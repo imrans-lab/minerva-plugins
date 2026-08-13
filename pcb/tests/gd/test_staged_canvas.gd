@@ -43,6 +43,7 @@ func _init() -> void:
 	_run_panel_doorways()
 	_run_capture_mirrors_the_draft_layer()
 	_run_fab_preview_accounting()
+	_run_approximation_notice()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -483,3 +484,71 @@ func _run_fab_preview_accounting() -> void:
 	canvas.mirror_capture_state_onto(copy)
 	check_eq("preview mode reaches the capture copy", bool(copy.show_fab_preview), true)
 	check_eq("…with its rasterized layers", copy._fab_preview_layers.size(), 1)
+
+
+# ── 10. the approximation notice is DERIVED, not recited ─────────────────────
+#
+# MUTATION THIS SECTION CATCHES: replacing approximation_notes() with a fixed
+# string. The DCR does not require this canvas to be pixel-exact — it requires
+# an approximation to be MARKED. A notice that lists approximations the board
+# does not have is worse than none: it trains the reader to ignore the one
+# place the editor admits its limits, and then the real disclosure goes unread.
+
+func _run_approximation_notice() -> void:
+	print("-- 10. approximation notice: derived from what is on screen --")
+
+	# A board with NO zones must not be told its zone fill is schematic.
+	var bare = PCBData.new()
+	bare.from_board_dict({
+		"version": 1, "name": "bare", "width_mm": 20.0, "height_mm": 20.0,
+		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"], "components": [], "nets": [],
+		"traces": [], "vias": [],
+	})
+	var c1 = PcbCanvasScript.new()
+	c1.data = bare
+	c1.show_mask = true
+	var bare_notes: Array = c1.approximation_notes()
+	var bare_text := "\n".join(PackedStringArray(bare_notes))
+	check("a zone-less board is NOT told its zone fill is approximate",
+		not ("zone fill" in bare_text))
+	check("a component-less board is NOT told about paste",
+		not ("paste" in bare_text))
+	check("with the mask overlay ON, it is not listed as hidden",
+		not ("mask" in bare_text))
+
+	# A board that HAS the geometry gets told, in the same run.
+	var rich = PCBData.new()
+	rich.from_board_dict({
+		"version": 1, "name": "rich", "width_mm": 20.0, "height_mm": 20.0,
+		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"],
+		"components": [{"ref": "R1", "footprint": "R_0805", "value": "1k",
+			"x_mm": 5.0, "y_mm": 5.0, "rotation_deg": 0.0, "layer": "top",
+			"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+				"pad_width_mm": 1.0, "pad_height_mm": 1.0}]}],
+		"nets": [], "traces": [], "vias": [],
+		"zones": [{"id": "zone:1", "kind": "copper_pour", "layer": "top", "net": "",
+			"outline": [{"x_mm": 1.0, "y_mm": 1.0}, {"x_mm": 9.0, "y_mm": 1.0},
+				{"x_mm": 9.0, "y_mm": 9.0}]}],
+	})
+	var c2 = PcbCanvasScript.new()
+	c2.data = rich
+	c2.show_mask = false
+	var rich_text := "\n".join(PackedStringArray(c2.approximation_notes()))
+	check("a board WITH zones is told its fill is outline-only", "zone fill" in rich_text)
+	check("…and that the fab receives a carved pour", "carved" in rich_text)
+	check("a board with pads is told paste is not drawn", "paste" in rich_text)
+	check("a hidden mask overlay is disclosed", "mask" in rich_text)
+
+	# Hiding zones removes the zone claim: the notice describes THIS VIEW, not
+	# the board in the abstract.
+	c2.show_zones = false
+	check("hiding zones drops the zone-fill note",
+		not ("zone fill" in "\n".join(PackedStringArray(c2.approximation_notes()))))
+
+	# The disclosure rides along to agent screenshots.
+	var copy = PcbCanvasScript.new()
+	c2.mirror_capture_state_onto(copy)
+	check_eq("the notice setting reaches the capture copy",
+		bool(copy.show_approximation_notice), true)

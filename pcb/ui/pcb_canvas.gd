@@ -1741,6 +1741,12 @@ func _draw() -> void:
 	if tool_mode == ToolMode.INSPECT_PIN and not _inspect_hover_label.is_empty():
 		_draw_inspect_hover_label()
 
+	# LAST, over everything, because it is a statement ABOUT the picture rather
+	# than part of it: what in this view is schematic, and where the exact
+	# artwork lives. Drawing it under anything would let a dense board hide the
+	# disclosure, which defeats the point of making it.
+	_draw_approximation_notice()
+
 
 ## P1 debt D4: the ARMED part wears its intent — a solid outline in the
 ## tether colour plus a "propose?" tag, so "my next drag proposes" is visible
@@ -9377,6 +9383,65 @@ func get_view() -> Dictionary:
 	}
 
 
+## ── APPROXIMATION NOTICE (WYSIWYG goal 019ff4a5a75a; DCR 019ffc52b455) ──────
+##
+## The DCR's standing rule for this canvas: it "may not silently render
+## fabrication-affecting geometry from an independent approximation". It does
+## not say the editor must be pixel-exact — an interactive canvas that
+## re-simulated pyclipper pour fill would be a second implementation of the
+## fill rule, which is the DRIFT this goal exists to remove. It says an
+## approximation must be MARKED.
+##
+## So the honest arrangement is: draw fast and schematic, SAY SO, and point at
+## the view that is exact. This notice is the "say so", and Fab Preview (G5) is
+## the exact view it points at.
+##
+## DERIVED FROM WHAT IS ACTUALLY ON SCREEN, never a fixed string: a board with
+## no zones must not be told its zone fill is schematic. A notice that lists
+## approximations the board does not have trains the reader to ignore it, which
+## costs more than saying nothing.
+var show_approximation_notice: bool = true
+
+
+## The fabrication-affecting classes THIS canvas is currently drawing
+## approximately, or not at all. One line each, plain language, no jargon.
+func approximation_notes() -> Array:
+	var notes: Array = []
+	if data == null:
+		return notes
+	if show_zones and not data.zones.is_empty():
+		# Pours draw as bare outline (a whole-board hatch buried every other
+		# layer — owner HITL 2026-07-30); the fab receives a carved pour with
+		# clearance voids and keyhole fracturing.
+		notes.append("zone fill: outline only — the fab receives a carved pour with voids")
+	if not data.components.is_empty():
+		# Paste has no canvas channel at all. Silence about a layer that exists
+		# reads as "there is nothing there", which for a paste stencil is wrong.
+		notes.append("solder paste: not drawn — no stencil view in the editor")
+	if not show_mask:
+		notes.append("solder mask: hidden — enable the mask overlay to see openings")
+	return notes
+
+
+## Draw the notice bottom-left, dim and small. It is not a warning: nothing is
+## broken. It is a statement about what this view can and cannot be trusted for.
+func _draw_approximation_notice() -> void:
+	if not show_approximation_notice:
+		return
+	var notes := approximation_notes()
+	if notes.is_empty():
+		return
+	var font := ThemeDB.fallback_font
+	var y := size.y - 8.0 - float(notes.size()) * 13.0
+	draw_string(font, Vector2(10, y), "APPROXIMATE IN THIS VIEW — Fab Preview shows the emitted artwork:",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.72, 0.72, 0.78, 0.85))
+	y += 13.0
+	for n in notes:
+		draw_string(font, Vector2(18, y), "· " + str(n),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.66, 0.66, 0.72, 0.8))
+		y += 13.0
+
+
 ## ── FAB PREVIEW (WYSIWYG goal 019ff4a5a75a, gap G5; DCR 019ffc52b455; K27) ───
 ##
 ## The emitted artifacts, rendered by the worker from the bytes that ship and
@@ -9506,6 +9571,7 @@ func mirror_capture_state_onto(copy) -> void:
 	# on must show the ARTWORK, not the editor's rendering of the same board.
 	# The rasterized layers are shared by reference: they are immutable
 	# textures, and re-rasterizing them per capture would be pure waste.
+	copy.show_approximation_notice = show_approximation_notice
 	copy.show_fab_preview = show_fab_preview
 	copy._fab_preview_layers = _fab_preview_layers
 	copy._fab_preview_unrendered = _fab_preview_unrendered
