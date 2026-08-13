@@ -748,14 +748,20 @@ def test_capability_digest_rule_matches_the_optional_floor_rule(tmp_path):
     # three fixtures by construction, so compare per-fixture against a
     # RE-LOADED twin instead of across ids: same bytes, same digest.
     assert plain.ref.digest == load_rule_profile("plain", library_root=tmp_path).ref.digest
-    # The load-bearing halves: {} adds nothing to the payload...
-    _write_profile(tmp_path, "plain2", {
+    # The load-bearing halves, exercised by OVERWRITING plain.json between
+    # loads — the loader enforces filename == declared id (a renamed file is
+    # an integrity failure), so a sibling file carrying id "plain" can never
+    # load; the first cut of this test wrote plain2/plain3 siblings and then
+    # re-loaded the UNTOUCHED plain.json, trivially passing the == half and
+    # failing the != half (caught at the GA testex). First: {} adds nothing
+    # to the payload...
+    _write_profile(tmp_path, "plain", {
         "id": "plain", "version": "1", "floor": _valid_floor(),
         "capabilities": {}})
     empty_as_plain = load_rule_profile("plain", library_root=tmp_path)
     assert empty_as_plain.ref.digest == plain.ref.digest
     # ...and a DECLARED capability changes the digest of the same id.
-    _write_profile(tmp_path, "plain3", {
+    _write_profile(tmp_path, "plain", {
         "id": "plain", "version": "1", "floor": _valid_floor(),
         "capabilities": {"max_copper_layers": 4}})
     declared_as_plain = load_rule_profile("plain", library_root=tmp_path)

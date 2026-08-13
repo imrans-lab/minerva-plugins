@@ -111,7 +111,16 @@ class Layer:
         elif low == "bottom" or low.startswith("b."):
             side = Side.BOTTOM
 
-        if low in {"top", "bottom", "f.cu", "b.cu"} or low.endswith(".cu"):
+        # Canonical INNER copper ("in1".."in30") folds through the ONE naming
+        # contract (epoch GA testex fix: the set below is the outer pair plus
+        # KiCad spellings, so a canonical inner id fell through to the
+        # unknown branch and "trace segments must be on copper" refused every
+        # inner trace on a declaring board). agent_router.layers is
+        # import-free, so the IR foundation stays cycle-free.
+        from agent_router.layers import inner_layer_index
+
+        if (low in {"top", "bottom", "f.cu", "b.cu"} or low.endswith(".cu")
+                or inner_layer_index(low) > 0):
             role = LayerRole.COPPER
         elif low.endswith(".mask"):
             role = LayerRole.MASK

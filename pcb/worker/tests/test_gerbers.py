@@ -29,7 +29,8 @@ from pcb_worker.fab_capability import EMITTED_GERBER_SUFFIXES
 
 # Layers that may legitimately carry no plot commands on a given board. See the
 # per-suffix reasoning in _assert_gerber_structural.
-_MAY_BE_EMPTY = ("F_SilkS", "B_SilkS", "F_Paste", "B_Paste")
+_MAY_BE_EMPTY = ("F_SilkS", "B_SilkS", "F_Paste", "B_Paste",
+                 "F_Mask", "B_Mask")
 from pcb_worker.methods import handle_request
 from tests.gerber_fab import build_fab, build_raw_emitter
 

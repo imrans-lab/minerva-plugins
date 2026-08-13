@@ -519,7 +519,12 @@ class TestUnnumberedPadsParse:
             "fix it silently vanished and its drill was routable free space")
         hole = holes[0]
         assert hole.number == ""
-        assert hole.net is None
+        # KiCad's unconnected net 0 is named "" in the file's own net table,
+        # and the reader maps it through verbatim — the longstanding net-0
+        # convention for EVERY pad, not a hole-specific choice. Both None
+        # and "" mean "owned by no real net" to the grid (no authored net is
+        # ever named the empty string).
+        assert hole.net in (None, "")
         assert hole.drill == 3.2
         assert hole.position == (50.0, 30.0)
 

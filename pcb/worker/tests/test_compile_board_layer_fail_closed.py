@@ -150,8 +150,14 @@ def test_pad_declaring_inner_copper_layer_fails_closed(tmp_path):
     assert isinstance(result, ResolutionFailure), \
         "a pad on In1.Cu (an unemitted COPPER layer) must fail closed, not compile clean"
     errors = _errors(result)
-    assert any(d.code == "unemitted_copper_layer" for d in errors), errors
-    matching = [d for d in errors if d.code == "unemitted_copper_layer"]
+    # Since the epoch-GA repair round the MORE PRECISE refusal fires first:
+    # this is a DRILL-LESS pad, so inner participation is unfabricable on any
+    # board (inner_smd_pad, from _resolved_pad_layers) — the pad never
+    # reaches _place_component's per-board unemitted-copper gate. Both codes
+    # are fail-closed answers; the precise one names the pad KIND as the
+    # reason, which is the truer diagnosis.
+    assert any(d.code == "inner_smd_pad" for d in errors), errors
+    matching = [d for d in errors if d.code == "inner_smd_pad"]
     assert any("In1.Cu" in d.message for d in matching), matching
 
 
@@ -276,7 +282,9 @@ def test_inner_copper_fails_closed_even_when_board_omits_layers_key(tmp_path):
     assert isinstance(result, ResolutionFailure), \
         "board.layers absence (the canonical two-layer default) must not " \
         "change whether a footprint's own In1.Cu pad is caught"
-    assert any(d.code == "unemitted_copper_layer" for d in _errors(result))
+    # Same precise-code note as test 1: the drill-less pad refuses as
+    # inner_smd_pad before the per-board unemitted-copper gate is reached.
+    assert any(d.code == "inner_smd_pad" for d in _errors(result))
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +334,7 @@ def test_through_pad_barrel_reaches_every_declared_plane(tmp_path):
     board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
     result = compile_board(board, library_root=library_root, lockfile=lockfile)
     assert isinstance(result, ResolutionSuccess), _errors(result)
-    placed = [p for comp in result.board.components for p in comp.pads]
+    placed = [p for comp in result.board.components for p in comp.placed_pads]
     layer_ids = {layer.id for pad in placed for layer in pad.layers}
     assert {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"} <= layer_ids, layer_ids
 

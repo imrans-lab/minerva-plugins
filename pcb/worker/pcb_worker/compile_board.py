@@ -1795,7 +1795,14 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
             continue
         layer_id = str(raw.get("layer") or "")
         layer = Layer.from_id(layer_id) if layer_id else None
-        if layer is None or layer.id not in CANON_TO_KICAD:
+        # NAMING gate only (epoch GA testex fix): is_copper knows the canonical
+        # inner names; the old CANON_TO_KICAD membership test was the outer
+        # PAIR, which refused every inner-layer trace on a declaring board.
+        # STACK membership is the boundary's job (board_validate
+        # trace_unknown_layer, mirrored in Go) and off-stack copper that
+        # bypasses the boundary still fails closed downstream (the emitters'
+        # stray-layer guard, the router's routable-set check).
+        if layer is None or not is_copper(layer.id):
             diags.error("trace_bad_layer", f"trace {ordinal}: layer {layer_id!r} is not a v1 copper layer", trace_ref)
             continue
         width = raw.get("width_mm")
@@ -2204,9 +2211,10 @@ def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
             continue
         layer_id = str(raw.get("layer") or "")
         layer = Layer.from_id(layer_id) if layer_id else None
-        if layer is None or layer.id not in CANON_TO_KICAD:
-            # Membership in CANON_TO_KICAD is what makes this a v1 copper layer, which
-            # is also what satisfies ResolvedZone's "zones must be on copper" check.
+        # NAMING gate via is_copper (epoch GA testex fix — the outer-pair
+        # membership test refused every inner-layer zone on a declaring
+        # board); same division of labor as the trace gate above.
+        if layer is None or not is_copper(layer.id):
             diags.error("zone_unknown_layer",
                         f"zone {ordinal}: layer {layer_id!r} is not a v1 copper layer", zone_ref)
             continue

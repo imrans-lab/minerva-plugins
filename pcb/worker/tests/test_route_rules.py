@@ -568,14 +568,21 @@ def test_every_keepout_marker_goes_through_the_one_margin(monkeypatch):
     import inspect
 
     tree = ast.parse(inspect.getsource(engine_router))
+    # `via_diameter or net_width` joined the allow-list at epoch GA-2: the
+    # two new call sites mark a PROPOSED via's annulus (both route loops,
+    # right after mark_trace) at the run's authored via diameter, falling
+    # back to the net's own copper width — both bare dimensions, never
+    # re-inflated; the grid still adds its one margin itself.
     _ALLOWED = {"width": {"trace_width", "net_width", "seg.width"},
-                "diameter": {"via.diameter"}}
+                "diameter": {"via.diameter", "via_diameter or net_width"}}
     for attr, arg_name in (("mark_trace", "width"), ("mark_via", "diameter")):
         calls = [node for node in ast.walk(tree)
                  if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Attribute)
                  and node.func.attr == attr]
-        expected = 4 if attr == "mark_trace" else 1
+        # mark_via grew 1 -> 3 at GA-2 (the T7 existing-via marker plus the
+        # two proposed-via markers above).
+        expected = 4 if attr == "mark_trace" else 3
         assert len(calls) == expected, \
             f"expected {expected} {attr} call sites, found {len(calls)}"
         for call in calls:

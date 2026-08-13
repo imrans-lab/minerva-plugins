@@ -340,7 +340,11 @@ def test_complete_pad_projection_parity(corner_board, corner_board_result):
             assert placed.solder_mask_margin == local.solder_mask_margin
             assert placed.solder_paste_margin == local.solder_paste_margin
             assert placed.side is comp.placement.side
-            assert placed.layers == _resolved_pad_layers(local, transform, comp.ref, diags)
+            # GA-1 added the per-board copper accept-set parameter; this
+            # parity fixture is 2-layer, and the deeper-stack expansion is
+            # separately pinned by test_wildcard_cu_expands_to_declared_stack.
+            assert placed.layers == _resolved_pad_layers(
+                local, transform, comp.ref, diags, ("F.Cu", "B.Cu"))
             checked += 1
     # Vacuity guard on the loop actually running, not just a count check — was
     # 76 against the withdrawn smart_remote.yaml (docket 019fbe68c5f8); the 5
@@ -552,7 +556,8 @@ def test_pad_layer_expansion_never_synthesizes_absent_participation():
     diags = _Diagnostics()
     transform = PlacementTransform(position=(0.0, 0.0), rotation_deg=0.0, side=Side.TOP)
     pad = _synthetic_pad(layers=(Layer.from_id("F.Cu"),))
-    layers = _resolved_pad_layers(pad, transform, "X1", diags)
+    layers = _resolved_pad_layers(pad, transform, "X1", diags,
+                                  ("F.Cu", "B.Cu"))
     assert [l.id for l in layers] == ["F.Cu"]
     assert not diags.has_error
 

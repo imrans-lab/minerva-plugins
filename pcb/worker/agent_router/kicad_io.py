@@ -472,8 +472,12 @@ def _parse_single_footprint(fp_content: str) -> Optional[dict]:
         if ref_match:
             fp["reference"] = ref_match.group(1)
 
-    # Parse pads
-    pad_pattern = r'\(pad\s+"?([^"\s]+)"?\s+(\w+)\s+(\w+)'
+    # Parse pads. The number alternation accepts an EMPTY quoted number
+    # (bug 019f9af741 — this scan is the SECOND copy of the pad-head regex,
+    # and the GA testex caught it still carrying the old shape after
+    # _parse_pad's own was fixed: the footprint-level scan never LOCATED an
+    # unnumbered pad, so _parse_pad's fix was unreachable from the reader).
+    pad_pattern = r'\(pad\s+(?:"[^"]*"|[^"\s]+)\s+(\w+)\s+(\w+)'
     for pad_match in re.finditer(pad_pattern, fp_content):
         pad_start = pad_match.start()
         # Find end of this pad block
