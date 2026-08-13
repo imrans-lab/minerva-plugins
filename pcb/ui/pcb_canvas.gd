@@ -1223,6 +1223,10 @@ const MENU_ID_SET_HINT_WIDTH := 445
 ## UX4 station 4 — the staged-entity menu seam's two verbs.
 const MENU_ID_STAGED_ACCEPT := 446
 const MENU_ID_STAGED_REJECT := 447
+## SPIKE 019ff8615fbe: revise a placement ghost's rotation from the menu —
+## the cheap stand-in until ghosts carry the universal-select rotate chrome
+## (owner feel-session ask, R2).
+const MENU_ID_STAGED_ROTATE_CCW := 448
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1414,6 +1418,10 @@ func _on_context_menu_pressed(id: int) -> void:
 			staged_verb_requested.emit("accept", str(_context_menu_target[1]))
 		MENU_ID_STAGED_REJECT:
 			staged_verb_requested.emit("reject", str(_context_menu_target[1]))
+		# SPIKE: ghost rotation revise — a store write like the ghost drag,
+		# not a board mutation, so the canvas performs it directly.
+		MENU_ID_STAGED_ROTATE_CCW:
+			_rotate_placement_ghost(str(_context_menu_target[1]), 90.0)
 
 
 ## Commit the ONE bend delete the frozen press resolved (station 6 fix F1).
@@ -2279,6 +2287,21 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 	draw_polyline(outline, edge, 1.0)
 	if str(payload.get("id", "")) in selected_staged_ids:
 		draw_polyline(outline, trace_selected_color, 2.0)
+
+	# SILK at the ghost pose (owner feel-session finding, R2): the polarity
+	# marks — cathode band, pin-1 dot — ARE the intent a reviewer confirms;
+	# a body-only ghost of a polarized part is unreviewable. SPIKE MECHANIC,
+	# stated: the shared silk helper anchors on comp.position, so it is
+	# swapped to the target for the one draw call and restored immediately —
+	# a direct var write fires no signals, and _draw runs synchronously.
+	if show_silk and comp.graphics.size() > 0:
+		var ghost_silk: Color = silk_color
+		ghost_silk.a *= 0.7
+		var ghost_xform := Transform2D(deg_to_rad(-float(pose.get("rot", 0.0))), Vector2.ZERO)
+		var real_pos: Vector2 = comp.position
+		comp.position = target
+		_draw_component_graphics_layer(comp, ghost_xform, "F.SilkS", ghost_silk, silk_min_width_px)
+		comp.position = real_pos
 
 	# Refdes + author on the ghost so "what and whose" reads without a click.
 	var label := "%s (%s)" % [comp.id, str(entry.get("author", "?"))]
@@ -8560,6 +8583,33 @@ func _add_staged_menu_seam(entity_id: String) -> void:
 	_context_menu_separate()
 	context_menu.add_item("Accept (lands it on the board)", MENU_ID_STAGED_ACCEPT)
 	context_menu.add_item("Reject (discards the draft)", MENU_ID_STAGED_REJECT)
+	# SPIKE: rotation revise, placements only — the stand-in for ghost rotate
+	# chrome (see MENU_ID_STAGED_ROTATE_CCW).
+	if _staged_store != null:
+		var r_sid := str(_staged_store.staged_id_for_entity(entity_id))
+		if not r_sid.is_empty() \
+				and str((_staged_store.get_entry(r_sid) as Dictionary).get("kind", "")) == "placement":
+			context_menu.add_item("Rotate ghost 90° CCW", MENU_ID_STAGED_ROTATE_CCW)
+
+
+## SPIKE 019ff8615fbe: bump a live placement ghost's proposed rotation by
+## `delta_deg` (KiCad sign: positive = CCW on screen). A store write, same
+## one-write shape as _end_placement_ghost_drag.
+func _rotate_placement_ghost(entity_id: String, delta_deg: float) -> void:
+	if _staged_store == null:
+		return
+	var sid := str(_staged_store.staged_id_for_entity(entity_id))
+	if sid.is_empty():
+		return
+	var entry: Dictionary = _staged_store.get_entry(sid)
+	if str(entry.get("kind", "")) != "placement":
+		return
+	var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
+	if not (to is Dictionary):
+		to = {}
+	_staged_store.update_placement_target(sid,
+		float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
+		fposmod(float(to.get("rotation_deg", 0.0)) + delta_deg, 360.0))
 
 
 func _add_candidate_menu_seam(candidate_id: String) -> void:
