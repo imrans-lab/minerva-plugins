@@ -74,6 +74,8 @@ MANUFACTURER_PROFILE = "pcb_worker/manufacturer_profile.py"
 ZONE_FILL = "pcb_worker/zone_fill.py"
 FOOTPRINTS = "pcb_worker/footprints.py"
 ROUTE_BRIDGE = "pcb_worker/route_bridge.py"
+MASK_SOURCE = "pcb_worker/mask_source.py"
+NET_CLASS_POLICY = "pcb_worker/net_class_policy.py"
 #: NOT source: the schema doc is TEST INPUT. Paths are relative to ``pcb/worker``,
 #: so this escapes one level, exactly as ``run_sweep.PCB_SIBLINGS`` copies it.
 BOARD_YAML_DOC = "../docs/board-yaml.md"
@@ -594,9 +596,14 @@ MUTANTS: tuple[dict, ...] = (
     },
     {
         "id": "drcgeo_class_width_admission_predicate_dropped",
-        "file": DRC_GEOM,
+        # RETARGETED at epoch GA-6 (chore 019fa20b11): the admission loop
+        # moved from drc_geometric into the shared net_class_policy module,
+        # so this mutant now proves the extraction's whole acceptance —
+        # relaxing the predicate HERE must redden BOTH the routing and the
+        # DRC suites, because both delegate to the one body.
+        "file": NET_CLASS_POLICY,
         "kind": "full",
-        "find": "            width = positive_mm(nc.min_trace_width_mm)",
+        "find": "            width = width_admit(nc.min_trace_width_mm)",
         "replace": "            width = float(nc.min_trace_width_mm)",
         # KILLER: test_drc_geometric.py::
         #   test_referenced_class_with_zero_min_trace_width_is_indeterminate
@@ -608,9 +615,10 @@ MUTANTS: tuple[dict, ...] = (
     },
     {
         "id": "drcgeo_class_clearance_admission_predicate_dropped",
-        "file": DRC_GEOM,
+        # RETARGETED at epoch GA-6 — see the width twin above.
+        "file": NET_CLASS_POLICY,
         "kind": "full",
-        "find": "            clearance = nonnegative_mm(nc.min_clearance_mm)",
+        "find": "            clearance = clearance_admit(nc.min_clearance_mm)",
         "replace": "            clearance = float(nc.min_clearance_mm)",
         # KILLER: test_drc_geometric.py::
         #   test_a_class_clearance_that_is_not_a_sourceable_number_fails_closed
@@ -683,17 +691,22 @@ MUTANTS: tuple[dict, ...] = (
     },
     {
         "id": "gerber_via_tenting_ignores_the_back_side",
-        "file": GERBER,
+        # RETARGETED at epoch GA-6: the per-side tenting decision moved to
+        # mask_source.via_openings in the CP2 S4 mask extraction — the old
+        # gerber.py emission text no longer exists anywhere, and the sweep's
+        # exactly-once check would have refused the stale target at the next
+        # run. Same defect, same kill direction, at the code's current home.
+        "file": MASK_SOURCE,
         "kind": "half",
         "find": L(
-            "        if not tented_front:",
-            "            g.mask_top.append(_circle_mask(vx, vy, md))",
-            "        if not tented_back:",
-            "            g.mask_bot.append(_circle_mask(vx, vy, md))",
+            "    if not tented_front:",
+            "        out.append(circle_opening(vx, vy, md, Side.TOP, ORIGIN_VIA, entity_id))",
+            "    if not tented_back:",
+            "        out.append(circle_opening(vx, vy, md, Side.BOTTOM, ORIGIN_VIA, entity_id))",
         ),
         "replace": L(
-            "        if not tented_front:",
-            "            g.mask_top.append(_circle_mask(vx, vy, md))",
+            "    if not tented_front:",
+            "        out.append(circle_opening(vx, vy, md, Side.TOP, ORIGIN_VIA, entity_id))",
         ),
         "rationale": "Handles one side of a symmetric per-side tenting rule, so an "
                      "untented via never gets its B.Cu mask opening (finding "
@@ -919,12 +932,16 @@ MUTANTS: tuple[dict, ...] = (
         "id": "manufacturerprofile_missing_field_guard_removed",
         "file": MANUFACTURER_PROFILE,
         "kind": "full",
+        # FIND refreshed at epoch GA-6: GA-1's capabilities tier reworded the
+        # message ("all ten" became a derived count) and the stale target
+        # would have hard-failed the next sweep's exactly-once check.
         "find": L(
             "    missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor]",
             "    if missing:",
             "        raise RuleProfileError(",
             '            f"rule profile {profile_id!r} floor is missing field(s) {\'/\'.join(missing)}; "',
-            '            f"a profile must supply all ten ManufacturingConstraints fields or fail "',
+            '            f"a profile must supply all {len(REQUIRED_FLOOR_FIELDS)} required "',
+            '            f"ManufacturingConstraints fields or fail "',
             '            f"(no merge with another profile\'s defaults)")',
         ),
         "replace": "    missing = []  # MUTANT: missing-field guard removed entirely",

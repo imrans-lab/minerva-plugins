@@ -26,7 +26,7 @@ from typing import Any
 
 from . import (assembly_advisory, assembly_outputs, bless, board_model,
                compile_board, drc, footprints, gerber, ir_candidates,
-               ir_connectivity, kicad, libcheck, resolve)
+               ir_connectivity, kicad, libcheck, net_class_policy, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -1763,38 +1763,18 @@ def _net_class_overrides(rb) -> dict[str, tuple[float | None, float | None]]:
     """
     from .route_bridge import UnsupportedGeometry
 
-    classes = {nc.id: nc for nc in rb.design_rules.net_classes}
-    overrides: dict[str, tuple[float | None, float | None]] = {}
-    for net in rb.nets:
-        if not net.net_class_id:
-            continue
-        nc = classes.get(net.net_class_id)
-        if nc is None:
-            continue  # unreachable on a valid ResolvedBoard; see docstring
-
-        width = None
-        if nc.min_trace_width_mm is not None:
-            width = ir_candidates.positive_mm(nc.min_trace_width_mm)
-            if width is None:
-                raise UnsupportedGeometry(
-                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
-                    f"min_trace_width_mm={nc.min_trace_width_mm!r} is not a "
-                    f"positive, finite width in mm — routing fails closed "
-                    f"rather than reinterpret the class's own rule")
-
-        clearance = None
-        if nc.min_clearance_mm is not None:
-            clearance = _nonnegative_mm(nc.min_clearance_mm)
-            if clearance is None:
-                raise UnsupportedGeometry(
-                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
-                    f"min_clearance_mm={nc.min_clearance_mm!r} is not a "
-                    f"non-negative, finite clearance in mm — routing fails "
-                    f"closed rather than reinterpret the class's own rule")
-
-        if width is not None or clearance is not None:
-            overrides[net.name] = (width, clearance)
-    return overrides
+    # ONE admission policy, owned by net_class_policy (019fa20b11, epoch
+    # GA-6): this and drc_geometric._net_class_minima both delegate, so the
+    # loop/referenced-only/fail-closed structure can no longer drift between
+    # the routed width and the checked floor. This side supplies its own
+    # identity (net NAME — the router speaks names) and its own predicates.
+    return net_class_policy.referenced_class_minima(
+        rb,
+        key_of=lambda net: net.name,
+        width_admit=ir_candidates.positive_mm,
+        clearance_admit=_nonnegative_mm,
+        fail=UnsupportedGeometry,
+        context="routing")
 
 
 def _routes_to_candidates(routes: list) -> tuple[list, list]:

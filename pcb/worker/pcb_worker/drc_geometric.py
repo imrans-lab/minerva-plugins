@@ -841,16 +841,14 @@ def _net_class_minima(rb: ResolvedBoard) -> dict[str, tuple[float | None, float 
     — a false clean). An unreachable path is not a reason to omit the predicate; it is
     the reason the predicate is the only thing keeping the two surfaces aligned.
 
-    WHY THIS IS NOT SHARED WITH ``methods._net_class_overrides``, which it closely
-    resembles (same class dict, same loop shape, same defensive ``nc is None``, the
-    same two predicates, near-identical messages). The duplication is known and was
-    left deliberately for now: the two live in different modules, key their results by
-    different identities (``net.id`` here because that is what a
-    :class:`CopperPrimitive` carries; ``net.name`` there because the router speaks
-    names), and ``methods`` already imports :mod:`drc_geometric`, so factoring the
-    shared body out would need a THIRD module rather than one function moving. That
-    extraction is filed separately — do not re-derive this, and do not "fix" it by
-    importing across the two.
+    SHARED WITH ``methods._net_class_overrides`` since epoch GA-6 (chore
+    019fa20b11): the loop, the referenced-only rule, the defensive lookup and
+    the two fail-closed raises live ONCE in :mod:`.net_class_policy` (the
+    third, dependency-free module the old note here predicted), and both
+    sides delegate — keying by their own identities (``net.id`` here, what a
+    :class:`CopperPrimitive` carries; ``net.name`` there, what the router
+    speaks) and passing the same two predicates. Relax the admission there
+    and both the routing and DRC suites go red.
     """
     # These are the SAME two predicates routing admits the same two fields through —
     # ``methods._nonnegative_mm`` is a one-line delegate to
@@ -867,39 +865,21 @@ def _net_class_minima(rb: ResolvedBoard) -> dict[str, tuple[float | None, float 
     from agent_router.router import nonnegative_mm
 
     from .ir_candidates import positive_mm
+    from .net_class_policy import referenced_class_minima
 
-    classes = {nc.id: nc for nc in rb.design_rules.net_classes}
-    minima: dict[str, tuple[float | None, float | None]] = {}
-    for net in rb.nets:
-        if not net.net_class_id:
-            continue
-        nc = classes.get(net.net_class_id)
-        if nc is None:
-            # Unreachable on a valid ResolvedBoard — its __post_init__ raises
-            # "ResolvedNet references an unknown net class" at construction. Defensive
-            # only; no behaviour is invented for a board that cannot exist.
-            continue
-        width = None
-        if nc.min_trace_width_mm is not None:
-            width = positive_mm(nc.min_trace_width_mm)
-            if width is None:
-                raise UnsupportedGeometry(
-                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
-                    f"min_trace_width_mm={nc.min_trace_width_mm!r} is not a "
-                    f"positive, finite width in mm — geometric DRC fails closed "
-                    f"rather than reinterpret the class's own rule")
-        clearance = None
-        if nc.min_clearance_mm is not None:
-            clearance = nonnegative_mm(nc.min_clearance_mm)
-            if clearance is None:
-                raise UnsupportedGeometry(
-                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
-                    f"min_clearance_mm={nc.min_clearance_mm!r} is not a "
-                    f"non-negative, finite clearance in mm — geometric DRC fails "
-                    f"closed rather than reinterpret the class's own rule")
-        if width is not None or clearance is not None:
-            minima[net.id] = (width, clearance)
-    return minima
+    # ONE admission policy (019fa20b11, epoch GA-6): the loop this function
+    # used to carry — the near-clone of methods._net_class_overrides whose
+    # "why not shared" note above predicted a third module — now lives in
+    # net_class_policy, and both sides delegate. This side supplies its own
+    # identity (net_id, what a projected CopperPrimitive carries) and the
+    # SAME two predicates routing admits the same two fields through.
+    return referenced_class_minima(
+        rb,
+        key_of=lambda net: net.id,
+        width_admit=positive_mm,
+        clearance_admit=nonnegative_mm,
+        fail=UnsupportedGeometry,
+        context="geometric DRC")
 
 
 def _effective_min_trace_width(global_min: float,
