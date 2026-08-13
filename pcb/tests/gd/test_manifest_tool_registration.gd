@@ -184,7 +184,13 @@ func _init() -> void:
 	# 8's (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's
 	# (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the
 	# same serialization point.
-	check("total registered tool count == 98", registered.size() == 98,
+	# Epoch GA round 2 (98 -> 100): minerva_pcb_staged_freeze +
+	# minerva_pcb_staged_unfreeze, the agent's half of K7's freeze verb. Two
+	# tools rather than one flag-taking verb, following the sibling
+	# workspace_pin/workspace_unpin precedent. Both are executor:"panel", so
+	# only THIS pin moves — the Go backend-executor count in
+	# manifest_registry_parity_test.go is unaffected by a panel tool.
+	check("total registered tool count == 100", registered.size() == 100,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
