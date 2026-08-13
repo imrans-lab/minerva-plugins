@@ -866,11 +866,18 @@ var courtyard_min_width_px: float = 0.75
 ## its net's colour (falling back to this muted copper-green when the net is
 ## unknown), so a GND pour reads as the same net as the GND traces.
 ##
-## Both are drawn HATCHED and never filled. That is not decoration: the contract
-## models the AUTHORED OUTLINE only (internal/board Zone), the actual filled
-## copper is compiler work that does not exist yet, and the fab paths still
-## refuse a board with zones outright. A solid fill would draw copper nobody has
-## computed. Hatch is the honest rendering of "declared, not yet filled".
+## Both are drawn HATCHED and never filled. THE ORIGINAL REASON IS NOW STALE and
+## is corrected here rather than left to mislead: it said the fill "does not
+## exist yet" and that "the fab paths still refuse a board with zones outright".
+## Neither is true — zones compile and fabricate, and the emitter produces a
+## carved pour with clearance voids and keyhole fracturing.
+##
+## The hatch STANDS, for a different and still-good reason: this canvas has no
+## polygon-with-holes primitive and does not re-compute the pour, so a solid
+## fill here would draw copper THIS VIEW never computed and whose shape differs
+## from the emitted artwork. Drawing the outline says "a pour is authored here"
+## without asserting its geometry. The approximation is disclosed by
+## approximation_notes(), and Fab Preview (G5) shows the real thing.
 var zone_keepout_color: Color = Color(0.95, 0.45, 0.15, 1.0)
 var zone_pour_fallback_color: Color = Color(0.45, 0.7, 0.5, 1.0)
 var zone_outline_alpha: float = 0.85
@@ -7286,8 +7293,14 @@ func _commit_cutout() -> void:
 		return
 	data.save_to_history("Add cutout")
 	_reset_cutout_draw()
+	# The old wording ("authored only, not yet compiled: routing/DRC/Gerber
+	# export ignore it") was FALSE and user-facing, which is the worst place for
+	# a stale claim: compile_board builds ResolvedCutout entries fail-closed,
+	# and board.go states that geometric DRC, routing and zone fill all consume
+	# that geometry. Telling a user their cutout is ignored invites them to
+	# author one that severs a trace and expect nothing to happen.
 	cutout_tool_message.emit(
-		"Added cutout (%d points) — authored only, not yet compiled: routing/DRC/Gerber export ignore it."
+		"Added cutout (%d points) — it compiles and fabricates; the editor draws it as a hatched patch rather than removed substrate."
 		% point_count)
 	queue_redraw()
 
@@ -9536,7 +9549,17 @@ func _draw_fab_preview() -> void:
 	else:
 		# Every layer shares ONE forced coordinate frame from the worker, so the
 		# textures are the same size and stack without per-layer registration.
-		var rect := Rect2(Vector2.ZERO, size)
+		#
+		# LETTERBOXED, NOT STRETCHED. Filling the canvas rect distorts the board
+		# whenever the canvas and the artwork disagree on aspect — and a
+		# fabrication preview that changes the shape of the board is worse than
+		# no preview, because every judgement a reviewer makes from it about
+		# clearance, spacing or fit is then wrong by an unstated factor.
+		var first_tex: Texture2D = (_fab_preview_layers[0] as Dictionary).get("texture")
+		var art: Vector2 = first_tex.get_size() if first_tex != null else size
+		var scale: float = minf(size.x / maxf(art.x, 1.0), size.y / maxf(art.y, 1.0))
+		var drawn: Vector2 = art * scale
+		var rect := Rect2((size - drawn) * 0.5, drawn)
 		for lay in _fab_preview_layers:
 			var tex: Texture2D = (lay as Dictionary).get("texture")
 			if tex != null:

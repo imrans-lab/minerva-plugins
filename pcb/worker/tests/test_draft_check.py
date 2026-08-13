@@ -275,3 +275,84 @@ def test_findings_carry_witness_geometry_and_both_type_spellings():
         if isinstance(at, (list, tuple)) and len(at) == 2:
             assert f.get("closest") == list(at), f
             assert f.get("witness") == list(at), f
+
+
+# ── the GEOMETRIC half of K9 (019fa6ed5e23) ─────────────────────────────────
+#
+# WHAT WAS WRONG. The panel composes canonical geometry plus the live staged
+# overlay — staged zones appended, staged placements applied — and sends that
+# board here. But this method's subject set is built only from board["traces"]
+# and board["vias"] plus the candidates, and its verdict came from drc.run_drc,
+# which states in its own module docstring that it reads pad CENTERS and trace
+# CENTERLINES only and CANNOT verify clearances. The composition was therefore
+# INERT: a staged zone or a moved component could not produce a finding however
+# badly it violated, because nothing in the path ever looked at zones,
+# components or pads. Composing correctly and CHECKING what was composed are
+# two claims, and only the first had been built.
+
+_SEEDED_REF = "Package_DIP:DIP-6_W7.62mm_Socket"
+
+
+def _compiling_board() -> dict:
+    """A board that actually COMPILES — real seed footprint, real design rules —
+    so the geometric kernel can run over it. The fixture above deliberately uses
+    synthetic footprints and does not compile, which is why it exercises the
+    fail-closed path instead."""
+    return {
+        "version": 1, "name": "draft-geo", "width_mm": 40, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "X1", "footprint": _SEEDED_REF, "x_mm": 20,
+                        "y_mm": 20, "rotation_deg": 0, "layer": "top"}],
+        "nets": [], "traces": [], "vias": [],
+    }
+
+
+def test_a_compiling_board_actually_REACHES_the_geometric_kernel():
+    """MUTATION THIS CATCHES: deleting the geometric pass. Without it the reply
+    carries neither geometric findings nor an indeterminate, and a caller cannot
+    tell that no geometric check happened at all — which is exactly the state
+    this method shipped in."""
+    res = _call({"board": _compiling_board(), "candidates": [],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    # The kernel ran and could model this board, so there is nothing to declare.
+    assert "geometric_indeterminate" not in res, res.get("geometric_indeterminate")
+
+
+def test_a_board_the_kernel_cannot_model_says_so_rather_than_reading_clean():
+    """MUTATION THIS CATCHES: swallowing a compile/kernel failure into an empty
+    finding list. An empty list is indistinguishable from "checked and clean",
+    and a draft check that cannot verify geometry must never present itself as
+    having verified it — the false-clean K14 forbids.
+
+    The module fixture uses synthetic footprints ("HDR") that do not resolve, so
+    the compile refuses and this is the honest path."""
+    res = _call({"board": _board(), "candidates": [_c3()],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    ind = res.get("geometric_indeterminate")
+    assert ind, "a board that cannot be compiled reported no geometric verdict at all"
+    assert ind.get("kind"), ind
+    assert str(ind.get("message", "")).strip(), ind
+
+
+def test_draft_provenance_is_echoed_so_a_finding_can_be_traced_to_its_draft():
+    """MUTATION THIS CATCHES: dropping the echo. The panel sends provenance
+    beside the board so a finding naming a staged entity can be tied back to the
+    store entry it came from. Without the echo the field was WRITE-ONLY — sent
+    every request and consumed by nothing, which is how it shipped."""
+    prov = [{"staged_id": "staged_1", "entity_id": "zone:1", "kind": "zone",
+             "disposition": "staged", "materialized": True}]
+    res = _call({"board": _compiling_board(), "candidates": [],
+                 "draft_provenance": prov,
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert res.get("draft_provenance") == prov
+
+
+def test_absent_provenance_does_not_invent_an_empty_one():
+    """MUTATION THIS CATCHES: echoing [] unconditionally. A caller would then be
+    unable to tell "this request carried no drafts" from "provenance was
+    stripped somewhere", and the second is a bug worth seeing."""
+    res = _call({"board": _compiling_board(), "candidates": [],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert "draft_provenance" not in res

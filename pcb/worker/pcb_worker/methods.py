@@ -2886,6 +2886,54 @@ def _dc_attribute(finding: dict, seg_subjects: list, via_subjects: list,
     return subjects
 
 
+def _draft_geometric(board: dict, layer_params: dict) -> tuple[list, dict]:
+    """Geometric findings over the COMPOSED DRAFT BOARD (K9, 019fa6ed5e23).
+
+    WHY THIS EXISTS, and what was wrong without it. The panel composes canonical
+    geometry plus the live staged overlay — staged zones appended, staged
+    placements applied — and sends that board to draft_check. But draft_check's
+    own subject set is built ONLY from board["traces"] and board["vias"] plus the
+    candidates, and its verdict came from drc.run_drc, whose module docstring
+    states outright that it reads pad CENTERS and trace CENTERLINES only and
+    CANNOT verify clearances. So the composition was INERT: a staged zone or a
+    moved component could not produce a finding no matter how badly it violated,
+    because nothing in the path ever looked at zones, components or pads.
+
+    That is the difference between composing correctly and CHECKING what was
+    composed, and only the first half had been built.
+
+    This runs the shipped geometric kernel — the same compile → project_board →
+    geometric_drc_from_resolution path minerva_pcb_drc_geometric uses — over the
+    composed board, so a staged zone's clearance violation and a staged
+    placement's pad collision surface as attributed findings WITH the witness
+    geometry K11 requires. The kernel is reused, never re-implemented: a second
+    reading of a clearance rule is the drift this goal exists to remove.
+
+    FAIL-CLOSED. Returns (findings, indeterminate). A compile that refuses, or a
+    kernel that meets geometry it cannot model, yields NO findings and a NAMED
+    indeterminate — never an empty finding list a caller could read as clean.
+    The caller must surface it; draft_check does.
+    """
+    try:
+        result = compile_board.compile_board(board, **layer_params)
+    except board_model.BoardParseError as exc:
+        return [], {"kind": "parse", "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — data, not a crash
+        return [], {"kind": "internal", "message": f"compile_board raised {exc!r}"}
+
+    union = geometric_drc_from_resolution(result)
+    if not union.get("verifies_geometry", False):
+        # INDETERMINATE: the kernel could not model this board. Reported as
+        # itself rather than flattened into "no findings", which is the exact
+        # false-clean K14 forbids.
+        return [], {
+            "kind": str(union.get("indeterminate_kind", "unresolved_geometry")),
+            "message": str(union.get("message", "geometry could not be verified")),
+            "details": union.get("indeterminate", []),
+        }
+    return list(union.get("findings", []) or []), {}
+
+
 def _draft_check(params: dict) -> dict:
     board = params.get("board")
     candidates = params.get("candidates") or []
@@ -2893,13 +2941,26 @@ def _draft_check(params: dict) -> dict:
     board_token = params.get("board_token")
     workspace_generation = params.get("workspace_generation")
 
-    def _reply(findings, per_candidate, error=None):
+    # Echoed back so the panel can tie a finding that names a staged entity to
+    # the store entry it came from. Sent by the panel beside the board; without
+    # the echo it was write-only, which is why it had no consumer.
+    draft_provenance = params.get("draft_provenance")
+
+    def _reply(findings, per_candidate, error=None, geometric_indeterminate_=None):
         result = {
             "board_token": board_token,
             "workspace_generation": workspace_generation,
             "findings": findings,
             "per_candidate": per_candidate,
         }
+        if isinstance(draft_provenance, list) and draft_provenance:
+            result["draft_provenance"] = draft_provenance
+        if geometric_indeterminate_:
+            # NEVER folded into "no findings": a caller that cannot tell
+            # "checked and clean" from "could not check" will read the second
+            # as the first, which is the false-clean this whole check exists
+            # to prevent.
+            result["geometric_indeterminate"] = geometric_indeterminate_
         if error is not None:
             result["error"] = error
         return {"ok": True, "result": result}
@@ -2981,8 +3042,26 @@ def _draft_check(params: dict) -> dict:
             per_candidate[cid] = "error"
         return _reply([], per_candidate, error=str(exc))
 
+    # THE GEOMETRIC HALF (K9). run_drc above is connectivity-only by its own
+    # contract, and the subject set built earlier walks traces and candidates —
+    # so nothing so far has looked at the staged zones and moved components the
+    # panel composed into `board`. This pass does, over the composed board, with
+    # the shipped kernel.
+    geo_findings, geo_indeterminate = _draft_geometric(board, _layer_params(params))
+
     eps = _dc_clearance(board)
     findings_out: list = []
+    # Geometric findings FIRST and passed through whole: they already carry
+    # their own type, subjects and witness geometry from the kernel, and the
+    # attribution loop below is built for connectivity findings whose evidence
+    # is a single point. Re-deriving subjects for them would replace richer
+    # information with poorer.
+    for gf in geo_findings:
+        if isinstance(gf, dict):
+            finding = dict(gf)
+            finding.setdefault("kind", gf.get("type"))
+            finding.setdefault("scope", "geometric")
+            findings_out.append(finding)
     for f in drc_result.get("findings", []):
         if not isinstance(f, dict):
             continue
@@ -3017,7 +3096,8 @@ def _draft_check(params: dict) -> dict:
             if scid in per_candidate and per_candidate[scid] != "error":
                 per_candidate[scid] = "violating"
 
-    return _reply(findings_out, per_candidate)
+    return _reply(findings_out, per_candidate,
+                  geometric_indeterminate_=geo_indeterminate or None)
 
 
 # ---------------------------------------------------------------------------

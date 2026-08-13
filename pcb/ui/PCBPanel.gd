@@ -492,7 +492,8 @@ func _init() -> void:
 	_data.data_changed.connect(func() -> void:
 		if not _restoring:
 			content_changed.emit()
-			_schedule_mask_view_refresh())
+			_schedule_mask_view_refresh()
+			_invalidate_fab_preview())
 	# Epoch UX4 station 2: bucket-9 binding — undo/redo now snapshots and
 	# restores staged dispositions alongside the board (pcb_data.gd
 	# bind_staged_store). Store mutations dirty the tab like every other
@@ -5387,6 +5388,23 @@ func mask_view_check(board: Dictionary) -> Dictionary:
 		"message": str(result.get("error_message", result.get("error", "mask_view failed")))}}
 
 
+## A LIVE FAB PREVIEW IS INVALIDATED BY ANY BOARD EDIT (Codex review of the
+## epoch tail, finding 1). It is deliberately NOT refetched — the DCR is
+## explicit that the exact preview is on demand and need not keep up with
+## editing — but leaving the previous artwork on screen after an edit is the
+## stale-authority case this view must never create. It is the one view in the
+## editor entitled to say "these are the bytes the fab receives", and that
+## sentence stops being true the moment the board moves.
+##
+## The mask overlay refetches on the same signal because it is cheap; this runs
+## the whole emission path, so it clears and waits to be asked again.
+func _invalidate_fab_preview() -> void:
+	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
+		return
+	_canvas.set_fab_preview([], [],
+		"stale — the board changed; re-open Fab Preview to re-render")
+
+
 ## pcb.fab_preview round-trip (WYSIWYG G5, DCR 019ffc52b455, K27) — same channel
 ## idiom as mask_view_check above.
 func fab_preview_check(board: Dictionary) -> Dictionary:
@@ -5421,9 +5439,24 @@ func fab_preview_check(board: Dictionary) -> Dictionary:
 func _refresh_fab_preview() -> void:
 	if _canvas == null or _data == null:
 		return
-	var reply: Dictionary = await fab_preview_check(_data.to_board_dict())
+	# THE BOARD THIS PREVIEW WILL DESCRIBE, fingerprinted before the hop.
+	# Without this the preview is the ONE view in the editor entitled to say
+	# "these are the bytes the fab receives" while describing a board that has
+	# since changed — an edit landing during the round trip, or any MCP write
+	# afterwards, left stale artwork on screen under that promise. The draft
+	# check already guards itself this way; the preview shipped without it
+	# (Codex review of the epoch tail, finding 1).
+	var requested: Dictionary = _data.to_board_dict()
+	var requested_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(requested)
+	var reply: Dictionary = await fab_preview_check(requested)
 	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
 		return  # toggled off (or panel torn down) while the worker ran
+	if _data == null or _PcbRoutingSidecarScript.compute_board_fingerprint_v2(
+			_data.to_board_dict()) != requested_token:
+		# The board moved under the request. Show NOTHING and say why, rather
+		# than artwork for a board that no longer exists.
+		_canvas.set_fab_preview([], [], "stale — the board changed while the preview was rendering; re-open Fab Preview")
+		return
 	if not bool(reply.get("ok", false)):
 		var err: Dictionary = _dict_or_empty(reply.get("error"))
 		_canvas.set_fab_preview([], [], "unavailable — " + str(
@@ -5433,7 +5466,18 @@ func _refresh_fab_preview() -> void:
 	var layers: Array = result.get("layers", [])
 	var unrendered: Array = result.get("unrendered", [])
 	# Identity in the note, so what is on screen can be tied to what would ship.
-	var note := "%d layer(s) rendered from the emitted artifacts" % layers.size()
+	# IDENTITY, actually in the note. The previous version claimed to carry it
+	# and carried only counts, so nothing on screen tied the artwork to the
+	# files that would ship — which is the whole point of hashing them.
+	var note := "%d layer(s) from the emitted artifacts" % layers.size()
+	var total_bytes := 0
+	for lay in layers:
+		if lay is Dictionary:
+			total_bytes += int((lay as Dictionary).get("byte_length", 0))
+	if not layers.is_empty():
+		var first: Dictionary = layers[0]
+		note += " — %d bytes total; %s %s…" % [total_bytes,
+			str(first.get("name", "")), str(first.get("sha256", "")).substr(0, 12)]
 	var warnings: Array = result.get("warnings", [])
 	if not warnings.is_empty():
 		note += " — %d emitter warning(s)" % warnings.size()
