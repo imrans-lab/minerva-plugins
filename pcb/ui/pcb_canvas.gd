@@ -9367,6 +9367,59 @@ func get_view() -> Dictionary:
 	}
 
 
+## Mirror EVERYTHING that decides what this canvas draws onto a capture copy,
+## so an off-screen render shows what the user is looking at (bug 019ff9d84b60,
+## WYSIWYG goal 019ff4a5a75a).
+##
+## THE DEFECT THIS CLOSES: the capture used to mirror only the committed-board
+## view flags, so an agent's screenshot showed a board with NO DRAFT LAYER —
+## no staged ghosts, no route candidates, no DRC witness markers — while the
+## human looking at the same board saw all three. An agent asked to review a
+## proposal was handed a picture with the proposal missing from it, and nothing
+## in the reply said so. Four committed-geometry toggles (zones, cutouts,
+## candidates, witnesses) were missing too, so even accepted zones could render
+## differently in a capture than on screen.
+##
+## EXTRACTED AS ITS OWN FUNCTION so the wiring is assertable: capture_to_image
+## returns null without a render target, so a headless suite can never inspect
+## the resulting pixels — but it CAN hand this a fresh canvas and check every
+## field arrived. Composing correctly and actually mirroring are two claims,
+## and only the second is what breaks.
+##
+## DIRECT FIELD ASSIGNMENT, not the set_* doorways, deliberately: a capture is a
+## READ. The setters connect signals on the live store/workspace and run
+## gesture-cancellation, and a throwaway copy has no business doing either — it
+## draws once and dies. This also keeps one idiom for the whole function.
+func mirror_capture_state_onto(copy) -> void:
+	# Committed-geometry view flags.
+	copy.show_grid = show_grid
+	copy.show_ratsnest = show_ratsnest
+	copy.show_traces = show_traces
+	copy.show_labels = show_labels
+	copy.show_pins = show_pins
+	copy.show_pads = show_pads
+	copy.show_silk = show_silk
+	copy.show_courtyard = show_courtyard
+	copy.show_unresolved_badges = show_unresolved_badges
+	copy.show_mask = show_mask
+	copy.mask_openings = mask_openings
+	copy.mask_view_note = mask_view_note
+	copy.show_zones = show_zones
+	copy.show_cutouts = show_cutouts
+	copy.snap_to_grid = snap_to_grid
+	copy.trace_layer_filter = trace_layer_filter
+	# THE DRAFT LAYER — the half the capture used to omit entirely.
+	copy.show_route_candidates = show_route_candidates
+	copy.show_drc_witnesses = show_drc_witnesses
+	copy._staged_store = _staged_store
+	copy._routing_workspace = _routing_workspace
+	# The cutover gates whether candidates draw AT ALL (a missing cutover reads
+	# as OFF, not as ON), so omitting it would silently blank the candidate
+	# layer while every other field looked right.
+	copy._routing_cutover = _routing_cutover
+	copy.selected_staged_ids = selected_staged_ids.duplicate()
+
+
 ## Render the board to an Image OFF-SCREEN — independent of which editor tab is
 ## focused or how the plugin panel is hosted. This is the get_image MCP capture
 ## path (bug 019f7876e3d4): it RESTORES the capture_to_image the native->plugin
@@ -9401,21 +9454,7 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 	var copy = get_script().new()
 	copy.size = Vector2(viewport.size)
 	copy.data = data
-	# Mirror the visible view options so the capture matches what the user sees.
-	copy.show_grid = show_grid
-	copy.show_ratsnest = show_ratsnest
-	copy.show_traces = show_traces
-	copy.show_labels = show_labels
-	copy.show_pins = show_pins
-	copy.show_pads = show_pads
-	copy.show_silk = show_silk
-	copy.show_courtyard = show_courtyard
-	copy.show_unresolved_badges = show_unresolved_badges
-	copy.show_mask = show_mask
-	copy.mask_openings = mask_openings
-	copy.mask_view_note = mask_view_note
-	copy.snap_to_grid = snap_to_grid
-	copy.trace_layer_filter = trace_layer_filter
+	mirror_capture_state_onto(copy)
 
 	viewport.add_child(copy)
 	add_child(viewport)

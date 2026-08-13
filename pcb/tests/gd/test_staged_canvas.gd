@@ -41,6 +41,7 @@ func _init() -> void:
 	_run_menu_seam()
 	_run_dash_pairing()
 	_run_panel_doorways()
+	_run_capture_mirrors_the_draft_layer()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -361,3 +362,70 @@ func _run_panel_doorways() -> void:
 	check("pointing at a rejected draft refuses (not_found — terminal entries draw nothing)",
 		not bool(refused.get("ok", false)))
 	panel.free()
+
+
+# ── 8. the capture copy carries the DRAFT LAYER (bug 019ff9d84b60) ───────────
+#
+# MUTATION THIS SECTION CATCHES: deleting any line of mirror_capture_state_onto.
+# The off-screen capture builds a FRESH canvas and copies state onto it; before
+# this fix it copied only committed-board view flags, so an agent's screenshot
+# showed the board with no staged ghosts, no route candidates and no DRC witness
+# markers, while the human saw all three. The picture disagreed with the panel
+# and said nothing about it.
+#
+# WHY THE MIRROR AND NOT THE IMAGE: capture_to_image returns null without a
+# render target, so a headless suite can never inspect the pixels. Asserting the
+# mirror is the strongest statement available here — the same reason this suite
+# asserts on the pick rather than on drawn pixels everywhere else.
+
+func _run_capture_mirrors_the_draft_layer() -> void:
+	print("-- 8. capture mirror: the draft layer survives the copy --")
+	var rig := _rig()
+	var canvas = rig["canvas"]
+
+	# Give the source canvas a full draft layer plus non-default toggles, so a
+	# mirror that silently kept ITS OWN defaults cannot pass.
+	var workspace := {"marker": "ws"}
+	var cutover := {"marker": "co"}
+	canvas._routing_workspace = workspace
+	canvas._routing_cutover = cutover
+	canvas.selected_staged_ids = [rig["zone_id"]]
+	canvas.show_route_candidates = false
+	canvas.show_drc_witnesses = false
+	canvas.show_zones = false
+	canvas.show_cutouts = false
+	canvas.show_mask = true
+	canvas.mask_view_note = "INCOMPLETE — 2 undetermined"
+
+	var copy = PcbCanvasScript.new()
+	canvas.mirror_capture_state_onto(copy)
+
+	# THE DRAFT LAYER — the half that was missing.
+	check("the staged store reaches the capture copy", copy._staged_store == rig["store"])
+	check("the routing workspace reaches the capture copy", copy._routing_workspace == workspace)
+	# The cutover gates candidate drawing entirely: a missing one reads as OFF,
+	# so omitting it blanks the candidate layer while everything else looks fine.
+	check("the routing CUTOVER reaches the capture copy", copy._routing_cutover == cutover)
+	check_eq("candidate visibility is mirrored, not defaulted",
+		bool(copy.show_route_candidates), false)
+	check_eq("DRC witness visibility is mirrored, not defaulted",
+		bool(copy.show_drc_witnesses), false)
+
+	# Committed-geometry toggles that were ALSO missing — an accepted zone could
+	# render in the capture while hidden on screen.
+	check_eq("zone visibility is mirrored", bool(copy.show_zones), false)
+	check_eq("cutout visibility is mirrored", bool(copy.show_cutouts), false)
+
+	# Selection is copied, not shared: a capture must never be able to edit the
+	# live selection array.
+	check_eq("selection is mirrored", copy.selected_staged_ids, [rig["zone_id"]])
+	copy.selected_staged_ids.append("intruder")
+	check_eq("…as a COPY, so the capture cannot mutate the live selection",
+		canvas.selected_staged_ids.size(), 1)
+
+	# The mask overlay and its honesty note ride along.
+	check_eq("mask visibility is mirrored", bool(copy.show_mask), true)
+	check_eq("the mask INCOMPLETE note rides along",
+		str(copy.mask_view_note), "INCOMPLETE — 2 undetermined")
+	check_eq("the board itself is not mirrored here (the caller sets it)",
+		copy.data, null)
