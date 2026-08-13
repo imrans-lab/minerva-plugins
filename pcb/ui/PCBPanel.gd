@@ -5167,7 +5167,17 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# as CLEAN: the exact false-clean K14 forbids. So fingerprint the composed
 	# board before the hop and re-derive it after; any drift discards the whole
 	# reply through the same revert path an unreachable worker takes.
-	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint(composed)
+	#
+	# V2, NOT V1, and the difference is load-bearing (epoch GA re-review,
+	# finding 1). The v1 subset has no zones key — its own successor's
+	# docstring says so — while the composer's whole job for this purpose is to
+	# append staged ZONES beside placements. Under v1 the guard would have been
+	# real for a dragged placement and DECORATIVE for a staged or rejected
+	# zone, i.e. blind to half the input class K9 named. Nothing constrains the
+	# choice here: this token is request-local and only ever compared with
+	# itself, unlike workspace.board_token above, which must stay v1 because it
+	# is compared against the durable sidecar's own fingerprint.
+	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(composed)
 
 	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
 	request.emit("pcb.draft_check", payload, reply_id)
@@ -5182,8 +5192,14 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# is fail-safe and reuses apply_check_result's empty-reply path, which
 	# reverts every candidate begin_check flipped to "checking" rather than
 	# leaving them stuck.
-	if _data == null or _staged_entities == null \
-			or _PcbRoutingSidecarScript.compute_board_fingerprint(draft_check_board()) != draft_token:
+	#
+	# The fingerprint comparison is SELF-GUARDING, so there are no null clauses
+	# here: draft_check_board() degrades to {} with no board and to the
+	# canonical board with no store, and either way the re-derived hash cannot
+	# equal a token taken when the state was different. An explicit
+	# `_staged_entities == null` test would additionally have contradicted that
+	# seam's documented degrade-don't-refuse contract (re-review note).
+	if _PcbRoutingSidecarScript.compute_board_fingerprint_v2(draft_check_board()) != draft_token:
 		_routing_workspace.apply_check_result({})
 		return {}
 

@@ -65,6 +65,7 @@ const _PcbRouteCandidateScript := preload("model/pcb_route_candidate.gd")
 ## and pinned by test_pcb_bus_geometry.gd — a standing pin this file consumes
 ## and never edits). Zero imports itself.
 const BusGeom := preload("model/pcb_bus_geometry.gd")
+const StagedEntities := preload("model/pcb_staged_entities.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
 ## the plugin component enum carries extra values but is set by NAME,
@@ -4039,7 +4040,7 @@ static func _staged_list_row(e: Dictionary, data = null) -> Dictionary:
 		# Written as "not terminal" so a future live disposition inherits the
 		# correct behaviour instead of silently falling to the stale branch,
 		# which is exactly how this defect was introduced.
-		if data != null and not (str(e.get("disposition", "")) in ["accepted", "rejected"]):
+		if data != null and not (str(e.get("disposition", "")) in StagedEntities.TERMINAL_DISPOSITIONS):
 			row["affected_nets"] = data.placement_affected_nets(str(payload.get("component_id", "")))
 		else:
 			row["affected_nets"] = payload.get("affected_nets", [])
