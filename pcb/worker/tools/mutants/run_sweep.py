@@ -145,7 +145,18 @@ WORKER_ENTRIES = ("agent_router", "pcb_worker", "tests", "tools", "pyproject.tom
 #: hazard that invites: the tempting "fix" is to have that test skip when the doc
 #: is absent, which would silently retire the gate exactly the way the ``ui``
 #: comment above warns about. Copy the input instead.
-PCB_SIBLINGS = ("spikes", "spec", "library", "ui", "docs")
+#: ``scripts`` joined at the GA testex re-baseline: CP2 grew script-behavior
+#: pins (test_hermetic_check drives pcb/scripts/hermetic-fab-check.sh as a
+#: subprocess; test_notice drives pcb/scripts/gen_notice.py) — without the
+#: dir, ELEVEN control tests are red in scratch and the harness correctly
+#: refuses the methodology. Same reasoning again: copy the input, never
+#: teach the test to skip.
+PCB_SIBLINGS = ("spikes", "spec", "library", "ui", "docs", "scripts")
+
+#: Single FILES under pcb/ the control needs (GA testex): NOTICE.md is
+#: gen_notice --check's byte-compare target; manifest.json is read by the
+#: NOTICE/CI pins' neighbors and costs nothing to carry.
+PCB_FILES = ("NOTICE.md", "manifest.json")
 
 COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
 
@@ -323,6 +334,15 @@ def build_scratch(tag: str) -> tuple[Path, Path]:
             shutil.copy2(src, worker / name)
     for name in PCB_SIBLINGS:
         shutil.copytree(PCB / name, pcb / name, ignore=COPY_IGNORE)
+    for name in PCB_FILES:
+        shutil.copy2(PCB / name, pcb / name)
+    # Repo-root .github joins the scratch (GA testex): test_hermetic_check
+    # asserts the CI workflow actually invokes the hermetic script (reading
+    # .github/workflows/pcb.yml relative to ITS repo root, which in scratch
+    # is <tmp>), and test_corpus_policy compares its scan coverage against
+    # .github/workflows/corpus-policy.yml. Workflows only — no CI secrets or
+    # state live there, it is plain YAML under version control.
+    shutil.copytree(PCB.parent / ".github", tmp / ".github", ignore=COPY_IGNORE)
     return tmp, worker
 
 
