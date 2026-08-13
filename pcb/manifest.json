@@ -38,7 +38,7 @@
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "layers": {"type": "array", "items": {"type": "string"}, "description": "Explicit canonical stack in stack order (top, in1..in(N-2), bottom). Provide this OR count."},
-          "count": {"type": "number", "description": "Total copper layer count (>= 2); builds the canonical stack for that count. Provide this OR layers."}
+          "count": {"type": "number", "minimum": 2, "maximum": 32, "description": "Total copper layer count (2..32); builds the canonical stack for that count. Provide this OR layers — supplying BOTH is refused (mutually exclusive spellings of one declaration), as is a count outside 2..32."}
         },
         "required": ["editor_name"]
       }

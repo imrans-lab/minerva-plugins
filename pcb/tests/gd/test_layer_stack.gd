@@ -418,3 +418,15 @@ func _run_set_board_layers() -> void:
 	check("handler whole-float count accepted", bool(res.get("success", false)))
 	check_eq("whole-float count built the 2-layer stack", res.get("layers", []),
 		["top", "bottom"])
+	# Epoch GA repair round (Codex whole-epoch review finding 5): strict
+	# argument grammar — no silent widening of invalid input.
+	res = PANEL_TOOLS._set_board_layers(host, {"count": 1.0})
+	check("handler count below 2 refused, never clamped up",
+		not bool(res.get("success", true)))
+	res = PANEL_TOOLS._set_board_layers(host, {"count": 33.0})
+	check("handler count above 32 refused",
+		not bool(res.get("success", true)))
+	res = PANEL_TOOLS._set_board_layers(
+		host, {"layers": ["top", "bottom"], "count": 4.0})
+	check("handler layers+count together refused (mutually exclusive)",
+		not bool(res.get("success", true)))

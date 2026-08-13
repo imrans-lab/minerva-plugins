@@ -296,6 +296,16 @@ static func _set_board_layers(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
+	# STRICT argument grammar (epoch GA repair round, Codex whole-epoch
+	# review finding 5): the manifest says "Provide this OR layers" and
+	# count >= 2 — silently preferring one of two conflicting spellings, or
+	# clamping an invalid count up to a legal stack, answers a question the
+	# caller didn't ask. Both-present refuses; count outside 2..32 refuses
+	# by name instead of riding stack_for_count's clamp.
+	if args.has("layers") and args.has("count"):
+		return _err("Provide layers OR count, not both — they are two "
+			+ "spellings of the same declaration and a conflict between "
+			+ "them has no right answer")
 	var new_layers: Array = []
 	if args.has("layers"):
 		var raw = args.get("layers")
@@ -308,6 +318,10 @@ static func _set_board_layers(host, args: Dictionary) -> Dictionary:
 		var count := int(count_raw)
 		if float(count) != float(count_raw):
 			return _err("count must be a whole number of copper layers")
+		var max_copper: int = 2 + PcbLayerStack.MAX_INNER_LAYERS
+		if count < 2 or count > max_copper:
+			return _err("count must be between 2 and %d copper layers, got %d"
+				% [max_copper, count])
 		new_layers = PcbLayerStack.stack_for_count(count)
 	else:
 		return _err("Provide either layers (explicit canonical stack) or count (copper layer count)")
@@ -1830,7 +1844,7 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 				"candidate_id": gate_cid,
 				"note": "annotation '%s' bridges to frozen candidate %s — settled geometry does not edit; minerva_pcb_workspace_unfreeze first" % [id, gate_cid]}
 
-	var result: Dictionary = _dict_or_empty(_PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y"), 0.0)))
+	var result: Dictionary = _PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y", 0.0)))
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "could not insert via")))
 
@@ -3800,7 +3814,7 @@ static func _propose_zone(host, args: Dictionary) -> Dictionary:
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "Zone was refused.")))
 	var payload: Dictionary = _dict_or_empty(built.get("payload"))
-	var staged: Dictionary = _dict_or_empty(panel.stage_built_payload("zone", payload, "ai", str(args.get("note"), "")))
+	var staged: Dictionary = panel.stage_built_payload("zone", payload, "ai", str(args.get("note", "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
 	return _ok({
@@ -3830,7 +3844,7 @@ static func _propose_cutout(host, args: Dictionary) -> Dictionary:
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "Cutout was refused.")))
 	var payload: Dictionary = _dict_or_empty(built.get("payload"))
-	var staged: Dictionary = _dict_or_empty(panel.stage_built_payload("cutout", payload, "ai", str(args.get("note"), "")))
+	var staged: Dictionary = panel.stage_built_payload("cutout", payload, "ai", str(args.get("note", "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
 	return _ok({
@@ -3898,7 +3912,7 @@ static func _propose_placement(host, args: Dictionary) -> Dictionary:
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "Placement was refused.")))
 	var payload: Dictionary = _dict_or_empty(built.get("payload"))
-	var staged: Dictionary = _dict_or_empty(panel.stage_built_payload("placement", payload, "ai", str(args.get("note"), "")))
+	var staged: Dictionary = panel.stage_built_payload("placement", payload, "ai", str(args.get("note", "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
 	var reply := _ok({
@@ -7785,7 +7799,7 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	if not bool(plan.get("ok", false)):
 		return _err(str(plan.get("error", "Bus was refused.")))
 
-	var result: Dictionary = _dict_or_empty(bus_commit_plan(data, plan, "Add bus (%d traces)" % (plan.get("nets"), []) as Array).size())
+	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d traces)" % (plan.get("nets", []) as Array).size())
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "Bus was refused by the board model.")))
 

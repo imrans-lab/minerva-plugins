@@ -1645,6 +1645,19 @@ def _build_job_file(base: str, filenames: list[str], outline_w: float,
         "FilesAttributes": files_attributes,
         "MaterialStackup": _material_stackup(copper_names, board_thickness_mm),
     }
+    # NO INVENTED PHYSICS ON DEEP STACKS (epoch GA repair round, Codex
+    # whole-epoch review finding 4): the KiCad-derived 1.6mm/35um/10um/FR4
+    # defaults reproduce KiCad's own numbers for the LEGACY 2-layer path and
+    # stay, byte-identically. A deeper board's physical stackup is genuinely
+    # UNKNOWN — the jlcpcb-4layer profile explicitly declares none because
+    # JLCPCB publishes none — and a job file is authoritative manufacturing
+    # metadata, so stating an evenly-divided FR4 guess there turns "we don't
+    # know" into "fabricate this". OMIT the physical fields instead: absent
+    # is honest, invented is not. LayerNumber stays (the stack IS known);
+    # a future profile that authors real thicknesses reinstates them here.
+    if len(copper_names) > 2:
+        del job["GeneralSpecs"]["BoardThickness"]
+        del job["MaterialStackup"]
     return json.dumps(job, indent=2) + "\n"
 
 

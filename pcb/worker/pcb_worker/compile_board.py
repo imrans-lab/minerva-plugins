@@ -1086,6 +1086,30 @@ def _resolved_pad_layers(pad: PadDefinition, transform: PlacementTransform, ref:
                 add(Layer.from_id(layer_id))
         else:
             add(transform.layer(layer))  # mirror an explicit F/B layer by side
+
+    # Epoch GA repair round (Codex whole-epoch review finding 3): a pad with
+    # NO DRILL has no barrel — its copper is a FACE land, and both fab
+    # emitters are face-based for drill-less copper (gerber flashes SMD lands
+    # on top/bottom only; kicad emits the component side's layer). Inner
+    # participation on such a pad would compile, route and DRC as inner
+    # copper and then be SILENTLY FABRICATED on an outer face — the exact
+    # K4 silent-relocation this module refuses everywhere else, one seam
+    # deeper. Refuse by name. Through pads (drill present) are untouched:
+    # their barrel genuinely reaches every declared plane (GA-3 flashes the
+    # annulus on each copper layer).
+    if pad.drill is None:
+        inner = [layer.id for layer in resolved
+                 if is_copper(layer.id) and layer.id not in ("F.Cu", "B.Cu")]
+        if inner:
+            diags.error(
+                "inner_smd_pad",
+                f"component {ref!r} pad {pad.number!r}: a drill-less pad "
+                f"declares copper on inner layer(s) {inner}; its land can "
+                f"only be fabricated on an outer face, so this would be "
+                f"silently relocated copper — refused (through pads with a "
+                f"drill reach inner planes; face pads do not)",
+                SourceRef(EntityKind.PAD, pad.source_id, f"component {ref}"))
+            return None
     return tuple(resolved)
 
 

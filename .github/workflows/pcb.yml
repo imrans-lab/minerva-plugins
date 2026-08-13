@@ -788,6 +788,14 @@ jobs:
           VERSION=$(python3 -c 'import json; print(json.load(open("pcb/manifest.json"))["version"])')
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"; PRE="false"
+            # TAG must equal the manifest-derived tag (epoch GA repair round,
+            # Codex whole-epoch review finding 6): a mistyped pcb-v0.4.0 tag
+            # on manifest 0.3.0 would otherwise publish a 0.4.0 release whose
+            # artifacts embed and name 0.3.0. Fail loudly instead.
+            if [ "$TAG" != "pcb-v${VERSION}" ]; then
+              echo "::error::pushed tag $TAG does not match the manifest-derived tag pcb-v${VERSION} — bump pcb/manifest.json (and main.go serverVersion, see TestServerVersionMatchesManifest) or retag"
+              exit 1
+            fi
           elif [ "$GITHUB_REF_NAME" = "main" ]; then
             TAG="pcb-v${VERSION}"; PRE="false"
           else

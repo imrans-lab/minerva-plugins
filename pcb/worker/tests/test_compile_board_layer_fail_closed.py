@@ -280,30 +280,55 @@ def test_inner_copper_fails_closed_even_when_board_omits_layers_key(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 5b. THE GA-1 INVERSION: the same In1.Cu pad is LEGAL copper on a board that
-#     DECLARES in1 in its stack (under a profile whose capability admits the
-#     depth). This is the other half of the per-board accept-set: the gate is
-#     "copper outside the board's own stack", not "copper that isn't F/B.Cu".
-#     Together with tests 1 and 5 this pins both directions -- neither a
-#     false refusal on a declaring board nor a false pass on a 2-layer one.
+# 5b. RE-FLIPPED at the epoch-GA repair round (Codex whole-epoch review
+#     finding 3; this test's GA-1 version enshrined the gap). A declaring
+#     board makes in1 REAL copper for traces/vias/zones — but a DRILL-LESS
+#     pad's land is fabricated on a face by both emitters, so its inner
+#     participation would be silently relocated copper. The gate is
+#     therefore two-dimensional: layer ∈ board stack (GA-1's half) AND the
+#     pad KIND can physically reach that layer (this half). An SMD pad on
+#     In1.Cu refuses BY NAME even under jlcpcb-4layer; a THROUGH pad's
+#     *.Cu barrel genuinely reaches every declared plane and stays legal.
 # ---------------------------------------------------------------------------
 
 
-def test_inner_copper_legal_when_board_declares_the_layer(tmp_path):
+def test_inner_smd_pad_refuses_even_on_a_declaring_board(tmp_path):
     ref, library_root, lockfile = _seed_footprint(
         tmp_path, "INNER_CU_PAD", _INNER_CU_PAD_FOOTPRINT)
     board = _board(ref)
     board["layers"] = ["top", "in1", "in2", "bottom"]
     board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
     result = compile_board(board, library_root=library_root, lockfile=lockfile)
+    assert isinstance(result, ResolutionFailure), (
+        "a drill-less pad on In1.Cu can only be fabricated on an outer face; "
+        "compiling it clean is the silent-relocation Codex finding 3 names")
+    errors = _errors(result)
+    assert any(d.code == "inner_smd_pad" for d in errors), errors
+    assert any("In1.Cu" in d.message for d in errors
+               if d.code == "inner_smd_pad"), errors
+
+
+_INNER_TH_PAD_FOOTPRINT = """\
+(footprint "INNER_TH_PAD" (version 20221018) (generator pcb_worker_seed)
+  (layer "F.Cu")
+  (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu"))
+)
+"""
+
+
+def test_through_pad_barrel_reaches_every_declared_plane(tmp_path):
+    """The half that stays LEGAL: a drilled pad's barrel is real copper on
+    every declared layer, and *.Cu expands to the board's own stack."""
+    ref, library_root, lockfile = _seed_footprint(
+        tmp_path, "INNER_TH_PAD", _INNER_TH_PAD_FOOTPRINT)
+    board = _board(ref)
+    board["layers"] = ["top", "in1", "in2", "bottom"]
+    board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
+    result = compile_board(board, library_root=library_root, lockfile=lockfile)
     assert isinstance(result, ResolutionSuccess), _errors(result)
-    codes = {d.code for d in result.diagnostics}
-    assert "unemitted_copper_layer" not in codes
-    assert "unsupported_layer_stack" not in codes
-    # The pad's inner participation must actually be THERE, not merely tolerated.
     placed = [p for comp in result.board.components for p in comp.pads]
-    assert any("In1.Cu" in {layer.id for layer in pad.layers} for pad in placed), \
-        [tuple(layer.id for layer in pad.layers) for pad in placed]
+    layer_ids = {layer.id for pad in placed for layer in pad.layers}
+    assert {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"} <= layer_ids, layer_ids
 
 
 # ---------------------------------------------------------------------------

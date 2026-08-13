@@ -764,7 +764,7 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 	for r in resolved:
 		var entry: Dictionary = _dict_or_empty(r.get("entry"))
 		var kind := str(entry.get("kind", ""))
-		var landed: Dictionary = _dict_or_empty(_apply_staged_payload(kind, entry.get("payload"), {}))
+		var landed: Dictionary = _apply_staged_payload(kind, _dict_or_empty(entry.get("payload")))
 		if landed.is_empty():
 			push_warning("[PCBPanel] batch accept: unexpected refusal on %s" % str(r.get("entity_id", "")))
 			midwrite_refusals.append(str(r.get("entity_id", "")))
@@ -2932,7 +2932,7 @@ func _on_hint_width_changed(value: float) -> void:
 			_hint_width_row.visible = false
 		return
 	var new_ann: Dictionary = ann.duplicate(true)
-	var kp: Dictionary = _dict_or_empty((new_ann.get("kind_payload"), {}) as Dictionary).duplicate(true)
+	var kp: Dictionary = _dict_or_empty(new_ann.get("kind_payload")).duplicate(true)
 	if value > 0.0:
 		kp["width_mm"] = value
 	else:

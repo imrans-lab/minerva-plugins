@@ -541,7 +541,11 @@ def _parse_pad(pad_content: str) -> Optional[dict]:
     if layers_match:
         pad["layer"] = layers_match.group(1)
 
-    return pad if pad.get("number") else None
+    # PRESENCE, not truthiness (bug 019f9af741, second half — the Codex
+    # whole-epoch review caught that fixing the regex alone was not enough):
+    # an empty quoted number "" is a VALID number (every NPTH mounting hole),
+    # so the gate is "did the main clause parse at all", which sets the key.
+    return pad if "number" in pad else None
 
 
 def _transform_position(

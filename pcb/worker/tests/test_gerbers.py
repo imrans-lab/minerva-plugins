@@ -1071,9 +1071,22 @@ def test_job_file_is_emitted_and_named_like_kicads(board_path, base, builder):
 @pytest.mark.parametrize("board_path,base,builder", CASES)
 def test_job_file_structure_matches_kicads(board_path, base, builder):
     job = _json.loads(builder(board_path, base)[f"{base}-job.gbrjob"])
-    assert list(job) == _KICAD_JOB_TOP_LEVEL_KEYS
-    assert list(job["GeneralSpecs"]) == ["ProjectId", "Size", "LayerNumber",
-                                         "BoardThickness", "Finish"]
+    deep = len(_declared_layers(board_path)) > 2
+    # NO INVENTED PHYSICS on deep stacks (epoch GA repair, Codex finding 4):
+    # a deeper board's physical stackup is unknown (the 4-layer profile
+    # declares none), so BoardThickness and MaterialStackup are OMITTED
+    # rather than stated from KiCad's 2-layer defaults. The 2-layer manifest
+    # keeps its exact key sets byte-for-byte.
+    if deep:
+        assert list(job) == [k for k in _KICAD_JOB_TOP_LEVEL_KEYS
+                             if k != "MaterialStackup"]
+        assert list(job["GeneralSpecs"]) == ["ProjectId", "Size",
+                                             "LayerNumber", "Finish"]
+        assert "BoardThickness" not in job["GeneralSpecs"]
+    else:
+        assert list(job) == _KICAD_JOB_TOP_LEVEL_KEYS
+        assert list(job["GeneralSpecs"]) == ["ProjectId", "Size", "LayerNumber",
+                                             "BoardThickness", "Finish"]
     assert list(job["GeneralSpecs"]["ProjectId"]) == ["Name", "GUID", "Revision"]
     assert list(job["DesignRules"][0]) == ["Layers", "PadToPad", "PadToTrack",
                                            "TrackToTrack", "MinLineWidth"]
