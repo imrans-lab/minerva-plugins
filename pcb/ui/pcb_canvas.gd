@@ -9420,7 +9420,34 @@ func approximation_notes() -> Array:
 		notes.append("solder paste: not drawn — no stencil view in the editor")
 	if not show_mask:
 		notes.append("solder mask: hidden — enable the mask overlay to see openings")
+	if show_cutouts and not data.cutouts.is_empty():
+		# v1 has no polygon-with-holes primitive, so a cutout is drawn as a
+		# hatched patch OVER the board rather than as substrate genuinely
+		# removed (see _draw_cutout).
+		notes.append("cutouts: hatched patch — the fab receives substrate actually removed")
 	return notes
+
+
+## THE CLASSES DELIBERATELY ABSENT FROM approximation_notes(), recorded so their
+## absence reads as a decision rather than an oversight. The DCR names seven
+## fabrication-affecting classes; these four are NOT marked because they are not
+## approximated — each draws from the same shared owner the fab path consumes:
+##
+##   pads and drill holes  — the resolved pad geometry adopted at board load
+##                           (WYSIWYG G1), not a fallback disc.
+##   silk and refdes       — the PRINTED stroke artwork the emitter flashes
+##                           (WYSIWYG G2), not a floating UI label.
+##   solder mask openings  — Projection.mask verbatim from the worker (G4),
+##                           which is why the note above fires only when the
+##                           overlay is switched OFF.
+##   N-layer copper        — traces carry their own layer and are drawn per
+##                           layer under the same stack the emitter walks.
+##
+## If any of these ever gains a local approximation, it belongs in the notes
+## above and this list must lose it. Naming them here is what makes that a
+## visible edit rather than a silent divergence.
+const NOT_APPROXIMATED := ["pads", "drills", "silk", "refdes", "mask_openings",
+	"n_layer_copper"]
 
 
 ## Draw the notice bottom-left, dim and small. It is not a warning: nothing is
@@ -9470,6 +9497,15 @@ func set_fab_preview(layers: Array, unrendered: Array, note: String = "") -> voi
 	_fab_preview_note = note
 	for entry in layers:
 		if not (entry is Dictionary):
+			# Even a malformed entry is ACCOUNTED FOR. Dropping it silently
+			# would falsify this function's whole contract — the worker
+			# guarantees every emitted file lands in one of its two lists, and
+			# a viewer counting what it can see would be short by one with
+			# nothing to explain it.
+			_fab_preview_unrendered.append({
+				"name": "(malformed layer entry)",
+				"reason": "the worker reply carried a layer that was not a record",
+			})
 			continue
 		var lay: Dictionary = entry
 		var svg := str(lay.get("svg", ""))
@@ -9523,66 +9559,74 @@ func _draw_fab_preview() -> void:
 			y += 14.0
 
 
-## Mirror EVERYTHING that decides what this canvas draws onto a capture copy,
-## so an off-screen render shows what the user is looking at (bug 019ff9d84b60,
+## Every piece of state that decides WHAT THIS CANVAS DRAWS, as one list.
+##
+## The list exists because the previous shape of this — a hand-written run of
+## assignments — silently fell behind twice: the draft layer was missing
+## entirely (bug 019ff9d84b60), and then hidden_layers was missed again for the
+## per-layer View eyes shipped in this same epoch. A hand-written mirror is a
+## thing you must remember to update, and the failure is invisible: the
+## screenshot still renders, it just disagrees with the panel.
+##
+## Adding a draw-affecting field is now ONE line here, and the capture suite
+## walks this same list, so a field added without a test is impossible and a
+## field added without mirroring is caught.
+const CAPTURE_MIRRORED_FIELDS := [
+	# Committed-geometry view flags.
+	"show_grid", "show_ratsnest", "show_traces", "show_labels", "show_pins",
+	"show_pads", "show_silk", "show_courtyard", "show_unresolved_badges",
+	"show_zones", "show_cutouts", "snap_to_grid", "trace_layer_filter",
+	# Per-layer visibility (epoch GA-1's View-menu eyes). Missing this let a
+	# capture draw copper the user had hidden on screen.
+	"hidden_layers",
+	# The mask overlay and the honesty note that rides with it.
+	"show_mask", "mask_openings", "mask_view_note",
+	# THE DRAFT LAYER — proposals, candidates and the DRC witnesses over them.
+	"show_route_candidates", "show_drc_witnesses",
+	"_staged_store", "_routing_workspace",
+	# The cutover gates candidate drawing ENTIRELY (a missing one reads as OFF),
+	# so omitting it blanks that layer while every other field looks right.
+	"_routing_cutover",
+	# Selection, every kind: a halo drawn on screen and absent from the capture
+	# is the same disagreement in miniature.
+	"selected_components", "selected_trace_ids", "selected_zone_ids",
+	"selected_via_ids", "selected_cutout_ids", "selected_candidate_ids",
+	"selected_staged_ids",
+	# Fab preview replaces the whole view, so it must survive the copy.
+	"show_fab_preview", "_fab_preview_layers", "_fab_preview_unrendered",
+	"_fab_preview_note",
+	# The disclosure itself — a screenshot must carry the same admission of
+	# what is approximate that the human sees.
+	"show_approximation_notice",
+]
+
+
+## Mirror every field in CAPTURE_MIRRORED_FIELDS onto a capture copy, so an
+## off-screen render shows what the user is looking at (bug 019ff9d84b60,
 ## WYSIWYG goal 019ff4a5a75a).
 ##
-## THE DEFECT THIS CLOSES: the capture used to mirror only the committed-board
-## view flags, so an agent's screenshot showed a board with NO DRAFT LAYER —
-## no staged ghosts, no route candidates, no DRC witness markers — while the
-## human looking at the same board saw all three. An agent asked to review a
-## proposal was handed a picture with the proposal missing from it, and nothing
-## in the reply said so. Four committed-geometry toggles (zones, cutouts,
-## candidates, witnesses) were missing too, so even accepted zones could render
-## differently in a capture than on screen.
+## THE DEFECT THIS CLOSES: the capture used to mirror only committed-board view
+## flags, so an agent's screenshot showed a board with NO DRAFT LAYER — no
+## staged ghosts, no route candidates, no DRC witness markers — while the human
+## saw all three. An agent asked to review a proposal was handed a picture with
+## the proposal missing from it, and nothing in the reply said so.
 ##
-## EXTRACTED AS ITS OWN FUNCTION so the wiring is assertable: capture_to_image
-## returns null without a render target, so a headless suite can never inspect
-## the resulting pixels — but it CAN hand this a fresh canvas and check every
-## field arrived. Composing correctly and actually mirroring are two claims,
-## and only the second is what breaks.
+## CONTAINERS ARE DUPLICATED, references are shared. Arrays and dictionaries are
+## copied so a capture can never mutate live selection or layer state; the
+## stores, the workspace and the rasterized preview textures are shared by
+## reference because they are read-only here and copying them would be waste.
 ##
-## DIRECT FIELD ASSIGNMENT, not the set_* doorways, deliberately: a capture is a
-## READ. The setters connect signals on the live store/workspace and run
-## gesture-cancellation, and a throwaway copy has no business doing either — it
-## draws once and dies. This also keeps one idiom for the whole function.
+## DIRECT ASSIGNMENT, not the set_* doorways, deliberately: a capture is a READ.
+## Those setters connect signals on the live store and workspace and run
+## gesture-cancellation, and a throwaway copy that draws once and dies has no
+## business doing either.
 func mirror_capture_state_onto(copy) -> void:
-	# Committed-geometry view flags.
-	copy.show_grid = show_grid
-	copy.show_ratsnest = show_ratsnest
-	copy.show_traces = show_traces
-	copy.show_labels = show_labels
-	copy.show_pins = show_pins
-	copy.show_pads = show_pads
-	copy.show_silk = show_silk
-	copy.show_courtyard = show_courtyard
-	copy.show_unresolved_badges = show_unresolved_badges
-	copy.show_mask = show_mask
-	copy.mask_openings = mask_openings
-	copy.mask_view_note = mask_view_note
-	copy.show_zones = show_zones
-	copy.show_cutouts = show_cutouts
-	copy.snap_to_grid = snap_to_grid
-	copy.trace_layer_filter = trace_layer_filter
-	# THE DRAFT LAYER — the half the capture used to omit entirely.
-	copy.show_route_candidates = show_route_candidates
-	copy.show_drc_witnesses = show_drc_witnesses
-	# Fab-preview mode replaces the whole view, so a capture taken while it is
-	# on must show the ARTWORK, not the editor's rendering of the same board.
-	# The rasterized layers are shared by reference: they are immutable
-	# textures, and re-rasterizing them per capture would be pure waste.
-	copy.show_approximation_notice = show_approximation_notice
-	copy.show_fab_preview = show_fab_preview
-	copy._fab_preview_layers = _fab_preview_layers
-	copy._fab_preview_unrendered = _fab_preview_unrendered
-	copy._fab_preview_note = _fab_preview_note
-	copy._staged_store = _staged_store
-	copy._routing_workspace = _routing_workspace
-	# The cutover gates whether candidates draw AT ALL (a missing cutover reads
-	# as OFF, not as ON), so omitting it would silently blank the candidate
-	# layer while every other field looked right.
-	copy._routing_cutover = _routing_cutover
-	copy.selected_staged_ids = selected_staged_ids.duplicate()
+	for field in CAPTURE_MIRRORED_FIELDS:
+		var value = get(field)
+		if value is Array or value is Dictionary:
+			copy.set(field, value.duplicate())
+		else:
+			copy.set(field, value)
 
 
 ## Render the board to an Image OFF-SCREEN — independent of which editor tab is

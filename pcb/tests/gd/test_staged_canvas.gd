@@ -366,69 +366,111 @@ func _run_panel_doorways() -> void:
 	panel.free()
 
 
-# ── 8. the capture copy carries the DRAFT LAYER (bug 019ff9d84b60) ───────────
+# ── 8. the capture copy carries EVERYTHING that decides the picture ──────────
 #
-# MUTATION THIS SECTION CATCHES: deleting any line of mirror_capture_state_onto.
-# The off-screen capture builds a FRESH canvas and copies state onto it; before
-# this fix it copied only committed-board view flags, so an agent's screenshot
-# showed the board with no staged ghosts, no route candidates and no DRC witness
-# markers, while the human saw all three. The picture disagreed with the panel
-# and said nothing about it.
+# The previous version of this section claimed to catch "deleting any line of
+# the mirror" and did not: it asserted about twelve of some twenty-six fields,
+# so deleting most of them passed. That is the vacuous-test class, and it was
+# caught by review rather than by the suite, which is luck.
 #
-# WHY THE MIRROR AND NOT THE IMAGE: capture_to_image returns null without a
-# render target, so a headless suite can never inspect the pixels. Asserting the
-# mirror is the strongest statement available here — the same reason this suite
-# asserts on the pick rather than on drawn pixels everywhere else.
+# The mirror is now a LIST plus a loop, which creates a new trap: a test that
+# simply walks the same list is circular — delete a field from the list and the
+# test's own loop shrinks with it. So this section has two independent halves:
+#
+#   (a) a HARDCODED demand, written here and owing nothing to the
+#       implementation, that specific fields are in the mirrored set; and
+#   (b) a MECHANISM check that every listed field actually survives the copy.
+#
+# (a) catches removing a field from the list. (b) catches breaking the copy.
+
+## Fields this suite DEMANDS are mirrored, independent of what the canvas says.
+## Each earned its place by having been missing at some point: the draft layer
+## (bug 019ff9d84b60), hidden_layers (the GA-1 per-layer eyes), the committed
+## selections, and the honesty surfaces added with fab preview.
+const MUST_MIRROR := [
+	"_staged_store", "_routing_workspace", "_routing_cutover",
+	"show_route_candidates", "show_drc_witnesses",
+	"hidden_layers",
+	"selected_components", "selected_trace_ids", "selected_zone_ids",
+	"selected_via_ids", "selected_cutout_ids", "selected_candidate_ids",
+	"selected_staged_ids",
+	"show_fab_preview", "_fab_preview_layers", "_fab_preview_unrendered",
+	"show_approximation_notice", "show_mask", "mask_openings", "mask_view_note",
+	"show_zones", "show_cutouts",
+]
+
 
 func _run_capture_mirrors_the_draft_layer() -> void:
-	print("-- 8. capture mirror: the draft layer survives the copy --")
+	print("-- 8. capture mirror: nothing that decides the picture is left behind --")
 	var rig := _rig()
 	var canvas = rig["canvas"]
 
-	# Give the source canvas a full draft layer plus non-default toggles, so a
-	# mirror that silently kept ITS OWN defaults cannot pass.
+	# (a) INDEPENDENT DEMAND — this list lives in the test, so removing a field
+	# from the canvas's mirrored set fails here rather than shrinking the check.
+	# ACCUMULATED into ONE assertion on purpose. A check() per field would make
+	# this suite's total depend on how many fields the canvas happens to list,
+	# and the runner pins that total EXACTLY — a growing mirror would then red
+	# the gate for growing. The failure message names the missing fields, so
+	# debuggability is better this way, not worse.
+	var mirrored: Array = canvas.CAPTURE_MIRRORED_FIELDS
+	var missing := []
+	for field in MUST_MIRROR:
+		if not (field in mirrored):
+			missing.append(field)
+	check("every field this suite demands is in the mirrored set (missing: %s)"
+		% str(missing), missing.is_empty())
+
+	# (b) MECHANISM — give every mirrored field a value distinguishable from a
+	# fresh canvas's default, then assert each one survives the copy.
+	var fresh = PcbCanvasScript.new()
+	var probes := {}
+	for field in mirrored:
+		var current = canvas.get(field)
+		var probe
+		if current is bool:
+			probe = not bool(fresh.get(field))
+		elif current is Dictionary:
+			probe = {"__probe": field}
+		elif current is Array:
+			probe = ["__probe_" + str(field)]
+		elif current is String:
+			probe = "__probe_" + str(field)
+		else:
+			probe = null  # object refs: exercised explicitly below
+		if probe != null:
+			canvas.set(field, probe)
+			probes[field] = probe
+
+	# Object-valued state, set explicitly so the reference identity is checked.
 	var workspace := {"marker": "ws"}
 	var cutover := {"marker": "co"}
 	canvas._routing_workspace = workspace
 	canvas._routing_cutover = cutover
-	canvas.selected_staged_ids = [rig["zone_id"]]
-	canvas.show_route_candidates = false
-	canvas.show_drc_witnesses = false
-	canvas.show_zones = false
-	canvas.show_cutouts = false
-	canvas.show_mask = true
-	canvas.mask_view_note = "INCOMPLETE — 2 undetermined"
 
 	var copy = PcbCanvasScript.new()
 	canvas.mirror_capture_state_onto(copy)
 
-	# THE DRAFT LAYER — the half that was missing.
-	check("the staged store reaches the capture copy", copy._staged_store == rig["store"])
-	check("the routing workspace reaches the capture copy", copy._routing_workspace == workspace)
-	# The cutover gates candidate drawing entirely: a missing one reads as OFF,
-	# so omitting it blanks the candidate layer while everything else looks fine.
-	check("the routing CUTOVER reaches the capture copy", copy._routing_cutover == cutover)
-	check_eq("candidate visibility is mirrored, not defaulted",
-		bool(copy.show_route_candidates), false)
-	check_eq("DRC witness visibility is mirrored, not defaulted",
-		bool(copy.show_drc_witnesses), false)
+	var lost := []
+	for field in probes:
+		if copy.get(field) != probes[field]:
+			lost.append(field)
+	check("every mirrored field survives the copy (lost: %s)" % str(lost),
+		lost.is_empty())
+	check("the staged store reaches the copy", copy._staged_store == rig["store"])
+	check("the routing workspace reaches the copy", copy._routing_workspace == workspace)
+	# The cutover gates candidate drawing ENTIRELY: a missing one reads as OFF,
+	# so omitting it blanks that layer while everything else looks correct.
+	check("the routing CUTOVER reaches the copy", copy._routing_cutover == cutover)
 
-	# Committed-geometry toggles that were ALSO missing — an accepted zone could
-	# render in the capture while hidden on screen.
-	check_eq("zone visibility is mirrored", bool(copy.show_zones), false)
-	check_eq("cutout visibility is mirrored", bool(copy.show_cutouts), false)
-
-	# Selection is copied, not shared: a capture must never be able to edit the
-	# live selection array.
-	check_eq("selection is mirrored", copy.selected_staged_ids, [rig["zone_id"]])
+	# CONTAINERS ARE COPIES, not shares — a capture must never be able to edit
+	# live selection or layer-visibility state.
 	copy.selected_staged_ids.append("intruder")
-	check_eq("…as a COPY, so the capture cannot mutate the live selection",
-		canvas.selected_staged_ids.size(), 1)
+	check_eq("selection is duplicated, not shared",
+		canvas.selected_staged_ids.has("intruder"), false)
+	copy.hidden_layers["intruder"] = true
+	check_eq("hidden_layers is duplicated, not shared",
+		canvas.hidden_layers.has("intruder"), false)
 
-	# The mask overlay and its honesty note ride along.
-	check_eq("mask visibility is mirrored", bool(copy.show_mask), true)
-	check_eq("the mask INCOMPLETE note rides along",
-		str(copy.mask_view_note), "INCOMPLETE — 2 undetermined")
 	check_eq("the board itself is not mirrored here (the caller sets it)",
 		copy.data, null)
 
@@ -477,6 +519,22 @@ func _run_fab_preview_accounting() -> void:
 	check_eq("a new reply clears the previous unrendered set",
 		canvas._fab_preview_unrendered.size(), 0)
 	check_eq("…and the previous layers", canvas._fab_preview_layers.size(), 1)
+
+	# THE ACTIVATION PATH (unified review finding 1). The worker method, the
+	# broker channel, the round-trip and the draw path can all be correct and
+	# the feature still be unreachable, because nothing turns it on. That is
+	# exactly what shipped in the first cut of this work: _refresh_fab_preview
+	# had zero callers and no control set show_fab_preview. A pipeline with no
+	# switch is not a feature, and no other assertion in this suite notices.
+	var panel: Variant = load(PANEL_PATH).new()
+	var flags: Array = panel.get("_VIEW_FLAGS")
+	var toggles := []
+	for f in flags:
+		toggles.append(str((f as Array)[1]))
+	check("the View menu can turn the fab preview ON",
+		"show_fab_preview" in toggles)
+	check("…and the mask overlay is still reachable beside it",
+		"show_mask" in toggles)
 
 	# Capture parity: a screenshot taken in preview mode must show the ARTWORK.
 	var copy = PcbCanvasScript.new()

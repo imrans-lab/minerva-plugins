@@ -414,6 +414,11 @@ const _VIEW_FLAGS := [
 	# triggers a worker refetch (see _on_view_menu_id_pressed) — the canvas only
 	# ever draws what pcb.mask_view returned, never a local re-derivation.
 	["Mask openings", "show_mask"],
+	# WYSIWYG goal 019ff4a5a75a gap G5 / K27: the EXACT fabrication preview.
+	# Toggling it ON triggers a worker round-trip (see _on_view_menu_id_pressed),
+	# exactly like the mask overlay — this view replaces the canvas with the
+	# emitted artwork, so it is on demand and off by default.
+	["Fab preview (exact)", "show_fab_preview"],
 ]
 const _VIEW_MENU_EXPORT_ID := 100
 ## Base id for the View menu's dynamic per-layer visibility section (epoch
@@ -3738,6 +3743,17 @@ func _on_view_menu_id_pressed(id: int) -> void:
 		# Fetch on demand rather than on every load: the overlay is off by
 		# default and the worker round-trip belongs to the person who asked.
 		_refresh_mask_view()
+	if flag == "show_fab_preview":
+		if bool(_canvas.get(flag)):
+			# Same on-demand rule, and the same reason: this one runs the whole
+			# emission path before it can draw anything.
+			_refresh_fab_preview()
+		else:
+			# Leaving the view DROPS the artwork rather than keeping it warm.
+			# A preview retained across edits would be redisplayed later as
+			# "what the fab receives" while describing a board that has since
+			# changed, which is the one lie this view must never tell.
+			_canvas.set_fab_preview([], [], "")
 	_canvas.queue_redraw()
 
 
