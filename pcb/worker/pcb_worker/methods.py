@@ -2926,10 +2926,18 @@ def _draft_geometric(board: dict, layer_params: dict) -> tuple[list, dict]:
         # INDETERMINATE: the kernel could not model this board. Reported as
         # itself rather than flattened into "no findings", which is the exact
         # false-clean K14 forbids.
+        #
+        # READ FROM THE SHAPE THE KERNEL ACTUALLY RETURNS (Codex re-review
+        # finding 5): the reason lives under `error`, not at the top level. The
+        # first version read nonexistent top-level keys, so every refusal —
+        # parse fault, unresolved geometry, unmodelable primitive — collapsed
+        # into the same default string and the actual cause was lost. An
+        # indeterminate that cannot say WHY is barely better than a silent one.
+        err = union.get("error") if isinstance(union.get("error"), dict) else {}
         return [], {
-            "kind": str(union.get("indeterminate_kind", "unresolved_geometry")),
-            "message": str(union.get("message", "geometry could not be verified")),
-            "details": union.get("indeterminate", []),
+            "kind": str(err.get("kind", "unresolved_geometry")),
+            "message": str(err.get("message", "geometry could not be verified")),
+            "details": err.get("diagnostics", []),
         }
     return list(union.get("findings", []) or []), {}
 
@@ -3047,7 +3055,13 @@ def _draft_check(params: dict) -> dict:
     # so nothing so far has looked at the staged zones and moved components the
     # panel composed into `board`. This pass does, over the composed board, with
     # the shipped kernel.
-    geo_findings, geo_indeterminate = _draft_geometric(board, _layer_params(params))
+    # EFFECTIVE, not board (Codex re-review finding 1). `board` is canonical plus
+    # the staged overlay; `effective` is that PLUS the candidates' copper as
+    # traces/vias. Handing the kernel `board` meant a clearance violation
+    # involving CANDIDATE copper could not be seen, so a near-miss between a
+    # proposed route and a staged zone still read clean — the materialized
+    # proposal board K9 names is all three sources at once, not two of them.
+    geo_findings, geo_indeterminate = _draft_geometric(effective, _layer_params(params))
 
     eps = _dc_clearance(board)
     findings_out: list = []
@@ -3057,11 +3071,24 @@ def _draft_check(params: dict) -> dict:
     # is a single point. Re-deriving subjects for them would replace richer
     # information with poorer.
     for gf in geo_findings:
-        if isinstance(gf, dict):
-            finding = dict(gf)
-            finding.setdefault("kind", gf.get("type"))
-            finding.setdefault("scope", "geometric")
-            findings_out.append(finding)
+        if not isinstance(gf, dict):
+            continue
+        finding = dict(gf)
+        finding.setdefault("kind", gf.get("type"))
+        finding.setdefault("scope", "geometric")
+        # ATTRIBUTED to the same subjects connectivity findings use (Codex
+        # re-review finding 2). Without this a geometric finding carried no
+        # candidate_id, so the workspace — which stores findings BY candidate —
+        # kept none of them, and a candidate whose copper violated a clearance
+        # still showed clean. A finding nothing can attribute is a finding
+        # nothing will act on.
+        subjects = _dc_attribute(gf, seg_subjects, via_subjects, eps)
+        finding["subjects"] = subjects
+        for subj in subjects:
+            cid = str(subj.get("candidate_id", "")) if isinstance(subj, dict) else ""
+            if cid and cid != "board" and cid in per_candidate:
+                per_candidate[cid] = "violating"
+        findings_out.append(finding)
     for f in drc_result.get("findings", []):
         if not isinstance(f, dict):
             continue

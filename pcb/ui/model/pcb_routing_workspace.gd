@@ -794,8 +794,22 @@ func begin_check(candidate_ids: Array = []) -> Dictionary:
 ## per_candidate verdict, its findings stored (attributed by candidate_id), and
 ## validation_changed emitted. The workspace is the SOLE authoritative store of
 ## validation + findings (no parallel store).
+## The last reply's geometric-indeterminate record, or {}. Held so consumers can
+## SEE that a check did not reach a geometric verdict; a caller that only reads
+## per-candidate validation would otherwise be told "clean" by the connectivity
+## half and never learn the other half was skipped.
+var _geometric_indeterminate: Dictionary = {}
+
+
+## The reason the last check could not verify geometry, or {} when it could.
+func geometric_indeterminate() -> Dictionary:
+	return _geometric_indeterminate.duplicate(true)
+
+
 func apply_check_result(reply: Dictionary) -> void:
 	var reply_token := str(reply.get("board_token", ""))
+	var gi: Variant = reply.get("geometric_indeterminate")
+	_geometric_indeterminate = (gi as Dictionary).duplicate(true) if gi is Dictionary else {}
 	# workspace_generation round-trips through JSON as a float; int() normalises.
 	var reply_gen := int(reply.get("workspace_generation", -1))
 
@@ -828,6 +842,15 @@ func apply_check_result(reply: Dictionary) -> void:
 			value = verdict
 		else:
 			value = "error"  # an unknown verdict is never trusted as clean
+		# GEOMETRY COULD NOT BE VERIFIED ⇒ NOTHING IS CLEAN (Codex re-review
+		# finding 2). The reply's connectivity half can still say "clean" while
+		# the geometric half never ran — an unmodelable board, a compile that
+		# refused. Trusting the connectivity verdict alone would put a green
+		# tick on copper whose clearances nobody checked, which is the whole
+		# false-clean this check exists to prevent. "error" is the honest state:
+		# a check happened and did not reach a verdict.
+		if _geometric_indeterminate and value == "clean":
+			value = "error"
 		set_validation(cid, value)
 		_findings[cid] = _findings_for_subject(findings, cid)
 

@@ -16,6 +16,8 @@ Fixture/call conventions mirror test_route_drc.py (handle_request dispatch).
 
 from __future__ import annotations
 
+import pytest
+
 from pcb_worker.methods import handle_request
 
 
@@ -309,14 +311,42 @@ def _compiling_board() -> dict:
     }
 
 
-def test_a_compiling_board_actually_REACHES_the_geometric_kernel():
-    """MUTATION THIS CATCHES: deleting the geometric pass. Without it the reply
-    carries neither geometric findings nor an indeterminate, and a caller cannot
-    tell that no geometric check happened at all — which is exactly the state
-    this method shipped in."""
+def test_a_staged_zone_that_violates_clearance_IS_REPORTED():
+    """THE DECISIVE ORACLE. The previous version of this test asserted only that
+    `geometric_indeterminate` was ABSENT for a compiling board — which deleting
+    the geometric pass entirely also satisfies, so it could not catch the very
+    mutation its docstring claimed (Codex re-review finding 6). Asserting the
+    absence of a failure signal proves nothing about a check having run.
+
+    This asserts a POSITIVE result instead: a staged keepout zone overlapping a
+    pad must produce a geometric finding. MUTATION THIS CATCHES: deleting the
+    pass, passing `board` instead of `effective`, or dropping the findings on
+    the floor — none of which can produce this finding."""
+    board = _compiling_board()
+    # A keepout laid directly over the component's pads: the composed draft
+    # board the panel would send once this zone is staged.
+    board["zones"] = [{
+        "id": "zone:violator", "kind": "keepout", "layer": "top", "net": "",
+        "outline": [{"x_mm": 18.0, "y_mm": 18.0}, {"x_mm": 24.0, "y_mm": 18.0},
+                    {"x_mm": 24.0, "y_mm": 24.0}, {"x_mm": 18.0, "y_mm": 24.0}],
+    }]
+    res = _call({"board": board, "candidates": [],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    if res.get("geometric_indeterminate"):
+        pytest.fail("the kernel refused this board rather than checking it: %s"
+                    % res["geometric_indeterminate"])
+    geo = [f for f in res.get("findings", [])
+           if str(f.get("scope", "")) == "geometric"]
+    assert geo, ("a keepout laid over the pads produced no geometric finding; "
+                 "the composed board is not reaching the kernel")
+
+
+def test_a_clean_compiling_board_declares_no_indeterminate():
+    """The negative half, kept for what it IS good for: a board the kernel can
+    model must not claim it could not be modelled. On its own this proves
+    nothing about the pass running — see the test above, which does."""
     res = _call({"board": _compiling_board(), "candidates": [],
                  "board_token": "t", "workspace_generation": 1})["result"]
-    # The kernel ran and could model this board, so there is nothing to declare.
     assert "geometric_indeterminate" not in res, res.get("geometric_indeterminate")
 
 

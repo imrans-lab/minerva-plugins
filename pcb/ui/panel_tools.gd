@@ -7194,7 +7194,7 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 		var c = workspace.get_candidate(str(t))
 		if c != null:
 			after[str(t)] = str(c.validation)
-	return _ok({
+	var reply: Dictionary = {
 		"checked": targets,
 		"checked_stale": stale,
 		"per_candidate": result.get("per_candidate", {}),
@@ -7203,7 +7203,22 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 		"board_token": result.get("board_token", ""),
 		"workspace_generation": result.get("workspace_generation", 0),
 		"newly_stale_candidate_ids": newly_stale,
-	})
+	}
+	# GEOMETRY THAT COULD NOT BE VERIFIED MUST REACH THE AGENT (Codex re-review
+	# finding 2). Without this the MCP reply carried per-candidate verdicts from
+	# the connectivity half while the geometric half had silently not run, and
+	# an agent reading "clean" would route on copper whose clearances nobody
+	# checked. The workspace already downgrades those candidates off "clean";
+	# this says WHY, which is what makes the downgrade actionable.
+	var indeterminate: Dictionary = workspace.geometric_indeterminate() \
+		if workspace.has_method("geometric_indeterminate") else {}
+	if not indeterminate.is_empty():
+		reply["geometric_indeterminate"] = indeterminate
+		reply["note"] = "geometry could NOT be verified (%s) — candidate verdicts reflect connectivity only and no candidate is reported clean" % str(indeterminate.get("kind", "unknown"))
+	var provenance: Variant = result.get("draft_provenance")
+	if provenance is Array and not (provenance as Array).is_empty():
+		reply["draft_provenance"] = provenance
+	return _ok(reply)
 
 
 # ══ C5 — BUS TOOL geometry core + MCP parity (S3+S4, DCR 019fb572b888) ══════

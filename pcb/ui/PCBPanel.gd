@@ -490,10 +490,16 @@ func _init() -> void:
 	# Carry-in 3b: relay model data_changed → content_changed (dirty glyph),
 	# gated by _restoring so board load / seeding never dirties the tab.
 	_data.data_changed.connect(func() -> void:
+		# OUTSIDE the _restoring gate, deliberately (Codex re-review finding 3).
+		# Both whole-board load paths set _restoring = true, and a load is
+		# PRECISELY when a live preview must be dropped: the artwork on screen
+		# now describes a different board entirely, under a label that says it
+		# is what the fab receives. The gate exists to stop a load dirtying the
+		# tab, not to stop it invalidating a stale view.
+		_invalidate_fab_preview()
 		if not _restoring:
 			content_changed.emit()
-			_schedule_mask_view_refresh()
-			_invalidate_fab_preview())
+			_schedule_mask_view_refresh())
 	# Epoch UX4 station 2: bucket-9 binding — undo/redo now snapshots and
 	# restores staged dispositions alongside the board (pcb_data.gd
 	# bind_staged_store). Store mutations dirty the tab like every other
@@ -5388,6 +5394,23 @@ func mask_view_check(board: Dictionary) -> Dictionary:
 		"message": str(result.get("error_message", result.get("error", "mask_view failed")))}}
 
 
+## The coherence token for a fab preview: the WHOLE canonical board, not the
+## routing fingerprint (Codex re-review finding 4).
+##
+## The routing fingerprint is an ALLOWLIST built for a different question — does
+## this reply still describe the copper the router saw. It deliberately omits
+## `name`, which selects the emitted FILENAMES; `library_lock`, which changes
+## what the board compiles to; and parts of the manufacturing-profile and
+## design-rule selection that reach the emitter. Any of those can move while a
+## request is in flight, and the preview would adopt artwork for the old ones
+## while claiming to be exact.
+##
+## Request-local and only ever compared with itself, so hashing the whole dict
+## costs nothing that matters and cannot be wrong by omission.
+func _fab_preview_token(board: Dictionary) -> String:
+	return JSON.stringify(board, "", true, true).sha256_text()
+
+
 ## A LIVE FAB PREVIEW IS INVALIDATED BY ANY BOARD EDIT (Codex review of the
 ## epoch tail, finding 1). It is deliberately NOT refetched — the DCR is
 ## explicit that the exact preview is on demand and need not keep up with
@@ -5447,12 +5470,11 @@ func _refresh_fab_preview() -> void:
 	# check already guards itself this way; the preview shipped without it
 	# (Codex review of the epoch tail, finding 1).
 	var requested: Dictionary = _data.to_board_dict()
-	var requested_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(requested)
+	var requested_token: String = _fab_preview_token(requested)
 	var reply: Dictionary = await fab_preview_check(requested)
 	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
 		return  # toggled off (or panel torn down) while the worker ran
-	if _data == null or _PcbRoutingSidecarScript.compute_board_fingerprint_v2(
-			_data.to_board_dict()) != requested_token:
+	if _data == null or _fab_preview_token(_data.to_board_dict()) != requested_token:
 		# The board moved under the request. Show NOTHING and say why, rather
 		# than artwork for a board that no longer exists.
 		_canvas.set_fab_preview([], [], "stale — the board changed while the preview was rendering; re-open Fab Preview")
