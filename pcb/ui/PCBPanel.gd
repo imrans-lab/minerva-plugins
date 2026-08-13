@@ -5205,6 +5205,13 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
 	var composed: Dictionary = draft_check_board()
 	payload["board"] = composed
+	# Provenance rides BESIDE the board, never inside it: the board dict is a
+	# canonical shape the worker consumes, and draft-only metadata has no
+	# business travelling in it. The worker reads params by name and ignores
+	# what it does not know, so this is additive. It lets a finding that names
+	# a zone id be traced to a DRAFT rather than read as canonical geometry,
+	# and it names every entity the composer deliberately did NOT materialize.
+	payload["draft_provenance"] = draft_check_provenance()
 	# DRAFT-OVERLAY COHERENCE (epoch GA cold review, finding 3). The two guards
 	# apply_check_result already runs cover the canonical board (board_token)
 	# and the candidate set (workspace_generation) — NEITHER covers the staged
@@ -5274,6 +5281,17 @@ func draft_check_board() -> Dictionary:
 		return canonical
 	return _PcbStagedEntitiesScript.effective_draft_board(
 		canonical, _staged_entities, "geometric")
+
+
+## One provenance record per LIVE staged entity for the board above: which
+## entry it came from, what disposition it held, whether it actually reached
+## the composed board, and a named reason when it did not. Travels beside the
+## board in the draft-check request, never inside it.
+func draft_check_provenance() -> Array:
+	if _data == null or _staged_entities == null:
+		return []
+	return _PcbStagedEntitiesScript.compose_draft(
+		_data.to_board_dict(), _staged_entities, "geometric").get("provenance", [])
 
 
 ## On-demand assembly advisory check (DCR 019fd5fd9084, work items

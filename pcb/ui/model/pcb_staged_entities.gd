@@ -541,11 +541,25 @@ const COMPOSE_PURPOSES := ["route", "geometric"]
 ## fail-safe direction is the same as everywhere else in this function —
 ## omitting draft content is never dangerous, inventing a component is.
 ##
-## CUTOUTS ARE NEVER COMPOSED, for any purpose: compile hard-refuses a
-## non-empty cutouts list ("authorable, not compilable" — board.go doctrine)
-## and routing ignores REAL cutouts too, so exclusion is consistency. A staged
-## cutout's whole v1 power is review-before-land (ghost + accept/reject +
-## persistence).
+## CUTOUTS ARE NEVER COMPOSED, for any purpose — but NOT for the reason this
+## comment used to give, and the correction matters (epoch GA round 2, bug
+## 019ffcd4a584). The old rationale was "compile hard-refuses a non-empty
+## cutouts list — authorable, not compilable — board.go doctrine". That is
+## FALSE at this SHA: compile_board reads board["cutouts"], validates them
+## fail-closed under invalid_cutout_outline and builds ResolvedCutout entries
+## into ProfileOutline.cutouts, and board.go's own Cutout comment says
+## geometric DRC, routing and zone fill all consume that geometry. What still
+## refuses cutouts is the LOOSE dict route bridge, which says so explicitly
+## and names the IR path as the one that models them.
+##
+## The exclusion therefore now rests on an unexamined assumption, not a hard
+## refusal. It is left STANDING and filed as 019ffcd4a584 rather than changed
+## here: composing cutouts would make draft DRC start scoring a staged cutout
+## as a real board opening, with knock-on effects on zone fill and routing
+## obstacles, and that is a design change owing its own unit and its own
+## tests — not a side effect of a round scoped to freeze and provenance. Every
+## skipped cutout now appears in the provenance list with this reason, so the
+## exclusion is visible rather than silent.
 ##
 ## Fail-safe direction: an unknown purpose or an absent/duck-typing-less store
 ## composes NOTHING (plain deep copy, warned) — draft content leaking into a
@@ -553,12 +567,66 @@ const COMPOSE_PURPOSES := ["route", "geometric"]
 ## The input dict is never mutated. The result is request-scoped and must
 ## never be serialized or fed to any cache keyed to the REAL board (A9/K5).
 static func effective_draft_board(board_dict: Dictionary, staged_store, purpose: String) -> Dictionary:
+	return compose_draft(board_dict, staged_store, purpose).get("board", board_dict.duplicate(true))
+
+
+## The composer proper: returns {board, provenance} in ONE pass.
+##
+## PROVENANCE (epoch GA, DCR 019ffc52a541: "one source/provenance record per
+## materialized entity … unsupported judgment is explicit indeterminate, never
+## omission"). Every live staged entity gets a record saying which store and
+## entry it came from, what disposition it held, and WHETHER IT REACHED THE
+## BOARD — with a named reason when it did not. Two consequences that are the
+## whole point:
+##   * a worker finding that names a zone id can be traced back to a DRAFT
+##     rather than read as canonical geometry;
+##   * an entity the composer deliberately skips (a cutout, or a placement
+##     naming a deleted component) is now VISIBLE as a skip with a reason,
+##     instead of being silently absent and indistinguishable from one that
+##     was never staged.
+##
+## Derived in the SAME PASS as the composition on purpose. A second pass that
+## re-derived "what did we compose" could disagree with what was actually
+## composed, which is precisely the record-disagrees-with-reality defect this
+## epoch keeps finding.
+##
+## The provenance list is a SIBLING of the board, never a key inside it: the
+## board dict is a canonical shape consumed by the worker, and draft-only
+## metadata has no business travelling inside it.
+static func compose_draft(board_dict: Dictionary, staged_store, purpose: String) -> Dictionary:
 	var out: Dictionary = board_dict.duplicate(true)
+	var provenance: Array = []
 	if not (purpose in COMPOSE_PURPOSES):
-		push_warning("[StagedEntities] effective_draft_board: unknown purpose '%s' — composed nothing" % purpose)
-		return out
-	if staged_store == null or not staged_store.has_method("staged_payloads"):
-		return out
+		push_warning("[StagedEntities] compose_draft: unknown purpose '%s' — composed nothing" % purpose)
+		return {"board": out, "provenance": provenance}
+	if staged_store == null or not staged_store.has_method("staged_entries"):
+		return {"board": out, "provenance": provenance}
+
+	var live: Array = staged_store.staged_entries()
+	# One record per live entity, in store order. `materialized` is written
+	# when the entity's fate is decided below; the default is the fail-safe
+	# one, so a path that forgets to mark it reads as "did not reach the
+	# board" rather than claiming a composition that never happened.
+	var record_by_sid := {}
+	for e in live:
+		var entry: Dictionary = e
+		var rec := {
+			"staged_id": str(entry.get("staged_id", "")),
+			"entity_id": str((entry.get("payload", {}) as Dictionary).get("id", "")),
+			"kind": str(entry.get("kind", "")),
+			"disposition": str(entry.get("disposition", "")),
+			"author": str(entry.get("author", "")),
+			"source": "staged_entities",
+			"materialized": false,
+			"reason": "",
+		}
+		if str(entry.get("kind", "")) == "cutout":
+			# Not a gap — a ruling (OFC-2). Recorded rather than omitted so a
+			# reader can tell "deliberately excluded" from "lost".
+			rec["reason"] = "cutouts are never composed into the draft board (bug 019ffcd4a584: the exclusion stands, its original rationale did not)"
+		provenance.append(rec)
+		record_by_sid[str(rec.get("entity_id", ""))] = rec
+
 	var staged_zones: Array = staged_store.staged_payloads("zone")
 	if not staged_zones.is_empty():
 		var zones: Array = out.get("zones", []) if out.get("zones", null) is Array else []
@@ -574,9 +642,15 @@ static func effective_draft_board(board_dict: Dictionary, staged_store, purpose:
 			if z is Dictionary:
 				board_zone_ids[str((z as Dictionary).get("id", ""))] = true
 		for z in staged_zones:
-			if board_zone_ids.has(str((z as Dictionary).get("id", ""))):
+			var zid := str((z as Dictionary).get("id", ""))
+			var zrec: Dictionary = record_by_sid.get(zid, {})
+			if board_zone_ids.has(zid):
+				if not zrec.is_empty():
+					zrec["reason"] = "a zone with this id is already on the board (two-store drift); the board's copy wins"
 				continue
 			zones.append(z)
+			if not zrec.is_empty():
+				zrec["materialized"] = true
 		out["zones"] = zones
 	var staged_placements: Array = staged_store.staged_payloads("placement")
 	if not staged_placements.is_empty():
@@ -590,8 +664,11 @@ static func effective_draft_board(board_dict: Dictionary, staged_store, purpose:
 				continue
 			var pl: Dictionary = p
 			var comp_id := str(pl.get("component_id", ""))
+			var prec: Dictionary = record_by_sid.get(str(pl.get("id", "")), {})
 			var to: Variant = pl.get("to")
 			if not comp_by_ref.has(comp_id) or not (to is Dictionary):
+				if not prec.is_empty():
+					prec["reason"] = "names component '%s', which is not on the board (or the target pose is malformed)" % comp_id
 				# Two-store drift again, placement flavor: the component was
 				# deleted after the ghost was staged (or the payload is
 				# malformed). Compose NOTHING for this entry; accept's own
@@ -608,4 +685,6 @@ static func effective_draft_board(board_dict: Dictionary, staged_store, purpose:
 			comp["x_mm"] = float(to_d.get("x_mm", comp.get("x_mm", 0.0)))
 			comp["y_mm"] = float(to_d.get("y_mm", comp.get("y_mm", 0.0)))
 			comp["rotation_deg"] = float(to_d.get("rotation_deg", comp.get("rotation_deg", 0.0)))
-	return out
+			if not prec.is_empty():
+				prec["materialized"] = true
+	return {"board": out, "provenance": provenance}

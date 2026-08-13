@@ -35,6 +35,7 @@ func _init() -> void:
 	_run_freeze_settles_the_pose()
 	_run_draft_check_board_seam()
 	_run_freeze_doorway()
+	_run_compose_provenance()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -487,3 +488,75 @@ func _run_freeze_doorway() -> void:
 		str(zfreeze.get("error", "")), StagedEntities.ERR_NOT_FREEZABLE)
 	check("MCP freeze requires an entity_id",
 		not bool(PanelTools._staged_freeze(host, {}).get("success", true)))
+
+
+# ── 12. composer provenance (epoch GA round 2, DCR 019ffc52a541) ─────────────
+#
+# "One source/provenance record per materialized entity … unsupported judgment
+# is explicit indeterminate, never omission." The assertions that carry weight
+# are the NEGATIVE ones: an entity the composer skips must be VISIBLE as a skip
+# with a named reason, because a silently absent entity is indistinguishable
+# from one that was never staged.
+
+func _run_compose_provenance() -> void:
+	print("\n-- 12. compose_draft: one record per live entity, skips named --")
+	var rig := _rig()
+	var store = rig["store"]
+
+	var moved: Dictionary = _stage_move(rig, "R1", 14.0, 8.0, 0.0)
+	var cut_payload: Dictionary = rig["data"].build_cutout_payload(
+		[Vector2(30, 18), Vector2(34, 18), Vector2(34, 22)]).get("payload", {})
+	var cut_sid := str(store.stage("cutout", cut_payload))
+	check("a cutout stages beside the placement", not cut_sid.is_empty())
+
+	var pair: Dictionary = StagedEntities.compose_draft(
+		rig["data"].to_board_dict(), store, "geometric")
+	check("compose_draft returns a board", pair.get("board", null) is Dictionary)
+	var prov: Array = pair.get("provenance", [])
+	check_eq("one record per LIVE entity", prov.size(), 2)
+
+	var by_kind := {}
+	for r in prov:
+		by_kind[str((r as Dictionary).get("kind", ""))] = r
+	var prec: Dictionary = by_kind.get("placement", {})
+	var crec: Dictionary = by_kind.get("cutout", {})
+
+	check_eq("the placement reached the board", bool(prec.get("materialized", false)), true)
+	check_eq("…and records the store it came from", str(prec.get("source", "")), "staged_entities")
+	check_eq("…and its staged id", str(prec.get("staged_id", "")), str(moved.get("staged_id", "")))
+	check_eq("…and its disposition", str(prec.get("disposition", "")), "staged")
+
+	# THE NEGATIVE HALF: a deliberate exclusion is recorded, not omitted.
+	check_eq("the cutout did NOT reach the board", bool(crec.get("materialized", true)), false)
+	check("…and says why, by name", not str(crec.get("reason", "")).is_empty())
+
+	# A placement naming a component that is gone must be a NAMED skip, not a
+	# silent absence — the two-store-drift case.
+	var rig2 := _rig()
+	var orphan: Dictionary = _stage_move(rig2, "R2", 24.0, 8.0, 0.0)
+	rig2["data"].remove_component("R2")
+	var prov2: Array = StagedEntities.compose_draft(
+		rig2["data"].to_board_dict(), rig2["store"], "geometric").get("provenance", [])
+	check_eq("the orphaned ghost still gets a record", prov2.size(), 1)
+	check_eq("…marked not materialized", bool((prov2[0] as Dictionary).get("materialized", true)), false)
+	check("…naming the missing component",
+		"R2" in str((prov2[0] as Dictionary).get("reason", "")))
+	check_eq("…and it is the ghost we staged", str((prov2[0] as Dictionary).get("staged_id", "")),
+		str(orphan.get("staged_id", "")))
+
+	# A FROZEN entity is live, so it is composed AND recorded as frozen.
+	check("freeze the placement", store.freeze(str(moved.get("staged_id", ""))))
+	var prov3: Array = StagedEntities.compose_draft(
+		rig["data"].to_board_dict(), store, "geometric").get("provenance", [])
+	var froze_rec := {}
+	for r in prov3:
+		if str((r as Dictionary).get("kind", "")) == "placement":
+			froze_rec = r
+	check_eq("a frozen entity is still materialized", bool(froze_rec.get("materialized", false)), true)
+	check_eq("…and its disposition is recorded honestly",
+		str(froze_rec.get("disposition", "")), "frozen")
+
+	# Back-compat: the old accessor still returns the board alone.
+	check_eq("effective_draft_board still returns the board",
+		_comp_x(StagedEntities.effective_draft_board(
+			rig["data"].to_board_dict(), store, "geometric"), "R1"), 14.0)
