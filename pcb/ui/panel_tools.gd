@@ -207,6 +207,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _staged_list(host, args)
 		"minerva_pcb_staged_accept":
 			return await _staged_accept(host, args)
+		"minerva_pcb_staged_freeze":
+			return _staged_freeze(host, args)
+		"minerva_pcb_staged_unfreeze":
+			return _staged_unfreeze(host, args)
 		"minerva_pcb_staged_reject":
 			return _staged_reject(host, args)
 		"minerva_pcb_group_components":
@@ -4105,6 +4109,43 @@ static func _staged_reject(host, args: Dictionary) -> Dictionary:
 			"entity_id": entity_id}
 	return _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")),
 		"note": "draft discarded (kept as audit; undo revives the ghost)"})
+
+
+## FREEZE a staged placement's pose (epoch GA, K7). The agent's half of the
+## same verb the canvas offers — parity principle: one implementation
+## (PCBPanel._set_staged_frozen, which owns the mandatory history pairing),
+## one vocabulary, the same named refusals both ways.
+static func _staged_freeze(host, args: Dictionary) -> Dictionary:
+	return _staged_freeze_common(host, args, true)
+
+
+## UNFREEZE a frozen staged placement.
+static func _staged_unfreeze(host, args: Dictionary) -> Dictionary:
+	return _staged_freeze_common(host, args, false)
+
+
+static func _staged_freeze_common(host, args: Dictionary, want_frozen: bool) -> Dictionary:
+	var panel = _staged_panel(host)
+	if not (panel is Object):
+		return panel
+	var entity_id: String = str(args.get("entity_id", ""))
+	if entity_id.is_empty():
+		return _err("entity_id is required")
+	var res: Dictionary = panel.freeze_staged(entity_id) if want_frozen \
+		else panel.unfreeze_staged(entity_id)
+	if not bool(res.get("ok", false)):
+		# The store's refusals reach the agent BY NAME rather than as a generic
+		# failure: staged_kind_not_freezable (only placements steer routing),
+		# staged_entry_terminal, staged_entry_not_found, and the deliberate
+		# no-op refusal — an agent that cannot tell "wrong kind" from "already
+		# frozen" cannot repair its own call.
+		return {"success": false, "error": str(res.get("error", "freeze_refused")),
+			"entity_id": entity_id}
+	if want_frozen:
+		return _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")), "frozen": true,
+			"note": "pose settled — the ghost still renders, still counts in draft checks, and can be accepted or rejected without unfreezing; minerva_pcb_staged_unfreeze makes it editable again"})
+	return _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")), "frozen": false,
+		"note": "pose editable again — routes already proposed against the settled pose may now go stale"})
 
 
 ## Delete a cutout. Mirrors _delete_zone's idiom exactly (mutate-then-snapshot,

@@ -34,6 +34,7 @@ func _init() -> void:
 	_run_collision_advisory()
 	_run_freeze_settles_the_pose()
 	_run_draft_check_board_seam()
+	_run_freeze_doorway()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -417,3 +418,72 @@ func _run_draft_check_board_seam() -> void:
 	check("freeze the ghost", rig["store"].freeze(str(staged.get("staged_id", ""))))
 	check_eq("a FROZEN placement is still scored by draft DRC",
 		_comp_x(rig["panel"].draft_check_board(), "R1"), 14.0)
+
+
+# ── 11. the freeze DOORWAY and its history transaction (epoch GA round 2) ─────
+#
+# Round 1 shipped freeze() on the store with no caller, and the round-1 cold
+# review's first finding was that the verb writes a disposition BARE — which
+# the store's own stamp() docstring calls a latent clobber, because every later
+# board snapshot carries the full disposition map, so undoing an unrelated edit
+# would restore the pre-freeze value and silently THAW a settled pose. The
+# clobber assertion below is the reason this suite exists; it fails against any
+# doorway that calls the store without pairing attach_staged_snapshot with
+# save_to_history.
+
+func _run_freeze_doorway() -> void:
+	print("\n-- 11. freeze doorway: both hands, and the history pairing --")
+	var rig := _rig()
+	var staged: Dictionary = _stage_move(rig, "R1", 14.0, 8.0, 0.0)
+	var eid := str(staged.get("entity_id", ""))
+	var sid := str(staged.get("staged_id", ""))
+
+	var out: Dictionary = rig["panel"].freeze_staged(eid)
+	check("the panel doorway freezes", bool(out.get("ok", false)))
+	check_eq("…and reports the state it reached", bool(out.get("frozen", false)), true)
+	check_eq("…the store agrees", str(rig["store"].get_entry(sid).get("disposition", "")), "frozen")
+
+	# THE CLOBBER TEST. An unrelated board edit, then undo of THAT edit: the
+	# freeze must survive, because it carries its own history entry.
+	rig["data"].create_cutout([Vector2(30, 18), Vector2(34, 18), Vector2(34, 22)])
+	rig["data"].save_to_history("unrelated cutout")
+	check("undo of the UNRELATED edit", rig["data"].undo())
+	check_eq("…leaves the freeze STANDING (no silent thaw)",
+		str(rig["store"].get_entry(sid).get("disposition", "")), "frozen")
+	# …and undoing the freeze itself DOES thaw it, which is what makes the
+	# pairing correct rather than merely present.
+	check("undo of the freeze entry itself", rig["data"].undo())
+	check_eq("…thaws the pose back to staged",
+		str(rig["store"].get_entry(sid).get("disposition", "")), "staged")
+
+	# PARITY: the agent doorway reaches the same implementation, with the same
+	# vocabulary and the same named refusals.
+	var host = rig["panel"].get_annotation_host()
+	var mcp: Dictionary = PanelTools._staged_freeze(host, {"entity_id": eid})
+	check("the MCP doorway freezes", bool(mcp.get("success", false)))
+	check_eq("…and the two doorways agree on the store state",
+		str(rig["store"].get_entry(sid).get("disposition", "")), "frozen")
+	var refuse_update: Dictionary = PanelTools._placement_update(host, {
+		"entity_id": eid, "x_mm": 30.0, "y_mm": 20.0})
+	check("a frozen pose refuses revision through MCP too",
+		not bool(refuse_update.get("success", true)))
+	check_eq("…by the store's own name",
+		str(refuse_update.get("error", "")), StagedEntities.ERR_FROZEN)
+
+	var mcp_thaw: Dictionary = PanelTools._staged_unfreeze(host, {"entity_id": eid})
+	check("the MCP doorway unfreezes", bool(mcp_thaw.get("success", false)))
+	check_eq("…and reports the state it reached", bool(mcp_thaw.get("frozen", true)), false)
+	var again: Dictionary = PanelTools._staged_unfreeze(host, {"entity_id": eid})
+	check("unfreezing a thawed entry refuses rather than silently succeeding",
+		not bool(again.get("success", true)))
+
+	# Kind gate through the doorway, not just the store.
+	var zpay: Dictionary = rig["data"].build_zone_payload(
+		"", "bottom", [Vector2(2, 2), Vector2(6, 2), Vector2(6, 6)], "keepout").get("payload", {})
+	var zres: Dictionary = rig["panel"].stage_built_payload("zone", zpay, "ai", "z")
+	var zfreeze: Dictionary = PanelTools._staged_freeze(host, {"entity_id": str(zres.get("entity_id", ""))})
+	check("MCP freeze refuses a zone", not bool(zfreeze.get("success", true)))
+	check_eq("…naming the kind refusal",
+		str(zfreeze.get("error", "")), StagedEntities.ERR_NOT_FREEZABLE)
+	check("MCP freeze requires an entity_id",
+		not bool(PanelTools._staged_freeze(host, {}).get("success", true)))

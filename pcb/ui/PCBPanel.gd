@@ -714,6 +714,53 @@ func reject_staged(entity_id: String) -> Dictionary:
 	return {"ok": true, "entity_id": entity_id, "kind": kind}
 
 
+## FREEZE a staged placement's pose (epoch GA, K7 019fa6ed3f60). The doorway
+## the store's freeze() was built for, and the transaction it REQUIRES: the
+## store writes a disposition, and a disposition written without a paired
+## history entry is a latent clobber — every later board snapshot carries the
+## full disposition map, so undoing an unrelated edit would restore the
+## pre-freeze value and silently THAW a settled pose. Mirrors reject_staged's
+## attach → verb → save_to_history shape exactly, for that reason.
+##
+## Freezing settles the pose so a route candidate proposed against it cannot be
+## invalidated by a later drag; the ghost stays live, renders, composes into
+## draft DRC, and may still be accepted or rejected without unfreezing.
+func freeze_staged(entity_id: String) -> Dictionary:
+	return _set_staged_frozen(entity_id, true)
+
+
+## UNFREEZE back to an editable pose. Same transaction obligation.
+func unfreeze_staged(entity_id: String) -> Dictionary:
+	return _set_staged_frozen(entity_id, false)
+
+
+## The shared freeze/unfreeze transaction. One implementation so the two verbs
+## cannot drift, and so the history pairing is written once rather than twice.
+## An unpaired attach is harmless (it stamps the current entry with the
+## disposition map as it actually is), which is why the attach may precede the
+## store call exactly as it does in reject_staged.
+func _set_staged_frozen(entity_id: String, want_frozen: bool) -> Dictionary:
+	var verb := "freeze" if want_frozen else "unfreeze"
+	var pre := _resolve_live_staged(entity_id)
+	if not bool(pre.get("ok", false)):
+		_show_transient_status("%s refused: %s" % [verb.capitalize(), str(pre.get("error", ""))])
+		return pre
+	var kind := str((pre.get("entry", {}) as Dictionary).get("kind", "draft"))
+	var sid := str(pre.get("sid", ""))
+	_data.attach_staged_snapshot()
+	var landed: bool = _staged_entities.freeze(sid) if want_frozen else _staged_entities.unfreeze(sid)
+	if not landed:
+		return {"ok": false,
+			"error": str(_staged_entities.last_error.get("error", "%s_refused" % verb)),
+			"entity_id": entity_id}
+	_data.save_to_history("%s staged %s" % [verb.capitalize(), kind])
+	if want_frozen:
+		_show_transient_status("Froze staged %s %s — its pose is settled; routes proposed against it stay valid." % [kind, entity_id])
+	else:
+		_show_transient_status("Unfroze staged %s %s — its pose is editable again." % [kind, entity_id])
+	return {"ok": true, "entity_id": entity_id, "kind": kind, "frozen": want_frozen}
+
+
 ## BATCH accept — the batch-commit pattern (DCR S5): ALL-OR-NOTHING, refused
 ## by name per entity, and ONE history step for the lot, so a single undo
 ## returns every accepted entity to a ghost together.

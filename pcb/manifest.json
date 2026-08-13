@@ -763,6 +763,32 @@
       }
     },
     {
+      "name": "minerva_pcb_staged_freeze",
+      "description": "FREEZE a staged component-placement draft (the staging family): its proposed pose becomes SETTLED, so a route proposed against that pose cannot be silently invalidated by a later drag — minerva_pcb_staged_update_placement then refuses by name (staged_entry_frozen). The ghost stays LIVE: it still renders, still composes into draft checks, and can still be accepted or rejected WITHOUT unfreezing first. Placements only; a zone or cutout draft is refused (staged_kind_not_freezable) because its payload is already immutable and nothing regenerates against it. Paired with its own history entry, so undo thaws the pose while undoing unrelated edits leaves the freeze standing.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "entity_id": {"type": "string", "description": "Canonical id of the staged placement draft to freeze"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_staged_unfreeze",
+      "description": "UNFREEZE a frozen staged placement draft (the staging family): its pose becomes editable again, so minerva_pcb_staged_update_placement is accepted once more. Routes already proposed against the settled pose may go stale once it moves. Refused by name on an entry that is not currently frozen, so \"already thawed\" is distinguishable from \"wrong entity\".",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "entity_id": {"type": "string", "description": "Canonical id of the frozen staged placement draft to unfreeze"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_pcb_group_components",
       "description": "Stamp two or more known components into one persistent group (merging any existing groups among them; Illustrator merge grammar, not nesting). One journalled, undoable step. A selection that is already exactly one flat group is a no-op reply (changed:false) with that group's own id/members, not an error. Refused (as an error) when fewer than two known components remain after expansion. Reply: {group_id, member_ids, changed}. Agrees with minerva_pcb_get_components' group_id/group_members fields by construction.",
       "executor": "panel",
