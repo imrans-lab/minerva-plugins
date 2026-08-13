@@ -596,3 +596,31 @@ def test_pour_fill_crosses_the_gerber_frame_exactly_once(filled_board):
     assert g.frame == "gerber"
     assert g.zone_fill_top == [[(5.0, -2.0), (15.0, -2.0), (5.0, -8.0)]], (
         "pour Y must be negated exactly once by to_gerber_frame")
+
+
+def test_wildcard_keepout_blocks_every_layer():
+    """KILLER for the corpus mutant route_bridge_wildcard_keepout_blocks_
+    nothing (GA testex survivor triage): a wildcard (*.Cu) or sideless
+    keepout carries layer_alias None, and the fail-safe reading — "the
+    author did not narrow it" — is blocks_all_layers True. The mutant
+    inverts that to False, which with layer None blocks NO layer at all:
+    the under-blocking direction that is never legal. The single-layer
+    test above cannot see it (its zone carries a real layer)."""
+    from types import SimpleNamespace
+
+    from pcb_worker.resolved_board import LineGeometry
+    from pcb_worker.route_bridge import _keepout_obstacle
+
+    square = [((2.0, 2.0), (8.0, 2.0)), ((8.0, 2.0), (8.0, 8.0)),
+              ((8.0, 8.0), (2.0, 8.0)), ((2.0, 8.0), (2.0, 2.0))]
+    zone = SimpleNamespace(
+        id="kz-wild",
+        layer=SimpleNamespace(is_wildcard=True, id="*.Cu"),
+        authored_outline=SimpleNamespace(segments=tuple(
+            LineGeometry(a=a, b=b) for a, b in square)),
+    )
+    ob = _keepout_obstacle(zone)
+    assert ob.blocks_all_layers is True, (
+        "an un-narrowed keepout must block EVERY routing layer — "
+        "blocks_all_layers False with layer None blocks nothing")
+    assert ob.layer is None

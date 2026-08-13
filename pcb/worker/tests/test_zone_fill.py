@@ -789,3 +789,30 @@ def test_hole_to_copper_is_a_FLOOR_not_a_replacement(tmp_path):
 
     assert with_lax == without_rule, (
         "a 0.05 mm hole rule shrank the void below the 0.2 mm copper clearance")
+
+
+def test_foreign_nets_class_widens_the_carve():
+    """KILLER for the corpus mutant zone_fill_clearance_ignores_the_foreign_
+    nets_class (GA testex survivor triage — the Z2 half survived because no
+    test drove a pour whose FOREIGN participant's class demands the wider
+    gap). Same hand-derived fixture as the headline carve test, plus a net
+    class on SIG (the foreign pad's net) with min_clearance_mm 0.4: the
+    void's ring grows from 0.2 to 0.4 on every side.
+
+        void = (1.00 + 0.8) * (1.45 + 0.8) - 4(0.16) + pi(0.16)
+             = 4.050000 - 0.640000 + 0.502655 = 3.912655 mm^2
+        fill = 100.000000 - 3.912655 = 96.087345 mm^2
+
+    The mutant folds only the ZONE's own net (GND, class-less), leaving the
+    0.2 ring and area 97.444336 — 1.36 mm^2 off, four hundred times the
+    derived tolerance ((2/3) * 2*pi*0.4 * 0.005 = 0.0084)."""
+    board = _board([{"net": "GND", "layer": "top",
+                     "outline": _rect(5, 5, 15, 15)}])
+    board["design_rules"] = dict(
+        board["design_rules"],
+        net_classes=[{"name": "Fat", "members": ["SIG"],
+                      "min_clearance_mm": 0.4}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    expected = 100.0 - (1.80 * 2.25 - 4 * 0.16 + math.pi * 0.16)
+    assert fill_area_mm2(_pour(result.board)) == pytest.approx(expected, abs=0.009)

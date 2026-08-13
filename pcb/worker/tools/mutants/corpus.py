@@ -965,14 +965,21 @@ MUTANTS: tuple[dict, ...] = (
         "file": MANUFACTURER_PROFILE,
         "kind": "half",
         "find": "    missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor]",
+        # RETARGETED at the GA testex re-baseline: the exempted field used to
+        # be solder_mask_expansion_mm, which CP2 S5 DEMOTED out of
+        # REQUIRED_FLOOR_FIELDS — exempting a field the comprehension no
+        # longer iterates is a no-op, and the mutant survived BY CONSTRUCTION
+        # (caught by the survivor-set diff, which is exactly what the named
+        # set exists for). min_clearance_mm is required for as long as
+        # clearance means anything.
         "replace": L(
             "    missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor",
-            '                and key != "solder_mask_expansion_mm"]',
-            "    # MUTANT: one of the ten required fields silently exempted from the gate",
+            '                and key != "min_clearance_mm"]',
+            "    # MUTANT: one required field silently exempted from the gate",
         ),
         # KILLER: tests/test_manufacturer_profile.py::
-        #   test_a_floor_missing_any_single_field_fails_closed_not_merged[solder_mask_expansion_mm]
-        # ONLY that one parametrization; the other nine still pass, which is
+        #   test_a_floor_missing_any_single_field_fails_closed_not_merged[min_clearance_mm]
+        # ONLY that one parametrization; the other eight still pass, which is
         # exactly the point of parametrizing over every field instead of
         # picking one representative.
         "rationale": "ONE OF TEN, not all ten: the same shape as "

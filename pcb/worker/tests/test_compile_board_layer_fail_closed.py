@@ -355,3 +355,30 @@ def test_parity_corners_seed_board_has_no_unemitted_copper_errors(parity_corners
     codes = {d.code for d in parity_corners_result.diagnostics
              if d.severity is DiagnosticSeverity.ERROR}
     assert "unemitted_copper_layer" not in codes
+
+
+_INNER_TH_PAD_2LAYER_FOOTPRINT = """\
+(footprint "INNER_TH_2L" (version 20221018) (generator pcb_worker_seed)
+  (layer "F.Cu")
+  (pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "In1.Cu"))
+)
+"""
+
+
+def test_drilled_pad_on_undeclared_inner_copper_is_an_error_not_a_warning(tmp_path):
+    """KILLER for the corpus mutant compileboard_unemitted_copper_demoted_to_a
+    _warning (GA testex survivor triage): its old killer was the SMD In1.Cu
+    test above, which the inner_smd_pad refusal now intercepts BEFORE the
+    per-board unemitted-copper gate — shadowing the mutant. A DRILLED pad
+    passes the pad-kind guard (barrels legitimately reach inner planes), so
+    on a 2-LAYER board its In1.Cu participation must hit the unemitted gate
+    as a fatal ERROR: demoted to a warning, this board compiles clean and
+    the copper silently never fabricates (the K4 discards clause)."""
+    result = _compile(tmp_path, "INNER_TH_2L", _INNER_TH_PAD_2LAYER_FOOTPRINT)
+    assert isinstance(result, ResolutionFailure), \
+        "a drilled pad on In1.Cu atop a 2-layer stack must fail closed"
+    errors = _errors(result)
+    assert any(d.code == "unemitted_copper_layer" for d in errors), errors
+    assert not any(d.code == "unemitted_copper_layer"
+                   for d in _warnings(result)), \
+        "the unemitted-copper diagnostic must be an ERROR, never a warning"

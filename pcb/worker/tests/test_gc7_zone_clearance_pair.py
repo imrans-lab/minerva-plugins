@@ -97,3 +97,33 @@ def test_the_same_net_trace_in_the_same_position_is_exempt():
     gc7 = [f for f in result["findings"] if f["type"] == "gc7_zone_clearance"]
     assert gc7 == [], (
         "same-net copper under a pour is the CONNECTION, not a violation")
+
+
+def test_two_netless_parties_are_never_exempted():
+    """KILLER for the corpus mutant gc7_same_net_exemption_treats_unassigned_
+    as_shared (GA testex survivor triage). The exemption's non-null conjunct
+    is what keeps two NETLESS parties checkable: a netless pour (doctored —
+    the compiler refuses one upstream, but ResolvedZone is public IR and
+    does not) over netless copper (a plated board hole's ring carries no
+    net) must still produce a GC7 finding. Dropping the conjunct makes
+    None == None read as "same net" and the encroachment silently exempt."""
+    board = _board(trace_net="SIG")
+    board["mounting_holes"] = [
+        {"x_mm": 10.0, "y_mm": 8.0, "diameter_mm": 2.0, "plated": True,
+         "annulus_mm": 3.0}]
+    del board["traces"]  # the hole is the only foreign party under the pour
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), [
+        d.code for d in result.diagnostics
+        if d.severity is DiagnosticSeverity.ERROR]
+    rb = result.board
+    zone = rb.zones[0]
+    solid = PolygonGeometry(points=tuple(
+        (p["x_mm"], p["y_mm"]) for p in _OUTLINE))
+    doctored = dataclasses.replace(
+        rb, zones=(dataclasses.replace(zone, net_id=None, fill=(solid,)),))
+    findings = run_geometric_drc(doctored)["findings"]
+    gc7 = [f for f in findings if f["type"] == "gc7_zone_clearance"]
+    assert gc7, (
+        "netless pour copper over netless board-hole copper must be CHECKED "
+        "— unassigned is not shared, and exempting it is a missed short")
