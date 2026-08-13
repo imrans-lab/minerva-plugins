@@ -190,7 +190,7 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_pcb_staged_list":
 			return _staged_list(host, args)
 		"minerva_pcb_staged_accept":
-			return _staged_accept(host, args)
+			return await _staged_accept(host, args)
 		"minerva_pcb_staged_reject":
 			return _staged_reject(host, args)
 		"minerva_pcb_group_components":
@@ -3762,10 +3762,34 @@ static func _propose_cutout(host, args: Dictionary) -> Dictionary:
 	})
 
 
-## SPIKE 019ff8615fbe: propose a component MOVE as a staged ghost. The agent
-## twin of propose-mode dragging; author "ai". One live ghost per component —
-## a standing one refuses with its entity_id so the agent revises via
-## minerva_pcb_placement_update (or rejects first).
+## P1 C5: other live placement ghosts' TARGET poses, as extra collision
+## bodies for PCBData.placement_collisions — so two pending proposals that
+## collide with each other are reported, not just proposal-vs-board.
+static func _other_ghost_targets(store, exclude_entity_id: String) -> Array:
+	var extras: Array = []
+	if store == null or not store.has_method("staged_entries"):
+		return extras
+	for e in store.staged_entries():
+		var entry: Dictionary = e
+		if str(entry.get("kind", "")) != "placement":
+			continue
+		var payload: Dictionary = entry.get("payload", {})
+		if str(payload.get("id", "")) == exclude_entity_id:
+			continue
+		var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+		extras.append({
+			"component_id": str(payload.get("component_id", "")),
+			"x_mm": float(to.get("x_mm", 0.0)),
+			"y_mm": float(to.get("y_mm", 0.0)),
+			"rotation_deg": float(to.get("rotation_deg", 0.0)),
+		})
+	return extras
+
+
+## Propose a component MOVE as a staged ghost (spike 019ff8615fbe, hardened
+## in P1). The agent twin of propose-mode dragging; author "ai". One live
+## ghost per component — a standing one refuses with its entity_id so the
+## agent revises via minerva_pcb_placement_update (or rejects first).
 static func _propose_placement(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -3798,7 +3822,7 @@ static func _propose_placement(host, args: Dictionary) -> Dictionary:
 	var staged: Dictionary = panel.stage_built_payload("placement", payload, "ai", str(args.get("note", "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
-	return _ok({
+	var reply := _ok({
 		"entity_id": str(payload.get("id", "")),
 		"staged_id": str(staged.get("staged_id", "")),
 		"component_id": component_id,
@@ -3807,6 +3831,17 @@ static func _propose_placement(host, args: Dictionary) -> Dictionary:
 		"affected_nets": payload.get("affected_nets", []),
 		"note": "a ghost DRAFT — the part has not moved; minerva_pcb_staged_accept applies it, and routed copper is FLAGGED, never auto-fixed",
 	})
+	# P1 C5 (parity principle): the reply carries what the dragging human
+	# SEES — target-pose overlap vs placed parts and other live ghosts.
+	# Advisory always (A7): nothing refuses on a collision.
+	var to: Dictionary = payload.get("to", {})
+	var collisions: Array = data.placement_collisions(component_id,
+		float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
+		float(to.get("rotation_deg", 0.0)),
+		_other_ghost_targets(store, str(payload.get("id", ""))))
+	if not collisions.is_empty():
+		reply["collisions"] = collisions
+	return reply
 
 
 ## SPIKE 019ff8615fbe: revise a live placement ghost's TARGET pose — the
@@ -3835,11 +3870,20 @@ static func _placement_update(host, args: Dictionary) -> Dictionary:
 	var rot := float(args.get("rotation_deg", to.get("rotation_deg", 0.0)))
 	if not store.update_placement_target(sid, x, y, rot, str(args.get("note", ""))):
 		return _err(str(store.last_error.get("error", "update_refused")))
-	return _ok({
+	var reply := _ok({
 		"entity_id": entity_id,
 		"to": {"x_mm": x, "y_mm": y, "rotation_deg": rot},
 		"note": "ghost revised in place — still a DRAFT until minerva_pcb_staged_accept",
 	})
+	# P1 C5: the revised pose gets the same collision advisory propose gives.
+	var data = _resolve_data(host)
+	if data is Object:
+		var collisions: Array = data.placement_collisions(
+			str((entry.get("payload", {}) as Dictionary).get("component_id", "")),
+			x, y, rot, _other_ghost_targets(store, entity_id))
+		if not collisions.is_empty():
+			reply["collisions"] = collisions
+	return reply
 
 
 static func _staged_list(host, args: Dictionary) -> Dictionary:
@@ -3894,6 +3938,7 @@ static func _staged_accept(host, args: Dictionary) -> Dictionary:
 	var panel = _staged_panel(host)
 	if not (panel is Object):
 		return panel
+	var data = _resolve_data(host)
 	# Batch form (DCR S5's batch-accept pattern): entity_ids = all-or-nothing,
 	# one undo step. Singular entity_id stays the simple path.
 	if args.has("entity_ids") and args.get("entity_ids") is Array:
@@ -3902,8 +3947,15 @@ static func _staged_accept(host, args: Dictionary) -> Dictionary:
 			return {"success": false, "error": str(out.get("error", "batch_refused")),
 				"refusals": out.get("refusals", []),
 				"note": str(out.get("note", ""))}
-		return _ok({"accepted": int(out.get("accepted", 0)),
+		var batch_reply := _ok({"accepted": int(out.get("accepted", 0)),
 			"note": "one history step — a single undo returns the whole batch to ghosts"})
+		# P1 C2 parity: an accepted MOVE reports its consequences like the
+		# direct-move verb does — dangling sweep (panel-computed) + assembly.
+		if out.has("dangling_copper"):
+			batch_reply["dangling_copper"] = out.get("dangling_copper")
+			if data is Object:
+				batch_reply = await _with_assembly_after_placement(host, data, batch_reply)
+		return batch_reply
 	var entity_id: String = str(args.get("entity_id", ""))
 	if entity_id.is_empty():
 		return _err("entity_id (or entity_ids for a batch) is required")
@@ -3911,8 +3963,14 @@ static func _staged_accept(host, args: Dictionary) -> Dictionary:
 	if not bool(res.get("ok", false)):
 		return {"success": false, "error": str(res.get("error", "accept_refused")),
 			"entity_id": entity_id, "note": str(res.get("note", ""))}
-	return _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")),
+	var reply := _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")),
 		"note": "landed on the board (journalled; undo returns it to a ghost)"})
+	if str(res.get("kind", "")) == "placement":
+		if res.has("dangling_copper"):
+			reply["dangling_copper"] = res.get("dangling_copper")
+		if data is Object:
+			reply = await _with_assembly_after_placement(host, data, reply)
+	return reply
 
 
 static func _staged_reject(host, args: Dictionary) -> Dictionary:

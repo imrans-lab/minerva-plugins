@@ -626,6 +626,14 @@ func accept_staged(entity_id: String) -> Dictionary:
 	if not refusal.is_empty():
 		_show_transient_status("Accept refused: %s" % refusal)
 		return {"ok": false, "error": "accept_refused", "entity_id": entity_id, "note": refusal}
+	# P1 C2 (the parity principle): a placement accept is a MOVE, and the
+	# direct-move verb already reports what a move does to copper — the same
+	# pre-pin snapshot + dangling sweep runs here so BOTH accept doorways
+	# (context menu and MCP) tell the same truth.
+	var pre_pins: Dictionary = {}
+	if kind == "placement":
+		pre_pins = _PanelToolsScript._pre_transform_pins(_data,
+			str(payload.get("component_id", "")))
 	_data.attach_staged_snapshot()
 	var landed: Dictionary = _apply_staged_payload(kind, payload)
 	if landed.is_empty():
@@ -635,8 +643,28 @@ func accept_staged(entity_id: String) -> Dictionary:
 			"note": "the board write was refused — see the model warning"}
 	_staged_entities.stamp(str(pre.get("sid", "")), "accepted", "accept")
 	_data.save_to_history("Accept staged %s" % kind)
+	var out := {"ok": true, "entity_id": entity_id, "kind": kind}
+	if kind == "placement":
+		var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+		var moved_msg := "Accepted move: %s is now at (%.2f, %.2f)." % [
+			str(payload.get("component_id", "")),
+			float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0))]
+		var warnings: Array = _PanelToolsScript._dangling_copper_warnings(_data, pre_pins)
+		if not warnings.is_empty():
+			out["dangling_copper"] = warnings
+			if _canvas != null and _canvas.has_method("set_disconnect_markers"):
+				_canvas.set_disconnect_markers(warnings)
+			var nets: Array[String] = []
+			for w in warnings:
+				var n := str((w as Dictionary).get("net", ""))
+				if not (n in nets):
+					nets.append(n)
+			moved_msg += " %d net%s disconnected (%s) — copper does not follow parts; delete or reroute." % [
+				nets.size(), "" if nets.size() == 1 else "s", ", ".join(nets)]
+		_show_transient_status(moved_msg)
+		return out
 	_show_transient_status("Accepted staged %s %s — it is on the board now." % [kind, entity_id])
-	return {"ok": true, "entity_id": entity_id, "kind": kind}
+	return out
 
 
 ## REJECT one staged draft: terminal stamp PAIRED with its own history entry
@@ -689,6 +717,14 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 			"note": "all-or-nothing: no draft was accepted"}
 	if resolved.is_empty():
 		return {"ok": false, "error": "empty_batch"}
+	# P1 C2: one merged pre-pin snapshot across every placement member, so a
+	# batch of moves reports its stranded copper exactly like a single one.
+	var batch_pre_pins: Dictionary = {}
+	for r in resolved:
+		var r_entry: Dictionary = r.get("entry", {})
+		if str(r_entry.get("kind", "")) == "placement":
+			batch_pre_pins.merge(_PanelToolsScript._pre_transform_pins(_data,
+				str((r_entry.get("payload", {}) as Dictionary).get("component_id", ""))))
 	_data.attach_staged_snapshot()
 	# Codex F3, second half: the reply counts LANDINGS, never intent — the
 	# preflight makes a mid-write refusal unreachable, but if one ever fires
@@ -704,8 +740,18 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 		_staged_entities.stamp(str(r.get("sid", "")), "accepted", "accept")
 		landed_count += 1
 	_data.save_to_history("Accept %d staged drafts" % landed_count)
-	_show_transient_status("Accepted %d staged drafts." % landed_count)
-	return {"ok": true, "accepted": landed_count}
+	var batch_out := {"ok": true, "accepted": landed_count}
+	var batch_status := "Accepted %d staged drafts." % landed_count
+	if not batch_pre_pins.is_empty():
+		var batch_warnings: Array = _PanelToolsScript._dangling_copper_warnings(_data, batch_pre_pins)
+		if not batch_warnings.is_empty():
+			batch_out["dangling_copper"] = batch_warnings
+			if _canvas != null and _canvas.has_method("set_disconnect_markers"):
+				_canvas.set_disconnect_markers(batch_warnings)
+			batch_status += " %d trace endpoint%s disconnected — see the markers." % [
+				batch_warnings.size(), "" if batch_warnings.size() == 1 else "s"]
+	_show_transient_status(batch_status)
+	return batch_out
 
 
 ## The canvas menu's announcement lands here (wired in _build_ui).

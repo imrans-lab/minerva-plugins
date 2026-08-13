@@ -1671,8 +1671,69 @@ func _draw() -> void:
 
 	_draw_component_rotate_chrome()
 
+	# P1: the propose-move arm indicator and the post-accept disconnect
+	# markers are review chrome — late, over everything they annotate.
+	_draw_propose_arm_chrome()
+	_draw_disconnect_markers()
+
 	if tool_mode == ToolMode.INSPECT_PIN and not _inspect_hover_label.is_empty():
 		_draw_inspect_hover_label()
+
+
+## P1 debt D4: the ARMED part wears its intent — a solid outline in the
+## tether colour plus a "propose?" tag, so "my next drag proposes" is visible
+## state, not memory. Solid stroke = a NEW channel pairing with the tether
+## (the dash rule stands untouched).
+func _draw_propose_arm_chrome() -> void:
+	if _propose_move_armed_id.is_empty() or data == null:
+		return
+	var comp = data.get_component(_propose_move_armed_id)
+	if comp == null:
+		return
+	var xform: Transform2D = comp.get_transform()
+	var screen_poly := PackedVector2Array()
+	for p in comp.get_local_body_polygon():
+		screen_poly.append(world_to_screen(comp.position + (xform * p)))
+	if screen_poly.size() < 3:
+		return
+	var outline := screen_poly.duplicate()
+	outline.append(screen_poly[0])
+	draw_polyline(outline, placement_tether_color, 2.0)
+	var top := screen_poly[0]
+	for p in screen_poly:
+		if p.y < top.y:
+			top = p
+	draw_string(font, Vector2(top.x, top.y - 6), "propose?",
+		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, placement_tether_color)
+
+
+## P1, ratified sheet B5: after an accepted move strands copper, the panel
+## marks each dangling endpoint — a violation-colour ring + the net name at
+## the exact coordinate the connectivity sweep reported. The panel owns the
+## list (set after accept, cleared on load/board copper repair); the canvas
+## only draws what it is handed.
+var _disconnect_markers: Array = []
+
+
+func set_disconnect_markers(markers: Array) -> void:
+	_disconnect_markers = markers.duplicate(true) if markers is Array else []
+	queue_redraw()
+
+
+func _draw_disconnect_markers() -> void:
+	for m in _disconnect_markers:
+		if not (m is Dictionary):
+			continue
+		var at: Array = (m as Dictionary).get("at", []) if (m as Dictionary).get("at", []) is Array else []
+		if at.size() < 2:
+			continue
+		var p := world_to_screen(Vector2(float(at[0]), float(at[1])))
+		draw_arc(p, 7.0, 0, TAU, 24, candidate_violation_color, 2.0, true)
+		draw_line(p + Vector2(-4, 0), p + Vector2(4, 0), candidate_violation_color, 2.0)
+		var net := str((m as Dictionary).get("net", ""))
+		if not net.is_empty():
+			draw_string(font, p + Vector2(10, -8), "%s disconnected" % net,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, candidate_violation_color)
 
 
 ## Draw the PCB board outline
@@ -2305,20 +2366,28 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 	if str(payload.get("id", "")) in selected_staged_ids:
 		draw_polyline(outline, trace_selected_color, 2.0)
 
-	# SILK at the ghost pose (owner feel-session finding, R2): the polarity
-	# marks — cathode band, pin-1 dot — ARE the intent a reviewer confirms;
-	# a body-only ghost of a polarized part is unreviewable. SPIKE MECHANIC,
-	# stated: the shared silk helper anchors on comp.position, so it is
-	# swapped to the target for the one draw call and restored immediately —
-	# a direct var write fires no signals, and _draw runs synchronously.
+	# COLLISION CHANNEL (P1, ratified sheet C5 — parity with the human eye):
+	# the ghost wears the violation colour LIVE while its target overlaps any
+	# placed part or any OTHER live ghost's target — the same continuous
+	# feedback the dragging human gets from vision, drawn every frame.
+	var live_collisions := _placement_ghost_collisions(payload)
+	if not live_collisions.is_empty():
+		draw_polyline(outline, candidate_violation_color, 2.5)
+		var offenders: Array[String] = []
+		for c in live_collisions:
+			offenders.append(str((c as Dictionary).get("ref", "?")))
+		draw_string(font, to_px + Vector2(10, 14), "overlaps %s" % ", ".join(offenders),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, candidate_violation_color)
+
+	# SILK at the ghost pose (owner ruling A5): the polarity marks — cathode
+	# band, pin-1 dot — ARE the intent a reviewer confirms; a body-only ghost
+	# of a polarized part is unreviewable. Drawn through the shared helper's
+	# origin override (P1 debt D2 — the spike's comp.position swap is gone).
 	if show_silk and comp.graphics.size() > 0:
 		var ghost_silk: Color = silk_color
 		ghost_silk.a *= 0.7
 		var ghost_xform := Transform2D(deg_to_rad(-float(pose.get("rot", 0.0))), Vector2.ZERO)
-		var real_pos: Vector2 = comp.position
-		comp.position = target
-		_draw_component_graphics_layer(comp, ghost_xform, "F.SilkS", ghost_silk, silk_min_width_px)
-		comp.position = real_pos
+		_draw_component_graphics_layer(comp, ghost_xform, "F.SilkS", ghost_silk, silk_min_width_px, target)
 
 	# Refdes + author on the ghost so "what and whose" reads without a click.
 	var label := "%s (%s)" % [comp.id, str(entry.get("author", "?"))]
@@ -2328,6 +2397,35 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 			top = p
 	draw_string(font, Vector2(to_px.x - 20, top.y - 6), label,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, tether_color)
+
+
+## Live collision list for one placement ghost: its (possibly mid-drag)
+## target pose vs placed parts and every OTHER live ghost's target. The ONE
+## collision derivation (PCBData.placement_collisions) behind both the render
+## channel above and the MCP reply advisory (panel_tools).
+func _placement_ghost_collisions(payload: Dictionary) -> Array:
+	if data == null or _staged_store == null:
+		return []
+	var pose := _placement_target_pose(payload)
+	var pos: Vector2 = pose.get("pos")
+	var extras: Array = []
+	var self_id := str(payload.get("id", ""))
+	for e in _staged_store.staged_entries():
+		var entry: Dictionary = e
+		if str(entry.get("kind", "")) != "placement":
+			continue
+		var other_payload: Dictionary = entry.get("payload", {})
+		if str(other_payload.get("id", "")) == self_id:
+			continue
+		var other_pose := _placement_target_pose(other_payload)
+		var other_pos: Vector2 = other_pose.get("pos")
+		extras.append({
+			"component_id": str(other_payload.get("component_id", "")),
+			"x_mm": other_pos.x, "y_mm": other_pos.y,
+			"rotation_deg": float(other_pose.get("rot", 0.0)),
+		})
+	return data.placement_collisions(str(payload.get("component_id", "")),
+		pos.x, pos.y, float(pose.get("rot", 0.0)), extras)
 
 
 ## Which staged entity a click at `world_pos` picks, or "" — by CANONICAL
@@ -2762,7 +2860,11 @@ func _draw_component_pads(comp, xform: Transform2D, tht_only: bool = false) -> v
 ## layer aligns with the copper it was resolved against. Shared by
 ## _draw_component_silk (F.SilkS) and _draw_component_courtyard (F.CrtYd) so
 ## both layers walk the same geometry-kind handling.
-func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String, stroke_color: Color, min_width_px: float) -> void:
+func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String, stroke_color: Color, min_width_px: float, origin = null) -> void:
+	# `origin` (P1, debt D2): a world-mm anchor override. The placement-ghost
+	# render draws this component's silk AT THE PROPOSED POSE, which is not
+	# comp.position — every call without it is byte-identical to before.
+	var base: Vector2 = origin if origin is Vector2 else comp.position
 	for g in comp.graphics:
 		if g.get("layer", "") != layer_name:
 			continue
@@ -2774,14 +2876,14 @@ func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String
 			"line":
 				var start: Vector2 = g.get("start", Vector2.ZERO)
 				var end: Vector2 = g.get("end", Vector2.ZERO)
-				var p0 := world_to_screen(comp.position + (xform * start))
-				var p1 := world_to_screen(comp.position + (xform * end))
+				var p0 := world_to_screen(base + (xform * start))
+				var p1 := world_to_screen(base + (xform * end))
 				draw_line(p0, p1, stroke_color, w)
 
 			"circle":
 				var center: Vector2 = g.get("center", Vector2.ZERO)
 				var radius: float = float(g.get("radius", 0.0))
-				var center_screen := world_to_screen(comp.position + (xform * center))
+				var center_screen := world_to_screen(base + (xform * center))
 				var radius_screen := radius * zoom
 				if radius_screen > 0.0:
 					draw_arc(center_screen, radius_screen, 0, TAU, 32, stroke_color, w)
@@ -2790,7 +2892,7 @@ func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String
 				var poly_points: PackedVector2Array = []
 				for pt in g.get("points", []):
 					var local_pt: Vector2 = pt
-					poly_points.append(world_to_screen(comp.position + (xform * local_pt)))
+					poly_points.append(world_to_screen(base + (xform * local_pt)))
 				if poly_points.size() >= 2:
 					draw_polyline(poly_points, stroke_color, w)
 
@@ -2805,7 +2907,7 @@ func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String
 				var arc_points: PackedVector2Array = []
 				for pt in g.get("points", []):
 					var local_pt: Vector2 = pt
-					arc_points.append(world_to_screen(comp.position + (xform * local_pt)))
+					arc_points.append(world_to_screen(base + (xform * local_pt)))
 				if arc_points.size() >= 2:
 					draw_polyline(arc_points, stroke_color, w)
 
@@ -3785,6 +3887,17 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# rotation (nothing was journalled) and keep the selection.
 			if _rotate_drag_active:
 				_cancel_component_rotate_drag()
+				return
+			# P1 debt D4: a standing propose-move arm is an intent, and Escape
+			# is its advertised cancel — cleared BEFORE the selection ladder so
+			# disarming does not also deselect (the same keep-the-selection rule
+			# every gesture above holds). A live ghost drag cancels through the
+			# release path, not here (the gesture owns its release).
+			if not _propose_move_armed_id.is_empty():
+				component_lock_changed.emit(
+					"Propose move disarmed for %s." % _propose_move_armed_id)
+				_propose_move_armed_id = ""
+				queue_redraw()
 				return
 			# A zone draw in progress is what Escape cancels FIRST — cancelling it
 			# should not also wipe the user's component selection.
@@ -8960,6 +9073,10 @@ func set_data(new_data) -> void:
 			data.structure_changed.disconnect(_on_structure_changed)
 
 	data = new_data
+	# A new board owes no explanation of the old one's stranded copper (P1
+	# B5) — and any standing propose-arm named a part of the old board.
+	_disconnect_markers = []
+	_propose_move_armed_id = ""
 
 	if data:
 		data.data_changed.connect(_on_data_changed)

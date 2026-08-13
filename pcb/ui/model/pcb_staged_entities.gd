@@ -215,12 +215,14 @@ func live_placement_for_component(component_id: String) -> String:
 
 
 ## Move a LIVE placement's TARGET pose (the Update of the CRUD cycle: ghost
-## drag and the MCP update verb both land here). SPIKE CAVEAT, stated rather
-## than hidden: this mutates a stored payload, which the store otherwise
-## forbids — bucket-9 snapshots carry DISPOSITIONS ONLY, so undo will never
-## restore a previous target pose (it only revives/retires whole ghosts). The
-## ratification session decides whether target-pose edits deserve history;
-## until then a mid-flight proposal is scratch, not record.
+## drag, the rotate arcs, and the MCP update verb all land here). THE RULE
+## (P1, ratified sheet D1/B3): a live proposal's target pose is SCRATCH, not
+## record — it may be revised freely by either party until a terminal verdict,
+## and pose edits carry NO history. Bucket-9 snapshots stay DISPOSITIONS ONLY:
+## undo revives/retires whole ghosts (the accept/reject acts, which ARE
+## record) and never replays pose edits. This is the ONE exception to the
+## store's payloads-immutable stance, legal ONLY for the "placement" kind and
+## ONLY through this method — zone/cutout payloads stay frozen at stage time.
 func update_placement_target(staged_id: String, to_x_mm: float, to_y_mm: float,
 		to_rotation_deg: float, note: String = "") -> bool:
 	var e: Dictionary = get_entry(staged_id)

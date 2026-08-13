@@ -1749,6 +1749,78 @@ func placement_affected_nets(component_id: String) -> Array:
 	return out
 
 
+## World-space BODY polygon of a component AT AN ARBITRARY POSE — the one
+## derivation the collision advisory uses for real parts and ghost targets
+## alike (same rotation convention as pcb_component.get_transform).
+func component_body_at_pose(component_id: String, x_mm: float, y_mm: float,
+		rotation_deg: float) -> PackedVector2Array:
+	var comp = get_component(component_id)
+	if comp == null:
+		return PackedVector2Array()
+	var xform := Transform2D(deg_to_rad(-rotation_deg), Vector2.ZERO)
+	var out := PackedVector2Array()
+	for p in comp.get_local_body_polygon():
+		out.append(Vector2(x_mm, y_mm) + (xform * p))
+	return out
+
+
+## COLLISION ADVISORY for a proposed pose (P1, ratified sheet C5 — the parity
+## principle: the human SEES an overlap while dragging; the agent must be
+## TOLD in the verb's reply). Body-polygon intersection of `component_id` at
+## the proposed pose against (a) every OTHER placed part's body and (b) any
+## `extra_bodies` [{component_id, x_mm, y_mm, rotation_deg}] — the caller
+## passes other live ghost TARGETS here, so two pending proposals colliding
+## with each other are caught too. Returns [{ref, overlap_mm2}] — ADVISORY
+## always (A7's flag-don't-fix ruling): nothing refuses on it. Body bounds
+## are the resolve-attached footprint bounds, so this approximates courtyard
+## contact; the authoritative courtyard verdict stays assembly_check's.
+func placement_collisions(component_id: String, x_mm: float, y_mm: float,
+		rotation_deg: float, extra_bodies: Array = []) -> Array:
+	var moving := component_body_at_pose(component_id, x_mm, y_mm, rotation_deg)
+	if moving.size() < 3:
+		return []
+	var out: Array = []
+	for other_id in components:
+		if str(other_id) == component_id:
+			continue
+		var other = components[other_id]
+		var other_poly := component_body_at_pose(str(other_id),
+			other.position.x, other.position.y, other.rotation)
+		var area := _polygon_overlap_area(moving, other_poly)
+		if area > 0.0:
+			out.append({"ref": str(other_id), "overlap_mm2": area})
+	for b in extra_bodies:
+		if not (b is Dictionary):
+			continue
+		var bid := str((b as Dictionary).get("component_id", ""))
+		if bid == component_id:
+			continue
+		var ghost_poly := component_body_at_pose(bid,
+			float((b as Dictionary).get("x_mm", 0.0)),
+			float((b as Dictionary).get("y_mm", 0.0)),
+			float((b as Dictionary).get("rotation_deg", 0.0)))
+		var g_area := _polygon_overlap_area(moving, ghost_poly)
+		if g_area > 0.0:
+			out.append({"ref": bid, "overlap_mm2": g_area, "ghost": true})
+	return out
+
+
+static func _polygon_overlap_area(a: PackedVector2Array, b: PackedVector2Array) -> float:
+	if a.size() < 3 or b.size() < 3:
+		return 0.0
+	var total := 0.0
+	for piece in Geometry2D.intersect_polygons(a, b):
+		var poly: PackedVector2Array = piece
+		# Shoelace; Godot may return either winding, so take the magnitude.
+		var acc := 0.0
+		for i in poly.size():
+			var p := poly[i]
+			var q := poly[(i + 1) % poly.size()]
+			acc += p.x * q.y - q.x * p.y
+		total += absf(acc) * 0.5
+	return total
+
+
 ## BUILD half — see build_zone_payload for the contract. `from` is the
 ## component's pose NOW (captured at build so the ghost can draw its tether
 ## and the journal can tell what the proposal believed it was moving).

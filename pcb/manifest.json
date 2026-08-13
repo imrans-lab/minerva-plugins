@@ -697,7 +697,7 @@
     },
     {
       "name": "minerva_pcb_propose_placement",
-      "description": "SPIKE (placement-coworking): STAGE a component MOVE as a DRAFT — a ghost of the part at the proposed pose with a tether from its current position, for human review. FAMILY NOTE: propose_* tools STAGE BOARD ENTITIES; the unrelated workspace_propose_* tools run the ROUTER. The part does NOT move until minerva_pcb_staged_accept, and accepting NEVER touches copper — nets already routed to the part are FLAGGED in affected_nets (routed:true) and the human sees an amber tether; re-routing stays a separate, explicit act. ONE live move ghost per component: a standing ghost refuses (placement_already_staged, with its entity_id) — revise it with minerva_pcb_placement_update or reject it first. The human can drag the ghost to counter-propose; read the current pose back via minerva_pcb_staged_list. Reply: {entity_id, staged_id, component_id, from, to, affected_nets}.",
+      "description": "STAGE a component MOVE as a DRAFT — a ghost of the part at the proposed pose with a tether from its current position, for human review. FAMILY NOTE: propose_* tools STAGE BOARD ENTITIES; the unrelated workspace_propose_* tools run the ROUTER. The part does NOT move until minerva_pcb_staged_accept, and accepting NEVER touches copper — nets already routed to the part are FLAGGED in affected_nets (routed:true) and the human sees an amber tether; re-routing stays a separate, explicit act. ONE live move ghost per component: a standing ghost refuses (placement_already_staged, with its entity_id) — revise it with minerva_pcb_placement_update or reject it first. The human can drag the ghost to counter-propose; read the current pose back via minerva_pcb_staged_list. PERCEPTION PARITY: when the proposed pose overlaps another part's body — or another live ghost's TARGET — the reply carries collisions:[{ref, overlap_mm2, ghost?}] (advisory, never a refusal; the ghost renders the violation channel for the human). Reply: {entity_id, staged_id, component_id, from, to, affected_nets, collisions?}.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -714,7 +714,7 @@
     },
     {
       "name": "minerva_pcb_placement_update",
-      "description": "SPIKE (placement-coworking): revise a LIVE placement draft's TARGET pose in place — the agent twin of dragging the ghost (the Update of the propose/review CRUD cycle). Omitted fields keep their current value. Still a DRAFT afterwards; nothing moves until minerva_pcb_staged_accept. Refuses on unknown/terminal entity_id or a non-placement draft. Reply: {entity_id, to}.",
+      "description": "Revise a LIVE placement draft's TARGET pose in place — the agent twin of dragging the ghost (the Update of the propose/review CRUD cycle). Omitted fields keep their current value. Still a DRAFT afterwards; nothing moves until minerva_pcb_staged_accept. Refuses on unknown/terminal entity_id or a non-placement draft. The revised pose gets the same collision advisory propose gives: collisions:[{ref, overlap_mm2, ghost?}] when overlapping (advisory, never a refusal). Reply: {entity_id, to, collisions?}.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -744,7 +744,7 @@
     },
     {
       "name": "minerva_pcb_staged_accept",
-      "description": "ACCEPT staged draft(s) (the staging family): replays the direct create with the STORED payload — same id, byte-identical entity — re-validated against the CURRENT board, so drift since staging (net deleted, layer removed) refuses with the direct verb's own reason and the draft stays live. One journalled history step; undo returns the entity to a ghost. Pass entity_id for one draft, or entity_ids (array) for an ALL-OR-NOTHING batch that lands as ONE undo step (refused whole, per-entity reasons, if any member cannot land).",
+      "description": "ACCEPT staged draft(s) (the staging family): replays the direct create with the STORED payload — same id, byte-identical entity — re-validated against the CURRENT board, so drift since staging (net deleted, layer removed) refuses with the direct verb's own reason and the draft stays live. One journalled history step; undo returns the entity to a ghost. Pass entity_id for one draft, or entity_ids (array) for an ALL-OR-NOTHING batch that lands as ONE undo step (refused whole, per-entity reasons, if any member cannot land). PERCEPTION PARITY for placement drafts: accepting a MOVE reports its consequences in the SAME reply, exactly as the direct move verb does — dangling_copper:[{trace_id, net, at, component_id, message}] when the move strands routed copper (the panel draws disconnect markers at those coordinates), plus the assembly tri-state re-check. Copper is never auto-fixed (flag-don't-fix): delete or reroute is a separate act.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
