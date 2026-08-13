@@ -1719,24 +1719,12 @@ _VIA_RE = re.compile(
     r'(?:\s+\(tenting[^)]*\))?\s+\(net\s+(\d+)\)\)')
 _SIGNAL_LAYER_RE = re.compile(r'\(\d+\s+"([^"]+)"\s+signal\)')
 
-# UNNUMBERED pads — the board-level mounting holes. kicad_io's ``_parse_pad``
-# requires a non-empty pad number (its regex is ``"?([^"\s]+)"?`` and it returns
-# None when the number is absent), so every synthetic MountingHole footprint the
-# emitter writes as ``(pad "" np_thru_hole ...)`` (kicad.py:854-882) is DROPPED by
-# the reused reader. Without this recovery the harness would be blind to four
-# drilled holes going missing from a fabrication-bound file, which is exactly the
-# class of defect it exists to catch — so this covers a documented GAP in the
-# existing parser rather than duplicating it.
-#
-# The tempered ``(?:(?!\(footprint).)*?`` cannot run past the next footprint, so a
-# footprint carrying no unnumbered pad never borrows the following one's.
-_UNNUMBERED_PAD_RE = re.compile(
-    r'\(footprint\s+"[^"]*"\s+\(layer\s+"[^"]*"\)\s+'
-    r'\(at\s+([-\d.eE]+)\s+([-\d.eE]+)(?:\s+([-\d.eE]+))?\)'
-    r'(?:(?!\(footprint).)*?'
-    r'\(pad\s+""\s+(\S+)\s+(\S+)\s+\(at\s+([-\d.eE]+)\s+([-\d.eE]+)(?:\s+[-\d.eE]+)?\)\s+'
-    r'\(size\s+([-\d.eE]+)\s+([-\d.eE]+)\)\s+\(drill\s+([-\d.eE]+)\)',
-    re.DOTALL)
+# The _UNNUMBERED_PAD_RE recovery that stood here is GONE (bug 019f9af741
+# fixed): kicad_io._parse_pad now accepts an empty quoted pad number, so the
+# board-level mounting holes it used to drop arrive through the shared
+# reader like every other pad and are classified in tabulate_kicad's own pad
+# loop (entity="board_hole" for an unnumbered pad). The recovery's shelf
+# life ended exactly as its comment predicted.
 
 
 def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
@@ -1786,6 +1774,28 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
                 net_name = None
             drill = pad.get("drill")
 
+            if number == "":
+                # BOARD-LEVEL MOUNTING HOLES — the emitter writes them as
+                # unnumbered pads on synthetic MountingHole footprints
+                # (kicad.py:854-882). Bug 019f9af741 is FIXED: kicad_io now
+                # parses unnumbered pads, so they arrive through this loop
+                # and the regex recovery that papered over the parser gap is
+                # deleted. Row shapes preserved exactly from that recovery:
+                # entity="board_hole", plated ring flashed on every copper
+                # layer at the pad SIZE (the authored annulus, finding
+                # 019f8dbb7104), square (w, w), rotation 0, no net row.
+                plated = pad_type != "np_thru_hole"
+                if drill:
+                    rows.append(_drill_row(x, y, drill, plated,
+                                           entity="board_hole"))
+                if plated:
+                    for token in stack:
+                        rows.append(_flash_row(
+                            token, x, y, shape=shape, w=w, h=w, rot_deg=0.0,
+                            entity="board_hole", ref=NA, pad_number=NA,
+                            net_name=NA))
+                continue
+
             if pad_type != "np_thru_hole":
                 # `(layers "*.Cu" ...)` is KiCad's "every copper layer" wildcard —
                 # a through-hole pad. A sided SMD pad names its one layer.
@@ -1803,21 +1813,6 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
             rows.append(ParityRow.make("net_ownership", (ref, number),
                                        net_name=net_name, ref=ref,
                                        pad_number=number))
-
-    for m in _UNNUMBERED_PAD_RE.finditer(text):
-        fx, fy, frot, pad_type, shape, lx, ly, sw, _sh, drill = m.groups()
-        x, y = _transform_position(float(lx), float(ly), float(fx), float(fy),
-                                   float(frot or 0.0))
-        plated = pad_type != "np_thru_hole"
-        rows.append(_drill_row(x, y, float(drill), plated, entity="board_hole"))
-        if plated:
-            # A PLATED board hole carries a copper ring whose diameter is the
-            # emitted pad SIZE (the authored annulus, finding 019f8dbb7104).
-            for token in stack:
-                rows.append(_flash_row(
-                    token, x, y, shape=_canonical_shape_token(shape),
-                    w=float(sw), h=float(sw), rot_deg=0.0, entity="board_hole",
-                    ref=NA, pad_number=NA, net_name=NA))
 
     for m in _SEGMENT_RE.finditer(text):
         x1, y1, x2, y2, width, layer, net_num = m.groups()

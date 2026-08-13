@@ -492,3 +492,41 @@ class TestViaSpanExpandsToTheOccupiedStackRange:
         board = Board.from_kicad(pcb)
         # F.Cu -> In2.Cu spans F, In1, In2 — NOT everything up to B.Cu.
         assert board.existing_vias[0].layers == ("F.Cu", "In1.Cu", "In2.Cu")
+
+
+class TestUnnumberedPadsParse:
+    """Bug 019f9af741 (fixed at epoch GA-6): `(pad "" np_thru_hole ...)` — the
+    shape KiCad writes for EVERY board-level NPTH mounting hole — used to fail
+    _parse_pad's number regex and vanish from the parse with no diagnostic.
+    A drilled hole the reader cannot see is free space the router can route
+    through; the ir_parity harness carried a private recovery regex for the
+    gap, deleted with the fix (its shelf life ended as its comment predicted)."""
+
+    def test_an_unnumbered_npth_pad_is_parsed_not_dropped(self, tmp_path):
+        extra = textwrap.dedent("""\
+            (footprint "MountingHole" (layer "F.Cu")
+              (at 50 30)
+              (property "Reference" "H1")
+              (pad "" np_thru_hole circle (at 0 0) (size 3.2 3.2) (drill 3.2) (layers "*.Cu" "*.Mask"))
+            )
+            """)
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(extra_copper=extra))
+        board = read_kicad_pcb(pcb)
+        holes = [p for p in board.pads if p.pad_type == "np_thru_hole"]
+        assert len(holes) == 1, (
+            "the NPTH mounting-hole pad must survive the parse — before the "
+            "fix it silently vanished and its drill was routable free space")
+        hole = holes[0]
+        assert hole.number == ""
+        assert hole.net is None
+        assert hole.drill == 3.2
+        assert hole.position == (50.0, 30.0)
+
+    def test_numbered_pads_still_parse_both_spellings(self, tmp_path):
+        """Regression control for the regex change: quoted and bare numbers
+        keep parsing exactly as before."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text())
+        board = read_kicad_pcb(pcb)
+        assert {p.number for p in board.pads} == {"1"}

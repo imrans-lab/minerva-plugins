@@ -500,12 +500,20 @@ def _parse_pad(pad_content: str) -> Optional[dict]:
     """Parse a single pad."""
     pad = {}
 
-    # Get pad number, type, shape
-    main_match = re.search(r'\(pad\s+"?([^"\s]+)"?\s+(\w+)\s+(\w+)', pad_content)
+    # Get pad number, type, shape. The number alternation accepts an EMPTY
+    # quoted number (bug 019f9af741): KiCad writes every NPTH mounting hole
+    # as `(pad "" np_thru_hole ...)`, and the old `"?([^"\s]+)"?` required at
+    # least one character, so the whole pad record silently vanished — a
+    # parse that reported success while under-counting drilled features.
+    main_match = re.search(r'\(pad\s+(?:"([^"]*)"|([^"\s]+))\s+(\w+)\s+(\w+)',
+                           pad_content)
     if main_match:
-        pad["number"] = main_match.group(1)
-        pad["type"] = main_match.group(2)  # smd, thru_hole, etc.
-        pad["shape"] = main_match.group(3)  # rect, circle, etc.
+        number = main_match.group(1)
+        if number is None:
+            number = main_match.group(2)
+        pad["number"] = number
+        pad["type"] = main_match.group(3)  # smd, thru_hole, etc.
+        pad["shape"] = main_match.group(4)  # rect, circle, etc.
 
     # Get position
     at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)(?:\s+([\d.-]+))?\)', pad_content)
