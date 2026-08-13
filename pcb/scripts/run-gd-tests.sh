@@ -58,21 +58,63 @@
 # test list is `${GD_TEST_DIR}/test_*.gd`, a bare glob, and a deleted or
 # renamed suite file simply drops out of it with nothing left to fail. Before
 # anything else runs, the runner cross-checks that glob against a checked-in
-# manifest (pcb/tests/gd/EXPECTED_SUITES, one filename per line) and fails
-# fast, by name, in both directions: a manifest entry with no file on disk
-# (deletion/rename), or a test_*.gd file with no manifest entry (addition
-# without registration). Adding a suite is meant to be a deliberate one-line
-# edit to that manifest; the count itself is never hardcoded here for exactly
-# that reason — a hardcoded integer goes stale the moment a suite is added
-# and gets "fixed" by lowering it, which is the same failure as deleting a
-# suite, performed by a different hand.
+# manifest (pcb/tests/gd/EXPECTED_SUITES) and fails fast, by name, in both
+# directions: a manifest entry with no file on disk (deletion/rename), or a
+# test_*.gd file with no manifest entry (addition without registration).
+# Adding a suite is meant to be a deliberate one-line edit to that manifest;
+# the count itself is never hardcoded here for exactly that reason — a
+# hardcoded integer goes stale the moment a suite is added and gets "fixed"
+# by lowering it, which is the same failure as deleting a suite, performed by
+# a different hand.
+#
+# FALSE-GREEN HARDENING (bug 019ff2b1fccb — this runner is the ONLY execution
+# gate for this layer since CI went --preflight-only in 38f1090, so what it
+# certifies has to be true). Three enforcement layers beyond the Results-line
+# floor, all fail-closed:
+#
+#   1. FATAL DIAGNOSTICS. Every `SCRIPT ERROR:` / `ERROR: Failed to load
+#      script` line in a suite's output fails that suite UNLESS the
+#      diagnostic (message + its `at:` location, as one record) matches a
+#      pattern in the checked-in allowlist tests/gd/KNOWN_HARNESS_DIAGNOSTICS.
+#      The allowlist exists because godot --script DOUBLE-LOADS the suite:
+#      the first pass runs before autoloads register, so every suite whose
+#      preload chain reaches SingletonObject prints a compile-noise cascade
+#      and then runs fine on the second pass. That noise is the harness's,
+#      not the suite's; anything NOT on the list is treated as the suite's
+#      and fails it — even when the Results line is green, which is exactly
+#      the case the old runner certified as passing.
+#
+#   2. PINNED ASSERTION COUNTS (closes the remaining half of 019fa83e8310).
+#      A manifest entry may carry `assertions=N`; the suite then fails unless
+#      it reports exactly N total (passed+failed). The per-suite floor used
+#      to be `n_pass > 0`, which `check(true); quit(0)` at the top of _init()
+#      satisfies while every real assertion silently skips. Growing a suite
+#      means re-pinning — a deliberate, reviewed manifest edit, same
+#      philosophy as adding the suite itself.
+#
+#   3. REAL-WORKER PROOF. A manifest entry may carry `real-worker`; the suite
+#      then fails unless its Results line proves `real_worker_used=true`.
+#      The E2E suites' worker seams fall back to canned results when the
+#      binary/wrapper invocation fails, and that fallback is allowed to keep
+#      the suite RUNNABLE — but it can never satisfy an E2E acceptance, so
+#      the gate refuses it. The seam prints a REAL-WORKER INVOCATION FAILED
+#      line with the actual worker error before falling back; read that, not
+#      the green assertion count.
+#
+# All three are covered by negative self-tests: scripts/test-gd-runner.sh
+# plants a compile error, a forced worker-false, an assertion-count drift and
+# a mid-suite SCRIPT ERROR into a sandbox suite dir and asserts this script
+# exits nonzero on each (and zero on the healthy control).
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PCB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PLUGINS_ROOT="$(cd "${PCB_DIR}/.." && pwd)"
-GD_TEST_DIR="${PCB_DIR}/tests/gd"
+# RUN_GD_TESTS_SUITE_DIR is the self-test seam (scripts/test-gd-runner.sh
+# points it at a sandbox of planted-defect suites). Everything derived from
+# the suite dir — glob, manifest, allowlist — follows it; nothing else does.
+GD_TEST_DIR="${RUN_GD_TESTS_SUITE_DIR:-${PCB_DIR}/tests/gd}"
 
 PREFLIGHT_ONLY=0
 declare -a positional=()
@@ -138,6 +180,13 @@ if [ "${PREFLIGHT_ONLY}" -eq 0 ] && ! command -v godot >/dev/null 2>&1; then
   echo "error: 'godot' not found on PATH" >&2
   exit 2
 fi
+# python3 has two execution-path jobs: deriving each suite's res:// path (one
+# derivation for default and sandbox suite dirs alike), and the E2E suites'
+# own e2e_route_stdio.py worker bridge. Preflight needs neither.
+if [ "${PREFLIGHT_ONLY}" -eq 0 ] && ! command -v python3 >/dev/null 2>&1; then
+  echo "error: 'python3' not found on PATH" >&2
+  exit 2
+fi
 
 # The tests' own preloads are hardcoded to the literal string
 # "res://../../minerva-plugins/pcb/...", which only resolves if the
@@ -177,12 +226,45 @@ if [ ! -f "${MANIFEST}" ]; then
   exit 2
 fi
 
+# Manifest v2 line format:  <filename> [assertions=N] [real-worker]
+# The first whitespace-separated token is the suite filename (what preflight
+# and the both-direction set check match on); the rest are per-suite
+# enforcement attributes. Unknown attributes are a hard error — a typo'd
+# `real-workr` that silently parsed as nothing would un-enforce the very
+# thing the entry was written to enforce.
 declare -a manifest_names=()
+declare -A manifest_assertions=()
+declare -A manifest_real_worker=()
 while IFS= read -r line; do
   case "${line}" in
     ""|"#"*) continue ;;
   esac
-  manifest_names+=("${line}")
+  read -r -a fields <<< "${line}"
+  if [ "${#fields[@]}" -eq 0 ]; then
+    continue  # whitespace-only line
+  fi
+  name="${fields[0]}"
+  manifest_names+=("${name}")
+  for attr in "${fields[@]:1}"; do
+    case "${attr}" in
+      assertions=*)
+        val="${attr#assertions=}"
+        if ! [[ "${val}" =~ ^[0-9]+$ ]] || [ "${val}" -eq 0 ]; then
+          echo "error: ${MANIFEST}: suite '${name}' has non-positive-integer assertions pin '${attr}'" >&2
+          exit 2
+        fi
+        manifest_assertions["${name}"]="${val}"
+        ;;
+      real-worker)
+        manifest_real_worker["${name}"]=1
+        ;;
+      *)
+        echo "error: ${MANIFEST}: suite '${name}' has unknown attribute '${attr}'" >&2
+        echo "  (known: assertions=N, real-worker)" >&2
+        exit 2
+        ;;
+    esac
+  done
 done < "${MANIFEST}"
 
 if [ "${#manifest_names[@]}" -eq 0 ]; then
@@ -284,6 +366,61 @@ if [ "${PREFLIGHT_ONLY}" -eq 1 ]; then
   exit 0
 fi
 
+# Known-harness-diagnostics allowlist (execution only — preflight executes
+# nothing, so it has nothing to scan). Comments/blanks are stripped into a
+# scratch copy before use: grep -v -f treats a blank line as a
+# match-everything pattern, which would filter EVERY diagnostic and silently
+# disarm the whole check — the exact failure mode this runner exists to
+# prevent, so it is treated as a harness-config error instead.
+ALLOWLIST="${GD_TEST_DIR}/KNOWN_HARNESS_DIAGNOSTICS"
+if [ ! -f "${ALLOWLIST}" ]; then
+  echo "error: known-harness-diagnostics allowlist not found: ${ALLOWLIST}" >&2
+  echo "  (required for execution runs — every SCRIPT ERROR/failed-script-load" >&2
+  echo "   diagnostic not matching it fails the suite that printed it)" >&2
+  exit 2
+fi
+ALLOWLIST_CLEAN="$(mktemp)"
+grep -Ev '^[[:space:]]*(#|$)' "${ALLOWLIST}" > "${ALLOWLIST_CLEAN}" || true
+if [ ! -s "${ALLOWLIST_CLEAN}" ]; then
+  echo "error: allowlist ${ALLOWLIST} has no patterns (only comments/blanks)" >&2
+  rm -f "${ALLOWLIST_CLEAN}"
+  exit 2
+fi
+
+# Emit one "MESSAGE @@ at: LOCATION" record per fatal diagnostic in a
+# captured suite log. Scope is deliberately the two fatal families the
+# acceptance names — `SCRIPT ERROR:` (compile/parse/runtime script errors)
+# and `ERROR: Failed to load script` — NOT every `ERROR:` engine line
+# (headless runs legitimately print Node-not-found/socket noise that is not
+# a script-layer verdict). The `at:` line that follows a diagnostic is glued
+# onto the record so the allowlist can pin a message to a location instead
+# of blessing it everywhere.
+_fatal_diagnostics() {
+  awk '
+    /^SCRIPT ERROR: / || /^ERROR: Failed to load script / {
+      if (pending != "") print pending " @@ "
+      pending = $0
+      next
+    }
+    /^[ \t]+at: / {
+      if (pending != "") {
+        loc = $0
+        sub(/^[ \t]+/, "", loc)
+        print pending " @@ " loc
+        pending = ""
+      }
+      next
+    }
+    {
+      if (pending != "") {
+        print pending " @@ "
+        pending = ""
+      }
+    }
+    END { if (pending != "") print pending " @@ " }
+  ' "$1"
+}
+
 overall_rc=0
 declare -a results=()
 total_pass=0
@@ -293,7 +430,7 @@ total_suites_ok=0
 # Results line can be parsed after the process exits. Reused across
 # iterations; cleaned up on any exit path.
 RESULTS_TMP="$(mktemp)"
-trap 'rm -f "${RESULTS_TMP}"' EXIT
+trap 'rm -f "${RESULTS_TMP}" "${ALLOWLIST_CLEAN}"' EXIT
 
 # Import the host project before running anything. Godot resolves `class_name`
 # globals through .godot/global_script_class_cache.cfg, which is generated on
@@ -316,7 +453,13 @@ echo
 
 for test_path in "${tests[@]}"; do
   name="$(basename "${test_path}")"
-  res_script="res://../../minerva-plugins/pcb/tests/gd/${name}"
+  # res:// path derived from where the suite file actually is, relative to
+  # the host's res:// root — ONE derivation for the default dir (yields the
+  # exact "res://../../minerva-plugins/..." string the suites' own preloads
+  # hardcode, given the sibling check above) and for a self-test sandbox
+  # alike. Two hand-maintained path strings that must agree is how the
+  # preflight/CI drift documented at the HOST CONTRACT note happened.
+  res_script="res://$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "${test_path}" "${MINERVA_DIR}/src")"
   echo "=== ${name} ==="
 
   # Tee so the run stays human-watchable live (nothing regresses for a
@@ -360,6 +503,50 @@ for test_path in "${tests[@]}"; do
   elif [ "${n_pass}" -eq 0 ]; then
     suite_ok=0
     fail_reason="Results line reports 0 passed assertions"
+  fi
+
+  # Pinned assertion count (manifest `assertions=N`): reported total must
+  # equal the pin exactly. `quit(0)` planted after one early check, or a
+  # silently skipped test block, reads exactly like a shrunken total with a
+  # green exit — the pre-pin floor (`n_pass > 0`) blessed both.
+  if [ "${suite_ok}" -eq 1 ] && [ -n "${manifest_assertions[${name}]:-}" ]; then
+    pinned="${manifest_assertions[${name}]}"
+    reported_total=$((n_pass + n_fail))
+    if [ "${reported_total}" -ne "${pinned}" ]; then
+      suite_ok=0
+      fail_reason="assertion count drifted: reported ${reported_total} total, manifest pins ${pinned} — if the suite legitimately grew or shrank, re-pin in EXPECTED_SUITES (deliberate own-commit); otherwise assertions are being skipped"
+    fi
+  fi
+
+  # Real-worker proof (manifest `real-worker`): the Results line must carry
+  # real_worker_used=true. =false or an absent field means the suite ran its
+  # canned subprocess-boundary fake — fine for keeping the suite runnable,
+  # never fine as E2E evidence. The seam prints REAL-WORKER INVOCATION
+  # FAILED with the worker's actual error before falling back; that line in
+  # the log above is the thing to fix.
+  if [ "${suite_ok}" -eq 1 ] && [ -n "${manifest_real_worker[${name}]:-}" ]; then
+    if [[ "${results_line}" != *"real_worker_used=true"* ]]; then
+      suite_ok=0
+      fail_reason="real-worker-required suite did not prove real_worker_used=true (Results line: '${results_line}') — canned fallback cannot satisfy an E2E acceptance; see the REAL-WORKER INVOCATION FAILED line in the output above"
+    fi
+  fi
+
+  # Fatal diagnostics not on the known-harness allowlist fail the suite even
+  # when everything above was green — the exact false-green 019ff2b1fccb
+  # documented: SCRIPT ERROR / failed script loads in the log while the
+  # runner printed 47/47.
+  if [ "${suite_ok}" -eq 1 ]; then
+    diag_residue="$(_fatal_diagnostics "${RESULTS_TMP}" | grep -Ev -f "${ALLOWLIST_CLEAN}" || true)"
+    if [ -n "${diag_residue}" ]; then
+      suite_ok=0
+      fail_reason="fatal Godot diagnostics not on the known-harness allowlist (${ALLOWLIST}):"
+      echo "!!! ${name}: unexplained fatal diagnostics:" >&2
+      while IFS= read -r diag_line; do
+        echo "      ${diag_line}" >&2
+      done <<< "${diag_residue}"
+      echo "    If (and only if) a diagnostic is provably the harness's and not" >&2
+      echo "    the suite's, allowlist it in ${ALLOWLIST} with a dated comment." >&2
+    fi
   fi
 
   if [ "${suite_ok}" -eq 1 ]; then

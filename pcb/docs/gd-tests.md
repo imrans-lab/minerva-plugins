@@ -92,9 +92,17 @@ was fixed (docket `019fa83e8310`), deleting 29 of the 30 suites made the
 runner print `gd test suite passed (1/1, ...)` and exit 0 — only the
 all-suites-gone case (`${#tests[@]} -eq 0`) was caught.
 
-The fix is a checked-in manifest, `pcb/tests/gd/EXPECTED_SUITES` — one
-filename per line, `#`-comments and blank lines ignored. As a **pre-flight
-step**, before `--import` and before any suite runs, `run-gd-tests.sh`
+The fix is a checked-in manifest, `pcb/tests/gd/EXPECTED_SUITES` —
+`#`-comments and blank lines ignored, one suite per line in the v2 format
+
+```
+<filename> [assertions=N] [real-worker]
+```
+
+(the attributes are the enforcement layers described in the next section;
+an unknown attribute is an `exit 2` hard error, so a typo cannot silently
+un-enforce anything). As a **pre-flight step**, before `--import` and before
+any suite runs, `run-gd-tests.sh`
 cross-checks the glob's discovered file list against the manifest and fails
 (`exit 2`, the same "harness/environment problem" convention as the other
 pre-flight guards — not `1`, which means "a suite failed") in either
@@ -116,6 +124,60 @@ The final summary line also reports real, independent counts —
 assertions)` — rather than the pre-fix `${#tests[@]}/${#tests[@]}`, a ratio
 that is 100% by construction regardless of how many suites the glob actually
 found.
+
+## False-green hardening (bug 019ff2b1fccb)
+
+Since CI went `--preflight-only`, this runner is the **only execution gate**
+for the panel layer — and it was measured certifying runs it should have
+refused: a "47/47 green" run whose log contained `SCRIPT ERROR` / `Compile
+Error` diagnostics, and E2E suites reporting `real_worker_used=false`
+because their worker seams had silently degraded to canned results after the
+Round E IR cutover (`component 'U1' has no footprint ref` — nobody saw the
+refusal because the fallback swallowed it). Three enforcement layers close
+this, all fail-closed:
+
+**1. Fatal diagnostics fail the suite that printed them.** Every
+`SCRIPT ERROR:` and `ERROR: Failed to load script` line in a suite's
+captured output — paired with its `at:` location into one record — must
+match a pattern in the checked-in allowlist
+`pcb/tests/gd/KNOWN_HARNESS_DIAGNOSTICS`, or the suite fails even with a
+green Results line. The allowlist exists because `godot --script`
+double-loads each suite: the first pass runs before autoloads register, so
+any preload chain reaching `SingletonObject` prints a compile-noise cascade,
+then the second pass runs the suite fine. That noise is the harness's; the
+allowlist patterns pin it to exact messages and locations, with the proof
+written next to each entry. Adding a pattern to silence a red run is the
+same act as deleting the assertion that failed — every entry needs a dated
+proof that the diagnostic is the harness's, not the suite's. Deliberately
+NOT scanned: plain `ERROR:` engine lines (headless runs legitimately print
+Node-not-found/socket noise that is not a script-layer verdict).
+
+**2. Pinned assertion counts** (`assertions=N`, closing the remaining half
+of `019fa83e8310`): the suite must report exactly N total (passed+failed).
+The old per-suite floor was `n_pass > 0`, which `check(true); quit(0)`
+planted above the real assertions satisfies while everything real silently
+skips. When a suite legitimately grows or shrinks, re-pin in a deliberate,
+reviewed own-commit.
+
+**3. Real-worker proof** (`real-worker`): the suite's Results line must
+carry `real_worker_used=true`. The E2E suites' seams still fall back to
+canned subprocess-boundary fakes — quietly when the pcb-plugin binary
+genuinely isn't built (the suite stays runnable anywhere), and LOUDLY via a
+`REAL-WORKER INVOCATION FAILED` line carrying the worker's actual error
+when the binary exists but the call failed. Either way the gate refuses the
+run: a canned result can never satisfy an E2E acceptance. When the gate
+fails a real-worker suite, the `REAL-WORKER INVOCATION FAILED` line above
+it in the log is the diagnosis — not the green assertion count.
+
+All three layers have negative self-tests: `pcb/scripts/test-gd-runner.sh
+<minerva-checkout>` plants a compile error, a forced `real_worker_used=false`,
+an assertion-count drift and a mid-suite `SCRIPT ERROR` into sandbox suite
+dirs (via the runner's `RUN_GD_TESTS_SUITE_DIR` seam) and asserts the runner
+exits nonzero on each — plus a healthy control proving it still exits zero
+when everything is genuinely fine. The self-test executes godot against the
+Minerva host, so it shares the real run's constraints (kills a running
+Minerva; needs built GDExtensions) and runs at testex next to the real
+suite run. A runner change is not done until it exits 0.
 
 ## Real plugin-subprocess suites need a BUILT Minerva checkout
 

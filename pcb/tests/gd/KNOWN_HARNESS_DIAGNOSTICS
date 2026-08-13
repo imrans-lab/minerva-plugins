@@ -1,0 +1,67 @@
+# Known-harness fatal-diagnostic allowlist for pcb/scripts/run-gd-tests.sh
+# (bug 019ff2b1fccb). One extended-regex pattern per line, matched against
+# composite records of the form
+#
+#     <diagnostic line> @@ <its `at:` location line>
+#
+# built from each suite's captured output. Every `SCRIPT ERROR:` and
+# `ERROR: Failed to load script` record that matches NO pattern here FAILS
+# the suite that printed it, even when its Results line is green. So each
+# entry is a claim: "this diagnostic is the HARNESS's, not the suite's" —
+# and each needs the proof written next to it. Add entries only with a dated
+# comment explaining the proof; a pattern added to silence a red run is the
+# same act as deleting the assertion that failed.
+#
+# THE DOUBLE-LOAD QUIRK all the compile-noise entries stem from (measured
+# 2026-08-13, gdtests log at minerva-plugins a95a139): godot --headless
+# --script <suite.gd> loads the script TWICE. The first load happens before
+# the host project's autoloads register, so any script in the suite's
+# preload chain that names SingletonObject fails to compile, cascading
+# "Failed to compile depended scripts." records up through the helpers into
+# the suite file itself, ending in one "Failed to load script ... with error
+# 'Compilation failed'". The second load, after autoloads register,
+# succeeds — the suite runs and reports. A suite that is GENUINELY broken
+# fails both loads and never prints a Results line, which the runner's
+# Results floor already fails; these patterns therefore never bless a suite
+# that did not actually run.
+
+# -- double-load pass-1 compile noise -----------------------------------------
+# Root cause: SingletonObject not yet registered. Deliberately pinned to the
+# autoload name AND to host-side scripts (res://Scripts/) — an "Identifier
+# not found" for anything else, or at a plugin/test path, is a real defect
+# and must fail.
+^SCRIPT ERROR: Compile Error: Identifier not found: SingletonObject @@ at: GDScript::reload \(res://Scripts/
+
+# Cascade records ("this script failed because a dependency did"). Location
+# is deliberately unpinned: the cascade legitimately walks through
+# res://test/helpers/ and the suite file itself. Blessing the cascade is
+# safe because the cascade NEVER appears without its root-cause record, and
+# only the SingletonObject root above is blessed — any other root (a Parse
+# Error in a suite, an unknown identifier in a panel script) still fails on
+# its own record. Proven by the 2026-08-12 log: test_staged_verbs' genuine
+# "Parse Error: ... must be called with 'await'" sat beside these cascades
+# and matches nothing here.
+^SCRIPT ERROR: Compile Error: Failed to compile depended scripts\. @@ at: GDScript::reload \(
+
+# The pass-1 terminal record. Only the "Compilation failed" flavor is
+# blessed — 'with error "Parse error"' (what a genuinely unparseable suite
+# prints) is NOT.
+^ERROR: Failed to load script ".*" with error "Compilation failed"\. @@ at: load \(modules/gdscript/gdscript\.cpp:
+
+# -- headless-host runtime noise ----------------------------------------------
+# MinervaIPC.await_reply calls get_tree().create_timer() — under a
+# --script SceneTree there is no scene tree, so the worker-unavailable test
+# paths (deliberately exercised by several suites) abort await_reply with
+# this error and the caller treats the null reply as the failure the test
+# expects. The error is load-bearing for those PASSing assertions. Pinned to
+# the exact method+file.
+^SCRIPT ERROR: Cannot call method 'create_timer' on a null value\. @@ at: MinervaIPC\.await_reply \(res://Scripts/Services/Plugins/MinervaIPC\.gd:
+
+# SingletonObject.initialize_plugins tries to .new() plugin scripts that do
+# not compile in the headless host (other installed plugins' UI scripts, not
+# pcb's) — host startup noise present in every suite's log regardless of
+# what the suite does. Pinned to the exact function+file. Known debt: this
+# CAN mask a pcb panel-script compile failure that first manifests inside
+# initialize_plugins; the suites' own preloads of those same scripts fail
+# louder and earlier, which is the coverage relied on here.
+^SCRIPT ERROR: Invalid call\. Nonexistent function 'new' in base 'GDScript'\. @@ at: initialize_plugins \(res://Scripts/Models/singleton_object\.gd:

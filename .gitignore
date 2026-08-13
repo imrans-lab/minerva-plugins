@@ -62,3 +62,6 @@ agent-relay/agent_relay_state.json
 # audit + a pinned board_revision/fingerprint) on every test load of that board.
 *.annotations.json
 *.routing.json
+# gd-runner self-test sandboxes (pcb/scripts/test-gd-runner.sh) — removed on
+# exit by trap; only survive a hard kill.
+.gd-selftest.*/
