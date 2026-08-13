@@ -158,7 +158,10 @@ func _init() -> void:
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is the placement-coworking SPIKE bump
+	# entry could hide behind it. This is the Epoch OFC station-4 bump
+	# (96 -> 97, minerva_pcb_board_check — the live-board census, the promote
+	# gate's read-only twin; kills detection-by-refusal, docket 019ff942beb4),
+	# sequenced after the placement-coworking SPIKE bump
 	# (94 -> 96, propose_placement + placement_update — staged component-move
 	# ghosts, docket 019ff8615fbe; SPIKE quality, semantics under
 	# ratification), sequenced after the Epoch LIB2 station-2 bump
@@ -178,7 +181,7 @@ func _init() -> void:
 	# 8's (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's
 	# (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the
 	# same serialization point.
-	check("total registered tool count == 96", registered.size() == 96,
+	check("total registered tool count == 97", registered.size() == 97,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
