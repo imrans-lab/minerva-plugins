@@ -51,6 +51,10 @@ const PCB_PLUGIN_ID := "pcb"
 var _pass := 0
 var _fail := 0
 var _used_real_worker := false
+# Latched by any seam fallback: once ONE real-worker call has fallen back,
+# a later successful call must not flip the report back to true — the run
+# as a whole did not prove the real worker end to end (bug 019ff2b1fccb).
+var _worker_fell_back := false
 
 var panel = null
 var host = null
@@ -321,27 +325,49 @@ func _with_resolvable_footprints(params: Dictionary) -> Dictionary:
 	return wire
 
 
+## Prints WHY a real-worker invocation fell back, loudly, before the canned
+## result masks it — this suite is designated real-worker in EXPECTED_SUITES,
+## so the gd runner FAILS the run on real_worker_used=false.
+func _surface_worker_failure(exit_code: int, output: Array, parsed: Variant) -> void:
+	var detail := "no output from wrapper"
+	if parsed is Dictionary:
+		detail = JSON.stringify((parsed as Dictionary).get("error", parsed))
+	elif not output.is_empty():
+		detail = str(output[0]).left(500)
+	printerr("[test_pcb_drc_propose] REAL-WORKER INVOCATION FAILED (exit=%d): %s" % [exit_code, detail])
+	printerr("[test_pcb_drc_propose] canned fallback engaged — real_worker_used will report false and the gd runner fails this suite; fix the invocation, do not trust the green assertions")
+
+
 func raw_worker_envelope(params: Dictionary) -> Dictionary:
 	var binary_path := ProjectSettings.globalize_path(PLUGIN_ROOT + "/pcb-plugin")
 	var wrapper_path := ProjectSettings.globalize_path(PLUGIN_ROOT + "/scripts/e2e_route_stdio.py")
-	if FileAccess.file_exists(binary_path) and FileAccess.file_exists(wrapper_path):
-		var req_uri := "user://drc_propose_route_request.json"
-		var f := FileAccess.open(req_uri, FileAccess.WRITE)
-		if f != null:
-			f.store_string(JSON.stringify(_with_resolvable_footprints(params)))
-			f.close()
-			var req_abs := ProjectSettings.globalize_path(req_uri)
-			var output: Array = []
-			var exit_code := OS.execute("python3", [wrapper_path, binary_path, req_abs], output, true)
-			DirAccess.remove_absolute(req_abs)
-			if exit_code == 0 and not output.is_empty():
-				var parsed: Variant = JSON.parse_string(str(output[0]))
-				if parsed is Dictionary and bool((parsed as Dictionary).get("ok", false)):
-					_used_real_worker = true
-					return parsed
+	if not FileAccess.file_exists(binary_path) or not FileAccess.file_exists(wrapper_path):
+		_used_real_worker = false
+		push_warning("[test_pcb_drc_propose] real pcb-plugin binary not built — " +
+			"canned single-segment fallback (no DRC)")
+		return {"ok": true, "result": _canned_result_for(params)}
+	var req_uri := "user://drc_propose_route_request.json"
+	var f := FileAccess.open(req_uri, FileAccess.WRITE)
+	if f == null:
+		_used_real_worker = false
+		printerr("[test_pcb_drc_propose] REAL-WORKER INVOCATION FAILED: cannot write %s" % req_uri)
+		return {"ok": true, "result": _canned_result_for(params)}
+	f.store_string(JSON.stringify(_with_resolvable_footprints(params)))
+	f.close()
+	var req_abs := ProjectSettings.globalize_path(req_uri)
+	var output: Array = []
+	var exit_code := OS.execute("python3", [wrapper_path, binary_path, req_abs], output, true)
+	DirAccess.remove_absolute(req_abs)
+	var parsed: Variant = null
+	if not output.is_empty():
+		parsed = JSON.parse_string(str(output[0]))
+	if exit_code == 0 and parsed is Dictionary and bool((parsed as Dictionary).get("ok", false)):
+		if not _worker_fell_back:
+			_used_real_worker = true
+		return parsed
+	_worker_fell_back = true
 	_used_real_worker = false
-	push_warning("[test_pcb_drc_propose] real pcb-plugin binary unavailable — " +
-		"falling back to a documented canned single-segment result (no DRC)")
+	_surface_worker_failure(exit_code, output, parsed)
 	return {"ok": true, "result": _canned_result_for(params)}
 
 
