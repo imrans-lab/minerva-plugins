@@ -16,12 +16,15 @@ extends RefCounted
 ## "bottom" — lowercase, 1-based — aliasing KiCad "F.Cu", "In1.Cu".."In30.Cu",
 ## "B.Cu". The inner range stops at 30 because KiCad's copper stack does.
 ##
-## Inner layers are AUTHORABLE, NOT FABRICABLE (the same pattern zones use).
 ## CANON_TO_KICAD / KICAD_TO_CANON / STACK_INDEX below stay the TWO-layer
-## FABRICABLE stack on purpose: the worker's compile step builds a board's
-## stackup from those tables and refuses any stack other than exactly
-## ["top","bottom"]. Inner-layer naming is a FUNCTION-level rule here (see
-## inner_layer_index), never a table entry.
+## OUTER pair on purpose. Since epoch GA-1 a board's resolved stackup comes
+## from its OWN declaration (PCBData.layers on this side;
+## compile_board._build_layer_stack in the worker) and its fabricable DEPTH is
+## the selected manufacturer profile's max_copper_layers capability — these
+## tables are the through-via span contract and the absent-declaration
+## default, not "the stack". Inner-layer naming is a FUNCTION-level rule here
+## (see inner_layer_index), never a table entry: adding inner entries would
+## widen is_legal_via_span into admitting blind/buried spans nobody fabricates.
 ##
 ## Direction asymmetry (deliberate, mirrors Python):
 ##  * WRITE/export side — canon_to_kicad FAILS CLOSED: an empty or unknown name
@@ -48,29 +51,60 @@ const STACK_INDEX := {"top": 0, "bottom": 1}
 const MAX_INNER_LAYERS := 30
 
 
-## One entry in the layer stack. Kept as a plain Dictionary (host_owned save
-## conventions favour dict/JSON-friendly shapes over typed inner classes).
-## An unknown layer_id yields kicad_alias "" (and a push_error from
-## canon_to_kicad) rather than a silent "F.Cu" — a stack entry that lies about
-## its KiCad name is worse than one that is visibly empty.
-static func _entry(layer_id: String, index: int, color: Color) -> Dictionary:
-	return {
-		"layer_id": layer_id,
-		"kicad_alias": canon_to_kicad(layer_id),
-		"index": index,
-		"color": color,
-		"kind": "copper",
-		"routing_enabled": true,
-		"visible": true,
-	}
+## The board's default copper stack when it declares none (the same
+## absence-convention the worker and Go codec use). Plain canonical ids, not
+## rich entries: PCBData.layers is an Array[String] and every picker/renderer
+## derives per-layer presentation (colors, labels) itself.
+##
+## (Epoch GA-1 note: this replaced ``default_two_layer()``/``_entry()`` — dead
+## API whose rich entries nothing consumed and whose hardcoded colors had
+## silently diverged from the canvas palette.)
+static func default_stack() -> Array:
+	return ["top", "bottom"]
 
 
-## The default 2-layer through-hole stack (top + bottom copper).
-static func default_two_layer() -> Array:
-	return [
-		_entry("top", 0, Color(0.85, 0.2, 0.2)),
-		_entry("bottom", 1, Color(0.2, 0.4, 0.85)),
-	]
+## Shape rule for a DECLARED stack — the GD mirror of Go's ``validateLayers`` /
+## Python's ``_check_layers`` (epoch GA-1): canonical names only, no
+## duplicates, ``top`` first, ``bottom`` last, inners contiguous from ``in1``
+## in stack order. Returns "" when valid, else a human-readable refusal (the
+## ``set_zone_layer`` refusal-string convention). The caller decides what to do
+## with copper stranded on a removed layer — that is an OCCUPANCY question
+## (PCBData.set_board_layers), not a shape question.
+static func stack_shape_error(candidate: Array) -> String:
+	if candidate.size() < 2:
+		return "A copper stack needs at least top and bottom (got %d layer(s))." % candidate.size()
+	var seen := {}
+	for i in candidate.size():
+		var name := str(candidate[i]).strip_edges().to_lower()
+		if not is_canonical_layer(name):
+			return "layers[%d] \"%s\" is not a canonical copper layer (want \"top\", \"bottom\", or \"in<k>\" with 1 <= k <= %d)." % [i, str(candidate[i]), MAX_INNER_LAYERS]
+		if seen.has(name):
+			return "layers[%d] \"%s\" duplicates layers[%d]." % [i, name, seen[name]]
+		seen[name] = i
+	if not seen.has("top") or not seen.has("bottom"):
+		return "A declared stack must contain both \"top\" and \"bottom\"."
+	if str(candidate[0]).strip_edges().to_lower() != "top":
+		return "layers[0] must be \"top\" — the list order is the stack order."
+	var last := candidate.size() - 1
+	if str(candidate[last]).strip_edges().to_lower() != "bottom":
+		return "layers[%d] must be \"bottom\" — the list order is the stack order." % last
+	for i in range(1, last):
+		var want := "in%d" % i
+		if str(candidate[i]).strip_edges().to_lower() != want:
+			return "layers[%d] is \"%s\", want \"%s\" — inner layers are contiguous from \"in1\" in stack order." % [i, str(candidate[i]), want]
+	return ""
+
+
+## The canonical stack for a given copper-layer COUNT (2 -> [top, bottom],
+## 4 -> [top, in1, in2, bottom]): the only shape ``stack_shape_error`` admits
+## for that count, so UI/tools that think in "number of layers" build the list
+## through one derivation instead of each assembling names by hand.
+static func stack_for_count(count: int) -> Array:
+	var out := ["top"]
+	for k in range(1, max(count, 2) - 1):
+		out.append("in%d" % k)
+	out.append("bottom")
+	return out
 
 
 ## The canonical span (top<->bottom) a 2-layer through-via bridges. One place
@@ -102,6 +136,20 @@ static func inner_layer_index(layer_id) -> int:
 		return 0
 	var k := int(digits)
 	return k if (k >= 1 and k <= MAX_INNER_LAYERS) else 0
+
+
+## Returns k for an inner-copper name in EITHER spelling — canonical "in<k>"
+## or KiCad "In<k>.Cu" — else 0. SILENT (safe in a draw loop), unlike
+## kicad_to_canon, which warns on non-copper names: color/presentation lookups
+## hand this whatever layer string an annotation carries, including silk/fab
+## names that are simply "not inner copper", not errors. (Epoch GA-1, for the
+## route-hint inner palette.)
+static func inner_index_any(layer_id) -> int:
+	var low := str(layer_id).strip_edges().to_lower()
+	var k := inner_layer_index(low)
+	if k > 0:
+		return k
+	return _kicad_inner_layer_index(low)
 
 
 ## Returns k for a lower-cased KiCad inner name "in<k>.cu", else 0.

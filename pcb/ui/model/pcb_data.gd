@@ -1274,6 +1274,57 @@ func zone_layer_error(layer: String) -> String:
 	return ""
 
 
+## Replace the board's declared copper stack (epoch GA-1). Returns "" on
+## success, else a human-readable refusal (the set_zone_layer convention).
+##
+## Two gates, both fail-closed:
+##  * SHAPE — PcbLayerStack.stack_shape_error (the one GD home of the rule Go's
+##    validateLayers / Python's _check_layers enforce): canonical names, no
+##    dups, top first, bottom last, inners contiguous from in1.
+##  * OCCUPANCY — shrinking the stack must not strand authored copper: a trace
+##    or zone on a layer being removed refuses with a listing rather than
+##    orphaning it (the canvas would still DRAW an undeclared-layer trace —
+##    deliberately, so nothing vanishes — but serialize/compile would then
+##    refuse the board; refusing HERE keeps the board always-consistent).
+##    Vias never block: a through-via spans top<->bottom, which every legal
+##    stack contains.
+##
+## Callers snapshot history themselves after a successful edit
+## (data.save_to_history(...), the _set_zone_layer handler convention); the
+## layers bucket makes the edit undoable.
+func set_board_layers(new_layers: Array) -> String:
+	var candidate: Array[String] = []
+	for entry in new_layers:
+		candidate.append(str(entry).strip_edges().to_lower())
+	var shape_refusal := PcbLayerStack.stack_shape_error(candidate)
+	if not shape_refusal.is_empty():
+		return shape_refusal
+	if candidate == layers:
+		return ""
+	var stranded: Array[String] = []
+	for trace_id in traces:
+		var trace = traces[trace_id]
+		if trace.layer not in candidate:
+			stranded.append("trace %s (layer %s)" % [str(trace_id), trace.layer])
+	for zone in zones:
+		var zone_layer := str(zone.get("layer", ""))
+		if not zone_layer.is_empty() and zone_layer not in candidate:
+			stranded.append("zone %s (layer %s)" % [str(zone.get("id", "?")), zone_layer])
+	if not stranded.is_empty():
+		var shown: Array[String] = stranded.slice(0, 5)
+		var suffix := "" if stranded.size() <= 5 else " (and %d more)" % (stranded.size() - 5)
+		return ("Cannot remove layers that still carry copper: %s%s. " +
+			"Delete or re-layer that copper first.") % [", ".join(shown), suffix]
+	var old_layers := layers.duplicate()
+	layers = candidate
+	record_change("set_board_layers", {
+		"old_layers": old_layers,
+		"layers": layers.duplicate(),
+	})
+	structure_changed.emit()
+	return ""
+
+
 ## Create an authored zone and add it to the board. Returns the new zone dict
 ## (the model's own, not a copy) or {} when zone_author_error refused it.
 ##
@@ -2213,7 +2264,15 @@ func save_to_history(action_name: String = "Change") -> void:
 		# create_cutout/remove_cutout are forward mutators like add_zone/
 		# remove_zone, so a cutout absent from a restored snapshot is a cutout
 		# the next undo of an unrelated edit would silently delete.
-		"cutouts": _cutouts_to_list()
+		"cutouts": _cutouts_to_list(),
+		# The layer STACK rides the snapshot as of epoch GA-1, because
+		# set_board_layers is now a mutator: undoing across a stack edit
+		# without this bucket would restore copper onto layers the board no
+		# longer declares (or strand a widened stack). _restore_state treats an
+		# ABSENT key as "leave the stack alone" so pre-GA-1 snapshots (none
+		# survive a session, but the absent-key rule is the codec's contract)
+		# stay applicable.
+		"layers": layers.duplicate()
 	}
 
 	# BUCKET 8 — the routing workspace's disposition layer (see the block above
@@ -2373,6 +2432,14 @@ func _restore_state(state: Dictionary) -> void:
 	_load_mounting_holes(state.get("mounting_holes", []))
 	zones = _zones_from_list(state.get("zones", []))
 	cutouts = _cutouts_from_list(state.get("cutouts", []))
+	# Layer stack (epoch GA-1): ABSENT key == leave the stack alone (the
+	# workspace/staged absent-key rule), so only snapshots taken since the
+	# stack became a mutable bucket ever rewrite it.
+	if state.has("layers"):
+		var restored_layers: Array[String] = []
+		for entry in state["layers"]:
+			restored_layers.append(str(entry))
+		layers = restored_layers
 
 	# BUCKET 8 — restore the workspace disposition layer LAST, after the board is
 	# whole, so a delegate that reads the board while restoring sees the state

@@ -181,6 +181,35 @@ var trace_layer_filter: String = "all":
 		view_changed.emit()
 		queue_redraw()
 
+## Per-layer visibility "eyes" (epoch GA-1): canonical copper ids the user has
+## hidden from the "All" view (View menu ▸ per-layer checkboxes). VIEW state,
+## deliberately NOT board state — it is never serialized (the 2-layer
+## byte-identity invariant stays trivially true) and resets per session,
+## exactly like trace_layer_filter. Composition rule with the filter, chosen
+## for predictability: under "All", the eyes decide; a SPECIFIC layer filter is
+## an explicit "show me this layer" and always shows it, hidden or not.
+var hidden_layers: Dictionary = {}
+
+
+## Toggle one layer's eye. `layer` may be canonical or KiCad-spelled — folded
+## ONCE here (the is_layer_visible normalisation-boundary rule; the draw-loop
+## predicate below never normalises).
+func set_layer_hidden(layer: String, hidden: bool) -> void:
+	var canon := _canonical_layer(layer)
+	var currently := hidden_layers.has(canon)
+	if currently == hidden:
+		return
+	if hidden:
+		hidden_layers[canon] = true
+	else:
+		hidden_layers.erase(canon)
+	view_changed.emit()
+	queue_redraw()
+
+
+func is_layer_hidden(layer: String) -> bool:
+	return hidden_layers.has(_canonical_layer(layer))
+
 ## ── SELECTION: ONE SET, THREE KINDS (item 019fb92f8b83) ───────────────────────
 ## The board selection is a single set that may span components, traces and
 ## zones at once. It is STORED as three id lists rather than one list of
@@ -1847,7 +1876,12 @@ func _layer_visible(layer: String) -> bool:
 	# "" is treated as "all" so a canvas whose filter was cleared rather than set
 	# renders the whole board instead of going blank.
 	if trace_layer_filter.is_empty() or trace_layer_filter == "all":
-		return true
+		# Under "All", the per-layer eyes decide (epoch GA-1). `layer` is
+		# already canonical here (this predicate's contract), so plain
+		# membership is safe and silent.
+		return not hidden_layers.has(layer)
+	# A specific filter is an explicit "show me this layer" — it wins over a
+	# hidden eye (see hidden_layers), and everything else stays hidden as ever.
 	return layer == trace_layer_filter
 
 
@@ -2034,15 +2068,35 @@ func _draw_single_trace(trace, layer_id: String) -> void:
 ## Two passes so KEEPOUTS ALWAYS LAND ON TOP of pours, regardless of the order
 ## the board file happened to list them in: a keepout is a constraint on the
 ## pour, and its warning render must not sit under pour geometry.
+##
+## WITHIN each pass, zones paint in STACK order — bottom-most copper first, the
+## same _stack_layers() walk _draw_traces uses (epoch GA-1): with N declared
+## layers, two overlapping pours on different layers must stack the way the
+## board physically does, not in board-file insertion order. A zone on an
+## undeclared layer paints LAST and stays visible, the traces rule exactly —
+## nothing an author wrote is ever silently undrawn.
 func _draw_zones() -> void:
 	if data.zones.is_empty():
 		return
+	var stack: Array = _stack_layers()
+	var by_layer := {}   # canonical layer -> Array[Dictionary]
+	var undeclared: Array = []
 	for zone in data.zones:
-		if not _is_keepout_zone(zone):
-			_draw_zone(zone, false)
-	for zone in data.zones:
-		if _is_keepout_zone(zone):
-			_draw_zone(zone, true)
+		var canon := PcbLayerStack.kicad_to_canon(str(zone.get("layer", "")))
+		if canon in stack:
+			if not by_layer.has(canon):
+				by_layer[canon] = []
+			by_layer[canon].append(zone)
+		else:
+			undeclared.append(zone)
+	for keepout_pass in [false, true]:
+		for i in range(stack.size() - 1, -1, -1):
+			for zone in by_layer.get(stack[i], []):
+				if _is_keepout_zone(zone) == keepout_pass:
+					_draw_zone(zone, keepout_pass)
+		for zone in undeclared:
+			if _is_keepout_zone(zone) == keepout_pass:
+				_draw_zone(zone, keepout_pass)
 
 
 func _is_keepout_zone(zone: Dictionary) -> bool:
@@ -2604,6 +2658,11 @@ enum CompVisibility { NONE, LANDS, FULL }
 ## the drill render on, whereas pad["layers"] is only filled in by the canonical
 ## pin-synthesis path (pcb_component.gd) — footprint-resolved pads pass it
 ## through from the footprint and can carry [].
+## `comp.layer` is the MOUNT SIDE ("top"/"bottom"), not a copper-stack entry —
+## do not feed it from the declared stack (epoch GA-1 note): under an inner-
+## layer view (in1..in30) no component is mounted THERE, so SMD parts correctly
+## resolve NONE and through-hole parts show LANDS via the pad loop below — the
+## barrel pierces every copper layer, the body sits on a surface.
 func _component_visibility(comp) -> CompVisibility:
 	if _layer_visible(str(comp.layer)):
 		return CompVisibility.FULL

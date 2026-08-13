@@ -23,6 +23,10 @@ test_candidate_canvas.gd assertions=278
 test_connectivity_baseline_surface.gd assertions=21
 test_epoch6_fix_regressions.gd assertions=9
 test_geometric_drc_surface.gd assertions=31
+# GA-1 grew this suite (stack_shape_error matrix, stack_for_count,
+# inner_index_any, the set_board_layers model/handler section) and retired the
+# dead default_two_layer checks; the exact count re-pins at GA testex from the
+# first trustworthy run, per the OFC precedent below.
 test_layer_stack.gd assertions=52
 test_manifest_tool_registration.gd assertions=42
 test_pad_synthesis.gd assertions=8

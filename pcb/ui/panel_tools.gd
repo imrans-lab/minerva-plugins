@@ -88,6 +88,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
 		"minerva_pcb_set_board_size":
 			return _set_board_size(host, args)
+		"minerva_pcb_set_board_layers":
+			return _set_board_layers(host, args)
 		"minerva_pcb_get_components":
 			return _get_components(host, args)
 		"minerva_pcb_get_nets":
@@ -267,6 +269,43 @@ static func _set_board_size(host, args: Dictionary) -> Dictionary:
 	var height: float = float(args.get("height", 100.0))
 	data.set_board_size(width, height)
 	return _ok({"board_width": width, "board_height": height})
+
+
+## Declare the board's copper stack (epoch GA-1). Accepts EITHER an explicit
+## `layers` array (validated by the one GD shape rule, PcbLayerStack.
+## stack_shape_error) or a `count` int (built through stack_for_count — the
+## only stack shape that count admits, so the two spellings cannot diverge).
+## Refusals — bad shape, or shrinking onto layers that still carry copper —
+## come back verbatim from the model as errors; a no-op re-declaration reports
+## changed=false. The reply always carries the (post-edit) declared stack so an
+## agent needs no second read to learn what it may now author on.
+static func _set_board_layers(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var new_layers: Array = []
+	if args.has("layers"):
+		var raw = args.get("layers")
+		if not (raw is Array):
+			return _err("layers must be an array of canonical copper layer names")
+		new_layers = raw
+	elif args.has("count"):
+		# GDScript JSON numbers arrive as floats; accept whole-number floats.
+		var count_raw = args.get("count")
+		var count := int(count_raw)
+		if float(count) != float(count_raw):
+			return _err("count must be a whole number of copper layers")
+		new_layers = PcbLayerStack.stack_for_count(count)
+	else:
+		return _err("Provide either layers (explicit canonical stack) or count (copper layer count)")
+	var before: Array = data.layers.duplicate()
+	var refusal: String = data.set_board_layers(new_layers)
+	if not refusal.is_empty():
+		return _err(refusal)
+	var changed: bool = data.layers != before
+	if changed:
+		data.save_to_history("Set board layers")
+	return _ok({"layers": data.layers.duplicate(), "changed": changed})
 
 
 static func _get_components(host, args: Dictionary) -> Dictionary:
@@ -1484,6 +1523,10 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 		metadata["board_height_mm"] = data.board_height
 		metadata["component_count"] = data.components.size()
 		metadata["net_count"] = data.nets.size()
+		# The declared copper stack (epoch GA-1): the stack is a mutable board
+		# property now, and this metadata block is the board-facts read every
+		# agent already gets with a look at the board.
+		metadata["layers"] = data.layers.duplicate()
 	if host.has_method("get_all_annotations"):
 		metadata["annotation_count"] = (host.call("get_all_annotations") as Array).size()
 
@@ -2771,7 +2814,9 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		# design_rules when set (via_diameter_mm/via_drill_mm), else the prior
 		# 0.8/0.4 defaults — never hardcoded over an authored board's rules.
 		# from_layer/to_layer are the canonical (top/bottom) span fields U1
-		# added; a 2-layer board's via always spans top<->bottom.
+		# added. top<->bottom stays correct at ANY declared depth (epoch GA-1):
+		# a THROUGH via spans the whole stack by definition, and through is the
+		# only via kind v1 models — blind/buried never materialize here.
 		var dr: Dictionary = data.design_rules if data.design_rules is Dictionary else {}
 		var via_size: float = float(dr.get("via_diameter_mm", 0.0))
 		if via_size <= 0.0:

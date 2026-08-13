@@ -404,6 +404,11 @@ const _VIEW_FLAGS := [
 	["Mask openings", "show_mask"],
 ]
 const _VIEW_MENU_EXPORT_ID := 100
+## Base id for the View menu's dynamic per-layer visibility section (epoch
+## GA-1): the separator takes the base itself, layer items take base+1+stack
+## index. Far above _VIEW_FLAGS' indices and _VIEW_MENU_EXPORT_ID so the three
+## id families can never collide.
+const _VIEW_MENU_LAYER_ID_BASE := 500
 
 ## True while restoring persisted state (board load OR annotation sidecar load).
 ## Suppresses the content_changed dirty relay so restoring never marks the tab
@@ -1064,6 +1069,12 @@ func _build_ui() -> void:
 
 	# Model → toolbar (board size label) refresh.
 	_data.structure_changed.connect(_update_board_size_label)
+	# Model → copper-layer pickers (epoch GA-1): the layer STACK is now a
+	# mutable board property (set_board_layers, undoable), and undo/redo also
+	# emit structure_changed — so every stack-mutation path re-derives the
+	# toolbar filter and both zone pickers from the declared stack instead of
+	# serving a picker built for a board that no longer exists.
+	_data.structure_changed.connect(_rebuild_copper_layer_pickers)
 
 	# Status bar. TRIM_ELLIPSIS is load-bearing, not cosmetic: an unclipped
 	# Label's MINIMUM width is its full text width, and this label carries the
@@ -2142,6 +2153,16 @@ func _rebuild_zone_prop_net_option(current_net: String) -> void:
 ## Populate the re-property layer picker from the declared copper stack, selecting
 ## the zone's current layer.
 ##
+## Re-derive every copper-layer picker from the board's declared stack (epoch
+## GA-1). One handler on structure_changed rather than three ad-hoc calls, so a
+## stack edit — MCP tool, dialog, or undo/redo — cannot refresh some pickers
+## and strand others. The zone-properties picker rebuilds only while its pane
+## is bound to a zone; _show_zone_properties owns that path.
+func _rebuild_copper_layer_pickers() -> void:
+	_rebuild_layer_option()
+	_rebuild_zone_layer_option()
+
+
 ## NO placeholder entry, unlike the arming picker: "follow the view filter" is a
 ## meaningful answer for a zone about to be DRAWN and a meaningless one for a zone
 ## that already exists on a layer. A board that declares no copper layers gets a
@@ -3613,11 +3634,43 @@ func _sync_view_menu_checks() -> void:
 		var idx := popup.get_item_index(i)
 		if idx >= 0:
 			popup.set_item_checked(idx, bool(_canvas.get(_VIEW_FLAGS[i][1])))
+	_rebuild_view_menu_layer_eyes(popup)
+
+
+## The per-layer visibility section of the View menu (epoch GA-1): one
+## checkable "eye" per DECLARED copper layer, labelled with the KiCad name the
+## selector uses. Rebuilt from the live stack on every about_to_popup — the
+## same lazy-sync moment the static checks use — so a stack edit can never
+## leave stale layer items behind. Items carry _VIEW_MENU_LAYER_ID_BASE +
+## stack index; the whole section (separator included) is torn down and
+## re-added each time, which is cheap at menu-open frequency.
+func _rebuild_view_menu_layer_eyes(popup: PopupMenu) -> void:
+	for i in range(popup.item_count - 1, -1, -1):
+		if popup.get_item_id(i) >= _VIEW_MENU_LAYER_ID_BASE:
+			popup.remove_item(i)
+	if _data == null or _data.layers.is_empty():
+		return
+	popup.add_separator("Copper layers", _VIEW_MENU_LAYER_ID_BASE)
+	for stack_index in _data.layers.size():
+		var canon := str(_data.layers[stack_index])
+		var label := PcbLayerStack.canon_to_kicad(canon)
+		if label.is_empty():
+			label = canon   # a non-copper declaration still gets an honest row
+		var id := _VIEW_MENU_LAYER_ID_BASE + 1 + stack_index
+		popup.add_check_item(label, id)
+		popup.set_item_checked(popup.get_item_index(id),
+			not _canvas.is_layer_hidden(canon))
 
 
 func _on_view_menu_id_pressed(id: int) -> void:
 	if id == _VIEW_MENU_EXPORT_ID:
 		_on_export_yaml_pressed()
+		return
+	if _canvas != null and _data != null and id > _VIEW_MENU_LAYER_ID_BASE:
+		var stack_index := id - _VIEW_MENU_LAYER_ID_BASE - 1
+		if stack_index >= 0 and stack_index < _data.layers.size():
+			var canon := str(_data.layers[stack_index])
+			_canvas.set_layer_hidden(canon, not _canvas.is_layer_hidden(canon))
 		return
 	if _canvas == null or id < 0 or id >= _VIEW_FLAGS.size():
 		return
@@ -4407,6 +4460,9 @@ func board_check() -> Dictionary:
 		"geometric": gate.get("geometric", {}),
 		"assembly": gate.get("assembly", {}),
 		"board_revision": checked_revision,
+		# The declared copper stack (epoch GA-1): the census is the read agents
+		# plan against, and what may be authored/routed is stack-dependent now.
+		"layers": _data.layers.duplicate() if _data != null else [],
 		"note": "read-only census — nothing was written, nothing was gated; these are the findings a promote would refuse on (empty refusals = it would pass)",
 	}
 	var advisory: Variant = gate.get("advisory", {})

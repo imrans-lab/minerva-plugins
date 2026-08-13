@@ -13,7 +13,10 @@ extends SceneTree
 ## the runner.
 ##
 ## Coverage:
-##   1. PcbLayerStack canon<->kicad round-trip + via-span legality (pure).
+##   1. PcbLayerStack canon<->kicad round-trip + via-span legality (pure),
+##      including the epoch GA-1 additions: default_stack/stack_for_count,
+##      stack_shape_error (the GD mirror of validateLayers/_check_layers),
+##      inner_index_any (the silent draw-loop-safe inner lookup).
 ##   2. FUNCTIONAL FLOOR (non-mocked): a REAL PCBData with a top trace, a bottom
 ##      trace, and a via spanning top<->bottom — serialise to the canonical board
 ##      dict (traces stay "top"/"bottom"; via carries from_layer/to_layer),
@@ -21,6 +24,11 @@ extends SceneTree
 ##      _export_trace_geometry to prove it emits KiCad "F.Cu"/"B.Cu" at the edge.
 ##   3. VIA + UNDO (GATE INV-1 guard): undo across a via-bearing checkpoint keeps
 ##      the via WITH its traces (not orphaned); redo returns both.
+##   5. SET_BOARD_LAYERS (epoch GA-1): the stack as a mutable, undoable board
+##      property — shape refusals verbatim from the one GD rule, occupancy
+##      refusal while copper sits on a removed layer, the layers history
+##      bucket across undo/redo, and the panel_tools MCP handler (count and
+##      layers spellings, reply shape, refusal passthrough).
 
 const PcbLayerStack := preload("res://../../minerva-plugins/pcb/ui/model/pcb_layer_stack.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -53,6 +61,7 @@ func _init() -> void:
 	_run_functional_floor()
 	_run_via_undo()
 	_run_host_current_layer()
+	_run_set_board_layers()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -107,14 +116,55 @@ func _run_contract() -> void:
 	check("is_copper top", PcbLayerStack.is_copper("top"))
 	check("is_copper B.Cu", PcbLayerStack.is_copper("B.Cu"))
 	check("is_copper inner illegal", not PcbLayerStack.is_copper("inner1"))
-	# default stack
-	var stack: Array = PcbLayerStack.default_two_layer()
-	check_eq("default stack has 2 entries", stack.size(), 2)
-	if stack.size() == 2:
-		check_eq("entry0 layer_id top", (stack[0] as Dictionary).get("layer_id", ""), "top")
-		check_eq("entry0 kicad_alias F.Cu", (stack[0] as Dictionary).get("kicad_alias", ""), "F.Cu")
-		check_eq("entry1 layer_id bottom", (stack[1] as Dictionary).get("layer_id", ""), "bottom")
-		check_eq("entry1 index 1", int((stack[1] as Dictionary).get("index", -1)), 1)
+	# Default stack + count derivation (epoch GA-1: default_two_layer()'s rich
+	# entries were dead API with divergent colors; the plain-id default_stack
+	# replaced them).
+	check_eq("default_stack is [top, bottom]", PcbLayerStack.default_stack(), ["top", "bottom"])
+	check_eq("stack_for_count(2)", PcbLayerStack.stack_for_count(2), ["top", "bottom"])
+	check_eq("stack_for_count(4)", PcbLayerStack.stack_for_count(4), ["top", "in1", "in2", "bottom"])
+	check_eq("stack_for_count(6)", PcbLayerStack.stack_for_count(6),
+		["top", "in1", "in2", "in3", "in4", "bottom"])
+	# Every count-derived stack is exactly the shape the shape rule admits —
+	# the one-derivation property that keeps the two spellings from diverging.
+	for n in [2, 3, 4, 8, 32]:
+		check_eq("stack_for_count(%d) passes stack_shape_error" % n,
+			PcbLayerStack.stack_shape_error(PcbLayerStack.stack_for_count(n)), "")
+
+	# Inner-layer naming (GA-1: the function-level mapping is load-bearing now).
+	check_eq("canon_to_kicad in1", PcbLayerStack.canon_to_kicad("in1"), "In1.Cu")
+	check_eq("canon_to_kicad in30", PcbLayerStack.canon_to_kicad("in30"), "In30.Cu")
+	check_eq("kicad_to_canon In7.Cu", PcbLayerStack.kicad_to_canon("In7.Cu"), "in7")
+	check("via span touching a canonical inner layer is illegal",
+		not PcbLayerStack.is_legal_via_span("top", "in1"))
+	check("inner<->inner span illegal", not PcbLayerStack.is_legal_via_span("in1", "in2"))
+
+	# inner_index_any: the SILENT spelling-agnostic lookup (draw-loop safe).
+	check_eq("inner_index_any in3", PcbLayerStack.inner_index_any("in3"), 3)
+	check_eq("inner_index_any In12.Cu", PcbLayerStack.inner_index_any("In12.Cu"), 12)
+	check_eq("inner_index_any top -> 0", PcbLayerStack.inner_index_any("top"), 0)
+	check_eq("inner_index_any F.SilkS -> 0", PcbLayerStack.inner_index_any("F.SilkS"), 0)
+	check_eq("inner_index_any in0 -> 0", PcbLayerStack.inner_index_any("in0"), 0)
+	check_eq("inner_index_any in31 -> 0", PcbLayerStack.inner_index_any("in31"), 0)
+
+	# stack_shape_error refusal matrix (the GD mirror of Go validateLayers /
+	# Python _check_layers — same rules, refusal-string spelling).
+	check_eq("shape: valid 2-layer", PcbLayerStack.stack_shape_error(["top", "bottom"]), "")
+	check_eq("shape: valid 4-layer",
+		PcbLayerStack.stack_shape_error(["top", "in1", "in2", "bottom"]), "")
+	check("shape: too short refused",
+		not PcbLayerStack.stack_shape_error(["top"]).is_empty())
+	check("shape: non-canonical name refused",
+		not PcbLayerStack.stack_shape_error(["top", "inner1", "bottom"]).is_empty())
+	check("shape: duplicate refused",
+		not PcbLayerStack.stack_shape_error(["top", "top", "bottom"]).is_empty())
+	check("shape: missing bottom refused",
+		not PcbLayerStack.stack_shape_error(["top", "in1", "in2"]).is_empty())
+	check("shape: wrong order refused",
+		not PcbLayerStack.stack_shape_error(["bottom", "top"]).is_empty())
+	check("shape: inner gap refused",
+		not PcbLayerStack.stack_shape_error(["top", "in2", "bottom"]).is_empty())
+	check("shape: inners out of order refused",
+		not PcbLayerStack.stack_shape_error(["top", "in2", "in1", "bottom"]).is_empty())
 
 
 # ── 2. functional floor (real PCBData) ────────────────────────────────────────
@@ -286,3 +336,85 @@ func _run_host_current_layer() -> void:
 	# passthrough of the filter string.
 	canvas.trace_layer_filter = "all"
 	check_eq("get_current_layer(non-copper filter) -> F.Cu default", host.get_current_layer(), "F.Cu")
+
+
+# ── 5. set_board_layers (epoch GA-1): the stack as a mutable board property ──
+
+func _run_set_board_layers() -> void:
+	print("-- set_board_layers: shape gate, occupancy gate, undo bucket, MCP handler --")
+	var data = PCBData.new()
+	check_eq("fresh board default stack", data.layers, ["top", "bottom"] as Array[String])
+
+	# SHAPE refusals come back verbatim from the one GD rule.
+	check("shape refusal: non-canonical",
+		not data.set_board_layers(["top", "inner1", "bottom"]).is_empty())
+	check("shape refusal: wrong order",
+		not data.set_board_layers(["bottom", "top"]).is_empty())
+	check_eq("refused edits leave the stack untouched", data.layers,
+		["top", "bottom"] as Array[String])
+
+	# Widen 2 -> 4: succeeds, spellings normalised, undoable.
+	data.save_to_history("baseline")
+	check_eq("widen to 4 succeeds", data.set_board_layers(["top", "in1", "in2", "bottom"]), "")
+	data.save_to_history("widen")
+	check_eq("stack is 4 deep", data.layers,
+		["top", "in1", "in2", "bottom"] as Array[String])
+	# KiCad/mixed-case spellings normalise to canonical on the way in.
+	check_eq("re-declare with mixed case is a no-op",
+		data.set_board_layers(["Top", "IN1", "in2", "BOTTOM"]), "")
+	check_eq("mixed-case no-op left canonical ids", data.layers,
+		["top", "in1", "in2", "bottom"] as Array[String])
+
+	# OCCUPANCY gate: copper on in1 blocks shrinking back to 2 and names the
+	# stranded trace; vias never block (a through-via spans top<->bottom,
+	# which every legal stack contains).
+	var t_inner = data.new_trace()
+	t_inner.id = "t_inner"; t_inner.net_name = "N1"; t_inner.layer = "in1"; t_inner.width = 0.3
+	t_inner.waypoints.append(Vector2(0, 0)); t_inner.waypoints.append(Vector2(5, 0))
+	data.add_trace(t_inner)
+	data.add_via({"position": Vector2(5, 0), "size": 0.8, "drill": 0.4,
+		"net_name": "N1", "from_layer": "top", "to_layer": "bottom"})
+	var refusal: String = data.set_board_layers(["top", "bottom"])
+	check("shrink over occupied in1 refused", not refusal.is_empty())
+	check("refusal names the stranded trace", refusal.contains("t_inner"))
+	check_eq("refused shrink left the 4-layer stack", data.layers.size(), 4)
+	# Clearing the copper unblocks the shrink; the through-via alone never blocks.
+	data.remove_trace("t_inner")
+	check_eq("shrink after clearing copper succeeds",
+		data.set_board_layers(["top", "bottom"]), "")
+	check_eq("via survived the shrink", data.vias.size(), 1)
+	data.save_to_history("shrink")
+
+	# UNDO/REDO: the layers bucket restores the stack with the board.
+	data.undo()
+	check_eq("undo returns the 4-layer stack", data.layers,
+		["top", "in1", "in2", "bottom"] as Array[String])
+	data.undo()
+	check_eq("second undo returns the 2-layer baseline", data.layers,
+		["top", "bottom"] as Array[String])
+	data.redo()
+	check_eq("redo returns the 4-layer stack again", data.layers,
+		["top", "in1", "in2", "bottom"] as Array[String])
+
+	# MCP handler: both argument spellings, reply shape, refusal passthrough.
+	var data2 = PCBData.new()
+	var host = _StubHost.new(data2)
+	var res: Dictionary = PANEL_TOOLS._set_board_layers(host, {"count": 4})
+	check("handler count=4 ok", bool(res.get("success", false)))
+	check_eq("handler reply carries the stack", res.get("layers", []),
+		["top", "in1", "in2", "bottom"])
+	check_eq("handler changed=true on a real edit", bool(res.get("changed", true)), true)
+	res = PANEL_TOOLS._set_board_layers(host, {"layers": ["top", "in1", "in2", "bottom"]})
+	check("handler explicit same stack ok", bool(res.get("success", false)))
+	check_eq("handler changed=false on a no-op", bool(res.get("changed", true)), false)
+	res = PANEL_TOOLS._set_board_layers(host, {"layers": ["top", "in9", "bottom"]})
+	check("handler malformed stack refused", not bool(res.get("success", true)))
+	res = PANEL_TOOLS._set_board_layers(host, {})
+	check("handler with neither arg refused", not bool(res.get("success", true)))
+	res = PANEL_TOOLS._set_board_layers(host, {"count": 4.5})
+	check("handler fractional count refused", not bool(res.get("success", true)))
+	# GDScript JSON numbers arrive as floats — a whole-number float count works.
+	res = PANEL_TOOLS._set_board_layers(host, {"count": 2.0})
+	check("handler whole-float count accepted", bool(res.get("success", false)))
+	check_eq("whole-float count built the 2-layer stack", res.get("layers", []),
+		["top", "bottom"])

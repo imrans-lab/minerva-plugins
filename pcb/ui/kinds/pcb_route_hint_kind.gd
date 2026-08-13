@@ -40,6 +40,7 @@ const _ANCHOR_TYPE_PAD := "pcb/pad"
 ## family of trick as every sibling file's PCBPanel.gd-style cross-file
 ## preload() consts.
 const _Self := preload("pcb_route_hint_kind.gd")
+const _PcbLayerStack := preload("../model/pcb_layer_stack.gd")
 
 ## Anchor-marker HIT-TEST slack, document-space (board mm). Kept for
 ## hit_test()'s zoom-less corridor sweep only — DRAWN marker size is
@@ -100,6 +101,22 @@ static func _marker_geometry(zoom: float) -> Vector2:
 const _COLOR_F_CU := Color(1.0, 0.5, 1.0, 0.95)      # magenta — top copper
 const _COLOR_B_CU := Color(0.30, 1.0, 0.40, 0.95)    # green   — bottom copper (complement)
 const _COLOR_OTHER := Color(0.85, 0.85, 0.85, 0.95)  # gray    — other/unspecified layer
+
+## Inner-copper hint strokes (epoch GA-1): per-layer distinct, CYCLED like the
+## canvas' _INNER_TRACE_PALETTE, but in THIS surface's family — bright,
+## semi-transparent proposal strokes — rather than the committed-trace palette
+## (the magenta/green ruling deliberately separates proposal color from
+## committed color; inner layers keep that separation). Before GA-1 every
+## inner layer fell into the gray "other" bucket, so an In1.Cu proposal was
+## indistinguishable from an unspecified-layer one.
+const _INNER_HINT_PALETTE: Array[Color] = [
+	Color(1.0, 0.75, 0.30, 0.95),   # amber-orange   — In1.Cu
+	Color(0.35, 0.80, 1.0, 0.95),   # sky            — In2.Cu
+	Color(1.0, 0.40, 0.45, 0.95),   # coral          — In3.Cu
+	Color(0.70, 0.60, 1.0, 0.95),   # lavender       — In4.Cu
+	Color(0.55, 0.95, 0.75, 0.95),  # mint           — In5.Cu
+	Color(0.95, 0.90, 0.40, 0.95),  # yellow         — In6.Cu (then cycles)
+]
 
 ## Via marker (U2, DCR 019f7095c395 Stage-1): amber ring, distinct from both
 ## layer colors and the AI cyan/human diamond anchor markers, so a
@@ -2156,6 +2173,13 @@ static func _layer_color(layer: String) -> Color:
 		"B.Cu":
 			return _COLOR_B_CU
 		_:
+			# Inner copper gets a per-layer cycled color (epoch GA-1); anything
+			# that is not a copper layer at all keeps the gray "other" bucket.
+			# inner_index_any is the SILENT spelling-agnostic lookup — this runs
+			# in a draw loop, where a warning per frame is a hang, not a hint.
+			var k := _PcbLayerStack.inner_index_any(layer)
+			if k > 0:
+				return _INNER_HINT_PALETTE[(k - 1) % _INNER_HINT_PALETTE.size()]
 			return _COLOR_OTHER
 
 
