@@ -55,6 +55,20 @@
       }
     },
     {
+      "name": "minerva_pcb_set_board_layers",
+      "description": "Declare the board's copper layer stack. Accepts either `layers` (explicit canonical stack, e.g. [\"top\",\"in1\",\"in2\",\"bottom\"] — top first, bottom last, inners contiguous from in1) or `count` (total copper layers; 4 builds top,in1,in2,bottom). Refuses malformed stacks, and refuses shrinking while traces/zones still occupy a removed layer (delete or re-layer that copper first). Undoable. The reply carries the declared stack. Whether a DEPTH is fabricable is the board's selected rule profile's capabilities.max_copper_layers (a profile declaring none is 2-layer; jlcpcb-4layer declares 4), enforced at compile — declaring here never bypasses that gate. Read the current stack from minerva_pcb_board_check or minerva_pcb_get_image metadata.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "layers": {"type": "array", "items": {"type": "string"}, "description": "Explicit canonical stack in stack order (top, in1..in(N-2), bottom). Provide this OR count."},
+          "count": {"type": "number", "description": "Total copper layer count (>= 2); builds the canonical stack for that count. Provide this OR layers."}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_pcb_get_components",
       "description": "Get all components from a PCB editor with their positions and connections.",
       "executor": "panel",
