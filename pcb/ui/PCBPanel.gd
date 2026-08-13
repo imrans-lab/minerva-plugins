@@ -5156,17 +5156,18 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint(board_dict)
 
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
-	# K9 (019fa6ed5e23): draft DRC must score the MATERIALIZED proposal board —
-	# canonical geometry plus the live staged overlay — not canonical alone.
-	# The composer has supported the "geometric" purpose since OFC-2, and this
-	# is the production consumer it was built for; until this line existed,
-	# check_draft sent the raw board and a staged placement or zone could not
-	# produce a finding at all, however badly it violated. Composition is
-	# fail-safe by construction (an absent store or unknown purpose composes
-	# nothing) and request-scoped: the result is sent and dropped, never
-	# serialized and never fed to a cache keyed to the real board (A9/K5).
-	payload["board"] = _PcbStagedEntitiesScript.effective_draft_board(
-		board_dict, _staged_entities, "geometric")
+	var composed: Dictionary = draft_check_board()
+	payload["board"] = composed
+	# DRAFT-OVERLAY COHERENCE (epoch GA cold review, finding 3). The two guards
+	# apply_check_result already runs cover the canonical board (board_token)
+	# and the candidate set (workspace_generation) — NEITHER covers the staged
+	# overlay, which became scored input the moment this method started sending
+	# it. A ghost dragged while the worker is thinking would otherwise land a
+	# verdict computed for a pose that no longer exists, and it would land it
+	# as CLEAN: the exact false-clean K14 forbids. So fingerprint the composed
+	# board before the hop and re-derive it after; any drift discards the whole
+	# reply through the same revert path an unreachable worker takes.
+	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint(composed)
 
 	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
 	request.emit("pcb.draft_check", payload, reply_id)
@@ -5177,9 +5178,39 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# worker {ok, result} envelope one level deeper under {success, result}
 	# (same shape route_board unwraps). apply_check_result guard-discards an
 	# empty/mismatched reply, so a failed unwrap safely reverts the candidates.
+	# The overlay guard, before the reply is allowed to write anything. Discard
+	# is fail-safe and reuses apply_check_result's empty-reply path, which
+	# reverts every candidate begin_check flipped to "checking" rather than
+	# leaving them stuck.
+	if _data == null or _staged_entities == null \
+			or _PcbRoutingSidecarScript.compute_board_fingerprint(draft_check_board()) != draft_token:
+		_routing_workspace.apply_check_result({})
+		return {}
+
 	var inner: Dictionary = _unwrap_draft_check(result)
 	_routing_workspace.apply_check_result(inner)
 	return inner
+
+
+## The board draft DRC scores: canonical geometry plus the LIVE staged overlay
+## (staged and frozen placements, staged zones). This is K9's materialized
+## proposal board (019fa6ed5e23) and it is a NAMED SEAM rather than an inline
+## expression so the wiring itself is assertable — the cold review's finding 4
+## was that composing correctly and actually SENDING the composition are two
+## different claims, and only the first had a test.
+##
+## Request-scoped by contract: the result is sent and dropped, never serialized
+## and never fed to any cache keyed to the real board (A9/K5). Fail-safe by
+## construction — an absent store composes nothing and the caller degrades to
+## the canonical board rather than refusing.
+func draft_check_board() -> Dictionary:
+	if _data == null:
+		return {}
+	var canonical: Dictionary = _data.to_board_dict()
+	if _staged_entities == null:
+		return canonical
+	return _PcbStagedEntitiesScript.effective_draft_board(
+		canonical, _staged_entities, "geometric")
 
 
 ## On-demand assembly advisory check (DCR 019fd5fd9084, work items

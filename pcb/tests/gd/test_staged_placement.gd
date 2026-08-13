@@ -33,6 +33,7 @@ func _init() -> void:
 	_run_dangling_parity_sweep()
 	_run_collision_advisory()
 	_run_freeze_settles_the_pose()
+	_run_draft_check_board_seam()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -388,3 +389,31 @@ func _comp_x(board: Dictionary, ref: String) -> float:
 		if c is Dictionary and str((c as Dictionary).get("ref", "")) == ref:
 			return float((c as Dictionary).get("x_mm", -1.0))
 	return -1.0
+
+
+# ── 10. the K9 wiring itself (epoch GA cold review, finding 4) ────────────────
+#
+# Composing correctly and actually SENDING the composition are two different
+# claims, and before this suite only the first had a test. draft_check_board()
+# is the named seam check_draft hands to the worker, so asserting on it pins
+# the wiring without needing the IPC hop (which does not run headless).
+
+func _run_draft_check_board_seam() -> void:
+	print("\n-- 10. draft DRC scores the materialized board, not the canonical one --")
+	var rig := _rig()
+	var staged: Dictionary = _stage_move(rig, "R1", 14.0, 8.0, 0.0)
+	check("a move is staged for the seam", not str(staged.get("staged_id", "")).is_empty())
+
+	var canonical: Dictionary = rig["data"].to_board_dict()
+	var scored: Dictionary = rig["panel"].draft_check_board()
+	check_eq("the board draft DRC scores carries the GHOST pose", _comp_x(scored, "R1"), 14.0)
+	check_eq("…while the canonical board still carries the real pose",
+		_comp_x(canonical, "R1"), 10.0)
+	# The regression this pins: check_draft used to send to_board_dict(), so a
+	# staged placement could not produce a finding however badly it violated.
+	check("the scored board is NOT the canonical board",
+		_comp_x(scored, "R1") != _comp_x(canonical, "R1"))
+
+	check("freeze the ghost", rig["store"].freeze(str(staged.get("staged_id", ""))))
+	check_eq("a FROZEN placement is still scored by draft DRC",
+		_comp_x(rig["panel"].draft_check_board(), "R1"), 14.0)

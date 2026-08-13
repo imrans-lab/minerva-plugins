@@ -4030,7 +4030,16 @@ static func _staged_list_row(e: Dictionary, data = null) -> Dictionary:
 		# Codex 1182 F5: LIVE derivation when the board is reachable — the
 		# routed flag must describe today's copper, not staging day's. The
 		# payload's proposal-time snapshot stays available as audit.
-		if data != null and str(e.get("disposition", "")) == "staged":
+		#
+		# The discriminator is TERMINAL vs LIVE, not the literal "staged"
+		# (epoch GA cold review, finding 2). A terminal entry is an audit
+		# record and must keep the pose-time snapshot; every LIVE entry is a
+		# standing proposal whose routed flag has to describe today's copper —
+		# and since freeze arrived there is more than one live disposition.
+		# Written as "not terminal" so a future live disposition inherits the
+		# correct behaviour instead of silently falling to the stale branch,
+		# which is exactly how this defect was introduced.
+		if data != null and not (str(e.get("disposition", "")) in ["accepted", "rejected"]):
 			row["affected_nets"] = data.placement_affected_nets(str(payload.get("component_id", "")))
 		else:
 			row["affected_nets"] = payload.get("affected_nets", [])
