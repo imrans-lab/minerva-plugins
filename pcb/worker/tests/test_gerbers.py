@@ -1206,3 +1206,57 @@ def test_mask_polarity_agrees_between_gbr_and_job_manifest():
         if is_mask and "%LPD*%" in text:
             # The flag changes the FILE attribute only — bodies stay dark.
             assert "%LPC*%" not in text.split("%LPD*%")[0]
+
+
+# ---------------------------------------------------------------------------
+# N-layer fail-closed seals (epoch GA-1). Compile RESOLVES deeper stacks now;
+# BOTH gerber entries and the kicad exporter still write the fixed two-sided
+# artifact set, so each must refuse a deeper board whole rather than emit
+# files whose inner copper is silently absent (the K4 discards clause). These
+# seals come OUT in epoch GA-3, replaced by per-layer emission + goldens.
+# ---------------------------------------------------------------------------
+
+
+def _four_layer_board_dict() -> dict:
+    return {
+        "version": 1, "name": "quad", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "in1", "in2", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4,
+                         "rule_profile": "jlcpcb-4layer"},
+        "components": [],
+    }
+
+
+def test_build_gerbers_ir_refuses_a_deeper_stack():
+    ir = _compile_board_ir(_four_layer_board_dict())
+    assert len(ir.layer_stack.copper) == 4  # the compile half really resolved it
+    with pytest.raises(ValueError, match="silently drops inner copper"):
+        gerber.build_gerbers_ir(ir)
+
+
+def test_build_gerbers_loose_dict_refuses_a_declared_deeper_stack():
+    with pytest.raises(ValueError, match="silently drops inner copper"):
+        gerber.build_gerbers({"name": "quad", "width_mm": 20, "height_mm": 20,
+                              "layers": ["top", "in1", "in2", "bottom"],
+                              "components": []})
+
+
+def test_generate_kicad_pcb_refuses_a_declared_deeper_stack():
+    from pcb_worker import kicad
+
+    with pytest.raises(ValueError, match="silently drops inner copper"):
+        kicad.generate_kicad_pcb({"name": "quad", "width_mm": 20, "height_mm": 20,
+                                  "layers": ["top", "in1", "in2", "bottom"],
+                                  "components": [], "nets": [], "traces": [],
+                                  "vias": []})
+
+
+def test_two_layer_declarations_still_emit():
+    # The seal is depth-scoped, not declaration-scoped: an explicit
+    # ["top","bottom"] (and the absent-key default other suites cover) emits
+    # exactly as ever.
+    board = {"name": "duo", "width_mm": 20, "height_mm": 20,
+             "layers": ["top", "bottom"], "components": []}
+    files = gerber.build_gerbers(board)
+    assert any(name.endswith("-F_Cu.gbr") for name in files)

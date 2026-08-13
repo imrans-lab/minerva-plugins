@@ -1,0 +1,11 @@
+version: 1
+name: TraceOffStack
+width_mm: 20
+height_mm: 20
+layers: [top, in1, bottom]
+traces:
+  - net: N
+    layer: in3
+    points:
+      - {x_mm: 1, y_mm: 1}
+      - {x_mm: 2, y_mm: 2}

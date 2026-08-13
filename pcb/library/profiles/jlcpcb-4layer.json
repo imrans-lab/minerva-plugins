@@ -1,0 +1,26 @@
+{
+  "id": "jlcpcb-4layer",
+  "version": "1",
+  "source": "JLCPCB multilayer (4-layer) standard service, published PCB capabilities (fetched 2026-08-13): https://jlcpcb.com/capabilities/pcb-capabilities . This profile quotes the page's MULTILAYER rows wherever the page distinguishes them from the 1-/2-layer rows, and the shared row otherwise; the jlcpcb-2layer profile's field-level reasoning (which published figure feeds which schema field, and why) is inherited wholesale and only the deltas are restated here. Quoted values -- min track width and spacing (1 oz): 'Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs.' (the 2-layer row reads 0.10/0.10; the multilayer figures govern this profile; the BGA fan-out exception is quoted but NOT declared -- the schema carries one track floor and the unconditional figure is the fail-closed choice); PTH annular ring (1 oz): 'Recommended 0.20 mm or above; absolute minimum 0.15 mm' (multilayer row; the 2-layer row reads 0.25/0.18 -- as in the 2-layer profile the ABSOLUTE minimum is declared and the recommendation is quoted for authors who want margin); via: 'Multilayer: 0.15 mm hole size / 0.25 mm via diameter' (same figures as 2-layer; min_finished_hole_mm reuses the published minimum via HOLE SIZE per the oshpark/jlcpcb-2layer precedent of never inventing a number); drill: 'Multilayer: 0.15 - 6.3 mm' (same as 2-layer); 'Min. Plated Slots Width -- Multi-layer: 0.35mm' (the 2-layer row reads 0.5mm; this is one of exactly three published multilayer deltas); 'Min. Non-plated holes: 0.50mm'; 'Min. Non-Plated Slots: 1.0mm'; 'Pad Hole-to-Hole Spacing: 0.45mm' (as in the 2-layer profile, the PAD figure is declared rather than the looser 'Via Hole-to-Hole Spacing: 0.2mm' because the schema carries ONE hole-to-hole floor, resolved fail-closed); solder mask 'Min. pad spacing: 0.10 mm (green, red, yellow, blue, purple)' (no multilayer distinction published); solder_mask_clearance_mm 0.05 is OUR emission-side mask-opening allowance, not a JLCPCB figure (JLCPCB plots 1:1, publishes no expansion of its own -- solder_mask_expansion_mm 0.0 records that verbatim); 'Copper clearance from routed board edges: >= 0.2 mm' (no multilayer distinction); 'PTH to Track: 0.28mm' (0.35mm recommended; enforcement scope closed in epoch CP2 S7 -- see the 2-layer profile); silkscreen 'Minimum Line Width: >=0.15mm' and 'Pad To Silkscreen: 0.15mm' (no multilayer distinction). HOLE-TO-EDGE: deliberately NOT declared -- the page publishes no hole-to-edge minimum (same S8 reasoning as the 2-layer profile; GC11's containment half runs regardless). CAPABILITIES TIER (epoch GA-1; this is the first profile to declare one): max_copper_layers 4 -- the page publishes 'Layer count: 1-32 Layers' for the service family, but this profile certifies ONLY the 4-layer stack it is named for and whose multilayer rows are quoted above; a 6-layer board must select a profile whose figures were checked against that service tier, not inherit this one's blessing. BLIND/BURIED VIAS, quoted verbatim because it is the capability this profile must refuse: 'Blind/Buried Vias: Not supported. Currently we don't support Blind/Buried Vias, only make through holes.' -- the compile pipeline models through-vias only (a via span is legal only across the full declared stack), so this profile's fab and the model's v1 via rule agree exactly. STACKUP: the capabilities page publishes no default 4-layer stackup/prepreg/core figures, so none are declared -- recording a stackup this page does not state would be inventing a number, the error this profile family exists to prevent.",
+  "floor": {
+    "min_trace_width_mm": 0.09,
+    "min_clearance_mm": 0.09,
+    "min_drill_mm": 0.15,
+    "min_finished_hole_mm": 0.15,
+    "min_annular_ring_mm": 0.15,
+    "min_hole_to_hole_mm": 0.45,
+    "min_mask_sliver_mm": 0.1,
+    "solder_mask_clearance_mm": 0.05,
+    "solder_mask_expansion_mm": 0.0,
+    "copper_to_edge_mm": 0.2,
+    "min_hole_to_copper_mm": 0.28,
+    "min_npth_mm": 0.5,
+    "min_plated_slot_mm": 0.35,
+    "min_npth_slot_mm": 1.0,
+    "min_silk_width_mm": 0.15,
+    "min_silk_to_pad_mm": 0.15
+  },
+  "capabilities": {
+    "max_copper_layers": 4
+  }
+}

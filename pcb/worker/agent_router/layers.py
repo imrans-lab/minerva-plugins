@@ -22,19 +22,20 @@ range stops at 30 because KiCad's copper stack does (32 layers: F.Cu + In1..In30
 + B.Cu); a name outside it has no alias to map to, so it fails closed here
 rather than emitting an ``In31.Cu`` no KiCad tool would accept.
 
-Inner layers are AUTHORABLE, NOT FABRICABLE -- exactly the pattern zones use.
-This module NAMES them and maps them; it does not make them buildable:
+This module NAMES layers and maps them; it does not decide what is buildable:
 
   * ``CANON_TO_KICAD`` / ``KICAD_TO_CANON`` / ``STACK_INDEX`` deliberately stay
-    the TWO-layer FABRICABLE stack. compile_board builds a board's resolved
-    stackup by walking ``STACK_INDEX`` and gates v1 copper on membership in
-    ``CANON_TO_KICAD``; adding inner entries to either table would silently
-    inject inner copper into every compiled board's stackup. Inner-layer
-    naming is therefore a FUNCTION-level rule (:func:`inner_layer_index` and the
-    two mapping functions), never a table entry.
-  * ``compile_board._require_two_layer`` still refuses any stack other than
-    exactly ``["top", "bottom"]``. That refusal is the fabrication gate and is
-    unchanged by this module.
+    the TWO-layer OUTER pair.  Since epoch GA-1 a board's resolved stackup is
+    built from its OWN ``layers`` declaration
+    (``compile_board._build_layer_stack``) using the FUNCTION-level mapping
+    (:func:`inner_layer_index`, :func:`canon_to_kicad`), so these tables are no
+    longer "the stack" — they are the through-via span contract and the
+    absent-declaration default.  Adding inner entries to them would widen
+    :func:`is_legal_via_span` into admitting blind/buried spans nobody can
+    fabricate; do not.
+  * Whether a DECLARED depth is fabricable is the selected manufacturer
+    profile's ``max_copper_layers`` capability gate
+    (``compile_board._build_design_rules``), not a rule in this module.
 
 Direction asymmetry (deliberate)
 --------------------------------
@@ -60,11 +61,12 @@ from typing import Any
 # The one canonical map + its inverse (module-level singletons; callers alias
 # these exact objects so drift is physically impossible).
 #
-# THESE TWO TABLES ARE THE FABRICABLE STACK, NOT THE NAMING CONTRACT. Do not add
-# in1..in30 here -- see the module docstring: compile_board derives a board's
-# resolved stackup from STACK_INDEX and gates v1 copper on CANON_TO_KICAD
-# membership, so an inner entry here would fabricate inner copper nobody
-# authored. Inner names are handled by the functions below.
+# THESE TWO TABLES ARE THE OUTER PAIR + THROUGH-VIA SPAN CONTRACT, NOT THE
+# NAMING CONTRACT AND (since GA-1) NOT THE STACK. Do not add in1..in30 here --
+# see the module docstring: is_legal_via_span derives from STACK_INDEX, so an
+# inner entry here would legalise blind/buried via spans nobody can fabricate.
+# Inner names are handled by the functions below; a board's resolved stackup
+# comes from its own declaration (compile_board._build_layer_stack).
 # ---------------------------------------------------------------------------
 
 CANON_TO_KICAD: dict[str, str] = {"top": "F.Cu", "bottom": "B.Cu"}

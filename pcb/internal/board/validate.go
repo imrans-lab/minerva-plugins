@@ -63,6 +63,12 @@ func Validate(b *Board) error {
 	if err := validateCutouts(b); err != nil {
 		return err
 	}
+	// AFTER zones/cutouts so every pre-GA-1 code keeps its position in the
+	// first-violation order (these two codes are new in GA-1; appending them
+	// changes no existing board's reported code).
+	if err := validateCopperEntityLayers(b); err != nil {
+		return err
+	}
 	// Component.Assembly is a closed token set: "" (assembled normally) or
 	// "exclude" (board furniture, no BOM/CPL row — epoch CPN1). A present
 	// unrecognized value refuses HERE, mirroring the worker's
@@ -202,10 +208,12 @@ func innerLayerIndex(name string) int {
 //     second inner by position. Contiguity is what keeps name and position the
 //     same fact.
 //
-// Inner layers are AUTHORABLE, NOT FABRICABLE: this validator accepts a 4-layer
-// stack, and the Python compiler still refuses to build anything but exactly
-// ["top","bottom"] (compile_board._require_two_layer), exactly as zones are
-// authorable-and-refused. See docs/board-yaml.md "Layer stack".
+// Since epoch GA-1 a declared stack is not just authorable but RESOLVED: the
+// Python compiler builds the board's stackup from this declaration
+// (compile_board._build_layer_stack) and gates its DEPTH against the selected
+// manufacturer profile's max_copper_layers capability — fabricability is the
+// profile's question, shape is this function's. See docs/board-yaml.md
+// "Layer stack".
 func validateLayers(b *Board) error {
 	if len(b.Layers) == 0 {
 		return nil
@@ -342,6 +350,54 @@ func validateCutouts(b *Board) error {
 	for i, c := range b.Cutouts {
 		if len(c.Outline) < 3 {
 			return fmt.Errorf("invalid_cutout_outline: cutout[%d] outline has %d point(s), a polygon needs at least 3", i, len(c.Outline))
+		}
+	}
+	return nil
+}
+
+// validateCopperEntityLayers holds traces and vias to the zone precedent
+// (epoch GA-1): WHEN the board declares a layer stack, a trace's layer and a
+// via's span endpoints must name declared entries. Before GA-1 nothing
+// validated Trace.Layer or Via.FromLayer/ToLayer at all, which was survivable
+// while the Python compiler refused every stack but [top, bottom]; now that a
+// board's declared stack drives its resolved stackup, a trace naming a layer
+// outside it must refuse HERE, with the same membership rule and the same
+// fail-open-when-undeclared shape zone_unknown_layer has.
+//
+// EMPTY stays legal on both fields (unlike Zone.Layer): both are omitempty and
+// every pre-GA-1 board in the wild carries traces/vias that rely on the
+// downstream defaults (trace -> top, via -> top/bottom). Refusing absence
+// would invalidate existing boards; refusing a PRESENT-but-undeclared name
+// catches the actual authoring error. Membership is LITERAL against the
+// declared canonical ids — the same rule zones follow — so a KiCad spelling
+// ("F.Cu") in a stack-declaring board is refused rather than folded; the
+// canonical contract stores canonical ids (docs/board-yaml.md).
+//
+// Through-only via SPAN legality (from/to must be the outer pair) is
+// deliberately NOT checked here: that is a fabricability rule and it lives in
+// the Python compiler's via_bad_span gate, exactly as the 2-layer stack
+// refusal lived there — this boundary checks naming, not buildability.
+// board_validate.py's _check_copper_entity_layers mirrors this
+// string-for-string and order-for-order.
+func validateCopperEntityLayers(b *Board) error {
+	if len(b.Layers) == 0 {
+		return nil
+	}
+	knownLayers := make(map[string]bool, len(b.Layers))
+	for _, l := range b.Layers {
+		knownLayers[l] = true
+	}
+	for i, t := range b.Traces {
+		if t.Layer != "" && !knownLayers[t.Layer] {
+			return fmt.Errorf("trace_unknown_layer: traces[%d] layer %q is not in the declared layer stack", i, t.Layer)
+		}
+	}
+	for i, v := range b.Vias {
+		if v.FromLayer != "" && !knownLayers[v.FromLayer] {
+			return fmt.Errorf("via_unknown_layer: vias[%d] from_layer %q is not in the declared layer stack", i, v.FromLayer)
+		}
+		if v.ToLayer != "" && !knownLayers[v.ToLayer] {
+			return fmt.Errorf("via_unknown_layer: vias[%d] to_layer %q is not in the declared layer stack", i, v.ToLayer)
 		}
 	}
 	return nil

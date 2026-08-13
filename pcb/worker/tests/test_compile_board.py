@@ -39,6 +39,7 @@ from pcb_worker.compile_board import (
     _check_coincidence,
     _check_pad_capabilities,
     _place_component,
+    _resolved_pad_layers,
     _validate_pin_override,
     compile_board,
 )
@@ -62,6 +63,7 @@ from pcb_worker.resolved_board import (
     ResolvedBoard,
     Side,
     SourceRef,
+    StackupKind,
     UnsupportedFeature,
     ViaKind,
 )
@@ -712,7 +714,8 @@ def _place_one_pad(pad: PadDefinition):
     definition = FootprintDefinition(name="fp", pads=(pad,), graphics=())
     comp = {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0}
     diags = _Diagnostics()
-    result = _place_component(comp, "X1-0", definition, Side.TOP, {}, {}, "X1", diags)
+    result = _place_component(comp, "X1-0", definition, Side.TOP, {}, {}, "X1", diags,
+                              ("F.Cu", "B.Cu"))
     assert result is not None, [d.message for d in diags.tuple()]
     placed_pads, _graphics = result
     assert len(placed_pads) == 1
@@ -1967,15 +1970,12 @@ def test_missing_design_rules_fails_closed():
     assert "missing_design_rules" in _errors(result)
 
 
-def test_non_two_layer_stack_fails_closed():
-    # Canonical layer vocabulary is top/bottom only, so a non-two-layer stack
-    # can be refused at either of two gates. Pin BOTH: a stack of valid names
-    # with the wrong count hits unsupported_layer_stack; a stack naming a
-    # non-canonical layer hits invalid_layer_name before the count check.
-    # Every non-two-layer shape now has its own granular refusal code from
-    # up-front validation, which shadows _require_two_layer's blanket
-    # unsupported_layer_stack (still present as defence in depth, but not
-    # reachable through compile_board's validated path). Pin the granular trio.
+def test_malformed_layer_stack_fails_closed():
+    # A MALFORMED stack is refused by the shared boundary's granular codes
+    # (validate_board_v2 / _check_layers) — since GA-1 there is no blanket
+    # exactly-two refusal behind them at all (_declared_layers trusts the
+    # boundary; depth is a profile-capability question, tested below). Pin the
+    # granular trio.
     result = compile_board(_minimal_board(layers=["bottom", "top"]))
     assert isinstance(result, ResolutionFailure)
     assert "invalid_layer_stack_order" in _errors(result)
@@ -1987,6 +1987,96 @@ def test_non_two_layer_stack_fails_closed():
     result = compile_board(_minimal_board(layers=["top", "inner1", "bottom"]))
     assert isinstance(result, ResolutionFailure)
     assert "invalid_layer_name" in _errors(result)
+
+
+# ---------------------------------------------------------------------------
+# N-layer stacks (epoch GA-1): a WELL-FORMED deeper stack is a capability
+# question — the selected profile's capabilities.max_copper_layers — not a
+# shape error. Both directions pinned: the default profile (declares no
+# capabilities → 2-layer baseline) refuses with the SAME code the old
+# exactly-two gate used, and a declaring profile compiles the board with a
+# resolved stackup built FROM the declaration.
+# ---------------------------------------------------------------------------
+
+
+_FOUR_LAYERS = ["top", "in1", "in2", "bottom"]
+
+
+def test_four_layer_stack_refused_by_default_profile_capability():
+    result = compile_board(_minimal_board(layers=list(_FOUR_LAYERS)))
+    assert isinstance(result, ResolutionFailure)
+    errors = [d for d in result.diagnostics
+              if d.severity is DiagnosticSeverity.ERROR
+              and d.code == "unsupported_layer_stack"]
+    assert errors, _errors(result)
+    # The refusal must be actionable: name the selected profile and the depth.
+    assert any("v1-fab-conservative" in d.message and "4" in d.message
+               for d in errors), [d.message for d in errors]
+
+
+def test_four_layer_stack_compiles_under_declaring_profile():
+    board = _minimal_board(layers=list(_FOUR_LAYERS))
+    board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    stack = result.board.layer_stack
+    assert [layer.id for layer in stack.copper] == _FOUR_LAYERS
+    assert [layer.kicad_alias for layer in stack.copper] == \
+        ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    assert [layer.stack_index for layer in stack.copper] == [0, 1, 2, 3]
+    # Physical stackup: copper/dielectric interleave — N copper, N-1 dielectric.
+    kinds = [entry.kind for entry in stack.stackup.entries]
+    assert len(kinds) == 7, kinds
+    assert kinds[::2] == [StackupKind.COPPER] * 4
+    assert kinds[1::2] == [StackupKind.DIELECTRIC] * 3
+    # The profile identity rides the rules, exactly as for the 2-layer houses.
+    assert result.board.design_rules.rule_profile.id == "jlcpcb-4layer"
+
+
+def test_two_layer_boards_unchanged_by_declaring_profile():
+    # The capability is a CEILING: a plain 2-layer board under jlcpcb-4layer
+    # (2 <= 4) compiles — selecting a deeper-capable house never breaks a
+    # shallower board.
+    board = _minimal_board()
+    board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    assert [layer.id for layer in result.board.layer_stack.copper] == ["top", "bottom"]
+
+
+def test_via_span_still_through_only_on_four_layer():
+    # Through-vias are the only via kind at ANY depth: a span touching a
+    # DECLARED inner layer is still via_bad_span — the naming tables were
+    # deliberately not widened (blind/buried stays unrepresentable).
+    board = _minimal_board(layers=list(_FOUR_LAYERS))
+    board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
+    board["nets"] = [{"name": "N1", "pins": []}]
+    board["vias"] = [{"x_mm": 5, "y_mm": 5, "diameter_mm": 0.8, "drill_mm": 0.4,
+                      "net": "N1", "from_layer": "top", "to_layer": "in1"}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "via_bad_span" in _errors(result)
+
+
+def test_wildcard_cu_expands_to_declared_stack():
+    # Hole 2 of D9b (test_compile_board_layer_fail_closed's module docstring):
+    # `*.Cu` expands to the board's OWN copper aliases, not a hardwired
+    # (F.Cu, B.Cu) pair — a THT pad on a 4-layer board carries annuli on the
+    # inner layers the drill physically produces.
+    pad = _synthetic_pad(pad_type="thru_hole",
+                         drill=DrillDefinition(shape="round", size=(0.8, 0.8)),
+                         layers=(Layer.from_id("*.Cu"),))
+    diags = _Diagnostics()
+    resolved = _resolved_pad_layers(
+        pad, PlacementTransform(position=(0.0, 0.0), rotation_deg=0.0, side=Side.TOP),
+        "X1", diags, ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"))
+    assert resolved is not None, [d.message for d in diags.tuple()]
+    assert [layer.id for layer in resolved] == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    # And under the 2-layer default the expansion is byte-for-byte the old one.
+    resolved_two = _resolved_pad_layers(
+        pad, PlacementTransform(position=(0.0, 0.0), rotation_deg=0.0, side=Side.TOP),
+        "X1", diags, ("F.Cu", "B.Cu"))
+    assert [layer.id for layer in resolved_two] == ["F.Cu", "B.Cu"]
 
 
 def test_missing_outline_fails_closed():

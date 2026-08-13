@@ -25,15 +25,19 @@ Two false-positive doors guard this gate, and both are pinned here:
 
 Hole 1 (whether the layers-absent board default admits inner-layer copper) is
 argued and closed by ``test_inner_copper_fails_closed_even_when_board_omits_layers_key``:
-the gate lives on PAD/GRAPHIC layer participation, which is independent of
-whatever ``board["layers"]`` does or does not declare.
+the gate lives on PAD/GRAPHIC layer participation judged against the RESOLVED
+stack, and an absent key resolves to the same 2-layer stack.
 
-Hole 2 (the ``*.Cu`` wildcard truncating to two layers on a widened stack) is
-UNREACHABLE at this SHA -- ``_build_layer_stack`` can only ever construct the
-canonical two-layer stack -- and is explicitly OUT OF SCOPE (item
-019fa73aee02, a two-layer-guard-widening unit, not this one). No test for it
-is written here; a test that cannot fail is the defect this campaign exists to
-prevent.
+Hole 2 (the ``*.Cu`` wildcard truncating to two layers on a widened stack)
+BECAME REACHABLE in epoch GA-1 -- ``_build_layer_stack`` now constructs the
+board's DECLARED stack -- and was closed in the same change: ``*.Cu`` expands
+to the board's own copper aliases (``_resolved_pad_layers``), no longer a
+hardwired (F.Cu, B.Cu) pair. ``test_compile_board.py``'s
+``test_wildcard_cu_expands_to_declared_stack`` pins it. GA-1 also INVERTED
+half of this gate deliberately: copper on a layer the board DECLARES is legal
+(``test_inner_copper_legal_when_board_declares_the_layer`` below), because the
+accept-set is per-board now; the fail-closed seal against emitting a deeper
+stack than the gerber writer handles moved to ``build_gerbers_ir``.
 """
 
 from __future__ import annotations
@@ -181,7 +185,11 @@ def test_graphic_declaring_inner_copper_layer_fails_closed():
     )
     diags = _Diagnostics()
     comp = {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0}
-    placed = _place_component(comp, "component:1", definition, Side.TOP, {}, {}, "X1", diags)
+    # copper_aliases_ordered is the board's own stack since GA-1; the 2-layer
+    # pair here reproduces the pre-GA-1 fixed accept-set this test always ran
+    # against.
+    placed = _place_component(comp, "component:1", definition, Side.TOP, {}, {}, "X1", diags,
+                              ("F.Cu", "B.Cu"))
     assert placed is not None
     assert diags.has_error
     matching = [d for d in diags.tuple() if d.code == "unemitted_copper_layer"]
@@ -256,8 +264,9 @@ def test_canonical_top_bottom_copper_ids_are_not_false_positives(tmp_path):
 # ---------------------------------------------------------------------------
 # 5. Hole 1: the layers-absent board default does not smuggle inner-layer
 #    copper past the gate. The gate lives on PAD/GRAPHIC layer participation
-#    (library-declared), which _require_two_layer's board["layers"] branch
-#    never touches -- so absence changes nothing about reachability here.
+#    judged against the board's RESOLVED stack (since GA-1; before that, a
+#    fixed 2-layer accept-set) -- an absent layers key resolves to the same
+#    2-layer stack, so absence changes nothing about reachability here.
 # ---------------------------------------------------------------------------
 
 
@@ -268,6 +277,33 @@ def test_inner_copper_fails_closed_even_when_board_omits_layers_key(tmp_path):
         "board.layers absence (the canonical two-layer default) must not " \
         "change whether a footprint's own In1.Cu pad is caught"
     assert any(d.code == "unemitted_copper_layer" for d in _errors(result))
+
+
+# ---------------------------------------------------------------------------
+# 5b. THE GA-1 INVERSION: the same In1.Cu pad is LEGAL copper on a board that
+#     DECLARES in1 in its stack (under a profile whose capability admits the
+#     depth). This is the other half of the per-board accept-set: the gate is
+#     "copper outside the board's own stack", not "copper that isn't F/B.Cu".
+#     Together with tests 1 and 5 this pins both directions -- neither a
+#     false refusal on a declaring board nor a false pass on a 2-layer one.
+# ---------------------------------------------------------------------------
+
+
+def test_inner_copper_legal_when_board_declares_the_layer(tmp_path):
+    ref, library_root, lockfile = _seed_footprint(
+        tmp_path, "INNER_CU_PAD", _INNER_CU_PAD_FOOTPRINT)
+    board = _board(ref)
+    board["layers"] = ["top", "in1", "in2", "bottom"]
+    board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
+    result = compile_board(board, library_root=library_root, lockfile=lockfile)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    codes = {d.code for d in result.diagnostics}
+    assert "unemitted_copper_layer" not in codes
+    assert "unsupported_layer_stack" not in codes
+    # The pad's inner participation must actually be THERE, not merely tolerated.
+    placed = [p for comp in result.board.components for p in comp.pads]
+    assert any("In1.Cu" in {layer.id for layer in pad.layers} for pad in placed), \
+        [tuple(layer.id for layer in pad.layers) for pad in placed]
 
 
 # ---------------------------------------------------------------------------

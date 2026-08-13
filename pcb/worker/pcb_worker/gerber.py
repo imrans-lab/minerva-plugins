@@ -1670,6 +1670,20 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
     """Compile a :class:`ResolvedBoard` (K2 IR) into fabrication files DIRECTLY — the
     IR-native fab entry the live path uses, with no IR->loose-dict adapter (C5).
     Pinned by the gerber golden + oracle (gerbonara / KiCad export) tests."""
+    # FAIL-CLOSED seal, N-LAYER HALF (epoch GA-1): compile now RESOLVES stacks
+    # deeper than two copper layers (the model/DRC/routing pipeline is
+    # stack-aware), but THIS emitter still writes exactly the two-sided
+    # F_Cu/B_Cu file set (_build_gerber_layers's straight-line top/bottom
+    # blocks + the L1/L2 .gbrjob table). Handing it a deeper board would
+    # fabricate outer copper and silently drop every inner layer — the exact
+    # K4-discards defect this seal exists to prevent — so it refuses the whole
+    # board until the per-layer emitter lands (epoch GA-3).
+    if len(board.layer_stack.copper) != 2:
+        stack = ", ".join(layer.id for layer in board.layer_stack.copper)
+        raise ValueError(
+            f"build_gerbers_ir: board declares {len(board.layer_stack.copper)} copper "
+            f"layers [{stack}] but this emitter writes the two-layer F_Cu/B_Cu file "
+            f"set only — refusing to emit fabrication that silently drops inner copper")
     # FAIL-CLOSED seal (a captured feature the gerber bridge does not map — a copper
     # zone or a board-level graphic — must RAISE, never vanish silently from a
     # fabrication-bound file).
@@ -1778,6 +1792,18 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
     """
     base = name or (board_dict.get("name") if isinstance(board_dict.get("name"), str) else None) or "board"
     date = creation_date or PINNED_CREATION_DATE
+
+    # FAIL-CLOSED N-layer seal (epoch GA-1) — the loose-dict twin of the
+    # build_gerbers_ir seal: this path hardcodes the two-layer emission blocks
+    # AND the ["F.Cu","B.Cu"] .gbrjob stackup below, so a dict declaring a
+    # deeper stack must refuse rather than emit files that silently drop inner
+    # copper. (0 declared layers == the absent-key 2-layer default.)
+    declared_stack = board_dict.get("layers")
+    if isinstance(declared_stack, list) and len(declared_stack) not in (0, 2):
+        raise ValueError(
+            f"build_gerbers: board declares {len(declared_stack)} copper layers "
+            f"{declared_stack!r} but this emitter writes the two-layer F_Cu/B_Cu file "
+            f"set only — refusing to emit fabrication that silently drops inner copper")
 
     set_generation_software("Minerva", "pcb_worker/gerber.py", WORKER_VERSION)
 

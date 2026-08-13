@@ -81,9 +81,10 @@ def test_oshpark_profile_loads_to_a_complete_pinned_floor_distinct_from_v1():
 def test_shipped_profile_root_holds_exactly_the_shipped_profiles():
     # Not a completeness guarantee for all time, just pins today's shipped
     # set so an accidental extra/missing file is noticed. jlcpcb-2layer
-    # joined in epoch CPN1 (docket 019fe2fb1e76).
+    # joined in epoch CPN1 (docket 019fe2fb1e76); jlcpcb-4layer in epoch GA-1.
     names = sorted(p.stem for p in DEFAULT_PROFILE_ROOT.glob("*.json"))
-    assert names == ["jlcpcb-2layer", "oshpark-2layer", "v1-fab-conservative"]
+    assert names == ["jlcpcb-2layer", "jlcpcb-4layer",
+                     "oshpark-2layer", "v1-fab-conservative"]
 
 
 def test_jlcpcb_profile_loads_to_a_complete_pinned_floor():
@@ -338,12 +339,13 @@ def test_a_boolean_floor_value_is_rejected_not_coerced(tmp_path):
         load_rule_profile("acme", library_root=tmp_path)
 
 
-def test_allowed_top_level_fields_is_exactly_id_version_source_floor():
+def test_allowed_top_level_fields_is_exactly_the_declared_set():
     # Pins the allow-list itself: symmetric with the floor-level guard, and
-    # wide enough to admit ``source`` (both shipped profiles carry one; see
-    # test_a_profile_with_a_top_level_source_field_loads_cleanly below) without
-    # admitting anything else.
-    assert ALLOWED_TOP_LEVEL_FIELDS == {"id", "version", "source", "floor"}
+    # wide enough to admit ``source`` (every shipped profile carries one; see
+    # test_a_profile_with_a_top_level_source_field_loads_cleanly below) and
+    # the GA-1 ``capabilities`` tier without admitting anything else.
+    assert ALLOWED_TOP_LEVEL_FIELDS == {
+        "id", "version", "source", "floor", "capabilities"}
 
 
 def test_a_profile_with_a_top_level_source_field_loads_cleanly(tmp_path):
@@ -661,3 +663,145 @@ def test_a_slot_board_hole_is_measured_against_the_slot_floor():
     findings = _check_gc3_drill(_Proj([slot]), _Board())
     assert len(findings) == 1, findings
     assert findings[0]["required_mm"] == 1.0, findings[0]
+
+
+# ---------------------------------------------------------------------------
+# Capabilities tier (epoch GA-1). A capability is a CEILING, so its
+# fail-closed direction INVERTS the floor tier's: an ABSENT capability means
+# the v1 two-copper-layer baseline (silence never widens what a board house is
+# claimed to fabricate), while a DECLARED one is validated exactly as strictly
+# as a floor.
+# ---------------------------------------------------------------------------
+
+
+def test_absent_capabilities_defaults_to_two_copper_layers(tmp_path):
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor()})
+    loaded = load_rule_profile("acme", library_root=tmp_path)
+    assert loaded.max_copper_layers == 2
+
+
+def test_declared_max_copper_layers_loads(tmp_path):
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor(),
+        "capabilities": {"max_copper_layers": 6}})
+    loaded = load_rule_profile("acme", library_root=tmp_path)
+    assert loaded.max_copper_layers == 6
+
+
+def test_empty_capabilities_mapping_is_the_baseline_not_an_error(tmp_path):
+    # Present-but-empty says nothing — identical to absent, including (below)
+    # in the digest.
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor(),
+        "capabilities": {}})
+    loaded = load_rule_profile("acme", library_root=tmp_path)
+    assert loaded.max_copper_layers == 2
+
+
+def test_unknown_capability_field_fails_closed(tmp_path):
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor(),
+        "capabilities": {"blind_buried_vias": True}})
+    with pytest.raises(RuleProfileError, match="unknown field"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_non_mapping_capabilities_fails_closed(tmp_path):
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor(),
+        "capabilities": [4]})
+    with pytest.raises(RuleProfileError, match="must be a mapping"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+@pytest.mark.parametrize("bad", [True, 4.0, "4", None, 1, 0, -2, 33])
+def test_malformed_max_copper_layers_fails_closed(tmp_path, bad):
+    # Booleans and floats are rejected, not coerced (4.0 is not a layer
+    # count); 1 and 33 fall outside [2, 32] — below the universal baseline or
+    # past KiCad's 32-copper stack, which every exported artifact is bounded
+    # by.
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor(),
+        "capabilities": {"max_copper_layers": bad}})
+    with pytest.raises(RuleProfileError, match="max_copper_layers"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_capability_digest_rule_matches_the_optional_floor_rule(tmp_path):
+    # Omitting the tier digests exactly as before the tier existed — no
+    # shipped profile is re-pinned by the schema gaining the field — and
+    # declaring it digests differently, because the fabrication claim really
+    # changed. {} is byte-identical to absent for the same reason.
+    _write_profile(tmp_path, "plain", {
+        "id": "plain", "version": "1", "floor": _valid_floor()})
+    _write_profile(tmp_path, "empty", {
+        "id": "empty", "version": "1", "floor": _valid_floor(),
+        "capabilities": {}})
+    _write_profile(tmp_path, "deep", {
+        "id": "deep", "version": "1", "floor": _valid_floor(),
+        "capabilities": {"max_copper_layers": 4}})
+    plain = load_rule_profile("plain", library_root=tmp_path)
+    empty = load_rule_profile("empty", library_root=tmp_path)
+    deep = load_rule_profile("deep", library_root=tmp_path)
+    # Digests pin {floor, profile-id, capabilities?}; ids differ across these
+    # three fixtures by construction, so compare per-fixture against a
+    # RE-LOADED twin instead of across ids: same bytes, same digest.
+    assert plain.ref.digest == load_rule_profile("plain", library_root=tmp_path).ref.digest
+    # The load-bearing halves: {} adds nothing to the payload...
+    _write_profile(tmp_path, "plain2", {
+        "id": "plain", "version": "1", "floor": _valid_floor(),
+        "capabilities": {}})
+    empty_as_plain = load_rule_profile("plain", library_root=tmp_path)
+    assert empty_as_plain.ref.digest == plain.ref.digest
+    # ...and a DECLARED capability changes the digest of the same id.
+    _write_profile(tmp_path, "plain3", {
+        "id": "plain", "version": "1", "floor": _valid_floor(),
+        "capabilities": {"max_copper_layers": 4}})
+    declared_as_plain = load_rule_profile("plain", library_root=tmp_path)
+    assert declared_as_plain.ref.digest != plain.ref.digest
+    assert deep.max_copper_layers == 4 and empty.max_copper_layers == 2
+
+
+def test_jlcpcb_4layer_profile_loads_with_multilayer_floors_and_capability():
+    """The epoch GA-1 profile: JLCPCB multilayer service, quoted 2026-08-13.
+    The three published multilayer DELTAS vs jlcpcb-2layer are the
+    discriminating axes — track/spacing 0.09 (vs 0.10), annular ring absolute
+    minimum 0.15 (vs 0.18), plated slot 0.35 (vs 0.5) — and it is the FIRST
+    shipped profile to declare a capabilities tier (max_copper_layers 4;
+    deliberately 4, not the page's '1-32 Layers' family figure — provenance
+    covers only the service tier the quotes were checked against)."""
+    loaded = load_rule_profile("jlcpcb-4layer")
+    assert loaded.ref.id == "jlcpcb-4layer"
+    assert len(loaded.ref.digest) == 64
+    assert loaded.max_copper_layers == 4
+    floor = loaded.floor
+    assert floor.min_trace_width_mm == pytest.approx(0.09)
+    assert floor.min_clearance_mm == pytest.approx(0.09)
+    assert floor.min_annular_ring_mm == pytest.approx(0.15)
+    assert floor.min_plated_slot_mm == pytest.approx(0.35)
+    # The no-multilayer-distinction fields carry the same figures as 2-layer.
+    assert floor.min_drill_mm == pytest.approx(0.15)
+    assert floor.min_finished_hole_mm == pytest.approx(0.15)
+    assert floor.min_hole_to_hole_mm == pytest.approx(0.45)
+    assert floor.min_hole_to_copper_mm == pytest.approx(0.28)
+    assert floor.min_npth_mm == pytest.approx(0.5)
+    assert floor.min_npth_slot_mm == pytest.approx(1.0)
+    assert floor.min_silk_width_mm == pytest.approx(0.15)
+    assert floor.min_silk_to_pad_mm == pytest.approx(0.15)
+    assert floor.solder_mask_expansion_mm == 0.0
+    assert floor.copper_to_edge_mm == pytest.approx(0.2)
+    # min_hole_to_edge stays undeclared — the page publishes no such figure
+    # (the S8 rule: absent means the profile said nothing).
+    assert floor.min_hole_to_edge_mm is None
+    # Distinct rule set ⇒ distinct digest from every other shipped profile.
+    for other in ("v1-fab-conservative", "oshpark-2layer", "jlcpcb-2layer"):
+        assert loaded.ref.digest != load_rule_profile(other).ref.digest
+
+
+def test_shipped_two_layer_profiles_declare_no_capability():
+    # The 2-layer houses and the v1 default say nothing and therefore fab the
+    # baseline — a regression here (someone "helpfully" declaring 2) would
+    # re-pin their digests for zero behavioral change.
+    for profile_id in ("v1-fab-conservative", "oshpark-2layer", "jlcpcb-2layer"):
+        assert load_rule_profile(profile_id).max_copper_layers == 2

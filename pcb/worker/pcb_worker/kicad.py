@@ -371,6 +371,18 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     """
     if diagnostics is None:
         diagnostics = []
+    # FAIL-CLOSED N-layer seal (epoch GA-1, same argument as gerber's
+    # build_gerbers_ir seal): this emitter writes the fixed 2-layer KiCad-9
+    # layer table below and hardcodes every via's span to (F.Cu B.Cu); a deeper
+    # declared stack would export a .kicad_pcb whose inner copper is silently
+    # absent — refuse the whole board until the emitter is stack-driven
+    # (epoch GA-3).
+    declared_stack = board.get("layers")
+    if isinstance(declared_stack, list) and len(declared_stack) not in (0, 2):
+        raise ValueError(
+            f"generate_kicad_pcb: board declares {len(declared_stack)} copper layers "
+            f"{declared_stack!r} but this emitter writes a 2-layer KiCad layer table "
+            f"only — refusing to export a board file that silently drops inner copper")
     min_x, min_y, max_x, max_y = _bounds(board)
     net_index, pad_net = _net_table(board)
     net_name_of = {i: n for n, i in net_index.items()}

@@ -121,6 +121,11 @@ def validate_board_v2(board: dict) -> list[str]:
     _check_layers(board, codes)
     _check_zones(lists["zones"], board, codes)
     _check_cutouts(lists["cutouts"], codes)
+    # AFTER zones/cutouts, BEFORE the v2 identity block — the same position as
+    # Go's validateCopperEntityLayers, so a multi-violation board reports the
+    # identical first code on both sides (the two codes are new in GA-1;
+    # appending here keeps every pre-GA-1 code's position unchanged).
+    _check_copper_entity_layers(lists["traces"], lists["vias"], board, codes)
 
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
@@ -164,6 +169,42 @@ def validate_board_v2(board: dict) -> list[str]:
     return codes
 
 
+def _check_copper_entity_layers(traces: list, vias: list, board: dict,
+                                codes: list) -> None:
+    """Mirror of Go's ``validateCopperEntityLayers`` (epoch GA-1): WHEN the board
+    declares a layer stack, a trace's ``layer`` and a via's ``from_layer``/
+    ``to_layer`` must name declared entries — the zone-membership precedent
+    applied to the other two copper-bearing entities.  Only the first violation
+    is appended, in Go's own walk order (traces, then vias, from before to).
+
+    EMPTY stays legal on all three fields, unlike ``zone_unknown_layer``'s
+    empty case: both entities' layer fields are omitempty and pre-GA-1 boards
+    rely on the downstream defaults (trace → top, via → top/bottom), so only a
+    PRESENT-but-undeclared name is the authoring error.  Membership is LITERAL
+    against the declared canonical ids, exactly as for zones.  Through-only via
+    SPAN legality is deliberately NOT here — that is ``via_bad_span``,
+    a compile fabricability rule, not a naming rule."""
+    declared = board.get("layers")
+    if not isinstance(declared, list) or not declared:
+        return
+    known = {str(layer) for layer in declared}
+    for trace in traces:
+        if not isinstance(trace, dict):
+            continue
+        layer = trace.get("layer")
+        if layer not in (None, "") and str(layer) not in known:
+            codes.append("trace_unknown_layer")
+            return
+    for via in vias:
+        if not isinstance(via, dict):
+            continue
+        for key in ("from_layer", "to_layer"):
+            value = via.get(key)
+            if value not in (None, "") and str(value) not in known:
+                codes.append("via_unknown_layer")
+                return
+
+
 def _check_layers(board: dict, codes: list) -> None:
     """Mirror of Go's ``validateLayers`` (internal/board/validate.go): append the FIRST
     layer-stack violation, using Go's own code strings.
@@ -183,10 +224,11 @@ def _check_layers(board: dict, codes: list) -> None:
     *Validate*, not its codec (the same division of labour that leaves the other
     auxiliary containers to the codec — see the ``lists`` comment above).
 
-    Inner layers are AUTHORABLE, NOT FABRICABLE: a 4-layer stack passes this boundary
-    on both sides, and ``compile_board._require_two_layer`` still refuses to build
-    anything but exactly ``["top", "bottom"]`` — the same shape as zones, which
-    validate here and are refused by every output consumer."""
+    A 4-layer stack passes this boundary on both sides, and since epoch GA-1
+    ``compile_board`` builds the board's resolved stackup FROM the declaration;
+    whether the declared depth is fabricable is the SELECTED manufacturer
+    profile's ``max_copper_layers`` capability gate
+    (``compile_board._build_design_rules``), not a shape rule here."""
     raw_layers, ok = _as_list(board.get("layers"))
     if not ok or not raw_layers:
         return

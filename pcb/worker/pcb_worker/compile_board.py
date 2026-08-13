@@ -41,7 +41,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Union
 
-from agent_router.layers import CANON_TO_KICAD, STACK_INDEX
+from agent_router.layers import CANON_TO_KICAD, canon_to_kicad, is_copper
 
 from . import bless
 from .board_schema import (
@@ -152,9 +152,14 @@ COMPILER_VERSION = "pcb-k2/1"
 # from copper.  Same threshold the legacy resolve path enforces.
 COINCIDENCE_TOL_MM = 0.01
 
-# Canonical two-layer board (the ONLY v1 stack).  Copper ids + KiCad aliases +
-# stack order all come from agent_router.layers — the single worker-side
-# authority — so this module cannot drift from the router/emitter mapping.
+# The canonical DEFAULT stack (a board that declares no ``layers`` key).
+# Copper ids + KiCad aliases come from agent_router.layers — the single
+# worker-side authority — so this module cannot drift from the router/emitter
+# mapping.  Since epoch GA-1 a board may declare a DEEPER stack
+# (top, in1..in(N-2), bottom); the declaration is validated by the shared
+# boundary (``validate_board_v2``) and gated against the selected
+# manufacturer profile's ``max_copper_layers`` capability, not against this
+# pair.
 _TOP_ID, _BOTTOM_ID = "top", "bottom"
 
 # Emitter capability + the fatal-output profile come from the ONE neutral
@@ -176,18 +181,26 @@ K3_EMITTED_LAYERS = EMITTED_LAYERS
 DEFAULT_ROUNDRECT_RRATIO = 0.25
 
 
-def _is_emitted_layer(layer_id: str) -> bool:
-    """``K3_EMITTED_LAYERS`` membership, canonical-id aware.
+def _is_emitted_layer(layer_id: str, copper_aliases: frozenset[str]) -> bool:
+    """Membership in THIS BOARD's fabricated layer set, canonical-id aware.
 
-    ``top``/``bottom`` are the SAME two copper layers as ``F.Cu``/``B.Cu``
-    under the canonical name (the ``agent_router.layers.CANON_TO_KICAD``
-    mapping already imported above) -- a footprint or board that spells them
-    the canonical way must not be misreported as declaring copper the emitter
-    cannot write.  ``CANON_TO_KICAD`` passes an already-KiCad or unrecognized
-    id through unchanged, so this is a strict superset of a raw membership
-    check, never a narrower one.
+    Copper participation is judged against ``copper_aliases`` -- the KiCad
+    aliases of the board's OWN resolved stack (epoch GA-1: the stack is
+    declared per board, so "copper the emitter cannot write" is a per-board
+    question, no longer a global one).  Non-copper participation keeps the
+    global ``K3_EMITTED_LAYERS`` accept-set: mask/paste/silk/edge capability
+    does not vary with copper depth.
+
+    ``top``/``bottom``/``in<k>`` are the SAME copper layers as
+    ``F.Cu``/``B.Cu``/``In<k>.Cu`` under the canonical name -- a footprint or
+    board that spells them the canonical way must not be misreported as
+    declaring copper outside the stack, so copper ids are folded through
+    ``canon_to_kicad`` (idempotent for already-KiCad names) before the
+    membership test.
     """
-    return CANON_TO_KICAD.get(layer_id, layer_id) in K3_EMITTED_LAYERS
+    if is_copper(layer_id):
+        return canon_to_kicad(layer_id) in copper_aliases
+    return layer_id in K3_EMITTED_LAYERS
 
 # Fabrication-critical outputs a captured-feature loss may corrupt. WHICH
 # domains those are, and why, is stated ONCE at the definition in
@@ -338,16 +351,24 @@ def _dict_items(board: dict, key: str, entity_code: str, diags: _Diagnostics) ->
 # ---------------------------------------------------------------------------
 
 
-def _require_two_layer(board: dict, diags: _Diagnostics) -> bool:
+def _declared_layers(board: dict) -> list[str]:
+    """The board's declared copper stack, in stack order; absence == the
+    canonical two-layer default (NOTHING is synthesized into the board dict --
+    the Go codec's byte-identity guarantee depends on an absent ``layers`` key
+    staying absent).
+
+    Shape is NOT re-validated here: the shared boundary
+    (``validate_board_v2``/``_check_layers``) ran before this and failed the
+    compile on any malformed declaration -- wrong container type, unknown or
+    duplicate names, missing top/bottom, out-of-order inners -- so a list that
+    reaches this function is a well-formed ``[top, in1..in(N-2), bottom]``
+    stack.  Whether the SELECTED manufacturer profile can fabricate a stack
+    this deep is a separate, fail-closed gate in ``_build_design_rules``.
+    """
     layers = board.get("layers")
     if layers is None:
-        return True  # absence == the canonical two-layer default
-    if not isinstance(layers, list) or [str(x) for x in layers] != [_TOP_ID, _BOTTOM_ID]:
-        diags.error("unsupported_layer_stack",
-                    f"v1 compiles exactly two copper layers [top, bottom]; got {layers!r}",
-                    _board_ref())
-        return False
-    return True
+        return [_TOP_ID, _BOTTOM_ID]
+    return [str(x) for x in layers]
 
 
 def _build_outline(board: dict, board_id: str, schema_version: int,
@@ -502,21 +523,27 @@ def _contour_aabbs_intersect(a: Contour, b: Contour) -> bool:
     return not (ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0)
 
 
-def _build_layer_stack() -> LayerStack:
-    ordered = sorted(STACK_INDEX.items(), key=lambda kv: kv[1])
+def _build_layer_stack(declared_layers: list[str]) -> LayerStack:
+    """The board's resolved copper stack, built from ITS OWN declaration
+    (epoch GA-1; before that this walked the global two-entry ``STACK_INDEX``
+    and never consulted the board).  Declared order IS stack order -- the
+    boundary validator already enforced ``[top, in1..in(N-2), bottom]`` -- and
+    ``canon_to_kicad`` is the FUNCTION-level mapping, so inner layers alias
+    correctly without widening the module tables the through-via span rule
+    derives from."""
     copper = tuple(
-        ResolvedLayer(id=canon, kicad_alias=CANON_TO_KICAD[canon], stack_index=index)
-        for canon, index in ordered
+        ResolvedLayer(id=canon, kicad_alias=canon_to_kicad(canon), stack_index=index)
+        for index, canon in enumerate(declared_layers)
     )
     # Physical stack: DECLARE the layer order but assert NO thickness/material the
     # source did not supply (K2 review 621 MF5; tagged-union seam allows None).
     entries: list[StackupEntry] = []
     order = 0
-    for position, (canon, _index) in enumerate(ordered):
-        entries.append(StackupEntry(id=CANON_TO_KICAD[canon], order=order,
-                                    kind=StackupKind.COPPER, copper_layer_id=canon))
+    for position, layer in enumerate(copper):
+        entries.append(StackupEntry(id=layer.kicad_alias, order=order,
+                                    kind=StackupKind.COPPER, copper_layer_id=layer.id))
         order += 1
-        if position < len(ordered) - 1:
+        if position < len(copper) - 1:
             entries.append(StackupEntry(id=f"dielectric-{position}", order=order,
                                         kind=StackupKind.DIELECTRIC))
             order += 1
@@ -807,10 +834,17 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
 def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str, ...],
                         profile_root: Union[str, Path, None],
                         library_layers: Union[Iterable, None],
-                        diags: _Diagnostics
+                        diags: _Diagnostics,
+                        copper_layer_count: int = 2,
                         ) -> Union[tuple[ResolvedDesignRules, dict[str, str]], None]:
     """Build the board's :class:`ResolvedDesignRules` and the net-name -> class-id
-    inversion its authored net classes imply (see :func:`_build_net_classes`)."""
+    inversion its authored net classes imply (see :func:`_build_net_classes`).
+
+    ``copper_layer_count`` is the depth of the board's declared stack; the
+    SELECTED profile must declare a ``max_copper_layers`` capability at least
+    that deep or the compile fails closed (epoch GA-1) -- a board house that
+    has not published an N-layer service must not be handed an N-layer board.
+    """
     rules = board.get("design_rules")
     if not isinstance(rules, dict):
         diags.error("missing_design_rules",
@@ -845,6 +879,21 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
             return None
     profile = _resolve_board_rule_profile(rules, profile_root, library_layers, diags)
     if profile is None:
+        return None
+    # Stack-depth capability gate (epoch GA-1). Fires AFTER the profile
+    # resolves so the message can name the selected profile, and reuses the
+    # ``unsupported_layer_stack`` code the old exactly-two refusal carried --
+    # consumers keyed on the code keep working; what changed is WHY a stack is
+    # refused (fab capability, no longer a hardwired pair).
+    if copper_layer_count > profile.max_copper_layers:
+        diags.error(
+            "unsupported_layer_stack",
+            f"board declares {copper_layer_count} copper layers but rule profile "
+            f"{profile.ref.id!r} fabricates at most {profile.max_copper_layers} "
+            f"(a profile that declares no capabilities.max_copper_layers is a "
+            f"2-layer profile); select a profile whose board house publishes a "
+            f"{copper_layer_count}-layer service",
+            _board_ref())
         return None
     net_classes, class_id_by_net = _build_net_classes(rules, board_id, requested_outputs, diags)
     return ResolvedDesignRules(
@@ -990,18 +1039,28 @@ def _check_pad_capabilities(pad: PadDefinition, ref: str, diags: _Diagnostics) -
     return ok
 
 
+# Non-copper wildcard expansions are GLOBAL (mask/paste exist only on the two
+# outer surfaces regardless of copper depth).  ``*.Cu`` is deliberately NOT in
+# this table since epoch GA-1: it expands to the board's OWN resolved copper
+# stack (see ``_resolved_pad_layers``) — a THT pad's ``*.Cu`` on a 4-layer
+# board carries annuli on the inner layers too, which is what the drill
+# physically produces.  Before GA-1 the ``*.Cu`` entry here was the D9b
+# out-of-scope hole: a hardwired (F.Cu, B.Cu) pair that would have silently
+# truncated inner participation the moment deeper stacks compiled.
 _WILDCARD_EXPANSION = {
-    "*.Cu": ("F.Cu", "B.Cu"),
     "*.Mask": ("F.Mask", "B.Mask"),
     "*.Paste": ("F.Paste", "B.Paste"),
 }
 
 
 def _resolved_pad_layers(pad: PadDefinition, transform: PlacementTransform, ref: str,
-                         diags: _Diagnostics) -> Union[tuple[Layer, ...], None]:
+                         diags: _Diagnostics,
+                         copper_aliases_ordered: tuple[str, ...],
+                         ) -> Union[tuple[Layer, ...], None]:
     """Expand the footprint pad's DECLARED layer selectors to explicit resolved
-    layers — wildcards to both sides, explicit F.*/B.* mirrored by placement
-    side — carrying exactly the participation the library declared (K2 review
+    layers — ``*.Cu`` to the board's own copper stack, ``*.Mask``/``*.Paste``
+    to both outer surfaces, explicit F.*/B.* mirrored by placement side —
+    carrying exactly the participation the library declared (K2 review
     623 R1).  Nothing is synthesized: a pad that declares no layers resolves to
     none, and an unexpandable selector is a fail-closed error.  No ``*.Cu`` /
     ``*.Mask`` wildcard survives into a PlacedPad."""
@@ -1015,7 +1074,8 @@ def _resolved_pad_layers(pad: PadDefinition, transform: PlacementTransform, ref:
 
     for layer in pad.layers:
         if layer.is_wildcard:
-            expansion = _WILDCARD_EXPANSION.get(layer.id)
+            expansion = (copper_aliases_ordered if layer.id == "*.Cu"
+                         else _WILDCARD_EXPANSION.get(layer.id))
             if expansion is None:
                 diags.error("unresolved_pad_layers",
                             f"component {ref!r} pad {pad.number!r}: cannot expand layer "
@@ -1056,20 +1116,22 @@ def _place_component(
     overrides: dict[str, dict],
     ref: str,
     diags: _Diagnostics,
+    copper_aliases_ordered: tuple[str, ...],
 ) -> Union[tuple[tuple[PlacedPad, ...], tuple[PlacedGraphic, ...]], None]:
     transform = PlacementTransform(
         position=(float(comp["x_mm"]), float(comp["y_mm"])),
         rotation_deg=float(comp.get("rotation_deg") or 0.0),
         side=side,
     )
+    copper_aliases = frozenset(copper_aliases_ordered)
     unemitted: set[str] = set()
     placed_pads: list[PlacedPad] = []
     for pad in definition.pads:
-        layers = _resolved_pad_layers(pad, transform, ref, diags)
+        layers = _resolved_pad_layers(pad, transform, ref, diags, copper_aliases_ordered)
         if layers is None:
             return None
         for layer in layers:
-            if _is_emitted_layer(layer.id):
+            if _is_emitted_layer(layer.id, copper_aliases):
                 continue
             if layer.role is LayerRole.COPPER:
                 # Copper the emitter cannot write is not documentation-only: the
@@ -1142,7 +1204,7 @@ def _place_component(
     placed_graphics: list[PlacedGraphic] = []
     for graphic in definition.graphics:
         placed_layer = transform.layer(graphic.layer)
-        if not _is_emitted_layer(placed_layer.id):
+        if not _is_emitted_layer(placed_layer.id, copper_aliases):
             if placed_layer.role is LayerRole.COPPER:
                 diags.error(
                     "unemitted_copper_layer",
@@ -2380,11 +2442,15 @@ def compile_board(
                     f"board declares {unsupported_key!r} ({value!r}), which v1 cannot fabricate",
                     _board_ref())
 
-    two_layer = _require_two_layer(board, diags)
+    declared_layers = _declared_layers(board)
     outline = _build_outline(board, board_id, version, diags)
-    layer_stack = _build_layer_stack() if two_layer else None
+    layer_stack = _build_layer_stack(declared_layers)
+    # The stack's KiCad aliases, in stack order: the ``*.Cu`` expansion and the
+    # per-board emitted-copper accept-set (see ``_is_emitted_layer``).
+    copper_aliases_ordered = tuple(layer.kicad_alias for layer in layer_stack.copper)
     built_rules = _build_design_rules(board, board_id, requested_outputs, profile_root,
-                                     library_layers, diags)
+                                     library_layers, diags,
+                                     copper_layer_count=len(declared_layers))
     design_rules, class_id_by_net = built_rules if built_rules is not None else (None, {})
 
     net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
@@ -2477,7 +2543,8 @@ def compile_board(
         pin_overrides = _check_coincidence(comp, clean, ref, diags)
 
         component_id = derive_id("component", board_id, ref)
-        placed = _place_component(comp, component_id, clean, side, pin_net, pin_overrides, ref, diags)
+        placed = _place_component(comp, component_id, clean, side, pin_net, pin_overrides, ref, diags,
+                                  copper_aliases_ordered)
         if placed is None:
             continue
         placed_pads, placed_graphics = placed
@@ -2522,7 +2589,11 @@ def compile_board(
                    "handoff that must land before any DRC/routing consumer switches onto the IR",
                    _board_ref())
 
-    if diags.has_error or outline is None or layer_stack is None or design_rules is None:
+    # ``layer_stack`` is no longer in this gate: since GA-1 the stack always
+    # builds (the boundary validated the declaration; capability refusal is a
+    # design_rules error), so a None here would be a programming error, not a
+    # board defect.
+    if diags.has_error or outline is None or design_rules is None:
         return ResolutionFailure(diagnostics=_ensure_error(diags))
 
     try:

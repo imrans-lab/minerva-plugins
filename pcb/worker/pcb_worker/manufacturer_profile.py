@@ -50,6 +50,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Union
 
+from agent_router.layers import MAX_INNER_LAYERS
+
 from .canonical_id import CanonicalizationError, content_id
 from .footprints import SEED_LAYER, normalize_library_layers
 from .resolved_board import ManufacturingConstraints, RuleProfileRef
@@ -64,11 +66,28 @@ DEFAULT_PROFILE_ROOT = _PCB_ROOT / "library" / "profiles"
 # The complete set of top-level keys a profile file is allowed to declare.
 # ``source`` is legitimate free-text provenance (both shipped profiles carry
 # one) that no reader consumes; everything else that isn't ``id``/``version``/
-# ``floor`` is an unread key -- an ALLOW-LIST, not a blanket rejection, so a
-# future legitimate metadata field can be added here deliberately instead of
-# silently accepted. See the ``floor``-level unknown-field check below for
-# the same argument one level down.
-ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset({"id", "version", "source", "floor"})
+# ``floor``/``capabilities`` is an unread key -- an ALLOW-LIST, not a blanket
+# rejection, so a future legitimate metadata field can be added here
+# deliberately instead of silently accepted. See the ``floor``-level
+# unknown-field check below for the same argument one level down.
+ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
+    {"id", "version", "source", "floor", "capabilities"})
+
+# ``capabilities`` is the profile's third tier (epoch GA station 1), and it is
+# NOT a floor. A floor is a minimum a board must stay above; a capability is a
+# CEILING on what the fab can build at all, so the fail-closed direction
+# INVERTS: an ABSENT floor field means "this profile said nothing, nothing
+# extra is enforced", while an ABSENT capability means "this profile fabricates
+# only what every profile has always fabricated" -- the v1 two-copper-layer
+# baseline. A profile must DECLARE a capability to unlock it; silence never
+# widens what a board house is claimed to build.
+ALLOWED_CAPABILITY_FIELDS: tuple[str, ...] = ("max_copper_layers",)
+
+# The capability every profile has when it declares none: the v1 stack. Two
+# copper layers is not a guess -- it is the only stack any profile-selected
+# board has ever fabricated, so a legacy profile keeps exactly the behaviour
+# it always had.
+DEFAULT_MAX_COPPER_LAYERS = 2
 
 # The REQUIRED ManufacturingConstraints field set, in the dataclass's own
 # declaration order. A profile supplies EVERY ONE of these or the load fails --
@@ -154,11 +173,19 @@ class LoadedRuleProfile:
     only. It is deliberately NOT part of ``ref``: the digest pins the profile's
     RULES, and the same floor authored in a user layer and in the seed is the
     same floor, so where the bytes came from must not change a board's pinned
-    profile identity (and therefore cannot change one fabricated byte)."""
+    profile identity (and therefore cannot change one fabricated byte).
+
+    ``max_copper_layers`` (epoch GA-1) is the profile's declared copper-stack
+    CEILING -- the deepest stack this board house is on record as fabricating.
+    Defaults to :data:`DEFAULT_MAX_COPPER_LAYERS`: a profile that declares no
+    ``capabilities`` fabricates the v1 two-layer stack it always has. The
+    compile-side reader is ``compile_board._build_design_rules``, which refuses
+    a board whose declared stack is deeper than this."""
 
     ref: RuleProfileRef
     floor: ManufacturingConstraints
     layer: str = SEED_LAYER
+    max_copper_layers: int = DEFAULT_MAX_COPPER_LAYERS
 
 
 def _profile_path(profile_id: str, root: Path) -> Path:
@@ -322,8 +349,52 @@ def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRu
     except ValueError as exc:
         raise RuleProfileError(f"rule profile {profile_id!r} floor is invalid: {exc}") from exc
 
+    # CAPABILITIES (epoch GA-1): validated exactly as strictly as a floor when
+    # PRESENT; when ABSENT the profile keeps the v1 two-copper-layer baseline
+    # (see ALLOWED_CAPABILITY_FIELDS -- for a ceiling, silence must never
+    # widen). ``max_copper_layers`` is an INT, not a float: half a copper layer
+    # is not a fabrication option, and accepting 4.0 here would put a float
+    # into a count comparison and into the digest.
+    max_copper_layers = DEFAULT_MAX_COPPER_LAYERS
+    capabilities = data.get("capabilities")
+    declared_capabilities: dict[str, int] = {}
+    if capabilities is not None:
+        if not isinstance(capabilities, dict):
+            raise RuleProfileError(
+                f"rule profile {profile_id!r} 'capabilities' must be a mapping; "
+                f"got {type(capabilities).__name__}")
+        unknown_caps = sorted(set(capabilities) - set(ALLOWED_CAPABILITY_FIELDS))
+        if unknown_caps:
+            raise RuleProfileError(
+                f"rule profile {profile_id!r} capabilities declares unknown field(s) "
+                f"{'/'.join(unknown_caps)}; an authored field with no reader is a rule "
+                f"that lies about being in force")
+        if "max_copper_layers" in capabilities:
+            value = capabilities["max_copper_layers"]
+            # KiCad's copper stack caps at F.Cu + In1..In30 + B.Cu; a profile
+            # claiming more names layers no exported artifact could carry.
+            ceiling = MAX_INNER_LAYERS + 2
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise RuleProfileError(
+                    f"rule profile {profile_id!r} capabilities.max_copper_layers must be "
+                    f"an integer; got {value!r}")
+            if not (2 <= value <= ceiling):
+                raise RuleProfileError(
+                    f"rule profile {profile_id!r} capabilities.max_copper_layers must be "
+                    f"between 2 and {ceiling}; got {value!r}")
+            max_copper_layers = value
+            declared_capabilities["max_copper_layers"] = value
+
+    # The digest payload gains a "capabilities" key ONLY when the file declares
+    # one -- the same shape-preserving rule the optional floor tier uses: a
+    # profile that says nothing digests exactly as it did before the tier
+    # existed, and a profile that DOES declare a capability digests
+    # differently, which is correct -- its fabrication claim really changed.
+    digest_payload: dict = {"floor": numeric_floor, "profile": profile_id}
+    if declared_capabilities:
+        digest_payload["capabilities"] = declared_capabilities
     try:
-        digest = content_id({"floor": numeric_floor, "profile": profile_id})
+        digest = content_id(digest_payload)
     except CanonicalizationError as exc:
         raise RuleProfileError(
             f"rule profile {profile_id!r} could not be digested: {exc}") from exc
@@ -332,4 +403,5 @@ def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRu
         ref=RuleProfileRef(id=profile_id, version=version, digest=digest),
         floor=constraints,
         layer=layer_name,
+        max_copper_layers=max_copper_layers,
     )

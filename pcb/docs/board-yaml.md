@@ -128,20 +128,34 @@ physical layer the board refuses to name, and would make the alias of the layer
 below the gap disagree with its position — `In3.Cu` by name, second inner by
 place. Requiring contiguity keeps a layer's name and its position the same fact.
 
-**Inner layers are AUTHORABLE, NOT FABRICABLE.** A 4-layer stack round-trips and
-validates on both sides, and `compile_board._require_two_layer` still refuses to
-build any stack other than exactly `[top, bottom]` (`unsupported_layer_stack`). This is the same pattern as
-zones below: the contract learns to *carry* the thing before any consumer learns
-to *make* it. For that reason no example in this document declares an inner
-layer — one would fail the compile-checked-examples test, exactly as a zone
-would.
+Two membership rules follow the stack (epoch GA-1, the `zone_unknown_layer`
+precedent applied to the other copper-bearing entities): when a stack is
+declared, a trace's `layer` and a via's `from_layer`/`to_layer` must name
+declared entries (`trace_unknown_layer` / `via_unknown_layer`, mirrored in
+`validateCopperEntityLayers` / `_check_copper_entity_layers`). An **absent**
+field stays legal on both entities — pre-GA-1 boards rely on the downstream
+defaults — and a board that declares no stack has nothing to check against,
+exactly as for zones.
+
+**A declared stack is RESOLVED, and its depth is a profile capability**
+(epoch GA-1; before that the compiler refused every stack but `[top, bottom]`).
+`compile_board._build_layer_stack` builds the board's resolved stackup from the
+declaration — declared order is stack order, dielectric entries interleaved —
+and the depth is gated against the **selected manufacturer profile's**
+`capabilities.max_copper_layers` (`unsupported_layer_stack` when the board is
+deeper than the profile fabricates). A profile that declares no capability is a
+2-layer profile: for a ceiling, silence never widens. `jlcpcb-4layer` is the
+first profile to declare one. The 2-layer *emitters* still refuse deeper
+stacks loudly (`build_gerbers_ir` / `generate_kicad_pcb` fail-closed seals)
+until the per-layer fab emitter lands.
 
 **Vias are through-hole only.** `from_layer`/`to_layer` describe a span that
 crosses the whole board; blind and buried vias are **not modeled**, and a span
-touching an inner layer is illegal (`is_legal_via_span`). Declaring inner layers
-does not change that — legality derives from the two-entry fabricable stack
-table, and blind/buried support needs a real span-adjacency rule, not more
-entries in it.
+touching an inner layer is illegal (`is_legal_via_span`) **at any declared
+depth** — a through-via on a 4-layer board still spans `top` ↔ `bottom` and
+carries copper on every layer it passes. Legality derives from the two-entry
+outer-pair table, and blind/buried support needs a real span-adjacency rule,
+not more entries in it.
 
 The canonical ↔ KiCad mapping has one source of truth per language —
 `worker/agent_router/layers.py`, mirrored value-for-value by

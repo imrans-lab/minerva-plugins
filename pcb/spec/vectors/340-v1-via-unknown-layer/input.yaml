@@ -1,0 +1,7 @@
+version: 1
+name: ViaOffStack
+width_mm: 20
+height_mm: 20
+layers: [top, in1, bottom]
+vias:
+  - {x_mm: 5, y_mm: 5, drill_mm: 0.4, diameter_mm: 0.8, from_layer: top, to_layer: in9}

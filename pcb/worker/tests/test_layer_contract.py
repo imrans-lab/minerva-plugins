@@ -130,3 +130,46 @@ def test_is_copper():
     assert layers.is_copper("top") is True
     assert layers.is_copper("B.Cu") is True
     assert layers.is_copper("inner1") is False
+
+
+# ---------------------------------------------------------------------------
+# Inner-layer naming (epoch GA-1). The FUNCTION-level mapping is what
+# _build_layer_stack now aliases a declared stack through, so the in<k>
+# round-trips graduate from incidental to load-bearing — and the through-only
+# via rule must hold in its CANONICAL spelling (the pre-GA-1 test above pins
+# only the non-canonical "inner1").
+# ---------------------------------------------------------------------------
+
+
+def test_inner_layer_canonical_round_trips():
+    assert layers.canon_to_kicad("in1") == "In1.Cu"
+    assert layers.canon_to_kicad("in30") == "In30.Cu"
+    assert layers.canon_to_kicad("In7.Cu") == "In7.Cu"   # idempotent
+    assert layers.kicad_to_canon("In1.Cu") == "in1"
+    assert layers.kicad_to_canon("IN30.CU") == "in30"    # case-insensitive
+    assert layers.kicad_to_canon("in7") == "in7"         # idempotent
+    for k in (1, 7, 30):
+        canon = f"in{k}"
+        assert layers.kicad_to_canon(layers.canon_to_kicad(canon)) == canon
+    assert layers.is_copper("in1") is True
+    assert layers.is_copper("In30.Cu") is True
+
+
+def test_inner_layer_rejects_off_by_one_spellings():
+    for bad in ("in0", "in01", "in31", "In0.Cu", "In31.Cu"):
+        with pytest.raises(ValueError):
+            layers.canon_to_kicad(bad)
+        assert layers.is_copper(bad) is False
+
+
+def test_via_span_touching_a_canonical_inner_layer_is_illegal():
+    # THE through-only rule, canonical spelling: declaring in<k> in a board's
+    # stack must never make a partial span legal, because legality derives
+    # from the deliberately-unwidened outer-pair table — blind/buried is
+    # structurally unrepresentable, not policy-refused.
+    assert layers.is_legal_via_span("top", "in1") is False
+    assert layers.is_legal_via_span("in1", "bottom") is False
+    assert layers.is_legal_via_span("in1", "in2") is False
+    assert layers.is_legal_via_span("In1.Cu", "B.Cu") is False
+    # And the full-stack span stays legal at any declared depth.
+    assert layers.is_legal_via_span("top", "bottom") is True
