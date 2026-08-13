@@ -27,6 +27,7 @@ from tests.gerber_fab import build_fab, build_raw_emitter  # noqa: E402
 SPIKE_BOARD = WORKER.parent / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE.parent / "gerber_boards" / "drilltest.yaml"
 COUPON_BOARD = HERE.parent / "coupon_jlc1.yaml"
+QUAD_BOARD = HERE.parent / "gerber_boards" / "quadlayer.yaml"
 
 # (board path, base name, builder) — the SAME helpers the emitter tests use.
 # The spike's footprints (R_0805/C_0805/TH_TestPoint) compile to their real
@@ -47,6 +48,11 @@ CASES = [
     # profile-pinned rule set. This is the golden K18 asks for: one that
     # certifies fabrication features rather than only its own contents.
     (COUPON_BOARD, "coupon_jlc1", build_fab),
+    # QuadLayer — the epoch GA-3 four-copper-layer fixture (traces on all four
+    # planes, inner pour, through vias, jlcpcb-4layer profile). Regenerating
+    # its goldens is a RE-BLESS: walk every layer in gerbv and second-witness
+    # in the KiCad viewer per the CPN1 method before committing.
+    (QUAD_BOARD, "quadlayer", build_fab),
 ]
 
 

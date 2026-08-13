@@ -685,3 +685,61 @@ def test_via_ownership_has_one_reader():
     # not make some phantom net "have copper".
     assert census["complete"] is True
     assert census["missing_copper"] == []
+
+
+# ---------------------------------------------------------------------------
+# Epoch GA-3 — connectivity DRC on an N-layer stack. Check D generalized from
+# the top/bottom split to every layer pair a net occupies; the harvest folds
+# each trace's layer once through the canonical naming contract.
+# ---------------------------------------------------------------------------
+
+
+def _inner_layer_board() -> dict:
+    board = yaml.safe_load(_MISSING_VIA)
+    board["layers"] = ["top", "in1", "in2", "bottom"]
+    # The bottom half of the hand-off moves to an INNER plane: top -> in1 at
+    # (5, 5), still with no via.
+    board["traces"][1]["layer"] = "in1"
+    return board
+
+
+def test_layer_change_between_top_and_an_inner_layer_requires_a_via():
+    """Before GA-3 this board CRASHED the harvest (_is_top raised on "in1");
+    the honest answer is the same finding a top/bottom hand-off gets."""
+    r = _run(_inner_layer_board())
+    assert r["counts"]["layer_change_no_via"] == 1
+    f = _of_type(r, "layer_change_no_via")[0]
+    assert f["net"] == "V"
+    assert f["at"] == [5.0, 5.0]
+
+
+def test_a_through_via_credits_an_inner_layer_change():
+    """The through-via model: one via at the point joins ALL declared layers,
+    so its position-only credit satisfies a top<->in1 hand-off exactly as it
+    does top<->bottom."""
+    board = _inner_layer_board()
+    board["vias"] = [{"x_mm": 5.0, "y_mm": 5.0, "drill_mm": 0.4,
+                      "diameter_mm": 0.8, "net": "V",
+                      "from_layer": "top", "to_layer": "bottom"}]
+    r = _run(board)
+    assert r["counts"]["layer_change_no_via"] == 0
+
+
+def test_crossing_layers_compare_canonically_folded():
+    """The harvest folds spellings once, so a "top" trace and an "F.Cu" trace
+    are the SAME layer to the crossing check — before GA-3 the raw strings
+    compared unequal and a genuine same-layer crossing between them was
+    silently missed."""
+    board = yaml.safe_load(_MISSING_VIA)
+    board["nets"] = [{"name": "V", "pins": ["P1.1"]},
+                     {"name": "W", "pins": ["P2.1"]}]
+    board["traces"] = [
+        {"net": "V", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 0, "y_mm": 0}, {"x_mm": 10, "y_mm": 10}]},
+        {"net": "W", "layer": "F.Cu", "width_mm": 0.25,
+         "points": [{"x_mm": 0, "y_mm": 10}, {"x_mm": 10, "y_mm": 0}]},
+    ]
+    r = _run(board)
+    assert r["counts"]["crossing"] == 1
+    f = _of_type(r, "crossing")[0]
+    assert f["layer"] == "top"

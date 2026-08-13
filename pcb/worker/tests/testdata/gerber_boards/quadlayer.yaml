@@ -1,0 +1,102 @@
+# QuadLayer — the epoch GA-3 four-copper-layer golden fixture. SYNTHETIC
+# (POLICY.md: authored for this repo, derived from no real product), the first
+# corpus board whose declared stack is deeper than two layers.
+#
+# Authored to exercise exactly the N-layer emission paths the 2-layer corpus
+# cannot reach:
+#   * copper TRACES on all four planes (top, in1, in2, bottom) -> four copper
+#     Gerbers each carrying real segment geometry, In1_Cu/In2_Cu among them
+#   * a copper POUR on an INNER layer (GND on in2) -> inner zone-fill emission
+#   * THROUGH vias (SIG and a GND stitching via) -> annuli flashed on every
+#     copper layer incl. inner, plus PTH drill hits
+#   * the jlcpcb-4layer profile -> the capability ceiling that admits the
+#     stack, and the .gbrjob L1..L4 renumbered copper rows (B.Cu = L4)
+#
+# Goldens are blessed per the CPN1 method (gerbv layer walk + KiCad viewer
+# second witness) at the epoch's testex/HITL — see docket 019ffa0f8538.
+version: 1
+name: QuadLayer
+width_mm: 30
+height_mm: 20
+layers: [top, in1, in2, bottom]
+origin: {x_mm: 0, y_mm: 0}
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.3
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+  rule_profile: jlcpcb-4layer
+
+components:
+  - ref: R1
+    footprint: R_0805
+    value: "10k"
+    x_mm: 7.0
+    y_mm: 10.0
+    rotation_deg: 0
+    layer: top
+  - ref: R2
+    footprint: R_0805
+    value: "10k"
+    x_mm: 23.0
+    y_mm: 10.0
+    rotation_deg: 0
+    layer: top
+
+nets:
+  - name: GND
+    pins: ["R1.1", "R2.1"]
+  - name: SIG
+    pins: ["R1.2", "R2.2"]
+
+traces:
+  # One SIG run per plane, hopping through the two SIG vias: top pad-side lead
+  # out, an in1 crossing, a bottom return, an in2 stub — every copper Gerber
+  # carries at least one real segment.
+  - net: SIG
+    layer: top
+    width_mm: 0.3
+    points:
+      - {x_mm: 8.0, y_mm: 10.0}
+      - {x_mm: 10.0, y_mm: 6.0}
+  - net: SIG
+    layer: in1
+    width_mm: 0.3
+    points:
+      - {x_mm: 10.0, y_mm: 6.0}
+      - {x_mm: 20.0, y_mm: 6.0}
+  - net: SIG
+    layer: bottom
+    width_mm: 0.3
+    points:
+      - {x_mm: 20.0, y_mm: 6.0}
+      - {x_mm: 22.0, y_mm: 10.0}
+  - net: GND
+    layer: in2
+    width_mm: 0.3
+    points:
+      - {x_mm: 6.0, y_mm: 15.0}
+      - {x_mm: 12.0, y_mm: 15.0}
+
+vias:
+  # SIG layer-change vias (through; v1 spans are always top<->bottom).
+  - {x_mm: 10.0, y_mm: 6.0, drill_mm: 0.4, diameter_mm: 0.8, net: SIG,
+     from_layer: top, to_layer: bottom}
+  - {x_mm: 20.0, y_mm: 6.0, drill_mm: 0.4, diameter_mm: 0.8, net: SIG,
+     from_layer: top, to_layer: bottom}
+  # GND stitching via inside the inner pour: its land must stay merged with
+  # the in2 fill (same moat trap zone_fill.yaml pins on the outer layers).
+  - {x_mm: 9.0, y_mm: 15.0, drill_mm: 0.4, diameter_mm: 0.8, net: GND,
+     from_layer: top, to_layer: bottom}
+
+zones:
+  # The INNER pour under test: GND on in2, carved around the two foreign SIG
+  # vias' drills/annuli and connected to the GND stitching via.
+  - net: GND
+    layer: in2
+    clearance_mm: 0.2
+    outline:
+      - {x_mm: 4.0, y_mm: 12.0}
+      - {x_mm: 26.0, y_mm: 12.0}
+      - {x_mm: 26.0, y_mm: 18.0}
+      - {x_mm: 4.0, y_mm: 18.0}

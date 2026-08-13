@@ -441,3 +441,54 @@ class TestExistingCopper:
         board = Board.from_kicad(pcb)
         assert board.existing_traces == ()
         assert board.existing_vias == ()
+
+
+class TestViaSpanExpandsToTheOccupiedStackRange:
+    """Epoch GA-3: a parsed via's ``(layers "A" "B")`` endpoint pair expands
+    to the INCLUSIVE stack-order range against the file's own copper header —
+    on a 4-layer file a through via occupies In1/In2 too, and handing the raw
+    pair through left those annuli unguarded on the grid."""
+
+    def _four_layer_text(self, extra_copper: str) -> str:
+        text = _pcb_text(extra_copper=extra_copper)
+        return text.replace(
+            '(0 "F.Cu" signal)\n    (31 "B.Cu" signal)',
+            '(0 "F.Cu" signal)\n    (4 "In1.Cu" signal)\n'
+            '    (6 "In2.Cu" signal)\n    (2 "B.Cu" signal)')
+
+    def test_a_through_via_occupies_every_layer_of_a_four_layer_file(
+            self, tmp_path):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(self._four_layer_text(
+            '(via (at 20 20) (size 0.8) (drill 0.4) '
+            '(layers "F.Cu" "B.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+        assert len(board.existing_vias) == 1
+        assert board.existing_vias[0].layers == (
+            "F.Cu", "In1.Cu", "In2.Cu", "B.Cu")
+
+    def test_a_two_layer_file_keeps_the_endpoint_pair_byte_identically(
+            self, tmp_path):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(via (at 20 20) (size 0.8) (drill 0.4) '
+                         '(layers "F.Cu" "B.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+        assert board.existing_vias[0].layers == ("F.Cu", "B.Cu")
+
+    def test_header_order_does_not_matter_stack_order_is_rederived(
+            self, tmp_path):
+        """A foreign file may list copper in layer-ID order (F, B, In1, In2);
+        the occupied range must still follow the physical stack."""
+        text = _pcb_text(extra_copper=(
+            '(via (at 20 20) (size 0.8) (drill 0.4) '
+            '(layers "F.Cu" "In2.Cu") (net 1))'))
+        text = text.replace(
+            '(0 "F.Cu" signal)\n    (31 "B.Cu" signal)',
+            '(0 "F.Cu" signal)\n    (2 "B.Cu" signal)\n'
+            '    (4 "In1.Cu" signal)\n    (6 "In2.Cu" signal)')
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(text)
+        board = Board.from_kicad(pcb)
+        # F.Cu -> In2.Cu spans F, In1, In2 — NOT everything up to B.Cu.
+        assert board.existing_vias[0].layers == ("F.Cu", "In1.Cu", "In2.Cu")

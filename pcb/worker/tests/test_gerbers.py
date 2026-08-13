@@ -43,6 +43,7 @@ HERE = Path(__file__).resolve().parent
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
 COUPON_BOARD = HERE / "testdata" / "coupon_jlc1.yaml"
+QUAD_BOARD = HERE / "testdata" / "gerber_boards" / "quadlayer.yaml"
 GOLDEN_DIR = HERE / "testdata" / "gerber_golden"
 
 BOUNDS_TOL_MM = 2.0  # slack for pad half-extents / real silk graphics past nominal extent
@@ -63,6 +64,15 @@ CASES = [
     # rules. Its goldens were blessed layer-by-layer in station S8 — see the
     # bless record on docket 019fe2fb843b and testdata/coupon_jlc1.README.md.
     pytest.param(COUPON_BOARD, "coupon_jlc1", build_fab, id="coupon-production"),
+    # QuadLayer (epoch GA-3) — the first FOUR-copper-layer corpus board:
+    # traces on all four planes, an INNER pour, through vias, the
+    # jlcpcb-4layer profile. Certifies the N-layer emission paths (In1_Cu/
+    # In2_Cu files, L1..L4 .gbrjob rows) the 2-layer corpus cannot reach.
+    # Goldens are blessed per the CPN1 method at the GA epoch's testex/HITL —
+    # until that bless lands, the golden byte-compare for this row is EXPECTED
+    # to fail with missing goldens (regenerate.py + the layer walk is the
+    # bless, not a fix).
+    pytest.param(QUAD_BOARD, "quadlayer", build_fab, id="quadlayer-production"),
 ]
 
 
@@ -1209,11 +1219,11 @@ def test_mask_polarity_agrees_between_gbr_and_job_manifest():
 
 
 # ---------------------------------------------------------------------------
-# N-layer fail-closed seals (epoch GA-1). Compile RESOLVES deeper stacks now;
-# BOTH gerber entries and the kicad exporter still write the fixed two-sided
-# artifact set, so each must refuse a deeper board whole rather than emit
-# files whose inner copper is silently absent (the K4 discards clause). These
-# seals come OUT in epoch GA-3, replaced by per-layer emission + goldens.
+# N-layer emission (epoch GA-3; this section held the GA-1 fail-closed seals
+# until the per-layer emitter landed). The IR path now fabricates the declared
+# stack completely; the LOOSE-dict gerber entry keeps its seal PERMANENTLY —
+# that path has no compiler and no profile capability ceiling in front of it,
+# so deep boards must go through compile + build_gerbers_ir.
 # ---------------------------------------------------------------------------
 
 
@@ -1228,26 +1238,104 @@ def _four_layer_board_dict() -> dict:
     }
 
 
-def test_build_gerbers_ir_refuses_a_deeper_stack():
+def test_build_gerbers_ir_emits_every_declared_copper_layer():
+    """FLIPPED at GA-3 (was ..._refuses_a_deeper_stack): a 4-layer board's file
+    set carries all four copper Gerbers in stack order, and the .gbrjob
+    manifest renumbers B.Cu to L4 with the two inner rows between."""
+    import json
+
     ir = _compile_board_ir(_four_layer_board_dict())
-    assert len(ir.layer_stack.copper) == 4  # the compile half really resolved it
-    with pytest.raises(ValueError, match="silently drops inner copper"):
-        gerber.build_gerbers_ir(ir)
+    assert len(ir.layer_stack.copper) == 4
+    files = gerber.build_gerbers_ir(ir)
+    for suffix in ("F_Cu", "In1_Cu", "In2_Cu", "B_Cu"):
+        assert f"quad-{suffix}.gbr" in files, sorted(files)
+    # Per-layer .gbrjob truth: L-numbers renumbered, inner rows present.
+    job = json.loads(files["quad-job.gbrjob"])
+    assert job["GeneralSpecs"]["LayerNumber"] == 4
+    copper_rows = {f["Path"]: f["FileFunction"]
+                   for f in job["FilesAttributes"]
+                   if f["FileFunction"].startswith("Copper")}
+    assert copper_rows == {
+        "quad-F_Cu.gbr": "Copper,L1,Top",
+        "quad-In1_Cu.gbr": "Copper,L2,Inr",
+        "quad-In2_Cu.gbr": "Copper,L3,Inr",
+        "quad-B_Cu.gbr": "Copper,L4,Bot",
+    }
+    # Stack order in the manifest: copper first, F -> inner -> B.
+    paths = [f["Path"] for f in job["FilesAttributes"]]
+    assert paths[:4] == ["quad-F_Cu.gbr", "quad-In1_Cu.gbr",
+                        "quad-In2_Cu.gbr", "quad-B_Cu.gbr"]
+    # The inner copper files carry the Inr copper attribute, not Top/Bot.
+    assert "Copper,L2,Inr" in files["quad-In1_Cu.gbr"]
+    assert "Copper,L3,Inr" in files["quad-In2_Cu.gbr"]
+    assert "Copper,L4,Bot" in files["quad-B_Cu.gbr"]
 
 
-def test_build_gerbers_loose_dict_refuses_a_declared_deeper_stack():
+def test_a_two_layer_board_gains_no_new_files_from_the_nlayer_emitter():
+    """The other half of the flip: the generalized loop emits EXACTLY the
+    nine baseline suffixes for a 2-layer board — byte-identity with the old
+    straight-line blocks is the goldens' job, file-SET identity is this
+    one's."""
+    board = _load(SPIKE_BOARD)
+    ir = _compile_board_ir(board)
+    files = gerber.build_gerbers_ir(ir, name="board")
+    gbr_suffixes = {n[len("board-"):-len(".gbr")]
+                    for n in files if n.endswith(".gbr")}
+    assert gbr_suffixes == set(gerber._GERBER_SUFFIXES)
+
+
+def test_build_gerbers_loose_dict_still_refuses_a_declared_deeper_stack():
+    """PERMANENT seal (GA-3 decision, comment 1198 D2): the loose path has no
+    compiler and no capability ceiling, so it never emits deep stacks."""
     with pytest.raises(ValueError, match="silently drops inner copper"):
         gerber.build_gerbers({"name": "quad", "width_mm": 20, "height_mm": 20,
                               "layers": ["top", "in1", "in2", "bottom"],
                               "components": []})
 
 
-def test_generate_kicad_pcb_refuses_a_declared_deeper_stack():
+def test_generate_kicad_pcb_emits_a_stack_driven_layer_table_and_via_spans():
+    """FLIPPED at GA-3 (was ..._refuses_a_declared_deeper_stack): the KiCad-9
+    layer table carries the declared stack on the even copper ids (F=0,
+    In1=4, In2=6, B=2) and a via writes its own span."""
     from pcb_worker import kicad
 
-    with pytest.raises(ValueError, match="silently drops inner copper"):
-        kicad.generate_kicad_pcb({"name": "quad", "width_mm": 20, "height_mm": 20,
-                                  "layers": ["top", "in1", "in2", "bottom"],
+    text = kicad.generate_kicad_pcb(
+        {"name": "quad", "width_mm": 20, "height_mm": 20,
+         "layers": ["top", "in1", "in2", "bottom"],
+         "components": [], "nets": [], "traces": [
+             {"net": "", "layer": "in1", "width_mm": 0.3,
+              "points": [{"x_mm": 2, "y_mm": 2}, {"x_mm": 8, "y_mm": 2}]}],
+         "vias": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 0.8, "drill_mm": 0.4,
+                   "from_layer": "top", "to_layer": "bottom"}]})
+    assert '(0 "F.Cu" signal)' in text
+    assert '(4 "In1.Cu" signal)' in text
+    assert '(6 "In2.Cu" signal)' in text
+    assert '(2 "B.Cu" signal)' in text
+    # Inner trace emits its KiCad alias, never the canonical id verbatim.
+    assert '(layer "In1.Cu")' in text
+    assert '(layer "in1")' not in text
+    # U5: the via span is the via's own (through) span.
+    assert '(layers "F.Cu" "B.Cu")' in text
+
+
+def test_harvested_copper_outside_the_declared_stack_fails_closed():
+    """The stray-layer guard that replaced the GA-1 seal: copper bucketed for
+    a layer the stack does not declare must raise, never silently miss every
+    file (the K4 discards clause, one level deeper)."""
+    g = gerber._Geometry()
+    g.traces_inner["in3"] = [(1.0, 1.0, 2.0, 1.0, 0.3)]
+    with pytest.raises(ValueError, match="outside the declared stack"):
+        gerber._build_gerber_layers({"width_mm": 10, "height_mm": 10}, g,
+                                    "2024-01-01T00:00:00+00:00",
+                                    copper_ids=("top", "in1", "in2", "bottom"))
+
+
+def test_generate_kicad_pcb_refuses_a_malformed_stack_shape():
+    from pcb_worker import kicad
+
+    with pytest.raises(ValueError, match="inner entry 1 must be 'in1'"):
+        kicad.generate_kicad_pcb({"name": "bad", "width_mm": 20, "height_mm": 20,
+                                  "layers": ["top", "in2", "bottom"],
                                   "components": [], "nets": [], "traces": [],
                                   "vias": []})
 

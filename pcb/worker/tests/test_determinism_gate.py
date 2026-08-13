@@ -37,6 +37,7 @@ from tests.gerber_fab import (build_assembly_bom, build_assembly_cpl, build_fab,
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
+QUAD_BOARD = HERE / "testdata" / "gerber_boards" / "quadlayer.yaml"
 ZONE_BOARD = HERE / "testdata" / "zone_fill.yaml"
 ASSEMBLY_BOARD = HERE / "testdata" / "assembly_boards" / "assembly_fixture.yaml"
 
@@ -71,6 +72,15 @@ CASES = [
     # a determinism bug in one would not show up in the other.
     pytest.param(ASSEMBLY_BOARD, "afix", build_assembly_bom, id="assembly-bom-production"),
     pytest.param(ASSEMBLY_BOARD, "afix", build_assembly_cpl, id="assembly-cpl-production"),
+    # QUAD LAYER (epoch GA-3) — same one-data-row pattern as zonefill above,
+    # for the same reason applied to a new derivation surface: the N-layer
+    # emitter DERIVES its file set, .gbrjob copper rows and per-layer object
+    # streams from the declared stack (a loop, where the 2-layer path was
+    # straight-line code), and an unstable iteration order there would
+    # produce different-but-plausible fabrication on a second run. This row
+    # checks the whole 4-layer package (inner copper files included) is
+    # byte-identical across runs.
+    pytest.param(QUAD_BOARD, "quadlayer", build_fab, id="quadlayer-production"),
 ]
 
 
