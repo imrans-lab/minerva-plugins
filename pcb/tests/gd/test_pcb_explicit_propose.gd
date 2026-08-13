@@ -92,8 +92,12 @@ var overlay: AnnotationOverlay = null
 
 const U1_PIN1 := Vector2(15.0, 20.0)
 const U2_PIN1 := Vector2(55.0, 20.0)
-const U3_PIN1 := Vector2(15.0, 55.0)
-const U4_PIN1 := Vector2(55.0, 55.0)
+# y=32 (testex find, OFC epoch): these two lived at y=55 on a 40 mm-tall
+# board — OUT OF BOUNDS — and only the canned fallback ever routed them; the
+# REAL worker refuses endpoint_out_of_bounds. Scenario F never clicks them
+# (bulk apply via handle_tool), so an in-bounds row is free of canvas math.
+const U3_PIN1 := Vector2(15.0, 32.0)
+const U4_PIN1 := Vector2(55.0, 32.0)
 
 var _hint_id := ""
 ## Workspace candidate id (S5, C4b: propose lands a candidate, not an
@@ -180,6 +184,20 @@ func _mount() -> bool:
 func _build_fixture_board(d) -> void:
 	d.board_width = 70.0
 	d.board_height = 40.0
+	# Real design rules, authored (testex find, same class as drc_propose's
+	# fixture note / docket 019fc22284537bdfa9861c159bad76b1 defect 2): the
+	# worker's compile_board._build_design_rules fail-closed REFUSES a board
+	# whose design_rules omit any of the four positive-number rules — the
+	# real-worker path was unreachable with the default (unset) rules, and the
+	# canned fallback silently ate the refusal until the OFC-1 gate made it
+	# loud. 0.25 mm equals pcb_trace.DEFAULT_WIDTH_MM, so no width-dependent
+	# assertion in this suite shifts.
+	d.design_rules = {
+		"trace_width_mm": 0.25,
+		"clearance_mm": 0.2,
+		"via_diameter_mm": 0.8,
+		"via_drill_mm": 0.4,
+	}
 
 	var u1 = d.new_component()
 	u1.id = "U1"
@@ -528,7 +546,10 @@ func _test_b_propose_creates_proposal() -> void:
 	# the status label when drc_summary is present. The fixture at this point
 	# has exactly one net (SIG, U1<->U2, no existing traces) so a real-worker
 	# run must come back clean.
-	var expected_b_status := "1 proposal — DRC clean" if _used_real_worker else "1 proposal"
+	# Real-worker string is the CURRENT status format (testex find: the old
+	# "DRC clean" suffix predates the geometric-DRC split and was unreachable
+	# while the seam silently ran canned).
+	var expected_b_status := "1 proposal — Connectivity clean (pre-existing: none) — Geometric clean" if _used_real_worker else "1 proposal"
 	check("B: status label reports one proposal" + (" (DRC clean)" if _used_real_worker else ""),
 		panel._status_label.text == expected_b_status,
 		"got '%s' expected '%s'" % [panel._status_label.text, expected_b_status])
@@ -685,7 +706,7 @@ func _test_d_propose_again_then_accept_via_real_dispatch() -> void:
 	await _click_propose_button()
 	# Same DRC-suffix accommodation as scenario B (see its comment) — still a
 	# single clean net (SIG) at this point.
-	var expected_d_status := "1 proposal — DRC clean" if _used_real_worker else "1 proposal"
+	var expected_d_status := "1 proposal — Connectivity clean (pre-existing: none) — Geometric clean" if _used_real_worker else "1 proposal"
 	check("D: status label reports one proposal again", panel._status_label.text == expected_d_status,
 		"got '%s' expected '%s'" % [panel._status_label.text, expected_d_status])
 

@@ -173,6 +173,20 @@ func _mount() -> bool:
 func _build_fixture_board(d) -> void:
 	d.board_width = 70.0
 	d.board_height = 40.0
+	# Real design rules, authored (testex find, same class as drc_propose's
+	# fixture note / docket 019fc22284537bdfa9861c159bad76b1 defect 2): the
+	# worker's compile_board._build_design_rules fail-closed REFUSES a board
+	# whose design_rules omit any of the four positive-number rules — the
+	# real-worker path was unreachable with the default (unset) rules, and the
+	# canned fallback silently ate the refusal until the OFC-1 gate made it
+	# loud. 0.25 mm equals pcb_trace.DEFAULT_WIDTH_MM, so no width-dependent
+	# assertion in this suite shifts.
+	d.design_rules = {
+		"trace_width_mm": 0.25,
+		"clearance_mm": 0.2,
+		"via_diameter_mm": 0.8,
+		"via_drill_mm": 0.4,
+	}
 
 	var u1 = d.new_component()
 	u1.id = "U1"

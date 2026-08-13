@@ -172,6 +172,20 @@ func _mount() -> bool:
 func _build_fixture_board(d) -> void:
 	d.board_width = 70.0
 	d.board_height = 40.0
+	# Real design rules, authored (testex find, same class as drc_propose's
+	# fixture note / docket 019fc22284537bdfa9861c159bad76b1 defect 2): the
+	# worker's compile_board._build_design_rules fail-closed REFUSES a board
+	# whose design_rules omit any of the four positive-number rules — the
+	# real-worker path was unreachable with the default (unset) rules, and the
+	# canned fallback silently ate the refusal until the OFC-1 gate made it
+	# loud. 0.25 mm equals pcb_trace.DEFAULT_WIDTH_MM, so no width-dependent
+	# assertion in this suite shifts.
+	d.design_rules = {
+		"trace_width_mm": 0.25,
+		"clearance_mm": 0.2,
+		"via_diameter_mm": 0.8,
+		"via_drill_mm": 0.4,
+	}
 
 	var u1 = d.new_component()
 	u1.id = "U1"
@@ -929,13 +943,31 @@ func _test_apply_tool_full_mcp_broker_path() -> void:
 	print("\n-- apply tool through the FULL MCP + broker-envelope path --")
 	var traces_before: int = data.get_trace_count()
 
+	# Fresh UN-CONNECTED pair for THIS scenario (testex find, OFC epoch): the
+	# old target U1.1→U2.1 was ALREADY CONNECTED by E2E-3C's committed trace,
+	# and the REAL worker correctly reports span_outcomes=already_connected
+	# and proposes NOTHING — only the canned double blindly re-routed it. The
+	# broker-envelope proof needs a span the router can actually route.
+	var u5 = data.new_component()
+	u5.id = "U5"
+	u5.position = Vector2(15.0, 30.0)
+	u5.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(u5)
+	var u6 = data.new_component()
+	u6.id = "U6"
+	u6.position = Vector2(55.0, 30.0)
+	u6.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(u6)
+	data.connect_pin_to_net("SIG3", "U5", "1")
+	data.connect_pin_to_net("SIG3", "U6", "1")
+
 	# Fresh open hint (host-authored twin of a tool-drawn one).
 	var env: Dictionary = host.build_route_hint_envelope(
-		U1_PIN1.x, U1_PIN1.y, "", "F.Cu", "single_trace",
-		[[U1_PIN1.x, U1_PIN1.y], [U2_PIN1.x, U2_PIN1.y]], "human")
+		15.0, 30.0, "", "F.Cu", "single_trace",
+		[[15.0, 30.0], [55.0, 30.0]], "human")
 	var kp: Dictionary = env.get("kind_payload", {})
-	kp["source_pins"] = ["U1.1"]
-	kp["dest_pins"] = ["U2.1"]
+	kp["source_pins"] = ["U5.1"]
+	kp["dest_pins"] = ["U6.1"]
 	env["kind_payload"] = kp
 	var hint_id := str(host.add_annotation_v2(env))
 	check("BR: fresh hint added", not hint_id.is_empty())
