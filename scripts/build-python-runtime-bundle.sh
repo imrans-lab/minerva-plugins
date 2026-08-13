@@ -289,14 +289,21 @@ for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','
       LOCALAPPDATA="${LOCALAPPDATA}" \
       HOMEDRIVE="${HOMEDRIVE}" \
       HOMEPATH="${HOMEPATH}" \
-        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
+        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: "${DEPS[@]}"
     else
       PYTHONNOUSERSITE=1 \
-        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
+        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: "${DEPS[@]}"
     fi
   fi
 else
   echo "[$TRIPLE] cross build: pip install via host python with --platform=$WHEEL_PLATS"
+  # --only-binary=:all: on the native path above (review of 019ffc543d1d):
+  # without it a missing wheel falls back to an SDIST, whose build backend runs
+  # ARBITRARY CODE during packaging — a strictly larger hole than the missing
+  # hash pins this work is about, and one no hash would have closed because
+  # the sdist would have been the artifact we hashed. The cross path already
+  # implies binary-only via --platform, which pip refuses to combine with a
+  # source build.
   # Find a host python3 (prefer 3.12 to match cpython version pin)
   HOST_PY="$(command -v "python${PY_MAJOR_MINOR}" || command -v python3 || true)"
   if [ -z "$HOST_PY" ]; then

@@ -48,21 +48,34 @@ PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0"
 # Provenance for every input below:
 #   python-build-standalone — https://github.com/astral-sh/python-build-standalone
 #     releases/download/$PBS_TAG/cpython-$CPYTHON+$PBS_TAG-<asset>-install_only.tar.gz
-#     License: PSF-2.0 (CPython) plus the project's own BSD-3-Clause tooling.
+#     License: PSF-2.0 covers the CPython it packages. The project's OWN
+#     license was recorded here as BSD-3-Clause, which is WRONG (review of
+#     019ffc543d1d); it is believed to be MPL-2.0 but that was not confirmed
+#     from the source, so it is marked below rather than swapped for another
+#     unverified value.
 #   ripgrep — https://github.com/BurntSushi/ripgrep releases/download/$RG_VERSION/...
 #     License: MIT OR Unlicense.
-#   wheels — PyPI, versions pinned in PIP_PKGS above. Licenses: PyYAML MIT,
-#     gerber-writer MIT, pyclipper MIT (Clipper itself is Boost-1.0).
+#   wheels — PyPI, versions pinned in PIP_PKGS above. PyYAML MIT; pyclipper MIT
+#     (Clipper itself Boost-1.0); gerber-writer NOT CONFIRMED (Ucamco —
+#     possibly Apache-2.0, recorded as MIT without a source).
+#
+# UNRESOLVED LICENSES, using this repo's own convention for them (see
+# scripts/gen_notice.py, which fails the release gate on any entry whose
+# license is empty or contains "unknown" rather than shipping a guess). A
+# provenance record exists to be TRUSTED FOR A DISTRIBUTION DECISION, so an
+# unverified value in it is worse than an admitted gap.
+PBS_PROJECT_LICENSE="UNKNOWN — pending verification (believed MPL-2.0)"
+GERBER_WRITER_LICENSE="UNKNOWN — pending verification (recorded MIT without a source)"
 PBS_SHA256_LINUX_X86_64=""
 PBS_SHA256_LINUX_ARM64=""
 PBS_SHA256_MACOS_ARM64=""
-PBS_SHA256_MACOS_X86_64=""
+PBS_SHA256_MACOS_AMD64=""
 PBS_SHA256_WINDOWS_X86_64=""
 
 RG_SHA256_LINUX_X86_64=""
 RG_SHA256_LINUX_ARM64=""
 RG_SHA256_MACOS_ARM64=""
-RG_SHA256_MACOS_X86_64=""
+RG_SHA256_MACOS_AMD64=""
 RG_SHA256_WINDOWS_X86_64=""
 
 # Wheels are pinned by version above but NOT yet by hash. Closing this needs a

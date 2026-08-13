@@ -2642,6 +2642,17 @@ def compile_board(
                     f"component {ref!r}: the lock entry for {fp_ref!r} carries no sha256, "
                     f"so this footprint is NOT pinned — re-lock the board to restore it",
                     comp_ref)
+            elif expected and not actual:
+                # The MIRROR of library_pin_unusable: the board knows what it
+                # wants, but the supplying layer's entry carries no sha to
+                # compare against, so the pin cannot fire. Same reasoning, same
+                # refusal to stay quiet — a pin that cannot adjudicate must not
+                # look like a pin that adjudicated and passed.
+                diags.warning(
+                    "library_pin_uncheckable",
+                    f"component {ref!r}: {fp_ref!r} is pinned, but the supplying layer "
+                    f"{supplied.layer!r} has no sha256 for it — the pin could NOT be checked",
+                    comp_ref)
             elif expected and actual and expected != actual:
                 diags.error(
                     "library_lock_mismatch",

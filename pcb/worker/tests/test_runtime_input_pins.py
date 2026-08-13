@@ -53,18 +53,70 @@ def test_the_builder_verifies_before_it_extracts():
 
 
 def test_verification_runs_on_a_CACHE_HIT_too():
-    """MUTATION THIS CATCHES: verifying only on the download branch. The cached
-    artifact is the MORE dangerous case, not the safer one — it was fetched at
-    some earlier time under conditions nobody can now inspect, and on CI the
-    cache is a shared writable store keyed by a hash of the lock file rather
-    than of the payload. A check that trusts the cache protects only the run
-    that populated it."""
+    """MUTATION THIS CATCHES: verifying only on ONE branch of the download
+    if/else. The cached artifact is the MORE dangerous case, not the safer one —
+    it was fetched at some earlier time under conditions nobody can now inspect,
+    and on CI the cache is a shared writable store keyed by a hash of the lock
+    file rather than of the payload. A check that trusts the cache protects only
+    the run that populated it.
+
+    ORDERING ALONE IS NOT ENOUGH, which the review of this suite pointed out: a
+    verification moved INSIDE the cache-hit branch still comes after the cached
+    echo and before the extract, so an index comparison passes while fresh
+    downloads go unverified. This asserts the structural fact instead — that the
+    if/else has CLOSED before the verify call, so it is on the single path both
+    branches converge to."""
+    lines = BUILDER.read_text(encoding="utf-8").splitlines()
+    cached_echo = next(i for i, l in enumerate(lines)
+                       if 'PBS cached: $PBS_CACHED' in l)
+    verify = next(i for i, l in enumerate(lines)
+                  if 'verify_sha256 "$PBS_CACHED"' in l)
+    between = [l.strip() for l in lines[cached_echo:verify]]
+    assert "fi" in between, (
+        "the PBS verification is inside the download if/else, so one branch "
+        "reaches extraction unverified")
+    # And it is at top level, not nested in some other block.
+    assert not lines[verify].startswith((" ", "\t")), lines[verify]
+
+
+def test_every_name_the_SCRIPT_derives_exists_in_the_lock():
+    """THE REVIEW'S MOST SERIOUS FINDING, now pinned. The script selects a pin by
+    upper-casing the build triple (macos-amd64 -> ..._MACOS_AMD64); the lock
+    declared ..._MACOS_X86_64. Those variables were DEAD: unreadable by the
+    script, so macOS Intel took the unverified path forever.
+
+    Why the completeness check below could not catch it: that test asserts every
+    lock value is non-empty. Populate all ten, delete its marker, and the record
+    says K23 is closed while one platform ships unverified. A gap marker that
+    cannot see a name mismatch is worse than no marker, because it certifies.
+
+    MUTATION THIS CATCHES: renaming either side, or adding a build triple
+    without adding its pins."""
     src = BUILDER.read_text(encoding="utf-8")
-    # The PBS verification must sit AFTER the if/else closes, not inside the
-    # download branch.
-    fi_at = src.index('echo "[$TRIPLE] PBS cached: $PBS_CACHED"')
-    verify_at = src.index('verify_sha256 "$PBS_CACHED"')
-    assert verify_at > fi_at
+    lock_names = set(_lock_vars())
+
+    # The BUILD triples are the case arms of the script's own target dispatch.
+    # The host-detection case block below it uses the same arm shape (its arms
+    # map a uname value onto a build triple, e.g. linux-aarch64 -> linux-arm64),
+    # so those are excluded by the HOST_TRIPLE assignment that marks them.
+    # Without that exclusion this test demands pins for host aliases that are
+    # never built, and reds the gate for a reason that is not a defect — caught
+    # by running this logic against the real files before trusting it.
+    triples = {m.group(1) for m in
+               re.finditer(r"^\s{2}((?:linux|macos|windows)-[a-z0-9_]+)\)(.*)$",
+                           src, re.MULTILINE)
+               if "HOST_TRIPLE" not in m.group(2)}
+    assert triples, "could not find the script's build triples"
+
+    missing = []
+    for triple in sorted(triples):
+        suffix = triple.upper().replace("-", "_")
+        for prefix in ("PBS_SHA256_", "RG_SHA256_"):
+            if prefix + suffix not in lock_names:
+                missing.append(prefix + suffix)
+    assert not missing, (
+        f"the script will look for these and find nothing: {missing}; "
+        f"lock declares {sorted(n for n in lock_names if 'SHA256' in n)}")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")

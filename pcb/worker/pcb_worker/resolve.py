@@ -260,7 +260,18 @@ def _resolve_component(
         if isinstance(pinned, dict):
             expected = str(pinned.get("sha256", ""))
             actual = str((supplied.entry or {}).get("sha256", ""))
-            if expected and actual and expected != actual:
+            if expected and not actual:
+                # Pinned but uncheckable — the supplying layer has no sha to
+                # compare. Marked, not silent, for the same reason a mismatch
+                # is: the panel must not render pinned content as verified when
+                # nothing verified it.
+                comp["library_lock_uncheckable"] = {
+                    "footprint": fp_ref,
+                    "supplying_layer": supplied.layer,
+                    "note": ("this footprint is pinned, but the supplying layer's lock "
+                             "entry has no sha256, so the pin could not be checked"),
+                }
+            elif expected and actual and expected != actual:
                 comp["library_lock_mismatch"] = {
                     "footprint": fp_ref,
                     "expected_sha256": expected,
