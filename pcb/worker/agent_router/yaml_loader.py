@@ -10,7 +10,7 @@ KiCad with human-authored routing guidance from the YAML.
 from pathlib import Path
 from typing import Optional
 
-from .board import Board
+from .board import Board, DesignRules, RoutingRulesError
 from .hints import (
     RoutingHints, BusHint, NetHint, Waypoint, AvoidArea,
     GlobalHints, InternalBridge, ChainHint,
@@ -30,7 +30,16 @@ def load_board_with_hints(
 
     Returns:
         Tuple of:
-        - Board: with accurate pad positions from .kicad_pcb
+        - Board: with accurate pad positions from .kicad_pcb, AND — epoch
+          GA-6, chore 019f9d0c20 — its ``design_rules`` slot filled from the
+          YAML's authored ``design_rules`` block (None when the board authors
+          none). ONE read, ONE error policy: cli.py used to re-read the same
+          file for the rules, and the two reads had already diverged once on
+          error semantics. A MISSING file still yields (board with rules
+          None, no hints) — absent-vs-unreadable is load-bearing, see hint
+          pcb-routing/absent-vs-unreadable-must-be-distinct (019f9d061f13);
+          an UNREADABLE file or rules block RAISES
+          (yaml.YAMLError / RoutingRulesError), never degrades silently.
         - RoutingHints: parsed from YAML routing_hints section
         - internal_nets_dict: {component_id: {net_name: [pad_numbers]}}
     """
@@ -39,13 +48,27 @@ def load_board_with_hints(
     # Board geometry from KiCad (accurate pad positions)
     board = Board.from_kicad(str(kicad_pcb_path))
 
-    # Parse the YAML for hints and internal_nets
+    # Parse the YAML for hints, internal_nets AND design rules — once.
     yaml_path = Path(board_yaml_path)
     if not yaml_path.exists():
         return board, RoutingHints(), {}
 
     with open(yaml_path) as f:
         data = yaml.safe_load(f)
+
+    if data is None:
+        # An empty file is "no guidance", same as a missing one.
+        return board, RoutingHints(), {}
+    if not isinstance(data, dict):
+        raise RoutingRulesError(
+            f"{yaml_path}: board YAML is not a mapping "
+            f"({type(data).__name__}); its design rules cannot be read and "
+            f"routing fails closed")
+
+    # Authored design rules ride the SAME read (chore 019f9d0c20).
+    # DesignRules.from_authored owns the field mapping and fails closed on a
+    # block it cannot read; an absent block yields None (engine defaults).
+    board.design_rules = DesignRules.from_authored(data.get("design_rules"))
 
     # Extract internal_nets from components
     internal_nets_dict: dict[str, dict[str, list[str]]] = {}

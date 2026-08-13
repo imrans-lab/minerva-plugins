@@ -2418,13 +2418,31 @@ def test_the_standalone_cli_refuses_a_board_carrying_net_classes(tmp_path):
     still read normally — the guard is scoped to the divergence, not to
     `design_rules` at large.
     """
-    from agent_router import cli as router_cli
     from agent_router.board import RoutingRulesError
+    from agent_router.yaml_loader import load_board_with_hints
+
+    # Chore 019f9d0c20 (epoch GA-6): cli._design_rules_from_yaml is GONE —
+    # the ONE read lives in load_board_with_hints, which fills the board's
+    # own rules slot. This test now drives that path, so the refusal matrix
+    # below guards the read every CLI run actually performs.
+    minimal_pcb = tmp_path / "board.kicad_pcb"
+    minimal_pcb.write_text(
+        '(kicad_pcb (version 20221018) (generator pcbnew)\n'
+        '  (general (thickness 1.6))\n'
+        '  (layers\n'
+        '    (0 "F.Cu" signal)\n'
+        '    (31 "B.Cu" signal)\n'
+        '    (44 "Edge.Cuts" user)\n'
+        '  )\n'
+        '  (net 0 "")\n'
+        '  (gr_rect (start 0 0) (end 30 20) (layer "Edge.Cuts") (width 0.1))\n'
+        ')\n')
 
     def read(design_rules):
         path = tmp_path / "board.yaml"
         path.write_text(yaml.safe_dump({"name": "b", "design_rules": design_rules}))
-        return router_cli._design_rules_from_yaml(path)
+        board, _hints, _inets = load_board_with_hints(minimal_pcb, path)
+        return board.design_rules
 
     plain = {"trace_width_mm": BOARD_WIDTH_MM, "clearance_mm": BOARD_CLEARANCE_MM}
 

@@ -67,32 +67,13 @@ def _refuse_if_source_carries_copper(pcb_path) -> None:
         f"unmodelled).")
 
 
-def _design_rules_from_yaml(board_yaml_path) -> DesignRules | None:
-    """The authored ``design_rules`` block of a board YAML, or None if the board
-    authors none.
-
-    A MISSING FILE yields None — ``load_board_with_hints`` already treats that as
-    "no YAML guidance", and this must not disagree with it. Anything else that
-    goes wrong RAISES. An earlier cut swallowed ``OSError``/``YAMLError`` into
-    None, which was a silent-degradation path in two ways at once: it disagreed
-    with ``load_board_with_hints``'s own unguarded ``yaml.safe_load`` (which
-    raises on the same file), and an unparseable rules block became the engine's
-    default width — the exact silent-0.25 failure this round exists to remove.
-    ``DesignRules.from_authored`` owns the authored-field mapping and fails
-    closed on a block it cannot read.
-    """
-    path = Path(board_yaml_path)
-    if not path.exists():
-        return None
-    with open(path) as handle:
-        data = yaml.safe_load(handle)
-    if data is None:
-        return None
-    if not isinstance(data, dict):
-        raise RoutingRulesError(
-            f"{path}: board YAML is not a mapping ({type(data).__name__}); its "
-            f"design rules cannot be read and routing fails closed")
-    return DesignRules.from_authored(data.get("design_rules"))
+# _design_rules_from_yaml is GONE (chore 019f9d0c20): it was a SECOND read of
+# the board YAML, added when yaml_loader ignored design_rules — and the two
+# reads diverged on error semantics inside the very round that created it.
+# load_board_with_hints now returns the board with its rules slot filled from
+# the one shared parse; the absent-vs-unreadable distinction it guarded
+# (missing file -> None rules; unreadable -> raise) lives there, stated in
+# its docstring.
 
 
 def main():
@@ -278,6 +259,12 @@ def cmd_route(args):
         # otherwise reach the user as a traceback and exit 1; a bad input file
         # is a user error, so it gets the same clean exit 2 as every other
         # fail-closed path here.
+        # ONE read, one boundary (chore 019f9d0c20): the loader now fills
+        # board.design_rules from the SAME parse that yields the hints — the
+        # second read this branch used to do (and the drift it invited) is
+        # gone. Rules that cannot be READ end the run exactly as rules that
+        # cannot be SOURCED do; a missing/empty YAML legitimately leaves the
+        # rules slot None (engine defaults).
         try:
             board, hints, internal_nets = load_board_with_hints(
                 args.input, args.board_yaml
@@ -286,14 +273,6 @@ def cmd_route(args):
             print(f"error: {args.board_yaml}: board YAML could not be parsed: "
                   f"{exc}", file=sys.stderr)
             sys.exit(2)
-        # The board YAML is also where a CLI-loaded board's design rules come
-        # from — the .kicad_pcb reader models none. Without this the Board's
-        # rules slot stays empty and the chain has nothing to fall through TO.
-        # Inside the same fail-closed boundary as the resolution below: rules
-        # that cannot be READ must end the run exactly as rules that cannot be
-        # SOURCED do.
-        try:
-            board.design_rules = _design_rules_from_yaml(args.board_yaml)
         except RoutingRulesError as exc:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(2)
