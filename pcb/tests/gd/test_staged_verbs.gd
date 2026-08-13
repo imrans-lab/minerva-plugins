@@ -29,7 +29,7 @@ func _init() -> void:
 	_run_reject_pairing()
 	_run_batch_all_or_nothing()
 	_run_canvas_signal_wiring()
-	_run_mcp_staging_family()
+	await _run_mcp_staging_family()
 	_run_regression_census()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -309,7 +309,7 @@ func _run_mcp_staging_family() -> void:
 		and str(zone_row.get("note", "")) == "agent draft")
 
 	# Accept one; reject the other; audit trail via include_terminal.
-	var acc: Dictionary = PanelTools._staged_accept(host, {"entity_id": eid})
+	var acc: Dictionary = await PanelTools._staged_accept(host, {"entity_id": eid})
 	check("staged_accept lands", bool(acc.get("success", false)))
 	check_eq("…the zone is on the board with ITS OWN id",
 		str((rig["data"].get_zone(eid) as Dictionary).get("id", "")), eid)
@@ -323,7 +323,7 @@ func _run_mcp_staging_family() -> void:
 		int(audit.get("count", -1)), 2)
 
 	# Terminal re-accept refuses through the tool envelope.
-	var again: Dictionary = PanelTools._staged_accept(host, {"entity_id": eid})
+	var again: Dictionary = await PanelTools._staged_accept(host, {"entity_id": eid})
 	check("re-accept refuses by name", not bool(again.get("success", true))
 		and str(again.get("error", "")) == "staged_entry_not_found")
 
@@ -331,12 +331,12 @@ func _run_mcp_staging_family() -> void:
 	var b1: Dictionary = PanelTools._propose_zone(host, {
 		"kind": "keepout", "layer": "top", "outline": outline})
 	var b1_id := str(b1.get("entity_id", ""))
-	var batch: Dictionary = PanelTools._staged_accept(host, {
+	var batch: Dictionary = await PanelTools._staged_accept(host, {
 		"entity_ids": [b1_id, "zone:doesnotexist"]})
 	check("batch with an unknown member refuses whole", not bool(batch.get("success", true)))
 	check_eq("…naming exactly the bad member",
 		(batch.get("refusals", []) as Array).size(), 1)
-	var batch_ok: Dictionary = PanelTools._staged_accept(host, {"entity_ids": [b1_id]})
+	var batch_ok: Dictionary = await PanelTools._staged_accept(host, {"entity_ids": [b1_id]})
 	check("healed batch accepts", bool(batch_ok.get("success", false)))
 	check_eq("…count", int(batch_ok.get("accepted", 0)), 1)
 	rig["panel"].free()

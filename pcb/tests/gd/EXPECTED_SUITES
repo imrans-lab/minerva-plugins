@@ -60,3 +60,4 @@ test_draft_composer.gd
 test_staged_canvas.gd
 test_staged_verbs.gd
 test_draft_doorways.gd
+test_staged_placement.gd
