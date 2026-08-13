@@ -950,12 +950,63 @@ static func _spatial_query(host, args: Dictionary) -> Dictionary:
 			"id": comp_id,
 			"relationship": spatial.describe_relative_position(reference_component, comp_id),
 		})
-	return _ok({
+	var reply: Dictionary = {
 		"reference": reference_component,
 		"radius_mm": radius,
 		"nearby_count": results.size(),
 		"nearby": results,
-	})
+	}
+	# COPPER IN THE SAME AREA (bug 019fa1cda337, acceptance check K28). The
+	# question "what is ROUTED here" was unanswerable over MCP: this verb
+	# returned components only, so an agent asked to reason about congestion or
+	# to avoid existing copper had no way to see any of it — while the human's
+	# marquee over the same rectangle picked all five kinds.
+	var ref_comp = data.get_component(reference_component)
+	if ref_comp == null:
+		# The component vanished between the nearby-walk and here (or the
+		# spatial index outlived it). Report what we have rather than inventing
+		# a region centred on nowhere — a copper answer for the wrong rectangle
+		# is worse than no copper answer.
+		reply["copper"] = {"unavailable": "reference component not found on the board"}
+		return _ok(reply)
+	var comp_pos: Vector2 = ref_comp.position
+	var region := Rect2(
+		Vector2(comp_pos.x - radius, comp_pos.y - radius),
+		Vector2(radius * 2.0, radius * 2.0))
+	reply["copper"] = _copper_in_region(data, region)
+	return _ok(reply)
+
+
+## Every non-component entity the board has in `region`, using the SAME model
+## queries the human's marquee walks — one implementation, two doorways, which
+## is the whole parity principle.
+##
+## VIEW STATE IS DELIBERATELY IGNORED. The human's box-select honours layer
+## visibility, because a person selects what they can see. An agent asking what
+## is routed somewhere is asking a question about the BOARD, and an answer that
+## changed with someone else's View-menu toggles would be unreproducible from
+## the agent's side and quietly wrong. The reply says so rather than leaving the
+## difference to be discovered.
+static func _copper_in_region(data, region: Rect2) -> Dictionary:
+	var traces: Array = data.get_traces_in_region(region)
+	var vias: Array = data.get_vias_in_region(region)
+	var zones: Array = data.get_zones_in_region(region)
+	var cutouts: Array = data.cutouts_in_region(region)
+	return {
+		"region_mm": {"x_mm": region.position.x, "y_mm": region.position.y,
+			"width_mm": region.size.x, "height_mm": region.size.y},
+		"traces": traces,
+		"vias": vias,
+		"zones": zones,
+		"cutouts": cutouts,
+		"count": traces.size() + vias.size() + zones.size(),
+		# NAME WHAT WAS SEARCHED. Without this an agent reading "traces: []"
+		# cannot tell "nothing is routed here" from "traces were not looked
+		# for" — and the first reading is the dangerous one, because it invites
+		# routing straight through copper the query never examined.
+		"searched": ["components", "traces", "vias", "zones", "cutouts"],
+		"note": "copper is reported regardless of layer visibility — this answers what the BOARD has, not what the panel currently shows",
+	}
 
 
 static func _describe_component(host, args: Dictionary) -> Dictionary:

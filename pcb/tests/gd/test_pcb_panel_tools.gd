@@ -290,7 +290,25 @@ func _run_golden_parity() -> void:
 	print("\n-- GOLDEN: spatial_query shape --")
 	# Legacy → {success, reference, radius_mm, nearby_count, nearby:[{id, relationship}]}
 	var gs := await h("minerva_pcb_spatial_query", _args({"reference_component": "U9", "radius_mm": 100.0}))
-	check_keys("spatial_query result", gs, ["success", "reference", "radius_mm", "nearby_count", "nearby"])
+	# SHAPE DELIBERATELY EXTENDED (bug 019fa1cda337, K28): the legacy reply
+	# answered "what components are near X" and had no way to say what was
+	# ROUTED there, while the human's marquee over the same rectangle picked
+	# copper too. The extension is nested under one "copper" key rather than
+	# sprawled across the top level, so the legacy fields a caller already reads
+	# are untouched in place. This golden pinned the C2/C3 MIGRATION parity,
+	# which shipped long ago; extending it now is a reviewed edit, not a drift.
+	check_keys("spatial_query result", gs,
+		["success", "reference", "radius_mm", "nearby_count", "nearby", "copper"])
+	var copper: Dictionary = gs.get("copper", {})
+	check_keys("spatial_query copper block", copper,
+		["region_mm", "traces", "vias", "zones", "cutouts", "count", "searched", "note"])
+	# The agent must be able to tell "nothing routed here" from "copper was not
+	# looked for" — the first reading invites routing straight through copper
+	# the query never examined.
+	check("copper names what it searched",
+		(copper.get("searched", []) as Array).has("traces"))
+	check("…and states that view state does not filter it",
+		"visibility" in str(copper.get("note", "")))
 	var nearby: Array = gs.get("nearby", [])
 	if nearby.size() > 0:
 		check_keys("nearby entry", nearby[0], ["id", "relationship"])
