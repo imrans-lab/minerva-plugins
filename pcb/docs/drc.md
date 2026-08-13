@@ -66,6 +66,18 @@ against the raised floor: `_effective_min_trace_width` for GC1,
   can sit on different nets with different classes, so **both** class terms fold
   in. Copper with no net (`net_id is None`, e.g. plated board-hole copper)
   contributes none; the other participant's class still governs.
+- **Pairwise participant order is a contract** (bug 019f98b26f76, epoch GA-6):
+  in every GC2/GC6 finding, `participants` (and the `closest`/`witness` pair,
+  which travels with them) are ordered by participant **kind rank** — pads
+  first, then vias, then board-hole copper, then trace segments, then zone
+  copper — with `entity_id` only as the tiebreak *within* a rank
+  (`drc_geometric._PARTICIPANT_KIND_RANK`). `participants[0]` is therefore
+  stable and meaningful: when a pad is involved, it is the pad. Consumers may
+  code against it ("<A> is too close to <B>", an arrow drawn pad→trace)
+  without the order flipping between boards or runs. Before this, order was
+  the comparison of two opaque content-derived ids — the same physical
+  collision could present as (pad, trace) on one board and (trace, pad) on
+  another.
 - Only **referenced** classes are read. A class defined on
   `design_rules.net_classes` that no net points at constrains nothing — the same
   rule `methods._net_class_overrides` applies on the routing side.

@@ -2460,11 +2460,30 @@ def compile_board(
     # member naming a net the board never declares be caught. It fails CLOSED: a
     # silently-ignored member is a class the author believes is in force on a net
     # that is in fact routed and checked at the board's blanket floors.
-    for net_name in sorted(class_id_by_net):
-        if net_name not in net_id_by_name:
-            diags.error("net_class_unknown_member",
-                        f"net class member {net_name!r} names no net declared by this board",
-                        _board_ref())
+    #
+    # ROOT CAUSE ONCE, not once per member (019fa2c513): when the net index
+    # is EMPTY — the board declares no nets, or _build_nets_index failed and
+    # already said so in its own diagnostics — every declared member would
+    # cascade into net_class_unknown_member, telling the author their class
+    # members are wrong when the defect is one level up. One error names the
+    # real problem. A board whose index BUILT (even partially) keeps the
+    # per-member errors: those are the genuine unknowns this pass exists for,
+    # and suppressing them there would be the opposite defect.
+    if class_id_by_net and not net_id_by_name:
+        diags.error(
+            "net_class_without_nets",
+            f"net class(es) name {len(class_id_by_net)} member net(s) but the "
+            f"board's net index is empty (no nets declared, or the nets block "
+            f"failed to build — see its own diagnostics); per-member "
+            f"unknown-member errors are withheld because the members are not "
+            f"the defect",
+            _board_ref())
+    else:
+        for net_name in sorted(class_id_by_net):
+            if net_name not in net_id_by_name:
+                diags.error("net_class_unknown_member",
+                            f"net class member {net_name!r} names no net declared by this board",
+                            _board_ref())
 
     interned: dict[str, FootprintDefinition] = {}
     components: list[ResolvedComponent] = []

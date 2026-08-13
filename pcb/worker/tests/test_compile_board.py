@@ -2569,3 +2569,30 @@ def test_a_round_drill_with_equal_axes_still_passes():
                          drill=DrillDefinition(shape="round", size=(0.8, 0.8)))
     assert _check_pad_capabilities(pad, "J1", diags), [
         d.message for d in diags.tuple()]
+
+
+def test_an_empty_net_index_reports_the_root_cause_once_not_per_member():
+    """019fa2c513 (epoch GA-6): a board declaring net classes but NO nets used
+    to emit one net_class_unknown_member per member — the author is told
+    their members are wrong when the defect is one level up. One error names
+    the real problem; the members are withheld because they are not it."""
+    result = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1", "N2"], "min_trace_width_mm": 0.6},
+        nets=[]))
+    assert isinstance(result, ResolutionFailure)
+    codes = _errors(result)
+    assert codes.count("net_class_without_nets") == 1, codes
+    assert "net_class_unknown_member" not in codes, (
+        "per-member errors are the CASCADE this fix removes for an empty index")
+
+
+def test_a_built_net_index_keeps_genuine_unknown_member_errors():
+    """The other half 019fa2c513's acceptance demands out loud: a board whose
+    net index BUILT still gets its per-member errors — suppressing those
+    would be the opposite defect."""
+    result = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1", "GHOST"], "min_trace_width_mm": 0.6}))
+    assert isinstance(result, ResolutionFailure)
+    codes = _errors(result)
+    assert "net_class_unknown_member" in codes
+    assert "net_class_without_nets" not in codes

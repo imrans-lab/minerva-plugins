@@ -1665,3 +1665,53 @@ def test_finding_constructor_refuses_to_omit_witness_geometry():
     cannot compile a finding without placing its evidence."""
     with pytest.raises(TypeError):
         dg._finding("gcX", "e1", None, "trace_seg", None, None, 0.1, 0.2)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Epoch GA-6 (bug 019f98b26f76) — pairwise participant order is a CONTRACT.
+# ---------------------------------------------------------------------------
+
+
+class _P:
+    def __init__(self, kind, entity_id):
+        self.kind = kind
+        self.entity_id = entity_id
+
+
+def test_participant_order_is_kind_ranked_not_id_ranked():
+    """participants[0] is the PAD whenever a pad is involved — never a
+    coin-flip on two opaque content hashes. The discriminating fixture: ids
+    chosen so the OLD entity_id order would put the trace first."""
+    from pcb_worker.drc_geometric import _ordered_pair
+
+    pad = _P("smd_pad", "zz:ffff")     # id sorts LAST
+    seg = _P("trace_seg", "aa:0000")   # id sorts FIRST
+    lo, hi = _ordered_pair(pad, seg, lambda p: p.kind)
+    assert (lo, hi) == (pad, seg), (
+        "kind rank must beat entity_id: the pad leads even with the larger id")
+    # Symmetric input, same answer — order cannot depend on argument order.
+    assert _ordered_pair(seg, pad, lambda p: p.kind) == (pad, seg)
+
+
+def test_same_rank_ties_break_on_entity_id_and_unknown_kinds_sort_last():
+    from pcb_worker.drc_geometric import _ordered_pair
+
+    a = _P("via", "via:aaa")
+    b = _P("via", "via:bbb")
+    assert _ordered_pair(b, a, lambda p: p.kind) == (a, b)
+    # An unknown kind degrades to last place + id order, never a crash.
+    new_thing = _P("future_primitive", "fp:000")
+    pad = _P("pth_pad", "zz:zzz")
+    assert _ordered_pair(new_thing, pad, lambda p: p.kind) == (pad, new_thing)
+
+
+def test_the_rank_table_pins_the_documented_order():
+    """pcb/docs/drc.md states pads -> vias -> board-hole copper -> trace
+    segments -> zone copper. The table IS the contract; a reorder must be a
+    deliberate docs+code change, not a drive-by."""
+    from pcb_worker.drc_geometric import _PARTICIPANT_KIND_RANK as R
+
+    assert R["smd_pad"] == R["pth_pad"] < R["via"] < R["board_hole_copper"] \
+        < R["trace_seg"] < R["zone_copper"]
+    assert R["board_hole"] == R["board_hole_copper"], (
+        "GC6's HolePrimitive.origin vocabulary shares the table")

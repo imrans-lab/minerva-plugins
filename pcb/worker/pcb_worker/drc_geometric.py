@@ -1010,6 +1010,33 @@ def _check_gc4_annular(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     return findings
 
 
+# THE DOCUMENTED PARTICIPANT ORDER for pairwise findings (bug 019f98b26f76,
+# fixed epoch GA-6; the contract statement lives in pcb/docs/drc.md). The old
+# order was the opaque entity_id comparison, a content-derived token — so the
+# SAME physical collision could present as (pad, trace) on one board and
+# (trace, pad) on another, and any consumer assuming participants[0] is the
+# pad would draw reversed arrows on some boards only. Order is now by KIND
+# RANK — pads, then vias, then board-hole copper, then trace segments, then
+# zone copper — with entity_id only as the tiebreak within a rank. The same
+# table serves GC6's hole pairs (HolePrimitive.origin uses the same
+# vocabulary for its pad/via/board_hole origins). Unknown kinds sort last,
+# so a future primitive class degrades to the old id order instead of
+# crashing or landing first.
+_PARTICIPANT_KIND_RANK = {
+    "smd_pad": 0, "pth_pad": 0,
+    "via": 1,
+    "board_hole_copper": 2, "board_hole": 2,
+    "trace_seg": 3,
+    "zone_copper": 4,
+}
+
+
+def _ordered_pair(a, b, kind_of):
+    ka = (_PARTICIPANT_KIND_RANK.get(kind_of(a), 99), a.entity_id)
+    kb = (_PARTICIPANT_KIND_RANK.get(kind_of(b), 99), b.entity_id)
+    return (a, b) if ka <= kb else (b, a)
+
+
 def _check_gc6_hole_to_hole(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     required = rb.design_rules.minimums.min_hole_to_hole_mm
     findings: list[dict] = []
@@ -1019,7 +1046,10 @@ def _check_gc6_hole_to_hole(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     n = len(ordered)
     for i in range(n):
         for j in range(i + 1, n):
-            h1, h2 = ordered[i], ordered[j]
+            # Kind-ranked participant order (019f98b26f76) — see the table
+            # above; witness/closest swap WITH the pair so they stay attached
+            # to the participant they describe.
+            h1, h2 = _ordered_pair(ordered[i], ordered[j], lambda h: h.origin)
             best = math.inf
             witness = None
             for c1 in h1.capsules:
@@ -1752,7 +1782,12 @@ def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
             a, b = prims[i], prims[j]
             if a.entity_id == b.entity_id:
                 continue  # self-pair (a shape never conflicts with itself)
-            lo, hi = (a, b) if a.entity_id <= b.entity_id else (b, a)
+            # Kind-ranked participant order (019f98b26f76): participants[0]
+            # is the pad when a pad is involved, then via/hole/trace/zone —
+            # never a coin-flip on two opaque content hashes. The dedupe key
+            # and the lo|hi entity_id string ride the same order, so they
+            # stay deterministic too.
+            lo, hi = _ordered_pair(a, b, lambda p: p.kind)
             if _same_net_exempt(lo, hi):
                 continue
             key = (lo.entity_id, hi.entity_id)
