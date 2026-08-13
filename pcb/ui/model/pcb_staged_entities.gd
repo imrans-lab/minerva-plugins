@@ -389,11 +389,23 @@ const COMPOSE_PURPOSES := ["route", "geometric"]
 ##
 ##   "route"     — staged ZONES appended (a staged keepout detours a draft
 ##                 propose through the shipped obstacle path,
-##                 route_bridge._keepout_obstacle).
+##                 route_bridge._keepout_obstacle) + staged PLACEMENTS
+##                 applied (components virtually AT their ghost targets).
 ##   "geometric" — staged ZONES appended (gc7 zone-clearance findings against
-##                 proposed copper). No panel-side consumer yet — the propose
-##                 reply's geometric summary is computed worker-side from the
-##                 SAME composed "route" request, so A3(b) rides that dict.
+##                 proposed copper) + staged PLACEMENTS applied. No panel-side
+##                 consumer yet — the propose reply's geometric summary is
+##                 computed worker-side from the SAME composed "route"
+##                 request, so A3(b) rides that dict.
+##
+## PLACEMENTS compose for BOTH purposes deliberately (OFC-2 decision, epoch
+## 019ff9421d3f): the whole point of previewing a route or DRC against a
+## proposal is judging copper at the pose the ghost PROPOSES, not the pose
+## the part still occupies. Only position/rotation move — traces stay at
+## their real coordinates, so a preview honestly shows the copper the move
+## would strand (flag-don't-fix). A placement naming a component that is no
+## longer on the board composes NOTHING for that entry (skip + warn): the
+## fail-safe direction is the same as everywhere else in this function —
+## omitting draft content is never dangerous, inventing a component is.
 ##
 ## CUTOUTS ARE NEVER COMPOSED, for any purpose: compile hard-refuses a
 ## non-empty cutouts list ("authorable, not compilable" — board.go doctrine)
@@ -414,22 +426,52 @@ static func effective_draft_board(board_dict: Dictionary, staged_store, purpose:
 	if staged_store == null or not staged_store.has_method("staged_payloads"):
 		return out
 	var staged_zones: Array = staged_store.staged_payloads("zone")
-	if staged_zones.is_empty():
-		return out
-	var zones: Array = out.get("zones", []) if out.get("zones", null) is Array else []
-	# Id-dedupe against the board's OWN zones (cold review st.3 F2): two-store
-	# drift — accept landed the zone but the sidecar autosave never did
-	# (crash), so a reload restores the entry as live-staged — would otherwise
-	# compose a request with duplicate zone ids, making worker findings that
-	# reference zone ids ambiguous. The board's copy wins; the drifted entry
-	# still surfaces honestly at accept (duplicate-id refusal).
-	var board_zone_ids := {}
-	for z in zones:
-		if z is Dictionary:
-			board_zone_ids[str((z as Dictionary).get("id", ""))] = true
-	for z in staged_zones:
-		if board_zone_ids.has(str((z as Dictionary).get("id", ""))):
-			continue
-		zones.append(z)
-	out["zones"] = zones
+	if not staged_zones.is_empty():
+		var zones: Array = out.get("zones", []) if out.get("zones", null) is Array else []
+		# Id-dedupe against the board's OWN zones (cold review st.3 F2):
+		# two-store drift — accept landed the zone but the sidecar autosave
+		# never did (crash), so a reload restores the entry as live-staged —
+		# would otherwise compose a request with duplicate zone ids, making
+		# worker findings that reference zone ids ambiguous. The board's copy
+		# wins; the drifted entry still surfaces honestly at accept
+		# (duplicate-id refusal).
+		var board_zone_ids := {}
+		for z in zones:
+			if z is Dictionary:
+				board_zone_ids[str((z as Dictionary).get("id", ""))] = true
+		for z in staged_zones:
+			if board_zone_ids.has(str((z as Dictionary).get("id", ""))):
+				continue
+			zones.append(z)
+		out["zones"] = zones
+	var staged_placements: Array = staged_store.staged_payloads("placement")
+	if not staged_placements.is_empty():
+		var comps: Array = out.get("components", []) if out.get("components", null) is Array else []
+		var comp_by_ref := {}
+		for c in comps:
+			if c is Dictionary:
+				comp_by_ref[str((c as Dictionary).get("ref", ""))] = c
+		for p in staged_placements:
+			if not (p is Dictionary):
+				continue
+			var pl: Dictionary = p
+			var comp_id := str(pl.get("component_id", ""))
+			var to: Variant = pl.get("to")
+			if not comp_by_ref.has(comp_id) or not (to is Dictionary):
+				# Two-store drift again, placement flavor: the component was
+				# deleted after the ghost was staged (or the payload is
+				# malformed). Compose NOTHING for this entry; accept's own
+				# author/exists gate reports it honestly when acted on.
+				push_warning("[StagedEntities] effective_draft_board: staged placement '%s' names component '%s' not on the board — composed nothing for it" % [
+					str(pl.get("id", "")), comp_id])
+				continue
+			# The store's one-live-ghost-per-component invariant means at most
+			# one entry ever reaches a given ref here. Only the pose moves:
+			# pins are component-local (they ride along), traces are absolute
+			# (they deliberately do NOT).
+			var comp: Dictionary = comp_by_ref[comp_id]
+			var to_d: Dictionary = to
+			comp["x_mm"] = float(to_d.get("x_mm", comp.get("x_mm", 0.0)))
+			comp["y_mm"] = float(to_d.get("y_mm", comp.get("y_mm", 0.0)))
+			comp["rotation_deg"] = float(to_d.get("rotation_deg", comp.get("rotation_deg", 0.0)))
 	return out

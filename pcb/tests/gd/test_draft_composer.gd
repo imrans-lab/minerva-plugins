@@ -34,6 +34,7 @@ func _init() -> void:
 	print("=== Draft composer + cache isolation ===\n")
 	await process_frame
 	_run_composer_content()
+	_run_composer_placements()
 	_run_composer_fail_safe()
 	_run_panel_request_board()
 	_run_reply_cache_isolation()
@@ -152,6 +153,101 @@ func _run_composer_content() -> void:
 	var bare_composed: Dictionary = StagedEntities.effective_draft_board(bare, store2, "route")
 	check_eq("zones key created when the board omitted it",
 		(bare_composed.get("zones", []) as Array).size(), 1)
+	rig["panel"].free()
+
+
+# ── 1b. composer: staged placements move components (OFC-2, epoch 019ff9421d3f)
+
+## A mounted panel whose board has two components and a net, with ONE staged
+## placement (U1 → (20, 25) @ 90°) in its store. Returns {panel, data, store,
+## placement}.
+func _placement_rig() -> Dictionary:
+	var panel: Variant = load(PANEL_PATH).new()
+	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
+	var data = panel.get_data()
+	data.from_board_dict({
+		"version": 1, "name": "draft", "width_mm": 30.0, "height_mm": 30.0,
+		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"],
+		"components": [
+			{"ref": "U1", "footprint": "", "x_mm": 5.0, "y_mm": 5.0,
+				"rotation_deg": 0, "layer": "top",
+				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
+			{"ref": "U2", "footprint": "", "x_mm": 25.0, "y_mm": 5.0,
+				"rotation_deg": 0, "layer": "top",
+				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
+		],
+		"nets": [{"name": "SIG", "pins": ["U1.1", "U2.1"]}],
+		"traces": [{"id": "t1", "net": "SIG", "layer": "F.Cu", "width_mm": 0.3,
+			"points": [{"x_mm": 5.0, "y_mm": 5.0}, {"x_mm": 25.0, "y_mm": 5.0}]}],
+		"vias": [],
+	})
+	var store = panel.get_staged_store()
+	var placement: Dictionary = data.build_placement_payload("U1", 20.0, 25.0, 90.0).get("payload", {})
+	store.stage("placement", placement, "ai")
+	return {"panel": panel, "data": data, "store": store, "placement": placement}
+
+
+func _composed_comp(composed: Dictionary, ref: String) -> Dictionary:
+	for c in (composed.get("components", []) as Array):
+		if c is Dictionary and str((c as Dictionary).get("ref", "")) == ref:
+			return c
+	return {}
+
+
+func _run_composer_placements() -> void:
+	print("-- 1b. composer: staged placements apply the ghost pose --")
+	var rig := _placement_rig()
+	var board: Dictionary = rig["data"].to_board_dict()
+
+	# BOTH purposes get placements (OFC-2 decision, recorded at the site): a
+	# route preview AND a DRC preview must judge copper at the proposed pose.
+	for purpose in ["route", "geometric"]:
+		var composed: Dictionary = StagedEntities.effective_draft_board(board, rig["store"], purpose)
+		var u1: Dictionary = _composed_comp(composed, "U1")
+		check_eq("[%s] U1 composes AT the ghost target x" % purpose, float(u1.get("x_mm", 0.0)), 20.0)
+		check_eq("[%s] …target y" % purpose, float(u1.get("y_mm", 0.0)), 25.0)
+		check_eq("[%s] …target rotation" % purpose, float(u1.get("rotation_deg", -1.0)), 90.0)
+		var u2: Dictionary = _composed_comp(composed, "U2")
+		check_eq("[%s] unproposed U2 stays put" % purpose, float(u2.get("x_mm", 0.0)), 25.0)
+		# Flag-don't-fix rides the composition: copper never moves with the
+		# ghost, so the preview honestly shows what the move would strand.
+		var t: Dictionary = (composed.get("traces", []) as Array)[0]
+		var t_start: Dictionary = (t.get("points", []) as Array)[0]
+		check_eq("[%s] traces stay at REAL coordinates (flag-don't-fix)" % purpose,
+			float(t_start.get("x_mm", -1.0)), 5.0)
+
+	# Input never mutated: the real board dict still has U1 at its real pose.
+	var real_u1: Dictionary = _composed_comp(board, "U1")
+	check_eq("input board dict never mutated (U1 real pose intact)",
+		float(real_u1.get("x_mm", 0.0)), 5.0)
+
+	# Live-only: a rejected ghost stops composing.
+	rig["store"].reject(rig["store"].staged_id_for_entity(str(rig["placement"].get("id", ""))))
+	var after: Dictionary = StagedEntities.effective_draft_board(board, rig["store"], "route")
+	check_eq("a rejected placement leaves the composed board (U1 back at real pose)",
+		float(_composed_comp(after, "U1").get("x_mm", 0.0)), 5.0)
+
+	# Two-store drift, placement flavor: a live ghost naming a component no
+	# longer on the board composes NOTHING for that entry (skip + warn), and
+	# the rest of the composition survives it.
+	var ghost2: Dictionary = rig["data"].build_placement_payload("U2", 10.0, 10.0, 0.0).get("payload", {})
+	rig["store"].stage("placement", ghost2, "ai")
+	var orphan := {"id": "placement:deadbeef", "component_id": "GONE",
+		"from": {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0},
+		"to": {"x_mm": 1.0, "y_mm": 1.0, "rotation_deg": 0.0},
+		"affected_nets": []}
+	rig["store"].stage("placement", orphan, "ai")
+	var mixed: Dictionary = StagedEntities.effective_draft_board(board, rig["store"], "route")
+	check_eq("orphan placement (deleted component) composes nothing for itself — no invented component",
+		(mixed.get("components", []) as Array).size(), 2)
+	check_eq("…while the healthy ghost beside it still composes",
+		float(_composed_comp(mixed, "U2").get("x_mm", 0.0)), 10.0)
+
+	# Unknown purpose fail-safe covers placements too (same gate as zones).
+	var unknown: Dictionary = StagedEntities.effective_draft_board(board, rig["store"], "promotion")
+	check_eq("unknown purpose leaves components at real poses",
+		float(_composed_comp(unknown, "U2").get("x_mm", 0.0)), 25.0)
 	rig["panel"].free()
 
 
