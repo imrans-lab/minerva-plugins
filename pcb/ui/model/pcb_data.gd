@@ -1725,6 +1725,24 @@ func cutouts_in_region(region: Rect2, visible_filter := Callable()) -> Array[Str
 ## the accept reply both surface — "this move strands copper" is a fact shown,
 ## not a fix applied. The ratification session owns the real ruling.
 
+## Why this payload's TARGET pose is malformed, or "" when whole (Codex 1182
+## F1: ONE validator behind both the accept preflight and the add gate, so a
+## torn/hand-edited sidecar draft refuses at PREFLIGHT — where the batch is
+## still all-or-nothing — instead of mid-write).
+static func placement_pose_error(payload: Dictionary) -> String:
+	var to = payload.get("to", null)
+	if not (to is Dictionary):
+		return "placement payload has no 'to' pose"
+	for k in ["x_mm", "y_mm"]:
+		var v = (to as Dictionary).get(k, null)
+		if not (v is float or v is int) or not is_finite(float(v)):
+			return "placement 'to.%s' must be a finite number" % k
+	var r = (to as Dictionary).get("rotation_deg", 0.0)
+	if not (r is float or r is int) or not is_finite(float(r)):
+		return "placement 'to.rotation_deg' must be a finite number"
+	return ""
+
+
 ## Why the proposed move cannot be authored, or "" when it can.
 func placement_author_error(component_id: String) -> String:
 	var comp = get_component(component_id)
@@ -1856,10 +1874,11 @@ func add_placement_payload(payload: Dictionary) -> Dictionary:
 	if pid.is_empty() or not pid.begins_with("placement:"):
 		push_warning("[PCBData] add_placement_payload refused: payload id '%s' is not a minted placement id" % pid)
 		return {}
-	var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
-	if not (to.has("x_mm") and to.has("y_mm")):
-		push_warning("[PCBData] add_placement_payload refused: 'to' pose needs x_mm and y_mm")
+	var pose_err := placement_pose_error(payload)
+	if not pose_err.is_empty():
+		push_warning("[PCBData] add_placement_payload refused: %s" % pose_err)
 		return {}
+	var to: Dictionary = payload.get("to", {})
 	var comp = get_component(component_id)
 	var target := Vector2(float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)))
 	if comp.position != target:

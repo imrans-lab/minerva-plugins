@@ -1720,12 +1720,40 @@ func set_disconnect_markers(markers: Array) -> void:
 	queue_redraw()
 
 
+## A marker's stranded endpoint still exists on the CURRENT board: some trace
+## on the marker's net still has an endpoint at the marker's coordinate. The
+## sweep that minted the marker proved that endpoint reached no pad; repair
+## is whatever makes the endpoint go away (delete or reroute).
+func _disconnect_marker_still_valid(m: Dictionary) -> bool:
+	if data == null:
+		return false
+	var at: Array = m.get("at", [])
+	if at.size() < 2:
+		return false
+	var pt := Vector2(float(at[0]), float(at[1]))
+	var net := str(m.get("net", ""))
+	for trace_id in data.traces:
+		var trace = data.traces[trace_id]
+		if str(trace.net_name) != net or trace.waypoints.is_empty():
+			continue
+		if (trace.waypoints[0] as Vector2).distance_to(pt) <= 0.01 \
+				or (trace.waypoints[trace.waypoints.size() - 1] as Vector2).distance_to(pt) <= 0.01:
+			return true
+	return false
+
+
 func _draw_disconnect_markers() -> void:
 	for m in _disconnect_markers:
 		if not (m is Dictionary):
 			continue
 		var at: Array = (m as Dictionary).get("at", []) if (m as Dictionary).get("at", []) is Array else []
 		if at.size() < 2:
+			continue
+		# Codex 1182 F6: a marker is live only while the stranded endpoint
+		# still EXISTS — deleting or rerouting the trace heals the marker on
+		# the next frame, and a board loaded over the same data object cannot
+		# inherit coordinates that describe nothing.
+		if not _disconnect_marker_still_valid(m):
 			continue
 		var p := world_to_screen(Vector2(float(at[0]), float(at[1])))
 		draw_arc(p, 7.0, 0, TAU, 24, candidate_violation_color, 2.0, true)
@@ -2335,9 +2363,12 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 	var pose := _placement_target_pose(payload)
 	var target: Vector2 = pose.get("pos")
 
-	# Tether first (under the body): current anchor → target anchor.
+	# Tether first (under the body): current anchor → target anchor. The
+	# routed flag is derived from TODAY'S copper (Codex 1182 F5) — a net
+	# routed or ripped since the proposal was staged changes the tether now,
+	# not at accept; the payload's snapshot stays as proposal-time audit.
 	var routed := false
-	for n in (payload.get("affected_nets", []) as Array):
+	for n in (data.placement_affected_nets(str(payload.get("component_id", ""))) as Array):
 		if n is Dictionary and bool((n as Dictionary).get("routed", false)):
 			routed = true
 			break
@@ -3888,11 +3919,16 @@ func _handle_key_input(event: InputEventKey) -> void:
 			if _rotate_drag_active:
 				_cancel_component_rotate_drag()
 				return
+			# Codex 1182 F2: a LIVE ghost drag is an innermost gesture like the
+			# rotate drag above — Escape cancels it WITHOUT the store write the
+			# release would perform (the ghost stays at its pre-drag pose).
+			if _placement_drag_active or _propose_pending:
+				_cancel_placement_gesture()
+				return
 			# P1 debt D4: a standing propose-move arm is an intent, and Escape
 			# is its advertised cancel — cleared BEFORE the selection ladder so
 			# disarming does not also deselect (the same keep-the-selection rule
-			# every gesture above holds). A live ghost drag cancels through the
-			# release path, not here (the gesture owns its release).
+			# every gesture above holds).
 			if not _propose_move_armed_id.is_empty():
 				component_lock_changed.emit(
 					"Propose move disarmed for %s." % _propose_move_armed_id)
@@ -4949,6 +4985,23 @@ func _begin_placement_ghost_drag(entity_id: String, world_pos: Vector2) -> bool:
 	_placement_drag_pos = target
 	_placement_drag_grab = world_pos - target
 	return true
+
+
+## Codex 1182 F2: the ONE cancel for every placement-gesture state — pending
+## birth, live ghost drag, standing arm — clearing WITHOUT writing the store.
+## Called from Esc, tool changes, store rebinds, and board (re)loads, so a
+## stale staged_N can never survive a context switch and be written at a
+## later release against whatever now owns that key.
+func _cancel_placement_gesture() -> void:
+	var was_active := _propose_pending or _placement_drag_active \
+		or not _propose_move_armed_id.is_empty()
+	_propose_pending = false
+	_placement_drag_active = false
+	_placement_drag_sid = ""
+	_placement_drag_entity = ""
+	_propose_move_armed_id = ""
+	if was_active:
+		queue_redraw()
 
 
 ## Release half: ONE store write for the whole gesture (the ghost previewed
@@ -6349,6 +6402,9 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 		# universal Select is disarmed by the panel on this same transition, so
 		# the release would arrive with nothing to receive it.
 		_annotation_gesture = false
+		# Codex 1182 F2: same rule for the placement gestures — a pending
+		# birth, live ghost drag, or standing arm cannot outlive its tool.
+		_cancel_placement_gesture()
 		# UX4 S7: a destination is the property of ONE arming press — any tool
 		# change (arm, switch, disarm-to-Select) resets it to DIRECT; the
 		# panel's draft toggles re-assert "draft" AFTER this call when they are
@@ -7863,6 +7919,10 @@ func set_staged_store(store, stage_doorway: Callable = Callable()) -> void:
 func _set_staged_store_only(store) -> void:
 	if _staged_store == store:
 		return
+	# Codex 1182 F2: a gesture addressing the OUTGOING store's staged_N key
+	# must die with the rebind — the key may mean a different entry (or
+	# nothing) in the incoming store.
+	_cancel_placement_gesture()
 	if _staged_store != null and _staged_store is Object and is_instance_valid(_staged_store) \
 			and _staged_store.has_signal("changed") \
 			and _staged_store.changed.is_connected(_on_staged_store_changed):
@@ -7879,6 +7939,13 @@ func _set_staged_store_only(store) -> void:
 ## get_selection keeps reporting a lit id for a ghost the canvas no longer
 ## paints.
 func _on_staged_store_changed() -> void:
+	# Codex 1182 F2: a live ghost drag whose entry vanished from the live set
+	# (rejected/accepted elsewhere, or a sidecar reload replaced the store's
+	# contents in place) must cancel before its release writes a stale — or
+	# freshly re-minted — staged_N key.
+	if _placement_drag_active and _staged_store != null \
+			and str(_staged_store.staged_id_for_entity(_placement_drag_entity)) != _placement_drag_sid:
+		_cancel_placement_gesture()
 	if _staged_store != null:
 		var pruned := false
 		for sel_id in selected_staged_ids.duplicate():
@@ -9074,9 +9141,10 @@ func set_data(new_data) -> void:
 
 	data = new_data
 	# A new board owes no explanation of the old one's stranded copper (P1
-	# B5) — and any standing propose-arm named a part of the old board.
+	# B5) — and any placement gesture in flight named the old board's parts
+	# (Codex 1182 F2: the full cancel, not just the arm).
 	_disconnect_markers = []
-	_propose_move_armed_id = ""
+	_cancel_placement_gesture()
 
 	if data:
 		data.data_changed.connect(_on_data_changed)

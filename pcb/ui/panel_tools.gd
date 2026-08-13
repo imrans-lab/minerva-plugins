@@ -3868,7 +3868,9 @@ static func _placement_update(host, args: Dictionary) -> Dictionary:
 	var x := float(args.get("x_mm", to.get("x_mm", 0.0)))
 	var y := float(args.get("y_mm", to.get("y_mm", 0.0)))
 	var rot := float(args.get("rotation_deg", to.get("rotation_deg", 0.0)))
-	if not store.update_placement_target(sid, x, y, rot, str(args.get("note", ""))):
+	# Codex 1182 F7: note is tri-state — absent = unchanged, "" = CLEAR.
+	if not store.update_placement_target(sid, x, y, rot,
+			args.get("note") if args.has("note") else null):
 		return _err(str(store.last_error.get("error", "update_refused")))
 	var reply := _ok({
 		"entity_id": entity_id,
@@ -3878,11 +3880,14 @@ static func _placement_update(host, args: Dictionary) -> Dictionary:
 	# P1 C5: the revised pose gets the same collision advisory propose gives.
 	var data = _resolve_data(host)
 	if data is Object:
-		var collisions: Array = data.placement_collisions(
-			str((entry.get("payload", {}) as Dictionary).get("component_id", "")),
+		var upd_comp := str((entry.get("payload", {}) as Dictionary).get("component_id", ""))
+		var collisions: Array = data.placement_collisions(upd_comp,
 			x, y, rot, _other_ghost_targets(store, entity_id))
 		if not collisions.is_empty():
 			reply["collisions"] = collisions
+		# Codex 1182 F5: what-breaks is derived from the CURRENT board, not
+		# the proposal-time snapshot — copper may have changed since staging.
+		reply["affected_nets"] = data.placement_affected_nets(upd_comp)
 	return reply
 
 
@@ -3894,20 +3899,22 @@ static func _staged_list(host, args: Dictionary) -> Dictionary:
 	if store == null:
 		return _err("no staged store bound to this panel")
 	var include_terminal: bool = bool(args.get("include_terminal", false))
+	var live_data = _resolve_data(host)
+	var row_data = live_data if live_data is Object else null
 	var entries: Array = []
 	if include_terminal:
 		for sid in store.entries:
 			var e: Dictionary = store.get_entry(str(sid))
 			e["staged_id"] = str(sid)
-			entries.append(_staged_list_row(e))
+			entries.append(_staged_list_row(e, row_data))
 	else:
 		for e in store.staged_entries():
-			entries.append(_staged_list_row(e))
+			entries.append(_staged_list_row(e, row_data))
 	return _ok({"staged": entries, "count": entries.size(),
 		"live_count": store.staged_entries().size()})
 
 
-static func _staged_list_row(e: Dictionary) -> Dictionary:
+static func _staged_list_row(e: Dictionary, data = null) -> Dictionary:
 	var payload: Dictionary = e.get("payload", {}) if e.get("payload", {}) is Dictionary else {}
 	var row := {
 		"staged_id": str(e.get("staged_id", "")),
@@ -3927,7 +3934,13 @@ static func _staged_list_row(e: Dictionary) -> Dictionary:
 		row["component_id"] = str(payload.get("component_id", ""))
 		row["from"] = payload.get("from", {})
 		row["to"] = payload.get("to", {})
-		row["affected_nets"] = payload.get("affected_nets", [])
+		# Codex 1182 F5: LIVE derivation when the board is reachable — the
+		# routed flag must describe today's copper, not staging day's. The
+		# payload's proposal-time snapshot stays available as audit.
+		if data != null and str(e.get("disposition", "")) == "staged":
+			row["affected_nets"] = data.placement_affected_nets(str(payload.get("component_id", "")))
+		else:
+			row["affected_nets"] = payload.get("affected_nets", [])
 	var note := str(e.get("note", ""))
 	if not note.is_empty():
 		row["note"] = note
@@ -3950,11 +3963,14 @@ static func _staged_accept(host, args: Dictionary) -> Dictionary:
 		var batch_reply := _ok({"accepted": int(out.get("accepted", 0)),
 			"note": "one history step — a single undo returns the whole batch to ghosts"})
 		# P1 C2 parity: an accepted MOVE reports its consequences like the
-		# direct-move verb does — dangling sweep (panel-computed) + assembly.
+		# direct-move verb does. Codex 1182 F3: the assembly re-check keys on
+		# WHETHER A PLACEMENT LANDED, never on whether copper happened to
+		# strand — an overlapping unrouted move has no dangling_copper and is
+		# exactly the case assembly exists to catch.
 		if out.has("dangling_copper"):
 			batch_reply["dangling_copper"] = out.get("dangling_copper")
-			if data is Object:
-				batch_reply = await _with_assembly_after_placement(host, data, batch_reply)
+		if int(out.get("placements", 0)) > 0 and data is Object:
+			batch_reply = await _with_assembly_after_placement(host, data, batch_reply)
 		return batch_reply
 	var entity_id: String = str(args.get("entity_id", ""))
 	if entity_id.is_empty():

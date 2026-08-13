@@ -100,6 +100,20 @@ func stage(kind: String, payload: Dictionary, author: String = "human",
 		last_error = {"staged_id": "", "error": ERR_DUPLICATE_ENTITY, "verb": "stage"}
 		push_warning("[StagedEntities] stage refused: entity '%s' is already staged" % str(payload.get("id", "")))
 		return ""
+	# Codex 1182 F4: one LIVE placement per component is a STORE invariant,
+	# not a caller convention — two live moves of the same part make review,
+	# render and sequential accepts ambiguous. Terminal audit entries stay
+	# legal (reject-then-repropose).
+	if kind == "placement":
+		var comp_id := str(payload.get("component_id", ""))
+		if comp_id.is_empty():
+			last_error = {"staged_id": "", "error": ERR_BAD_PAYLOAD, "verb": "stage"}
+			push_warning("[StagedEntities] stage refused: placement without component_id")
+			return ""
+		if not live_placement_for_component(comp_id).is_empty():
+			last_error = {"staged_id": "", "error": ERR_DUPLICATE_ENTITY, "verb": "stage"}
+			push_warning("[StagedEntities] stage refused: component '%s' already has a live move ghost" % comp_id)
+			return ""
 	if author != "human" and author != "ai":
 		push_warning("[StagedEntities] unknown author '%s' recorded as 'human'" % author)
 	var sid := next_id()
@@ -223,8 +237,10 @@ func live_placement_for_component(component_id: String) -> String:
 ## record) and never replays pose edits. This is the ONE exception to the
 ## store's payloads-immutable stance, legal ONLY for the "placement" kind and
 ## ONLY through this method — zone/cutout payloads stay frozen at stage time.
+## `note`: null = unchanged; any String REPLACES the note, and "" CLEARS it
+## (Codex 1182 F7 — the advertised clear semantics).
 func update_placement_target(staged_id: String, to_x_mm: float, to_y_mm: float,
-		to_rotation_deg: float, note: String = "") -> bool:
+		to_rotation_deg: float, note = null) -> bool:
 	var e: Dictionary = get_entry(staged_id)
 	if e.is_empty():
 		last_error = {"staged_id": staged_id, "error": ERR_UNKNOWN_ENTRY, "verb": "update_placement"}
@@ -238,8 +254,8 @@ func update_placement_target(staged_id: String, to_x_mm: float, to_y_mm: float,
 	var payload: Dictionary = e.get("payload", {})
 	payload["to"] = {"x_mm": to_x_mm, "y_mm": to_y_mm, "rotation_deg": to_rotation_deg}
 	e["payload"] = payload
-	if not note.is_empty():
-		e["note"] = note
+	if note != null:
+		e["note"] = str(note)
 	entries[staged_id] = e
 	last_error = {}
 	changed.emit()
@@ -322,6 +338,14 @@ func load_from_dict(data: Dictionary) -> void:
 				push_warning("[StagedEntities] dropped entry '%s': a live entry for '%s' already loaded" % [str(sid), pid])
 				continue
 			live_ids[pid] = true
+			# Codex 1182 F4, load half: the same one-live-placement-per-
+			# component rule stage() enforces — first wins, later twins drop.
+			if str(e.get("kind", "")) == "placement":
+				var live_comp := str((e.get("payload", {}) as Dictionary).get("component_id", ""))
+				if live_comp.is_empty() or live_ids.has("placement@" + live_comp):
+					push_warning("[StagedEntities] dropped entry '%s': live placement for component '%s' already loaded" % [str(sid), live_comp])
+					continue
+				live_ids["placement@" + live_comp] = true
 		e["base_board_revision"] = int(e.get("base_board_revision", 0))
 		entries[str(sid)] = e
 	# High-water counter: max of stored counter and the largest staged_N key.

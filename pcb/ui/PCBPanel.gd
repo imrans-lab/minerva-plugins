@@ -589,6 +589,12 @@ func _staged_payload_refusal(kind: String, payload: Dictionary) -> String:
 			var p_err: String = _data.placement_author_error(str(payload.get("component_id", "")))
 			if not p_err.is_empty():
 				return p_err
+			# Codex 1182 F1: the pose validator runs at PREFLIGHT too — the
+			# same check add_placement_payload gates on, so a torn sidecar
+			# draft refuses here, where the batch is still all-or-nothing.
+			var p_pose_err: String = _data.placement_pose_error(payload)
+			if not p_pose_err.is_empty():
+				return p_pose_err
 			if not pid.begins_with("placement:"):
 				return "payload id '%s' is not a minted placement id" % pid
 		_:
@@ -730,17 +736,33 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 	# preflight makes a mid-write refusal unreachable, but if one ever fires
 	# the count must not lie about it.
 	var landed_count := 0
+	var placements_landed := 0
+	var midwrite_refusals: Array = []
 	for r in resolved:
 		var entry: Dictionary = r.get("entry", {})
 		var kind := str(entry.get("kind", ""))
 		var landed: Dictionary = _apply_staged_payload(kind, entry.get("payload", {}))
 		if landed.is_empty():
 			push_warning("[PCBPanel] batch accept: unexpected refusal on %s" % str(r.get("entity_id", "")))
+			midwrite_refusals.append(str(r.get("entity_id", "")))
 			continue
 		_staged_entities.stamp(str(r.get("sid", "")), "accepted", "accept")
 		landed_count += 1
+		if kind == "placement":
+			placements_landed += 1
 	_data.save_to_history("Accept %d staged drafts" % landed_count)
-	var batch_out := {"ok": true, "accepted": landed_count}
+	# Codex 1182 F1, second half: if the "unreachable" mid-write refusal ever
+	# fires, the reply must not dress a torn transaction as success — the
+	# landings are journalled (one undo returns them), the reply says exactly
+	# which members did not land, and ok is FALSE.
+	if not midwrite_refusals.is_empty():
+		_show_transient_status("Batch accept TORE: %d landed, %d refused mid-write — undo returns the landed ones." % [
+			landed_count, midwrite_refusals.size()])
+		return {"ok": false, "error": "batch_partial_failure",
+			"accepted": landed_count, "refused_mid_write": midwrite_refusals,
+			"placements": placements_landed,
+			"note": "preflight admitted a member the write refused — the landed members are journalled as one step; undo reverts them"}
+	var batch_out := {"ok": true, "accepted": landed_count, "placements": placements_landed}
 	var batch_status := "Accepted %d staged drafts." % landed_count
 	if not batch_pre_pins.is_empty():
 		var batch_warnings: Array = _PanelToolsScript._dangling_copper_warnings(_data, batch_pre_pins)

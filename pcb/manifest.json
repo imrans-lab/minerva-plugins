@@ -714,7 +714,7 @@
     },
     {
       "name": "minerva_pcb_placement_update",
-      "description": "Revise a LIVE placement draft's TARGET pose in place — the agent twin of dragging the ghost (the Update of the propose/review CRUD cycle). Omitted fields keep their current value. Still a DRAFT afterwards; nothing moves until minerva_pcb_staged_accept. Refuses on unknown/terminal entity_id or a non-placement draft. The revised pose gets the same collision advisory propose gives: collisions:[{ref, overlap_mm2, ghost?}] when overlapping (advisory, never a refusal). Reply: {entity_id, to, collisions?}.",
+      "description": "Revise a LIVE placement draft's TARGET pose in place — the agent twin of dragging the ghost (the Update of the propose/review CRUD cycle). Omitted fields keep their current value. Still a DRAFT afterwards; nothing moves until minerva_pcb_staged_accept. Refuses on unknown/terminal entity_id or a non-placement draft. The revised pose gets the same collision advisory propose gives: collisions:[{ref, overlap_mm2, ghost?}] when overlapping (advisory, never a refusal), plus affected_nets derived from the CURRENT board. Reply: {entity_id, to, affected_nets, collisions?}.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -724,14 +724,14 @@
           "x_mm": {"type": "number", "description": "New target X in board mm (default: unchanged)"},
           "y_mm": {"type": "number", "description": "New target Y in board mm (default: unchanged)"},
           "rotation_deg": {"type": "number", "description": "New rotation in degrees (default: unchanged)"},
-          "note": {"type": "string", "description": "Replace the draft's note (default: unchanged)"}
+          "note": {"type": "string", "description": "Replace the draft's note; an explicit empty string CLEARS it (omitted: unchanged)"}
         },
         "required": ["editor_name", "entity_id"]
       }
     },
     {
       "name": "minerva_pcb_staged_list",
-      "description": "List staged entity DRAFTS (the staging family — see minerva_pcb_propose_zone). Read-only. By default only LIVE (disposition \"staged\") entries; include_terminal:true also returns the accepted/rejected audit trail. Each row: {staged_id, entity_id, kind, disposition, author, base_board_revision, zone_kind?, layer?, net?, note?}. entity_id is the canonical board id the ghost/selection/accept all reference.",
+      "description": "List staged entity DRAFTS (the staging family — see minerva_pcb_propose_zone). Read-only. By default only LIVE (disposition \"staged\") entries; include_terminal:true also returns the accepted/rejected audit trail. Each row: {staged_id, entity_id, kind, disposition, author, base_board_revision, note?} plus per-kind fields — zone rows add {zone_kind, layer, net?}; placement rows add {component_id, from, to, affected_nets}, where affected_nets is derived from the CURRENT board for live rows (routed flags track today's copper; terminal rows keep their proposal-time snapshot as audit). entity_id is the canonical board id the ghost/selection/accept all reference.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -750,7 +750,7 @@
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "entity_id": {"type": "string", "description": "Canonical id of ONE staged draft (zone:<hex>/cutout:<hex>)"},
+          "entity_id": {"type": "string", "description": "Canonical id of ONE staged draft (zone:<hex>/cutout:<hex>/placement:<hex>)"},
           "entity_ids": {
             "type": "array",
             "description": "Canonical ids for an all-or-nothing batch accept (one history step)",
