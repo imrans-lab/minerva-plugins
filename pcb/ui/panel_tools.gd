@@ -230,6 +230,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _clear_hints_by_author(host, args)
 		"minerva_pcb_promote":
 			return await _promote(host, args)
+		"minerva_pcb_board_check":
+			return await _board_check(host, args)
 		"minerva_pcb_workspace_reject":
 			return _workspace_reject(host, args)
 		"minerva_pcb_workspace_commit":
@@ -5795,6 +5797,15 @@ static func _promote(host, args: Dictionary) -> Dictionary:
 	# panel's regression guard — same arg the button's confirm dialog passes.
 	return await panel.promote(str(args.get("path", "")),
 		bool(args.get("allow_copper_regression", false)))
+
+
+## OFC-4: the promote gate's read-only twin — PCBPanel.board_check owns the
+## verb (same stripped live board, same worker verdict, no write, no gate).
+static func _board_check(host, _args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("board_check"):
+		return _err("no live panel — the census reads the live board")
+	return await panel.board_check()
 
 
 static func _workspace_freeze(host, args: Dictionary) -> Dictionary:

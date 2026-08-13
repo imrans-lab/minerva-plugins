@@ -4278,6 +4278,109 @@ func _on_export_yaml_pressed() -> void:
 ## copper presence = traces ∪ zones ∪ netted vias — pours count, mirroring the
 ## census's own definition) or would drop components refuses by name until the
 ## caller confirms.
+## CANONICAL-SOURCE HYGIENE (K2, epoch CPN1): the live board dict with
+## DERIVED presentation state stripped, exactly as the gate + serializer must
+## see it. Captured footprint graphics are attached at LOAD by the worker's
+## footprint resolution (pcb.deserialize's graphics attach) — re-derivable
+## library projections, never design intent — and through Go's Extra
+## passthrough they would land VERBATIM in the canonical YAML. Found live in
+## the coupon round: LOGO1's baked stroke text pushed the serialized source
+## past the 60KiB payload cap, so the size ceiling accidentally caught the
+## exact residue class K2 exists to forbid. The render-detail key set below
+## is the full set to_board_dict emits for the HANDOFF path (see
+## pcb_component.gd's "Canonical Extra (render detail)" block) — every one
+## re-derivable from the locked footprint at load, none design intent; the
+## first real promote shipped all of them into the corpus file via Go's
+## Extra passthrough (K2 residue, found by inspection).
+func _promote_stripped_board() -> Dictionary:
+	var board: Dictionary = _data.to_board_dict()
+	var render_detail_keys: Array = ["graphics", "pads", "local_bounds",
+		"has_pad_geometry", "bbox_center_offset", "color", "label_visible",
+		"locked", "width", "height", "footprint_id"]
+	for comp in (board.get("components", []) as Array):
+		if comp is Dictionary:
+			for render_key in render_detail_keys:
+				(comp as Dictionary).erase(render_key)
+	for trace in (board.get("traces", []) as Array):
+		if trace is Dictionary:
+			(trace as Dictionary).erase("locked")
+	return board
+
+
+## The promote gate's WORKER ROUND-TRIP, shared verbatim by promote() (which
+## gates on it) and board_check() (which only reports it — OFC-4). Returns
+## {ok:true, gate:<verdict>} or {ok:false, reply:<the error dict the caller
+## should return>}. A well-formed gate reply ALWAYS carries `promotable` — a
+## dict without it is some other shape (F3's lesson) and reads as
+## unavailable, never gated.
+func run_promote_gate(board: Dictionary) -> Dictionary:
+	var gate_raw: Dictionary = await _request_with_backend_ensure(
+		"pcb.promote_check", {"board": board}, 60000)
+	var gate: Dictionary = _unwrap_channel_reply(gate_raw)
+	if gate.is_empty() or not gate.has("promotable"):
+		return {"ok": false, "reply": {"success": false, "error": "promotion_check_unavailable",
+			"note": "the promotion gate could not run — an unverifiable board does not promote (fail closed)"}}
+	return {"ok": true, "gate": gate}
+
+
+## OFC-4 (epoch 019ff9421d3f; ratification sheet C1/C3 — kill
+## detection-by-refusal): the promote gate's READ half as a standalone,
+## non-mutating census of the LIVE board. Same stripped snapshot, same
+## pcb.promote_check verdict, no write and no gate semantics — the reply
+## REPORTS the refusals promotion WOULD raise instead of raising them. This
+## is the agent's free eyes on the live board; before it existed, post-accept
+## damage was only visible by attempting a promote and reading the refusal.
+func board_check() -> Dictionary:
+	if _data == null:
+		return {"success": false, "error": "no_board"}
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"success": false, "error": "worker_unavailable",
+			"note": "the census needs the pcb backend (same worker the promote gate uses) — plugin IPC not ready"}
+	var board: Dictionary = _promote_stripped_board()
+	var gate_run: Dictionary = await run_promote_gate(board)
+	if not bool(gate_run.get("ok", false)):
+		return gate_run.get("reply", {"success": false, "error": "promotion_check_unavailable"})
+	var gate: Dictionary = gate_run.get("gate", {})
+	var reply: Dictionary = {
+		"success": true,
+		"promotable": bool(gate.get("promotable", false)),
+		"refusals": gate.get("refusals", []),
+		"connectivity": gate.get("connectivity", {}),
+		"geometric": gate.get("geometric", {}),
+		"assembly": gate.get("assembly", {}),
+		"note": "read-only census — nothing was written, nothing was gated; these are the findings a promote would refuse on (empty refusals = it would pass)",
+	}
+	var advisory: Variant = gate.get("advisory", {})
+	if advisory is Dictionary and not (advisory as Dictionary).is_empty():
+		reply["advisory"] = advisory
+	# PARITY (the sheet's rule read in both directions): the reply carries
+	# what the panel renders, and the panel renders what the reply carries —
+	# connectivity findings with coordinates become disconnect markers on the
+	# canvas, so the human sees exactly what the agent just learned. The
+	# canvas's self-heal keeps only markers whose stranded endpoint still
+	# exists, same as the accept-time sweep's markers.
+	var markers: Array = []
+	var conn: Variant = reply.get("connectivity", {})
+	if conn is Dictionary:
+		for f in ((conn as Dictionary).get("findings", []) as Array):
+			if not (f is Dictionary):
+				continue
+			var at: Variant = (f as Dictionary).get("at", null)
+			if at is Array and (at as Array).size() >= 2:
+				markers.append({
+					"net": str((f as Dictionary).get("net", "")),
+					"at": (at as Array).duplicate(),
+					"message": "%s on net '%s' at (%.2f, %.2f) — board_check census finding" % [
+						str((f as Dictionary).get("type", "finding")),
+						str((f as Dictionary).get("net", "")),
+						float((at as Array)[0]), float((at as Array)[1])],
+				})
+	if _canvas != null and _canvas.has_method("set_disconnect_markers"):
+		_canvas.set_disconnect_markers(markers)
+	return reply
+
+
 func promote(explicit_path: String = "", allow_copper_regression: bool = false) -> Dictionary:
 	if _data == null:
 		return {"success": false, "error": "no_board"}
@@ -4298,41 +4401,16 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		return {"success": false, "error": "worker_unavailable",
 			"note": "promotion needs the pcb backend for its DRC gate and serializer — plugin IPC not ready"}
 
-	var board: Dictionary = _data.to_board_dict()
-	# CANONICAL-SOURCE HYGIENE (K2, epoch CPN1): strip DERIVED presentation
-	# state before the gate + serializer see the board. Captured footprint
-	# graphics are attached at LOAD by the worker's footprint resolution
-	# (pcb.deserialize's graphics attach) — re-derivable library projections,
-	# never design intent — and through Go's Extra passthrough they would land
-	# VERBATIM in the canonical YAML. Found live in the coupon round: LOGO1's
-	# baked stroke text pushed the serialized source past the 60KiB payload
-	# cap, so the size ceiling accidentally caught the exact residue class K2
-	# exists to forbid.
-	# The full render-detail key set to_board_dict emits for the HANDOFF path
-	# (see pcb_component.gd's "Canonical Extra (render detail)" block) — every
-	# one is re-derivable from the locked footprint at load and none is design
-	# intent. The first real promote shipped all of them into the corpus file
-	# via Go's Extra passthrough (K2 residue, found by inspection).
-	var render_detail_keys: Array = ["graphics", "pads", "local_bounds",
-		"has_pad_geometry", "bbox_center_offset", "color", "label_visible",
-		"locked", "width", "height", "footprint_id"]
-	for comp in (board.get("components", []) as Array):
-		if comp is Dictionary:
-			for render_key in render_detail_keys:
-				(comp as Dictionary).erase(render_key)
-	for trace in (board.get("traces", []) as Array):
-		if trace is Dictionary:
-			(trace as Dictionary).erase("locked")
+	# ONE snapshot serves the gate AND the serializer below — the board must
+	# not be re-derived across the gate's await (a user edit mid-gate would
+	# split what was checked from what gets written).
+	var board: Dictionary = _promote_stripped_board()
 
 	# ── THE GATE, fail closed ────────────────────────────────────────────────
-	var gate_raw: Dictionary = await _request_with_backend_ensure(
-		"pcb.promote_check", {"board": board}, 60000)
-	var gate: Dictionary = _unwrap_channel_reply(gate_raw)
-	# A well-formed gate reply ALWAYS carries `promotable` — a dict without it
-	# is some other shape (F3's lesson) and reads as unavailable, never gated.
-	if gate.is_empty() or not gate.has("promotable"):
-		return {"success": false, "error": "promotion_check_unavailable",
-			"note": "the promotion gate could not run — an unverifiable board does not promote (fail closed)"}
+	var gate_run: Dictionary = await run_promote_gate(board)
+	if not bool(gate_run.get("ok", false)):
+		return gate_run.get("reply", {"success": false, "error": "promotion_check_unavailable"})
+	var gate: Dictionary = gate_run.get("gate", {})
 	if not bool(gate.get("promotable", false)):
 		return {"success": false, "error": "promotion_gated",
 			"refusals": gate.get("refusals", []),

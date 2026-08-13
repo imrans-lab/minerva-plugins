@@ -1237,6 +1237,23 @@
       }
     },
     {
+      "name": "minerva_pcb_board_check",
+      "description": "LIVE-BOARD CENSUS (OFC-4, read-only — kills detection-by-refusal): runs the EXACT verdict the promote gate runs — connectivity DRC with per-finding coordinates + the completeness census (complete/missing_copper/partial), geometric DRC GC1-GC7, and the assembly tri-state, composed fail-closed worker-side over the same K2-stripped snapshot of the LIVE board — but writes NOTHING and gates NOTHING: the reply REPORTS the refusals a promote would raise (empty refusals = it would pass). Args {editor_name}. Returns {promotable, refusals, connectivity, geometric, assembly, advisory?}. Before this verb, post-accept damage on the live board was only visible by attempting minerva_pcb_promote and reading its refusal — checkers took yaml|board and the live board had no serialize-out. PARITY: connectivity findings with coordinates also refresh the canvas disconnect markers, so the human sees exactly what this reply says (and a clean census clears healed markers). Needs the pcb backend; refuses worker_unavailable without it.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
+      }
+    },
+    {
       "name": "minerva_pcb_point",
       "description": "POINT at an entity for the human (Epoch UX3 station 10 — THE MIRROR of minerva_pcb_get_selection): makes it the canvas selection through the same choke points a click uses, so the human sees it lit exactly as their own click would show it, with a status-line callout. Deixis runs both ways: get_selection answers 'what is the human pointing at?'; this answers 'look HERE'. Args {editor_name, kind, id} — kind: component | trace | via | zone | cutout | candidate | annotation. A candidate point also sets the workspace's active candidate (the same active-sync the click performs). Refuses not_found/unknown_kind by name.",
       "executor": "panel",
