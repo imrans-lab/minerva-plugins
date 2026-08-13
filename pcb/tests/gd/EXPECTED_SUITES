@@ -80,7 +80,7 @@ test_staged_entities.gd assertions=72
 # then 82 → 91 with the Codex-1188 repair round (F1 race seams ×4 in 1c,
 # F3/F4/F5 census checks ×5 in 1d).
 test_draft_composer.gd assertions=91
-test_staged_canvas.gd assertions=64
+test_staged_canvas.gd assertions=77
 # Pinned at OFC testex 2026-08-13 (first post-await-repair full run).
 test_staged_verbs.gd assertions=73
 test_draft_doorways.gd assertions=31
