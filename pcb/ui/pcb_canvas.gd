@@ -1595,6 +1595,16 @@ func _draw() -> void:
 
 	draw_rect(Rect2(Vector2.ZERO, size), Color(0.08, 0.08, 0.08))
 
+	# FAB PREVIEW takes the whole canvas and draws NOTHING ELSE (WYSIWYG G5,
+	# K27). Overlaying the emitted artwork on top of the editor's own rendering
+	# would produce a third picture that is neither the editor's view nor the
+	# fab's, and the entire value of this mode is that what you are looking at
+	# came out of the emitter. So it replaces the view rather than decorating
+	# it, and returns before any editor geometry is drawn.
+	if show_fab_preview:
+		_draw_fab_preview()
+		return
+
 	_draw_board()
 
 	# The cutout BASE render (fill+hatch+plain outline) draws immediately over
@@ -9367,6 +9377,87 @@ func get_view() -> Dictionary:
 	}
 
 
+## ── FAB PREVIEW (WYSIWYG goal 019ff4a5a75a, gap G5; DCR 019ffc52b455; K27) ───
+##
+## The emitted artifacts, rendered by the worker from the bytes that ship and
+## handed here as SVG. This canvas does not interpret them: it converts each
+## layer to a texture and draws it. That is the whole point — every other view
+## in this editor is an interpretation, and this one is the artwork itself.
+
+var show_fab_preview: bool = false
+## [{name, kind, sha256, byte_length, texture}] in draw order.
+var _fab_preview_layers: Array = []
+## Files the worker emitted but could NOT render, each with a reason. Drawn as
+## text ON the preview: a viewer who cannot see that the artifact set is
+## incomplete would read this view as complete, which is the false-clean the
+## whole goal exists to remove.
+var _fab_preview_unrendered: Array = []
+var _fab_preview_note: String = ""
+
+
+## Adopt a worker fab_preview reply. `layers` carries the SVG strings; each is
+## rasterized ONCE here rather than per frame. A layer whose SVG cannot be
+## parsed by the engine joins `unrendered` rather than being dropped, so the
+## count the viewer sees always accounts for every emitted file.
+func set_fab_preview(layers: Array, unrendered: Array, note: String = "") -> void:
+	_fab_preview_layers.clear()
+	_fab_preview_unrendered = unrendered.duplicate(true)
+	_fab_preview_note = note
+	for entry in layers:
+		if not (entry is Dictionary):
+			continue
+		var lay: Dictionary = entry
+		var svg := str(lay.get("svg", ""))
+		var img := Image.new()
+		if svg.is_empty() or img.load_svg_from_string(svg, 1.0) != OK:
+			_fab_preview_unrendered.append({
+				"name": str(lay.get("name", "?")),
+				"reason": "the engine could not rasterize the worker's SVG for this layer",
+			})
+			continue
+		_fab_preview_layers.append({
+			"name": str(lay.get("name", "")),
+			"kind": str(lay.get("kind", "")),
+			"sha256": str(lay.get("sha256", "")),
+			"byte_length": int(lay.get("byte_length", 0)),
+			"texture": ImageTexture.create_from_image(img),
+		})
+	queue_redraw()
+
+
+func _draw_fab_preview() -> void:
+	var font := ThemeDB.fallback_font
+	var y := 18.0
+	if _fab_preview_layers.is_empty():
+		draw_string(font, Vector2(12, y), "Fab preview: nothing rendered yet.",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.9, 0.75, 0.3))
+		y += 18.0
+	else:
+		# Every layer shares ONE forced coordinate frame from the worker, so the
+		# textures are the same size and stack without per-layer registration.
+		var rect := Rect2(Vector2.ZERO, size)
+		for lay in _fab_preview_layers:
+			var tex: Texture2D = (lay as Dictionary).get("texture")
+			if tex != null:
+				draw_texture_rect(tex, rect, false, Color(1, 1, 1, 0.85))
+	if not _fab_preview_note.is_empty():
+		draw_string(font, Vector2(12, y), _fab_preview_note,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.85, 0.85, 0.9))
+		y += 18.0
+	# THE INCOMPLETE BANNER — never optional when something did not render.
+	if not _fab_preview_unrendered.is_empty():
+		draw_string(font, Vector2(12, y),
+			"INCOMPLETE — %d emitted file(s) not shown:" % _fab_preview_unrendered.size(),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.95, 0.55, 0.2))
+		y += 16.0
+		for u in _fab_preview_unrendered:
+			draw_string(font, Vector2(24, y), "%s — %s" % [
+				str((u as Dictionary).get("name", "?")),
+				str((u as Dictionary).get("reason", ""))],
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.95, 0.7, 0.45))
+			y += 14.0
+
+
 ## Mirror EVERYTHING that decides what this canvas draws onto a capture copy,
 ## so an off-screen render shows what the user is looking at (bug 019ff9d84b60,
 ## WYSIWYG goal 019ff4a5a75a).
@@ -9411,6 +9502,14 @@ func mirror_capture_state_onto(copy) -> void:
 	# THE DRAFT LAYER — the half the capture used to omit entirely.
 	copy.show_route_candidates = show_route_candidates
 	copy.show_drc_witnesses = show_drc_witnesses
+	# Fab-preview mode replaces the whole view, so a capture taken while it is
+	# on must show the ARTWORK, not the editor's rendering of the same board.
+	# The rasterized layers are shared by reference: they are immutable
+	# textures, and re-rasterizing them per capture would be pure waste.
+	copy.show_fab_preview = show_fab_preview
+	copy._fab_preview_layers = _fab_preview_layers
+	copy._fab_preview_unrendered = _fab_preview_unrendered
+	copy._fab_preview_note = _fab_preview_note
 	copy._staged_store = _staged_store
 	copy._routing_workspace = _routing_workspace
 	# The cutover gates whether candidates draw AT ALL (a missing cutover reads

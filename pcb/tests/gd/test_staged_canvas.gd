@@ -42,6 +42,7 @@ func _init() -> void:
 	_run_dash_pairing()
 	_run_panel_doorways()
 	_run_capture_mirrors_the_draft_layer()
+	_run_fab_preview_accounting()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -429,3 +430,56 @@ func _run_capture_mirrors_the_draft_layer() -> void:
 		str(copy.mask_view_note), "INCOMPLETE — 2 undetermined")
 	check_eq("the board itself is not mirrored here (the caller sets it)",
 		copy.data, null)
+
+
+# ── 9. fab preview accounting (WYSIWYG G5, K27) ──────────────────────────────
+#
+# MUTATION THIS SECTION CATCHES: dropping a layer the ENGINE cannot rasterize
+# instead of moving it to `unrendered`. The worker guarantees every emitted file
+# appears in exactly one of its two lists; that guarantee dies at this boundary
+# if the canvas silently discards an SVG it fails to parse, and the viewer would
+# then read a short stack as the complete artifact set.
+
+func _run_fab_preview_accounting() -> void:
+	print("-- 9. fab preview: every emitted file stays accounted for --")
+	var canvas = PcbCanvasScript.new()
+	var good := "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\" viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\"/></svg>"
+
+	canvas.set_fab_preview([
+		{"name": "F_Cu.gbr", "kind": "gerber", "sha256": "aa", "byte_length": 10, "svg": good},
+		{"name": "B_Cu.gbr", "kind": "gerber", "sha256": "bb", "byte_length": 11, "svg": "not svg at all"},
+		{"name": "PTH.drl", "kind": "drill", "sha256": "cc", "byte_length": 12, "svg": ""},
+	], [{"name": "board.gbrjob", "reason": "job manifest — metadata, not artwork"}], "3 layers")
+
+	# The worker's own skip survives the hand-off…
+	var un: Array = canvas._fab_preview_unrendered
+	var names := []
+	for u in un:
+		names.append(str((u as Dictionary).get("name", "")))
+	check("the worker's skip is preserved", "board.gbrjob" in names)
+	# …and the two the ENGINE could not rasterize JOIN it rather than vanishing.
+	check("an unparseable SVG is reported, not dropped", "B_Cu.gbr" in names)
+	check("an EMPTY SVG is reported, not dropped", "PTH.drl" in names)
+	check_eq("nothing is silently lost: 1 worker skip + 2 engine failures",
+		un.size(), 3)
+	for u in un:
+		check("…each carries a reason", not str((u as Dictionary).get("reason", "")).is_empty())
+
+	check_eq("only the renderable layer is drawable", canvas._fab_preview_layers.size(), 1)
+	check_eq("…and it keeps its file identity",
+		str((canvas._fab_preview_layers[0] as Dictionary).get("sha256", "")), "aa")
+
+	# A fresh reply REPLACES the previous accounting — a stale unrendered entry
+	# would accuse the current artifacts of a failure that is not theirs.
+	canvas.set_fab_preview([{"name": "F_Cu.gbr", "kind": "gerber", "sha256": "dd",
+		"byte_length": 10, "svg": good}], [], "1 layer")
+	check_eq("a new reply clears the previous unrendered set",
+		canvas._fab_preview_unrendered.size(), 0)
+	check_eq("…and the previous layers", canvas._fab_preview_layers.size(), 1)
+
+	# Capture parity: a screenshot taken in preview mode must show the ARTWORK.
+	var copy = PcbCanvasScript.new()
+	canvas.show_fab_preview = true
+	canvas.mirror_capture_state_onto(copy)
+	check_eq("preview mode reaches the capture copy", bool(copy.show_fab_preview), true)
+	check_eq("…with its rasterized layers", copy._fab_preview_layers.size(), 1)

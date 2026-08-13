@@ -5371,6 +5371,59 @@ func mask_view_check(board: Dictionary) -> Dictionary:
 		"message": str(result.get("error_message", result.get("error", "mask_view failed")))}}
 
 
+## pcb.fab_preview round-trip (WYSIWYG G5, DCR 019ffc52b455, K27) — same channel
+## idiom as mask_view_check above.
+func fab_preview_check(board: Dictionary) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var result: Dictionary = await _request_with_backend_ensure(
+		"pcb.fab_preview", {"board": board}, 60000)
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
+		if inner.has("ok"):
+			return inner
+		return {"ok": true, "result": inner}
+	return {"ok": false, "error": {"kind": "worker_error",
+		"message": str(result.get("error_message", result.get("error", "fab_preview failed")))}}
+
+
+## Refetch the exact fabrication preview and hand it to the canvas.
+##
+## ON ANY FAILURE the canvas is given an EMPTY layer set plus a visible reason,
+## never a stale preview drawn as current. A preview is the one view a user is
+## entitled to trust as "what the fab receives"; showing yesterday's artwork
+## under that promise would be worse than showing nothing. Same rule the mask
+## overlay follows, for the same reason.
+##
+## The 60s budget is deliberately longer than the mask view's 30s: this runs the
+## full emission path before it renders anything, and the DCR is explicit that
+## the exact preview is ON DEMAND and need not keep up with editing.
+func _refresh_fab_preview() -> void:
+	if _canvas == null or _data == null:
+		return
+	var reply: Dictionary = await fab_preview_check(_data.to_board_dict())
+	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
+		return  # toggled off (or panel torn down) while the worker ran
+	if not bool(reply.get("ok", false)):
+		var err: Dictionary = _dict_or_empty(reply.get("error"))
+		_canvas.set_fab_preview([], [], "unavailable — " + str(
+			err.get("message", err.get("kind", "unknown"))))
+		return
+	var result: Dictionary = _dict_or_empty(reply.get("result"))
+	var layers: Array = result.get("layers", [])
+	var unrendered: Array = result.get("unrendered", [])
+	# Identity in the note, so what is on screen can be tied to what would ship.
+	var note := "%d layer(s) rendered from the emitted artifacts" % layers.size()
+	var warnings: Array = result.get("warnings", [])
+	if not warnings.is_empty():
+		note += " — %d emitter warning(s)" % warnings.size()
+	_canvas.set_fab_preview(layers, unrendered, note)
+
+
 ## Refetch the mask overlay from the worker and hand it to the canvas. The
 ## overlay is only ever what Projection.mask said — on ANY failure the canvas
 ## gets an empty set plus a visible note, never a stale set drawn as current
