@@ -2596,3 +2596,30 @@ def test_a_built_net_index_keeps_genuine_unknown_member_errors():
     codes = _errors(result)
     assert "net_class_unknown_member" in codes
     assert "net_class_without_nets" not in codes
+
+
+def test_inner_smd_guard_speaks_both_layer_namespaces():
+    """Codex re-review finding 1 (epoch-GA repair round 2): the inner-SMD
+    guard's first cut compared raw resolved ids against KiCad aliases, and
+    is_copper accepts BOTH spellings — so a pad whose resolved layer id is
+    CANONICAL "top"/"bottom" (every hand-authored pin board) was refused as
+    inner copper. Inner-ness now folds canonical first: outer passes in both
+    spellings, inner refuses in both."""
+    transform = PlacementTransform(position=(0.0, 0.0), rotation_deg=0.0,
+                                   side=Side.TOP)
+
+    # Canonical OUTER — must pass (the misclassified case).
+    diags = _Diagnostics()
+    resolved = _resolved_pad_layers(
+        _synthetic_pad(pad_type="smd", layers=(Layer.from_id("top"),)),
+        transform, "X1", diags, ("F.Cu", "B.Cu"))
+    assert resolved is not None, [d.message for d in diags.tuple()]
+    assert not any(d.code == "inner_smd_pad" for d in diags.tuple())
+
+    # Canonical INNER — must refuse exactly like its alias twin.
+    diags2 = _Diagnostics()
+    resolved2 = _resolved_pad_layers(
+        _synthetic_pad(pad_type="smd", layers=(Layer.from_id("in1"),)),
+        transform, "X1", diags2, ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"))
+    assert resolved2 is None
+    assert any(d.code == "inner_smd_pad" for d in diags2.tuple())

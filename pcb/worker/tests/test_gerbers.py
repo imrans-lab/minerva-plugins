@@ -1080,9 +1080,12 @@ def test_job_file_structure_matches_kicads(board_path, base, builder):
     if deep:
         assert list(job) == [k for k in _KICAD_JOB_TOP_LEVEL_KEYS
                              if k != "MaterialStackup"]
-        assert list(job["GeneralSpecs"]) == ["ProjectId", "Size",
-                                             "LayerNumber", "Finish"]
+        # Finish is OMITTED too (Codex re-review finding 2): the Gerber Job
+        # spec reads "None" as an actual finish VALUE (bare copper), and the
+        # field is optional — an unknown finish is stated by absence.
+        assert list(job["GeneralSpecs"]) == ["ProjectId", "Size", "LayerNumber"]
         assert "BoardThickness" not in job["GeneralSpecs"]
+        assert "Finish" not in job["GeneralSpecs"]
     else:
         assert list(job) == _KICAD_JOB_TOP_LEVEL_KEYS
         assert list(job["GeneralSpecs"]) == ["ProjectId", "Size", "LayerNumber",
@@ -1091,7 +1094,8 @@ def test_job_file_structure_matches_kicads(board_path, base, builder):
     assert list(job["DesignRules"][0]) == ["Layers", "PadToPad", "PadToTrack",
                                            "TrackToTrack", "MinLineWidth"]
     assert job["GeneralSpecs"]["LayerNumber"] == len(_declared_layers(board_path))
-    assert job["GeneralSpecs"]["Finish"] == "None"
+    if not deep:
+        assert job["GeneralSpecs"]["Finish"] == "None"
     assert job["GeneralSpecs"]["ProjectId"]["Name"] == base
 
 

@@ -41,7 +41,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Union
 
-from agent_router.layers import CANON_TO_KICAD, canon_to_kicad, is_copper
+from agent_router.layers import (CANON_TO_KICAD, canon_to_kicad,
+                                 inner_layer_index, is_copper, kicad_to_canon)
 
 from . import bless
 from .board_schema import (
@@ -1098,8 +1099,17 @@ def _resolved_pad_layers(pad: PadDefinition, transform: PlacementTransform, ref:
     # their barrel genuinely reaches every declared plane (GA-3 flashes the
     # annulus on each copper layer).
     if pad.drill is None:
+        # INNER-NESS IS A NAMING-CONTRACT QUESTION, asked in the canonical
+        # namespace (Codex re-review finding 1: the first cut compared raw
+        # ids against ("F.Cu", "B.Cu"), so a pad whose resolved layer id is
+        # CANONICAL "top"/"bottom" — every hand-authored pin board — was
+        # misclassified as inner and refused). is_copper gates first (both
+        # spellings; keeps mask/paste out of the fold so kicad_to_canon
+        # never warns here), then the id folds canonical and only a genuine
+        # in<k> counts.
         inner = [layer.id for layer in resolved
-                 if is_copper(layer.id) and layer.id not in ("F.Cu", "B.Cu")]
+                 if is_copper(layer.id)
+                 and inner_layer_index(kicad_to_canon(layer.id)) > 0]
         if inner:
             diags.error(
                 "inner_smd_pad",

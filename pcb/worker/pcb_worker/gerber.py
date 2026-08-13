@@ -1658,6 +1658,14 @@ def _build_job_file(base: str, filenames: list[str], outline_w: float,
     if len(copper_names) > 2:
         del job["GeneralSpecs"]["BoardThickness"]
         del job["MaterialStackup"]
+        # Finish too (Codex re-review finding 2): the Gerber Job spec treats
+        # "None" as an ACTUAL finish value (bare copper, a real order
+        # option), and the field is optional — so stating it on a stack
+        # whose finish is unknown is the same invented-physics defect one
+        # field over. The 2-layer path keeps writing "None" byte-identically
+        # (KiCad itself writes it for an undeclared finish, and that is the
+        # measured convention the legacy path reproduces).
+        del job["GeneralSpecs"]["Finish"]
     return json.dumps(job, indent=2) + "\n"
 
 
