@@ -28,9 +28,16 @@ const _Self := preload("pcb_staged_entities.gd")
 
 ## Legal kinds — the entity families the v1 substrate stages. Route proposals
 ## stay in the routing workspace (a different species: generated answers, not
-## staged edits); component moves and deletions are explicitly out of scope
-## (DCR S10).
-const KINDS := ["zone", "cutout"]
+## staged edits). Component DELETIONS remain out of scope (DCR S10).
+##
+## "placement" (SPIKE 019ff8615fbe — placement-coworking): a proposed component
+## MOVE, {component_id, from{...}, to{...}}. Unlike zone/cutout its accept does
+## not ADD an entity — it applies a move (PCBData.add_placement_payload). It is
+## also the one kind whose payload is MUTABLE while live (the ghost is
+## draggable; dragging IS the Update of the CRUD cycle under ratification) —
+## see update_placement_target for the deliberate breach of the
+## payloads-immutable rule and its undo consequence.
+const KINDS := ["zone", "cutout", "placement"]
 
 const DISPOSITIONS := ["staged", "accepted", "rejected"]
 const TERMINAL_DISPOSITIONS := ["accepted", "rejected"]
@@ -190,6 +197,51 @@ func stamp(staged_id: String, disposition: String, verb: String) -> bool:
 ## transaction; nothing may call this bare.
 func reject(staged_id: String) -> bool:
 	return stamp(staged_id, "rejected", "reject")
+
+
+# ── placement-kind helpers (SPIKE 019ff8615fbe) ───────────────────────────────
+
+## The LIVE placement staged for `component_id`, or "" — at most one may be
+## live per component (the propose paths check this so a second drag REVISES
+## the standing ghost instead of stacking a twin).
+func live_placement_for_component(component_id: String) -> String:
+	for e in staged_entries():
+		var entry: Dictionary = e
+		if str(entry.get("kind", "")) != "placement":
+			continue
+		if str((entry.get("payload", {}) as Dictionary).get("component_id", "")) == component_id:
+			return str(entry.get("staged_id", ""))
+	return ""
+
+
+## Move a LIVE placement's TARGET pose (the Update of the CRUD cycle: ghost
+## drag and the MCP update verb both land here). SPIKE CAVEAT, stated rather
+## than hidden: this mutates a stored payload, which the store otherwise
+## forbids — bucket-9 snapshots carry DISPOSITIONS ONLY, so undo will never
+## restore a previous target pose (it only revives/retires whole ghosts). The
+## ratification session decides whether target-pose edits deserve history;
+## until then a mid-flight proposal is scratch, not record.
+func update_placement_target(staged_id: String, to_x_mm: float, to_y_mm: float,
+		to_rotation_deg: float, note: String = "") -> bool:
+	var e: Dictionary = get_entry(staged_id)
+	if e.is_empty():
+		last_error = {"staged_id": staged_id, "error": ERR_UNKNOWN_ENTRY, "verb": "update_placement"}
+		return false
+	if str(e.get("disposition", "")) in TERMINAL_DISPOSITIONS:
+		last_error = {"staged_id": staged_id, "error": ERR_TERMINAL, "verb": "update_placement"}
+		return false
+	if str(e.get("kind", "")) != "placement":
+		last_error = {"staged_id": staged_id, "error": ERR_BAD_KIND, "verb": "update_placement"}
+		return false
+	var payload: Dictionary = e.get("payload", {})
+	payload["to"] = {"x_mm": to_x_mm, "y_mm": to_y_mm, "rotation_deg": to_rotation_deg}
+	e["payload"] = payload
+	if not note.is_empty():
+		e["note"] = note
+	entries[staged_id] = e
+	last_error = {}
+	changed.emit()
+	return true
 
 
 # ── bucket-9 history participation (DCR F8) ───────────────────────────────────

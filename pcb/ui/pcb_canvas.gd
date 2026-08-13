@@ -944,6 +944,21 @@ const CANDIDATE_HIT_SLACK_PX := 4.0
 ## above, and the same shape as VIA_HIT_RADIUS_PX for committed vias.
 const CANDIDATE_VIA_HIT_RADIUS_PX := 6.0
 
+## ── STAGED PLACEMENT ghost styling (SPIKE 019ff8615fbe) ───────────────────────
+## A placement ghost is a RIGID BODY at the proposed pose plus a TETHER from
+## the part's current position — a third geometry class, so it takes a NEW
+## channel (ghosted body + solid tether line) rather than a third dash period
+## (the dash-pairing rule above stands untouched). The body keeps the
+## component's own colour at ghost alpha, per the no-recolouring rule.
+const PLACEMENT_GHOST_BODY_ALPHA := 0.40
+const PLACEMENT_TETHER_WIDTH_PX := 1.5
+const PLACEMENT_TETHER_ARROW_PX := 8.0
+## Calm tether: no routed copper touches the part — the move is free.
+var placement_tether_color: Color = Color(0.55, 0.8, 1.0, 0.8)
+## Amber tether: at least one routed net touches the part — accepting this
+## move strands copper (the what-breaks advisory, shown not fixed).
+var placement_tether_routed_color: Color = Color(1.0, 0.72, 0.2, 0.9)
+
 ## Font
 var font: Font
 var font_size: int = 12
@@ -2188,6 +2203,91 @@ func _draw_staged_entities() -> void:
 			"cutout":
 				if show_cutouts:
 					_draw_cutout(payload, true)
+			"placement":
+				_draw_staged_placement(entry)
+
+
+## The proposed TARGET pose of a placement entry: payload.to, unless this very
+## ghost is mid-drag — then the live drag position (the preview IS the pose).
+func _placement_target_pose(payload: Dictionary) -> Dictionary:
+	var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+	var pos := Vector2(float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)))
+	if _placement_drag_active and str(payload.get("id", "")) == _placement_drag_entity:
+		pos = _placement_drag_pos
+	return {"pos": pos, "rot": float(to.get("rotation_deg", 0.0))}
+
+
+## The ghost BODY polygon (world mm) at the proposed pose — one derivation
+## shared by draw and pick so the click target is exactly what is painted.
+func _placement_ghost_polygon(payload: Dictionary) -> PackedVector2Array:
+	var comp = data.get_component(str(payload.get("component_id", ""))) if data else null
+	if comp == null:
+		return PackedVector2Array()
+	var pose := _placement_target_pose(payload)
+	# Same sign convention as pcb_component.get_transform (KiCad CW-in-Y-down).
+	var xform := Transform2D(deg_to_rad(-float(pose.get("rot", 0.0))), Vector2.ZERO)
+	var out := PackedVector2Array()
+	for p in comp.get_local_body_polygon():
+		out.append((pose.get("pos") as Vector2) + (xform * p))
+	return out
+
+
+## SPIKE 019ff8615fbe: a placement ghost = the component body ghosted at the
+## TARGET pose + a tether from the part's CURRENT position, amber when the
+## move strands routed copper (advisory channel — shown, never auto-fixed).
+func _draw_staged_placement(entry: Dictionary) -> void:
+	var payload: Dictionary = entry.get("payload", {})
+	var comp = data.get_component(str(payload.get("component_id", ""))) if data else null
+	if comp == null:
+		return
+	var world_poly := _placement_ghost_polygon(payload)
+	if world_poly.size() < 3:
+		return
+	var screen_poly := PackedVector2Array()
+	for p in world_poly:
+		screen_poly.append(world_to_screen(p))
+	var pose := _placement_target_pose(payload)
+	var target: Vector2 = pose.get("pos")
+
+	# Tether first (under the body): current anchor → target anchor.
+	var routed := false
+	for n in (payload.get("affected_nets", []) as Array):
+		if n is Dictionary and bool((n as Dictionary).get("routed", false)):
+			routed = true
+			break
+	var tether_color: Color = placement_tether_routed_color if routed else placement_tether_color
+	var from_px := world_to_screen(comp.position)
+	var to_px := world_to_screen(target)
+	if (to_px - from_px).length() > 1.0:
+		draw_line(from_px, to_px, tether_color, PLACEMENT_TETHER_WIDTH_PX, true)
+		# Arrowhead at the target end — the tether reads as "goes THERE".
+		var dir := (to_px - from_px).normalized()
+		var n1 := dir.rotated(PI * 0.85) * PLACEMENT_TETHER_ARROW_PX
+		var n2 := dir.rotated(-PI * 0.85) * PLACEMENT_TETHER_ARROW_PX
+		draw_line(to_px, to_px + n1, tether_color, PLACEMENT_TETHER_WIDTH_PX, true)
+		draw_line(to_px, to_px + n2, tether_color, PLACEMENT_TETHER_WIDTH_PX, true)
+
+	# Ghost body: the component's OWN colour at ghost alpha (no recolouring),
+	# with a selection halo when the ghost is the selection.
+	var body: Color = comp.color
+	body.a = PLACEMENT_GHOST_BODY_ALPHA
+	draw_colored_polygon(screen_poly, body)
+	var outline := screen_poly.duplicate()
+	outline.append(screen_poly[0])
+	var edge: Color = comp.color.darkened(0.3)
+	edge.a = 0.8
+	draw_polyline(outline, edge, 1.0)
+	if str(payload.get("id", "")) in selected_staged_ids:
+		draw_polyline(outline, trace_selected_color, 2.0)
+
+	# Refdes + author on the ghost so "what and whose" reads without a click.
+	var label := "%s (%s)" % [comp.id, str(entry.get("author", "?"))]
+	var top := screen_poly[0]
+	for p in screen_poly:
+		if p.y < top.y:
+			top = p
+	draw_string(font, Vector2(to_px.x - 20, top.y - 6), label,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, tether_color)
 
 
 ## Which staged entity a click at `world_pos` picks, or "" — by CANONICAL
@@ -2212,6 +2312,12 @@ func _staged_at(world_pos: Vector2) -> String:
 		elif kind == "cutout":
 			if not show_cutouts:
 				continue
+		elif kind == "placement":
+			# Pick exactly the ghost body that is drawn (one derivation).
+			var ghost := _placement_ghost_polygon(payload)
+			if ghost.size() >= 3 and Geometry2D.is_point_in_polygon(world_pos, ghost):
+				return str(payload.get("id", ""))
+			continue
 		else:
 			continue
 		var pts := PCBDataScript.zone_outline_points(payload)
@@ -3175,6 +3281,15 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 						selection_changed.emit()
 						queue_redraw()
 						return
+					# SPIKE 019ff8615fbe: a press on a live PLACEMENT ghost
+					# drags the ghost's TARGET pose (the Update verb of the
+					# CRUD cycle) — never the generic selection drag, which
+					# deliberately captures no staged entity.
+					if hit_kind == KIND_STAGED \
+							and _begin_placement_ghost_drag(hit_id, world_pos):
+						selection_changed.emit()
+						queue_redraw()
+						return
 					_begin_selection_drag(hit_kind, hit_id, event.position)
 
 			selection_changed.emit()
@@ -3203,6 +3318,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# UX3 station 6) — commit through the guarded workspace verb.
 			if _junction_drag_active:
 				_end_candidate_junction_drag(screen_to_world(event.position))
+				queue_redraw()
+				return
+
+			# A placement-ghost drag owns its release the same way (SPIKE
+			# 019ff8615fbe): write the dragged target pose back to the store.
+			if _placement_drag_active:
+				_end_placement_ghost_drag()
 				queue_redraw()
 				return
 
@@ -3451,6 +3573,17 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		component_lock_changed.emit(
 			"%d cutout%s stayed put — v1 has no cutout move (draw + delete only)"
 			% [cutout_count, "" if cutout_count == 1 else "s"])
+
+	# Placement-ghost drag (SPIKE 019ff8615fbe): move the local target-pose
+	# preview; the store is written once, at release. Same snap rules as the
+	# selection drag so a proposed pose lands where a real move would.
+	if _placement_drag_active:
+		var ghost_target: Vector2 = screen_to_world(event.position) - _placement_drag_grab
+		if snap_to_grid and not _snap_bypass_held():
+			ghost_target = data.snap_to_grid(ghost_target)
+		_placement_drag_pos = ghost_target
+		queue_redraw()
+		return
 
 	if is_dragging_selection:
 		# The ANCHOR is what snaps; everything else in the selection takes the
@@ -4516,6 +4649,88 @@ func _draw_component_rotate_chrome() -> void:
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, _ROTATE_HANDLE_COLOR)
 
 
+## SPIKE 019ff8615fbe: arm a TARGET-POSE drag on a live placement ghost, or
+## return false (not a placement — the press falls through to the ordinary
+## select-yes/drag-no staged behaviour). The board is untouched throughout;
+## only the proposal's `to` pose is edited, and only at release.
+func _begin_placement_ghost_drag(entity_id: String, world_pos: Vector2) -> bool:
+	if _staged_store == null:
+		return false
+	var sid := str(_staged_store.staged_id_for_entity(entity_id))
+	if sid.is_empty():
+		return false
+	var entry: Dictionary = _staged_store.get_entry(sid)
+	if str(entry.get("kind", "")) != "placement":
+		return false
+	var payload: Dictionary = entry.get("payload", {})
+	var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+	var target := Vector2(float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)))
+	_placement_drag_active = true
+	_placement_drag_sid = sid
+	_placement_drag_entity = entity_id
+	_placement_drag_pos = target
+	_placement_drag_grab = world_pos - target
+	return true
+
+
+## Release half: ONE store write for the whole gesture (the ghost previewed
+## locally during motion). Rotation rides through unchanged — the drag edits
+## position only.
+func _end_placement_ghost_drag() -> void:
+	_placement_drag_active = false
+	if _staged_store == null or _placement_drag_sid.is_empty():
+		return
+	var entry: Dictionary = _staged_store.get_entry(_placement_drag_sid)
+	var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
+	_staged_store.update_placement_target(_placement_drag_sid,
+		_placement_drag_pos.x, _placement_drag_pos.y,
+		float((to if to is Dictionary else {}).get("rotation_deg", 0.0)))
+	_placement_drag_sid = ""
+	_placement_drag_entity = ""
+
+
+## SPIKE 019ff8615fbe, the propose-mode release half: each dragged component
+## snaps BACK to its origin and its dragged pose becomes a placement ghost
+## (author "human", through the panel's one stage doorway). A part with a
+## standing live ghost gets that ghost REVISED instead — drag again = update,
+## not a second proposal.
+func _convert_drag_to_placement_proposals() -> void:
+	var staged_n := 0
+	var revised_n := 0
+	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
+		var comp = data.get_component(comp_id)
+		var old_pos: Vector2 = _drag_origins[KIND_COMPONENT][comp_id]
+		if comp == null or comp.position == old_pos:
+			continue
+		var target: Vector2 = comp.position
+		comp.position = old_pos  # the board never moved — only the proposal did
+		if _staged_store != null and _staged_store.has_method("live_placement_for_component"):
+			var standing := str(_staged_store.live_placement_for_component(str(comp_id)))
+			if not standing.is_empty():
+				_staged_store.update_placement_target(standing, target.x, target.y, comp.rotation)
+				revised_n += 1
+				continue
+		if not _stage_doorway.is_valid():
+			component_lock_changed.emit("Propose mode has no stage doorway — move discarded.")
+			continue
+		var built: Dictionary = data.build_placement_payload(str(comp_id), target.x, target.y, comp.rotation)
+		if not bool(built.get("ok", false)):
+			component_lock_changed.emit("Move proposal refused: %s" % str(built.get("error", "")))
+			continue
+		var staged: Dictionary = _stage_doorway.call("placement", built.get("payload", {}), "human", "")
+		if not bool(staged.get("ok", false)):
+			component_lock_changed.emit("Move proposal refused: %s" % str(staged.get("error", "")))
+			continue
+		staged_n += 1
+	if staged_n > 0 or revised_n > 0:
+		var bits: Array = []
+		if staged_n > 0:
+			bits.append("staged %d move ghost%s" % [staged_n, "" if staged_n == 1 else "s"])
+		if revised_n > 0:
+			bits.append("revised %d standing ghost%s" % [revised_n, "" if revised_n == 1 else "s"])
+		component_lock_changed.emit("Propose mode: %s — right-click a ghost to Accept or Reject." % ", ".join(bits))
+
+
 ## Begin a drag-move anchored on the entity under the cursor. The anchor is only
 ## the snap reference — what MOVES is the whole selection (_capture_drag_origins).
 func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2) -> void:
@@ -4567,15 +4782,19 @@ func _capture_drag_origins() -> void:
 		if comp != null and not _unit_locked(KIND_COMPONENT, comp_id):
 			comps[comp_id] = comp.position
 	var trace_pts := {}
-	for trace_id in selected_trace_ids:
-		var trace = data.get_trace(trace_id)
-		if trace != null and not trace.locked and not trace.waypoints.is_empty():
-			trace_pts[trace_id] = PackedVector2Array(trace.waypoints)
 	var zone_pts := {}
-	for zone_id in selected_zone_ids:
-		var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
-		if not pts.is_empty():
-			zone_pts[zone_id] = pts
+	# SPIKE 019ff8615fbe: propose mode stages COMPONENT moves only — traces
+	# and zones are not captured while it is on, so a mixed drag cannot half
+	# move real geometry while the components merely propose.
+	if not propose_moves:
+		for trace_id in selected_trace_ids:
+			var trace = data.get_trace(trace_id)
+			if trace != null and not trace.locked and not trace.waypoints.is_empty():
+				trace_pts[trace_id] = PackedVector2Array(trace.waypoints)
+		for zone_id in selected_zone_ids:
+			var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+			if not pts.is_empty():
+				zone_pts[zone_id] = pts
 	# VIAS ARE DELIBERATELY NOT CAPTURED, and this comment is the decision, not a
 	# note about an omission (item 019fbb96cf). A via is not free geometry: it is
 	# the point where one net's copper changes layer, and the trace ends that meet
@@ -4650,6 +4869,18 @@ static func _translated(points: PackedVector2Array, delta: Vector2) -> PackedVec
 ## _batch_touched false and snapshots NOTHING.
 func _end_selection_drag() -> void:
 	is_dragging_selection = false
+
+	# SPIKE 019ff8615fbe: in propose mode the drag never happened to the
+	# BOARD — restore every component to its origin and stage the dragged
+	# pose as a placement ghost instead (revising a standing ghost for the
+	# same part rather than stacking a twin). No journal, no history: the
+	# store's changed signal drives redraw + sidecar autosave.
+	if propose_moves and _drag_origins.has(KIND_COMPONENT):
+		_convert_drag_to_placement_proposals()
+		_drag_origins = {}
+		queue_redraw()
+		return
+
 	var moved_components: Array[String] = []
 	var moved_total := 0
 
@@ -7315,6 +7546,21 @@ var authoring_destination: String = DEST_DIRECT
 ## base_board_revision and is the ONE stage entry point, A8).
 var _stage_doorway: Callable = Callable()
 
+## ── SPIKE 019ff8615fbe: propose-mode for component moves ──────────────────────
+## While true (the panel's "Propose moves" toggle), a component drag STAGES a
+## placement ghost instead of moving the part — the gesture is unchanged, its
+## destination flips (the zone/cutout DEST_DRAFT idiom applied to SELECT).
+var propose_moves: bool = false
+
+## Ghost-drag state (the Update of the CRUD cycle): a press on a live
+## placement ghost drags the ghost's TARGET pose; release writes it back to
+## the store (update_placement_target). Local preview only while dragging.
+var _placement_drag_active := false
+var _placement_drag_sid := ""            # store key of the dragged entry
+var _placement_drag_entity := ""         # canonical payload id
+var _placement_drag_pos := Vector2.ZERO  # live target (world mm) during drag
+var _placement_drag_grab := Vector2.ZERO # press offset from the target pose
+
 
 func set_staged_store(store, stage_doorway: Callable = Callable()) -> void:
 	_stage_doorway = stage_doorway
@@ -8299,7 +8545,16 @@ func _add_staged_menu_seam(entity_id: String) -> void:
 				var layer := str(payload.get("layer", ""))
 				if not layer.is_empty():
 					what += ", " + layer
-			label = "Staged %s %s — by %s" % [what, entity_id, str(entry.get("author", "?"))]
+			if what == "placement":
+				# SPIKE 019ff8615fbe: name the MOVE, not the mint — the part
+				# and where it is proposed to go is the identity that matters.
+				var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+				label = "Staged move %s → (%.1f, %.1f) — by %s" % [
+					str(payload.get("component_id", "?")),
+					float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
+					str(entry.get("author", "?"))]
+			else:
+				label = "Staged %s %s — by %s" % [what, entity_id, str(entry.get("author", "?"))]
 	context_menu.add_item(label, 0)
 	context_menu.set_item_disabled(context_menu.item_count - 1, true)
 	_context_menu_separate()

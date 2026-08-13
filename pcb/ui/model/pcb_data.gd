@@ -1713,6 +1713,93 @@ func cutouts_in_region(region: Rect2, visible_filter := Callable()) -> Array[Str
 #endregion
 
 
+#region Placement Proposals (SPIKE 019ff8615fbe — placement-coworking)
+## The staged-entity build/add pair for a proposed component MOVE. Same split
+## as zones/cutouts (build validates + mints, add re-validates + writes), with
+## one structural difference: accept does not ADD an entity to the board — it
+## APPLIES a move. The payload therefore has no board-duplicate check; replay
+## protection is the store's terminal-disposition rule.
+##
+## SPIKE stance on copper: accepting a placement NEVER touches traces. The
+## affected_nets list (routed flag per net) is advisory freight the ghost and
+## the accept reply both surface — "this move strands copper" is a fact shown,
+## not a fix applied. The ratification session owns the real ruling.
+
+## Why the proposed move cannot be authored, or "" when it can.
+func placement_author_error(component_id: String) -> String:
+	var comp = get_component(component_id)
+	if comp == null:
+		return "Component \"%s\" is not on this board." % component_id
+	if comp.locked:
+		return "Component \"%s\" is locked — unlock it before proposing a move." % component_id
+	return ""
+
+
+## Nets touching `component_id`, each with whether the board carries copper
+## for it: [{net, routed}]. The what-breaks fact a placement ghost carries.
+func placement_affected_nets(component_id: String) -> Array:
+	var routed_nets := {}
+	for trace_id in traces:
+		routed_nets[str(traces[trace_id].net_name)] = true
+	var out: Array = []
+	for net_name in nets:
+		if (nets[net_name].get_pins_for_component(component_id) as Array).is_empty():
+			continue
+		out.append({"net": str(net_name), "routed": routed_nets.has(str(net_name))})
+	return out
+
+
+## BUILD half — see build_zone_payload for the contract. `from` is the
+## component's pose NOW (captured at build so the ghost can draw its tether
+## and the journal can tell what the proposal believed it was moving).
+func build_placement_payload(component_id: String, to_x_mm: float, to_y_mm: float,
+		to_rotation_deg: float) -> Dictionary:
+	var refusal := placement_author_error(component_id)
+	if not refusal.is_empty():
+		return {"ok": false, "error": refusal}
+	var comp = get_component(component_id)
+	return {"ok": true, "payload": {
+		"id": mint_entity_id("placement"),
+		"component_id": component_id,
+		"from": {"x_mm": comp.position.x, "y_mm": comp.position.y,
+			"rotation_deg": comp.rotation},
+		"to": {"x_mm": to_x_mm, "y_mm": to_y_mm, "rotation_deg": to_rotation_deg},
+		"affected_nets": placement_affected_nets(component_id),
+	}}
+
+
+## ADD half — APPLY the proposed move against the CURRENT board (re-validated:
+## the component may have been deleted or locked since staging). Journals the
+## standard move_component/rotate_component shapes so every existing journal
+## reader parses the landing. Returns the payload dict, or {} with a warning.
+func add_placement_payload(payload: Dictionary) -> Dictionary:
+	if payload.is_empty():
+		return {}
+	var component_id := str(payload.get("component_id", ""))
+	var refusal := placement_author_error(component_id)
+	if not refusal.is_empty():
+		push_warning("[PCBData] add_placement_payload refused: %s" % refusal)
+		return {}
+	var pid := str(payload.get("id", ""))
+	if pid.is_empty() or not pid.begins_with("placement:"):
+		push_warning("[PCBData] add_placement_payload refused: payload id '%s' is not a minted placement id" % pid)
+		return {}
+	var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+	if not (to.has("x_mm") and to.has("y_mm")):
+		push_warning("[PCBData] add_placement_payload refused: 'to' pose needs x_mm and y_mm")
+		return {}
+	var comp = get_component(component_id)
+	var target := Vector2(float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)))
+	if comp.position != target:
+		move_component(component_id, target)
+	var target_rot := float(to.get("rotation_deg", comp.rotation))
+	if comp.rotation != target_rot:
+		rotate_component(component_id, target_rot)
+	return payload
+
+#endregion
+
+
 #region Trace Authoring
 
 ## Fallback width for an authored trace when the board declares no design rule.

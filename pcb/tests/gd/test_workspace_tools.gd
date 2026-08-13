@@ -1380,14 +1380,16 @@ func _run_removal_manifest_tools_absent() -> void:
 	# the bless gate's exit door into the durable user layer) == 93,
 	# + Epoch LIB2 station-2's import_footprint (B4, docket 019ff568b56b: the
 	# arbitrary-source supply chain — git/URL/vendor-export bytes staged
-	# UNBLESSED, never auto-trusted) == 94.
+	# UNBLESSED, never auto-trusted) == 94,
+	# + the placement-coworking SPIKE's propose_placement + placement_update
+	# (staged component-move ghosts, docket 019ff8615fbe) == 96.
 	# This is a SECOND, independent count pin on the same manifest.json this
 	# round's tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (93->94 over the
+	# tests/gd/test_manifest_tool_registration.gd's own pin (94->96 over the
 	# same station) for the "deliberate bump, its own diff"
 	# convention this follows.
-	check_eq("manifest tool count == 94 (ALL manifest.json tools[] entries)",
-		names.size(), 94)
+	check_eq("manifest tool count == 96 (ALL manifest.json tools[] entries)",
+		names.size(), 96)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

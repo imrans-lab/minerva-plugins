@@ -183,6 +183,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _propose_zone(host, args)
 		"minerva_pcb_propose_cutout":
 			return _propose_cutout(host, args)
+		"minerva_pcb_propose_placement":
+			return _propose_placement(host, args)
+		"minerva_pcb_placement_update":
+			return _placement_update(host, args)
 		"minerva_pcb_staged_list":
 			return _staged_list(host, args)
 		"minerva_pcb_staged_accept":
@@ -3758,6 +3762,86 @@ static func _propose_cutout(host, args: Dictionary) -> Dictionary:
 	})
 
 
+## SPIKE 019ff8615fbe: propose a component MOVE as a staged ghost. The agent
+## twin of propose-mode dragging; author "ai". One live ghost per component —
+## a standing one refuses with its entity_id so the agent revises via
+## minerva_pcb_placement_update (or rejects first).
+static func _propose_placement(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var panel = _staged_panel(host)
+	if not (panel is Object):
+		return panel
+	var component_id: String = str(args.get("component_id", ""))
+	if component_id.is_empty():
+		return _err("component_id is required (the ref, e.g. \"R1\")")
+	if not (args.has("x_mm") and args.has("y_mm")):
+		return _err("x_mm and y_mm are required: the proposed target position")
+	var comp = data.get_component(component_id)
+	if comp == null:
+		return _err("Component \"%s\" is not on this board." % component_id)
+	var store = panel.get_staged_store() if panel.has_method("get_staged_store") else null
+	if store != null and store.has_method("live_placement_for_component"):
+		var standing := str(store.live_placement_for_component(component_id))
+		if not standing.is_empty():
+			var st_entry: Dictionary = store.get_entry(standing)
+			return {"success": false, "error": "placement_already_staged",
+				"entity_id": str((st_entry.get("payload", {}) as Dictionary).get("id", "")),
+				"note": "one live move ghost per component — revise it with minerva_pcb_placement_update or reject it first"}
+	var rot := float(args.get("rotation_deg", comp.rotation))
+	var built: Dictionary = data.build_placement_payload(component_id,
+		float(args.get("x_mm", 0.0)), float(args.get("y_mm", 0.0)), rot)
+	if not bool(built.get("ok", false)):
+		return _err(str(built.get("error", "Placement was refused.")))
+	var payload: Dictionary = built.get("payload", {})
+	var staged: Dictionary = panel.stage_built_payload("placement", payload, "ai", str(args.get("note", "")))
+	if not bool(staged.get("ok", false)):
+		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
+	return _ok({
+		"entity_id": str(payload.get("id", "")),
+		"staged_id": str(staged.get("staged_id", "")),
+		"component_id": component_id,
+		"from": payload.get("from", {}),
+		"to": payload.get("to", {}),
+		"affected_nets": payload.get("affected_nets", []),
+		"note": "a ghost DRAFT — the part has not moved; minerva_pcb_staged_accept applies it, and routed copper is FLAGGED, never auto-fixed",
+	})
+
+
+## SPIKE 019ff8615fbe: revise a live placement ghost's TARGET pose — the
+## agent twin of dragging the ghost (the Update of the CRUD cycle).
+static func _placement_update(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_staged_store"):
+		return _err("no live panel — the staged store is panel state")
+	var store = panel.get_staged_store()
+	if store == null:
+		return _err("no staged store bound to this panel")
+	var entity_id: String = str(args.get("entity_id", ""))
+	if entity_id.is_empty():
+		return _err("entity_id is required (the placement:<hex> id from propose/list)")
+	var sid := str(store.staged_id_for_entity(entity_id))
+	if sid.is_empty():
+		return _err("staged_entry_not_found: no live entry '%s'" % entity_id)
+	var entry: Dictionary = store.get_entry(sid)
+	if str(entry.get("kind", "")) != "placement":
+		return _err("'%s' is a staged %s, not a placement" % [entity_id, str(entry.get("kind", ""))])
+	var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
+	if not (to is Dictionary):
+		to = {}
+	var x := float(args.get("x_mm", to.get("x_mm", 0.0)))
+	var y := float(args.get("y_mm", to.get("y_mm", 0.0)))
+	var rot := float(args.get("rotation_deg", to.get("rotation_deg", 0.0)))
+	if not store.update_placement_target(sid, x, y, rot, str(args.get("note", ""))):
+		return _err(str(store.last_error.get("error", "update_refused")))
+	return _ok({
+		"entity_id": entity_id,
+		"to": {"x_mm": x, "y_mm": y, "rotation_deg": rot},
+		"note": "ghost revised in place — still a DRAFT until minerva_pcb_staged_accept",
+	})
+
+
 static func _staged_list(host, args: Dictionary) -> Dictionary:
 	var panel = _get_panel(host)
 	if panel == null or not panel.has_method("get_staged_store"):
@@ -3795,6 +3879,11 @@ static func _staged_list_row(e: Dictionary) -> Dictionary:
 		var net := str(payload.get("net", ""))
 		if not net.is_empty():
 			row["net"] = net
+	elif str(e.get("kind", "")) == "placement":
+		row["component_id"] = str(payload.get("component_id", ""))
+		row["from"] = payload.get("from", {})
+		row["to"] = payload.get("to", {})
+		row["affected_nets"] = payload.get("affected_nets", [])
 	var note := str(e.get("note", ""))
 	if not note.is_empty():
 		row["note"] = note

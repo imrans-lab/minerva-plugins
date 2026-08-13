@@ -581,9 +581,32 @@ func _staged_payload_refusal(kind: String, payload: Dictionary) -> String:
 				return "payload id '%s' is not a minted cutout id" % pid
 			if not (_data.get_cutout(pid) as Dictionary).is_empty():
 				return "cutout id '%s' is already on the board" % pid
+		"placement":
+			# SPIKE 019ff8615fbe: no board-duplicate half — accept applies a
+			# move rather than adding an entity, so there is nothing on the
+			# board to collide with; replay is refused by the store's terminal
+			# disposition.
+			var p_err: String = _data.placement_author_error(str(payload.get("component_id", "")))
+			if not p_err.is_empty():
+				return p_err
+			if not pid.begins_with("placement:"):
+				return "payload id '%s' is not a minted placement id" % pid
 		_:
 			return "unknown staged kind '%s'" % kind
 	return ""
+
+
+## The one accept write per kind — the add_*_payload dispatch both accept
+## paths share (single + batch), so a new staged kind lands in ONE place.
+func _apply_staged_payload(kind: String, payload: Dictionary) -> Dictionary:
+	match kind:
+		"zone":
+			return _data.add_zone_payload(payload)
+		"cutout":
+			return _data.add_cutout_payload(payload)
+		"placement":
+			return _data.add_placement_payload(payload)
+	return {}
 
 
 ## ACCEPT one staged draft: replay the direct add verb with the STORED payload
@@ -604,8 +627,7 @@ func accept_staged(entity_id: String) -> Dictionary:
 		_show_transient_status("Accept refused: %s" % refusal)
 		return {"ok": false, "error": "accept_refused", "entity_id": entity_id, "note": refusal}
 	_data.attach_staged_snapshot()
-	var landed: Dictionary = _data.add_zone_payload(payload) if kind == "zone" \
-		else _data.add_cutout_payload(payload)
+	var landed: Dictionary = _apply_staged_payload(kind, payload)
 	if landed.is_empty():
 		# Unreachable after the pre-check above mirrors the add gates; kept as
 		# an honest backstop rather than a stamp over a write that never was.
@@ -675,8 +697,7 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 	for r in resolved:
 		var entry: Dictionary = r.get("entry", {})
 		var kind := str(entry.get("kind", ""))
-		var landed: Dictionary = _data.add_zone_payload(entry.get("payload", {})) if kind == "zone" \
-			else _data.add_cutout_payload(entry.get("payload", {}))
+		var landed: Dictionary = _apply_staged_payload(kind, entry.get("payload", {}))
 		if landed.is_empty():
 			push_warning("[PCBPanel] batch accept: unexpected refusal on %s" % str(r.get("entity_id", "")))
 			continue
@@ -1489,6 +1510,21 @@ func _build_sidebar() -> VBoxContainer:
 		"Propose a board opening as a DRAFT (ghost for review — Accept lands it)", "cutout_24.png")
 	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
 		"Propose a parallel bus (Enter lands ghost candidates for review, never copper)", "bus_24.png")
+
+	# ── SPIKE 019ff8615fbe: propose-mode for MOVES ───────────────────────────
+	# While ON, dragging a component stages a placement ghost (author "human")
+	# instead of moving the part — the drag gesture is unchanged, only its
+	# destination flips (the zone/cutout draft buttons' idiom, applied to the
+	# SELECT tool). OFF by default so every existing flow is untouched.
+	var propose_moves_toggle := CheckButton.new()
+	propose_moves_toggle.name = "ProposeMovesToggle"
+	propose_moves_toggle.text = "Propose moves"
+	propose_moves_toggle.tooltip_text = _wrap_tooltip(
+		"Drags STAGE a ghost move for review instead of moving the part (Accept applies it)")
+	propose_moves_toggle.toggled.connect(func(on: bool) -> void:
+		if _canvas != null:
+			_canvas.propose_moves = on)
+	draft_flow.add_child(propose_moves_toggle)
 
 	# Per-HINT width row (HITL-7c, docket 019fe0395764 — owner override of
 	# station 8b's standing authoring picker: "feels disconnected from
