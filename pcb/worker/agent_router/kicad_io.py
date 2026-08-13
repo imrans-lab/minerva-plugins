@@ -283,6 +283,38 @@ def _existing_traces_from_content(
     return tuple(segments)
 
 
+def _copper_layer_table(content: str) -> tuple[str, ...]:
+    """The .kicad_pcb's OWN copper stack, in the header's declaration order.
+
+    Epoch GA-3: reads the ``(layers ...)`` header's ``signal`` rows — the one
+    authoritative statement of which copper planes the board has. Order is
+    REDERIVED canonically (F.Cu, In1.Cu.., B.Cu) rather than trusted from row
+    order: our emitter writes stack sequence, but a foreign file may list
+    copper in layer-ID order (F.Cu, B.Cu, In1.Cu, ...), and a mis-ordered
+    table would expand via spans to the wrong occupied range. Returns () for
+    content with no such header (fragments in tests), which callers treat as
+    "no expansion possible"."""
+    header = re.search(r'\(layers\s*\n(.*?)\n\s*\)', content, re.DOTALL)
+    if not header:
+        return ()
+    names = {m.group(1) for m in re.finditer(
+        r'\(\d+\s+"([^"]+)"\s+signal\)', header.group(1))}
+
+    def _stack_key(name: str) -> tuple[int, str]:
+        if name == "F.Cu":
+            return (0, name)
+        if name == "B.Cu":
+            return (10 ** 9, name)
+        low = name.lower()
+        if low.startswith("in") and low.endswith(".cu"):
+            digits = low[2:-3]
+            if digits.isdigit() and digits[0] != "0":
+                return (int(digits), name)
+        return (10 ** 6, name)  # unknown copper name: after inners, stable
+
+    return tuple(sorted(names, key=_stack_key))
+
+
 def _existing_vias_from_content(
     content: str, net_numbers: dict[int, str]
 ) -> tuple:
@@ -299,17 +331,20 @@ def _existing_vias_from_content(
     ``router.py``, which is out of this reader's fence. Not read here.
 
     ``ExistingVia.layers`` is the ENUMERATED SET of layers the via's copper
-    OCCUPIES — not ``kicad_io.Via.layers``' (from, to) SPAN. On the boards
-    this package can build (agent_router.layers models exactly two copper
-    layers, top/bottom) a through-via's span and its occupied set are the
-    same two names, but they are not the same THING, and a raw ``(from, to)``
-    tuple handed straight through would be right by coincidence, not by
-    construction. ``dict.fromkeys`` mirrors ``route_bridge.
-    resolved_board_existing_copper``'s own projection (which also dedupes a
-    from==to span down to the ONE layer actually occupied) rather than
-    assuming the pair is always two distinct names.
+    OCCUPIES — not ``kicad_io.Via.layers``' (from, to) SPAN. Epoch GA-3: the
+    parsed endpoint pair is EXPANDED to the inclusive stack-order range
+    against the file's own copper layer table (the same algorithm
+    ``route_bridge.resolved_board_existing_copper`` applies to the IR path),
+    because on a deeper board a through via's ``(layers "F.Cu" "B.Cu")``
+    endpoint pair occupies every inner annulus in between — handing the raw
+    pair through left In1/In2 unguarded and a proposal free to route through
+    the barrel. When the header names no copper table (fragment input) or an
+    endpoint is not in it, the deduped endpoint pair is kept: on a 2-layer
+    file that IS the occupied set, byte-identically the old behaviour.
     """
     from .router import ExistingVia
+
+    copper_order = _copper_layer_table(content)
 
     vias = []
     for block in _find_top_level_blocks(content, "via"):
@@ -332,6 +367,10 @@ def _existing_vias_from_content(
         net_num = int(net_match.group(1)) if net_match else 0
         occupied = tuple(dict.fromkeys(
             (layers_match.group(1), layers_match.group(2))))
+        if copper_order and all(lid in copper_order for lid in occupied):
+            indices = [copper_order.index(lid) for lid in occupied]
+            lo, hi = min(indices), max(indices)
+            occupied = tuple(copper_order[lo:hi + 1])
         vias.append(ExistingVia(
             net=net_numbers.get(net_num),
             position=(float(at_match.group(1)), float(at_match.group(2))),

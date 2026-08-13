@@ -270,9 +270,11 @@ def _gerbers(params: dict) -> dict:
 
     Return convention mirrors `generate` exactly: {files:{name:content},
     written:[{path,bytes_written}]}, with the files also written to disk when
-    out_dir is supplied. Six Gerber layers (F_Cu/B_Cu/F_Mask/B_Mask/F_SilkS/
-    Edge_Cuts) plus PTH.drl/NPTH.drl (each drill file only when the board has
-    holes of that class).
+    out_dir is supplied. Nine baseline Gerber layers (F_Cu/B_Cu/F_Paste/
+    B_Paste/F_SilkS/B_SilkS/F_Mask/B_Mask/Edge_Cuts) plus one In{k}_Cu per
+    declared inner copper layer (epoch GA-3), plus PTH.drl/NPTH.drl (each
+    drill file only when the board has holes of that class) and the -job
+    .gbrjob manifest.
     """
     try:
         board = _load(params)
@@ -1172,12 +1174,14 @@ def _routes_to_vias(routes: list) -> list:
     top/bottom — see pcb_data.gd / board-yaml.md) so it matches the shape of
     a canonical board via. agent_router.router.Route.vias is positional
     ((x, y) only, no layer span — see agent_router/router.py's Route
-    dataclass) and on a 2-layer board a via always bridges the full
-    top<->bottom span, so that is the default here. This does NOT change the
-    public route() JSON contract (routes[].vias stays [[x, y], ...] — see
-    _serialize_routing_result); this dict shape is internal to DRC harvesting
-    only. If the engine ever reports a real per-via layer span, thread it
-    through here instead of the hardcoded default.
+    dataclass), and under the v1 THROUGH-VIA model (epoch GA-3) that is not
+    a gap: a through via's RECORDED span is top<->bottom at ANY stack depth
+    — the via physically crosses the whole board and joins every declared
+    layer — so "top"/"bottom" here is CORRECT for N-layer boards, not a
+    2-layer legacy. This does NOT change the public route() JSON contract
+    (routes[].vias stays [[x, y], ...] — see _serialize_routing_result);
+    this dict shape is internal to DRC harvesting only. Only a blind/buried
+    via (explicitly out of scope v1) would need a real per-via span here.
     """
     vias: list = []
     for r in routes:
@@ -1817,12 +1821,14 @@ def _routes_to_candidates(routes: list) -> tuple[list, list]:
             "net": r.get("net"),
             "segments": [dict(s, id=str(s.get("id", "") or f"segment:{i}"))
                          for i, s in enumerate(segments)],
-            # Span is top<->bottom because the vendored engine is 2-layer only
-            # (see _ROUTABLE_KICAD_LAYERS in route_bridge); a route reply carries
-            # no span of its own. IF THIS IS COPIED to a board with inner copper,
-            # this hardcode would silently UNDER-model the span and the overlay
-            # would miss collisions on the layers it skipped. Read the span from
-            # the route when the engine learns to emit one.
+            # Span is top<->bottom because that IS a through via's recorded
+            # span at ANY stack depth (epoch GA-3; the engine routes the
+            # declared N-layer stack now, but v1 vias are all through-hole
+            # and a through via joins every layer). The downstream span
+            # consumers expand it to the full occupied set against the
+            # board's own stack, so inner-layer collisions ARE modelled.
+            # Only a blind/buried via (out of scope v1) would need a real
+            # per-via span from the engine.
             "vias": [{"id": f"via:{i}", "position": v, "from_layer": "top",
                       "to_layer": "bottom"} for i, v in enumerate(vias)],
         })

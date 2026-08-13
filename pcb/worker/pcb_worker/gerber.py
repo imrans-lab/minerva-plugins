@@ -63,6 +63,8 @@ from gerber_writer import (
 # in prose. Re-add the import if code here ever renders glyphs again — but the
 # reason it should not is that a second glyph renderer is a second answer to
 # "what silk is on this board".
+from agent_router.layers import canon_to_kicad
+
 from . import board_model, mask_source, silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .footprint_def import ReferenceTextDefinition
@@ -160,6 +162,11 @@ REFDES_LOCAL_Y_MM = silk_source.REFDES_LOCAL_Y_MM
 # KiCad's default fab plot set minus F.Fab (which KiCad's own .gbrjob classifies
 # as AssemblyDrawing, i.e. not a fabrication layer). Pinned to
 # fab_capability.EMITTED_GERBER_SUFFIXES by the drift test.
+#
+# THE 2-LAYER BASELINE, not the whole story (epoch GA-3): a board declaring a
+# deeper stack additionally emits one In{k}_Cu suffix per inner layer, derived
+# from the stack itself in _build_gerber_layers — a per-board set has no seat
+# in a module constant.
 _GERBER_SUFFIXES = ("F_Cu", "B_Cu", "F_Paste", "B_Paste", "F_SilkS", "B_SilkS",
                     "F_Mask", "B_Mask", "Edge_Cuts")
 
@@ -338,6 +345,15 @@ class _Geometry:
         # rather than the (x, y, shape, w, h, ...) tuple the flashed families use.
         self.zone_fill_top: list[list[tuple[float, float]]] = []
         self.zone_fill_bot: list[list[tuple[float, float]]] = []
+        # INNER-layer copper (epoch GA-3), keyed by CANONICAL layer id ("in1",
+        # "in2", ...). ADDITIVE beside the *_top/*_bot pairs rather than a
+        # rename, for the same reason the silk buckets below stay asymmetric:
+        # suites read the outer pairs directly, and outer copper genuinely IS
+        # a pair (SMD pads, mask, paste, silk exist only on the two faces).
+        # Only inner traces and inner pour fill land here; the emitter fails
+        # closed on any key outside the board's declared stack.
+        self.traces_inner: dict[str, list[tuple[float, float, float, float, float]]] = {}
+        self.zone_fill_inner: dict[str, list[list[tuple[float, float]]]] = {}
         # Drill hits: (x, y, diameter, plated?)
         self.holes: list[tuple[float, float, float, bool]] = []
         # Real footprint silk, harvested from component graphics and placed into
@@ -440,6 +456,11 @@ class _Geometry:
                            for (x1, y1, x2, y2, w) in self.traces_bot]
         self.zone_fill_top = [[(x, -y) for (x, y) in ring] for ring in self.zone_fill_top]
         self.zone_fill_bot = [[(x, -y) for (x, y) in ring] for ring in self.zone_fill_bot]
+        self.traces_inner = {lid: [(x1, -y1, x2, -y2, w)
+                                   for (x1, y1, x2, y2, w) in segs]
+                             for lid, segs in self.traces_inner.items()}
+        self.zone_fill_inner = {lid: [[(x, -y) for (x, y) in ring] for ring in rings]
+                                for lid, rings in self.zone_fill_inner.items()}
         self.holes = [(x, -y, d, plated) for (x, y, d, plated) in self.holes]
         self.silk_lines = [(x1, -y1, x2, -y2, w)
                            for (x1, y1, x2, y2, w) in self.silk_lines]
@@ -1154,33 +1175,57 @@ def _add_silk_arcs(layer: DataLayer, arcs) -> None:
         layer.add_trace_arc(start, end, center, orientation, w, "")
 
 
-def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[str, str]:
+def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str,
+                         copper_ids: tuple[str, ...] = ("top", "bottom"),
+                         ) -> dict[str, str]:
     min_x, min_y, max_x, max_y = board_model.board_bounds(board)
 
     out: dict[str, str] = {}
 
-    # F.Cu
-    f_cu = DataLayer("Copper,L1,Top,Signal", negative=False)
-    _add_smd(f_cu, g.smd_pads, top_wanted=True)
-    _add_annuli(f_cu, g.th_annuli)
-    _add_shaped_th(f_cu, g.th_shaped)
-    _add_traces(f_cu, g.traces_top)
-    # Pour LAST on the layer: a Gerber layer is an ordered stream and every
-    # object here is positive (dark), so the pour is additive to the pads and
-    # traces it was carved around rather than something that could cover them.
-    # Emitting it last also keeps the diff of a board that gains a pour confined
-    # to the tail of the file.
-    _add_zone_fill(f_cu, g.zone_fill_top)
-    out["F_Cu"] = _dump(f_cu, creation_date)
+    # COPPER — one Gerber layer per DECLARED stack entry, stack order (epoch
+    # GA-3; formerly two straight-line F.Cu/B.Cu blocks). On a 2-layer stack
+    # this loop reproduces those blocks byte-identically: same attributes
+    # ("Copper,L1,Top,Signal" / "Copper,L2,Bot,Signal"), same object order.
+    #
+    # FAIL CLOSED on harvested inner copper whose layer is not declared: the
+    # harvest buckets by the layer id each primitive names, so a stray key
+    # here would otherwise be copper that silently never reaches any file —
+    # the exact K4 silent-discard this emitter exists to refuse.
+    declared = set(copper_ids)
+    stray = sorted((set(g.traces_inner) | set(g.zone_fill_inner)) - declared)
+    if stray:
+        raise ValueError(
+            f"_build_gerber_layers: harvested copper on layer(s) {stray} outside "
+            f"the declared stack {list(copper_ids)} — refusing to drop it silently")
 
-    # B.Cu
-    b_cu = DataLayer("Copper,L2,Bot,Signal", negative=False)
-    _add_smd(b_cu, g.smd_pads, top_wanted=False)
-    _add_annuli(b_cu, g.th_annuli)
-    _add_shaped_th(b_cu, g.th_shaped)
-    _add_traces(b_cu, g.traces_bot)
-    _add_zone_fill(b_cu, g.zone_fill_bot)
-    out["B_Cu"] = _dump(b_cu, creation_date)
+    n = len(copper_ids)
+    for idx, layer_id in enumerate(copper_ids):
+        if layer_id == "top":
+            attr = "Copper,L1,Top,Signal"
+            traces, fills = g.traces_top, g.zone_fill_top
+        elif layer_id == "bottom":
+            attr = f"Copper,L{n},Bot,Signal"
+            traces, fills = g.traces_bot, g.zone_fill_bot
+        else:
+            attr = f"Copper,L{idx + 1},Inr,Signal"
+            traces = g.traces_inner.get(layer_id, [])
+            fills = g.zone_fill_inner.get(layer_id, [])
+        cu = DataLayer(attr, negative=False)
+        # SMD pads exist only on the two FACES; a through-hole's barrel copper
+        # (annulus + shaped land) exists on EVERY copper layer it crosses —
+        # v1 drills are all through, so that is every declared layer.
+        if layer_id in ("top", "bottom"):
+            _add_smd(cu, g.smd_pads, top_wanted=(layer_id == "top"))
+        _add_annuli(cu, g.th_annuli)
+        _add_shaped_th(cu, g.th_shaped)
+        _add_traces(cu, traces)
+        # Pour LAST on the layer: a Gerber layer is an ordered stream and every
+        # object here is positive (dark), so the pour is additive to the pads
+        # and traces it was carved around rather than something that could
+        # cover them. Emitting it last also keeps the diff of a board that
+        # gains a pour confined to the tail of the file.
+        _add_zone_fill(cu, fills)
+        out[canon_to_kicad(layer_id).replace(".", "_")] = _dump(cu, creation_date)
 
     # F.Paste / B.Paste — the solder-paste stencils.
     #
@@ -1402,6 +1447,36 @@ _GBRJOB_FILE_ATTRIBUTES: dict[str, tuple[str, str]] = {
 _GBRJOB_SUFFIX_ORDER = ("F_Cu", "B_Cu", "F_Paste", "B_Paste",
                         "F_SilkS", "B_SilkS", "F_Mask", "B_Mask", "Edge_Cuts")
 
+
+def _gbrjob_layer_tables(copper_names: list[str]) -> tuple[dict, tuple]:
+    """(FileFunction table, manifest order) for one board's DECLARED stack.
+
+    Epoch GA-3: copper rows derive from the stack with renumbered L-indices —
+    F_Cu is always L1/Top, B_Cu is L{n}/Bot (L2 on a 2-layer board, L4 on a
+    4-layer one), and each inner layer is "Copper,L{k},Inr" per KiCad's own
+    .gbrjob vocabulary. Non-copper rows keep the measured static table above.
+    On ["F.Cu", "B.Cu"] this returns exactly _GBRJOB_FILE_ATTRIBUTES /
+    _GBRJOB_SUFFIX_ORDER, which stay as the pinned 2-layer baseline."""
+    n = len(copper_names)
+    attrs: dict[str, tuple[str, str]] = {}
+    copper_suffixes: list[str] = []
+    for idx, alias in enumerate(copper_names):
+        suffix = alias.replace(".", "_")
+        if idx == 0:
+            function = "Copper,L1,Top"
+        elif idx == n - 1:
+            function = f"Copper,L{n},Bot"
+        else:
+            function = f"Copper,L{idx + 1},Inr"
+        attrs[suffix] = (function, "Positive")
+        copper_suffixes.append(suffix)
+    for suffix, row in _GBRJOB_FILE_ATTRIBUTES.items():
+        if suffix not in ("F_Cu", "B_Cu"):
+            attrs[suffix] = row
+    order = tuple(copper_suffixes) + tuple(
+        s for s in _GBRJOB_SUFFIX_ORDER if s not in ("F_Cu", "B_Cu"))
+    return attrs, order
+
 # Physical defaults for a v1 two-layer board. These are KiCad's own defaults, and
 # they reproduce its numbers exactly: 1.6 total, 0.035 per copper layer, 0.01 per
 # mask => a 1.51 dielectric, which is what KiCad wrote for the spike board.
@@ -1517,11 +1592,12 @@ def _build_job_file(base: str, filenames: list[str], outline_w: float,
             by_suffix[fname[len(base) + 1:-len(".gbr")]] = fname
 
     files_attributes = []
-    for suffix in _GBRJOB_SUFFIX_ORDER:
+    attrs_table, suffix_order = _gbrjob_layer_tables(copper_names)
+    for suffix in suffix_order:
         fname = by_suffix.get(suffix)
         if fname is None:
             continue
-        function, polarity = _GBRJOB_FILE_ATTRIBUTES[suffix]
+        function, polarity = attrs_table[suffix]
         files_attributes.append({"Path": fname, "FileFunction": function,
                                  "FilePolarity": polarity})
 
@@ -1626,7 +1702,7 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
 
     for trace in board.traces:
         for seg in trace.segments:
-            bucket = g.traces_top if _is_top(seg.layer.id) else g.traces_bot
+            bucket = _ir_trace_bucket(g, seg.layer.id)
             bucket.append((seg.a[0], seg.a[1], seg.b[0], seg.b[1], seg.width_mm))
 
     # COPPER POURS. Only COPPER_POUR contributes copper: a KEEPOUT is a
@@ -1641,7 +1717,7 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
     for zone in board.zones:
         if zone.kind is not ZoneKind.COPPER_POUR or not zone.fill:
             continue
-        bucket = g.zone_fill_top if _is_top(zone.layer.id) else g.zone_fill_bot
+        bucket = _ir_zone_bucket(g, zone.layer.id)
         for polygon in zone.fill:
             bucket.append([(x, y) for (x, y) in polygon.points])
 
@@ -1664,26 +1740,42 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
     return g.to_gerber_frame()
 
 
+def _ir_trace_bucket(g: _Geometry, layer_id: str) -> list:
+    """The copper trace bucket for an IR segment's CANONICAL layer id.
+
+    Epoch GA-3: outer copper keeps its historical pair (suites read those
+    directly); genuinely inner copper buckets per layer id. Any id that is
+    neither outer nor a declared inner layer is caught at emission, where the
+    declared stack is in hand (_build_gerber_layers fails closed on strays)."""
+    if layer_id == "top":
+        return g.traces_top
+    if layer_id == "bottom":
+        return g.traces_bot
+    return g.traces_inner.setdefault(layer_id, [])
+
+
+def _ir_zone_bucket(g: _Geometry, layer_id: str) -> list:
+    """Zone-fill twin of :func:`_ir_trace_bucket`."""
+    if layer_id == "top":
+        return g.zone_fill_top
+    if layer_id == "bottom":
+        return g.zone_fill_bot
+    return g.zone_fill_inner.setdefault(layer_id, [])
+
+
 def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
                      name: str | None = None,
                      creation_date: str | None = None) -> GerberResult:
     """Compile a :class:`ResolvedBoard` (K2 IR) into fabrication files DIRECTLY — the
     IR-native fab entry the live path uses, with no IR->loose-dict adapter (C5).
     Pinned by the gerber golden + oracle (gerbonara / KiCad export) tests."""
-    # FAIL-CLOSED seal, N-LAYER HALF (epoch GA-1): compile now RESOLVES stacks
-    # deeper than two copper layers (the model/DRC/routing pipeline is
-    # stack-aware), but THIS emitter still writes exactly the two-sided
-    # F_Cu/B_Cu file set (_build_gerber_layers's straight-line top/bottom
-    # blocks + the L1/L2 .gbrjob table). Handing it a deeper board would
-    # fabricate outer copper and silently drop every inner layer — the exact
-    # K4-discards defect this seal exists to prevent — so it refuses the whole
-    # board until the per-layer emitter lands (epoch GA-3).
-    if len(board.layer_stack.copper) != 2:
-        stack = ", ".join(layer.id for layer in board.layer_stack.copper)
-        raise ValueError(
-            f"build_gerbers_ir: board declares {len(board.layer_stack.copper)} copper "
-            f"layers [{stack}] but this emitter writes the two-layer F_Cu/B_Cu file "
-            f"set only — refusing to emit fabrication that silently drops inner copper")
+    # The GA-1 two-layer seal that stood here is GONE (epoch GA-3): the copper
+    # emitter now writes one Gerber layer per DECLARED stack entry and the
+    # .gbrjob derives its copper rows from the same stack, so a deeper board
+    # fabricates completely instead of refusing. What still guards depth is
+    # the COMPILE-time capability ceiling (a board only reaches this function
+    # under a profile declaring max_copper_layers >= its stack), plus
+    # _build_gerber_layers' own stray-layer fail-closed check.
     # FAIL-CLOSED seal (a captured feature the gerber bridge does not map — a copper
     # zone or a board-level graphic — must RAISE, never vanish silently from a
     # fabrication-bound file).
@@ -1734,7 +1826,9 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
                     "cutouts": cutout_dicts(board.outline)}
 
     files: dict[str, str] = {}
-    for suffix, text in _build_gerber_layers(outline_dict, g, date).items():
+    copper_ids = tuple(layer.id for layer in board.layer_stack.copper)
+    for suffix, text in _build_gerber_layers(outline_dict, g, date,
+                                             copper_ids=copper_ids).items():
         files[f"{base}-{suffix}.gbr"] = text
     for suffix, text in _build_drill_files(g, date).items():
         files[f"{base}-{suffix}.drl"] = text
@@ -1793,11 +1887,13 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
     base = name or (board_dict.get("name") if isinstance(board_dict.get("name"), str) else None) or "board"
     date = creation_date or PINNED_CREATION_DATE
 
-    # FAIL-CLOSED N-layer seal (epoch GA-1) — the loose-dict twin of the
-    # build_gerbers_ir seal: this path hardcodes the two-layer emission blocks
-    # AND the ["F.Cu","B.Cu"] .gbrjob stackup below, so a dict declaring a
-    # deeper stack must refuse rather than emit files that silently drop inner
-    # copper. (0 declared layers == the absent-key 2-layer default.)
+    # FAIL-CLOSED N-layer seal — PERMANENT on this path (epoch GA-3 decision,
+    # was "until GA-3" at GA-1): the loose-dict entry has NO compiler and NO
+    # manufacturer-profile capability ceiling, so emitting a deeper stack here
+    # would bypass the exact gate that makes N-layer fabrication safe on the
+    # IR path. Deep boards go through compile + build_gerbers_ir; this path
+    # keeps the ["F.Cu","B.Cu"] .gbrjob stackup and two-layer harvest.
+    # (0 declared layers == the absent-key 2-layer default.)
     declared_stack = board_dict.get("layers")
     if isinstance(declared_stack, list) and len(declared_stack) not in (0, 2):
         raise ValueError(

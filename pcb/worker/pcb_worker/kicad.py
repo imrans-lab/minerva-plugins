@@ -102,6 +102,24 @@ class KicadResult(dict):
 _LAYER_MAP = _layers.CANON_TO_KICAD
 
 
+def _stack_shape_error(stack: list[str]) -> str | None:
+    """Shape-validate a declared copper stack (epoch GA-3), or None if legal.
+
+    The canonical contract: first entry "top", last "bottom", middles the
+    contiguous "in1".."in{n-2}" run in order — the same shape board_validate
+    (and its Go mirror) enforce at the boundary. Re-checked here because the
+    loose-dict entry has no compiler in front of it and a malformed stack
+    would drive the KiCad layer-table numbering off the rails."""
+    if len(stack) < 2 or stack[0] != "top" or stack[-1] != "bottom":
+        return (f"declared layer stack {stack!r} must start with 'top' and "
+                f"end with 'bottom'")
+    for k, lid in enumerate(stack[1:-1], start=1):
+        if lid != f"in{k}":
+            return (f"declared layer stack {stack!r}: inner entry {k} must be "
+                    f"'in{k}', got {lid!r}")
+    return None
+
+
 def _num(v: Any, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
 
@@ -114,7 +132,17 @@ def _copper_layer(name: Any) -> str:
     if isinstance(name, str) and name in _LAYER_MAP:
         return _LAYER_MAP[name]
     if isinstance(name, str) and name:
-        return name  # already a KiCad layer id (e.g. "F.Cu")
+        # Epoch GA-3: an inner CANONICAL id ("in1", "in2", ...) folds to its
+        # KiCad alias exactly the way top/bottom always have — before this, an
+        # inner trace/zone would have emitted a literal (layer "in1") KiCad
+        # cannot load. Everything else keeps the historical visible
+        # passthrough (already-KiCad ids like "F.Cu", zone wildcards) — this
+        # is a READ-side boundary and follows kicad_to_canon's fails-visible
+        # doctrine, not the write-side fail-closed one.
+        try:
+            return _layers.canon_to_kicad(name)
+        except ValueError:
+            return name
     return "F.Cu"
 
 
@@ -371,18 +399,20 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     """
     if diagnostics is None:
         diagnostics = []
-    # FAIL-CLOSED N-layer seal (epoch GA-1, same argument as gerber's
-    # build_gerbers_ir seal): this emitter writes the fixed 2-layer KiCad-9
-    # layer table below and hardcodes every via's span to (F.Cu B.Cu); a deeper
-    # declared stack would export a .kicad_pcb whose inner copper is silently
-    # absent — refuse the whole board until the emitter is stack-driven
-    # (epoch GA-3).
+    # The GA-1 two-layer seal that stood here is GONE (epoch GA-3): the layer
+    # table below is now STACK-DRIVEN and every via writes its own span, so a
+    # deeper declared stack exports completely. What stays fail-closed is the
+    # stack's SHAPE — a malformed declaration would emit a board file KiCad
+    # cannot load (or worse, loads wrong), and the emitter is the last place
+    # that can refuse it. On the IR path the compiler has already validated
+    # membership and the capability ceiling; this guards the loose-dict entry.
     declared_stack = board.get("layers")
-    if isinstance(declared_stack, list) and len(declared_stack) not in (0, 2):
-        raise ValueError(
-            f"generate_kicad_pcb: board declares {len(declared_stack)} copper layers "
-            f"{declared_stack!r} but this emitter writes a 2-layer KiCad layer table "
-            f"only — refusing to export a board file that silently drops inner copper")
+    stack_ids = ([str(x) for x in declared_stack]
+                 if isinstance(declared_stack, list) and declared_stack
+                 else ["top", "bottom"])
+    shape_err = _stack_shape_error(stack_ids)
+    if shape_err:
+        raise ValueError(f"generate_kicad_pcb: {shape_err}")
     min_x, min_y, max_x, max_y = _bounds(board)
     net_index, pad_net = _net_table(board)
     net_name_of = {i: n for n, i in net_index.items()}
@@ -406,8 +436,17 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     # the stack (B.Cu=2 not 31, F.Mask=1, Edge.Cuts=25, F.SilkS=5 not 35), so the old
     # KiCad-7 numbers under the 20241229 (v9) stamp were internally inconsistent.
     out.append("  (layers")
+    # Copper rows are STACK-DRIVEN (epoch GA-3). KiCad-9 gives copper the EVEN
+    # ids — F.Cu=0, B.Cu=2, and inner layers from 4 upward (In1.Cu=4,
+    # In2.Cu=6, ...), which is why the technical layers below all carry odd or
+    # high ids. On a 2-layer stack this emits exactly the two rows the table
+    # always had, in the same order.
+    copper_decls = ['(0 "F.Cu" signal)']
+    for k in range(1, len(stack_ids) - 1):
+        copper_decls.append(f'({2 + 2 * k} "In{k}.Cu" signal)')
+    copper_decls.append('(2 "B.Cu" signal)')
     for decl in (
-        '(0 "F.Cu" signal)', '(2 "B.Cu" signal)',
+        *copper_decls,
         '(9 "F.Adhes" user "F.Adhesive")', '(11 "B.Adhes" user "B.Adhesive")',
         '(13 "F.Paste" user)', '(15 "B.Paste" user)',
         '(5 "F.SilkS" user "F.Silkscreen")', '(7 "B.SilkS" user "B.Silkscreen")',
@@ -500,9 +539,18 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
         tented = [s for s, t in (("front", via.get("tented_front", True)),
                                  ("back", via.get("tented_back", True))) if t]
         tenting = f'(tenting {" ".join(tented)})' if tented else "(tenting none)"
+        # U5 (019f70af5736): the span is the via's OWN from_layer/to_layer,
+        # folded through the shared naming contract — no longer a hardcoded
+        # (layers "F.Cu" "B.Cu"). Absent keys keep the through-span default,
+        # so every existing 2-layer board emits byte-identically; v1 vias are
+        # all through-hole, so today the folded span IS always F.Cu/B.Cu —
+        # but the data path is honest and a future partial span would emit
+        # what it says instead of being silently rewritten.
+        span_from = _copper_layer(via.get("from_layer") or "top")
+        span_to = _copper_layer(via.get("to_layer") or "bottom")
         out.append(
             f'  (via (at {_num(via.get("x_mm"))} {_num(via.get("y_mm"))}) '
-            f'(size {size}) (drill {drill}) (layers "F.Cu" "B.Cu") '
+            f'(size {size}) (drill {drill}) (layers "{span_from}" "{span_to}") '
             f'{tenting} (net {net_no}))'
         )
 
@@ -1105,6 +1153,10 @@ def _kicad_via_dicts(board: ResolvedBoard, net_name_of: dict[str, str]) -> list[
             "net": net_name_of.get(via.net_id, ""),
             "tented_front": via.tented_front,
             "tented_back": via.tented_back,
+            # U5: the IR's own span reaches the emitter instead of being
+            # dropped here and re-invented as a hardcode downstream.
+            "from_layer": via.from_layer,
+            "to_layer": via.to_layer,
         }
         for via in board.vias
     ]
@@ -1218,6 +1270,11 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
         # Canonical loose shape — the sexpr builder reads ONE cutout
         # representation whether fed from the IR or a raw board dict.
         "cutouts": cutout_dicts(board.outline),
+        # Epoch GA-3: the resolved stack's canonical ids. This key is what
+        # drives the emitter's stack-driven layer table; before it existed the
+        # IR path emitted a 2-layer table for ANY board (the GA-1 seal keyed
+        # on a key this projection never wrote — the survey's seal-hole).
+        "layers": [layer.id for layer in board.layer_stack.copper],
         "design_rules": {
             "trace_width_mm": rules.defaults.trace_width_mm,
             "via_diameter_mm": rules.defaults.via_diameter_mm,

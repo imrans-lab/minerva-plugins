@@ -95,10 +95,9 @@ from .resolved_board import (
 # drift from the canonical map.
 _LAYER_MAP = _layers.CANON_TO_KICAD
 
-# The copper layers the vendored engine can route (agent_router.layers is
-# explicitly 2-layer: "NO N-layer support"). A compiled board whose copper stack
-# is anything else fails CLOSED rather than route with inner copper the grid
-# never models.
+# The 2-LAYER BASELINE stack (epoch GA-3: no longer a routing refusal — the
+# engine routes the board's own declared stack, see _routing_layer_ids). Kept
+# as the named default for callers that need a stack before any board exists.
 _ROUTABLE_KICAD_LAYERS = ("F.Cu", "B.Cu")
 
 
@@ -960,10 +959,11 @@ def resolved_board_existing_copper(
             layer = _layers.canon_to_kicad(seg.layer.id)
             if layer not in routable:
                 # Defence in depth, matching _pad_copper_layer: the IR already
-                # validates every segment onto the compiled copper stack and
-                # _routing_layer_ids already refused any stack that is not
-                # F.Cu/B.Cu, so this is unreachable today. Kept because the
-                # failure it guards is silent invisible copper.
+                # validates every segment onto the compiled copper stack, and
+                # `routable` IS that stack (epoch GA-3: the old exactly-
+                # F.Cu/B.Cu refusal is gone), so this is unreachable today.
+                # Kept because the failure it guards is silent invisible
+                # copper.
                 raise UnsupportedGeometry(
                     f"accepted trace {trace.id}: segment on copper layer "
                     f"{layer!r} is not routable ({list(routable)}); the routing "

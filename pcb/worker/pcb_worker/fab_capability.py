@@ -69,6 +69,13 @@ EMITTED_LAYERS: frozenset[str] = frozenset({
 # board with no such content).  A fab package with a silently-ABSENT layer is
 # worse than one with an empty layer: the board house cannot tell "no back
 # legend" from "the back legend went missing in transit".
+#
+# BOTH SETS ARE THE 2-LAYER BASELINE (epoch GA-3): a board declaring a deeper
+# stack fabricates its inner copper too — the compiler accepts inner copper
+# through the board's OWN resolved stack (compile_board._is_emitted_layer's
+# copper_aliases parameter, epoch GA-1), and the gerber emitter derives one
+# In{k}_Cu file per inner layer from the same stack. Per-board layers have no
+# seat in a module-level frozenset; these stay the profile-independent floor.
 EMITTED_GERBER_SUFFIXES: frozenset[str] = frozenset({
     "F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "B_SilkS", "Edge_Cuts",
     "F_Paste", "B_Paste",

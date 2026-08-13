@@ -41,7 +41,9 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, NamedTuple
 
-from .geometry import is_top as _is_top, rotate_local_offset as _rotate
+from agent_router import layers as _layers
+
+from .geometry import rotate_local_offset as _rotate
 from .pad_source import is_through_hole, iter_pads
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
@@ -187,12 +189,18 @@ class _Pad:
 
 
 class _Seg:
-    __slots__ = ("net", "layer", "top", "a", "b")
+    """One harvested copper segment. ``layer`` is the CANONICAL id (epoch
+    GA-3: "top"/"in1"/../"bottom", folded once at harvest) — the old per-seg
+    ``top`` boolean is gone because a stack is not a pair. Folding at harvest
+    also means the crossing check compares one spelling: before, a board that
+    mixed "top" with "F.Cu" spellings compared them UNEQUAL and under-detected
+    crossings between them."""
 
-    def __init__(self, net, layer, top, a, b):
+    __slots__ = ("net", "layer", "a", "b")
+
+    def __init__(self, net, layer, a, b):
         self.net = net
         self.layer = layer
-        self.top = top
         self.a = a
         self.b = b
 
@@ -249,12 +257,16 @@ def _harvest_segments(board: dict) -> list[_Seg]:
         if not isinstance(tr, dict):
             continue
         net = tr.get("net")
-        layer = tr.get("layer")
-        top = _is_top(layer)
+        # Canonical fold (epoch GA-3; replaces the _is_top boolean, which
+        # RAISED on any inner layer): "F.Cu"/"top" -> "top", "In1.Cu"/"in1"
+        # -> "in1". kicad_to_canon fails VISIBLE (warns + passes through) on
+        # junk, per the read-side doctrine — connectivity DRC on a legacy
+        # board must degrade, not crash.
+        layer = _layers.kicad_to_canon(tr.get("layer"))
         pts = [(_num(p.get("x_mm")), _num(p.get("y_mm")))
                for p in _list(tr.get("points")) if isinstance(p, dict)]
         for a, b in zip(pts, pts[1:]):
-            segs.append(_Seg(net, layer if isinstance(layer, str) else "", top, a, b))
+            segs.append(_Seg(net, layer, a, b))
     return segs
 
 
@@ -281,11 +293,12 @@ def _harvest_vias(board: dict) -> list[_HarvestedVia]:
     span; see pcb_data.gd / board-yaml.md), but every DRC use of a via
     (check C's dangling-endpoint credit, check D's layer_change_no_via
     resolution) only needs to know THAT a via exists at a point, not which
-    two layers it bridges — on a 2-layer board every via already spans the
-    full top<->bottom, which is exactly what both checks assume. This
-    function never mutates board["vias"], so from_layer/to_layer are never
-    dropped from the source data — they simply aren't load-bearing for these
-    two checks today. If a future multi-layer board or partial (blind/buried)
+    two layers it bridges — under the v1 THROUGH-VIA model (epoch GA-3) every
+    via joins ALL declared copper layers at its point, at ANY stack depth, so
+    the position-only credit both checks use is exactly right for N-layer
+    boards too. This function never mutates board["vias"], so
+    from_layer/to_layer are never dropped from the source data — they simply
+    aren't load-bearing for these two checks. If a partial (blind/buried)
     via needs a layer-aware credit, extend this to a small (x, y, from, to)
     tuple/dataclass and thread the span into checks C/D's distance tests.
     """
@@ -426,23 +439,39 @@ def _check_layer_change(segs, pads, vias, clr) -> list[dict]:
         by_net[seg.net].append(seg)
 
     for net, net_segs in by_net.items():
-        top_segs = [s for s in net_segs if s.top]
-        bot_segs = [s for s in net_segs if not s.top]
-        if not top_segs or not bot_segs:
-            continue  # single-sided net can't change layers
-        # A layer hand-off is a top-side segment ENDPOINT coincident with a
-        # bottom-side segment ENDPOINT (the routing terminates on one layer and
-        # resumes on the other at that exact point). Endpoint-on-INTERIOR
-        # overlaps are NOT transitions — different layers overlap freely and
-        # only connect where there is a via or a through-hole pad, so treating
-        # an overlap as a required via reports a false missing-via.
-        top_ends = {tp for ts in top_segs for tp in (ts.a, ts.b)}
+        by_layer: dict = defaultdict(list)
+        for s in net_segs:
+            by_layer[s.layer].append(s)
+        if len(by_layer) < 2:
+            continue  # single-layer net can't change layers
+        # A layer hand-off is a segment ENDPOINT on one layer coincident with
+        # a segment ENDPOINT on ANOTHER layer (the routing terminates on one
+        # layer and resumes on the other at that exact point). Endpoint-on-
+        # INTERIOR overlaps are NOT transitions — different layers overlap
+        # freely and only connect where there is a via or a through-hole pad,
+        # so treating an overlap as a required via reports a false missing-via.
+        #
+        # Epoch GA-3: generalized from the top/bottom split to EVERY layer
+        # pair the net occupies. Pair order is stack order (the board's own
+        # sequence of first appearance is not stable, so sort by canonical
+        # name with the outer pair anchored); one meetings dict per net keeps
+        # a three-layer junction point a single finding, not one per pair. On
+        # a 2-layer board this is byte-identical to the old top-vs-bottom
+        # walk: one pair, top as the reference end-set, bottom iterated.
+        order = {"top": 0, "bottom": 10 ** 9}
+        layer_keys = sorted(
+            by_layer,
+            key=lambda lid: (order.get(
+                lid, _layers.inner_layer_index(lid) or 10 ** 6), lid))
         meetings: dict = {}  # rounded point -> raw point
-        for bs in bot_segs:
-            for bp in (bs.a, bs.b):
-                for tp in top_ends:
-                    if _dist(bp, tp) <= MERGE_EPS_MM:
-                        meetings.setdefault(_round_pt(bp), bp)
+        for i in range(len(layer_keys)):
+            ref_ends = {p for s in by_layer[layer_keys[i]] for p in (s.a, s.b)}
+            for j in range(i + 1, len(layer_keys)):
+                for bs in by_layer[layer_keys[j]]:
+                    for bp in (bs.a, bs.b):
+                        for tp in ref_ends:
+                            if _dist(bp, tp) <= MERGE_EPS_MM:
+                                meetings.setdefault(_round_pt(bp), bp)
 
         for pt in meetings.values():
             if any(_dist(pt, v) <= clr for v in vias):
