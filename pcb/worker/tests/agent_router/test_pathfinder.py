@@ -870,3 +870,44 @@ class TestAStarNeverCutsABlockedCorner:
             f"{len(violations)} of {diagonal_steps_checked} diagonal A* steps "
             f"cut a blocked corner: {violations[:5]}"
         )
+
+
+class TestCorridorLayerChangeRecordsItsVia:
+    """Epoch GA-2 fix: the corridor branch was the one layer-changing path
+    that reported ZERO vias — copper on the other side of the board with
+    nothing joining it to the pads. When the winning corridor plan lands on a
+    layer other than the requested one, the via is recorded at the route's
+    start, the same convention _try_via_path uses."""
+
+    def test_a_corridor_route_planned_on_the_other_layer_carries_a_via(self):
+        from agent_router.corridor import Corridor
+
+        grid = RoutingGrid(width=30, height=20, resolution=0.5,
+                           clearance=0.2, trace_width=0.25)
+        # A wall across F.Cu ONLY: the requested layer cannot carry the
+        # route, so the corridor candidate on B.Cu is the winner.
+        y = 0.0
+        while y <= 20.0:
+            grid.mark_obstacle(x=15.0, y=y, radius=0.6, layer="F.Cu")
+            y += 0.5
+
+        path = find_path(grid, (5.0, 10.0), (25.0, 10.0), net="SIG",
+                         layer="F.Cu", allow_via=True,
+                         corridor=Corridor(waypoints=((15.0, 10.0),)))
+        assert path is not None, "the B.Cu corridor candidate must route"
+        assert path.segments and all(s.layer == "B.Cu" for s in path.segments)
+        # THE fix: the layer change is a real via, recorded where the pad's
+        # layer transitions.
+        assert path.vias == [(5.0, 10.0)]
+
+    def test_a_corridor_route_on_the_requested_layer_stays_via_free(self):
+        from agent_router.corridor import Corridor
+
+        grid = RoutingGrid(width=30, height=20, resolution=0.5,
+                           clearance=0.2, trace_width=0.25)
+        path = find_path(grid, (5.0, 10.0), (25.0, 10.0), net="SIG",
+                         layer="F.Cu", allow_via=True,
+                         corridor=Corridor(waypoints=((15.0, 10.0),)))
+        assert path is not None
+        assert all(s.layer == "F.Cu" for s in path.segments)
+        assert path.vias == []

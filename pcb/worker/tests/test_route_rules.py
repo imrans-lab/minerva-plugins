@@ -1273,10 +1273,11 @@ def test_marked_copper_never_steals_another_owners_copper():
 
 def test_accepted_copper_on_an_unmodelable_via_span_still_fails_closed():
     """Narrowing a fail-closed reason is right; deleting it while a sub-case is
-    still unmodelable is not. A via that reaches a layer the 2-layer grid does not
-    carry would be modeled as half copper and half nothing — worse than not
-    routing — so it keeps failing closed with the same `unsupported_geometry`
-    vocabulary.
+    still unmodelable is not. A via that reaches a layer OUTSIDE this board's
+    declared stack (epoch GA-2: the grid now carries the declared stack, not a
+    fixed 2-layer pair — this fixture's board declares two) would be modeled as
+    half copper and half nothing — worse than not routing — so it keeps failing
+    closed with the same `unsupported_geometry` vocabulary.
 
     UNREACHABLE ON A REAL BOARD TODAY, and the fixture has to say so out loud:
     `compile_board._build_vias` rejects any span outside [top, bottom], and

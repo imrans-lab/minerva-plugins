@@ -290,15 +290,28 @@ def test_unresolvable_footprint_returns_diagnostics_and_no_routes():
     assert "result" not in resp                   # and NOTHING is proposed
 
 
-def test_inner_copper_layers_fail_closed():
-    """The vendored engine is 2-layer. Inner copper it never models must not be
-    silently absent from the grid."""
+def test_inner_copper_projects_on_a_declaring_stack_and_refuses_otherwise():
+    """FLIPPED at epoch GA-2 (was test_inner_copper_layers_fail_closed: "the
+    vendored engine is 2-layer"). The engine now models the board's own
+    declared stack, so inner copper PROJECTS — provided the manufacturer
+    profile's capabilities ceiling admits the depth. Both halves pinned: the
+    declaring profile projects every plane in stack order, and the silent
+    default profile still refuses the whole compile (ceiling 2, absence never
+    widens), so inner copper is never silently absent from any grid."""
     board = _board([_comp("R1", "R_0805", 10, 10)],
-                   layers=["top", "inner1", "inner2", "bottom"])
-    result = cb.compile_board(board, requested_outputs=cb.V1_ROUTING_OUTPUTS)
-    if isinstance(result, cb.ResolutionSuccess):
-        with pytest.raises(ir_pads.UnsupportedGeometry, match="2-layer"):
-            route_bridge.resolved_board_to_router(result.board)
+                   layers=["top", "in1", "in2", "bottom"])
+    board["design_rules"]["rule_profile"] = "jlcpcb-4layer"
+    rb = _compile(board)
+    rendered = route_bridge.resolved_board_to_router(rb)
+    assert rendered.pads
+    assert route_bridge._routing_layer_ids(rb) == (
+        "F.Cu", "In1.Cu", "In2.Cu", "B.Cu")
+
+    undeclared = _board([_comp("R1", "R_0805", 10, 10)],
+                        layers=["top", "in1", "in2", "bottom"])
+    result = cb.compile_board(undeclared, requested_outputs=cb.V1_ROUTING_OUTPUTS)
+    assert not isinstance(result, cb.ResolutionSuccess)
+    assert any(d.code == "unsupported_layer_stack" for d in result.diagnostics)
 
 
 def test_sizeless_smd_pad_can_never_be_given_a_nominal_land():

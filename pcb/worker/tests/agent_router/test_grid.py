@@ -344,3 +344,42 @@ class TestKeepoutPolygonMarking:
         assert grid.is_blocked(3.5, 3.5) is True
         # centre (0.5, 0.5): dist ~3.54 > 1.325 -> free
         assert grid.is_blocked(0.5, 0.5) is False
+
+
+class TestNLayerGridFailsClosed:
+    """Epoch GA-2: the grid allocates one plane per DECLARED layer and refuses
+    the rest. An unknown layer used to KeyError (a crash), and the other
+    tolerable answer — a free cell — would let a route claim space on a plane
+    nobody allocated."""
+
+    def test_get_cell_on_an_unknown_layer_is_blocked_not_fatal(self):
+        grid = RoutingGrid(width=10, height=10, resolution=0.5,
+                           clearance=0.2, trace_width=0.25)
+        cell = grid.get_cell(5.0, 5.0, layer="In1.Cu")
+        assert cell.occupied is True
+        assert cell.obstacle_type == "unknown_layer"
+        assert grid.is_blocked(5.0, 5.0, "In1.Cu") is True
+        assert grid.can_route_through(5.0, 5.0, net="SIG", layer="In1.Cu") is False
+
+    def test_a_declared_four_layer_stack_allocates_every_plane(self):
+        stack = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        grid = RoutingGrid(width=10, height=10, resolution=0.5,
+                           clearance=0.2, trace_width=0.25, layers=list(stack))
+        for lyr in stack:
+            assert grid.is_blocked(5.0, 5.0, lyr) is False
+
+    def test_mark_via_with_no_layer_list_reserves_every_declared_plane(self):
+        """A PROPOSED via (both route loops call mark_via(..., layers=None))
+        is a through-hole: its annulus must be reserved on ALL declared
+        planes, or a later net could route straight through the barrel on an
+        inner layer the marker skipped."""
+        stack = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        grid = RoutingGrid(width=10, height=10, resolution=0.5,
+                           clearance=0.2, trace_width=0.25, layers=list(stack))
+        grid.mark_via(5.0, 5.0, diameter=0.8, net="SIG", layers=None)
+        for lyr in stack:
+            cell = grid.get_cell(5.0, 5.0, lyr)
+            assert cell.occupied and cell.net == "SIG"
+            assert grid.can_route_through(5.0, 5.0, net="OTHER", layer=lyr) is False
+            # The via's own net keeps access to its own copper.
+            assert grid.can_route_through(5.0, 5.0, net="SIG", layer=lyr) is True
