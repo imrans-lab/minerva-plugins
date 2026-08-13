@@ -27,7 +27,7 @@ test_geometric_drc_surface.gd assertions=31
 # inner_index_any, the set_board_layers model/handler section) and retired the
 # dead default_two_layer checks; the exact count re-pins at GA testex from the
 # first trustworthy run, per the OFC precedent below.
-test_layer_stack.gd assertions=52
+test_layer_stack.gd assertions=105
 test_manifest_tool_registration.gd assertions=42
 test_pad_synthesis.gd assertions=8
 test_parity_bridge.gd assertions=79
@@ -88,4 +88,4 @@ test_staged_placement.gd assertions=45
 # NEW at epoch GA-6 (bug 019fa0f8d575): the typed-Dictionary guard matrix for
 # both panel files' _dict_or_empty. Assertion count pins at the GA testex
 # from the first trustworthy run.
-test_dict_guard.gd assertions=0
+test_dict_guard.gd assertions=30

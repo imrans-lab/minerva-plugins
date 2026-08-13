@@ -1384,14 +1384,19 @@ func _run_removal_manifest_tools_absent() -> void:
 	# + the placement-coworking SPIKE's propose_placement + placement_update
 	# (staged component-move ghosts, docket 019ff8615fbe) == 96,
 	# + Epoch OFC station-4's board_check (the live-board census, promote's
-	# read-only twin — docket 019ff942beb4) == 97.
+	# read-only twin — docket 019ff942beb4) == 97,
+	# + Epoch GA-1's set_board_layers (the N-layer stack declaration verb,
+	# docket 019ffa0f404b) == 98. GA-1 bumped the sibling pin
+	# (test_manifest_tool_registration.gd, own commit 812bb63) and MISSED this
+	# second seat — caught at the GA testex, which is exactly what a second
+	# independent pin is for.
 	# This is a SECOND, independent count pin on the same manifest.json this
 	# round's tools[] addition touches — see
 	# tests/gd/test_manifest_tool_registration.gd's own pin (94->96 over the
 	# same station) for the "deliberate bump, its own diff"
 	# convention this follows.
-	check_eq("manifest tool count == 97 (ALL manifest.json tools[] entries)",
-		names.size(), 97)
+	check_eq("manifest tool count == 98 (ALL manifest.json tools[] entries)",
+		names.size(), 98)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

@@ -14,10 +14,12 @@ const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
 const PCB_PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 
 var _fail := 0
+var _passed := 0
 
 
 func _check(cond: bool, label: String) -> void:
 	if cond:
+		_passed += 1
 		print("PASS: %s" % label)
 	else:
 		_fail += 1
@@ -66,5 +68,5 @@ func _init() -> void:
 	if panel != null:
 		_matrix(panel, "PCBPanel")
 
-	print("dict-guard: %d failure(s)" % _fail)
+	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
 	quit(1 if _fail > 0 else 0)

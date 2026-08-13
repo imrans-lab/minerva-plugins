@@ -3667,7 +3667,7 @@ func _rebuild_view_menu_layer_eyes(popup: PopupMenu) -> void:
 		var label := PcbLayerStack.canon_to_kicad(canon)
 		if label.is_empty():
 			label = canon   # a non-copper declaration still gets an honest row
-		var id := _VIEW_MENU_LAYER_ID_BASE + 1 + stack_index
+		var id: int = _VIEW_MENU_LAYER_ID_BASE + 1 + stack_index
 		popup.add_check_item(label, id)
 		popup.set_item_checked(popup.get_item_index(id),
 			not _canvas.is_layer_hidden(canon))
