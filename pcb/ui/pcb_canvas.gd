@@ -1227,6 +1227,10 @@ const MENU_ID_STAGED_REJECT := 447
 ## the cheap stand-in until ghosts carry the universal-select rotate chrome
 ## (owner feel-session ask, R2).
 const MENU_ID_STAGED_ROTATE_CCW := 448
+## SPIKE, owner ruling R2 ("propose move is part of universal select"): a
+## ONE-SHOT arm on the pressed component — its next drag stages a ghost
+## instead of moving it. Replaces the rejected "Propose moves" mode toggle.
+const MENU_ID_COMPONENT_PROPOSE_MOVE := 449
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1328,6 +1332,14 @@ func _add_context_menu_target_items() -> void:
 		# focus that row; it does not set a width itself.
 		context_menu.add_item("Set trace width…", MENU_ID_SET_TRACE_WIDTH)
 
+	# SPIKE 019ff8615fbe (owner ruling R2): propose-move lives IN universal
+	# select — a one-shot arm; the part's next drag stages a ghost instead of
+	# moving it. Locked parts don't offer it (a locked part refuses the move
+	# the proposal would eventually apply).
+	if kind == KIND_COMPONENT and not _unit_locked(kind, target_id):
+		context_menu.add_item("Propose move (next drag stages a ghost)",
+			MENU_ID_COMPONENT_PROPOSE_MOVE)
+
 	context_menu.add_item(_entity_action_label("Delete", kind, target_id), MENU_ID_DELETE_TARGET)
 	if _unit_locked(kind, target_id):
 		# Locked (or locked-by-group): shown-but-disabled rather than hidden, so
@@ -1422,6 +1434,13 @@ func _on_context_menu_pressed(id: int) -> void:
 		# not a board mutation, so the canvas performs it directly.
 		MENU_ID_STAGED_ROTATE_CCW:
 			_rotate_placement_ghost(str(_context_menu_target[1]), 90.0)
+		# SPIKE: one-shot propose-move arm (owner ruling R2). Arming a second
+		# part replaces the first — at most one arm stands at a time.
+		MENU_ID_COMPONENT_PROPOSE_MOVE:
+			_propose_move_armed_id = str(_context_menu_target[1])
+			component_lock_changed.emit(
+				"Propose move armed for %s — drag it to stage a ghost (its next drag only)."
+				% _propose_move_armed_id)
 
 
 ## Commit the ONE bend delete the frozen press resolved (station 6 fix F1).
@@ -4717,7 +4736,7 @@ func _end_placement_ghost_drag() -> void:
 ## (author "human", through the panel's one stage doorway). A part with a
 ## standing live ghost gets that ghost REVISED instead — drag again = update,
 ## not a second proposal.
-func _convert_drag_to_placement_proposals() -> void:
+func _convert_drag_to_placement_proposals() -> int:
 	var staged_n := 0
 	var revised_n := 0
 	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
@@ -4751,7 +4770,8 @@ func _convert_drag_to_placement_proposals() -> void:
 			bits.append("staged %d move ghost%s" % [staged_n, "" if staged_n == 1 else "s"])
 		if revised_n > 0:
 			bits.append("revised %d standing ghost%s" % [revised_n, "" if revised_n == 1 else "s"])
-		component_lock_changed.emit("Propose mode: %s — right-click a ghost to Accept or Reject." % ", ".join(bits))
+		component_lock_changed.emit("Proposed: %s — right-click a ghost to Accept or Reject." % ", ".join(bits))
+	return staged_n + revised_n
 
 
 ## Begin a drag-move anchored on the entity under the cursor. The anchor is only
@@ -4759,6 +4779,11 @@ func _convert_drag_to_placement_proposals() -> void:
 func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2) -> void:
 	_drag_anchor_start = _entity_anchor(kind, entity_id)
 	drag_start_mouse = screen_pos
+	# SPIKE 019ff8615fbe: latch whether THIS gesture proposes — the armed
+	# component is in the dragged selection. Latched before capture so the
+	# capture gate below sees it.
+	_gesture_proposes = not _propose_move_armed_id.is_empty() \
+		and _propose_move_armed_id in selected_components
 	_capture_drag_origins()
 	is_dragging_selection = not _drag_origins.is_empty()
 	# Vias in the selection are about to be left behind by whatever this gesture
@@ -4806,10 +4831,10 @@ func _capture_drag_origins() -> void:
 			comps[comp_id] = comp.position
 	var trace_pts := {}
 	var zone_pts := {}
-	# SPIKE 019ff8615fbe: propose mode stages COMPONENT moves only — traces
-	# and zones are not captured while it is on, so a mixed drag cannot half
+	# SPIKE 019ff8615fbe: a proposal gesture stages COMPONENT moves only —
+	# traces and zones are not captured for it, so a mixed drag cannot half
 	# move real geometry while the components merely propose.
-	if not propose_moves:
+	if not _gesture_proposes:
 		for trace_id in selected_trace_ids:
 			var trace = data.get_trace(trace_id)
 			if trace != null and not trace.locked and not trace.waypoints.is_empty():
@@ -4893,16 +4918,20 @@ static func _translated(points: PackedVector2Array, delta: Vector2) -> PackedVec
 func _end_selection_drag() -> void:
 	is_dragging_selection = false
 
-	# SPIKE 019ff8615fbe: in propose mode the drag never happened to the
-	# BOARD — restore every component to its origin and stage the dragged
-	# pose as a placement ghost instead (revising a standing ghost for the
-	# same part rather than stacking a twin). No journal, no history: the
-	# store's changed signal drives redraw + sidecar autosave.
-	if propose_moves and _drag_origins.has(KIND_COMPONENT):
-		_convert_drag_to_placement_proposals()
+	# SPIKE 019ff8615fbe: a proposal gesture never happened to the BOARD —
+	# restore every component to its origin and stage the dragged pose as a
+	# placement ghost instead (revising a standing ghost for the same part
+	# rather than stacking a twin). No journal, no history: the store's
+	# changed signal drives redraw + sidecar autosave. The one-shot arm is
+	# consumed only when a ghost actually landed (a no-motion tap keeps it).
+	if _gesture_proposes and _drag_origins.has(KIND_COMPONENT):
+		if _convert_drag_to_placement_proposals() > 0:
+			_propose_move_armed_id = ""
+		_gesture_proposes = false
 		_drag_origins = {}
 		queue_redraw()
 		return
+	_gesture_proposes = false
 
 	var moved_components: Array[String] = []
 	var moved_total := 0
@@ -7569,11 +7598,15 @@ var authoring_destination: String = DEST_DIRECT
 ## base_board_revision and is the ONE stage entry point, A8).
 var _stage_doorway: Callable = Callable()
 
-## ── SPIKE 019ff8615fbe: propose-mode for component moves ──────────────────────
-## While true (the panel's "Propose moves" toggle), a component drag STAGES a
-## placement ghost instead of moving the part — the gesture is unchanged, its
-## destination flips (the zone/cutout DEST_DRAFT idiom applied to SELECT).
-var propose_moves: bool = false
+## ── SPIKE 019ff8615fbe: propose-move inside universal select ──────────────────
+## Owner ruling (R2 feel session): NO mode toggle, NO draft-toolbar entry —
+## proposing a move is a one-shot arm from the component's own context menu.
+## `_propose_move_armed_id` holds the armed component; a drag whose selection
+## contains it becomes a proposal gesture (`_gesture_proposes`, latched at
+## _begin_selection_drag): every moved component snaps back and stages a
+## ghost. The arm is consumed only when a ghost actually lands.
+var _propose_move_armed_id := ""
+var _gesture_proposes := false
 
 ## Ghost-drag state (the Update of the CRUD cycle): a press on a live
 ## placement ghost drags the ghost's TARGET pose; release writes it back to

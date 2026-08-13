@@ -1510,21 +1510,10 @@ func _build_sidebar() -> VBoxContainer:
 		"Propose a board opening as a DRAFT (ghost for review — Accept lands it)", "cutout_24.png")
 	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
 		"Propose a parallel bus (Enter lands ghost candidates for review, never copper)", "bus_24.png")
-
-	# ── SPIKE 019ff8615fbe: propose-mode for MOVES ───────────────────────────
-	# While ON, dragging a component stages a placement ghost (author "human")
-	# instead of moving the part — the drag gesture is unchanged, only its
-	# destination flips (the zone/cutout draft buttons' idiom, applied to the
-	# SELECT tool). OFF by default so every existing flow is untouched.
-	var propose_moves_toggle := CheckButton.new()
-	propose_moves_toggle.name = "ProposeMovesToggle"
-	propose_moves_toggle.text = "Propose moves"
-	propose_moves_toggle.tooltip_text = _wrap_tooltip(
-		"Drags STAGE a ghost move for review instead of moving the part (Accept applies it)")
-	propose_moves_toggle.toggled.connect(func(on: bool) -> void:
-		if _canvas != null:
-			_canvas.propose_moves = on)
-	draft_flow.add_child(propose_moves_toggle)
+	# SPIKE 019ff8615fbe: the "Propose moves" mode toggle that briefly lived
+	# here was REJECTED at the R2 feel session ("conflicts with universal
+	# select") — proposing a move is now a one-shot arm on the component's
+	# own context menu (pcb_canvas MENU_ID_COMPONENT_PROPOSE_MOVE).
 
 	# Per-HINT width row (HITL-7c, docket 019fe0395764 — owner override of
 	# station 8b's standing authoring picker: "feels disconnected from
