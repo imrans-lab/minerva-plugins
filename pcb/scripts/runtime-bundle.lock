@@ -1,0 +1,42 @@
+# Pinned inputs for the pcb plugin's embedded Python runtime bundle.
+#
+# Consumed by scripts/build-python-runtime-bundle.sh (plugin-agnostic; every
+# pcb-specific pin lives HERE). Shell-sourceable KEY=VALUE on purpose — same
+# format rationale as cad/scripts/runtime-bundle.lock.
+#
+# The CI PBS download cache keys on the hash of THIS FILE, so bumping any pin
+# invalidates the cache exactly when it should.
+
+# python-build-standalone release tag + CPython version. Same pins as cad's
+# lock so the two plugins ride one PBS download per runner when caches share.
+PBS_TAG="20260510"
+CPYTHON="3.12.13"
+
+# Runtime deps only — the worker's [project.dependencies], EXACT pins for
+# reproducibility. dev extras (pytest, pygerber, gerbonara) must NEVER enter
+# the bundle: pygerber/gerbonara are the CAM oracle and shipping the oracle
+# beside the emitter would let a packaging mistake grade its own homework.
+# pyclipper is the one native wheel; cp312 coverage verified in
+# worker/pyproject.toml's wheel-availability note (manylinux x86_64 +
+# 2_28_aarch64 + macosx universal2 + win_amd64) — so unlike cad, pcb ships
+# the FULL platform matrix including linux-arm64.
+PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0"
+
+# Layer-1 import self-test (native builds only; cross targets skip). Imports
+# every runtime dep plus both first-party worker packages, so an empty or
+# mis-copied site-packages fails the bundle build, not the first user.
+LAYER1_IMPORTS="import yaml; import gerber_writer; import pyclipper; import pcb_worker; import agent_router"
+
+# First-party worker code copied into site-packages. Both packages from
+# worker/pyproject.toml's wheel target: pcb_worker (the JSON-RPC worker) and
+# agent_router (the vendored routing engine it imports).
+WORKER_SOURCE_DIR="worker"
+WORKER_PACKAGES="pcb_worker agent_router"
+
+# go:embed-reachable output dir (Go forbids `..` in embed paths, so the
+# bundle must live under the Go source tree). NOTE unlike cad, this dir
+# carries COMMITTED zero-byte placeholders so the plugin compiles without a
+# bundle (empty embed => sharedruntime dev-tier fallback); the CI package job
+# overwrites them and the >100MB size assertion catches a release that
+# didn't.
+BUNDLE_OUT_DIR="internal/pcbruntime/bundle"

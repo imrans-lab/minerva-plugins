@@ -95,6 +95,17 @@ type Worker struct {
 	// emitting Minerva toast notifications for critical lines).
 	StderrCallback func(line string)
 
+	// ExtraEnv, if non-empty, is appended to the spawned worker's environment
+	// AFTER buildEnv's base list (epoch GA-4). This is the plugin-specific
+	// channel for values only the Go side knows — e.g. pcb passes
+	// MINERVA_PCB_ROOT=<pluginRoot> so a worker running from inside the
+	// extracted bundle's site-packages can still find the data files the
+	// tarball ships at the plugin root (library/, profiles). Entries are
+	// "KEY=VALUE" strings. buildEnv stays a fresh minimal slice on purpose
+	// (see its trailing comment); this field is additive and set once at
+	// construction time by the plugin's own main, never from host input.
+	ExtraEnv []string
+
 	// Subprocess state (guarded by mu).
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -188,7 +199,7 @@ func (w *Worker) startLocked(ctx context.Context) error {
 
 	cmd := exec.CommandContext(ctx, w.pythonPath, "-m", w.workerModule) //nolint:gosec
 	cmd.Dir = workerCwd(w.pythonPath, w.workerDir)
-	cmd.Env = buildEnv(w.pythonPath)
+	cmd.Env = append(buildEnv(w.pythonPath), w.ExtraEnv...)
 	setProcessGroup(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()

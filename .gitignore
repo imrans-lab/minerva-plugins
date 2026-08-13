@@ -26,6 +26,11 @@ agent-relay/target/
 */runtime-build/*.tar.zst
 */runtime-build/*.tar.gz
 */runtime-build/*.zip
+# The whole runtime-build scratch tree (extraction stage + pip work dirs).
+# NOTE pcb/internal/pcbruntime/bundle/ is NOT ignored: it carries committed
+# zero-byte placeholder bundles (see its README); a locally-built real bundle
+# shows as a modified placeholder — intentional, never commit it.
+*/runtime-build/
 
 # Python
 __pycache__/

@@ -1,10 +1,11 @@
 {
   "id": "pcb",
   "name": "PCB Editor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",
+    "linux-arm64",
     "macos-universal",
     "windows-x86_64"
   ],
@@ -12,32 +13,6 @@
     "transport": "stdio",
     "entrypoint": "./pcb-plugin",
     "args": []
-  },
-  "setup": {
-    "requires": [
-      {
-        "tool": "go",
-        "min": "1.22"
-      },
-      {
-        "tool": "python",
-        "min": "3.12"
-      }
-    ],
-    "steps": [
-      {
-        "type": "go_build",
-        "package": "./",
-        "output": "pcb-plugin",
-        "timeout_s": 600
-      },
-      {
-        "type": "python_venv",
-        "dir": "worker",
-        "install": "editable",
-        "timeout_s": 600
-      }
-    ]
   },
   "tools": [
     {

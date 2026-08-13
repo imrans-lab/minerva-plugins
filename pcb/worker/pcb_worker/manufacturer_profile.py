@@ -52,15 +52,16 @@ from typing import Iterable, Union
 
 from agent_router.layers import MAX_INNER_LAYERS
 
+from . import plugin_root as _plugin_root
 from .canonical_id import CanonicalizationError, content_id
 from .footprints import SEED_LAYER, normalize_library_layers
 from .resolved_board import ManufacturingConstraints, RuleProfileRef
 
-# Repo layout: this file is pcb/worker/pcb_worker/manufacturer_profile.py, so
-# the shipped profile library lives two levels up -- the SAME root the seed
-# footprint library resolves through (``footprints.py:63-65``). Do not invent
-# a second root for shipped worker data.
-_PCB_ROOT = Path(__file__).resolve().parents[2]
+# The SAME root the seed footprint library resolves through — one shared
+# derivation in plugin_root.py (dev tree layout, or the MINERVA_PCB_ROOT the
+# Go side states in a marketplace binary install). Do not invent a second
+# root for shipped worker data.
+_PCB_ROOT = _plugin_root.PCB_ROOT
 DEFAULT_PROFILE_ROOT = _PCB_ROOT / "library" / "profiles"
 
 # The complete set of top-level keys a profile file is allowed to declare.

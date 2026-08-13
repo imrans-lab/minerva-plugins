@@ -33,6 +33,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+
+from . import plugin_root as _plugin_root
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Union
@@ -61,9 +63,10 @@ _FAB_GRAPHIC_TAGS = (
     "fp_text", "fp_text_box", "fp_curve",
 )
 
-# Repo layout: this file is pcb/worker/pcb_worker/footprints.py, so the seed
-# library lives two levels up (pcb/library/...).
-_PCB_ROOT = Path(__file__).resolve().parents[2]
+# The plugin root (dev tree: two levels up; marketplace binary install: the
+# MINERVA_PCB_ROOT dir the Go side states) — one derivation for all shipped
+# worker data, owned by plugin_root.py (epoch GA-4).
+_PCB_ROOT = _plugin_root.PCB_ROOT
 DEFAULT_LIBRARY_ROOT = _PCB_ROOT / "library" / "footprints"
 DEFAULT_LOCKFILE = _PCB_ROOT / "library" / "footprints.lock.json"
 

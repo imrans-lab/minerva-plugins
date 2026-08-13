@@ -1,9 +1,13 @@
 name: pcb
 
-# TEST GATES ONLY (round A0a). No packaging/release/registry/NOTICE/runtime
-# bundle here — that is round A0b, a separate follow-up workflow change.
+# Test gates (rounds A0a/A0c/A1a) PLUS the marketplace binary-tier packaging
+# pair `package`/`release` (epoch GA-4, docket 019f985bd921 — the "round A0b"
+# this header used to defer). The five test jobs are the merge gate; the
+# packaging pair builds the embedded-runtime binary, packs the tarball
+# (binary + manifest + ui/ + library/ + libraries.lock.json + NOTICE.md) and
+# publishes on push, mirroring cad.yml.
 #
-# Five jobs:
+# Five test jobs:
 #
 #   `fab-gate`
 #            — epoch CP2 station S1. Runs pcb/scripts/hermetic-fab-check.sh,
@@ -105,6 +109,7 @@ name: pcb
 on:
   push:
     branches: [main, "dcr/**"]
+    tags: ["pcb-v*"]
     # NOTE: the two paths lists below are duplicated on purpose. GitHub Actions
     # does not support YAML anchors/aliases in workflow files, so they cannot be
     # factored. Keep them in sync by hand.
@@ -544,3 +549,233 @@ jobs:
       # run rather than a failure.
       - name: Pre-flight the GD suite registry and host wiring
         run: bash pcb/scripts/run-gd-tests.sh --preflight-only ../Minerva
+
+  # ---------------------------------------------------------------------------
+  # MARKETPLACE BINARY TIER (epoch GA-4, docket 019f985bd921) — mirror of
+  # cad.yml's build+release pair. Each matrix leg builds the embedded Python
+  # runtime bundle (overwriting the committed zero-byte placeholders in
+  # internal/pcbruntime/bundle/ — see that dir's README), compiles the Go
+  # binary with the bundle embedded, smoke-tests it over MCP stdio, and packs
+  # the release tarball. Unlike cad, pcb ships the FULL matrix including
+  # linux-arm64: its one native wheel (pyclipper 1.4.0) publishes
+  # manylinux_2_28_aarch64 for cp312 (verified in worker/pyproject.toml's
+  # wheel-availability note), so there is no cad-style blocker.
+  # ---------------------------------------------------------------------------
+  package:
+    name: package (${{ matrix.target }})
+    # Public-repo standard runners are free across all OSes, so full matrix
+    # runs on every trigger. (Matrix context isn't valid in job-level `if:`.)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - target: linux-arm64
+            runs-on: ubuntu-22.04-arm
+            goos: linux
+            goarch: arm64
+            ext: ""
+          - target: macos-universal
+            runs-on: macos-14
+            goos: darwin
+            goarch: ""
+            ext: ""
+          - target: windows-x86_64
+            runs-on: windows-2022
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: pcb
+    steps:
+      - uses: actions/checkout@v4
+
+      # Go 1.26, NOT go.mod's 1.22 language floor: the macOS 26 runner's dyld
+      # rejects Go 1.22-linked binaries (missing LC_UUID — see
+      # .github/actions/pcb-setup/action.yml for the run reference).
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install zstd (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zstd
+
+      - name: Install zstd (macOS)
+        if: runner.os == 'macOS'
+        run: which zstd || brew install zstd
+
+      - name: Confirm zstd (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: zstd --version
+
+      - name: Cache PBS downloads
+        uses: actions/cache@v4
+        with:
+          path: pcb/runtime-build/cache/pbs
+          key: pbs-${{ matrix.target }}-${{ hashFiles('pcb/scripts/runtime-bundle.lock') }}
+
+      # NOTICE release gate — the license/attribution inventory must be in
+      # sync with footprints.lock.json before anything is packed for
+      # distribution (shipping the tarball REDISTRIBUTES KiCad-derived
+      # footprint definitions; DCR 019f761e item 7).
+      - name: NOTICE release gate
+        run: python3 scripts/gen_notice.py --check
+
+      - name: Build runtime bundle (single arch)
+        if: matrix.target != 'macos-universal'
+        run: |
+          bash ../scripts/build-python-runtime-bundle.sh . ${{ matrix.target }}
+          ls -la internal/pcbruntime/bundle/
+
+      - name: Build runtime bundle (macos arm64 + amd64 for lipo)
+        if: matrix.target == 'macos-universal'
+        run: |
+          bash ../scripts/build-python-runtime-bundle.sh . macos-arm64
+          bash ../scripts/build-python-runtime-bundle.sh . macos-amd64
+          ls -la internal/pcbruntime/bundle/
+
+      - name: Go build (single arch)
+        if: matrix.target != 'macos-universal'
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p build
+          go build -o build/pcb-plugin${{ matrix.ext }} .
+
+      - name: Go build (macos universal via lipo)
+        if: matrix.target == 'macos-universal'
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p build
+          GOOS=darwin GOARCH=arm64 go build -o build/pcb-plugin-arm64 .
+          GOOS=darwin GOARCH=amd64 go build -o build/pcb-plugin-amd64 .
+          lipo -create build/pcb-plugin-arm64 build/pcb-plugin-amd64 -output build/pcb-plugin
+          lipo -info build/pcb-plugin
+
+      - name: Binary-size assertion (catches go:embed silently consuming empty bundle)
+        run: |
+          # The embedded bundle is well over 100MB per platform. A binary
+          # smaller than that means go:embed consumed the committed zero-byte
+          # PLACEHOLDERS instead of a built bundle — the exact failure the
+          # placeholder scheme makes possible, and this assertion prevents.
+          BIN="build/pcb-plugin${{ matrix.ext }}"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::built binary not found at $BIN"; exit 1
+          fi
+          SIZE=$(wc -c < "$BIN")
+          echo "binary size: $SIZE bytes ($((SIZE / 1024 / 1024)) MB)"
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "::error::binary too small ($SIZE bytes < 100MB) — go:embed likely embedded the placeholders"
+            exit 1
+          fi
+
+      - name: MCP stdio smoke (initialize + tools/list)
+        run: python3 ../scripts/smoke/mcp_smoke.py build/pcb-plugin${{ matrix.ext }}
+
+      - name: Pack release tarball
+        run: |
+          PLATFORM="${{ matrix.target }}"
+          VERSION=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+          mkdir -p dist
+          PACKDIR="dist/pcb-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp build/pcb-plugin${{ matrix.ext }} "$PACKDIR/"
+          cp manifest.json "$PACKDIR/"
+          # ui/ — manifest declares godot_scene panels; without it the
+          # installed plugin starts its backend but cannot open its panel
+          # (same class of bug cad.yml documents).
+          cp -r ui "$PACKDIR/"
+          # library/ — the plugin is DATA-DEPENDENT (hermetic compilation):
+          # the seed footprint library + manufacturer profiles +
+          # footprints.lock.json. Omit it and every board fails to resolve —
+          # fail-closed means a marketplace user's first action errors out.
+          # cp -r preserves bytes; the sha pins in the lock survive because
+          # library/.gitattributes pins EOLs at checkout, not here.
+          cp -r library "$PACKDIR/"
+          # libraries.lock.json — the download-on-demand KiCad-subset lock
+          # read by minerva_pcb_fetch_libraries via DefaultLockPath(root).
+          cp libraries.lock.json "$PACKDIR/"
+          # NOTICE.md — the license/attribution inventory for the
+          # redistributed KiCad-derived footprints; gated for drift above.
+          cp NOTICE.md "$PACKDIR/"
+          # SHA256SUMS covers every shipped file.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
+          else
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
+          fi
+          tar -czf "dist/pcb-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcb-${{ matrix.target }}
+          path: pcb/dist/pcb-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: package
+    # Push only — PRs build but never release. Same tag scheme as cad.yml:
+    # a version tag releases as-is; main releases pcb-v<manifest version>;
+    # a dcr/** branch releases a -branch- prerelease that regen_registry.py
+    # deliberately skips.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pcb-*
+          merge-multiple: true
+          path: dist
+
+      - name: Compute tag
+        id: tag
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("pcb/manifest.json"))["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"; PRE="false"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="pcb-v${VERSION}"; PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="pcb-v${VERSION}-branch-${SAFE_BRANCH}"; PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/imrans-lab/minerva-plugins/pcb/internal/pcbruntime"
 	"github.com/imrans-lab/minerva-plugins/pcb/internal/tools"
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 	sharedruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
@@ -149,15 +150,16 @@ var pluginRoot string
 
 // initWorker resolves the Python interpreter and constructs the Worker. The
 // worker is NOT spawned here — spawning is lazy (first minerva_pcb_* tool
-// call). This
-// plugin has no embedded PBS bundle yet, so PythonPath falls through to the dev
-// tiers: <worker>/.venv, then python3 on PATH.
+// call). Binary tier (epoch GA-4): the embedded PBS bundle is tier 1; in a
+// dev tree the embed is a zero-byte placeholder (see internal/pcbruntime),
+// which PythonPath treats as not-bundled and falls through to the dev tiers:
+// <worker>/.venv, then python3 on PATH.
 func initWorker() {
 	workerDir := sharedruntime.WorkerScriptDir(pluginRoot)
 
 	pythonPath, err := sharedruntime.PythonPath(sharedruntime.PythonPathRequest{
-		EmbeddedBundle: nil, // no embedded runtime this round — dev fallbacks only
-		EmbeddedSHA256: "",
+		EmbeddedBundle: pcbruntime.EmbeddedBundle,
+		EmbeddedSHA256: pcbruntime.EmbeddedSHA256,
 		WorkerDir:      workerDir,
 		PluginID:       serverName,
 		PluginVersion:  serverVersion,
@@ -172,6 +174,14 @@ func initWorker() {
 	log.Printf("pcb-plugin: worker dir=%s, python=%s", workerDir, pythonPath)
 
 	w := bridge.New(pythonPath, workerDir, workerModule)
+	// Marketplace installs run the worker from inside the extracted bundle's
+	// site-packages, where pcb_worker's source-tree-relative data lookups
+	// (library/footprints, library/profiles — footprints.DEFAULT_LIBRARY_ROOT
+	// et al.) would resolve into the bundle instead of the plugin dir the
+	// tarball actually ships library/ in. The Go side is the one place that
+	// KNOWS the plugin root, so it states it; the worker's path constants
+	// honor this env override before falling back to the source-tree layout.
+	w.ExtraEnv = []string{"MINERVA_PCB_ROOT=" + pluginRoot}
 	w.StderrCallback = func(line string) {
 		if isCriticalStderrLine(line) {
 			emitHostNotify("error", "PCB worker: "+line, nil)
