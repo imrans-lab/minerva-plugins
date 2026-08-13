@@ -71,8 +71,9 @@ test_zone_select_delete.gd assertions=50
 test_ux3_contracts.gd assertions=44
 test_staged_entities.gd assertions=72
 # Re-pinned 34 → 49 with OFC-2's placement-composition section (15 checks),
-# then 49 → 68 with OFC-3's provenance + commit-gate section (19 checks).
-test_draft_composer.gd assertions=68
+# then 49 → 68 with OFC-3's provenance + commit-gate section (19 checks),
+# then 68 → 82 with OFC-4's board_check census section (14 checks).
+test_draft_composer.gd assertions=82
 test_staged_canvas.gd assertions=52
 # TODO(testex 019ff2b1fccb): pin assertions= — this suite's only full run
 # predates its coroutine-await repair (eba4f07), so no trustworthy count

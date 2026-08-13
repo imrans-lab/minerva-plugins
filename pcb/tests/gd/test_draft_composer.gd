@@ -37,6 +37,7 @@ func _init() -> void:
 	_run_composer_content()
 	_run_composer_placements()
 	await _run_candidate_placement_provenance()
+	await _run_board_check_census()
 	_run_composer_fail_safe()
 	_run_panel_request_board()
 	_run_reply_cache_isolation()
@@ -354,6 +355,96 @@ func _run_candidate_placement_provenance() -> void:
 		if ingest2.get("result", null) is Dictionary else ingest2.get("candidates", [])
 	check("a ghost-free ingest carries NO draft_placements key (absent, not empty)",
 		landed2.size() == 1 and not (landed2[0] as Dictionary).has("draft_placements"))
+	panel.free()
+
+
+# ── 1d. board_check: the promote gate's read-only twin (OFC-4) ────────────────
+
+## Fake "_MinervaIPC": captures the panel's request emission and answers the
+## next await_reply with a canned worker verdict — the same seam idiom the
+## refine-loop suite's broker fakes use, narrowed to one round-trip.
+class FakeGateIPC extends Node:
+	var verdict: Dictionary = {}
+	var captured_channel := ""
+	var captured_payload: Dictionary = {}
+	var _reply_id := ""
+
+	func bind(panel_node) -> void:
+		name = "_MinervaIPC"
+		panel_node.add_child(self)
+		panel_node.request.connect(_on_request)
+
+	func _on_request(channel: String, payload: Dictionary, reply_id: String) -> void:
+		captured_channel = channel
+		captured_payload = payload
+		_reply_id = reply_id
+
+	func await_reply(reply_id: String, _timeout_ms: int = 0) -> Dictionary:
+		if reply_id != _reply_id:
+			return {"success": false, "error_code": "timeout", "error_message": "no captured request"}
+		return {"success": true, "result": {"ok": true, "result": verdict.duplicate(true)}}
+
+
+func _run_board_check_census() -> void:
+	print("-- 1d. board_check: read-only census, no write, no gate --")
+	var rig := _placement_rig()
+	var panel = rig["panel"]
+	var host = panel.get_annotation_host()
+
+	# (a) dispatch + the no-backend guard: the verb is reachable by name and
+	# refuses honestly without a worker (fail closed, never a fake census).
+	var no_ipc: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
+	check_eq("without a backend the census refuses", bool(no_ipc.get("success", true)), false)
+	check_eq("…by name", str(no_ipc.get("error", "")), "worker_unavailable")
+
+	# (b) a gated verdict passes through VERBATIM, labeled as a report.
+	var ipc := FakeGateIPC.new()
+	ipc.bind(panel)
+	ipc.verdict = {
+		"promotable": false,
+		"refusals": ["connectivity DRC reports 1 finding(s)"],
+		"connectivity": {"findings": [
+			{"type": "dangling", "net": "SIG", "at": [25.0, 5.0]}],
+			"complete": false, "missing_copper": ["SIG"]},
+		"geometric": {"verdict": "clean"},
+		"assembly": {"status": "pass", "findings": []},
+		"advisory": {"completeness": {"complete": false, "missing_copper": ["SIG"]}},
+	}
+	var census: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
+	check_eq("the census itself SUCCEEDS while reporting a would-be refusal",
+		bool(census.get("success", false)), true)
+	check_eq("…the worker channel is the promote gate's own",
+		ipc.captured_channel, "pcb.promote_check")
+	check_eq("…promotable rides verbatim", bool(census.get("promotable", true)), false)
+	check_eq("…refusals ride verbatim", (census.get("refusals", []) as Array).size(), 1)
+	check_eq("…connectivity findings carry coordinates",
+		str(((census.get("connectivity", {}) as Dictionary).get("findings", []) as Array)[0].get("at", [])),
+		str([25.0, 5.0]))
+	check("…advisory present when the worker sent one", census.has("advisory"))
+	check("…and the note says read-only", str(census.get("note", "")).contains("read-only"))
+	# K2 hygiene rides the census's snapshot too: the request board must not
+	# carry render-detail residue.
+	var sent_board: Dictionary = ipc.captured_payload.get("board", {})
+	var first_comp: Dictionary = (sent_board.get("components", []) as Array)[0]
+	check("census request board is K2-stripped (no render-detail keys)",
+		not first_comp.has("width") and not first_comp.has("local_bounds"))
+	# Parity: findings with coordinates became canvas disconnect markers
+	# (when this headless mount carries a canvas at all — one check either
+	# way, so the assertion count stays pinned).
+	var canvas = panel._canvas
+	check("findings became disconnect markers (or no canvas headless)",
+		canvas == null or (canvas._disconnect_markers as Array).size() == 1)
+
+	# (c) a clean verdict reports promotable and clears the markers.
+	ipc.verdict = {"promotable": true, "refusals": [],
+		"connectivity": {"findings": [], "complete": true},
+		"geometric": {"verdict": "clean"},
+		"assembly": {"status": "pass", "findings": []}}
+	var clean: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
+	check_eq("a clean census reports promotable", bool(clean.get("promotable", false)), true)
+	check("…refusals empty", (clean.get("refusals", []) as Array).is_empty())
+	check("…and healed markers clear (or no canvas headless)",
+		canvas == null or (canvas._disconnect_markers as Array).is_empty())
 	panel.free()
 
 
