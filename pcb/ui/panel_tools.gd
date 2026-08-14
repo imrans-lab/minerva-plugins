@@ -7800,8 +7800,24 @@ static func _parse_route_intent_corridor(raw) -> Variant:
 ## DELEGATES to RoutingWorkspace.add_via — the EXISTING path-scoped via/layer
 ## edit entry INV-3 names — verbatim, not reimplemented. Its own named
 ## refusals (illegal_via_span, no_segment_at_point, degenerate_insert_at_endpoint,
-## degenerate_insert_on_via, segment_locked, from_layer_mismatch) pass through
-## unchanged.
+## degenerate_insert_on_via, segment_locked, from_layer_mismatch,
+## continuation_layer_not_copper) pass through unchanged.
+##
+## SINCE EPOCH NLC C1b, `to_layer` is the layer THE RUN CONTINUES ON, not an end
+## of the via's span — a v1 via is always a through via and its recorded span is
+## always top<->bottom whatever the stack depth. `to_layer` may therefore name
+## ANY copper layer, inner ones included; it previously could not, because the
+## value was tested with is_legal_via_span, whose STACK_INDEX holds only
+## {"top","bottom"} and so refused every inner continuation on every board.
+## illegal_via_span now means only "this via would change nothing" (to_layer
+## equals the layer the run is already on). The reply reports the run's
+## from_layer/to_layer AND the hole's via_span separately, because they were one
+## value before this station and a reader must not infer either from the other.
+##
+## This verb is currently the ONLY way to place a via whose run continues on an
+## inner layer: the canvas gesture can resolve the outer pair by itself but has
+## no layer picker, so it refuses an inner-layer run with a toast naming this
+## verb. That picker is station C2's (the via tool).
 ##
 ## CONCURRENCY (comment 1026 Q5, symmetric with station 9's
 ## expected_constraint_revision): `expected_candidate_revision`, when given, is
@@ -7860,7 +7876,7 @@ static func _workspace_edit_candidate(host, args: Dictionary) -> Dictionary:
 		"move_junction":
 			out = _edit_candidate_move_junction(workspace, cid, args)
 		"insert_via":
-			out = _edit_candidate_insert_via(workspace, cid, args)
+			out = _edit_candidate_insert_via(workspace, cid, args, ctx["data"])
 	if not bool(out.get("ok", false)):
 		return {
 			"success": false,
@@ -7898,7 +7914,7 @@ static func _edit_candidate_move_junction(workspace, cid: String, args: Dictiona
 ## insert_via's own arg parsing — delegates the actual edit to
 ## RoutingWorkspace.add_via verbatim; this function does nothing but shape the
 ## MCP args into that call's own signature.
-static func _edit_candidate_insert_via(workspace, cid: String, args: Dictionary) -> Dictionary:
+static func _edit_candidate_insert_via(workspace, cid: String, args: Dictionary, data = null) -> Dictionary:
 	var position: Variant = _parse_xy_pair(args.get("position"))
 	if position == null:
 		return {"ok": false, "error": "invalid_point", "message": "position must be [x_mm, y_mm]"}
@@ -7908,6 +7924,25 @@ static func _edit_candidate_insert_via(workspace, cid: String, args: Dictionary)
 		return {"ok": false, "error": "invalid_args", "message": "from_layer is required"}
 	if to_layer.is_empty():
 		return {"ok": false, "error": "invalid_args", "message": "to_layer is required"}
+
+	# THE DECLARED-STACK CHECK RoutingWorkspace.add_via DEFERS TO THIS LAYER
+	# (epoch NLC C1b). add_via validates that the run's continuation layer is
+	# COPPER, which is all a workspace can know — it holds candidates, not a
+	# board. Whether that copper layer actually EXISTS on this board is a
+	# question only something holding the board can answer, and it is the
+	# difference between "in7" being a typo and being a plane: without this,
+	# a continuation onto an undeclared layer would be accepted here and
+	# refused much later by the compiler, naming a segment rather than the
+	# argument that caused it.
+	if data != null and "layers" in data:
+		var declared: Array = data.layers if data.layers is Array else []
+		var canon_to: String = PcbLayerStack.kicad_to_canon(to_layer)
+		if not declared.is_empty() and not (canon_to in declared):
+			return {"ok": false, "error": "layer_not_on_stack",
+				"message": "this board declares %s — a run cannot continue on %s, which is not one of them"
+					% [str(declared), canon_to],
+				"declared_layers": declared.duplicate()}
+
 	return workspace.add_via(cid, position, from_layer, to_layer)
 
 

@@ -1098,16 +1098,35 @@ class ViaInsertTool:
 		var c = workspace.get_candidate(cid)
 		if c == null:
 			return false
-		# The via spans FROM the clicked segment's layer to its opposite —
-		# the same span the workspace verb validates (from_layer must match
-		# the segment under the point; a miss refuses no_segment_at_point).
+		# from_layer is the layer the run ARRIVES on — the workspace verb
+		# validates it against the copper under the point (a miss refuses
+		# no_segment_at_point, a wrong claim refuses from_layer_mismatch).
 		var hit: Dictionary = workspace._segment_hit(c, doc_pos)
 		var from_layer := "top"
 		if not hit.is_empty():
 			var seg_idx := int(hit.get("segment_index", 0))
 			if seg_idx >= 0 and seg_idx < c.segments.size() and c.segments[seg_idx] is Dictionary:
 				from_layer = str((c.segments[seg_idx] as Dictionary).get("layer", "top"))
-		var to_layer := "bottom" if from_layer == "top" else "top"
+
+		# THE CONTINUATION LAYER — where the run goes past the via, which since
+		# C1b is a separate question from the via's span (always through). On a
+		# two-layer run the opposite side is the ONLY answer, so the gesture may
+		# pick it. On an inner-layer run there are several answers and this
+		# canvas has no layer picker to ask with; that picker arrives with the
+		# via TOOL (station C2), which is where a tool-vs-proposal parity
+		# affordance belongs.
+		#
+		# NOT resolved from the toolbar's layer OptionButton, which drives
+		# _canvas.trace_layer_filter — a VIEW filter. Letting a view control
+		# silently choose where copper lands is the same class of surprise this
+		# station exists to remove, and would make "what am I looking at" and
+		# "what am I authoring" one setting.
+		var to_layer := _continuation_for(from_layer)
+		if to_layer.is_empty():
+			_toast(("This run is on %s. A via here could continue on any copper layer, and the canvas "
+				+ "has no layer picker yet — use minerva_pcb_workspace_edit_candidate "
+				+ "(op:insert_via, to_layer:…) to say which. Nothing was changed.") % from_layer)
+			return true
 		var res: Dictionary = workspace.add_via(cid, doc_pos, from_layer, to_layer)
 		if bool(res.get("ok", false)):
 			_toast("Via inserted on %s — the following run flips to %s; its verdict is stale until the next Check."
@@ -1116,6 +1135,26 @@ class ViaInsertTool:
 			_toast("Via insert on %s refused (%s): %s"
 				% [cid, str(res.get("error", "unknown")), str(res.get("message", ""))])
 		return true
+
+	## The layer a run continues on past a via when the gesture can work it out
+	## ALONE, or "" when it cannot and must ask instead.
+	##
+	## Deliberately the same shape and the same refusal as the hint half's
+	## _toggle_layer: only the outer pair has one unambiguous answer, and both
+	## spellings of it are accepted because candidate segments carry canonical
+	## ids while hint segments may carry either. Two small matchers rather than
+	## one shared helper — these live in different classes over different data
+	## models, and the hint half must ALSO preserve its caller's spelling, which
+	## this one has no reason to do (a candidate is canonical by construction).
+	func _continuation_for(from_layer: String) -> String:
+		match from_layer.strip_edges().to_lower():
+			"top", "f.cu":
+				return "bottom"
+			"bottom", "b.cu":
+				return "top"
+			_:
+				return ""
+
 
 	## Host toast → the panel status line (duck-typed; silent when absent).
 	func _toast(text: String) -> void:

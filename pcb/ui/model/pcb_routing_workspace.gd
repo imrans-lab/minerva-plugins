@@ -1811,6 +1811,10 @@ const ERR_DEGENERATE_AT_ENDPOINT := "degenerate_insert_at_endpoint"
 const ERR_DEGENERATE_ON_VIA := "degenerate_insert_on_via"
 const ERR_SEGMENT_LOCKED := "segment_locked"
 const ERR_LAYER_MISMATCH := "from_layer_mismatch"
+## add_via's `to_layer` names the layer the RUN CONTINUES ON past the via, and
+## a run can only continue on copper. Distinct from ERR_ILLEGAL_VIA_SPAN, which
+## now means only "this via would change nothing" — see add_via's own doc.
+const ERR_CONTINUATION_NOT_COPPER := "continuation_layer_not_copper"
 ## Epoch UX1 station 10 (DCR 019fd095e694, docket 019fd057ea0b comments 1026/
 ## 1028): move_junction's own named refusals.
 const ERR_CONSTRAINT_STALE := "constraint_stale_candidate"
@@ -2405,6 +2409,14 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 ## Insert a via into a candidate at `position`, flipping the run DOWNSTREAM of
 ## that point onto `to_layer`.
 ##
+## `from_layer` is the layer the run ARRIVES on (it must match the copper under
+## `position`, see the mismatch refusal below) and `to_layer` is the layer it
+## CONTINUES on. Neither is the via's span: a v1 via is always a THROUGH via and
+## its recorded span is always top<->bottom, at any stack depth. `to_layer` may
+## therefore be any copper layer, inner ones included — which is the whole point
+## of epoch NLC C1b — while the hole itself stays the only kind of hole this
+## pipeline fabricates. The reply reports both, separately.
+##
 ## THIS IS THE EDIT ENTRY INV-3 NAMES, and the whole point of it is the word
 ## PATH. A candidate for a multi-pad net can hold ≥2 DISCONNECTED copper paths
 ## (pcb_route_candidate.gd's own header says so, and forbids a connected-chain
@@ -2446,11 +2458,40 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 		return _verb_error(ERR_FROZEN,
 			"candidate '%s' is frozen — settled geometry does not edit; unfreeze it first"
 				% candidate_id, candidate_id)
+	# `to_layer` IS THE LAYER THE RUN CONTINUES ON, NOT AN END OF THE VIA'S SPAN.
+	# Those were the same thing while the stack was two layers deep and are not
+	# the same thing now (epoch NLC C1b).
+	#
+	# Under the v1 THROUGH-VIA model there is nothing to author about the span:
+	# methods.py _routes_to_vias states it outright — "a through via's RECORDED
+	# span is top<->bottom at ANY stack depth — the via physically crosses the
+	# whole board and joins every declared layer ... Only a blind/buried via
+	# (explicitly out of scope v1) would need a real per-via span here." So the
+	# via below is recorded with default_through_via_span() unconditionally, the
+	# same span sync_candidate_geometry already writes for every via it creates.
+	#
+	# Testing the CONTINUATION layer with is_legal_via_span was the bug: that
+	# predicate reads STACK_INDEX, which holds exactly {"top", "bottom"}, so it
+	# refused every inner-layer continuation on every board — "I cannot propose
+	# any via at all" in the N-layer HITL. It was answering "may a via SPAN
+	# these two layers", which for a through via is not the question being
+	# asked, and its answer for an inner layer is correctly NO.
+	#
+	# What remains to check is the continuation itself: copper, and different
+	# from where the run already is. Membership of the board's DECLARED stack is
+	# checked one level up, in the tool layer, which is what holds a board — a
+	# workspace does not, and a check it cannot make is not a check it should
+	# fake.
 	var canon_from := PcbLayerStack.kicad_to_canon(from_layer)
 	var canon_to := PcbLayerStack.kicad_to_canon(to_layer)
-	if not PcbLayerStack.is_legal_via_span(canon_from, canon_to):
+	if not PcbLayerStack.is_copper(canon_to):
+		return _verb_error(ERR_CONTINUATION_NOT_COPPER,
+			"a run cannot continue on %s — name a copper layer (\"top\", \"bottom\", \"in1\".., or a KiCad copper name)"
+				% [str(to_layer)], candidate_id)
+	if canon_to == canon_from:
 		return _verb_error(ERR_ILLEGAL_VIA_SPAN,
-			"%s->%s is not a legal via span on this stack" % [canon_from, canon_to], candidate_id)
+			"a via at this point would leave %s and arrive on %s — it changes nothing"
+				% [canon_from, canon_to], candidate_id)
 
 	# Refuse ON-VIA before looking for a segment: a click on an existing via is
 	# a different mistake from a click on empty board, and must say so.
@@ -2540,8 +2581,14 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 		s["layer"] = canon_to
 		relayered.append(str(s.get("id", "")))
 
+	# THE VIA'S OWN SPAN IS ALWAYS THE THROUGH SPAN — never canon_from->canon_to,
+	# which since C1b describes the RUN, not the hole. Recording the run's
+	# endpoints as the span is what made an inner-layer continuation look like a
+	# blind/buried via to every downstream reader (commit's via_span_legal, the
+	# emitter, DRC), and blind/buried is out of scope v1.
+	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var via_id := next_via_id()
-	c.add_via(PcbRouteCandidate.make_via(via_id, at, canon_from, canon_to))
+	c.add_via(PcbRouteCandidate.make_via(via_id, at, via_span[0], via_span[1]))
 	c.candidate_revision = int(c.candidate_revision) + 1
 	# INV-2, geometry half: this candidate's own copper moved, so its verdict is
 	# gone. Its findings go with it (see mark_stale) — they name segment ids that
@@ -2558,8 +2605,14 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 		"candidate_id": candidate_id,
 		"via_id": via_id,
 		"at": [at.x, at.y],
+		# from_layer/to_layer describe THE RUN — where it arrived from and where
+		# it continues. via_span describes THE HOLE, and is reported separately
+		# and explicitly precisely because the two used to be one value: a
+		# reader that assumes to_layer is where the via stops is now wrong, and
+		# should see the span it actually got rather than infer it.
 		"from_layer": canon_from,
 		"to_layer": canon_to,
+		"via_span": [str(via_span[0]), str(via_span[1])],
 		"head_segment_id": str(head["id"]),
 		"tail_segment_id": str(tail["id"]),
 		"relayered_segment_ids": relayered,

@@ -1,6 +1,20 @@
 extends SceneTree
-## EPOCH NLC station C1a — a via insert never silently re-layers an inner-layer
-## run (item 019fff6080fd, opened by the GA A1 co-design HITL).
+## EPOCH NLC station C1 — inner-layer vias: never silently re-layered (C1a,
+## groups 1-4), and actually placeable (C1b, groups 5-6). Item 019fff6080fd,
+## opened by the GA A1 co-design HITL.
+##
+## The two halves are one story told at two seams. A via has a SPAN (the hole,
+## always top<->bottom under the v1 through-via model) and the run it sits on
+## has a CONTINUATION LAYER (where the copper carries on). While the stack was
+## two layers deep those were the same value, and both halves of this file are
+## consequences of them no longer being so:
+##   * the HINT half used to GUESS the continuation ("else F.Cu") — C1a makes it
+##     refuse instead, because a guess about which copper layer a trace lands on
+##     is not one to make silently;
+##   * the CANDIDATE half used to validate the continuation with
+##     is_legal_via_span, whose STACK_INDEX is {"top","bottom"} — so it refused
+##     EVERY inner continuation on EVERY board ("I cannot propose any via at
+##     all", the owner's HITL). C1b asks the right question of it instead.
 ##
 ## Run (via a Minerva checkout as the Godot host):
 ##   pcb/scripts/run-gd-tests.sh <path-to-minerva-checkout>
@@ -37,6 +51,8 @@ extends SceneTree
 ## annotation half is exercised alone.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const PcbWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
+const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 const PCB_PANEL_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 
 var _pass := 0
@@ -49,6 +65,8 @@ func _init() -> void:
 	_run_two_layer_still_toggles()
 	_run_canonical_spelling_still_toggles()
 	_run_miss_is_still_a_miss()
+	_run_candidate_continuation_onto_inner()
+	_run_candidate_refusals_survive()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -204,3 +222,86 @@ func _run_miss_is_still_a_miss() -> void:
 	check_eq("annotation untouched by a miss too", _stored_layers(host, ann_id), ["In1.Cu"])
 
 	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 5. THE HITL BLOCKER: a run may now continue onto an INNER layer ───────────
+#
+# "There is no tool to place a via for the human ... I cannot propose any via at
+# all" (owner, N-layer co-design HITL). The cause was not the hint toggle: it
+# was RoutingWorkspace.add_via testing the CONTINUATION layer with
+# is_legal_via_span, whose STACK_INDEX holds exactly {"top","bottom"}, so every
+# inner-layer continuation was refused illegal_via_span on every board.
+#
+# This group drives the model verb directly — no panel, no host — because the
+# claim is about the workspace's own contract.
+
+func _inner_candidate() -> Array:
+	var ws = PcbWorkspace.new()
+	var c = PcbRouteCandidate.new()
+	c.net = "N1"
+	c.add_segment(PcbRouteCandidate.make_segment("", "in1", 0.3, [Vector2(0, 0), Vector2(10, 0)]))
+	var cid := str(ws.add_candidate(c))
+	return [ws, cid]
+
+
+func _run_candidate_continuation_onto_inner() -> void:
+	print("-- 5. candidate via: an in1 run may continue on top; span stays through --")
+	var pair := _inner_candidate()
+	var ws = pair[0]
+	var cid: String = pair[1]
+
+	var res: Dictionary = ws.add_via(cid, Vector2(5.0, 0.0), "in1", "top")
+	check("a via on an in1 run is ACCEPTED", bool(res.get("ok", false)))
+	check_eq("the run continues on top", str(res.get("to_layer", "")), "top")
+
+	# THE SEPARATION C1b EXISTS FOR. The run goes in1 -> top; the HOLE is still
+	# a through via, top<->bottom. Recording the run's endpoints as the span is
+	# what made an inner continuation look like a blind/buried via to every
+	# downstream reader, and blind/buried is out of scope v1.
+	check_eq("the via's own span is the THROUGH span, not in1->top",
+		res.get("via_span", []), ["top", "bottom"])
+
+	var c = ws.get_candidate(cid)
+	check_eq("exactly one via exists", (c.vias as Array).size(), 1)
+	var via: Dictionary = c.vias[0]
+	check_eq("stored via from_layer is top", str(via.get("from_layer", "")), "top")
+	check_eq("stored via to_layer is bottom", str(via.get("to_layer", "")), "bottom")
+	# via_span_legal is what commit's pre-flight gates on: a via recorded as
+	# in1->top would fail it, so this is the assertion that proves the fix
+	# reaches copper rather than stopping at the reply.
+	check("the stored via passes the commit pre-flight's span check", c.via_span_legal(via))
+
+	# The head keeps in1, the tail continues on top.
+	var layers: Array = []
+	for s in c.segments:
+		if s is Dictionary:
+			layers.append(str((s as Dictionary).get("layer", "")))
+	check_eq("head stays on in1, tail continues on top", layers, ["in1", "top"])
+
+
+# ── 6. the two refusals that must SURVIVE the loosening ───────────────────────
+#
+# Loosening a gate is where guards die quietly: this group is the half-mutation
+# check. A continuation that changes nothing, and one onto something that is not
+# copper at all, must still be refused — by their own distinct names.
+
+func _run_candidate_refusals_survive() -> void:
+	print("-- 6. same-layer and non-copper continuations still refuse --")
+	var pair := _inner_candidate()
+	var ws = pair[0]
+	var cid: String = pair[1]
+
+	var same: Dictionary = ws.add_via(cid, Vector2(5.0, 0.0), "in1", "in1")
+	check("a continuation onto the SAME layer refuses", not bool(same.get("ok", true)))
+	check_eq("named illegal_via_span", str(same.get("error", "")),
+		PcbWorkspace.ERR_ILLEGAL_VIA_SPAN)
+
+	var junk: Dictionary = ws.add_via(cid, Vector2(5.0, 0.0), "in1", "F.SilkS")
+	check("a continuation onto a NON-COPPER layer refuses", not bool(junk.get("ok", true)))
+	check_eq("named continuation_layer_not_copper", str(junk.get("error", "")),
+		PcbWorkspace.ERR_CONTINUATION_NOT_COPPER)
+
+	var c = ws.get_candidate(cid)
+	check_eq("every refusal was a no-op: still one unsplit segment",
+		(c.segments as Array).size(), 1)
+	check_eq("every refusal was a no-op: no via", (c.vias as Array).size(), 0)

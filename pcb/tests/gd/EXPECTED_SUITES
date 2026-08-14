@@ -89,9 +89,10 @@ test_staged_placement.gd assertions=114
 # both panel files' _dict_or_empty. Assertion count pins at the GA testex
 # from the first trustworthy run.
 test_dict_guard.gd assertions=30
-# NEW at epoch NLC C1a (item 019fff6080fd): the inner-layer via guard. Count is
-# 19 by construction (7 + 6 + 3 + 3 across its four groups). NOT YET CONFIRMED
-# BY A RUN — the epoch defers all test execution until after the Codex review,
-# so this pin is provisional and re-pins at testex from the first trustworthy
-# run, exactly as test_layer_stack.gd and test_dict_guard.gd did.
-test_inner_layer_via_guard.gd assertions=19
+# NEW at epoch NLC C1 (item 019fff6080fd): inner-layer vias — C1a's refuse-don't-
+# guess guard (groups 1-4) and C1b's placeable continuation layer (groups 5-6).
+# Count is 33 by construction (7 + 6 + 3 + 3 + 8 + 6). NOT YET CONFIRMED BY A
+# RUN — the epoch defers all test execution until after the Codex review, so
+# this pin is provisional and re-pins at testex from the first trustworthy run,
+# exactly as test_layer_stack.gd and test_dict_guard.gd did.
+test_inner_layer_via_guard.gd assertions=33
