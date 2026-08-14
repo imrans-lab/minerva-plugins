@@ -179,6 +179,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _set_trace_width(host, args)
 		"minerva_pcb_list_vias":
 			return _list_vias(host, args)
+		"minerva_pcb_place_via":
+			return _place_via(host, args)
 		"minerva_pcb_delete_via":
 			return _delete_via(host, args)
 		"minerva_pcb_get_preference":
@@ -3578,6 +3580,96 @@ static func _list_vias(host, args: Dictionary) -> Dictionary:
 			entry["via_id"] = via_id
 		vias_arr.append(entry)
 	return _ok({"via_count": vias_arr.size(), "vias": vias_arr})
+
+
+## Place ONE via directly on the board — one journalled, undoable step.
+##
+## THE PARITY GAP THIS CLOSES (epoch NLC station C2, item 019fff60e05a). Before
+## this, copper CREATION was proposal-only while copper DESTRUCTION was direct:
+## minerva_pcb_delete_via and minerva_pcb_delete_traces act on the board, but the
+## only add-via verb (minerva_pcb_add_via) splits a route HINT. The owner's
+## N-layer HITL named it exactly — "there is no tool to place a via for the
+## human, only propose ... that breaks a goal of parity between tools and
+## proposals". An agent could delete a via it could not put back.
+##
+## THE SPAN IS ALWAYS THE THROUGH SPAN, and from_layer/to_layer are NOT accepted.
+## A v1 via crosses the whole board and joins every declared layer, so there is
+## nothing to choose (see methods._routes_to_vias' own docstring, and epoch NLC
+## C1b for the same reasoning on the candidate side). A caller that passes a span
+## is REFUSED rather than quietly ignored: silently dropping an argument someone
+## bothered to write is how a caller comes to believe in a blind/buried via this
+## pipeline cannot fabricate.
+##
+## Mutate-then-snapshot, matching _delete_via: add first, save_to_history after.
+## add_via journals its own "add_via" entry; this owes only the history step.
+static func _place_via(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	if not args.has("x_mm") or not args.has("y_mm"):
+		return _err("x_mm and y_mm are required")
+	for banned in ["from_layer", "to_layer", "layers"]:
+		if args.has(banned):
+			return {"success": false, "error": "span_not_selectable",
+				"note": ("a v1 via is a THROUGH via — it crosses the whole board and joins every "
+					+ "declared layer, so '%s' is not a choice this pipeline can honour. "
+					+ "Blind/buried vias are out of scope. Omit it. To change which layer a "
+					+ "TRACE continues on past a via, that is the run's own layer, not the hole's.")
+					% banned}
+
+	var pos := Vector2(float(args["x_mm"]), float(args["y_mm"]))
+	var size_mm := float(args.get("size_mm", 0.8))
+	var drill_mm := float(args.get("drill_mm", 0.4))
+	if size_mm <= 0.0 or drill_mm <= 0.0:
+		return _err("size_mm and drill_mm must be positive (got %.4f / %.4f)" % [size_mm, drill_mm])
+	if drill_mm >= size_mm:
+		# An annular ring of zero or less is not a via, it is a hole through a
+		# pad that no longer exists. Refused here rather than left for the
+		# fabricator's DFM report.
+		return _err("drill_mm (%.4f) must be smaller than size_mm (%.4f) — the difference IS the annular ring"
+			% [drill_mm, size_mm])
+
+	# Board bounds. Copper outside the outline is not manufacturable, and the
+	# agent cannot see the board to notice it asked for it.
+	var w := float(data.board_width) if "board_width" in data else 0.0
+	var h := float(data.board_height) if "board_height" in data else 0.0
+	if w > 0.0 and h > 0.0 and (pos.x < 0.0 or pos.y < 0.0 or pos.x > w or pos.y > h):
+		return {"success": false, "error": "outside_board",
+			"note": "(%.3f, %.3f) is outside this %.3f x %.3f mm board" % [pos.x, pos.y, w, h]}
+
+	# Stacking two holes at one point is the same mistake RoutingWorkspace.add_via
+	# refuses by name, and for the same reason — it is a different mistake from
+	# "nothing is there", and must say so rather than silently drilling twice.
+	for existing in data.vias:
+		if existing is Dictionary:
+			var claim: float = maxf(float((existing as Dictionary).get("size", 0.8)) * 0.5, 0.05)
+			if data.via_position(existing).distance_to(pos) <= claim:
+				return {"success": false, "error": "via_already_there",
+					"via_id": str((existing as Dictionary).get("id", "")),
+					"note": "via '%s' already occupies (%.3f, %.3f) within its own %.3fmm claim"
+						% [str((existing as Dictionary).get("id", "")), pos.x, pos.y, claim]}
+
+	var span: Array = PcbLayerStack.default_through_via_span()
+	var via_id: String = str(data.add_via({
+		"position": pos,
+		"net_name": str(args.get("net_name", "")),
+		"size": size_mm,
+		"drill": drill_mm,
+		"from_layer": str(span[0]),
+		"to_layer": str(span[1]),
+	}))
+	data.save_to_history("Place via " + via_id)
+	return _ok({
+		"via_id": via_id,
+		"x_mm": snapped(pos.x, 0.0001),
+		"y_mm": snapped(pos.y, 0.0001),
+		"net_name": str(args.get("net_name", "")),
+		"size_mm": size_mm,
+		"drill_mm": drill_mm,
+		"from_layer": str(span[0]),
+		"to_layer": str(span[1]),
+		"via_count": data.vias.size(),
+	})
 
 
 ## Delete ONE board via by id — one journalled, undoable step.

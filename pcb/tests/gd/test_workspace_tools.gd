@@ -1400,10 +1400,14 @@ func _run_removal_manifest_tools_absent() -> void:
 	# BECAUSE the sibling pin in test_manifest_tool_registration.gd counts a
 	# different set (registered tools) and can agree while this one is wrong.
 	# Epoch NLC C4 (101 -> 102): minerva_pcb_view_state (item 019ffeaccc0c).
-	check_eq("manifest tool count == 102 (ALL manifest.json tools[] entries)",
-		names.size(), 102)
-	check("the C4 view-state tool is the addition THIS count accounts for",
+	# Epoch NLC C2 (102 -> 103): minerva_pcb_place_via (item 019fff60e05a) —
+	# the direct board via that closes the create/destroy parity gap.
+	check_eq("manifest tool count == 103 (ALL manifest.json tools[] entries)",
+		names.size(), 103)
+	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
+	check("the C2 place-via tool is the other",
+		"minerva_pcb_place_via" in names)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

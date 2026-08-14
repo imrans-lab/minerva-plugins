@@ -901,6 +901,41 @@
       }
     },
     {
+      "name": "minerva_pcb_place_via",
+      "description": "Place ONE via directly on the board at x_mm/y_mm — the direct counterpart of minerva_pcb_delete_via, and the tool-side parity for minerva_pcb_add_via (which edits a route PROPOSAL, not the board). Exactly one journalled, undoable step. Optional net_name, size_mm (default 0.8) and drill_mm (default 0.4); the difference between them is the annular ring, so drill_mm must be smaller. Returns {via_id, x_mm, y_mm, net_name, size_mm, drill_mm, from_layer, to_layer, via_count}. THE SPAN IS NOT SELECTABLE: a v1 via is a THROUGH via that crosses the whole board and joins every declared layer, so from_layer/to_layer/layers are refused rather than ignored — blind and buried vias are out of scope. Which layer a TRACE continues on past a via is a property of the trace, not of the hole. Refused by name, changing nothing: outside_board (the point is off the board outline), via_already_there (a via already claims that point), span_not_selectable, and a non-positive or too-large drill. This places the via ONLY; it does not connect or re-layer any trace, so check the routing afterwards.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          },
+          "x_mm": {
+            "type": "number",
+            "description": "Via centre X in board mm"
+          },
+          "y_mm": {
+            "type": "number",
+            "description": "Via centre Y in board mm"
+          },
+          "net_name": {
+            "type": "string",
+            "description": "Net this via belongs to. Optional; omit for an unassigned via."
+          },
+          "size_mm": {
+            "type": "number",
+            "description": "Via pad diameter in mm (default 0.8)"
+          },
+          "drill_mm": {
+            "type": "number",
+            "description": "Drill diameter in mm (default 0.4). Must be smaller than size_mm."
+          }
+        },
+        "required": ["editor_name", "x_mm", "y_mm"]
+      }
+    },
+    {
       "name": "minerva_pcb_delete_via",
       "description": "Delete ONE board via by id. Exactly one journalled, undoable step — a single undo puts the via back. Get the id from minerva_pcb_list_vias (or from the `id` on each via in minerva_pcb_export_trace_geometry). Returns {deleted, net_name, x_mm, y_mm, remaining_via_count}. An unknown via_id — including an empty one, which is what an id-less legacy via yields — is an ERROR, never a silent no-op: nothing is removed and nothing is journalled. This deletes the via ONLY; the traces meeting it are left exactly as they are, which can leave copper that changes layer with nothing connecting it, so check the routing afterwards. To remove several vias at once (or vias together with traces) in a single undo step, use minerva_pcb_delete_traces with via_ids instead. The human's Delete key, trash button and eraser on the canvas remove vias through this same model path and the same undo history.",
       "executor": "panel",

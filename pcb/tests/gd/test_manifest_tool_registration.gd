@@ -204,10 +204,15 @@ func _init() -> void:
 	# manifest_registry_parity_test.go is genuinely unaffected: it counts
 	# backend-executor tools, and both new tools are executor:"panel".
 	# Epoch NLC C4 (101 -> 102): minerva_pcb_view_state, the agent's read/write
-	# of WHAT the canvas is drawing (item 019ffeaccc0c). executor:"panel", so
-	# the Go pin in manifest_registry_parity_test.go is genuinely unaffected —
-	# that test filters to executor=="backend" before it counts anything.
-	check("total registered tool count == 102", registered.size() == 102,
+	# of WHAT the canvas is drawing (item 019ffeaccc0c).
+	# Epoch NLC C2 (102 -> 103): minerva_pcb_place_via, the direct board via
+	# (item 019fff60e05a) — copper CREATION was proposal-only while copper
+	# DESTRUCTION was direct, so an agent could delete a via it could not
+	# put back.
+	# Both are executor:"panel", so the Go pin in
+	# manifest_registry_parity_test.go is genuinely unaffected — that test
+	# filters to executor=="backend" before it counts anything.
+	check("total registered tool count == 103", registered.size() == 103,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
