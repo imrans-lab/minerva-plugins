@@ -181,6 +181,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _list_vias(host, args)
 		"minerva_pcb_place_via":
 			return _place_via(host, args)
+		"minerva_pcb_add_trace":
+			return _add_trace(host, args)
 		"minerva_pcb_delete_via":
 			return _delete_via(host, args)
 		"minerva_pcb_get_preference":
@@ -3580,6 +3582,90 @@ static func _list_vias(host, args: Dictionary) -> Dictionary:
 			entry["via_id"] = via_id
 		vias_arr.append(entry)
 	return _ok({"via_count": vias_arr.size(), "vias": vias_arr})
+
+
+## Draw ONE trace directly on the board — one journalled, undoable step.
+##
+## The other half of station C2's parity gap (epoch NLC station C3, item
+## 01a001c39aa3): minerva_pcb_delete_traces removes copper directly, and until
+## now the only way to ADD a trace was to propose one and route it. The human
+## has had a direct Trace tool on the canvas the whole time.
+##
+## RULING ON "DOES A DIRECT TRACE BYPASS DRC?" (the open question on the item):
+## IT LANDS AS COPPER, and DRC stays a separate question asked by a separate
+## verb. Decided by PARITY, which is this epoch's whole point — the human's
+## canvas Trace tool (pcb_canvas.gd _commit_trace) validates authorability and
+## commits, and gates on no DRC at all. A verb that refused what the Trace tool
+## accepts would make the agent a second-class author of the same board, which
+## is the asymmetry this station exists to remove. It also matches every other
+## direct verb here: place_via, delete_via, move_component and create_zone all
+## write and let the next check speak.
+##
+## So this shares the human tool's EXACT model path — trace_author_error to
+## validate, create_trace_entity to build — rather than a parallel one. One
+## implementation, one set of refusals, one undo history. Run
+## minerva_pcb_drc / minerva_pcb_drc_geometric afterwards; the reply says so.
+static func _add_trace(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+
+	var net_name: String = str(args.get("net_name", ""))
+	var layer_in: String = str(args.get("layer", ""))
+	if layer_in.is_empty():
+		return _err("layer is required (\"top\", \"bottom\", \"in1\"..., or a KiCad copper name)")
+	var layer: String = PcbLayerStack.kicad_to_canon(layer_in)
+
+	# Declared-stack membership, same check and same reason as
+	# _edit_candidate_insert_via: "in7" as a typo and "in7" as a plane are
+	# indistinguishable without it, and the compiler would name a segment
+	# instead of the argument that caused it.
+	var declared: Array = data.layers if ("layers" in data and data.layers is Array) else []
+	if not declared.is_empty() and not (layer in declared):
+		return {"success": false, "error": "layer_not_on_stack",
+			"declared_layers": declared.duplicate(),
+			"note": "this board declares %s — it has no layer '%s' to draw on"
+				% [str(declared), layer_in]}
+
+	var raw_points: Variant = args.get("points")
+	if not (raw_points is Array):
+		return _err("points must be an array of [x_mm, y_mm] pairs")
+	var pts := PackedVector2Array()
+	for entry in (raw_points as Array):
+		var pair: Variant = _parse_xy_pair(entry)
+		if pair == null:
+			return _err("every entry in points must be [x_mm, y_mm]; got %s" % str(entry))
+		pts.append(pair as Vector2)
+
+	# THE HUMAN TOOL'S OWN GUARD, not a re-implementation of it. Covers the
+	# net/layer/point-count rules in one place, so an agent and a click are
+	# refused for the same reasons in the same words.
+	var refusal: String = str(data.trace_author_error(net_name, layer, pts.size()))
+	if not refusal.is_empty():
+		return {"success": false, "error": "trace_not_authorable", "note": refusal}
+
+	var width: float = float(args.get("width_mm", 0.0))
+	var trace = data.create_trace_entity(net_name, layer, pts, width)
+	if trace == null:
+		return _err("the board model refused this trace — see the log")
+	data.save_to_history("Add trace")
+
+	var out_points: Array = []
+	for p in pts:
+		out_points.append([snapped(p.x, 0.0001), snapped(p.y, 0.0001)])
+	return _ok({
+		"trace_id": str(trace.id),
+		"net_name": net_name,
+		"layer": layer,
+		"width_mm": float(trace.width) if "width" in trace else width,
+		"point_count": pts.size(),
+		"segment_count": maxi(0, pts.size() - 1),
+		"points": out_points,
+		"trace_count": data.traces.size(),
+		"note": ("copper is on the board now — this verb runs no DRC, exactly as the canvas "
+			+ "Trace tool does not. Run minerva_pcb_drc (connectivity) and "
+			+ "minerva_pcb_drc_geometric (clearances) to find out what it touched."),
+	})
 
 
 ## Place ONE via directly on the board — one journalled, undoable step.

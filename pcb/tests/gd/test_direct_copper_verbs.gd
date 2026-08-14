@@ -1,5 +1,6 @@
 extends SceneTree
-## EPOCH NLC station C2 — minerva_pcb_place_via (item 019fff60e05a).
+## EPOCH NLC stations C2 + C3 — minerva_pcb_place_via (item 019fff60e05a) and
+## minerva_pcb_add_trace (item 01a001c39aa3).
 ##
 ## Run (via a Minerva checkout as the Godot host):
 ##   pcb/scripts/run-gd-tests.sh <path-to-minerva-checkout>
@@ -28,11 +29,13 @@ var _fail := 0
 
 
 func _init() -> void:
-	print("=== Direct copper verbs (NLC C2) ===\n")
+	print("=== Direct copper verbs (NLC C2 + C3) ===\n")
 	_run_place_via_lands_on_the_board()
 	_run_span_is_not_selectable()
 	_run_refusals_change_nothing()
 	_run_round_trips_with_delete()
+	_run_add_trace_lands_copper()
+	_run_add_trace_refusals()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -187,5 +190,106 @@ func _run_round_trips_with_delete() -> void:
 	# A re-place must not collide with the freed id — the model's id high-water
 	# mark is what prevents it, and this is the caller that would notice.
 	check("the re-placed via has a non-empty id", not str(again.get("via_id", "")).is_empty())
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 5. C3: a trace drawn directly, through the HUMAN TOOL'S OWN model path ────
+#
+# minerva_pcb_delete_traces removed copper directly; nothing drew it. The human
+# has had a canvas Trace tool the whole time. RULED HERE, and asserted below:
+# the direct verb LANDS COPPER AND RUNS NO DRC, because _commit_trace does not
+# gate either — a verb that refused what the Trace tool accepts would make the
+# agent a second-class author of the same board.
+
+const PcbNet := preload("res://../../minerva-plugins/pcb/ui/model/pcb_net.gd")
+
+
+func _trace_ctx() -> Dictionary:
+	var ctx := _ctx()
+	var net = PcbNet.new()
+	net.name = "N1"
+	ctx["data"].add_net(net)
+	return ctx
+
+
+func _run_add_trace_lands_copper() -> void:
+	print("-- 5. add_trace writes a real board trace on an INNER layer --")
+	var ctx := _trace_ctx()
+	var host = ctx["host"]
+	var data = ctx["data"]
+
+	var before: int = data.traces.size()
+	var res: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "N1", "layer": "in1",
+		"points": [[1.0, 1.0], [5.0, 1.0], [5.0, 8.0]],
+	})
+	check("add_trace succeeds on an inner layer", bool(res.get("success", false)))
+	check_eq("the board gained one trace", data.traces.size(), before + 1)
+
+	var tid := str(res.get("trace_id", ""))
+	check("the reply names a trace id", not tid.is_empty())
+	check("that id is a key on the board", data.traces.has(tid))
+	var stored = data.traces.get(tid)
+	check_eq("stored on the layer asked for", str(stored.layer), "in1")
+	check_eq("stored on the net asked for", str(stored.net_name), "N1")
+	check_eq("all three points survived", stored.waypoints.size(), 3)
+	check_eq("reported segment count is points - 1", int(res.get("segment_count", -1)), 2)
+
+	# A KiCad spelling must reach the same layer — the vocabularies are
+	# interchangeable everywhere else on this surface.
+	var res2: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "N1", "layer": "In2.Cu", "points": [[2.0, 2.0], [6.0, 2.0]],
+	})
+	check("a KiCad layer spelling is accepted", bool(res2.get("success", false)))
+	check_eq("and is stored canonically", str(res2.get("layer", "")), "in2")
+
+	# THE RULING, stated as an assertion: no DRC gate, and the reply says so
+	# rather than leaving the agent to assume the board is clean.
+	check("the reply warns that no DRC ran",
+		str(res.get("note", "")).to_lower().contains("drc"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 6. C3 refusals: named, and nothing written ────────────────────────────────
+
+func _run_add_trace_refusals() -> void:
+	print("-- 6. undeclared layer, unauthorable trace, malformed points --")
+	var ctx := _trace_ctx()
+	var host = ctx["host"]
+	var data = ctx["data"]
+
+	var off_stack: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "N1", "layer": "in7", "points": [[1.0, 1.0], [2.0, 2.0]]})
+	check("a layer this board does not declare refuses",
+		not bool(off_stack.get("success", true)))
+	check_eq("named layer_not_on_stack", str(off_stack.get("error", "")), "layer_not_on_stack")
+	check("and lists the layers it DOES declare",
+		(off_stack.get("declared_layers", []) as Array).size() == 4)
+
+	# The model's own rule, in the model's own words — not a re-implementation
+	# that could drift from what a human's click is told.
+	var one_point: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "N1", "layer": "top", "points": [[1.0, 1.0]]})
+	check("a one-point trace refuses", not bool(one_point.get("success", true)))
+	check_eq("named trace_not_authorable", str(one_point.get("error", "")), "trace_not_authorable")
+	check("carrying the model's own wording",
+		str(one_point.get("note", "")).contains("at least 2 points"))
+
+	var no_net: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "NOPE", "layer": "top", "points": [[1.0, 1.0], [2.0, 2.0]]})
+	check("an undeclared net refuses", not bool(no_net.get("success", true)))
+	check_eq("also trace_not_authorable", str(no_net.get("error", "")), "trace_not_authorable")
+
+	var bad_pts: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "N1", "layer": "top", "points": [[1.0, 1.0], "nope"]})
+	check("a malformed point refuses", not bool(bad_pts.get("success", true)))
+
+	var no_layer: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "N1", "points": [[1.0, 1.0], [2.0, 2.0]]})
+	check("a missing layer refuses", not bool(no_layer.get("success", true)))
+
+	check_eq("not one refusal wrote copper", data.traces.size(), 0)
 
 	ctx["driver"].free_panel(ctx["panel"])

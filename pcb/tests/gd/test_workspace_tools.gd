@@ -1402,12 +1402,15 @@ func _run_removal_manifest_tools_absent() -> void:
 	# Epoch NLC C4 (101 -> 102): minerva_pcb_view_state (item 019ffeaccc0c).
 	# Epoch NLC C2 (102 -> 103): minerva_pcb_place_via (item 019fff60e05a) —
 	# the direct board via that closes the create/destroy parity gap.
-	check_eq("manifest tool count == 103 (ALL manifest.json tools[] entries)",
-		names.size(), 103)
+	# Epoch NLC C3 (103 -> 104): minerva_pcb_add_trace (item 01a001c39aa3).
+	check_eq("manifest tool count == 104 (ALL manifest.json tools[] entries)",
+		names.size(), 104)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
-	check("the C2 place-via tool is the other",
+	check("the C2 place-via tool is another",
 		"minerva_pcb_place_via" in names)
+	check("the C3 add-trace tool is the third",
+		"minerva_pcb_add_trace" in names)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

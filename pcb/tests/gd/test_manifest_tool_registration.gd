@@ -209,10 +209,12 @@ func _init() -> void:
 	# (item 019fff60e05a) — copper CREATION was proposal-only while copper
 	# DESTRUCTION was direct, so an agent could delete a via it could not
 	# put back.
+	# Epoch NLC C3 (103 -> 104): minerva_pcb_add_trace, the same gap's other
+	# half (item 01a001c39aa3) — delete_traces was direct, drawing one was not.
 	# Both are executor:"panel", so the Go pin in
 	# manifest_registry_parity_test.go is genuinely unaffected — that test
 	# filters to executor=="backend" before it counts anything.
-	check("total registered tool count == 103", registered.size() == 103,
+	check("total registered tool count == 104", registered.size() == 104,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

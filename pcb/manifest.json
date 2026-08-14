@@ -901,6 +901,38 @@
       }
     },
     {
+      "name": "minerva_pcb_add_trace",
+      "description": "Draw ONE trace directly on the board through the SAME model path the human's canvas Trace tool uses — the direct counterpart of minerva_pcb_delete_traces. Exactly one journalled, undoable step. Give net_name, layer (\"top\", \"bottom\", \"in1\"..., or a KiCad copper name) and points as [[x_mm,y_mm], ...] in order; width_mm is optional and falls back to the board's authored trace width. Returns {trace_id, net_name, layer, width_mm, point_count, segment_count, points, trace_count}. THIS RUNS NO DRC — the copper is on the board the moment it returns, exactly as the canvas Trace tool commits without gating, so run minerva_pcb_drc (connectivity) and minerva_pcb_drc_geometric (clearances) afterwards to find out what it touched. Refused by name, changing nothing: layer_not_on_stack (the board does not declare that layer — the reply lists the ones it does) and trace_not_authorable (the board model's own rule, e.g. too few points or an unknown net, reported in its own words so an agent and a human click are refused identically). To have a trace ROUTED for you around obstacles instead of drawn where you say, propose a route hint and apply it.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          },
+          "net_name": {
+            "type": "string",
+            "description": "Net this trace belongs to"
+          },
+          "layer": {
+            "type": "string",
+            "description": "Copper layer to draw on: \"top\", \"bottom\", \"in1\"... or a KiCad copper name. Must be one this board declares."
+          },
+          "points": {
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "number"}},
+            "description": "Ordered polyline as [[x_mm, y_mm], ...]. At least two points."
+          },
+          "width_mm": {
+            "type": "number",
+            "description": "Trace width in mm. Optional; omit or pass 0 to use the board's authored trace width."
+          }
+        },
+        "required": ["editor_name", "net_name", "layer", "points"]
+      }
+    },
+    {
       "name": "minerva_pcb_place_via",
       "description": "Place ONE via directly on the board at x_mm/y_mm — the direct counterpart of minerva_pcb_delete_via, and the tool-side parity for minerva_pcb_add_via (which edits a route PROPOSAL, not the board). Exactly one journalled, undoable step. Optional net_name, size_mm (default 0.8) and drill_mm (default 0.4); the difference between them is the annular ring, so drill_mm must be smaller. Returns {via_id, x_mm, y_mm, net_name, size_mm, drill_mm, from_layer, to_layer, via_count}. THE SPAN IS NOT SELECTABLE: a v1 via is a THROUGH via that crosses the whole board and joins every declared layer, so from_layer/to_layer/layers are refused rather than ignored — blind and buried vias are out of scope. Which layer a TRACE continues on past a via is a property of the trace, not of the hole. Refused by name, changing nothing: outside_board (the point is off the board outline), via_already_there (a via already claims that point), span_not_selectable, and a non-positive or too-large drill. This places the via ONLY; it does not connect or re-layer any trace, so check the routing afterwards.",
       "executor": "panel",
