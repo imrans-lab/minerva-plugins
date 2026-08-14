@@ -95,11 +95,14 @@ test_staged_placement.gd assertions=114
 test_dict_guard.gd assertions=30
 # NEW at epoch NLC C1 (item 019fff6080fd): inner-layer vias — C1a's refuse-don't-
 # guess guard (groups 1-4) and C1b's placeable continuation layer (groups 5-6).
-# Count is 33 by construction (7 + 6 + 3 + 3 + 8 + 6). NOT YET CONFIRMED BY A
-# RUN — the epoch defers all test execution until after the Codex review, so
-# this pin is provisional and re-pins at testex from the first trustworthy run,
-# exactly as test_layer_stack.gd and test_dict_guard.gd did.
-test_inner_layer_via_guard.gd assertions=33
+# Grown to 39 by the cold review's finding 1: group 7 pins the case C1a's first
+# guard did NOT close — a mixed [F.Cu, In1.Cu] authored payload, whose running
+# layer IS toggleable, so the walk proceeded and clobbered the authored inner
+# run. Count is 39 by construction (7 + 6 + 3 + 3 + 8 + 6 + 6). NOT YET
+# CONFIRMED BY A RUN — the epoch defers all test execution until after the Codex
+# review, so this pin is provisional and re-pins at testex from the first
+# trustworthy run, exactly as test_layer_stack.gd and test_dict_guard.gd did.
+test_inner_layer_via_guard.gd assertions=39
 # NEW at epoch NLC C4 (item 019ffeaccc0c): minerva_pcb_view_state. Count is 37
 # by construction (10 + 7 + 9 + 11). Provisional for the same reason as the
 # suite above — no run happens before the Codex review — and re-pins at testex.

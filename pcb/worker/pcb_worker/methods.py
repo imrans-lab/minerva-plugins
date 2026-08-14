@@ -2451,7 +2451,13 @@ def _route(params: dict) -> dict:
     # engine-guided path.
     drawn_routes, consumed_nets, drawn_warnings, consumed_ids = \
         route_bridge.materialize_detailed_hints(
-            envelopes, board, params.get("selection"))
+            envelopes, board, params.get("selection"),
+            # The board's DECLARED copper stack, so authored hint geometry
+            # cannot land on a layer this board does not have (cold review,
+            # epoch NLC). board_dict is the canonical dict `layers` lives on;
+            # connectivity_board does NOT carry it, so wiring this to drc_board
+            # would have been a check that silently never ran.
+            declared_layers=(board_dict or {}).get("layers"))
     for net_name in consumed_nets:
         board.nets.pop(net_name, None)
     remaining = [e for e in envelopes

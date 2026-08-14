@@ -1302,6 +1302,39 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 	var vias: Array = (vias_raw as Array).duplicate(true) if vias_raw is Array else []
 	vias.append([best_point.x, best_point.y])
 
+	# AUTHORED LAYERS ARE CHECKED TOO, NOT JUST THE RUNNING ONE (cold review,
+	# finding 1 — the defect C1a's guard did not actually close).
+	#
+	# _recompute_layer_runs OVERWRITES every segment's layer from the running
+	# toggle value, so an authored layer is discarded before the toggle ever
+	# sees it. Guarding only the running layer therefore missed the case that
+	# matters most: a payload of [F.Cu, In1.Cu] starts on F.Cu, which IS
+	# toggleable, so the walk proceeded and relabelled the In1.Cu run "B.Cu"
+	# under a success reply. Exactly the silent relocation C1a exists to stop,
+	# one door over — and epoch NLC C1b made that payload FIRST-CLASS DATA in
+	# the same range (route_bridge now materializes authored per-segment layers
+	# verbatim), so the shape is not hypothetical, it is the shape the worker
+	# was taught to honour.
+	#
+	# Refused rather than honoured: with mixed authored layers there is no
+	# unambiguous answer to "which layer does the tail continue on", and this
+	# payload has no way to say. Choosing for the user is the guess this whole
+	# station removes. A segment carrying NO layer key is not an authored
+	# layer and is left to the start_layer default above.
+	for seg_any in segments:
+		if not (seg_any is Dictionary):
+			continue
+		var seg_d: Dictionary = seg_any
+		if not seg_d.has("layer"):
+			continue
+		var authored := str(seg_d["layer"])
+		if _toggle_layer(authored).is_empty():
+			return {"ok": false, "error_code": "unsupported_layer",
+				"error": ("this proposal already runs on %s, and a via records no span, so which "
+					+ "copper layer the run continues on afterwards is unstated. Only the outer "
+					+ "pair (F.Cu<->B.Cu, or top<->bottom) has one unambiguous answer. "
+					+ "Nothing was changed.") % authored}
+
 	# REFUSAL BEFORE MUTATION. `segments`/`vias` above are local duplicates, so
 	# returning here leaves the caller's kind_payload untouched — the split and
 	# the appended via never reach anything that persists.

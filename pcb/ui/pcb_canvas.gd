@@ -8264,6 +8264,45 @@ func _candidate_via_visible() -> bool:
 ## RETURNS [] WHEN THE SURFACE IS OFF — the single gate, so no caller can forget
 ## it. A malformed segment (fewer than 2 points) is skipped rather than drawn as a
 ## degenerate stroke; a via with no position is skipped the same way.
+## Coincidence tolerance for matching a via to the segment endpoint it sits on.
+## The workspace splits a segment AT the via's exact point, so these agree bar
+## float noise; this is a geometry question, not a UI hit-test.
+const _VIA_ARRIVAL_EPS_MM: float = 0.01
+
+## The layer the run ARRIVES on at `pos` — the layer of the segment whose LAST
+## point sits on the via — falling back to `fallback` when nothing coincides.
+##
+## Why derived rather than read off the via (cold review, finding 3): since
+## epoch NLC C1b a via's stored span is always the through span (top<->bottom),
+## because that is what a v1 via physically is, so from_layer no longer varies
+## with the run and cannot colour anything. The segments still know.
+##
+## The INCOMING segment is preferred over the outgoing one deliberately — a via
+## exists precisely where two runs on different layers meet, so both coincide
+## with it and the answer would otherwise depend on array order. Last-point
+## match is the arriving run; a first-point match is used only if no segment
+## arrives (a via at the very start of a path), which keeps a colour on screen
+## rather than falling through to a default that means nothing.
+func _via_arrival_layer(segments, pos: Vector2, fallback: String) -> String:
+	var outgoing := ""
+	for seg in segments:
+		if not (seg is Dictionary):
+			continue
+		var pts: Array = (seg as Dictionary).get("points", [])
+		if pts.size() < 2:
+			continue
+		var layer := str((seg as Dictionary).get("layer", ""))
+		if layer.is_empty():
+			continue
+		if pts[pts.size() - 1] is Vector2 \
+				and (pts[pts.size() - 1] as Vector2).distance_to(pos) <= _VIA_ARRIVAL_EPS_MM:
+			return layer
+		if outgoing.is_empty() and pts[0] is Vector2 \
+				and (pts[0] as Vector2).distance_to(pos) <= _VIA_ARRIVAL_EPS_MM:
+			outgoing = layer
+	return outgoing if not outgoing.is_empty() else fallback
+
+
 func candidate_draw_items() -> Array:
 	var items: Array = []
 	if not _candidates_active():
@@ -8283,6 +8322,7 @@ func candidate_draw_items() -> Array:
 		var dashed: bool = validation == "stale"
 		var marked: bool = validation == "violating" or validation == "error"
 		var selected: bool = cid in selected_candidate_ids
+		# (see _via_arrival_layer below for why the via loop needs the segments)
 
 		for seg in cand.segments:
 			if not (seg is Dictionary):
@@ -8321,11 +8361,22 @@ func candidate_draw_items() -> Array:
 			var pos: Variant = via_dict.get("position", null)
 			if not (pos is Vector2):
 				continue
-			# A via's colour comes from the layer it STARTS on — the same choice
-			# the committed-via draw makes by taking the net colour rather than
-			# inventing a two-tone disc. from_layer is where the reviewer's eye is
-			# already travelling along the incoming segment.
-			var from_layer := str(via_dict.get("from_layer", "top"))
+			# A via's colour comes from the layer the run ARRIVES on — the same
+			# choice the committed-via draw makes by taking the net colour rather
+			# than inventing a two-tone disc. It is where the reviewer's eye is
+			# already travelling, along the incoming segment.
+			#
+			# DERIVED FROM THE SEGMENTS, NOT FROM via_dict.from_layer (cold
+			# review, finding 3). Since epoch NLC C1b a via's stored span is
+			# ALWAYS the through span — top<->bottom, whatever the run does —
+			# because that is what a v1 via physically is. from_layer is
+			# therefore "top" on every via and would paint every ghost via the
+			# top colour, including on 2-layer boards where a via on a bottom run
+			# used to draw bottom-coloured. The span stopped being able to answer
+			# this question; the geometry still can, and unlike a cached field it
+			# cannot drift from the copper it describes.
+			var from_layer := _via_arrival_layer(cand.segments, pos as Vector2,
+				str(via_dict.get("from_layer", "top")))
 			items.append({
 				"candidate_id": cid,
 				"item_kind": "via",

@@ -26,21 +26,29 @@ extends SceneTree
 ## and reported success. Nothing warned, and the canvas then drew the hint on a
 ## layer the hint's own kind_payload.layer still disagreed with.
 ##
-## WHY THE ORACLE IS THE PERSISTED ANNOTATION, NOT THE RETURN VALUE. The
-## process law for this epoch asked for emitted Gerbers as C1's oracle, on the
-## premise that the corrupted layers reached fabricated copper. THEY DO NOT,
-## and a Gerber assertion here would have passed for the wrong reason —
-## route_bridge.materialize_detailed_hints (route_bridge.py:1653) builds its
-## route from the hint's SINGLE kind_payload.layer with "vias": [], and
-## hints_to_router uses waypoints + preferred_layer; neither reads
-## kind_payload.segments[].layer or kind_payload.vias. The live consumer of
-## these fields is the CANVAS, so the furthest-downstream thing that can be
-## asserted mechanically is what got STORED on the host. That is still a
-## different representation from the code under test: these assertions read
-## back through PcbAnnotationHost.get_by_id after the real MCP verb
-## (PanelTools._add_via, a different file) has run, so a toggle that lies is
-## caught at the point the lie becomes durable. See the epoch record for the
-## corrected diagnosis.
+## WHY THE ORACLE IS THE PERSISTED ANNOTATION, NOT THE RETURN VALUE.
+##
+## HISTORY, because the reason CHANGED mid-epoch and a stale rationale is worse
+## than none. The process law asked for emitted Gerbers as C1's oracle, on the
+## premise that these layers reached fabricated copper. At C1a they did NOT:
+## materialize_detailed_hints built from the hint's single kind_payload.layer
+## with "vias": [], hints_to_router used waypoints + preferred_layer, and the
+## only path that carried per-segment layers to a candidate was dormant. A
+## Gerber assertion would have passed for the wrong reason, so the oracle became
+## the persisted annotation.
+##
+## THAT PREMISE IS NOW VOID, AND BY THIS EPOCH'S OWN HAND: C1b (commit 9030439)
+## taught route_bridge to materialize authored per-segment layers and vias
+## VERBATIM, which CREATED the consumer whose absence justified the choice. A
+## Gerber-level oracle is possible at HEAD and is owed — filed rather than
+## silently skipped, because a rationale nobody re-reads is how a deliberate
+## choice becomes an accident.
+##
+## What these assertions still buy, and why they stay: they read back through
+## PcbAnnotationHost.get_by_id AFTER the real MCP verb (PanelTools._add_via, a
+## different file) has run, so a toggle that lies is caught at the point the lie
+## becomes durable — one seam earlier than emission, and it fails for a reason
+## a reader can act on rather than a diff in a .gbr.
 ##
 ## REUSE SCAN: panel/host boot + check helpers copied from
 ## test_parity_bridge.gd (plugin_panel_driver, host.set_panel). The hint
@@ -67,6 +75,7 @@ func _init() -> void:
 	_run_miss_is_still_a_miss()
 	_run_candidate_continuation_onto_inner()
 	_run_candidate_refusals_survive()
+	_run_authored_inner_layer_is_not_clobbered()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -305,3 +314,56 @@ func _run_candidate_refusals_survive() -> void:
 	check_eq("every refusal was a no-op: still one unsplit segment",
 		(c.segments as Array).size(), 1)
 	check_eq("every refusal was a no-op: no via", (c.vias as Array).size(), 0)
+
+
+# ── 7. THE GAP C1a's FIRST GUARD LEFT OPEN (cold review, finding 1) ───────────
+#
+# _recompute_layer_runs overwrites EVERY segment's layer from the running toggle
+# value, so an authored layer is discarded before the toggle sees it. Guarding
+# only the RUNNING layer therefore missed the case that matters most: a payload
+# of [F.Cu, In1.Cu] starts on F.Cu — which IS toggleable — so the walk proceeded
+# and relabelled the In1.Cu run "B.Cu" under a success reply.
+#
+# This is not a hypothetical payload. Epoch NLC C1b taught route_bridge to
+# materialize authored per-segment layers VERBATIM, so a mixed-layer hint is
+# first-class data that now reaches copper. Before this fix the hint editor
+# destroyed exactly what the worker had just been taught to honour.
+
+func _mixed_layer_context() -> Dictionary:
+	var ctx := _hint_context("F.Cu")
+	var host = ctx["host"]
+	var ann: Dictionary = host.get_by_id(ctx["ann_id"])
+	var kp: Dictionary = ann.get("kind_payload", {})
+	kp["segments"] = [
+		{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"},
+		{"start": [5.0, 0.0], "end": [10.0, 0.0], "layer": "In1.Cu"},
+	]
+	ann["kind_payload"] = kp
+	host.update_annotation(str(ctx["ann_id"]), ann)
+	return ctx
+
+
+func _run_authored_inner_layer_is_not_clobbered() -> void:
+	print("-- 7. a via on a MIXED [F.Cu, In1.Cu] run refuses, keeping In1.Cu --")
+	var ctx := _mixed_layer_context()
+	var host = ctx["host"]
+	var ann_id: String = ctx["ann_id"]
+
+	check_eq("fixture stores the mixed authored run",
+		_stored_layers(host, ann_id), ["F.Cu", "In1.Cu"])
+
+	# The click lands on the F.Cu head — a layer the toggle CAN resolve. The
+	# old guard passed here and the walk then destroyed the In1.Cu tail.
+	var res: Dictionary = PanelTools._add_via(host, {"id": ann_id, "x": 2.5, "y": 0.0})
+	check("add_via refuses on a mixed authored payload", not bool(res.get("success", false)))
+	check_eq("named unsupported_layer", str(res.get("error_code", "")), "unsupported_layer")
+	check("the refusal names the authored layer it could not resolve",
+		str(res.get("error", "")).contains("In1.Cu"))
+
+	# THE ORACLE. Before this fix the readback was ["F.Cu", "B.Cu", "B.Cu"] —
+	# a split, plus an authored inner run silently moved to the bottom layer,
+	# under success:true.
+	check_eq("the authored run is intact", _stored_layers(host, ann_id), ["F.Cu", "In1.Cu"])
+	check_eq("no via was appended", _stored_via_count(host, ann_id), 0)
+
+	ctx["driver"].free_panel(ctx["panel"])

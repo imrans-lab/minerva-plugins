@@ -1583,7 +1583,25 @@ def _xy(raw: Any, what: str) -> list:
         raise ValueError(f"{what} has non-numeric coordinates: {raw!r}")
 
 
-def _authored_segments(raw_segments: list) -> list:
+def _declared_kicad_layers(declared: Any) -> set:
+    """The board's declared copper stack as KiCad names, or an EMPTY SET when
+    the board declared nothing readable.
+
+    Empty means "unknown", and every caller must treat it as "cannot check" —
+    never as "nothing is allowed".
+    """
+    if not isinstance(declared, (list, tuple)):
+        return set()
+    out = set()
+    for entry in declared:
+        try:
+            out.add(_canon_layer(entry))
+        except ValueError:
+            continue
+    return out
+
+
+def _authored_segments(raw_segments: list, declared_layers: Any = None) -> list:
     """A hint's own kind_payload.segments as route segments, layers HONOURED.
 
     Owner ruling (b) on bug 01a001fca55f: a detailed hint is materialized
@@ -1600,6 +1618,7 @@ def _authored_segments(raw_segments: list) -> list:
     the waypoint path's own `pts[i] != pts[i + 1]` filter — copper with no
     length is not copper, and build_overlay refuses it downstream anyway.
     """
+    declared = _declared_kicad_layers(declared_layers)
     out: list = []
     for i, seg in enumerate(raw_segments):
         if not isinstance(seg, dict):
@@ -1611,6 +1630,18 @@ def _authored_segments(raw_segments: list) -> list:
         # Raises ValueError for an unknown/empty name — deliberately NOT
         # defaulted. This is the write side; see canon_to_kicad's own docstring.
         layer = _canon_layer(seg.get("layer"))
+        # DECLARED-STACK MEMBERSHIP (cold review, finding 4). canon_to_kicad
+        # accepts in1..in30 on ANY board, so without this an authored "in5" on a
+        # 4-layer board materialized happily, and _materialize_routes commits it
+        # through PCBData.add_trace — which, unlike create_trace_entity, does not
+        # gate on the declared stack. Copper on a layer the board does not have.
+        # The same principle is already applied at the two GD authoring seams in
+        # this epoch ("'in7' as a typo and 'in7' as a plane are
+        # indistinguishable"); this was the seam that missed it.
+        if declared and layer not in declared:
+            raise ValueError(
+                f"segment {i} names layer {layer!r}, which this board does not "
+                f"declare (declared: {sorted(declared)})")
         out.append({"start": start, "end": end, "layer": layer})
     return out
 
@@ -1641,6 +1672,7 @@ def materialize_detailed_hints(
     hint_envelopes: list[dict],
     board: Board,
     selection: Any = None,
+    declared_layers: Any = None,
 ) -> tuple[list[dict], set, list[dict], list[str]]:
     """Materialize 'detailed' single-trace hints as routes-as-drawn.
 
@@ -1748,7 +1780,7 @@ def materialize_detailed_hints(
         authored = kp.get("segments")
         if isinstance(authored, list) and authored:
             try:
-                segments = _authored_segments(authored)
+                segments = _authored_segments(authored, declared_layers)
                 vias = _authored_vias(kp.get("vias"))
             except ValueError as exc:
                 warnings.append({"id": ann_id, "message":

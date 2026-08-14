@@ -240,6 +240,20 @@ def test_route_method_sparse_hint_without_waypoints_reports_no_status():
 # ---------------------------------------------------------------------------
 
 
+# The authored fixtures are 4-LAYER on purpose (cold review, finding 4). An
+# earlier draft ran an In1.Cu segment against the 2-layer _two_pin_board() and
+# asserted it materialized — pinning as CORRECT the very defect the
+# declared-stack check exists to refuse.
+QUAD_STACK = ["top", "in1", "in2", "bottom"]
+
+
+def _quad_board() -> dict:
+    """_two_pin_board() with a declared 4-layer copper stack."""
+    b = _two_pin_board()
+    b["layers"] = list(QUAD_STACK)
+    return b
+
+
 def _authored_hint(_id: str = "ann1", **kp_overrides) -> dict:
     """A detailed hint whose run crosses from F.Cu to In1.Cu through a via.
 
@@ -261,7 +275,7 @@ def _authored_hint(_id: str = "ann1", **kp_overrides) -> dict:
 def test_authored_segments_keep_their_own_layers():
     board = route_bridge.board_to_router(_two_pin_board())
     routes, _, _, ids = route_bridge.materialize_detailed_hints(
-        [_authored_hint()], board)
+        [_authored_hint()], board, declared_layers=QUAD_STACK)
 
     assert ids == ["ann1"]
     assert len(routes) == 1
@@ -273,7 +287,7 @@ def test_authored_segments_keep_their_own_layers():
 def test_authored_vias_are_not_dropped():
     board = route_bridge.board_to_router(_two_pin_board())
     routes, _, _, _ = route_bridge.materialize_detailed_hints(
-        [_authored_hint()], board)
+        [_authored_hint()], board, declared_layers=QUAD_STACK)
     # Was hardcoded []. THE headline defect of bug 01a001fca55f.
     assert routes[0]["vias"] == [[30.0, 20.32]]
 
@@ -290,9 +304,9 @@ def test_authored_vias_reach_the_DRC_harvest_as_through_vias():
     """
     from pcb_worker import methods
 
-    board = route_bridge.board_to_router(_two_pin_board())
+    board = route_bridge.board_to_router(_quad_board())
     routes, _, _, _ = route_bridge.materialize_detailed_hints(
-        [_authored_hint()], board)
+        [_authored_hint()], board, declared_layers=QUAD_STACK)
 
     harvested = methods._routes_to_vias(routes)
     assert len(harvested) == 1
@@ -314,7 +328,7 @@ def test_unknown_authored_layer_falls_back_and_warns():
     hint = _authored_hint()
     hint["kind_payload"]["segments"][1]["layer"] = "Nope.Cu"
     routes, nets, warnings, ids = route_bridge.materialize_detailed_hints(
-        [hint], board)
+        [hint], board, declared_layers=QUAD_STACK)
 
     assert routes == [] and nets == set() and ids == []
     assert any(w.get("id") == "ann1" and "authored geometry" in w.get("message", "")
@@ -329,7 +343,7 @@ def test_malformed_authored_via_is_not_silently_dropped():
     hint = _authored_hint()
     hint["kind_payload"]["vias"] = [[30.0]]
     routes, _, warnings, ids = route_bridge.materialize_detailed_hints(
-        [hint], board)
+        [hint], board, declared_layers=QUAD_STACK)
 
     assert routes == [] and ids == []
     assert any("via 0" in w.get("message", "") for w in warnings), warnings
@@ -341,7 +355,8 @@ def test_zero_length_authored_segment_is_skipped_not_refused():
     hint = _authored_hint()
     hint["kind_payload"]["segments"].insert(
         1, {"start": [30.0, 20.32], "end": [30.0, 20.32], "layer": "F.Cu"})
-    routes, _, _, ids = route_bridge.materialize_detailed_hints([hint], board)
+    routes, _, _, ids = route_bridge.materialize_detailed_hints(
+        [hint], board, declared_layers=QUAD_STACK)
 
     assert ids == ["ann1"]
     assert [s["layer"] for s in routes[0]["segments"]] == ["F.Cu", "In1.Cu"]
@@ -356,3 +371,29 @@ def test_hint_without_authored_segments_still_uses_waypoints():
         [_detailed_hint()], board)
     assert routes[0]["vias"] == []
     assert all(s["layer"] == "F.Cu" for s in routes[0]["segments"])
+
+
+def test_authored_layer_off_the_declared_stack_is_refused():
+    """FINDING 4. canon_to_kicad accepts in1..in30 on ANY board, so without a
+    declared-stack check an authored "in5" on a 4-layer board materialized
+    happily — and _materialize_routes commits it through PCBData.add_trace,
+    which (unlike create_trace_entity) does not gate on the stack. That is
+    copper on a layer the board does not have."""
+    board = route_bridge.board_to_router(_quad_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["segments"][1]["layer"] = "In5.Cu"
+    routes, nets, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board, declared_layers=QUAD_STACK)
+
+    assert routes == [] and nets == set() and ids == []
+    assert any("does not declare" in w.get("message", "") for w in warnings), warnings
+
+
+def test_unknown_declared_stack_does_not_block_authored_geometry():
+    """Empty/absent `layers` means UNKNOWN, never "nothing is allowed" — a board
+    that declares no stack must not have every authored hint refused."""
+    board = route_bridge.board_to_router(_two_pin_board())
+    routes, _, _, ids = route_bridge.materialize_detailed_hints(
+        [_authored_hint()], board, declared_layers=None)
+    assert ids == ["ann1"]
+    assert [s["layer"] for s in routes[0]["segments"]] == ["F.Cu", "In1.Cu"]
