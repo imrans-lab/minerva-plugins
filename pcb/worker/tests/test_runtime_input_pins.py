@@ -27,6 +27,33 @@ LOCK = PCB_ROOT / "scripts" / "runtime-bundle.lock"
 BUILDER = PCB_ROOT.parent / "scripts" / "build-python-runtime-bundle.sh"
 
 
+def _usable_bash() -> bool:
+    """PROBE bash, do not merely locate it.
+
+    `shutil.which("bash") is not None` is the obvious guard and it is WRONG on
+    Windows: System32\\bash.exe is the WSL launcher, which is on PATH on every
+    stock runner even when no distribution is installed. It answers which(),
+    then exits non-zero printing a UTF-16 "use `wsl --install`" notice on
+    STDOUT with an empty stderr — so a test guarded by which() runs against a
+    shell that never executed its script, and reports the resulting empty
+    stderr as a failure of the code under test.
+
+    Run something and require the answer back."""
+    exe = shutil.which("bash")
+    if exe is None:
+        return False
+    try:
+        proc = subprocess.run([exe, "-c", "printf __bash_ok__"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and "__bash_ok__" in (proc.stdout or "")
+
+
+HAVE_BASH = _usable_bash()
+needs_bash = pytest.mark.skipif(not HAVE_BASH, reason="no usable bash")
+
+
 def _lock_vars() -> dict[str, str]:
     """The lock is shell-sourceable KEY="VALUE" by design; read it as data."""
     out: dict[str, str] = {}
@@ -119,7 +146,7 @@ def test_every_name_the_SCRIPT_derives_exists_in_the_lock():
         f"lock declares {sorted(n for n in lock_names if 'SHA256' in n)}")
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
+@needs_bash
 def test_corrupt_bytes_are_REFUSED_and_the_cache_entry_is_dropped():
     """THE NEGATIVE TEST K23 NAMES. Runs the real verify_sha256 out of the real
     script against bytes that do not match, and asserts a non-zero exit.
@@ -152,7 +179,7 @@ def test_corrupt_bytes_are_REFUSED_and_the_cache_entry_is_dropped():
         assert not victim.exists(), "the corrupt artifact was left in the cache"
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
+@needs_bash
 def test_matching_bytes_pass():
     """MUTATION THIS CATCHES: a verifier that rejects everything, which would
     pass the negative test above while making the build unusable. Both
