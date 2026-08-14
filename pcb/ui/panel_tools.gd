@@ -3706,34 +3706,16 @@ static func _place_via(host, args: Dictionary) -> Dictionary:
 	var pos := Vector2(float(args["x_mm"]), float(args["y_mm"]))
 	var size_mm := float(args.get("size_mm", 0.8))
 	var drill_mm := float(args.get("drill_mm", 0.4))
-	if size_mm <= 0.0 or drill_mm <= 0.0:
-		return _err("size_mm and drill_mm must be positive (got %.4f / %.4f)" % [size_mm, drill_mm])
-	if drill_mm >= size_mm:
-		# An annular ring of zero or less is not a via, it is a hole through a
-		# pad that no longer exists. Refused here rather than left for the
-		# fabricator's DFM report.
-		return _err("drill_mm (%.4f) must be smaller than size_mm (%.4f) — the difference IS the annular ring"
-			% [drill_mm, size_mm])
 
-	# Board bounds. Copper outside the outline is not manufacturable, and the
-	# agent cannot see the board to notice it asked for it.
-	var w := float(data.board_width) if "board_width" in data else 0.0
-	var h := float(data.board_height) if "board_height" in data else 0.0
-	if w > 0.0 and h > 0.0 and (pos.x < 0.0 or pos.y < 0.0 or pos.x > w or pos.y > h):
-		return {"success": false, "error": "outside_board",
-			"note": "(%.3f, %.3f) is outside this %.3f x %.3f mm board" % [pos.x, pos.y, w, h]}
-
-	# Stacking two holes at one point is the same mistake RoutingWorkspace.add_via
-	# refuses by name, and for the same reason — it is a different mistake from
-	# "nothing is there", and must say so rather than silently drilling twice.
-	for existing in data.vias:
-		if existing is Dictionary:
-			var claim: float = maxf(float((existing as Dictionary).get("size", 0.8)) * 0.5, 0.05)
-			if data.via_position(existing).distance_to(pos) <= claim:
-				return {"success": false, "error": "via_already_there",
-					"via_id": str((existing as Dictionary).get("id", "")),
-					"note": "via '%s' already occupies (%.3f, %.3f) within its own %.3fmm claim"
-						% [str((existing as Dictionary).get("id", "")), pos.x, pos.y, claim]}
+	# THE MODEL'S OWN RULE, not a re-implementation of it (epoch NLC C2, canvas
+	# round). PCBData.via_author_error is the ONE place bounds, ring and
+	# stacking are decided, and the canvas Via tool reads the identical call —
+	# so a human's click and an agent's tool call are refused for the same
+	# reasons in the same words. The same shape _add_trace takes from
+	# trace_author_error.
+	var refusal: String = str(data.via_author_error(pos, size_mm, drill_mm))
+	if not refusal.is_empty():
+		return {"success": false, "error": "via_not_placeable", "note": refusal}
 
 	var span: Array = PcbLayerStack.default_through_via_span()
 	var via_id: String = str(data.add_via({

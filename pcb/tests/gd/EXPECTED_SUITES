@@ -110,8 +110,16 @@ test_view_state.gd assertions=37
 # NEW at epoch NLC C2 (item 019fff60e05a): minerva_pcb_place_via, the direct
 # board via. Grown at C3 (item 01a001c39aa3) with minerva_pcb_add_trace's two
 # groups — SAME suite on purpose: the pair is one parity gap answered twice and
-# has to stay symmetric. Count is 56 = 52 static call sites
-# (10 + 7 + 11 + 6 + 11 + 11 by group) + 4 for the extra iterations of group 2's
-# three-key loop, the counting rule's "+ extra loop iterations" term.
-# Provisional until testex, same as its siblings above.
-test_direct_copper_verbs.gd assertions=56
+# has to stay symmetric. Grown again in the canvas round: group 7 pins the
+# HUMAN's Via tool (a registered toolbar button + a click that lands copper
+# through the same model rule the MCP verb reads) and group 8 pins that rule
+# directly.
+#
+# COUNT = 70. That is 66 STATIC call sites plus 4 for the extra iterations of
+# group 2's three-key loop — the counting rule's "+ extra loop iterations" term.
+# Per group the static counts are 10, 3, 12, 6, 11, 11, 9, 4; group 2's 3 static
+# sites execute 7 times, which is where the +4 comes from. Stated as static-vs-
+# executed on purpose: an earlier version of this comment mixed the two and
+# printed an arithmetic that did not add up, which would teach the next
+# re-pinner the wrong rule (cold review, finding 8). Provisional until testex.
+test_direct_copper_verbs.gd assertions=70

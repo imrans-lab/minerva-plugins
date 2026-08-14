@@ -36,6 +36,8 @@ func _init() -> void:
 	_run_round_trips_with_delete()
 	_run_add_trace_lands_copper()
 	_run_add_trace_refusals()
+	_run_human_via_tool()
+	_run_one_rule_for_both_surfaces()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -141,7 +143,13 @@ func _run_refusals_change_nothing() -> void:
 	var off: Dictionary = PanelTools._place_via(host,
 		{"x_mm": float(data.board_width) + 50.0, "y_mm": 1.0})
 	check("a point off the board refuses", not bool(off.get("success", true)))
-	check_eq("named outside_board", str(off.get("error", "")), "outside_board")
+	check_eq("named via_not_placeable", str(off.get("error", "")), "via_not_placeable")
+	# ONE code, the MODEL's own words. via_author_error is the single rule the
+	# canvas Via tool reads too, so a click and a tool call are refused
+	# identically — the distinguishing detail lives in the message, not in a
+	# code the two surfaces would have to keep in step by hand.
+	check("and says it is off the board",
+		str(off.get("note", "")).contains("outside this"))
 
 	# The annular ring IS size minus drill, so a drill at least as wide as the
 	# pad is a hole through nothing.
@@ -160,8 +168,9 @@ func _run_refusals_change_nothing() -> void:
 		bool(PanelTools._place_via(host, {"x_mm": 5.0, "y_mm": 5.0}).get("success", false)))
 	var stacked: Dictionary = PanelTools._place_via(host, {"x_mm": 5.0, "y_mm": 5.0})
 	check("a second via at the same point refuses", not bool(stacked.get("success", true)))
-	check_eq("named via_already_there", str(stacked.get("error", "")), "via_already_there")
-	check("and names the via already there", not str(stacked.get("via_id", "")).is_empty())
+	check_eq("named via_not_placeable", str(stacked.get("error", "")), "via_not_placeable")
+	check("and says a via is already there",
+		str(stacked.get("note", "")).contains("already sits"))
 	check_eq("still exactly one via", data.vias.size(), 1)
 
 	ctx["driver"].free_panel(ctx["panel"])
@@ -189,7 +198,10 @@ func _run_round_trips_with_delete() -> void:
 	check_eq("board has one via once more", data.vias.size(), 1)
 	# A re-place must not collide with the freed id — the model's id high-water
 	# mark is what prevents it, and this is the caller that would notice.
-	check("the re-placed via has a non-empty id", not str(again.get("via_id", "")).is_empty())
+	# ASSERTS INEQUALITY, not merely non-emptiness (cold review, finding 9): a
+	# colliding id is also non-empty, so the weaker form could not fail.
+	check_eq("the re-placed via gets a FRESH id, not the freed one",
+		str(again.get("via_id", "")) != via_id, true)
 
 	ctx["driver"].free_panel(ctx["panel"])
 
@@ -291,5 +303,81 @@ func _run_add_trace_refusals() -> void:
 	check("a missing layer refuses", not bool(no_layer.get("success", true)))
 
 	check_eq("not one refusal wrote copper", data.traces.size(), 0)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 7. THE HUMAN'S VIA TOOL — the half the owner actually asked for ───────────
+#
+# "There is no tool to place a via for the human, only propose." That was first
+# answered with minerva_pcb_place_via, an MCP verb — the AGENT's half. The owner
+# drives this panel with buttons and cannot call MCP, so the reported gap stayed
+# open. These assertions are about the CANVAS.
+
+const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
+
+
+func _run_human_via_tool() -> void:
+	print("-- 7. ToolMode.VIA: a button, a click, a via --")
+	var ctx := _ctx()
+	var panel = ctx["panel"]
+	var data = ctx["data"]
+	# get_canvas lives on the annotation HOST, not the panel (PcbAnnotationHost
+	# :1079) — checked rather than assumed.
+	var canvas = ctx["host"].get_canvas()
+	check("the host exposes the canvas", canvas != null)
+	if canvas == null:
+		ctx["driver"].free_panel(ctx["panel"])
+		return
+
+	# THE AFFORDANCE EXISTS. Without a registered tool button there is nothing
+	# for a person to press, and every assertion below would be testing a
+	# capability only an agent can reach — the exact substitution this group
+	# exists to prevent.
+	check("a Via tool button is registered in the toolbar",
+		(panel._tool_buttons as Dictionary).has(PcbCanvasScript.ToolMode.VIA))
+
+	canvas.set_tool_mode(PcbCanvasScript.ToolMode.VIA)
+	check_eq("the canvas arms the Via tool", int(canvas.tool_mode),
+		int(PcbCanvasScript.ToolMode.VIA))
+
+	var before: int = data.vias.size()
+	canvas._handle_via_click(Vector2(12.0, 9.0))
+	check_eq("a click places exactly one via", data.vias.size(), before + 1)
+
+	var placed: Dictionary = data.vias[data.vias.size() - 1]
+	check_eq("at the clicked point", data.via_position(placed), Vector2(12.0, 9.0))
+	# A v1 via is a through via — no span control on this tool, and none needed.
+	check_eq("recorded as a through via (top)", str(placed.get("from_layer", "")), "top")
+	check_eq("recorded as a through via (bottom)", str(placed.get("to_layer", "")), "bottom")
+
+	# SAME RULE AS THE AGENT'S VERB. Clicking the same point again must refuse
+	# for the same reason minerva_pcb_place_via refuses it — one model rule,
+	# read by both surfaces, so the two can never drift.
+	canvas._handle_via_click(Vector2(12.0, 9.0))
+	check_eq("clicking an occupied point places nothing", data.vias.size(), before + 1)
+
+	# And off the board.
+	canvas._handle_via_click(Vector2(float(data.board_width) + 25.0, 5.0))
+	check_eq("clicking off the board places nothing", data.vias.size(), before + 1)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 8. the model rule itself, read by BOTH surfaces ───────────────────────────
+
+func _run_one_rule_for_both_surfaces() -> void:
+	print("-- 8. via_author_error is the single rule --")
+	var ctx := _ctx()
+	var data = ctx["data"]
+
+	check_eq("a clean point is placeable",
+		str(data.via_author_error(Vector2(5.0, 5.0), 0.8, 0.4)), "")
+	check("a drill wider than the pad is refused",
+		not str(data.via_author_error(Vector2(5.0, 5.0), 0.4, 0.8)).is_empty())
+	check("a drill equal to the pad is refused (the ring would be zero)",
+		not str(data.via_author_error(Vector2(5.0, 5.0), 0.4, 0.4)).is_empty())
+	check("a point off the board is refused",
+		not str(data.via_author_error(Vector2(-1.0, 5.0), 0.8, 0.4)).is_empty())
 
 	ctx["driver"].free_panel(ctx["panel"])

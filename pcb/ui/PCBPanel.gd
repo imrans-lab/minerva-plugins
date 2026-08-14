@@ -237,6 +237,10 @@ var _zone_net_option: OptionButton = null
 ## resting state and means "follow the toolbar layer filter" — the behaviour that
 ## was the ONLY behaviour before this control existed.
 var _zone_layer_option: OptionButton = null
+## Continuation-layer picker for the Add Via proposal gesture (epoch NLC C2,
+## canvas round). Visible only while that tool is armed, the same contextual
+## rule _zone_layer_option follows.
+var _via_continuation_option: OptionButton = null
 ## Width box for the Draw ▸ Trace tool (epoch 6 boundary fix). Same arming rules
 ## again; it starts at the board's design-rule width, which is what the tool used
 ## unconditionally before there was any UI for it.
@@ -1502,6 +1506,18 @@ func _build_sidebar() -> VBoxContainer:
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
 		"Draw a parallel bus (pick nets by clicking pads; Enter commits, Shift+Enter proposes)", "bus_24.png")
 
+	# Via (epoch NLC C2, item 019fff60e05a). Sits with the constructive Draw
+	# tools because it ADDS copper, one click at a time.
+	#
+	# Why it exists: the owner's N-layer HITL reported "there is no tool to
+	# place a via for the human, only propose", and the first answer to that was
+	# minerva_pcb_place_via — an MCP verb, which is the AGENT's half. The owner
+	# drives this panel with buttons and cannot call MCP, so until this button
+	# existed the gap they reported was still open. Both surfaces, or it is not
+	# delivered.
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.VIA, "Via",
+		"Click to place a through via (Esc to disarm)", "via_24.png")
+
 	# Eraser (item 019fb934827776) + Delete/trash-can (item 019fb92f8b83) live
 	# HERE, not in the Select section above (cold-review N3) — the section
 	# comment's own taxonomy draws the line at "the Select tools above ...
@@ -1630,6 +1646,22 @@ func _build_sidebar() -> VBoxContainer:
 	add_via_btn.pressed.connect(_on_add_via_button_pressed)
 	hints_flow.add_child(add_via_btn)
 	_route_flow_buttons["add_via"] = add_via_btn
+
+	# THE CONTINUATION-LAYER PICKER (epoch NLC C2, canvas round). A via joins
+	# every copper layer; what the tool cannot know is which layer the RUN
+	# carries on to afterwards. On a 2-layer board the opposite side is the only
+	# answer and the gesture resolves it alone, so this stays on "Opposite
+	# side". On a deeper stack there are several answers, and before this
+	# existed the gesture refused an inner-layer run with a toast naming an MCP
+	# verb — an instruction the owner, who drives this panel with buttons,
+	# cannot follow. That was worse than the gap it replaced.
+	_via_continuation_option = OptionButton.new()
+	_via_continuation_option.name = "ViaContinuationOption"
+	_via_continuation_option.tooltip_text = _wrap_tooltip(
+		"Layer the run continues on after the via (the via itself always crosses the whole board)")
+	_via_continuation_option.visible = false
+	_rebuild_via_continuation_option()
+	hints_flow.add_child(_via_continuation_option)
 
 	# Propose button (C5, docket 019f6c465fd8, deliverable 1): explicit-propose
 	# UX — the router NEVER runs implicitly (product contract v2). This is a
@@ -3315,6 +3347,7 @@ func _activate_route_flow_tool(kind_key: String) -> void:
 	# active_tool_changed synchronously, and _on_overlay_active_tool_changed
 	# must see a match (no self-reset).
 	_active_route_flow_kind = kind_key
+	_sync_via_continuation_visibility()
 	_active_route_flow_tool = tool
 	overlay.set_active_tool(tool)
 
@@ -3411,6 +3444,7 @@ func _teardown_active_route_flow_tool() -> void:
 	_active_route_flow_tool.on_deactivate()
 	_active_route_flow_tool = null
 	_active_route_flow_kind = ""
+	_sync_via_continuation_visibility()
 
 
 func _untoggle_route_flow_buttons() -> void:
@@ -3481,6 +3515,7 @@ func _on_overlay_active_tool_changed(tool: Object) -> void:
 		return
 	_active_route_flow_tool = null
 	_active_route_flow_kind = ""
+	_sync_via_continuation_visibility()
 	_untoggle_route_flow_buttons()
 	_update_route_flow_mode_label("")
 	# Reverse half of bug 019fb5e9c8ac: another surface (the dock's
@@ -4070,6 +4105,52 @@ func _on_zone_net_selected(index: int) -> void:
 ## COPPER ONLY — a zone is copper (or a keepout over copper), and the canvas
 ## refuses a non-copper override anyway, so offering a declared non-copper layer
 ## here would offer a choice that does nothing.
+## The continuation layer the human picked, canonical, or "" for "opposite
+## side" (let the gesture resolve it — correct and unambiguous on 2 layers).
+##
+## Read by pcb_route_hint_kind.gd's ViaInsertTool through host.get_panel(),
+## duck-typed: a panel predating this control simply answers nothing and the
+## gesture behaves exactly as it did before.
+## Shown only while Add Via is armed — a layer picker standing permanently in
+## the Hints flow would read as applying to every hint tool there.
+func _sync_via_continuation_visibility() -> void:
+	if _via_continuation_option == null:
+		return
+	var armed := _active_route_flow_kind == "add_via"
+	_via_continuation_option.visible = armed
+	if armed:
+		_rebuild_via_continuation_option()
+
+
+func via_continuation_layer() -> String:
+	if _via_continuation_option == null:
+		return ""
+	var idx := _via_continuation_option.selected
+	if idx < 0:
+		return ""
+	var meta: Variant = _via_continuation_option.get_item_metadata(idx)
+	return str(meta) if meta != null else ""
+
+
+## Same list and same rules as the zone picker — _declared_copper_layer_choices
+## is the ONE place "which copper layers does this board have" is answered.
+func _rebuild_via_continuation_option() -> void:
+	if _via_continuation_option == null:
+		return
+	var previous := via_continuation_layer()
+	_via_continuation_option.clear()
+	_via_continuation_option.add_item("Opposite side")
+	_via_continuation_option.set_item_metadata(0, "")
+	var selected := 0
+	for choice in _declared_copper_layer_choices():
+		var idx := _via_continuation_option.item_count
+		_via_continuation_option.add_item(str(choice["label"]))
+		_via_continuation_option.set_item_metadata(idx, str(choice["canon"]))
+		if str(choice["canon"]) == previous:
+			selected = idx
+	_via_continuation_option.select(selected)
+
+
 func _rebuild_zone_layer_option() -> void:
 	if _zone_layer_option == null:
 		return
@@ -5654,6 +5735,7 @@ const _MODE_HINTS := {
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
 	11: "Click pads/traces to pick nets (2+), Enter to draw the spine, then click vertices and Enter/dbl-click to commit",  # BUS
+	12: "Click to place a through via — it connects no trace by itself",  # VIA
 }
 const _ROUTE_FLOW_LABELS := {
 	"single_trace": "Single Trace",

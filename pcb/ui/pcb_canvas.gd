@@ -492,7 +492,7 @@ var _space_pan_armed: bool = false
 ## APPENDED AT THE END, same append-only rule as CUTOUT's own note above —
 ## PCBPanel.gd's raw-int status tables (_MODE_HINTS, _update_status's
 ## mode_names) both gain an entry for it.
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT, BUS }
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT, BUS, VIA }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
 ## Transient user-facing feedback from the zone tools ("pick a net", "needs 3
@@ -3415,6 +3415,17 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_eraser_click(world_pos)
 				return
 
+			# Via tool (epoch NLC C2, item 019fff60e05a): one click, one via.
+			# Owns the click outright on the same rule as the tools above.
+			#
+			# This tool exists because the owner could not place a via at all
+			# without an agent: minerva_pcb_place_via shipped first and answered
+			# only the agent's half of "there is no tool to place a via for the
+			# HUMAN". A capability is not delivered until BOTH surfaces have it.
+			if tool_mode == ToolMode.VIA:
+				_handle_via_click(world_pos)
+				return
+
 			# Pan tool OR Space-drag: a left-drag pans the whole board view.
 			# (Discoverability for finding 2 — a visible Pan tool + the familiar
 			# Space+drag, alongside the existing right/middle-drag pan.)
@@ -5691,6 +5702,50 @@ static func _annotation_delete_notice(ann_removed: int, board_removed: int) -> S
 ## can's all-locked case, an eraser miss is not reported; that is the
 ## "empty click does nothing" ruling itself, and a locked hit is just another
 ## kind of miss). There is no drag-sweep here by design (v1 scope).
+## Default via geometry for the canvas tool, matching minerva_pcb_place_via's
+## defaults and _list_vias' read-side fallbacks. Not a preference yet — when one
+## is added it belongs in PCBPreferences beside the trace width, read by BOTH
+## this tool and the MCP verb, never by one of them.
+const VIA_TOOL_SIZE_MM: float = 0.8
+const VIA_TOOL_DRILL_MM: float = 0.4
+
+## Place ONE board via at the clicked point — the human half of epoch NLC C2.
+##
+## Shares PCBData.via_author_error with minerva_pcb_place_via, so a click and a
+## tool call are refused for the same reasons in the same words; the same
+## arrangement _commit_trace and minerva_pcb_add_trace have through
+## trace_author_error. A refusal is ANNOUNCED on the status line rather than
+## swallowed: a click that silently does nothing is indistinguishable from a
+## dead tool, which is how the owner experienced the missing via tool.
+##
+## A v1 via is a THROUGH via, so there is no span to pick and no layer control
+## on this tool. Which layer a RUN continues on past a via is a different
+## question, asked by the route-hint via gesture, not by this one.
+func _handle_via_click(world_pos: Vector2) -> void:
+	if not data:
+		return
+	var pos := _author_point(world_pos)
+	var refusal: String = str(data.via_author_error(pos, VIA_TOOL_SIZE_MM, VIA_TOOL_DRILL_MM))
+	if not refusal.is_empty():
+		trace_tool_message.emit(refusal)
+		return
+	var span: Array = PcbLayerStack.default_through_via_span()
+	var via_id: String = str(data.add_via({
+		"position": pos,
+		"net_name": "",
+		"size": VIA_TOOL_SIZE_MM,
+		"drill": VIA_TOOL_DRILL_MM,
+		"from_layer": str(span[0]),
+		"to_layer": str(span[1]),
+	}))
+	# Mutate-then-snapshot, the model's house rule: add_via journals its own
+	# entry, this owes the single undoable history step.
+	data.save_to_history("Place via")
+	trace_tool_message.emit("Via %s placed at (%.3f, %.3f) — it connects no trace by itself." \
+		% [via_id, pos.x, pos.y])
+	queue_redraw()
+
+
 func _handle_eraser_click(world_pos: Vector2) -> void:
 	if not data:
 		return
@@ -5936,7 +5991,7 @@ func _cutout_visible() -> bool:
 ## reached this far, hit-resolve) UNDER an armed bus tool, advertising a drag
 ## the click ladder's early return would never let happen.
 func _zone_vertex_edit_active() -> bool:
-	if tool_mode == ToolMode.INSPECT_PIN or tool_mode == ToolMode.TRACE \
+	if tool_mode == ToolMode.VIA or tool_mode == ToolMode.INSPECT_PIN or tool_mode == ToolMode.TRACE \
 			or tool_mode == ToolMode.ERASER or tool_mode == ToolMode.PAN \
 			or tool_mode == ToolMode.CUTOUT or tool_mode == ToolMode.BUS:
 		return false

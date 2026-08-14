@@ -1121,11 +1121,25 @@ class ViaInsertTool:
 		# silently choose where copper lands is the same class of surprise this
 		# station exists to remove, and would make "what am I looking at" and
 		# "what am I authoring" one setting.
-		var to_layer := _continuation_for(from_layer)
+		# THE HUMAN'S PICK WINS. The Add Via tool carries a continuation-layer
+		# selector (PCBPanel._via_continuation_option); "Opposite side" — its
+		# default, and an empty answer here — means "resolve it yourself", which
+		# is unambiguous on a 2-layer run and refuses out loud on an inner one.
+		#
+		# Duck-typed: a panel predating the selector answers nothing and this
+		# behaves exactly as it did before.
+		var chosen := ""
+		if panel.has_method("via_continuation_layer"):
+			chosen = str(panel.via_continuation_layer())
+		var to_layer := chosen if not chosen.is_empty() else _continuation_for(from_layer)
 		if to_layer.is_empty():
-			_toast(("This run is on %s. A via here could continue on any copper layer, and the canvas "
-				+ "has no layer picker yet — use minerva_pcb_workspace_edit_candidate "
-				+ "(op:insert_via, to_layer:…) to say which. Nothing was changed.") % from_layer)
+			# NAMES A CONTROL, NEVER A TOOL CALL. An earlier version of this
+			# message told the human to invoke minerva_pcb_workspace_edit_candidate
+			# — an instruction the owner, who drives this panel with buttons,
+			# cannot follow, and therefore worse than the gap it replaced.
+			_toast(("This run is on %s, which a via could leave for any copper layer. "
+				+ "Pick the continuing layer in the selector beside the Add Via button, "
+				+ "then click again. Nothing was changed.") % from_layer)
 			return true
 		var res: Dictionary = workspace.add_via(cid, doc_pos, from_layer, to_layer)
 		if bool(res.get("ok", false)):

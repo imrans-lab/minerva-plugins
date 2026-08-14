@@ -2028,6 +2028,40 @@ func authored_trace_width() -> float:
 ## The one rule Go DOES enforce on traces is IDENTITY, not content: on a v2 board
 ## Validate() requires every trace id to be a minted "trace:<32hex>" — see
 ## create_trace_entity for why that is the id this path mints.
+## Why a via may NOT be placed at `pos`, or "" if it may — the via twin of
+## trace_author_error, and for the same reason: ONE rule read by both the
+## canvas Via tool and minerva_pcb_place_via, so a human's click and an agent's
+## call are refused identically, in identical words.
+##
+## Deliberately NOT a span check. A v1 via is a THROUGH via and its span is
+## always top<->bottom whatever the stack depth, so there is nothing here to
+## choose or validate; blind/buried vias are out of scope (see
+## methods._routes_to_vias' docstring, and epoch NLC C1b).
+func via_author_error(pos: Vector2, size: float, drill: float) -> String:
+	if size <= 0.0 or drill <= 0.0:
+		return "A via needs a positive size and drill (got %.4f / %.4f)." % [size, drill]
+	if drill >= size:
+		# The difference between them IS the annular ring, so a drill at least
+		# as wide as the pad is a hole through nothing. Caught here rather than
+		# in a fabricator's DFM report.
+		return "Drill %.4fmm must be smaller than pad %.4fmm — the difference is the annular ring." \
+			% [drill, size]
+	if board_width > 0.0 and board_height > 0.0 \
+			and (pos.x < 0.0 or pos.y < 0.0 or pos.x > board_width or pos.y > board_height):
+		return "(%.3f, %.3f) is outside this %.3f x %.3f mm board." \
+			% [pos.x, pos.y, board_width, board_height]
+	for existing in vias:
+		if not (existing is Dictionary):
+			continue
+		# The via's OWN disc is the claim, floored so a hairline via still has a
+		# clickable footprint — the same shape RoutingWorkspace.add_via uses for
+		# the same gesture question.
+		var claim: float = maxf(float((existing as Dictionary).get("size", 0.8)) * 0.5, 0.05)
+		if via_position(existing).distance_to(pos) <= claim:
+			return "A via already sits at (%.3f, %.3f)." % [pos.x, pos.y]
+	return ""
+
+
 func trace_author_error(net_name: String, layer: String, point_count: int) -> String:
 	if point_count < 2:
 		return "A trace needs at least 2 points (%d placed)." % point_count
