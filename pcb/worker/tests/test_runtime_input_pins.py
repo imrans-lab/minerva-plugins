@@ -142,9 +142,14 @@ def test_corrupt_bytes_are_REFUSED_and_the_cache_entry_is_dropped():
         )
         proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
-    assert proc.returncode != 0, "corrupt bytes were accepted"
-    assert "FATAL" in proc.stderr
-    assert not victim.exists(), "the corrupt artifact was left in the cache"
+        # INSIDE the with-block ON PURPOSE. TemporaryDirectory deletes the whole
+        # tree on exit, so `not victim.exists()` outside it is true no matter what
+        # the script did — the assertion carrying this test's headline claim was
+        # passing vacuously, and a verifier that exited non-zero while LEAVING the
+        # poisoned artifact cached would have satisfied it.
+        assert proc.returncode != 0, "corrupt bytes were accepted"
+        assert "FATAL" in proc.stderr
+        assert not victim.exists(), "the corrupt artifact was left in the cache"
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash unavailable")
@@ -166,8 +171,11 @@ def test_matching_bytes_pass():
                   + f'\nverify_sha256 "{good}" "{digest}" "fixture"\n')
         proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
-    assert proc.returncode == 0, proc.stderr
-    assert good.exists()
+        # INSIDE the with-block, same reason as above — but here the deleted
+        # tree made the assertion always FALSE rather than always true, so this
+        # test failed on its first ever execution instead of lying quietly.
+        assert proc.returncode == 0, proc.stderr
+        assert good.exists()
 
 
 @pytest.mark.xfail(
