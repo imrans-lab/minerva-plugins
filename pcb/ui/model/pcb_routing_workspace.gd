@@ -2491,6 +2491,14 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 		return _verb_error(ERR_CONTINUATION_NOT_COPPER,
 			"name the layer the run continues on — an unnamed continuation is not a default",
 			candidate_id)
+	# BOTH ENDS, not just the continuation (cold review 2, finding 8). from_layer
+	# goes through the same read-side canonicalizer, so an empty one silently
+	# became "top" and then MATCHED a top segment — succeeding exactly as if the
+	# caller had named it. The guard above would have been half a guard.
+	if str(from_layer).strip_edges().is_empty():
+		return _verb_error(ERR_LAYER_MISMATCH,
+			"name the layer the run arrives on — an unnamed from_layer is not a default",
+			candidate_id)
 	var canon_from := PcbLayerStack.kicad_to_canon(from_layer)
 	var canon_to := PcbLayerStack.kicad_to_canon(to_layer)
 	if not PcbLayerStack.is_copper(canon_to):

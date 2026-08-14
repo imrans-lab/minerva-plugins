@@ -3780,7 +3780,40 @@ func _on_view_menu_id_pressed(id: int) -> void:
 	if _canvas == null or id < 0 or id >= _VIEW_FLAGS.size():
 		return
 	var flag: String = _VIEW_FLAGS[id][1]
-	set_view_flag(flag, not bool(_canvas.get(flag)))
+	# Awaited so the on-demand refresh completes before the handler returns —
+	# nobody is waiting on this return value, but an un-awaited coroutine would
+	# leave the menu path subtly different from the MCP one, and "the same path"
+	# is the whole reason set_view_flag was extracted.
+	await set_view_flag(flag, not bool(_canvas.get(flag)))
+
+
+## Set the toolbar's trace-layer FILTER, moving the OptionButton with it.
+## Returns false for a value this board cannot offer.
+##
+## THE ONE WRITER (cold review 2, finding 1). The filter and the per-layer eyes
+## COMPOSE, and not symmetrically: pcb_canvas._layer_visible gives a specific
+## filter priority over every eye ("a specific filter is an explicit 'show me
+## this layer' — it wins over a hidden eye"). So hiding layers while a specific
+## filter is set changes the eye dictionary and changes NOTHING on screen. Any
+## caller that wants the eyes to govern must put the filter back to "all", and
+## must move the OptionButton too or the toolbar will display a filter the
+## canvas is not using.
+func set_trace_layer_filter(canon: String) -> bool:
+	if _canvas == null or _layer_option == null:
+		return false
+	var want := "all" if canon.is_empty() else canon
+	for i in _layer_option.item_count:
+		if str(_layer_option.get_item_metadata(i)) == want:
+			_layer_option.select(i)
+			_canvas.trace_layer_filter = want
+			_canvas.queue_redraw()
+			return true
+	return false
+
+
+## The filter currently in force ("all" or a canonical layer id).
+func trace_layer_filter() -> String:
+	return str(_canvas.trace_layer_filter) if _canvas != null else "all"
 
 
 ## Every View draw flag's name, in menu order.
@@ -3808,6 +3841,13 @@ func view_flag_names() -> Array:
 ## setter that just assigned the flag would leave an agent looking at an empty
 ## overlay and reporting it as the board's true state. The menu toggles; this
 ## sets — a caller that wants a toggle reads the flag first.
+## AWAITS the on-demand refreshes (cold review 2, finding 2). show_mask and
+## show_fab_preview draw ONLY what a worker round-trip returned, and both
+## refreshers are coroutines. Firing them and returning immediately reported the
+## view as applied while the artwork was still in flight — so a caller that
+## captured the canvas next got an empty or stale overlay under a success reply,
+## which is the false-clean class this whole epoch is about. The menu path awaits
+## it too (a click simply has nobody waiting on the return).
 func set_view_flag(flag: String, value: bool) -> bool:
 	if _canvas == null or not (flag in view_flag_names()):
 		return false
@@ -3815,12 +3855,12 @@ func set_view_flag(flag: String, value: bool) -> bool:
 	if flag == "show_mask" and value:
 		# Fetch on demand rather than on every load: the overlay is off by
 		# default and the worker round-trip belongs to the person who asked.
-		_refresh_mask_view()
+		await _refresh_mask_view()
 	if flag == "show_fab_preview":
 		if value:
 			# Same on-demand rule, and the same reason: this one runs the whole
 			# emission path before it can draw anything.
-			_refresh_fab_preview()
+			await _refresh_fab_preview()
 		else:
 			# Leaving the view DROPS the artwork rather than keeping it warm.
 			# A preview retained across edits would be redisplayed later as

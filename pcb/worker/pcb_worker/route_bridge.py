@@ -1574,13 +1574,25 @@ def _corridor_from_task_constraint(
 
 
 def _xy(raw: Any, what: str) -> list:
-    """A [x_mm, y_mm] pair as floats, or ValueError naming what was wrong."""
+    """A [x_mm, y_mm] pair as finite floats, or ValueError naming what was wrong.
+
+    STRICT ABOUT bool AND NON-FINITE (cold review 2, finding 7). bool is a
+    subclass of int in Python, so a coordinate of ``True`` would have become
+    1.0 — copper at a plausible but unintended point, from an input nobody
+    rejected. float("nan")/float("inf") survive float() just as happily and
+    reach the board as geometry no emitter can draw.
+    """
     if not isinstance(raw, (list, tuple)) or len(raw) < 2:
         raise ValueError(f"{what} is not an [x, y] pair: {raw!r}")
-    try:
-        return [float(raw[0]), float(raw[1])]
-    except (TypeError, ValueError):
-        raise ValueError(f"{what} has non-numeric coordinates: {raw!r}")
+    out = []
+    for axis, value in zip(("x", "y"), raw[:2]):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{what} has a non-numeric {axis}: {value!r}")
+        coord = float(value)
+        if not math.isfinite(coord):
+            raise ValueError(f"{what} has a non-finite {axis}: {value!r}")
+        out.append(coord)
+    return out
 
 
 def _declared_kicad_layers(declared: Any) -> set:
@@ -1777,7 +1789,25 @@ def materialize_detailed_hints(
         # A detailed hint that opts INTO engine layer changes never reaches
         # here (the allow_layer_change guard above sends it to hints_to_router),
         # so honouring authored layers here cannot override an engine decision.
+        # ABSENT vs MALFORMED (cold review 2, finding 3). Only a hint that
+        # carries NO segments at all may take the waypoint path — that path
+        # hardcodes vias:[], so letting an empty-or-wrong-typed `segments`
+        # fall through to it silently discarded any authored vias alongside
+        # it: the exact evaporation this station exists to stop, reached by a
+        # different door. A hint that HAS vias but no usable segments is
+        # malformed, not sparse, and says so.
         authored = kp.get("segments")
+        authored_vias_present = bool(kp.get("vias"))
+        if authored is not None and not (isinstance(authored, list) and authored):
+            warnings.append({"id": ann_id, "message":
+                "detailed hint carries a 'segments' field that is empty or not a list — "
+                "falling back to engine-guided routing"})
+            continue
+        if authored is None and authored_vias_present:
+            warnings.append({"id": ann_id, "message":
+                "detailed hint carries vias but no authored segments to place them on — "
+                "falling back to engine-guided routing"})
+            continue
         if isinstance(authored, list) and authored:
             try:
                 segments = _authored_segments(authored, declared_layers)

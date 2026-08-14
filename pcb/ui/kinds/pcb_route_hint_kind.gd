@@ -1112,9 +1112,9 @@ class ViaInsertTool:
 		# C1b is a separate question from the via's span (always through). On a
 		# two-layer run the opposite side is the ONLY answer, so the gesture may
 		# pick it. On an inner-layer run there are several answers and this
-		# canvas has no layer picker to ask with; that picker arrives with the
-		# via TOOL (station C2), which is where a tool-vs-proposal parity
-		# affordance belongs.
+		# canvas resolves it alone. On an inner-layer run there are several, and
+		# the human names one in the continuation-layer selector beside the Add
+		# Via button (PCBPanel._via_continuation_option, read just below).
 		#
 		# NOT resolved from the toolbar's layer OptionButton, which drives
 		# _canvas.trace_layer_filter — a VIEW filter. Letting a view control

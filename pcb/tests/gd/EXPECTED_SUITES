@@ -107,9 +107,13 @@ test_inner_layer_via_guard.gd assertions=39
 # by construction (10 + 7 + 9 + 11), grown to 46 by the cold review's finding 5:
 # group 5 pins TYPE validation (a non-boolean flag value, a non-object `flags`,
 # an empty layer name), each of which could previously slip past the name-only
-# validation and land a partial write. Provisional for the same reason as the
+# validation and land a partial write. Grown again to 57 by the CODEX review's
+# finding 1: group 3 now asserts ACTUAL visibility (is_layer_visible) with the
+# toolbar deliberately left on a specific layer — the state in which soloing
+# used to change the eyes and nothing on screen — and group 6 pins the newly
+# writable trace_layer_filter. Provisional for the same reason as the
 # suite above — no run happens before the Codex review — and re-pins at testex.
-test_view_state.gd assertions=46
+test_view_state.gd assertions=57
 # NEW at epoch NLC C2 (item 019fff60e05a): minerva_pcb_place_via, the direct
 # board via. Grown at C3 (item 01a001c39aa3) with minerva_pcb_add_trace's two
 # groups — SAME suite on purpose: the pair is one parity gap answered twice and

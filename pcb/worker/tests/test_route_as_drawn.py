@@ -397,3 +397,79 @@ def test_unknown_declared_stack_does_not_block_authored_geometry():
         [_authored_hint()], board, declared_layers=None)
     assert ids == ["ann1"]
     assert [s["layer"] for s in routes[0]["segments"]] == ["F.Cu", "In1.Cu"]
+
+
+def test_empty_segments_does_not_silently_drop_authored_vias():
+    """CODEX FINDING 3. Authored geometry was honoured only when `segments` was
+    a NON-EMPTY list; every other shape fell through to the waypoint path, which
+    hardcodes vias:[]. So a hint with segments:[] and a real via returned a
+    successful route with the hole silently gone — this epoch's headline defect,
+    reached by a different door. Absent geometry and MALFORMED geometry are now
+    different things."""
+    board = route_bridge.board_to_router(_quad_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["segments"] = []
+    routes, _, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board, declared_layers=QUAD_STACK)
+
+    assert routes == [] and ids == []
+    assert any("empty or not a list" in w.get("message", "") for w in warnings), warnings
+
+
+def test_wrong_typed_segments_is_malformed_not_absent():
+    board = route_bridge.board_to_router(_quad_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["segments"] = {"not": "a list"}
+    routes, _, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board, declared_layers=QUAD_STACK)
+    assert routes == [] and ids == []
+    assert warnings
+
+
+def test_vias_without_any_segments_refuse_rather_than_evaporate():
+    """A hint carrying vias but no segments to place them on is malformed, not
+    sparse — taking the waypoint path would drop the vias without a word."""
+    board = route_bridge.board_to_router(_quad_board())
+    hint = _detailed_hint()
+    hint["kind_payload"]["vias"] = [[30.0, 20.32]]
+    routes, _, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board, declared_layers=QUAD_STACK)
+    assert routes == [] and ids == []
+    assert any("no authored segments" in w.get("message", "") for w in warnings), warnings
+
+
+@pytest.mark.parametrize("bad", [[True, 20.0], [float("nan"), 20.0],
+                                 [float("inf"), 20.0], ["3", 20.0]])
+def test_via_coordinates_reject_bool_and_non_finite(bad):
+    """CODEX FINDING 7. bool is a subclass of int in Python, so [True, 20] became
+    [1.0, 20.0] — copper at a plausible but unintended point. NaN/Infinity
+    survive float() just as happily."""
+    board = route_bridge.board_to_router(_quad_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["vias"] = [bad]
+    routes, _, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board, declared_layers=QUAD_STACK)
+    assert routes == [] and ids == []
+    assert warnings
+
+
+def test_authored_vias_are_counted_in_via_count():
+    """CODEX FINDING 4. via_count came only from the engine result, so a run
+    whose only via was AUTHORED reported 0 while routes[0].vias held it and the
+    commit went on to create it — the headline number said nothing happened."""
+    from pcb_worker import methods
+
+    drawn = [{"net": "SIG", "segments": [], "vias": [[1.0, 2.0], [3.0, 4.0]],
+              "as_drawn": True, "hint_id": "ann1"}]
+    payload = {"routes": [{"net": "OTHER", "vias": [[9.0, 9.0]]}],
+               "via_count": 1, "success": True, "unrouted": []}
+
+    # THE PRODUCTION MERGE, called. The arithmetic was inline in _route(), where
+    # the only way to reach it was a whole compiled board — so nothing reached
+    # it, which is how the bug survived. Re-implementing the sum here instead
+    # would be a test that cannot fail.
+    methods._merge_drawn_routes(payload, drawn)
+
+    assert payload["via_count"] == 3, "engine's 1 + the 2 authored"
+    assert payload["routes"][0]["as_drawn"] is True, "as-drawn routes lead"
+    assert len(payload["routes"]) == 2

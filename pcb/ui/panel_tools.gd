@@ -151,7 +151,7 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_pcb_set_view":
 			return _set_view(host, args)
 		"minerva_pcb_view_state":
-			return _view_state(host, args)
+			return await _view_state(host, args)
 		"minerva_pcb_apply_route_hints":
 			return await _apply_route_hints(host, args)
 		"minerva_pcb_hint_undo":
@@ -1571,11 +1571,20 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 ## and one typo changes nothing and says which was wrong, rather than leaving
 ## the view half-moved — the caller cannot see the screen to notice.
 ##
-## trace_layer_filter is REPORTED BUT NOT WRITABLE: it is backed by the
-## toolbar's layer OptionButton, and setting it from here would leave that
-## control displaying a filter the canvas is no longer using. Soloing a layer
-## from MCP goes through hidden_layers, which the View menu rebuilds its check
-## marks from and so cannot drift.
+##   trace_layer_filter: "all" | a declared copper layer id
+##
+## THE FILTER AND THE EYES COMPOSE, ASYMMETRICALLY, and callers must know it:
+## pcb_canvas._layer_visible gives a SPECIFIC filter priority over every
+## per-layer eye. So hiding layers while the toolbar sits on one layer changes
+## the eye dictionary and nothing on screen. Applying `hidden_layers` therefore
+## puts the filter back to "all" (reported in `changed`) so the eyes govern —
+## otherwise the solo gesture would silently do the opposite of what was asked.
+## An explicit `trace_layer_filter` in the SAME request is applied last and
+## wins, so a caller can ask for both and get exactly what they wrote.
+##
+## The filter became writable once PCBPanel.set_trace_layer_filter existed to
+## move the OptionButton with the canvas; before that, writing it here would
+## have left the toolbar displaying a filter the canvas was not using.
 static func _view_state(host, args: Dictionary) -> Dictionary:
 	if host == null or not host.has_method("get_canvas"):
 		return _err("PCB view control not available")
@@ -1622,6 +1631,29 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 					"note": "flag '%s' must be true or false, got %s"
 						% [str(k), str(want_flags[k])]}
 
+	# trace_layer_filter is WRITABLE since the panel gained a setter that moves
+	# the OptionButton with the canvas (cold review 2, finding 1). It was
+	# read-only before precisely because writing it here would have left the
+	# toolbar showing a filter the canvas no longer used.
+	var want_filter := ""
+	var set_filter := args.has("trace_layer_filter")
+	if set_filter:
+		want_filter = str(args.get("trace_layer_filter", "")).strip_edges()
+		if want_filter.is_empty():
+			return {"success": false, "error": "invalid_args",
+				"note": "trace_layer_filter must be \"all\" or a declared copper layer id"}
+		if want_filter != "all":
+			want_filter = PcbLayerStack.kicad_to_canon(want_filter)
+			if not (want_filter in declared):
+				return {"success": false, "error": "layer_not_on_stack",
+					"unknown": str(args.get("trace_layer_filter", "")),
+					"declared_layers": declared,
+					"note": "this board declares %s — it cannot filter to '%s'"
+						% [str(declared), str(args.get("trace_layer_filter", ""))]}
+		if not panel.has_method("set_trace_layer_filter"):
+			return {"success": false, "error": "unsupported",
+				"note": "this panel predates the trace_layer_filter setter"}
+
 	var want_hidden: Array = []
 	var set_hidden := args.has("hidden_layers")
 	if set_hidden:
@@ -1656,14 +1688,37 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 	for k in want_flags.keys():
 		var flag := str(k)
 		var value := bool(want_flags[k])
-		if bool(canvas.get(flag)) != value and panel.set_view_flag(flag, value):
+		# AWAITED: set_view_flag runs the on-demand mask/fab-preview worker
+		# round-trips, so returning before it settles would report a view as
+		# applied while its artwork was still in flight.
+		if bool(canvas.get(flag)) != value and await panel.set_view_flag(flag, value):
 			changed.append(flag)
 	if set_hidden and canvas.has_method("set_layer_hidden"):
+		# THE FILTER MUST YIELD TO THE EYES FIRST (cold review 2, finding 1).
+		# pcb_canvas._layer_visible gives a specific trace_layer_filter priority
+		# over every per-layer eye, so hiding layers while the toolbar sits on a
+		# specific layer changes the eye dictionary and NOTHING on screen — the
+		# solo gesture would silently do the opposite of what was asked. Putting
+		# the filter back to "all" through the panel's own setter moves the
+		# OptionButton with it, so the toolbar never displays a filter the canvas
+		# is not using. Reported in `changed`, because it is a visible change to
+		# a control the human can see.
+		if panel.has_method("set_trace_layer_filter") \
+				and str(canvas.get("trace_layer_filter")) not in ["", "all"]:
+			if panel.set_trace_layer_filter("all"):
+				changed.append("trace_layer_filter")
 		for canon in declared:
 			var should_hide: bool = str(canon) in want_hidden
 			if bool(canvas.is_layer_hidden(str(canon))) != should_hide:
 				canvas.set_layer_hidden(str(canon), should_hide)
 				changed.append("layer:%s" % str(canon))
+	# LAST, deliberately: an EXPLICIT filter in the same request outranks the
+	# implicit "all" the hidden_layers path just set, so a caller can ask for
+	# both and get what they literally asked for.
+	if set_filter and str(canvas.get("trace_layer_filter")) != want_filter:
+		if panel.set_trace_layer_filter(want_filter):
+			if not ("trace_layer_filter" in changed):
+				changed.append("trace_layer_filter")
 
 	# ── report the whole resulting state ─────────────────────────────────────
 	var flags_out: Dictionary = {}
@@ -3678,7 +3733,20 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 	if not refusal.is_empty():
 		return {"success": false, "error": "trace_not_authorable", "note": refusal}
 
-	var width: float = float(args.get("width_mm", 0.0))
+	# WIDTH IS CHECKED, NOT COERCED (cold review 2, finding 6). Only an OMITTED
+	# or exactly-zero width is the documented "use the board default" sentinel.
+	# create_trace_entity treats ANY non-positive value as that sentinel, so
+	# width_mm:-1 — schema-valid numeric input — silently landed real copper at
+	# the authored default under a success reply, and a wrong-typed value
+	# coerced to 0.0 and did the same.
+	var width: float = 0.0
+	if args.has("width_mm"):
+		if not (args["width_mm"] is float or args["width_mm"] is int):
+			return _err("width_mm must be a number, got %s" % str(args["width_mm"]))
+		width = float(args["width_mm"])
+		if is_nan(width) or is_inf(width) or width < 0.0:
+			return _err("width_mm must be a positive number, or 0 to use the board's authored width (got %s)"
+				% str(args["width_mm"]))
 	var trace = data.create_trace_entity(net_name, layer, pts, width)
 	if trace == null:
 		return _err("the board model refused this trace — see the log")

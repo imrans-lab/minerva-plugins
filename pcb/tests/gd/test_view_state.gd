@@ -38,11 +38,12 @@ var _fail := 0
 
 func _init() -> void:
 	print("=== PCB view_state (NLC C4) ===\n")
-	_run_read_reports_the_canvas()
-	_run_flags_are_writable_and_absolute()
-	_run_layers_solo()
-	_run_refusals_change_nothing()
-	_run_types_are_validated()
+	await _run_read_reports_the_canvas()
+	await _run_flags_are_writable_and_absolute()
+	await _run_layers_solo()
+	await _run_refusals_change_nothing()
+	await _run_types_are_validated()
+	await _run_explicit_filter_wins()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -76,8 +77,12 @@ func _ctx() -> Dictionary:
 	return {"driver": driver, "panel": panel, "host": host, "canvas": host.get_canvas()}
 
 
+## AWAITED: _view_state runs the on-demand mask/fab-preview worker round-trips
+## through PCBPanel.set_view_flag, so it is a coroutine. Calling it without
+## await would hand back a coroutine object and every assertion below would be
+## reading fields off the wrong thing.
 func _view(host, args: Dictionary = {}) -> Dictionary:
-	return PanelTools._view_state(host, args)
+	return await PanelTools._view_state(host, args)
 
 
 # ── 1. reading reports what the canvas actually holds ─────────────────────────
@@ -89,7 +94,7 @@ func _run_read_reports_the_canvas() -> void:
 	var canvas = ctx["canvas"]
 	var panel = ctx["panel"]
 
-	var res: Dictionary = _view(host)
+	var res: Dictionary = await _view(host)
 	check("read succeeds", bool(res.get("success", false)))
 	var flags: Dictionary = res.get("flags", {})
 
@@ -131,7 +136,7 @@ func _run_flags_are_writable_and_absolute() -> void:
 
 	var before := bool(canvas.get("show_traces"))
 	var grid_before := bool(canvas.get("show_grid"))
-	var res: Dictionary = _view(host, {"flags": {"show_traces": not before}})
+	var res: Dictionary = await _view(host, {"flags": {"show_traces": not before}})
 	check("write succeeds", bool(res.get("success", false)))
 	check_eq("THE CANVAS moved", bool(canvas.get("show_traces")), not before)
 	check_eq("the reply agrees with the canvas",
@@ -141,7 +146,7 @@ func _run_flags_are_writable_and_absolute() -> void:
 	# ABSOLUTE, NOT A TOGGLE. Setting the same value again is a no-op — an agent
 	# re-asserting a view it already asked for must not flip it back, which a
 	# toggle-shaped verb would do and which is unnoticeable without a screen.
-	var again: Dictionary = _view(host, {"flags": {"show_traces": not before}})
+	var again: Dictionary = await _view(host, {"flags": {"show_traces": not before}})
 	check_eq("re-asserting the same value changes nothing",
 		(again.get("changed", []) as Array), [])
 	check_eq("and the canvas is still where it was put",
@@ -165,20 +170,41 @@ func _run_layers_solo() -> void:
 	var ctx := _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
+	var panel = ctx["panel"]
 
 	# Solo in1: hide every other declared layer. This is the gesture the human
 	# had from the View menu and the agent did not.
-	var res: Dictionary = _view(host, {"hidden_layers": ["top", "in2", "bottom"]})
+	# THE TOOLBAR IS LEFT ON A SPECIFIC LAYER FIRST (cold review 2, finding 1).
+	# That is the state the human leaves behind after soloing from the toolbar,
+	# and it is the state in which this gesture used to do NOTHING: a specific
+	# trace_layer_filter beats every per-layer eye in _layer_visible, so the eye
+	# dictionary moved while the canvas kept drawing the filtered layer.
+	panel.set_trace_layer_filter("top")
+	check_eq("precondition: the toolbar filter is on a specific layer",
+		str(canvas.trace_layer_filter), "top")
+
+	var res: Dictionary = await _view(host, {"hidden_layers": ["top", "in2", "bottom"]})
 	check("solo write succeeds", bool(res.get("success", false)))
-	check("in1 is visible", not bool(canvas.is_layer_hidden("in1")))
-	check("top is hidden", bool(canvas.is_layer_hidden("top")))
-	check("in2 is hidden", bool(canvas.is_layer_hidden("in2")))
-	check("bottom is hidden", bool(canvas.is_layer_hidden("bottom")))
+
+	# ASSERT ACTUAL VISIBILITY, NOT THE BACKING DICTIONARY. is_layer_hidden reads
+	# the eyes alone and would have passed while the canvas drew the opposite —
+	# a producer-side assertion on the very state that was being ignored.
+	check("in1 is ACTUALLY visible", bool(canvas.is_layer_visible("in1")))
+	check("top is ACTUALLY not visible", not bool(canvas.is_layer_visible("top")))
+	check("in2 is ACTUALLY not visible", not bool(canvas.is_layer_visible("in2")))
+	check("bottom is ACTUALLY not visible", not bool(canvas.is_layer_visible("bottom")))
+	check_eq("the filter was reset to all so the eyes govern",
+		str(canvas.trace_layer_filter), "all")
+	check("and the reset is reported", "trace_layer_filter" in (res.get("changed", []) as Array))
+
+	# The eyes themselves still say what was asked, so the two views agree.
+	check("in1 eye open", not bool(canvas.is_layer_hidden("in1")))
+	check("top eye shut", bool(canvas.is_layer_hidden("top")))
 
 	# A SET, NOT A DELTA. Passing a different set must UNHIDE what it omits;
 	# a delta-shaped verb would leave the previous three hidden forever and an
 	# agent would never work out why its screenshots were empty.
-	var res2: Dictionary = _view(host, {"hidden_layers": ["bottom"]})
+	var res2: Dictionary = await _view(host, {"hidden_layers": ["bottom"]})
 	check("omitted layers become visible again", not bool(canvas.is_layer_hidden("top")))
 	check("and the named one stays hidden", bool(canvas.is_layer_hidden("bottom")))
 	var hidden_reported: Array = []
@@ -188,7 +214,7 @@ func _run_layers_solo() -> void:
 	check_eq("the reply reports exactly that one hidden", hidden_reported, ["bottom"])
 
 	# [] is the "show everything" request, and must not be read as "no key".
-	_view(host, {"hidden_layers": []})
+	await _view(host, {"hidden_layers": []})
 	check("an empty set shows every layer",
 		not bool(canvas.is_layer_hidden("bottom")) and not bool(canvas.is_layer_hidden("top")))
 
@@ -208,7 +234,7 @@ func _run_refusals_change_nothing() -> void:
 	# One good flag, one typo. The whole request must be refused: the caller
 	# cannot see the screen, so a half-applied view is a view nobody knows the
 	# shape of.
-	var bad: Dictionary = _view(host, {"flags": {"show_grid": not grid_before, "show_grd": true}})
+	var bad: Dictionary = await _view(host, {"flags": {"show_grid": not grid_before, "show_grd": true}})
 	check("a request naming an unknown flag refuses", not bool(bad.get("success", true)))
 	check_eq("named unknown_view_flag", str(bad.get("error", "")), "unknown_view_flag")
 	check_eq("and says which one", str(bad.get("unknown", "")), "show_grd")
@@ -217,7 +243,7 @@ func _run_refusals_change_nothing() -> void:
 	check_eq("THE GOOD HALF WAS NOT APPLIED", bool(canvas.get("show_grid")), grid_before)
 
 	# A layer this board does not declare.
-	var bad_layer: Dictionary = _view(host, {"hidden_layers": ["in7"]})
+	var bad_layer: Dictionary = await _view(host, {"hidden_layers": ["in7"]})
 	check("hiding an undeclared layer refuses", not bool(bad_layer.get("success", true)))
 	check_eq("named layer_not_on_stack", str(bad_layer.get("error", "")), "layer_not_on_stack")
 	check("the refusal reports the declared stack",
@@ -225,7 +251,7 @@ func _run_refusals_change_nothing() -> void:
 	check("nothing was hidden by the refusal", not bool(canvas.is_layer_hidden("top")))
 
 	# Wrong TYPE, not just a wrong value.
-	var bad_type: Dictionary = _view(host, {"hidden_layers": "top"})
+	var bad_type: Dictionary = await _view(host, {"hidden_layers": "top"})
 	check("a non-array hidden_layers refuses", not bool(bad_type.get("success", true)))
 	check_eq("named invalid_args", str(bad_type.get("error", "")), "invalid_args")
 
@@ -251,7 +277,7 @@ func _run_types_are_validated() -> void:
 
 	# A good flag FIRST, so a non-total validation would have applied it before
 	# reaching the bad one.
-	var bad_val: Dictionary = _view(host, {"flags":
+	var bad_val: Dictionary = await _view(host, {"flags":
 		{"show_grid": not grid_before, "show_traces": "true"}})
 	check("a non-boolean flag value refuses", not bool(bad_val.get("success", true)))
 	check_eq("named invalid_args", str(bad_val.get("error", "")), "invalid_args")
@@ -261,15 +287,40 @@ func _run_types_are_validated() -> void:
 
 	# A non-dict `flags` was previously swallowed by _dict_or_empty and reported
 	# as success — the silent no-op its hidden_layers sibling already refuses.
-	var bad_flags: Dictionary = _view(host, {"flags": "show_traces"})
+	var bad_flags: Dictionary = await _view(host, {"flags": "show_traces"})
 	check("a non-object flags refuses", not bool(bad_flags.get("success", true)))
 	check_eq("named invalid_args", str(bad_flags.get("error", "")), "invalid_args")
 
 	# kicad_to_canon maps "" to "top" with only a warning (it is the read side),
 	# so an empty name would hide the top layer nobody asked about.
-	var empty_layer: Dictionary = _view(host, {"hidden_layers": [""]})
+	var empty_layer: Dictionary = await _view(host, {"hidden_layers": [""]})
 	check("an empty layer name refuses", not bool(empty_layer.get("success", true)))
 	check_eq("named invalid_args", str(empty_layer.get("error", "")), "invalid_args")
 	check("and the top layer was NOT hidden", not bool(canvas.is_layer_hidden("top")))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 6. an EXPLICIT filter outranks the implicit reset ─────────────────────────
+
+func _run_explicit_filter_wins() -> void:
+	print("-- 6. trace_layer_filter is writable and applied last --")
+	var ctx := _ctx()
+	var host = ctx["host"]
+	var canvas = ctx["canvas"]
+
+	# Both in one request: hidden_layers would reset the filter to "all", but an
+	# explicit filter is what the caller literally wrote, so it wins.
+	var res: Dictionary = await _view(host, {
+		"hidden_layers": ["bottom"], "trace_layer_filter": "in1"})
+	check("write succeeds", bool(res.get("success", false)))
+	check_eq("the explicit filter is in force", str(canvas.trace_layer_filter), "in1")
+	check_eq("and is reported back", str(res.get("trace_layer_filter", "")), "in1")
+
+	# A filter this board does not declare is refused by name, changing nothing.
+	var bad: Dictionary = await _view(host, {"trace_layer_filter": "in7"})
+	check("an undeclared filter refuses", not bool(bad.get("success", true)))
+	check_eq("named layer_not_on_stack", str(bad.get("error", "")), "layer_not_on_stack")
+	check_eq("the filter is untouched", str(canvas.trace_layer_filter), "in1")
 
 	ctx["driver"].free_panel(ctx["panel"])

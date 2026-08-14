@@ -1386,6 +1386,29 @@ def _routes_to_traces(routes: list) -> list:
     return traces
 
 
+def _merge_drawn_routes(payload: dict, drawn_routes: list) -> dict:
+    """Fold materialized as-drawn routes into an engine result, IN PLACE.
+
+    Extracted so the arithmetic below is reachable by a test (cold review 2,
+    finding 4). It was inline in ``_route``, where the only way to exercise it
+    was a whole compiled board — so it was never exercised, and the bug sat in
+    the one line nobody could reach.
+
+    ``via_count`` is the reason this exists. It comes from
+    ``_serialize_routing_result``, which only ever saw the ENGINE result, so a
+    run whose only via was AUTHORED reported ``via_count`` 0 while
+    ``routes[0].vias`` held it and the board commit went on to create it — a
+    caller checking the headline number was told nothing happened.
+
+    As-drawn routes go FIRST, matching the previous inline order.
+    """
+    payload["routes"] = list(drawn_routes) + list(payload.get("routes") or [])
+    payload["success"] = bool(payload.get("success", False)) or not payload.get("unrouted")
+    payload["via_count"] = int(payload.get("via_count", 0) or 0) + sum(
+        len(r.get("vias") or []) for r in drawn_routes if isinstance(r, dict))
+    return payload
+
+
 def _routes_to_vias(routes: list) -> list:
     """Materialize proposed-route vias for DRC-at-propose (see _drc_for_routes).
 
@@ -2650,8 +2673,7 @@ def _route(params: dict) -> dict:
 
     payload = _serialize_routing_result(result)
     if drawn_routes:
-        payload["routes"] = drawn_routes + payload["routes"]
-        payload["success"] = bool(payload.get("success", False)) or not payload.get("unrouted")
+        _merge_drawn_routes(payload, drawn_routes)
     # PER-ROUTE ATTRIBUTION (019f80a80123). Stamped over the MERGED route list,
     # so as-drawn and engine routes are attributed by the one map; and stamped
     # only when hints were supplied, so an unhinted whole-board run carries no
