@@ -27,31 +27,39 @@ LOCK = PCB_ROOT / "scripts" / "runtime-bundle.lock"
 BUILDER = PCB_ROOT.parent / "scripts" / "build-python-runtime-bundle.sh"
 
 
-def _usable_bash() -> bool:
-    """PROBE bash, do not merely locate it.
+def _usable_bash() -> str | None:
+    """Resolve bash to an ABSOLUTE PATH and prove that exact binary runs.
 
-    `shutil.which("bash") is not None` is the obvious guard and it is WRONG on
-    Windows: System32\\bash.exe is the WSL launcher, which is on PATH on every
-    stock runner even when no distribution is installed. It answers which(),
-    then exits non-zero printing a UTF-16 "use `wsl --install`" notice on
-    STDOUT with an empty stderr — so a test guarded by which() runs against a
-    shell that never executed its script, and reports the resulting empty
-    stderr as a failure of the code under test.
+    Two separate Windows traps, and the second one bit after the first was
+    fixed. System32\\bash.exe is the WSL launcher: present on PATH on every
+    stock runner even with no distribution installed, it exits non-zero and
+    prints a UTF-16 "use `wsl --install`" notice on STDOUT with an EMPTY
+    stderr. A test that reaches it sees a shell which never ran its script and
+    blames the code under test for the empty output.
 
-    Run something and require the answer back."""
+    So probing is necessary — but probing alone is not sufficient, because
+    `shutil.which("bash")` and `subprocess.run(["bash", ...])` DO NOT RESOLVE
+    THE SAME BINARY on Windows. which() walks PATH (finding Git Bash);
+    a bare argv[0] goes to CreateProcess, which searches System32 FIRST and
+    gets the WSL stub. Probing which()'s answer while running the bare name
+    validates one binary and executes another.
+
+    Return the path that was actually tested, and let callers run THAT."""
     exe = shutil.which("bash")
     if exe is None:
-        return False
+        return None
     try:
         proc = subprocess.run([exe, "-c", "printf __bash_ok__"],
                               capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0 and "__bash_ok__" in (proc.stdout or "")
+        return None
+    if proc.returncode == 0 and "__bash_ok__" in (proc.stdout or ""):
+        return exe
+    return None
 
 
-HAVE_BASH = _usable_bash()
-needs_bash = pytest.mark.skipif(not HAVE_BASH, reason="no usable bash")
+BASH = _usable_bash()
+needs_bash = pytest.mark.skipif(BASH is None, reason="no usable bash")
 
 
 def _lock_vars() -> dict[str, str]:
@@ -163,11 +171,13 @@ def test_corrupt_bytes_are_REFUSED_and_the_cache_entry_is_dropped():
     with tempfile.TemporaryDirectory() as td:
         victim = Path(td) / "payload.tar.gz"
         victim.write_bytes(b"not the bytes you were promised")
+        target = victim.as_posix()
         script = (
             "set -e\nTRIPLE=test\n" + func
-            + f'\nverify_sha256 "{victim}" "{"0" * 64}" "fixture"\n'
+            + f'\nverify_sha256 "$1" "{"0" * 64}" "fixture"\n'
         )
-        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        proc = subprocess.run([BASH, "-c", script, "bash", target],
+                              capture_output=True, text=True)
 
         # INSIDE the with-block ON PURPOSE. TemporaryDirectory deletes the whole
         # tree on exit, so `not victim.exists()` outside it is true no matter what
@@ -194,9 +204,11 @@ def test_matching_bytes_pass():
         good = Path(td) / "payload.tar.gz"
         good.write_bytes(b"exactly these bytes")
         digest = hashlib.sha256(good.read_bytes()).hexdigest()
+        target = good.as_posix()
         script = ("set -e\nTRIPLE=test\n" + func
-                  + f'\nverify_sha256 "{good}" "{digest}" "fixture"\n')
-        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+                  + f'\nverify_sha256 "$1" "{digest}" "fixture"\n')
+        proc = subprocess.run([BASH, "-c", script, "bash", target],
+                              capture_output=True, text=True)
 
         # INSIDE the with-block, same reason as above — but here the deleted
         # tree made the assertion always FALSE rather than always true, so this
