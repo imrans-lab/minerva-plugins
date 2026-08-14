@@ -30,14 +30,14 @@ var _fail := 0
 
 func _init() -> void:
 	print("=== Direct copper verbs (NLC C2 + C3) ===\n")
-	_run_place_via_lands_on_the_board()
-	_run_span_is_not_selectable()
-	_run_refusals_change_nothing()
-	_run_round_trips_with_delete()
-	_run_add_trace_lands_copper()
-	_run_add_trace_refusals()
-	_run_human_via_tool()
-	_run_one_rule_for_both_surfaces()
+	await _run_place_via_lands_on_the_board()
+	await _run_span_is_not_selectable()
+	await _run_refusals_change_nothing()
+	await _run_round_trips_with_delete()
+	await _run_add_trace_lands_copper()
+	await _run_add_trace_refusals()
+	await _run_human_via_tool()
+	await _run_one_rule_for_both_surfaces()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -57,9 +57,39 @@ func check_eq(desc: String, actual, expected) -> void:
 	check("%s (expected %s, got %s)" % [desc, str(expected), str(actual)], actual == expected)
 
 
+
+class FakeEditor extends RefCounted:
+	var tab_title: String = "NlcProbe"
+	var associated_object: Variant = ""
+
+
+## A panel MOUNTED IN THE REAL TREE, because these suites touch the UI.
+##
+## plugin_panel_driver.load_panel only calls script.new() — the panel never
+## enters the tree, so _ready()/_build_ui() never run and _canvas, _tool_buttons
+## and every OptionButton stay null. Both reviews confirmed get_canvas() EXISTS
+## and it does; it returns null against an unmounted panel, which only execution
+## could show. Mount pattern copied from test_pcb_panel_ui.gd's
+## _mount_panel_in_tree, which exists for exactly this reason.
+func _mount() -> Variant:
+	var panel: Variant = load(PCB_PANEL_SCRIPT_PATH).new()
+	get_root().add_child(panel)
+	panel.position = Vector2.ZERO
+	panel.size = Vector2(1100, 700)
+	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
+	for _i in range(6):
+		await process_frame
+	return panel
+
+
+func _unmount(panel: Variant) -> void:
+	if panel != null and panel is Node:
+		(panel as Node).queue_free()
+	await process_frame
+
+
 func _ctx() -> Dictionary:
-	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
-	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
+	var panel = await _mount()
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
 	var data = panel.get_data()
@@ -76,14 +106,14 @@ func _ctx() -> Dictionary:
 		var net = PcbNet.new()
 		net.name = net_name
 		data.add_net(net)
-	return {"driver": driver, "panel": panel, "host": host, "data": data}
+	return {"panel": panel, "host": host, "data": data}
 
 
 # ── 1. it lands on the BOARD, not on a proposal ───────────────────────────────
 
 func _run_place_via_lands_on_the_board() -> void:
 	print("-- 1. place_via writes a real board via --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var data = ctx["data"]
 
@@ -109,14 +139,14 @@ func _run_place_via_lands_on_the_board() -> void:
 	check_eq("default size", float(stored.get("size", 0.0)), 0.8)
 	check_eq("default drill", float(stored.get("drill", 0.0)), 0.4)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 2. a span argument is REFUSED, not ignored ────────────────────────────────
 
 func _run_span_is_not_selectable() -> void:
 	print("-- 2. from_layer/to_layer/layers are refused, never silently dropped --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var data = ctx["data"]
 
@@ -132,14 +162,14 @@ func _run_span_is_not_selectable() -> void:
 
 	check_eq("no via was created by any of them", data.vias.size(), 0)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 3. every refusal is named, and writes nothing ─────────────────────────────
 
 func _run_refusals_change_nothing() -> void:
 	print("-- 3. off-board, stacked, and degenerate geometry all refuse --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var data = ctx["data"]
 
@@ -181,14 +211,14 @@ func _run_refusals_change_nothing() -> void:
 		str(stacked.get("note", "")).contains("already sits"))
 	check_eq("still exactly one via", data.vias.size(), 1)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 4. create and destroy are now symmetric ───────────────────────────────────
 
 func _run_round_trips_with_delete() -> void:
 	print("-- 4. place -> delete -> place: the parity claim, end to end --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var data = ctx["data"]
 
@@ -211,7 +241,7 @@ func _run_round_trips_with_delete() -> void:
 	check_eq("the re-placed via gets a FRESH id, not the freed one",
 		str(again.get("via_id", "")) != via_id, true)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 5. C3: a trace drawn directly, through the HUMAN TOOL'S OWN model path ────
@@ -228,12 +258,12 @@ const PcbNet := preload("res://../../minerva-plugins/pcb/ui/model/pcb_net.gd")
 func _trace_ctx() -> Dictionary:
 	# N1 is already declared by _ctx(); this alias stays so the trace groups read
 	# as stating their own precondition rather than inheriting it silently.
-	return _ctx()
+	return await _ctx()
 
 
 func _run_add_trace_lands_copper() -> void:
 	print("-- 5. add_trace writes a real board trace on an INNER layer --")
-	var ctx := _trace_ctx()
+	var ctx: Dictionary = await _trace_ctx()
 	var host = ctx["host"]
 	var data = ctx["data"]
 
@@ -267,14 +297,14 @@ func _run_add_trace_lands_copper() -> void:
 	check("the reply warns that no DRC ran",
 		str(res.get("note", "")).to_lower().contains("drc"))
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 6. C3 refusals: named, and nothing written ────────────────────────────────
 
 func _run_add_trace_refusals() -> void:
 	print("-- 6. undeclared layer, unauthorable trace, malformed points --")
-	var ctx := _trace_ctx()
+	var ctx: Dictionary = await _trace_ctx()
 	var host = ctx["host"]
 	var data = ctx["data"]
 
@@ -310,7 +340,7 @@ func _run_add_trace_refusals() -> void:
 
 	check_eq("not one refusal wrote copper", data.traces.size(), 0)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 7. THE HUMAN'S VIA TOOL — the half the owner actually asked for ───────────
@@ -325,7 +355,7 @@ const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.
 
 func _run_human_via_tool() -> void:
 	print("-- 7. ToolMode.VIA: a button, a click, a via --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var panel = ctx["panel"]
 	var data = ctx["data"]
 	# get_canvas lives on the annotation HOST, not the panel (PcbAnnotationHost
@@ -333,7 +363,7 @@ func _run_human_via_tool() -> void:
 	var canvas = ctx["host"].get_canvas()
 	check("the host exposes the canvas", canvas != null)
 	if canvas == null:
-		ctx["driver"].free_panel(ctx["panel"])
+		await _unmount(ctx["panel"])
 		return
 
 	# THE AFFORDANCE EXISTS. Without a registered tool button there is nothing
@@ -352,7 +382,23 @@ func _run_human_via_tool() -> void:
 	check_eq("a click places exactly one via", data.vias.size(), before + 1)
 
 	var placed: Dictionary = data.vias[data.vias.size() - 1]
-	check_eq("at the clicked point", data.via_position(placed), Vector2(12.0, 9.0))
+
+	# SNAPPED TO THE AUTHORING GRID, and that is CORRECT — _handle_via_click
+	# routes the point through _author_point exactly as the Trace, Zone and
+	# Cutout gestures do, so a human's via lands on the same grid as their
+	# copper. Found by running this: the first version of this assertion
+	# demanded the raw click point and would have pinned a REGRESSION (a via
+	# tool that ignored the grid) as correct.
+	#
+	# Note the deliberate asymmetry with minerva_pcb_place_via, which does NOT
+	# snap: an agent supplies exact coordinates and means them, while a human
+	# supplies a mouse position and means the nearest grid point.
+	var expected: Vector2 = canvas._author_point(Vector2(12.0, 9.0))
+	check_eq("at the snapped click point", data.via_position(placed), expected)
+	# ...and the snap moved it somewhere SENSIBLE, not merely somewhere
+	# self-consistent — a snap returning a constant would satisfy the line above.
+	check("the snapped point is within a grid step of the click",
+		expected.distance_to(Vector2(12.0, 9.0)) < 1.0)
 	# A v1 via is a through via — no span control on this tool, and none needed.
 	check_eq("recorded as a through via (top)", str(placed.get("from_layer", "")), "top")
 	check_eq("recorded as a through via (bottom)", str(placed.get("to_layer", "")), "bottom")
@@ -367,14 +413,14 @@ func _run_human_via_tool() -> void:
 	canvas._handle_via_click(Vector2(float(data.board_width) + 25.0, 5.0))
 	check_eq("clicking off the board places nothing", data.vias.size(), before + 1)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 8. the model rule itself, read by BOTH surfaces ───────────────────────────
 
 func _run_one_rule_for_both_surfaces() -> void:
 	print("-- 8. via_author_error is the single rule --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var data = ctx["data"]
 
 	check_eq("a clean point is placeable",
@@ -386,4 +432,4 @@ func _run_one_rule_for_both_surfaces() -> void:
 	check("a point off the board is refused",
 		not str(data.via_author_error(Vector2(-1.0, 5.0), 0.8, 0.4)).is_empty())
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])

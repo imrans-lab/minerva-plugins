@@ -66,15 +66,45 @@ func check_eq(desc: String, actual, expected) -> void:
 ## A real panel + host + a FOUR-layer board, so the layer half has inner layers
 ## to hide. A 2-layer fixture cannot tell "hid the layer I named" from "hid the
 ## only other layer there was".
+
+class FakeEditor extends RefCounted:
+	var tab_title: String = "NlcProbe"
+	var associated_object: Variant = ""
+
+
+## A panel MOUNTED IN THE REAL TREE, because these suites touch the UI.
+##
+## plugin_panel_driver.load_panel only calls script.new() — the panel never
+## enters the tree, so _ready()/_build_ui() never run and _canvas, _tool_buttons
+## and every OptionButton stay null. Both reviews confirmed get_canvas() EXISTS
+## and it does; it returns null against an unmounted panel, which only execution
+## could show. Mount pattern copied from test_pcb_panel_ui.gd's
+## _mount_panel_in_tree, which exists for exactly this reason.
+func _mount() -> Variant:
+	var panel: Variant = load(PCB_PANEL_SCRIPT_PATH).new()
+	get_root().add_child(panel)
+	panel.position = Vector2.ZERO
+	panel.size = Vector2(1100, 700)
+	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
+	for _i in range(6):
+		await process_frame
+	return panel
+
+
+func _unmount(panel: Variant) -> void:
+	if panel != null and panel is Node:
+		(panel as Node).queue_free()
+	await process_frame
+
+
 func _ctx() -> Dictionary:
-	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
-	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
+	var panel = await _mount()
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
 	var data = panel.get_data()
 	if data != null and data.has_method("set_board_layers"):
 		data.set_board_layers(["top", "in1", "in2", "bottom"])
-	return {"driver": driver, "panel": panel, "host": host, "canvas": host.get_canvas()}
+	return {"panel": panel, "host": host, "data": data, "canvas": host.get_canvas()}
 
 
 ## AWAITED: _view_state runs the on-demand mask/fab-preview worker round-trips
@@ -89,7 +119,7 @@ func _view(host, args: Dictionary = {}) -> Dictionary:
 
 func _run_read_reports_the_canvas() -> void:
 	print("-- 1. a bare read reports every flag and layer --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
 	var panel = ctx["panel"]
@@ -123,14 +153,14 @@ func _run_read_reports_the_canvas() -> void:
 		not bool((layers[1] as Dictionary).get("hidden", true)))
 	check("a bare read changed nothing", (res.get("changed", []) as Array).is_empty())
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 2. flags are absolute, and reach the canvas ───────────────────────────────
 
 func _run_flags_are_writable_and_absolute() -> void:
 	print("-- 2. writing a flag moves the canvas, and is absolute not a toggle --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
 
@@ -160,14 +190,14 @@ func _run_flags_are_writable_and_absolute() -> void:
 	check_eq("a flag not named in the write kept its value",
 		bool(canvas.get("show_grid")), grid_before)
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 3. hidden_layers is the COMPLETE set — which is what makes solo work ──────
 
 func _run_layers_solo() -> void:
 	print("-- 3. hidden_layers solos a layer, and is a set not a delta --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
 	var panel = ctx["panel"]
@@ -218,14 +248,14 @@ func _run_layers_solo() -> void:
 	check("an empty set shows every layer",
 		not bool(canvas.is_layer_hidden("bottom")) and not bool(canvas.is_layer_hidden("top")))
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 4. refusals are named, and TOTAL ──────────────────────────────────────────
 
 func _run_refusals_change_nothing() -> void:
 	print("-- 4. a bad request changes NOTHING, including its good half --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
 
@@ -255,7 +285,7 @@ func _run_refusals_change_nothing() -> void:
 	check("a non-array hidden_layers refuses", not bool(bad_type.get("success", true)))
 	check_eq("named invalid_args", str(bad_type.get("error", "")), "invalid_args")
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 5. TYPES, not just names (cold review, finding 5) ─────────────────────────
@@ -268,7 +298,7 @@ func _run_refusals_change_nothing() -> void:
 
 func _run_types_are_validated() -> void:
 	print("-- 5. wrong-typed arguments refuse, and write nothing --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
 
@@ -298,14 +328,14 @@ func _run_types_are_validated() -> void:
 	check_eq("named invalid_args", str(empty_layer.get("error", "")), "invalid_args")
 	check("and the top layer was NOT hidden", not bool(canvas.is_layer_hidden("top")))
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])
 
 
 # ── 6. an EXPLICIT filter outranks the implicit reset ─────────────────────────
 
 func _run_explicit_filter_wins() -> void:
 	print("-- 6. trace_layer_filter is writable and applied last --")
-	var ctx := _ctx()
+	var ctx: Dictionary = await _ctx()
 	var host = ctx["host"]
 	var canvas = ctx["canvas"]
 
@@ -323,4 +353,4 @@ func _run_explicit_filter_wins() -> void:
 	check_eq("named layer_not_on_stack", str(bad.get("error", "")), "layer_not_on_stack")
 	check_eq("the filter is untouched", str(canvas.trace_layer_filter), "in1")
 
-	ctx["driver"].free_panel(ctx["panel"])
+	await _unmount(ctx["panel"])

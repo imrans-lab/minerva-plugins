@@ -122,11 +122,14 @@ test_view_state.gd assertions=57
 # through the same model rule the MCP verb reads) and group 8 pins that rule
 # directly.
 #
-# COUNT = 70. That is 66 STATIC call sites plus 4 for the extra iterations of
+# COUNT = 71 (70 + one assertion added at testex: the canvas Via tool snaps to
+# the authoring grid, so the placed point is checked against _author_point AND
+# bounded near the click, rather than against the raw click point).
+# PREVIOUS COUNT = 70. That is 66 STATIC call sites plus 4 for the extra iterations of
 # group 2's three-key loop — the counting rule's "+ extra loop iterations" term.
 # Per group the static counts are 10, 3, 12, 6, 11, 11, 9, 4; group 2's 3 static
 # sites execute 7 times, which is where the +4 comes from. Stated as static-vs-
 # executed on purpose: an earlier version of this comment mixed the two and
 # printed an arithmetic that did not add up, which would teach the next
 # re-pinner the wrong rule (cold review, finding 8). Provisional until testex.
-test_direct_copper_verbs.gd assertions=70
+test_direct_copper_verbs.gd assertions=71
