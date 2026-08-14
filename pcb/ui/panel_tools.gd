@@ -1913,7 +1913,15 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 
 	var result: Dictionary = _PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y", 0.0)))
 	if not bool(result.get("ok", false)):
-		return _err(str(result.get("error", "could not insert via")))
+		# error_code carried through verbatim (epoch NLC C1a): an agent
+		# retrying a refused via needs to know whether it MISSED
+		# ("no_segment_at_point" — move the point) or whether the layer itself
+		# is unsupported ("unsupported_layer" — no point on this run will ever
+		# work), and a prose message is not a thing to branch on.
+		var refusal: Dictionary = _err(str(result.get("error", "could not insert via")))
+		if result.has("error_code"):
+			refusal["error_code"] = str(result["error_code"])
+		return refusal
 
 	var new_ann: Dictionary = ann.duplicate(true)
 	var new_kp: Dictionary = _dict_or_empty(result.get("kind_payload"), kp)

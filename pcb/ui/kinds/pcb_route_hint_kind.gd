@@ -1002,6 +1002,16 @@ class ViaInsertTool:
 					new_ann["kind_payload"] = result.get("kind_payload", kp)
 					annotation_modified.emit(sel, new_ann)
 					return true
+				# The click LANDED on this hint and the insert refused on its
+				# own terms — say why and consume it. Falling through to
+				# candidate targeting here would read to the human as a click
+				# that did nothing at all, which is how a refusal becomes
+				# indistinguishable from a dead tool. A miss
+				# ("no_segment_at_point") is NOT this case: the point was never
+				# on this hint, so the fall-through below is still correct.
+				if str(result.get("error_code", "")) == "unsupported_layer":
+					_toast(str(result.get("error", "via insert refused")))
+					return true
 
 		# ── CANDIDATE TARGETING (Epoch UX3 station 6b) ────────────────────────
 		# When no hint is the selection but a route CANDIDATE (ghost) is, the
@@ -1189,11 +1199,23 @@ static func draw_disarm_notice(ctx: AnnotationRenderContext, text: String) -> vo
 ## Split the kind_payload.segments entry nearest (x, y) into two at its
 ## projected point, append that point to kind_payload.vias, and recompute
 ## every segment's layer via the layer-run toggle (see
-## _recompute_layer_runs below). Returns {ok:false, error} when no segment
-## lies within threshold_mm of (x, y) (a no-op — the caller must not persist
-## anything); otherwise {ok:true, kind_payload: Dictionary (fresh — segments
-## + vias updated, every other key preserved verbatim), via_count: int,
-## segments: Array}.
+## _recompute_layer_runs below).
+##
+## Returns {ok:true, kind_payload: Dictionary (fresh — segments + vias
+## updated, every other key preserved verbatim), via_count: int,
+## segments: Array}, or a REFUSAL {ok:false, error: String, error_code: String}
+## which is always a complete no-op — the caller must persist nothing.
+##
+## error_code lets callers tell the two refusals apart, because they mean
+## opposite things to a click:
+##   "no_segment_at_point" — the point missed this hint. A canvas gesture
+##                           should keep looking (a candidate may be under the
+##                           cursor); this is not an error the human caused.
+##   "unsupported_layer"   — the point HIT, and the run is on a copper layer
+##                           whose via span this payload cannot express (see
+##                           _toggle_layer). The gesture must stop and SAY SO;
+##                           falling through would leave the human's click
+##                           looking like it did nothing.
 static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, threshold_mm: float = _HIT_THRESHOLD_MM) -> Dictionary:
 	var segments_raw: Variant = kind_payload.get("segments", [])
 	var segments: Array = (segments_raw as Array).duplicate(true) if segments_raw is Array else []
@@ -1218,7 +1240,8 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 			best_point = proj
 
 	if best_idx < 0 or best_dist > threshold_mm:
-		return {"ok": false, "error": "no route segment within %.2fmm of (%.3f, %.3f)" % [threshold_mm, x, y]}
+		return {"ok": false, "error_code": "no_segment_at_point",
+			"error": "no route segment within %.2fmm of (%.3f, %.3f)" % [threshold_mm, x, y]}
 
 	# The layer-run toggle always starts from the ORIGINAL first segment's
 	# layer — captured before the split below, so it stays stable across
@@ -1240,7 +1263,20 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 	var vias: Array = (vias_raw as Array).duplicate(true) if vias_raw is Array else []
 	vias.append([best_point.x, best_point.y])
 
-	var recomputed := _recompute_layer_runs(segments, vias, start_layer)
+	# REFUSAL BEFORE MUTATION. `segments`/`vias` above are local duplicates, so
+	# returning here leaves the caller's kind_payload untouched — the split and
+	# the appended via never reach anything that persists.
+	var recompute: Dictionary = _recompute_layer_runs(segments, vias, start_layer)
+	if not bool(recompute.get("ok", false)):
+		var stuck := str(recompute.get("layer", ""))
+		return {"ok": false, "error_code": "unsupported_layer",
+			"error": ("a via on a %s run cannot be placed from this proposal: the hint records "
+				+ "a via as a bare point with no span, so which of the stack's other copper "
+				+ "layers the run continues on is unstated. Only the outer pair "
+				+ "(F.Cu<->B.Cu, or top<->bottom) has one unambiguous answer. "
+				+ "Nothing was changed.") % stuck}
+
+	var recomputed: Array = recompute.get("segments", [])
 	var new_payload := kind_payload.duplicate(true)
 	new_payload["segments"] = recomputed
 	new_payload["vias"] = vias
@@ -1263,7 +1299,15 @@ const _VIA_EPS_MM: float = 0.01
 ## again with the same segments/vias/start_layer reproduces the same output).
 ## N vias on the path therefore produce N layer alternations: one via flips
 ## the tail to the opposite layer, a second flips it back, etc.
-static func _recompute_layer_runs(segments: Array, vias: Array, start_layer: String) -> Array:
+##
+## FAILS CLOSED, and returns a STATUS rather than an Array so it can: the
+## moment a crossing lands on a layer _toggle_layer cannot resolve, the whole
+## recompute refuses and names that layer. It does NOT emit the segments it had
+## already re-layered before the failure — a partial run is a board half-moved
+## to another layer, which is worse than either outcome the caller chose
+## between. Returns {"ok": true, "segments": Array} or
+## {"ok": false, "layer": String} naming the layer it could not leave.
+static func _recompute_layer_runs(segments: Array, vias: Array, start_layer: String) -> Dictionary:
 	var via_points: Array = []
 	for v in vias:
 		via_points.append(_to_vec2(v))
@@ -1278,16 +1322,56 @@ static func _recompute_layer_runs(segments: Array, vias: Array, start_layer: Str
 			var seg_start := _to_vec2(seg.get("start", [0, 0]))
 			for vp in via_points:
 				if (vp as Vector2).distance_to(seg_start) <= _VIA_EPS_MM:
-					current = _toggle_layer(current)
+					var next_layer := _toggle_layer(current)
+					if next_layer.is_empty():
+						return {"ok": false, "layer": current}
+					current = next_layer
 					break
 		seg["layer"] = current
 		out.append(seg)
-	return out
+	return {"ok": true, "segments": out}
 
 
-## F.Cu <-> B.Cu only (the KiCad copper-layer vocabulary segments carry).
+## The layer a run continues on after crossing a via, or "" when this function
+## CANNOT KNOW — which every caller must treat as a refusal, never as a default.
+##
+## F.Cu <-> B.Cu, BY NAME, and nothing else. The `else "F.Cu"` this replaced
+## answered every input it did not recognise with the top layer, so a via
+## inserted on an In1.Cu run relabelled the whole downstream run "F.Cu" — the
+## exact defect class agent_router.layers.canon_to_kicad had its own top-layer
+## default deleted for (route_bridge.py:127-131: "a silently defaulted layer
+## name puts copper on the wrong side of a board that then gets fabricated").
+##
+## A two-layer board's toggle is unambiguous: leaving F.Cu there is one place
+## to go. On a 4-layer stack a through via leaving In1.Cu reaches F.Cu, In2.Cu
+## AND B.Cu, and this payload carries nothing that says which — the hint's via
+## is a bare [x, y] point with no span. Picking one is a GUESS, and a guess
+## about which copper layer a trace lands on is not a thing this file is
+## entitled to make. Returning "" hands that decision back up to a caller that
+## can refuse out loud. Real per-via spans are epoch NLC station C1b; until
+## then inner-layer runs refuse rather than lie.
+##
+## SPELLING-AGNOSTIC, and answers in the SPELLING IT WAS ASKED IN. Segments on
+## this payload are written by more than one producer and _layer_color already
+## treats the two vocabularies as equally valid (it reads them through
+## PcbLayerStack.inner_index_any), so matching only the KiCad pair would refuse
+## a legitimate "bottom" run and turn this guard into a regression.
+##
+## Deliberately NOT routed through PcbLayerStack.kicad_to_canon: that is the
+## READ side and maps "" to "top" with a warning, which would reintroduce
+## exactly the silent default being removed here — an empty layer name must
+## refuse, not become the top layer. The pair is two entries; matching it here
+## is cheaper than a helper that has to be safe for a different caller.
+const _TOP_SPELLINGS: Array = ["f.cu", "top"]
+const _BOTTOM_SPELLINGS: Array = ["b.cu", "bottom"]
+
 static func _toggle_layer(layer: String) -> String:
-	return "B.Cu" if layer == "F.Cu" else "F.Cu"
+	var low := layer.strip_edges().to_lower()
+	if low in _TOP_SPELLINGS:
+		return "B.Cu" if low == "f.cu" else "bottom"
+	if low in _BOTTOM_SPELLINGS:
+		return "F.Cu" if low == "b.cu" else "top"
+	return ""
 
 
 # ── Bend-handle geometry (C4 deliverable 3, docket 019f6c464ff0) ──────────────
