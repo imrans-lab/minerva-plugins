@@ -232,6 +232,35 @@ def positive_mm(value) -> float | None:
     return v
 
 
+def candidate_id(cand: dict, ordinal: int) -> str:
+    """The one wire-id rule for every candidate consumer.
+
+    Workspace candidates always carry an id, but ``draft_check`` is also a
+    direct worker/MCP surface. Id-less inputs receive an ordinal fallback so
+    connectivity verdicts, geometric verdicts and attributed subjects can
+    still be joined without inventing three subtly different identities.
+    """
+    return str(cand.get("candidate_id", "") or f"candidate:{ordinal}")
+
+
+def candidate_is_provably_empty(cand) -> bool:
+    """True only when the wire value explicitly contains no candidate copper.
+
+    Missing/null/empty arrays are safe to omit from a geometric batch: no
+    primitive exists that could collide with another candidate. Any malformed
+    container or non-empty value returns False and reaches ``build_overlay``,
+    where it fails closed rather than being mistaken for empty geometry.
+    """
+    if not isinstance(cand, dict):
+        return False
+
+    def empty_collection(value) -> bool:
+        return value is None or (isinstance(value, (list, tuple)) and not value)
+
+    return empty_collection(cand.get("segments")) \
+        and empty_collection(cand.get("vias"))
+
+
 # ---------------------------------------------------------------------------
 # The overlay.
 # ---------------------------------------------------------------------------
@@ -287,7 +316,7 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
             raise UnsupportedGeometry(
                 f"candidate[{ordinal}]: expected a mapping, got "
                 f"{type(cand).__name__}")
-        cid = str(cand.get("candidate_id", "") or f"candidate:{ordinal}")
+        cid = candidate_id(cand, ordinal)
         if cid in revisions:
             raise UnmodelableCandidate(
                 cid,
@@ -317,9 +346,16 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
             # Trace segments. One IR trace per candidate segment (drc_geometric
             # projects per-segment capsules regardless of how they are grouped, and a
             # per-segment trace keeps segment identity 1:1 with the ghost's own).
-            for seg_ordinal, seg in enumerate(cand.get("segments") or []):
+            raw_segments = cand.get("segments")
+            if raw_segments is None:
+                raw_segments = []
+            if not isinstance(raw_segments, (list, tuple)):
+                raise UnsupportedGeometry(
+                    f"candidate {cid!r}: segments must be an array")
+            for seg_ordinal, seg in enumerate(raw_segments):
                 if not isinstance(seg, dict):
-                    continue
+                    raise UnsupportedGeometry(
+                        f"candidate {cid!r} segment[{seg_ordinal}]: expected a mapping")
                 what = f"candidate {cid!r} segment[{seg_ordinal}]"
                 pts = _segment_points(seg)
                 if len(pts) < 2:
@@ -352,7 +388,13 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
                                       "segment_id": sid}
 
             # Vias.
-            for via_ordinal, via in enumerate(cand.get("vias") or []):
+            raw_vias = cand.get("vias")
+            if raw_vias is None:
+                raw_vias = []
+            if not isinstance(raw_vias, (list, tuple)):
+                raise UnsupportedGeometry(
+                    f"candidate {cid!r}: vias must be an array")
+            for via_ordinal, via in enumerate(raw_vias):
                 what = f"candidate {cid!r} via[{via_ordinal}]"
                 pos = candidate_via_position(via)
                 if pos is None:

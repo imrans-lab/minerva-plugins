@@ -253,11 +253,91 @@ def test_echo_is_verbatim_and_geometryless_candidate_errors():
     res = _call(params)["result"]
     assert res["board_token"] == "sha256:zzz"
     assert res["workspace_generation"] == 42
-    # Candidate geometric checking is batch-atomic: the unmodelable empty/unknown
-    # candidate means no member of the batch may be reported clean.
-    assert res["per_candidate"]["cand_3"] == "error"
+    # The empty candidate has no copper and cannot interact with cand_3, so its
+    # bad/deleted net is a local input error rather than a reason to erase the
+    # real geometric verdict for the rest of the batch.
+    assert res["per_candidate"]["cand_3"] == "clean"
     assert res["per_candidate"]["cand_empty"] == "error"
-    assert res.get("geometric_indeterminate"), res
+    assert "geometric_indeterminate" not in res, res.get("geometric_indeterminate")
+
+
+def test_idless_direct_candidate_uses_one_fallback_identity_everywhere():
+    """A direct caller may omit the workspace-minted id. Connectivity and the
+    IR overlay must derive the same fallback or the geometric violation cannot
+    merge back into the candidate verdict and silently reads clean."""
+    candidate = {
+        "net": "BUS", "revision": 7,
+        "segments": [{"id": "run", "layer": "top", "width": 0.3,
+                      "points": [[10, 20], [50, 20]]}],
+    }
+    res = _call({"board": _candidate_geometry_board(), "candidates": [candidate],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert res["per_candidate"]["candidate:0"] == "violating"
+    assert any(
+        {"candidate_id": "candidate:0", "revision": 7, "segment_id": "run"}
+        in f.get("subjects", [])
+        for f in res.get("findings", []) if f.get("scope") == "geometric")
+
+
+def test_idless_identity_survives_empty_candidate_filtering():
+    """Filtering a provably-empty predecessor must not renumber later fallback
+    ids inside the reduced geometric batch."""
+    empty = {"candidate_id": "empty", "net": "DELETED_NET",
+             "segments": [], "vias": []}
+    candidate = {
+        "net": "BUS", "revision": 8,
+        "segments": [{"id": "run", "layer": "top", "width": 0.3,
+                      "points": [[10, 20], [50, 20]]}],
+    }
+    res = _call({"board": _candidate_geometry_board(),
+                 "candidates": [empty, candidate],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert res["per_candidate"]["empty"] == "error"
+    assert res["per_candidate"]["candidate:1"] == "violating"
+    assert any(
+        {"candidate_id": "candidate:1", "revision": 8, "segment_id": "run"}
+        in f.get("subjects", [])
+        for f in res.get("findings", []) if f.get("scope") == "geometric")
+
+
+def test_indeterminate_names_the_candidate_that_poisoned_the_batch():
+    candidate = {
+        "candidate_id": "poison", "net": "DELETED_NET", "revision": 1,
+        "segments": [{"id": "s", "layer": "top", "width": 0.3,
+                      "points": [[2, 2], [5, 2]]}],
+    }
+    res = _call({"board": _candidate_geometry_board(), "candidates": [candidate],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    # Connectivity may independently prove a violation (for example dangling
+    # copper); that sound result survives. The important contract is that the
+    # geometric refusal never produces clean and names its offender.
+    assert res["per_candidate"]["poison"] != "clean"
+    assert res["geometric_indeterminate"]["candidate_id"] == "poison"
+
+
+def test_unknown_future_geometric_verdict_fails_closed(monkeypatch):
+    """The current producer emits only clean/violations. Pin the adapter so a
+    future vocabulary addition cannot fall through an `else clean` branch."""
+    from pcb_worker import methods
+
+    def future_union(_board, _candidates, **_kwargs):
+        return {
+            "ok": True, "verifies_geometry": True,
+            "per_candidate": {"cand-clean": {"verdict": "partial"}},
+            "findings": [], "baseline": {"findings": []},
+        }
+
+    monkeypatch.setattr(methods.ir_candidates, "check_candidates", future_union)
+    candidate = {
+        "candidate_id": "cand-clean", "net": "BUS", "revision": 1,
+        "segments": [{"id": "safe", "layer": "top", "width": 0.3,
+                      "points": [[10, 20], [10, 35], [30, 35]]}],
+    }
+    res = _call({"board": _candidate_geometry_board(), "candidates": [candidate],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert res["per_candidate"]["cand-clean"] == "error"
+    assert res["geometric_indeterminate"]["kind"] == "internal"
+    assert res["geometric_indeterminate"]["candidate_id"] == "cand-clean"
 
 
 def test_findings_carry_witness_geometry_and_both_type_spellings():

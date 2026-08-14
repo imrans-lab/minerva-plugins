@@ -125,9 +125,11 @@ var _annotation_to_candidate: Dictionary = {}
 ## (add/remove/ingest/supersede + disposition changes that alter the live set).
 ## It is the SECOND coherence token draft_check echoes (alongside board_token):
 ## if the set drifted between begin_check and apply_check_result, the generation
-## differs and the whole reply is discarded. It is RUNTIME state — it resets to 0
-## on a fresh session/load and is DELIBERATELY absent from to_dict/to_sidecar_dict
-## (the durable sidecar guards coherence with the board fingerprint, not this).
+## differs and the whole reply is discarded. It is RUNTIME state — it starts at
+## 0 on a fresh instance and ADVANCES when an existing instance loads another
+## workspace, invalidating replies still in flight from the prior document. It is
+## DELIBERATELY absent from to_dict/to_sidecar_dict (the durable sidecar guards
+## coherence with the board fingerprint, not this process-local epoch).
 var _workspace_generation: int = 0
 
 ## The current board coherence token (compute_board_fingerprint of the live
@@ -3180,6 +3182,14 @@ func rebase(rev: int) -> Array:
 ## through to here is the natural call site, and is left to the owner of that
 ## file (out of this unit's fence).
 func load_from_dict(data: Dictionary, board_revision_hint: int = -1) -> void:
+	# A load is a replacement of the workspace's identity, not a mutation within
+	# the old one. Drop every check-local transient and advance the process-local
+	# epoch BEFORE installing ids that may be identical to the prior document's.
+	# Otherwise a late reply can match those reused ids/generation, or an old
+	# geometric refusal can downgrade candidates belonging to the new document.
+	_pending_check = {}
+	_geometric_indeterminate = {}
+	_bump_generation()
 	candidates.clear()
 	pinned.clear()
 	frozen.clear()

@@ -78,6 +78,7 @@ func _init() -> void:
 	_run_geometric_indeterminate()
 	_run_stale_diagnostic_discard()
 	await _run_cross_check_reply_honesty()
+	_run_load_resets_check_epoch()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -347,3 +348,36 @@ func _run_cross_check_reply_honesty() -> void:
 		"unsupported_geometry")
 	check("cross-check note makes the refusal visible",
 		str(cross.get("note", "")).contains("could NOT be verified"))
+
+
+func _run_load_resets_check_epoch() -> void:
+	print("-- 4(iv). document load clears diagnostics and invalidates old replies --")
+	var fx := _fresh()
+	var ws = fx["ws"]
+	ws.apply_check_result(_matching_reply(fx, "clean", "clean"))
+	var saved: Dictionary = ws.to_dict()
+
+	# Establish a current refusal, then leave another reply in flight from the
+	# old document. The saved replacement intentionally reuses the same candidate
+	# ids and board token: generation is the load boundary's decisive guard.
+	fx["payload"] = ws.begin_check()
+	var refused := _matching_reply(fx, "clean", "clean")
+	refused["geometric_indeterminate"] = {
+		"kind": "old_document", "message": "must not cross the load boundary"}
+	ws.apply_check_result(refused)
+	fx["payload"] = ws.begin_check()
+	var late_reply := _matching_reply(fx, "clean", "clean")
+	var old_generation: int = int(ws.workspace_generation())
+
+	ws.load_from_dict(saved)
+	var loaded_c1 = ws.get_candidate(str(fx["c1"].candidate_id))
+	check("load clears the prior document's geometric diagnostic",
+		ws.geometric_indeterminate().is_empty())
+	check("load advances the check epoch",
+		ws.workspace_generation() > old_generation)
+	check_eq("replacement candidate restored its persisted validation",
+		str(loaded_c1.validation), "clean")
+
+	ws.apply_check_result(late_reply)
+	check_eq("late pre-load reply cannot mutate the replacement candidate",
+		str(loaded_c1.validation), "clean")

@@ -2949,19 +2949,40 @@ def _draft_geometric(board: dict, candidates: list,
         # into the same default string and the actual cause was lost. An
         # indeterminate that cannot say WHY is barely better than a silent one.
         err = union.get("error") if isinstance(union.get("error"), dict) else {}
-        return [], {}, {
+        indeterminate = {
             "kind": str(err.get("kind", "unresolved_geometry")),
             "message": str(err.get("message", "geometry could not be verified")),
             "details": err.get("diagnostics", []),
         }
+        # Preserve the structured attribution supplied by UnmodelableCandidate.
+        # In a batch-atomic refusal this is the only machine-readable answer to
+        # "which candidate poisoned the batch?"; leaving it embedded only in
+        # prose makes automated repair needlessly guess.
+        if "candidate_id" in err:
+            indeterminate["candidate_id"] = err["candidate_id"]
+        return [], {}, indeterminate
 
     findings = list((union.get("baseline") or {}).get("findings", []) or [])
     findings += list(union.get("findings", []) or [])
     per_candidate = {}
     for raw_cid, record in (union.get("per_candidate") or {}).items():
         verdict = record.get("verdict") if isinstance(record, dict) else None
-        per_candidate[str(raw_cid)] = \
-            "violating" if verdict == "violations" else "clean"
+        if verdict == "violations":
+            per_candidate[str(raw_cid)] = "violating"
+        elif verdict == "clean":
+            per_candidate[str(raw_cid)] = "clean"
+        else:
+            # The current producer has exactly two determinate tokens. A future
+            # partial/unknown token is not evidence of clean geometry; treat the
+            # contract mismatch as batch-indeterminate until this adapter gains
+            # explicit semantics for it.
+            return [], {}, {
+                "kind": "internal",
+                "message": "geometric candidate DRC returned unknown verdict "
+                           f"{verdict!r} for candidate {raw_cid!r}",
+                "candidate_id": str(raw_cid),
+                "details": [],
+            }
     return findings, per_candidate, {}
 
 
@@ -3021,14 +3042,27 @@ def _draft_check(params: dict) -> dict:
 
     new_traces: list = []
     new_vias: list = []
-    for cand in candidates:
+    geometric_candidates: list = []
+    candidate_id_counts: dict[str, int] = {}
+    for ordinal, cand in enumerate(candidates):
+        if isinstance(cand, dict):
+            cid = ir_candidates.candidate_id(cand, ordinal)
+            candidate_id_counts[cid] = candidate_id_counts.get(cid, 0) + 1
+    for ordinal, cand in enumerate(candidates):
         if not isinstance(cand, dict):
+            # Keep malformed values in the geometric batch so the neutral owner
+            # rejects them fail-closed. They have no identity to expose in the
+            # connectivity map.
+            geometric_candidates.append(cand)
             continue
-        cid = str(cand.get("candidate_id", ""))
+        cid = ir_candidates.candidate_id(cand, ordinal)
         net = str(cand.get("net", ""))
         per_candidate.setdefault(cid, "clean")
         had_geometry = False
-        for seg in cand.get("segments") or []:
+        raw_segments = cand.get("segments")
+        connectivity_segments = raw_segments \
+            if isinstance(raw_segments, (list, tuple)) else []
+        for seg in connectivity_segments:
             if not isinstance(seg, dict):
                 continue
             pts = _dc_points(seg.get("points"))
@@ -3045,7 +3079,10 @@ def _draft_check(params: dict) -> dict:
             for a, b in zip(pts, pts[1:]):
                 seg_subjects.append({"candidate_id": cid, "segment_id": sid,
                                      "net": net, "layer": layer, "a": a, "b": b})
-        for via in cand.get("vias") or []:
+        raw_vias = cand.get("vias")
+        connectivity_vias = raw_vias \
+            if isinstance(raw_vias, (list, tuple)) else []
+        for via in connectivity_vias:
             if not isinstance(via, dict):
                 continue
             pos = _dc_via_pos(via)
@@ -3060,6 +3097,18 @@ def _draft_check(params: dict) -> dict:
         if not had_geometry:
             # A candidate with no usable geometry can't be checked → error verdict.
             per_candidate[cid] = "error"
+        # Empty candidates have no copper and therefore cannot interact with any
+        # sibling. Excluding ONLY this provably-empty shape keeps their own error
+        # local; malformed/non-empty copper still reaches the batch and poisons it
+        # if the geometric owner cannot model it.
+        if (not ir_candidates.candidate_is_provably_empty(cand)
+                or candidate_id_counts.get(cid, 0) > 1):
+            # Stamp the shared fallback before filtering changes ordinals. If an
+            # empty index 0 is omitted, an id-less index 1 must remain
+            # "candidate:1" when build_overlay enumerates the reduced list.
+            geometric_cand = dict(cand)
+            geometric_cand["candidate_id"] = cid
+            geometric_candidates.append(geometric_cand)
 
     # Effective board = committed copper ∪ every candidate's draft copper.
     effective: dict = dict(board) if isinstance(board, dict) else {}
@@ -3079,7 +3128,7 @@ def _draft_check(params: dict) -> dict:
     # feeding its hand-built vias to compile_board used to omit net/size fields
     # and made every via-bearing candidate permanently indeterminate.
     geo_findings, geo_per_candidate, geo_indeterminate = _draft_geometric(
-        board, candidates, _layer_params(params))
+        board, geometric_candidates, _layer_params(params))
 
     # One authoritative per-candidate result. A determinate geometric violation
     # overrides connectivity clean; indeterminate downgrades every otherwise-
