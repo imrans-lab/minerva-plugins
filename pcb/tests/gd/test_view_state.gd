@@ -20,9 +20,14 @@ extends SceneTree
 ## the two disagreed.
 ##
 ## REUSE SCAN: panel boot + check helpers follow test_parity_bridge.gd
-## (plugin_panel_driver, host.set_panel). Tools are dispatched through
-## PanelTools.handle_tool_call's real entry — not by calling _view_state
-## directly — so the dispatch wiring is exercised too.
+## (plugin_panel_driver, host.set_panel).
+##
+## SCOPE, stated accurately: these call PanelTools._view_state DIRECTLY. The
+## dispatch wiring is NOT exercised here — an earlier version of this header
+## claimed it was, and named a "handle_tool_call" entry point that does not
+## exist (the dispatcher is handle()). The manifest<->dispatch pairing is pinned
+## instead by test_pcb_panel_tools.gd, which reads both out of the source and
+## fails if either side lacks the other.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCB_PANEL_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
@@ -37,6 +42,7 @@ func _init() -> void:
 	_run_flags_are_writable_and_absolute()
 	_run_layers_solo()
 	_run_refusals_change_nothing()
+	_run_types_are_validated()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -124,6 +130,7 @@ func _run_flags_are_writable_and_absolute() -> void:
 	var canvas = ctx["canvas"]
 
 	var before := bool(canvas.get("show_traces"))
+	var grid_before := bool(canvas.get("show_grid"))
 	var res: Dictionary = _view(host, {"flags": {"show_traces": not before}})
 	check("write succeeds", bool(res.get("success", false)))
 	check_eq("THE CANVAS moved", bool(canvas.get("show_traces")), not before)
@@ -141,9 +148,12 @@ func _run_flags_are_writable_and_absolute() -> void:
 		bool(canvas.get("show_traces")), not before)
 
 	# Untouched flags are untouched: a partial write is not a whole-state write.
+	# COMPARED AGAINST A VALUE CAPTURED BEFORE THE WRITE (cold review, finding
+	# 9). The earlier form compared the reply to the canvas — both read from the
+	# same object after the write — so it could not fail even if show_grid had
+	# been changed.
 	check_eq("a flag not named in the write kept its value",
-		bool(canvas.get("show_grid")),
-		bool((res.get("flags", {}) as Dictionary).get("show_grid", false)))
+		bool(canvas.get("show_grid")), grid_before)
 
 	ctx["driver"].free_panel(ctx["panel"])
 
@@ -218,5 +228,48 @@ func _run_refusals_change_nothing() -> void:
 	var bad_type: Dictionary = _view(host, {"hidden_layers": "top"})
 	check("a non-array hidden_layers refuses", not bool(bad_type.get("success", true)))
 	check_eq("named invalid_args", str(bad_type.get("error", "")), "invalid_args")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 5. TYPES, not just names (cold review, finding 5) ─────────────────────────
+#
+# bool("true") is not a valid conversion in GDScript and errors AT THE POINT OF
+# USE. Left to the apply loop, that error would land AFTER earlier flags had
+# been written — the partial application this verb promises cannot happen. The
+# manifest schema constrains nothing inside `flags`, so a loosely-typed caller
+# sending a string is ordinary input, not an exotic case.
+
+func _run_types_are_validated() -> void:
+	print("-- 5. wrong-typed arguments refuse, and write nothing --")
+	var ctx := _ctx()
+	var host = ctx["host"]
+	var canvas = ctx["canvas"]
+
+	var traces_before := bool(canvas.get("show_traces"))
+	var grid_before := bool(canvas.get("show_grid"))
+
+	# A good flag FIRST, so a non-total validation would have applied it before
+	# reaching the bad one.
+	var bad_val: Dictionary = _view(host, {"flags":
+		{"show_grid": not grid_before, "show_traces": "true"}})
+	check("a non-boolean flag value refuses", not bool(bad_val.get("success", true)))
+	check_eq("named invalid_args", str(bad_val.get("error", "")), "invalid_args")
+	check_eq("and the GOOD flag was not applied",
+		bool(canvas.get("show_grid")), grid_before)
+	check_eq("nor the bad one", bool(canvas.get("show_traces")), traces_before)
+
+	# A non-dict `flags` was previously swallowed by _dict_or_empty and reported
+	# as success — the silent no-op its hidden_layers sibling already refuses.
+	var bad_flags: Dictionary = _view(host, {"flags": "show_traces"})
+	check("a non-object flags refuses", not bool(bad_flags.get("success", true)))
+	check_eq("named invalid_args", str(bad_flags.get("error", "")), "invalid_args")
+
+	# kicad_to_canon maps "" to "top" with only a warning (it is the read side),
+	# so an empty name would hide the top layer nobody asked about.
+	var empty_layer: Dictionary = _view(host, {"hidden_layers": [""]})
+	check("an empty layer name refuses", not bool(empty_layer.get("success", true)))
+	check_eq("named invalid_args", str(empty_layer.get("error", "")), "invalid_args")
+	check("and the top layer was NOT hidden", not bool(canvas.is_layer_hidden("top")))
 
 	ctx["driver"].free_panel(ctx["panel"])

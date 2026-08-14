@@ -104,9 +104,12 @@ test_dict_guard.gd assertions=30
 # trustworthy run, exactly as test_layer_stack.gd and test_dict_guard.gd did.
 test_inner_layer_via_guard.gd assertions=39
 # NEW at epoch NLC C4 (item 019ffeaccc0c): minerva_pcb_view_state. Count is 37
-# by construction (10 + 7 + 9 + 11). Provisional for the same reason as the
+# by construction (10 + 7 + 9 + 11), grown to 46 by the cold review's finding 5:
+# group 5 pins TYPE validation (a non-boolean flag value, a non-object `flags`,
+# an empty layer name), each of which could previously slip past the name-only
+# validation and land a partial write. Provisional for the same reason as the
 # suite above — no run happens before the Codex review — and re-pins at testex.
-test_view_state.gd assertions=37
+test_view_state.gd assertions=46
 # NEW at epoch NLC C2 (item 019fff60e05a): minerva_pcb_place_via, the direct
 # board via. Grown at C3 (item 01a001c39aa3) with minerva_pcb_add_trace's two
 # groups — SAME suite on purpose: the pair is one parity gap answered twice and

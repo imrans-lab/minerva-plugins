@@ -1594,12 +1594,33 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		declared = (data.layers as Array).duplicate()
 
 	# ── validate everything first ────────────────────────────────────────────
-	var want_flags: Dictionary = _dict_or_empty(args.get("flags")) if args.has("flags") else {}
-	for k in want_flags.keys():
-		if not (str(k) in flag_names):
-			return {"success": false, "error": "unknown_view_flag",
-				"unknown": str(k), "known_flags": flag_names,
-				"note": "no View flag is called '%s'" % str(k)}
+	#
+	# TYPES AS WELL AS NAMES. `bool(some_string)` is not a valid conversion in
+	# GDScript and errors AT THE POINT OF USE — which, if it were left to the
+	# apply loop below, would be after earlier flags had already been written:
+	# precisely the partial application this station promises cannot happen.
+	# The manifest schema constrains nothing inside `flags`, so a loosely-typed
+	# caller sending {"show_traces": "true"} is an ordinary input, not an
+	# exotic one.
+	var want_flags: Dictionary = {}
+	if args.has("flags"):
+		var raw_flags: Variant = args.get("flags")
+		# Refused, not swallowed. _dict_or_empty would have turned a wrong-typed
+		# `flags` into {} and reported success, which is the silent no-op the
+		# sibling hidden_layers check already refuses by name.
+		if not (raw_flags is Dictionary):
+			return {"success": false, "error": "invalid_args",
+				"note": "flags must be an object of {flag_name: true|false}"}
+		want_flags = raw_flags
+		for k in want_flags.keys():
+			if not (str(k) in flag_names):
+				return {"success": false, "error": "unknown_view_flag",
+					"unknown": str(k), "known_flags": flag_names,
+					"note": "no View flag is called '%s'" % str(k)}
+			if not (want_flags[k] is bool):
+				return {"success": false, "error": "invalid_args",
+					"note": "flag '%s' must be true or false, got %s"
+						% [str(k), str(want_flags[k])]}
 
 	var want_hidden: Array = []
 	var set_hidden := args.has("hidden_layers")
@@ -1608,9 +1629,22 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		if not (raw_hidden is Array):
 			return {"success": false, "error": "invalid_args",
 				"note": "hidden_layers must be an array of canonical layer ids (the COMPLETE hidden set)"}
+		# A board with no declared stack cannot answer "does this layer exist",
+		# so a hide request against it is unanswerable rather than satisfied.
+		# Applying it would hide nothing and report success — a silent no-op on
+		# a request that named layers.
+		if not (raw_hidden as Array).is_empty() and declared.is_empty():
+			return {"success": false, "error": "no_declared_stack",
+				"note": "this board declares no copper stack, so there is no layer to hide"}
 		for entry in (raw_hidden as Array):
+			# Refuse the EMPTY name explicitly: kicad_to_canon maps "" to "top"
+			# with only a warning (it is the read side), so `hidden_layers: [""]`
+			# would otherwise hide the top layer nobody named.
+			if str(entry).strip_edges().is_empty():
+				return {"success": false, "error": "invalid_args",
+					"note": "hidden_layers contains an empty layer name — name a layer or omit it"}
 			var canon := PcbLayerStack.kicad_to_canon(str(entry))
-			if not declared.is_empty() and not (canon in declared):
+			if not (canon in declared):
 				return {"success": false, "error": "layer_not_on_stack",
 					"unknown": str(entry), "declared_layers": declared,
 					"note": "this board declares %s — it has no layer '%s' to hide"
@@ -3703,17 +3737,25 @@ static func _place_via(host, args: Dictionary) -> Dictionary:
 					+ "TRACE continues on past a via, that is the run's own layer, not the hole's.")
 					% banned}
 
+	# NUMBERS ARE CHECKED, NOT COERCED. float("nope") is 0.0 in GDScript, so a
+	# non-numeric argument would silently become a via at the origin — copper the
+	# caller never asked for, from an argument nobody rejected.
+	for key in ["x_mm", "y_mm", "size_mm", "drill_mm"]:
+		if args.has(key) and not (args[key] is float or args[key] is int):
+			return _err("%s must be a number, got %s" % [key, str(args[key])])
+
 	var pos := Vector2(float(args["x_mm"]), float(args["y_mm"]))
 	var size_mm := float(args.get("size_mm", 0.8))
 	var drill_mm := float(args.get("drill_mm", 0.4))
 
 	# THE MODEL'S OWN RULE, not a re-implementation of it (epoch NLC C2, canvas
-	# round). PCBData.via_author_error is the ONE place bounds, ring and
-	# stacking are decided, and the canvas Via tool reads the identical call —
-	# so a human's click and an agent's tool call are refused for the same
-	# reasons in the same words. The same shape _add_trace takes from
-	# trace_author_error.
-	var refusal: String = str(data.via_author_error(pos, size_mm, drill_mm))
+	# round). PCBData.via_author_error is the ONE place bounds, ring, stacking
+	# and net membership are decided, and the canvas Via tool reads the
+	# identical call — so a human's click and an agent's tool call are refused
+	# for the same reasons in the same words. The same shape _add_trace takes
+	# from trace_author_error.
+	var refusal: String = str(data.via_author_error(pos, size_mm, drill_mm,
+		str(args.get("net_name", ""))))
 	if not refusal.is_empty():
 		return {"success": false, "error": "via_not_placeable", "note": refusal}
 

@@ -2482,6 +2482,15 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 	# checked one level up, in the tool layer, which is what holds a board — a
 	# workspace does not, and a check it cannot make is not a check it should
 	# fake.
+	# EMPTY REFUSED BEFORE CANONICALIZING. kicad_to_canon is the READ side and
+	# maps "" to "top" with only a warning, so an unnamed continuation would
+	# silently become the top layer — the exact silent-default class this epoch
+	# exists to remove. The MCP tool layer already refuses empty, but this is the
+	# model API and must not depend on its callers being careful.
+	if str(to_layer).strip_edges().is_empty():
+		return _verb_error(ERR_CONTINUATION_NOT_COPPER,
+			"name the layer the run continues on — an unnamed continuation is not a default",
+			candidate_id)
 	var canon_from := PcbLayerStack.kicad_to_canon(from_layer)
 	var canon_to := PcbLayerStack.kicad_to_canon(to_layer)
 	if not PcbLayerStack.is_copper(canon_to):

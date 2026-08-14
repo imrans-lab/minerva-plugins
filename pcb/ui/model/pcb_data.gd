@@ -2037,9 +2037,21 @@ func authored_trace_width() -> float:
 ## always top<->bottom whatever the stack depth, so there is nothing here to
 ## choose or validate; blind/buried vias are out of scope (see
 ## methods._routes_to_vias' docstring, and epoch NLC C1b).
-func via_author_error(pos: Vector2, size: float, drill: float) -> String:
+func via_author_error(pos: Vector2, size: float, drill: float, net_name: String = "") -> String:
+	# NaN FIRST, because every comparison below is false against it — a NaN
+	# coordinate would sail through the bounds test and land copper nowhere.
+	# It arrives from a caller that coerced a non-numeric argument, which is
+	# exactly the shape a loosely-typed tool call has.
+	if is_nan(pos.x) or is_nan(pos.y) or is_nan(size) or is_nan(drill):
+		return "A via needs finite numbers for its position, size and drill."
 	if size <= 0.0 or drill <= 0.0:
 		return "A via needs a positive size and drill (got %.4f / %.4f)." % [size, drill]
+	# An EMPTY net is fine — a via may be unassigned. A NAMED net that this
+	# board does not declare is a typo, and accepting it would put the via on a
+	# net nothing else is on. The trace side already refuses this through
+	# trace_author_error; the via side used to accept it silently.
+	if not net_name.is_empty() and not has_net(net_name):
+		return "Net \"%s\" is not declared on this board." % net_name
 	if drill >= size:
 		# The difference between them IS the annular ring, so a drill at least
 		# as wide as the pad is a hole through nothing. Caught here rather than

@@ -68,6 +68,14 @@ func _ctx() -> Dictionary:
 	# span there is and the assertion would be vacuous.
 	if data != null and data.has_method("set_board_layers"):
 		data.set_board_layers(["top", "in1", "in2", "bottom"])
+	# Declared nets. via_author_error refuses a NAMED net the board does not
+	# declare (a via on a net nothing else is on is a typo, and the trace side
+	# already refused it through trace_author_error), so the fixtures that place
+	# a netted via need those nets to exist.
+	for net_name in ["GND", "N1"]:
+		var net = PcbNet.new()
+		net.name = net_name
+		data.add_net(net)
 	return {"driver": driver, "panel": panel, "host": host, "data": data}
 
 
@@ -218,11 +226,9 @@ const PcbNet := preload("res://../../minerva-plugins/pcb/ui/model/pcb_net.gd")
 
 
 func _trace_ctx() -> Dictionary:
-	var ctx := _ctx()
-	var net = PcbNet.new()
-	net.name = "N1"
-	ctx["data"].add_net(net)
-	return ctx
+	# N1 is already declared by _ctx(); this alias stays so the trace groups read
+	# as stating their own precondition rather than inheriting it silently.
+	return _ctx()
 
 
 func _run_add_trace_lands_copper() -> void:
