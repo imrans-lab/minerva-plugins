@@ -150,6 +150,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _get_image(host, args)
 		"minerva_pcb_set_view":
 			return _set_view(host, args)
+		"minerva_pcb_view_state":
+			return _view_state(host, args)
 		"minerva_pcb_apply_route_hints":
 			return await _apply_route_hints(host, args)
 		"minerva_pcb_hint_undo":
@@ -1540,6 +1542,110 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 ##   zoom_factor   — multiply current zoom (>1 in, <1 out), centre fixed
 ##   fit:true      — frame the whole board
 ## Returns {view:{zoom, center_x_mm, center_y_mm, visible:{...}}}.
+## minerva_pcb_view_state — READ, and optionally SET, what the View menu shows
+## (epoch NLC station C4, item 019ffeaccc0c).
+##
+## THE GAP THIS CLOSES. minerva_pcb_set_view aims the CAMERA. Nothing exposed
+## what the camera was pointed at: an agent could not tell whether traces were
+## drawn, whether an inner layer was hidden, or whether the fab preview was up —
+## so it could not read its own minerva_pcb_get_image. In the N-layer co-design
+## HITL the human could solo each layer and confirm the board while the agent
+## beside them was blind to the same control. This is deliberately NOT
+## layer-specific: every flag in the _VIEW_FLAGS family had the same gap, and a
+## per-flag verb would have re-created it for the next flag added.
+##
+## ALWAYS RETURNS THE FULL RESULTING STATE, whether or not it changed anything —
+## a setter whose reply an agent has to guess at is a setter it has to follow
+## with a getter, and there is no getter to follow it with.
+##
+## Writes (all optional, all absolute rather than relative — an absolute view is
+## idempotent, and a toggle needs a read the caller may not have done):
+##   flags: {<flag_name>: bool, ...}   any subset of view_flag_names()
+##   hidden_layers: [canonical layer ids]   THE COMPLETE hidden set, not a delta
+##
+## VALIDATED IN FULL BEFORE ANYTHING IS APPLIED. A request naming one good flag
+## and one typo changes nothing and says which was wrong, rather than leaving
+## the view half-moved — the caller cannot see the screen to notice.
+##
+## trace_layer_filter is REPORTED BUT NOT WRITABLE: it is backed by the
+## toolbar's layer OptionButton, and setting it from here would leave that
+## control displaying a filter the canvas is no longer using. Soloing a layer
+## from MCP goes through hidden_layers, which the View menu rebuilds its check
+## marks from and so cannot drift.
+static func _view_state(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("get_canvas"):
+		return _err("PCB view control not available")
+	var canvas = host.get_canvas()
+	if canvas == null or not is_instance_valid(canvas):
+		return _err("PCB canvas not available (panel detached/headless)")
+	var panel = host.get_panel() if host.has_method("get_panel") else null
+	if panel == null or not panel.has_method("view_flag_names") \
+			or not panel.has_method("set_view_flag"):
+		return _err("PCB panel not available (detached, or predates view_state)")
+
+	var flag_names: Array = panel.view_flag_names()
+	var data = _get_data(host)
+	var declared: Array = []
+	if data != null and "layers" in data and data.layers is Array:
+		declared = (data.layers as Array).duplicate()
+
+	# ── validate everything first ────────────────────────────────────────────
+	var want_flags: Dictionary = _dict_or_empty(args.get("flags")) if args.has("flags") else {}
+	for k in want_flags.keys():
+		if not (str(k) in flag_names):
+			return {"success": false, "error": "unknown_view_flag",
+				"unknown": str(k), "known_flags": flag_names,
+				"note": "no View flag is called '%s'" % str(k)}
+
+	var want_hidden: Array = []
+	var set_hidden := args.has("hidden_layers")
+	if set_hidden:
+		var raw_hidden: Variant = args.get("hidden_layers")
+		if not (raw_hidden is Array):
+			return {"success": false, "error": "invalid_args",
+				"note": "hidden_layers must be an array of canonical layer ids (the COMPLETE hidden set)"}
+		for entry in (raw_hidden as Array):
+			var canon := PcbLayerStack.kicad_to_canon(str(entry))
+			if not declared.is_empty() and not (canon in declared):
+				return {"success": false, "error": "layer_not_on_stack",
+					"unknown": str(entry), "declared_layers": declared,
+					"note": "this board declares %s — it has no layer '%s' to hide"
+						% [str(declared), str(entry)]}
+			want_hidden.append(canon)
+
+	# ── apply ────────────────────────────────────────────────────────────────
+	var changed: Array = []
+	for k in want_flags.keys():
+		var flag := str(k)
+		var value := bool(want_flags[k])
+		if bool(canvas.get(flag)) != value and panel.set_view_flag(flag, value):
+			changed.append(flag)
+	if set_hidden and canvas.has_method("set_layer_hidden"):
+		for canon in declared:
+			var should_hide: bool = str(canon) in want_hidden
+			if bool(canvas.is_layer_hidden(str(canon))) != should_hide:
+				canvas.set_layer_hidden(str(canon), should_hide)
+				changed.append("layer:%s" % str(canon))
+
+	# ── report the whole resulting state ─────────────────────────────────────
+	var flags_out: Dictionary = {}
+	for name in flag_names:
+		flags_out[str(name)] = bool(canvas.get(str(name)))
+	var layers_out: Array = []
+	for canon in declared:
+		layers_out.append({
+			"id": str(canon),
+			"kicad": PcbLayerStack.canon_to_kicad(str(canon)) if PcbLayerStack.is_copper(canon) else "",
+			"hidden": bool(canvas.is_layer_hidden(str(canon))) if canvas.has_method("is_layer_hidden") else false,
+		})
+	return _ok({
+		"flags": flags_out,
+		"layers": layers_out,
+		"trace_layer_filter": str(canvas.get("trace_layer_filter")),
+		"changed": changed,
+	})
+
+
 static func _set_view(host, args: Dictionary) -> Dictionary:
 	if host == null or not host.has_method("get_canvas"):
 		return _err("PCB view control not available")

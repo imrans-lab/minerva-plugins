@@ -1399,8 +1399,11 @@ func _run_removal_manifest_tools_absent() -> void:
 	# minerva_pcb_staged_unfreeze, K7's freeze doorway. This pin exists
 	# BECAUSE the sibling pin in test_manifest_tool_registration.gd counts a
 	# different set (registered tools) and can agree while this one is wrong.
-	check_eq("manifest tool count == 101 (ALL manifest.json tools[] entries)",
-		names.size(), 101)
+	# Epoch NLC C4 (101 -> 102): minerva_pcb_view_state (item 019ffeaccc0c).
+	check_eq("manifest tool count == 102 (ALL manifest.json tools[] entries)",
+		names.size(), 102)
+	check("the C4 view-state tool is the addition THIS count accounts for",
+		"minerva_pcb_view_state" in names)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

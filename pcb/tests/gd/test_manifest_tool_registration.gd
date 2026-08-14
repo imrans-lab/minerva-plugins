@@ -203,7 +203,11 @@ func _init() -> void:
 	# previous station broke the gate. The Go pin in
 	# manifest_registry_parity_test.go is genuinely unaffected: it counts
 	# backend-executor tools, and both new tools are executor:"panel".
-	check("total registered tool count == 101", registered.size() == 101,
+	# Epoch NLC C4 (101 -> 102): minerva_pcb_view_state, the agent's read/write
+	# of WHAT the canvas is drawing (item 019ffeaccc0c). executor:"panel", so
+	# the Go pin in manifest_registry_parity_test.go is genuinely unaffected —
+	# that test filters to executor=="backend" before it counts anything.
+	check("total registered tool count == 102", registered.size() == 102,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

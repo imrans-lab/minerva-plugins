@@ -3745,13 +3745,44 @@ func _on_view_menu_id_pressed(id: int) -> void:
 	if _canvas == null or id < 0 or id >= _VIEW_FLAGS.size():
 		return
 	var flag: String = _VIEW_FLAGS[id][1]
-	_canvas.set(flag, not bool(_canvas.get(flag)))
-	if flag == "show_mask" and bool(_canvas.get(flag)):
+	set_view_flag(flag, not bool(_canvas.get(flag)))
+
+
+## Every View draw flag's name, in menu order.
+##
+## THE ONE LIST. The View menu builds itself from _VIEW_FLAGS and, since epoch
+## NLC C4, so does the MCP view_state verb — through this accessor rather than
+## a second hand-kept copy, so a flag added to _VIEW_FLAGS reaches an agent
+## without a follow-up edit somebody has to remember. That drift is exactly how
+## show_route_candidates and show_drc_witnesses each shipped as a canvas var no
+## control could reach (see their entries in _VIEW_FLAGS).
+func view_flag_names() -> Array:
+	var out: Array = []
+	for row in _VIEW_FLAGS:
+		out.append(str(row[1]))
+	return out
+
+
+## Set ONE View draw flag to an absolute value, running the same on-demand
+## worker refetches the View menu runs. Returns false for an unknown flag or a
+## detached canvas — the caller reports; this never guesses.
+##
+## Extracted from _on_view_menu_id_pressed so the menu click and the MCP verb
+## are ONE path, not two. The refetches are the reason it has to be: show_mask
+## and show_fab_preview draw ONLY what a worker round-trip returned, so a
+## setter that just assigned the flag would leave an agent looking at an empty
+## overlay and reporting it as the board's true state. The menu toggles; this
+## sets — a caller that wants a toggle reads the flag first.
+func set_view_flag(flag: String, value: bool) -> bool:
+	if _canvas == null or not (flag in view_flag_names()):
+		return false
+	_canvas.set(flag, value)
+	if flag == "show_mask" and value:
 		# Fetch on demand rather than on every load: the overlay is off by
 		# default and the worker round-trip belongs to the person who asked.
 		_refresh_mask_view()
 	if flag == "show_fab_preview":
-		if bool(_canvas.get(flag)):
+		if value:
 			# Same on-demand rule, and the same reason: this one runs the whole
 			# emission path before it can draw anything.
 			_refresh_fab_preview()
@@ -3762,6 +3793,7 @@ func _on_view_menu_id_pressed(id: int) -> void:
 			# changed, which is the one lie this view must never tell.
 			_canvas.set_fab_preview([], [], "")
 	_canvas.queue_redraw()
+	return true
 
 
 ## Structured layout state for MCP/tests — lets an agent verify responsive

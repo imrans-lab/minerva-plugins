@@ -350,6 +350,30 @@
       }
     },
     {
+      "name": "minerva_pcb_view_state",
+      "description": "Read — and optionally set — WHAT the PCB canvas is drawing, so you can interpret your own minerva_pcb_get_image instead of guessing. minerva_pcb_set_view aims the camera; this says what the camera is pointed at. Call with no arguments to read: returns {flags:{show_grid, show_traces, show_silk, show_ratsnest, show_labels, show_courtyard, show_route_candidates, show_drc_witnesses, show_mask, show_fab_preview}, layers:[{id, kicad, hidden}], trace_layer_filter, changed:[]}. Writes are absolute, not deltas: flags {name:bool} sets any subset, and hidden_layers is THE COMPLETE set of canonical layer ids to hide (pass [] to show every layer, or every id but one to solo that layer — the way to inspect an inner layer on its own). Everything is validated before anything is applied, so a bad flag name or a layer this board does not declare changes nothing and names what was wrong. Toggling show_mask or show_fab_preview on runs the same worker refetch the View menu runs, so the overlay you then capture is real rather than empty. trace_layer_filter is reported but not writable — use hidden_layers.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          },
+          "flags": {
+            "type": "object",
+            "description": "Any subset of the View draw flags, as {flag_name: bool}. Unknown names are refused by name and change nothing."
+          },
+          "hidden_layers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "THE COMPLETE set of canonical layer ids to hide (\"top\", \"bottom\", \"in1\"...). Absolute, not a delta: layers omitted here become visible. Omit the key entirely to leave layer visibility untouched."
+          }
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_pcb_set_view",
       "description": "Pan/zoom the PCB board camera so you (and the human watching the panel) can view items at different scales. Drives the live canvas view; then capture it with minerva_pcb_get_image {fit:false}. Provide exactly one framing (first present wins): component_id (frame one part), region (frame a world-mm rect), center_x_mm/center_y_mm/zoom (set centre in mm + zoom in px/mm; omitted axis/zoom keeps current), zoom_factor (multiply current zoom — >1 in, <1 out), or fit:true (whole board). Returns {view:{zoom, center_x_mm, center_y_mm, visible:{x_mm,y_mm,width_mm,height_mm}}}.",
       "executor": "panel",

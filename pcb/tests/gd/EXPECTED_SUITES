@@ -70,7 +70,10 @@ test_trace_identity_delete.gd assertions=213
 test_workspace_check.gd assertions=46
 test_workspace_ingest.gd assertions=69
 test_workspace_persistence.gd assertions=76
-test_workspace_tools.gd assertions=1135
+# Epoch NLC C4 (1135 -> 1136): the manifest-count pin gained a companion
+# assertion naming minerva_pcb_view_state as the tool that moved it, matching
+# how every prior addition to this pin is accounted for.
+test_workspace_tools.gd assertions=1136
 test_zone_select_delete.gd assertions=50
 test_ux3_contracts.gd assertions=44
 test_staged_entities.gd assertions=72
@@ -96,3 +99,7 @@ test_dict_guard.gd assertions=30
 # this pin is provisional and re-pins at testex from the first trustworthy run,
 # exactly as test_layer_stack.gd and test_dict_guard.gd did.
 test_inner_layer_via_guard.gd assertions=33
+# NEW at epoch NLC C4 (item 019ffeaccc0c): minerva_pcb_view_state. Count is 37
+# by construction (10 + 7 + 9 + 11). Provisional for the same reason as the
+# suite above — no run happens before the Codex review — and re-pins at testex.
+test_view_state.gd assertions=37
