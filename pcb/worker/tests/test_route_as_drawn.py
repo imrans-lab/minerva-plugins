@@ -227,3 +227,132 @@ def test_route_method_sparse_hint_without_waypoints_reports_no_status():
     assert resp["ok"] is True, resp
     r = resp["result"]
     assert not [w for w in r.get("warnings", []) if w.get("waypoint_status")]
+
+
+# ---------------------------------------------------------------------------
+# AUTHORED geometry (owner ruling (b), bug 01a001fca55f; epoch NLC C1b)
+#
+# A detailed hint that carries its own kind_payload.segments/vias is
+# materialized from THEM. Before this, every segment was flattened onto the
+# hint's single kind_payload.layer and vias were hardcoded to [] — so a via the
+# user placed and watched appear on the canvas evaporated at apply, and a run
+# that changed layer came out on one.
+# ---------------------------------------------------------------------------
+
+
+def _authored_hint(_id: str = "ann1", **kp_overrides) -> dict:
+    """A detailed hint whose run crosses from F.Cu to In1.Cu through a via.
+
+    Deliberately an INNER layer: the two-layer case cannot distinguish
+    "honoured the authored layer" from "flattened onto kind_payload.layer",
+    because on a 2-layer board those coincide half the time.
+    """
+    return _detailed_hint(
+        _id,
+        segments=[
+            {"start": [15.24, 20.32], "end": [30.0, 20.32], "layer": "F.Cu"},
+            {"start": [30.0, 20.32], "end": [45.72, 20.32], "layer": "In1.Cu"},
+        ],
+        vias=[[30.0, 20.32]],
+        **kp_overrides,
+    )
+
+
+def test_authored_segments_keep_their_own_layers():
+    board = route_bridge.board_to_router(_two_pin_board())
+    routes, _, _, ids = route_bridge.materialize_detailed_hints(
+        [_authored_hint()], board)
+
+    assert ids == ["ann1"]
+    assert len(routes) == 1
+    layers = [s["layer"] for s in routes[0]["segments"]]
+    # The flattening bug produced ["F.Cu", "F.Cu"] here, from kp["layer"].
+    assert layers == ["F.Cu", "In1.Cu"]
+
+
+def test_authored_vias_are_not_dropped():
+    board = route_bridge.board_to_router(_two_pin_board())
+    routes, _, _, _ = route_bridge.materialize_detailed_hints(
+        [_authored_hint()], board)
+    # Was hardcoded []. THE headline defect of bug 01a001fca55f.
+    assert routes[0]["vias"] == [[30.0, 20.32]]
+
+
+def test_authored_vias_reach_the_DRC_harvest_as_through_vias():
+    """The consumer-side half: an emitted via must survive into the board DRC
+    actually runs against, carrying the v1 through span.
+
+    This is the assertion that makes the two above mean something. A route dict
+    holding a via is not copper; methods._routes_to_vias is what turns it into
+    a board via, and _post_route_board merges THAT into the board handed to
+    drc.run_drc. Asserting only on the route dict would leave the same
+    "producer works, nothing consumes it" gap this bug was filed for.
+    """
+    from pcb_worker import methods
+
+    board = route_bridge.board_to_router(_two_pin_board())
+    routes, _, _, _ = route_bridge.materialize_detailed_hints(
+        [_authored_hint()], board)
+
+    harvested = methods._routes_to_vias(routes)
+    assert len(harvested) == 1
+    assert harvested[0]["x_mm"] == pytest.approx(30.0)
+    assert harvested[0]["y_mm"] == pytest.approx(20.32)
+    # Through via at any stack depth — see _routes_to_vias' own docstring.
+    assert harvested[0]["from_layer"] == "top"
+    assert harvested[0]["to_layer"] == "bottom"
+
+    post = methods._post_route_board(_two_pin_board(), routes)
+    assert any(v["x_mm"] == pytest.approx(30.0) for v in post["vias"])
+
+
+def test_unknown_authored_layer_falls_back_and_warns():
+    """FAILS CLOSED. An unreadable layer name must not become a default, and
+    must not take half the route with it: the whole hint falls back to the
+    engine and says so."""
+    board = route_bridge.board_to_router(_two_pin_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["segments"][1]["layer"] = "Nope.Cu"
+    routes, nets, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board)
+
+    assert routes == [] and nets == set() and ids == []
+    assert any(w.get("id") == "ann1" and "authored geometry" in w.get("message", "")
+               for w in warnings), warnings
+
+
+def test_malformed_authored_via_is_not_silently_dropped():
+    """The whole bug was vias disappearing without a word. A via that cannot be
+    read falls the hint back to the engine WITH a warning — it never ships a
+    route that quietly has one fewer hole than the author drew."""
+    board = route_bridge.board_to_router(_two_pin_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["vias"] = [[30.0]]
+    routes, _, warnings, ids = route_bridge.materialize_detailed_hints(
+        [hint], board)
+
+    assert routes == [] and ids == []
+    assert any("via 0" in w.get("message", "") for w in warnings), warnings
+
+
+def test_zero_length_authored_segment_is_skipped_not_refused():
+    """Matches the waypoint path's own `pts[i] != pts[i + 1]` filter."""
+    board = route_bridge.board_to_router(_two_pin_board())
+    hint = _authored_hint()
+    hint["kind_payload"]["segments"].insert(
+        1, {"start": [30.0, 20.32], "end": [30.0, 20.32], "layer": "F.Cu"})
+    routes, _, _, ids = route_bridge.materialize_detailed_hints([hint], board)
+
+    assert ids == ["ann1"]
+    assert [s["layer"] for s in routes[0]["segments"]] == ["F.Cu", "In1.Cu"]
+
+
+def test_hint_without_authored_segments_still_uses_waypoints():
+    """The fallback must survive the addition of the authored path — otherwise
+    every hint that predates it silently changes shape. Same assertion as
+    test_detailed_hint_materializes_verbatim, stated as a regression."""
+    board = route_bridge.board_to_router(_two_pin_board())
+    routes, _, _, _ = route_bridge.materialize_detailed_hints(
+        [_detailed_hint()], board)
+    assert routes[0]["vias"] == []
+    assert all(s["layer"] == "F.Cu" for s in routes[0]["segments"])

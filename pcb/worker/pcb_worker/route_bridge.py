@@ -1573,6 +1573,70 @@ def _corridor_from_task_constraint(
     return pts, layer, revision
 
 
+def _xy(raw: Any, what: str) -> list:
+    """A [x_mm, y_mm] pair as floats, or ValueError naming what was wrong."""
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        raise ValueError(f"{what} is not an [x, y] pair: {raw!r}")
+    try:
+        return [float(raw[0]), float(raw[1])]
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} has non-numeric coordinates: {raw!r}")
+
+
+def _authored_segments(raw_segments: list) -> list:
+    """A hint's own kind_payload.segments as route segments, layers HONOURED.
+
+    Owner ruling (b) on bug 01a001fca55f: a detailed hint is materialized
+    verbatim, so its per-segment layers are the layers, not decoration to be
+    flattened onto the hint's single kind_payload.layer.
+
+    FAILS CLOSED on anything it cannot read — a malformed entry or an
+    unrecognised layer name raises, and the caller falls back to engine-guided
+    routing WITH A WARNING naming the hint. It does not drop the bad segment
+    and keep the rest: a partial route is copper that goes somewhere the author
+    did not draw, which is worse than a route the engine owns outright.
+
+    Zero-length segments are the one thing skipped rather than refused, matching
+    the waypoint path's own `pts[i] != pts[i + 1]` filter — copper with no
+    length is not copper, and build_overlay refuses it downstream anyway.
+    """
+    out: list = []
+    for i, seg in enumerate(raw_segments):
+        if not isinstance(seg, dict):
+            raise ValueError(f"segment {i} is not a mapping")
+        start = _xy(seg.get("start"), f"segment {i} start")
+        end = _xy(seg.get("end"), f"segment {i} end")
+        if start == end:
+            continue
+        # Raises ValueError for an unknown/empty name — deliberately NOT
+        # defaulted. This is the write side; see canon_to_kicad's own docstring.
+        layer = _canon_layer(seg.get("layer"))
+        out.append({"start": start, "end": end, "layer": layer})
+    return out
+
+
+def _authored_vias(raw_vias: Any) -> list:
+    """A hint's own kind_payload.vias as route vias: [[x, y], ...].
+
+    That positional shape is deliberate and is the one every consumer already
+    speaks — methods._routes_to_vias reads routes[].vias as (x, y) pairs and
+    stamps the through span onto each, and _serialize_routing_result keeps the
+    public route() contract at [[x, y], ...]. A v1 via has no per-via span to
+    carry (see _routes_to_vias' own docstring on the through-via model), so
+    there is nothing here to lose by staying positional.
+
+    Absent/empty is the empty case. A MALFORMED entry raises rather than being
+    skipped: this whole change exists because vias were being dropped silently,
+    and dropping one here for being unreadable would be the same defect wearing
+    a different hat. The caller turns that into a warning that names the hint.
+    """
+    if raw_vias is None:
+        return []
+    if not isinstance(raw_vias, (list, tuple)):
+        raise ValueError(f"vias is not a list: {raw_vias!r}")
+    return [_xy(v, f"via {i}") for i, v in enumerate(raw_vias)]
+
+
 def materialize_detailed_hints(
     hint_envelopes: list[dict],
     board: Board,
@@ -1585,10 +1649,28 @@ def materialize_detailed_hints(
     around obstacles the engine can't see, so its waypoints are the route,
     not a soft attraction field. For each SELECTED envelope with
     hint_type=single_trace, detail_level=detailed, and BOTH endpoints
-    resolvable to pads on one net, emit a serialized route dict
-    (pad -> waypoints -> pad, single layer) and consume the hint + its net so
-    the A* engine neither re-routes nor duplicates it. Anything that doesn't
-    fully resolve is left for the engine path with a warning.
+    resolvable to pads on one net, emit a serialized route dict and consume the
+    hint + its net so the A* engine neither re-routes nor duplicates it.
+    Anything that doesn't fully resolve is left for the engine path with a
+    warning.
+
+    TWO GEOMETRY SOURCES, in this order (owner ruling (b), bug 01a001fca55f):
+
+    1. AUTHORED — the hint carries its own ``kind_payload.segments``. They are
+       emitted verbatim, each on ITS OWN layer, together with
+       ``kind_payload.vias``. "Verbatim" is what this function promises, and
+       until epoch NLC C1b it was not keeping that promise for either field:
+       every segment was flattened onto the single ``kind_payload.layer`` and
+       vias were hardcoded to []. A via the user placed and watched appear on
+       the canvas therefore evaporated at apply, and a run that changed layer
+       came out on one.
+    2. WAYPOINT-DERIVED — the hint carries no segments of its own, so the route
+       is pad -> waypoints -> pad on the hint's single layer, with no vias.
+       Unchanged, and still the shape most hints have.
+
+    A detailed hint that opts INTO engine layer changes never reaches here (the
+    ``allow_layer_change`` guard sends it to hints_to_router), so honouring
+    authored layers here can never override an engine decision.
 
     Returns (routes, consumed_net_names, warnings, consumed_hint_ids); route
     dicts carry "as_drawn": True so callers/tests can tell the paths apart.
@@ -1650,22 +1732,53 @@ def materialize_detailed_hints(
             consumed_ids.append(ann_id)
             continue
 
-        layer = _canon_layer(kp.get("layer", "F.Cu"))
-        pts = [[src.position[0], src.position[1]]]
-        pts += _waypoints_of(env)
-        pts.append([dst.position[0], dst.position[1]])
-        segments = [
-            {"start": [pts[i][0], pts[i][1]],
-             "end": [pts[i + 1][0], pts[i + 1][1]],
-             "layer": layer}
-            for i in range(len(pts) - 1)
-            if pts[i] != pts[i + 1]
-        ]
+        # AUTHORED GEOMETRY FIRST (owner ruling (b) on bug 01a001fca55f).
+        # A hint that carries its own per-segment layers and vias is
+        # materialized from THEM, verbatim. The waypoint-derived build below is
+        # the fallback for a hint that carries no segments of its own.
+        #
+        # This is the gap this function's own comment above has been naming:
+        # "its verbatim single-layer segments with vias:[]". Flattening every
+        # segment onto the hint's single kp["layer"] and dropping kp["vias"]
+        # meant a via the user placed and watched appear on the canvas simply
+        # evaporated at apply, and a run that changed layer came out on one.
+        # A detailed hint that opts INTO engine layer changes never reaches
+        # here (the allow_layer_change guard above sends it to hints_to_router),
+        # so honouring authored layers here cannot override an engine decision.
+        authored = kp.get("segments")
+        if isinstance(authored, list) and authored:
+            try:
+                segments = _authored_segments(authored)
+                vias = _authored_vias(kp.get("vias"))
+            except ValueError as exc:
+                warnings.append({"id": ann_id, "message":
+                    f"detailed hint carries unusable authored geometry ({exc}) — "
+                    "falling back to engine-guided routing"})
+                continue
+        else:
+            try:
+                layer = _canon_layer(kp.get("layer", "F.Cu"))
+            except ValueError as exc:
+                warnings.append({"id": ann_id, "message":
+                    f"detailed hint names an unusable layer ({exc}) — "
+                    "falling back to engine-guided routing"})
+                continue
+            pts = [[src.position[0], src.position[1]]]
+            pts += _waypoints_of(env)
+            pts.append([dst.position[0], dst.position[1]])
+            segments = [
+                {"start": [pts[i][0], pts[i][1]],
+                 "end": [pts[i + 1][0], pts[i + 1][1]],
+                 "layer": layer}
+                for i in range(len(pts) - 1)
+                if pts[i] != pts[i + 1]
+            ]
+            vias = []
         if not segments:
             warnings.append({"id": ann_id, "message":
                 "detailed hint has no usable geometry — skipped"})
             continue
-        routes.append({"net": net, "segments": segments, "vias": [],
+        routes.append({"net": net, "segments": segments, "vias": vias,
                        "as_drawn": True, "hint_id": ann_id})
         consumed_nets.add(net)
         consumed_ids.append(ann_id)
