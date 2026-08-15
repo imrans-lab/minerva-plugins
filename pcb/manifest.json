@@ -985,6 +985,41 @@
       }
     },
     {
+      "name": "minerva_pcb_fabrication_stage",
+      "description": "Read or DECLARE what this board is for manufacturing. Omit `stage` to read; pass it to declare. Returns {fabrication_stage, routing_deferred, known_stages, trace_count, via_count}. Stages: \"routed\" (the default, and what a board that declares nothing IS — every net is meant to be wired, today's behaviour exactly); \"routing_deferred\" (routing happens in a later step, some copper may already exist); \"vias_only\" (drilled and plated with no copper runs intended at all — the fiber-laser deliverable, where the customer cannot drill so they order the holes and lase the runs themselves). WHAT IT CHANGES: on a deferred board the connectivity census reports `complete:true` over a non-empty missing_copper, because unrouted nets are the JOB rather than a defect, and it carries fabrication_stage/routing_deferred/expected_incomplete beside the verdict so the reason always travels with it. WHAT IT DOES NOT CHANGE: nothing is suppressed. Every unrouted and fragmented net is still computed and still listed, and the violation checks — shorts, crossings, dangling endpoints, layer changes with no via — fire exactly as before, because those report copper that is WRONG while a stage excuses only copper that is ABSENT. Refused by name, changing nothing: invalid_fabrication_stage (an unknown token, or \"vias_only\" on a board that has traces — that declaration would be false, so delete the traces or declare \"routing_deferred\"). One journalled, undoable step. The Properties sidebar's Fabrication row is the same declaration.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "stage": {
+            "type": "string",
+            "enum": ["routed", "routing_deferred", "vias_only"],
+            "description": "Stage to declare. Omit to read the current one without changing it."
+          }
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_update_via",
+      "description": "Edit ONE placed via — position, net, size or drill — in exactly one journalled, undoable step, keeping its id. The agent counterpart of dragging a via on the canvas or editing it in the Properties panel; all three share PCBData.update_via, so a call and a click are refused identically. Every argument except via_id is OPTIONAL and an absent one means UNCHANGED, but x_mm and y_mm must be given together (a via moves as a point). Returns {via_id, x_mm, y_mm, net_name, size_mm, drill_mm, trace_ids, snapped_to_trace, changed, from_layer, to_layer} — the RESULTING values, not the requested ones, because the edit is resolved against the board's copper: growing a via until its annulus reaches a trace snaps it to that centreline and inherits the trace's net, and clearing the net of a via that sits on a trace re-inherits that net, since a hole in that copper is on that net whatever you asked for. `changed:false` with success is a no-op (the via already had those values); a refusal is success:false with a named error. The whole edit is validated before anything is applied, so a refusal leaves the via untouched. Refused by name: via_not_placeable (off the board, overlapping another via, drill not smaller than pad, undeclared net, ambiguous multi-net trace contact, or a net that conflicts with the trace it touches) and span_not_selectable (a v1 via is a THROUGH via joining every declared layer; which layer a TRACE continues on past it is the run's property, not the hole's).",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "via_id": {"type": "string", "description": "Via id to edit (as reported by minerva_pcb_list_vias)"},
+          "x_mm": {"type": "number", "description": "New centre X in board mm. Must be given with y_mm."},
+          "y_mm": {"type": "number", "description": "New centre Y in board mm. Must be given with x_mm."},
+          "net_name": {"type": "string", "description": "New net for the via. Pass \"\" to unassign it — but a via sitting on a trace re-inherits that trace's net."},
+          "size_mm": {"type": "number", "description": "New pad diameter in mm. Must stay larger than the drill."},
+          "drill_mm": {"type": "number", "description": "New drill diameter in mm. Must stay smaller than the pad."}
+        },
+        "required": ["editor_name", "via_id"]
+      }
+    },
+    {
       "name": "minerva_pcb_delete_via",
       "description": "Delete ONE board via by id. Exactly one journalled, undoable step — a single undo puts the via back. Get the id from minerva_pcb_list_vias (or from the `id` on each via in minerva_pcb_export_trace_geometry). Returns {deleted, net_name, x_mm, y_mm, remaining_via_count}. An unknown via_id — including an empty one, which is what an id-less legacy via yields — is an ERROR, never a silent no-op: nothing is removed and nothing is journalled. This deletes the via ONLY; the traces meeting it are left exactly as they are, which can leave copper that changes layer with nothing connecting it, so check the routing afterwards. To remove several vias at once (or vias together with traces) in a single undo step, use minerva_pcb_delete_traces with via_ids instead. The human's Delete key, trash button and eraser on the canvas remove vias through this same model path and the same undo history.",
       "executor": "panel",

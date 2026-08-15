@@ -70,6 +70,31 @@ var board_name: String = "Untitled"
 ## Board layers
 var layers: Array[String] = ["top", "bottom"]
 
+## Fabrication-stage tokens, mirroring internal/board/board.go's FabStage*
+## constants and worker/pcb_worker/drc.py's FAB_STAGE_*. Three copies exist
+## because the three runtimes cannot share a symbol; the Go one is the WRITE
+## GATE (validateFabricationStage refuses anything outside the set), so this
+## list only ever has to agree with it, never arbitrate.
+const FAB_STAGE_ROUTED := "routed"
+const FAB_STAGE_ROUTING_DEFERRED := "routing_deferred"
+const FAB_STAGE_VIAS_ONLY := "vias_only"
+const FAB_STAGES: Array[String] = [
+	FAB_STAGE_ROUTED, FAB_STAGE_ROUTING_DEFERRED, FAB_STAGE_VIAS_ONLY]
+
+## THE BOARD'S DECLARED MANUFACTURING INTENT (DCR 01a0033a12a9 change 3).
+##
+## "routed" is the default and every board that never declares a stage IS one —
+## absent and "routed" are the same board, here, in the canonical dict, in Go
+## and in the census. The other two say that unrouted nets are the JOB rather
+## than a defect: a via-only board is drilled and plated with no copper runs
+## intended at all (fiber-laser users cannot drill, so they order the holes and
+## lase the runs later), and routing_deferred is the looser case where some
+## copper may already exist.
+##
+## The panel does not DECIDE anything from this — drc.connectivity_completeness
+## does. The model's job is to hold the declaration and not lose it.
+var fabrication_stage: String = FAB_STAGE_ROUTED
+
 ## Board-wide manufacturing constraints (canonical design_rules block, stored as
 ## a plain dict of canonical keys: clearance_mm, trace_width_mm, via_diameter_mm,
 ## via_drill_mm, diff_pair_gap_mm, diff_pair_width_mm).
@@ -2188,24 +2213,81 @@ func insert_trace_junction(trace_id: String, position: Vector2) -> bool:
 ## with the via; a trace touched at the destination is snapped, net-checked and
 ## explicitly bisected through the same resolver direct placement uses.
 ## History is the caller's (the canvas batches mixed-selection movement).
+##
+## POSITION-ONLY SUGAR over update_via, which is the one via-edit rule. A drag
+## can only change a position, so keeping this narrow verb is what stops the
+## drag path from ever rewriting a net, a size or a drill by accident.
 func move_via(via_id: String, target: Vector2) -> Dictionary:
+	return update_via(via_id, {"position": target})
+
+
+## THE ONE VIA-EDIT RULE — what via_author_error/resolve_via_target are for
+## CREATION, this is for a via that already exists. The canvas drag, the
+## Properties rows and minerva_pcb_update_via all come through here, so a
+## human's edit and an agent's call are refused identically, in identical
+## words: the same contract _place_via keeps for placement (DCR 01a0033a12a9
+## change 2). Before it there was no way to change a placed via's net, size or
+## drill AT ALL on any surface, and its position could only be changed by
+## dragging it — so an agent could delete and re-create a via but never adjust
+## one, which is the same parity hole station C2 closed for placement.
+##
+## ABSENT KEY MEANS UNCHANGED. `changes` may carry any of "position" (Vector2),
+## "net_name" (String), "size" and "drill" (float). A key that is not present is
+## not an instruction to clear that field — a partial edit must never blank the
+## rest of the via.
+##
+## VALIDATED IN FULL BEFORE ANYTHING IS APPLIED. The effective post-edit values
+## go through resolve_via_target as ONE set, so an edit that would be refused
+## leaves the via exactly as it was rather than half-applied. That ordering is
+## load-bearing rather than tidy: the trace-capture radius is size-dependent, so
+## a via that grows must be judged at its NEW size. Assigning the size first and
+## resolving after would decide contact against geometry the board never had.
+##
+## TWO RESULTS THAT LOOK SURPRISING AND ARE THE MODEL BEING CONSISTENT:
+##   * GROWING a via can MOVE it. A wider annulus can reach a trace it did not
+##     touch before, and a via touching copper snaps to that centreline and
+##     inherits the net exactly as placement does. The alternative is precisely
+##     the offset, netless via that bug 01a003e2fb6e was filed for.
+##   * CLEARING the net of a via that sits ON a trace does not leave it netless.
+##     resolve_via_target re-inherits the trace's net, because a hole in that
+##     copper IS on that net whatever the caller typed.
+## The reply therefore reports the RESULTING position and net, never the
+## requested ones, so a caller can always see when either happened.
+func update_via(via_id: String, changes: Dictionary) -> Dictionary:
 	var via: Dictionary = get_via(via_id)
 	if via.is_empty():
 		return {"ok": false, "error": "via_not_found",
 			"message": "No via '%s' exists on this board." % via_id}
 	var old_pos := via_position(via)
-	var size := float(via.get("size", 0.8))
-	var drill := float(via.get("drill", 0.4))
+	var old_size := float(via.get("size", 0.8))
+	var old_drill := float(via.get("drill", 0.4))
 	var old_net := str(via.get("net_name", ""))
-	var resolved := resolve_via_target(target, size, drill, old_net, via_id)
+
+	# TYPE-GUARDED, not coerced. `changes["position"]` assigned straight into a
+	# typed Vector2 local HARD-ERRORS on anything else, which is the 23-site
+	# defect class docket 019fa0f8d575 records for this codebase. Refuse by name
+	# instead. The numbers below need no such guard: float("nope") is 0.0 in
+	# GDScript and via_author_error already refuses a non-positive size or drill
+	# by name, so a bad number cannot become geometry.
+	if changes.has("position") and not (changes["position"] is Vector2):
+		return {"ok": false, "error": "via_not_placeable",
+			"message": "A via position must be a Vector2 (got %s)." % str(changes["position"])}
+	var target: Vector2 = changes["position"] if changes.has("position") else old_pos
+	var size := float(changes["size"]) if changes.has("size") else old_size
+	var drill := float(changes["drill"]) if changes.has("drill") else old_drill
+	var want_net := str(changes["net_name"]) if changes.has("net_name") else old_net
+
+	var resolved := resolve_via_target(target, size, drill, want_net, via_id)
 	if not bool(resolved.get("ok", false)):
 		return {"ok": false, "error": "via_not_placeable",
 			"message": str(resolved.get("error", "The via cannot be moved there."))}
 	var new_pos: Vector2 = resolved["position"]
 	var new_net := str(resolved.get("net_name", old_net))
-	if new_pos.distance_to(old_pos) <= 0.0001 and new_net == old_net:
+	if new_pos.distance_to(old_pos) <= 0.0001 and new_net == old_net \
+			and is_equal_approx(size, old_size) and is_equal_approx(drill, old_drill):
 		return {"ok": true, "via_id": via_id, "position": new_pos,
-			"net_name": new_net, "trace_ids": [], "moved": false}
+			"net_name": new_net, "size": old_size, "drill": old_drill,
+			"trace_ids": [], "moved": false}
 
 	# Every same-net trace that genuinely meets the old centre owns this
 	# junction. Move that point with the via rather than detaching the hole.
@@ -2229,23 +2311,32 @@ func move_via(via_id: String, target: Vector2) -> Dictionary:
 
 	via["position"] = new_pos
 	via["net_name"] = new_net
+	via["size"] = size
+	via["drill"] = drill
 	var target_trace := str(resolved.get("trace_id", ""))
 	if not target_trace.is_empty():
 		insert_trace_junction(target_trace, new_pos)
 		if not (target_trace in touched):
 			touched.append(target_trace)
-	record_change("move_via", {
+	# ONE journal entry per edit, whatever it changed — a caller reading the
+	# journal for a move still finds it here with old_position != new_position.
+	# The old/new pairs are carried for every field so an entry is readable
+	# without the board state that produced it.
+	record_change("update_via", {
 		"via_id": via_id,
 		"old_position": {"x": old_pos.x, "y": old_pos.y},
 		"new_position": {"x": new_pos.x, "y": new_pos.y},
 		"old_net_name": old_net, "new_net_name": new_net,
+		"old_size": old_size, "new_size": size,
+		"old_drill": old_drill, "new_drill": drill,
 		"trace_ids": touched.duplicate(),
 	})
 	for trace_id in touched:
 		trace_changed.emit(str(trace_id))
 	data_changed.emit()
 	return {"ok": true, "via_id": via_id, "position": new_pos,
-		"net_name": new_net, "trace_ids": touched, "moved": true,
+		"net_name": new_net, "size": size, "drill": drill,
+		"trace_ids": touched, "moved": true,
 		"snapped": bool(resolved.get("snapped", false))}
 
 
@@ -2312,6 +2403,42 @@ func create_trace_entity(net_name: String, layer: String, points, width: float =
 
 
 #region Board Properties
+
+## Declare what this board IS for manufacturing. Returns "" on success, or the
+## refusal in the board model's own words — the set_zone_net idiom, so the
+## panel and minerva_pcb_set_fabrication_stage show one sentence, not two.
+##
+## THE vias_only RULE IS MIRRORED FROM THE WRITE GATE, not invented here.
+## internal/board/validate.go's validateFabricationStage refuses a vias_only
+## board that carries traces, because a declaration the board's own contents
+## contradict is a false one, and without that refusal the two deferred stages
+## would be pure synonyms. Checking it HERE too is not duplicated authority: the
+## Go gate stays the authority and would still refuse on save. This one exists
+## so the human finds out when they pick the value rather than when the file
+## fails to write, which is the same reason the zone pickers refuse locally.
+##
+## History is NOT snapshotted here — the house rule that no mutator in this file
+## snapshots itself. The caller owns the undo step.
+func set_fabrication_stage(stage: String) -> String:
+	var wanted := FAB_STAGE_ROUTED if stage.is_empty() else stage
+	if wanted not in FAB_STAGES:
+		return "\"%s\" is not a fabrication stage this pipeline knows (want %s)." \
+			% [stage, ", ".join(FAB_STAGES)]
+	if wanted == FAB_STAGE_VIAS_ONLY and not traces.is_empty():
+		return ("\"%s\" declares no copper runs, but this board has %d trace(s) — "
+			+ "declare \"%s\" instead, or delete the traces.") \
+			% [FAB_STAGE_VIAS_ONLY, traces.size(), FAB_STAGE_ROUTING_DEFERRED]
+	if wanted == fabrication_stage:
+		return ""
+	var previous := fabrication_stage
+	fabrication_stage = wanted
+	record_change("set_fabrication_stage", {
+		"old_stage": previous, "new_stage": wanted,
+	})
+	structure_changed.emit()
+	data_changed.emit()
+	return ""
+
 
 ## Resize the board outline (journalled + emits structure/data changes).
 func set_board_size(new_width: float, new_height: float) -> void:
@@ -2497,7 +2624,13 @@ func save_to_history(action_name: String = "Change") -> void:
 		# ABSENT key as "leave the stack alone" so pre-GA-1 snapshots (none
 		# survive a session, but the absent-key rule is the codec's contract)
 		# stay applicable.
-		"layers": layers.duplicate()
+		"layers": layers.duplicate(),
+		# The DECLARED STAGE rides the snapshot for the same reason the stack
+		# does: set_fabrication_stage is a mutator, so undoing across a stage
+		# edit without this bucket would leave the declaration behind while
+		# every other bucket rewound. _restore_state's absent-key rule applies
+		# here too — an older snapshot leaves the stage alone.
+		"fabrication_stage": fabrication_stage
 	}
 
 	# BUCKET 8 — the routing workspace's disposition layer (see the block above
@@ -2665,6 +2798,14 @@ func _restore_state(state: Dictionary) -> void:
 		for entry in state["layers"]:
 			restored_layers.append(str(entry))
 		layers = restored_layers
+	# Declared stage (DCR 01a0033a12a9 change 3): same ABSENT-key rule as the
+	# stack above, and the same normalisation from_board_dict applies — a
+	# snapshot carrying a token this build does not know rewinds to "routed"
+	# rather than restoring a declaration nothing can honour.
+	if state.has("fabrication_stage"):
+		var restored_stage := str(state["fabrication_stage"])
+		fabrication_stage = restored_stage if restored_stage in FAB_STAGES \
+			else FAB_STAGE_ROUTED
 
 	# BUCKET 8 — restore the workspace disposition layer LAST, after the board is
 	# whole, so a delegate that reads the board while restoring sees the state
@@ -3143,6 +3284,13 @@ func to_board_dict() -> Dictionary:
 	# slice is `omitempty` too.
 	if not cutouts.is_empty():
 		out["cutouts"] = _cutouts_to_list()
+	# Same conditional-emit idiom, same reason: a board that declares no
+	# fabrication stage must serialize byte-identically to before the field
+	# existed. Go's FabricationStage is `omitempty`, and drc.fabrication_stage
+	# reads an absent value as "routed", so the default board is unchanged
+	# end-to-end (DCR 01a0033a12a9 change 3).
+	if not fabrication_stage.is_empty() and fabrication_stage != FAB_STAGE_ROUTED:
+		out["fabrication_stage"] = fabrication_stage
 	return out
 
 
@@ -3163,6 +3311,14 @@ func from_board_dict(data: Dictionary) -> void:
 		layers.append(str(layer))
 
 	design_rules = (data.get("design_rules", {}) as Dictionary).duplicate()
+
+	# An unknown token is normalised to "routed" rather than carried. The Go
+	# write gate (internal/board/validate.go validateFabricationStage) refuses
+	# one, so a board that got here with a bad value did not come through that
+	# gate — and the conservative reading is the one where an unrouted net stays
+	# a DEFECT. Carrying it would let a typo silently excuse a half-routed board.
+	var loaded_stage := str(data.get("fabrication_stage", ""))
+	fabrication_stage = loaded_stage if loaded_stage in FAB_STAGES else FAB_STAGE_ROUTED
 
 	# THE BOARD'S LIBRARY LOCK (K20, DCR 019ffc52c358) is carried through this
 	# model rather than interpreted by it. The panel is not the authority on

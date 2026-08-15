@@ -62,6 +62,23 @@ type LibraryLockEntry struct {
 	Source string `json:"source,omitempty" yaml:"source,omitempty"`
 }
 
+// Board.FabricationStage tokens. See the field's own comment for what they
+// mean and why an unknown one is refused rather than defaulted.
+const (
+	FabStageRouted          = "routed"
+	FabStageRoutingDeferred = "routing_deferred"
+	FabStageViasOnly        = "vias_only"
+)
+
+// RoutingIsDeferred reports whether this board's declared stage says its nets
+// are meant to be unrouted for now. The ONE predicate behind that question, so
+// adding a future deferred stage cannot leave one consumer judging by an
+// out-of-date list of tokens. Its Python mirror is drc.routing_is_deferred.
+func (b *Board) RoutingIsDeferred() bool {
+	return b.FabricationStage == FabStageRoutingDeferred ||
+		b.FabricationStage == FabStageViasOnly
+}
+
 type Board struct {
 	Version int `json:"version" yaml:"version"`
 	// ID is the persistent, mint-once board identity (schema v2+). It is an
@@ -93,6 +110,40 @@ type Board struct {
 	// a stack for it.
 	// See docs/board-yaml.md "Layer stack".
 	Layers []string `json:"layers,omitempty" yaml:"layers,omitempty"`
+
+	// FabricationStage is the board's DECLARED manufacturing intent, and it
+	// exists so an incomplete board can say it is incomplete ON PURPOSE
+	// (DCR 01a0033a12a9 change 3).
+	//
+	// THE PROBLEM IT SOLVES. A via-only board has every net unrouted BY DESIGN:
+	// fiber-laser users cannot drill, so they order a drilled, plated board with
+	// no copper runs and lase the traces themselves in a second step. The
+	// connectivity census reports each of those nets as missing_copper, so the
+	// customer's CORRECT board reads as a wall of incompleteness and there is no
+	// way to tell it apart from a job someone abandoned half-routed.
+	//
+	// A DECLARATION, NOT A SUPPRESSION. Nothing here turns a check off — every
+	// unrouted and fragmented net is still computed and still listed, and the
+	// stage rides beside them in every reply that carries a completeness
+	// verdict. What changes is only whether "not routed" counts as a DEFECT,
+	// which is a question about intent that only the board can answer. Muting
+	// checks hides real defects; stating what the board IS does not.
+	//
+	// VALUES (validateFabricationStage owns the refusal):
+	//   ""                  same as "routed" — every existing board, unchanged.
+	//   "routed"            the board is meant to be fully routed. Today's
+	//                       behaviour exactly.
+	//   "routing_deferred"  routing happens in a later step; some copper may
+	//                       already exist. Unrouted nets are intended.
+	//   "vias_only"         drilled and plated, no copper runs intended at all.
+	//                       A STRICT subset of routing_deferred: a board that
+	//                       declares it and carries traces is refused, because
+	//                       the declaration would be false. That refusal is what
+	//                       keeps the two values from being synonyms.
+	//
+	// omitempty so a board that never declares a stage round-trips
+	// byte-identically and no existing golden moves.
+	FabricationStage string `json:"fabrication_stage,omitempty" yaml:"fabrication_stage,omitempty"`
 
 	Origin      *Point      `json:"origin,omitempty" yaml:"origin,omitempty"`
 	DesignRules DesignRules `json:"design_rules" yaml:"design_rules"`

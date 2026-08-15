@@ -516,6 +516,37 @@ def _check_layer_change(segs, pads, vias, clr) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+# Board.fabrication_stage tokens. The Go mirror is internal/board/board.go's
+# FabStage* constants, and internal/board/validate.go is what REFUSES a value
+# outside this set — this module never sees an unknown one on a board that
+# passed the write gate, and treats one as "routed" if it somehow does, which
+# is the conservative direction (a defect stays a defect).
+FAB_STAGE_ROUTED = "routed"
+FAB_STAGE_ROUTING_DEFERRED = "routing_deferred"
+FAB_STAGE_VIAS_ONLY = "vias_only"
+
+
+def fabrication_stage(board: dict) -> str:
+    """This board's declared manufacturing intent, "routed" when it declares
+    none. Absent and "routed" are the same board (DCR 01a0033a12a9 change 3)."""
+    stage = (board or {}).get("fabrication_stage")
+    if isinstance(stage, str) and stage:
+        return stage
+    return FAB_STAGE_ROUTED
+
+
+def routing_is_deferred(board: dict) -> bool:
+    """Whether this board's stage says its nets are MEANT to be unrouted.
+
+    THE ONE PREDICATE behind that question — the Python mirror of
+    board.Board.RoutingIsDeferred — so a future deferred stage cannot leave one
+    consumer branching on a stale list of tokens. Every caller asks this rather
+    than comparing ``fabrication_stage`` to a literal.
+    """
+    return fabrication_stage(board) in (
+        FAB_STAGE_ROUTING_DEFERRED, FAB_STAGE_VIAS_ONLY)
+
+
 def _board_clearance(board: dict) -> float:
     """The board's coincidence tolerance — the same derivation run_drc uses."""
     dr = board.get("design_rules") or {}
@@ -649,7 +680,22 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
                       "pin_groups": k}],
          "indeterminate": [{"net": name,   # copper the kernel cannot judge
                             "reason": "zone_copper"}],
+         "fabrication_stage": str,   # the board's DECLARED intent ("routed"
+                                     #   when it declares none)
+         "routing_deferred": bool,   # derived: does that stage say these nets
+                                     #   are MEANT to be unrouted? Branch on
+                                     #   this, never on the token
+         "expected_incomplete": bool,# deferred AND something is unrouted —
+                                     #   the label that earns a True `complete`
+                                     #   over a non-empty missing_copper
          "approximate": True}        # standing centerline-basis honesty label
+
+    DECLARED INTENT (DCR 01a0033a12a9 change 3). On a board whose stage defers
+    routing, unrouted nets are the JOB, not a defect, so `complete` is True and
+    `expected_incomplete` says why. The lists are still fully populated — the
+    stage reclassifies them, it never hides them, and the violation checks in
+    :func:`run_drc` are untouched because they report copper that is WRONG
+    rather than copper that is ABSENT.
 
     Every key is ALWAYS present here (this is the internal census; reply
     surfaces apply their own absent-when-empty conventions). Nets with fewer
@@ -712,8 +758,30 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
     # when other nets are indeterminate (a known defect outranks an unknown);
     # indeterminate alone withholds the True a nobody-measured pour cannot
     # earn.
-    if missing or partial:
-        complete: bool | None = False
+    #
+    # DECLARED INTENT OUTRANKS ALL THREE (DCR 01a0033a12a9 change 3). On a board
+    # whose stage defers routing, "this net has no copper" is not a defect — it
+    # is the job. A via-only board has EVERY net missing by design (the
+    # fiber-laser customer drills first and lases the runs later), and before
+    # this the census had no vocabulary for that: the correct board read as a
+    # wall of incompleteness, indistinguishable from one abandoned half-routed.
+    #
+    # NOTHING IS SUPPRESSED, and that distinction is the whole design. Every
+    # unrouted, fragmented and unjudgeable net is still computed and still
+    # listed below; the stage rides in the same dict, so no reader can see the
+    # verdict without seeing why it is what it is. Only the classification of
+    # those lists changes — defect vs intended — which is a question about
+    # INTENT that nothing but the board can answer.
+    #
+    # THE VIOLATION CHECKS ARE UNTOUCHED. run_drc's shorts, crossings, dangling
+    # endpoints and layer-change-without-via all still fire on a deferred board,
+    # because those report copper that is WRONG, not copper that is ABSENT. A
+    # stage excuses only the absence.
+    deferred = routing_is_deferred(board)
+    if deferred:
+        complete: bool | None = True
+    elif missing or partial:
+        complete = False
     elif indeterminate:
         complete = None
     else:
@@ -722,6 +790,15 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
             "missing_copper": missing,
             "partial": partial,
             "indeterminate": indeterminate,
+            "fabrication_stage": fabrication_stage(board),
+            # The DERIVED question, beside the raw declaration. Consumers branch
+            # on this rather than re-deriving it from the token, which is what
+            # keeps a future stage from needing an edit in every reply surface.
+            "routing_deferred": deferred,
+            # Present ONLY on a deferred board, and it is the honesty label that
+            # earns the True above: these nets are unrouted and that is intended.
+            # A reader that ignores it still sees the lists.
+            "expected_incomplete": bool(deferred and (missing or partial)),
             "approximate": True}
 
 
@@ -812,4 +889,12 @@ def run_drc(board: dict) -> dict:
         out["partial"] = completeness["partial"]
     if completeness["indeterminate"]:
         out["indeterminate"] = completeness["indeterminate"]
+    # DECLARED INTENT rides with the verdict it produced, never separately — a
+    # `complete: True` over a non-empty missing_copper is only honest if the
+    # reason is in the same reply. Absent-key convention for the default board:
+    # a "routed" board says nothing new here, so no existing reply shape moves.
+    if completeness["routing_deferred"]:
+        out["fabrication_stage"] = completeness["fabrication_stage"]
+        out["routing_deferred"] = True
+        out["expected_incomplete"] = completeness["expected_incomplete"]
     return out

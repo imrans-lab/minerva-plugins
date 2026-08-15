@@ -883,6 +883,23 @@ def _promote_check(params: dict) -> dict:
                 "missing_copper": connectivity.get("missing_copper") or [],
                 "partial": connectivity.get("partial") or [],
             }
+        elif connectivity.get("routing_deferred"):
+            # DECLARED-INTENT ADVISORY (DCR 01a0033a12a9 change 3). This board
+            # promotes with unrouted nets because it SAYS it is meant to have
+            # them — a via-only board's whole deliverable is the drill file.
+            # The advisory exists so the promotion record still NAMES the
+            # unrouted nets and the stage that excused them: a `complete: True`
+            # reached by declaration must never be indistinguishable from one
+            # reached by routing every net.
+            advisory["completeness"] = {
+                "complete": True,
+                "fabrication_stage": connectivity.get("fabrication_stage"),
+                "routing_deferred": True,
+                "expected_incomplete": bool(
+                    connectivity.get("expected_incomplete")),
+                "missing_copper": connectivity.get("missing_copper") or [],
+                "partial": connectivity.get("partial") or [],
+            }
 
     geo_reply = _drc_geometric(gate_params)
     geometric: dict = (geo_reply.get("result") or {}) if isinstance(geo_reply, dict) else {}
@@ -1641,7 +1658,16 @@ def _completeness_keys(board_dict: dict, routes: list,
          "missing_copper": [net, ...],
          "partial": [{"net", "pin_groups"}],       # absent when empty
          "indeterminate": [{"net", "reason"}],     # absent when empty
+         "fabrication_stage": str,   # DEFERRED BOARDS ONLY — absent on a
+         "routing_deferred": True,   #   "routed" board, so no existing reply
+         "expected_incomplete": bool,#   shape moves (DCR 01a0033a12a9 ch. 3)
          "approximate": True}                       # standing honesty label
+
+    A DEFERRED board's `complete` is True over a non-empty `missing_copper`,
+    and the three keys above are what make that honest: they always travel with
+    the verdict they produced, never separately. See
+    drc.connectivity_completeness for why intent outranks the lists and why the
+    violation checks are untouched by it.
 
     A census FAULT degrades to `{"complete": None, "completeness_error": str,
     "approximate": True}` (the three-way-clean convention drc_summary already
@@ -1662,6 +1688,13 @@ def _completeness_keys(board_dict: dict, routes: list,
         keys["partial"] = completeness["partial"]
     if completeness["indeterminate"]:
         keys["indeterminate"] = completeness["indeterminate"]
+    # The declaration rides with the verdict it produced. Same absent-when-
+    # default convention as the two lists above: a "routed" board says nothing
+    # new, so every existing ledger shape is byte-unchanged.
+    if completeness["routing_deferred"]:
+        keys["fabrication_stage"] = completeness["fabrication_stage"]
+        keys["routing_deferred"] = True
+        keys["expected_incomplete"] = completeness["expected_incomplete"]
     return keys
 
 

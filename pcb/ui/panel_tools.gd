@@ -184,6 +184,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _propose_via(host, args)
 		"minerva_pcb_add_trace":
 			return _add_trace(host, args)
+		"minerva_pcb_update_via":
+			return _update_via(host, args)
+		"minerva_pcb_fabrication_stage":
+			return _fabrication_stage(host, args)
 		"minerva_pcb_delete_via":
 			return _delete_via(host, args)
 		"minerva_pcb_get_preference":
@@ -3913,6 +3917,152 @@ static func _place_via(host, args: Dictionary) -> Dictionary:
 		"from_layer": str(span[0]),
 		"to_layer": str(span[1]),
 		"via_count": data.vias.size(),
+	})
+
+
+## Read or declare the board's FABRICATION STAGE — what this board IS for
+## manufacturing (DCR 01a0033a12a9 change 3). One read/write verb, following
+## the minerva_pcb_view_state precedent from this same epoch rather than a
+## get/set pair, because the read and the write describe one small fact.
+##
+## WHY THE BOARD NEEDS TO SAY THIS. A via-only board has every net unrouted BY
+## DESIGN — fiber-laser users cannot drill, so they order a drilled, plated
+## board with no copper runs and lase the traces themselves afterwards. Before
+## this, the connectivity census had no vocabulary for that: the customer's
+## CORRECT board reported a wall of missing_copper, indistinguishable from a job
+## someone abandoned half-routed.
+##
+## A DECLARATION, NOT A SUPPRESSION, and the difference is the whole design.
+## Nothing here turns a check off. Every unrouted and fragmented net is still
+## computed and still listed, the stage rides in the same reply, and the
+## VIOLATION checks (shorts, crossings, dangling ends, layer changes with no
+## via) fire exactly as before — those report copper that is WRONG, and a stage
+## excuses only copper that is ABSENT.
+##
+## REFUSES BY NAME rather than defaulting, for the reason the whole epoch
+## exists: a stage that fell back to "routed" on a typo would silently re-report
+## a via-only board as broken, and one that fell back the other way would
+## silently excuse a board someone genuinely left half-routed.
+static func _fabrication_stage(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	if args.has("stage"):
+		if not (args["stage"] is String):
+			return {"success": false, "error": "invalid_args",
+				"note": "stage must be a string, got %s" % str(args["stage"])}
+		var refusal: String = data.set_fabrication_stage(str(args["stage"]))
+		if not refusal.is_empty():
+			return {"success": false, "error": "invalid_fabrication_stage",
+				"note": refusal, "known_stages": _PcbDataScript.FAB_STAGES}
+		data.save_to_history("Set fabrication stage")
+	var stage := str(data.fabrication_stage)
+	var deferred := stage != _PcbDataScript.FAB_STAGE_ROUTED
+	return _ok({
+		"fabrication_stage": stage,
+		# The DERIVED question beside the raw token, the same pairing the worker
+		# census returns — a caller branches on this rather than re-deriving it
+		# from a token list that could go stale.
+		"routing_deferred": deferred,
+		"known_stages": _PcbDataScript.FAB_STAGES,
+		"trace_count": data.traces.size(),
+		"via_count": data.vias.size(),
+	})
+
+
+## Edit ONE placed via — position, net, size or drill — in one journalled,
+## undoable step. The agent half of what the canvas drag and the Properties
+## rows do for the human; both come through PCBData.update_via, so an agent's
+## call and a human's edit are refused identically, in identical words.
+##
+## THE GAP THIS CLOSES (DCR 01a0033a12a9 change 2). place/delete/list existed;
+## nothing could ADJUST a via. Delete-and-replace was the only route and it
+## loses the id, which matters under the owner's model — vias are placed FIRST
+## and routed against later, so the via id is the stable thing traces are
+## authored against. Moving one was possible ONLY by dragging it on the canvas
+## (PCBData.move_via had exactly one caller, pcb_canvas._end_selection_drag),
+## and net/size/drill could not be changed on ANY surface.
+##
+## ABSENT ARGUMENT MEANS UNCHANGED — a partial edit never blanks the rest of
+## the via. x_mm and y_mm must come together: a via moves as a point, and
+## accepting one alone would silently combine a new X with a stale Y.
+##
+## THE SPAN IS STILL NOT SELECTABLE, for the reason _place_via spells out at
+## length: a v1 via is a THROUGH via. A caller passing a span is refused rather
+## than quietly ignored.
+##
+## THE RESULT MAY NOT BE WHAT WAS ASKED FOR, and the reply says so rather than
+## hiding it: growing a via can make it reach a trace, which snaps it to that
+## centreline and inherits the net (`snapped_to_trace`), and clearing the net of
+## a via sitting on copper re-inherits that copper's net. Both are the placement
+## rule applied consistently — see PCBData.update_via for why the alternative is
+## bug 01a003e2fb6e.
+static func _update_via(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var via_id: String = str(args.get("via_id", ""))
+	if data.get_via(via_id).is_empty():
+		return _err("Unknown via: %s" % via_id)
+
+	for banned in ["from_layer", "to_layer", "layers"]:
+		if args.has(banned):
+			return {"success": false, "error": "span_not_selectable",
+				"note": ("a v1 via is a THROUGH via — it crosses the whole board and joins every "
+					+ "declared layer, so '%s' is not a choice this pipeline can honour. "
+					+ "Blind/buried vias are out of scope. Omit it. To change which layer a "
+					+ "TRACE continues on past a via, that is the run's own layer, not the hole's.")
+					% banned}
+
+	# NUMBERS ARE CHECKED, NOT COERCED — the same reason _place_via gives:
+	# float("nope") is 0.0 in GDScript, so a non-numeric argument would move the
+	# via to the origin or shrink it to nothing without anyone refusing it.
+	for key in ["x_mm", "y_mm", "size_mm", "drill_mm"]:
+		if args.has(key) and not (args[key] is float or args[key] is int):
+			return _err("%s must be a number, got %s" % [key, str(args[key])])
+	if args.has("x_mm") != args.has("y_mm"):
+		return _err("x_mm and y_mm must be given together — a via moves as a point, "
+			+ "and one without the other would pair a new coordinate with a stale one.")
+
+	var changes: Dictionary = {}
+	if args.has("x_mm"):
+		changes["position"] = Vector2(float(args["x_mm"]), float(args["y_mm"]))
+	if args.has("net_name"):
+		changes["net_name"] = str(args["net_name"])
+	if args.has("size_mm"):
+		changes["size"] = float(args["size_mm"])
+	if args.has("drill_mm"):
+		changes["drill"] = float(args["drill_mm"])
+	if changes.is_empty():
+		return _err("Nothing to change — give at least one of x_mm/y_mm, net_name, "
+			+ "size_mm or drill_mm.")
+
+	# end_batch is a no-op when nothing was applied, so a refusal inside
+	# update_via leaves no history step and no board_revision bump.
+	data.begin_batch()
+	var res: Dictionary = data.update_via(via_id, changes)
+	data.end_batch("Update via " + via_id)
+	if not bool(res.get("ok", false)):
+		return {"success": false, "error": str(res.get("error", "via_not_placeable")),
+			"note": str(res.get("message", "The via cannot be edited that way."))}
+
+	var pos: Vector2 = res.get("position", Vector2.ZERO)
+	var span: Array = PcbLayerStack.default_through_via_span()
+	return _ok({
+		"via_id": via_id,
+		"x_mm": snapped(pos.x, 0.0001),
+		"y_mm": snapped(pos.y, 0.0001),
+		"net_name": str(res.get("net_name", "")),
+		"size_mm": float(res.get("size", 0.8)),
+		"drill_mm": float(res.get("drill", 0.4)),
+		"trace_ids": res.get("trace_ids", []),
+		"snapped_to_trace": bool(res.get("snapped", false)),
+		# `changed` false is a successful no-op: the requested values were
+		# already the via's values. Distinct from a refusal, which returns
+		# success:false with a named error.
+		"changed": bool(res.get("moved", false)),
+		"from_layer": str(span[0]),
+		"to_layer": str(span[1]),
 	})
 
 

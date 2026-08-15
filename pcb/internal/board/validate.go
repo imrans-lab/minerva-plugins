@@ -81,6 +81,9 @@ func Validate(b *Board) error {
 				i, b.Components[i].Ref, a)
 		}
 	}
+	if err := validateFabricationStage(b); err != nil {
+		return err
+	}
 	if b.Version < 2 {
 		return nil
 	}
@@ -214,6 +217,38 @@ func innerLayerIndex(name string) int {
 // manufacturer profile's max_copper_layers capability — fabricability is the
 // profile's question, shape is this function's. See docs/board-yaml.md
 // "Layer stack".
+// validateFabricationStage refuses a manufacturing intent this pipeline does
+// not know, and refuses a "vias_only" declaration the board's own contents
+// contradict.
+//
+// FAIL CLOSED ON AN UNKNOWN VALUE, deliberately, and it is the same reasoning
+// as the Assembly token check above. The stage is what the connectivity census
+// reads to decide whether an unrouted net is a DEFECT or the entire point of
+// the job. A typo travelling as "unrecognized, so treat it as routed" would
+// silently re-report a via-only board as a wall of errors; a typo travelling
+// the other way would silently excuse a board someone genuinely abandoned
+// half-routed. Neither is a default worth having.
+func validateFabricationStage(b *Board) error {
+	switch b.FabricationStage {
+	case "", FabStageRouted, FabStageRoutingDeferred:
+		return nil
+	case FabStageViasOnly:
+		// The declaration has to be TRUE, or the two deferred stages are mere
+		// synonyms and the narrower one means nothing. A board claiming no
+		// copper runs while carrying some is refused BY NAME rather than
+		// quietly widened to routing_deferred.
+		if len(b.Traces) > 0 {
+			return fmt.Errorf(
+				"invalid_fabrication_stage: %q declares no copper runs, but this board has %d trace(s) — declare %q instead",
+				FabStageViasOnly, len(b.Traces), FabStageRoutingDeferred)
+		}
+		return nil
+	}
+	return fmt.Errorf(
+		"invalid_fabrication_stage: %q is not a stage this pipeline knows (want %q, %q, %q, or absent)",
+		b.FabricationStage, FabStageRouted, FabStageRoutingDeferred, FabStageViasOnly)
+}
+
 func validateLayers(b *Board) error {
 	if len(b.Layers) == 0 {
 		return nil

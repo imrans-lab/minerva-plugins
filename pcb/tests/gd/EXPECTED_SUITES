@@ -137,3 +137,21 @@ test_view_state.gd assertions=57
 # printed an arithmetic that did not add up, which would teach the next
 # re-pinner the wrong rule (cold review, finding 8). Provisional until testex.
 test_direct_copper_verbs.gd assertions=147
+# DCR 01a0033a12a9 changes 2 + 3 — minerva_pcb_update_via (editing a PLACED
+# via: place/delete/list existed and nothing could ADJUST one, so an agent
+# could delete and re-create a via, losing the id, but never move or re-net it)
+# and minerva_pcb_fabrication_stage (the board's declared manufacturing intent,
+# so a via-only board's unrouted nets read as the job rather than as defects).
+#
+# COUNT = 93, VERIFIED BY EXECUTION (93 passed, 0 failed) — not hand-counted.
+# That is 89 STATIC call sites + 4 for the extra iterations of group 3's
+# three-key span loop (2 static sites executing 3 times). Stated static-vs-
+# executed on purpose, following the sibling entry above — mixing the two is
+# how this pin has been got wrong before.
+#
+# 92 -> 93 before the first commit: group 7 gained a fixture assertion after
+# MUTATION showed its net-picker check was VACUOUS. It picked dropdown index 1,
+# which sorts to "GND" — the net the fixture had already placed the via on — so
+# it passed with the entire GUI commit path deleted. The added assertion pins
+# that the chosen net differs from the one the via carries.
+test_via_edit_and_fab_stage.gd assertions=93

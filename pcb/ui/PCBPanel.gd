@@ -283,6 +283,39 @@ var _trace_prop_width_spin: SpinBox = null
 ## re-width a trace the user is no longer looking at.
 var _trace_prop_trace_id: String = ""
 
+## The selected VIA's property rows (DCR 01a0033a12a9 change 2). Built in the
+## same key-label + value-control shape as the trace and zone rows beside them.
+##
+## THIS IS THE GUI HALF OF update_via, NOT A CONVENIENCE. The owner drives this
+## panel with buttons only, so a via edit shipped as minerva_pcb_update_via
+## alone would be half done — the same mistake this epoch already made once,
+## when C2 recorded the place-via gap closed while the owner still had no
+## button. Position stays draggable on the canvas and is a READ-OUT here;
+## net, size and drill have no other affordance at all.
+## Spin bounds for the via pad/drill boxes. Deliberately WIDE rather than the
+## currently-legal window: the binding rule (drill < pad) is a relation between
+## the two boxes, so a max derived from the sibling would move under the cursor
+## mid-edit. PCBData.update_via is what refuses; these only keep the boxes
+## inside the range a fabricator could ever drill. The floor is the same 0.05 mm
+## via_author_error already treats as the smallest meaningful via footprint.
+const VIA_PROP_MIN_MM := 0.05
+const VIA_PROP_MAX_MM := 5.0
+
+## The board's declared fabrication stage picker (DCR 01a0033a12a9 change 3).
+## Board-level, so unlike every other control in the Properties section it is
+## always visible and never keyed to a selection.
+var _fabrication_stage_option: OptionButton = null
+
+var _via_prop_rows: VBoxContainer = null
+var _via_prop_position_label: Label = null
+var _via_prop_net_option: OptionButton = null
+var _via_prop_size_spin: SpinBox = null
+var _via_prop_drill_spin: SpinBox = null
+## WHICH via the rows edit ("" = none) — the via twin of _trace_prop_trace_id,
+## and for the same reason: a selection change racing a spin-box commit must not
+## re-size a via the user is no longer looking at.
+var _via_prop_via_id: String = ""
+
 var _board_size_label: Label = null
 var _status_label: Label = null
 
@@ -1784,6 +1817,12 @@ func _build_properties_section() -> VBoxContainer:
 	_properties_body.name = "PropertiesBody"
 	section.add_child(_properties_body)
 
+	# BOARD-LEVEL, so it goes FIRST and stays visible whatever is selected —
+	# every row below it describes the selection instead. The separator is what
+	# marks that change of subject.
+	_properties_body.add_child(_build_fabrication_row())
+	_properties_body.add_child(HSeparator.new())
+
 	for field in ["ID", "Position", "Rotation", "Layer", "Footprint"]:
 		var row := HBoxContainer.new()
 		var key_label := Label.new()
@@ -1801,6 +1840,7 @@ func _build_properties_section() -> VBoxContainer:
 	_properties_body.add_child(_build_group_rows())
 	_properties_body.add_child(_build_zone_rows())
 	_properties_body.add_child(_build_trace_rows())
+	_properties_body.add_child(_build_via_rows())
 	return section
 
 
@@ -1939,6 +1979,7 @@ func _set_properties_expanded(expanded: bool) -> void:
 func _update_properties() -> void:
 	if _prop_labels.is_empty() or _canvas == null or _data == null:
 		return
+	_update_fabrication_row()
 	var comp = _property_focus_component()
 	if comp == null:
 		for key in _prop_labels:
@@ -1956,6 +1997,7 @@ func _update_properties() -> void:
 		(_prop_labels["Footprint"] as Label).text = fp
 	_update_zone_rows()
 	_update_trace_rows()
+	_update_via_rows()
 
 
 ## Drive the zone re-property rows for the selected zone.
@@ -2059,6 +2101,283 @@ func _hide_trace_rows() -> void:
 	_trace_prop_trace_id = ""
 	if _trace_prop_rows != null:
 		_trace_prop_rows.visible = false
+
+
+## The board's FABRICATION STAGE row (DCR 01a0033a12a9 change 3) — the GUI half
+## of minerva_pcb_fabrication_stage, and the only control in this section that
+## describes the BOARD rather than the selection.
+##
+## IT HAS TO BE A GUI CONTROL, not just a verb. A via-only board is the fiber-
+## laser customer's actual deliverable, and the owner drives this panel with
+## buttons only — shipping the declaration as MCP alone would leave the person
+## who most needs it unable to make it. That is the mistake this epoch already
+## made once with place_via.
+##
+## A DROPDOWN OF THE THREE KNOWN STAGES, taken from the model's own FAB_STAGES,
+## so the control cannot offer a token the write gate would refuse. What it CAN
+## still offer is "vias_only" on a board that has traces — that refusal depends
+## on board contents, not on the token, so it surfaces as the model's own
+## sentence and the picker snaps back, the contract _build_offset_edit set.
+func _build_fabrication_row() -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.name = "FabricationRow"
+	var key := Label.new()
+	key.text = "Fabrication:"
+	key.custom_minimum_size.x = 60
+	row.add_child(key)
+	_fabrication_stage_option = OptionButton.new()
+	_fabrication_stage_option.name = "FabricationStageOption"
+	_fabrication_stage_option.tooltip_text = _wrap_tooltip(
+		"What this board IS for manufacturing. \"routed\" means every net is "
+		+ "meant to be wired. The other two say unrouted nets are intended, so "
+		+ "the completeness check reports them as the job rather than as "
+		+ "defects — \"vias_only\" is a drilled, plated board with no copper "
+		+ "runs at all (drill now, lase the traces later).")
+	_fabrication_stage_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_fabrication_stage_option.clip_text = true
+	for stage in _PcbDataScript.FAB_STAGES:
+		var idx := _fabrication_stage_option.item_count
+		_fabrication_stage_option.add_item(str(stage))
+		_fabrication_stage_option.set_item_metadata(idx, str(stage))
+	_fabrication_stage_option.item_selected.connect(_on_fabrication_stage_selected)
+	row.add_child(_fabrication_stage_option)
+	return row
+
+
+func _update_fabrication_row() -> void:
+	if _fabrication_stage_option == null or _data == null:
+		return
+	var current := str(_data.fabrication_stage)
+	for i in range(_fabrication_stage_option.item_count):
+		if str(_fabrication_stage_option.get_item_metadata(i)) == current:
+			# select(), not item_selected — assigning through the signal would
+			# re-declare the stage the board already has on every properties
+			# refresh, pushing dead undo steps. Same rule the spin boxes keep
+			# with set_value_no_signal.
+			_fabrication_stage_option.select(i)
+			return
+
+
+func _on_fabrication_stage_selected(index: int) -> void:
+	if _fabrication_stage_option == null or _data == null:
+		return
+	var chosen := str(_fabrication_stage_option.get_item_metadata(index))
+	# NO-OP PICKS MUST NOT REACH save_to_history — Godot's OptionButton emits
+	# item_selected for every popup pick including the one already showing, and
+	# a dead undo step makes the user's next Ctrl+Z appear to do nothing. The
+	# model returns "" for both "no change" and a real write, so the guard is
+	# here rather than there (the zone net picker's precedent).
+	if chosen == str(_data.fabrication_stage):
+		return
+	var refusal: String = _data.set_fabrication_stage(chosen)
+	if not refusal.is_empty():
+		_show_transient_status(refusal)
+		_update_fabrication_row()
+		return
+	_data.save_to_history("Set fabrication stage")
+	_show_transient_status("Fabrication stage: %s" % chosen)
+	_update_status()
+
+
+## The selected VIA's property rows (DCR 01a0033a12a9 change 2) — the GUI half
+## of PCBData.update_via, built in the same key-label + value-control shape as
+## the trace and zone rows above.
+##
+## POSITION IS A READ-OUT, not a field. A via already moves by dragging it, and
+## that gesture goes through the same model rule these controls do; adding a
+## second numeric editor for the same fact would be two places to change one
+## thing. It is shown because a via the user has just dragged onto a trace gets
+## SNAPPED to that centreline, and a read-out is how they see where it landed.
+##
+## NET IS A DROPDOWN OF DECLARED NETS PLUS "unassigned", for the reason the zone
+## picker gives: a control that could offer a net the board does not declare
+## would be the UI lying about a contract update_via enforces anyway. The
+## unassigned entry is real — a standalone via legitimately carries no net, and
+## via-only boards are built entirely out of them.
+##
+## SIZE AND DRILL ARE SPINBOXES with generous bounds rather than boxes narrowed
+## to the currently-legal window. The one rule that binds them (drill smaller
+## than pad, the difference being the annular ring) is a RELATION between the
+## two, so a max that tracked the other box would move under the user's cursor
+## mid-edit. Instead a refused edit shows the model's own words and snaps the
+## box back to the board's value — the contract _build_offset_edit already sets
+## for the first editable control in this panel.
+func _build_via_rows() -> VBoxContainer:
+	_via_prop_rows = VBoxContainer.new()
+	_via_prop_rows.name = "ViaRows"
+	_via_prop_rows.visible = false
+
+	var pos_row := HBoxContainer.new()
+	pos_row.name = "ViaPositionRow"
+	var pos_key := Label.new()
+	pos_key.text = "Via:"
+	pos_key.custom_minimum_size.x = 60
+	pos_row.add_child(pos_key)
+	_via_prop_position_label = Label.new()
+	_via_prop_position_label.name = "ViaPositionValue"
+	_via_prop_position_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_via_prop_position_label.clip_text = true
+	pos_row.add_child(_via_prop_position_label)
+	_via_prop_rows.add_child(pos_row)
+
+	var net_row := HBoxContainer.new()
+	net_row.name = "ViaNetRow"
+	var net_key := Label.new()
+	net_key.text = "Net:"
+	net_key.custom_minimum_size.x = 60
+	net_row.add_child(net_key)
+	_via_prop_net_option = OptionButton.new()
+	_via_prop_net_option.name = "ViaPropNetOption"
+	_via_prop_net_option.tooltip_text = _wrap_tooltip(
+		"Net this via belongs to (declared nets only). A via sitting on a trace "
+		+ "takes that trace's net whatever is picked here.")
+	_via_prop_net_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_via_prop_net_option.clip_text = true
+	_via_prop_net_option.item_selected.connect(_on_via_prop_net_selected)
+	net_row.add_child(_via_prop_net_option)
+	_via_prop_rows.add_child(net_row)
+
+	var size_row := HBoxContainer.new()
+	size_row.name = "ViaSizeRow"
+	var size_key := Label.new()
+	size_key.text = "Pad:"
+	size_key.custom_minimum_size.x = 60
+	size_row.add_child(size_key)
+	_via_prop_size_spin = _build_via_spin("ViaPropSizeSpin",
+		"Via pad diameter in mm. Must stay larger than the drill — the "
+		+ "difference is the annular ring.")
+	_via_prop_size_spin.value_changed.connect(_on_via_prop_size_changed)
+	size_row.add_child(_via_prop_size_spin)
+	_via_prop_rows.add_child(size_row)
+
+	var drill_row := HBoxContainer.new()
+	drill_row.name = "ViaDrillRow"
+	var drill_key := Label.new()
+	drill_key.text = "Drill:"
+	drill_key.custom_minimum_size.x = 60
+	drill_row.add_child(drill_key)
+	_via_prop_drill_spin = _build_via_spin("ViaPropDrillSpin",
+		"Via drill diameter in mm. Must stay smaller than the pad.")
+	_via_prop_drill_spin.value_changed.connect(_on_via_prop_drill_changed)
+	drill_row.add_child(_via_prop_drill_spin)
+	_via_prop_rows.add_child(drill_row)
+
+	return _via_prop_rows
+
+
+func _build_via_spin(spin_name: String, hint: String) -> SpinBox:
+	var spin := SpinBox.new()
+	spin.name = spin_name
+	spin.tooltip_text = _wrap_tooltip(hint)
+	spin.min_value = VIA_PROP_MIN_MM
+	spin.max_value = VIA_PROP_MAX_MM
+	spin.step = 0.05
+	spin.suffix = "mm"
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	return spin
+
+
+## Drive the via property rows for the selected via. EXACTLY ONE selected via or
+## the rows hide — the same rule the trace and zone halves apply, and for the
+## same reason: with two selected there is no single drill a box could show.
+func _update_via_rows() -> void:
+	if _via_prop_rows == null:
+		return
+	var selected: Array = _canvas.get_selected_vias()
+	if selected.size() != 1:
+		_hide_via_rows()
+		return
+	var via_id := str(selected[0])
+	var via: Dictionary = _data.get_via(via_id)
+	if via.is_empty():
+		_hide_via_rows()
+		return
+	_via_prop_via_id = via_id
+	_via_prop_rows.visible = true
+	var pos: Vector2 = _data.via_position(via)
+	_via_prop_position_label.text = "%s  (%.3f, %.3f)" % [via_id, pos.x, pos.y]
+	_rebuild_via_prop_net_option(str(via.get("net_name", "")))
+	# set_value_no_signal for the SAME reason the trace width box uses it:
+	# assigning would fire value_changed and commit the box's step-rounded number
+	# back onto the via, so merely SELECTING a 0.635 mm via would silently
+	# re-size it to 0.65 and push an undo step nobody asked for.
+	_via_prop_size_spin.set_value_no_signal(float(via.get("size", 0.8)))
+	_via_prop_drill_spin.set_value_no_signal(float(via.get("drill", 0.4)))
+
+
+func _hide_via_rows() -> void:
+	_via_prop_via_id = ""
+	if _via_prop_rows != null:
+		_via_prop_rows.visible = false
+
+
+## Populate the via net picker from the board's declared nets, with a real
+## "unassigned" entry at the top carrying "" as its metadata.
+func _rebuild_via_prop_net_option(current_net: String) -> void:
+	if _via_prop_net_option == null:
+		return
+	_via_prop_net_option.clear()
+	_via_prop_net_option.add_item("(unassigned)")
+	_via_prop_net_option.set_item_metadata(0, "")
+	var names: Array = _data.get_net_names()
+	names.sort()
+	var selected := 0
+	for net_name in names:
+		var idx := _via_prop_net_option.item_count
+		_via_prop_net_option.add_item(str(net_name))
+		_via_prop_net_option.set_item_metadata(idx, str(net_name))
+		if str(net_name) == current_net:
+			selected = idx
+	_via_prop_net_option.select(selected)
+
+
+func _on_via_prop_net_selected(index: int) -> void:
+	if _via_prop_net_option == null:
+		return
+	var meta: Variant = _via_prop_net_option.get_item_metadata(index)
+	_commit_via_edit({"net_name": str(meta) if meta != null else ""})
+
+
+func _on_via_prop_size_changed(value: float) -> void:
+	_commit_via_edit({"size": value})
+
+
+func _on_via_prop_drill_changed(value: float) -> void:
+	_commit_via_edit({"drill": value})
+
+
+## The ONE commit path behind all three via controls.
+##
+## NO-OP PICKS MUST NOT REACH save_to_history, the rule the zone net picker
+## records: Godot's OptionButton emits item_selected for EVERY popup pick,
+## including the entry already showing. update_via answers that itself — it
+## returns ok with moved:false when nothing actually differs — so the guard
+## lives in the model rather than being re-derived per control, and a SpinBox
+## re-entering its own value is covered by the same branch.
+##
+## A REFUSAL SHOWS THE MODEL'S OWN WORDS and re-reads the rows from the board,
+## which snaps the offending control back to the value the via actually has.
+func _commit_via_edit(changes: Dictionary) -> void:
+	if _via_prop_via_id.is_empty() or _data == null:
+		return
+	var via_id := _via_prop_via_id
+	_data.begin_batch()
+	var res: Dictionary = _data.update_via(via_id, changes)
+	_data.end_batch("Edit via " + via_id)
+	if not bool(res.get("ok", false)):
+		_show_transient_status(str(res.get("message", "The via cannot be edited that way.")))
+		_update_properties()
+		return
+	if not bool(res.get("moved", false)):
+		return
+	if bool(res.get("snapped", false)):
+		_show_transient_status("Via snapped onto its trace at (%.3f, %.3f)."
+			% [(res.get("position", Vector2.ZERO) as Vector2).x,
+				(res.get("position", Vector2.ZERO) as Vector2).y])
+	if _canvas != null:
+		_canvas.queue_redraw()
+	_update_properties()
+	_update_status()
 
 
 ## The canvas context menu's "Set trace width…" landing (B1u5, owner comment 962:
@@ -3155,12 +3474,26 @@ static func _completeness_status_suffix(result: Dictionary) -> String:
 	var complete: Variant = health.get("complete", null)
 	if complete == null:
 		return " · completeness indeterminate"
-	if bool(complete):
-		return ""
 	var missing: Array = health.get("missing_copper", []) \
 		if health.get("missing_copper", []) is Array else []
 	var partial: Array = health.get("partial", []) \
 		if health.get("partial", []) is Array else []
+	if bool(complete):
+		# DECLARED INTENT (DCR 01a0033a12a9 change 3). A deferred board reaches
+		# `complete: true` over unrouted nets BY DECLARATION, not by routing
+		# them, and the two must never render identically — that is the whole
+		# honesty cost of letting the stage decide. So the count is still shown;
+		# only the word changes, from a defect to the job.
+		if not bool(health.get("routing_deferred", false)):
+			return ""
+		var stage := str(health.get("fabrication_stage", "routing_deferred"))
+		if missing.is_empty() and partial.is_empty():
+			return " · %s" % stage
+		var as_intended := " · %s — %d net%s unrouted as intended" % [
+			stage, missing.size(), "" if missing.size() == 1 else "s"]
+		if not partial.is_empty():
+			as_intended += ", %d fragmented" % partial.size()
+		return as_intended
 	var text := " · INCOMPLETE — %d net%s unrouted" % [
 		missing.size(), "" if missing.size() == 1 else "s"]
 	if not partial.is_empty():
@@ -4921,8 +5254,19 @@ func _on_promote_button_pressed() -> void:
 			_dict_or_empty(result.get("advisory")).get("completeness"))
 		if not completeness.is_empty():
 			var missing: Array = completeness.get("missing_copper", [])
-			adv_txt = "  •  ADVISORY: %d net(s) unrouted (%s)" % [missing.size(),
-				", ".join(PackedStringArray(Array(missing.slice(0, 6).map(func(m): return str(m)))))]
+			var names := ", ".join(PackedStringArray(
+				Array(missing.slice(0, 6).map(func(m): return str(m)))))
+			# A DECLARED-INTENT advisory is not a warning (DCR 01a0033a12a9
+			# change 3): the board promoted with unrouted nets because it SAYS
+			# it is meant to have them. It still names them and the stage that
+			# excused them, so a promotion reached by declaration can never read
+			# the same as one reached by routing every net.
+			if bool(completeness.get("routing_deferred", false)):
+				adv_txt = "  •  %s: %d net(s) unrouted as intended (%s)" % [
+					str(completeness.get("fabrication_stage", "routing_deferred")),
+					missing.size(), names]
+			else:
+				adv_txt = "  •  ADVISORY: %d net(s) unrouted (%s)" % [missing.size(), names]
 		_set_status("PROMOTED → %s (%d bytes)%s%s" % [str(result.get("path", "")),
 			int(result.get("bytes", 0)), delta_txt, adv_txt])
 		return
