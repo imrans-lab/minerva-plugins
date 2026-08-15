@@ -1405,8 +1405,14 @@ func _run_removal_manifest_tools_absent() -> void:
 	# Epoch NLC C3 (103 -> 104): minerva_pcb_add_trace (item 01a001c39aa3).
 	# DCR 01a0033a12a9 (104 -> 105): minerva_pcb_propose_via, the Proposals-area
 	# twin of place_via — a via is an entity, so proposing one proposes an entity.
-	check_eq("manifest tool count == 105 (ALL manifest.json tools[] entries)",
-		names.size(), 105)
+	# DCR 01a0033a12a9 change 2 (105 -> 106): minerva_pcb_update_via — place,
+	# delete and list existed; nothing could ADJUST a placed via, so an agent
+	# could delete and re-create one (losing its id) but never move or re-net it.
+	# DCR 01a0033a12a9 change 3 (106 -> 107): minerva_pcb_fabrication_stage —
+	# the board's declared manufacturing intent, so a via-only board can report
+	# its unrouted nets as the job rather than as a wall of defects.
+	check_eq("manifest tool count == 107 (ALL manifest.json tools[] entries)",
+		names.size(), 107)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

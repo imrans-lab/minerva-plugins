@@ -214,7 +214,17 @@ func _init() -> void:
 	# Both are executor:"panel", so the Go pin in
 	# manifest_registry_parity_test.go is genuinely unaffected — that test
 	# filters to executor=="backend" before it counts anything.
-	check("total registered tool count == 105", registered.size() == 105,
+	# DCR 01a0033a12a9 change 2 (105 -> 106): minerva_pcb_update_via — the
+	# via-EDIT verb. place/delete/list existed and nothing could adjust a placed
+	# via, so an agent could delete and re-create one (losing the id traces are
+	# authored against) but never move it or change its net.
+	# DCR 01a0033a12a9 change 3 (106 -> 107): minerva_pcb_fabrication_stage —
+	# the board's declared manufacturing intent, which is what lets a via-only
+	# board report its unrouted nets as intended instead of as defects.
+	# Both are executor:"panel", so the Go pin in
+	# manifest_registry_parity_test.go is genuinely unaffected — that test
+	# filters to executor=="backend" before it counts anything.
+	check("total registered tool count == 107", registered.size() == 107,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
