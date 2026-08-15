@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,22 @@ func TestWithLibraryChain_HostOwnsEveryRoot(t *testing.T) {
 	bad := json.RawMessage(`[1,2,3]`)
 	if out := withLibraryChain(bad); string(out) != string(bad) {
 		t.Fatalf("malformed params rewritten: %s", out)
+	}
+}
+
+// The HITL regression was not in withLibraryChain itself: draft_check was the
+// sole compile-bearing broker channel that forgot to CALL it. Seal the dispatch
+// boundary explicitly so workspace_check cannot fall back to seed-only while
+// board_check resolves through the live user/WIP chain.
+func TestDraftCheckChannelUsesLiveLibraryChain(t *testing.T) {
+	raw, err := os.ReadFile("worker_tools.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(raw)
+	want := `return w.Call(ctx, "draft_check", withLibraryChain(params))`
+	if !strings.Contains(source, want) {
+		t.Fatalf("HandleDraftCheckChannel must inject the live library chain; missing %q", want)
 	}
 }
 

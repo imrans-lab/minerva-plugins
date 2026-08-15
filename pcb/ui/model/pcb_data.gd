@@ -2037,7 +2037,8 @@ func authored_trace_width() -> float:
 ## always top<->bottom whatever the stack depth, so there is nothing here to
 ## choose or validate; blind/buried vias are out of scope (see
 ## methods._routes_to_vias' docstring, and epoch NLC C1b).
-func via_author_error(pos: Vector2, size: float, drill: float, net_name: String = "") -> String:
+func via_author_error(pos: Vector2, size: float, drill: float, net_name: String = "",
+		ignore_via_id: String = "") -> String:
 	# NaN FIRST, because every comparison below is false against it — a NaN
 	# coordinate would sail through the bounds test and land copper nowhere.
 	# It arrives from a caller that coerced a non-numeric argument, which is
@@ -2065,6 +2066,8 @@ func via_author_error(pos: Vector2, size: float, drill: float, net_name: String 
 	for existing in vias:
 		if not (existing is Dictionary):
 			continue
+		if not ignore_via_id.is_empty() and str((existing as Dictionary).get("id", "")) == ignore_via_id:
+			continue
 		# The via's OWN disc is the claim, floored so a hairline via still has a
 		# clickable footprint — the same shape RoutingWorkspace.add_via uses for
 		# the same gesture question.
@@ -2072,6 +2075,178 @@ func via_author_error(pos: Vector2, size: float, drill: float, net_name: String 
 		if via_position(existing).distance_to(pos) <= claim:
 			return "A via already sits at (%.3f, %.3f)." % [pos.x, pos.y]
 	return ""
+
+
+## Resolve the semantic target of a via authoring gesture.
+##
+## A via dropped in empty space remains a first-class standalone entity. A via
+## whose annulus physically reaches an existing trace is not "near" that trace:
+## it is copper touching copper. Leaving the raw click offset and netless makes
+## the rendering claim a connection the model denies. This resolver therefore
+## snaps that case to the nearest trace centreline, inherits the trace net when
+## the caller did not name one, and returns the trace identity that must receive
+## an explicit waypoint when the via is materialised.
+##
+## More than one touched net is ambiguous and refuses. A caller-authored net
+## that disagrees with the touched trace also refuses rather than silently
+## changing ownership. `ignore_via_id` is the move seam: the via being moved may
+## occupy its own source/target point without tripping the duplicate gate.
+func resolve_via_target(pos: Vector2, size: float, drill: float,
+		net_name: String = "", ignore_via_id: String = "") -> Dictionary:
+	var shape_error := via_author_error(pos, size, drill, net_name, ignore_via_id)
+	if not shape_error.is_empty():
+		return {"ok": false, "error": shape_error}
+
+	var hits: Array = []
+	for trace_id in traces:
+		var trace = traces[trace_id]
+		if trace == null or trace.waypoints.size() < 2:
+			continue
+		var closest: Vector2 = trace.get_closest_point(pos)
+		var distance := closest.distance_to(pos)
+		# Physical contact is the capture rule: outer via radius plus half the
+		# trace width. This catches the HITL's partly-overlapping via without a
+		# view/zoom-dependent magic number.
+		var capture := size * 0.5 + float(trace.width) * 0.5
+		if distance <= capture:
+			hits.append({
+				"trace_id": str(trace_id),
+				"net_name": str(trace.net_name),
+				"position": closest,
+				"segment_index": int(trace.get_closest_segment_index(pos)),
+				"distance": distance,
+			})
+
+	if hits.is_empty():
+		return {"ok": true, "position": pos, "net_name": net_name,
+			"trace_id": "", "segment_index": -1, "snapped": false}
+
+	var touched_nets: Dictionary = {}
+	for hit in hits:
+		touched_nets[str((hit as Dictionary).get("net_name", ""))] = true
+	if touched_nets.size() > 1:
+		var names: Array = touched_nets.keys()
+		names.sort()
+		return {"ok": false, "error":
+			"A via at (%.3f, %.3f) touches traces on multiple nets (%s); move it so the intended trace is unambiguous."
+				% [pos.x, pos.y, ", ".join(names)]}
+
+	# Deterministic winner: nearest centreline, then stable trace id.
+	hits.sort_custom(func(a, b) -> bool:
+		var da := float((a as Dictionary).get("distance", INF))
+		var db := float((b as Dictionary).get("distance", INF))
+		if not is_equal_approx(da, db):
+			return da < db
+		return str((a as Dictionary).get("trace_id", "")) < str((b as Dictionary).get("trace_id", "")))
+	var chosen: Dictionary = hits[0]
+	var trace_net := str(chosen.get("net_name", ""))
+	if not net_name.is_empty() and net_name != trace_net:
+		return {"ok": false, "error":
+			"Via net '%s' conflicts with trace '%s' on net '%s'."
+				% [net_name, str(chosen.get("trace_id", "")), trace_net]}
+	var snapped_pos: Vector2 = chosen["position"]
+	var snapped_error := via_author_error(
+		snapped_pos, size, drill, trace_net if net_name.is_empty() else net_name,
+		ignore_via_id)
+	if not snapped_error.is_empty():
+		return {"ok": false, "error": snapped_error}
+	return {"ok": true, "position": snapped_pos,
+		"net_name": trace_net if net_name.is_empty() else net_name,
+		"trace_id": str(chosen.get("trace_id", "")),
+		"segment_index": int(chosen.get("segment_index", -1)), "snapped": true}
+
+
+## Insert an explicit waypoint where a via meets `trace_id`. The geometric
+## result is unchanged, but the canonical topology now says what the rendering
+## says: the trace is bisected at the via rather than merely passing beneath it.
+## Returns true when a point was inserted, false when the trace already had the
+## junction (or the trace no longer exists).
+func insert_trace_junction(trace_id: String, position: Vector2) -> bool:
+	var trace = get_trace(trace_id)
+	if trace == null or trace.waypoints.size() < 2:
+		return false
+	const JUNCTION_EPS_MM := 0.0001
+	for point in trace.waypoints:
+		if (point as Vector2).distance_to(position) <= JUNCTION_EPS_MM:
+			return false
+	var segment_index := int(trace.get_closest_segment_index(position))
+	if segment_index < 0:
+		return false
+	var projected: Vector2 = trace.get_closest_point(position)
+	trace.waypoints.insert(segment_index + 1, projected)
+	record_change("insert_trace_junction", {
+		"trace_id": trace_id, "point_index": segment_index + 1,
+		"position": {"x": projected.x, "y": projected.y},
+	})
+	trace_changed.emit(trace_id)
+	data_changed.emit()
+	return true
+
+
+## Move one committed via as a position-only entity while preserving any real
+## copper junction it already owns. Exact trace contacts at the old point move
+## with the via; a trace touched at the destination is snapped, net-checked and
+## explicitly bisected through the same resolver direct placement uses.
+## History is the caller's (the canvas batches mixed-selection movement).
+func move_via(via_id: String, target: Vector2) -> Dictionary:
+	var via: Dictionary = get_via(via_id)
+	if via.is_empty():
+		return {"ok": false, "error": "via_not_found",
+			"message": "No via '%s' exists on this board." % via_id}
+	var old_pos := via_position(via)
+	var size := float(via.get("size", 0.8))
+	var drill := float(via.get("drill", 0.4))
+	var old_net := str(via.get("net_name", ""))
+	var resolved := resolve_via_target(target, size, drill, old_net, via_id)
+	if not bool(resolved.get("ok", false)):
+		return {"ok": false, "error": "via_not_placeable",
+			"message": str(resolved.get("error", "The via cannot be moved there."))}
+	var new_pos: Vector2 = resolved["position"]
+	var new_net := str(resolved.get("net_name", old_net))
+	if new_pos.distance_to(old_pos) <= 0.0001 and new_net == old_net:
+		return {"ok": true, "via_id": via_id, "position": new_pos,
+			"net_name": new_net, "trace_ids": [], "moved": false}
+
+	# Every same-net trace that genuinely meets the old centre owns this
+	# junction. Move that point with the via rather than detaching the hole.
+	var touched: Array = []
+	for trace_id in traces:
+		var trace = traces[trace_id]
+		if trace == null or trace.waypoints.size() < 2 or str(trace.net_name) != old_net:
+			continue
+		if trace.get_closest_point(old_pos).distance_to(old_pos) > 0.0001:
+			continue
+		var replaced := false
+		for i in range(trace.waypoints.size()):
+			if (trace.waypoints[i] as Vector2).distance_to(old_pos) <= 0.0001:
+				trace.waypoints[i] = new_pos
+				replaced = true
+		if not replaced:
+			var si := int(trace.get_closest_segment_index(old_pos))
+			trace.waypoints.insert(si + 1, new_pos)
+		if not (str(trace_id) in touched):
+			touched.append(str(trace_id))
+
+	via["position"] = new_pos
+	via["net_name"] = new_net
+	var target_trace := str(resolved.get("trace_id", ""))
+	if not target_trace.is_empty():
+		insert_trace_junction(target_trace, new_pos)
+		if not (target_trace in touched):
+			touched.append(target_trace)
+	record_change("move_via", {
+		"via_id": via_id,
+		"old_position": {"x": old_pos.x, "y": old_pos.y},
+		"new_position": {"x": new_pos.x, "y": new_pos.y},
+		"old_net_name": old_net, "new_net_name": new_net,
+		"trace_ids": touched.duplicate(),
+	})
+	for trace_id in touched:
+		trace_changed.emit(str(trace_id))
+	data_changed.emit()
+	return {"ok": true, "via_id": via_id, "position": new_pos,
+		"net_name": new_net, "trace_ids": touched, "moved": true,
+		"snapped": bool(resolved.get("snapped", false))}
 
 
 func trace_author_error(net_name: String, layer: String, point_count: int) -> String:

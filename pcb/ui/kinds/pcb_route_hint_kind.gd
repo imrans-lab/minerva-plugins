@@ -929,37 +929,18 @@ class BendHandleEditTool:
 		return registry.get_annotation_kind(StringName("pcb_route_hint"))
 
 
-## Manual via-insertion tool (U4, DCR 019f7095c395 Stage-2): the autorouter
-## avoids vias by preferring single-layer detours, so a human resolves a
-## collision by hand — click a point on a SELECTED proposal's route to split
-## the segment there, insert a via, and flip the following run of segments to
-## the opposite copper layer (a second via jumps back). Instantiated directly
-## by PCBPanel's route-flow toolbar cluster ("Add Via" button /
-## _new_route_flow_tool), same idiom as BendHandleEditTool right above — NOT
-## wired to kind.author_ui() (this is a MANIPULATION tool over an EXISTING
-## hint/proposal, not an authoring tool).
+## Standalone via-proposal tool (DCR 01a0033a12a9). A click proposes one via
+## ENTITY at that board point: no selected route, no segment split, and no
+## continuation-layer choice. The result is a via-only RoutingWorkspace ghost
+## that Accept commits and Reject discards. The Tools-area Via mode remains its
+## direct-copper twin.
 ##
-## Selection-first idiom, mirrors BendHandleEditTool exactly: only
-## pcb_route_hint annotations are selectable while this tool is active. A
-## left-click near a segment of the CURRENTLY SELECTED hint inserts a via
-## there (ONE annotation_modified, so undo/redo + revision history — the
-## same host.update_annotation() seam BendHandleEditTool uses — already work
-## for free); a click that misses every segment of the selection instead
-## re-targets selection (select a different hint, or clear it) — never both
-## effects from one click. Escape clears the selection.
-##
-## The split+via+layer-run-toggle geometry itself is NOT reimplemented here —
-## it lives once, as the outer class's static apply_via_at_point() (below,
-## in the "Manual via insertion" section), shared verbatim with the MCP
-## parity tool minerva_pcb_add_via (panel_tools.gd._add_via) so the canvas
-## gesture and an agent's tool call produce byte-identical results.
+## Both this gesture and minerva_pcb_propose_via call
+## RoutingWorkspace.propose_via with the live PCBData. That shared gate reads
+## PCBData.via_author_error and the workspace's live ghosts, so bounds, net,
+## annular-ring and duplicate refusals are identical on both surfaces.
 class ViaInsertTool:
 	extends AnnotationAuthorTool
-
-	# Matches BendHandleEditTool's segment/select hit-test tolerances exactly
-	# (screen px, converted to doc-space via zoom at hit-test time).
-	const _SEGMENT_HIT_PX := 8.0
-	const _SELECT_HIT_PX := 8.0
 
 	var _host: AnnotationHost = null
 
@@ -981,7 +962,6 @@ class ViaInsertTool:
 			return false
 
 		var doc_pos := _host.transform_screen_to_doc(pos)
-		var seg_r := _SEGMENT_HIT_PX / _zoom()
 
 		# PROPOSE A VIA AT THE CLICKED POINT — DCR 01a0033a12a9.
 		#
@@ -1000,48 +980,7 @@ class ViaInsertTool:
 		# correct wherever it lands.
 		return _propose_via_at(doc_pos)
 
-
-	## Visible disarm (A8u1) — mirrors BendHandleEditTool.draw_preview. This tool
-	## had no preview before; it has one now solely to say why the click that
-	## normally inserts a via is not going to. Codex 1047 fix round, verdict 3
-	## added the second disarm reason: a path-locked (superseded) selection.
-	func draw_preview(ctx: AnnotationRenderContext) -> void:
-		if _host == null:
-			return
-		if _multi_selected():
-			_Self.draw_disarm_notice(ctx, "Via insert needs one hint — click one to edit")
-			return
-		# Codex 1047 fix round, verdict 3: same visible-feedback seam as
-		# BendHandleEditTool — the gesture above is disarmed for this
-		# selection, and the notice says why (the full tool pointer lives in
-		# the host's structured refusal; the canvas keeps the human phrasing).
-		var sel := _host.get_selected_annotation_id()
-		if sel.is_empty():
-			return
-		var ann := _find(sel)
-		if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint" and _path_locked(ann):
-			_Self.draw_disarm_notice(ctx,
-				"Superseded route — via insert disarmed; right-click: Reclaim waypoints (convert to detailed), or steer the route")
-
 	# ── internal ──────────────────────────────────────────────────────────────
-
-	## See BendHandleEditTool._multi_selected — same rule, same reason.
-	func _multi_selected() -> bool:
-		# Duck-typed against the HOST INSTANCE, not AnnotationHost's new
-		# static: a class_name reference to a member the running host lacks
-		# is a PARSE error that unregisters the whole kind (measured, CI run
-		# 30673225191 — hint pcb-plugin/off-tree-core-api-coupling). A host
-		# predating the multi-select API can never hold a multi-selection,
-		# so false is the truthful degraded answer, and every gesture below
-		# then behaves exactly as it did against that host before A8u1.
-		if _host == null or not _host.has_method("get_selected_annotation_ids"):
-			return false
-		return _host.get_selected_annotation_ids().size() > 1
-
-	func _zoom() -> float:
-		if _host != null and _host.has_method("get_annotation_zoom"):
-			return maxf(float(_host.get_annotation_zoom()), 0.01)
-		return 1.0
 
 	## Propose a via at `doc_pos` through RoutingWorkspace.propose_via — the same
 	## verb minerva_pcb_propose_via calls, so a human's click and an agent's tool
@@ -1064,11 +1003,20 @@ class ViaInsertTool:
 		if workspace == null or not workspace.has_method("propose_via"):
 			_toast("This panel predates propose_via — the via was not proposed.")
 			return true
+		if not panel.has_method("get_data") or panel.get_data() == null:
+			_toast("No board data is bound — the via was not proposed.")
+			return true
 
-		var res: Dictionary = workspace.propose_via(doc_pos, "")
+		var res: Dictionary = workspace.propose_via(doc_pos, "", 0.8, 0.4, panel.get_data())
 		if bool(res.get("ok", false)):
-			_toast("Via PROPOSED at (%.3f, %.3f) — a ghost, not copper. Accept it to place it."
-				% [doc_pos.x, doc_pos.y])
+			var actual: Array = res.get("at", [doc_pos.x, doc_pos.y])
+			var trace_id := str(res.get("trace_id", ""))
+			if trace_id.is_empty():
+				_toast("Via PROPOSED at (%.3f, %.3f) — standalone ghost, not copper. Accept it to place it."
+					% [float(actual[0]), float(actual[1])])
+			else:
+				_toast("Via PROPOSED on trace %s at (%.3f, %.3f), net %s — Accept will materialize the junction."
+					% [trace_id, float(actual[0]), float(actual[1]), str(res.get("net_name", ""))])
 		else:
 			_toast("Via proposal refused (%s): %s"
 				% [str(res.get("error", "unknown")), str(res.get("message", ""))])
@@ -1083,61 +1031,9 @@ class ViaInsertTool:
 			var panel = _host.get_panel()
 			if panel != null and panel.has_method("_show_transient_status"):
 				panel._show_transient_status(text)
-
-	## See BendHandleEditTool._kind — same registry lookup, mirrored here
-	## because these tool classes deliberately share no base beyond
-	## AnnotationAuthorTool (Codex 1047 fix round, verdict 3).
-	func _kind() -> AnnotationKind:
-		if _host == null:
-			return null
-		var registry := _host.get_registry()
-		if registry == null:
-			return null
-		return registry.get_annotation_kind(StringName("pcb_route_hint"))
-
-	## See BendHandleEditTool._path_locked — same predicate, same reason
-	## (Codex 1047 fix round, verdict 3).
-	func _path_locked(ann: Dictionary) -> bool:
-		var kind := _kind()
-		return kind != null and kind.has_method("path_editing_locked") \
-				and bool(kind.path_editing_locked(ann))
-
-	func _select_route_hint_at(doc_pos: Vector2) -> bool:
-		var registry := _host.get_registry()
-		var annotations: Array = _host.get_annotations()
-		var hit_threshold := _SELECT_HIT_PX / _zoom()
-		for i in range(annotations.size() - 1, -1, -1):
-			var ann: Dictionary = annotations[i]
-			if str(ann.get("kind", "")) != "pcb_route_hint":
-				continue
-			# Epoch UX2 station 1 (cold review F2): a consumed hint's corridor
-			# lies exactly under its committed copper — it renders nothing and
-			# must not be pickable through that invisible geometry.
-			if str(ann.get("lifecycle", "open")) == "applied":
-				continue
-			if not _host.is_annotation_visible(ann):
-				continue
-			var kind: AnnotationKind = registry.get_annotation_kind(StringName("pcb_route_hint")) if registry != null else null
-			if kind == null:
-				continue
-			if kind.hit_test(ann, doc_pos, hit_threshold):
-				_host.set_selected_annotation_id(str(ann.get("id", "")))
-				return true
-		_host.set_selected_annotation_id("")
-		return true
-
-	func _find(id: String) -> Dictionary:
-		if _host == null:
-			return {}
-		for ann in _host.get_annotations():
-			if ann is Dictionary and str((ann as Dictionary).get("id", "")) == id:
-				return ann as Dictionary
-		return {}
-
-
-## Shared on-canvas notice for the single-target tools above (BendHandleEditTool,
-## ViaInsertTool) when a multi-selection leaves them without an unambiguous edit
-## target (A8u1). Pinned to the top-left of the viewport in SCREEN pixels — the
+## Shared on-canvas notice for BendHandleEditTool when a multi-selection leaves
+## it without an unambiguous edit target (A8u1). Pinned to the top-left of the
+## viewport in SCREEN pixels — the
 ## disarm reason must be readable wherever the board is panned or zoomed to, and
 ## must not chase the selection around. ctx.from_screen maps back to document
 ## space so ctx.draw_string's own doc→screen mapping lands it where intended.
@@ -1148,11 +1044,10 @@ static func draw_disarm_notice(ctx: AnnotationRenderContext, text: String) -> vo
 
 # ── Manual via insertion (U4, DCR 019f7095c395 Stage-2) ───────────────────────
 #
-# Shared by ViaInsertTool (canvas gesture, above) and the MCP parity tool
-# minerva_pcb_add_via (panel_tools.gd._add_via) — ONE implementation, so a
-# human's click and an agent's tool call always produce the same geometry.
-# Reached from panel_tools.gd via a preload() of this script (off-tree,
-# no class_name — same convention PCBPanel.gd's _PcbRouteHintKindScript uses).
+# Legacy route-hint edit geometry used by minerva_pcb_add_via. The DCR's canvas
+# Via tool no longer reaches this helper: it proposes an independent entity.
+# Kept for the named legacy MCP verb until that route-edit surface is retired or
+# renamed. Reached from panel_tools.gd via preload() (off-tree, no class_name).
 
 ## Split the kind_payload.segments entry nearest (x, y) into two at its
 ## projected point, append that point to kind_payload.vias, and recompute
@@ -1178,7 +1073,8 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 	var segments_raw: Variant = kind_payload.get("segments", [])
 	var segments: Array = (segments_raw as Array).duplicate(true) if segments_raw is Array else []
 	if segments.is_empty():
-		return {"ok": false, "error": "proposal has no segments to split"}
+		return {"ok": false, "error_code": "no_segment_at_point",
+			"error": "proposal has no segments to split"}
 
 	var click := Vector2(x, y)
 	var best_idx := -1

@@ -1637,7 +1637,7 @@ func _build_sidebar() -> VBoxContainer:
 		add_via_btn.icon = add_via_icon
 	else:
 		add_via_btn.text = "Add Via"
-	add_via_btn.tooltip_text = _wrap_tooltip("Insert a via on a selected proposal")
+	add_via_btn.tooltip_text = _wrap_tooltip("Propose a standalone via, or click copper to propose a trace junction")
 	add_via_btn.toggle_mode = true
 	add_via_btn.pressed.connect(_on_add_via_button_pressed)
 	hints_flow.add_child(add_via_btn)
@@ -5706,7 +5706,7 @@ const _MODE_HINTS := {
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
 	11: "Click pads/traces to pick nets (2+), Enter to draw the spine, then click vertices and Enter/dbl-click to commit",  # BUS
-	12: "Click to place a through via — it connects no trace by itself",  # VIA
+	12: "Click empty space for a standalone via · click a trace to snap, inherit its net, and bisect it",  # VIA
 }
 const _ROUTE_FLOW_LABELS := {
 	"single_trace": "Single Trace",
@@ -5716,7 +5716,7 @@ const _ROUTE_FLOW_LABELS := {
 const _ROUTE_FLOW_HINTS := {
 	"single_trace": "Click a pad/point, waypoints, then a pad to finish",
 	"edit_hint": "Drag a handle to move a bend, right-click to delete it",
-	"add_via": "Click the proposal, then a point on its route to add a via",
+	"add_via": "Click empty space for a via ghost · click a trace to propose a snapped junction",
 }
 
 
@@ -5732,7 +5732,7 @@ func _update_status() -> void:
 	# BUS (campaign 2 epoch C, unit 5) is APPENDED as entry 11 —
 	# ToolMode.BUS is the enum's new last member, so this stays correct
 	# WITHOUT renumbering anything above it (see the enum's own append-only doc).
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout", "Bus"]
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout", "Bus", "Via"]
 	var mode_txt := ""
 	var armed_hint := ""
 	if _active_route_flow_kind != "":

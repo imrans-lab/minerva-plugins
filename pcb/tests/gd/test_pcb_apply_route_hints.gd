@@ -474,8 +474,8 @@ func _run_lossless_multilayer_via_carry() -> void:
 #
 # The autorouter avoids vias (prefers single-layer detours); U4 lets a human
 # resolve a collision by hand — invokes the shared add-via logic
-# (panel_tools.gd._add_via, the SAME static helper the canvas ViaInsertTool
-# calls, pcb_route_hint_kind.gd.apply_via_at_point) twice, asserting the
+# (panel_tools.gd._add_via -> pcb_route_hint_kind.gd.apply_via_at_point) twice,
+# asserting the
 # layer-run toggle at each step. S5 (C4b) note: _add_via was never gated on
 # proposal-hood — it edits ANY pcb_route_hint annotation carrying
 # kind_payload.segments — so this scenario now hand-builds that annotation

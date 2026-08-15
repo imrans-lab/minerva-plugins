@@ -433,7 +433,11 @@ func _run_capture_mirrors_the_draft_layer() -> void:
 		elif current is Dictionary:
 			probe = {"__probe": field}
 		elif current is Array:
-			probe = ["__probe_" + str(field)]
+			# Preserve Array[String]'s runtime type. Assigning an untyped literal to
+			# those properties is refused by Godot before the mirror even runs,
+			# making the old test diagnose seven fake "lost" selections.
+			probe = current.duplicate()
+			probe.append("__probe_" + str(field))
 		elif current is String:
 			probe = "__probe_" + str(field)
 		else:

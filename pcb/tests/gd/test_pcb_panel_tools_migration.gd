@@ -295,7 +295,8 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 
 	print("\n-- spatial_query + describe_component --")
 	var sq := await d("minerva_pcb_spatial_query", _args({"reference_component": "U9", "radius_mm": 100.0}))
-	check_keys("spatial_query shape", sq, ["success", "reference", "radius_mm", "nearby_count", "nearby"])
+	check_keys("spatial_query shape", sq,
+		["success", "reference", "radius_mm", "nearby_count", "nearby", "copper"])
 	# empty reference → falls back to get_components shape (legacy behaviour,
 	# still true post-migration since both live in the same panel_tools.gd).
 	var sq_empty := await d("minerva_pcb_spatial_query", _args())

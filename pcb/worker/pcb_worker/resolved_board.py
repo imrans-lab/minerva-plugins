@@ -880,7 +880,11 @@ class ResolvedVia:
     position: Point
     diameter_mm: float
     drill_mm: float
-    net_id: str
+    # None is a deliberately unassigned standalone via. The geometric kernel
+    # already treats net-less copper as non-exempt against every other copper
+    # primitive; fabrication projects it to KiCad net 0. A named/unknown net is
+    # still a compile error — None is not a typo escape hatch.
+    net_id: str | None
     kind: ViaKind
     from_layer: str
     to_layer: str
@@ -889,8 +893,10 @@ class ResolvedVia:
     padstack: ViaPadstack | None = None
 
     def __post_init__(self) -> None:
-        for field in ("id", "net_id", "from_layer", "to_layer"):
+        for field in ("id", "from_layer", "to_layer"):
             _nonempty(getattr(self, field), f"ResolvedVia.{field}")
+        if self.net_id is not None:
+            _nonempty(self.net_id, "ResolvedVia.net_id")
         _point(self.position, "ResolvedVia.position")
         _positive(self.diameter_mm, "ResolvedVia.diameter_mm")
         _positive(self.drill_mm, "ResolvedVia.drill_mm")
@@ -1192,7 +1198,7 @@ class ResolvedBoard:
                     raise ValueError("PlacedPad references an unknown net")
         if any(trace.net_id not in net_ids for trace in self.traces):
             raise ValueError("ResolvedTrace references an unknown net")
-        if any(via.net_id not in net_ids for via in self.vias):
+        if any(via.net_id is not None and via.net_id not in net_ids for via in self.vias):
             raise ValueError("ResolvedVia references an unknown net")
         if any(zone.net_id is not None and zone.net_id not in net_ids for zone in self.zones):
             raise ValueError("ResolvedZone references an unknown net")

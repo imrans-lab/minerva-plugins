@@ -333,8 +333,9 @@ func HandleRouteChannel(ctx context.Context, w *bridge.Worker, params json.RawMe
 //
 // The on-demand honest-DRC-over-the-draft-set seam behind ui/PCBPanel.gd's
 // check_draft(). Like pcb.route it is a dotted panel-IPC channel (NOT an
-// LLM-facing pcb_* tool) that forwards verbatim to the Python worker — here the
-// "draft_check" method, which runs drc.run_drc over the union of committed
+// LLM-facing pcb_* tool) that forwards to the Python worker with the SAME
+// host-owned live library chain as route/promote_check. The "draft_check"
+// method runs drc.run_drc over the union of committed
 // copper and every candidate's draft geometry (SET-scoped). Every declared
 // ipc_channels entry needs a same-named backend tool (main.go registry, gap
 // A-7), and the computation is Python, so this forwards rather than computing.
@@ -342,7 +343,8 @@ func HandleRouteChannel(ctx context.Context, w *bridge.Worker, params json.RawMe
 var DraftCheckChannel = ToolSpec{
 	Name: "pcb.draft_check",
 	Description: "Panel IPC channel backing ui/PCBPanel.gd's on-demand routing " +
-		"draft-check. Forwards verbatim to the Python worker's 'draft_check' " +
+		"draft-check. Forwards with the host-owned live footprint-library chain " +
+		"to the Python worker's 'draft_check' " +
 		"method, which runs the existing DRC checks over the UNION of the board's " +
 		"committed copper and every candidate's draft segments/vias (set-scoped, " +
 		"not per-candidate). Args: {board:<canonical Board dict>, candidates:[{" +
@@ -357,7 +359,7 @@ var DraftCheckChannel = ToolSpec{
 }
 
 func HandleDraftCheckChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "draft_check", params)
+	return w.Call(ctx, "draft_check", withLibraryChain(params))
 }
 
 // ---- pcb.assembly_check (worker-backed broker CHANNEL) ---------------------

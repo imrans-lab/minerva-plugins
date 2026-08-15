@@ -22,6 +22,9 @@ extends SceneTree
 ## is the thing under test.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const PcbRouteHintKind := preload("res://../../minerva-plugins/pcb/ui/kinds/pcb_route_hint_kind.gd")
+const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
+const PcbLayerStack := preload("res://../../minerva-plugins/pcb/ui/model/pcb_layer_stack.gd")
 const PCB_PANEL_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 
 var _pass := 0
@@ -38,6 +41,10 @@ func _init() -> void:
 	await _run_add_trace_refusals()
 	await _run_human_via_tool()
 	await _run_one_rule_for_both_surfaces()
+	await _run_proposal_workspace_contract()
+	await _run_proposal_surface_parity()
+	await _run_proposal_lifecycle_and_commit_revalidation()
+	await _run_trace_hit_junction_and_via_movement()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -433,3 +440,250 @@ func _run_one_rule_for_both_surfaces() -> void:
 		not str(data.via_author_error(Vector2(-1.0, 5.0), 0.8, 0.4)).is_empty())
 
 	await _unmount(ctx["panel"])
+
+
+# ── 9. standalone proposal model: one entity, one generation ─────────────────
+
+func _run_proposal_workspace_contract() -> void:
+	print("-- 9. standalone via proposal model + refusals --")
+	var ctx: Dictionary = await _ctx()
+	var ws = ctx["panel"].get_routing_workspace()
+	var data = ctx["data"]
+	var signals := {"added": 0, "changed": 0}
+	ws.candidate_added.connect(func(_id: String) -> void: signals.added += 1)
+	ws.candidate_changed.connect(func(_id: String) -> void: signals.changed += 1)
+	var generation_before := int(ws.workspace_generation())
+
+	var res: Dictionary = ws.propose_via(Vector2(10.0, 11.0), "N1", 0.9, 0.3, data)
+	check("workspace proposal succeeds", bool(res.get("ok", false)))
+	var cid := str(res.get("candidate_id", ""))
+	var candidate = ws.get_candidate(cid)
+	check("proposal names a stored candidate", candidate != null and not cid.is_empty())
+	check_eq("candidate has zero trace segments", candidate.segments.size(), 0)
+	check_eq("candidate has exactly one via", candidate.vias.size(), 1)
+	check_eq("candidate starts proposed", str(candidate.disposition), "proposed")
+	check_eq("candidate keeps its net", str(candidate.net), "N1")
+	var via: Dictionary = candidate.vias[0]
+	check_eq("via position is exact", via.get("position"), Vector2(10.0, 11.0))
+	check_eq("via diameter survives", float(via.get("diameter", 0.0)), 0.9)
+	check_eq("via drill survives", float(via.get("drill", 0.0)), 0.3)
+	var span: Array = PcbLayerStack.default_through_via_span()
+	check_eq("via uses through-span start", str(via.get("from_layer", "")), str(span[0]))
+	check_eq("via uses through-span end", str(via.get("to_layer", "")), str(span[1]))
+	check_eq("one candidate means one generation bump",
+		int(ws.workspace_generation()), generation_before + 1)
+	check_eq("candidate_added emits once", int(signals.added), 1)
+	check_eq("no redundant candidate_changed emit", int(signals.changed), 0)
+
+	var duplicate: Dictionary = ws.propose_via(Vector2(10.0, 11.0), "N1", 0.9, 0.3, data)
+	check_eq("a duplicate live ghost refuses by name",
+		str(duplicate.get("error", "")), "via_not_placeable")
+	check("duplicate refusal names the proposed candidate",
+		str(duplicate.get("message", "")).contains(cid))
+	check_eq("duplicate refusal added nothing", ws.list_candidates().size(), 1)
+	check_eq("off-board proposal refuses by name",
+		str(ws.propose_via(Vector2(-1.0, 2.0), "", 0.8, 0.4, data).get("error", "")),
+		"via_not_placeable")
+	check_eq("invalid ring refuses by the same board rule",
+		str(ws.propose_via(Vector2(5.0, 5.0), "", 0.4, 0.4, data).get("error", "")),
+		"via_not_placeable")
+	check_eq("a workspace-only proposal fails closed without its board",
+		str(ws.propose_via(Vector2(5.0, 5.0)).get("error", "")), "board_unavailable")
+
+	await _unmount(ctx["panel"])
+
+
+# ── 10. mounted canvas gesture == MCP surface ─────────────────────────────────
+
+func _run_proposal_surface_parity() -> void:
+	print("-- 10. mounted canvas proposal and MCP proposal are parity twins --")
+	var human: Dictionary = await _ctx()
+	var agent: Dictionary = await _ctx()
+	var human_ws = human["panel"].get_routing_workspace()
+	var agent_ws = agent["panel"].get_routing_workspace()
+
+	var tool = PcbRouteHintKind.ViaInsertTool.new()
+	tool.on_activate(human["host"])
+	check("canvas gesture consumes the click", tool._propose_via_at(Vector2(14.0, 16.0)))
+	var mcp: Dictionary = PanelTools._propose_via(agent["host"],
+		{"x_mm": 14.0, "y_mm": 16.0})
+	check("MCP proposal succeeds", bool(mcp.get("success", false)))
+	check_eq("each surface creates exactly one ghost",
+		[human_ws.list_candidates().size(), agent_ws.list_candidates().size()], [1, 1])
+	var human_c = human_ws.list_candidates()[0]
+	var agent_c = agent_ws.list_candidates()[0]
+	check_eq("surface geometry is identical", human_c.vias, agent_c.vias)
+	check_eq("both are via-only", [human_c.segments.size(), agent_c.segments.size()], [0, 0])
+
+	var human_before: int = human_ws.list_candidates().size()
+	check("off-board canvas click is consumed", tool._propose_via_at(Vector2(-2.0, 4.0)))
+	var mcp_off: Dictionary = PanelTools._propose_via(agent["host"],
+		{"x_mm": -2.0, "y_mm": 4.0})
+	check_eq("MCP off-board refusal is named", str(mcp_off.get("error", "")),
+		"via_not_placeable")
+	check_eq("off-board canvas click creates no ghost",
+		human_ws.list_candidates().size(), human_before)
+	check_eq("off-board MCP call creates no ghost", agent_ws.list_candidates().size(), 1)
+
+	for banned in ["from_layer", "to_layer", "layers"]:
+		var args := {"x_mm": 20.0, "y_mm": 20.0}
+		args[banned] = "in1"
+		check_eq("proposal refuses '%s' rather than dropping it" % banned,
+			str(PanelTools._propose_via(agent["host"], args).get("error", "")),
+			"span_not_selectable")
+	check("non-numeric x refuses",
+		not bool(PanelTools._propose_via(agent["host"],
+			{"x_mm": "four", "y_mm": 4.0}).get("success", true)))
+	check("undeclared net refuses",
+		not bool(PanelTools._propose_via(agent["host"],
+			{"x_mm": 20.0, "y_mm": 20.0, "net_name": "TYPO"}).get("success", true)))
+
+	tool.on_deactivate()
+	await _unmount(human["panel"])
+	await _unmount(agent["panel"])
+
+
+# ── 11. commit/reject/undo and time-of-accept validity ────────────────────────
+
+func _run_proposal_lifecycle_and_commit_revalidation() -> void:
+	print("-- 11. via proposal lifecycle + commit-time revalidation --")
+	var ctx: Dictionary = await _ctx()
+	var data = ctx["data"]
+	var ws = ctx["panel"].get_routing_workspace()
+	var proposed: Dictionary = PanelTools._propose_via(ctx["host"], {
+		"x_mm": 22.0, "y_mm": 23.0, "net_name": "N1",
+		"size_mm": 1.0, "drill_mm": 0.35,
+	})
+	var cid := str(proposed.get("candidate_id", ""))
+	check("lifecycle fixture proposed", bool(proposed.get("success", false)))
+	check_eq("board is untouched before Accept", data.vias.size(), 0)
+	var committed: Dictionary = ws.commit(cid, data)
+	check("Accept succeeds", bool(committed.get("ok", false)))
+	check_eq("Accept lands exactly one board via", data.vias.size(), 1)
+	var landed: Dictionary = data.get_via(str((committed.get("via_ids", []) as Array)[0]))
+	check_eq("landed position matches the ghost", data.via_position(landed), Vector2(22.0, 23.0))
+	check_eq("landed size matches the ghost", float(landed.get("size", 0.0)), 1.0)
+	check_eq("landed drill matches the ghost", float(landed.get("drill", 0.0)), 0.35)
+	check_eq("landed net matches the ghost", str(landed.get("net_name", "")), "N1")
+	check("one undo succeeds", data.undo())
+	check_eq("undo removes the via", data.vias.size(), 0)
+	check_eq("undo restores the ghost disposition", str(ws.get_candidate(cid).disposition), "proposed")
+
+	var rejected: Dictionary = PanelTools._propose_via(ctx["host"],
+		{"x_mm": 30.0, "y_mm": 31.0})
+	var rejected_id := str(rejected.get("candidate_id", ""))
+	check("Reject succeeds", ws.reject(rejected_id))
+	check_eq("Reject leaves the board untouched", data.vias.size(), 0)
+	check_eq("Reject is terminal on the ghost", str(ws.get_candidate(rejected_id).disposition), "rejected")
+
+	# Time-of-check/time-of-accept: real copper landing after proposal must make
+	# the stale ghost refuse, not stack a second via at the same point.
+	var stale: Dictionary = PanelTools._propose_via(ctx["host"],
+		{"x_mm": 40.0, "y_mm": 35.0})
+	check("stale-commit fixture proposed (%s)" % str(stale),
+		bool(stale.get("success", false)))
+	var stale_id := str(stale.get("candidate_id", ""))
+	data.add_via({"position": Vector2(40.0, 35.0), "size": 0.8, "drill": 0.4,
+		"net_name": "", "from_layer": "top", "to_layer": "bottom"})
+	var stale_commit: Dictionary = ws.commit(stale_id, data)
+	check_eq("commit revalidation refuses the now-occupied point",
+		str(stale_commit.get("error", "")), "via_not_placeable")
+	check_eq("refused commit adds no second board via", data.vias.size(), 1)
+	check_eq("refused commit leaves the ghost live",
+		str(ws.get_candidate(stale_id).disposition), "proposed")
+
+	# A legacy/persisted workspace may contain duplicates even though new
+	# proposals cannot create them. Batch preflight must remain all-or-nothing.
+	var batch_ctx: Dictionary = await _ctx()
+	var batch_ws = batch_ctx["panel"].get_routing_workspace()
+	var batch_data = batch_ctx["data"]
+	var first: Dictionary = batch_ws.propose_via(Vector2(8.0, 9.0), "", 0.8, 0.4, batch_data)
+	var legacy = PcbRouteCandidate.new()
+	legacy.add_via(PcbRouteCandidate.make_via("legacy_via", Vector2(8.0, 9.0),
+		"top", "bottom", 0.8, 0.4))
+	var legacy_id := str(batch_ws.add_candidate(legacy))
+	var batch: Dictionary = batch_ws.commit_batch(
+		[str(first.get("candidate_id", "")), legacy_id], batch_data)
+	check_eq("overlapping standalone batch refuses by name",
+		str(batch.get("error", "")), "via_not_placeable")
+	check_eq("batch refusal writes no copper", batch_data.vias.size(), 0)
+
+	await _unmount(batch_ctx["panel"])
+	await _unmount(ctx["panel"])
+
+
+# ── 12. trace-hit semantics + Universal Select movement ─────────────────────
+
+func _run_trace_hit_junction_and_via_movement() -> void:
+	print("-- 12. trace-hit vias snap, inherit, bisect, and remain movable --")
+	var ctx: Dictionary = await _ctx()
+	var data = ctx["data"]
+	var panel = ctx["panel"]
+	var canvas = ctx["host"].get_canvas()
+	var workspace = panel.get_routing_workspace()
+	var trace = data.create_trace_entity("N1", "top",
+		[Vector2(10.0, 10.0), Vector2(30.0, 10.0)], 0.25)
+	var trace_id := str(trace.id)
+
+	# The raw point only partly overlaps the trace. It must never survive in
+	# that visually-connected/model-disconnected state.
+	var placed: Dictionary = PanelTools._place_via(ctx["host"], {
+		"x_mm": 20.0, "y_mm": 10.3,
+	})
+	check("trace-hit direct placement succeeds", bool(placed.get("success", false)))
+	check_eq("direct placement reports the trace it joined",
+		str(placed.get("trace_id", "")), trace_id)
+	var via_id := str(placed.get("via_id", ""))
+	var via: Dictionary = data.get_via(via_id)
+	check_eq("partly-touching via snaps onto the centreline",
+		data.via_position(via), Vector2(20.0, 10.0))
+	check_eq("trace-hit via inherits the trace net", str(via.get("net_name", "")), "N1")
+	check_eq("trace is explicitly bisected at the via", trace.waypoints.size(), 3)
+	check("the bisection point is canonical geometry", Vector2(20.0, 10.0) in trace.waypoints)
+
+	# Universal Select captures committed vias now. Release delegates to
+	# PCBData.move_via, so the owned trace junction follows atomically.
+	canvas._clear_selection_all()
+	canvas._add_to_selection(canvas.KIND_VIA, via_id)
+	canvas._capture_drag_origins()
+	check("Universal Select captures a committed via for movement",
+		canvas._drag_origins.has(canvas.KIND_VIA))
+	canvas._apply_drag_delta(Vector2(2.0, 0.0))
+	canvas._end_selection_drag()
+	via = data.get_via(via_id)
+	check_eq("committed via moved through Select-drag",
+		data.via_position(via), Vector2(22.0, 10.0))
+	check("its trace junction moved with it", Vector2(22.0, 10.0) in trace.waypoints)
+	check("the old junction was not left behind", not (Vector2(20.0, 10.0) in trace.waypoints))
+
+	# Via-only ghosts are points in the candidate junction gesture. Moving to
+	# empty space clears an inferred net; moving back onto copper snaps/inherits.
+	var proposed: Dictionary = workspace.propose_via(
+		Vector2(26.0, 10.25), "", 0.8, 0.4, data)
+	check("trace-hit via proposal succeeds", bool(proposed.get("ok", false)))
+	var cid := str(proposed.get("candidate_id", ""))
+	var candidate = workspace.get_candidate(cid)
+	check_eq("proposal snaps to the trace", candidate.vias[0]["position"], Vector2(26.0, 10.0))
+	check_eq("proposal inherits N1", str(candidate.net), "N1")
+	canvas.selected_candidate_ids.clear()
+	canvas.selected_candidate_ids.append(cid)
+	check("Select-drag arms on a via-only proposal",
+		canvas._begin_candidate_junction_drag(cid, Vector2(26.0, 10.0)))
+	canvas._end_candidate_junction_drag(Vector2(40.0, 30.0))
+	check_eq("via-only proposal moves in empty space",
+		candidate.vias[0]["position"], Vector2(40.0, 30.0))
+	check_eq("inferred net clears when moved off copper", str(candidate.net), "")
+	check("the moved via-only proposal arms again",
+		canvas._begin_candidate_junction_drag(cid, Vector2(40.0, 30.0)))
+	canvas._end_candidate_junction_drag(Vector2(27.0, 10.2))
+	check_eq("proposal re-snaps when moved back to the trace",
+		candidate.vias[0]["position"], Vector2(27.0, 10.0))
+	check_eq("and re-inherits the trace net", str(candidate.net), "N1")
+	var committed: Dictionary = workspace.commit(cid, data)
+	check("trace-hit proposal commits", bool(committed.get("ok", false)))
+	check("proposal commit materializes the trace bisection",
+		Vector2(27.0, 10.0) in trace.waypoints)
+	var landed: Dictionary = data.get_via(str((committed.get("via_ids", []) as Array)[0]))
+	check_eq("committed proposal via is electrically N1", str(landed.get("net_name", "")), "N1")
+
+	await _unmount(panel)

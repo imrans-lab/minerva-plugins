@@ -336,10 +336,14 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
         try:
             net_name = cand.get("net")
             net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
-            if net_id is None:
-                # No net => no same-net exemption and no electrical meaning. Guessing
-                # (net_id=None) would make the candidate conflict with its OWN pads and
-                # report a short that does not exist, so fail closed instead.
+            raw_segments_for_net = cand.get("segments") or []
+            raw_vias_for_net = cand.get("vias") or []
+            netless_via_only = (net_name in (None, "") and not raw_segments_for_net
+                                and bool(raw_vias_for_net))
+            if net_id is None and not netless_via_only:
+                # A route needs electrical ownership. The sole narrow exception
+                # is a via-only entity: ResolvedVia(None) is supported net-less
+                # copper and receives no same-net clearance exemption.
                 raise UnsupportedGeometry(
                     f"candidate {cid!r}: net {net_name!r} is not a net of this board")
 

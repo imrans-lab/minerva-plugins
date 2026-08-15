@@ -1806,6 +1806,7 @@ const ERR_NOT_EDITABLE := "candidate_not_editable"
 const ERR_ALREADY_COMMITTED := "already_committed"
 const ERR_DUPLICATE_CANDIDATE := "duplicate_candidate_id"
 const ERR_COMMIT_IN_PROGRESS := "commit_in_progress"
+const ERR_VIA_NOT_PLACEABLE := "via_not_placeable"
 const ERR_NO_SEGMENT_AT_POINT := "no_segment_at_point"
 const ERR_DEGENERATE_AT_ENDPOINT := "degenerate_insert_at_endpoint"
 const ERR_DEGENERATE_ON_VIA := "degenerate_insert_on_via"
@@ -2157,8 +2158,47 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 						str(via_dict.get("to_layer", ""))], candidate_id)
 		via_plan.append(via_dict)
 
+	# A via proposed as an ENTITY has a stronger commit contract than a router
+	# candidate's internal layer-change vias: the point itself must still be a
+	# legal board placement. Proposal-time validation is not sufficient because
+	# the board may have been resized, its nets may have changed, or a real via
+	# may have landed while the ghost was waiting for review. Re-read the SAME
+	# PCBData rule immediately before mutation so Accept can never turn a stale,
+	# formerly-valid ghost into invalid copper.
+	var junction_plan: Dictionary = {}
+	if _is_standalone_via_candidate(c):
+		if not board.has_method("resolve_via_target"):
+			return _verb_error(ERR_NO_BOARD,
+				"the board cannot validate a standalone via placement at commit time",
+				candidate_id)
+		var standalone: Dictionary = via_plan[0]
+		var dims: Dictionary = _via_dimensions(standalone, board)
+		var authored_net := str(standalone.get("authored_net", str(c.net)))
+		var target: Dictionary = board.resolve_via_target(
+			standalone["position"], float(dims["diameter"]), float(dims["drill"]),
+			authored_net)
+		if not bool(target.get("ok", false)):
+			return _verb_error(ERR_VIA_NOT_PLACEABLE,
+				str(target.get("error", "the via cannot be placed there")), candidate_id)
+		var expected_trace := str(standalone.get("junction_trace_id", ""))
+		var actual_trace := str(target.get("trace_id", ""))
+		var actual_position: Vector2 = target.get("position", standalone["position"])
+		if expected_trace != actual_trace \
+				or actual_position.distance_to(standalone["position"]) > EDIT_EPS_MM \
+				or str(target.get("net_name", authored_net)) != str(c.net):
+			return _verb_error(ERR_VIA_NOT_PLACEABLE,
+				"the board under standalone via candidate '%s' changed since it was proposed — move or re-propose it before commit"
+					% candidate_id, candidate_id)
+		if not actual_trace.is_empty():
+			if not board.has_method("insert_trace_junction"):
+				return _verb_error(ERR_NO_BOARD,
+					"the board cannot materialize the trace junction this via proposal requires",
+					candidate_id)
+			junction_plan = {"trace_id": actual_trace, "position": actual_position}
+
 	return {"ok": true, "candidate": c, "candidate_id": candidate_id,
 		"seg_plan": seg_plan, "via_plan": via_plan,
+		"junction_plan": junction_plan,
 		"validation_at_commit": str(c.validation)}
 
 
@@ -2208,6 +2248,16 @@ func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
 		if not bool(pf.get("ok", false)):
 			return pf
 		plans.append(pf)
+
+	# Board validation above sees only REAL copper. Two standalone ghosts at the
+	# same point would therefore both look valid during this all-up-front batch
+	# preflight and then materialize as stacked vias. Proposal creation prevents
+	# new duplicates, but persisted/legacy workspaces can still contain them, so
+	# keep the transaction honest here as well. Preserve existing route-batch
+	# semantics unless at least one side is the DCR's standalone via entity.
+	var batch_via_error: Dictionary = _standalone_batch_via_error(plans)
+	if not batch_via_error.is_empty():
+		return batch_via_error
 
 	# ── mutation, PHASE A: ALL copper, NO workspace state (Codex review P1) ───
 	# Copper writes are the only step that can fail mid-batch (a board fault on
@@ -2344,6 +2394,15 @@ func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
 			"consumed_hint_ids": _to_string_array(c.source_hint_ids),
 			"validation_at_commit": str(pf["validation_at_commit"]),
 		})
+	# Standalone proposals that intentionally targeted an existing trace become
+	# explicit canonical junctions only after every candidate has transitioned
+	# successfully. No failure branch remains beyond this point, so these
+	# topology-only edits never need the copper rollback path.
+	for pf in plans:
+		var junction: Dictionary = pf.get("junction_plan", {})
+		if not junction.is_empty():
+			board.insert_trace_junction(
+				str(junction.get("trace_id", "")), junction.get("position", Vector2.ZERO))
 	_defer_stale_pass = false
 	# Guard drops BEFORE the deferred stale pass and end_batch: the batch is
 	# fully applied and consistent from here, so handlers reacting to the
@@ -2406,12 +2465,94 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 
 # ── INV-3: the PATH-SCOPED via/layer edit entry ───────────────────────────────
 
+## True only for the DCR's via-as-entity candidate. Router candidates may also
+## carry no trace segments in an unhappy/partial answer, but they retain task or
+## source-hint provenance. The entity verb deliberately creates neither: its
+## whole meaning is exactly one independent via at one point.
+static func _is_standalone_via_candidate(candidate) -> bool:
+	return candidate != null \
+		and candidate.segments.is_empty() and candidate.vias.size() == 1 \
+		and str(candidate.task_id).is_empty() and candidate.source_hint_ids.is_empty()
+
+
+## Resolve the dimensions commit will actually write. Kept beside validation so
+## the gate and materializer cannot disagree when a legacy candidate omitted its
+## explicit diameter/drill and relies on board design-rule defaults.
+static func _via_dimensions(via: Dictionary, board) -> Dictionary:
+	var dr: Dictionary = board.design_rules if board.design_rules is Dictionary else {}
+	var diameter := float(via.get("diameter", 0.0))
+	if diameter <= 0.0:
+		diameter = float(dr.get("via_diameter_mm", 0.0))
+	if diameter <= 0.0:
+		diameter = 0.8
+	var drill := float(via.get("drill", 0.0))
+	if drill <= 0.0:
+		drill = float(dr.get("via_drill_mm", 0.0))
+	if drill <= 0.0:
+		drill = 0.4
+	return {"diameter": diameter, "drill": drill}
+
+
+## A live candidate via already claims this point even though it is not board
+## copper yet. This closes the gap PCBData.via_author_error cannot see: two MCP
+## calls made before either ghost is accepted. Terminal ghosts claim nothing;
+## committed vias are already visible through the board rule.
+func _candidate_via_error(position: Vector2, except_candidate_id: String = "") -> String:
+	for candidate in candidates.values():
+		if candidate == null or str(candidate.disposition) in ["superseded", "rejected", "committed"]:
+			continue
+		if not except_candidate_id.is_empty() and str(candidate.candidate_id) == except_candidate_id:
+			continue
+		for raw_via in candidate.vias:
+			if not (raw_via is Dictionary):
+				continue
+			var via: Dictionary = raw_via
+			var other_position = via.get("position", null)
+			if not (other_position is Vector2):
+				continue
+			var claim := maxf(float(via.get("diameter", 0.8)) * 0.5, 0.05)
+			if (other_position as Vector2).distance_to(position) <= claim:
+				return "A proposed via already sits at (%.3f, %.3f) in candidate '%s'." \
+					% [position.x, position.y, str(candidate.candidate_id)]
+	return ""
+
+
+## Cross-plan half of commit validation. All ordinary route candidates retain
+## their established batch semantics; the extra placement gate applies when a
+## standalone entity would overlap any other via in the same atomic approval.
+static func _standalone_batch_via_error(plans: Array) -> Dictionary:
+	for i in range(plans.size()):
+		var left: Dictionary = plans[i]
+		var left_candidate = left.get("candidate", null)
+		for j in range(i + 1, plans.size()):
+			var right: Dictionary = plans[j]
+			var right_candidate = right.get("candidate", null)
+			if not _is_standalone_via_candidate(left_candidate) \
+					and not _is_standalone_via_candidate(right_candidate):
+				continue
+			for left_raw in left.get("via_plan", []):
+				if not (left_raw is Dictionary) or not ((left_raw as Dictionary).get("position") is Vector2):
+					continue
+				var left_via: Dictionary = left_raw
+				for right_raw in right.get("via_plan", []):
+					if not (right_raw is Dictionary) or not ((right_raw as Dictionary).get("position") is Vector2):
+						continue
+					var right_via: Dictionary = right_raw
+					var claim := maxf(maxf(float(left_via.get("diameter", 0.8)),
+						float(right_via.get("diameter", 0.8))) * 0.5, 0.05)
+					if (left_via["position"] as Vector2).distance_to(right_via["position"]) <= claim:
+						var right_id := str(right.get("candidate_id", ""))
+						return _verb_error(ERR_VIA_NOT_PLACEABLE,
+							"standalone via candidate '%s' overlaps candidate '%s' in the same commit batch"
+								% [str(left.get("candidate_id", "")), right_id], right_id)
+	return {}
+
 ## Propose a VIA ON ITS OWN — a candidate carrying one via and no segments.
 ##
-## DCR 01a0033a12a9, owner's model: "Traces are independent thoughts vs via to
-## me. I'd place the via, then go back to trace workflow ... Vias can just
-## exist, they don't need to bisect traces." A via is an ENTITY, so proposing
-## one is proposing an entity, not editing a route.
+## DCR 01a0033a12a9 plus owner HITL clarification: a via in empty space is an
+## independent entity, while a via physically touching an existing trace is an
+## intentional junction. The latter snaps, inherits the trace net, and records
+## the trace identity so Accept can materialize the bisection atomically.
 ##
 ## This is the Proposals-area twin of PCBData.add_via / minerva_pcb_place_via,
 ## completing the panel's two-area language: Tools place a REAL via, Proposals
@@ -2428,28 +2569,38 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 ## workflow orders via-only boards and lases copper against them later).
 ## Returns {ok:true, candidate_id, via_id, at} or {ok:false, error, message}.
 func propose_via(position: Vector2, net: String = "", diameter: float = 0.8,
-		drill: float = 0.4) -> Dictionary:
+		drill: float = 0.4, board = null) -> Dictionary:
 	if _commit_transaction_active:
 		return _verb_error(ERR_COMMIT_IN_PROGRESS,
 			"a commit transaction is applying; new candidates are refused from its signal handlers")
-	if diameter <= 0.0 or drill <= 0.0 or drill >= diameter:
-		return _verb_error(ERR_UNMODELABLE_VIA,
-			"a via needs a positive pad and a smaller drill (the difference is the annular ring); got %.4f / %.4f"
-				% [diameter, drill])
+	if board == null or not is_instance_valid(board) or not board.has_method("resolve_via_target"):
+		return _verb_error(ERR_NO_BOARD,
+			"a standalone via proposal needs the live board's placement rule")
+	var target: Dictionary = board.resolve_via_target(position, diameter, drill, net)
+	var placement_error := "" if bool(target.get("ok", false)) \
+		else str(target.get("error", "the via cannot be placed there"))
+	var resolved_position: Vector2 = target.get("position", position)
+	if placement_error.is_empty():
+		placement_error = _candidate_via_error(resolved_position)
+	if not placement_error.is_empty():
+		return _verb_error(ERR_VIA_NOT_PLACEABLE, placement_error)
 
 	var span: Array = PcbLayerStack.default_through_via_span()
 	var c = PcbRouteCandidate.new()
-	c.net = net
+	c.net = str(target.get("net_name", net))
 	var via_id := next_via_id()
-	c.add_via(PcbRouteCandidate.make_via(via_id, position, str(span[0]), str(span[1]),
-		diameter, drill))
+	var via: Dictionary = PcbRouteCandidate.make_via(
+		via_id, resolved_position, str(span[0]), str(span[1]), diameter, drill)
+	via["authored_net"] = net
+	via["junction_trace_id"] = str(target.get("trace_id", ""))
+	c.add_via(via)
 	var cid := str(add_candidate(c))
 	if cid.is_empty():
 		return _verb_error(ERR_DUPLICATE_CANDIDATE, "the workspace refused the candidate")
-	_bump_generation()
-	candidate_changed.emit(cid)
 	return {"ok": true, "candidate_id": cid, "via_id": via_id,
-		"at": [position.x, position.y],
+		"at": [resolved_position.x, resolved_position.y], "net_name": str(c.net),
+		"trace_id": str(target.get("trace_id", "")),
+		"snapped_to_trace": bool(target.get("snapped", false)),
 		"from_layer": str(span[0]), "to_layer": str(span[1])}
 
 
@@ -2769,7 +2920,7 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 ## its own explicit verb.
 ##
 ## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
-func move_junction(candidate_id: String, point: Vector2, to: Vector2) -> Dictionary:
+func move_junction(candidate_id: String, point: Vector2, to: Vector2, board = null) -> Dictionary:
 	# Reentrancy guard (see _apply_disposition / add_via): a geometry edit mid-
 	# commit would mutate a member the transaction has already planned from.
 	if _commit_transaction_active:
@@ -2816,6 +2967,54 @@ func move_junction(candidate_id: String, point: Vector2, to: Vector2) -> Diction
 		return _verb_error(ERR_JUNCTION_NOT_FOUND,
 			"no segment endpoint or via of candidate '%s' is within %.4fmm of %s"
 				% [candidate_id, EDIT_EPS_MM, str(point)], candidate_id)
+
+	# A standalone via candidate is itself a movable point. It has no connected
+	# path by design, so requiring segment membership here made the Universal
+	# Select gesture arm and then refuse every via-only proposal. Resolve its
+	# destination through the same context-aware board rule proposal creation
+	# uses: empty space remains standalone; trace contact snaps and inherits net.
+	if hit_seg_indices.is_empty() and _is_standalone_via_candidate(c):
+		if hit_via_indices.size() != 1:
+			return _verb_error(ERR_AMBIGUOUS_JUNCTION,
+				"more than one via of candidate '%s' matches %s" % [candidate_id, str(point)],
+				candidate_id)
+		if board == null or not is_instance_valid(board) or not board.has_method("resolve_via_target"):
+			return _verb_error(ERR_NO_BOARD,
+				"moving a standalone via proposal needs the live board's placement rule",
+				candidate_id)
+		var vi := int(hit_via_indices[0])
+		var standalone: Dictionary = c.vias[vi]
+		var dims := _via_dimensions(standalone, board)
+		var authored_net := str(standalone.get("authored_net", str(c.net)))
+		var target: Dictionary = board.resolve_via_target(
+			to, float(dims["diameter"]), float(dims["drill"]), authored_net)
+		if not bool(target.get("ok", false)):
+			return _verb_error(ERR_VIA_NOT_PLACEABLE,
+				str(target.get("error", "the via cannot be moved there")), candidate_id)
+		var target_position: Vector2 = target.get("position", to)
+		var sibling_error := _candidate_via_error(target_position, candidate_id)
+		if not sibling_error.is_empty():
+			return _verb_error(ERR_VIA_NOT_PLACEABLE, sibling_error, candidate_id)
+		standalone["position"] = target_position
+		standalone["junction_trace_id"] = str(target.get("trace_id", ""))
+		standalone["authored_net"] = authored_net
+		c.net = str(target.get("net_name", authored_net))
+		c.candidate_revision = int(c.candidate_revision) + 1
+		mark_stale(candidate_id)
+		_bump_generation()
+		candidate_changed.emit(candidate_id)
+		return {
+			"ok": true, "candidate_id": candidate_id,
+			"from": [point.x, point.y],
+			"to": [target_position.x, target_position.y],
+			"moved_segment_ids": [],
+			"moved_via_ids": [str(standalone.get("id", ""))],
+			"path_segment_ids": [], "net_name": str(c.net),
+			"trace_id": str(target.get("trace_id", "")),
+			"snapped_to_trace": bool(target.get("snapped", false)),
+			"candidate_revision": int(c.candidate_revision),
+			"validation": str(c.validation),
+		}
 
 	# ── 2. AMBIGUITY: every hit segment must resolve to the SAME connected path ─
 	var resolved_path: Array = []

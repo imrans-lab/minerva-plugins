@@ -442,7 +442,8 @@ func _test_tool_buttons_render() -> void:
 	# change.
 	#
 	# DELIBERATE PIN BUMP (C5, campaign 2 epoch C unit 5, DCR 019fb572b888):
-	# 8 -> 9 radio tool modes, the Bus tool's own toolbar button
+	# 9 -> 10 radio tool modes: the standalone direct-copper Via tool joins the
+	# same append-only ToolMode family after Bus.
 	# (PCBPanel.gd's _build_ui, right after Cutout) — the same
 	# "count moves only when a round adds a tool ON PURPOSE" convention
 	# test_manifest_tool_registration.gd's own count pin documents. This file
@@ -454,10 +455,10 @@ func _test_tool_buttons_render() -> void:
 		PcbCanvasScript.ToolMode.INSPECT_PIN, PcbCanvasScript.ToolMode.ZONE_POUR,
 		PcbCanvasScript.ToolMode.ZONE_KEEPOUT, PcbCanvasScript.ToolMode.TRACE,
 		PcbCanvasScript.ToolMode.CUTOUT, PcbCanvasScript.ToolMode.BUS,
-		PcbCanvasScript.ToolMode.ERASER,
+		PcbCanvasScript.ToolMode.ERASER, PcbCanvasScript.ToolMode.VIA,
 	]
 	var tool_buttons: Dictionary = panel._tool_buttons
-	check("_tool_buttons has exactly the 9 current radio tool modes (got %d)" % tool_buttons.keys().size(),
+	check("_tool_buttons has exactly the 10 current radio tool modes (got %d)" % tool_buttons.keys().size(),
 		tool_buttons.keys().size() == expected_tool_modes.size())
 	for mode in expected_tool_modes:
 		check("radio tool button registered + mounted for ToolMode %s" % mode,
@@ -497,12 +498,12 @@ func _test_tool_buttons_render() -> void:
 		check("%s node present in the sidebar" % node_name,
 			panel.find_child(node_name, true, false) != null)
 
-	# 20 as of Epoch UX4 station 7: the four DRAFT doorway toggles joined the
+	# 21 after the direct-copper Via tool: the four DRAFT doorway toggles joined the
 	# Proposals area (deliberate pin bump, the standing convention) on top of
-	# UX3's 16 (9 radio tools + 3 route-flow + Delete + Propose + Check +
+	# UX3's 17 (10 radio tools + 3 route-flow + Delete + Propose + Check +
 	# Promote).
-	check("20 tool buttons total across the four flows (16 + 4 draft doorways; got %d)" % all_buttons.size(),
-		all_buttons.size() == 20)
+	check("21 tool buttons total across the four flows (17 + 4 draft doorways; got %d)" % all_buttons.size(),
+		all_buttons.size() == 21)
 
 	_teardown(panel)
 

@@ -102,6 +102,7 @@ func _init() -> void:
 	_run_steered_retry()
 	_run_junction_drag()
 	_run_candidate_via_insert_path()
+	_run_standalone_via_candidate_visibility()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1569,11 +1570,10 @@ func _run_junction_drag() -> void:
 	canvas.free()
 
 
-# ── 17. Add Via tool targets the SELECTED ghost (station 6b, kind-level) ─────
-# The ViaInsertTool's candidate half is a host/panel seam the free-floating
-# canvas fixture cannot mount; what IS assertable here is the workspace verb
-# it delegates to, driven with the exact arguments the tool computes (segment
-# layer under the click → opposite layer), plus the refusal surface.
+# ── 17. Candidate-local insert_via remains a route-edit operation ─────────────
+# DCR 01a0033a12a9 moved the canvas Via tool to standalone entity proposals.
+# This section therefore pins only the separate candidate-edit verb: split a
+# route segment and change the downstream continuation layer.
 
 func _run_candidate_via_insert_path() -> void:
 	print("-- 17. via insert into a ghost: the delegated verb + its refusals --")
@@ -1596,4 +1596,27 @@ func _run_candidate_via_insert_path() -> void:
 	check("a click on empty board refuses by name", not bool(miss.get("ok", true)))
 	check_eq("…no_segment_at_point", str(miss.get("error", "")), "no_segment_at_point")
 
+	canvas.free()
+
+
+# ── 18. a via-only entity ghost is visible and pickable ──────────────────────
+
+func _run_standalone_via_candidate_visibility() -> void:
+	print("-- 18. standalone via ghost: visible and pickable at its centre --")
+	var data = PCBData.new()
+	var ws = PcbRoutingWorkspace.new()
+	var cutover = PcbRoutingCutover.new()
+	var proposed: Dictionary = ws.propose_via(Vector2(30.0, 30.0), "", 0.8, 0.4, data)
+	var cid := str(proposed.get("candidate_id", ""))
+	var canvas = PcbCanvasScript.new()
+	canvas.zoom = 10.0
+	canvas.set_routing_workspace(ws, cutover)
+	cutover.set_workspace_authoritative("canvas", true)
+	var items: Array = canvas.candidate_draw_items()
+	check_eq("via-only candidate produces one draw item", items.size(), 1)
+	check("that draw item is the proposed via",
+		items.size() == 1 and str(items[0].get("candidate_id", "")) == cid
+		and str(items[0].get("item_kind", "")) == "via")
+	check_eq("centre hit resolves the via-only candidate",
+		canvas._candidate_at(Vector2(30.0, 30.0)), cid)
 	canvas.free()

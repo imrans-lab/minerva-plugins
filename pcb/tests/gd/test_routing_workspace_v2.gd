@@ -711,13 +711,11 @@ func _run_transient_not_persisted() -> void:
 	for key in ["board_token", "workspace_generation", "_workspace_generation", "board_revision"]:
 		check("to_dict omits '%s'" % key, not full.has(key))
 
-	# ORACLE NOTE: the correct expectation is that these RESET, not that they
-	# survive. They are runtime coherence tokens — a generation that survived a
-	# load would let a pre-load draft-check reply be accepted against a
-	# post-load candidate set, which is exactly the confusion the token exists
-	# to prevent. A test asserting survival would encode the wrong contract.
+	# ORACLE NOTE: board identity resets, while workspace_generation starts a NEW
+	# process-local epoch at 1. load_from_dict deliberately bumps before replacing
+	# ids so a reply begun against the prior document cannot match the loaded set.
 	var loaded = PcbRoutingWorkspace.from_dict(durable)
-	check_eq("workspace_generation RESETS to 0 on load", int(loaded.workspace_generation()), 0)
+	check_eq("workspace_generation starts a fresh load epoch", int(loaded.workspace_generation()), 1)
 	check_eq("board_token RESETS to empty on load", loaded.board_token, "")
 	check_eq("board_revision RESETS to 0 on load", int(loaded.board_revision), 0)
 	check_eq("...while the candidates themselves DID survive", loaded.candidates.size(), 1)

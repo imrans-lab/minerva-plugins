@@ -99,6 +99,13 @@ def _c3() -> dict:
             "segments": [_seg("s3", "top", [[5, 60], [12, 60]])], "vias": []}
 
 
+def _netless_via(cid: str, x: float, y: float) -> dict:
+    return {"candidate_id": cid, "net": "", "revision": 1, "segments": [],
+            "vias": [{"id": f"{cid}_via", "position": [x, y],
+                      "diameter_mm": 0.8, "drill_mm": 0.4,
+                      "from_layer": "top", "to_layer": "bottom"}]}
+
+
 # ---------------------------------------------------------------------------
 # 1. Set-scoped verdicts + subject identity + verbatim echo.
 # ---------------------------------------------------------------------------
@@ -149,6 +156,22 @@ def test_draft_check_verdicts_and_subjects():
     assert "cand_1" in cids
     assert "board" in cids
     assert ("cand_1", "s1") in {(s["candidate_id"], s.get("segment_id")) for s in cb[0]["subjects"]}
+
+
+def test_netless_committed_and_candidate_vias_are_checked_not_indeterminate():
+    """The live editor permits via-only, unassigned work. Both real and ghost
+    forms must project as netless copper instead of poisoning the batch with
+    via_unknown_net / unsupported candidate-net errors."""
+    board = _board()
+    board["vias"] = [{"net": "", "x_mm": 70, "y_mm": 70,
+                      "diameter_mm": 0.8, "drill_mm": 0.4,
+                      "from_layer": "top", "to_layer": "bottom"}]
+    resp = _call({"board": board, "candidates": [_netless_via("solo", 65, 65)],
+                  "board_token": "netless", "workspace_generation": 1})
+    assert resp["ok"] is True, resp
+    result = resp["result"]
+    assert "geometric_indeterminate" not in result, result
+    assert result["per_candidate"]["solo"] == "clean"
 
 
 # ---------------------------------------------------------------------------

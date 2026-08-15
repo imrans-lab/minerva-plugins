@@ -5209,11 +5209,10 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 			return
 	_capture_drag_origins()
 	is_dragging_selection = not _drag_origins.is_empty()
-	# Vias in the selection are about to be left behind by whatever this gesture
-	# turns out to be — including "no gesture at all" when the selection is vias
-	# only (nothing captured => is_dragging_selection false). Arm the notice for
-	# BOTH cases here, at the one place a move gesture begins.
-	_via_drag_notice_armed = not selected_via_ids.is_empty()
+	# Vias are position-only movable entities. Their live preview is captured
+	# below; release resolves trace contact and moves any owned junction through
+	# PCBData.move_via rather than leaving copper behind.
+	_via_drag_notice_armed = false
 	_cutout_drag_notice_armed = not selected_cutout_ids.is_empty()
 
 
@@ -5262,19 +5261,11 @@ func _capture_drag_origins() -> void:
 		var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
 		if not pts.is_empty():
 			zone_pts[zone_id] = pts
-	# VIAS ARE DELIBERATELY NOT CAPTURED, and this comment is the decision, not a
-	# note about an omission (item 019fbb96cf). A via is not free geometry: it is
-	# the point where one net's copper changes layer, and the trace ends that meet
-	# there are stored separately from it. Dragging the via alone would silently
-	# detach it from its own copper and leave a board that looks routed and is
-	# not. Moving a via therefore belongs to the routing tools, which can move the
-	# trace ends with it — not to the generic select-and-drag gesture.
-	#
-	# Not being captured is ALSO the enforcement: _apply_drag_delta only ever
-	# walks what is in here, so there is no second place a via could be moved
-	# from, and no fourth loop below to forget. The refusal is announced by
-	# _via_drag_notice_armed (see _begin_selection_drag) rather than being silent
-	# — the same "select yes, act no" shape a locked component already has.
+	var via_positions := {}
+	for via_id in selected_via_ids:
+		var via: Dictionary = data.get_via(via_id)
+		if not via.is_empty():
+			via_positions[via_id] = PCBDataScript.via_position(via)
 	# CUTOUTS ARE ALSO DELIBERATELY NOT CAPTURED (campaign 2 epoch B, unit 3),
 	# the SAME idiom as vias just above, for an analogous reason: v1 ships DRAW
 	# + DELETE only, with NO vertex editing and NO move (see the Cutout
@@ -5300,6 +5291,8 @@ func _capture_drag_origins() -> void:
 		_drag_origins[KIND_TRACE] = trace_pts
 	if not zone_pts.is_empty():
 		_drag_origins[KIND_ZONE] = zone_pts
+	if not via_positions.is_empty():
+		_drag_origins[KIND_VIA] = via_positions
 
 
 ## Translate every captured entity to `origin + delta`. ABSOLUTE from the
@@ -5314,6 +5307,10 @@ func _apply_drag_delta(delta: Vector2) -> void:
 		data.set_trace_waypoints(trace_id, _translated(_drag_origins[KIND_TRACE][trace_id], delta))
 	for zone_id in _drag_origins.get(KIND_ZONE, {}):
 		data.set_zone_outline(zone_id, _translated(_drag_origins[KIND_ZONE][zone_id], delta))
+	for via_id in _drag_origins.get(KIND_VIA, {}):
+		var via: Dictionary = data.get_via(via_id)
+		if not via.is_empty():
+			via["position"] = _drag_origins[KIND_VIA][via_id] + delta
 
 
 static func _translated(points: PackedVector2Array, delta: Vector2) -> PackedVector2Array:
@@ -5341,6 +5338,24 @@ func _end_selection_drag() -> void:
 	var moved_total := 0
 
 	data.begin_batch()
+
+	for via_id in _drag_origins.get(KIND_VIA, {}):
+		var via: Dictionary = data.get_via(via_id)
+		var old_pos: Vector2 = _drag_origins[KIND_VIA][via_id]
+		if via.is_empty():
+			continue
+		var target := PCBDataScript.via_position(via)
+		# The preview wrote the target directly. Restore the source before the
+		# one-shot model verb resolves duplicates and attached copper.
+		via["position"] = old_pos
+		var moved: Dictionary = data.move_via(via_id, target)
+		if bool(moved.get("ok", false)) and bool(moved.get("moved", false)):
+			moved_total += 1
+		else:
+			via["position"] = old_pos
+			if not bool(moved.get("ok", false)):
+				component_lock_changed.emit("Via move refused (%s): %s" % [
+					str(moved.get("error", "unknown")), str(moved.get("message", ""))])
 
 	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
 		var comp = data.get_component(comp_id)
@@ -5725,24 +5740,33 @@ func _handle_via_click(world_pos: Vector2) -> void:
 	if not data:
 		return
 	var pos := _author_point(world_pos)
-	var refusal: String = str(data.via_author_error(pos, VIA_TOOL_SIZE_MM, VIA_TOOL_DRILL_MM))
-	if not refusal.is_empty():
-		trace_tool_message.emit(refusal)
+	var resolved: Dictionary = data.resolve_via_target(
+		pos, VIA_TOOL_SIZE_MM, VIA_TOOL_DRILL_MM)
+	if not bool(resolved.get("ok", false)):
+		trace_tool_message.emit(str(resolved.get("error", "The via cannot be placed there.")))
 		return
+	pos = resolved.get("position", pos)
+	var net_name := str(resolved.get("net_name", ""))
 	var span: Array = PcbLayerStack.default_through_via_span()
+	data.begin_batch()
 	var via_id: String = str(data.add_via({
 		"position": pos,
-		"net_name": "",
+		"net_name": net_name,
 		"size": VIA_TOOL_SIZE_MM,
 		"drill": VIA_TOOL_DRILL_MM,
 		"from_layer": str(span[0]),
 		"to_layer": str(span[1]),
 	}))
-	# Mutate-then-snapshot, the model's house rule: add_via journals its own
-	# entry, this owes the single undoable history step.
-	data.save_to_history("Place via")
-	trace_tool_message.emit("Via %s placed at (%.3f, %.3f) — it connects no trace by itself." \
-		% [via_id, pos.x, pos.y])
+	var trace_id := str(resolved.get("trace_id", ""))
+	if not trace_id.is_empty():
+		data.insert_trace_junction(trace_id, pos)
+	data.end_batch("Place via " + via_id)
+	if trace_id.is_empty():
+		trace_tool_message.emit("Via %s placed at (%.3f, %.3f) — standalone and unassigned." \
+			% [via_id, pos.x, pos.y])
+	else:
+		trace_tool_message.emit("Via %s snapped to trace %s at (%.3f, %.3f), joined to net %s." \
+			% [via_id, trace_id, pos.x, pos.y, net_name])
 	queue_redraw()
 
 
@@ -8777,6 +8801,14 @@ func _candidate_junction_at(cid: String, world_pos: Vector2) -> Vector2:
 				if d <= best_d:
 					best_d = d
 					best = p
+	for via in c.vias:
+		if not (via is Dictionary) or not ((via as Dictionary).get("position") is Vector2):
+			continue
+		var p: Vector2 = (via as Dictionary)["position"]
+		var d := p.distance_to(world_pos)
+		if d <= best_d:
+			best_d = d
+			best = p
 	return best
 
 
@@ -8822,7 +8854,7 @@ func _end_candidate_junction_drag(release_pos: Vector2) -> void:
 	if release_pos.distance_to(from) < 0.0001:
 		trace_tool_message.emit("Junction unmoved — nothing changed on %s." % cid)
 		return
-	var res: Dictionary = _routing_workspace.move_junction(cid, from, release_pos)
+	var res: Dictionary = _routing_workspace.move_junction(cid, from, release_pos, data)
 	if bool(res.get("ok", false)):
 		trace_tool_message.emit("Moved a junction of %s: %d segment(s)%s followed — its verdict is stale until the next Check."
 			% [cid, (res.get("moved_segment_ids", []) as Array).size(),

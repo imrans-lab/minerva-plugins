@@ -1347,6 +1347,25 @@ def test_v2_board_with_minted_ids_compiles_and_reads_persisted_identity():
     assert result.board.holes[0].id == _mid("hole", 1)
 
 
+def test_unassigned_via_compiles_as_netless_copper_but_named_typo_still_refuses():
+    """HITL 01a003e2a468: the editor deliberately authors standalone vias
+    with an empty net. The resolved geometric kernel supports net_id=None and
+    must check that copper rather than making the whole board indeterminate.
+    This is narrow: a non-empty unknown name remains an authoring error."""
+    board = _v2_full_board()
+    board["vias"][0]["net"] = ""
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), result
+    assert result.board.vias[0].net_id is None
+    assert "via_unknown_net" not in _errors(result)
+
+    typo = copy.deepcopy(board)
+    typo["vias"][0]["net"] = "DOES_NOT_EXIST"
+    refused = compile_board(typo)
+    assert isinstance(refused, ResolutionFailure)
+    assert "via_unknown_net" in _errors(refused)
+
+
 def test_v2_board_with_only_board_id_compiles():
     # A childless v2 board needs just the persisted board id — no trace/via/hole
     # id requirement to trip, and no ordinal bridge.

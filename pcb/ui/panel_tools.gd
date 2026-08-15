@@ -38,11 +38,10 @@ extends RefCounted
 ## NOT declare a class_name — preloaded by relative path from PCBPanel.gd
 ## (matches the convention every other pcb/ui/*.gd file already follows).
 
-## Shared split+via+layer-run-toggle geometry (U4) lives on pcb_route_hint_kind.gd
-## as a static func (apply_via_at_point) so ViaInsertTool (the canvas gesture)
-## and _add_via below (the MCP parity tool) share ONE implementation. Off-tree,
-## no class_name — reached by preload(), same convention every other
-## cross-file pcb/ui/*.gd reference in this plugin already uses.
+## Legacy split+via+layer-run-toggle geometry (U4) lives on
+## pcb_route_hint_kind.gd as apply_via_at_point for _add_via below. The canvas
+## Via tool no longer uses it: DCR 01a0033a12a9 made that gesture propose an
+## independent via entity instead of editing a route hint.
 const _PcbRouteHintKindScript := preload("kinds/pcb_route_hint_kind.gd")
 ## T1.5: the ONE canonical layer/via-span contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
@@ -3793,6 +3792,13 @@ static func _propose_via(host, args: Dictionary) -> Dictionary:
 
 	if not args.has("x_mm") or not args.has("y_mm"):
 		return _err("x_mm and y_mm are required")
+	for banned in ["from_layer", "to_layer", "layers"]:
+		if args.has(banned):
+			return {"success": false, "error": "span_not_selectable",
+				"note": ("a v1 via is a THROUGH via — it crosses the whole board and joins every "
+					+ "declared layer, so '%s' is not a choice this pipeline can honour. Omit it; "
+					+ "the layer a trace continues on is a property of that trace, not the hole.")
+					% banned}
 	for key in ["x_mm", "y_mm", "size_mm", "drill_mm"]:
 		if args.has(key) and not (args[key] is float or args[key] is int):
 			return _err("%s must be a number, got %s" % [key, str(args[key])])
@@ -3802,23 +3808,22 @@ static func _propose_via(host, args: Dictionary) -> Dictionary:
 	var drill_mm := float(args.get("drill_mm", 0.4))
 	var net_name: String = str(args.get("net_name", ""))
 
-	# THE SAME MODEL RULE THE REAL VIA USES. A proposal that could be placed
-	# somewhere the board would refuse is a proposal that cannot be accepted —
-	# better to refuse it now, in the same words, than at commit.
-	var refusal: String = str(data.via_author_error(pos, size_mm, drill_mm, net_name))
-	if not refusal.is_empty():
-		return {"success": false, "error": "via_not_placeable", "note": refusal}
-
-	var res: Dictionary = workspace.propose_via(pos, net_name, size_mm, drill_mm)
+	# ONE proposal gate for both surfaces. RoutingWorkspace calls the board's
+	# canonical via_author_error and also sees live candidate vias, which PCBData
+	# alone cannot: two ghost proposals at one point must not both be accepted.
+	var res: Dictionary = workspace.propose_via(pos, net_name, size_mm, drill_mm, data)
 	if not bool(res.get("ok", false)):
 		return {"success": false, "error": str(res.get("error", "propose_via_refused")),
 			"note": str(res.get("message", ""))}
+	var actual: Array = res.get("at", [pos.x, pos.y])
 	return _ok({
 		"candidate_id": str(res.get("candidate_id", "")),
 		"via_id": str(res.get("via_id", "")),
-		"x_mm": snapped(pos.x, 0.0001),
-		"y_mm": snapped(pos.y, 0.0001),
-		"net_name": net_name,
+		"x_mm": snapped(float(actual[0]), 0.0001),
+		"y_mm": snapped(float(actual[1]), 0.0001),
+		"net_name": str(res.get("net_name", net_name)),
+		"trace_id": str(res.get("trace_id", "")),
+		"snapped_to_trace": bool(res.get("snapped_to_trace", false)),
 		"size_mm": size_mm,
 		"drill_mm": drill_mm,
 		"from_layer": str(res.get("from_layer", "top")),
@@ -3874,32 +3879,35 @@ static func _place_via(host, args: Dictionary) -> Dictionary:
 	var size_mm := float(args.get("size_mm", 0.8))
 	var drill_mm := float(args.get("drill_mm", 0.4))
 
-	# THE MODEL'S OWN RULE, not a re-implementation of it (epoch NLC C2, canvas
-	# round). PCBData.via_author_error is the ONE place bounds, ring, stacking
-	# and net membership are decided, and the canvas Via tool reads the
-	# identical call — so a human's click and an agent's tool call are refused
-	# for the same reasons in the same words. The same shape _add_trace takes
-	# from trace_author_error.
-	var refusal: String = str(data.via_author_error(pos, size_mm, drill_mm,
-		str(args.get("net_name", ""))))
-	if not refusal.is_empty():
-		return {"success": false, "error": "via_not_placeable", "note": refusal}
+	var resolved: Dictionary = data.resolve_via_target(
+		pos, size_mm, drill_mm, str(args.get("net_name", "")))
+	if not bool(resolved.get("ok", false)):
+		return {"success": false, "error": "via_not_placeable",
+			"note": str(resolved.get("error", "The via cannot be placed there."))}
+	pos = resolved.get("position", pos)
+	var net_name := str(resolved.get("net_name", ""))
 
 	var span: Array = PcbLayerStack.default_through_via_span()
+	data.begin_batch()
 	var via_id: String = str(data.add_via({
 		"position": pos,
-		"net_name": str(args.get("net_name", "")),
+		"net_name": net_name,
 		"size": size_mm,
 		"drill": drill_mm,
 		"from_layer": str(span[0]),
 		"to_layer": str(span[1]),
 	}))
-	data.save_to_history("Place via " + via_id)
+	var trace_id := str(resolved.get("trace_id", ""))
+	if not trace_id.is_empty():
+		data.insert_trace_junction(trace_id, pos)
+	data.end_batch("Place via " + via_id)
 	return _ok({
 		"via_id": via_id,
 		"x_mm": snapped(pos.x, 0.0001),
 		"y_mm": snapped(pos.y, 0.0001),
-		"net_name": str(args.get("net_name", "")),
+		"net_name": net_name,
+		"trace_id": trace_id,
+		"snapped_to_trace": bool(resolved.get("snapped", false)),
 		"size_mm": size_mm,
 		"drill_mm": drill_mm,
 		"from_layer": str(span[0]),
@@ -8308,7 +8316,7 @@ static func _workspace_edit_candidate(host, args: Dictionary) -> Dictionary:
 	var out: Dictionary = {}
 	match op:
 		"move_junction":
-			out = _edit_candidate_move_junction(workspace, cid, args)
+			out = _edit_candidate_move_junction(workspace, cid, args, ctx["data"])
 		"insert_via":
 			out = _edit_candidate_insert_via(workspace, cid, args, ctx["data"])
 	if not bool(out.get("ok", false)):
@@ -8335,14 +8343,15 @@ static func _workspace_edit_candidate(host, args: Dictionary) -> Dictionary:
 ## than the {x_mm,y_mm} dict shape corridor/pin lookups use elsewhere in this
 ## file, because the point named here IS a point already living in that wire
 ## shape, read back from a prior list/get_active/include_geometry reply).
-static func _edit_candidate_move_junction(workspace, cid: String, args: Dictionary) -> Dictionary:
+static func _edit_candidate_move_junction(workspace, cid: String, args: Dictionary,
+		data = null) -> Dictionary:
 	var point: Variant = _parse_xy_pair(args.get("point"))
 	if point == null:
 		return {"ok": false, "error": "invalid_point", "message": "point must be [x_mm, y_mm]"}
 	var to: Variant = _parse_xy_pair(args.get("to"))
 	if to == null:
 		return {"ok": false, "error": "invalid_point", "message": "to must be [x_mm, y_mm]"}
-	return workspace.move_junction(cid, point, to)
+	return workspace.move_junction(cid, point, to, data)
 
 
 ## insert_via's own arg parsing — delegates the actual edit to

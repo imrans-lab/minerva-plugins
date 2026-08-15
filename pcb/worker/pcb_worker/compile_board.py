@@ -1855,11 +1855,14 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
     vias: list[ResolvedVia] = []
     for ordinal, raw in enumerate(_dict_items(board, "vias", "via", diags)):
         net_name = raw.get("net")
-        net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
+        net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) and net_name else None
         via_ref = SourceRef(EntityKind.VIA, f"via:{ordinal}", f"net {net_name}")
         if not _validate_child_id("via", raw, via_ref, schema_version, diags):
             continue
-        if net_id is None:
+        # Empty/absent is an intentionally unassigned standalone via. A NAMED
+        # net must resolve: preserving the former error for typos is what keeps
+        # this relaxation narrow.
+        if net_id is None and net_name not in (None, ""):
             diags.error("via_unknown_net", f"via {ordinal}: references unknown net {net_name!r}", via_ref)
             continue
         x, y = raw.get("x_mm"), raw.get("y_mm")
@@ -1896,7 +1899,7 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
                         f"via {ordinal}: tented must be a boolean, got {raw_tented!r}", via_ref)
             continue
         vias.append(ResolvedVia(
-            id=_resolve_child_id("via", board_id, raw, (net_id, ordinal), schema_version),
+            id=_resolve_child_id("via", board_id, raw, (net_id or "unassigned", ordinal), schema_version),
             position=(float(x), float(y)),
             diameter_mm=float(diameter),
             drill_mm=float(drill),
