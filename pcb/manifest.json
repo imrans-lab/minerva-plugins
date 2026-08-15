@@ -933,6 +933,23 @@
       }
     },
     {
+      "name": "minerva_pcb_propose_via",
+      "description": "Propose ONE via as a GHOST for review — the Proposals-area twin of minerva_pcb_place_via, which places a real one. Nothing lands on the board until minerva_pcb_workspace_commit accepts the candidate (or minerva_pcb_workspace_reject drops it). A via is an ENTITY that exists at a point: it does not bisect or edit any trace, and it needs no trace to be valid — via-only boards are a real deliverable, drilled first and routed in a later step. Args x_mm/y_mm, optional net_name (omit for an unassigned via), size_mm (default 0.8) and drill_mm (default 0.4). Returns {candidate_id, via_id, x_mm, y_mm, net_name, size_mm, drill_mm, from_layer, to_layer}. THE SPAN IS NOT SELECTABLE: a v1 via is a THROUGH via joining every declared copper layer, so there is nothing to choose; which layer a TRACE continues on past a via is a property of the trace, not of the hole. Refused by name, changing nothing: via_not_placeable (off the board outline, a via already at that point, a drill not smaller than the pad, or a net this board does not declare) \u2014 the same model rule minerva_pcb_place_via and the canvas Via tool read, so a proposal that would be refused as copper is refused now rather than at commit.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "x_mm": {"type": "number", "description": "Via centre X in board mm"},
+          "y_mm": {"type": "number", "description": "Via centre Y in board mm"},
+          "net_name": {"type": "string", "description": "Net this via belongs to. Optional; omit for an unassigned via."},
+          "size_mm": {"type": "number", "description": "Via pad diameter in mm (default 0.8)"},
+          "drill_mm": {"type": "number", "description": "Drill diameter in mm (default 0.4). Must be smaller than size_mm."}
+        },
+        "required": ["editor_name", "x_mm", "y_mm"]
+      }
+    },
+    {
       "name": "minerva_pcb_place_via",
       "description": "Place ONE via directly on the board at x_mm/y_mm — the direct counterpart of minerva_pcb_delete_via, and the tool-side parity for minerva_pcb_add_via (which edits a route PROPOSAL, not the board). Exactly one journalled, undoable step. Optional net_name, size_mm (default 0.8) and drill_mm (default 0.4); the difference between them is the annular ring, so drill_mm must be smaller. Returns {via_id, x_mm, y_mm, net_name, size_mm, drill_mm, from_layer, to_layer, via_count}. THE SPAN IS NOT SELECTABLE: a v1 via is a THROUGH via that crosses the whole board and joins every declared layer, so from_layer/to_layer/layers are refused rather than ignored — blind and buried vias are out of scope. Which layer a TRACE continues on past a via is a property of the trace, not of the hole. Refused by name, changing nothing: via_not_placeable (off the board outline, a via already at that point, or a drill that is not smaller than the pad \u2014 the message says which, in the board model\u0027s own words, because the canvas Via tool reads that same rule) and span_not_selectable. This places the via ONLY; it does not connect or re-layer any trace, so check the routing afterwards.",
       "executor": "panel",

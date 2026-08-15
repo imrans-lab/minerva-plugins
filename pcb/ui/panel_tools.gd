@@ -181,6 +181,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _list_vias(host, args)
 		"minerva_pcb_place_via":
 			return _place_via(host, args)
+		"minerva_pcb_propose_via":
+			return _propose_via(host, args)
 		"minerva_pcb_add_trace":
 			return _add_trace(host, args)
 		"minerva_pcb_delete_via":
@@ -3767,6 +3769,62 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 		"note": ("copper is on the board now — this verb runs no DRC, exactly as the canvas "
 			+ "Trace tool does not. Run minerva_pcb_drc (connectivity) and "
 			+ "minerva_pcb_drc_geometric (clearances) to find out what it touched."),
+	})
+
+
+## Propose ONE via — a ghost via for review, the Proposals-area twin of
+## minerva_pcb_place_via (DCR 01a0033a12a9).
+##
+## Completes the panel's two-area language for vias: Tools place a REAL via,
+## Proposals propose a GHOST one, and workspace_commit turns it into copper.
+## Before this, the Proposals area's only via verb BISECTED A ROUTE — a trace
+## operation wearing a via's name. Under the owner's model a via is an entity
+## that exists at a point, so proposing one proposes an entity.
+##
+## No layer argument: a v1 via joins every copper layer, so there is nothing to
+## choose. Which layer a RUN continues on past a via is a routing decision and
+## belongs to a trace verb.
+static func _propose_via(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+
+	if not args.has("x_mm") or not args.has("y_mm"):
+		return _err("x_mm and y_mm are required")
+	for key in ["x_mm", "y_mm", "size_mm", "drill_mm"]:
+		if args.has(key) and not (args[key] is float or args[key] is int):
+			return _err("%s must be a number, got %s" % [key, str(args[key])])
+
+	var pos := Vector2(float(args["x_mm"]), float(args["y_mm"]))
+	var size_mm := float(args.get("size_mm", 0.8))
+	var drill_mm := float(args.get("drill_mm", 0.4))
+	var net_name: String = str(args.get("net_name", ""))
+
+	# THE SAME MODEL RULE THE REAL VIA USES. A proposal that could be placed
+	# somewhere the board would refuse is a proposal that cannot be accepted —
+	# better to refuse it now, in the same words, than at commit.
+	var refusal: String = str(data.via_author_error(pos, size_mm, drill_mm, net_name))
+	if not refusal.is_empty():
+		return {"success": false, "error": "via_not_placeable", "note": refusal}
+
+	var res: Dictionary = workspace.propose_via(pos, net_name, size_mm, drill_mm)
+	if not bool(res.get("ok", false)):
+		return {"success": false, "error": str(res.get("error", "propose_via_refused")),
+			"note": str(res.get("message", ""))}
+	return _ok({
+		"candidate_id": str(res.get("candidate_id", "")),
+		"via_id": str(res.get("via_id", "")),
+		"x_mm": snapped(pos.x, 0.0001),
+		"y_mm": snapped(pos.y, 0.0001),
+		"net_name": net_name,
+		"size_mm": size_mm,
+		"drill_mm": drill_mm,
+		"from_layer": str(res.get("from_layer", "top")),
+		"to_layer": str(res.get("to_layer", "bottom")),
+		"note": "a GHOST via — nothing is on the board yet. Accept it with "
+			+ "minerva_pcb_workspace_commit, or drop it with minerva_pcb_workspace_reject.",
 	})
 
 

@@ -214,7 +214,7 @@ func _init() -> void:
 	# Both are executor:"panel", so the Go pin in
 	# manifest_registry_parity_test.go is genuinely unaffected — that test
 	# filters to executor=="backend" before it counts anything.
-	check("total registered tool count == 104", registered.size() == 104,
+	check("total registered tool count == 105", registered.size() == 105,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

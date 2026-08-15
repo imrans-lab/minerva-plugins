@@ -2406,6 +2406,53 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 
 # ── INV-3: the PATH-SCOPED via/layer edit entry ───────────────────────────────
 
+## Propose a VIA ON ITS OWN — a candidate carrying one via and no segments.
+##
+## DCR 01a0033a12a9, owner's model: "Traces are independent thoughts vs via to
+## me. I'd place the via, then go back to trace workflow ... Vias can just
+## exist, they don't need to bisect traces." A via is an ENTITY, so proposing
+## one is proposing an entity, not editing a route.
+##
+## This is the Proposals-area twin of PCBData.add_via / minerva_pcb_place_via,
+## completing the panel's two-area language: Tools place a REAL via, Proposals
+## propose a GHOST via that Accept turns into copper. Vias-only candidates were
+## already modelled — panel_tools.gd's candidate summariser reports "honest
+## ZEROS" for a geometry-less candidate — so this creates no new shape, it
+## reaches an existing one that nothing could previously produce.
+##
+## NO LAYER ARGUMENT, deliberately. A v1 via is a through via joining every
+## copper layer, so there is nothing to choose; and which layer a RUN continues
+## on is a routing decision that belongs to a trace verb, not to this one.
+##
+## `net` may be empty — an unassigned via is legitimate (the fiber-laser
+## workflow orders via-only boards and lases copper against them later).
+## Returns {ok:true, candidate_id, via_id, at} or {ok:false, error, message}.
+func propose_via(position: Vector2, net: String = "", diameter: float = 0.8,
+		drill: float = 0.4) -> Dictionary:
+	if _commit_transaction_active:
+		return _verb_error(ERR_COMMIT_IN_PROGRESS,
+			"a commit transaction is applying; new candidates are refused from its signal handlers")
+	if diameter <= 0.0 or drill <= 0.0 or drill >= diameter:
+		return _verb_error(ERR_UNMODELABLE_VIA,
+			"a via needs a positive pad and a smaller drill (the difference is the annular ring); got %.4f / %.4f"
+				% [diameter, drill])
+
+	var span: Array = PcbLayerStack.default_through_via_span()
+	var c = PcbRouteCandidate.new()
+	c.net = net
+	var via_id := next_via_id()
+	c.add_via(PcbRouteCandidate.make_via(via_id, position, str(span[0]), str(span[1]),
+		diameter, drill))
+	var cid := str(add_candidate(c))
+	if cid.is_empty():
+		return _verb_error(ERR_DUPLICATE_CANDIDATE, "the workspace refused the candidate")
+	_bump_generation()
+	candidate_changed.emit(cid)
+	return {"ok": true, "candidate_id": cid, "via_id": via_id,
+		"at": [position.x, position.y],
+		"from_layer": str(span[0]), "to_layer": str(span[1])}
+
+
 ## Insert a via into a candidate at `position`, flipping the run DOWNSTREAM of
 ## that point onto `to_layer`.
 ##

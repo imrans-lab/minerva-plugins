@@ -983,53 +983,23 @@ class ViaInsertTool:
 		var doc_pos := _host.transform_screen_to_doc(pos)
 		var seg_r := _SEGMENT_HIT_PX / _zoom()
 
-		var sel := _host.get_selected_annotation_id()
-		# Multi-selection: no unambiguous hint to insert a via into, so the
-		# insert gesture disarms and the click re-targets selection instead
-		# (same rule as BendHandleEditTool; see its _multi_selected doc).
-		if not sel.is_empty() and not _multi_selected():
-			var ann := _find(sel)
-			# Codex 1047 fix round, verdict 3: the via-insert gesture disarms
-			# on a path-locked (superseded) hint, same rule + same fallback as
-			# BendHandleEditTool's gestures — the click re-targets selection
-			# instead of arming an edit the supersession machinery owns.
-			if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint" \
-					and not _path_locked(ann):
-				var kp: Dictionary = ann.get("kind_payload", {})
-				var result: Dictionary = _Self.apply_via_at_point(kp, doc_pos.x, doc_pos.y, seg_r)
-				if bool(result.get("ok", false)):
-					var new_ann := ann.duplicate(true)
-					new_ann["kind_payload"] = result.get("kind_payload", kp)
-					annotation_modified.emit(sel, new_ann)
-					return true
-				# The click LANDED on this hint and the insert refused on its
-				# own terms — say why and consume it. Falling through to
-				# candidate targeting here would read to the human as a click
-				# that did nothing at all, which is how a refusal becomes
-				# indistinguishable from a dead tool. A miss
-				# ("no_segment_at_point") is NOT this case: the point was never
-				# on this hint, so the fall-through below is still correct.
-				if str(result.get("error_code", "")) == "unsupported_layer":
-					_toast(str(result.get("error", "via insert refused")))
-					return true
+		# PROPOSE A VIA AT THE CLICKED POINT — DCR 01a0033a12a9.
+		#
+		# This gesture used to BISECT a selected route and re-layer its tail: a
+		# trace operation wearing a via's name. The owner's model is that a via is
+		# an ENTITY — "vias can just exist, they don't need to bisect traces" — and
+		# via-only boards are a real deliverable, drilled first and routed later.
+		# So the Proposals-area via verb now PROPOSES A VIA, exactly as the
+		# Tools-area Via button places one; neither needs a selection, a target
+		# route, or a layer choice.
+		#
+		# The continuation-layer picker went with the bisect. It was not wrong, it
+		# was attached to the wrong verb — a via does not pick a layer, a route
+		# does. That capability belongs to a future trace-layer verb, and epoch NLC
+		# C1b's separation of hole-span from run-continuation is what will make it
+		# correct wherever it lands.
+		return _propose_via_at(doc_pos)
 
-		# ── CANDIDATE TARGETING (Epoch UX3 station 6b) ────────────────────────
-		# When no hint is the selection but a route CANDIDATE (ghost) is, the
-		# tool targets the candidate instead of silently disarming: the click
-		# routes through RoutingWorkspace.add_via — the SAME revision-guarded,
-		# path-scoped verb minerva_pcb_workspace_edit_candidate's insert_via
-		# op calls, never a parallel mutation path. The workspace resolves the
-		# segment at the point itself and owns every refusal by name
-		# (no_segment_at_point, degenerate inserts, candidate_frozen, …);
-		# refusals surface on the panel status line through the host toast.
-		# Hint-targeting above is UNCHANGED — a selected hint still wins.
-		if sel.is_empty() and _insert_via_into_selected_candidate(doc_pos):
-			return true
-
-		# No via inserted (nothing selected, selection isn't a route hint, or the
-		# click missed every segment of the selection's route) — fall back to
-		# route-hint-only selection, same idiom as BendHandleEditTool.
-		return _select_route_hint_at(doc_pos)
 
 	## Visible disarm (A8u1) — mirrors BendHandleEditTool.draw_preview. This tool
 	## had no preview before; it has one now solely to say why the click that
@@ -1168,6 +1138,38 @@ class ViaInsertTool:
 				return "top"
 			_:
 				return ""
+
+
+	## Propose a via at `doc_pos` through RoutingWorkspace.propose_via — the same
+	## verb minerva_pcb_propose_via calls, so a human's click and an agent's tool
+	## call produce the identical ghost (DCR 01a0033a12a9).
+	##
+	## ALWAYS consumes the click and ALWAYS says something. The gesture this
+	## replaced could refuse silently — it needed a selected route, found none,
+	## and returned false with no message, which reads as a dead tool. That was
+	## the owner's original complaint about vias, and it recurred at the NLC HITL.
+	## Returns true unconditionally for that reason.
+	func _propose_via_at(doc_pos: Vector2) -> bool:
+		if _host == null or not _host.has_method("get_panel"):
+			_toast("No panel is bound — the via was not proposed.")
+			return true
+		var panel = _host.get_panel()
+		if panel == null or not panel.has_method("get_routing_workspace"):
+			_toast("No routing workspace is bound — the via was not proposed.")
+			return true
+		var workspace = panel.get_routing_workspace()
+		if workspace == null or not workspace.has_method("propose_via"):
+			_toast("This panel predates propose_via — the via was not proposed.")
+			return true
+
+		var res: Dictionary = workspace.propose_via(doc_pos, "")
+		if bool(res.get("ok", false)):
+			_toast("Via PROPOSED at (%.3f, %.3f) — a ghost, not copper. Accept it to place it."
+				% [doc_pos.x, doc_pos.y])
+		else:
+			_toast("Via proposal refused (%s): %s"
+				% [str(res.get("error", "unknown")), str(res.get("message", ""))])
+		return true
 
 
 	## Host toast → the panel status line (duck-typed; silent when absent).
