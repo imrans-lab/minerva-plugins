@@ -50,7 +50,11 @@ test_pcb_panel_layout.gd assertions=147
 test_pcb_panel_model.gd assertions=186
 test_pcb_panel_tools.gd assertions=211
 test_pcb_panel_tools_migration.gd assertions=68
-test_pcb_panel_ui.gd assertions=154
+# Epoch NLC (154 -> 158): the Tools-area Via button adds four assertions to this
+# suite's tool-button walk. Found by RUNNING it after the DCR picker removal —
+# it is outside the NLC delta the owner scoped, so nothing had exercised it since
+# the button landed. All 158 pass; only the pin was stale.
+test_pcb_panel_ui.gd assertions=158
 test_pcb_pin_inspector.gd assertions=49
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev
