@@ -43,4 +43,10 @@ WORKER_PACKAGES="mcad_worker mcad"
 # that go:embed can reach from the package using the embed (Go forbids `..`
 # in embed paths, so the bundle must live under the Go source tree). Scratch
 # state (PBS cache, extraction stage) still goes under runtime-build/.
-BUNDLE_OUT_DIR="internal/runtime/bundle"
+# 2026-06-10's `refactor(shared): extract plugin-agnostic bridge + runtime from
+# cad` (1c8291b) renamed internal/runtime -> internal/cadruntime and moved the
+# go:embed directives with it, but left this path behind. The bundle has been
+# landing in a directory nothing embeds ever since, so every cad CI run has
+# failed at `Build (native)` with "pattern bundle/runtime-bundle-<triple>.sha256:
+# no matching files found". This line was the last reference to the old path.
+BUNDLE_OUT_DIR="internal/cadruntime/bundle"

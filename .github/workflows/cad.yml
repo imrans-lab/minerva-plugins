@@ -114,20 +114,20 @@ jobs:
       # ----- Build runtime bundle (per W1a) -----
       # Native + cross targets each produce one bundle. macos-universal
       # produces TWO (one per arch) — the lipo'd Go binary embeds both via
-      # the per-platform build tags in cad/internal/runtime/embed_darwin_*.go.
+      # the per-platform build tags in cad/internal/cadruntime/embed_darwin_*.go.
 
       - name: Build runtime bundle (single arch)
         if: matrix.target != 'macos-universal'
         run: |
           bash ../scripts/build-python-runtime-bundle.sh . ${{ matrix.target }}
-          ls -la internal/runtime/bundle/
+          ls -la internal/cadruntime/bundle/
 
       - name: Build runtime bundle (macos arm64 + amd64 for lipo)
         if: matrix.target == 'macos-universal'
         run: |
           bash ../scripts/build-python-runtime-bundle.sh . macos-arm64
           bash ../scripts/build-python-runtime-bundle.sh . macos-amd64
-          ls -la internal/runtime/bundle/
+          ls -la internal/cadruntime/bundle/
 
       - name: Build (native)
         if: matrix.target != 'macos-universal'
