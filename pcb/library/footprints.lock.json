@@ -60,6 +60,48 @@
    "source_kind": "generated",
    "source_ref": "pcb_worker_seed synthesizer (baae81a 2026-07-18)"
   },
+  "Capacitor_SMD:C_0402_1005Metric": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Capacitor_SMD.pretty/C_0402_1005Metric.kicad_mod",
+   "path": "Capacitor_SMD.pretty/C_0402_1005Metric.kicad_mod",
+   "provenance_note": "smart-remote v2b: 0402 ceramic - decoupling",
+   "retrieved_at": "2026-08-15",
+   "sha256": "88232454c8ab84afbcda21beeeccc8a2b0b745b15c0515a83e3d56ff9be2d412",
+   "size_bytes": 1766,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
+  "Capacitor_SMD:C_1210_3225Metric": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Capacitor_SMD.pretty/C_1210_3225Metric.kicad_mod",
+   "path": "Capacitor_SMD.pretty/C_1210_3225Metric.kicad_mod",
+   "provenance_note": "smart-remote v2b: bulk buck-input cap (>=100uF)",
+   "retrieved_at": "2026-08-15",
+   "sha256": "dc1d0a7bce3d19e41856e1e02896abcc84ef4ee752999c7f4162f4519df9d5f8",
+   "size_bytes": 1766,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
   "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal": {
    "assembly": {
     "dist_part_numbers": [],
@@ -81,6 +123,90 @@
    "source_kind": "official_kicad",
    "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
   },
+  "Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Connector_JST.pretty/JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal.kicad_mod",
+   "path": "Connector_JST.pretty/JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal.kicad_mod",
+   "provenance_note": "smart-remote v2b: J4 speaker",
+   "retrieved_at": "2026-08-15",
+   "sha256": "241f1b2109c9276e6e6f3062f0b6fd23d0681ef0bb50034bf817bf20df2a7a4d",
+   "size_bytes": 5668,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
+  "Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Connector_JST.pretty/JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal.kicad_mod",
+   "path": "Connector_JST.pretty/JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal.kicad_mod",
+   "provenance_note": "smart-remote v2b: J2 OLED",
+   "retrieved_at": "2026-08-15",
+   "sha256": "3486f30edc8e25e161e93fe692ee41f21b7efb74e30b037b744be6f91bde497a",
+   "size_bytes": 5917,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
+  "Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Connector_JST.pretty/JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal.kicad_mod",
+   "path": "Connector_JST.pretty/JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal.kicad_mod",
+   "provenance_note": "smart-remote v2b: J3 joystick",
+   "retrieved_at": "2026-08-15",
+   "sha256": "9206c780e279f2ba0ec211cfd598e2c11a8f30d947831b0dccdda2b086338890",
+   "size_bytes": 6029,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
+  "Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Connector_JST.pretty/JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal.kicad_mod",
+   "path": "Connector_JST.pretty/JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal.kicad_mod",
+   "provenance_note": "smart-remote v2b: J5 battery",
+   "retrieved_at": "2026-08-15",
+   "sha256": "24857b82c0c022319a0bd3ec2790672c2cf5309ba5c15e0e6c0f00bc1dc6c8d0",
+   "size_bytes": 5007,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
   "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical": {
    "assembly": {
     "dist_part_numbers": [],
@@ -95,7 +221,7 @@
    "model3d_ref": null,
    "original_source_path": null,
    "path": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
-   "provenance_note": "name and descr mirror the official KiCad footprint; dimensions are the generic 2.54mm convention — flagged for release-path attribution review",
+   "provenance_note": "name and descr mirror the official KiCad footprint; dimensions are the generic 2.54mm convention \u2014 flagged for release-path attribution review",
    "retrieved_at": "2026-08-03",
    "sha256": "d5ac19c4d2a8248d6bdb67fee2db15f11d6a63af7c5bd63dd6faf23103b60c1c",
    "size_bytes": 1496,
@@ -165,6 +291,27 @@
    "source_kind": "official_kicad",
    "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
   },
+  "Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2.kicad_mod",
+   "provenance_note": "smart-remote v2b: J6/J7 ESP32-S3-DevKitC socket. TYPE 2 selected because both stocked part numbers end -2. Butt-joining a 1x20+1x4 is IMPOSSIBLE (housing = 2.54N+0.20 gives 1.37mm end walls -> 0.20mm interference), so a single 1x20 is used and 2 DevKit pins overhang onto clearance holes.",
+   "retrieved_at": "2026-08-15",
+   "sha256": "7c3f2b5ec51003da45929978830296658da9f8cc749971be57283fe4a6d27dbc",
+   "size_bytes": 6772,
+   "source_kind": "hand_authored",
+   "source_ref": "authored 2026-08-15 from the Wcon 2171 manufacturer drawing (LCSC C920840 datasheet, 600dpi render): pitch 2.54, pad 1.02x1.90, 5.20 across outer pad edges, TYPE 2 phase (pin 1 tail up), contact-centreline NPTH dia 1.02"
+  },
   "Diode_SMD:D_SMA": {
    "assembly": {
     "dist_part_numbers": [],
@@ -219,12 +366,33 @@
    "model3d_ref": null,
    "original_source_path": null,
    "path": "Espressif.pretty/ESP32-S3-DevKitC.kicad_mod",
-   "provenance_note": "attribution reconstructed forensically (generator pcbnew, version 20211014, verbatim Espressif descr text); upstream byte-identity NOT re-verified — file predates acquisition tooling",
+   "provenance_note": "attribution reconstructed forensically (generator pcbnew, version 20211014, verbatim Espressif descr text); upstream byte-identity NOT re-verified \u2014 file predates acquisition tooling",
    "retrieved_at": "2026-07-07",
    "sha256": "1e033c202e4ae743955d325da9e8e392c9600b51bf67caec56fb7f7eca723c0a",
    "size_bytes": 16642,
    "source_kind": "vendor_export",
    "source_ref": "github.com/espressif/kicad-libraries (footprint ESP32-S3-DevKitC)"
+  },
+  "Fuse:Fuse_1206_3216Metric": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Fuse.pretty/Fuse_1206_3216Metric.kicad_mod",
+   "path": "Fuse.pretty/Fuse_1206_3216Metric.kicad_mod",
+   "provenance_note": "smart-remote v2b: F1 PTC resettable fuse",
+   "retrieved_at": "2026-08-15",
+   "sha256": "04cc22c125b2ba35ad77430d27889a64d84a493743f03f6cf463c44bf27e0174",
+   "size_bytes": 1709,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
   },
   "INMP441:INMP441_I2S_2x3_P2.54mm": {
    "assembly": {
@@ -245,6 +413,48 @@
    "size_bytes": 1955,
    "source_kind": "hand_authored",
    "source_ref": "authored in-repo 17f9a1e 2026-08-03 (corrected 7.62mm row spacing)"
+  },
+  "Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Inductor_SMD.pretty/L_Vishay_IFSC-1515AH_4x4x1.8mm.kicad_mod",
+   "path": "Inductor_SMD.pretty/L_Vishay_IFSC-1515AH_4x4x1.8mm.kicad_mod",
+   "provenance_note": "smart-remote v2b: L1 buck inductor - 4x4mm land, see provenance_note",
+   "retrieved_at": "2026-08-15",
+   "sha256": "1ecc0ff19cd7d578e447c089426586a466411064c45b97616bb21df289f2d56a",
+   "size_bytes": 3973,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
+  "MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "MEMSensing.pretty/MSM261S4030H0R_TopPort_LGA-8_4x3mm.kicad_mod",
+   "provenance_note": "smart-remote v2b: U3 microphone. TOP PORT so no PCB acoustic hole. NOTE pins 4 (CHIPEN) and 5 (L/R) are straps the module version used to handle: CHIPEN low = mic DISABLED.",
+   "retrieved_at": "2026-08-15",
+   "sha256": "274fc7878f16788b32d1edcbb3f5487961da8c8c520def427fae87e8fd56559a",
+   "size_bytes": 2938,
+   "source_kind": "hand_authored",
+   "source_ref": "authored 2026-08-15 from the MEMSensing MSM261S4030H0R datasheet (Ver.1.0 DOC NO:DS-050), SMT Parameters land pattern: 8 pads 0.9x0.6, columns 1.0mm apart, rows 1.0mm pitch"
   },
   "Minerva_Fixture:DAM_MinWeb_2P": {
    "assembly": {
@@ -387,6 +597,27 @@
    "source_kind": "official_kicad",
    "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
   },
+  "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Package_DFN_QFN.pretty/VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm.kicad_mod",
+   "path": "Package_DFN_QFN.pretty/VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm.kicad_mod",
+   "provenance_note": "smart-remote v2b: MAX98357A I2S amplifier (bare chip)",
+   "retrieved_at": "2026-08-15",
+   "sha256": "73c40c396114dfb1fe257bc8ede0882af0b9132b13cb511a217a314a4a4eba7a",
+   "size_bytes": 7294,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
   "Package_DIP:DIP-6_W7.62mm_Socket": {
    "assembly": {
     "dist_part_numbers": [],
@@ -408,6 +639,48 @@
    "source_kind": "official_kicad",
    "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
   },
+  "Package_TO_SOT_SMD:SOT-23": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Package_TO_SOT_SMD.pretty/SOT-23.kicad_mod",
+   "path": "Package_TO_SOT_SMD.pretty/SOT-23.kicad_mod",
+   "provenance_note": "smart-remote v2b: AO3401A P-FET (Q1 reverse-polarity, Q2 load switch)",
+   "retrieved_at": "2026-08-15",
+   "sha256": "5fbcd830e62b2a7096210c50f4507b6110c79a844412200da276e0ee2e27ed14",
+   "size_bytes": 4350,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
+  "Package_TO_SOT_SMD:TSOT-23-6": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Package_TO_SOT_SMD.pretty/TSOT-23-6.kicad_mod",
+   "path": "Package_TO_SOT_SMD.pretty/TSOT-23-6.kicad_mod",
+   "provenance_note": "smart-remote v2b: AP63203WU-7 buck",
+   "retrieved_at": "2026-08-15",
+   "sha256": "a61152835f7573bdbcd4321367edd2022ae167c800152b42fcaed4f2d98b1b7e",
+   "size_bytes": 4129,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
+  },
   "R_0805": {
    "assembly": {
     "dist_part_numbers": [],
@@ -422,12 +695,33 @@
    "model3d_ref": null,
    "original_source_path": null,
    "path": "Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
-   "provenance_note": "synthetic 0805 land — deliberately NOT the official KiCad R_0805 (comment 599 proof)",
+   "provenance_note": "synthetic 0805 land \u2014 deliberately NOT the official KiCad R_0805 (comment 599 proof)",
    "retrieved_at": "2026-07-18",
    "sha256": "aaa6a6a177248b71877a6ca5e3bbda99c930b84ef7c5b5c08c9861832e7638f7",
    "size_bytes": 744,
    "source_kind": "generated",
    "source_ref": "pcb_worker_seed synthesizer (baae81a 2026-07-18)"
+  },
+  "Resistor_SMD:R_0402_1005Metric": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": "/usr/share/kicad/footprints/Resistor_SMD.pretty/R_0402_1005Metric.kicad_mod",
+   "path": "Resistor_SMD.pretty/R_0402_1005Metric.kicad_mod",
+   "provenance_note": "smart-remote v2b: 0402 resistor - all values",
+   "retrieved_at": "2026-08-15",
+   "sha256": "3d0936db48c6ab489699460947c0404419ffeb7b715a627460c54e101212ce02",
+   "size_bytes": 1767,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15)"
   },
   "TH_TestPoint": {
    "assembly": {

@@ -18,12 +18,24 @@ These entries are drawn from Espressif's kicad-libraries, licensed under the Apa
 
 These entries are drawn from KiCad's official libraries (kicad-footprints), licensed CC-BY-SA-4.0 WITH the KiCad-libraries-exception. Redistribution requires attribution to the KiCad project — see https://gitlab.com/kicad/libraries/kicad-footprints/-/blob/master/LICENSE.md for the exception text this NOTICE satisfies.
 
+- `Capacitor_SMD:C_0402_1005Metric` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: 0402 ceramic - decoupling)
+- `Capacitor_SMD:C_1210_3225Metric` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: bulk buck-input cap (>=100uF))
 - `Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal` — kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07) (descr: 'generated with kicad-footprint-generator', tedit 5B7745C6)
+- `Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: J4 speaker)
+- `Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: J2 OLED)
+- `Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: J3 joystick)
+- `Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: J5 battery)
 - `Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical` — kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07) (descr: '(from Kicad 4.0.7), script generated', tedit 5A19A429)
 - `Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical` — kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07) (descr: '(from Kicad 4.0.7), script generated', tedit 5A19A429)
 - `Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical` — kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07) (descr: '(from Kicad 4.0.7), script generated', tedit 5A19A429)
+- `Fuse:Fuse_1206_3216Metric` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: F1 PTC resettable fuse)
+- `Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: L1 buck inductor - 4x4mm land, see provenance_note)
 - `MountingHole:MountingHole_3.2mm_M3` — kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07) (official virtual mounting-hole footprint, tedit 56D1B4CB)
+- `Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: MAX98357A I2S amplifier (bare chip))
 - `Package_DIP:DIP-6_W7.62mm_Socket` — kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07) (canonical official descr, tedit 5A02E8C5)
+- `Package_TO_SOT_SMD:SOT-23` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: AO3401A P-FET (Q1 reverse-polarity, Q2 load switch))
+- `Package_TO_SOT_SMD:TSOT-23-6` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: AP63203WU-7 buck)
+- `Resistor_SMD:R_0402_1005Metric` — kicad-footprints official library (Ubuntu kicad 9.0.9~ubuntu24.04.1, /usr/share/kicad/footprints, copied verbatim 2026-08-15) (smart-remote v2b: 0402 resistor - all values)
 
 ## LicenseRef-TurnRock-Proprietary
 
@@ -33,9 +45,11 @@ Internal / TurnRock-authored parts. No third-party attribution obligation applie
 - `Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals` — authored in-repo 17f9a1e 2026-08-03; speaker terminals as pins 8/9 per owner ruling
 - `C_0805` — pcb_worker_seed synthesizer (baae81a 2026-07-18)
 - `Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical` — authored in-repo 17f9a1e 2026-08-03 (tedit 0) (name and descr mirror the official KiCad footprint; dimensions are the generic 2.54mm convention — flagged for release-path attribution review)
+- `Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2` — authored 2026-08-15 from the Wcon 2171 manufacturer drawing (LCSC C920840 datasheet, 600dpi render): pitch 2.54, pad 1.02x1.90, 5.20 across outer pad edges, TYPE 2 phase (pin 1 tail up), contact-centreline NPTH dia 1.02 (smart-remote v2b: J6/J7 ESP32-S3-DevKitC socket. TYPE 2 selected because both stocked part numbers end -2. Butt-joining a 1x20+1x4 is IMPOSSIBLE (housing = 2.54N+0.20 gives 1.37mm end walls -> 0.20mm interference), so a single 1x20 is used and 2 DevKit pins overhang onto clearance holes.)
 - `Diode_SMD:D_SMA` — authored in-repo c90728c 2026-08-03 from the DO-214AC/SMA package convention
 - `EVP-ASAC1A:SW_EVP-ASAC1A` — authored in-repo cdc060f 2026-07-07 from the Panasonic EVP-ASAC1A datasheet
 - `INMP441:INMP441_I2S_2x3_P2.54mm` — authored in-repo 17f9a1e 2026-08-03 (corrected 7.62mm row spacing)
+- `MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm` — authored 2026-08-15 from the MEMSensing MSM261S4030H0R datasheet (Ver.1.0 DOC NO:DS-050), SMT Parameters land pattern: 8 pads 0.9x0.6, columns 1.0mm apart, rows 1.0mm pitch (smart-remote v2b: U3 microphone. TOP PORT so no PCB acoustic hole. NOTE pins 4 (CHIPEN) and 5 (L/R) are straps the module version used to handle: CHIPEN low = mic DISABLED.)
 - `Minerva_Fixture:DAM_MinWeb_2P` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
 - `Minerva_Fixture:FID_Circle_1mm` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
 - `Minerva_Fixture:LOGO_Owl_TestCoupon` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
@@ -45,4 +59,4 @@ Internal / TurnRock-authored parts. No third-party attribution obligation applie
 - `R_0805` — pcb_worker_seed synthesizer (baae81a 2026-07-18) (synthetic 0805 land — deliberately NOT the official KiCad R_0805 (comment 599 proof))
 - `TH_TestPoint` — pcb_worker_seed synthesizer (baae81a 2026-07-18)
 
-Total entries: 22
+Total entries: 36
