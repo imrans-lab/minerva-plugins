@@ -726,7 +726,14 @@ jobs:
           PACKDIR="dist/pcb-${VERSION}-${PLATFORM}"
           mkdir -p "$PACKDIR"
           cp build/pcb-plugin${{ matrix.ext }} "$PACKDIR/"
-          cp manifest.json "$PACKDIR/"
+          # Binary tier (pcb/manifest_binary_tier_test.go): the PACKED manifest
+          # must not carry the source-tier `setup` stanza. The repo manifest
+          # declares how to build this plugin from a checkout; the tarball
+          # ships that build's output, and a host predating Minerva's
+          # install-lane split would run the stanza against source that was
+          # never packaged. Strip it here — SHA256SUMS below covers the
+          # stripped file, so integrity still checks out.
+          python3 -c "import json,sys; m=json.load(open('manifest.json')); m.pop('setup',None); json.dump(m,open(sys.argv[1],'w'),indent=2)" "$PACKDIR/manifest.json"
           # ui/ — manifest declares godot_scene panels; without it the
           # installed plugin starts its backend but cannot open its panel
           # (same class of bug cad.yml documents).

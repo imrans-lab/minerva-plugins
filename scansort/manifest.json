@@ -439,5 +439,25 @@
     }
   },
   "autostart": false,
-  "auto_reload": true
+  "auto_reload": true,
+  "setup": {
+    "requires": [
+      {
+        "tool": "cargo",
+        "min": "1.70"
+      }
+    ],
+    "steps": [
+      {
+        "type": "cargo_build",
+        "manifest_dir": ".",
+        "artifact": "target/release/scansort-plugin"
+      },
+      {
+        "type": "copy",
+        "from": "target/release/scansort-plugin",
+        "to": "scansort-plugin"
+      }
+    ]
+  }
 }

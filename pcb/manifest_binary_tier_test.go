@@ -4,14 +4,22 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// Epoch GA-4 (docket 019f985bd921): the manifest is BINARY tier — defined by
-// the ABSENCE of a setup block (the host installs a prebuilt tarball; no Go
-// toolchain, no Python, no on-machine compile). These assertions pin the tier
-// and the packaging preconditions the release tarball depends on, so a
-// regression fails a Go test instead of a marketplace user's first install.
+// Epoch GA-4 (docket 019f985bd921): what a marketplace user installs is BINARY
+// tier — a prebuilt tarball; no Go toolchain, no Python, no on-machine compile.
+// The tier used to be pinned by the ABSENCE of a setup block in this file,
+// because the repo manifest was shipped verbatim in the tarball.
+//
+// That coupling is gone (2026-08-16). Minerva now records an install lane and
+// never builds a stanza on the marketplace lane, and pcb.yml's pack step
+// strips `setup` from the packed copy — so the repo manifest can declare how
+// to build pcb from a checkout (source tier, dev installs) while the tarball
+// stays binary tier. The guarantee is unchanged; only its enforcement point
+// moved, so this test moved with it: the stanza is now allowed HERE and
+// forbidden THERE, and the strip that separates them is itself asserted.
 func TestManifestIsBinaryTier(t *testing.T) {
 	raw, err := os.ReadFile("manifest.json")
 	if err != nil {
@@ -22,10 +30,25 @@ func TestManifestIsBinaryTier(t *testing.T) {
 		t.Fatalf("parse manifest.json: %v", err)
 	}
 
+	// A stanza here is only safe while the pack step removes it. If someone
+	// deletes the strip, the next release would carry a build recipe to hosts
+	// that have no source to run it against — fail here instead.
 	if _, ok := m["setup"]; ok {
-		t.Fatalf("manifest carries a setup block — that is the SOURCE tier; " +
-			"the binary tier ships prebuilt tarballs and must not ask the " +
-			"user's machine for go/python toolchains")
+		wf, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "pcb.yml"))
+		if err != nil {
+			t.Fatalf("manifest carries a setup block but pcb.yml is unreadable: %v", err)
+		}
+		if !strings.Contains(string(wf), `m.pop('setup',None)`) {
+			t.Fatalf("manifest carries a setup block (SOURCE tier) but pcb.yml's " +
+				"pack step no longer strips it — the release tarball would ship a " +
+				"build recipe to machines with no source and no toolchain")
+		}
+		// Compare against the command that WRITES the sums file (`> SHA256SUMS`),
+		// not the bare word — that also appears in the pack step's comments.
+		if strings.Index(string(wf), `m.pop('setup',None)`) > strings.Index(string(wf), "> SHA256SUMS") {
+			t.Fatalf("pcb.yml strips setup AFTER SHA256SUMS is computed — the " +
+				"checksum would not match the packed manifest")
+		}
 	}
 
 	// release_targets must agree with pcb.yml's package matrix and with

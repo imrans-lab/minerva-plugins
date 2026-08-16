@@ -307,5 +307,25 @@
     }
   },
   "autostart": false,
-  "auto_reload": false
+  "auto_reload": false,
+  "setup": {
+    "requires": [
+      {
+        "tool": "cargo",
+        "min": "1.70"
+      }
+    ],
+    "steps": [
+      {
+        "type": "cargo_build",
+        "manifest_dir": ".",
+        "artifact": "target/release/movie_gen-plugin"
+      },
+      {
+        "type": "copy",
+        "from": "target/release/movie_gen-plugin",
+        "to": "movie_gen-plugin"
+      }
+    ]
+  }
 }

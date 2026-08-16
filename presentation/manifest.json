@@ -66,5 +66,20 @@
   },
   "data_directory": "",
   "autostart": false,
-  "auto_reload": true
+  "auto_reload": true,
+  "setup": {
+    "requires": [
+      {
+        "tool": "go",
+        "min": "1.22"
+      }
+    ],
+    "steps": [
+      {
+        "type": "go_build",
+        "package": "./",
+        "output": "presentation-plugin"
+      }
+    ]
+  }
 }
