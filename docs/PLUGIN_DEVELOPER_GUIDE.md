@@ -11,6 +11,13 @@ unconfirmed it is called out explicitly and cross-referenced to
 > The marketplace registry is served from
 > `https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/registry.json`.
 
+> **Verified against:** Minerva `adcb58e3` (2026-08-17). Substrate added since the
+> previous revision: the `setup` build pipeline and install lanes ([§17](#17-build-from-source--the-setup-stanza--install-lanes)),
+> manifest-declared `settings` ([§3.4](#34-settings-fields)), eight host capabilities
+> (`host.settings.*`, `host.models.*`, `host.chat_providers.*`, `host.project.*` — [§4.2](#42-capability-reference)),
+> six panel lifecycle hooks ([§7.1](#71-panel-lifecycle-hooks-full-list)), and the
+> annotation substrate ([§18](#18-annotations)).
+
 ---
 
 ## 1. Overview & plugin anatomy
@@ -64,6 +71,12 @@ pattern that is not a Minerva-manifest plugin. The backend transport is
 **language-agnostic**: anything that can read stdin and write stdout and speak
 JSON-RPC 2.0 works (Go, Rust, Python, Node.js, …). The UI surface is selected per
 panel by `ui.panels[].kind` (`html` or `godot_scene`).
+
+> **Who compiles the binary?** The five options below describe what your plugin
+> *is*. Orthogonal to that is *who builds it*: ship a prebuilt binary per platform
+> (the marketplace lane), or declare a `setup` stanza and let Minerva build from
+> source at install time (the manifest lane). Both lanes read the same
+> `manifest.json`. See [§17](#17-build-from-source--the-setup-stanza--install-lanes).
 
 ### 2.1 Compiled native stdio binary (Go, Rust, any compiled language)
 
@@ -126,6 +139,12 @@ without a CWD). **Author ships:** `manifest.json` + `server.py`.
 > verify one at install. Your plugin will fail to start on a host that has no
 > compatible interpreter on PATH. If you need a guaranteed runtime, use the embedded
 > approach in §2.2 instead.
+>
+> **Middle ground:** a `setup` stanza with a `requires` entry (`{"tool": "python",
+> "min": "3.12"}`) turns "the user might not have a compatible interpreter" from a
+> confusing start-time failure into a specific, actionable install-time error with an
+> install hint — and a `python_venv` step can build the venv your `args` point at.
+> This only applies to the manifest lane ([§17](#17-build-from-source--the-setup-stanza--install-lanes)).
 
 **Shipped examples:** `hello_scene`, `notes_helper`, `test_paired_dsl`
 (`python3 server.py`), `test_stdio_server` (bare `python server.py`).
@@ -154,9 +173,11 @@ not a crash). Scripts load with cache-mode-ignore.
 
 A `godot_scene` plugin **still declares a backend** (the `backend` block is required);
 that backend may be a near-empty stub (`tools: []`). The panel root is a `Control`
-that may implement the lifecycle hooks `_on_panel_loaded(ctx)`, `_on_panel_unload()`,
-`_on_panel_save_request() -> Dictionary`, `_on_panel_load_request(doc)`,
-`receive(channel, payload)`, and `get_annotation_host()`.
+that may implement any of thirteen optional lifecycle hooks — `_on_panel_loaded(ctx)`,
+`_on_panel_unload()`, `_on_panel_save_request()`, `_on_panel_load_request(doc)`,
+`receive(channel, payload)`, `get_annotation_host()`, `handle_tool()` and six more.
+Every one is opt-in and probed with `has_method`; the full list with signatures is
+[§7.1](#71-panel-lifecycle-hooks-full-list).
 
 **`class_name` constraint:** any `class_name` you declare in panel scripts must match
 `^<CanonicalPrefix>_[A-Za-z0-9_]+$` and must not collide with core or another
@@ -257,7 +278,11 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `tools[].name` | R* | string | — | Must begin with `minerva_<id>_`. |
 | `tools[].description` | O | string | — | Pass-through, surfaced to `tools/list`. |
 | `tools[].input_schema` | O | object | — | JSON Schema, pass-through, **not validated**. |
+| `tools[].executor` | O | string | `"backend"` | `backend` \| `panel`. `panel` serves the tool from the live scene panel instead of the subprocess. See §7. |
 | `skills` | O | object[] | `[]` | Agent skills seeded into the docket on install. See §3.3. |
+| `settings` | O | object[] | `[]` | Declarative user-editable settings contributed to Minerva's Preferences window. See §3.4. |
+| `settings_title` | O | string | `""` | Preferences tab title for this plugin's settings. Defaults to the plugin's display `name`. |
+| `setup` | O | object | `{}` | `{requires[], steps[]}` build recipe. Run at install on the **manifest lane only**. Structurally validated — a bad stanza fails manifest load. See §17. |
 | `ui` | O | object | `{}` | `{panels[], ipc_messages[]}`. |
 | `ui.ipc_messages` | O | string[] | `[]` | Plugin-wide IPC allowlist. Every channel referenced anywhere (panel `ipc_channels`, `project_file`, `project_export`, and `capability:*` messages) MUST appear here. |
 | `ui.panels` | O | object[] | `[]` | String entries are **hard-rejected**. Each must be a typed Dictionary with a unique `name`. |
@@ -290,12 +315,14 @@ Legend: **R** = required, **O** = optional. "Strict→null" means a violation ma
 | `permissions.host_capabilities` | O | string[] | `[]` | **The capability grant list.** See §4 + §13. |
 | `permissions.network.mode` | O | string | `"none"` | `none`/`localhost`/`unrestricted` documented; **value not validated and not enforced** (see §13). |
 | `permissions.network.ports` | O | int[] | — | **Silently dropped** by the parser. Dead metadata. |
-| `permissions.filesystem.mode` | O | string | `"none"` | `none`/`scoped_paths`. Must be `scoped_paths` (with non-empty `paths`) if any `host.files.*` is declared. |
-| `permissions.filesystem.paths` | O | string[] | `[]` | Allowlisted roots (e.g. `user://plugins/data/<id>/`). Required non-empty when `host.files.*` declared. |
+| `permissions.filesystem.mode` | O | string | `"none"` | `none` \| `scoped_paths` \| **`unrestricted`**. Must be `scoped_paths` (with non-empty `paths`) **or** `unrestricted` if any `host.files.*` is declared. |
+| `permissions.filesystem.paths` | O | string[] | `[]` | Allowlisted roots (e.g. `user://plugins/data/<id>/`). Required non-empty when `host.files.*` is declared **with `scoped_paths`**; ignored under `unrestricted`. |
+| `release_targets` | O | string[] | — | **Not parsed by the host** — CI/registry metadata naming the platforms you publish tarballs for. See §14. |
 | `data_directory` | O | string | (overwritten) | Ignored from manifest (host overwrites with the plugin's own dir). |
 | `autostart` | O | bool | `false` | **Loader drift:** NOT read on manifest install; only honored after persist+reload (§10). |
 | `auto_reload` | O | bool | `false` | Same loader drift. When true, source edits trigger a debounced reload. |
 | `class_names` | — | — | — | **Not author-supplied.** Populated by the host at install (scanning panel scripts). |
+| `install_lane` | — | — | `"manifest"` | **Not author-supplied.** Recorded by the host at install (`manifest` \| `marketplace`) and persisted. See §17. |
 
 ### 3.3 `skills[]` fields
 
@@ -308,13 +335,62 @@ array of non-empty strings resolved against the host tool registry **at install*
 `minerva_create_plugin_editor`) that are not in the cad backend — see the open
 questions in the coverage ledger.
 
+### 3.4 `settings[]` fields
+
+A plugin contributes user-editable settings to Minerva's **Preferences** window by
+declaring them in the manifest. The host owns the widgets, the persistence, the type
+coercion and the validation — you declare the schema and read the values back.
+
+```json
+"settings_title": "PCB",
+"settings": [
+  {"key": "drc_profile", "type": "enum", "label": "DRC profile",
+   "options": ["jlc_2layer", "jlc_4layer"], "default": "jlc_2layer",
+   "help": "Fab capability floors used by the checker."},
+  {"key": "router_provider", "type": "provider", "label": "Router LLM"},
+  {"key": "router_model",    "type": "model",    "label": "Model",
+   "provider_key": "router_provider"}
+]
+```
+
+| Field | R/O | Notes |
+|---|---|---|
+| `key` | R | Non-empty and unique within the plugin (duplicates → `manifest_duplicate_setting_key`, install fails). |
+| `type` | R | One of `string`, `multiline`, `enum`, `bool`, `number`, `provider`, `model`. Anything else fails install. |
+| `label` | O | Widget label. |
+| `default` | O | Returned by `host.settings.get` until the user sets a value. |
+| `options` | R (enum) | Non-empty array; an `enum` without it fails install. Writes outside the list are rejected. |
+| `provider_key` | O (model) | For `type: "model"` — the `key` of the sibling `provider` field whose enabled models populate this dropdown. |
+| `help` | O | Help text under the widget. |
+
+- **Where values live:** `config_file.cfg`, section `[Plugin:<id>]`, key = your `key`.
+  The host coerces on write (`bool` accepts `"true"`/`1`; `number` accepts numeric
+  strings; `enum` is membership-checked) and returns the schema `default` when unset.
+- **Where they appear:** a Preferences tab named by `settings_title`, falling back to
+  the plugin's display `name`, falling back to its `id`.
+- **How you read them:** the `host.settings.get` / `host.settings.list` capabilities
+  ([§4.2](#42-capability-reference)) — scoped to your own plugin, no arg can select
+  another plugin's scope. **There is no `host.settings.set`**: settings are
+  user-owned, and a plugin cannot write its own configuration. Agents can read and
+  write them via the host tools `minerva_list_preferences` / `minerva_get_preference`
+  / `minerva_set_preference`.
+- `provider` and `model` values are stored as plain strings (a provider key and a
+  model name) and resolved against the live catalog at use time — pair them with
+  `host.models.list_providers` / `host.models.list_models` if your backend needs to
+  validate or enumerate.
+
 ---
 
 ## 4. Host APIs & capabilities a plugin can call
 
 A plugin reaches host functionality through the **capability broker**. Every
-capability is gated by `permissions.host_capabilities` (deny-by-default; capabilities
-are auto-granted at install **except** `host.permissions.grant_scope`). Two callers:
+capability is gated by `permissions.host_capabilities` (deny-by-default: a capability
+you do not declare is never dispatchable). **Install is the trust act** — every
+capability the manifest declares is granted at install, with no exceptions and no
+per-capability prompt; the user can revoke any of them afterward in the Plugin
+Manager. (Earlier revisions of this guide said `host.permissions.grant_scope` was held
+back from the auto-grant. It no longer is — the host's never-auto-grant list is
+deliberately empty.) Two callers:
 
 - **Backend** (any language): emit a JSON-RPC request
   `{"method":"minerva/capability","id":...,"params":{"capability":<name>,"args":{...}}}`
@@ -371,6 +447,14 @@ is available-but-unused.
 | `host.editors.open` | `path` (req) | `{tab_name, kind, plugin_id, panel_name, path, was_already_open}` | `host.editors.open` | presentation |
 | `host.providers.chat` | `messages` (req array of `{role, text\|content, images?}`); `model` XOR `model_spec`; `provider`/`max_tokens`/`temperature` | OpenAI-shape `{model, choices, usage, provider, cost_usd, free}` | `host.providers.chat` (+budget/key/opt-out) | scansort |
 | `host.core.session` | none | `{ws_url, token, client_id}` | `host.core.session` | gen3d, movie_gen |
+| `host.settings.get` | `key` (req) | `{key, value}` (schema default when unset) | `host.settings.get` | — |
+| `host.settings.list` | none | `{fields:[{key, type, label, default?, options?, help?, value}]}` | `host.settings.list` | — |
+| `host.models.list_providers` | none | `{providers:[…]}` — the user's **enabled** providers | `host.models.list_providers` | — |
+| `host.models.list_models` | `provider` (req) | `{provider, models:[…]}` — enabled models for that provider | `host.models.list_models` | — |
+| `host.chat_providers.register` | `entry_id`, `display_name`, `generate_tool`, `history_mode` (req); `timeout_sec`, `cancel_tool`, `metadata` (opt) | `{key, entry_id, display_name}` | `host.chat_providers.register` | — |
+| `host.chat_providers.unregister` | `entry_id` (req) | `{entry_id, removed}` | **the `…register` grant** — see the trap below | — |
+| `host.project.current` | none | `{path, dirty}` | `host.project.current` | — |
+| `host.project.open` | `path` (req, must exist and end `.minproj`); `discard_unsaved` (opt) | `{opened}` — means *accepted*, not *loaded* | `host.project.open` | — |
 | `host.dialogs.file_picker` | all opt: `title`, `initial_path`, `filters[]`, `mode` (`open`/`save`) | `{cancelled, path?}` | `host.dialogs.file_picker` | — |
 | `host.dialogs.directory_picker` | opt: `title`, `initial_path` | `{cancelled, path?}` | `host.dialogs.directory_picker` | — |
 | `host.permissions.grant_scope` | `path` (req, absolute, no `..`/null), `reason` | `{granted, already_granted, cancelled, path}` | `host.permissions.grant_scope` — **NEVER auto-granted** (privilege escalation) | — |
@@ -384,13 +468,70 @@ is available-but-unused.
 
 **`host.core.session` notes:** mints a **new, distinct Core session** (an independent re-login with the user's stored credentials) and returns `{ws_url, token, client_id}`. Use it when your plugin needs to talk to a Core service (media-gen, etc.) over its **own** WebSocket connection. Do **not** try to reuse Minerva's own session token to open a second connection — Core composes the connection identity as `user_id:::session_id`, so the same token collides ("Session ID collision"). A fresh login yields a fresh `session_id` (Core allows up to 10 concurrent sessions per user), so the plugin's connection is independent of Minerva's and of other plugins'. The minted session carries the user's `svc_allow` (service-level allowlist) — it is **not** scoped to specific topics, so treat the grant as "this plugin may act as the user on Core." Errors with `backend_error` when the host is not logged in / has no stored credentials. The reference consumers `gen3d` and `movie_gen` use it via the shared `minerva-media-client` crate (`shared/rust/`), which performs the Core register handshake + binary artifact relay.
 
+**`host.settings.*` notes:** the scope is fixed to your own plugin — there is no arg
+that selects another scope, and no `set` capability (settings are user-owned; see
+[§3.4](#34-settings-fields)). `get` on a key you did not declare is a
+`schema_validation_failed`, not a null.
+
+**`host.chat_providers.*` notes — a plugin can BE a chat provider.** Registering an
+entry makes it selectable in Minerva's chat provider chooser; when the user picks it,
+each turn dispatches to your `generate_tool` as a normal MCP tool call:
+
+```jsonc
+// args your generate_tool receives
+{"chat_id": "<owner history id>",       // stable per chat
+ "entry_id": "<the entry you registered>",  // which of your entries this turn is for
+ "text": "<newest user message>",
+ "messages": [ … ]}                      // ONLY when history_mode == "full"
+```
+
+Your reply must be a dict with a `kind` discriminator — the host maps it onto the
+chat bubble and rejects anything else:
+
+| `kind` | Fields read | Effect |
+|---|---|---|
+| `answer` | `text` | Normal assistant turn. |
+| `question` | `text`, `options[{label, keystroke}]` | Turn plus selectable options. |
+| `error` | `text` | Rendered as a chat error. |
+
+`prompt_tokens` / `completion_tokens` are copied through when present (else 0).
+`timeout_sec` defaults to **600**. If you declare a `cancel_tool`, it is called with
+`{chat_id}` when the user stops a turn; without one, cancel still returns promptly
+host-side and your late reply is discarded. Entries are keyed
+`plugin:<plugin_id>:<entry_id>`; re-registering the same pair updates in place. All
+entries are dropped when your plugin stops or crashes, so **register from your
+backend at startup**, not once at install.
+
+> **Trap — do NOT declare `host.chat_providers.unregister`.** It is dispatchable but
+> is deliberately *not* in the host's allowed-capability list: it is gated by the
+> `host.chat_providers.register` grant. A manifest that lists it fails install with
+> `unknown host_capability`. Declare `host.chat_providers.register` and call both ops.
+
+**`host.project.*` notes:** `open` refuses with error code `unsaved_changes` (plus
+`needs_save: true`) when the current project is dirty, unless you pass
+`discard_unsaved: true` — so opening can never silently discard the user's work.
+Success means the open was *accepted*: the load runs through the same signal the File
+menu uses and there is no synchronous "loaded" result to await. Poll
+`host.project.current` if you need to observe the switch.
+
 **`host.terminal.*` notes:** the four interactive capabilities (`list`/`read`/`write`/`wait`) observe and converse with open terminal tabs; they do not own terminal lifecycle (no create/close in v1). `host.terminal.write` defaults `raw=true` for this capability path because plugin SDKs send real control characters in JSON strings (e.g. a literal `\r` byte), and the MCP-side `c_unescape` step — which converts LLM-typed escape strings like `\\r` into real bytes — would corrupt them. Pass `raw=false` only if your plugin explicitly builds `\\r`-style escape sequences as strings. `host.terminal.wait` returns `bell_rung: true` when a standalone BEL arrived during the wait — useful as a fast-path turn signal for bell-capable CLI agents. **`bell_rung` is always `false` on Windows** (the ghostty-vt shim that provides the BEL counter is Unix/macOS-only). `shell_exited` and `shell_exit_code` appear in the result only when the shell exits during the wait. Error code: `terminal_tool_error` (inner tool failure), `schema_validation_failed` (unknown arg key). `host.terminal.exec` is a pre-existing separate capability for one-shot command execution with merged stdout+stderr output; it is unrelated to these four.
 
-**Filesystem path rules** (`host.files.*`): path must be absolute or `user://`,
-contain no `..` segments and no null bytes, and prefix-match (with trailing slash) one
-of `permissions.filesystem.paths`. 8 MiB read/write cap. **No symlink realpath
-resolution** (documented limitation; recursive delete re-validates every child against
-scope as a partial mitigation). Writes are **not** atomic.
+**Filesystem path rules** (`host.files.*`) — two modes, and you must pick one to use
+these capabilities at all:
+
+- **`scoped_paths`** (recommended): path must be absolute or `user://`, contain no
+  `..` segments and no null bytes, and prefix-match (with trailing slash) one of
+  `permissions.filesystem.paths`.
+- **`unrestricted`**: syntactic validation only (non-empty, no null bytes, no `..`) —
+  **no allowlist at all**. Any absolute path the agent supplies is read/writable. This
+  is deliberate parity with Minerva's core file tools (`minerva_disk_write`,
+  `minerva_doc_*`), which enforce no path policy either; install is the trust act.
+  Declare it only when your plugin genuinely operates on arbitrary user paths, and
+  expect an auditor to ask why.
+
+Both modes: 8 MiB read/write cap, **no symlink realpath resolution** (documented
+limitation; recursive delete re-validates every child against scope as a partial
+mitigation), and writes are **not** atomic.
 
 **`host.providers.chat` `model_spec` kinds:** `core_action`
 `{service_client_id, action_name}`, `dynamic` `{model_id >= 10000}`, `builtin`
@@ -521,6 +662,48 @@ A scene panel reaches host capabilities by emitting a `request` with channel
 `capability:<name>` (the broker validates it against `ui.ipc_messages`/policy and
 dispatches it just like the HTML path). Other declared channels route to your
 backend's tools.
+
+### 7.1 Panel lifecycle hooks (full list)
+
+Every hook is **optional** and probed with `has_method` on your panel's scene root
+before it is called — omitting one is never an error, it just selects the platform's
+default behavior. Declare them on the root `Control` script.
+
+| Hook | When the host calls it | Contract |
+|---|---|---|
+| `_on_panel_loaded(ctx: Dictionary)` | Once, after the panel mounts and **after** the broker is wired. Deferred to `ready` if the scene isn't ready yet. | `ctx` shape below. |
+| `_on_panel_unload()` | Panel/tab is closing. | Release timers, threads, file watches. |
+| `_on_panel_save_request() -> Dictionary` | Ctrl+S under `save_mode: "host_owned"`. | Return the document dict; the host serializes and writes the file. |
+| `_on_panel_load_request(document)` | Opening a bound file, and on `.minproj` restore. | Rebuild the scene from the document. |
+| `_on_panel_apply_sync(document) -> Dictionary` | An MCP write tool applied a document and wants the *result* of your per-apply work (e.g. a re-evaluate round-trip) in its reply. | **May `await`.** Return at least `{ok: bool}`; extra fields pass through verbatim. Not implementing it is normal — the host falls back to `_on_panel_load_request` + buffer-only behavior. |
+| `receive(channel: String, payload)` | Backend→panel push. | Channel is the **raw event name** for events and the literal `"state"` for state (see below). |
+| `handle_tool(tool_name, args) -> Dictionary` | An `executor: "panel"` tool targets this panel. | See the panel-tools section below. Return `{}` for names you don't own. |
+| `on_progress(request_id, phase, fraction)` | Backend progress notification. **Implicit channel** — not declared in `ipc_channels`/`ui.ipc_messages`. | See the caveat in §8. |
+| `_on_hot_reload()` | After the host hot-reloads your `.gd`/`.tscn` sources (`auto_reload`). | Re-establish anything the reload dropped. Manifest edits are *not* covered — see the reinstall gotcha below. |
+| `_on_panel_create_note_request(ctx) -> Dictionary` | User creates a note from your panel. | Return a note descriptor. Not implementing it falls back to screenshot-to-image-note. |
+| `_on_panel_restore_from_note(payload) -> bool` | A `plugin_data` note created by the hook above is reopened. | Inverse of `_on_panel_create_note_request`. Return `false` for an unrecognised/old payload — the host toasts and leaves the panel blank. Without the hook the note degrades to preview-image-only. |
+| `_on_panel_render_for_llm(ctx) -> Array` | Your panel's content is being injected into a chat. | Return a canonical multimodal payload: an Array of `{"type":"text","text":String}` and/or `{"type":"image","image":Image,"alt":String}` parts. Return `[]` / omit the hook to fall back to the note's preview image. |
+| `_on_panel_inject_toggle_changed(enabled: bool)` | User toggles chat injection for this tab. | Fire-and-forget; the host's bookkeeping happens regardless. |
+| `get_annotation_host() -> RefCounted` | The editor is mounting the shared annotation toolbar/dock. | Return your `AnnotationHost` subclass — see [§18](#18-annotations). |
+
+**The `ctx` Dictionary** passed to `_on_panel_loaded` (and to the create-note /
+render-for-llm hooks):
+
+```gdscript
+{
+  "plugin_id":         String,   # your id
+  "panel_name":        String,   # the manifest panel name
+  "data_directory":    String,   # your install dir — resolve your own paths from this
+  "broker":            Object,   # PluginScenePanelBroker (may be null in headless tests)
+  "file_path":         String,   # bound file, or "" when unbacked
+  "associated_object": Variant,  # the editor's bound object (a String path when file-backed)
+  "editor":            Object,   # the host Editor wrapper
+  "host_api_version":  "1",
+}
+```
+
+`data_directory` is the supported way to find your own files — the process has no
+per-plugin CWD and no per-plugin env var (§10).
 
 **Event/state delivery to scene panels (important shape difference):** for an event,
 the host calls `panel.receive(<event_name>, payload)` — the channel is the **raw
@@ -701,6 +884,15 @@ omit it (only `obs_controller` declares one). **`events[]` shape is unvalidated*
 `{name, payload_schema}` and `{name, description}` both parse; there is no canonical
 event-declaration schema.
 
+> **Progress notifications are not wired yet.** The scene-panel broker implements the
+> delivery half (`push_progress` → your panel's `on_progress(request_id, phase,
+> fraction)`, an implicit channel needing no manifest declaration), but **nothing
+> currently routes a backend `{"method":"progress","params":{…}}` notification into
+> it** — the host-side integration carries an open TODO. Implementing `on_progress`
+> today is harmless and future-proof; do not design a feature that depends on it
+> firing. For progress a user must see now, push it as plugin **state** (§8) or as a
+> `host.notify` toast.
+
 ### 8.1 PLUGIN_EVENT trigger — waking a Minerva agent chat from a plugin event
 
 A `PLUGIN_EVENT` trigger (trigger_type=4) lets a plugin wake a Minerva agent chat
@@ -774,8 +966,9 @@ logs** (captured and shown as rate-limited toasts).
 
 **Lifecycle (no separate "enable" verb):**
 - **Install** is the trust act — parse + validate manifest, create the plugin data
-  dir, **auto-grant every declared `host_capabilities` except
-  `host.permissions.grant_scope`**, seed skills. Does not start a process.
+  dir, **auto-grant every declared `host_capabilities`** (no exceptions — §4), seed
+  skills. Does not start a process. On the manifest lane, a `setup` stanza also
+  builds here (`BUILDING` → `BUILD_FAILED` / `NEEDS_BINARY` on failure — §17).
 - **Start** → `STARTING` → (`RUNNING` | `ERROR`).
 - **Stop** is idempotent; **Restart** = stop + brief yield + start.
 - **Uninstall/remove** stops the plugin, unseeds plugin-shipped skills, and optionally
@@ -787,7 +980,16 @@ unexpected exits. **3+ crashes within 60 s → `CRASH_LOOP`** (no auto-restart u
 reset).
 
 **Runtime state is transient** — it is reconstructed as `INSTALLED` on every restart;
-only `autostart`/`auto_reload`/`class_names` are persisted.
+only `autostart`/`auto_reload`/`class_names`/`install_lane` and the setup-pipeline
+states below are persisted.
+
+**The nine states.** The six lifecycle states above (`INSTALLED`, `STARTING`,
+`RUNNING`, `STOPPED`, `ERROR`, `CRASH_LOOP`) are joined by three setup-pipeline states
+that only the manifest lane can reach: `BUILDING` (pipeline running), `BUILD_FAILED`
+(a step failed — terminal until Rebuild) and `NEEDS_BINARY` (preflight failed, or no
+runnable artifact for this platform). These three persist across restart, so a
+half-installed plugin reports honestly on the next launch, and both carry a structured
+failure envelope readable with `minerva_plugin_build_status`. See §17.
 
 ---
 
@@ -845,9 +1047,23 @@ is then launched with an isolated env (`PYTHONHOME`/`PYTHONPATH` → the bundle;
 host `PYTHON*`/`VIRTUAL_ENV`/`CONDA_*` not forwarded). Old runtime versions are not
 GC'd (out of scope for v1).
 
-**Host-set env:** Minerva sets `MINERVA_PLUGIN_DATA_DIR` at spawn to give each plugin a
-private extraction/data dir; `MINERVA_WORKER_READY_TIMEOUT_SEC` overrides the 60 s
-cold-start timeout.
+> **Correction (2026-08-17): Minerva does NOT set `MINERVA_PLUGIN_DATA_DIR`.** A
+> previous revision of this guide claimed the host injects it at spawn. It does not —
+> the host sets **no** environment variables for a plugin process (consistent with
+> §9/§10: `SubProcess.start()` takes neither an env nor a cwd parameter). The only
+> reader of that variable in the tree is a test helper. **Derive your data directory
+> from `argv[0]`**, or — for a scene panel — from `ctx.data_directory` (§7.1). If your
+> own launcher exports `MINERVA_PLUGIN_DATA_DIR` for its child worker, that is your
+> convention, not a host guarantee.
+>
+> In practice this is already handled for Go plugins: `shared/runtime.DataDir(id)`
+> treats the env var as an *optional override* and otherwise resolves a per-OS user
+> data dir (`~/.local/share/Minerva/plugins/<id>`, `~/Library/Application
+> Support/Minerva/plugins/<id>`, `%APPDATA%/Minerva/plugins/<id>`). Because the
+> override is never set in production, **tier 2 is the path your plugin actually
+> uses** — note that it is a private data dir, *not* your install directory.
+> `MINERVA_WORKER_READY_TIMEOUT_SEC` is likewise read by our own `shared/bridge`
+> worker helper (and set by CI), not by the host — it is a plugin-side convention.
 
 ---
 
@@ -913,23 +1129,31 @@ annotation toolbar. In `cad`, edge annotations are a **separate live channel**
 (`minerva_cad_list_user_labels` / `minerva_cad_annotate_edges`) tied to the B-Rep edge
 registry and **not** persisted in the `.mcad` document.
 
+Annotations are now a full platform substrate with its own kind/anchor registries,
+schema, trust boundary and workbench dock — how to *host* them from your panel is
+[§18](#18-annotations); what you see here is only how they sit in document state.
+
 ---
 
 ## 13. Permissions & security model
 
-- **Deny-by-default.** Every capability must be declared in
-  `permissions.host_capabilities` and is then auto-granted at install — **except**
-  `host.permissions.grant_scope`, which is never auto-granted (privilege escalation,
-  prompts the user).
+- **Deny-by-default, but install is the trust act.** Every capability must be declared
+  in `permissions.host_capabilities`; every declared capability is then auto-granted at
+  install, **including `host.permissions.grant_scope`** — the host's never-auto-grant
+  list is deliberately empty, on the reasoning that the user already made the trust
+  decision by installing. The user can revoke individual capabilities afterward. The
+  practical consequence for you: an over-declared manifest is not "harmless because the
+  user would be prompted anyway" — it is granted. Declare only what you use.
 - **Capability matching is exact**, with two namespace exceptions:
   `mcp.proxy:<tool>` (supports `mcp.proxy:*` and prefix `mcp.proxy:<x>*` wildcards) and
   `secrets:<op>:<handle>`.
 - **Secrets are namespaced** per plugin (`plugin/<id>/<handle>` internally) — you
   cannot read another plugin's secrets. Secrets are never written to on-disk config;
   only the panel reads/writes them via the `secrets:*` capabilities.
-- **Filesystem** requires `permissions.filesystem.mode == "scoped_paths"` with a
-  non-empty `paths[]` whenever any `host.files.*` is declared. Path rules in §4. No
-  symlink realpath resolution.
+- **Filesystem** requires `permissions.filesystem.mode` to be `scoped_paths` (with a
+  non-empty `paths[]`) **or** `unrestricted` whenever any `host.files.*` is declared.
+  `unrestricted` disables the allowlist entirely — syntactic checks only. Path rules
+  in §4. No symlink realpath resolution in either mode.
 - **Network mode is documentary only.** `permissions.network.mode`
   (`none`/`localhost`/`unrestricted`) is **not validated and not enforced** — there is
   no egress-gating layer. A plugin with `mode: "none"` can still open arbitrary sockets
@@ -942,13 +1166,18 @@ registry and **not** persisted in the `.mcad` document.
 ### ⚠ The local MCP HTTP server (`localhost:9315`) is unauthenticated
 
 `minerva.call()` in the injected bridge POSTs directly to `http://localhost:9315` —
-the Minerva MCP HTTP server. That server **binds all interfaces, has no
-Authorization/token check, and has no plugin scoping** (agent identity is a TODO).
-Consequence: any HTML panel — and anything else on the host or LAN that can reach the
-port — can call **every** MCP tool, bypassing the per-message `ui.ipc_messages`
-allowlist that gates `pluginIPC()`. Treat `minerva.call()` as an **unscoped, unauthenticated**
-channel and design your panel's trust assumptions accordingly. This is a confirmed gap
-(see the coverage ledger), not a hardened boundary.
+the Minerva MCP HTTP server. That server has **no Authorization/token check and no
+plugin scoping** (agent identity is a TODO). Consequence: any HTML panel — and any
+other process on the same machine — can call **every** MCP tool, bypassing the
+per-message `ui.ipc_messages` allowlist that gates `pluginIPC()`. Treat
+`minerva.call()` as an **unscoped, unauthenticated** channel and design your panel's
+trust assumptions accordingly.
+
+**Update (2026-08-17): the LAN half of this is fixed.** The server now binds the IPv4
+loopback (`127.0.0.1`) rather than all interfaces, so the OS rejects non-local
+connections at the socket layer. Earlier revisions of this guide said it "binds all
+interfaces" — that is no longer true. The *unauthenticated and unscoped* half stands:
+same-host reach is still full-tool reach.
 
 ---
 
@@ -966,6 +1195,14 @@ Generated deterministically by `scripts/regen_registry.py` (sorted by `id`); a C
 committed artifact. `version` is derived from the git tag; **`manifest_version` (from
 `manifest.json`) drives the tarball filename**.
 
+**`release_targets`** (manifest, top-level) lists the platform triples you publish
+tarballs for — e.g. `["linux-x86_64", "macos-universal", "windows-x86_64"]`. All ten
+shipped plugins declare it. It is **repo tooling, not host contract**: Minerva's
+manifest parser ignores the field entirely (it is neither validated nor stored), so it
+can never fail an install; it exists so CI and the registry generator know which
+`downloads` keys to expect. Keep it truthful anyway — a target you list but never
+build produces a registry entry with no artifact behind it.
+
 ### Tag / tarball / SHA256 conventions
 
 - **Release tag:** `<id>-v<MAJOR>.<MINOR>.<PATCH>` (e.g. `presentation-v0.0.3`).
@@ -974,9 +1211,11 @@ committed artifact. `version` is derived from the git tag; **`manifest_version` 
 - **Tarball filename:** `<id>-<manifest.version>-<target>.tar.gz`,
   `target ∈ {linux-x86_64, linux-arm64, macos-universal, windows-x86_64}`.
 - **Tarball contents (files at archive ROOT, not nested):** the plugin binary
-  **matching `backend.entrypoint`**, `manifest.json`, the entire `ui/` directory
-  (every `.gd` in `scripts[]` — omit it and the panel fails with "Whitelisted script
-  not found"), and a `SHA256SUMS` covering every other file.
+  **matching `backend.entrypoint`**, `manifest.json` (**with any `setup` stanza
+  stripped** — see §17), the entire `ui/` directory (every `.gd` in `scripts[]` — omit
+  it and the panel fails with "Whitelisted script not found"), any data your plugin is
+  fail-closed without (e.g. `pcb` ships its `library/`), and a `SHA256SUMS` covering
+  every other file.
 - **`SHA256SUMS`** is required at install (`<64hex>  <relative-path>`). Missing it is a
   hard failure. **Integrity only — no signing/GPG/notarization.** The sidecar lives
   inside the same tarball it describes, so it guards against transit corruption, not a
@@ -1008,7 +1247,8 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
 3. **`save_mode: "plugin_owned"` is unimplemented.** Ctrl+S logs a warning and writes
    nothing. Use `host_owned` or `none`.
 4. **`localhost:9315` (and thus `minerva.call()`) is unauthenticated and unscoped**
-   (§13). Binds all interfaces; no token; reaches every MCP tool.
+   (§13). No token; reaches every MCP tool. It now binds loopback only, so the
+   exposure is same-host rather than LAN-wide.
 5. **`network.mode` is unenforced and `network.ports` is dropped.** No egress gating
    anywhere — do not rely on the network permission to constrain your plugin.
 6. **Interpreter-script plugins have an unshipped, unverified PATH dependency**
@@ -1030,10 +1270,11 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
     `ui/<name>.html` or `ui/panel.html`.
 14. **Scene-panel event channel is the raw event name**, not `"event"` (state is the
     literal `"state"`). Match your `receive()` switch accordingly (§7).
-15. **Least privilege:** declare only the capabilities you actually use. `scansort`
-    over-declares 14 (uses 2); `cad` under-declares (emits `host.notify` with an empty
-    list — it works only because the notify *notification* path is ungated). Auditors
-    will flag both.
+15. **Least privilege — and there is no second gate.** Declare only the capabilities
+    you actually use: **everything you declare is granted at install**, including
+    `host.permissions.grant_scope` (§4, §13). `scansort` over-declares 14 (uses 2);
+    `cad` under-declares (emits `host.notify` with an empty list — it works only
+    because the notify *notification* path is ungated). Auditors will flag both.
 16. **`host.terminal.write` defaults `raw=true` for the capability path** — unlike the
     MCP tool (`minerva_terminal_write`) which defaults `raw=false`. Reason: plugin SDKs
     send real control bytes in JSON; the `c_unescape` step that converts LLM-typed `\\r`
@@ -1048,6 +1289,23 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
     A paused trigger pointing at a plain chat re-arms only via `minerva_update_trigger`
     (toggle `enabled`). This is acceptable for the primary use-case (MESSAGE_EXISTING
     into an agent chat).
+19. **Never declare `host.chat_providers.unregister`** — it is dispatchable but not in
+    the host's allowed list (it rides the `…register` grant). Declaring it fails
+    install with `unknown host_capability` (§4.2).
+20. **`MINERVA_PLUGIN_DATA_DIR` is not set by the host** (§11). No env var is. Resolve
+    your own paths from `argv[0]`, or `ctx.data_directory` in a scene panel.
+21. **A `setup` stanza is inert on the marketplace lane** (§17). The same
+    `manifest.json` ships in the release tarball, where the source it would build was
+    never packaged — so a missing binary there is `NEEDS_BINARY`
+    (`plugin_binary_missing`), repaired by reinstalling, not by rebuilding.
+22. **`exec` setup steps fail closed when nobody can approve them.** An install driven
+    by an agent/CI with no interactive approver **denies** every `exec` step rather
+    than running it. Prefer the typed step types (`go_build`/`cargo_build`/
+    `python_venv`/`copy`); keep `exec` for genuinely last-resort work (§17).
+23. **Progress notifications are not routed yet** (§8). `on_progress` is safe to
+    implement but nothing fires it today.
+24. **Panel-tool `input_schema` must require `editor_name`** (§7) — and manifest edits
+    need a reinstall, not a hot reload.
 
 ---
 
@@ -1099,6 +1357,191 @@ For a panel that drives a Go backend and reads a secret, follow `obs_controller`
 For a native scene panel that owns a document, follow `presentation` (panel-canonical,
 `host_owned_save`, `host.documents.patch_state` with `json_patch`) or `cad`
 (`paired_dsl`, buffer-canonical).
+
+---
+
+## 17. Build-from-source — the `setup` stanza & install lanes
+
+A plugin with a compiled backend has two ways to get a runnable binary onto a user's
+machine. Both read the **same `manifest.json`**; the host records which one produced
+the install as the plugin's **lane**.
+
+| | **manifest lane** | **marketplace lane** |
+|---|---|---|
+| How it installs | Side-load / dev install pointing at a `manifest.json` in a source checkout | SHA-pinned release tarball from the registry |
+| Source present? | Yes, by definition | No — only what you packaged |
+| `setup` stanza | **Built on every install/reinstall** | **Inert** — logged once, never run |
+| Entrypoint artifact | Verified by the pipeline | Verified at install |
+| Artifact missing | `BUILD_FAILED` (`setup_step_failed`) | `NEEDS_BINARY` (`plugin_binary_missing`) |
+| Repair | `rebuild()` | reinstall/update — rebuild refuses with `rebuild_unavailable_marketplace` |
+
+You do not choose the lane; the installer does (only the marketplace client sets the
+marketplace lane). **Declaring a `setup` stanza is safe for a plugin that also
+publishes release tarballs** — that is exactly what the lane split is for.
+`minerva_plugin_build_status` reports `install_lane` and `rebuildable` so an agent
+picks the right repair.
+
+> **Repo rule: strip `setup` from the packed manifest.** Current Minerva ignores the
+> stanza on the marketplace lane, but a host *predating* the install-lane split would
+> try to compile source the tarball never carried. Every release workflow in this repo
+> therefore removes the key when packing — and does so **before** `SHA256SUMS` is
+> computed, so integrity still checks out over the stripped file:
+>
+> ```bash
+> python3 -c "import json,sys; m=json.load(open('manifest.json')); m.pop('setup',None); json.dump(m,open(sys.argv[1],'w'),indent=2)" "$PACKDIR/manifest.json"
+> ```
+>
+> Copy that step into any workflow that ships a plugin declaring a stanza. `pcb` pins
+> the guarantee with a test (`manifest_binary_tier_test.go`) that fails if the pack
+> step reverts to a plain `cp` or if the strip stops preceding the checksum.
+
+**Who declares one today (8 of 10 shipped plugins):** `go_build` — `nametag-maker`,
+`pcb`, `presentation`; `cargo_build` + `copy` — `3d-gen`, `agent-relay`, `drive`,
+`movie-gen`, `scansort`.
+
+**Who deliberately does not, and why it matters to you:** `cad` and `codetools` ship a
+per-platform embedded Python runtime bundle built by a network-fetching script that
+lives *outside* the plugin directory — `go build ./` on a clean checkout fails for
+both. The v1 step vocabulary cannot express that honestly, and a `go_build`-only
+stanza would advertise a producer that doesn't actually produce. **If your real build
+needs a step the vocabulary can't express, ship no stanza rather than a partial one**
+— a stanza is a promise that a clean checkout builds.
+
+### 17.1 The stanza
+
+```json
+"setup": {
+  "requires": [
+    {"tool": "go",     "min": "1.22"},
+    {"tool": "python", "min": "3.12"}
+  ],
+  "steps": [
+    {"type": "go_build",    "package": "./",  "output": "pcb-plugin", "timeout_s": 600},
+    {"type": "python_venv", "dir": "worker",  "install": "editable"},
+    {"type": "copy",        "from": "assets/policy.json", "to": "bin/policy.json"},
+    {"type": "exec",        "argv": ["./scripts/postinstall.sh"], "artifact": "bin/generated.dat"}
+  ]
+}
+```
+
+**Step vocabulary (v1 — closed):**
+
+| `type` | Required | Optional | Artifact verified after the step |
+|---|---|---|---|
+| `go_build` | `package`, `output` | `timeout_s` | `output` |
+| `cargo_build` | `manifest_dir`, `artifact` | `profile` (default `release`), `timeout_s` | `artifact` |
+| `python_venv` | `dir`, `install` (`"editable"` \| `"requirements"`) | `requirements_file` (default `requirements.txt`), `timeout_s` | `<dir>/.venv` marker (`pyvenv.cfg`) |
+| `copy` | `from`, `to` | `timeout_s` | `to` |
+| `exec` | `argv` (non-empty string array) | `artifact`, `timeout_s` | only `artifact`, if declared |
+
+Any step may add `artifact` to have its existence checked afterwards. `timeout_s`
+defaults to **300** per step. The vocabulary is deliberately closed — the litmus test
+for adding to it is *"could two machines with the same checkout and the same tool
+versions disagree about what to execute?"*
+
+**Rules you must design around:**
+
+- **All paths are relative to your plugin directory.** Absolute paths and any `..`
+  segment are validation errors (`setup_path_escape`), and manifest load fails.
+- **No environment-variable expansion, anywhere.** `%APPDATA%` / `$HOME` are literal
+  characters in a setup path, never substituted.
+- **Steps are cwd-independent.** Godot cannot set a child working directory, so the
+  runner absolutizes paths at argv-build time (`go build -C <plugin_dir>`, an absolute
+  `--manifest-path` for cargo, absolute paths for `python_venv`/`copy`). **`exec` gets
+  no cwd guarantee**: an `argv[0]` starting with `./` resolves against the plugin dir,
+  everything after it is passed verbatim. An exec'd program that needs the plugin dir
+  must derive it from `argv[0]` or take it as an explicit argument. Never wrap argv in
+  a shell to fake a cwd — there is no shell; argv goes straight to the process.
+- **Always-build.** The pipeline runs on *every* manifest install/reinstall; your
+  toolchain's own incremental build is the cache. There is no host-level source-hash
+  skip.
+- **`exec` requires explicit user approval** at install; its argv is shown verbatim.
+  With no interactive approver (agent-driven or CI install) it is **denied** —
+  fail-closed — and the build ends with `detail: exec_denied`. Prefer the typed steps.
+
+**Validation error codes** (all fail manifest load, before anything executes):
+`setup_unknown_step_type`, `setup_step_missing_field`, `setup_path_escape`,
+`setup_bad_requires`, `setup_empty_argv`.
+
+### 17.2 `requires` and toolchain preflight
+
+Each entry is `{"tool": <registry name>, "min": <semver-ish>}`. The v1 registry knows
+**`go`, `cargo`, `python`, `node`, `bun`, `zig`, `scons`**; anything else is not
+resolvable. Preflight resolves each tool as: persisted user override → well-known
+install dirs → `PATH`. The well-known tier is mandatory because a GUI-launched Godot
+does not inherit your shell's `PATH` — *do not assume a tool on your terminal `PATH`
+is visible to Minerva.*
+
+A candidate is **executed** to be accepted: the probe runs the tool's version argv with
+a 5 s timeout and requires exit 0 plus a parseable version. Presence on disk is never
+sufficiency; a hang or garbage output is a failure. Windows Store shims
+(`*/Microsoft/WindowsApps/*`) are rejected *before* execution. Failures land the plugin
+in `NEEDS_BINARY` with a per-requirement envelope:
+
+```json
+{"error": "toolchain_missing" | "toolchain_too_old" | "toolchain_shim_rejected" | "toolchain_probe_failed",
+ "tool": "go", "found_path": "…", "found_version": "1.19", "required_min": "1.22",
+ "install_hint": "https://go.dev/dl"}
+```
+
+### 17.3 When a build fails
+
+`BUILD_FAILED` carries:
+
+```json
+{"error": "setup_step_failed", "step_type": "go_build", "step_index": 1,
+ "resolved_argv": ["/usr/local/go/bin/go", "build", "-C", "/…/pcb", "-o", "pcb-plugin", "./"],
+ "exit_code": 2, "stderr_tail": "<= 2KB", "artifact_expected": "pcb-plugin"}
+```
+
+`artifact_expected` present **with `exit_code: 0`** means the step succeeded but did
+not produce what it promised — that is a manifest bug, not a build error. A mismatch
+between your declared `backend.entrypoint` and what the steps actually produced
+reuses the same envelope with `step_type: "entrypoint_check"`.
+
+### 17.4 Tools for authors
+
+- **`minerva_plugin_setup_dry_run`** — renders the exact argv each step *would* run,
+  without executing anything, probing anything, or touching the filesystem. Takes an
+  installed `id` or a `manifest_path`. Tool names appear unresolved (`go`, not an
+  absolute path) precisely because no probe runs. Use it to check a stanza before
+  shipping it.
+- **`minerva_plugin_build_status`** — state + live `{step_index, step_count,
+  step_type}` while building, the full failure envelope, the step log of the most
+  recent build, and `install_lane` / `rebuildable`. Poll it after
+  `minerva_plugin_install` returns `{building: true}`.
+
+---
+
+## 18. Annotations
+
+Minerva ships an **annotation substrate**: a shared toolbar, overlay, workbench dock
+and JSON schema that any editor — core or plugin — can host. A plugin panel opts in by
+returning an `AnnotationHost` subclass from `get_annotation_host()` ([§7.1](#71-panel-lifecycle-hooks-full-list)).
+
+The split: the substrate owns the host protocol, the kind/anchor registries, schema
+validation, the overlay Control, the trust state machine and the apply/dry-run
+wrapper. Your plugin owns concrete `AnnotationKind` subclasses, anchor resolvers,
+authoring tools and body views — the substrate never learns what a "PCB net" or a "CAD
+edge" is; that stays behind opaque payloads and your resolvers.
+
+Two rules worth knowing before you start:
+
+- **Namespace.** Plugin kinds are `<plugin>_<kind>`; the `2d_*` prefix is reserved for
+  core, and registering into it is rejected.
+- **Trust.** Every plugin contribution (renderers, resolvers, apply tools) runs behind
+  `AnnotationTrustManager`, so a misbehaving plugin auto-suspends instead of taking the
+  editor down with it.
+
+The full adoption guide — base-class signatures, kind registration, custom anchors,
+body views, per-kind actions, authoring tools, canvas opt-out, the trust boundary and
+the off-tree-plugin gotchas — is a companion document in this repo:
+**[`ANNOTATION_SUBSTRATE_ADOPTION.md`](./ANNOTATION_SUBSTRATE_ADOPTION.md)**. It is
+self-contained; you do not need a Minerva checkout to follow it.
+
+> **Off-tree reminder** (it bites here more than anywhere else): installed plugin
+> scripts **cannot use `class_name`** for cross-script type references. Reference your
+> kind/tool scripts by `preload` and path — see [§2.4](#24-native-gdscript--godot-scene-panel-in-process-ui).
 
 ---
 

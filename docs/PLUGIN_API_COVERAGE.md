@@ -10,6 +10,21 @@ Column meaning:
 - **in_schema** — recognized by the manifest parser / capability allowlist.
 - **used_by** — shipped plugins that actually exercise it (empty = available-but-unused).
 
+> **Revision state.** The original audit was taken against Minerva as of 2026-06-13.
+> This revision (2026-08-17, Minerva `adcb58e3`) re-verified the *claims* and folded in
+> the substrate added since — the `setup` build pipeline and install lanes, manifest
+> `settings`, eight host capabilities (`host.settings.*`, `host.models.*`,
+> `host.chat_providers.*`, `host.project.*`), six panel lifecycle hooks, three
+> setup-pipeline states, and the annotation substrate. Rows and findings added or
+> corrected in this pass are marked **(2026-08)**.
+>
+> **`source_ref` line numbers are indicative, not authoritative.** They were captured
+> against the June tree; `CapabilityBroker.gd` alone has since grown past 4000 lines, so
+> most numbers now point a few hundred lines off. The **symbol and file names are
+> correct** — grep for the symbol, don't jump to the line. New rows in this pass cite
+> function names instead of line numbers, which is the durable form; existing rows are
+> left as-is rather than re-derived into numbers that would be stale again next epoch.
+
 ---
 
 ## 1. Coverage matrix
@@ -155,6 +170,36 @@ Column meaning:
 | minerva.getSpreadsheet/updateSpreadsheet/createNote | ipc | yes | no | — (host tools confirmed) | minerva_bridge.gd:43-56; cef_bridge.gd:49-56; MCPSpreadsheetTools.gd, MCPNotesTools.gd |
 | localhost:9315 MCP HTTP server (no auth) | runtime | yes | no | obs_controller (via minerva.call) | MinervaMCPHttpServer.gd:51-68,320 |
 | elgato Stream Deck companion (separate substrate) | language | no (external) | no | elgato | plugins/elgato/manifest.json:1-26; src/index.ts:33-34,51 |
+| host.settings.get **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_get`; PluginSettingsStore.gd |
+| host.settings.list **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_settings_list` |
+| host.models.list_providers **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_models_list_providers` |
+| host.models.list_models **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_models_list_models` |
+| host.chat_providers.register **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_chat_providers_register`; PluginChatProviderRegistry.gd |
+| host.chat_providers.unregister **(2026-08)** | host_api | yes | **no (rides the register grant — declaring it fails install)** | — | CapabilityBroker `_handle_host_chat_providers_unregister`; PluginDefinition `ALLOWED_HOST_CAPABILITIES` |
+| host.project.current **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_project_current` |
+| host.project.open **(2026-08)** | host_api | yes | yes | — | CapabilityBroker `_handle_host_project_open` |
+| PluginProvider (plugin-as-chat-provider) **(2026-08)** | runtime | yes | no | — | Providers/PluginProvider.gd `generate_content`, `_apply_result_to_bot` |
+| settings[] **(2026-08)** | manifest_field | yes | yes | — | PluginDefinition `SETTING_TYPES`, `validate()`; PluginSettingsStore.gd |
+| settings_title **(2026-08)** | manifest_field | yes | yes | — | PluginSettingsStore `scope_tab` |
+| setup{} (requires/steps) **(2026-08)** | manifest_field | yes | yes | 8 of 10: nametag-maker, pcb, presentation (go_build); 3d-gen, agent-relay, drive, movie-gen, scansort (cargo_build+copy). cad + codetools abstain — embedded-runtime build not expressible in v1 vocabulary | Setup/SetupSchema.gd, SetupPipeline.gd, SetupExecutors.gd |
+| `setup` stripped from packed manifest **(2026-08)** | registry | n/a (repo-side) | n/a | every release workflow | .github/workflows/*.yml pack step; pcb/manifest_binary_tier_test.go |
+| setup toolchain registry + preflight **(2026-08)** | runtime | yes | n/a | pcb | Setup/ToolchainRegistry.gd `TOOLS`, ToolchainProbe.gd |
+| install_lane (manifest \| marketplace) **(2026-08)** | manifest_field | yes | no (host-recorded) | all | PluginDefinition `LANE_MANIFEST`/`LANE_MARKETPLACE`, `resolve_install_lane` |
+| release_targets **(2026-08)** | manifest_field | **no (repo/CI only)** | **no (parser ignores)** | all 10 | */manifest.json; scripts/regen_registry.py |
+| tools[].executor: "panel" **(2026-08)** | manifest_field | yes | yes | pcb (76 of 88), cad | PluginToolRegistry; PluginDefinition `_from_dict_internal` |
+| S_BUILDING / S_BUILD_FAILED / S_NEEDS_BINARY **(2026-08)** | state | yes | no | — | PluginManager.gd `S_BUILDING`…`S_NEEDS_BINARY` (**not** members of `PluginDefinition.State`) |
+| minerva_plugin_build_status **(2026-08)** | host_tool | yes | n/a | — | PluginMCPTools.gd |
+| minerva_plugin_setup_dry_run **(2026-08)** | host_tool | yes | n/a | — | PluginMCPTools.gd; Setup/SetupDryRun.gd |
+| minerva_get/set/list_preference(s) **(2026-08)** | host_tool | yes | n/a | — | MCP preference tools → PluginSettingsStore |
+| panel hook `_on_panel_apply_sync` **(2026-08)** | lifecycle | yes | no | pcb, cad | PluginScenePanelHost `invoke_apply_sync` |
+| panel hook `_on_panel_create_note_request` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_create_note` |
+| panel hook `_on_panel_restore_from_note` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_restore_from_note` |
+| panel hook `_on_panel_render_for_llm` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_render_for_llm` |
+| panel hook `_on_panel_inject_toggle_changed` **(2026-08)** | lifecycle | yes | no | — | PluginScenePanelHost `invoke_inject_toggle` |
+| panel hook `_on_hot_reload` **(2026-08)** | lifecycle | yes | no | — | PluginManager (hot-reload dispatch) |
+| panel hook `on_progress` **(2026-08)** | lifecycle | **partial — delivery only, no producer wiring** | no (implicit channel) | — | PluginScenePanelBroker `push_progress` (carries a TODO(integration)) |
+| Annotation substrate v2 **(2026-08)** | document_model | yes | no | pcb, cad, hello_scene | src/Scripts/Services/Annotations/*; `get_annotation_host()` |
+| filesystem mode "unrestricted" **(2026-08)** | permission | yes | yes | — (no shipped plugin declares it) | PluginDefinition `filesystem_mode`; CapabilityBroker `_files_scope_check` |
 
 ---
 
@@ -166,6 +211,14 @@ Column meaning:
 4. **Native GDScript / Godot scene panel** — `ui.panels[].kind:"godot_scene"` + `entry_scene` + `scripts[]` (whitelist, audited), mounted in-process. Still declares a stdio backend (may be a stub). Examples: cad CADPanel, presentation SlideEditorPanel, scansort ScansortPanel, hello_scene, test_paired_dsl.
 5. **HTML/JS webview panel** — `ui.panels[].kind:"html"` + `entry:"ui/panel.html"`, self-contained; host injects `window.minerva`; runs in godot-cef (preferred) or godot_wry (fallback). Example: obs_controller (Go backend + HTML panel — canonical multi-language example).
 6. **TypeScript/Bun external Stream Deck companion (NOT a Minerva-manifest plugin)** — Elgato manifest schema, `bun build --compile`, connects to Minerva via `ws://127.0.0.1:{port}` as a client. Example: elgato.
+
+**(2026-08) Orthogonal to the six above: who compiles the artifact.** A compiled backend
+now has two delivery paths reading the same `manifest.json` — the **marketplace lane**
+(prebuilt, SHA-pinned tarball) and the **manifest lane** (dev/side-load, where a `setup`
+stanza makes the host build from source at install: `go_build`, `cargo_build`,
+`python_venv`, `copy`, `exec`, gated by a `requires` toolchain preflight over
+`go`/`cargo`/`python`/`node`/`bun`/`zig`/`scons`). This is a packaging axis, not a
+seventh language. `pcb` is the reference consumer. See the developer guide §17.
 
 ---
 
@@ -198,8 +251,11 @@ Column meaning:
   → effectively no plugin exercises the channel.
 - `host.dialogs.file_picker` / `host.dialogs.directory_picker` — implemented; scansort
   declares both, calls neither; nobody invokes them.
-- `host.permissions.grant_scope` — implemented (never auto-granted); scansort declares,
-  nobody calls.
+- `host.permissions.grant_scope` — implemented; scansort declares, nobody calls.
+  **(2026-08 correction)** it is no longer held back from the auto-grant: the host's
+  never-auto-grant list is now empty by owner decision ("install is the trust act"), so
+  a manifest declaring `grant_scope` gets it granted at install like any other
+  capability. (`PluginManager._NEVER_AUTO_GRANT` / `_auto_grant_declared_capabilities`.)
 - `host.editors.list` — implemented, used by nobody (presentation uses
   list_open/export/open, not editors.list).
 - `secrets:delete:<handle>` — implemented; obs_controller declares get/set only.
@@ -282,13 +338,14 @@ Column meaning:
    Minerva") and returns. `capability:editor.request_save` appears only in a TODO
    comment (Editor.gd:1542) and a manifest doc-comment (PluginDefinition.gd:747) — **zero
    dispatch sites**. Authors must NOT use `plugin_owned`.
-4. **`localhost:9315` MCP HTTP server is unauthenticated and unscoped** —
-   `TCPServer.listen(port)` with no bind address (all interfaces), no Authorization/token
-   check, agent identity is a TODO (`X-Agent-Id` header, line 320). `minerva.call()`
-   POSTs here, bypassing the per-message `ui.ipc_messages` allowlist that gates
-   `pluginIPC()`. Every HTML panel — and anything on host/LAN reaching the port — can
-   call every MCP tool. (MinervaMCPHttpServer.gd:51-68,189,320.) Confirmed gap, not an
-   open question.
+4. **`localhost:9315` MCP HTTP server is unauthenticated and unscoped** — no
+   Authorization/token check, agent identity is a TODO. `minerva.call()` POSTs here,
+   bypassing the per-message `ui.ipc_messages` allowlist that gates `pluginIPC()`, so
+   every HTML panel — and any other process on the same machine — can call every MCP
+   tool. **(2026-08 partial fix)** the "binds all interfaces" half is resolved: the
+   server now listens on `BIND_ADDRESS = "127.0.0.1"` so the OS rejects non-local
+   connections at the socket layer. Exposure is same-host, no longer LAN-wide; the
+   missing auth/scoping stands. (`MinervaMCPHttpServer.gd` `BIND_ADDRESS`.)
 5. **`network.mode`/`filesystem.mode` value enums unenforced + no egress layer** —
    there is no network-egress gate anywhere; `permissions.network.mode` is purely
    documentary for all values, and a `mode:"none"` plugin can still open arbitrary
@@ -347,6 +404,31 @@ Column meaning:
     that exposes the BEL counter is only compiled for Unix/macOS. On Windows the
     terminal glue has no shim; `bell_serial` is never incremented.
     (MCPTerminalTools.gd:290; scripts/build-extensions.sh.)
+22. **(2026-08) `host.chat_providers.unregister` is dispatchable but undeclarable** — the
+    broker maps it onto the `host.chat_providers.register` grant, and it is deliberately
+    absent from `ALLOWED_HOST_CAPABILITIES`. A manifest listing it fails
+    `validate_host_capabilities()` with `unknown host_capability`, i.e. install fails.
+    The asymmetry is intentional but discoverable only by reading the broker.
+23. **(2026-08) `MINERVA_PLUGIN_DATA_DIR` is not set by the host** — the guide previously
+    claimed Minerva injects it at spawn. It does not; `SubProcess.start()` takes no env
+    parameter and nothing in Minerva sets any plugin env var. The only in-tree reader is
+    `src/test/marketplace_test_helpers.gd`. Our own `shared/runtime.DataDir()` treats it
+    as an optional override and falls through to a per-OS user data dir, so no shipped
+    plugin is broken — but the *claim* was wrong and code comments repeated it.
+24. **(2026-08) Setup `exec` steps fail closed with no approver** — an install driven by
+    an agent or CI (no interactive approver wired) denies every `exec` step rather than
+    running it, ending the build with `detail: exec_denied`. Correct-by-design, but a
+    plugin whose only producer is an `exec` step is uninstallable headlessly.
+25. **(2026-08) Progress notifications have a delivery half and no producer half** —
+    `PluginScenePanelBroker.push_progress()` → `panel.on_progress()` is implemented and
+    audited, but nothing routes a backend `{"method":"progress"}` notification into it;
+    the broker carries an explicit `TODO(integration)`. A panel implementing
+    `on_progress` today will simply never be called.
+26. **(2026-08) `PluginDefinition.State` does not include the three setup states** —
+    `S_BUILDING`/`S_BUILD_FAILED`/`S_NEEDS_BINARY` are plain ints (6/7/8) defined on
+    `PluginManager` and assigned into a field typed as the six-member enum. Deliberate
+    (scope fence, and GDScript enums are ints), but any consumer switching exhaustively
+    over `PluginDefinition.State` will not see them.
 
 ---
 
@@ -362,9 +444,12 @@ Column meaning:
 3. **Is `state.schema` enforced/surfaced anywhere** (MCP tool-schema generation, event
    broker)? It is parsed/round-tripped but no validation path was found — appears
    documentary.
-4. **Is `localhost:9315` ever intended to gain plugin-scoped auth?** The code shows it
-   is currently unauthenticated/unscoped (requirement bug #4). Confirm whether the open
-   binding + missing token is an intentional/known gap or slated for hardening.
+4. **Is `localhost:9315` ever intended to gain plugin-scoped auth?** ~~The code shows it
+   is currently unauthenticated/unscoped~~ **(2026-08: half answered.)** The open
+   *binding* was a known gap and has been closed — the server now binds `127.0.0.1`
+   with an explicit comment saying the endpoint is unauthenticated and must never be
+   reachable off-host. Whether it gains a *token* and per-plugin scoping is still open
+   (agent identity remains a TODO). See requirement bug #4.
 5. **The Minerva-side WebSocket endpoint elgato connects to (`ws://127.0.0.1:{port}`)**
    was not located in any plugin dir or producer extractor — its host implementation /
    registration is unconfirmed.
@@ -385,3 +470,16 @@ Column meaning:
     via the Go backend's `minerva/capability` upstream calls (confirmed: presentation/main.go
     issues `minerva/capability`), so the panel's host-document access flows through the
     backend, not panel-broker `capability:*` dispatch.
+11. **(2026-08) What routes a backend progress notification to `push_progress`?** The
+    broker's own TODO names the missing piece (a handler in `MinervaMCPServer` or a
+    dedicated notification router) but nothing implements it. Open: is the producer half
+    scheduled, or should `on_progress` be documented as deprecated-before-arrival?
+12. **(2026-08) Are `settings[]` writable by the plugin that declares them?** Today: no —
+    only `host.settings.get`/`.list` exist, and agents write through
+    `minerva_set_preference`. Open whether a `host.settings.set` is deliberately withheld
+    (settings are user-owned) or simply not built yet.
+13. **(2026-08) Does the `setup` toolchain registry intend to stay closed at seven
+    tools?** `go`, `cargo`, `python`, `node`, `bun`, `zig`, `scons` are hardcoded in
+    `ToolchainRegistry.TOOLS`; a plugin needing anything else (cmake, dotnet, …) has no
+    declarable `requires` entry and must fall back to an `exec` step — which is exactly
+    the step type that fails closed headlessly (bug #24).

@@ -15,7 +15,10 @@ import (
 //
 // Resolution order:
 //
-//  1. MINERVA_PLUGIN_DATA_DIR env var (set by Minerva at plugin spawn).
+//  1. MINERVA_PLUGIN_DATA_DIR env var, when set. NOTE: Minerva does NOT set this
+//     — the host injects no environment for a plugin process (SubProcess.start()
+//     takes no env parameter). Treat it as an override for tests/CI/embedders;
+//     tier 2 is what production actually resolves to.
 //  2. Per-OS XDG-equivalent default:
 //     - Linux/BSD: $XDG_DATA_HOME/Minerva/plugins/<id> or ~/.local/share/Minerva/plugins/<id>
 //     - macOS:     ~/Library/Application Support/Minerva/plugins/<id>
