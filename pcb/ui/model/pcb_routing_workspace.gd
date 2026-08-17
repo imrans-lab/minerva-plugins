@@ -997,7 +997,7 @@ func _vias_wire(c) -> Array:
 ## ingest_task_held signal). See the policy block in _create_candidate_for_route.
 ## The returned id array is therefore SHORTER than the reply's route list when
 ## any task was held — read last_ingest_holds to say which and why.
-func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], board_revision: int = 0) -> Array:
+func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], base_board_revision: int = 0) -> Array:
 	last_ingest_holds = []  # per-call: holds describe THIS ingest, not history
 	var new_ids: Array = []
 	for route in router_reply.get("routes", []):
@@ -1011,7 +1011,7 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 			str(route_dict.get("net", "")),
 			route_dict.get("segments", []),
 			route_dict.get("vias", []),
-			source_hints, board_revision, null, route_span)
+			source_hints, base_board_revision, null, route_span)
 		if not new_id.is_empty():
 			new_ids.append(new_id)
 	return new_ids
@@ -1033,7 +1033,7 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 ## is the ONLY caller that supplies it, so only THIS path stops recomputing a
 ## worse answer from raw `source_hints` (see _create_candidate_for_route).
 ## ingest_routing_result has no such stamp available and is left untouched.
-func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
+func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 	# Reentrancy guard (see _apply_disposition): a handler landing a NEW
 	# candidate mid-commit would change the very live set the deferred INV-2
 	# pass is about to score.
@@ -1049,7 +1049,7 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 		str(record.get("net", "")),
 		record.get("segments", []) if record.get("segments", []) is Array else [],
 		record.get("vias", []) if record.get("vias", []) is Array else [],
-		hints, board_revision, explicit_hint_ids, span,
+		hints, base_board_revision, explicit_hint_ids, span,
 		float(record.get("width_override", 0.0)))
 	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
 	# DURABLE candidate state, not just a reply stamp — the commit preflight's
@@ -1096,7 +1096,7 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 ## a hintless record does not fall through to _width_from_hints' 0.25mm
 ## default (the exact stamped-default bug class of docket 019fa73a191e).
 ## 0.0 (the default) means "no override": every hint-derived path is unchanged.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0) -> String:
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -1175,7 +1175,7 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	cand.task_id = task_key
 	cand.net = net
 	cand.generation = generation
-	cand.base_board_revision = board_revision
+	cand.base_board_revision = base_board_revision
 	cand.source_hint_ids = _to_string_typed_array(hint_ids)
 
 	var width: float
@@ -3171,15 +3171,15 @@ func connected_path_segment_ids(candidate_id: String, segment_id: String) -> Arr
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return []
-	var seed := -1
+	var seed_index := -1
 	for i in range(c.segments.size()):
 		if str((c.segments[i] as Dictionary).get("id", "")) == segment_id:
-			seed = i
+			seed_index = i
 			break
-	if seed < 0:
+	if seed_index < 0:
 		return []
 	var out: Array = []
-	for i in _connected_path_indices(c, seed):
+	for i in _connected_path_indices(c, seed_index):
 		out.append(str((c.segments[int(i)] as Dictionary).get("id", "")))
 	return out
 
@@ -3234,10 +3234,10 @@ static func _segments_adjacent(a: Dictionary, b: Dictionary) -> bool:
 	return false
 
 
-## Indices of the connected component containing `seed` (endpoint adjacency).
-func _connected_path_indices(c, seed: int) -> Array:
-	var seen: Dictionary = {seed: true}
-	var queue: Array = [seed]
+## Indices of the connected component containing `seed_index` (endpoint adjacency).
+func _connected_path_indices(c, seed_index: int) -> Array:
+	var seen: Dictionary = {seed_index: true}
+	var queue: Array = [seed_index]
 	while not queue.is_empty():
 		var cur: int = int(queue.pop_back())
 		for i in range(c.segments.size()):

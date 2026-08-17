@@ -544,10 +544,10 @@ func set_rotation(degrees: float) -> void:
 ## snap a rigid-body delta through the same rule bodies use — the two halves of
 ## a group rotation must never disagree (cold-review A4 finding 1).
 static func snap_rotation(degrees: float) -> float:
-	var snapped := fmod(degrees, 360.0)
-	if snapped < 0:
-		snapped += 360.0
-	return roundf(snapped / 90.0) * 90.0
+	var normalized := fmod(degrees, 360.0)
+	if normalized < 0:
+		normalized += 360.0
+	return roundf(normalized / 90.0) * 90.0
 
 
 ## Rotate clockwise by 90 degrees

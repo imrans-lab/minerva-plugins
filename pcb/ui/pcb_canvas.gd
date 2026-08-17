@@ -194,12 +194,12 @@ var hidden_layers: Dictionary = {}
 ## Toggle one layer's eye. `layer` may be canonical or KiCad-spelled — folded
 ## ONCE here (the is_layer_visible normalisation-boundary rule; the draw-loop
 ## predicate below never normalises).
-func set_layer_hidden(layer: String, hidden: bool) -> void:
+func set_layer_hidden(layer: String, is_hidden: bool) -> void:
 	var canon := _canonical_layer(layer)
 	var currently := hidden_layers.has(canon)
-	if currently == hidden:
+	if currently == is_hidden:
 		return
-	if hidden:
+	if is_hidden:
 		hidden_layers[canon] = true
 	else:
 		hidden_layers.erase(canon)
@@ -9609,13 +9609,13 @@ func _draw_approximation_notice() -> void:
 	var notes := approximation_notes()
 	if notes.is_empty():
 		return
-	var font := ThemeDB.fallback_font
+	var notice_font := ThemeDB.fallback_font
 	var y := size.y - 8.0 - float(notes.size()) * 13.0
-	draw_string(font, Vector2(10, y), "APPROXIMATE IN THIS VIEW — Fab Preview shows the emitted artwork:",
+	draw_string(notice_font, Vector2(10, y), "APPROXIMATE IN THIS VIEW — Fab Preview shows the emitted artwork:",
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.72, 0.72, 0.78, 0.85))
 	y += 13.0
 	for n in notes:
-		draw_string(font, Vector2(18, y), "· " + str(n),
+		draw_string(notice_font, Vector2(18, y), "· " + str(n),
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(0.66, 0.66, 0.72, 0.8))
 		y += 13.0
 
@@ -9678,10 +9678,10 @@ func set_fab_preview(layers: Array, unrendered: Array, note: String = "") -> voi
 
 
 func _draw_fab_preview() -> void:
-	var font := ThemeDB.fallback_font
+	var notice_font := ThemeDB.fallback_font
 	var y := 18.0
 	if _fab_preview_layers.is_empty():
-		draw_string(font, Vector2(12, y), "Fab preview: nothing rendered yet.",
+		draw_string(notice_font, Vector2(12, y), "Fab preview: nothing rendered yet.",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.9, 0.75, 0.3))
 		y += 18.0
 	else:
@@ -9695,25 +9695,25 @@ func _draw_fab_preview() -> void:
 		# clearance, spacing or fit is then wrong by an unstated factor.
 		var first_tex: Texture2D = (_fab_preview_layers[0] as Dictionary).get("texture")
 		var art: Vector2 = first_tex.get_size() if first_tex != null else size
-		var scale: float = minf(size.x / maxf(art.x, 1.0), size.y / maxf(art.y, 1.0))
-		var drawn: Vector2 = art * scale
+		var fit_scale: float = minf(size.x / maxf(art.x, 1.0), size.y / maxf(art.y, 1.0))
+		var drawn: Vector2 = art * fit_scale
 		var rect := Rect2((size - drawn) * 0.5, drawn)
 		for lay in _fab_preview_layers:
 			var tex: Texture2D = (lay as Dictionary).get("texture")
 			if tex != null:
 				draw_texture_rect(tex, rect, false, Color(1, 1, 1, 0.85))
 	if not _fab_preview_note.is_empty():
-		draw_string(font, Vector2(12, y), _fab_preview_note,
+		draw_string(notice_font, Vector2(12, y), _fab_preview_note,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.85, 0.85, 0.9))
 		y += 18.0
 	# THE INCOMPLETE BANNER — never optional when something did not render.
 	if not _fab_preview_unrendered.is_empty():
-		draw_string(font, Vector2(12, y),
+		draw_string(notice_font, Vector2(12, y),
 			"INCOMPLETE — %d emitted file(s) not shown:" % _fab_preview_unrendered.size(),
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.95, 0.55, 0.2))
 		y += 16.0
 		for u in _fab_preview_unrendered:
-			draw_string(font, Vector2(24, y), "%s — %s" % [
+			draw_string(notice_font, Vector2(24, y), "%s — %s" % [
 				str((u as Dictionary).get("name", "?")),
 				str((u as Dictionary).get("reason", ""))],
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.95, 0.7, 0.45))

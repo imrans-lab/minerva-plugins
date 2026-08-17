@@ -4420,11 +4420,11 @@ func _rebuild_zone_net_option() -> void:
 	var names: Array = _data.get_net_names() if _data != null else []
 	names.sort()
 	var selected := 0
-	for name in names:
+	for net_name in names:
 		var idx := _zone_net_option.item_count
-		_zone_net_option.add_item(str(name))
-		_zone_net_option.set_item_metadata(idx, str(name))
-		if str(name) == previous:
+		_zone_net_option.add_item(str(net_name))
+		_zone_net_option.set_item_metadata(idx, str(net_name))
+		if str(net_name) == previous:
 			selected = idx
 	_zone_net_option.select(selected)
 	# Keep the canvas's armed net and the widget in step: a net that vanished with

@@ -294,9 +294,9 @@ func _coerce(key: String, raw: Variant) -> Dictionary:
 			return {"value": c, "clamped": not is_equal_approx(c, f), "error": ""}
 		TYPE_INT:
 			if raw is int:
-				return _clamp_int(key, int(raw), spec)
+				return _clamp_int(int(raw), spec)
 			if raw is float and is_equal_approx(float(raw), roundf(float(raw))):
-				return _clamp_int(key, int(roundf(float(raw))), spec)
+				return _clamp_int(int(roundf(float(raw))), spec)
 			return {"value": null, "clamped": false,
 				"error": "Preference \"%s\" is a whole number; got %s." % [key, type_string(typeof(raw))]}
 		TYPE_BOOL:
@@ -319,7 +319,7 @@ func _coerce(key: String, raw: Variant) -> Dictionary:
 				"error": "Preference \"%s\" has an unsupported declared type." % key}
 
 
-func _clamp_int(key: String, v: int, spec: Dictionary) -> Dictionary:
+func _clamp_int(v: int, spec: Dictionary) -> Dictionary:
 	var lo: int = int(spec.get("min", -9223372036854775807))
 	var hi: int = int(spec.get("max", 9223372036854775807))
 	var c: int = clampi(v, lo, hi)

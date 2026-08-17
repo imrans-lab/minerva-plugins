@@ -750,10 +750,10 @@ class BendHandleEditTool:
 			# the unit was ruled to preserve. Left as a gesture, on purpose.
 			if _multi_selected():
 				return false
-			var sel := _host.get_selected_annotation_id()
-			if sel.is_empty():
+			var bend_delete_sel := _host.get_selected_annotation_id()
+			if bend_delete_sel.is_empty():
 				return false
-			var ann := _find(sel)
+			var ann := _find(bend_delete_sel)
 			var kind := _kind()
 			if ann.is_empty() or kind == null or str(ann.get("kind", "")) != "pcb_route_hint":
 				return false
@@ -767,7 +767,7 @@ class BendHandleEditTool:
 			if idx < 0:
 				return false
 			bends.remove_at(idx)
-			annotation_modified.emit(sel, kind.with_bend_points(ann, bends))
+			annotation_modified.emit(bend_delete_sel, kind.with_bend_points(ann, bends))
 			return true
 
 		if button != MOUSE_BUTTON_LEFT:
@@ -1084,9 +1084,9 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 		var seg: Variant = segments[i]
 		if not (seg is Dictionary):
 			continue
-		var a := _to_vec2((seg as Dictionary).get("start", [0, 0]))
-		var b := _to_vec2((seg as Dictionary).get("end", [0, 0]))
-		var proj := _project_on_segment(a, b, click)
+		var seg_start := _to_vec2((seg as Dictionary).get("start", [0, 0]))
+		var seg_end := _to_vec2((seg as Dictionary).get("end", [0, 0]))
+		var proj := _project_on_segment(seg_start, seg_end, click)
 		var d := proj.distance_to(click)
 		if d < best_dist:
 			best_dist = d
@@ -1105,11 +1105,11 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 		start_layer = str((segments[0] as Dictionary).get("layer", "F.Cu"))
 
 	var target: Dictionary = segments[best_idx]
-	var a := _to_vec2(target.get("start", [0, 0]))
-	var b := _to_vec2(target.get("end", [0, 0]))
+	var target_start := _to_vec2(target.get("start", [0, 0]))
+	var target_end := _to_vec2(target.get("end", [0, 0]))
 	var target_layer := str(target.get("layer", start_layer))
-	var seg1 := {"start": [a.x, a.y], "end": [best_point.x, best_point.y], "layer": target_layer}
-	var seg2 := {"start": [best_point.x, best_point.y], "end": [b.x, b.y], "layer": target_layer}
+	var seg1 := {"start": [target_start.x, target_start.y], "end": [best_point.x, best_point.y], "layer": target_layer}
+	var seg2 := {"start": [best_point.x, best_point.y], "end": [target_end.x, target_end.y], "layer": target_layer}
 	segments[best_idx] = seg1
 	segments.insert(best_idx + 1, seg2)
 

@@ -351,7 +351,7 @@ static func _set_board_layers(host, args: Dictionary) -> Dictionary:
 	return _ok({"layers": data.layers.duplicate(), "changed": changed})
 
 
-static func _get_components(host, args: Dictionary) -> Dictionary:
+static func _get_components(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -383,7 +383,7 @@ static func _get_components(host, args: Dictionary) -> Dictionary:
 	return _ok({"component_count": components.size(), "components": components})
 
 
-static func _get_nets(host, args: Dictionary) -> Dictionary:
+static func _get_nets(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -1068,7 +1068,7 @@ static func _import_csv(host, args: Dictionary) -> Dictionary:
 	return _ok(result)
 
 
-static func _export_csv(host, args: Dictionary) -> Dictionary:
+static func _export_csv(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -1460,7 +1460,7 @@ static func _delete_traces(host, args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
-static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
+static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -3616,7 +3616,7 @@ static func _build_polylines_from_segments(segments: Array) -> Array:
 # _on_data_changed -> queue_redraw; nothing new was added here or there).
 
 ## List every zone, summary shape. Read-only — journals nothing.
-static func _list_zones(host, args: Dictionary) -> Dictionary:
+static func _list_zones(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -3655,7 +3655,7 @@ static func _list_zones(host, args: Dictionary) -> Dictionary:
 ## via ids genuinely has no identity, and "absent" says that, while "" would
 ## claim its identity is the empty string. Such a via cannot be deleted by id and
 ## cannot be clicked on the canvas either; both surfaces agree about that.
-static func _list_vias(host, args: Dictionary) -> Dictionary:
+static func _list_vias(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -4369,7 +4369,7 @@ static func _set_zone_outline(host, args: Dictionary) -> Dictionary:
 
 ## List every cutout, summary shape. Read-only — journals nothing. Mirrors
 ## _list_zones minus the kind/net/layer fields a cutout does not have.
-static func _list_cutouts(host, args: Dictionary) -> Dictionary:
+static func _list_cutouts(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
@@ -5009,7 +5009,7 @@ static func _set_group_member_offset(host, args: Dictionary) -> Dictionary:
 ## — see PCBPanel.get_layout_state's own docs for the full shape, including
 ## the plugin_build design choice). Read-only — journals nothing, mutates
 ## nothing.
-static func _get_layout_state(host, args: Dictionary) -> Dictionary:
+static func _get_layout_state(host, _args: Dictionary) -> Dictionary:
 	var panel = _get_panel(host)
 	if panel == null or not panel.has_method("get_layout_state"):
 		return _err("PCB panel not available")
@@ -5089,7 +5089,7 @@ static func _set_trace_width(host, args: Dictionary) -> Dictionary:
 ## Reports the EFFECTIVE value plus whether it was actually stored, because
 ## "never chosen" and "chosen and equal to the default" are different facts the
 ## panel's seeding order depends on.
-static func _get_preference(host, args: Dictionary) -> Dictionary:
+static func _get_preference(_host, args: Dictionary) -> Dictionary:
 	var prefs = _PcbPrefsScript.shared()
 	var key: String = str(args.get("key", ""))
 	if key.is_empty():
