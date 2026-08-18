@@ -25,6 +25,7 @@ Over-blocking is legal; under-blocking never is.
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 
 import pytest
 
@@ -122,9 +123,24 @@ def test_locked_seed_census_projects_every_pad_faithfully(ref):
         {(p.ref, p.number) for p in copper_bearing}
     assert len(rendered.pads) == len(copper_bearing)
 
-    by_id = {(p.component, p.number): p for p in rendered.pads}
+    # A human pad number is an ELECTRICAL identity, not a physical-occurrence
+    # identity: KiCad legitimately gives both copper mounting lands on a JST
+    # connector the number ``MP``.  Preserve every occurrence instead of using a
+    # dict whose last ``MP`` silently overwrites the first and looks like an X
+    # mirror when the left IR land is compared with the right router land.
+    by_human_id = defaultdict(list)
+    for pad in rendered.pads:
+        by_human_id[(pad.component, pad.number)].append(pad)
     for ir_pad in copper_bearing:
-        pad = by_id[(ir_pad.ref, ir_pad.number)]
+        candidates = by_human_id[(ir_pad.ref, ir_pad.number)]
+        match = next((candidate for candidate in candidates
+                      if candidate.position == pytest.approx(
+                          ir_pad.pad.position, abs=1e-9)), None)
+        assert match is not None, (
+            ir_pad.ref, ir_pad.number, ir_pad.pad.position,
+            [candidate.position for candidate in candidates])
+        candidates.remove(match)
+        pad = match
         box = copper[ir_pad.pad.id].aabb
         # Position + layer are the IR's own.
         assert pad.position == pytest.approx(ir_pad.pad.position, abs=1e-9)
@@ -138,6 +154,19 @@ def test_locked_seed_census_projects_every_pad_faithfully(ref):
         assert pad.position[0] + half_w >= box.max_x - 1e-9
         assert pad.position[1] - half_h <= box.min_y + 1e-9
         assert pad.position[1] + half_h >= box.max_y - 1e-9
+    assert not any(by_human_id.values()), by_human_id
+
+
+def test_qfn_paste_only_apertures_are_absent_from_copper_drc_and_routing():
+    ref = "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm"
+    rb = _compile(_board([_comp("U1", ref, 20, 20)]))
+    census = list(ir_pads.iter_ir_pads(rb))
+
+    assert len(census) == 21
+    assert sum(p.carries_copper for p in census) == 17
+    assert sum(not p.carries_copper and not p.is_npth for p in census) == 4
+    assert len(drc_geometric.project_board(rb).copper) == 17
+    assert len(route_bridge.resolved_board_to_router(rb).pads) == 17
 
 
 def test_pad_extent_contains_the_copper_geometric_drc_checks():

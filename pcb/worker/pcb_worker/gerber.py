@@ -93,6 +93,7 @@ from .pad_source import (
     # directly and need the same default the production entry points resolve).
     # Deleting it on a lint sweep would break them at import time.
     DEFAULT_MASK_CLEARANCE_MM,
+    has_copper,
     has_paste,
     is_through_hole,
     iter_pads,
@@ -605,15 +606,20 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
             # is where the rule and its rationale now live.
             g.holes.append((px, py, drill, is_plated))
         else:
-            # SMD pad on the component's own side. width/height are guaranteed
-            # positive by the caller (require_smd_size — a sizeless SMD pad has
-            # already raised PadGeometryError).
+            # A KiCad ``smd`` node may be either a copper land or a paste-only
+            # stencil aperture.  Width/height are guaranteed positive for both by
+            # the compiler / require_smd_size boundary.  Only real copper enters
+            # the copper bucket; paste participation is emitted independently
+            # from the authored layer list below.
             w = pad.width
             h = pad.height
-            g.smd_pads.append((px, py, w, h, pad_angle, top, pad.shape, pad.corner_rratio))
+            if has_copper(pad):
+                g.smd_pads.append(
+                    (px, py, w, h, pad_angle, top, pad.shape, pad.corner_rratio))
             # The mask opening (pad SHAPE, enlarged by the effective margin, on
             # this component's side only) came from mask_source above.
-            # Stencil aperture, from the SAME copper land the flash above used.
+            # A copper pad's stencil aperture follows that land; a paste-only pad
+            # uses its own authored shape as the aperture base.
             _emit_paste(g, pad, px, py, pad.shape, w, h, pad.corner_rratio,
                         pad_angle, ref)
 

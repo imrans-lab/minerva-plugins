@@ -323,6 +323,36 @@ _EXPECTED_SEED_MARKERS = {
     ),
     "Package_DIP:DIP-6_W7.62mm_Socket":
         (("uncaptured_graphic", "F.Fab", "fab"),),
+    # Smart-remote v2 official KiCad seed expansion.  Their value text remains
+    # an explicit nonblocking F.Fab omission.  The QFN also carries an authored
+    # zone-connect preference on exposed pad 17; that existing capability marker
+    # is recorded independently of its now-supported paste-only apertures.
+    "Capacitor_SMD:C_0402_1005Metric":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Capacitor_SMD:C_1210_3225Metric":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Fuse:Fuse_1206_3216Metric":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm": (
+        ("uncaptured_graphic", "F.Fab", "fab"),
+        ("zone_connect", None, "copper"),
+    ),
+    "Package_TO_SOT_SMD:SOT-23":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Package_TO_SOT_SMD:TSOT-23-6":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Resistor_SMD:R_0402_1005Metric":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
 }
 
 

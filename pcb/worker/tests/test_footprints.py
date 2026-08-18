@@ -80,6 +80,24 @@ EXPECTED_PAD_COUNTS = {
     "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical": 2,
     # Power-path Schottky (SS34/JLCPCB C8678), SMD lap pads.
     "Diode_SMD:D_SMA": 2,
+    # Smart-remote v2 seed expansion (2026-08-15).  These are raw KiCad pad-node
+    # counts, intentionally including repeated physical occurrences (the two
+    # same-number ``MP`` lands on each JST) and stencil-only apertures (the
+    # QFN's 17 copper pads + 4 paste-only nodes = 21).
+    "Capacitor_SMD:C_0402_1005Metric": 2,
+    "Capacitor_SMD:C_1210_3225Metric": 2,
+    "Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal": 4,
+    "Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal": 6,
+    "Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal": 7,
+    "Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal": 6,
+    "Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2": 40,
+    "Fuse:Fuse_1206_3216Metric": 2,
+    "Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm": 2,
+    "MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm": 8,
+    "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm": 21,
+    "Package_TO_SOT_SMD:SOT-23": 3,
+    "Package_TO_SOT_SMD:TSOT-23-6": 6,
+    "Resistor_SMD:R_0402_1005Metric": 2,
 }
 
 # MountingHole is a purely-mechanical footprint: it carries NO F.SilkS graphics

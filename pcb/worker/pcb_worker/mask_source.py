@@ -67,6 +67,7 @@ from typing import Any
 
 from .pad_source import (
     DEFAULT_MASK_CLEARANCE_MM,
+    has_copper,
     is_through_hole,
     mask_opening_dim,
     pad_mask_margin,
@@ -221,6 +222,12 @@ def pad_openings(pad: Any, px: float, py: float, pad_angle: float,
     pad_number = str(number) if number is not None else None
 
     if not is_through_hole(pad):
+        # A paste-only KiCad ``smd`` node is not copper and declares no mask
+        # participation.  It contributes a stencil aperture only; inventing a
+        # mask opening here would make both Gerber and GC8 check geometry absent
+        # from the footprint.
+        if not has_copper(pad):
+            return ()
         # SMD: one opening, on the component's own side, following the pad
         # SHAPE (R2) and enlarged by the effective margin. A large-negative
         # per-pad margin that collapses the opening fails closed in

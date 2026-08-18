@@ -36,7 +36,7 @@ from typing import Any, Iterator
 
 from .drc_geom_primitives import Capsule, OrientedRect
 from .pad_source import placed_pad_to_geom, th_land
-from .resolved_board import ResolvedBoard
+from .resolved_board import LayerRole, ResolvedBoard
 
 # The IR pad_type literal for a bare mechanical (non-plated) through hole. Shared
 # with pad_source's classification rather than re-spelled per consumer.
@@ -91,8 +91,17 @@ class IRPad:
 
     @property
     def carries_copper(self) -> bool:
-        """False only for a bare mechanical hole (NPTH) — no land, no ring."""
-        return not self.is_npth
+        """Whether this placed KiCad pad primitive actually participates in copper.
+
+        ``pad_type == smd`` is not sufficient: KiCad represents split stencil
+        apertures as unnumbered SMD pad nodes on F.Paste/B.Paste only.  Copper is
+        therefore a layer-participation fact, not a pad-type inference.
+        """
+        if self.is_npth:
+            # KiCad commonly writes NPTH pads on ``*.Cu`` to make the hole span
+            # the stack; the pad type still means there is no plated land/ring.
+            return False
+        return any(layer.role is LayerRole.COPPER for layer in self.pad.layers)
 
     @property
     def is_addressable(self) -> bool:

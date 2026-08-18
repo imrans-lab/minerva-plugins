@@ -843,8 +843,13 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     obstacles: list[Obstacle] = []
     pad_by_id: dict[str, Pad] = {}
     for ir_pad in iter_ir_pads(rb):
-        if not ir_pad.carries_copper:
+        if ir_pad.is_npth:
             obstacles.append(_npth_obstacle(ir_pad))
+            continue
+        if not ir_pad.carries_copper:
+            # A paste-only KiCad pad primitive is stencil geometry, not a land,
+            # endpoint, hole or routing obstacle.  It survives in the resolved IR
+            # for CAM but is intentionally absent from the copper router.
             continue
         if not ir_pad.is_addressable:
             # Copper with no authored pad number (019f97eb6adf). It cannot be a

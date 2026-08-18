@@ -117,6 +117,48 @@ def _near(points, target, tol: float = 1e-3) -> bool:
               for px, py in points)
 
 
+@pytest.mark.parametrize(("side", "paste_layer", "bucket_name", "empty_bucket"), [
+    ("top", "F.Paste", "paste_top", "paste_bot"),
+    ("bottom", "B.Paste", "paste_bot", "paste_top"),
+])
+def test_qfn_split_stencil_apertures_emit_without_phantom_copper(
+        side, paste_layer, bucket_name, empty_bucket):
+    """Four paste-only KiCad pad nodes subdivide the QFN exposed-pad stencil.
+
+    They must survive side placement into both fabrication surfaces while never
+    entering the copper flash bucket.  The 16 perimeter leads also declare paste;
+    pad 17 does not, so the correct totals are 17 copper lands and 20 apertures.
+    """
+    ref = "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm"
+    rb = _resolve(_board(ref, layer=side, x=20.0, y=20.0))
+
+    geometry = gerber._harvest_ir(rb, gerber.DEFAULT_MASK_CLEARANCE_MM)
+    assert len(geometry.smd_pads) == 17
+    assert len(getattr(geometry, bucket_name)) == 20
+    assert getattr(geometry, empty_bucket) == []
+    split = [row for row in getattr(geometry, bucket_name)
+             if row[3] == pytest.approx(0.68) and row[4] == pytest.approx(0.68)]
+    assert len(split) == 4
+
+    files = gerber.build_gerbers_ir(rb, name="qfn")
+    copper_suffix = "F_Cu" if side == "top" else "B_Cu"
+    other_copper = "B_Cu" if side == "top" else "F_Cu"
+    paste_suffix = "F_Paste" if side == "top" else "B_Paste"
+    other_paste = "B_Paste" if side == "top" else "F_Paste"
+    assert _flash_count(files[f"qfn-{copper_suffix}.gbr"]) == 17
+    assert _flash_count(files[f"qfn-{other_copper}.gbr"]) == 0
+    assert _flash_count(files[f"qfn-{paste_suffix}.gbr"]) == 20
+    assert _flash_count(files[f"qfn-{other_paste}.gbr"]) == 0
+
+    pcb = kicad.generate_ir(rb, base_name="qfn")["qfn.kicad_pcb"]
+    aperture_lines = [line for line in pcb.splitlines()
+                      if '(pad "" smd roundrect' in line]
+    assert len(aperture_lines) == 4
+    assert all(f'(layers "{paste_layer}")' in line for line in aperture_lines)
+    assert all(".Cu" not in line and ".Mask" not in line
+               for line in aperture_lines)
+
+
 # ---------------------------------------------------------------------------
 # WIN 1 — board-ABSOLUTE placement reaches copper.
 # ---------------------------------------------------------------------------

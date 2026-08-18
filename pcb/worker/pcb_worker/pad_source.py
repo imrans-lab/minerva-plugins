@@ -45,6 +45,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from agent_router import layers as _layers
+
 from .fab_capability import SUPPORTED_PAD_SHAPES
 
 if TYPE_CHECKING:
@@ -619,6 +621,21 @@ def has_paste(pad: "PadGeom", top: bool) -> bool:
     """
     want = "F.Paste" if top else "B.Paste"
     return any(layer == want for layer in (pad.layers or []))
+
+
+def has_copper(pad: "PadGeom") -> bool:
+    """Whether a normalized pad participates on any copper layer.
+
+    Resolved footprint pads carry their authored layer list, so this is the
+    authoritative distinction between an electrical land and KiCad's legal
+    paste-only ``smd`` aperture nodes.  The unresolved inline-pin fallback has
+    no layer list; preserve its historical copper behavior until it is resolved
+    (fabrication normally compiles through the resolved IR first).
+    """
+    layers = pad.layers or []
+    if not layers:
+        return not pad.from_resolve
+    return any(layer == "*.Cu" or _layers.is_copper(layer) for layer in layers)
 
 
 def paste_aperture(shape: str, w: float, h: float, rratio: "float | None",

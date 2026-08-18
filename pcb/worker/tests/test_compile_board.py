@@ -173,6 +173,32 @@ def test_compile_census_every_seed_resolves(ref):
     assert len(result.board.footprint_definitions) == 1
 
 
+def test_qfn_split_stencil_apertures_survive_without_becoming_copper():
+    """The official QFN uses four unnumbered F.Paste-only ``smd`` nodes to
+    subdivide pad 17's stencil.  They are real fabrication geometry, but they
+    are neither electrical pads nor copper lands."""
+    ref = "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm"
+    result = compile_board(_one_component_board(ref))
+    assert isinstance(result, ResolutionSuccess), result.diagnostics
+
+    comp = result.board.components[0]
+    definition = result.board.footprint_for(comp)
+    number_of = {pad.source_id: pad.number for pad in definition.pads}
+    paste_only = [
+        pad for pad in comp.placed_pads
+        if not any(layer.role.value == "copper" for layer in pad.layers)
+    ]
+    copper = [pad for pad in comp.placed_pads if pad not in paste_only]
+
+    assert len(definition.pads) == len(comp.placed_pads) == 21
+    assert len(copper) == 17
+    assert len(paste_only) == 4
+    assert all(number_of[pad.source_id] == "" for pad in paste_only)
+    assert all([layer.id for layer in pad.layers] == ["F.Paste"]
+               for pad in paste_only)
+    assert all(pad.net_id is None and pad.drill is None for pad in paste_only)
+
+
 # ---------------------------------------------------------------------------
 # Smart-remote full board.
 # ---------------------------------------------------------------------------

@@ -1044,10 +1044,13 @@ def tabulate_ir(rb: ResolvedBoard) -> SurfaceTable:
             number = numbers.get(pad.source_id) or pad.source_id
             net_name = net_name_of.get(pad.net_id) if pad.net_id else None
             drilled = pad.drill is not None
-            # NPTH carries no copper land at all — a bare mechanical hole. Emitting
-            # a flash row for it would put phantom copper in the reference and make
-            # every other surface look like it LOST copper.
-            carries_copper = pad.pad_type != "np_thru_hole"
+            # Copper participation is authored in the layer list.  KiCad also
+            # represents stencil-only apertures as ``smd`` pads, so pad_type alone
+            # would put phantom copper into the reference table.
+            carries_copper = (
+                pad.pad_type != "np_thru_hole"
+                and any(layer.role is LayerRole.COPPER for layer in pad.layers)
+            )
             if carries_copper:
                 shape, w, h, _rr = _ir_pad_land(pad)
                 layers = [tokens[layer.id] for layer in pad.layers
@@ -1061,9 +1064,10 @@ def tabulate_ir(rb: ResolvedBoard) -> SurfaceTable:
                 rows.append(_drill_row(pad.position[0], pad.position[1],
                                        pad.drill.size[0], pad.drill.plated,
                                        entity="pad"))
-            rows.append(ParityRow.make("net_ownership", (comp.ref, number),
-                                       net_name=net_name, ref=comp.ref,
-                                       pad_number=number))
+            if carries_copper or drilled:
+                rows.append(ParityRow.make("net_ownership", (comp.ref, number),
+                                           net_name=net_name, ref=comp.ref,
+                                           pad_number=number))
 
     for trace in rb.traces:
         name = net_name_of.get(trace.net_id)
@@ -1176,6 +1180,12 @@ def _ir_pad_mask_openings(pad, ref: Any, number: Any,
         (finding 019f8fe77068).
       * PLATED through-hole -> BOTH sides, following the land, plus the margin.
     """
+    carries_copper = any(layer.role is LayerRole.COPPER for layer in pad.layers)
+    if pad.drill is None and not carries_copper:
+        # Paste-only SMD primitives have no mask opening.  They remain in the IR
+        # for stencil emission but contribute no row to the mask parity family.
+        return []
+
     plated_th = (pad.drill is not None and pad.drill.plated
                  and pad.pad_type != "np_thru_hole")
     who = f"{ref}.{number}"
@@ -1774,6 +1784,13 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
                 net_name = None
             drill = pad.get("drill")
 
+            raw_layer = pad.get("layer", "F.Cu")
+            if number == "" and not drill and raw_layer in ("F.Paste", "B.Paste"):
+                # An unnumbered paste-only footprint aperture, not the synthetic
+                # board-hole form handled below.  Copper/mask parity deliberately
+                # has no row for stencil-only geometry.
+                continue
+
             if number == "":
                 # BOARD-LEVEL MOUNTING HOLES — the emitter writes them as
                 # unnumbered pads on synthetic MountingHole footprints
@@ -1799,7 +1816,6 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
             if pad_type != "np_thru_hole":
                 # `(layers "*.Cu" ...)` is KiCad's "every copper layer" wildcard —
                 # a through-hole pad. A sided SMD pad names its one layer.
-                raw_layer = pad.get("layer", "F.Cu")
                 layers = (stack if raw_layer.startswith("*")
                           else (tokens.get(raw_layer, raw_layer),))
                 for token in layers:

@@ -436,11 +436,11 @@ def project_board(rb: ResolvedBoard) -> Projection:
                     per_layer=tuple((lid, land) for lid in layers),
                     drill=drill, position=pad.position,
                     ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
-        else:
+        elif ir_pad.carries_copper:
             shape = smd_shape(pad, number, comp.ref)
             copper.append(CopperPrimitive(
                 entity_id=pad.id, parent_id=comp.id, kind="smd_pad",
-                layers=pad_copper or all_copper[:1], net_id=pad.net_id,
+                layers=pad_copper, net_id=pad.net_id,
                 shape=shape, aabb=_shape_aabb(shape),
                 ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
 

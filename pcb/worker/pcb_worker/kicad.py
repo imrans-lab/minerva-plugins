@@ -41,6 +41,7 @@ from .ir_projection import (
 )
 from .pad_source import (
     DEFAULT_MASK_CLEARANCE_MM,
+    has_copper,
     is_through_hole,
     iter_pads,
     mask_opening_dim,
@@ -684,6 +685,20 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         net_expr = ""
         if net_no:
             net_expr = f' (net {net_no} "{_esc(net_name_of.get(net_no, ""))}")'
+        if not is_through_hole(pad) and not has_copper(pad):
+            # Preserve KiCad's stencil-only pad primitive exactly as such.  The
+            # resolved layer list has already been side-flipped by the placement
+            # transform, so a bottom component naturally emits B.Paste here.
+            shape_tok, sw, sh, rratio_suffix = _smd_shape_tokens(pad)
+            paste_layers = [value for value in (pad.layers or [])
+                            if value in ("F.Paste", "B.Paste")]
+            layer_expr = " ".join(f'"{value}"' for value in paste_layers)
+            lines.append(
+                f'    (pad "{_esc(num_s)}" smd {shape_tok} '
+                f'{_pad_at(px, py, pad.rotation)} (size {sw} {sh})'
+                f'{rratio_suffix} (layers {layer_expr}))'
+            )
+            continue
         # Explicit per-pad solder-mask expansion, IDENTICAL to gerber's per-pad
         # margin (bug 019f9266b9cd) — authoritative in KiCad, so the CAM output does
         # not depend on the board-setup default. 0 for an unplated hole (drill-size
@@ -940,6 +955,8 @@ def _pad_to_dict(pad: PlacedPad, number: str) -> dict:
         out["corner_rratio"] = pad.corner_rratio
     if pad.solder_mask_margin is not None:
         out["solder_mask_margin"] = pad.solder_mask_margin
+    if pad.solder_paste_margin is not None:
+        out["solder_paste_margin"] = pad.solder_paste_margin
     # D1 provenance — omitted when an OVERRIDE annulus (round) supersedes the
     # footprint shape, so an override-annulus pad stays a round annulus.
     if pad.raw_shape is not None and pad.annulus is None:

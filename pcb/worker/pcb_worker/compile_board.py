@@ -1005,14 +1005,24 @@ def _check_pad_capabilities(pad: PadDefinition, ref: str, diags: _Diagnostics) -
              f"the second; refusing rather than silently picking one")
 
     has_copper = any(layer.role is LayerRole.COPPER for layer in pad.layers)
-    if has_copper and pad.size is None:
-        fail("missing_pad_size", "copper pad has no declared size; v1 refuses to invent one")
+    has_paste = any(layer.role is LayerRole.PASTE for layer in pad.layers)
+    if (has_copper or has_paste) and pad.size is None:
+        feature = "copper pad" if has_copper else "paste aperture"
+        fail("missing_pad_size", f"{feature} has no declared size; v1 refuses to invent one")
 
     # Pad-type legality: the three seed pad types have distinct, non-overlapping
     # geometry contracts.  A definition that violates its own type is malformed.
     if pad.pad_type == "smd":
-        if not has_copper:
-            fail("illegal_pad_definition", "SMD pad declares no copper layer")
+        # KiCad also spells a stencil-only aperture as an unnumbered ``smd`` pad
+        # whose sole participation is F.Paste/B.Paste.  It is not an electrical
+        # land and must not be rejected merely because it has no copper.  Keep the
+        # accepted non-copper subset deliberately narrow: a pad on some OTHER
+        # technical layer still has no modeled meaning and fails closed.
+        non_copper_roles = {layer.role for layer in pad.layers
+                            if layer.role is not LayerRole.COPPER}
+        if not has_copper and (not has_paste or non_copper_roles != {LayerRole.PASTE}):
+            fail("illegal_pad_definition",
+                 "SMD pad declares neither copper nor a paste-only aperture")
         if pad.drill is not None:
             fail("illegal_pad_definition", "SMD pad must not carry a drill")
     elif pad.pad_type in ("thru_hole", "np_thru_hole"):
