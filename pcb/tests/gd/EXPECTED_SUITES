@@ -20,6 +20,11 @@
 # See pcb/docs/gd-tests.md.
 test_bus_tool.gd assertions=64
 test_candidate_canvas.gd assertions=281
+# Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
+# authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
+# enriched dict, so the suite re-demonstrates the >64KiB defect condition on
+# every run before proving the projection fixes it.
+test_canonical_wire_board.gd assertions=23
 test_connectivity_baseline_surface.gd assertions=21
 test_epoch6_fix_regressions.gd assertions=9
 test_geometric_drc_surface.gd assertions=31

@@ -3410,16 +3410,85 @@ static func _feed_assembly_cache(host, assembly: Dictionary, board_revision: int
 		panel.set_assembly_state(assembly, board_revision)
 
 
+## Per-component fields canonical_wire_board strips — the panel's RENDER
+## enrichment (worker-attached or panel-derived draw detail). Every entry is
+## poison-proven unread by the worker's assembly/board_health kernels
+## (worker/tests/test_board_health_resolve_first.py): both resolve tolerantly
+## from the library chain themselves, so shipping these is pure wire weight.
+## `pads` is deliberately NOT here — see canonical_wire_board.
+const _WIRE_DROP_COMPONENT_FIELDS: Array[String] = [
+	"graphics", "refdes_graphics", "local_bounds", "width", "height",
+	"bbox_center_offset", "properties", "color", "has_pad_geometry",
+	"footprint_id", "label_visible", "locked", "footprint_resolved",
+]
+
+
+## The CANONICAL WIRE form of a board dict — what the worker channels
+## (pcb.assembly_check / pcb.board_health) are actually owed (bug
+## 01a007f1dd02). The full panel dict ships ~9x the canonical size in render
+## enrichment (pads/graphics/refdes_graphics dominate) and blew the host
+## broker's 64 KiB payload cap on an ordinary 36-component board, silently
+## disabling the assembly advisory on exactly the boards big enough to need
+## it. The worker resolves tolerantly from the library chain on BOTH channels
+## (resolve-first census: bug 01a01b6bc649), so enrichment for
+## library-resolvable components is recomputed server-side and never read off
+## the wire.
+##
+## DROP-LIST philosophy, not keep-list: unknown board sections and component
+## extras (origin, zones, mpn, assembly, ...) PASS THROUGH — an allowlist
+## silently sheds the next canonical field someone adds, which is how the
+## first draft of this helper lost quadlayer's `origin`.
+##
+## `pads` is conditional: dropped when the worker can re-derive them
+## (component marked footprint_resolved, or its footprint is a "Lib:Name"
+## library ref), KEPT otherwise — for a custom/parametric part the panel's
+## pads are the only geometry anywhere, and dropping them measurably changes
+## the assembly verdict (the ladder's custom-rich-pads probe). `pins` always
+## travel: they are canonical fab geometry and the pad_extent fallback.
+##
+## Idempotent: applying it to its own output is the identity.
+static func canonical_wire_board(board: Dictionary) -> Dictionary:
+	var out := {}
+	for key in board:
+		if key == "components":
+			continue
+		out[key] = board[key]
+	var comps_out: Array = []
+	var comps_in_v: Variant = board.get("components", [])
+	var comps_in: Array = comps_in_v if comps_in_v is Array else []
+	for comp_v in comps_in:
+		if not (comp_v is Dictionary):
+			comps_out.append(comp_v)
+			continue
+		var comp: Dictionary = comp_v
+		var lean := {}
+		var worker_can_rederive_pads: bool = \
+			bool(comp.get("footprint_resolved", false)) \
+			or str(comp.get("footprint", "")).contains(":")
+		for key in comp:
+			if key in _WIRE_DROP_COMPONENT_FIELDS:
+				continue
+			if key == "pads" and worker_can_rederive_pads:
+				continue
+			lean[key] = comp[key]
+		comps_out.append(lean)
+	out["components"] = comps_out
+	return out
+
+
 ## Run the pcb.assembly_check channel over the LIVE board and return the
 ## tri-state verdict, feeding the cache as a side effect (work item
 ## 019fd5fe2724 — the placement verbs' refresh half). A host without the
 ## bridge (headless model-only fixtures) or a failed channel degrades to
-## {status:"indeterminate", ...} — advisory, NEVER a gate here.
+## {status:"indeterminate", ...} — advisory, NEVER a gate here. The board
+## crosses the broker as its canonical wire form (canonical_wire_board) —
+## the full dict blew the 64 KiB payload cap on real boards (01a007f1dd02).
 static func _run_assembly_check(host, data) -> Dictionary:
 	if data == null or host == null or not host.has_method("assembly_check"):
 		return {"status": "indeterminate",
 			"reason": "assembly check unavailable — no channel bridge (headless / before mount)"}
-	var reply: Dictionary = await host.assembly_check(data.to_board_dict())
+	var reply: Dictionary = await host.assembly_check(
+		canonical_wire_board(data.to_board_dict()))
 	var tri: Dictionary = _assembly_tri_state(reply)
 	_feed_assembly_cache(host, tri, int(data.board_revision))
 	return tri

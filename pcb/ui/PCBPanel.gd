@@ -5785,6 +5785,10 @@ func get_selection_state() -> Dictionary:
 ## object a route reply's board_health carries. Same envelope normalisation
 ## as assembly_check below.
 func board_health_check(board: Dictionary) -> Dictionary:
+	# Canonical wire form at the seam (01a007f1dd02): the enriched dict blew
+	# the broker's 64 KiB cap on real boards; the worker resolves for itself.
+	# Applied here so EVERY caller — the load path included — is covered.
+	board = _PanelToolsScript.canonical_wire_board(board)
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
@@ -5974,6 +5978,8 @@ func _schedule_mask_view_refresh() -> void:
 
 
 func assembly_check(board: Dictionary) -> Dictionary:
+	# Same canonical-wire seam as board_health_check above (01a007f1dd02).
+	board = _PanelToolsScript.canonical_wire_board(board)
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",

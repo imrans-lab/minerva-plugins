@@ -793,13 +793,29 @@ def _board_health_method(params: dict) -> dict:
     indeterminate?, assembly:{...}, approximate: True}} — one kernel, same
     keys, same tri-state semantics as the propose-time ledger; a census
     fault degrades inside _completeness_keys ({complete: None,
-    completeness_error}), never a raise."""
+    completeness_error}), never a raise.
+
+    RESOLVE-FIRST (bug 01a01b6bc649): the completeness census locates pin
+    copper from resolve-attached pad geometry, so a CANONICAL board — whose
+    library components carry no inline pins — used to census as pin-free and
+    return a false `complete: true` on a board with a split net. The
+    assembly half already resolved tolerantly for itself
+    (_assembly_tri_state's own contract); the census now gets the same
+    treatment, so canonical and enriched input yield the identical ledger —
+    the property the panel's canonical-wire payload (01a007f1dd02) rests on.
+    Any resolution failure falls back to the raw board, the same
+    degrade-not-refuse rule _assembly_tri_state uses."""
     try:
         board = _load(params)
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
-    return {"ok": True, "result": _board_health(board, [], board,
-                                                layers=_layer_params(params))}
+    layers = _layer_params(params)
+    census_board = board
+    resolved = _resolve_mapped(board, tolerant=True, layers=layers)
+    if isinstance(resolved, dict) and not _is_error_reply(resolved):
+        census_board = resolved
+    return {"ok": True, "result": _board_health(census_board, [], census_board,
+                                                layers=layers)}
 
 
 def _promote_check(params: dict) -> dict:
