@@ -276,8 +276,19 @@ class DefaultCapabilityPolicy:
         requested_outputs: tuple[str, ...],
     ) -> bool:
         if marker.feature == "zone_connect":
-            # Inert unless the board actually declares zones for it to affect.
-            return bool(isinstance(board_context, dict) and board_context.get("zones"))
+            # Inert unless the board declares a zone this pad's connect STYLE
+            # could actually change -- i.e. a COPPER POUR. A keepout zone pours
+            # no copper, so there is nothing for `(zone_connect ...)` to alter
+            # and refusing the board over it is a false fatality: it blocked
+            # every compile of a board whose only zones were antenna keepouts,
+            # taking geometric DRC and the routing IR down with it.
+            #
+            # `kind` follows Go's Zone.Kind (board.go:416): "" means
+            # copper_pour, so a zone authored before the field existed still
+            # counts. An unrecognised kind counts too -- _zone_kind() reports it
+            # as invalid_zone_kind separately, and guessing "harmless" about a
+            # zone we cannot classify is the fail-open direction.
+            return _declares_copper_pour(board_context)
         if marker.domain not in _FATAL_DOMAINS:
             return False
         # Fatal when the marker's own domain OR any of its explicitly-attributed
@@ -285,6 +296,28 @@ class DefaultCapabilityPolicy:
         if marker.domain.value in requested_outputs:
             return True
         return any(output in requested_outputs for output in marker.affected_outputs)
+
+
+def _declares_copper_pour(board_context: object) -> bool:
+    """Whether the board declares at least one copper-pour zone.
+
+    The context-sensitivity test for ``zone_connect`` (see
+    :meth:`DefaultCapabilityPolicy.is_blocking`). Deliberately tolerant about
+    the container -- the policy is handed whatever the caller had -- and
+    deliberately STRICT about which kinds it discounts: only the literal
+    ``"keepout"`` spelling is treated as pour-free.
+    """
+    if not isinstance(board_context, dict):
+        return False
+    zones = board_context.get("zones")
+    if not isinstance(zones, list):
+        return bool(zones)
+    for zone in zones:
+        if not isinstance(zone, dict):
+            return True
+        if zone.get("kind") != ZoneKind.KEEPOUT.value:
+            return True
+    return False
 
 
 class _Diagnostics:

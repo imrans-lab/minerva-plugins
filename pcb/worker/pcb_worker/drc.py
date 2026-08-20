@@ -38,13 +38,14 @@ wiring and the segment geometry that gerber has no need for.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Any, NamedTuple
 
 from agent_router import layers as _layers
 
 from .geometry import rotate_local_offset as _rotate
-from .pad_source import is_through_hole, iter_pads
+from .pad_source import has_copper, is_through_hole, iter_pads
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
 # layer"; it defaults to the board's clearance rule (same value the wrong-net
@@ -151,17 +152,26 @@ def _dist(a, b) -> float:
 
 
 def _point_on_segment_interior(pt, a, b, eps: float) -> bool:
-    """True if pt lies on the STRICT interior of segment a-b (distance <= eps,
-    projection parameter strictly between the endpoints). Endpoint coincidences
-    are handled separately via degree counting."""
+    """True if pt lies on the STRICT interior of segment a-b (perpendicular
+    distance <= eps, and at least eps ALONG the segment from either endpoint).
+    Endpoint coincidences are handled separately via degree counting.
+
+    UNITS. ``t`` is the dimensionless projection parameter in [0, 1]; ``eps`` is
+    a distance in MILLIMETRES. Comparing them directly (``t <= eps``) scaled the
+    endpoint exclusion by the segment's own length: on a 12mm run at eps=0.2 it
+    blanked 2.4mm at each end, so a pad sitting on real copper 2.35mm from a
+    trace end earned no T-junction credit and its net silently reported an extra
+    pin island. Both ends of the comparison are metric now.
+    """
     ax, ay = a
     bx, by = b
     dx, dy = bx - ax, by - ay
     seg_len2 = dx * dx + dy * dy
     if seg_len2 < eps * eps:
         return False
+    seg_len = math.sqrt(seg_len2)
     t = ((pt[0] - ax) * dx + (pt[1] - ay) * dy) / seg_len2
-    if t <= eps or t >= 1.0 - eps:
+    if t * seg_len <= eps or (1.0 - t) * seg_len <= eps:
         return False
     proj = (ax + t * dx, ay + t * dy)
     return _dist(pt, proj) <= eps
@@ -173,15 +183,39 @@ def _point_on_segment_interior(pt, a, b, eps: float) -> bool:
 
 
 class _Pad:
-    __slots__ = ("ref", "pin", "net", "x", "y", "through_hole")
+    """One harvested pad. ``layers`` is the CANONICAL set of copper layers the
+    pad actually occupies ("top"/"in1"/.../"bottom"), folded once at harvest
+    exactly like :class:`_Seg`.
 
-    def __init__(self, ref, pin, net, x, y, through_hole):
+    A pad is not a column through the stack. A top-side SMD land shares no
+    copper with a bottom-layer trace passing under it, which is ordinary
+    routing -- yet a layer-blind reader called it a short (check A) AND, worse,
+    let it JOIN two islands of a net (the pin-group census), which fails open.
+    ``through_hole`` stays as the separate, cheaper fact the emitters share;
+    ``occupies`` is what the layer-sensitive checks ask."""
+
+    __slots__ = ("ref", "pin", "net", "x", "y", "through_hole", "layers")
+
+    def __init__(self, ref, pin, net, x, y, through_hole, layers=None):
         self.ref = ref
         self.pin = pin
         self.net = net
         self.x = x
         self.y = y
         self.through_hole = through_hole
+        self.layers = layers
+
+    def occupies(self, layer) -> bool:
+        """Whether this pad has copper on ``layer`` (a canonical id).
+
+        PERMISSIVE when unknown: a through-hole spans the stack, and a pad
+        harvested from the inline-pin fallback declares no layers at all -- for
+        those, every layer answers True, which is exactly the pre-layer-aware
+        behaviour. Only a pad that positively declares its copper layers can
+        say no."""
+        if self.through_hole or not self.layers:
+            return True
+        return layer in self.layers
 
     @property
     def pt(self):
@@ -246,8 +280,26 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             # isfinite guard means it is simply not counted as a through-hole (never
             # NaN-classified), matching the emitters' post-validation behaviour.
             through_hole = is_through_hole(pad)
+            # PASTE-ONLY apertures are not pads. KiCad splits a QFN thermal pad
+            # into several unnumbered `(pad "" smd ... (layers "F.Paste"))`
+            # nodes; they are stencil geometry with no copper and no net. Left
+            # in, each one reads as an unnetted pad sitting inside the very
+            # thermal land it stencils, so any trace endpoint within `clearance`
+            # of an aperture centre was reported as a wrong-net short against a
+            # nameless pad -- a false positive with no way for the router to
+            # comply. `has_copper` is pad_source's own predicate for exactly
+            # this distinction, and it preserves the unresolved inline-pin
+            # fallback (no layer list => still copper).
+            if not has_copper(pad):
+                continue
+            declared = pad.layers or []
+            if any(lay == "*.Cu" for lay in declared):
+                canon = None          # spans the stack -> permissive
+            else:
+                canon = frozenset(_layers.kicad_to_canon(lay) for lay in declared
+                                  if _layers.is_copper(lay)) or None
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
-                             cx + ox, cy + oy, through_hole))
+                             cx + ox, cy + oy, through_hole, canon))
     return pads
 
 
@@ -322,7 +374,8 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
     seen: set = set()
     for seg in segs:
         for pt in (seg.a, seg.b):
-            near = [p for p in pads if _dist(pt, p.pt) <= clr]
+            near = [p for p in pads
+                    if _dist(pt, p.pt) <= clr and p.occupies(seg.layer)]
             if not near:
                 continue
             nets_here = {p.net for p in near}
@@ -613,6 +666,8 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
     seg_node = n_pads
     for si, seg in enumerate(net_segs):
         for pi, pad in enumerate(net_pads):
+            if not pad.occupies(seg.layer):
+                continue   # copper on another layer joins nothing here
             if (_dist(seg.a, pad.pt) <= clr or _dist(seg.b, pad.pt) <= clr
                     or _point_on_segment_interior(pad.pt, seg.a, seg.b, clr)):
                 union(pi, seg_node + si)

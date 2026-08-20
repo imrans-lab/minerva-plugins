@@ -615,7 +615,30 @@ def test_policy_zone_connect_is_context_sensitive():
                             default_blocking=False, detail="zc",
                             source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
     assert policy.is_blocking(zc, {}, V1_FAB_OUTPUTS) is False           # no zones → inert
-    assert policy.is_blocking(zc, {"zones": [{}]}, V1_FAB_OUTPUTS) is True  # zones present → fatal
+    assert policy.is_blocking(zc, {"zones": [{}]}, V1_FAB_OUTPUTS) is True  # pour (kind defaults) → fatal
+    assert policy.is_blocking(zc, {"zones": [{"kind": "copper_pour"}]},
+                              V1_FAB_OUTPUTS) is True
+
+
+def test_policy_zone_connect_ignores_keepout_only_zones():
+    """A keepout pours no copper, so a pad's zone-connect STYLE cannot change
+    it. Blocking on one refused every board whose only zones were keepouts
+    (an antenna exclusion), which took the whole compile -- geometric DRC and
+    the routing IR with it -- down over a token with nothing to affect."""
+    policy = DefaultCapabilityPolicy()
+    zc = UnsupportedFeature(feature="zone_connect", domain=FeatureDomain.COPPER,
+                            affected_layer=None, affected_outputs=("copper",),
+                            default_blocking=False, detail="zc",
+                            source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
+    keepouts = {"zones": [{"kind": "keepout"}, {"kind": "keepout"}]}
+    assert policy.is_blocking(zc, keepouts, V1_FAB_OUTPUTS) is False
+    # ...but ONE pour alongside them is enough to make it fatal again.
+    mixed = {"zones": [{"kind": "keepout"}, {"kind": "copper_pour"}]}
+    assert policy.is_blocking(zc, mixed, V1_FAB_OUTPUTS) is True
+    # An unclassifiable zone fails CLOSED rather than being assumed harmless.
+    assert policy.is_blocking(zc, {"zones": [{"kind": "Keepout"}]},
+                              V1_FAB_OUTPUTS) is True
+    assert policy.is_blocking(zc, {"zones": ["nonsense"]}, V1_FAB_OUTPUTS) is True
 
 
 def test_v1_requested_outputs_do_not_claim_the_fab_layer():

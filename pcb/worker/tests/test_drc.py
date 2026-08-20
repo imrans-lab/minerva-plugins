@@ -246,6 +246,170 @@ def test_single_wrong_net_pad():
     assert f["pad"]["net"] == "NB"
 
 
+_PASTE_APERTURE = """
+version: 1
+name: paste
+width_mm: 12
+height_mm: 12
+design_rules: {clearance_mm: 0.2}
+components:
+  - ref: A1
+    footprint: R
+    x_mm: 0
+    y_mm: 5
+    rotation_deg: 0
+    pins: [{number: '1', x_mm: 0, y_mm: 0}]
+    pads:
+      - {number: '1', type: smd, shape: rect, position: {x: 0, y: 0},
+         size: {width: 1, height: 1}, layers: ['F.Cu', 'F.Mask', 'F.Paste']}
+  - ref: U1
+    footprint: QFN
+    x_mm: 10
+    y_mm: 5
+    rotation_deg: 0
+    pins: [{number: '17', x_mm: 0, y_mm: 0}]
+    pads:
+      - {number: '17', type: smd, shape: rect, position: {x: 0, y: 0},
+         size: {width: 1.68, height: 1.68}, layers: ['F.Cu', 'F.Mask']}
+      - {number: '', type: smd, shape: roundrect, position: {x: 0, y: 0},
+         size: {width: 0.68, height: 0.68}, layers: ['F.Paste']}
+nets:
+  - {name: NA, pins: ['A1.1', 'U1.17']}
+traces:
+  - {net: NA, layer: top, width_mm: 0.25,
+     points: [{x_mm: 0, y_mm: 5}, {x_mm: 10, y_mm: 5}]}
+"""
+
+
+_UNDER_PAD = """
+version: 1
+name: underpad
+width_mm: 20
+height_mm: 20
+design_rules: {clearance_mm: 0.2}
+components:
+  - ref: U1
+    footprint: LGA
+    x_mm: 10
+    y_mm: 2
+    rotation_deg: 0
+    pins: [{number: '1', x_mm: 0, y_mm: 0}, {number: '2', x_mm: 0, y_mm: 2}]
+    pads:
+      - {number: '1', type: smd, shape: rect, position: {x: 0, y: 0},
+         size: {width: 0.9, height: 0.6}, layers: ['F.Cu', 'F.Mask']}
+      - {number: '2', type: smd, shape: rect, position: {x: 0, y: 2},
+         size: {width: 0.9, height: 0.6}, layers: ['F.Cu', 'F.Mask']}
+  - ref: P1
+    footprint: R
+    x_mm: 2
+    y_mm: 2
+    rotation_deg: 0
+    pins: [{number: '1', x_mm: 0, y_mm: 0}]
+    pads:
+      - {number: '1', type: thru_hole, shape: circle, position: {x: 0, y: 0},
+         size: {width: 1.2, height: 1.2}, drill: {x: 0.8}, layers: ['*.Cu']}
+nets:
+  - {name: SIG, pins: ['P1.1', 'U1.2']}
+  - {name: OTHER, pins: ['U1.1']}
+traces:
+  - {net: SIG, layer: bottom, width_mm: 0.25,
+     points: [{x_mm: 2, y_mm: 2}, {x_mm: 10, y_mm: 2}, {x_mm: 10, y_mm: 4}]}
+"""
+
+
+def _groups(board, net="SIG"):
+    return drc._net_pin_groups(net, drc._harvest_pads(board),
+                               drc._harvest_segments(board),
+                               drc._harvest_vias(board), 0.2)
+
+
+def test_bottom_trace_under_a_top_smd_pad_is_not_a_short():
+    """A top-side SMD land shares no copper with a bottom trace running under
+    it -- ordinary two-layer routing. The pad harvest now carries each pad's own
+    copper layers so check A can tell them apart; before it could not, and every
+    bottom trace crossing beneath a foreign top-side pad was reported as a short
+    the router had no legal way to avoid.
+
+    Here the SIG trace runs on `bottom` from the P1 through-hole and turns at
+    (10, 2) -- dead on U1.1, which is on net OTHER and lives on F.Cu only."""
+    board = yaml.safe_load(_UNDER_PAD)
+    assert _run(board)["counts"]["wrong_net_pad"] == 0
+    # The SAME geometry on `top` really is a short, so the gate is a layer
+    # test and not a blanket exemption.
+    board["traces"][0]["layer"] = "top"
+    r = _run(board)
+    assert r["counts"]["wrong_net_pad"] == 1
+    assert _of_type(r, "wrong_net_pad")[0]["pad"] == {
+        "ref": "U1", "pin": "1", "net": "OTHER"}
+
+
+def test_layer_gate_fails_closed_for_completeness():
+    """The same layer fact must tighten the pin-group census, not just relax
+    check A. A bottom trace ENDING on a top-only pad reaches no copper, so the
+    net is still two islands -- crediting it would fail OPEN, and `complete`
+    gates promotion."""
+    board = yaml.safe_load(_UNDER_PAD)
+    assert _groups(board) == 2          # bottom trace never reaches U1.2
+    board["traces"][0]["layer"] = "top"
+    assert _groups(board) == 1          # ...on top it does
+
+
+def test_through_hole_and_unresolved_pads_stay_layer_permissive():
+    """The gate must not tighten the two cases that legitimately span, or that
+    simply do not know: a through-hole pad has copper on every layer, and a pad
+    from the inline-pin fallback declares no layers at all."""
+    board = yaml.safe_load(_UNDER_PAD)
+    pads = {(p.ref, p.pin): p for p in drc._harvest_pads(board)}
+    assert pads[("P1", "1")].occupies("bottom") is True   # thru-hole spans
+    assert pads[("P1", "1")].occupies("top") is True
+    assert pads[("U1", "1")].occupies("bottom") is False  # top-only SMD
+    assert pads[("U1", "1")].occupies("top") is True
+    del board["components"][0]["pads"]                    # inline-pin fallback
+    fallback = {(p.ref, p.pin): p for p in drc._harvest_pads(board)}
+    assert fallback[("U1", "1")].occupies("bottom") is True
+
+
+def test_tee_credit_is_metric_not_parametric():
+    """The T-junction epsilon is a DISTANCE, so the endpoint exclusion it
+    carves out must not scale with the segment's length.
+
+    `t` is the dimensionless projection parameter; comparing it to `eps`
+    directly excluded the first and last `eps * seg_len` mm of every run. On the
+    12mm GND spine below that is 2.4mm at each end -- so a pad on genuine copper
+    2.35mm from the end read as unconnected and the net reported a phantom
+    second pin island."""
+    pt = (11.0, 70.15)
+    a, b = (11.0, 72.5), (11.0, 60.5)          # 12mm run; pt is 2.35mm from a
+    assert drc._point_on_segment_interior(pt, a, b, 0.2) is True
+    # ...still excluded AT the endpoint, and still rejected off to the side.
+    assert drc._point_on_segment_interior((11.0, 72.45), a, b, 0.2) is False
+    assert drc._point_on_segment_interior((11.5, 70.15), a, b, 0.2) is False
+    # The exclusion is now length-INDEPENDENT: the same 2.35mm offset behaves
+    # identically on a run ten times longer.
+    long_b = (11.0, -47.5)
+    assert drc._point_on_segment_interior(pt, a, long_b, 0.2) is True
+
+
+def test_paste_only_aperture_is_not_a_pad():
+    """KiCad splits a QFN thermal land into unnumbered F.Paste-only `pad` nodes.
+    They are stencil geometry -- no copper, no net -- so they must not be
+    harvested as pads: sitting inside the very land they stencil, each one made
+    every trace landing on that thermal pad read as a wrong-net short against a
+    nameless, unnettable pad, which no router could route its way out of."""
+    r = _run(yaml.safe_load(_PASTE_APERTURE))
+    assert r["counts"]["wrong_net_pad"] == 0
+    assert r["counts"]["dangling_endpoint"] == 0
+    assert r["counts"]["crossing"] == 0
+    # ...and the COPPER land at the same centre is still a pad: flip the trace
+    # to a different net and the short comes back.
+    board = yaml.safe_load(_PASTE_APERTURE)
+    board["nets"] = [{"name": "NA", "pins": ["A1.1"]},
+                     {"name": "NB", "pins": ["U1.17"]}]
+    r2 = _run(board)
+    assert r2["counts"]["wrong_net_pad"] == 1
+    assert _of_type(r2, "wrong_net_pad")[0]["pad"]["pin"] == "17"
+
+
 def test_single_layer_change_no_via():
     r = _run(yaml.safe_load(_MISSING_VIA))
     assert r["counts"]["layer_change_no_via"] == 1
