@@ -549,7 +549,7 @@ other lacks.
 
 | Tool | Notes |
 |---|---|
-| `minerva_pcb_workspace_propose` | router reply → candidates (no annotations); `holds[]` names any task a PINNED candidate held |
+| `minerva_pcb_workspace_propose` | router reply → candidates (no annotations); `holds[]` names any task a PINNED candidate held. `spans:[{source_pin, dest_pin, width_mm?, note?, corridor?}]` (DCR `01a022ab356c` leg B) mints the route intent per span internally — same validation/annotation/ref/width channel as `add_route_intent`, atomic across both stores (any invalid span refuses before anything mints) — then routes them in this same call; `spans` + `hint_ids` are a UNION in one run; reply carries `minted_hint_ids` |
 | `minerva_pcb_workspace_list` | live candidates + tasks + selection; `include_terminal` for history |
 | `minerva_pcb_workspace_get_active` | the focused candidate + its findings; empty active id is a success, not an error |
 | `minerva_pcb_workspace_pin` | Keep — future routing routes around it; stales nothing |
@@ -558,7 +558,7 @@ other lacks.
 | `minerva_pcb_workspace_unfreeze` | the deliberate demotion back to `proposed` — the only way settled geometry becomes retirable again |
 | `minerva_pcb_workspace_reject` | discard + reopen the task; terminal; stales every still-live verdict |
 | `minerva_pcb_workspace_commit` | Accept — candidate → real copper, in ONE undoable step (below) |
-| `minerva_pcb_workspace_reroute_route` | Try-again on the whole route; router runs before the prior is retired |
+| `minerva_pcb_workspace_reroute_route` | Try-again on the whole route; router runs before the prior is retired. A candidate whose source hints are GONE (deleted intent) or absent (worker attributed `[]`) no longer refuses (DCR `01a022ab356c` leg C): the run degrades to hint-less task/terminal scoping from the candidate's own endpoints, lands on the SAME task (superseding, never duplicating), and the reply says so (`hintless_fallback: true`); only a candidate with neither hints nor endpoints refuses (`unscopable_candidate`) |
 | `minerva_pcb_workspace_reroute_span` | **DEGRADED** to a whole-route reroute, named on every reply (below) |
 | `minerva_pcb_workspace_check` | set-scoped draft DRC; findings name candidate/segment/via ids; stale candidates refuse |
 | `minerva_pcb_promote` | K13's serialize-back, correctness-gated + completeness-ADVISORY (UX4 owner ruling: granular promotion): full gate → canonical YAML write; correctness refusals name findings with NO acknowledge-through; a clean-partial board promotes with unrouted nets as advisory; panel-side copper/component regression guard (allow_copper_regression overrides) |
@@ -669,11 +669,15 @@ reach it from `PCBPanel.route_board(selection, extra)`, whose `extra` argument
   - absent scope/no pins: the request is `{board, route_hints, selection}`,
     byte-identical to before this fix.
 
-**Still open:** a reroute on a candidate with no `source_hint_ids` is still
-refused (`no_source_hints`) rather than being addressed via `scope` alone —
-the reroute call sites still gate on hint provenance first. Fixing that is a
-separate, larger change to `_workspace_reroute`'s control flow, not part of
-this fence.
+**Closed (DCR `01a022ab356c` leg C):** a reroute on a candidate with no
+`source_hint_ids` (or whose hints were deleted) is no longer refused — it
+degrades to a hint-less run scoped by the candidate's own task/net/endpoint
+pin refs, lands on the SAME task via the ingest task-key override, and the
+reply carries `hintless_fallback: true`. Only a candidate with neither hints
+nor ≥2 well-formed endpoint refs refuses (`unscopable_candidate`). Corridor
+steering stays hint-keyed, so `corridor`/`preserve_shape_as_corridor` on such
+a candidate refuse `steering_unavailable_hintless` (`clear_constraint` remains
+the stale-gate recovery).
 
 ## Bus tool (`minerva_pcb_route_bus_direct`, campaign 2 epoch C unit 5, DCR `019fb572b888` S3+S4)
 

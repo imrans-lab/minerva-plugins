@@ -2431,17 +2431,41 @@ static func _is_bus_branch_hint(kp: Dictionary) -> bool:
 ## bus-branch hint, skip the scope entirely; the reroute still runs, unscoped,
 ## exactly as before this fix.
 ##
-## `endpoints` is deliberately omitted from the task entry: an endpoints list
-## would ask parse_route_scope to validate a SPAN, and a reroute always means
-## "the whole route for this task" (reroute-span is the documented degrade to
-## whole-route, see _workspace_reroute_span) — never a span, so omitting it
-## resolves to the whole net.
+## `endpoints` is deliberately omitted from the task entry on HINT-SCOPED
+## reroutes: an endpoints list would ask parse_route_scope to validate a
+## SPAN, and a reroute always means "the whole route for this task"
+## (reroute-span is the documented degrade to whole-route, see
+## _workspace_reroute_span) — never a span, so omitting it resolves to the
+## whole net. The ONE exception is leg C's HINT-LESS fallback (DCR
+## 01a022ab356c): with no hints to select, the candidate's own terminals are
+## the run's only narrowing, so _workspace_reroute adds them to this scope
+## via _endpoint_pin_refs below.
 static func _reroute_scope(c, source_hints: Array, _data) -> Dictionary:
 	for hint in source_hints:
 		var kp: Dictionary = _dict_or_empty(hint.get("kind_payload"))
 		if _is_bus_branch_hint(kp):
 			return {}
 	return {"tasks": [{"task_id": str(c.task_id), "net": str(c.net)}]}
+
+
+## The candidate's endpoints as "Comp.Pin" wire strings (DCR 01a022ab356c
+## leg C). The model stores endpoints as {component, pin} dicts
+## (_endpoints_from_hints); route_bridge.parse_route_scope wants pad refs —
+## and ONLY pad refs: a component-only entry (empty pin) is skipped rather
+## than emitted, because "U1" is never a routable terminal and the worker
+## would refuse the whole scope over it.
+static func _endpoint_pin_refs(c) -> Array:
+	var out: Array = []
+	for e in c.endpoints:
+		if e is Dictionary:
+			var comp := str((e as Dictionary).get("component", ""))
+			var pin := str((e as Dictionary).get("pin", ""))
+			if comp.is_empty() or pin.is_empty():
+				continue
+			out.append("%s.%s" % [comp, pin])
+		elif str(e).contains("."):
+			out.append(str(e))
+	return out
 
 
 ## Scope for a PROPOSE with an explicit hint_ids selection (DCR finding 7 part
@@ -6026,12 +6050,60 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	var workspace = ctx["ws"]
 	var data = ctx["data"]
 
+	# ── DCR 01a022ab356c leg B: one-call span-propose ─────────────────────────
+	# spans:[{source_pin, dest_pin, width_mm?, note?, corridor?}] mints a route
+	# intent per span through the SAME author path the standalone tool uses
+	# (identical annotation, citeable ref, width channel, eager task), then
+	# routes the minted hints in this very call. ATOMIC across both stores:
+	# every span validates BEFORE anything mints — a refusal leaves neither an
+	# annotation nor an eager task behind. spans + hint_ids are a UNION (one
+	# worker run routes both; owner ruling on the DCR).
+	var minted_hint_ids: Array = []
+	if args.has("spans"):
+		var spans_v: Variant = args.get("spans")
+		if not (spans_v is Array):
+			return _err("spans must be an array of {source_pin, dest_pin, width_mm?, note?, corridor?}")
+		var spans: Array = spans_v
+		if spans.is_empty():
+			# Present-but-empty refuses by name (the corridor precedent):
+			# spans:[] is a caller stating "route these spans: none", not the
+			# same ask as omitting the key.
+			return _err("spans present but empty — omit the key entirely for a hint-only propose")
+		for i in range(spans.size()):
+			if not (spans[i] is Dictionary):
+				return _err("spans[%d] must be an object with source_pin and dest_pin" % i)
+			var v: Dictionary = _validate_route_intent(data, spans[i] as Dictionary)
+			if not bool(v.get("ok", false)):
+				var refusal: Dictionary = v.duplicate()
+				refusal["span_index"] = i
+				return refusal
+		for i in range(spans.size()):
+			var minted: Dictionary = _add_route_intent(host, spans[i] as Dictionary)
+			if not bool(minted.get("success", false)):
+				# Post-validation mint failures are NOT fully unreachable
+				# (annotation-host/schema rejection sits past validation), and
+				# spans 0..i-1 are already minted — name them on the failure
+				# (fix cold review f4) so nothing is half-minted SILENTLY:
+				# the earlier intents remain ordinary open hints.
+				var failure: Dictionary = minted.duplicate()
+				failure["span_index"] = i
+				if not minted_hint_ids.is_empty():
+					failure["minted_hint_ids"] = minted_hint_ids.duplicate()
+					failure["note"] = str(failure.get("note", "")) \
+						+ " — earlier spans already minted their intents (see minted_hint_ids); they remain open hints, routable by a later propose or deletable individually"
+				return failure
+			minted_hint_ids.append(str(minted.get("hint_id", "")))
+
 	var hint_ids: Array = args.get("hint_ids", []) if args.get("hint_ids", []) is Array else []
+	if not minted_hint_ids.is_empty():
+		# Union — and with spans present the selection is ALWAYS ids-mode:
+		# a span-propose must never widen into an every-open-hint run.
+		hint_ids = hint_ids + minted_hint_ids
 	var source_hints: Array = _gather_route_hints(host, hint_ids)
 	if source_hints.is_empty():
 		return _ok({
 			"proposed": 0, "candidates": [], "holds": [], "unrouted": [], "stuck": [],
-			"note": "no open route hints to route (add hints or pass hint_ids)",
+			"note": "no open route hints to route (add hints, pass hint_ids, or pass spans:[{source_pin, dest_pin}] to mint an intent and route it in one call)",
 		})
 	var selection: Dictionary
 	if hint_ids.is_empty():
@@ -6070,8 +6142,13 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 				+ "beyond the ask was NOT attempted — propose net-level hints "
 				+ "(or omit endpoints) to route whole nets.",
 		}
-	return await _ingest_result_into_workspace(host, workspace, data, result, source_hints, extra,
+	var landed: Dictionary = await _ingest_result_into_workspace(host, workspace, data, result, source_hints, extra,
 		reply.get("draft_context", {}) if reply.get("draft_context", null) is Dictionary else {})
+	if not minted_hint_ids.is_empty():
+		# Leg B reply contract: the caller learns WHICH intents this call
+		# minted (order matches spans) — the durable, citeable records.
+		landed["minted_hint_ids"] = minted_hint_ids
+	return landed
 
 
 ## Reply honesty for every candidate-landing verb (docket 019fce3a6c57): when
@@ -6237,8 +6314,18 @@ static func _attach_hint_status(landed: Array, result: Dictionary) -> void:
 ## identically and a fix to one is a fix to all. `extra` is merged last so a
 ## caller can stamp its own metadata (e.g. the span degrade notice).
 static func _ingest_result_into_workspace(host, workspace, data, result: Dictionary,
-		source_hints: Array, extra: Dictionary, draft_context: Dictionary = {}) -> Dictionary:
+		source_hints: Array, extra: Dictionary, draft_context: Dictionary = {},
+		record_overrides: Dictionary = {}) -> Dictionary:
+	# record_overrides (DCR 01a022ab356c leg C): keys merged onto EVERY
+	# normalized record before ingest — the hint-less reroute passes
+	# task_key_override / endpoints_override / width_override so a
+	# hint-unattributed answer lands on the asking task instead of a phantom
+	# "net|" key. Empty (the default) is byte-identical to the old behavior.
 	var records: Array = _normalize_route_records(result, source_hints)
+	if not record_overrides.is_empty():
+		for rec_v in records:
+			if rec_v is Dictionary:
+				(rec_v as Dictionary).merge(record_overrides, true)
 	# F1 (Codex 1188): the request context is captured by route_board
 	# ATOMICALLY with the composition and rides the reply — both halves are
 	# consumed from it here. base_board_revision comes from COMPOSE time when
@@ -7165,6 +7252,20 @@ static func _workspace_reroute_route(host, args: Dictionary) -> Dictionary:
 	if not bool(pre.get("ok", false)):
 		return pre.get("reply")
 
+	# DCR 01a022ab356c leg C (fix cold review f3): corridor steering is
+	# hint-keyed end to end (owner_hint_id, the {hint_id: …} wire map, the
+	# worker's per-hint application) — a hint-less fallback run can never
+	# consume the constraint a steer would write, so writing one here would
+	# be silently ignored AND leave the landed generation commit-gated
+	# stale. Refuse by name. clear_constraint stays legal — it is the
+	# recovery path for exactly that stale gate.
+	if bool(pre.get("hintless", false)) and wants_steer:
+		return {
+			"success": false, "error": "steering_unavailable_hintless",
+			"candidate_id": str(pre["cid"]),
+			"note": "corridor steering is hint-keyed and this candidate has no live source hints — a hint-less fallback run cannot consume a routing_constraint. Author a fresh intent (minerva_pcb_add_route_intent, or spans on workspace_propose) to steer this span; clear_constraint remains available to release a stale one.",
+		}
+
 	var cleared_revision: int = 0
 	if wants_clear:
 		var clear: Dictionary = _clear_task_constraint_before_reroute(host, args, pre)
@@ -7716,28 +7817,34 @@ static func _reroute_precheck(host, args: Dictionary) -> Dictionary:
 	if not workspace.can_transition(cid, "superseded"):
 		return {"ok": false, "reply": _workspace_refusal_static(cid, str(c.disposition))}
 
+	# DCR 01a022ab356c leg C: hint provenance is the PREFERRED scoping, no
+	# longer the only one. A candidate whose hints are gone (deleted intent)
+	# or that never had any (bus/fallback generations, worker attributed [])
+	# degrades to a hint-less run scoped by the candidate's OWN task_id/net/
+	# endpoints — the worker already accepts task/terminal scope
+	# (route_bridge.parse_route_scope), and the candidate's endpoints are
+	# durable. The executor lands the answer on the SAME task (ingest
+	# task-key override) and reports hintless_fallback:true. This retires the
+	# no_source_hints / source_hints_missing refusals; a candidate with NO
+	# endpoints either still fails closed — an unscopable run must never
+	# silently widen to the whole board.
 	var hint_ids: Array = _string_list(c.source_hint_ids)
-	if hint_ids.is_empty():
-		# FAIL CLOSED rather than run a whole-board route. `route_board`/
-		# `run_router` DO now forward an explicit `scope` (DCR finding 7,
-		# _reroute_scope below, built straight from this candidate's own
-		# task_id/net) — but only AFTER this gate: this verb still requires
-		# hint provenance FIRST and uses `scope` as a belt-and-suspenders
-		# assertion alongside it, not as a substitute for it. Lifting this gate
-		# so a hint-less candidate could be addressed by task/net scope alone
-		# is a separate, larger change to this function's control flow — not
-		# part of this fence.
-		return {"ok": false, "reply": {
-			"success": false, "error": "no_source_hints", "candidate_id": cid,
-			"note": "this candidate carries no source route-hint ids; reroute is gated on hint provenance before the router bridge is even called, so an explicit task/net scope cannot be substituted for it here (see pcb/docs/tools.md's route-request note for what scope/pinned_candidates now cover)",
-		}}
-	var source_hints: Array = _gather_route_hints(host, hint_ids)
-	if source_hints.is_empty():
-		return {"ok": false, "reply": {
-			"success": false, "error": "source_hints_missing", "candidate_id": cid,
-			"hint_ids": hint_ids,
-			"note": "the route hints this candidate came from are no longer on the board, so the run cannot be scoped to it",
-		}}
+	var source_hints: Array = _gather_route_hints(host, hint_ids) if not hint_ids.is_empty() else []
+	if hint_ids.is_empty() or source_hints.is_empty():
+		# ≥2 DEDUPED well-formed refs (fix cold review f5): a single terminal,
+		# a duplicated pad, or component-only entries all pass an emptiness
+		# check yet make parse_route_scope refuse — which would surface as a
+		# misdiagnosed "route_worker_unavailable". Gate here, by name.
+		var seen: Dictionary = {}
+		for r in _endpoint_pin_refs(c):
+			seen[str(r)] = true
+		if seen.size() < 2:
+			return {"ok": false, "reply": {
+				"success": false, "error": "unscopable_candidate", "candidate_id": cid,
+				"note": "this candidate has neither live source hints nor at least two well-formed endpoint pin refs (\"Comp.Pin\") — a reroute cannot be scoped to it, and an unscoped run would route the whole board",
+			}}
+		return {"ok": true, "workspace": workspace, "data": data, "candidate": c,
+			"cid": cid, "hint_ids": [], "source_hints": [], "hintless": true}
 	return {"ok": true, "workspace": workspace, "data": data, "candidate": c,
 		"cid": cid, "hint_ids": hint_ids, "source_hints": source_hints}
 
@@ -7757,9 +7864,19 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary, pre: D
 	var c = pre["candidate"]
 	var cid: String = str(pre["cid"])
 	var source_hints: Array = pre["source_hints"]
+	var hintless: bool = bool(pre.get("hintless", false))
 
+	var scope: Dictionary = _reroute_scope(c, source_hints, data)
+	if hintless and scope.has("tasks"):
+		# Leg C: a hint-less run's ONLY steering is the candidate's own
+		# terminals — ride them on the task scope (as "Comp.Pin" ref strings,
+		# the parse_route_scope wire shape) so the worker narrows the run
+		# instead of routing the whole net blind.
+		for t in scope["tasks"]:
+			if t is Dictionary:
+				(t as Dictionary)["endpoints"] = _endpoint_pin_refs(c)
 	var route_extra: Dictionary = _route_request_extra(
-		workspace, _reroute_scope(c, source_hints, data), _hint_id_list(source_hints))
+		workspace, scope, _hint_id_list(source_hints))
 	# Epoch UX4 station 3: a reroute replaces one ghost with another — always
 	# a draft request, same contract as propose above.
 	route_extra["draft_request"] = true
@@ -7774,9 +7891,38 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary, pre: D
 	if str(c.disposition) == "pinned" and not workspace.supersede(cid):
 		return _workspace_refusal(workspace, "reroute", cid)
 
+	# Leg C ingest override: a hint-less reply attributes to [] — without the
+	# override the answer would land on a phantom "net|" task, leaving TWO
+	# live candidates for one question. The overrides pin the answer to the
+	# SAME task, carry the endpoints onto the fallback generation (so IT can
+	# be rerouted again), and keep the prior width.
+	var overrides: Dictionary = {}
+	if hintless:
+		# Prior width rides per-segment on the candidate (no scalar field) —
+		# the first segment's width is the run width every reply reports.
+		var prior_width := 0.0
+		if not c.segments.is_empty() and c.segments[0] is Dictionary:
+			prior_width = float((c.segments[0] as Dictionary).get("width", 0.0))
+		overrides = {
+			# endpoints keep the model's {component, pin} DICT shape — the
+			# override feeds cand.endpoints directly, and every consumer
+			# (including this very fallback on the NEXT reroute) reads dicts.
+			"task_key_override": prior_task,
+			"endpoints_override": (c.endpoints as Array).duplicate(true),
+			"width_override": prior_width,
+		}
 	var landed: Dictionary = await _ingest_result_into_workspace(
 		host, workspace, data, reply.get("result", {}), source_hints, extra,
-		reply.get("draft_context", {}) if reply.get("draft_context", null) is Dictionary else {})
+		reply.get("draft_context", {}) if reply.get("draft_context", null) is Dictionary else {},
+		overrides)
+	if hintless:
+		landed["hintless_fallback"] = true
+		# Honesty for constrained tasks (fix cold review f3): the constraint
+		# could not ride this run, and the landed generation will refuse
+		# commit as constraint-stale — say so NOW, with the recovery named.
+		var asking_task = workspace.get_task(prior_task)
+		if asking_task != null and asking_task.is_constrained():
+			landed["constraint_note"] = "the asking task carries a routing_constraint this hint-less run could NOT consume (steering is hint-keyed) — committing the landed generation will refuse constraint-stale; clear_constraint on a reroute releases it, or author a fresh intent to steer"
 	landed["rerouted_candidate_id"] = cid
 	landed["prior_task_id"] = prior_task
 	# Epoch UX1 station 11: reroute's own review-then-commit guidance replaces
@@ -8241,13 +8387,14 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 ## only accepts one source_pin/dest_pin string; a caller that sends an array is
 ## refused rather than silently taking the first), or no live workspace
 ## ("workspace_unavailable", via _workspace_ctx).
-static func _add_route_intent(host, args: Dictionary) -> Dictionary:
-	var ctx: Dictionary = _workspace_ctx(host)
-	if not bool(ctx.get("ok", false)):
-		return ctx.get("reply")
-	var workspace = ctx["ws"]
-	var data = ctx["data"]
-
+## Validation half of _add_route_intent, factored (DCR 01a022ab356c leg B) so
+## span-propose can validate EVERY span before minting ANY — atomic across
+## both stores. Pure: touches neither annotations nor tasks. Returns
+## {ok:true, source_pin, dest_pin, source_resolved, dest_resolved, net,
+## corridor_points, width_mm} — or, on refusal, the EXACT error dict
+## _add_route_intent always returned, VERBATIM (shapes are pinned by suites;
+## callers detect refusal by the absent "ok" key).
+static func _validate_route_intent(data, args: Dictionary) -> Dictionary:
 	if args.get("source_pin", "") is Array or args.get("dest_pin", "") is Array:
 		return {
 			"success": false, "error": "single_endpoint_only",
@@ -8325,6 +8472,29 @@ static func _add_route_intent(host, args: Dictionary) -> Dictionary:
 				"note": "width_mm must be a positive number (trace width in mm) — omit the key entirely for the net class default",
 			}
 		width_mm = float(raw_width)
+
+	return {"ok": true, "source_pin": source_pin, "dest_pin": dest_pin,
+		"source_resolved": source_resolved, "dest_resolved": dest_resolved,
+		"net": net, "corridor_points": corridor_points, "width_mm": width_mm}
+
+
+static func _add_route_intent(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+
+	var v: Dictionary = _validate_route_intent(data, args)
+	if not bool(v.get("ok", false)):
+		return v
+	var source_pin: String = v["source_pin"]
+	var dest_pin: String = v["dest_pin"]
+	var source_resolved: Dictionary = v["source_resolved"]
+	var dest_resolved: Dictionary = v["dest_resolved"]
+	var net: String = v["net"]
+	var corridor_points: Variant = v["corridor_points"]
+	var width_mm: Variant = v["width_mm"]
 
 	# ── (a) the connectivity annotation — NO waypoints, ever, by construction ──
 	var source_comp = source_resolved["comp"]

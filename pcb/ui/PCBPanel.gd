@@ -1380,9 +1380,11 @@ func _add_draft_tool_button(tb: Container, mode: int, text: String, tip: String,
 
 
 ## Sidebar section label — the 11px caption idiom shared by all three tool
-## groups. Named "<text>GroupLabel" (e.g. ProposalsGroupLabel; a repo-wide grep
-## 2026-08-01 found NO name lookups, so renaming a section is a text-only change)
-## keep resolving.
+## groups. Named "<text>GroupLabel" (e.g. IntentsGroupLabel). Renaming a
+## section is NO LONGER text-only (DCR 01a022ab356c leg D): the acceptance
+## suite test_dcr_proposal_ghost.gd pins these node names — IntentsGroupLabel
+## must exist and ProposalsGroupLabel must NOT — so a rename is a deliberate
+## vocabulary change with a suite re-pin.
 func _add_group_label(text: String) -> void:
 	var group_label := Label.new()
 	group_label.name = text + "GroupLabel"
@@ -1609,7 +1611,11 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar_content.add_child(_trace_width_spin)
 
 	_sidebar_content.add_child(HSeparator.new())
-	_add_group_label("Proposals")
+	# DCR 01a022ab356c leg D: this cluster AUTHORS INTENTS (the dashed-pink
+	# ask). A "proposal" is a ghost candidate in the routing workspace — the
+	# status line's "N proposals" counts those, and this header must never
+	# blur the two again.
+	_add_group_label("Intents")
 
 	var hints_flow := FlowContainer.new()
 	hints_flow.name = "HintsFlow"
@@ -5582,7 +5588,8 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 		# Cold review F3: the ROUTING sidecar's load half must ride the same
 		# adoption, or the first Ctrl+S at the new path deletes/clobbers an
 		# existing <source>.routing.json that was never read (save writes at
-		# _file_path; zero candidates deletes the file). The fingerprint
+		# _file_path; zero payload deletes the file — see save_workspace's
+		# contract for what counts as payload). The fingerprint
 		# coherence gate inside load_into_workspace already rejects a stale
 		# sidecar for a changed board. On a SWITCH the workspace is RESET
 		# first (Codex 1049 finding 2, routing half): the prior document's
@@ -6270,7 +6277,9 @@ func _on_panel_save_request() -> Dictionary:
 	# has already been updated to the new path by _on_panel_load_request's capture
 	# (the host re-drives load with the new path) — but for a same-content Save-As
 	# the recomputed fingerprint still matches, so candidates stay valid. Zero
-	# candidates ⇒ the sidecar is deleted, never written empty.
+	# payload ⇒ the sidecar is deleted, never written empty (zero payload =
+	# no candidates, no staged entities, no constraint-carrying task — bug
+	# 01a022b1b7d5).
 	if _routing_workspace != null and not _file_path.is_empty():
 		_PcbRoutingSidecarScript.save_workspace(
 			_file_path, _routing_workspace, board_dict, int(_data.board_revision),

@@ -173,3 +173,22 @@ test_via_edit_and_fab_stage.gd assertions=93
 # entries above; the deliberate RED baseline run (helper + wiring absent)
 # reports fewer and fails — that failing run is the point, not a stale pin.
 test_board_by_path.gd assertions=63
+# NEW (DCR 01a022ab356c acceptance): "proposal" means ghost trace only —
+# B one-call span-propose (mints the intent internally; spans+hint_ids =
+# union), C orphan-reroute terminal fallback with ingest task-key override,
+# census pins, and re-entrancy (the fallback generation itself reroutes), D
+# vocabulary by node name + text sweep. COUNT = 44 by construction (baseline
+# 4, B 18, C 18, D 4) after the cold review's rework (two forever-red reads
+# corrected: new generation from candidates[0], shim echoes worker-style
+# attribution). Provisional until the first trustworthy post-DCR run; the
+# deliberate RED baseline reports FEWER (conditional skips) and failing —
+# that red run is the acceptance baseline, not a stale pin.
+test_dcr_proposal_ghost.gd assertions=44
+# NEW (bug 01a022b1b7d5 acceptance): unanswered intent's task-owned corridor
+# constraint must survive save/reload (VALUES, not counts — cold review f1)
+# and quarantine — the sidecar zero-payload rule counts constrained tasks as
+# payload; bare tasks stay non-payload. COUNT = 14 by construction (group 1:
+# 11 incl. quarantine, group 2: 3 incl. the write_envelope seed). Provisional;
+# the deliberate RED baseline (rule unfixed) reports FEWER (conditional skips)
+# and failing — that red run is the acceptance baseline, not a stale pin.
+test_sidecar_constraint_survival.gd assertions=14

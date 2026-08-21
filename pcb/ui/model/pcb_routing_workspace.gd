@@ -1050,7 +1050,9 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 		record.get("segments", []) if record.get("segments", []) is Array else [],
 		record.get("vias", []) if record.get("vias", []) is Array else [],
 		hints, base_board_revision, explicit_hint_ids, span,
-		float(record.get("width_override", 0.0)))
+		float(record.get("width_override", 0.0)),
+		str(record.get("task_key_override", "")),
+		record.get("endpoints_override", []) if record.get("endpoints_override", []) is Array else [])
 	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
 	# DURABLE candidate state, not just a reply stamp — the commit preflight's
 	# staleness comparison (ERR_CONSTRAINT_STALE) reads it back from here, and
@@ -1096,7 +1098,14 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 ## a hintless record does not fall through to _width_from_hints' 0.25mm
 ## default (the exact stamped-default bug class of docket 019fa73a191e).
 ## 0.0 (the default) means "no override": every hint-derived path is unchanged.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0) -> String:
+## `task_key_override` + `endpoints_override` (DCR 01a022ab356c leg C): a
+## hint-less reroute's answer attributes to [] — its derived key would be a
+## phantom "net|" task beside the asking one, TWO live answers to one
+## question. The caller that KNOWS which task asked (the reroute executor,
+## which holds the prior candidate) pins the key and carries the terminals
+## onto the fallback generation so it stays reroutable. Empty (the defaults)
+## leaves every derived path byte-identical.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = []) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -1120,6 +1129,8 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		hint_ids = _hint_ids_for_net(source_hints, net)
 	var span_key := PcbRouteTask.span_key(span)
 	var task_key := _task_key(net, hint_ids, span_key)
+	if not task_key_override.is_empty():
+		task_key = task_key_override
 	# H3-1 (cold review, Epoch UX1 station 8 follow-up): before minting/reusing
 	# task_key, absorb any still-open, CANDIDATE-LESS "eager" task whose OWN key
 	# is a single-hint slice of THIS route's attribution — the shape
@@ -1182,6 +1193,10 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	var width_hints: Array
 	if use_explicit:
 		cand.endpoints = _endpoints_from_hints(attribution_hints)
+		if cand.endpoints.is_empty() and not endpoints_override.is_empty():
+			# Same {component, pin} dict shape _endpoints_from_hints emits —
+			# the override IS a prior candidate's endpoints, carried forward.
+			cand.endpoints = endpoints_override.duplicate(true)
 		width = _width_from_hints(attribution_hints)
 		width_hints = attribution_hints
 	else:

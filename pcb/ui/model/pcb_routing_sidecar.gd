@@ -114,6 +114,26 @@ static func write_envelope(board_path: String, envelope: Dictionary) -> Error:
 
 # ── high-level save / load (the seam PCBPanel wires) ──────────────────────────
 
+## Bug 01a022b1b7d5: a task carrying a routing_constraint IS payload. The
+## corridor an intent authored lives ONLY on its eager task (station 8's
+## authoring decision, comment 1028 — never on the annotation; station 9 is
+## the consumption side), so deleting the sidecar while such a task is
+## unanswered silently evaporates the steering: the annotation survives in
+## .annotations.json, the next propose runs unguided. A BARE task is still
+## NOT payload — it is fully reconstructible from its hint on the next
+## propose, so the zero-payload hygiene (and the persistence suite's
+## "zero candidates ⇒ sidecar deleted" pin) stands.
+static func _has_constrained_task(durable: Dictionary) -> bool:
+	var tasks: Dictionary = durable.get("tasks", {}) if durable.get("tasks", {}) is Dictionary else {}
+	for tid in tasks:
+		if not (tasks[tid] is Dictionary):
+			continue
+		var rc: Variant = (tasks[tid] as Dictionary).get("routing_constraint", {})
+		if rc is Dictionary and not (rc as Dictionary).is_empty():
+			return true
+	return false
+
+
 ## Reset a bound staged store (Codex UX4 F1): called on EVERY load path that
 ## does not load — missing sidecar, unparseable envelope, garbled workspace
 ## token — so the previous document's drafts can never survive a switch onto
@@ -123,9 +143,11 @@ static func _reset_staged(staged_store) -> void:
 		staged_store.load_from_dict({})
 
 ## Persist `workspace` beside the board file. ZERO payload ⇒ the sidecar is
-## DELETED (mirrors AnnotationSidecar's zero-payload rule) — and since Epoch
-## UX4 station 6 (DCR S9) "zero payload" means NO candidates AND NO staged
-## entities: an area draft alone keeps the file alive. `staged_store` is the
+## DELETED (mirrors AnnotationSidecar's zero-payload rule) — and "zero
+## payload" means NO candidates, NO staged entities (Epoch UX4 station 6, DCR
+## S9: an area draft alone keeps the file alive), AND no constraint-carrying
+## task (bug 01a022b1b7d5: an unanswered intent's corridor lives only on its
+## eager task and must survive the session). `staged_store` is the
 ## panel's StagedEntities store (optional — existing callers without one keep
 ## the exact prior candidates-only behavior); its section is written verbatim
 ## (store.to_dict()) under "staged_entities", absent when the store is empty.
@@ -142,7 +164,8 @@ static func save_workspace(board_path: String, workspace, board_dict: Dictionary
 	var staged_section: Dictionary = {}
 	if staged_store != null and staged_store.has_method("to_dict") and not staged_store.is_empty():
 		staged_section = staged_store.to_dict()
-	if cands.is_empty() and staged_section.is_empty():
+	if cands.is_empty() and staged_section.is_empty() \
+			and not _has_constrained_task(durable):
 		return delete_sidecar(board_path)
 
 	# Carry a stable document id forward from an existing sidecar, else mint one.
