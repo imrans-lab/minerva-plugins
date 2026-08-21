@@ -278,6 +278,12 @@ def test_real_dip6_legacy_arc_normalizes_center_start_sweep():
 
 
 _EXPECTED_SEED_MARKERS = {
+    "Capacitor_SMD:C_0805_2012Metric": (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Resistor_SMD:R_0805_2012Metric": (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT": (
+        ("uncaptured_graphic", "F.SilkS", "silk"),
+        ("uncaptured_graphic", "F.Fab", "fab"),
+    ),
     # 019f77fd6d69: each of these seed footprints carries EXACTLY one fp_text
     # on F.SilkS — its own visible ``reference`` field — and nothing else on
     # that layer. The parser now captures that one node (see

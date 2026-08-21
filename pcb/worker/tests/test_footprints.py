@@ -86,6 +86,13 @@ EXPECTED_PAD_COUNTS = {
     # QFN's 17 copper pads + 4 paste-only nodes = 21).
     "Capacitor_SMD:C_0402_1005Metric": 2,
     "Capacitor_SMD:C_1210_3225Metric": 2,
+    # 0805 R+C added to seed 2026-08-20. The seed shipped SYNTHETIC 0805 lands
+    # under these very filenames, keyed bare ("C_0805"/"R_0805"); those moved to
+    # *_SeedSynthetic.kicad_mod so the real parts could take the canonical path.
+    "Capacitor_SMD:C_0805_2012Metric": 2,
+    "Resistor_SMD:R_0805_2012Metric": 2,
+    # 2x22 THT carrier socket for an ESP32-S3-DevKitC-1: 44 through-holes.
+    "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT": 44,
     "Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal": 4,
     "Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal": 6,
     "Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal": 7,
