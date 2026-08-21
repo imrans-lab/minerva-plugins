@@ -848,11 +848,32 @@ def _promote_check(params: dict) -> dict:
     refusals: list = []
     advisory: dict = {}
 
+    # Board-by-reference resolve (work item 01a0223ec9e271269fd664fcf90dd20b,
+    # fix cold review F1): the gate's own request rides the capped broker
+    # pipe, so an oversized board arrives as {board_path, board_digest}.
+    # Resolve it HERE into the inline dict the contract below demands — the
+    # F7 uniform-contract rule is about the sub-legs not diverging, not about
+    # how the dict reached us. An unreadable/mismatched snapshot is a gate
+    # refusal (fail closed), never a crash.
+    params = dict(params or {})
+    if not isinstance(params.get("board"), dict) \
+            and isinstance(params.get("board_path"), str):
+        try:
+            params["board"] = board_model.load_board({
+                "board_path": params["board_path"],
+                "board_digest": params.get("board_digest"),
+            })
+        except board_model.BoardParseError as exc:
+            return {"ok": True, "result": {
+                "promotable": False,
+                "refusals": ["promote_check board_path unreadable: %s" % exc],
+                "connectivity": {}, "geometric": {}, "assembly": {},
+            }}
     # Input contract, uniform across all three legs (cold review F7): the gate
     # takes exactly {board: <canonical dict>} — the two DRC legs' tolerant
     # _load fallbacks (yaml source etc.) must not make the gate's own contract
     # leg-dependent.
-    if not isinstance((params or {}).get("board"), dict):
+    if not isinstance(params.get("board"), dict):
         return {"ok": True, "result": {
             "promotable": False,
             "refusals": ["promote_check requires a canonical board dict under 'board'"],

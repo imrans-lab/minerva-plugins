@@ -4801,10 +4801,22 @@ func _request_with_backend_ensure(channel: String, payload: Dictionary, timeout_
 	return await ipc.await_reply(retry_id, timeout_ms)
 
 
+## Board-by-reference sender seam (work item 01a0223ec9e271269fd664fcf90dd20b):
+## an oversized board-carrying payload swaps its document for a sha256-verified
+## snapshot ref before entering the broker's 64 KiB request pipe. Under-limit
+## payloads pass through unchanged. The returned dict is a COPY when swapped —
+## the ensure-retry above re-emits whichever dict it was handed, and the
+## snapshot outlives the call (panel_tools prunes the dir count-bounded).
+func _payload_by_ref(payload: Dictionary, key: String) -> Dictionary:
+	return _PanelToolsScript.board_payload_by_ref_if_large(
+		payload, key, "user://pcb_snapshots")
+
+
 ## YAML export → pcb.serialize over the plugin IPC channel (carry-in 3a). The
 ## legacy PCBEditor.export_yaml() called the dropped to_yaml(); the canonical
-## boundary + Go channel owns YAML now. 64KiB cap surfaces as payload_too_large
-## → shown in the status bar (never crashes).
+## boundary + Go channel owns YAML now. Oversized boards go by-ref both ways
+## (work item 01a0223ec9e271269fd664fcf90dd20b): the request snapshots the
+## board, and an over-cap document comes back as {yaml_path, yaml_digest}.
 func _on_export_yaml_pressed() -> void:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
@@ -4812,7 +4824,8 @@ func _on_export_yaml_pressed() -> void:
 		return
 	_set_status("Exporting YAML…")
 	var result: Dictionary = await _request_with_backend_ensure(
-			"pcb.serialize", {"board": _data.to_board_dict()}, 30000)
+			"pcb.serialize",
+			_payload_by_ref({"board": _data.to_board_dict()}, "board"), 30000)
 
 	if not bool(result.get("success", false)):
 		var code := str(result.get("error_code", ""))
@@ -4823,13 +4836,18 @@ func _on_export_yaml_pressed() -> void:
 			_set_status("YAML export failed: %s" % (msg if msg != "" else code))
 		return
 
-	# Success payload shape is owned by the Go side; surface a size hint if present.
-	var payload: Variant = result.get("result", null)
-	var yaml_text := ""
-	if payload is Dictionary:
-		yaml_text = str((payload as Dictionary).get("yaml", (payload as Dictionary).get("text", "")))
-	elif payload is String:
-		yaml_text = payload
+	# Success payload shape is owned by the Go side; surface a size hint if
+	# present. An over-cap document arrives as {yaml_path, yaml_digest} — read
+	# it back verified through the one serialize-result reader, at the SAME
+	# unwrap level promote uses (fix cold review F2: the live reply is
+	# {success, result:{ok, result:{yaml|yaml_path}}}, and reading one level
+	# shallow made the by-path branch unreachable).
+	var payload_dict: Dictionary = _unwrap_channel_reply(result)
+	var read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
+	if not bool(read.get("ok", false)) and payload_dict.has("yaml_path"):
+		_set_status("YAML export failed: %s" % str(read.get("error")))
+		return
+	var yaml_text := str(read.get("yaml", ""))
 	if yaml_text != "":
 		_set_status("YAML exported (%d bytes)." % yaml_text.length())
 	else:
@@ -4910,8 +4928,12 @@ func _promote_stripped_board() -> Dictionary:
 ## dict without it is some other shape (F3's lesson) and reads as
 ## unavailable, never gated.
 func run_promote_gate(board: Dictionary) -> Dictionary:
+	# By-ref like every board sender (fix cold review F1): without this, an
+	# oversized board died payload_too_large HERE — one hop before promote's
+	# wired serialize — so the gate refused exactly the boards the by-ref
+	# serialize exists for.
 	var gate_raw: Dictionary = await _request_with_backend_ensure(
-		"pcb.promote_check", {"board": board}, 60000)
+		"pcb.promote_check", _payload_by_ref({"board": board}, "board"), 60000)
 	var gate: Dictionary = _unwrap_channel_reply(gate_raw)
 	if gate.is_empty() or not gate.has("promotable"):
 		return {"ok": false, "reply": {"success": false, "error": "promotion_check_unavailable",
@@ -5050,7 +5072,8 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 	if FileAccess.file_exists(target):
 		var prior_text := FileAccess.get_file_as_string(target)
 		var prior_reply: Dictionary = _unwrap_channel_reply(
-			await _request_with_backend_ensure("pcb.deserialize", {"yaml": prior_text}, 30000))
+			await _request_with_backend_ensure("pcb.deserialize",
+				_payload_by_ref({"yaml": prior_text}, "yaml"), 30000))
 		var prior_board: Dictionary = _dict_or_empty(prior_reply.get("board"))
 		if prior_board.is_empty():
 			prior_state = "unreadable"
@@ -5113,7 +5136,7 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 
 	# ── serialize + write ────────────────────────────────────────────────────
 	var ser: Dictionary = await _request_with_backend_ensure(
-		"pcb.serialize", {"board": board}, 30000)
+		"pcb.serialize", _payload_by_ref({"board": board}, "board"), 30000)
 	if not bool(ser.get("success", false)):
 		return {"success": false, "error": "serialize_failed",
 			"note": str(ser.get("error_message", ser.get("error_code", "")))}
@@ -5124,11 +5147,23 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 	# as "empty document" while 6KB of perfectly good YAML sat one level
 	# deeper).
 	var payload_dict: Dictionary = _unwrap_channel_reply(ser)
-	var yaml_text := str(payload_dict.get("yaml", payload_dict.get("text", "")))
+	# Over-cap documents arrive as {yaml_path, yaml_digest} — promote is
+	# precisely the large-board case, so read through the one verified
+	# serialize-result reader instead of .get("yaml") (which reported the
+	# by-path shape as "empty document").
+	var ser_read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
+	var yaml_text := str(ser_read.get("yaml", ""))
+	if yaml_text.is_empty() and payload_dict.has("yaml_path"):
+		# A by-path reply that failed verification is its own named refusal
+		# (digest mismatch / missing file) — never "empty document".
+		return {"success": false, "error": "serialize_read_failed",
+			"note": str(ser_read.get("error", ""))}
 	if yaml_text.is_empty():
-		# The serialize channel's REFUSALS are success-shaped ({error, bytes}
-		# for payload_too_large) — surface them by name instead of the
-		# misleading "empty document" this branch reported before CPN1.
+		# The serialize channel's REFUSALS are success-shaped {error, …} —
+		# surface them by name instead of the misleading "empty document"
+		# this branch reported before CPN1. (payload_too_large itself is
+		# retired: over-cap documents now come back {yaml_path, yaml_digest}
+		# and are handled by the by-path read above.)
 		if str(payload_dict.get("error", "")) != "":
 			return {"success": false,
 				"error": str(payload_dict.get("error")),
@@ -5418,6 +5453,10 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	# adherence, and geometry that ignored the authored corridor.
 	if extra.has("task_constraints"):
 		params["task_constraints"] = extra["task_constraints"]
+	# Wrapped LAST, after every optional key, so the size decision sees the
+	# payload the wire would carry — and after _board_for_route_request, so
+	# the draft-composed board goes by-ref exactly like the plain one.
+	params = _payload_by_ref(params, "board")
 	var result: Dictionary = await _request_with_backend_ensure("pcb.route", params, 30000)
 	# The worker returns {ok, result}; the host IPC wrapper may nest it under
 	# "result"/"success" — normalise to the worker envelope the apply tool wants.
@@ -5467,7 +5506,8 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	if ipc == null or _data == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
-	var result: Dictionary = await _request_with_backend_ensure("pcb.deserialize", {"yaml": yaml_text}, 30000)
+	var result: Dictionary = await _request_with_backend_ensure("pcb.deserialize",
+		_payload_by_ref({"yaml": yaml_text}, "yaml"), 30000)
 
 	# Unwrap the deserialize reply. HandleDeserialize returns {board, warnings};
 	# the broker/worker path nests that under one or more {ok|success, result:{…}}

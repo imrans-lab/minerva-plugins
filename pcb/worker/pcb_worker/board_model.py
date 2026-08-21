@@ -26,27 +26,65 @@ def load_board(params: dict) -> dict:
     """Resolve a board dict from a request's params.
 
     Accepts, in priority order:
-      - params["yaml"]  : canonical YAML source string.
-      - params["board"] : an already-decoded board mapping (dict).
+      - params["yaml"]       : canonical YAML source string.
+      - params["board"]      : an already-decoded board mapping (dict).
+      - params["board_path"] : path to a board snapshot file (YAML or JSON —
+        JSON is YAML), verified against params["board_digest"] (sha256 hex of
+        the file bytes, case-insensitive). The by-reference arm exists so an
+        O(board) document never rides the host broker's capped request pipe
+        (work item 01a0223ec9e271269fd664fcf90dd20b); the digest is MANDATORY
+        — an unverified file read is refused, never trusted.
 
-    Raises BoardParseError on missing input or non-mapping YAML.
+    Raises BoardParseError on missing input, unreadable/mismatched snapshot,
+    or non-mapping source.
     """
     if isinstance(params.get("yaml"), str):
-        import yaml
-        try:
-            data = yaml.safe_load(params["yaml"])
-        except yaml.YAMLError as exc:  # type: ignore[attr-defined]
-            raise BoardParseError(f"invalid YAML: {exc}") from exc
-        if data is None:
-            raise BoardParseError("YAML source is empty")
-        if not isinstance(data, dict):
-            raise BoardParseError(
-                f"board YAML must be a mapping at the top level, got {type(data).__name__}"
-            )
-        return data
+        return _parse_board_text(params["yaml"])
     if isinstance(params.get("board"), dict):
         return params["board"]
-    raise BoardParseError("expected params.yaml (str) or params.board (object)")
+    if isinstance(params.get("board_path"), str):
+        import hashlib
+
+        path = params["board_path"]
+        digest = params.get("board_digest")
+        if not isinstance(digest, str) or not digest:
+            raise BoardParseError(
+                "board_path requires board_digest (sha256 hex of the file bytes)")
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            raise BoardParseError(f"cannot read board_path {path!r}: {exc}") from exc
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != digest.lower():
+            raise BoardParseError(
+                f"board_path digest mismatch for {path!r}: "
+                f"expected {digest}, file has {actual}")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BoardParseError(
+                f"board_path {path!r} is not UTF-8 text: {exc}") from exc
+        return _parse_board_text(text)
+    raise BoardParseError(
+        "expected params.yaml (str), params.board (object), "
+        "or params.board_path (str)")
+
+
+def _parse_board_text(source: str) -> dict:
+    """Parse board source text (YAML; JSON parses too) into a mapping."""
+    import yaml
+    try:
+        data = yaml.safe_load(source)
+    except yaml.YAMLError as exc:  # type: ignore[attr-defined]
+        raise BoardParseError(f"invalid YAML: {exc}") from exc
+    if data is None:
+        raise BoardParseError("YAML source is empty")
+    if not isinstance(data, dict):
+        raise BoardParseError(
+            f"board YAML must be a mapping at the top level, got {type(data).__name__}"
+        )
+    return data
 
 
 def _is_number(v: Any) -> bool:

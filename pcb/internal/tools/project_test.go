@@ -355,6 +355,12 @@ func TestIPCRoundTripPreservesUnknownYAMLFields(t *testing.T) {
 	}
 }
 
+// Deliberately re-pinned (work item 01a0223ec9e271269fd664fcf90dd20b): an
+// over-cap document is no longer REFUSED payload_too_large — it lands in a
+// temp file and the reply carries {yaml_path, yaml_digest, bytes}. This test
+// keeps its original fixture (many-nets oversized board) and now pins the
+// refusal's retirement; the full by-path reply contract (digest, content,
+// size) is board_by_path_test.go's TestSerializeOversizedDocumentLandsByPath.
 func TestSerializePayloadTooLarge(t *testing.T) {
 	// Build a board whose YAML exceeds the cap via many nets.
 	var sb strings.Builder
@@ -374,16 +380,21 @@ func TestSerializePayloadTooLarge(t *testing.T) {
 		t.Fatalf("serialize: %v", err)
 	}
 	var r struct {
-		Error string `json:"error"`
-		Bytes int    `json:"bytes"`
+		Error      string `json:"error"`
+		Bytes      int    `json:"bytes"`
+		YAMLPath   string `json:"yaml_path"`
+		YAMLDigest string `json:"yaml_digest"`
 	}
 	if err := json.Unmarshal(out, &r); err != nil {
 		t.Fatal(err)
 	}
-	if r.Error != "payload_too_large" {
-		t.Fatalf("want payload_too_large, got %#v", r)
+	if r.Error == "payload_too_large" {
+		t.Fatalf("oversized document still refused; want a yaml_path reply, got %#v", r)
+	}
+	if r.YAMLPath == "" || r.YAMLDigest == "" {
+		t.Fatalf("want yaml_path + yaml_digest, got %#v", r)
 	}
 	if r.Bytes == 0 {
-		t.Errorf("expected non-zero byte count in error")
+		t.Errorf("expected non-zero byte count alongside the by-path reply")
 	}
 }

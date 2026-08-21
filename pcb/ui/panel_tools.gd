@@ -8687,3 +8687,121 @@ static func _ok(data: Dictionary = {}) -> Dictionary:
 
 static func _err(msg: String) -> Dictionary:
 	return {"error": msg, "success": false}
+
+
+# ── Board-by-reference (work item 01a0223ec9e271269fd664fcf90dd20b) ──────────
+# The host broker caps panel→plugin requests at 64 KiB and the board-carrying
+# channels (pcb.route / pcb.serialize / pcb.deserialize) inlined O(board)
+# documents into that pipe — a real board (~700 KB expanded) made all three
+# fail payload_too_large. These two helpers are the panel half of the fix:
+# an over-limit payload swaps its document for {board_path, board_digest}
+# (a snapshot file the worker process reads back sha256-verified), and
+# serialize CONSUMERS read the worker's oversized {yaml_path, yaml_digest}
+# reply back through one verified reader.
+
+## Margin under PluginScenePanelBroker.MAX_PAYLOAD_BYTES (65536): the payload
+## is measured here pre-envelope, so leave headroom for reply-id fields.
+const _SNAPSHOT_LIMIT := 60000
+## Snapshot retention: never delete the file just written (the backend-ensure
+## retry re-emits the same payload and the worker re-reads it), never
+## accumulate forever either — a count-bounded prune on each write.
+const _SNAPSHOT_KEEP := 8
+
+static var _snapshot_seq := 0
+
+
+## If JSON.stringify(payload) exceeds `limit`, snapshot payload[key] (a board
+## dict or source text) to a unique OS-native file under base_dir and return a
+## COPY of the payload with the key replaced by {board_path, board_digest}.
+## Under-limit payloads (and payloads without the key) pass through
+## UNCHANGED — no current caller changes wire shape. NEVER mutates its input:
+## _request_with_backend_ensure's retry re-emits the same payload dict.
+## On any snapshot-write failure the ORIGINAL payload is returned — the broker
+## then refuses it loudly (payload_too_large), which beats silently dropping
+## the request.
+static func board_payload_by_ref_if_large(payload: Dictionary, key: String,
+		base_dir: String, limit: int = _SNAPSHOT_LIMIT) -> Dictionary:
+	if not payload.has(key):
+		return payload
+	if JSON.stringify(payload).length() <= limit:
+		return payload
+	var doc: Variant = payload[key]
+	var text: String = doc if doc is String else JSON.stringify(doc)
+	var abs_dir := ProjectSettings.globalize_path(base_dir)
+	DirAccess.make_dir_recursive_absolute(abs_dir)
+	_prune_snapshots(abs_dir)
+	_snapshot_seq += 1
+	var path := abs_dir.path_join("board-%d-%d.snap" % [Time.get_ticks_usec(), _snapshot_seq])
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return payload
+	f.store_string(text)
+	var write_err := f.get_error()
+	f.close()
+	if write_err != OK:
+		DirAccess.remove_absolute(path)
+		return payload
+	var digest := FileAccess.get_sha256(path)
+	if digest.is_empty():
+		# Hash failure is a write-failure (fix cold review F8): fall back to
+		# the original payload — the broker's loud payload_too_large beats a
+		# request the worker would refuse as digest-less.
+		DirAccess.remove_absolute(path)
+		return payload
+	var out := payload.duplicate()
+	out.erase(key)
+	out["board_path"] = path
+	out["board_digest"] = digest
+	return out
+
+
+## Read the yaml text out of a pcb.serialize result payload, whichever shape
+## it arrived in: inline {yaml} (under-cap, unchanged behavior) or by-path
+## {yaml_path, yaml_digest} (over-cap — Go lands the document in a temp file).
+## The digest is verified before a byte is trusted; a mismatch or missing file
+## is refused by name, never returned as "empty document".
+## Returns {ok: bool, yaml: String, error: String}.
+static func yaml_from_serialize_result(payload: Dictionary) -> Dictionary:
+	var inline := str(payload.get("yaml", payload.get("text", "")))
+	if not inline.is_empty():
+		return {"ok": true, "yaml": inline, "error": ""}
+	var path := str(payload.get("yaml_path", ""))
+	if path.is_empty():
+		return {"ok": false, "yaml": "",
+			"error": "serialize reply carried neither yaml nor yaml_path"}
+	if not FileAccess.file_exists(path):
+		return {"ok": false, "yaml": "",
+			"error": "serialize yaml_path missing: %s" % path}
+	var digest := str(payload.get("yaml_digest", ""))
+	if digest.is_empty() \
+			or FileAccess.get_sha256(path).to_lower() != digest.to_lower():
+		return {"ok": false, "yaml": "",
+			"error": "serialize yaml_path digest mismatch for %s" % path}
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return {"ok": false, "yaml": "",
+			"error": "cannot open serialize yaml_path %s" % path}
+	var text := f.get_as_text()
+	f.close()
+	# CONSUME on successful read (fix cold review F3): the Go side lands each
+	# over-cap document in a fresh os.CreateTemp file and nothing else ever
+	# deletes it — and unlike the request snapshot (which the backend-ensure
+	# retry re-reads), a reply document is read exactly once. A FAILED read
+	# leaves the file for diagnosis.
+	DirAccess.remove_absolute(path)
+	return {"ok": true, "yaml": text, "error": ""}
+
+
+## Delete oldest snapshots until at most _SNAPSHOT_KEEP - 1 remain, so the
+## write that follows lands within the retention bound.
+static func _prune_snapshots(abs_dir: String) -> void:
+	var files: Array = []
+	for fname in DirAccess.get_files_at(abs_dir):
+		if str(fname).begins_with("board-") and str(fname).ends_with(".snap"):
+			var p := abs_dir.path_join(str(fname))
+			files.append({"path": p, "mtime": FileAccess.get_modified_time(p)})
+	if files.size() < _SNAPSHOT_KEEP:
+		return
+	files.sort_custom(func(a, b): return int(a["mtime"]) < int(b["mtime"]))
+	for i in range(files.size() - (_SNAPSHOT_KEEP - 1)):
+		DirAccess.remove_absolute(str(files[i]["path"]))

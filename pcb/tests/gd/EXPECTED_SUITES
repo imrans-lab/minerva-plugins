@@ -160,3 +160,16 @@ test_direct_copper_verbs.gd assertions=147
 # it passed with the entire GUI commit path deleted. The added assertion pins
 # that the chosen net differs from the one the via carries.
 test_via_edit_and_fab_stage.gd assertions=93
+# NEW (work item 01a0223ec9e271269fd664fcf90dd20b): board-by-path + digest —
+# the panel-sender half of the 64KiB broker-cap regression (route/serialize/
+# deserialize all inlined O(board) payloads). COUNT = 63 by construction
+# (Section 0: 22, Section 0i consumption: 6, Section 1: 33, Section 2: 2)
+# after two cold reviews grew it — tests review: draft_request route variant,
+# OS-native path pin, non-mutation + retry/prune lifetime, yaml_path reply
+# consumption; fix review: the promote GATE sender (1f — it rides the same
+# capped pipe one hop before promote's serialize), the export consumer at the
+# LIVE envelope depth (1g), and consume-on-read for reply documents (0i6).
+# Provisional until the first trustworthy post-fix run, per the sibling NEW
+# entries above; the deliberate RED baseline run (helper + wiring absent)
+# reports fewer and fails — that failing run is the point, not a stale pin.
+test_board_by_path.gd assertions=63

@@ -24,13 +24,44 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/imrans-lab/minerva-plugins/pcb/internal/board"
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
+
+// readVerifiedSnapshot reads a board-by-reference snapshot file and verifies
+// its sha256 against the caller-supplied digest (hex, case-insensitive)
+// before a byte of it is trusted. The digest is MANDATORY — an unverified
+// file read is refused by name, never silently accepted (work item
+// 01a0223ec9e271269fd664fcf90dd20b).
+func readVerifiedSnapshot(path, digest string) ([]byte, error) {
+	if digest == "" {
+		return nil, fmt.Errorf("board_path requires board_digest (sha256 hex of the file bytes)")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read board_path %q: %w", path, err)
+	}
+	sum := sha256.Sum256(raw)
+	if actual := hex.EncodeToString(sum[:]); !strings.EqualFold(actual, digest) {
+		return nil, fmt.Errorf("board_path digest mismatch for %q: expected %s, file has %s",
+			path, digest, actual)
+	}
+	if len(raw) == 0 {
+		// A verified-but-empty snapshot must refuse by name (the Python arm's
+		// "YAML source is empty" symmetry) — falling through would let
+		// HandleSerialize's echoState compatibility path swallow it silently.
+		return nil, fmt.Errorf("board_path %q is an empty file", path)
+	}
+	return raw, nil
+}
 
 // echoState is the shared handler for the four project channels. It unmarshals
 // the incoming arguments (tolerating an empty/absent body) and echoes the
@@ -89,7 +120,9 @@ var ApplyExport = ToolSpec{
 // echo so the host_owned save skeleton path is not regressed.
 func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
 	var a struct {
-		Board json.RawMessage `json:"board"`
+		Board       json.RawMessage `json:"board"`
+		BoardPath   string          `json:"board_path"`
+		BoardDigest string          `json:"board_digest"`
 	}
 	if len(params) > 0 {
 		// Malformed params must error, not silently fall through to the echo
@@ -97,6 +130,17 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 		if err := json.Unmarshal(params, &a); err != nil {
 			return nil, fmt.Errorf("pcb.serialize: parse params: %w", err)
 		}
+	}
+	if len(a.Board) == 0 && a.BoardPath != "" {
+		// Board-by-reference arm (work item 01a0223ec9e271269fd664fcf90dd20b):
+		// an O(board) document must not ride the host broker's capped request
+		// pipe, so the panel snapshots it to a file and sends {board_path,
+		// board_digest}. Inline board takes precedence — this arm is additive.
+		raw, err := readVerifiedSnapshot(a.BoardPath, a.BoardDigest)
+		if err != nil {
+			return nil, fmt.Errorf("pcb.serialize: %w", err)
+		}
+		a.Board = raw
 	}
 	if len(a.Board) == 0 {
 		// Genuinely absent board → project_file compatibility echo fallback.
@@ -135,9 +179,29 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 		return nil, fmt.Errorf("pcb.serialize: %w", err)
 	}
 	if len(yml) > board.MaxPayloadBytes {
+		// An over-cap document is no longer refused: it lands in a temp file
+		// and the reply carries {yaml_path, yaml_digest} for the panel to
+		// read back verified (the outbound half of board-by-reference,
+		// work item 01a0223ec9e271269fd664fcf90dd20b). Under-cap documents
+		// keep the inline {yaml} shape byte-for-byte.
+		f, err := os.CreateTemp("", "pcb-serialize-*.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("pcb.serialize: land oversized document: %w", err)
+		}
+		if _, err := f.Write(yml); err != nil {
+			f.Close()
+			os.Remove(f.Name())
+			return nil, fmt.Errorf("pcb.serialize: land oversized document: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(f.Name())
+			return nil, fmt.Errorf("pcb.serialize: land oversized document: %w", err)
+		}
+		sum := sha256.Sum256(yml)
 		return json.Marshal(map[string]interface{}{
-			"error": "payload_too_large",
-			"bytes": len(yml),
+			"yaml_path":   f.Name(),
+			"yaml_digest": hex.EncodeToString(sum[:]),
+			"bytes":       len(yml),
 		})
 	}
 	return json.Marshal(map[string]interface{}{"yaml": string(yml)})
@@ -184,8 +248,10 @@ func HandleDeserializeResolved(ctx context.Context, w *bridge.Worker, params jso
 // pre-enrichment behaviour, which is what keeps HandleDeserialize pure.
 func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	var a struct {
-		YAML       string          `json:"yaml"`
-		MinpcbJSON json.RawMessage `json:"minpcb_json"`
+		YAML        string          `json:"yaml"`
+		MinpcbJSON  json.RawMessage `json:"minpcb_json"`
+		BoardPath   string          `json:"board_path"`
+		BoardDigest string          `json:"board_digest"`
 	}
 	if len(params) > 0 {
 		// Malformed params must error, not silently fall through to the echo
@@ -193,6 +259,16 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 		if err := json.Unmarshal(params, &a); err != nil {
 			return nil, fmt.Errorf("pcb.deserialize: parse params: %w", err)
 		}
+	}
+	if a.YAML == "" && len(a.MinpcbJSON) == 0 && a.BoardPath != "" {
+		// Board-by-reference arm — see HandleSerialize. Inline yaml/minpcb
+		// take precedence; the snapshot file is board source (YAML) verified
+		// against its sha256 before a byte of it is parsed.
+		raw, err := readVerifiedSnapshot(a.BoardPath, a.BoardDigest)
+		if err != nil {
+			return nil, fmt.Errorf("pcb.deserialize: %w", err)
+		}
+		a.YAML = string(raw)
 	}
 
 	var (
