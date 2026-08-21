@@ -359,9 +359,17 @@ def test_no_tracked_file_references_the_product_via_a_path_literal(repo):
     scan above would never see it — but it is the same reference class:
     naming where the private design lives, in a public file. See
     ``_PATH_REFERENCE`` for why this is narrower than the bare-string ban,
-    and ``_PATH_REFERENCE_REPOS`` for why the repo scope is narrower too."""
+    and ``_PATH_REFERENCE_REPOS`` for why the repo scope is narrower too.
+
+    ``.dct`` docket databases are exempt for exactly the reason MINERVA_ROOT
+    is (bug 01a0225bb250): they are project-management prose, and a record
+    NARRATING this policy's own cleanup must be able to quote the banned
+    construction without becoming an offender. The hazard this test targets
+    — a test/fixture DEFAULTING to a private path — cannot live in a .dct:
+    nothing executes it."""
     offenders = [name for name in _tracked_text_files(repo)
-                 if _PATH_REFERENCE.search(
+                 if not name.endswith(".dct")
+                 and _PATH_REFERENCE.search(
                      (repo / name).read_text(encoding="utf-8", errors="ignore"))]
     assert not offenders, (
         f"[{repo.name}] these tracked files hardcode a path referencing the "
