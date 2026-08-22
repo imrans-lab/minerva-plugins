@@ -109,6 +109,8 @@ test_staged_placement.gd assertions=114
 # NEW at epoch GA-6 (bug 019fa0f8d575): the typed-Dictionary guard matrix for
 # both panel files' _dict_or_empty. Assertion count pins at the GA testex
 # from the first trustworthy run.
+# SR2FAB S7 — authored, never executed; pins at testex.
+test_degenerate_copper.gd
 test_dict_guard.gd assertions=30
 # NEW at epoch NLC C1 (item 019fff6080fd): inner-layer vias — C1a's refuse-don't-
 # guess guard (groups 1-4) and C1b's placeable continuation layer (groups 5-6).

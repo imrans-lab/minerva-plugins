@@ -661,6 +661,55 @@ def _ctx(board, ref="U2", pad=None):
     return AdjudicationContext(board=board, ref=ref, pad=pad)
 
 
+def _degenerate_board(trace: dict) -> dict:
+    return {
+        "version": 1, "name": "degenerate", "width_mm": 40, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25},
+        "components": [], "nets": [{"name": "N", "pins": []}],
+        "traces": [trace],
+    }
+
+
+def test_a_degenerate_trace_names_itself_so_it_can_be_removed():
+    """SR2FAB S7. A zero-length segment makes the WHOLE board uncompilable, so
+    this diagnostic is the only thing its author has to work from — and the
+    ordinal alone is not a handle. delete_traces and import_trace_geometry both
+    take the AUTHORED id, so the message named something no verb accepts and the
+    board could be diagnosed but not repaired.
+
+    Observed on smart-remote-v2: recovery took an export / hand-edit / import
+    round trip because "trace 1" identified nothing."""
+    result = compile_board(_degenerate_board({
+        "id": "trace_7", "net": "N", "layer": "top", "width_mm": 0.25,
+        "points": [{"x_mm": 75.4, "y_mm": 80.0}, {"x_mm": 75.4, "y_mm": 80.0}]}))
+    messages = [d.message for d in result.diagnostics if d.code == "trace_degenerate"]
+    assert messages, [d.code for d in result.diagnostics]
+    assert "'trace_7'" in messages[0], messages[0]
+    assert "zero-length" in messages[0], messages[0]
+
+    # Same for the too-few-points case, which strands a board identically.
+    short = compile_board(_degenerate_board({
+        "id": "trace_9", "net": "N", "layer": "top", "width_mm": 0.25,
+        "points": [{"x_mm": 1.0, "y_mm": 1.0}]}))
+    short_messages = [d.message for d in short.diagnostics
+                      if d.code == "trace_degenerate"]
+    assert short_messages, [d.code for d in short.diagnostics]
+    assert "'trace_9'" in short_messages[0], short_messages[0]
+
+
+def test_a_trace_with_no_authored_id_still_reads_cleanly():
+    """The id is optional in the schema, so the label must degrade to the bare
+    ordinal rather than printing a None nobody can act on."""
+    result = compile_board(_degenerate_board({
+        "net": "N", "layer": "top", "width_mm": 0.25,
+        "points": [{"x_mm": 5.0, "y_mm": 5.0}, {"x_mm": 5.0, "y_mm": 5.0}]}))
+    messages = [d.message for d in result.diagnostics if d.code == "trace_degenerate"]
+    assert messages, [d.code for d in result.diagnostics]
+    assert "None" not in messages[0], messages[0]
+    assert messages[0].startswith("trace 0:"), messages[0]
+
+
 def test_policy_zone_connect_uninterrogable_context_blocks():
     """THE CELL THAT MUST NEVER FAIL OPEN, and the one this station inverted.
 

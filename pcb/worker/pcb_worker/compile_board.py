@@ -2017,14 +2017,18 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
         if points is None:
             continue
         if len(points) < 2:
-            diags.error("trace_degenerate", f"trace {ordinal}: needs at least two points, got {len(points)}", trace_ref)
+            diags.error("trace_degenerate",
+                        f"{_trace_label(raw, ordinal)}: needs at least two "
+                        f"points, got {len(points)}", trace_ref)
             continue
         trace_id = _resolve_child_id("trace", board_id, raw, (net_id, ordinal), schema_version)
         segments: list[ResolvedTraceSegment] = []
         degenerate = False
         for seg_ordinal, (a, b) in enumerate(zip(points, points[1:])):
             if a == b:
-                diags.error("trace_degenerate", f"trace {ordinal}: zero-length segment at {a}", trace_ref)
+                diags.error("trace_degenerate",
+                            f"{_trace_label(raw, ordinal)}: zero-length segment "
+                            f"at {a}", trace_ref)
                 degenerate = True
                 break
             segments.append(ResolvedTraceSegment(
@@ -2035,6 +2039,20 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
             continue
         traces.append(ResolvedTrace(id=trace_id, net_id=net_id, segments=tuple(segments)))
     return tuple(traces)
+
+
+def _trace_label(raw: dict, ordinal: int) -> str:
+    """``trace 3 'trace_7'`` when the board authored an id, else ``trace 3``.
+
+    A degenerate trace makes the whole board uncompilable, so the diagnostic is
+    the only thing the author has to work from — and the ordinal alone is not a
+    handle. Every repair verb (delete_traces, import_trace_geometry) takes the
+    AUTHORED id, so a board stranded this way could be diagnosed but not fixed
+    from the message it produced."""
+    authored = raw.get("id")
+    if isinstance(authored, str) and authored:
+        return f"trace {ordinal} {authored!r}"
+    return f"trace {ordinal}"
 
 
 def _board_library_lock(board: dict) -> dict:
