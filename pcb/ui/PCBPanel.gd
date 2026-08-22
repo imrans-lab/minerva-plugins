@@ -74,7 +74,7 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## running" deploy check. Format is free text; "<manifest version>+<round
 ## tag>" is the convention started here so it still roughly tracks
 ## manifest.json's own "version" (0.2.0) without reading it.
-const PLUGIN_BUILD := "0.2.0+b2-mcp-parity"
+const PLUGIN_BUILD := "0.2.0+sr2fab"
 
 ## T2 (S2.2) strangler-fig SHADOW phase: the routing workspace is populated
 ## ALONGSIDE the existing annotation proposals on every propose (dual-write,

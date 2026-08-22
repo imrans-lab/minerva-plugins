@@ -41,6 +41,8 @@ test_geometric_drc_surface.gd assertions=31
 # dead default_two_layer checks; the exact count re-pins at GA testex from the
 # first trustworthy run, per the OFC precedent below.
 test_layer_stack.gd assertions=105
+# SR2FAB S10 — authored, never executed; pins at testex.
+test_mm_quantization.gd
 test_manifest_tool_registration.gd assertions=45
 # SR2FAB S8 — authored, never executed; pins at testex.
 test_mounting_holes_verb.gd

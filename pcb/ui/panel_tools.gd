@@ -365,8 +365,8 @@ static func _get_components(host, _args: Dictionary) -> Dictionary:
 		var comp_info := {
 			"id": comp.id,
 			"footprint": comp.get_footprint_name(),
-			"x": comp.position.x,
-			"y": comp.position.y,
+			"x": _mm(comp.position.x),
+			"y": _mm(comp.position.y),
 			"rotation": comp.rotation,
 			"layer": comp.layer,
 			"pins": comp.pins.keys(),
@@ -382,7 +382,8 @@ static func _get_components(host, _args: Dictionary) -> Dictionary:
 			comp_info["group_members"] = data.group_member_ids(comp.group_id())
 			comp_info["group_anchor"] = data.group_anchor_id(comp.group_id())
 			comp_info["group_offset"] = {
-				"x": data.member_offset(comp.id).x, "y": data.member_offset(comp.id).y}
+				"x": _mm(data.member_offset(comp.id).x),
+				"y": _mm(data.member_offset(comp.id).y)}
 		components.append(comp_info)
 	return _ok({"component_count": components.size(), "components": components})
 
@@ -434,8 +435,8 @@ static func _get_pin_position(host, args: Dictionary) -> Dictionary:
 	var world_pos: Vector2 = comp.get_pin_world_position(pin)
 	return {
 		"success": true,
-		"world_position": {"x": float(world_pos.x), "y": float(world_pos.y)},
-		"component_position": {"x": float(comp.position.x), "y": float(comp.position.y)},
+		"world_position": {"x": _mm(world_pos.x), "y": _mm(world_pos.y)},
+		"component_position": {"x": _mm(comp.position.x), "y": _mm(comp.position.y)},
 		"component_rotation": float(comp.rotation),
 		"pin": str(pin),
 		"pin_name": comp.get_pin_name(pin),
@@ -565,8 +566,8 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	# attach the tri-state as `assembly` (coroutine; handle() awaits this verb).
 	return await _with_assembly_after_placement(host, data, _with_snap_disclosure(_ok({
 		"component_id": component_id,
-		"x": comp.position.x,
-		"y": comp.position.y,
+		"x": _mm(comp.position.x),
+		"y": _mm(comp.position.y),
 		"pin_count": comp.pins.size(),
 	}), x, y, comp.position))
 
@@ -730,7 +731,8 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 	data.move_component(component_id, new_pos)
 	data.save_to_history("Move " + component_id)
 	return await _with_assembly_after_placement(host, data, _with_dangling_copper(data,
-		_with_snap_disclosure(_ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y}),
+		_with_snap_disclosure(_ok({"component_id": component_id,
+			"x": _mm(new_pos.x), "y": _mm(new_pos.y)}),
 			asked_x, asked_y, new_pos), pre_pins))
 
 
@@ -760,8 +762,8 @@ static func _move_component_group(data, component_id: String, new_pos: Vector2) 
 	data.end_batch("Move group (%d)" % moved.size())
 	return _ok({
 		"component_id": component_id,
-		"x": new_pos.x,
-		"y": new_pos.y,
+		"x": _mm(new_pos.x),
+		"y": _mm(new_pos.y),
 		"group_id": group_id,
 		"moved_components": moved,
 		"moved_count": moved.size(),
@@ -967,7 +969,7 @@ static func _spatial_query(host, args: Dictionary) -> Dictionary:
 		})
 	var reply: Dictionary = {
 		"reference": reference_component,
-		"radius_mm": radius,
+		"radius_mm": _mm(radius),
 		"nearby_count": results.size(),
 		"nearby": results,
 	}
@@ -1008,8 +1010,8 @@ static func _copper_in_region(data, region: Rect2) -> Dictionary:
 	var zones: Array = data.get_zones_in_region(region)
 	var cutouts: Array = data.cutouts_in_region(region)
 	return {
-		"region_mm": {"x_mm": region.position.x, "y_mm": region.position.y,
-			"width_mm": region.size.x, "height_mm": region.size.y},
+		"region_mm": {"x_mm": _mm(region.position.x), "y_mm": _mm(region.position.y),
+			"width_mm": _mm(region.size.x), "height_mm": _mm(region.size.y)},
 		"traces": traces,
 		"vias": vias,
 		"zones": zones,
@@ -1494,8 +1496,8 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 				# payload NAMES a trace and coordinates are the only handle,
 				# which is why targeted deletion used to be impossible.
 				"trace_id": trace_id,
-				"start": {"x": snapped(start_pt.x, 0.0001), "y": snapped(start_pt.y, 0.0001)},
-				"end": {"x": snapped(end_pt.x, 0.0001), "y": snapped(end_pt.y, 0.0001)},
+				"start": {"x": _mm(start_pt.x), "y": _mm(start_pt.y)},
+				"end": {"x": _mm(end_pt.x), "y": _mm(end_pt.y)},
 				"width": trace.width,
 				"layer": layer_name,
 				"net_name": trace.net_name,
@@ -1505,7 +1507,7 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 	for via in data.vias:
 		var pos: Vector2 = via.get("position", Vector2.ZERO)
 		var via_out := {
-			"position": {"x": snapped(pos.x, 0.0001), "y": snapped(pos.y, 0.0001)},
+			"position": {"x": _mm(pos.x), "y": _mm(pos.y)},
 			"size": via.get("size", 0.8),
 			"drill": via.get("drill", 0.4),
 			"net_name": via.get("net_name", ""),
@@ -2368,7 +2370,7 @@ static func _corridor_points_wire(points: Array) -> Array:
 	var out: Array = []
 	for p in points:
 		if p is Vector2:
-			out.append([(p as Vector2).x, (p as Vector2).y])
+			out.append([_mm((p as Vector2).x), _mm((p as Vector2).y)])
 	return out
 
 
@@ -2991,7 +2993,7 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 			"layer": str(rec.get("layer", "F.Cu")),
 			"waypoint_count": pts.size(),
 			"source_hint_ids": rec.get("source_hint_ids", []),
-			"width_mm": float(rec.get("width", 0.0)),
+			"width_mm": _mm(float(rec.get("width", 0.0))),
 		}
 		# DRC-at-propose (docket 019f6f1492e0): the per-route CONNECTIVITY verdict
 		# (absent-key ⇒ older worker / non-canonical path that skipped the attach).
@@ -3878,13 +3880,13 @@ static func _list_vias(host, _args: Dictionary) -> Dictionary:
 	for via in data.vias:
 		var pos: Vector2 = data.via_position(via)
 		var entry := {
-			"x_mm": snapped(pos.x, 0.0001),
-			"y_mm": snapped(pos.y, 0.0001),
+			"x_mm": _mm(pos.x),
+			"y_mm": _mm(pos.y),
 			"net_name": str(via.get("net_name", "")),
 			"from_layer": str(via.get("from_layer", "")),
 			"to_layer": str(via.get("to_layer", "")),
-			"size_mm": float(via.get("size", 0.8)),
-			"drill_mm": float(via.get("drill", 0.4)),
+			"size_mm": _mm(float(via.get("size", 0.8))),
+			"drill_mm": _mm(float(via.get("drill", 0.4))),
 		}
 		var via_id: String = str(via.get("id", ""))
 		if not via_id.is_empty():
@@ -3974,12 +3976,12 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 
 	var out_points: Array = []
 	for p in pts:
-		out_points.append([snapped(p.x, 0.0001), snapped(p.y, 0.0001)])
+		out_points.append([_mm(p.x), _mm(p.y)])
 	return _ok({
 		"trace_id": str(trace.id),
 		"net_name": net_name,
 		"layer": layer,
-		"width_mm": float(trace.width) if "width" in trace else width,
+		"width_mm": _mm(float(trace.width) if "width" in trace else width),
 		"point_count": pts.size(),
 		"segment_count": maxi(0, pts.size() - 1),
 		"points": out_points,
@@ -4038,13 +4040,13 @@ static func _propose_via(host, args: Dictionary) -> Dictionary:
 	return _ok({
 		"candidate_id": str(res.get("candidate_id", "")),
 		"via_id": str(res.get("via_id", "")),
-		"x_mm": snapped(float(actual[0]), 0.0001),
-		"y_mm": snapped(float(actual[1]), 0.0001),
+		"x_mm": _mm(float(actual[0])),
+		"y_mm": _mm(float(actual[1])),
 		"net_name": str(res.get("net_name", net_name)),
 		"trace_id": str(res.get("trace_id", "")),
 		"snapped_to_trace": bool(res.get("snapped_to_trace", false)),
-		"size_mm": size_mm,
-		"drill_mm": drill_mm,
+		"size_mm": _mm(size_mm),
+		"drill_mm": _mm(drill_mm),
 		"from_layer": str(res.get("from_layer", "top")),
 		"to_layer": str(res.get("to_layer", "bottom")),
 		"note": "a GHOST via — nothing is on the board yet. Accept it with "
@@ -4122,13 +4124,13 @@ static func _place_via(host, args: Dictionary) -> Dictionary:
 	data.end_batch("Place via " + via_id)
 	return _ok({
 		"via_id": via_id,
-		"x_mm": snapped(pos.x, 0.0001),
-		"y_mm": snapped(pos.y, 0.0001),
+		"x_mm": _mm(pos.x),
+		"y_mm": _mm(pos.y),
 		"net_name": net_name,
 		"trace_id": trace_id,
 		"snapped_to_trace": bool(resolved.get("snapped", false)),
-		"size_mm": size_mm,
-		"drill_mm": drill_mm,
+		"size_mm": _mm(size_mm),
+		"drill_mm": _mm(drill_mm),
 		"from_layer": str(span[0]),
 		"to_layer": str(span[1]),
 		"via_count": data.vias.size(),
@@ -4265,11 +4267,11 @@ static func _update_via(host, args: Dictionary) -> Dictionary:
 	var span: Array = PcbLayerStack.default_through_via_span()
 	return _ok({
 		"via_id": via_id,
-		"x_mm": snapped(pos.x, 0.0001),
-		"y_mm": snapped(pos.y, 0.0001),
+		"x_mm": _mm(pos.x),
+		"y_mm": _mm(pos.y),
 		"net_name": str(res.get("net_name", "")),
-		"size_mm": float(res.get("size", 0.8)),
-		"drill_mm": float(res.get("drill", 0.4)),
+		"size_mm": _mm(float(res.get("size", 0.8))),
+		"drill_mm": _mm(float(res.get("drill", 0.4))),
 		"trace_ids": res.get("trace_ids", []),
 		"snapped_to_trace": bool(res.get("snapped", false)),
 		# `changed` false is a successful no-op: the requested values were
@@ -4318,8 +4320,8 @@ static func _delete_via(host, args: Dictionary) -> Dictionary:
 	return _ok({
 		"deleted": via_id,
 		"net_name": net_name,
-		"x_mm": snapped(pos.x, 0.0001),
-		"y_mm": snapped(pos.y, 0.0001),
+		"x_mm": _mm(pos.x),
+		"y_mm": _mm(pos.y),
 		"remaining_via_count": data.vias.size(),
 	})
 
@@ -4754,8 +4756,8 @@ static func _other_ghost_targets(store, exclude_entity_id: String) -> Array:
 		var to: Dictionary = _dict_or_empty(payload.get("to"))
 		extras.append({
 			"component_id": str(payload.get("component_id", "")),
-			"x_mm": float(to.get("x_mm", 0.0)),
-			"y_mm": float(to.get("y_mm", 0.0)),
+			"x_mm": _mm(float(to.get("x_mm", 0.0))),
+			"y_mm": _mm(float(to.get("y_mm", 0.0))),
 			"rotation_deg": float(to.get("rotation_deg", 0.0)),
 		})
 	return extras
@@ -4849,7 +4851,7 @@ static func _placement_update(host, args: Dictionary) -> Dictionary:
 		return _err(str(store.last_error.get("error", "update_refused")))
 	var reply := _ok({
 		"entity_id": entity_id,
-		"to": {"x_mm": x, "y_mm": y, "rotation_deg": rot},
+		"to": {"x_mm": _mm(x), "y_mm": _mm(y), "rotation_deg": rot},
 		"note": "ghost revised in place — still a DRAFT until minerva_pcb_staged_accept",
 	})
 	# P1 C5: the revised pose gets the same collision advisory propose gives.
@@ -5205,7 +5207,7 @@ static func _set_group_member_offset(host, args: Dictionary) -> Dictionary:
 	if comp.position == target:
 		return _ok({
 			"component_id": component_id, "group_id": gid,
-			"dx_mm": offset.x, "dy_mm": offset.y, "changed": false,
+			"dx_mm": _mm(offset.x), "dy_mm": _mm(offset.y), "changed": false,
 		})
 	if not data.set_member_offset(component_id, offset):
 		# Defensive only — every refusal case above (ungrouped/locked/anchor)
@@ -5214,7 +5216,7 @@ static func _set_group_member_offset(host, args: Dictionary) -> Dictionary:
 	data.save_to_history("Offset %s" % component_id)
 	return _ok({
 		"component_id": component_id, "group_id": gid,
-		"dx_mm": offset.x, "dy_mm": offset.y, "changed": true,
+		"dx_mm": _mm(offset.x), "dy_mm": _mm(offset.y), "changed": true,
 	})
 
 
@@ -5283,7 +5285,7 @@ static func _set_trace_width(host, args: Dictionary) -> Dictionary:
 		return _err("width_mm is required and must be a number of millimetres")
 	var width_mm := float(args.get("width_mm"))
 	if is_equal_approx(float(trace.width), width_mm):
-		return _ok({"trace_id": trace_id, "width_mm": float(trace.width), "changed": false})
+		return _ok({"trace_id": trace_id, "width_mm": _mm(float(trace.width)), "changed": false})
 	var refusal: String = data.set_trace_width(trace_id, width_mm)
 	if not refusal.is_empty():
 		return _err(refusal)
@@ -5293,7 +5295,7 @@ static func _set_trace_width(host, args: Dictionary) -> Dictionary:
 	# would be indistinguishable from a write that never landed.
 	return _ok({
 		"trace_id": trace_id,
-		"width_mm": float(trace.width),
+		"width_mm": _mm(float(trace.width)),
 		"net_name": str(trace.net_name),
 		"layer": str(trace.layer),
 		"changed": true,
@@ -6666,8 +6668,8 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 		var entry: Dictionary = {"kind": "component", "id": str(comp_id)}
 		if data != null and data.has_component(str(comp_id)):
 			var comp = data.get_component(str(comp_id))
-			entry["x"] = comp.position.x
-			entry["y"] = comp.position.y
+			entry["x"] = _mm(comp.position.x)
+			entry["y"] = _mm(comp.position.y)
 			entry["rotation"] = comp.rotation
 			entry["value"] = str(comp.properties.get("value", "")) \
 				if "properties" in comp else ""
@@ -8637,7 +8639,7 @@ static func _validate_route_intent(data, args: Dictionary) -> Dictionary:
 
 	return {"ok": true, "source_pin": source_pin, "dest_pin": dest_pin,
 		"source_resolved": source_resolved, "dest_resolved": dest_resolved,
-		"net": net, "corridor_points": corridor_points, "width_mm": width_mm}
+		"net": net, "corridor_points": corridor_points, "width_mm": _mm(width_mm)}
 
 
 static func _add_route_intent(host, args: Dictionary) -> Dictionary:
