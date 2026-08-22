@@ -806,7 +806,13 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 			if bool(args.get("snap_to_grid", true)) else new_pos
 		reply["new_x"] = _mm(landed.x)
 		reply["new_y"] = _mm(landed.y)
-		_with_snap_disclosure(reply, new_pos.x, new_pos.y, landed)
+		# Quantized at the CALL SITE, not inside the helper. For every other
+		# caller `requested` is the caller's own 64-bit argument, echoed
+		# verbatim on purpose; here it is arithmetic this surface performed on
+		# float32 positions (the caller passed a direction, not a coordinate),
+		# so it carries residue of our own making and must land on the same
+		# grid as the new_x/new_y beside it.
+		_with_snap_disclosure(reply, _mm(new_pos.x), _mm(new_pos.y), landed)
 		# Group parity with _move_component: a grouped component carries its whole
 		# group to the interpreted destination. The reply keeps new_x/new_y (the
 		# ADDRESSED component's landing point) and adds the group fields.
@@ -1148,8 +1154,7 @@ static func _get_change_journal(host, args: Dictionary) -> Dictionary:
 	var since_timestamp: float = float(args.get("since_timestamp", 0.0))
 	var limit: int = int(args.get("limit", 50))
 
-	# Journal coordinates ride VERBATIM, deliberately, and are the one mm-bearing
-	# reply on this surface that is not quantized. The journal is a record of
+	# Journal coordinates ride VERBATIM, deliberately. The journal is a record of
 	# what happened, not a coordinate to compute against: rounding it would make
 	# the record disagree with the move it describes, and the entries are
 	# free-shaped so there is no boundary to round at anyway.
@@ -3760,6 +3765,10 @@ static func _list_zones(host, _args: Dictionary) -> Dictionary:
 ## claim its identity is the empty string. Such a via cannot be deleted by id and
 ## cannot be clicked on the canvas either; both surfaces agree about that.
 ## Millimetre quantization for every mm value that leaves this surface.
+##
+## PcbAnnotationHost keeps a one-line mirror of this (the dependency direction
+## is tools -> host, so the host cannot reach here). Change the quantum in both
+## or the two surfaces disagree about what grid they are on.
 ##
 ## Vector2 is single-precision, so a pad the author placed at 75.4 comes back as
 ## 75.4000015258789. That residue is not a measurement — it is the float32

@@ -858,13 +858,6 @@ func describe_point(doc_pos: Vector2) -> String:
 const _VIA_HIT_MIN_RADIUS_MM := 0.5
 
 
-## Structured anchor resolution for ONE annotation (LLM ergonomics, docket
-## 019fcafd) — the machine-readable twin of describe_point's string. Called
-## duck-typed by minerva_annotations_list on live hosts; returns {} when the
-## anchor point resolves to nothing (the entry simply omits anchor_detail).
-## Same tier order as describe_point; every hit carries the entity id, net
-## (when it has one), position (board mm) and distance_mm from the anchor
-## point, so an agent can verify the resolution instead of trusting it.
 ## Millimetre quantization for values leaving this host on a reply. Vector2 is
 ## single-precision, so a pad authored at 75.4 reads back as 75.4000015258789 —
 ## the float32 representation of the number typed, not a measurement. Mirrors
@@ -874,6 +867,13 @@ static func _mm(value: float) -> float:
 	return snapped(value, 0.0001)
 
 
+## Structured anchor resolution for ONE annotation (LLM ergonomics, docket
+## 019fcafd) — the machine-readable twin of describe_point's string. Called
+## duck-typed by minerva_annotations_list on live hosts; returns {} when the
+## anchor point resolves to nothing (the entry simply omits anchor_detail).
+## Same tier order as describe_point; every hit carries the entity id, net
+## (when it has one), position (board mm) and distance_mm from the anchor
+## point, so an agent can verify the resolution instead of trusting it.
 func describe_anchor_detail(annotation: Dictionary) -> Dictionary:
 	var data = _board_data()
 	if data == null or _registry == null:
