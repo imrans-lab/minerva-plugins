@@ -744,12 +744,19 @@ def _from_pin(pin: dict) -> PadGeom:
         shape="rect",
         corner_rratio=None,  # inline-pin fallback carries no footprint corner datum
         solder_mask_margin=_opt_num(pin.get("solder_mask_margin")),
-        # The inline-pin fallback carries no footprint paste datum, and no paste
-        # LAYER participation either (``layers=[]`` below), so this pad emits no
-        # stencil aperture at all. None here means "unauthored", not "zero".
+        # The inline-pin fallback carries no footprint paste datum. A pin that
+        # declares no layers also declares no paste LAYER participation, so it
+        # emits no stencil aperture at all. None here means "unauthored", not
+        # "zero".
         solder_paste_margin=_opt_num(pin.get("solder_paste_margin")),
         pad_type=("thru_hole" if is_th_drill(drill) else "smd"),
-        layers=[],
+        # Carried when the producer declared it. Board YAML pins do not (the Go
+        # Pin struct has no layers field), so in practice this is populated only
+        # by ir_connectivity's projection of a compiled board, where the layer
+        # participation IS known and dropping it made every pad answer "I have
+        # copper on every layer".
+        layers=([str(layer) for layer in pin.get("layers")]
+                if isinstance(pin.get("layers"), (list, tuple)) else []),
         from_resolve=False,
     )
 

@@ -30,7 +30,7 @@ from collections import defaultdict
 import pytest
 
 from pcb_worker import compile_board as cb
-from pcb_worker import drc_geometric, ir_pads, route_bridge
+from pcb_worker import drc, drc_geometric, ir_pads, route_bridge
 from pcb_worker.footprints import load_lockfile
 from pcb_worker.methods import handle_request
 
@@ -564,6 +564,39 @@ def test_connectivity_projection_comes_from_the_compiled_ir():
         assert (pin["x_mm"], pin["y_mm"]) == pytest.approx(ir[number].pad.position)
     assert {"R1.2"} == set(next(n for n in projected["nets"]
                                 if n["name"] == "N1")["pins"])
+
+
+def test_connectivity_projection_carries_pad_layers():
+    """SR2FAB S3. The IR knows exactly which faces each pad has copper on, and
+    the projection used to drop it — so every projected pad reached
+    drc._Pad.occupies with an empty layer list and answered "yes" for every
+    layer. Copper on the wrong side of the board then read as a joined net.
+
+    Spellings ride VERBATIM: drc._harvest_pads folds them through kicad_to_canon
+    after filtering to copper, so folding here would only have to special-case
+    the mask and paste layers a pad legitimately carries."""
+    from pcb_worker import ir_connectivity
+
+    rb = _compile(_board([_comp("R1", "R_0805", 10, 10)],
+                         nets=[{"name": "N1", "pins": ["R1.2"]}]))
+    projected = ir_connectivity.connectivity_board(rb)
+    comp = next(c for c in projected["components"] if c["ref"] == "R1")
+
+    ir = {p.number: p for p in ir_pads.iter_ir_pads(rb)}
+    for pin in comp["pins"]:
+        expected = [layer.id for layer in ir[pin["number"]].pad.layers]
+        assert pin["layers"] == expected, pin["number"]
+        # An 0805 is a surface part: copper on one face only, and the projection
+        # says which. This is the fact that was missing.
+        copper = [layer for layer in pin["layers"] if layer.endswith(".Cu")]
+        assert copper == ["F.Cu"], pin["layers"]
+
+    # ...and it survives the trip back through the pad-source fallback, which is
+    # the only reader the connectivity kernel has for a projected board (these
+    # components carry `pins`, never `pads`).
+    pads = {(pad.ref, pad.pin): pad for pad in drc._harvest_pads(projected)}
+    assert pads[("R1", "2")].occupies("top") is True
+    assert pads[("R1", "2")].occupies("bottom") is False
 
 
 def test_routing_capability_profile_ignores_mask_but_not_copper():

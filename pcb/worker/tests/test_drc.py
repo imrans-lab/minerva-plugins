@@ -369,6 +369,48 @@ def test_through_hole_and_unresolved_pads_stay_layer_permissive():
     assert fallback[("U1", "1")].occupies("bottom") is True
 
 
+def test_inline_pins_carry_declared_layers_when_the_producer_knows_them():
+    """SR2FAB S3. The inline-pin fallback is layer-permissive because a board
+    YAML pin genuinely does not say which faces it lands on. A pin that DOES say
+    must be believed — that is the whole point of ir_connectivity projecting the
+    compiled IR's pad layers, and dropping them made every projected pad claim
+    copper on every layer.
+
+    Permissiveness stays exactly where it was earned: a pin with no layers key
+    still answers True everywhere (the test above pins that), and a through-hole
+    pin still spans regardless of what it declares."""
+    board = yaml.safe_load(_UNDER_PAD)
+    del board["components"][0]["pads"]            # force the inline-pin fallback
+    for pin in board["components"][0]["pins"]:
+        pin["layers"] = ["F.Cu", "F.Mask"]
+
+    pads = {(p.ref, p.pin): p for p in drc._harvest_pads(board)}
+    assert pads[("U1", "1")].occupies("top") is True
+    assert pads[("U1", "1")].occupies("bottom") is False
+
+    # The census tightens with it: the bottom trace ends on a top-only land, so
+    # SIG is still two islands rather than credited as joined.
+    assert _groups(board) == 2
+    board["traces"][0]["layer"] = "top"
+    assert _groups(board) == 1
+
+
+def test_a_pin_declaring_only_non_copper_layers_is_not_an_electrical_land():
+    """pad_source.has_copper is what separates a real land from KiCad's legal
+    paste-only aperture node, and it can only do that when the layer list
+    arrives. Before the projection carried layers, every projected aperture
+    counted as a pad."""
+    board = yaml.safe_load(_UNDER_PAD)
+    del board["components"][0]["pads"]
+    for pin in board["components"][0]["pins"]:
+        pin["layers"] = ["F.Paste"]
+    harvested = {(p.ref, p.pin) for p in drc._harvest_pads(board)}
+    assert ("U1", "1") not in harvested
+    assert ("U1", "2") not in harvested
+    # P1 keeps its resolved through-hole pad and is unaffected.
+    assert ("P1", "1") in harvested
+
+
 def test_tee_credit_is_metric_not_parametric():
     """The T-junction epsilon is a DISTANCE, so the endpoint exclusion it
     carves out must not scale with the segment's length.
