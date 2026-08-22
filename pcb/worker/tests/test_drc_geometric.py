@@ -176,6 +176,86 @@ def _profiled_board(profile_id: str):
                       "rule_profile": profile_id})
 
 
+def _not_evaluated(res: dict) -> set:
+    return {(row["check"], row["floor"]) for row in res["not_evaluated"]}
+
+
+def test_a_zero_count_says_whether_it_was_measured():
+    """SR2FAB S4. GC9, GC10 and GC11-proximity are gated on OPTIONAL-tier floors,
+    so under a profile that publishes none of them their count keys sit at 0 —
+    indistinguishable from "checked and clean" to anything reading the result.
+    The module says so three times in docstrings a result-reader never sees.
+
+    This is the honest fix and the one the register entry was actually about:
+    naming the unmeasured rules, rather than declaring numbers into a profile
+    that says of itself it is "not a specific board house". oshpark-2layer is
+    silent about silk and hole-to-copper BY DESIGN — OSH Park publishes no such
+    figure — so for that profile the ambiguity is permanent, and no amount of
+    filling profiles in would ever have closed it."""
+    res = _run(_profiled_board("v1-fab-conservative"))
+    unmeasured = _not_evaluated(res)
+    assert ("gc9_silk_width", "min_silk_width_mm") in unmeasured
+    assert ("gc9_silk_to_pad", "min_silk_to_pad_mm") in unmeasured
+    assert ("gc10_hole_to_copper", "min_hole_to_copper_mm") in unmeasured
+    assert (dg.GC11_PROXIMITY, "min_hole_to_edge_mm") in unmeasured
+    # ...and each of those counts really is sitting at 0, which is the pair of
+    # facts a reader needs together to draw the right conclusion.
+    for check, _floor in unmeasured:
+        assert res["counts"][check] == 0
+
+    # The reason names the field, so a reader can go and look at the profile.
+    for row in res["not_evaluated"]:
+        assert row["floor"] in row["reason"]
+
+
+def test_a_declared_floor_is_not_reported_as_unmeasured():
+    """The list has to DRAIN when a profile publishes the figure, or it is just
+    a second constant. jlcpcb-2layer declares silk, hole-to-copper and all three
+    feature-specific drill floors, and deliberately declares no hole-to-edge —
+    so exactly one row survives, and it is the one the page has no number for."""
+    res = _run(_profiled_board("jlcpcb-2layer"))
+    assert _not_evaluated(res) == {(dg.GC11_PROXIMITY, "min_hole_to_edge_mm")}
+
+    conservative = _not_evaluated(_run(_profiled_board("v1-fab-conservative")))
+    assert _not_evaluated(res) < conservative
+
+
+def test_partially_gated_checks_say_which_feature_class_went_unmeasured():
+    """GC3 runs on every hole against the general drill floor whatever the
+    profile says, so an absent feature-specific floor does NOT mean the check
+    sat out — it means one feature class was never measured against its own
+    number. Reporting that as a bare "not evaluated" would trade one false
+    impression for another, so those rows carry a scope."""
+    rows = {row["floor"]: row for row in _run(
+        _profiled_board("v1-fab-conservative"))["not_evaluated"]}
+    for floor, scope in (("min_npth_mm", "non-plated round holes"),
+                         ("min_plated_slot_mm", "plated slots"),
+                         ("min_npth_slot_mm", "non-plated slots")):
+        assert rows[floor]["check"] == "gc3_drill"
+        assert rows[floor]["scope"] == scope
+    # The wholly-gated rules carry no scope — absence of the key IS the
+    # distinction between "the check did not run" and "one class went
+    # unmeasured".
+    assert "scope" not in rows["min_silk_width_mm"]
+
+
+def test_every_unmeasured_row_names_a_real_count_key_and_a_real_floor_field():
+    """Both halves of a row are strings that must match something. A typo in
+    either would produce a row that reads plausibly and points nowhere, which is
+    worse than the 0 it replaced."""
+    from pcb_worker.manufacturer_profile import OPTIONAL_FLOOR_FIELDS
+
+    res = _run(_profiled_board("v1-fab-conservative"))
+    for row in res["not_evaluated"]:
+        assert row["check"] in res["counts"], row
+        assert row["floor"] in OPTIONAL_FLOOR_FIELDS, row
+
+    # solder_mask_expansion_mm is optional-tier and undeclared by v1, but it has
+    # NO reader — listing it would imply a check that does not exist, which is
+    # this key's own failure mode pointed the other way.
+    assert "solder_mask_expansion_mm" not in {row["floor"] for row in res["not_evaluated"]}
+
+
 def test_two_profiles_same_board_different_verdicts():
     v1_board = _profiled_board("v1-fab-conservative")
     oshpark_board = _profiled_board("oshpark-2layer")

@@ -2302,6 +2302,57 @@ _COUNT_KEYS = (
 )
 
 
+# Which count keys are governed by an OPTIONAL-tier profile floor, and by which
+# field. A floor the selected profile does not declare means its rule was NOT
+# EVALUATED on this board — and the count key for it stays 0, which is
+# indistinguishable from "checked and clean" to anything reading the result.
+# Three separate comments in this module already say so in prose that a
+# result-reader never sees (GC9's, GC10's and GC11's docstrings); this is the
+# same fact where the reader is.
+#
+# ``scope`` is present when the floor gates only PART of the named check. GC3
+# still runs on every hole against the general drill floor; what an absent
+# feature-specific floor means there is that one FEATURE CLASS went unmeasured,
+# which is a narrower claim than "the check did not run".
+#
+# solder_mask_expansion_mm is deliberately absent from this table. It has no
+# reader at all (it was demoted out of the required tier for exactly that
+# reason), so listing it would imply a check that does not exist — the same
+# false impression this table is here to remove, pointed the other way.
+_OPTIONAL_FLOOR_READERS: tuple[tuple[str, str, str], ...] = (
+    ("gc9_silk_width", "min_silk_width_mm", ""),
+    ("gc9_silk_to_pad", "min_silk_to_pad_mm", ""),
+    ("gc10_hole_to_copper", "min_hole_to_copper_mm", ""),
+    (GC11_PROXIMITY, "min_hole_to_edge_mm", ""),
+    ("gc3_drill", "min_npth_mm", "non-plated round holes"),
+    ("gc3_drill", "min_plated_slot_mm", "plated slots"),
+    ("gc3_drill", "min_npth_slot_mm", "non-plated slots"),
+)
+
+
+def _not_evaluated(rb: ResolvedBoard) -> list[dict]:
+    """The rules the selected profile published no floor for, named.
+
+    Without this a caller sees a count of 0 and cannot tell a rule that was
+    measured and found clean from one that was never measured. Both of the
+    shipped non-JLCPCB profiles are silent about silk and hole-to-copper, and
+    oshpark-2layer is silent BY DESIGN (OSH Park publishes no such figure), so
+    the ambiguity is permanent for them rather than a gap to be filled in later
+    by declaring more numbers.
+    """
+    minimums = rb.design_rules.minimums
+    rows: list[dict] = []
+    for check, floor_field, scope in _OPTIONAL_FLOOR_READERS:
+        if getattr(minimums, floor_field, None) is not None:
+            continue
+        row = {"check": check, "floor": floor_field,
+               "reason": f"the selected rule profile declares no {floor_field}"}
+        if scope:
+            row["scope"] = scope
+        rows.append(row)
+    return rows
+
+
 def _indeterminate(kind: str, message: str,
                    diagnostics: list | None = None) -> dict:
     """The INDETERMINATE envelope — the check did NOT produce a geometric verdict.
@@ -2537,6 +2588,11 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         # avoid harm, whereas an unknown key is simply ignored.
         "advisories": advisories,
         "counts": counts,
+        # ADDITIVE, same reasoning as `advisories` above: a consumer that does
+        # not know the key behaves exactly as before. Every row here names a
+        # count in `counts` whose 0 means "not measured" rather than "clean" —
+        # the one thing a reader could not previously tell.
+        "not_evaluated": _not_evaluated(rb),
         "warnings": list(warnings),
     }
 
