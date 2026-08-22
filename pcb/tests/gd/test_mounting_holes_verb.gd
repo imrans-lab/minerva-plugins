@@ -179,10 +179,15 @@ func _run_advisory() -> void:
 	#     trivially "on a line" with anything, so a naive triple scan reports
 	#     two advisories for one fault — noise on the advisory whose whole
 	#     value is that it does not cry wolf.
+	# ORDER MATTERS, and the first version of this fixture got it wrong. The
+	# scan walks triples (i<j<k), so a duplicate pair at indices 0,1 lands as
+	# (a,b) — which the pre-fix code ALREADY skipped. The pair has to straddle
+	# the third hole to reach the (a,c)/(b,c) positions that were unguarded,
+	# or this cell passes on both sides of the fix and proves nothing.
 	var stacked_plus: Dictionary = await _call(_rig([
 		{"position": Vector2(20.0, 20.0), "diameter": 3.2, "plated": false},
-		{"position": Vector2(20.0, 20.0), "diameter": 3.2, "plated": false},
 		{"position": Vector2(40.0, 5.0), "diameter": 3.2, "plated": false},
+		{"position": Vector2(20.0, 20.0), "diameter": 3.2, "plated": false},
 	]))
 	check("a stacked pair beside a third hole reports the stack",
 		_codes(stacked_plus).has("coincident_holes"))

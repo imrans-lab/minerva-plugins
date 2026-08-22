@@ -865,6 +865,15 @@ const _VIA_HIT_MIN_RADIUS_MM := 0.5
 ## Same tier order as describe_point; every hit carries the entity id, net
 ## (when it has one), position (board mm) and distance_mm from the anchor
 ## point, so an agent can verify the resolution instead of trusting it.
+## Millimetre quantization for values leaving this host on a reply. Vector2 is
+## single-precision, so a pad authored at 75.4 reads back as 75.4000015258789 —
+## the float32 representation of the number typed, not a measurement. Mirrors
+## panel_tools._mm; kept local because this script does not otherwise depend on
+## the tool layer and one rounding call is not worth the coupling.
+static func _mm(value: float) -> float:
+	return snapped(value, 0.0001)
+
+
 func describe_anchor_detail(annotation: Dictionary) -> Dictionary:
 	var data = _board_data()
 	if data == null or _registry == null:
@@ -880,7 +889,7 @@ func describe_anchor_detail(annotation: Dictionary) -> Dictionary:
 		return {
 			"kind": "pad",
 			"id": "%s.%s" % [str(pad_hit.get("component", "")), str(pad_hit.get("pin", ""))],
-			"position": [pad_pos.x, pad_pos.y],
+			"position": [_mm(pad_pos.x), _mm(pad_pos.y)],
 			"distance_mm": snappedf(pad_pos.distance_to(point), 0.001),
 		}
 
@@ -892,7 +901,7 @@ func describe_anchor_detail(annotation: Dictionary) -> Dictionary:
 			"kind": "via",
 			"id": via_id,
 			"net": str(via.get("net_name", "")),
-			"position": [via_pos.x, via_pos.y],
+			"position": [_mm(via_pos.x), _mm(via_pos.y)],
 			"distance_mm": snappedf(via_pos.distance_to(point), 0.001),
 		}
 
@@ -1024,7 +1033,7 @@ func pin_info(component: String, pin: String) -> Dictionary:
 		"net_members": net_members,
 		"trace_ids": trace_ids,
 		"trace_count": trace_ids.size(),
-		"position": {"x_mm": world_pos.x, "y_mm": world_pos.y},
+		"position": {"x_mm": _mm(world_pos.x), "y_mm": _mm(world_pos.y)},
 	}
 
 

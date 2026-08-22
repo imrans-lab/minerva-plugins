@@ -498,7 +498,7 @@ static func _pin_info(host, args: Dictionary) -> Dictionary:
 		var comp = data.get_component(component)
 		if comp != null:
 			var world_pos: Vector2 = comp.get_pin_world_position(pin)
-			result["position"] = [float(world_pos.x), float(world_pos.y)]
+			result["position"] = [_mm(world_pos.x), _mm(world_pos.y)]
 
 	return _ok(result)
 
@@ -621,7 +621,7 @@ static func _dangling_copper_warnings(data, pre_pins_by_comp: Dictionary) -> Arr
 					warnings.append({
 						"trace_id": str(trace.id),
 						"net": str(trace.net_name),
-						"at": [endpoint.x, endpoint.y],
+						"at": [_mm(endpoint.x), _mm(endpoint.y)],
 						"component_id": str(comp_id),
 						"message": "trace endpoint at (%.2f, %.2f) on net '%s' sat on a %s pad before this transform and now dangles — copper does not follow parts; delete it (minerva_pcb_delete_traces) or reroute" \
 							% [endpoint.x, endpoint.y, str(trace.net_name), str(comp_id)],
@@ -790,8 +790,8 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 	var new_pos: Vector2 = spatial.interpret_relative_move(component_id, direction)
 	var reply := {
 		"component_id": component_id,
-		"new_x": new_pos.x,
-		"new_y": new_pos.y,
+		"new_x": _mm(new_pos.x),
+		"new_y": _mm(new_pos.y),
 		"interpreted_direction": direction,
 	}
 	if data.has_component(component_id):
@@ -804,8 +804,8 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 		# point exactly.
 		var landed: Vector2 = data.snap_to_grid(new_pos) \
 			if bool(args.get("snap_to_grid", true)) else new_pos
-		reply["new_x"] = landed.x
-		reply["new_y"] = landed.y
+		reply["new_x"] = _mm(landed.x)
+		reply["new_y"] = _mm(landed.y)
 		_with_snap_disclosure(reply, new_pos.x, new_pos.y, landed)
 		# Group parity with _move_component: a grouped component carries its whole
 		# group to the interpreted destination. The reply keeps new_x/new_y (the
@@ -1148,6 +1148,11 @@ static func _get_change_journal(host, args: Dictionary) -> Dictionary:
 	var since_timestamp: float = float(args.get("since_timestamp", 0.0))
 	var limit: int = int(args.get("limit", 50))
 
+	# Journal coordinates ride VERBATIM, deliberately, and are the one mm-bearing
+	# reply on this surface that is not quantized. The journal is a record of
+	# what happened, not a coordinate to compute against: rounding it would make
+	# the record disagree with the move it describes, and the entries are
+	# free-shaped so there is no boundary to round at anyway.
 	var entries: Array = data.get_change_journal(since_timestamp)
 	if limit > 0 and entries.size() > limit:
 		entries = entries.slice(entries.size() - limit)
