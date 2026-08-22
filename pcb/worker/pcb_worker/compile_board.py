@@ -259,6 +259,28 @@ _DEFAULT_RULE_PROFILE = _default_rule_profile()
 V1_RULE_PROFILE = _DEFAULT_RULE_PROFILE.ref
 
 
+@dataclass(frozen=True)
+class AdjudicationContext:
+    """What the policy is allowed to know about the marker it is judging.
+
+    The :class:`CapabilityPolicy` protocol types its second parameter ``object``
+    ("whatever the caller had"), and for every marker except ``zone_connect``
+    nothing is read from it at all. ``zone_connect`` needs the owning pad's net
+    and copper layers to tell a pour it could touch from one it could not, and
+    :func:`_adjudicate_footprint` already has both in scope -- so they are
+    handed over as a named record rather than smuggled through a wider dict or
+    duplicated onto every marker.
+
+    ``pad`` is ``None`` for a marker on the footprint itself rather than on one
+    of its pads; relevance then falls back to the board-wide pour test, which is
+    the conservative reading of an inherited default.
+    """
+
+    board: dict
+    ref: str = ""
+    pad: PadDefinition | None = None
+
+
 class DefaultCapabilityPolicy:
     """v1 fatality policy (implements the :class:`CapabilityPolicy` protocol).
 
@@ -266,7 +288,8 @@ class DefaultCapabilityPolicy:
     against the requested outputs, NOT by the parser's ``default_blocking`` hint.
     A copper/drill/mask/paste marker is fatal when that output is requested; a
     documentation/silk/fab omission is non-fatal (warned).  ``zone_connect`` is
-    context-sensitive — inert unless the board actually declares zones.
+    decided by its VALUE first and its RELEVANCE second — see
+    :func:`_zone_connect_blocks`.
     """
 
     def is_blocking(
@@ -276,19 +299,7 @@ class DefaultCapabilityPolicy:
         requested_outputs: tuple[str, ...],
     ) -> bool:
         if marker.feature == "zone_connect":
-            # Inert unless the board declares a zone this pad's connect STYLE
-            # could actually change -- i.e. a COPPER POUR. A keepout zone pours
-            # no copper, so there is nothing for `(zone_connect ...)` to alter
-            # and refusing the board over it is a false fatality: it blocked
-            # every compile of a board whose only zones were antenna keepouts,
-            # taking geometric DRC and the routing IR down with it.
-            #
-            # `kind` follows Go's Zone.Kind (board.go:416): "" means
-            # copper_pour, so a zone authored before the field existed still
-            # counts. An unrecognised kind counts too -- _zone_kind() reports it
-            # as invalid_zone_kind separately, and guessing "harmless" about a
-            # zone we cannot classify is the fail-open direction.
-            return _declares_copper_pour(board_context)
+            return _zone_connect_blocks(marker, board_context)
         if marker.domain not in _FATAL_DOMAINS:
             return False
         # Fatal when the marker's own domain OR any of its explicitly-attributed
@@ -298,26 +309,165 @@ class DefaultCapabilityPolicy:
         return any(output in requested_outputs for output in marker.affected_outputs)
 
 
-def _declares_copper_pour(board_context: object) -> bool:
-    """Whether the board declares at least one copper-pour zone.
+# KiCad's ZONE_CONNECTION enum, as the pad/footprint token spells it.
+_ZONE_CONNECT_NONE = 0        # isolate: the pour must carve around this pad
+_ZONE_CONNECT_THERMAL = 1     # spokes bridging pad to pour across a gap
+_ZONE_CONNECT_SOLID = 2       # merge pad into pour -- what v1 fill does
+_ZONE_CONNECT_THT_THERMAL = 3 # thermal on a through-hole pad, solid on an SMD one
 
-    The context-sensitivity test for ``zone_connect`` (see
-    :meth:`DefaultCapabilityPolicy.is_blocking`). Deliberately tolerant about
-    the container -- the policy is handed whatever the caller had -- and
-    deliberately STRICT about which kinds it discounts: only the literal
-    ``"keepout"`` spelling is treated as pour-free.
+
+def _zone_connect_value(marker: UnsupportedFeature) -> Union[int, None]:
+    """The marker's integer value, or ``None`` when it cannot be read.
+
+    ``None`` is NOT a synonym for "absent": a token whose value the tokenizer
+    produced but that is not an integer is a zone-connect instruction nobody can
+    interpret, and the caller blocks on it. ``bool`` is excluded deliberately —
+    it is an ``int`` subclass and ``True`` would read as thermal."""
+    raw = marker.value
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _zone_connect_blocks(marker: UnsupportedFeature, context: object) -> bool:
+    """Whether a ``zone_connect`` marker corrupts the copper v1 would fill.
+
+    VALUE FIRST. v1's fill connects same-net copper SOLID and nothing else --
+    the pour simply does not carve around it (see ``zone_fill`` module docs) --
+    so ``2`` is not an approximation of the author's instruction, it IS the
+    author's instruction, and it never blocks however the board is shaped. ``3``
+    means thermal-on-through-hole, solid-on-SMD, so on an SMD pad it is ``2`` by
+    another spelling.
+
+    Everything else asks for geometry v1 does not fill: ``0`` asks for isolation
+    and gets a solid tie (star grounds and deliberate thermal breaks silently
+    disappear), ``1`` asks for spokes and gets a solid tie (the cold-joint case
+    the zone-level ``_refuse_thermal`` already refuses rather than mis-fills).
+    Warning about those at pad scope while refusing them at zone scope would
+    make v1's strictness depend on where the author typed the same intent.
+
+    RELEVANCE SECOND, and only as a way to say yes-but-it-cannot-matter-here: a
+    connect style is inert unless some pour could actually reach this pad.
     """
-    if not isinstance(board_context, dict):
+    value = _zone_connect_value(marker)
+    if value == _ZONE_CONNECT_SOLID:
         return False
-    zones = board_context.get("zones")
+    pad = context.pad if isinstance(context, AdjudicationContext) else None
+    if value == _ZONE_CONNECT_THT_THERMAL and pad is not None and pad.pad_type == "smd":
+        return False
+    return _pour_could_touch(context)
+
+
+def _pour_could_touch(context: object) -> bool:
+    """Whether some copper pour could reach the pad this marker sits on.
+
+    Relevance is: a non-keepout zone, on the pad's net, on a copper layer the
+    pad occupies. Any of the three failing means the connect style has nothing
+    to act on -- the pour must carve clearance around foreign or unnetted copper
+    regardless of what its connect style says.
+
+    Deliberately tolerant about the container (the policy is handed whatever the
+    caller had) and deliberately STRICT about the fail direction: a context this
+    cannot interrogate answers TRUE. Its predecessor answered False for a
+    non-dict, which made an unreadable board the safest kind to compile.
+
+    ``kind`` follows Go's Zone.Kind (board.go:416): "" means copper_pour, so a
+    zone authored before the field existed still counts, and an unrecognised
+    kind counts too -- ``_zone_kind`` reports it as invalid_zone_kind
+    separately, and guessing "harmless" about a zone we cannot classify is the
+    fail-open direction.
+    """
+    if isinstance(context, AdjudicationContext):
+        board, ref, pad = context.board, context.ref, context.pad
+    elif isinstance(context, dict):
+        # A caller that supplied no pad identity gets the board-wide answer.
+        board, ref, pad = context, "", None
+    else:
+        return True
+    if not isinstance(board, dict):
+        return True
+    zones = board.get("zones")
     if not isinstance(zones, list):
+        # Truthy non-list: unreadable rather than empty, so it counts.
         return bool(zones)
+    if pad is None or not ref:
+        # No pad, or a pad whose component is unknown: neither can be scoped, so
+        # they get the board-wide answer. Reading an unknown ref as "this pad is
+        # on no net" would make a missing ref the cheapest way past the check.
+        return _declares_copper_pour(zones)
+    net = _pad_net_name(board, ref, pad.number)
+    if net is None:
+        return False
+    for zone in zones:
+        if not isinstance(zone, dict):
+            return True
+        if zone.get("kind") == ZoneKind.KEEPOUT.value:
+            continue
+        if zone.get("net") != net:
+            continue
+        if _pad_occupies(pad, zone.get("layer")):
+            return True
+    return False
+
+
+def _declares_copper_pour(zones: list) -> bool:
+    """Whether *zones* holds at least one non-keepout zone. The board-wide
+    relevance test, used when no pad identity is available."""
     for zone in zones:
         if not isinstance(zone, dict):
             return True
         if zone.get("kind") != ZoneKind.KEEPOUT.value:
             return True
     return False
+
+
+def _pad_net_name(board: dict, ref: str, number: str) -> Union[str, None]:
+    """The net a pad belongs to, read off the board's own net pin references.
+
+    Shares :func:`_split_pin_ref` with the net builder so the "REF.NUMBER" split
+    has one definition; ``drc._pin_net_map`` is the same walk on the consumer
+    side of the IR."""
+    if not ref:
+        return None
+    for net in board.get("nets") or ():
+        if not isinstance(net, dict):
+            continue
+        name = net.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        for token in net.get("pins") or ():
+            parsed = _split_pin_ref(token)
+            if parsed is not None and parsed[0] == ref and parsed[1] == str(number):
+                return name
+    return None
+
+
+def _pad_occupies(pad: PadDefinition, zone_layer: object) -> bool:
+    """Whether *pad* has copper on the zone's layer.
+
+    Mirrors ``drc._Pad.occupies``: a pad declaring no layers, or declaring the
+    stack-spanning ``*.Cu``, answers True for every layer. Permissive is the
+    fail-CLOSED direction here -- an undeclared pad that might sit under the
+    pour must not talk its way out of the check. A zone layer that is empty or
+    does not name copper answers True for the same reason: ``_build_zones``
+    refuses it separately, but this must not assume that gate ran first, and
+    folding an unrecognised name would compare it unequal to everything and so
+    report the pour unreachable -- fail-open by arithmetic."""
+    if not isinstance(zone_layer, str) or not is_copper(zone_layer):
+        return True
+    declared = [layer.id for layer in pad.layers]
+    if not declared or any(layer == "*.Cu" for layer in declared):
+        return True
+    target = kicad_to_canon(zone_layer)
+    return any(is_copper(layer) and kicad_to_canon(layer) == target
+               for layer in declared)
 
 
 class _Diagnostics:
@@ -973,10 +1123,11 @@ def _adjudicate_footprint(
     stripped so the definition satisfies the IR no-residual-marker invariant."""
     blocked = False
 
-    def judge(markers) -> None:
+    def judge(markers, pad: Union[PadDefinition, None] = None) -> None:
         nonlocal blocked
+        context = AdjudicationContext(board=board, ref=ref, pad=pad)
         for marker in markers:
-            if policy.is_blocking(marker, board, requested_outputs):
+            if policy.is_blocking(marker, context, requested_outputs):
                 diags.error("unsupported_feature",
                             f"footprint {ref!r}: {marker.feature} on {marker.domain.value} "
                             f"({marker.detail}) corrupts a requested fabrication output",
@@ -989,7 +1140,7 @@ def _adjudicate_footprint(
 
     judge(definition.unsupported)
     for pad in definition.pads:
-        judge(pad.unsupported)
+        judge(pad.unsupported, pad)
 
     if blocked:
         return None

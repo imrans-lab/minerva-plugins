@@ -375,6 +375,61 @@ def test_k1_unsupported_pad_and_graphic_are_flagged_not_dropped():
     assert all("'2'" in u["detail"] for u in p2["unsupported"])  # attributed to pad
 
 
+def test_zone_connect_marker_carries_its_value():
+    """SR2FAB S2. The value is what decides fatality -- 2 is v1's own solid
+    connect while 0 and 1 ask for geometry a solid fill overrides -- so the
+    presence-only marker this used to emit gave the policy nothing to judge."""
+    parsed = parse_kicad_mod("""
+        (footprint "ZC" (layer "F.Cu")
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (zone_connect 2))
+          (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (zone_connect 0)))
+    """)
+    by_number = {p["number"]: p for p in parsed["pads"]}
+    for number, expected in (("1", "2"), ("2", "0")):
+        markers = [u for u in by_number[number]["unsupported"]
+                   if u["feature"] == "zone_connect"]
+        assert len(markers) == 1
+        assert markers[0]["value"] == expected
+        assert f"zone_connect {expected}" in markers[0]["detail"]
+        assert f"pad {number!r}" in markers[0]["detail"]
+
+
+def test_zone_connect_with_an_unreadable_value_is_still_a_marker():
+    """Unreadable and absent must stay distinguishable: they get opposite
+    verdicts, so a value the tokenizer produced but cannot be read as an integer
+    rides through raw rather than being dropped."""
+    parsed = parse_kicad_mod("""
+        (footprint "ZC" (layer "F.Cu")
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (zone_connect solid))
+          (pad "2" smd rect (at 2 0) (size 1 1) (layers "F.Cu") (zone_connect)))
+    """)
+    by_number = {p["number"]: p for p in parsed["pads"]}
+    marker = [u for u in by_number["1"]["unsupported"] if u["feature"] == "zone_connect"][0]
+    assert marker["value"] == "solid"
+    bare = [u for u in by_number["2"]["unsupported"] if u["feature"] == "zone_connect"][0]
+    assert bare["value"] is None
+
+
+def test_footprint_level_zone_connect_becomes_a_marker():
+    """KiCad allows the token on the footprint as well as on a pad, where it is
+    the default every pad without its own value inherits. Only the pad-level one
+    was ever read, so a footprint-level one reached no policy at all -- dropped
+    before anything could decide about it."""
+    parsed = parse_kicad_mod("""
+        (footprint "InheritedZC" (layer "F.Cu")
+          (zone_connect 1)
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")))
+    """)
+    markers = [u for u in parsed.get("unsupported", [])
+               if u["feature"] == "zone_connect"]
+    assert len(markers) == 1, parsed.get("unsupported")
+    assert markers[0]["value"] == "1"
+    assert "FOOTPRINT level" in markers[0]["detail"]
+    # ...and it does NOT leak onto the pads, which carry no token of their own.
+    assert "unsupported" not in parsed["pads"][0] or not [
+        u for u in parsed["pads"][0]["unsupported"] if u["feature"] == "zone_connect"]
+
+
 def test_malformed_modeled_graphic_is_diagnosed_instead_of_silently_filtered():
     parsed = parse_kicad_mod("""
         (footprint "Malformed" (layer "F.Cu")

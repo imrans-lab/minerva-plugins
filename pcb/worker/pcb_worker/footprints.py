@@ -339,7 +339,6 @@ def _parse_pad(p: list) -> dict:
     for _feat, _toks in (
         ("chamfer", ("chamfer", "chamfer_ratio")),
         ("local_clearance", ("clearance",)),
-        ("zone_connect", ("zone_connect",)),
     ):
         _present = [t for t in _toks if _kv(p, t) is not None]
         if _present:
@@ -350,6 +349,24 @@ def _parse_pad(p: list) -> dict:
                     f"not modeled by the parser"
                 ),
             })
+
+    # zone_connect is recorded WITH ITS VALUE, unlike the presence-only markers
+    # above, because the value is what decides whether the pour v1 fills matches
+    # what the author asked for: 2 is v1's native solid connect, 3 is solid on an
+    # SMD pad, and 0/1 ask for isolation or thermal spokes that a solid fill
+    # silently overrides. A value the tokenizer produced but that is not an
+    # integer is carried through RAW rather than dropped -- unreadable and absent
+    # get opposite verdicts downstream, so they must stay distinguishable.
+    _zc = _kv(p, "zone_connect")
+    if _zc is not None:
+        pad.setdefault("unsupported", []).append({
+            "feature": "zone_connect",
+            "value": _atom(_zc[1]) if len(_zc) > 1 else None,
+            "detail": (
+                f"pad {_atom(number)!r} carries "
+                f"(zone_connect {_atom(_zc[1]) if len(_zc) > 1 else ''})"
+            ),
+        })
 
     return pad
 
@@ -649,8 +666,12 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     clearance, zone connect, and a nonzero ``solder_paste_margin_ratio``); plus a
     top-level ``unsupported`` list of attributed markers for graphics outside the
     modeled kind/layer, and for FOOTPRINT-level ``solder_paste_margin_ratio`` /
-    ``solder_paste_ratio``
+    ``solder_paste_ratio`` / ``zone_connect``
     matrix.
+
+    ``zone_connect`` markers (pad-level and footprint-level alike) carry a
+    ``value`` key holding the raw token, because the value and not the presence
+    is what decides whether v1's solid fill matches what the author asked for.
 
     All coordinates are footprint-LOCAL (no board transform applied).
     """
@@ -715,6 +736,25 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
                 f"this proportional stencil margin is not modeled, so without "
                 f"this refusal every paste aperture in the footprint would be "
                 f"cut from the copper land instead of the ratio-adjusted size"
+            ),
+        }]
+
+    # FOOTPRINT-LEVEL zone_connect. KiCad allows the token on the footprint as
+    # well as on a pad (gerbonara's schema declares it on both Pad and
+    # Footprint), where it is the DEFAULT every pad without its own value
+    # inherits. Only the pad-level token was ever read, so a footprint-level one
+    # reached no policy at all: it was dropped before anything could decide
+    # about it, which is the one fail-open direction the marker exists to close.
+    _fp_zc = _kv(root, "zone_connect")
+    if _fp_zc is not None:
+        uncaptured = list(uncaptured) + [{
+            "feature": "zone_connect",
+            "value": _atom(_fp_zc[1]) if len(_fp_zc) > 1 else None,
+            "detail": (
+                f"footprint {name!r} declares "
+                f"(zone_connect {_atom(_fp_zc[1]) if len(_fp_zc) > 1 else ''}) "
+                f"at FOOTPRINT level, the default every pad without its own "
+                f"value inherits"
             ),
         }]
 

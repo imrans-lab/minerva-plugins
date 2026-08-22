@@ -348,6 +348,9 @@ def _raw_marker(
         default_blocking=blocking,
         detail=str(raw.get("detail") or feature),
         source_ref=source_ref,
+        # Forwarded verbatim, including a value the parser could not read: the
+        # policy gives "unreadable" and "absent" opposite verdicts.
+        value=raw.get("value"),
     )
 
 
@@ -405,7 +408,7 @@ def _graphic_to_payload(graphic: GraphicDefinition) -> dict:
 
 
 def _unsupported_to_payload(marker: UnsupportedFeature) -> dict:
-    return {
+    payload = {
         "feature": marker.feature,
         "domain": marker.domain.value,
         "affected_layer": marker.affected_layer.id if marker.affected_layer else None,
@@ -418,6 +421,14 @@ def _unsupported_to_payload(marker: UnsupportedFeature) -> dict:
             "detail": marker.source_ref.detail,
         },
     }
+    # This payload is BOTH the round trip back through from_kicad_parsed and the
+    # content_id digest input, so the key is emitted only when the marker has a
+    # value. Omitting it otherwise keeps every marker that never had one
+    # byte-identical, and carrying it keeps a value from silently becoming
+    # "unreadable" -- which the policy treats as the opposite of what it says.
+    if marker.value is not None:
+        payload["value"] = marker.value
+    return payload
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,7 @@ from pcb_worker.compile_board import (
     V1_FAB_OUTPUTS,
     V1_ROUTING_OUTPUTS,
     V1_RULE_PROFILE,
+    AdjudicationContext,
     DefaultCapabilityPolicy,
     _Diagnostics,
     _adjudicate_footprint,
@@ -608,15 +609,208 @@ def test_policy_never_blocks_documentation_marker():
     assert policy.is_blocking(_nonblocking_marker(domain=FeatureDomain.SILK), {}, V1_FAB_OUTPUTS) is False
 
 
-def test_policy_zone_connect_is_context_sensitive():
+# ---------------------------------------------------------------------------
+# zone_connect adjudication (SR2FAB S2).
+#
+# The whole table, so a later edit has to argue with a failing test rather than
+# an absent one. Relevance means: some non-keepout zone, on the pad's net, on a
+# copper layer the pad occupies.
+#
+#   value | relevance                | pad      | verdict
+#   ------+--------------------------+----------+---------
+#     2   | any                      | any      | allow  (v1's native solid connect)
+#     3   | relevant                 | smd      | allow  (== 2 on an SMD pad)
+#     3   | relevant                 | thru     | BLOCK  (== 1 on a through-hole pad)
+#     1   | relevant                 | any      | BLOCK  (spokes; solid fill = cold joint)
+#     0   | relevant                 | any      | BLOCK  (isolation inverted by solid fill)
+#   unreadable | relevant            | any      | BLOCK
+#   0/1/3/unreadable | irrelevant    | any      | allow
+#   any non-2 | context unreadable   | any      | BLOCK  <-- must never fail open
+#   any non-2 | footprint-level      | pad=None | board-wide relevance
+# ---------------------------------------------------------------------------
+
+
+def _zc_marker(value=None, source_id="pad:17:0"):
+    return UnsupportedFeature(
+        feature="zone_connect", domain=FeatureDomain.COPPER,
+        affected_layer=None, affected_outputs=("copper",),
+        default_blocking=False, detail=f"zone_connect {value}",
+        source_ref=SourceRef(EntityKind.PAD, source_id), value=value)
+
+
+def _zc_pad(number="17", pad_type="smd", layers=("F.Cu",)):
+    return PadDefinition(
+        source_id=f"pad:{number}:0", number=number, pad_type=pad_type,
+        raw_pad_type=pad_type, shape=PadShape.RECT, raw_shape="rect",
+        position=(0.0, 0.0), size=(1.0, 1.0),
+        layers=tuple(Layer.from_id(layer) for layer in layers))
+
+
+def _zc_board(zone_net="GND", zone_layer="bottom", zone_kind="copper_pour",
+              pad_net="GND", ref="U2", number="17"):
+    """A board whose single zone is on *zone_net*/*zone_layer* and whose pad
+    U2.17 belongs to *pad_net* (None leaves the pad off every net)."""
+    nets = [{"name": "SIG", "pins": ["U2.1"]}]
+    if pad_net is not None:
+        nets.append({"name": pad_net, "pins": [f"{ref}.{number}"]})
+    return {"zones": [{"kind": zone_kind, "net": zone_net, "layer": zone_layer}],
+            "nets": nets}
+
+
+def _ctx(board, ref="U2", pad=None):
+    return AdjudicationContext(board=board, ref=ref, pad=pad)
+
+
+def test_policy_zone_connect_uninterrogable_context_blocks():
+    """THE CELL THAT MUST NEVER FAIL OPEN, and the one this station inverted.
+
+    Before S2 a context the policy could not read answered False -- an
+    unreadable board was the safest kind to compile. Every assertion here is
+    red against pre-station code."""
     policy = DefaultCapabilityPolicy()
-    zc = UnsupportedFeature(feature="zone_connect", domain=FeatureDomain.COPPER,
-                            affected_layer=None, affected_outputs=("copper",),
-                            default_blocking=False, detail="zc",
-                            source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
-    assert policy.is_blocking(zc, {}, V1_FAB_OUTPUTS) is False           # no zones → inert
-    assert policy.is_blocking(zc, {"zones": [{}]}, V1_FAB_OUTPUTS) is True  # pour (kind defaults) → fatal
-    assert policy.is_blocking(zc, {"zones": [{"kind": "copper_pour"}]},
+    for value in (0, 1, 3, "solid", None):
+        marker = _zc_marker(value)
+        assert policy.is_blocking(marker, None, V1_FAB_OUTPUTS) is True
+        assert policy.is_blocking(marker, "nonsense", V1_FAB_OUTPUTS) is True
+        assert policy.is_blocking(marker, _ctx("not-a-board"), V1_FAB_OUTPUTS) is True
+        # A truthy non-list `zones` is unreadable, not empty.
+        assert policy.is_blocking(marker, {"zones": "nonsense"}, V1_FAB_OUTPUTS) is True
+        assert policy.is_blocking(marker, {"zones": ["nonsense"]}, V1_FAB_OUTPUTS) is True
+
+
+def test_policy_zone_connect_solid_never_blocks():
+    """v1's fill connects same-net copper SOLID, so 2 is not an approximation of
+    the instruction, it IS the instruction. Red pre-station, which blocked on
+    the token's presence whatever it said -- and this is the exact value the
+    shipped VQFN-16 exposed pad carries."""
+    policy = DefaultCapabilityPolicy()
+    pad = _zc_pad(layers=("F.Cu",))
+    for board in (_zc_board(zone_layer="top"), _zc_board(zone_layer="bottom"),
+                  {"zones": [{"kind": "copper_pour"}]}, {}):
+        assert policy.is_blocking(_zc_marker(2), _ctx(board, pad=pad),
+                                  V1_FAB_OUTPUTS) is False
+    # The string form the tokenizer actually produces reads the same.
+    assert policy.is_blocking(_zc_marker("2"), _ctx(_zc_board(zone_layer="top"), pad=pad),
+                              V1_FAB_OUTPUTS) is False
+
+
+def test_policy_zone_connect_isolation_and_thermal_block_a_reachable_pour():
+    """0 asks for isolation and 1 asks for spokes; a solid fill overrides both
+    silently. Warning at pad scope while zone_fill._refuse_thermal REFUSES the
+    same intent at zone scope would make strictness depend on where the author
+    typed it.
+
+    REGRESSION GUARD, not red-first: pre-station code also blocked these,
+    because it blocked every zone_connect on any board with a pour. What is red
+    is the irrelevance half, in the test below."""
+    policy = DefaultCapabilityPolicy()
+    pad = _zc_pad(layers=("F.Cu",))
+    board = _zc_board(zone_net="GND", zone_layer="top", pad_net="GND")
+    for value in (0, 1, "solid", None):
+        assert policy.is_blocking(_zc_marker(value), _ctx(board, pad=pad),
+                                  V1_FAB_OUTPUTS) is True
+
+
+def test_policy_zone_connect_is_inert_when_no_pour_can_reach_the_pad():
+    """The RED half. Each board below made pre-station code block -- it asked
+    only "does this board declare a pour", never "could that pour touch THIS
+    pad" -- and each is a pour that physically cannot act on the pad's connect
+    style."""
+    policy = DefaultCapabilityPolicy()
+    pad = _zc_pad(layers=("F.Cu",))
+    irrelevant = {
+        "pour on another net": _zc_board(zone_net="VBAT", zone_layer="top",
+                                         pad_net="GND"),
+        "pour on a layer the pad does not occupy":
+            _zc_board(zone_net="GND", zone_layer="bottom", pad_net="GND"),
+        "pad on no net at all": _zc_board(zone_net="GND", zone_layer="top",
+                                          pad_net=None),
+        "keepout, which pours no copper": _zc_board(zone_net="GND", zone_layer="top",
+                                                    zone_kind="keepout"),
+    }
+    for label, board in irrelevant.items():
+        for value in (0, 1, 3, "solid", None):
+            assert policy.is_blocking(_zc_marker(value), _ctx(board, pad=pad),
+                                      V1_FAB_OUTPUTS) is False, f"{label}, value={value}"
+
+
+def test_policy_zone_connect_three_is_solid_on_smd_and_thermal_on_through_hole():
+    """3 means thermal-on-through-hole, solid-on-SMD, so the same value gets
+    opposite verdicts on the two pad kinds. Red pre-station in the SMD
+    direction; the through-hole direction is a regression guard."""
+    policy = DefaultCapabilityPolicy()
+    board = _zc_board(zone_net="GND", zone_layer="top", pad_net="GND")
+    smd = _zc_pad(pad_type="smd", layers=("F.Cu",))
+    tht = _zc_pad(pad_type="thru_hole", layers=("*.Cu",))
+    assert policy.is_blocking(_zc_marker(3), _ctx(board, pad=smd), V1_FAB_OUTPUTS) is False
+    assert policy.is_blocking(_zc_marker(3), _ctx(board, pad=tht), V1_FAB_OUTPUTS) is True
+
+
+def test_policy_zone_connect_stack_spanning_pad_occupies_every_copper_layer():
+    """A through-hole pad and a pad declaring no layers both span the stack, so
+    a pour on ANY copper layer can reach them. Mirrors drc._Pad.occupies, where
+    permissive is the fail-CLOSED direction."""
+    policy = DefaultCapabilityPolicy()
+    board = _zc_board(zone_net="GND", zone_layer="bottom", pad_net="GND")
+    for pad in (_zc_pad(pad_type="thru_hole", layers=("*.Cu",)),
+                _zc_pad(pad_type="thru_hole", layers=())):
+        assert policy.is_blocking(_zc_marker(1), _ctx(board, pad=pad),
+                                  V1_FAB_OUTPUTS) is True
+    # ...and an unreadable zone layer counts as reachable rather than as absent.
+    no_layer = _zc_board(zone_net="GND", zone_layer="", pad_net="GND")
+    assert policy.is_blocking(_zc_marker(1), _ctx(no_layer, pad=_zc_pad()),
+                              V1_FAB_OUTPUTS) is True
+
+
+def test_policy_zone_connect_kicad_and_canonical_layer_spellings_are_one_layer():
+    """The pad declares KiCad names and the zone declares canonical ones. Before
+    the fold they compared unequal, so every pour looked unreachable -- the
+    fail-OPEN direction, and the reason the comparison goes through
+    kicad_to_canon rather than string equality."""
+    policy = DefaultCapabilityPolicy()
+    pad = _zc_pad(layers=("F.Cu",))
+    for zone_layer in ("top", "F.Cu"):
+        assert policy.is_blocking(
+            _zc_marker(1), _ctx(_zc_board(zone_layer=zone_layer), pad=pad),
+            V1_FAB_OUTPUTS) is True
+    for zone_layer in ("bottom", "B.Cu"):
+        assert policy.is_blocking(
+            _zc_marker(1), _ctx(_zc_board(zone_layer=zone_layer), pad=pad),
+            V1_FAB_OUTPUTS) is False
+
+
+def test_policy_zone_connect_footprint_level_marker_uses_board_wide_relevance():
+    """A footprint-level token is the default every pad inherits, so there is no
+    single pad to scope it to; relevance falls back to "does the board pour
+    copper at all", which is the conservative reading."""
+    policy = DefaultCapabilityPolicy()
+    marker = _zc_marker(1, source_id="footprint:VQFN")
+    pours = _ctx({"zones": [{"kind": "copper_pour", "net": "GND", "layer": "top"}]})
+    keepouts_only = _ctx({"zones": [{"kind": "keepout"}, {"kind": "keepout"}]})
+    assert policy.is_blocking(marker, pours, V1_FAB_OUTPUTS) is True
+    assert policy.is_blocking(marker, keepouts_only, V1_FAB_OUTPUTS) is False
+    assert policy.is_blocking(marker, _ctx({}), V1_FAB_OUTPUTS) is False
+    # A value-2 default is solid whatever the board looks like.
+    assert policy.is_blocking(_zc_marker(2, source_id="footprint:VQFN"), pours,
+                              V1_FAB_OUTPUTS) is False
+
+
+def test_policy_zone_connect_matches_this_boards_shape():
+    """smart-remote-v2, encoded: U2's VQFN exposed pad carries zone_connect 2 on
+    F.Cu and the GND pour is on the bottom. The station's unblocking event is
+    that BOTH tests clear it independently -- the value is v1's own connect
+    style, and the pour could not reach the pad even if it were not."""
+    policy = DefaultCapabilityPolicy()
+    ep = _zc_pad(number="17", pad_type="smd", layers=("F.Cu", "F.Mask"))
+    board = _zc_board(zone_net="GND", zone_layer="bottom", pad_net="GND",
+                      ref="U2", number="17")
+    assert policy.is_blocking(_zc_marker(2), _ctx(board, ref="U2", pad=ep),
+                              V1_FAB_OUTPUTS) is False
+    # The same board with the pad's own net poured on its own layer, and a value
+    # v1 cannot fill, still refuses -- the gate is scoped, not disarmed.
+    reachable = _zc_board(zone_net="GND", zone_layer="F.Cu", pad_net="GND",
+                          ref="U2", number="17")
+    assert policy.is_blocking(_zc_marker(1), _ctx(reachable, ref="U2", pad=ep),
                               V1_FAB_OUTPUTS) is True
 
 
@@ -626,19 +820,13 @@ def test_policy_zone_connect_ignores_keepout_only_zones():
     (an antenna exclusion), which took the whole compile -- geometric DRC and
     the routing IR with it -- down over a token with nothing to affect."""
     policy = DefaultCapabilityPolicy()
-    zc = UnsupportedFeature(feature="zone_connect", domain=FeatureDomain.COPPER,
-                            affected_layer=None, affected_outputs=("copper",),
-                            default_blocking=False, detail="zc",
-                            source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
-    keepouts = {"zones": [{"kind": "keepout"}, {"kind": "keepout"}]}
+    zc = _zc_marker(1)
+    keepouts = _ctx({"zones": [{"kind": "keepout"}, {"kind": "keepout"}]})
     assert policy.is_blocking(zc, keepouts, V1_FAB_OUTPUTS) is False
-    # ...but ONE pour alongside them is enough to make it fatal again.
-    mixed = {"zones": [{"kind": "keepout"}, {"kind": "copper_pour"}]}
-    assert policy.is_blocking(zc, mixed, V1_FAB_OUTPUTS) is True
-    # An unclassifiable zone fails CLOSED rather than being assumed harmless.
-    assert policy.is_blocking(zc, {"zones": [{"kind": "Keepout"}]},
+    # An unclassifiable zone kind fails CLOSED rather than being assumed
+    # harmless: only the literal "keepout" spelling is treated as pour-free.
+    assert policy.is_blocking(zc, _ctx({"zones": [{"kind": "Keepout"}]}),
                               V1_FAB_OUTPUTS) is True
-    assert policy.is_blocking(zc, {"zones": ["nonsense"]}, V1_FAB_OUTPUTS) is True
 
 
 def test_v1_requested_outputs_do_not_claim_the_fab_layer():

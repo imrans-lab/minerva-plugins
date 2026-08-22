@@ -216,6 +216,13 @@ class UnsupportedFeature:
     default_blocking: bool
     detail: str
     source_ref: SourceRef
+    # The token's own value, when the feature's fatality depends on it rather
+    # than on its mere presence -- ``zone_connect 2`` is v1's native solid
+    # connect while ``zone_connect 1`` asks for thermal spokes v1 cannot fill.
+    # Left as the raw parsed atom: a value the parser could not read must stay
+    # distinguishable from a value that was absent, because the two get
+    # opposite verdicts.
+    value: object | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.feature, "UnsupportedFeature.feature")
