@@ -20,6 +20,8 @@ contract (pcb/internal/board/board.go, pcb/docs/board-yaml.md):
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import traceback
 from pathlib import Path
@@ -350,6 +352,71 @@ def _drc(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
+# How many entity references a grouped warning row carries before it stops
+# naming them individually. Enough to see the pattern, few enough that a
+# board-wide omission does not cost more than the finding it sits beside.
+_WARNING_REFS_SHOWN = 8
+
+
+def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
+    """Collapse repeated compile diagnostics into one row per code.
+
+    THE PROBLEM THIS SOLVES is a coworking cost, not a correctness one. Compile
+    emits one WARNING per marker and per component — feature_omitted,
+    captured_geometry_not_emitted, ordinal_ids — so a real board produces
+    dozens of rows saying the same thing about different entities, and every
+    board_check carries all of them. The DRC-clean push runs board_check dozens
+    of times, which makes this the single largest context cost of working the
+    manufacture loop, for information that does not change between runs.
+
+    Returns {rows, digest, total}. The DIGEST is what makes the collapse safe
+    to skim: it is stable across identical calls, so a caller who saw the rows
+    once can tell at a glance that nothing new appeared, and it MOVES the
+    moment any warning does. Rows are sorted before hashing so an ordering
+    change in the compiler cannot masquerade as new information.
+
+    ``verbose`` returns the flat list untouched beside the rows, for the caller
+    who genuinely needs every entity.
+    """
+    grouped: dict[str, dict] = {}
+    for entry in warnings:
+        if not isinstance(entry, dict):
+            continue
+        code = str(entry.get("code", "") or "uncoded")
+        row = grouped.setdefault(code, {
+            "code": code, "count": 0, "refs": [], "severity": entry.get("severity"),
+            "message": str(entry.get("message", "")),
+        })
+        row["count"] += 1
+        ref = ((entry.get("source_ref") or {}).get("entity_id")
+               if isinstance(entry.get("source_ref"), dict) else None)
+        if isinstance(ref, str) and ref and ref not in row["refs"]:
+            row["refs"].append(ref)
+    rows = []
+    for code in sorted(grouped):
+        row = grouped[code]
+        shown = sorted(row["refs"])
+        out_row = {
+            "code": row["code"],
+            "count": row["count"],
+            "severity": row["severity"],
+            # ONE representative message, because the rows differ only by the
+            # entity they name and that is what `refs` is for.
+            "message": row["message"],
+            "refs": shown[:_WARNING_REFS_SHOWN],
+        }
+        if len(shown) > _WARNING_REFS_SHOWN:
+            out_row["refs_omitted"] = len(shown) - _WARNING_REFS_SHOWN
+        rows.append(out_row)
+    digest = hashlib.sha256(
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    out = {"rows": rows, "digest": digest, "total": len(warnings)}
+    if verbose:
+        out["warnings"] = list(warnings)
+    return out
+
+
 def _drc_geometric(params: dict) -> dict:
     """Geometric copper DRC over the ResolvedBoard IR (GC1-GC7): reads REAL copper
     and hole geometry, fail-closed, and NEVER emits a false ``clean``. This is the
@@ -402,6 +469,18 @@ def _drc_geometric(params: dict) -> dict:
     # union; clean / violations / indeterminate are conveyed INSIDE the union
     # (``result.ok`` / ``result.verdict``), so every failure still returns the SAME
     # union (019f9589b232) and no consumer needs a bespoke branch.
+    # STATIC-WARNING AGGREGATION (SR2FAB S12). The union's flat `warnings` list
+    # is one row per marker per entity, unchanged between runs and re-sent on
+    # every call. It is replaced by `static_warnings` — one row per code with a
+    # count, a sample of the entities and a digest — and the flat list returns
+    # only for a caller that asks. The digest is what makes the collapse safe:
+    # it moves the moment any warning does.
+    if isinstance(union, dict) and isinstance(union.get("warnings"), list):
+        union = dict(union)
+        union["static_warnings"] = _group_static_warnings(
+            union["warnings"], verbose=bool((params or {}).get("verbose_warnings")))
+        if not bool((params or {}).get("verbose_warnings")):
+            union.pop("warnings", None)
     return {"ok": True, "result": union}
 
 

@@ -1949,3 +1949,105 @@ def test_a_malformed_direction_declaration_refuses_the_board():
         result = compile_board(_directed_board(bad, [((5.0, 5.0), (25.0, 5.0))]))
         assert isinstance(result, ResolutionFailure), bad
         assert any(d.code == "bad_trace_angles" for d in result.diagnostics), bad
+
+
+# ---------------------------------------------------------------------------
+# Static-warning aggregation (SR2FAB S12).
+# ---------------------------------------------------------------------------
+
+
+def _warning(code: str, entity: str, message: str = "omitted") -> dict:
+    return {"severity": "warning", "code": code, "message": message,
+            "source_ref": {"entity_kind": "pad", "entity_id": entity,
+                           "detail": ""}}
+
+
+def test_repeated_compile_warnings_collapse_to_one_row_per_code():
+    """SR2FAB S12. Compile emits one WARNING per marker and per component, so a
+    real board produces dozens of rows saying the same thing about different
+    entities — and every board_check re-sends all of them. The DRC-clean push
+    runs board_check dozens of times, which makes this the single largest
+    context cost of working the manufacture loop, for information that does not
+    change between runs."""
+    from pcb_worker.methods import _group_static_warnings
+
+    flat = ([_warning("feature_omitted", "pad:%d" % i) for i in range(20)]
+            + [_warning("captured_geometry_not_emitted", "comp:%d" % i)
+               for i in range(5)])
+    grouped = _group_static_warnings(flat)
+
+    assert grouped["total"] == 25
+    assert [row["code"] for row in grouped["rows"]] == [
+        "captured_geometry_not_emitted", "feature_omitted"]   # sorted
+    by_code = {row["code"]: row for row in grouped["rows"]}
+    assert by_code["feature_omitted"]["count"] == 20
+    assert by_code["captured_geometry_not_emitted"]["count"] == 5
+
+    # The refs are a SAMPLE, and the row says how many it did not name — a
+    # truncation that does not admit to truncating reads as a complete list.
+    assert len(by_code["feature_omitted"]["refs"]) == 8
+    assert by_code["feature_omitted"]["refs_omitted"] == 12
+    assert "refs_omitted" not in by_code["captured_geometry_not_emitted"]
+
+
+def test_the_warning_digest_is_stable_and_moves_when_a_warning_does():
+    """The digest is what makes the collapse safe to skim: a caller who read the
+    rows once can tell at a glance that nothing new appeared. It must therefore
+    be identical across identical calls and different the moment anything
+    changes — including a change in ORDER, which is why the rows are sorted
+    before hashing rather than after."""
+    from pcb_worker.methods import _group_static_warnings
+
+    flat = [_warning("feature_omitted", "pad:1"), _warning("ordinal_ids", "trace:2")]
+    first = _group_static_warnings(flat)
+    assert _group_static_warnings(flat)["digest"] == first["digest"]
+    # Same warnings, different order in — same digest out.
+    assert _group_static_warnings(list(reversed(flat)))["digest"] == first["digest"]
+    # One more entity on an existing code moves it.
+    assert _group_static_warnings(
+        flat + [_warning("feature_omitted", "pad:3")])["digest"] != first["digest"]
+    # A brand new code moves it.
+    assert _group_static_warnings(
+        flat + [_warning("something_new", "pad:1")])["digest"] != first["digest"]
+
+
+def test_the_flat_list_is_available_to_a_caller_that_asks():
+    from pcb_worker.methods import _group_static_warnings
+
+    flat = [_warning("feature_omitted", "pad:1")]
+    assert "warnings" not in _group_static_warnings(flat)
+    assert _group_static_warnings(flat, verbose=True)["warnings"] == flat
+
+
+def test_the_geometric_reply_carries_the_grouped_form_not_the_flat_one():
+    """The collapse has to happen where the reply is built, or the rows are
+    grouped and the flat list rides along beside them costing exactly what it
+    cost before."""
+    from pcb_worker.methods import handle_request
+
+    board = _profiled_board("v1-fab-conservative")
+    quiet = handle_request({"id": "g1", "method": "drc_geometric",
+                            "params": {"board": board}})["result"]
+    assert "static_warnings" in quiet
+    assert "warnings" not in quiet
+    assert isinstance(quiet["static_warnings"]["digest"], str)
+    assert len(quiet["static_warnings"]["digest"]) == 64
+
+    verbose = handle_request({"id": "g2", "method": "drc_geometric",
+                              "params": {"board": board,
+                                         "verbose_warnings": True}})["result"]
+    assert "warnings" in verbose
+    assert verbose["static_warnings"]["digest"] == quiet["static_warnings"]["digest"]
+    assert verbose["static_warnings"]["total"] == len(verbose["warnings"])
+
+
+def test_an_indeterminate_reply_grows_no_warning_block():
+    """The INDETERMINATE union deliberately carries no findings or counts a
+    caller could read as a pass, and it carries no warnings list either — so
+    there is nothing to group, and nothing must be invented."""
+    from pcb_worker.methods import handle_request
+
+    union = handle_request({"id": "g3", "method": "drc_geometric",
+                            "params": {"yaml": "not: [valid"}})["result"]
+    assert union["verdict"] == "indeterminate"
+    assert "static_warnings" not in union
