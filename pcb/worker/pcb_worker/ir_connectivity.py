@@ -97,6 +97,24 @@ def connectivity_board(rb: ResolvedBoard) -> dict:
             # through the SHARED pad_source.is_through_hole predicate from this
             # drill — so it classifies exactly as the emitters do.
             pin["drill_mm"] = max(float(pad.drill.size[0]), float(pad.drill.size[1]))
+        if pad.layers:
+            # WHICH FACES THIS PAD HAS COPPER ON. Without it every projected pad
+            # reached drc._Pad.occupies with an empty layer list and answered
+            # "yes" for every layer, so a bottom-side segment ending at the
+            # centre of an F.Cu-only SMD pad counted as connected to it — copper
+            # on the wrong side of the board, reported as a joined net.
+            #
+            # VERBATIM, unlike the traces and vias below, which this module
+            # folds to canonical ids. The two consumers genuinely differ:
+            # segment layers are compared by raw string equality, while pad
+            # layers go through kicad_to_canon on the reading side
+            # (drc._harvest_pads), which filters to copper first. Folding here
+            # would have to special-case the mask and paste layers a pad
+            # legitimately carries — kicad_to_canon warns and passes those
+            # through lowercased — for no gain, since the reader folds anyway.
+            # Emitting them ALL is what lets pad_source.has_copper tell an
+            # electrical land from KiCad's legal paste-only aperture node.
+            pin["layers"] = [layer.id for layer in pad.layers]
         comp["pins"].append(pin)
         pin_ref_by_pad_id[pad.id] = _pin_ref(ir_pad.ref, ir_pad.human_number)
 

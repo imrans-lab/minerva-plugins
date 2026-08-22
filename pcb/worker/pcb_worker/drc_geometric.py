@@ -794,6 +794,17 @@ def _violates(measured: float, required: float) -> bool:
     return measured < required - EPS
 
 
+def _exceeds(measured: float, ceiling: float) -> bool:
+    """Ceiling predicate — the mirror of :func:`_violates`, which is a FLOOR.
+
+    Every other rule in this module asks "is this at least X". GC12 asks "is
+    this at most X", and spelling that as ``_violates(ceiling, measured)`` is
+    arithmetically identical while reading inside-out — which is exactly how a
+    later edit swaps two arguments and silently inverts a check. A measurement
+    AT the ceiling passes, symmetrically with _violates."""
+    return measured > ceiling + EPS
+
+
 def _net_class_minima(rb: ResolvedBoard) -> dict[str, tuple[float | None, float | None]]:
     """``net_id -> (class min_trace_width_mm, class min_clearance_mm)`` for every net
     that REFERENCES a net class naming at least one of them. This is the net->class
@@ -1788,15 +1799,22 @@ def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                     "gc2_copper_clearance", f"{lo.entity_id}|{hi.entity_id}", None,
                     "copper_pair", None, layer_id, dist, required,
                     closest=list(w1), witness=list(w2), midpoint=list(mid),
+                    # width_mm rides each participant (None for anything that
+                    # is not a trace segment) so a clearance finding says what
+                    # width the copper was modeled at. A clearance violation
+                    # that is really a width mix-up — copper checked at the
+                    # run's baseline instead of the width it was authored at —
+                    # is otherwise indistinguishable from a real one, and
+                    # diagnosing it meant re-deriving the overlay by hand.
                     extra={"participants": [
                         {"entity_id": lo.entity_id, "parent": lo.parent_id,
                          "kind": lo.kind, "net_id": lo.net_id,
                          "ref": lo.ref, "pad": lo.pad_number,
-                         "net_name": lo.net_name},
+                         "net_name": lo.net_name, "width_mm": lo.width_mm},
                         {"entity_id": hi.entity_id, "parent": hi.parent_id,
                          "kind": hi.kind, "net_id": hi.net_id,
                          "ref": hi.ref, "pad": hi.pad_number,
-                         "net_name": hi.net_name}]}))
+                         "net_name": hi.net_name, "width_mm": hi.width_mm}]}))
     findings.sort(key=lambda f: (f["layer"], f["entity_id"]))
     return findings
 
@@ -2099,6 +2117,86 @@ def _check_gc11_hole_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+## The narrowest overlap GC7 will call a violation, in nanometres.
+##
+## Narrower than this, an intersection is kernel noise rather than copper. In the
+## COMMON case — a pour that authors no ``clearance_mm`` at all — the filler's
+## carve and this check's requirement resolve to the identical number, so the two
+## boundaries are mathematically coincident and the only thing separating them is
+## integer rounding. The filler carves with ONE ``CT_DIFFERENCE`` against every
+## inflated obstacle at once (``zone_fill._fill_one``), so wherever two obstacles'
+## inflated bands overlap each other Clipper mints intersection vertices snapped
+## to the 1 nm grid; this check intersects one obstacle at a time against a
+## ``SimplifyPolygons``'d fill, which snaps again, as do ``_fracture``'s keyhole
+## slits. MEASURED on smart-remote-v2: slivers of 1,858 to 24,927 nm^2 along one
+## via-plus-trace run, reported as three clearance violations that do not exist
+## and blocking promote on a correctly carved board (docket 01a02873cad3).
+##
+## TWICE THE WIDEST PHANTOM EVER MEASURED, which is not the same as twice the
+## coordinate quantum, and the difference matters. The tempting derivation is
+## that a vertex snapped to the 1 nm grid moves either boundary by at most half a
+## quantum, so coincident boundaries separate by at most 1 nm. THAT BOUND IS
+## FALSE, and it was in this comment until measurement contradicted it: there is
+## more than one rounding stage (the filler's ``CT_DIFFERENCE``, the float-mm
+## round trip through ``PolygonGeometry``, ``SimplifyPolygons``, ``_fracture``'s
+## keyhole slits, then this check's own ``CT_INTERSECTION``) and they do not
+## cancel.
+##
+## WHAT WAS ACTUALLY MEASURED. Phantom width reaches 2 nm. A bend-only sweep of
+## 60 arrangements (trace widths 0.15-1.2 mm; orthogonal bends, chevrons,
+## zigzags, U-turns, sawtooth, with and without vias) never exceeded 1 nm and
+## made the false bound look confirmed; ROTATED PADS, the arrangement class that
+## sweep omitted, reach 2 nm routinely — found across ~800 further boards of
+## grazing pad pairs at odd rotations, sub-micrometre jitter, and coordinates out
+## to 70 mm. Bends mint the phantoms where two obstacles' inflated bands overlap
+## each other; a via AT a bend swallows the join region and yields nothing.
+##
+## SO 4, NOT 2. At 2 the guard sat exactly on the measured maximum: it worked
+## only because ``_is_sliver``'s predicate is strictly-wider-than (a band of
+## width exactly W is annihilated by deflating W/2 from each side), leaving no
+## headroom at all — one more rounding stage in some future kernel or fill path
+## and the promote-blocking phantoms return. 4 buys one full quantum of margin
+## and costs nothing: the smallest genuine under-carve under test is 50 nm, still
+## 12.5x above it, and the threshold kill-mutations above it still hold.
+##
+## NOT derived from the arc tolerance, which was the first proposal. Arc
+## tolerance CANCELS: both sides flatten round joins through the same
+## ``ARC_TOLERANCE_NM``, so it says nothing about how far the boundaries drift.
+## A 5,000 nm guard would swallow both nanometre-scale under-carves pinned here
+## (50 nm and 100 nm) and leave only 30x under the 0.15 mm one — which does still
+## fire at that threshold, so the coarse case alone never discriminated. It would
+## also HIDE those constants drifting apart, the one change that WOULD
+## reintroduce genuine approximation error.
+GC7_SLIVER_WIDTH_NM = 4
+
+
+def _is_sliver(pyclipper, overlap) -> bool:
+    """True when ``overlap`` is nowhere WIDER than ``GC7_SLIVER_WIDTH_NM``.
+
+    Strictly wider, and the boundary case is worth naming because the threshold's
+    margin depends on it: deflating ``W/2`` from every side annihilates a band of
+    width exactly ``W``, so a band of exactly the threshold is culled, not kept.
+
+    A WIDTH test, not an area test, because a real under-carve is a long thin
+    band too: area alone cannot separate a 10 mm run of 1 nm noise from a 10 um
+    run of 100 nm copper, and any area threshold that killed the first would
+    have to be tuned against the second. Width is the same question at every
+    length.
+
+    Asked the way the filler already asks it (``zone_fill._survives_deflation``):
+    deflate by half the floor from every side and see whether anything survives.
+    The whole solution goes in with its orientations intact, so a ring of overlap
+    around a void deflates from both boundaries and is not mistaken for solid.
+    """
+    from .zone_fill import ARC_TOLERANCE_NM, MITER_LIMIT  # noqa: PLC0415
+
+    offset = pyclipper.PyclipperOffset()
+    offset.MiterLimit = MITER_LIMIT
+    offset.ArcTolerance = ARC_TOLERANCE_NM
+    offset.AddPaths(overlap, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+    return not offset.Execute(-GC7_SLIVER_WIDTH_NM / 2.0)
+
+
 def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     """GC7 — POUR COPPER IS COPPER. Filled zone copper vs foreign-net copper.
 
@@ -2111,25 +2209,66 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
     the largest single piece of copper on the board, so pour copper gets its own
     check with a kernel that can actually represent it.
 
-    WHY IT IS NOT CIRCULAR. The obvious objection to checking a fill we computed
-    is that we would be asking the filler whether it obeyed itself. It is not the
-    same rule on both sides: the FILLER carves by the ZONE's authored
-    ``clearance_mm`` (falling back to the board minimum), while this check uses
-    ``_effective_min_clearance`` — the board minimum RAISED by either net's class.
-    A zone that authors a clearance BELOW what its net class demands fills happily
-    and is caught here. The independent judge for the fill's SHAPE is the pcbnew
-    oracle (tests/oracle/zone_fill_oracle.py), not this.
+    IT IS LARGELY CIRCULAR, AND THAT IS WHY THE SLIVER GUARD EXISTS. The obvious
+    objection to checking a fill we computed is that we would be asking the
+    filler whether it obeyed itself, and mostly we are: ``zone_fill._clearance_mm``
+    resolves the SAME max() of the zone's authored clearance, the board minimum
+    and both nets' class minima that ``_effective_min_clearance`` resolves here,
+    and says so in its own docstring. An earlier version of this paragraph
+    claimed a zone authoring below what its net class demands would fill happily
+    and be caught here. It cannot — the filler folds the class minima in too, so
+    that case never reaches this check. The claim was false when written and is
+    recorded here rather than deleted, because believing it is what let the
+    coincident-boundary bug (docket 01a02873cad3) ship.
+
+    WHAT IS GENUINELY LEFT TO CATCH, none of it nothing: a zone that authors a
+    clearance below the GLOBAL minimum with no class to rescue it, where the
+    filler honours the author's number and this check does not; a fill handed to
+    us by a foreign tool, since ``ResolvedZone.fill`` is public IR that nothing
+    forces us to have computed; and any future filler bug that carves less than
+    it resolved, the documented layer-namespace fail-open in
+    ``zone_fill._obstacle_paths`` being the one we have already seen. In practice
+    every one of those is MACROSCOPIC — a band as wide as the deficit, or a whole
+    pad — which is what makes a nanometre-scale guard safe.
+
+    WHERE THAT ARGUMENT THINS, stated rather than glossed. It rests on the
+    encroachment being as WIDE as it is deep, which holds for anything the filler
+    produces and for any deficit an author can plausibly write, but is not a
+    theorem: a spike 4 nm across at its base and micrometres deep would be culled,
+    because nothing here guards penetration DEPTH. Two cases can reach that shape.
+    A foreign tool's fill is arbitrary geometry and is not width-screened —
+    ``zone_fill._refuse_unfabricable_regions`` runs inside our filler only. And an
+    author may write a deficit that is itself sub-threshold (``0.199998`` against
+    a 0.2 mm minimum is a representable 2 nm breach, and is masked). Neither is
+    worth widening the check for — sub-grid copper is not fabricable and a 2 nm
+    deficit is not a rule anyone is relying on — but neither is covered by the
+    word "macroscopic", so it does not stand unqualified.
 
     Exact integer arithmetic via the same kernel that computed the fill: inflate
     each foreign primitive by the required clearance and intersect with the pour.
-    A non-empty intersection means copper is closer than the rule allows.
+    An intersection anywhere WIDER than ``GC7_SLIVER_WIDTH_NM`` means copper is
+    closer than the rule allows.
+
+    The independent judge for the fill's SHAPE is the pcbnew oracle
+    (tests/oracle/zone_fill_oracle.py), not this.
     """
     zones = [z for z in rb.zones
              if z.kind is ZoneKind.COPPER_POUR and z.fill]
     if not zones:
         return []
 
-    from .zone_fill import NM_PER_MM, _capsule_ring, _rect_ring  # noqa: PLC0415
+    # The OFFSET CONSTANTS COME FROM THE FILLER, they are not restated here.
+    # This check inflates foreign copper with the same flattening the filler used
+    # to carve around it; if the two ever differed, the boundaries would separate
+    # by approximation error and every default pour would report violations. They
+    # were hardcoded as a literal ``(2.0, 5000)`` until docket 01a02873cad3.
+    from .zone_fill import (  # noqa: PLC0415
+        ARC_TOLERANCE_NM,
+        MITER_LIMIT,
+        NM_PER_MM,
+        _capsule_ring,
+        _rect_ring,
+    )
 
     pyclipper = _zone_clipper()
     if pyclipper is None:  # pragma: no cover - install-time condition
@@ -2168,7 +2307,7 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
                     f"zone clearance cannot model copper shape "
                     f"{type(prim.shape).__name__} on {prim.entity_id!r}")
 
-            offset = pyclipper.PyclipperOffset(2.0, 5000)
+            offset = pyclipper.PyclipperOffset(MITER_LIMIT, ARC_TOLERANCE_NM)
             offset.AddPath(ring, pyclipper.JT_ROUND,
                            pyclipper.ET_CLOSEDPOLYGON if closed
                            else pyclipper.ET_OPENROUND)
@@ -2181,7 +2320,7 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
             clipper.AddPaths(inflated, pyclipper.PT_CLIP, True)
             overlap = clipper.Execute(pyclipper.CT_INTERSECTION,
                                       pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
-            if not overlap:
+            if not overlap or _is_sliver(pyclipper, overlap):
                 continue
 
             centre = _overlap_centroid(overlap, NM_PER_MM)
@@ -2215,6 +2354,98 @@ def _overlap_centroid(paths, scale: int) -> tuple[float, float]:
     Clipper's contour ordering."""
     best = min(min(path) for path in paths)
     return (best[0] / scale, best[1] / scale)
+
+
+# GC12 — trace DIRECTION. Absent by default; see _check_gc12_trace_direction.
+GC12_DIRECTION = "gc12_trace_direction"
+
+## How far off-axis a segment may sit, measured as the PERPENDICULAR DEVIATION
+## of its far end from the allowed direction through its near end, in mm.
+##
+## A perpendicular distance rather than an angle, deliberately. An angular
+## tolerance is scale-dependent: the same 0.1 um of coordinate quantization is
+## 0.0036 deg across a 1.6 mm run and 0.057 deg across a 0.1 mm one, so any
+## single angle either fails short conforming segments or passes long
+## near-diagonal ones. A distance is the same rule at every length, and it is
+## the quantity a fab cares about anyway.
+##
+## The value is the coincidence epsilon the connectivity kernel already uses
+## (drc.COPPER_COINCIDENT_EPS_MM), for one derivation and because it sits an
+## order of magnitude above the 0.1 um emit grid: a segment authored on-axis
+## and round-tripped through float32 cannot drift into a finding.
+GC12_AXIS_TOLERANCE_MM = 1e-3
+
+
+def _check_gc12_trace_direction(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC12 — every trace segment runs in one of the directions the board allows.
+
+    ABSENT BY DEFAULT, and gated on BOARD state
+    (``design_rules.allowed_trace_angles_deg``) rather than on a rule profile.
+    A profile records what a board HOUSE publishes; no house requires
+    orthogonal routing. Manhattan is a design style its author chose, and
+    asserting it as a fab capability would be inventing a rule.
+
+    WHAT IT CATCHES, and why nothing else did. smart-remote-v2 is routed
+    Manhattan by an external router, and no rule in this module expresses
+    direction: a 45-degree stub and a 0.9-degree-off-vertical segment both pass
+    GC1-GC11 completely clean. The 0.9-degree case is the one that matters —
+    0.025 mm of drift over a 1.6 mm run, invisible at any zoom, and it reached
+    the board.
+
+    FAIL DIRECTION, per this module's cardinal rule: a borderline segment
+    produces a SPURIOUS FINDING, never a missed diagonal. The tolerance is
+    tight enough (1 um perpendicular) that no real diagonal can hide under it,
+    and an author who dislikes a marginal finding can move the segment; an
+    author who never learns about a diagonal cannot do anything at all.
+
+    NOTE ON THE FINDING SHAPE: this is the module's only CEILING rule, so
+    ``required_mm`` here is the maximum allowed deviation, not a minimum. The
+    angles in ``measured_angle_deg`` / ``nearest_allowed_angle_deg`` are the
+    legible half and the reason the finding carries them.
+    """
+    allowed = rb.design_rules.allowed_trace_angles_deg
+    if not allowed:
+        return []
+    findings: list[dict] = []
+    for prim in proj.copper:
+        if prim.kind != "trace_seg":
+            continue
+        shape = prim.shape
+        ax, ay, bx, by = shape.ax, shape.ay, shape.bx, shape.by
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length <= GC12_AXIS_TOLERANCE_MM:
+            # Shorter than the tolerance in every direction at once, so it has
+            # no direction to be wrong about. A segment this short is GC1/S7's
+            # problem, not this rule's.
+            continue
+        best_dev = None
+        best_angle = 0.0
+        for angle in allowed:
+            radians = math.radians(angle)
+            # Perpendicular deviation of the far end from the allowed direction
+            # through the near end: |d x u|, u a unit vector along the axis.
+            deviation = abs(dx * math.sin(radians) - dy * math.cos(radians))
+            if best_dev is None or deviation < best_dev:
+                best_dev = deviation
+                best_angle = angle
+        if best_dev is not None and _exceeds(best_dev, GC12_AXIS_TOLERANCE_MM):
+            # The segment's own heading, folded to [0, 180) the same way the
+            # allowed set is, so the two are directly comparable by eye.
+            measured_angle = math.degrees(math.atan2(dy, dx)) % 180.0
+            findings.append(_finding(
+                GC12_DIRECTION, prim.entity_id, prim.parent_id, prim.kind,
+                prim.net_id, prim.layers[0] if prim.layers else None,
+                best_dev, GC12_AXIS_TOLERANCE_MM,
+                closest=[ax, ay], witness=[bx, by],
+                midpoint=[(ax + bx) / 2.0, (ay + by) / 2.0],
+                extra={
+                    "measured_angle_deg": round(measured_angle, 6),
+                    "nearest_allowed_angle_deg": round(best_angle, 6),
+                    "allowed_angles_deg": list(allowed),
+                },
+                ref=prim.ref, pad=prim.pad_number, net_name=prim.net_name))
+    return findings
 
 
 def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
@@ -2299,7 +2530,74 @@ _COUNT_KEYS = (
     # key stays 0 on every board in the corpus — "the profile said nothing".
     GC11_CONTAINMENT,
     GC11_PROXIMITY,
+    # SR2FAB S11 — trace direction. Gated on BOARD state, not on a profile, and
+    # absent by default, so this key stays 0 unless the board asked for it. The
+    # `not_evaluated` list says which of those two a 0 means.
+    GC12_DIRECTION,
 )
+
+
+# Which count keys are governed by an OPTIONAL-tier profile floor, and by which
+# field. A floor the selected profile does not declare means its rule was NOT
+# EVALUATED on this board — and the count key for it stays 0, which is
+# indistinguishable from "checked and clean" to anything reading the result.
+# Three separate comments in this module already say so in prose that a
+# result-reader never sees (GC9's, GC10's and GC11's docstrings); this is the
+# same fact where the reader is.
+#
+# ``scope`` is present when the floor gates only PART of the named check. GC3
+# still runs on every hole against the general drill floor; what an absent
+# feature-specific floor means there is that one FEATURE CLASS went unmeasured,
+# which is a narrower claim than "the check did not run".
+#
+# solder_mask_expansion_mm is deliberately absent from this table. It has no
+# reader at all (it was demoted out of the required tier for exactly that
+# reason), so listing it would imply a check that does not exist — the same
+# false impression this table is here to remove, pointed the other way.
+_OPTIONAL_FLOOR_READERS: tuple[tuple[str, str, str], ...] = (
+    ("gc9_silk_width", "min_silk_width_mm", ""),
+    ("gc9_silk_to_pad", "min_silk_to_pad_mm", ""),
+    ("gc10_hole_to_copper", "min_hole_to_copper_mm", ""),
+    (GC11_PROXIMITY, "min_hole_to_edge_mm", ""),
+    ("gc3_drill", "min_npth_mm", "non-plated round holes"),
+    ("gc3_drill", "min_plated_slot_mm", "plated slots"),
+    ("gc3_drill", "min_npth_slot_mm", "non-plated slots"),
+)
+
+
+def _not_evaluated(rb: ResolvedBoard) -> list[dict]:
+    """The rules the selected profile published no floor for, named.
+
+    Without this a caller sees a count of 0 and cannot tell a rule that was
+    measured and found clean from one that was never measured. Both of the
+    shipped non-JLCPCB profiles are silent about silk and hole-to-copper, and
+    oshpark-2layer is silent BY DESIGN (OSH Park publishes no such figure), so
+    the ambiguity is permanent for them rather than a gap to be filled in later
+    by declaring more numbers.
+    """
+    minimums = rb.design_rules.minimums
+    rows: list[dict] = []
+    for check, floor_field, scope in _OPTIONAL_FLOOR_READERS:
+        if getattr(minimums, floor_field, None) is not None:
+            continue
+        row = {"check": check, "floor": floor_field,
+               "reason": f"the selected rule profile declares no {floor_field}"}
+        if scope:
+            row["scope"] = scope
+        rows.append(row)
+    # GC12 is gated on BOARD state rather than on a profile floor, but its zero
+    # is ambiguous in exactly the same way, so it belongs in the same list.
+    if not rb.design_rules.allowed_trace_angles_deg:
+        rows.append({
+            "check": GC12_DIRECTION,
+            "floor": "design_rules.allowed_trace_angles_deg",
+            # The reason names the FULL path, matching `floor`: a reader has to
+            # be able to go and look at the thing that is missing, and
+            # "allowed_trace_angles_deg" alone does not say where it lives.
+            "reason": "this board declares no design_rules.allowed_trace_angles_deg, "
+                      "so it asked for no direction constraint",
+        })
+    return rows
 
 
 def _indeterminate(kind: str, message: str,
@@ -2432,6 +2730,9 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         # mask-projection refusal below, which is about a different family.
         findings += _check_gc10_hole_to_copper(proj, rb)
         findings += _check_gc11_hole_to_edge(proj, rb)
+        # Copper-only like the two above, so it runs before the mask-projection
+        # refusal below rather than behind it.
+        findings += _check_gc12_trace_direction(proj, rb)
 
         # GC8 CONSUMES THE MASK PROJECTION, so it must first refuse to run on a
         # KNOWN-INCOMPLETE aperture set. `mask_indeterminate` names entities
@@ -2537,6 +2838,11 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         # avoid harm, whereas an unknown key is simply ignored.
         "advisories": advisories,
         "counts": counts,
+        # ADDITIVE, same reasoning as `advisories` above: a consumer that does
+        # not know the key behaves exactly as before. Every row here names a
+        # count in `counts` whose 0 means "not measured" rather than "clean" —
+        # the one thing a reader could not previously tell.
+        "not_evaluated": _not_evaluated(rb),
         "warnings": list(warnings),
     }
 

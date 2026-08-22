@@ -74,7 +74,7 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## running" deploy check. Format is free text; "<manifest version>+<round
 ## tag>" is the convention started here so it still roughly tracks
 ## manifest.json's own "version" (0.2.0) without reading it.
-const PLUGIN_BUILD := "0.2.0+b2-mcp-parity"
+const PLUGIN_BUILD := "0.2.0+sr2fab"
 
 ## T2 (S2.2) strangler-fig SHADOW phase: the routing workspace is populated
 ## ALONGSIDE the existing annotation proposals on every propose (dual-write,
@@ -3179,11 +3179,22 @@ func _on_check_button_pressed() -> void:
 	var result: Dictionary = await check_draft()
 	if _canvas != null:
 		_canvas.queue_redraw()
-	if result.is_empty():
-		# check_draft's contract: an empty dict means the worker hop could not
-		# run and every candidate was reverted to its prior verdict — say so
-		# rather than leave the "Checking…" line lying.
-		_set_status("Draft check could not run (worker unavailable) — proposals keep their prior verdicts.")
+	if not result.has("per_candidate"):
+		# check_draft's contract: a reply without per_candidate is a failure
+		# carrying its own name, and every candidate was reverted to its prior
+		# verdict — say WHICH failure rather than leave the "Checking…" line
+		# lying or blame the worker for a ghost the user dragged.
+		_set_status("Draft check could not run (%s) — proposals keep their prior verdicts."
+			% str(result.get("error", "unknown")))
+		return
+	if str(result.get("error", "")) != "":
+		# The worker CAN answer with per_candidate and still say it could not
+		# stand behind the verdict — an unreadable board snapshot, an
+		# indeterminate geometric leg. Reading only the per_candidate guard
+		# above would print "Checked:" over exactly that run, which is the lie
+		# this handler was rewritten to stop telling.
+		_set_status("Draft check incomplete (%s) — proposals keep their prior verdicts."
+			% str(result.get("error")))
 		return
 	var findings: int = (result.get("findings", []) as Array).size() \
 		if result.get("findings", []) is Array else 0
@@ -4207,6 +4218,11 @@ func get_layout_state() -> Dictionary:
 		"properties_expanded": _properties_expanded,
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
 		"plugin_build": PLUGIN_BUILD,
+		# The board's DECLARED manufacturing intent. It decides whether the
+		# completeness census judges the copper or excuses it, so a caller
+		# planning work against this board has to be able to read it without
+		# running the gate.
+		"fabrication_stage": str(_data.fabrication_stage) if _data != null else "",
 	}
 
 
@@ -4823,12 +4839,19 @@ func _payload_by_ref(payload: Dictionary, key: String) -> Dictionary:
 ## boundary + Go channel owns YAML now. Oversized boards go by-ref both ways
 ## (work item 01a0223ec9e271269fd664fcf90dd20b): the request snapshots the
 ## board, and an over-cap document comes back as {yaml_path, yaml_digest}.
-func _on_export_yaml_pressed() -> void:
+##
+## Returns {success:true, yaml, bytes, draft:true} or {success:false, error,
+## note}. UNGATED, and it WRITES NOTHING: promote() stays the only verb in
+## this panel that puts bytes in a .yaml file, so a board the gate refuses is
+## still readable, diffable and archivable without the design of record
+## changing underneath it.
+func export_yaml_text() -> Dictionary:
+	if _data == null:
+		return {"success": false, "error": "no_board"}
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
-		_set_status("YAML export unavailable — plugin IPC not ready.")
-		return
-	_set_status("Exporting YAML…")
+		return {"success": false, "error": "worker_unavailable",
+			"note": "YAML serialization runs in the pcb backend — plugin IPC not ready"}
 	var result: Dictionary = await _request_with_backend_ensure(
 			"pcb.serialize",
 			_payload_by_ref({"board": _data.to_board_dict()}, "board"), 30000)
@@ -4837,25 +4860,51 @@ func _on_export_yaml_pressed() -> void:
 		var code := str(result.get("error_code", ""))
 		var msg := str(result.get("error_message", ""))
 		if code.findn("payload_too_large") != -1 or code.findn("too_large") != -1 or msg.findn("64") != -1:
-			_set_status("YAML export failed: board exceeds the 64KiB IPC cap.")
-		else:
-			_set_status("YAML export failed: %s" % (msg if msg != "" else code))
-		return
+			return {"success": false, "error": "payload_too_large",
+				"note": "board exceeds the 64KiB IPC cap"}
+		return {"success": false, "error": "serialize_failed",
+			"note": msg if msg != "" else code}
 
-	# Success payload shape is owned by the Go side; surface a size hint if
-	# present. An over-cap document arrives as {yaml_path, yaml_digest} — read
-	# it back verified through the one serialize-result reader, at the SAME
-	# unwrap level promote uses (fix cold review F2: the live reply is
-	# {success, result:{ok, result:{yaml|yaml_path}}}, and reading one level
-	# shallow made the by-path branch unreachable).
+	# Success payload shape is owned by the Go side. An over-cap document
+	# arrives as {yaml_path, yaml_digest} — read it back verified through the
+	# one serialize-result reader, at the SAME unwrap level promote uses (fix
+	# cold review F2: the live reply is {success, result:{ok,
+	# result:{yaml|yaml_path}}}, and reading one level shallow made the
+	# by-path branch unreachable).
 	var payload_dict: Dictionary = _unwrap_channel_reply(result)
 	var read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
-	if not bool(read.get("ok", false)) and payload_dict.has("yaml_path"):
-		_set_status("YAML export failed: %s" % str(read.get("error")))
-		return
+	if not bool(read.get("ok", false)):
+		if payload_dict.has("yaml_path"):
+			return {"success": false, "error": "serialize_read_failed",
+				"note": str(read.get("error", ""))}
+		# The serialize channel's REFUSALS are success-shaped {error, …} —
+		# surface them by name rather than as an empty document.
+		if str(payload_dict.get("error", "")) != "":
+			return {"success": false, "error": str(payload_dict.get("error")),
+				"bytes": int(payload_dict.get("bytes", 0)),
+				"note": "pcb.serialize refused"}
+		return {"success": false, "error": "serialize_failed",
+			"note": str(read.get("error", ""))}
 	var yaml_text := str(read.get("yaml", ""))
-	if yaml_text != "":
-		_set_status("YAML exported (%d bytes)." % yaml_text.length())
+	return {"success": true, "yaml": yaml_text, "bytes": yaml_text.length(),
+		"draft": true}
+
+
+## The Export YAML button: the same serialization, rendered to the status line.
+func _on_export_yaml_pressed() -> void:
+	if get_node_or_null("_MinervaIPC") == null:
+		_set_status("YAML export unavailable — plugin IPC not ready.")
+		return
+	_set_status("Exporting YAML…")
+	var result: Dictionary = await export_yaml_text()
+	if not bool(result.get("success", false)):
+		var note := str(result.get("note", ""))
+		_set_status("YAML export failed: %s" % (note if note != ""
+			else str(result.get("error", ""))))
+		return
+	var bytes := int(result.get("bytes", 0))
+	if bytes > 0:
+		_set_status("YAML exported (%d bytes)." % bytes)
 	else:
 		_set_status("YAML export complete.")
 
@@ -4986,6 +5035,11 @@ func board_check() -> Dictionary:
 		"geometric": gate.get("geometric", {}),
 		"assembly": gate.get("assembly", {}),
 		"board_revision": checked_revision,
+		# A census that reads complete because the board DECLARED routing is not
+		# its deliverable is not the same fact as one that read every net's
+		# copper, and a bare complete:true cannot tell them apart. The worker
+		# already distinguishes them; this is where a reader sees it.
+		"complete_by_declaration": _complete_by_declaration(gate),
 		# The declared copper stack (epoch GA-1): the census is the read agents
 		# plan against, and what may be authored/routed is stack-dependent now.
 		"layers": _data.layers.duplicate() if _data != null else [],
@@ -5212,6 +5266,11 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		"bytes": yaml_text.length(),
 		"prior_state": prior_state,
 		"promote_check": {"promotable": true, "refusals": []},
+		# The promoted file is the durable design of record, so the record of
+		# HOW it passed matters more here than anywhere: a completeness that
+		# came from the board's declared stage is not one that came from its
+		# copper.
+		"complete_by_declaration": _complete_by_declaration(gate),
 	}
 	if not census_delta.is_empty():
 		reply["census_delta"] = census_delta
@@ -5224,6 +5283,18 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		reply["staged_drafts"] = _staged_entities.staged_entries().size()
 	reply["success"] = true
 	return reply
+
+
+## Whether a `complete` verdict was reached by DECLARATION rather than by
+## routing every net — the board's fabrication stage said routing was not its
+## deliverable, so the census excused its unrouted nets. False for a board that
+## is genuinely complete, and false for one that is incomplete.
+static func _complete_by_declaration(gate: Dictionary) -> bool:
+	var conn: Variant = gate.get("connectivity", {})
+	if not (conn is Dictionary):
+		return false
+	return bool((conn as Dictionary).get("complete", false)) \
+		and bool((conn as Dictionary).get("routing_deferred", false))
 
 
 ## Per-net copper presence — the CENSUS's own definition (traces ∪ zones ∪
@@ -5690,7 +5761,8 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 			# Still flip+revert so a caller sees a coherent no-op, not stuck state.
 			_routing_workspace.begin_check(candidate_ids)
 			_routing_workspace.apply_check_result({})
-		return {}
+		return {"error": "draft_check_unavailable",
+			"note": "no worker bridge, board or routing workspace on this panel — nothing was scored and every candidate keeps the validation it had"}
 
 	# Board coherence token = the SAME fingerprint the durable sidecar guards
 	# with, and it is computed from the CANONICAL board deliberately. The token
@@ -5738,8 +5810,28 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(composed)
 
 	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
-	request.emit("pcb.draft_check", payload, reply_id)
+	# By-ref like every other board-carrying sender (work item
+	# 01a0223ec9e271269fd664fcf90dd20b). This channel was left inline, so on a
+	# board past the broker's 64KiB cap the request died before the worker saw
+	# it — and the refusal arrived as an empty reply, indistinguishable from a
+	# worker that simply had nothing to say. The composed DRAFT board is what
+	# travels, so it is bigger than the canonical one, not smaller.
+	request.emit("pcb.draft_check", _payload_by_ref(payload, "board"), reply_id)
 	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	# The broker's own failures are success:false with no result at all. They
+	# used to fall through the unwrap and return {} — the same value an overlay
+	# drift and an unmounted panel returned, so three different faults with
+	# three different fixes all read as "the worker did not answer".
+	if result.has("success") and not bool(result.get("success", false)):
+		var code := str(result.get("error_code", ""))
+		var message := str(result.get("error_message", ""))
+		_routing_workspace.apply_check_result({})
+		if code.findn("timeout") != -1:
+			return {"error": "draft_check_timeout", "error_code": code,
+				"note": "the draft_check worker channel did not answer within 30s; every checked candidate kept the validation it had"}
+		return {"error": "draft_check_refused", "error_code": code,
+			"error_message": message,
+			"note": "the draft_check request was refused before it was scored; every checked candidate kept the validation it had"}
 
 	# Unwrap to the worker's draft_check result dict ({board_token,
 	# workspace_generation, findings, per_candidate}). The broker may nest the
@@ -5759,10 +5851,14 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# seam's documented degrade-don't-refuse contract (re-review note).
 	if _PcbRoutingSidecarScript.compute_board_fingerprint_v2(draft_check_board()) != draft_token:
 		_routing_workspace.apply_check_result({})
-		return {}
+		return {"error": "draft_overlay_drifted",
+			"note": "a staged placement or zone moved while the worker was scoring, so the verdict describes a board that no longer exists — it was discarded and every candidate kept the validation it had"}
 
 	var inner: Dictionary = _unwrap_draft_check(result)
 	_routing_workspace.apply_check_result(inner)
+	if inner.is_empty():
+		return {"error": "draft_check_no_reply",
+			"note": "the worker answered in a shape carrying neither per_candidate nor board_token; every checked candidate kept the validation it had"}
 	return inner
 
 

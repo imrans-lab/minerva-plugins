@@ -1,7 +1,7 @@
 {
   "id": "pcb",
   "name": "PCB Editor",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",
@@ -1109,12 +1109,13 @@
     },
     {
       "name": "minerva_pcb_drc_geometric",
-      "description": "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR — real pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. Compiles the board to the ResolvedBoard IR, then checks GC1 min trace width, GC2 copper-copper clearance, GC3 drill/finished-hole (finished-hole is a necessary pre-DFM check — the IR carries drill diameter, not the plated finished bore), GC4 annular ring, GC5 copper-to-edge, GC6 hole-to-hole, GC7 filled-pour clearance, GC8 solder-mask sliver, GC10 hole-to-copper, and GC11 hole-to-edge (an unconditional containment refusal for a bore that crosses the outline or enters a cutout, plus a proximity check that runs only when the profile declares min_hole_to_edge_mm). GC9 silkscreen DFM (legend stroke width and legend-to-pad) is ADVISORY: its rows appear in a separate top-level `advisories` array and are counted, but are NOT in `findings` and NEVER change `verdict` — legend is cosmetic and is warned, never fatal. Floors declared OPTIONAL by a profile (hole-to-copper, hole-to-edge, the silk pair, feature-specific drill minima) are enforced only when that profile states them. `counts` reports ROWS, not check coverage: zero can mean either 'the profile stated no floor' or 'the check ran and found no row'. A GC9 failure is explicit as a counted `gc9_silk_indeterminate` advisory, never inferred from the two measuring counts. NEVER a false clean: modeled copper is exact or a superset (fail-safe), and unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, entity_id, net_id, layer, measured_mm, required_mm, witness}], advisories:[...same shape...], counts, warnings} or indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. Distinct from minerva_pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
+      "description": "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR \u2014 real pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. Compiles the board to the ResolvedBoard IR, then checks GC1 min trace width, GC2 copper-copper clearance, GC3 drill/finished-hole (finished-hole is a necessary pre-DFM check \u2014 the IR carries drill diameter, not the plated finished bore), GC4 annular ring, GC5 copper-to-edge, GC6 hole-to-hole, GC7 filled-pour clearance, GC8 solder-mask sliver, GC10 hole-to-copper, and GC11 hole-to-edge (an unconditional containment refusal for a bore that crosses the outline or enters a cutout, plus a proximity check that runs only when the profile declares min_hole_to_edge_mm). GC9 silkscreen DFM (legend stroke width and legend-to-pad) is ADVISORY: its rows appear in a separate top-level `advisories` array and are counted, but are NOT in `findings` and NEVER change `verdict` \u2014 legend is cosmetic and is warned, never fatal. Floors declared OPTIONAL by a profile (hole-to-copper, hole-to-edge, the silk pair, feature-specific drill minima) are enforced only when that profile states them. `counts` reports ROWS, not check coverage: zero can mean either 'the profile stated no floor' or 'the check ran and found no row'. A GC9 failure is explicit as a counted `gc9_silk_indeterminate` advisory, never inferred from the two measuring counts. NEVER a false clean: modeled copper is exact or a superset (fail-safe), and unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a discriminated union \u2014 determinate {ok:true, scope:'geometric', verifies_geometry:true, verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, entity_id, net_id, layer, measured_mm, required_mm, witness}], advisories:[...same shape...], counts, not_evaluated:[{check, floor, reason, scope?}], static_warnings:{rows:[{code, count, severity, message, refs, refs_omitted?}], digest, total}} or indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. `not_evaluated` names every rule whose floor the selected profile (or the board, for gc12_trace_direction) does not declare, so a zero count that means NOT MEASURED can be told from one that means clean. `static_warnings` collapses the per-entity compile warnings into one row per code with a digest that is stable across identical calls; pass verbose_warnings:true to get the flat `warnings` list beside it. Distinct from minerva_pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
       "input_schema": {
         "type": "object",
         "properties": {
           "yaml": {"type": "string", "description": "Canonical board YAML source."},
-          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+          "verbose_warnings": {"type": "boolean", "description": "Return the FLAT per-entity compile warnings beside the grouped static_warnings (default false). The flat list is dozens of rows saying the same thing about different entities, unchanged between runs and re-sent on every call; the grouped form carries a digest that moves the moment any warning does."}
         }
       }
     },
@@ -1390,6 +1391,40 @@
           "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
         },
         "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_list_mounting_holes",
+      "description": "LIST the board's MOUNTING HOLES (SR2FAB S8) — position, diameter and plating for each, snapped to 0.1 um so the values are the numbers the author typed rather than their float32 residue. Mounting holes ONLY: pad drills and via barrels are not reported here (use minerva_pcb_list_vias for vias). Args {editor_name}. Returns {hole_count, mounting_holes:[{index, x_mm, y_mm, diameter_mm, plated}]}. PLACEMENT ADVISORY: the reply carries placement_advisory when two holes are coincident or three or more lie on one line — patterns NO geometric check covers (GC11's proximity half never runs because no shipped profile publishes a hole-to-edge figure, GC6 fires only on a near-collision, GC10 is about copper), and exactly what a silently rewritten hole pattern looks like. It is ADVISORY: collinear holes are legitimate on plenty of boards, so the reply reports what it saw and the reader decides. Before this verb the board's mounting holes could be written but never read back.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
+      }
+    },
+    {
+      "name": "minerva_pcb_export_yaml",
+      "description": "EXPORT the live board as canonical YAML TEXT (SR2FAB S1) — the MCP twin of the Export YAML button, running that button's exact implementation. UNGATED and NON-WRITING: no DRC runs and no file is touched, so a board that minerva_pcb_promote refuses can still be read out, diffed against the file on disk, and archived. Oversized boards ride the by-ref path in both directions (the request snapshots the board; an over-cap document comes back as {yaml_path, yaml_digest} and is read back sha256-verified), so this works on boards far past the 64KiB broker cap. Args {editor_name}. Returns {yaml, bytes, draft:true}. Refuses by name: path_not_supported (a `path` argument is refused rather than ignored — an ignored path returns a success the caller reads as a file having been written), no_board, worker_unavailable, payload_too_large, serialize_failed, serialize_read_failed. THIS IS NOT PROMOTION — the returned document carries no gate verdict, and minerva_pcb_promote remains the only verb that writes the canonical .yaml file. Writing this text over that file yourself bypasses the correctness gate deliberately and silently.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
       }
     },
     {

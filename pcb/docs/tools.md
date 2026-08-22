@@ -562,6 +562,8 @@ other lacks.
 | `minerva_pcb_workspace_reroute_span` | **DEGRADED** to a whole-route reroute, named on every reply (below) |
 | `minerva_pcb_workspace_check` | set-scoped draft DRC; findings name candidate/segment/via ids; stale candidates refuse |
 | `minerva_pcb_promote` | K13's serialize-back, correctness-gated + completeness-ADVISORY (UX4 owner ruling: granular promotion): full gate → canonical YAML write; correctness refusals name findings with NO acknowledge-through; a clean-partial board promotes with unrouted nets as advisory; panel-side copper/component regression guard (allow_copper_regression overrides) |
+| `minerva_pcb_export_yaml` | the live board as canonical YAML TEXT — UNGATED and writes nothing, so a board the promote gate refuses can still be read out and diffed. Refuses a `path` by name: `minerva_pcb_promote` is the only verb that writes the canonical file |
+| `minerva_pcb_list_mounting_holes` | mounting holes read back (position/diameter/plated, snapped), with a placement advisory for coincident or collinear holes — a pattern no geometric check covers |
 | `minerva_pcb_point` | the get_selection MIRROR — select an entity FOR the human (deixis both ways) |
 | `minerva_pcb_hint_move_bend` / `_insert_bend` / `_delete_bend` | micro hint edits, one revision each; superseded refuses with the sanctioned exits |
 | `minerva_pcb_clear_hints_by_author` | the dock menu's MCP twin (human/ai/all; workflow-class only) |
@@ -782,7 +784,6 @@ convention every other worker-backed tool uses.
 | `minerva_pcb_interpret_route_hints` | agent-router child `019eb47eb567` re-homes it |
 | `minerva_pcb_create_note` | generic `plugin_data` note flow |
 | `minerva_create_pcb_editor` | `minerva_create_plugin_editor` |
-| `minerva_pcb_export_yaml` | worker `pcb.serialize` / the panel's **Export YAML** toolbar action |
 
 ## Canvas gestures (human UI, docket `019fb933d4a9`)
 

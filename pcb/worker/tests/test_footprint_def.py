@@ -175,6 +175,46 @@ def test_np_thru_hole_drill_is_unplated():
         assert p.drill is not None and p.drill.plated is False
 
 
+def test_zone_connect_marker_carries_its_value_and_it_is_content():
+    """SR2FAB S2. The value decides fatality -- 2 is v1's own solid connect, 0
+    asks for isolation a solid fill overrides -- so it has to reach the policy,
+    and two footprints differing only in it are not the same footprint."""
+    def build(pad_value, fp_value):
+        return FootprintDefinition.from_kicad_parsed(parse_kicad_mod(f"""
+            (footprint "ZC" (layer "F.Cu")
+              (zone_connect {fp_value})
+              (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")
+                (zone_connect {pad_value})))
+        """))
+
+    definition = build(2, 3)
+    pad_marker = [m for m in definition.pads[0].unsupported
+                  if m.feature == "zone_connect"][0]
+    assert pad_marker.value == "2"
+    fp_marker = [m for m in definition.unsupported if m.feature == "zone_connect"][0]
+    assert fp_marker.value == "3"
+
+    # The value is part of the content digest: without it, a pad the author
+    # asked to ISOLATE and one asked to tie SOLID intern as the same footprint.
+    assert build(0, 3).content_id != definition.content_id
+    assert build(2, 0).content_id != definition.content_id
+    assert build(2, 3).content_id == definition.content_id
+
+
+def test_marker_payload_stays_additive_for_valueless_features():
+    """A marker that never had a value emits no key at all, so no footprint
+    outside the zone_connect family moves in the digest."""
+    plain = FootprintDefinition.from_kicad_parsed(parse_kicad_mod("""
+        (footprint "Plain" (layer "F.Cu")
+          (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")
+            (chamfer top_left)))
+    """))
+    chamfer = [m for m in plain.pads[0].unsupported if m.feature == "chamfer"][0]
+    assert chamfer.value is None
+    from pcb_worker.footprint_def import _unsupported_to_payload
+    assert "value" not in _unsupported_to_payload(chamfer)
+
+
 def test_content_identity_excludes_provenance_but_tracks_geometry():
     parsed = parse_kicad_mod(_LOCAL_FIXTURES[0])
     first = FootprintDefinition.from_kicad_parsed(

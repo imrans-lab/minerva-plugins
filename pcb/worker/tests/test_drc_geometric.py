@@ -176,6 +176,97 @@ def _profiled_board(profile_id: str):
                       "rule_profile": profile_id})
 
 
+def _not_evaluated(res: dict) -> set:
+    return {(row["check"], row["floor"]) for row in res["not_evaluated"]}
+
+
+def test_a_zero_count_says_whether_it_was_measured():
+    """SR2FAB S4. GC9, GC10 and GC11-proximity are gated on OPTIONAL-tier floors,
+    so under a profile that publishes none of them their count keys sit at 0 —
+    indistinguishable from "checked and clean" to anything reading the result.
+    The module says so three times in docstrings a result-reader never sees.
+
+    This is the honest fix and the one the register entry was actually about:
+    naming the unmeasured rules, rather than declaring numbers into a profile
+    that says of itself it is "not a specific board house". oshpark-2layer is
+    silent about silk and hole-to-copper BY DESIGN — OSH Park publishes no such
+    figure — so for that profile the ambiguity is permanent, and no amount of
+    filling profiles in would ever have closed it."""
+    res = _run(_profiled_board("v1-fab-conservative"))
+    unmeasured = _not_evaluated(res)
+    assert ("gc9_silk_width", "min_silk_width_mm") in unmeasured
+    assert ("gc9_silk_to_pad", "min_silk_to_pad_mm") in unmeasured
+    assert ("gc10_hole_to_copper", "min_hole_to_copper_mm") in unmeasured
+    assert (dg.GC11_PROXIMITY, "min_hole_to_edge_mm") in unmeasured
+    # ...and each of those counts really is sitting at 0, which is the pair of
+    # facts a reader needs together to draw the right conclusion.
+    for check, _floor in unmeasured:
+        assert res["counts"][check] == 0
+
+    # The reason names the field, so a reader can go and look at the profile.
+    for row in res["not_evaluated"]:
+        assert row["floor"] in row["reason"]
+
+
+def test_a_declared_floor_is_not_reported_as_unmeasured():
+    """The list has to DRAIN when a profile publishes the figure, or it is just
+    a second constant. jlcpcb-2layer declares silk, hole-to-copper and all three
+    feature-specific drill floors, and deliberately declares no hole-to-edge —
+    so exactly one row survives, and it is the one the page has no number for."""
+    res = _run(_profiled_board("jlcpcb-2layer"))
+    # Two rows survive, and they are gated on different things: hole-to-edge is
+    # the one figure this house publishes no number for, and GC12 is board
+    # state that no profile could ever supply.
+    assert _not_evaluated(res) == {
+        (dg.GC11_PROXIMITY, "min_hole_to_edge_mm"),
+        (dg.GC12_DIRECTION, "design_rules.allowed_trace_angles_deg"),
+    }
+
+    conservative = _not_evaluated(_run(_profiled_board("v1-fab-conservative")))
+    assert _not_evaluated(res) < conservative
+
+
+def test_partially_gated_checks_say_which_feature_class_went_unmeasured():
+    """GC3 runs on every hole against the general drill floor whatever the
+    profile says, so an absent feature-specific floor does NOT mean the check
+    sat out — it means one feature class was never measured against its own
+    number. Reporting that as a bare "not evaluated" would trade one false
+    impression for another, so those rows carry a scope."""
+    rows = {row["floor"]: row for row in _run(
+        _profiled_board("v1-fab-conservative"))["not_evaluated"]}
+    for floor, scope in (("min_npth_mm", "non-plated round holes"),
+                         ("min_plated_slot_mm", "plated slots"),
+                         ("min_npth_slot_mm", "non-plated slots")):
+        assert rows[floor]["check"] == "gc3_drill"
+        assert rows[floor]["scope"] == scope
+    # The wholly-gated rules carry no scope — absence of the key IS the
+    # distinction between "the check did not run" and "one class went
+    # unmeasured".
+    assert "scope" not in rows["min_silk_width_mm"]
+
+
+def test_every_unmeasured_row_names_a_real_count_key_and_a_real_floor_field():
+    """Both halves of a row are strings that must match something. A typo in
+    either would produce a row that reads plausibly and points nowhere, which is
+    worse than the 0 it replaced."""
+    from pcb_worker.manufacturer_profile import OPTIONAL_FLOOR_FIELDS
+
+    res = _run(_profiled_board("v1-fab-conservative"))
+    for row in res["not_evaluated"]:
+        assert row["check"] in res["counts"], row
+        # Two kinds of gate, and both have to point at something real: a
+        # profile floor by its field name, or board state by its dotted path.
+        if row["floor"].startswith("design_rules."):
+            assert row["floor"] == "design_rules.allowed_trace_angles_deg", row
+        else:
+            assert row["floor"] in OPTIONAL_FLOOR_FIELDS, row
+
+    # solder_mask_expansion_mm is optional-tier and undeclared by v1, but it has
+    # NO reader — listing it would imply a check that does not exist, which is
+    # this key's own failure mode pointed the other way.
+    assert "solder_mask_expansion_mm" not in {row["floor"] for row in res["not_evaluated"]}
+
+
 def test_two_profiles_same_board_different_verdicts():
     v1_board = _profiled_board("v1-fab-conservative")
     oshpark_board = _profiled_board("oshpark-2layer")
@@ -657,6 +748,22 @@ def test_gc2_pad_pad_below_threshold_flags():
     assert f["required_mm"] == pytest.approx(0.2)
     assert f["layer"] == "top"
     assert {p["entity_id"] for p in f["participants"]} == {"p1", "p2"}
+
+
+def test_gc2_participants_report_the_width_the_copper_was_modeled_at():
+    """SR2FAB S5. A clearance violation caused by copper checked at the WRONG
+    width looks exactly like a real one, and diagnosing it meant re-deriving the
+    overlay by hand. Each participant now says what width it was modeled at —
+    None for anything that is not a trace segment, which is itself the answer to
+    "was a width involved here at all"."""
+    res = _gc2(_proj(
+        _cp("t1", Capsule(0.0, 0.0, 4.0, 0.0, 0.15), net="A",
+            kind="trace_seg", width=0.3),
+        _cp("p2", Capsule.disc(4.0, 0.35, 0.15), net="B")))
+    assert len(res) == 1
+    widths = {p["entity_id"]: p["width_mm"] for p in res[0]["participants"]}
+    assert widths["t1"] == pytest.approx(0.3)
+    assert widths["p2"] is None
 
 
 def test_gc2_pad_pad_at_threshold_passes():
@@ -1715,3 +1822,284 @@ def test_the_rank_table_pins_the_documented_order():
         < R["trace_seg"] < R["zone_copper"]
     assert R["board_hole"] == R["board_hole_copper"], (
         "GC6's HolePrimitive.origin vocabulary shares the table")
+
+
+# ---------------------------------------------------------------------------
+# GC12 — trace direction (SR2FAB S11).
+# ---------------------------------------------------------------------------
+
+
+def _directed_board(angles, segments):
+    """A board declaring `angles` as its allowed trace directions, carrying
+    `segments` as [( (ax,ay), (bx,by) ), ...] on net N."""
+    rules = {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+             "via_diameter_mm": 0.8, "via_drill_mm": 0.4}
+    if angles is not None:
+        rules["allowed_trace_angles_deg"] = angles
+    return _base(
+        # Parked well clear of every segment below and well inside the 0.3mm
+        # copper-to-edge floor, so GC5/GC2 cannot fire and muddy a GC12 verdict.
+        components=[_th_pad_comp(ref="U1", x=3.0, y=36.0)],
+        nets=[{"name": "N", "pins": ["U1.1"]}],
+        design_rules=rules,
+        traces=[{"net": "N", "layer": "top", "width_mm": 0.3,
+                 "points": [{"x_mm": a[0], "y_mm": a[1]},
+                            {"x_mm": b[0], "y_mm": b[1]}]}
+                for a, b in segments])
+
+
+def _gc12(res: dict) -> list:
+    return _findings(res, dg.GC12_DIRECTION)
+
+
+def test_gc12_is_absent_until_the_board_asks_for_it():
+    """No board house requires orthogonal routing, so this cannot live in a rule
+    profile — it is the board author's own style. A board that declares nothing
+    gets no direction constraint, and the reply SAYS the check did not run
+    rather than leaving a 0 that reads as clean."""
+    res = _run(_directed_board(None, [((5.0, 5.0), (15.0, 12.0))]))  # a diagonal
+    assert _counts(res, dg.GC12_DIRECTION) == 0
+    assert res["verdict"] == "clean"
+    assert (dg.GC12_DIRECTION, "design_rules.allowed_trace_angles_deg") in {
+        (row["check"], row["floor"]) for row in res["not_evaluated"]}
+
+
+def test_gc12_passes_exact_horizontal_and_vertical():
+    res = _run(_directed_board([0, 90], [
+        ((5.0, 5.0), (25.0, 5.0)),     # exact horizontal
+        ((25.0, 5.0), (25.0, 30.0)),   # exact vertical
+    ]))
+    assert _gc12(res) == []
+    # ...and the check really ran, so the zero above means clean this time.
+    assert not any(row["check"] == dg.GC12_DIRECTION
+                   for row in res["not_evaluated"])
+
+
+def test_gc12_flags_a_forty_five_degree_run():
+    res = _run(_directed_board([0, 90], [((5.0, 5.0), (15.0, 15.0))]))
+    findings = _gc12(res)
+    assert len(findings) == 1
+    assert findings[0]["measured_angle_deg"] == pytest.approx(45.0)
+    assert findings[0]["nearest_allowed_angle_deg"] in (0.0, 90.0)
+    assert findings[0]["allowed_angles_deg"] == [0.0, 90.0]
+
+
+def test_gc12_catches_the_real_case_that_reached_this_board():
+    """THE ONE THAT MATTERS. 0.025 mm of drift over a 1.6 mm run — 0.9 degrees
+    off vertical, invisible at any zoom, and it reached smart-remote-v2's copper
+    because no rule in this module expresses direction. Every other check passes
+    it completely clean."""
+    board = _directed_board([0, 90], [((20.0, 10.0), (20.025, 11.6))])
+    res = _run(board)
+    findings = _gc12(res)
+    assert len(findings) == 1, res["counts"]
+    assert findings[0]["measured_angle_deg"] == pytest.approx(89.1, abs=0.1)
+    assert findings[0]["nearest_allowed_angle_deg"] == pytest.approx(90.0)
+    # The deviation reported is the perpendicular one, which is what the author
+    # has to close.
+    assert findings[0]["measured_mm"] == pytest.approx(0.025, abs=1e-4)
+
+    # ...and it is invisible to everything else, which is the whole argument
+    # for the rule existing.
+    unconstrained = _run(_directed_board(None, [((20.0, 10.0), (20.025, 11.6))]))
+    assert unconstrained["verdict"] == "clean"
+
+
+def test_gc12_tolerates_a_conforming_segment_with_sub_grid_jitter():
+    """A segment authored on-axis and round-tripped through float32 must not
+    drift into a finding. The tolerance is a PERPENDICULAR DISTANCE for exactly
+    this reason: an angular tolerance is scale-dependent, so the same
+    quantization noise is 0.0036 deg across a 1.6 mm run and 0.057 deg across a
+    0.1 mm one, and no single angle serves both."""
+    jitter = 5e-5  # half the 0.1 um emit grid
+    res = _run(_directed_board([0, 90], [
+        ((5.0, 5.0), (25.0, 5.0 + jitter)),          # long, nearly horizontal
+        ((30.0, 5.0), (30.0 + jitter, 5.1)),         # SHORT, nearly vertical
+    ]))
+    assert _gc12(res) == []
+
+
+def test_gc12_allows_a_forty_five_degree_style_when_the_board_declares_it():
+    """The rule is "the directions this board allows", not "Manhattan". An
+    octilinear board declares four and its diagonals are legal."""
+    res = _run(_directed_board([0, 45, 90, 135], [
+        ((5.0, 5.0), (15.0, 15.0)),    # +45
+        ((15.0, 15.0), (25.0, 5.0)),   # -45, which folds to 135
+        ((25.0, 5.0), (25.0, 20.0)),   # vertical
+    ]))
+    assert _gc12(res) == []
+
+
+def test_gc12_folds_a_direction_and_its_reverse_into_one_rule():
+    """0 and 180 are the same constraint on a horizontal run, so a board that
+    writes either gets the same answer — and writing both is not two rules."""
+    for declared in ([0], [180], [0, 180], [-90]):
+        res = _run(_directed_board(declared, [((5.0, 5.0), (25.0, 5.0))]))
+        if declared == [-90]:
+            assert len(_gc12(res)) == 1, declared    # -90 folds to 90: vertical only
+        else:
+            assert _gc12(res) == [], declared
+
+
+def test_a_malformed_direction_declaration_refuses_the_board():
+    """A board that ASKS for a direction constraint and silently gets none is
+    the fail-open direction, and it is invisible: every trace passes a check
+    that never ran. Malformed is an error, not an ignored key."""
+    for bad in ([], "manhattan", [0, "ninety"], [0, float("inf")], [0, True]):
+        result = compile_board(_directed_board(bad, [((5.0, 5.0), (25.0, 5.0))]))
+        assert isinstance(result, ResolutionFailure), bad
+        assert any(d.code == "bad_trace_angles" for d in result.diagnostics), bad
+
+
+# ---------------------------------------------------------------------------
+# Static-warning aggregation (SR2FAB S12).
+# ---------------------------------------------------------------------------
+
+
+def _warning(code: str, entity: str, message: str = "omitted", *,
+             entity_kind: str = "pad", detail: str = "") -> dict:
+    """The real compile-warning payload shape (methods._diagnostic_to_payload):
+    severity, code, message, and a source_ref carrying entity_kind, entity_id
+    and detail. Every field is a parameter here because the digest has to move
+    when ANY of them does, and the first two versions of that test used a
+    fixture that could only vary two."""
+    return {"severity": "warning", "code": code, "message": message,
+            "source_ref": {"entity_kind": entity_kind, "entity_id": entity,
+                           "detail": detail}}
+
+
+def test_repeated_compile_warnings_collapse_to_one_row_per_code():
+    """SR2FAB S12. Compile emits one WARNING per marker and per component, so a
+    real board produces dozens of rows saying the same thing about different
+    entities — and every board_check re-sends all of them. The DRC-clean push
+    runs board_check dozens of times, which makes this the single largest
+    context cost of working the manufacture loop, for information that does not
+    change between runs."""
+    from pcb_worker.methods import _group_static_warnings
+
+    flat = ([_warning("feature_omitted", "pad:%d" % i) for i in range(20)]
+            + [_warning("captured_geometry_not_emitted", "comp:%d" % i)
+               for i in range(5)])
+    grouped = _group_static_warnings(flat)
+
+    assert grouped["total"] == 25
+    assert [row["code"] for row in grouped["rows"]] == [
+        "captured_geometry_not_emitted", "feature_omitted"]   # sorted
+    by_code = {row["code"]: row for row in grouped["rows"]}
+    assert by_code["feature_omitted"]["count"] == 20
+    assert by_code["captured_geometry_not_emitted"]["count"] == 5
+
+    # The refs are a SAMPLE, and the row says how many it did not name — a
+    # truncation that does not admit to truncating reads as a complete list.
+    assert len(by_code["feature_omitted"]["refs"]) == 8
+    assert by_code["feature_omitted"]["refs_omitted"] == 12
+    assert "refs_omitted" not in by_code["captured_geometry_not_emitted"]
+
+
+def test_the_warning_digest_is_stable_and_moves_when_a_warning_does():
+    """The digest is what makes the collapse safe to skim: a caller who read the
+    rows once can tell at a glance that nothing new appeared. It must therefore
+    be identical across identical calls and different the moment anything
+    changes — including a change in ORDER, which is why the rows are sorted
+    before hashing rather than after."""
+    from pcb_worker.methods import _group_static_warnings
+
+    flat = [_warning("feature_omitted", "pad:1"), _warning("ordinal_ids", "trace:2")]
+    first = _group_static_warnings(flat)
+    assert _group_static_warnings(flat)["digest"] == first["digest"]
+    # Same warnings, different order in — same digest out.
+    assert _group_static_warnings(list(reversed(flat)))["digest"] == first["digest"]
+
+    # THE CELL THE FIRST VERSION OF THIS TEST COULD NOT SEE. Real compile
+    # messages embed the entity they name ("footprint 'U2': ..."), so two
+    # entries under ONE code carry DIFFERENT messages. A representative picked
+    # first-encountered changes on reversal and moves the digest — reporting a
+    # compiler-internal reorder as new information. Two distinct codes with one
+    # entry each, all sharing a default message, cannot expose that.
+    same_code = [_warning("feature_omitted", "pad:1", "footprint 'U1': omitted"),
+                 _warning("feature_omitted", "pad:2", "footprint 'U2': omitted")]
+    assert (_group_static_warnings(list(reversed(same_code)))["digest"]
+            == _group_static_warnings(same_code)["digest"])
+    # ...and the row admits that its message is a sample of two, not the story.
+    row = _group_static_warnings(same_code)["rows"][0]
+    assert row["distinct_messages"] == 2
+    assert row["message"] == "footprint 'U1': omitted"   # lexicographic min
+    # One more entity on an existing code moves it.
+    assert _group_static_warnings(
+        flat + [_warning("feature_omitted", "pad:3")])["digest"] != first["digest"]
+    # A brand new code moves it.
+    assert _group_static_warnings(
+        flat + [_warning("something_new", "pad:1")])["digest"] != first["digest"]
+
+    # A CHANGE HIDDEN BEHIND THE ROW TRUNCATION still moves it. The rows keep
+    # only the first few refs, so a digest taken over the DISPLAY rows makes two
+    # different warning sets collide exactly where the reader cannot see the
+    # difference — an unchanged digest on changed input, which is the one thing
+    # this field must never do.
+    ten = [_warning("feature_omitted", "pad:%d" % i) for i in range(10)]
+    swapped = ten[:8] + [_warning("feature_omitted", "pad:98"),
+                         _warning("feature_omitted", "pad:99")]
+    assert (_group_static_warnings(swapped)["digest"]
+            != _group_static_warnings(ten)["digest"])
+    # ...and the two are genuinely indistinguishable in the rows themselves,
+    # which is what makes the digest the only thing carrying that information.
+    assert (_group_static_warnings(swapped)["rows"]
+            == _group_static_warnings(ten)["rows"])
+
+    # EVERY FIELD OF THE PAYLOAD, not a chosen subset. A digest built from a
+    # hand-picked tuple of fields is a second schema shadowing
+    # _diagnostic_to_payload's, and it drifts: the version before this one
+    # listed code/severity/message/entity_id and silently ignored
+    # source_ref.entity_kind and source_ref.detail, so a diagnostic that moved
+    # between entity kinds hashed identically. These two cases are also
+    # indistinguishable in the rows, so the digest is again the only carrier.
+    one = [_warning("feature_omitted", "pad:1", detail="front")]
+    for mutated in ([_warning("feature_omitted", "pad:1", detail="back")],
+                    [_warning("feature_omitted", "pad:1", entity_kind="graphic")],
+                    [_warning("feature_omitted", "pad:1", message="dropped")]):
+        assert (_group_static_warnings(mutated)["digest"]
+                != _group_static_warnings(one)["digest"]), mutated
+    assert (_group_static_warnings([_warning("feature_omitted", "pad:1", detail="back")])["rows"]
+            == _group_static_warnings(one)["rows"])
+
+
+def test_the_flat_list_is_available_to_a_caller_that_asks():
+    from pcb_worker.methods import _group_static_warnings
+
+    flat = [_warning("feature_omitted", "pad:1")]
+    assert "warnings" not in _group_static_warnings(flat)
+    assert _group_static_warnings(flat, verbose=True)["warnings"] == flat
+
+
+def test_the_geometric_reply_carries_the_grouped_form_not_the_flat_one():
+    """The collapse has to happen where the reply is built, or the rows are
+    grouped and the flat list rides along beside them costing exactly what it
+    cost before."""
+    from pcb_worker.methods import handle_request
+
+    board = _profiled_board("v1-fab-conservative")
+    quiet = handle_request({"id": "g1", "method": "drc_geometric",
+                            "params": {"board": board}})["result"]
+    assert "static_warnings" in quiet
+    assert "warnings" not in quiet
+    assert isinstance(quiet["static_warnings"]["digest"], str)
+    assert len(quiet["static_warnings"]["digest"]) == 64
+
+    verbose = handle_request({"id": "g2", "method": "drc_geometric",
+                              "params": {"board": board,
+                                         "verbose_warnings": True}})["result"]
+    assert "warnings" in verbose
+    assert verbose["static_warnings"]["digest"] == quiet["static_warnings"]["digest"]
+    assert verbose["static_warnings"]["total"] == len(verbose["warnings"])
+
+
+def test_an_indeterminate_reply_grows_no_warning_block():
+    """The INDETERMINATE union deliberately carries no findings or counts a
+    caller could read as a pass, and it carries no warnings list either — so
+    there is nothing to group, and nothing must be invented."""
+    from pcb_worker.methods import handle_request
+
+    union = handle_request({"id": "g3", "method": "drc_geometric",
+                            "params": {"yaml": "not: [valid"}})["result"]
+    assert union["verdict"] == "indeterminate"
+    assert "static_warnings" not in union

@@ -2467,3 +2467,50 @@ def test_the_standalone_cli_refuses_a_board_carrying_net_classes(tmp_path):
         with pytest.raises(RoutingRulesError) as exc:
             read({**plain, "net_classes": refused})
         assert "net_classes" in str(exc.value)
+
+
+def test_a_segment_keeps_a_width_it_declared_for_itself():
+    """SR2FAB S5. The per-net width is stamped onto reply segments so the
+    geometric overlay checks a proposal at the width it was routed at rather
+    than the run's baseline. It was stamped UNCONDITIONALLY, so a segment that
+    carried its own width — a detailed hint, a reroute given an explicit one —
+    lost it, and ir_candidates.build_overlay reads a segment's own width_mm
+    FIRST precisely because it is the more specific value.
+
+    That cuts both ways and both are bad: a declared width NARROWER than the run
+    width gets checked as if it were fat (a phantom clearance violation the
+    author cannot act on), and a declared width WIDER than the run width gets
+    checked as if it were thin (a clean verdict on copper that is not clean)."""
+    payload = {"routes": [{
+        "net": "GND",
+        "segments": [
+            {"id": "declared", "width_mm": 0.5},
+            {"id": "silent"},
+        ],
+    }]}
+    methods._attach_effective_routing_rules(
+        payload, baseline_width=0.25, width_source="board_default",
+        keepout_clearance=0.2, keepout_clearance_source="board_default",
+        net_widths={"GND": 1.0})
+
+    by_id = {seg["id"]: seg for seg in payload["routes"][0]["segments"]}
+    assert by_id["declared"]["width_mm"] == pytest.approx(0.5)
+    assert by_id["silent"]["width_mm"] == pytest.approx(1.0)
+
+    # The route-level provenance still reports the NET's width — that is the
+    # run's answer for this net, and it is unchanged. The per-segment override
+    # is a narrower fact that lives beside it, not a contradiction of it.
+    assert payload["routes"][0]["effective_routing_rules"]["trace_width_mm"] == {
+        "value": 1.0, "source": "net_class"}
+
+
+def test_an_unclassed_net_still_fills_in_the_baseline_width():
+    """The stamping exists so an unclassed net's segments are not left widthless
+    for the overlay to guess at. setdefault must not have quietly removed that:
+    a segment with no width of its own still gets the run's baseline."""
+    payload = {"routes": [{"net": "SIG", "segments": [{"id": "silent"}]}]}
+    methods._attach_effective_routing_rules(
+        payload, baseline_width=0.25, width_source="board_default",
+        keepout_clearance=0.2, keepout_clearance_source="board_default",
+        net_widths={})
+    assert payload["routes"][0]["segments"][0]["width_mm"] == pytest.approx(0.25)

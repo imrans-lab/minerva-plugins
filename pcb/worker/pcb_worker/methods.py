@@ -20,6 +20,8 @@ contract (pcb/internal/board/board.go, pcb/docs/board-yaml.md):
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import traceback
 from pathlib import Path
@@ -350,6 +352,112 @@ def _drc(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
+# How many entity references a grouped warning row carries before it stops
+# naming them individually. Enough to see the pattern, few enough that a
+# board-wide omission does not cost more than the finding it sits beside.
+_WARNING_REFS_SHOWN = 8
+
+
+def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
+    """Collapse repeated compile diagnostics into one row per code.
+
+    THE PROBLEM THIS SOLVES is a coworking cost, not a correctness one. Compile
+    emits one WARNING per marker and per component — feature_omitted,
+    captured_geometry_not_emitted, ordinal_ids — so a real board produces
+    dozens of rows saying the same thing about different entities, and every
+    board_check carries all of them. The DRC-clean push runs board_check dozens
+    of times, which makes this the single largest context cost of working the
+    manufacture loop, for information that does not change between runs.
+
+    Returns {rows, digest, total}. The DIGEST is what makes the collapse safe
+    to skim: it is stable across identical calls, so a caller who saw the rows
+    once can tell at a glance that nothing new appeared, and it MOVES the
+    moment any warning does — INCLUDING one hidden behind the row truncation.
+    It is taken over a canonicalization of the full warning set rather than
+    over the display rows, because the rows keep only the first few refs and
+    one representative message: hashing those would let two different sets
+    collide precisely where a reader cannot see the difference.
+
+    ``verbose`` returns the flat list untouched beside the rows, for the caller
+    who genuinely needs every entity.
+    """
+    grouped: dict[str, dict] = {}
+    for entry in warnings:
+        if not isinstance(entry, dict):
+            continue
+        code = str(entry.get("code", "") or "uncoded")
+        row = grouped.setdefault(code, {
+            "code": code, "count": 0, "refs": [], "severities": set(),
+            "messages": set(),
+        })
+        row["count"] += 1
+        # COLLECTED, not first-wins. Real compile messages embed the entity they
+        # name (compile_board's "footprint 'U2': ..."), so a first-encountered
+        # representative changes when the warning list is reordered — which
+        # would move the digest and report a compiler-internal reorder as new
+        # information, the exact thing sorting before hashing exists to prevent.
+        row["messages"].add(str(entry.get("message", "")))
+        severity = entry.get("severity")
+        if severity is not None:
+            row["severities"].add(str(severity))
+        ref = ((entry.get("source_ref") or {}).get("entity_id")
+               if isinstance(entry.get("source_ref"), dict) else None)
+        if isinstance(ref, str) and ref and ref not in row["refs"]:
+            row["refs"].append(ref)
+    rows = []
+    for code in sorted(grouped):
+        row = grouped[code]
+        shown = sorted(row["refs"])
+        # ONE representative message, chosen DETERMINISTICALLY, because the
+        # rows for a code differ only by the entity they name and that is what
+        # `refs` is for. Lexicographic min is order-independent, so the digest
+        # depends on the warning SET rather than on the order it arrived in.
+        messages = sorted(row["messages"])
+        severities = sorted(row["severities"])
+        out_row = {
+            "code": row["code"],
+            "count": row["count"],
+            "severity": severities[0] if severities else None,
+            "message": messages[0] if messages else "",
+            "refs": shown[:_WARNING_REFS_SHOWN],
+        }
+        if len(messages) > 1:
+            # Distinct wordings under one code are worth admitting to: it means
+            # the row's `message` is a sample, not the whole story.
+            out_row["distinct_messages"] = len(messages)
+        if len(severities) > 1:
+            out_row["severities"] = severities
+        if len(shown) > _WARNING_REFS_SHOWN:
+            out_row["refs_omitted"] = len(shown) - _WARNING_REFS_SHOWN
+        rows.append(out_row)
+    # DIGEST OVER THE WHOLE WARNING, not over the display rows and not over a
+    # chosen subset of fields.
+    #
+    # The rows truncate refs and keep one representative message, so hashing
+    # THEM lets two different warning sets collide wherever they differ past the
+    # display cut. Hashing a hand-picked tuple of fields has the same failure
+    # one level in: it is a second schema shadowing _diagnostic_to_payload's,
+    # and it drifts. The first version of this listed code/severity/message/
+    # entity_id and silently ignored source_ref.entity_kind and .detail, so a
+    # diagnostic that moved from one entity_kind to another produced an
+    # identical digest.
+    #
+    # So: serialize each warning WHOLE with sorted keys, sort the serialized
+    # strings, and hash that. Any field the payload grows is covered the day it
+    # appears, and the sort makes the result a function of the warning multiset
+    # rather than of the order it arrived in.
+    canonical = sorted(
+        json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
+        for entry in warnings if isinstance(entry, dict))
+    digest = hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    out = {"rows": rows, "digest": digest, "total": len(warnings)}
+    if verbose:
+        out["warnings"] = list(warnings)
+    return out
+
+
 def _drc_geometric(params: dict) -> dict:
     """Geometric copper DRC over the ResolvedBoard IR (GC1-GC7): reads REAL copper
     and hole geometry, fail-closed, and NEVER emits a false ``clean``. This is the
@@ -402,6 +510,18 @@ def _drc_geometric(params: dict) -> dict:
     # union; clean / violations / indeterminate are conveyed INSIDE the union
     # (``result.ok`` / ``result.verdict``), so every failure still returns the SAME
     # union (019f9589b232) and no consumer needs a bespoke branch.
+    # STATIC-WARNING AGGREGATION (SR2FAB S12). The union's flat `warnings` list
+    # is one row per marker per entity, unchanged between runs and re-sent on
+    # every call. It is replaced by `static_warnings` — one row per code with a
+    # count, a sample of the entities and a digest — and the flat list returns
+    # only for a caller that asks. The digest is what makes the collapse safe:
+    # it moves the moment any warning does.
+    if isinstance(union, dict) and isinstance(union.get("warnings"), list):
+        union = dict(union)
+        union["static_warnings"] = _group_static_warnings(
+            union["warnings"], verbose=bool((params or {}).get("verbose_warnings")))
+        if not bool((params or {}).get("verbose_warnings")):
+            union.pop("warnings", None)
     return {"ok": True, "result": union}
 
 
@@ -951,6 +1071,37 @@ def _promote_check(params: dict) -> dict:
                         % ((geometric.get("error") or {}).get("kind", "unknown")))
 
     raw_board = (params or {}).get("board")
+
+    # STAGE INCONGRUENCE — M3's residual foot-gun, advisory only.
+    #
+    # `routing_deferred` excuses unrouted nets because the board DECLARES that
+    # routing is not its deliverable. A declaration is authored once and then
+    # forgotten, so a board that has since had copper laid on it still promotes
+    # on that excuse, and its census still reports complete:true — reached by
+    # declaration, on a board whose copper could have earned the verdict
+    # honestly. The two are indistinguishable in the reply, which is how a
+    # half-routed board gets promoted as finished.
+    #
+    # NO GATE CHANGE: the granular-promotion and declared-intent rulings stand,
+    # so this names the incongruence and nothing else.
+    if isinstance(raw_board, dict) and connectivity.get("routing_deferred"):
+        raw_traces = raw_board.get("traces")
+        trace_count = len(raw_traces) if isinstance(raw_traces, list) else 0
+        if trace_count:
+            advisory["stage_incongruence"] = {
+                "fabrication_stage": connectivity.get("fabrication_stage"),
+                "trace_count": trace_count,
+                "note": (
+                    "this board's declared fabrication stage defers routing, "
+                    "and it carries %d trace(s) — the declaration is what "
+                    "excused its unrouted nets from the completeness census, "
+                    "so a board that has since been routed is being judged by "
+                    "an intent it has outgrown. Re-declare the stage "
+                    "(minerva_pcb_fabrication_stage) to have the census judge "
+                    "the copper instead." % trace_count
+                ),
+            }
+
     if isinstance(raw_board, dict):
         # The ONE computation behind every assembly verdict (_assembly_tri_state
         # owns its own fault→indeterminate boundary — a crash inside reads as
@@ -2292,12 +2443,15 @@ def _attach_effective_routing_rules(
       * ``routes[].effective_routing_rules`` — THIS route's own width (differs
         from the baseline only if its net carries a class override) and the
         SAME run-wide clearance every route carries.
-      * ``routes[].segments[].width_mm`` — stamped with the per-net width, so
-        the geometric candidate overlay below (``ir_candidates.build_overlay``,
-        which reads a segment's own ``width_mm`` before any default) checks a
-        net-classed proposal at the width it actually got, not the run's
-        baseline (docs/routing.md, "the overlay must be checked at the width it
-        was routed at" — the false-clean this whole surface exists to prevent).
+      * ``routes[].segments[].width_mm`` — FILLED IN with the per-net width
+        where the segment does not already carry one, so the geometric
+        candidate overlay below (``ir_candidates.build_overlay``, which reads a
+        segment's own ``width_mm`` before any default) checks a net-classed
+        proposal at the width it actually got, not the run's baseline
+        (docs/routing.md, "the overlay must be checked at the width it was
+        routed at" — the false-clean this whole surface exists to prevent). A
+        segment that DOES carry one keeps it: that value is the overlay's first
+        choice precisely because it is more specific than the net's.
     """
     payload["effective_routing_rules"] = {
         "trace_width_mm": {"value": baseline_width, "source": width_source},
@@ -2320,7 +2474,14 @@ def _attach_effective_routing_rules(
         }
         for seg in r.get("segments") or []:
             if isinstance(seg, dict):
-                seg["width_mm"] = width
+                # setdefault, NOT assignment: a segment that already declares a
+                # width declared it for a reason (a detailed hint, a reroute
+                # given an explicit width), and it is the value ir_candidates
+                # reads FIRST when it builds the overlay. Overwriting it made
+                # the overlay check that segment at the run's width instead of
+                # its own — a phantom violation when the declared width is
+                # narrower, and a false clean when it is wider.
+                seg.setdefault("width_mm", width)
 
 
 def _hint_ids_by_net(nets_by_hint: dict, drawn_routes: list) -> dict:
@@ -3085,6 +3246,33 @@ def _draft_geometric(board: dict, candidates: list,
 
 
 def _draft_check(params: dict) -> dict:
+    # Board-by-reference resolve, the same shape _promote_check uses. This
+    # request rides the same capped broker pipe every board-carrying channel
+    # does, so an oversized board arrives as {board_path, board_digest} — and
+    # without this it arrived as no board at all, which this method reads as
+    # "score the candidates against empty committed copper". That is a CLEAN
+    # verdict on a board whose copper was never looked at: precisely the
+    # false-clean the whole draft check exists to prevent, and it fires on
+    # exactly the large boards that need checking most.
+    params = dict(params or {})
+    if not isinstance(params.get("board"), dict) \
+            and isinstance(params.get("board_path"), str):
+        try:
+            params["board"] = board_model.load_board({
+                "board_path": params["board_path"],
+                "board_digest": params.get("board_digest"),
+            })
+        except board_model.BoardParseError as exc:
+            # FAIL CLOSED: no verdict at all rather than a verdict computed
+            # without the committed copper. The panel reverts every candidate
+            # to the validation it had.
+            return {"ok": True, "result": {
+                "board_token": params.get("board_token"),
+                "workspace_generation": params.get("workspace_generation"),
+                "findings": [],
+                "per_candidate": {},
+                "error": "draft_check board_path unreadable: %s" % exc,
+            }}
     board = params.get("board")
     candidates = params.get("candidates") or []
     # Echoed VERBATIM (no int/str coercion) so the GD guard can compare exactly.

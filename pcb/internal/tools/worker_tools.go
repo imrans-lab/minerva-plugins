@@ -179,14 +179,21 @@ var DRCGeometric = ToolSpec{
 		"discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, " +
 		"verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, " +
 		"entity_id, net_id, layer, measured_mm, required_mm, witness}], advisories:[...same " +
-		"shape...], counts, warnings} or " +
+		"shape...], counts, not_evaluated:[{check, floor, reason, scope?}], " +
+		"static_warnings:{rows:[{code, count, severity, message, refs, refs_omitted?}], digest, total}} or " +
 		"indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. " +
+		"`not_evaluated` names every rule whose floor the selected profile (or the board, for " +
+		"gc12_trace_direction) does not declare, so a zero count that means NOT MEASURED can be told " +
+		"from one that means clean. `static_warnings` collapses the per-entity compile warnings into " +
+		"one row per code with a digest that is stable across identical calls; pass verbose_warnings:true " +
+		"to get the flat `warnings` list beside it. " +
 		"Distinct from minerva_pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
 			"yaml": {"type": "string", "description": "Canonical board YAML source."},
-			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+			"verbose_warnings": {"type": "boolean", "description": "Return the FLAT per-entity compile warnings beside the grouped static_warnings (default false). The flat list is dozens of rows saying the same thing about different entities, unchanged between runs and re-sent on every call; the grouped form carries a digest that moves the moment any warning does."}
 		}
 	}`),
 }

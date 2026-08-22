@@ -1258,7 +1258,14 @@ const PREFS_SOURCE_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_prefs.g
 const SIDECAR_SOURCE_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_routing_sidecar.gd"
 
 ## The witness pair, as of this test's authoring.
-const WITNESS_PLUGIN_BUILD := "0.2.0+b2-mcp-parity"
+##
+## SR2FAB re-baselined PLUGIN_BUILD and NOT the schemas, deliberately: the epoch
+## changed reply shapes and added verbs, and it changed no PERSISTED shape —
+## pcb_prefs and the routing sidecar both round-trip exactly what they did
+## before. The workspace's new degenerate-segment counter is per-call in-memory
+## state and never reaches the sidecar. This edit is the review artifact the
+## block above asks for.
+const WITNESS_PLUGIN_BUILD := "0.2.0+sr2fab"
 const WITNESS_PREFS_SCHEMA := "1"
 const WITNESS_SIDECAR_SCHEMA := "1"
 

@@ -1300,8 +1300,11 @@ func _run_check_stale_gate() -> void:
 	var forced: Dictionary = await PanelTools._workspace_check(shim, _args({"include_stale": true}))
 	check("include_stale got past the gate",
 		str(forced.get("error", "")) != "stale_candidates")
-	check_eq("and the missing worker is its own named envelope",
-		str(forced.get("error", "")), "draft_check_no_reply")
+	# SR2FAB S6: this scaffold's panel has no _MinervaIPC bridge at all, which
+	# is a DIFFERENT fault from "the worker did not answer" and used to be
+	# reported as the same one. It names itself now.
+	check_eq("and the missing worker bridge is its own named envelope",
+		str(forced.get("error", "")), "draft_check_unavailable")
 	check_eq("the candidate is still stale, never clean, never stuck checking",
 		str(tws.get_candidate(tcid).validation), "stale")
 
@@ -1411,8 +1414,11 @@ func _run_removal_manifest_tools_absent() -> void:
 	# DCR 01a0033a12a9 change 3 (106 -> 107): minerva_pcb_fabrication_stage —
 	# the board's declared manufacturing intent, so a via-only board can report
 	# its unrouted nets as the job rather than as a wall of defects.
-	check_eq("manifest tool count == 107 (ALL manifest.json tools[] entries)",
-		names.size(), 107)
+	# SR2FAB (107 -> 109): minerva_pcb_export_yaml and
+	# minerva_pcb_list_mounting_holes. Both executor:"panel", so the Go pin at
+	# 19 backend tools is unaffected.
+	check_eq("manifest tool count == 109 (ALL manifest.json tools[] entries)",
+		names.size(), 109)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",
@@ -1858,8 +1864,8 @@ func _run_cross_candidate_check_reply() -> void:
 		not out.has("cross_candidate_check"))
 
 	# A SECOND task's candidate lands ⇒ live set is 2 and the check must run.
-	# This unmounted panel has no _MinervaIPC bridge, so check_draft answers {}
-	# and the field must be the NAMED skip — present, honest, non-fatal.
+	# This unmounted panel has no _MinervaIPC bridge, so check_draft names that
+	# specific fault and the field must carry it — present, honest, non-fatal.
 	var hint2: String = _seed_net_named_hint(ctx["host"], "N2")
 	shim.reply = {"routes": [{
 		"net": "N2",
@@ -1876,7 +1882,7 @@ func _run_cross_candidate_check_reply() -> void:
 		out2.has("cross_candidate_check"))
 	check_eq("no worker bridge ⇒ the NAMED skip, never a hang or a failure",
 		str((out2.get("cross_candidate_check", {}) as Dictionary).get("skipped", "")),
-		"draft_check_no_reply")
+		"draft_check_unavailable")
 
 	ctx["driver"].free_panel(ctx["panel"])
 
@@ -4069,17 +4075,24 @@ func _run_station10_move_junction_degenerate_neighbor_in_moved_set() -> void:
 	stub._data = data
 	stub._ws = ws
 	host.set_panel(stub)
-	var record: Dictionary = {
-		"net": "N3",
-		"segments": [
-			{"start": [0.0, 0.0], "end": [0.4 * eps, 0.0], "layer": "F.Cu"},
-		],
-		"vias": [],
-		"width": 0.3,
-		"source_hint_ids": ["hint_degenerate_neighbor"],
-		"source_hints": [],
-	}
-	var cid := str(ws.ingest_record(record, int(data.board_revision)))
+	# BUILT DIRECTLY, not through ingest_record, and that is the point of this
+	# comment. The leg here is 0.4 * EDIT_EPS_MM = 4e-5 mm long, and ingest now
+	# DROPS a segment whose ends coincide within COPPER_COINCIDENT_EPS_MM (1e-3)
+	# — correctly, because copper that short is unmanufacturable and reaches the
+	# board as a zero-length segment that makes the whole thing uncompilable.
+	# So this state can no longer arrive through ingest at all.
+	#
+	# The state is still worth reaching, because what THIS test exercises is the
+	# EDIT-side guard: move_junction must refuse to collapse a leg whose
+	# neighbour is itself in the moved set. Constructing the candidate directly
+	# keeps that guard under test without asking the ingest guard to admit
+	# copper it exists to reject.
+	var seed_cand = PcbRouteCandidate.new()
+	seed_cand.net = "N3"
+	seed_cand.task_id = "N3|hint_degenerate_neighbor"
+	seed_cand.add_segment(PcbRouteCandidate.make_segment(
+		"seg_degenerate", "top", 0.3, [Vector2(0.0, 0.0), Vector2(0.4 * eps, 0.0)]))
+	var cid := str(ws.add_candidate(seed_cand))
 	var cand = ws.get_candidate(cid)
 	var rev_before: int = int(cand.candidate_revision)
 	var pts_before: Array = (cand.segments[0] as Dictionary).get("points", []).duplicate()
@@ -6055,8 +6068,21 @@ func _run_ux2_snap_disclosure_and_pin_groups() -> void:
 		_args({"component_id": "U8", "direction": "right"}))
 	check("move_relative succeeded", bool(mr.get("success", false)))
 	if data.has_component("U8"):
+		# Compared on the 0.1um reply grid, not bit-for-bit. This assertion
+		# guards LANDED-vs-REQUESTED — a grid-scale distinction (2.54mm) — and
+		# the reply now quantizes, so the model holds 17.7800006866455 while the
+		# reply says 17.78. Demanding float32 bit-equality of a reply would
+		# require the reply to carry the residue this surface exists to remove;
+		# 0.0005 is the same tolerance the freeform checks above use and is
+		# three orders of magnitude tighter than the thing being guarded.
+		# EXACT against the reply grid, not a tolerance. This guards
+		# LANDED-vs-REQUESTED (a 2.54mm distinction), and the reply now
+		# quantizes, so the model holds 17.7800006866455 while the reply says
+		# 17.78. Comparing to the SNAPPED model value pins the reply contract
+		# itself rather than allowing any 0.0005mm mismatch to pass.
 		check_eq("move_relative new_x is the component's ACTUAL position",
-			float(mr.get("new_x", -1.0)), float(data.get_component("U8").position.x))
+			float(mr.get("new_x", -1.0)),
+			snappedf(float(data.get_component("U8").position.x), 0.0001))
 
 	# pin_groups int normalization (the F5 constraint_revision class): a
 	# worker board_health whose partial[].pin_groups crossed the JSON hop as

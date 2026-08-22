@@ -30,6 +30,35 @@ extends RefCounted
 
 const _Self := preload("pcb_routing_workspace.gd")
 const PcbRouteCandidate := preload("pcb_route_candidate.gd")
+## Two points closer than this were AUTHORED to be the same point. The value
+## is the connectivity kernel's own COPPER_COINCIDENT_EPS_MM (drc.py:76), for
+## the same reason it gives: coincidence here is an authoring-identity
+## question, not a clearance one.
+##
+## It cannot go lower. Vector2 is single-precision, so at real board
+## coordinates (~75mm) one float32 ulp is already ~7.6e-6 mm — a threshold
+## below that would fail to recognise two points the author wrote identically
+## but that round-tripped through a float32 differently. It cannot sensibly go
+## higher either: 1e-3 mm is a hundredth of the narrowest manufacturable
+## trace, so nothing this collapses was ever going to be fabricated.
+const COPPER_COINCIDENT_EPS_MM := 1e-3
+
+
+## Drop consecutive points that are the same point, so a run of them collapses
+## to the one point it draws. Returns the points that actually describe copper.
+##
+## A zero-length segment is not harmless geometry — it is UNCOMPILABLE. The
+## worker refuses the whole board with trace_degenerate, which takes geometric
+## DRC, the routing IR and promotion down with it, and the board stays that way
+## until the trace is found and removed by hand.
+static func drop_coincident_points(points: Array) -> Array:
+	var out: Array = []
+	for p in points:
+		if not (p is Vector2):
+			continue
+		if out.is_empty() or (out[out.size() - 1] as Vector2).distance_to(p) > COPPER_COINCIDENT_EPS_MM:
+			out.append(p)
+	return out
 const PcbRouteTask := preload("pcb_route_task.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 
@@ -155,6 +184,18 @@ var board_revision: int = 0
 ## ingest_routing_result / ingest_record): [{task_id, held_candidate_id, net,
 ## reason}, …]. Empty when the ingest replaced/created everything it was given.
 var last_ingest_holds: Array = []
+
+## How many segments the most recent geometry-building call dropped because
+## their two ends were the same point. Reset at the start of each of the three
+## (ingest_routing_result, ingest_record, sync_candidate_geometry), same
+## per-call convention as last_ingest_holds above.
+##
+## Almost always 0: a router emitting a zero-length segment is a router bug.
+## The count exists so the drop is REPORTABLE rather than silent — dropping is
+## the right thing (that segment draws nothing, and committing it makes the
+## whole board uncompilable), but doing it without a trace would hide the
+## upstream bug that produced it.
+var last_ingest_degenerate_segments: int = 0
 
 ## F4 (cold review, Epoch UX1 station 9): CONFLICTING routing_constraints
 ## found by _absorb_eager_tasks_for_merge during the most recent
@@ -829,8 +870,10 @@ func apply_check_result(reply: Dictionary) -> void:
 	var per_candidate: Dictionary = reply.get("per_candidate", {}) if reply.get("per_candidate", {}) is Dictionary else {}
 	var findings: Array = reply.get("findings", []) if reply.get("findings", []) is Array else []
 
+	var answered: Dictionary = {}
 	for raw_cid in per_candidate:
 		var cid := str(raw_cid)
+		answered[cid] = true
 		var c = get_candidate(cid)
 		if c == null:
 			continue
@@ -860,6 +903,26 @@ func apply_check_result(reply: Dictionary) -> void:
 			value = "error"
 		set_validation(cid, value)
 		_findings[cid] = _findings_for_subject(findings, cid)
+
+	# GUARD 4 — a coherent reply that does not ANSWER for a pending candidate
+	# still has to un-flip it. The whole-reply guards above revert everything
+	# when a reply is incoherent, and the loop above handles every candidate the
+	# reply named; a candidate that is neither leaves "checking" set while
+	# _pending_check is cleared below, and nothing else in this model ever
+	# clears that state. The next check then snapshots "checking" as the prior
+	# value and makes it permanent.
+	#
+	# The worker's own fail-closed refusals are exactly this shape: a coherent
+	# token and generation, an empty per_candidate, and an error saying the
+	# verdict could not be reached.
+	for raw_pending in _pending_check:
+		var pending_cid := str(raw_pending)
+		if answered.has(pending_cid):
+			continue
+		var pending = get_candidate(pending_cid)
+		if pending != null and str(pending.validation) == "checking":
+			var pending_snap: Dictionary = _pending_check.get(pending_cid, {})
+			set_validation(pending_cid, str(pending_snap.get("prior", "unchecked")))
 
 	_pending_check = {}
 
@@ -999,6 +1062,7 @@ func _vias_wire(c) -> Array:
 ## any task was held — read last_ingest_holds to say which and why.
 func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], base_board_revision: int = 0) -> Array:
 	last_ingest_holds = []  # per-call: holds describe THIS ingest, not history
+	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
 	var new_ids: Array = []
 	for route in router_reply.get("routes", []):
 		if not (route is Dictionary):
@@ -1041,6 +1105,7 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 		push_warning("[RoutingWorkspace] ingest_record refused: %s" % ERR_COMMIT_IN_PROGRESS)
 		return ""
 	last_ingest_holds = []  # per-call (see ingest_routing_result)
+	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
 	last_ingest_constraint_conflicts = []  # per-call (see the field's own doc)
 	var hints: Array = record.get("source_hints", []) if record.get("source_hints", []) is Array else []
 	var explicit_hint_ids: Array = record.get("source_hint_ids", []) if record.get("source_hint_ids", []) is Array else []
@@ -1218,13 +1283,26 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 			continue
 		var seg_dict: Dictionary = seg
 		var layer := PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "F.Cu"))
-		var pts: Array = [_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))]
+		var pts: Array = drop_coincident_points(
+			[_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))])
+		if pts.size() < 2:
+			# A router that emitted start == end drew nothing. Keeping it would
+			# put a zero-length segment on the board at commit and make the
+			# board uncompilable; the rest of this route is unaffected.
+			last_ingest_degenerate_segments += 1
+			continue
 		cand.add_segment(PcbRouteCandidate.make_segment("", layer, width, pts))
 
 	for via in vias:
 		var pos := _via_pt(via)
 		cand.add_via(PcbRouteCandidate.make_via("", pos, via_span[0], via_span[1]))
 
+	if cand.segments.is_empty() and cand.vias.is_empty():
+		# Everything this route carried collapsed. Honour the documented
+		# contract ("" when the route has no geometry) rather than adding a
+		# ghost that draws nothing and can only ever be rejected;
+		# last_ingest_degenerate_segments says why it vanished.
+		return ""
 	var new_id: String = add_candidate(cand)
 	_task_candidate[task_key] = new_id
 	return new_id
@@ -1406,6 +1484,7 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 	if str(c.disposition) == "frozen":
 		push_warning("[RoutingWorkspace] sync_candidate_geometry refused: %s is frozen (unfreeze first)" % candidate_id)
 		return false
+	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var width := 0.25
 	if not c.segments.is_empty() and c.segments[0] is Dictionary:
@@ -1417,7 +1496,11 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 			continue
 		var seg_dict: Dictionary = seg
 		var layer := PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "F.Cu"))
-		var pts: Array = [_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))]
+		var pts: Array = drop_coincident_points(
+			[_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))])
+		if pts.size() < 2:
+			last_ingest_degenerate_segments += 1
+			continue
 		var s := PcbRouteCandidate.make_segment(next_segment_id(), layer, width, pts)
 		new_segments.append(s)
 
@@ -2131,13 +2214,14 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 		if not (seg is Dictionary):
 			return _verb_error(ERR_UNMODELABLE_SEGMENT, "candidate '%s' holds a non-dictionary segment" % candidate_id, candidate_id)
 		var seg_dict: Dictionary = seg
-		var pts: Array = []
-		for p in seg_dict.get("points", []):
-			if p is Vector2:
-				pts.append(p)
+		# DISTINCT points, not just points. The old count admitted a segment
+		# whose two points were the same point, which lands a zero-length
+		# segment on the board and makes it uncompilable — the author then has
+		# no working board and no verb that names what to remove.
+		var pts: Array = drop_coincident_points(seg_dict.get("points", []))
 		if pts.size() < 2:
 			return _verb_error(ERR_UNMODELABLE_SEGMENT,
-				"segment '%s' has %d usable point(s); copper needs at least two"
+				"segment '%s' collapses to %d distinct point(s); copper needs at least two"
 					% [str(seg_dict.get("id", "")), pts.size()], candidate_id)
 		var w := float(seg_dict.get("width", 0.0))
 		if w <= 0.0:
