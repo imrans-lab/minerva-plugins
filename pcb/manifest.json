@@ -1393,6 +1393,23 @@
       }
     },
     {
+      "name": "minerva_pcb_export_yaml",
+      "description": "EXPORT the live board as canonical YAML TEXT (SR2FAB S1) — the MCP twin of the Export YAML button, running that button's exact implementation. UNGATED and NON-WRITING: no DRC runs and no file is touched, so a board that minerva_pcb_promote refuses can still be read out, diffed against the file on disk, and archived. Oversized boards ride the by-ref path in both directions (the request snapshots the board; an over-cap document comes back as {yaml_path, yaml_digest} and is read back sha256-verified), so this works on boards far past the 64KiB broker cap. Args {editor_name}. Returns {yaml, bytes, draft:true}. Refuses by name: path_not_supported (a `path` argument is refused rather than ignored — an ignored path returns a success the caller reads as a file having been written), no_board, worker_unavailable, payload_too_large, serialize_failed, serialize_read_failed. THIS IS NOT PROMOTION — the returned document carries no gate verdict, and minerva_pcb_promote remains the only verb that writes the canonical .yaml file. Writing this text over that file yourself bypasses the correctness gate deliberately and silently.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {
+            "type": "string",
+            "description": "Name of the PCB editor tab"
+          }
+        },
+        "required": [
+          "editor_name"
+        ]
+      }
+    },
+    {
       "name": "minerva_pcb_promote",
       "description": "PROMOTE the live board to its canonical YAML file (K13, the serialize-back verb — CORRECTNESS-GATED, COMPLETENESS-ADVISORY per the Epoch UX4 owner ruling): runs the FULL authoritative gate in one call (connectivity DRC + geometric DRC GC1-GC7 + assembly tri-state, composed fail-closed worker-side) and, only when no CORRECTNESS refusal stands, serializes the live board through pcb.serialize and writes it to the adopted document path (or the explicit `path` arg). Any finding, error, or indeterminate refuses by name (promotion_gated, with refusals[] and the three sub-reports) — there is NO acknowledge-through for correctness. A clean-but-PARTIAL board PROMOTES, with the unrouted nets on the reply as advisory.completeness. PANEL-SIDE REGRESSION GUARD: if the prior file has per-net copper (traces ∪ zones ∪ netted vias — a pour counts) or components this promotion would remove, the call refuses copper_regression (regressed_nets, component_delta) unless allow_copper_regression:true. Success reply: {path, digest_sha256, bytes, prior_state, census_delta?, advisory?, staged_drafts?}. Committed candidates and consumed-hint records are NOT mutated — they already describe the copper this file now carries.",
       "executor": "panel",

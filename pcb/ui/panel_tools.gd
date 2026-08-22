@@ -259,6 +259,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_bend_edit(host, args, "delete")
 		"minerva_pcb_clear_hints_by_author":
 			return _clear_hints_by_author(host, args)
+		"minerva_pcb_export_yaml":
+			return await _export_yaml(host, args)
 		"minerva_pcb_promote":
 			return await _promote(host, args)
 		"minerva_pcb_board_check":
@@ -6768,6 +6770,31 @@ static func _clear_hints_by_author(host, args: Dictionary) -> Dictionary:
 	var removed: int = int(host.clear_annotations_by_author(author))
 	return _ok({"removed": removed, "author": author,
 		"note": "route hints only (workflow class) — review annotations are never touched, same filter as the dock menu"})
+
+
+## The Export YAML button's verb — PCBPanel.export_yaml_text owns it, and both
+## doorways run that one implementation. UNGATED and non-writing by design:
+## minerva_pcb_promote remains the only verb that puts bytes in a .yaml file,
+## so this cannot make a board the gate refuses become the design of record.
+static func _export_yaml(host, args: Dictionary) -> Dictionary:
+	# A `path` reads as "write it there", which this verb deliberately cannot
+	# do. Refusing by name beats ignoring the argument and returning a success
+	# the caller reads as a file having been written.
+	if str(args.get("path", "")).strip_edges() != "":
+		return {"success": false, "error": "path_not_supported",
+			"note": "this verb returns the document and writes nothing — use minerva_pcb_promote to write the canonical file (it gates first)"}
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("export_yaml_text"):
+		return _err("no live panel — YAML export serializes the live board")
+	var result: Dictionary = await panel.export_yaml_text()
+	if not bool(result.get("success", false)):
+		return result
+	return _ok({
+		"yaml": str(result.get("yaml", "")),
+		"bytes": int(result.get("bytes", 0)),
+		"draft": true,
+		"note": "draft export — nothing was written and no gate ran; minerva_pcb_promote is the gated writer of the canonical file",
+	})
 
 
 ## Epoch UX3 station 11 (K13): gated promotion — a thin tool over

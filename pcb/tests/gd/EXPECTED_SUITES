@@ -27,6 +27,11 @@ test_candidate_canvas.gd assertions=281
 test_canonical_wire_board.gd assertions=23
 test_connectivity_baseline_surface.gd assertions=21
 test_epoch6_fix_regressions.gd assertions=9
+# SR2FAB S1 — authored, never executed (the epoch defers all execution to
+# testex). Left UNPINNED on purpose: an assertions= count guessed by
+# reading is exactly the false pin this attribute exists to prevent. Pin it
+# from the first trustworthy run, as test_layer_stack.gd does above.
+test_export_yaml_verb.gd
 test_geometric_drc_surface.gd assertions=31
 # GA-1 grew this suite (stack_shape_error matrix, stack_for_count,
 # inner_index_any, the set_board_layers model/handler section) and retired the

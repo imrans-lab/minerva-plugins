@@ -224,7 +224,12 @@ func _init() -> void:
 	# Both are executor:"panel", so the Go pin in
 	# manifest_registry_parity_test.go is genuinely unaffected — that test
 	# filters to executor=="backend" before it counts anything.
-	check("total registered tool count == 107", registered.size() == 107,
+	# SR2FAB S1 (107 -> 108): minerva_pcb_export_yaml — the Export YAML
+	# button's verb. The button rendered the document to the status line and
+	# discarded it, so the only way to read the live board out as YAML was
+	# minerva_pcb_promote, which refuses a board with any correctness finding.
+	# Also executor:"panel", so the Go pin stays unaffected.
+	check("total registered tool count == 108", registered.size() == 108,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

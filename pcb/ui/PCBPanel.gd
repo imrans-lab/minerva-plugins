@@ -4823,12 +4823,19 @@ func _payload_by_ref(payload: Dictionary, key: String) -> Dictionary:
 ## boundary + Go channel owns YAML now. Oversized boards go by-ref both ways
 ## (work item 01a0223ec9e271269fd664fcf90dd20b): the request snapshots the
 ## board, and an over-cap document comes back as {yaml_path, yaml_digest}.
-func _on_export_yaml_pressed() -> void:
+##
+## Returns {success:true, yaml, bytes, draft:true} or {success:false, error,
+## note}. UNGATED, and it WRITES NOTHING: promote() stays the only verb in
+## this panel that puts bytes in a .yaml file, so a board the gate refuses is
+## still readable, diffable and archivable without the design of record
+## changing underneath it.
+func export_yaml_text() -> Dictionary:
+	if _data == null:
+		return {"success": false, "error": "no_board"}
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
-		_set_status("YAML export unavailable — plugin IPC not ready.")
-		return
-	_set_status("Exporting YAML…")
+		return {"success": false, "error": "worker_unavailable",
+			"note": "YAML serialization runs in the pcb backend — plugin IPC not ready"}
 	var result: Dictionary = await _request_with_backend_ensure(
 			"pcb.serialize",
 			_payload_by_ref({"board": _data.to_board_dict()}, "board"), 30000)
@@ -4837,25 +4844,51 @@ func _on_export_yaml_pressed() -> void:
 		var code := str(result.get("error_code", ""))
 		var msg := str(result.get("error_message", ""))
 		if code.findn("payload_too_large") != -1 or code.findn("too_large") != -1 or msg.findn("64") != -1:
-			_set_status("YAML export failed: board exceeds the 64KiB IPC cap.")
-		else:
-			_set_status("YAML export failed: %s" % (msg if msg != "" else code))
-		return
+			return {"success": false, "error": "payload_too_large",
+				"note": "board exceeds the 64KiB IPC cap"}
+		return {"success": false, "error": "serialize_failed",
+			"note": msg if msg != "" else code}
 
-	# Success payload shape is owned by the Go side; surface a size hint if
-	# present. An over-cap document arrives as {yaml_path, yaml_digest} — read
-	# it back verified through the one serialize-result reader, at the SAME
-	# unwrap level promote uses (fix cold review F2: the live reply is
-	# {success, result:{ok, result:{yaml|yaml_path}}}, and reading one level
-	# shallow made the by-path branch unreachable).
+	# Success payload shape is owned by the Go side. An over-cap document
+	# arrives as {yaml_path, yaml_digest} — read it back verified through the
+	# one serialize-result reader, at the SAME unwrap level promote uses (fix
+	# cold review F2: the live reply is {success, result:{ok,
+	# result:{yaml|yaml_path}}}, and reading one level shallow made the
+	# by-path branch unreachable).
 	var payload_dict: Dictionary = _unwrap_channel_reply(result)
 	var read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
-	if not bool(read.get("ok", false)) and payload_dict.has("yaml_path"):
-		_set_status("YAML export failed: %s" % str(read.get("error")))
-		return
+	if not bool(read.get("ok", false)):
+		if payload_dict.has("yaml_path"):
+			return {"success": false, "error": "serialize_read_failed",
+				"note": str(read.get("error", ""))}
+		# The serialize channel's REFUSALS are success-shaped {error, …} —
+		# surface them by name rather than as an empty document.
+		if str(payload_dict.get("error", "")) != "":
+			return {"success": false, "error": str(payload_dict.get("error")),
+				"bytes": int(payload_dict.get("bytes", 0)),
+				"note": "pcb.serialize refused"}
+		return {"success": false, "error": "serialize_failed",
+			"note": str(read.get("error", ""))}
 	var yaml_text := str(read.get("yaml", ""))
-	if yaml_text != "":
-		_set_status("YAML exported (%d bytes)." % yaml_text.length())
+	return {"success": true, "yaml": yaml_text, "bytes": yaml_text.length(),
+		"draft": true}
+
+
+## The Export YAML button: the same serialization, rendered to the status line.
+func _on_export_yaml_pressed() -> void:
+	if get_node_or_null("_MinervaIPC") == null:
+		_set_status("YAML export unavailable — plugin IPC not ready.")
+		return
+	_set_status("Exporting YAML…")
+	var result: Dictionary = await export_yaml_text()
+	if not bool(result.get("success", false)):
+		var note := str(result.get("note", ""))
+		_set_status("YAML export failed: %s" % (note if note != ""
+			else str(result.get("error", ""))))
+		return
+	var bytes := int(result.get("bytes", 0))
+	if bytes > 0:
+		_set_status("YAML exported (%d bytes)." % bytes)
 	else:
 		_set_status("YAML export complete.")
 
