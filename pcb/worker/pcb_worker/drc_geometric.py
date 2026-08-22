@@ -794,6 +794,17 @@ def _violates(measured: float, required: float) -> bool:
     return measured < required - EPS
 
 
+def _exceeds(measured: float, ceiling: float) -> bool:
+    """Ceiling predicate — the mirror of :func:`_violates`, which is a FLOOR.
+
+    Every other rule in this module asks "is this at least X". GC12 asks "is
+    this at most X", and spelling that as ``_violates(ceiling, measured)`` is
+    arithmetically identical while reading inside-out — which is exactly how a
+    later edit swaps two arguments and silently inverts a check. A measurement
+    AT the ceiling passes, symmetrically with _violates."""
+    return measured > ceiling + EPS
+
+
 def _net_class_minima(rb: ResolvedBoard) -> dict[str, tuple[float | None, float | None]]:
     """``net_id -> (class min_trace_width_mm, class min_clearance_mm)`` for every net
     that REFERENCES a net class naming at least one of them. This is the net->class
@@ -2224,6 +2235,98 @@ def _overlap_centroid(paths, scale: int) -> tuple[float, float]:
     return (best[0] / scale, best[1] / scale)
 
 
+# GC12 — trace DIRECTION. Absent by default; see _check_gc12_trace_direction.
+GC12_DIRECTION = "gc12_trace_direction"
+
+## How far off-axis a segment may sit, measured as the PERPENDICULAR DEVIATION
+## of its far end from the allowed direction through its near end, in mm.
+##
+## A perpendicular distance rather than an angle, deliberately. An angular
+## tolerance is scale-dependent: the same 0.1 um of coordinate quantization is
+## 0.0036 deg across a 1.6 mm run and 0.057 deg across a 0.1 mm one, so any
+## single angle either fails short conforming segments or passes long
+## near-diagonal ones. A distance is the same rule at every length, and it is
+## the quantity a fab cares about anyway.
+##
+## The value is the coincidence epsilon the connectivity kernel already uses
+## (drc.COPPER_COINCIDENT_EPS_MM), for one derivation and because it sits an
+## order of magnitude above the 0.1 um emit grid: a segment authored on-axis
+## and round-tripped through float32 cannot drift into a finding.
+GC12_AXIS_TOLERANCE_MM = 1e-3
+
+
+def _check_gc12_trace_direction(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC12 — every trace segment runs in one of the directions the board allows.
+
+    ABSENT BY DEFAULT, and gated on BOARD state
+    (``design_rules.allowed_trace_angles_deg``) rather than on a rule profile.
+    A profile records what a board HOUSE publishes; no house requires
+    orthogonal routing. Manhattan is a design style its author chose, and
+    asserting it as a fab capability would be inventing a rule.
+
+    WHAT IT CATCHES, and why nothing else did. smart-remote-v2 is routed
+    Manhattan by an external router, and no rule in this module expresses
+    direction: a 45-degree stub and a 0.9-degree-off-vertical segment both pass
+    GC1-GC11 completely clean. The 0.9-degree case is the one that matters —
+    0.025 mm of drift over a 1.6 mm run, invisible at any zoom, and it reached
+    the board.
+
+    FAIL DIRECTION, per this module's cardinal rule: a borderline segment
+    produces a SPURIOUS FINDING, never a missed diagonal. The tolerance is
+    tight enough (1 um perpendicular) that no real diagonal can hide under it,
+    and an author who dislikes a marginal finding can move the segment; an
+    author who never learns about a diagonal cannot do anything at all.
+
+    NOTE ON THE FINDING SHAPE: this is the module's only CEILING rule, so
+    ``required_mm`` here is the maximum allowed deviation, not a minimum. The
+    angles in ``measured_angle_deg`` / ``nearest_allowed_angle_deg`` are the
+    legible half and the reason the finding carries them.
+    """
+    allowed = rb.design_rules.allowed_trace_angles_deg
+    if not allowed:
+        return []
+    findings: list[dict] = []
+    for prim in proj.copper:
+        if prim.kind != "trace_seg":
+            continue
+        shape = prim.shape
+        ax, ay, bx, by = shape.ax, shape.ay, shape.bx, shape.by
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length <= GC12_AXIS_TOLERANCE_MM:
+            # Shorter than the tolerance in every direction at once, so it has
+            # no direction to be wrong about. A segment this short is GC1/S7's
+            # problem, not this rule's.
+            continue
+        best_dev = None
+        best_angle = 0.0
+        for angle in allowed:
+            radians = math.radians(angle)
+            # Perpendicular deviation of the far end from the allowed direction
+            # through the near end: |d x u|, u a unit vector along the axis.
+            deviation = abs(dx * math.sin(radians) - dy * math.cos(radians))
+            if best_dev is None or deviation < best_dev:
+                best_dev = deviation
+                best_angle = angle
+        if best_dev is not None and _exceeds(best_dev, GC12_AXIS_TOLERANCE_MM):
+            # The segment's own heading, folded to [0, 180) the same way the
+            # allowed set is, so the two are directly comparable by eye.
+            measured_angle = math.degrees(math.atan2(dy, dx)) % 180.0
+            findings.append(_finding(
+                GC12_DIRECTION, prim.entity_id, prim.parent_id, prim.kind,
+                prim.net_id, prim.layers[0] if prim.layers else None,
+                best_dev, GC12_AXIS_TOLERANCE_MM,
+                closest=[ax, ay], witness=[bx, by],
+                midpoint=[(ax + bx) / 2.0, (ay + by) / 2.0],
+                extra={
+                    "measured_angle_deg": round(measured_angle, 6),
+                    "nearest_allowed_angle_deg": round(best_angle, 6),
+                    "allowed_angles_deg": list(allowed),
+                },
+                ref=prim.ref, pad=prim.pad_number, net_name=prim.net_name))
+    return findings
+
+
 def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
              net_id: str | None, layer: str | None,
              measured: float, required: float, *,
@@ -2306,6 +2409,10 @@ _COUNT_KEYS = (
     # key stays 0 on every board in the corpus — "the profile said nothing".
     GC11_CONTAINMENT,
     GC11_PROXIMITY,
+    # SR2FAB S11 — trace direction. Gated on BOARD state, not on a profile, and
+    # absent by default, so this key stays 0 unless the board asked for it. The
+    # `not_evaluated` list says which of those two a 0 means.
+    GC12_DIRECTION,
 )
 
 
@@ -2357,6 +2464,15 @@ def _not_evaluated(rb: ResolvedBoard) -> list[dict]:
         if scope:
             row["scope"] = scope
         rows.append(row)
+    # GC12 is gated on BOARD state rather than on a profile floor, but its zero
+    # is ambiguous in exactly the same way, so it belongs in the same list.
+    if not rb.design_rules.allowed_trace_angles_deg:
+        rows.append({
+            "check": GC12_DIRECTION,
+            "floor": "design_rules.allowed_trace_angles_deg",
+            "reason": "this board declares no allowed_trace_angles_deg, so it "
+                      "asked for no direction constraint",
+        })
     return rows
 
 
@@ -2490,6 +2606,9 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         # mask-projection refusal below, which is about a different family.
         findings += _check_gc10_hole_to_copper(proj, rb)
         findings += _check_gc11_hole_to_edge(proj, rb)
+        # Copper-only like the two above, so it runs before the mask-projection
+        # refusal below rather than behind it.
+        findings += _check_gc12_trace_direction(proj, rb)
 
         # GC8 CONSUMES THE MASK PROJECTION, so it must first refuse to run on a
         # KNOWN-INCOMPLETE aperture set. `mask_indeterminate` names entities

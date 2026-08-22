@@ -214,7 +214,13 @@ def test_a_declared_floor_is_not_reported_as_unmeasured():
     feature-specific drill floors, and deliberately declares no hole-to-edge —
     so exactly one row survives, and it is the one the page has no number for."""
     res = _run(_profiled_board("jlcpcb-2layer"))
-    assert _not_evaluated(res) == {(dg.GC11_PROXIMITY, "min_hole_to_edge_mm")}
+    # Two rows survive, and they are gated on different things: hole-to-edge is
+    # the one figure this house publishes no number for, and GC12 is board
+    # state that no profile could ever supply.
+    assert _not_evaluated(res) == {
+        (dg.GC11_PROXIMITY, "min_hole_to_edge_mm"),
+        (dg.GC12_DIRECTION, "design_rules.allowed_trace_angles_deg"),
+    }
 
     conservative = _not_evaluated(_run(_profiled_board("v1-fab-conservative")))
     assert _not_evaluated(res) < conservative
@@ -248,7 +254,12 @@ def test_every_unmeasured_row_names_a_real_count_key_and_a_real_floor_field():
     res = _run(_profiled_board("v1-fab-conservative"))
     for row in res["not_evaluated"]:
         assert row["check"] in res["counts"], row
-        assert row["floor"] in OPTIONAL_FLOOR_FIELDS, row
+        # Two kinds of gate, and both have to point at something real: a
+        # profile floor by its field name, or board state by its dotted path.
+        if row["floor"].startswith("design_rules."):
+            assert row["floor"] == "design_rules.allowed_trace_angles_deg", row
+        else:
+            assert row["floor"] in OPTIONAL_FLOOR_FIELDS, row
 
     # solder_mask_expansion_mm is optional-tier and undeclared by v1, but it has
     # NO reader — listing it would imply a check that does not exist, which is
@@ -1811,3 +1822,130 @@ def test_the_rank_table_pins_the_documented_order():
         < R["trace_seg"] < R["zone_copper"]
     assert R["board_hole"] == R["board_hole_copper"], (
         "GC6's HolePrimitive.origin vocabulary shares the table")
+
+
+# ---------------------------------------------------------------------------
+# GC12 — trace direction (SR2FAB S11).
+# ---------------------------------------------------------------------------
+
+
+def _directed_board(angles, segments):
+    """A board declaring `angles` as its allowed trace directions, carrying
+    `segments` as [( (ax,ay), (bx,by) ), ...] on net N."""
+    rules = {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+             "via_diameter_mm": 0.8, "via_drill_mm": 0.4}
+    if angles is not None:
+        rules["allowed_trace_angles_deg"] = angles
+    return _base(
+        # Parked well clear of every segment below and well inside the 0.3mm
+        # copper-to-edge floor, so GC5/GC2 cannot fire and muddy a GC12 verdict.
+        components=[_th_pad_comp(ref="U1", x=3.0, y=36.0)],
+        nets=[{"name": "N", "pins": ["U1.1"]}],
+        design_rules=rules,
+        traces=[{"net": "N", "layer": "top", "width_mm": 0.3,
+                 "points": [{"x_mm": a[0], "y_mm": a[1]},
+                            {"x_mm": b[0], "y_mm": b[1]}]}
+                for a, b in segments])
+
+
+def _gc12(res: dict) -> list:
+    return _findings(res, dg.GC12_DIRECTION)
+
+
+def test_gc12_is_absent_until_the_board_asks_for_it():
+    """No board house requires orthogonal routing, so this cannot live in a rule
+    profile — it is the board author's own style. A board that declares nothing
+    gets no direction constraint, and the reply SAYS the check did not run
+    rather than leaving a 0 that reads as clean."""
+    res = _run(_directed_board(None, [((5.0, 5.0), (15.0, 12.0))]))  # a diagonal
+    assert _counts(res, dg.GC12_DIRECTION) == 0
+    assert res["verdict"] == "clean"
+    assert (dg.GC12_DIRECTION, "design_rules.allowed_trace_angles_deg") in {
+        (row["check"], row["floor"]) for row in res["not_evaluated"]}
+
+
+def test_gc12_passes_exact_horizontal_and_vertical():
+    res = _run(_directed_board([0, 90], [
+        ((5.0, 5.0), (25.0, 5.0)),     # exact horizontal
+        ((25.0, 5.0), (25.0, 30.0)),   # exact vertical
+    ]))
+    assert _gc12(res) == []
+    # ...and the check really ran, so the zero above means clean this time.
+    assert not any(row["check"] == dg.GC12_DIRECTION
+                   for row in res["not_evaluated"])
+
+
+def test_gc12_flags_a_forty_five_degree_run():
+    res = _run(_directed_board([0, 90], [((5.0, 5.0), (15.0, 15.0))]))
+    findings = _gc12(res)
+    assert len(findings) == 1
+    assert findings[0]["measured_angle_deg"] == pytest.approx(45.0)
+    assert findings[0]["nearest_allowed_angle_deg"] in (0.0, 90.0)
+    assert findings[0]["allowed_angles_deg"] == [0.0, 90.0]
+
+
+def test_gc12_catches_the_real_case_that_reached_this_board():
+    """THE ONE THAT MATTERS. 0.025 mm of drift over a 1.6 mm run — 0.9 degrees
+    off vertical, invisible at any zoom, and it reached smart-remote-v2's copper
+    because no rule in this module expresses direction. Every other check passes
+    it completely clean."""
+    board = _directed_board([0, 90], [((20.0, 10.0), (20.025, 11.6))])
+    res = _run(board)
+    findings = _gc12(res)
+    assert len(findings) == 1, res["counts"]
+    assert findings[0]["measured_angle_deg"] == pytest.approx(89.1, abs=0.1)
+    assert findings[0]["nearest_allowed_angle_deg"] == pytest.approx(90.0)
+    # The deviation reported is the perpendicular one, which is what the author
+    # has to close.
+    assert findings[0]["measured_mm"] == pytest.approx(0.025, abs=1e-4)
+
+    # ...and it is invisible to everything else, which is the whole argument
+    # for the rule existing.
+    unconstrained = _run(_directed_board(None, [((20.0, 10.0), (20.025, 11.6))]))
+    assert unconstrained["verdict"] == "clean"
+
+
+def test_gc12_tolerates_a_conforming_segment_with_sub_grid_jitter():
+    """A segment authored on-axis and round-tripped through float32 must not
+    drift into a finding. The tolerance is a PERPENDICULAR DISTANCE for exactly
+    this reason: an angular tolerance is scale-dependent, so the same
+    quantization noise is 0.0036 deg across a 1.6 mm run and 0.057 deg across a
+    0.1 mm one, and no single angle serves both."""
+    jitter = 5e-5  # half the 0.1 um emit grid
+    res = _run(_directed_board([0, 90], [
+        ((5.0, 5.0), (25.0, 5.0 + jitter)),          # long, nearly horizontal
+        ((30.0, 5.0), (30.0 + jitter, 5.1)),         # SHORT, nearly vertical
+    ]))
+    assert _gc12(res) == []
+
+
+def test_gc12_allows_a_forty_five_degree_style_when_the_board_declares_it():
+    """The rule is "the directions this board allows", not "Manhattan". An
+    octilinear board declares four and its diagonals are legal."""
+    res = _run(_directed_board([0, 45, 90, 135], [
+        ((5.0, 5.0), (15.0, 15.0)),    # +45
+        ((15.0, 15.0), (25.0, 5.0)),   # -45, which folds to 135
+        ((25.0, 5.0), (25.0, 20.0)),   # vertical
+    ]))
+    assert _gc12(res) == []
+
+
+def test_gc12_folds_a_direction_and_its_reverse_into_one_rule():
+    """0 and 180 are the same constraint on a horizontal run, so a board that
+    writes either gets the same answer — and writing both is not two rules."""
+    for declared in ([0], [180], [0, 180], [-90]):
+        res = _run(_directed_board(declared, [((5.0, 5.0), (25.0, 5.0))]))
+        if declared == [-90]:
+            assert len(_gc12(res)) == 1, declared    # -90 folds to 90: vertical only
+        else:
+            assert _gc12(res) == [], declared
+
+
+def test_a_malformed_direction_declaration_refuses_the_board():
+    """A board that ASKS for a direction constraint and silently gets none is
+    the fail-open direction, and it is invisible: every trace passes a check
+    that never ran. Malformed is an error, not an ignored key."""
+    for bad in ([], "manhattan", [0, "ninety"], [0, float("inf")], [0, True]):
+        result = compile_board(_directed_board(bad, [((5.0, 5.0), (25.0, 5.0))]))
+        assert isinstance(result, ResolutionFailure), bad
+        assert any(d.code == "bad_trace_angles" for d in result.diagnostics), bad

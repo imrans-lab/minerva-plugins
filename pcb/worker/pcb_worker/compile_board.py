@@ -1090,7 +1090,11 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
             _board_ref())
         return None
     net_classes, class_id_by_net = _build_net_classes(rules, board_id, requested_outputs, diags)
+    angles = _allowed_trace_angles(rules, diags)
+    if angles is None:
+        return None
     return ResolvedDesignRules(
+        allowed_trace_angles_deg=angles,
         defaults=RoutingDefaults(
             trace_width_mm=float(trace_width),
             via_diameter_mm=float(via_diameter),
@@ -1101,6 +1105,43 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
         net_classes=net_classes,
         rule_profile=profile.ref,
     ), class_id_by_net
+
+
+def _allowed_trace_angles(rules: dict, diags: _Diagnostics):
+    """``design_rules.allowed_trace_angles_deg``, validated. ``()`` when absent
+    (the default: no direction constraint), ``None`` when malformed.
+
+    BOARD state, not profile state. A rule profile records what a board HOUSE
+    publishes and no house requires orthogonal routing; a board's routing style
+    is its author's choice. Putting it in a profile would assert a fab
+    capability that does not exist.
+
+    Malformed is an ERROR rather than an ignored key. A board that asks for a
+    direction constraint and silently gets none is the fail-open direction, and
+    it is invisible: every trace passes a check that never ran."""
+    raw = rules.get("allowed_trace_angles_deg")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        diags.error("bad_trace_angles",
+                    "design_rules.allowed_trace_angles_deg must be a non-empty "
+                    f"list of directions in degrees, got {raw!r}", _board_ref())
+        return None
+    angles: list[float] = []
+    for value in raw:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(value):
+            diags.error("bad_trace_angles",
+                        "design_rules.allowed_trace_angles_deg entries must be "
+                        f"finite numbers, got {value!r}", _board_ref())
+            return None
+        # A direction and its reverse are one constraint, so everything folds
+        # into [0, 180) — otherwise 0 and 180 would be two different rules for
+        # the same horizontal run.
+        folded = float(value) % 180.0
+        if folded not in angles:
+            angles.append(folded)
+    return tuple(angles)
 
 
 def _floor_with_clearance(profile_floor: ManufacturingConstraints,

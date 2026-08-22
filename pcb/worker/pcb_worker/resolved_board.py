@@ -673,6 +673,18 @@ class ResolvedDesignRules:
     allowed_via_kinds: tuple[ViaKind, ...]
     net_classes: tuple[NetClass, ...]
     rule_profile: RuleProfileRef
+    # The directions this board's traces are allowed to run in, in degrees from
+    # +X, each direction standing for its own reverse (0 means both +X and -X).
+    # EMPTY MEANS UNCONSTRAINED, which is the default and what almost every
+    # board wants.
+    #
+    # This is BOARD state, not profile state, and the distinction is the whole
+    # reason it lives here. A rule profile records what a board HOUSE
+    # publishes; no house requires orthogonal routing. Manhattan is a design
+    # style its author chose, so putting it in a manufacturer profile would
+    # assert a fab capability that does not exist — the same error K21 forbids
+    # for design minima, in a different costume.
+    allowed_trace_angles_deg: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         _tuple(self.allowed_via_kinds, "ResolvedDesignRules.allowed_via_kinds")
@@ -682,6 +694,19 @@ class ResolvedDesignRules:
         if len(self.allowed_via_kinds) != len(set(self.allowed_via_kinds)):
             raise ValueError("allowed via kinds must be unique")
         _unique_ids(self.net_classes, "ResolvedDesignRules.net_classes")
+        _tuple(self.allowed_trace_angles_deg,
+               "ResolvedDesignRules.allowed_trace_angles_deg")
+        for angle in self.allowed_trace_angles_deg:
+            if isinstance(angle, bool) or not isinstance(angle, (int, float)) \
+                    or not math.isfinite(angle):
+                raise ValueError(
+                    "ResolvedDesignRules.allowed_trace_angles_deg entries must "
+                    "be finite numbers")
+            if not 0.0 <= float(angle) < 180.0:
+                raise ValueError(
+                    "ResolvedDesignRules.allowed_trace_angles_deg entries are "
+                    "directions in [0, 180) — a direction and its reverse are "
+                    f"the same constraint, got {angle!r}")
 
 
 @dataclass(frozen=True)
