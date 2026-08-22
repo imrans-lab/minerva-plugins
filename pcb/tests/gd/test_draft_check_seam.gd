@@ -23,6 +23,8 @@ extends SceneTree
 
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const BROKER_PATH := "res://Scripts/Services/Plugins/PluginScenePanelBroker.gd"
+const PcbWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
+const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 
 var BROKER_CAP: int = load(BROKER_PATH).MAX_PAYLOAD_BYTES
 
@@ -121,6 +123,7 @@ func _init() -> void:
 	await _run_by_ref()
 	await _run_named_faults()
 	await _run_success_unchanged()
+	_run_state_wedge()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -240,3 +243,69 @@ func _run_success_unchanged() -> void:
 	check_eq("3: …with the worker's findings", (out.get("findings", []) as Array).size(), 1)
 	check_eq("3: …and its generation", int(out.get("workspace_generation", -1)), 3)
 	check("3: …and carries no error key", not out.has("error"))
+
+
+# ── 4: a coherent reply that answers for nothing must not wedge the state ───
+#
+# THE FAILURE THIS PREVENTS. The worker's fail-closed refusal (an unreadable
+# board snapshot) returns a COHERENT board_token and workspace_generation with
+# an EMPTY per_candidate, because the panel's coherence guard has to recognise
+# the reply as its own. apply_check_result's whole-reply guards therefore pass
+# it, its per-candidate loop has nothing to iterate, and it then clears
+# _pending_check — leaving every candidate this check flipped to "checking"
+# stuck there. Nothing else in the model ever clears that, and the NEXT check
+# snapshots "checking" as their prior value, making it permanent.
+#
+# Sections 1-3 above cannot see this: they call check_draft([]) with no live
+# candidates, so nothing is ever flipped and there is nothing to leave stuck.
+
+func _run_state_wedge() -> void:
+	print("\n-- 4: an unanswered candidate is reverted, not left checking --")
+	var ws = PcbWorkspace.new()
+	var c = PcbRouteCandidate.new()
+	c.net = "N1"
+	c.task_id = "N1|"
+	c.add_segment(PcbRouteCandidate.make_segment("", "top", 0.3,
+		[Vector2(0, 0), Vector2(5, 0)]))
+	var cid := str(ws.add_candidate(c))
+	ws.set_validation(cid, "clean")
+
+	var payload: Dictionary = ws.begin_check([cid])
+	check_eq("the check flipped the candidate to checking",
+		str(ws.get_candidate(cid).validation), "checking")
+
+	# The worker's refusal shape, verbatim: coherent identity, no verdicts, an
+	# error saying the verdict could not be reached.
+	ws.apply_check_result({
+		"board_token": payload.get("board_token", ""),
+		"workspace_generation": payload.get("workspace_generation", -1),
+		"per_candidate": {},
+		"findings": [],
+		"error": "draft_check board_path unreadable: digest mismatch",
+	})
+	check_eq("a coherent reply that answered for nothing reverts it",
+		str(ws.get_candidate(cid).validation), "clean")
+
+	# ...and the state is genuinely released, not merely repainted: a SECOND
+	# check must be able to snapshot the real prior value. This is where the
+	# wedge became permanent — the next begin_check would record "checking".
+	var second: Dictionary = ws.begin_check([cid])
+	ws.apply_check_result({
+		"board_token": second.get("board_token", ""),
+		"workspace_generation": second.get("workspace_generation", -1),
+		"per_candidate": {},
+		"findings": [],
+	})
+	check_eq("…and a second unanswered check still reverts to the real prior",
+		str(ws.get_candidate(cid).validation), "clean")
+
+	# A reply that DOES answer is untouched by the new guard.
+	var third: Dictionary = ws.begin_check([cid])
+	ws.apply_check_result({
+		"board_token": third.get("board_token", ""),
+		"workspace_generation": third.get("workspace_generation", -1),
+		"per_candidate": {cid: "violating"},
+		"findings": [],
+	})
+	check_eq("an answered candidate still takes its verdict",
+		str(ws.get_candidate(cid).validation), "violating")

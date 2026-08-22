@@ -1414,8 +1414,11 @@ func _run_removal_manifest_tools_absent() -> void:
 	# DCR 01a0033a12a9 change 3 (106 -> 107): minerva_pcb_fabrication_stage —
 	# the board's declared manufacturing intent, so a via-only board can report
 	# its unrouted nets as the job rather than as a wall of defects.
-	check_eq("manifest tool count == 107 (ALL manifest.json tools[] entries)",
-		names.size(), 107)
+	# SR2FAB (107 -> 109): minerva_pcb_export_yaml and
+	# minerva_pcb_list_mounting_holes. Both executor:"panel", so the Go pin at
+	# 19 backend tools is unaffected.
+	check_eq("manifest tool count == 109 (ALL manifest.json tools[] entries)",
+		names.size(), 109)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

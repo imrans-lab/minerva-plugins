@@ -1508,7 +1508,7 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 				"trace_id": trace_id,
 				"start": {"x": _mm(start_pt.x), "y": _mm(start_pt.y)},
 				"end": {"x": _mm(end_pt.x), "y": _mm(end_pt.y)},
-				"width": trace.width,
+				"width": _mm(float(trace.width)),
 				"layer": layer_name,
 				"net_name": trace.net_name,
 			})
@@ -1518,8 +1518,8 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 		var pos: Vector2 = via.get("position", Vector2.ZERO)
 		var via_out := {
 			"position": {"x": _mm(pos.x), "y": _mm(pos.y)},
-			"size": via.get("size", 0.8),
-			"drill": via.get("drill", 0.4),
+			"size": _mm(float(via.get("size", 0.8))),
+			"drill": _mm(float(via.get("drill", 0.4))),
 			"net_name": via.get("net_name", ""),
 			"layers": via.get("layers", PcbLayerStack.default_via_kicad_layers()),
 		}

@@ -208,10 +208,16 @@ func _run_refusals() -> void:
 		null, "minerva_pcb_export_yaml", {})
 	check_eq("2a: no live panel refuses", bool(orphan.get("success", true)), false)
 
-	# 2b: a panel that never loaded a board. _data is null at declaration and
-	# only _on_panel_loaded assigns it, so this is the pre-load window a tool
-	# call can genuinely land in.
+	# 2b: the no-board guard. PCBPanel._init() builds _data eagerly and seeds a
+	# default board, so a fresh .new() panel is NOT this state — the first
+	# version of this test assumed it was and got worker_unavailable, because it
+	# was measuring the guard one line further down.
+	#
+	# The state is still worth guarding: promote() and board_check() both open
+	# with the same check, and every one of the three dereferences _data
+	# immediately after. Forcing it is how a defensive guard gets tested at all.
 	var bare: Variant = load(PANEL_PATH).new()
+	bare._data = null
 	var bare_out: Dictionary = await bare.export_yaml_text()
 	check_eq("2b: a panel with no board refuses by name",
 		str(bare_out.get("error", "")), "no_board")

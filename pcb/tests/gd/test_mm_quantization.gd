@@ -145,6 +145,33 @@ func _run_emitters() -> void:
 		check_eq("describe_component x is on the grid",
 			float(described.get("x", -1.0)), AUTHORED_X)
 
+	# THE ROUND-TRIPPABLE GEOMETRY SURFACE. export/import_trace_geometry is how
+	# an external router reads copper out and writes it back, so its SCALAR
+	# dimensions travel exactly as its coordinates do — a width read back as
+	# 0.30000001192092896 is re-authored at that value on the next import.
+	var traced := _rig()
+	var td = traced["panel"].get_data()
+	td.from_board_dict({
+		"version": 1, "name": "s10-traces", "width_mm": 100.0, "height_mm": 100.0,
+		"layers": ["top", "bottom"], "components": [], "nets": [{"name": "N", "pins": []}],
+		"traces": [{"id": "t1", "net": "N", "layer": "F.Cu", "width_mm": 0.3,
+			"points": [{"x_mm": 10.4, "y_mm": 5.2}, {"x_mm": 30.4, "y_mm": 5.2}]}],
+		"vias": [{"x_mm": 20.4, "y_mm": 5.2, "net": "N", "drill_mm": 0.4,
+			"diameter_mm": 0.8, "from_layer": "top", "to_layer": "bottom"}]})
+	var geom: Dictionary = await PanelTools.handle(
+		traced["host"], "minerva_pcb_export_trace_geometry", {})
+	var segs: Array = geom.get("segments", [])
+	if not segs.is_empty():
+		var seg: Dictionary = segs[0]
+		check_eq("exported segment width is on the grid", float(seg.get("width", -1.0)), 0.3)
+		check_eq("…and its start x", float((seg.get("start", {}) as Dictionary).get("x", -1.0)), 10.4)
+	var evias: Array = geom.get("vias", [])
+	if not evias.is_empty():
+		var ev: Dictionary = evias[0]
+		check_eq("exported via size is on the grid", float(ev.get("size", -1.0)), 0.8)
+		check_eq("exported via drill is on the grid", float(ev.get("drill", -1.0)), 0.4)
+		check_eq("…and its position", float((ev.get("position", {}) as Dictionary).get("x", -1.0)), 20.4)
+
 
 # ── 3: the loop that actually matters ───────────────────────────────────────
 
@@ -160,8 +187,15 @@ func _run_round_trip() -> void:
 	var y: float = float((first.get("world_position", {}) as Dictionary).get("y", 0.0))
 
 	# ...and write geometry back at exactly the coordinate it was given.
+	#
+	# snap_to_grid:false is REQUIRED here and is not a detail. move_component
+	# defaults to snapping onto the board's placement grid (2.54mm by default),
+	# so the default path lands 75.4 on 76.2 — a legitimate move to a different
+	# place, which says nothing about quantization either way. The fixed point
+	# this test is about is the FREEFORM one an external router uses.
 	var moved: Dictionary = await PanelTools.handle(
-		host, "minerva_pcb_move_component", {"component_id": "Q1", "x": x, "y": y})
+		host, "minerva_pcb_move_component",
+		{"component_id": "Q1", "x": x, "y": y, "snap_to_grid": false})
 	check("the move is accepted", bool(moved.get("success", false)), str(moved))
 	check_eq("…and echoes the coordinate it was handed, unchanged",
 		[float(moved.get("x", -1.0)), float(moved.get("y", -1.0))], [x, y])

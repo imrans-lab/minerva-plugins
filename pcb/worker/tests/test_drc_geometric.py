@@ -2025,6 +2025,21 @@ def test_the_warning_digest_is_stable_and_moves_when_a_warning_does():
     assert _group_static_warnings(
         flat + [_warning("something_new", "pad:1")])["digest"] != first["digest"]
 
+    # A CHANGE HIDDEN BEHIND THE ROW TRUNCATION still moves it. The rows keep
+    # only the first few refs, so a digest taken over the DISPLAY rows makes two
+    # different warning sets collide exactly where the reader cannot see the
+    # difference — an unchanged digest on changed input, which is the one thing
+    # this field must never do.
+    ten = [_warning("feature_omitted", "pad:%d" % i) for i in range(10)]
+    swapped = ten[:8] + [_warning("feature_omitted", "pad:98"),
+                         _warning("feature_omitted", "pad:99")]
+    assert (_group_static_warnings(swapped)["digest"]
+            != _group_static_warnings(ten)["digest"])
+    # ...and the two are genuinely indistinguishable in the rows themselves,
+    # which is what makes the digest the only thing carrying that information.
+    assert (_group_static_warnings(swapped)["rows"]
+            == _group_static_warnings(ten)["rows"])
+
 
 def test_the_flat_list_is_available_to_a_caller_that_asks():
     from pcb_worker.methods import _group_static_warnings

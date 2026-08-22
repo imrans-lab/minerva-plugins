@@ -372,8 +372,11 @@ def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
     Returns {rows, digest, total}. The DIGEST is what makes the collapse safe
     to skim: it is stable across identical calls, so a caller who saw the rows
     once can tell at a glance that nothing new appeared, and it MOVES the
-    moment any warning does. Rows are sorted before hashing so an ordering
-    change in the compiler cannot masquerade as new information.
+    moment any warning does — INCLUDING one hidden behind the row truncation.
+    It is taken over a canonicalization of the full warning set rather than
+    over the display rows, because the rows keep only the first few refs and
+    one representative message: hashing those would let two different sets
+    collide precisely where a reader cannot see the difference.
 
     ``verbose`` returns the flat list untouched beside the rows, for the caller
     who genuinely needs every entity.
@@ -427,8 +430,22 @@ def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
         if len(shown) > _WARNING_REFS_SHOWN:
             out_row["refs_omitted"] = len(shown) - _WARNING_REFS_SHOWN
         rows.append(out_row)
+    # DIGEST OVER THE FULL SET, not over the display rows. The rows truncate
+    # refs and keep one representative message, so hashing them makes two
+    # different warning sets collide whenever they differ only in a ref past the
+    # display cut — a caller would read an unchanged digest and conclude nothing
+    # had changed. Canonicalized separately: every warning reduced to its
+    # identifying triple, sorted, so the hash depends on the SET and not on the
+    # order it arrived in.
+    canonical = sorted(
+        (str(entry.get("code", "") or "uncoded"),
+         str(entry.get("severity", "")),
+         str(entry.get("message", "")),
+         str(((entry.get("source_ref") or {}).get("entity_id", ""))
+             if isinstance(entry.get("source_ref"), dict) else ""))
+        for entry in warnings if isinstance(entry, dict))
     digest = hashlib.sha256(
-        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     out = {"rows": rows, "digest": digest, "total": len(warnings)}
     if verbose:

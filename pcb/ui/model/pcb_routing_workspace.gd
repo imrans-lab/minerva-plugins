@@ -870,8 +870,10 @@ func apply_check_result(reply: Dictionary) -> void:
 	var per_candidate: Dictionary = reply.get("per_candidate", {}) if reply.get("per_candidate", {}) is Dictionary else {}
 	var findings: Array = reply.get("findings", []) if reply.get("findings", []) is Array else []
 
+	var answered: Dictionary = {}
 	for raw_cid in per_candidate:
 		var cid := str(raw_cid)
+		answered[cid] = true
 		var c = get_candidate(cid)
 		if c == null:
 			continue
@@ -901,6 +903,26 @@ func apply_check_result(reply: Dictionary) -> void:
 			value = "error"
 		set_validation(cid, value)
 		_findings[cid] = _findings_for_subject(findings, cid)
+
+	# GUARD 4 — a coherent reply that does not ANSWER for a pending candidate
+	# still has to un-flip it. The whole-reply guards above revert everything
+	# when a reply is incoherent, and the loop above handles every candidate the
+	# reply named; a candidate that is neither leaves "checking" set while
+	# _pending_check is cleared below, and nothing else in this model ever
+	# clears that state. The next check then snapshots "checking" as the prior
+	# value and makes it permanent.
+	#
+	# The worker's own fail-closed refusals are exactly this shape: a coherent
+	# token and generation, an empty per_candidate, and an error saying the
+	# verdict could not be reached.
+	for raw_pending in _pending_check:
+		var pending_cid := str(raw_pending)
+		if answered.has(pending_cid):
+			continue
+		var pending = get_candidate(pending_cid)
+		if pending != null and str(pending.validation) == "checking":
+			var pending_snap: Dictionary = _pending_check.get(pending_cid, {})
+			set_validation(pending_cid, str(pending_snap.get("prior", "unchecked")))
 
 	_pending_check = {}
 

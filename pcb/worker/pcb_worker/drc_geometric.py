@@ -2470,8 +2470,11 @@ def _not_evaluated(rb: ResolvedBoard) -> list[dict]:
         rows.append({
             "check": GC12_DIRECTION,
             "floor": "design_rules.allowed_trace_angles_deg",
-            "reason": "this board declares no allowed_trace_angles_deg, so it "
-                      "asked for no direction constraint",
+            # The reason names the FULL path, matching `floor`: a reader has to
+            # be able to go and look at the thing that is missing, and
+            # "allowed_trace_angles_deg" alone does not say where it lives.
+            "reason": "this board declares no design_rules.allowed_trace_angles_deg, "
+                      "so it asked for no direction constraint",
         })
     return rows
 
