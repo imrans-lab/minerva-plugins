@@ -951,6 +951,37 @@ def _promote_check(params: dict) -> dict:
                         % ((geometric.get("error") or {}).get("kind", "unknown")))
 
     raw_board = (params or {}).get("board")
+
+    # STAGE INCONGRUENCE — M3's residual foot-gun, advisory only.
+    #
+    # `routing_deferred` excuses unrouted nets because the board DECLARES that
+    # routing is not its deliverable. A declaration is authored once and then
+    # forgotten, so a board that has since had copper laid on it still promotes
+    # on that excuse, and its census still reports complete:true — reached by
+    # declaration, on a board whose copper could have earned the verdict
+    # honestly. The two are indistinguishable in the reply, which is how a
+    # half-routed board gets promoted as finished.
+    #
+    # NO GATE CHANGE: the granular-promotion and declared-intent rulings stand,
+    # so this names the incongruence and nothing else.
+    if isinstance(raw_board, dict) and connectivity.get("routing_deferred"):
+        raw_traces = raw_board.get("traces")
+        trace_count = len(raw_traces) if isinstance(raw_traces, list) else 0
+        if trace_count:
+            advisory["stage_incongruence"] = {
+                "fabrication_stage": connectivity.get("fabrication_stage"),
+                "trace_count": trace_count,
+                "note": (
+                    "this board's declared fabrication stage defers routing, "
+                    "and it carries %d trace(s) — the declaration is what "
+                    "excused its unrouted nets from the completeness census, "
+                    "so a board that has since been routed is being judged by "
+                    "an intent it has outgrown. Re-declare the stage "
+                    "(minerva_pcb_fabrication_stage) to have the census judge "
+                    "the copper instead." % trace_count
+                ),
+            }
+
     if isinstance(raw_board, dict):
         # The ONE computation behind every assembly verdict (_assembly_tri_state
         # owns its own fault→indeterminate boundary — a crash inside reads as

@@ -61,7 +61,10 @@ test_pcb_explicit_propose.gd assertions=68 real-worker
 test_pcb_hint_refine_loop.gd assertions=64 real-worker
 test_pcb_single_trace_tool.gd assertions=98 real-worker
 test_pcb_legacy_annotation_migration.gd assertions=53
-test_pcb_panel_layout.gd assertions=149
+# SR2FAB S9 added ONE assertion (get_layout_state carries
+# fabrication_stage). 149 -> 150 is an AUTHORED count; see the note on
+# test_draft_composer.gd above.
+test_pcb_panel_layout.gd assertions=150
 test_pcb_panel_model.gd assertions=186
 test_pcb_panel_tools.gd assertions=211
 test_pcb_panel_tools_migration.gd assertions=68
@@ -102,7 +105,14 @@ test_staged_entities.gd assertions=72
 # then 68 → 82 with OFC-4's board_check census section (14 checks),
 # then 82 → 91 with the Codex-1188 repair round (F1 race seams ×4 in 1c,
 # F3/F4/F5 census checks ×5 in 1d).
-test_draft_composer.gd assertions=91
+# SR2FAB S9 grew the board_check census section by FOUR assertions
+# (complete_by_declaration: absent on a genuinely complete board, present
+# on a declared one, absent on an incomplete one). 91 -> 95 is an
+# AUTHORED count — nothing was executed this epoch — so if the first
+# trustworthy run disagrees, the runner fails loudly with the real
+# number and this line is corrected. That loud failure is the pin
+# working, not the pin being wrong to keep.
+test_draft_composer.gd assertions=95
 test_staged_canvas.gd assertions=88
 # Pinned at OFC testex 2026-08-13 (first post-await-repair full run).
 test_staged_verbs.gd assertions=73

@@ -518,6 +518,34 @@ func _run_board_check_census() -> void:
 	var clean: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
 	check_eq("a clean census reports promotable", bool(clean.get("promotable", false)), true)
 	check("…refusals empty", (clean.get("refusals", []) as Array).is_empty())
+	# SR2FAB S9: this board earned its completeness by having its copper read.
+	check_eq("…and did NOT reach complete by declaration",
+		bool(clean.get("complete_by_declaration", true)), false)
+
+	# (c2) SR2FAB S9: the SAME complete:true, reached because the board declared
+	# routing was not its deliverable. A bare complete:true cannot tell the two
+	# apart, which is how a half-finished board reads as finished.
+	ipc.verdict = {"promotable": true, "refusals": [],
+		"connectivity": {"findings": [], "complete": true, "routing_deferred": true,
+			"fabrication_stage": "routing_deferred"},
+		"geometric": {"verdict": "clean"},
+		"assembly": {"status": "pass", "findings": []}}
+	var declared: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
+	check_eq("a declared completeness still reports promotable",
+		bool(declared.get("promotable", false)), true)
+	check_eq("…and SAYS it was reached by declaration",
+		bool(declared.get("complete_by_declaration", false)), true)
+
+	# (c3) An INCOMPLETE board never reads as complete-by-declaration, whatever
+	# stage it declares — the flag qualifies a completeness, it does not grant one.
+	ipc.verdict = {"promotable": true, "refusals": [],
+		"connectivity": {"findings": [], "complete": false, "routing_deferred": true,
+			"fabrication_stage": "routing_deferred"},
+		"geometric": {"verdict": "clean"},
+		"assembly": {"status": "pass", "findings": []}}
+	var partial: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
+	check_eq("an incomplete board is not complete-by-declaration",
+		bool(partial.get("complete_by_declaration", true)), false)
 	check("…and healed markers clear (or no canvas headless)",
 		canvas == null or (canvas._disconnect_markers as Array).is_empty())
 

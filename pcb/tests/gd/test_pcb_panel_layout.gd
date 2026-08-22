@@ -178,6 +178,11 @@ func _test_wide_mode() -> void:
 	check("state.mode == wide", str(state.get("mode", "")) == "wide")
 	check("state width ~ 1100", absf(float(state.get("width", 0.0)) - 1100.0) < 2.0)
 	check("sidebar visible", bool(state.get("sidebar_visible", false)))
+	# SR2FAB S9: the board's DECLARED manufacturing intent decides whether the
+	# completeness census judges its copper or excuses it, so an agent planning
+	# work against this board must be able to read it without running the gate.
+	check("state carries the board's fabrication stage",
+		state.has("fabrication_stage") and not str(state.get("fabrication_stage", "")).is_empty())
 
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
 	check("sidebar node exists + visible", sidebar != null and sidebar.visible)

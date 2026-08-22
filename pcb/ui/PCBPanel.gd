@@ -4209,6 +4209,11 @@ func get_layout_state() -> Dictionary:
 		"properties_expanded": _properties_expanded,
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
 		"plugin_build": PLUGIN_BUILD,
+		# The board's DECLARED manufacturing intent. It decides whether the
+		# completeness census judges the copper or excuses it, so a caller
+		# planning work against this board has to be able to read it without
+		# running the gate.
+		"fabrication_stage": str(_data.fabrication_stage) if _data != null else "",
 	}
 
 
@@ -5021,6 +5026,11 @@ func board_check() -> Dictionary:
 		"geometric": gate.get("geometric", {}),
 		"assembly": gate.get("assembly", {}),
 		"board_revision": checked_revision,
+		# A census that reads complete because the board DECLARED routing is not
+		# its deliverable is not the same fact as one that read every net's
+		# copper, and a bare complete:true cannot tell them apart. The worker
+		# already distinguishes them; this is where a reader sees it.
+		"complete_by_declaration": _complete_by_declaration(gate),
 		# The declared copper stack (epoch GA-1): the census is the read agents
 		# plan against, and what may be authored/routed is stack-dependent now.
 		"layers": _data.layers.duplicate() if _data != null else [],
@@ -5247,6 +5257,11 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		"bytes": yaml_text.length(),
 		"prior_state": prior_state,
 		"promote_check": {"promotable": true, "refusals": []},
+		# The promoted file is the durable design of record, so the record of
+		# HOW it passed matters more here than anywhere: a completeness that
+		# came from the board's declared stage is not one that came from its
+		# copper.
+		"complete_by_declaration": _complete_by_declaration(gate),
 	}
 	if not census_delta.is_empty():
 		reply["census_delta"] = census_delta
@@ -5259,6 +5274,18 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		reply["staged_drafts"] = _staged_entities.staged_entries().size()
 	reply["success"] = true
 	return reply
+
+
+## Whether a `complete` verdict was reached by DECLARATION rather than by
+## routing every net — the board's fabrication stage said routing was not its
+## deliverable, so the census excused its unrouted nets. False for a board that
+## is genuinely complete, and false for one that is incomplete.
+static func _complete_by_declaration(gate: Dictionary) -> bool:
+	var conn: Variant = gate.get("connectivity", {})
+	if not (conn is Dictionary):
+		return false
+	return bool((conn as Dictionary).get("complete", false)) \
+		and bool((conn as Dictionary).get("routing_deferred", false))
 
 
 ## Per-net copper presence — the CENSUS's own definition (traces ∪ zones ∪

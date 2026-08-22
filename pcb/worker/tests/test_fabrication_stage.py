@@ -173,3 +173,82 @@ def test_run_drc_carries_the_declaration_only_on_a_deferred_board():
     assert deferred["routing_deferred"] is True
     assert deferred["expected_incomplete"] is True
     assert deferred["missing_copper"] == ["N1", "N2"]
+
+
+# --------------------------------------------------------------------------
+# SR2FAB S9 — the declaration outliving the board it described.
+# --------------------------------------------------------------------------
+
+
+def _promote_check(board: dict) -> dict:
+    from pcb_worker.methods import handle_request
+
+    resp = handle_request({"id": "pc1", "method": "promote_check",
+                           "params": {"board": board}})
+    assert resp is not None and resp["id"] == "pc1"
+    assert resp["ok"] is True, resp
+    return resp["result"]
+
+
+def test_a_deferred_board_that_has_since_been_routed_says_so():
+    """SR2FAB S9. `routing_deferred` excuses unrouted nets because the board
+    DECLARES routing is not its deliverable. A declaration is authored once and
+    then forgotten, so a board that has since had copper laid on it still
+    promotes on that excuse — and its census still reads complete:true, reached
+    by declaration, on a board whose copper could have earned it honestly.
+
+    ADVISORY only. The granular-promotion and declared-intent rulings stand, so
+    this names the incongruence and changes no verdict."""
+    board = _unrouted_board("routing_deferred")
+    board["traces"] = [
+        {"net": "N1", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 5, "y_mm": 10}, {"x_mm": 25, "y_mm": 10}]}]
+
+    result = _promote_check(board)
+    incongruence = result.get("advisory", {}).get("stage_incongruence")
+    assert incongruence is not None, result.get("advisory")
+    assert incongruence["trace_count"] == 1
+    assert incongruence["fabrication_stage"] == "routing_deferred"
+    # It names the verb that resolves it — an advisory a reader cannot act on
+    # is a warning, not a finding.
+    assert "minerva_pcb_fabrication_stage" in incongruence["note"]
+
+
+def test_a_deferred_board_with_no_copper_is_congruent():
+    """The whole point of the stage. A via-only board carrying no traces is
+    exactly what it declared itself to be, and must not be nagged."""
+    result = _promote_check(_unrouted_board("routing_deferred"))
+    assert "stage_incongruence" not in result.get("advisory", {})
+    # ...and the declared-intent advisory that DOES belong is still there.
+    assert result["advisory"]["completeness"]["routing_deferred"] is True
+
+
+def test_a_routed_board_with_traces_is_congruent():
+    """A board that never deferred anything cannot be incongruent with a
+    declaration it does not make. Guards the other direction: an advisory keyed
+    on trace-count alone would fire on every ordinary board."""
+    board = _unrouted_board("routed")
+    board["traces"] = [
+        {"net": "N1", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 5, "y_mm": 10}, {"x_mm": 25, "y_mm": 10}]}]
+    result = _promote_check(board)
+    assert "stage_incongruence" not in result.get("advisory", {})
+
+
+def test_the_incongruence_advisory_changes_no_verdict():
+    """NO GATE CHANGE was the station's constraint. The same board's refusals
+    are identical whether the advisory fires or not — the only difference is
+    that the reply now says which kind of complete it reached."""
+    deferred = _unrouted_board("routing_deferred")
+    routed_over = _unrouted_board("routing_deferred")
+    routed_over["traces"] = [
+        {"net": "N1", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 5, "y_mm": 10}, {"x_mm": 25, "y_mm": 10}]}]
+
+    a = _promote_check(deferred)
+    b = _promote_check(routed_over)
+    assert "stage_incongruence" not in a.get("advisory", {})
+    assert "stage_incongruence" in b.get("advisory", {})
+    # Both still report the completeness the declaration bought them.
+    assert a["advisory"]["completeness"]["complete"] is True
+    assert b["advisory"]["completeness"]["complete"] is True
