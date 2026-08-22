@@ -4775,10 +4775,17 @@ static func _other_ghost_targets(store, exclude_entity_id: String) -> Array:
 		if str(payload.get("id", "")) == exclude_entity_id:
 			continue
 		var to: Dictionary = _dict_or_empty(payload.get("to"))
+		# VERBATIM, not quantized. These are collision BODIES handed to
+		# PCBData.placement_collisions, not a reply — rounding them moves the
+		# other ghost by up to 0.00005mm before the polygon intersection and can
+		# flip a tangent overlap. The staged payload already holds the caller's
+		# own 64-bit target, which is the pose the collision has to be computed
+		# against. Same reply-boundary distinction the route-intent sentinel
+		# regression came from.
 		extras.append({
 			"component_id": str(payload.get("component_id", "")),
-			"x_mm": _mm(float(to.get("x_mm", 0.0))),
-			"y_mm": _mm(float(to.get("y_mm", 0.0))),
+			"x_mm": float(to.get("x_mm", 0.0)),
+			"y_mm": float(to.get("y_mm", 0.0)),
 			"rotation_deg": float(to.get("rotation_deg", 0.0)),
 		})
 	return extras

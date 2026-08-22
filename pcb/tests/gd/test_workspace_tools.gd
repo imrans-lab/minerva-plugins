@@ -6075,9 +6075,14 @@ func _run_ux2_snap_disclosure_and_pin_groups() -> void:
 		# require the reply to carry the residue this surface exists to remove;
 		# 0.0005 is the same tolerance the freeform checks above use and is
 		# three orders of magnitude tighter than the thing being guarded.
-		check("move_relative new_x is the component's ACTUAL position",
-			absf(float(mr.get("new_x", -1.0))
-				- float(data.get_component("U8").position.x)) < 0.0005)
+		# EXACT against the reply grid, not a tolerance. This guards
+		# LANDED-vs-REQUESTED (a 2.54mm distinction), and the reply now
+		# quantizes, so the model holds 17.7800006866455 while the reply says
+		# 17.78. Comparing to the SNAPPED model value pins the reply contract
+		# itself rather than allowing any 0.0005mm mismatch to pass.
+		check_eq("move_relative new_x is the component's ACTUAL position",
+			float(mr.get("new_x", -1.0)),
+			snappedf(float(data.get_component("U8").position.x), 0.0001))
 
 	# pin_groups int normalization (the F5 constraint_revision class): a
 	# worker board_health whose partial[].pin_groups crossed the JSON hop as

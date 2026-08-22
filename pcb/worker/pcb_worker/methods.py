@@ -430,22 +430,27 @@ def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
         if len(shown) > _WARNING_REFS_SHOWN:
             out_row["refs_omitted"] = len(shown) - _WARNING_REFS_SHOWN
         rows.append(out_row)
-    # DIGEST OVER THE FULL SET, not over the display rows. The rows truncate
-    # refs and keep one representative message, so hashing them makes two
-    # different warning sets collide whenever they differ only in a ref past the
-    # display cut — a caller would read an unchanged digest and conclude nothing
-    # had changed. Canonicalized separately: every warning reduced to its
-    # identifying triple, sorted, so the hash depends on the SET and not on the
-    # order it arrived in.
+    # DIGEST OVER THE WHOLE WARNING, not over the display rows and not over a
+    # chosen subset of fields.
+    #
+    # The rows truncate refs and keep one representative message, so hashing
+    # THEM lets two different warning sets collide wherever they differ past the
+    # display cut. Hashing a hand-picked tuple of fields has the same failure
+    # one level in: it is a second schema shadowing _diagnostic_to_payload's,
+    # and it drifts. The first version of this listed code/severity/message/
+    # entity_id and silently ignored source_ref.entity_kind and .detail, so a
+    # diagnostic that moved from one entity_kind to another produced an
+    # identical digest.
+    #
+    # So: serialize each warning WHOLE with sorted keys, sort the serialized
+    # strings, and hash that. Any field the payload grows is covered the day it
+    # appears, and the sort makes the result a function of the warning multiset
+    # rather than of the order it arrived in.
     canonical = sorted(
-        (str(entry.get("code", "") or "uncoded"),
-         str(entry.get("severity", "")),
-         str(entry.get("message", "")),
-         str(((entry.get("source_ref") or {}).get("entity_id", ""))
-             if isinstance(entry.get("source_ref"), dict) else ""))
+        json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
         for entry in warnings if isinstance(entry, dict))
     digest = hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(canonical, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     out = {"rows": rows, "digest": digest, "total": len(warnings)}
     if verbose:

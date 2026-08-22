@@ -1956,10 +1956,16 @@ def test_a_malformed_direction_declaration_refuses_the_board():
 # ---------------------------------------------------------------------------
 
 
-def _warning(code: str, entity: str, message: str = "omitted") -> dict:
+def _warning(code: str, entity: str, message: str = "omitted", *,
+             entity_kind: str = "pad", detail: str = "") -> dict:
+    """The real compile-warning payload shape (methods._diagnostic_to_payload):
+    severity, code, message, and a source_ref carrying entity_kind, entity_id
+    and detail. Every field is a parameter here because the digest has to move
+    when ANY of them does, and the first two versions of that test used a
+    fixture that could only vary two."""
     return {"severity": "warning", "code": code, "message": message,
-            "source_ref": {"entity_kind": "pad", "entity_id": entity,
-                           "detail": ""}}
+            "source_ref": {"entity_kind": entity_kind, "entity_id": entity,
+                           "detail": detail}}
 
 
 def test_repeated_compile_warnings_collapse_to_one_row_per_code():
@@ -2039,6 +2045,22 @@ def test_the_warning_digest_is_stable_and_moves_when_a_warning_does():
     # which is what makes the digest the only thing carrying that information.
     assert (_group_static_warnings(swapped)["rows"]
             == _group_static_warnings(ten)["rows"])
+
+    # EVERY FIELD OF THE PAYLOAD, not a chosen subset. A digest built from a
+    # hand-picked tuple of fields is a second schema shadowing
+    # _diagnostic_to_payload's, and it drifts: the version before this one
+    # listed code/severity/message/entity_id and silently ignored
+    # source_ref.entity_kind and source_ref.detail, so a diagnostic that moved
+    # between entity kinds hashed identically. These two cases are also
+    # indistinguishable in the rows, so the digest is again the only carrier.
+    one = [_warning("feature_omitted", "pad:1", detail="front")]
+    for mutated in ([_warning("feature_omitted", "pad:1", detail="back")],
+                    [_warning("feature_omitted", "pad:1", entity_kind="graphic")],
+                    [_warning("feature_omitted", "pad:1", message="dropped")]):
+        assert (_group_static_warnings(mutated)["digest"]
+                != _group_static_warnings(one)["digest"]), mutated
+    assert (_group_static_warnings([_warning("feature_omitted", "pad:1", detail="back")])["rows"]
+            == _group_static_warnings(one)["rows"])
 
 
 def test_the_flat_list_is_available_to_a_caller_that_asks():
