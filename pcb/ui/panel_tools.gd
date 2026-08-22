@@ -3633,9 +3633,9 @@ static func _string_list(raw) -> Array:
 ## Coerce a [x, y] pair (Array or Vector2) to a fresh [float, float] Array.
 static func _arr_pair(raw) -> Array:
 	if raw is Vector2:
-		return [float((raw as Vector2).x), float((raw as Vector2).y)]
+		return [_mm((raw as Vector2).x), _mm((raw as Vector2).y)]
 	if raw is Array and (raw as Array).size() >= 2:
-		return [float((raw as Array)[0]), float((raw as Array)[1])]
+		return [_mm(float((raw as Array)[0])), _mm(float((raw as Array)[1]))]
 	return [0.0, 0.0]
 
 
@@ -3814,9 +3814,16 @@ static func _hole_placement_advisory(holes: Array) -> Array:
 				var a: Vector2 = holes[i]["pt"]
 				var b: Vector2 = holes[j]["pt"]
 				var c: Vector2 = holes[k]["pt"]
+				# ANY coincident pair in the triple disqualifies it. Two points
+				# and a duplicate of one of them are trivially "collinear", so a
+				# stacked pair plus any third hole would raise BOTH advisories
+				# for one fault — on the advisory whose whole value is that it
+				# does not cry wolf.
+				if a.distance_to(b) <= _HOLE_COINCIDENT_MM \
+						or a.distance_to(c) <= _HOLE_COINCIDENT_MM \
+						or b.distance_to(c) <= _HOLE_COINCIDENT_MM:
+					continue
 				var ab := b - a
-				if ab.length() <= _HOLE_COINCIDENT_MM:
-					continue  # a and b are one point; not a line
 				# Perpendicular distance from c to the line through a and b.
 				var area2: float = absf(ab.x * (c.y - a.y) - ab.y * (c.x - a.x))
 				if area2 / ab.length() <= _HOLE_COINCIDENT_MM:
@@ -6024,11 +6031,11 @@ static func _candidate_geometry(c) -> Dictionary:
 		var pts: Array = []
 		for p in seg_dict.get("points", []):
 			if p is Vector2:
-				pts.append([(p as Vector2).x, (p as Vector2).y])
+				pts.append([_mm((p as Vector2).x), _mm((p as Vector2).y)])
 		segments.append({
 			"id": str(seg_dict.get("id", "")),
 			"layer": str(seg_dict.get("layer", "")),
-			"width": float(seg_dict.get("width", 0.0)),
+			"width": _mm(float(seg_dict.get("width", 0.0))),
 			"points": pts,
 		})
 	var vias: Array = []
@@ -6039,8 +6046,9 @@ static func _candidate_geometry(c) -> Dictionary:
 		var pos: Variant = via_dict.get("position", null)
 		vias.append({
 			"id": str(via_dict.get("id", "")),
-			"position": [(pos as Vector2).x, (pos as Vector2).y] if pos is Vector2 else [],
-			"diameter": float(via_dict.get("diameter", 0.0)),
+			"position": [_mm((pos as Vector2).x), _mm((pos as Vector2).y)] \
+				if pos is Vector2 else [],
+			"diameter": _mm(float(via_dict.get("diameter", 0.0))),
 			"from_layer": str(via_dict.get("from_layer", "")),
 			"to_layer": str(via_dict.get("to_layer", "")),
 		})
@@ -6304,6 +6312,12 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 	var result: Dictionary = await panel.check_draft(live)
 	if not result.has("per_candidate"):
 		return {"skipped": str(result.get("error", "draft_check_no_reply"))}
+	if str(result.get("error", "")) != "":
+		# A verdict the worker could not stand behind. The validations below are
+		# workspace-authoritative so this cannot go false-clean, but the reply
+		# must still say the check did not finish.
+		return {"skipped": "draft_check_incomplete",
+			"worker_error": str(result.get("error"))}
 	var validation: Dictionary = {}
 	for cid in live:
 		var c = workspace.get_candidate(str(cid))
@@ -6875,7 +6889,7 @@ static func _hint_bend_edit(host, args: Dictionary, op: String) -> Dictionary:
 			"note": "the host refused the waypoint update — see the host's structured refusal for the governing lock"}
 	var out_bends: Array = []
 	for b in kind.bend_points(host.get_by_id(hint_id)):
-		out_bends.append([(b as Vector2).x, (b as Vector2).y])
+		out_bends.append([_mm((b as Vector2).x), _mm((b as Vector2).y)])
 	return _ok({"hint_id": hint_id, "op": op,
 		"bend_count": out_bends.size(), "bends": out_bends})
 

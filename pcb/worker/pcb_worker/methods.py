@@ -384,10 +384,19 @@ def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
             continue
         code = str(entry.get("code", "") or "uncoded")
         row = grouped.setdefault(code, {
-            "code": code, "count": 0, "refs": [], "severity": entry.get("severity"),
-            "message": str(entry.get("message", "")),
+            "code": code, "count": 0, "refs": [], "severities": set(),
+            "messages": set(),
         })
         row["count"] += 1
+        # COLLECTED, not first-wins. Real compile messages embed the entity they
+        # name (compile_board's "footprint 'U2': ..."), so a first-encountered
+        # representative changes when the warning list is reordered — which
+        # would move the digest and report a compiler-internal reorder as new
+        # information, the exact thing sorting before hashing exists to prevent.
+        row["messages"].add(str(entry.get("message", "")))
+        severity = entry.get("severity")
+        if severity is not None:
+            row["severities"].add(str(severity))
         ref = ((entry.get("source_ref") or {}).get("entity_id")
                if isinstance(entry.get("source_ref"), dict) else None)
         if isinstance(ref, str) and ref and ref not in row["refs"]:
@@ -396,15 +405,25 @@ def _group_static_warnings(warnings: list, *, verbose: bool = False) -> dict:
     for code in sorted(grouped):
         row = grouped[code]
         shown = sorted(row["refs"])
+        # ONE representative message, chosen DETERMINISTICALLY, because the
+        # rows for a code differ only by the entity they name and that is what
+        # `refs` is for. Lexicographic min is order-independent, so the digest
+        # depends on the warning SET rather than on the order it arrived in.
+        messages = sorted(row["messages"])
+        severities = sorted(row["severities"])
         out_row = {
             "code": row["code"],
             "count": row["count"],
-            "severity": row["severity"],
-            # ONE representative message, because the rows differ only by the
-            # entity they name and that is what `refs` is for.
-            "message": row["message"],
+            "severity": severities[0] if severities else None,
+            "message": messages[0] if messages else "",
             "refs": shown[:_WARNING_REFS_SHOWN],
         }
+        if len(messages) > 1:
+            # Distinct wordings under one code are worth admitting to: it means
+            # the row's `message` is a sample, not the whole story.
+            out_row["distinct_messages"] = len(messages)
+        if len(severities) > 1:
+            out_row["severities"] = severities
         if len(shown) > _WARNING_REFS_SHOWN:
             out_row["refs_omitted"] = len(shown) - _WARNING_REFS_SHOWN
         rows.append(out_row)

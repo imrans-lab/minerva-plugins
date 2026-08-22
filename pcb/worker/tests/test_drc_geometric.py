@@ -2003,6 +2003,21 @@ def test_the_warning_digest_is_stable_and_moves_when_a_warning_does():
     assert _group_static_warnings(flat)["digest"] == first["digest"]
     # Same warnings, different order in — same digest out.
     assert _group_static_warnings(list(reversed(flat)))["digest"] == first["digest"]
+
+    # THE CELL THE FIRST VERSION OF THIS TEST COULD NOT SEE. Real compile
+    # messages embed the entity they name ("footprint 'U2': ..."), so two
+    # entries under ONE code carry DIFFERENT messages. A representative picked
+    # first-encountered changes on reversal and moves the digest — reporting a
+    # compiler-internal reorder as new information. Two distinct codes with one
+    # entry each, all sharing a default message, cannot expose that.
+    same_code = [_warning("feature_omitted", "pad:1", "footprint 'U1': omitted"),
+                 _warning("feature_omitted", "pad:2", "footprint 'U2': omitted")]
+    assert (_group_static_warnings(list(reversed(same_code)))["digest"]
+            == _group_static_warnings(same_code)["digest"])
+    # ...and the row admits that its message is a sample of two, not the story.
+    row = _group_static_warnings(same_code)["rows"][0]
+    assert row["distinct_messages"] == 2
+    assert row["message"] == "footprint 'U1': omitted"   # lexicographic min
     # One more entity on an existing code moves it.
     assert _group_static_warnings(
         flat + [_warning("feature_omitted", "pad:3")])["digest"] != first["digest"]

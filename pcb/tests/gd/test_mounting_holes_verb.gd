@@ -174,3 +174,18 @@ func _run_advisory() -> void:
 	# Two holes cannot be collinear — three is the smallest line.
 	check("…and two holes alone raise no collinearity",
 		not _codes(stacked).has("collinear_holes"))
+
+	# (f) A stacked pair PLUS a third hole. The pair and its duplicate are
+	#     trivially "on a line" with anything, so a naive triple scan reports
+	#     two advisories for one fault — noise on the advisory whose whole
+	#     value is that it does not cry wolf.
+	var stacked_plus: Dictionary = await _call(_rig([
+		{"position": Vector2(20.0, 20.0), "diameter": 3.2, "plated": false},
+		{"position": Vector2(20.0, 20.0), "diameter": 3.2, "plated": false},
+		{"position": Vector2(40.0, 5.0), "diameter": 3.2, "plated": false},
+	]))
+	check("a stacked pair beside a third hole reports the stack",
+		_codes(stacked_plus).has("coincident_holes"))
+	check("…and does NOT also report it as a line",
+		not _codes(stacked_plus).has("collinear_holes"),
+		str(stacked_plus.get("placement_advisory", [])))

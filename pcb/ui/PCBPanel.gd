@@ -3187,6 +3187,15 @@ func _on_check_button_pressed() -> void:
 		_set_status("Draft check could not run (%s) — proposals keep their prior verdicts."
 			% str(result.get("error", "unknown")))
 		return
+	if str(result.get("error", "")) != "":
+		# The worker CAN answer with per_candidate and still say it could not
+		# stand behind the verdict — an unreadable board snapshot, an
+		# indeterminate geometric leg. Reading only the per_candidate guard
+		# above would print "Checked:" over exactly that run, which is the lie
+		# this handler was rewritten to stop telling.
+		_set_status("Draft check incomplete (%s) — proposals keep their prior verdicts."
+			% str(result.get("error")))
+		return
 	var findings: int = (result.get("findings", []) as Array).size() \
 		if result.get("findings", []) is Array else 0
 	var tally := _ghost_status_summary()

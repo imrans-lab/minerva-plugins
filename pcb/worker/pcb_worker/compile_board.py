@@ -37,6 +37,7 @@ authority is imported from ``geometry`` and recorded on board provenance.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Union
@@ -412,6 +413,13 @@ def _pour_could_touch(context: object) -> bool:
         # they get the board-wide answer. Reading an unknown ref as "this pad is
         # on no net" would make a missing ref the cheapest way past the check.
         return _declares_copper_pour(zones)
+    nets = board.get("nets")
+    if nets is not None and not isinstance(nets, list):
+        # Un-interrogable, exactly like a non-list `zones` above. Iterating a
+        # string walks its characters and a dict walks its keys, so every pad
+        # would read as netless and every marker would pass — the same
+        # fail-open direction, on the other container.
+        return True
     net = _pad_net_name(board, ref, pad.number)
     if net is None:
         return False
