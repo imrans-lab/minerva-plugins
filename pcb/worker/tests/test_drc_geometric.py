@@ -739,6 +739,22 @@ def test_gc2_pad_pad_below_threshold_flags():
     assert {p["entity_id"] for p in f["participants"]} == {"p1", "p2"}
 
 
+def test_gc2_participants_report_the_width_the_copper_was_modeled_at():
+    """SR2FAB S5. A clearance violation caused by copper checked at the WRONG
+    width looks exactly like a real one, and diagnosing it meant re-deriving the
+    overlay by hand. Each participant now says what width it was modeled at —
+    None for anything that is not a trace segment, which is itself the answer to
+    "was a width involved here at all"."""
+    res = _gc2(_proj(
+        _cp("t1", Capsule(0.0, 0.0, 4.0, 0.0, 0.15), net="A",
+            kind="trace_seg", width=0.3),
+        _cp("p2", Capsule.disc(4.0, 0.35, 0.15), net="B")))
+    assert len(res) == 1
+    widths = {p["entity_id"]: p["width_mm"] for p in res[0]["participants"]}
+    assert widths["t1"] == pytest.approx(0.3)
+    assert widths["p2"] is None
+
+
 def test_gc2_pad_pad_at_threshold_passes():
     # centres 1.2 apart -> edge 0.2 == floor -> exact-at-threshold PASSES (epsilon).
     res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="A"),

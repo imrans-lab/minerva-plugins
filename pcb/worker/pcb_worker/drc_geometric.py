@@ -1788,15 +1788,22 @@ def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                     "gc2_copper_clearance", f"{lo.entity_id}|{hi.entity_id}", None,
                     "copper_pair", None, layer_id, dist, required,
                     closest=list(w1), witness=list(w2), midpoint=list(mid),
+                    # width_mm rides each participant (None for anything that
+                    # is not a trace segment) so a clearance finding says what
+                    # width the copper was modeled at. A clearance violation
+                    # that is really a width mix-up — copper checked at the
+                    # run's baseline instead of the width it was authored at —
+                    # is otherwise indistinguishable from a real one, and
+                    # diagnosing it meant re-deriving the overlay by hand.
                     extra={"participants": [
                         {"entity_id": lo.entity_id, "parent": lo.parent_id,
                          "kind": lo.kind, "net_id": lo.net_id,
                          "ref": lo.ref, "pad": lo.pad_number,
-                         "net_name": lo.net_name},
+                         "net_name": lo.net_name, "width_mm": lo.width_mm},
                         {"entity_id": hi.entity_id, "parent": hi.parent_id,
                          "kind": hi.kind, "net_id": hi.net_id,
                          "ref": hi.ref, "pad": hi.pad_number,
-                         "net_name": hi.net_name}]}))
+                         "net_name": hi.net_name, "width_mm": hi.width_mm}]}))
     findings.sort(key=lambda f: (f["layer"], f["entity_id"]))
     return findings
 

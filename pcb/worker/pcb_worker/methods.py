@@ -2292,12 +2292,15 @@ def _attach_effective_routing_rules(
       * ``routes[].effective_routing_rules`` — THIS route's own width (differs
         from the baseline only if its net carries a class override) and the
         SAME run-wide clearance every route carries.
-      * ``routes[].segments[].width_mm`` — stamped with the per-net width, so
-        the geometric candidate overlay below (``ir_candidates.build_overlay``,
-        which reads a segment's own ``width_mm`` before any default) checks a
-        net-classed proposal at the width it actually got, not the run's
-        baseline (docs/routing.md, "the overlay must be checked at the width it
-        was routed at" — the false-clean this whole surface exists to prevent).
+      * ``routes[].segments[].width_mm`` — FILLED IN with the per-net width
+        where the segment does not already carry one, so the geometric
+        candidate overlay below (``ir_candidates.build_overlay``, which reads a
+        segment's own ``width_mm`` before any default) checks a net-classed
+        proposal at the width it actually got, not the run's baseline
+        (docs/routing.md, "the overlay must be checked at the width it was
+        routed at" — the false-clean this whole surface exists to prevent). A
+        segment that DOES carry one keeps it: that value is the overlay's first
+        choice precisely because it is more specific than the net's.
     """
     payload["effective_routing_rules"] = {
         "trace_width_mm": {"value": baseline_width, "source": width_source},
@@ -2320,7 +2323,14 @@ def _attach_effective_routing_rules(
         }
         for seg in r.get("segments") or []:
             if isinstance(seg, dict):
-                seg["width_mm"] = width
+                # setdefault, NOT assignment: a segment that already declares a
+                # width declared it for a reason (a detailed hint, a reroute
+                # given an explicit width), and it is the value ir_candidates
+                # reads FIRST when it builds the overlay. Overwriting it made
+                # the overlay check that segment at the run's width instead of
+                # its own — a phantom violation when the declared width is
+                # narrower, and a false clean when it is wider.
+                seg.setdefault("width_mm", width)
 
 
 def _hint_ids_by_net(nets_by_hint: dict, drawn_routes: list) -> dict:
