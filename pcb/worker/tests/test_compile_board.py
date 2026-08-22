@@ -740,10 +740,20 @@ def test_policy_zone_connect_three_is_solid_on_smd_and_thermal_on_through_hole()
     direction; the through-hole direction is a regression guard."""
     policy = DefaultCapabilityPolicy()
     board = _zc_board(zone_net="GND", zone_layer="top", pad_net="GND")
-    smd = _zc_pad(pad_type="smd", layers=("F.Cu",))
     tht = _zc_pad(pad_type="thru_hole", layers=("*.Cu",))
-    assert policy.is_blocking(_zc_marker(3), _ctx(board, pad=smd), V1_FAB_OUTPUTS) is False
     assert policy.is_blocking(_zc_marker(3), _ctx(board, pad=tht), V1_FAB_OUTPUTS) is True
+    # "connect" is a surface pad that semantic_pad_type deliberately keeps
+    # distinct from "smd" (normalize_pad_type folds it, the semantic reader does
+    # not), so testing == "smd" would refuse a board over a pad whose copper
+    # lands on one face like any other SMD pad.
+    for surface in ("smd", "connect"):
+        pad = _zc_pad(pad_type=surface, layers=("F.Cu",))
+        assert policy.is_blocking(_zc_marker(3), _ctx(board, pad=pad),
+                                  V1_FAB_OUTPUTS) is False, surface
+    # A pad type nobody has seen before is NOT waved through as surface-mount.
+    unknown = _zc_pad(pad_type="future_kind", layers=("F.Cu",))
+    assert policy.is_blocking(_zc_marker(3), _ctx(board, pad=unknown),
+                              V1_FAB_OUTPUTS) is True
 
 
 def test_policy_zone_connect_stack_spanning_pad_occupies_every_copper_layer():

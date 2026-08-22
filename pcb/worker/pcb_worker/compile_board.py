@@ -315,6 +315,15 @@ _ZONE_CONNECT_THERMAL = 1     # spokes bridging pad to pour across a gap
 _ZONE_CONNECT_SOLID = 2       # merge pad into pour -- what v1 fill does
 _ZONE_CONNECT_THT_THERMAL = 3 # thermal on a through-hole pad, solid on an SMD one
 
+# The pad types ``zone_connect 3`` treats as SMD, i.e. everything that lands its
+# copper on one face rather than spanning a drilled barrel. Named as a POSITIVE
+# set, not as "not through-hole": a pad type nobody has seen before then falls
+# outside it and blocks, instead of being waved through as surface-mount.
+# ``connect`` is preserved as its own token by ``semantic_pad_type`` while
+# ``normalize_pad_type`` folds it to smd, so testing == "smd" would refuse a
+# board over a pad that is electrically surface-mount.
+_SURFACE_PAD_TYPES = frozenset(("smd", "connect"))
+
 
 def _zone_connect_value(marker: UnsupportedFeature) -> Union[int, None]:
     """The marker's integer value, or ``None`` when it cannot be read.
@@ -360,7 +369,8 @@ def _zone_connect_blocks(marker: UnsupportedFeature, context: object) -> bool:
     if value == _ZONE_CONNECT_SOLID:
         return False
     pad = context.pad if isinstance(context, AdjudicationContext) else None
-    if value == _ZONE_CONNECT_THT_THERMAL and pad is not None and pad.pad_type == "smd":
+    if (value == _ZONE_CONNECT_THT_THERMAL
+            and pad is not None and pad.pad_type in _SURFACE_PAD_TYPES):
         return False
     return _pour_could_touch(context)
 
