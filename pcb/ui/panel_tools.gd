@@ -261,6 +261,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _clear_hints_by_author(host, args)
 		"minerva_pcb_export_yaml":
 			return await _export_yaml(host, args)
+		"minerva_pcb_list_mounting_holes":
+			return _list_mounting_holes(host, args)
 		"minerva_pcb_promote":
 			return await _promote(host, args)
 		"minerva_pcb_board_check":
@@ -3750,6 +3752,124 @@ static func _list_zones(host, _args: Dictionary) -> Dictionary:
 ## via ids genuinely has no identity, and "absent" says that, while "" would
 ## claim its identity is the empty string. Such a via cannot be deleted by id and
 ## cannot be clicked on the canvas either; both surfaces agree about that.
+## Millimetre quantization for every mm value that leaves this surface.
+##
+## Vector2 is single-precision, so a pad the author placed at 75.4 comes back as
+## 75.4000015258789. That residue is not a measurement — it is the float32
+## representation of the number the author typed — and it travels: an external
+## router reads a pin position over MCP, computes against it, and writes copper
+## back at a coordinate that misses the pad by a sub-micron, which then reads as
+## a real geometric finding. 0.1 um is four orders of magnitude finer than
+## anything fabricable and comfortably coarser than the noise.
+static func _mm(value: float) -> float:
+	return snapped(value, 0.0001)
+
+
+## Two holes closer than this are the same hole. Well below any drill tolerance,
+## well above float32 noise at board coordinates.
+const _HOLE_COINCIDENT_MM := 0.001
+## Beyond this many holes the collinearity scan (which is O(n^3)) is skipped and
+## says so, rather than quietly costing more than the advisory is worth.
+const _HOLE_ADVISORY_MAX := 64
+
+
+## Mounting-hole placement patterns worth a second look, as {code, holes, note}.
+##
+## NO GEOMETRIC CHECK COVERS THIS. GC11's proximity half never runs (no shipped
+## profile publishes a hole-to-edge figure), GC6 fires only on a near-collision,
+## and GC10 is about copper. So a hole pattern that was silently rewritten —
+## every hole landing on one line, or two holes stacked at one point — passes
+## every check and is discovered when the board comes back from the fab.
+##
+## ADVISORY, never a refusal: three collinear holes are a legitimate pattern on
+## plenty of boards. The reply says what it saw; the reader decides.
+static func _hole_placement_advisory(holes: Array) -> Array:
+	var out: Array = []
+	var coincident: Array = []
+	for i in range(holes.size()):
+		for j in range(i + 1, holes.size()):
+			var a: Vector2 = holes[i]["pt"]
+			var b: Vector2 = holes[j]["pt"]
+			if a.distance_to(b) <= _HOLE_COINCIDENT_MM:
+				coincident.append([holes[i]["index"], holes[j]["index"]])
+	if not coincident.is_empty():
+		out.append({
+			"code": "coincident_holes",
+			"holes": coincident,
+			"note": "two mounting holes occupy the same point — one of them drills nothing new, and a fab may reject the pair or merge them",
+		})
+	if holes.size() > _HOLE_ADVISORY_MAX:
+		out.append({
+			"code": "collinearity_not_checked",
+			"holes": [],
+			"note": "more than %d mounting holes — the collinearity scan was skipped, so a linear pattern would not be reported here" % _HOLE_ADVISORY_MAX,
+		})
+		return out
+	var collinear: Array = []
+	for i in range(holes.size()):
+		for j in range(i + 1, holes.size()):
+			for k in range(j + 1, holes.size()):
+				var a: Vector2 = holes[i]["pt"]
+				var b: Vector2 = holes[j]["pt"]
+				var c: Vector2 = holes[k]["pt"]
+				var ab := b - a
+				if ab.length() <= _HOLE_COINCIDENT_MM:
+					continue  # a and b are one point; not a line
+				# Perpendicular distance from c to the line through a and b.
+				var area2: float = absf(ab.x * (c.y - a.y) - ab.y * (c.x - a.x))
+				if area2 / ab.length() <= _HOLE_COINCIDENT_MM:
+					collinear.append([holes[i]["index"], holes[j]["index"], holes[k]["index"]])
+	if not collinear.is_empty():
+		out.append({
+			"code": "collinear_holes",
+			"holes": collinear,
+			"note": "three or more mounting holes lie on one line — legitimate on some boards, and also exactly what a silently rewritten hole pattern looks like",
+		})
+	return out
+
+
+## The mounting holes the board declares, with their placement read back.
+##
+## Named for mounting holes rather than the plan's `list_holes`: pad drills and
+## via barrels are holes too, and this verb does not report them.
+static func _list_mounting_holes(host, _args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var holes: Array = []
+	var geometry: Array = []
+	var index := 0
+	for hole in data.mounting_holes:
+		if not (hole is Dictionary):
+			index += 1
+			continue
+		var raw: Variant = (hole as Dictionary).get("position", null)
+		var pt := Vector2.ZERO
+		if raw is Vector2:
+			pt = raw
+		elif raw is Dictionary:
+			pt = Vector2(float((raw as Dictionary).get("x", 0.0)),
+				float((raw as Dictionary).get("y", 0.0)))
+		holes.append({
+			"index": index,
+			"x_mm": _mm(pt.x),
+			"y_mm": _mm(pt.y),
+			"diameter_mm": _mm(float((hole as Dictionary).get("diameter", 0.0))),
+			"plated": bool((hole as Dictionary).get("plated", false)),
+		})
+		geometry.append({"index": index, "pt": pt})
+		index += 1
+	var reply := {
+		"hole_count": holes.size(),
+		"mounting_holes": holes,
+		"note": "mounting holes only — pad drills and via barrels are not reported here",
+	}
+	var advisory: Array = _hole_placement_advisory(geometry)
+	if not advisory.is_empty():
+		reply["placement_advisory"] = advisory
+	return _ok(reply)
+
+
 static func _list_vias(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
