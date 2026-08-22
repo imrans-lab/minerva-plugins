@@ -8667,7 +8667,11 @@ static func _validate_route_intent(data, args: Dictionary) -> Dictionary:
 
 	return {"ok": true, "source_pin": source_pin, "dest_pin": dest_pin,
 		"source_resolved": source_resolved, "dest_resolved": dest_resolved,
-		"net": net, "corridor_points": corridor_points, "width_mm": _mm(width_mm)}
+		# width_mm is NOT quantized here and must not be: this is an internal
+		# validation result, not a reply, and null is a load-bearing sentinel
+		# ("no width given — use the net class default"). _mm takes a float, so
+		# snapping it both crashes on the sentinel and would destroy it.
+		"net": net, "corridor_points": corridor_points, "width_mm": width_mm}
 
 
 static func _add_route_intent(host, args: Dictionary) -> Dictionary:

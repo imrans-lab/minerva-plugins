@@ -4075,17 +4075,24 @@ func _run_station10_move_junction_degenerate_neighbor_in_moved_set() -> void:
 	stub._data = data
 	stub._ws = ws
 	host.set_panel(stub)
-	var record: Dictionary = {
-		"net": "N3",
-		"segments": [
-			{"start": [0.0, 0.0], "end": [0.4 * eps, 0.0], "layer": "F.Cu"},
-		],
-		"vias": [],
-		"width": 0.3,
-		"source_hint_ids": ["hint_degenerate_neighbor"],
-		"source_hints": [],
-	}
-	var cid := str(ws.ingest_record(record, int(data.board_revision)))
+	# BUILT DIRECTLY, not through ingest_record, and that is the point of this
+	# comment. The leg here is 0.4 * EDIT_EPS_MM = 4e-5 mm long, and ingest now
+	# DROPS a segment whose ends coincide within COPPER_COINCIDENT_EPS_MM (1e-3)
+	# — correctly, because copper that short is unmanufacturable and reaches the
+	# board as a zero-length segment that makes the whole thing uncompilable.
+	# So this state can no longer arrive through ingest at all.
+	#
+	# The state is still worth reaching, because what THIS test exercises is the
+	# EDIT-side guard: move_junction must refuse to collapse a leg whose
+	# neighbour is itself in the moved set. Constructing the candidate directly
+	# keeps that guard under test without asking the ingest guard to admit
+	# copper it exists to reject.
+	var seed_cand = PcbRouteCandidate.new()
+	seed_cand.net = "N3"
+	seed_cand.task_id = "N3|hint_degenerate_neighbor"
+	seed_cand.add_segment(PcbRouteCandidate.make_segment(
+		"seg_degenerate", "top", 0.3, [Vector2(0.0, 0.0), Vector2(0.4 * eps, 0.0)]))
+	var cid := str(ws.add_candidate(seed_cand))
 	var cand = ws.get_candidate(cid)
 	var rev_before: int = int(cand.candidate_revision)
 	var pts_before: Array = (cand.segments[0] as Dictionary).get("points", []).duplicate()
@@ -6061,8 +6068,16 @@ func _run_ux2_snap_disclosure_and_pin_groups() -> void:
 		_args({"component_id": "U8", "direction": "right"}))
 	check("move_relative succeeded", bool(mr.get("success", false)))
 	if data.has_component("U8"):
-		check_eq("move_relative new_x is the component's ACTUAL position",
-			float(mr.get("new_x", -1.0)), float(data.get_component("U8").position.x))
+		# Compared on the 0.1um reply grid, not bit-for-bit. This assertion
+		# guards LANDED-vs-REQUESTED — a grid-scale distinction (2.54mm) — and
+		# the reply now quantizes, so the model holds 17.7800006866455 while the
+		# reply says 17.78. Demanding float32 bit-equality of a reply would
+		# require the reply to carry the residue this surface exists to remove;
+		# 0.0005 is the same tolerance the freeform checks above use and is
+		# three orders of magnitude tighter than the thing being guarded.
+		check("move_relative new_x is the component's ACTUAL position",
+			absf(float(mr.get("new_x", -1.0))
+				- float(data.get_component("U8").position.x)) < 0.0005)
 
 	# pin_groups int normalization (the F5 constraint_revision class): a
 	# worker board_health whose partial[].pin_groups crossed the JSON hop as
