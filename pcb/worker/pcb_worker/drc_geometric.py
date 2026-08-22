@@ -2117,6 +2117,86 @@ def _check_gc11_hole_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+## The narrowest overlap GC7 will call a violation, in nanometres.
+##
+## Narrower than this, an intersection is kernel noise rather than copper. In the
+## COMMON case — a pour that authors no ``clearance_mm`` at all — the filler's
+## carve and this check's requirement resolve to the identical number, so the two
+## boundaries are mathematically coincident and the only thing separating them is
+## integer rounding. The filler carves with ONE ``CT_DIFFERENCE`` against every
+## inflated obstacle at once (``zone_fill._fill_one``), so wherever two obstacles'
+## inflated bands overlap each other Clipper mints intersection vertices snapped
+## to the 1 nm grid; this check intersects one obstacle at a time against a
+## ``SimplifyPolygons``'d fill, which snaps again, as do ``_fracture``'s keyhole
+## slits. MEASURED on smart-remote-v2: slivers of 1,858 to 24,927 nm^2 along one
+## via-plus-trace run, reported as three clearance violations that do not exist
+## and blocking promote on a correctly carved board (docket 01a02873cad3).
+##
+## TWICE THE WIDEST PHANTOM EVER MEASURED, which is not the same as twice the
+## coordinate quantum, and the difference matters. The tempting derivation is
+## that a vertex snapped to the 1 nm grid moves either boundary by at most half a
+## quantum, so coincident boundaries separate by at most 1 nm. THAT BOUND IS
+## FALSE, and it was in this comment until measurement contradicted it: there is
+## more than one rounding stage (the filler's ``CT_DIFFERENCE``, the float-mm
+## round trip through ``PolygonGeometry``, ``SimplifyPolygons``, ``_fracture``'s
+## keyhole slits, then this check's own ``CT_INTERSECTION``) and they do not
+## cancel.
+##
+## WHAT WAS ACTUALLY MEASURED. Phantom width reaches 2 nm. A bend-only sweep of
+## 60 arrangements (trace widths 0.15-1.2 mm; orthogonal bends, chevrons,
+## zigzags, U-turns, sawtooth, with and without vias) never exceeded 1 nm and
+## made the false bound look confirmed; ROTATED PADS, the arrangement class that
+## sweep omitted, reach 2 nm routinely — found across ~800 further boards of
+## grazing pad pairs at odd rotations, sub-micrometre jitter, and coordinates out
+## to 70 mm. Bends mint the phantoms where two obstacles' inflated bands overlap
+## each other; a via AT a bend swallows the join region and yields nothing.
+##
+## SO 4, NOT 2. At 2 the guard sat exactly on the measured maximum: it worked
+## only because ``_is_sliver``'s predicate is strictly-wider-than (a band of
+## width exactly W is annihilated by deflating W/2 from each side), leaving no
+## headroom at all — one more rounding stage in some future kernel or fill path
+## and the promote-blocking phantoms return. 4 buys one full quantum of margin
+## and costs nothing: the smallest genuine under-carve under test is 50 nm, still
+## 12.5x above it, and the threshold kill-mutations above it still hold.
+##
+## NOT derived from the arc tolerance, which was the first proposal. Arc
+## tolerance CANCELS: both sides flatten round joins through the same
+## ``ARC_TOLERANCE_NM``, so it says nothing about how far the boundaries drift.
+## A 5,000 nm guard would swallow both nanometre-scale under-carves pinned here
+## (50 nm and 100 nm) and leave only 30x under the 0.15 mm one — which does still
+## fire at that threshold, so the coarse case alone never discriminated. It would
+## also HIDE those constants drifting apart, the one change that WOULD
+## reintroduce genuine approximation error.
+GC7_SLIVER_WIDTH_NM = 4
+
+
+def _is_sliver(pyclipper, overlap) -> bool:
+    """True when ``overlap`` is nowhere WIDER than ``GC7_SLIVER_WIDTH_NM``.
+
+    Strictly wider, and the boundary case is worth naming because the threshold's
+    margin depends on it: deflating ``W/2`` from every side annihilates a band of
+    width exactly ``W``, so a band of exactly the threshold is culled, not kept.
+
+    A WIDTH test, not an area test, because a real under-carve is a long thin
+    band too: area alone cannot separate a 10 mm run of 1 nm noise from a 10 um
+    run of 100 nm copper, and any area threshold that killed the first would
+    have to be tuned against the second. Width is the same question at every
+    length.
+
+    Asked the way the filler already asks it (``zone_fill._survives_deflation``):
+    deflate by half the floor from every side and see whether anything survives.
+    The whole solution goes in with its orientations intact, so a ring of overlap
+    around a void deflates from both boundaries and is not mistaken for solid.
+    """
+    from .zone_fill import ARC_TOLERANCE_NM, MITER_LIMIT  # noqa: PLC0415
+
+    offset = pyclipper.PyclipperOffset()
+    offset.MiterLimit = MITER_LIMIT
+    offset.ArcTolerance = ARC_TOLERANCE_NM
+    offset.AddPaths(overlap, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+    return not offset.Execute(-GC7_SLIVER_WIDTH_NM / 2.0)
+
+
 def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     """GC7 — POUR COPPER IS COPPER. Filled zone copper vs foreign-net copper.
 
@@ -2129,25 +2209,66 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
     the largest single piece of copper on the board, so pour copper gets its own
     check with a kernel that can actually represent it.
 
-    WHY IT IS NOT CIRCULAR. The obvious objection to checking a fill we computed
-    is that we would be asking the filler whether it obeyed itself. It is not the
-    same rule on both sides: the FILLER carves by the ZONE's authored
-    ``clearance_mm`` (falling back to the board minimum), while this check uses
-    ``_effective_min_clearance`` — the board minimum RAISED by either net's class.
-    A zone that authors a clearance BELOW what its net class demands fills happily
-    and is caught here. The independent judge for the fill's SHAPE is the pcbnew
-    oracle (tests/oracle/zone_fill_oracle.py), not this.
+    IT IS LARGELY CIRCULAR, AND THAT IS WHY THE SLIVER GUARD EXISTS. The obvious
+    objection to checking a fill we computed is that we would be asking the
+    filler whether it obeyed itself, and mostly we are: ``zone_fill._clearance_mm``
+    resolves the SAME max() of the zone's authored clearance, the board minimum
+    and both nets' class minima that ``_effective_min_clearance`` resolves here,
+    and says so in its own docstring. An earlier version of this paragraph
+    claimed a zone authoring below what its net class demands would fill happily
+    and be caught here. It cannot — the filler folds the class minima in too, so
+    that case never reaches this check. The claim was false when written and is
+    recorded here rather than deleted, because believing it is what let the
+    coincident-boundary bug (docket 01a02873cad3) ship.
+
+    WHAT IS GENUINELY LEFT TO CATCH, none of it nothing: a zone that authors a
+    clearance below the GLOBAL minimum with no class to rescue it, where the
+    filler honours the author's number and this check does not; a fill handed to
+    us by a foreign tool, since ``ResolvedZone.fill`` is public IR that nothing
+    forces us to have computed; and any future filler bug that carves less than
+    it resolved, the documented layer-namespace fail-open in
+    ``zone_fill._obstacle_paths`` being the one we have already seen. In practice
+    every one of those is MACROSCOPIC — a band as wide as the deficit, or a whole
+    pad — which is what makes a nanometre-scale guard safe.
+
+    WHERE THAT ARGUMENT THINS, stated rather than glossed. It rests on the
+    encroachment being as WIDE as it is deep, which holds for anything the filler
+    produces and for any deficit an author can plausibly write, but is not a
+    theorem: a spike 4 nm across at its base and micrometres deep would be culled,
+    because nothing here guards penetration DEPTH. Two cases can reach that shape.
+    A foreign tool's fill is arbitrary geometry and is not width-screened —
+    ``zone_fill._refuse_unfabricable_regions`` runs inside our filler only. And an
+    author may write a deficit that is itself sub-threshold (``0.199998`` against
+    a 0.2 mm minimum is a representable 2 nm breach, and is masked). Neither is
+    worth widening the check for — sub-grid copper is not fabricable and a 2 nm
+    deficit is not a rule anyone is relying on — but neither is covered by the
+    word "macroscopic", so it does not stand unqualified.
 
     Exact integer arithmetic via the same kernel that computed the fill: inflate
     each foreign primitive by the required clearance and intersect with the pour.
-    A non-empty intersection means copper is closer than the rule allows.
+    An intersection anywhere WIDER than ``GC7_SLIVER_WIDTH_NM`` means copper is
+    closer than the rule allows.
+
+    The independent judge for the fill's SHAPE is the pcbnew oracle
+    (tests/oracle/zone_fill_oracle.py), not this.
     """
     zones = [z for z in rb.zones
              if z.kind is ZoneKind.COPPER_POUR and z.fill]
     if not zones:
         return []
 
-    from .zone_fill import NM_PER_MM, _capsule_ring, _rect_ring  # noqa: PLC0415
+    # The OFFSET CONSTANTS COME FROM THE FILLER, they are not restated here.
+    # This check inflates foreign copper with the same flattening the filler used
+    # to carve around it; if the two ever differed, the boundaries would separate
+    # by approximation error and every default pour would report violations. They
+    # were hardcoded as a literal ``(2.0, 5000)`` until docket 01a02873cad3.
+    from .zone_fill import (  # noqa: PLC0415
+        ARC_TOLERANCE_NM,
+        MITER_LIMIT,
+        NM_PER_MM,
+        _capsule_ring,
+        _rect_ring,
+    )
 
     pyclipper = _zone_clipper()
     if pyclipper is None:  # pragma: no cover - install-time condition
@@ -2186,7 +2307,7 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
                     f"zone clearance cannot model copper shape "
                     f"{type(prim.shape).__name__} on {prim.entity_id!r}")
 
-            offset = pyclipper.PyclipperOffset(2.0, 5000)
+            offset = pyclipper.PyclipperOffset(MITER_LIMIT, ARC_TOLERANCE_NM)
             offset.AddPath(ring, pyclipper.JT_ROUND,
                            pyclipper.ET_CLOSEDPOLYGON if closed
                            else pyclipper.ET_OPENROUND)
@@ -2199,7 +2320,7 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
             clipper.AddPaths(inflated, pyclipper.PT_CLIP, True)
             overlap = clipper.Execute(pyclipper.CT_INTERSECTION,
                                       pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
-            if not overlap:
+            if not overlap or _is_sliver(pyclipper, overlap):
                 continue
 
             centre = _overlap_centroid(overlap, NM_PER_MM)
