@@ -26,6 +26,9 @@ test_candidate_canvas.gd assertions=281
 # every run before proving the projection fixes it.
 test_canonical_wire_board.gd assertions=23
 test_connectivity_baseline_surface.gd assertions=21
+# SR2FAB S6 — authored, never executed; pinned at testex like the entry
+# below it.
+test_draft_check_seam.gd
 test_epoch6_fix_regressions.gd assertions=9
 # SR2FAB S1 — authored, never executed (the epoch defers all execution to
 # testex). Left UNPINNED on purpose: an assertions= count guessed by

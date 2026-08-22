@@ -3095,6 +3095,33 @@ def _draft_geometric(board: dict, candidates: list,
 
 
 def _draft_check(params: dict) -> dict:
+    # Board-by-reference resolve, the same shape _promote_check uses. This
+    # request rides the same capped broker pipe every board-carrying channel
+    # does, so an oversized board arrives as {board_path, board_digest} — and
+    # without this it arrived as no board at all, which this method reads as
+    # "score the candidates against empty committed copper". That is a CLEAN
+    # verdict on a board whose copper was never looked at: precisely the
+    # false-clean the whole draft check exists to prevent, and it fires on
+    # exactly the large boards that need checking most.
+    params = dict(params or {})
+    if not isinstance(params.get("board"), dict) \
+            and isinstance(params.get("board_path"), str):
+        try:
+            params["board"] = board_model.load_board({
+                "board_path": params["board_path"],
+                "board_digest": params.get("board_digest"),
+            })
+        except board_model.BoardParseError as exc:
+            # FAIL CLOSED: no verdict at all rather than a verdict computed
+            # without the committed copper. The panel reverts every candidate
+            # to the validation it had.
+            return {"ok": True, "result": {
+                "board_token": params.get("board_token"),
+                "workspace_generation": params.get("workspace_generation"),
+                "findings": [],
+                "per_candidate": {},
+                "error": "draft_check board_path unreadable: %s" % exc,
+            }}
     board = params.get("board")
     candidates = params.get("candidates") or []
     # Echoed VERBATIM (no int/str coercion) so the GD guard can compare exactly.

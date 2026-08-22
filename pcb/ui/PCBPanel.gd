@@ -3179,11 +3179,13 @@ func _on_check_button_pressed() -> void:
 	var result: Dictionary = await check_draft()
 	if _canvas != null:
 		_canvas.queue_redraw()
-	if result.is_empty():
-		# check_draft's contract: an empty dict means the worker hop could not
-		# run and every candidate was reverted to its prior verdict — say so
-		# rather than leave the "Checking…" line lying.
-		_set_status("Draft check could not run (worker unavailable) — proposals keep their prior verdicts.")
+	if not result.has("per_candidate"):
+		# check_draft's contract: a reply without per_candidate is a failure
+		# carrying its own name, and every candidate was reverted to its prior
+		# verdict — say WHICH failure rather than leave the "Checking…" line
+		# lying or blame the worker for a ghost the user dragged.
+		_set_status("Draft check could not run (%s) — proposals keep their prior verdicts."
+			% str(result.get("error", "unknown")))
 		return
 	var findings: int = (result.get("findings", []) as Array).size() \
 		if result.get("findings", []) is Array else 0
@@ -5723,7 +5725,8 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 			# Still flip+revert so a caller sees a coherent no-op, not stuck state.
 			_routing_workspace.begin_check(candidate_ids)
 			_routing_workspace.apply_check_result({})
-		return {}
+		return {"error": "draft_check_unavailable",
+			"note": "no worker bridge, board or routing workspace on this panel — nothing was scored and every candidate keeps the validation it had"}
 
 	# Board coherence token = the SAME fingerprint the durable sidecar guards
 	# with, and it is computed from the CANONICAL board deliberately. The token
@@ -5771,8 +5774,28 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(composed)
 
 	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
-	request.emit("pcb.draft_check", payload, reply_id)
+	# By-ref like every other board-carrying sender (work item
+	# 01a0223ec9e271269fd664fcf90dd20b). This channel was left inline, so on a
+	# board past the broker's 64KiB cap the request died before the worker saw
+	# it — and the refusal arrived as an empty reply, indistinguishable from a
+	# worker that simply had nothing to say. The composed DRAFT board is what
+	# travels, so it is bigger than the canonical one, not smaller.
+	request.emit("pcb.draft_check", _payload_by_ref(payload, "board"), reply_id)
 	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	# The broker's own failures are success:false with no result at all. They
+	# used to fall through the unwrap and return {} — the same value an overlay
+	# drift and an unmounted panel returned, so three different faults with
+	# three different fixes all read as "the worker did not answer".
+	if result.has("success") and not bool(result.get("success", false)):
+		var code := str(result.get("error_code", ""))
+		var message := str(result.get("error_message", ""))
+		_routing_workspace.apply_check_result({})
+		if code.findn("timeout") != -1:
+			return {"error": "draft_check_timeout", "error_code": code,
+				"note": "the draft_check worker channel did not answer within 30s; every checked candidate kept the validation it had"}
+		return {"error": "draft_check_refused", "error_code": code,
+			"error_message": message,
+			"note": "the draft_check request was refused before it was scored; every checked candidate kept the validation it had"}
 
 	# Unwrap to the worker's draft_check result dict ({board_token,
 	# workspace_generation, findings, per_candidate}). The broker may nest the
@@ -5792,10 +5815,14 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# seam's documented degrade-don't-refuse contract (re-review note).
 	if _PcbRoutingSidecarScript.compute_board_fingerprint_v2(draft_check_board()) != draft_token:
 		_routing_workspace.apply_check_result({})
-		return {}
+		return {"error": "draft_overlay_drifted",
+			"note": "a staged placement or zone moved while the worker was scoring, so the verdict describes a board that no longer exists — it was discarded and every candidate kept the validation it had"}
 
 	var inner: Dictionary = _unwrap_draft_check(result)
 	_routing_workspace.apply_check_result(inner)
+	if inner.is_empty():
+		return {"error": "draft_check_no_reply",
+			"note": "the worker answered in a shape carrying neither per_candidate nor board_token; every checked candidate kept the validation it had"}
 	return inner
 
 

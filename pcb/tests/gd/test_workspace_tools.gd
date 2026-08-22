@@ -1300,8 +1300,11 @@ func _run_check_stale_gate() -> void:
 	var forced: Dictionary = await PanelTools._workspace_check(shim, _args({"include_stale": true}))
 	check("include_stale got past the gate",
 		str(forced.get("error", "")) != "stale_candidates")
-	check_eq("and the missing worker is its own named envelope",
-		str(forced.get("error", "")), "draft_check_no_reply")
+	# SR2FAB S6: this scaffold's panel has no _MinervaIPC bridge at all, which
+	# is a DIFFERENT fault from "the worker did not answer" and used to be
+	# reported as the same one. It names itself now.
+	check_eq("and the missing worker bridge is its own named envelope",
+		str(forced.get("error", "")), "draft_check_unavailable")
 	check_eq("the candidate is still stale, never clean, never stuck checking",
 		str(tws.get_candidate(tcid).validation), "stale")
 
@@ -1858,8 +1861,8 @@ func _run_cross_candidate_check_reply() -> void:
 		not out.has("cross_candidate_check"))
 
 	# A SECOND task's candidate lands ⇒ live set is 2 and the check must run.
-	# This unmounted panel has no _MinervaIPC bridge, so check_draft answers {}
-	# and the field must be the NAMED skip — present, honest, non-fatal.
+	# This unmounted panel has no _MinervaIPC bridge, so check_draft names that
+	# specific fault and the field must carry it — present, honest, non-fatal.
 	var hint2: String = _seed_net_named_hint(ctx["host"], "N2")
 	shim.reply = {"routes": [{
 		"net": "N2",
@@ -1876,7 +1879,7 @@ func _run_cross_candidate_check_reply() -> void:
 		out2.has("cross_candidate_check"))
 	check_eq("no worker bridge ⇒ the NAMED skip, never a hang or a failure",
 		str((out2.get("cross_candidate_check", {}) as Dictionary).get("skipped", "")),
-		"draft_check_no_reply")
+		"draft_check_unavailable")
 
 	ctx["driver"].free_panel(ctx["panel"])
 

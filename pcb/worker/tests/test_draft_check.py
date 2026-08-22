@@ -111,6 +111,72 @@ def _netless_via(cid: str, x: float, y: float) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _write_board_snapshot(tmp_path, board: dict):
+    """A board snapshot exactly as the panel writes one: JSON bytes plus their
+    sha256, which is what {board_path, board_digest} refers to."""
+    import hashlib
+    import json
+
+    path = tmp_path / "board.snap"
+    data = json.dumps(board).encode("utf-8")
+    path.write_bytes(data)
+    return str(path), hashlib.sha256(data).hexdigest()
+
+
+def test_draft_check_reads_a_board_sent_by_reference(tmp_path):
+    """SR2FAB S6. The draft board is the canonical board PLUS the staged
+    overlay, so it is the largest payload any channel sends and it goes over the
+    same capped broker pipe as the rest. Sent by reference it arrived here as no
+    board at all — and this method reads an absent board as "there is no
+    committed copper", which scores every candidate against an empty board and
+    calls it CLEAN. The false clean fired on exactly the large boards that most
+    need checking."""
+    board = _board()
+    path, digest = _write_board_snapshot(tmp_path, board)
+
+    inline = _call({"board": board, "candidates": [], "board_token": "tok"})
+    by_ref = _call({"board_path": path, "board_digest": digest,
+                    "candidates": [], "board_token": "tok"})
+    assert by_ref["ok"] is True, by_ref
+    # Same board, same verdict, whichever way it travelled.
+    assert by_ref["result"] == inline["result"]
+
+
+def test_an_unreadable_board_reference_refuses_instead_of_scoring(tmp_path):
+    """FAIL CLOSED: no verdict at all beats a verdict computed without the
+    committed copper. The reply carries an error and an EMPTY per_candidate, so
+    the panel's guard reverts every candidate to the validation it had."""
+    board = _board()
+    path, digest = _write_board_snapshot(tmp_path, board)
+
+    for bad in ({"board_path": path},                       # no digest
+                {"board_path": path, "board_digest": "0" * 64},   # wrong digest
+                {"board_path": str(tmp_path / "gone.snap"),
+                 "board_digest": digest}):                  # missing file
+        resp = _call(dict(bad, candidates=[], board_token="tok"))
+        assert resp["ok"] is True, bad
+        result = resp["result"]
+        assert result["per_candidate"] == {}, bad
+        assert "unreadable" in result["error"], bad
+        assert result["findings"] == [], bad
+        # The echo the panel's coherence guard compares against still rides the
+        # refusal, or the guard cannot tell this reply from a foreign one.
+        assert result["board_token"] == "tok", bad
+
+
+def test_an_inline_board_still_wins_over_a_reference(tmp_path):
+    """Same precedence the other channels keep: an inline board is used as-is
+    and the snapshot is not read, so a stale path beside a good board cannot
+    change the verdict."""
+    board = _board()
+    resp = _call({"board": board,
+                  "board_path": str(tmp_path / "never-read.snap"),
+                  "board_digest": "0" * 64,
+                  "candidates": [], "board_token": "tok"})
+    assert resp["ok"] is True
+    assert "error" not in resp["result"]
+
+
 def test_draft_check_verdicts_and_subjects():
     params = {
         "board": _board(),

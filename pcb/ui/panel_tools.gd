@@ -6180,8 +6180,8 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 		if c != null and str(c.validation) == "stale":
 			stale.append(str(cid))
 	var result: Dictionary = await panel.check_draft(live)
-	if result.is_empty() or not result.has("per_candidate"):
-		return {"skipped": "draft_check_no_reply"}
+	if not result.has("per_candidate"):
+		return {"skipped": str(result.get("error", "draft_check_no_reply"))}
 	var validation: Dictionary = {}
 	for cid in live:
 		var c = workspace.get_candidate(str(cid))
@@ -8052,10 +8052,25 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 		return {"success": false, "error": "draft_check_unavailable",
 			"note": "no panel bridge to the pcb.draft_check worker channel (headless / before mount)"}
 	var result: Dictionary = await panel.check_draft(targets)
-	if result.is_empty() or not result.has("per_candidate"):
-		return {"success": false, "error": "draft_check_no_reply",
+	if not result.has("per_candidate"):
+		# check_draft names its own failure now. It used to return {} for an
+		# unmounted panel, a mid-flight ghost drag AND a broker refusal alike,
+		# so every one of them arrived here as "the worker did not answer" —
+		# one message for three faults with three different fixes.
+		return {"success": false,
+			"error": str(result.get("error", "draft_check_no_reply")),
 			"checked": targets,
-			"note": "the draft_check worker channel did not answer; every checked candidate was reverted to the validation it had before (never left 'checking')"}
+			"note": str(result.get("note",
+				"the draft_check worker channel did not answer; every checked candidate was reverted to the validation it had before (never left 'checking')"))}
+	# The worker can score a request and still report that it could not finish
+	# (an unreadable board snapshot, an indeterminate geometric leg). That was
+	# write-only: it rode the reply and nothing surfaced it, so a caller saw an
+	# empty findings list and read it as clean.
+	if str(result.get("error", "")) != "":
+		return {"success": false, "error": "draft_check_incomplete",
+			"checked": targets,
+			"worker_error": str(result.get("error")),
+			"note": "the worker returned a verdict it could not stand behind; every checked candidate kept the validation it had"}
 	var after: Dictionary = {}
 	for t in targets:
 		var c = workspace.get_candidate(str(t))
