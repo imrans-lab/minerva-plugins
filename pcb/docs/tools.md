@@ -445,6 +445,37 @@ A delete that changed something is one undo step, exactly like an import — one
 undo restores the deleted traces **and** vias. A delete that removed nothing takes
 no snapshot, so it adds no step you have to click past.
 
+### Deleting copper a committed candidate owns (bug `01a02bf97224`)
+
+A route candidate is `committed` only for as long as its copper is on the board.
+Delete a trace or via that a committed candidate owns and the commit is
+**retired**: the candidate returns to its pre-commit disposition (live again,
+with any DRC verdict it held staled), its `committed_trace_ids` are cleared, and
+its **routing task reopens** — the workspace stops reporting that span as routed.
+The reply names them in `reopened_candidate_ids`, absent when the delete touched
+no committed copper. Before this, the task stayed `closed` over an empty span and
+the candidate was stuck: `commit` refuses a re-commit ("undo the commit or
+uncommit it") and nothing ever called `uncommit`.
+
+**Partial loss counts as loss.** A candidate can own several traces and lose one.
+The survivors do not connect the span it answered, and deciding whether they might
+would be a connectivity judgement made from an id list — the same fail-closed
+ruling the missing region selector below rests on. The surviving copper is left on
+the board untouched; it is not this pass's to remove.
+
+The rule is `RoutingWorkspace.reconcile_committed_copper(board)`, and it also runs
+at the top of **every** workspace verb (`_workspace_ctx`), so copper removed any
+other way — the canvas eraser, `delete_via`, a re-import that cleared the board —
+is reconciled before any verb reports a task state. It is asked from outside,
+against the board as it stands, rather than hooked into `remove_trace`: that
+function is also the commit rollback's tool and `_restore_state`'s rebuild path,
+where compensating would be wrong. It cannot double-apply on undo — an undo
+restores the copper and the disposition layer together, and the pass then finds
+nothing missing — and it is idempotent, because a retired commit is no longer
+committed. Running it *before* the delete's own `save_to_history` is what puts
+both halves of the act in one history entry: undo brings the copper and the
+commit back together, redo removes both again.
+
 ### Known gap: no region selector, no clipping
 
 There is deliberately **no spatial or bounding-box selector**. A region predicate

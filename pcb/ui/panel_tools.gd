@@ -1355,6 +1355,11 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 ## vias (PCBData.save_to_history snapshots both — see its F1 note). A delete
 ## that removed nothing takes no snapshot: an undo step that undoes nothing is
 ## noise in the history.
+##
+## Routing workspace: deleting copper a COMMITTED route candidate owns retires
+## that commit and REOPENS its routing task, reported as `reopened_candidate_ids`
+## (bug 01a02bf97224 — see phase 3 below and RoutingWorkspace.reconcile_
+## committed_copper). It rides the same single undo step as the copper itself.
 static func _delete_traces(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -1455,7 +1460,23 @@ static func _delete_traces(host, args: Dictionary) -> Dictionary:
 			# Only reachable if the board changed under us between phases.
 			missing_via_ids.append(vid)
 
+	# ── Phase 3: tell the ROUTING WORKSPACE its copper is gone (bug
+	# 01a02bf97224). Copper the caller just named may be copper a COMMITTED
+	# route candidate owns, and until this ran the workspace kept reporting that
+	# span as routed — task closed, committed_trace_ids naming traces this call
+	# had just erased.
+	#
+	# BEFORE the snapshot on purpose: the delete's own history entry then
+	# carries BOTH halves of the act (bucket 8 — the copper gone AND the commit
+	# retired), the mirror of the paired snapshot commit takes for the opposite
+	# one. Undo of this delete restores the copper and the commit together;
+	# REDO removes both again, instead of reinstating a workspace that claims
+	# traces the redo just deleted. Every OTHER way copper can leave is covered
+	# by the same reconcile at the workspace verbs' own entry (_workspace_ctx);
+	# this call is what makes THIS tool's undo/redo coherent by itself.
+	var reopened: Array = []
 	if not deleted_trace_ids.is_empty() or not deleted_via_ids.is_empty():
+		reopened = _reconcile_committed_copper(host, data)
 		data.save_to_history("Delete traces")
 
 	var reply := {
@@ -1473,6 +1494,15 @@ static func _delete_traces(host, args: Dictionary) -> Dictionary:
 	if has_net:
 		reply["net_name"] = net_name
 		reply["net_match_count"] = net_match_count
+	# ADDITIVE, ABSENT WHEN EMPTY (the same rule missing_*/net_* keep above):
+	# the overwhelming case is a delete that touched no committed candidate.
+	# When it did, SAY SO — the caller removed copper and, as a consequence,
+	# reopened routing work it did not name. Silently reopening a task would be
+	# the same class of quiet state change this bug was filed about, in the
+	# other direction.
+	if not reopened.is_empty():
+		reply["reopened_candidate_ids"] = reopened
+		reply["note"] = "this copper was committed by %d route candidate(s); their commits are retired and their routing tasks are OPEN again (they are live once more, and any DRC verdict they held is staled — re-check or reroute before committing them)" % reopened.size()
 	return _ok(reply)
 
 
@@ -4373,14 +4403,23 @@ static func _delete_via(host, args: Dictionary) -> Dictionary:
 	var net_name: String = str(via.get("net_name", ""))
 	if not data.remove_via_by_id(via_id):
 		return _err("Unknown via: %s" % via_id)
+	# A via a COMMITTED candidate owns is a layer change that candidate's route
+	# depends on — losing it is losing the route (bug 01a02bf97224). Same
+	# placement and the same reason as _delete_traces' phase 3: before the
+	# snapshot, so this delete's one history entry carries both halves.
+	var reopened: Array = _reconcile_committed_copper(host, data)
 	data.save_to_history("Delete via " + via_id)
-	return _ok({
+	var reply := {
 		"deleted": via_id,
 		"net_name": net_name,
 		"x_mm": _mm(pos.x),
 		"y_mm": _mm(pos.y),
 		"remaining_via_count": data.vias.size(),
-	})
+	}
+	if not reopened.is_empty():
+		reply["reopened_candidate_ids"] = reopened
+		reply["note"] = "this via was committed by %d route candidate(s); their commits are retired and their routing tasks are OPEN again — re-check or reroute before committing them" % reopened.size()
+	return _ok(reply)
 
 
 ## Describe one zone in full, including its outline. Read-only — journals
@@ -5653,12 +5692,43 @@ static func _workspace_ctx(host) -> Dictionary:
 		}}
 	if data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(workspace)
+	# Bug 01a02bf97224 — COPPER-LOSS reconcile, the same compensating-half shape
+	# as _reconcile_hint_lifecycle below and for the same class of reason:
+	# nothing tells the workspace that copper it committed was deleted, so the
+	# question is asked HERE, at the top of every verb, BEFORE any of them
+	# reports a task state or a committed_trace_ids list. The rule itself lives
+	# in the model (RoutingWorkspace.reconcile_committed_copper) — this is only
+	# the wiring. Runs FIRST so the hint pass below sees the reconciled
+	# dispositions and reopens the source hint of a commit that just lost its
+	# copper, in the same pass rather than one verb later.
+	_reconcile_committed_copper(host, data)
 	# MF-2 (review, owner-ratified HITL-2 — undo coherence): see
 	# _reconcile_hint_lifecycle's own doc for why this lazy self-heal, run at
 	# the top of EVERY workspace verb, is the compensating half for a gap that
 	# cannot be closed synchronously.
 	_reconcile_hint_lifecycle(host, workspace)
 	return {"ok": true, "ws": workspace, "data": data}
+
+
+## Wiring for the copper-loss reconcile (bug 01a02bf97224): resolve the routing
+## workspace, BIND it to the board (idempotent — same reason _workspace_ctx
+## binds: bucket 8 only exists while a delegate is bound) and ask the model its
+## question. Returns the candidate ids whose commit was retired, [] when there
+## is no workspace to ask (headless, or a host with no panel — every non-
+## workspace caller of this file, e.g. the delete tool's own unit tests).
+##
+## Two callers, one wiring point: _workspace_ctx above, so every workspace verb
+## reports against copper that exists, and _delete_traces, so the tool that most
+## often removes committed copper reconciles inside its own history step.
+static func _reconcile_committed_copper(host, data) -> Array:
+	if data == null or not is_instance_valid(data):
+		return []
+	var workspace = _get_workspace(host)
+	if workspace == null or not workspace.has_method("reconcile_committed_copper"):
+		return []
+	if data.has_method("bind_routing_workspace"):
+		data.bind_routing_workspace(workspace)
+	return workspace.reconcile_committed_copper(data)
 
 
 ## MF-2 (review, owner-ratified HITL-2 contract; DCR finding 6's "two-store

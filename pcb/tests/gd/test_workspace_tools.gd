@@ -176,6 +176,7 @@ func _init() -> void:
 	await _run_ux3_commit_dialog()
 	await _run_ux3_reclaim_menu()
 	await _run_ux3_reverse_parity()
+	_run_copper_loss_reconcile()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -6528,3 +6529,211 @@ func _run_ux3_reverse_parity() -> void:
 	check("an unknown author refuses", not bool(bad_author.get("success", true)))
 
 	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 29. COPPER-LOSS RECONCILE (bug 01a02bf97224) ═════════════════════════════
+#
+# Deleting copper a COMMITTED candidate owns left the workspace claiming the
+# span was routed: the disposition stayed "committed", committed_trace_ids kept
+# naming traces the export could not find, and — the part that matters — the
+# TASK STAYED CLOSED. The surface that answers "what still needs routing" was
+# answering "routed" over an empty span. RoutingWorkspace.uncommit() was written
+# for exactly this compensation and, until now, had no caller at all.
+#
+# THE FALSIFIERS this group is built around, rather than a listing that merely
+# looks tidy:
+#   * a HEALTHY commit must SURVIVE the pass. An existence check that cannot
+#     tell present from absent (wrong lookup, object-vs-id compare) would retire
+#     a commit whose copper is all there — asserted BEFORE anything is deleted.
+#   * the TASK STATE is the claim. The docket names the lazy fix that would pass
+#     a shape-only test while leaving the defect in place: filtering dead ids out
+#     of committed_trace_ids at read time. So the load-bearing assertions here
+#     are task_state / open_task_ids / disposition, and the id list is checked
+#     only as the second half.
+#   * the SURVIVORS are read off the BOARD, not off the reply — a pass that
+#     "reconciled" by deleting the rest of the candidate's copper would satisfy
+#     every disposition assertion and be catastrophically wrong.
+#   * UNDO AND REDO BOTH WAYS. The one path that was already coherent is undo
+#     (bucket 8 restores copper and disposition together), and the docket's
+#     first trap is a fix that fires there too and double-applies. Undo of the
+#     delete must bring the copper AND the commit back; redo must take both away
+#     again — which is only true because the reconcile runs INSIDE the delete's
+#     own history step.
+
+func _run_copper_loss_reconcile() -> void:
+	print("-- 29. bug 01a02bf97224: deleting committed copper retires the commit and reopens the span --")
+	_run_copper_loss_model()
+	_run_copper_loss_delete_tool()
+
+
+## MODEL half: the rule itself, on the mandatory multipad fixture (3 traces +
+## 1 via, two layers, two disconnected paths).
+func _run_copper_loss_model() -> void:
+	var ctx := _model_context()
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+	var cid: String = ctx["cid"]
+	var task_id: String = str(ws.get_candidate(cid).task_id)
+
+	# PIN first, so the disposition the reconcile restores is a NON-DEFAULT one:
+	# a candidate committed from "proposed" cannot tell a real restore from a
+	# constructor default (same reason group 3 pins).
+	check("pin the candidate before committing", ws.pin(cid))
+	var res: Dictionary = ws.commit(cid, data)
+	check("commit reports ok", bool(res.get("ok", false)))
+	var committed_traces: Array = (res.get("trace_ids", []) as Array).duplicate()
+	check_eq("the fixture committed three traces", committed_traces.size(), 3)
+	check_eq("…and one via", (res.get("via_ids", []) as Array).size(), 1)
+	check_eq("its task is closed", ws.task_state(task_id), "closed")
+
+	# A REAL VERDICT to lose. "unchecked" has nothing to stale, so a candidate
+	# that never carried a verdict cannot show that the reconcile invalidates
+	# one — and a clean verdict scored against copper that is now gone is the
+	# exact thing that must not survive.
+	ws.set_validation(cid, "clean")
+
+	# ── THE NEGATIVE, FIRST: intact copper is not loss ────────────────────────
+	check_eq("a pass over INTACT copper retires nothing",
+		(ws.reconcile_committed_copper(data) as Array).size(), 0)
+	check_eq("…the candidate is still committed",
+		str(ws.get_candidate(cid).disposition), "committed")
+	check_eq("…its task is still closed", ws.task_state(task_id), "closed")
+	check_eq("…and its verdict is untouched", str(ws.get_candidate(cid).validation), "clean")
+
+	# ── PARTIAL LOSS: one of three traces removed, by the board's own remover ─
+	var doomed := str(committed_traces[1])
+	data.remove_trace(doomed)
+	check("the board no longer resolves the deleted trace", data.get_trace(doomed) == null)
+
+	var retired: Array = ws.reconcile_committed_copper(data)
+	check_eq("losing ONE of three traces retires the commit", retired.size(), 1)
+	check_eq("…naming the candidate", str(retired[0]) if retired.size() > 0 else "", cid)
+	check_eq("…which is back at its PRE-commit disposition",
+		str(ws.get_candidate(cid).disposition), "pinned")
+	check_eq("…ITS TASK IS OPEN AGAIN — the span is not routed",
+		ws.task_state(task_id), "open")
+	check("…and the task reads open from the list surface too",
+		task_id in ws.open_task_ids())
+	check_eq("…the dead copper ids are CLEARED, not filtered at read time",
+		(ws.committed_copper_ids(cid).get("trace_ids", []) as Array).size(), 0)
+	check_eq("…the recorded vias are cleared with them (never orphaned)",
+		(ws.committed_copper_ids(cid).get("via_ids", []) as Array).size(), 0)
+	check_eq("…and the verdict scored against the old copper is staled",
+		str(ws.get_candidate(cid).validation), "stale")
+
+	# ── THE SURVIVORS ARE NOT THIS PASS'S TO REMOVE ──────────────────────────
+	check_eq("the two traces the user did NOT name are still on the board",
+		int(data.traces.size()), 2)
+	check("the first survivor is still resolvable by id",
+		data.get_trace(str(committed_traces[0])) != null)
+	check("the third survivor is still resolvable by id",
+		data.get_trace(str(committed_traces[2])) != null)
+	check_eq("the via is untouched too", int(data.vias.size()), 1)
+
+	# ── IDEMPOTENT: a retired commit is not committed, so there is no second
+	#    pass to make. This is also why the verb-entry call cannot accumulate.
+	check_eq("a second pass retires nothing",
+		(ws.reconcile_committed_copper(data) as Array).size(), 0)
+	check_eq("…and the disposition did not move again",
+		str(ws.get_candidate(cid).disposition), "pinned")
+	check_eq("…nor did the task state", ws.task_state(task_id), "open")
+
+	# ── A COMMIT THAT CLAIMED NO COPPER IS NEVER RETIRED ─────────────────────
+	# mark_committed's annotation-accept shape records no ids: it makes no claim
+	# about board copper, so an EMPTY board cannot falsify it. Absence of a
+	# record must never be read as evidence of loss.
+	var ws2 = PcbWorkspace.new()
+	var bare = PcbData.new()
+	bare.save_to_history("baseline")
+	var cid2 := str(ws2.ingest_record(_multipad_record(), int(bare.board_revision)))
+	check("the id-less fixture marks committed", ws2.mark_committed(cid2))
+	check_eq("…its task is closed", ws2.task_state(str(ws2.get_candidate(cid2).task_id)), "closed")
+	check_eq("a pass over a board with NO copper at all retires nothing",
+		(ws2.reconcile_committed_copper(bare) as Array).size(), 0)
+	check_eq("…the id-less commit stands", str(ws2.get_candidate(cid2).disposition), "committed")
+
+
+## TOOL half: the docket's acceptance path verbatim — commit, then
+## minerva_pcb_delete_traces, then minerva_pcb_workspace_list — plus the
+## undo/redo pairing that the eager, in-history-step reconcile buys.
+func _run_copper_loss_delete_tool() -> void:
+	var data = PcbData.new()
+	data.save_to_history("baseline")
+	var ws = PcbWorkspace.new()
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var stub := _RouteIntentStubPanel.new()
+	stub._data = data
+	stub._ws = ws
+	host.set_panel(stub)
+
+	var cid := str(ws.ingest_record(_multipad_record(), int(data.board_revision)))
+	var task_id: String = str(ws.get_candidate(cid).task_id)
+	var res: Dictionary = ws.commit(cid, data)
+	check("tool half: commit lands", bool(res.get("ok", false)))
+	var committed_traces: Array = (res.get("trace_ids", []) as Array).duplicate()
+	check_eq("tool half: three traces committed", committed_traces.size(), 3)
+
+	# The BEFORE reading, through the real listing tool.
+	var before: Dictionary = PanelTools._workspace_list(host, _args({"include_terminal": true}))
+	check("workspace_list succeeds", bool(before.get("success", false)))
+	check_eq("before the delete the task reads CLOSED",
+		_task_state_in(before, task_id), "closed")
+
+	# ── THE ACCEPTANCE ACT: delete ONE of the committed traces by id ─────────
+	var doomed := str(committed_traces[0])
+	var deleted: Dictionary = PanelTools._delete_traces(host, _args({"trace_ids": [doomed]}))
+	check("delete_traces succeeds", bool(deleted.get("success", false)))
+	check_eq("…removing exactly the one named trace",
+		int(deleted.get("deleted_trace_count", -1)), 1)
+	check_eq("…leaving the other two", int(deleted.get("remaining_trace_count", -1)), 2)
+	check("…and SAYING it reopened routing work",
+		(deleted.get("reopened_candidate_ids", []) as Array).has(cid))
+	check("…in a note that names the consequence",
+		str(deleted.get("note", "")).to_lower().contains("open"))
+
+	# ── THE ACCEPTANCE READING ───────────────────────────────────────────────
+	var after: Dictionary = PanelTools._workspace_list(host, _args({"include_terminal": true}))
+	check_eq("AFTER the delete the task reads OPEN — not routed",
+		_task_state_in(after, task_id), "open")
+	check("…and it is listed among open_task_ids",
+		(after.get("open_task_ids", []) as Array).has(task_id))
+	var rec: Dictionary = _candidate_in(after, cid)
+	check_eq("…the candidate is live again", str(rec.get("disposition", "")), "proposed")
+	check("…and no longer names copper the board cannot find",
+		not rec.has("committed_trace_ids"))
+
+	# ── UNDO: the copper AND the commit come back together (bucket 8) ────────
+	check("undo of the delete reports success", data.undo())
+	check_eq("…the deleted trace is back", int(data.traces.size()), 3)
+	check_eq("…and the candidate is committed again",
+		str(ws.get_candidate(cid).disposition), "committed")
+	var undone: Dictionary = PanelTools._workspace_list(host, _args({"include_terminal": true}))
+	check_eq("…so the task reads closed once more", _task_state_in(undone, task_id), "closed")
+	check("…and the verb-entry pass did NOT re-fire on the restored copper",
+		str(ws.get_candidate(cid).disposition) == "committed")
+
+	# ── REDO: both halves leave again, from the delete's own history entry ───
+	check("redo of the delete reports success", data.redo())
+	check_eq("…the trace is gone again", int(data.traces.size()), 2)
+	check_eq("…and the commit is retired again, without a second reconcile",
+		str(ws.get_candidate(cid).disposition), "proposed")
+	var redone: Dictionary = PanelTools._workspace_list(host, _args({"include_terminal": true}))
+	check_eq("…the task reads open again", _task_state_in(redone, task_id), "open")
+
+
+## The `state` of one task in a workspace_list reply, or "" when the listing
+## does not carry it (read from the REPLY, never from the model — the reply is
+## the surface the bug was reported against).
+func _task_state_in(reply: Dictionary, task_id: String) -> String:
+	for t in (reply.get("tasks", []) as Array):
+		if t is Dictionary and str((t as Dictionary).get("task_id", "")) == task_id:
+			return str((t as Dictionary).get("state", ""))
+	return ""
+
+
+## One candidate record out of a workspace_list reply, {} when absent.
+func _candidate_in(reply: Dictionary, candidate_id: String) -> Dictionary:
+	for c in (reply.get("candidates", []) as Array):
+		if c is Dictionary and str((c as Dictionary).get("candidate_id", "")) == candidate_id:
+			return c
+	return {}
