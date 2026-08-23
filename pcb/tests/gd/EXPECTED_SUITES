@@ -76,10 +76,7 @@ test_pcb_panel_tools_migration.gd assertions=68
 # the button landed. All 158 pass; only the pin was stale.
 test_pcb_panel_ui.gd assertions=158
 test_pcb_pin_inspector.gd assertions=49
-# Ratsnest renderer: physical connectivity, MST airwires, high-fanout
-# quieting. Authored but never executed, so no run has measured its assertion
-# count. UNPINNED; pin it from the first trustworthy run.
-test_pcb_ratsnest.gd
+test_pcb_ratsnest.gd assertions=68
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev
 # scaffold.
