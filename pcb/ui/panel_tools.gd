@@ -2899,7 +2899,7 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 			"net": net,
 			"segments": (route.get("segments", []) as Array).duplicate(true) if route.get("segments", []) is Array else [],
 			"vias": (route.get("vias", []) as Array).duplicate(true) if route.get("vias", []) is Array else [],
-			"width": _width_for_net(source_hints, net),
+			"width": _route_width(route, source_hints, net),
 			"source_hint_ids": _route_hint_ids(route),
 			"polyline": _route_polyline(route),
 			"layer": _route_layer(route),
@@ -2919,7 +2919,7 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 		# WIDTH PROVENANCE (docket 019fd0ab5af8): the worker already resolves
 		# which source supplied this route's width (methods.py
 		# _attach_effective_routing_rules — "caller_option"/"hint"/"board_rules"/
-		# "engine_default"/"net_class") and stamps it per-route as
+		# "engine_default"/"net_class"/"net_copper") and stamps it per-route as
 		# route["effective_routing_rules"]["trace_width_mm"]. HITL found an
 		# owner-drawn hint with no width fell back to the router's 0.25mm default
 		# silently where 0.5mm was intended — this is what makes that fallback
@@ -3111,7 +3111,11 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		if not (route is Dictionary):
 			continue
 		var net: String = str(route.get("net", ""))
-		var width: float = _width_for_net(source_hints, net)
+		# The width the ROUTER drew this net at, not a hint-only re-derivation
+		# (bug 01a02bc4f800) — see _route_width. This is the copper that lands
+		# on the board, so the silent 0.25mm literal below is the last resort it
+		# always was, reached only when the reply carries no width at all.
+		var width: float = _route_width(route, source_hints, net)
 		if width <= 0.0:
 			width = 0.25
 		var by_layer := {}
@@ -3584,6 +3588,38 @@ static func _route_layer(route: Dictionary) -> String:
 		if seg is Dictionary and (seg as Dictionary).has("layer"):
 			return str((seg as Dictionary).get("layer", "F.Cu"))
 	return "F.Cu"
+
+
+## The width this route's copper is ACTUALLY drawn at, in mm.
+##
+## The worker resolves it (methods.py `_effective_routing_rules_detailed` plus
+## the per-net step) and stamps it per route as
+## `effective_routing_rules.trace_width_mm.value` — one chain, covering an
+## explicit caller option, a hint-authored width, the net's class minimum, the
+## width the net's own EXISTING copper establishes (bug 01a02bc4f800) and the
+## board's default, in that order. Reading it is what stops this side from
+## keeping a SECOND, poorer copy of that chain: `_width_for_net` below sees
+## hints only, so a hintless route onto a 0.8mm power net used to report — and
+## commit — 0.25mm.
+##
+## Falls back to the hint derivation (and to 0.0) only when the reply carries no
+## stamp at all: an older worker, or a path that skipped the attach. Same
+## absent-key contract as every other field read off a route reply.
+static func _route_width(route: Dictionary, source_hints: Array, net: String) -> float:
+	var routed: float = _route_effective_width(route)
+	if routed > 0.0:
+		return routed
+	return _width_for_net(source_hints, net)
+
+
+## `effective_routing_rules.trace_width_mm.value` off one route, or 0.0 when the
+## route carries no stamp (or a non-positive one, which is not a width).
+static func _route_effective_width(route: Dictionary) -> float:
+	var erules: Dictionary = _dict_or_empty(route.get("effective_routing_rules"))
+	var entry: Dictionary = _dict_or_empty(erules.get("trace_width_mm"))
+	if not entry.has("value"):
+		return 0.0
+	return maxf(0.0, float(entry.get("value", 0.0)))
 
 
 ## Widest authored trace width among the source hints that target `net`
@@ -6373,7 +6409,8 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 ## record onto the candidate record it produced — additive keys "width_mm"
 ## (the route's effective width) and "width_source" (whatever vocabulary
 ## methods.py _attach_effective_routing_rules emits — "caller_option", "hint",
-## "board_rules", "engine_default", "net_class" — relayed verbatim, never
+## "board_rules", "engine_default", "net_class", "net_copper" — relayed
+## verbatim, never
 ## reinterpreted here). Absent when `route_rec` carries no
 ## "effective_width_mm" (the worker attached no provenance for this route —
 ## see _normalize_route_records' own absent-key note), so a caller can never

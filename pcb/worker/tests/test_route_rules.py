@@ -2079,7 +2079,8 @@ def test_the_staged_via_fixture_is_projected_at_a_net_classed_nets_own_width():
     methods._attach_effective_routing_rules(
         payload, baseline_width=BOARD_WIDTH_MM, width_source="board_rules",
         keepout_clearance=BOARD_CLEARANCE_MM, keepout_clearance_source="board_rules",
-        net_widths={"SIG": CLASS_WIDTH_MM})
+        net_widths={"SIG": CLASS_WIDTH_MM},
+        net_width_sources={"SIG": "net_class"})
 
     sig = payload["routes"][0]
     assert sig["effective_routing_rules"]["trace_width_mm"] == \
@@ -2491,7 +2492,7 @@ def test_a_segment_keeps_a_width_it_declared_for_itself():
     methods._attach_effective_routing_rules(
         payload, baseline_width=0.25, width_source="board_default",
         keepout_clearance=0.2, keepout_clearance_source="board_default",
-        net_widths={"GND": 1.0})
+        net_widths={"GND": 1.0}, net_width_sources={"GND": "net_class"})
 
     by_id = {seg["id"]: seg for seg in payload["routes"][0]["segments"]}
     assert by_id["declared"]["width_mm"] == pytest.approx(0.5)
@@ -2512,5 +2513,226 @@ def test_an_unclassed_net_still_fills_in_the_baseline_width():
     methods._attach_effective_routing_rules(
         payload, baseline_width=0.25, width_source="board_default",
         keepout_clearance=0.2, keepout_clearance_source="board_default",
-        net_widths={})
+        net_widths={}, net_width_sources={})
     assert payload["routes"][0]["segments"][0]["width_mm"] == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# 7. THE NET'S OWN ESTABLISHED WIDTH (bug 01a02bc4f800).
+#
+# Measured on smart-remote v2: routes proposed onto VIN — every pre-existing
+# trace of which is 0.8mm — committed at 0.25mm, because the propose path read
+# the board's blanket default and never the net's own copper. Nothing objected:
+# GC1 checks a MINIMUM width, so undersized copper on a 2A input path is
+# manufacturable and reported clean.
+#
+# The fixtures below reuse the mandatory 3-pin board and its accepted-copper
+# shape (`_committed`), re-authored at a width that is NEITHER of the two numbers
+# a wrong implementation would produce: not BOARD_WIDTH_MM (0.35, the board's own
+# default — what the bug produced) and not the engine's 0.25.
+# ---------------------------------------------------------------------------
+
+ESTABLISHED_WIDTH_MM = 0.8   # the net's own copper; the docket's real number
+NARROW_ESTABLISHED_MM = 0.5  # the OTHER width on a mixed net — still != 0.35
+
+
+def _committed_at(board: dict, *widths: float) -> dict:
+    """`_committed`'s accepted copper, re-authored at the given width(s).
+
+    One width authors BOTH accepted traces at it (a net whose copper is
+    uniform). TWO widths author the top trace at the first and the bottom at the
+    second — a net whose copper is MIXED, with the NARROW one listed first so
+    "first segment wins" and "widest wins" are distinguishable outcomes rather
+    than the same number.
+
+    Only SIG's copper is touched; OTHER stays a net with no copper at all, which
+    is what makes "a fresh net still gets the board default" observable on the
+    same run.
+    """
+    out = _committed(board)
+    picks = list(widths) * 2 if len(widths) == 1 else list(widths)
+    out["traces"] = [dict(t, width_mm=w) for t, w in zip(out["traces"], picks)]
+    return out
+
+
+def _rules_by_net(resp: dict) -> dict:
+    """net -> its route's own effective trace-width entry {value, source}."""
+    return {r["net"]: r["effective_routing_rules"]["trace_width_mm"]
+            for r in resp["result"]["routes"]}
+
+
+def test_a_route_onto_a_net_that_already_carries_copper_adopts_that_width():
+    """THE headline, end to end through the real `route()` on a real board.
+
+    SIG already carries 0.8mm copper; OTHER carries none. On the SAME run:
+
+      * SIG's proposal is 0.8mm and says so (`source: "net_copper"`) — the bug
+        made it BOARD_WIDTH_MM with `source: "board_rules"`;
+      * OTHER's is still BOARD_WIDTH_MM/`board_rules` — the criterion the lazy
+        fix fails, because raising `design_rules.trace_width_mm` would make SIG
+        right and every thin-signal net on the board wrong;
+      * the run-wide baseline is still the board's own rule: the per-net answer
+        must not be smuggled in by moving a global.
+
+    The segment stamp is asserted too, because that — not the provenance dict —
+    is what `ir_candidates.build_overlay` checks the proposal at and what the
+    commit path lays as copper. A route whose provenance claims 0.8mm over
+    segments stamped 0.35mm would be the lying-field shape this surface exists
+    to prevent.
+    """
+    board = _committed_at(_three_pin_board(), ESTABLISHED_WIDTH_MM)
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+
+    rules = _rules_by_net(resp)
+    assert "SIG" in rules and "OTHER" in rules, rules
+    assert rules["SIG"] == {"value": pytest.approx(ESTABLISHED_WIDTH_MM),
+                            "source": "net_copper"}, (
+        "SIG already carries 0.8mm copper — a new span on it must be proposed "
+        "at 0.8mm, named as coming from the net's own copper")
+    assert rules["OTHER"] == {"value": pytest.approx(BOARD_WIDTH_MM),
+                              "source": "board_rules"}, (
+        "OTHER carries no copper: it has nothing to inherit and the board's "
+        "own default is the honest answer. A fix that widened it too would be "
+        "a board-wide default change wearing a per-net costume")
+
+    widths = {r["net"]: sorted({s["width_mm"] for s in r["segments"]})
+              for r in resp["result"]["routes"]}
+    assert widths["SIG"] == pytest.approx([ESTABLISHED_WIDTH_MM])
+    assert widths["OTHER"] == pytest.approx([BOARD_WIDTH_MM])
+
+    assert resp["result"]["effective_routing_rules"]["trace_width_mm"] == {
+        "value": pytest.approx(BOARD_WIDTH_MM), "source": "board_rules"}, (
+        "the RUN's baseline is still the board's own rule — the net's copper "
+        "answers for that net, it does not move a global")
+
+
+def test_a_net_whose_existing_copper_is_mixed_takes_the_widest():
+    """The deterministic rule for a net with no single obvious answer.
+
+    SIG's copper is 0.5mm (top, listed FIRST) and 0.8mm (bottom). The proposal
+    must be 0.8mm:
+
+      * 0.5 would be "first segment wins" or "narrowest wins" — the direction
+        that keeps producing undersized copper, which is the whole defect;
+      * 0.35/0.25 would be the bug or the engine default, unchanged.
+
+    Widest is chosen because it can only OVER-size, and over-sized copper either
+    fits or fails loudly as an unrouted pair; under-sized copper on a power net
+    is a defect every gate calls clean. It is also what the bus path already
+    answers to the same question (`panel_tools.gd::bus_net_width`).
+    """
+    board = _committed_at(_three_pin_board(),
+                          NARROW_ESTABLISHED_MM, ESTABLISHED_WIDTH_MM)
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+
+    assert _rules_by_net(resp)["SIG"] == {
+        "value": pytest.approx(ESTABLISHED_WIDTH_MM), "source": "net_copper"}, (
+        "a mixed net takes its WIDEST existing copper, deterministically — "
+        "never the first segment encountered, and never the narrowest")
+
+
+def test_established_net_widths_is_widest_per_net_and_fails_closed():
+    """The rule itself, at its own seam, over real `ExistingSegment` values.
+
+    Three facts no end-to-end route can show as cheaply: the max is taken
+    PER NET (not board-wide), a net with no copper is ABSENT rather than
+    defaulted, and copper whose width cannot be read as a positive number
+    REFUSES instead of being skipped — skipping would let the original defect
+    back in through the one net whose copper could not be measured.
+    """
+    def seg(net, width):
+        return route_bridge.ExistingSegment(
+            net=net, start=(0.0, 0.0), end=(1.0, 0.0), width=width, layer="F.Cu")
+
+    widths = route_bridge.established_net_widths([
+        seg("VIN", 0.8), seg("VIN", 0.25), seg("SIG", 0.35), seg(None, 9.0)])
+    assert widths == {"VIN": pytest.approx(0.8), "SIG": pytest.approx(0.35)}, (
+        "widest wins WITHIN a net; VIN's 0.8 must not leak onto SIG, and "
+        "unnetted copper establishes nothing")
+    assert "GND" not in widths, "a net with no copper has nothing to inherit"
+
+    for bad in (0.0, -0.4, float("nan"), None):
+        with pytest.raises(route_bridge.UnsupportedGeometry) as exc:
+            route_bridge.established_net_widths([seg("VIN", bad)])
+        assert "VIN" in str(exc.value), exc.value
+
+
+def test_a_stated_width_still_outranks_the_nets_own_copper_and_says_so():
+    """Steps 1/2 are unchanged: an explicit caller option (and a hint width)
+    fixes the WHOLE run, even on a net carrying wider copper.
+
+    That is not the bug — the bug is the SILENT board default. A stated 0.6mm
+    is a decision, and the reply names it `caller_option`, so a reviewer can see
+    that the net's own 0.8mm was overridden rather than never consulted.
+    """
+    board = _committed_at(_three_pin_board(), ESTABLISHED_WIDTH_MM)
+    resp = _call_route({"board": board, "options": {"trace_width": 0.6}})
+    assert resp["ok"] is True, resp
+
+    rules = _rules_by_net(resp)
+    assert rules["SIG"] == {"value": pytest.approx(0.6), "source": "caller_option"}
+    assert rules["OTHER"] == {"value": pytest.approx(0.6), "source": "caller_option"}
+
+
+def test_the_class_minimum_is_a_floor_the_nets_copper_can_only_raise(
+        net_classed_compile):
+    """Both per-net rules apply to the same net, and they compose by MAX.
+
+    Run 1: SIG's class demands a 1.0mm minimum over 0.8mm copper -> 1.0mm.
+    Routing at the copper's 0.8 would propose copper this board's own GC1 floor
+    rejects, so the class floor has to win when it is higher.
+
+    Run 2: the class demands 0.5mm over that same 0.8mm copper -> 0.8mm. The
+    class is a MINIMUM (`min_trace_width_mm`), and 0.8 satisfies it; taking 0.5
+    because "the class is more specific" would be the original defect wearing a
+    net class.
+
+    The provenance names whichever rule actually decided, in both directions.
+    """
+    board = _committed_at(_three_pin_board(), ESTABLISHED_WIDTH_MM)
+
+    net_classed_compile["net"] = "SIG"
+    net_classed_compile["nc"] = NetClass(
+        id="nc:power", name="Power", min_trace_width_mm=1.0)
+    strict = _call_route({"board": board})
+    assert strict["ok"] is True, strict
+    assert _rules_by_net(strict)["SIG"] == {
+        "value": pytest.approx(1.0), "source": "net_class"}
+
+    net_classed_compile["nc"] = NetClass(
+        id="nc:power", name="Power", min_trace_width_mm=0.5)
+    lenient = _call_route({"board": board})
+    assert lenient["ok"] is True, lenient
+    assert _rules_by_net(lenient)["SIG"] == {
+        "value": pytest.approx(ESTABLISHED_WIDTH_MM), "source": "net_copper"}
+
+
+def test_the_grid_reserves_for_the_widest_copper_the_run_actually_draws(
+        recorded_grids):
+    """The safety half, and the one this fix could itself have broken.
+
+    `RoutingGrid.keepout_margin` is `clearance + trace_width / 2` where that
+    trace_width is the NEWCOMER's half-width, and the grid is marked ONCE for the
+    whole run. Adopting 0.8mm for SIG while the grid reserved for the board's
+    0.35mm would put SIG's own copper inside every ring it passes — an
+    under-block introduced by the fix, and routing.md's invariant ("the modeled
+    keepout must be a SUPERSET of the fabricated copper") has no exception for
+    one the fix introduces.
+
+    Asserted as the invariant rather than as a plumbed number: whatever the reply
+    says the widest proposed copper is, the grid's own reservation must cover it.
+    """
+    board = _committed_at(_three_pin_board(), ESTABLISHED_WIDTH_MM)
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+    assert recorded_grids, "the run built no grid"
+
+    widest_proposed = max(
+        seg["width_mm"]
+        for route in resp["result"]["routes"] for seg in route["segments"])
+    assert widest_proposed == pytest.approx(ESTABLISHED_WIDTH_MM)
+    for grid in recorded_grids:
+        assert grid.trace_width >= widest_proposed - 1e-9, (
+            "the grid reserved less than the widest copper this run draws")

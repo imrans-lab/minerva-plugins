@@ -232,7 +232,7 @@ _effective_routing_rules` resolves them and passes both to `route_board` /
 |---|---|---|---|---|
 | 1 | explicit caller option | `options.trace_width` | `options.clearance` | whole run |
 | 2 | hint-authored width | widest `width_mm` among selected hints | — (a route hint has no clearance field) | whole run |
-| 3 | **net class minima** (this round) | `net_class.min_trace_width_mm` | `net_class.min_clearance_mm` | width: **that net's own copper only**. clearance: **board-wide** — see "Keepout margin" below, this is not a symmetric pair |
+| 3 | **per-net rules**, whichever is **wider**: the net's class minimum, or the width its **existing copper** establishes | `max(net_class.min_trace_width_mm, widest existing trace on that net)` | `net_class.min_clearance_mm` | width: **that net's own copper only**. clearance: **board-wide** — see "Keepout margin" below, this is not a symmetric pair |
 | 4 | the compiled board's design rules | `design_rules.defaults.trace_width_mm` | `design_rules.minimums.min_clearance_mm` | whole run (fallback) |
 | 5 | the engine's own signature default | `route_board`'s `trace_width` | `route_board`'s `clearance` | whole run (fallback) |
 
@@ -428,6 +428,71 @@ from OTHER's own pads too, not merely `0.35/2 + 0.3 = 0.475mm` — pinned by
 `test_a_strict_class_elsewhere_widens_the_keepout_around_an_unclassed_nets_own_copper`.
 COPPER WIDTH stays exactly per-net regardless (OTHER's own trace is still
 drawn at 0.35mm) — only the shared RESERVATION widens.
+
+### The net's own established width (bug `01a02bc4f800`)
+
+**A net that already carries copper has already had its width decided.** Before
+this, a span proposed onto such a net took the board's blanket default: measured
+on smart-remote v2, routes proposed onto VIN committed at **0.25mm** while every
+pre-existing VIN trace on that board is **0.8mm**. Nothing objected — geometric
+DRC's GC1 checks a *minimum* width, never whether a width suits the current — so
+a 2A input path fabricated at a quarter of its own copper's width, and every
+report called it clean. The second-order harm is the worse one: each undersized
+span looks identical to a correct one in every tool output.
+
+So step 3 reads the copper as well as the class. `pcb_worker.methods._route`
+asks `route_bridge.established_net_widths` for `net name -> widest existing
+trace`, over the SAME `ExistingSegment` list the grid is about to mark (accepted
+copper plus any pinned candidate — `existing_copper_with_pinned`), so the width a
+net adopts and the copper the run routes around are one observation rather than
+two that can drift. The reply names it: `effective_routing_rules.trace_width_mm.
+source` is `"net_copper"` on such a route, distinct from `"net_class"` and from
+`"board_rules"`.
+
+**Combined by `max`, not by precedence.** A class minimum and the net's own
+copper are both per-net and both *floors*: routing below the class minimum
+proposes copper the board's own DRC will flag (GC1 enforces it whatever routing
+decided), and routing below the established width is the defect above. So the net
+routes at whichever is wider, and the provenance names the one that decided it; a
+tie keeps `"net_class"`, since nothing was widened by the copper.
+
+**A net with no copper inherits nothing** — it is simply absent from the map and
+falls through to step 4, the board's own default, which is the honest answer for
+a fresh net. That is also why raising `design_rules.trace_width_mm` is not a fix
+for this bug and never was: it would make the power span right and every
+thin-signal span wrong. The width has to come from the NET.
+
+**Steps 1/2 still outrank it**, exactly as they outrank a class minimum and for
+the same reason: `options.trace_width` or a hint-authored width fixes the value
+for the WHOLE RUN, and reinterpreting that per net would silently override a
+stated decision. A caller who states `0.6` gets `0.6` on a 0.8mm net, reported as
+`caller_option` — a stated number, not the silent board default this bug is
+about.
+
+**Mixed widths: widest wins.** A net whose copper is not uniform has no single
+obvious answer, and the rule is deterministic: the widest existing trace on that
+net. Widest can only over-size, and over-sized copper either fits or fails
+LOUDLY (an unrouted pair with a reason); under-sized copper on a power net is a
+defect every gate calls clean — the same asymmetry the keepout margin follows.
+"Nearest segment" would make the result depend on which end a span starts from,
+and still under-sizes whenever the near segment is the thin one; refusing would
+make an ordinary tapered net (0.8mm trunk, 0.4mm branches) unroutable with
+nothing for the human to fix. It is also the rule the bus path already applies to
+the same question (`pcb/ui/panel_tools.gd::bus_net_width`).
+
+**Copper whose width cannot be read fails closed** (`unsupported_geometry`,
+naming the net) rather than being skipped: skipping would let the original defect
+back in through the one net whose copper could not be measured. Vias are not read
+— an annulus diameter is not a trace width.
+
+**Keepout margin.** Established widths join class minima in the board-wide
+worst case (`keepout_trace_width` is `max(run baseline, every per-net width)`),
+because the grid's margin uses the NEWCOMER's half-width: a net adopting 0.8mm
+against a grid reserved for 0.25mm would be an under-block introduced by this
+fix itself. The cost is the one named below — a board carrying wide power copper
+reserves more around everything, and a dense board may report unrouted pairs it
+previously routed. That is the loud direction, and it is the direction the
+invariant requires.
 
 **Bus routing now honours net-class width too.** `agent_router.router.
 route_bus` (hint-driven bus/parallel-corridor routing) first cut of this round

@@ -1077,8 +1077,34 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 			route_dict.get("vias", []),
 			source_hints, base_board_revision, null, route_span)
 		if not new_id.is_empty():
+			# The worker's finer width vocabulary, upgraded onto the candidate
+			# exactly as ingest_record does it for the correlated path (bug
+			# 01a02bc4f800). This path takes the routed segment widths now, so
+			# leaving the ingest verdict ("hint"/"default") standing would file
+			# a width the ROUTER resolved — a net class minimum, or the width the
+			# net's own copper established — under a source that never supplied
+			# it.
+			var routed_source: String = _route_width_source(route_dict)
+			if not routed_source.is_empty() and candidates.has(new_id):
+				candidates[new_id].width_source = routed_source
 			new_ids.append(new_id)
 	return new_ids
+
+
+## The width source the WORKER stamped on one route
+## (`effective_routing_rules.trace_width_mm.source` — "caller_option" | "hint" |
+## "net_class" | "net_copper" | "board_rules" | "engine_default"), or "" when the
+## route carries none (an older worker, or a non-canonical path that skipped the
+## attach). Absent-key contract, never invented — same as every other stamp read
+## off a route reply.
+static func _route_width_source(route: Dictionary) -> String:
+	var erules = route.get("effective_routing_rules")
+	if not (erules is Dictionary):
+		return ""
+	var entry = (erules as Dictionary).get("trace_width_mm")
+	if not (entry is Dictionary):
+		return ""
+	return str((entry as Dictionary).get("source", ""))
 
 
 ## T2.3 correlated single-route ingest. Builds EXACTLY the candidate
@@ -1291,7 +1317,25 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 			# board uncompilable; the rest of this route is unaffected.
 			last_ingest_degenerate_segments += 1
 			continue
-		cand.add_segment(PcbRouteCandidate.make_segment("", layer, width, pts))
+		# THE WORKER'S OWN WIDTH WINS (bug 01a02bc4f800). Each routed segment
+		# arrives carrying `width_mm` — the width the router ACTUALLY drew that
+		# net at, after its whole precedence chain (caller option, hint, the
+		# net's class minimum, the width the net's EXISTING copper establishes,
+		# the board's default). The hint re-derivation above is a SECOND, poorer
+		# copy of that chain: it sees hints only, so a route proposed onto a
+		# 0.8mm power net with no hint width fell through to its silent 0.25mm
+		# default and committed copper a quarter the width of the copper it
+		# joins — the defect this fixes, and one no gate catches because GC1
+		# checks a MINIMUM width.
+		#
+		# `width_override` still outranks it: that is a caller who resolved an
+		# exact per-trace width itself (bus propose), not a fallback.
+		var seg_width := width
+		if width_override <= 0.0:
+			var routed_width := float(seg_dict.get("width_mm", 0.0))
+			if routed_width > 0.0:
+				seg_width = routed_width
+		cand.add_segment(PcbRouteCandidate.make_segment("", layer, seg_width, pts))
 
 	for via in vias:
 		var pos := _via_pt(via)
@@ -1776,6 +1820,11 @@ static func _pin_ref_to_endpoint(pin_ref) -> Dictionary:
 ## (mirrors panel_tools._width_for_net); falls back to 0.25mm — the same
 ## default _materialize_routes applies when no hint specifies a width — so a
 ## shadow candidate's width matches what would actually be committed.
+## NOW A FALLBACK ONLY (bug 01a02bc4f800): a routed segment that carries the
+## worker's own `width_mm` outranks whatever this returns, because the worker
+## resolved the FULL precedence chain (class minimum, the net's established
+## copper, the board default) and this sees hints alone. It still decides a
+## reply that carries no routed width at all.
 ## NET_NAMES-ONLY match (via _hints_matching_net) — used ONLY by the legacy
 ## ingest_routing_result path; a pins-only hint never matches here (same gap
 ## as _hint_ids_for_net, docket 019fa109766f). ingest_record instead calls

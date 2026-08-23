@@ -8,7 +8,7 @@ extends SceneTree
 ## ../../minerva-plugins reaches this plugin checkout beside it (same
 ## convention as test_layer_stack.gd / test_routing_workspace_model.gd).
 ##
-## Coverage (6 groups):
+## Coverage (7 groups):
 ##   1. Ingest a fixture router reply (multi-pad net, >=2 DISCONNECTED paths +
 ##      a via) -> candidate geometry matches exactly; base_board_revision
 ##      captured; source_hint_ids set.
@@ -24,6 +24,10 @@ extends SceneTree
 ##   5. ingest_record: a route the worker attributed to NO hint gets empty
 ##      provenance/endpoints/default width — distinguishing "legitimately
 ##      unattributed" from the fixed pins-only case above.
+##   7. ingest_record: the width the WORKER routed at (segment `width_mm`)
+##      sizes the candidate's copper, and its `effective_width_source` names
+##      the provenance — the hint-only re-derivation and its silent 0.25mm
+##      default are a FALLBACK now, not the answer (bug 01a02bc4f800).
 ##   6. FUNCTIONAL FLOOR (non-mocked, S5 workspace-only): a REAL PCBPanel
 ##      (booted via plugin_panel_driver) driving the EXACT production propose
 ##      seam (panel_tools._propose_into_workspace) with a fixture router
@@ -51,6 +55,7 @@ func _init() -> void:
 	_run_empty_reply()
 	_run_ingest_record_pins_only_attribution()
 	_run_ingest_record_unattributed_is_empty()
+	_run_ingest_record_routed_width_wins()
 	_run_functional_floor_dual_write()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -405,3 +410,77 @@ func _run_functional_floor_dual_write() -> void:
 	check_eq("candidate source_hint_ids == [hint_1]", cand.source_hint_ids, ["hint_1"])
 
 	driver.free_panel(panel)
+
+
+# ── 7. the routed width is the candidate's width (bug 01a02bc4f800) ─────────
+
+## A route proposed onto a net that ALREADY carries copper is routed by the
+## worker at that net's established width — the worker resolves the whole
+## precedence chain (caller option, hint, class minimum, the net's own copper,
+## the board default) and stamps the answer on every segment as `width_mm`,
+## plus its provenance as `effective_width_source`.
+##
+## This side used to throw that away and re-derive a width from the selected
+## HINTS alone, falling back to a silent 0.25mm — so a hintless route onto a
+## 0.8mm power net landed a candidate 0.25mm wide, and the commit wrote exactly
+## that copper. The candidate's width is what gets FABRICATED, so this is the
+## half of the fix that decides real copper.
+##
+## The fixture states three DIFFERENT numbers so a wrong implementation is
+## identifiable, not merely wrong: 0.8 is the routed width, 0.4 is what the
+## selected hint would give, 0.25 is the silent default. Only one of them is
+## the copper the router actually drew.
+func _run_ingest_record_routed_width_wins() -> void:
+	print("-- 7. ingest_record: the ROUTER's width sizes the candidate --")
+	var ws = PcbRoutingWorkspace.new()
+
+	var hint := {
+		"id": "hint_w",
+		"kind_payload": {
+			"net_names": ["VIN"], "width_mm": 0.4,
+			"source_pins": ["U1.1"], "dest_pins": ["U4.2"],
+		},
+	}
+	# Exactly the shape panel_tools._normalize_route_records produces from a
+	# worker reply whose route carried effective_routing_rules: raw router
+	# segments (now stamped with the routed width_mm) plus the once-resolved
+	# effective width/source.
+	var record := {
+		"net": "VIN",
+		"segments": [
+			{"start": [0.0, 0.0], "end": [3.0, 0.0], "layer": "F.Cu", "width_mm": 0.8},
+			{"start": [3.0, 0.0], "end": [3.0, 4.0], "layer": "F.Cu", "width_mm": 0.8},
+		],
+		"vias": [],
+		"source_hint_ids": ["hint_w"],
+		"source_hints": [hint],
+		"width": 0.8,
+		"effective_width_mm": 0.8,
+		"effective_width_source": "net_copper",
+	}
+
+	var cand = ws.get_candidate(str(ws.ingest_record(record, 4)))
+	check("candidate resolves", cand != null)
+	if cand == null:
+		return
+	check_eq("segment 0 is the ROUTED 0.8mm (not the hint's 0.4, not the 0.25 default)",
+		float(cand.segments[0].get("width")), 0.8)
+	check_eq("segment 1 is the ROUTED 0.8mm too",
+		float(cand.segments[1].get("width")), 0.8)
+	check_eq("width_source names the net's own copper, not the ingest verdict",
+		str(cand.width_source), "net_copper")
+
+	# A caller that resolved its OWN exact per-trace width (bus propose) still
+	# outranks the routed stamp — that is a stated width, not a fallback.
+	var bus_record: Dictionary = record.duplicate(true)
+	bus_record["net"] = "VBUS"
+	bus_record["width_override"] = 0.6
+	bus_record.erase("effective_width_source")
+	var bus_cand = ws.get_candidate(str(ws.ingest_record(bus_record, 4)))
+	check("bus candidate resolves", bus_cand != null)
+	if bus_cand == null:
+		return
+	check_eq("an explicit width_override still wins over the routed stamp",
+		float(bus_cand.segments[0].get("width")), 0.6)
+	check_eq("...and reports itself as the caller's own width",
+		str(bus_cand.width_source), "caller_option")

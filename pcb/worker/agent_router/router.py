@@ -433,10 +433,14 @@ class RoutingResult:
 # Per-net-class minima (docs/routing.md, "Per-net-class minima"). Two
 # SEPARATE concepts, sized differently on purpose:
 #
-#   * COPPER WIDTH is genuinely per-net: `net_widths` (net name -> width_mm,
-#     sourced from that net's own class by `pcb_worker.methods.
-#     _net_class_overrides`) says what width THAT net's own trace is drawn
-#     at. A net absent from the map draws at the run's baseline `trace_width`.
+#   * COPPER WIDTH is genuinely per-net: `net_widths` (net name -> width_mm)
+#     says what width THAT net's own trace is drawn at. A net absent from the
+#     map draws at the run's baseline `trace_width`. `pcb_worker.methods._route`
+#     builds it from the two per-net rules there are — that net's own class
+#     minimum (`_net_class_overrides`) and the width its EXISTING copper
+#     establishes (`route_bridge.established_net_widths`, bug 01a02bc4f800) —
+#     taking whichever is wider. The engine neither knows nor needs to know
+#     which of the two a number came from.
 #
 #   * The KEEPOUT MARGIN is NOT per-net. `keepout_clearance`/`keepout_trace_
 #     width` size the GRID itself (its `clearance`/`trace_width` fields, which
@@ -1245,7 +1249,8 @@ def route_board(
         clearance: Minimum clearance between traces in mm — the FALLBACK
             keepout clearance if ``keepout_clearance`` is None.
         grid_resolution: Grid resolution in mm
-        net_widths: per-net class-sourced copper width override (see the
+        net_widths: per-net copper width override — that net's class
+            minimum or its existing copper's width, whichever is wider (see the
             module note above). Affects ONLY the copper drawn for that net —
             never the keepout margin, which is grid-wide (below).
         keepout_clearance / keepout_trace_width: the grid's OWN clearance/
@@ -1838,7 +1843,8 @@ def route_bus(
         trace_width: Width of each trace — the FALLBACK for any net in the bus
             not named in ``net_widths``.
         layer: Layer to route on
-        net_widths: per-net class-sourced copper width override (see the
+        net_widths: per-net copper width override — that net's class
+            minimum or its existing copper's width, whichever is wider (see the
             module note above ``route_board``). Net-class minima round 2: a
             bus net used to be laid at ``trace_width`` unconditionally, which
             made the reply's per-route provenance describe copper the bus
@@ -2066,7 +2072,7 @@ def route_board_with_hints(
         trace_width: Default trace width in mm
         clearance: Minimum clearance between traces in mm
         grid_resolution: Grid resolution in mm
-        net_widths: per-net class-sourced copper width — see the module note
+        net_widths: per-net copper width override — see the module note
             above ``route_board``. Threaded to BOTH the standard per-net loop
             below AND ``route_bus`` (net-class round 2): each bus net draws at
             its own width, exactly like a standard net. Only the bus's

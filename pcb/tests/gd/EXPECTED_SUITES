@@ -92,7 +92,7 @@ test_routing_workspace_model.gd assertions=168
 test_routing_workspace_v2.gd assertions=395
 test_trace_identity_delete.gd assertions=213
 test_workspace_check.gd assertions=46
-test_workspace_ingest.gd assertions=69
+test_workspace_ingest.gd assertions=76
 test_workspace_persistence.gd assertions=76
 # Epoch NLC C4 (1135 -> 1136), C2 (-> 1137), C3 (-> 1138): the manifest-count
 # pin gained a companion assertion per added tool — minerva_pcb_view_state,
