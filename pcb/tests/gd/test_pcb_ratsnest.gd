@@ -78,6 +78,11 @@ extends SceneTree
 ##      witness points, and only the barrel reaches the bottom. The surviving
 ##      join declares no layer change whichever ref spelling sorts first —
 ##      refs make the choice deterministic, they never make it.
+##
+##  12. DUPLICATE PAD NUMBERS ARE DISTINCT LANDS, ONE LOGICAL PIN. Copper on a
+##      non-first land closes the pin, while a through-hole land elsewhere does
+##      not lend its bottom-layer reach to a top-only sibling. Reversing the
+##      physical-pad list changes neither answer nor picture.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -101,6 +106,7 @@ func _init() -> void:
 	_run_pad_rotation_is_part_of_its_shape()
 	_run_airwire_aims_at_island_copper()
 	_run_layer_change_tie()
+	_run_duplicate_pad_numbers()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -880,6 +886,15 @@ func _run_pour_conducts_as_its_fill() -> void:
 			{"x_mm": 8.5, "y_mm": 9.9}, {"x_mm": 15.0, "y_mm": 10.1},
 			{"x_mm": 21.5, "y_mm": 10.3}]]})), "PR"), 1)
 
+	# Float64 can hold coordinates that Vector2 cannot. Narrowing the far point
+	# below to infinity makes Geometry2D classify both lands inside a triangle
+	# whose finite payload contains only P2. A region is usable only when every
+	# coordinate remains finite in the geometry type the solver actually reads.
+	check_eq("a coordinate that overflows the geometry type rejects the fill",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [[
+			{"x_mm": 20.0, "y_mm": 10.0}, {"x_mm": 21.0, "y_mm": 10.0},
+			{"x_mm": -1e100, "y_mm": 1e100}]]})), "PR"), 1)
+
 	check_eq("one damaged region rejects the WHOLE fill — the intact sibling proves nothing",
 		_remaining(Ratsnest.compute(_pour_board({"fill": [covering, 42]})), "PR"), 1)
 
@@ -1088,3 +1103,94 @@ func _run_layer_change_tie() -> void:
 				% [smd_ref, tht_ref], not bool(l["layer_change"]))
 			check_eq("…and its near end names the barrel (smd=%s, tht=%s)"
 				% [smd_ref, tht_ref], str(l["a_ref"]), "%s.1" % tht_ref)
+
+
+# ── 12. duplicate pad numbers are distinct lands, one logical pin ────────────
+
+func _explicit_pad(number: String, pad_type: String, shape: String,
+		x: float, y: float, layers: Array) -> Dictionary:
+	return {"number": number, "type": pad_type, "shape": shape,
+		"position": {"x": x, "y": y}, "size": {"width": 1.0, "height": 1.0},
+		"layers": layers}
+
+
+func _duplicate_part(ref: String, x: float, y: float, pads: Array) -> Dictionary:
+	return {"ref": ref, "footprint": "CUSTOM", "x_mm": x, "y_mm": y,
+		"rotation_deg": 0.0, "layer": "top", "width": 12.0, "height": 3.0,
+		"has_pad_geometry": true,
+		# load_pad_geometry deliberately rebuilds this logical map from every
+		# physical pad, leaving the final duplicate's position as the pin centre.
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}], "pads": pads}
+
+
+func _duplicate_pad_board(reverse_pads: bool, mixed_layers: bool):
+	var pads: Array
+	var y := 25.0 if mixed_layers else 10.0
+	if mixed_layers:
+		pads = [
+			_explicit_pad("1", "thru_hole", "rect", 0.0, 0.0, ["*.Cu"]),
+			_explicit_pad("1", "smd", "rect", 10.0, 0.0, ["F.Cu"]),
+		]
+	else:
+		pads = [
+			_explicit_pad("1", "smd", "rect", 0.0, 0.0, ["F.Cu"]),
+			_explicit_pad("1", "smd", "rect", 10.0, 0.0, ["F.Cu"]),
+		]
+	if reverse_pads:
+		pads.reverse()
+	var board = _board({
+		"components": [
+			_duplicate_part("DUP", 10.0, y, pads),
+			_part("END", 30.0, y + (0.0 if mixed_layers else 0.4),
+				[_smd_pin("1", 0.0, 0.0)], "bottom" if mixed_layers else "top"),
+		],
+		"nets": [{"name": "DUPNET", "pins": ["DUP.1", "END.1"]}],
+		"traces": [
+			# The top case touches the second land's body without reaching its
+			# centre. The mixed case runs on bottom directly under that top land.
+			_trace("t_dup", "DUPNET", "bottom" if mixed_layers else "top",
+				Vector2(20.0 if mixed_layers else 19.55,
+					y if mixed_layers else y + 0.4),
+				Vector2(30.0, y if mixed_layers else y + 0.4), 0.2),
+		],
+	})
+	# The worker's footprint-resolution path calls load_pad_geometry(), whose
+	# logical pin map deliberately keeps the final equal-number land's position.
+	# Reproduce that enrichment step on this compact board fixture.
+	var last_pos: Vector2 = (board.get_component("DUP").pads[1] as Dictionary)["position"]
+	board.get_component("DUP").pins["1"] = last_pos
+	return board
+
+
+func _run_duplicate_pad_numbers() -> void:
+	print("-- 12. duplicate pad numbers keep per-land geometry and layers --")
+	var joined := Ratsnest.compute(_duplicate_pad_board(false, false))
+	check_eq("copper on the body of a non-first duplicate land closes the logical pin",
+		_remaining(joined, "DUPNET"), 0)
+	var extracted := Ratsnest.extract(_duplicate_pad_board(false, false))
+	check_eq("both duplicate lands and the other logical pin reach the solver",
+		((extracted[0] as Dictionary)["pads"] as Array).size(), 3)
+	var one_pin = _board({
+		"components": [_duplicate_part("SOLO", 10.0, 15.0, [
+			_explicit_pad("1", "smd", "rect", 0.0, 0.0, ["F.Cu"]),
+			_explicit_pad("1", "smd", "rect", 10.0, 0.0, ["F.Cu"]),
+		])],
+		"nets": [{"name": "SOLO_NET", "pins": ["SOLO.1"]}],
+	})
+	check("two lands of one logical pin do not invent a routable two-pin net",
+		Ratsnest.extract(one_pin).is_empty())
+
+	var mixed := Ratsnest.compute(_duplicate_pad_board(false, true))
+	check_eq("bottom copper under a top-only duplicate does not borrow the sibling barrel",
+		_remaining(mixed, "DUPNET"), 1)
+	var links := _links_for(mixed, "DUPNET")
+	check_eq("the missing connection remains visible as one airwire", links.size(), 1)
+	if links.size() == 1:
+		var link := links[0] as Dictionary
+		check("the zero-length cue asks for the layer change at the surface land",
+			float(link["length"]) < 1e-6)
+		check("…and explicitly declares that layer change", bool(link["layer_change"]))
+
+	check("reversing duplicate physical pads changes neither answer nor picture",
+		_picture(Ratsnest.compute(_duplicate_pad_board(true, false))) == _picture(joined)
+			and _picture(Ratsnest.compute(_duplicate_pad_board(true, true))) == _picture(mixed))

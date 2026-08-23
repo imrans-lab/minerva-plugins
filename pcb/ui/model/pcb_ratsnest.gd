@@ -111,10 +111,16 @@ const QUIET_SHOWN_LINKS := 6
 ##     "bounds": Rect2                      # already grown by swell
 ##     "ref":    String                     # pads only: "<component>.<pin>"
 ##     "at":     Vector2                    # pads only: the pad centre
+##     "pin_group":String                   # pads only: equal means internally
+##                                          #   joined inside the component
+##     "land_order":int                     # pads only: position among the
+##                                          #   pin's lands after they are
+##                                          #   ordered by geometry, so a sort
+##                                          #   comparing it is a total order
 ##   }
 ##
-## A net with fewer than two pads is omitted entirely: there is nothing it could
-## ever need joined to.
+## A net with fewer than two logical pins is omitted entirely: extra physical
+## lands belonging to one pin do not create a routing obligation.
 static func extract(data) -> Array:
 	var bundles: Array = []
 	if data == null:
@@ -129,7 +135,12 @@ static func extract(data) -> Array:
 		if net == null:
 			continue
 		var pads := _net_pads(data, net, stack)
-		if pads.size() < 2:
+		# A duplicate-number footprint expands one logical pin into several land
+		# nodes. It still cannot make a one-pin net need routing by itself.
+		var logical_pins := {}
+		for pad in pads:
+			logical_pins[int((pad as Dictionary)["seq"])] = true
+		if logical_pins.size() < 2:
 			continue
 		bundles.append({
 			"net": net_name,
@@ -177,33 +188,44 @@ static func _layer_set(layers) -> Dictionary:
 	return out
 
 
-## A net's pads as nodes, ordered by "<component>.<pin>" so the pad INDEX a
-## link reports is a property of the board rather than of the pin list's order.
+## A net's physical pad lands as nodes, ordered by "<component>.<pin>" and then
+## by land geometry so the pad INDEX a link reports is a property of the board
+## rather than of either input list's order. Equal-number lands keep one ref and
+## pin_group: they are distinct pieces of fabricated copper but one logical pin.
 static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 	var pads: Array = []
-	for pin in net.pins:
+	for pin_seq in net.pins.size():
+		var pin = net.pins[pin_seq]
 		var comp_id := str((pin as Dictionary).get("component_id", ""))
 		var pin_name := str((pin as Dictionary).get("pin_name", ""))
 		var comp = data.get_component(comp_id)
 		if comp == null:
 			continue
-		var node := _pad_node(comp, pin_name, stack)
-		node["ref"] = "%s.%s" % [comp_id, pin_name]
-		node["seq"] = pads.size()
-		pads.append(node)
+		var ref := "%s.%s" % [comp_id, pin_name]
+		var lands := _pad_nodes(comp, pin_name, stack)
+		for land_order in lands.size():
+			var node: Dictionary = lands[land_order]
+			node["ref"] = ref
+			node["pin_group"] = ref
+			node["seq"] = pin_seq
+			node["land_order"] = land_order
+			pads.append(node)
 	# Total order: the ref, then the pin's position in the net's own list. A
 	# board CAN list the same pin twice (load_from_board_dict does not dedupe
 	# the way add_pin does), so the ref alone is not a total order and the
-	# unstable sort_custom would order the duplicates arbitrarily.
+	# unstable sort_custom would order the duplicates arbitrarily. Physical
+	# lands within one occurrence use their geometry-derived order last.
 	pads.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if a["ref"] != b["ref"]:
 			return str(a["ref"]) < str(b["ref"])
-		return int(a["seq"]) < int(b["seq"]))
+		if a["seq"] != b["seq"]:
+			return int(a["seq"]) < int(b["seq"])
+		return int(a["land_order"]) < int(b["land_order"]))
 	return pads
 
 
-## One pad as a node: its land where the footprint resolved, a small disc at
-## the pin centre when it did not.
+## One logical pin as one node per physical land where the footprint resolved,
+## or one small disc at the pin centre when it did not.
 ##
 ## THE LAND IS NEVER MODELLED LARGER THAN ITS REAL COPPER. A shape that
 ## overhangs the land makes copper merely passing nearby read as touching,
@@ -230,13 +252,55 @@ static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 ## part is mounted on). A pin with NO pad geometry is given the whole stack —
 ## nothing in the model says which side its copper is on, and its component is
 ## already badged as unresolved on the canvas.
-static func _pad_node(comp, pin_name: String, stack: PackedStringArray) -> Dictionary:
+static func _pad_nodes(comp, pin_name: String, stack: PackedStringArray) -> Array:
 	var centre: Vector2 = comp.get_pin_world_position(pin_name)
 	var centre_line := PackedVector2Array([centre])
-	var pad := _pad_geometry(comp, pin_name)
-	if pad.is_empty():
-		return _make_node([], [centre_line],
-			FALLBACK_PAD_RADIUS_MM, _layer_set(stack), centre)
+	var matches: Array = []
+	if comp.has_pad_geometry:
+		for source_order in comp.pads.size():
+			var pad = comp.pads[source_order]
+			if str((pad as Dictionary).get("number", "")) == pin_name:
+				matches.append({"pad": pad, "source_order": source_order,
+					"key": _pad_geometry_key(pad as Dictionary)})
+	if matches.is_empty():
+		return [_make_node([], [centre_line],
+			FALLBACK_PAD_RADIUS_MM, _layer_set(stack), centre)]
+	# The source list is not an electrical ordering. Geometry first makes a
+	# reversed-but-identical footprint produce the same node and island order;
+	# source_order only distinguishes physically identical records.
+	matches.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if a["key"] != b["key"]:
+			return str(a["key"]) < str(b["key"])
+		return int(a["source_order"]) < int(b["source_order"]))
+	var out: Array = []
+	for match in matches:
+		out.append(_physical_pad_node(comp, (match as Dictionary)["pad"], stack,
+			centre, matches.size() == 1))
+	return out
+
+
+## A stable description of every property that changes a physical land. Used
+## only to order equal-number lands; it never decides connectivity.
+static func _pad_geometry_key(pad: Dictionary) -> String:
+	var pos: Vector2 = pad.get("position", Vector2.ZERO)
+	var size: Vector2 = pad.get("size", Vector2(1, 1))
+	var layer_names := PackedStringArray()
+	var declared = pad.get("layers", [])
+	if declared is Array:
+		for layer in declared:
+			layer_names.append(_canon(layer))
+	layer_names.sort()
+	return "%s|%s|%s|%s|%s|%s|%s|%s" % [
+		str(pos.x), str(pos.y), str(pad.get("type", "smd")),
+		str(pad.get("shape", "rect")), str(size.x), str(size.y),
+		str(pad.get("rotation", 0.0)), ",".join(layer_names)]
+
+
+## One physical land as one uniform-layer node. `logical_centre` is retained
+## only for the legacy single-land rect safeguard; combining it with any one
+## of several lands would assign that point the wrong sibling's layers.
+static func _physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
+		logical_centre: Vector2, only_land: bool) -> Dictionary:
 
 	var pad_type := str(pad.get("type", "smd"))
 	var layers: Dictionary
@@ -257,18 +321,24 @@ static func _pad_node(comp, pin_name: String, stack: PackedStringArray) -> Dicti
 	var pad_pos: Vector2 = pad.get("position", Vector2.ZERO)
 	var half: Vector2 = (pad.get("size", Vector2(1, 1)) as Vector2) * 0.5
 	var shape := str(pad.get("shape", "rect")).strip_edges().to_lower()
+	var land_centre: Vector2 = comp.position + (comp_xform * pad_pos)
+	var route_at := logical_centre if only_land else land_centre
 
 	if shape == "rect":
 		var quad := PackedVector2Array()
 		for corner in [Vector2(-half.x, -half.y), Vector2(half.x, -half.y),
 				Vector2(half.x, half.y), Vector2(-half.x, half.y)]:
 			quad.append(comp.position + (comp_xform * (pad_pos + (pad_xform * (corner as Vector2)))))
-		# The land AND the pin centre. They should coincide, but they are read
-		# from two different fields (`pads[].position` vs `pins[]`), and a trace
-		# snapped to the pin centre must still be credited if a footprint ever
-		# disagrees with itself. Zero swell, so this adds exact coincidence and
-		# nothing looser.
-		return _make_node([quad], [centre_line], 0.0, layers, centre)
+		# For a sole land, keep the land AND the pin centre. They should coincide,
+		# but they are read from two different fields (`pads[].position` vs
+		# `pins[]`), and a trace snapped to the pin centre must still be credited
+		# if a footprint ever disagrees with itself. Zero swell, so this adds exact
+		# coincidence and nothing looser. With duplicate lands every real centre
+		# is already represented by its own node and its own layer set.
+		var extra_lines: Array = []
+		if only_land:
+			extra_lines.append(PackedVector2Array([logical_centre]))
+		return _make_node([quad], extra_lines, 0.0, layers, route_at)
 
 	# Disc or stadium: a segment (a point, for the disc) swollen by the short
 	# half-axis. The pin centre is not added as a separate entry here — the
@@ -281,18 +351,7 @@ static func _pad_node(comp, pin_name: String, stack: PackedStringArray) -> Dicti
 		comp.position + (comp_xform * (pad_pos + (pad_xform * -axis))),
 		comp.position + (comp_xform * (pad_pos + (pad_xform * axis))),
 	])
-	return _make_node([], [land_line], radius, layers, centre)
-
-
-## The pad dict whose number matches `pin_name`, or {} when the footprint gave
-## no geometry for it.
-static func _pad_geometry(comp, pin_name: String) -> Dictionary:
-	if not comp.has_pad_geometry:
-		return {}
-	for pad in comp.pads:
-		if str((pad as Dictionary).get("number", "")) == pin_name:
-			return pad
-	return {}
+	return _make_node([], [land_line], radius, layers, route_at)
 
 
 ## Every piece of NON-PAD copper carrying this net: traces, vias and copper
@@ -396,8 +455,10 @@ static func _zone_fill_regions(zone: Dictionary) -> Array:
 ## Vector2: that reduction rounds each coordinate to the vector type's
 ## precision, and a shoelace sum over absolute board coordinates carries the
 ## rounding as cancellation noise that grows with the ring's distance from the
-## origin — enough to lift a zero-area ring past the cutoff. See _ring_area_2x
-## for how the sum is kept at the ring's own scale.
+## origin — enough to lift a zero-area ring past the cutoff. The reduced points
+## must remain finite too: a finite Float64 coordinate can overflow Vector2 and
+## turn a bounded polygon into infinite geometry. See _ring_area_2x for how the
+## sum is kept at the ring's own scale.
 static func _fill_region_ring(region) -> PackedVector2Array:
 	var empty := PackedVector2Array()
 	if not (region is Array):
@@ -421,7 +482,10 @@ static func _fill_region_ring(region) -> PackedVector2Array:
 		return empty
 	var pts := PackedVector2Array()
 	for i in xs.size():
-		pts.append(Vector2(xs[i], ys[i]))
+		var point := Vector2(xs[i], ys[i])
+		if not (is_finite(point.x) and is_finite(point.y)):
+			return empty
+		pts.append(point)
 	return pts
 
 
@@ -512,6 +576,7 @@ static func _make_node(polys: Array, lines: Array, swell: float,
 	return {
 		"polys": polys, "lines": lines, "swell": swell,
 		"layers": layers, "bounds": bounds, "at": at, "ref": "",
+		"pin_group": "",
 	}
 
 
@@ -737,9 +802,11 @@ static func solve(bundles: Array) -> Dictionary:
 ## of its island); the pads are the island's addressable identity.
 ##
 ## The sweep unions every touching pair over pads AND copper pieces together
-## (a trace is what joins two pads; a via is what joins two traces). Copper
-## carrying no pad — a stub trace, an orphan pour region — belongs to no
-## reported island and never appears in the answer.
+## (a trace is what joins two pads; a via is what joins two traces), plus every
+## pair of physical lands in the same logical pin_group: those are joined
+## inside the component without sharing geometry or layers here. Copper carrying
+## no pad — a stub trace, an orphan pour region — belongs to no reported island
+## and never appears in the answer.
 ##
 ## Array[int], NOT PackedInt32Array, for the union-find store: `_union` mutates
 ## it through a call, and a plain Array is by-reference in GDScript. Packed
@@ -749,10 +816,15 @@ static func _islands(nodes: Array, pad_count: int) -> Array:
 	for i in nodes.size():
 		parent.append(i)
 	for i in nodes.size():
+		var pin_group := str((nodes[i] as Dictionary).get("pin_group", ""))
 		for j in range(i + 1, nodes.size()):
 			if _root(parent, i) == _root(parent, j):
 				continue
-			if nodes_touch(nodes[i], nodes[j]):
+			# Equal-number lands are connected inside the component, but remain
+			# separate geometry nodes so one land never borrows another's layers.
+			if (not pin_group.is_empty()
+					and pin_group == str((nodes[j] as Dictionary).get("pin_group", ""))) \
+					or nodes_touch(nodes[i], nodes[j]):
 				_union(parent, i, j)
 
 	var by_root := {}
