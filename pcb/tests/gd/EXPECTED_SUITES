@@ -76,6 +76,12 @@ test_pcb_panel_tools_migration.gd assertions=68
 # the button landed. All 158 pass; only the pin was stale.
 test_pcb_panel_ui.gd assertions=158
 test_pcb_pin_inspector.gd assertions=49
+# Ratsnest renderer rewrite (work item 01a02b5763e87b84a9318b28f7437fa7):
+# physical connectivity, MST airwires, high-fanout quieting. Authored, never
+# executed — the round defers all execution to testex — so left UNPINNED on
+# purpose, for the reason this file states above: a count guessed by reading
+# is exactly the false pin the attribute exists to prevent.
+test_pcb_ratsnest.gd
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev
 # scaffold.

@@ -51,6 +51,11 @@ const BusGeom := preload("model/pcb_bus_geometry.gd")
 ## dependency edge (canvas -> panel_tools); the reverse edge does not exist
 ## (panel_tools.gd never references pcb_canvas.gd), so it introduces no cycle.
 const _PanelToolsScript := preload("panel_tools.gd")
+## THE RATSNEST ANSWER (work item 01a02b5763e87b84a9318b28f7437fa7): which pads
+## a net still needs joined, measured from the copper actually on the board.
+## Pure statics over the board model — see _draw_ratsnest below for why the
+## computation lives outside this file.
+const PcbRatsnest := preload("model/pcb_ratsnest.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -2625,35 +2630,111 @@ func _draw_cutout_halos() -> void:
 		draw_polyline(outline, trace_selected_color, cutout_outline_width_px * 2.0)
 
 
-## Draw ratsnest (unrouted net connections)
+## ── RATSNEST ─────────────────────────────────────────────────────────────────
+## WHAT IS DRAWN and WHY it is drawn that way lives in model/pcb_ratsnest.gd;
+## this canvas only turns that answer into pixels. The split matters: the
+## answer is a pure function of the board, so it is testable without a
+## viewport, and an off-screen capture computes the SAME answer from the SAME
+## board rather than mirroring a snapshot that could go stale.
+##
+## THE CACHE. PcbRatsnest.extract() is O(board) and PcbRatsnest.solve() is
+## O(pads^2) per net; a redraw fires on every pan and zoom frame, so solving
+## per frame would make panning a large board cost quadratic work for a picture
+## that did not change. The cache key is hash(extract(...)) — a hash of the
+## solver's COMPLETE input — which is why a stale ratsnest cannot survive a
+## board edit: there is no second, hand-written summary of "what counts as a
+## change" to fall out of step with what the solver actually reads. In
+## particular this covers a LIVE DRAG, which moves component positions without
+## bumping board_revision (see _apply_drag_delta).
+var _ratsnest_key: int = 0
+var _ratsnest_solved: Dictionary = {}
+var _ratsnest_ready: bool = false
+
+
+## The current ratsnest answer, re-solved only when the board's copper moved.
+func _ratsnest() -> Dictionary:
+	if data == null:
+		return {}
+	var bundles := PcbRatsnest.extract(data)
+	var key := hash(bundles)
+	if not _ratsnest_ready or key != _ratsnest_key:
+		_ratsnest_solved = PcbRatsnest.solve(bundles)
+		_ratsnest_key = key
+		_ratsnest_ready = true
+	return _ratsnest_solved
+
+
+## Minimum value (HSV V) an airwire is drawn at. Net colours are authored for
+## COPPER on a light-ish schematic reading, and pcb_net.generate_color_for_name
+## hands GND flat black — which, drawn at 60% alpha over this canvas's dark
+## green board, is an airwire nobody can see. Ground is the single net a
+## designer most needs to read here, so the airwire (and ONLY the airwire —
+## the net's own colour is untouched) is lifted to a legible value.
+const AIRWIRE_MIN_VALUE := 0.55
+const AIRWIRE_ALPHA := 0.6
+
+
+func _airwire_color(net_color: Color) -> Color:
+	var c := net_color
+	if c.v < AIRWIRE_MIN_VALUE:
+		c = Color.from_hsv(c.h, c.s, AIRWIRE_MIN_VALUE, 1.0)
+	c.a = AIRWIRE_ALPHA
+	return c
+
+
+## Draw the ratsnest: one dashed airwire per join a net still needs.
+##
+## NOT LAYER-FILTERED, deliberately. An airwire is not copper — it is the
+## ABSENCE of copper — so hiding a copper layer must not hide the work that
+## remains on it. (The connectivity behind it is computed over all copper for
+## the same reason: what is physically joined does not change because a View
+## eye is shut.)
 func _draw_ratsnest() -> void:
-	for net_name in data.nets:
-		var net = data.nets[net_name]
-		if net.pins.size() < 2:
-			continue
+	var rats := _ratsnest()
+	if rats.is_empty():
+		return
 
-		var pin_data: Array = []
-		for pin in net.pins:
-			var comp_id: String = pin.get("component_id", "")
-			var pin_name: String = pin.get("pin_name", "")
-			var comp = data.get_component(comp_id)
-			if comp:
-				pin_data.append({
-					"pos": comp.get_pin_world_position(pin_name),
-					"comp_id": comp_id,
-					"pin_name": pin_name
-				})
+	for link in rats.get("links", []):
+		var c := _airwire_color((link as Dictionary)["color"])
+		var p1 := world_to_screen((link as Dictionary)["a"])
+		var p2 := world_to_screen((link as Dictionary)["b"])
+		_draw_dashed_line(p1, p2, c, 1.5, 5.0)
+		draw_circle(p1, 3.0, c)
+		draw_circle(p2, 3.0, c)
 
-		if pin_data.size() >= 2:
-			var net_color = net.color
-			net_color.a = 0.6
+	# A quieted net's UNDRAWN islands still say where they are — a hollow ring
+	# on one pad of each, so "there is more of this net left" is a place on the
+	# board and not only a number in the corner.
+	for marker in rats.get("markers", []):
+		var c := _airwire_color((marker as Dictionary)["color"])
+		draw_arc(world_to_screen((marker as Dictionary)["at"]), 4.0, 0.0, TAU, 12, c, 1.5)
 
-			for i in range(pin_data.size() - 1):
-				var p1 := world_to_screen(pin_data[i]["pos"])
-				var p2 := world_to_screen(pin_data[i + 1]["pos"])
-				_draw_dashed_line(p1, p2, net_color, 1.5, 5.0)
-				draw_circle(p1, 3.0, net_color)
-				draw_circle(p2, 3.0, net_color)
+	_draw_ratsnest_legend(rats.get("quieted", []))
+
+
+## The honesty half of quieting (top-right, clear of the mask note at top-left
+## and the approximation notice at the bottom): every net whose airwires were
+## thinned says so by name, with how many joins it still needs and how many of
+## them are on screen. A distribution net that went quiet without this line
+## would be indistinguishable from one that finished routing.
+func _draw_ratsnest_legend(rows: Array) -> void:
+	if rows.is_empty():
+		return
+	var legend_font := ThemeDB.fallback_font
+	if legend_font == null:
+		return
+	var box := 300.0
+	var x := maxf(size.x - 10.0 - box, 4.0)
+	var y := 20.0
+	draw_string(legend_font, Vector2(x, y), "RATSNEST — quieted (high-fanout) nets",
+		HORIZONTAL_ALIGNMENT_RIGHT, box, 11, Color(0.82, 0.82, 0.88, 0.9))
+	y += 14.0
+	for row in rows:
+		var r := row as Dictionary
+		draw_string(legend_font, Vector2(x, y),
+			"%s — %d joins left, %d shown" % [str(r["net"]), int(r["remaining"]), int(r["shown"])],
+			HORIZONTAL_ALIGNMENT_RIGHT, box, 11, _airwire_color(r["color"]))
+		y += 13.0
 
 
 ## How much of a component the current layer filter lets through. ONE rule,
@@ -9759,6 +9840,13 @@ const CAPTURE_MIRRORED_FIELDS := [
 	# The disclosure itself — a screenshot must carry the same admission of
 	# what is approximate that the human sees.
 	"show_approximation_notice",
+	# NOT LISTED, on purpose: _ratsnest_key / _ratsnest_solved / _ratsnest_ready.
+	# Those are a CACHE of a pure function of `data`, and `data` is shared with
+	# the copy by reference. The copy recomputes and — because the computation
+	# is deterministic (see model/pcb_ratsnest.gd) — arrives at the same answer.
+	# Mirroring a cache would be strictly worse: it would let a capture inherit
+	# a stale solve instead of taking a fresh one. `show_ratsnest`, which is the
+	# actual VIEW state, is listed at the top.
 ]
 
 
