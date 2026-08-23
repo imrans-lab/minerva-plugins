@@ -21,6 +21,11 @@ extends RefCounted
 ##                     quieting
 ##   compute(data)   = solve(extract(data))
 ##
+## Beside that pipeline, and reading the same extract:
+##
+##   focus(bundles, ref) → the ONE nearest place a trace started on pad `ref`
+##                     should be routed to, or {} when there is none
+##
 ## `extract` is O(board); `solve` is O(nodes^2) geometry comparisons per net.
 ## The canvas caches the solve, keyed on a hash of the extract — the solver's
 ## complete input.
@@ -880,12 +885,7 @@ static func _union(parent: Array[int], a: int, b: int) -> void:
 ##
 ## Kruskal over one best edge per island pair.
 static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Array:
-	var island_of: Array[int] = []
-	island_of.resize(nodes.size())
-	island_of.fill(-1)
-	for i in islands.size():
-		for n in ((islands[i] as Dictionary)["nodes"] as Array):
-			island_of[int(n)] = i
+	var island_of := _island_of_nodes(nodes.size(), islands)
 
 	# Best (shortest) bridge per island pair. An equal-length challenger is
 	# resolved by _edge_beats over the candidates' own coordinates, layer need
@@ -979,6 +979,121 @@ static func _points_less(a1: Vector2, b1: Vector2, a2: Vector2, b2: Vector2) -> 
 	if a1 != a2:
 		return _point_less(a1, a2)
 	return _point_less(b1, b2)
+
+
+## For each node index, the island it belongs to, or -1 for copper that belongs
+## to no pad-bearing island.
+static func _island_of_nodes(node_count: int, islands: Array) -> Array[int]:
+	var island_of: Array[int] = []
+	island_of.resize(node_count)
+	island_of.fill(-1)
+	for i in islands.size():
+		for n in ((islands[i] as Dictionary)["nodes"] as Array):
+			island_of[int(n)] = i
+	return island_of
+
+
+# ── FOCUS: the one destination a trace started on a pad should reach ──────────
+
+## The single nearest place to route `origin_ref` to, or {} when there is none.
+##
+## Measured FROM THE PAD, not from the pad's whole island: the gesture this
+## answers starts at that pad, so the distance reported is the distance the
+## designer is about to draw. Every node of every OTHER island on the pad's net
+## is a candidate — pads, traces, vias and poured regions alike — so the answer
+## lands on the copper a new trace would actually touch, which need not be a pad
+## centre. The origin's own island is excluded: copper already joined to the pad
+## is not somewhere left to route it.
+##
+## Independent of quieting. A high-fanout net draws only its shortest few
+## airwires, but a pad on it still has a nearest unjoined island, and that is
+## what this reports.
+##
+## Returns:
+##   {
+##     "net": String, "color": Color,
+##     "from_ref": String,        # the pad the gesture started on
+##     "to_ref": String,          # the destination pad, "" when the destination
+##                                #   copper is a trace, via or pour
+##     "to_island_ref": String,   # the destination island's identifying pad —
+##                                #   its lowest-sorting one; always present
+##     "a": Vector2, "b": Vector2,# route targets: a on the origin pad, b on the
+##                                #   destination copper
+##     "length": float,           # mm between them
+##     "layer_change": bool,      # the two ends share no copper layer
+##     "label": String,           # net, destination and distance, for the canvas
+##   }
+##
+## DETERMINISM. Candidates are compared with _edge_beats, the same total order
+## the spanning tree uses; candidates equal on every one of its keys draw the
+## same airwire, and the first-visited one wins. Visiting order follows node
+## index, which the extract has already made a function of the board.
+static func focus(bundles: Array, origin_ref: String) -> Dictionary:
+	if origin_ref.is_empty():
+		return {}
+	for bundle in bundles:
+		var pads: Array = (bundle as Dictionary)["pads"]
+		var origin_lands: Array[int] = []
+		for i in pads.size():
+			if str((pads[i] as Dictionary)["ref"]) == origin_ref:
+				origin_lands.append(i)
+		if origin_lands.is_empty():
+			continue
+		return _focus_in_bundle(bundle as Dictionary, origin_ref, origin_lands)
+	return {}
+
+
+## The focus within the one bundle carrying `origin_ref`. `origin_lands` are that
+## pin's land nodes; they are joined to each other by pin_group, so they all sit
+## in one island and any of them names it.
+static func _focus_in_bundle(bundle: Dictionary, origin_ref: String,
+		origin_lands: Array[int]) -> Dictionary:
+	var pads: Array = bundle["pads"]
+	var nodes: Array = pads.duplicate()
+	nodes.append_array(bundle["pieces"])
+	var islands := _islands(nodes, pads.size())
+	if islands.size() < 2:
+		return {}
+	var island_of := _island_of_nodes(nodes.size(), islands)
+	var home := island_of[origin_lands[0]]
+	if home < 0:
+		return {}
+
+	var best := {}
+	for i in origin_lands:
+		for j in nodes.size():
+			var ib := island_of[j]
+			if ib < 0 or ib == home:
+				continue
+			var near := _nearest_targets(nodes[i], true, nodes[j], j < pads.size())
+			var cand := {
+				"island": ib,
+				"a": near["a"], "b": near["b"],
+				"a_ref": origin_ref,
+				"b_ref": str((nodes[j] as Dictionary)["ref"]),
+				"layer_change": not _layers_meet(
+					nodes[i]["layers"], nodes[j]["layers"]),
+				"length": float(near["length"]),
+			}
+			if best.is_empty() or _edge_beats(cand, best):
+				best = cand
+	if best.is_empty():
+		return {}
+
+	var target_island: Dictionary = islands[int(best["island"])]
+	var island_ref := str(
+		(pads[int((target_island["pads"] as Array)[0])] as Dictionary)["ref"])
+	var to_ref := str(best["b_ref"])
+	var net_name := str(bundle["net"])
+	var named := to_ref if not to_ref.is_empty() else "%s's copper" % island_ref
+	return {
+		"net": net_name, "color": bundle["color"],
+		"from_ref": origin_ref, "to_ref": to_ref, "to_island_ref": island_ref,
+		"a": best["a"], "b": best["b"],
+		"length": float(best["length"]),
+		"layer_change": bool(best["layer_change"]),
+		"label": "%s → %s · %.2f mm" % [net_name, named, float(best["length"])],
+	}
 
 
 # ── AIM: where an airwire between two conductors lands ────────────────────────

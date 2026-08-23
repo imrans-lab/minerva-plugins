@@ -877,6 +877,14 @@ top copper layer, when the filter is "All"). Note this is the OPPOSITE
 default from Draw ▸ Pour above (bottom) — leaving the filter on "All" and
 drawing both puts them on different layers with no warning.
 
+Starting on a pad also marks and labels **one destination**: the nearest
+copper on that pad's net that is not already joined to it, with the net, the
+destination part and the distance. It is picked when the gesture starts and
+does not move until the trace commits or is cancelled, and every other
+airwire dims while it is up (none are removed). It is guidance only — every
+click, waypoint and finish stays exactly as legal as it was; DRC is still the
+correctness net. Turning the ratsnest off (N) hides it along with the rest.
+
 **Draw ▸ Bus** — draws N parallel traces at once (campaign 2 epoch C unit 5,
 DCR `019fb572b888`). Two phases in one tool: **PICKING** — click a pad or a
 trace to add that net to an ORDERED list (click an already-listed net again

@@ -83,6 +83,22 @@ extends SceneTree
 ##      non-first land closes the pin, while a through-hole land elsewhere does
 ##      not lend its bottom-layer reach to a top-only sibling. Reversing the
 ##      physical-pad list changes neither answer nor picture.
+##
+##  13. ROUTE FOCUS — one destination, locked for the gesture. (a) six pads with
+##      unique nearest neighbours: every pad is offered the nearest one, at that
+##      land's copper, measured from the pad the gesture started on, against
+##      distances this suite computes itself. (b) the destination is COPPER, so
+##      a pad 2mm off a routed trace is aimed at the trace (Godot's own
+##      closest-point-on-segment is the oracle) while a pad at the other end of
+##      that island is offered the far land it can actually reach. (c) quieting
+##      thins the drawn airwires, never the destination: every pad of a 20-pad
+##      quieted net has one, at the 4mm grid pitch, including the pads no drawn
+##      airwire touches. (d) the canvas seam — idle renders the solver's answer
+##      with nothing dimmed, the destination is fixed at gesture start and
+##      survives waypoints, cursor movement and a board edit that demonstrably
+##      moves the answer, every other airwire recedes without any leaving the
+##      picture, a capture copy draws the same thing, and commit and cancel both
+##      leave nothing behind.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -107,6 +123,10 @@ func _init() -> void:
 	_run_airwire_aims_at_island_copper()
 	_run_layer_change_tie()
 	_run_duplicate_pad_numbers()
+	_run_route_focus_is_the_nearest_island()
+	_run_route_focus_aims_at_copper()
+	_run_route_focus_survives_quieting()
+	_run_route_focus_canvas_gesture()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -199,18 +219,34 @@ func _links_for(result: Dictionary, net: String) -> Array:
 
 
 ## A stable text rendering of the whole picture, for comparing two answers.
+##
+## EMPHASIS IS PART OF THE PICTURE. A canvas render plan tags every link and
+## marker with the weight it is drawn at and may carry a focused destination;
+## a raw solver answer carries neither, and reads as "normal" with no focus —
+## which is exactly what an idle canvas must produce. Without emphasis here,
+## "the idle picture is unchanged" would still pass for a canvas that dimmed
+## half the board.
 func _picture(result: Dictionary) -> PackedStringArray:
 	var out := PackedStringArray()
 	for link in result.get("links", []):
 		var l := link as Dictionary
-		out.append("link %s %s->%s (%.4f,%.4f)-(%.4f,%.4f)%s" % [
+		out.append("link %s %s->%s (%.4f,%.4f)-(%.4f,%.4f)%s [%s]" % [
 			str(l["net"]), str(l["a_ref"]), str(l["b_ref"]),
 			(l["a"] as Vector2).x, (l["a"] as Vector2).y,
 			(l["b"] as Vector2).x, (l["b"] as Vector2).y,
-			" via" if bool(l.get("layer_change", false)) else ""])
+			" via" if bool(l.get("layer_change", false)) else "",
+			str(l.get("emphasis", "normal"))])
 	for marker in result.get("markers", []):
 		var m := marker as Dictionary
-		out.append("mark %s %s" % [str(m["net"]), str(m["ref"])])
+		out.append("mark %s %s [%s]" % [str(m["net"]), str(m["ref"]),
+			str(m.get("emphasis", "normal"))])
+	var focus: Dictionary = result.get("focus", {})
+	if not focus.is_empty():
+		out.append("focus %s (%.4f,%.4f)-(%.4f,%.4f) [%s]" % [
+			str(focus["label"]),
+			(focus["a"] as Vector2).x, (focus["a"] as Vector2).y,
+			(focus["b"] as Vector2).x, (focus["b"] as Vector2).y,
+			str(focus.get("emphasis", "normal"))])
 	for row in result.get("nets", []):
 		var r := row as Dictionary
 		out.append("net %s islands=%d remaining=%d shown=%d quiet=%s" % [
@@ -1194,3 +1230,270 @@ func _run_duplicate_pad_numbers() -> void:
 	check("reversing duplicate physical pads changes neither answer nor picture",
 		_picture(Ratsnest.compute(_duplicate_pad_board(true, false))) == _picture(joined)
 			and _picture(Ratsnest.compute(_duplicate_pad_board(true, true))) == _picture(mixed))
+
+
+# ── 13. route focus: one locked destination for a trace gesture ───────────────
+
+## Six pads on one net, no copper between them, placed so that every pad's
+## nearest neighbour is unique — no two candidates tie, so "the nearest one" has
+## exactly one right answer to compare against.
+const _STAR_PADS := {
+	"S1.1": Vector2(2.0, 2.0), "S2.1": Vector2(6.0, 3.0),
+	"S3.1": Vector2(20.0, 4.0), "S4.1": Vector2(21.0, 12.0),
+	"S5.1": Vector2(9.0, 20.0), "S6.1": Vector2(34.0, 30.0),
+}
+
+
+func _star_board():
+	var parts: Array = []
+	var pin_refs: Array = []
+	for ref in _STAR_PADS:
+		var at: Vector2 = _STAR_PADS[ref]
+		parts.append(_part(str(ref).get_slice(".", 0), at.x, at.y,
+			[_smd_pin("1", 0.0, 0.0)]))
+		pin_refs.append(ref)
+	# A second net whose two pads are already joined end to end: nothing left to
+	# route, so nothing to focus on.
+	parts.append(_part("W1", 4.0, 36.0, [_smd_pin("1", 0.0, 0.0)]))
+	parts.append(_part("W2", 14.0, 36.0, [_smd_pin("1", 0.0, 0.0)]))
+	return _board({
+		"components": parts,
+		"nets": [
+			{"name": "STAR", "pins": pin_refs},
+			{"name": "WHOLE", "pins": ["W1.1", "W2.1"]},
+		],
+		"traces": [_trace("t_whole", "WHOLE", "top",
+			Vector2(4, 36), Vector2(14, 36))],
+	})
+
+
+## The nearest OTHER pad of the star net, measured over pad centres with plain
+## arithmetic — the independent answer the focus has to agree with.
+func _nearest_star_pad(ref: String) -> Dictionary:
+	var here: Vector2 = _STAR_PADS[ref]
+	var best_ref := ""
+	var best_d := INF
+	for other in _STAR_PADS:
+		if other == ref:
+			continue
+		var d: float = here.distance_to(_STAR_PADS[other])
+		if d < best_d:
+			best_d = d
+			best_ref = str(other)
+	return {"ref": best_ref, "length": best_d, "at": _STAR_PADS[best_ref]}
+
+
+## The link list with emphasis stripped — for asserting that receding removed
+## nothing, against a picture that deliberately encodes emphasis.
+func _link_identities(result: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	for link in result.get("links", []):
+		var l := link as Dictionary
+		out.append("%s %s->%s (%.4f,%.4f)-(%.4f,%.4f)" % [
+			str(l["net"]), str(l["a_ref"]), str(l["b_ref"]),
+			(l["a"] as Vector2).x, (l["a"] as Vector2).y,
+			(l["b"] as Vector2).x, (l["b"] as Vector2).y])
+	return out
+
+
+func _emphases(rows: Array) -> Dictionary:
+	var seen := {}
+	for row in rows:
+		seen[str((row as Dictionary).get("emphasis", ""))] = true
+	return seen
+
+
+func _run_route_focus_is_the_nearest_island() -> void:
+	print("-- 13a. the focused destination is the nearest unjoined copper --")
+	var d = _star_board()
+	var bundles := Ratsnest.extract(d)
+
+	# ORACLE: the nearest other pad, by distance between pad centres, computed
+	# here without the solver. A focus that followed the spanning tree, the pin
+	# list, or the net's first island would disagree on at least one pad.
+	var wrong_target: Array = []
+	var wrong_point: Array = []
+	var wrong_origin: Array = []
+	var wrong_length: Array = []
+	for ref in _STAR_PADS:
+		var expected := _nearest_star_pad(str(ref))
+		var f := Ratsnest.focus(bundles, str(ref))
+		if str(f.get("to_ref", "")) != str(expected["ref"]):
+			wrong_target.append(ref)
+		if not (f.get("b", Vector2.ZERO) as Vector2).is_equal_approx(expected["at"]):
+			wrong_point.append(ref)
+		if not (f.get("a", Vector2.ZERO) as Vector2).is_equal_approx(_STAR_PADS[ref]):
+			wrong_origin.append(ref)
+		if absf(float(f.get("length", -1.0)) - float(expected["length"])) > 1e-4:
+			wrong_length.append(ref)
+	check("every pad is offered its nearest unjoined land (wrong: %s)"
+		% str(wrong_target), wrong_target.is_empty())
+	check("…at that land's own copper (wrong: %s)" % str(wrong_point),
+		wrong_point.is_empty())
+	check("…measured from the pad the gesture started on (wrong: %s)"
+		% str(wrong_origin), wrong_origin.is_empty())
+	check("…and the reported distance is that measured distance (wrong: %s)"
+		% str(wrong_length), wrong_length.is_empty())
+
+	# The label has to identify the destination on its own: net, pad, distance.
+	check_eq("the label names the net, the destination pad and the distance",
+		str(Ratsnest.focus(bundles, "S1.1").get("label", "")),
+		"STAR → S2.1 · 4.12 mm")
+
+	check("a pad whose net is already whole is offered nothing",
+		Ratsnest.focus(bundles, "W1.1").is_empty())
+	check("a ref that is on no pad is offered nothing",
+		Ratsnest.focus(bundles, "NOSUCH.1").is_empty())
+	check("an empty ref is offered nothing", Ratsnest.focus(bundles, "").is_empty())
+
+
+func _run_route_focus_aims_at_copper() -> void:
+	print("-- 13b. the destination is copper, and it is measured from the pad --")
+	# A1 and A2 are joined by a 30mm trace; A3 sits 2mm above its midpoint.
+	var d = _board({
+		"components": [
+			_part("A1", 5.0, 40.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("A2", 35.0, 40.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("A3", 20.0, 42.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "AIM", "pins": ["A1.1", "A2.1", "A3.1"]}],
+		"traces": [_trace("t_span", "AIM", "top", Vector2(5, 40), Vector2(35, 40))],
+	})
+	var bundles := Ratsnest.extract(d)
+
+	# ORACLE: the closest point on the trace segment, from Godot's own geometry,
+	# owing nothing to the ratsnest.
+	var foot := Geometry2D.get_closest_point_to_segment(
+		Vector2(20, 42), Vector2(5, 40), Vector2(35, 40))
+	var from_a3 := Ratsnest.focus(bundles, "A3.1")
+	check("the destination is the trace, not the nearest pad centre",
+		(from_a3.get("b", Vector2.ZERO) as Vector2).is_equal_approx(foot)
+			and absf(float(from_a3.get("length", -1.0)) - 2.0) < 1e-4)
+	check("mid-trace copper names no pad of its own…",
+		str(from_a3.get("to_ref", "x")) == "")
+	check("…so the island is identified by its lowest-sorting pad",
+		str(from_a3.get("to_island_ref", "")) == "A1.1")
+	check_eq("and the label still says which net, which part and how far",
+		str(from_a3.get("label", "")), "AIM → A1.1's copper · 2.00 mm")
+
+	# ORACLE: the distance is the one the designer is about to draw. From A1 the
+	# only unjoined copper is A3's land 15.13mm away — the 2mm hop belongs to the
+	# other end of A1's own island, and offering it would name a destination this
+	# gesture cannot reach in 2mm.
+	var from_a1 := Ratsnest.focus(bundles, "A1.1")
+	check("a gesture started elsewhere on the island measures from ITS pad",
+		str(from_a1.get("to_ref", "")) == "A3.1"
+			and absf(float(from_a1.get("length", -1.0))
+				- Vector2(5, 40).distance_to(Vector2(20, 42))) < 1e-4)
+
+
+func _run_route_focus_survives_quieting() -> void:
+	print("-- 13c. quieting thins the airwires, never the destination --")
+	var d = _fanout_board(20)
+	var bundles := Ratsnest.extract(d)
+	var solved := Ratsnest.solve(bundles)
+
+	var reached := {}
+	for link in _links_for(solved, "BIGGND"):
+		reached[str((link as Dictionary)["a_ref"])] = true
+		reached[str((link as Dictionary)["b_ref"])] = true
+	check("quieting leaves most of this net's pads off every drawn airwire",
+		reached.size() < 20)
+
+	# ORACLE: the grid pitch. Every pad in a 4mm grid has a neighbour exactly 4mm
+	# away, so any correct destination is 4mm off — including for the pads no
+	# drawn airwire touches. A focus read out of the drawn link list would have
+	# nothing to offer those.
+	var missing: Array = []
+	var wrong_length: Array = []
+	for i in 20:
+		var ref := "G%d.1" % (i + 1)
+		var f := Ratsnest.focus(bundles, ref)
+		if f.is_empty():
+			missing.append(ref)
+		elif absf(float(f["length"]) - 4.0) > 1e-4:
+			wrong_length.append(ref)
+	check("every pad on the quieted net still has a destination (missing: %s)"
+		% str(missing), missing.is_empty())
+	check("…and each one is the 4mm grid neighbour (wrong: %s)" % str(wrong_length),
+		wrong_length.is_empty())
+
+
+func _run_route_focus_canvas_gesture() -> void:
+	print("-- 13d. the canvas locks it for the gesture and leaves nothing behind --")
+	var d = _star_board()
+	var canvas = PcbCanvasScript.new()
+	canvas.data = d
+	canvas.zoom = 8.0
+	canvas.tool_mode = PcbCanvasScript.ToolMode.TRACE
+
+	# ORACLE (idle): the board's own answer, which the solver produces without
+	# any of this. _picture encodes emphasis, so a canvas that dimmed anything
+	# with no gesture in progress fails here.
+	var idle := canvas.ratsnest_render_plan()
+	check("with no gesture the plan is the solved answer, unaltered",
+		_picture(idle) == _picture(Ratsnest.compute(d)))
+	check("…nothing is receded and no destination is marked",
+		_emphases(idle["links"]) == {"normal": true}
+			and (idle["focus"] as Dictionary).is_empty())
+
+	canvas._start_trace({"ref": "S1.1", "position": _STAR_PADS["S1.1"], "net": "STAR"})
+	var locked: Dictionary = canvas._trace_focus.duplicate()
+	check("starting on a pad locks exactly one destination",
+		str(locked.get("to_ref", "")) == "S2.1")
+
+	# The gesture continues: waypoints through the real click path, and the
+	# rubber-band point the motion handler writes.
+	canvas._handle_trace_click(Vector2(4.0, 8.0), false)
+	canvas._handle_trace_click(Vector2(6.0, 14.0), false)
+	canvas._trace_preview = Vector2(30.0, 30.0)
+	canvas._trace_has_preview = true
+	check("waypoints and cursor movement do not move it",
+		canvas._trace_focus == locked)
+
+	# ORACLE (lock): move the copper the destination was chosen from. The board's
+	# answer demonstrably changes; an unlocked focus would change with it — S2 is
+	# no longer S1's nearest land once it is 25mm away.
+	var before := _picture(canvas._ratsnest())
+	d.get_component("S2").position += Vector2(0.0, 25.0)
+	check("the underlying answer really did move", _picture(canvas._ratsnest()) != before)
+	check("…and the locked destination did not", canvas._trace_focus == locked)
+
+	# ORACLE (recede, do not hide): the same airwires, all of them, at a lower
+	# weight — compared against the solver's list with emphasis stripped.
+	var during := canvas.ratsnest_render_plan()
+	var solved_now := Ratsnest.compute(d)
+	check("every airwire the board still owes is still in the picture",
+		_link_identities(during) == _link_identities(solved_now))
+	check("…and every one of them recedes",
+		_emphases(during["links"]) == {"receded": true})
+	check("…while the focus is the one thing drawn at full weight",
+		str((during["focus"] as Dictionary).get("emphasis", "")) == "focus")
+
+	# An agent's screenshot must not disagree with the screen about any of it.
+	check("the focus is registered as draw-affecting state",
+		"_trace_focus" in canvas.CAPTURE_MIRRORED_FIELDS)
+	var copy = PcbCanvasScript.new()
+	copy.data = d
+	canvas.mirror_capture_state_onto(copy)
+	check("…so a capture copy draws the same focused picture",
+		_picture(copy.ratsnest_render_plan()) == _picture(during))
+
+	canvas._cancel_trace_draw(true)
+	check("cancelling leaves no focus behind", canvas._trace_focus.is_empty())
+	check("…and the board renders as its own answer again",
+		_picture(canvas.ratsnest_render_plan()) == _picture(solved_now))
+
+	# Only now, with the gesture over, does a new one see the moved board.
+	canvas._start_trace({"ref": "S1.1", "position": _STAR_PADS["S1.1"], "net": "STAR"})
+	check("the next gesture picks up the board as it now is",
+		str(canvas._trace_focus.get("to_ref", "")) == "S3.1")
+
+	# The commit path tears it down through the same reset.
+	canvas._handle_trace_click(Vector2(4.0, 8.0), false)
+	canvas._commit_trace()
+	check("committing leaves no focus behind", canvas._trace_focus.is_empty())
+	check("…and the trace really was committed", d.traces.size() == 2)
+
+	canvas.free()
+	copy.free()

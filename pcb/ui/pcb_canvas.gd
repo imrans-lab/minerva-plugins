@@ -764,6 +764,15 @@ var _trace_has_preview: bool = false
 ## polyline reads as drawn and the rubber band reads as proposed.
 const TRACE_PREVIEW_RUBBER_ALPHA := 0.45
 const TRACE_PREVIEW_VERTEX_RADIUS_PX := 3.0
+## THE FOCUSED DESTINATION — PcbRatsnest.focus's answer for _trace_start_ref,
+## computed ONCE in _start_trace and held unchanged until _reset_trace_draw. {}
+## whenever no draw is in progress, and whenever the starting pad's net has
+## nothing left to join.
+##
+## LOCKED FOR THE GESTURE. Nothing re-solves it: not a waypoint, not the cursor,
+## not a board edit that lands mid-draw. The only route to a different answer is
+## to end this gesture and start another.
+var _trace_focus: Dictionary = {}
 
 ## ── Bus authoring (campaign 2 epoch C, unit 5 — DCR 019fb572b888 S3+S4) ───────
 ## PICKING state: nets picked so far, in CLICK ORDER (T11 — this order is what
@@ -2664,13 +2673,80 @@ func _ratsnest() -> Dictionary:
 const AIRWIRE_MIN_VALUE := 0.55
 const AIRWIRE_ALPHA := 0.6
 
+## The three weights an airwire is drawn at. NORMAL is the only one reached with
+## no gesture in progress.
+const RATSNEST_EMPHASIS_NORMAL := "normal"
+const RATSNEST_EMPHASIS_RECEDED := "receded"
+const RATSNEST_EMPHASIS_FOCUS := "focus"
 
-func _airwire_color(net_color: Color) -> Color:
+## Alpha multiplier for an airwire that is not the focused destination. Low
+## enough that the focus reads as the one answer, high enough that the rest of
+## the ratsnest is still legible context.
+const AIRWIRE_RECEDED_FACTOR := 0.3
+## The focused airwire is opaque, solid, and drawn heavier than the dashes.
+const AIRWIRE_FOCUS_WIDTH_PX := 2.5
+const AIRWIRE_FOCUS_RING_PX := 6.0
+
+
+func _airwire_color(net_color: Color,
+		emphasis: String = RATSNEST_EMPHASIS_NORMAL) -> Color:
 	var c := net_color
 	if c.v < AIRWIRE_MIN_VALUE:
 		c = Color.from_hsv(c.h, c.s, AIRWIRE_MIN_VALUE, 1.0)
-	c.a = AIRWIRE_ALPHA
+	if emphasis == RATSNEST_EMPHASIS_RECEDED:
+		c.a = AIRWIRE_ALPHA * AIRWIRE_RECEDED_FACTOR
+	elif emphasis == RATSNEST_EMPHASIS_FOCUS:
+		c.a = 1.0
+	else:
+		c.a = AIRWIRE_ALPHA
 	return c
+
+
+## The ratsnest as it will be drawn: every solved airwire and marker paired with
+## the emphasis it gets, plus the focused destination when a trace gesture holds
+## one. {} when there is nothing to draw.
+##
+## THE DRAW PATH READS THIS AND NOTHING ELSE, so "what the canvas draws" is
+## inspectable as data rather than only as pixels.
+##
+## With no gesture in progress every entry is RATSNEST_EMPHASIS_NORMAL and
+## "focus" is empty — the solved answer, unaltered. During a gesture every solved
+## entry recedes and the focus is added on top; nothing is dropped, so the same
+## links and markers are present either way.
+##
+## The focus is NOT taken from the solved links. Those are a spanning tree over
+## islands, thinned by quieting; the focus is the origin pad's own nearest
+## unjoined island, which survives both.
+##
+## The solved answer's own rows are carried through untouched, so the plan is
+## that answer plus emphasis plus the focus — never less of it. The links and
+## markers are rebuilt rather than written into, so the solver's cache keeps the
+## emphasis-free rows it computed.
+func ratsnest_render_plan() -> Dictionary:
+	var rats := _ratsnest()
+	if rats.is_empty():
+		return {}
+	var emphasis := RATSNEST_EMPHASIS_NORMAL
+	if not _trace_focus.is_empty():
+		emphasis = RATSNEST_EMPHASIS_RECEDED
+	var plan := rats.duplicate()
+	plan["links"] = _with_emphasis(rats.get("links", []), emphasis)
+	plan["markers"] = _with_emphasis(rats.get("markers", []), emphasis)
+	plan["focus"] = {}
+	if not _trace_focus.is_empty():
+		var f := _trace_focus.duplicate()
+		f["emphasis"] = RATSNEST_EMPHASIS_FOCUS
+		plan["focus"] = f
+	return plan
+
+
+static func _with_emphasis(rows: Array, emphasis: String) -> Array:
+	var out: Array = []
+	for row in rows:
+		var copy := (row as Dictionary).duplicate()
+		copy["emphasis"] = emphasis
+		out.append(copy)
+	return out
 
 
 ## Draw the ratsnest: one dashed airwire per join a net still needs. A join
@@ -2682,13 +2758,13 @@ func _airwire_color(net_color: Color) -> Color:
 ## connectivity behind it is likewise computed over all copper layers,
 ## whatever the View filter shows.
 func _draw_ratsnest() -> void:
-	var rats := _ratsnest()
-	if rats.is_empty():
+	var plan := ratsnest_render_plan()
+	if plan.is_empty():
 		return
 
-	for link in rats.get("links", []):
+	for link in plan["links"]:
 		var l := link as Dictionary
-		var c := _airwire_color(l["color"])
+		var c := _airwire_color(l["color"], str(l["emphasis"]))
 		var p1 := world_to_screen(l["a"])
 		var p2 := world_to_screen(l["b"])
 		_draw_dashed_line(p1, p2, c, 1.5, 5.0)
@@ -2705,11 +2781,36 @@ func _draw_ratsnest() -> void:
 
 	# A quieted net's UNDRAWN islands are marked in place: a hollow ring on one
 	# pad of each.
-	for marker in rats.get("markers", []):
-		var c := _airwire_color((marker as Dictionary)["color"])
-		draw_arc(world_to_screen((marker as Dictionary)["at"]), 4.0, 0.0, TAU, 12, c, 1.5)
+	for marker in plan["markers"]:
+		var m := marker as Dictionary
+		var c := _airwire_color(m["color"], str(m["emphasis"]))
+		draw_arc(world_to_screen(m["at"]), 4.0, 0.0, TAU, 12, c, 1.5)
 
-	_draw_ratsnest_legend(rats.get("quieted", []))
+	_draw_ratsnest_legend(plan["quieted"])
+	_draw_ratsnest_focus(plan["focus"])
+
+
+## The focused destination: a solid opaque airwire from the pad the gesture
+## started on to the copper it should reach, a ring around that copper, and the
+## label naming it. Drawn LAST so it sits over the receded ratsnest, and drawn
+## from the focus itself rather than from a solved link — the destination need
+## not be one of the spanning tree's edges.
+##
+## GUIDANCE, NEVER ENFORCEMENT: this only draws. Nothing here refuses a click,
+## moves a waypoint, or narrows where the trace may end.
+func _draw_ratsnest_focus(focus: Dictionary) -> void:
+	if focus.is_empty():
+		return
+	var c := _airwire_color(focus["color"], RATSNEST_EMPHASIS_FOCUS)
+	var p1 := world_to_screen(focus["a"])
+	var p2 := world_to_screen(focus["b"])
+	draw_line(p1, p2, c, AIRWIRE_FOCUS_WIDTH_PX)
+	draw_arc(p2, AIRWIRE_FOCUS_RING_PX, 0.0, TAU, 20, c, AIRWIRE_FOCUS_WIDTH_PX)
+	if bool(focus["layer_change"]):
+		_draw_layer_change_marker(p2, c)
+	if font != null:
+		draw_string(font, p2 + Vector2(AIRWIRE_FOCUS_RING_PX + 4.0, -4.0),
+			str(focus["label"]), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, c)
 
 
 ## Marker for an airwire endpoint whose join needs a layer change: a hollow
@@ -7544,6 +7645,10 @@ func _draw_cutout_preview() -> void:
 ## authors a route HINT the router consumes; this one authors the Trace entity
 ## itself — model, canvas and board YAML — bypassing the router entirely.
 ##
+## Starting also LOCKS ONE DESTINATION — see _trace_focus — which the ratsnest
+## draw path marks and labels while every other airwire recedes. It is drawing
+## only: no click, waypoint or finish is refused or redirected by it.
+##
 ## Starting REQUIRES a pad hit, because a trace's net is INHERITED rather than
 ## chosen. That is why this tool has no net picker where the zone tools have one:
 ## pads are the only place on the board where "which net is this?" already has an
@@ -7668,6 +7773,9 @@ func _start_trace(hit: Dictionary) -> void:
 	_trace_start_ref = str(hit.get("ref", ""))
 	_trace_points = PackedVector2Array([hit.get("position", Vector2.ZERO)])
 	_trace_has_preview = false
+	# The one place the destination is chosen. extract() is O(board) and runs
+	# once per gesture here, not per frame.
+	_trace_focus = PcbRatsnest.focus(PcbRatsnest.extract(data), _trace_start_ref)
 	trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad to finish." % [
 		_trace_start_ref, _trace_net, _trace_layer])
 	queue_redraw()
@@ -7757,6 +7865,9 @@ func _reset_trace_draw() -> void:
 	_trace_layer = ""
 	_trace_start_ref = ""
 	_trace_has_preview = false
+	# The focus is gesture state and leaves nothing behind: every commit, cancel
+	# and tool switch reaches here, and the next gesture computes its own.
+	_trace_focus = {}
 
 
 ## Draw the trace being born in the SAME visual language _draw_single_trace uses
@@ -9849,6 +9960,10 @@ const CAPTURE_MIRRORED_FIELDS := [
 	# The disclosure itself — a screenshot must carry the same admission of
 	# what is approximate that the human sees.
 	"show_approximation_notice",
+	# The trace gesture's focused destination: it recedes every other airwire
+	# and adds one of its own, so a capture without it draws a different
+	# ratsnest from the one on screen.
+	"_trace_focus",
 	# NOT LISTED, on purpose: _ratsnest_key / _ratsnest_solved / _ratsnest_ready.
 	# Those are a CACHE of a pure function of `data`, which the copy shares by
 	# reference; the copy re-solves and, the computation being deterministic (see
