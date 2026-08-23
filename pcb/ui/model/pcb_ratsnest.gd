@@ -26,7 +26,7 @@ extends RefCounted
 ## complete input.
 ##
 ## ── DETERMINISM ──────────────────────────────────────────────────────────────
-## The same board draws the same picture in every session. Three places where
+## The same board draws the same picture in every session. Four places where
 ## iteration order could leak in, and what each does instead:
 ##
 ##   * ENUMERATION. Net names, trace ids, via ids and zone ids are SORTED
@@ -36,8 +36,12 @@ extends RefCounted
 ##     root, so the root of a set is its minimum member rather than an artefact
 ##     of the order the unions arrived in.
 ##   * SORTS. Godot's sort_custom is not stable, so every comparator here is a
-##     TOTAL order — the float key first, then integer tie-breaks down to the
-##     node indices — and never calls two distinct elements equal.
+##     TOTAL order — the float key first, then tie-breaks that never call two
+##     distinct elements equal.
+##   * TIES. Equal-distance choices (which copper an airwire lands on) resolve
+##     by the candidates' own coordinates — see _near_update and _edge_beats —
+##     never by which candidate a loop visited first, so reordering a zone's
+##     fill regions, or the points within one, cannot change the picture.
 ##
 ## No randomness, no time, no hashing of pointer identities.
 
@@ -354,24 +358,71 @@ static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Arr
 ## Array of regions, each an Array of {x_mm, y_mm} points — the same point
 ## encoding as the authored outline, one polygon ring per separately filled
 ## region. Returns them as PackedVector2Array polygons; empty when the fill is
-## absent, malformed, or legitimately produced no copper.
+## absent or legitimately produced no copper.
+##
+## DAMAGED FILL DATA IS NOT COPPER. Any damage anywhere in the fill — a region
+## that is not an Array, a point that is not a finite-numbered {x_mm, y_mm}
+## Dictionary, a ring that encloses no area — rejects the ENTIRE fill, intact
+## sibling regions included: a fill that is partly wrong is a compile output
+## that cannot be trusted, and treating any of it as copper could erase an
+## airwire the board still needs. Rejection only ever KEEPS airwires.
 static func _zone_fill_regions(zone: Dictionary) -> Array:
 	var out: Array = []
 	var fill = zone.get("fill")
 	if not (fill is Array):
 		return out
 	for region in fill:
-		if not (region is Array):
-			continue
-		var pts := PackedVector2Array()
-		for p in region:
-			if p is Dictionary:
-				pts.append(Vector2(
-					float((p as Dictionary).get("x_mm", 0.0)),
-					float((p as Dictionary).get("y_mm", 0.0))))
-		if pts.size() >= 3:
-			out.append(pts)
+		var pts := _fill_region_ring(region)
+		if pts.is_empty():
+			return []
+		out.append(pts)
 	return out
+
+
+## One fill region decoded into its polygon ring, or empty when the region is
+## not usable as copper. Every point must be present, a Dictionary, and carry
+## finite numeric x_mm AND y_mm — a damaged point is never repaired with a
+## defaulted coordinate and never skipped, because either builds a
+## plausible-looking shape out of data that no longer describes one. The ring
+## must also enclose real area: a collinear or coincident ring is a line, not
+## a region of copper.
+static func _fill_region_ring(region) -> PackedVector2Array:
+	var empty := PackedVector2Array()
+	if not (region is Array):
+		return empty
+	var pts := PackedVector2Array()
+	for p in region:
+		if not (p is Dictionary):
+			return empty
+		var x = (p as Dictionary).get("x_mm")
+		var y = (p as Dictionary).get("y_mm")
+		if not (_finite_number(x) and _finite_number(y)):
+			return empty
+		pts.append(Vector2(float(x), float(y)))
+	if pts.size() < 3:
+		return empty
+	# Less enclosed area than the coincidence tolerance can resolve is no
+	# area at all — this also absorbs float cancellation noise in the
+	# shoelace sum of a nearly-degenerate ring.
+	if _ring_area_2x(pts) <= TOUCH_EPS_MM * TOUCH_EPS_MM:
+		return empty
+	return pts
+
+
+static func _finite_number(v) -> bool:
+	if v is int:
+		return true
+	return v is float and is_finite(v)
+
+
+## Twice the area a ring encloses (shoelace), sign dropped.
+static func _ring_area_2x(pts: PackedVector2Array) -> float:
+	var s := 0.0
+	for i in pts.size():
+		var a := pts[i]
+		var b := pts[(i + 1) % pts.size()]
+		s += a.x * b.y - b.x * a.y
+	return absf(s)
 
 
 ## A copy of `entries` ordered by a caller-supplied string key, with the key's
@@ -544,13 +595,17 @@ static func _polygons_meet(a: PackedVector2Array, b: PackedVector2Array, tol: fl
 ## Returns:
 ##   {
 ##     "links":   Array — one airwire each, in draw order:
-##                {net, color, a: Vector2, b: Vector2, a_ref, b_ref, length}.
+##                {net, color, a: Vector2, b: Vector2, a_ref, b_ref,
+##                layer_change, length}.
 ##                a/b are the CLOSEST ROUTE TARGETS of the two islands bridged —
 ##                a pad centre, a point on a trace centreline, a via, a point of
 ##                a poured region — so the airwire points where the joining
 ##                copper would land. a_ref/b_ref name the endpoint's pad
 ##                ("<component>.<pin>") when the endpoint IS a pad, "" when it
-##                is other copper.
+##                is other copper. layer_change is true when the two endpoints'
+##                copper shares no layer, so closing the join takes a via — it
+##                can be true even at zero length, two ends stacked through the
+##                board.
 ##     "markers": Array — {net, color, at: Vector2, ref} for each island of a
 ##                QUIETED net that no drawn link reaches: "there is still
 ##                unjoined copper here", without a line to reach it
@@ -595,6 +650,7 @@ static func solve(bundles: Array) -> Dictionary:
 				"net": net_name, "color": color,
 				"a": edge["a"], "b": edge["b"],
 				"a_ref": edge["a_ref"], "b_ref": edge["b_ref"],
+				"layer_change": bool(edge["layer_change"]),
 				"length": float(edge["length"]),
 			})
 		if quieted:
@@ -706,9 +762,11 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 		for n in ((islands[i] as Dictionary)["nodes"] as Array):
 			island_of[int(n)] = i
 
-	# Best (shortest) bridge per island pair. Nodes are walked in ascending
-	# index order and the comparison is STRICTLY less-than, so a tie keeps the
-	# lexicographically smallest node pair without a second tie-break. The
+	# Best (shortest) bridge per island pair. An equal-length challenger is
+	# resolved by _edge_beats over the candidates' own coordinates and refs,
+	# so which one represents the pair is a property of the board rather than
+	# of the order the node pairs are visited in — node visiting order follows
+	# node indices, which follow the order the board's lists arrived in. The
 	# edge's a-side always belongs to the LOWER-numbered island.
 	var best := {}
 	for i in nodes.size():
@@ -721,31 +779,32 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 				continue
 			var near := _nearest_targets(
 				nodes[i], i < pad_count, nodes[j], j < pad_count)
-			var key := "%d_%d" % [mini(ia, ib), maxi(ia, ib)]
-			if best.has(key) and float((best[key] as Dictionary)["length"]) <= float(near["length"]):
-				continue
 			var swap := ia > ib
-			best[key] = {
+			var cand := {
 				"island_a": mini(ia, ib), "island_b": maxi(ia, ib),
-				"node_a": j if swap else i, "node_b": i if swap else j,
 				"a": near["b"] if swap else near["a"],
 				"b": near["a"] if swap else near["b"],
 				"a_ref": str((nodes[j] if swap else nodes[i])["ref"]),
 				"b_ref": str((nodes[i] if swap else nodes[j])["ref"]),
+				"layer_change": not _layers_meet(
+					nodes[i]["layers"], nodes[j]["layers"]),
 				"length": float(near["length"]),
 			}
+			var key := "%d_%d" % [int(cand["island_a"]), int(cand["island_b"])]
+			if best.has(key) and not _edge_beats(cand, best[key]):
+				continue
+			best[key] = cand
 
+	# Total order without further tie-breaks: `best` holds one candidate per
+	# island pair, so (island_a, island_b) alone never compares two distinct
+	# elements equal.
 	var candidates: Array = best.values()
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if a["length"] != b["length"]:
 			return float(a["length"]) < float(b["length"])
 		if a["island_a"] != b["island_a"]:
 			return int(a["island_a"]) < int(b["island_a"])
-		if a["island_b"] != b["island_b"]:
-			return int(a["island_b"]) < int(b["island_b"])
-		if a["node_a"] != b["node_a"]:
-			return int(a["node_a"]) < int(b["node_a"])
-		return int(a["node_b"]) < int(b["node_b"]))
+		return int(a["island_b"]) < int(b["island_b"]))
 
 	var parent: Array[int] = []
 	for i in islands.size():
@@ -763,6 +822,41 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 	return edges
 
 
+## True when `cand` should replace `incumbent` as an island pair's bridge:
+## strictly shorter, or the same length with lexicographically smaller witness
+## points, then refs, then a same-layer join over one needing a layer change.
+## Every key is read off the candidates themselves, never off the order they
+## were generated in. Candidates equal on every key draw the same airwire, so
+## the incumbent stays.
+static func _edge_beats(cand: Dictionary, incumbent: Dictionary) -> bool:
+	if float(cand["length"]) != float(incumbent["length"]):
+		return float(cand["length"]) < float(incumbent["length"])
+	var ca: Vector2 = cand["a"]
+	var cb: Vector2 = cand["b"]
+	var na: Vector2 = incumbent["a"]
+	var nb: Vector2 = incumbent["b"]
+	if ca != na or cb != nb:
+		return _points_less(ca, cb, na, nb)
+	if str(cand["a_ref"]) != str(incumbent["a_ref"]):
+		return str(cand["a_ref"]) < str(incumbent["a_ref"])
+	if str(cand["b_ref"]) != str(incumbent["b_ref"]):
+		return str(cand["b_ref"]) < str(incumbent["b_ref"])
+	if bool(cand["layer_change"]) != bool(incumbent["layer_change"]):
+		return not bool(cand["layer_change"])
+	return false
+
+
+## Lexicographic order over a witness point pair: a.x, a.y, b.x, b.y.
+static func _points_less(a1: Vector2, b1: Vector2, a2: Vector2, b2: Vector2) -> bool:
+	if a1.x != a2.x:
+		return a1.x < a2.x
+	if a1.y != a2.y:
+		return a1.y < a2.y
+	if b1.x != b2.x:
+		return b1.x < b2.x
+	return b1.y < b2.y
+
+
 # ── AIM: where an airwire between two conductors lands ────────────────────────
 
 ## The closest pair of ROUTE TARGETS between two nodes, as
@@ -778,8 +872,10 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 ## consulted: the islands were separated by real connectivity already, and the
 ## closest in-plane copper is where a designer lands a trace or drops a via.
 ##
-## Every comparison is strictly less-than over a deterministic walk, so ties
-## keep the first candidate and the answer is a function of the input alone.
+## Distances can tie — symmetric copper offers the same length from several
+## places — and a tie resolves toward the lexicographically smallest witness
+## points (see _near_update), so the answer is a function of the geometry
+## alone, whatever order the candidates are visited in.
 static func _nearest_targets(a: Dictionary, a_pad: bool,
 		b: Dictionary, b_pad: bool) -> Dictionary:
 	var best := {"a": a["at"], "b": b["at"], "length": INF}
@@ -810,12 +906,19 @@ static func _target_lines(node: Dictionary, is_pad: bool) -> Array:
 	return node["lines"]
 
 
+## Adopt (pa, pb) when it is nearer than the best so far — or exactly as near
+## with lexicographically smaller witness points, so an equal-distance tie is
+## decided by the points' own coordinates rather than by which candidate the
+## walk reached first.
 static func _near_update(best: Dictionary, pa: Vector2, pb: Vector2) -> void:
 	var d := pa.distance_to(pb)
-	if d < float(best["length"]):
-		best["length"] = d
-		best["a"] = pa
-		best["b"] = pb
+	if d > float(best["length"]):
+		return
+	if d == float(best["length"]) and not _points_less(pa, pb, best["a"], best["b"]):
+		return
+	best["length"] = d
+	best["a"] = pa
+	best["b"] = pb
 
 
 ## `swapped` says the FIRST polyline argument belongs to the b-side, so the

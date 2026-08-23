@@ -13,6 +13,8 @@ extends SceneTree
 ##      back, a via that changes layers, a pour whose COMPILED FILL joins two
 ##      pads, a KEEPOUT that joins nothing, and a rotated part. Every net has
 ##      exactly two pins, so net membership cannot decide any of the answers.
+##      A remaining join whose two ends share no copper layer DECLARES the
+##      layer change — even at zero length — and a same-layer join does not.
 ##
 ##   2. THE EDGE-ADDITION INVARIANT. Joining two SEPARATE islands lowers the
 ##      count of remaining joins by exactly one; joining two pads ALREADY in
@@ -25,8 +27,13 @@ extends SceneTree
 ##      a per-link ceiling, both derived from the geometry.
 ##
 ##   4. DETERMINISM. The same physical board, described twice with every list
-##      reversed, produces the identical picture. Any dependence on Dictionary
-##      order, on file order, or on an unstable sort shows up as a difference.
+##      reversed — the zones' nested fill regions and the points within each
+##      region included — produces the identical picture. Any dependence on
+##      Dictionary order, on file order, or on an unstable sort shows up as a
+##      difference. Two symmetric fixtures put an EXACT equal-distance tie in
+##      front of the solver (two equidistant fill regions; two equidistant
+##      edges of one notched region) so a tie resolved by visit order rather
+##      than by geometry shows up as a moved endpoint.
 ##
 ##   5. QUIETING IS NOT HIDING. A 20-pad unrouted net. (a) the REPORTED
 ##      remaining count equals islands-1 however many links were drawn; (b)
@@ -43,7 +50,10 @@ extends SceneTree
 ##      two pads when its fill is one region covering both, does NOT join them
 ##      when the fill is two separate regions (one per pad), and proves nothing
 ##      when no fill is present at all — the outline never stands in for
-##      copper.
+##      copper. DAMAGED FILL DATA IS NOT COPPER: a region with a non-point
+##      entry, a point missing a coordinate, a non-finite coordinate, or a
+##      ring enclosing no area contributes no connection — and one damaged
+##      region rejects the whole fill, intact siblings included.
 ##
 ##   8. A PAD IS NOT ITS BOUNDING BOX. A trace passing where a circular land's
 ##      bounding-box corner would be, 0.16mm clear of the real disc, does not
@@ -175,10 +185,11 @@ func _picture(result: Dictionary) -> PackedStringArray:
 	var out := PackedStringArray()
 	for link in result.get("links", []):
 		var l := link as Dictionary
-		out.append("link %s %s->%s (%.4f,%.4f)-(%.4f,%.4f)" % [
+		out.append("link %s %s->%s (%.4f,%.4f)-(%.4f,%.4f)%s" % [
 			str(l["net"]), str(l["a_ref"]), str(l["b_ref"]),
 			(l["a"] as Vector2).x, (l["a"] as Vector2).y,
-			(l["b"] as Vector2).x, (l["b"] as Vector2).y])
+			(l["b"] as Vector2).x, (l["b"] as Vector2).y,
+			" via" if bool(l.get("layer_change", false)) else ""])
 	for marker in result.get("markers", []):
 		var m := marker as Dictionary
 		out.append("mark %s %s" % [str(m["net"]), str(m["ref"])])
@@ -309,6 +320,16 @@ func _run_physical_connectivity() -> void:
 				and (tht["b"] as Vector2).is_equal_approx(Vector2(30, 20)))
 		check_eq("…its pad endpoint names the still-unjoined land", str(tht["b_ref"]), "U4.1")
 		check_eq("…its copper endpoint is mid-island copper, not a pad", str(tht["a_ref"]), "")
+		# The bottom trace and the top land share no layer, and the two ends
+		# COINCIDE — the join is zero-length, so the line itself can show
+		# nothing. The link must say the layer change out loud.
+		check("…and a zero-length join across layers DECLARES the layer change",
+			tht.has("layer_change") and bool(tht["layer_change"]))
+
+	var gap_links := _links_for(result, "SIG_GAP")
+	if gap_links.size() == 1:
+		check("a same-layer join declares NO layer change",
+			not bool((gap_links[0] as Dictionary).get("layer_change", true)))
 
 	check_eq("a via joining a bottom trace to a top land closes the net",
 		_remaining(result, "PWR_VIA"), 0)
@@ -453,9 +474,100 @@ func _run_determinism() -> void:
 	check("a board described in reverse order draws the identical picture",
 		_picture(Ratsnest.compute(backward)) == picture)
 
+	# The NESTED lists too: each zone's fill regions reversed, and the points
+	# within each region reversed, on top of the top-level reversals.
+	var nested := _connectivity_spec()
+	for key in ["components", "nets", "traces", "vias", "zones"]:
+		var nested_rev: Array = (nested[key] as Array).duplicate()
+		nested_rev.reverse()
+		nested[key] = nested_rev
+	for zone in (nested["zones"] as Array):
+		(zone as Dictionary)["fill"] = _reversed_fill((zone as Dictionary).get("fill"))
+	check("reversing every zone's fill regions and their points changes nothing",
+		_picture(Ratsnest.compute(_board(nested))) == picture)
+
 	# And twice over the same model instance, so nothing carried between runs.
 	check("recomputing over the same board is byte-identical",
 		_picture(Ratsnest.compute(forward)) == picture)
+
+	# AN EXACT EQUAL-DISTANCE TIE, region against region. T2 carries two fill
+	# regions placed symmetrically above and below it; each presents a corner
+	# exactly sqrt(9.75^2 + 0.25^2) mm from T1's centre (every coordinate
+	# offset is binary-exact, so the two distances are bit-identical), and
+	# both beat the 10mm pad pair. Which region the airwire lands on is a pure
+	# tie — it may not depend on the order the regions arrive in.
+	var up := _rect_outline(Vector2(19.75, 8.0), Vector2(20.25, 9.75))
+	var down := _rect_outline(Vector2(19.75, 10.25), Vector2(20.25, 12.0))
+	var tie_fwd := Ratsnest.compute(_twin_region_board([up, down]))
+	var tie_rev := Ratsnest.compute(_twin_region_board([down, up]))
+	var tie_links := _links_for(tie_fwd, "TIE")
+	check_eq("the twin-region board owes exactly one join", tie_links.size(), 1)
+	if tie_links.size() == 1:
+		check("the airwire lands on a region, nearer than the 10mm pad pair (got %.4f)"
+			% float((tie_links[0] as Dictionary)["length"]),
+			float((tie_links[0] as Dictionary)["length"]) < 10.0 - 1e-3)
+	check("swapping the two equidistant regions draws the identical picture",
+		_picture(tie_fwd) == _picture(tie_rev))
+
+	# The same tie INSIDE one region: a ring notched on the side facing N1, so
+	# its two left-edge segments end 0.25mm above and below N1's row — two
+	# witness points at bit-identical distances. Reversing the ring's points
+	# reverses the order the two are visited in; the picture may not move.
+	var ring := [
+		{"x_mm": 19.75, "y_mm": 9.0}, {"x_mm": 22.0, "y_mm": 9.0},
+		{"x_mm": 22.0, "y_mm": 11.0}, {"x_mm": 19.75, "y_mm": 11.0},
+		{"x_mm": 19.75, "y_mm": 10.25}, {"x_mm": 20.75, "y_mm": 10.25},
+		{"x_mm": 20.75, "y_mm": 9.75}, {"x_mm": 19.75, "y_mm": 9.75},
+	]
+	var ring_rev: Array = ring.duplicate()
+	ring_rev.reverse()
+	check("reversing the points within a notched region draws the identical picture",
+		_picture(Ratsnest.compute(_notched_region_board(ring)))
+			== _picture(Ratsnest.compute(_notched_region_board(ring_rev))))
+
+
+## `fill` with its regions in reverse order and each region's points reversed;
+## anything not Array-shaped comes back untouched.
+func _reversed_fill(fill):
+	if not (fill is Array):
+		return fill
+	var regions: Array = (fill as Array).duplicate()
+	regions.reverse()
+	for i in regions.size():
+		if regions[i] is Array:
+			var pts: Array = (regions[i] as Array).duplicate()
+			pts.reverse()
+			regions[i] = pts
+	return regions
+
+
+## Two pads 10mm apart; T2 is joined to every fill region handed in, T1 stands
+## alone, so the one remaining join must bridge T1 to T2's island.
+func _twin_region_board(fill_regions: Array):
+	return _board({
+		"components": [
+			_part("T1", 10.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("T2", 20.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "TIE", "pins": ["T1.1", "T2.1"]}],
+		"zones": [{"id": "zt", "layer": "top", "kind": "copper_pour", "net": "TIE",
+			"outline": _rect_outline(Vector2(19, 7), Vector2(21, 13)),
+			"fill": fill_regions}],
+	})
+
+
+## One pad plus a pad-joined single fill region whose ring is handed in.
+func _notched_region_board(ring: Array):
+	return _board({
+		"components": [
+			_part("N1", 10.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("N2", 21.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "NTIE", "pins": ["N1.1", "N2.1"]}],
+		"zones": [{"id": "zn", "layer": "top", "kind": "copper_pour", "net": "NTIE",
+			"outline": _rect_outline(Vector2(19, 8), Vector2(22.5, 12)),
+			"fill": [ring]}],
+	})
 
 
 # ── 5. quieting is not hiding ─────────────────────────────────────────────────
@@ -653,6 +765,38 @@ func _run_pour_conducts_as_its_fill() -> void:
 
 	check_eq("a fill computed EMPTY contributes no connection either",
 		_remaining(Ratsnest.compute(_pour_board({"fill": []})), "PR"), 1)
+
+	# DAMAGED FILL DATA IS NOT COPPER. Each payload below would cover both
+	# lands if its damage were repaired (a defaulted coordinate) or skipped (a
+	# dropped point or region) — and a plausible-looking shape built that way
+	# erases an airwire the designer still needs. ORACLE: the join stays owed,
+	# exactly as if the fill were absent.
+	var covering := _rect_outline(Vector2(8.5, 8.5), Vector2(21.5, 11.5))
+
+	var with_alien: Array = covering.duplicate()
+	with_alien.append("not a point")
+	check_eq("a region containing a non-point entry contributes nothing",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [with_alien]})), "PR"), 1)
+
+	var with_half_point: Array = covering.duplicate()
+	with_half_point.append({"x_mm": 8.5})
+	check_eq("a region with a point missing a coordinate contributes nothing",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [with_half_point]})), "PR"), 1)
+
+	var with_nan: Array = covering.duplicate()
+	with_nan.append({"x_mm": 8.5, "y_mm": NAN})
+	check_eq("a region with a non-finite coordinate contributes nothing",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [with_nan]})), "PR"), 1)
+
+	# Three collinear points THROUGH both lands: a ring that encloses no
+	# copper, yet whose segments would touch both pads if it were believed.
+	check_eq("a ring enclosing no area is not a conductor",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [[
+			{"x_mm": 8.5, "y_mm": 10.0}, {"x_mm": 15.0, "y_mm": 10.0},
+			{"x_mm": 21.5, "y_mm": 10.0}]]})), "PR"), 1)
+
+	check_eq("one damaged region rejects the WHOLE fill — the intact sibling proves nothing",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [covering, 42]})), "PR"), 1)
 
 
 # ── 8. a pad is not its bounding box ──────────────────────────────────────────

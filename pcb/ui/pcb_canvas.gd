@@ -2673,7 +2673,9 @@ func _airwire_color(net_color: Color) -> Color:
 	return c
 
 
-## Draw the ratsnest: one dashed airwire per join a net still needs.
+## Draw the ratsnest: one dashed airwire per join a net still needs. A join
+## whose two ends share no copper layer additionally carries a hollow diamond
+## on each end — the mark that closing it takes a via.
 ##
 ## NOT LAYER-FILTERED: an airwire marks the ABSENCE of copper, so hiding a
 ## copper layer does not hide the joins still outstanding on it. The
@@ -2685,12 +2687,21 @@ func _draw_ratsnest() -> void:
 		return
 
 	for link in rats.get("links", []):
-		var c := _airwire_color((link as Dictionary)["color"])
-		var p1 := world_to_screen((link as Dictionary)["a"])
-		var p2 := world_to_screen((link as Dictionary)["b"])
+		var l := link as Dictionary
+		var c := _airwire_color(l["color"])
+		var p1 := world_to_screen(l["a"])
+		var p2 := world_to_screen(l["b"])
 		_draw_dashed_line(p1, p2, c, 1.5, 5.0)
 		draw_circle(p1, 3.0, c)
 		draw_circle(p2, 3.0, c)
+		# A join whose two ends share no copper layer needs a via, and it can
+		# have ZERO length — two ends stacked through the board, no line to
+		# see. The diamond on each end is what says so, so it must read
+		# differently from both the plain endpoint dot and the quieted-net
+		# ring below.
+		if bool(l["layer_change"]):
+			_draw_layer_change_marker(p1, c)
+			_draw_layer_change_marker(p2, c)
 
 	# A quieted net's UNDRAWN islands are marked in place: a hollow ring on one
 	# pad of each.
@@ -2699,6 +2710,17 @@ func _draw_ratsnest() -> void:
 		draw_arc(world_to_screen((marker as Dictionary)["at"]), 4.0, 0.0, TAU, 12, c, 1.5)
 
 	_draw_ratsnest_legend(rats.get("quieted", []))
+
+
+## Marker for an airwire endpoint whose join needs a layer change: a hollow
+## diamond around the endpoint dot, drawn once per endpoint so it stays
+## visible when the two endpoints coincide and the airwire has no length.
+func _draw_layer_change_marker(p: Vector2, c: Color) -> void:
+	var r := 6.0
+	draw_polyline(PackedVector2Array([
+		p + Vector2(0.0, -r), p + Vector2(r, 0.0), p + Vector2(0.0, r),
+		p + Vector2(-r, 0.0), p + Vector2(0.0, -r),
+	]), c, 1.5)
 
 
 ## Names every net whose airwires were thinned, with how many joins it still
