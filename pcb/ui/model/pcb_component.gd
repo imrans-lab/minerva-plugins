@@ -288,6 +288,10 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 			"shape": pad_data.get("shape", "rect"),
 			"position": Vector2(pos_dict.get("x", 0), pos_dict.get("y", 0)),
 			"size": Vector2(size_dict.get("width", 1), size_dict.get("height", 1)),
+			# The pad's own rotation WITHIN the footprint, degrees, same CW
+			# convention as the component's rotation_deg. Part of the pad's
+			# shape: a 2.0x0.5 pad at rotation 90 is vertical, not horizontal.
+			"rotation": float(pad_data.get("rotation", 0.0)),
 			"drill": drill_size,  # Now Vector2 for slot support
 			"layers": pad_data.get("layers", [])
 		}
@@ -848,7 +852,7 @@ func _pads_to_list() -> Array:
 			# Legacy: float drill value
 			var d := float(drill_val) if drill_val != null else 0.0
 			drill_dict = {"x": d, "y": d}
-		pads_list.append({
+		var entry := {
 			"number": pad.get("number", ""),
 			"type": pad.get("type", "smd"),
 			"shape": pad.get("shape", "rect"),
@@ -856,7 +860,13 @@ func _pads_to_list() -> Array:
 			"size": {"width": pad_size.x, "height": pad_size.y},
 			"drill": drill_dict,
 			"layers": pad.get("layers", [])
-		})
+		}
+		# Emitted only when set, matching the worker's own omit-zero convention
+		# for this key — an unrotated pad's serialized shape stays unchanged.
+		var pad_rotation := float(pad.get("rotation", 0.0))
+		if pad_rotation != 0.0:
+			entry["rotation"] = pad_rotation
+		pads_list.append(entry)
 	return pads_list
 
 
@@ -894,6 +904,10 @@ func _pads_from_list(pads_data: Array) -> void:
 			"shape": pad_data.get("shape", "rect"),
 			"position": Vector2(pad_pos.get("x", 0), pad_pos.get("y", 0)),
 			"size": Vector2(size_w, size_h),
+			# The pad's own rotation WITHIN the footprint, degrees, same CW
+			# convention as the component's rotation_deg. Part of the pad's
+			# shape: a 2.0x0.5 pad at rotation 90 is vertical, not horizontal.
+			"rotation": float(pad_data.get("rotation", 0.0)),
 			"drill": drill_vec,
 			"layers": pad_data.get("layers", [])
 		})

@@ -7,12 +7,12 @@ extends SceneTree
 ##
 ## ── WHAT EACH SECTION COVERS ─────────────────────────────────────────────────
 ##
-##   1. PHYSICAL CONNECTIVITY (fixture). One board, seven nets, each a separate
+##   1. PHYSICAL CONNECTIVITY (fixture). One board, eight nets, each a separate
 ##      physical question: a routed pair, a pair with a 0.5mm gap, a pair whose
 ##      only trace is on the wrong side, a through-hole pad reached from the
-##      back, a via that changes layers, a pour that joins two pads, and a
-##      KEEPOUT that joins nothing. Every net has exactly two pins, so net
-##      membership cannot decide any of the answers.
+##      back, a via that changes layers, a pour whose COMPILED FILL joins two
+##      pads, a KEEPOUT that joins nothing, and a rotated part. Every net has
+##      exactly two pins, so net membership cannot decide any of the answers.
 ##
 ##   2. THE EDGE-ADDITION INVARIANT. Joining two SEPARATE islands lowers the
 ##      count of remaining joins by exactly one; joining two pads ALREADY in
@@ -38,9 +38,29 @@ extends SceneTree
 ##      the cache re-solves when a LIVE DRAG moves copper (a drag mutates
 ##      component positions WITHOUT bumping board_revision — see
 ##      pcb_canvas._apply_drag_delta); and N toggles the ratsnest.
+##
+##   7. A POUR CONDUCTS AS ITS COMPILED FILL. The same authored outline joins
+##      two pads when its fill is one region covering both, does NOT join them
+##      when the fill is two separate regions (one per pad), and proves nothing
+##      when no fill is present at all — the outline never stands in for
+##      copper.
+##
+##   8. A PAD IS NOT ITS BOUNDING BOX. A trace passing where a circular land's
+##      bounding-box corner would be, 0.16mm clear of the real disc, does not
+##      join; a trace genuinely reaching the disc does.
+##
+##   9. A PAD'S OWN ROTATION IS PART OF ITS SHAPE. It survives decode and a
+##      serialize round trip; the solver's land is where fabrication puts it
+##      (offset turned by the component only, body turned by both), so copper
+##      on the real end joins and copper on the phantom unrotated end does not.
+##
+##  10. AN AIRWIRE AIMS AT THE ISLAND'S COPPER. A pad 2mm from the middle of a
+##      routed trace gets a 2mm airwire onto the trace, not a 15mm airwire to
+##      the nearest pad centre of that island.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
+const PCBComponent := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
 
 var _pass := 0
@@ -55,6 +75,10 @@ func _init() -> void:
 	_run_determinism()
 	_run_quieting_is_not_hiding()
 	_run_canvas_seam()
+	_run_pour_conducts_as_its_fill()
+	_run_pad_is_not_its_bounding_box()
+	_run_pad_rotation_is_part_of_its_shape()
+	_run_airwire_aims_at_island_copper()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -240,12 +264,16 @@ func _connectivity_spec() -> Dictionary:
 				"from_layer": "top", "to_layer": "bottom"},
 		],
 		"zones": [
+			# The pour carries its COMPILED FILL: one region covering both
+			# lands, so the two pads are one conductor.
 			{"id": "z_pour", "layer": "top", "kind": "copper_pour", "net": "POUR",
-				"outline": _rect_outline(Vector2(13, 13), Vector2(19, 15))},
-			# Carries a net on purpose: it is excluded because a keepout is not
-			# copper, not because of its net.
+				"outline": _rect_outline(Vector2(13, 13), Vector2(19, 15)),
+				"fill": [_rect_outline(Vector2(13.2, 13.2), Vector2(18.8, 14.8))]},
+			# Carries a net AND a fill on purpose: it is excluded because a
+			# keepout is not copper, not because of its net or a missing fill.
 			{"id": "z_keep", "layer": "top", "kind": "keepout", "net": "KEEPOUT",
-				"outline": _rect_outline(Vector2(13, 27), Vector2(19, 29))},
+				"outline": _rect_outline(Vector2(13, 27), Vector2(19, 29)),
+				"fill": [_rect_outline(Vector2(13.2, 27.2), Vector2(18.8, 28.8))]},
 		],
 	}
 
@@ -270,18 +298,22 @@ func _run_physical_connectivity() -> void:
 	check_eq("a bottom trace reaches a THROUGH-HOLE land but not a top-side SMD one",
 		_remaining(result, "PWR_THT"), 1)
 	var tht_links := _links_for(result, "PWR_THT")
-	var tht_ends := PackedStringArray()
+	check_eq("…and exactly one airwire asks for that join", tht_links.size(), 1)
 	if tht_links.size() == 1:
-		tht_ends.append(str((tht_links[0] as Dictionary)["a_ref"]))
-		tht_ends.append(str((tht_links[0] as Dictionary)["b_ref"]))
-		tht_ends.sort()
-	check("…and the airwire names the two lands still apart, not some other pair (%s)"
-		% str(tht_ends), tht_ends == PackedStringArray(["U3.1", "U4.1"]))
+		var tht := tht_links[0] as Dictionary
+		# The island holding U3 also holds the bottom trace, whose end sits
+		# directly under U4's land — that trace end, not U3's centre 10mm away,
+		# is where the joining copper (a via) would land.
+		check("…the airwire lands on the trace end under the pad, not on the far pad centre",
+			(tht["a"] as Vector2).is_equal_approx(Vector2(30, 20))
+				and (tht["b"] as Vector2).is_equal_approx(Vector2(30, 20)))
+		check_eq("…its pad endpoint names the still-unjoined land", str(tht["b_ref"]), "U4.1")
+		check_eq("…its copper endpoint is mid-island copper, not a pad", str(tht["a_ref"]), "")
 
 	check_eq("a via joining a bottom trace to a top land closes the net",
 		_remaining(result, "PWR_VIA"), 0)
 
-	check_eq("a copper pour covering two lands on its own layer joins them",
+	check_eq("a pour whose COMPILED FILL covers two lands on its own layer joins them",
 		_remaining(result, "POUR"), 0)
 
 	check_eq("a KEEPOUT is an instruction, not a conductor — it joins nothing",
@@ -403,7 +435,10 @@ func _run_spanning_tree_not_chain() -> void:
 
 func _run_determinism() -> void:
 	print("-- 4. the same board draws the same picture every time --")
-	var forward := _connectivity_board()
+	# Plain `=`: _connectivity_board() returns Variant (PCBData is an untyped
+	# preload), and `:=` cannot infer a type from a Variant-returning call —
+	# the script would fail to parse.
+	var forward = _connectivity_board()
 	var picture := _picture(Ratsnest.compute(forward))
 
 	# The SAME physical board, described with every list reversed: components,
@@ -562,3 +597,225 @@ func _key(code: Key) -> InputEventKey:
 	ev.keycode = code
 	ev.pressed = true
 	return ev
+
+
+# ── 7. a pour conducts as its compiled fill ───────────────────────────────────
+
+## Two 1x1mm lands 10mm apart under one authored pour outline. What varies is
+## ONLY the `fill` key — the compiled regions — so any difference in the answer
+## is attributable to the fill alone.
+func _pour_board(zone_extra: Dictionary):
+	var zone := {"id": "z1", "layer": "top", "kind": "copper_pour", "net": "PR",
+		"outline": _rect_outline(Vector2(8, 8), Vector2(22, 12))}
+	for k in zone_extra:
+		zone[k] = zone_extra[k]
+	return _board({
+		"components": [
+			_part("P1", 10.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("P2", 20.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "PR", "pins": ["P1.1", "P2.1"]}],
+		"zones": [zone],
+	})
+
+
+func _run_pour_conducts_as_its_fill() -> void:
+	print("-- 7. a pour conducts as its compiled fill, never as its outline --")
+	# ORACLE: the compiler is the only thing that knows what a pour conducts —
+	# clearance and keepouts can cut one authored outline into regions that do
+	# not conduct to each other. So the outline may never stand in for copper:
+	# only a carried fill joins anything, and each region is its own conductor.
+	check_eq("one fill region covering both lands joins them",
+		_remaining(Ratsnest.compute(_pour_board(
+			{"fill": [_rect_outline(Vector2(8.5, 8.5), Vector2(21.5, 11.5))]})), "PR"),
+		0)
+
+	# The severed pour: the SAME outline compiled into two regions, one under
+	# each land. Real same-net copper on both sides, yet no conduction between
+	# them — the exact case an outline-as-copper model erases the airwire for.
+	var split := Ratsnest.compute(_pour_board({"fill": [
+		_rect_outline(Vector2(9, 9), Vector2(11, 11)),
+		_rect_outline(Vector2(19, 9), Vector2(21, 11)),
+	]}))
+	check_eq("two separate fill regions are two conductors — the join is still owed",
+		_remaining(split, "PR"), 1)
+	var split_links := _links_for(split, "PR")
+	check_eq("…and one airwire still asks for it", split_links.size(), 1)
+	if split_links.size() == 1:
+		# The two regions' facing edges are 8mm apart (x=11 to x=19); the pad
+		# centres are 10mm apart. The airwire spans the region gap, proving it
+		# aims at the islands' copper rather than at their pad centres.
+		check("…spanning the 8mm region gap, not the 10mm pad-centre gap",
+			absf(float((split_links[0] as Dictionary)["length"]) - 8.0) < 1e-4)
+
+	check_eq("a pour with NO fill contributes no connection at all",
+		_remaining(Ratsnest.compute(_pour_board({})), "PR"), 1)
+
+	check_eq("a fill computed EMPTY contributes no connection either",
+		_remaining(Ratsnest.compute(_pour_board({"fill": []})), "PR"), 1)
+
+
+# ── 8. a pad is not its bounding box ──────────────────────────────────────────
+
+## A component whose single pad has explicit geometry (the editor-authored
+## `pads` array path), so the land's SHAPE — not just its size — reaches the
+## solver.
+func _shaped_part(ref: String, x: float, y: float, pad: Dictionary,
+		rotation_deg: float = 0.0) -> Dictionary:
+	return {"ref": ref, "footprint": "CUSTOM", "x_mm": x, "y_mm": y,
+		"rotation_deg": rotation_deg, "layer": "top",
+		"width": 3.0, "height": 3.0, "has_pad_geometry": true,
+		"pins": [{"number": "1",
+			"x_mm": float((pad.get("position", {}) as Dictionary).get("x", 0.0)),
+			"y_mm": float((pad.get("position", {}) as Dictionary).get("y", 0.0))}],
+		"pads": [pad]}
+
+
+func _circle_pad(x: float, y: float, diameter: float) -> Dictionary:
+	return {"number": "1", "type": "smd", "shape": "circle",
+		"position": {"x": x, "y": y},
+		"size": {"width": diameter, "height": diameter},
+		"layers": ["F.Cu"]}
+
+
+func _run_pad_is_not_its_bounding_box() -> void:
+	print("-- 8. a circular land is a disc, not the square drawn around it --")
+	# ORACLE, hand-derived: a 1.0mm disc at (10,10); a 0.1mm-wide trace starting
+	# at (10.45,10.55). Gap to the disc: sqrt(0.45^2+0.55^2) - 0.5 - 0.05
+	# = 0.1606mm of bare laminate. Gap to the disc's BOUNDING SQUARE: the corner
+	# region puts the same trace 0.05mm from "copper" — within one trace
+	# half-width, a false join. The two shapes disagree by 0.16mm; only the disc
+	# is the land.
+	var d = _board({
+		"components": [
+			_shaped_part("D1", 10.0, 10.0, _circle_pad(0.0, 0.0, 1.0)),
+			_part("D2", 14.0, 10.55, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "CIRC", "pins": ["D1.1", "D2.1"]}],
+		"traces": [
+			_trace("t_corner", "CIRC", "top",
+				Vector2(10.45, 10.55), Vector2(14.0, 10.55), 0.1),
+		],
+	})
+	check_eq("a trace crossing only the phantom bounding-box corner does NOT join the disc",
+		_remaining(Ratsnest.compute(d), "CIRC"), 1)
+
+	# The control from the other side: the same construction with the trace
+	# start moved to (10.35,10.35) — 0.495mm from the centre, inside the disc's
+	# 0.55mm reach (radius + trace half-width) — must join, so the fix cannot
+	# have shrunk the land below its real copper.
+	var joined = _board({
+		"components": [
+			_shaped_part("D3", 10.0, 10.0, _circle_pad(0.0, 0.0, 1.0)),
+			_part("D4", 14.0, 10.35, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "CIRC2", "pins": ["D3.1", "D4.1"]}],
+		"traces": [
+			_trace("t_disc", "CIRC2", "top",
+				Vector2(10.35, 10.35), Vector2(14.0, 10.35), 0.1),
+		],
+	})
+	check_eq("a trace genuinely reaching the disc still joins it",
+		_remaining(Ratsnest.compute(joined), "CIRC2"), 0)
+
+
+# ── 9. a pad's own rotation is part of its shape ──────────────────────────────
+
+## A 2.4 x 0.6 pad at local offset (2,0) with pad-local rotation 90, on a
+## component itself rotated 90. Hand-derived, in the KiCad CW convention the
+## component transform uses: the component turn maps the offset (2,0) to
+## (0,-2), so the land centres at comp+(0,-2); the two 90-degree turns compose
+## to 180 for the body, so the long axis ends up HORIZONTAL, spanning
+## x centre±1.2, y centre±0.3.
+##
+## The fixture separates every wrong composition: unrotated-pad models leave
+## the body VERTICAL; models that turn the offset by the pad's own rotation
+## put the centre at comp+(-2,0) instead.
+func _rotated_pad() -> Dictionary:
+	return {"number": "1", "type": "smd", "shape": "rect",
+		"position": {"x": 2.0, "y": 0.0},
+		"size": {"width": 2.4, "height": 0.6},
+		"rotation": 90.0,
+		"layers": ["F.Cu"]}
+
+
+func _run_pad_rotation_is_part_of_its_shape() -> void:
+	print("-- 9. a pad's own rotation survives into the land the solver reads --")
+	# Land centre: (20,20) + (0,-2) = (20,18); body horizontal,
+	# x 18.8..21.2, y 17.7..18.3.
+	var d = _board({
+		"components": [
+			_shaped_part("R1", 20.0, 20.0, _rotated_pad(), 90.0),
+			_part("R2", 28.0, 18.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "ROTPAD", "pins": ["R1.1", "R2.1"]}],
+		"traces": [
+			# Ends at (21.1,18): inside the REAL horizontal land, 0.8mm clear
+			# of where an unrotated pad's copper would stop.
+			_trace("t_real_end", "ROTPAD", "top",
+				Vector2(28.0, 18.0), Vector2(21.1, 18.0)),
+		],
+	})
+	var comp = d.get_component("R1")
+	check_eq("the pad's local rotation survives decode",
+		float((comp.pads[0] as Dictionary).get("rotation", 0.0)), 90.0)
+	var again = PCBComponent.from_board_dict(comp.to_board_dict())
+	check_eq("…and survives a serialize round trip",
+		float((again.pads[0] as Dictionary).get("rotation", 0.0)), 90.0)
+
+	check_eq("copper landing on the REAL end of the turned land joins it",
+		_remaining(Ratsnest.compute(d), "ROTPAD"), 0)
+
+	# The phantom end: (20,25.1) is inside where the UNROTATED-pad model puts
+	# copper (vertical span to y=25.2) and 0.8mm clear of the real land
+	# (y 23.7..24.3 around centre (20,24)).
+	var phantom = _board({
+		"components": [
+			_shaped_part("R3", 20.0, 26.0, _rotated_pad(), 90.0),
+			_part("R4", 28.0, 25.1, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "ROTPAD2", "pins": ["R3.1", "R4.1"]}],
+		"traces": [
+			_trace("t_phantom_end", "ROTPAD2", "top",
+				Vector2(28.0, 25.1), Vector2(20.0, 25.1)),
+		],
+	})
+	check_eq("copper landing on the PHANTOM unrotated end does not join",
+		_remaining(Ratsnest.compute(phantom), "ROTPAD2"), 1)
+
+
+# ── 10. an airwire aims at the island's copper ────────────────────────────────
+
+func _run_airwire_aims_at_island_copper() -> void:
+	print("-- 10. an airwire lands on the nearest copper, not the nearest pad centre --")
+	# A1 and A2 are joined by a 30mm trace; A3 sits 2mm above its midpoint. The
+	# nearest copper of the joined island to A3 is the trace at (20,40), 2mm
+	# away; the nearest PAD CENTRE is A1 at sqrt(15^2+2^2) = 15.13mm. ORACLE:
+	# the copper a designer routes to is the trace, and no correct answer can
+	# be longer than the 2mm perpendicular.
+	var d = _board({
+		"components": [
+			_part("A1", 5.0, 40.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("A2", 35.0, 40.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("A3", 20.0, 42.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "AIM", "pins": ["A1.1", "A2.1", "A3.1"]}],
+		"traces": [
+			_trace("t_span", "AIM", "top", Vector2(5, 40), Vector2(35, 40)),
+		],
+	})
+	var result := Ratsnest.compute(d)
+	check_eq("two islands, one join still owed", _remaining(result, "AIM"), 1)
+	var links := _links_for(result, "AIM")
+	check_eq("…as one airwire", links.size(), 1)
+	if links.size() == 1:
+		var l := links[0] as Dictionary
+		check("the airwire is the 2mm perpendicular onto the trace (got %.3f)"
+			% float(l["length"]), absf(float(l["length"]) - 2.0) < 1e-4)
+		check("…landing ON the trace at (20,40)",
+			(l["a"] as Vector2).is_equal_approx(Vector2(20, 40)))
+		check("…from the unjoined pad's centre",
+			(l["b"] as Vector2).is_equal_approx(Vector2(20, 42))
+				and str(l["b_ref"]) == "A3.1")
+		check_eq("…and the copper endpoint is mid-trace, so it names no pad",
+			str(l["a_ref"]), "")
