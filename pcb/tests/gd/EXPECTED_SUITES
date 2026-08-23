@@ -96,18 +96,9 @@ test_routing_workspace_model.gd assertions=168
 test_routing_workspace_v2.gd assertions=395
 test_trace_identity_delete.gd assertions=213
 test_workspace_check.gd assertions=46
-# Grew (routed-width ingest). UNPINNED until a run measures it; the previous
-# pin no longer matches the file.
-test_workspace_ingest.gd
+test_workspace_ingest.gd assertions=76
 test_workspace_persistence.gd assertions=76
-# Epoch NLC C4 (1135 -> 1136), C2 (-> 1137), C3 (-> 1138): the manifest-count
-# pin gained a companion assertion per added tool — minerva_pcb_view_state,
-# minerva_pcb_place_via and minerva_pcb_add_trace — matching how every prior
-# addition to this pin is accounted for.
-#
-# Grew again (copper-loss reconcile). UNPINNED until a run measures it: 1138
-# no longer matches the file.
-test_workspace_tools.gd
+test_workspace_tools.gd assertions=1189
 test_zone_select_delete.gd assertions=50
 test_ux3_contracts.gd assertions=44
 test_staged_entities.gd assertions=72
