@@ -26,8 +26,8 @@ extends SceneTree
 ##      unattributed" from the fixed pins-only case above.
 ##   7. ingest_record: the width the WORKER routed at (segment `width_mm`)
 ##      sizes the candidate's copper, and its `effective_width_source` names
-##      the provenance — the hint-only re-derivation and its silent 0.25mm
-##      default are a FALLBACK now, not the answer (bug 01a02bc4f800).
+##      the provenance; the hint-only re-derivation and its 0.25mm default are
+##      the fallback.
 ##   6. FUNCTIONAL FLOOR (non-mocked, S5 workspace-only): a REAL PCBPanel
 ##      (booted via plugin_panel_driver) driving the EXACT production propose
 ##      seam (panel_tools._propose_into_workspace) with a fixture router
@@ -412,24 +412,18 @@ func _run_functional_floor_dual_write() -> void:
 	driver.free_panel(panel)
 
 
-# ── 7. the routed width is the candidate's width (bug 01a02bc4f800) ─────────
+# ── 7. the routed width is the candidate's width ─────────────────────────────
 
-## A route proposed onto a net that ALREADY carries copper is routed by the
-## worker at that net's established width — the worker resolves the whole
-## precedence chain (caller option, hint, class minimum, the net's own copper,
-## the board default) and stamps the answer on every segment as `width_mm`,
-## plus its provenance as `effective_width_source`.
+## The worker resolves the whole width precedence chain (caller option, hint,
+## class minimum, the net's own copper, the board default) and stamps the answer
+## on every segment as `width_mm`, plus its provenance as
+## `effective_width_source`. The candidate's width is the copper that gets
+## committed, so it must be that stamped width and not a re-derivation from the
+## selected HINTS alone.
 ##
-## This side used to throw that away and re-derive a width from the selected
-## HINTS alone, falling back to a silent 0.25mm — so a hintless route onto a
-## 0.8mm power net landed a candidate 0.25mm wide, and the commit wrote exactly
-## that copper. The candidate's width is what gets FABRICATED, so this is the
-## half of the fix that decides real copper.
-##
-## The fixture states three DIFFERENT numbers so a wrong implementation is
-## identifiable, not merely wrong: 0.8 is the routed width, 0.4 is what the
-## selected hint would give, 0.25 is the silent default. Only one of them is
-## the copper the router actually drew.
+## The fixture states three DIFFERENT numbers, so a wrong answer identifies
+## which path produced it: 0.8 is the routed width, 0.4 is what the selected
+## hint gives, 0.25 is the hint derivation's own default.
 func _run_ingest_record_routed_width_wins() -> void:
 	print("-- 7. ingest_record: the ROUTER's width sizes the candidate --")
 	var ws = PcbRoutingWorkspace.new()
@@ -443,8 +437,8 @@ func _run_ingest_record_routed_width_wins() -> void:
 	}
 	# Exactly the shape panel_tools._normalize_route_records produces from a
 	# worker reply whose route carried effective_routing_rules: raw router
-	# segments (now stamped with the routed width_mm) plus the once-resolved
-	# effective width/source.
+	# segments stamped with the routed width_mm, plus the once-resolved effective
+	# width/source.
 	var record := {
 		"net": "VIN",
 		"segments": [
@@ -470,8 +464,8 @@ func _run_ingest_record_routed_width_wins() -> void:
 	check_eq("width_source names the net's own copper, not the ingest verdict",
 		str(cand.width_source), "net_copper")
 
-	# A caller that resolved its OWN exact per-trace width (bus propose) still
-	# outranks the routed stamp — that is a stated width, not a fallback.
+	# A caller that resolved its OWN exact per-trace width (bus propose)
+	# outranks the routed stamp.
 	var bus_record: Dictionary = record.duplicate(true)
 	bus_record["net"] = "VBUS"
 	bus_record["width_override"] = 0.6

@@ -1105,14 +1105,13 @@ def existing_copper_with_pinned(
 
 
 # ---------------------------------------------------------------------------
-# THE NET'S ESTABLISHED WIDTH (bug 01a02bc4f800)
+# THE NET'S ESTABLISHED WIDTH
 # ---------------------------------------------------------------------------
-# A net that ALREADY carries copper has already had its width decided — by the
-# author, by an earlier accepted proposal, or by a pin. Routing the next span of
-# that same net at the board's blanket default produces a trace narrower than the
-# copper it joins, and nothing objects: geometric DRC checks a MINIMUM width, so
-# a 0.25mm addition to a 0.8mm power net is manufacturable and wrong. This is the
-# projection that lets the run read that width off the copper itself.
+# A net that ALREADY carries copper has had its width decided — by the author,
+# by an earlier accepted proposal, or by a pin. Geometric DRC checks a MINIMUM
+# width, so routing the next span of that net at the board's blanket default
+# passes every check while laying copper narrower than the copper it joins.
+# This projection reads the established width off the copper itself.
 
 
 def established_net_widths(
@@ -1121,45 +1120,26 @@ def established_net_widths(
     """net name -> the width its EXISTING copper establishes, WIDEST wins.
 
     Derived from the very segments the grid is about to mark (accepted copper
-    plus any PINNED candidate — :func:`existing_copper_with_pinned`), not from a
-    second walk of the IR: the width a run adopts for a net and the copper the
-    run routes around are then the same observation, and cannot drift.
+    plus any PINNED candidate — :func:`existing_copper_with_pinned`), so the
+    width a run adopts for a net and the copper that run routes around are the
+    same observation.
 
-    WIDEST WINS, for a net whose copper is not uniform. The three candidate
-    rules are "widest", "nearest segment", and "refuse", and only one of them is
-    safe in the direction that matters:
+    WIDEST WINS on a net whose copper is not uniform: a net that tapers from a
+    0.8mm trunk to 0.4mm branches yields 0.8, whichever segment comes first and
+    whichever end of the net a new span starts from. ``bus_net_width`` in
+    ``pcb/ui/panel_tools.gd`` answers the same question the same way.
 
-      * WIDEST can only over-size. Over-sized copper wastes area (and, if it no
-        longer fits, fails LOUDLY as an unrouted pair with a reason); under-sized
-        copper on a power net is a current-carrying defect that every report
-        calls clean. The asymmetry is the same one the keepout margin follows —
-        over-block is legal, under-block never is.
-      * NEAREST depends on which end of the net the new span starts from, so the
-        same net gets different copper depending on the order spans are
-        proposed in — and it still under-sizes whenever the near segment is the
-        thin one.
-      * REFUSING would make a perfectly ordinary board unroutable: a net that
-        tapers from a 0.8mm trunk to 0.4mm branches is normal design, not an
-        authoring error, and there is nothing for the human to fix.
-
-    It is also the rule this plugin already applies to the same question on the
-    bus path (``pcb/ui/panel_tools.gd::bus_net_width``: widest existing trace on
-    the net, else the board's authored width), so the two surfaces answer "how
-    wide is this net?" the same way.
-
-    A net with NO copper is simply absent from the map — it has nothing to
-    inherit, and the board's own default is the honest answer for it.
+    A net with NO copper is absent from the map, and its caller falls back to
+    the board's own default.
 
     FAIL-CLOSED on copper whose width cannot be read as a positive, finite
-    number: a segment like that is copper of unknown size, and silently skipping
-    it would let the very defect this fixes back in through the one net whose
-    copper could not be measured. Defensive rather than reachable — the compiler
-    validates authored trace widths and ``ir_candidates`` refuses a dimensionless
-    candidate — which is exactly why it must not be a silent skip.
+    number: raises rather than skipping the segment, which would leave that net
+    at the board default. Defensive rather than reachable — the compiler
+    validates authored trace widths and ``ir_candidates`` refuses a
+    dimensionless candidate.
 
     VIAS ARE DELIBERATELY NOT READ. A via's annulus is a diameter, not a trace
-    width; adopting it as one would size a net's copper from the wrong dimension
-    (and every net with a via would inherit the board's via size).
+    width.
     """
     widths: dict[str, float] = {}
     for seg in existing:

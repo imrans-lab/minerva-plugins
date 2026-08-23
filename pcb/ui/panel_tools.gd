@@ -1358,8 +1358,8 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 ##
 ## Routing workspace: deleting copper a COMMITTED route candidate owns retires
 ## that commit and REOPENS its routing task, reported as `reopened_candidate_ids`
-## (bug 01a02bf97224 — see phase 3 below and RoutingWorkspace.reconcile_
-## committed_copper). It rides the same single undo step as the copper itself.
+## (see phase 3 below and RoutingWorkspace.reconcile_committed_copper). It
+## rides the same single undo step as the copper itself.
 static func _delete_traces(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -1460,20 +1460,15 @@ static func _delete_traces(host, args: Dictionary) -> Dictionary:
 			# Only reachable if the board changed under us between phases.
 			missing_via_ids.append(vid)
 
-	# ── Phase 3: tell the ROUTING WORKSPACE its copper is gone (bug
-	# 01a02bf97224). Copper the caller just named may be copper a COMMITTED
-	# route candidate owns, and until this ran the workspace kept reporting that
-	# span as routed — task closed, committed_trace_ids naming traces this call
-	# had just erased.
+	# ── Phase 3: tell the ROUTING WORKSPACE its copper is gone. Copper the
+	# caller just named may be copper a COMMITTED route candidate owns; the
+	# reconcile retires that commit and reopens its task.
 	#
-	# BEFORE the snapshot on purpose: the delete's own history entry then
-	# carries BOTH halves of the act (bucket 8 — the copper gone AND the commit
-	# retired), the mirror of the paired snapshot commit takes for the opposite
-	# one. Undo of this delete restores the copper and the commit together;
-	# REDO removes both again, instead of reinstating a workspace that claims
-	# traces the redo just deleted. Every OTHER way copper can leave is covered
-	# by the same reconcile at the workspace verbs' own entry (_workspace_ctx);
-	# this call is what makes THIS tool's undo/redo coherent by itself.
+	# BEFORE the snapshot: the delete's own history entry then carries BOTH
+	# halves (bucket 8 — the copper gone AND the commit retired), so one undo
+	# restores copper and commit together and one redo removes both again.
+	# Copper leaving any other way is reconciled at the workspace verbs' own
+	# entry (_workspace_ctx).
 	var reopened: Array = []
 	if not deleted_trace_ids.is_empty() or not deleted_via_ids.is_empty():
 		reopened = _reconcile_committed_copper(host, data)
@@ -1495,11 +1490,8 @@ static func _delete_traces(host, args: Dictionary) -> Dictionary:
 		reply["net_name"] = net_name
 		reply["net_match_count"] = net_match_count
 	# ADDITIVE, ABSENT WHEN EMPTY (the same rule missing_*/net_* keep above):
-	# the overwhelming case is a delete that touched no committed candidate.
-	# When it did, SAY SO — the caller removed copper and, as a consequence,
-	# reopened routing work it did not name. Silently reopening a task would be
-	# the same class of quiet state change this bug was filed about, in the
-	# other direction.
+	# present only when the delete reopened routing work the caller did not
+	# name.
 	if not reopened.is_empty():
 		reply["reopened_candidate_ids"] = reopened
 		reply["note"] = "this copper was committed by %d route candidate(s); their commits are retired and their routing tasks are OPEN again (they are live once more, and any DRC verdict they held is staled — re-check or reroute before committing them)" % reopened.size()
@@ -3141,10 +3133,8 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		if not (route is Dictionary):
 			continue
 		var net: String = str(route.get("net", ""))
-		# The width the ROUTER drew this net at, not a hint-only re-derivation
-		# (bug 01a02bc4f800) — see _route_width. This is the copper that lands
-		# on the board, so the silent 0.25mm literal below is the last resort it
-		# always was, reached only when the reply carries no width at all.
+		# The width the ROUTER drew this net at — see _route_width. The 0.25mm
+		# literal below is reached only when the reply carries no width at all.
 		var width: float = _route_width(route, source_hints, net)
 		if width <= 0.0:
 			width = 0.25
@@ -3622,15 +3612,12 @@ static func _route_layer(route: Dictionary) -> String:
 
 ## The width this route's copper is ACTUALLY drawn at, in mm.
 ##
-## The worker resolves it (methods.py `_effective_routing_rules_detailed` plus
-## the per-net step) and stamps it per route as
-## `effective_routing_rules.trace_width_mm.value` — one chain, covering an
-## explicit caller option, a hint-authored width, the net's class minimum, the
-## width the net's own EXISTING copper establishes (bug 01a02bc4f800) and the
-## board's default, in that order. Reading it is what stops this side from
-## keeping a SECOND, poorer copy of that chain: `_width_for_net` below sees
-## hints only, so a hintless route onto a 0.8mm power net used to report — and
-## commit — 0.25mm.
+## AUTHORITATIVE over `_width_for_net` below, which sees hints only. The worker
+## resolves the width (methods.py `_effective_routing_rules_detailed` plus the
+## per-net step) and stamps it per route as
+## `effective_routing_rules.trace_width_mm.value`, covering an explicit caller
+## option, a hint-authored width, the net's class minimum, the width the net's
+## own EXISTING copper establishes and the board's default, in that order.
 ##
 ## Falls back to the hint derivation (and to 0.0) only when the reply carries no
 ## stamp at all: an older worker, or a path that skipped the attach. Same
@@ -4404,9 +4391,9 @@ static func _delete_via(host, args: Dictionary) -> Dictionary:
 	if not data.remove_via_by_id(via_id):
 		return _err("Unknown via: %s" % via_id)
 	# A via a COMMITTED candidate owns is a layer change that candidate's route
-	# depends on — losing it is losing the route (bug 01a02bf97224). Same
-	# placement and the same reason as _delete_traces' phase 3: before the
-	# snapshot, so this delete's one history entry carries both halves.
+	# depends on, so removing it retires the commit. Placed like _delete_traces'
+	# phase 3: before the snapshot, so this delete's one history entry carries
+	# both halves.
 	var reopened: Array = _reconcile_committed_copper(host, data)
 	data.save_to_history("Delete via " + via_id)
 	var reply := {
@@ -5692,15 +5679,15 @@ static func _workspace_ctx(host) -> Dictionary:
 		}}
 	if data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(workspace)
-	# Bug 01a02bf97224 — COPPER-LOSS reconcile, the same compensating-half shape
-	# as _reconcile_hint_lifecycle below and for the same class of reason:
-	# nothing tells the workspace that copper it committed was deleted, so the
-	# question is asked HERE, at the top of every verb, BEFORE any of them
-	# reports a task state or a committed_trace_ids list. The rule itself lives
-	# in the model (RoutingWorkspace.reconcile_committed_copper) — this is only
-	# the wiring. Runs FIRST so the hint pass below sees the reconciled
-	# dispositions and reopens the source hint of a commit that just lost its
-	# copper, in the same pass rather than one verb later.
+	# COPPER-LOSS reconcile, the same compensating-half shape as
+	# _reconcile_hint_lifecycle below: nothing tells the workspace that copper it
+	# committed was deleted, so the question is asked HERE, at the top of every
+	# verb, BEFORE any of them reports a task state or a committed_trace_ids
+	# list. The rule itself lives in the model
+	# (RoutingWorkspace.reconcile_committed_copper); this is only the wiring.
+	# Runs FIRST so the hint pass below sees the reconciled dispositions and
+	# reopens the source hint of a commit that just lost its copper in the same
+	# pass.
 	_reconcile_committed_copper(host, data)
 	# MF-2 (review, owner-ratified HITL-2 — undo coherence): see
 	# _reconcile_hint_lifecycle's own doc for why this lazy self-heal, run at
@@ -5710,16 +5697,15 @@ static func _workspace_ctx(host) -> Dictionary:
 	return {"ok": true, "ws": workspace, "data": data}
 
 
-## Wiring for the copper-loss reconcile (bug 01a02bf97224): resolve the routing
-## workspace, BIND it to the board (idempotent — same reason _workspace_ctx
-## binds: bucket 8 only exists while a delegate is bound) and ask the model its
-## question. Returns the candidate ids whose commit was retired, [] when there
-## is no workspace to ask (headless, or a host with no panel — every non-
-## workspace caller of this file, e.g. the delete tool's own unit tests).
+## Wiring for the copper-loss reconcile: resolve the routing workspace, BIND it
+## to the board (idempotent — bucket 8 only exists while a delegate is bound)
+## and ask the model its question. Returns the candidate ids whose commit was
+## retired, [] when there is no workspace to ask (headless, or a host with no
+## panel).
 ##
-## Two callers, one wiring point: _workspace_ctx above, so every workspace verb
-## reports against copper that exists, and _delete_traces, so the tool that most
-## often removes committed copper reconciles inside its own history step.
+## Two callers: _workspace_ctx above, so every workspace verb reports against
+## copper that exists, and _delete_traces, so that tool reconciles inside its
+## own history step.
 static func _reconcile_committed_copper(host, data) -> Array:
 	if data == null or not is_instance_valid(data):
 		return []
@@ -6480,8 +6466,7 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 ## (the route's effective width) and "width_source" (whatever vocabulary
 ## methods.py _attach_effective_routing_rules emits — "caller_option", "hint",
 ## "board_rules", "engine_default", "net_class", "net_copper" — relayed
-## verbatim, never
-## reinterpreted here). Absent when `route_rec` carries no
+## verbatim, never reinterpreted here). Absent when `route_rec` carries no
 ## "effective_width_mm" (the worker attached no provenance for this route —
 ## see _normalize_route_records' own absent-key note), so a caller can never
 ## mistake "we don't know" for "board default".

@@ -6531,34 +6531,25 @@ func _run_ux3_reverse_parity() -> void:
 	ctx["driver"].free_panel(ctx["panel"])
 
 
-# ══ 29. COPPER-LOSS RECONCILE (bug 01a02bf97224) ═════════════════════════════
+# ══ 29. COPPER-LOSS RECONCILE ════════════════════════════════════════════════
 #
-# Deleting copper a COMMITTED candidate owns left the workspace claiming the
-# span was routed: the disposition stayed "committed", committed_trace_ids kept
-# naming traces the export could not find, and — the part that matters — the
-# TASK STAYED CLOSED. The surface that answers "what still needs routing" was
-# answering "routed" over an empty span. RoutingWorkspace.uncommit() was written
-# for exactly this compensation and, until now, had no caller at all.
+# Deleting copper a COMMITTED candidate owns must retire that commit: the
+# disposition leaves "committed", committed_trace_ids stops naming traces the
+# board no longer has, and the routing TASK REOPENS.
 #
-# THE FALSIFIERS this group is built around, rather than a listing that merely
-# looks tidy:
-#   * a HEALTHY commit must SURVIVE the pass. An existence check that cannot
-#     tell present from absent (wrong lookup, object-vs-id compare) would retire
-#     a commit whose copper is all there — asserted BEFORE anything is deleted.
-#   * the TASK STATE is the claim. The docket names the lazy fix that would pass
-#     a shape-only test while leaving the defect in place: filtering dead ids out
-#     of committed_trace_ids at read time. So the load-bearing assertions here
-#     are task_state / open_task_ids / disposition, and the id list is checked
-#     only as the second half.
-#   * the SURVIVORS are read off the BOARD, not off the reply — a pass that
-#     "reconciled" by deleting the rest of the candidate's copper would satisfy
-#     every disposition assertion and be catastrophically wrong.
-#   * UNDO AND REDO BOTH WAYS. The one path that was already coherent is undo
-#     (bucket 8 restores copper and disposition together), and the docket's
-#     first trap is a fix that fires there too and double-applies. Undo of the
-#     delete must bring the copper AND the commit back; redo must take both away
-#     again — which is only true because the reconcile runs INSIDE the delete's
-#     own history step.
+# What each part of the group pins down:
+#   * a HEALTHY commit SURVIVES the pass — asserted BEFORE anything is deleted,
+#     so an existence check that cannot tell present from absent (wrong lookup,
+#     object-vs-id compare) fails here.
+#   * the TASK STATE is the claim, so task_state / open_task_ids / disposition
+#     are the load-bearing assertions and the id list is checked second.
+#     Filtering dead ids out of committed_trace_ids at read time passes a
+#     shape-only test and fails these.
+#   * the SURVIVORS are read off the BOARD, not off the reply, so copper the
+#     caller did not name must still be there afterwards.
+#   * UNDO AND REDO BOTH WAYS. Undo of the delete brings the copper AND the
+#     commit back; redo takes both away again. That holds only because the
+#     reconcile runs INSIDE the delete's own history step.
 
 func _run_copper_loss_reconcile() -> void:
 	print("-- 29. bug 01a02bf97224: deleting committed copper retires the commit and reopens the span --")
@@ -6577,7 +6568,7 @@ func _run_copper_loss_model() -> void:
 
 	# PIN first, so the disposition the reconcile restores is a NON-DEFAULT one:
 	# a candidate committed from "proposed" cannot tell a real restore from a
-	# constructor default (same reason group 3 pins).
+	# constructor default.
 	check("pin the candidate before committing", ws.pin(cid))
 	var res: Dictionary = ws.commit(cid, data)
 	check("commit reports ok", bool(res.get("ok", false)))
@@ -6586,10 +6577,8 @@ func _run_copper_loss_model() -> void:
 	check_eq("…and one via", (res.get("via_ids", []) as Array).size(), 1)
 	check_eq("its task is closed", ws.task_state(task_id), "closed")
 
-	# A REAL VERDICT to lose. "unchecked" has nothing to stale, so a candidate
-	# that never carried a verdict cannot show that the reconcile invalidates
-	# one — and a clean verdict scored against copper that is now gone is the
-	# exact thing that must not survive.
+	# A REAL VERDICT to lose: "unchecked" has nothing to stale, so a candidate
+	# that never carried a verdict cannot show that the reconcile stales one.
 	ws.set_validation(cid, "clean")
 
 	# ── THE NEGATIVE, FIRST: intact copper is not loss ────────────────────────
@@ -6630,8 +6619,8 @@ func _run_copper_loss_model() -> void:
 		data.get_trace(str(committed_traces[2])) != null)
 	check_eq("the via is untouched too", int(data.vias.size()), 1)
 
-	# ── IDEMPOTENT: a retired commit is not committed, so there is no second
-	#    pass to make. This is also why the verb-entry call cannot accumulate.
+	# ── IDEMPOTENT: a retired commit is not committed, so a second pass has
+	#    nothing to do — including the pass at every workspace verb's entry.
 	check_eq("a second pass retires nothing",
 		(ws.reconcile_committed_copper(data) as Array).size(), 0)
 	check_eq("…and the disposition did not move again",
@@ -6640,8 +6629,7 @@ func _run_copper_loss_model() -> void:
 
 	# ── A COMMIT THAT CLAIMED NO COPPER IS NEVER RETIRED ─────────────────────
 	# mark_committed's annotation-accept shape records no ids: it makes no claim
-	# about board copper, so an EMPTY board cannot falsify it. Absence of a
-	# record must never be read as evidence of loss.
+	# about board copper, so an EMPTY board does not falsify it.
 	var ws2 = PcbWorkspace.new()
 	var bare = PcbData.new()
 	bare.save_to_history("baseline")
@@ -6653,9 +6641,9 @@ func _run_copper_loss_model() -> void:
 	check_eq("…the id-less commit stands", str(ws2.get_candidate(cid2).disposition), "committed")
 
 
-## TOOL half: the docket's acceptance path verbatim — commit, then
-## minerva_pcb_delete_traces, then minerva_pcb_workspace_list — plus the
-## undo/redo pairing that the eager, in-history-step reconcile buys.
+## TOOL half: commit, then minerva_pcb_delete_traces, then
+## minerva_pcb_workspace_list — plus the undo/redo pairing the in-history-step
+## reconcile produces.
 func _run_copper_loss_delete_tool() -> void:
 	var data = PcbData.new()
 	data.save_to_history("baseline")
@@ -6722,8 +6710,7 @@ func _run_copper_loss_delete_tool() -> void:
 
 
 ## The `state` of one task in a workspace_list reply, or "" when the listing
-## does not carry it (read from the REPLY, never from the model — the reply is
-## the surface the bug was reported against).
+## does not carry it. Read from the REPLY, never from the model.
 func _task_state_in(reply: Dictionary, task_id: String) -> String:
 	for t in (reply.get("tasks", []) as Array):
 		if t is Dictionary and str((t as Dictionary).get("task_id", "")) == task_id:

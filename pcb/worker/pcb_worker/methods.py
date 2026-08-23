@@ -2430,10 +2430,10 @@ def _attach_effective_routing_rules(
     what this reply claims a route got cannot drift apart.
 
     ``net_width_sources`` (net name -> source label) is that map's PROVENANCE,
-    and is required rather than defaulted: two per-net rules can now supply a
+    and is required rather than defaulted: two per-net rules can supply a
     width (a net class's minimum, ``"net_class"``, and the net's own established
-    copper, ``"net_copper"`` — bug 01a02bc4f800), so a hard-coded label here
-    would report one of them as the other. A net in ``net_widths`` with no entry
+    copper, ``"net_copper"``), so a hard-coded label here would report one of
+    them as the other. A net in ``net_widths`` with no entry
     here is a caller bug and raises, rather than reporting a source that was not
     consulted: this field exists precisely so a consumer never has to infer
     where a width came from.
@@ -2853,32 +2853,24 @@ def _route(params: dict) -> dict:
     net_widths = {n: w for n, (w, _c) in net_overrides.items() if w is not None}
     net_width_sources = {n: "net_class" for n in net_widths}
 
-    # THE NET'S OWN ESTABLISHED WIDTH (bug 01a02bc4f800) — the OTHER per-net
-    # rule, resolved in the SAME step 3 and combined with the class minimum by
-    # MAX, not by precedence. Both are per-net facts about the same net and
-    # both are floors:
+    # THE NET'S OWN ESTABLISHED WIDTH — the OTHER per-net rule, resolved in the
+    # SAME step 3 and combined with the class minimum by MAX, not by precedence.
+    # Both are floors: the class rule is a minimum by name
+    # (`min_trace_width_mm`) and by consumer (`drc_geometric` enforces it as
+    # GC1's floor whatever routing decided), and GC1 checks only a minimum, so a
+    # span joining 0.8mm copper at the board's 0.25mm default passes every gate
+    # while being a quarter the width of the copper it joins.
     #
-    #   * the class rule is a MINIMUM by name (`min_trace_width_mm`) and by
-    #     consumer — `drc_geometric` enforces it as GC1's floor whatever routing
-    #     decided — so routing BELOW it would propose copper the board's own DRC
-    #     will flag;
-    #   * the net's established copper is a floor for the physical reason the
-    #     bug names: a span joining 0.8mm copper at the board's 0.25mm default is
-    #     a current-carrying defect no gate catches, because GC1 checks a
-    #     minimum and never whether the width suits the current.
-    #
-    # So the net routes at whichever is wider, and the provenance names the one
-    # that actually decided it. A tie keeps the class label: nothing was widened
-    # by the copper, and the class is the authored rule. See
+    # The net routes at whichever is wider, and the provenance names the one
+    # that decided it. A tie keeps the class label. See
     # route_bridge.established_net_widths for the widest-wins rule on a net whose
     # own copper is not uniform, and docs/routing.md ("Per-net-class minima" ->
-    # "The net's own established width") for the placement argument.
+    # "The net's own established width").
     #
     # Dropped wholesale — like the class width, and for the identical reason —
     # when steps 1/2 already fixed the width for the WHOLE RUN: a caller who
     # states `trace_width: 0.6` gets 0.6 on every net, reported as
-    # `caller_option`, which is a stated decision rather than the silent board
-    # default this bug is about.
+    # `caller_option`.
     if not (caller_set_width or hint_set_width):
         try:
             established = route_bridge.established_net_widths(existing_traces)
@@ -2913,10 +2905,8 @@ def _route(params: dict) -> dict:
     # established-copper widths already merged — rather than off `net_overrides`
     # alone. The grid's margin is `clearance + trace_width / 2` where that
     # trace_width is the NEWCOMER's half-width (agent_router/grid.py::mark_trace),
-    # so it must cover the widest copper THIS RUN may draw. A net adopting its
-    # own established 0.8mm while the grid reserved for 0.25mm is exactly the
-    # under-block the invariant forbids — and it would be an under-block the fix
-    # itself introduced.
+    # so it must cover the widest copper THIS RUN may draw: a net routed at its
+    # own established 0.8mm while the grid reserved for 0.25mm is an under-block.
     keepout_trace_width = max([kw["trace_width"]] + list(net_widths.values()))
 
     kw["net_widths"] = net_widths

@@ -172,7 +172,7 @@ var draft_placements: Array = []
 ## SILENT fallback to it. Vocabulary: the worker's effective-rules words
 ## ("caller_option"/"hint"/"board_rules"/"engine_default"/"net_class"/
 ## "net_copper" — the last one meaning the width this net's OWN EXISTING copper
-## established, bug 01a02bc4f800) when
+## established) when
 ## the route carried them, else the workspace's own ingest verdict ("hint" |
 ## "default" | "caller_option"). "" = generated before this field existed.
 var width_source: String = ""

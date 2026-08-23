@@ -1078,12 +1078,10 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 			source_hints, base_board_revision, null, route_span)
 		if not new_id.is_empty():
 			# The worker's finer width vocabulary, upgraded onto the candidate
-			# exactly as ingest_record does it for the correlated path (bug
-			# 01a02bc4f800). This path takes the routed segment widths now, so
-			# leaving the ingest verdict ("hint"/"default") standing would file
-			# a width the ROUTER resolved — a net class minimum, or the width the
-			# net's own copper established — under a source that never supplied
-			# it.
+			# exactly as ingest_record does it for the correlated path. The
+			# candidate's copper comes from the routed segment widths, so its
+			# width_source has to name the ROUTER's source rather than this side's
+			# ingest verdict ("hint"/"default").
 			var routed_source: String = _route_width_source(route_dict)
 			if not routed_source.is_empty() and candidates.has(new_id):
 				candidates[new_id].width_source = routed_source
@@ -1317,19 +1315,15 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 			# board uncompilable; the rest of this route is unaffected.
 			last_ingest_degenerate_segments += 1
 			continue
-		# THE WORKER'S OWN WIDTH WINS (bug 01a02bc4f800). Each routed segment
-		# arrives carrying `width_mm` — the width the router ACTUALLY drew that
-		# net at, after its whole precedence chain (caller option, hint, the
-		# net's class minimum, the width the net's EXISTING copper establishes,
-		# the board's default). The hint re-derivation above is a SECOND, poorer
-		# copy of that chain: it sees hints only, so a route proposed onto a
-		# 0.8mm power net with no hint width fell through to its silent 0.25mm
-		# default and committed copper a quarter the width of the copper it
-		# joins — the defect this fixes, and one no gate catches because GC1
-		# checks a MINIMUM width.
+		# THE WORKER'S OWN WIDTH WINS over the hint re-derivation above. Each
+		# routed segment arrives carrying `width_mm`: the width the router
+		# ACTUALLY drew that net at, after its whole precedence chain (caller
+		# option, hint, the net's class minimum, the width the net's EXISTING
+		# copper establishes, the board's default). The hint derivation sees hints
+		# only, and falls back to 0.25mm when none carries a width.
 		#
-		# `width_override` still outranks it: that is a caller who resolved an
-		# exact per-trace width itself (bus propose), not a fallback.
+		# `width_override` outranks both: that is a caller who resolved an exact
+		# per-trace width itself (bus propose), not a fallback.
 		var seg_width := width
 		if width_override <= 0.0:
 			var routed_width := float(seg_dict.get("width_mm", 0.0))
@@ -1510,73 +1504,48 @@ func uncommit(candidate_id: String) -> bool:
 	return true
 
 
-## COPPER-LOSS RECONCILE (bug 01a02bf97224): a candidate is committed only for
-## as long as the copper it owns is still on the board. Asked against `board`
-## (duck-typed: get_trace / find_via_index, the same two lookups
-## minerva_pcb_delete_traces resolves its own selectors with), it retires the
-## commit of every candidate whose recorded copper the board can no longer
-## resolve, and returns those candidate ids.
+## COPPER-LOSS RECONCILE: a candidate stays committed only while the copper it
+## owns is still on the board. Asked against `board` (duck-typed: get_trace /
+## find_via_index, the same two lookups minerva_pcb_delete_traces resolves its
+## own selectors with), it retires the commit of every candidate whose recorded
+## copper the board can no longer resolve, and returns those candidate ids.
 ##
-## WHAT WAS WRONG. Nothing tells this workspace that a trace was removed.
-## PCBData.remove_trace erases the trace and emits its own signals; the bound
-## delegate exists purely for the bucket-8 undo snapshot. So a candidate whose
-## committed copper someone deleted kept disposition="committed", kept
-## committed_trace_ids naming ids the board no longer has, and — the part that
-## matters — kept its TASK CLOSED. This workspace is the surface that answers
-## "what still needs routing", and it was answering "routed" over an empty
-## span: it failed in the reassuring direction. It also minted unreachable
-## state, because _commit_preflight refuses a re-commit ("undo the commit or
-## uncommit it") and nothing ever called uncommit.
+## Nothing notifies this workspace when copper is deleted: PCBData.remove_trace
+## erases the trace and emits its own signals, and the bound delegate exists
+## only for the bucket-8 undo snapshot. The question is therefore asked from
+## OUTSIDE, against the board as it now stands, and has one answer however the
+## copper left — hand delete, eraser, via delete, a re-import that cleared the
+## board.
 ##
-## WHY A LAZY RECONCILE AND NOT A remove_trace HOOK. remove_trace is also the
-## ROLLBACK path's tool: _rollback_commit calls it with the commit transaction
-## OPEN, and uncommit refuses while _commit_transaction_active (correctly — a
-## torn batch is compensated as a batch, never candidate by candidate). The same
-## hook would also fire during _restore_state's wholesale rebuild, i.e. on the
-## undo path, which is the one path that is already coherent. Asking the
-## question from OUTSIDE, against the board as it now stands, has one answer no
-## matter how the copper left — hand delete, eraser, via delete, a re-import
-## that cleared the board.
+## Retiring a commit is uncommit's full compensation: the prior disposition is
+## restored, the recorded copper ids cleared, the routing task REOPENED, and any
+## verdict the candidate held staled (uncommit's _stale_live_verdicts).
 ##
-## THE UNDO PATH IS UNTOUCHED, BY CONSTRUCTION. A board undo restores the
-## bucket-8 disposition layer and the copper together; this pass then finds
-## every committed candidate's copper present and does nothing. Idempotent for
-## the same reason: once a commit is retired the candidate is no longer
-## committed, so the next pass skips it. Nothing here can double-apply.
+## Idempotent — once a commit is retired the candidate is no longer committed,
+## so the next pass skips it. After a board undo, which restores the bucket-8
+## disposition layer and the copper together, this pass finds every committed
+## candidate's copper present and does nothing.
 ##
-## PARTIAL LOSS COUNTS AS LOSS. A candidate can own several traces and lose only
-## one (a leg deleted and redrawn by hand). The survivors do not connect the
-## span the candidate answered, and deciding whether they might would be a
-## connectivity judgement made from an id list — this project's standing ruling
-## is that routing fails closed rather than approximating copper. So ANY missing
-## owned id retires the commit, vias included: a lost via is a lost layer
-## change, and F1's never-orphan-a-via rule cuts both ways. The surviving copper
-## is LEFT ON THE BOARD untouched — copper the user did not delete is not this
-## pass's to remove — and the candidate comes back live with any verdict it held
-## STALED (uncommit's own _stale_live_verdicts: a clean verdict scored against
-## copper that is gone is not a clean verdict), which is what says "re-check or
-## reroute me against the board that actually exists" rather than re-commit me
-## blind over the survivors.
+## PARTIAL LOSS COUNTS AS LOSS: ANY missing owned id retires the commit, vias
+## included. The surviving copper is LEFT ON THE BOARD untouched.
 ##
-## A committed candidate that recorded NO copper ids at all is SKIPPED, always:
-## that is mark_committed's annotation-accept shape (ids optional), a commit
-## that makes no claim about board copper, so there is no claim for the board to
-## falsify. Absence of a record is never read as evidence of loss.
+## A committed candidate that recorded NO copper ids is SKIPPED: that is
+## mark_committed's annotation-accept shape (ids optional), a commit that makes
+## no claim about board copper.
 func reconcile_committed_copper(board) -> Array:
 	var retired: Array = []
 	if board == null or not is_instance_valid(board):
 		return retired
 	if not (board.has_method("get_trace") and board.has_method("find_via_index")):
 		return retired
-	# Never compensate mid-transaction: uncommit would refuse anyway (and stamp
-	# a refusal nobody asked for). A commit in flight is about to record its own
-	# copper; the question is asked again at the next verb.
+	# uncommit refuses while a commit transaction is open (a torn batch is
+	# compensated as a batch), and a commit in flight is about to record its own
+	# copper. The question is asked again at the next verb.
 	if _commit_transaction_active:
 		return retired
 	# keys() is a SNAPSHOT and every read goes through get_candidate(): uncommit
-	# emits candidate_changed, and a handler that removed a candidate mid-pass
-	# would make a direct candidates[id] read fault on a key this loop already
-	# holds.
+	# emits candidate_changed, and a handler may remove a candidate mid-pass, so
+	# a key held by this loop can be gone by the time it is read.
 	for raw_id in candidates.keys():
 		var cid := str(raw_id)
 		var c = get_candidate(cid)
@@ -1916,11 +1885,9 @@ static func _pin_ref_to_endpoint(pin_ref) -> Dictionary:
 ## (mirrors panel_tools._width_for_net); falls back to 0.25mm — the same
 ## default _materialize_routes applies when no hint specifies a width — so a
 ## shadow candidate's width matches what would actually be committed.
-## NOW A FALLBACK ONLY (bug 01a02bc4f800): a routed segment that carries the
-## worker's own `width_mm` outranks whatever this returns, because the worker
-## resolved the FULL precedence chain (class minimum, the net's established
-## copper, the board default) and this sees hints alone. It still decides a
-## reply that carries no routed width at all.
+## A FALLBACK ONLY: a routed segment carrying the worker's own `width_mm`
+## outranks whatever this returns. This decides only a reply that carries no
+## routed width at all.
 ## NET_NAMES-ONLY match (via _hints_matching_net) — used ONLY by the legacy
 ## ingest_routing_result path; a pins-only hint never matches here (same gap
 ## as _hint_ids_for_net, docket 019fa109766f). ingest_record instead calls

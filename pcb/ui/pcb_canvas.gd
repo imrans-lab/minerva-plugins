@@ -51,10 +51,9 @@ const BusGeom := preload("model/pcb_bus_geometry.gd")
 ## dependency edge (canvas -> panel_tools); the reverse edge does not exist
 ## (panel_tools.gd never references pcb_canvas.gd), so it introduces no cycle.
 const _PanelToolsScript := preload("panel_tools.gd")
-## THE RATSNEST ANSWER (work item 01a02b5763e87b84a9318b28f7437fa7): which pads
-## a net still needs joined, measured from the copper actually on the board.
-## Pure statics over the board model — see _draw_ratsnest below for why the
-## computation lives outside this file.
+## THE RATSNEST ANSWER: which pads a net still needs joined, measured from the
+## copper actually on the board. Pure statics over the board model; this file
+## only draws the answer.
 const PcbRatsnest := preload("model/pcb_ratsnest.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
@@ -2631,21 +2630,15 @@ func _draw_cutout_halos() -> void:
 
 
 ## ── RATSNEST ─────────────────────────────────────────────────────────────────
-## WHAT IS DRAWN and WHY it is drawn that way lives in model/pcb_ratsnest.gd;
-## this canvas only turns that answer into pixels. The split matters: the
-## answer is a pure function of the board, so it is testable without a
-## viewport, and an off-screen capture computes the SAME answer from the SAME
-## board rather than mirroring a snapshot that could go stale.
+## What is drawn is decided in model/pcb_ratsnest.gd, a pure function of the
+## board; this canvas turns that answer into pixels.
 ##
 ## THE CACHE. PcbRatsnest.extract() is O(board) and PcbRatsnest.solve() is
-## O(pads^2) per net; a redraw fires on every pan and zoom frame, so solving
-## per frame would make panning a large board cost quadratic work for a picture
-## that did not change. The cache key is hash(extract(...)) — a hash of the
-## solver's COMPLETE input — which is why a stale ratsnest cannot survive a
-## board edit: there is no second, hand-written summary of "what counts as a
-## change" to fall out of step with what the solver actually reads. In
-## particular this covers a LIVE DRAG, which moves component positions without
-## bumping board_revision (see _apply_drag_delta).
+## O(pads^2) per net, and a redraw fires on every pan and zoom frame. The cache
+## key is hash(extract(...)) — a hash of the solver's COMPLETE input — so any
+## board edit the solver can see invalidates it, including a LIVE DRAG, which
+## moves component positions without bumping board_revision (see
+## _apply_drag_delta).
 var _ratsnest_key: int = 0
 var _ratsnest_solved: Dictionary = {}
 var _ratsnest_ready: bool = false
@@ -2665,11 +2658,9 @@ func _ratsnest() -> Dictionary:
 
 
 ## Minimum value (HSV V) an airwire is drawn at. Net colours are authored for
-## COPPER on a light-ish schematic reading, and pcb_net.generate_color_for_name
-## hands GND flat black — which, drawn at 60% alpha over this canvas's dark
-## green board, is an airwire nobody can see. Ground is the single net a
-## designer most needs to read here, so the airwire (and ONLY the airwire —
-## the net's own colour is untouched) is lifted to a legible value.
+## COPPER: pcb_net.generate_color_for_name hands GND flat black, which at 60%
+## alpha over this canvas's dark green board is invisible. Only the AIRWIRE is
+## lifted to this value; the net's own colour is untouched.
 const AIRWIRE_MIN_VALUE := 0.55
 const AIRWIRE_ALPHA := 0.6
 
@@ -2684,11 +2675,10 @@ func _airwire_color(net_color: Color) -> Color:
 
 ## Draw the ratsnest: one dashed airwire per join a net still needs.
 ##
-## NOT LAYER-FILTERED, deliberately. An airwire is not copper — it is the
-## ABSENCE of copper — so hiding a copper layer must not hide the work that
-## remains on it. (The connectivity behind it is computed over all copper for
-## the same reason: what is physically joined does not change because a View
-## eye is shut.)
+## NOT LAYER-FILTERED: an airwire marks the ABSENCE of copper, so hiding a
+## copper layer does not hide the joins still outstanding on it. The
+## connectivity behind it is likewise computed over all copper layers,
+## whatever the View filter shows.
 func _draw_ratsnest() -> void:
 	var rats := _ratsnest()
 	if rats.is_empty():
@@ -2702,9 +2692,8 @@ func _draw_ratsnest() -> void:
 		draw_circle(p1, 3.0, c)
 		draw_circle(p2, 3.0, c)
 
-	# A quieted net's UNDRAWN islands still say where they are — a hollow ring
-	# on one pad of each, so "there is more of this net left" is a place on the
-	# board and not only a number in the corner.
+	# A quieted net's UNDRAWN islands are marked in place: a hollow ring on one
+	# pad of each.
 	for marker in rats.get("markers", []):
 		var c := _airwire_color((marker as Dictionary)["color"])
 		draw_arc(world_to_screen((marker as Dictionary)["at"]), 4.0, 0.0, TAU, 12, c, 1.5)
@@ -2712,11 +2701,9 @@ func _draw_ratsnest() -> void:
 	_draw_ratsnest_legend(rats.get("quieted", []))
 
 
-## The honesty half of quieting (top-right, clear of the mask note at top-left
-## and the approximation notice at the bottom): every net whose airwires were
-## thinned says so by name, with how many joins it still needs and how many of
-## them are on screen. A distribution net that went quiet without this line
-## would be indistinguishable from one that finished routing.
+## Names every net whose airwires were thinned, with how many joins it still
+## needs and how many of them are on screen. Drawn top-right, clear of the mask
+## note at top-left and the approximation notice at the bottom.
 func _draw_ratsnest_legend(rows: Array) -> void:
 	if rows.is_empty():
 		return
@@ -9841,12 +9828,10 @@ const CAPTURE_MIRRORED_FIELDS := [
 	# what is approximate that the human sees.
 	"show_approximation_notice",
 	# NOT LISTED, on purpose: _ratsnest_key / _ratsnest_solved / _ratsnest_ready.
-	# Those are a CACHE of a pure function of `data`, and `data` is shared with
-	# the copy by reference. The copy recomputes and — because the computation
-	# is deterministic (see model/pcb_ratsnest.gd) — arrives at the same answer.
-	# Mirroring a cache would be strictly worse: it would let a capture inherit
-	# a stale solve instead of taking a fresh one. `show_ratsnest`, which is the
-	# actual VIEW state, is listed at the top.
+	# Those are a CACHE of a pure function of `data`, which the copy shares by
+	# reference; the copy re-solves and, the computation being deterministic (see
+	# model/pcb_ratsnest.gd), reaches the same answer. `show_ratsnest`, the actual
+	# VIEW state, is listed at the top.
 ]
 
 

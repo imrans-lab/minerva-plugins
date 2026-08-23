@@ -2518,21 +2518,19 @@ def test_an_unclassed_net_still_fills_in_the_baseline_width():
 
 
 # ---------------------------------------------------------------------------
-# 7. THE NET'S OWN ESTABLISHED WIDTH (bug 01a02bc4f800).
+# 7. THE NET'S OWN ESTABLISHED WIDTH.
 #
-# Measured on smart-remote v2: routes proposed onto VIN — every pre-existing
-# trace of which is 0.8mm — committed at 0.25mm, because the propose path read
-# the board's blanket default and never the net's own copper. Nothing objected:
-# GC1 checks a MINIMUM width, so undersized copper on a 2A input path is
-# manufacturable and reported clean.
+# A route proposed onto a net that already carries copper is routed at that
+# net's established width. GC1 checks a MINIMUM width only, so a narrower
+# addition to a wide power net is reported clean.
 #
 # The fixtures below reuse the mandatory 3-pin board and its accepted-copper
-# shape (`_committed`), re-authored at a width that is NEITHER of the two numbers
-# a wrong implementation would produce: not BOARD_WIDTH_MM (0.35, the board's own
-# default — what the bug produced) and not the engine's 0.25.
+# shape (`_committed`), re-authored at a width that is NEITHER BOARD_WIDTH_MM
+# (0.35, the board's own default) NOR the engine's 0.25, so a wrong answer says
+# which path produced it.
 # ---------------------------------------------------------------------------
 
-ESTABLISHED_WIDTH_MM = 0.8   # the net's own copper; the docket's real number
+ESTABLISHED_WIDTH_MM = 0.8   # the width the net's own copper establishes
 NARROW_ESTABLISHED_MM = 0.5  # the OTHER width on a mixed net — still != 0.35
 
 
@@ -2566,19 +2564,14 @@ def test_a_route_onto_a_net_that_already_carries_copper_adopts_that_width():
 
     SIG already carries 0.8mm copper; OTHER carries none. On the SAME run:
 
-      * SIG's proposal is 0.8mm and says so (`source: "net_copper"`) — the bug
-        made it BOARD_WIDTH_MM with `source: "board_rules"`;
-      * OTHER's is still BOARD_WIDTH_MM/`board_rules` — the criterion the lazy
-        fix fails, because raising `design_rules.trace_width_mm` would make SIG
-        right and every thin-signal net on the board wrong;
-      * the run-wide baseline is still the board's own rule: the per-net answer
-        must not be smuggled in by moving a global.
+      * SIG's proposal is 0.8mm and says so (`source: "net_copper"`);
+      * OTHER's is still BOARD_WIDTH_MM/`board_rules`, so the per-net answer
+        cannot have come from raising `design_rules.trace_width_mm`;
+      * the run-wide baseline is still the board's own rule.
 
-    The segment stamp is asserted too, because that — not the provenance dict —
-    is what `ir_candidates.build_overlay` checks the proposal at and what the
-    commit path lays as copper. A route whose provenance claims 0.8mm over
-    segments stamped 0.35mm would be the lying-field shape this surface exists
-    to prevent.
+    The segment stamp is asserted too: that — not the provenance dict — is what
+    `ir_candidates.build_overlay` checks the proposal at and what the commit
+    path lays as copper.
     """
     board = _committed_at(_three_pin_board(), ESTABLISHED_WIDTH_MM)
     resp = _call_route({"board": board})
@@ -2613,14 +2606,9 @@ def test_a_net_whose_existing_copper_is_mixed_takes_the_widest():
     SIG's copper is 0.5mm (top, listed FIRST) and 0.8mm (bottom). The proposal
     must be 0.8mm:
 
-      * 0.5 would be "first segment wins" or "narrowest wins" — the direction
-        that keeps producing undersized copper, which is the whole defect;
-      * 0.35/0.25 would be the bug or the engine default, unchanged.
-
-    Widest is chosen because it can only OVER-size, and over-sized copper either
-    fits or fails loudly as an unrouted pair; under-sized copper on a power net
-    is a defect every gate calls clean. It is also what the bus path already
-    answers to the same question (`panel_tools.gd::bus_net_width`).
+      * 0.5 would be "first segment wins" or "narrowest wins";
+      * 0.35/0.25 would be the board default or the engine default — the net's
+        own copper never consulted at all.
     """
     board = _committed_at(_three_pin_board(),
                           NARROW_ESTABLISHED_MM, ESTABLISHED_WIDTH_MM)
@@ -2639,8 +2627,7 @@ def test_established_net_widths_is_widest_per_net_and_fails_closed():
     Three facts no end-to-end route can show as cheaply: the max is taken
     PER NET (not board-wide), a net with no copper is ABSENT rather than
     defaulted, and copper whose width cannot be read as a positive number
-    REFUSES instead of being skipped — skipping would let the original defect
-    back in through the one net whose copper could not be measured.
+    RAISES instead of being skipped.
     """
     def seg(net, width):
         return route_bridge.ExistingSegment(
@@ -2663,9 +2650,8 @@ def test_a_stated_width_still_outranks_the_nets_own_copper_and_says_so():
     """Steps 1/2 are unchanged: an explicit caller option (and a hint width)
     fixes the WHOLE run, even on a net carrying wider copper.
 
-    That is not the bug — the bug is the SILENT board default. A stated 0.6mm
-    is a decision, and the reply names it `caller_option`, so a reviewer can see
-    that the net's own 0.8mm was overridden rather than never consulted.
+    The reply names the source `caller_option`, so the net's own 0.8mm reads
+    as overridden rather than never consulted.
     """
     board = _committed_at(_three_pin_board(), ESTABLISHED_WIDTH_MM)
     resp = _call_route({"board": board, "options": {"trace_width": 0.6}})
@@ -2685,9 +2671,7 @@ def test_the_class_minimum_is_a_floor_the_nets_copper_can_only_raise(
     rejects, so the class floor has to win when it is higher.
 
     Run 2: the class demands 0.5mm over that same 0.8mm copper -> 0.8mm. The
-    class is a MINIMUM (`min_trace_width_mm`), and 0.8 satisfies it; taking 0.5
-    because "the class is more specific" would be the original defect wearing a
-    net class.
+    class is a MINIMUM (`min_trace_width_mm`), and 0.8 satisfies it.
 
     The provenance names whichever rule actually decided, in both directions.
     """
@@ -2711,15 +2695,14 @@ def test_the_class_minimum_is_a_floor_the_nets_copper_can_only_raise(
 
 def test_the_grid_reserves_for_the_widest_copper_the_run_actually_draws(
         recorded_grids):
-    """The safety half, and the one this fix could itself have broken.
+    """The grid's reservation covers the widest copper the run draws.
 
     `RoutingGrid.keepout_margin` is `clearance + trace_width / 2` where that
     trace_width is the NEWCOMER's half-width, and the grid is marked ONCE for the
-    whole run. Adopting 0.8mm for SIG while the grid reserved for the board's
-    0.35mm would put SIG's own copper inside every ring it passes — an
-    under-block introduced by the fix, and routing.md's invariant ("the modeled
-    keepout must be a SUPERSET of the fabricated copper") has no exception for
-    one the fix introduces.
+    whole run. Routing SIG at 0.8mm while the grid reserved for the board's
+    0.35mm puts SIG's own copper inside every ring it passes — the under-block
+    routing.md's invariant forbids ("the modeled keepout must be a SUPERSET of
+    the fabricated copper").
 
     Asserted as the invariant rather than as a plumbed number: whatever the reply
     says the widest proposed copper is, the grid's own reservation must cover it.

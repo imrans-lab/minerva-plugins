@@ -438,8 +438,8 @@ class RoutingResult:
 #     map draws at the run's baseline `trace_width`. `pcb_worker.methods._route`
 #     builds it from the two per-net rules there are — that net's own class
 #     minimum (`_net_class_overrides`) and the width its EXISTING copper
-#     establishes (`route_bridge.established_net_widths`, bug 01a02bc4f800) —
-#     taking whichever is wider. The engine neither knows nor needs to know
+#     establishes (`route_bridge.established_net_widths`) — taking whichever
+#     is wider. The engine neither knows nor needs to know
 #     which of the two a number came from.
 #
 #   * The KEEPOUT MARGIN is NOT per-net. `keepout_clearance`/`keepout_trace_

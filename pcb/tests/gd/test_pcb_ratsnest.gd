@@ -1,72 +1,43 @@
 extends SceneTree
 ## THE RATSNEST: physical connectivity, a spanning tree, and quieting.
-## Work item 01a02b5763e87b84a9318b28f7437fa7 (parent DCR 01a02b570e4d).
 ##
 ## Run (via a Minerva scaffold as the Godot host — NEVER the live checkout):
 ##   godot --headless --path <minerva-scaffold>/src \
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_pcb_ratsnest.gd
 ##
-## ── WHAT EACH SECTION'S ORACLE IS ─────────────────────────────────────────────
-## Every check below is answerable WITHOUT running the implementation. Where a
-## section leans on a hand-built fixture, the fixture's answer is a physical
-## fact about the copper it describes; where it leans on an invariant, the
-## invariant is a theorem about connectivity that any correct implementation
-## must satisfy whatever fixture it is handed. Both kinds are present on
-## purpose: a hand-computed fixture only tests what the fixture contains, so a
-## fixture too simple would pass a wrong implementation, while an invariant
-## holds for every board and therefore cannot be satisfied by accident.
+## ── WHAT EACH SECTION COVERS ─────────────────────────────────────────────────
 ##
-##   1. PHYSICAL CONNECTIVITY (fixture). One board, seven nets, each net a
-##      separate physical question with a known answer: a routed pair, a pair
-##      with a 0.5mm gap, a pair whose only trace is on the wrong side, a
-##      through-hole pad reached from the back, a via that changes layers, a
-##      pour that joins two pads, and a KEEPOUT that must join nothing.
-##      ORACLE: each answer is what a fabricated board would do. None of them
-##      is "does this net exist" — net membership is exactly what must NOT
-##      decide the answer.
+##   1. PHYSICAL CONNECTIVITY (fixture). One board, seven nets, each a separate
+##      physical question: a routed pair, a pair with a 0.5mm gap, a pair whose
+##      only trace is on the wrong side, a through-hole pad reached from the
+##      back, a via that changes layers, a pour that joins two pads, and a
+##      KEEPOUT that joins nothing. Every net has exactly two pins, so net
+##      membership cannot decide any of the answers.
 ##
 ##   2. THE EDGE-ADDITION INVARIANT. Joining two SEPARATE islands lowers the
 ##      count of remaining joins by exactly one; joining two pads ALREADY in
 ##      the same island lowers it by zero.
-##      ORACLE: graph theory. Adding an edge between two connected components
-##      merges them (components fall by 1); adding an edge inside one leaves
-##      the count alone. It is true of every correct answer on every board, so
-##      an implementation that counted traces, or pins, or anything other than
-##      islands, fails it.
 ##
 ##   3. SPANNING TREE, NOT A CHAIN. Four pads spaced 10mm apart on a line,
-##      listed in the net in scrambled order.
-##      ORACLE: for equally spaced collinear points the Euclidean MST is
-##      provably the chain of ADJACENT pairs — three 10mm links, total 30mm.
-##      The renderer this replaces drew pin[i]→pin[i+1] in list order, which on
-##      a scrambled list totals more than 30 and contains a link longer than
-##      10. Asserted as total length + a per-link ceiling, both derived from
-##      the geometry rather than read off the implementation.
+##      listed in the net in scrambled order. For equally spaced collinear
+##      points the Euclidean MST is the chain of ADJACENT pairs: three 10mm
+##      links, 30mm total, none longer than 10mm. Asserted as total length plus
+##      a per-link ceiling, both derived from the geometry.
 ##
 ##   4. DETERMINISM. The same physical board, described twice with every list
-##      reversed, must produce the identical picture.
-##      ORACLE: two descriptions of one board are one board. Any dependence on
-##      Dictionary order, on file order, or on an unstable sort shows up as a
-##      difference. (This is the check that would catch a tie broken by
-##      iteration order — see the determinism note in pcb_ratsnest.gd.)
+##      reversed, produces the identical picture. Any dependence on Dictionary
+##      order, on file order, or on an unstable sort shows up as a difference.
 ##
-##   5. QUIETING IS NOT HIDING. A 20-pad unrouted net.
-##      ORACLE: two invariants, not a hand-counted picture. (a) the REPORTED
-##      remaining count equals islands-1 no matter how many links were drawn —
-##      quieting must not change the arithmetic a designer reads; (b) every
-##      island is either touched by a drawn link or carries a marker, so no
-##      unresolved copper goes unrepresented. Plus the threshold boundary from
-##      both sides, which is a statement about the constant, not about a net.
+##   5. QUIETING IS NOT HIDING. A 20-pad unrouted net. (a) the REPORTED
+##      remaining count equals islands-1 however many links were drawn; (b)
+##      every island is either touched by a drawn link or carries a marker.
+##      Plus the threshold boundary from both sides, stated against the
+##      constant.
 ##
 ##   6. THE CANVAS SEAM. A capture copy draws the same ratsnest as the screen;
 ##      the cache re-solves when a LIVE DRAG moves copper (a drag mutates
 ##      component positions WITHOUT bumping board_revision — see
-##      pcb_canvas._apply_drag_delta — so a revision-keyed cache would serve a
-##      stale picture); and N still toggles the ratsnest.
-##      ORACLE: for the capture, two independently computed answers that must
-##      agree; for the cache, the physical fact that a pad dragged off the end
-##      of its trace is no longer joined to it; for the key, the binding named
-##      in the work item.
+##      pcb_canvas._apply_drag_delta); and N toggles the ratsnest.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -114,8 +85,8 @@ func _smd_pin(number: String, x: float, y: float) -> Dictionary:
 
 
 ## A through-hole pin: 0.6mm drill in a 1.2mm annulus. The barrel pierces the
-## board, so its land exists on EVERY copper layer — which is the whole point
-## of the PWR_THT net below.
+## board, so its land exists on EVERY copper layer — which is what the PWR_THT
+## net below exercises.
 func _tht_pin(number: String, x: float, y: float) -> Dictionary:
 	return {"number": number, "x_mm": x, "y_mm": y,
 		"drill_mm": 0.6, "annulus_diameter_mm": 1.2}
@@ -151,9 +122,8 @@ func _board(spec: Dictionary):
 	return d
 
 
-## net name -> the row solve() reported for it. A net absent from the result is
-## a net with nothing left to join, which is a MEANINGFUL answer here, so the
-## helper reports remaining = 0 for it rather than hiding the distinction.
+## net name -> the row solve() reported for it. A net absent from the result
+## has nothing left to join; _remaining() reports 0 for it.
 func _rows_by_net(result: Dictionary) -> Dictionary:
 	var out := {}
 	for row in result.get("nets", []):
@@ -230,14 +200,14 @@ func _connectivity_spec() -> Dictionary:
 			_part("U6", 18.0, 14.0, [_smd_pin("1", 0.0, 0.0)]),
 			_part("U13", 14.0, 28.0, [_smd_pin("1", 0.0, 0.0)]),
 			_part("U14", 18.0, 28.0, [_smd_pin("1", 0.0, 0.0)]),
-			# ROT — a 90-degree part with an OFFSET, ELONGATED land. Placed so
-			# the trace below reaches it only if BOTH the pad's offset from the
-			# part origin and the pad's own long axis were turned by the part's
-			# rotation. Hand-derived: rotating (2,0) by the component transform
-			# puts the land's centre at (38,28), and its 3.0 x 0.6 body then
-			# spans x 37.7..38.3, y 26.5..29.5 — so a trace ending at (38,27)
-			# is on copper. Leave the offset unrotated and the land lands near
-			# (40,30) instead, three millimetres away, and the join is lost.
+			# ROT — a 90-degree part with an OFFSET, ELONGATED land. The trace
+			# below reaches it only if BOTH the pad's offset from the part origin
+			# and the pad's own long axis are turned by the part's rotation.
+			# Hand-derived: rotating (2,0) by the component transform puts the
+			# land's centre at (38,28), and its 3.0 x 0.6 body then spans
+			# x 37.7..38.3, y 26.5..29.5 — so a trace ending at (38,27) is on
+			# copper. With the offset unrotated the land sits near (40,30),
+			# three millimetres away.
 			{"ref": "U15", "footprint": "CUSTOM", "x_mm": 38.0, "y_mm": 30.0,
 				"rotation_deg": 90.0, "layer": "top",
 				"pins": [{"number": "1", "x_mm": 2.0, "y_mm": 0.0,
@@ -272,9 +242,8 @@ func _connectivity_spec() -> Dictionary:
 		"zones": [
 			{"id": "z_pour", "layer": "top", "kind": "copper_pour", "net": "POUR",
 				"outline": _rect_outline(Vector2(13, 13), Vector2(19, 15))},
-			# Carries a net on purpose: what excludes it is that a keepout is
-			# not copper. An implementation filtering only on the net name
-			# would wrongly join U13.1 and U14.1 here.
+			# Carries a net on purpose: it is excluded because a keepout is not
+			# copper, not because of its net.
 			{"id": "z_keep", "layer": "top", "kind": "keepout", "net": "KEEPOUT",
 				"outline": _rect_outline(Vector2(13, 27), Vector2(19, 29))},
 		],
@@ -321,10 +290,8 @@ func _run_physical_connectivity() -> void:
 	check_eq("a rotated part's offset, elongated land is measured where it is DRAWN",
 		_remaining(result, "ROT"), 0)
 
-	# The net-membership trap, stated directly: every net above has exactly two
-	# pins, so anything deciding by net membership would answer identically for
-	# all eight. Half of them differ. (Written as one assertion over the set so
-	# it reads as the claim it is.)
+	# Every net above has exactly two pins, so membership alone gives all eight
+	# the same answer. Half of them differ.
 	var by_net := {}
 	for n in ["SIG_JOINED", "SIG_GAP", "SIG_WRONGSIDE", "PWR_THT", "PWR_VIA",
 			"POUR", "KEEPOUT", "ROT"]:
@@ -360,15 +327,14 @@ func _run_edge_addition_invariant() -> void:
 	check_eq("joining two more, elsewhere on the net, drops it by one again",
 		_remaining(Ratsnest.compute(d), "INV"), 2)
 
-	# THE ONE THAT SEPARATES "counts islands" FROM "counts copper": a second
-	# trace between two pads ALREADY joined adds copper and adds no
-	# connectivity, so the number of joins still needed cannot move.
+	# A second trace between two pads ALREADY joined adds copper and no
+	# connectivity, so the number of joins still needed does not move.
 	_add_trace(d, "INV", "top", Vector2(5, 30), Vector2(10, 30))
 	check_eq("a redundant second trace between an already-joined pair changes nothing",
 		_remaining(Ratsnest.compute(d), "INV"), 2)
 
-	# …and the mirror of it: copper that bridges the two islands built above
-	# merges them, even though neither of its endpoints is a NEW pad.
+	# …and copper bridging the two islands built above merges them, even though
+	# neither of its endpoints is a NEW pad.
 	_add_trace(d, "INV", "top", Vector2(10, 30), Vector2(15, 30))
 	check_eq("copper bridging two existing islands merges them",
 		_remaining(Ratsnest.compute(d), "INV"), 1)
@@ -425,8 +391,8 @@ func _run_spanning_tree_not_chain() -> void:
 	check("no airwire skips a neighbour — longest is 10mm (got %.3f)" % longest,
 		longest <= 10.0 + 1e-4)
 
-	# The picture is a property of the BOARD, not of the order the net happened
-	# to list its pins in.
+	# The picture is a property of the BOARD, not of the order the net lists its
+	# pins in.
 	var reversed_order := scrambled.duplicate()
 	reversed_order.reverse()
 	check("reversing the pin list changes nothing about the picture",
@@ -441,9 +407,8 @@ func _run_determinism() -> void:
 	var picture := _picture(Ratsnest.compute(forward))
 
 	# The SAME physical board, described with every list reversed: components,
-	# nets, traces, vias, zones. Nothing about the copper changed, and the spec
-	# is the one _connectivity_board() itself loads — not a second hand-typed
-	# fixture that could quietly differ.
+	# nets, traces, vias, zones. The spec is the one _connectivity_board() itself
+	# loads, so only the ordering differs.
 	var spec := _connectivity_spec()
 	for key in ["components", "nets", "traces", "vias", "zones"]:
 		var reversed_list: Array = (spec[key] as Array).duplicate()
@@ -482,9 +447,8 @@ func _run_quieting_is_not_hiding() -> void:
 	check("the high-fanout net is reported", rows.has("BIGGND"))
 	var row: Dictionary = rows.get("BIGGND", {})
 
-	# (a) THE ARITHMETIC A DESIGNER READS IS UNCHANGED BY QUIETING. Twenty
-	# unjoined lands are twenty islands, which is nineteen joins — whatever the
-	# renderer chose to draw.
+	# (a) QUIETING DOES NOT CHANGE THE REPORTED ARITHMETIC. Twenty unjoined
+	# lands are twenty islands, which is nineteen joins, whatever is drawn.
 	check_eq("twenty unjoined lands are twenty islands", int(row.get("islands", -1)), 20)
 	check_eq("…and nineteen joins still to make", int(row.get("remaining", -1)), 19)
 	check("the net is marked quieted", bool(row.get("quieted", false)))
@@ -496,9 +460,8 @@ func _run_quieting_is_not_hiding() -> void:
 		result.get("quieted", []).size() == 1)
 
 	# (b) NOTHING GOES UNREPRESENTED. Every island is either an endpoint of a
-	# drawn airwire or carries a marker — which is what makes this quieting
-	# rather than hiding. Counted through the pad REFS, so it does not depend
-	# on island numbering.
+	# drawn airwire or carries a marker. Counted through the pad REFS, so it does
+	# not depend on island numbering.
 	var represented := {}
 	for l in _links_for(result, "BIGGND"):
 		represented[str((l as Dictionary)["a_ref"])] = true
@@ -516,8 +479,8 @@ func _run_quieting_is_not_hiding() -> void:
 		represented.size(), 20)
 	check_eq("a land already on a drawn airwire is never ALSO marked", overlap, 0)
 
-	# (c) THE BOUNDARY, from both sides. Stated against the constant rather
-	# than a literal, so the test says what the rule IS.
+	# (c) THE BOUNDARY, from both sides, stated against the constant rather than
+	# a literal.
 	var at_threshold := Ratsnest.compute(_fanout_board(Ratsnest.QUIET_ABOVE_LINKS + 1))
 	var below: Dictionary = _rows_by_net(at_threshold).get("BIGGND", {})
 	check_eq("a net needing exactly QUIET_ABOVE_LINKS joins is NOT quieted",
@@ -547,9 +510,8 @@ func _run_canvas_seam() -> void:
 		_picture(live) == _picture(Ratsnest.compute(d)))
 
 	# A capture copy shares the board by reference and computes its own answer
-	# (the ratsnest is derived, so it is deliberately NOT in the mirrored set —
-	# see CAPTURE_MIRRORED_FIELDS). What must hold is that the two answers are
-	# the same picture: an agent's screenshot may not disagree with the screen.
+	# (the ratsnest is derived, so it is NOT in the mirrored set — see
+	# CAPTURE_MIRRORED_FIELDS). The two answers must be the same picture.
 	var copy = PcbCanvasScript.new()
 	copy.data = d
 	canvas.mirror_capture_state_onto(copy)
@@ -568,8 +530,7 @@ func _run_canvas_seam() -> void:
 	# THE LIVE-DRAG CACHE TEST. _apply_drag_delta writes component.position
 	# directly and takes no history snapshot, so board_revision does NOT move
 	# during a drag. Dragging U2 five millimetres off the end of its trace
-	# physically breaks the join; a cache keyed on the revision would keep
-	# reporting the net as routed while the user watches the pad leave.
+	# breaks the join, and the cache has to follow.
 	check_eq("before the drag, SIG_JOINED needs no joins",
 		_remaining(canvas._ratsnest(), "SIG_JOINED"), 0)
 	var revision_before: int = d.board_revision
@@ -582,7 +543,7 @@ func _run_canvas_seam() -> void:
 	check_eq("dragging it back onto the trace removes the airwire again",
 		_remaining(canvas._ratsnest(), "SIG_JOINED"), 0)
 
-	# The binding named in the work item: N stays the ratsnest toggle.
+	# The keyboard binding: N stays the ratsnest toggle.
 	var before: bool = canvas.show_ratsnest
 	canvas._handle_key_input(_key(KEY_N))
 	check("N toggles the ratsnest", canvas.show_ratsnest == (not before))

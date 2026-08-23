@@ -5,52 +5,37 @@ extends RefCounted
 ## pcb_canvas.gd's port note). Every function here is STATIC and pure: data in,
 ## drawing instructions out. The canvas owns the pixels; this owns the answer.
 ##
-## ── WHAT REPLACED WHAT (work item 01a02b5763e87b84a9318b28f7437fa7) ──────────
-## The previous renderer chained a net's pins in RAW PIN-LIST ORDER — pin[i] to
-## pin[i+1] — and drew that chain whether or not copper already joined the pair.
-## Three consequences, all of them the same defect wearing different clothes:
-##
-##   1. It was not a spanning tree, so lines crossed the board arbitrarily
-##      instead of naming the nearest thing to join.
-##   2. It subtracted nothing for routed copper, so airwires never shrank as
-##      routing landed — the picture could not be used to measure progress.
-##   3. It had no quieting, so a 36-pad GND net contributed 35 lines.
-##
 ## ── THE MODEL ────────────────────────────────────────────────────────────────
 ## CONNECTIVITY IS PHYSICAL, NEVER NOMINAL. Two pads count as already joined
 ## when COPPER ON THE BOARD joins them — a trace, a via, a pour, or another pad
 ## whose land overlaps — never because they share a net name. Net membership
 ## says what SHOULD be joined; this module measures what IS, and the airwires
-## are the difference between the two. That is the whole reason a line vanishes
-## when a trace lands: the difference got smaller.
+## are the difference. An airwire disappears when copper lands that joins its
+## two ends.
 ##
-## So the pipeline is:
+## The pipeline:
 ##
 ##   extract(data)   → per-net bundles of COPPER PIECES with real geometry
 ##   solve(bundles)  → islands (union-find over touching pieces), then a
 ##                     Euclidean MST over the islands, then quieting
 ##   compute(data)   = solve(extract(data))
 ##
-## The split is not decoration. `extract` is O(board) and `solve` is O(pads^2)
-## per net, so the canvas hashes the EXTRACT — the solver's one and only input —
-## and re-solves only when that hash moves. Because the cache key is a hash of
-## exactly what the solver reads, a stale ratsnest cannot outlive a board edit:
-## there is no second walk of the data to fall out of step with the first.
+## `extract` is O(board); `solve` is O(pads^2) per net. The canvas caches the
+## solve, keyed on a hash of the extract — the solver's complete input.
 ##
-## ── DETERMINISM (a requirement, not a nicety) ────────────────────────────────
-## The same board must draw the same picture in every session. Three places
-## could have leaked iteration order, and each is pinned:
+## ── DETERMINISM ──────────────────────────────────────────────────────────────
+## The same board draws the same picture in every session. Three places where
+## iteration order could leak in, and what each does instead:
 ##
 ##   * ENUMERATION. Net names, trace ids, via ids and zone ids are SORTED
 ##     before use, so nothing depends on Dictionary insertion order or on the
-##     order a board file happened to list its entities.
+##     order a board file lists its entities in.
 ##   * UNION-FIND ROOTS. `_union` always keeps the SMALLER node index as the
-##     root, so the root of a set is a property of the set (its minimum
-##     member), not of the order the unions happened to arrive in.
-##   * SORTS. Every comparator is a TOTAL order — the float key first, then
-##     integer tie-breaks down to the pad indices. Godot's sort_custom is not
-##     stable, so a comparator that can call two distinct elements equal would
-##     be a coin flip; none here can.
+##     root, so the root of a set is its minimum member rather than an artefact
+##     of the order the unions arrived in.
+##   * SORTS. Godot's sort_custom is not stable, so every comparator here is a
+##     TOTAL order — the float key first, then integer tie-breaks down to the
+##     pad indices — and never calls two distinct elements equal.
 ##
 ## No randomness, no time, no hashing of pointer identities.
 
@@ -64,14 +49,11 @@ const PCBDataScript := preload("pcb_data.gd")
 ## same copper". One micron: far below any gap a fabricator could etch and far
 ## above the rounding error of mm-quantized coordinates.
 ##
-## DELIBERATELY TINY, and this is the load-bearing choice in the whole module.
-## A generous tolerance merges islands that are not actually joined, which
-## DELETES an airwire the designer still needs — the board then looks more
-## finished than it is, which is the reassuring direction and the one that gets
-## a board fabricated wrong. A tight tolerance can only leave an airwire
-## standing over a gap that is genuinely there. (Contrast PcbAnnotationHost's
-## _PAD_HIT_RADIUS_MM = 1.0mm: that is a POINTER tolerance for a human aiming a
-## mouse, and using it here would merge every pad on a 0.5mm-pitch part.)
+## A tolerance as large as a fabricable gap merges islands that are not joined,
+## and the airwire over that gap disappears — the board reads as more finished
+## than it is. (PcbAnnotationHost's _PAD_HIT_RADIUS_MM = 1.0mm is a POINTER
+## tolerance for a human aiming a mouse; at that size every pad on a
+## 0.5mm-pitch part merges.)
 const TOUCH_EPS_MM := 0.001
 
 ## Copper radius assumed for a pin with NO pad geometry (an unresolved
@@ -81,10 +63,9 @@ const TOUCH_EPS_MM := 0.001
 ## a geometry-less pin counts as touching it.
 const FALLBACK_PAD_RADIUS_MM := 0.3
 
-## A net needing MORE than this many joins is a distribution net (ground,
-## rails, a bussed reference) rather than a signal, and drawing every one of
-## its airwires is the hairball. Signals sit far below it; the smart-remote v2
-## GND (36 pads) and +3V3 (20 pads) nets sit far above.
+## A net needing MORE than this many joins is quieted (see solve()). Signal
+## nets need a handful of joins; distribution nets — ground, rails, a bussed
+## reference — need one per pad, so a 36-pad ground net needs 35.
 const QUIET_ABOVE_LINKS := 8
 
 ## How many airwires a quieted net still draws: its SHORTEST joins, which are
@@ -198,9 +179,8 @@ static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 		pads.append(node)
 	# Total order: the ref, then the pin's position in the net's own list. A
 	# board CAN list the same pin twice (load_from_board_dict does not dedupe
-	# the way add_pin does), and two elements a comparator calls equal would
-	# make an unstable sort_custom the one place the picture could vary between
-	# sessions.
+	# the way add_pin does), so the ref alone is not a total order and the
+	# unstable sort_custom would order the duplicates arbitrarily.
 	pads.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if a["ref"] != b["ref"]:
 			return str(a["ref"]) < str(b["ref"])
@@ -211,10 +191,9 @@ static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 ## One pad as a node: its land as an oriented quad when the footprint resolved,
 ## a small disc at the pin centre when it did not.
 ##
-## SHAPE APPROXIMATION, stated: a circle/oval/roundrect pad is carried as its
-## bounding quad, so its corners reach a few tenths of a millimetre further
-## than the real copper. That is the permissive direction on a sub-pad scale
-## and it cannot join two pads that are not already nearly touching.
+## SHAPE APPROXIMATION: a circle/oval/roundrect pad is carried as its bounding
+## quad, so its corners reach a few tenths of a millimetre further than the
+## real copper.
 ##
 ## LAYERS: a through-hole barrel pierces every declared copper layer; an SMD
 ## pad has copper only where the footprint says (falling back to the side the
@@ -240,9 +219,8 @@ static func _pad_node(comp, pin_name: String, stack: PackedStringArray) -> Dicti
 			layers = _layer_set([comp.layer])
 
 	# Same transform composition the pad RENDER uses (pcb_canvas
-	# _draw_component_pads): comp.position + (comp.get_transform() * local).
-	# A land drawn in one place and measured in another is the drift this
-	# shares-the-transform rule exists to prevent.
+	# _draw_component_pads): comp.position + (comp.get_transform() * local), so
+	# a land is measured where it is drawn.
 	var xform: Transform2D = comp.get_transform()
 	var pad_pos: Vector2 = pad.get("position", Vector2.ZERO)
 	var half: Vector2 = (pad.get("size", Vector2(1, 1)) as Vector2) * 0.5
@@ -277,8 +255,7 @@ static func _pad_geometry(comp, pin_name: String) -> Dictionary:
 ## extract hash the canvas caches on — is a function of the board alone.
 ##
 ## KEEPOUTS ARE NOT COPPER and are excluded: a keepout is an instruction about
-## where copper may not go, and treating one as a conductor would silently join
-## everything crossing it.
+## where copper may not go, not a conductor.
 static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Array:
 	var pieces: Array = []
 
@@ -327,15 +304,12 @@ static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Arr
 		var outline := PCBDataScript.zone_outline_points(zone)
 		if outline.size() < 3:
 			continue
-		# A pour is taken as its SOLID OUTLINE. This is the one approximation in
-		# this module that errs in the dangerous direction named at TOUCH_EPS_MM:
-		# a real fill is not solid — clearance around foreign-net copper can cut
-		# it into regions, and a region isolated from the rest joins nothing.
-		# Two pads inside such a pour read as one island here and their airwire
-		# disappears, so the board looks more finished than it is. Deciding
-		# otherwise needs the poured fill polygons, which the board model does
-		# not carry; until it does, this stays a known over-join rather than a
-		# silent one.
+		# A pour is taken as its SOLID OUTLINE. A real fill is not solid —
+		# clearance around foreign-net copper can cut it into regions, and a
+		# region isolated from the rest joins nothing. Two pads inside such a
+		# pour therefore read as ONE island here and their airwire disappears.
+		# The poured fill polygons an exact answer needs are not in the board
+		# model.
 		pieces.append(_make_node([outline], [], 0.0,
 			_layer_set([(zone as Dictionary).get("layer", "top")]), Vector2.ZERO))
 
@@ -343,9 +317,8 @@ static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Arr
 
 
 ## A copy of `entries` ordered by a caller-supplied string key, with the key's
-## own position in the source array as the last tie-break — so the order is a
-## TOTAL one even if two entries produce the same key, and sort_custom's
-## instability can never leak into the result.
+## own position in the source array as the last tie-break — so the order is
+## TOTAL even if two entries produce the same key.
 static func _sorted_by_key(entries, key_of: Callable) -> Array:
 	var keyed: Array = []
 	if entries is Array:
@@ -365,9 +338,8 @@ static func _sorted_by_key(entries, key_of: Callable) -> Array:
 
 ## The copper layers a via's barrel touches: its two endpoints plus everything
 ## between them in the declared stack. (Only through spans are modeled — see
-## PcbLayerStack.is_legal_via_span — so in practice this is the whole stack;
-## it is derived rather than assumed so a future blind/buried span narrows it
-## instead of over-joining.)
+## PcbLayerStack.is_legal_via_span — so in practice this is the whole stack; a
+## blind/buried span would yield fewer layers.)
 static func _via_span(via: Dictionary, stack: PackedStringArray) -> Array:
 	var from_layer := _canon(via.get("from_layer", "top"))
 	var to_layer := _canon(via.get("to_layer", "bottom"))
@@ -401,9 +373,8 @@ static func _make_node(polys: Array, lines: Array, swell: float,
 	if not seeded:
 		bounds = Rect2(at, Vector2.ZERO)
 	# Grown by the swell PLUS the coincidence tolerance, so the bounds test in
-	# nodes_touch is strictly more permissive than the real test it precedes —
-	# i.e. a pure optimisation that can never reject a genuine touch. (Grown by
-	# swell alone it would miss a pair separated by less than one tolerance.)
+	# nodes_touch is strictly more permissive than the geometry test it precedes
+	# and never rejects a genuine touch.
 	bounds = bounds.grow(swell + TOUCH_EPS_MM)
 	return {
 		"polys": polys, "lines": lines, "swell": swell,
@@ -416,8 +387,8 @@ static func _make_node(polys: Array, lines: Array, swell: float,
 ## True when two nodes are the same physical conductor: their layer sets
 ## intersect AND their geometry meets within the pair's tolerance.
 ##
-## The bounds test first is not only speed — it is what keeps the O(nodes^2)
-## sweep in solve() from being O(segments^2) across a whole board.
+## The bounds test runs first: it keeps the O(nodes^2) sweep in solve() from
+## becoming O(segments^2) across a whole board.
 static func nodes_touch(a: Dictionary, b: Dictionary) -> bool:
 	if not (a["bounds"] as Rect2).intersects(b["bounds"] as Rect2, true):
 		return false
@@ -528,9 +499,8 @@ static func _polygons_meet(a: PackedVector2Array, b: PackedVector2Array, tol: fl
 ##
 ## "remaining" is islands - 1: the number of separate pieces of copper on the
 ## net, less one, is exactly how many joins it still takes to make the net
-## whole. It is the number a designer can watch fall as routing lands, and it
-## is reported for a quieted net whether or not its links are drawn — that is
-## what makes quieting a QUIETING and not a hiding.
+## whole. It is reported for a quieted net whether or not that net's links are
+## drawn, so it does not move when quieting does.
 static func solve(bundles: Array) -> Dictionary:
 	var out := {
 		"links": [], "markers": [], "nets": [], "quieted": [], "remaining_total": 0,
@@ -545,9 +515,8 @@ static func solve(bundles: Array) -> Dictionary:
 		var edges := _spanning_edges(pads, islands)
 		var remaining := edges.size()
 		var quieted := remaining > QUIET_ABOVE_LINKS
-		# mini(), not a bare constant: the two thresholds are independent knobs,
-		# and QUIET_SHOWN_LINKS raised above QUIET_ABOVE_LINKS would otherwise
-		# index past the end of the tree.
+		# Clamped: the two thresholds are independent, and drawing more links
+		# than the tree has would index past its end.
 		var shown := mini(QUIET_SHOWN_LINKS, remaining) if quieted else remaining
 
 		var net_name: String = (bundle as Dictionary)["net"]
@@ -596,10 +565,8 @@ static func solve(bundles: Array) -> Dictionary:
 ## an orphan pour — simply never appear in the answer.
 ##
 ## Array[int], NOT PackedInt32Array, for the union-find store: `_union` mutates
-## it through a call, and a plain Array is unambiguously by-reference in
-## GDScript. Packed arrays are copy-on-write, and a store that silently copied
-## on the first write would lose every union — the failure would be a ratsnest
-## that never subtracts anything, i.e. exactly the defect being removed.
+## it through a call, and a plain Array is by-reference in GDScript. Packed
+## arrays are copy-on-write, so a packed store loses every union.
 static func _islands(pads: Array, pieces: Array) -> Array:
 	var nodes: Array = pads.duplicate()
 	nodes.append_array(pieces)
@@ -640,8 +607,8 @@ static func _root(parent: Array[int], i: int) -> int:
 
 
 ## Union with the SMALLER INDEX AS ROOT — see the determinism note at the top.
-## Not union-by-rank: rank would make the root depend on the order the unions
-## arrived in, and the root identity is what island ordering is read from.
+## Island ordering is read from root identity, so the root has to be a property
+## of the set (its minimum member) rather than of union order.
 static func _union(parent: Array[int], a: int, b: int) -> void:
 	var ra := _root(parent, a)
 	var rb := _root(parent, b)
@@ -656,13 +623,10 @@ static func _union(parent: Array[int], a: int, b: int) -> void:
 ## A Euclidean minimum spanning tree over the islands: exactly islands-1 edges,
 ## each naming the CLOSEST pad pair that bridges the two islands it joins.
 ##
-## Returned SORTED SHORTEST-FIRST, which is what makes quieting meaningful — a
-## quieted net draws the head of this list, i.e. its most local, most routable
-## hops, rather than an arbitrary handful.
+## Returned SORTED SHORTEST-FIRST: a quieted net draws the head of this list,
+## its most local hops.
 ##
-## Kruskal rather than Prim because the edge list is already the natural
-## intermediate (one best edge per island pair) and sorting it gives the
-## shortest-first order for free.
+## Kruskal over one best edge per island pair.
 static func _spanning_edges(pads: Array, islands: Array) -> Array:
 	var island_of: Array[int] = []
 	island_of.resize(pads.size())
