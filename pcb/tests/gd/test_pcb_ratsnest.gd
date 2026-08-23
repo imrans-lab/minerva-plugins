@@ -191,7 +191,22 @@ func _board(spec: Dictionary):
 	for k in spec:
 		full[k] = spec[k]
 	d.from_board_dict(full)
+	_adopt_authored_fills(d, full.get("zones", []))
 	return d
+
+
+## A pour's fill reaches the model through adopt_zone_fill and no other door —
+## a board dict never carries one in (PCBData.ZONE_FILL_KEY). The fixtures here
+## author a fill inline as the shortest way to say "the compiler answered THIS",
+## so hand it over the way a compiler answer arrives.
+func _adopt_authored_fills(d, zone_specs) -> void:
+	var entries: Array = []
+	for zone in (zone_specs as Array):
+		if zone is Dictionary and (zone as Dictionary).has("fill"):
+			entries.append({"id": (zone as Dictionary).get("id", ""),
+				"fill": (zone as Dictionary)["fill"]})
+	if not entries.is_empty():
+		d.adopt_zone_fill(entries)
 
 
 ## net name -> the row solve() reported for it. A net absent from the result

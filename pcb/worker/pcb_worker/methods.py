@@ -683,6 +683,98 @@ def _mask_view(params: dict) -> dict:
     }}
 
 
+def _zone_fill(params: dict) -> dict:
+    """THE COMPILED COPPER of every pour on the board.
+
+    A pour conducts as the copper it is FILLED with, never as the outline it is
+    authored from: clearance carving, keepouts and the board-edge inset can cut
+    one outline into several regions that do not conduct to each other. This is
+    the surface that hands those regions to a caller that has to answer what is
+    already joined.
+
+    params: {board|yaml} (anything ``_load`` accepts). Reply::
+
+        {ok: True, result: {zones: [{id: str,
+                                     fill: [[{x_mm, y_mm}, ...], ...]}, ...]}}
+
+    ``id`` is the zone's id AS THE CALLER SENT IT, not the compiled one. They
+    differ whenever the source is not schema v2 — a sub-v2 board has its entity
+    ids minted during the compile — and a caller matching the reply against its
+    own zones has only the id it sent. See :func:`_authored_zone_id`.
+
+    One entry per COPPER POUR whose fill was computed, one ring per separately
+    filled region, points in the ring's own order. ``fill: []`` is a computed
+    empty pour (its outline entirely consumed by keepouts, clearance or the
+    edge inset) — a real answer, distinct from the absence below.
+
+    A zone is OMITTED when no fill was computed for it: keepouts, which are not
+    copper. An omitted zone tells the caller nothing about that zone's copper,
+    which is the only honest thing to say about copper that was never computed.
+
+    The fill comes off the compiled IR — the same ``ResolvedZone.fill`` the
+    Gerber emitter flashes — so the regions here are the regions that ship.
+    Compiling is what fills, so a board that will not compile has no fill to
+    report and comes back as the compile error itself: no partial answer, and
+    nothing derived from the authored outline as a stand-in.
+
+    Compiled against the ROUTING output profile, not the fab one: this answers a
+    connectivity question, so a lost solder-mask or paste capability must not
+    take the pour's copper away with it, while dropped copper, drill or design
+    rules stay fatal here as everywhere.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_or_fail(board, _layer_params(params),
+                                requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
+    if _is_error_reply(compiled):
+        return compiled
+    from .resolved_board import ZoneKind  # noqa: PLC0415
+    authored = board.get("zones")
+    if not isinstance(authored, list):
+        authored = []
+    return {"ok": True, "result": {"zones": [
+        {
+            "id": _authored_zone_id(authored, index, zone),
+            "fill": [[{"x_mm": x, "y_mm": y} for (x, y) in polygon.points]
+                     for polygon in zone.fill],
+        }
+        for index, zone in enumerate(compiled.board.zones)
+        if zone.kind is ZoneKind.COPPER_POUR and zone.fill is not None
+    ]}}
+
+
+def _authored_zone_id(authored: list, index: int, zone) -> str:
+    """The id the CALLER gave this zone, or the compiled one when there is none.
+
+    A successful compile builds one ResolvedZone per authored zone, in order —
+    a zone the compiler rejects makes the whole compile fail rather than
+    dropping out of the list — so position identifies the source zone. The
+    position is nonetheless CHECKED against the layer and kind that came back,
+    and a disagreement falls through to the compiled id: an id echoed onto the
+    wrong zone would attach one plane's copper to another.
+
+    A compiled id is returned unchanged for a caller whose zone carried none.
+    Such a caller has nothing to match it against, which is the honest outcome
+    — better than an id that looks matchable and is not.
+    """
+    from .resolved_board import ZoneKind  # noqa: PLC0415
+    if index >= len(authored):
+        return zone.id
+    source = authored[index]
+    if not isinstance(source, dict):
+        return zone.id
+    authored_id = source.get("id")
+    if not (isinstance(authored_id, str) and authored_id):
+        return zone.id
+    if str(source.get("layer") or "") != zone.layer.id:
+        return zone.id
+    if str(source.get("kind") or ZoneKind.COPPER_POUR.value) != zone.kind.value:
+        return zone.id
+    return authored_id
+
+
 def _fab_preview(params: dict) -> dict:
     """EXACT FABRICATION PREVIEW (WYSIWYG goal 019ff4a5a75a, gap G5; approved
     DCR 019ffc52b455; acceptance check K27).
@@ -3956,6 +4048,9 @@ _HANDLERS = {
     "board_health": lambda req: _board_health_method(req.get("params") or {}),
     # Solder-mask overlay for the panel (WYSIWYG G4) — Projection.mask verbatim.
     "mask_view": lambda req: _mask_view(req.get("params") or {}),
+    # The compiled copper of every pour — the regions a caller needs to answer
+    # what a plane already joins.
+    "zone_fill": lambda req: _zone_fill(req.get("params") or {}),
     "fab_preview": lambda req: _fab_preview(req.get("params") or {}),
     "promote_check": lambda req: _promote_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),

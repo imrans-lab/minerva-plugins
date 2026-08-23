@@ -5489,7 +5489,15 @@ func _capture_drag_origins() -> void:
 ## Translate every captured entity to `origin + delta`. ABSOLUTE from the
 ## captured origin, never incremental — an incremental nudge would accumulate the
 ## snap residue of every frame into a drift the user never asked for.
+##
+## A component (and a via) is moved by writing its position straight onto the
+## entity, without the model's data_changed relay — the drag's own reason for
+## being fast. So the drop of any adopted pour fill is stated HERE: the ratsnest
+## re-solves every frame of a drag (see _ratsnest), and a pad dragged onto a
+## plane over a fill compiled before the drag would read as already joined when
+## the real fill carves a clearance void around it.
 func _apply_drag_delta(delta: Vector2) -> void:
+	data.clear_zone_fill()
 	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
 		var comp = data.get_component(comp_id)
 		if comp != null:

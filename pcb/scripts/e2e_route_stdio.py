@@ -11,8 +11,12 @@ result envelope (one JSON line) to its own stdout — which Godot's
 OS.execute(..., output, true) captures painlessly (no piping needed on the
 Godot side).
 
-Usage: python3 e2e_route_stdio.py <pcb-plugin-binary-path> <request-json-path>
-  request-json-path is a JSON file: {"board": {...}, "route_hints": [...], "selection": {...}}
+Usage: python3 e2e_route_stdio.py <pcb-plugin-binary-path> <request-json-path> [tool-name]
+  request-json-path is a JSON file whose contents become the tool's arguments
+  verbatim -- for the default "pcb.route" tool, {"board": {...},
+  "route_hints": [...], "selection": {...}}.
+  tool-name defaults to "pcb.route"; any other registered dotted panel-IPC
+  channel (e.g. "pcb.zone_fill") is driven through the same handshake.
 
 Prints to stdout: {"ok": true, "result": {success, routes, unrouted, via_count, ...}}
                or: {"ok": false, "error": "<message>"}
@@ -25,11 +29,12 @@ import sys
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print(json.dumps({"ok": False, "error": "usage: e2e_route_stdio.py <binary> <request.json>"}))
+    if len(sys.argv) not in (3, 4):
+        print(json.dumps({"ok": False, "error": "usage: e2e_route_stdio.py <binary> <request.json> [tool]"}))
         return 0
 
     binary_path, request_path = sys.argv[1], sys.argv[2]
+    tool_name = sys.argv[3] if len(sys.argv) == 4 else "pcb.route"
     try:
         with open(request_path, "r", encoding="utf-8") as f:
             request = json.load(f)
@@ -73,7 +78,7 @@ def main() -> int:
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         recv_id(1)
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-              "params": {"name": "pcb.route", "arguments": request}})
+              "params": {"name": tool_name, "arguments": request}})
         reply = recv_id(2)
         proc.stdin.close()
         proc.wait(timeout=15)
@@ -87,7 +92,7 @@ def main() -> int:
         print(json.dumps(envelope))
         return 0
     except Exception as exc:  # noqa: BLE001
-        print(json.dumps({"ok": False, "error": "route call failed: %s" % exc}))
+        print(json.dumps({"ok": False, "error": "%s call failed: %s" % (tool_name, exc)}))
         return 0
 
 

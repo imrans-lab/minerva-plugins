@@ -263,6 +263,9 @@ func initRegistry() {
 	// routing run (Epoch UX2 station 9). See worker_tools.go.
 	registry.Register(tools.BoardHealthChannel, tools.HandleBoardHealthChannel)
 	registry.Register(tools.MaskViewChannel, tools.HandleMaskViewChannel)
+	// pcb.zone_fill — the compiled copper of every pour, for the surface that
+	// answers what a plane already joins. See worker_tools.go.
+	registry.Register(tools.ZoneFillChannel, tools.HandleZoneFillChannel)
 	registry.Register(tools.FabPreviewChannel, tools.HandleFabPreviewChannel)
 	// Rendered-bless surface (S3/B2, docket 019ff5687b99) — the library trust
 	// boundary: stage a .kicad_mod into the WIP layer, render the fact

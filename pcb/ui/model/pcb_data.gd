@@ -132,6 +132,9 @@ var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 ## `net` is likewise unchanged in shape but no longer universal: a keepout may
 ## carry no `net` key at all (Go omits it when empty), so every read of a zone's
 ## net goes through `.get("net", "")`.
+##
+## ONE key here is NOT carried and is not authored: ZONE_FILL_KEY, a pour's
+## compiled fill. See its declaration for how it enters and why it never leaves.
 ## The board's library lock: {footprint_ref: {sha256, layer?, source?}} (K20,
 ## DCR 019ffc52c358). Opaque to this model — carried, never adjudicated.
 var library_lock: Dictionary = {}
@@ -3525,10 +3528,15 @@ func _mounting_hole_to_board_dict(hole: Dictionary) -> Dictionary:
 ## it was handed (a serializer normalising numbers, a tool building a payload)
 ## cannot reach back into this model's state. Mirrors the `.duplicate(true)`
 ## discipline save_to_history already applies to vias / mounting_holes.
+##
+## ZONE_FILL_KEY IS STRIPPED. See its declaration: this projection is the board
+## as authored, and the fill is not authored.
 func _zones_to_list() -> Array:
 	var result: Array = []
 	for zone in zones:
-		result.append(zone.duplicate(true))
+		var out: Dictionary = zone.duplicate(true)
+		out.erase(ZONE_FILL_KEY)
+		result.append(out)
 	return result
 
 
@@ -3536,14 +3544,93 @@ func _zones_to_list() -> Array:
 ## dropped rather than tolerated: every other loader here does the same
 ## (_vias_from_board_list, the component/net/trace loops), and a zone that is not
 ## a mapping has no outline to draw.
+##
+## ZONE_FILL_KEY IS STRIPPED here too, so adopt_zone_fill stays the only writer.
+## See its declaration.
 func _zones_from_list(zone_list) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	if not (zone_list is Array):
 		return result
 	for zd in zone_list:
 		if zd is Dictionary:
-			result.append((zd as Dictionary).duplicate(true))
+			var entry: Dictionary = (zd as Dictionary).duplicate(true)
+			entry.erase(ZONE_FILL_KEY)
+			result.append(entry)
 	return result
+
+
+## The key a pour's COMPILED FILL rides on inside `zones` — the key
+## pcb_ratsnest reads to decide what a plane actually conducts.
+##
+## DERIVED STATE, HELD ONLY IN MEMORY. Everything else in `zones` is the board
+## as authored; this is a compile output about that board, and it is true only
+## of the exact board it was computed from. So it enters through adopt_zone_fill
+## and nothing else, and every projection out of this model strips it:
+##
+##   * to_board_dict — so it is never saved into the board source, never sent
+##     back to the compiler, and never fingerprinted as if the board had moved;
+##   * the history snapshot — so undo/redo restores a board without a fill
+##     rather than a board wearing the fill of a different board;
+##   * _zones_from_list — so a fill riding in a loaded document or a hand-edited
+##     source can never be mistaken for one this session computed.
+##
+## Dropping it always costs the same thing and never more: a pour with no fill
+## contributes no connection, so joins the plane really does serve are reported
+## as still owed until a fresh fill arrives. The opposite mistake — a fill kept
+## past the board it describes — reports a pad as already served when it is not,
+## and that one reaches fabrication.
+const ZONE_FILL_KEY := "fill"
+
+
+## Adopt compiled pour fills onto the zones they belong to, matched by zone id.
+##
+## `entries` is the `zones` array of a zone-fill reply: [{id, fill}, ...], one
+## entry per pour whose fill was computed, each `fill` an Array of regions.
+## Returns how many zones took one.
+##
+## EVERY ZONE'S FILL IS REPLACED, adopted or not: a zone the reply does not
+## mention had no fill computed for it, and the previous fill described a board
+## that is no longer this one. Merging would leave exactly the stale answer
+## ZONE_FILL_KEY's declaration refuses.
+##
+## An entry naming no zone id, or a zone id no zone on this board carries, is
+## skipped — it describes a zone this model cannot identify, and guessing which
+## one it meant would attach copper to the wrong plane. A `fill` that is not an
+## Array is not adopted either; the ring-level reading of what IS adopted
+## belongs to the consumer, which already refuses fill data it cannot use.
+##
+## Adoption is silent: no signal, no journal entry, no revision bump. The board
+## did not change — only what is known about the copper it already describes.
+func adopt_zone_fill(entries) -> int:
+	clear_zone_fill()
+	if not (entries is Array):
+		return 0
+	var by_id: Dictionary = {}
+	for zone in zones:
+		var zid := str(zone.get("id", ""))
+		if not zid.is_empty():
+			by_id[zid] = zone
+	var adopted := 0
+	for entry in (entries as Array):
+		if not (entry is Dictionary):
+			continue
+		var zid := str((entry as Dictionary).get("id", ""))
+		if not by_id.has(zid):
+			continue
+		var fill = (entry as Dictionary).get(ZONE_FILL_KEY)
+		if not (fill is Array):
+			continue
+		(by_id[zid] as Dictionary)[ZONE_FILL_KEY] = (fill as Array).duplicate(true)
+		adopted += 1
+	return adopted
+
+
+## Drop every adopted fill. The pours keep their outlines and contribute no
+## connection until a fresh fill is adopted — see ZONE_FILL_KEY's declaration
+## for why that is the direction to fail in.
+func clear_zone_fill() -> void:
+	for zone in zones:
+		zone.erase(ZONE_FILL_KEY)
 
 
 ## Deep-copy the cutout list on the way OUT. Mirrors _zones_to_list, same

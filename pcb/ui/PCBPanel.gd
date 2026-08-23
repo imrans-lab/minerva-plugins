@@ -530,9 +530,18 @@ func _init() -> void:
 		# is what the fab receives. The gate exists to stop a load dirtying the
 		# tab, not to stop it invalidating a stale view.
 		_invalidate_fab_preview()
+		# OUTSIDE the _restoring gate too: a board LOAD is when the pours on
+		# screen stop being the pours any held fill describes, and it is also
+		# when a fresh one is wanted.
+		_restate_zone_fill()
 		if not _restoring:
 			content_changed.emit()
 			_schedule_mask_view_refresh())
+	# data_changed does not cover every board move: record_change is the hook
+	# every FORWARD mutator funnels through, and it emits only this. A drag-move
+	# committed through the batch pair reaches the model here and nowhere else.
+	_data.journal_entry_added.connect(func(_entry: Dictionary) -> void:
+		_restate_zone_fill())
 	# Epoch UX4 station 2: bucket-9 binding — undo/redo now snapshots and
 	# restores staged dispositions alongside the board (pcb_data.gd
 	# bind_staged_store). Store mutations dirty the tab like every other
@@ -5983,6 +5992,13 @@ func mask_view_check(board: Dictionary) -> Dictionary:
 ## Request-local and only ever compared with itself, so hashing the whole dict
 ## costs nothing that matters and cannot be wrong by omission.
 func _fab_preview_token(board: Dictionary) -> String:
+	return _whole_board_token(board)
+
+
+## SHA-256 over the whole canonical board dict, key order normalised by
+## JSON.stringify's sort. Used by the round trips that must prove the board did
+## not move while the worker ran, and only ever compared with itself.
+static func _whole_board_token(board: Dictionary) -> String:
 	return JSON.stringify(board, "", true, true).sha256_text()
 
 
@@ -6118,6 +6134,84 @@ func _schedule_mask_view_refresh() -> void:
 	get_tree().create_timer(0.5).timeout.connect(func() -> void:
 		_mask_view_refresh_pending = false
 		_refresh_mask_view())
+
+
+## pcb.zone_fill round-trip — same channel idiom as mask_view_check above. The
+## board crosses the broker as its canonical wire form, like assembly_check: the
+## full dict of a real board exceeds the broker's payload cap.
+func zone_fill_check(board: Dictionary) -> Dictionary:
+	board = _PanelToolsScript.canonical_wire_board(board)
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var result: Dictionary = await _request_with_backend_ensure(
+		"pcb.zone_fill", {"board": board}, 30000)
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
+		if inner.has("ok"):
+			return inner
+		return {"ok": true, "result": inner}
+	return {"ok": false, "error": {"kind": "worker_error",
+		"message": str(result.get("error_message", result.get("error", "zone_fill failed")))}}
+
+
+## The board moved, so what is known about its pours does not: drop every
+## adopted fill, then ask for a fresh one.
+##
+## A fill describes the exact board it was compiled from and nothing else. The
+## board keeps its pours; what goes is the claim about what they conduct, so
+## between the edit and the next fill the pours join nothing and every join they
+## really do serve is reported as still owed. See PCBData.ZONE_FILL_KEY for why
+## that is the direction to fail in.
+func _restate_zone_fill() -> void:
+	if _data == null:
+		return
+	_data.clear_zone_fill()
+	_schedule_zone_fill_refresh()
+
+
+## Refetch the compiled pour fills and adopt them onto the live board.
+##
+## The board is fingerprinted before the hop and re-checked after it: an edit
+## landing while the worker compiled would otherwise be answered with copper
+## carved around parts that have since moved. On ANY failure, and on any board
+## movement, NOTHING is adopted — the pours stay fill-less rather than wearing a
+## fill from a board that no longer exists.
+func _refresh_zone_fill() -> void:
+	if _data == null:
+		return
+	if _data.zones.is_empty():
+		return  # no pours to fill — the compile would cost a round trip to say so
+	var requested: Dictionary = _data.to_board_dict()
+	var requested_token: String = _whole_board_token(requested)
+	var reply: Dictionary = await zone_fill_check(requested)
+	if _data == null:
+		return  # panel torn down while the worker ran
+	if _whole_board_token(_data.to_board_dict()) != requested_token:
+		return
+	if not bool(reply.get("ok", false)):
+		return
+	_data.adopt_zone_fill(_dict_or_empty(reply.get("result")).get("zones", []))
+	if _canvas != null:
+		_canvas.queue_redraw()
+
+
+## Debounced refetch on board mutation. Between the mutation and the refetch
+## landing the pours carry no fill at all — _restate_zone_fill dropped it — so
+## nothing stale is ever consulted while this is in flight.
+var _zone_fill_refresh_pending := false
+func _schedule_zone_fill_refresh() -> void:
+	if _data == null or _data.zones.is_empty() or not is_inside_tree():
+		return
+	if _zone_fill_refresh_pending:
+		return
+	_zone_fill_refresh_pending = true
+	get_tree().create_timer(0.5).timeout.connect(func() -> void:
+		_zone_fill_refresh_pending = false
+		_refresh_zone_fill())
 
 
 func assembly_check(board: Dictionary) -> Dictionary:

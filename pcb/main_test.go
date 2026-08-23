@@ -120,6 +120,11 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// method: Projection.mask verbatim, the same openings GC8 checks
 		// and the Gerber emitter flashes. Same channel idiom.
 		"pcb.mask_view",
+		// worker-backed — the compiled copper of every pour, forwarding to the
+		// worker's "zone_fill" method: the regions a pour actually conducts as,
+		// for the surface that answers what a plane already joins. Same channel
+		// idiom.
+		"pcb.zone_fill",
 		// worker-backed — the EXACT fabrication preview (WYSIWYG goal
 		// 019ff4a5a75a, gap G5; DCR 019ffc52b455; K27), forwarding to the
 		// worker's "fab_preview" method: the production emission path, read

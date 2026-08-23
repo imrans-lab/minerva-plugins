@@ -456,6 +456,31 @@ func HandleMaskViewChannel(ctx context.Context, w *bridge.Worker, params json.Ra
 	return w.Call(ctx, "mask_view", withLibraryChain(params))
 }
 
+// ---- pcb.zone_fill (worker-backed broker CHANNEL) --------------------------
+//
+// The compiled copper of every pour on the board. A pour conducts as the copper
+// it is FILLED with, not as the outline it is authored from: clearance carving
+// and keepouts can cut one outline into regions that do not conduct to each
+// other. Forwards verbatim to the Python worker's "zone_fill" method, whose
+// regions come off the same compiled IR the Gerber emitter flashes.
+
+var ZoneFillChannel = ToolSpec{
+	Name: "pcb.zone_fill",
+	Description: "Panel IPC channel for the compiled copper of every pour. " +
+		"Forwards verbatim to the Python worker's 'zone_fill' method. Args: " +
+		"{board:<canonical Board dict>} or {yaml}. Returns {ok, result:{zones:" +
+		"[{id, fill:[[{x_mm,y_mm},...],...]}]}} — one entry per copper pour " +
+		"whose fill was computed, one ring per separately filled region. An " +
+		"empty 'fill' is a computed-empty pour; a zone ABSENT from 'zones' had " +
+		"no fill computed and says nothing about its copper. The regions are " +
+		"ResolvedZone.fill, the copper that ships.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleZoneFillChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "zone_fill", withLibraryChain(params))
+}
+
 // ---- pcb.fab_preview (worker-backed broker CHANNEL) ------------------------
 //
 // WYSIWYG goal 019ff4a5a75a, gap G5; approved DCR 019ffc52b455; K27. The

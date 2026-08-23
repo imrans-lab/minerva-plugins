@@ -213,3 +213,8 @@ test_dcr_proposal_ghost.gd assertions=44
 # the deliberate RED baseline (rule unfixed) reports FEWER (conditional skips)
 # and failing — that red run is the acceptance baseline, not a stale pin.
 test_sidecar_constraint_survival.gd assertions=14
+# NEW: the compiled pour fill reaching the model that answers what is already
+# joined — the transport, not the fill rule (test_pcb_ratsnest.gd section 7
+# owns that). Real-worker: sections 1 and 2 compare the COMPILER's regions
+# against what the model holds, and a canned fill can only agree with itself.
+test_zone_fill_transport.gd assertions=31 real-worker
