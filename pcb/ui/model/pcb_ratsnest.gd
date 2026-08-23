@@ -42,6 +42,11 @@ extends RefCounted
 ##     by the candidates' own coordinates — see _near_update and _edge_beats —
 ##     never by which candidate a loop visited first, so reordering a zone's
 ##     fill regions, or the points within one, cannot change the picture.
+##   * WITNESSES. The closest-pair primitive receives every segment with its
+##     endpoints in a fixed lexicographic order (_seg_closest), so where the
+##     closest approach is a CONTINUUM — parallel overlapping runs — the pair
+##     it picks is a function of the segments as point sets, and reversing a
+##     trace's waypoints cannot move a witness.
 ##
 ## No randomness, no time, no hashing of pointer identities.
 
@@ -386,11 +391,19 @@ static func _zone_fill_regions(zone: Dictionary) -> Array:
 ## plausible-looking shape out of data that no longer describes one. The ring
 ## must also enclose real area: a collinear or coincident ring is a line, not
 ## a region of copper.
+##
+## The area is judged on the payload's own numbers, BEFORE the reduction to
+## Vector2: that reduction rounds each coordinate to the vector type's
+## precision, and a shoelace sum over absolute board coordinates carries the
+## rounding as cancellation noise that grows with the ring's distance from the
+## origin — enough to lift a zero-area ring past the cutoff. See _ring_area_2x
+## for how the sum is kept at the ring's own scale.
 static func _fill_region_ring(region) -> PackedVector2Array:
 	var empty := PackedVector2Array()
 	if not (region is Array):
 		return empty
-	var pts := PackedVector2Array()
+	var xs := PackedFloat64Array()
+	var ys := PackedFloat64Array()
 	for p in region:
 		if not (p is Dictionary):
 			return empty
@@ -398,14 +411,17 @@ static func _fill_region_ring(region) -> PackedVector2Array:
 		var y = (p as Dictionary).get("y_mm")
 		if not (_finite_number(x) and _finite_number(y)):
 			return empty
-		pts.append(Vector2(float(x), float(y)))
-	if pts.size() < 3:
+		xs.append(float(x))
+		ys.append(float(y))
+	if xs.size() < 3:
 		return empty
 	# Less enclosed area than the coincidence tolerance can resolve is no
-	# area at all — this also absorbs float cancellation noise in the
-	# shoelace sum of a nearly-degenerate ring.
-	if _ring_area_2x(pts) <= TOUCH_EPS_MM * TOUCH_EPS_MM:
+	# area at all.
+	if _ring_area_2x(xs, ys) <= TOUCH_EPS_MM * TOUCH_EPS_MM:
 		return empty
+	var pts := PackedVector2Array()
+	for i in xs.size():
+		pts.append(Vector2(xs[i], ys[i]))
 	return pts
 
 
@@ -415,13 +431,21 @@ static func _finite_number(v) -> bool:
 	return v is float and is_finite(v)
 
 
-## Twice the area a ring encloses (shoelace), sign dropped.
-static func _ring_area_2x(pts: PackedVector2Array) -> float:
+## Twice the area a ring encloses (shoelace), sign dropped. Every coordinate
+## is translated to the ring's first point before it enters the sum, so the
+## terms — and their float cancellation noise — scale with the ring's own
+## extent rather than with where the ring sits on the board: the verdict is
+## the same at any offset from the origin.
+static func _ring_area_2x(xs: PackedFloat64Array, ys: PackedFloat64Array) -> float:
 	var s := 0.0
-	for i in pts.size():
-		var a := pts[i]
-		var b := pts[(i + 1) % pts.size()]
-		s += a.x * b.y - b.x * a.y
+	var n := xs.size()
+	for i in n:
+		var j := (i + 1) % n
+		var ax := xs[i] - xs[0]
+		var ay := ys[i] - ys[0]
+		var bx := xs[j] - xs[0]
+		var by := ys[j] - ys[0]
+		s += ax * by - bx * ay
 	return absf(s)
 
 
@@ -544,10 +568,39 @@ static func _seg_end(pts: PackedVector2Array, i: int) -> Vector2:
 	return pts[i + 1] if i + 1 < pts.size() else pts[i]
 
 
+## The closest pair between two segments, each segment handed to the engine
+## with its endpoints in lexicographic order. A segment is the same set of
+## points whichever way its two endpoints are listed, but when the closest
+## approach is a CONTINUUM — parallel overlapping runs — the engine returns
+## one pair of it, chosen by the order the endpoints arrive in. Fixing that
+## order makes the returned pair a function of the segments' geometry alone,
+## so a polyline read from either end yields the same witness. Every
+## segment-to-segment measurement goes through here, the boolean touch tests
+## included, so touch and aim measure with one instrument.
+static func _seg_closest(a1: Vector2, a2: Vector2,
+		b1: Vector2, b2: Vector2) -> PackedVector2Array:
+	if _point_less(a2, a1):
+		var a_swap := a1
+		a1 = a2
+		a2 = a_swap
+	if _point_less(b2, b1):
+		var b_swap := b1
+		b1 = b2
+		b2 = b_swap
+	return Geometry2D.get_closest_points_between_segments(a1, a2, b1, b2)
+
+
+## Lexicographic order over one point: x, then y.
+static func _point_less(a: Vector2, b: Vector2) -> bool:
+	if a.x != b.x:
+		return a.x < b.x
+	return a.y < b.y
+
+
 static func _lines_meet(a: PackedVector2Array, b: PackedVector2Array, tol: float) -> bool:
 	for i in _seg_count(a):
 		for j in _seg_count(b):
-			var closest := Geometry2D.get_closest_points_between_segments(
+			var closest := _seg_closest(
 				a[i], _seg_end(a, i), b[j], _seg_end(b, j))
 			if closest.size() == 2 and closest[0].distance_to(closest[1]) <= tol:
 				return true
@@ -563,7 +616,7 @@ static func _line_meets_polygon(line: PackedVector2Array, poly: PackedVector2Arr
 			return true
 	for i in _seg_count(line):
 		for k in poly.size():
-			var closest := Geometry2D.get_closest_points_between_segments(
+			var closest := _seg_closest(
 				line[i], _seg_end(line, i), poly[k], poly[(k + 1) % poly.size()])
 			if closest.size() == 2 and closest[0].distance_to(closest[1]) <= tol:
 				return true
@@ -581,7 +634,7 @@ static func _polygons_meet(a: PackedVector2Array, b: PackedVector2Array, tol: fl
 			return true
 	for i in a.size():
 		for k in b.size():
-			var closest := Geometry2D.get_closest_points_between_segments(
+			var closest := _seg_closest(
 				a[i], a[(i + 1) % a.size()], b[k], b[(k + 1) % b.size()])
 			if closest.size() == 2 and closest[0].distance_to(closest[1]) <= tol:
 				return true
@@ -763,8 +816,8 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 			island_of[int(n)] = i
 
 	# Best (shortest) bridge per island pair. An equal-length challenger is
-	# resolved by _edge_beats over the candidates' own coordinates and refs,
-	# so which one represents the pair is a property of the board rather than
+	# resolved by _edge_beats over the candidates' own coordinates, layer need
+	# and refs, so which one represents the pair is a property of the board rather than
 	# of the order the node pairs are visited in — node visiting order follows
 	# node indices, which follow the order the board's lists arrived in. The
 	# edge's a-side always belongs to the LOWER-numbered island.
@@ -823,11 +876,14 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 
 
 ## True when `cand` should replace `incumbent` as an island pair's bridge:
-## strictly shorter, or the same length with lexicographically smaller witness
-## points, then refs, then a same-layer join over one needing a layer change.
-## Every key is read off the candidates themselves, never off the order they
-## were generated in. Candidates equal on every key draw the same airwire, so
-## the incumbent stays.
+## strictly shorter; the same length with lexicographically smaller witness
+## points; the same points with no layer change against one needing a layer
+## change; then refs. The layer question outranks the refs because the two
+## candidates draw the same line at the same coordinates yet ask the designer
+## for different work — refs only make the surviving equivalent choice
+## deterministic, they never decide it. Every key is read off the candidates
+## themselves, never off the order they were generated in. Candidates equal on
+## every key draw the same airwire, so the incumbent stays.
 static func _edge_beats(cand: Dictionary, incumbent: Dictionary) -> bool:
 	if float(cand["length"]) != float(incumbent["length"]):
 		return float(cand["length"]) < float(incumbent["length"])
@@ -837,24 +893,20 @@ static func _edge_beats(cand: Dictionary, incumbent: Dictionary) -> bool:
 	var nb: Vector2 = incumbent["b"]
 	if ca != na or cb != nb:
 		return _points_less(ca, cb, na, nb)
+	if bool(cand["layer_change"]) != bool(incumbent["layer_change"]):
+		return not bool(cand["layer_change"])
 	if str(cand["a_ref"]) != str(incumbent["a_ref"]):
 		return str(cand["a_ref"]) < str(incumbent["a_ref"])
 	if str(cand["b_ref"]) != str(incumbent["b_ref"]):
 		return str(cand["b_ref"]) < str(incumbent["b_ref"])
-	if bool(cand["layer_change"]) != bool(incumbent["layer_change"]):
-		return not bool(cand["layer_change"])
 	return false
 
 
 ## Lexicographic order over a witness point pair: a.x, a.y, b.x, b.y.
 static func _points_less(a1: Vector2, b1: Vector2, a2: Vector2, b2: Vector2) -> bool:
-	if a1.x != a2.x:
-		return a1.x < a2.x
-	if a1.y != a2.y:
-		return a1.y < a2.y
-	if b1.x != b2.x:
-		return b1.x < b2.x
-	return b1.y < b2.y
+	if a1 != a2:
+		return _point_less(a1, a2)
+	return _point_less(b1, b2)
 
 
 # ── AIM: where an airwire between two conductors lands ────────────────────────
@@ -927,7 +979,7 @@ static func _near_lines(best: Dictionary, la: PackedVector2Array,
 		lb: PackedVector2Array, swapped: bool) -> void:
 	for i in _seg_count(la):
 		for j in _seg_count(lb):
-			var closest := Geometry2D.get_closest_points_between_segments(
+			var closest := _seg_closest(
 				la[i], _seg_end(la, i), lb[j], _seg_end(lb, j))
 			if closest.size() == 2:
 				if swapped:
@@ -945,7 +997,7 @@ static func _near_line_poly(best: Dictionary, line: PackedVector2Array,
 			_near_update(best, p, p)
 	for i in _seg_count(line):
 		for k in poly.size():
-			var closest := Geometry2D.get_closest_points_between_segments(
+			var closest := _seg_closest(
 				line[i], _seg_end(line, i), poly[k], poly[(k + 1) % poly.size()])
 			if closest.size() == 2:
 				if swapped:
@@ -966,7 +1018,7 @@ static func _near_polys(best: Dictionary, pa: PackedVector2Array,
 			_near_update(best, p, p)
 	for i in pa.size():
 		for k in pb.size():
-			var closest := Geometry2D.get_closest_points_between_segments(
+			var closest := _seg_closest(
 				pa[i], pa[(i + 1) % pa.size()], pb[k], pb[(k + 1) % pb.size()])
 			if closest.size() == 2:
 				_near_update(best, closest[0], closest[1])

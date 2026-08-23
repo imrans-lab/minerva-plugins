@@ -33,7 +33,11 @@ extends SceneTree
 ##      difference. Two symmetric fixtures put an EXACT equal-distance tie in
 ##      front of the solver (two equidistant fill regions; two equidistant
 ##      edges of one notched region) so a tie resolved by visit order rather
-##      than by geometry shows up as a moved endpoint.
+##      than by geometry shows up as a moved endpoint. TRACE WAYPOINT ORDER is
+##      its own case: every trace reversed on the connectivity board, plus a
+##      collinear partially-overlapping pair on different layers, where the
+##      closest approach is a CONTINUUM and the witness may not move when a
+##      trace's points are listed from the other end.
 ##
 ##   5. QUIETING IS NOT HIDING. A 20-pad unrouted net. (a) the REPORTED
 ##      remaining count equals islands-1 however many links were drawn; (b)
@@ -67,6 +71,13 @@ extends SceneTree
 ##  10. AN AIRWIRE AIMS AT THE ISLAND'S COPPER. A pad 2mm from the middle of a
 ##      routed trace gets a 2mm airwire onto the trace, not a 15mm airwire to
 ##      the nearest pad centre of that island.
+##
+##  11. A JOIN THAT NEEDS NO LAYER CHANGE BEATS ONE THAT DOES. An island holds
+##      a surface land and a through-hole barrel at the same position; against
+##      a far bottom-side pad the two candidate joins tie on length and
+##      witness points, and only the barrel reaches the bottom. The surviving
+##      join declares no layer change whichever ref spelling sorts first —
+##      refs make the choice deterministic, they never make it.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -89,6 +100,7 @@ func _init() -> void:
 	_run_pad_is_not_its_bounding_box()
 	_run_pad_rotation_is_part_of_its_shape()
 	_run_airwire_aims_at_island_copper()
+	_run_layer_change_tie()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -525,6 +537,41 @@ func _run_determinism() -> void:
 		_picture(Ratsnest.compute(_notched_region_board(ring)))
 			== _picture(Ratsnest.compute(_notched_region_board(ring_rev))))
 
+	# TRACE WAYPOINT ORDER, whole board: a trace is the same copper whichever
+	# end its points are listed from.
+	var tr := _connectivity_spec()
+	for trace in (tr["traces"] as Array):
+		var pts_rev: Array = ((trace as Dictionary)["points"] as Array).duplicate()
+		pts_rev.reverse()
+		(trace as Dictionary)["points"] = pts_rev
+	check("reversing every trace's waypoints draws the identical picture",
+		_picture(Ratsnest.compute(_board(tr))) == picture)
+
+	# THE CONTINUUM CASE. Two collinear traces on different layers overlap for
+	# 8mm in plan: EVERY point of the overlap is an equally close approach, so
+	# the closest-pair primitive has a continuum to choose one witness from.
+	# ORACLE: the copper is identical however either trace lists its points, so
+	# the picture — the witness included — may not move; and any correct
+	# witness lies inside the overlap, at zero length, declaring the layer
+	# change.
+	var ovl := Ratsnest.compute(_overlap_board(false, false))
+	var ovl_links := _links_for(ovl, "OVL")
+	check_eq("the overlapping cross-layer pair still owes exactly one join",
+		ovl_links.size(), 1)
+	if ovl_links.size() == 1:
+		var ol := ovl_links[0] as Dictionary
+		check("…at zero length: the copper overlaps in plan (got %.4f)"
+			% float(ol["length"]), float(ol["length"]) < 1e-6)
+		check("…declaring the layer change", bool(ol["layer_change"]))
+		var wx := (ol["a"] as Vector2).x
+		check("…witnessed inside the 8mm overlap (got x=%.4f)" % wx,
+			wx >= 12.0 - 1e-4 and wx <= 20.0 + 1e-4)
+	for flips in [[true, false], [false, true], [true, true]]:
+		check("reversing trace waypoints moves nothing (top flipped=%s, bottom flipped=%s)"
+			% [str(flips[0]), str(flips[1])],
+			_picture(Ratsnest.compute(_overlap_board(flips[0], flips[1])))
+				== _picture(ovl))
+
 
 ## `fill` with its regions in reverse order and each region's points reversed;
 ## anything not Array-shaped comes back untouched.
@@ -553,6 +600,31 @@ func _twin_region_board(fill_regions: Array):
 		"zones": [{"id": "zt", "layer": "top", "kind": "copper_pour", "net": "TIE",
 			"outline": _rect_outline(Vector2(19, 7), Vector2(21, 13)),
 			"fill": fill_regions}],
+	})
+
+
+## Two collinear traces on DIFFERENT layers, overlapping in plan for
+## x 12..20 at y 10, each landing on its own pad. Two islands — the layers
+## never meet — whose closest approach is the whole overlap segment. Each
+## flip lists that trace's two waypoints in the opposite order; the copper is
+## identical in all four spellings.
+func _overlap_board(flip_top: bool, flip_bottom: bool):
+	var top_a := Vector2(5, 10)
+	var top_b := Vector2(20, 10)
+	var bot_a := Vector2(12, 10)
+	var bot_b := Vector2(30, 10)
+	return _board({
+		"components": [
+			_part("V1", 5.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("V2", 30.0, 10.0, [_smd_pin("1", 0.0, 0.0)], "bottom"),
+		],
+		"nets": [{"name": "OVL", "pins": ["V1.1", "V2.1"]}],
+		"traces": [
+			_trace("t_top", "OVL", "top",
+				top_b if flip_top else top_a, top_a if flip_top else top_b),
+			_trace("t_bot", "OVL", "bottom",
+				bot_b if flip_bottom else bot_a, bot_a if flip_bottom else bot_b),
+		],
 	})
 
 
@@ -795,6 +867,19 @@ func _run_pour_conducts_as_its_fill() -> void:
 			{"x_mm": 8.5, "y_mm": 10.0}, {"x_mm": 15.0, "y_mm": 10.0},
 			{"x_mm": 21.5, "y_mm": 10.0}]]})), "PR"), 1)
 
+	# The same zero-area construction off the exactly-representable axis: three
+	# points on one straight line (6.5 * 0.4 = 13 * 0.2, so the middle point
+	# sits ON the chord) whose y values round when narrowed to the engine's
+	# vector type. A degeneracy check run AFTER that narrowing, summing in
+	# absolute board coordinates, measures the rounding sliver above the cutoff
+	# and accepts the ring — and its segments cross both lands, so the join
+	# silently closes. ORACLE: zero enclosed area is zero copper wherever the
+	# ring sits; the join stays owed.
+	check_eq("a zero-area ring at ordinary board coordinates is still not a conductor",
+		_remaining(Ratsnest.compute(_pour_board({"fill": [[
+			{"x_mm": 8.5, "y_mm": 9.9}, {"x_mm": 15.0, "y_mm": 10.1},
+			{"x_mm": 21.5, "y_mm": 10.3}]]})), "PR"), 1)
+
 	check_eq("one damaged region rejects the WHOLE fill — the intact sibling proves nothing",
 		_remaining(Ratsnest.compute(_pour_board({"fill": [covering, 42]})), "PR"), 1)
 
@@ -963,3 +1048,43 @@ func _run_airwire_aims_at_island_copper() -> void:
 				and str(l["b_ref"]) == "A3.1")
 		check_eq("…and the copper endpoint is mid-trace, so it names no pad",
 			str(l["a_ref"]), "")
+
+
+# ── 11. a join that needs no layer change beats one that does ─────────────────
+
+## A surface land and a through-hole barrel at the SAME position, one island;
+## a far pad on the BOTTOM, the other. The two candidate joins tie on length
+## and on witness points; the surface land reaches only the top, the barrel
+## reaches every layer. The ref spellings are the fixture's variable.
+func _coincident_pads_board(smd_ref: String, tht_ref: String):
+	return _board({
+		"components": [
+			_part(smd_ref, 10.0, 10.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part(tht_ref, 10.0, 10.0, [_tht_pin("1", 0.0, 0.0)]),
+			_part("F1", 20.0, 10.0, [_smd_pin("1", 0.0, 0.0)], "bottom"),
+		],
+		"nets": [{"name": "COIN",
+			"pins": ["%s.1" % smd_ref, "%s.1" % tht_ref, "F1.1"]}],
+	})
+
+
+func _run_layer_change_tie() -> void:
+	print("-- 11. a join that needs no layer change beats one that does --")
+	# ORACLE: the island already offers the bottom layer through the barrel at
+	# the very same coordinates, so no correct answer reports a layer change —
+	# whichever of the two coincident pads' refs sorts first. A tie-break that
+	# consults refs before layers picks the surface pad when its ref sorts
+	# lower and tells the designer a via is required where none is.
+	for names in [["A1", "B1"], ["B1", "A1"]]:
+		var smd_ref: String = names[0]
+		var tht_ref: String = names[1]
+		var result := Ratsnest.compute(_coincident_pads_board(smd_ref, tht_ref))
+		var links := _links_for(result, "COIN")
+		check_eq("one join owed (smd=%s, tht=%s)" % [smd_ref, tht_ref],
+			links.size(), 1)
+		if links.size() == 1:
+			var l := links[0] as Dictionary
+			check("the surviving join needs NO layer change (smd=%s, tht=%s)"
+				% [smd_ref, tht_ref], not bool(l["layer_change"]))
+			check_eq("…and its near end names the barrel (smd=%s, tht=%s)"
+				% [smd_ref, tht_ref], str(l["a_ref"]), "%s.1" % tht_ref)
