@@ -7808,8 +7808,18 @@ func _handle_trace_click(world_pos: Vector2, is_double_click: bool) -> void:
 	# The second press of a physical double-click arrives AFTER the first has
 	# already placed its waypoint, so it ends the trace there instead of stacking
 	# a duplicate point on top of it.
+	#
+	# Unless press 1 already ENDED the gesture, which this tool — alone in the
+	# click-per-point family — can do: landing on a pad or a via finishes and
+	# commits on press 1, and landing on one with nothing in progress starts a
+	# trace holding a single point. Either way fewer than 2 points are left here,
+	# and _commit_trace can then only answer with the point-count refusal — a
+	# sentence about THIS press's empty buffer, emitted over the confirmation (or
+	# the start line) press 1 correctly wrote. Enter keeps that refusal: pressing
+	# it is a request to commit, so the count is news there.
 	if is_double_click:
-		_commit_trace()
+		if _trace_points.size() >= 2:
+			_commit_trace()
 		return
 
 	var hit := _trace_anchor_at(world_pos)

@@ -21,6 +21,8 @@ extends SceneTree
 ##      the via's CENTRE and the via's net; a netless via is refused by name; and
 ##      the copper a click authors is byte-identical to what minerva_pcb_add_trace
 ##      authors from the same via's coordinates.
+##   7. the DOUBLE-CLICK's second press: it commits only when there is still a
+##      trace to commit, so a finish-on-anchor keeps its own confirmation
 ##
 ## INDEPENDENT REPRESENTATION, throughout: the SERIALIZED trace entities out of
 ## to_board_dict() and the model's change_journal / history — never the tool's own
@@ -69,6 +71,7 @@ func _init() -> void:
 	_test_cross_net_finish_is_permissive_but_loud()
 	_test_via_anchoring()
 	_test_via_click_and_mcp_author_the_same_copper()
+	_test_double_click_second_press()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -612,3 +615,128 @@ func _test_via_click_and_mcp_author_the_same_copper() -> void:
 
 	canvas.free()
 	agent[0].free()
+
+
+## ── 7. THE DOUBLE-CLICK'S SECOND PRESS ───────────────────────────────────────
+##
+## A physical double-click reaches this tool as TWO press events; only the second
+## carries double_click=true. Every OTHER click-per-point tool on this canvas
+## commits on that second press and nowhere else, so its first press can only
+## have placed a point. This tool is the exception: press 1 can land on a pad or
+## a via and finish the whole trace by itself, leaving press 1's confirmation on
+## the status line and NOTHING left to commit.
+##
+## ORACLE, for every leg: the SERIALIZED board (trace count, geometry) and the
+## change journal — neither of which the tool writes directly — plus the message
+## channel compared against pcb_data.trace_author_error's OWN output for an empty
+## buffer, so the refusal is recognised by asking the model rather than by a copy
+## of its wording that could drift away from it.
+func _test_double_click_second_press() -> void:
+	print("\n-- double-click: the second press does not overwrite press 1's answer --")
+
+	# (a) FINISH ON A PAD by double-click — the gesture the tool documents.
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs: Array = []
+	canvas.trace_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	# The refusal an empty buffer produces, asked of the model, not written here.
+	var empty_buffer_refusal: String = data.trace_author_error("", "", 0)
+
+	canvas._handle_trace_click(Vector2(10.0, 10.0), false)   # start U1.1 (VCC)
+	canvas._handle_trace_click(Vector2(20.0, 10.0), false)   # a waypoint
+	canvas._handle_trace_click(Vector2(30.0, 10.0), false)   # press 1: finishes on R1.1
+	var after_press1 := _serialized_traces(data)
+	var journal_after_press1: int = data.change_journal.size()
+	var msgs_after_press1: int = msgs.size()
+
+	canvas._handle_trace_click(Vector2(30.0, 10.0), true)    # press 2 of the same click
+
+	check("DBLCLK (a): press 2 said NOTHING — press 1's line is still what is read",
+			msgs.size() == msgs_after_press1,
+			"press 2 added %s" % str(msgs.slice(msgs_after_press1)))
+	check("DBLCLK (a): …and what is read is not the model's empty-buffer refusal",
+			not msgs.is_empty() and msgs[msgs.size() - 1] != empty_buffer_refusal,
+			"last=%s" % (msgs[msgs.size() - 1] if not msgs.is_empty() else "<none>"))
+	var after_press2 := _serialized_traces(data)
+	var held: Dictionary = after_press2[0] if after_press2.size() == 1 else {}
+	check("DBLCLK (a): …and it names the trace the board actually holds",
+			not held.is_empty()
+			and msgs[msgs.size() - 1].contains(str(held.get("net", "?")))
+			and msgs[msgs.size() - 1].contains(str(held.get("layer", "?"))),
+			"last=%s trace=%s" % [msgs[msgs.size() - 1] if not msgs.is_empty() else "<none>",
+					str(held)])
+	# The constraint: press 2 is a status-channel event only. The copper is
+	# compared either side of it, entity for entity, plus the journal length.
+	check("DBLCLK (a): the committed copper is IDENTICAL either side of press 2",
+			after_press1.size() == 1 and after_press2.size() == 1
+			and after_press1[0] == after_press2[0]
+			and data.change_journal.size() == journal_after_press1,
+			"before=%s after=%s journal %d->%d" % [str(after_press1), str(after_press2),
+					journal_after_press1, data.change_journal.size()])
+	canvas.free()
+
+	# (b) FINISH ON A VIA by double-click — the same press-1 finish, other anchor.
+	var v := _rig_with_vias()
+	var canvas_v = v[0]
+	var data_v = v[1]
+	var msgs_v: Array = []
+	canvas_v.trace_tool_message.connect(func(t: String) -> void: msgs_v.append(t))
+	canvas_v._handle_trace_click(Vector2(10.0, 10.0), false)   # start U1.1 (VCC)
+	canvas_v._handle_trace_click(_WAYPOINT, false)
+	canvas_v._handle_trace_click(_OFF_CENTRE_CLICK, false)     # press 1: finishes on the via
+	canvas_v._handle_trace_click(_OFF_CENTRE_CLICK, true)      # press 2
+	check("DBLCLK (b): the via finish committed exactly one trace",
+			_serialized_traces(data_v).size() == 1,
+			"traces=%d" % _serialized_traces(data_v).size())
+	check("DBLCLK (b): …and the status is not the empty-buffer refusal either",
+			not msgs_v.is_empty()
+			and msgs_v[msgs_v.size() - 1] != data_v.trace_author_error("", "", 0),
+			"last=%s" % (msgs_v[msgs_v.size() - 1] if not msgs_v.is_empty() else "<none>"))
+	canvas_v.free()
+
+	# (c) DOUBLE-CLICK TO START. Press 1 arms the trace with its single start
+	#     point; press 2 must not report that count back as a failure.
+	var s := _rig()
+	var canvas_s = s[0]
+	var data_s = s[1]
+	var msgs_s: Array = []
+	canvas_s.trace_tool_message.connect(func(t: String) -> void: msgs_s.append(t))
+	canvas_s._handle_trace_click(Vector2(10.0, 10.0), false)
+	var started_with: String = msgs_s[msgs_s.size() - 1] if not msgs_s.is_empty() else ""
+	canvas_s._handle_trace_click(Vector2(10.0, 10.0), true)
+	check("DBLCLK (c): starting by double-click still reads as a start",
+			not msgs_s.is_empty() and msgs_s[msgs_s.size() - 1] == started_with,
+			"last=%s" % (msgs_s[msgs_s.size() - 1] if not msgs_s.is_empty() else "<none>"))
+	check("DBLCLK (c): …with the gesture still live and nothing committed",
+			canvas_s._trace_points.size() == 1 and _serialized_traces(data_s).is_empty(),
+			"%d points, %d traces" % [canvas_s._trace_points.size(),
+					_serialized_traces(data_s).size()])
+	canvas_s.free()
+
+	# (d) THE GESTURE THAT MUST KEEP WORKING: double-click on EMPTY SPACE ends a
+	#     dangling trace there. Press 1 places the last waypoint, press 2 commits.
+	var e := _rig()
+	var canvas_e = e[0]
+	var data_e = e[1]
+	var msgs_e: Array = []
+	canvas_e.trace_tool_message.connect(func(t: String) -> void: msgs_e.append(t))
+	var end_point := Vector2(22.0, 16.0)   # 10 mm from the nearest pad
+	canvas_e._handle_trace_click(Vector2(10.0, 10.0), false)   # start U1.1 (VCC)
+	canvas_e._handle_trace_click(Vector2(20.0, 10.0), false)   # a waypoint
+	canvas_e._handle_trace_click(end_point, false)             # press 1
+	canvas_e._handle_trace_click(end_point, true)              # press 2 commits
+	var dangling := _serialized_traces(data_e)
+	var dangling_pts: Array = _points_of(dangling[0]) if dangling.size() == 1 else []
+	check("DBLCLK (d): a double-click on empty space still COMMITS the trace, "
+			+ "ending at the point that was double-clicked",
+			dangling.size() == 1 and dangling_pts.size() == 3
+			and (dangling_pts[2] as Vector2).is_equal_approx(end_point),
+			"traces=%d points=%s" % [dangling.size(), str(dangling_pts)])
+	check("DBLCLK (d): …the gesture ended, and the confirmation is what is read",
+			canvas_e._trace_points.is_empty()
+			and not msgs_e.is_empty()
+			and msgs_e[msgs_e.size() - 1] != data_e.trace_author_error("", "", 0),
+			"%d points left, last=%s" % [canvas_e._trace_points.size(),
+					msgs_e[msgs_e.size() - 1] if not msgs_e.is_empty() else "<none>"])
+	canvas_e.free()
