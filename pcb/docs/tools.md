@@ -867,23 +867,29 @@ tool's schema: authored and validated only — routing, DRC and Gerber export
 all ignore a cutout today (see "Cut-outs" in `board-yaml.md`).
 
 **Draw ▸ Trace** — draws real copper directly, bypassing the router (Hints ▸
-Trace below instead asks the router for a route). Click a pad to start — the
-trace takes that pad's net — then click each waypoint, then click another pad
-to finish on it (or double-click/Enter to end it where it is; Esc/right-click
-cancels). Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
+Trace below instead asks the router for a route). Click a pad **or a via** to
+start — the trace takes that anchor's net — then click each waypoint, then
+click another pad or via to finish on its centre (or double-click/Enter to end
+it where it is; Esc/right-click cancels). A via anchors for the same reason a
+pad does: it already carries a net, and a via is where a hand-routed run
+changes layer, so it is where the next leg of that run begins or ends. An
+anchor on NO net is refused by name when you start on it (the trace would have
+no net to inherit), and merely named out loud when you finish on it. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
 freely. Drawn at the width set in the sidebar's trace-width box, on the
 toolbar's selected copper layer (or the hardcoded `TRACE_DEFAULT_LAYER`, the
 top copper layer, when the filter is "All"). Note this is the OPPOSITE
 default from Draw ▸ Pour above (bottom) — leaving the filter on "All" and
 drawing both puts them on different layers with no warning.
 
-Starting on a pad also marks and labels **one destination**: the nearest
+Starting on a **pad** also marks and labels **one destination**: the nearest
 copper on that pad's net that is not already joined to it, with the net, the
 destination part and the distance. It is picked when the gesture starts and
 does not move until the trace commits or is cancelled, and every other
 airwire dims while it is up (none are removed). It is guidance only — every
 click, waypoint and finish stays exactly as legal as it was; DRC is still the
 correctness net. Turning the ratsnest off (N) hides it along with the rest.
+Starting on a **via** locks no destination — the focus is resolved from a pad
+reference — so the ratsnest draws unchanged for that gesture.
 
 **Draw ▸ Bus** — draws N parallel traces at once (campaign 2 epoch C unit 5,
 DCR `019fb572b888`). Two phases in one tool: **PICKING** — click a pad or a

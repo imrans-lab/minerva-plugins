@@ -465,8 +465,8 @@ var _space_pan_armed: bool = false
 ## drawing tools — click per vertex, double-click or Enter closes, Esc/right-click
 ## cancels; they AUTHOR board entities (unlike the hint tools, which author
 ## annotations), so they belong on this surface rather than the overlay's. TRACE
-## (epoch 6 unit 5) is the same family for copper: click a pad, click waypoints,
-## click a pad to finish. It is NOT the Proposals-group trace tool — that one authors
+## (epoch 6 unit 5) is the same family for copper: click a pad or via, click
+## waypoints, click a pad or via to finish. It is NOT the Proposals-group trace tool — that one authors
 ## a route HINT for the router; this one authors the Trace entity itself. ERASER
 ## (item 019fb934827776) owns clicks the same way: each click deletes exactly the
 ## entity it hits (same pick _entity_at gives the Select tool), journalled as its
@@ -504,8 +504,8 @@ signal tool_mode_changed(mode: ToolMode)
 ## signal from component_lock_changed so neither channel has to pretend to be the
 ## other.
 signal zone_tool_message(text: String)
-## The trace tool's twin of the above ("start on a pad", "trace added", the
-## different-net warning). A separate signal for the same reason zone_tool_message
+## The trace tool's twin of the above ("start on a pad or via", "trace added",
+## the different-net warning). A separate signal for the same reason zone_tool_message
 ## is separate from component_lock_changed — one channel per tool, all routed to
 ## the panel's single transient-status sink, so no channel has to pretend to be
 ## another's.
@@ -740,6 +740,13 @@ const TRACE_DEFAULT_LAYER := "top"
 ## impossible to place a waypoint anywhere near a component. 1.27 mm is half a
 ## 0.1" pitch: inside it, the nearest pad is unambiguously the pad clicked.
 const TRACE_PAD_SNAP_MM := 1.27
+## The two things a trace may be ANCHORED to — the kinds carried in the anchor
+## dictionary _trace_pad_at / _trace_via_at both return. Named rather than
+## spelled inline because three call sites branch on the value (the focus lock,
+## the label, and the refusals), and "pad" typed four times is three chances to
+## type "Pad".
+const ANCHOR_PAD := "pad"
+const ANCHOR_VIA := "via"
 ## Width in mm the trace tool is armed to, set by the panel's width box. 0.0 —
 ## the resting state — means "use the board's design rule"
 ## (pcb_data.authored_trace_width), which is what the tool did before this control
@@ -755,7 +762,8 @@ var _trace_points: PackedVector2Array = PackedVector2Array()
 ## from the one on screen.
 var _trace_net: String = ""
 var _trace_layer: String = ""
-## "U1.22" — the starting pad, for the preview label and the commit message.
+## "U1.22" (a pad) or "via_3" (a via) — the anchor the trace started from, for
+## the preview label, the commit message and the ratsnest focus lock.
 var _trace_start_ref: String = ""
 ## Live rubber-band point (the cursor), only meaningful while drawing.
 var _trace_preview: Vector2 = Vector2.ZERO
@@ -3577,9 +3585,10 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_zone_click(world_pos, event.double_click)
 				return
 
-			# Trace tool (unit 5): first click must land on a pad (that is where
-			# the net comes from), later clicks place waypoints or finish on a
-			# pad. Owns the click outright, same as the two tools above.
+			# Trace tool (unit 5): first click must land on an ANCHOR — a pad or
+			# a via (that is where the net comes from) — and later clicks place
+			# waypoints or finish on one. Owns the click outright, same as the
+			# two tools above.
 			if tool_mode == ToolMode.TRACE:
 				_handle_trace_click(world_pos, event.double_click)
 				return
@@ -4178,7 +4187,7 @@ func _handle_key_input(event: InputEventKey) -> void:
 				_commit_zone()
 			# Ends an in-progress trace at its last waypoint — a dangling trace,
 			# which the model and the board contract both allow (nothing requires
-			# a trace to terminate on a pad).
+			# a trace to terminate on a pad or via).
 			elif tool_mode == ToolMode.TRACE:
 				_commit_trace()
 			# Closes an in-progress cutout — same grammar as the zone tools
@@ -7333,8 +7342,8 @@ func _author_layer(default_layer: String) -> String:
 ## now lives in _snap_bypass_held(), shared with the drag-move's no-snap modifier
 ## (item 019fb93185c8) so authoring and moving cannot disagree about the key.
 ##
-## Pad ENDPOINTS deliberately never come through here — a trace must meet the
-## pad's actual centre (see _finish_trace_on_pad).
+## ANCHOR ENDPOINTS deliberately never come through here — a trace must meet the
+## pad's, or the via's, actual centre (see _finish_trace_on_anchor).
 func _author_point(world_pos: Vector2) -> Vector2:
 	if _snap_bypass_held():
 		return world_pos
@@ -7639,9 +7648,9 @@ func _draw_cutout_preview() -> void:
 
 ## Gesture (KiCad's route-a-track grammar, expressed in the same click-per-point
 ## family the zone tools use — one gesture grammar on this canvas, not three):
-##   ARMED   --click a pad-->        start; net + layer frozen from that pad
+##   ARMED   --click a pad OR via--> start; net + layer frozen from that anchor
 ##   DRAWING --left-click-->         place a waypoint
-##   DRAWING --click ANY pad-->      finish at that pad's centre and commit
+##   DRAWING --click ANY pad/via-->  finish at that anchor's centre and commit
 ##   DRAWING --double-click/Enter--> finish at the last waypoint (dangling)
 ##   DRAWING --Esc/right-click-->    cancel (announced)
 ##   DRAWING --tool switch-->        cancel (silent, unless the switch IS a
@@ -7657,10 +7666,18 @@ func _draw_cutout_preview() -> void:
 ## draw path marks and labels while every other airwire recedes. It is drawing
 ## only: no click, waypoint or finish is refused or redirected by it.
 ##
-## Starting REQUIRES a pad hit, because a trace's net is INHERITED rather than
-## chosen. That is why this tool has no net picker where the zone tools have one:
-## pads are the only place on the board where "which net is this?" already has an
-## answer, and copper that invents its own net answer is copper on the wrong net.
+## Starting REQUIRES an ANCHOR hit, because a trace's net is INHERITED rather
+## than chosen. That is why this tool has no net picker where the zone tools have
+## one: an anchor is a place on the board where "which net is this?" ALREADY has
+## an answer, and copper that invents its own net answer is copper on the wrong
+## net.
+##
+## THERE ARE TWO KINDS OF ANCHOR — a pad, and a VIA. A via qualifies for exactly
+## the reason a pad does: it carries a net of its own (pcb_data's via dicts hold
+## "net_name", which minerva_pcb_place_via validates against the declared net
+## table). It has to qualify, because a via is WHERE COPPER CHANGES LAYER — a
+## hand-routed run that drops to the bottom layer lands on a via, and with pads
+## as the only anchor the next leg of that run could neither begin nor end on it.
 
 ## Resolve a click to a pad and its net.
 ##
@@ -7673,6 +7690,12 @@ func _draw_cutout_preview() -> void:
 ##
 ## {} on a miss AND when no host is bound — with no hit test there is no pad, so
 ## the tool refuses to start rather than guessing a net.
+##
+## THE ANCHOR SHAPE, defined here and matched by _trace_via_at: {ref, kind,
+## position, net}. `ref` stays the bare pad reference ("U1.1") because two other
+## readers depend on that exact string — PcbRatsnest.focus matches it against the
+## bundle's pad refs, and _bus_net_at surfaces it as the picked net's name — so
+## the KIND rides a separate key rather than being decorated onto the ref.
 func _trace_pad_at(world_pos: Vector2) -> Dictionary:
 	if _pin_inspector_host == null or not _pin_inspector_host.has_method("pad_at"):
 		return {}
@@ -7686,9 +7709,73 @@ func _trace_pad_at(world_pos: Vector2) -> Dictionary:
 		pad_net = data.find_net_for_pin(comp, pin)
 	return {
 		"ref": "%s.%s" % [comp, pin],
+		"kind": ANCHOR_PAD,
 		"position": hit.get("position", Vector2.ZERO),
 		"net": pad_net,
 	}
+
+
+## Resolve a click to a VIA, in the SAME anchor shape _trace_pad_at returns, so
+## the start/finish paths below never learn which kind of thing they landed on.
+##
+## REUSES _via_at — this canvas's ONE via pick, the same rung the Select tool's
+## ladder uses — rather than hit-testing vias a second way. That inherits its
+## click-target floor (VIA_HIT_RADIUS_PX, deliberately tight so a via does not
+## steal clicks from the copper drawn through it) and, load-bearing, its
+## VISIBILITY rule: with traces hidden there is no via on screen, and a tool that
+## anchored copper to something the user cannot see would be authoring blind.
+##
+## The net is the via's own stored "net_name" — the same field minerva_pcb_place_via
+## writes and validates against the declared net table. A netless via is returned
+## with net "" rather than dropped, because _start_trace owes the user a NAMED
+## refusal for it, exactly as it does for a netless pad; silently falling through
+## to "that was a waypoint" is the outcome this must not produce.
+##
+## {} on a miss AND when no model is bound.
+func _trace_via_at(world_pos: Vector2) -> Dictionary:
+	if data == null:
+		return {}
+	var via_id := _via_at(world_pos)
+	if via_id.is_empty():
+		return {}
+	var via: Dictionary = data.get_via(via_id)
+	if via.is_empty():
+		return {}
+	return {
+		"ref": via_id,
+		"kind": ANCHOR_VIA,
+		"position": PCBDataScript.via_position(via),
+		"net": str(via.get("net_name", "")),
+	}
+
+
+## What a trace-tool click may anchor to: a PAD, else a VIA, else {} — and {} is
+## precisely what makes the click a waypoint instead.
+##
+## PAD FIRST, deliberately. The two hit tests can both claim one click only where
+## a via sits inside a pad (via-in-pad), and there the PAD keeps winning: every
+## click that resolved to a pad before the via rung existed still resolves to the
+## same pad, so the new rung can only ever answer clicks that used to be a MISS.
+## That is the opposite of _entity_at's ladder, where VIA outranks COMPONENT, and
+## the difference is the point — that ladder picks whatever is drawn on top of a
+## fresh selection gesture, while this one is grafted onto an established one and
+## must not move ground under it.
+##
+## Same pad-then-other-thing shape _bus_net_at already uses for its own pick.
+func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
+	var pad_hit := _trace_pad_at(world_pos)
+	if not pad_hit.is_empty():
+		return pad_hit
+	return _trace_via_at(world_pos)
+
+
+## How an anchor is NAMED to the user: "Pad U1.1", "Via via_3". Now that two
+## kinds of thing can be clicked, a refusal that says only "U1.1 is on no net"
+## leaves the user guessing what was under the cursor. Anything without a kind is
+## a PAD — the pre-anchor shape, which several callers (and test_pcb_ratsnest's
+## direct _start_trace call) still hand in.
+static func _trace_anchor_label(hit: Dictionary) -> String:
+	return "%s %s" % [str(hit.get("kind", ANCHOR_PAD)).capitalize(), str(hit.get("ref", ""))]
 
 
 ## The width a new trace is drawn and committed at, in mm.
@@ -7725,14 +7812,14 @@ func _handle_trace_click(world_pos: Vector2, is_double_click: bool) -> void:
 		_commit_trace()
 		return
 
-	var hit := _trace_pad_at(world_pos)
+	var hit := _trace_anchor_at(world_pos)
 
 	if _trace_points.is_empty():
 		_start_trace(hit)
 		return
 
 	if not hit.is_empty():
-		_finish_trace_on_pad(hit)
+		_finish_trace_on_anchor(hit)
 		return
 
 	_trace_append_point(_author_point(world_pos))
@@ -7758,53 +7845,71 @@ func _trace_append_point(point: Vector2) -> bool:
 	return true
 
 
-## First click: adopt the pad's net + the current layer and place the start
-## point at the pad's centre. Both refusals are transient messages, not silent
+## First click: adopt the anchor's net + the current layer and place the start
+## point at the anchor's centre. Both refusals are transient messages, not silent
 ## no-ops — a tool that does nothing when clicked is indistinguishable from a
-## broken one.
+## broken one, and that is doubly true of the netless-VIA case, where the thing
+## under the cursor plainly IS copper.
 func _start_trace(hit: Dictionary) -> void:
 	if hit.is_empty():
-		trace_tool_message.emit("Start a trace on a pad — that is where its net comes from.")
+		trace_tool_message.emit("Start a trace on a pad or a via — that is where its net comes from.")
 		return
-	var pad_net := str(hit.get("net", ""))
-	if pad_net.is_empty():
-		trace_tool_message.emit("Pad %s is on no net — a trace inherits its net from the pad it starts on."
-			% str(hit.get("ref", "")))
+	var anchor_net := str(hit.get("net", ""))
+	if anchor_net.is_empty():
+		trace_tool_message.emit("%s is on no net — a trace inherits its net from the pad or via it starts on."
+			% _trace_anchor_label(hit))
 		return
 	var layer := trace_author_layer()
 	if layer.is_empty():
 		trace_tool_message.emit("This board declares no copper layer to draw a trace on.")
 		return
 
-	_trace_net = pad_net
+	_trace_net = anchor_net
 	_trace_layer = layer
 	_trace_start_ref = str(hit.get("ref", ""))
 	_trace_points = PackedVector2Array([hit.get("position", Vector2.ZERO)])
 	_trace_has_preview = false
 	# The one place the destination is chosen. extract() is O(board) and runs
-	# once per gesture here, not per frame.
-	_trace_focus = PcbRatsnest.focus(PcbRatsnest.extract(data), _trace_start_ref)
-	trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad to finish." % [
+	# once per gesture here, not per frame — and only for a PAD start, because
+	# focus() answers by matching a PAD ref (see PcbRatsnest.focus): handed a via
+	# id it would walk every bundle on the board to return {} anyway. A via start
+	# therefore locks no destination; the ratsnest draws exactly as it does when
+	# no gesture is in progress.
+	_trace_focus = {}
+	if str(hit.get("kind", ANCHOR_PAD)) == ANCHOR_PAD:
+		_trace_focus = PcbRatsnest.focus(PcbRatsnest.extract(data), _trace_start_ref)
+	trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad or via to finish." % [
 		_trace_start_ref, _trace_net, _trace_layer])
 	queue_redraw()
 
 
-## Finish on a pad: the trace ends at that pad's centre.
+## Finish on an anchor: the trace ends at that pad's — or that via's — centre.
+##
+## THE ENDPOINT IS THE ANCHOR'S CENTRE, not the click point, which is what makes
+## a click and minerva_pcb_add_trace able to author the SAME copper: an agent
+## passing the via's coordinates as its last point lands the identical geometry,
+## through the identical data.create_trace_entity call.
 ##
 ## NO SAME-NET ENFORCEMENT (owner ruling this round): DRC is the correctness net,
 ## not the drawing tool. A trace landing on a different net's pad is a short, and
 ## a short the user drew deliberately is still theirs to draw — but it is named
-## out loud, both nets, rather than committed quietly.
-func _finish_trace_on_pad(hit: Dictionary) -> void:
+## out loud, both nets, rather than committed quietly. A via finish is held to the
+## same rule: ending a VCC run on a GND via is a short, named and committed.
+##
+## A NETLESS via/pad is permitted HERE while it is refused at the start, and the
+## asymmetry is not an oversight: the start is where the net is INHERITED, so a
+## netless anchor there leaves the trace with no answer at all, while at the end
+## the trace already has its net and the anchor merely says where it stops.
+func _finish_trace_on_anchor(hit: Dictionary) -> void:
 	_trace_append_point(hit.get("position", Vector2.ZERO))
 	_trace_has_preview = false
 	var end_net := str(hit.get("net", ""))
 	var warning := ""
 	if not end_net.is_empty() and end_net != _trace_net:
 		warning = "ends on %s, which is on net %s, not %s — that is a short; DRC will flag it." % [
-			str(hit.get("ref", "")), end_net, _trace_net]
+			_trace_anchor_label(hit), end_net, _trace_net]
 	elif end_net.is_empty():
-		warning = "ends on %s, which is on no net." % str(hit.get("ref", ""))
+		warning = "ends on %s, which is on no net." % _trace_anchor_label(hit)
 	_commit_trace(warning)
 
 

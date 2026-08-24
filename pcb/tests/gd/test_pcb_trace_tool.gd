@@ -17,6 +17,10 @@ extends SceneTree
 ##   4. Esc / right-click cancel, and a refusal that KEEPS the placed points
 ##   5. cross-net finish permissiveness (owner ruling: DRC is the correctness
 ##      net, not the drawing tool — but the short is named out loud)
+##   6. VIA ANCHORING: a via starts a trace and ends one, on
+##      the via's CENTRE and the via's net; a netless via is refused by name; and
+##      the copper a click authors is byte-identical to what minerva_pcb_add_trace
+##      authors from the same via's coordinates.
 ##
 ## INDEPENDENT REPRESENTATION, throughout: the SERIALIZED trace entities out of
 ## to_board_dict() and the model's change_journal / history — never the tool's own
@@ -25,6 +29,9 @@ extends SceneTree
 
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
+## The MCP verb surface. Section 6 asserts the AGENT path and the CLICK path
+## land the same copper, so it has to call the real verb, not a stand-in.
+const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 
 var _pass := 0
 var _fail := 0
@@ -35,6 +42,12 @@ var _fail := 0
 ## this suite free of the annotation substrate entirely.
 class StubPadHost extends RefCounted:
 	var pads: Array = []   # [{component, pin, position}]
+	## PanelTools._resolve_data reaches the model through exactly one duck-typed
+	## call (panel_tools.gd _get_data -> host.get_board_data()), so the MCP verbs
+	## run against this stub without mounting a PCBPanel. Set by _rig.
+	var board: Variant = null
+	func get_board_data() -> Variant:
+		return board
 	func pad_at(world_pos: Vector2, radius: float, _filter: Variant = null) -> Dictionary:
 		var best: Dictionary = {}
 		var best_d := INF
@@ -54,6 +67,8 @@ func _init() -> void:
 	_test_commit_journal_shape()
 	_test_cancel_paths()
 	_test_cross_net_finish_is_permissive_but_loud()
+	_test_via_anchoring()
+	_test_via_click_and_mcp_author_the_same_copper()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -111,6 +126,7 @@ func _rig(rule_width: float = 0.0) -> Array:
 		{"component": "R1", "pin": "1", "position": Vector2(30.0, 10.0)},
 		{"component": "C1", "pin": "1", "position": Vector2(30.0, 25.0)},
 	]
+	host.board = data
 	canvas.set_pin_inspector_host(host)
 	canvas.set_tool_mode(canvas.ToolMode.TRACE)
 	return [canvas, data, host]
@@ -359,3 +375,240 @@ func _test_cross_net_finish_is_permissive_but_loud() -> void:
 			last.contains("DRC"), "message=%s" % last)
 
 	canvas.free()
+
+
+## ── 6. VIA ANCHORING ─────────────────────────────────────────────────────────
+##
+## THE FIXTURE, added on top of _rig so sections 1-5 keep the board they were
+## written against. Vias go in through data.add_via — the same call
+## minerva_pcb_place_via makes — rather than through the board dict, because
+## _vias_from_board_list mints no id and get_via_at skips id-less vias: a
+## board-dict fixture would be unclickable for a reason that has nothing to do
+## with the tool.
+##
+## Returns [canvas, data, host, netted_via_id, netless_via_id].
+func _rig_with_vias() -> Array:
+	var rig := _rig()
+	var data = rig[1]
+	var netted: String = str(data.add_via({
+		"position": _VIA_CENTRE, "net_name": "VCC", "size": 0.8, "drill": 0.4,
+		"from_layer": "top", "to_layer": "bottom",
+	}))
+	var netless: String = str(data.add_via({
+		"position": _NETLESS_VIA_CENTRE, "net_name": "", "size": 0.8, "drill": 0.4,
+		"from_layer": "top", "to_layer": "bottom",
+	}))
+	return [rig[0], data, rig[2], netted, netless]
+
+
+## Both vias sit well clear of all three pads (nearest is 11 mm away, against a
+## 1.27 mm pad snap) so no assertion below can be satisfied by a pad hit, and
+## clear of every world point sections 1-5 click.
+const _VIA_CENTRE := Vector2(20.0, 20.0)
+const _NETLESS_VIA_CENTRE := Vector2(40.0, 20.0)
+## A click 0.5 mm off the via's centre. Inside the pick target (the canvas floors
+## it at VIA_HIT_RADIUS_PX/zoom = 6/8 = 0.75 mm at this rig's zoom) and clearly
+## OUTSIDE float noise, which is what lets the endpoint assertion below tell
+## "snapped to the via's centre" apart from "kept the point I clicked".
+const _OFF_CENTRE_CLICK := Vector2(20.5, 20.0)
+## A plain waypoint: 8.9 mm from the netted via, 6.3 mm from the nearest pad.
+const _WAYPOINT := Vector2(24.0, 12.0)
+
+
+func _points_of(t: Dictionary) -> Array:
+	var out: Array = []
+	for p in (t.get("points", []) as Array):
+		out.append(Vector2(float((p as Dictionary).get("x_mm", 0.0)),
+				float((p as Dictionary).get("y_mm", 0.0))))
+	return out
+
+
+## ORACLE, for every leg: the SERIALIZED trace read back off the board model
+## after the gesture, with its endpoint compared against the via's centre as the
+## MODEL reports it (data.via_position on the stored via) and its net against the
+## via's stored net_name. Neither value is read from the tool's own buffers, and
+## neither is a literal copied from the fixture — an implementation that fixed
+## only the preview, or only the status line, commits nothing and fails leg (a)
+## on the first assertion.
+func _test_via_anchoring() -> void:
+	print("\n-- via anchoring (1): a via starts a trace, and ends one --")
+
+	# (a) FINISH ON A VIA — the leg the feature exists for. Start on a pad so the
+	#     start half is the already-shipped behaviour and only the finish is new.
+	var a := _rig_with_vias()
+	var canvas_a = a[0]
+	var data_a = a[1]
+	var via_a: Dictionary = data_a.get_via(str(a[3]))
+	var msgs_a: Array = []
+	canvas_a.trace_tool_message.connect(func(t: String) -> void: msgs_a.append(t))
+
+	canvas_a._handle_trace_click(Vector2(10.0, 10.0), false)   # start U1.1 (VCC)
+	canvas_a._handle_trace_click(_WAYPOINT, false)             # a plain waypoint
+	canvas_a._handle_trace_click(_OFF_CENTRE_CLICK, false)     # finish ON THE VIA
+
+	var traces_a := _serialized_traces(data_a)
+	check("VIA (a): clicking a via while drawing COMMITTED a trace",
+			traces_a.size() == 1, "traces=%d" % traces_a.size())
+	var ta: Dictionary = traces_a[0] if traces_a.size() == 1 else {}
+	var pts_a: Array = _points_of(ta)
+	check("VIA (a): …ending on the via's CENTRE as the model reports it",
+			not pts_a.is_empty()
+			and (pts_a[pts_a.size() - 1] as Vector2).is_equal_approx(
+					data_a.via_position(via_a)),
+			"endpoint=%s via centre=%s" % [str(pts_a), str(data_a.via_position(via_a))])
+	# The leg that makes the one above non-vacuous: the click was 0.5 mm off the
+	# centre, so "kept the click point" and "snapped to the centre" differ.
+	check("VIA (a): …NOT at the point that was clicked (the snap is real)",
+			not pts_a.is_empty()
+			and not (pts_a[pts_a.size() - 1] as Vector2).is_equal_approx(_OFF_CENTRE_CLICK),
+			"endpoint=%s click=%s" % [str(pts_a), str(_OFF_CENTRE_CLICK)])
+	check("VIA (a): the middle click stayed a plain WAYPOINT, at the point clicked",
+			pts_a.size() == 3 and (pts_a[1] as Vector2).is_equal_approx(_WAYPOINT),
+			"points=%s" % str(pts_a))
+	check("VIA (a): the gesture ENDED — nothing is still being drawn",
+			canvas_a._trace_points.is_empty(),
+			"%d points still held" % canvas_a._trace_points.size())
+	check("VIA (a): no short was announced — the via is on the trace's own net",
+			not msgs_a.is_empty() and not msgs_a[msgs_a.size() - 1].contains("short"),
+			str(msgs_a))
+	canvas_a.free()
+
+	# (b) START ON A VIA — the trace inherits the VIA's net, read back off the
+	#     stored via rather than off the fixture literal.
+	var b := _rig_with_vias()
+	var canvas_b = b[0]
+	var data_b = b[1]
+	var via_b: Dictionary = data_b.get_via(str(b[3]))
+	var msgs_b: Array = []
+	canvas_b.trace_tool_message.connect(func(t: String) -> void: msgs_b.append(t))
+
+	canvas_b._handle_trace_click(_OFF_CENTRE_CLICK, false)     # start ON THE VIA
+	check("VIA (b): a click on a via ARMED the tool", not canvas_b._trace_points.is_empty())
+	check("VIA (b): …and the teach line names the via", not msgs_b.is_empty()
+			and msgs_b[0].contains(str(b[3])), str(msgs_b))
+	canvas_b._handle_trace_click(_WAYPOINT, false)
+	canvas_b._handle_trace_click(Vector2(30.0, 10.0), false)   # finish R1.1 (VCC)
+
+	var traces_b := _serialized_traces(data_b)
+	check("VIA (b): starting on a via committed a trace", traces_b.size() == 1,
+			"traces=%d" % traces_b.size())
+	var tb: Dictionary = traces_b[0] if traces_b.size() == 1 else {}
+	check("VIA (b): …carrying the VIA's OWN net, as the model stores it",
+			str(tb.get("net", "")) == str(via_b.get("net_name", "")),
+			"trace net=%s via says=%s" % [str(tb.get("net", "")),
+					str(via_b.get("net_name", ""))])
+	var pts_b: Array = _points_of(tb)
+	check("VIA (b): …and it BEGINS at the via's centre, not the click point",
+			not pts_b.is_empty()
+			and (pts_b[0] as Vector2).is_equal_approx(data_b.via_position(via_b))
+			and not (pts_b[0] as Vector2).is_equal_approx(_OFF_CENTRE_CLICK),
+			"points=%s" % str(pts_b))
+	canvas_b.free()
+
+	# (c) THE NEGATIVE: a NETLESS via is REFUSED BY NAME, never silently authored
+	#     and never silently demoted to "you clicked nothing". Same shape as the
+	#     netless-PAD refusal section 1b pins.
+	print("\n-- via anchoring (2): a netless via is refused, by name --")
+	var c := _rig_with_vias()
+	var canvas_c = c[0]
+	var data_c = c[1]
+	var msgs_c: Array = []
+	canvas_c.trace_tool_message.connect(func(t: String) -> void: msgs_c.append(t))
+
+	canvas_c._handle_trace_click(_NETLESS_VIA_CENTRE, false)
+	check("VIA (c): a netless via does not start a trace",
+			canvas_c._trace_points.is_empty(),
+			"%d points placed" % canvas_c._trace_points.size())
+	check("VIA (c): …and nothing was serialized", _serialized_traces(data_c).is_empty())
+	var last_c: String = msgs_c[msgs_c.size() - 1] if not msgs_c.is_empty() else ""
+	check("VIA (c): …and the refusal NAMES the via and says it is on no net",
+			last_c.contains(str(c[4])) and last_c.contains("no net"),
+			"message=%s" % last_c)
+	# Distinguishes "refused because netless" from "the click missed everything":
+	# the miss refusal is a different sentence, pinned in section 1b.
+	check("VIA (c): …and it is not the generic \"you missed\" refusal",
+			not last_c.contains("that is where its net comes from"),
+			"message=%s" % last_c)
+
+	# (c2) …but a netless via is a legal PLACE TO STOP: by then the trace already
+	#      has its net. Permissive-but-loud, the same rule the cross-net finish
+	#      follows (section 5).
+	msgs_c.clear()
+	canvas_c._handle_trace_click(Vector2(10.0, 10.0), false)   # start U1.1 (VCC)
+	canvas_c._handle_trace_click(_WAYPOINT, false)
+	canvas_c._handle_trace_click(_NETLESS_VIA_CENTRE, false)   # finish on it
+	var traces_c := _serialized_traces(data_c)
+	check("VIA (c2): finishing ON a netless via IS allowed", traces_c.size() == 1,
+			"traces=%d" % traces_c.size())
+	check("VIA (c2): …the trace keeps the net it started with",
+			traces_c.size() == 1 and str(traces_c[0].get("net", "")) == "VCC",
+			"net=%s" % (str(traces_c[0].get("net", "")) if traces_c.size() == 1 else "-"))
+	check("VIA (c2): …and the netless end is named out loud",
+			not msgs_c.is_empty()
+			and msgs_c[msgs_c.size() - 1].contains(str(c[4]))
+			and msgs_c[msgs_c.size() - 1].contains("no net"),
+			str(msgs_c))
+	canvas_c.free()
+
+
+## ── 6b. THE CLICK AND THE VERB AUTHOR THE SAME COPPER ────────────────────────
+##
+## The constraint this feature was given: "a human clicking a via and an agent
+## calling the trace-authoring verb with that via's coordinates should produce
+## the same trace."
+##
+## ORACLE: the two SERIALIZED trace dicts, compared field-for-field with only the
+## minted id removed (ids are minted per board and are never equal by
+## construction). Two boards built from the identical fixture, one driven by
+## _handle_trace_click and one by PanelTools._add_trace — nothing in this test
+## reads either implementation's internals, so a click path that snapped to the
+## wrong point, inherited the wrong net, or resolved a different width fails on
+## the diff rather than on a hand-written expectation that could drift with it.
+func _test_via_click_and_mcp_author_the_same_copper() -> void:
+	print("\n-- via anchoring (3): the click and minerva_pcb_add_trace agree --")
+
+	# THE HUMAN. Pad U1.1 → a waypoint → the via, clicked off-centre.
+	var human := _rig_with_vias()
+	var canvas = human[0]
+	var data_h = human[1]
+	var via: Dictionary = data_h.get_via(str(human[3]))
+	var centre: Vector2 = data_h.via_position(via)
+	canvas._handle_trace_click(Vector2(10.0, 10.0), false)
+	canvas._handle_trace_click(_WAYPOINT, false)
+	canvas._handle_trace_click(_OFF_CENTRE_CLICK, false)
+	var layer: String = canvas.trace_author_layer()
+	var clicked := _serialized_traces(data_h)
+	check("PARITY fixture: the click authored exactly one trace", clicked.size() == 1,
+			"traces=%d" % clicked.size())
+
+	# THE AGENT. The same three points, the last one being the via's coordinates —
+	# which is all an agent has to go on — through the real verb.
+	var agent := _rig_with_vias()
+	var data_a = agent[1]
+	var host_a = agent[2]
+	var res: Dictionary = PanelTools._add_trace(host_a, {
+		"net_name": str(via.get("net_name", "")),
+		"layer": layer,
+		"points": [[10.0, 10.0], [_WAYPOINT.x, _WAYPOINT.y], [centre.x, centre.y]],
+	})
+	check("PARITY: the verb accepted it", bool(res.get("success", false)),
+			str(res))
+	var authored := _serialized_traces(data_a)
+	check("PARITY: …and authored exactly one trace", authored.size() == 1,
+			"traces=%d" % authored.size())
+
+	if clicked.size() == 1 and authored.size() == 1:
+		var lhs: Dictionary = (clicked[0] as Dictionary).duplicate(true)
+		var rhs: Dictionary = (authored[0] as Dictionary).duplicate(true)
+		check("PARITY fixture: the two minted ids DIFFER (so erasing them is not "
+				+ "erasing the difference)",
+				str(lhs.get("id", "")) != str(rhs.get("id", "")),
+				"%s vs %s" % [str(lhs.get("id", "")), str(rhs.get("id", ""))])
+		lhs.erase("id")
+		rhs.erase("id")
+		check("PARITY: the click's copper and the verb's copper are IDENTICAL "
+				+ "(net, layer, width, every point)",
+				lhs == rhs, "click=%s verb=%s" % [str(lhs), str(rhs)])
+
+	canvas.free()
+	agent[0].free()

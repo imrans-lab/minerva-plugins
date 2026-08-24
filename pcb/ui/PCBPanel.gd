@@ -1525,7 +1525,7 @@ func _build_sidebar() -> VBoxContainer:
 	# hint's hollow ones) and tooltip carry the distinction outright: this one
 	# IS the copper, that one is a request for copper.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.TRACE, "Trace",
-		"Draw copper directly (click a pad to start)", "trace_draw_24.png")
+		"Draw copper directly (click a pad or via to start)", "trace_draw_24.png")
 
 	# Cutout drawing tool (campaign 2 epoch B, unit 3). Same section and same
 	# reason as Pour/Keepout/Trace above: it authors a board ENTITY (a Cutout,
@@ -6289,7 +6289,7 @@ const _MODE_HINTS := {
 	5: "Click a pin to see its info",                                    # INSPECT_PIN
 	6: "Pick a net below, click each corner, Enter/dbl-click to close",  # ZONE_POUR
 	7: "Click each corner, Enter/dbl-click to close (no net needed)",    # ZONE_KEEPOUT
-	8: "Click a pad to start, click waypoints, click a pad to finish",   # TRACE
+	8: "Click a pad or via to start, click waypoints, click a pad or via to finish",   # TRACE
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
 	11: "Click pads/traces to pick nets (2+), Enter to draw the spine, then click vertices and Enter/dbl-click to commit",  # BUS
