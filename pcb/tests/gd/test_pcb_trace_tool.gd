@@ -23,6 +23,8 @@ extends SceneTree
 ##      authors from the same via's coordinates.
 ##   7. the DOUBLE-CLICK's second press: it commits only when there is still a
 ##      trace to commit, so a finish-on-anchor keeps its own confirmation
+##   8. the NETLESS refusal names every anchor kind, on the model surface an
+##      agent reads and the canvas surface a click reads alike
 ##
 ## INDEPENDENT REPRESENTATION, throughout: the SERIALIZED trace entities out of
 ## to_board_dict() and the model's change_journal / history — never the tool's own
@@ -72,6 +74,7 @@ func _init() -> void:
 	_test_via_anchoring()
 	_test_via_click_and_mcp_author_the_same_copper()
 	_test_double_click_second_press()
+	_test_netless_refusal_names_every_anchor_kind()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -740,3 +743,72 @@ func _test_double_click_second_press() -> void:
 			"%d points left, last=%s" % [canvas_e._trace_points.size(),
 					msgs_e[msgs_e.size() - 1] if not msgs_e.is_empty() else "<none>"])
 	canvas_e.free()
+
+
+## ── 8. THE NETLESS REFUSAL NAMES EVERY ANCHOR KIND ───────────────────────────
+##
+## Three sentences state where a trace's net comes from: the model's refusal —
+## which minerva_pcb_add_trace hands an agent back verbatim as `note` — and the
+## canvas's two start refusals. The canvas answers a click with
+## _trace_anchor_at, whose kinds are ANCHOR_PAD and ANCHOR_VIA.
+##
+## ORACLE: those two constants, never either sentence. A kind that stops
+## anchoring, or a third one that starts, fails this without anyone having to
+## remember which strings mention it. The canvas leg reads the netless-PAD
+## gesture on purpose: its anchor LABEL is "Pad U1.9", so "via" can only be
+## satisfied by the sentence body. The verb leg compares its note byte-for-byte
+## against the model's own output, so the agent-facing and click-facing surfaces
+## cannot drift apart unnoticed.
+func _test_netless_refusal_names_every_anchor_kind() -> void:
+	print("\n-- the netless refusal names every anchor kind --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var host = rig[2]
+
+	# THE RULE ITSELF is untouched: netless refuses, a declared net authors.
+	var netless: String = data.trace_author_error("", "top", 2)
+	check("RULE: a trace naming no net is refused", not netless.is_empty())
+	check("RULE: …and one naming a declared net is authorable",
+			data.trace_author_error("VCC", "top", 2).is_empty(),
+			data.trace_author_error("VCC", "top", 2))
+
+	# The canvas's own two refusals, taken from real gestures rather than quoted.
+	var msgs: Array = []
+	canvas.trace_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	canvas._handle_trace_click(Vector2(50.0, 35.0), false)   # empty space
+	host.pads.append({"component": "U1", "pin": "9", "position": Vector2(14.0, 14.0)})
+	canvas._handle_trace_click(Vector2(14.0, 14.0), false)   # a NETLESS pad
+	var off_anchor: String = str(msgs[0]).to_lower() if msgs.size() > 0 else ""
+	var netless_anchor: String = str(msgs[1]).to_lower() if msgs.size() > 1 else ""
+
+	# Both canvas refusals name both kinds, so the netless leg has to prove it
+	# really hit the pad: only that refusal labels the anchor it found. Without
+	# this, a missed hit would fall through to the off-anchor sentence and
+	# satisfy the loop below on the wrong message.
+	check("the netless gesture landed ON the pad, not past it",
+			netless_anchor.contains("u1.9"), netless_anchor)
+
+	for kind in [canvas.ANCHOR_PAD, canvas.ANCHOR_VIA]:
+		check("the model's refusal names the %s anchor" % str(kind),
+				netless.to_lower().contains(str(kind)), netless)
+		check("the canvas's netless-anchor refusal names the %s anchor" % str(kind),
+				netless_anchor.contains(str(kind)), netless_anchor)
+		check("the canvas's off-anchor refusal names the %s anchor" % str(kind),
+				off_anchor.contains(str(kind)), off_anchor)
+
+	# THE CALLER THAT STILL REACHES IT. A click cannot: _start_trace refuses a
+	# netless anchor before the buffer arms, so _commit_trace never sees an empty
+	# net. minerva_pcb_add_trace's net_name is caller-supplied text and does.
+	var res: Dictionary = PanelTools._add_trace(host, {
+		"net_name": "", "layer": "top", "points": [[10.0, 10.0], [20.0, 10.0]]})
+	check("the verb refuses a netless trace", not bool(res.get("success", true)), str(res))
+	check("…named trace_not_authorable",
+			str(res.get("error", "")) == "trace_not_authorable", str(res))
+	check("…carrying the model's own refusal, byte-for-byte",
+			str(res.get("note", "")) == netless,
+			"note=%s / model says %s" % [str(res.get("note", "")), netless])
+	check("…and nothing was written", _serialized_traces(data).is_empty(),
+			str(_serialized_traces(data)))
+
+	canvas.free()

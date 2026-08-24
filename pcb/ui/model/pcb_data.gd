@@ -2347,7 +2347,7 @@ func trace_author_error(net_name: String, layer: String, point_count: int) -> St
 	if point_count < 2:
 		return "A trace needs at least 2 points (%d placed)." % point_count
 	if net_name.is_empty():
-		return "A trace must name a net — start it on a pad that has one."
+		return "A trace must name a net — the one carried by the pad or via it starts on."
 	if not has_net(net_name):
 		return "Net \"%s\" is not declared on this board." % net_name
 	if layer.is_empty():

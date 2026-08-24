@@ -84,7 +84,10 @@ test_pcb_plugin_smoke.gd assertions=43
 test_pcb_route_hint_mcp_parity.gd assertions=19
 # Section 7 (the double-click's second press) added 10 unconditional check()
 # calls: 54 -> 64.
-test_pcb_trace_tool.gd assertions=64
+# Section 8 (the netless refusal's anchor vocabulary) adds 13: 2 rule checks,
+# 1 landed-on-the-pad guard, 3 static sites in a 2-kind loop, 4 on the MCP
+# verb — 64 -> 77.
+test_pcb_trace_tool.gd assertions=77
 # Re-pinned 28 → 34 with OFC-5's menu-revealed drawing-width section (BT-OFC5,
 # 6 checks; the section-registry count check updates in place).
 test_pcb_width_prefs.gd assertions=34
