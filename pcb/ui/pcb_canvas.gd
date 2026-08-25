@@ -8505,10 +8505,29 @@ func _bus_target_at(world_pos: Vector2) -> Dictionary:
 		if comp == null:
 			continue
 		var d: float = comp.pin_copper_distance(str(cand.get("pin", "")), world_pos)
-		if d <= TRACE_PAD_SNAP_MM and d < best_d:
+		if d > TRACE_PAD_SNAP_MM:
+			continue
+		if best.is_empty() or (d < best_d and not is_equal_approx(d, best_d)):
 			best_d = d
 			best = cand
+		elif is_equal_approx(d, best_d) and _bus_target_precedes(cand, best):
+			best = cand
 	return best
+
+
+## host.pad_at's TIE-BREAK, so the two pickers cannot name different pads for
+## one click. It groups equal distances with is_equal_approx and then takes the
+## lower (component, pin); ranking here by strict `<` instead would keep
+## whichever candidate came first, and this list is enumerated in PICK order —
+## so a click exactly between two pads resolved one way for the bus and the
+## other way for every other tool, including the message that names the pad the
+## user "actually hit".
+func _bus_target_precedes(a: Dictionary, b: Dictionary) -> bool:
+	var a_comp := str(a.get("component", ""))
+	var b_comp := str(b.get("component", ""))
+	if a_comp != b_comp:
+		return a_comp < b_comp
+	return str(a.get("pin", "")) < str(b.get("pin", ""))
 
 
 ## Why a click on copper does nothing while SOURCES is picking nets.

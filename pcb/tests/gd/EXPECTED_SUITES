@@ -34,11 +34,12 @@ test_bus_breakout_geometry.gd assertions=61
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.
-# 96 -> 116: pads are picked by distance to their copper (section 4b), and
-# where each net may end is shown from the first pick (section 9). MEASURED on
-# a run, not counted: section 9's checks sit inside a two-iteration loop, which
-# is how a source count of this suite goes wrong.
-test_bus_tool.gd assertions=116
+# 96 -> 121: pads are picked by distance to their copper (section 4b), where
+# each net may end is shown from the first pick (section 9), and the bus picker
+# and the shared hit test are held to one answer on a tie. MEASURED on a run,
+# not counted: section 9's checks sit inside a two-iteration loop, which is how
+# a source count of this suite goes wrong.
+test_bus_tool.gd assertions=121
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2

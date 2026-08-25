@@ -68,10 +68,26 @@ class StubPadHost extends RefCounted:
 			var d: float = PCBComponentScript.pin_copper_distance_from(
 				Vector2.ZERO, Transform2D.IDENTITY, p["position"],
 				p.get("lands", []), world_pos)
-			if d <= radius and d < best_d:
+			if d > radius:
+				continue
+			# host.pad_at's TIE-BREAK as well as its distance: equal distances
+			# group under is_equal_approx and the lower (component, pin) wins.
+			# Ranking by strict `<` would keep whichever pad came first in this
+			# array, so the double would answer a click exactly between two
+			# pads differently from the surface it stands in for.
+			if best.is_empty() or (d < best_d and not is_equal_approx(d, best_d)):
 				best_d = d
 				best = p
+			elif is_equal_approx(d, best_d) and _pad_precedes(p, best):
+				best = p
 		return best
+
+	static func _pad_precedes(a: Dictionary, b: Dictionary) -> bool:
+		var a_comp := str(a.get("component", ""))
+		var b_comp := str(b.get("component", ""))
+		if a_comp != b_comp:
+			return a_comp < b_comp
+		return str(a.get("pin", "")) < str(b.get("pin", ""))
 
 
 func _init() -> void:

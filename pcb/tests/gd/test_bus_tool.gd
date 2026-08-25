@@ -77,10 +77,26 @@ class StubPadHost extends RefCounted:
 			var d: float = PCBComponentScript.pin_copper_distance_from(
 				Vector2.ZERO, Transform2D.IDENTITY, p["position"],
 				p.get("lands", []), world_pos)
-			if d <= radius and d < best_d:
+			if d > radius:
+				continue
+			# host.pad_at's TIE-BREAK as well as its distance: equal distances
+			# group under is_equal_approx and the lower (component, pin) wins.
+			# Ranking by strict `<` would keep whichever pad came first in this
+			# array, so the double would answer a click exactly between two
+			# pads differently from the surface it stands in for.
+			if best.is_empty() or (d < best_d and not is_equal_approx(d, best_d)):
 				best_d = d
 				best = p
+			elif is_equal_approx(d, best_d) and _pad_precedes(p, best):
+				best = p
 		return best
+
+	static func _pad_precedes(a: Dictionary, b: Dictionary) -> bool:
+		var a_comp := str(a.get("component", ""))
+		var b_comp := str(b.get("component", ""))
+		if a_comp != b_comp:
+			return a_comp < b_comp
+		return str(a.get("pin", "")) < str(b.get("pin", ""))
 
 
 ## Minimal host for panel_tools.handle() — the ONLY duck-typed method the
@@ -100,6 +116,7 @@ func _init() -> void:
 	_test_a_trace_is_not_a_bus_anchor()
 	_test_target_pick_matches_the_pad_hit_test()
 	_test_a_click_on_the_pads_copper_is_that_pad()
+	_test_the_two_pickers_agree_on_a_tie()
 	_test_double_click_grammar()
 	_test_manhattan_from_sloppy_clicks()
 	_test_crossing_refusal_names_both_nets()
@@ -1168,3 +1185,89 @@ func _test_where_each_net_may_end() -> void:
 	check("un-picking the net removes its row", canvas2.bus_target_guidance().is_empty(),
 			str(canvas2.bus_target_guidance()))
 	canvas2.free()
+
+
+## TIE FIXTURE. Distances chosen to be exact in binary floating point (1.0mm
+## each side), so the tie is a genuine tie and not a rounding accident that
+## drifts one pad out of the snap radius.
+const TIE_SRC_1 := Vector2(10.0, 10.0)
+const TIE_SRC_2 := Vector2(10.0, 12.0)
+## Enumerated FIRST, because its net is picked first.
+const TIE_FIRST_SEEN := Vector2(20.0, 20.0)
+## Lexicographically first by component ref, so the tie-break must choose it
+## over the pad above.
+const TIE_LOWEST_REF := Vector2(22.0, 20.0)
+const TIE_MID := Vector2(21.0, 20.0)
+
+
+func _tie_board() -> Dictionary:
+	return {
+		"version": 1, "name": "TieBoard", "width_mm": 60.0, "height_mm": 40.0,
+		"grid_mm": 2.54,
+		"layers": ["top", "bottom"],
+		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
+		"components": [
+			_part("U8", TIE_SRC_1.x, TIE_SRC_1.y),
+			_part("Z8", TIE_FIRST_SEEN.x, TIE_FIRST_SEEN.y),
+			_part("U9", TIE_SRC_2.x, TIE_SRC_2.y),
+			_part("A8", TIE_LOWEST_REF.x, TIE_LOWEST_REF.y),
+		],
+		"nets": [
+			{"name": "NT1", "pins": ["U8.1", "Z8.1"]},
+			{"name": "NT2", "pins": ["U9.1", "A8.1"]},
+		],
+	}
+
+
+## ONE CLICK, TWO PICKERS, ONE PAD.
+##
+## _bus_target_at and the shared pad hit test are separate walks over separate
+## sources, so a click EQUIDISTANT from two pads is the input where their
+## ranking can disagree while both are still honestly "nearest". The bus list is
+## walked in PICK order, which this fixture arranges to meet Z8.1 first, while
+## the tie-break both pickers are supposed to share must answer A8.1.
+##
+## The comparison against the hit test only has falsifying power because
+## StubPadHost carries the production TIE-BREAK and not just the production
+## DISTANCE: a double that also kept its first find would agree with a broken
+## bus picker and prove nothing. The third check does not lean on either picker.
+func _test_the_two_pickers_agree_on_a_tie() -> void:
+	var canvas = PcbCanvasScript.new()
+	var data = PCBData.new()
+	data.from_board_dict(_tie_board())
+	canvas.data = data
+	canvas.zoom = 8.0
+	canvas.snap_to_grid = false
+	var host := StubPadHost.new()
+	host.pads = [
+		{"component": "U8", "pin": "1", "position": TIE_SRC_1},
+		{"component": "Z8", "pin": "1", "position": TIE_FIRST_SEEN},
+		{"component": "U9", "pin": "1", "position": TIE_SRC_2},
+		{"component": "A8", "pin": "1", "position": TIE_LOWEST_REF},
+	]
+	canvas.set_pin_inspector_host(host)
+	canvas.set_tool_mode(canvas.ToolMode.BUS)
+
+	canvas._handle_bus_click(TIE_SRC_1, false)
+	canvas._handle_bus_click(TIE_SRC_2, false)
+
+	# The fixture's own coordinates, not either picker, say this is a tie.
+	check("the fixture really is a tie",
+			is_equal_approx(TIE_FIRST_SEEN.distance_to(TIE_MID),
+				TIE_LOWEST_REF.distance_to(TIE_MID)),
+			"%f vs %f" % [TIE_FIRST_SEEN.distance_to(TIE_MID),
+				TIE_LOWEST_REF.distance_to(TIE_MID)])
+
+	var by_bus: Dictionary = canvas._bus_target_at(TIE_MID)
+	var by_hit_test: Dictionary = canvas._trace_pad_at(TIE_MID)
+	check("the bus picker names a pad at the tie", not by_bus.is_empty())
+	check("the shared hit test names a pad at the tie", not by_hit_test.is_empty())
+	check("both pickers resolve one click to one pad",
+			str(by_bus.get("ref", "")) == str(by_hit_test.get("ref", "")),
+			"bus %s vs hit test %s"
+				% [str(by_bus.get("ref", "")), str(by_hit_test.get("ref", ""))])
+	# Independent of both: the documented policy is that the lower (component,
+	# pin) wins a tie, and the fixture names which pad that is.
+	check("the tie goes to the lower component ref, not to whichever was seen first",
+			str(by_bus.get("ref", "")) == "A8.1", "got %s" % str(by_bus.get("ref", "")))
+	canvas.free()
