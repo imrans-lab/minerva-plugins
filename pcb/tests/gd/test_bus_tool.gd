@@ -30,6 +30,10 @@ extends SceneTree
 ##   MCP PARITY — two INDEPENDENTLY driven boards (one through the canvas
 ##     handlers, one through panel_tools.handle) compared point for point, plus
 ##     the manifest's own required-args lists for both bus verbs.
+##   WHERE A NET MAY END — the fixture's OWN net pin lists minus the source pad
+##     (eligibility) and plain pad-centre distance (the suggestion), both
+##     derived in this file; plus the pick path itself, driven onto every pad
+##     the guidance offers, and the landed target read back afterwards.
 ##
 ## WHAT IS NOT PINNED HERE: the lane arithmetic (test_pcb_bus_geometry.gd) and
 ## the pad-to-pad breakout geometry, bends and crossing rules
@@ -100,6 +104,7 @@ func _init() -> void:
 	_test_manhattan_from_sloppy_clicks()
 	_test_crossing_refusal_names_both_nets()
 	_test_propose_is_pad_to_pad_and_writes_no_copper()
+	_test_where_each_net_may_end()
 	_test_manifest_requires_pads_on_both_verbs()
 	# AWAITED (unlike every synchronous test above): panel_tools.handle() is a
 	# coroutine end to end (see panel_tools.gd's own class-doc note) because it
@@ -948,3 +953,218 @@ func _test_mcp_direct_verb_matches_the_gesture() -> void:
 	check("board B: one undo removes its whole bus", data_b.undo() and data_b.get_trace_count() == 0)
 
 	canvas_a.free()
+
+
+# ── 9. WHERE EACH NET MAY END, AND THE SUGGESTION AMONG THOSE ENDINGS ─────────
+#
+# A bus track does NOT have one predetermined target. Every pad on its net but
+# the source pad is a legal ending, so a three-pad net offers TWO of them, and
+# the tool has to say which is likely without hiding the rest.
+#
+# The fan-out fixture below lists ND's FAR pad first, so "the first candidate",
+# "the last candidate" and "the nearest candidate" are three different answers
+# and only one of them passes.
+#
+# ORACLES:
+#   ELIGIBILITY — the fixture's own net pin lists, minus the source pad, read
+#     out of the board dict here.
+#   THE ENDINGS ARE REAL — every pad the guidance offers is fed to the pick path
+#     (_bus_target_at) and then CLICKED, and the tool's own committed target
+#     list is read back. A pad the guidance marks that the click refuses fails.
+#   THE SUGGESTION — the nearest eligible pad, by plain distance between the
+#     fixture's coordinates.
+#   FROM THE FIRST PICK — the same rows are demanded in SOURCES, PATH and
+#     TARGETS and compared phase to phase, so guidance that only appeared once
+#     targets were being landed would fail.
+
+## Fan-out fixture: ND has THREE pads (two legal endings), NE has two — the
+## bus's minimum of two nets, with only one of them ambiguous.
+const FAN_SRC := Vector2(10.0, 10.0)
+## Listed FIRST in ND's pins and 110mm out; the pin list is not distance order.
+const FAN_FAR := Vector2(120.0, 10.0)
+## Listed LAST and 30mm out.
+const FAN_NEAR := Vector2(40.0, 10.0)
+const FAN2_SRC := Vector2(10.0, 12.0)
+const FAN2_TGT := Vector2(120.0, 12.0)
+## Spine vertices, 13mm clear of every pad row (TRACE_PAD_SNAP_MM is 1.27mm).
+const FAN_PATH_1 := Vector2(20.0, 25.0)
+const FAN_PATH_2 := Vector2(110.0, 25.0)
+
+
+func _fanout_board() -> Dictionary:
+	return {
+		"version": 1, "name": "FanBoard", "width_mm": 140.0, "height_mm": 60.0,
+		"grid_mm": 2.54,
+		"layers": ["top", "bottom"],
+		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
+		"components": [
+			_part("U4", FAN_SRC.x, FAN_SRC.y), _part("Z4", FAN_FAR.x, FAN_FAR.y),
+			_part("Y4", FAN_NEAR.x, FAN_NEAR.y),
+			_part("U5", FAN2_SRC.x, FAN2_SRC.y), _part("Z5", FAN2_TGT.x, FAN2_TGT.y),
+		],
+		"nets": [
+			{"name": "ND", "pins": ["U4.1", "Z4.1", "Y4.1"]},
+			{"name": "NE", "pins": ["U5.1", "Z5.1"]},
+		],
+	}
+
+
+func _fanout_rig() -> Array:
+	var canvas = PcbCanvasScript.new()
+	var data = PCBData.new()
+	data.from_board_dict(_fanout_board())
+	canvas.data = data
+	canvas.zoom = 8.0
+	canvas.snap_to_grid = false
+	var host := StubPadHost.new()
+	host.pads = [
+		{"component": "U4", "pin": "1", "position": FAN_SRC},
+		{"component": "Z4", "pin": "1", "position": FAN_FAR},
+		{"component": "Y4", "pin": "1", "position": FAN_NEAR},
+		{"component": "U5", "pin": "1", "position": FAN2_SRC},
+		{"component": "Z5", "pin": "1", "position": FAN2_TGT},
+	]
+	canvas.set_pin_inspector_host(host)
+	canvas.set_tool_mode(canvas.ToolMode.BUS)
+	return [canvas, data, host]
+
+
+## Every pad on `net` except `source`, straight out of a board dict's own net
+## list — the eligibility oracle, owing nothing to the canvas.
+func _eligible_from_fixture(board: Dictionary, net: String, source: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	for n in (board.get("nets", []) as Array):
+		var nd := n as Dictionary
+		if str(nd.get("name", "")) != net:
+			continue
+		for pin in (nd.get("pins", []) as Array):
+			if str(pin) != source:
+				out.append(str(pin))
+	out.sort()
+	return out
+
+
+func _guidance_row(canvas, net: String) -> Dictionary:
+	for row in canvas.bus_target_guidance():
+		if str((row as Dictionary).get("net", "")) == net:
+			return row
+	return {}
+
+
+func _candidate_refs(row: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	for c in (row.get("candidates", []) as Array):
+		out.append(str((c as Dictionary).get("ref", "")))
+	out.sort()
+	return out
+
+
+func _candidate_at(row: Dictionary, ref: String) -> Vector2:
+	for c in (row.get("candidates", []) as Array):
+		var cd := c as Dictionary
+		if str(cd.get("ref", "")) == ref:
+			var at: Vector2 = cd.get("at", Vector2.ZERO)
+			return at
+	return Vector2.ZERO
+
+
+## A stable text rendering of the whole guidance — compared phase to phase, and
+## a string rather than the rows themselves so the comparison does not rest on
+## Dictionary equality semantics.
+func _guidance_summary(rows: Array) -> PackedStringArray:
+	var out := PackedStringArray()
+	for row in rows:
+		var r := row as Dictionary
+		out.append("%d %s from %s -> [%s] likely %s target %s" % [
+			int(r.get("index", -1)), str(r.get("net", "")), str(r.get("source_ref", "")),
+			", ".join(_candidate_refs(r)), str(r.get("suggested_ref", "")),
+			str(r.get("target_ref", ""))])
+	return out
+
+
+func _test_where_each_net_may_end() -> void:
+	print("\n-- (9) eligible endings from the first pick, and a suggestion among them --")
+	var rig := _fanout_rig()
+	var canvas = rig[0]
+	var board := _fanout_board()
+
+	# Two picks and not one click more: still SOURCES, no path, no target.
+	canvas._handle_bus_click(FAN_SRC, false)    # ND, from U4.1
+	canvas._handle_bus_click(FAN2_SRC, false)   # NE, from U5.1
+	check("still in SOURCES — what follows owes nothing to a later phase",
+			canvas._bus_phase == canvas.BusPhase.SOURCES)
+
+	var sources_rows: Array = canvas.bus_target_guidance()
+	check("both picked nets are already described", sources_rows.size() == 2,
+			"got %d rows" % sources_rows.size())
+
+	var nd := _guidance_row(canvas, "ND")
+	var want_nd := _eligible_from_fixture(board, "ND", "U4.1")
+	check("ND's three-pad net offers TWO endings — the fixture's own other pads %s"
+			% str(want_nd),
+			_candidate_refs(nd) == want_nd, "got %s" % str(_candidate_refs(nd)))
+
+	# ORACLE: distance between the fixture's own coordinates. Y4.1 is 30mm out
+	# and listed LAST; Z4.1 is 110mm out and listed FIRST.
+	var nearer := "Y4.1" if FAN_SRC.distance_to(FAN_NEAR) < FAN_SRC.distance_to(FAN_FAR) else "Z4.1"
+	check("the suggestion is the NEAREST ending, not the first-listed one",
+			str(nd.get("suggested_ref", "")) == nearer,
+			"suggested %s, nearest is %s" % [str(nd.get("suggested_ref", "")), nearer])
+	check("…and it is one of the endings on offer, never a pad from outside them",
+			want_nd.has(str(nd.get("suggested_ref", ""))))
+
+	# A marked pad is a clickable pad — both of them, not only the suggested one.
+	for ref in want_nd:
+		var at := _candidate_at(nd, str(ref))
+		var picked: Dictionary = canvas._bus_target_at(at)
+		check("%s: the pad the guidance marks is the pad the pick resolves" % str(ref),
+				str(picked.get("ref", "")) == str(ref), "picked %s" % str(picked))
+
+	var ne := _guidance_row(canvas, "NE")
+	check("NE's two-pad net offers exactly one ending, and suggests it",
+			_candidate_refs(ne) == _eligible_from_fixture(board, "NE", "U5.1")
+				and str(ne.get("suggested_ref", "")) == "Z5.1",
+			"candidates %s, suggested %s" % [str(_candidate_refs(ne)), str(ne.get("suggested_ref", ""))])
+
+	# The phases: the answer must not wait for the one that lands targets.
+	var in_sources := _guidance_summary(sources_rows)
+	canvas._handle_bus_click(FAN_PATH_1, false)   # ends SOURCES, vertex 1
+	canvas._handle_bus_click(FAN_PATH_2, false)   # vertex 2
+	check("PATH reached", canvas._bus_phase == canvas.BusPhase.PATH)
+	check("the endings on offer are the SAME ones the SOURCES phase named",
+			_guidance_summary(canvas.bus_target_guidance()) == in_sources,
+			"\n    sources: %s\n    path:    %s" % [str(in_sources),
+				str(_guidance_summary(canvas.bus_target_guidance()))])
+
+	canvas._handle_bus_click(FAN_NEAR, false)     # ends PATH, ND → Y4.1
+	check("TARGETS reached, ND landed on the pad it was steered to",
+			canvas._bus_phase == canvas.BusPhase.TARGETS
+				and canvas._bus_target_refs[0] == "Y4.1",
+			"phase %d, targets %s" % [canvas._bus_phase, str(canvas._bus_target_refs)])
+
+	var nd_landed := _guidance_row(canvas, "ND")
+	check("with a target landed, ND still reports BOTH endings",
+			_candidate_refs(nd_landed) == want_nd,
+			"got %s" % str(_candidate_refs(nd_landed)))
+	check("…and still names the same likely one",
+			str(nd_landed.get("suggested_ref", "")) == nearer,
+			"got %s" % str(nd_landed.get("suggested_ref", "")))
+
+	# The alternative was never decoration: clicking it re-targets the net.
+	canvas._handle_bus_click(FAN_FAR, false)
+	check("clicking the OTHER ending replaces ND's target — the suggestion was "
+			+ "never that net's only legal ending",
+			canvas._bus_target_refs[0] == "Z4.1", "targets %s" % str(canvas._bus_target_refs))
+
+	canvas.free()
+
+	# Un-picking a net takes its guidance with it: nothing is marked for a net
+	# that is no longer in the bus.
+	var rig2 := _rig()
+	var canvas2 = rig2[0]
+	canvas2._handle_bus_click(SRC_A, false)
+	check("one pick, one row", canvas2.bus_target_guidance().size() == 1)
+	canvas2._handle_bus_click(SRC_A, false)
+	check("un-picking the net removes its row", canvas2.bus_target_guidance().is_empty(),
+			str(canvas2.bus_target_guidance()))
+	canvas2.free()

@@ -813,6 +813,21 @@ var _bus_net_points: PackedVector2Array = PackedVector2Array()
 ## _commit_bus checks before it will write anything.
 var _bus_target_refs: Array[String] = []
 var _bus_target_points: PackedVector2Array = PackedVector2Array()
+## THE PER-NET SUGGESTION, parallel to _bus_nets: PcbRatsnest.focus's answer for
+## that net's SOURCE pad — the SAME "likely partner for this pad" the trace tool
+## locks in _start_trace, asked here once per net PICK rather than once per
+## frame, because extract() is O(board) and this canvas redraws on every pan and
+## zoom tick.
+##
+## Holds focus's RAW answer, which may name copper rather than a pad, or a pad
+## that is no longer a legal ending. bus_target_guidance() is what filters it
+## against the live candidate list, so a suggestion is only ever marked on a pad
+## the click can also land on.
+##
+## LOCKED THE SAME WAY _trace_focus IS: nothing re-solves it while the path is
+## drawn, so the suggestion cannot wander mid-gesture. The pick list changing is
+## the only thing that recomputes it.
+var _bus_suggested_refs: Array[String] = []
 ## Spine vertices placed so far, in board mm. Meaningful from the PATH phase
 ## on; the click that ends SOURCES places the first one, so it is never empty
 ## in a later phase.
@@ -863,9 +878,14 @@ const BUS_REFUSAL_COLOR := Color(1.0, 0.35, 0.25, 1.0)
 const BUS_PICK_MARKER_RADIUS_PX := 9.0
 const BUS_PICK_MARKER_WIDTH_PX := 2.0
 ## TARGET MARKER geometry, deliberately smaller than the pick ring above: the
-## TARGETS phase marks every legal pad at once, and at the pick ring's size a
-## dense footprint would read as a wall rather than as a set of choices.
+## marks name every legal pad at once, and at the pick ring's size a dense
+## footprint would read as a wall rather than as a set of choices.
 const BUS_TARGET_MARKER_RADIUS_PX := 5.0
+## SUGGESTION HALO geometry — an OUTER ring drawn AROUND the target ring the
+## suggested pad already carries, never instead of it. Every eligible pad keeps
+## the identical mark, so the halo adds "this one is likely" without demoting
+## the alternatives beside it into something that looks illegal.
+const BUS_SUGGESTION_MARKER_RADIUS_PX := 8.0
 
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)
@@ -8107,6 +8127,15 @@ func _draw_trace_preview() -> void:
 ## move. From PATH on, a vertex over a trace is fine — the bus commits on its
 ## own frozen layer, where crossing copper on another layer is legitimate.
 ##
+## WHERE A NET MAY END IS SHOWN, NOT DECIDED. From the first pick on, every pad
+## that can legally end a picked net's track is ringed (bus_target_guidance),
+## and the one the ratsnest calls that SOURCE pad's likely partner — the same
+## PcbRatsnest.focus answer the trace tool locks for its own gesture — carries a
+## halo and a count of how many endings the net actually has. A net commonly has
+## more than one, and the count is there so the halo cannot be read as the only
+## one. GUIDANCE, NEVER ENFORCEMENT: nothing in it refuses a click, advances a
+## phase, or narrows what _bus_target_at accepts.
+##
 ## This tool AUTHORS N BOARD ENTITIES (real Trace entities, same as Draw ▸
 ## Trace) in ONE undo step — see _commit_bus. It is the direct-authoring
 ## sibling of the router's route_bus(), not a UI on top of it: the router is
@@ -8172,6 +8201,7 @@ func _handle_bus_source_click(world_pos: Vector2) -> void:
 		_bus_nets.remove_at(idx)
 		_bus_net_refs.remove_at(idx)
 		_bus_net_points.remove_at(idx)
+		_refresh_bus_suggestions()
 		bus_tool_message.emit("Removed %s from the bus (%d picked)." % [net, _bus_nets.size()])
 		queue_redraw()
 		return
@@ -8179,6 +8209,7 @@ func _handle_bus_source_click(world_pos: Vector2) -> void:
 	_bus_nets.append(net)
 	_bus_net_refs.append(ref)
 	_bus_net_points.append(hit.get("position", world_pos))
+	_refresh_bus_suggestions()
 	var msg := "Bus: [%s] (%d picked)" % [_bus_nets_joined(), _bus_nets.size()]
 	msg += " — click clear of the pads to start the path." if _bus_nets.size() >= 2 \
 		else " — pick at least 1 more net."
@@ -8309,14 +8340,18 @@ func _bus_axis_point(prev: Vector2, p: Vector2) -> Vector2:
 	return Vector2(p.x, prev.y) if absf(d.x) >= absf(d.y) else Vector2(prev.x, p.y)
 
 
-## The pads the TARGETS phase accepts: every pad on a picked net EXCEPT that
-## net's own source. Each entry is {index, net, ref, component, pin, position},
+## The pads a target click accepts: every pad on a picked net EXCEPT that net's
+## own source — so a net with three pads offers TWO legal endings, and "the
+## target" of a bus track is a choice, not a lookup. Each entry is
+## {index, net, ref, component, pin, position},
 ## `index` being the net's slot in the picked order and component/pin the parts
 ## the pick measures its distance against.
 ##
-## The draw path and the click pick both walk this ONE list, so a ring the user
-## can see is exactly a ring the click can land on — the same "rendered
-## geometry == hit-test geometry" rule the candidate region states.
+## The draw path (through bus_target_guidance) and the click pick both walk this
+## ONE list, so a ring the user can see is exactly a ring the click can land on
+## — the same "rendered geometry == hit-test geometry" rule the candidate region
+## states. The list is well-defined from the FIRST pick, which is why the marks
+## do not wait for the TARGETS phase to appear.
 func _bus_target_candidates() -> Array:
 	var out: Array = []
 	if data == null:
@@ -8349,6 +8384,65 @@ func _bus_nets_with_candidates() -> PackedStringArray:
 		var net := str((cand as Dictionary).get("net", ""))
 		if not out.has(net):
 			out.append(net)
+	return out
+
+
+## Re-ask the ratsnest which pad each picked net is LIKELY to run to, one
+## extract() for the whole pick list. Called from the SOURCES clicks that add or
+## remove a net — the only clicks that change _bus_net_refs — and never from the
+## draw path; see _bus_suggested_refs for why the answer is then held.
+func _refresh_bus_suggestions() -> void:
+	_bus_suggested_refs = []
+	if data == null:
+		for i in range(_bus_net_refs.size()):
+			_bus_suggested_refs.append("")
+		return
+	var bundles := PcbRatsnest.extract(data)
+	for ref in _bus_net_refs:
+		# focus() answers by matching a PAD ref, which is exactly what a bus
+		# source is, and returns {} for a net with nothing left to join.
+		_bus_suggested_refs.append(str(PcbRatsnest.focus(bundles, ref).get("to_ref", "")))
+
+
+## EVERY MARK THE TARGET GUIDANCE DRAWS, AS DATA — one row per picked net, in
+## pick order, from the moment the bus has its nets:
+##
+##   {index, net, source_ref, target_ref, target_at,
+##    suggested_ref, candidates: Array[{ref, at}]}
+##
+## `candidates` is EVERY pad that may legally end that net's track, so a net
+## with three pads offers two of them and the suggestion is one among those,
+## never the net's only ending. `suggested_ref` is "" when the ratsnest names no
+## pad, or names one that is not (or is no longer) a legal ending — the filter
+## against `candidates` here is what keeps a marked pad a clickable pad.
+##
+## The draw path reads this and nothing else, which is the only way to make
+## "what the canvas claims" inspectable on an IMMEDIATE-MODE canvas — the same
+## rule candidate_draw_items() states for route candidates.
+func bus_target_guidance() -> Array:
+	var cands := _bus_target_candidates()
+	var out: Array = []
+	for i in range(_bus_nets.size()):
+		var mine: Array = []
+		var refs := PackedStringArray()
+		for cand in cands:
+			var c := cand as Dictionary
+			if int(c.get("index", -1)) != i:
+				continue
+			mine.append({"ref": str(c.get("ref", "")), "at": c.get("position", Vector2.ZERO)})
+			refs.append(str(c.get("ref", "")))
+		var suggested := _bus_suggested_refs[i] if i < _bus_suggested_refs.size() else ""
+		if not refs.has(suggested):
+			suggested = ""
+		out.append({
+			"index": i,
+			"net": _bus_nets[i],
+			"source_ref": _bus_net_refs[i],
+			"target_ref": _bus_target_refs[i] if i < _bus_target_refs.size() else "",
+			"target_at": _bus_target_points[i] if i < _bus_target_points.size() else Vector2.ZERO,
+			"suggested_ref": suggested,
+			"candidates": mine,
+		})
 	return out
 
 
@@ -8542,6 +8636,7 @@ func _cancel_bus_step(announce: bool) -> void:
 		_bus_nets = []
 		_bus_net_refs = []
 		_bus_net_points = PackedVector2Array()
+		_bus_suggested_refs = []
 		if announce:
 			bus_tool_message.emit("Bus net picks cleared.")
 		queue_redraw()
@@ -8559,6 +8654,7 @@ func _reset_bus_tool(announce: bool) -> void:
 	_bus_nets = []
 	_bus_net_refs = []
 	_bus_net_points = PackedVector2Array()
+	_bus_suggested_refs = []
 	_bus_target_refs = []
 	_bus_target_points = PackedVector2Array()
 	_bus_plan_cache_key = []
@@ -8602,8 +8698,8 @@ func _draw_bus_picks() -> void:
 	var teach := ""
 	match _bus_phase:
 		BusPhase.SOURCES:
-			teach = "%d nets picked — click clear of the pads to start the path." % count \
-				if count >= 2 else "%d net picked — pick at least 1 more." % count
+			teach = "%d nets picked — rings mark where each may end; click clear of the pads to start the path." % count \
+				if count >= 2 else "%d net picked — rings mark where it may end; pick at least 1 more." % count
 		BusPhase.PATH:
 			teach = "Path on %s — click vertices, then a pad per net." % _bus_layer
 		BusPhase.TARGETS:
@@ -8618,27 +8714,57 @@ func _bus_net_color(i: int) -> Color:
 	return net_obj.color if net_obj else BUS_SPINE_PREVIEW_COLOR
 
 
-## Mark the pads a TARGETS click may land on: a small ring on every legal pad
-## of a net still waiting, and a filled marker plus label on each target
-## already picked. Walks the SAME candidate list the pick does.
+## Mark where each picked net may END: a small ring on every pad still eligible,
+## a halo plus label on the one the ratsnest suggests, and a filled marker plus
+## label on each target already landed. Reads bus_target_guidance() and nothing
+## else, so a ring the user can see is exactly a ring the click can land on.
+##
+## TWO PASSES over the same rows, so the landed markers stay ON TOP of every
+## net's rings rather than under whichever net was drawn later.
+##
+## The eligible ring is drawn for the suggested pad too, under its halo: the
+## suggestion is an emphasis on one of the choices, and a pad that lost its
+## ordinary ring would read as a different KIND of pad from its alternatives.
 func _draw_bus_targets() -> void:
-	for cand in _bus_target_candidates():
-		var i: int = int((cand as Dictionary).get("index", 0))
-		if not _bus_target_refs[i].is_empty():
+	var rows := bus_target_guidance()
+	for row in rows:
+		var r := row as Dictionary
+		if not str(r["target_ref"]).is_empty():
 			continue
-		var pad_pos: Vector2 = (cand as Dictionary).get("position", Vector2.ZERO)
-		draw_arc(world_to_screen(pad_pos),
-			BUS_TARGET_MARKER_RADIUS_PX, 0.0, TAU, 16,
-			Color(_bus_net_color(i), BUS_GHOST_ALPHA), BUS_PICK_MARKER_WIDTH_PX)
-	for i in range(_bus_target_refs.size()):
-		if _bus_target_refs[i].is_empty():
+		var i: int = int(r["index"])
+		var color := _bus_net_color(i)
+		var suggested := str(r["suggested_ref"])
+		var candidates: Array = r["candidates"]
+		for cand in candidates:
+			var c := cand as Dictionary
+			var pad_pos: Vector2 = c.get("at", Vector2.ZERO)
+			var screen_pt := world_to_screen(pad_pos)
+			draw_arc(screen_pt, BUS_TARGET_MARKER_RADIUS_PX, 0.0, TAU, 16,
+				Color(color, BUS_GHOST_ALPHA), BUS_PICK_MARKER_WIDTH_PX)
+			if str(c["ref"]) != suggested:
+				continue
+			draw_arc(screen_pt, BUS_SUGGESTION_MARKER_RADIUS_PX, 0.0, TAU, 20,
+				color, BUS_PICK_MARKER_WIDTH_PX)
+			# The count is the label's load-bearing half: it says out loud that
+			# the halo is one of N endings this net accepts, so a user who
+			# follows it knows a different ring is not a mistake.
+			if font != null:
+				draw_string(font, screen_pt + Vector2(BUS_SUGGESTION_MARKER_RADIUS_PX + 3.0, 4.0),
+					"%d  %s likely — %d eligible" % [i + 1, str(r["net"]), candidates.size()],
+					HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+	for row in rows:
+		var r := row as Dictionary
+		var target_ref := str(r["target_ref"])
+		if target_ref.is_empty():
 			continue
-		var screen_pt := world_to_screen(_bus_target_points[i])
+		var i: int = int(r["index"])
+		var target_pos: Vector2 = r.get("target_at", Vector2.ZERO)
+		var screen_pt := world_to_screen(target_pos)
 		var color := _bus_net_color(i)
 		draw_circle(screen_pt, BUS_TARGET_MARKER_RADIUS_PX, color)
 		if font != null:
 			draw_string(font, screen_pt + Vector2(BUS_TARGET_MARKER_RADIUS_PX + 3.0, 4.0),
-				"%d  %s" % [i + 1, _bus_target_refs[i]],
+				"%d  %s" % [i + 1, target_ref],
 				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
 
 
@@ -8651,24 +8777,26 @@ func _bus_plan_target_pins() -> PackedStringArray:
 	return PackedStringArray(_bus_target_refs)
 
 
-## Draw the bus being born: the picked source pads in every phase, then — once
-## a path exists — the raw spine as a rubber band (same visual language
-## _draw_trace_preview uses) and the N per-net GHOST polylines bus_plan would
-## commit: bare lanes while targets are still missing, the whole pad-to-pad
-## routes once they are not. TOOL PREVIEW geometry, not workspace candidates
-## (see the region doc + this file's _draw for the depth this renders at). The
-## spine tints BUS_REFUSAL_COLOR the instant the current geometry would be
-## refused, so the refusal is visible before Enter is ever pressed, not only
-## after a failed commit.
+## Draw the bus being born: the picked source pads and the pads each net may end
+## on in every phase, then — once a path exists — the raw spine as a rubber band
+## (same visual language _draw_trace_preview uses) and the N per-net GHOST
+## polylines bus_plan would commit: bare lanes while targets are still missing,
+## the whole pad-to-pad routes once they are not. TOOL PREVIEW geometry, not
+## workspace candidates (see the region doc + this file's _draw for the depth
+## this renders at). The spine tints BUS_REFUSAL_COLOR the instant the current
+## geometry would be refused, so the refusal is visible before Enter is ever
+## pressed, not only after a failed commit.
 func _draw_bus_preview() -> void:
 	# Picks render in every phase: where the nets were taken from is the
 	# context for judging whether the bus lands where it should.
 	_draw_bus_picks()
+	# So do the endings, from the FIRST pick on — the phase that lands a target
+	# is not the phase in which "which pad can this net run to?" is asked. A
+	# path drawn without knowing where it has to arrive is a path drawn twice.
+	_draw_bus_targets()
 
 	if _bus_phase == BusPhase.SOURCES:
 		return
-	if _bus_phase == BusPhase.TARGETS:
-		_draw_bus_targets()
 
 	var screen_pts := PackedVector2Array()
 	for p in _bus_spine_points:
