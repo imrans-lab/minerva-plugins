@@ -2767,6 +2767,12 @@ const AIRWIRE_RECEDED_FACTOR := 0.3
 ## The focused airwire is opaque, solid, and drawn heavier than the dashes.
 const AIRWIRE_FOCUS_WIDTH_PX := 2.5
 const AIRWIRE_FOCUS_RING_PX := 6.0
+## The ORDINARY airwire's weight and dash period. Named because the bus tool's
+## per-net airlines draw with them too: an airline is an airwire, and reusing
+## this period keeps it inside the existing dash channel rather than adding a
+## third one to the dash pairing documented near the top of this file.
+const AIRWIRE_DASH_WIDTH_PX := 1.5
+const AIRWIRE_DASH_PERIOD_PX := 5.0
 
 
 func _airwire_color(net_color: Color,
@@ -2848,7 +2854,7 @@ func _draw_ratsnest() -> void:
 		var c := _airwire_color(l["color"], str(l["emphasis"]))
 		var p1 := world_to_screen(l["a"])
 		var p2 := world_to_screen(l["b"])
-		_draw_dashed_line(p1, p2, c, 1.5, 5.0)
+		_draw_dashed_line(p1, p2, c, AIRWIRE_DASH_WIDTH_PX, AIRWIRE_DASH_PERIOD_PX)
 		draw_circle(p1, 3.0, c)
 		draw_circle(p2, 3.0, c)
 		# A join whose two ends share no copper layer needs a via, and it can
@@ -8164,7 +8170,11 @@ func _draw_trace_preview() -> void:
 ## PcbRatsnest.focus answer the trace tool locks for its own gesture — carries a
 ## halo and a count of how many endings the net actually has. A net commonly has
 ## more than one, and the count is there so the halo cannot be read as the only
-## one. GUIDANCE, NEVER ENFORCEMENT: nothing in it refuses a click, advances a
+## one. Once the spine has a vertex each net also grows an AIRLINE from the
+## spine's live end to that pad (bus_airline_items) — dashed while it is only a
+## suggestion, solid once the target has landed — so "where does this trace want
+## to go" is answered at the end the user is actually drawing from.
+## GUIDANCE, NEVER ENFORCEMENT: nothing in it refuses a click, advances a
 ## phase, or narrows what _bus_target_at accepts.
 ##
 ## This tool AUTHORS N BOARD ENTITIES (real Trace entities, same as Draw ▸
@@ -8525,6 +8535,61 @@ func bus_target_guidance() -> Array:
 	return out
 
 
+## THE PER-NET AIRLINE, AS DATA — one row per picked net that has somewhere to
+## point, from the moment the spine has its first vertex:
+##
+##   {index, net, ref, from, to, color, landed}
+##
+## `from` is the spine's LIVE END — the rubber-band point while one is live,
+## the last placed vertex otherwise — so every airline leaves the same place the
+## next spine segment will. `to` is that net's landed target where it has one
+## (`landed` true) and the pad bus_target_guidance suggests otherwise.
+##
+## DERIVED FROM bus_target_guidance() AND NOTHING ELSE, so the pad an airline
+## points at is by construction the pad the click would pick: it cannot drift
+## into a second opinion about where a net wants to go.
+##
+## Empty while the bus has no spine — before the path begins the guidance rings
+## already answer "where may this net end", and an airline needs a live end to
+## leave from.
+func bus_airline_items() -> Array:
+	var out: Array = []
+	if _bus_spine_points.is_empty():
+		return out
+	var live_end: Vector2 = _bus_preview if _bus_has_preview \
+		else _bus_spine_points[_bus_spine_points.size() - 1]
+	for row in bus_target_guidance():
+		var r := row as Dictionary
+		var i: int = int(r["index"])
+		var landed := str(r["target_ref"])
+		var ref := landed
+		var to: Vector2 = r.get("target_at", Vector2.ZERO)
+		if landed.is_empty():
+			ref = str(r["suggested_ref"])
+			if ref.is_empty():
+				continue
+			to = _bus_candidate_position(r, ref)
+		out.append({
+			"index": i,
+			"net": str(r["net"]),
+			"ref": ref,
+			"from": live_end,
+			"to": to,
+			"color": _bus_net_color(i),
+			"landed": not landed.is_empty(),
+		})
+	return out
+
+
+## Where `ref` sits, out of one guidance row's own candidate list.
+func _bus_candidate_position(row: Dictionary, ref: String) -> Vector2:
+	for cand in (row.get("candidates", []) as Array):
+		var c := cand as Dictionary
+		if str(c.get("ref", "")) == ref:
+			return c.get("at", Vector2.ZERO)
+	return Vector2.ZERO
+
+
 ## The legal target pad nearest `world_pos`, or {}.
 ##
 ## Only legal pads are candidates, so a legal pad can never be shadowed by the
@@ -8875,6 +8940,30 @@ func _draw_bus_targets() -> void:
 				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
 
 
+## Draw one airline per picked net, from the spine's live end to the pad that
+## net is heading for. Reads bus_airline_items() and nothing else.
+##
+## THE DASH IS THE TENSE. A suggestion is drawn in the ordinary airwire's dash,
+## the same mark the ratsnest uses for a join that is still only wanted; a
+## LANDED target is solid and opaque, the same weight the trace tool's focus
+## airline carries, because that end is now decided.
+##
+## Drawn BEFORE the target marks so the rings, halo and labels stay legible on
+## top of the lines that converge on them.
+func _draw_bus_airlines() -> void:
+	for item in bus_airline_items():
+		var it := item as Dictionary
+		var landed: bool = bool(it["landed"])
+		var c := _airwire_color(it["color"],
+			RATSNEST_EMPHASIS_FOCUS if landed else RATSNEST_EMPHASIS_NORMAL)
+		var p1 := world_to_screen(it["from"])
+		var p2 := world_to_screen(it["to"])
+		if landed:
+			draw_line(p1, p2, c, AIRWIRE_FOCUS_WIDTH_PX)
+		else:
+			_draw_dashed_line(p1, p2, c, AIRWIRE_DASH_WIDTH_PX, AIRWIRE_DASH_PERIOD_PX)
+
+
 ## The target refs to plan with: the whole array once every net has one, and
 ## EMPTY otherwise — bus_plan's own "corridor only, do not commit" input, which
 ## previews the bundle's lanes while the path is still being drawn.
@@ -8885,7 +8974,8 @@ func _bus_plan_target_pins() -> PackedStringArray:
 
 
 ## Draw the bus being born: the picked source pads and the pads each net may end
-## on in every phase, then — once a path exists — the raw spine as a rubber band
+## on in every phase, the per-net airlines to those pads once a spine exists,
+## then — once a path exists — the raw spine as a rubber band
 ## (same visual language _draw_trace_preview uses) and the N per-net GHOST
 ## polylines bus_plan would commit: bare lanes while targets are still missing,
 ## the whole pad-to-pad routes once they are not. TOOL PREVIEW geometry, not
@@ -8900,6 +8990,9 @@ func _draw_bus_preview() -> void:
 	# So do the endings, from the FIRST pick on — the phase that lands a target
 	# is not the phase in which "which pad can this net run to?" is asked. A
 	# path drawn without knowing where it has to arrive is a path drawn twice.
+	# The airlines go UNDER them: a ring the eye has to read must not be
+	# crossed out by the line arriving at it.
+	_draw_bus_airlines()
 	_draw_bus_targets()
 
 	if _bus_phase == BusPhase.SOURCES:

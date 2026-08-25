@@ -34,6 +34,11 @@ extends SceneTree
 ##     (eligibility) and plain pad-centre distance (the suggestion), both
 ##     derived in this file; plus the pick path itself, driven onto every pad
 ##     the guidance offers, and the landed target read back afterwards.
+##   WHERE A NET IS HEADED — the airline's own two endpoints: the `from` against
+##     the fixture's spine-click coordinates (and, with a rubber band live, the
+##     axis snap applied to a hover point by hand), the `to` against the
+##     fixture's pad coordinates, and every `to` fed back through
+##     _bus_target_at, which must name the ref the airline claims.
 ##
 ## WHAT IS NOT PINNED HERE: the lane arithmetic (test_pcb_bus_geometry.gd) and
 ## the pad-to-pad breakout geometry, bends and crossing rules
@@ -122,6 +127,7 @@ func _init() -> void:
 	_test_crossing_refusal_names_both_nets()
 	_test_propose_is_pad_to_pad_and_writes_no_copper()
 	_test_where_each_net_may_end()
+	_test_the_airline_says_where_each_net_is_headed()
 	_test_manifest_requires_pads_on_both_verbs()
 	# AWAITED (unlike every synchronous test above): panel_tools.handle() is a
 	# coroutine end to end (see panel_tools.gd's own class-doc note) because it
@@ -1254,6 +1260,109 @@ func _test_where_each_net_may_end() -> void:
 	check("un-picking the net removes its row", canvas2.bus_target_guidance().is_empty(),
 			str(canvas2.bus_target_guidance()))
 	canvas2.free()
+
+
+## Where the cursor hovers while the rubber band is live, and the point the
+## axis snap turns it into. |dx| from the last vertex (110,25) is 50 and |dy| is
+## 15, so the segment runs HORIZONTALLY and keeps that vertex's y — derived here
+## by hand, not read back off the canvas.
+const AIRLINE_HOVER := Vector2(60.0, 40.0)
+const AIRLINE_HOVER_SNAPPED := Vector2(60.0, 25.0)
+
+
+func _airline_row(rows: Array, net: String) -> Dictionary:
+	for row in rows:
+		if str((row as Dictionary).get("net", "")) == net:
+			return row
+	return {}
+
+
+## One airline, checked whole: which pad it points at, whether it reads as
+## landed, and both endpoints against coordinates this file names.
+func _check_airline(rows: Array, net: String, from: Vector2, to: Vector2,
+		ref: String, landed: bool) -> void:
+	var r := _airline_row(rows, net)
+	var got_from: Vector2 = r.get("from", Vector2.ZERO)
+	var got_to: Vector2 = r.get("to", Vector2.ZERO)
+	check("%s's airline runs %s -> %s (%s, %s)" % [net, str(from), str(to), ref,
+				"landed" if landed else "suggested"],
+			not r.is_empty() and got_from.distance_to(from) <= EPS
+				and got_to.distance_to(to) <= EPS
+				and str(r.get("ref", "")) == ref
+				and bool(r.get("landed", false)) == landed,
+			"got %s" % str(r))
+
+
+func _test_the_airline_says_where_each_net_is_headed() -> void:
+	print("\n-- (10) an airline per net, from the spine's live end to its pad --")
+	var rig := _fanout_rig()
+	var canvas = rig[0]
+	var data = rig[1]
+
+	canvas._handle_bus_click(FAN_SRC, false)    # ND, from U4.1
+	canvas._handle_bus_click(FAN2_SRC, false)   # NE, from U5.1
+	check("with no spine there is nothing to leave FROM, so no airlines — the "
+			+ "rings alone answer SOURCES",
+			canvas.bus_airline_items().is_empty(),
+			str(canvas.bus_airline_items()))
+
+	# ONE vertex is enough: the question "where does this trace want to go" is
+	# asked the moment there is a live end to ask it from.
+	canvas._handle_bus_click(FAN_PATH_1, false)   # ends SOURCES, vertex 1
+	var first: Array = canvas.bus_airline_items()
+	check("from the FIRST vertex on, both picked nets have an airline",
+			first.size() == 2, "got %d: %s" % [first.size(), str(first)])
+	_check_airline(first, "ND", FAN_PATH_1, FAN_NEAR, "Y4.1", false)
+	_check_airline(first, "NE", FAN_PATH_1, FAN2_TGT, "Z5.1", false)
+
+	# THE ONE SOURCE OF TRUTH, checked rather than asserted: every pad an
+	# airline points at is the pad a click there resolves to. A second opinion
+	# about "likely" would fail here even if it drew a plausible line.
+	for row in first:
+		var r := row as Dictionary
+		var at: Vector2 = r.get("to", Vector2.ZERO)
+		var picked: Dictionary = canvas._bus_target_at(at)
+		check("%s: the pad its airline points at is the pad a click there picks"
+					% str(r.get("net", "")),
+				str(picked.get("ref", "")) == str(r.get("ref", "")),
+				"airline says %s, pick says %s" % [str(r.get("ref", "")), str(picked)])
+		check("%s: the airline is drawn in that net's own colour" % str(r.get("net", "")),
+				(r.get("color", Color.BLACK) as Color) == data.get_net(str(r.get("net", ""))).color,
+				"got %s" % str(r.get("color", "")))
+
+	canvas._handle_bus_click(FAN_PATH_2, false)   # vertex 2
+	_check_airline(canvas.bus_airline_items(), "ND", FAN_PATH_2, FAN_NEAR, "Y4.1", false)
+
+	# A LIVE RUBBER BAND MOVES THE ORIGIN. Driven through the real motion
+	# handler, so the airline leaves the same point the spine's own preview
+	# segment does — including the axis snap.
+	var mm := InputEventMouseMotion.new()
+	mm.position = canvas.world_to_screen(AIRLINE_HOVER)
+	canvas._handle_mouse_motion(mm)
+	var hovering: Array = canvas.bus_airline_items()
+	_check_airline(hovering, "ND", AIRLINE_HOVER_SNAPPED, FAN_NEAR, "Y4.1", false)
+	_check_airline(hovering, "NE", AIRLINE_HOVER_SNAPPED, FAN2_TGT, "Z5.1", false)
+
+	# Landing ND's target ends PATH, which retires the rubber band: the origin
+	# falls back to the last placed vertex for BOTH nets, and only ND's airline
+	# changes tense.
+	canvas._handle_bus_click(FAN_NEAR, false)     # ND → Y4.1
+	var landed: Array = canvas.bus_airline_items()
+	_check_airline(landed, "ND", FAN_PATH_2, FAN_NEAR, "Y4.1", true)
+	_check_airline(landed, "NE", FAN_PATH_2, FAN2_TGT, "Z5.1", false)
+
+	# Re-targeting ND onto its OTHER ending moves the airline with the pick.
+	canvas._handle_bus_click(FAN_FAR, false)
+	_check_airline(canvas.bus_airline_items(), "ND", FAN_PATH_2, FAN_FAR, "Z4.1", true)
+
+	# Guidance only: none of the above wrote copper or moved the phase off
+	# TARGETS.
+	check("the airlines changed nothing — still TARGETS, still no traces",
+			canvas._bus_phase == canvas.BusPhase.TARGETS
+				and _serialized_traces(data).is_empty(),
+			"phase %d, %d traces" % [canvas._bus_phase, _serialized_traces(data).size()])
+
+	canvas.free()
 
 
 ## TIE FIXTURE. Distances chosen to be exact in binary floating point (1.0mm
