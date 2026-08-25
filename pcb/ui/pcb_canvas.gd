@@ -842,6 +842,14 @@ var _bus_net_points: PackedVector2Array = PackedVector2Array()
 ## _commit_bus checks before it will write anything.
 var _bus_target_refs: Array[String] = []
 var _bus_target_points: PackedVector2Array = PackedVector2Array()
+## The target the most recent single press in TARGETS CLEARED, as
+## {index, ref, at}, or {} when that press did anything else. The pad half of
+## the commit gesture reads it: a double-click on a pad that already IS its
+## net's target arrives as a first press that toggles the target off, so the
+## second press has to take that clear back before it can commit. Only a clear
+## is remembered, which is exactly what keeps the press that LANDS a target from
+## also committing it — that press leaves this empty.
+var _bus_target_press_cleared: Dictionary = {}
 ## THE PER-NET SUGGESTION, parallel to _bus_nets: PcbRatsnest.focus's answer for
 ## that net's SOURCE pad — the SAME "likely partner for this pad" the trace tool
 ## locks in _start_trace, asked here once per net PICK rather than once per
@@ -8156,15 +8164,21 @@ func _draw_trace_preview() -> void:
 ##   TARGETS --click its current target--> clear that net's target again
 ##   TARGETS --Enter, every net targeted--> COMMIT copper (Shift+Enter proposes)
 ##   TARGETS --double-click clear of the pads--> the same commit, at the mouse
+##   TARGETS --double-click a LANDED target, every net targeted--> the same
+##                                        commit, without leaving the pads
 ##   any     --Esc/right-click-->         peel ONE phase (see _cancel_bus_step)
 ##   --tool switch-->                     cancel EVERYTHING, silently unless the
 ##                                        switch IS a re-click disarm (see
 ##                                        set_tool_mode's announce_cancel)
 ##
 ## COMMITTING IS ITS OWN ACT, and deliberately not the act that ends the
-## gesture: the last TARGET CLICK ends the gesture, Enter writes the copper,
-## and Enter refuses by name any bus that is not finished. One key used to do
-## both, so a bus the user could not finish landed on the board anyway.
+## gesture: the last TARGET CLICK ends the gesture, a SECOND, separate gesture
+## writes the copper, and every commit gesture refuses by name any bus that is
+## not finished. One press used to do both, so a bus the user could not finish
+## landed on the board anyway. The three commit gestures — Enter, a double-click
+## clear of the pads, and a double-click on a pad that ALREADY is its net's
+## target — all funnel through _commit_bus, and none of them is a press that can
+## land a target.
 ##
 ## WHICH PHASE IS ACTIVE IS ALSO ON THE TOOLBAR. Both in-canvas reports fail a
 ## user who looks away and back: the status line expires after 2s, and the
@@ -8293,11 +8307,15 @@ func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 	if is_double_click:
 		# A physical double-click arrives as TWO presses and the first already
 		# did whatever the phase does with a click, so the second carries one
-		# verb only, and only where that verb is legal — clear of the pads: in
-		# TARGETS the commit, in PATH the end of the path. On a pad it is inert
+		# verb only, and only where that verb is legal. Clear of the pads: in
+		# TARGETS the commit, in PATH the end of the path. ON a pad it is inert
 		# — which is what stops a double-click re-toggling a pick in SOURCES,
-		# and stops the press that lands the last target from also committing it.
+		# and stops the press that lands the last target from also committing it
+		# — with the ONE exception below: a finished bus commits from a
+		# double-click on a pad that was already its net's target.
 		if not _trace_pad_at(world_pos).is_empty():
+			if _bus_phase == BusPhase.TARGETS:
+				_commit_bus_on_landed_target(world_pos, Input.is_key_pressed(KEY_SHIFT))
 			return
 		if _bus_phase == BusPhase.TARGETS:
 			_commit_bus(Input.is_key_pressed(KEY_SHIFT))
@@ -8305,6 +8323,7 @@ func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 			_end_bus_path_on_double_click()
 		return
 	_bus_path_press_appended = false
+	_bus_target_press_cleared = {}
 	match _bus_phase:
 		BusPhase.SOURCES:
 			_handle_bus_source_click(world_pos)
@@ -8432,6 +8451,39 @@ func _handle_bus_target_click(world_pos: Vector2) -> void:
 	bus_tool_message.emit(_bus_targets_status())
 
 
+## THE PAD HALF OF THE COMMIT GESTURE: the second press of a double-click on a
+## pad that was ALREADY its net's target, with every other net targeted too.
+##
+## The first press of that double-click reached _handle_bus_target_click as an
+## ordinary click and TOGGLED the target off, so this press takes the clear back
+## and commits the bus the user had finished — the same _commit_bus every other
+## commit gesture calls, refusing just as loudly on a refused plan.
+##
+## Every other double-click on a pad falls out of here having written nothing.
+## _bus_target_press_cleared is empty unless the press before this one cleared a
+## target, which is what keeps the press that LANDS a target — the one that
+## makes the bus finished in the first place — from also committing it.
+func _commit_bus_on_landed_target(world_pos: Vector2, propose: bool) -> void:
+	if _bus_target_press_cleared.is_empty():
+		return
+	var i: int = int(_bus_target_press_cleared.get("index", -1))
+	var ref := str(_bus_target_press_cleared.get("ref", ""))
+	var cand := _bus_target_at(world_pos)
+	if cand.is_empty() or int(cand.get("index", -1)) != i or str(cand.get("ref", "")) != ref:
+		return
+	# Only a FINISHED bus commits: the sole net still missing a target must be
+	# the one this double-click's first press cleared. Otherwise the clear
+	# stands and the gesture means what it has always meant.
+	var missing := _bus_nets_without_targets()
+	if missing.size() != 1 or missing[0] != _bus_nets[i]:
+		return
+	_bus_target_refs[i] = ref
+	_bus_target_points[i] = _bus_target_press_cleared.get("at", Vector2.ZERO)
+	_bus_target_press_cleared = {}
+	queue_redraw()
+	_commit_bus(propose)
+
+
 ## SOURCES -> PATH. Freezes the layer the same way _start_trace freezes
 ## _trace_layer — the preview below draws in that layer's colour at the real
 ## per-net widths, so a toolbar layer-filter change mid-draw cannot silently
@@ -8477,11 +8529,11 @@ func _begin_bus_path(world_pos: Vector2) -> void:
 	if authoring_destination == DEST_DRAFT:
 		bus_tool_message.emit(
 			"Path for [%s] on %s — click vertices, then a pad per net; DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)."
-				% [_bus_nets_joined(), _bus_layer])
+				% [_bus_nets_joined(), _bus_layer_display()])
 	else:
 		bus_tool_message.emit(
 			"Path for [%s] on %s — click vertices, then a pad per net to land its target; Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)."
-				% [_bus_nets_joined(), _bus_layer])
+				% [_bus_nets_joined(), _bus_layer_display()])
 	queue_redraw()
 
 
@@ -8492,6 +8544,9 @@ func _assign_bus_target(cand: Dictionary) -> void:
 		return
 	var ref := str(cand.get("ref", ""))
 	if _bus_target_refs[i] == ref:
+		# Remembered so the SECOND press of a double-click on this same pad can
+		# take the clear back and commit instead — see _bus_target_press_cleared.
+		_bus_target_press_cleared = {"index": i, "ref": ref, "at": _bus_target_points[i]}
 		_bus_target_refs[i] = ""
 		_bus_target_points[i] = Vector2.ZERO
 		bus_tool_message.emit("%s's target cleared — %s" % [_bus_nets[i], _bus_targets_status()])
@@ -8746,12 +8801,18 @@ func _bus_illegal_target_message(pad: Dictionary) -> String:
 
 
 ## "still needs a target: ..." or the ready-to-commit line.
+##
+## The ready line NAMES ALL THREE COMMIT GESTURES, because a finished bus that
+## the user cannot see how to finalize is the tool having done nothing: the
+## mouse gestures are the ones a user reaches for, and Enter is the one they
+## would never guess from the canvas alone.
 func _bus_targets_status() -> String:
 	var missing := _bus_nets_without_targets()
 	if missing.is_empty():
+		var how := "double-click a landed target pad, or clear of the pads, or press Enter"
 		if authoring_destination == DEST_DRAFT:
-			return "every net has a target — Enter PROPOSES ghosts for review."
-		return "every net has a target — Enter commits COPPER, Shift+Enter proposes ghosts."
+			return "every net has a target — to PROPOSE ghosts for review, %s." % how
+		return "every net has a target — to commit COPPER, %s; Shift+Enter proposes ghosts." % how
 	return "still needs a target pad: %s." % ", ".join(missing)
 
 
@@ -8761,6 +8822,20 @@ func _bus_nets_without_targets() -> PackedStringArray:
 		if i >= _bus_target_refs.size() or _bus_target_refs[i].is_empty():
 			out.append(_bus_nets[i])
 	return out
+
+
+## The frozen bus layer as the user reads it on the toolbar — "F.Cu" / "B.Cu",
+## not the canonical "top" / "bottom" this canvas stores. Every sentence the bus
+## tool says about its layer goes through here, so the name in the teach line is
+## the name in the layer selector.
+##
+## canon_to_kicad FAILS CLOSED on anything it does not recognise; falling back to
+## the canonical id keeps a layer the user can at least name, which is the same
+## choice the layer selector makes.
+func _bus_layer_display() -> String:
+	var label := PcbLayerStack.canon_to_kicad(_bus_layer) if PcbLayerStack.is_copper(_bus_layer) \
+		else ""
+	return label if not label.is_empty() else _bus_layer
 
 
 func _bus_nets_joined() -> String:
@@ -8817,7 +8892,7 @@ func _commit_bus(propose: bool = false) -> void:
 			return
 		var held: Array = out.get("holds", []) if out.get("holds", []) is Array else []
 		var prop_summary := "Proposed bus: %d ghost traces on %s (%s) — accept/reject/pin in the workspace." % [
-			int(out.get("proposed", 0)), _bus_layer, _bus_nets_joined()]
+			int(out.get("proposed", 0)), _bus_layer_display(), _bus_nets_joined()]
 		if not held.is_empty():
 			prop_summary += " %d net(s) held by a pinned candidate." % held.size()
 		_reset_bus_tool(false)
@@ -8833,7 +8908,7 @@ func _commit_bus(propose: bool = false) -> void:
 
 	var trace_ids: Array = result.get("trace_ids", [])
 	var summary := "Added bus: %d traces on %s (%s)." % [
-		trace_ids.size(), _bus_layer, _bus_nets_joined()]
+		trace_ids.size(), _bus_layer_display(), _bus_nets_joined()]
 	_reset_bus_tool(false)
 	bus_tool_message.emit(summary)
 	queue_redraw()
@@ -8871,6 +8946,7 @@ func _peel_bus_phase(announce: bool) -> void:
 		for i in range(_bus_target_refs.size()):
 			_bus_target_refs[i] = ""
 			_bus_target_points[i] = Vector2.ZERO
+		_bus_target_press_cleared = {}
 		if announce:
 			bus_tool_message.emit("Bus targets cleared — path kept (%d points)." % _bus_spine_points.size())
 		queue_redraw()
@@ -8913,6 +8989,7 @@ func _reset_bus_tool(announce: bool) -> void:
 	_bus_suggested_refs = []
 	_bus_target_refs = []
 	_bus_target_points = PackedVector2Array()
+	_bus_target_press_cleared = {}
 	_bus_plan_cache_key = []
 	_bus_plan_cache = {}
 	_announce_bus_refusal()
@@ -8966,7 +9043,8 @@ func bus_teach_line() -> String:
 	var count: int = _bus_nets.size()
 	match _bus_phase:
 		BusPhase.PATH:
-			return "Path on %s — click vertices, then a pad per net, or double-click clear of the pads to end the path." % _bus_layer
+			return ("Path on %s, fixed when the path began (Esc to restart on another layer) — click vertices, then a pad per net, or double-click clear of the pads to end the path."
+				% _bus_layer_display())
 		BusPhase.TARGETS:
 			return _bus_targets_status()
 	return "%d nets picked — rings mark where each may end; click clear of the pads to start the path." % count \

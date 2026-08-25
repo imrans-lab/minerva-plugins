@@ -123,6 +123,7 @@ func _init() -> void:
 	_test_a_click_on_the_pads_copper_is_that_pad()
 	_test_the_two_pickers_agree_on_a_tie()
 	_test_double_click_grammar()
+	_test_the_finished_bus_commits_from_a_landed_target()
 	_test_manhattan_from_sloppy_clicks()
 	_test_crossing_refusal_names_both_nets()
 	_test_propose_is_pad_to_pad_and_writes_no_copper()
@@ -292,6 +293,14 @@ func _drive_full_gesture(canvas) -> void:
 	canvas._handle_bus_click(TGT_A, false)     # ends PATH, target NA
 	canvas._handle_bus_click(TGT_B, false)
 	canvas._handle_bus_click(TGT_C, false)
+
+
+## A PHYSICAL double-click, as the two presses Godot actually delivers: an
+## ordinary click, then the same position again with double_click set. Driving
+## only the second press would hide whatever the first one did to the tool.
+func _double_click(canvas, at: Vector2) -> void:
+	canvas._handle_bus_click(at, false)
+	canvas._handle_bus_click(at, true)
 
 
 func _serialized_traces(data) -> Array:
@@ -691,10 +700,11 @@ func _test_a_click_on_the_pads_copper_is_that_pad() -> void:
 #
 # Godot delivers a physical double-click as TWO press events; the second
 # carries double_click=true. The picking guard that survived from the two-phase
-# tool is pinned here alongside the rule that a double-click ON a pad is inert,
-# so the press that lands the last target can never also commit it, and the
-# PATH ending: a double-click clear of the pads ends the path, and because its
-# OWN first press placed a vertex there, ending must drop that vertex again.
+# tool is pinned here alongside the rule that the press which LANDS a target can
+# never also commit it, and the PATH ending: a double-click clear of the pads
+# ends the path, and because its OWN first press placed a vertex there, ending
+# must drop that vertex again. The one double-click ON a pad that DOES commit is
+# section 5b's, and this section is what holds it to that one case.
 #
 # ORACLE: the picked-net list for the pick claims, the board-state triple for
 # the commit claims, and for the PATH ending the COMMITTED COPPER — a path
@@ -720,8 +730,8 @@ func _test_double_click_grammar() -> void:
 	_drive_full_gesture(canvas)
 	var ready := _board_state(data)
 	canvas._handle_bus_click(TGT_C, true)
-	check("a double-click ON a pad with the bus finished commits NOTHING — the "
-			+ "press that lands a target can never also write copper",
+	check("the press that LANDS the last target can never also write copper — "
+			+ "its double-click's second press commits NOTHING",
 			_board_state(data) == ready, str(_board_state(data)))
 
 	canvas._handle_bus_click(EMPTY, true)
@@ -748,6 +758,13 @@ func _test_double_click_grammar() -> void:
 			canvas.bus_teach_line().contains("double-click")
 				and canvas.bus_teach_line().contains("pad per net"),
 			canvas.bus_teach_line())
+	# The canvas STORES the canonical id; the user reads the toolbar's name. The
+	# line has to carry the second, and say the choice is already made — a user
+	# who wanted the other side has to start the path over to get it.
+	check("…names the layer the way the toolbar does, and says it is already fixed",
+			canvas._bus_layer == "top" and canvas.bus_teach_line().contains("F.Cu")
+				and canvas.bus_teach_line().contains("fixed when the path began"),
+			"layer %s: %s" % [canvas._bus_layer, canvas.bus_teach_line()])
 	canvas._handle_bus_click(DBL_END, false)   # press 1 of the double-click
 	canvas._handle_bus_click(DBL_END, true)    # press 2 ends the path
 	check("a double-click clear of the pads ends PATH", canvas.bus_phase() == canvas.BusPhase.TARGETS,
@@ -812,6 +829,102 @@ func _test_double_click_grammar() -> void:
 	check("and neither refusal wrote anything", _board_state(data) == before,
 			str(_board_state(data)))
 
+	canvas.free()
+
+
+# ── 5b. FINISHING THE BUS FROM ITS OWN TARGET PAD ─────────────────────────────
+#
+# The gesture a user reaches for once every net is targeted: the cursor is
+# already on the pads, so they double-click one. Its FIRST press is an ordinary
+# TARGETS click on a pad that already IS that net's target, which clears it — so
+# the second press has to take that clear back before it can commit, and the
+# whole double-click is atomic the way the PATH ending's is. That is also what
+# separates this gesture from the press that LANDS a target (section 5): only a
+# press that CLEARED one leaves anything to take back.
+#
+# ORACLE: the COMMITTED COPPER — the same hand-derived routes _expected_routes()
+# pins for the Enter-committed bus, in one journal step — plus the board-state
+# triple for the two gestures that must write nothing, the target array read
+# back for the half-way states, and bus_teach_line(), the string the draw path
+# itself renders, for the words that teach the gesture.
+
+func _test_the_finished_bus_commits_from_a_landed_target() -> void:
+	print("\n-- (5b) a finished bus commits from a double-click on its own target pad --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	_drive_full_gesture(canvas)
+	var ready := _board_state(data)
+
+	check("the TARGETS teach line names every way to finish the bus",
+			canvas.bus_teach_line().contains("double-click")
+				and canvas.bus_teach_line().contains("landed target")
+				and canvas.bus_teach_line().contains("clear of the pads")
+				and canvas.bus_teach_line().contains("Enter"),
+			canvas.bus_teach_line())
+
+	canvas._handle_bus_click(TGT_A, false)   # press 1: NA's own target, cleared
+	check("press 1 clears that net's target, exactly as a lone click does",
+			canvas._bus_target_refs[0].is_empty() and _board_state(data) == ready,
+			"refs %s, board %s" % [str(canvas._bus_target_refs), str(_board_state(data))])
+	canvas._handle_bus_click(TGT_A, true)    # press 2: takes the clear back, commits
+	var by_net := _traces_by_net(data)
+	check("press 2 commits the bus the user had finished", by_net.size() == 3,
+			"got %s" % str(by_net.keys()))
+	check("…in one journal step", data.history.size() == int(ready[1]) + 1,
+			"history %d" % data.history.size())
+	# The routes are the pad-ended gesture's own: a press 2 that committed
+	# without restoring NA's target could not produce NA's copper at all.
+	var want := _expected_routes()
+	for net in ["NA", "NB", "NC"]:
+		if not by_net.has(net):
+			check("bus trace for %s exists" % net, false)
+			continue
+		_check_route(net, _points_of(by_net[net]), want[net])
+	canvas.free()
+
+	# NOT every net targeted: the same double-click still means what it has
+	# always meant — clear that net's target, write nothing.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_A, false)   # ends PATH, target NA
+	canvas._handle_bus_click(TGT_C, false)   # NC targeted; NB left open
+	var quiet := _board_state(data)
+	_double_click(canvas, TGT_A)
+	check("an UNFINISHED bus does not commit from a target pad — the clear stands",
+			canvas._bus_target_refs[0].is_empty() and _board_state(data) == quiet,
+			"refs %s, board %s" % [str(canvas._bus_target_refs), str(_board_state(data))])
+	canvas.free()
+
+	# A refused plan refuses through this gesture exactly as it does through
+	# Enter, and the target press 1 took back is not lost to the refusal.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	var msgs := _collect(canvas)
+	canvas._handle_bus_click(SRC_C, false)   # reverse pick order: the lanes cross
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_A, false)
+	quiet = _board_state(data)
+	_double_click(canvas, TGT_C)             # NC is _bus_nets[0] in this order
+	check("a refused bus refuses through this gesture too, naming both crossing nets",
+			_last(msgs).contains("NB") and _last(msgs).contains("NC")
+				and _board_state(data) == quiet,
+			"%s / %s" % [_last(msgs), str(_board_state(data))])
+	check("…and the target its first press cleared is back, not lost to the refusal",
+			canvas._bus_nets_without_targets().is_empty(),
+			"missing %s" % str(canvas._bus_nets_without_targets()))
 	canvas.free()
 
 
