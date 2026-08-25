@@ -714,11 +714,22 @@ the stale-gate recovery).
 
 ## Bus tool (`minerva_pcb_route_bus_direct`, campaign 2 epoch C unit 5, DCR `019fb572b888` S3+S4)
 
-MCP parity for the canvas **Bus** tool — a two-phase gesture (pick an ORDERED
-net list, then draw one spine polyline) that emits N real parallel Trace
-entities, mitered through bends so the pitch between tracks stays constant.
-It authors copper directly, the same altitude as Draw ▸ Trace — it does not
-touch the router or the routing workspace.
+MCP parity for the canvas **Bus** tool — a three-phase gesture (pick an
+ORDERED net list by clicking one SOURCE pad each, draw one spine polyline,
+then click one TARGET pad each) that emits N real Trace entities running the
+whole way from pad to pad: an axis-aligned breakout leg into the bundle, the
+parallel run mitered through bends so the pitch stays constant, and a leg back
+out. It authors copper directly, the same altitude as Draw ▸ Trace — it does
+not touch the router or the routing workspace.
+
+**`sources` and `targets` are required**, one `"Component.Pin"` ref per net in
+the same order as `nets`, each on the net at its own index. A bus that stops
+short of the pads is not connected copper, so there is no arg shape that asks
+for one. Each track peels off at its own departure station, and the call is
+REFUSED — naming both nets and the end — when two nets' breakout legs cannot
+be ordered without crossing. Nothing is re-sorted, rerouted or moved to
+another layer to make a crossing go away. The spine must be axis-aligned and
+must start clear of the source pads and end clear of the target pads.
 
 **Order is the caller's order**, always. `pcb_bus_geometry.gd`'s
 `cumulative_offsets` deliberately does NOT re-sort nets by any geometric
@@ -730,11 +741,13 @@ each track lands on; it is not a bug.
 
 **One call, one implementation shared with the gesture.** `panel_tools.gd`'s
 `bus_plan` (pure: per-net width resolution → `PCBData.design_rule_clearance()`
-→ `pcb_bus_geometry.pitch_between` via `cumulative_offsets` → `offset_polyline`
-per net → the inner-fold guard) and `bus_commit_plan` (mutating: N
-`create_trace_entity` calls + one `save_to_history`) are called by BOTH the
-canvas tool's commit path and this MCP tool — not two independently
-maintained copies of the same math.
+→ `pcb_bus_geometry.pitch_between` via `cumulative_offsets` → the inner-fold
+guard → `pcb_bus_geometry.bundle_routes` for each net's whole pad-to-pad
+polyline) and `bus_commit_plan` (mutating: N `create_trace_entity` calls + one
+`save_to_history`) are called by BOTH the canvas tool's commit path and the two
+MCP bus verbs — not independently maintained copies of the same math. A plan
+with no targets is the canvas's live corridor PREVIEW only; `bus_commit_plan`
+and `bus_propose_plan` both refuse it.
 
 ## Bus propose (`minerva_pcb_workspace_propose_bus`, docket `019fcac1509d`)
 
@@ -892,20 +905,29 @@ Starting on a **via** locks no destination — the focus is resolved from a pad
 reference — so the ratsnest draws unchanged for that gesture.
 
 **Draw ▸ Bus** — draws N parallel traces at once (campaign 2 epoch C unit 5,
-DCR `019fb572b888`). Two phases in one tool: **PICKING** — click a pad or a
-trace to add that net to an ORDERED list (click an already-listed net again
-to remove it; 2+ needed); **DRAWING** — press Enter to freeze the layer and
-start the spine, then click each vertex the same way Draw ▸ Trace does
-(double-click/Enter commits, Esc/right-click cancels). While drawing, N ghost
-offset tracks preview live, coloured by net, alongside the raw spine — that
-preview IS what commits, mitered through bends at clearance-or-better pitch.
-Esc/right-click is a TWO-STEP ladder: the first press cancels an in-progress
-spine back to PICKING (net list kept); a second press then clears the net
-list. Refuses to commit (spine tinted red, reason shown) when any spine
-segment is shorter than the widest track offset — that segment's inner track
-would fold back on itself. All N traces land in ONE undo step. See the "Bus
-tool" section above for `minerva_pcb_route_bus_direct`, the MCP parity tool
-calling the exact same commit path.
+DCR `019fb572b888`). Three phases in one tool, and **every phase change is a
+click** — pads, then clear board, then pads again. **SOURCES** — click a pad to
+add its net to an ORDERED list, that pad being the net's source (click a
+picked net's pad again to remove it; 2+ needed). A click on a **trace** while
+picking sources is inert and refused by name: a trace is not a bus anchor, and
+the click that ends SOURCES is also the path's first vertex, which must not
+start on existing copper. **PATH** — the first click clear of the pads and of
+copper ends SOURCES and places the path's first vertex; each further click
+places another, snapped to the axis it travels furthest along so the bus is
+Manhattan by construction. From here on a vertex over a trace is fine — the
+bus commits on its own layer. **TARGETS** — a click on a pad of one of
+the bus's own nets ends PATH and lands that net's target; every legal pad is
+ringed on screen and an illegal one is refused by name. Enter then COMMITS
+(Shift+Enter proposes ghosts) and refuses, naming the nets, any bus that still
+has a target missing — committing is its own act, never the gesture that
+finishes the bus. Esc/right-click peels ONE phase per press. While pathing, N
+ghost tracks preview live, coloured by net; once every target is picked the
+ghosts are the whole pad-to-pad routes that would commit. Refuses (spine
+tinted red, reason shown) a spine segment shorter than the widest track offset
+and any pair of nets whose breakout legs would cross. All N traces land in ONE
+undo step. See the "Bus tool" section above for
+`minerva_pcb_route_bus_direct`, the MCP parity tool calling the exact same
+commit path.
 
 **Eraser** — click an entity to delete it: one click, one undo step. Clicking
 empty space does nothing and leaves the tool armed. Esc or switching tools

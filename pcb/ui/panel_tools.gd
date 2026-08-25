@@ -8358,10 +8358,11 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 #
 # bus_plan/bus_commit_plan are the ONE shared implementation the canvas
 # gesture (pcb_canvas.gd's _commit_bus/_draw_bus_preview, which preload this
-# file) and minerva_pcb_route_bus_direct below both call — the parked suite's
-# "MCP tool result == gesture result on the same input" claim is true by
-# construction (one function, not two hand-synchronised copies), not merely
-# tested for.
+# file) and BOTH MCP bus verbs below call — "MCP tool result == gesture result
+# on the same input" is true by construction (one function, not two
+# hand-synchronised copies), not merely tested for. The pads a bus runs between
+# are part of that one plan for the same reason: a verb that grew its own
+# pad-to-pad path would be the second copy.
 #
 # Split in two on purpose: bus_plan is PURE (no mutation, no history — safe to
 # call every redraw for the live preview) and bus_commit_plan MUTATES (create
@@ -8374,6 +8375,11 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 ## detail of a standing pin never meant to be consumed past its public statics
 ## (offset_polyline/pitch_between/cumulative_offsets/MITER_LIMIT).
 const _BUS_MIN_SEGMENT_MM := 1e-6
+
+## The refusal both writers answer an INCOMPLETE plan with (bus_plan's
+## target-less corridor — see its doc). Shared so the fail-closed gate reads
+## identically wherever a plan turns into copper or a candidate.
+const _BUS_INCOMPLETE_PLAN := "This bus has no target pad for every net yet — a bus is authored pad to pad, so nothing was written."
 
 
 ## The per-net width bus_plan uses when no override is given: the widest
@@ -8404,48 +8410,100 @@ static func _bus_drop_duplicates(points: PackedVector2Array) -> PackedVector2Arr
 	return out
 
 
+## Resolve one "Component.Pin" ref per net into the pad centre a bus leg starts
+## (or ends) at.
+##
+## THE NET CHECK IS THE POINT. BusGeom.bundle_routes sees coordinates only and
+## has no way to tell that a pad belongs to the net whose track is being run to
+## it; a ref naming another net's pad would otherwise route real copper to the
+## wrong pin and pass every geometric test on the way. Checked here, in the one
+## place both the canvas gesture and the two MCP verbs learn a pad's position.
+##
+## Returns {ok, error, points} — points parallel to `nets` on success.
+static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: String) -> Dictionary:
+	if pins.size() != nets.size():
+		return {"ok": false, "points": PackedVector2Array(), "error":
+			"A bus needs one %s pin per net (%d nets, %d %s pins)." % [role, nets.size(), pins.size(), role]}
+	var points := PackedVector2Array()
+	for i in range(nets.size()):
+		var net_name: String = str(nets[i])
+		var ref: String = str(pins[i])
+		var resolved: Dictionary = _resolve_route_intent_pin(data, ref)
+		if not bool(resolved.get("ok", false)):
+			return {"ok": false, "points": PackedVector2Array(), "error":
+				"Net \"%s\"'s %s pin: %s" % [net_name, role, str(resolved.get("message", ""))]}
+		var component: String = str(resolved["component"])
+		var pin: String = str(resolved["pin"])
+		var pin_net: String = data.find_net_for_pin(component, pin)
+		if pin_net != net_name:
+			return {"ok": false, "points": PackedVector2Array(), "error":
+				"Pin %s is on net \"%s\", not \"%s\" — a bus's %s pin has to sit on the net it carries."
+					% [ref, pin_net if not pin_net.is_empty() else "(none)", net_name, role]}
+		var comp = resolved["comp"]
+		points.append(comp.get_pin_world_position(pin))
+	return {"ok": true, "error": "", "points": points}
+
+
 ## PURE. The whole bus geometry pipeline in one place: per-net width
 ## resolution -> data.design_rule_clearance() -> BusGeom.pitch_between (via
-## cumulative_offsets) -> BusGeom.offset_polyline per net -> the INNER-FOLD
-## GUARD (pcb_bus_geometry.gd:78-82's documented gap — "S4 must either refuse
-## a spine with segments shorter than the widest offset, or accept the fold";
-## this tool layer refuses, never accepts the fold).
+## cumulative_offsets) -> the INNER-FOLD GUARD (pcb_bus_geometry.gd's own
+## documented gap — "a caller must either refuse a spine with segments shorter
+## than the widest offset, or accept the fold"; this tool layer refuses, never
+## accepts the fold) -> BusGeom.bundle_routes, which returns each net's WHOLE
+## polyline from its source pad to its target pad, breakout legs included.
 ##
 ## `nets` is the ORDERED net-name array — T11: this order is never re-sorted,
-## by either this function or BusGeom.cumulative_offsets underneath it; it is
-## the caller's (the picker's, or the MCP arg's) order, verbatim.
+## by either this function or BusGeom underneath it; it is the caller's (the
+## picker's, or the MCP arg's) order, verbatim.
+##
+## `source_pins`/`target_pins` are "Component.Pin" refs, one per net in the
+## same order (see bus_pad_anchors for the net check they get).
+##
+## `target_pins` MAY BE EMPTY, and ONLY that: the INCOMPLETE plan the canvas
+## previews while the path is still being drawn and no target has been picked
+## yet. It carries the bundle's bare LANES (offset_polyline, no breakout legs)
+## so the corridor can be drawn, and reports complete == false —
+## bus_commit_plan and bus_propose_plan both refuse such a plan, so a bus that
+## does not reach its pads cannot become copper or a candidate.
+##
 ## `width_override`, when > 0.0, replaces the per-net auto-derived width for
-## EVERY net (the MCP tool's optional uniform override — the canvas gesture
+## EVERY net (the MCP tools' optional uniform override — the canvas gesture
 ## never passes one, relying on bus_net_width's per-net derivation instead).
 ##
-## Returns {ok, error, nets, widths, offsets, polylines, layer} — `error` is
-## "" when ok, else the ONE refusal string (structural refusals — too few
-## nets, an undeclared net, no layer, too few spine points — and the
-## inner-fold guard's named refusal all land in this same field, so every
-## caller checks exactly one thing).
-static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer: String, width_override: float = 0.0) -> Dictionary:
+## Returns {ok, error, complete, nets, widths, offsets, polylines, layer,
+## source_pins, target_pins} — `error` is "" when ok, else the ONE refusal
+## string. Structural refusals, an unresolvable or wrong-net pin, the
+## inner-fold guard, and every bundle_routes refusal (a diagonal spine, a pad
+## sitting inside the corridor, two nets whose breakout legs would cross) all
+## land in that same field, so every caller checks exactly one thing and can
+## show it to the user verbatim.
+static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer: String,
+		source_pins: PackedStringArray, target_pins: PackedStringArray,
+		width_override: float = 0.0) -> Dictionary:
 	if nets.size() < 2:
 		return {"ok": false, "error": "A bus needs at least 2 nets (%d given)." % nets.size()}
+	var net_names := PackedStringArray()
 	for net_name in nets:
 		if not data.has_net(str(net_name)):
 			return {"ok": false, "error": "Net \"%s\" is not declared on this board." % str(net_name)}
+		net_names.append(str(net_name))
 	if layer.is_empty():
 		return {"ok": false, "error": "No copper layer to place the bus on."}
-	# LAYER MEMBERSHIP (cold review N1): the canvas gesture always hands this
-	# function a layer that already passed trace_author_layer()'s own
-	# declared-stack check, so this predicate is normally a no-op for it — but
-	# minerva_pcb_route_bus_direct's `layer` arg is caller-supplied, untrusted
-	# text, the ONE input this function does not otherwise validate before
-	# reaching create_trace_entity. Checked HERE, in the one shared plan
-	# function, rather than only in the MCP handler, so "same validation path"
-	# stays true for both callers instead of the MCP path growing a second,
-	# parallel check. Same predicate + wording as pcb_data.trace_author_error's
-	# own layer clause (_create_zone's precedent: reuse the model's real
-	# refusal wording rather than inventing one) — checked directly rather
-	# than through that function so a garbage layer is named HERE, before any
-	# per-net width work runs, instead of surfacing only once bus_commit_plan
-	# reaches the first create_trace_entity call and wraps it in the generic
-	# "Bus was refused by the board model on net %s" message.
+	# LAYER MEMBERSHIP: the canvas gesture always hands this function a layer
+	# that already passed trace_author_layer()'s own declared-stack check, so
+	# this predicate is normally a no-op for it — but the MCP verbs' `layer`
+	# arg is caller-supplied, untrusted text, the ONE
+	# input this function does not otherwise validate before reaching
+	# create_trace_entity. Checked HERE, in the one shared plan function,
+	# rather than only in the MCP handler, so "same validation path" stays true
+	# for both callers instead of the MCP path growing a second, parallel
+	# check. Same predicate + wording as pcb_data.trace_author_error's own
+	# layer clause (_create_zone's precedent: reuse the model's real refusal
+	# wording rather than inventing one) — checked directly rather than through
+	# that function so a garbage layer is named HERE, before any per-net width
+	# work runs, instead of surfacing only once bus_commit_plan reaches the
+	# first create_trace_entity call and wraps it in the generic "Bus was
+	# refused by the board model on net %s" message.
 	var declared_layers: Array = data.layers if data else []
 	if not declared_layers.is_empty() and layer not in declared_layers:
 		return {"ok": false, "error": "Layer \"%s\" is not in the board's declared layer stack." % layer}
@@ -8463,7 +8521,9 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	# INNER-FOLD GUARD. Checked against the WIDEST |offset| in the whole bus
 	# (pcb_bus_geometry.gd's own wording), on the DEDUPLICATED spine — a
 	# duplicate point is a zero-length segment offset_polyline drops silently,
-	# not a fold (see _bus_drop_duplicates' doc).
+	# not a fold (see _bus_drop_duplicates' doc). bundle_routes runs a STRICTER
+	# room check of its own on the two end segments, which the fan-outs eat
+	# into; this one runs first because it is the refusal that names the fold.
 	var max_offset := 0.0
 	for o in offsets:
 		max_offset = maxf(max_offset, absf(float(o)))
@@ -8474,23 +8534,48 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 				"Bus spine segment %d→%d (%.3fmm) is shorter than the widest track offset (%.3fmm) — the inner track would fold back on itself. Add a waypoint or widen this corner."
 					% [i, i + 1, seg_len, max_offset]}
 
-	var polylines: Array = []
-	for offset in offsets:
-		polylines.append(BusGeom.offset_polyline(spine_points, float(offset)))
+	var sources: Dictionary = bus_pad_anchors(data, nets, source_pins, "source")
+	if not bool(sources["ok"]):
+		return {"ok": false, "error": str(sources["error"])}
+
+	if target_pins.is_empty():
+		var lanes: Array = []
+		for offset in offsets:
+			lanes.append(BusGeom.offset_polyline(spine_points, float(offset)))
+		return {
+			"ok": true, "error": "", "complete": false,
+			"nets": nets.duplicate(), "widths": widths, "offsets": offsets,
+			"polylines": lanes, "layer": layer,
+			"source_pins": source_pins, "target_pins": PackedStringArray(),
+		}
+
+	var targets: Dictionary = bus_pad_anchors(data, nets, target_pins, "target")
+	if not bool(targets["ok"]):
+		return {"ok": false, "error": str(targets["error"])}
+
+	var routed: Dictionary = BusGeom.bundle_routes(
+		spine_points, net_names, sources["points"], targets["points"], widths, clearance)
+	if not bool(routed.get("ok", false)):
+		return {"ok": false, "error": str(routed.get("error", "The bus geometry was refused."))}
 
 	return {
-		"ok": true, "error": "",
-		"nets": nets.duplicate(), "widths": widths, "offsets": offsets,
-		"polylines": polylines, "layer": layer,
+		"ok": true, "error": "", "complete": true,
+		"nets": nets.duplicate(), "widths": widths, "offsets": routed["offsets"],
+		"polylines": routed["polylines"], "layer": layer,
+		"source_pins": source_pins, "target_pins": target_pins,
+		"source_stations": routed["source_stations"], "target_stations": routed["target_stations"],
+		"source_order": routed["source_order"], "target_order": routed["target_order"],
 	}
 
 
 ## MUTATES. Call only with a plan whose ok == true (bus_plan's own refusal
-## check already ran — this function trusts it). Creates one Trace entity per
-## net via data.create_trace_entity (the SAME minted-id, fail-closed-if-
-## refused path every other authoring tool on this board uses), then ONE
-## save_to_history call for the whole batch — "one journal step for the whole
-## bus, one undo removes all N" (docket 019fb572b888 S4).
+## check already ran — this function trusts it). COMPLETENESS it does not
+## trust: a plan carrying only the corridor is refused here, so the one shape
+## bus_plan can return that must never become copper cannot, whichever caller
+## holds it. Creates one Trace entity per net via data.create_trace_entity (the
+## SAME minted-id, fail-closed-if-refused path every other authoring tool on
+## this board uses), then ONE save_to_history call for the whole batch — one
+## journal step for the whole bus, one undo removes all N.
 ##
 ## FAIL-CLOSED MID-BATCH: create_trace_entity refusing net i is defensive
 ## (bus_plan already checked has_net/layer) but handled anyway — every trace
@@ -8500,6 +8585,8 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 ## add_trace so far is only in `traces`, not a journal entry the user can act
 ## on).
 static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Dictionary:
+	if not bool(plan.get("complete", false)):
+		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN}
 	var nets: Array = plan.get("nets", [])
 	var widths: Array = plan.get("widths", [])
 	var polylines: Array = plan.get("polylines", [])
@@ -8516,13 +8603,13 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	return {"ok": true, "error": "", "trace_ids": created_ids, "nets": nets, "widths": widths, "layer": layer}
 
 
-## GHOST twin of bus_commit_plan (docket 019fcac1509d): the SAME ok'd plan, but
-## the N traces land as workspace RouteCandidates (one per net, disposition
-## "proposed") instead of board copper. NOTHING is journalled and the board is
-## not mutated — resolution happens through the normal workspace verbs
-## (minerva_pcb_workspace_commit/_reject/pin, or the canvas candidate menu),
-## so a bus finally participates in the propose → steer → accept loop (S4)
-## instead of being the one author verb that bypassed it.
+## GHOST twin of bus_commit_plan: the SAME ok'd, COMPLETE plan, but the N
+## pad-to-pad traces land as workspace RouteCandidates (one per net,
+## disposition "proposed") instead of board copper. NOTHING is journalled and
+## the board is not mutated — resolution happens through the normal workspace
+## verbs (minerva_pcb_workspace_commit/_reject/pin, or the canvas candidate
+## menu), so a bus participates in the propose → steer → accept loop instead of
+## being the one author verb that bypassed it.
 ##
 ## Each record carries the plan's exact offset polyline as raw router-shape
 ## segments ({start,end,layer}) plus a width_override — the per-net width
@@ -8536,6 +8623,8 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 	if workspace == null:
 		return {"ok": false, "error": "no routing workspace is bound to this panel (headless / before mount)"}
+	if not bool(plan.get("complete", false)):
+		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN}
 	var nets: Array = plan.get("nets", [])
 	var widths: Array = plan.get("widths", [])
 	var polylines: Array = plan.get("polylines", [])
@@ -8576,9 +8665,10 @@ static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 
 
 ## Shared arg → plan parsing for the two bus MCP handlers (_route_bus_direct
-## and _workspace_propose_bus): ordered nets + spine points + layer +
-## width_override, then bus_plan. Returns bus_plan's own {ok, error, ...} shape
-## so a parse refusal and a plan refusal surface identically.
+## and _workspace_propose_bus): ordered nets + spine points + one source and one
+## target pad per net + layer + width_override, then bus_plan. Returns
+## bus_plan's own {ok, error, ...} shape so a parse refusal and a plan refusal
+## surface identically.
 static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
 	if not args.has("nets"):
 		return {"ok": false, "error": "nets is required: an ordered array of declared net names (2+)"}
@@ -8595,6 +8685,13 @@ static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
 	if pts == null:
 		return {"ok": false, "error": "points need x_mm and y_mm"}
 
+	var sources = _bus_pin_refs(args.get("sources"))
+	if sources == null:
+		return {"ok": false, "error": "sources is required: one \"Component.Pin\" pad per net, in the same order as nets — the pad each track leaves from."}
+	var targets = _bus_pin_refs(args.get("targets"))
+	if targets == null:
+		return {"ok": false, "error": "targets is required: one \"Component.Pin\" pad per net, in the same order as nets — the pad each track runs to."}
+
 	var layer: String = str(args.get("layer", ""))
 	if layer.is_empty():
 		var declared: Array = data.layers if data else []
@@ -8604,7 +8701,22 @@ static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
 			return {"ok": false, "error": "layer is required (the board declares %d copper layers, not exactly 1)." % declared.size()}
 
 	var width_override: float = float(args.get("width_override", 0.0))
-	return bus_plan(data, nets, pts, layer, width_override)
+	return bus_plan(data, nets, pts, layer, sources, targets, width_override)
+
+
+## Parse an MCP pin-ref array ("U1.1", ...) into a PackedStringArray, or null
+## when the key is absent or not an array of refs. NULL IS NOT AN EMPTY ARRAY
+## here: an empty target_pins is bus_plan's legal "corridor only, do not
+## commit" input, which no MCP caller may reach — both verbs write, and a
+## missing key has to refuse, not silently plan a bus that stops short of the
+## pads.
+static func _bus_pin_refs(raw) -> Variant:
+	if not (raw is Array) or (raw as Array).is_empty():
+		return null
+	var refs := PackedStringArray()
+	for r in (raw as Array):
+		refs.append(str(r))
+	return refs
 
 
 ## minerva_pcb_workspace_propose_bus — the bus's PROPOSAL doorway (docket

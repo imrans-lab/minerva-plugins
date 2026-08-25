@@ -1,10 +1,6 @@
 extends SceneTree
-## The CANVAS bus tool (ToolMode.BUS, S3 picker + S4 armed tool) — campaign 2
-## epoch C, unit 5, DCR 019fb572b888.
-##
-## UN-PARKED at the epoch-C boundary (Station 1, un-park + execute): moved
-## from pcb/tests/pending/ into pcb/tests/gd/ and added to EXPECTED_SUITES —
-## it now runs as part of the normal run-gd-tests.sh sweep.
+## The CANVAS bus tool (ToolMode.BUS) — the pin-to-pin gesture and the plan the
+## two MCP bus verbs share with it.
 ##
 ## Run:
 ##   godot --headless --path src --script ../../minerva-plugins/pcb/tests/gd/test_bus_tool.gd
@@ -12,48 +8,54 @@ extends SceneTree
 ## STYLE NOTE: this suite follows test_pcb_trace_tool.gd's LIGHT rig (a bare
 ## pcb_canvas.gd instance + a StubPadHost + direct calls into the tool's own
 ## methods), not test_pcb_canvas_input_probe.gd's heavy armed-mount/Window
-## recipe — BT-93 (the trace tool, the closest precedent for a brand-new
-## canvas draw tool) is the closer analog: the bus tool, like the trace tool,
-## owns its click outright and needs no annotation-overlay/universal-select
-## machinery to exercise. "Esc/disarm grammar" below borrows the input
-## probe's ARMED/DISARM vocabulary, not its mount.
+## recipe — the bus tool, like the trace tool, owns its click outright and needs
+## no annotation-overlay/universal-select machinery to exercise.
 ##
-## WHAT IS PINNED, per the C5 brief's six requested groups:
-##   1. S3 picker order semantics (T11 — caller's order) + remove-by-reclick
-##   2. mixed-width 3-net offsets, reusing test_pcb_bus_geometry.gd's OWN
-##      pinned numbers ([1.0, 0.2, 0.2] @ 0.2 -> [-0.6, +0.2, +0.6]) rather
-##      than re-deriving the geometry
-##   3. the INNER-FOLD GUARD refusal (pcb_bus_geometry.gd:78-82's documented
-##      gap, assigned to this tool layer) — 3 WIDE nets, hand-derived offset
-##   4. single-journal-step undo (one save_to_history for the whole bus)
-##   5. MCP parity: minerva_pcb_route_bus_direct vs the canvas gesture, on the
-##      SAME input, via the shared panel_tools.bus_plan/bus_commit_plan core
-##   6. the Esc/right-click TWO-STEP ladder + the full-reset re-click disarm
-## Plus two structural pins the brief's traps name directly: the ToolMode
-## enum's append-only position, and the _zone_vertex_edit_active() exclusion
-## (the B4-U3/F1 class bug CUTOUT already fixed once, BUS repeats the fix
-## for). Plus two REGRESSION pins added at cold review (N5): a physical
-## double-click during PICKING must pick exactly once, not re-toggle the net
-## off (a real bug found and fixed this round); and the inner-fold guard
-## refusal is independently pinned on the MCP path (minerva_pcb_route_bus_
-## direct), not only proved by the gesture-side test's shared-function
-## construction.
+## ── THE ORACLES ──────────────────────────────────────────────────────────────
+## Every claim below is checked against something the tool does not author:
 ##
-## INDEPENDENT REPRESENTATION, throughout: the SERIALIZED trace entities
-## (data.to_board_dict()'s "traces") and data.history — never the tool's own
-## _bus_nets/_bus_spine_points buffers, which are the thing under test.
+##   GEOMETRY — the SERIALIZED traces (data.to_board_dict()["traces"]), compared
+##     against point lists derived by hand. The straight-bundle numbers are NOT
+##     re-derived here: they are test_bus_breakout_geometry.gd's own pinned
+##     straight bundle translated by (+20, +20), spine and pads together, so a
+##     reviewer checks a translation rather than a second derivation.
+##   NOTHING WAS COMMITTED — the serialized trace list, data.history.size() AND
+##     data.change_journal.size(), all three read either side of the gesture. A
+##     status string is not evidence that no copper landed; the board is.
+##   REFUSALS REACH THE USER — the bus_tool_message signal's text, required to
+##     NAME the offending nets/pads, not merely to be non-empty.
+##   MANHATTAN — every segment of every committed trace, measured for a non-zero
+##     dx AND dy. That test asserts on the copper, not on the spine buffer the
+##     axis snap writes.
+##   MCP PARITY — two INDEPENDENTLY driven boards (one through the canvas
+##     handlers, one through panel_tools.handle) compared point for point, plus
+##     the manifest's own required-args lists for both bus verbs.
+##
+## WHAT IS NOT PINNED HERE: the lane arithmetic (test_pcb_bus_geometry.gd) and
+## the pad-to-pad breakout geometry, bends and crossing rules
+## (test_bus_breakout_geometry.gd). This suite is about the GESTURE and the
+## wiring, and consumes those pins rather than repeating them.
 
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
 const PanelToolsScript := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
+const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
+
+## Coordinate tolerance, in mm. Vector2 is 32-bit float regardless of build
+## precision and these points are built through an offset normal at magnitudes
+## past 100mm; 1e-4 mm is 0.1 micron, four orders below any fab tolerance, so it
+## still fails every real geometry bug (a track on the wrong lane misses by
+## 0.5mm, a leg at the wrong station by the same).
+const EPS := 1e-4
 
 var _pass := 0
 var _fail := 0
 
 
 ## The pad oracle the tool asks for pads. Mirrors test_pcb_trace_tool.gd's own
-## StubPadHost verbatim (each parked/light suite owns its copy — this is a
-## private test double, not shared production code).
+## StubPadHost verbatim (each light suite owns its copy — this is a private test
+## double, not shared production code).
 class StubPadHost extends RefCounted:
 	var pads: Array = []   # [{component, pin, position}]
 	func pad_at(world_pos: Vector2, radius: float, _filter: Variant = null) -> Dictionary:
@@ -76,26 +78,25 @@ class StubMcpHost extends RefCounted:
 
 
 func _init() -> void:
-	print("=== PCB canvas BUS tool (C5, DCR 019fb572b888 S3+S4) ===\n")
+	print("=== PCB canvas BUS tool: pin to pin ===\n")
 	_test_tool_mode_enum_position()
 	_test_zone_vertex_edit_exclusion()
-	_test_picker_order_and_remove_by_reclick()
-	_test_double_click_does_not_retoggle_during_picking()
-	_test_mixed_width_offsets_reusing_geometry_pins()
-	_test_inner_fold_refusal_three_wide_nets()
-	_test_propose_doorway_teach_line()
-	# AWAITED (unlike every synchronous test above): both call
-	# panel_tools.handle(), a coroutine end to end (see panel_tools.gd's own
-	# class-doc note) because it awaits internally on other branches. A bare
-	# call without await here would still COMPILE, but the test's own
-	# post-await assertions would resume on some later, unscheduled tick —
-	# possibly after this _init() has already printed Results and quit() —
-	# and silently not count. Mirrors test_pcb_panel_tools.gd's own _init(),
-	# which awaits every helper that touches handle_tool/handle for the same
-	# reason.
-	await _test_mcp_parity()
-	await _test_mcp_inner_fold_refusal()
-	_test_esc_ladder_and_reclick_disarm()
+	_test_pin_to_pin_gesture()
+	_test_nothing_lands_until_the_bus_is_finished()
+	_test_a_trace_is_not_a_bus_anchor()
+	_test_target_pick_matches_the_pad_hit_test()
+	_test_double_click_grammar()
+	_test_manhattan_from_sloppy_clicks()
+	_test_crossing_refusal_names_both_nets()
+	_test_propose_is_pad_to_pad_and_writes_no_copper()
+	_test_manifest_requires_pads_on_both_verbs()
+	# AWAITED (unlike every synchronous test above): panel_tools.handle() is a
+	# coroutine end to end (see panel_tools.gd's own class-doc note) because it
+	# awaits internally on other branches. A bare call without await here would
+	# still COMPILE, but this test's post-await assertions would resume on some
+	# later, unscheduled tick — possibly after _init() has printed Results and
+	# quit() — and silently not count.
+	await _test_mcp_direct_verb_matches_the_gesture()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -114,44 +115,79 @@ func check(desc: String, cond: bool, detail: String = "") -> void:
 			printerr("  FAIL: %s — %s" % [desc, detail])
 
 
-## Six single-pin components (U1..U6), each its own single-pin net (N1..N6),
-## on a 2-layer board. clearance_mm 0.2 matches test_pcb_bus_geometry.gd's own
-## pinned clearance throughout, so the mixed/wide-net groups below can reuse
-## its exact numbers without re-deriving anything.
+# ── FIXTURE ───────────────────────────────────────────────────────────────────
+#
+# Three nets to bus, each with a SOURCE pad on the left and a TARGET pad on the
+# right, plus one net that is never picked (the illegal-target probe).
+#
+#   NA  U1 (10,10) → V1 (130,40)
+#   NB  U2 (10,12) → V2 (130,42)
+#   NC  U3 (10,14) → V3 (130,44)
+#   NX  W1 (60,50) → W2 (70,50)      never picked
+#
+# The board declares trace_width_mm 0.2 and clearance_mm 0.3, so every net's
+# width auto-derives to 0.2 with no seeded copper at all — the serialized trace
+# list is then exactly the bus, and pitch = 0.1 + 0.3 + 0.1 = 0.5 gives lanes
+# [-0.5, 0.0, +0.5] (pinned by test_pcb_bus_geometry.gd, consumed here).
+
 func _board() -> Dictionary:
 	return {
-		"version": 1, "name": "BusBoard", "width_mm": 80.0, "height_mm": 60.0,
+		"version": 1, "name": "BusBoard", "width_mm": 140.0, "height_mm": 60.0,
 		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
-		"design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
 		"components": [
-			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 10.0, "y_mm": 10.0,
-				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
-			{"ref": "U2", "footprint": "IC_DIP", "x_mm": 20.0, "y_mm": 10.0,
-				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
-			{"ref": "U3", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 10.0,
-				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
-			{"ref": "U4", "footprint": "IC_DIP", "x_mm": 10.0, "y_mm": 20.0,
-				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
-			{"ref": "U5", "footprint": "IC_DIP", "x_mm": 20.0, "y_mm": 20.0,
-				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
-			{"ref": "U6", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 20.0,
-				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
+			_part("U1", 10.0, 10.0), _part("U2", 10.0, 12.0), _part("U3", 10.0, 14.0),
+			_part("V1", 130.0, 40.0), _part("V2", 130.0, 42.0), _part("V3", 130.0, 44.0),
+			_part("W1", 60.0, 50.0), _part("W2", 70.0, 50.0),
 		],
 		"nets": [
-			{"name": "N1", "pins": ["U1.1"]},
-			{"name": "N2", "pins": ["U2.1"]},
-			{"name": "N3", "pins": ["U3.1"]},
-			{"name": "N4", "pins": ["U4.1"]},
-			{"name": "N5", "pins": ["U5.1"]},
-			{"name": "N6", "pins": ["U6.1"]},
+			{"name": "NA", "pins": ["U1.1", "V1.1"]},
+			{"name": "NB", "pins": ["U2.1", "V2.1"]},
+			{"name": "NC", "pins": ["U3.1", "V3.1"]},
+			{"name": "NX", "pins": ["W1.1", "W2.1"]},
 		],
 	}
 
 
-## Fresh canvas + data + stub pad host, armed to BUS. Mirrors test_pcb_trace_
-## tool.gd's own _rig(): snap disabled so authored points land exactly where
-## clicked, matching the hand-derived numbers below to the bit.
+func _part(ref: String, x: float, y: float) -> Dictionary:
+	return {"ref": ref, "footprint": "IC_DIP", "x_mm": x, "y_mm": y, "rotation_deg": 0.0,
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]}
+
+
+const SRC_A := Vector2(10.0, 10.0)
+const SRC_B := Vector2(10.0, 12.0)
+const SRC_C := Vector2(10.0, 14.0)
+const TGT_A := Vector2(130.0, 40.0)
+const TGT_B := Vector2(130.0, 42.0)
+const TGT_C := Vector2(130.0, 44.0)
+## Clear board, well outside every pad's TRACE_PAD_SNAP_MM (1.27mm) radius.
+const PATH_1 := Vector2(20.0, 20.0)
+const PATH_2 := Vector2(120.0, 20.0)
+const EMPTY := Vector2(60.0, 20.0)
+
+## The bus this fixture commits, hand-checked.
+##
+## test_bus_breakout_geometry.gd's straight bundle is spine (0,0)→(100,0) with
+## sources (-10,-10)/(-10,-8)/(-10,-6) and targets (110,20)/(110,22)/(110,24);
+## it pins source stations 1.0/0.5/0.0 and target stations 0.0/0.5/1.0 and the
+## three routes below. This fixture is that case translated by (+20, +20) —
+## spine (20,20)→(120,20), the same pads moved with it — so the routes are the
+## pinned ones plus the same offset, and nothing about the geometry is being
+## re-derived here.
+func _expected_routes() -> Dictionary:
+	return {
+		"NA": [SRC_A, Vector2(21.0, 10.0), Vector2(21.0, 19.5),
+			Vector2(120.0, 19.5), Vector2(120.0, 40.0), TGT_A],
+		"NB": [SRC_B, Vector2(20.5, 12.0), Vector2(20.5, 20.0),
+			Vector2(119.5, 20.0), Vector2(119.5, 42.0), TGT_B],
+		"NC": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.5),
+			Vector2(119.0, 20.5), Vector2(119.0, 44.0), TGT_C],
+	}
+
+
+## Fresh canvas + data + stub pad host, armed to BUS. Snap disabled so authored
+## points land exactly where clicked, matching the numbers above to the bit.
 func _rig() -> Array:
 	var canvas = PcbCanvasScript.new()
 	var data = PCBData.new()
@@ -161,32 +197,76 @@ func _rig() -> Array:
 	canvas.snap_to_grid = false
 	var host := StubPadHost.new()
 	host.pads = [
-		{"component": "U1", "pin": "1", "position": Vector2(10.0, 10.0)},
-		{"component": "U2", "pin": "1", "position": Vector2(20.0, 10.0)},
-		{"component": "U3", "pin": "1", "position": Vector2(30.0, 10.0)},
-		{"component": "U4", "pin": "1", "position": Vector2(10.0, 20.0)},
-		{"component": "U5", "pin": "1", "position": Vector2(20.0, 20.0)},
-		{"component": "U6", "pin": "1", "position": Vector2(30.0, 20.0)},
+		{"component": "U1", "pin": "1", "position": SRC_A},
+		{"component": "U2", "pin": "1", "position": SRC_B},
+		{"component": "U3", "pin": "1", "position": SRC_C},
+		{"component": "V1", "pin": "1", "position": TGT_A},
+		{"component": "V2", "pin": "1", "position": TGT_B},
+		{"component": "V3", "pin": "1", "position": TGT_C},
+		{"component": "W1", "pin": "1", "position": Vector2(60.0, 50.0)},
+		{"component": "W2", "pin": "1", "position": Vector2(70.0, 50.0)},
 	]
 	canvas.set_pin_inspector_host(host)
 	canvas.set_tool_mode(canvas.ToolMode.BUS)
 	return [canvas, data, host]
 
 
+## Pick the three sources, path the bundle, land the three targets — the whole
+## gesture up to (but NOT including) the commit.
+func _drive_full_gesture(canvas) -> void:
+	canvas._handle_bus_click(SRC_A, false)     # NA
+	canvas._handle_bus_click(SRC_B, false)     # NB
+	canvas._handle_bus_click(SRC_C, false)     # NC
+	canvas._handle_bus_click(PATH_1, false)    # ends SOURCES, vertex 1
+	canvas._handle_bus_click(PATH_2, false)    # vertex 2
+	canvas._handle_bus_click(TGT_A, false)     # ends PATH, target NA
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_C, false)
+
+
 func _serialized_traces(data) -> Array:
 	return (data.to_board_dict().get("traces", []) as Array)
 
 
-## Pre-author one existing trace per net, at the given width, so
-## _bus_net_width (delegating to panel_tools.bus_net_width) resolves that
-## width for a NEW bus joining the net — the documented "widest existing
-## trace on the net" rule. Placed well away from the pick pads / spine so it
-## cannot be hit-tested by either.
-func _seed_widths(data, nets: Array, widths: Array) -> void:
-	for i in range(nets.size()):
-		var y := 50.0 + float(i) * 2.0
-		data.create_trace_entity(str(nets[i]), "top",
-			[Vector2(50.0, y), Vector2(60.0, y)], float(widths[i]))
+func _traces_by_net(data) -> Dictionary:
+	var out := {}
+	for t in _serialized_traces(data):
+		out[str((t as Dictionary).get("net", ""))] = t
+	return out
+
+
+func _points_of(trace: Dictionary) -> Array:
+	var out: Array = []
+	for p in (trace.get("points", []) as Array):
+		var d: Dictionary = p
+		out.append(Vector2(float(d.get("x_mm", d.get("x", 0.0))), float(d.get("y_mm", d.get("y", 0.0)))))
+	return out
+
+
+func _check_route(net: String, got: Array, want: Array) -> void:
+	var ok := got.size() == want.size()
+	if ok:
+		for i in range(got.size()):
+			if (got[i] as Vector2).distance_to(want[i] as Vector2) > EPS:
+				ok = false
+				break
+	check("%s runs its whole hand-derived route, source pad to target pad" % net, ok,
+		"\n    want: %s\n    got:  %s" % [str(want), str(got)])
+
+
+## Everything an "and nothing was written" claim is measured against.
+func _board_state(data) -> Array:
+	return [_serialized_traces(data).size(), data.history.size(), data.change_journal.size()]
+
+
+func _collect(canvas) -> Array:
+	var msgs: Array = []
+	canvas.bus_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	return msgs
+
+
+func _last(msgs: Array) -> String:
+	return str(msgs[msgs.size() - 1]) if not msgs.is_empty() else "(no message)"
 
 
 # ── 0. STRUCTURAL PINS (the brief's own named traps) ──────────────────────────
@@ -206,441 +286,579 @@ func _test_zone_vertex_edit_exclusion() -> void:
 	var rig := _rig()
 	var canvas = rig[0]
 	check("with BUS armed, _zone_vertex_edit_active() is false — a zone vertex "
-			+ "handle must not draw/hit-resolve while the bus tool owns the click "
-			+ "(the exact bug class CUTOUT's own fix records)",
+			+ "handle must not draw/hit-resolve while the bus tool owns the click",
 			not canvas._zone_vertex_edit_active())
 	canvas.free()
 
 
-# ── 1. S3 PICKER: ORDER + REMOVE-BY-RECLICK ───────────────────────────────────
+# ── 1. THE WHOLE PIN-TO-PIN GESTURE ───────────────────────────────────────────
+#
+# ORACLE: the serialized traces (their exact point lists, hand-derived above),
+# data.history and data.change_journal — read BEFORE the commit as well as
+# after, because the claim under test is not only "the right copper lands" but
+# "it lands on the commit and on nothing else". The click that finishes the
+# gesture (the last target) is measured for silence on the board; only Enter
+# writes.
 
-func _test_picker_order_and_remove_by_reclick() -> void:
-	print("\n-- S3 (1): picker order is the CLICK order (T11), and a re-click removes --")
-	var rig := _rig()
-	var canvas = rig[0]
-	var msgs: Array = []
-	canvas.bus_tool_message.connect(func(t: String) -> void: msgs.append(t))
-
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas._handle_bus_click(Vector2(30.0, 10.0), false)   # N3
-	check("picked in click order: [N1, N2, N3]",
-			canvas._bus_nets == (["N1", "N2", "N3"] as Array[String]),
-			"got %s" % str(canvas._bus_nets))
-	check("the last message names all three and the count",
-			msgs[msgs.size() - 1].contains("N1") and msgs[msgs.size() - 1].contains("N2")
-				and msgs[msgs.size() - 1].contains("N3") and msgs[msgs.size() - 1].contains("3 picked"),
-			str(msgs[msgs.size() - 1]))
-
-	# Re-click an ALREADY-LISTED net's pad removes it (S3's own contract).
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2 again
-	check("re-clicking N2's pad removes it: [N1, N3]",
-			canvas._bus_nets == (["N1", "N3"] as Array[String]),
-			"got %s" % str(canvas._bus_nets))
-	check("the removal message says so", msgs[msgs.size() - 1].contains("Removed N2"),
-			str(msgs[msgs.size() - 1]))
-
-	# Re-adding N2 appends at the END (click order, not the original slot) —
-	# proves order is truly re-authored by the picker, not restored from a
-	# remembered position.
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2 a third time
-	check("re-adding N2 appends at the end: [N1, N3, N2]",
-			canvas._bus_nets == (["N1", "N3", "N2"] as Array[String]),
-			"got %s" % str(canvas._bus_nets))
-
-	# A pad on no net, and empty space, both refuse without mutating the list.
-	var before: Array = canvas._bus_nets.duplicate()
-	canvas._handle_bus_click(Vector2(70.0, 55.0), false)   # empty board
-	check("a click on empty space picks nothing",
-			canvas._bus_nets == before, "got %s" % str(canvas._bus_nets))
-	check("…and says why", msgs[msgs.size() - 1].contains("pad") and msgs[msgs.size() - 1].contains("trace"),
-			str(msgs[msgs.size() - 1]))
-
-	canvas.free()
-
-
-## 1b. REGRESSION PIN (cold review N5): a physical double-click during PICKING
-## must not re-toggle the net it picked. Godot delivers a double-click as TWO
-## separate press events — the first (double_click=false) already performs
-## the pick; without _handle_bus_click's own guard, the second
-## (double_click=true) would fall through into _handle_bus_pick_click AGAIN
-## and immediately remove the SAME net (S3's re-click-removes rule), netting
-## a double-click on a pad to "nothing picked" on what looked like one click.
-func _test_double_click_does_not_retoggle_during_picking() -> void:
-	print("\n-- S3 (1b, regression): a double-click on a pad during PICKING picks ONCE --")
-	var rig := _rig()
-	var canvas = rig[0]
-
-	# The two-event sequence a REAL physical double-click produces.
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # press 1: picks N1
-	canvas._handle_bus_click(Vector2(10.0, 10.0), true)    # press 2: double_click=true
-	check("N1 is picked exactly once, not toggled back off by the second press",
-			canvas._bus_nets == (["N1"] as Array[String]),
-			"got %s" % str(canvas._bus_nets))
-
-	# A GENUINE second, separate click (not a double-click event) on the same
-	# pad is still the documented remove-by-reclick — the guard above must not
-	# have swallowed that grammar too.
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)
-	check("…but a real second single-click on the same pad still removes it",
-			canvas._bus_nets.is_empty(), "got %s" % str(canvas._bus_nets))
-
-	canvas.free()
-
-
-# ── 2. MIXED-WIDTH 3-NET OFFSETS — reusing test_pcb_bus_geometry.gd's OWN pin ──
-
-func _test_mixed_width_offsets_reusing_geometry_pins() -> void:
-	print("\n-- S4 (2): mixed-width 3-net offsets, straight spine (translate-only) --")
-	# PINNED ELSEWHERE, reused verbatim (test_pcb_bus_geometry.gd
-	# _run_cumulative_offsets, "MIXED" block): cumulative_offsets([1.0, 0.2,
-	# 0.2], 0.2) == [-0.6, +0.2, +0.6]. Not re-derived here — only consumed.
+func _test_pin_to_pin_gesture() -> void:
+	print("\n-- (1) pads → path → pads → Enter: the bus reaches every pad --")
 	var rig := _rig()
 	var canvas = rig[0]
 	var data = rig[1]
-	_seed_widths(data, ["N1", "N2", "N3"], [1.0, 0.2, 0.2])
+	var msgs := _collect(canvas)
 
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1 (1.0mm)
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2 (0.2mm)
-	canvas._handle_bus_click(Vector2(30.0, 10.0), false)   # N3 (0.2mm)
-	canvas._start_bus_draw()
-	check("draw phase armed", canvas._bus_drawing)
+	var before := _board_state(data)
+	_drive_full_gesture(canvas)
 
-	# STRAIGHT spine (0,0)->(10,0): d=(1,0), n=(-d.y,d.x)=(0,1) — a PLAIN
-	# perpendicular translate (offset_polyline's own documented "exactly 2
-	# distinct points" case), so a track at offset `o` is simply y=o along the
-	# whole spine. No miter math is exercised or re-derived here.
-	canvas._handle_bus_click(Vector2(0.0, 0.0), false)
-	canvas._handle_bus_click(Vector2(10.0, 0.0), false)
+	check("picked in click order: [NA, NB, NC] (T11 — never re-sorted)",
+			canvas._bus_nets == (["NA", "NB", "NC"] as Array[String]),
+			"got %s" % str(canvas._bus_nets))
+	check("the gesture is FINISHED — every net has a target",
+			canvas._bus_target_refs == (["V1.1", "V2.1", "V3.1"] as Array[String]),
+			"got %s" % str(canvas._bus_target_refs))
+	check("…and finishing it wrote NOTHING: traces, history and journal all unmoved",
+			_board_state(data) == before,
+			"before=%s after=%s" % [str(before), str(_board_state(data))])
+	check("the tool says it is ready to commit, naming the verb",
+			_last(msgs).contains("Enter") and _last(msgs).contains("every net has a target"),
+			_last(msgs))
+
 	canvas._commit_bus()
 
-	var traces := _serialized_traces(data)
-	check("3 new traces landed (seed traces at y=50/52/54 are also present, so 6 total)",
-			traces.size() == 6, "got %d" % traces.size())
-
-	var by_net := {}
-	for t in traces:
-		var pts: Array = t.get("points", [])
-		# Only the newly-committed bus traces run through (0,0)/(10,0) — the
-		# seeded width traces sit at y>=50 and are excluded here so each net
-		# maps to exactly the trace this test cares about.
-		if pts.size() == 2 and float(pts[0].get("y_mm", pts[0].get("y", 999.0))) < 10.0:
-			by_net[str(t.get("net", ""))] = t
-
-	check("all three bus nets landed", by_net.size() == 3, "got %s" % str(by_net.keys()))
-	var expect := {"N1": -0.6, "N2": 0.2, "N3": 0.6}
-	var expect_width := {"N1": 1.0, "N2": 0.2, "N3": 0.2}
-	for net in expect.keys():
+	var by_net := _traces_by_net(data)
+	check("3 traces landed, one per net, and nothing else",
+			_serialized_traces(data).size() == 3 and by_net.size() == 3,
+			"got %s" % str(by_net.keys()))
+	var want := _expected_routes()
+	for net in ["NA", "NB", "NC"]:
 		if not by_net.has(net):
 			check("bus trace for %s exists" % net, false)
 			continue
-		var t: Dictionary = by_net[net]
-		var pts: Array = t.get("points", [])
-		var y0 := float(pts[0].get("y_mm", pts[0].get("y", 0.0)))
-		var y1 := float(pts[1].get("y_mm", pts[1].get("y", 0.0)))
-		check("%s track sits at y=%.3f (both points)" % [net, float(expect[net])],
-				is_equal_approx(y0, float(expect[net])) and is_equal_approx(y1, float(expect[net])),
-				"got y0=%.4f y1=%.4f want %.4f" % [y0, y1, float(expect[net])])
-		check("%s keeps its seeded width %.2f" % [net, float(expect_width[net])],
-				is_equal_approx(float(t.get("width_mm", t.get("width", 0.0))), float(expect_width[net])),
-				"got %s" % str(t.get("width_mm", t.get("width", 0.0))))
+		_check_route(net, _points_of(by_net[net]), want[net])
+		check("%s carries the board's declared 0.2mm width" % net,
+				is_equal_approx(float((by_net[net] as Dictionary).get("width_mm",
+					(by_net[net] as Dictionary).get("width", 0.0))), 0.2))
+	if by_net.size() == 3:
+		var ends := {"NA": [SRC_A, TGT_A], "NB": [SRC_B, TGT_B], "NC": [SRC_C, TGT_C]}
+		var on_source := true
+		var on_target := true
+		for net in ends.keys():
+			var pts := _points_of(by_net[net])
+			var want_pads: Array = ends[net]
+			on_source = on_source and (pts[0] as Vector2).distance_to(want_pads[0] as Vector2) <= EPS
+			on_target = on_target and (pts[pts.size() - 1] as Vector2).distance_to(want_pads[1] as Vector2) <= EPS
+		check("every route STARTS on its own source pad", on_source)
+		check("…and ENDS on its own target pad", on_target)
 
-	canvas.free()
-
-
-# ── 3. INNER-FOLD GUARD — 3 WIDE nets, a short segment, hand-derived offset ────
-
-func _test_inner_fold_refusal_three_wide_nets() -> void:
-	print("\n-- S4 (3): the inner-fold guard refuses a segment shorter than the widest offset --")
-	# HAND-DERIVED (uniform, translate-only spine — the same simple formula
-	# test_pcb_bus_geometry.gd's own "uniform trio" pins, at a different
-	# width so the class read as genuinely WIDE nets):
-	#   pitch_between(2.0, 2.0, 0.2) = 1.0 + 0.2 + 1.0 = 2.2
-	#   cumulative_offsets([2.0, 2.0, 2.0], 0.2): positions [0, 2.2, 4.4],
-	#   centre 2.2 -> [-2.2, 0.0, +2.2]. max|offset| = 2.2.
-	var rig := _rig()
-	var canvas = rig[0]
-	var data = rig[1]
-	_seed_widths(data, ["N1", "N2", "N3"], [2.0, 2.0, 2.0])
-
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas._handle_bus_click(Vector2(30.0, 10.0), false)   # N3
-	canvas._start_bus_draw()
-
-	# Spine (0,0)->(10,0)->(10,1.0): segment 1->2 has length 1.000mm, which is
-	# SHORTER than the widest offset 2.200mm — the inner track (at -2.2 or
-	# +2.2) would fold back on itself on that segment.
-	canvas._handle_bus_click(Vector2(0.0, 0.0), false)
-	canvas._handle_bus_click(Vector2(10.0, 0.0), false)
-	canvas._handle_bus_click(Vector2(10.0, 1.0), false)
-	check("3 spine points placed", canvas._bus_spine_points.size() == 3,
-			"got %d" % canvas._bus_spine_points.size())
-
-	var msgs: Array = []
-	canvas.bus_tool_message.connect(func(t: String) -> void: msgs.append(t))
-	var traces_before := _serialized_traces(data).size()
-	canvas._commit_bus()
-
-	check("commit was refused — no new traces landed",
-			_serialized_traces(data).size() == traces_before,
-			"before=%d after=%d" % [traces_before, _serialized_traces(data).size()])
-	check("still drawing — the spine is KEPT, not thrown away (another click/wider "
-			+ "corner is the fix, not a redraw from scratch)",
-			canvas._bus_drawing and canvas._bus_spine_points.size() == 3)
-	check("the refusal NAMES the segment (1→2) and the offending offset (2.200mm)",
-			not msgs.is_empty() and msgs[msgs.size() - 1].contains("segment 1")
-				and msgs[msgs.size() - 1].contains("2.200")
-				and msgs[msgs.size() - 1].contains("1.000")
-				and msgs[msgs.size() - 1].contains("fold"),
-			str(msgs[msgs.size() - 1]) if not msgs.is_empty() else "(no message)")
-
-	canvas.free()
-
-
-## 3b. REGRESSION PIN (cold review N5): the inner-fold guard is inside
-## panel_tools.bus_plan, the ONE shared implementation — but the gesture path
-## above only PROVES that by construction, not by an independent exercise of
-## the MCP call. This pins the MCP side directly: if the guard were ever
-## bypassed on that path alone (e.g. a future edit routes
-## minerva_pcb_route_bus_direct around bus_plan), this test reds
-## independently of the gesture test above. SAME hand-derived numbers as
-## group 3 (3x2.0mm @ 0.2mm clearance -> offsets [-2.2, 0, 2.2], the short
-## segment 1->2 at 1.000mm) — reused, not re-derived.
-func _test_mcp_inner_fold_refusal() -> void:
-	print("\n-- (3b, regression) MCP-side inner-fold refusal, independent of the gesture --")
-	var data := PCBData.new()
-	data.from_board_dict(_board())
-	_seed_widths(data, ["N1", "N2", "N3"], [2.0, 2.0, 2.0])
-	var host := StubMcpHost.new()
-	host.data = data
-
-	var args := {
-		"editor_name": "PCB1",
-		"nets": ["N1", "N2", "N3"],
-		"points": [{"x_mm": 0.0, "y_mm": 0.0}, {"x_mm": 10.0, "y_mm": 0.0}, {"x_mm": 10.0, "y_mm": 1.0}],
-		"layer": "top",
-	}
-	var traces_before := _serialized_traces(data).size()
-	var result: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", args)
-
-	check("the MCP call itself reports failure",
-			not bool(result.get("success", true)), str(result))
-	check("the error NAMES the segment (1→2) and the offending offset (2.200mm), "
-			+ "the SAME wording the gesture's refusal carries",
-			str(result.get("error", "")).contains("segment 1")
-				and str(result.get("error", "")).contains("2.200")
-				and str(result.get("error", "")).contains("1.000")
-				and str(result.get("error", "")).contains("fold"),
-			str(result.get("error", "")))
-	check("no trace was created via the MCP path either",
-			_serialized_traces(data).size() == traces_before,
-			"before=%d after=%d" % [traces_before, _serialized_traces(data).size()])
-
-
-# ── 4. SINGLE-JOURNAL-STEP UNDO ────────────────────────────────────────────────
-
-func _test_single_journal_step_undo() -> void:
-	print("\n-- S4 (4): the whole bus is ONE undo step (journal delta 1) --")
-	var rig := _rig()
-	var canvas = rig[0]
-	var data = rig[1]
-
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas._handle_bus_click(Vector2(30.0, 10.0), false)   # N3
-	canvas._start_bus_draw()
-	canvas._handle_bus_click(Vector2(0.0, 0.0), false)
-	canvas._handle_bus_click(Vector2(10.0, 0.0), false)
-
-	var traces_before: int = data.get_trace_count()
-	var history_before: int = data.history.size()
-	canvas._commit_bus()
-
-	check("3 traces landed (one per net)", data.get_trace_count() == traces_before + 3,
-			"before=%d after=%d" % [traces_before, data.get_trace_count()])
 	check("history grew by EXACTLY ONE step for the whole bus (journal delta 1)",
-			data.history.size() == history_before + 1,
-			"before=%d after=%d" % [history_before, data.history.size()])
-	check("the tool disarmed its draw state after commit",
-			not canvas._bus_drawing and canvas._bus_nets.is_empty())
-
-	check("undo() removes ALL 3 traces together", data.undo(),
-			"undo() returned false")
-	check("trace count is back to the pre-bus count",
-			data.get_trace_count() == traces_before,
-			"got %d want %d" % [data.get_trace_count(), traces_before])
+			data.history.size() == int(before[1]) + 1,
+			"before=%d after=%d" % [int(before[1]), data.history.size()])
+	check("the tool disarmed itself after committing",
+			canvas._bus_nets.is_empty() and canvas._bus_spine_points.is_empty()
+				and canvas._bus_target_refs.is_empty())
+	check("undo() removes ALL 3 traces together", data.undo() and data.get_trace_count() == 0,
+			"got %d traces" % data.get_trace_count())
 
 	canvas.free()
 
 
-# ── 5. MCP PARITY: minerva_pcb_route_bus_direct == the canvas gesture ─────────
+# ── 2. NOTHING LANDS UNTIL THE BUS IS FINISHED ────────────────────────────────
+#
+# ORACLE: the whole board state triple, sampled after every gesture that must
+# not write — Enter in each unfinished phase, an illegal target pad, and the
+# Esc ladder all the way out. A status string can lie about what happened; the
+# trace list, the history and the change journal cannot.
 
-func _test_mcp_parity() -> void:
-	print("\n-- (5) MCP parity: minerva_pcb_route_bus_direct == the canvas gesture on the same input --")
-	# Board A: driven through the canvas gesture.
-	var rig_a := _rig()
-	var canvas_a = rig_a[0]
-	var data_a = rig_a[1]
-	canvas_a._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas_a._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas_a._handle_bus_click(Vector2(30.0, 10.0), false)   # N3
-	canvas_a._start_bus_draw()
-	canvas_a._handle_bus_click(Vector2(0.0, 0.0), false)
-	canvas_a._handle_bus_click(Vector2(10.0, 0.0), false)
+func _test_nothing_lands_until_the_bus_is_finished() -> void:
+	print("\n-- (2) an unfinished bus cannot be committed, by any route --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	var quiet := _board_state(data)
+
+	# Enter with nothing picked at all.
+	canvas._commit_bus()
+	check("Enter while picking sources writes nothing", _board_state(data) == quiet)
+	check("…and names the verb the user owes", _last(msgs).contains("pads"), _last(msgs))
+
+	# Enter with a path but no targets.
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._commit_bus()
+	check("Enter with a path but no targets writes nothing", _board_state(data) == quiet,
+			str(_board_state(data)))
+	check("…and says a target pad is what is missing",
+			_last(msgs).contains("target"), _last(msgs))
+
+	# A pad on a net that is not in the bus is refused BY NAME and does not end
+	# the PATH phase — checked behaviourally: the next empty click still places
+	# a spine vertex instead of answering with the targets line.
+	var msg_count := msgs.size()
+	canvas._handle_bus_click(Vector2(60.0, 50.0), false)   # W1.1, net NX
+	check("an off-bus pad is refused, naming the pad AND its net",
+			_last(msgs).contains("W1.1") and _last(msgs).contains("NX"), _last(msgs))
+	check("…and the tool is still pathing (phase unchanged)",
+			canvas._bus_phase == canvas.BusPhase.PATH)
+	msg_count = msgs.size()
+	canvas._handle_bus_click(Vector2(60.0, 20.0), false)
+	check("…so the next clear-board click still places a vertex, silently",
+			msgs.size() == msg_count and canvas._bus_spine_points.size() == 3,
+			"messages +%d, %d spine points" % [msgs.size() - msg_count, canvas._bus_spine_points.size()])
+
+	# A net's OWN source pad is not a legal target for it.
+	canvas._handle_bus_click(SRC_B, false)
+	check("a net's own source pad is refused as its target, by name",
+			_last(msgs).contains("U2.1") and _last(msgs).contains("source"), _last(msgs))
+
+	# Two of three targets: still not committable.
+	canvas._handle_bus_click(TGT_A, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._commit_bus()
+	check("Enter with 2 of 3 nets targeted writes nothing", _board_state(data) == quiet,
+			str(_board_state(data)))
+	check("…and names the net still missing one",
+			_last(msgs).contains("NC"), _last(msgs))
+
+	# The Esc ladder peels one phase per press and abandons without copper.
+	canvas._cancel_bus_step(true)
+	check("Esc 1: targets dropped, path kept",
+			canvas._bus_spine_points.size() == 3 and canvas._bus_target_refs == (["", "", ""] as Array[String]),
+			"%d points, targets %s" % [canvas._bus_spine_points.size(), str(canvas._bus_target_refs)])
+	canvas._cancel_bus_step(true)
+	check("Esc 2: path dropped, the picked nets kept in order",
+			canvas._bus_spine_points.is_empty()
+				and canvas._bus_nets == (["NA", "NB", "NC"] as Array[String]))
+	canvas._cancel_bus_step(true)
+	check("Esc 3: the picks are cleared too", canvas._bus_nets.is_empty())
+	var msg_count_end := msgs.size()
+	canvas._cancel_bus_step(true)
+	check("Esc 4 with nothing armed is a true no-op (no message)", msgs.size() == msg_count_end)
+	check("the whole abandoned gesture wrote NOTHING to the board",
+			_board_state(data) == quiet, str(_board_state(data)))
+
+	# And a plain tool switch abandons an armed bus silently, still writing
+	# nothing.
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(PATH_1, false)
+	var msg_count_switch := msgs.size()
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	check("a plain tool switch resets every phase's state",
+			canvas._bus_nets.is_empty() and canvas._bus_spine_points.is_empty()
+				and canvas._bus_phase == canvas.BusPhase.SOURCES)
+	check("…silently (the user chose the switch)", msgs.size() == msg_count_switch)
+	check("…and still nothing on the board", _board_state(data) == quiet)
+
+	canvas.free()
+
+
+# ── 3. COPPER IS NOT CLEAR BOARD (SOURCES ONLY) ───────────────────────────────
+#
+# The click that ends SOURCES becomes the path's FIRST VERTEX, so "not a pad"
+# cannot mean "start the path here" when the thing under the cursor is a trace:
+# that one click would both change phase and drop a vertex on existing copper.
+# In SOURCES a trace click is inert and says so. From PATH on the rule is the
+# opposite, deliberately — the bus commits on its own frozen layer, so a spine
+# crossing copper is legitimate; both halves are pinned here.
+#
+# ORACLE: the phase enum and the spine array (the two things a phase change
+# would move), the emitted text, and the board-state triple.
+
+func _test_a_trace_is_not_a_bus_anchor() -> void:
+	print("\n-- (3) a trace click while picking sources is inert --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	# Copper on the never-picked net, crossing the spine's own line at x=60 and
+	# well clear of every pad's 1.27mm snap radius.
+	data.create_trace_entity("NX", "top",
+		PackedVector2Array([Vector2(60.0, 5.0), Vector2(60.0, 45.0)]), 0.2)
+	var quiet := _board_state(data)
+	var on_copper := Vector2(60.0, 20.0)
+
+	check("the seeded trace really is under that point — measured with the same "
+			+ "hit test the tool asks, not assumed",
+			canvas._trace_at(on_copper) != "", "_trace_at found nothing")
+	check("…and no pad is", canvas._trace_pad_at(on_copper).is_empty())
+
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(on_copper, false)
+	check("the phase did not advance — still picking sources",
+			canvas._bus_phase == canvas.BusPhase.SOURCES,
+			"phase %d" % canvas._bus_phase)
+	check("…and no vertex was placed", canvas._bus_spine_points.is_empty(),
+			"%d spine points" % canvas._bus_spine_points.size())
+	check("…refused BY NAME: a trace is not a bus anchor, and a click clear of "
+			+ "the copper is what starts the path",
+			_last(msgs).contains("trace") and _last(msgs).contains("not a bus anchor")
+				and _last(msgs).contains("clear of the copper"), _last(msgs))
+	check("…the picks are untouched", canvas._bus_nets == (["NA", "NB"] as Array[String]),
+			"got %s" % str(canvas._bus_nets))
+	check("…and nothing was written", _board_state(data) == quiet, str(_board_state(data)))
+
+	# The PATH phase is PERMISSIVE, and that is the whole scope of the rule.
+	canvas._handle_bus_click(PATH_1, false)
+	var msg_count := msgs.size()
+	canvas._handle_bus_click(on_copper, false)
+	check("once pathing, a vertex over that same copper is placed, silently",
+			canvas._bus_spine_points.size() == 2 and msgs.size() == msg_count,
+			"%d points, messages +%d" % [canvas._bus_spine_points.size(), msgs.size() - msg_count])
+	if canvas._bus_spine_points.size() == 2:
+		check("…and it really did land ON the trace (the axis snap holds y=20)",
+				canvas._trace_at(canvas._bus_spine_points[1]) != "",
+				"vertex %s" % str(canvas._bus_spine_points[1]))
+
+	canvas.free()
+
+
+# ── 4. THE TARGET PICK AGREES WITH THE PAD HIT TEST ───────────────────────────
+#
+# A ringed pad must be clickable anywhere the pad hit test accepts it: the
+# target pick's radius IS the one _trace_pad_at hands the pad host
+# (TRACE_PAD_SNAP_MM), so a click near the edge of that radius lands the target
+# instead of falling through to the refusal. The refusal's own half is pinned
+# with it — the pad it names is the pad the hit test resolved, so "that is this
+# net's own source" is only ever said about a pad that is.
+#
+# ORACLE: _trace_pad_at's own answer at the same point (the pick is measured
+# against the hit test, not against a re-derived distance), plus the target
+# array and the emitted text.
+
+func _test_target_pick_matches_the_pad_hit_test() -> void:
+	print("\n-- (4) an off-centre click on a legal pad is accepted, not refused --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var msgs := _collect(canvas)
+
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+
+	# 1.2mm off V2.1's centre: inside the 1.27mm the pad hit test is asked for,
+	# and 2.3mm from V1.1/V3.1, so exactly one pad can claim it.
+	var off_centre := TGT_B + Vector2(1.2, 0.0)
+	check("the PAD hit test resolves that click to V2.1",
+			str(canvas._trace_pad_at(off_centre).get("ref", "")) == "V2.1",
+			str(canvas._trace_pad_at(off_centre)))
+	canvas._handle_bus_click(off_centre, false)
+	check("…so the pick accepts it as NB's target rather than refusing it",
+			canvas._bus_target_refs[1] == "V2.1", "targets %s" % str(canvas._bus_target_refs))
+	check("…naming the net and the pad", _last(msgs).contains("NB")
+			and _last(msgs).contains("V2.1"), _last(msgs))
+
+	# And where the pick DOES refuse, it refuses the pad the hit test resolved.
+	var off_source := SRC_B + Vector2(1.2, 0.0)
+	check("the PAD hit test resolves this one to U2.1 — NB's own source",
+			str(canvas._trace_pad_at(off_source).get("ref", "")) == "U2.1",
+			str(canvas._trace_pad_at(off_source)))
+	canvas._handle_bus_click(off_source, false)
+	check("…and THAT is the pad the refusal names, as NB's source",
+			_last(msgs).contains("U2.1") and _last(msgs).contains("source"), _last(msgs))
+	check("…leaving the target already landed alone", canvas._bus_target_refs[1] == "V2.1",
+			"targets %s" % str(canvas._bus_target_refs))
+
+	canvas.free()
+
+
+# ── 5. THE DOUBLE-CLICK GRAMMAR ───────────────────────────────────────────────
+#
+# Godot delivers a physical double-click as TWO press events; the second
+# carries double_click=true. The picking guard that survived from the two-phase
+# tool is pinned here alongside the new rule that a double-click ON a pad is
+# inert, so the press that lands the last target can never also commit it.
+#
+# ORACLE: the picked-net list for the first claim, the board-state triple for
+# the other two.
+
+func _test_double_click_grammar() -> void:
+	print("\n-- (5) double-click: never re-toggles a pick, never commits from a pad --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+
+	canvas._handle_bus_click(SRC_A, false)   # press 1 picks NA
+	canvas._handle_bus_click(SRC_A, true)    # press 2 of the same double-click
+	check("NA is picked exactly once, not toggled back off by the second press",
+			canvas._bus_nets == (["NA"] as Array[String]), "got %s" % str(canvas._bus_nets))
+	canvas._handle_bus_click(SRC_A, false)
+	check("…but a real second single-click on the same pad still removes it",
+			canvas._bus_nets.is_empty(), "got %s" % str(canvas._bus_nets))
+
+	_drive_full_gesture(canvas)
+	var ready := _board_state(data)
+	canvas._handle_bus_click(TGT_C, true)
+	check("a double-click ON a pad with the bus finished commits NOTHING — the "
+			+ "press that lands a target can never also write copper",
+			_board_state(data) == ready, str(_board_state(data)))
+
+	canvas._handle_bus_click(EMPTY, true)
+	check("a double-click clear of the pads DOES commit (the mouse twin of Enter)",
+			_serialized_traces(data).size() == 3, "got %d" % _serialized_traces(data).size())
+	check("…in one journal step", data.history.size() == int(ready[1]) + 1)
+
+	canvas.free()
+
+
+# ── 6. MANHATTAN BY CONSTRUCTION ──────────────────────────────────────────────
+#
+# ORACLE: every segment of the COMMITTED copper, measured for a simultaneous
+# non-zero dx and dy — not the spine buffer, which is what the axis snap writes.
+# The sloppy click is 3mm off axis over a 100mm run; if the snap were dropped,
+# bundle_routes would refuse the diagonal outright and nothing would land, and
+# if it merely rounded, the routes would miss their hand-derived points.
+
+func _test_manhattan_from_sloppy_clicks() -> void:
+	print("\n-- (6) an off-axis click still makes axis-aligned copper --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(Vector2(120.0, 23.0), false)   # 3mm off the axis
+	canvas._handle_bus_click(TGT_A, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._commit_bus()
+
+	var by_net := _traces_by_net(data)
+	check("the bus committed despite the off-axis click", by_net.size() == 3,
+			"got %s" % str(by_net.keys()))
+	var diagonals := 0
+	for net in by_net.keys():
+		var pts := _points_of(by_net[net])
+		for i in range(pts.size() - 1):
+			var d: Vector2 = (pts[i + 1] as Vector2) - (pts[i] as Vector2)
+			if absf(d.x) > EPS and absf(d.y) > EPS:
+				diagonals += 1
+	check("no committed segment moves on both axes (90-degree bends only)",
+			diagonals == 0, "%d diagonal segments" % diagonals)
+	var want := _expected_routes()
+	for net in ["NA", "NB", "NC"]:
+		if by_net.has(net):
+			_check_route(net, _points_of(by_net[net]), want[net])
+
+	canvas.free()
+
+
+# ── 7. A CROSSING IS REFUSED, BY NAME, AND STAYS REFUSED ──────────────────────
+#
+# Picking the same three nets in the REVERSE perpendicular order puts NB's lane
+# inside NC's breakout band and NC's pad inside NB's: each would have to leave
+# the bundle before the other. pcb_bus_geometry refuses that rather than
+# re-sorting the picks, and this pins that the refusal reaches the user with
+# both nets named — and that the gesture is KEPT, so the fix is one more click.
+#
+# ORACLE: the emitted message's text plus the board-state triple.
+
+func _test_crossing_refusal_names_both_nets() -> void:
+	print("\n-- (7) two nets that cannot both go first: named refusal, no copper --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	var quiet := _board_state(data)
+
+	canvas._handle_bus_click(SRC_C, false)   # NC first — reverse of the lanes
+	canvas._handle_bus_click(SRC_B, false)   # NB
+	canvas._handle_bus_click(SRC_A, false)   # NA
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_A, false)
+	canvas._commit_bus()
+
+	check("the refusal names BOTH nets that cross",
+			_last(msgs).contains("NB") and _last(msgs).contains("NC"), _last(msgs))
+	check("…and which END of the bus they cross at", _last(msgs).contains("source"), _last(msgs))
+	check("…and nothing was written", _board_state(data) == quiet, str(_board_state(data)))
+	check("the gesture is KEPT so the user can fix it — picks, path and targets all intact",
+			canvas._bus_nets.size() == 3 and canvas._bus_spine_points.size() == 2
+				and canvas._bus_nets_without_targets().is_empty())
+
+	canvas.free()
+
+
+# ── 8. THE PROPOSE PATH INHERITS THE SAME PAD-TO-PAD PLAN ─────────────────────
+#
+# bus_propose_plan is the function BOTH the canvas Shift+Enter and
+# minerva_pcb_workspace_propose_bus call. Pinned here directly, with a real
+# RoutingWorkspace, because the geometry a ghost carries is the geometry a
+# commit would carry.
+#
+# ORACLE: the candidate segments' own endpoints (first point of the first
+# segment, last point of the last) against the pads, and the board-state triple
+# for "a proposal is not a write".
+
+func _test_propose_is_pad_to_pad_and_writes_no_copper() -> void:
+	print("\n-- (8) proposing lands pad-to-pad ghosts and touches no copper --")
+	var data = PCBData.new()
+	data.from_board_dict(_board())
+	var ws = PcbRoutingWorkspace.new()
+	var quiet := _board_state(data)
+
+	var incomplete: Dictionary = PanelToolsScript.bus_plan(
+		data, ["NA", "NB", "NC"], PackedVector2Array([PATH_1, PATH_2]), "top",
+		PackedStringArray(["U1.1", "U2.1", "U3.1"]), PackedStringArray())
+	check("a target-less plan is OK to preview but reports complete == false",
+			bool(incomplete.get("ok", false)) and not bool(incomplete.get("complete", true)),
+			str(incomplete.get("error", "")))
+	var refused: Dictionary = PanelToolsScript.bus_propose_plan(ws, data, incomplete)
+	check("…and proposing it is REFUSED", not bool(refused.get("ok", true)),
+			str(refused.get("error", "")))
+	check("…with nothing ingested", ws.list_candidates().is_empty())
+
+	var plan: Dictionary = PanelToolsScript.bus_plan(
+		data, ["NA", "NB", "NC"], PackedVector2Array([PATH_1, PATH_2]), "top",
+		PackedStringArray(["U1.1", "U2.1", "U3.1"]), PackedStringArray(["V1.1", "V2.1", "V3.1"]))
+	check("the finished plan is complete", bool(plan.get("ok", false)) and bool(plan.get("complete", false)),
+			str(plan.get("error", "")))
+
+	var out: Dictionary = PanelToolsScript.bus_propose_plan(ws, data, plan)
+	check("3 ghost candidates landed", bool(out.get("ok", false)) and int(out.get("proposed", 0)) == 3,
+			str(out.get("error", "")))
+	check("the board is untouched — no copper, no history, no journal entry",
+			_board_state(data) == quiet, str(_board_state(data)))
+
+	var pads := {"NA": [SRC_A, TGT_A], "NB": [SRC_B, TGT_B], "NC": [SRC_C, TGT_C]}
+	for cand in ws.list_candidates():
+		var segs: Array = cand.segments
+		if segs.is_empty():
+			check("candidate for %s has segments" % str(cand.net), false)
+			continue
+		var first: Array = (segs[0] as Dictionary).get("points", [])
+		var last: Array = (segs[segs.size() - 1] as Dictionary).get("points", [])
+		var want: Array = pads.get(str(cand.net), [Vector2.ZERO, Vector2.ZERO])
+		check("%s's ghost starts on its source pad and ends on its target pad" % str(cand.net),
+				(first[0] as Vector2).distance_to(want[0]) <= EPS
+					and (last[last.size() - 1] as Vector2).distance_to(want[1]) <= EPS,
+				"first=%s last=%s want=%s" % [str(first[0]), str(last[last.size() - 1]), str(want)])
+
+
+# ── 9. BOTH MCP VERBS DEMAND THE PADS ─────────────────────────────────────────
+#
+# ORACLE: the shipped manifest itself. The two verbs share one arg parser, so
+# the schema is where a caller learns the contract — and a verb that still
+# advertised nets+points alone would be advertising a bus that stops short of
+# the pads.
+
+func _test_manifest_requires_pads_on_both_verbs() -> void:
+	print("\n-- (9) the manifest requires sources+targets on both bus verbs --")
+	var text := FileAccess.get_file_as_string(MANIFEST_PATH)
+	check("manifest.json is readable", not text.is_empty(), MANIFEST_PATH)
+	if text.is_empty():
+		return
+	var parsed = JSON.parse_string(text)
+	check("manifest.json parses", parsed is Dictionary)
+	if not (parsed is Dictionary):
+		return
+	var wanted := {"minerva_pcb_route_bus_direct": false, "minerva_pcb_workspace_propose_bus": false}
+	for tool in ((parsed as Dictionary).get("tools", []) as Array):
+		var name := str((tool as Dictionary).get("name", ""))
+		if not wanted.has(name):
+			continue
+		wanted[name] = true
+		var required: Array = (((tool as Dictionary).get("input_schema", {}) as Dictionary).get("required", []) as Array)
+		var props: Dictionary = ((tool as Dictionary).get("input_schema", {}) as Dictionary).get("properties", {})
+		check("%s requires sources AND targets" % name,
+				"sources" in required and "targets" in required, str(required))
+		check("%s documents both as pin-ref arrays" % name,
+				props.has("sources") and props.has("targets"))
+	for name in wanted.keys():
+		check("%s is registered" % name, bool(wanted[name]))
+
+
+# ── 10. MCP PARITY: THE DIRECT VERB == THE GESTURE ─────────────────────────────
+#
+# ORACLE: two boards driven independently — one through the canvas handlers,
+# one through panel_tools.handle — compared point for point. Same fixture, same
+# ordered nets, same pads, same spine.
+
+func _test_mcp_direct_verb_matches_the_gesture() -> void:
+	print("\n-- (10) minerva_pcb_route_bus_direct == the canvas gesture, pad to pad --")
+	var rig := _rig()
+	var canvas_a = rig[0]
+	var data_a = rig[1]
+	_drive_full_gesture(canvas_a)
 	canvas_a._commit_bus()
-	var traces_a := _serialized_traces(data_a)
+	var by_net_a := _traces_by_net(data_a)
 
-	# Board B: IDENTICAL fixture, driven through the MCP tool with the SAME
-	# ordered net list, the SAME spine, and the SAME layer the canvas gesture
-	# resolved to (trace_author_layer() on this rig's "all" filter -> "top",
-	# TRACE_DEFAULT_LAYER — named explicitly here since an MCP call has no
-	# toolbar to fall back on).
 	var data_b := PCBData.new()
 	data_b.from_board_dict(_board())
 	var host_b := StubMcpHost.new()
 	host_b.data = data_b
-	var args := {
-		"editor_name": "PCB1",
-		"nets": ["N1", "N2", "N3"],
-		"points": [{"x_mm": 0.0, "y_mm": 0.0}, {"x_mm": 10.0, "y_mm": 0.0}],
+	var quiet := _board_state(data_b)
+
+	# The pads are not optional on this verb any more: a call without them is
+	# the bus that stops short of the copper it is meant to reach.
+	var no_pads: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
 		"layer": "top",
-	}
-	var result: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", args)
+	})
+	check("a call with no sources/targets is refused", not bool(no_pads.get("success", true)),
+			str(no_pads))
+	check("…naming the missing arg", str(no_pads.get("error", "")).contains("sources"),
+			str(no_pads.get("error", "")))
+	check("…and writing nothing", _board_state(data_b) == quiet, str(_board_state(data_b)))
+
+	# A pad that is not on the net it is offered for is refused too — the one
+	# check the geometry underneath cannot make for itself.
+	var wrong_net: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "W2.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+		"layer": "top",
+	})
+	check("a target pad on the WRONG net is refused, naming pad and both nets",
+			not bool(wrong_net.get("success", true))
+				and str(wrong_net.get("error", "")).contains("W2.1")
+				and str(wrong_net.get("error", "")).contains("NX")
+				and str(wrong_net.get("error", "")).contains("NC"),
+			str(wrong_net.get("error", "")))
+	check("…and writing nothing", _board_state(data_b) == quiet, str(_board_state(data_b)))
+
+	var result: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "V3.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+		"layer": "top",
+	})
 	check("the MCP call succeeded", bool(result.get("success", false)), str(result))
 	check("it reports 3 trace ids", (result.get("trace_ids", []) as Array).size() == 3,
 			str(result.get("trace_ids", [])))
-	var traces_b := _serialized_traces(data_b)
 
+	var by_net_b := _traces_by_net(data_b)
 	check("both boards ended with the same trace COUNT",
-			traces_a.size() == traces_b.size(),
-			"gesture=%d tool=%d" % [traces_a.size(), traces_b.size()])
-
-	# Compare by net (order-independent id-wise, but T11 is separately pinned
-	# in group 1 above — this check is about GEOMETRY parity, not order).
-	var by_net_a := {}
-	for t in traces_a:
-		by_net_a[str(t.get("net", ""))] = t
-	var by_net_b := {}
-	for t in traces_b:
-		by_net_b[str(t.get("net", ""))] = t
-	for net in ["N1", "N2", "N3"]:
-		check("%s exists on both boards" % net,
-				by_net_a.has(net) and by_net_b.has(net))
+			by_net_a.size() == by_net_b.size(),
+			"gesture=%d tool=%d" % [by_net_a.size(), by_net_b.size()])
+	for net in ["NA", "NB", "NC"]:
 		if not (by_net_a.has(net) and by_net_b.has(net)):
+			check("%s exists on both boards" % net, false)
 			continue
-		var wa := float(by_net_a[net].get("width_mm", by_net_a[net].get("width", 0.0)))
-		var wb := float(by_net_b[net].get("width_mm", by_net_b[net].get("width", 0.0)))
-		check("%s: same width (gesture=%.4f tool=%.4f)" % [net, wa, wb],
-				is_equal_approx(wa, wb))
-		var pa: Array = by_net_a[net].get("points", [])
-		var pb: Array = by_net_b[net].get("points", [])
-		check("%s: same point count" % net, pa.size() == pb.size(),
-				"gesture=%d tool=%d" % [pa.size(), pb.size()])
-		if pa.size() == pb.size():
+		var pa := _points_of(by_net_a[net])
+		var pb := _points_of(by_net_b[net])
+		var same := pa.size() == pb.size()
+		if same:
 			for i in range(pa.size()):
-				var xa := float(pa[i].get("x_mm", pa[i].get("x", 0.0)))
-				var ya := float(pa[i].get("y_mm", pa[i].get("y", 0.0)))
-				var xb := float(pb[i].get("x_mm", pb[i].get("x", 0.0)))
-				var yb := float(pb[i].get("y_mm", pb[i].get("y", 0.0)))
-				check("%s point %d matches (gesture=(%.3f,%.3f) tool=(%.3f,%.3f))"
-						% [net, i, xa, ya, xb, yb],
-						is_equal_approx(xa, xb) and is_equal_approx(ya, yb))
+				if (pa[i] as Vector2).distance_to(pb[i] as Vector2) > EPS:
+					same = false
+					break
+		check("%s: the gesture and the tool authored the SAME polyline" % net, same,
+				"\n    gesture: %s\n    tool:    %s" % [str(pa), str(pb)])
 
-	# Undo parity too: both are one journal step.
 	check("board A: one undo removes its whole bus", data_a.undo() and data_a.get_trace_count() == 0)
 	check("board B: one undo removes its whole bus", data_b.undo() and data_b.get_trace_count() == 0)
 
 	canvas_a.free()
-
-
-# ── 6. ESC/RIGHT-CLICK LADDER + FULL-RESET RE-CLICK DISARM ────────────────────
-
-func _test_esc_ladder_and_reclick_disarm() -> void:
-	print("\n-- (6) Esc/right-click TWO-STEP ladder, then a full disarm --")
-	var rig := _rig()
-	var canvas = rig[0]
-	var msgs: Array = []
-	canvas.bus_tool_message.connect(func(t: String) -> void: msgs.append(t))
-
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas._start_bus_draw()
-	canvas._handle_bus_click(Vector2(0.0, 0.0), false)     # one spine vertex
-	check("armed: 2 nets picked, drawing, 1 spine point",
-			canvas._bus_nets.size() == 2 and canvas._bus_drawing
-				and canvas._bus_spine_points.size() == 1)
-
-	# STEP 1 of the ladder: cancels the SPINE ONLY, net list kept.
-	canvas._cancel_bus_step(true)
-	check("ladder step 1: spine cancelled", not canvas._bus_drawing
-			and canvas._bus_spine_points.is_empty())
-	check("ladder step 1: the net list is KEPT (2 nets)",
-			canvas._bus_nets.size() == 2, "got %s" % str(canvas._bus_nets))
-	check("…announced, naming the kept count",
-			msgs[msgs.size() - 1].contains("cancelled") and msgs[msgs.size() - 1].contains("kept"),
-			str(msgs[msgs.size() - 1]))
-
-	# STEP 2 of the ladder: now that nothing is drawing, Esc clears the picks.
-	canvas._cancel_bus_step(true)
-	check("ladder step 2: net picks cleared", canvas._bus_nets.is_empty())
-	check("…announced", msgs[msgs.size() - 1].contains("cleared"), str(msgs[msgs.size() - 1]))
-
-	# A THIRD press with nothing left to cancel is a true no-op (no crash, no
-	# spurious message) — the ladder bottoms out cleanly.
-	var msg_count_before := msgs.size()
-	canvas._cancel_bus_step(true)
-	check("a third press with nothing armed emits no message",
-			msgs.size() == msg_count_before)
-
-	# FULL RESET via set_tool_mode's re-click-disarm path (announce_cancel =
-	# true): picks AND an in-progress spine are BOTH discarded in one go,
-	# unlike the ladder's incremental peel above.
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas._start_bus_draw()
-	canvas._handle_bus_click(Vector2(0.0, 0.0), false)
-	check("armed again: 2 nets, drawing, 1 point",
-			canvas._bus_nets.size() == 2 and canvas._bus_drawing)
-	canvas.set_tool_mode(canvas.ToolMode.SELECT, true)   # re-click disarm
-	check("full disarm: net list AND spine both gone",
-			canvas._bus_nets.is_empty() and not canvas._bus_drawing
-				and canvas._bus_spine_points.is_empty())
-	check("…announced as a disarm", msgs[msgs.size() - 1].contains("disarmed"),
-			str(msgs[msgs.size() - 1]))
-
-	# A PLAIN tool switch (announce_cancel = false, the default — the user
-	# already knows) resets SILENTLY, same convention TRACE/ZONE/CUTOUT use.
-	canvas.set_tool_mode(canvas.ToolMode.BUS)
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)
-	var msg_count_before2 := msgs.size()
-	canvas.set_tool_mode(canvas.ToolMode.SELECT)   # plain switch, no announce
-	check("plain switch: state reset", canvas._bus_nets.is_empty())
-	check("…but SILENTLY (no new message)", msgs.size() == msg_count_before2)
-
-	canvas.free()
-
-
-# ── HITL-7a (docket 019fe0391d06): the propose doorway is TAUGHT at the mouse ─
-# Shift+dbl-click proposes ghosts (the mouse twin of Shift+Enter — same
-# _commit_bus(propose) call, asserted by reading the same drawing-phase teach
-# line a user reads; the gesture's key-modifier read is untestable headless,
-# so the taught contract is the pin).
-
-func _test_propose_doorway_teach_line() -> void:
-	print("\n-- HITL-7a: drawing teach line names BOTH propose gestures --")
-	var rig := _rig()
-	var canvas = rig[0]
-	var msgs: Array = []
-	canvas.bus_tool_message.connect(func(t: String) -> void: msgs.append(t))
-	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
-	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
-	canvas._start_bus_draw()
-	check("drawing started", canvas._bus_drawing)
-	var teach := str(msgs[msgs.size() - 1]) if not msgs.is_empty() else ""
-	check("the teach line names Shift+Enter", teach.contains("Shift+Enter"))
-	check("…AND the mouse twin Shift+dbl-click (HITL-7a: it was keyboard-only and invisible)",
-		teach.contains("Shift+dbl-click"))
-	check("…and says plainly which verb makes COPPER vs PROPOSES",
-		teach.contains("COPPER") and teach.contains("PROPOSES"))

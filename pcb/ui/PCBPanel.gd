@@ -1541,10 +1541,10 @@ func _build_sidebar() -> VBoxContainer:
 	# section and same reason as Pour/Keepout/Trace/Cutout above: it authors
 	# board ENTITIES (N real Trace entities, one undo step). No sidebar
 	# picker: unlike Pour's net picker, the net LIST is authored by clicking
-	# pads/traces on the canvas itself (the S3 picker), not a widget — see
-	# pcb_canvas.gd's Bus Authoring region.
+	# pads on the canvas itself, not a widget — see pcb_canvas.gd's Bus
+	# Authoring region.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
-		"Draw a parallel bus (pick nets by clicking pads; Enter commits, Shift+Enter proposes)", "bus_24.png")
+		"Draw a parallel bus pin to pin (source pads, clear to path, target pads; Enter commits)", "bus_24.png")
 
 	# Via (epoch NLC C2, item 019fff60e05a). Sits with the constructive Draw
 	# tools because it ADDS copper, one click at a time.
@@ -1726,7 +1726,7 @@ func _build_sidebar() -> VBoxContainer:
 	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.CUTOUT, "Cutout",
 		"Propose a board opening as a DRAFT (ghost for review — Accept lands it)", "cutout_24.png")
 	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
-		"Propose a parallel bus (Enter lands ghost candidates for review, never copper)", "bus_24.png")
+		"Propose a parallel bus pin to pin (Enter lands ghost candidates for review, never copper)", "bus_24.png")
 	# SPIKE 019ff8615fbe: the "Propose moves" mode toggle that briefly lived
 	# here was REJECTED at the R2 feel session ("conflicts with universal
 	# select") — proposing a move is now a one-shot arm on the component's
@@ -6292,7 +6292,7 @@ const _MODE_HINTS := {
 	8: "Click a pad or via to start, click waypoints, click a pad or via to finish",   # TRACE
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
-	11: "Click pads/traces to pick nets (2+), Enter to draw the spine, then click vertices and Enter/dbl-click to commit",  # BUS
+	11: "Click a source pad per net (2+), click clear of the pads to path it, then click each net's target pad · Enter commits",  # BUS
 	12: "Click empty space for a standalone via · click a trace to snap, inherit its net, and bisect it",  # VIA
 }
 const _ROUTE_FLOW_LABELS := {
