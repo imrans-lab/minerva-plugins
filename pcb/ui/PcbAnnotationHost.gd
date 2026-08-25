@@ -115,7 +115,9 @@ var _panel = null
 ## bridge (see get_spatial_index). Rebuilt when the bound board model changes.
 var _spatial_index = null
 
-## Board-mm proximity for a pad/pin hit in describe_point (precedence tier 1).
+## Board-mm proximity for a pad/pin hit in describe_point (precedence tier 1) —
+## measured to the pad's COPPER (see pad_at), so this is slack around the land
+## rather than a disc drawn from its centre.
 const _PAD_HIT_RADIUS_MM := 1.0
 
 ## Board-mm proximity for a trace hit in describe_point (precedence tier 3).
@@ -886,11 +888,19 @@ func describe_anchor_detail(annotation: Dictionary) -> Dictionary:
 	var pad_hit := pad_at(point, _PAD_HIT_RADIUS_MM)
 	if not pad_hit.is_empty():
 		var pad_pos: Vector2 = pad_hit.get("position", Vector2.ZERO)
+		var pad_comp = data.get_component(str(pad_hit.get("component", "")))
+		# The distance the TIER measured — to the pad's copper, 0 on the land —
+		# not the distance to the centre reported as `position`. Reporting the
+		# centre distance here would contradict the hit for any pad wider than
+		# _PAD_HIT_RADIUS_MM: on the land, but "4mm away" inside a 1mm tier.
+		var pad_dist := pad_pos.distance_to(point)
+		if pad_comp != null:
+			pad_dist = pad_comp.pin_copper_distance(str(pad_hit.get("pin", "")), point)
 		return {
 			"kind": "pad",
 			"id": "%s.%s" % [str(pad_hit.get("component", "")), str(pad_hit.get("pin", ""))],
 			"position": [_mm(pad_pos.x), _mm(pad_pos.y)],
-			"distance_mm": snappedf(pad_pos.distance_to(point), 0.001),
+			"distance_mm": snappedf(pad_dist, 0.001),
 		}
 
 	var via_id := str(data.get_via_at(point, _VIA_HIT_MIN_RADIUS_MM))
@@ -944,6 +954,12 @@ func _pad_at(doc_pos: Vector2) -> String:
 ## Returns {} on miss, else {component: String, pin: String, position: Vector2
 ## (board mm, the live pin world position)}.
 ##
+## DISTANCE IS TO THE PAD'S COPPER, not to its centre
+## (pcb_component.pin_copper_distance): a point anywhere on a land is 0mm from
+## that pad, so radius_mm is slack AROUND the copper rather than a disc drawn
+## from the middle of it. A pin whose footprint never resolved has no land and
+## is measured from its centre, exactly as every pin was before.
+##
 ## component_filter (bug 019fb59c1a89): optional Callable(comp_id: String) ->
 ## bool applied BEFORE the distance sort, so a filtered-out pad never shadows a
 ## visible one. The canvas inspector passes its layer-view predicate; MCP
@@ -961,7 +977,7 @@ func pad_at(doc_pos: Vector2, radius_mm: float = 5.0,
 		var comp = data.components[comp_id]
 		for pin_name in comp.pins:
 			var world_pin: Vector2 = comp.get_pin_world_position(pin_name)
-			var d := world_pin.distance_to(doc_pos)
+			var d: float = comp.pin_copper_distance(str(pin_name), doc_pos)
 			if d <= radius_mm:
 				candidates.append({
 					"component": str(comp_id), "pin": str(pin_name),

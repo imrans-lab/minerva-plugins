@@ -45,7 +45,13 @@ var _fail := 0
 ## the tool only ever calls pad_at(), so a stub is the honest seam — and it keeps
 ## this suite free of the annotation substrate entirely.
 class StubPadHost extends RefCounted:
-	var pads: Array = []   # [{component, pin, position}]
+	## The production pad-picking rule, so this double cannot drift from it.
+	const PCBComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
+	## [{component, pin, position, lands?}]. `lands` are optional footprint
+	## lands in the SAME shape pcb_component.pads carries, and because this stub
+	## measures in an identity frame their `position` is world mm. Omitted, the
+	## pin is a bare point — which is what every pad in this suite is.
+	var pads: Array = []
 	## PanelTools._resolve_data reaches the model through exactly one duck-typed
 	## call (panel_tools.gd _get_data -> host.get_board_data()), so the MCP verbs
 	## run against this stub without mounting a PCBPanel. Set by _rig.
@@ -56,7 +62,12 @@ class StubPadHost extends RefCounted:
 		var best: Dictionary = {}
 		var best_d := INF
 		for p in pads:
-			var d: float = (p["position"] as Vector2).distance_to(world_pos)
+			# The production rule, CALLED not copied: distance to the pad's
+			# copper. A stub carrying the old centre-distance rule would keep
+			# this suite green against a contract that no longer exists.
+			var d: float = PCBComponentScript.pin_copper_distance_from(
+				Vector2.ZERO, Transform2D.IDENTITY, p["position"],
+				p.get("lands", []), world_pos)
 			if d <= radius and d < best_d:
 				best_d = d
 				best = p

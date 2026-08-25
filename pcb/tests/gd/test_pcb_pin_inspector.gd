@@ -429,6 +429,9 @@ func _test_pad_at_units() -> void:
 	# lexicographically-first (component, pin).
 	_test_pad_at_tie_break()
 
+	# The rule the ranking above measures with: a pad's COPPER, not its centre.
+	_test_pad_at_copper_extent()
+
 
 func _test_pad_at_tie_break() -> void:
 	# A separate throwaway board (via a second panel-free pcb_data instance is not
@@ -453,6 +456,82 @@ func _test_pad_at_tie_break() -> void:
 
 	data.remove_component("ZTIE")
 	data.remove_component("ATIE")
+
+
+## A part whose pads are NOT all one size or shape: a long land, a small round
+## land beside its far end, and a third land turned 90 degrees WITHIN the
+## footprint. All geometry is component-local, so the same part measures the
+## same at any component rotation.
+func _add_land_probe_part(part_id: String, at: Vector2, rotation_deg: float):
+	var c = data.new_component()
+	c.id = part_id
+	c.position = at
+	c.rotation = rotation_deg
+	c.pins = {"1": Vector2(0.0, 0.0), "2": Vector2(3.0, 0.0), "3": Vector2(0.0, 6.0)}
+	c.pads = [
+		{"number": "1", "type": "smd", "shape": "rect", "position": Vector2(0.0, 0.0),
+			"size": Vector2(4.0, 1.6), "rotation": 0.0,
+			"drill": Vector2.ZERO, "layers": ["F.Cu"]},
+		{"number": "2", "type": "smd", "shape": "circle", "position": Vector2(3.0, 0.0),
+			"size": Vector2(0.6, 0.6), "rotation": 0.0,
+			"drill": Vector2.ZERO, "layers": ["F.Cu"]},
+		{"number": "3", "type": "smd", "shape": "rect", "position": Vector2(0.0, 6.0),
+			"size": Vector2(4.0, 1.6), "rotation": 90.0,
+			"drill": Vector2.ZERO, "layers": ["F.Cu"]},
+	]
+	c.has_pad_geometry = true
+	data.add_component(c)
+	return c
+
+
+## A click anywhere on a pad's copper is that pad.
+##
+## The probe part is built twice, unrotated and at 90 degrees, so the SAME local
+## probe has to survive the component transform as well as each land's own
+## rotation. Every probe is PLACED with the forward transform and RESOLVED by
+## the pick's inverse of it, so a composition error fails the rotated part while
+## the unrotated one still passes.
+##
+## ORACLE: the authored land sizes. Pin 1's land is 4.0mm long, so +-2.0mm along
+## it is copper; pin 2 is a 0.6mm disc 3.0mm away. A point 1.7mm out is
+## therefore ON pin 1 while being NEARER pin 2's CENTRE (1.3mm) than pin 1's
+## (1.7mm) — pin 2 is the answer a centre-ranked pick gives, and the answer this
+## one must not. Pin 3's land is the same 4.0 x 1.6 turned 90 degrees inside the
+## footprint, so 1.7mm along the footprint's Y is copper while 1.7mm along its X
+## is 0.9mm clear of the 1.6mm-wide land.
+func _test_pad_at_copper_extent() -> void:
+	var parts := [
+		_add_land_probe_part("LAND0", Vector2(85.0, 45.0), 0.0),
+		_add_land_probe_part("LAND90", Vector2(35.0, 50.0), 90.0),
+	]
+	for part in parts:
+		var at := func(local: Vector2) -> Vector2:
+			return part.position + (part.get_transform() * local)
+
+		var far_end: Dictionary = host.pad_at(at.call(Vector2(1.7, 0.0)), 5.0)
+		check("%s: a click on the long land's far end is that pad, not the small pad nearer its centre" % part.id,
+			str(far_end.get("component", "")) == part.id
+				and str(far_end.get("pin", "")) == "1", "got %s" % str(far_end))
+
+		# The fine-work case that must survive: 0.4mm off the small pad's
+		# centre is 0.1mm off its copper, and 1.4mm clear of the long land.
+		var near_small: Dictionary = host.pad_at(at.call(Vector2(3.4, 0.0)), 5.0)
+		check("%s: a click NEAR but not on the small pad still finds it" % part.id,
+			str(near_small.get("component", "")) == part.id
+				and str(near_small.get("pin", "")) == "2", "got %s" % str(near_small))
+
+		# Radius 0.5mm: only true copper plus a hair of slack can answer, so
+		# these two probes read the land's ORIENTATION and nothing else.
+		var along: Dictionary = host.pad_at(at.call(Vector2(0.0, 7.7)), 0.5)
+		check("%s: the turned land is copper 1.7mm along the footprint's Y" % part.id,
+			str(along.get("component", "")) == part.id
+				and str(along.get("pin", "")) == "3", "got %s" % str(along))
+		check("%s: …and is not copper 1.7mm along its X, 0.9mm clear of the same land" % part.id,
+			host.pad_at(at.call(Vector2(1.7, 6.0)), 0.5).is_empty(),
+			"got %s" % str(host.pad_at(at.call(Vector2(1.7, 6.0)), 0.5)))
+
+	data.remove_component("LAND0")
+	data.remove_component("LAND90")
 
 
 # ── assertion helper ─────────────────────────────────────────────────────────

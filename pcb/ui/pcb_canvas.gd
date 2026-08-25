@@ -581,7 +581,10 @@ var _junction_drag_current := Vector2.ZERO ## live preview position
 
 ## Duck-typed back-reference to the PcbAnnotationHost (set by PCBPanel), the
 ## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
-## canvas does no hit-testing of its own, only rendering + input plumbing.
+## canvas does no hit-testing of its own, only rendering + input plumbing. The
+## one exception is _bus_target_at, which picks from a FILTERED pad set the host
+## has no way to express; it ranks with the same pcb_component.pin_copper_distance
+## host.pad_at does, so the rule still lives in exactly one place.
 var _pin_inspector_host = null
 
 ## ── ROUTING WORKSPACE (S3) ────────────────────────────────────────────────────
@@ -741,7 +744,8 @@ const TRACE_DEFAULT_LAYER := "top"
 ## about the nearest pad" — where generosity costs nothing. Here a pad hit
 ## CONSUMES the click and ends the gesture, so a 5 mm radius would make it
 ## impossible to place a waypoint anywhere near a component. 1.27 mm is half a
-## 0.1" pitch: inside it, the nearest pad is unambiguously the pad clicked.
+## 0.1" pitch: within that much of a pad's COPPER (pad_at measures to the land,
+## not to its centre) the nearest pad is unambiguously the pad clicked.
 const TRACE_PAD_SNAP_MM := 1.27
 ## The two things a trace may be ANCHORED to — the kinds carried in the anchor
 ## dictionary _trace_pad_at / _trace_via_at both return. Named rather than
@@ -8306,8 +8310,9 @@ func _bus_axis_point(prev: Vector2, p: Vector2) -> Vector2:
 
 
 ## The pads the TARGETS phase accepts: every pad on a picked net EXCEPT that
-## net's own source. Each entry is {index, net, ref, position}, `index` being
-## the net's slot in the picked order.
+## net's own source. Each entry is {index, net, ref, component, pin, position},
+## `index` being the net's slot in the picked order and component/pin the parts
+## the pick measures its distance against.
 ##
 ## The draw path and the click pick both walk this ONE list, so a ring the user
 ## can see is exactly a ring the click can land on — the same "rendered
@@ -8331,6 +8336,7 @@ func _bus_target_candidates() -> Array:
 				continue
 			out.append({
 				"index": i, "net": _bus_nets[i], "ref": ref,
+				"component": comp_id, "pin": pin_name,
 				"position": comp.get_pin_world_position(pin_name),
 			})
 	return out
@@ -8352,11 +8358,20 @@ func _bus_nets_with_candidates() -> PackedStringArray:
 ## illegal one beside it — that is the "help the user land on a legal one" half
 ## of the rule. The other half is _handle_bus_target_click's fall-through to
 ## _trace_pad_at, which is what names the pad they actually hit.
+##
+## This is the canvas's SECOND pad pick (the filtered one), so it measures the
+## way the shared hit test does — pcb_component.pin_copper_distance, distance to
+## the pad's COPPER — at the same TRACE_PAD_SNAP_MM radius. Ranking by the
+## distance to pad CENTRES here would refuse a click the user made on a long
+## land while _trace_pad_at accepted it, and the two answers must agree.
 func _bus_target_at(world_pos: Vector2) -> Dictionary:
 	var best: Dictionary = {}
 	var best_d := INF
 	for cand in _bus_target_candidates():
-		var d: float = (cand.get("position", Vector2.ZERO) as Vector2).distance_to(world_pos)
+		var comp = data.get_component(str(cand.get("component", ""))) if data else null
+		if comp == null:
+			continue
+		var d: float = comp.pin_copper_distance(str(cand.get("pin", "")), world_pos)
 		if d <= TRACE_PAD_SNAP_MM and d < best_d:
 			best_d = d
 			best = cand

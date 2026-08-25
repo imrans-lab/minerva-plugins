@@ -199,6 +199,82 @@ func get_pin_world_position(pin_name: String) -> Vector2:
 	return position + (xform * local_pos)
 
 
+## Millimetres from `point` to pin `pin_name`'s COPPER: 0.0 anywhere on one of
+## its lands, otherwise the gap to the nearest land edge. This is the measure a
+## pad PICKER ranks and thresholds on — a click on a 6mm connector land is on
+## that pad wherever it lands, which the distance to the pad's CENTRE cannot
+## say, and on a board whose pads are not all one size that centre distance
+## hands a big pad's own copper to whatever small pad happens to sit nearer.
+##
+## Never reports MORE than the centre distance, so it can only ever find a pin
+## the centre measure also found: `pins[]` and `pads[].position` are two
+## separate fields, and a pin whose footprint disagrees with itself must still
+## be pickable at the position the rest of the model routes to.
+func pin_copper_distance(pin_name: String, point: Vector2) -> float:
+	return pin_copper_distance_from(position, get_transform(),
+		get_pin_world_position(pin_name), lands_for_pin(pin_name), point)
+
+
+## The lands of one pin — the `pads` entries carrying its number. A footprint
+## may declare several for one electrical pin (a split thermal land), and none
+## at all when it never resolved.
+func lands_for_pin(pin_name: String) -> Array:
+	var out: Array = []
+	for pad in pads:
+		if str((pad as Dictionary).get("number", "")) == pin_name:
+			out.append(pad)
+	return out
+
+
+## The pad-picking rule itself, free of any component instance so a hit-test
+## seam holding lands directly measures the same way. `origin`/`xform` are the
+## frame the lands are placed in (a component's position / get_transform());
+## `centre` is the pin's world position; `pin_lands` its `pads` entries.
+static func pin_copper_distance_from(origin: Vector2, xform: Transform2D,
+		centre: Vector2, pin_lands: Array, point: Vector2) -> float:
+	var best := centre.distance_to(point)
+	for land in pin_lands:
+		best = minf(best, _land_distance(land as Dictionary, origin, xform, point))
+	return best
+
+
+## Millimetres from `point` to ONE land's copper, 0.0 inside it.
+##
+## SHAPES, and why the model differs from pcb_ratsnest's land of the same name:
+## this is a POINTER measurement, so where the shape cannot be represented
+## exactly it errs LARGE (a click on real copper must resolve to it), while the
+## ratsnest errs small (copper merely near an island must not read as joined).
+##   rect / roundrect / unknown — the oriented rectangle. The authored corner
+##     radius is not carried in the model, and the rectangle contains every
+##     roundrect of that size; the overhang is at most one corner radius, far
+##     under the slack a picker already grants around a pad.
+##   circle / oval — the exact stadium: the long-axis segment swollen by the
+##     short half-axis, which is a disc when the two sizes are equal.
+##
+## ROTATION: a land's OFFSET turns with the component only, its BODY with the
+## component's rotation and its own — same CW degree convention throughout (see
+## get_transform), so the copper is measured where it is fabricated.
+static func _land_distance(land: Dictionary, origin: Vector2,
+		xform: Transform2D, point: Vector2) -> float:
+	var half: Vector2 = (land.get("size", Vector2(1, 1)) as Vector2) * 0.5
+	var land_pos: Vector2 = land.get("position", Vector2.ZERO)
+	# Into the land's own frame: undo the component transform, then the land's
+	# offset, then the land's own rotation. Placing a land turns it by
+	# -rotation (CW, as get_transform does), so undoing that turns by +rotation.
+	var in_footprint: Vector2 = (xform.affine_inverse() * (point - origin)) - land_pos
+	var local := in_footprint.rotated(deg_to_rad(float(land.get("rotation", 0.0))))
+	var shape := str(land.get("shape", "rect")).strip_edges().to_lower()
+	if shape == "circle" or shape == "oval":
+		var radius := minf(half.x, half.y)
+		var extent := maxf(half.x, half.y) - radius
+		var axis := Vector2(extent, 0.0) if half.x >= half.y else Vector2(0.0, extent)
+		var to_axis := Vector2(maxf(absf(local.x) - axis.x, 0.0),
+			maxf(absf(local.y) - axis.y, 0.0))
+		return maxf(to_axis.length() - radius, 0.0)
+	return Vector2(maxf(absf(local.x) - half.x, 0.0),
+		maxf(absf(local.y) - half.y, 0.0)).length()
+
+
 ## Get the symbolic name for a pin number (from geometry import)
 ## Returns empty string if no name is defined
 func get_pin_name(pin_number: String) -> String:

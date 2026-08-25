@@ -57,12 +57,22 @@ var _fail := 0
 ## StubPadHost verbatim (each light suite owns its copy — this is a private test
 ## double, not shared production code).
 class StubPadHost extends RefCounted:
-	var pads: Array = []   # [{component, pin, position}]
+	## The production pad-picking rule, so this double cannot drift from it.
+	const PCBComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
+	## [{component, pin, position, lands?}]. `lands` are optional footprint
+	## lands in the SAME shape pcb_component.pads carries, and because this stub
+	## measures in an identity frame their `position` is world mm.
+	var pads: Array = []
 	func pad_at(world_pos: Vector2, radius: float, _filter: Variant = null) -> Dictionary:
 		var best: Dictionary = {}
 		var best_d := INF
 		for p in pads:
-			var d: float = (p["position"] as Vector2).distance_to(world_pos)
+			# The production rule, CALLED not copied: distance to the pad's
+			# copper. A stub carrying the old centre-distance rule would keep
+			# this suite green against a contract that no longer exists.
+			var d: float = PCBComponentScript.pin_copper_distance_from(
+				Vector2.ZERO, Transform2D.IDENTITY, p["position"],
+				p.get("lands", []), world_pos)
 			if d <= radius and d < best_d:
 				best_d = d
 				best = p
@@ -85,6 +95,7 @@ func _init() -> void:
 	_test_nothing_lands_until_the_bus_is_finished()
 	_test_a_trace_is_not_a_bus_anchor()
 	_test_target_pick_matches_the_pad_hit_test()
+	_test_a_click_on_the_pads_copper_is_that_pad()
 	_test_double_click_grammar()
 	_test_manhattan_from_sloppy_clicks()
 	_test_crossing_refusal_names_both_nets()
@@ -122,13 +133,24 @@ func check(desc: String, cond: bool, detail: String = "") -> void:
 #
 #   NA  U1 (10,10) → V1 (130,40)
 #   NB  U2 (10,12) → V2 (130,42)
-#   NC  U3 (10,14) → V3 (130,44)
+#   NC  U3 (10,14) → V3 (130,44)     V3.1 is a 6.0 x 0.6mm LAND, not a point
 #   NX  W1 (60,50) → W2 (70,50)      never picked
+#
+# Every pad but V3.1 is a bare point pin. V3.1 carries real pad geometry so the
+# suite can click copper that is far from a pad's centre — see section 4b.
 #
 # The board declares trace_width_mm 0.2 and clearance_mm 0.3, so every net's
 # width auto-derives to 0.2 with no seeded copper at all — the serialized trace
 # list is then exactly the bus, and pitch = 0.1 + 0.3 + 0.1 = 0.5 gives lanes
 # [-0.5, 0.0, +0.5] (pinned by test_pcb_bus_geometry.gd, consumed here).
+
+## V3.1's land, width x height in mm. 6.0 long on X, so its copper reaches
+## +-3.0mm from the pin centre — well past the 1.27mm TRACE_PAD_SNAP_MM a pick
+## measures with. Only 0.6 tall on Y, deliberately: V2.1 sits 2.0mm above, and
+## a taller land would reach into V2.1's own 1.27mm slack and make the two pads
+## equidistant from this suite's existing off-centre probe.
+const V3_LAND_MM := Vector2(6.0, 0.6)
+
 
 func _board() -> Dictionary:
 	return {
@@ -138,7 +160,8 @@ func _board() -> Dictionary:
 		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
 		"components": [
 			_part("U1", 10.0, 10.0), _part("U2", 10.0, 12.0), _part("U3", 10.0, 14.0),
-			_part("V1", 130.0, 40.0), _part("V2", 130.0, 42.0), _part("V3", 130.0, 44.0),
+			_part("V1", 130.0, 40.0), _part("V2", 130.0, 42.0),
+			_part("V3", 130.0, 44.0, V3_LAND_MM),
 			_part("W1", 60.0, 50.0), _part("W2", 70.0, 50.0),
 		],
 		"nets": [
@@ -150,9 +173,17 @@ func _board() -> Dictionary:
 	}
 
 
-func _part(ref: String, x: float, y: float) -> Dictionary:
+## `land`, when non-zero, is the pin's pad width x height in mm. Canonical
+## boards carry pad geometry ON the pin (pad_width_mm/pad_height_mm) and
+## pcb_component synthesizes the render land from it, so this is the authored
+## form — no hand-built `pads` array anywhere.
+func _part(ref: String, x: float, y: float, land: Vector2 = Vector2.ZERO) -> Dictionary:
+	var pin := {"number": "1", "x_mm": 0.0, "y_mm": 0.0}
+	if land != Vector2.ZERO:
+		pin["pad_width_mm"] = land.x
+		pin["pad_height_mm"] = land.y
 	return {"ref": ref, "footprint": "IC_DIP", "x_mm": x, "y_mm": y, "rotation_deg": 0.0,
-		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]}
+		"pins": [pin]}
 
 
 const SRC_A := Vector2(10.0, 10.0)
@@ -202,7 +233,13 @@ func _rig() -> Array:
 		{"component": "U3", "pin": "1", "position": SRC_C},
 		{"component": "V1", "pin": "1", "position": TGT_A},
 		{"component": "V2", "pin": "1", "position": TGT_B},
-		{"component": "V3", "pin": "1", "position": TGT_C},
+		# The ONE pad with copper of its own. Same land the board dict authors
+		# for V3.1 — the two pickers each read their own source, and section 4b
+		# is what holds the two readings to the same answer.
+		{"component": "V3", "pin": "1", "position": TGT_C, "lands": [
+			{"number": "1", "shape": "rect", "position": TGT_C,
+				"size": V3_LAND_MM, "rotation": 0.0},
+		]},
 		{"component": "W1", "pin": "1", "position": Vector2(60.0, 50.0)},
 		{"component": "W2", "pin": "1", "position": Vector2(70.0, 50.0)},
 	]
@@ -564,6 +601,55 @@ func _test_target_pick_matches_the_pad_hit_test() -> void:
 			_last(msgs).contains("U2.1") and _last(msgs).contains("source"), _last(msgs))
 	check("…leaving the target already landed alone", canvas._bus_target_refs[1] == "V2.1",
 			"targets %s" % str(canvas._bus_target_refs))
+
+	canvas.free()
+
+
+# ── 4b. A CLICK ANYWHERE ON A PAD'S COPPER IS THAT PAD ────────────────────────
+#
+# V3.1 is a 6.0 x 0.6mm land, so its copper runs x=127..133 at y=44. A point
+# 2.5mm along it is ON the pad and 2.5mm from the pin centre — nearly twice the
+# 1.27mm TRACE_PAD_SNAP_MM a pick measures with. Rank pad CENTRES and there is
+# no pad there at all: the TARGETS click falls through to the "nothing here"
+# status and NC never gets a target, on copper the user can plainly see.
+#
+# Both of the canvas's pad picks are driven, because they read DIFFERENT
+# sources: _trace_pad_at goes through the pad host, _bus_target_at straight off
+# the board model. They must give one answer.
+#
+# ORACLE: the authored land, 6.0mm long and centred on the pin — |dx| <= 3.0 is
+# copper, |dx| >= 3.0 + 1.27 is neither copper nor slack — plus the tool's own
+# committed target list (_bus_target_refs), which is state, not a message.
+
+func _test_a_click_on_the_pads_copper_is_that_pad() -> void:
+	print("\n-- (4b) a click on the far end of a long land lands that pad --")
+	var rig := _rig()
+	var canvas = rig[0]
+
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+
+	var on_far_copper := TGT_C + Vector2(2.5, 0.0)
+	check("the PAD hit test resolves the far end of V3.1's land to V3.1",
+			str(canvas._trace_pad_at(on_far_copper).get("ref", "")) == "V3.1",
+			str(canvas._trace_pad_at(on_far_copper)))
+	canvas._handle_bus_click(on_far_copper, false)
+	check("…and the TARGET pick agrees — NC's target is landed, not refused",
+			canvas._bus_target_refs[2] == "V3.1",
+			"targets %s" % str(canvas._bus_target_refs))
+
+	# The rule is the copper PLUS the same slack, not an unbounded pad: 4.5mm
+	# out is 1.5mm clear of the land's end, past the 1.27mm.
+	var off_the_end := TGT_C + Vector2(4.5, 0.0)
+	check("a click 1.5mm clear of the land's end is not that pad",
+			canvas._trace_pad_at(off_the_end).is_empty(),
+			str(canvas._trace_pad_at(off_the_end)))
+	check("…and the target pick does not claim it either",
+			canvas._bus_target_at(off_the_end).is_empty(),
+			str(canvas._bus_target_at(off_the_end)))
 
 	canvas.free()
 
