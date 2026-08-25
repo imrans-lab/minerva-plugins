@@ -18,6 +18,12 @@
 # This file is deliberately NOT named test_*.gd (it must not match the
 # runner's own `test_*.gd` glob) and NOT executable GDScript.
 # See pcb/docs/gd-tests.md.
+# The pad-to-pad half of the bus geometry (bundle_routes + its breakout
+# legs). Authored with the code it covers and NEVER EXECUTED — the only
+# runner takes the Minerva single-instance lock, and an assertions= count
+# guessed by reading is exactly the false pin that attribute exists to
+# prevent. Pin it from the first trustworthy run.
+test_bus_breakout_geometry.gd
 test_bus_tool.gd assertions=64
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at

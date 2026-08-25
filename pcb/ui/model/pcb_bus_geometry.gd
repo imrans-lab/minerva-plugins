@@ -10,25 +10,17 @@ extends RefCounted
 ## with plain numbers, with no scene tree, no board, and no UI to stand up.
 ##
 ##
-## WHAT THIS IS FOR, AND WHAT IS DELIBERATELY NOT HERE YET
-## -------------------------------------------------------
-## The real bus tool (docket 019fb572b888) is: pick an ORDERED set of nets, draw
-## ONE spine polyline, and emit N real Trace entities as parallel offsets of that
-## spine at clearance-or-better pitch, one net per track, mitered so the pitch
-## stays constant through bends. That tool is built in four slices:
+## WHAT THIS IS FOR
+## -----------------
+## The bus tool is: pick an ORDERED set of nets, draw ONE spine polyline, and
+## emit N real Trace entities, one net per track, at clearance-or-better pitch
+## along that spine, mitered so the pitch stays constant through bends.
 ##
-##   S1  design_rule_clearance() + pitch_between()      <- shipped (S1 half here)
-##   S2  offset_polyline() + cumulative_offsets()       <- shipped (this file)
-##   S3  the ordered multi-net picker UI                <- NOT BUILT
-##   S4  the armed canvas tool + one-undo batch commit  <- NOT BUILT
-##
-## S3 and S4 are DEFERRED, not forgotten, and not an oversight in review: the
-## bus item sequences itself "after the real trace tool proves the direct-
-## authoring plumbing", while S1+S2 are pure functions carrying all of the new
-## computational geometry. Banking the hard part first, pinned by tests, is the
-## point of this file existing before the tool that will call it.
-##
-## Nothing in pcb/ui/ calls these functions yet. That is expected until S4.
+## Two layers of that live here. offset_polyline/pitch_between/
+## cumulative_offsets place the parallel LANES and know nothing about pads.
+## bundle_routes builds on them to produce each net's whole polyline, source pad
+## to target pad, adding the axis-aligned breakout legs at both ends; it is the
+## one function here that constrains the spine to right angles.
 ##
 ##
 ## WHY NOT REUSE THE ROUTER'S BUS OFFSET
@@ -78,12 +70,16 @@ extends RefCounted
 ## - INNER-SIDE SELF-OVERLAP. When a segment is shorter than |offset|, the inner
 ##   offset polyline folds back over itself. A miter limit does not fix that (it
 ##   is a trimming/clipping problem, not a join problem) and no trimming is done
-##   here. S4 must either refuse a spine with segments shorter than the widest
-##   offset, or accept the fold. Recorded so it is a known gap, not a surprise.
+##   here. A caller of offset_polyline must either refuse a spine with segments
+##   shorter than the widest offset or accept the fold; bundle_routes below
+##   refuses, and so does the tool layer that calls offset_polyline directly.
 ## - CLOSED POLYGONS. These are open polylines; the first and last vertices get
 ##   plain segment-end treatment, never a join.
-## - PAD BREAKOUT at the bundle ends, which the bus item itself puts out of scope
-##   for v1 ("stop the bundle short of the pads").
+## - PADS SPREAD ALONG THE CORRIDOR. bundle_routes reaches pads that lie beyond
+##   the spine's ends. A row of pads running PARALLEL to the bundle, each one
+##   wanting its own perpendicular drop at its own position along the spine, is
+##   a different construction (the stations would come from the pads instead of
+##   being built distinct) and is refused by name, not served.
 
 
 ## Miter length beyond which an interior joint is bevelled instead of mitered,
@@ -254,6 +250,169 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 	return out
 
 
+## Every net's COMPLETE polyline, from its source pad to its target pad, for a
+## bus riding `spine`.
+##
+## Track i rides the lane at cumulative_offsets(widths, clearance)[i] — the
+## caller's order, never re-sorted (see that function's own note) — and reaches
+## its two pads through axis-aligned legs at each end:
+##
+##     pad --parallel--> corner --perpendicular--> lane . . . lane --> corner --> pad
+##
+## The corner sits at that track's OWN DEPARTURE STATION: a point along the
+## spine's first (last) segment that no other track shares, so the tracks peel
+## off the bundle one at a time instead of all turning at the same place.
+## Stations are spaced by pitch_between of the two tracks that meet at each
+## step, and every width must be positive, so two departure legs can neither
+## coincide nor sit closer than the clearance rule allows. That is a property of
+## how the stations are built, not of a check run over them afterwards.
+##
+## WHICH TRACK PEELS OFF FIRST IS DERIVED, not fixed by index. Two rules give a
+## "must leave before" order over the nets:
+##
+##   - a track whose leg sweeps across another track's LANE has to be through
+##     before that lane starts, so it leaves first;
+##   - a track whose leg sweeps across the line another track's PAD LEG runs
+##     along has to wait until that track has turned in.
+##
+## Ties keep the caller's order. When the two rules demand that each of a pair
+## goes before the other, the pads cannot be reached without a crossing: the
+## call is REFUSED and both nets are named. Nothing is reordered, rerouted or
+## moved to another layer to make a crossing go away.
+##
+## AXIS-ALIGNED ONLY, unlike offset_polyline above: a spine segment with a
+## non-zero dx AND dy is refused rather than rounded onto an axis, because no
+## rounding here is one a fab would agree with. The legs inherit the frame — the
+## pad's own coordinate is carried into the corner unchanged instead of being
+## rebuilt from a dot product, which would leave an ulp of diagonal behind.
+##
+## The pads must lie OUTSIDE the spine: a source pad no further along than the
+## spine's first point, a target pad no nearer than its last. Pads spread ALONG
+## the corridor (a header running parallel to the bundle) are refused by that
+## rule, and deliberately: their legs would have to drop perpendicular at each
+## pad's own position, which is a different construction from this one and has
+## no distinct-station guarantee.
+##
+## Returns, on success:
+##   {ok: true, error: "", offsets, source_stations, target_stations,
+##    source_order, target_order, polylines}
+## `polylines[i]` runs from sources[i] to targets[i]; the station arrays give
+## each track's departure distance from the spine's first (source) and last
+## (target) point; the order arrays give the track indices in departure order.
+## On refusal: {ok: false, error: "..."} and nothing else — one field to check,
+## the shape the tool layer's own refusals already use.
+static func bundle_routes(
+		spine: PackedVector2Array,
+		net_names: PackedStringArray,
+		sources: PackedVector2Array,
+		targets: PackedVector2Array,
+		widths: Array,
+		clearance: float) -> Dictionary:
+	var n: int = net_names.size()
+	if n == 0:
+		return _refused("A bus needs at least one net (none given).")
+	if sources.size() != n or targets.size() != n or widths.size() != n:
+		return _refused("A bus needs one source, one target and one width per net (%d nets, %d sources, %d targets, %d widths)."
+			% [n, sources.size(), targets.size(), widths.size()])
+	for i in range(n):
+		# Zero width is what would let two departure stations coincide (their
+		# spacing is pitch_between of the two widths and the clearance, which a
+		# board is allowed to declare as 0.0), so it is refused here rather than
+		# clamped — the distinct-station guarantee is the whole point.
+		if float(widths[i]) <= 0.0:
+			return _refused("Net \"%s\" has no trace width (%.3fmm) — a track with no copper has no lane to leave the bundle from."
+				% [net_names[i], float(widths[i])])
+
+	var pts := _drop_duplicate_points(spine)
+	if pts.size() < 2:
+		return _refused("The bus spine needs at least 2 distinct points (%d given)." % spine.size())
+	var shape_error := _spine_shape_error(pts)
+	if not shape_error.is_empty():
+		return _refused(shape_error)
+
+	var last: int = pts.size() - 1
+	var u_src := _axis_unit(pts[1] - pts[0])
+	var n_src := Vector2(-u_src.y, u_src.x)
+	var u_tgt := _axis_unit(pts[last] - pts[last - 1])
+	var n_tgt := Vector2(-u_tgt.y, u_tgt.x)
+
+	# Pads in each end's own frame: `perp` across the bundle (same sign
+	# convention as the offsets), the axial component only checked, never kept.
+	var src_perp: Array = []
+	var tgt_perp: Array = []
+	for i in range(n):
+		var from_start: Vector2 = sources[i] - pts[0]
+		if from_start.dot(u_src) > _MIN_SEGMENT_MM:
+			return _refused("Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start clear of the pads it fans out to."
+				% [net_names[i], from_start.dot(u_src)])
+		var from_end: Vector2 = targets[i] - pts[last]
+		if from_end.dot(u_tgt) < -_MIN_SEGMENT_MM:
+			return _refused("Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end clear of the pads it fans out to."
+				% [net_names[i], -from_end.dot(u_tgt)])
+		src_perp.append(from_start.dot(n_src))
+		tgt_perp.append(from_end.dot(n_tgt))
+
+	var offsets: Array = cumulative_offsets(widths, clearance)
+	var src := _departure_stations(src_perp, offsets, widths, clearance, net_names, "source")
+	if not bool(src["ok"]):
+		return src
+	var tgt := _departure_stations(tgt_perp, offsets, widths, clearance, net_names, "target")
+	if not bool(tgt["ok"]):
+		return tgt
+	var src_stations: Array = src["stations"]
+	var tgt_stations: Array = tgt["stations"]
+
+	# Room check. The fan-outs eat into the first and last segments, and what is
+	# left has to still be a bundle: at least the widest offset, which is the
+	# same figure the inner-fold rule uses (a segment shorter than that folds the
+	# inner track back over itself) and, on the first/last segment, exactly what
+	# keeps every station inside its own offset segment rather than past the
+	# miter at the far end of it. A one-segment spine pays both fans.
+	var margin := 0.0
+	for o in offsets:
+		margin = maxf(margin, absf(float(o)))
+	var span_src := 0.0
+	var span_tgt := 0.0
+	for i in range(n):
+		span_src = maxf(span_src, float(src_stations[i]))
+		span_tgt = maxf(span_tgt, float(tgt_stations[i]))
+	for i in range(last):
+		var seg_len: float = pts[i].distance_to(pts[i + 1])
+		var fanned: float = (span_src if i == 0 else 0.0) + (span_tgt if i == last - 1 else 0.0)
+		if seg_len - fanned < margin:
+			return _refused("Bus spine segment %d→%d is %.3fmm long; the fan-outs on it take %.3fmm and the bundle still needs %.3fmm of straight run clear of them. Lengthen the spine or move the pads."
+				% [i, i + 1, seg_len, fanned, margin])
+
+	var polylines: Array = []
+	for i in range(n):
+		var offset := float(offsets[i])
+		var lane := offset_polyline(pts, offset)
+		var d: float = float(src_stations[i])
+		var e: float = float(tgt_stations[i])
+		# The spine is axis-aligned with no reversal, so every joint miters to a
+		# single point and `lane` runs one point per spine vertex; only its two
+		# ENDS move, inward to this track's own stations.
+		lane[0] = _station_point(pts[0], u_src, d, lane[0])
+		lane[lane.size() - 1] = _station_point(pts[last], u_tgt, -e, lane[lane.size() - 1])
+		var route := PackedVector2Array()
+		route.append(sources[i])
+		route.append(_station_point(pts[0], u_src, d, sources[i]))
+		route.append_array(lane)
+		route.append(_station_point(pts[last], u_tgt, -e, targets[i]))
+		route.append(targets[i])
+		# A pad already on its own lane, or already at its own station, makes one
+		# of those legs zero-length; the corner is then the same point twice.
+		polylines.append(_drop_duplicate_points(route))
+
+	return {
+		"ok": true, "error": "",
+		"offsets": offsets,
+		"source_stations": src_stations, "target_stations": tgt_stations,
+		"source_order": src["order"], "target_order": tgt["order"],
+		"polylines": polylines,
+	}
+
+
 ## The input with consecutive duplicate points removed.
 ##
 ## Kept private and applied by offset_polyline itself rather than pushed onto the
@@ -268,3 +427,156 @@ static func _drop_duplicate_points(points: PackedVector2Array) -> PackedVector2A
 		if out.is_empty() or out[out.size() - 1].distance_to(p) > _MIN_SEGMENT_MM:
 			out.append(p)
 	return out
+
+
+## The one-field refusal every bundle_routes exit shares.
+static func _refused(message: String) -> Dictionary:
+	return {"ok": false, "error": message}
+
+
+## Why this spine cannot carry a pad-to-pad bus, or "" when it can.
+##
+## EXACT zero, not is_zero_approx: a segment with any non-zero dx and dy is a
+## diagonal, and the alternative to refusing it is silently moving a point the
+## caller placed. Exactness also buys the legs their frame — _axis_unit can
+## return a unit vector with no rounding at all, so every emitted segment is
+## axis-aligned in float rather than to within an ulp.
+static func _spine_shape_error(pts: PackedVector2Array) -> String:
+	for i in range(pts.size() - 1):
+		var d: Vector2 = pts[i + 1] - pts[i]
+		if d.x != 0.0 and d.y != 0.0:
+			return "Bus spine segment %d→%d moves on both axes (dx %.3fmm, dy %.3fmm) — a bus bends at 90 degrees only, so its spine has to as well." % [i, i + 1, d.x, d.y]
+	for i in range(1, pts.size() - 1):
+		if (pts[i] - pts[i - 1]).dot(pts[i + 1] - pts[i]) < 0.0:
+			return "The bus spine doubles back at point %d — every track would fold over the one beside it there." % i
+	return ""
+
+
+## The unit vector along an axis-aligned, non-zero `d`, built rather than
+## normalized so it is EXACTLY (+-1, 0) or (0, +-1).
+static func _axis_unit(d: Vector2) -> Vector2:
+	return Vector2(signf(d.x), 0.0) if d.y == 0.0 else Vector2(0.0, signf(d.y))
+
+
+## The point `axial` mm along `u` from `origin`, on the same perpendicular line
+## as `through`.
+##
+## Axis-aligned frames only. The perpendicular coordinate is COPIED from
+## `through` rather than recomputed, which is what makes the segment
+## `through` -> result exactly axis-aligned instead of a dot-product round trip
+## away from it.
+static func _station_point(origin: Vector2, u: Vector2, axial: float, through: Vector2) -> Vector2:
+	if u.y == 0.0:
+		return Vector2(origin.x + u.x * axial, through.y)
+	return Vector2(through.x, origin.y + u.y * axial)
+
+
+## Where each track leaves the bundle at ONE end, as a distance measured inward
+## from that end of the spine.
+##
+## `pad_perp` and `lane_perp` are that end's frame: the pad's and the lane's
+## perpendicular coordinates. Both ends solve the same problem — the target end
+## is the source end of the reversed spine, which negates every perpendicular
+## coordinate, and every test below is a containment test that negation leaves
+## alone — so the caller hands over the target end unchanged and gets stations
+## measured backwards from the spine's last point.
+##
+## Returns {ok, error, stations, order} or the shared one-field refusal.
+static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array,
+		clearance: float, net_names: PackedStringArray, end_label: String) -> Dictionary:
+	var n: int = pad_perp.size()
+	# leaves_first[i][j]: track i has to be off the bundle before track j is.
+	var leaves_first: Array = []
+	for i in range(n):
+		var row: Array = []
+		for j in range(n):
+			row.append(false)
+		leaves_first.append(row)
+	for i in range(n):
+		# The band track i's own perpendicular leg sweeps through, closed and
+		# widened by the duplicate-point tolerance: a leg that ENDS on another
+		# track's lane is touching copper, which is a conflict to order around,
+		# not a near miss to allow.
+		var lo: float = minf(float(pad_perp[i]), float(lane_perp[i])) - _MIN_SEGMENT_MM
+		var hi: float = maxf(float(pad_perp[i]), float(lane_perp[i])) + _MIN_SEGMENT_MM
+		for j in range(n):
+			if j == i:
+				continue
+			if float(lane_perp[j]) >= lo and float(lane_perp[j]) <= hi:
+				leaves_first[i][j] = true
+			if float(pad_perp[j]) >= lo and float(pad_perp[j]) <= hi:
+				leaves_first[j][i] = true
+	for i in range(n):
+		for j in range(i + 1, n):
+			if leaves_first[i][j] and leaves_first[j][i]:
+				return _refused("Nets \"%s\" and \"%s\" cross at the %s end — neither can leave the bundle before the other. Reorder the picked nets or move their pads."
+					% [net_names[i], net_names[j], end_label])
+
+	var indegree := PackedInt32Array()
+	indegree.resize(n)
+	var placed: Array = []
+	for i in range(n):
+		placed.append(false)
+	for i in range(n):
+		for j in range(n):
+			if leaves_first[i][j]:
+				indegree[j] += 1
+	# Lowest index first among the tracks nothing is waiting on, so the caller's
+	# order survives wherever the rules do not decide the question.
+	var order: Array = []
+	while order.size() < n:
+		var pick := -1
+		for k in range(n):
+			if not placed[k] and indegree[k] == 0:
+				pick = k
+				break
+		if pick < 0:
+			break
+		placed[pick] = true
+		order.append(pick)
+		for j in range(n):
+			if leaves_first[pick][j]:
+				indegree[j] -= 1
+	if order.size() < n:
+		return _refused(_cycle_refusal(leaves_first, placed, net_names, end_label))
+
+	var stations: Array = []
+	for i in range(n):
+		stations.append(0.0)
+	var run := 0.0
+	for k in range(1, n):
+		run += pitch_between(float(widths[order[k - 1]]), float(widths[order[k]]), clearance)
+		stations[order[k]] = run
+	return {"ok": true, "error": "", "stations": stations, "order": order}
+
+
+## Two nets from a cycle of "leaves first" rules, named in a refusal.
+##
+## Reached only when the ordering could not be completed AND no pair contradicts
+## each other directly, i.e. three or more nets chain into a loop. Every
+## unplaced track still has an unplaced track waiting ahead of it — that is why
+## it was never emitted — so walking backwards along those rules cannot stop and
+## must revisit a track; the revisited one and the track it was reached from are
+## both on the loop.
+static func _cycle_refusal(leaves_first: Array, placed: Array,
+		net_names: PackedStringArray, end_label: String) -> String:
+	var n: int = placed.size()
+	var cur := -1
+	for k in range(n):
+		if not placed[k]:
+			cur = k
+			break
+	var seen: Dictionary = {}
+	while cur >= 0:
+		seen[cur] = true
+		var prev := -1
+		for k in range(n):
+			if not placed[k] and bool(leaves_first[k][cur]):
+				prev = k
+				break
+		if prev < 0:
+			break
+		if seen.has(prev):
+			return "Nets \"%s\" and \"%s\" cross at the %s end — their breakout legs sit in a loop with the other nets that no departure order undoes. Reorder the picked nets or move their pads." % [net_names[prev], net_names[cur], end_label]
+		cur = prev
+	return "The nets cross at the %s end — no departure order lets every track reach its pad without crossing another. Reorder the picked nets or move their pads." % end_label

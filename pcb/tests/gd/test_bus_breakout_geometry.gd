@@ -1,0 +1,491 @@
+extends SceneTree
+## Pins pcb_bus_geometry.bundle_routes — the pad-to-pad half of the bus
+## geometry: the parallel bundle plus the axis-aligned breakout legs that carry
+## each net from its source pad into its lane and back out to its target pad.
+##
+## Sibling of test_pcb_bus_geometry.gd, which pins the lane arithmetic
+## (offset_polyline / pitch_between / cumulative_offsets) underneath this. Kept
+## as its own suite rather than grown onto that one so its assertion pin stays
+## the number a trustworthy run measured.
+##
+## EVERY EXPECTED POINT BELOW IS HAND-DERIVED, and the derivation is written out
+## beside it. The bundle lanes come from the offsets that suite already pins; the
+## stations, the corners and the legs are worked out here from the offsets, the
+## pad positions and the pitch rule, so a reviewer can check any coordinate with
+## a calculator and never has to run the code to know what it should be.
+##
+## A THIRD oracle runs alongside them and depends on no expected coordinate at
+## all: _run_geometry_invariants routes both shapes again — the bend mirrored,
+## so the frame signs are exercised both ways — and asserts, with its own
+## segment-overlap test, that nothing is diagonal, that every route lands on its
+## own two pads, and that no two nets share a point. That check knows nothing of
+## departure stations or ordering rules; it fails on copper that crosses however
+## the geometry arrived at it.
+##
+## Run via pcb/scripts/run-gd-tests.sh <minerva-checkout>.
+
+const BusGeom := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_geometry.gd")
+
+## Tolerance for a coordinate comparison, in mm. Looser than the sibling suite's
+## 1e-6 for the reason its own DERIVED_EPS records: Vector2 is 32-bit float
+## regardless of build precision, and these points are built through an offset
+## normal and a miter at magnitudes past 100mm, where one ulp is already ~1e-5.
+## 1e-4 mm is 0.1 micron — four orders below any fabrication tolerance, so it
+## still fails every real geometry bug (a station off by one track misses by
+## 0.5mm, a lane off by one by the same).
+const EPS := 1e-4
+
+var _pass := 0
+var _fail := 0
+
+
+func _init() -> void:
+	print("=== Bus breakout geometry: pad-to-pad routes ===\n")
+	_run_straight_bundle()
+	_run_mixed_width_bend()
+	_run_geometry_invariants()
+	_run_crossing_refusals()
+	_run_structural_refusals()
+	_run_pads_already_on_their_lanes()
+	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
+	if _fail > 0:
+		printerr("FAILURES: %d" % _fail)
+	quit(1 if _fail > 0 else 0)
+
+
+func check(desc: String, cond: bool) -> void:
+	if cond:
+		_pass += 1
+		print("  PASS: " + desc)
+	else:
+		_fail += 1
+		printerr("  FAIL: " + desc)
+
+
+func check_near(desc: String, got: float, want: float, tol := EPS) -> void:
+	if absf(got - want) <= tol:
+		_pass += 1
+		print("  PASS: %s (%.6f)" % [desc, got])
+	else:
+		_fail += 1
+		printerr("  FAIL: %s — want %.6f, got %.6f" % [desc, want, got])
+
+
+## Assert a route equals a hand-derived point list, reporting BOTH on failure —
+## a geometry failure is unreadable without the actual numbers.
+func check_points(desc: String, got: PackedVector2Array, want: Array) -> void:
+	var ok := got.size() == want.size()
+	if ok:
+		for i in range(got.size()):
+			var w: Vector2 = want[i]
+			if absf(got[i].x - w.x) > EPS or absf(got[i].y - w.y) > EPS:
+				ok = false
+				break
+	if ok:
+		_pass += 1
+		print("  PASS: " + desc)
+	else:
+		_fail += 1
+		printerr("  FAIL: %s\n    want: %s\n    got:  %s" % [desc, str(want), str(got)])
+
+
+## Assert the call was refused, and that the refusal SAYS what is wrong: every
+## fragment must appear in the message. Naming the offending nets is half the
+## contract, so a refusal that fires with the wrong story still fails here.
+func check_refused(desc: String, result: Dictionary, fragments: Array) -> void:
+	var message := str(result.get("error", ""))
+	var ok := not bool(result.get("ok", true)) and not result.has("polylines")
+	for fragment in fragments:
+		if not message.contains(str(fragment)):
+			ok = false
+	if ok:
+		_pass += 1
+		print("  PASS: %s — \"%s\"" % [desc, message])
+	else:
+		_fail += 1
+		printerr("  FAIL: %s\n    got: ok=%s error=\"%s\"" % [desc, str(result.get("ok")), message])
+
+
+func _pv(arr: Array) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for p in arr:
+		out.append(p)
+	return out
+
+
+func _route(result: Dictionary, index: int) -> PackedVector2Array:
+	var polylines: Array = result.get("polylines", [])
+	return polylines[index] if index < polylines.size() else PackedVector2Array()
+
+
+## THE STRAIGHT BUNDLE, every point hand-derived.
+##
+## Spine (0,0) -> (100,0), so the bundle runs east: u = (1,0) and the offset
+## normal n = (-u.y, u.x) = (0,1), i.e. a track's offset is its y.
+##
+## Three 0.2mm tracks at 0.3mm clearance: pitch = 0.1 + 0.3 + 0.1 = 0.5 for both
+## gaps, so cumulative_offsets gives lanes [-0.5, 0.0, +0.5] for A, B, C in the
+## caller's order (the sibling suite pins that arithmetic).
+##
+## SOURCE pads sit west of the spine and ABOVE the whole bundle, in the same
+## perpendicular order as the lanes: A (-10,-10), B (-10,-8), C (-10,-6).
+## Every track has to travel DOWN to its lane, and C — the lane furthest from
+## the pads — has to cross both other lanes to get there, so it must leave
+## first, before those lanes have started. B crosses only A's. A crosses none.
+## Departure order is therefore C, B, A at stations 0, 0.5, 1.0 (spaced by the
+## same 0.5 pitch, since the tracks meeting at each step are the same widths):
+##
+##     source stations  A = 1.0   B = 0.5   C = 0.0
+##
+## TARGET pads sit east of the spine and BELOW the whole bundle, again in lane
+## order: A (110,20), B (110,22), C (110,24). Mirrored reasoning — A now has to
+## cross both other lanes, so A leaves first, measured BACK from the spine's
+## end:
+##
+##     target stations  A = 0.0   B = 0.5   C = 1.0
+##
+## Each route is then pad, corner at (station, pad-perp), lane start at
+## (station, lane), lane end, corner, pad.
+func _run_straight_bundle() -> void:
+	print("-- straight bundle: three nets, hand-derived pad to pad --")
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(100, 0)]),
+		PackedStringArray(["A", "B", "C"]),
+		_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+		_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+		[0.2, 0.2, 0.2], 0.3)
+	check("the straight bundle is routed", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+
+	var offsets: Array = result["offsets"]
+	check_near("lane A", float(offsets[0]), -0.5)
+	check_near("lane B", float(offsets[1]), 0.0)
+	check_near("lane C", float(offsets[2]), 0.5)
+
+	var src: Array = result["source_stations"]
+	check_near("A leaves the source end last (1.0mm in)", float(src[0]), 1.0)
+	check_near("B leaves second (0.5mm in)", float(src[1]), 0.5)
+	check_near("C, which crosses both other lanes, leaves first (0.0mm in)",
+		float(src[2]), 0.0)
+	var tgt: Array = result["target_stations"]
+	check_near("A leaves the target end first (0.0mm back)", float(tgt[0]), 0.0)
+	check_near("B leaves second (0.5mm back)", float(tgt[1]), 0.5)
+	check_near("C leaves last (1.0mm back)", float(tgt[2]), 1.0)
+
+	check_points("A: pad -> corner -> lane -0.5 -> corner -> pad", _route(result, 0),
+		[Vector2(-10, -10), Vector2(1, -10), Vector2(1, -0.5),
+		 Vector2(100, -0.5), Vector2(100, 20), Vector2(110, 20)])
+	check_points("B: rides the spine itself (lane 0.0)", _route(result, 1),
+		[Vector2(-10, -8), Vector2(0.5, -8), Vector2(0.5, 0),
+		 Vector2(99.5, 0), Vector2(99.5, 22), Vector2(110, 22)])
+	check_points("C: leaves at the spine's own first point", _route(result, 2),
+		[Vector2(-10, -6), Vector2(0, -6), Vector2(0, 0.5),
+		 Vector2(99, 0.5), Vector2(99, 24), Vector2(110, 24)])
+
+
+## MIXED WIDTHS THROUGH A BEND, every point hand-derived.
+##
+## Spine (0,0) -> (30,0) -> (30,30): east, then south. Source frame u = (1,0),
+## n = (0,1). Target frame is the LAST segment, u = (0,1), so n = (-1,0) — at
+## that end a track's offset runs in -x, and a pad's perpendicular coordinate is
+## 30 - x.
+##
+## Widths [1.0, 0.2, 0.2] at 0.2mm clearance. gap A-B = 0.5 + 0.2 + 0.1 = 0.8,
+## gap B-C = 0.1 + 0.2 + 0.1 = 0.4; positions 0 / 0.8 / 1.2 centred on 0.6 give
+## lanes [-0.6, +0.2, +0.6].
+##
+## The lane polyline through the right angle is offset_polyline's mitered one:
+## for offset o the corner lands at (30 - o, o) and the last point at (30 - o,
+## 30), which is what holds the pitch constant round the bend.
+##
+## SOURCE pads (-5,-4), (-5,-3), (-5,-2), above the bundle in lane order, so the
+## departure order is C, B, A as in the straight case. THE STATIONS ARE THE
+## DISCRIMINATOR: they are spaced by the pitch of the two tracks meeting at each
+## step, not by one uniform figure. C -> B is 0.1 + 0.2 + 0.1 = 0.4, and B -> A
+## is 0.1 + 0.2 + 0.5 = 0.8 because A is the 1.0mm track:
+##
+##     source stations  C = 0.0   B = 0.4   A = 0.4 + 0.8 = 1.2
+##
+## TARGET pads (29,35), (27,35), (25,35) are perpendicular coordinates 1, 3, 5 —
+## lane order again — so A leaves first there and the same widths give
+##
+##     target stations  A = 0.0   B = 0.8   C = 0.8 + 0.4 = 1.2
+func _run_mixed_width_bend() -> void:
+	print("-- mixed widths through a 90-degree bend, hand-derived --")
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(30, 0), Vector2(30, 30)]),
+		PackedStringArray(["A", "B", "C"]),
+		_pv([Vector2(-5, -4), Vector2(-5, -3), Vector2(-5, -2)]),
+		_pv([Vector2(29, 35), Vector2(27, 35), Vector2(25, 35)]),
+		[1.0, 0.2, 0.2], 0.2)
+	check("the bent, mixed-width bundle is routed", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+
+	var offsets: Array = result["offsets"]
+	check_near("the 1.0mm track's lane", float(offsets[0]), -0.6)
+	check_near("middle lane", float(offsets[1]), 0.2)
+	check_near("outer lane", float(offsets[2]), 0.6)
+
+	var src: Array = result["source_stations"]
+	check_near("C leaves first", float(src[2]), 0.0)
+	check_near("B leaves 0.4mm later (the two 0.2mm tracks' pitch)",
+		float(src[1]), 0.4)
+	check_near("A leaves 0.8mm after B — its 1.0mm width widened THAT step alone",
+		float(src[0]), 1.2)
+	var tgt: Array = result["target_stations"]
+	check_near("A leaves the target end first", float(tgt[0]), 0.0)
+	check_near("B is 0.8mm back from it", float(tgt[1]), 0.8)
+	check_near("C is a further 0.4mm back", float(tgt[2]), 1.2)
+	check("the wide track did NOT get the narrow tracks' spacing",
+		absf(float(src[0]) - float(src[1])) > absf(float(src[1]) - float(src[2])) + EPS)
+
+	check_points("A: 1.0mm track, outside of the corner at x = 30.6", _route(result, 0),
+		[Vector2(-5, -4), Vector2(1.2, -4), Vector2(1.2, -0.6), Vector2(30.6, -0.6),
+		 Vector2(30.6, 30), Vector2(29, 30), Vector2(29, 35)])
+	check_points("B: through the corner at x = 29.8", _route(result, 1),
+		[Vector2(-5, -3), Vector2(0.4, -3), Vector2(0.4, 0.2), Vector2(29.8, 0.2),
+		 Vector2(29.8, 29.2), Vector2(27, 29.2), Vector2(27, 35)])
+	check_points("C: inside of the corner at x = 29.4", _route(result, 2),
+		[Vector2(-5, -2), Vector2(0, -2), Vector2(0, 0.6), Vector2(29.4, 0.6),
+		 Vector2(29.4, 28.8), Vector2(25, 28.8), Vector2(25, 35)])
+
+	# The property the mitered lane buys, measured rather than read off the
+	# points above: on the SOUTHBOUND run the three lanes are still their own
+	# pitches apart (0.8 and 0.4), where a rigid translate would have collapsed
+	# them onto one x.
+	var a: PackedVector2Array = _route(result, 0)
+	var b: PackedVector2Array = _route(result, 1)
+	var c: PackedVector2Array = _route(result, 2)
+	check_near("A to B on the post-bend run", absf(a[4].x - b[4].x), 0.8)
+	check_near("B to C on the post-bend run", absf(b[4].x - c[4].x), 0.4)
+
+
+## THE INDEPENDENT ORACLE. Re-routes both shapes — the second one mirrored, so
+## the frame signs are exercised in both directions — and asserts the properties
+## that make the copper legal, using nothing the implementation computed: no
+## diagonal anywhere, every route landing on its own two pads, no two departure
+## stations shared, and no two NETS sharing a single point of copper.
+func _run_geometry_invariants() -> void:
+	print("-- invariants over both routed cases (independent of the expected points) --")
+	var cases: Array = [
+		{
+			"label": "straight, east",
+			"spine": _pv([Vector2(0, 0), Vector2(100, 0)]),
+			"sources": _pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+			"targets": _pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+			"widths": [0.2, 0.2, 0.2], "clearance": 0.3,
+		},
+		{
+			# The bend case mirrored: west then north, so both frames' unit and
+			# normal vectors take their other signs.
+			"label": "bent west then north, mixed widths",
+			"spine": _pv([Vector2(30, 0), Vector2(0, 0), Vector2(0, -30)]),
+			"sources": _pv([Vector2(35, 4), Vector2(35, 3), Vector2(35, 2)]),
+			"targets": _pv([Vector2(-5, -35), Vector2(-3, -35), Vector2(-1, -35)]),
+			"widths": [1.0, 0.2, 0.2], "clearance": 0.2,
+		},
+	]
+	for case in cases:
+		var label: String = str(case["label"])
+		var sources: PackedVector2Array = case["sources"]
+		var targets: PackedVector2Array = case["targets"]
+		var result: Dictionary = BusGeom.bundle_routes(case["spine"],
+			PackedStringArray(["A", "B", "C"]), sources, targets,
+			case["widths"], float(case["clearance"]))
+		if not bool(result.get("ok", false)):
+			check("%s: routed" % label, false)
+			printerr("    refused: " + str(result.get("error", "")))
+			continue
+		var polylines: Array = result["polylines"]
+		check("%s: one route per net" % label, polylines.size() == 3)
+
+		var diagonals := 0
+		var stranded := 0
+		for i in range(polylines.size()):
+			var route: PackedVector2Array = polylines[i]
+			if route.is_empty() or route[0] != sources[i] or route[route.size() - 1] != targets[i]:
+				stranded += 1
+			for s in range(route.size() - 1):
+				var d: Vector2 = route[s + 1] - route[s]
+				if absf(d.x) > EPS and absf(d.y) > EPS:
+					diagonals += 1
+		check("%s: every segment is axis-aligned" % label, diagonals == 0)
+		check("%s: every route runs from its own source pad to its own target pad"
+			% label, stranded == 0)
+
+		var shared := ""
+		for i in range(polylines.size()):
+			for j in range(i + 1, polylines.size()):
+				if _routes_touch(polylines[i], polylines[j]):
+					shared = "%d and %d" % [i, j]
+		check("%s: no two nets share a point of copper" % label, shared.is_empty())
+		if not shared.is_empty():
+			printerr("    tracks %s overlap" % shared)
+
+		var src: Array = result["source_stations"]
+		var tgt: Array = result["target_stations"]
+		var collided := false
+		for i in range(src.size()):
+			for j in range(i + 1, src.size()):
+				if is_equal_approx(float(src[i]), float(src[j])):
+					collided = true
+				if is_equal_approx(float(tgt[i]), float(tgt[j])):
+					collided = true
+		check("%s: no two tracks leave the bundle at the same place" % label,
+			not collided)
+
+
+## Two routes sharing any point. Both are axis-aligned polylines, so each
+## segment IS its own bounding box and "the boxes overlap" and "the segments
+## meet" are the same statement — a vertical and a horizontal meet exactly when
+## the vertical's x falls in the horizontal's x span and vice versa on y, which
+## is what this test says. Deliberately a different mechanism from the ordering
+## rules the module uses to avoid crossings in the first place.
+func _routes_touch(a: PackedVector2Array, b: PackedVector2Array) -> bool:
+	for i in range(a.size() - 1):
+		for j in range(b.size() - 1):
+			if (minf(a[i].x, a[i + 1].x) <= maxf(b[j].x, b[j + 1].x) + EPS
+					and minf(b[j].x, b[j + 1].x) <= maxf(a[i].x, a[i + 1].x) + EPS
+					and minf(a[i].y, a[i + 1].y) <= maxf(b[j].y, b[j + 1].y) + EPS
+					and minf(b[j].y, b[j + 1].y) <= maxf(a[i].y, a[i + 1].y) + EPS):
+				return true
+	return false
+
+
+func _run_crossing_refusals() -> void:
+	print("-- crossings are refused by name, never untangled --")
+	# TWO NETS, PADS SWAPPED. Lanes are [-0.25, +0.25] (0.2mm tracks at 0.3mm
+	# clearance, pitch 0.5). A is picked first so it rides the -0.25 lane, but
+	# A's pad is BELOW the bundle at y +5 and B's is ABOVE at y -5. A has to
+	# climb across B's lane and B has to drop across A's, at whichever station
+	# each leaves: whoever goes first is crossed by the other. There is no
+	# ordering that avoids it, so the only honest answer is a refusal.
+	check_refused("swapped source pads refuse, naming both nets",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(100, 0)]),
+			PackedStringArray(["SDA", "SCL"]),
+			_pv([Vector2(-10, 5), Vector2(-10, -5)]),
+			_pv([Vector2(110, -5), Vector2(110, 5)]),
+			[0.2, 0.2], 0.3),
+		["\"SDA\"", "\"SCL\"", "source"])
+
+	# THE SAME PADS AS _run_straight_bundle, PICKED IN THE OPPOSITE ORDER. Pick
+	# order decides track position and is never re-sorted, so reversing it puts
+	# every net on the far side of the bundle from where its pads are. A tool
+	# that quietly re-sorted to make a bus work would return the straight case's
+	# bundle again here; this one refuses.
+	check_refused("reversing the pick order refuses instead of re-sorting",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(100, 0)]),
+			PackedStringArray(["C", "B", "A"]),
+			_pv([Vector2(-10, -6), Vector2(-10, -8), Vector2(-10, -10)]),
+			_pv([Vector2(110, 24), Vector2(110, 22), Vector2(110, 20)]),
+			[0.2, 0.2, 0.2], 0.3),
+		["\"C\"", "\"B\"", "source"])
+
+	# CROSSING AT THE FAR END ONLY. Same source pads as the bend case, but the
+	# target pads run the other way along the board edge: their perpendicular
+	# coordinates are 5, 3, 1 against lanes -0.6, +0.2, +0.6. The source end is
+	# perfectly routable; the refusal must name the TARGET end.
+	check_refused("a crossing at the target end names that end",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(30, 0), Vector2(30, 30)]),
+			PackedStringArray(["A", "B", "C"]),
+			_pv([Vector2(-5, -4), Vector2(-5, -3), Vector2(-5, -2)]),
+			_pv([Vector2(25, 35), Vector2(27, 35), Vector2(29, 35)]),
+			[1.0, 0.2, 0.2], 0.2),
+		["\"A\"", "\"B\"", "target"])
+
+
+func _run_structural_refusals() -> void:
+	print("-- structural refusals --")
+	var names := PackedStringArray(["A", "B"])
+	var sources := _pv([Vector2(-10, -5), Vector2(-10, 5)])
+	var targets := _pv([Vector2(110, -5), Vector2(110, 5)])
+
+	# A diagonal spine cannot carry axis-aligned tracks, and rounding it onto an
+	# axis would move a point the caller placed.
+	check_refused("a diagonal spine segment is refused, not squared up",
+		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(10, 5)]),
+			names, sources, targets, [0.2, 0.2], 0.3),
+		["0→1", "both axes"])
+
+	# (0,0) -> (50,0) -> (20,0) reverses along the same axis: the offset lanes
+	# would fold back over their neighbours.
+	check_refused("a spine that doubles back is refused",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(50, 0), Vector2(20, 0)]),
+			names, sources, targets, [0.2, 0.2], 0.3),
+		["doubles back", "point 1"])
+
+	# A pad 5mm INSIDE the bundle: its leg would have to run backwards through
+	# the fan-out to reach its station.
+	check_refused("a source pad past the start of the spine is refused by name",
+		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
+			names, _pv([Vector2(5, -5), Vector2(-10, 5)]), targets,
+			[0.2, 0.2], 0.3),
+		["\"A\"", "5.000mm past"])
+	check_refused("a target pad short of the end of the spine is refused by name",
+		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
+			names, sources, _pv([Vector2(110, -5), Vector2(97, 5)]),
+			[0.2, 0.2], 0.3),
+		["\"B\"", "3.000mm short"])
+
+	# ROOM. Three 0.2mm tracks at 0.3mm clearance fan out over 1.0mm at each
+	# end and need 0.5mm (the widest offset) of bundle clear of both. A 1.2mm
+	# spine has 2.0mm of fan-out to hold and nothing left over.
+	check_refused("a spine too short for its own fan-outs is refused",
+		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(1.2, 0)]),
+			PackedStringArray(["A", "B", "C"]),
+			_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+			_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+			[0.2, 0.2, 0.2], 0.3),
+		["0→1", "1.200mm", "2.000mm", "0.500mm"])
+
+	# A zero-width track is what would let two departure stations coincide, so
+	# it is refused rather than clamped.
+	check_refused("a zero-width track is refused by name",
+		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
+			names, sources, targets, [0.2, 0.0], 0.3),
+		["\"B\"", "no trace width"])
+
+	check_refused("a missing endpoint is refused, not routed from a default",
+		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
+			names, _pv([Vector2(-10, -5)]), targets, [0.2, 0.2], 0.3),
+		["one source, one target and one width"])
+	check_refused("a spine of one distinct point is refused",
+		BusGeom.bundle_routes(_pv([Vector2(4, 4), Vector2(4, 4)]),
+			names, sources, targets, [0.2, 0.2], 0.3),
+		["at least 2 distinct points"])
+
+
+## A pad already sitting on its own lane needs no perpendicular leg at all: the
+## corner and the lane's end are the same point, and the route is a single
+## straight run.
+##
+## Spine (0,0) -> (20,0), two 0.2mm tracks at 0.3mm clearance: pitch 0.5, lanes
+## [-0.25, +0.25]. Both pads are placed ON those lanes, so neither track's leg
+## sweeps across anything and nothing constrains the order; the caller's order
+## stands and the stations are 0.0 and 0.5 at each end. A's route is then
+## (-5,-0.25) -> (0,-0.25) -> (20,-0.25) -> (25,-0.25) and B's is the same
+## 0.5mm further in at each end.
+func _run_pads_already_on_their_lanes() -> void:
+	print("-- a pad already on its lane drops the corner instead of doubling it --")
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(20, 0)]),
+		PackedStringArray(["A", "B"]),
+		_pv([Vector2(-5, -0.25), Vector2(-5, 0.25)]),
+		_pv([Vector2(25, -0.25), Vector2(25, 0.25)]),
+		[0.2, 0.2], 0.3)
+	check("aligned pads route", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+	check_points("A: one straight run, no repeated corner", _route(result, 0),
+		[Vector2(-5, -0.25), Vector2(0, -0.25), Vector2(20, -0.25), Vector2(25, -0.25)])
+	check_points("B: the same, 0.5mm in at each end", _route(result, 1),
+		[Vector2(-5, 0.25), Vector2(0.5, 0.25), Vector2(19.5, 0.25), Vector2(25, 0.25)])
