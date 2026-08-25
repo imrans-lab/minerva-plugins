@@ -90,7 +90,10 @@ test_pcb_panel_tools_migration.gd assertions=68
 # suite's tool-button walk. Found by RUNNING it after the DCR picker removal —
 # it is outside the NLC delta the owner scoped, so nothing had exercised it since
 # the button landed. All 158 pass; only the pin was stale.
-test_pcb_panel_ui.gd assertions=158
+# 158 -> 183: the Bus button's phase badge adds one wide test of 25 assertions
+# (_test_bus_phase_badge). COUNTED FROM THE SOURCE, not measured on a run —
+# every check() in it is unconditional and none sits inside a loop.
+test_pcb_panel_ui.gd assertions=183
 test_pcb_pin_inspector.gd assertions=49
 test_pcb_ratsnest.gd assertions=136
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to

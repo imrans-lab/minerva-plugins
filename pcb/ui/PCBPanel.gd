@@ -1157,6 +1157,10 @@ func _build_ui() -> void:
 	_canvas.edit_hint_width_requested.connect(_on_edit_hint_width_requested)
 	_canvas.cutout_tool_message.connect(_show_transient_status)
 	_canvas.bus_tool_message.connect(_show_transient_status)
+	# Repaint-only feed for the Bus buttons' phase badge — see
+	# _draw_bus_phase_badge. Deliberately NOT routed to the transient status:
+	# that sink expires, and the badge exists because the phase must not.
+	_canvas.bus_phase_changed.connect(_on_bus_phase_changed)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
 	_canvas.edit_draw_width_requested.connect(_on_edit_draw_width_requested)
 
@@ -1388,6 +1392,123 @@ func _add_draft_tool_button(tb: Container, mode: int, text: String, tip: String,
 	_draft_tool_buttons[mode] = btn
 
 
+## ── The Bus tool's PHASE BADGE ───────────────────────────────────────────────
+## The bus gesture runs in three phases (pcb_canvas.gd's Bus Authoring region)
+## and its button is icon-only, so the toolbar said nothing about which phase
+## was live. The canvas's own two reports cannot fill that in: the status line
+## is cleared after 2s by _show_transient_status, and the canvas teach line
+## hangs off the last picked pad, which pans off screen. The badge is painted
+## ON the existing button — no child node, no second icon asset, no text — so
+## the toolbar keeps the icon-only width the narrow column depends on.
+##
+## NOT ICON TINT. _add_draft_tool_button above already spends icon_*_color on
+## "this doorway proposes instead of committing"; putting a phase in the same
+## channel would make the draft Bus button say two things with one colour.
+##
+## PIPS, NOT A NUMERAL: at a 24px icon a glyph is unreadable, and drawing one
+## would pull a theme font into the paint path for no gain. The three pips read
+## left to right in the same order the button's own tooltip names the phases.
+const _BUS_BADGE_PIP_RADIUS := 2.0
+const _BUS_BADGE_ACTIVE_RADIUS := 3.0
+const _BUS_BADGE_PIP_GAP := 7.0
+const _BUS_BADGE_BOTTOM_INSET := 4.0
+const _BUS_BADGE_ACTIVE_COLOR := Color(1.0, 0.85, 0.3, 1.0)
+const _BUS_BADGE_DONE_COLOR := Color(1.0, 0.85, 0.3, 0.45)
+const _BUS_BADGE_PENDING_COLOR := Color(1.0, 1.0, 1.0, 0.35)
+
+
+## Where the pips sit on a button of `button_size` and what each one is:
+## [{"centre": Vector2, "state": "done"|"active"|"pending"}], one entry per
+## phase, left to right. `step` is the live phase's 0-based index.
+##
+## Laid out from the button's OWN rect — these buttons are theme-sized and
+## reflow inside a FlowContainer, so a fixed origin would drift off them. []
+## when the row cannot fit inside that rect, which is what keeps the painter
+## from ever marking a neighbouring button.
+##
+## Pure and static so the placement can be checked without painting a button,
+## and so the painter and any such check read ONE derivation rather than two.
+static func bus_badge_pips(button_size: Vector2, step: int, phase_count: int) -> Array:
+	var pips: Array = []
+	if phase_count <= 0:
+		return pips
+	var span := _BUS_BADGE_PIP_GAP * float(phase_count - 1)
+	if button_size.x < span + 2.0 * _BUS_BADGE_ACTIVE_RADIUS \
+			or button_size.y < _BUS_BADGE_BOTTOM_INSET + _BUS_BADGE_ACTIVE_RADIUS:
+		return pips
+	var origin := Vector2((button_size.x - span) * 0.5,
+		button_size.y - _BUS_BADGE_BOTTOM_INSET)
+	for i in range(phase_count):
+		var state := "pending"
+		if i == step:
+			state = "active"
+		elif i < step:
+			state = "done"
+		pips.append({
+			"centre": origin + Vector2(_BUS_BADGE_PIP_GAP * float(i), 0.0),
+			"state": state,
+		})
+	return pips
+
+
+## Which of the bus tool's phases is live, 0-based, or -1 when the bus tool is
+## not armed at all.
+##
+## READ FROM THE CANVAS on every call. This panel keeps no copy of the phase,
+## and that is the whole mechanism: a cached phase is a phase that can be stale,
+## and a phase written at a moment is a phase that has a moment to expire from.
+func bus_phase_step() -> int:
+	if _canvas == null or _canvas.tool_mode != _PcbCanvasScript.ToolMode.BUS:
+		return -1
+	if not _canvas.has_method("bus_phase"):
+		return -1
+	return int(_canvas.bus_phase())
+
+
+## Painted on the bus button itself through its `draw` signal. Godot emits that
+## signal after the Button has drawn its own style box and icon, so the badge
+## lands on top of both; nothing here adds a node, so nothing here changes what
+## the toolbar measures.
+func _draw_bus_phase_badge(btn: Button) -> void:
+	# Only the doorway that actually armed the tool is pressed
+	# (_sync_tool_buttons lights exactly one of the two families), so exactly
+	# one badge is on screen even though both Bus buttons carry the painter.
+	if not btn.button_pressed:
+		return
+	var step := bus_phase_step()
+	if step < 0:
+		return
+	for pip in bus_badge_pips(btn.size, step, int(_PcbCanvasScript.BusPhase.size())):
+		var centre: Vector2 = (pip as Dictionary)["centre"]
+		match str((pip as Dictionary)["state"]):
+			"active":
+				btn.draw_circle(centre, _BUS_BADGE_ACTIVE_RADIUS, _BUS_BADGE_ACTIVE_COLOR)
+			"done":
+				btn.draw_circle(centre, _BUS_BADGE_PIP_RADIUS, _BUS_BADGE_DONE_COLOR)
+			_:
+				btn.draw_arc(centre, _BUS_BADGE_PIP_RADIUS, 0.0, TAU, 12,
+					_BUS_BADGE_PENDING_COLOR, 1.0)
+
+
+## Give one Bus button the badge.
+##
+## BOTH doorways get it. Draw ▸ Bus and Draft ▸ Bus arm the SAME canvas gesture
+## with the same three phases and the same single _bus_phase — they disagree
+## only about what a commit writes — so a user who armed the draft doorway is
+## exactly as phase-blind as one who armed the direct button.
+func _attach_bus_phase_badge(btn: Button) -> void:
+	btn.draw.connect(_draw_bus_phase_badge.bind(btn))
+
+
+## Repaint both Bus buttons when the canvas changes phase. The badge reads the
+## phase itself at paint time; this only tells the buttons the answer moved.
+func _on_bus_phase_changed(_phase: int) -> void:
+	for family in [_tool_buttons, _draft_tool_buttons]:
+		var btn = (family as Dictionary).get(_PcbCanvasScript.ToolMode.BUS)
+		if btn is Button:
+			(btn as Button).queue_redraw()
+
+
 ## Sidebar section label — the 11px caption idiom shared by all three tool
 ## groups. Named "<text>GroupLabel" (e.g. IntentsGroupLabel). Renaming a
 ## section is NO LONGER text-only (DCR 01a022ab356c leg D): the acceptance
@@ -1545,6 +1666,9 @@ func _build_sidebar() -> VBoxContainer:
 	# Authoring region.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
 		"Draw a parallel bus pin to pin (source pads, clear to path, target pads; Enter commits)", "bus_24.png")
+	# The three phases the tooltip above names, marked on the button itself for
+	# as long as the tool is armed — see _attach_bus_phase_badge.
+	_attach_bus_phase_badge(_tool_buttons[_PcbCanvasScript.ToolMode.BUS] as Button)
 
 	# Via (epoch NLC C2, item 019fff60e05a). Sits with the constructive Draw
 	# tools because it ADDS copper, one click at a time.
@@ -1727,6 +1851,8 @@ func _build_sidebar() -> VBoxContainer:
 		"Propose a board opening as a DRAFT (ghost for review — Accept lands it)", "cutout_24.png")
 	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
 		"Propose a parallel bus pin to pin (Enter lands ghost candidates for review, never copper)", "bus_24.png")
+	# Same gesture, same three phases, same blindness — so the same badge.
+	_attach_bus_phase_badge(_draft_tool_buttons[_PcbCanvasScript.ToolMode.BUS] as Button)
 	# SPIKE 019ff8615fbe: the "Propose moves" mode toggle that briefly lived
 	# here was REJECTED at the R2 feel session ("conflicts with universal
 	# select") — proposing a move is now a one-shot arm on the component's

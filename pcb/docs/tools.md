@@ -920,7 +920,11 @@ the bus's own nets ends PATH and lands that net's target; every legal pad is
 ringed on screen and an illegal one is refused by name. Enter then COMMITS
 (Shift+Enter proposes ghosts) and refuses, naming the nets, any bus that still
 has a target missing — committing is its own act, never the gesture that
-finishes the bus. Esc/right-click peels ONE phase per press. While pathing, N
+finishes the bus. Esc/right-click peels ONE phase per press. Which phase you are in is marked on
+the Bus button itself for as long as the tool is armed — three pips along its
+bottom edge, filled up to the live one, in the order named above. It does not
+time out and it does not move with the board, so glancing away never loses it.
+While pathing, N
 ghost tracks preview live, coloured by net; once every target is picked the
 ghosts are the whole pad-to-pad routes that would commit. Refuses (spine
 tinted red, reason shown) a spine segment shorter than the widest track offset

@@ -523,6 +523,14 @@ signal cutout_tool_message(text: String)
 ## "Added bus: 3 traces on top", the inner-fold refusal) — its own channel,
 ## same reason as the three above.
 signal bus_tool_message(text: String)
+## The bus tool's PHASE, announced whenever it actually changes. Carries no
+## words and never expires — unlike bus_tool_message above, which the panel
+## clears after 2s — because its only consumer is a surface OUTSIDE this canvas
+## that must keep showing the phase for as long as the tool is armed: the
+## toolbar button that armed it. This signal is a REPAINT PING, not the state;
+## the value is read back from bus_phase(), so a consumer never holds a copy
+## that can go stale.
+signal bus_phase_changed(phase: int)
 ## The context menu's "Set trace width…" item asking the PANEL to reveal and focus
 ## its existing width SpinBox (B1u5, owner comment 962: the numeric editor already
 ## existed and was undiscoverable). A SIGNAL rather than a canvas-side dialog
@@ -794,7 +802,20 @@ var _trace_focus: Dictionary = {}
 ## CLICK, never a key: pads, then board, then pads again (see the Bus Authoring
 ## region for the whole grammar).
 enum BusPhase { SOURCES, PATH, TARGETS }
-var _bus_phase: BusPhase = BusPhase.SOURCES
+## Written from four places — the two phase-advancing clicks (_begin_bus_path,
+## _handle_bus_path_click), the Esc ladder (_cancel_bus_step) and the flat
+## reset (_reset_bus_tool) — so the announce rides a SETTER rather than an emit
+## at each site: a fifth write site cannot forget to tell the toolbar. The
+## same-value guard keeps the signal a CHANGE report, so a consumer repainting
+## on it does no work when a click leaves the phase where it was. Assigning the
+## backing variable from inside the setter does not re-enter it.
+var _bus_phase: BusPhase = BusPhase.SOURCES:
+	set(value):
+		if value == _bus_phase:
+			return
+		_bus_phase = value
+		bus_phase_changed.emit(int(value))
+
 ## SOURCES state: nets picked so far, in CLICK ORDER (T11 — this order is what
 ## pcb_bus_geometry.cumulative_offsets assigns track position by; it is never
 ## re-sorted). _bus_net_refs is the parallel SOURCE PAD ref ("U1.3"), and it IS
@@ -8119,6 +8140,13 @@ func _draw_trace_preview() -> void:
 ## and Enter refuses by name any bus that is not finished. One key used to do
 ## both, so a bus the user could not finish landed on the board anyway.
 ##
+## WHICH PHASE IS ACTIVE IS ALSO ON THE TOOLBAR. Both in-canvas reports fail a
+## user who looks away and back: the status line expires after 2s, and the
+## teach line _draw_bus_picks anchors is wherever the last picked pad is, which
+## may be off-screen. The button that armed the tool therefore carries a badge
+## fed by bus_phase() (PCBPanel._draw_bus_phase_badge) — no timer, no board
+## coordinate, and it stays for as long as the tool is armed.
+##
 ## ONLY PADS PICK NETS — a bus runs pin to pin, so a net picked off a trace
 ## would have had no source pad to leave from. In SOURCES, copper is not the
 ## phase verb either: the click that ends SOURCES becomes the path's FIRST
@@ -8151,6 +8179,17 @@ func _draw_trace_preview() -> void:
 ## below and the eventual commit call bus_plan with the SAME inputs, so what is
 ## on screen when Enter is pressed is what commits, or refuses for the reason
 ## shown.
+
+
+## THE PHASE, as a BusPhase int, for surfaces outside this canvas — the toolbar
+## button that armed the tool reads it on every repaint of its own badge.
+##
+## PULLED, never pushed: bus_phase_changed only says "repaint", and a consumer
+## that cached the value instead of calling this would grow the two faults the
+## in-canvas reporting has — a reading that can go stale, and a reading tied to
+## the moment it was made.
+func bus_phase() -> int:
+	return int(_bus_phase)
 
 
 func _handle_bus_click(world_pos: Vector2, is_double_click: bool) -> void:

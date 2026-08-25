@@ -54,6 +54,7 @@ func _init() -> void:
 	await _test_propose_selection_scope_and_retry_narration()
 	await _test_intent_parity_and_width_picker()
 	await _test_promote_headless_fail_closed()
+	await _test_bus_phase_badge()
 
 	_finish()
 
@@ -955,3 +956,226 @@ func _test_promote_headless_fail_closed() -> void:
 		(panel._unwrap_channel_reply({"ok": false, "error": {"kind": "x"}}) as Dictionary).is_empty())
 
 	_driver.free_panel(panel)
+
+
+# ── The Bus tool's PHASE BADGE ────────────────────────────────────────────────
+#
+# The bus gesture has three phases and its toolbar button is icon-only, so
+# nothing on the toolbar said which phase was live. The canvas's two reports
+# both fail a user who looks away: the status line is wiped on the next status
+# refresh, and the canvas teach line is anchored to the last picked pad, which
+# pans off screen. The badge is painted on the button itself.
+#
+# ORACLE: WHAT THE NEXT CLICK DOES. The badge's step is read against the phase
+# established BEHAVIOURALLY — a click clear of the pads either adds a net
+# (SOURCES) or places a spine vertex (PATH), and a pad click either picks a net
+# or lands a target — measured on the canvas's own gesture buffers, which no
+# badge code writes. Reading the badge back against _bus_phase would only
+# re-assert the assignment the badge was handed.
+#
+# The two failures it exists to cure get their own oracles: the status label is
+# refreshed (the same call the 2s transient timer makes) and the board is panned
+# until the picked pads leave the viewport, and the badge is read again after
+# each.
+
+const BADGE_SRC_A := Vector2(10.0, 10.0)
+const BADGE_SRC_B := Vector2(10.0, 14.0)
+const BADGE_TGT_A := Vector2(60.0, 10.0)
+const BADGE_PATH_1 := Vector2(25.0, 25.0)
+const BADGE_PATH_2 := Vector2(45.0, 25.0)
+
+
+## Two nets, two pads each, pads far apart and far clear of the path vertices
+## above — the smallest board the bus tool will path at all (it refuses a net
+## with no second pad to run to).
+func _bus_badge_board() -> Dictionary:
+	return {
+		"version": 1, "name": "BusBadgeBoard", "width_mm": 80.0, "height_mm": 40.0,
+		"grid_mm": 2.54,
+		"layers": ["top", "bottom"],
+		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
+		"components": [
+			_badge_part("U1", BADGE_SRC_A), _badge_part("U2", BADGE_SRC_B),
+			_badge_part("V1", BADGE_TGT_A), _badge_part("V2", Vector2(60.0, 14.0)),
+		],
+		"nets": [
+			{"name": "NA", "pins": ["U1.1", "V1.1"]},
+			{"name": "NB", "pins": ["U2.1", "V2.1"]},
+		],
+	}
+
+
+## One part, one pin, pin 1 at the component origin — so the component's own
+## placement IS the pad's world position.
+func _badge_part(ref: String, at: Vector2) -> Dictionary:
+	return {"ref": ref, "footprint": "IC_DIP", "x_mm": at.x, "y_mm": at.y,
+		"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]}
+
+
+## The objects listening on a button's `draw` signal. Identified by object
+## rather than by method name: the painter is connected through a .bind(), and
+## get_object() is defined for a bound callable where the method name is not
+## dependably readable back off one.
+func _draw_listeners(btn: Button) -> Array:
+	var out: Array = []
+	for c in btn.get_signal_connection_list("draw"):
+		out.append(((c as Dictionary)["callable"] as Callable).get_object())
+	return out
+
+
+## Every tool button in either family EXCEPT the two Bus doorways.
+func _non_bus_tool_buttons(panel: Variant, bus_mode: int) -> Array:
+	var out: Array = []
+	for family in [panel._tool_buttons, panel._draft_tool_buttons]:
+		for mode in (family as Dictionary).keys():
+			if int(mode) != bus_mode:
+				out.append((family as Dictionary)[mode] as Button)
+	return out
+
+
+## For each phase in turn: the index of the badge's single ACTIVE pip, or -1
+## when the badge does not mark exactly one pip out of exactly `phases`. A list
+## oracle, so the whole badge vocabulary is read in one assertion.
+func _badge_active_indices(P: Variant, btn_size: Vector2, phases: int) -> Array:
+	var out: Array = []
+	for step in range(phases):
+		var pips: Array = P.bus_badge_pips(btn_size, step, phases)
+		var active: Array = []
+		for i in range(pips.size()):
+			if str((pips[i] as Dictionary)["state"]) == "active":
+				active.append(i)
+		out.append(int(active[0]) if active.size() == 1 and pips.size() == phases else -1)
+	return out
+
+
+func _test_bus_phase_badge() -> void:
+	print("\n-- the Bus button's badge names the live phase, with no timer --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+	var P := load(PANEL_PATH)
+	panel.get_data().from_board_dict(_bus_badge_board())
+	# Authored points land exactly where clicked, so the vertices below stay the
+	# measured distance clear of every pad.
+	canvas.snap_to_grid = false
+	await process_frame
+
+	var direct_btn: Button = panel._tool_buttons[canvas.ToolMode.BUS]
+	var draft_btn: Button = panel._draft_tool_buttons[canvas.ToolMode.BUS]
+	var trace_btn: Button = panel._tool_buttons[canvas.ToolMode.TRACE]
+
+	check("badge fixture: the Bus button has a real laid-out rect (%s)" % str(direct_btn.size),
+			direct_btn.size.x >= 20.0 and direct_btn.size.y >= 20.0)
+	check("badge: with no bus armed there is no phase to show",
+			panel.bus_phase_step() == -1, "step=%d" % panel.bus_phase_step())
+	check("badge: Draw ▸ Bus has exactly one painter on it, and it is the panel",
+			_draw_listeners(direct_btn) == [panel], str(_draw_listeners(direct_btn)))
+	check("badge: Draft ▸ Bus carries the SAME badge — one gesture, one set of phases",
+			_draw_listeners(draft_btn) == [panel], str(_draw_listeners(draft_btn)))
+	var badged_elsewhere: Array = []
+	for other in _non_bus_tool_buttons(panel, int(canvas.ToolMode.BUS)):
+		if not _draw_listeners(other as Button).is_empty():
+			badged_elsewhere.append((other as Button).name)
+	check("badge: no OTHER tool button is painted — the badge belongs to the "
+			+ "three-phase tool, not to the toolbar",
+			badged_elsewhere.is_empty(), str(badged_elsewhere))
+	check("badge: the Bus button still measures exactly like an unbadged icon "
+			+ "sibling — the badge is painted, never laid out",
+			direct_btn.get_combined_minimum_size() == trace_btn.get_combined_minimum_size(),
+			"bus=%s trace=%s" % [str(direct_btn.get_combined_minimum_size()),
+				str(trace_btn.get_combined_minimum_size())])
+
+	# ── The gesture, phase by phase, each read against what the click did ──────
+	panel._toggle_tool_mode(canvas.ToolMode.BUS)
+	await process_frame
+	check("badge fixture: the Draw ▸ Bus doorway is the pressed one",
+			direct_btn.button_pressed and not draft_btn.button_pressed)
+	check("badge: armed and untouched, the badge marks the FIRST phase",
+			panel.bus_phase_step() == 0, "step=%d" % panel.bus_phase_step())
+
+	canvas._handle_bus_click(BADGE_SRC_A, false)
+	canvas._handle_bus_click(BADGE_SRC_B, false)
+	check("oracle (SOURCES): with the badge on phase 1, pad clicks added NETS and "
+			+ "placed no spine vertex — the SOURCES verb",
+			canvas._bus_nets.size() == 2 and canvas._bus_spine_points.is_empty(),
+			"nets=%s spine=%d" % [str(canvas._bus_nets), canvas._bus_spine_points.size()])
+	check("badge: picking a net does not advance the phase",
+			panel.bus_phase_step() == 0, "step=%d" % panel.bus_phase_step())
+
+	canvas._handle_bus_click(BADGE_PATH_1, false)
+	check("oracle (PATH): the clear-board click became the path's FIRST VERTEX "
+			+ "instead of a third net pick",
+			canvas._bus_spine_points.size() == 1 and canvas._bus_nets.size() == 2,
+			"spine=%d nets=%d" % [canvas._bus_spine_points.size(), canvas._bus_nets.size()])
+	check("badge: …and the badge moved to the SECOND phase with it",
+			panel.bus_phase_step() == 1, "step=%d" % panel.bus_phase_step())
+	canvas._handle_bus_click(BADGE_PATH_2, false)
+	check("oracle (PATH): a second clear click places another vertex — still pathing",
+			canvas._bus_spine_points.size() == 2, "spine=%d" % canvas._bus_spine_points.size())
+	check("badge: …and the badge is still on the second phase",
+			panel.bus_phase_step() == 1, "step=%d" % panel.bus_phase_step())
+
+	canvas._handle_bus_click(BADGE_TGT_A, false)
+	check("oracle (TARGETS): the pad click LANDED A TARGET rather than a vertex",
+			canvas._bus_target_refs[0] == "V1.1" and canvas._bus_spine_points.size() == 2,
+			"targets=%s spine=%d" % [str(canvas._bus_target_refs), canvas._bus_spine_points.size()])
+	check("badge: …and the badge marks the LAST phase",
+			panel.bus_phase_step() == 2, "step=%d" % panel.bus_phase_step())
+
+	# ── It does not expire, and it is not anchored to the board ───────────────
+	var label_before: String = str(panel._status_label.text)
+	panel._update_status()          # exactly what the 2s transient timer calls
+	await process_frame
+	check("badge: the status line's phase words are wiped by the same refresh the "
+			+ "2s transient timer fires — and the badge is not",
+			label_before != str(panel._status_label.text) and panel.bus_phase_step() == 2,
+			"before=%s after=%s step=%d" % [label_before, str(panel._status_label.text),
+				panel.bus_phase_step()])
+	canvas.pan_offset += Vector2(100000.0, 100000.0)
+	await process_frame
+	var pad_screen: Vector2 = canvas.world_to_screen(BADGE_SRC_A)
+	check("badge: the picked pads (and the teach line anchored to them) are off "
+			+ "screen, and the badge still names the phase",
+			not Rect2(Vector2.ZERO, canvas.size).has_point(pad_screen)
+				and panel.bus_phase_step() == 2,
+			"pad at %s, canvas %s, step=%d" % [str(pad_screen), str(canvas.size),
+				panel.bus_phase_step()])
+
+	# ── The Esc ladder peels one phase, and the badge peels with it ───────────
+	canvas._cancel_bus_step(false)
+	check("oracle (ladder): Esc cleared the targets and KEPT the path",
+			canvas._bus_target_refs[0] == "" and canvas._bus_spine_points.size() == 2,
+			"targets=%s spine=%d" % [str(canvas._bus_target_refs), canvas._bus_spine_points.size()])
+	check("badge: …and the badge went back to the second phase, not to the first",
+			panel.bus_phase_step() == 1, "step=%d" % panel.bus_phase_step())
+
+	# ── Both doorways, and disarming ──────────────────────────────────────────
+	panel._toggle_draft_tool(canvas.ToolMode.BUS)
+	await process_frame
+	check("badge: switching doorway mid-gesture moves the badge to the pressed "
+			+ "button and keeps the phase the gesture is in",
+			draft_btn.button_pressed and not direct_btn.button_pressed
+				and panel.bus_phase_step() == 1, "step=%d" % panel.bus_phase_step())
+	panel._toggle_draft_tool(canvas.ToolMode.BUS)      # the re-click disarms
+	await process_frame
+	check("badge: disarming leaves no phase to show, on either doorway",
+			panel.bus_phase_step() == -1 and not draft_btn.button_pressed
+				and not direct_btn.button_pressed, "step=%d" % panel.bus_phase_step())
+
+	# ── The badge's own vocabulary ────────────────────────────────────────────
+	var phases: int = int(canvas.BusPhase.size())
+	check("badge: one pip per phase, and the tool still has 3 (%d)" % phases,
+			phases == 3 and P.bus_badge_pips(direct_btn.size, 0, phases).size() == phases)
+	check("badge: exactly one pip is ACTIVE, at the live phase's own index, for "
+			+ "every phase in turn",
+			_badge_active_indices(P, direct_btn.size, phases) == [0, 1, 2],
+			str(_badge_active_indices(P, direct_btn.size, phases)))
+	var inside := true
+	for step in range(phases):
+		for pip in P.bus_badge_pips(direct_btn.size, step, phases):
+			var c: Vector2 = (pip as Dictionary)["centre"]
+			inside = inside and Rect2(Vector2.ZERO, direct_btn.size).has_point(c)
+	check("badge: every pip lands inside the button's own rect, so it can never "
+			+ "mark a neighbouring tool", inside, "button %s" % str(direct_btn.size))
+
+	panel.queue_free()
+	await process_frame
