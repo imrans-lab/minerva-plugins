@@ -8124,6 +8124,9 @@ func _draw_trace_preview() -> void:
 ##                                        a second pad to run to)
 ##   SOURCES --click a trace-->           INERT; says so and stays in SOURCES
 ##   PATH    --click clear of the pads--> place another vertex, axis-aligned
+##   PATH    --double-click clear of the pads--> PATH ends where the spine
+##                                        already is, no target landed yet
+##                                        (needs 2+ vertices placed)
 ##   PATH    --click a legal target pad--> PATH ends; that pad is that net's
 ##                                        target (needs 2+ vertices placed)
 ##   TARGETS --click a legal target pad--> set, or replace, that net's target
@@ -8196,12 +8199,16 @@ func _handle_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 	if is_double_click:
 		# A physical double-click arrives as TWO presses and the first already
 		# did whatever the phase does with a click, so the second carries one
-		# verb only, and only where that verb is legal: the commit, in TARGETS,
-		# clear of the pads. On a pad it is inert — which is what stops a
-		# double-click re-toggling a pick in SOURCES, and stops the press that
-		# lands the last target from also committing it.
-		if _bus_phase == BusPhase.TARGETS and _trace_pad_at(world_pos).is_empty():
+		# verb only, and only where that verb is legal — clear of the pads: in
+		# TARGETS the commit, in PATH the end of the path. On a pad it is inert
+		# — which is what stops a double-click re-toggling a pick in SOURCES,
+		# and stops the press that lands the last target from also committing it.
+		if not _trace_pad_at(world_pos).is_empty():
+			return
+		if _bus_phase == BusPhase.TARGETS:
 			_commit_bus(Input.is_key_pressed(KEY_SHIFT))
+		elif _bus_phase == BusPhase.PATH:
+			_end_bus_path_on_double_click()
 		return
 	match _bus_phase:
 		BusPhase.SOURCES:
@@ -8274,13 +8281,46 @@ func _handle_bus_path_click(world_pos: Vector2) -> void:
 		bus_tool_message.emit(_bus_illegal_target_message(pad))
 		return
 	if _bus_spine_points.size() < 2:
-		bus_tool_message.emit(
-			"The bus path needs at least 2 points before its targets (%d placed) — click another vertex clear of the pads."
-				% _bus_spine_points.size())
+		bus_tool_message.emit(_bus_path_too_short_message())
 		return
 	_bus_phase = BusPhase.TARGETS
 	_bus_has_preview = false
 	_assign_bus_target(cand)
+
+
+## PATH -> TARGETS with no target landed — the ending for a spine that does not
+## finish on a pad, and the only way to leave PATH other than a target click.
+##
+## THE FIRST PRESS OF THIS DOUBLE-CLICK ALREADY PLACED A VERTEX under the
+## cursor (it reached _handle_bus_path_click as an ordinary click), so the
+## gesture that ENDS the path would otherwise also lengthen it. Dropping that
+## vertex again makes the whole double-click atomic: it either ends the path on
+## exactly the vertices the user placed before it, or it refuses and leaves the
+## spine — and the phase — as it found them. The size guard is what keeps the
+## press that ENTERED this phase (_begin_bus_path placed that first vertex, not
+## a click of this gesture) from being peeled off into an empty spine.
+func _end_bus_path_on_double_click() -> void:
+	if _bus_spine_points.size() > 1:
+		_bus_spine_points.remove_at(_bus_spine_points.size() - 1)
+	# The rubber band is anchored on the point just dropped, so it is stale on
+	# BOTH exits below, not only the one that leaves the phase.
+	_bus_has_preview = false
+	if _bus_spine_points.size() < 2:
+		bus_tool_message.emit(_bus_path_too_short_message())
+		queue_redraw()
+		return
+	_bus_phase = BusPhase.TARGETS
+	bus_tool_message.emit("Bus path ended (%d points) — %s"
+		% [_bus_spine_points.size(), _bus_targets_status()])
+	queue_redraw()
+
+
+## Both endings of PATH refuse a one-vertex spine in the same words: a bus
+## bundle needs a segment to run along, and which gesture asked to end the path
+## is not the user's problem.
+func _bus_path_too_short_message() -> String:
+	return ("The bus path needs at least 2 points before its targets (%d placed) — click another vertex clear of the pads."
+		% _bus_spine_points.size())
 
 
 ## TARGETS click: a legal pad sets, replaces or clears its net's target.

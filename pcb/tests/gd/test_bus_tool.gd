@@ -218,6 +218,11 @@ const TGT_C := Vector2(130.0, 44.0)
 const PATH_1 := Vector2(20.0, 20.0)
 const PATH_2 := Vector2(120.0, 20.0)
 const EMPTY := Vector2(60.0, 20.0)
+## Where the PATH-ending double-click lands. Clear board like the two above,
+## and deliberately OFF the spine's axis: the vertex its first press places
+## snaps to (120, 34), a leg no duplicate-point dedup would swallow, so a spine
+## that kept it commits visibly different copper.
+const DBL_END := Vector2(122.0, 34.0)
 
 ## The bus this fixture commits, hand-checked.
 ##
@@ -680,11 +685,17 @@ func _test_a_click_on_the_pads_copper_is_that_pad() -> void:
 #
 # Godot delivers a physical double-click as TWO press events; the second
 # carries double_click=true. The picking guard that survived from the two-phase
-# tool is pinned here alongside the new rule that a double-click ON a pad is
-# inert, so the press that lands the last target can never also commit it.
+# tool is pinned here alongside the rule that a double-click ON a pad is inert,
+# so the press that lands the last target can never also commit it, and the
+# PATH ending: a double-click clear of the pads ends the path, and because its
+# OWN first press placed a vertex there, ending must drop that vertex again.
 #
-# ORACLE: the picked-net list for the first claim, the board-state triple for
-# the other two.
+# ORACLE: the picked-net list for the pick claims, the board-state triple for
+# the commit claims, and for the PATH ending the COMMITTED COPPER — a path
+# ended by double-click at DBL_END must commit the same hand-derived routes as
+# the pad-ended gesture, which a stray vertex (a leg down to y=34, past any
+# duplicate-point dedup) could not do. The refusal is measured against the text
+# the pad ending emits for the same too-short path, not a copy of it.
 
 func _test_double_click_grammar() -> void:
 	print("\n-- (5) double-click: never re-toggles a pick, never commits from a pad --")
@@ -711,6 +722,64 @@ func _test_double_click_grammar() -> void:
 	check("a double-click clear of the pads DOES commit (the mouse twin of Enter)",
 			_serialized_traces(data).size() == 3, "got %d" % _serialized_traces(data).size())
 	check("…in one journal step", data.history.size() == int(ready[1]) + 1)
+	canvas.free()
+
+	# The PATH ending. DBL_END's first press places a vertex the double-click
+	# must take back; if it stayed, the spine would turn down to y=34 and no
+	# route below would land where the pad-ended gesture puts it.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)    # ends SOURCES, vertex 1
+	canvas._handle_bus_click(PATH_2, false)    # vertex 2
+	canvas._handle_bus_click(DBL_END, false)   # press 1 of the double-click
+	canvas._handle_bus_click(DBL_END, true)    # press 2 ends the path
+	check("a double-click clear of the pads ends PATH", canvas.bus_phase() == canvas.BusPhase.TARGETS,
+			"phase %d" % canvas.bus_phase())
+	check("…on exactly the vertices placed before it — no stray vertex under the cursor",
+			canvas._bus_spine_points == PackedVector2Array([PATH_1, PATH_2]),
+			"got %s" % str(canvas._bus_spine_points))
+	canvas._handle_bus_click(TGT_A, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._commit_bus()
+	var by_net := _traces_by_net(data)
+	check("the double-click-ended path commits the same bus as the pad-ended one",
+			by_net.size() == 3, "got %s" % str(by_net.keys()))
+	var want := _expected_routes()
+	for net in ["NA", "NB", "NC"]:
+		if by_net.has(net):
+			_check_route(net, _points_of(by_net[net]), want[net])
+	canvas.free()
+
+	# A one-vertex path refuses whichever gesture asks to end it, and the
+	# refusal leaves the tool exactly as it found it.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	var msgs := _collect(canvas)
+	var before := _board_state(data)
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)    # ends SOURCES, vertex 1
+	canvas._handle_bus_click(PATH_2, false)    # press 1 of the double-click
+	canvas._handle_bus_click(PATH_2, true)     # press 2 — only 1 placed vertex
+	var refusal := _last(msgs)
+	check("a double-click on a path too short to bus is refused, phase unmoved",
+			canvas.bus_phase() == canvas.BusPhase.PATH and refusal.contains("at least 2 points"),
+			"phase %d, %s" % [canvas.bus_phase(), refusal])
+	check("…and the vertex its own first press placed is gone again",
+			canvas._bus_spine_points == PackedVector2Array([PATH_1]),
+			"got %s" % str(canvas._bus_spine_points))
+	canvas._handle_bus_click(TGT_A, false)     # the pad ending, same short path
+	check("…in the same words the pad ending refuses in", _last(msgs) == refusal,
+			"\n    pad:    %s\n    double: %s" % [_last(msgs), refusal])
+	check("and neither refusal wrote anything", _board_state(data) == before,
+			str(_board_state(data)))
 
 	canvas.free()
 
