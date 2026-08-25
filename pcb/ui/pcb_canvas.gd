@@ -787,9 +787,16 @@ var _trace_focus: Dictionary = {}
 ## pcb_bus_geometry.cumulative_offsets assigns track position by; it is never
 ## re-sorted). _bus_net_refs is the parallel "picked from" ref (a pad ref like
 ## "U1.3" or "trace <id>") for the teach line only — nothing reads it for
-## geometry. Both empty ⇔ nothing picked yet.
+## geometry. All three empty ⇔ nothing picked yet.
+##
+## _bus_net_points is the parallel WORLD position each net was picked at — the
+## copper the pick came from, which is what _draw_bus_picks marks so the PICKING
+## phase is visible at all. Kept in lockstep with the two arrays above: every
+## append, remove_at and clear touches all three, and both readers index them
+## together on that assumption.
 var _bus_nets: Array[String] = []
 var _bus_net_refs: Array[String] = []
+var _bus_net_points: PackedVector2Array = PackedVector2Array()
 ## DRAWING state. _bus_drawing is what actually distinguishes the two phases:
 ## _bus_spine_points is empty both before drawing starts AND for one instant
 ## after Enter starts it (before the first vertex lands), so the points array
@@ -834,6 +841,11 @@ const BUS_SPINE_PREVIEW_COLOR := Color(0.85, 0.85, 0.85, 1.0)
 ## live while drawing, not only after a failed commit, so "never commit
 ## self-overlapping copper" is visible before the user ever presses Enter.
 const BUS_REFUSAL_COLOR := Color(1.0, 0.35, 0.25, 1.0)
+## PICK MARKER geometry. A ring rather than a filled dot so the pad or trace
+## underneath stays readable through it — the marker says "this is in the bus",
+## it does not replace what was picked.
+const BUS_PICK_MARKER_RADIUS_PX := 9.0
+const BUS_PICK_MARKER_WIDTH_PX := 2.0
 
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)
@@ -4016,7 +4028,10 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not hovered_component.is_empty():
 			hovered_component = ""
 			queue_redraw()
-		if _bus_drawing and not _bus_spine_points.is_empty():
+		if _bus_drawing:
+			# Armed with no vertex yet still rubber-bands: the cursor vertex is
+			# meaningful the moment the spine is armed, because it is where the
+			# first vertex will land.
 			_bus_preview = _author_point(world_pos)
 			_bus_has_preview = true
 			queue_redraw()
@@ -8071,20 +8086,33 @@ func _draw_trace_preview() -> void:
 ## is what commits, or refuses for the reason shown.
 
 
-## Resolve a click to a net, trying a PAD first (reuses the trace tool's own
-## lookup — same source of truth, same net-inheritance rule) then a TRACE
-## (data.get_trace's net_name). {} on a miss.
+## Resolve a click to {net, ref, position}, trying a PAD first (reuses the trace
+## tool's own lookup — same source of truth, same net-inheritance rule) then a
+## TRACE (data.get_trace's net_name). {} on a miss.
+##
+## `position` is the PAD CENTRE for a pad hit and the closest point on the
+## centreline for a trace hit — never the raw cursor — so a pick marker lands on
+## the copper the net was taken from rather than wherever inside the hit radius
+## the mouse happened to be.
 func _bus_net_at(world_pos: Vector2) -> Dictionary:
 	var pad_hit := _trace_pad_at(world_pos)
 	if not pad_hit.is_empty():
-		return {"net": str(pad_hit.get("net", "")), "ref": str(pad_hit.get("ref", ""))}
+		return {
+			"net": str(pad_hit.get("net", "")),
+			"ref": str(pad_hit.get("ref", "")),
+			"position": pad_hit.get("position", world_pos),
+		}
 	if data == null:
 		return {}
 	var trace_id := _trace_at(world_pos)
 	if not trace_id.is_empty():
 		var trace = data.get_trace(trace_id)
 		if trace != null:
-			return {"net": str(trace.net_name), "ref": "trace %s" % trace_id}
+			return {
+				"net": str(trace.net_name),
+				"ref": "trace %s" % trace_id,
+				"position": trace.get_closest_point(world_pos),
+			}
 	return {}
 
 
@@ -8132,12 +8160,14 @@ func _handle_bus_pick_click(world_pos: Vector2) -> void:
 		# Click an already-listed net again to remove it (S3's own contract).
 		_bus_nets.remove_at(idx)
 		_bus_net_refs.remove_at(idx)
+		_bus_net_points.remove_at(idx)
 		bus_tool_message.emit("Removed %s from the bus (%d picked)." % [net, _bus_nets.size()])
 		queue_redraw()
 		return
 
 	_bus_nets.append(net)
 	_bus_net_refs.append(str(hit.get("ref", "")))
+	_bus_net_points.append(hit.get("position", world_pos))
 	var msg := "Bus: [%s] (%d picked)" % [_bus_nets_joined(), _bus_nets.size()]
 	msg += " — Enter to draw the spine." if _bus_nets.size() >= 2 else " — pick at least 1 more net."
 	bus_tool_message.emit(msg)
@@ -8253,6 +8283,7 @@ func _cancel_bus_step(announce: bool) -> void:
 	if not _bus_nets.is_empty():
 		_bus_nets = []
 		_bus_net_refs = []
+		_bus_net_points = PackedVector2Array()
 		if announce:
 			bus_tool_message.emit("Bus net picks cleared.")
 		queue_redraw()
@@ -8269,20 +8300,75 @@ func _reset_bus_tool(announce: bool) -> void:
 	_bus_layer = ""
 	_bus_nets = []
 	_bus_net_refs = []
+	_bus_net_points = PackedVector2Array()
 	_bus_plan_cache_key = []
 	_bus_plan_cache = {}
 	if announce and had_progress:
 		bus_tool_message.emit("Bus tool disarmed — picks and spine discarded.")
 
 
-## Draw the bus being born: the raw spine as a rubber band (same visual
-## language _draw_trace_preview uses), then the N per-net GHOST offset
-## polylines bus_plan would commit — TOOL PREVIEW geometry, not a workspace
-## candidate (see the region doc + this file's _draw for the depth this
-## renders at). The spine tints BUS_REFUSAL_COLOR the instant the current
-## geometry would trip the inner-fold guard, so the refusal is visible before
-## Enter is ever pressed, not only after a failed commit.
+## Draw the PICKING phase's state: one ring per picked net, at the copper it was
+## picked from, plus a teach line naming the next verb.
+##
+## The click-order NUMBER is semantic, not decoration:
+## pcb_bus_geometry.cumulative_offsets assigns each net its track position by
+## pick order, so "which did I pick second" decides where that net's copper
+## lands in the bundle. A user who cannot see the order cannot predict the bus.
+func _draw_bus_picks() -> void:
+	if _bus_nets.is_empty():
+		return
+	var count: int = _bus_nets.size()
+	var last_screen := Vector2.ZERO
+	for i in range(count):
+		var screen_pt := world_to_screen(_bus_net_points[i])
+		var marker_color := BUS_SPINE_PREVIEW_COLOR
+		var net_obj = data.get_net(_bus_nets[i]) if data else null
+		if net_obj:
+			marker_color = net_obj.color
+		draw_arc(screen_pt, BUS_PICK_MARKER_RADIUS_PX, 0.0, TAU, 20,
+			marker_color, BUS_PICK_MARKER_WIDTH_PX)
+		# The ring is the load-bearing mark and needs no font; only the labels
+		# below do. Gating the whole marker on `font` would make a missing font
+		# restore the exact "tool looks dead" symptom this draw call exists to
+		# cure.
+		if font != null:
+			draw_string(font, screen_pt + Vector2(BUS_PICK_MARKER_RADIUS_PX + 3.0, 4.0),
+				"%d  %s" % [i + 1, _bus_nets[i]],
+				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, marker_color)
+		last_screen = screen_pt
+	if font == null:
+		return
+
+	# Teach line anchored to the most recent pick, so the next verb is where the
+	# eye already is. The status bar carries the same words for 2s; this one
+	# stays until the state it describes changes.
+	var teach := ""
+	if _bus_drawing:
+		if _bus_spine_points.is_empty():
+			teach = "Spine armed on %s — click the first vertex." % _bus_layer
+	elif count >= 2:
+		teach = "%d nets picked — Enter to draw the spine." % count
+	else:
+		teach = "%d net picked — pick at least 1 more." % count
+	if teach.is_empty():
+		return
+	draw_string(font, last_screen + Vector2(BUS_PICK_MARKER_RADIUS_PX + 3.0, -10.0),
+		teach, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, BUS_SPINE_PREVIEW_COLOR)
+
+
+## Draw the bus being born: the picked nets in BOTH phases, then — once drawing
+## — the raw spine as a rubber band (same visual language _draw_trace_preview
+## uses) and the N per-net GHOST offset polylines bus_plan would commit — TOOL
+## PREVIEW geometry, not a workspace candidate (see the region doc + this file's
+## _draw for the depth this renders at). The spine tints BUS_REFUSAL_COLOR the
+## instant the current geometry would trip the inner-fold guard, so the refusal
+## is visible before Enter is ever pressed, not only after a failed commit.
 func _draw_bus_preview() -> void:
+	# Picks render in both phases: the _bus_drawing gate below covers only what
+	# genuinely needs a spine. While placing the spine, where the nets were taken
+	# from is the context for judging whether the bus lands where it should.
+	_draw_bus_picks()
+
 	if not _bus_drawing:
 		return
 
@@ -8313,6 +8399,13 @@ func _draw_bus_preview() -> void:
 		draw_polyline(open_path, spine_color, 1.0)
 	for pt in screen_pts:
 		draw_circle(pt, TRACE_PREVIEW_VERTEX_RADIUS_PX, spine_color)
+	# The cursor vertex, hollow so it reads as "not placed yet" against the
+	# filled ones above. It carries the armed-but-empty state on its own: with
+	# no spine points there is no polyline and no label, so this ring is the
+	# only thing telling the user the spine is live and where vertex 1 lands.
+	if _bus_has_preview:
+		draw_arc(cursor_pt, TRACE_PREVIEW_VERTEX_RADIUS_PX, 0.0, TAU, 16,
+			spine_color, 1.5)
 
 	# N ghost offset polylines — only once the plan is valid (a refused plan
 	# has no polylines to show; the tinted spine above already carries the
