@@ -19,17 +19,13 @@
 # runner's own `test_*.gd` glob) and NOT executable GDScript.
 # See pcb/docs/gd-tests.md.
 # The pad-to-pad half of the bus geometry (bundle_routes + its breakout
-# legs). Authored with the code it covers and NEVER EXECUTED — the only
-# runner takes the Minerva single-instance lock, and an assertions= count
-# guessed by reading is exactly the false pin that attribute exists to
-# prevent. Pin it from the first trustworthy run.
-test_bus_breakout_geometry.gd
+# legs), including the refusals: a crossing the leaves-first rules cannot
+# order, a spine too short for its fan-outs, and a pad past the spine's end.
+test_bus_breakout_geometry.gd assertions=53
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
-# share. REWRITTEN with the code it covers and NEVER EXECUTED, so the old
-# assertions=64 pin no longer describes it and a re-count by reading would be
-# exactly the false pin this attribute exists to prevent. Re-pin it from the
-# first trustworthy run.
-test_bus_tool.gd
+# share. The board triple (traces, history, change journal) is the oracle for
+# every "this gesture wrote nothing" claim, read before the commit verb.
+test_bus_tool.gd assertions=96
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
