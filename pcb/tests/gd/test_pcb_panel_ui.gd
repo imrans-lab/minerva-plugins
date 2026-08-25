@@ -15,6 +15,9 @@ extends SceneTree
 
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const DRIVER_PATH := "res://test/helpers/plugin_panel_driver.gd"
+## The shared bus plan — the ORACLE the held-refusal test below reads its
+## expected words out of. See _test_bus_refusal_is_held.
+const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
 
 var _pass_count: int = 0
 var _fail_count: int = 0
@@ -55,6 +58,7 @@ func _init() -> void:
 	await _test_intent_parity_and_width_picker()
 	await _test_promote_headless_fail_closed()
 	await _test_bus_phase_badge()
+	await _test_bus_refusal_is_held()
 
 	_finish()
 
@@ -1176,6 +1180,134 @@ func _test_bus_phase_badge() -> void:
 			inside = inside and Rect2(Vector2.ZERO, direct_btn.size).has_point(c)
 	check("badge: every pip lands inside the button's own rect, so it can never "
 			+ "mark a neighbouring tool", inside, "button %s" % str(direct_btn.size))
+
+	panel.queue_free()
+	await process_frame
+
+
+# ── The Bus tool's REFUSAL, said out loud ─────────────────────────────────────
+#
+# The tool already KNEW its live plan was refused — it tinted the spine and
+# printed the reason in a small on-canvas label. Both marks sit at the spine's
+# first vertex, which pans off screen, so the refusal can be visible while its
+# reason is not.
+#
+# So the reason goes where the user already looks, and STAYS: the panel's
+# standing status line (not the 2s transient sink — a refusal that expires is a
+# refusal nobody reads) and the phase badge's colour.
+#
+# ORACLE: THE SHARED PLAN'S OWN WORDS. panel_tools.bus_plan — the one function
+# the gesture, both MCP verbs and the commit all call — is asked to plan the
+# SAME fixture geometry directly, and its refusal string is what the canvas, the
+# panel accessor and the rendered status label are each held to, verbatim. The
+# refusal RULES are not being tested here (test_bus_breakout_geometry.gd and
+# test_pcb_bus_geometry.gd own those); what is tested is that the words reach
+# the user and stay reachable.
+
+## A second path vertex 0.1mm from the first. The badge board's two 0.2mm nets
+## at 0.3mm clearance ride lanes at ±0.25mm, so a 0.1mm spine segment is
+## shorter than the widest offset and the inner track would fold back on
+## itself — bus_plan's inner-fold refusal, reached while still PATHING.
+const BADGE_FOLD := Vector2(25.1, 25.0)
+
+
+func _test_bus_refusal_is_held() -> void:
+	print("\n-- a refused bus plan is named in the status line, and HELD there --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+	var P := load(PANEL_PATH)
+	var PT := load(PANEL_TOOLS_PATH)
+	panel.get_data().from_board_dict(_bus_badge_board())
+	canvas.snap_to_grid = false
+	await process_frame
+
+	check("refusal: with no bus armed the panel has no refusal to report",
+			panel.bus_refusal_text() == "", panel.bus_refusal_text())
+
+	# Every crossing the canvas announces, in order — the edge-triggered feed
+	# the panel's two surfaces repaint off.
+	var announced: Array = []
+	canvas.bus_refusal_changed.connect(func(refused: bool) -> void: announced.append(refused))
+
+	panel._toggle_tool_mode(canvas.ToolMode.BUS)
+	await process_frame
+	canvas._handle_bus_click(BADGE_SRC_A, false)
+	canvas._handle_bus_click(BADGE_SRC_B, false)
+	canvas._handle_bus_click(BADGE_PATH_1, false)
+	check("refusal fixture: two nets picked, pathing on top from one vertex",
+			canvas._bus_nets.size() == 2 and canvas._bus_layer == "top"
+				and canvas._bus_spine_points.size() == 1,
+			"nets=%s layer=%s spine=%d" % [str(canvas._bus_nets), canvas._bus_layer,
+				canvas._bus_spine_points.size()])
+	check("refusal: one vertex is not yet a plan — nothing refused, nothing announced",
+			canvas.bus_refusal() == "" and announced.is_empty(),
+			"refusal=%s announced=%s" % [canvas.bus_refusal(), str(announced)])
+
+	# ── The fold, planned INDEPENDENTLY to get the expected words ─────────────
+	var oracle: Dictionary = PT.bus_plan(panel.get_data(), ["NA", "NB"],
+		PackedVector2Array([BADGE_PATH_1, BADGE_FOLD]), "top",
+		PackedStringArray(["U1.1", "U2.1"]), PackedStringArray())
+	var expected := str(oracle.get("error", ""))
+	check("refusal oracle: bus_plan itself refuses this spine, and says why",
+			not bool(oracle.get("ok", true)) and not expected.is_empty(), expected)
+
+	canvas._handle_bus_click(BADGE_FOLD, false)
+	check("refusal: the canvas reports the refusal in bus_plan's own words",
+			canvas.bus_refusal() == expected, canvas.bus_refusal())
+	check("refusal: the panel reads those same words back off the canvas",
+			panel.bus_refusal_text() == expected, panel.bus_refusal_text())
+	check("refusal: the crossing was announced exactly once, as refused",
+			announced == [true], str(announced))
+	check("refusal: the STATUS LINE carries the reason",
+			str(panel._status_label.text).contains(expected),
+			str(panel._status_label.text))
+	check("refusal: …and the full text is on the tooltip, which no ellipsis trims",
+			str(panel._status_label.tooltip_text).contains(expected),
+			str(panel._status_label.tooltip_text))
+
+	# ── HELD: it outlasts a transient message AND the refresh that clears one ─
+	panel._show_transient_status("a passing message")
+	check("refusal: a transient message does NOT displace it — the line carries "
+			+ "the passing words and the standing refusal at once",
+			str(panel._status_label.text).contains("a passing message")
+				and str(panel._status_label.text).contains(expected),
+			str(panel._status_label.text))
+	panel._update_status()          # exactly what the 2s transient timer calls
+	check("refusal: …and the refresh that clears the transient leaves the "
+			+ "refusal where it is",
+			str(panel._status_label.text).contains(expected)
+				and not str(panel._status_label.text).contains("a passing message"),
+			str(panel._status_label.text))
+
+	# ── The badge wears the refusal, and it is the canvas's own colour ────────
+	check("refusal: the badge's live pip takes the SPINE's refusal colour",
+			P.bus_badge_pip_color("active", true) == canvas.BUS_REFUSAL_COLOR,
+			str(P.bus_badge_pip_color("active", true)))
+	var retinted := true
+	for state in ["active", "done", "pending"]:
+		var tinted: Color = P.bus_badge_pip_color(str(state), true)
+		retinted = retinted and Color(tinted, 1.0) == canvas.BUS_REFUSAL_COLOR \
+			and tinted != P.bus_badge_pip_color(str(state), false)
+	check("refusal: EVERY pip is retinted, and none of the three keeps its "
+			+ "ordinary phase colour", retinted)
+
+	# ── It does not clear itself, and it clears when the state does ───────────
+	canvas._handle_bus_click(BADGE_PATH_2, false)
+	check("refusal: a later good vertex does not cure a fold already in the "
+			+ "spine — the refusal stands and nothing new is announced",
+			canvas.bus_refusal() == expected and announced == [true],
+			"refusal=%s announced=%s" % [canvas.bus_refusal(), str(announced)])
+	canvas._cancel_bus_step(false)
+	check("refusal oracle (ladder): Esc peeled PATH, so the folded spine is gone",
+			canvas._bus_spine_points.is_empty() and canvas._bus_nets.size() == 2,
+			"spine=%d nets=%d" % [canvas._bus_spine_points.size(), canvas._bus_nets.size()])
+	check("refusal: …and the refusal cleared with it, announced once as clear",
+			canvas.bus_refusal() == "" and panel.bus_refusal_text() == ""
+				and announced == [true, false], str(announced))
+	check("refusal: the status line drops it too — nothing is held that no "
+			+ "longer stands",
+			not str(panel._status_label.text).contains(expected),
+			str(panel._status_label.text))
 
 	panel.queue_free()
 	await process_frame

@@ -1161,6 +1161,10 @@ func _build_ui() -> void:
 	# _draw_bus_phase_badge. Deliberately NOT routed to the transient status:
 	# that sink expires, and the badge exists because the phase must not.
 	_canvas.bus_phase_changed.connect(_on_bus_phase_changed)
+	# The same repaint-only shape, for the live plan's REFUSAL — see
+	# _on_bus_refusal_changed. Also not routed to the transient status: a
+	# refusal that expires is a refusal the user never reads.
+	_canvas.bus_refusal_changed.connect(_on_bus_refusal_changed)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
 	_canvas.edit_draw_width_requested.connect(_on_edit_draw_width_requested)
 
@@ -1465,6 +1469,37 @@ func bus_phase_step() -> int:
 	return int(_canvas.bus_phase())
 
 
+## Why the bus tool's LIVE plan would be refused, in the canvas's own words, or
+## "" when nothing is refused (the bus tool not being armed included).
+##
+## READ FROM THE CANVAS on every call, for the same reason bus_phase_step is:
+## a refusal this panel had copied could outlive the geometry that caused it.
+func bus_refusal_text() -> String:
+	if _canvas == null or _canvas.tool_mode != _PcbCanvasScript.ToolMode.BUS:
+		return ""
+	return str(_canvas.bus_refusal())
+
+
+## What colour one pip is painted in.
+##
+## A REFUSED PLAN REPLACES THE PALETTE rather than adding a fourth pip state:
+## the pips go on saying which phase is live, and the colour they say it in is
+## what carries "this plan would be refused". The tint is pulled from the canvas
+## (BUS_REFUSAL_COLOR — the same colour it tints the spine with) rather than
+## re-chosen here, so the two surfaces cannot drift apart.
+##
+## Pure and static so the tint can be checked without painting a button.
+static func bus_badge_pip_color(state: String, refused: bool) -> Color:
+	if not refused:
+		if state == "active":
+			return _BUS_BADGE_ACTIVE_COLOR
+		return _BUS_BADGE_DONE_COLOR if state == "done" else _BUS_BADGE_PENDING_COLOR
+	var refusal: Color = _PcbCanvasScript.BUS_REFUSAL_COLOR
+	if state == "active":
+		return refusal
+	return Color(refusal, _BUS_BADGE_DONE_COLOR.a if state == "done" else _BUS_BADGE_PENDING_COLOR.a)
+
+
 ## Painted on the bus button itself through its `draw` signal. Godot emits that
 ## signal after the Button has drawn its own style box and icon, so the badge
 ## lands on top of both; nothing here adds a node, so nothing here changes what
@@ -1478,16 +1513,17 @@ func _draw_bus_phase_badge(btn: Button) -> void:
 	var step := bus_phase_step()
 	if step < 0:
 		return
+	var refused := not bus_refusal_text().is_empty()
 	for pip in bus_badge_pips(btn.size, step, int(_PcbCanvasScript.BusPhase.size())):
 		var centre: Vector2 = (pip as Dictionary)["centre"]
-		match str((pip as Dictionary)["state"]):
-			"active":
-				btn.draw_circle(centre, _BUS_BADGE_ACTIVE_RADIUS, _BUS_BADGE_ACTIVE_COLOR)
-			"done":
-				btn.draw_circle(centre, _BUS_BADGE_PIP_RADIUS, _BUS_BADGE_DONE_COLOR)
-			_:
-				btn.draw_arc(centre, _BUS_BADGE_PIP_RADIUS, 0.0, TAU, 12,
-					_BUS_BADGE_PENDING_COLOR, 1.0)
+		var state := str((pip as Dictionary)["state"])
+		var color := bus_badge_pip_color(state, refused)
+		if state == "active":
+			btn.draw_circle(centre, _BUS_BADGE_ACTIVE_RADIUS, color)
+		elif state == "done":
+			btn.draw_circle(centre, _BUS_BADGE_PIP_RADIUS, color)
+		else:
+			btn.draw_arc(centre, _BUS_BADGE_PIP_RADIUS, 0.0, TAU, 12, color, 1.0)
 
 
 ## Give one Bus button the badge.
@@ -1500,13 +1536,26 @@ func _attach_bus_phase_badge(btn: Button) -> void:
 	btn.draw.connect(_draw_bus_phase_badge.bind(btn))
 
 
-## Repaint both Bus buttons when the canvas changes phase. The badge reads the
-## phase itself at paint time; this only tells the buttons the answer moved.
-func _on_bus_phase_changed(_phase: int) -> void:
+func _repaint_bus_buttons() -> void:
 	for family in [_tool_buttons, _draft_tool_buttons]:
 		var btn = (family as Dictionary).get(_PcbCanvasScript.ToolMode.BUS)
 		if btn is Button:
 			(btn as Button).queue_redraw()
+
+
+## Repaint both Bus buttons when the canvas changes phase. The badge reads the
+## phase itself at paint time; this only tells the buttons the answer moved.
+func _on_bus_phase_changed(_phase: int) -> void:
+	_repaint_bus_buttons()
+
+
+## The live plan crossed between acceptable and refused: retint the badge and
+## re-lead the status line that is already showing, whatever wrote it (see
+## _set_status). Both surfaces re-read the refusal themselves; this only tells
+## them the answer moved.
+func _on_bus_refusal_changed(_refused: bool) -> void:
+	_repaint_bus_buttons()
+	_set_status(_status_base_text)
 
 
 ## Sidebar section label — the 11px caption idiom shared by all three tool
@@ -6390,13 +6439,36 @@ func _update_board_size_label() -> void:
 		_board_size_label.text = "Board: %s×%smm" % [_data.board_width, _data.board_height]
 
 
+## The text last ASKED for, without the held lead below — kept so the lead can
+## be added to or dropped from the line already showing, without the caller that
+## wrote it having to be found again.
+var _status_base_text: String = ""
+
+
 ## The ONE status-text writer: the label ellipsizes on overflow (see its
 ## build-site comment), so the tooltip always carries the full text — hover
 ## recovers whatever a narrow pane trimmed.
+##
+## A HELD LEAD RIDES EVERY WRITE. The bus tool's live refusal is not a message —
+## it is a condition, and it has to outlast the next thing anything says in this
+## line. Adding it here rather than in _update_status means it survives
+## _show_transient_status's 2s messages instead of taking turns with them, and a
+## refusal appearing or clearing never has to clobber a transient to be seen. It
+## LEADS because the label ellipsizes; the tooltip carries the rest.
 func _set_status(text: String) -> void:
-	if _status_label != null:
-		_status_label.text = text
-		_status_label.tooltip_text = text
+	if _status_label == null:
+		return
+	_status_base_text = text
+	var full := _status_lead() + text
+	_status_label.text = full
+	_status_label.tooltip_text = full
+
+
+## The held condition every status write is prefixed with, or "" when there is
+## none.
+func _status_lead() -> String:
+	var bus_refusal := bus_refusal_text()
+	return "" if bus_refusal.is_empty() else "BUS REFUSED: %s  •  " % bus_refusal
 
 
 ## While-armed gesture grammar (docket 019fb933d4a9): the teaching prose that
@@ -6484,6 +6556,8 @@ func _update_status() -> void:
 	var ghost_summary := _ghost_status_summary()
 	if not ghost_summary.is_empty():
 		ghost_txt = "  •  %s" % ghost_summary
+	# A live bus refusal leads this line too, but it is not added here: _set_status
+	# adds it to EVERY write, so it outlasts the transient messages as well.
 	_set_status("%d parts, %d nets, %d traces  •  %d selected%s%s%s%s" % [
 		_data.get_component_count(), _data.get_net_count(), _data.get_trace_count(),
 		sel.size(), mode_txt, ghost_txt, board_txt, hint])

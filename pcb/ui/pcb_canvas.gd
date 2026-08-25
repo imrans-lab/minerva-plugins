@@ -531,6 +531,12 @@ signal bus_tool_message(text: String)
 ## the value is read back from bus_phase(), so a consumer never holds a copy
 ## that can go stale.
 signal bus_phase_changed(phase: int)
+## The bus tool's live plan crossing between acceptable and REFUSED. Same shape
+## and same reason as bus_phase_changed above: a repaint ping carrying no words,
+## for surfaces outside this canvas that must keep showing the refusal for as
+## long as the geometry causing it stands — the panel's status line and the
+## toolbar's phase badge. The words are read back from bus_refusal().
+signal bus_refusal_changed(refused: bool)
 ## The context menu's "Set trace width…" item asking the PANEL to reveal and focus
 ## its existing width SpinBox (B1u5, owner comment 962: the numeric editor already
 ## existed and was undiscoverable). A SIGNAL rather than a canvas-side dialog
@@ -802,13 +808,14 @@ var _trace_focus: Dictionary = {}
 ## CLICK, never a key: pads, then board, then pads again (see the Bus Authoring
 ## region for the whole grammar).
 enum BusPhase { SOURCES, PATH, TARGETS }
-## Written from four places — the two phase-advancing clicks (_begin_bus_path,
-## _handle_bus_path_click), the Esc ladder (_cancel_bus_step) and the flat
-## reset (_reset_bus_tool) — so the announce rides a SETTER rather than an emit
-## at each site: a fifth write site cannot forget to tell the toolbar. The
-## same-value guard keeps the signal a CHANGE report, so a consumer repainting
-## on it does no work when a click leaves the phase where it was. Assigning the
-## backing variable from inside the setter does not re-enter it.
+## Written from the phase-advancing clicks (_begin_bus_path,
+## _handle_bus_path_click, _end_bus_path_on_double_click), the Esc ladder's peel
+## (_peel_bus_phase) and the flat reset (_reset_bus_tool) — so the announce
+## rides a SETTER rather than an emit at each site: a further write site cannot
+## forget to tell the toolbar. The same-value guard keeps the signal a CHANGE
+## report, so a consumer repainting on it does no work when a click leaves the
+## phase where it was. Assigning the backing variable from inside the setter
+## does not re-enter it.
 var _bus_phase: BusPhase = BusPhase.SOURCES:
 	set(value):
 		if value == _bus_phase:
@@ -880,6 +887,10 @@ var _bus_layer: String = ""
 ## arming.
 var _bus_plan_cache_key: Array = []
 var _bus_plan_cache: Dictionary = {}
+## The refusal last ANNOUNCED on bus_refusal_changed, held only so a change can
+## be spotted — never read as the refusal itself, which bus_refusal() derives
+## fresh from the live plan.
+var _bus_announced_refusal: String = ""
 ## Alpha for the N ghost offset polylines shown while drawing — the same
 ## "not committed yet" value TRACE_PREVIEW_RUBBER_ALPHA and CANDIDATE_GHOST_ALPHA
 ## already use, reused rather than re-chosen, so a bus ghost, a trace rubber
@@ -8192,6 +8203,14 @@ func _draw_trace_preview() -> void:
 ## below and the eventual commit call bus_plan with the SAME inputs, so what is
 ## on screen when Enter is pressed is what commits, or refuses for the reason
 ## shown.
+##
+## A REFUSED PLAN IS SAID OUT LOUD, not only tinted. The spine turning
+## BUS_REFUSAL_COLOR and the small label beside it are both on the board, at the
+## spine's first vertex, which pans off screen exactly like the teach line
+## above — the tint can be visible while its reason is not.
+## bus_refusal() is therefore the same kind of
+## pulled reading bus_phase() is, and the panel holds its words in the status
+## line and tints the badge with them for as long as the refusal stands.
 
 
 ## THE PHASE, as a BusPhase int, for surfaces outside this canvas — the toolbar
@@ -8205,7 +8224,66 @@ func bus_phase() -> int:
 	return int(_bus_phase)
 
 
+## The live plan for the CURRENT spine, memoized — or {} while there is not yet
+## enough spine to plan at all. The ONE place bus_plan is called from during the
+## gesture: the preview draws from it and bus_refusal() judges it, so what the
+## spine is tinted for and what the panel says cannot disagree.
+func _bus_current_plan() -> Dictionary:
+	if data == null or _bus_spine_points.size() < 2:
+		return {}
+	# Memo: reuse the last frame's plan when nothing it depends on moved — see
+	# _bus_plan_cache_key's own doc for what actually varies.
+	var target_pins := _bus_plan_target_pins()
+	var cache_key: Array = [_bus_nets.duplicate(), _bus_spine_points.duplicate(),
+		_bus_layer, target_pins]
+	if cache_key == _bus_plan_cache_key:
+		return _bus_plan_cache
+	var plan: Dictionary = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points,
+		_bus_layer, PackedStringArray(_bus_net_refs), target_pins)
+	_bus_plan_cache_key = cache_key
+	_bus_plan_cache = plan
+	return plan
+
+
+## Why `plan` would be refused, in bus_plan's own words, or "" when it would be
+## accepted — or when there is no plan to judge yet.
+func _bus_plan_refusal(plan: Dictionary) -> String:
+	if plan.is_empty() or bool(plan.get("ok", false)):
+		return ""
+	return str(plan.get("error", "The bus geometry was refused."))
+
+
+## THE LIVE PLAN'S REFUSAL, as words, or "" when nothing is refused — for the
+## surfaces outside this canvas that report it: the panel HOLDS it in the status
+## line and tints the phase badge with it, alongside the spine tint here.
+##
+## PULLED, never pushed, for the same reason bus_phase() is: a cached refusal is
+## a refusal that can outlive the geometry that caused it.
+func bus_refusal() -> String:
+	return _bus_plan_refusal(_bus_current_plan())
+
+
+## Re-read the live refusal and ping the outside surfaces when it changed.
+## Called from the gesture steps that can change the plan — the clicks, the Esc
+## ladder and the reset. Mouse motion is NOT one of them: the rubber-band cursor
+## is not part of the plan (see _bus_plan_cache_key).
+func _announce_bus_refusal() -> void:
+	var refusal := bus_refusal()
+	if refusal == _bus_announced_refusal:
+		return
+	_bus_announced_refusal = refusal
+	bus_refusal_changed.emit(not refusal.is_empty())
+
+
+## Every bus click funnels through here, so this is the one place the refusal
+## announcement has to ride: each of the phases below can move the spine, the
+## net list or the targets, and those are exactly what the plan is judged on.
 func _handle_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
+	_dispatch_bus_click(world_pos, is_double_click)
+	_announce_bus_refusal()
+
+
+func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 	if is_double_click:
 		# A physical double-click arrives as TWO presses and the first already
 		# did whatever the phase does with a click, so the second carries one
@@ -8773,6 +8851,13 @@ func _bus_tool_has_progress() -> bool:
 ## mistake never costs the work of the phase before it. The flat reset is
 ## _reset_bus_tool, reserved for actually leaving the tool (see set_tool_mode).
 func _cancel_bus_step(announce: bool) -> void:
+	_peel_bus_phase(announce)
+	# Peeling a phase drops the spine or the targets, so the refusal the panel
+	# is holding may no longer stand — same funnel rule as _handle_bus_click.
+	_announce_bus_refusal()
+
+
+func _peel_bus_phase(announce: bool) -> void:
 	if _bus_phase == BusPhase.TARGETS:
 		_bus_phase = BusPhase.PATH
 		for i in range(_bus_target_refs.size()):
@@ -8822,6 +8907,7 @@ func _reset_bus_tool(announce: bool) -> void:
 	_bus_target_points = PackedVector2Array()
 	_bus_plan_cache_key = []
 	_bus_plan_cache = {}
+	_announce_bus_refusal()
 	if announce and had_progress:
 		bus_tool_message.emit("Bus tool disarmed — picks, path and targets discarded.")
 
@@ -8855,20 +8941,28 @@ func _draw_bus_picks() -> void:
 	if font == null:
 		return
 
-	# Teach line anchored to the most recent pick, so the next verb is where the
-	# eye already is. The status bar carries the same words for 2s; this one
-	# stays until the state it describes changes.
-	var teach := ""
-	match _bus_phase:
-		BusPhase.SOURCES:
-			teach = "%d nets picked — rings mark where each may end; click clear of the pads to start the path." % count \
-				if count >= 2 else "%d net picked — rings mark where it may end; pick at least 1 more." % count
-		BusPhase.PATH:
-			teach = "Path on %s — click vertices, then a pad per net." % _bus_layer
-		BusPhase.TARGETS:
-			teach = _bus_targets_status()
 	draw_string(font, last_screen + Vector2(BUS_PICK_MARKER_RADIUS_PX + 3.0, -10.0),
-		teach, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, BUS_SPINE_PREVIEW_COLOR)
+		bus_teach_line(), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, BUS_SPINE_PREVIEW_COLOR)
+
+
+## The teach line the picks are annotated with: the next verb, named for the
+## live phase. Anchored on canvas to the most recent pick, so the verb is where
+## the eye already is. The status bar carries the same words for 2s; this one
+## stays until the state it describes changes.
+##
+## PATH names BOTH of its endings — a target pad, and the double-click clear of
+## the pads. The double-click is the only way to end a path that does not finish
+## on a pad, and a user who does not know it exists reads its result (the spine
+## closing on the vertices already placed) as the tool collapsing.
+func bus_teach_line() -> String:
+	var count: int = _bus_nets.size()
+	match _bus_phase:
+		BusPhase.PATH:
+			return "Path on %s — click vertices, then a pad per net, or double-click clear of the pads to end the path." % _bus_layer
+		BusPhase.TARGETS:
+			return _bus_targets_status()
+	return "%d nets picked — rings mark where each may end; click clear of the pads to start the path." % count \
+		if count >= 2 else "%d net picked — rings mark where it may end; pick at least 1 more." % count
 
 
 ## The colour net `i` of the bundle is drawn in — its own, where it has one.
@@ -9003,21 +9097,12 @@ func _draw_bus_preview() -> void:
 		screen_pts.append(world_to_screen(p))
 	var cursor_pt := world_to_screen(_bus_preview) if _bus_has_preview else Vector2.ZERO
 
-	var plan: Dictionary = {}
-	if _bus_spine_points.size() >= 2:
-		# Memo: reuse last frame's plan when nothing it depends on moved — see
-		# _bus_plan_cache_key's own doc for what actually varies.
-		var target_pins := _bus_plan_target_pins()
-		var cache_key: Array = [_bus_nets.duplicate(), _bus_spine_points.duplicate(),
-			_bus_layer, target_pins]
-		if cache_key == _bus_plan_cache_key:
-			plan = _bus_plan_cache
-		else:
-			plan = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points, _bus_layer,
-				PackedStringArray(_bus_net_refs), target_pins)
-			_bus_plan_cache_key = cache_key
-			_bus_plan_cache = plan
-	var refused: bool = _bus_spine_points.size() >= 2 and not bool(plan.get("ok", false))
+	# The same plan and the same refusal words the panel pulls through
+	# bus_refusal() — one derivation, so the tinted spine and the held status
+	# line cannot say different things.
+	var plan := _bus_current_plan()
+	var refusal := _bus_plan_refusal(plan)
+	var refused := not refusal.is_empty()
 	var spine_color: Color = BUS_REFUSAL_COLOR if refused else BUS_SPINE_PREVIEW_COLOR
 
 	var open_path := screen_pts.duplicate()
@@ -9058,7 +9143,7 @@ func _draw_bus_preview() -> void:
 	if font != null and not screen_pts.is_empty():
 		var label := "Bus [%s] @ %s  ·  %d pts" % [_bus_nets_joined(), _bus_layer, _bus_spine_points.size()]
 		if refused:
-			label += "  ·  %s" % str(plan.get("error", ""))
+			label += "  ·  %s" % refusal
 		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, spine_color)
 

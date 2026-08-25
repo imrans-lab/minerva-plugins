@@ -39,7 +39,9 @@ test_bus_breakout_geometry.gd assertions=61
 # and the shared hit test are held to one answer on a tie. MEASURED on a run,
 # not counted: section 9's checks sit inside a two-iteration loop, which is how
 # a source count of this suite goes wrong.
-test_bus_tool.gd assertions=121
+# 121 -> 122: the PATH teach line must name the double-click ending, checked on
+# bus_teach_line() inside section 5's double-click grammar.
+test_bus_tool.gd assertions=122
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
@@ -98,7 +100,11 @@ test_pcb_panel_tools_migration.gd assertions=68
 # 158 -> 183: the Bus button's phase badge adds one wide test of 25 assertions
 # (_test_bus_phase_badge). Every check() in it is unconditional and none sits
 # inside a loop; measured on a run, which agreed with the source count.
-test_pcb_panel_ui.gd assertions=183
+# 183 -> 200: a refused bus plan is named in the standing status line and worn
+# by the badge — one wide test of 17 assertions (_test_bus_refusal_is_held).
+# Its one loop ANDs three states into a single check(), so the source count of
+# check( calls is the assertion count.
+test_pcb_panel_ui.gd assertions=200
 # 49 -> 57: the copper-extent pad pick adds four probes run over a part built
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.

@@ -741,6 +741,13 @@ func _test_double_click_grammar() -> void:
 	canvas._handle_bus_click(SRC_C, false)
 	canvas._handle_bus_click(PATH_1, false)    # ends SOURCES, vertex 1
 	canvas._handle_bus_click(PATH_2, false)    # vertex 2
+	# The ending performed below has to be NAMED before it can be performed —
+	# nothing else on screen carries the gesture. Checked on bus_teach_line(),
+	# the string the draw path itself renders.
+	check("the PATH teach line names BOTH endings — the pad, and the double-click",
+			canvas.bus_teach_line().contains("double-click")
+				and canvas.bus_teach_line().contains("pad per net"),
+			canvas.bus_teach_line())
 	canvas._handle_bus_click(DBL_END, false)   # press 1 of the double-click
 	canvas._handle_bus_click(DBL_END, true)    # press 2 ends the path
 	check("a double-click clear of the pads ends PATH", canvas.bus_phase() == canvas.BusPhase.TARGETS,
