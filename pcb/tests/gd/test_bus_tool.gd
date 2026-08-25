@@ -764,8 +764,26 @@ func _test_double_click_grammar() -> void:
 			by_net.size() == 3, "got %s" % str(by_net.keys()))
 	var want := _expected_routes()
 	for net in ["NA", "NB", "NC"]:
-		if by_net.has(net):
-			_check_route(net, _points_of(by_net[net]), want[net])
+		if not by_net.has(net):
+			check("bus trace for %s exists" % net, false)
+			continue
+		_check_route(net, _points_of(by_net[net]), want[net])
+	canvas.free()
+
+	# A first press that appended NOTHING must cost nothing: refused on the
+	# never-picked net's pad, the double-click then lands clear of it and has no
+	# vertex of its own to take back.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	for p in [SRC_A, SRC_B, SRC_C, PATH_1, PATH_2]:
+		canvas._handle_bus_click(p, false)
+	var kept: PackedVector2Array = canvas._bus_spine_points.duplicate()
+	canvas._handle_bus_click(Vector2(60.0, 50.0), false)   # press 1: NX's pad, illegal
+	canvas._handle_bus_click(DBL_END, true)                 # press 2
+	check("a refused first press leaves the double-click nothing to take back",
+			canvas._bus_phase == canvas.BusPhase.TARGETS and canvas._bus_spine_points == kept,
+			"phase %d, spine %s" % [int(canvas._bus_phase), str(canvas._bus_spine_points)])
 	canvas.free()
 
 	# A one-vertex path refuses whichever gesture asks to end it, and the
@@ -835,8 +853,10 @@ func _test_manhattan_from_sloppy_clicks() -> void:
 			diagonals == 0, "%d diagonal segments" % diagonals)
 	var want := _expected_routes()
 	for net in ["NA", "NB", "NC"]:
-		if by_net.has(net):
-			_check_route(net, _points_of(by_net[net]), want[net])
+		if not by_net.has(net):
+			check("bus trace for %s exists" % net, false)
+			continue
+		_check_route(net, _points_of(by_net[net]), want[net])
 
 	canvas.free()
 

@@ -531,8 +531,9 @@ signal bus_tool_message(text: String)
 ## the value is read back from bus_phase(), so a consumer never holds a copy
 ## that can go stale.
 signal bus_phase_changed(phase: int)
-## The bus tool's live plan crossing between acceptable and REFUSED. Same shape
-## and same reason as bus_phase_changed above: a repaint ping carrying no words,
+## The bus tool's live refusal CHANGED — appeared, cleared, or gave a different
+## reason (the bool says which side it now stands on). Same shape and same
+## reason as bus_phase_changed above: a repaint ping carrying no words,
 ## for surfaces outside this canvas that must keep showing the refusal for as
 ## long as the geometry causing it stands — the panel's status line and the
 ## toolbar's phase badge. The words are read back from bus_refusal().
@@ -861,6 +862,11 @@ var _bus_suggested_refs: Array[String] = []
 ## in a later phase.
 var _bus_spine_points: PackedVector2Array = PackedVector2Array()
 ## Live rubber-band vertex (the cursor), only meaningful during PATH.
+## Whether the most recent single press in PATH appended a spine vertex. The
+## double-click ending reads it to know whether its own first press lengthened
+## the path — a press refused on an illegal pad did not, and must not cost a
+## vertex the user placed earlier.
+var _bus_path_press_appended: bool = false
 var _bus_preview: Vector2 = Vector2.ZERO
 var _bus_has_preview: bool = false
 ## The copper layer every trace in this bus lands on. Frozen at the moment the
@@ -8298,6 +8304,7 @@ func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 		elif _bus_phase == BusPhase.PATH:
 			_end_bus_path_on_double_click()
 		return
+	_bus_path_press_appended = false
 	match _bus_phase:
 		BusPhase.SOURCES:
 			_handle_bus_source_click(world_pos)
@@ -8357,6 +8364,7 @@ func _handle_bus_path_click(world_pos: Vector2) -> void:
 	if pad.is_empty():
 		var prev: Vector2 = _bus_spine_points[_bus_spine_points.size() - 1]
 		_bus_spine_points.append(_bus_axis_point(prev, _author_point(world_pos)))
+		_bus_path_press_appended = true
 		_bus_has_preview = false
 		queue_redraw()
 		return
@@ -8379,17 +8387,17 @@ func _handle_bus_path_click(world_pos: Vector2) -> void:
 ## PATH -> TARGETS with no target landed — the ending for a spine that does not
 ## finish on a pad, and the only way to leave PATH other than a target click.
 ##
-## THE FIRST PRESS OF THIS DOUBLE-CLICK ALREADY PLACED A VERTEX under the
-## cursor (it reached _handle_bus_path_click as an ordinary click), so the
-## gesture that ENDS the path would otherwise also lengthen it. Dropping that
-## vertex again makes the whole double-click atomic: it either ends the path on
-## exactly the vertices the user placed before it, or it refuses and leaves the
-## spine — and the phase — as it found them. The size guard is what keeps the
-## press that ENTERED this phase (_begin_bus_path placed that first vertex, not
-## a click of this gesture) from being peeled off into an empty spine.
+## THE FIRST PRESS OF THIS DOUBLE-CLICK usually placed a vertex under the cursor
+## (it reached _handle_bus_path_click as an ordinary click), so the gesture that
+## ENDS the path would otherwise also lengthen it. That vertex — and ONLY that
+## one — is dropped again, which makes the whole double-click atomic: it either
+## ends the path on exactly the vertices the user placed before it, or it
+## refuses and leaves the spine and the phase as it found them. A first press
+## that appended nothing (refused on an illegal pad, say) leaves nothing to drop.
 func _end_bus_path_on_double_click() -> void:
-	if _bus_spine_points.size() > 1:
+	if _bus_path_press_appended:
 		_bus_spine_points.remove_at(_bus_spine_points.size() - 1)
+		_bus_path_press_appended = false
 	# The rubber band is anchored on the point just dropped, so it is stale on
 	# BOTH exits below, not only the one that leaves the phase.
 	_bus_has_preview = false

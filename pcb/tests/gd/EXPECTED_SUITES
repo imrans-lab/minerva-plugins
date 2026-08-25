@@ -39,9 +39,11 @@ test_bus_breakout_geometry.gd assertions=61
 # and the shared hit test are held to one answer on a tie. MEASURED on a run,
 # not counted: section 9's checks sit inside a two-iteration loop, which is how
 # a source count of this suite goes wrong.
-# 121 -> 122: the PATH teach line must name the double-click ending, checked on
-# bus_teach_line() inside section 5's double-click grammar.
-test_bus_tool.gd assertions=122
+# 121 -> 148: the double-click PATH ending (section 5 grew a second gesture, a
+# refused-first-press probe and a too-short refusal), the per-net airline test,
+# and the teach-line check. MEASURED on a run; the source count is lower
+# because section 5's route checks expand per net.
+test_bus_tool.gd assertions=148
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
