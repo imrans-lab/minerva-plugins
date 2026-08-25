@@ -34,7 +34,11 @@ test_bus_breakout_geometry.gd assertions=61
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.
-test_bus_tool.gd assertions=96
+# 96 -> 116: pads are picked by distance to their copper (section 4b), and
+# where each net may end is shown from the first pick (section 9). MEASURED on
+# a run, not counted: section 9's checks sit inside a two-iteration loop, which
+# is how a source count of this suite goes wrong.
+test_bus_tool.gd assertions=116
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
@@ -91,10 +95,13 @@ test_pcb_panel_tools_migration.gd assertions=68
 # it is outside the NLC delta the owner scoped, so nothing had exercised it since
 # the button landed. All 158 pass; only the pin was stale.
 # 158 -> 183: the Bus button's phase badge adds one wide test of 25 assertions
-# (_test_bus_phase_badge). COUNTED FROM THE SOURCE, not measured on a run —
-# every check() in it is unconditional and none sits inside a loop.
+# (_test_bus_phase_badge). Every check() in it is unconditional and none sits
+# inside a loop; measured on a run, which agreed with the source count.
 test_pcb_panel_ui.gd assertions=183
-test_pcb_pin_inspector.gd assertions=49
+# 49 -> 57: the copper-extent pad pick adds four probes run over a part built
+# twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
+# inside that two-part loop, so the source reads eight fewer than it runs.
+test_pcb_pin_inspector.gd assertions=57
 test_pcb_ratsnest.gd assertions=136
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev

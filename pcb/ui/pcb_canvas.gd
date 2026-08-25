@@ -8768,19 +8768,28 @@ func _draw_bus_targets() -> void:
 	var rows := bus_target_guidance()
 	for row in rows:
 		var r := row as Dictionary
-		if not str(r["target_ref"]).is_empty():
-			continue
 		var i: int = int(r["index"])
 		var color := _bus_net_color(i)
-		var suggested := str(r["suggested_ref"])
+		var landed := str(r["target_ref"])
+		# A landed target does NOT retire its net's other endings: a click on
+		# one of them still re-targets (_handle_bus_target_click -> the same
+		# candidate list), so they keep their rings or the tool would be
+		# accepting clicks on pads it had stopped drawing. Only the pad that
+		# LANDED drops its ring, because the pass below fills it instead.
+		# The suggestion is suppressed once a target lands — the user has
+		# answered the question the halo was asking.
+		var suggested := str(r["suggested_ref"]) if landed.is_empty() else ""
 		var candidates: Array = r["candidates"]
 		for cand in candidates:
 			var c := cand as Dictionary
+			var ref := str(c["ref"])
+			if ref == landed:
+				continue
 			var pad_pos: Vector2 = c.get("at", Vector2.ZERO)
 			var screen_pt := world_to_screen(pad_pos)
 			draw_arc(screen_pt, BUS_TARGET_MARKER_RADIUS_PX, 0.0, TAU, 16,
 				Color(color, BUS_GHOST_ALPHA), BUS_PICK_MARKER_WIDTH_PX)
-			if str(c["ref"]) != suggested:
+			if ref != suggested:
 				continue
 			draw_arc(screen_pt, BUS_SUGGESTION_MARKER_RADIUS_PX, 0.0, TAU, 20,
 				color, BUS_PICK_MARKER_WIDTH_PX)
