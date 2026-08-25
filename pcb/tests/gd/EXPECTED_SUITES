@@ -21,7 +21,16 @@
 # The pad-to-pad half of the bus geometry (bundle_routes + its breakout
 # legs), including the refusals: a crossing the leaves-first rules cannot
 # order, a spine too short for its fan-outs, and a pad past the spine's end.
-test_bus_breakout_geometry.gd assertions=53
+#
+# Re-pinned 53 -> 61 by the cross-provider review's two P1 findings, both of
+# which REPRODUCED against the module at 0cfc3f5 (routed, ok == true, copper
+# emitted): a breakout leg crossing a lane belonging to a distant arm of a
+# folded-back spine, and two pad legs running parallel 0.25mm apart where the
+# rule demands 0.5mm. The whole-route clearance measurement that refuses both
+# adds six assertions in its own section, and the invariants walk's new metric
+# oracle adds one per routed case. 61 is MEASURED (61 passed, 0 failed), never
+# derived by reading.
+test_bus_breakout_geometry.gd assertions=61
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.

@@ -17,10 +17,11 @@ extends SceneTree
 ## A THIRD oracle runs alongside them and depends on no expected coordinate at
 ## all: _run_geometry_invariants routes both shapes again — the bend mirrored,
 ## so the frame signs are exercised both ways — and asserts, with its own
-## segment-overlap test, that nothing is diagonal, that every route lands on its
-## own two pads, and that no two nets share a point. That check knows nothing of
-## departure stations or ordering rules; it fails on copper that crosses however
-## the geometry arrived at it.
+## segment-overlap and segment-gap tests, that nothing is diagonal, that every
+## route lands on its own two pads, that no two nets share a point, and that no
+## two nets come closer than their own pitch. That check knows nothing of
+## departure stations or ordering rules; it fails on copper that crosses, or
+## merely crowds, however the geometry arrived at it.
 ##
 ## Run via pcb/scripts/run-gd-tests.sh <minerva-checkout>.
 
@@ -35,6 +36,13 @@ const BusGeom := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_geome
 ## 0.5mm, a lane off by one by the same).
 const EPS := 1e-4
 
+## Tolerance for a CLEARANCE measurement, in mm — the same one micron the
+## module itself allows, and for the same reason: a lane pair laid out exactly
+## one pitch apart measures 0.799999 against 0.800000 in 32-bit float. Named
+## separately from EPS because it answers a different question (is this copper
+## legal) with a different consequence for being wrong.
+const MEASURE_EPS := 1e-3
+
 var _pass := 0
 var _fail := 0
 
@@ -45,6 +53,7 @@ func _init() -> void:
 	_run_mixed_width_bend()
 	_run_geometry_invariants()
 	_run_crossing_refusals()
+	_run_clearance_refusals()
 	_run_structural_refusals()
 	_run_pads_already_on_their_lanes()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -326,6 +335,23 @@ func _run_geometry_invariants() -> void:
 		if not shared.is_empty():
 			printerr("    tracks %s overlap" % shared)
 
+		# The METRIC half of the same oracle: not crossing is not enough, the
+		# copper has to stand off. Measured with this suite's own gap routine
+		# against pitch_between of each PAIR's widths — the figure that spaces
+		# the lanes, so a correct bundle measures exactly its requirement.
+		var widths: Array = case["widths"]
+		var clearance: float = float(case["clearance"])
+		var tight := ""
+		for i in range(polylines.size()):
+			for j in range(i + 1, polylines.size()):
+				var need: float = BusGeom.pitch_between(float(widths[i]), float(widths[j]), clearance)
+				var got: float = _min_gap(polylines[i], polylines[j])
+				if got < need - MEASURE_EPS:
+					tight = "%d and %d: %.6f < %.6f" % [i, j, got, need]
+		check("%s: no two nets come closer than their own pitch" % label, tight.is_empty())
+		if not tight.is_empty():
+			printerr("    " + tight)
+
 		var src: Array = result["source_stations"]
 		var tgt: Array = result["target_stations"]
 		var collided := false
@@ -399,6 +425,145 @@ func _run_crossing_refusals() -> void:
 			_pv([Vector2(25, 35), Vector2(27, 35), Vector2(29, 35)]),
 			[1.0, 0.2, 0.2], 0.2),
 		["\"A\"", "\"B\"", "target"])
+
+
+## THE METRIC GAP between two whole routes, in mm — the independent oracle for
+## "this copper stands off", written the same way _routes_touch is written for
+## "this copper crosses" and deliberately NOT sharing the module's routine.
+##
+## Both routes are axis-aligned, so each segment IS its own bounding box: the
+## boxes overlapping means the segments share a point (gap 0), and otherwise the
+## closest approach between two disjoint segments is reached at an endpoint of
+## one of them, so the four point-to-segment distances are the whole answer.
+func _min_gap(a: PackedVector2Array, b: PackedVector2Array) -> float:
+	var best := INF
+	for i in range(a.size() - 1):
+		for j in range(b.size() - 1):
+			if (minf(a[i].x, a[i + 1].x) <= maxf(b[j].x, b[j + 1].x)
+					and minf(b[j].x, b[j + 1].x) <= maxf(a[i].x, a[i + 1].x)
+					and minf(a[i].y, a[i + 1].y) <= maxf(b[j].y, b[j + 1].y)
+					and minf(b[j].y, b[j + 1].y) <= maxf(a[i].y, a[i + 1].y)):
+				return 0.0
+			best = minf(best, _point_segment(a[i], b[j], b[j + 1]))
+			best = minf(best, _point_segment(a[i + 1], b[j], b[j + 1]))
+			best = minf(best, _point_segment(b[j], a[i], a[i + 1]))
+			best = minf(best, _point_segment(b[j + 1], a[i], a[i + 1]))
+	return best
+
+
+func _point_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab: Vector2 = b - a
+	var len2: float = ab.length_squared()
+	if len2 <= 0.0:
+		return p.distance_to(a)
+	return p.distance_to(a + ab * clampf((p - a).dot(ab) / len2, 0.0, 1.0))
+
+
+## THE FINISHED COPPER IS MEASURED, not just ordered.
+##
+## The two rules in _departure_stations compare a breakout leg only with the
+## lanes and pad legs at its OWN end of the spine, and they compare them for
+## INTERSECTION. Both cases below slip through that and were ROUTED, ok == true,
+## before this section existed — the routes each case would have emitted are
+## written out in full so the defect stays legible after the refusal hides it.
+##
+##
+## CASE 1 — A LEG AGAINST A LANE FROM A DISTANT PART OF THE SPINE.
+##
+## Spine (0,0) -> (100,0) -> (100,100) -> (-30,100). Every joint is a 90-degree
+## turn and no joint doubles back, so _spine_shape_error allows it; the third
+## arm nonetheless runs WEST, back past the first arm's start. Two 0.2mm tracks
+## at 0.3mm clearance give lanes [-0.25, +0.25] and a 0.5mm pitch.
+##
+## Source pads (-10,150) and (-10,152) sit above and west of the start. A's pad
+## is nearer the bundle, so A leaves first: source stations A = 0.0, B = 0.5.
+## Target pads (-40,200) and (-40,198) sit past the west end, and B's is nearer,
+## so target stations are B = 0.0, A = 0.5. BOTH ordering walks complete — this
+## input has no end-local crossing at all.
+##
+## A's route then contains the leg (0,150) -> (0,-0.25): a 150mm perpendicular
+## drop on the line x = 0. B's lane on the WESTBOUND arm is y = 99.75 and runs
+## from x = 99.75 back to x = -30. It passes straight under that leg:
+##
+##     A: (-10,150) (0,150) (0,-0.25) (100.25,-0.25) (100.25,100.25)
+##        (-29.5,100.25) (-29.5,200) (-40,200)
+##     B: (-10,152) (0.5,152) (0.5,0.25) (99.75,0.25) (99.75,99.75)
+##        (-30,99.75) (-30,198) (-40,198)
+##
+## ORACLE: refused, naming both nets, quoting the crossing at (0.000, 99.750) —
+## and the message must NOT be either end's ordering refusal, since neither
+## ordering rule fired.
+##
+##
+## CASE 2 — THE REVIEWER'S LITERAL SPINE, same shape with the west arm stopping
+## at x = 0. Same pads at the source end. ORACLE: refused, naming both nets, as
+## a crossing. (Its west arm ends on the same x = 0 line the station-0 legs sit
+## on, so several segment pairs meet; which one is quoted is not pinned, only
+## that it is refused as a cross.)
+##
+##
+## CASE 3 — PARALLEL LEGS THAT NEVER CROSS. Straight spine (0,0) -> (100,0),
+## two 0.2mm tracks at 0.3mm clearance: lanes [-0.25, +0.25], required pitch
+## 0.5. Source pads (-8,-2.20) and (-6,-1.95) are 0.25mm apart across the
+## bundle. SCL's pad is nearer the bundle so it leaves first (stations SCL = 0,
+## SDA = 0.5) and no leg crosses anything:
+##
+##     SDA: (-8,-2.20) (0.5,-2.20) (0.5,-0.25) (100,-0.25) (100,20) (110,20)
+##     SCL: (-6,-1.95) (0,-1.95) (0,0.25) (99.5,0.25) (99.5,22) (110,22)
+##
+## The two pad legs run PARALLEL, 0.25mm apart, over x in [-6, 0] — half the
+## 0.5mm the same rule that spaced the lanes demands, i.e. 0.05mm of gap between
+## 0.2mm copper where 0.3mm was declared. ORACLE: refused, naming both nets,
+## quoting the measured 0.250mm and the required 0.500mm.
+##
+##
+## CASE 4 — THE NEAR MISS, which must still route. Case 3 with SCL's pad moved
+## to (-6,-1.70), exactly one pitch from SDA's. Nothing else changes: same
+## stations, same lanes, same shapes. ORACLE: routed, and the two routes measure
+## exactly 0.5mm apart by this suite's own gap routine. Without it the refusal
+## above could be "staggered pads are refused", which is not the contract.
+func _run_clearance_refusals() -> void:
+	print("-- the finished copper is measured, not just ordered --")
+
+	var folded: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(100, 0), Vector2(100, 100), Vector2(-30, 100)]),
+		PackedStringArray(["A", "B"]),
+		_pv([Vector2(-10, 150), Vector2(-10, 152)]),
+		_pv([Vector2(-40, 200), Vector2(-40, 198)]),
+		[0.2, 0.2], 0.3)
+	check_refused("a leg crossing a lane from a distant part of the spine is refused by name",
+		folded, ["\"A\"", "\"B\"", "cross at (0.000, 99.750)"])
+	check("that refusal is the measurement's, not either end's ordering rule",
+		not str(folded.get("error", "")).contains("end —"))
+
+	check_refused("the spine folded back onto its own start is refused as a cross",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(100, 0), Vector2(100, 100), Vector2(0, 100)]),
+			PackedStringArray(["SDA", "SCL"]),
+			_pv([Vector2(-10, 150), Vector2(-10, 152)]),
+			_pv([Vector2(-10, 90), Vector2(-10, 88)]),
+			[0.2, 0.2], 0.3),
+		["\"SDA\"", "\"SCL\"", "cross at ("])
+
+	check_refused("breakout legs running parallel inside the clearance are refused by name",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(100, 0)]),
+			PackedStringArray(["SDA", "SCL"]),
+			_pv([Vector2(-8, -2.20), Vector2(-6, -1.95)]),
+			_pv([Vector2(110, 20), Vector2(110, 22)]),
+			[0.2, 0.2], 0.3),
+		["\"SDA\"", "\"SCL\"", "0.250mm apart", "need 0.500mm"])
+
+	var near_miss: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(100, 0)]),
+		PackedStringArray(["SDA", "SCL"]),
+		_pv([Vector2(-8, -2.20), Vector2(-6, -1.70)]),
+		_pv([Vector2(110, 20), Vector2(110, 22)]),
+		[0.2, 0.2], 0.3)
+	check("staggered pads exactly one pitch apart still route", bool(near_miss.get("ok", false)))
+	if bool(near_miss.get("ok", false)):
+		check_near("and their legs measure exactly that pitch",
+			_min_gap(_route(near_miss, 0), _route(near_miss, 1)), 0.5, MEASURE_EPS)
 
 
 func _run_structural_refusals() -> void:

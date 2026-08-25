@@ -104,6 +104,19 @@ const MITER_LIMIT := 4.0
 ## double-click or a replayed drag can easily produce an exact duplicate.
 const _MIN_SEGMENT_MM := 1e-6
 
+## How far inside the required pitch two finished routes may measure before the
+## clearance check below calls it a violation, in mm.
+##
+## Vector2 is 32-bit float whatever the build's precision, so a pair of lanes
+## laid out EXACTLY one pitch apart measures that pitch only to within an ulp:
+## test_bus_breakout_geometry.gd's mixed-width bend measures 0.799999 against a
+## required 0.800000. One micron sits two orders above that noise and three
+## below the tightest clearance any fab quotes, so it lets every correctly
+## spaced bundle through and still catches every real violation — those miss by
+## a fraction of a pitch (0.25mm of 0.5mm in the case that found this), never by
+## a micron.
+const _CLEARANCE_TOLERANCE_MM := 1e-3
+
 
 ## The parallel polyline at signed perpendicular `offset` from `points`.
 ##
@@ -263,9 +276,11 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## spine's first (last) segment that no other track shares, so the tracks peel
 ## off the bundle one at a time instead of all turning at the same place.
 ## Stations are spaced by pitch_between of the two tracks that meet at each
-## step, and every width must be positive, so two departure legs can neither
+## step, and every width must be positive, so two DEPARTURE legs can neither
 ## coincide nor sit closer than the clearance rule allows. That is a property of
-## how the stations are built, not of a check run over them afterwards.
+## how the stations are built, not of a check run over them afterwards. It says
+## nothing about the PAD legs, which run at the pads' own perpendicular
+## coordinates and are spaced by wherever the pads happen to be.
 ##
 ## WHICH TRACK PEELS OFF FIRST IS DERIVED, not fixed by index. Two rules give a
 ## "must leave before" order over the nets:
@@ -279,6 +294,20 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## goes before the other, the pads cannot be reached without a crossing: the
 ## call is REFUSED and both nets are named. Nothing is reordered, rerouted or
 ## moved to another layer to make a crossing go away.
+##
+## THOSE RULES ARE NOT THE WHOLE GUARANTEE, and the gap is in two directions.
+## They compare a leg only with the lanes and pad legs at its OWN end, so they
+## never see a leg meeting a lane belonging to a DISTANT part of the spine —
+## which is what a spine that turns back alongside its own start puts there.
+## And they test for INTERSECTION, a topological property, while copper needs a
+## metric one: two legs that never cross can still run a hair apart.
+##
+## So the COMPLETED routes are measured against each other before they are
+## returned. No two nets may come closer than pitch_between(width_i, width_j,
+## clearance) — the same rule that spaces the lanes, applied to every pair of
+## segments in the two whole polylines, pads and legs included. Closer than
+## that is refused by name like everything else here. This module authors copper
+## with no DRC gate downstream of it, so the measurement is the gate.
 ##
 ## AXIS-ALIGNED ONLY, unlike offset_polyline above: a spine segment with a
 ## non-zero dx AND dy is refused rather than rounded onto an axis, because no
@@ -404,6 +433,12 @@ static func bundle_routes(
 		# of those legs zero-length; the corner is then the same point twice.
 		polylines.append(_drop_duplicate_points(route))
 
+	# THE GATE. Everything above reasons about one end of the spine at a time
+	# and about crossings only; this measures the finished copper.
+	var too_close := _clearance_error(polylines, net_names, widths, clearance)
+	if not too_close.is_empty():
+		return _refused(too_close)
+
 	return {
 		"ok": true, "error": "",
 		"offsets": offsets,
@@ -411,6 +446,77 @@ static func bundle_routes(
 		"source_order": src["order"], "target_order": tgt["order"],
 		"polylines": polylines,
 	}
+
+
+## Two nets whose finished routes are closer than the clearance rule allows, as
+## a refusal message, or "" when every pair clears.
+##
+## The required separation is pitch_between of the PAIR's own two widths, the
+## same figure cumulative_offsets uses to space their lanes — so a bundle whose
+## lanes are correctly spaced measures exactly its requirement and passes, and
+## anything the breakout legs do to bring two nets closer than that fails.
+static func _clearance_error(polylines: Array, net_names: PackedStringArray,
+		widths: Array, clearance: float) -> String:
+	for i in range(polylines.size()):
+		for j in range(i + 1, polylines.size()):
+			var need: float = pitch_between(float(widths[i]), float(widths[j]), clearance)
+			var gap: Dictionary = _route_separation(polylines[i], polylines[j])
+			var got: float = float(gap["distance"])
+			if got >= need - _CLEARANCE_TOLERANCE_MM:
+				continue
+			var at: Vector2 = gap["at"]
+			if got <= _CLEARANCE_TOLERANCE_MM:
+				return "Nets \"%s\" and \"%s\" cross at (%.3f, %.3f) — their finished routes are one piece of copper there, which is a short between two nets. Redraw the spine, reorder the picked nets or move their pads." % [net_names[i], net_names[j], at.x, at.y]
+			return "Nets \"%s\" and \"%s\" run %.3fmm apart near (%.3f, %.3f) — their %.3fmm and %.3fmm tracks at %.3fmm clearance need %.3fmm between centrelines. Move their pads apart or redraw the spine." % [net_names[i], net_names[j], got, at.x, at.y, float(widths[i]), float(widths[j]), maxf(0.0, clearance), need]
+	return ""
+
+
+## The closest approach between two whole routes: {distance, at}, where `at` is
+## a point at that closest approach, for the refusal to quote.
+static func _route_separation(a: PackedVector2Array, b: PackedVector2Array) -> Dictionary:
+	var best: Dictionary = {"distance": INF, "at": Vector2.ZERO}
+	for i in range(a.size() - 1):
+		for j in range(b.size() - 1):
+			var gap := _segment_separation(a[i], a[i + 1], b[j], b[j + 1])
+			if float(gap["distance"]) < float(best["distance"]):
+				best = gap
+				if float(best["distance"]) <= 0.0:
+					return best
+	return best
+
+
+## The closest approach between two segments: {distance, at}.
+##
+## Every segment reaching here is AXIS-ALIGNED — the spine is (_spine_shape_error
+## refuses anything else) and the legs are built by _station_point, which copies
+## one coordinate rather than recomputing it. An axis-aligned segment IS its own
+## bounding box, so "the boxes overlap" and "the segments share a point" are the
+## same statement, and the overlap box's centre is a point they genuinely share.
+##
+## Disjoint segments are two disjoint convex sets, so their closest approach is
+## attained at an endpoint of at least one of them: four point-to-segment tests
+## are the whole answer, no parametric solve needed.
+static func _segment_separation(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> Dictionary:
+	var lo_x: float = maxf(minf(a0.x, a1.x), minf(b0.x, b1.x))
+	var hi_x: float = minf(maxf(a0.x, a1.x), maxf(b0.x, b1.x))
+	var lo_y: float = maxf(minf(a0.y, a1.y), minf(b0.y, b1.y))
+	var hi_y: float = minf(maxf(a0.y, a1.y), maxf(b0.y, b1.y))
+	if lo_x <= hi_x and lo_y <= hi_y:
+		return {"distance": 0.0, "at": Vector2((lo_x + hi_x) * 0.5, (lo_y + hi_y) * 0.5)}
+	var best := _endpoint_gap(a0, b0, b1)
+	for candidate in [_endpoint_gap(a1, b0, b1), _endpoint_gap(b0, a0, a1), _endpoint_gap(b1, a0, a1)]:
+		if float(candidate["distance"]) < float(best["distance"]):
+			best = candidate
+	return best
+
+
+## Point `p` against segment `a`-`b`: {distance, at}, `at` the midpoint of the
+## gap so a refusal can name somewhere between the two nets rather than on one.
+static func _endpoint_gap(p: Vector2, a: Vector2, b: Vector2) -> Dictionary:
+	var ab: Vector2 = b - a
+	var len2: float = ab.length_squared()
+	var q: Vector2 = a if len2 <= 0.0 else a + ab * clampf((p - a).dot(ab) / len2, 0.0, 1.0)
+	return {"distance": p.distance_to(q), "at": (p + q) * 0.5}
 
 
 ## The input with consecutive duplicate points removed.
