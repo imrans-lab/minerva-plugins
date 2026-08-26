@@ -64,7 +64,11 @@ test_bus_breakout_geometry.gd assertions=100
 # 247, because the findings walk expands per foreign entity. MEASURED.
 # 247 -> 251: section 13c, a station via that lands on one-sided copper is
 # reported on that copper's layer, two sides x two checks. MEASURED: 251.
-test_bus_tool.gd assertions=251
+# 251 -> 258: the SOURCES note lost its speculative branch — 13b re-pins the
+# teach line and the verb reply to carry no start-on advice (+1 net), and 13d
+# pins that targets with no copper on the working layer STILL name the layer
+# to set, and go quiet once the working layer is theirs (+6). MEASURED: 258.
+test_bus_tool.gd assertions=258
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
