@@ -845,6 +845,29 @@ MCP bus verbs — not independently maintained copies of the same math. A plan
 with no targets is the canvas's live corridor PREVIEW only; `bus_commit_plan`
 and `bus_propose_plan` both refuse it.
 
+**The reply carries what the next verb needs.** Rule for every copper-creating
+verb: return the coordinates and ids the NEXT call needs, never ids alone. Both
+bus verbs reply with `nets_detail` (built by `panel_tools.bus_nets_detail`), one
+entry per net in bus order:
+
+```json
+{"net": "NA", "lane_index": 0, "offset_mm": -0.51, "source": "U1.1",
+ "landed": false, "target": "",
+ "traces": [{"trace_id": "t12", "layer": "top",
+             "points": [[10.0, 10.0], [21.02, 10.0], [21.02, 19.49], [120.0, 19.49]]}],
+ "via_id": "",
+ "free_end": {"trace_id": "t12", "end": "end"},
+ "free_end_x_mm": 120.0, "free_end_y_mm": 19.49, "free_end_layer": "top"}
+```
+
+`points` are exactly the board's own trace polylines (two runs around a via
+station, with `via_id` and `via: [x, y]`). A landed net names its `target`. An
+open lane's `free_end` is the very object `minerva_pcb_add_trace` takes as its
+`start` anchor — pass it verbatim and the extension lands on the same trace id.
+`minerva_pcb_workspace_propose_bus` returns the same entries keyed by
+`candidate_id`, with empty `trace_id`/`via_id` and a null `free_end` (ghosts have
+no board ids until committed).
+
 ## Bus propose (`minerva_pcb_workspace_propose_bus`, docket `019fcac1509d`)
 
 The bus's PROPOSAL verb — same args and same validation path as

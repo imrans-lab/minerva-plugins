@@ -3149,6 +3149,58 @@ func _test_the_open_verb_matches_the_open_gesture() -> void:
 			continue
 		_check_route("verb %s" % net, _points_of(by_net[net]), want[net])
 
+	# ── nets_detail: the reply carries what the NEXT verb needs ──────────────
+	# ORACLE: the board's own serialized traces (ids, layers, points) and what
+	# minerva_pcb_add_trace does with the reply's free_end passed VERBATIM —
+	# the extension must land on NA's existing trace id, growing that trace by
+	# the point given. Nothing here is read back from the code under test
+	# except the object under test itself.
+	var detail: Array = result.get("nets_detail", []) if result.get("nets_detail", []) is Array else []
+	check("nets_detail carries one entry per net, in bus order",
+			detail.size() == 3 and str((detail[0] as Dictionary).get("net", "")) == "NA"
+				and int((detail[1] as Dictionary).get("lane_index", -1)) == 1
+				and str((detail[2] as Dictionary).get("net", "")) == "NC", str(detail))
+	if detail.size() == 3:
+		for i in range(3):
+			var entry: Dictionary = detail[i]
+			var net: String = str(entry.get("net", ""))
+			var runs: Array = entry.get("traces", []) if entry.get("traces", []) is Array else []
+			var board_trace: Dictionary = by_net.get(net, {})
+			var pts: Array = []
+			for raw in (runs[0] as Dictionary).get("points", []) if runs.size() == 1 else []:
+				pts.append(Vector2(float((raw as Array)[0]), float((raw as Array)[1])))
+			check("%s: the reply names the board's own trace id and layer" % net,
+					runs.size() == 1 and str((runs[0] as Dictionary).get("trace_id", "")) == str(board_trace.get("id", "?"))
+						and str((runs[0] as Dictionary).get("layer", "")) == "top", str(runs))
+			_check_route("%s (nets_detail points)" % net, pts, _points_of(board_trace))
+		var na: Dictionary = detail[0]
+		var nb: Dictionary = detail[1]
+		check("NB landed on V2.1 and says so", bool(nb.get("landed", false))
+				and str(nb.get("target", "")) == "V2.1" and str(nb.get("source", "")) == "U2.1"
+				and not nb.has("free_end"), str(nb))
+		check("NA is open, with its free end at the lane's end (120, 19.49) on top",
+				not bool(na.get("landed", true)) and str(na.get("target", "x")) == ""
+					and absf(float(na.get("free_end_x_mm", 0.0)) - 120.0) <= EPS
+					and absf(float(na.get("free_end_y_mm", 0.0)) - 19.49) <= EPS
+					and str(na.get("free_end_layer", "")) == "top", str(na))
+		var free_end: Variant = na.get("free_end", null)
+		check("NA's free_end is add_trace's start-anchor shape, naming NA's trace",
+				free_end is Dictionary and str((free_end as Dictionary).get("trace_id", "")) == str(by_net["NA"].get("id", "?"))
+					and str((free_end as Dictionary).get("end", "")) == "end", str(free_end))
+		# THE HANDOFF: the anchor goes in verbatim, and the same trace grows.
+		var grown: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_add_trace", {
+			"editor_name": "PCB1", "start": free_end, "points": [[120.0, 30.0]],
+		})
+		var na_after: Dictionary = _traces_by_net(data).get("NA", {})
+		var na_pts: Array = _points_of(na_after)
+		check("add_trace accepts the free_end verbatim and extends NA's SAME trace",
+				bool(grown.get("success", false)) and str(grown.get("trace_id", "")) == str(by_net["NA"].get("id", "?"))
+					and str(grown.get("extended_from", "")) == "end"
+					and _traces_by_net(data).size() == 3
+					and na_pts.size() == want["NA"].size() + 1
+					and (na_pts[na_pts.size() - 1] as Vector2).distance_to(Vector2(120.0, 30.0)) <= EPS,
+				str(grown))
+
 	# The PROPOSAL twin mirrors it: three ghosts, NA's ending at its lane's end.
 	var data_p := PCBData.new()
 	data_p.from_board_dict(_board())
@@ -3170,6 +3222,19 @@ func _test_the_open_verb_matches_the_open_gesture() -> void:
 	check("NA's ghost has three segments (source leg + lane, no target leg)",
 			int(na_ghost.get("segment_count", -1)) == 3, str(na_ghost))
 	check("…and nothing was committed by the proposal", _serialized_traces(data_p).is_empty())
+	# The proposal's nets_detail: same geometry, keyed to its ghost, no board ids.
+	var ghost_detail: Array = out.get("nets_detail", []) if out.get("nets_detail", []) is Array else []
+	var ghost_na: Dictionary = ghost_detail[0] if ghost_detail.size() == 3 else {}
+	var ghost_pts: Array = []
+	for raw in ((ghost_na.get("traces", [{}]) as Array)[0] as Dictionary).get("points", []):
+		ghost_pts.append(Vector2(float((raw as Array)[0]), float((raw as Array)[1])))
+	check("the proposal's nets_detail keys NA's lane to its ghost, with no trace id and a null free_end",
+			ghost_detail.size() == 3 and str(ghost_na.get("candidate_id", "")) == str(na_ghost.get("candidate_id", "?"))
+				and str(((ghost_na.get("traces", [{}]) as Array)[0] as Dictionary).get("trace_id", "x")) == ""
+				and ghost_na.get("free_end", "x") == null
+				and absf(float(ghost_na.get("free_end_x_mm", 0.0)) - 120.0) <= EPS,
+			str(ghost_na))
+	_check_route("NA ghost (nets_detail points)", ghost_pts, want["NA"])
 
 
 # ── 16. LANE IDENTITY: every lane wears its net, end to end ──────────────────

@@ -9597,6 +9597,11 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var created_ids: Array[String] = []
 	var created_via_ids: Array[String] = []
+	# Per net, in bus order: the trace ids each net produced (one, or two
+	# around a station) and its via id ("" without a station) — what the reply's
+	# nets_detail is built from.
+	var net_trace_ids: Array = []
+	var net_via_ids: Array = []
 	for i in range(nets.size()):
 		var poly: PackedVector2Array = polylines[i]
 		var runs: Array = [poly]
@@ -9605,6 +9610,7 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 			var cut: int = int((station["splits"] as Array)[i])
 			runs = [poly.slice(0, cut + 1), poly.slice(cut)]
 			run_layers = [layer, str(station["layer"])]
+		var mine: Array = []
 		for r in range(runs.size()):
 			var trace = data.create_trace_entity(
 				str(nets[i]), str(run_layers[r]), runs[r], float(widths[i]))
@@ -9612,6 +9618,9 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 				_bus_rollback(data, created_ids, created_via_ids)
 				return {"ok": false, "error": "Bus was refused by the board model on net %s." % str(nets[i]), "findings": []}
 			created_ids.append(str(trace.id))
+			mine.append(str(trace.id))
+		net_trace_ids.append(mine)
+		net_via_ids.append("")
 		if not station_active:
 			continue
 		var via_id := str(data.add_via({
@@ -9625,6 +9634,7 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 			_bus_rollback(data, created_ids, created_via_ids)
 			return {"ok": false, "error": "The board model refused the via station on net %s." % str(nets[i]), "findings": []}
 		created_via_ids.append(via_id)
+		net_via_ids[i] = via_id
 	data.save_to_history(history_label)
 	# ONE journal row for the bus as a whole, after the per-trace add_trace rows
 	# the model wrote: what stood at commit — the findings the author was shown
@@ -9636,7 +9646,82 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 		"nets": nets, "widths": widths, "layer": layer,
 		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", []),
 		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
+		"nets_detail": bus_nets_detail(plan, station, net_trace_ids, net_via_ids),
 		"clean_order": PackedStringArray(plan.get("clean_order", PackedStringArray()))}
+
+
+## The per-net account of a bus, for the two bus verbs' replies: everything the
+## NEXT verb needs, so an agent never has to export the board and hunt for the
+## polyline that ends at the spine. One entry per net, in bus order:
+##
+##   net, lane_index (bus order, 0-based), offset_mm (the lane's signed offset
+##   from the spine), source (the "Component.Pin" it left), landed (bool),
+##   target (the pad ref it landed on, "" when open),
+##   traces: [{trace_id, layer, points: [[x_mm, y_mm], ...]}] — one run, or two
+##   around a via station, each run's points being EXACTLY the polyline the
+##   board's trace carries; via_id ("" without a station) and via: [x, y];
+##   and for an OPEN lane: free_end — {trace_id, end: "end"}, the very object
+##   minerva_pcb_add_trace takes as its `start` anchor, so it can be passed
+##   verbatim — plus free_end_x_mm / free_end_y_mm / free_end_layer for a
+##   reader. A ghost (propose) run has no trace ids yet: trace_id and via_id are
+##   "" and free_end is null, while the coordinates are still reported.
+##
+## `net_trace_ids[i]` is the id list for net i's runs (empty for a proposal);
+## `net_via_ids[i]` its via id or "".
+static func bus_nets_detail(plan: Dictionary, station: Dictionary,
+		net_trace_ids: Array, net_via_ids: Array) -> Array:
+	var nets: Array = plan.get("nets", [])
+	var polylines: Array = plan.get("polylines", [])
+	var offsets: Array = plan.get("offsets", [])
+	var layer: String = str(plan.get("layer", ""))
+	var open_nets: Array = plan.get("open_nets", []) if plan.get("open_nets", []) is Array else []
+	var sources: PackedStringArray = PackedStringArray(plan.get("source_pins", PackedStringArray()))
+	var targets: PackedStringArray = PackedStringArray(plan.get("target_pins", PackedStringArray()))
+	var station_active: bool = bool(station.get("active", false))
+	var out: Array = []
+	for i in range(nets.size()):
+		var poly: PackedVector2Array = polylines[i]
+		var runs: Array = [poly]
+		var run_layers: Array = [layer]
+		if station_active:
+			var cut: int = int((station["splits"] as Array)[i])
+			runs = [poly.slice(0, cut + 1), poly.slice(cut)]
+			run_layers = [layer, str(station["layer"])]
+		var ids: Array = net_trace_ids[i] if i < net_trace_ids.size() else []
+		var traces: Array = []
+		for r in range(runs.size()):
+			var pts: Array = []
+			for pt in (runs[r] as PackedVector2Array):
+				pts.append([_mm(pt.x), _mm(pt.y)])
+			traces.append({"trace_id": str(ids[r]) if r < ids.size() else "",
+				"layer": str(run_layers[r]), "points": pts})
+		var net: String = str(nets[i])
+		var landed: bool = not (net in open_nets)
+		var entry: Dictionary = {
+			"net": net, "lane_index": i,
+			"offset_mm": _mm(float(offsets[i])) if i < offsets.size() else 0.0,
+			"source": sources[i] if i < sources.size() else "",
+			"landed": landed,
+			"target": (targets[i] if i < targets.size() else "") if landed else "",
+			"traces": traces,
+			"via_id": str(net_via_ids[i]) if i < net_via_ids.size() else "",
+		}
+		if station_active:
+			var at: Vector2 = (station["points"] as Array)[i]
+			entry["via"] = [_mm(at.x), _mm(at.y)]
+		if not landed:
+			# The open lane ends where its LAST run ends — past the station when
+			# there is one — so that run's "end" end is the free end.
+			var last: Dictionary = traces[traces.size() - 1]
+			var last_pt: Vector2 = (runs[runs.size() - 1] as PackedVector2Array)[
+				(runs[runs.size() - 1] as PackedVector2Array).size() - 1]
+			var tid: String = str(last["trace_id"])
+			entry["free_end"] = {"trace_id": tid, "end": "end"} if not tid.is_empty() else null
+			entry["free_end_x_mm"] = _mm(last_pt.x)
+			entry["free_end_y_mm"] = _mm(last_pt.y)
+			entry["free_end_layer"] = str(last["layer"])
+		out.append(entry)
+	return out
 
 
 ## The `details` of a bus commit's journal row: {nets, open_nets, layer,
@@ -9749,12 +9834,22 @@ static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 		if not mine.is_empty() and workspace.has_method("set_findings"):
 			workspace.set_findings(cid, mine)
 		landed.append(_candidate_record(workspace, workspace.get_candidate(cid)))
+	# Ghosts have no trace or via ids yet; the coordinates are still the
+	# geometry the next verb will need, keyed to its candidate.
+	var detail: Array = bus_nets_detail(plan, station, [], [])
+	for i in range(detail.size()):
+		var cid := ""
+		for c in landed:
+			if str((c as Dictionary).get("net", "")) == str((detail[i] as Dictionary)["net"]):
+				cid = str((c as Dictionary).get("candidate_id", ""))
+		(detail[i] as Dictionary)["candidate_id"] = cid
 	return {
 		"ok": true, "error": "",
 		"proposed": landed.size(), "candidates": landed, "holds": holds,
 		"nets": nets, "widths": widths, "layer": layer,
 		"via_station_layer": str(station["layer"]), "findings": findings,
 		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
+		"nets_detail": detail,
 	}
 
 
@@ -9896,6 +9991,7 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 		"via_station_layer": str(out.get("via_station_layer", "")),
 		"findings": findings,
 		"open_nets": out.get("open_nets", []),
+		"nets_detail": out.get("nets_detail", []),
 		"note": "ghost candidates landed in the routing workspace; no copper was committed — resolve via minerva_pcb_workspace_commit/_reject/pin.",
 	}
 	if not findings.is_empty():
@@ -10412,6 +10508,7 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 		"via_station_layer": str(result.get("via_station_layer", "")),
 		"findings": findings,
 		"open_nets": result.get("open_nets", []),
+		"nets_detail": result.get("nets_detail", []),
 		"undo_note": "one board history step: Ctrl+Z (or PCBData.undo) removes all traces and vias this call created.",
 	}
 	if not findings.is_empty():
