@@ -1216,9 +1216,9 @@ func _drive_station_gesture(canvas) -> void:
 	canvas._handle_bus_click(SRC_B, false)     # NB
 	canvas._handle_bus_click(SRC_C, false)     # NC
 	canvas._handle_bus_click(PATH_1, false)    # ends SOURCES, spine vertex 0
-	# THE LAYER SWITCH, made the way every surface makes it: the toolbar
-	# selector, the View menu and minerva_pcb_set_view all write this property.
-	canvas.trace_layer_filter = "bottom"
+	# THE LAYER SWITCH, made the way every surface makes it: the toolbar Layer
+	# chooser and minerva_pcb_view_state both write this property.
+	canvas.working_layer = "bottom"
 	canvas._handle_bus_click(STATION, false)   # vertex 1 — the via station
 	canvas._handle_bus_click(PATH_2, false)    # vertex 2
 	canvas._handle_bus_click(TGT_A, false)     # ends PATH, target NA
@@ -1255,20 +1255,27 @@ func _test_a_layer_switch_mid_path_is_a_via_station() -> void:
 	canvas._handle_bus_click(SRC_C, false)
 	canvas._handle_bus_click(PATH_1, false)
 	var before := _board_state(data)
-	canvas.trace_layer_filter = "bottom"
+	canvas.working_layer = "bottom"
 	check("the switch does not cancel the path", canvas.bus_phase() == canvas.BusPhase.PATH)
 	check("…nor re-aim the copper already drawn — the bus is still on top",
 			str(canvas._bus_layer) == "top", str(canvas._bus_layer))
 	check("…and it says a station is armed",
 			_last(msgs).contains("Via station armed"), _last(msgs))
 	check("…having written nothing", _board_state(data) == before, str(_board_state(data)))
+	# The switch is AUTHORING, not view: the run already drawn on top has to stay
+	# on screen, or the user vias onto a layer and loses sight of what they left.
+	# Read through is_layer_visible, the predicate the draw loop uses.
+	check("…and BOTH layers are still drawn — arming a station is not a view change",
+			bool(canvas.is_layer_visible("top")) and bool(canvas.is_layer_visible("bottom")))
+	check("…with the view filter untouched", str(canvas.trace_layer_filter) == "all",
+			str(canvas.trace_layer_filter))
 
 	canvas._handle_bus_click(STATION, false)
 	check("the station lands on the vertex just clicked",
 			int(canvas._bus_station_index) == 1, str(canvas._bus_station_index))
 	# ONE station per bus: the second switch is refused by name rather than
 	# quietly moving the station out from under the geometry drawn around it.
-	canvas.trace_layer_filter = "top"
+	canvas.working_layer = "top"
 	check("a second layer switch is refused, naming the station it already has",
 			_last(msgs).contains("already has a via station") and int(canvas._bus_station_index) == 1,
 			_last(msgs))

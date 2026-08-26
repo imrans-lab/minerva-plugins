@@ -50,9 +50,9 @@ class _StubHost extends RefCounted:
 
 
 ## Minimal duck-typed canvas so PcbAnnotationHost.get_current_layer() can read a
-## trace_layer_filter without a live canvas.
+## working_layer without a live canvas.
 class _StubCanvas extends RefCounted:
-	var trace_layer_filter := "top"
+	var working_layer := "top"
 
 
 func _init() -> void:
@@ -319,8 +319,9 @@ func _run_via_undo() -> void:
 # ── 4. PcbAnnotationHost.get_current_layer resolves through the contract ──────
 #
 # Guards the FOURTH (now-removed) top->F.Cu / bottom->B.Cu dup: the active-layer
-# lookup must come from PcbLayerStack, and a non-copper filter keeps the F.Cu
-# default (no single active layer).
+# lookup must come from PcbLayerStack, reading the canvas's WORKING layer (where
+# copper is authored) and not its view filter. A non-copper value keeps the F.Cu
+# default.
 
 func _run_host_current_layer() -> void:
 	print("-- PcbAnnotationHost.get_current_layer via contract --")
@@ -328,14 +329,14 @@ func _run_host_current_layer() -> void:
 	var canvas = _StubCanvas.new()
 	host._canvas = canvas   # inject a stub canvas (bypasses set_canvas signal wiring)
 
-	canvas.trace_layer_filter = "top"
+	canvas.working_layer = "top"
 	check_eq("get_current_layer(top) == contract canon_to_kicad", host.get_current_layer(), PcbLayerStack.canon_to_kicad("top"))
-	canvas.trace_layer_filter = "bottom"
+	canvas.working_layer = "bottom"
 	check_eq("get_current_layer(bottom) == contract canon_to_kicad", host.get_current_layer(), PcbLayerStack.canon_to_kicad("bottom"))
-	# A non-copper filter ("all"/unknown) keeps the F.Cu default — NOT a
-	# passthrough of the filter string.
-	canvas.trace_layer_filter = "all"
-	check_eq("get_current_layer(non-copper filter) -> F.Cu default", host.get_current_layer(), "F.Cu")
+	# A non-copper value keeps the F.Cu default — NOT a passthrough of the
+	# string. The live canvas refuses one, but this hook is duck-typed.
+	canvas.working_layer = "all"
+	check_eq("get_current_layer(non-copper working layer) -> F.Cu default", host.get_current_layer(), "F.Cu")
 
 
 # ── 5. set_board_layers (epoch GA-1): the stack as a mutable board property ──

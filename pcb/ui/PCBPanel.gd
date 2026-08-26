@@ -48,7 +48,7 @@ const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
-## layer selector shows KiCad names and carries canonical ids — see
+## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
 ## instantiated-script consts above) so the parser keeps the GDScript class type
 ## and can resolve its static funcs — a `Script`-typed const cannot.
@@ -233,9 +233,9 @@ var _layer_option: OptionButton = null
 var _zone_net_option: OptionButton = null
 ## Layer picker for the zone tools (epoch 6 boundary fix). Same rules as the net
 ## picker beside it: sidebar, Draw section, visible only while a zone tool is
-## armed, rebuilt on every arm and on board load. Its "View layer" entry is the
-## resting state and means "follow the toolbar layer filter" — the behaviour that
-## was the ONLY behaviour before this control existed.
+## armed, rebuilt on every arm and on board load. Its "Working layer" entry is the
+## resting state and means "pour on the toolbar's working layer" — what every
+## other authoring tool does.
 var _zone_layer_option: OptionButton = null
 ## Width box for the Draw ▸ Trace tool (epoch 6 boundary fix). Same arming rules
 ## again; it starts at the board's design-rule width, which is what the tool used
@@ -459,6 +459,12 @@ const _VIEW_MENU_EXPORT_ID := 100
 ## index. Far above _VIEW_FLAGS' indices and _VIEW_MENU_EXPORT_ID so the three
 ## id families can never collide.
 const _VIEW_MENU_LAYER_ID_BASE := 500
+## "Show all copper layers" — the escape hatch from a trace_layer_filter an agent
+## set through minerva_pcb_view_state. A specific filter outranks every per-layer
+## eye, so without this the human's own checkboxes would be inert with no control
+## on screen to explain why. Shown ONLY while a filter is in force. Above the
+## per-layer ids so the same teardown sweep clears it.
+const _VIEW_MENU_CLEAR_FILTER_ID := 999
 
 ## True while restoring persisted state (board load OR annotation sidecar load).
 ## Suppresses the content_changed dirty relay so restoring never marks the tab
@@ -1044,6 +1050,9 @@ func _build_ui() -> void:
 	# local coordinate space.
 	canvas_container.add_child(_canvas)
 	_canvas.set_data(_data)
+	# The toolbar was built before this canvas existed, so its working-layer
+	# chooser has nothing to follow until now.
+	_rebuild_layer_option()
 
 	# Bind the annotation host to the live canvas so route-hint markers track
 	# board coordinates through zoom/pan and describe_point can read the board
@@ -1287,13 +1296,16 @@ func _build_toolbar() -> HBoxContainer:
 
 	tb.add_child(VSeparator.new())
 
-	# Layer selector (drives the canvas trace-layer filter).
+	# WORKING-LAYER chooser: where copper is authored, NOT what is shown. Layer
+	# visibility is the View menu's per-layer eyes.
 	var layer_label := Label.new()
 	layer_label.text = "Layer:"
 	tb.add_child(layer_label)
 
 	_layer_option = OptionButton.new()
 	_layer_option.name = "LayerOption"
+	_layer_option.tooltip_text = _wrap_tooltip(
+		"Working layer — the copper a new trace, pour or bus lands on. It does not change what you can see; hide layers from View ▸ Copper layers.")
 	_rebuild_layer_option()
 	_layer_option.item_selected.connect(_on_layer_selected)
 	tb.add_child(_layer_option)
@@ -1770,7 +1782,7 @@ func _build_sidebar() -> VBoxContainer:
 
 	_zone_layer_option = OptionButton.new()
 	_zone_layer_option.name = "ZoneLayerOption"
-	_zone_layer_option.tooltip_text = _wrap_tooltip("Copper layer for the zone being drawn")
+	_zone_layer_option.tooltip_text = _wrap_tooltip("Copper layer for the zone being drawn — \"Working layer\" follows the toolbar chooser")
 	_zone_layer_option.visible = false
 	_rebuild_zone_layer_option()
 	_zone_layer_option.item_selected.connect(_on_zone_layer_selected)
@@ -2755,7 +2767,7 @@ func _rebuild_copper_layer_pickers() -> void:
 	_rebuild_zone_layer_option()
 
 
-## NO placeholder entry, unlike the arming picker: "follow the view filter" is a
+## NO placeholder entry, unlike the arming picker: "follow the working layer" is a
 ## meaningful answer for a zone about to be DRAWN and a meaningless one for a zone
 ## that already exists on a layer. A board that declares no copper layers gets a
 ## single disabled entry saying so, and the control goes disabled — the visible
@@ -4276,11 +4288,21 @@ func _rebuild_view_menu_layer_eyes(popup: PopupMenu) -> void:
 		popup.add_check_item(label, id)
 		popup.set_item_checked(popup.get_item_index(id),
 			not _canvas.is_layer_hidden(canon))
+	var filter := str(_canvas.trace_layer_filter)
+	if filter != "" and filter != "all":
+		var filter_label := PcbLayerStack.canon_to_kicad(filter)
+		if filter_label.is_empty():
+			filter_label = filter
+		popup.add_item("Show all copper layers (filtered to %s)" % filter_label,
+			_VIEW_MENU_CLEAR_FILTER_ID)
 
 
 func _on_view_menu_id_pressed(id: int) -> void:
 	if id == _VIEW_MENU_EXPORT_ID:
 		_on_export_yaml_pressed()
+		return
+	if id == _VIEW_MENU_CLEAR_FILTER_ID:
+		set_trace_layer_filter("all")
 		return
 	if _canvas != null and _data != null and id > _VIEW_MENU_LAYER_ID_BASE:
 		var stack_index := id - _VIEW_MENU_LAYER_ID_BASE - 1
@@ -4298,33 +4320,54 @@ func _on_view_menu_id_pressed(id: int) -> void:
 	await set_view_flag(flag, not bool(_canvas.get(flag)))
 
 
-## Set the toolbar's trace-layer FILTER, moving the OptionButton with it.
-## Returns false for a value this board cannot offer.
+## Set the canvas's VIEW-only trace-layer filter. Returns false for a value this
+## board does not declare.
 ##
-## THE ONE WRITER (cold review 2, finding 1). The filter and the per-layer eyes
-## COMPOSE, and not symmetrically: pcb_canvas._layer_visible gives a specific
-## filter priority over every eye ("a specific filter is an explicit 'show me
-## this layer' — it wins over a hidden eye"). So hiding layers while a specific
-## filter is set changes the eye dictionary and changes NOTHING on screen. Any
-## caller that wants the eyes to govern must put the filter back to "all", and
-## must move the OptionButton too or the toolbar will display a filter the
-## canvas is not using.
+## NO TOOLBAR CONTROL MOVES WITH IT: the toolbar chooser sets the WORKING layer,
+## and the human's visibility control is the View menu's per-layer eyes. This
+## filter is reached from minerva_pcb_view_state and cleared from the View menu,
+## so the only widget that has to stay in step with it is that menu — which
+## rebuilds itself on every open.
+##
+## The filter and the eyes COMPOSE, and not symmetrically: pcb_canvas
+## ._layer_visible gives a specific filter priority over every eye ("a specific
+## filter is an explicit 'show me this layer' — it wins over a hidden eye"). So
+## hiding layers while a specific filter is set changes the eye dictionary and
+## changes NOTHING on screen; any caller that wants the eyes to govern must put
+## the filter back to "all".
 func set_trace_layer_filter(canon: String) -> bool:
-	if _canvas == null or _layer_option == null:
+	if _canvas == null:
 		return false
 	var want := "all" if canon.is_empty() else canon
-	for i in _layer_option.item_count:
-		if str(_layer_option.get_item_metadata(i)) == want:
-			_layer_option.select(i)
-			_canvas.trace_layer_filter = want
-			_canvas.queue_redraw()
-			return true
-	return false
+	if want != "all":
+		var declared: Array = _data.layers if _data != null else []
+		if not (want in declared):
+			return false
+	_canvas.trace_layer_filter = want
+	return true
 
 
 ## The filter currently in force ("all" or a canonical layer id).
 func trace_layer_filter() -> String:
 	return str(_canvas.trace_layer_filter) if _canvas != null else "all"
+
+
+## Set the WORKING layer — the copper authoring tools draw on — moving the
+## toolbar chooser with it. Returns false for a layer this board cannot offer.
+##
+## THE ONE WRITER for every non-toolbar caller (minerva_pcb_view_state). Writing
+## canvas.working_layer directly would leave the chooser displaying a layer the
+## canvas is not authoring on, which is exactly the disagreement the human reads
+## the toolbar to resolve.
+func set_working_layer(canon: String) -> bool:
+	if _canvas == null or _layer_option == null or canon.is_empty():
+		return false
+	for i in _layer_option.item_count:
+		if str(_layer_option.get_item_metadata(i)) == canon:
+			_layer_option.select(i)
+			_canvas.working_layer = canon
+			return true
+	return false
 
 
 ## Every View draw flag's name, in menu order.
@@ -4410,43 +4453,53 @@ func get_layout_state() -> Dictionary:
 	}
 
 
-## Rebuild the layer selector from the board's declared stack.
+## Rebuild the WORKING-LAYER chooser from the board's declared copper stack.
 ##
 ## Epoch 6 unit 3b, owner ruling "layer presentation matches KiCad": the item
 ## LABEL is the KiCad copper name (F.Cu / In1.Cu / … / B.Cu) because that is what
 ## a PCB person reads, while the item METADATA stays the CANONICAL id ("top" /
-## "in1" / "bottom") because that is what the canvas filter and the board model
-## compare against (pcb_canvas._layer_visible is canonical-name equality). "All"
-## stays first; the rest follow the board's declared order, which IS stack order
+## "in1" / "bottom") because that is what the canvas and the board model compare
+## against. Entries follow the board's declared order, which IS stack order
 ## (enforced by the validator, unit 3a).
+##
+## NO "All" ENTRY, and copper only: this control names the ONE layer copper is
+## authored on, and "all" is not a layer anything can be drawn on. Visibility
+## belongs to the View menu's per-layer eyes.
+##
+## Reconciles BOTH WAYS. The chooser follows the canvas's live working layer, and
+## a board whose stack no longer declares that layer has its working layer moved
+## to the first declared copper — so the widget can never show a layer the canvas
+## is not authoring on, which is the drift the zone picker guards against too.
 func _rebuild_layer_option() -> void:
 	if _layer_option == null:
 		return
 	_layer_option.clear()
-	_layer_option.add_item("All")
-	_layer_option.set_item_metadata(0, "all")
-	var layers: Array = _data.layers if _data != null else ["top", "bottom"]
-	for layer in layers:
-		var raw := str(layer)
-		# A valid board declares canonical ids, but fold a KiCad-named declaration
-		# too so the metadata still MATCHES trace.layer instead of filtering to an
-		# empty canvas. Non-copper names are left exactly as declared rather than
-		# pushed through the copper mapping (which would error on them).
-		var canon := raw
-		var label := raw
-		if PcbLayerStack.is_copper(raw):
-			canon = PcbLayerStack.kicad_to_canon(raw)
-			label = PcbLayerStack.canon_to_kicad(canon)
-		# canon_to_kicad FAILS CLOSED (returns "" and push_error()s) on anything
-		# it does not recognise. Show the raw declared name instead — a blank menu
-		# entry is a layer the user cannot even name, which is worse than an
-		# unfamiliar one.
-		if label.is_empty():
-			label = raw
+	# "" before the canvas exists (the toolbar is built first): there is nothing
+	# to follow yet, so the first declared copper stands in until the canvas is
+	# built and this runs again.
+	var want := str(_canvas.working_layer) if _canvas != null else ""
+	var selected := -1
+	for choice in _declared_copper_layer_choices():
+		var canon := str(choice["canon"])
 		var idx := _layer_option.item_count
-		_layer_option.add_item(label)
+		_layer_option.add_item(str(choice["label"]))
 		_layer_option.set_item_metadata(idx, canon)
-	_layer_option.select(0)
+		if canon == want:
+			selected = idx
+	if _layer_option.item_count == 0:
+		# A board declaring no copper has no layer to author on; say so rather
+		# than offering an empty dropdown.
+		_layer_option.add_item("(no copper layers)")
+		_layer_option.set_item_metadata(0, "")
+		_layer_option.disabled = true
+		_layer_option.select(0)
+		return
+	_layer_option.disabled = false
+	if selected < 0:
+		selected = 0
+		if _canvas != null:
+			_canvas.working_layer = str(_layer_option.get_item_metadata(0))
+	_layer_option.select(selected)
 
 
 # ── Toolbar / canvas event handlers ───────────────────────────────────────────
@@ -4650,9 +4703,9 @@ func _on_zone_net_selected(index: int) -> void:
 ##
 ## Structurally the net picker above and the toolbar's _rebuild_layer_option
 ## together: first entry is a placeholder carrying "" — but here "" is NOT "no
-## choice made", it is the REAL and default choice "follow the view layer filter",
-## which is what the zone tools did before this control existed. That is why it is
-## labelled "View layer" rather than "Layer…" and why landing on it is not an
+## choice made", it is the REAL and default choice "pour on the working layer",
+## which is what every other authoring tool on the canvas does. That is why it is
+## labelled "Working layer" rather than "Layer…" and why landing on it is not an
 ## error the commit path refuses.
 ##
 ## Labels are KiCad names and metadata is canonical, per the same owner ruling
@@ -4666,7 +4719,7 @@ func _rebuild_zone_layer_option() -> void:
 		return
 	var previous := str(_canvas.zone_layer_override) if _canvas != null else ""
 	_zone_layer_option.clear()
-	_zone_layer_option.add_item("View layer")
+	_zone_layer_option.add_item("Working layer")
 	_zone_layer_option.set_item_metadata(0, "")
 	# _declared_copper_layer_choices (A5) is where the copper-only / KiCad-label /
 	# canonical-metadata rules below used to be spelled out inline; the zone
@@ -4681,7 +4734,7 @@ func _rebuild_zone_layer_option() -> void:
 			selected = idx
 	_zone_layer_option.select(selected)
 	# Keep the canvas's armed layer and the widget in step: a layer that vanished
-	# with a board reload must not stay armed behind the "View layer" entry.
+	# with a board reload must not stay armed behind the "Working layer" entry.
 	if _canvas != null and selected == 0:
 		_canvas.zone_layer_override = ""
 
@@ -4848,12 +4901,15 @@ func apply_preference(key: String, value: Variant) -> void:
 		_trace_width_spin.set_value_no_signal(width)
 
 
+## The toolbar Layer chooser moves the WORKING layer and nothing else. Layer
+## visibility is the View menu's per-layer eyes.
 func _on_layer_selected(index: int) -> void:
 	if _canvas == null or _layer_option == null:
 		return
 	var meta: Variant = _layer_option.get_item_metadata(index)
-	_canvas.trace_layer_filter = str(meta) if meta != null else "all"
-	_canvas.queue_redraw()
+	if meta == null or str(meta).is_empty():
+		return
+	_canvas.working_layer = str(meta)
 
 
 func _on_component_lock_changed(message: String) -> void:

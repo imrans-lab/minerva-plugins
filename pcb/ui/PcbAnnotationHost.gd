@@ -434,30 +434,26 @@ func is_annotation_visible(annotation: Dictionary) -> bool:
 
 
 ## The board-layer a freshly-authored route hint should carry (WC-3 contract
-## §5, "current layer"). Derived from the canvas's live trace_layer_filter (the
-## same OptionButton the human drives, PCBPanel.gd _on_layer_selected) so a
-## human authoring while the view is scoped to one layer gets a hint on THAT
-## layer, not a stale default.
+## §5, "current layer"). Derived from the canvas's WORKING layer — the toolbar
+## chooser the human drives, PCBPanel.gd _on_layer_selected — so a hint lands on
+## the copper the human is authoring on, not on whatever the view happens to be
+## filtered to.
 ##
-## Epoch 6 unit 3b: ANY canonical copper filter designates the active layer, not
-## just top/bottom. The old code compared the filter against the two literals
-## "top"/"bottom", so authoring under an inner-layer view (In1.Cu) silently fell
-## through to the F.Cu default — a route hint landing on the wrong copper without
-## saying so. The mapping is delegated to the ONE contract, which now knows
-## in1..in30, so the guard is "is this a copper layer at all?" instead of a
-## hardcoded pair.
+## ANY canonical copper layer designates the active layer, not just top/bottom
+## (epoch 6 unit 3b): authoring under an inner layer must not silently fall
+## through to F.Cu. The mapping is delegated to the ONE contract, which knows
+## in1..in30, so the guard is "is this a copper layer at all?".
 ##
-## "all" and no canvas bound (headless) mean NO single active layer, and keep the
-## F.Cu fallback (the pcb_route_hint kind's own default) — deliberately unchanged
-## behaviour: with every layer shown there is nothing better to infer, and
-## refusing to author would be worse than authoring on the default side.
+## No canvas bound (headless) means no active layer, and keeps the F.Cu fallback
+## (the pcb_route_hint kind's own default): refusing to author would be worse
+## than authoring on the default side.
 func get_current_layer() -> String:
-	if _canvas == null or not is_instance_valid(_canvas) or not ("trace_layer_filter" in _canvas):
+	if _canvas == null or not is_instance_valid(_canvas) or not ("working_layer" in _canvas):
 		return "F.Cu"
-	var filter := str(_canvas.trace_layer_filter)
-	if not PcbLayerStack.is_copper(filter):
+	var layer := str(_canvas.working_layer)
+	if not PcbLayerStack.is_copper(layer):
 		return "F.Cu"
-	return PcbLayerStack.canon_to_kicad(filter)
+	return PcbLayerStack.canon_to_kicad(layer)
 
 
 ## Clear-by-author (pcb-ui-native-cluster §5 / WC-3 deliverable 3): removes

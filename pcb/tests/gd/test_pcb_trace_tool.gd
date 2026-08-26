@@ -102,6 +102,7 @@ func _init() -> void:
 	_test_via_click_and_mcp_author_the_same_copper()
 	_test_double_click_second_press()
 	_test_netless_refusal_names_every_anchor_kind()
+	_test_working_layer_is_not_the_view()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -839,3 +840,62 @@ func _test_netless_refusal_names_every_anchor_kind() -> void:
 			str(_serialized_traces(data)))
 
 	canvas.free()
+
+
+## 9. THE WORKING LAYER AUTHORS; THE VIEW SHOWS. Two controls, no crosstalk.
+##
+## ORACLE: the `layer` field of every SERIALIZED trace, as a multiset, drawn in
+## one rig whose VIEW is moved between draws — never trace_author_layer(), which
+## is the rule under test. The other half is read back through is_layer_visible,
+## the predicate the draw loop itself uses, so "the view did not move" (and, in
+## step 2, "the view really did move") is measured rather than assumed.
+func _test_working_layer_is_not_the_view() -> void:
+	print("\n-- BT-93 (9): the working layer authors, the view only shows --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+
+	# The toolbar chooser's whole job: pick the bottom, draw on the bottom, and
+	# leave both layers on screen.
+	canvas.working_layer = "bottom"
+	_draw_a_trace(canvas)
+	check("BT-93: choosing B.Cu lands the trace on bottom",
+			_trace_layers(data) == ["bottom"], str(_trace_layers(data)))
+	check("BT-93: …and top copper is still drawn", bool(canvas.is_layer_visible("top")))
+	check("BT-93: …as is bottom", bool(canvas.is_layer_visible("bottom")))
+	check("BT-93: …with the view filter untouched",
+			str(canvas.trace_layer_filter) == "all", str(canvas.trace_layer_filter))
+
+	# An EYE is visibility and nothing else: shutting the layer being authored on
+	# hides the copper already there and still lands the next trace on it.
+	canvas.working_layer = "top"
+	canvas.set_layer_hidden("top", true)
+	_draw_a_trace(canvas)
+	check("BT-93: hiding F.Cu does not move where the next trace lands",
+			_trace_layers(data) == ["bottom", "top"], str(_trace_layers(data)))
+	check("BT-93: …and the eye really did shut", not bool(canvas.is_layer_visible("top")))
+
+	# The VIEW filter — the agent's half of the same separation.
+	canvas.set_layer_hidden("top", false)
+	canvas.trace_layer_filter = "bottom"
+	_draw_a_trace(canvas)
+	check("BT-93: a bottom-only view filter does not move authoring either",
+			_trace_layers(data) == ["bottom", "top", "top"], str(_trace_layers(data)))
+	check("BT-93: …though it does scope the view",
+			not bool(canvas.is_layer_visible("top")) and bool(canvas.is_layer_visible("bottom")))
+
+	# Refused rather than stored, so no tool ever has to ask "is the working
+	# layer a layer at all".
+	canvas.working_layer = "all"
+	check("BT-93: \"all\" is not a working layer and does not become one",
+			str(canvas.working_layer) == "top", str(canvas.working_layer))
+
+
+## Every committed trace's layer, sorted — an order-independent multiset, so the
+## assertions above cannot be satisfied (or broken) by serialisation order.
+func _trace_layers(data) -> Array:
+	var out: Array = []
+	for t in _serialized_traces(data):
+		out.append(str((t as Dictionary).get("layer", "")))
+	out.sort()
+	return out

@@ -792,7 +792,7 @@ single `save_to_history` call, so `Ctrl+Z` (or `PCBData.undo()`) removes all
 N traces together — never a partial bus.
 
 `layer` is required unless the board declares exactly one copper layer (there
-is no toolbar layer filter to fall back on from an MCP call, unlike the
+is no toolbar working layer to fall back on from an MCP call, unlike the
 canvas gesture's `trace_author_layer()`).
 
 ## Worker (already live — credited, not re-created)
@@ -860,9 +860,8 @@ corner there (a zone can't drop below 3 corners — the delete is refused).
 **Draw ▸ Pour** — pick its net and layer in the sidebar pickers, then click
 each corner on the canvas; double-click or press Enter to close (needs 3+
 corners; Esc or right-click cancels mid-draw). Corners snap to a quarter of
-the grid — hold Ctrl/Cmd to place freely. With the layer picker left on "View
-layer" the pour goes on the toolbar's selected copper layer; on "All" it
-falls back to the hardcoded `ZONE_DEFAULT_LAYER`, the bottom copper layer.
+the grid — hold Ctrl/Cmd to place freely. With the layer picker left on
+"Working layer" the pour goes on the toolbar's working layer.
 
 **Draw ▸ Keepout** — same corner-clicking grammar as Pour (double-click/Enter
 to close, Esc/right-click to cancel, quarter-grid snap with Ctrl/Cmd to place
@@ -889,10 +888,10 @@ changes layer, so it is where the next leg of that run begins or ends. An
 anchor on NO net is refused by name when you start on it (the trace would have
 no net to inherit), and merely named out loud when you finish on it. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
 freely. Drawn at the width set in the sidebar's trace-width box, on the
-toolbar's selected copper layer (or the hardcoded `TRACE_DEFAULT_LAYER`, the
-top copper layer, when the filter is "All"). Note this is the OPPOSITE
-default from Draw ▸ Pour above (bottom) — leaving the filter on "All" and
-drawing both puts them on different layers with no warning.
+toolbar's **working layer** — the F.Cu / B.Cu chooser. That chooser sets where
+copper goes and nothing else: it never changes what the canvas shows, and
+hiding a layer through View ▸ Copper layers never changes where the next trace
+lands.
 
 Starting on a **pad** also marks and labels **one destination**: the nearest
 copper on that pad's net that is not already joined to it, with the net, the
@@ -950,9 +949,8 @@ already drawn.
 
 **Zone net / layer pickers** (sidebar, arm alongside Pour/Keepout) — the net
 picker is required by the board contract for a pour (a keepout needs none, so
-the picker hides for it); the layer picker follows the toolbar's layer filter
-while left on "View layer", and falls back to `ZONE_DEFAULT_LAYER` (bottom
-copper) when the filter is "All".
+the picker hides for it); the layer picker follows the toolbar's working layer
+while left on "Working layer", and pins the pour to one copper layer otherwise.
 
 **Hints ▸ Trace (single-trace route hint)** — click a pad or point to start,
 click waypoints, then click a pad or double-click empty space to finish

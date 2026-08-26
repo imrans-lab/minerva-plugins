@@ -23,8 +23,10 @@ extends Control
 ## ── KEPT (board editing) ──────────────────────────────────────────────────────
 ## Component select / box-select / drag / rotate, trace + via rendering, trace
 ## selection + delete, ratsnest, grid, pad geometry rendering, component lock,
-## zoom / pan, tool modes (Select/Translate/Rotate), a per-copper-layer trace
-## filter (the toolbar's layer selector drives trace_layer_filter).
+## zoom / pan, tool modes (Select/Translate/Rotate), a per-copper-layer VIEW
+## filter (trace_layer_filter) and the WORKING LAYER authoring tools draw on
+## (working_layer, driven by the toolbar's Layer chooser). Those two are
+## deliberately separate — see their declarations.
 
 const PCBComponentScript := preload("model/pcb_component.gd")
 ## T1.5: canonical layer contract (only _canonical_layer migrated here; layer
@@ -166,15 +168,21 @@ var show_route_candidates: bool = true
 ## human cannot act on a finding. View-menu toggled like every draw flag.
 var show_drc_witnesses: bool = true
 
-## Copper-layer view filter driven by the toolbar layer selector. Holds "all" or
-## a CANONICAL copper-layer id ("top" / "in1".."in30" / "bottom") — the selector
-## shows KiCad names (F.Cu / In1.Cu / B.Cu) but carries the canonical id as item
-## metadata, so nothing here has to parse a display string.
+## Copper-layer VIEW filter. Holds "all" or a CANONICAL copper-layer id ("top" /
+## "in1".."in30" / "bottom").
+##
+## VIEW ONLY — nothing that authors copper reads it. Where a new trace, zone or
+## bus lands is working_layer's answer, so soloing a layer to look at it cannot
+## re-aim the next thing drawn, and choosing where to draw cannot blank the view.
 ##
 ## "all" shows every layer; any other value scopes the view to THAT ONE layer —
 ## its traces, its zones, the components mounted on it, plus the through-hole
 ## lands of every part (a barrel pierces all copper). This is a whole-VIEW
 ## filter, not just a trace filter, since epoch 6 unit 3b.
+##
+## No toolbar control writes it: the per-layer eyes are the human's visibility
+## control, and this is reached from minerva_pcb_view_state (plus the View
+## menu's "Show all copper layers" escape hatch, which only ever clears it).
 ## Setter emits view_changed so the annotation overlay re-renders — layer-keyed
 ## workflow annotations (route hints, WC-2 C3 fix 019f33d2c9bf) must appear /
 ## disappear with the same filter change that shows/hides the traces.
@@ -183,21 +191,45 @@ var trace_layer_filter: String = "all":
 		if trace_layer_filter == value:
 			return
 		trace_layer_filter = value
-		# THE ONE FUNNEL every layer choice arrives through — the toolbar
-		# selector, the View menu and minerva_pcb_set_view all write this
-		# property — so it is where a bus in mid-path learns that the user
-		# asked for another layer.
-		_arm_bus_via_station(value)
 		view_changed.emit()
+		queue_redraw()
+
+## THE WORKING LAYER — the copper every authoring tool on this canvas draws on:
+## the trace tool, the zone tools (unless zone_layer_override names another) and
+## the bus, including the layer a bus via station switches ONTO. Defaults to top,
+## the component side signal routing starts from.
+##
+## Always ONE canonical copper id, never "all": authoring has to name a layer,
+## and a "no choice" state would put a fallback rule back inside every tool.
+## Non-copper writes are refused rather than stored, so the invariant holds for
+## every writer. Every copper-authoring path reads it through `_author_layer`,
+## which is where the board's declared stack gets the last word.
+##
+## THE ONE FUNNEL every working-layer choice arrives through — the toolbar Layer
+## chooser and minerva_pcb_view_state both write this property — so it is where a
+## bus in mid-path learns that the user asked for another layer.
+var working_layer: String = "top":
+	set(value):
+		if not PcbLayerStack.is_copper(value):
+			return
+		var canon := PcbLayerStack.kicad_to_canon(value)
+		if working_layer == canon:
+			return
+		working_layer = canon
+		_arm_bus_via_station(canon)
+		# Redraw, but NOT view_changed: the committed board looks identical. Only
+		# the in-progress previews, which label themselves with the layer they
+		# will commit on, have anything new to say.
 		queue_redraw()
 
 ## Per-layer visibility "eyes" (epoch GA-1): canonical copper ids the user has
 ## hidden from the "All" view (View menu ▸ per-layer checkboxes). VIEW state,
 ## deliberately NOT board state — it is never serialized (the 2-layer
 ## byte-identity invariant stays trivially true) and resets per session,
-## exactly like trace_layer_filter. Composition rule with the filter, chosen
-## for predictability: under "All", the eyes decide; a SPECIFIC layer filter is
-## an explicit "show me this layer" and always shows it, hidden or not.
+## exactly like trace_layer_filter. THE HUMAN'S visibility control: the View
+## menu's per-layer checkboxes drive these. Composition rule with the filter,
+## chosen for predictability: under "All", the eyes decide; a SPECIFIC layer
+## filter is an explicit "show me this layer" and always shows it, hidden or not.
 var hidden_layers: Dictionary = {}
 
 
@@ -671,15 +703,10 @@ var selected_zone_id: String:
 ## the last pour left here and the keepout commit passes "" regardless.
 var zone_author_net: String = ""
 ## The copper layer a zone is armed to, set by the panel's zone layer picker.
-## Empty — the resting state, the picker's "View layer" entry — means "follow the
-## toolbar layer filter", which is exactly what the tools did before this control
-## existed, so the default behaviour is unchanged. A canonical id ("top"/"in1"/
-## "bottom") overrides the filter; see zone_author_layer.
+## Empty — the resting state, the picker's "Working layer" entry — means "pour on
+## working_layer like every other authoring tool". A canonical id ("top"/"in1"/
+## "bottom") pins this tool to a layer regardless; see zone_author_layer.
 var zone_layer_override: String = ""
-## Default pour layer when the toolbar's layer filter is "all" — the classic
-## ground-pour side. Surfaced as a constant so the panel's tooltip and the commit
-## path name the SAME layer.
-const ZONE_DEFAULT_LAYER := "bottom"
 ## Vertices placed so far, in board mm. Empty ⇔ no draw in progress.
 var _zone_points: PackedVector2Array = PackedVector2Array()
 ## Live rubber-band vertex (the cursor), only meaningful while drawing.
@@ -752,11 +779,6 @@ const CUTOUT_PREVIEW_CLOSE_ALPHA := 0.35
 const CUTOUT_PREVIEW_VERTEX_RADIUS_PX := 3.0
 
 ## ── Trace authoring (epoch 6 unit 5) ──────────────────────────────────────────
-## Default copper layer when the toolbar's layer filter is "all". TOP, unlike the
-## zone tools' "bottom": a pour under "All" wants the classic ground-pour side,
-## while signal routing starts on the component side. Surfaced as a constant so
-## the panel's tooltip and the commit path name the SAME layer.
-const TRACE_DEFAULT_LAYER := "top"
 ## Pad capture radius for the trace tool, in board mm.
 ##
 ## DELIBERATELY TIGHTER than the pin inspector's 5 mm default (PcbAnnotationHost.
@@ -785,7 +807,7 @@ var _trace_points: PackedVector2Array = PackedVector2Array()
 ## draw. The net is inherited from that pad (KiCad-style — copper does not get to
 ## invent a net), and the layer is frozen alongside it rather than re-resolved at
 ## commit: the preview is drawn in that layer's trace colour at its real width, so
-## changing the layer filter mid-draw must not silently commit a different trace
+## changing the working layer mid-draw must not silently commit a different trace
 ## from the one on screen.
 var _trace_net: String = ""
 var _trace_layer: String = ""
@@ -885,12 +907,12 @@ var _bus_has_preview: bool = false
 ## The copper layer every trace in this bus lands on. Frozen at the moment the
 ## PATH phase begins (_begin_bus_path), the same "arm once, hold for the whole
 ## draw" rule _trace_layer freezes under — the preview is drawn in that
-## layer's colour at the real per-net widths, so a layer-filter change
+## layer's colour at the real per-net widths, so a working-layer change
 ## mid-draw must not silently commit different copper from what is on screen.
 ##
-## A layer change mid-PATH is therefore NOT a change of _bus_layer: it arms a
-## VIA STATION instead (see _arm_bus_via_station), which is the one way this
-## tool authors on a second layer.
+## A working-layer change mid-PATH is therefore NOT a change of _bus_layer: it
+## arms a VIA STATION instead (see _arm_bus_via_station), which is the one way
+## this tool authors on a second layer.
 var _bus_layer: String = ""
 ## THE VIA STATION. `_bus_station_armed` means a layer switch is waiting for the
 ## next spine vertex to land on; `_bus_station_index` is that vertex once it
@@ -7413,35 +7435,31 @@ func _zone_tool_kind() -> String:
 ## still checked for copper-ness rather than trusted: the override is a String set
 ## from outside this class, and copper is the only thing a zone may be poured on.
 ##
-## With the picker left on "View layer" (override "", the resting state), the
-## toolbar layer filter names it whenever it is scoped to one copper layer — the
-## layer you are LOOKING at is the layer you are drawing on. Under "All" there is
-## no such answer, so it falls back to ZONE_DEFAULT_LAYER ("bottom", the classic
-## ground-pour side); the tool button's tooltip states that fallback outright so
-## it is never a silent choice. Fails visible (returns "") when the board does not
-## declare the fallback layer at all, rather than authoring copper onto a layer
-## the board has never heard of.
+## With the picker left on "Working layer" (override "", the resting state), the
+## pour lands on working_layer — the same copper every other authoring tool on
+## this canvas is aimed at.
 ##
 ## _draw_zone_preview's arming label calls THIS function, so the label always
-## names the layer the commit will actually use, override or filter.
+## names the layer the commit will actually use, override or working layer.
 func zone_author_layer() -> String:
 	if not zone_layer_override.is_empty() and PcbLayerStack.is_copper(zone_layer_override):
 		return zone_layer_override
-	return _author_layer(ZONE_DEFAULT_LAYER)
+	return _author_layer()
 
 
-## The layer-from-filter rule shared by every copper-authoring tool on this
-## canvas (unit 5 lifted it out of zone_author_layer verbatim rather than writing
-## a second copy for traces). ONLY the "All" fallback differs between tools — a
-## pour defaults to the ground side, a trace to the component side — so that is
-## the one thing passed in.
-func _author_layer(default_layer: String) -> String:
-	if not trace_layer_filter.is_empty() and trace_layer_filter != "all" \
-			and PcbLayerStack.is_copper(trace_layer_filter):
-		return trace_layer_filter
+## The working layer, reconciled against the board's DECLARED stack — the one
+## rule every copper-authoring tool on this canvas resolves its layer through.
+##
+## The reconciliation is not ceremony: working_layer survives a stack edit that
+## drops the layer it names (set_board_layers, a board reload), and authoring
+## onto a layer the board has never heard of is copper no fab file can carry. A
+## stranded working layer therefore falls to the first declared copper rather
+## than to a hardcoded side. "" — no declared copper at all — fails visible at
+## the commit paths that call this.
+func _author_layer() -> String:
 	var declared: Array = data.layers if data else []
-	if declared.is_empty() or default_layer in declared:
-		return default_layer
+	if declared.is_empty() or working_layer in declared:
+		return working_layer
 	for layer in declared:
 		if PcbLayerStack.is_copper(str(layer)):
 			return str(layer)
@@ -7926,10 +7944,10 @@ func trace_author_width() -> float:
 	return PCBDataScript.DEFAULT_TRACE_WIDTH_MM
 
 
-## The copper layer a new trace is placed on — the layer-filter rule shared with
-## the zone tools, defaulting to TRACE_DEFAULT_LAYER ("top") under "All".
+## The copper layer a new trace is placed on — the working layer, through the
+## declared-stack rule shared with the zone tools.
 func trace_author_layer() -> String:
-	return _author_layer(TRACE_DEFAULT_LAYER)
+	return _author_layer()
 
 
 func _handle_trace_click(world_pos: Vector2, is_double_click: bool) -> void:
@@ -8183,7 +8201,7 @@ func _draw_trace_preview() -> void:
 ##                                        (needs 2+ vertices placed)
 ##   PATH    --click a legal target pad--> PATH ends; that pad is that net's
 ##                                        target (needs 2+ vertices placed)
-##   PATH    --switch the layer selector--> the NEXT vertex placed becomes a VIA
+##   PATH    --switch the working layer--> the NEXT vertex placed becomes a VIA
 ##                                        STATION onto that layer; the path is
 ##                                        neither restarted nor re-aimed
 ##   TARGETS --click a legal target pad--> set, or replace, that net's target
@@ -8558,7 +8576,7 @@ func _commit_bus_on_landed_target(world_pos: Vector2, propose: bool) -> void:
 
 ## SOURCES -> PATH. Freezes the layer the same way _start_trace freezes
 ## _trace_layer — the preview below draws in that layer's colour at the real
-## per-net widths, so a toolbar layer-filter change mid-draw cannot silently
+## per-net widths, so a working-layer change mid-draw cannot silently
 ## commit different copper from what is on screen — and sizes the target arrays
 ## alongside the net list they parallel.
 ##
@@ -8600,11 +8618,11 @@ func _begin_bus_path(world_pos: Vector2) -> void:
 	# user to expect copper.
 	if authoring_destination == DEST_DRAFT:
 		bus_tool_message.emit(
-			"Path for [%s] on %s — click vertices, then a pad per net (switch layer to via the bundle onto it); DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)."
+			"Path for [%s] on %s — click vertices, then a pad per net (switch the working layer to via the bundle onto it); DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)."
 				% [_bus_nets_joined(), _bus_layer_display()])
 	else:
 		bus_tool_message.emit(
-			"Path for [%s] on %s — click vertices, then a pad per net to land its target (switch layer to via the bundle onto it); Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)."
+			"Path for [%s] on %s — click vertices, then a pad per net to land its target (switch the working layer to via the bundle onto it); Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)."
 				% [_bus_nets_joined(), _bus_layer_display()])
 	queue_redraw()
 
@@ -8631,13 +8649,13 @@ func _assign_bus_target(cand: Dictionary) -> void:
 	queue_redraw()
 
 
-## A layer choice made while a bus PATH is being drawn: ARM (or drop) the via
-## station instead of restarting the bus or silently re-aiming the copper that
+## A working-layer choice made while a bus PATH is being drawn: ARM (or drop) the
+## via station instead of restarting the bus or silently re-aiming the copper that
 ## is already on screen at another layer.
 ##
-## Reached from trace_layer_filter's setter, which every layer choice on this
+## Reached from working_layer's setter, which every working-layer choice on this
 ## canvas passes through, so it has to be inert for every other tool and phase —
-## including the filter changes made with no bus in progress at all.
+## including the choices made with no bus in progress at all.
 func _arm_bus_via_station(layer: String) -> void:
 	if tool_mode != ToolMode.BUS or _bus_phase != BusPhase.PATH:
 		return
@@ -8958,11 +8976,11 @@ func _bus_nets_without_targets() -> PackedStringArray:
 ## The frozen bus layer as the user reads it on the toolbar — "F.Cu" / "B.Cu",
 ## not the canonical "top" / "bottom" this canvas stores. Every sentence the bus
 ## tool says about its layer goes through here, so the name in the teach line is
-## the name in the layer selector.
+## the name in the toolbar Layer chooser.
 ##
 ## canon_to_kicad FAILS CLOSED on anything it does not recognise; falling back to
 ## the canonical id keeps a layer the user can at least name, which is the same
-## choice the layer selector makes.
+## choice the toolbar Layer chooser makes.
 func _bus_layer_display() -> String:
 	return _bus_layer_name(_bus_layer)
 
@@ -9240,7 +9258,7 @@ func _bus_path_teach_line() -> String:
 	if _bus_station_index >= 0:
 		return ("Path on %s to the via station at vertex %d, %s past it — click vertices, then a pad per net, or double-click clear of the pads to end the path."
 			% [_bus_layer_display(), _bus_station_index, _bus_layer_name(_bus_station_layer)])
-	return ("Path on %s — click vertices, then a pad per net, or double-click clear of the pads to end the path; switching layer drops a via station on the next vertex."
+	return ("Path on %s — click vertices, then a pad per net, or double-click clear of the pads to end the path; switching the toolbar Layer chooser drops a via station on the next vertex."
 		% _bus_layer_display())
 
 

@@ -360,15 +360,15 @@ func _test_d_layer_visibility() -> void:
 		"selected='%s'" % host.get_selected_annotation_id())
 	host.set_selected_annotation_id("")
 
-	# Simulate the HUMAN hiding B.Cu: pick "top" in the panel's layer selector
-	# (the same OptionButton path _on_layer_selected serves in the UI).
-	var top_idx := _layer_option_index("top")
-	check("D: layer selector offers 'top' (sanity)", top_idx >= 0, "idx=%d" % top_idx)
-	panel._layer_option.select(top_idx)
-	panel._on_layer_selected(top_idx)
+	# Simulate the HUMAN hiding B.Cu: shut its eye, the View menu's per-layer
+	# checkbox (_on_view_menu_id_pressed calls exactly this). The toolbar Layer
+	# chooser is NOT this gesture — it moves the working layer and leaves the
+	# view alone.
+	canvas.set_layer_hidden("bottom", true)
 	await process_frame
-	check("D: canvas filter is now 'top' (B.Cu hidden)", str(canvas.trace_layer_filter) == "top",
-		"filter='%s'" % str(canvas.trace_layer_filter))
+	check("D: B.Cu is now hidden", not bool(canvas.is_layer_visible("bottom")))
+	check("D: and hiding it did not move where copper is authored",
+		str(canvas.working_layer) == "top", "working='%s'" % str(canvas.working_layer))
 
 	# [C3 red->green] Canvas-rendering gate: the overlay render loop consults
 	# this exact host predicate (AnnotationOverlay._draw skips invisible
@@ -402,13 +402,6 @@ func _test_d_layer_visibility() -> void:
 	check("D: workflow listing still shows both hints while B.Cu is hidden",
 		workflow_list.get_listing().size() == 2,
 		"size=%d" % workflow_list.get_listing().size())
-
-
-func _layer_option_index(meta: String) -> int:
-	for i in range(panel._layer_option.item_count):
-		if str(panel._layer_option.get_item_metadata(i)) == meta:
-			return i
-	return -1
 
 
 # ── E. MCP unchanged while a layer is hidden ─────────────────────────────────

@@ -351,7 +351,7 @@
     },
     {
       "name": "minerva_pcb_view_state",
-      "description": "Read — and optionally set — WHAT the PCB canvas is drawing, so you can interpret your own minerva_pcb_get_image instead of guessing. minerva_pcb_set_view aims the camera; this says what the camera is pointed at. Call with no arguments to read: returns {flags:{show_grid, show_traces, show_silk, show_ratsnest, show_labels, show_courtyard, show_route_candidates, show_drc_witnesses, show_mask, show_fab_preview}, layers:[{id, kicad, hidden}], trace_layer_filter, changed:[]}. Writes are absolute, not deltas: flags {name:bool} sets any subset, and hidden_layers is THE COMPLETE set of canonical layer ids to hide (pass [] to show every layer, or every id but one to solo that layer — the way to inspect an inner layer on its own). Everything is validated before anything is applied, so a bad flag name or a layer this board does not declare changes nothing and names what was wrong. Toggling show_mask or show_fab_preview on runs the same worker refetch the View menu runs, so the overlay you then capture is real rather than empty. trace_layer_filter is writable too (\"all\" or a declared copper layer id) and is applied LAST so an explicit value wins. The two compose ASYMMETRICALLY: a specific filter beats every per-layer eye, so applying hidden_layers resets the filter to \"all\" (reported in changed) — without that, soloing a layer would change the eyes and nothing on screen.",
+      "description": "Read — and optionally set — WHAT the PCB canvas is drawing, so you can interpret your own minerva_pcb_get_image instead of guessing. minerva_pcb_set_view aims the camera; this says what the camera is pointed at. Call with no arguments to read: returns {flags:{show_grid, show_traces, show_silk, show_ratsnest, show_labels, show_courtyard, show_route_candidates, show_drc_witnesses, show_mask, show_fab_preview}, layers:[{id, kicad, hidden}], trace_layer_filter, working_layer, changed:[]}. Writes are absolute, not deltas: flags {name:bool} sets any subset, and hidden_layers is THE COMPLETE set of canonical layer ids to hide (pass [] to show every layer, or every id but one to solo that layer — the way to inspect an inner layer on its own). Everything is validated before anything is applied, so a bad flag name or a layer this board does not declare changes nothing and names what was wrong. Toggling show_mask or show_fab_preview on runs the same worker refetch the View menu runs, so the overlay you then capture is real rather than empty. trace_layer_filter is writable too (\"all\" or a declared copper layer id) and is applied LAST so an explicit value wins. The two compose ASYMMETRICALLY: a specific filter beats every per-layer eye, so applying hidden_layers resets the filter to \"all\" (reported in changed) — without that, soloing a layer would change the eyes and nothing on screen. SEPARATELY, and NOT a view control at all: working_layer is the copper the canvas AUTHORS on \u2014 the layer the toolbar chooser names and the trace tool, the zone tools and the bus draw on. Read it back on every call; write it with a declared copper layer id (never \"all\") to aim the human-facing tools. It composes with nothing above it: setting it changes nothing on screen, and no view write moves it. Direct authoring verbs (add_trace, create_zone, route_bus_direct) keep their own explicit layer args and ignore it.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -368,6 +368,14 @@
             "type": "array",
             "items": {"type": "string"},
             "description": "THE COMPLETE set of canonical layer ids to hide (\"top\", \"bottom\", \"in1\"...). Absolute, not a delta: layers omitted here become visible. Omit the key entirely to leave layer visibility untouched."
+          },
+          "trace_layer_filter": {
+            "type": "string",
+            "description": "VIEW filter: \"all\", or a declared copper layer id to scope the whole view to that one layer. A specific value outranks every per-layer eye, so it is applied LAST. Does NOT change where copper is authored \u2014 that is working_layer."
+          },
+          "working_layer": {
+            "type": "string",
+            "description": "The copper layer the canvas AUTHORS on (trace tool, zone tools, bus, and the layer a bus via station switches onto) \u2014 the toolbar's Layer chooser. A declared copper layer id; \"all\" is refused. Setting it changes nothing on screen."
           }
         },
         "required": ["editor_name"]

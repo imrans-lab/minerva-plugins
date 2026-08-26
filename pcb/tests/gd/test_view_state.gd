@@ -44,6 +44,7 @@ func _init() -> void:
 	await _run_refusals_change_nothing()
 	await _run_types_are_validated()
 	await _run_explicit_filter_wins()
+	await _run_working_layer_is_not_view()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -352,5 +353,66 @@ func _run_explicit_filter_wins() -> void:
 	check("an undeclared filter refuses", not bool(bad.get("success", true)))
 	check_eq("named layer_not_on_stack", str(bad.get("error", "")), "layer_not_on_stack")
 	check_eq("the filter is untouched", str(canvas.trace_layer_filter), "in1")
+
+	await _unmount(ctx["panel"])
+
+
+# ── 7. the WORKING layer rides this verb and touches nothing else ─────────────
+#
+# The verb an agent reads to interpret its own screenshot is also the one place
+# it can say where its copper should go, so the two live side by side here — and
+# the whole point of the pair is that neither moves the other.
+#
+# ORACLE, both directions: the live canvas (working_layer, trace_layer_filter,
+# is_layer_hidden) plus the toolbar OptionButton's selected metadata. The widget
+# is checked because a working layer the canvas holds and the toolbar denies is
+# the disagreement the human reads the toolbar to resolve.
+
+func _run_working_layer_is_not_view() -> void:
+	print("-- 7. working_layer is authoring state, and rides beside the view --")
+	var ctx: Dictionary = await _ctx()
+	var host = ctx["host"]
+	var canvas = ctx["canvas"]
+	var panel = ctx["panel"]
+
+	var read: Dictionary = await _view(host)
+	check_eq("a plain read reports the working layer",
+		str(read.get("working_layer", "")), str(canvas.working_layer))
+
+	# WRITE it: the canvas moves, the toolbar moves with it, the view does not.
+	var filter_before := str(canvas.trace_layer_filter)
+	var res: Dictionary = await _view(host, {"working_layer": "in2"})
+	check("the write succeeds", bool(res.get("success", false)))
+	check_eq("the canvas authors on in2 now", str(canvas.working_layer), "in2")
+	check_eq("and the toolbar chooser moved with it",
+		str(panel._layer_option.get_item_metadata(panel._layer_option.selected)), "in2")
+	check("the change is reported", "working_layer" in (res.get("changed", []) as Array))
+	check_eq("the view filter did not move", str(canvas.trace_layer_filter), filter_before)
+	check("nor did any eye", not bool(canvas.is_layer_hidden("in2")))
+
+	# The VIEW half, in the same verb: neither a filter nor the eyes' implicit
+	# reset of it may re-aim where copper goes.
+	var both: Dictionary = await _view(host, {"trace_layer_filter": "top"})
+	check("the filter write succeeds", bool(both.get("success", false)))
+	check_eq("the view is scoped to top", str(canvas.trace_layer_filter), "top")
+	check_eq("and copper still goes to in2", str(canvas.working_layer), "in2")
+
+	var solo: Dictionary = await _view(host, {"hidden_layers": ["top"]})
+	check("the solo write succeeds", bool(solo.get("success", false)))
+	check_eq("the eyes reset the filter, as they always did",
+		str(canvas.trace_layer_filter), "all")
+	check_eq("and copper STILL goes to in2", str(canvas.working_layer), "in2")
+
+	# REFUSALS. "all" is a view answer, not a layer to draw on, and it is refused
+	# by name rather than folded to a default the caller did not ask for.
+	var all_req: Dictionary = await _view(host, {"working_layer": "all"})
+	check("\"all\" is refused", not bool(all_req.get("success", true)))
+	check_eq("named invalid_args", str(all_req.get("error", "")), "invalid_args")
+	check_eq("and the working layer is untouched", str(canvas.working_layer), "in2")
+
+	var undeclared: Dictionary = await _view(host, {"working_layer": "in7"})
+	check("a layer off the stack is refused", not bool(undeclared.get("success", true)))
+	check_eq("named layer_not_on_stack", str(undeclared.get("error", "")), "layer_not_on_stack")
+	check_eq("and the working layer is still untouched", str(canvas.working_layer), "in2")
 
 	await _unmount(ctx["panel"])

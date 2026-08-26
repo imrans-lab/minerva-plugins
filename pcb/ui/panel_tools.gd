@@ -1618,16 +1618,21 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 ##
 ## THE FILTER AND THE EYES COMPOSE, ASYMMETRICALLY, and callers must know it:
 ## pcb_canvas._layer_visible gives a SPECIFIC filter priority over every
-## per-layer eye. So hiding layers while the toolbar sits on one layer changes
+## per-layer eye. So hiding layers while a specific filter is in force changes
 ## the eye dictionary and nothing on screen. Applying `hidden_layers` therefore
 ## puts the filter back to "all" (reported in `changed`) so the eyes govern —
 ## otherwise the solo gesture would silently do the opposite of what was asked.
 ## An explicit `trace_layer_filter` in the SAME request is applied last and
 ## wins, so a caller can ask for both and get exactly what they wrote.
 ##
-## The filter became writable once PCBPanel.set_trace_layer_filter existed to
-## move the OptionButton with the canvas; before that, writing it here would
-## have left the toolbar displaying a filter the canvas was not using.
+##   working_layer: a declared copper layer id
+##
+## THE ONE THING HERE THAT IS NOT VIEW. It is where the canvas AUTHORS copper:
+## the layer the trace tool, the zone tools and the bus draw on. It rides on this
+## verb because an agent has to read it to know what the human's next gesture
+## will do, and it is independent of every filter and eye above — setting it
+## changes nothing on screen, and no view write moves it. The direct authoring
+## verbs take an explicit `layer` and never consult it.
 static func _view_state(host, args: Dictionary) -> Dictionary:
 	if host == null or not host.has_method("get_canvas"):
 		return _err("PCB view control not available")
@@ -1674,10 +1679,6 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 					"note": "flag '%s' must be true or false, got %s"
 						% [str(k), str(want_flags[k])]}
 
-	# trace_layer_filter is WRITABLE since the panel gained a setter that moves
-	# the OptionButton with the canvas (cold review 2, finding 1). It was
-	# read-only before precisely because writing it here would have left the
-	# toolbar showing a filter the canvas no longer used.
 	var want_filter := ""
 	var set_filter := args.has("trace_layer_filter")
 	if set_filter:
@@ -1696,6 +1697,27 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		if not panel.has_method("set_trace_layer_filter"):
 			return {"success": false, "error": "unsupported",
 				"note": "this panel predates the trace_layer_filter setter"}
+
+	# The WORKING layer: authoring, not view. "all" is refused by name rather
+	# than folded to a default — a caller that wrote it has confused this with
+	# the filter beside it, and copper has to land on ONE layer.
+	var want_working := ""
+	var set_working := args.has("working_layer")
+	if set_working:
+		want_working = str(args.get("working_layer", "")).strip_edges()
+		if want_working.is_empty() or want_working == "all":
+			return {"success": false, "error": "invalid_args",
+				"note": "working_layer must be a declared copper layer id — it is where copper is AUTHORED, and \"all\" is not a layer to draw on"}
+		want_working = PcbLayerStack.kicad_to_canon(want_working)
+		if not (want_working in declared):
+			return {"success": false, "error": "layer_not_on_stack",
+				"unknown": str(args.get("working_layer", "")),
+				"declared_layers": declared,
+				"note": "this board declares %s — it cannot author on '%s'"
+					% [str(declared), str(args.get("working_layer", ""))]}
+		if not panel.has_method("set_working_layer"):
+			return {"success": false, "error": "unsupported",
+				"note": "this panel predates the working layer"}
 
 	var want_hidden: Array = []
 	var set_hidden := args.has("hidden_layers")
@@ -1739,13 +1761,10 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 	if set_hidden and canvas.has_method("set_layer_hidden"):
 		# THE FILTER MUST YIELD TO THE EYES FIRST (cold review 2, finding 1).
 		# pcb_canvas._layer_visible gives a specific trace_layer_filter priority
-		# over every per-layer eye, so hiding layers while the toolbar sits on a
-		# specific layer changes the eye dictionary and NOTHING on screen — the
-		# solo gesture would silently do the opposite of what was asked. Putting
-		# the filter back to "all" through the panel's own setter moves the
-		# OptionButton with it, so the toolbar never displays a filter the canvas
-		# is not using. Reported in `changed`, because it is a visible change to
-		# a control the human can see.
+		# over every per-layer eye, so hiding layers while a specific filter is
+		# in force changes the eye dictionary and NOTHING on screen — the
+		# solo gesture would silently do the opposite of what was asked. Reported
+		# in `changed`, because it is a visible change to what is on screen.
 		if panel.has_method("set_trace_layer_filter") \
 				and str(canvas.get("trace_layer_filter")) not in ["", "all"]:
 			if panel.set_trace_layer_filter("all"):
@@ -1762,6 +1781,11 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		if panel.set_trace_layer_filter(want_filter):
 			if not ("trace_layer_filter" in changed):
 				changed.append("trace_layer_filter")
+	# Independent of everything above: nothing in the view half reads or writes
+	# it, so its ordering among the view writes cannot matter.
+	if set_working and str(canvas.get("working_layer")) != want_working:
+		if panel.set_working_layer(want_working):
+			changed.append("working_layer")
 
 	# ── report the whole resulting state ─────────────────────────────────────
 	var flags_out: Dictionary = {}
@@ -1778,6 +1802,7 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		"flags": flags_out,
 		"layers": layers_out,
 		"trace_layer_filter": str(canvas.get("trace_layer_filter")),
+		"working_layer": str(canvas.get("working_layer")),
 		"changed": changed,
 	})
 
@@ -9509,11 +9534,11 @@ static func _maybe_stamp_annotation_ref(envelope: Dictionary) -> void:
 ## the canvas Bus tool draws (see the region doc above): an ORDERED net list
 ## (T11 — echoed back verbatim, never re-sorted) plus a spine polyline in one
 ## call, same validation path (bus_plan), same single journal step
-## (bus_commit_plan), same named refusal shape. `layer` defaults to
-## trace_author_layer()'s own rule (toolbar filter, else TRACE_DEFAULT_LAYER)
-## is NOT available here (no canvas/toolbar in an MCP call) — an agent must
-## name the layer explicitly, or the board's only declared copper layer is
-## used when there is exactly one.
+## (bus_commit_plan), same named refusal shape. The canvas's WORKING layer is
+## NOT consulted here (there is no canvas in an MCP call, and a verb that read
+## panel state would route differently depending on what the human last clicked)
+## — an agent must name `layer` explicitly, or the board's only declared copper
+## layer is used when there is exactly one.
 static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
