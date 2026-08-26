@@ -1134,6 +1134,14 @@ func _test_bus_phase_badge() -> void:
 			label_before != str(panel._status_label.text) and panel.bus_phase_step() == 2,
 			"before=%s after=%s step=%d" % [label_before, str(panel._status_label.text),
 				panel.bus_phase_step()])
+	# THE LANE MAPPING lives on this standing line (the badge is three pips on
+	# a 24px icon and cannot carry text): NA landed on V1.1, NB still open.
+	check("status: the standing line lists every lane in pick order with its ending",
+			str(panel._status_label.text).contains("lanes: 1 NA  U1.1 → V1.1 · 2 NB  U2.1 → open"),
+			str(panel._status_label.text))
+	check("status: …and the tooltip carries the same mapping untrimmed",
+			str(panel._status_label.tooltip_text).contains("1 NA  U1.1 → V1.1"),
+			str(panel._status_label.tooltip_text))
 	canvas.pan_offset += Vector2(100000.0, 100000.0)
 	await process_frame
 	var pad_screen: Vector2 = canvas.world_to_screen(BADGE_SRC_A)

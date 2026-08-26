@@ -54,6 +54,8 @@ const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.
 const PanelToolsScript := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const ComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
+const PcbBusLabels := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_labels.gd")
+const PcbRatsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
 
 ## Coordinate tolerance, in mm. Vector2 is 32-bit float regardless of build
@@ -156,6 +158,7 @@ func _init() -> void:
 	_test_unreachable_targets_still_name_the_layer_to_start_on()
 	_test_an_open_lane_commits_as_a_free_end()
 	await _test_the_open_verb_matches_the_open_gesture()
+	_test_every_lane_wears_its_net()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -3156,3 +3159,77 @@ func _test_the_open_verb_matches_the_open_gesture() -> void:
 	check("NA's ghost has three segments (source leg + lane, no target leg)",
 			int(na_ghost.get("segment_count", -1)) == 3, str(na_ghost))
 	check("…and nothing was committed by the proposal", _serialized_traces(data_p).is_empty())
+
+
+# ── 16. LANE IDENTITY: every lane wears its net, end to end ──────────────────
+#
+# "I couldn't tell what wire would go to what pad." The words a lane carries
+# are built by pcb_bus_labels.gd (pinned here without a canvas), and the same
+# fields ride bus_target_guidance() rows — lane_index, color, ending — so an
+# agent reads the mapping the human sees. The colour is the ratsnest's: the
+# bundle colour PcbRatsnest.extract reports for a net IS the lane colour.
+#
+# ORACLE: the helper's own strings, the guidance rows per phase, and the
+# ratsnest's extract() output for the same board.
+
+func _test_every_lane_wears_its_net() -> void:
+	print("\n-- (16) every lane wears its net: labels, numbers, colours --")
+	# The helper alone.
+	check("ending: no target before TARGETS reads '?'", PcbBusLabels.ending("", false) == "?")
+	check("ending: no target in TARGETS reads 'open'", PcbBusLabels.ending("", true) == "open")
+	check("ending: a landed target is its ref", PcbBusLabels.ending("V1.1", true) == "V1.1")
+	check("lane_label reads 'NA → V1.1'", PcbBusLabels.lane_label("NA", "V1.1") == "NA → V1.1")
+	check("lane_line reads '2 NB  U2.1 → open'",
+			PcbBusLabels.lane_line(2, "NB", "U2.1", "open") == "2 NB  U2.1 → open")
+	check("lanes_summary joins the lines with ' · ' in lane order",
+			PcbBusLabels.lanes_summary([
+				{"lane_index": 1, "net": "NA", "source_ref": "U1.1", "ending": "V1.1"},
+				{"lane_index": 2, "net": "NB", "source_ref": "U2.1", "ending": "?"}])
+				== "1 NA  U1.1 → V1.1 · 2 NB  U2.1 → ?")
+	check("the TARGETS rule names the pick order",
+			PcbBusLabels.TARGETS_RULE.contains("order you picked the nets"), PcbBusLabels.TARGETS_RULE)
+
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	# SOURCES: numbered in pick order, every ending still '?'.
+	var rows: Array = canvas.bus_target_guidance()
+	var lanes: Array = []
+	var endings: Array = []
+	for row in rows:
+		lanes.append(int((row as Dictionary)["lane_index"]))
+		endings.append(str((row as Dictionary)["ending"]))
+	check("SOURCES: lanes are numbered 1, 2, 3 in pick order", lanes == [1, 2, 3], str(lanes))
+	check("SOURCES: every ending is '?'", endings == ["?", "?", "?"], str(endings))
+	# THE COLOUR IS THE RATSNEST'S. The bundle extract() reports for NA carries
+	# the colour its airwires are drawn in; the lane row for NA must carry the
+	# same one, through the same helper.
+	var ratsnest_color: Variant = null
+	for bundle in PcbRatsnest.extract(data):
+		if str((bundle as Dictionary).get("net", "")) == "NA":
+			ratsnest_color = (bundle as Dictionary).get("color")
+	var na_row: Dictionary = _guidance_row(canvas, "NA")
+	check("NA's lane colour is the ratsnest's colour for NA, and the helper's",
+			ratsnest_color is Color and na_row.get("color") == ratsnest_color
+				and PcbBusLabels.net_color(data.get_net("NA")) == ratsnest_color,
+			"lane %s ratsnest %s" % [str(na_row.get("color")), str(ratsnest_color)])
+	check("…and color_hex is that colour as html", str(na_row.get("color_hex", ""))
+			== (ratsnest_color as Color).to_html(false) if ratsnest_color is Color else false)
+	check("a net without a colour of its own falls back to white, like an airwire",
+			PcbBusLabels.net_color(null) == Color.WHITE)
+
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	check("PATH: the endings are still '?' — no target is askable yet",
+			str(_guidance_row(canvas, "NA")["ending"]) == "?")
+	canvas._handle_bus_click(TGT_A, false)     # ends PATH, lands NA
+	check("TARGETS: the teach line leads with the pick-order rule",
+			canvas.bus_teach_line().begins_with(PcbBusLabels.TARGETS_RULE), canvas.bus_teach_line())
+	check("TARGETS: the lane lines read the landed ref and 'open' for the rest",
+			canvas.bus_lane_lines() == PackedStringArray([
+				"1 NA  U1.1 → V1.1", "2 NB  U2.1 → open", "3 NC  U3.1 → open"]),
+			str(canvas.bus_lane_lines()))
+	canvas.free()

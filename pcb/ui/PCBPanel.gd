@@ -6630,6 +6630,16 @@ func _update_status() -> void:
 		if tm > 0 and tm < mode_names.size():
 			mode_txt = "  [%s]" % mode_names[tm]
 		armed_hint = str(_MODE_HINTS.get(tm, ""))
+		# THE LANE MAPPING, readable at once: one "N net  source → ending" per
+		# picked net, in lane order, after the bus grammar. It lives HERE and
+		# not on the phase badge because the badge is three 2px pips painted on
+		# a 24px icon — it cannot carry a line of text without a scene change.
+		# Re-read from the canvas on every write, like the phase and the
+		# refusal, so it is never a stale copy.
+		if tm == _PcbCanvasScript.ToolMode.BUS and _canvas.has_method("bus_lane_lines"):
+			var lanes: PackedStringArray = _canvas.bus_lane_lines()
+			if not lanes.is_empty():
+				armed_hint = "%s  •  lanes: %s" % [armed_hint, " · ".join(lanes)]
 	var hint := "  •  wheel/pinch zoom · Pan tool or Space/right/middle-drag to pan"
 	if not armed_hint.is_empty():
 		hint = "  •  %s" % armed_hint

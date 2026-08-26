@@ -56,6 +56,7 @@ extends RefCounted
 ## No randomness, no time, no hashing of pointer identities.
 
 const PcbLayerStack := preload("pcb_layer_stack.gd")
+const PcbBusLabels := preload("pcb_bus_labels.gd")
 ## Zone decoding statics (outline points + kind normalisation) live on the data
 ## model that defines the zone dict's shape; reached through the script, not an
 ## instance, exactly as pcb_canvas.gd reaches them.
@@ -1218,5 +1219,4 @@ static func compute(data) -> Dictionary:
 
 
 static func _net_color(net) -> Color:
-	var c = net.color
-	return c if c is Color else Color.WHITE
+	return PcbBusLabels.net_color(net)

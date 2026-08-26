@@ -43,6 +43,7 @@ const PCBDataScript := preload("model/pcb_data.gd")
 ## a standing pin this unit consumes and never edits). Zero imports itself, so
 ## preloading it here adds no further dependency weight.
 const BusGeom := preload("model/pcb_bus_geometry.gd")
+const PcbBusLabels := preload("model/pcb_bus_labels.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 ## The MCP tool surface (panel_tools.gd) is preloaded HERE too, for the bus
 ## tool only: bus_plan()/bus_commit_plan() (its static funcs) are the ONE
@@ -9074,21 +9075,32 @@ func bus_target_guidance() -> Array:
 		if not refs.has(suggested):
 			suggested = ""
 		var target_ref: String = _bus_target_refs[i] if i < _bus_target_refs.size() else ""
+		var color := _bus_net_color(i)
 		out.append({
 			"index": i,
+			# The lane's number as the user reads it — pick order, 1-based — and
+			# the net's colour, the same one the ratsnest paints its airwires in.
+			"lane_index": i + 1,
+			"color": color,
+			"color_hex": color.to_html(false),
 			"net": _bus_nets[i],
 			"source_ref": _bus_net_refs[i],
 			"target_ref": target_ref,
-			# How this net ENDS if committed now: its target pad, or "open" in
-			# TARGETS where a commit would leave its lane ending free. Drawn in
-			# the preview label as "NB → open".
-			"ending": target_ref if not target_ref.is_empty() \
-				else ("open" if _bus_phase == BusPhase.TARGETS else ""),
+			# How this net ENDS if committed now: its target pad, "open" in
+			# TARGETS (a commit would leave its lane ending free), "?" before.
+			"ending": PcbBusLabels.ending(target_ref, _bus_phase == BusPhase.TARGETS),
 			"target_at": _bus_target_points[i] if i < _bus_target_points.size() else Vector2.ZERO,
 			"suggested_ref": suggested,
 			"candidates": mine,
 		})
 	return out
+
+
+## The whole lane mapping as text, one line per net in lane order — "1 NA
+## U1.1 → V1.1" — for the panel's standing status line, where the mapping can
+## be read at once; the same rows an agent gets from bus_target_guidance().
+func bus_lane_lines() -> PackedStringArray:
+	return PcbBusLabels.lane_lines(bus_target_guidance())
 
 
 ## THE PER-NET AIRLINE, AS DATA — one row per picked net that has somewhere to
@@ -9228,7 +9240,8 @@ func _bus_targets_status() -> String:
 		if authoring_destination == DEST_DRAFT:
 			return "every net has a target — to PROPOSE ghosts for review, %s." % how
 		return "every net has a target — to commit COPPER, %s; Shift+Enter proposes ghosts." % how
-	return "no target yet for %s — click a pad on each, or double-click clear of the pads / press Enter to commit with those lanes ending OPEN (free ends the Trace tool can finish)." % ", ".join(missing)
+	return "%s No target yet for %s — or double-click clear of the pads / press Enter to commit with those lanes ending OPEN (free ends the Trace tool can finish)." % [
+		PcbBusLabels.TARGETS_RULE, ", ".join(missing)]
 
 
 func _bus_nets_without_targets() -> PackedStringArray:
@@ -9492,10 +9505,7 @@ func _draw_bus_picks() -> void:
 		# below do. Gating the whole marker on `font` would make a missing font
 		# restore the exact "tool looks dead" symptom this draw call exists to
 		# cure.
-		if font != null:
-			draw_string(font, screen_pt + Vector2(BUS_PICK_MARKER_RADIUS_PX + 3.0, 4.0),
-				"%d  %s" % [i + 1, _bus_nets[i]],
-				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, marker_color)
+		_bus_label(screen_pt, BUS_PICK_MARKER_RADIUS_PX, "%d  %s" % [i + 1, _bus_nets[i]], marker_color)
 		last_screen = screen_pt
 	if font == null:
 		return
@@ -9541,8 +9551,7 @@ func _bus_path_teach_line() -> String:
 
 ## The colour net `i` of the bundle is drawn in — its own, where it has one.
 func _bus_net_color(i: int) -> Color:
-	var net_obj = data.get_net(_bus_nets[i]) if data else null
-	return net_obj.color if net_obj else BUS_SPINE_PREVIEW_COLOR
+	return PcbBusLabels.net_color(data.get_net(_bus_nets[i]) if data else null)
 
 
 ## Mark where each picked net may END: a small ring on every pad still eligible,
@@ -9579,19 +9588,21 @@ func _draw_bus_targets() -> void:
 				continue
 			var pad_pos: Vector2 = c.get("at", Vector2.ZERO)
 			var screen_pt := world_to_screen(pad_pos)
+			# Every eligible ring wears its net: a thin ring in the net's colour
+			# and the net's name, so a pad that several nets could end on says
+			# which lane each ring belongs to.
 			draw_arc(screen_pt, BUS_TARGET_MARKER_RADIUS_PX, 0.0, TAU, 16,
-				Color(color, BUS_GHOST_ALPHA), BUS_PICK_MARKER_WIDTH_PX)
+				Color(color, BUS_GHOST_ALPHA), 1.0)
 			if ref != suggested:
+				_bus_label(screen_pt, BUS_TARGET_MARKER_RADIUS_PX, str(r["net"]), Color(color, BUS_GHOST_ALPHA))
 				continue
-			draw_arc(screen_pt, BUS_SUGGESTION_MARKER_RADIUS_PX, 0.0, TAU, 20,
-				color, BUS_PICK_MARKER_WIDTH_PX)
-			# The count is the label's load-bearing half: it says out loud that
-			# the halo is one of N endings this net accepts, so a user who
-			# follows it knows a different ring is not a mistake.
-			if font != null:
-				draw_string(font, screen_pt + Vector2(BUS_SUGGESTION_MARKER_RADIUS_PX + 3.0, 4.0),
-					"%d  %s likely — %d eligible" % [i + 1, str(r["net"]), candidates.size()],
-					HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+			# The suggestion is DASHED, the ratsnest's own tense for a join that
+			# is still only wanted. The count is the label's load-bearing half:
+			# it says the halo is one of N endings this net accepts, so a user
+			# who follows it knows a different ring is not a mistake.
+			_draw_dashed_ring(screen_pt, BUS_SUGGESTION_MARKER_RADIUS_PX, color, BUS_PICK_MARKER_WIDTH_PX)
+			_bus_label(screen_pt, BUS_SUGGESTION_MARKER_RADIUS_PX,
+				"%d  %s likely — %d eligible" % [i + 1, str(r["net"]), candidates.size()], color)
 	for row in rows:
 		var r := row as Dictionary
 		var target_ref := str(r["target_ref"])
@@ -9601,11 +9612,28 @@ func _draw_bus_targets() -> void:
 		var target_pos: Vector2 = r.get("target_at", Vector2.ZERO)
 		var screen_pt := world_to_screen(target_pos)
 		var color := _bus_net_color(i)
+		# LANDED: solid, and labelled with the lane it closes — "1 NA → V1.1".
 		draw_circle(screen_pt, BUS_TARGET_MARKER_RADIUS_PX, color)
-		if font != null:
-			draw_string(font, screen_pt + Vector2(BUS_TARGET_MARKER_RADIUS_PX + 3.0, 4.0),
-				"%d  %s" % [i + 1, target_ref],
-				HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+		_bus_label(screen_pt, BUS_TARGET_MARKER_RADIUS_PX,
+			"%d  %s" % [i + 1, PcbBusLabels.lane_label(str(r["net"]), target_ref)], color)
+
+
+## A bus marker's text, to the right of a ring of `radius` at `at`. ONE draw
+## site for every label the bus preview writes, and the one place the font is
+## checked: the rings and pips are the load-bearing marks and need no font.
+func _bus_label(at: Vector2, radius: float, text: String, color: Color) -> void:
+	if font == null:
+		return
+	draw_string(font, at + Vector2(radius + 3.0, 4.0), text,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+
+
+## A ring drawn as dashes — the ratsnest's dash, bent round a pad.
+func _draw_dashed_ring(centre: Vector2, radius: float, color: Color, width: float) -> void:
+	var dashes := 8
+	for k in range(dashes):
+		var a0: float = TAU * float(k) / float(dashes)
+		draw_arc(centre, radius, a0, a0 + TAU / float(dashes) * 0.6, 4, color, width)
 
 
 ## Draw one airline per picked net, from the spine's live end to the pad that
@@ -9720,27 +9748,34 @@ func _draw_bus_preview() -> void:
 		var nets: Array = plan.get("nets", [])
 		var widths: Array = plan.get("widths", [])
 		var polylines: Array = plan.get("polylines", [])
+		var rows := bus_target_guidance()
 		for i in range(nets.size()):
 			var pts: PackedVector2Array = polylines[i]
 			if pts.size() < 2:
 				continue
-			var ghost_color := _trace_layer_color(_bus_layer)
-			var net_obj = data.get_net(str(nets[i])) if data else null
-			if net_obj:
-				ghost_color = net_obj.color
+			# The net's ONE colour — the same the ratsnest, the pips and the
+			# rings use — so a lane can be followed from pip to pad by colour.
+			var ghost_color := _bus_net_color(i)
 			var ghost_pts := PackedVector2Array()
 			for p in pts:
 				ghost_pts.append(world_to_screen(p))
 			var width_px := maxf(float(widths[i]) * zoom, 1.0)
 			draw_polyline(ghost_pts, Color(ghost_color, BUS_GHOST_ALPHA), width_px)
+			# THE LANE SAYS WHERE IT ENDS, at its far end: "NA → V1.1", "NA →
+			# open", "NA → ?". Skipped only where the lane already ends ON its
+			# landed pad, whose solid marker carries the same words.
+			if i < rows.size():
+				var row: Dictionary = rows[i]
+				var landed_here: bool = not str(row["target_ref"]).is_empty() \
+					and pts[pts.size() - 1].is_equal_approx(row.get("target_at", Vector2.ZERO))
+				if not landed_here:
+					_bus_label(ghost_pts[ghost_pts.size() - 1], width_px * 0.5,
+						PcbBusLabels.lane_label(str(row["net"]), str(row["ending"])), ghost_color)
 
 	if font != null and not screen_pts.is_empty():
 		var label := "Bus [%s] @ %s  ·  %d pts" % [_bus_nets_joined(), _bus_layer, _bus_spine_points.size()]
 		if _bus_phase == BusPhase.TARGETS:
-			var endings := PackedStringArray()
-			for row in bus_target_guidance():
-				endings.append("%s → %s" % [str(row["net"]), str(row["ending"])])
-			label = "Bus [%s] @ %s  ·  %d pts" % [", ".join(endings), _bus_layer, _bus_spine_points.size()]
+			label = "Bus [%s] @ %s  ·  %d pts" % [PcbBusLabels.lanes_summary(bus_target_guidance()), _bus_layer, _bus_spine_points.size()]
 		if _bus_station_index >= 0:
 			label += "  ·  via station v%d → %s" % [_bus_station_index, _bus_station_layer]
 		if refused:
