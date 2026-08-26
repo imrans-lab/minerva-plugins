@@ -75,31 +75,37 @@ A pour whose fill is legitimately EMPTY (entirely covered by a keepout, say) is
 NOT an error — it returns ``()``. That is a computed-and-empty pour, which is a
 different fact from ``None`` (uncomputed), and the emitters distinguish them.
 
-=== ISLANDS AND SLIVERS ARE REFUSED, NOT EMITTED AND NOT CULLED ===
+=== ISLANDS AND SLIVERS: SMALL ONES ARE CULLED AND REPORTED, BIG ONES REFUSED ===
 
-A fill that breaks into a region overlapping no same-net copper (an ISLAND), or
-into a region nowhere as wide as the profile's ``min_trace_width_mm`` (a
-SLIVER), is REFUSED by name. Both used to be emitted in silence, recorded only
-in this docstring and in three skipped tests — a skip reads as coverage in a
-green tally, which is why they are now executable.
+A fill breaks into disjoint REGIONS, and two of them cannot go to fab: one
+nowhere as wide as the zone's minimum thickness (a SLIVER), and one overlapping
+no same-net copper at all (an ISLAND). Both are graded against AUTHORED zone
+minima — ``design_rules.zone_min_thickness_mm`` and
+``design_rules.zone_min_island_area_mm2``, each defaulting to a number the
+author already wrote (see :func:`default_zone_minima`) and carried onto every
+pour as ``ResolvedZone.min_thickness_mm`` / ``.min_island_area_mm2``.
 
-KiCad culls both instead, and the difference is not an oversight: it culls
-against per-zone properties ITS schema has and ours does not (``min_thickness``,
-``island_removal_mode``). Deleting the author's copper by a rule the author
-never wrote is exactly the silent-damage class every other refusal here exists
-to prevent. See :func:`_refuse_unfabricable_regions` for the measurement behind
-this, for why it does not prejudge the thermal ruling, and for the one case it
-deliberately does not catch (sub-floor necks inside an otherwise sound region,
-which need an authored min-thickness).
+A sliver is CULLED: copper the fab cannot make is not copper anyone can keep. An
+island is CULLED below the island minimum and REFUSED at or above it — scrap too
+small for any via to stitch back is removed, while orphan copper big enough to
+matter is a design fact its author has to see. Every cull comes back as a
+:class:`CulledRegion` and is reported at WARNING severity; nothing is deleted in
+silence.
+
+REFUSING EVERYTHING WAS WORSE THAN EITHER. It made one pour's etch scrap
+indeterminate for the WHOLE BOARD: a three-via fan-out inside a ground pour left
+two 0.02 mm^2 crumbs, the compile failed, and every geometric DRC check
+downstream reported nothing — including four real shorts elsewhere on the board.
+See :func:`_cull_or_refuse_unfabricable_regions`.
 
 === KNOWN v1 GAPS (stated, not hidden) ===
 
-  * ZONE MIN-THICKNESS IS NOT AUTHORABLE. ``ResolvedZone.min_thickness_mm``
-    exists in the IR and is never populated, so the deflate/re-inflate opening
-    KiCad performs — which sheds sub-thickness necks and rounds every convex
-    corner — has no number to run at. Adding one is a board-schema change and
-    needs the Go validator to agree, or validate and compile would disagree
-    about a fabrication parameter.
+  * NO MIN-THICKNESS OPENING. The minimum now exists, and the region-level
+    sliver test runs at it, but the deflate/re-inflate OPENING KiCad performs —
+    which also sheds sub-thickness NECKS inside an otherwise sound region — does
+    not. It rounds every convex corner, so it changes the shape of every pour it
+    touches; that is a fill-geometry change to make against the oracle, not a
+    cull.
   * POUR-TO-POUR PRIORITY. Two pours of different nets overlapping on one layer
     would both claim the overlap. ``priority`` is unpopulated, so there is no
     authored answer; the case is refused rather than resolved arbitrarily.
@@ -107,7 +113,9 @@ which need an authored min-thickness).
 
 from __future__ import annotations
 
-from dataclasses import replace
+import math
+from dataclasses import dataclass, replace
+from enum import Enum
 
 from agent_router.layers import kicad_to_canon
 
@@ -165,6 +173,36 @@ class ZoneFillError(ValueError):
     def __init__(self, zone_id: str, message: str) -> None:
         super().__init__(f"zone {zone_id!r}: {message}")
         self.zone_id = zone_id
+
+
+class CullKind(str, Enum):
+    """Why a fill region was dropped instead of emitted."""
+
+    SLIVER = "sliver"
+    ISLAND = "island"
+
+
+@dataclass(frozen=True)
+class CulledRegion:
+    """One disjoint fill region the zone-fill minima removed from a pour.
+
+    Reported, never silent: the caller turns each of these into a WARNING so an
+    author who drew copper and got less of it back is told which piece, how much
+    and where. ``area_mm2`` and ``bbox_mm`` are the region's own, measured before
+    it was dropped.
+    """
+
+    zone_id: str
+    layer_id: str
+    kind: CullKind
+    area_mm2: float
+    bbox_mm: tuple[float, float, float, float]
+    reason: str
+
+    def describe(self) -> str:
+        x0, y0, x1, y1 = self.bbox_mm
+        return (f"{self.kind.value.upper()} at ({x0:.4f},{y0:.4f})-({x1:.4f},"
+                f"{y1:.4f}) of {self.area_mm2:.6f} mm^2 — {self.reason}")
 
 
 def _pyclipper():
@@ -855,12 +893,20 @@ def _refuse_thermal(zone: ResolvedZone) -> None:
 # --------------------------------------------------------------------------
 
 
-def fill_board_zones(board: ResolvedBoard) -> ResolvedBoard:
+def fill_board_zones(board: ResolvedBoard, *,
+                     culled: list[CulledRegion] | None = None) -> ResolvedBoard:
     """Return ``board`` with every COPPER_POUR zone carrying a computed fill.
 
     Keepouts pass through untouched with ``fill=None``: a keepout has no copper,
     so there is nothing to compute, and ``()`` would falsely claim a computed
     empty pour. Raises :class:`ZoneFillError` for any pour that cannot be filled.
+
+    ``culled`` COLLECTS, in board order, every region the zone minima dropped
+    (see :func:`_cull_or_refuse_unfabricable_regions`). Pass a list to be told
+    what was removed and report it; pass nothing and the culls happen anyway, as
+    they must — this is an out-parameter rather than a second return value so
+    every existing caller keeps working, and a caller that ignores it is only
+    choosing not to relay the warning, never changing the copper.
     """
     if not board.zones:
         return board
@@ -887,8 +933,10 @@ def fill_board_zones(board: ResolvedBoard) -> ResolvedBoard:
             filled.append(zone)
             continue
         _refuse_thermal(zone)
-        filled.append(replace(zone, fill=_fill_one(pc, zone, board, projection,
-                                                   class_clearance)))
+        fill, dropped = _fill_one(pc, zone, board, projection, class_clearance)
+        if culled is not None:
+            culled.extend(dropped)
+        filled.append(replace(zone, fill=fill))
     return replace(board, zones=tuple(filled))
 
 
@@ -943,6 +991,31 @@ def _refuse_overlapping_pours(pc, pours) -> None:
                     f"check models (geometric DRC projects pads/traces/vias, "
                     f"never zone fill) — and fill priority is not authorable in "
                     f"this schema, so which pour owns it has no answer to read")
+
+
+def default_zone_minima(min_trace_width_mm: float,
+                        via_diameter_mm: float) -> tuple[float, float]:
+    """``(min_thickness_mm, min_island_area_mm2)`` for a board that states none.
+
+    THE ONE DERIVATION SITE for both defaults — compile_board fills the authored
+    values in from ``design_rules`` and falls back here, and the filler falls
+    back here too for an IR built without them. A second copy would be a rule
+    that drifts.
+
+    Neither number is invented; each comes off a number the author already wrote.
+
+      * THICKNESS <- the selected profile's ``min_trace_width_mm``. Pour copper
+        thinner than the board house's own published minimum feature does not
+        etch reliably, and the author set that floor by choosing the house.
+      * ISLAND AREA <- the area of one default via land, ``pi/4 * d^2``. An
+        orphan fragment can only ever become connected copper by stitching a via
+        into it, and a region whose TOTAL AREA is under one land's area cannot
+        contain that land whatever its shape — so it can never be stitched, and
+        it is etch scrap rather than plane. The converse is deliberately NOT
+        claimed: a bigger fragment might still not hold a via, and that one is
+        refused so the author decides.
+    """
+    return (min_trace_width_mm, math.pi / 4.0 * via_diameter_mm * via_diameter_mm)
 
 
 QUANTUM_NM = 1
@@ -1013,49 +1086,56 @@ def _region_area_mm2(outer, holes) -> float:
     return abs(doubled) / 2.0 / (NM_PER_MM * NM_PER_MM)
 
 
-def _refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
-                                 projection, solution) -> None:
-    """Refuse a pour whose fill broke into copper that cannot go to fab.
+def _cull_or_refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
+                                         projection, solution):
+    """Drop the fill regions the zone minima condemn; refuse the ones they do not.
+
+    Returns ``(kept_solution, culled)`` — the contour set to fracture, and one
+    :class:`CulledRegion` per dropped region for the caller to report. When
+    nothing is culled the ORIGINAL solution object comes back untouched, so a
+    board with no sub-minimum regions produces byte-identical copper.
 
     TWO FAULTS, both stated over one disjoint filled REGION (see
-    :func:`_group_regions`), both previously EMITTED IN SILENCE and recorded only
-    as skipped tests:
+    :func:`_group_regions`):
 
+      * SLIVER — a region nowhere as wide as ``zone.min_thickness_mm``, so no
+        part of it can be etched reliably. Detected by deflating the region by
+        half the minimum and asking whether ANYTHING survives: a shape contains a
+        disc of radius t/2 exactly when it is at least t wide somewhere, so an
+        empty deflation is a proof of sub-thickness width, not an estimate of
+        one. No tolerance and no area threshold appears here. ALWAYS CULLED —
+        copper the fab cannot make is not copper the author can keep.
       * ISLAND — a region overlapping no same-net copper at all. It is live
-        copper attached to nothing: an antenna, floating at whatever potential
-        it couples to, and on a ground pour it is also ground plane the designer
-        believes they have and do not. KiCad removes these by default
-        (MEASURED against KiCad 9.0.9: a 20 mm^2 severed fragment vanishes from
-        ``ZONE_FILLER``'s output, and reappears at exactly 19.9745 mm^2 when
-        ``island_removal_mode`` is set to 1 or 2 — so removal is the default and
-        the fragment is exactly what removal takes).
-      * SLIVER — a region that is nowhere as wide as the board house's minimum
-        feature, so no part of it can be etched reliably. Detected by deflating
-        the region by half the floor and asking whether ANYTHING survives: a
-        shape contains a disc of radius d/2 exactly when it is at least d wide
-        somewhere, so an empty deflation is a proof of sub-floor width, not an
-        estimate of one. No tolerance and no area threshold appears here.
+        copper attached to nothing: an antenna, floating at whatever potential it
+        couples to, and on a ground pour it is also ground plane the designer
+        believes they have and do not. CULLED BELOW ``zone.min_island_area_mm2``,
+        REFUSED at or above it (see below).
 
-    === WHY REFUSE RATHER THAN CULL, WHEN KiCad CULLS ===
+    SLIVER OUTRANKS ISLAND when a region is both, and the order is fixed rather
+    than incidental: a fragment that cannot be etched at all is a fact about the
+    fab, while whether it connects to anything is a fact about the netlist, and
+    grading it by the second while the first holds would classify it by the
+    wrong property.
 
-    KiCad culls both, and we deliberately do not copy it, because KiCad culls
-    against NUMBERS ITS AUTHOR SUPPLIED and we have none. Its sliver cull runs at
-    the zone's own ``min_thickness`` (default 0.25 mm) and its island cull at the
-    zone's own ``island_removal_mode``; both are per-zone authored properties in
-    its schema. Ours has neither field, and ``ResolvedZone.min_thickness_mm``
-    exists in the IR precisely as a place one would go — it is never populated.
+    === WHY SMALL ONES ARE CULLED AND BIG ONES ARE REFUSED ===
 
-    So the choice is not "cull or refuse", it is "invent a rule and silently
-    delete the author's copper by it, or hand the author the fact". Deleting
-    copper on a rule nobody wrote is the failure mode this module's every other
-    refusal exists to prevent, and it is worse here than elsewhere because the
-    deletion is invisible: the pour still fills, still passes DRC, and still
-    emits plausible Gerbers with less ground plane than the designer drew.
+    Both responses are wrong applied everywhere. Refusing every fragment makes
+    ONE pour's etch scrap indeterminate for the WHOLE BOARD — a three-via fan-out
+    inside a ground pour leaves two 0.02 mm^2 crumbs, the compile fails, and every
+    geometric DRC check downstream reports nothing, including the real shorts.
+    Culling every fragment deletes the author's copper silently: a severed half of
+    a ground plane vanishes and the board still passes.
 
-    THE FLOOR IS NOT INVENTED. ``min_trace_width_mm`` is the pinned profile's own
-    published minimum feature — a rule the author DID write, by choosing that
-    board house. A fragment thinner than it is unmanufacturable by the fab's own
-    statement, which is a fact about the fab and not a policy of ours.
+    The line between them is the zone minima, which are AUTHORED (or derived from
+    a number the author wrote — see :func:`default_zone_minima`), so what gets
+    deleted is deleted by the author's own rule. Below it the fragment is scrap
+    the fab could not use and no via could reconnect; at or above it the fragment
+    is copper big enough that its being orphaned is a design fact, and the author
+    is handed it rather than having it quietly removed.
+
+    NOTHING IS DELETED IN SILENCE EITHER WAY: every cull comes back as a
+    :class:`CulledRegion` naming its kind, area and bounding box, which the
+    compiler reports at WARNING severity.
 
     === WHY THIS DOES NOT PREJUDGE THE THERMAL RULING (R-d) ===
 
@@ -1065,12 +1145,11 @@ def _refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
     cannot arise here, because :func:`_refuse_thermal` refuses any board that
     authors thermal fields BEFORE the fill runs. Everything this function ever
     sees is SOLID-connect fill, where "region overlaps same-net copper" is the
-    whole of the connectivity question — the measurement above confirms KiCad
-    reaches the same verdict on the same geometry in both modes.
+    whole of the connectivity question.
 
     When R-d lands and spokes are implemented, the spokes become part of the fill
     and both tests read them for free: a region joined by a spoke overlaps the
-    pad it is spoked to, and a spoke narrower than the minimum feature is a
+    pad it is spoked to, and a spoke narrower than the minimum thickness is a
     genuine sliver rather than a false positive. What must NOT happen is spokes
     being added downstream of this check.
 
@@ -1079,46 +1158,49 @@ def _refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
     Two things, both xfailed by name in tests/test_zone_fill.py rather than
     skipped, so the tally counts them as open:
 
-      * Sub-floor copper INSIDE an otherwise sound region — a thin neck or spike
-        on a fragment that is elsewhere wide. Detecting it needs the
-        deflate/inflate opening KiCad performs, which rounds every convex corner
-        and so cannot be distinguished from a real defect without a fitted area
-        threshold; the honest form is an authored ``min_thickness`` applied as
-        KiCad applies it.
+      * Sub-thickness copper INSIDE an otherwise sound region — a thin neck or
+        spike on a fragment that is elsewhere wide. The minimum now exists to run
+        it at; what is missing is the deflate/re-inflate OPENING KiCad performs,
+        which rounds every convex corner and so changes the geometry of every
+        pour that passes through it. That is a fill-shape change, not a cull, and
+        it belongs with the oracle comparison rather than here.
       * A pour with NO same-net copper on its layer at all. That is a whole-pour
         fact rather than a severed-fragment fact, and the island test is scoped
-        away from it deliberately — see the ``if not attached`` branch.
+        away from it deliberately — see the scoping note above the island loop.
     """
     outers, assigned = _group_regions(pc, zone.id, solution)
     if not outers:
-        return
+        return solution, []
 
-    floor_mm = board.design_rules.minimums.min_trace_width_mm
-    floor_nm = _to_nm(floor_mm)
+    default_thickness, default_island_area = default_zone_minima(
+        board.design_rules.minimums.min_trace_width_mm,
+        board.design_rules.defaults.via_diameter_mm)
+    thickness_mm = (zone.min_thickness_mm if zone.min_thickness_mm is not None
+                    else default_thickness)
+    island_area_mm2 = (zone.min_island_area_mm2
+                       if zone.min_island_area_mm2 is not None
+                       else default_island_area)
+    thickness_nm = _to_nm(thickness_mm)
     attached = _same_net_copper_paths(pc, zone, projection)
+    layer_id = kicad_to_canon(zone.layer.id)
 
-    faults: list[tuple[tuple, str]] = []
-    survivors: list[tuple[tuple, float, tuple, bool]] = []
+    culled: list[tuple[tuple, int, CulledRegion]] = []
+    survivors: list[tuple[tuple, int, float, tuple, bool]] = []
     for index, outer in enumerate(outers):
         holes = assigned[index]
         bbox = _region_bbox_mm(outer)
         area = _region_area_mm2(outer, holes)
         sort_key = (bbox[0], bbox[1], bbox[2], bbox[3], area)
 
-        # SLIVER IS REPORTED IN PREFERENCE TO ISLAND when a region is both, and
-        # the order is fixed rather than incidental: a fragment that cannot be
-        # etched at all is a fact about the fab, while whether it connects to
-        # anything is a fact about the netlist, and reporting the second while
-        # the first holds would send the author to fix the wrong thing.
-        if floor_nm > 0 and not _survives_deflation(pc, outer, holes, floor_nm):
-            faults.append((sort_key, (
-                f"SLIVER at ({bbox[0]:.4f},{bbox[1]:.4f})-({bbox[2]:.4f},"
-                f"{bbox[3]:.4f}) of {area:.6f} mm^2 is nowhere as wide as the "
-                f"{floor_mm} mm minimum feature this board's profile publishes "
-                f"(min_trace_width_mm), so no part of it etches reliably")))
+        if thickness_nm > 0 and not _survives_deflation(pc, outer, holes, thickness_nm):
+            culled.append((sort_key, index, CulledRegion(
+                zone_id=zone.id, layer_id=layer_id, kind=CullKind.SLIVER,
+                area_mm2=area, bbox_mm=bbox,
+                reason=(f"nowhere as wide as this zone's {thickness_mm} mm "
+                        f"minimum thickness, so no part of it etches reliably"))))
             continue
 
-        survivors.append((sort_key, area, bbox,
+        survivors.append((sort_key, index, area, bbox,
                           _overlaps_any(pc, outer, holes, attached)))
 
     # AN ISLAND IS A REGION SEVERED FROM *THIS POUR'S OWN* ATTACHED COPPER, so
@@ -1127,10 +1209,10 @@ def _refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
     #
     #   * If NO region is attached, the pour as a whole touches none of its net
     #     — a bottom-side GND pour on a board whose only GND copper is top-side,
-    #     say. Nothing was severed from anything. Reporting every region would
-    #     be reporting a WHOLE-POUR fact ("this pour attaches to nothing") in
-    #     the vocabulary of a per-fragment one, while having lost the ability to
-    #     tell a severed fragment from an intact one. That fact deserves its own
+    #     say. Nothing was severed from anything. Grading every region would be
+    #     grading a WHOLE-POUR fact ("this pour attaches to nothing") in the
+    #     vocabulary of a per-fragment one, while having lost the ability to tell
+    #     a severed fragment from an intact one. That fact deserves its own
     #     diagnostic and is recorded as an open in tests/test_zone_fill.py, not
     #     smuggled in here.
     #   * If SOME region is attached and others are not, the carve genuinely cut
@@ -1139,38 +1221,61 @@ def _refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
     # A netless pour also lands in the first case (nothing can match a null net),
     # which keeps a future schema change from silently deleting its copper;
     # compile_board rejects one upstream today.
-    if any(is_attached for _, _, _, is_attached in survivors):
-        for sort_key, area, bbox, is_attached in survivors:
+    faults: list[tuple[tuple, str]] = []
+    if any(is_attached for _, _, _, _, is_attached in survivors):
+        for sort_key, index, area, bbox, is_attached in survivors:
             if is_attached:
+                continue
+            if area < island_area_mm2:
+                culled.append((sort_key, index, CulledRegion(
+                    zone_id=zone.id, layer_id=layer_id, kind=CullKind.ISLAND,
+                    area_mm2=area, bbox_mm=bbox,
+                    reason=(f"overlaps no {_net_name(board, zone.net_id)} copper "
+                            f"on {layer_id} and is under this zone's "
+                            f"{island_area_mm2:.6f} mm^2 island minimum, so no "
+                            f"via could stitch it back to the net"))))
                 continue
             faults.append((sort_key, (
                 f"ISLAND at ({bbox[0]:.4f},{bbox[1]:.4f})-({bbox[2]:.4f},"
                 f"{bbox[3]:.4f}) of {area:.6f} mm^2 overlaps no "
-                f"{_net_name(board, zone.net_id)} copper on "
-                f"{kicad_to_canon(zone.layer.id)}, so it is live copper "
-                f"severed from the rest of this pour")))
+                f"{_net_name(board, zone.net_id)} copper on {layer_id}, so it is "
+                f"live copper severed from the rest of this pour — and at or "
+                f"above this zone's {island_area_mm2:.6f} mm^2 island minimum it "
+                f"is too much copper to drop without being told")))
 
-    if not faults:
-        return
-    # Sorted by geometry, never by Clipper's contour order, so the message a
-    # given board produces is the same message on every run and every platform.
-    detail = "\n  - ".join(text for _, text in sorted(faults))
-    raise ZoneFillError(
-        zone.id,
-        f"fill broke into {len(faults)} region(s) that cannot be fabricated:\n"
-        f"  - {detail}\n"
-        f"Neither fault is culled: dropping copper the author drew needs a rule "
-        f"the author wrote, and this schema has neither a zone min-thickness nor "
-        f"an island-removal mode to read one from")
+    if faults:
+        # Sorted by geometry, never by Clipper's contour order, so the message a
+        # given board produces is the same message on every run and every platform.
+        detail = "\n  - ".join(text for _, text in sorted(faults))
+        raise ZoneFillError(
+            zone.id,
+            f"fill broke into {len(faults)} region(s) that cannot be fabricated:\n"
+            f"  - {detail}\n"
+            f"Raise design_rules.zone_min_island_area_mm2 to cull these instead, "
+            f"or reconnect them")
+
+    if not culled:
+        # The ORIGINAL object, so an unculled board's fill is byte-identical.
+        return solution, []
+
+    dropped = {index for _, index, _ in culled}
+    kept: list = []
+    for index, outer in enumerate(outers):
+        if index in dropped:
+            continue
+        kept.append(outer)
+        kept.extend(assigned[index])
+    return kept, [record for _, _, record in sorted(culled, key=lambda row: row[0])]
 
 
-def _survives_deflation(pc, outer, holes, floor_nm: int) -> bool:
-    """True when the region still holds a disc of radius ``floor_nm/2``.
 
-    Exactly the "is it ever as wide as the floor" question, asked in the integer
-    kernel. NEGATIVE offsets on a region are why the holes must be included: a
-    ring of copper around a big void is thin everywhere, and deflating only its
-    outer boundary would report it as solid.
+def _survives_deflation(pc, outer, holes, thickness_nm: int) -> bool:
+    """True when the region still holds a disc of radius ``thickness_nm/2``.
+
+    Exactly the "is it ever as wide as the minimum" question, asked in the
+    integer kernel. NEGATIVE offsets on a region are why the holes must be
+    included: a ring of copper around a big void is thin everywhere, and
+    deflating only its outer boundary would report it as solid.
     """
     offset = pc.PyclipperOffset()
     offset.MiterLimit = MITER_LIMIT
@@ -1178,7 +1283,7 @@ def _survives_deflation(pc, outer, holes, floor_nm: int) -> bool:
     offset.AddPath(outer, pc.JT_ROUND, pc.ET_CLOSEDPOLYGON)
     for hole in holes:
         offset.AddPath(hole, pc.JT_ROUND, pc.ET_CLOSEDPOLYGON)
-    return bool(offset.Execute(-floor_nm / 2.0))
+    return bool(offset.Execute(-thickness_nm / 2.0))
 
 
 def _overlaps_any(pc, outer, holes, clip_paths) -> bool:
@@ -1194,7 +1299,11 @@ def _overlaps_any(pc, outer, holes, clip_paths) -> bool:
 
 
 def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
-              class_clearance: dict[str, float]) -> tuple[PolygonGeometry, ...]:
+              class_clearance: dict[str, float]):
+    """``(fill polygons, culled regions)`` for one pour.
+
+    An empty fill is a COMPUTED empty pour (fully covered by a keepout, say), not
+    an uncomputed one — the emitters distinguish ``()`` from ``None``."""
     subject = _contour_ring(zone)
 
     clip = pc.Pyclipper()
@@ -1207,7 +1316,7 @@ def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
             zone.id, f"outline rejected by the boolean kernel (self-intersecting "
                      f"or degenerate?): {exc}") from exc
     if not bounded:
-        return ()
+        return (), []
 
     subtrahends = _inflate(
         pc, _obstacle_paths(pc, zone, board, projection, class_clearance)
@@ -1229,13 +1338,14 @@ def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
     if not solution:
         # Legitimately nothing left (fully covered by a keepout, say). A COMPUTED
         # empty pour, which is not the same fact as an uncomputed one.
-        return ()
+        return (), []
 
     # BEFORE fracturing, because fracturing merges each region's voids into a
     # self-touching keyhole and the two checks below are stated over regions and
     # their voids as separate rings. Checking afterwards would ask both questions
     # of a shape that no longer distinguishes copper from the window in it.
-    _refuse_unfabricable_regions(pc, zone, board, projection, solution)
+    solution, culled = _cull_or_refuse_unfabricable_regions(
+        pc, zone, board, projection, solution)
 
     rings = _fracture(pc, zone.id, solution)
     polygons = []
@@ -1245,7 +1355,7 @@ def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
                 zone.id, f"fill produced a degenerate {len(ring)}-point contour")
         polygons.append(PolygonGeometry(
             points=tuple((_to_mm(x), _to_mm(y)) for (x, y) in ring)))
-    return tuple(polygons)
+    return tuple(polygons), culled
 
 
 def fill_area_mm2(zone: ResolvedZone) -> float:
@@ -1272,7 +1382,10 @@ def fill_area_mm2(zone: ResolvedZone) -> float:
 __all__ = [
     "ARC_TOLERANCE_NM",
     "NM_PER_MM",
+    "CullKind",
+    "CulledRegion",
     "ZoneFillError",
+    "default_zone_minima",
     "fill_area_mm2",
     "fill_board_zones",
 ]

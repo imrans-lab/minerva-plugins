@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from dataclasses import replace
 
 import pytest
@@ -402,23 +403,47 @@ def test_fill_is_quantized_to_whole_nanometres():
 
 
 # --------------------------------------------------------------------------
-# 5. UNFABRICABLE FILL REGIONS — islands and slivers are REFUSED.
+# 5. UNFABRICABLE FILL REGIONS — culled below the zone minima, refused above.
 #
-#    These three cases used to be SILENT pytest.skip()s carrying prose about
-#    what v1 did not do. A skip reads as coverage in a green tally, so the
-#    tally said 3 green over three known-broken behaviours. They are now
-#    executable, and the one piece that genuinely cannot be built inside this
-#    schema is xfail-with-reason rather than skipped.
+#    The board states the minima (design_rules.zone_min_thickness_mm and
+#    zone_min_island_area_mm2) or gets them derived from numbers it already
+#    wrote. A sliver is always culled; an island is culled below the island
+#    minimum and refused at or above it. Every cull is reported.
 #
 #    EVERY EXPECTED NUMBER BELOW IS HAND-DERIVED from the clearance definition
 #    and the profile's published floor, exactly as section 1 derives its areas.
 #    None was read off the filler.
 # --------------------------------------------------------------------------
 
-# v1-fab-conservative's published minimum feature. Quoted as a literal rather
-# than read from the profile at test time: a test that imports the number it is
-# checking cannot notice the number changing.
+# v1-fab-conservative's published minimum feature, which is also the DEFAULT
+# zone min-thickness. Quoted as a literal rather than read from the profile at
+# test time: a test that imports the number it is checking cannot notice the
+# number changing.
 MIN_FEATURE_MM = 0.127
+
+# The DEFAULT island minimum for _board(): pi/4 * via_diameter_mm^2 with the
+# fixture's authored 0.8 mm default via = 0.502655 mm^2. Written out for the
+# same reason.
+DEFAULT_ISLAND_MIN_MM2 = 0.5026548
+
+_CULLED_ROW = re.compile(
+    r"(SLIVER|ISLAND) at \(([-\d.]+),([-\d.]+)\)-\(([-\d.]+),([-\d.]+)\) "
+    r"of ([\d.]+) mm\^2")
+
+
+def _culled(result, zone_ordinal=0):
+    """The (kind, bbox, area) rows of the zone_fill_culled warning, parsed.
+
+    Reads the DIAGNOSTIC rather than the filler's return value on purpose: what
+    an author is told is the thing under test, and a cull nobody is told about
+    is the failure this whole section exists to prevent."""
+    messages = [d.message for d in result.diagnostics
+                if d.code == "zone_fill_culled"]
+    assert len(messages) == 1, messages
+    rows = _CULLED_ROW.findall(messages[0])
+    return messages[0], [(kind, (float(x0), float(y0), float(x1), float(y1)),
+                          float(area))
+                         for kind, x0, y0, x1, y1, area in rows]
 
 
 def _severing_trace(y_mm):
@@ -433,8 +458,8 @@ def _severing_trace(y_mm):
              "points": [{"x_mm": 2.0, "y_mm": y_mm}, {"x_mm": 18.0, "y_mm": y_mm}]}]
 
 
-def test_a_sub_floor_fill_fragment_is_REFUSED_and_named():
-    """A fill region nowhere as wide as the fab's minimum feature is refused.
+def test_a_sub_thickness_fill_fragment_is_CULLED_and_reported():
+    """A fill region nowhere as wide as the zone minimum is dropped, and named.
 
     THE ARITHMETIC, on paper. Pour (3,3)-(17,17). A SIG trace at y = 3.47 puts
     its void's near edge at 3.47 - 0.35 = 3.12, so the strip left between the
@@ -444,27 +469,29 @@ def test_a_sub_floor_fill_fragment_is_REFUSED_and_named():
         x from 3.00 to 17.00  ->  14.000 mm long
         area = 14.000 * 0.120 =  1.680000 mm^2
 
-    and 0.120 mm is below v1-fab-conservative's 0.127 mm min_trace_width_mm, so
-    no part of that strip etches reliably. The refusal must NAME it: an author
-    told only "zone failed" has to rediscover which piece and why.
+    and 0.120 mm is below the 0.127 mm default zone min-thickness this board
+    inherits from v1-fab-conservative's min_trace_width_mm, so no part of that
+    strip etches reliably. Copper the fab cannot make is not copper the author
+    can keep: it is CULLED.
 
-    WHY REFUSED RATHER THAN CULLED. KiCad sheds this strip silently, at its
-    zone's own min_thickness. Our schema has no such field to read, so culling
-    would mean deleting the author's copper by a rule invented here. See
-    zone_fill._refuse_unfabricable_regions.
+    THE CULL IS NOT SILENT, which is the whole difference between this and
+    deleting the author's copper. The board compiles, the strip is absent from
+    the emitted fill, and a WARNING names the piece, its area and where it was.
     """
     result = compile_board(_board(
         [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
         traces=_severing_trace(3.47)))
-    assert isinstance(result, ResolutionFailure)
-    assert "zone_fill_failed" in _errors(result)
-    message = next(d.message for d in result.diagnostics
-                   if d.code == "zone_fill_failed")
-    assert "SLIVER" in message
-    assert "1.680000 mm^2" in message, message
-    assert f"{MIN_FEATURE_MM} mm minimum feature" in message, message
-    # The bounding box locates the offending piece on the board.
-    assert "(3.0000,3.0000)-(17.0000,3.1200)" in message, message
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    message, rows = _culled(result)
+    assert rows == [("SLIVER", (3.0, 3.0, 17.0, 3.12), 1.68)], rows
+    assert f"{MIN_FEATURE_MM} mm minimum thickness" in message, message
+
+    # ABSENT FROM THE COPPER, not merely reported. The pour keeps one region —
+    # everything above the trace void — and its lowest point is that void's far
+    # edge at 3.47 + 0.35 = 3.82, never the culled strip's 3.00.
+    fill = _pour(result.board).fill
+    assert len(fill) == 1, fill
+    assert min(y for _, y in fill[0].points) == pytest.approx(3.82, abs=5e-4)
 
 
 def test_a_fill_fragment_attached_to_no_same_net_copper_is_REFUSED_and_named():
@@ -486,11 +513,16 @@ def test_a_fill_fragment_attached_to_no_same_net_copper_is_REFUSED_and_named():
     nothing — which is what makes this a test of the island rule and not of the
     sliver rule wearing its name.
 
+    WHY THIS ONE REFUSES WHERE THE FAN-OUT CRUMBS ARE CULLED. 14 mm^2 is 28x
+    this board's 0.502655 mm^2 island minimum. A fragment that large is ground
+    plane the designer believes they have, not etch scrap, and a via could
+    stitch it back — so the author is handed the fact instead of having it
+    removed. The refusal names the minimum, so raising it is a stated way out.
+
     MEASURED AGAINST THE ORACLE (KiCad 9.0.9): pcbnew's ZONE_FILLER deletes a
     severed fragment like this one, and restoring it requires setting
     island_removal_mode away from its default. So the FAULT is real and
-    independently confirmed; only the response (refuse vs cull) differs, for
-    the reason the sliver test states.
+    independently confirmed; only the response at this size differs.
     """
     result = compile_board(_board(
         [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
@@ -505,25 +537,157 @@ def test_a_fill_fragment_attached_to_no_same_net_copper_is_REFUSED_and_named():
     # Named by the AUTHORED net name, not by the internal net id hash.
     assert "overlaps no GND copper on top" in message, message
     assert "severed from the rest of this pour" in message, message
+    assert f"{DEFAULT_ISLAND_MIN_MM2:.6f} mm^2 island minimum" in message, message
+    # Nothing was culled: a refusal and a cull are different answers, and a
+    # board that got both would have had copper deleted on the way to failing.
+    assert not [d for d in result.diagnostics if d.code == "zone_fill_culled"]
 
 
 def test_sliver_wins_over_island_when_one_region_is_both():
-    """Fixed precedence, so the message does not depend on evaluation order.
+    """Fixed precedence, so the verdict does not depend on evaluation order.
 
     The 0.120 mm strip of the sliver case is ALSO attached to no GND copper, so
-    both faults hold of it. The report names the sliver: "cannot be etched" is a
-    fact about the fab and outranks "connects to nothing", which is a fact about
-    the netlist. An author sent to fix the netlist first would reconnect a strip
-    that still cannot be made.
+    both faults hold of it — and at 1.680000 mm^2 it is well ABOVE the island
+    minimum, so grading it as an island would REFUSE the board. It is graded as
+    a sliver and culled: "cannot be etched" is a fact about the fab and outranks
+    "connects to nothing", which is a fact about the netlist. An author sent to
+    reconnect a strip that still cannot be made is sent to fix the wrong thing.
     """
     result = compile_board(_board(
         [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
         traces=_severing_trace(3.47)))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    message, rows = _culled(result)
+    assert [kind for kind, _, _ in rows] == ["SLIVER"], rows
+    assert "ISLAND" not in message, message
+
+
+def _via_station(pitch_mm=0.8, xs=(10.0, 10.8, 11.6)):
+    """A three-via fan-out station: 0.6 mm vias at ``pitch_mm``, each with a
+    0.25 mm leg running up out of the pour, capped by a 0.25 mm bus trace.
+
+    This is the live shape that made a whole board's DRC indeterminate. The
+    legs' voids reach 0.125 + 0.2 = 0.325 mm each side of their centrelines, so
+    at 0.8 mm pitch they leave a 0.800 - 0.650 = 0.150 mm slot between adjacent
+    legs — closed below by the merged via voids and above by the cap's void.
+    """
+    vias = [{"net": "SIG", "x_mm": x, "y_mm": 6.0, "diameter_mm": 0.6,
+             "drill_mm": 0.3, "from_layer": "top", "to_layer": "bottom"}
+            for x in xs]
+    traces = [{"net": "SIG", "layer": "top", "width_mm": 0.25,
+               "points": [{"x_mm": x, "y_mm": 6.0}, {"x_mm": x, "y_mm": 8.0}]}
+              for x in xs]
+    traces.append({"net": "SIG", "layer": "top", "width_mm": 0.25,
+                   "points": [{"x_mm": xs[0] - 1.0, "y_mm": 8.0},
+                              {"x_mm": xs[-1] + 1.0, "y_mm": 8.0}]})
+    return vias, traces
+
+
+def test_a_via_station_leaves_sub_minimum_islands_that_are_CULLED_not_refused():
+    """The live case, hand-derived: the board compiles and the crumbs are named.
+
+    THE GEOMETRY. Vias at (10.0, 6.0), (10.8, 6.0), (11.6, 6.0), land 0.6 mm,
+    clearance 0.2 -> void discs of radius 0.5 centred on each. At 0.8 mm pitch
+    those discs OVERLAP (0.8 < 1.0) and merge into one blob. The legs above them
+    leave 0.150 mm slots at x in [10.325, 10.475] and [11.125, 11.275], and the
+    cap trace at y = 8.0 closes each slot from above at 8.0 - 0.325 = 7.675.
+
+    THE ARITHMETIC for the left slot, by symmetry about x = 10.4. Below x = 10.4
+    the blob's upper boundary is the disc centred at (10.0, 6.0):
+
+        area = 2 * integral over u in [0.325, 0.4] of (1.675 - sqrt(0.25 - u^2)) du
+             = 2 * [1.675*0.075 - ((u/2)sqrt(0.25-u^2) + 0.125*asin(2u))|_0.325^0.4]
+             = 2 * [0.125625 - (0.17591190 - 0.15019496)]
+             = 2 * 0.09990806
+             = 0.199816 mm^2
+
+    and its box is (10.3250, 6.3000)-(10.4750, 7.6750): the two discs cross at
+    x = 10.4, y = 6 + sqrt(0.25 - 0.16) = 6.300, which is the region's low point.
+
+    THE TOLERANCE IS DERIVED. The discs are flattened INSCRIBED at
+    ARC_TOLERANCE_NM = 5 um, so the void is slightly smaller and this island
+    slightly LARGER and slightly TALLER than the exact figure. The arc-derived
+    part of its boundary is under 0.25 mm long, and an inscribed approximation
+    with sagitta at most t loses at most (2/3)*L*t of area:
+
+        (2/3) * 0.25 * 0.005 = 0.00083 mm^2
+
+    so 0.001 mm^2 is the area budget. The LOW POINT moves further than one
+    sagitta, because it is where two discs cross at a shallow angle: each
+    boundary is displaced inward by at most one sagitta along its own normal,
+    and those normals are (+/-0.8, 0.6), so a displacement of 0.005 along each
+    drops their crossing by 0.005 / 0.6 = 0.0083 mm. 0.009 mm is the y budget.
+    (Observed 0.0052 and 0.000825 — inside both, which is the check that the
+    bounds are the right explanation and not numbers picked to fit.)
+
+    NEITHER ISLAND IS A SLIVER: 0.150 mm is wider than the 0.127 mm minimum
+    thickness, so the sliver test passes them and they are graded as islands.
+    At 0.199816 mm^2 each they sit under this board's 0.502655 mm^2 island
+    minimum, so they are CULLED — and the compile SUCCEEDS, which is the point.
+    Refusing here made every geometric DRC check on the board indeterminate.
+    """
+    vias, traces = _via_station()
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
+        vias=vias, traces=traces))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+
+    message, rows = _culled(result)
+    assert "2 unfabricable region(s)" in message, message
+    assert [kind for kind, _, _ in rows] == ["ISLAND", "ISLAND"], rows
+    for (_, bbox, area), x_lo in zip(rows, (10.325, 11.125)):
+        assert area == pytest.approx(0.199816, abs=0.001), rows
+        assert bbox[0] == pytest.approx(x_lo, abs=5e-4), rows
+        assert bbox[2] == pytest.approx(x_lo + 0.15, abs=5e-4), rows
+        assert bbox[1] == pytest.approx(6.300, abs=0.009), rows
+        assert bbox[3] == pytest.approx(7.675, abs=5e-4), rows
+
+    # ABSENT FROM THE COPPER. One region survives — the pour itself — and no
+    # emitted contour lies inside either slot.
+    fill = _pour(result.board).fill
+    assert len(fill) == 1, fill
+    for x_lo in (10.325, 11.125):
+        assert not [1 for x, y in fill[0].points
+                    if x_lo < x < x_lo + 0.15 and 6.30 < y < 7.675]
+
+
+def test_the_island_minimum_is_AUTHORED_so_a_board_can_refuse_its_own_crumbs():
+    """The rule is the board's, not the filler's — the answer to "whose rule?".
+
+    The same via station, with design_rules.zone_min_island_area_mm2 authored to
+    0. Nothing is then small enough to cull, both crumbs are refused by name,
+    and the board fails closed. A board that would rather see every orphan
+    fragment than lose any copper says so and gets exactly that.
+    """
+    vias, traces = _via_station()
+    board = _board([{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
+                   vias=vias, traces=traces)
+    board["design_rules"]["zone_min_island_area_mm2"] = 0
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
     message = next(d.message for d in result.diagnostics
                    if d.code == "zone_fill_failed")
-    assert "SLIVER" in message
-    assert "ISLAND" not in message, message
-    assert "1 region(s)" in message, message
+    assert "2 region(s) that cannot be fabricated" in message, message
+    assert message.count("ISLAND") == 2, message
+
+
+def test_the_min_thickness_is_AUTHORED_so_a_board_can_widen_what_counts_as_scrap():
+    """The other half of the same answer, and the field KiCad calls min_thickness.
+
+    The via station's 0.150 mm slots pass the 0.127 mm default. Author
+    zone_min_thickness_mm at 0.2 and the same two regions are nowhere wide
+    enough, so they are culled as SLIVERS instead of islands — a different
+    verdict from a number only the board can state.
+    """
+    vias, traces = _via_station()
+    board = _board([{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
+                   vias=vias, traces=traces)
+    board["design_rules"]["zone_min_thickness_mm"] = 0.2
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    message, rows = _culled(result)
+    assert [kind for kind, _, _ in rows] == ["SLIVER", "SLIVER"], rows
+    assert "0.2 mm minimum thickness" in message, message
 
 
 def test_a_sound_pour_trips_NEITHER_refusal():
@@ -594,22 +758,21 @@ def test_GAP_a_pour_attached_to_no_same_net_copper_at_all_is_still_emitted():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="STATED GAP, not a flake: a sub-floor NECK inside an otherwise sound "
-           "region is not detected. Catching it needs the deflate/re-inflate "
-           "opening KiCad performs, which rounds every convex corner and so "
-           "cannot be told from a real defect without a fitted area threshold. "
-           "The honest form is an authored ResolvedZone.min_thickness_mm applied "
-           "as KiCad applies it — a board-schema change that also needs the Go "
-           "validator to carry the field, or validate and compile would disagree "
-           "about a fabrication parameter. OUT OF SCOPE for a pcb/worker-only "
-           "change; NOT blocked on the thermal ruling R-d.")
+    reason="STATED GAP, not a flake: a sub-thickness NECK inside an otherwise "
+           "sound region is not detected. The minimum to run it at now EXISTS "
+           "(ResolvedZone.min_thickness_mm, authored via "
+           "design_rules.zone_min_thickness_mm); what is missing is the "
+           "deflate/re-inflate OPENING KiCad applies it with. That opening "
+           "rounds every convex corner, so it reshapes every pour it touches — "
+           "a fill-geometry change to make against the oracle, not a cull. NOT "
+           "blocked on the thermal ruling R-d.")
 def test_GAP_a_sub_floor_neck_inside_a_sound_region_is_not_detected():
     """The residue of the min-thickness gap, stated as a failing expectation.
 
     A mounting hole whose void stops 0.120 mm short of the pour edge leaves a
-    crescent of copper that is thinner than the 0.127 mm floor at its waist but
-    is CONNECTED to the pour around both ends. The region as a whole is wide,
-    so the region-level deflation survives and nothing is reported.
+    crescent of copper that is thinner than the 0.127 mm minimum at its waist
+    but is CONNECTED to the pour around both ends. The region as a whole is
+    wide, so the region-level deflation survives and nothing is reported.
 
     Hole at (10, 16.68), diameter 2.0 -> void radius 1.0 + 0.2 = 1.2, so the
     void's top reaches 16.68 + 1.2 = 17.88 against a pour edge at 18.00: a

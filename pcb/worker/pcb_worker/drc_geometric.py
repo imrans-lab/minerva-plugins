@@ -2237,7 +2237,7 @@ def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]
     theorem: a spike 4 nm across at its base and micrometres deep would be culled,
     because nothing here guards penetration DEPTH. Two cases can reach that shape.
     A foreign tool's fill is arbitrary geometry and is not width-screened —
-    ``zone_fill._refuse_unfabricable_regions`` runs inside our filler only. And an
+    ``zone_fill._cull_or_refuse_unfabricable_regions`` runs inside our filler only. And an
     author may write a deficit that is itself sub-threshold (``0.199998`` against
     a 0.2 mm minimum is a representable 2 nm breach, and is masked). Neither is
     worth widening the check for — sub-grid copper is not fabricable and a 2 nm

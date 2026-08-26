@@ -84,6 +84,7 @@ from .geometry import (
     TRANSFORM_VERSION,
 )
 from .zone_fill import (
+    CulledRegion,
     ZoneFillError,
     _to_nm as _zone_to_nm,
     fill_area_mm2,
@@ -1101,8 +1102,14 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
     angles = _allowed_trace_angles(rules, diags)
     if angles is None:
         return None
+    minima = _zone_fill_minima(rules, profile.floor, float(via_diameter), diags)
+    if minima is None:
+        return None
+    zone_min_thickness, zone_min_island_area = minima
     return ResolvedDesignRules(
         allowed_trace_angles_deg=angles,
+        zone_min_thickness_mm=zone_min_thickness,
+        zone_min_island_area_mm2=zone_min_island_area,
         defaults=RoutingDefaults(
             trace_width_mm=float(trace_width),
             via_diameter_mm=float(via_diameter),
@@ -1150,6 +1157,54 @@ def _allowed_trace_angles(rules: dict, diags: _Diagnostics):
         if folded not in angles:
             angles.append(folded)
     return tuple(angles)
+
+
+def _zone_fill_minima(rules: dict, profile_floor: ManufacturingConstraints,
+                      via_diameter_mm: float, diags: _Diagnostics):
+    """The EFFECTIVE ``(zone_min_thickness_mm, zone_min_island_area_mm2)`` pair.
+
+    Authored via ``design_rules.zone_min_thickness_mm`` /
+    ``design_rules.zone_min_island_area_mm2``; ``None`` for the pair when either
+    is malformed, which fails the compile closed. Both DEFAULT rather than being
+    required, and each default is derived from a number the author already wrote:
+
+      * THICKNESS defaults to the selected profile's ``min_trace_width_mm``.
+        Pour copper thinner than the board house's own published minimum feature
+        does not etch reliably, so the board house set this floor by being
+        chosen. It is the same number the filler's sliver test used before the
+        rule was authorable, which is why no existing board's fill moves.
+      * ISLAND AREA defaults to the area of one default via land,
+        ``pi/4 * via_diameter_mm**2``. An orphan pour fragment can only ever
+        become connected copper by stitching a via into it, and a region whose
+        TOTAL AREA is under one land's area cannot contain that land whatever
+        its shape — so it can never be stitched, and it is etch scrap rather
+        than plane. The converse is deliberately not claimed: a larger fragment
+        might still not hold a via, and that one is refused so the author
+        decides.
+
+    A board may state ``0`` for the island area, which means "cull no island by
+    size" — every orphan region is then refused. A zero THICKNESS is refused
+    instead: a pour with no minimum width is not a policy, it is a missing one.
+    """
+    thickness = rules.get("zone_min_thickness_mm")
+    if thickness is None:
+        thickness = profile_floor.min_trace_width_mm
+    elif not _is_positive_number(thickness):
+        diags.error("invalid_design_rule",
+                    "design_rules.zone_min_thickness_mm must be a positive "
+                    f"number of millimetres; got {thickness!r}", _board_ref())
+        return None
+    island_area = rules.get("zone_min_island_area_mm2")
+    if island_area is None:
+        island_area = math.pi / 4.0 * via_diameter_mm * via_diameter_mm
+    elif isinstance(island_area, bool) or not isinstance(island_area, (int, float)) \
+            or not math.isfinite(island_area) or island_area < 0:
+        diags.error("invalid_design_rule",
+                    "design_rules.zone_min_island_area_mm2 must be a "
+                    f"non-negative number of mm^2; got {island_area!r}",
+                    _board_ref())
+        return None
+    return float(thickness), float(island_area)
 
 
 def _floor_with_clearance(profile_floor: ManufacturingConstraints,
@@ -2466,13 +2521,30 @@ def _zone_kind(raw: dict, ordinal: int, ref: SourceRef,
         return None
 
 
+def _pour_only(kind: ZoneKind, design_rules: Union[ResolvedDesignRules, None],
+               field: str) -> Union[float, None]:
+    """A board-level zone-fill minimum, for a COPPER_POUR only.
+
+    A keepout carries neither: it prohibits copper rather than being copper, and
+    the IR refuses a keepout that claims a copper minimum."""
+    if kind is not ZoneKind.COPPER_POUR or design_rules is None:
+        return None
+    return getattr(design_rules, field)
+
+
 def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
-                 schema_version: int, diags: _Diagnostics) -> tuple[ResolvedZone, ...]:
+                 schema_version: int, diags: _Diagnostics,
+                 design_rules: Union[ResolvedDesignRules, None] = None,
+                 ) -> tuple[ResolvedZone, ...]:
     """Compile authored zones into pre-fill :class:`ResolvedZone` entries.
 
     Every zone gets ``fill=None`` explicitly. The completed board is passed to
     ``fill_board_zones`` at the end of compilation, so no successful compile
-    returns an uncomputed copper pour."""
+    returns an uncomputed copper pour.
+
+    ``design_rules`` carries the board's zone-fill minima onto each POUR, so the
+    filler grades a zone by numbers the zone holds. It is ``None`` only when the
+    design-rules build already failed, and the compile is over by then."""
     zones: list[ResolvedZone] = []
     for ordinal, raw in enumerate(_dict_items(board, "zones", "zone", diags)):
         net_name = raw.get("net")
@@ -2539,11 +2611,18 @@ def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
                 # pour — a false clean.
                 fill=None,
                 clearance_mm=clearance,
-                # No Go counterpart for either, so neither is asserted: inventing a
-                # min-thickness or a fill priority would be a rule the author never
-                # wrote (and priority only means something once two pours overlap,
-                # which needs a filler to resolve).
-                min_thickness_mm=None,
+                # THE BOARD'S ZONE-FILL MINIMA, carried onto the pour the filler
+                # grades by them (`None` on a keepout, which has no copper). Both
+                # are authored in `design_rules` or derived there from a number
+                # the author wrote — see _zone_fill_minima — so the filler never
+                # culls copper by a rule nobody stated.
+                min_thickness_mm=_pour_only(kind, design_rules,
+                                            "zone_min_thickness_mm"),
+                min_island_area_mm2=_pour_only(kind, design_rules,
+                                               "zone_min_island_area_mm2"),
+                # Fill priority stays unasserted: it only means something once two
+                # pours overlap, which needs a filler to resolve, and there is no
+                # Go counterpart to read one from.
                 priority=None,
                 connect_mode=connect_mode,
                 thermal=thermal,
@@ -2989,7 +3068,7 @@ def compile_board(
     traces = _build_traces(board, board_id, net_id_by_name, version, diags)
     vias = _build_vias(board, board_id, net_id_by_name, version, diags)
     holes = _build_holes(board, board_id, version, diags)
-    zones = _build_zones(board, board_id, net_id_by_name, version, diags)
+    zones = _build_zones(board, board_id, net_id_by_name, version, diags, design_rules)
 
     # The ordinal-id bridge diagnostic is a v1-only artifact: v2 ids are the
     # persisted minted identity (validated above), not ordinal-derived, so there
@@ -3073,8 +3152,9 @@ def compile_board(
     #
     # FAIL-CLOSED: a pour that cannot be filled is a compile ERROR naming the
     # zone, never a board that compiles with approximated or missing copper.
+    culled: list[CulledRegion] = []
     try:
-        resolved = fill_board_zones(resolved)
+        resolved = fill_board_zones(resolved, culled=culled)
     except ZoneFillError as exc:
         diags.error("zone_fill_failed", str(exc),
                     SourceRef(EntityKind.ZONE, exc.zone_id))
@@ -3083,6 +3163,19 @@ def compile_board(
         diags.error("zone_fill_failed", f"zone fill rejected the board: {exc}",
                     _board_ref())
         return ResolutionFailure(diagnostics=_ensure_error(diags))
+
+    # CULLED COPPER IS REPORTED, NEVER SILENT. One warning per pour rather than
+    # one per region: the author needs the total they lost and where each piece
+    # was, and N separate rows for N crumbs of one fan-out buries that.
+    for zone_id in dict.fromkeys(record.zone_id for record in culled):
+        rows = [record for record in culled if record.zone_id == zone_id]
+        total = sum(record.area_mm2 for record in rows)
+        detail = "\n  - ".join(record.describe() for record in rows)
+        diags.warning(
+            "zone_fill_culled",
+            f"zone {zone_id} dropped {len(rows)} unfabricable region(s) totalling "
+            f"{total:.6f} mm^2 from its fill:\n  - {detail}",
+            SourceRef(EntityKind.ZONE, zone_id))
 
     for zone in resolved.zones:
         if zone.kind is not ZoneKind.COPPER_POUR:

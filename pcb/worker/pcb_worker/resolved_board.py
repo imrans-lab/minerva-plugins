@@ -685,9 +685,35 @@ class ResolvedDesignRules:
     # assert a fab capability that does not exist — the same error K21 forbids
     # for design minima, in a different costume.
     allowed_trace_angles_deg: tuple[float, ...] = ()
+    # ZONE-FILL MINIMA — the board's answer to "how small a piece of pour copper
+    # is scrap". Both are EFFECTIVE values: authored when the board states them,
+    # otherwise derived (see compile_board._zone_fill_minima), so every reader
+    # gets one number and nobody re-derives a default.
+    #
+    # BOARD state, not profile state, for the same reason allowed_trace_angles_deg
+    # is: `minimums` records what a board HOUSE publishes, and no house publishes
+    # a zone min-thickness. Putting these there would assert a fab capability
+    # that does not exist.
+    #
+    # zone_min_thickness_mm — pour copper nowhere this wide is culled from the
+    # fill (a SLIVER). zone_min_island_area_mm2 — a pour fragment attached to no
+    # same-net copper is culled when it is smaller than this (an ISLAND);
+    # anything larger is refused instead, because orphan copper big enough to
+    # matter is a fact the author has to see.
+    #
+    # `None` only while a board is mid-compile; a completed ResolvedDesignRules
+    # always carries both.
+    zone_min_thickness_mm: float | None = None
+    zone_min_island_area_mm2: float | None = None
 
     def __post_init__(self) -> None:
         _tuple(self.allowed_via_kinds, "ResolvedDesignRules.allowed_via_kinds")
+        if self.zone_min_thickness_mm is not None:
+            _positive(self.zone_min_thickness_mm,
+                      "ResolvedDesignRules.zone_min_thickness_mm")
+        if self.zone_min_island_area_mm2 is not None:
+            _nonnegative(self.zone_min_island_area_mm2,
+                         "ResolvedDesignRules.zone_min_island_area_mm2")
         _tuple(self.net_classes, "ResolvedDesignRules.net_classes")
         if not self.allowed_via_kinds:
             raise ValueError("at least one via kind must be allowed")
@@ -1048,7 +1074,12 @@ class ResolvedZone:
     authored_outline: Contour
     fill: tuple[PolygonGeometry, ...] | None = None
     clearance_mm: float | None = None
+    # THE ZONE-FILL MINIMA THIS POUR IS GRADED BY, resolved from the board rule
+    # (ResolvedDesignRules.zone_min_thickness_mm / .zone_min_island_area_mm2) so
+    # the filler grades a zone by numbers carried ON the zone. A keepout leaves
+    # both `None`: it is a prohibition on copper, so no copper minimum applies.
     min_thickness_mm: float | None = None
+    min_island_area_mm2: float | None = None
     priority: int | None = None
     connect_mode: ConnectMode | None = None
     thermal: ThermalSettings | None = None
@@ -1067,6 +1098,12 @@ class ResolvedZone:
             _nonnegative(self.clearance_mm, "ResolvedZone.clearance_mm")
         if self.min_thickness_mm is not None:
             _positive(self.min_thickness_mm, "ResolvedZone.min_thickness_mm")
+        if self.min_island_area_mm2 is not None:
+            _nonnegative(self.min_island_area_mm2, "ResolvedZone.min_island_area_mm2")
+        if self.kind is ZoneKind.KEEPOUT and (
+                self.min_thickness_mm is not None
+                or self.min_island_area_mm2 is not None):
+            raise ValueError("a keepout has no copper, so no fill minimum applies")
         if self.thermal is not None and self.connect_mode is not ConnectMode.THERMAL:
             raise ValueError("thermal settings require thermal connect mode")
 
