@@ -347,6 +347,15 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## nothing about the PAD legs, which run at the pads' own perpendicular
 ## coordinates and are spaced by wherever the pads happen to be.
 ##
+## ONE THING MOVES A STATION after the ladder has placed it. A lane MITERS its
+## bends, so its corner sits |offset| back from (or past) the spine's own
+## vertex, at a distance from the end that owes nothing to the station ladder.
+## When those two land closer together than the track is wide, the run between
+## them is a sub-width stub — copper a fab renders as a notch and DRC measures
+## as a defect — and the leg turns at the lane's corner instead, meeting it in a
+## single corner. _leg_station holds the spacing guarantee above across that
+## move; it declines any snap that would not.
+##
 ## WHICH TRACK PEELS OFF FIRST IS DERIVED, not fixed by index. Two rules give a
 ## "must leave before" order over the nets:
 ##
@@ -564,8 +573,17 @@ static func bundle_routes(
 	var station_splits: Array = []
 	for i in range(n):
 		var offset := float(offsets[i])
-		var d: float = float(src_stations[i])
-		var e: float = float(tgt_stations[i])
+		var lane := offset_polyline(spine_a, offset)
+		# The second piece is built here rather than below because the TARGET
+		# leg lands on it, and both legs are placed before any point is.
+		var lane_b := PackedVector2Array() if station < 0 else offset_polyline(spine_b, offset)
+		var tgt_lane: PackedVector2Array = lane if station < 0 else lane_b
+		# Each leg turns at its own station, EXCEPT where that would leave a
+		# sub-width remnant of the lane between it and the lane's own corner.
+		var d: float = _leg_station(float(src_stations[i]),
+			_lane_corner(lane, true, pts[0], u_src), i, src_stations, widths, clearance)
+		var e: float = _leg_station(float(tgt_stations[i]),
+			_lane_corner(tgt_lane, false, pts[last], -u_tgt), i, tgt_stations, widths, clearance)
 		# A pad already on its own lane, or already at its own station, makes a
 		# leg zero-length; the corner is then the same point twice, which is why
 		# every run below is deduplicated before it is used.
@@ -576,7 +594,6 @@ static func bundle_routes(
 		tail.append(_station_point(pts[last], u_tgt, -e, targets[i]))
 		tail.append(targets[i])
 
-		var lane := offset_polyline(spine_a, offset)
 		# Only the lane's two ENDS move, inward to this track's own stations.
 		# Indexed from the ends rather than by spine vertex on purpose: a spine
 		# that doubles back bevels its reversal into TWO offset points, so
@@ -603,7 +620,6 @@ static func bundle_routes(
 		run_a.append(via_point)
 		run_a = _drop_duplicate_points(run_a)
 
-		var lane_b := offset_polyline(spine_b, offset)
 		lane_b[0] = exit_pt + n_st * offset
 		lane_b[lane_b.size() - 1] = _station_point(pts[last], u_tgt, -e, lane_b[lane_b.size() - 1])
 		var run_b := PackedVector2Array()
@@ -955,6 +971,60 @@ static func _station_point(origin: Vector2, u: Vector2, axial: float, through: V
 	if u.y == 0.0:
 		return Vector2(origin.x + u.x * axial, through.y)
 	return Vector2(through.x, origin.y + u.y * axial)
+
+
+## How far inward from `origin` along `u` the lane's OWN corner sits, in the
+## same measure the departure stations use; INF when this end of the lane has
+## no corner to reach.
+##
+## `at_start` picks which end of `lane` the leg lands on: the vertex next to it
+## is the first thing along the lane that the station is not about to replace.
+## That neighbour always lies on this end segment's offset LINE — a miter is
+## |offset| from both segments, and a bevel's two points sit one on each of
+## them, nearest end first — so the run between it and the station is
+## axis-aligned and its length is the difference of these two distances.
+##
+## A lane of fewer than three points has no corner here: its far end is another
+## station (or a via fan-out), and the run between two stations is the bundle
+## itself, not a remnant to be collapsed.
+static func _lane_corner(lane: PackedVector2Array, at_start: bool,
+		origin: Vector2, u: Vector2) -> float:
+	if lane.size() < 3:
+		return INF
+	var neighbour: Vector2 = lane[1] if at_start else lane[lane.size() - 2]
+	return (neighbour - origin).dot(u)
+
+
+## Where track `index`'s breakout leg actually turns off the spine, as an inward
+## distance from that end of the spine.
+##
+## `station` is what the departure ladder gave it and `corner` is where its lane
+## turns away from the end segment. Between the two sits a REMNANT of the lane,
+## and when the remnant is shorter than that track's own copper it is not a
+## segment anyone drew: it is a sub-width stub, which a fab renders as a notch
+## and DRC measures as a defect. The leg then lands ON the corner, so the leg
+## and the lane meet at ONE axis-aligned corner instead of two.
+##
+## THE SNAP ONLY EVER PUSHES A STATION OUTWARD. The room check upstream leaves
+## every station at least the widest |offset| of segment before the bend, which
+## puts any reachable corner at or beyond the LAST station — so the moved leg
+## walks away from the legs behind it rather than into them. It can still reach
+## the last station itself when the track being snapped is not the last to
+## leave, so a move that would come within pitch of another leg is DECLINED and
+## the remnant kept: the ladder's guarantee that two departure legs never sit
+## closer than the clearance rule allows outranks a tidy corner, and the stub is
+## still measured with everything else downstream.
+static func _leg_station(station: float, corner: float, index: int,
+		stations: Array, widths: Array, clearance: float) -> float:
+	if not is_finite(corner) or absf(corner - station) >= float(widths[index]):
+		return station
+	for j in range(stations.size()):
+		if j == index:
+			continue
+		var need: float = pitch_between(float(widths[index]), float(widths[j]), clearance)
+		if absf(corner - float(stations[j])) < need - _CLEARANCE_TOLERANCE_MM:
+			return station
+	return corner
 
 
 ## Where each track leaves the bundle at ONE end, as a distance measured inward

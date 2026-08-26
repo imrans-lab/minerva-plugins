@@ -64,6 +64,7 @@ func _init() -> void:
 	_run_clearance_refusals()
 	_run_structural_refusals()
 	_run_pads_already_on_their_lanes()
+	_run_leg_lands_on_its_lane_corner()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -918,3 +919,90 @@ func _run_pads_already_on_their_lanes() -> void:
 		[Vector2(-5, -0.25), Vector2(0, -0.25), Vector2(20, -0.25), Vector2(25, -0.25)])
 	check_points("B: the same, 0.5mm in at each end", _route(result, 1),
 		[Vector2(-5, 0.25), Vector2(0.5, 0.25), Vector2(19.5, 0.25), Vector2(25, 0.25)])
+
+
+## A DEPARTURE STATION THAT ALL BUT MEETS ITS LANE'S CORNER, every point
+## hand-derived — the live-board shape that produced a 0.05mm stub.
+##
+## Spine (57.6,48.6) -> (59,48.6) -> (59,82) -> (50,82): east 1.4mm, south
+## 33.4mm, west 9mm. Source frame u = (1,0), n = (0,1), so a track's offset is
+## its y from 48.6. Target frame is the LAST segment, u = (-1,0) and n = (0,-1),
+## so a pad's perpendicular coordinate there is 82 - y and a station runs east
+## from x = 50.
+##
+## Three 0.25mm tracks at 0.2mm clearance: pitch = 0.125 + 0.2 + 0.125 = 0.45
+## for both gaps, so the lanes are [-0.45, 0, +0.45] and the mitered corners sit
+## at (59 - o, 48.6 + o) and (59 - o, 82 - o):
+##
+##     LRCLK  -0.45   (57.6,48.15) (59.45,48.15) (59.45,82.45) (50,82.45)
+##     SDATA   0.00   (57.6,48.60) (59.00,48.60) (59.00,82.00) (50,82.00)
+##     BCLK   +0.45   (57.6,49.05) (58.55,49.05) (58.55,81.55) (50,81.55)
+##
+## SOURCE pads (56.43, 53.877 / 54.527 / 55.177) are perpendicular coordinates
+## 5.277 / 5.927 / 6.577 — REVERSE lane order, so the track on the far lane has
+## the nearest pad and has to cross both other lanes to reach it. LRCLK leaves
+## first, then SDATA, then BCLK: source stations 0 / 0.45 / 0.9, i.e. corners at
+## x = 57.6 / 58.05 / 58.5. TARGET pads (48, 79.3 / 78.65 / 78) are 2.7 / 3.35 /
+## 4.0 across, reversed the same way, so the target stations are 0 / 0.45 / 0.9
+## back from (50,82) — corners at x = 50 / 50.45 / 50.9.
+##
+## THE CASE. The first spine segment is only 1.4mm, so BCLK's station at 0.9mm
+## lands at x = 58.5 while its own lane turns south at x = 58.55: 0.05mm of that
+## lane is left between them, a fifth of the 0.25mm the track is wide. That
+## remnant is a stub no fab and no DRC reads as a segment, so the leg lands ON
+## the corner instead and the two meet at ONE vertex. The other two tracks are
+## unaffected: their corners are 1.85mm and 0.95mm past their stations.
+##
+## THE ORACLES beyond the point lists are the two properties that make the
+## corner clean, and neither reads a coordinate off the routes: every segment of
+## every route is at least as long as its track is wide, and BCLK's route
+## touches the y its lane holds along the first spine segment exactly once — a
+## stub of any length would touch it twice.
+func _run_leg_lands_on_its_lane_corner() -> void:
+	print("-- a station within a track width of its lane's corner lands on it --")
+	var widths: Array = [0.25, 0.25, 0.25]
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(57.6, 48.6), Vector2(59, 48.6), Vector2(59, 82), Vector2(50, 82)]),
+		PackedStringArray(["I2S1_LRCLK", "I2S1_SDATA", "I2S1_BCLK"]),
+		_pv([Vector2(56.43, 53.877), Vector2(56.43, 54.527), Vector2(56.43, 55.177)]),
+		_pv([Vector2(48, 79.3), Vector2(48, 78.65), Vector2(48, 78)]),
+		widths, 0.2)
+	check("the live bus routes clean", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+
+	check_points("LRCLK: outside of both corners, station 1.85mm clear of its lane's",
+		_route(result, 0),
+		[Vector2(56.43, 53.877), Vector2(57.6, 53.877), Vector2(57.6, 48.15),
+		 Vector2(59.45, 48.15), Vector2(59.45, 82.45), Vector2(50, 82.45),
+		 Vector2(50, 79.3), Vector2(48, 79.3)])
+	check_points("SDATA: on the spine itself, station 0.95mm clear",
+		_route(result, 1),
+		[Vector2(56.43, 54.527), Vector2(58.05, 54.527), Vector2(58.05, 48.6),
+		 Vector2(59, 48.6), Vector2(59, 82), Vector2(50.45, 82),
+		 Vector2(50.45, 78.65), Vector2(48, 78.65)])
+	check_points("BCLK: the leg turns at x 58.55, the lane's own corner, not at 58.5",
+		_route(result, 2),
+		[Vector2(56.43, 55.177), Vector2(58.55, 55.177), Vector2(58.55, 49.05),
+		 Vector2(58.55, 81.55), Vector2(50.9, 81.55), Vector2(50.9, 78),
+		 Vector2(48, 78)])
+
+	var stub := ""
+	for i in range(3):
+		var width: float = float(widths[i])
+		var route: PackedVector2Array = _route(result, i)
+		for s in range(route.size() - 1):
+			var seg: float = route[s].distance_to(route[s + 1])
+			if seg < width - EPS:
+				stub = "net %d segment %d is %.6fmm on a %.3fmm track" % [i, s, seg, width]
+	check("no segment of any route is shorter than its own track is wide", stub.is_empty())
+	if not stub.is_empty():
+		printerr("    " + stub)
+
+	var on_the_lane := 0
+	for p in _route(result, 2):
+		if absf(p.y - 49.05) <= EPS:
+			on_the_lane += 1
+	check("BCLK's leg meets its lane at ONE corner, with no stub along it",
+		on_the_lane == 1)
