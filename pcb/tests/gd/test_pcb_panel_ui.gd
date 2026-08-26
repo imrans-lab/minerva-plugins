@@ -59,6 +59,8 @@ func _init() -> void:
 	await _test_promote_headless_fail_closed()
 	await _test_bus_phase_badge()
 	await _test_bus_refusal_is_held()
+	await _test_board_undo_redo()
+	await _test_selection_drag_threshold()
 
 	_finish()
 
@@ -1355,5 +1357,231 @@ func _test_bus_refusal_is_held() -> void:
 			not str(panel._status_label.text).contains(expected),
 			str(panel._status_label.text))
 
+	panel.queue_free()
+	await process_frame
+
+
+# ── Board-level undo/redo ─────────────────────────────────────────────────────
+#
+# ORACLE: the SERIALIZED BOARD (trace and via counts out of to_board_dict) and
+# the model's own history_index either side of each key press, plus the
+# rendered status label text — never the reply of the code under test. The
+# step label the status must name is read off the history entry the bus commit
+# recorded, BEFORE any undo runs, so the expectation owes nothing to the undo
+# path. The hint case asserts the board did NOT move while a route hint was
+# selected, which is the whole contract for that branch.
+
+const UNDO_STATION := Vector2(35.0, 25.0)
+const UNDO_TGT_B := Vector2(60.0, 14.0)
+## Clear board, far from every pad and vertex: where the finishing double-click
+## lands.
+const UNDO_EMPTY := Vector2(40.0, 35.0)
+
+
+func _ctrl_key(keycode: Key, shift: bool = false) -> InputEventKey:
+	var ek := InputEventKey.new()
+	ek.keycode = keycode
+	ek.pressed = true
+	ek.ctrl_pressed = true
+	ek.shift_pressed = shift
+	return ek
+
+
+func _board_counts(panel: Variant) -> Array:
+	var doc: Dictionary = panel.get_data().to_board_dict()
+	return [(doc.get("traces", []) as Array).size(), (doc.get("vias", []) as Array).size()]
+
+
+## Commit a two-net bus with a via station on the badge board: sources on the
+## left, spine (25,25) -> (35,25) [station, bottom] -> (45,25), targets right.
+func _commit_station_bus(panel: Variant, canvas: Variant) -> void:
+	panel._toggle_tool_mode(canvas.ToolMode.BUS)
+	await process_frame
+	canvas._handle_bus_click(BADGE_SRC_A, false)
+	canvas._handle_bus_click(BADGE_SRC_B, false)
+	canvas._handle_bus_click(BADGE_PATH_1, false)
+	canvas.working_layer = "bottom"
+	canvas._handle_bus_click(UNDO_STATION, false)
+	canvas._handle_bus_click(BADGE_PATH_2, false)
+	canvas._handle_bus_click(BADGE_TGT_A, false)
+	canvas._handle_bus_click(UNDO_TGT_B, false)
+	canvas._handle_bus_click(UNDO_EMPTY, false)
+	canvas._handle_bus_click(UNDO_EMPTY, true)
+	await process_frame
+
+
+func _test_board_undo_redo() -> void:
+	print("\n-- Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y step the board history, and say so --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+	var data: Variant = panel.get_data()
+	data.from_board_dict(_bus_badge_board())
+	canvas.snap_to_grid = false
+	await process_frame
+
+	var history_before: int = data.history.size()
+	await _commit_station_bus(panel, canvas)
+	var landed: Array = _board_counts(panel)
+	check("undo fixture: the station bus landed copper on both layers plus its vias",
+			landed[0] == 4 and landed[1] == 2 and data.history.size() == history_before + 1,
+			"traces=%d vias=%d history=%d" % [landed[0], landed[1], data.history.size()])
+	if landed[0] != 4:
+		panel.queue_free()
+		return
+	# The label the commit recorded — what every route must name.
+	var step_label: String = str((data.history[data.history_index] as Dictionary).get("action", ""))
+	check("undo fixture: the commit recorded a named step", not step_label.is_empty(), step_label)
+	var index_after_commit: int = data.history_index
+
+	# ── Ctrl+Z ────────────────────────────────────────────────────────────────
+	panel._unhandled_key_input(_ctrl_key(KEY_Z))
+	var after_undo: Array = _board_counts(panel)
+	check("Ctrl+Z removes every trace and via of the bus step",
+			after_undo[0] == 0 and after_undo[1] == 0 and data.history_index == index_after_commit - 1,
+			"traces=%d vias=%d index=%d" % [after_undo[0], after_undo[1], data.history_index])
+	check("...and the status line names the step it undid",
+			str(panel._status_label.text).contains("Undid")
+				and str(panel._status_label.text).contains(step_label),
+			str(panel._status_label.text))
+
+	# ── Ctrl+Shift+Z ──────────────────────────────────────────────────────────
+	panel._unhandled_key_input(_ctrl_key(KEY_Z, true))
+	var after_redo: Array = _board_counts(panel)
+	check("Ctrl+Shift+Z restores the traces and vias",
+			after_redo[0] == 4 and after_redo[1] == 2 and data.history_index == index_after_commit,
+			"traces=%d vias=%d" % [after_redo[0], after_redo[1]])
+	check("...and the status line names the step it redid",
+			str(panel._status_label.text).contains("Redid")
+				and str(panel._status_label.text).contains(step_label),
+			str(panel._status_label.text))
+
+	# ── Ctrl+Y is redo too ────────────────────────────────────────────────────
+	panel._unhandled_key_input(_ctrl_key(KEY_Z))
+	panel._unhandled_key_input(_ctrl_key(KEY_Y))
+	var after_y: Array = _board_counts(panel)
+	check("Ctrl+Y redoes exactly as Ctrl+Shift+Z does",
+			after_y[0] == 4 and after_y[1] == 2 and data.history_index == index_after_commit,
+			"traces=%d vias=%d" % [after_y[0], after_y[1]])
+
+	# ── With a route hint selected the key is the HINT's ─────────────────────
+	var host: Variant = panel._annotation_host
+	var env: Dictionary = host.build_route_hint_envelope(
+		0.0, 0.0, "", "F.Cu", "waypoint", [[5.0, 30.0], [15.0, 30.0]], "human")
+	var hint_id: String = str(host.add_annotation_v2(env))
+	host.set_selected_annotation_id(hint_id)
+	check("hint fixture: one route hint is selected",
+			host.get_selected_annotation_id() == hint_id
+				and str(host.get_by_id(hint_id).get("kind", "")) == "pcb_route_hint")
+	panel._unhandled_key_input(_ctrl_key(KEY_Z))
+	var with_hint: Array = _board_counts(panel)
+	check("with a route hint selected Ctrl+Z leaves the board history alone",
+			with_hint[0] == 4 and with_hint[1] == 2 and data.history_index == index_after_commit,
+			"traces=%d vias=%d index=%d" % [with_hint[0], with_hint[1], data.history_index])
+	host.set_selected_annotation_id("")
+
+	# ── The host hook pair and the verbs take the same path ──────────────────
+	check("the host's undo hook reverts the step", panel._on_panel_undo_request()
+			and _board_counts(panel)[0] == 0)
+	check("the host's redo hook restores it", panel._on_panel_redo_request()
+			and _board_counts(panel)[0] == 4)
+
+	var undo_reply: Dictionary = await panel.handle_tool("minerva_pcb_undo", {})
+	check("minerva_pcb_undo reverts the step and names it with the depths",
+			bool(undo_reply.get("ok", false)) and str(undo_reply.get("action", "")) == step_label
+				and int(undo_reply.get("undo_depth", -1)) == index_after_commit - 1
+				and int(undo_reply.get("redo_depth", -1)) == 1
+				and _board_counts(panel)[0] == 0,
+			str(undo_reply))
+	check("...and the status line names it, the same as the key did",
+			str(panel._status_label.text).contains("Undid")
+				and str(panel._status_label.text).contains(step_label),
+			str(panel._status_label.text))
+	var redo_reply: Dictionary = await panel.handle_tool("minerva_pcb_redo", {})
+	check("minerva_pcb_redo restores the step",
+			bool(redo_reply.get("ok", false)) and str(redo_reply.get("action", "")) == step_label
+				and int(redo_reply.get("redo_depth", -1)) == 0 and _board_counts(panel)[0] == 4,
+			str(redo_reply))
+	var nothing: Dictionary = await panel.handle_tool("minerva_pcb_redo", {})
+	check("minerva_pcb_redo refuses when nothing was undone",
+			not bool(nothing.get("ok", true)) and str(nothing.get("error", "")).contains("nothing_to_redo"),
+			str(nothing))
+	# Walk the undo side to its floor: the load state is step 0 and never undone.
+	var floor_reply: Dictionary = {}
+	for _i in range(index_after_commit + 1):
+		floor_reply = await panel.handle_tool("minerva_pcb_undo", {})
+	check("minerva_pcb_undo refuses at the bottom of the history",
+			not bool(floor_reply.get("ok", true)) and str(floor_reply.get("error", "")).contains("nothing_to_undo")
+				and data.history_index == 0,
+			str(floor_reply))
+	panel.queue_free()
+	await process_frame
+
+
+# ── Selection-drag threshold ──────────────────────────────────────────────────
+#
+# ORACLE: the serialized trace list and history.size() either side of two real
+# press/motion/release gestures on NA's lane, driven through the canvas's own
+# _gui_input. A 2 px wobble must leave both untouched; a 20 px drag must change
+# the points and record exactly one step.
+
+## A point on NA's top-layer lane: NA rides the -0.255 lane (0.2mm tracks at
+## 0.3mm clearance, laid pitch 0.51) of the spine at y = 25, between its source
+## station and the station fan-out.
+const DRAG_ON_LANE := Vector2(30.0, 24.745)
+
+
+func _mouse_button(canvas: Variant, screen: Vector2, pressed: bool) -> void:
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.position = screen
+	canvas._gui_input(ev)
+
+
+func _mouse_move(canvas: Variant, screen: Vector2) -> void:
+	var mm := InputEventMouseMotion.new()
+	mm.position = screen
+	canvas._gui_input(mm)
+
+
+func _test_selection_drag_threshold() -> void:
+	print("\n-- a press with a wobble moves no copper; a real drag still does --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+	var data: Variant = panel.get_data()
+	data.from_board_dict(_bus_badge_board())
+	canvas.snap_to_grid = false
+	await process_frame
+	await _commit_station_bus(panel, canvas)
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	await process_frame
+
+	var start: Vector2 = canvas.world_to_screen(DRAG_ON_LANE)
+	var hit: Array = canvas._entity_at(DRAG_ON_LANE)
+	check("drag fixture: the press point is on a trace", str(hit[0]) == canvas.KIND_TRACE, str(hit))
+	var traces_before: Array = data.to_board_dict().get("traces", [])
+	var history_before: int = data.history.size()
+
+	# A click with a 2 px wobble in it.
+	_mouse_button(canvas, start, true)
+	check("the press arms a drag without moving anything",
+			not canvas.is_dragging_selection and canvas._selection_drag_pending)
+	_mouse_move(canvas, start + Vector2(2.0, 0.0))
+	check("2 px of travel does not go live", not canvas.is_dragging_selection)
+	_mouse_button(canvas, start + Vector2(2.0, 0.0), false)
+	check("a wobbled click moves no copper and records no step",
+			data.to_board_dict().get("traces", []) == traces_before
+				and data.history.size() == history_before,
+			"history %d -> %d" % [history_before, data.history.size()])
+
+	# A real drag of the (now selected) trace.
+	_mouse_button(canvas, start, true)
+	_mouse_move(canvas, start + Vector2(20.0, 0.0))
+	check("20 px of travel goes live", canvas.is_dragging_selection)
+	_mouse_button(canvas, start + Vector2(20.0, 0.0), false)
+	check("a real drag moves the trace and records exactly one step",
+			data.to_board_dict().get("traces", []) != traces_before
+				and data.history.size() == history_before + 1,
+			"history %d -> %d" % [history_before, data.history.size()])
 	panel.queue_free()
 	await process_frame

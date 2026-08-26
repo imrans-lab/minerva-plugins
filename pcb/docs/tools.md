@@ -48,6 +48,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_delete_traces` | removes named traces/vias without clearing the board |
 | `minerva_pcb_add_trace` | `data.create_trace_entity`, or `data.extend_trace` when `start`/`end` names a free trace end (below); one journalled step |
 | `minerva_pcb_cut_trace` | `data.cut_trace` at an interior vertex, by `at_index` or by `x_mm`/`y_mm` (below); one journalled step |
+| `minerva_pcb_undo` / `minerva_pcb_redo` | `PCBPanel.board_undo` / `board_redo` (one step of `PCBData` history; the keys and ribbon buttons take the same path — see Board history below) |
 | `minerva_pcb_get_image` | snapshot-style via `host.render_content_to_image`; null-safe headless |
 | `minerva_pcb_apply_route_hints` | route the open route hints → RouteCandidates in the routing workspace (default) or committed traces (`commit=true`); see the route-correction loop below |
 | `minerva_pcb_list_zones` | read-only; summary per zone (`zone_id`, `kind`, `net`, `layer`, `point_count`) |
@@ -889,6 +890,33 @@ N traces together — never a partial bus.
 `layer` is required unless the board declares exactly one copper layer (there
 is no toolbar working layer to fall back on from an MCP call, unlike the
 canvas gesture's `trace_author_layer()`).
+
+## Board history (`minerva_pcb_undo` / `minerva_pcb_redo`)
+
+The board model keeps one history step per committed action (every tool commit,
+bus, delete, drag-move and mutating verb calls `save_to_history` once). Three
+surfaces step it, through ONE implementation (`pcb/ui/pcb_board_history.gd` →
+`PCBPanel.board_undo` / `board_redo`):
+
+- **Keys** — `Ctrl+Z` undoes, `Ctrl+Shift+Z` or `Ctrl+Y` redoes, while the panel
+  has focus. With a `pcb_route_hint` annotation selected the same keys drive that
+  hint's own revision stack instead (`minerva_pcb_hint_undo` / `_redo`); the hint
+  owns the key whenever it is the target, so the two stacks never both move.
+- **Ribbon** — the editor's Undo/Redo buttons reach the panel through the host
+  hook pair `_on_panel_undo_request` / `_on_panel_redo_request`.
+- **Verbs** — `minerva_pcb_undo` / `minerva_pcb_redo` (`editor_name` only).
+
+Every route names the step in the status line (`Undid "Add bus (2 nets)" — 2 more
+to undo.`) and refreshes the canvas and pickers. The verbs reply:
+
+```json
+{"ok": true, "action": "Add bus (2 nets)", "undo_depth": 2, "redo_depth": 1}
+```
+
+and refuse with `nothing_to_undo` / `nothing_to_redo` at either end of the
+history. A selection drag on the canvas only becomes a move once the pointer has
+travelled `SELECTION_DRAG_THRESHOLD_PX` (3 px), so a click with a wobble in it
+records no step to undo.
 
 ## Worker (already live — credited, not re-created)
 

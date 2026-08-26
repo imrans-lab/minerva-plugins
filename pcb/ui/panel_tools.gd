@@ -49,6 +49,7 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## panel reads (pcb_prefs.shared()), which is what makes an agent's write and a
 ## human's turn of the width box two views of one value rather than two stores.
 const _PcbPrefsScript := preload("model/pcb_prefs.gd")
+const _PcbBoardHistoryScript := preload("pcb_board_history.gd")
 ## B2 (MCP parity round): static-func + const access for the zone outline
 ## helpers (zone_outline_to_list/zone_outline_points, MIN_ZONE_OUTLINE_POINTS)
 ## without depending on GDScript's instance-forwarding for consts across a
@@ -161,6 +162,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_undo(host, args)
 		"minerva_pcb_hint_redo":
 			return _hint_redo(host, args)
+		"minerva_pcb_undo":
+			return _board_history(host, "undo")
+		"minerva_pcb_redo":
+			return _board_history(host, "redo")
 		# Codex 1047 fix round, verdict 4: the NAMED guided→detailed conversion
 		"minerva_pcb_hint_convert_to_detailed":
 			return _hint_convert_to_detailed(host, args)
@@ -1988,6 +1993,31 @@ static func _hint_redo(host, args: Dictionary) -> Dictionary:
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "redo failed")))
 	return _ok({"id": id, "kind_payload": result.get("kind_payload", {})})
+
+
+# ── Board-level undo/redo (minerva_pcb_undo / minerva_pcb_redo) ──────────────
+#
+# The verb twins of Ctrl+Z / Ctrl+Shift+Z and the host's ribbon buttons. When
+# a live panel is mounted the step goes THROUGH it (PCBPanel.board_undo/
+# board_redo), so the status line and the pickers react exactly as they do to
+# the keys; headless (no panel) the module steps the model directly.
+
+static func _board_history(host, which: String) -> Dictionary:
+	var panel = host.get_panel() if host != null and host.has_method("get_panel") else null
+	var result: Dictionary
+	if panel != null and is_instance_valid(panel) and panel.has_method("board_undo"):
+		result = panel.board_undo() if which == "undo" else panel.board_redo()
+	else:
+		var data = _resolve_data(host)
+		if not (data is Object):
+			return data
+		result = _PcbBoardHistoryScript.undo(data) if which == "undo" \
+			else _PcbBoardHistoryScript.redo(data)
+	if not bool(result.get("ok", false)):
+		return _err(str(result.get("error", which + "_failed")))
+	return _ok({"action": str(result.get("action", "")),
+		"undo_depth": int(result.get("undo_depth", 0)),
+		"redo_depth": int(result.get("redo_depth", 0))})
 
 
 ## Codex 1047 fix round, verdict 4 — minerva_pcb_hint_convert_to_detailed:

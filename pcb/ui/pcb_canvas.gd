@@ -476,6 +476,17 @@ var _ghost_rotate_start_deg := 0.0
 ## Cleared on release, so one gesture is at most one notice.
 var _via_drag_notice_armed: bool = false
 const _VIA_DRAG_NOTICE_PX := 3.0
+
+## Screen-pixel travel a press on a selected entity must make before it becomes
+## a MOVE. A press captures the selection's origins and arms the drag; copper
+## only starts to follow the pointer once it has travelled this far, so a click
+## with a wobble in it — the ordinary way a mouse releases — moves nothing and
+## journals nothing. Same figure as the two drag notices above.
+const SELECTION_DRAG_THRESHOLD_PX := 3.0
+## True from a press on a selected entity until the pointer crosses
+## SELECTION_DRAG_THRESHOLD_PX (the drag then goes live) or releases (the press
+## was a click).
+var _selection_drag_pending: bool = false
 ## Cutout twin of the above (cold-review F3): cutouts do not drag either (see
 ## _capture_drag_origins), and a drag attempt on a cutout-only selection was
 ## silent — the exact "looks like a broken canvas" case the via notice exists
@@ -1314,6 +1325,7 @@ func _exit_tree() -> void:
 	# the re-added canvas ignore all input. _enter_tree restores STOP on re-add.
 	is_panning = false
 	is_dragging_selection = false
+	_selection_drag_pending = false
 	_drag_origins = {}
 	is_box_selecting = false
 	# Same reason the drag state above is dropped: this node is REPARENTED, and a
@@ -4033,6 +4045,9 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# Release a left-drag pan (Pan tool / Space-drag).
 			if is_panning:
 				is_panning = false
+			# A press that never crossed the threshold was a click: nothing
+			# moved, so there is nothing to journal.
+			_selection_drag_pending = false
 			if is_dragging_selection:
 				_end_selection_drag()
 
@@ -4285,6 +4300,13 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		_placement_drag_pos = ghost_target
 		queue_redraw()
 		return
+
+	# The armed drag goes live on the first real travel; until then the press
+	# is still a click and the copper stays where it is.
+	if _selection_drag_pending \
+			and (event.position - drag_start_mouse).length() >= SELECTION_DRAG_THRESHOLD_PX:
+		_selection_drag_pending = false
+		is_dragging_selection = true
 
 	if is_dragging_selection:
 		# The ANCHOR is what snaps; everything else in the selection takes the
@@ -5596,11 +5618,15 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 			_propose_pending = true
 			_propose_pending_grab = screen_to_world(screen_pos) - armed.position
 			is_dragging_selection = false
+			_selection_drag_pending = false
 			_via_drag_notice_armed = false
 			_cutout_drag_notice_armed = false
 			return
 	_capture_drag_origins()
-	is_dragging_selection = not _drag_origins.is_empty()
+	# Armed, not live: is_dragging_selection flips in _handle_mouse_motion once
+	# the pointer has travelled SELECTION_DRAG_THRESHOLD_PX.
+	is_dragging_selection = false
+	_selection_drag_pending = not _drag_origins.is_empty()
 	# Vias are position-only movable entities. Their live preview is captured
 	# below; release resolves trace contact and moves any owned junction through
 	# PCBData.move_via rather than leaving copper behind.

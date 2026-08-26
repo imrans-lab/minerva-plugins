@@ -458,6 +458,30 @@
       }
     },
     {
+      "name": "minerva_pcb_undo",
+      "description": "Undo the board's most recent history step — the same board-level undo as Ctrl+Z on the panel and the editor ribbon's Undo button (every tool commit, bus, delete, drag-move or verb that changes copper records one step). Replies with the label of the step reverted and how many steps remain in each direction. Refuses (nothing_to_undo) at the bottom of the history. Route-hint revisions have their own stack: use minerva_pcb_hint_undo for those.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_redo",
+      "description": "Redo the board history step most recently undone — the twin of Ctrl+Shift+Z / Ctrl+Y and the ribbon's Redo button. Replies with the label of the step re-applied and the remaining depth in each direction. Refuses (nothing_to_redo) when nothing was undone, or once a fresh edit has cleared the redo side.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_pcb_hint_convert_to_detailed",
       "description": "Convert a SUPERSEDED guided route hint to 'detailed', reclaiming manual waypoint control. A legacy guided hint whose inline waypoints were seeded into a task-level routing constraint (marked kind_payload.waypoints_superseded_by_constraint_revision — the station-12 migration, or a live steer) has inert waypoints: the host refuses waypoint edits and routing reads only the constraint. This named operation clears that task constraint (only when this hint singly owns it), then strips the supersession marker and the offline lock fields and sets detail_level='detailed' — ordered two-store writes, NOT a spanning transaction: a torn save is repaired by deterministic load-time reconciliation, and undo restores the annotation side only (one history step; re-run this tool to complete a half-undone conversion) — afterwards the hint's waypoints are editable again, routing follows them literally (as-drawn) on the next propose, and the hint is never re-seeded. Use it when an edit was refused with error 'waypoints_superseded' (or offline with 'live_editor_required') and you want to hand-edit the path instead of steering the constraint. Refuses by name: constraint_not_singly_owned when a merged multi-hint task owns the constraint (converting would orphan shared steering — steer via minerva_pcb_workspace_reroute_route instead), not_superseded for an ordinary unstamped hint, hint_not_found / not_a_route_hint otherwise.",
       "executor": "panel",

@@ -1419,8 +1419,10 @@ func _run_removal_manifest_tools_absent() -> void:
 	# minerva_pcb_list_mounting_holes. Both executor:"panel", so the Go pin at
 	# 19 backend tools is unaffected.
 	# (109 -> 110): minerva_pcb_cut_trace, executor:"panel"; the Go pin stays.
-	check_eq("manifest tool count == 110 (ALL manifest.json tools[] entries)",
-		names.size(), 110)
+	# (110 -> 112): minerva_pcb_undo / minerva_pcb_redo, the board history's
+	# verb twins of Ctrl+Z / Ctrl+Shift+Z; executor:"panel", the Go pin stays.
+	check_eq("manifest tool count == 112 (ALL manifest.json tools[] entries)",
+		names.size(), 112)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

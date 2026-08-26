@@ -235,7 +235,10 @@ func _init() -> void:
 	# executor:"panel".
 	# (109 -> 110): minerva_pcb_cut_trace — a trace cut at an interior vertex,
 	# the verb twin of the canvas's "Cut here" item. executor:"panel".
-	check("total registered tool count == 110", registered.size() == 110,
+	# (110 -> 112): minerva_pcb_undo / minerva_pcb_redo — the board history's
+	# verb twins of Ctrl+Z / Ctrl+Shift+Z and the ribbon buttons. Both
+	# executor:"panel".
+	check("total registered tool count == 112", registered.size() == 112,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

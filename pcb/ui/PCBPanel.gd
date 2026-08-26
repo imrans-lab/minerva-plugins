@@ -47,6 +47,7 @@ const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.
 const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
+const _PcbBoardHistoryScript: Script = preload("pcb_board_history.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
@@ -4127,12 +4128,14 @@ func _sync_dock_pane_mode() -> void:
 	pane.set_dock_mode(0 if wide else 1)
 
 
-# ── Per-hint revision undo/redo keyboard seam (C4 deliverable 2c) ─────────────
+# ── Undo/redo keyboard seam ───────────────────────────────────────────────────
 
-## Ctrl+Z / Ctrl+Shift+Z routes to per-hint revision undo/redo ONLY when a
-## pcb_route_hint annotation is currently selected — otherwise the event is
-## left unconsumed so it never collides with a future board-level undo
-## binding (see below).
+## Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y: with a pcb_route_hint annotation selected
+## the keys drive that hint's own revision stack (below); with no hint
+## selected they step the BOARD history through board_undo()/board_redo() —
+## the same path the host's ribbon hooks and the minerva_pcb_undo/_redo verbs
+## take. The hint branch is asked first and owns the key whenever a hint is
+## the target, so the two stacks never both move on one press.
 ##
 ## Seam choice (reuse-scan finding): AnnotationOverlay._gui_input only
 ## special-cases Escape/Delete/Backspace/Enter via its pseudo-pointer
@@ -4149,17 +4152,28 @@ func _sync_dock_pane_mode() -> void:
 ## neither the overlay's nor the canvas's _gui_input consumed the key.
 ## Gating strictly on "a route hint is selected" keeps this mutually
 ## exclusive by construction with any future board-level Ctrl+Z binding —
-## an edit with no hint selected simply falls through unconsumed.
+## an edit with no hint selected falls through to the board history.
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
 	var ek: InputEventKey = event
-	if not ek.pressed or ek.is_echo():
+	var action: String = _PcbBoardHistoryScript.key_action(ek)
+	if action.is_empty():
 		return
-	if ek.keycode != KEY_Z or not ek.ctrl_pressed:
+	if _hint_revision_key(action):
 		return
+	var result: Dictionary = board_undo() if action == "undo" else board_redo()
+	if bool(result.get("ok", false)):
+		get_viewport().set_input_as_handled()
+
+
+## The per-hint half of the key seam. Returns true when the key belonged to a
+## hint — one route hint selected (whether or not its stack had a step), or a
+## multi-selection that disarms — and false when no hint is the target, so the
+## caller may step the board instead.
+func _hint_revision_key(action: String) -> bool:
 	if _annotation_host == null:
-		return
+		return false
 	# A8u1: hint undo/redo is a SINGLE-hint revision stack (undo_hint_revision
 	# takes one id). With a multi-selection there is no unambiguous target, so
 	# Ctrl+Z disarms rather than silently rewinding whichever hint happens to be
@@ -4171,16 +4185,16 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_show_transient_status("Hint undo needs one hint selected — %d are selected." \
 			% _annotation_host.get_selected_annotation_ids().size())
 		get_viewport().set_input_as_handled()
-		return
+		return true
 	var sel_id: String = _annotation_host.get_selected_annotation_id()
 	if sel_id.is_empty():
-		return
+		return false
 	var ann: Dictionary = _annotation_host.get_by_id(sel_id)
 	if str(ann.get("kind", "")) != "pcb_route_hint":
-		return
+		return false
 
 	var result: Dictionary
-	if ek.shift_pressed:
+	if action == "redo":
 		result = _annotation_host.redo_hint_revision(sel_id)
 	else:
 		result = _annotation_host.undo_hint_revision(sel_id)
@@ -4188,6 +4202,42 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		if _canvas != null:
 			_canvas.queue_redraw()
+	return true
+
+
+# ── Board-level undo/redo ─────────────────────────────────────────────────────
+
+## Step the board history back one step and say so. The one implementation
+## behind the keys, the host's ribbon hooks and the MCP verbs; returns the
+## pcb_board_history reply (ok, action, undo_depth, redo_depth | error).
+func board_undo() -> Dictionary:
+	return _after_history_step(_PcbBoardHistoryScript.undo(_data))
+
+
+## Re-apply the most recently undone step; board_undo's mirror.
+func board_redo() -> Dictionary:
+	return _after_history_step(_PcbBoardHistoryScript.redo(_data))
+
+
+## The feedback every history step owes: the status line names the step, and
+## the pickers, size label and canvas re-read the restored board (the model's
+## own data_changed/structure_changed already reach the canvas and the labels;
+## the refresh covers the option lists that only rebuild on demand).
+func _after_history_step(result: Dictionary) -> Dictionary:
+	_show_transient_status(_PcbBoardHistoryScript.status_line(result))
+	if bool(result.get("ok", false)):
+		_refresh_board_ui()
+	return result
+
+
+## Minerva host hook pair: the editor ribbon's Undo/Redo buttons land here
+## (both must exist for the host to show the buttons). True when a step moved.
+func _on_panel_undo_request() -> bool:
+	return bool(board_undo().get("ok", false))
+
+
+func _on_panel_redo_request() -> bool:
+	return bool(board_redo().get("ok", false))
 
 
 # ── Responsive layout (round B) ────────────────────────────────────────────────
