@@ -45,7 +45,10 @@ const EPS := 1e-4
 
 ## Tolerance for a CLEARANCE measurement, in mm — the same one micron the
 ## module itself allows, and for the same reason: a lane pair laid out exactly
-## one pitch apart measures 0.799999 against 0.800000 in 32-bit float. Named
+## one pitch apart measures 0.799999 against 0.800000 in 32-bit float (the
+## module now lays every pair a 0.01mm margin past its rule, so this tolerance
+## is no longer spent on a correct bundle; it stays for the measurements that
+## compare copper the module did not space, such as pad legs). Named
 ## separately from EPS because it answers a different question (is this copper
 ## legal) with a different consequence for being wrong.
 const MEASURE_EPS := 1e-3
@@ -182,26 +185,28 @@ func _route(result: Dictionary, index: int) -> PackedVector2Array:
 ## Spine (0,0) -> (100,0), so the bundle runs east: u = (1,0) and the offset
 ## normal n = (-u.y, u.x) = (0,1), i.e. a track's offset is its y.
 ##
-## Three 0.2mm tracks at 0.3mm clearance: pitch = 0.1 + 0.3 + 0.1 = 0.5 for both
-## gaps, so cumulative_offsets gives lanes [-0.5, 0.0, +0.5] for A, B, C in the
-## caller's order (the sibling suite pins that arithmetic).
+## Three 0.2mm tracks at 0.3mm clearance: rule pitch = 0.1 + 0.3 + 0.1 = 0.5,
+## laid at 0.5 + 0.01 = 0.51 for both gaps, so cumulative_offsets gives lanes
+## [-0.51, 0.0, +0.51] for A, B, C in the caller's order (the sibling suite pins
+## that arithmetic, margin included).
 ##
 ## SOURCE pads sit west of the spine and ABOVE the whole bundle, in the same
 ## perpendicular order as the lanes: A (-10,-10), B (-10,-8), C (-10,-6).
 ## Every track has to travel DOWN to its lane, and C — the lane furthest from
 ## the pads — has to cross both other lanes to get there, so it must leave
 ## first, before those lanes have started. B crosses only A's. A crosses none.
-## Departure order is therefore C, B, A at stations 0, 0.5, 1.0 (spaced by the
-## same 0.5 pitch, since the tracks meeting at each step are the same widths):
+## Departure order is therefore C, B, A at stations 0, 0.51, 1.02 (spaced by
+## the same 0.51 laid pitch, since the tracks meeting at each step are the same
+## widths):
 ##
-##     source stations  A = 1.0   B = 0.5   C = 0.0
+##     source stations  A = 1.02   B = 0.51   C = 0.0
 ##
 ## TARGET pads sit east of the spine and BELOW the whole bundle, again in lane
 ## order: A (110,20), B (110,22), C (110,24). Mirrored reasoning — A now has to
 ## cross both other lanes, so A leaves first, measured BACK from the spine's
 ## end:
 ##
-##     target stations  A = 0.0   B = 0.5   C = 1.0
+##     target stations  A = 0.0   B = 0.51   C = 1.02
 ##
 ## Each route is then pad, corner at (station, pad-perp), lane start at
 ## (station, lane), lane end, corner, pad.
@@ -219,29 +224,29 @@ func _run_straight_bundle() -> void:
 		return
 
 	var offsets: Array = result["offsets"]
-	check_near("lane A", float(offsets[0]), -0.5)
+	check_near("lane A", float(offsets[0]), -0.51)
 	check_near("lane B", float(offsets[1]), 0.0)
-	check_near("lane C", float(offsets[2]), 0.5)
+	check_near("lane C", float(offsets[2]), 0.51)
 
 	var src: Array = result["source_stations"]
-	check_near("A leaves the source end last (1.0mm in)", float(src[0]), 1.0)
-	check_near("B leaves second (0.5mm in)", float(src[1]), 0.5)
+	check_near("A leaves the source end last (1.02mm in)", float(src[0]), 1.02)
+	check_near("B leaves second (0.51mm in)", float(src[1]), 0.51)
 	check_near("C, which crosses both other lanes, leaves first (0.0mm in)",
 		float(src[2]), 0.0)
 	var tgt: Array = result["target_stations"]
 	check_near("A leaves the target end first (0.0mm back)", float(tgt[0]), 0.0)
-	check_near("B leaves second (0.5mm back)", float(tgt[1]), 0.5)
-	check_near("C leaves last (1.0mm back)", float(tgt[2]), 1.0)
+	check_near("B leaves second (0.51mm back)", float(tgt[1]), 0.51)
+	check_near("C leaves last (1.02mm back)", float(tgt[2]), 1.02)
 
-	check_points("A: pad -> corner -> lane -0.5 -> corner -> pad", _route(result, 0),
-		[Vector2(-10, -10), Vector2(1, -10), Vector2(1, -0.5),
-		 Vector2(100, -0.5), Vector2(100, 20), Vector2(110, 20)])
+	check_points("A: pad -> corner -> lane -0.51 -> corner -> pad", _route(result, 0),
+		[Vector2(-10, -10), Vector2(1.02, -10), Vector2(1.02, -0.51),
+		 Vector2(100, -0.51), Vector2(100, 20), Vector2(110, 20)])
 	check_points("B: rides the spine itself (lane 0.0)", _route(result, 1),
-		[Vector2(-10, -8), Vector2(0.5, -8), Vector2(0.5, 0),
-		 Vector2(99.5, 0), Vector2(99.5, 22), Vector2(110, 22)])
+		[Vector2(-10, -8), Vector2(0.51, -8), Vector2(0.51, 0),
+		 Vector2(99.49, 0), Vector2(99.49, 22), Vector2(110, 22)])
 	check_points("C: leaves at the spine's own first point", _route(result, 2),
-		[Vector2(-10, -6), Vector2(0, -6), Vector2(0, 0.5),
-		 Vector2(99, 0.5), Vector2(99, 24), Vector2(110, 24)])
+		[Vector2(-10, -6), Vector2(0, -6), Vector2(0, 0.51),
+		 Vector2(98.98, 0.51), Vector2(98.98, 24), Vector2(110, 24)])
 
 
 ## MIXED WIDTHS THROUGH A BEND, every point hand-derived.
@@ -251,9 +256,10 @@ func _run_straight_bundle() -> void:
 ## that end a track's offset runs in -x, and a pad's perpendicular coordinate is
 ## 30 - x.
 ##
-## Widths [1.0, 0.2, 0.2] at 0.2mm clearance. gap A-B = 0.5 + 0.2 + 0.1 = 0.8,
-## gap B-C = 0.1 + 0.2 + 0.1 = 0.4; positions 0 / 0.8 / 1.2 centred on 0.6 give
-## lanes [-0.6, +0.2, +0.6].
+## Widths [1.0, 0.2, 0.2] at 0.2mm clearance, each gap laid 0.01 past its rule.
+## gap A-B = 0.5 + 0.2 + 0.1 + 0.01 = 0.81, gap B-C = 0.1 + 0.2 + 0.1 + 0.01 =
+## 0.41; positions 0 / 0.81 / 1.22 centred on 0.61 give lanes
+## [-0.61, +0.20, +0.61].
 ##
 ## The lane polyline through the right angle is offset_polyline's mitered one:
 ## for offset o the corner lands at (30 - o, o) and the last point at (30 - o,
@@ -262,37 +268,37 @@ func _run_straight_bundle() -> void:
 ## SOURCE pads (-5,-4), (-5,-3), (-5,-2), above the bundle in lane order, so the
 ## departure order is C, B, A as in the straight case. THE STATIONS ARE THE
 ## DISCRIMINATOR: they are spaced by the pitch of the two tracks meeting at each
-## step, not by one uniform figure. C -> B is 0.1 + 0.2 + 0.1 = 0.4, and B -> A
-## is 0.1 + 0.2 + 0.5 = 0.8 because A is the 1.0mm track:
+## step, not by one uniform figure. C -> B is 0.1 + 0.2 + 0.1 + 0.01 = 0.41, and
+## B -> A is 0.1 + 0.2 + 0.5 + 0.01 = 0.81 because A is the 1.0mm track:
 ##
-##     source stations  C = 0.0   B = 0.4   A = 0.4 + 0.8 = 1.2
+##     source stations  C = 0.0   B = 0.41   A = 0.41 + 0.81 = 1.22
 ##
 ## TARGET pads (29,35), (27,35), (25,35) are perpendicular coordinates 1, 3, 5 —
 ## lane order again — so A leaves first there and the same widths give
 ##
-##     target stations  A = 0.0   B = 0.8   C = 0.8 + 0.4 = 1.2
+##     target stations  A = 0.0   B = 0.81   C = 0.81 + 0.41 = 1.22
 ## THE SAME STRAIGHT BUNDLE, WITH A VIA STATION on a middle vertex — every
 ## point hand-derived from the numbers _run_straight_bundle already worked out.
 ##
 ## Spine (0,0) -> (50,0) -> (100,0), station on vertex 1, 0.8mm vias. Nothing
-## about the ends changes: the same lanes [-0.5, 0, +0.5], the same source
-## stations 1.0 / 0.5 / 0.0 and target stations 0.0 / 0.5 / 1.0.
+## about the ends changes: the same lanes [-0.51, 0, +0.51], the same source
+## stations 1.02 / 0.51 / 0.0 and target stations 0.0 / 0.51 / 1.02.
 ##
 ## WHAT THE STATION ADDS. Two vias 0.8mm across at 0.3mm clearance need
-## 0.4 + 0.3 + 0.4 = 1.1mm between centres, wider than the 0.5mm the tracks are
-## spaced by, so the lanes widen to via offsets [-1.1, 0.0, +1.1] — B, already
-## on the spine, does not move at all.
+## 0.4 + 0.3 + 0.4 = 1.1mm between centres, laid at 1.11, wider than the 0.51mm
+## the tracks are spaced by, so the lanes widen to via offsets
+## [-1.11, 0.0, +1.11] — B, already on the spine, does not move at all.
 ##
-## The jogs are staggered by that same 1.1mm step, one rank per distinct
-## distance from the spine. A and C are both 0.5mm out, so they share rank 0 and
-## jog 1.1mm either side of the station: A leaves its lane at x = 48.9, runs
-## down to y = -1.1, carries its via at (50, -1.1), and comes back up at
-## x = 51.1. C mirrors it. B has no jog and meets its via at (50, 0).
+## The jogs are staggered by that same 1.11mm step, one rank per distinct
+## distance from the spine. A and C are both 0.51mm out, so they share rank 0
+## and jog 1.11mm either side of the station: A leaves its lane at x = 48.89,
+## runs down to y = -1.11, carries its via at (50, -1.11), and comes back up at
+## x = 51.11. C mirrors it. B has no jog and meets its via at (50, 0).
 ##
-##     vias  A (50, -1.1)   B (50, 0)   C (50, +1.1)
+##     vias  A (50, -1.11)   B (50, 0)   C (50, +1.11)
 ##
-## so the three vias sit on the station's own perpendicular, in lane order, 1.1mm
-## apart — the via pitch, measured below rather than assumed.
+## so the three vias sit on the station's own perpendicular, in lane order,
+## 1.11mm apart — past the 1.1mm via pitch, measured below rather than assumed.
 func _run_via_station() -> void:
 	print("-- via station: three nets change layer on one vertex --")
 	var result: Dictionary = BusGeom.bundle_routes(
@@ -309,25 +315,25 @@ func _run_via_station() -> void:
 	check("the station is reported on the vertex it was asked for",
 		int(result.get("via_station_index", -1)) == 1)
 	var via_offsets: Array = result["via_station_offsets"]
-	check_near("A widens to -1.1", float(via_offsets[0]), -1.1)
+	check_near("A widens to -1.11", float(via_offsets[0]), -1.11)
 	check_near("B, already on the spine, does not widen", float(via_offsets[1]), 0.0)
-	check_near("C widens to +1.1", float(via_offsets[2]), 1.1)
+	check_near("C widens to +1.11", float(via_offsets[2]), 1.11)
 
-	check_points("A: lane -0.5, jog out at x 48.9, via at -1.1, jog back at 51.1",
+	check_points("A: lane -0.51, jog out at x 48.89, via at -1.11, jog back at 51.11",
 		_route(result, 0),
-		[Vector2(-10, -10), Vector2(1, -10), Vector2(1, -0.5),
-		 Vector2(48.9, -0.5), Vector2(48.9, -1.1), Vector2(50, -1.1),
-		 Vector2(51.1, -1.1), Vector2(51.1, -0.5), Vector2(100, -0.5),
+		[Vector2(-10, -10), Vector2(1.02, -10), Vector2(1.02, -0.51),
+		 Vector2(48.89, -0.51), Vector2(48.89, -1.11), Vector2(50, -1.11),
+		 Vector2(51.11, -1.11), Vector2(51.11, -0.51), Vector2(100, -0.51),
 		 Vector2(100, 20), Vector2(110, 20)])
 	check_points("B: no jog — the spine lane runs straight through its via",
 		_route(result, 1),
-		[Vector2(-10, -8), Vector2(0.5, -8), Vector2(0.5, 0), Vector2(50, 0),
-		 Vector2(99.5, 0), Vector2(99.5, 22), Vector2(110, 22)])
+		[Vector2(-10, -8), Vector2(0.51, -8), Vector2(0.51, 0), Vector2(50, 0),
+		 Vector2(99.49, 0), Vector2(99.49, 22), Vector2(110, 22)])
 	check_points("C: the mirror of A", _route(result, 2),
-		[Vector2(-10, -6), Vector2(0, -6), Vector2(0, 0.5),
-		 Vector2(48.9, 0.5), Vector2(48.9, 1.1), Vector2(50, 1.1),
-		 Vector2(51.1, 1.1), Vector2(51.1, 0.5), Vector2(99, 0.5),
-		 Vector2(99, 24), Vector2(110, 24)])
+		[Vector2(-10, -6), Vector2(0, -6), Vector2(0, 0.51),
+		 Vector2(48.89, 0.51), Vector2(48.89, 1.11), Vector2(50, 1.11),
+		 Vector2(51.11, 1.11), Vector2(51.11, 0.51), Vector2(98.98, 0.51),
+		 Vector2(98.98, 24), Vector2(110, 24)])
 
 	# THE CUT IS WHERE THE COPPER CHANGES LAYER, so it has to land ON the via
 	# point of the very polyline it indexes — a split off by one authors a
@@ -345,11 +351,12 @@ func _run_via_station() -> void:
 		mismatched == 0)
 	check_points("the vias sit on the station's perpendicular, in lane order",
 		_pv(points),
-		[Vector2(50, -1.1), Vector2(50, 0), Vector2(50, 1.1)])
+		[Vector2(50, -1.11), Vector2(50, 0), Vector2(50, 1.11)])
 
 	# ADJACENT-VIA CLEARANCE, measured rather than assumed — the pads are 0.8mm
 	# across at 0.3mm clearance, so 1.1mm centre to centre is the requirement
-	# and anything less is copper the fab will bridge.
+	# and anything less is copper the fab will bridge. The laid spacing clears
+	# it by the margin, with no tolerance spent.
 	var need_via: float = BusGeom.pitch_between(0.8, 0.8, 0.3)
 	check_near("the via pitch this bundle owes", need_via, 1.1)
 	var closest := INF
@@ -357,6 +364,8 @@ func _run_via_station() -> void:
 		for j in range(i + 1, points.size()):
 			closest = minf(closest, (points[i] as Vector2).distance_to(points[j] as Vector2))
 	check("no two vias come closer than the via pitch", closest >= need_via - MEASURE_EPS)
+	check("...and the laid spacing beats the via pitch outright, by the margin",
+		closest > need_via and closest - need_via >= BusGeom.LANE_PITCH_MARGIN_MM - MEASURE_EPS)
 
 	# THE STATION IS A VIA, NOT A CORNER, and it needs spine on both sides: both
 	# are UNBUILDABLE because a fan-out has no unambiguous axis to run along.
@@ -380,8 +389,8 @@ func _run_via_station() -> void:
 	# TOO LITTLE RUN PAST THE STATION IS A FINDING, not a refusal: the jogs fold
 	# back over the run they came from, which is copper somebody can shorten a
 	# spine to fix. Spine (0,0)->(20,0)->(21,0)->(100,0) with the station on
-	# vertex 1 leaves 1.0mm before the next vertex where the 1.1mm fan-out plus
-	# the 0.5mm bundle needs 1.6mm.
+	# vertex 1 leaves 1.0mm before the next vertex where the 1.11mm fan-out plus
+	# the 0.51mm bundle needs 1.62mm.
 	check_bad_but_buildable("a station with no room to fan out lands anyway",
 		BusGeom.bundle_routes(
 			_pv([Vector2(0, 0), Vector2(20, 0), Vector2(21, 0), Vector2(100, 0)]),
@@ -406,42 +415,42 @@ func _run_mixed_width_bend() -> void:
 		return
 
 	var offsets: Array = result["offsets"]
-	check_near("the 1.0mm track's lane", float(offsets[0]), -0.6)
+	check_near("the 1.0mm track's lane", float(offsets[0]), -0.61)
 	check_near("middle lane", float(offsets[1]), 0.2)
-	check_near("outer lane", float(offsets[2]), 0.6)
+	check_near("outer lane", float(offsets[2]), 0.61)
 
 	var src: Array = result["source_stations"]
 	check_near("C leaves first", float(src[2]), 0.0)
-	check_near("B leaves 0.4mm later (the two 0.2mm tracks' pitch)",
-		float(src[1]), 0.4)
-	check_near("A leaves 0.8mm after B — its 1.0mm width widened THAT step alone",
-		float(src[0]), 1.2)
+	check_near("B leaves 0.41mm later (the two 0.2mm tracks' laid pitch)",
+		float(src[1]), 0.41)
+	check_near("A leaves 0.81mm after B — its 1.0mm width widened THAT step alone",
+		float(src[0]), 1.22)
 	var tgt: Array = result["target_stations"]
 	check_near("A leaves the target end first", float(tgt[0]), 0.0)
-	check_near("B is 0.8mm back from it", float(tgt[1]), 0.8)
-	check_near("C is a further 0.4mm back", float(tgt[2]), 1.2)
+	check_near("B is 0.81mm back from it", float(tgt[1]), 0.81)
+	check_near("C is a further 0.41mm back", float(tgt[2]), 1.22)
 	check("the wide track did NOT get the narrow tracks' spacing",
 		absf(float(src[0]) - float(src[1])) > absf(float(src[1]) - float(src[2])) + EPS)
 
-	check_points("A: 1.0mm track, outside of the corner at x = 30.6", _route(result, 0),
-		[Vector2(-5, -4), Vector2(1.2, -4), Vector2(1.2, -0.6), Vector2(30.6, -0.6),
-		 Vector2(30.6, 30), Vector2(29, 30), Vector2(29, 35)])
+	check_points("A: 1.0mm track, outside of the corner at x = 30.61", _route(result, 0),
+		[Vector2(-5, -4), Vector2(1.22, -4), Vector2(1.22, -0.61), Vector2(30.61, -0.61),
+		 Vector2(30.61, 30), Vector2(29, 30), Vector2(29, 35)])
 	check_points("B: through the corner at x = 29.8", _route(result, 1),
-		[Vector2(-5, -3), Vector2(0.4, -3), Vector2(0.4, 0.2), Vector2(29.8, 0.2),
-		 Vector2(29.8, 29.2), Vector2(27, 29.2), Vector2(27, 35)])
-	check_points("C: inside of the corner at x = 29.4", _route(result, 2),
-		[Vector2(-5, -2), Vector2(0, -2), Vector2(0, 0.6), Vector2(29.4, 0.6),
-		 Vector2(29.4, 28.8), Vector2(25, 28.8), Vector2(25, 35)])
+		[Vector2(-5, -3), Vector2(0.41, -3), Vector2(0.41, 0.2), Vector2(29.8, 0.2),
+		 Vector2(29.8, 29.19), Vector2(27, 29.19), Vector2(27, 35)])
+	check_points("C: inside of the corner at x = 29.39", _route(result, 2),
+		[Vector2(-5, -2), Vector2(0, -2), Vector2(0, 0.61), Vector2(29.39, 0.61),
+		 Vector2(29.39, 28.78), Vector2(25, 28.78), Vector2(25, 35)])
 
 	# The property the mitered lane buys, measured rather than read off the
 	# points above: on the SOUTHBOUND run the three lanes are still their own
-	# pitches apart (0.8 and 0.4), where a rigid translate would have collapsed
-	# them onto one x.
+	# laid pitches apart (0.81 and 0.41), where a rigid translate would have
+	# collapsed them onto one x.
 	var a: PackedVector2Array = _route(result, 0)
 	var b: PackedVector2Array = _route(result, 1)
 	var c: PackedVector2Array = _route(result, 2)
-	check_near("A to B on the post-bend run", absf(a[4].x - b[4].x), 0.8)
-	check_near("B to C on the post-bend run", absf(b[4].x - c[4].x), 0.4)
+	check_near("A to B on the post-bend run", absf(a[4].x - b[4].x), 0.81)
+	check_near("B to C on the post-bend run", absf(b[4].x - c[4].x), 0.41)
 
 
 ## THE INDEPENDENT ORACLE. Re-routes both shapes — the second one mirrored, so
@@ -538,8 +547,9 @@ func _run_geometry_invariants() -> void:
 
 		# The METRIC half of the same oracle: not crossing is not enough, the
 		# copper has to stand off. Measured with this suite's own gap routine
-		# against pitch_between of each PAIR's widths — the figure that spaces
-		# the lanes, so a correct bundle measures exactly its requirement.
+		# against pitch_between of each PAIR's widths — the RULE the lanes are
+		# spaced past, so a correct bundle measures its requirement plus the
+		# laid margin, with the tolerance below never spent.
 		var widths: Array = case["widths"]
 		var clearance: float = float(case["clearance"])
 		var tight := ""
@@ -585,8 +595,8 @@ func _routes_touch(a: PackedVector2Array, b: PackedVector2Array) -> bool:
 
 func _run_crossing_refusals() -> void:
 	print("-- crossings are named and drawn, never untangled --")
-	# TWO NETS, PADS SWAPPED. Lanes are [-0.25, +0.25] (0.2mm tracks at 0.3mm
-	# clearance, pitch 0.5). A is picked first so it rides the -0.25 lane, but
+	# TWO NETS, PADS SWAPPED. Lanes are [-0.255, +0.255] (0.2mm tracks at 0.3mm
+	# clearance, laid pitch 0.51). A is picked first so it rides the -0.255 lane, but
 	# A's pad is BELOW the bundle at y +5 and B's is ABOVE at y -5. A has to
 	# climb across B's lane and B has to drop across A's, at whichever station
 	# each leaves: whoever goes first is crossed by the other. There is no
@@ -618,7 +628,7 @@ func _run_crossing_refusals() -> void:
 
 	# CROSSING AT THE FAR END ONLY. Same source pads as the bend case, but the
 	# target pads run the other way along the board edge: their perpendicular
-	# coordinates are 5, 3, 1 against lanes -0.6, +0.2, +0.6. The source end is
+	# coordinates are 5, 3, 1 against lanes -0.61, +0.2, +0.61. The source end is
 	# perfectly routable; the finding must name the TARGET end.
 	check_bad_but_buildable("a crossing at the target end names that end",
 		BusGeom.bundle_routes(
@@ -739,24 +749,25 @@ func _point_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
 ## Spine (0,0) -> (100,0) -> (100,100) -> (-30,100). Every joint is a 90-degree
 ## turn and no joint doubles back, so neither spine-shape rule fires; the third
 ## arm nonetheless runs WEST, back past the first arm's start. Two 0.2mm tracks
-## at 0.3mm clearance give lanes [-0.25, +0.25] and a 0.5mm pitch.
+## at 0.3mm clearance give lanes [-0.255, +0.255]: a 0.5mm rule pitch, laid at
+## 0.51.
 ##
 ## Source pads (-10,150) and (-10,152) sit above and west of the start. A's pad
-## is nearer the bundle, so A leaves first: source stations A = 0.0, B = 0.5.
+## is nearer the bundle, so A leaves first: source stations A = 0.0, B = 0.51.
 ## Target pads (-40,200) and (-40,198) sit past the west end, and B's is nearer,
-## so target stations are B = 0.0, A = 0.5. BOTH ordering walks complete — this
+## so target stations are B = 0.0, A = 0.51. BOTH ordering walks complete — this
 ## input has no end-local crossing at all.
 ##
-## A's route then contains the leg (0,150) -> (0,-0.25): a 150mm perpendicular
-## drop on the line x = 0. B's lane on the WESTBOUND arm is y = 99.75 and runs
-## from x = 99.75 back to x = -30. It passes straight under that leg:
+## A's route then contains the leg (0,150) -> (0,-0.255): a 150mm perpendicular
+## drop on the line x = 0. B's lane on the WESTBOUND arm is y = 99.745 and runs
+## from x = 99.745 back to x = -30. It passes straight under that leg:
 ##
-##     A: (-10,150) (0,150) (0,-0.25) (100.25,-0.25) (100.25,100.25)
-##        (-29.5,100.25) (-29.5,200) (-40,200)
-##     B: (-10,152) (0.5,152) (0.5,0.25) (99.75,0.25) (99.75,99.75)
-##        (-30,99.75) (-30,198) (-40,198)
+##     A: (-10,150) (0,150) (0,-0.255) (100.255,-0.255) (100.255,100.255)
+##        (-29.49,100.255) (-29.49,200) (-40,200)
+##     B: (-10,152) (0.51,152) (0.51,0.255) (99.745,0.255) (99.745,99.745)
+##        (-30,99.745) (-30,198) (-40,198)
 ##
-## ORACLE: refused, naming both nets, quoting the crossing at (0.000, 99.750) —
+## ORACLE: refused, naming both nets, quoting the crossing at (0.000, 99.745) —
 ## and the message must NOT be either end's ordering refusal, since neither
 ## ordering rule fired.
 ##
@@ -769,13 +780,13 @@ func _point_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
 ##
 ##
 ## CASE 3 — PARALLEL LEGS THAT NEVER CROSS. Straight spine (0,0) -> (100,0),
-## two 0.2mm tracks at 0.3mm clearance: lanes [-0.25, +0.25], required pitch
-## 0.5. Source pads (-8,-2.20) and (-6,-1.95) are 0.25mm apart across the
-## bundle. SCL's pad is nearer the bundle so it leaves first (stations SCL = 0,
-## SDA = 0.5) and no leg crosses anything:
+## two 0.2mm tracks at 0.3mm clearance: lanes [-0.255, +0.255], required pitch
+## 0.5 (laid at 0.51). Source pads (-8,-2.20) and (-6,-1.95) are 0.25mm apart
+## across the bundle. SCL's pad is nearer the bundle so it leaves first
+## (stations SCL = 0, SDA = 0.51) and no leg crosses anything:
 ##
-##     SDA: (-8,-2.20) (0.5,-2.20) (0.5,-0.25) (100,-0.25) (100,20) (110,20)
-##     SCL: (-6,-1.95) (0,-1.95) (0,0.25) (99.5,0.25) (99.5,22) (110,22)
+##     SDA: (-8,-2.20) (0.51,-2.20) (0.51,-0.255) (100,-0.255) (100,20) (110,20)
+##     SCL: (-6,-1.95) (0,-1.95) (0,0.255) (99.49,0.255) (99.49,22) (110,22)
 ##
 ## The two pad legs run PARALLEL, 0.25mm apart, over x in [-6, 0] — half the
 ## 0.5mm the same rule that spaced the lanes demands, i.e. 0.05mm of gap between
@@ -798,7 +809,7 @@ func _run_clearance_refusals() -> void:
 		_pv([Vector2(-40, 200), Vector2(-40, 198)]),
 		[0.2, 0.2], 0.3)
 	check_bad_but_buildable("a leg crossing a lane from a distant part of the spine is named",
-		folded, 2, ["\"A\"", "\"B\"", "cross at (0.000, 99.750)"])
+		folded, 2, ["\"A\"", "\"B\"", "cross at (0.000, 99.745)"])
 	check("that finding is the measurement's, not either end's ordering rule",
 		not str(folded.get("error", "")).contains("end —"))
 
@@ -822,13 +833,13 @@ func _run_clearance_refusals() -> void:
 	_check_crowded_copper(crowded)
 	# STAGGERED PADS ARE NOT A COLUMN. 0.25mm apart across the bundle is inside
 	# the pitch but outside the 0.2mm track, so both stay on the ladder — SCL
-	# at station 0, SDA at 0.5 — and the copper CROWDS, as measured above. Sent
+	# at station 0, SDA at 0.51 — and the copper CROWDS, as measured above. Sent
 	# sideways instead, SCL's leg at x -6 would cross SDA's lane, which starts
 	# at x -8: a short in place of a named crowd.
 	var stations: Array = crowded.get("source_stations", [])
-	check("staggered pads stay on the ladder — stations 0.5 / 0, neither a pad row",
+	check("staggered pads stay on the ladder — stations 0.51 / 0, neither a pad row",
 		stations.size() == 2
-			and absf(float(stations[0]) - 0.5) <= EPS
+			and absf(float(stations[0]) - 0.51) <= EPS
 			and absf(float(stations[1]) - 0.0) <= EPS)
 
 	var near_miss: Dictionary = BusGeom.bundle_routes(
@@ -933,28 +944,28 @@ func _run_structural_refusals() -> void:
 ## corner and the lane's end are the same point, and the route is a single
 ## straight run.
 ##
-## Spine (0,0) -> (20,0), two 0.2mm tracks at 0.3mm clearance: pitch 0.5, lanes
-## [-0.25, +0.25]. Both pads are placed ON those lanes, so neither track's leg
-## sweeps across anything and nothing constrains the order; the caller's order
-## stands and the stations are 0.0 and 0.5 at each end. A's route is then
-## (-5,-0.25) -> (0,-0.25) -> (20,-0.25) -> (25,-0.25) and B's is the same
-## 0.5mm further in at each end.
+## Spine (0,0) -> (20,0), two 0.2mm tracks at 0.3mm clearance: laid pitch 0.51,
+## lanes [-0.255, +0.255]. Both pads are placed ON those lanes, so neither
+## track's leg sweeps across anything and nothing constrains the order; the
+## caller's order stands and the stations are 0.0 and 0.51 at each end. A's
+## route is then (-5,-0.255) -> (0,-0.255) -> (20,-0.255) -> (25,-0.255) and B's
+## is the same 0.51mm further in at each end.
 func _run_pads_already_on_their_lanes() -> void:
 	print("-- a pad already on its lane drops the corner instead of doubling it --")
 	var result: Dictionary = BusGeom.bundle_routes(
 		_pv([Vector2(0, 0), Vector2(20, 0)]),
 		PackedStringArray(["A", "B"]),
-		_pv([Vector2(-5, -0.25), Vector2(-5, 0.25)]),
-		_pv([Vector2(25, -0.25), Vector2(25, 0.25)]),
+		_pv([Vector2(-5, -0.255), Vector2(-5, 0.255)]),
+		_pv([Vector2(25, -0.255), Vector2(25, 0.255)]),
 		[0.2, 0.2], 0.3)
 	check("aligned pads route", bool(result.get("ok", false)))
 	if not bool(result.get("ok", false)):
 		printerr("    refused: " + str(result.get("error", "")))
 		return
 	check_points("A: one straight run, no repeated corner", _route(result, 0),
-		[Vector2(-5, -0.25), Vector2(0, -0.25), Vector2(20, -0.25), Vector2(25, -0.25)])
-	check_points("B: the same, 0.5mm in at each end", _route(result, 1),
-		[Vector2(-5, 0.25), Vector2(0.5, 0.25), Vector2(19.5, 0.25), Vector2(25, 0.25)])
+		[Vector2(-5, -0.255), Vector2(0, -0.255), Vector2(20, -0.255), Vector2(25, -0.255)])
+	check_points("B: the same, 0.51mm in at each end", _route(result, 1),
+		[Vector2(-5, 0.255), Vector2(0.51, 0.255), Vector2(19.49, 0.255), Vector2(25, 0.255)])
 
 
 ## A DEPARTURE STATION THAT ALL BUT MEETS ITS LANE'S CORNER, every point
@@ -966,28 +977,29 @@ func _run_pads_already_on_their_lanes() -> void:
 ## so a pad's perpendicular coordinate there is 82 - y and a station runs east
 ## from x = 50.
 ##
-## Three 0.25mm tracks at 0.2mm clearance: pitch = 0.125 + 0.2 + 0.125 = 0.45
-## for both gaps, so the lanes are [-0.45, 0, +0.45] and the mitered corners sit
-## at (59 - o, 48.6 + o) and (59 - o, 82 - o):
+## Three 0.25mm tracks at 0.2mm clearance: rule pitch = 0.125 + 0.2 + 0.125 =
+## 0.45, laid at 0.46 for both gaps, so the lanes are [-0.46, 0, +0.46] and the
+## mitered corners sit at (59 - o, 48.6 + o) and (59 - o, 82 - o):
 ##
-##     LRCLK  -0.45   (57.6,48.15) (59.45,48.15) (59.45,82.45) (50,82.45)
+##     LRCLK  -0.46   (57.6,48.14) (59.46,48.14) (59.46,82.46) (50,82.46)
 ##     SDATA   0.00   (57.6,48.60) (59.00,48.60) (59.00,82.00) (50,82.00)
-##     BCLK   +0.45   (57.6,49.05) (58.55,49.05) (58.55,81.55) (50,81.55)
+##     BCLK   +0.46   (57.6,49.06) (58.54,49.06) (58.54,81.54) (50,81.54)
 ##
 ## SOURCE pads (56.43, 53.877 / 54.527 / 55.177) are perpendicular coordinates
 ## 5.277 / 5.927 / 6.577 — REVERSE lane order, so the track on the far lane has
 ## the nearest pad and has to cross both other lanes to reach it. LRCLK leaves
-## first, then SDATA, then BCLK: source stations 0 / 0.45 / 0.9, i.e. corners at
-## x = 57.6 / 58.05 / 58.5. TARGET pads (48, 79.3 / 78.65 / 78) are 2.7 / 3.35 /
-## 4.0 across, reversed the same way, so the target stations are 0 / 0.45 / 0.9
-## back from (50,82) — corners at x = 50 / 50.45 / 50.9.
+## first, then SDATA, then BCLK: source stations 0 / 0.46 / 0.92, i.e. corners
+## at x = 57.6 / 58.06 / 58.52. TARGET pads (48, 79.3 / 78.65 / 78) are 2.7 /
+## 3.35 / 4.0 across, reversed the same way, so the target stations are 0 /
+## 0.46 / 0.92 back from (50,82) — corners at x = 50 / 50.46 / 50.92.
 ##
-## THE CASE. The first spine segment is only 1.4mm, so BCLK's station at 0.9mm
-## lands at x = 58.5 while its own lane turns south at x = 58.55: 0.05mm of that
-## lane is left between them, a fifth of the 0.25mm the track is wide. That
-## remnant is a stub no fab and no DRC reads as a segment, so the leg lands ON
-## the corner instead and the two meet at ONE vertex. The other two tracks are
-## unaffected: their corners are 1.85mm and 0.95mm past their stations.
+## THE CASE. The first spine segment is only 1.4mm, so BCLK's station at 0.92mm
+## lands at x = 58.52 while its own lane turns south at x = 58.54: 0.02mm of
+## that lane is left between them, a small fraction of the 0.25mm the track is
+## wide. That remnant is a stub no fab and no DRC reads as a segment, so the
+## leg lands ON the corner instead and the two meet at ONE vertex. The other
+## two tracks are unaffected: their corners are 1.86mm and 0.94mm past their
+## stations.
 ##
 ## THE ORACLE beyond the point lists is the property that makes the corner
 ## clean, and it reads no coordinate off the routes: every segment of every
@@ -1007,20 +1019,20 @@ func _run_leg_lands_on_its_lane_corner() -> void:
 		printerr("    refused: " + str(result.get("error", "")))
 		return
 
-	check_points("LRCLK: outside of both corners, station 1.85mm clear of its lane's",
+	check_points("LRCLK: outside of both corners, station 1.86mm clear of its lane's",
 		_route(result, 0),
-		[Vector2(56.43, 53.877), Vector2(57.6, 53.877), Vector2(57.6, 48.15),
-		 Vector2(59.45, 48.15), Vector2(59.45, 82.45), Vector2(50, 82.45),
+		[Vector2(56.43, 53.877), Vector2(57.6, 53.877), Vector2(57.6, 48.14),
+		 Vector2(59.46, 48.14), Vector2(59.46, 82.46), Vector2(50, 82.46),
 		 Vector2(50, 79.3), Vector2(48, 79.3)])
-	check_points("SDATA: on the spine itself, station 0.95mm clear",
+	check_points("SDATA: on the spine itself, station 0.94mm clear",
 		_route(result, 1),
-		[Vector2(56.43, 54.527), Vector2(58.05, 54.527), Vector2(58.05, 48.6),
-		 Vector2(59, 48.6), Vector2(59, 82), Vector2(50.45, 82),
-		 Vector2(50.45, 78.65), Vector2(48, 78.65)])
-	check_points("BCLK: the leg turns at x 58.55, the lane's own corner, not at 58.5",
+		[Vector2(56.43, 54.527), Vector2(58.06, 54.527), Vector2(58.06, 48.6),
+		 Vector2(59, 48.6), Vector2(59, 82), Vector2(50.46, 82),
+		 Vector2(50.46, 78.65), Vector2(48, 78.65)])
+	check_points("BCLK: the leg turns at x 58.54, the lane's own corner, not at 58.52",
 		_route(result, 2),
-		[Vector2(56.43, 55.177), Vector2(58.55, 55.177), Vector2(58.55, 49.05),
-		 Vector2(58.55, 81.55), Vector2(50.9, 81.55), Vector2(50.9, 78),
+		[Vector2(56.43, 55.177), Vector2(58.54, 55.177), Vector2(58.54, 49.06),
+		 Vector2(58.54, 81.54), Vector2(50.92, 81.54), Vector2(50.92, 78),
 		 Vector2(48, 78)])
 
 	var stub := ""
@@ -1037,33 +1049,33 @@ func _run_leg_lands_on_its_lane_corner() -> void:
 
 	# THE ACROSS CASE STAYS ON THE LADDER. These pads sit 0.65mm apart ACROSS
 	# the horizontal first segment, so every station is a ladder step measured
-	# inward from the spine's start — 0, 0.45, 0.9 in pick order — and not one
+	# inward from the spine's start — 0, 0.46, 0.92 in pick order — and not one
 	# of them is a pad row. Together with the three point lists above this is
 	# the pin that the sideways construction below leaves this shape alone.
 	var stations: Array = result["source_stations"]
-	check("the across case keeps its ladder stations 0 / 0.45 / 0.9",
+	check("the across case keeps its ladder stations 0 / 0.46 / 0.92",
 		stations.size() == 3
 			and absf(float(stations[0]) - 0.0) <= EPS
-			and absf(float(stations[1]) - 0.45) <= EPS
-			and absf(float(stations[2]) - 0.9) <= EPS)
+			and absf(float(stations[1]) - 0.46) <= EPS
+			and absf(float(stations[2]) - 0.92) <= EPS)
 
 
 ## A SIDEWAYS PAD NEAR ITS OWN LANE draws no sub-width reach.
 ##
-## Spine (0,0)->(100,0), two 0.2mm tracks at 0.3mm clearance: lanes -0.25 (A)
-## and +0.25 (B). Sources A (-10, 0.17) and B (-5, 0.17) share a column along
-## the spine, so both are sideways. B's centre is 0.08mm from its lane — under
+## Spine (0,0)->(100,0), two 0.2mm tracks at 0.3mm clearance: lanes -0.255 (A)
+## and +0.255 (B). Sources A (-10, 0.17) and B (-5, 0.17) share a column along
+## the spine, so both are sideways. B's centre is 0.085mm from its lane — under
 ## the lane's copper (half-width 0.1) — so B's route starts ON the lane in its
-## own row, (-5, 0.25), with no 0.08mm jog; A's centre is 0.42mm from its lane
-## and gets an ordinary jog. Targets (110,20)/(110,22) are the straight
-## bundle's: A leaves first, stations 0 / 0.5.
+## own row, (-5, 0.255), with no 0.085mm jog; A's centre is 0.425mm from its
+## lane and gets an ordinary jog. Targets (110,20)/(110,22) are the straight
+## bundle's: A leaves first, stations 0 / 0.51.
 ##
-##     A: (-10,0.17) (-10,-0.25) (100,-0.25) (100,20) (110,20)
-##     B: (-5,0.25) (99.5,0.25) (99.5,22) (110,22)
+##     A: (-10,0.17) (-10,-0.255) (100,-0.255) (100,20) (110,20)
+##     B: (-5,0.255) (99.49,0.255) (99.49,22) (110,22)
 ##
 ## ORACLE beyond the points: a walk over every run of every route finds none
-## shorter than its track is wide. THE SAME PADS AT y 0.10 put B 0.15mm from its
-## lane — past the copper's edge, short of a track width — a jog no
+## shorter than its track is wide. THE SAME PADS AT y 0.10 put B 0.155mm from
+## its lane — past the copper's edge, short of a track width — a jog no
 ## construction can lengthen; it is drawn and named as a stub, by net, with its
 ## own length.
 func _run_pad_under_its_lane() -> void:
@@ -1079,13 +1091,13 @@ func _run_pad_under_its_lane() -> void:
 	if not bool(result.get("ok", false)):
 		printerr("    refused: " + str(result.get("error", "")))
 		return
-	check_points("A: 0.42mm off its lane, an ordinary sideways jog",
+	check_points("A: 0.425mm off its lane, an ordinary sideways jog",
 		_route(result, 0),
-		[Vector2(-10, 0.17), Vector2(-10, -0.25), Vector2(100, -0.25),
+		[Vector2(-10, 0.17), Vector2(-10, -0.255), Vector2(100, -0.255),
 		 Vector2(100, 20), Vector2(110, 20)])
-	check_points("B: 0.08mm off its lane, the route starts on the lane in B's row",
+	check_points("B: 0.085mm off its lane, the route starts on the lane in B's row",
 		_route(result, 1),
-		[Vector2(-5, 0.25), Vector2(99.5, 0.25), Vector2(99.5, 22), Vector2(110, 22)])
+		[Vector2(-5, 0.255), Vector2(99.49, 0.255), Vector2(99.49, 22), Vector2(110, 22)])
 	var stub := ""
 	for i in range(2):
 		var route: PackedVector2Array = _route(result, i)
@@ -1103,8 +1115,8 @@ func _run_pad_under_its_lane() -> void:
 		_pv([Vector2(-10, 0.10), Vector2(-5, 0.10)]),
 		_pv([Vector2(110, 20), Vector2(110, 22)]),
 		widths, 0.3)
-	check_bad_but_buildable("a pad 0.15mm off its lane is a named stub, drawn anyway",
-		stubbed, 2, ["\"B\"", "0.150mm run", "stub"])
+	check_bad_but_buildable("a pad 0.155mm off its lane is a named stub, drawn anyway",
+		stubbed, 2, ["\"B\"", "0.155mm run", "stub"])
 	var first: Array = stubbed.get("findings", [])
 	check("…filed under its own finding type",
 		not first.is_empty()
@@ -1117,8 +1129,8 @@ func _run_pad_under_its_lane() -> void:
 ## with the spine starting BESIDE the column and running down: (58.5,57.5) ->
 ## (58.5,86). u = (0,1), n = (-1,0), so a pad's perpendicular coordinate is
 ## 58.5 - x = 2.07 for all three, and its axial one is y - 57.5: -7.403,
-## -4.863, -2.323. Three 0.25mm tracks at 0.2mm clearance: pitch 0.45, lanes
-## [-0.45, 0, +0.45] in pick order, i.e. x = 58.95, 58.5, 58.05.
+## -4.863, -2.323. Three 0.25mm tracks at 0.2mm clearance: laid pitch 0.46,
+## lanes [-0.46, 0, +0.46] in pick order, i.e. x = 58.96, 58.5, 58.04.
 ##
 ## Every pad shares its column with the other two (same perpendicular, rows
 ## 2.54mm apart), so each one is SIDEWAYS: no leg runs down the column, the
@@ -1129,15 +1141,15 @@ func _run_pad_under_its_lane() -> void:
 ##
 ## TARGET pads sit past the end, east of the spine, spread ACROSS it: GPIO6
 ## (64,92), GPIO5 (62,92), GPIO4 (60,92) — perpendicular -5.5, -3.5, -1.5
-## against lanes -0.45, 0, +0.45. GPIO4's band [-1.5, 0.45] holds both other
+## against lanes -0.46, 0, +0.46. GPIO4's band [-1.5, 0.46] holds both other
 ## lanes, so it leaves first; GPIO5's holds GPIO6's; departure order GPIO4,
-## GPIO5, GPIO6 at stations 0, 0.45, 0.9 measured back from y 86: legs at y 86,
-## 85.55, 85.1. That end is the ordinary ladder, so this one case exercises
-## both constructions on one bus.
+## GPIO5, GPIO6 at stations 0, 0.46, 0.92 measured back from y 86: legs at y
+## 86, 85.54, 85.08. That end is the ordinary ladder, so this one case
+## exercises both constructions on one bus.
 ##
-##     GPIO6: (56.43,50.097) (58.95,50.097) (58.95,85.1) (64,85.1) (64,92)
-##     GPIO5: (56.43,52.637) (58.5,52.637)  (58.5,85.55) (62,85.55) (62,92)
-##     GPIO4: (56.43,55.177) (58.05,55.177) (58.05,86)   (60,86)    (60,92)
+##     GPIO6: (56.43,50.097) (58.96,50.097) (58.96,85.08) (64,85.08) (64,92)
+##     GPIO5: (56.43,52.637) (58.5,52.637)  (58.5,85.54)  (62,85.54) (62,92)
+##     GPIO4: (56.43,55.177) (58.04,55.177) (58.04,86)    (60,86)    (60,92)
 ##
 ## ORACLES that owe nothing to those point lists:
 ##   - no segment of any net comes within pad radius (0.85) + clearance (0.2)
@@ -1171,17 +1183,17 @@ func _run_pads_along_the_spine() -> void:
 		printerr("    refused: " + str(result.get("error", "")))
 		return
 
-	check_points("GPIO6: sideways at y 50.097 onto the far lane, ladder leg at y 85.1",
+	check_points("GPIO6: sideways at y 50.097 onto the far lane, ladder leg at y 85.08",
 		_route(result, 0),
-		[Vector2(56.43, 50.097), Vector2(58.95, 50.097), Vector2(58.95, 85.1),
-		 Vector2(64, 85.1), Vector2(64, 92)])
-	check_points("GPIO5: sideways at y 52.637 onto the spine's own lane, leg at y 85.55",
+		[Vector2(56.43, 50.097), Vector2(58.96, 50.097), Vector2(58.96, 85.08),
+		 Vector2(64, 85.08), Vector2(64, 92)])
+	check_points("GPIO5: sideways at y 52.637 onto the spine's own lane, leg at y 85.54",
 		_route(result, 1),
-		[Vector2(56.43, 52.637), Vector2(58.5, 52.637), Vector2(58.5, 85.55),
-		 Vector2(62, 85.55), Vector2(62, 92)])
+		[Vector2(56.43, 52.637), Vector2(58.5, 52.637), Vector2(58.5, 85.54),
+		 Vector2(62, 85.54), Vector2(62, 92)])
 	check_points("GPIO4: sideways at y 55.177 onto the near lane, leg at y 86",
 		_route(result, 2),
-		[Vector2(56.43, 55.177), Vector2(58.05, 55.177), Vector2(58.05, 86),
+		[Vector2(56.43, 55.177), Vector2(58.04, 55.177), Vector2(58.04, 86),
 		 Vector2(60, 86), Vector2(60, 92)])
 	var stations: Array = result["source_stations"]
 	check("each sideways station is its pad's own row behind the spine's start",

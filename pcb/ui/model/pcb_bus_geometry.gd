@@ -281,11 +281,39 @@ static func pitch_between(width_a: float, width_b: float, clearance: float) -> f
 	return maxf(0.0, width_a) * 0.5 + maxf(0.0, clearance) + maxf(0.0, width_b) * 0.5
 
 
+## How much wider than the clearance rule every spacing this module LAYS is, in
+## mm. pitch_between is the rule — the least two centrelines may be apart — and
+## a lane laid at exactly that figure sits at the limit: Vector2 is float32, so
+## once its coordinates are stored the pair measures a few nanometres short of
+## the rule on most magnitudes, and the fab-facing geometric DRC, which allows
+## no tolerance, reads that as a violation while the check below (which does)
+## reads it as clean. Laying every spacing this much past the rule keeps the
+## two agreeing: 0.01mm is over a hundred float32 ulps at any board coordinate,
+## ten times the measurement tolerance below, and a twentieth of the tightest
+## clearance a fab quotes — copper the fab cannot see and a reviewer can (every
+## hand-derived figure stays a two-decimal number). A fixed margin rather than
+## a round-up to the authoring grid because the grid is the PLACEMENT pitch
+## (2.54mm by default, a quarter of it for authoring) and has nothing to do
+## with clearance: rounding to it would widen a 0.5mm bus to 0.635mm on one
+## board and to 1.0mm on another.
+const LANE_PITCH_MARGIN_MM := 0.01
+
+
+## The centre-to-centre distance two ADJACENT tracks are LAID at: the rule
+## pitch_between gives plus LANE_PITCH_MARGIN_MM. Every spacing this module
+## constructs — lanes, departure stations, via-station offsets and the fan
+## step — goes through here; every spacing it MEASURES (the clearance and
+## crossing rules) keeps pitch_between, so a bundle laid by this function
+## measures past its rule by exactly the margin.
+static func lane_pitch_between(width_a: float, width_b: float, clearance: float) -> float:
+	return pitch_between(width_a, width_b, clearance) + LANE_PITCH_MARGIN_MM
+
+
 ## Signed offsets from the spine for N tracks of the given `widths`, centred on
-## the spine, spaced by the per-adjacent-pair pitch.
+## the spine, spaced by the per-adjacent-pair LAID pitch.
 ##
 ## Track i sits at cumulative_offsets(...)[i], to be fed straight to
-## offset_polyline as the `offset`. Gap i uses pitch_between(widths[i],
+## offset_polyline as the `offset`. Gap i uses lane_pitch_between(widths[i],
 ## widths[i+1], clearance), so a mixed-width bundle gets a different spacing
 ## either side of the fat track. The whole bundle is then shifted so the first
 ## and last CENTRELINES are symmetric about the spine (the spine runs down the
@@ -318,7 +346,7 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 	var running: float = 0.0
 	var positions: Array = [0.0]
 	for i in range(n - 1):
-		running += pitch_between(float(widths[i]), float(widths[i + 1]), clearance)
+		running += lane_pitch_between(float(widths[i]), float(widths[i + 1]), clearance)
 		positions.append(running)
 
 	# Centre on the spine: the midpoint of the outermost two CENTRELINES. (Not
@@ -835,10 +863,11 @@ static func _permutations(remaining: Array, prefix: Array, out: Array) -> void:
 ## One finding per pair of nets whose finished routes are closer than the
 ## clearance rule allows; empty when every pair clears.
 ##
-## The required separation is pitch_between of the PAIR's own two widths, the
-## same figure cumulative_offsets uses to space their lanes — so a bundle whose
-## lanes are correctly spaced measures exactly its requirement and passes, and
-## anything the breakout legs do to bring two nets closer than that is reported.
+## The required separation is pitch_between of the PAIR's own two widths — the
+## RULE, not the laid pitch, so a bundle whose lanes are correctly spaced
+## measures its requirement plus LANE_PITCH_MARGIN_MM and passes with room, and
+## anything the breakout legs do to bring two nets closer than the rule is
+## reported.
 static func _clearance_findings(polylines: Array, net_names: PackedStringArray,
 		widths: Array, clearance: float) -> Array:
 	var out: Array = []
@@ -993,11 +1022,11 @@ static func _via_station_offsets(widths: Array, clearance: float, via_diameter: 
 		return [0.0]
 	var via_pitch := 0.0
 	if via_diameter > 0.0:
-		via_pitch = pitch_between(via_diameter, via_diameter, clearance)
+		via_pitch = lane_pitch_between(via_diameter, via_diameter, clearance)
 	var running := 0.0
 	var positions: Array = [0.0]
 	for i in range(n - 1):
-		running += maxf(pitch_between(float(widths[i]), float(widths[i + 1]), clearance), via_pitch)
+		running += maxf(lane_pitch_between(float(widths[i]), float(widths[i + 1]), clearance), via_pitch)
 		positions.append(running)
 	var centre: float = running * 0.5
 	var out: Array = []
@@ -1035,9 +1064,9 @@ static func _via_station_fan_distances(offsets: Array, via_offsets: Array,
 
 	var step := 0.0
 	if via_diameter > 0.0:
-		step = pitch_between(via_diameter, via_diameter, clearance)
+		step = lane_pitch_between(via_diameter, via_diameter, clearance)
 	for i in range(n - 1):
-		step = maxf(step, pitch_between(float(widths[i]), float(widths[i + 1]), clearance))
+		step = maxf(step, lane_pitch_between(float(widths[i]), float(widths[i + 1]), clearance))
 
 	# Sorted innermost first so rank 1 (nearest the station) goes to the
 	# innermost track and the outermost track jogs farthest out along the
@@ -1314,7 +1343,7 @@ static func _departure_stations(pad_perp: Array, pad_axial: Array, sideways: Arr
 		stations.append(float(pad_axial[i]) if sideways[i] else 0.0)
 	var run := 0.0
 	for k in range(1, order.size()):
-		run += pitch_between(float(widths[order[k - 1]]), float(widths[order[k]]), clearance)
+		run += lane_pitch_between(float(widths[order[k - 1]]), float(widths[order[k]]), clearance)
 		stations[order[k]] = run
 	var first: Array = []
 	for i in range(n):

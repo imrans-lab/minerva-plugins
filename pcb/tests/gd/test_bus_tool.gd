@@ -198,8 +198,9 @@ func check(desc: String, cond: bool, detail: String = "") -> void:
 #
 # The board declares trace_width_mm 0.2 and clearance_mm 0.3, so every net's
 # width auto-derives to 0.2 with no seeded copper at all — the serialized trace
-# list is then exactly the bus, and pitch = 0.1 + 0.3 + 0.1 = 0.5 gives lanes
-# [-0.5, 0.0, +0.5] (pinned by test_pcb_bus_geometry.gd, consumed here).
+# list is then exactly the bus, and the rule pitch 0.1 + 0.3 + 0.1 = 0.5, laid
+# 0.01 wider at 0.51, gives lanes [-0.51, 0.0, +0.51] (pinned by
+# test_pcb_bus_geometry.gd, consumed here).
 
 ## V3.1's land, width x height in mm. 6.0 long on X, so its copper reaches
 ## +-3.0mm from the pin centre — well past the 1.27mm TRACE_PAD_SNAP_MM a pick
@@ -267,19 +268,19 @@ const DBL_END := Vector2(122.0, 34.0)
 ##
 ## test_bus_breakout_geometry.gd's straight bundle is spine (0,0)→(100,0) with
 ## sources (-10,-10)/(-10,-8)/(-10,-6) and targets (110,20)/(110,22)/(110,24);
-## it pins source stations 1.0/0.5/0.0 and target stations 0.0/0.5/1.0 and the
+## it pins source stations 1.02/0.51/0.0 and target stations 0.0/0.51/1.02 and the
 ## three routes below. This fixture is that case translated by (+20, +20) —
 ## spine (20,20)→(120,20), the same pads moved with it — so the routes are the
 ## pinned ones plus the same offset, and nothing about the geometry is being
 ## re-derived here.
 func _expected_routes() -> Dictionary:
 	return {
-		"NA": [SRC_A, Vector2(21.0, 10.0), Vector2(21.0, 19.5),
-			Vector2(120.0, 19.5), Vector2(120.0, 40.0), TGT_A],
-		"NB": [SRC_B, Vector2(20.5, 12.0), Vector2(20.5, 20.0),
-			Vector2(119.5, 20.0), Vector2(119.5, 42.0), TGT_B],
-		"NC": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.5),
-			Vector2(119.0, 20.5), Vector2(119.0, 44.0), TGT_C],
+		"NA": [SRC_A, Vector2(21.02, 10.0), Vector2(21.02, 19.49),
+			Vector2(120.0, 19.49), Vector2(120.0, 40.0), TGT_A],
+		"NB": [SRC_B, Vector2(20.51, 12.0), Vector2(20.51, 20.0),
+			Vector2(119.49, 20.0), Vector2(119.49, 42.0), TGT_B],
+		"NC": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.51),
+			Vector2(118.98, 20.51), Vector2(118.98, 44.0), TGT_C],
 	}
 
 
@@ -1238,18 +1239,19 @@ func _test_manifest_requires_pads_on_both_verbs() -> void:
 # own numbers, exactly as _expected_routes derives the single-layer bus.
 #
 # THE DERIVATION, from the fixture's 0.2mm tracks at 0.3mm clearance (lanes
-# [-0.5, 0.0, +0.5], source stations 1.0/0.5/0.0, target stations 0.0/0.5/1.0 —
-# all pinned by test_bus_breakout_geometry.gd and consumed here) plus the via
-# rules this board declares NONE of, so the 0.8mm / 0.4mm fallback applies:
+# [-0.51, 0.0, +0.51], source stations 1.02/0.51/0.0, target stations
+# 0.0/0.51/1.02 — all pinned by test_bus_breakout_geometry.gd and consumed
+# here) plus the via rules this board declares NONE of, so the 0.8mm / 0.4mm
+# fallback applies:
 #
-#   via pitch = 0.4 + 0.3 + 0.4 = 1.1mm, wider than the 0.5mm track pitch, so
-#   the lanes widen to [-1.1, 0.0, +1.1] at the station and NA/NC jog 1.1mm
-#   either side of it (x 68.9 and x 71.1). NB is already on the spine and does
-#   not move, so it has no jog at all.
+#   via pitch = 0.4 + 0.3 + 0.4 = 1.1mm, laid at 1.11, wider than the 0.51mm
+#   track pitch, so the lanes widen to [-1.11, 0.0, +1.11] at the station and
+#   NA/NC jog 1.11mm either side of it (x 68.89 and x 71.11). NB is already on
+#   the spine and does not move, so it has no jog at all.
 #
 # The three vias therefore sit on x = 70, the station's own perpendicular, at
-# y 18.9 / 20.0 / 21.1 — 1.1mm apart, which is the clearance claim measured
-# below rather than assumed.
+# y 18.89 / 20.0 / 21.11 — 1.11mm apart, past the 1.1mm clearance claim
+# measured below rather than assumed.
 
 ## Pick, path, switch layer, place the station, finish and commit.
 func _drive_station_gesture(canvas) -> void:
@@ -1270,17 +1272,17 @@ func _drive_station_gesture(canvas) -> void:
 ## The six runs the station bus commits, hand-derived above.
 func _expected_station_runs() -> Dictionary:
 	return {
-		"NA|top": [SRC_A, Vector2(21.0, 10.0), Vector2(21.0, 19.5),
-			Vector2(68.9, 19.5), Vector2(68.9, 18.9), Vector2(70.0, 18.9)],
-		"NA|bottom": [Vector2(70.0, 18.9), Vector2(71.1, 18.9),
-			Vector2(71.1, 19.5), Vector2(120.0, 19.5), Vector2(120.0, 40.0), TGT_A],
-		"NB|top": [SRC_B, Vector2(20.5, 12.0), Vector2(20.5, 20.0), Vector2(70.0, 20.0)],
-		"NB|bottom": [Vector2(70.0, 20.0), Vector2(119.5, 20.0),
-			Vector2(119.5, 42.0), TGT_B],
-		"NC|top": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.5),
-			Vector2(68.9, 20.5), Vector2(68.9, 21.1), Vector2(70.0, 21.1)],
-		"NC|bottom": [Vector2(70.0, 21.1), Vector2(71.1, 21.1),
-			Vector2(71.1, 20.5), Vector2(119.0, 20.5), Vector2(119.0, 44.0), TGT_C],
+		"NA|top": [SRC_A, Vector2(21.02, 10.0), Vector2(21.02, 19.49),
+			Vector2(68.89, 19.49), Vector2(68.89, 18.89), Vector2(70.0, 18.89)],
+		"NA|bottom": [Vector2(70.0, 18.89), Vector2(71.11, 18.89),
+			Vector2(71.11, 19.49), Vector2(120.0, 19.49), Vector2(120.0, 40.0), TGT_A],
+		"NB|top": [SRC_B, Vector2(20.51, 12.0), Vector2(20.51, 20.0), Vector2(70.0, 20.0)],
+		"NB|bottom": [Vector2(70.0, 20.0), Vector2(119.49, 20.0),
+			Vector2(119.49, 42.0), TGT_B],
+		"NC|top": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.51),
+			Vector2(68.89, 20.51), Vector2(68.89, 21.11), Vector2(70.0, 21.11)],
+		"NC|bottom": [Vector2(70.0, 21.11), Vector2(71.11, 21.11),
+			Vector2(71.11, 20.51), Vector2(118.98, 20.51), Vector2(118.98, 44.0), TGT_C],
 	}
 
 
@@ -1351,8 +1353,8 @@ func _test_a_layer_switch_mid_path_is_a_via_station() -> void:
 	var vias := _vias_by_net(data)
 	check("one via per net", _serialized_vias(data).size() == 3 and vias.size() == 3,
 			str(_serialized_vias(data)))
-	var want_vias := {"NA": Vector2(70.0, 18.9), "NB": Vector2(70.0, 20.0),
-		"NC": Vector2(70.0, 21.1)}
+	var want_vias := {"NA": Vector2(70.0, 18.89), "NB": Vector2(70.0, 20.0),
+		"NC": Vector2(70.0, 21.11)}
 	for net in want_vias.keys():
 		if not vias.has(net):
 			check("%s carries a via" % net, false, str(vias.keys()))
@@ -2150,24 +2152,26 @@ func _test_the_station_verb_matches_the_station_gesture() -> void:
 # and a foreign TRACE across one leg.
 #
 # THE GEOMETRY, derived from the fixture's own numbers — 0.2mm tracks at 0.2mm
-# clearance give a 0.4mm pitch and lanes [-0.2, +0.2], and both ends order the
-# two tracks by the caller's order, so their departure stations are 0.0 and 0.4:
+# clearance give a 0.4mm rule pitch, laid at 0.41, and lanes [-0.205, +0.205];
+# both ends order the two tracks by the caller's order, so their departure
+# stations are 0.0 and 0.41:
 #
-#   NA  (10,10) (14,10) (14,9.8) (30.2,9.8) (30.2,24) (31,24) (31,28)
-#   NB  (10,12.54) (14.4,12.54) (14.4,10.2) (29.8,10.2) (29.8,23.6) (29,23.6) (29,28)
+#   NA  (10,10) (14,10) (14,9.795) (30.205,9.795) (30.205,24) (31,24) (31,28)
+#   NB  (10,12.54) (14.41,12.54) (14.41,10.205) (29.795,10.205) (29.795,23.59)
+#       (29,23.59) (29,28)
 #
 # NA's last leg runs x=31 from y 24 to 28 and so passes through T1.3 (FVCC, a
 # 0.6mm land at (31,26)) and across the seeded FGND trace at y=27; NB's runs
-# x=29 and passes through T1.1 (FGND at (29,26)). NA's long lane at y=9.8 runs
-# 0.55mm from the seeded via at (22,9.25).
+# x=29 and passes through T1.1 (FGND at (29,26)). NA's long lane at y=9.795
+# runs 0.545mm from the seeded via at (22,9.25).
 #
 # ORACLES:
 #   THE FINDING SET — the (bus net, foreign item) pairs above, compared against
 #     the WHOLE finding list. Equality, not membership: it also says nothing
 #     ELSE about this bus is broken, which is what makes the four attributable.
-#   THE MEASUREMENT — the via near-miss's own arithmetic: 0.550mm centre to
+#   THE MEASUREMENT — the via near-miss's own arithmetic: 0.545mm centre to
 #     lane, less the 0.400mm via radius and the 0.100mm track half-width, is
-#     0.050mm of bare board where the board's rules ask 0.200mm.
+#     0.045mm of bare board where the board's rules ask 0.200mm.
 #   THE LAYER — the same bus planned on `bottom`, where the target part's SMD
 #     lands and the seeded trace are not. Only the through-the-stack copper (the
 #     via) may still be named there.
@@ -2186,10 +2190,10 @@ const LGA_SRC_A := Vector2(10.0, 10.0)     # U1.1, net NA
 const LGA_SRC_B := Vector2(10.0, 12.54)    # U1.2, net NB
 const LGA_TGT_A := Vector2(31.0, 28.0)     # T1.4, net NA — T1.3 (FVCC) sits above it
 const LGA_TGT_B := Vector2(29.0, 28.0)     # T1.2, net NB — T1.1 (FGND) sits above it
-## The seeded foreign via, 0.550mm off NA's lane (y 9.800).
+## The seeded foreign via, 0.545mm off NA's lane (y 9.795).
 const LGA_VIA_AT := Vector2(22.0, 9.25)
 ## What that leaves between the two coppers' EDGES, in mm, against a 0.200mm rule.
-const LGA_VIA_GAP_MM := 0.05
+const LGA_VIA_GAP_MM := 0.045
 const LGA_CLEARANCE_MM := 0.2
 ## The finding type under test, spelled OUT rather than read off the
 ## implementation: it is a wire value a consumer branches on, so this file is
@@ -2686,24 +2690,24 @@ func _test_a_station_via_names_the_layer_it_lands_on() -> void:
 #
 # THE FIXTURE is the LGA board with a station at (26,10) on the straight first
 # run, bottom to top. 0.2mm tracks at 0.2mm clearance and the 0.8mm fallback
-# via give a 1.0mm via pitch, so the two vias sit at (26, 9.5) for NA and
-# (26, 10.5) for NB, ring edges 0.4mm out. A 0.6mm square land P1.1 on its own
-# net is placed on the station's own column BELOW NB's via, its top edge y
-# 10.9 + gap: at gap 0.25 the ring and the land clear the 0.2mm rule and not the
-# 0.2 + 2 x 0.2 = 0.6mm corridor; at gap 0.7 they clear both. NB's own copper
-# past the station lies at y <= 10.6, so the land is never a foreign-copper
-# hit itself.
+# via give a 1.0mm via pitch, laid at 1.01, so the two vias sit at (26, 9.495)
+# for NA and (26, 10.505) for NB, ring edges 0.4mm out. A 0.6mm square land
+# P1.1 on its own net is placed on the station's own column BELOW NB's via,
+# its top edge y 10.905 + gap: at gap 0.25 the ring and the land clear the
+# 0.2mm rule and not the 0.2 + 2 x 0.2 = 0.6mm corridor; at gap 0.7 they clear
+# both. NB's own copper past the station lies at y <= 10.61, so the land is
+# never a foreign-copper hit itself.
 #
 # ORACLES: the finding's pad, net, measured and required, read against those
 # hand-derived figures; its absence at 0.7; and the board triple plus via count
 # through the verb — the station still lands.
 
-## P1's pin centre for a given ring-to-land gap: NB's via top edge (10.9) plus
+## P1's pin centre for a given ring-to-land gap: NB's via top edge (10.905) plus
 ## the gap plus half the 0.6mm land.
 func _crowd_board(gap: float) -> Dictionary:
 	var board := _lga_board()
 	(board["components"] as Array).append({"ref": "P1", "footprint": "IC_DIP",
-		"x_mm": LGA_STATION_AT.x, "y_mm": 10.9 + gap + 0.3, "rotation_deg": 0.0,
+		"x_mm": LGA_STATION_AT.x, "y_mm": 10.905 + gap + 0.3, "rotation_deg": 0.0,
 		"pins": [_lga_pin("1", 0.0, 0.0)]})
 	(board["nets"] as Array).append({"name": "FP", "pins": ["P1.1"]})
 	return board
@@ -2749,7 +2753,7 @@ func _test_a_station_that_walls_a_pad_off_is_named() -> void:
 	check("…with a witness from NB's via to the land",
 			(hit.get("closest", []) as Array).size() == 2
 				and absf(float((hit.get("closest", [0, 0]) as Array)[0]) - 26.0) <= EPS
-				and absf(float((hit.get("closest", [0, 0]) as Array)[1]) - 10.5) <= EPS
+				and absf(float((hit.get("closest", [0, 0]) as Array)[1]) - 10.505) <= EPS
 				and (hit.get("witness", []) as Array).size() == 2,
 			str(hit))
 	check("the same land 0.7mm away is not named", _crowd_findings(0.7).is_empty(),
@@ -2997,14 +3001,15 @@ func _test_unreachable_targets_still_name_the_layer_to_start_on() -> void:
 # trace ending OPEN at the end of its lane — a free end — while the landed nets
 # route exactly as a bus of just those nets would.
 #
-# HAND-DERIVED. NA is left open; its lane is the -0.5 offset (y = 19.5) of the
-# spine (20,20)->(120,20), so its route is the source leg the full bus gives it
-# — (10,10),(21,10),(21,19.5) — then the lane to the spine's end: (120,19.5).
-# With NA out of the target ladder, NB (offset 0) leaves FIRST at station 0.0
-# (x = 120.0) and NC one pitch (0.5) inward at x = 119.5 — where the full bus
-# had NB at 119.5 and NC at 119.0. NB's leg at x = 120 from y = 20 down to 42
-# sits exactly one pitch (0.5) from NA's open lane end at (120,19.5), so the
-# clearance rule measures 0.5 against a 0.5 requirement and raises nothing.
+# HAND-DERIVED. NA is left open; its lane is the -0.51 offset (y = 19.49) of
+# the spine (20,20)->(120,20), so its route is the source leg the full bus
+# gives it — (10,10),(21.02,10),(21.02,19.49) — then the lane to the spine's
+# end: (120,19.49). With NA out of the target ladder, NB (offset 0) leaves
+# FIRST at station 0.0 (x = 120.0) and NC one laid pitch (0.51) inward at
+# x = 119.49 — where the full bus had NB at 119.49 and NC at 118.98. NB's leg
+# at x = 120 from y = 20 down to 42 sits one laid pitch (0.51) from NA's open
+# lane end at (120,19.49), so the clearance rule measures 0.51 against a 0.5
+# requirement and raises nothing.
 #
 # ORACLE: the serialized traces (count, per-net points), data.history, the
 # add_bus journal row's open_nets, free_trace_end_at on the model, and the
@@ -3012,11 +3017,11 @@ func _test_unreachable_targets_still_name_the_layer_to_start_on() -> void:
 
 func _open_routes() -> Dictionary:
 	return {
-		"NA": [SRC_A, Vector2(21.0, 10.0), Vector2(21.0, 19.5), Vector2(120.0, 19.5)],
-		"NB": [SRC_B, Vector2(20.5, 12.0), Vector2(20.5, 20.0),
+		"NA": [SRC_A, Vector2(21.02, 10.0), Vector2(21.02, 19.49), Vector2(120.0, 19.49)],
+		"NB": [SRC_B, Vector2(20.51, 12.0), Vector2(20.51, 20.0),
 			Vector2(120.0, 20.0), Vector2(120.0, 42.0), TGT_B],
-		"NC": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.5),
-			Vector2(119.5, 20.5), Vector2(119.5, 44.0), TGT_C],
+		"NC": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.51),
+			Vector2(119.49, 20.51), Vector2(119.49, 44.0), TGT_C],
 	}
 
 
@@ -3070,8 +3075,8 @@ func _test_an_open_lane_commits_as_a_free_end() -> void:
 				and _last(msgs).contains("NA") and _last(msgs).contains("Trace tool"),
 			_last(msgs))
 	# THE FREE END: the model offers NA's lane end as a trace end to continue.
-	var free_end: Dictionary = data.free_trace_end_at(Vector2(120.0, 19.5), data.TRACE_SNAP_MM)
-	check("NA's lane end (120,19.5) is a FREE end of NA's trace",
+	var free_end: Dictionary = data.free_trace_end_at(Vector2(120.0, 19.49), data.TRACE_SNAP_MM)
+	check("NA's lane end (120,19.49) is a FREE end of NA's trace",
 			by_net.has("NA") and str(free_end.get("trace_id", "")) == str(by_net["NA"].get("id", ""))
 				and str(free_end.get("end", "")) == "end", str(free_end))
 	check("…and a landed end is not (NB's end sits on its pad)",
@@ -3081,8 +3086,8 @@ func _test_an_open_lane_commits_as_a_free_end() -> void:
 
 	# WITH A STATION: the open lane crosses the via and ends on the station
 	# layer. NA's top run is the full station bus's own (source leg, fan-out into
-	# the via at (70,18.9)); its bottom run leaves the via, fans back to the
-	# lane (71.1,18.9)->(71.1,19.5) and runs to the spine's end (120,19.5).
+	# the via at (70,18.89)); its bottom run leaves the via, fans back to the
+	# lane (71.11,18.89)->(71.11,19.49) and runs to the spine's end (120,19.49).
 	rig = _rig()
 	canvas = rig[0]
 	data = rig[1]
@@ -3105,8 +3110,8 @@ func _test_an_open_lane_commits_as_a_free_end() -> void:
 	if runs.has("NA|top") and runs.has("NA|bottom"):
 		_check_route("NA|top", _points_of(runs["NA|top"]), _expected_station_runs()["NA|top"])
 		_check_route("NA|bottom (open)", _points_of(runs["NA|bottom"]),
-			[Vector2(70.0, 18.9), Vector2(71.1, 18.9), Vector2(71.1, 19.5), Vector2(120.0, 19.5)])
-		var open_end: Dictionary = data.free_trace_end_at(Vector2(120.0, 19.5), data.TRACE_SNAP_MM)
+			[Vector2(70.0, 18.89), Vector2(71.11, 18.89), Vector2(71.11, 19.49), Vector2(120.0, 19.49)])
+		var open_end: Dictionary = data.free_trace_end_at(Vector2(120.0, 19.49), data.TRACE_SNAP_MM)
 		check("the open end is the BOTTOM run's free end",
 				str(open_end.get("trace_id", "")) == str(runs["NA|bottom"].get("id", ""))
 					and str(open_end.get("end", "")) == "end", str(open_end))
@@ -3480,7 +3485,7 @@ func _test_a_neighbouring_pad_outranks_the_glyph() -> void:
 # In TARGETS the preview plans with the same target array the commit uses —
 # "" per open net — so the ghost shows the landed legs and the open lanes and
 # the held status judges the copper that would land. With NB (the middle
-# lane, y = 20) left open, NA's leg at x = 120 runs from y = 19.5 through
+# lane, y = 20) left open, NA's leg at x = 120 runs from y = 19.49 through
 # (120, 20), which is NB's open lane END: the clearance measurement reads a
 # 0 mm gap and names both nets, BEFORE any commit. No pad moves: the fixture
 # crosses as it stands once the middle net is the open one.

@@ -8,7 +8,7 @@ is the whole point of naming them.
 | Module | Owns |
 |---|---|
 | `pcb_trace_geometry.gd` | THE one implementation of each trace-geometry primitive: point→segment, point→polyline, segment↔segment gaps (general and axis-aligned), polyline↔rect, length, Manhattan distance, axis checks and snaps, trace ends (`end_index_at`), translate, bounds. Tolerances are named and passed in (`degenerate_len_sq`, `tol`); tie-breaks are documented. |
-| `pcb_bus_geometry.gd` | The parallel-bus construction: mitered offsets, pitch, `bundle_routes` (pad-to-pad routes, via station, open-ended lanes), the clearance measurement, `clean_pick_order`. |
+| `pcb_bus_geometry.gd` | The parallel-bus construction: mitered offsets, pitch (`pitch_between` is the rule, `lane_pitch_between` the laid spacing, `LANE_PITCH_MARGIN_MM` past it), `bundle_routes` (pad-to-pad routes, via station, open-ended lanes), the clearance measurement, `clean_pick_order`. |
 | `pcb_bus_labels.gd` | The words and colour a bus lane wears: `net_color` (the ratsnest's rule), lane labels/lines, the teach-line rules, the open-lane and clean-order sentences. |
 | `pcb_layer_stack.gd` | Canonical layer names, KiCad aliases, via-span legality. |
 | `pcb_staged_entities.gd`, `pcb_ratsnest.gd`, `pcb_spatial_index.gd`, `pcb_routing_workspace.gd`, … | Their own bounded concerns, same shape. |

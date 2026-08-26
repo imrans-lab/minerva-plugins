@@ -60,6 +60,7 @@ func _init() -> void:
 	_run_zero_offset_identity()
 	_run_pitch_invariant_through_bends()
 	_run_pitch_between()
+	_run_lane_pitch_margin()
 	_run_cumulative_offsets()
 	_run_design_rule_clearance()
 	_run_loaded_board_composition()
@@ -397,41 +398,88 @@ func _run_pitch_between() -> void:
 		BusGeom.pitch_between(0.3, 0.3, -5.0), 0.3)
 
 
+## THE LAID PITCH IS THE RULE PLUS A FIXED MARGIN, and the margin is what keeps
+## the fab-facing geometric DRC and this module's own clearance check agreeing.
+##
+## ORACLE, independent of the module: Vector2 is float32. Two lanes laid
+## exactly one rule-pitch apart on an ordinary coordinate measure SHORT of the
+## rule once stored — 16.05 and 15.55 round to float32 on opposite sides, and
+## their stored difference is 0.4999990 against a 0.5 rule — which a DRC that
+## allows no tolerance calls a violation. The check below stores the laid lanes
+## in Vector2s, measures them the way that DRC does (a plain difference, no
+## tolerance) and asks for the rule to be beaten outright; then repeats the
+## measurement for lanes laid at the bare rule on the same spine and shows
+## THAT is what falls short, so a margin of zero cannot pass by luck of the
+## coordinate.
+func _run_lane_pitch_margin() -> void:
+	print("-- laid pitch = rule + LANE_PITCH_MARGIN_MM --")
+	check_near("the margin is a hundredth of a millimetre", BusGeom.LANE_PITCH_MARGIN_MM, 0.01)
+	check_near("lane pitch for 0.3mm tracks at 0.2mm clearance is 0.51",
+		BusGeom.lane_pitch_between(0.3, 0.3, 0.2), 0.51)
+	check_near("...i.e. exactly the rule plus the margin",
+		BusGeom.lane_pitch_between(0.3, 0.3, 0.2) - BusGeom.pitch_between(0.3, 0.3, 0.2),
+		BusGeom.LANE_PITCH_MARGIN_MM)
+	check_near("the margin clamps the same way the rule does (negative clearance)",
+		BusGeom.lane_pitch_between(0.3, 0.3, -5.0), 0.31)
+
+	# 0.3mm tracks at 0.2mm clearance about a spine at y = 16.05: the outer lanes
+	# land at 16.05 -/+ 0.51 and the copper edges 0.15 nearer each other, so the
+	# fab sees 0.51 - 0.3 = 0.21mm of board where it asked for 0.20.
+	var lanes: Array = BusGeom.cumulative_offsets([0.3, 0.3, 0.3], 0.2)
+	var spine_y := 16.05
+	var a := Vector2(50.0, spine_y + float(lanes[0]))
+	var b := Vector2(50.0, spine_y + float(lanes[1]))
+	var edge_gap: float = (b.y - a.y) - 0.3
+	check("stored as float32, the copper gap beats the 0.2mm rule with no tolerance at all",
+		edge_gap > 0.2)
+	check("...by at least half the margin", edge_gap - 0.2 >= 0.005)
+	# The same pair at the BARE rule, stored the same way: 15.55 and 16.05 land
+	# on the float32 grid a hair apart from their true spacing, and the stored
+	# difference is the short measurement the geometric DRC reports on a real
+	# board — 0.1999990 of copper gap against 0.2.
+	var bare_a := Vector2(50.0, spine_y - BusGeom.pitch_between(0.3, 0.3, 0.2))
+	var bare_b := Vector2(50.0, spine_y)
+	var bare_gap: float = (bare_b.y - bare_a.y) - 0.3
+	check("lanes laid at the bare rule fall SHORT of it once stored (the defect the margin exists for)",
+		bare_gap < 0.2 and bare_gap > 0.199)
+
+
 func _run_cumulative_offsets() -> void:
 	print("-- S1+S2: cumulative track offsets, caller's order --")
 	check("empty widths -> empty", BusGeom.cumulative_offsets([], 0.2).is_empty())
 	check_near("one track sits on the spine",
 		float(BusGeom.cumulative_offsets([0.3], 0.2)[0]), 0.0)
 
-	# UNIFORM: three 0.3mm tracks at 0.2mm clearance. pitch = 0.5 for both gaps,
-	# positions 0 / 0.5 / 1.0, centre 0.5 -> [-0.5, 0, +0.5]. This is exactly the
-	# router's (i - (n-1)/2)*spacing for spacing 0.5 — the two agree wherever the
-	# router's uniform assumption actually holds.
+	# UNIFORM: three 0.3mm tracks at 0.2mm clearance. rule 0.5 + margin 0.01 =
+	# 0.51 for both gaps, positions 0 / 0.51 / 1.02, centre 0.51 ->
+	# [-0.51, 0, +0.51]. This is exactly the router's (i - (n-1)/2)*spacing for
+	# spacing 0.51 — the two agree wherever the router's uniform assumption holds.
 	var uni: Array = BusGeom.cumulative_offsets([0.3, 0.3, 0.3], 0.2)
-	check_near("uniform trio: track 0", float(uni[0]), -0.5)
+	check_near("uniform trio: track 0", float(uni[0]), -0.51)
 	check_near("uniform trio: track 1", float(uni[1]), 0.0)
-	check_near("uniform trio: track 2", float(uni[2]), 0.5)
+	check_near("uniform trio: track 2", float(uni[2]), 0.51)
 	var quad: Array = BusGeom.cumulative_offsets([0.3, 0.3, 0.3, 0.3], 0.2)
 	for i in range(4):
 		check_near("uniform quad track %d matches (i-(n-1)/2)*pitch" % i,
-			float(quad[i]), (float(i) - 1.5) * 0.5)
+			float(quad[i]), (float(i) - 1.5) * 0.51)
 
-	# MIXED: [1.0, 0.2, 0.2] at 0.2. gap0 = 0.5+0.2+0.1 = 0.8 ; gap1 = 0.1+0.2+0.1
-	# = 0.4. positions 0 / 0.8 / 1.2, centre 0.6 -> [-0.6, +0.2, +0.6].
+	# MIXED: [1.0, 0.2, 0.2] at 0.2. gap0 = 0.5+0.2+0.1 + 0.01 = 0.81 ; gap1 =
+	# 0.1+0.2+0.1 + 0.01 = 0.41. positions 0 / 0.81 / 1.22, centre 0.61 ->
+	# [-0.61, +0.20, +0.61].
 	var mixed: Array = BusGeom.cumulative_offsets([1.0, 0.2, 0.2], 0.2)
-	check_near("mixed trio: fat track", float(mixed[0]), -0.6)
+	check_near("mixed trio: fat track", float(mixed[0]), -0.61)
 	check_near("mixed trio: middle track", float(mixed[1]), 0.2)
-	check_near("mixed trio: outer track", float(mixed[2]), 0.6)
-	# Composition: each adjacent GAP is exactly its own pitch_between.
-	check_near("gap 0 == pitch_between(1.0, 0.2, 0.2)",
-		float(mixed[1]) - float(mixed[0]), BusGeom.pitch_between(1.0, 0.2, 0.2))
-	check_near("gap 1 == pitch_between(0.2, 0.2, 0.2)",
-		float(mixed[2]) - float(mixed[1]), BusGeom.pitch_between(0.2, 0.2, 0.2))
+	check_near("mixed trio: outer track", float(mixed[2]), 0.61)
+	# Composition: each adjacent GAP is exactly its own laid pitch.
+	check_near("gap 0 == lane_pitch_between(1.0, 0.2, 0.2)",
+		float(mixed[1]) - float(mixed[0]), BusGeom.lane_pitch_between(1.0, 0.2, 0.2))
+	check_near("gap 1 == lane_pitch_between(0.2, 0.2, 0.2)",
+		float(mixed[2]) - float(mixed[1]), BusGeom.lane_pitch_between(0.2, 0.2, 0.2))
 
 	# CALLER'S ORDER IS THE OUTPUT ORDER (T11). Reversing the width list mirrors
-	# the layout instead of reproducing it: [0.2,0.2,1.0] gives gaps 0.4 then 0.8,
-	# positions 0 / 0.4 / 1.2, centre 0.6 -> [-0.6, -0.2, +0.6], which is the
-	# negated reverse of the [-0.6,+0.2,+0.6] above. If this function re-sorted
+	# the layout instead of reproducing it: [0.2,0.2,1.0] gives gaps 0.41 then
+	# 0.81, positions 0 / 0.41 / 1.22, centre 0.61 -> [-0.61, -0.20, +0.61], the
+	# negated reverse of the [-0.61,+0.20,+0.61] above. If this function re-sorted
 	# its input the way route_bus re-sorts nets (router.py:1624-1631), the two
 	# calls would return the SAME array and this would fail.
 	var rev: Array = BusGeom.cumulative_offsets([0.2, 0.2, 1.0], 0.2)
@@ -451,7 +499,7 @@ func _run_cumulative_offsets() -> void:
 	var t1: PackedVector2Array = tracks[1]
 	check_near("mixed bundle holds gap 0 on the post-bend segment",
 		_dist_to_line((t0[1] + t0[2]) * 0.5, t1[1], t1[2]),
-		BusGeom.pitch_between(1.0, 0.2, 0.2), DERIVED_EPS)
+		BusGeom.lane_pitch_between(1.0, 0.2, 0.2), DERIVED_EPS)
 
 
 func _run_design_rule_clearance() -> void:
@@ -513,14 +561,15 @@ func _run_design_rule_clearance() -> void:
 ##     the bundle to one width would still be symmetric and still look plausible;
 ##     it is only wrong by a measurable amount when the widths differ.
 ##
-## HAND-DERIVED, per pcb_bus_geometry.pitch_between = a/2 + clearance + b/2:
-##   gap 0-1 = 0.20/2 + 0.30 + 0.40/2 = 0.10 + 0.30 + 0.20 = 0.60
-##   gap 1-2 = 0.40/2 + 0.30 + 0.20/2 = 0.20 + 0.30 + 0.10 = 0.60
-##   positions before centring = [0.00, 0.60, 1.20], centre = 1.20 / 2 = 0.60
-##   centred                   = [-0.60, 0.00, 0.60]
+## HAND-DERIVED, per pcb_bus_geometry.lane_pitch_between = a/2 + clearance +
+## b/2 + the 0.01 laid margin:
+##   gap 0-1 = 0.20/2 + 0.30 + 0.40/2 + 0.01 = 0.10 + 0.30 + 0.20 + 0.01 = 0.61
+##   gap 1-2 = 0.40/2 + 0.30 + 0.20/2 + 0.01 = 0.20 + 0.30 + 0.10 + 0.01 = 0.61
+##   positions before centring = [0.00, 0.61, 1.22], centre = 1.22 / 2 = 0.61
+##   centred                   = [-0.61, 0.00, 0.61]
 ##
 ## (The two gaps come out equal here BECAUSE the bundle is symmetric — that is
-## what makes the outer offsets a clean +/-0.60 to check by eye. The per-pair
+## what makes the outer offsets a clean +/-0.61 to check by eye. The per-pair
 ## arithmetic is still what produced them, and the assertion below on a
 ## uniform-width bundle is what proves the widths were actually consulted.)
 func _run_loaded_board_composition() -> void:
@@ -546,9 +595,9 @@ func _run_loaded_board_composition() -> void:
 
 	check("three tracks in, three offsets out", offsets.size() == 3)
 	if offsets.size() == 3:
-		check_near("track 0 sits at -0.60 mm (hand-derived above)", float(offsets[0]), -0.60)
+		check_near("track 0 sits at -0.61 mm (hand-derived above)", float(offsets[0]), -0.61)
 		check_near("track 1 sits on the spine", float(offsets[1]), 0.0)
-		check_near("track 2 sits at +0.60 mm", float(offsets[2]), 0.60)
+		check_near("track 2 sits at +0.61 mm", float(offsets[2]), 0.61)
 
 	# THE DISCRIMINATOR. Feed the SAME board clearance to a bundle whose widths
 	# are all the first track's width. If the widths were being ignored, this
@@ -558,7 +607,7 @@ func _run_loaded_board_composition() -> void:
 	check("a uniform-width bundle at the same clearance is NOT the mixed one "
 		+ "(proves the per-pair widths reached the pitch)",
 		uniform.size() == 3 and not is_equal_approx(float(uniform[0]), float(offsets[0])))
-	# ... and its own hand-derived value: 0.20/2 + 0.30 + 0.20/2 = 0.50 per gap,
-	# positions [0, 0.50, 1.00], centred [-0.50, 0, +0.50].
+	# ... and its own hand-derived value: 0.20/2 + 0.30 + 0.20/2 + 0.01 = 0.51
+	# per gap, positions [0, 0.51, 1.02], centred [-0.51, 0, +0.51].
 	if uniform.size() == 3:
-		check_near("uniform bundle outer track at -0.50 mm", float(uniform[0]), -0.50)
+		check_near("uniform bundle outer track at -0.51 mm", float(uniform[0]), -0.51)

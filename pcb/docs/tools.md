@@ -834,7 +834,9 @@ each track lands on; it is not a bug.
 
 **One call, one implementation shared with the gesture.** `panel_tools.gd`'s
 `bus_plan` (pure: per-net width resolution → `PCBData.design_rule_clearance()`
-→ `pcb_bus_geometry.pitch_between` via `cumulative_offsets` → the inner-fold
+→ `pcb_bus_geometry.lane_pitch_between` (the rule `pitch_between` plus a fixed
+0.01 mm `LANE_PITCH_MARGIN_MM`, so laid copper never sits exactly at the limit
+the geometric DRC measures against) via `cumulative_offsets` → the inner-fold
 guard → `pcb_bus_geometry.bundle_routes` for each net's whole pad-to-pad
 polyline) and `bus_commit_plan` (mutating: N `create_trace_entity` calls + one
 `save_to_history`) are called by BOTH the canvas tool's commit path and the two
