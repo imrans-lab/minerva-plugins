@@ -8432,14 +8432,14 @@ const BUS_FINDING_INNER_FOLD := "bus_inner_fold"
 ## to as bare coordinates and cannot even tell which net one belongs to.
 const BUS_FINDING_FOREIGN_COPPER := "bus_foreign_copper"
 
-## The THIRD finding type raised in this file: a bus leg that lands on a layer
+## A bus leg that lands on a layer
 ## its own pad has no copper on — an SMD pad on the other side of the board
 ## from the layer the leg runs on. The copper ends under the pad with nothing
 ## to join, which is an open by construction, and nothing in bundle_routes can
 ## see it: that module knows pads as bare points, not as copper on a layer.
 const BUS_FINDING_PAD_OFF_LAYER := "bus_pad_off_layer"
 
-## The FOURTH: a via station whose vias leave another net's pad clear of the
+## A via station whose vias leave another net's pad clear of the
 ## board's clearance but not of a routing CORRIDOR. A via ring that sits one
 ## clearance from a pad's copper is legal and walls the pad off — no track can
 ## pass between them — so the pad cannot be reached from that side any more.
