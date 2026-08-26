@@ -35,7 +35,11 @@
 # copper finding's measured/required/witness checks, and the via station
 # (hand-derived fan, split indices, via pitch, two refusals, one finding, and
 # two more invariant cases). MEASURED: 95 passed, 0 failed.
-test_bus_breakout_geometry.gd assertions=95
+# 95 -> 100: the leg-station snap (a leg lands on its lane's mitered corner,
+# never leaving a sub-width stub) adds the hand-derived BCLK case and a
+# min-segment-length walk over every route; the batch review dropped one
+# check that could not fail on its own. MEASURED: 100 passed, 0 failed.
+test_bus_breakout_geometry.gd assertions=100
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.
@@ -53,7 +57,12 @@ test_bus_breakout_geometry.gd assertions=95
 # the ghost, the layer switch that becomes a via station (gesture and verb,
 # compared board to board), a fractional verb index and a torn station plan
 # both refused. MEASURED: 223 passed, 0 failed.
-test_bus_tool.gd assertions=223
+# 223 -> 247: the foreign-copper findings (every pad, via or trace the bus
+# lands on or crowds, reaching the verb reply, the status line and the
+# ghost), the working-layer funnel into the via station, and the teach /
+# status wording checks. Implementers reported 225 by reading; the run says
+# 247, because the findings walk expands per foreign entity. MEASURED.
+test_bus_tool.gd assertions=247
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
@@ -132,7 +141,10 @@ test_pcb_route_hint_mcp_parity.gd assertions=19
 # Section 8 (the netless refusal's anchor vocabulary) adds 13: 2 rule checks,
 # 1 landed-on-the-pad guard, 3 static sites in a 2-kind loop, 4 on the MCP
 # verb — 64 -> 77.
-test_pcb_trace_tool.gd assertions=77
+# Section 9 (the working layer authors, the view only shows): 9 checks that
+# choosing a layer moves where the trace lands and hiding or filtering a
+# layer does not — 77 -> 86. MEASURED: 86 passed, 0 failed.
+test_pcb_trace_tool.gd assertions=86
 # Re-pinned 28 → 34 with OFC-5's menu-revealed drawing-width section (BT-OFC5,
 # 6 checks; the section-registry count check updates in place).
 test_pcb_width_prefs.gd assertions=34
@@ -193,7 +205,12 @@ test_inner_layer_via_guard.gd assertions=39
 # used to change the eyes and nothing on screen — and group 6 pins the newly
 # writable trace_layer_filter. Provisional for the same reason as the
 # suite above — no run happens before the Codex review — and re-pins at testex.
-test_view_state.gd assertions=57
+# 57 -> 76: group 7 pins the split between the working layer (what edits
+# land on) and trace_layer_filter (what is drawn): setting one leaves the
+# other alone, and re-asserting the same value changes nothing. MEASURED:
+# 76 passed, 0 failed — the first run of this suite; the 57 above was never
+# executed and the run confirms the batch's count, not the provisional one.
+test_view_state.gd assertions=76
 # NEW at epoch NLC C2 (item 019fff60e05a): minerva_pcb_place_via, the direct
 # board via. Grown at C3 (item 01a001c39aa3) with minerva_pcb_add_trace's two
 # groups — SAME suite on purpose: the pair is one parity gap answered twice and
