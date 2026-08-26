@@ -10,8 +10,10 @@ ResolvedBoard IR, docket 019f7abf55c2) and are reported separately (019f7abf7e7b
 Pure Python, no KiCad binary — operates on the same canonical board dict
 (``board_model.load_board``) that gerber.py / kicad.py consume. Four connectivity checks:
 
-  A. wrong_net_pad     — a trace endpoint coincident (<= clearance) with a pad of
-                         a DIFFERENT net  -> short / mis-route.
+  A. wrong_net_pad     — a trace centerline within clearance of a pad of a
+                         DIFFERENT net, at an ENDPOINT (short / mis-route) or
+                         ANYWHERE ALONG the run (a segment driven straight over
+                         a foreign land)  -> deduped per (segment, pad).
   B. crossing          — two trace segments on the SAME layer, DIFFERENT nets,
                          that intersect  -> deduped per (net-pair, layer).
   C. dangling_endpoint — a LEAF trace endpoint (degree 1 in its net) that reaches
@@ -175,6 +177,25 @@ def _point_on_segment_interior(pt, a, b, eps: float) -> bool:
         return False
     proj = (ax + t * dx, ay + t * dy)
     return _dist(pt, proj) <= eps
+
+
+def _closest_point_on_segment(pt, a, b) -> tuple[float, float]:
+    """The point of segment a-b nearest ``pt``, CLAMPED to the segment (a
+    degenerate zero-length segment answers ``a``).
+
+    Unlike :func:`_point_on_segment_interior` this carves out no endpoint band
+    and returns a POINT rather than a verdict: the caller decides which stretch
+    of the run it owns and needs the location to report.
+    """
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    seg_len2 = dx * dx + dy * dy
+    if seg_len2 <= 0.0:
+        return a
+    t = ((pt[0] - ax) * dx + (pt[1] - ay) * dy) / seg_len2
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return (ax + t * dx, ay + t * dy)
 
 
 # ---------------------------------------------------------------------------
@@ -370,8 +391,31 @@ def _harvest_vias(board: dict) -> list[_HarvestedVia]:
 
 
 def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
+    """Check A — a trace within ``clr`` of a foreign-net pad, reported wherever
+    along the run it happens.
+
+    TWO PASSES OVER ONE FAULT, split by which pads each owns so neither can
+    double-report the other's: the ENDPOINT pass owns every pad whose center is
+    within ``clr`` of ``seg.a`` or ``seg.b``, the ALONG-SEGMENT pass owns all
+    the rest. Both emit ``wrong_net_pad`` — the physical fault is the same short
+    and consumers key off the type — and ``at`` says which stretch it is (an
+    endpoint coordinate vs. the closest point on the run).
+
+    The endpoint pass keeps its OWN-NET VETO: a trace terminating on its own
+    pad is a correct landing even when a foreign pad sits within clearance of
+    that same point, which is a spacing question for the geometric DRC and not
+    a mis-route. Mid-run there is no such ambiguity — nothing is landing — so
+    each foreign pad the centerline passes over is judged on its own, and a run
+    driven across several of them reports each one.
+
+    MEASURE: centerline to pad CENTER, the module's standing basis. Pad EXTENT
+    is never read, so a wide land whose copper the centerline misses by more
+    than ``clr`` is the geometric DRC's finding rather than this one — this
+    check under-reports, it never invents copper it cannot see.
+    """
     findings: list[dict] = []
-    seen: set = set()
+    seen_at_ends: set = set()
+    seen_along: set = set()
     for seg in segs:
         for pt in (seg.a, seg.b):
             near = [p for p in pads
@@ -383,13 +427,38 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
                 continue  # correctly lands on its own net's pad
             pad = min(near, key=lambda p: _dist(pt, p.pt))
             key = (seg.net, _round_pt(pt), pad.ref, pad.pin)
-            if key in seen:
+            if key in seen_at_ends:
                 continue
-            seen.add(key)
+            seen_at_ends.add(key)
             findings.append({
                 "type": "wrong_net_pad",
                 "net": seg.net,
                 "at": [round(pt[0], 3), round(pt[1], 3)],
+                "pad": {"ref": pad.ref, "pin": pad.pin, "net": pad.net},
+            })
+        for pad in pads:
+            if pad.net == seg.net or not pad.occupies(seg.layer):
+                continue
+            if _dist(pad.pt, seg.a) <= clr or _dist(pad.pt, seg.b) <= clr:
+                continue  # the endpoint pass owns this pad, veto included
+            at = _closest_point_on_segment(pad.pt, seg.a, seg.b)
+            if _dist(pad.pt, at) > clr:
+                continue
+            # One row per (segment, pad): the segment by its authored geometry
+            # rather than by identity, so a duplicated trace cannot report the
+            # same short twice. A pad on a shared polyline VERTEX is not
+            # double-billed either — it is within clr of both segments' shared
+            # endpoint, so both hand it to the endpoint pass, which dedupes on
+            # the point.
+            key = (seg.net, seg.layer, _round_pt(seg.a), _round_pt(seg.b),
+                   pad.ref, pad.pin)
+            if key in seen_along:
+                continue
+            seen_along.add(key)
+            findings.append({
+                "type": "wrong_net_pad",
+                "net": seg.net,
+                "at": [round(at[0], 3), round(at[1], 3)],
                 "pad": {"ref": pad.ref, "pin": pad.pin, "net": pad.net},
             })
     return findings

@@ -129,7 +129,7 @@ var DRC = ToolSpec{
 		"clearance/width/annular). Pure " +
 		"Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. " +
 		"Returns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured " +
-		"and located: 'wrong_net_pad' (a trace endpoint on a different-net pad -> short) " +
+		"and located: 'wrong_net_pad' (a trace endpoint on, or a segment passing over, a different-net pad -> short) " +
 		"{net, at:[x,y], pad:{ref,pin,net}}; 'crossing' (two same-layer different-net traces " +
 		"that intersect, deduped per net-pair-per-layer) {nets:[a,b], layer, at}; " +
 		"'dangling_endpoint' (a leaf trace endpoint reaching no pad/via/same-net copper -> " +

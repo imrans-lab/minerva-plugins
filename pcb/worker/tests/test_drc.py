@@ -949,3 +949,104 @@ def test_crossing_layers_compare_canonically_folded():
     assert r["counts"]["crossing"] == 1
     f = _of_type(r, "crossing")[0]
     assert f["layer"] == "top"
+
+
+# ---------------------------------------------------------------------------
+# Check A along the RUN, not just at the ends.
+#
+# Live shape (smart-remote v2, U3): a committed bus drove three I2S nets up a
+# 1mm two-column LGA, each landing correctly on its own pad but crossing the
+# foreign pads BELOW it on the way. Four dead shorts; the endpoint-only check
+# reported none of them (only the two trace-trace `crossing` rows the two
+# collinear column-A runs earn). Coordinates below are the live ones.
+# ---------------------------------------------------------------------------
+
+_OVER_PADS = """
+version: 1
+name: overpads
+width_mm: 60
+height_mm: 100
+design_rules: {clearance_mm: 0.2}
+components:
+  - ref: U3
+    footprint: LGA
+    x_mm: 45.0
+    y_mm: 90.5
+    rotation_deg: 0
+    pins:
+      - {number: '3', x_mm: 0.95, y_mm: 1.0}
+      - {number: '4', x_mm: 0.95, y_mm: 0.0}
+      - {number: '5', x_mm: -0.95, y_mm: 0.0}
+      - {number: '6', x_mm: -0.95, y_mm: 1.0}
+      - {number: '7', x_mm: -0.95, y_mm: 2.0}
+nets:
+  - {name: I2S1_WS, pins: ['U3.3']}
+  - {name: '+3V3', pins: ['U3.4']}
+  - {name: GND, pins: ['U3.5']}
+  - {name: I2S1_BCLK, pins: ['U3.6']}
+  - {name: I2S1_SD, pins: ['U3.7']}
+vias:
+  - {x_mm: 44.05, y_mm: 88.6, drill_mm: 0.3, diameter_mm: 0.6, net: I2S1_BCLK}
+  - {x_mm: 44.05, y_mm: 89.5, drill_mm: 0.3, diameter_mm: 0.6, net: I2S1_SD}
+  - {x_mm: 45.95, y_mm: 89.05, drill_mm: 0.3, diameter_mm: 0.6, net: I2S1_WS}
+traces:
+  - {net: I2S1_SD, layer: top, width_mm: 0.15,
+     points: [{x_mm: 44.05, y_mm: 89.5}, {x_mm: 44.05, y_mm: 92.5}]}
+  - {net: I2S1_BCLK, layer: top, width_mm: 0.15,
+     points: [{x_mm: 44.05, y_mm: 88.6}, {x_mm: 44.05, y_mm: 91.5}]}
+  - {net: I2S1_WS, layer: top, width_mm: 0.15,
+     points: [{x_mm: 45.95, y_mm: 89.05}, {x_mm: 45.95, y_mm: 91.5}]}
+"""
+
+
+def _rows(result: dict) -> set:
+    return {(f["net"], tuple(f["at"]), f["pad"]["ref"], f["pad"]["pin"],
+             f["pad"]["net"]) for f in _of_type(result, "wrong_net_pad")}
+
+
+def test_segments_driven_over_foreign_pads_are_shorts():
+    """Each run ENDS on its own pad — the endpoint check has nothing to say —
+    and shorts the foreign pads it crosses on the way there."""
+    r = _run(yaml.safe_load(_OVER_PADS))
+    assert r["counts"]["wrong_net_pad"] == 4
+    assert _rows(r) == {
+        ("I2S1_SD", (44.05, 90.5), "U3", "5", "GND"),
+        ("I2S1_SD", (44.05, 91.5), "U3", "6", "I2S1_BCLK"),
+        ("I2S1_BCLK", (44.05, 90.5), "U3", "5", "GND"),
+        ("I2S1_WS", (45.95, 90.5), "U3", "4", "+3V3"),
+    }
+
+
+def test_pass_over_ones_own_pad_is_a_connection_not_a_finding():
+    """A run crossing its OWN net's pads is how a bus taps a column. Silent for
+    check A, and the completeness census already credits the same contact (the
+    pad-on-interior union in _net_pin_groups) — all four pads are one island,
+    not three."""
+    board = yaml.safe_load(_OVER_PADS)
+    board["nets"] = [{"name": "I2S1_SD", "pins": ["U3.5", "U3.6", "U3.7"]},
+                     {"name": "+3V3", "pins": ["U3.4"]},
+                     {"name": "I2S1_WS", "pins": ["U3.3"]}]
+    board["traces"] = [board["traces"][0]]   # the 89.5 -> 92.5 column-A run
+    board["vias"] = []
+    r = _run(board)
+    assert r["counts"]["wrong_net_pad"] == 0
+    # U3.7 is the landing; U3.5 and U3.6 are credited by the interior union —
+    # without it this net would read as three islands.
+    assert drc._net_pin_groups("I2S1_SD", drc._harvest_pads(board),
+                               drc._harvest_segments(board),
+                               drc._harvest_vias(board), 0.2) == 1
+
+
+def test_endpoint_short_is_reported_once_and_an_overshoot_once():
+    """The two passes partition by pad, so the endpoint case cannot be billed
+    twice — and the same pad one segment-length further along the SAME run,
+    which the endpoint check could never see, is reported exactly once."""
+    board = yaml.safe_load(_WRONG_NET)
+    r = _run(board)
+    assert r["counts"]["wrong_net_pad"] == 1
+    assert _rows(r) == {("NA", (10.0, 5.0), "B1", "1", "NB")}
+    # Overshoot B1.1 by 2mm: same short, now mid-run.
+    board["traces"][0]["points"][1]["x_mm"] = 12
+    r2 = _run(board)
+    assert r2["counts"]["wrong_net_pad"] == 1
+    assert _rows(r2) == {("NA", (10.0, 5.0), "B1", "1", "NB")}

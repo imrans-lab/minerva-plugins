@@ -2,9 +2,11 @@
 
 Docket 019f952b99f2, closing bug 019f80b5124d: a routing proposal ran a trace
 straight through the centre of a different-net pad, shorting two nets, and the
-DRC attached to that proposal reported it CLEAN. The connectivity checker cannot
-see that fault (traces are centerlines, pads are points); geometric DRC detects
-it exactly, but only ever ran on ACCEPTED copper.
+DRC attached to that proposal reported it CLEAN. Connectivity's check A only
+looked at trace ENDPOINTS then, so a run driven THROUGH a pad said nothing; it
+reads the whole run now and names this one. What connectivity still cannot do is
+measure copper EXTENT — geometric DRC detects that exactly, but only ever ran on
+ACCEPTED copper.
 
 BASELINE ROBUSTNESS. ``parity_corners.yaml`` (docket 019fbe68c5f8 — replaces the
 withdrawn product board ``smart_remote.yaml``, see testdata/POLICY.md) already
@@ -112,12 +114,21 @@ def test_shorting_proposal_is_caught_before_acceptance():
     assert per_candidate["finding_count"] == len(union["findings"])
 
 
-def test_connectivity_drc_still_calls_the_same_geometry_clean():
-    """The bug, restated as a test: the CONNECTIVITY checker reports the shorting
-    proposal clean. It is not wrong — a centerline checker cannot represent this —
-    which is exactly why the geometric complement above had to exist. This test
-    pins the division of labour: if connectivity ever starts reporting it, the two
-    surfaces have blurred and the honest-label contract needs revisiting."""
+def test_connectivity_drc_names_the_short_but_cannot_measure_it():
+    """The division of labour, measured rather than assumed.
+
+    This used to assert connectivity reported the shorting proposal CLEAN, on the
+    premise that "a centerline checker cannot represent this". Measured, that
+    premise was false for THIS geometry: SW9 pad B's centre is (10.0, 19.0) and
+    the candidate centerline runs straight through it, so the fault was visible to
+    a centerline kernel all along — only check A's endpoint-only scope hid it.
+    With check A reading the whole run, connectivity NAMES the short.
+
+    What it still cannot do is MEASURE it: the geometric surface reports the
+    copper-edge overlap (measured_mm/required_mm above) off real pad and trace
+    extents, which is the fault class a centre-to-centerline test genuinely cannot
+    represent — a trace that misses a pad's centre by more than clearance while
+    its copper still overlaps the land."""
     from pcb_worker.methods import _attach_route_drc
     from pcb_worker import ir_connectivity
 
@@ -127,7 +138,10 @@ def test_connectivity_drc_still_calls_the_same_geometry_clean():
     _attach_route_drc(payload, ir_connectivity.connectivity_board(rb))
     route_drc = payload["routes"][0]["drc"]
     assert route_drc["scope"] == "connectivity"
-    assert not any(v.get("type") == "wrong_net_pad" for v in route_drc["violations"])
+    shorts = [v for v in route_drc["violations"] if v.get("type") == "wrong_net_pad"]
+    assert shorts == [{"type": "wrong_net_pad", "net": "N_OBL", "at": [10.0, 19.0],
+                       "pad": {"ref": "SW9", "pin": "B", "net": "N_BOT"}}]
+    assert all("measured_mm" not in v for v in shorts)
 
 
 # ---------------------------------------------------------------------------

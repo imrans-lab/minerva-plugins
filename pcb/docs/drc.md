@@ -18,7 +18,7 @@ Every reply carries a `scope` token, and no two are spelled alike.
 `_drc` runs the centerline checker over a best-effort-resolved board. It reasons
 about pad centers and trace centerlines only, so it **cannot verify a clearance,
 a trace width, or an annular ring**. Its findings are connectivity faults:
-`wrong_net_pad` (endpoint on a different-net pad → short), `crossing` (two
+`wrong_net_pad` (endpoint on, or segment passing over, a different-net pad → short), `crossing` (two
 different-net traces intersect), `dangling_endpoint` (a leaf endpoint reaching no
 pad/via → open), `layer_change_no_via` (missing via). **A zero-finding `drc`
 result is a topology pass, not a proof the copper is geometrically clean.**
