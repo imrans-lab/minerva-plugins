@@ -85,6 +85,7 @@ from .geometry import (
 )
 from .zone_fill import (
     CulledRegion,
+    default_zone_minima,
     ZoneFillError,
     _to_nm as _zone_to_nm,
     fill_area_mm2,
@@ -1165,30 +1166,20 @@ def _zone_fill_minima(rules: dict, profile_floor: ManufacturingConstraints,
 
     Authored via ``design_rules.zone_min_thickness_mm`` /
     ``design_rules.zone_min_island_area_mm2``; ``None`` for the pair when either
-    is malformed, which fails the compile closed. Both DEFAULT rather than being
-    required, and each default is derived from a number the author already wrote:
-
-      * THICKNESS defaults to the selected profile's ``min_trace_width_mm``.
-        Pour copper thinner than the board house's own published minimum feature
-        does not etch reliably, so the board house set this floor by being
-        chosen. It is the same number the filler's sliver test used before the
-        rule was authorable, which is why no existing board's fill moves.
-      * ISLAND AREA defaults to the area of one default via land,
-        ``pi/4 * via_diameter_mm**2``. An orphan pour fragment can only ever
-        become connected copper by stitching a via into it, and a region whose
-        TOTAL AREA is under one land's area cannot contain that land whatever
-        its shape — so it can never be stitched, and it is etch scrap rather
-        than plane. The converse is deliberately not claimed: a larger fragment
-        might still not hold a via, and that one is refused so the author
-        decides.
+    is malformed, which fails the compile closed. An unstated value takes the
+    default from :func:`zone_fill.default_zone_minima` — the one place both
+    defaults are derived, so the IR and a filler running without an IR value
+    cannot disagree about what "scrap" means.
 
     A board may state ``0`` for the island area, which means "cull no island by
     size" — every orphan region is then refused. A zero THICKNESS is refused
     instead: a pour with no minimum width is not a policy, it is a missing one.
     """
+    default_thickness, default_island = default_zone_minima(
+        profile_floor.min_trace_width_mm, via_diameter_mm)
     thickness = rules.get("zone_min_thickness_mm")
     if thickness is None:
-        thickness = profile_floor.min_trace_width_mm
+        thickness = default_thickness
     elif not _is_positive_number(thickness):
         diags.error("invalid_design_rule",
                     "design_rules.zone_min_thickness_mm must be a positive "
@@ -1196,7 +1187,7 @@ def _zone_fill_minima(rules: dict, profile_floor: ManufacturingConstraints,
         return None
     island_area = rules.get("zone_min_island_area_mm2")
     if island_area is None:
-        island_area = math.pi / 4.0 * via_diameter_mm * via_diameter_mm
+        island_area = default_island
     elif isinstance(island_area, bool) or not isinstance(island_area, (int, float)) \
             or not math.isfinite(island_area) or island_area < 0:
         diags.error("invalid_design_rule",

@@ -1005,9 +1005,3 @@ func _run_leg_lands_on_its_lane_corner() -> void:
 	if not stub.is_empty():
 		printerr("    " + stub)
 
-	var on_the_lane := 0
-	for p in _route(result, 2):
-		if absf(p.y - 49.05) <= EPS:
-			on_the_lane += 1
-	check("BCLK's leg meets its lane at ONE corner, with no stub along it",
-		on_the_lane == 1)

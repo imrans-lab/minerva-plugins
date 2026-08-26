@@ -28,6 +28,8 @@ design_rules:                  # board-wide manufacturing constraints
   trace_width_mm: 0.25
   via_diameter_mm: 0.8
   via_drill_mm: 0.4
+  zone_min_thickness_mm: 0.15  # optional; see "Zone minima" under "Zones"
+  zone_min_island_area_mm2: 0.5 # optional; see "Zone minima" under "Zones"
   net_classes:                 # optional; see "Net classes" below
     - name: Power              # class identity; its IR id is DERIVED from this
       members: [VCC, GND]      # net names that belong to the class
@@ -210,6 +212,27 @@ on v1 boards too, unlike identity, which is v2-only. `kind` is checked BEFORE
 are not yet cross-checked by a shared vector, but `board_validate.py`'s
 `_check_zones` mirrors them string-for-string and in the same
 first-violation-wins order.
+
+#### Zone minima (`design_rules.zone_min_thickness_mm`, `design_rules.zone_min_island_area_mm2`)
+
+After a pour is carved around foreign copper, the fill may leave fragments no
+fab can etch and no via could reconnect. Two board-wide rules decide what the
+compiler does with them:
+
+| key | default | meaning |
+|---|---|---|
+| `zone_min_thickness_mm` | the selected manufacturer profile's `min_trace_width_mm` | a fill region (or any orphan fragment) thinner than this everywhere is a **sliver** and is culled; must be a positive number |
+| `zone_min_island_area_mm2` | the area of one default via land, `pi/4 * via_diameter_mm^2` | an orphan fragment (no same-net copper touching it on its layer) with total area below this is **etch scrap** and is culled; `0` means "cull no island by size"; must be non-negative |
+
+Every cull is reported as a `zone_fill_culled` WARNING with the region's area and layer — nothing
+is deleted silently. An orphan fragment **at or above** the island minimum is
+not culled: the compile refuses it (`zone_fill_failed`) so the author decides
+whether to stitch it, extend the pour, or shrink the outline.
+
+These two keys are compile-time rules only: `Validate` (Go) carries them in
+`design_rules` untyped and does not check them, so a malformed value (negative,
+non-numeric) passes `validate` and is refused by `compile` with
+`invalid_design_rule`.
 
 **A `copper_pour` zone is AUTHORABLE, COMPILABLE, and FABRICABLE (solid connect
 only); a `keepout` zone is AUTHORABLE, COMPILABLE, and enforced by routing and

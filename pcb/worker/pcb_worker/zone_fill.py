@@ -92,11 +92,10 @@ matter is a design fact its author has to see. Every cull comes back as a
 :class:`CulledRegion` and is reported at WARNING severity; nothing is deleted in
 silence.
 
-REFUSING EVERYTHING WAS WORSE THAN EITHER. It made one pour's etch scrap
-indeterminate for the WHOLE BOARD: a three-via fan-out inside a ground pour left
-two 0.02 mm^2 crumbs, the compile failed, and every geometric DRC check
-downstream reported nothing — including four real shorts elsewhere on the board.
-See :func:`_cull_or_refuse_unfabricable_regions`.
+Refusing every fragment is worse than either: a compile that fails on one
+pour's etch scrap leaves every geometric DRC check downstream unrun, so the
+whole board reads as indeterminate. See
+:func:`_cull_or_refuse_unfabricable_regions`.
 
 === KNOWN v1 GAPS (stated, not hidden) ===
 
@@ -1120,9 +1119,8 @@ def _cull_or_refuse_unfabricable_regions(pc, zone: ResolvedZone, board: Resolved
     === WHY SMALL ONES ARE CULLED AND BIG ONES ARE REFUSED ===
 
     Both responses are wrong applied everywhere. Refusing every fragment makes
-    ONE pour's etch scrap indeterminate for the WHOLE BOARD — a three-via fan-out
-    inside a ground pour leaves two 0.02 mm^2 crumbs, the compile fails, and every
-    geometric DRC check downstream reports nothing, including the real shorts.
+    ONE pour's etch scrap indeterminate for the WHOLE BOARD: the compile fails
+    and every geometric DRC check downstream goes unrun, real shorts included.
     Culling every fragment deletes the author's copper silently: a severed half of
     a ground plane vanishes and the board still passes.
 

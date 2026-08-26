@@ -954,7 +954,7 @@ def test_crossing_layers_compare_canonically_folded():
 # ---------------------------------------------------------------------------
 # Check A along the RUN, not just at the ends.
 #
-# Live shape (smart-remote v2, U3): a committed bus drove three I2S nets up a
+# Live shape: a committed bus drove three I2S nets up a
 # 1mm two-column LGA, each landing correctly on its own pad but crossing the
 # foreign pads BELOW it on the way. Four dead shorts; the endpoint-only check
 # reported none of them (only the two trace-trace `crossing` rows the two
