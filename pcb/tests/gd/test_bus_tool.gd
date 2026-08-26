@@ -149,6 +149,8 @@ func _init() -> void:
 	_test_a_leg_on_a_layer_its_pad_is_not_on_is_named()
 	await _test_an_off_layer_leg_reaches_the_agent()
 	_test_a_station_via_names_the_layer_it_lands_on()
+	_test_a_station_that_walls_a_pad_off_is_named()
+	await _test_a_crowding_station_still_lands()
 	_test_unreachable_targets_still_name_the_layer_to_start_on()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -2181,6 +2183,8 @@ const LGA_CLEARANCE_MM := 0.2
 const FOREIGN := "bus_foreign_copper"
 ## Likewise the off-layer pad rule's wire value, held equal to the tool's below.
 const OFF_LAYER := "bus_pad_off_layer"
+## And the station-corridor rule's.
+const CROWDS := "bus_station_crowds_pad"
 
 
 ## A through-hole pin of the source column: a 0.8mm drill in a 1.6mm annulus, so
@@ -2637,6 +2641,118 @@ func _test_a_station_via_names_the_layer_it_lands_on() -> void:
 			findings.size() == 1 and not hit.is_empty(), str(_finding_keys(findings)))
 		check("…and the finding says %s" % side,
 			str(hit.get("layer", "")) == side, str(hit.get("layer", "")))
+
+
+# ── 13e. A STATION VIA THAT WALLS A PAD OFF ───────────────────────────────────
+#
+# THE LIVE DEFECT: a station's vias sat one clearance from a foreign pad's edge.
+# Legal copper, and the pad could no longer be reached from that side. The
+# foreign-copper pass measures clearance and was rightly silent.
+#
+# THE FIXTURE is the LGA board with a station at (26,10) on the straight first
+# run, bottom to top. 0.2mm tracks at 0.2mm clearance and the 0.8mm fallback
+# via give a 1.0mm via pitch, so the two vias sit at (26, 9.5) for NA and
+# (26, 10.5) for NB, ring edges 0.4mm out. A 0.6mm square land P1.1 on its own
+# net is placed on the station's own column BELOW NB's via, its top edge y
+# 10.9 + gap: at gap 0.25 the ring and the land clear the 0.2mm rule and not the
+# 0.2 + 2 x 0.2 = 0.6mm corridor; at gap 0.7 they clear both. NB's own copper
+# past the station lies at y <= 10.6, so the land is never a foreign-copper
+# hit itself.
+#
+# ORACLES: the finding's pad, net, measured and required, read against those
+# hand-derived figures; its absence at 0.7; and the board triple plus via count
+# through the verb — the station still lands.
+
+## P1's pin centre for a given ring-to-land gap: NB's via top edge (10.9) plus
+## the gap plus half the 0.6mm land.
+func _crowd_board(gap: float) -> Dictionary:
+	var board := _lga_board()
+	(board["components"] as Array).append({"ref": "P1", "footprint": "IC_DIP",
+		"x_mm": LGA_STATION_AT.x, "y_mm": 10.9 + gap + 0.3, "rotation_deg": 0.0,
+		"pins": [_lga_pin("1", 0.0, 0.0)]})
+	(board["nets"] as Array).append({"name": "FP", "pins": ["P1.1"]})
+	return board
+
+
+func _crowd_findings(gap: float) -> Array:
+	var data := PCBData.new()
+	data.from_board_dict(_crowd_board(gap))
+	var plan: Dictionary = PanelToolsScript.bus_plan(
+		data, ["NA", "NB"],
+		PackedVector2Array([LGA_PATH_1, LGA_STATION_AT, LGA_PATH_2, LGA_PATH_3]), "bottom",
+		PackedStringArray(["U1.1", "U1.2"]), PackedStringArray(["T1.4", "T1.2"]),
+		0.0, 1, "top")
+	var out: Array = []
+	for raw in _findings_of(plan):
+		if str((raw as Dictionary).get("type", "")) == CROWDS:
+			out.append(raw)
+	return out
+
+
+func _test_a_station_that_walls_a_pad_off_is_named() -> void:
+	print("\n-- (13e) a station via one clearance from a pad walls it off, and says so --")
+	check("the type this suite pins is the type the tool emits",
+			PanelToolsScript.BUS_FINDING_STATION_CROWDS_PAD == CROWDS,
+			str(PanelToolsScript.BUS_FINDING_STATION_CROWDS_PAD))
+	var crowded := _crowd_findings(0.25)
+	check("the land 0.25mm from NB's ring is named once, by NB",
+			crowded.size() == 1
+				and str((crowded[0] as Dictionary).get("foreign_ref", "")) == "P1.1"
+				and str((crowded[0] as Dictionary).get("foreign_net", "")) == "FP"
+				and str((crowded[0] as Dictionary).get("net_name", "")) == "NB",
+			str(crowded))
+	var hit: Dictionary = crowded[0] if not crowded.is_empty() else {}
+	check("…measuring 0.25mm against the 0.6mm corridor",
+			absf(float(hit.get("measured_mm", 0.0)) - 0.25) <= 1e-3
+				and absf(float(hit.get("required_mm", 0.0)) - 0.6) <= 1e-3,
+			"measured=%s required=%s" % [str(hit.get("measured_mm", "")), str(hit.get("required_mm", ""))])
+	check("…saying the pad is walled off and that the station should move along the spine",
+			str(hit.get("message", "")).contains("P1.1")
+				and str(hit.get("message", "")).contains("walls")
+				and str(hit.get("message", "")).contains("along the spine"),
+			str(hit.get("message", "")))
+	check("…with a witness from NB's via to the land",
+			(hit.get("closest", []) as Array).size() == 2
+				and absf(float((hit.get("closest", [0, 0]) as Array)[0]) - 26.0) <= EPS
+				and absf(float((hit.get("closest", [0, 0]) as Array)[1]) - 10.5) <= EPS
+				and (hit.get("witness", []) as Array).size() == 2,
+			str(hit))
+	check("the same land 0.7mm away is not named", _crowd_findings(0.7).is_empty(),
+			str(_crowd_findings(0.7)))
+
+
+func _test_a_crowding_station_still_lands() -> void:
+	print("\n-- (13f) …and the verb still drops the station, returning the finding --")
+	var data := PCBData.new()
+	data.from_board_dict(_crowd_board(0.25))
+	var host := StubMcpHost.new()
+	host.data = data
+	var quiet := _board_state(data)
+	var result: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB"],
+		"sources": ["U1.1", "U1.2"], "targets": ["T1.4", "T1.2"],
+		"points": [{"x_mm": LGA_PATH_1.x, "y_mm": LGA_PATH_1.y},
+			{"x_mm": LGA_STATION_AT.x, "y_mm": LGA_STATION_AT.y},
+			{"x_mm": LGA_PATH_2.x, "y_mm": LGA_PATH_2.y},
+			{"x_mm": LGA_PATH_3.x, "y_mm": LGA_PATH_3.y}],
+		"layer": "bottom", "via_station_index": 1, "via_station_layer": "top",
+	})
+	check("the verb reports success — the station landed", bool(result.get("success", false)),
+			str(result))
+	check("…4 traces and 2 vias, in ONE journal step",
+			_serialized_traces(data).size() == int(quiet[0]) + 4
+				and _serialized_vias(data).size() == 2
+				and data.history.size() == int(quiet[1]) + 1,
+			"board %s (was %s) vias %d" % [str(_board_state(data)), str(quiet),
+				_serialized_vias(data).size()])
+	var named := false
+	for raw in result.get("findings", []) as Array:
+		if str((raw as Dictionary).get("type", "")) == CROWDS \
+				and str((raw as Dictionary).get("foreign_ref", "")) == "P1.1":
+			named = true
+	check("…and the reply names the walled-off pad, in the note too",
+			named and str(result.get("note", "")).contains("P1.1"),
+			str(result.get("note", "")))
 
 
 # ── 13d. THE ONE START-LAYER NOTE LEFT ────────────────────────────────────────

@@ -8439,6 +8439,13 @@ const BUS_FINDING_FOREIGN_COPPER := "bus_foreign_copper"
 ## see it: that module knows pads as bare points, not as copper on a layer.
 const BUS_FINDING_PAD_OFF_LAYER := "bus_pad_off_layer"
 
+## The FOURTH: a via station whose vias leave another net's pad clear of the
+## board's clearance but not of a routing CORRIDOR. A via ring that sits one
+## clearance from a pad's copper is legal and walls the pad off — no track can
+## pass between them — so the pad cannot be reached from that side any more.
+## The corridor is one track width plus a clearance each side of it.
+const BUS_FINDING_STATION_CROWDS_PAD := "bus_station_crowds_pad"
+
 ## How far inside the board's clearance a bus route may measure against another
 ## net's copper before the pass below calls it a violation, in mm. Mirrors
 ## pcb_bus_geometry.gd's own _CLEARANCE_TOLERANCE_MM — an independent constant
@@ -8781,6 +8788,59 @@ static func _bus_pad_off_layer_findings(pads: Array, landing: String, role: Stri
 			"witness": [centre.x, centre.y],
 			"midpoint": [centre.x, centre.y],
 		})
+	return out
+
+
+## One finding per (station via, foreign pad) pair whose bare board between
+## them is at least the clearance — so the foreign-copper pass has nothing to
+## say — but less than a routing corridor: `trace_width` plus `clearance` on
+## each side of it, the room one track needs to pass between the via's ring and
+## the pad's copper. Measured ring edge to copper edge with the same
+## pin_copper_distance rule the foreign pass uses for pads, so the two findings
+## split a single scale at the clearance and never both name one pair.
+static func _bus_station_corridor_findings(data, nets: PackedStringArray,
+		via_points: Array, via_diameter: float, clearance: float,
+		trace_width: float, layer: String) -> Array:
+	if data == null or via_points.is_empty() or via_points.size() != nets.size():
+		return []
+	var radius: float = maxf(0.0, via_diameter) * 0.5
+	var need: float = maxf(0.0, trace_width) + 2.0 * maxf(0.0, clearance)
+	var out: Array = []
+	var items: Array = _bus_board_copper(data)
+	for i in range(via_points.size()):
+		var at: Vector2 = via_points[i]
+		var bus_net: String = str(nets[i])
+		var box := Rect2(at, Vector2.ZERO).grow(radius + need + _BUS_FOREIGN_TOLERANCE_MM)
+		for raw_item in items:
+			var item: Dictionary = raw_item
+			if str(item["kind"]) != "pad" or str(item["net"]) == bus_net:
+				continue
+			if not box.intersects(item["bounds"] as Rect2):
+				continue
+			var comp = item["comp"]
+			var pin: String = str(item["pin"])
+			var gap: float = comp.pin_copper_distance(pin, at) - radius
+			if gap < maxf(0.0, clearance) - _BUS_FOREIGN_TOLERANCE_MM \
+					or gap >= need - _BUS_FOREIGN_TOLERANCE_MM:
+				continue
+			var foreign_net: String = str(item["net"])
+			var centre: Vector2 = item["centre"]
+			out.append({
+				"type": BUS_FINDING_STATION_CROWDS_PAD,
+				"message": "Net \"%s\"'s station via at (%.3f, %.3f) leaves %.3fmm of bare board beside pad %s (net \"%s\") — clear of this board's %.3fmm clearance, but a track needs %.3fmm to pass between them (%.3fmm trace width plus %.3fmm clearance each side), so the station walls that pad off from this side. Move the station along the spine, away from the pad, or move the pad."
+					% [bus_net, at.x, at.y, gap, str(item["ref"]),
+						foreign_net if not foreign_net.is_empty() else "(none)",
+						maxf(0.0, clearance), need, maxf(0.0, trace_width), maxf(0.0, clearance)],
+				"nets": [bus_net],
+				"measured_mm": gap,
+				"required_mm": need,
+				"layer": _bus_via_hit_layer(item, layer),
+				"foreign_ref": str(item["ref"]),
+				"foreign_net": foreign_net,
+				"closest": [at.x, at.y],
+				"witness": [centre.x, centre.y],
+				"midpoint": [(at.x + centre.x) * 0.5, (at.y + centre.y) * 0.5],
+			})
 	return out
 
 
@@ -9173,6 +9233,13 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		routed.get("via_station_splits", []) as Array,
 		routed.get("via_station_points", []) as Array,
 		via_size, clearance))
+	if routed_station >= 0:
+		var corridor_width: float = data.design_rule_trace_width()
+		if corridor_width <= 0.0:
+			corridor_width = data.authored_trace_width()
+		findings.append_array(_bus_station_corridor_findings(data, net_names,
+			routed.get("via_station_points", []) as Array, via_size, clearance,
+			corridor_width, layer))
 
 	return _bus_planned(findings, layer, {
 		"complete": true,
