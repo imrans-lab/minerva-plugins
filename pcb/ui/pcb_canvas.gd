@@ -44,6 +44,7 @@ const PCBDataScript := preload("model/pcb_data.gd")
 ## preloading it here adds no further dependency weight.
 const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbBusLabels := preload("model/pcb_bus_labels.gd")
+const PcbPadApproach := preload("model/pcb_pad_approach.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 ## The MCP tool surface (panel_tools.gd) is preloaded HERE too, for the bus
 ## tool only: bus_plan()/bus_commit_plan() (its static funcs) are the ONE
@@ -9206,7 +9207,16 @@ func bus_target_guidance() -> Array:
 			var c := cand as Dictionary
 			if int(c.get("index", -1)) != i:
 				continue
-			mine.append({"ref": str(c.get("ref", "")), "at": c.get("position", Vector2.ZERO)})
+			# The sides a rule-width trace can reach the candidate pad from,
+			# clear of its own component's other pads (pcb_pad_approach).
+			var sides := PackedStringArray()
+			var cand_comp = data.get_component(str(c.get("component", ""))) if data != null else null
+			if cand_comp != null:
+				var rules: Array = PcbPadApproach.board_rules(data)
+				sides = PcbPadApproach.pin_approach_sides(cand_comp, str(c.get("pin", "")),
+					float(rules[0]), float(rules[1]))
+			mine.append({"ref": str(c.get("ref", "")), "at": c.get("position", Vector2.ZERO),
+				"approach_sides": Array(sides)})
 			refs.append(str(c.get("ref", "")))
 		var suggested := _bus_suggested_refs[i] if i < _bus_suggested_refs.size() else ""
 		if not refs.has(suggested):

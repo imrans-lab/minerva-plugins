@@ -56,6 +56,7 @@ const ComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_c
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbBusLabels := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_labels.gd")
 const BusGeom := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_geometry.gd")
+const PcbPadApproach := preload("res://../../minerva-plugins/pcb/ui/model/pcb_pad_approach.gd")
 const PcbRatsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
 
@@ -160,6 +161,7 @@ func _init() -> void:
 	_test_an_open_lane_commits_as_a_free_end()
 	await _test_the_open_verb_matches_the_open_gesture()
 	await _test_dry_run_reads_the_bus_and_writes_nothing()
+	await _test_approach_sides_and_leave_one_open()
 	_test_every_lane_wears_its_net()
 	_test_lane_order_is_a_visible_choice()
 	_test_a_neighbouring_pad_outranks_the_glyph()
@@ -3736,3 +3738,160 @@ func _test_dry_run_reads_the_bus_and_writes_nothing() -> void:
 						or ((run as Dictionary).get("points", []) as Array).size() < 2:
 					idless = false
 		check("%s: the dry run's nets_detail has every polyline and no id" % label, idless, str(detail))
+
+
+# ── 18. WHICH SIDE A PAD CAN BE REACHED FROM, AND THE WAY OUT OF A MIRRORED PAIR
+#
+# ORACLES:
+#   APPROACH SIDES — hand-derived from pitch, pad and rule: a 2x3 LGA on 1.0mm
+#     pitch with 0.6mm lands, 0.2mm tracks at 0.2mm clearance. The reach strip
+#     is 0.1 + 0.2 = 0.3mm each side of the pad's centre line; a same-column
+#     neighbour sits ON that line and a same-row neighbour's 0.6mm land spans
+#     it, so the middle pad of the west column is reachable from the west ONLY,
+#     a corner pad from its two outer sides, and a lone land from all four.
+#     Read through pin_approach_sides on the loaded component and through the
+#     canvas's own bus_target_guidance rows.
+#   THE WAY OUT — the LGA board with the header's pads ABOVE the spine start
+#     and the two target pads swapped: the original pick order crosses at the
+#     TARGET end, the reversed order crosses at the SOURCE end (each hand-
+#     checked against _departure_stations' band rule below), so no pick order
+#     is clean. The reply must say so with a CONCRETE targets array, and that
+#     array fed straight back must land one net and leave the named one open.
+
+## The 2x3 LGA: pins 1-3 down the west column (x -0.5), 4-6 down the east
+## (x +0.5), rows y -1 / 0 / +1, 0.6mm square lands, at (40, 40).
+func _lga_2x3_board() -> Dictionary:
+	var board := _lga_board()
+	(board["components"] as Array).append({"ref": "T2", "footprint": "IC_DIP",
+		"x_mm": 40.0, "y_mm": 40.0, "rotation_deg": 0.0, "pins": [
+			_lga_pin("1", -0.5, -1.0), _lga_pin("2", -0.5, 0.0), _lga_pin("3", -0.5, 1.0),
+			_lga_pin("4", 0.5, -1.0), _lga_pin("5", 0.5, 0.0), _lga_pin("6", 0.5, 1.0)]})
+	(board["components"] as Array).append({"ref": "W1", "footprint": "IC_DIP",
+		"x_mm": 50.0, "y_mm": 50.0, "rotation_deg": 0.0, "pins": [_lga_pin("1", 0.0, 0.0)]})
+	return board
+
+
+## The LGA board MIRRORED: U1's header pads stacked ABOVE the spine's start
+## (y 6 / 8, with FGND's at 10) and NA/NB landing on the swapped target pads.
+## Source end (spine east from (14,10), n = (0,1)): pad perps NA -4, NB -2 vs
+## lanes NA -0.205 / NB +0.205 — NB's pad lies in NA's band and NA's lane in
+## NB's, so NB leaves first: consistent, no crossing. Target end (last segment
+## south, perp = 30 - x): NA on T1.2 (29,28) is +1, NB on T1.4 (31,28) is -1 —
+## each other's lane inside the other's band: a CROSSING. Reversed, the lanes
+## swap sign: the target end clears and the SOURCE end becomes the cycle.
+func _mirrored_lga_board() -> Dictionary:
+	var board := _lga_board()
+	var u1: Dictionary = (board["components"] as Array)[0]
+	u1["y_mm"] = 6.0
+	(u1["pins"] as Array)[1]["y_mm"] = 2.0
+	(u1["pins"] as Array)[2]["y_mm"] = 4.0
+	board["nets"] = [
+		{"name": "NA", "pins": ["U1.1", "T1.2"]},
+		{"name": "NB", "pins": ["U1.2", "T1.4"]},
+		{"name": "FGND", "pins": ["U1.3", "T1.1"]},
+		{"name": "FVCC", "pins": ["T1.3"]},
+	]
+	return board
+
+
+func _test_approach_sides_and_leave_one_open() -> void:
+	print("\n-- (18) approach_sides on the pad, and the leave-one-open way out --")
+	var data := PCBData.new()
+	data.from_board_dict(_lga_2x3_board())
+	var rules: Array = PcbPadApproach.board_rules(data)
+	check("the board's rules are the 0.2mm track at 0.2mm clearance this section derives from",
+			absf(float(rules[0]) - 0.2) <= EPS and absf(float(rules[1]) - 0.2) <= EPS, str(rules))
+	var t2 = data.get_component("T2")
+	var w1 = data.get_component("W1")
+	check("fixture: the 2x3 LGA carries six lands and the lone part one",
+			t2 != null and t2.pads.size() == 6 and w1 != null and w1.pads.size() == 1)
+	if t2 == null or w1 == null:
+		return
+	check("the west column's middle pad (T2.2) is reachable from the west only",
+			PcbPadApproach.pin_approach_sides(t2, "2", float(rules[0]), float(rules[1])) == PackedStringArray(["west"]),
+			str(PcbPadApproach.pin_approach_sides(t2, "2", float(rules[0]), float(rules[1]))))
+	check("the east column's middle pad (T2.5) is reachable from the east only",
+			PcbPadApproach.pin_approach_sides(t2, "5", float(rules[0]), float(rules[1])) == PackedStringArray(["east"]))
+	check("a corner pad (T2.1, north-west) is reachable from north and west",
+			PcbPadApproach.pin_approach_sides(t2, "1", float(rules[0]), float(rules[1])) == PackedStringArray(["north", "west"]))
+	check("a lone land is reachable from all four sides",
+			PcbPadApproach.pin_approach_sides(w1, "1", float(rules[0]), float(rules[1])).size() == 4)
+	# The pure rule on bare rectangles: one 0.6mm neighbour 1.0mm to the east
+	# closes the east side only; a neighbour clear of the strip closes nothing.
+	check("the pure rule: an east neighbour in the strip closes east alone",
+			PcbPadApproach.approach_sides(Rect2(-0.3, -0.3, 0.6, 0.6),
+				[Rect2(0.7, -0.3, 0.6, 0.6)], 0.2, 0.2) == PackedStringArray(["north", "south", "west"]))
+	check("…and one outside the strip (0.7mm north of the centre line) closes nothing",
+			PcbPadApproach.approach_sides(Rect2(-0.3, -0.3, 0.6, 0.6),
+				[Rect2(0.7, -1.3, 0.6, 0.6)], 0.2, 0.2).size() == 4)
+
+	# The canvas's guidance rows describe the same pads the same way.
+	var rig := _rig()
+	var canvas = rig[0]
+	canvas._handle_bus_click(SRC_A, false)
+	var rows: Array = canvas.bus_target_guidance()
+	var described := not rows.is_empty()
+	for row in rows:
+		for cand in (row as Dictionary).get("candidates", []):
+			if not (cand as Dictionary).has("approach_sides") \
+					or ((cand as Dictionary)["approach_sides"] as Array).size() != 4:
+				described = false
+	check("bus_target_guidance candidates carry approach_sides (a bare point pin: all four)", described, str(rows))
+	canvas.free()
+
+	# ── The mirrored pair ────────────────────────────────────────────────────
+	var mirrored := PCBData.new()
+	mirrored.from_board_dict(_mirrored_lga_board())
+	var host := StubMcpHost.new()
+	host.data = mirrored
+	var args := {
+		"editor_name": "PCB1", "nets": ["NA", "NB"],
+		"sources": ["U1.1", "U1.2"], "targets": ["T1.2", "T1.4"],
+		"points": [{"x_mm": LGA_PATH_1.x, "y_mm": LGA_PATH_1.y},
+			{"x_mm": LGA_PATH_2.x, "y_mm": LGA_PATH_2.y},
+			{"x_mm": LGA_PATH_3.x, "y_mm": LGA_PATH_3.y}],
+		"layer": "top", "dry_run": true,
+	}
+	var seen: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", args)
+	var crossing: Dictionary = {}
+	for f in seen.get("findings", []):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+			crossing = f
+	check("the mirrored pair crosses at the TARGET end, and the finding says which end",
+			bool(seen.get("success", false)) and not crossing.is_empty()
+				and str(crossing.get("end", "")) == "target", str(seen.get("findings", [])))
+	check("no pick order is clean (the reversed order crosses at the source end)",
+			not seen.has("clean_order") or (seen.get("clean_order", []) as Array).is_empty(), str(seen))
+	var open_net: String = str(seen.get("leave_open_net", ""))
+	var open_targets: Array = seen.get("leave_open_targets", []) if seen.get("leave_open_targets", []) is Array else []
+	check("the reply names the net to leave open and the concrete targets array",
+			open_net in ["NA", "NB"] and open_targets.size() == 2
+				and open_targets.count("") == 1
+				and str(open_targets[(args["nets"] as Array).find(open_net)]) == "", str(seen))
+	check("the note says it in as many words, targets array included",
+			str(seen.get("note", "")).contains("no pick order lands both")
+				and str(seen.get("note", "")).contains("leave one open")
+				and str(seen.get("note", "")).contains("targets [")
+				and str(seen.get("note", "")).contains("\"\""), str(seen.get("note", "")))
+	check("…and the dry run wrote nothing", _serialized_traces(mirrored).is_empty())
+
+	# FED BACK VERBATIM: the named net's lane ends open, the other lands.
+	var again: Dictionary = args.duplicate(true)
+	again.erase("dry_run")
+	again["targets"] = open_targets
+	var landed: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", again)
+	var landed_crossing := false
+	for f in landed.get("findings", []):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+			landed_crossing = true
+	check("the targets array from the reply lands the bus with the named lane open and no crossing",
+			bool(landed.get("success", false)) and (landed.get("open_nets", []) as Array) == [open_net]
+				and not landed_crossing and _traces_by_net(mirrored).size() == 2, str(landed))
+	var detail: Array = landed.get("nets_detail", []) if landed.get("nets_detail", []) is Array else []
+	var open_entry: Dictionary = {}
+	for e in detail:
+		if str((e as Dictionary).get("net", "")) == open_net:
+			open_entry = e
+	check("…and its free_end anchor is there for minerva_pcb_add_trace",
+			open_entry.get("free_end", null) is Dictionary
+				and str((open_entry["free_end"] as Dictionary).get("end", "")) == "end", str(open_entry))

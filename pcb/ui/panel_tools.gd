@@ -9515,17 +9515,35 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	# THE ORDER ADVISORY: only when a leg crosses at an end, and only as words —
 	# the geometry's own permutation search, on the same spine and pads.
 	var clean_order := PackedStringArray()
+	var crossing: Dictionary = {}
 	for f in findings:
 		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+			crossing = f
 			clean_order = BusGeom.clean_pick_order(spine_points, net_names,
 				sources["points"], target_points, widths, clearance,
 				via_station_index, via_size if via_station_index >= 0 else 0.0,
 				open_flags if not open_nets.is_empty() else [])
 			break
+	# NO CLEAN ORDER and the crossing is at the TARGET end: the other end fixes
+	# the order, so the way out is to land one of the pair and leave the other
+	# open — the concrete targets array is the next call.
+	var leave_open_net := ""
+	var leave_open_targets := PackedStringArray()
+	if clean_order.is_empty() and not crossing.is_empty() \
+			and str(crossing.get("end", "")) == "target":
+		var pair: Array = crossing.get("nets", []) if crossing.get("nets", []) is Array else []
+		if pair.size() == 2:
+			var idx: int = nets.find(str(pair[1]))
+			if idx >= 0 and idx < target_pins.size() and not target_pins[idx].is_empty():
+				leave_open_net = str(pair[1])
+				leave_open_targets = PackedStringArray(target_pins)
+				leave_open_targets[idx] = ""
 
 	return _bus_planned(findings, layer, {
 		"complete": true,
 		"clean_order": clean_order,
+		"leave_open_net": leave_open_net,
+		"leave_open_targets": leave_open_targets,
 		"nets": nets.duplicate(), "widths": widths, "offsets": routed["offsets"],
 		"polylines": routed["polylines"], "layer": layer,
 		"source_pins": source_pins, "target_pins": target_pins, "open_nets": open_nets,
@@ -10054,6 +10072,7 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 	if not findings.is_empty():
 		reply["note"] = "%d bus rule(s) broke and the ghosts were proposed anyway so they can be corrected: %s. Nothing was committed — resolve via minerva_pcb_workspace_commit/_reject/pin." \
 			% [findings.size(), bus_findings_sentence(findings)]
+		_add_leave_one_open(reply, plan)
 	var open_words: String = PcbBusLabels.bus_open_sentence(out.get("open_nets", []) as Array)
 	if not open_words.is_empty():
 		reply["note"] = "%s %s" % [str(reply["note"]), open_words]
@@ -10584,10 +10603,34 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 		if not advice.is_empty():
 			reply["clean_order"] = Array(result.get("clean_order", PackedStringArray()))
 			reply["note"] = "%s Advisory: %s" % [str(reply["note"]), advice]
+		_add_leave_one_open(reply, plan)
 	var open_words: String = PcbBusLabels.bus_open_sentence(result.get("open_nets", []) as Array)
 	if not open_words.is_empty():
 		reply["note"] = open_words if not reply.has("note") else "%s %s" % [str(reply["note"]), open_words]
 	return _ok(reply)
+
+
+## When the plan found no clean pick order for a target-end crossing, the
+## reply carries the next verb: leave_open_net, the concrete leave_open_targets
+## array, and the sentence appended to the note.
+static func _add_leave_one_open(reply: Dictionary, plan: Dictionary) -> void:
+	var open_net: String = str(plan.get("leave_open_net", ""))
+	if open_net.is_empty():
+		return
+	var targets := PackedStringArray(plan.get("leave_open_targets", PackedStringArray()))
+	var pair: Array = []
+	for f in plan.get("findings", []):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING \
+				and str((f as Dictionary).get("end", "")) == "target":
+			pair = (f as Dictionary).get("nets", [])
+			break
+	if pair.size() != 2:
+		return
+	reply["leave_open_net"] = open_net
+	reply["leave_open_targets"] = Array(targets)
+	var words: String = PcbBusLabels.leave_one_open_sentence(str(pair[0]), str(pair[1]),
+		open_net, targets)
+	reply["note"] = words if not reply.has("note") else "%s %s" % [str(reply["note"]), words]
 
 
 static func _ok(data: Dictionary = {}) -> Dictionary:

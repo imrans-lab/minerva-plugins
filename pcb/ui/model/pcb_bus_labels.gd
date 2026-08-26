@@ -94,6 +94,20 @@ static func clean_order_sentence(order: PackedStringArray) -> String:
 	return "pick order %s would leave the bundle clean." % ", ".join(order)
 
 
+## The advice a target-end crossing gets when NO pick order is clean — the
+## other end fixes the order, so reordering cannot help. It is the next verb,
+## not a hint: the concrete targets array with the chosen net left open, to be
+## passed straight back to minerva_pcb_route_bus_direct, whose reply then
+## carries that lane's free end (nets_detail.free_end) for minerva_pcb_add_trace.
+static func leave_one_open_sentence(net_a: String, net_b: String, open_net: String,
+		targets: PackedStringArray) -> String:
+	var quoted := PackedStringArray()
+	for t in targets:
+		quoted.append("\"%s\"" % t)
+	return "no pick order lands both %s and %s from this side — leave one open: targets [%s] and finish %s from its free end (the reply's nets_detail.free_end feeds minerva_pcb_add_trace's start)." % [
+		net_a, net_b, ", ".join(quoted), open_net]
+
+
 ## What a reorder click answers with when the net cannot move any further.
 static func reorder_end_message(net: String, inward: bool) -> String:
 	if inward:

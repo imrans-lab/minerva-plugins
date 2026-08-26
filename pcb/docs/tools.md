@@ -845,6 +845,24 @@ MCP bus verbs — not independently maintained copies of the same math. A plan
 with no targets is the canvas's live corridor PREVIEW only; `bus_commit_plan`
 and `bus_propose_plan` both refuse it.
 
+**Which side a pad can be reached from.** `minerva_pcb_pin_info` (and every
+candidate row of `bus_target_guidance()`) carries `approach_sides`: the sides
+(`north`/`east`/`south`/`west`, board frame, y down) from which a trace at the
+board's rule width can leave the pad and run straight out clear of the SAME
+component's other pads at the declared clearance — `pcb/ui/model/
+pcb_pad_approach.gd`, a pure rectangle rule (`approach_sides(pad, others,
+width, clearance)`). An LGA column pad on 1 mm pitch reports only its outer
+side; a lone land all four. Foreign components are not consulted.
+
+**When no pick order is clean.** A target-end crossing whose reversed order
+crosses at the source end has no `clean_order`; the plan then names the way
+out as the next call: `leave_open_net` and a concrete `leave_open_targets`
+array (the pair's second net left `""`), and the note reads `no pick order
+lands both A and B from this side — leave one open: targets ["T1.2", ""] and
+finish NB from its free end …`. Fed straight back to the verb it lands the
+other net and leaves the named lane open, whose `nets_detail.free_end` then
+feeds `minerva_pcb_add_trace`.
+
 **Read before you write: `dry_run: true`.** `minerva_pcb_route_bus_direct`
 with `dry_run: true` runs the same plan through the same gates and returns the
 identical reply — `findings`, `note`, `open_nets`, `clean_order`, `nets_detail`

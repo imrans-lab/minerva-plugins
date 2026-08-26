@@ -1292,10 +1292,14 @@ static func _departure_stations(pad_perp: Array, pad_axial: Array, sideways: Arr
 	for i in range(n):
 		for j in range(i + 1, n):
 			if leaves_first[i][j] and leaves_first[j][i]:
-				findings.append(_finding(FINDING_END_CROSSING,
+				var pair := _finding(FINDING_END_CROSSING,
 					"Nets \"%s\" and \"%s\" cross at the %s end — neither can leave the bundle before the other. Reorder the picked nets or move their pads."
 						% [net_names[i], net_names[j], end_label],
-					[net_names[i], net_names[j]]))
+					[net_names[i], net_names[j]])
+				# Which end, as a field: a consumer that turns the finding into
+				# the next verb needs the end without parsing the sentence.
+				pair["end"] = end_label
+				findings.append(pair)
 
 	var indegree := PackedInt32Array()
 	indegree.resize(n)

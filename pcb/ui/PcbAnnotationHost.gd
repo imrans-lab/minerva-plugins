@@ -35,6 +35,7 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 ## T1.5: the ONE canonical layer contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
+const _PcbPadApproach := preload("model/pcb_pad_approach.gd")
 
 ## Storage: Array of v2 envelope Dictionaries.
 var _annotations: Array = []
@@ -1038,6 +1039,10 @@ func pin_info(component: String, pin: String) -> Dictionary:
 	# (routing a hint to it, pointing at it, checking a witness against it),
 	# and re-deriving it needed a second tool call through get_pin_position.
 	var world_pos: Vector2 = comp.get_pin_world_position(pin)
+	# The sides a board-rule-width trace can reach this pad from, clear of the
+	# component's other pads — what an agent otherwise derives by hand from
+	# pitch, pad size, width and clearance.
+	var rules: Array = _PcbPadApproach.board_rules(data)
 	return {
 		"ref": "%s.%s" % [component, pin],
 		"pin_name": pin_name,
@@ -1046,6 +1051,8 @@ func pin_info(component: String, pin: String) -> Dictionary:
 		"trace_ids": trace_ids,
 		"trace_count": trace_ids.size(),
 		"position": {"x_mm": _mm(world_pos.x), "y_mm": _mm(world_pos.y)},
+		"approach_sides": Array(_PcbPadApproach.pin_approach_sides(comp, pin,
+			float(rules[0]), float(rules[1]))),
 	}
 
 
