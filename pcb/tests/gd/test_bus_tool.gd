@@ -135,6 +135,7 @@ func _init() -> void:
 	_test_the_airline_says_where_each_net_is_headed()
 	_test_manifest_requires_pads_on_both_verbs()
 	_test_a_layer_switch_mid_path_is_a_via_station()
+	_test_foreign_copper_is_named_and_still_lands()
 	# AWAITED (unlike every synchronous test above): panel_tools.handle() is a
 	# coroutine end to end (see panel_tools.gd's own class-doc note) because it
 	# awaits internally on other branches. A bare call without await here would
@@ -144,6 +145,7 @@ func _init() -> void:
 	await _test_mcp_direct_verb_matches_the_gesture()
 	await _test_a_bad_bus_reaches_the_agent_and_the_ghost()
 	await _test_the_station_verb_matches_the_station_gesture()
+	await _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -2076,3 +2078,342 @@ func _test_the_station_verb_matches_the_station_gesture() -> void:
 	check("the gesture and the tool dropped the SAME three vias", via_mismatch.is_empty(),
 			via_mismatch)
 	canvas_a.free()
+
+
+# ── 13. BUS COPPER THAT LANDS ON ANOTHER NET'S COPPER ─────────────────────────
+#
+# THE LIVE DEFECT this section exists for: a three-net bus committed target legs
+# that ran straight down a 1mm-pitch LGA's pad COLUMNS, through four pads
+# belonging to other nets. Every rule the tool had measured the bus against
+# ITSELF, so the findings named only the bus's own crossings and the four shorts
+# went unreported.
+#
+# THE FIXTURE reproduces the SHAPE rather than the board: a through-hole source
+# column on the left, a spine that turns south, and a target part whose picked
+# pads sit BEYOND foreign-net pads on the same column — so each track's last
+# leg, which runs down its own pad's column, has to cross one. Seeded alongside
+# them are the other two kinds of copper a bus can land on: a foreign VIA a hair
+# inside clearance of a lane (the near-miss branch, which no pad here reaches)
+# and a foreign TRACE across one leg.
+#
+# THE GEOMETRY, derived from the fixture's own numbers — 0.2mm tracks at 0.2mm
+# clearance give a 0.4mm pitch and lanes [-0.2, +0.2], and both ends order the
+# two tracks by the caller's order, so their departure stations are 0.0 and 0.4:
+#
+#   NA  (10,10) (14,10) (14,9.8) (30.2,9.8) (30.2,24) (31,24) (31,28)
+#   NB  (10,12.54) (14.4,12.54) (14.4,10.2) (29.8,10.2) (29.8,23.6) (29,23.6) (29,28)
+#
+# NA's last leg runs x=31 from y 24 to 28 and so passes through T1.3 (FVCC, a
+# 0.6mm land at (31,26)) and across the seeded FGND trace at y=27; NB's runs
+# x=29 and passes through T1.1 (FGND at (29,26)). NA's long lane at y=9.8 runs
+# 0.55mm from the seeded via at (22,9.25).
+#
+# ORACLES:
+#   THE FINDING SET — the (bus net, foreign item) pairs above, compared against
+#     the WHOLE finding list. Equality, not membership: it also says nothing
+#     ELSE about this bus is broken, which is what makes the four attributable.
+#   THE MEASUREMENT — the via near-miss's own arithmetic: 0.550mm centre to
+#     lane, less the 0.400mm via radius and the 0.100mm track half-width, is
+#     0.050mm of bare board where the board's rules ask 0.200mm.
+#   THE LAYER — the same bus planned on `bottom`, where the target part's SMD
+#     lands and the seeded trace are not. Only the through-the-stack copper (the
+#     via) may still be named there.
+#   THE BOARD — the serialized trace list and history.size() either side of the
+#     MCP call: a bad bus still lands, in one journal step.
+#   THE EXISTING FIXTURE — section 1's clean bus, which must gain no finding at
+#     all; this rule may not start refusing buses that were always legal.
+
+## The LGA fixture's spine: east out of the source column, then south into the
+## target part. The last segment's axis is what makes each track's final leg run
+## DOWN a pad column, which is the whole shape of the live defect.
+const LGA_PATH_1 := Vector2(14.0, 10.0)
+const LGA_PATH_2 := Vector2(30.0, 10.0)
+const LGA_PATH_3 := Vector2(30.0, 24.0)
+const LGA_SRC_A := Vector2(10.0, 10.0)     # U1.1, net NA
+const LGA_SRC_B := Vector2(10.0, 12.54)    # U1.2, net NB
+const LGA_TGT_A := Vector2(31.0, 28.0)     # T1.4, net NA — T1.3 (FVCC) sits above it
+const LGA_TGT_B := Vector2(29.0, 28.0)     # T1.2, net NB — T1.1 (FGND) sits above it
+## The seeded foreign via, 0.550mm off NA's lane (y 9.800).
+const LGA_VIA_AT := Vector2(22.0, 9.25)
+## What that leaves between the two coppers' EDGES, in mm, against a 0.200mm rule.
+const LGA_VIA_GAP_MM := 0.05
+const LGA_CLEARANCE_MM := 0.2
+## The finding type under test, spelled OUT rather than read off the
+## implementation: it is a wire value a consumer branches on, so this file is
+## where a rename has to be noticed. The two are held equal below.
+const FOREIGN := "bus_foreign_copper"
+
+
+## A through-hole pin of the source column: a 0.8mm drill in a 1.6mm annulus, so
+## its copper is a 0.8mm-radius disc present on BOTH copper layers.
+func _tht_pin(number: String, x: float, y: float) -> Dictionary:
+	return {"number": number, "x_mm": x, "y_mm": y,
+		"drill_mm": 0.8, "annulus_diameter_mm": 1.6}
+
+
+## One 0.6mm square land of the target part — SMD, and therefore TOP only.
+func _lga_pin(number: String, x: float, y: float) -> Dictionary:
+	return {"number": number, "x_mm": x, "y_mm": y,
+		"pad_width_mm": 0.6, "pad_height_mm": 0.6}
+
+
+func _lga_board() -> Dictionary:
+	return {
+		"version": 1, "name": "LgaBusBoard", "width_mm": 60.0, "height_mm": 60.0,
+		"grid_mm": 2.54,
+		"layers": ["top", "bottom"],
+		"design_rules": {"clearance_mm": LGA_CLEARANCE_MM, "trace_width_mm": 0.2},
+		"components": [
+			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 10.0, "y_mm": 10.0,
+				"rotation_deg": 0.0, "pins": [
+					_tht_pin("1", 0.0, 0.0), _tht_pin("2", 0.0, 2.54),
+					_tht_pin("3", 0.0, 5.08)]},
+			{"ref": "T1", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 28.0,
+				"rotation_deg": 0.0, "pins": [
+					_lga_pin("1", -1.0, -2.0), _lga_pin("2", -1.0, 0.0),
+					_lga_pin("3", 1.0, -2.0), _lga_pin("4", 1.0, 0.0)]},
+		],
+		"nets": [
+			{"name": "NA", "pins": ["U1.1", "T1.4"]},
+			{"name": "NB", "pins": ["U1.2", "T1.2"]},
+			{"name": "FGND", "pins": ["U1.3", "T1.1"]},
+			{"name": "FVCC", "pins": ["T1.3"]},
+		],
+	}
+
+
+## The LGA board with its two pieces of PRE-EXISTING foreign copper seeded on.
+## Returns [data, via_id, trace_id] — the two ids are minted by the model, so
+## the expected finding set below is built from what the board says they are
+## rather than from a spelling this file guesses.
+func _lga_rig_data() -> Array:
+	var data := PCBData.new()
+	data.from_board_dict(_lga_board())
+	var via_id := str(data.add_via({"position": LGA_VIA_AT, "net_name": "FVCC",
+		"size": 0.8, "drill": 0.4, "from_layer": "top", "to_layer": "bottom"}))
+	var trace = data.create_trace_entity("FGND", "top",
+		PackedVector2Array([Vector2(32.0, 27.0), Vector2(30.0, 27.0)]), 0.25)
+	# The seed is its own undo step. from_board_dict leaves ONE history entry
+	# ("Load"), taken before this copper existed, so without a second one the
+	# bus's undo would step past the seeded via and trace as well and the "one
+	# undo removes the bus" check below would be measuring the wrong thing.
+	data.save_to_history("Seed foreign copper")
+	return [data, via_id, str(trace.id) if trace != null else ""]
+
+
+## The plan the whole section measures, on `layer`.
+func _lga_plan(data, layer: String) -> Dictionary:
+	return PanelToolsScript.bus_plan(
+		data, ["NA", "NB"],
+		PackedVector2Array([LGA_PATH_1, LGA_PATH_2, LGA_PATH_3]), layer,
+		PackedStringArray(["U1.1", "U1.2"]), PackedStringArray(["T1.4", "T1.2"]))
+
+
+## Every finding in a plan, as sorted "<type>|<bus net>|<foreign item>" keys —
+## the shape the expected sets below are written in. A finding of any OTHER type
+## keys on its type alone, so an unexpected rule break cannot hide inside a
+## comparison that only looks at foreign copper.
+func _finding_keys(findings: Array) -> Array:
+	var keys: Array = []
+	for raw in findings:
+		var f: Dictionary = raw
+		var type := str(f.get("type", ""))
+		if type != FOREIGN:
+			keys.append(type)
+			continue
+		var nets: Array = f.get("nets", []) if f.get("nets", []) is Array else []
+		keys.append("%s|%s|%s" % [type, str(nets[0]) if not nets.is_empty() else "",
+			str(f.get("foreign_ref", ""))])
+	keys.sort()
+	return keys
+
+
+func _findings_of(plan: Dictionary) -> Array:
+	return plan.get("findings", []) if plan.get("findings", []) is Array else []
+
+
+## The one finding naming `ref`, or {} — so an assertion can talk about a
+## specific piece of copper rather than about "some finding".
+func _finding_naming(findings: Array, ref: String) -> Dictionary:
+	for raw in findings:
+		var f: Dictionary = raw
+		if str(f.get("foreign_ref", "")) == ref:
+			return f
+	return {}
+
+
+func _test_foreign_copper_is_named_and_still_lands() -> void:
+	print("\n-- (13) bus copper on another net's pad/via/trace is named --")
+	check("the type this suite pins is the type the tool emits",
+			PanelToolsScript.BUS_FINDING_FOREIGN_COPPER == FOREIGN,
+			str(PanelToolsScript.BUS_FINDING_FOREIGN_COPPER))
+	var rig := _lga_rig_data()
+	var data = rig[0]
+	var via_id: String = rig[1]
+	var trace_id: String = rig[2]
+	check("the fixture seeded a foreign via and a foreign trace",
+			not via_id.is_empty() and not trace_id.is_empty()
+				and _serialized_traces(data).size() == 1,
+			"via=%s trace=%s traces=%d" % [via_id, trace_id, _serialized_traces(data).size()])
+
+	var plan: Dictionary = _lga_plan(data, "top")
+	check("the plan is BAD BUT BUILDABLE, and complete",
+			not bool(plan.get("ok", true)) and bool(plan.get("buildable", false))
+				and bool(plan.get("complete", false)),
+			str(plan.get("error", "")))
+
+	var findings: Array = _findings_of(plan)
+	var expected: Array = [
+		"%s|NA|T1.3" % FOREIGN,        # the LGA pad NA's leg runs down through
+		"%s|NA|%s" % [FOREIGN, trace_id],
+		"%s|NA|%s" % [FOREIGN, via_id],
+		"%s|NB|T1.1" % FOREIGN,        # the LGA pad NB's leg runs down through
+	]
+	expected.sort()
+	check("the four pieces of foreign copper are named, and nothing else broke",
+			_finding_keys(findings) == expected,
+			"got %s want %s" % [str(_finding_keys(findings)), str(expected)])
+
+	var pad_hit: Dictionary = _finding_naming(findings, "T1.3")
+	check("the pad finding names the bus net, the pad, ITS net and the layer",
+			str(pad_hit.get("message", "")).contains("NA")
+				and str(pad_hit.get("message", "")).contains("T1.3")
+				and str(pad_hit.get("message", "")).contains("FVCC")
+				and str(pad_hit.get("layer", "")) == "top"
+				and str(pad_hit.get("foreign_net", "")) == "FVCC",
+			str(pad_hit))
+	check("…and calls overlapping copper a short, not a gap",
+			float(pad_hit.get("measured_mm", 1.0)) <= 0.0
+				and str(pad_hit.get("message", "")).contains("one piece of copper"),
+			str(pad_hit.get("message", "")))
+	check("…carrying a witness the ghost renderer can draw",
+			(pad_hit.get("closest", []) as Array).size() == 2
+				and (pad_hit.get("witness", []) as Array).size() == 2
+				and (pad_hit.get("midpoint", []) as Array).size() == 2,
+			str(pad_hit))
+
+	var via_hit: Dictionary = _finding_naming(findings, via_id)
+	check("the via finding measures the gap the fixture builds, against the board's rule",
+			absf(float(via_hit.get("measured_mm", 0.0)) - LGA_VIA_GAP_MM) <= 1e-3
+				and absf(float(via_hit.get("required_mm", 0.0)) - LGA_CLEARANCE_MM) <= 1e-3,
+			"measured=%s required=%s" % [str(via_hit.get("measured_mm", "")),
+				str(via_hit.get("required_mm", ""))])
+	check("…and reads as a clearance miss, not a short",
+			str(via_hit.get("message", "")).contains("runs")
+				and str(via_hit.get("message", "")).contains("FVCC"),
+			str(via_hit.get("message", "")))
+
+	# THE LAYER RULE. The target part's lands are SMD and the seeded trace is on
+	# top; only the via and the through-hole source column cross the stack.
+	var below: Dictionary = _lga_plan(data, "bottom")
+	check("on the other layer only the through-the-stack copper is still named",
+			_finding_keys(_findings_of(below)) == ["%s|NA|%s" % [FOREIGN, via_id]],
+			str(_finding_keys(_findings_of(below))))
+
+	# THE CONTROL. Section 1's fixture routes a clean bus past pads on three
+	# other nets; this rule must not start refusing it.
+	var clean_data := PCBData.new()
+	clean_data.from_board_dict(_board())
+	var clean: Dictionary = PanelToolsScript.bus_plan(
+		clean_data, ["NA", "NB", "NC"], PackedVector2Array([PATH_1, PATH_2]), "top",
+		PackedStringArray(["U1.1", "U2.1", "U3.1"]),
+		PackedStringArray(["V1.1", "V2.1", "V3.1"]))
+	check("the clean fixture bus gains no foreign-copper finding",
+			bool(clean.get("ok", false)) and _findings_of(clean).is_empty(),
+			str(clean.get("error", "")))
+
+
+func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
+	print("\n-- (13b) …and reaches the verb, the status line and the ghosts --")
+
+	# THE VERB: the copper lands anyway, and the findings come back with it.
+	var rig := _lga_rig_data()
+	var data = rig[0]
+	var via_id: String = rig[1]
+	var host := StubMcpHost.new()
+	host.data = data
+	var quiet := _board_state(data)
+	var result: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB"],
+		"sources": ["U1.1", "U1.2"], "targets": ["T1.4", "T1.2"],
+		"points": [{"x_mm": LGA_PATH_1.x, "y_mm": LGA_PATH_1.y},
+			{"x_mm": LGA_PATH_2.x, "y_mm": LGA_PATH_2.y},
+			{"x_mm": LGA_PATH_3.x, "y_mm": LGA_PATH_3.y}],
+		"layer": "top",
+	})
+	check("the verb reports success — the copper landed", bool(result.get("success", false)),
+			str(result))
+	check("…2 bus traces on top of the seeded one, in ONE journal step",
+			_serialized_traces(data).size() == int(quiet[0]) + 2
+				and data.history.size() == int(quiet[1]) + 1,
+			"board %s (was %s)" % [str(_board_state(data)), str(quiet)])
+	var reply_keys := _finding_keys(result.get("findings", []) as Array)
+	check("…and the reply carries all four foreign-copper findings",
+			reply_keys.size() == 4 and str(reply_keys[0]).begins_with(FOREIGN),
+			str(reply_keys))
+	check("…with the note telling the caller it landed anyway",
+			str(result.get("note", "")).contains("landed anyway")
+				and str(result.get("note", "")).contains("T1.3"),
+			str(result.get("note", "")))
+	check("one undo removes the bus and leaves the seeded copper",
+			data.undo() and _serialized_traces(data).size() == int(quiet[0]))
+
+	# THE GESTURE: the same bus drawn by hand, reported in the status line.
+	var gesture_rig := _lga_rig_data()
+	var gesture_data = gesture_rig[0]
+	var canvas = PcbCanvasScript.new()
+	canvas.data = gesture_data
+	canvas.zoom = 8.0
+	canvas.snap_to_grid = false
+	var pad_host := StubPadHost.new()
+	pad_host.pads = [
+		{"component": "U1", "pin": "1", "position": LGA_SRC_A},
+		{"component": "U1", "pin": "2", "position": LGA_SRC_B},
+		{"component": "U1", "pin": "3", "position": Vector2(10.0, 15.08)},
+		{"component": "T1", "pin": "1", "position": Vector2(29.0, 26.0)},
+		{"component": "T1", "pin": "2", "position": LGA_TGT_B},
+		{"component": "T1", "pin": "3", "position": Vector2(31.0, 26.0)},
+		{"component": "T1", "pin": "4", "position": LGA_TGT_A},
+	]
+	canvas.set_pin_inspector_host(pad_host)
+	canvas.set_tool_mode(canvas.ToolMode.BUS)
+	var msgs := _collect(canvas)
+	canvas._handle_bus_click(LGA_SRC_A, false)    # NA
+	canvas._handle_bus_click(LGA_SRC_B, false)    # NB
+	canvas._handle_bus_click(LGA_PATH_1, false)   # ends SOURCES
+	canvas._handle_bus_click(LGA_PATH_2, false)
+	canvas._handle_bus_click(LGA_PATH_3, false)
+	canvas._handle_bus_click(LGA_TGT_A, false)    # ends PATH, target NA
+	canvas._handle_bus_click(LGA_TGT_B, false)    # target NB
+	canvas._commit_bus()
+	check("the gesture committed the same two traces",
+			_serialized_traces(gesture_data).size() == 3, str(_board_state(gesture_data)))
+	check("the status line names the foreign pad, its net and the pad NB crosses",
+			_last(msgs).contains("T1.3") and _last(msgs).contains("FVCC")
+				and _last(msgs).contains("T1.1"), _last(msgs))
+	check("…and still says the copper landed so it can be corrected",
+			_last(msgs).contains("Added bus") and _last(msgs).contains("correct"),
+			_last(msgs))
+	canvas.free()
+
+	# THE GHOSTS: each candidate carries the findings that name ITS net.
+	var ghost_rig := _lga_rig_data()
+	var ghost_data = ghost_rig[0]
+	var ghost_via: String = ghost_rig[1]
+	var ws = PcbRoutingWorkspace.new()
+	var plan: Dictionary = _lga_plan(ghost_data, "top")
+	var before := _board_state(ghost_data)
+	var out: Dictionary = PanelToolsScript.bus_propose_plan(ws, ghost_data, plan)
+	check("both ghosts landed and the board is untouched",
+			int(out.get("proposed", 0)) == 2 and _board_state(ghost_data) == before,
+			"%s / %s" % [str(out.get("error", "")), str(_board_state(ghost_data))])
+	var per_net := {}
+	for cand in ws.list_candidates():
+		per_net[str(cand.net)] = _finding_keys(ws.findings_for_candidate(str(cand.candidate_id)))
+	check("NA's ghost carries its three and NB's carries its one",
+			(per_net.get("NA", []) as Array).size() == 3
+				and (per_net.get("NB", []) as Array) == ["%s|NB|T1.1" % FOREIGN],
+			str(per_net))
+	check("…and NA's own via finding is filed under NA",
+			("%s|NA|%s" % [FOREIGN, ghost_via]) in (per_net.get("NA", []) as Array),
+			str(per_net.get("NA", [])))

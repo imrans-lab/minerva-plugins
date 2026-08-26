@@ -8422,6 +8422,24 @@ const _BUS_INCOMPLETE_PLAN := "This bus has no target pad for every net yet — 
 ## module never sees the spine that causes it.
 const BUS_FINDING_INNER_FOLD := "bus_inner_fold"
 
+## The SECOND finding type raised in this file: bus copper sitting on, or inside
+## the board's clearance of, copper belonging to ANOTHER net — a pad, a via or a
+## trace that is already on the board.
+##
+## It cannot live in pcb_bus_geometry.gd for the same reason the inner fold
+## cannot: that module is pure geometry over points and imports nothing, so it
+## has no board to ask what else is on the layer. It sees the pads it is routing
+## to as bare coordinates and cannot even tell which net one belongs to.
+const BUS_FINDING_FOREIGN_COPPER := "bus_foreign_copper"
+
+## How far inside the board's clearance a bus route may measure against another
+## net's copper before the pass below calls it a violation, in mm. Mirrors
+## pcb_bus_geometry.gd's own _CLEARANCE_TOLERANCE_MM — an independent constant
+## rather than a reach into that module's privates, same as _BUS_MIN_SEGMENT_MM
+## above, and for the same reason: Vector2 is 32-bit float, so copper laid out
+## EXACTLY at its clearance measures that clearance only to within an ulp.
+const _BUS_FOREIGN_TOLERANCE_MM := 1e-3
+
 ## Via pad and drill a bus station falls back to when the board's design_rules
 ## block declares neither, in mm. The SAME pair RoutingWorkspace._via_dimensions
 ## falls back to, so a via a bus drops and a via a committed route drops measure
@@ -8437,11 +8455,16 @@ const _BUS_DEFAULT_VIA_DRILL_MM := 0.4
 ## its `net_name` — the two keys the routing workspace's witness renderer reads
 ## off a draft-check finding, so a bus finding drawn as a ghost's witness needs
 ## no shape of its own.
+##
+## A finding that ALREADY names a layer keeps it. Only the board-aware
+## foreign-copper pass sets one, and it has to: a bus with a via station runs on
+## two layers, and the half of it past the station is not on the plan's `layer`.
 static func _bus_planned(findings: Array, layer: String, fields: Dictionary) -> Dictionary:
 	var stamped: Array = []
 	for raw in findings:
 		var f: Dictionary = (raw as Dictionary).duplicate(true)
-		f["layer"] = layer
+		if not f.has("layer"):
+			f["layer"] = layer
 		var nets: Array = f.get("nets", []) if f.get("nets", []) is Array else []
 		if nets.size() == 1:
 			f["net_name"] = str(nets[0])
@@ -8523,6 +8546,365 @@ static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: St
 		var comp = resolved["comp"]
 		points.append(comp.get_pin_world_position(pin))
 	return {"ok": true, "error": "", "points": points}
+
+
+# ── THE BOARD-AWARE PASS: bus copper against ANOTHER NET'S copper ────────────
+#
+# BusGeom.bundle_routes measures the bus against ITSELF and nothing else. It is
+# a pure geometry module that takes pads as bare coordinates, imports nothing
+# and cannot be told what else is on the layer without becoming board-aware —
+# which would cost it the property that makes it a standing pin (exercised with
+# plain numbers, no scene tree, no board). So the check lives HERE, in bus_plan,
+# over the polylines bundle_routes hands back: this is the one function both the
+# canvas gesture and both MCP verbs already call, it already holds `data`, and a
+# finding raised here reaches the status line, the verb reply and the ghost's
+# per-candidate findings through the exact channels the existing findings use.
+#
+# THIS IS BAD-BUT-BUILDABLE, like every other bus finding: the copper still
+# lands. Copper that exists can be corrected; a refusal leaves nothing to.
+#
+# WHAT IT MEASURES: copper EDGE to copper EDGE, against the board's own
+# design_rule_clearance(). One convention for pads, vias and traces alike, and
+# the one a fab states — a negative figure is overlap, i.e. a short.
+
+## Canonical copper id for a stored layer name, or "" when the name is not
+## copper at all. Silent where PcbLayerStack.kicad_to_canon warns: pads legally
+## carry mask and paste layer names, and "not copper" is not an error to report.
+static func _bus_canon_layer(name: String) -> String:
+	return PcbLayerStack.kicad_to_canon(name) if PcbLayerStack.is_copper(name) else ""
+
+
+## The point on segment `a0`→`a1` nearest `p`; `a0` for a zero-length segment.
+static func _bus_closest_on_segment(a0: Vector2, a1: Vector2, p: Vector2) -> Vector2:
+	var ab: Vector2 = a1 - a0
+	var len2: float = ab.length_squared()
+	if len2 <= 0.0:
+		return a0
+	return a0 + ab * clampf((p - a0).dot(ab) / len2, 0.0, 1.0)
+
+
+## Closest approach between two segments: {distance, a, b}, `a` on the first and
+## `b` on the second.
+##
+## GENERAL, deliberately unlike pcb_bus_geometry.gd's own segment measurement,
+## which documents that everything reaching it is axis-aligned and therefore
+## reads "the bounding boxes overlap" as "the segments share a point". Bus
+## copper is axis-aligned; an EXISTING trace on the board is whatever a router
+## or a human left there, so a diagonal one would be reported as touching
+## whenever its box merely overlapped — a false short, on every crossing corner.
+##
+## Disjoint segments are two disjoint convex sets, so their closest approach is
+## attained at an endpoint of at least one of them: the intersection test plus
+## four point-to-segment projections are the whole answer. Collinear overlap,
+## which segment_intersects_segment does not report, lands an endpoint of one on
+## the other and so measures zero through the projections.
+static func _bus_segment_gap(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> Dictionary:
+	var hit: Variant = Geometry2D.segment_intersects_segment(a0, a1, b0, b1)
+	if hit is Vector2:
+		var at: Vector2 = hit
+		return {"distance": 0.0, "a": at, "b": at}
+	var best: Dictionary = {"distance": INF, "a": a0, "b": b0}
+	for p in [a0, a1]:
+		var q: Vector2 = _bus_closest_on_segment(b0, b1, p)
+		if p.distance_to(q) < float(best["distance"]):
+			best = {"distance": p.distance_to(q), "a": p, "b": q}
+	for p in [b0, b1]:
+		var q: Vector2 = _bus_closest_on_segment(a0, a1, p)
+		if p.distance_to(q) < float(best["distance"]):
+			best = {"distance": p.distance_to(q), "a": q, "b": p}
+	return best
+
+
+## Every piece of copper ALREADY on the board a bus could land on, as
+## [{kind, what, ref, net, all_layers, layers, bounds, ...}].
+##
+## PADS ARE ENUMERATED THROUGH THE COMPONENT'S PINS, not through its render
+## `pads` array, because the pins are the set the board actually routes to: a
+## footprint that never resolved carries pins and no lands, and its copper is
+## then known only as a point. Mechanical (np_thru_hole) holes never enter
+## `pins` at all, which is right — a hole is not copper.
+##
+## Pad copper is measured by pcb_component.pin_copper_distance, the SAME rule
+## the pad picker and the hit-test use, so this pass and the pointer agree about
+## where a pad's copper ends. A pin with no lands falls back to its CENTRE
+## inside that rule; items carrying `centre_only` say so in their finding.
+##
+## VIAS ARE TAKEN AS PRESENT ON EVERY COPPER LAYER. This model has no
+## blind/buried via — PcbLayerStack.is_legal_via_span refuses any span that is
+## not through — so a via's barrel crosses the whole stack.
+static func _bus_board_copper(data) -> Array:
+	var pin_nets: Dictionary = {}
+	for net_name in data.nets:
+		for raw_pin in data.get_net(str(net_name)).pins:
+			var pin_ref: Dictionary = raw_pin
+			pin_nets["%s.%s" % [str(pin_ref.get("component_id", "")), str(pin_ref.get("pin_name", ""))]] = str(net_name)
+
+	var items: Array = []
+	for comp in data.get_all_components():
+		for raw_name in comp.pins:
+			var pin: String = str(raw_name)
+			var lands: Array = comp.lands_for_pin(pin)
+			var pin_local: Vector2 = comp.pins.get(pin, Vector2.ZERO)
+			var reach := 0.0
+			var all_layers: bool = lands.is_empty()
+			var layers: Dictionary = {}
+			for raw_land in lands:
+				var land: Dictionary = raw_land
+				var size: Vector2 = land.get("size", Vector2.ZERO)
+				var offset: Vector2 = land.get("position", Vector2.ZERO)
+				# Half-DIAGONAL, so the box holds the land at any rotation.
+				reach = maxf(reach, offset.distance_to(pin_local) + size.length() * 0.5)
+				var land_type := str(land.get("type", "smd")).to_lower()
+				if land_type == "thru_hole" or land_type == "np_thru_hole":
+					all_layers = true
+					continue
+				for raw_layer in (land.get("layers", []) as Array):
+					var canon := _bus_canon_layer(str(raw_layer))
+					if not canon.is_empty():
+						layers[canon] = true
+			if not all_layers and layers.is_empty():
+				# A land naming no copper layer of its own sits on the side its
+				# component is placed on; a component with no readable side is
+				# taken as everywhere, which is the fail-closed reading.
+				var side := _bus_canon_layer(str(comp.layer))
+				if side.is_empty():
+					all_layers = true
+				else:
+					layers[side] = true
+			var centre: Vector2 = comp.get_pin_world_position(pin)
+			items.append({
+				"kind": "pad", "what": "pad", "ref": "%s.%s" % [str(comp.id), pin],
+				"net": str(pin_nets.get("%s.%s" % [str(comp.id), pin], "")),
+				"all_layers": all_layers, "layers": layers,
+				"comp": comp, "pin": pin, "centre": centre,
+				"centre_only": lands.is_empty(),
+				"bounds": Rect2(centre, Vector2.ZERO).grow(reach + _BUS_FOREIGN_TOLERANCE_MM),
+			})
+
+	for raw_via in data.vias:
+		var via: Dictionary = raw_via
+		var at: Vector2 = _PcbDataScript.via_position(via)
+		var radius: float = _PcbDataScript.via_radius(via)
+		items.append({
+			"kind": "via", "what": "via", "ref": str(via.get("id", "(id-less via)")),
+			"net": str(via.get("net_name", "")),
+			"all_layers": true, "layers": {},
+			"centre": at, "radius": radius, "centre_only": false,
+			"bounds": Rect2(at, Vector2.ZERO).grow(radius + _BUS_FOREIGN_TOLERANCE_MM),
+		})
+
+	for raw_id in data.traces:
+		var trace = data.get_trace(str(raw_id))
+		if trace == null or trace.waypoints.size() < 2:
+			continue
+		var canon := _bus_canon_layer(str(trace.layer))
+		if canon.is_empty():
+			continue
+		var half: float = float(trace.width) * 0.5
+		items.append({
+			"kind": "trace", "what": "trace", "ref": str(trace.id),
+			"net": str(trace.net_name),
+			"all_layers": false, "layers": {canon: true},
+			"points": trace.waypoints, "half": half, "centre_only": false,
+			"bounds": _bus_points_bounds(trace.waypoints).grow(half + _BUS_FOREIGN_TOLERANCE_MM),
+		})
+	return items
+
+
+## The axis-aligned box holding every point of `points`.
+static func _bus_points_bounds(points) -> Rect2:
+	var box := Rect2()
+	var first := true
+	for p in points:
+		var at: Vector2 = p
+		if first:
+			box = Rect2(at, Vector2.ZERO)
+			first = false
+		else:
+			box = box.expand(at)
+	return box
+
+
+## Does this board item have copper on `probe_layer`? An empty `probe_layer`
+## means the bus copper being measured spans the stack (a station via), and so
+## meets everything.
+static func _bus_item_on_layer(item: Dictionary, probe_layer: String) -> bool:
+	if bool(item.get("all_layers", false)) or probe_layer.is_empty():
+		return true
+	return (item.get("layers", {}) as Dictionary).has(probe_layer)
+
+
+## Closest approach between ONE bus segment's CENTRELINE and one board item's
+## copper EDGE: {distance, a, b}, `a` on the bus and `b` on (or at the centre
+## of) the item.
+##
+## A PAD is asked through pcb_component.pin_copper_distance — the production
+## rule, called rather than copied — at the three points of this segment that
+## can hold the minimum: its two ends and the point nearest the pad's centre.
+## That triple is EXACT for an axis-aligned land against an axis-aligned
+## segment, which is every land at a cardinal rotation and every segment a bus
+## builds. A land rotated off-axis can measure LONG by up to its own corner
+## overhang; nothing this tool authors produces one, and the pad picker makes
+## the same trade in the other direction.
+static func _bus_item_gap(item: Dictionary, a0: Vector2, a1: Vector2) -> Dictionary:
+	var kind: String = str(item["kind"])
+	if kind == "trace":
+		var pts: Array = item["points"]
+		var best: Dictionary = {"distance": INF, "a": a0, "b": a0}
+		for i in range(pts.size() - 1):
+			var b0: Vector2 = pts[i]
+			var b1: Vector2 = pts[i + 1]
+			var g: Dictionary = _bus_segment_gap(a0, a1, b0, b1)
+			if float(g["distance"]) < float(best["distance"]):
+				best = g
+		best["distance"] = float(best["distance"]) - float(item["half"])
+		return best
+	var centre: Vector2 = item["centre"]
+	var near: Vector2 = _bus_closest_on_segment(a0, a1, centre)
+	if kind == "via":
+		return {"distance": near.distance_to(centre) - float(item["radius"]),
+			"a": near, "b": centre}
+	var comp = item["comp"]
+	var pin: String = str(item["pin"])
+	var best_at: Vector2 = near
+	var best_d: float = comp.pin_copper_distance(pin, near)
+	for p in [a0, a1]:
+		var at: Vector2 = p
+		var d: float = comp.pin_copper_distance(pin, at)
+		if d < best_d:
+			best_d = d
+			best_at = at
+	return {"distance": best_d, "a": best_at, "b": centre}
+
+
+## One finding per (bus net, board item) pair whose copper is closer than the
+## board's clearance allows, worst approach only — a leg running the length of a
+## pad meets it in several segments and is one defect, not four.
+##
+## `polylines`/`widths` are bundle_routes' finished routes; `station_layer`,
+## `splits` and `via_points` are its via station (empty/-1 for a single-layer
+## bus), which is what makes each net's copper TWO runs on two layers plus a via
+## that spans them. The station's own vias are measured too: they are bus copper
+## and land on the board with everything else.
+##
+## THE BUS'S OWN NETS ARE NOT FOREIGN TO THEMSELVES but ARE foreign to each
+## other — the live defect this exists for was one bus net's breakout leg run
+## down a pad column through ANOTHER bus net's target pad. Track-against-track
+## spacing stays BusGeom's job (FINDING_CLEARANCE); this pass only ever asks
+## about copper already on the board.
+static func _bus_foreign_copper_findings(data, nets: PackedStringArray, widths: Array,
+		polylines: Array, layer: String, station_layer: String, splits: Array,
+		via_points: Array, via_diameter: float, clearance: float) -> Array:
+	if data == null or polylines.is_empty():
+		return []
+	var items: Array = _bus_board_copper(data)
+	if items.is_empty():
+		return []
+
+	# Every piece of copper the bus itself puts down, as {net_index, points,
+	# layer, half}. `half` is what that piece claims either side of the point it
+	# is addressed by — a track's half-width, a via's radius — and an empty
+	# `layer` means "the whole stack", which is what a through via is.
+	var probes: Array = []
+	var station_active: bool = not station_layer.is_empty() \
+		and splits.size() == polylines.size() and via_points.size() == polylines.size()
+	for i in range(polylines.size()):
+		var poly: PackedVector2Array = polylines[i]
+		var half: float = float(widths[i]) * 0.5
+		var cut: int = int(splits[i]) if station_active else -1
+		if cut < 1 or cut > poly.size() - 2:
+			probes.append({"net_index": i, "points": poly, "layer": layer, "half": half})
+			continue
+		probes.append({"net_index": i, "points": poly.slice(0, cut + 1), "layer": layer, "half": half})
+		probes.append({"net_index": i, "points": poly.slice(cut), "layer": station_layer, "half": half})
+		var at: Vector2 = via_points[i]
+		probes.append({"net_index": i, "points": PackedVector2Array([at, at]),
+			"layer": "", "half": maxf(0.0, via_diameter) * 0.5})
+
+	# key "<net index>|<item index>" -> the worst approach found for that pair.
+	var worst: Dictionary = {}
+	for raw_probe in probes:
+		var probe: Dictionary = raw_probe
+		var pts: PackedVector2Array = probe["points"]
+		if pts.size() < 2:
+			continue
+		var index: int = int(probe["net_index"])
+		var bus_net: String = str(nets[index])
+		var half: float = float(probe["half"])
+		var probe_layer: String = str(probe["layer"])
+		var box: Rect2 = _bus_points_bounds(pts).grow(
+			half + maxf(0.0, clearance) + _BUS_FOREIGN_TOLERANCE_MM)
+		for k in range(items.size()):
+			var item: Dictionary = items[k]
+			if str(item["net"]) == bus_net:
+				continue
+			if not _bus_item_on_layer(item, probe_layer):
+				continue
+			var item_box: Rect2 = item["bounds"]
+			if not box.intersects(item_box):
+				continue
+			var best: Dictionary = {}
+			for s in range(pts.size() - 1):
+				var g: Dictionary = _bus_item_gap(item, pts[s], pts[s + 1])
+				if best.is_empty() or float(g["distance"]) < float(best["distance"]):
+					best = g
+			var gap: float = float(best["distance"]) - half
+			if gap >= maxf(0.0, clearance) - _BUS_FOREIGN_TOLERANCE_MM:
+				continue
+			var key := "%d|%d" % [index, k]
+			if worst.has(key) and float((worst[key] as Dictionary)["gap"]) <= gap:
+				continue
+			worst[key] = {"gap": gap, "a": best["a"], "b": best["b"], "item": k,
+				"net_index": index,
+				"layer": probe_layer if not probe_layer.is_empty() else layer}
+
+	var out: Array = []
+	for key in worst:
+		out.append(_bus_foreign_finding(worst[key] as Dictionary, items, nets, clearance))
+	return out
+
+
+## ONE foreign-copper finding, in pcb_bus_geometry.gd's own finding shape plus
+## the two machine-readable keys a caller would otherwise have to parse out of
+## the prose (`foreign_ref`, `foreign_net`).
+##
+## `nets` holds ONLY the bus net, never the foreign one: it is the key the
+## workspace files a finding under, and a bus net's ghost must not be handed a
+## defect belonging to a net it is not carrying.
+static func _bus_foreign_finding(hit: Dictionary, items: Array, nets: PackedStringArray,
+		clearance: float) -> Dictionary:
+	var item: Dictionary = items[int(hit["item"])]
+	var bus_net: String = str(nets[int(hit["net_index"])])
+	var gap: float = float(hit["gap"])
+	var at_bus: Vector2 = hit["a"]
+	var at_item: Vector2 = hit["b"]
+	var run_layer: String = str(hit["layer"])
+	var foreign_net: String = str(item["net"])
+	var what := "%s %s (net \"%s\")" % [str(item["what"]), str(item["ref"]),
+		foreign_net if not foreign_net.is_empty() else "(none)"]
+	var caveat := ""
+	if bool(item.get("centre_only", false)):
+		caveat = " Measured to the pad CENTRE — this footprint carries no pad geometry, so the real copper reaches further than this figure says."
+	var message := ""
+	if gap <= _BUS_FOREIGN_TOLERANCE_MM:
+		message = "Net \"%s\"'s bus copper lands on %s on %s at (%.3f, %.3f) — that is one piece of copper across two nets. Move the pad or the spine, pick a different pad, or take this net to another layer.%s" \
+			% [bus_net, what, run_layer, at_item.x, at_item.y, caveat]
+	else:
+		message = "Net \"%s\"'s bus copper runs %.3fmm from %s on %s near (%.3f, %.3f) — this board's %.3fmm clearance needs that much bare board between two nets. Move the pad or the spine, or take this net to another layer.%s" \
+			% [bus_net, gap, what, run_layer, at_item.x, at_item.y, maxf(0.0, clearance), caveat]
+	return {
+		"type": BUS_FINDING_FOREIGN_COPPER,
+		"message": message,
+		"nets": [bus_net],
+		"measured_mm": gap,
+		"required_mm": maxf(0.0, clearance),
+		"layer": run_layer,
+		"foreign_ref": str(item["ref"]),
+		"foreign_net": foreign_net,
+		"closest": [at_bus.x, at_bus.y],
+		"witness": [at_item.x, at_item.y],
+		"midpoint": [(at_bus.x + at_item.x) * 0.5, (at_bus.y + at_item.y) * 0.5],
+	}
 
 
 ## PURE. The whole bus geometry pipeline in one place: per-net width
@@ -8686,6 +9068,18 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	if not bool(routed.get("buildable", false)):
 		return _bus_unbuildable(str(routed.get("error", "The bus geometry was refused.")))
 	findings.append_array(routed.get("findings", []) as Array)
+	# THE BOARD-AWARE PASS, and the only rule here that looks at anything other
+	# than the bus. Runs LAST because it measures the FINISHED routes — legs,
+	# lanes, station fans and the station's own vias — against the copper the
+	# board already carries. The station index is read back off `routed`, not
+	# off the argument: bundle_routes resolves it on the deduplicated spine.
+	var routed_station: int = int(routed.get("via_station_index", -1))
+	findings.append_array(_bus_foreign_copper_findings(data, net_names, widths,
+		routed["polylines"], layer,
+		via_station_layer if routed_station >= 0 else "",
+		routed.get("via_station_splits", []) as Array,
+		routed.get("via_station_points", []) as Array,
+		via_size, clearance))
 
 	return _bus_planned(findings, layer, {
 		"complete": true,
