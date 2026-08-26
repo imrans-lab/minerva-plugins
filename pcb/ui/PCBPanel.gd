@@ -5289,6 +5289,32 @@ func _promote_stripped_board() -> Dictionary:
 	return board
 
 
+## One worker CHECK over a board document, findings back: the seam behind the
+## minerva_pcb_drc / minerva_pcb_drc_geometric verbs. `payload` carries the
+## document under "board" (the live board, or a caller's own) or "yaml"; an
+## oversized board goes by reference exactly as every other board sender here.
+## Returns {success:true, result:<the worker method's own reply>} or
+## {success:false, error, note}. Never reads or echoes the document itself.
+func worker_check(channel: String, payload: Dictionary) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"success": false, "error": "worker_unavailable",
+			"note": "the check runs in the pcb backend — plugin IPC not ready"}
+	var raw: Dictionary = await _request_with_backend_ensure(
+		channel, _payload_by_ref(payload, "board"), 60000)
+	if not bool(raw.get("success", false)):
+		return {"success": false, "error": str(raw.get("error_code", "worker_error")),
+			"note": str(raw.get("error_message", ""))}
+	var envelope: Variant = raw.get("result", null)
+	if not (envelope is Dictionary):
+		return {"success": false, "error": "worker_error", "note": "no result in the worker reply"}
+	if not bool((envelope as Dictionary).get("ok", false)):
+		return {"success": false, "error": "worker_error",
+			"note": str((envelope as Dictionary).get("error", ""))}
+	var result: Variant = (envelope as Dictionary).get("result", {})
+	return {"success": true, "result": result if result is Dictionary else {}}
+
+
 ## The promote gate's WORKER ROUND-TRIP, shared verbatim by promote() (which
 ## gates on it) and board_check() (which only reports it — OFC-4). Returns
 ## {ok:true, gate:<verdict>} or {ok:false, reply:<the error dict the caller

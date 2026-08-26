@@ -162,6 +162,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_undo(host, args)
 		"minerva_pcb_hint_redo":
 			return _hint_redo(host, args)
+		"minerva_pcb_board_drc":
+			return await _board_drc(host, args)
 		"minerva_pcb_undo":
 			return _board_history(host, "undo")
 		"minerva_pcb_redo":
@@ -1993,6 +1995,38 @@ static func _hint_redo(host, args: Dictionary) -> Dictionary:
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "redo failed")))
 	return _ok({"id": id, "kind_payload": result.get("kind_payload", {})})
+
+
+# ── minerva_pcb_board_drc: the two DRC checks over the LIVE board ────────────
+#
+# minerva_pcb_drc / minerva_pcb_drc_geometric stay backend tools that take a
+# document (yaml/board) — the headless form CI and the Go stdio smoke use.
+# This verb is their live-board twin: editor_name in, the panel's own
+# to_board_dict out over the SAME backend tools (declared as this panel's IPC
+# channels), snapshotted by reference when the board is over the broker cap —
+# the pipe pcb.route and pcb.draft_check ride — so a large board never has to
+# be exported, parsed and fed back. The reply is the worker's own findings
+# payload; the board is never echoed.
+
+static func _board_drc(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("worker_check"):
+		return _err("no live panel — minerva_pcb_board_drc checks the board open in an editor; with a document in hand use minerva_pcb_drc / minerva_pcb_drc_geometric")
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var geometric: bool = bool(args.get("geometric", false))
+	var channel: String = "minerva_pcb_drc_geometric" if geometric else "minerva_pcb_drc"
+	var payload: Dictionary = {"board": data.to_board_dict()}
+	if geometric and args.has("verbose_warnings"):
+		payload["verbose_warnings"] = bool(args["verbose_warnings"])
+	var reply: Dictionary = await panel.worker_check(channel, payload)
+	if not bool(reply.get("success", false)):
+		return reply
+	var out: Dictionary = (reply.get("result", {}) as Dictionary).duplicate()
+	out["check"] = "geometric" if geometric else "connectivity"
+	out["board_source"] = "editor"
+	return _ok(out)
 
 
 # ── Board-level undo/redo (minerva_pcb_undo / minerva_pcb_redo) ──────────────

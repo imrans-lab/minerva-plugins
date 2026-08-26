@@ -951,6 +951,25 @@ history. A selection drag on the canvas only becomes a move once the pointer has
 travelled `SELECTION_DRAG_THRESHOLD_PX` (3 px), so a click with a wobble in it
 records no step to undo.
 
+## DRC over the live board (`minerva_pcb_board_drc`)
+
+`minerva_pcb_drc` and `minerva_pcb_drc_geometric` are backend tools that take
+a document (`yaml` or `board`) — the headless form CI, the Go stdio smoke and
+an agent with no tab open use. `minerva_pcb_board_drc {editor_name,
+geometric?, verbose_warnings?}` is their LIVE-BOARD twin: the panel serializes
+the board on screen (`to_board_dict`) and sends it to the very same backend
+tool (both are declared as the panel's IPC channels), snapshotted by reference
+(`{board_path, board_digest}`) when it is over the broker's 64 KiB cap — the
+pipe `pcb.route`, `pcb.draft_check` and `pcb.serialize` ride — and the
+worker's `board_model.load_board` resolves it exactly as it resolves `yaml`.
+`geometric:false` (default) runs the connectivity check, `geometric:true` the
+geometric union. The reply is the worker's findings payload plus
+`check` (`"connectivity"` / `"geometric"`) and `board_source: "editor"`; the
+board is never echoed (`PCBPanel.worker_check` → `panel_tools._board_drc`).
+`minerva_pcb_pcb_board_health` / `minerva_pcb_pcb_assembly_check` remain
+plain channels taking `{board}`: a live-board form of each would be a new
+verb, so they were left alone.
+
 ## Worker (already live — credited, not re-created)
 
 | Tool | Worker method | Purpose |

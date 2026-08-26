@@ -349,6 +349,58 @@ func _init() -> void:
 	check("2a: small board still inlines 'board'", small_route.has("board"))
 	check("2b: small board carries no board_path", not small_route.has("board_path"))
 
+	# ── Section 3: minerva_pcb_board_drc, the live-board DRC verb ────────────
+	# {editor_name} checks the LIVE board through the backend DRC tools, by
+	# reference over the cap, and the reply is the worker's findings payload
+	# with no board echo. ORACLE: the captured channel request (its shape and
+	# its by-ref file, through _check_by_ref) and the reply against the canned
+	# worker result the fake IPC answers with — the worker's own by-path arms
+	# are pinned by pcb/worker/tests/test_board_by_path.py::
+	# test_drc_methods_accept_board_path.
+	print("\n-- 3: minerva_pcb_board_drc by editor_name --")
+	var host = panel._annotation_host
+	var canned_findings: Array = [{"type": "dangling_endpoint", "net": "GND", "at": [1.0, 2.0]}]
+	ipc.overrides["minerva_pcb_drc"] = {"ok": true, "scope": "connectivity",
+		"findings": canned_findings, "counts": {"dangling_endpoint": 1}}
+	var drc: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_drc", {"editor_name": "PCB1"})
+	var drc_req: Dictionary = ipc.last_payload("minerva_pcb_drc")
+	check("3a: the default check sends the live board over the backend drc tool", not drc_req.is_empty())
+	_check_by_ref("3b (board_drc, oversized)", drc_req, "board")
+	check("3c: the reply is the worker's findings payload, no board echo",
+		bool(drc.get("success", false)) and drc.get("findings", []) == canned_findings
+			and str(drc.get("scope", "")) == "connectivity"
+			and str(drc.get("check", "")) == "connectivity"
+			and not drc.has("board") and not drc.has("yaml")
+			and str(drc.get("board_source", "")) == "editor", str(drc))
+
+	ipc.overrides["minerva_pcb_drc_geometric"] = {"ok": true, "scope": "geometric",
+		"verifies_geometry": true, "verdict": "clean", "findings": [], "advisories": [],
+		"counts": {}}
+	var geo: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_drc",
+		{"editor_name": "PCB1", "geometric": true, "verbose_warnings": true})
+	var geo_req: Dictionary = ipc.last_payload("minerva_pcb_drc_geometric")
+	_check_by_ref("3d (board_drc geometric, oversized)", geo_req, "board")
+	check("3e: verbose_warnings rides the geometric request", bool(geo_req.get("verbose_warnings", false)))
+	check("3f: the geometric union comes back as the reply",
+		bool(geo.get("success", false)) and str(geo.get("verdict", "")) == "clean"
+			and str(geo.get("check", "")) == "geometric"
+			and str(geo.get("board_source", "")) == "editor", str(geo))
+	check("3g: no request went out on the connectivity tool for a geometric check",
+		ipc.captured[ipc.captured.size() - 1]["channel"] == "minerva_pcb_drc_geometric")
+	ipc.overrides.clear()
+
+	# A small live board keeps today's inline wire shape.
+	ipc2.overrides["minerva_pcb_drc"] = {"ok": true, "scope": "connectivity", "findings": [], "counts": {}}
+	var small: Dictionary = await PanelTools.handle(panel2._annotation_host, "minerva_pcb_board_drc",
+		{"editor_name": "PCB1"})
+	var small_req: Dictionary = ipc2.last_payload("minerva_pcb_drc")
+	check("3h: a small live board is sent inline as the panel's own to_board_dict",
+		small_req.get("board", {}) == panel2.get_data().to_board_dict()
+			and not small_req.has("board_path"))
+	check("3i: ...and the reply is its findings", bool(small.get("success", false))
+		and (small.get("findings", ["x"]) as Array).is_empty())
+	ipc2.overrides.clear()
+
 	panel.free()
 	panel2.free()
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])

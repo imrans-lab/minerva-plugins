@@ -276,3 +276,49 @@ def test_route_method_digest_mismatch_is_parse_error(tmp_path):
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "parse"
     assert "digest" in resp["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# The DRC methods behind minerva_pcb_drc / minerva_pcb_drc_geometric
+# ---------------------------------------------------------------------------
+
+
+def _findings_of(resp: dict) -> list:
+    assert resp["ok"] is True, resp
+    return resp["result"].get("findings")
+
+
+def test_drc_methods_accept_board_path(tmp_path):
+    """The panel now sends the LIVE board to both DRC methods by reference when
+    it is over the broker cap. ORACLE: the same board fed inline as yaml — the
+    by-path call must produce byte-equal findings (and, for the geometric
+    check, the same verdict), or the live-board verb would be checking
+    something other than what the export path checks."""
+    import yaml
+    board = _ir_two_pin_board()
+    board["traces"] = [{"net": "SIG", "layer": "top", "width_mm": 0.3,
+                        "points": [{"x_mm": 15.24, "y_mm": 20.32},
+                                   {"x_mm": 30.0, "y_mm": 20.32}]}]
+    text = yaml.safe_dump(board)
+    path, digest = _snapshot(tmp_path, board)
+
+    by_yaml = _call("drc", {"yaml": text})
+    by_path = _call("drc", {"board_path": path, "board_digest": digest})
+    assert _findings_of(by_path) == _findings_of(by_yaml), (by_path, by_yaml)
+    assert by_path["result"]["counts"] == by_yaml["result"]["counts"]
+    assert _findings_of(by_yaml), "the dangling SIG trace must be reported, or the pair is vacuous"
+
+    geo_yaml = _call("drc_geometric", {"yaml": text})
+    geo_path = _call("drc_geometric", {"board_path": path, "board_digest": digest})
+    assert geo_path["ok"] is True and geo_yaml["ok"] is True
+    assert geo_path["result"]["verdict"] == geo_yaml["result"]["verdict"]
+    assert geo_path["result"].get("findings") == geo_yaml["result"].get("findings")
+
+
+def test_drc_board_path_digest_mismatch_is_parse_error(tmp_path):
+    """A by-path DRC never checks an unverified snapshot: the digest arm's own
+    refusal surfaces as the method's structured parse error."""
+    path, _digest = _snapshot(tmp_path, _ir_two_pin_board())
+    resp = _call("drc", {"board_path": path, "board_digest": "0" * 64})
+    assert resp["ok"] is False, resp
+    assert resp["error"]["kind"] == "parse", resp

@@ -238,7 +238,10 @@ func _init() -> void:
 	# (110 -> 112): minerva_pcb_undo / minerva_pcb_redo — the board history's
 	# verb twins of Ctrl+Z / Ctrl+Shift+Z and the ribbon buttons. Both
 	# executor:"panel".
-	check("total registered tool count == 112", registered.size() == 112,
+	# (112 -> 113): minerva_pcb_board_drc — the LIVE-BOARD form of the two DRC
+	# verbs (editor_name in, findings out, by-ref over the cap). executor:"panel";
+	# minerva_pcb_drc / _drc_geometric stay backend, so the Go pin at 19 holds.
+	check("total registered tool count == 113", registered.size() == 113,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
