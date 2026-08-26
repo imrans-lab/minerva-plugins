@@ -55,6 +55,7 @@ const PanelToolsScript := preload("res://../../minerva-plugins/pcb/ui/panel_tool
 const ComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbBusLabels := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_labels.gd")
+const BusGeom := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_geometry.gd")
 const PcbRatsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
 
@@ -159,6 +160,8 @@ func _init() -> void:
 	_test_an_open_lane_commits_as_a_free_end()
 	await _test_the_open_verb_matches_the_open_gesture()
 	_test_every_lane_wears_its_net()
+	_test_lane_order_is_a_visible_choice()
+	await _test_a_crossing_bus_is_told_a_clean_order()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -3233,3 +3236,206 @@ func _test_every_lane_wears_its_net() -> void:
 				"1 NA  U1.1 → V1.1", "2 NB  U2.1 → open", "3 NC  U3.1 → open"]),
 			str(canvas.bus_lane_lines()))
 	canvas.free()
+
+
+# ── 17. LANE ORDER IS A VISIBLE CHOICE ───────────────────────────────────────
+#
+# Lane order is pick order. Clicking a pick's NUMBER (the label box to the
+# right of its pip ring — never the pad itself, which still toggles the net)
+# moves that net one lane outward, toward lane 1 on the left of the spine
+# looking from sources to targets; Shift moves it inward; the ends are named
+# no-ops. Every per-net array rotates together, so a landed target follows its
+# net, and the plan follows the order: the copper a reordered gesture commits
+# is the copper a fresh gesture picked in that order commits.
+#
+# ORACLE: _bus_nets after each click, the message channel, the target array
+# after a TARGETS-phase reorder, and — for "the plan follows" — the serialized
+# traces of two boards compared net by net.
+
+## Where a click on pick `i`'s number lands, in world mm: the middle of the
+## digit's box to the right of its ring, at this rig's zoom of 8
+## (world_to_screen is world * 8 with no pan and no size here).
+func _pip_number_click(canvas, i: int) -> Vector2:
+	var pad: Vector2 = canvas._bus_net_points[i]
+	return pad + Vector2((canvas.BUS_PICK_MARKER_RADIUS_PX + 3.0
+		+ canvas.BUS_PIP_NUMBER_HIT_W_PX * 0.5) / canvas.zoom, 0.0)
+
+
+func _test_lane_order_is_a_visible_choice() -> void:
+	print("\n-- (17) clicking a pick's number moves its net one lane outward --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+
+	# THE TOGGLE-VS-NUMBER RULE, pinned: the pad centre toggles, the number moves.
+	canvas._handle_bus_click(SRC_A, false)
+	check("a click ON the pad still toggles the net off", canvas._bus_nets == (["NB", "NC"] as Array[String]),
+			str(canvas._bus_nets))
+	canvas._handle_bus_click(SRC_A, false)
+	check("…and back on, at the end of the order", canvas._bus_nets == (["NB", "NC", "NA"] as Array[String]),
+			str(canvas._bus_nets))
+	canvas._handle_bus_click(_pip_number_click(canvas, 2), false)   # NA's number
+	check("a click on the NUMBER does not toggle — NA is still picked, one lane outward",
+			canvas._bus_nets == (["NB", "NA", "NC"] as Array[String]), str(canvas._bus_nets))
+	check("…the source refs and points moved with it",
+			canvas._bus_net_refs[1] == "U1.1" and canvas._bus_net_points[1] == SRC_A,
+			"%s %s" % [str(canvas._bus_net_refs), str(canvas._bus_net_points)])
+	check("…and the message names the new lane", _last(msgs).contains("NA is now lane 2"), _last(msgs))
+	canvas._handle_bus_click(_pip_number_click(canvas, 1), false)   # NA again
+	check("a second click takes NA to lane 1", canvas._bus_nets == (["NA", "NB", "NC"] as Array[String]),
+			str(canvas._bus_nets))
+	canvas._handle_bus_click(_pip_number_click(canvas, 0), false)   # NA at lane 1: no-op
+	check("at lane 1 the click is a no-op that says so",
+			canvas._bus_nets == (["NA", "NB", "NC"] as Array[String])
+				and _last(msgs) == PcbBusLabels.reorder_end_message("NA", false), _last(msgs))
+	canvas._reorder_bus_lane(0, true)                                # Shift: inward
+	check("Shift (inward) moves NA back to lane 2", canvas._bus_nets == (["NB", "NA", "NC"] as Array[String]),
+			str(canvas._bus_nets))
+	canvas._reorder_bus_lane(2, true)
+	check("at the last lane inward is a no-op that says so",
+			canvas._bus_nets == (["NB", "NA", "NC"] as Array[String])
+				and _last(msgs) == PcbBusLabels.reorder_end_message("NC", true), _last(msgs))
+	# THE CONTROL NEVER COMPETES WITH STARTING THE PATH: a click 3 mm right of a
+	# pick — clear of the pads, past the digit — begins the path, as the teach
+	# line tells a human to.
+	canvas._handle_bus_click(SRC_A + Vector2(3.0, 0.0), false)
+	check("a click 3 mm right of a pick starts the PATH rather than reordering",
+			canvas.bus_phase() == canvas.BusPhase.PATH and canvas._bus_spine_points.size() == 1
+				and canvas._bus_nets == (["NB", "NA", "NC"] as Array[String]),
+			"phase %d spine %d nets %s" % [canvas._bus_phase, canvas._bus_spine_points.size(), str(canvas._bus_nets)])
+	canvas._cancel_bus_step(false)             # back to SOURCES, picks kept
+
+	# TARGETS: the landed targets rotate with their nets, and the teach line
+	# says how.
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_A, false)
+	check("TARGETS teach line (targets still owed) carries the reorder rule",
+			canvas.bus_teach_line().contains("numbered pip"), canvas.bus_teach_line())
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._handle_bus_click(_pip_number_click(canvas, 2), false)   # NC outward
+	check("in TARGETS the number click reorders too: [NB, NC, NA]",
+			canvas._bus_nets == (["NB", "NC", "NA"] as Array[String]), str(canvas._bus_nets))
+	check("…and each net keeps its landed target",
+			canvas._bus_target_refs == (["V2.1", "V3.1", "V1.1"] as Array[String]),
+			str(canvas._bus_target_refs))
+	# THE PLAN FOLLOWS. Commit this reordered bus and a bus picked fresh in the
+	# same order; the copper must agree net by net.
+	_double_click(canvas, EMPTY)
+	var reordered := _traces_by_net(data)
+	var fresh := _rig()
+	var canvas_f = fresh[0]
+	canvas_f._handle_bus_click(SRC_B, false)
+	canvas_f._handle_bus_click(SRC_C, false)
+	canvas_f._handle_bus_click(SRC_A, false)
+	canvas_f._handle_bus_click(PATH_1, false)
+	canvas_f._handle_bus_click(PATH_2, false)
+	canvas_f._handle_bus_click(TGT_A, false)
+	canvas_f._handle_bus_click(TGT_B, false)
+	canvas_f._handle_bus_click(TGT_C, false)
+	canvas_f._commit_bus()
+	var picked := _traces_by_net(fresh[1])
+	check("both boards hold three traces", reordered.size() == 3 and picked.size() == 3)
+	for net in ["NA", "NB", "NC"]:
+		var same := reordered.has(net) and picked.has(net) \
+			and _points_of(reordered[net]) == _points_of(picked[net])
+		check("%s: the reordered gesture and the fresh pick in that order authored the SAME polyline" % net,
+				same, "%s vs %s" % [str(_points_of(reordered.get(net, {}))), str(_points_of(picked.get(net, {})))])
+	canvas.free()
+	canvas_f.free()
+
+
+# ── 17b. A CROSSING BUS IS TOLD WHICH ORDER WOULD BE CLEAN ───────────────────
+#
+# Advisory only — nothing re-sorts. The helper walks every order (n <= 4)
+# through bundle_routes on the same spine and pads and returns the first with
+# no end crossing. ORACLE: bundle_routes itself, re-run on the returned order,
+# and the verb reply / gesture message carrying the sentence.
+
+func _test_a_crossing_bus_is_told_a_clean_order() -> void:
+	print("\n-- (17b) a crossing pick order is offered a clean one, as words --")
+	var spine := PackedVector2Array([PATH_1, PATH_2])
+	var widths: Array = [0.2, 0.2, 0.2]
+	# The reverse pick order of the suite's fixture crosses at both ends (5b).
+	var names := PackedStringArray(["NC", "NB", "NA"])
+	var src := PackedVector2Array([SRC_C, SRC_B, SRC_A])
+	var tgt := PackedVector2Array([TGT_C, TGT_B, TGT_A])
+	var crossing := BusGeom.bundle_routes(spine, names, src, tgt, widths, 0.3)
+	check("fixture: the reverse order crosses", _has_end_crossing(crossing), str(crossing.get("error", "")))
+	var order := BusGeom.clean_pick_order(spine, names, src, tgt, widths, 0.3)
+	check("the helper returns an order", order.size() == 3, str(order))
+	if order.size() == 3:
+		var s2 := PackedVector2Array()
+		var t2 := PackedVector2Array()
+		for name in order:
+			var k := names.find(name)
+			s2.append(src[k])
+			t2.append(tgt[k])
+		var clean := BusGeom.bundle_routes(spine, order, s2, t2, widths, 0.3)
+		check("…and bundle_routes on that order has no end crossing",
+				bool(clean.get("buildable", false)) and not _has_end_crossing(clean),
+				str(clean.get("error", "")))
+	check("a clean order is returned unchanged",
+			BusGeom.clean_pick_order(spine, PackedStringArray(["NA", "NB", "NC"]),
+				PackedVector2Array([SRC_A, SRC_B, SRC_C]), PackedVector2Array([TGT_A, TGT_B, TGT_C]),
+				widths, 0.3) == PackedStringArray(["NA", "NB", "NC"]))
+	# NO clean order: two nets whose targets are swapped relative to their
+	# sources — either order crosses at one end (hand-derived in the section
+	# doc of pcb_bus_geometry's departure ladder: the pad of the other net lies
+	# inside this net's leg band at one end whichever lane it takes).
+	var none := BusGeom.clean_pick_order(spine, PackedStringArray(["NA", "NB"]),
+		PackedVector2Array([SRC_A, SRC_B]), PackedVector2Array([TGT_B, TGT_A]), [0.2, 0.2], 0.3)
+	check("a swap that crosses either way gets NO order", none.is_empty(), str(none))
+	check("five nets are not searched", BusGeom.clean_pick_order(spine,
+			PackedStringArray(["A", "B", "C", "D", "E"]),
+			PackedVector2Array([SRC_A, SRC_B, SRC_C, SRC_A, SRC_B]),
+			PackedVector2Array([TGT_A, TGT_B, TGT_C, TGT_A, TGT_B]),
+			[0.2, 0.2, 0.2, 0.2, 0.2], 0.3).is_empty())
+	check("the sentence names the order", PcbBusLabels.clean_order_sentence(
+			PackedStringArray(["NA", "NB", "NC"])) == "pick order NA, NB, NC would leave the bundle clean.")
+	check("…and is empty for no order", PcbBusLabels.clean_order_sentence(PackedStringArray()) == "")
+
+	# THE VERB carries it in its note, and the gesture's commit message too.
+	var data := PCBData.new()
+	data.from_board_dict(_board())
+	var host := StubMcpHost.new()
+	host.data = data
+	var result: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NC", "NB", "NA"],
+		"sources": ["U3.1", "U2.1", "U1.1"], "targets": ["V3.1", "V2.1", "V1.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+		"layer": "top",
+	})
+	check("the verb landed the crossing bus", bool(result.get("success", false)), str(result))
+	check("…and its note carries the advisory sentence and the reply the order",
+			str(result.get("note", "")).contains("would leave the bundle clean")
+				and (result.get("clean_order", []) as Array).size() == 3, str(result))
+	var rig := _rig()
+	var canvas = rig[0]
+	var msgs := _collect(canvas)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_A, false)
+	check("the live plan's advisory is the same sentence",
+			canvas.bus_advisory().begins_with("pick order") and canvas.bus_advisory().ends_with("clean."),
+			canvas.bus_advisory())
+	_double_click(canvas, EMPTY)
+	check("the commit message carries it", _last(msgs).contains("would leave the bundle clean"), _last(msgs))
+	canvas.free()
+
+
+func _has_end_crossing(routed: Dictionary) -> bool:
+	for f in (routed.get("findings", []) as Array):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+			return true
+	return false

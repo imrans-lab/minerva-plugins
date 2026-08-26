@@ -65,6 +65,7 @@ const _PcbRouteCandidateScript := preload("model/pcb_route_candidate.gd")
 ## and never edits). Zero imports itself.
 const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
+const PcbBusLabels := preload("model/pcb_bus_labels.gd")
 const StagedEntities := preload("model/pcb_staged_entities.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
@@ -9219,8 +9220,13 @@ static func _bus_foreign_finding(hit: Dictionary, items: Array, nets: PackedStri
 ## copper itself is still measured against the board like any other. An EMPTY
 ## target_pins stays the corridor-only preview and is not committable.
 ##
+## `clean_order` (a pad-to-pad plan only) is the pick order the geometry found
+## free of end crossings when this order has one — BusGeom.clean_pick_order,
+## advisory words, nothing re-sorted — else empty.
+##
 ## Returns {ok, buildable, findings, error, complete, nets, widths, offsets,
-## polylines, layer, source_pins, target_pins, open_nets, via_station_index,
+## polylines, layer, source_pins, target_pins, open_nets, clean_order,
+## via_station_index,
 ## via_station_layer, via_station_points, via_station_splits, via_size_mm,
 ## via_drill_mm}.
 ##
@@ -9397,9 +9403,20 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		findings.append_array(_bus_station_corridor_findings(data, net_names,
 			routed.get("via_station_points", []) as Array, via_size, clearance,
 			corridor_width, layer))
+	# THE ORDER ADVISORY: only when a leg crosses at an end, and only as words —
+	# the geometry's own permutation search, on the same spine and pads.
+	var clean_order := PackedStringArray()
+	for f in findings:
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+			clean_order = BusGeom.clean_pick_order(spine_points, net_names,
+				sources["points"], target_points, widths, clearance,
+				via_station_index, via_size if via_station_index >= 0 else 0.0,
+				open_flags if not open_nets.is_empty() else [])
+			break
 
 	return _bus_planned(findings, layer, {
 		"complete": true,
+		"clean_order": clean_order,
 		"nets": nets.duplicate(), "widths": widths, "offsets": routed["offsets"],
 		"polylines": routed["polylines"], "layer": layer,
 		"source_pins": source_pins, "target_pins": target_pins, "open_nets": open_nets,
@@ -9543,7 +9560,8 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	return {"ok": true, "error": "", "trace_ids": created_ids, "via_ids": created_via_ids,
 		"nets": nets, "widths": widths, "layer": layer,
 		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", []),
-		"open_nets": (plan.get("open_nets", []) as Array).duplicate()}
+		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
+		"clean_order": PackedStringArray(plan.get("clean_order", PackedStringArray()))}
 
 
 ## The `details` of a bus commit's journal row: {nets, open_nets, layer,
@@ -10336,6 +10354,11 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	if not findings.is_empty():
 		reply["note"] = "%d bus rule(s) broke and the copper landed anyway so it can be corrected: %s. Fix it in place (move a pad, redraw the spine, minerva_pcb_delete_traces) or undo the whole step." \
 			% [findings.size(), bus_findings_sentence(findings)]
+		var advice: String = PcbBusLabels.clean_order_sentence(
+			PackedStringArray(result.get("clean_order", PackedStringArray())))
+		if not advice.is_empty():
+			reply["clean_order"] = Array(result.get("clean_order", PackedStringArray()))
+			reply["note"] = "%s Advisory: %s" % [str(reply["note"]), advice]
 	var open_words: String = bus_open_sentence(result.get("open_nets", []) as Array)
 	if not open_words.is_empty():
 		reply["note"] = open_words if not reply.has("note") else "%s %s" % [str(reply["note"]), open_words]

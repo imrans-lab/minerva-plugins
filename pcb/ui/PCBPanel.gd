@@ -6546,7 +6546,17 @@ func _set_status(text: String) -> void:
 ## The held condition every status write is prefixed with, or "" when there is
 ## none.
 func _status_lead() -> String:
-	return bus_status_lead(bus_refusal_text(), bus_plan_lands(), bus_finding_count())
+	return bus_status_lead(bus_refusal_text(), bus_plan_lands(), bus_finding_count(),
+		bus_advisory_text())
+
+
+## The live plan's order advisory, in the canvas's words, or "" — read on every
+## call like the refusal it rides beside.
+func bus_advisory_text() -> String:
+	if _canvas == null or _canvas.tool_mode != _PcbCanvasScript.ToolMode.BUS \
+			or not _canvas.has_method("bus_advisory"):
+		return ""
+	return str(_canvas.bus_advisory())
 
 
 ## THE HELD LEAD'S WORDS, from what the live plan already knows about itself.
@@ -6564,13 +6574,18 @@ func _status_lead() -> String:
 ## ARE its first finding's message (panel_tools._bus_planned).
 ##
 ## Pure and static so both classes can be read without a canvas to drive.
-static func bus_status_lead(refusal: String, lands: bool, findings: int) -> String:
+##
+## `advisory`, when given, is the one sentence a crossing plan is offered —
+## "pick order … would leave the bundle clean." — appended after the reason.
+static func bus_status_lead(refusal: String, lands: bool, findings: int,
+		advisory: String = "") -> String:
 	if refusal.is_empty():
 		return ""
+	var advice := "" if advisory.is_empty() else "  •  Advisory: %s" % advisory
 	if not lands:
-		return "BUS REFUSED: %s  •  " % refusal
-	return "BUS WILL LAND WITH %d FINDING%s: %s  •  " % [
-		findings, "" if findings == 1 else "S", refusal]
+		return "BUS REFUSED: %s%s  •  " % [refusal, advice]
+	return "BUS WILL LAND WITH %d FINDING%s: %s%s  •  " % [
+		findings, "" if findings == 1 else "S", refusal, advice]
 
 
 ## While-armed gesture grammar (docket 019fb933d4a9): the teaching prose that

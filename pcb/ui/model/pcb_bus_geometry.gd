@@ -771,6 +771,67 @@ static func bundle_routes(
 	}
 
 
+## The FIRST pick order (net names, in lane order) that bundle_routes builds
+## with NO bus_end_crossing finding on this spine and these pads, or [] when no
+## order is clean — or when there are more than CLEAN_ORDER_MAX_NETS nets, which
+## is not searched at all (24 permutations is a cheap advisory; 120 is not).
+##
+## ADVISORY ONLY: nothing here re-sorts anything. The permutations are walked
+## in lexicographic index order from the given order, so the answer is stable
+## and the given order itself, when clean, is what comes back. Every other
+## argument is bundle_routes' own and is permuted alongside the names.
+const CLEAN_ORDER_MAX_NETS := 4
+
+static func clean_pick_order(spine: PackedVector2Array, net_names: PackedStringArray,
+		sources: PackedVector2Array, targets: PackedVector2Array, widths: Array,
+		clearance: float, via_station_index: int = -1, via_diameter: float = 0.0,
+		open_targets: Array = []) -> PackedStringArray:
+	var n: int = net_names.size()
+	if n == 0 or n > CLEAN_ORDER_MAX_NETS or sources.size() != n or targets.size() != n \
+			or widths.size() != n:
+		return PackedStringArray()
+	var perms: Array = []
+	_permutations(range(n), [], perms)
+	for perm in perms:
+		var names := PackedStringArray()
+		var src := PackedVector2Array()
+		var tgt := PackedVector2Array()
+		var w: Array = []
+		var open: Array = []
+		for i in (perm as Array):
+			names.append(net_names[i])
+			src.append(sources[i])
+			tgt.append(targets[i])
+			w.append(widths[i])
+			if not open_targets.is_empty():
+				open.append(open_targets[i])
+		var routed := bundle_routes(spine, names, src, tgt, w, clearance,
+			via_station_index, via_diameter, open)
+		if not bool(routed.get("buildable", false)):
+			continue
+		var crosses := false
+		for f in (routed.get("findings", []) as Array):
+			if str((f as Dictionary).get("type", "")) == FINDING_END_CROSSING:
+				crosses = true
+				break
+		if not crosses:
+			return names
+	return PackedStringArray()
+
+
+## Every ordering of `remaining`, appended to `out` in lexicographic order.
+static func _permutations(remaining: Array, prefix: Array, out: Array) -> void:
+	if remaining.is_empty():
+		out.append(prefix)
+		return
+	for i in range(remaining.size()):
+		var rest: Array = remaining.duplicate()
+		rest.remove_at(i)
+		var next: Array = prefix.duplicate()
+		next.append(remaining[i])
+		_permutations(rest, next, out)
+
+
 ## One finding per pair of nets whose finished routes are closer than the
 ## clearance rule allows; empty when every pair clears.
 ##

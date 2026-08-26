@@ -972,6 +972,14 @@ const BUS_REFUSAL_COLOR := Color(1.0, 0.35, 0.25, 1.0)
 ## underneath stays readable through it — the marker says "this is in the bus",
 ## it does not replace what was picked.
 const BUS_PICK_MARKER_RADIUS_PX := 9.0
+## The NUMBER glyph beside a pick pip is the REORDER control, and ONLY the
+## glyph: a box this wide and BUS_PIP_NUMBER_HIT_H_PX tall, starting where the
+## label's digit is drawn (ring radius + 3 px to the right of the centre). The
+## pad itself keeps meaning "toggle this net", and a click clear of the pads
+## beside a pick — where the path starts — falls past the glyph's far edge
+## (22 px) at any zoom, so the control never competes with starting the path.
+const BUS_PIP_NUMBER_HIT_W_PX := 10.0
+const BUS_PIP_NUMBER_HIT_H_PX := 14.0
 const BUS_PICK_MARKER_WIDTH_PX := 2.0
 ## VIA-STATION MARKER geometry. A ring at the spine vertex the vias land on,
 ## sized between the pick ring and the target ring so it reads as a mark on the
@@ -8505,6 +8513,19 @@ func bus_finding_count() -> int:
 	return (raw as Array).size() if raw is Array else 0
 
 
+## The live plan's ORDER ADVISORY — "pick order … would leave the bundle
+## clean." — or "" when the plan has no end crossing, no clean order was found
+## (or more than four nets were not searched), or there is no plan. Words only:
+## the pips are how the order is actually changed.
+func bus_advisory() -> String:
+	return _bus_plan_advisory(_bus_current_plan())
+
+
+func _bus_plan_advisory(plan: Dictionary) -> String:
+	return PcbBusLabels.clean_order_sentence(
+		PackedStringArray(plan.get("clean_order", PackedStringArray())))
+
+
 ## Re-read the live refusal and ping the outside surfaces when it changed.
 ## Called from the gesture steps that can change the plan — the clicks, the Esc
 ## ladder and the reset. Mouse motion is NOT one of them: the rubber-band cursor
@@ -8546,6 +8567,14 @@ func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 		return
 	_bus_path_press_appended = false
 	_bus_target_press_cleared = {}
+	# A click on a pick's NUMBER reorders the lanes, in the two phases where
+	# the pips are the thing being read (SOURCES and TARGETS); it is checked
+	# before the phase's own verb so the number never doubles as a toggle.
+	if _bus_phase != BusPhase.PATH:
+		var pip: int = _bus_pip_label_at(world_pos)
+		if pip >= 0:
+			_reorder_bus_lane(pip, Input.is_key_pressed(KEY_SHIFT))
+			return
 	match _bus_phase:
 		BusPhase.SOURCES:
 			_handle_bus_source_click(world_pos)
@@ -8553,6 +8582,65 @@ func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 			_handle_bus_path_click(world_pos)
 		BusPhase.TARGETS:
 			_handle_bus_target_click(world_pos)
+
+
+## Which pick's NUMBER glyph a click landed on, or -1: the digit-sized box at
+## the start of pip `i`'s label (BUS_PIP_NUMBER_HIT_W_PX × _H_PX, right of the
+## ring), measured on screen because the label is a screen-sized mark. The
+## ring's own disc — the pad — is not in it, and neither is the clear board
+## past the label where the path starts.
+func _bus_pip_label_at(world_pos: Vector2) -> int:
+	var at := world_to_screen(world_pos)
+	for i in range(_bus_net_points.size()):
+		var pip := world_to_screen(_bus_net_points[i])
+		var box := Rect2(pip + Vector2(BUS_PICK_MARKER_RADIUS_PX + 3.0, -BUS_PIP_NUMBER_HIT_H_PX * 0.5),
+			Vector2(BUS_PIP_NUMBER_HIT_W_PX, BUS_PIP_NUMBER_HIT_H_PX))
+		if box.has_point(at):
+			return i
+	return -1
+
+
+## Move pick `i` one lane OUTWARD (toward lane 1, the left of the spine looking
+## from sources to targets — see PcbBusLabels.REORDER_RULE) or, `inward`,
+## toward the last lane. Every per-net array rotates together — nets, source
+## refs and points, suggestions, and the targets already landed — so a net keeps
+## its pad and its target and only its lane changes; the plan replans through
+## its own cache key, which carries the net order. At the end of the order the
+## click is a NAMED no-op.
+func _reorder_bus_lane(i: int, inward: bool) -> void:
+	var j: int = i + 1 if inward else i - 1
+	if j < 0 or j >= _bus_nets.size():
+		bus_tool_message.emit(PcbBusLabels.reorder_end_message(_bus_nets[i], inward))
+		return
+	_swap_bus_lanes(i, j)
+	_bus_target_press_cleared = {}
+	bus_tool_message.emit("%s is now lane %d (%s) — [%s]. %s" % [
+		_bus_nets[j], j + 1, "inward" if inward else "outward", _bus_nets_joined(),
+		bus_teach_line()])
+	queue_redraw()
+
+
+func _swap_bus_lanes(a: int, b: int) -> void:
+	var net: String = _bus_nets[a]
+	_bus_nets[a] = _bus_nets[b]
+	_bus_nets[b] = net
+	var ref: String = _bus_net_refs[a]
+	_bus_net_refs[a] = _bus_net_refs[b]
+	_bus_net_refs[b] = ref
+	var pt: Vector2 = _bus_net_points[a]
+	_bus_net_points[a] = _bus_net_points[b]
+	_bus_net_points[b] = pt
+	if a < _bus_suggested_refs.size() and b < _bus_suggested_refs.size():
+		var sug: String = _bus_suggested_refs[a]
+		_bus_suggested_refs[a] = _bus_suggested_refs[b]
+		_bus_suggested_refs[b] = sug
+	if a < _bus_target_refs.size() and b < _bus_target_refs.size():
+		var tref: String = _bus_target_refs[a]
+		_bus_target_refs[a] = _bus_target_refs[b]
+		_bus_target_refs[b] = tref
+		var tpt: Vector2 = _bus_target_points[a]
+		_bus_target_points[a] = _bus_target_points[b]
+		_bus_target_points[b] = tpt
 
 
 ## SOURCES click: a pad toggles its net in or out of the ordered list; clear
@@ -9240,8 +9328,8 @@ func _bus_targets_status() -> String:
 		if authoring_destination == DEST_DRAFT:
 			return "every net has a target — to PROPOSE ghosts for review, %s." % how
 		return "every net has a target — to commit COPPER, %s; Shift+Enter proposes ghosts." % how
-	return "%s No target yet for %s — or double-click clear of the pads / press Enter to commit with those lanes ending OPEN (free ends the Trace tool can finish)." % [
-		PcbBusLabels.TARGETS_RULE, ", ".join(missing)]
+	return "%s %s No target yet for %s — or double-click clear of the pads / press Enter to commit with those lanes ending OPEN (free ends the Trace tool can finish)." % [
+		PcbBusLabels.TARGETS_RULE, PcbBusLabels.REORDER_RULE, ", ".join(missing)]
 
 
 func _bus_nets_without_targets() -> PackedStringArray:
@@ -9391,8 +9479,10 @@ func _bus_findings_sentence(plan: Dictionary, outcome: String) -> String:
 	var findings: Array = plan.get("findings", []) if plan.get("findings", []) is Array else []
 	if findings.is_empty():
 		return ""
-	return " %d rule(s) broke and it %s anyway so you can correct it: %s" % [
-		findings.size(), outcome, _PanelToolsScript.bus_findings_sentence(findings)]
+	var advice := _bus_plan_advisory(plan)
+	return " %d rule(s) broke and it %s anyway so you can correct it: %s%s" % [
+		findings.size(), outcome, _PanelToolsScript.bus_findings_sentence(findings),
+		"" if advice.is_empty() else " Advisory: " + advice]
 
 
 ## What Enter answers with in a phase that has nothing to commit — the verb the

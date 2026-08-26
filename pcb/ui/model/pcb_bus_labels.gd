@@ -14,6 +14,14 @@ extends RefCounted
 ## The TARGETS-phase rule, said once, before the per-net status.
 const TARGETS_RULE := "Click each net's target pad — lanes are numbered in the order you picked the nets."
 
+## LANE ORDER IS PICK ORDER, and lane 1 is the lane on the LEFT of the spine
+## looking along it from the sources to the targets (the most negative offset
+## in cumulative_offsets; on a y-down board that is the side the spine's
+## direction rotated anticlockwise points to). "Outward" moves a net toward
+## lane 1 — one step left; "inward" moves it toward the last lane. At lane 1
+## outward is a no-op, at the last lane inward is.
+const REORDER_RULE := "Click a numbered pip to move that net outward (Shift+click inward) — lane 1 rides the left of the spine looking from the sources to the targets."
+
 ## What an ending reads as while no target is landed: "open" once the bus is in
 ## TARGETS (a commit now would leave the lane open-ended), "?" before that (the
 ## target is not yet askable).
@@ -63,3 +71,19 @@ static func lane_lines(rows: Array) -> PackedStringArray:
 ## The mapping as ONE status-line string: the lines joined by " · ".
 static func lanes_summary(rows: Array) -> String:
 	return " · ".join(lane_lines(rows))
+
+
+## The advisory a crossing bus is given — "pick order NA, NC, NB would leave the
+## bundle clean." — or "" when `order` is empty (no clean order, or not
+## searched). Advisory only; nothing re-sorts on its own.
+static func clean_order_sentence(order: PackedStringArray) -> String:
+	if order.is_empty():
+		return ""
+	return "pick order %s would leave the bundle clean." % ", ".join(order)
+
+
+## What a reorder click answers with when the net cannot move any further.
+static func reorder_end_message(net: String, inward: bool) -> String:
+	if inward:
+		return "%s is already the last lane — it cannot move further inward." % net
+	return "%s is already lane 1, the outermost — it cannot move further outward." % net
