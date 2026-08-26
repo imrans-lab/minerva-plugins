@@ -39,7 +39,14 @@
 # never leaving a sub-width stub) adds the hand-derived BCLK case and a
 # min-segment-length walk over every route; the batch review dropped one
 # check that could not fail on its own. MEASURED: 100 passed, 0 failed.
-test_bus_breakout_geometry.gd assertions=100
+# 100 -> 116: pads lying along the spine fan out sideways (hand-derived U1S
+# column, foreign-pad reach, no shared copper, Manhattan and no stub: +12),
+# the corridor words follow the rule they measure (+3), and a staggered pair
+# is pinned to stay on the ladder (+1). MEASURED: 116 passed, 0 failed.
+# 116 -> 122: a pad already under its lane's copper gets no reach at all, and a
+# pad half-to-one track width off its lane is named bus_sub_width_stub (+6).
+# MEASURED: 122 passed, 0 failed.
+test_bus_breakout_geometry.gd assertions=122
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.
@@ -68,7 +75,11 @@ test_bus_breakout_geometry.gd assertions=100
 # teach line and the verb reply to carry no start-on advice (+1 net), and 13d
 # pins that targets with no copper on the working layer STILL name the layer
 # to set, and go quiet once the working layer is theirs (+6). MEASURED: 258.
-test_bus_tool.gd assertions=258
+# 258 -> 289: a pad with no copper on the landing layer is named (14/14b,
+# +12), a station that walls a pad off is named (13e/13f, +9), and the
+# add_bus journal row (13g, +10). MEASURED: 289 passed, 0 failed.
+# 289 -> 291: an unplated hole is on no layer at all (+2). MEASURED: 291.
+test_bus_tool.gd assertions=291
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
