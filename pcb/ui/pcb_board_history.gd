@@ -11,11 +11,13 @@ extends RefCounted
 ## Off-tree plugin: reached by preload, typed by base class.
 
 ## The key gesture `event` asks for: "undo" (Ctrl+Z), "redo" (Ctrl+Shift+Z or
-## Ctrl+Y), or "" for any other key. Cmd stands in for Ctrl on macOS.
+## Ctrl+Y), or "" for any other key. On macOS Cmd stands in for Ctrl; elsewhere
+## meta is the Super/Windows key and is not an undo modifier.
 static func key_action(event: InputEventKey) -> String:
 	if not event.pressed or event.is_echo():
 		return ""
-	if not (event.ctrl_pressed or event.meta_pressed):
+	var command: bool = event.meta_pressed and OS.get_name() == "macOS"
+	if not (event.ctrl_pressed or command):
 		return ""
 	if event.keycode == KEY_Z:
 		return "redo" if event.shift_pressed else "undo"

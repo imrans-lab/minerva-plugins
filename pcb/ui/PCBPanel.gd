@@ -4143,16 +4143,13 @@ func _sync_dock_pane_mode() -> void:
 ## on_pointer_down(Vector2.ZERO, MOUSE_BUTTON_LEFT, mods)) — it does NOT
 ## forward Ctrl+Z at all, so no AnnotationAuthorTool ever sees it. Nor does
 ## pcb_canvas.gd's own _handle_key_input (it binds Delete/Escape/R/G/N/L/
-## Home/+/-/S but no Ctrl+Z). PCBPanel currently wires NO board-level undo
-## either (no Undo button, no Ctrl+Z handler anywhere in this plugin) — the
-## legacy in-core Editor.gd:undo_action() match on Type.PCB is dead code for
-## this off-tree plugin (its panel type is Type.PLUGIN_SCENE, which
-## undo_action() does not match at all). So _unhandled_key_input on the
-## panel Control is the first seam nothing else claims: it fires only when
-## neither the overlay's nor the canvas's _gui_input consumed the key.
-## Gating strictly on "a route hint is selected" keeps this mutually
-## exclusive by construction with any future board-level Ctrl+Z binding —
-## an edit with no hint selected falls through to the board history.
+## Home/+/-/S but no Ctrl+Z). So _unhandled_key_input on the panel Control
+## is the first seam nothing else claims: it fires only when neither the
+## overlay's nor the canvas's _gui_input consumed the key. The hint branch is
+## asked first and OWNS the key whenever a hint is the target — the event is
+## marked handled even when the hint's stack has nothing to move, so the
+## press neither reaches the board history nor leaks past the panel — and an
+## edit with no hint selected falls through to the board history.
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
@@ -4178,8 +4175,8 @@ func _hint_revision_key(action: String) -> bool:
 	# takes one id). With a multi-selection there is no unambiguous target, so
 	# Ctrl+Z disarms rather than silently rewinding whichever hint happens to be
 	# primary. Exactly one selected → unchanged. The disarm is ANNOUNCED, not
-	# silent: no board-level Ctrl+Z exists in this plugin (see the header above),
-	# so falling through unconsumed would produce a dead key with no explanation —
+	# silent, and owns the key: with hints selected the press must not fall
+	# through to the board history, so it is consumed here with an explanation —
 	# the same thing draw_disarm_notice exists to prevent for bend/via.
 	if _annotation_host.has_method("has_multi_selection") and _annotation_host.has_multi_selection():
 		_show_transient_status("Hint undo needs one hint selected — %d are selected." \
@@ -4198,10 +4195,24 @@ func _hint_revision_key(action: String) -> bool:
 		result = _annotation_host.redo_hint_revision(sel_id)
 	else:
 		result = _annotation_host.undo_hint_revision(sel_id)
+	# The hint owned the key either way: a refusal (bottom of its stack) is
+	# still this press's answer, not a reason to let it reach something else.
+	get_viewport().set_input_as_handled()
 	if bool(result.get("ok", false)):
-		get_viewport().set_input_as_handled()
 		if _canvas != null:
 			_canvas.queue_redraw()
+	else:
+		# Stack exhaustion reads as "nothing to"; any other refusal shows its
+		# own error code so a host fault is never disguised as an empty stack.
+		var code: String = str(result.get("error", ""))
+		var why: String
+		if code == "no_prior_revision":
+			why = "nothing to undo"
+		elif code == "no_redo_available":
+			why = "nothing to redo"
+		else:
+			why = code
+		_show_transient_status("Hint %s: %s" % ["redo" if action == "redo" else "undo", why])
 	return true
 
 
@@ -4224,9 +4235,12 @@ func board_redo() -> Dictionary:
 ## own data_changed/structure_changed already reach the canvas and the labels;
 ## the refresh covers the option lists that only rebuild on demand).
 func _after_history_step(result: Dictionary) -> Dictionary:
-	_show_transient_status(_PcbBoardHistoryScript.status_line(result))
+	# Refresh FIRST: _refresh_board_ui rewrites the standing status line, so
+	# the step's sentence goes on the label after it, where it stays until
+	# the transient timer restores the standing line.
 	if bool(result.get("ok", false)):
 		_refresh_board_ui()
+	_show_transient_status(_PcbBoardHistoryScript.status_line(result))
 	return result
 
 
@@ -5309,8 +5323,16 @@ func worker_check(channel: String, payload: Dictionary) -> Dictionary:
 	if not (envelope is Dictionary):
 		return {"success": false, "error": "worker_error", "note": "no result in the worker reply"}
 	if not bool((envelope as Dictionary).get("ok", false)):
-		return {"success": false, "error": "worker_error",
-			"note": str((envelope as Dictionary).get("error", ""))}
+		# A METHOD-level refusal ({ok:false, error:{kind, message}} — a parse
+		# failure, say). Its structured cause rides through as `detail`; the
+		# geometric check never lands here: its indeterminate verdict is a
+		# union INSIDE result ({ok:true, result:{ok:false, verdict:
+		# "indeterminate", error}}) and passes below verbatim.
+		var cause: Variant = (envelope as Dictionary).get("error", "")
+		var kind: String = str((cause as Dictionary).get("kind", "worker_error")) \
+			if cause is Dictionary else "worker_error"
+		return {"success": false, "error": kind, "detail": cause,
+			"note": str((cause as Dictionary).get("message", "")) if cause is Dictionary else str(cause)}
 	var result: Variant = (envelope as Dictionary).get("result", {})
 	return {"success": true, "result": result if result is Dictionary else {}}
 

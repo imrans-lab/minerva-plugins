@@ -912,16 +912,17 @@ func _run_structural_refusals() -> void:
 	check("a spine started past the sources and ended short of the targets raises no corridor finding",
 		bool(followed.get("buildable", false)) and not corridor)
 
-	# ROOM. Three 0.2mm tracks at 0.3mm clearance fan out over 1.0mm at each
-	# end and need 0.5mm (the widest offset) of bundle clear of both. A 1.2mm
-	# spine has 2.0mm of fan-out to hold and nothing left over.
+	# ROOM. Three 0.2mm tracks at 0.3mm clearance (laid pitch 0.51) fan out
+	# over 1.02mm at each end and need 0.51mm (the widest offset) of bundle
+	# clear of both. A 1.2mm spine has 2.04mm of fan-out to hold and nothing
+	# left over.
 	check_bad_but_buildable("a spine too short for its own fan-outs is named",
 		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(1.2, 0)]),
 			PackedStringArray(["A", "B", "C"]),
 			_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
 			_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
 			[0.2, 0.2, 0.2], 0.3),
-		3, ["0→1", "1.200mm", "2.000mm", "0.500mm"])
+		3, ["0→1", "1.200mm", "2.040mm", "0.510mm"])
 
 	# A zero-width track is what would let two departure stations coincide, so
 	# it is refused rather than clamped.

@@ -2037,9 +2037,9 @@ static func _board_drc(host, args: Dictionary) -> Dictionary:
 # the keys; headless (no panel) the module steps the model directly.
 
 static func _board_history(host, which: String) -> Dictionary:
-	var panel = host.get_panel() if host != null and host.has_method("get_panel") else null
+	var panel = _get_panel(host)
 	var result: Dictionary
-	if panel != null and is_instance_valid(panel) and panel.has_method("board_undo"):
+	if panel != null and panel.has_method("board_undo"):
 		result = panel.board_undo() if which == "undo" else panel.board_redo()
 	else:
 		var data = _resolve_data(host)
@@ -9354,7 +9354,7 @@ static func _bus_foreign_finding(hit: Dictionary, items: Array, nets: PackedStri
 static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer: String,
 		source_pins: PackedStringArray, target_pins: PackedStringArray,
 		width_override: float = 0.0, via_station_index: int = -1,
-		via_station_layer: String = "") -> Dictionary:
+		via_station_layer: String = "", advise_leave_open: bool = true) -> Dictionary:
 	if nets.size() < 2:
 		return _bus_unbuildable("A bus needs at least 2 nets (%d given)." % nets.size())
 	var net_names := PackedStringArray()
@@ -9515,34 +9515,43 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	# THE ORDER ADVISORY: only when a leg crosses at an end, and only as words —
 	# the geometry's own permutation search, on the same spine and pads.
 	var clean_order := PackedStringArray()
-	var crossing: Dictionary = {}
+	var searched := false
+	# The first TARGET-end crossing pair, whichever end's finding came first.
+	var target_pair: Array = []
 	for f in findings:
-		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
-			crossing = f
+		if str((f as Dictionary).get("type", "")) != BusGeom.FINDING_END_CROSSING:
+			continue
+		if not searched:
+			searched = true
 			clean_order = BusGeom.clean_pick_order(spine_points, net_names,
 				sources["points"], target_points, widths, clearance,
 				via_station_index, via_size if via_station_index >= 0 else 0.0,
 				open_flags if not open_nets.is_empty() else [])
-			break
-	# NO CLEAN ORDER and the crossing is at the TARGET end: the other end fixes
-	# the order, so the way out is to land one of the pair and leave the other
-	# open — the concrete targets array is the next call.
+		var pair: Array = (f as Dictionary).get("nets", []) if (f as Dictionary).get("nets", []) is Array else []
+		if target_pair.is_empty() and str((f as Dictionary).get("end", "")) == "target" \
+				and pair.size() == 2:
+			target_pair = pair
+	# NO CLEAN ORDER and a crossing at the TARGET end: the other end fixes the
+	# order, so the way out is to land the rest and leave one net open — the
+	# concrete targets array is the next call. VERIFIED, not assumed: the
+	# reduced bus is re-planned (bus_plan is pure) and the advice is given
+	# only when that plan carries no end crossing at all.
 	var leave_open_net := ""
 	var leave_open_targets := PackedStringArray()
-	if clean_order.is_empty() and not crossing.is_empty() \
-			and str(crossing.get("end", "")) == "target":
-		var pair: Array = crossing.get("nets", []) if crossing.get("nets", []) is Array else []
-		if pair.size() == 2:
-			var idx: int = nets.find(str(pair[1]))
-			if idx >= 0 and idx < target_pins.size() and not target_pins[idx].is_empty():
-				leave_open_net = str(pair[1])
-				leave_open_targets = PackedStringArray(target_pins)
-				leave_open_targets[idx] = ""
+	var leave_open_pair: Array = []
+	if advise_leave_open and clean_order.is_empty() and not target_pair.is_empty():
+		var way_out: Dictionary = _bus_leave_one_open(data, nets, spine_points, layer,
+			source_pins, target_pins, width_override, via_station_index, via_station_layer,
+			findings)
+		leave_open_net = str(way_out.get("net", ""))
+		leave_open_pair = way_out.get("pair", [])
+		leave_open_targets = PackedStringArray(way_out.get("targets", PackedStringArray()))
 
 	return _bus_planned(findings, layer, {
 		"complete": true,
 		"clean_order": clean_order,
 		"leave_open_net": leave_open_net,
+		"leave_open_pair": leave_open_pair,
 		"leave_open_targets": leave_open_targets,
 		"nets": nets.duplicate(), "widths": widths, "offsets": routed["offsets"],
 		"polylines": routed["polylines"], "layer": layer,
@@ -9604,6 +9613,84 @@ static func _bus_rollback(data, trace_ids: Array, via_ids: Array) -> void:
 		data.remove_via_by_id(str(vid))
 
 
+## The net to leave open so the rest of the bus lands with no end crossing,
+## as {net, pair, targets} — or {} when no single open lane does it.
+##
+## Candidates, in order: the second net of the first target-end crossing
+## pair, then the net that appears in the MOST target-end crossing pairs (the
+## one every crossing shares, when they share one). Each candidate's reduced
+## targets array is re-planned through bus_plan itself and accepted only when
+## that plan has no end-crossing finding at either end — opening one net of
+## one pair can leave another pair crossing, and advice that does not work is
+## worse than none. `pair` is the first target-end crossing the chosen net is
+## in, for the sentence.
+static func _bus_leave_one_open(data, nets: Array, spine_points: PackedVector2Array,
+		layer: String, source_pins: PackedStringArray, target_pins: PackedStringArray,
+		width_override: float, via_station_index: int, via_station_layer: String,
+		findings: Array) -> Dictionary:
+	var pairs: Array = []
+	var tally: Dictionary = {}
+	for f in findings:
+		if str((f as Dictionary).get("type", "")) != BusGeom.FINDING_END_CROSSING \
+				or str((f as Dictionary).get("end", "")) != "target":
+			continue
+		var pair: Array = (f as Dictionary).get("nets", []) if (f as Dictionary).get("nets", []) is Array else []
+		if pair.size() != 2:
+			continue
+		pairs.append(pair)
+		for net in pair:
+			tally[str(net)] = int(tally.get(str(net), 0)) + 1
+	if pairs.is_empty():
+		return {}
+	var candidates: Array = [str((pairs[0] as Array)[1])]
+	var most := ""
+	for net in tally:
+		if most.is_empty() or int(tally[net]) > int(tally[most]):
+			most = str(net)
+	if not most.is_empty() and not (most in candidates):
+		candidates.append(most)
+	for candidate in candidates:
+		var idx: int = nets.find(candidate)
+		if idx < 0 or idx >= target_pins.size() or target_pins[idx].is_empty():
+			continue
+		var reduced := PackedStringArray(target_pins)
+		reduced[idx] = ""
+		var replan: Dictionary = bus_plan(data, nets, spine_points, layer, source_pins,
+			reduced, width_override, via_station_index, via_station_layer, false)
+		if not bool(replan.get("buildable", false)):
+			continue
+		var crosses := false
+		for f in replan.get("findings", []):
+			if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+				crosses = true
+				break
+		if crosses:
+			continue
+		var pair_for_words: Array = pairs[0]
+		for pair in pairs:
+			if candidate in (pair as Array):
+				pair_for_words = pair
+				break
+		return {"net": candidate, "pair": pair_for_words, "targets": reduced}
+	return {}
+
+
+## The gate every consumer of a bus plan passes it through before acting on
+## it — commit, dry run and proposal alike: the plan must be buildable and
+## COMPLETE (every target picked or deliberately open), and its via station,
+## when it names one, coherent (_bus_station_runs). Returns {ok:true, station}
+## or the {ok:false, error, findings:[]} refusal the caller returns verbatim.
+static func _bus_gate(plan: Dictionary) -> Dictionary:
+	if not bool(plan.get("ok", false)) and not bool(plan.get("buildable", false)):
+		return {"ok": false, "error": str(plan.get("error", "Bus was refused.")), "findings": []}
+	if not bool(plan.get("complete", false)):
+		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN, "findings": []}
+	var station: Dictionary = _bus_station_runs(plan)
+	if not str(station["error"]).is_empty():
+		return {"ok": false, "error": str(station["error"]), "findings": []}
+	return {"ok": true, "station": station}
+
+
 ## MUTATES. Takes any plan that HAS geometry — clean or bad-but-buildable — and
 ## lands it as copper. TRUSTS NOTHING: an UNBUILDABLE plan and an INCOMPLETE
 ## (corridor-only) plan are both refused here, so neither shape bus_plan can
@@ -9634,17 +9721,14 @@ static func _bus_rollback(data, trace_ids: Array, via_ids: Array) -> void:
 ## add_trace so far is only in `traces`, not a journal entry the user can act
 ## on).
 static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Dictionary:
-	if not bool(plan.get("ok", false)) and not bool(plan.get("buildable", false)):
-		return {"ok": false, "error": str(plan.get("error", "Bus was refused.")), "findings": []}
-	if not bool(plan.get("complete", false)):
-		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN, "findings": []}
+	var gate: Dictionary = _bus_gate(plan)
+	if not bool(gate["ok"]):
+		return gate
 	var nets: Array = plan.get("nets", [])
 	var widths: Array = plan.get("widths", [])
 	var polylines: Array = plan.get("polylines", [])
 	var layer: String = str(plan.get("layer", ""))
-	var station: Dictionary = _bus_station_runs(plan)
-	if not str(station["error"]).is_empty():
-		return {"ok": false, "error": str(station["error"]), "findings": []}
+	var station: Dictionary = gate["station"]
 	var station_active: bool = bool(station["active"])
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var created_ids: Array[String] = []
@@ -9655,13 +9739,9 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	var net_trace_ids: Array = []
 	var net_via_ids: Array = []
 	for i in range(nets.size()):
-		var poly: PackedVector2Array = polylines[i]
-		var runs: Array = [poly]
-		var run_layers: Array = [layer]
-		if station_active:
-			var cut: int = int((station["splits"] as Array)[i])
-			runs = [poly.slice(0, cut + 1), poly.slice(cut)]
-			run_layers = [layer, str(station["layer"])]
+		var split: Dictionary = _bus_runs(polylines[i], layer, station, i)
+		var runs: Array = split["runs"]
+		var run_layers: Array = split["layers"]
 		var mine: Array = []
 		for r in range(runs.size()):
 			var trace = data.create_trace_entity(
@@ -9709,13 +9789,10 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 ## as a proposal's does. Lets an agent read a bus's findings, lane offsets and
 ## polylines before deciding to commit, propose a ghost, or redraw the spine.
 static func bus_dry_run_plan(plan: Dictionary) -> Dictionary:
-	if not bool(plan.get("ok", false)) and not bool(plan.get("buildable", false)):
-		return {"ok": false, "error": str(plan.get("error", "Bus was refused.")), "findings": []}
-	if not bool(plan.get("complete", false)):
-		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN, "findings": []}
-	var station: Dictionary = _bus_station_runs(plan)
-	if not str(station["error"]).is_empty():
-		return {"ok": false, "error": str(station["error"]), "findings": []}
+	var gate: Dictionary = _bus_gate(plan)
+	if not bool(gate["ok"]):
+		return gate
+	var station: Dictionary = gate["station"]
 	return {"ok": true, "error": "", "dry_run": true, "trace_ids": [], "via_ids": [],
 		"nets": plan.get("nets", []), "widths": plan.get("widths", []),
 		"layer": str(plan.get("layer", "")),
@@ -9723,6 +9800,21 @@ static func bus_dry_run_plan(plan: Dictionary) -> Dictionary:
 		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
 		"nets_detail": bus_nets_detail(plan, station, [], []),
 		"clean_order": PackedStringArray(plan.get("clean_order", PackedStringArray()))}
+
+
+## One net's polyline cut into the runs the board carries: {runs: [
+## PackedVector2Array], layers: [String]} — the whole polyline on `layer`
+## without a station, or two runs around the via (the cut vertex on both, so
+## the via point is the first run's last point and the second's first) with
+## the second on the station's layer. The ONE slicing rule behind the traces
+## bus_commit_plan creates and the polylines bus_nets_detail reports.
+static func _bus_runs(poly: PackedVector2Array, layer: String, station: Dictionary,
+		index: int) -> Dictionary:
+	if not bool(station.get("active", false)):
+		return {"runs": [poly], "layers": [layer]}
+	var cut: int = int((station["splits"] as Array)[index])
+	return {"runs": [poly.slice(0, cut + 1), poly.slice(cut)],
+		"layers": [layer, str(station["layer"])]}
 
 
 ## The per-net account of a bus, for the two bus verbs' replies: everything the
@@ -9755,13 +9847,9 @@ static func bus_nets_detail(plan: Dictionary, station: Dictionary,
 	var station_active: bool = bool(station.get("active", false))
 	var out: Array = []
 	for i in range(nets.size()):
-		var poly: PackedVector2Array = polylines[i]
-		var runs: Array = [poly]
-		var run_layers: Array = [layer]
-		if station_active:
-			var cut: int = int((station["splits"] as Array)[i])
-			runs = [poly.slice(0, cut + 1), poly.slice(cut)]
-			run_layers = [layer, str(station["layer"])]
+		var split: Dictionary = _bus_runs(polylines[i], layer, station, i)
+		var runs: Array = split["runs"]
+		var run_layers: Array = split["layers"]
 		var ids: Array = net_trace_ids[i] if i < net_trace_ids.size() else []
 		var traces: Array = []
 		for r in range(runs.size()):
@@ -9859,19 +9947,16 @@ static func _bus_journal_details(plan: Dictionary, trace_ids: Array, via_ids: Ar
 static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 	if workspace == null:
 		return {"ok": false, "error": "no routing workspace is bound to this panel (headless / before mount)"}
-	if not bool(plan.get("ok", false)) and not bool(plan.get("buildable", false)):
-		return {"ok": false, "error": str(plan.get("error", "Bus was refused."))}
-	if not bool(plan.get("complete", false)):
-		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN}
+	var gate: Dictionary = _bus_gate(plan)
+	if not bool(gate["ok"]):
+		return gate
 	var findings: Array = plan.get("findings", []) if plan.get("findings", []) is Array else []
 	var nets: Array = plan.get("nets", [])
 	var widths: Array = plan.get("widths", [])
 	var polylines: Array = plan.get("polylines", [])
 	var layer: String = str(plan.get("layer", ""))
 	var revision: int = int(data.board_revision) if data != null else 0
-	var station: Dictionary = _bus_station_runs(plan)
-	if not str(station["error"]).is_empty():
-		return {"ok": false, "error": str(station["error"]), "findings": []}
+	var station: Dictionary = gate["station"]
 	var landed: Array = []
 	var holds: Array = []
 	for i in range(nets.size()):
@@ -10618,12 +10703,7 @@ static func _add_leave_one_open(reply: Dictionary, plan: Dictionary) -> void:
 	if open_net.is_empty():
 		return
 	var targets := PackedStringArray(plan.get("leave_open_targets", PackedStringArray()))
-	var pair: Array = []
-	for f in plan.get("findings", []):
-		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING \
-				and str((f as Dictionary).get("end", "")) == "target":
-			pair = (f as Dictionary).get("nets", [])
-			break
+	var pair: Array = plan.get("leave_open_pair", []) if plan.get("leave_open_pair", []) is Array else []
 	if pair.size() != 2:
 		return
 	reply["leave_open_net"] = open_net

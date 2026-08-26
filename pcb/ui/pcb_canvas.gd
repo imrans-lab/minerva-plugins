@@ -476,17 +476,14 @@ var _ghost_rotate_start_deg := 0.0
 ## on every plain click on a via, which is a selection, not a refused drag.
 ## Cleared on release, so one gesture is at most one notice.
 var _via_drag_notice_armed: bool = false
-const _VIA_DRAG_NOTICE_PX := 3.0
-
-## Screen-pixel travel a press on a selected entity must make before it becomes
-## a MOVE. A press captures the selection's origins and arms the drag; copper
-## only starts to follow the pointer once it has travelled this far, so a click
-## with a wobble in it — the ordinary way a mouse releases — moves nothing and
-## journals nothing. Same figure as the two drag notices above.
-const SELECTION_DRAG_THRESHOLD_PX := 3.0
+## Screen-pixel travel that turns a press into a gesture: the via and cutout
+## notices fire past it, and a press on a selected entity only becomes a MOVE
+## past it — the press arms the drag, copper follows the pointer from here on,
+## so a click with a wobble in it moves nothing and journals nothing.
+const DRAG_TRAVEL_PX := 3.0
+const _VIA_DRAG_NOTICE_PX := DRAG_TRAVEL_PX
 ## True from a press on a selected entity until the pointer crosses
-## SELECTION_DRAG_THRESHOLD_PX (the drag then goes live) or releases (the press
-## was a click).
+## DRAG_TRAVEL_PX (the drag then goes live) or releases (the press was a click).
 var _selection_drag_pending: bool = false
 ## Cutout twin of the above (cold-review F3): cutouts do not drag either (see
 ## _capture_drag_origins), and a drag attempt on a cutout-only selection was
@@ -4305,7 +4302,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	# The armed drag goes live on the first real travel; until then the press
 	# is still a click and the copper stays where it is.
 	if _selection_drag_pending \
-			and (event.position - drag_start_mouse).length() >= SELECTION_DRAG_THRESHOLD_PX:
+			and (event.position - drag_start_mouse).length() >= DRAG_TRAVEL_PX:
 		_selection_drag_pending = false
 		is_dragging_selection = true
 
@@ -5625,7 +5622,7 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 			return
 	_capture_drag_origins()
 	# Armed, not live: is_dragging_selection flips in _handle_mouse_motion once
-	# the pointer has travelled SELECTION_DRAG_THRESHOLD_PX.
+	# the pointer has travelled DRAG_TRAVEL_PX.
 	is_dragging_selection = false
 	_selection_drag_pending = not _drag_origins.is_empty()
 	# Vias are position-only movable entities. Their live preview is captured

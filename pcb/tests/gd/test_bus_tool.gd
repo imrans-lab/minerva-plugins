@@ -3895,3 +3895,79 @@ func _test_approach_sides_and_leave_one_open() -> void:
 	check("…and its free_end anchor is there for minerva_pcb_add_trace",
 			open_entry.get("free_end", null) is Dictionary
 				and str((open_entry["free_end"] as Dictionary).get("end", "")) == "end", str(open_entry))
+
+
+	# ── THREE NETS, TWO CROSSINGS SHARING A NET ──────────────────────────────
+	# Sources stacked above the spine start (perps -6/-4/-2 for NA/NB/NC) and
+	# targets on the southbound leg at x 28 / 32 / 31 (perps +2/-2/-1 for
+	# NA/NB/NC against lanes -0.41/0/+0.41). At the target end NA's band
+	# [-0.41, 2] holds both other lanes and each of theirs holds NA's, so
+	# (NA,NB) and (NA,NC) cross; NB and NC only ORDER — NC's band [-1, 0.41]
+	# holds NB's lane and NB's band [-2, 0] holds NC's pad, both saying NC
+	# leaves first. Every one of the six pick orders crosses at one end or the
+	# other (the two ends want opposite orders), so no permutation is clean.
+	# Opening NB alone would leave (NA,NC) crossing — the advice must open NA,
+	# the net both pairs share, and the re-fed targets must land with no
+	# crossing.
+	var three := PCBData.new()
+	three.from_board_dict(_three_net_mirrored_board())
+	var host3 := StubMcpHost.new()
+	host3.data = three
+	var args3 := {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U1.2", "U1.3"], "targets": ["T3.1", "T3.2", "T3.3"],
+		"points": [{"x_mm": LGA_PATH_1.x, "y_mm": LGA_PATH_1.y},
+			{"x_mm": LGA_PATH_2.x, "y_mm": LGA_PATH_2.y},
+			{"x_mm": LGA_PATH_3.x, "y_mm": LGA_PATH_3.y}],
+		"layer": "top", "dry_run": true,
+	}
+	var seen3: Dictionary = await PanelToolsScript.handle(host3, "minerva_pcb_route_bus_direct", args3)
+	var target_crossings := 0
+	for f in seen3.get("findings", []):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING \
+				and str((f as Dictionary).get("end", "")) == "target":
+			target_crossings += 1
+	check("three nets: two target-end crossings and no clean order",
+			bool(seen3.get("success", false)) and target_crossings == 2
+				and (not seen3.has("clean_order") or (seen3.get("clean_order", []) as Array).is_empty()),
+			str(seen3.get("findings", [])))
+	check("the advice opens the net both crossings share, not the first pair's second net",
+			str(seen3.get("leave_open_net", "")) == "NA"
+				and (seen3.get("leave_open_targets", []) as Array) == ["", "T3.2", "T3.3"], str(seen3))
+	var again3: Dictionary = args3.duplicate(true)
+	again3.erase("dry_run")
+	again3["targets"] = seen3.get("leave_open_targets", [])
+	var landed3: Dictionary = await PanelToolsScript.handle(host3, "minerva_pcb_route_bus_direct", again3)
+	var crossings_left := 0
+	for f in landed3.get("findings", []):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
+			crossings_left += 1
+	check("fed back, the targets land NB and NC with ZERO end-crossing findings and NA open",
+			bool(landed3.get("success", false)) and crossings_left == 0
+				and (landed3.get("open_nets", []) as Array) == ["NA"], str(landed3))
+
+
+## Three header pads stacked above the spine's start and three LGA lands on
+## the southbound leg's row (NA x 28, NB x 32, NC x 31), placed so the two
+## ends want opposite pick orders and the target end crosses NA with both
+## other nets while NB and NC merely order.
+func _three_net_mirrored_board() -> Dictionary:
+	return {
+		"version": 1, "name": "ThreeNetMirror", "width_mm": 60.0, "height_mm": 60.0,
+		"grid_mm": 2.54,
+		"layers": ["top", "bottom"],
+		"design_rules": {"clearance_mm": LGA_CLEARANCE_MM, "trace_width_mm": 0.2},
+		"components": [
+			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 10.0, "y_mm": 4.0,
+				"rotation_deg": 0.0, "pins": [
+					_tht_pin("1", 0.0, 0.0), _tht_pin("2", 0.0, 2.0), _tht_pin("3", 0.0, 4.0)]},
+			{"ref": "T3", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 28.0,
+				"rotation_deg": 0.0, "pins": [
+					_lga_pin("1", -2.0, 0.0), _lga_pin("2", 2.0, 0.0), _lga_pin("3", 1.0, 0.0)]},
+		],
+		"nets": [
+			{"name": "NA", "pins": ["U1.1", "T3.1"]},
+			{"name": "NB", "pins": ["U1.2", "T3.2"]},
+			{"name": "NC", "pins": ["U1.3", "T3.3"]},
+		],
+	}

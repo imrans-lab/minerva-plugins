@@ -1472,11 +1472,20 @@ func _test_board_undo_redo() -> void:
 	check("hint fixture: one route hint is selected",
 			host.get_selected_annotation_id() == hint_id
 				and str(host.get_by_id(hint_id).get("kind", "")) == "pcb_route_hint")
+	# The hint's revision stack is EMPTY (never edited): the press is still the
+	# hint's — the board history does not move and the event is consumed, so
+	# it cannot leak to whatever sits above the panel. The viewport's handled
+	# flag is readable right after the direct call (nothing else pushes input
+	# headless).
 	panel._unhandled_key_input(_ctrl_key(KEY_Z))
 	var with_hint: Array = _board_counts(panel)
 	check("with a route hint selected Ctrl+Z leaves the board history alone",
 			with_hint[0] == 4 and with_hint[1] == 2 and data.history_index == index_after_commit,
 			"traces=%d vias=%d index=%d" % [with_hint[0], with_hint[1], data.history_index])
+	check("...even at the bottom of the hint's stack the key is marked handled",
+			panel.get_viewport().is_input_handled())
+	check("...and the status line says the hint had nothing to undo",
+			str(panel._status_label.text).contains("nothing to undo"), str(panel._status_label.text))
 	host.set_selected_annotation_id("")
 
 	# ── The host hook pair and the verbs take the same path ──────────────────
@@ -1487,7 +1496,7 @@ func _test_board_undo_redo() -> void:
 
 	var undo_reply: Dictionary = await panel.handle_tool("minerva_pcb_undo", {})
 	check("minerva_pcb_undo reverts the step and names it with the depths",
-			bool(undo_reply.get("ok", false)) and str(undo_reply.get("action", "")) == step_label
+			bool(undo_reply.get("success", false)) and str(undo_reply.get("action", "")) == step_label
 				and int(undo_reply.get("undo_depth", -1)) == index_after_commit - 1
 				and int(undo_reply.get("redo_depth", -1)) == 1
 				and _board_counts(panel)[0] == 0,
@@ -1498,19 +1507,21 @@ func _test_board_undo_redo() -> void:
 			str(panel._status_label.text))
 	var redo_reply: Dictionary = await panel.handle_tool("minerva_pcb_redo", {})
 	check("minerva_pcb_redo restores the step",
-			bool(redo_reply.get("ok", false)) and str(redo_reply.get("action", "")) == step_label
+			bool(redo_reply.get("success", false)) and str(redo_reply.get("action", "")) == step_label
 				and int(redo_reply.get("redo_depth", -1)) == 0 and _board_counts(panel)[0] == 4,
 			str(redo_reply))
 	var nothing: Dictionary = await panel.handle_tool("minerva_pcb_redo", {})
 	check("minerva_pcb_redo refuses when nothing was undone",
-			not bool(nothing.get("ok", true)) and str(nothing.get("error", "")).contains("nothing_to_redo"),
+			nothing.has("success") and not bool(nothing.get("success", true))
+				and str(nothing.get("error", "")).contains("nothing_to_redo"),
 			str(nothing))
 	# Walk the undo side to its floor: the load state is step 0 and never undone.
 	var floor_reply: Dictionary = {}
 	for _i in range(index_after_commit + 1):
 		floor_reply = await panel.handle_tool("minerva_pcb_undo", {})
 	check("minerva_pcb_undo refuses at the bottom of the history",
-			not bool(floor_reply.get("ok", true)) and str(floor_reply.get("error", "")).contains("nothing_to_undo")
+			floor_reply.has("success") and not bool(floor_reply.get("success", true))
+				and str(floor_reply.get("error", "")).contains("nothing_to_undo")
 				and data.history_index == 0,
 			str(floor_reply))
 	panel.queue_free()

@@ -96,8 +96,9 @@ static func clean_order_sentence(order: PackedStringArray) -> String:
 
 ## The advice a target-end crossing gets when NO pick order is clean — the
 ## other end fixes the order, so reordering cannot help. It is the next verb,
-## not a hint: the concrete targets array with the chosen net left open, to be
-## passed straight back to minerva_pcb_route_bus_direct, whose reply then
+## not a hint: the concrete targets array with the chosen net left open (a
+## reduced bus the planner has already re-planned and found crossing-free), to
+## be passed straight back to minerva_pcb_route_bus_direct, whose reply then
 ## carries that lane's free end (nets_detail.free_end) for minerva_pcb_add_trace.
 static func leave_one_open_sentence(net_a: String, net_b: String, open_net: String,
 		targets: PackedStringArray) -> String:

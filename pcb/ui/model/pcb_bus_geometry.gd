@@ -281,21 +281,12 @@ static func pitch_between(width_a: float, width_b: float, clearance: float) -> f
 	return maxf(0.0, width_a) * 0.5 + maxf(0.0, clearance) + maxf(0.0, width_b) * 0.5
 
 
-## How much wider than the clearance rule every spacing this module LAYS is, in
-## mm. pitch_between is the rule — the least two centrelines may be apart — and
-## a lane laid at exactly that figure sits at the limit: Vector2 is float32, so
-## once its coordinates are stored the pair measures a few nanometres short of
-## the rule on most magnitudes, and the fab-facing geometric DRC, which allows
-## no tolerance, reads that as a violation while the check below (which does)
-## reads it as clean. Laying every spacing this much past the rule keeps the
-## two agreeing: 0.01mm is over a hundred float32 ulps at any board coordinate,
-## ten times the measurement tolerance below, and a twentieth of the tightest
-## clearance a fab quotes — copper the fab cannot see and a reviewer can (every
-## hand-derived figure stays a two-decimal number). A fixed margin rather than
-## a round-up to the authoring grid because the grid is the PLACEMENT pitch
-## (2.54mm by default, a quarter of it for authoring) and has nothing to do
-## with clearance: rounding to it would widen a 0.5mm bus to 0.635mm on one
-## board and to 1.0mm on another.
+## How far past the clearance rule every spacing this module LAYS is, in mm.
+## Vector2 is float32: a pair laid at exactly the rule pitch is stored a few
+## nanometres short of it and the zero-tolerance geometric DRC reads that as a
+## violation. Laid spacing = rule + this margin; every measurement keeps the
+## bare rule (pitch_between). Why a fixed 0.01 and not a grid round-up:
+## docs/tools.md, "Bus tool".
 const LANE_PITCH_MARGIN_MM := 0.01
 
 

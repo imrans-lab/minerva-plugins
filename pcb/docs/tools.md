@@ -873,6 +873,15 @@ nothing: the board, its history and its change journal are untouched
 instead of landing and deleting copper; when a reviewable on-screen ghost is
 wanted, `minerva_pcb_workspace_propose_bus` is the call.
 
+**Why the laid pitch is the rule plus a fixed 0.01 mm** (`LANE_PITCH_MARGIN_MM`):
+0.01 mm is over a hundred float32 ulps at any board coordinate, ten times the
+bus tool's own measurement tolerance, and a twentieth of the tightest clearance
+a fab quotes — invisible to the fab, and every hand-derived figure stays a
+two-decimal number. A round-up to the authoring grid was rejected because the
+grid is the PLACEMENT pitch (2.54 mm by default, a quarter of it for
+authoring) and has nothing to do with clearance: it would widen a 0.5 mm bus
+to 0.635 mm on one board and to 1.0 mm on another.
+
 **The reply carries what the next verb needs.** Rule for every copper-creating
 verb: return the coordinates and ids the NEXT call needs, never ids alone. Both
 bus verbs reply with `nets_detail` (built by `panel_tools.bus_nets_detail`), one
@@ -966,7 +975,7 @@ to undo.`) and refreshes the canvas and pickers. The verbs reply:
 
 and refuse with `nothing_to_undo` / `nothing_to_redo` at either end of the
 history. A selection drag on the canvas only becomes a move once the pointer has
-travelled `SELECTION_DRAG_THRESHOLD_PX` (3 px), so a click with a wobble in it
+travelled `DRAG_TRAVEL_PX` (3 px), so a click with a wobble in it
 records no step to undo.
 
 ## DRC over the live board (`minerva_pcb_board_drc`)

@@ -358,6 +358,10 @@ func _init() -> void:
 	# are pinned by pcb/worker/tests/test_board_by_path.py::
 	# test_drc_methods_accept_board_path.
 	print("\n-- 3: minerva_pcb_board_drc by editor_name --")
+	# Section 1's load→deserialize replaced the live board with the fake IPC's
+	# canned (tiny) one; put the oversized board back so this verb's own
+	# to_board_dict is over the cap.
+	panel.get_data().from_board_dict(_oversized_board())
 	var host = panel._annotation_host
 	var canned_findings: Array = [{"type": "dangling_endpoint", "net": "GND", "at": [1.0, 2.0]}]
 	ipc.overrides["minerva_pcb_drc"] = {"ok": true, "scope": "connectivity",
@@ -387,6 +391,22 @@ func _init() -> void:
 			and str(geo.get("board_source", "")) == "editor", str(geo))
 	check("3g: no request went out on the connectivity tool for a geometric check",
 		ipc.captured[ipc.captured.size() - 1]["channel"] == "minerva_pcb_drc_geometric")
+
+	# The worker's INDETERMINATE union — {ok:false, verdict, error:{kind,...}}
+	# INSIDE a successful method envelope, exactly as methods.py returns it —
+	# must reach the caller intact: verdict and structured cause, never a
+	# generic worker_error.
+	ipc.overrides["minerva_pcb_drc_geometric"] = {"ok": false, "scope": "geometric",
+		"verifies_geometry": false, "verdict": "indeterminate",
+		"error": {"kind": "compile", "message": "unmodelable land on R3"}}
+	var indeterminate: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_drc",
+		{"editor_name": "PCB1", "geometric": true})
+	check("3j: an indeterminate geometric union arrives verbatim — verdict and error object",
+		bool(indeterminate.get("success", false))
+			and str(indeterminate.get("verdict", "")) == "indeterminate"
+			and indeterminate.get("error", null) is Dictionary
+			and str((indeterminate.get("error", {}) as Dictionary).get("kind", "")) == "compile"
+			and str(indeterminate.get("check", "")) == "geometric", str(indeterminate))
 	ipc.overrides.clear()
 
 	# A small live board keeps today's inline wire shape.
