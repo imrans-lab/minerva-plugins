@@ -146,6 +146,7 @@ func _init() -> void:
 	await _test_a_bad_bus_reaches_the_agent_and_the_ghost()
 	await _test_the_station_verb_matches_the_station_gesture()
 	await _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost()
+	_test_a_station_via_names_the_layer_it_lands_on()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -2460,3 +2461,30 @@ func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
 	check("…and NA's own via finding is filed under NA",
 			("%s|NA|%s" % [FOREIGN, ghost_via]) in (per_net.get("NA", []) as Array),
 			str(per_net.get("NA", [])))
+
+
+## A through via touches every copper layer, so what it lands on is named on
+## THAT copper's own layer. The pad sits beside the run, not under it: the
+## via's 0.4mm radius reaches its edge and the 0.125mm half-track plus 0.2mm
+## clearance does not, so only the via can be the finding — a run-layer stamp
+## cannot hide behind a track-layer one.
+func _test_a_station_via_names_the_layer_it_lands_on() -> void:
+	print("\n-- (13c) a station via's finding is on the copper's layer, not the bus's --")
+	var via_at := Vector2(40.0, 40.0)
+	for side in ["bottom", "top"]:
+		var board := _lga_board()
+		(board["components"] as Array).append({"ref": "B1", "footprint": "IC_DIP",
+			"x_mm": via_at.x, "y_mm": via_at.y + 0.68, "rotation_deg": 0.0,
+			"layer": side, "pins": [_lga_pin("1", 0.0, 0.0)]})
+		(board["nets"] as Array).append({"name": "FSIDE", "pins": ["B1.1"]})
+		var data := PCBData.new()
+		data.from_board_dict(board)
+		var findings: Array = PanelToolsScript._bus_foreign_copper_findings(
+			data, PackedStringArray(["NA"]), [0.25],
+			[PackedVector2Array([via_at - Vector2(10.0, 0.0), via_at, via_at + Vector2(10.0, 0.0)])],
+			"top", "bottom", [1], [via_at], 0.8, LGA_CLEARANCE_MM)
+		var hit := _finding_naming(findings, "B1.1")
+		check("the %s-only pad beside the station is found once, by the via" % side,
+			findings.size() == 1 and not hit.is_empty(), str(_finding_keys(findings)))
+		check("…and the finding says %s" % side,
+			str(hit.get("layer", "")) == side, str(hit.get("layer", "")))

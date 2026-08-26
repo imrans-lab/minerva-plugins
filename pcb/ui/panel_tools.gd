@@ -8728,6 +8728,20 @@ static func _bus_points_bounds(points) -> Rect2:
 ## Does this board item have copper on `probe_layer`? An empty `probe_layer`
 ## means the bus copper being measured spans the stack (a station via), and so
 ## meets everything.
+## The layer a finding names when a THROUGH VIA (a probe on every layer) meets
+## `item`: the item's own layer, so a station via that lands on bottom-only
+## copper is reported on bottom rather than on the layer the bus started on.
+## Copper on every layer is reported on `fallback` — any layer is true there.
+static func _bus_via_hit_layer(item: Dictionary, fallback: String) -> String:
+	if bool(item.get("all_layers", false)):
+		return fallback
+	var layers: Array = (item.get("layers", {}) as Dictionary).keys()
+	if layers.is_empty():
+		return fallback
+	layers.sort()
+	return str(layers[0])
+
+
 static func _bus_item_on_layer(item: Dictionary, probe_layer: String) -> bool:
 	if bool(item.get("all_layers", false)) or probe_layer.is_empty():
 		return true
@@ -8856,7 +8870,7 @@ static func _bus_foreign_copper_findings(data, nets: PackedStringArray, widths: 
 				continue
 			worst[key] = {"gap": gap, "a": best["a"], "b": best["b"], "item": k,
 				"net_index": index,
-				"layer": probe_layer if not probe_layer.is_empty() else layer}
+				"layer": probe_layer if not probe_layer.is_empty() else _bus_via_hit_layer(item, layer)}
 
 	var out: Array = []
 	for key in worst:
