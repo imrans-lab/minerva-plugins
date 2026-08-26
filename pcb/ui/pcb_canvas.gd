@@ -183,6 +183,11 @@ var trace_layer_filter: String = "all":
 		if trace_layer_filter == value:
 			return
 		trace_layer_filter = value
+		# THE ONE FUNNEL every layer choice arrives through — the toolbar
+		# selector, the View menu and minerva_pcb_set_view all write this
+		# property — so it is where a bus in mid-path learns that the user
+		# asked for another layer.
+		_arm_bus_via_station(value)
 		view_changed.emit()
 		queue_redraw()
 
@@ -882,7 +887,20 @@ var _bus_has_preview: bool = false
 ## draw" rule _trace_layer freezes under — the preview is drawn in that
 ## layer's colour at the real per-net widths, so a layer-filter change
 ## mid-draw must not silently commit different copper from what is on screen.
+##
+## A layer change mid-PATH is therefore NOT a change of _bus_layer: it arms a
+## VIA STATION instead (see _arm_bus_via_station), which is the one way this
+## tool authors on a second layer.
 var _bus_layer: String = ""
+## THE VIA STATION. `_bus_station_armed` means a layer switch is waiting for the
+## next spine vertex to land on; `_bus_station_index` is that vertex once it
+## has, and `_bus_station_layer` the copper the bundle continues on past it.
+## ONE per bus: with an index already placed, a further layer switch is refused
+## by name rather than moving the station under geometry the user has drawn
+## around it.
+var _bus_station_armed: bool = false
+var _bus_station_index: int = -1
+var _bus_station_layer: String = ""
 ## PREVIEW-FRAME MEMO. _draw_bus_preview calls panel_tools.bus_plan on every
 ## redraw while drawing, and mouse motion queues one every tick
 ## (_handle_mouse_motion's BUS branch). bus_plan's per-net
@@ -923,6 +941,11 @@ const BUS_REFUSAL_COLOR := Color(1.0, 0.35, 0.25, 1.0)
 ## it does not replace what was picked.
 const BUS_PICK_MARKER_RADIUS_PX := 9.0
 const BUS_PICK_MARKER_WIDTH_PX := 2.0
+## VIA-STATION MARKER geometry. A ring at the spine vertex the vias land on,
+## sized between the pick ring and the target ring so it reads as a mark on the
+## PATH rather than as another pad choice.
+const BUS_STATION_MARKER_RADIUS_PX := 7.0
+const BUS_STATION_MARKER_WIDTH_PX := 2.0
 ## TARGET MARKER geometry, deliberately smaller than the pick ring above: the
 ## marks name every legal pad at once, and at the pick ring's size a dense
 ## footprint would read as a wall rather than as a set of choices.
@@ -8160,6 +8183,9 @@ func _draw_trace_preview() -> void:
 ##                                        (needs 2+ vertices placed)
 ##   PATH    --click a legal target pad--> PATH ends; that pad is that net's
 ##                                        target (needs 2+ vertices placed)
+##   PATH    --switch the layer selector--> the NEXT vertex placed becomes a VIA
+##                                        STATION onto that layer; the path is
+##                                        neither restarted nor re-aimed
 ##   TARGETS --click a legal target pad--> set, or replace, that net's target
 ##   TARGETS --click its current target--> clear that net's target again
 ##   TARGETS --Enter, every net targeted--> COMMIT copper (Shift+Enter proposes)
@@ -8213,6 +8239,15 @@ func _draw_trace_preview() -> void:
 ## sibling of the router's route_bus(), not a UI on top of it: the router is
 ## never called (see pcb_bus_geometry.gd's own "why not reuse route_bus" note).
 ##
+## A LAYER SWITCH MID-PATH IS A VIA STATION, not a restart and not a change of
+## the layer the copper already drawn would land on. The next vertex clicked
+## carries one via per net; the spine crosses it straight (the click after it is
+## projected onto the same axis), everything before it lands on the layer the
+## path began on and everything after on the layer switched to. ONE station per
+## bus: a second switch is refused by name. Around the station the lanes widen
+## to the pitch the vias need and come back — that widening is the only
+## geometry a station adds (pcb_bus_geometry.gd's own "the via station").
+##
 ## THE GEOMETRY PIPELINE (bus_plan/bus_commit_plan, on panel_tools.gd — see the
 ## preload note at the top of this file) is the ONE implementation shared with
 ## minerva_pcb_route_bus_direct and minerva_pcb_workspace_propose_bus: per-net
@@ -8262,11 +8297,12 @@ func _bus_current_plan() -> Dictionary:
 	# _bus_plan_cache_key's own doc for what actually varies.
 	var target_pins := _bus_plan_target_pins()
 	var cache_key: Array = [_bus_nets.duplicate(), _bus_spine_points.duplicate(),
-		_bus_layer, target_pins]
+		_bus_layer, target_pins, _bus_station_index, _bus_station_layer]
 	if cache_key == _bus_plan_cache_key:
 		return _bus_plan_cache
 	var plan: Dictionary = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points,
-		_bus_layer, PackedStringArray(_bus_net_refs), target_pins)
+		_bus_layer, PackedStringArray(_bus_net_refs), target_pins, 0.0,
+		_bus_station_index, _bus_station_layer)
 	_bus_plan_cache_key = cache_key
 	_bus_plan_cache = plan
 	return plan
@@ -8389,7 +8425,21 @@ func _handle_bus_path_click(world_pos: Vector2) -> void:
 	var pad := _trace_pad_at(world_pos)
 	if pad.is_empty():
 		var prev: Vector2 = _bus_spine_points[_bus_spine_points.size() - 1]
-		_bus_spine_points.append(_bus_axis_point(prev, _author_point(world_pos)))
+		var point := _bus_axis_point(prev, _author_point(world_pos))
+		# THE VERTEX AFTER A STATION CARRIES ON, because the spine crosses a
+		# station straight (a via, not a bend). This one click is projected onto
+		# the run it arrived on rather than choosing its own axis.
+		if _bus_station_index >= 0 and _bus_spine_points.size() == _bus_station_index + 1:
+			point = _bus_straight_on_from_station(_author_point(world_pos))
+			if point == prev:
+				bus_tool_message.emit("The vertex after a via station carries straight on — click further along the run, past the station.")
+				return
+		_bus_spine_points.append(point)
+		if _bus_station_armed:
+			_bus_station_armed = false
+			_bus_station_index = _bus_spine_points.size() - 1
+			bus_tool_message.emit("Via station at vertex %d — a via per net lands there and the bundle continues on %s; click once more straight on."
+				% [_bus_station_index, _bus_layer_name(_bus_station_layer)])
 		_bus_path_press_appended = true
 		_bus_has_preview = false
 		queue_redraw()
@@ -8405,6 +8455,7 @@ func _handle_bus_path_click(world_pos: Vector2) -> void:
 	if _bus_spine_points.size() < 2:
 		bus_tool_message.emit(_bus_path_too_short_message())
 		return
+	_drop_armed_bus_station(true)
 	_bus_phase = BusPhase.TARGETS
 	_bus_has_preview = false
 	_assign_bus_target(cand)
@@ -8421,7 +8472,17 @@ func _handle_bus_path_click(world_pos: Vector2) -> void:
 ## refuses and leaves the spine and the phase as it found them. A first press
 ## that appended nothing (refused on an illegal pad, say) leaves nothing to drop.
 func _end_bus_path_on_double_click() -> void:
+	var lost_station := false
 	if _bus_path_press_appended:
+		# The dropped vertex may be the one that just became the via station,
+		# and then the station goes with it — there is no vertex left for the
+		# vias to land on. Said in the ending message below rather than left for
+		# the user to notice from a ring that stopped being drawn.
+		if _bus_station_index == _bus_spine_points.size() - 1:
+			lost_station = true
+			_bus_station_index = -1
+			_bus_station_armed = false
+			_bus_station_layer = ""
 		_bus_spine_points.remove_at(_bus_spine_points.size() - 1)
 		_bus_path_press_appended = false
 	# The rubber band is anchored on the point just dropped, so it is stale on
@@ -8431,9 +8492,13 @@ func _end_bus_path_on_double_click() -> void:
 		bus_tool_message.emit(_bus_path_too_short_message())
 		queue_redraw()
 		return
+	_drop_armed_bus_station(true)
 	_bus_phase = BusPhase.TARGETS
-	bus_tool_message.emit("Bus path ended (%d points) — %s"
-		% [_bus_spine_points.size(), _bus_targets_status()])
+	var ended := "Bus path ended (%d points) — %s" \
+		% [_bus_spine_points.size(), _bus_targets_status()]
+	if lost_station:
+		ended += " The via station went with the vertex this double-click dropped."
+	bus_tool_message.emit(ended)
 	queue_redraw()
 
 
@@ -8535,11 +8600,11 @@ func _begin_bus_path(world_pos: Vector2) -> void:
 	# user to expect copper.
 	if authoring_destination == DEST_DRAFT:
 		bus_tool_message.emit(
-			"Path for [%s] on %s — click vertices, then a pad per net; DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)."
+			"Path for [%s] on %s — click vertices, then a pad per net (switch layer to via the bundle onto it); DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)."
 				% [_bus_nets_joined(), _bus_layer_display()])
 	else:
 		bus_tool_message.emit(
-			"Path for [%s] on %s — click vertices, then a pad per net to land its target; Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)."
+			"Path for [%s] on %s — click vertices, then a pad per net to land its target (switch layer to via the bundle onto it); Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)."
 				% [_bus_nets_joined(), _bus_layer_display()])
 	queue_redraw()
 
@@ -8564,6 +8629,65 @@ func _assign_bus_target(cand: Dictionary) -> void:
 	_bus_target_points[i] = pad_pos
 	bus_tool_message.emit("%s → %s — %s" % [_bus_nets[i], ref, _bus_targets_status()])
 	queue_redraw()
+
+
+## A layer choice made while a bus PATH is being drawn: ARM (or drop) the via
+## station instead of restarting the bus or silently re-aiming the copper that
+## is already on screen at another layer.
+##
+## Reached from trace_layer_filter's setter, which every layer choice on this
+## canvas passes through, so it has to be inert for every other tool and phase —
+## including the filter changes made with no bus in progress at all.
+func _arm_bus_via_station(layer: String) -> void:
+	if tool_mode != ToolMode.BUS or _bus_phase != BusPhase.PATH:
+		return
+	if not PcbLayerStack.is_copper(layer):
+		# "All" or a non-copper choice is not a layer to hand the bus to, so an
+		# armed-but-unplaced station is dropped rather than left waiting.
+		_drop_armed_bus_station()
+		return
+	if _bus_station_index >= 0:
+		# Past a placed station the bundle is on the station's layer, so ANY
+		# other copper layer — the original one included — is a second switch.
+		if layer != _bus_station_layer:
+			bus_tool_message.emit("This bus already has a via station at vertex %d, onto %s — one station per bus (Esc restarts the path)."
+				% [_bus_station_index, _bus_layer_name(_bus_station_layer)])
+		return
+	if layer == _bus_layer:
+		# A return to the layer the bundle is already on: nothing to switch to.
+		_drop_armed_bus_station()
+		return
+	_bus_station_armed = true
+	_bus_station_layer = layer
+	bus_tool_message.emit("Via station armed onto %s — the NEXT vertex you click carries a via per net; the run before it stays on %s."
+		% [_bus_layer_name(layer), _bus_layer_display()])
+
+
+## An arm that never got its vertex, dropped either by a layer choice that is
+## not a second layer or as the PATH phase ends. Said out loud: a station that
+## vanished silently is a bus committing on one layer for no reason the user
+## can see.
+func _drop_armed_bus_station(path_ended: bool = false) -> void:
+	if not _bus_station_armed:
+		return
+	_bus_station_armed = false
+	_bus_station_layer = ""
+	if path_ended:
+		bus_tool_message.emit("The armed via station never got a vertex — this bus stays on %s."
+			% _bus_layer_display())
+	else:
+		bus_tool_message.emit("Via station dropped — the bus stays on %s." % _bus_layer_display())
+
+
+## `p` projected onto the axis the spine arrives at its via station on, and
+## never behind the station itself — which is what the caller reads as "that
+## click was not ahead of the station" and refuses.
+func _bus_straight_on_from_station(p: Vector2) -> Vector2:
+	var station: Vector2 = _bus_spine_points[_bus_station_index]
+	var d: Vector2 = station - _bus_spine_points[_bus_station_index - 1]
+	var u := Vector2(signf(d.x), 0.0) if is_zero_approx(d.y) else Vector2(0.0, signf(d.y))
+	var along: float = (p - station).dot(u)
+	return station if along <= 0.0 else station + u * along
 
 
 ## `p` moved onto whichever axis it travels furthest along from `prev`.
@@ -8840,9 +8964,14 @@ func _bus_nets_without_targets() -> PackedStringArray:
 ## the canonical id keeps a layer the user can at least name, which is the same
 ## choice the layer selector makes.
 func _bus_layer_display() -> String:
-	var label := PcbLayerStack.canon_to_kicad(_bus_layer) if PcbLayerStack.is_copper(_bus_layer) \
-		else ""
-	return label if not label.is_empty() else _bus_layer
+	return _bus_layer_name(_bus_layer)
+
+
+## The same rule for any copper layer this tool has to name — the station's
+## second layer as well as the bundle's own.
+func _bus_layer_name(layer: String) -> String:
+	var label := PcbLayerStack.canon_to_kicad(layer) if PcbLayerStack.is_copper(layer) else ""
+	return label if not label.is_empty() else layer
 
 
 func _bus_nets_joined() -> String:
@@ -8893,7 +9022,8 @@ func _commit_bus(propose: bool = false) -> void:
 		propose = true
 	var plan: Dictionary = _PanelToolsScript.bus_plan(
 		data, _bus_nets, _bus_spine_points, _bus_layer,
-		PackedStringArray(_bus_net_refs), PackedStringArray(_bus_target_refs))
+		PackedStringArray(_bus_net_refs), PackedStringArray(_bus_target_refs), 0.0,
+		_bus_station_index, _bus_station_layer)
 	if not bool(plan.get("buildable", false)):
 		# Keep the whole gesture — picks, path AND targets: the fix for a
 		# diagonal spine or an unresolvable pad is one more click, not redrawing
@@ -8909,6 +9039,9 @@ func _commit_bus(propose: bool = false) -> void:
 		var held: Array = out.get("holds", []) if out.get("holds", []) is Array else []
 		var prop_summary := "Proposed bus: %d ghost traces on %s (%s) — accept/reject/pin in the workspace." % [
 			int(out.get("proposed", 0)), _bus_layer_display(), _bus_nets_joined()]
+		if _bus_station_index >= 0:
+			prop_summary += " Each ghost vias at the station on vertex %d and continues on %s." % [
+				_bus_station_index, _bus_layer_name(_bus_station_layer)]
 		if not held.is_empty():
 			prop_summary += " %d net(s) held by a pinned candidate." % held.size()
 		prop_summary += _bus_findings_sentence(plan, "proposed")
@@ -8918,14 +9051,22 @@ func _commit_bus(propose: bool = false) -> void:
 		return
 
 	var result: Dictionary = _PanelToolsScript.bus_commit_plan(
-		data, plan, "Add bus (%d traces)" % _bus_nets.size())
+		data, plan, "Add bus (%d nets)" % _bus_nets.size())
 	if not bool(result.get("ok", false)):
 		bus_tool_message.emit(str(result.get("error", "Bus was refused by the board model.")))
 		return
 
 	var trace_ids: Array = result.get("trace_ids", [])
+	var raw_vias: Variant = result.get("via_ids", [])
+	var via_ids: Array = raw_vias if raw_vias is Array else []
 	var summary := "Added bus: %d traces on %s (%s)." % [
 		trace_ids.size(), _bus_layer_display(), _bus_nets_joined()]
+	if not via_ids.is_empty():
+		# A station bus lands two traces and one via per net, so the count alone
+		# would read as twice the bus the user drew.
+		summary = "Added bus: %d traces and %d vias — %s up to the station at vertex %d, %s past it (%s)." % [
+			trace_ids.size(), via_ids.size(), _bus_layer_display(), _bus_station_index,
+			_bus_layer_name(_bus_station_layer), _bus_nets_joined()]
 	summary += _bus_findings_sentence(plan, "landed")
 	_reset_bus_tool(false)
 	bus_tool_message.emit(summary)
@@ -8991,6 +9132,9 @@ func _peel_bus_phase(announce: bool) -> void:
 		_bus_target_points = PackedVector2Array()
 		_bus_has_preview = false
 		_bus_layer = ""
+		_bus_station_armed = false
+		_bus_station_index = -1
+		_bus_station_layer = ""
 		_bus_plan_cache_key = []
 		_bus_plan_cache = {}
 		if announce:
@@ -9016,6 +9160,9 @@ func _reset_bus_tool(announce: bool) -> void:
 	_bus_spine_points = PackedVector2Array()
 	_bus_has_preview = false
 	_bus_layer = ""
+	_bus_station_armed = false
+	_bus_station_index = -1
+	_bus_station_layer = ""
 	_bus_nets = []
 	_bus_net_refs = []
 	_bus_net_points = PackedVector2Array()
@@ -9076,12 +9223,25 @@ func bus_teach_line() -> String:
 	var count: int = _bus_nets.size()
 	match _bus_phase:
 		BusPhase.PATH:
-			return ("Path on %s, fixed when the path began (Esc to restart on another layer) — click vertices, then a pad per net, or double-click clear of the pads to end the path."
-				% _bus_layer_display())
+			return _bus_path_teach_line()
 		BusPhase.TARGETS:
 			return _bus_targets_status()
 	return "%d nets picked — rings mark where each may end; click clear of the pads to start the path." % count \
 		if count >= 2 else "%d net picked — rings mark where it may end; pick at least 1 more." % count
+
+
+## What the PATH phase teaches, which depends on where the via station is: none
+## yet (a layer switch starts one), armed (the next click carries it), or placed
+## (which run is on which layer).
+func _bus_path_teach_line() -> String:
+	if _bus_station_armed:
+		return ("Via station armed onto %s — click the vertex it sits on; the run before it stays on %s."
+			% [_bus_layer_name(_bus_station_layer), _bus_layer_display()])
+	if _bus_station_index >= 0:
+		return ("Path on %s to the via station at vertex %d, %s past it — click vertices, then a pad per net, or double-click clear of the pads to end the path."
+			% [_bus_layer_display(), _bus_station_index, _bus_layer_name(_bus_station_layer)])
+	return ("Path on %s — click vertices, then a pad per net, or double-click clear of the pads to end the path; switching layer drops a via station on the next vertex."
+		% _bus_layer_display())
 
 
 ## The colour net `i` of the bundle is drawn in — its own, where it has one.
@@ -9228,9 +9388,27 @@ func _draw_bus_preview() -> void:
 	if _bus_has_preview:
 		open_path.append(cursor_pt)
 	if open_path.size() >= 2:
-		draw_polyline(open_path, spine_color, 1.0)
+		# THE TWO RUNS CARRY THEIR OWN LAYERS' COLOURS once a station is placed,
+		# so the halves of the spine read as the layers they will land on. A
+		# REFUSED plan keeps the single refusal tint instead: which layer that
+		# copper would have been on is not the thing to be reading then.
+		if refused or _bus_station_index <= 0:
+			draw_polyline(open_path, spine_color, 1.0)
+		else:
+			var before_station := open_path.slice(0, _bus_station_index + 1)
+			var after_station := open_path.slice(_bus_station_index)
+			if before_station.size() >= 2:
+				draw_polyline(before_station, _trace_layer_color(_bus_layer), 1.0)
+			if after_station.size() >= 2:
+				draw_polyline(after_station, _trace_layer_color(_bus_station_layer), 1.0)
 	for pt in screen_pts:
 		draw_circle(pt, TRACE_PREVIEW_VERTEX_RADIUS_PX, spine_color)
+	# THE STATION IS MARKED, not merely implied by a colour change — a ring at
+	# the vertex the vias land on, drawn in the layer they hand the bundle to,
+	# so an armed-but-unplaced station and a placed one cannot be confused.
+	if _bus_station_index > 0 and _bus_station_index < screen_pts.size():
+		draw_arc(screen_pts[_bus_station_index], BUS_STATION_MARKER_RADIUS_PX, 0.0, TAU, 20,
+			_trace_layer_color(_bus_station_layer), BUS_STATION_MARKER_WIDTH_PX)
 	# The cursor vertex, hollow so it reads as "not placed yet" against the
 	# filled ones above.
 	if _bus_has_preview:
@@ -9263,6 +9441,8 @@ func _draw_bus_preview() -> void:
 
 	if font != null and not screen_pts.is_empty():
 		var label := "Bus [%s] @ %s  ·  %d pts" % [_bus_nets_joined(), _bus_layer, _bus_spine_points.size()]
+		if _bus_station_index >= 0:
+			label += "  ·  via station v%d → %s" % [_bus_station_index, _bus_station_layer]
 		if refused:
 			label += "  ·  %s" % refusal
 		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,

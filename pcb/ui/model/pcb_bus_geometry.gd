@@ -86,13 +86,14 @@ extends RefCounted
 ## TWO CLASSES OF "NO" -- READ BEFORE ADDING A CHECK
 ## -------------------------------------------------
 ## UNBUILDABLE means no geometry can exist: no nets, a missing source/target/
-## width, fewer than two distinct spine points, a diagonal segment. There is
-## nothing to hand back, so bundle_routes returns {ok:false, buildable:false}
-## and no polylines.
+## width, fewer than two distinct spine points, a diagonal segment, a via
+## station at an end of the spine or on a bend. There is nothing to hand back,
+## so bundle_routes returns {ok:false, buildable:false} and no polylines.
 ##
 ## BAD BUT BUILDABLE means the geometry exists and breaks a rule: two nets
 ## closer than their pitch, an end whose legs cannot be ordered, a pad inside
-## the corridor, a spine shorter than its own fan-outs, a spine that doubles
+## the corridor, a spine shorter than its own fan-outs, a via station with too
+## little run either side of it for its own fan-out, a spine that doubles
 ## back. Those return {ok:false, buildable:true} WITH the polylines and one
 ## FINDING per broken rule. The caller decides whether that copper lands;
 ## copper that exists can be corrected, and a refusal that lands nothing leaves
@@ -100,6 +101,41 @@ extends RefCounted
 ##
 ## `ok` therefore means CLEAN, not "returned something". A caller that wants
 ## the geometry regardless reads `buildable`.
+##
+##
+## THE VIA STATION
+## ---------------
+## bundle_routes takes an optional STATION: one interior spine vertex where
+## every track drops a via and continues on another copper layer. The spine
+## runs STRAIGHT ACROSS it (a via, not a bend) and there is at most one per
+## bus — a bent or end-of-spine station is UNBUILDABLE, because the fan-out
+## below has no unambiguous axis to run along there.
+##
+## Vias claim more room than tracks do, so around the station the lanes WIDEN:
+## each track jogs perpendicular from its lane offset to a wider via offset,
+## carries the via, and jogs back. That fan is the only geometry a station adds.
+## When the via pitch is no wider than the track pitch nothing moves and the
+## tracks run straight through their vias.
+##
+## THE JOGS ARE STAGGERED, outermost first, and that is load-bearing rather
+## than decorative: a track that steps out has to cross the band its outer
+## neighbour is about to vacate, so one jog per track per axial position is the
+## only arrangement in which no jog leg lands inside another's clearance. A
+## single shared jog position works for three tracks and shorts four.
+##
+## The returned `polylines` still hold each net's WHOLE route, both layer runs
+## in one array — the clearance measurement, the preview and the pad legs all
+## want the whole thing. `via_station_splits[i]` is the index of the via point
+## in polylines[i]: points up to it ride the layer the caller drew on, points
+## from it ride the layer past the station. A caller landing copper cuts there.
+##
+## The two runs are measured against each other like any other pair of tracks
+## even though they are on different layers. On a spine that goes one way that
+## costs nothing: the only place a pre-station run comes near a post-station one
+## is the station perpendicular itself, where the via pitch already holds them
+## apart. A spine that DOUBLES BACK can lay them side by side and be measured
+## for a gap two layers do not need — and that spine is already a finding of its
+## own.
 
 
 ## Miter length beyond which an interior joint is bevelled instead of mitered,
@@ -144,6 +180,7 @@ const FINDING_PAD_INSIDE_CORRIDOR := "bus_pad_inside_corridor"
 const FINDING_END_CROSSING := "bus_end_crossing"
 const FINDING_SPINE_TOO_SHORT := "bus_spine_too_short"
 const FINDING_CLEARANCE := "bus_clearance"
+const FINDING_VIA_STATION_CROWDED := "bus_via_station_crowded"
 
 
 ## The parallel polyline at signed perpendicular `offset` from `points`.
@@ -353,10 +390,24 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## at each pad's own position, which is a different construction from this one
 ## and has no distinct-station guarantee.
 ##
+## `via_station_index` names ONE interior vertex of `spine` (the array as GIVEN,
+## duplicates and all — it is translated onto the deduplicated spine here) that
+## carries a via per track and hands the bundle to another layer; -1, the
+## default, is the single-layer bus this function has always built.
+## `via_diameter` is what one of those vias measures across its pad, and the
+## only thing the widening arithmetic needs from the board's via rules;
+## non-positive means "the vias claim no more room than the tracks do", so
+## nothing widens.
+##
 ## Returns, whenever geometry could be built (see the header's "two classes of
 ## no"):
 ##   {ok, buildable: true, error, findings, offsets, source_stations,
-##    target_stations, source_order, target_order, polylines}
+##    target_stations, source_order, target_order, polylines,
+##    via_station_index, via_station_offsets, via_station_points,
+##    via_station_splits}
+## The four via-station keys are EMPTY (via_station_index -1) for a bus with no
+## station; otherwise via_station_points[i] is net i's via centre and
+## via_station_splits[i] the index of that point in polylines[i].
 ## `ok` is true only when `findings` is empty; `error` is findings[0].message
 ## otherwise, so a caller that still checks one string reads the same words it
 ## always did. `polylines[i]` runs from sources[i] to targets[i]; the station
@@ -371,7 +422,9 @@ static func bundle_routes(
 		sources: PackedVector2Array,
 		targets: PackedVector2Array,
 		widths: Array,
-		clearance: float) -> Dictionary:
+		clearance: float,
+		via_station_index: int = -1,
+		via_diameter: float = 0.0) -> Dictionary:
 	var n: int = net_names.size()
 	if n == 0:
 		return _unbuildable("A bus needs at least one net (none given).")
@@ -393,6 +446,19 @@ static func bundle_routes(
 	var diagonal := _spine_diagonal_error(pts)
 	if not diagonal.is_empty():
 		return _unbuildable(diagonal)
+	# THE STATION IS RESOLVED BEFORE ANY FINDING, in the UNBUILDABLE class. A
+	# station at an end of the spine, or one the spine bends at, leaves the
+	# fan-out below no unambiguous axis to run along, so there is no geometry to
+	# hand over and correct.
+	var station: int = -1
+	if via_station_index >= 0:
+		station = _dedup_index(spine, via_station_index)
+		if station < 1 or station > pts.size() - 2:
+			return _unbuildable("A via station needs spine on both sides of it — vertex %d is at an end of this %d-point spine."
+				% [via_station_index, pts.size()])
+		if _axis_unit(pts[station] - pts[station - 1]) != _axis_unit(pts[station + 1] - pts[station]):
+			return _unbuildable("The bus spine bends at via-station vertex %d — a station is a straight run across carrying a via, not a corner."
+				% via_station_index)
 
 	# From here on every rule is BUILDABLE-but-illegal: it names a finding and
 	# the construction carries on, so the caller ends up holding copper it can
@@ -429,6 +495,18 @@ static func bundle_routes(
 		tgt_perp.append(from_end.dot(n_tgt))
 
 	var offsets: Array = cumulative_offsets(widths, clearance)
+	# THE WIDENING, and the only geometry a station adds: each track steps out
+	# to a via offset before the station and back after it. Nothing moves when
+	# the via pitch is no wider than the track pitch, and `fan` is then 0 —
+	# every track runs straight through its own via.
+	var via_offsets: Array = offsets
+	var fan_at: Array = []
+	var fan := 0.0
+	if station >= 0:
+		via_offsets = _via_station_offsets(widths, clearance, via_diameter)
+		fan_at = _via_station_fan_distances(offsets, via_offsets, widths, clearance, via_diameter)
+		for f in fan_at:
+			fan = maxf(fan, float(f))
 	var src := _departure_stations(src_perp, offsets, widths, clearance, net_names, "source")
 	findings.append_array(src["findings"])
 	var tgt := _departure_stations(tgt_perp, offsets, widths, clearance, net_names, "target")
@@ -451,6 +529,12 @@ static func bundle_routes(
 		span_src = maxf(span_src, float(src_stations[i]))
 		span_tgt = maxf(span_tgt, float(tgt_stations[i]))
 	for i in range(last):
+		# The two segments the station sits between are judged by the station's
+		# own rule below, which measures the same margin and names the station —
+		# the more specific rule, so this one steps aside rather than reporting
+		# the same short run twice in different words.
+		if i == station - 1 or i == station:
+			continue
 		var seg_len: float = pts[i].distance_to(pts[i + 1])
 		var fanned: float = (span_src if i == 0 else 0.0) + (span_tgt if i == last - 1 else 0.0)
 		if seg_len - fanned < margin:
@@ -458,28 +542,88 @@ static func bundle_routes(
 				"Bus spine segment %d→%d is %.3fmm long; the fan-outs on it take %.3fmm and the bundle still needs %.3fmm of straight run clear of them. Lengthen the spine or move the pads."
 					% [i, i + 1, seg_len, fanned, margin],
 				[], seg_len - fanned, margin, (pts[i] + pts[i + 1]) * 0.5))
+	if station >= 0:
+		findings.append_array(_via_station_findings(pts, station, fan, margin,
+			span_src, span_tgt))
+
+	# The station splits the spine in two, so each lane is offset in two pieces
+	# and rejoined through the fan. Both pieces end (begin) on the station's own
+	# perpendicular, which is what lets the fan be spliced onto their inner ends
+	# by REPLACEMENT rather than by hunting for a vertex inside an offset
+	# polyline that is not 1:1 with the spine.
+	var spine_a := pts if station < 0 else pts.slice(0, station + 1)
+	var spine_b := PackedVector2Array() if station < 0 else pts.slice(station)
+	var u_st := Vector2.ZERO
+	var n_st := Vector2.ZERO
+	if station >= 0:
+		u_st = _axis_unit(pts[station] - pts[station - 1])
+		n_st = Vector2(-u_st.y, u_st.x)
 
 	var polylines: Array = []
+	var station_points: Array = []
+	var station_splits: Array = []
 	for i in range(n):
 		var offset := float(offsets[i])
-		var lane := offset_polyline(pts, offset)
 		var d: float = float(src_stations[i])
 		var e: float = float(tgt_stations[i])
+		# A pad already on its own lane, or already at its own station, makes a
+		# leg zero-length; the corner is then the same point twice, which is why
+		# every run below is deduplicated before it is used.
+		var head := PackedVector2Array()
+		head.append(sources[i])
+		head.append(_station_point(pts[0], u_src, d, sources[i]))
+		var tail := PackedVector2Array()
+		tail.append(_station_point(pts[last], u_tgt, -e, targets[i]))
+		tail.append(targets[i])
+
+		var lane := offset_polyline(spine_a, offset)
 		# Only the lane's two ENDS move, inward to this track's own stations.
 		# Indexed from the ends rather than by spine vertex on purpose: a spine
 		# that doubles back bevels its reversal into TWO offset points, so
 		# `lane` is not 1:1 with the spine there.
 		lane[0] = _station_point(pts[0], u_src, d, lane[0])
-		lane[lane.size() - 1] = _station_point(pts[last], u_tgt, -e, lane[lane.size() - 1])
-		var route := PackedVector2Array()
-		route.append(sources[i])
-		route.append(_station_point(pts[0], u_src, d, sources[i]))
-		route.append_array(lane)
-		route.append(_station_point(pts[last], u_tgt, -e, targets[i]))
-		route.append(targets[i])
-		# A pad already on its own lane, or already at its own station, makes one
-		# of those legs zero-length; the corner is then the same point twice.
-		polylines.append(_drop_duplicate_points(route))
+		if station < 0:
+			lane[lane.size() - 1] = _station_point(pts[last], u_tgt, -e, lane[lane.size() - 1])
+			var route := head
+			route.append_array(lane)
+			route.append_array(tail)
+			polylines.append(_drop_duplicate_points(route))
+			continue
+
+		var v: float = float(via_offsets[i])
+		# This track's OWN jog positions: a track that does not widen has none,
+		# and turns straight into its via.
+		var enter: Vector2 = pts[station] - u_st * float(fan_at[i])
+		var exit_pt: Vector2 = pts[station] + u_st * float(fan_at[i])
+		var via_point: Vector2 = pts[station] + n_st * v
+		lane[lane.size() - 1] = enter + n_st * offset
+		var run_a := head
+		run_a.append_array(lane)
+		run_a.append(enter + n_st * v)
+		run_a.append(via_point)
+		run_a = _drop_duplicate_points(run_a)
+
+		var lane_b := offset_polyline(spine_b, offset)
+		lane_b[0] = exit_pt + n_st * offset
+		lane_b[lane_b.size() - 1] = _station_point(pts[last], u_tgt, -e, lane_b[lane_b.size() - 1])
+		var run_b := PackedVector2Array()
+		run_b.append(via_point)
+		run_b.append(exit_pt + n_st * v)
+		run_b.append_array(lane_b)
+		run_b.append_array(tail)
+		run_b = _drop_duplicate_points(run_b)
+
+		# The via point is the LAST of run_a and the FIRST of run_b; the whole
+		# route carries it once, and its index is where a caller cuts the
+		# polyline into its two layer runs. Read BEFORE the join: a packed
+		# array assigned to `whole` is the same array, so run_a grows with it.
+		var split := run_a.size() - 1
+		var whole := run_a
+		for j in range(1, run_b.size()):
+			whole.append(run_b[j])
+		polylines.append(whole)
+		station_points.append(via_point)
+		station_splits.append(split)
 
 	# THE MEASUREMENT. Everything above reasons about one end of the spine at a
 	# time and about crossings only; this measures the finished copper.
@@ -493,6 +637,10 @@ static func bundle_routes(
 		"source_stations": src_stations, "target_stations": tgt_stations,
 		"source_order": src["order"], "target_order": tgt["order"],
 		"polylines": polylines,
+		"via_station_index": station,
+		"via_station_offsets": via_offsets if station >= 0 else [],
+		"via_station_points": station_points,
+		"via_station_splits": station_splits,
 	}
 
 
@@ -656,6 +804,138 @@ static func _spine_doubles_back_error(pts: PackedVector2Array) -> String:
 		if (pts[i] - pts[i - 1]).dot(pts[i + 1] - pts[i]) < 0.0:
 			return "The bus spine doubles back at point %d — every track would fold over the one beside it there." % i
 	return ""
+
+
+## Where `points[index]` ends up once _drop_duplicate_points has run, or -1 when
+## `index` is not a point of `points` at all.
+##
+## The via station arrives as an index into the spine the CALLER holds; every
+## other coordinate here is taken from the deduplicated one. Walking the same
+## keep rule is what keeps a spine with a doubled click from silently moving the
+## station one vertex along.
+static func _dedup_index(points: PackedVector2Array, index: int) -> int:
+	var kept := -1
+	var last_kept := Vector2.ZERO
+	for i in range(points.size()):
+		if kept < 0 or last_kept.distance_to(points[i]) > _MIN_SEGMENT_MM:
+			kept += 1
+			last_kept = points[i]
+		if i == index:
+			return kept
+	return -1
+
+
+## The signed offsets the tracks widen to AT the via station.
+##
+## cumulative_offsets' arithmetic with one substitution: every adjacent pair is
+## spaced by the WIDER of its own track pitch and the pitch two vias need, so a
+## bundle whose vias already fit inside the track pitch does not move at all and
+## one whose vias do not fans out by exactly the difference. Centred the same
+## way, so the middle of an odd bundle stays on the spine.
+static func _via_station_offsets(widths: Array, clearance: float, via_diameter: float) -> Array:
+	var n: int = widths.size()
+	if n == 0:
+		return []
+	if n == 1:
+		return [0.0]
+	var via_pitch := 0.0
+	if via_diameter > 0.0:
+		via_pitch = pitch_between(via_diameter, via_diameter, clearance)
+	var running := 0.0
+	var positions: Array = [0.0]
+	for i in range(n - 1):
+		running += maxf(pitch_between(float(widths[i]), float(widths[i + 1]), clearance), via_pitch)
+		positions.append(running)
+	var centre: float = running * 0.5
+	var out: Array = []
+	for pos in positions:
+		out.append(float(pos) - centre)
+	return out
+
+
+## How far before (and after) the station EACH track starts stepping out, in mm,
+## parallel to `offsets`. 0.0 for a track that does not widen — it turns
+## straight into its via and no jog is built for it at all.
+##
+## Staggered outermost-first, one rank per distinct distance from the spine,
+## spaced by `step`. The stagger is what makes the fan legal (see the header):
+## two jog legs at the same axial position must clear each other across the
+## bundle, and with real vias three tracks is the most that ever does. Spaced
+## along the spine instead, any two legs are at least `step` apart whatever
+## they do across it.
+##
+## `step` is the widest pitch anything here is spaced by — the widest adjacent
+## track pitch, or the via pitch when the vias are the wider claim — so it
+## needs no separate justification per pair.
+static func _via_station_fan_distances(offsets: Array, via_offsets: Array,
+		widths: Array, clearance: float, via_diameter: float) -> Array:
+	var n: int = offsets.size()
+	var out: Array = []
+	for i in range(n):
+		out.append(0.0)
+	var moving: Array = []
+	for i in range(n):
+		if absf(float(via_offsets[i]) - float(offsets[i])) > _MIN_SEGMENT_MM:
+			moving.append(i)
+	if moving.is_empty():
+		return out
+
+	var step := 0.0
+	if via_diameter > 0.0:
+		step = pitch_between(via_diameter, via_diameter, clearance)
+	for i in range(n - 1):
+		step = maxf(step, pitch_between(float(widths[i]), float(widths[i + 1]), clearance))
+
+	# Sorted innermost first so rank 1 (nearest the station) goes to the
+	# innermost track and the outermost track jogs farthest out along the
+	# spine, i.e. first on the way in. Insertion sort rather than sort_custom:
+	# the arrays here are one per bus track.
+	for a in range(1, moving.size()):
+		var key: int = moving[a]
+		var b: int = a - 1
+		while b >= 0 and absf(float(offsets[moving[b]])) > absf(float(offsets[key])):
+			moving[b + 1] = moving[b]
+			b -= 1
+		moving[b + 1] = key
+
+	var rank := 0
+	for k in range(moving.size()):
+		if k > 0 and absf(float(offsets[moving[k]])) \
+				> absf(float(offsets[moving[k - 1]])) + _MIN_SEGMENT_MM:
+			rank += 1
+		out[moving[k]] = float(rank + 1) * step
+	return out
+
+
+## The BUILDABLE rule a via station can break: it sits too close to an end of
+## the spine to fan out and back inside the run it has.
+##
+## Same measurement the spine's own too-short rule makes — what is left of the
+## run once the fan-outs have eaten into it, against the width of the bundle —
+## and it REPLACES that rule on the station's two segments, so a short run there
+## is reported once, in the words that name the station.
+##
+## It leaves real geometry behind (the jogs fold back over the run they came
+## from), so it is a finding and the copper is handed over to be corrected.
+static func _via_station_findings(pts: PackedVector2Array, station: int, fan: float,
+		margin: float, span_src: float, span_tgt: float) -> Array:
+	var out: Array = []
+	var last: int = pts.size() - 1
+	var before: float = pts[station - 1].distance_to(pts[station]) \
+		- (span_src if station - 1 == 0 else 0.0)
+	var after: float = pts[station].distance_to(pts[station + 1]) \
+		- (span_tgt if station == last - 1 else 0.0)
+	if before - fan < margin:
+		out.append(_finding(FINDING_VIA_STATION_CROWDED,
+			"The via station at spine vertex %d has %.3fmm of run before it once the pads have fanned out; its own fan-out takes %.3fmm and the bundle still needs %.3fmm of straight run clear of that. Move the station along the spine, or lengthen it."
+				% [station, before, fan, margin],
+			[], before - fan, margin, pts[station]))
+	if after - fan < margin:
+		out.append(_finding(FINDING_VIA_STATION_CROWDED,
+			"The via station at spine vertex %d has %.3fmm of run after it once the pads have fanned out; its own fan-out takes %.3fmm and the bundle still needs %.3fmm of straight run clear of that. Move the station along the spine, or lengthen it."
+				% [station, after, fan, margin],
+			[], after - fan, margin, pts[station]))
+	return out
 
 
 ## The unit vector along an axis-aligned, non-zero `d`, built rather than

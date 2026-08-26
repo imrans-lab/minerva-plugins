@@ -134,6 +134,7 @@ func _init() -> void:
 	_test_where_each_net_may_end()
 	_test_the_airline_says_where_each_net_is_headed()
 	_test_manifest_requires_pads_on_both_verbs()
+	_test_a_layer_switch_mid_path_is_a_via_station()
 	# AWAITED (unlike every synchronous test above): panel_tools.handle() is a
 	# coroutine end to end (see panel_tools.gd's own class-doc note) because it
 	# awaits internally on other branches. A bare call without await here would
@@ -142,6 +143,7 @@ func _init() -> void:
 	# quit() — and silently not count.
 	await _test_mcp_direct_verb_matches_the_gesture()
 	await _test_a_bad_bus_reaches_the_agent_and_the_ghost()
+	await _test_the_station_verb_matches_the_station_gesture()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -230,6 +232,10 @@ const TGT_C := Vector2(130.0, 44.0)
 const PATH_1 := Vector2(20.0, 20.0)
 const PATH_2 := Vector2(120.0, 20.0)
 const EMPTY := Vector2(60.0, 20.0)
+## The middle spine vertex a via station lands on, and the two layers it joins.
+## Clear board like PATH_1/PATH_2, and on their axis so the spine crosses it
+## straight — the only shape a station is built for.
+const STATION := Vector2(70.0, 20.0)
 ## Where the PATH-ending double-click lands. Clear board like the two above,
 ## and deliberately OFF the spine's axis: the vertex its first press places
 ## snaps to (120, 34), a leg no duplicate-point dedup would swallow, so a spine
@@ -310,6 +316,29 @@ func _double_click(canvas, at: Vector2) -> void:
 
 func _serialized_traces(data) -> Array:
 	return (data.to_board_dict().get("traces", []) as Array)
+
+
+## Serialized traces keyed "net|layer". A bus with a via station lands TWO
+## traces per net, one per layer run, so keying by net alone would silently keep
+## whichever of the pair sorted last.
+func _traces_by_net_and_layer(data) -> Dictionary:
+	var out := {}
+	for t in _serialized_traces(data):
+		var d: Dictionary = t
+		out["%s|%s" % [str(d.get("net", "")), str(d.get("layer", ""))]] = d
+	return out
+
+
+func _serialized_vias(data) -> Array:
+	return (data.to_board_dict().get("vias", []) as Array)
+
+
+## Serialized vias keyed by net — one per net for a one-station bus.
+func _vias_by_net(data) -> Dictionary:
+	var out := {}
+	for v in _serialized_vias(data):
+		out[str((v as Dictionary).get("net", ""))] = v
+	return out
 
 
 func _traces_by_net(data) -> Dictionary:
@@ -763,12 +792,10 @@ func _test_double_click_grammar() -> void:
 			canvas.bus_teach_line().contains("double-click")
 				and canvas.bus_teach_line().contains("pad per net"),
 			canvas.bus_teach_line())
-	# The canvas STORES the canonical id; the user reads the toolbar's name. The
-	# line has to carry the second, and say the choice is already made — a user
-	# who wanted the other side has to start the path over to get it.
-	check("…names the layer the way the toolbar does, and says it is already fixed",
-			canvas._bus_layer == "top" and canvas.bus_teach_line().contains("F.Cu")
-				and canvas.bus_teach_line().contains("fixed when the path began"),
+	# The canvas STORES the canonical id; the user reads the toolbar's name, so
+	# the line has to carry the second.
+	check("…names the layer the way the toolbar does",
+			canvas._bus_layer == "top" and canvas.bus_teach_line().contains("F.Cu"),
 			"layer %s: %s" % [canvas._bus_layer, canvas.bus_teach_line()])
 	canvas._handle_bus_click(DBL_END, false)   # press 1 of the double-click
 	canvas._handle_bus_click(DBL_END, true)    # press 2 ends the path
@@ -907,9 +934,9 @@ func _test_the_finished_bus_commits_from_a_landed_target() -> void:
 			"refs %s, board %s" % [str(canvas._bus_target_refs), str(_board_state(data))])
 	canvas.free()
 
-	# A BUS THAT BREAKS A RULE COMMITS THROUGH THIS GESTURE. The owner's rule:
-	# corrections need copper to correct, so the finish gesture lands the traces
-	# and says what broke rather than arguing.
+	# A BUS THAT BREAKS A RULE COMMITS THROUGH THIS GESTURE: corrections need
+	# copper to correct, so the finish gesture lands the traces and says what
+	# broke rather than arguing.
 	rig = _rig()
 	canvas = rig[0]
 	data = rig[1]
@@ -985,8 +1012,7 @@ func _test_manhattan_from_sloppy_clicks() -> void:
 # inside NC's breakout band and NC's pad inside NB's: each would have to leave
 # the bundle before the other. pcb_bus_geometry names that rather than
 # re-sorting the picks — and, since the geometry can still be drawn, the bus
-# LANDS so the user has traces to correct. The old behaviour (write nothing,
-# argue) left nothing to correct; that is the change this pins.
+# LANDS so the user has traces to correct.
 #
 # THE PREVIEW IS UNCHANGED: the plan is still `ok == false`, so the spine keeps
 # its refusal tint and the panel keeps holding the reason — only the commit
@@ -1017,7 +1043,7 @@ func _test_a_crossing_commits_and_is_named() -> void:
 	canvas._handle_bus_click(TGT_B, false)
 	canvas._handle_bus_click(TGT_A, false)
 
-	var live_refusal := canvas.bus_refusal()
+	var live_refusal: String = str(canvas.bus_refusal())
 	check("the live preview still calls this bus refused, naming both nets",
 			live_refusal.contains("NB") and live_refusal.contains("NC"), live_refusal)
 
@@ -1154,8 +1180,166 @@ func _test_manifest_requires_pads_on_both_verbs() -> void:
 				"sources" in required and "targets" in required, str(required))
 		check("%s documents both as pin-ref arrays" % name,
 				props.has("sources") and props.has("targets"))
+		# The via station is OPTIONAL — it must be documented but must never
+		# join `required`, or every single-layer bus call becomes a schema error.
+		check("%s documents the via station as an optional pair" % name,
+				props.has("via_station_index") and props.has("via_station_layer")
+					and not ("via_station_index" in required)
+					and not ("via_station_layer" in required), str(required))
 	for name in wanted.keys():
 		check("%s is registered" % name, bool(wanted[name]))
+
+
+# ── 9b. THE VIA STATION ───────────────────────────────────────────────────────
+#
+# ORACLE: the SERIALIZED board — six traces keyed by net AND layer, three vias,
+# one new history entry — against point lists derived by hand from the fixture's
+# own numbers, exactly as _expected_routes derives the single-layer bus.
+#
+# THE DERIVATION, from the fixture's 0.2mm tracks at 0.3mm clearance (lanes
+# [-0.5, 0.0, +0.5], source stations 1.0/0.5/0.0, target stations 0.0/0.5/1.0 —
+# all pinned by test_bus_breakout_geometry.gd and consumed here) plus the via
+# rules this board declares NONE of, so the 0.8mm / 0.4mm fallback applies:
+#
+#   via pitch = 0.4 + 0.3 + 0.4 = 1.1mm, wider than the 0.5mm track pitch, so
+#   the lanes widen to [-1.1, 0.0, +1.1] at the station and NA/NC jog 1.1mm
+#   either side of it (x 68.9 and x 71.1). NB is already on the spine and does
+#   not move, so it has no jog at all.
+#
+# The three vias therefore sit on x = 70, the station's own perpendicular, at
+# y 18.9 / 20.0 / 21.1 — 1.1mm apart, which is the clearance claim measured
+# below rather than assumed.
+
+## Pick, path, switch layer, place the station, finish and commit.
+func _drive_station_gesture(canvas) -> void:
+	canvas._handle_bus_click(SRC_A, false)     # NA
+	canvas._handle_bus_click(SRC_B, false)     # NB
+	canvas._handle_bus_click(SRC_C, false)     # NC
+	canvas._handle_bus_click(PATH_1, false)    # ends SOURCES, spine vertex 0
+	# THE LAYER SWITCH, made the way every surface makes it: the toolbar
+	# selector, the View menu and minerva_pcb_set_view all write this property.
+	canvas.trace_layer_filter = "bottom"
+	canvas._handle_bus_click(STATION, false)   # vertex 1 — the via station
+	canvas._handle_bus_click(PATH_2, false)    # vertex 2
+	canvas._handle_bus_click(TGT_A, false)     # ends PATH, target NA
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_C, false)
+
+
+## The six runs the station bus commits, hand-derived above.
+func _expected_station_runs() -> Dictionary:
+	return {
+		"NA|top": [SRC_A, Vector2(21.0, 10.0), Vector2(21.0, 19.5),
+			Vector2(68.9, 19.5), Vector2(68.9, 18.9), Vector2(70.0, 18.9)],
+		"NA|bottom": [Vector2(70.0, 18.9), Vector2(71.1, 18.9),
+			Vector2(71.1, 19.5), Vector2(120.0, 19.5), Vector2(120.0, 40.0), TGT_A],
+		"NB|top": [SRC_B, Vector2(20.5, 12.0), Vector2(20.5, 20.0), Vector2(70.0, 20.0)],
+		"NB|bottom": [Vector2(70.0, 20.0), Vector2(119.5, 20.0),
+			Vector2(119.5, 42.0), TGT_B],
+		"NC|top": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.5),
+			Vector2(68.9, 20.5), Vector2(68.9, 21.1), Vector2(70.0, 21.1)],
+		"NC|bottom": [Vector2(70.0, 21.1), Vector2(71.1, 21.1),
+			Vector2(71.1, 20.5), Vector2(119.0, 20.5), Vector2(119.0, 44.0), TGT_C],
+	}
+
+
+func _test_a_layer_switch_mid_path_is_a_via_station() -> void:
+	print("\n-- (9b) a layer switch mid-path vias the bus onto the new layer --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	var before := _board_state(data)
+	canvas.trace_layer_filter = "bottom"
+	check("the switch does not cancel the path", canvas.bus_phase() == canvas.BusPhase.PATH)
+	check("…nor re-aim the copper already drawn — the bus is still on top",
+			str(canvas._bus_layer) == "top", str(canvas._bus_layer))
+	check("…and it says a station is armed",
+			_last(msgs).contains("Via station armed"), _last(msgs))
+	check("…having written nothing", _board_state(data) == before, str(_board_state(data)))
+
+	canvas._handle_bus_click(STATION, false)
+	check("the station lands on the vertex just clicked",
+			int(canvas._bus_station_index) == 1, str(canvas._bus_station_index))
+	# ONE station per bus: the second switch is refused by name rather than
+	# quietly moving the station out from under the geometry drawn around it.
+	canvas.trace_layer_filter = "top"
+	check("a second layer switch is refused, naming the station it already has",
+			_last(msgs).contains("already has a via station") and int(canvas._bus_station_index) == 1,
+			_last(msgs))
+
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_A, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_C, false)
+	canvas._commit_bus()
+
+	var runs := _traces_by_net_and_layer(data)
+	check("three nets landed SIX traces — one per layer run",
+			_serialized_traces(data).size() == 6 and runs.size() == 6,
+			str(_serialized_traces(data).size()))
+	for key in _expected_station_runs().keys():
+		if not runs.has(key):
+			check("%s exists" % key, false, str(runs.keys()))
+			continue
+		_check_route(str(key), _points_of(runs[key]), _expected_station_runs()[key])
+
+	var vias := _vias_by_net(data)
+	check("one via per net", _serialized_vias(data).size() == 3 and vias.size() == 3,
+			str(_serialized_vias(data)))
+	var want_vias := {"NA": Vector2(70.0, 18.9), "NB": Vector2(70.0, 20.0),
+		"NC": Vector2(70.0, 21.1)}
+	for net in want_vias.keys():
+		if not vias.has(net):
+			check("%s carries a via" % net, false, str(vias.keys()))
+			continue
+		var v: Dictionary = vias[net]
+		var at := Vector2(float(v.get("x_mm", 0.0)), float(v.get("y_mm", 0.0)))
+		check("%s\'s via sits on the station\'s perpendicular at its own lane offset" % net,
+				at.distance_to(want_vias[net]) <= EPS, "%s vs %s" % [str(at), str(want_vias[net])])
+		check("%s\'s via is a THROUGH via at the board\'s own fallback size" % net,
+				str(v.get("from_layer", "")) == "top" and str(v.get("to_layer", "")) == "bottom"
+					and absf(float(v.get("diameter_mm", 0.0)) - 0.8) <= EPS
+					and absf(float(v.get("drill_mm", 0.0)) - 0.4) <= EPS,
+				str(v))
+
+	# ADJACENT-VIA CLEARANCE, measured on the committed board: 0.8mm pads at the
+	# board's 0.3mm clearance owe 1.1mm centre to centre.
+	var tightest := INF
+	var placed: Array = _serialized_vias(data)
+	for i in range(placed.size()):
+		for j in range(i + 1, placed.size()):
+			var a := Vector2(float((placed[i] as Dictionary).get("x_mm", 0.0)),
+				float((placed[i] as Dictionary).get("y_mm", 0.0)))
+			var b := Vector2(float((placed[j] as Dictionary).get("x_mm", 0.0)),
+				float((placed[j] as Dictionary).get("y_mm", 0.0)))
+			tightest = minf(tightest, a.distance_to(b))
+	check("no two vias come closer than the 1.1mm via pitch", tightest >= 1.1 - 1e-3,
+			"%.6f" % tightest)
+
+	# MANHATTAN ON THE COPPER, both layers — measured on what was serialized,
+	# not on the spine buffer the axis snap wrote.
+	var diagonals := 0
+	for t in _serialized_traces(data):
+		var pts := _points_of(t)
+		for i in range(pts.size() - 1):
+			var d: Vector2 = (pts[i + 1] as Vector2) - (pts[i] as Vector2)
+			if absf(d.x) > EPS and absf(d.y) > EPS:
+				diagonals += 1
+	check("every committed segment is still axis-aligned", diagonals == 0)
+
+	check("the whole two-layer bus is ONE undo step",
+			data.history.size() == before[1] + 1,
+			"%d -> %d" % [before[1], data.history.size()])
+	check("the summary counts the vias and names both layers",
+			_last(msgs).contains("3 vias") and _last(msgs).contains("F.Cu")
+				and _last(msgs).contains("B.Cu"), _last(msgs))
+	canvas.free()
 
 
 # ── 10. MCP PARITY: THE DIRECT VERB == THE GESTURE ─────────────────────────────
@@ -1756,3 +1940,132 @@ func _test_a_bad_bus_reaches_the_agent_and_the_ghost() -> void:
 	check("every ghost carries the findings that name its own net, filed under itself",
 			carried == 3 and misfiled == 0,
 			"%d ghosts with findings, %d mis-filed" % [carried, misfiled])
+
+# ── 12. MCP PARITY FOR THE VIA STATION ────────────────────────────────────────
+#
+# ORACLE: the same two-board comparison test 10 makes, on the station gesture —
+# one board driven through the canvas handlers with a layer switch, one through
+# minerva_pcb_route_bus_direct with via_station_index/via_station_layer, then
+# compared run for run AND via for via. Plus the half-specified station, which
+# must be refused rather than half-honoured: an index with no layer would
+# silently commit the single-layer bus the caller did not ask for.
+
+func _test_the_station_verb_matches_the_station_gesture() -> void:
+	print("\n-- (12) the station args == the layer-switch gesture --")
+	var rig := _rig()
+	var canvas_a = rig[0]
+	var data_a = rig[1]
+	_drive_station_gesture(canvas_a)
+	canvas_a._commit_bus()
+	var runs_a := _traces_by_net_and_layer(data_a)
+
+	var data_b := PCBData.new()
+	data_b.from_board_dict(_board())
+	var host_b := StubMcpHost.new()
+	host_b.data = data_b
+	var quiet := _board_state(data_b)
+	var spine: Array = [{"x_mm": PATH_1.x, "y_mm": PATH_1.y},
+		{"x_mm": STATION.x, "y_mm": STATION.y}, {"x_mm": PATH_2.x, "y_mm": PATH_2.y}]
+
+	var half: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "V3.1"],
+		"points": spine, "layer": "top", "via_station_index": 1,
+	})
+	check("a station index with no layer is refused, naming both args",
+			not bool(half.get("success", true))
+				and str(half.get("error", "")).contains("via_station_index")
+				and str(half.get("error", "")).contains("via_station_layer"),
+			str(half.get("error", "")))
+	check("…and writing nothing", _board_state(data_b) == quiet, str(_board_state(data_b)))
+
+	var bent: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "V3.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 70.0, "y_mm": 20.0},
+			{"x_mm": 70.0, "y_mm": 30.0}, {"x_mm": 120.0, "y_mm": 30.0}],
+		"layer": "top", "via_station_index": 1, "via_station_layer": "bottom",
+	})
+	check("a station on a BEND is refused — a station is a via, not a corner",
+			not bool(bent.get("success", true))
+				and str(bent.get("error", "")).contains("bends"),
+			str(bent.get("error", "")))
+	check("…and writing nothing", _board_state(data_b) == quiet, str(_board_state(data_b)))
+
+	# A JSON number is a float on arrival; 1.9 is not a vertex and must not
+	# quietly become vertex 1.
+	var fractional: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "V3.1"],
+		"points": spine, "layer": "top", "via_station_index": 1.9, "via_station_layer": "bottom",
+	})
+	check("a fractional station index is refused, not truncated",
+			not bool(fractional.get("success", true))
+				and str(fractional.get("error", "")).contains("integer"),
+			str(fractional.get("error", "")))
+	check("…and writing nothing", _board_state(data_b) == quiet, str(_board_state(data_b)))
+
+	# A plan that names a station layer but has lost its cuts is refused by the
+	# writer before it touches the board — not landed as a single-layer bus.
+	var torn: Dictionary = PanelToolsScript.bus_plan(data_b, ["NA", "NB", "NC"],
+		PackedVector2Array([PATH_1, STATION, PATH_2]), "top",
+		PackedStringArray(["U1.1", "U2.1", "U3.1"]), PackedStringArray(["V1.1", "V2.1", "V3.1"]),
+		0.0, 1, "bottom")
+	check("the torn-plan probe starts from a routed station plan",
+			bool(torn.get("ok", false)) and (torn.get("via_station_splits", []) as Array).size() == 3, str(torn.get("error", "")))
+	torn["via_station_splits"] = [torn["via_station_splits"][0]]
+	var torn_out: Dictionary = PanelToolsScript.bus_commit_plan(data_b, torn, "torn")
+	check("a station plan with a missing cut is refused, naming the mismatch",
+			not bool(torn_out.get("ok", true)) and str(torn_out.get("error", "")).contains("split"),
+			str(torn_out.get("error", "")))
+	check("…and writing nothing", _board_state(data_b) == quiet, str(_board_state(data_b)))
+
+	var result: Dictionary = await PanelToolsScript.handle(host_b, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "V3.1"],
+		"points": spine, "layer": "top",
+		"via_station_index": 1, "via_station_layer": "bottom",
+	})
+	check("the station call succeeded", bool(result.get("success", false)), str(result))
+	check("it reports six traces and three vias",
+			(result.get("trace_ids", []) as Array).size() == 6
+				and (result.get("via_ids", []) as Array).size() == 3,
+			str(result))
+	check("it names the layer the bus continues on",
+			str(result.get("via_station_layer", "")) == "bottom", str(result))
+
+	var runs_b := _traces_by_net_and_layer(data_b)
+	check("both boards ended with the same run COUNT", runs_a.size() == runs_b.size(),
+			"gesture=%d tool=%d" % [runs_a.size(), runs_b.size()])
+	for key in _expected_station_runs().keys():
+		if not (runs_a.has(key) and runs_b.has(key)):
+			check("%s exists on both boards" % key, false,
+					"%s / %s" % [str(runs_a.keys()), str(runs_b.keys())])
+			continue
+		var pa := _points_of(runs_a[key])
+		var pb := _points_of(runs_b[key])
+		var same := pa.size() == pb.size()
+		if same:
+			for i in range(pa.size()):
+				if (pa[i] as Vector2).distance_to(pb[i] as Vector2) > EPS:
+					same = false
+					break
+		check("%s: the gesture and the tool authored the SAME run" % key, same,
+				"gesture=%s tool=%s" % [str(pa), str(pb)])
+
+	var vias_a := _vias_by_net(data_a)
+	var vias_b := _vias_by_net(data_b)
+	var via_mismatch := ""
+	for net in ["NA", "NB", "NC"]:
+		if not (vias_a.has(net) and vias_b.has(net)):
+			via_mismatch = "%s missing" % net
+			continue
+		var a := Vector2(float((vias_a[net] as Dictionary).get("x_mm", 0.0)),
+			float((vias_a[net] as Dictionary).get("y_mm", 0.0)))
+		var b := Vector2(float((vias_b[net] as Dictionary).get("x_mm", 0.0)),
+			float((vias_b[net] as Dictionary).get("y_mm", 0.0)))
+		if a.distance_to(b) > EPS:
+			via_mismatch = "%s: %s vs %s" % [net, str(a), str(b)]
+	check("the gesture and the tool dropped the SAME three vias", via_mismatch.is_empty(),
+			via_mismatch)
+	canvas_a.free()

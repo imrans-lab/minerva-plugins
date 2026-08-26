@@ -57,6 +57,7 @@ var _fail := 0
 func _init() -> void:
 	print("=== Bus breakout geometry: pad-to-pad routes ===\n")
 	_run_straight_bundle()
+	_run_via_station()
 	_run_mixed_width_bend()
 	_run_geometry_invariants()
 	_run_crossing_refusals()
@@ -267,6 +268,127 @@ func _run_straight_bundle() -> void:
 ## lane order again — so A leaves first there and the same widths give
 ##
 ##     target stations  A = 0.0   B = 0.8   C = 0.8 + 0.4 = 1.2
+## THE SAME STRAIGHT BUNDLE, WITH A VIA STATION on a middle vertex — every
+## point hand-derived from the numbers _run_straight_bundle already worked out.
+##
+## Spine (0,0) -> (50,0) -> (100,0), station on vertex 1, 0.8mm vias. Nothing
+## about the ends changes: the same lanes [-0.5, 0, +0.5], the same source
+## stations 1.0 / 0.5 / 0.0 and target stations 0.0 / 0.5 / 1.0.
+##
+## WHAT THE STATION ADDS. Two vias 0.8mm across at 0.3mm clearance need
+## 0.4 + 0.3 + 0.4 = 1.1mm between centres, wider than the 0.5mm the tracks are
+## spaced by, so the lanes widen to via offsets [-1.1, 0.0, +1.1] — B, already
+## on the spine, does not move at all.
+##
+## The jogs are staggered by that same 1.1mm step, one rank per distinct
+## distance from the spine. A and C are both 0.5mm out, so they share rank 0 and
+## jog 1.1mm either side of the station: A leaves its lane at x = 48.9, runs
+## down to y = -1.1, carries its via at (50, -1.1), and comes back up at
+## x = 51.1. C mirrors it. B has no jog and meets its via at (50, 0).
+##
+##     vias  A (50, -1.1)   B (50, 0)   C (50, +1.1)
+##
+## so the three vias sit on the station's own perpendicular, in lane order, 1.1mm
+## apart — the via pitch, measured below rather than assumed.
+func _run_via_station() -> void:
+	print("-- via station: three nets change layer on one vertex --")
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(50, 0), Vector2(100, 0)]),
+		PackedStringArray(["A", "B", "C"]),
+		_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+		_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+		[0.2, 0.2, 0.2], 0.3, 1, 0.8)
+	check("the station bundle is routed clean", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+
+	check("the station is reported on the vertex it was asked for",
+		int(result.get("via_station_index", -1)) == 1)
+	var via_offsets: Array = result["via_station_offsets"]
+	check_near("A widens to -1.1", float(via_offsets[0]), -1.1)
+	check_near("B, already on the spine, does not widen", float(via_offsets[1]), 0.0)
+	check_near("C widens to +1.1", float(via_offsets[2]), 1.1)
+
+	check_points("A: lane -0.5, jog out at x 48.9, via at -1.1, jog back at 51.1",
+		_route(result, 0),
+		[Vector2(-10, -10), Vector2(1, -10), Vector2(1, -0.5),
+		 Vector2(48.9, -0.5), Vector2(48.9, -1.1), Vector2(50, -1.1),
+		 Vector2(51.1, -1.1), Vector2(51.1, -0.5), Vector2(100, -0.5),
+		 Vector2(100, 20), Vector2(110, 20)])
+	check_points("B: no jog — the spine lane runs straight through its via",
+		_route(result, 1),
+		[Vector2(-10, -8), Vector2(0.5, -8), Vector2(0.5, 0), Vector2(50, 0),
+		 Vector2(99.5, 0), Vector2(99.5, 22), Vector2(110, 22)])
+	check_points("C: the mirror of A", _route(result, 2),
+		[Vector2(-10, -6), Vector2(0, -6), Vector2(0, 0.5),
+		 Vector2(48.9, 0.5), Vector2(48.9, 1.1), Vector2(50, 1.1),
+		 Vector2(51.1, 1.1), Vector2(51.1, 0.5), Vector2(99, 0.5),
+		 Vector2(99, 24), Vector2(110, 24)])
+
+	# THE CUT IS WHERE THE COPPER CHANGES LAYER, so it has to land ON the via
+	# point of the very polyline it indexes — a split off by one authors a
+	# millimetre of the second layer's trace on the first.
+	var splits: Array = result["via_station_splits"]
+	var points: Array = result["via_station_points"]
+	check("one via and one cut per net", splits.size() == 3 and points.size() == 3)
+	var mismatched := 0
+	for i in range(3):
+		var route: PackedVector2Array = _route(result, i)
+		var cut: int = int(splits[i])
+		if cut <= 0 or cut >= route.size() - 1 or route[cut] != (points[i] as Vector2):
+			mismatched += 1
+	check("every cut indexes its own net's via point, with copper either side",
+		mismatched == 0)
+	check_points("the vias sit on the station's perpendicular, in lane order",
+		_pv(points),
+		[Vector2(50, -1.1), Vector2(50, 0), Vector2(50, 1.1)])
+
+	# ADJACENT-VIA CLEARANCE, measured rather than assumed — the pads are 0.8mm
+	# across at 0.3mm clearance, so 1.1mm centre to centre is the requirement
+	# and anything less is copper the fab will bridge.
+	var need_via: float = BusGeom.pitch_between(0.8, 0.8, 0.3)
+	check_near("the via pitch this bundle owes", need_via, 1.1)
+	var closest := INF
+	for i in range(points.size()):
+		for j in range(i + 1, points.size()):
+			closest = minf(closest, (points[i] as Vector2).distance_to(points[j] as Vector2))
+	check("no two vias come closer than the via pitch", closest >= need_via - MEASURE_EPS)
+
+	# THE STATION IS A VIA, NOT A CORNER, and it needs spine on both sides: both
+	# are UNBUILDABLE because a fan-out has no unambiguous axis to run along.
+	check_refused("a station on the spine's last vertex is refused",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(50, 0), Vector2(100, 0)]),
+			PackedStringArray(["A", "B", "C"]),
+			_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+			_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+			[0.2, 0.2, 0.2], 0.3, 2, 0.8),
+		["via station", "spine on both sides"])
+	check_refused("a station on a bend is refused",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(50, 0), Vector2(50, 50)]),
+			PackedStringArray(["A", "B", "C"]),
+			_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+			_pv([Vector2(60, 60), Vector2(62, 60), Vector2(64, 60)]),
+			[0.2, 0.2, 0.2], 0.3, 1, 0.8),
+		["bends at via-station vertex 1"])
+
+	# TOO LITTLE RUN PAST THE STATION IS A FINDING, not a refusal: the jogs fold
+	# back over the run they came from, which is copper somebody can shorten a
+	# spine to fix. Spine (0,0)->(20,0)->(21,0)->(100,0) with the station on
+	# vertex 1 leaves 1.0mm before the next vertex where the 1.1mm fan-out plus
+	# the 0.5mm bundle needs 1.6mm.
+	check_bad_but_buildable("a station with no room to fan out lands anyway",
+		BusGeom.bundle_routes(
+			_pv([Vector2(0, 0), Vector2(20, 0), Vector2(21, 0), Vector2(100, 0)]),
+			PackedStringArray(["A", "B", "C"]),
+			_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+			_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+			[0.2, 0.2, 0.2], 0.3, 1, 0.8),
+		3, ["via station at spine vertex 1", "of run after it"])
+
+
 func _run_mixed_width_bend() -> void:
 	print("-- mixed widths through a 90-degree bend, hand-derived --")
 	var result: Dictionary = BusGeom.bundle_routes(
@@ -343,20 +465,50 @@ func _run_geometry_invariants() -> void:
 			"targets": _pv([Vector2(-5, -35), Vector2(-3, -35), Vector2(-1, -35)]),
 			"widths": [1.0, 0.2, 0.2], "clearance": 0.2,
 		},
+		{
+			# THE STRAIGHT BUNDLE WITH A VIA STATION on its middle vertex. The
+			# invariants below know nothing about layers, so they measure the
+			# widened fan-out and the vias' own perpendicular as ordinary
+			# copper — which is the question worth asking of a station.
+			"label": "straight with a via station, east",
+			"spine": _pv([Vector2(0, 0), Vector2(50, 0), Vector2(100, 0)]),
+			"sources": _pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+			"targets": _pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
+			"widths": [0.2, 0.2, 0.2], "clearance": 0.3,
+			"station": 1, "via_diameter": 0.8,
+		},
+		{
+			# FOUR nets through a station, which is where the fan-out's stagger
+			# starts earning its keep: with every track jogging at ONE axial
+			# position the two inner tracks' legs would sit 0.2mm apart on that
+			# perpendicular against a 0.5mm requirement. Staggered they cannot,
+			# and the pitch invariant below is what says so.
+			"label": "four nets through a via station",
+			"nets": PackedStringArray(["A", "B", "C", "D"]),
+			"spine": _pv([Vector2(0, 0), Vector2(50, 0), Vector2(100, 0)]),
+			"sources": _pv([Vector2(-10, -12), Vector2(-10, -10),
+				Vector2(-10, -8), Vector2(-10, -6)]),
+			"targets": _pv([Vector2(110, 20), Vector2(110, 22),
+				Vector2(110, 24), Vector2(110, 26)]),
+			"widths": [0.2, 0.2, 0.2, 0.2], "clearance": 0.3,
+			"station": 1, "via_diameter": 0.8,
+		},
 	]
 	for case in cases:
 		var label: String = str(case["label"])
 		var sources: PackedVector2Array = case["sources"]
 		var targets: PackedVector2Array = case["targets"]
+		var names: PackedStringArray = case.get("nets", PackedStringArray(["A", "B", "C"]))
 		var result: Dictionary = BusGeom.bundle_routes(case["spine"],
-			PackedStringArray(["A", "B", "C"]), sources, targets,
-			case["widths"], float(case["clearance"]))
+			names, sources, targets,
+			case["widths"], float(case["clearance"]),
+			int(case.get("station", -1)), float(case.get("via_diameter", 0.0)))
 		if not bool(result.get("ok", false)):
 			check("%s: routed" % label, false)
 			printerr("    refused: " + str(result.get("error", "")))
 			continue
 		var polylines: Array = result["polylines"]
-		check("%s: one route per net" % label, polylines.size() == 3)
+		check("%s: one route per net" % label, polylines.size() == names.size())
 
 		var diagonals := 0
 		var stranded := 0

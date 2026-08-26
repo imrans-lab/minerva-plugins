@@ -8368,6 +8368,12 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 # call every redraw for the live preview) and bus_commit_plan MUTATES (create
 # N traces, one save_to_history). A caller always calls bus_plan first.
 #
+# A BUS MAY CHANGE LAYER ONCE, at a VIA STATION: one interior spine vertex
+# where every track drops a via and continues on a second layer. A plan
+# carrying one lands TWO traces and ONE via per net instead of one trace —
+# the same shape the routing workspace materializes a layer-changing route
+# into, so DRC, Gerber and the single undo step treat a bus via like any other.
+#
 # A PLAN HAS THREE STATES, not two (pcb_bus_geometry.gd's "two classes of no"):
 # clean (ok), BAD BUT BUILDABLE (ok false, buildable true, findings non-empty,
 # geometry present) and UNBUILDABLE (ok false, buildable false, no geometry).
@@ -8390,6 +8396,13 @@ const _BUS_INCOMPLETE_PLAN := "This bus has no target pad for every net yet — 
 ## the inner fold is measured before the pads are resolved, so the geometry
 ## module never sees the spine that causes it.
 const BUS_FINDING_INNER_FOLD := "bus_inner_fold"
+
+## Via pad and drill a bus station falls back to when the board's design_rules
+## block declares neither, in mm. The SAME pair RoutingWorkspace._via_dimensions
+## falls back to, so a via a bus drops and a via a committed route drops measure
+## the same on a board that states no rule.
+const _BUS_DEFAULT_VIA_SIZE_MM := 0.8
+const _BUS_DEFAULT_VIA_DRILL_MM := 0.4
 
 
 ## A plan that HAS geometry, clean or not: `ok` iff nothing was found, `error`
@@ -8513,8 +8526,17 @@ static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: St
 ## EVERY net (the MCP tools' optional uniform override — the canvas gesture
 ## never passes one, relying on bus_net_width's per-net derivation instead).
 ##
+## `via_station_index` (>= 0) puts a VIA STATION on that vertex of
+## `spine_points`: every track vias down there and continues on
+## `via_station_layer`, which must be a declared copper layer other than
+## `layer`. The via pad and drill come from the board's design_rules block. The
+## plan then carries via_station_splits/via_station_points, the cut each net's
+## polyline takes and the via centre it takes it at.
+##
 ## Returns {ok, buildable, findings, error, complete, nets, widths, offsets,
-## polylines, layer, source_pins, target_pins}.
+## polylines, layer, source_pins, target_pins, via_station_index,
+## via_station_layer, via_station_points, via_station_splits, via_size_mm,
+## via_drill_mm}.
 ##
 ## `ok` means CLEAN. `buildable` means geometry exists — false only for the
 ## refusals that leave nothing to draw (too few nets, an undeclared net, no
@@ -8530,7 +8552,8 @@ static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: St
 ## line it used to.
 static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer: String,
 		source_pins: PackedStringArray, target_pins: PackedStringArray,
-		width_override: float = 0.0) -> Dictionary:
+		width_override: float = 0.0, via_station_index: int = -1,
+		via_station_layer: String = "") -> Dictionary:
 	if nets.size() < 2:
 		return _bus_unbuildable("A bus needs at least 2 nets (%d given)." % nets.size())
 	var net_names := PackedStringArray()
@@ -8558,6 +8581,15 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	var declared_layers: Array = data.layers if data else []
 	if not declared_layers.is_empty() and layer not in declared_layers:
 		return _bus_unbuildable("Layer \"%s\" is not in the board's declared layer stack." % layer)
+	# The station's SECOND layer gets the identical treatment, in the same one
+	# shared place, for the same reason: the MCP verbs' arg is untrusted text.
+	if via_station_index >= 0:
+		if via_station_layer.is_empty():
+			return _bus_unbuildable("A via station needs the copper layer the bus continues on past it.")
+		if via_station_layer == layer:
+			return _bus_unbuildable("A via station hands the bus to ANOTHER layer — \"%s\" is the one it is already on." % layer)
+		if not declared_layers.is_empty() and via_station_layer not in declared_layers:
+			return _bus_unbuildable("Layer \"%s\" is not in the board's declared layer stack." % via_station_layer)
 
 	var cleaned := _bus_drop_duplicates(spine_points)
 	if cleaned.size() < 2:
@@ -8568,6 +8600,13 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		widths.append(width_override if width_override > 0.0 else bus_net_width(data, str(net_name)))
 	var clearance: float = data.design_rule_clearance()
 	var offsets: Array = BusGeom.cumulative_offsets(widths, clearance)
+	var design_rules: Dictionary = data.design_rules if data.design_rules is Dictionary else {}
+	var via_size := float(design_rules.get("via_diameter_mm", 0.0))
+	if via_size <= 0.0:
+		via_size = _BUS_DEFAULT_VIA_SIZE_MM
+	var via_drill := float(design_rules.get("via_drill_mm", 0.0))
+	if via_drill <= 0.0:
+		via_drill = _BUS_DEFAULT_VIA_DRILL_MM
 
 	# INNER-FOLD FINDING. Checked against the WIDEST |offset| in the whole bus
 	# (pcb_bus_geometry.gd's own wording), on the DEDUPLICATED spine — a
@@ -8599,11 +8638,17 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		var lanes: Array = []
 		for offset in offsets:
 			lanes.append(BusGeom.offset_polyline(spine_points, float(offset)))
+		# The corridor-only preview draws LANES, which have no pads, no legs and
+		# so no station to widen around — the station is echoed back for the
+		# caller that is already drawing it, not built into this geometry.
 		return _bus_planned(findings, layer, {
 			"complete": false,
 			"nets": nets.duplicate(), "widths": widths, "offsets": offsets,
 			"polylines": lanes, "layer": layer,
 			"source_pins": source_pins, "target_pins": PackedStringArray(),
+			"via_station_index": -1, "via_station_layer": via_station_layer,
+			"via_station_points": [], "via_station_splits": [],
+			"via_size_mm": via_size, "via_drill_mm": via_drill,
 		})
 
 	var targets: Dictionary = bus_pad_anchors(data, nets, target_pins, "target")
@@ -8611,7 +8656,8 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		return _bus_unbuildable(str(targets["error"]))
 
 	var routed: Dictionary = BusGeom.bundle_routes(
-		spine_points, net_names, sources["points"], targets["points"], widths, clearance)
+		spine_points, net_names, sources["points"], targets["points"], widths, clearance,
+		via_station_index, via_size if via_station_index >= 0 else 0.0)
 	if not bool(routed.get("buildable", false)):
 		return _bus_unbuildable(str(routed.get("error", "The bus geometry was refused.")))
 	findings.append_array(routed.get("findings", []) as Array)
@@ -8623,7 +8669,59 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		"source_pins": source_pins, "target_pins": target_pins,
 		"source_stations": routed["source_stations"], "target_stations": routed["target_stations"],
 		"source_order": routed["source_order"], "target_order": routed["target_order"],
+		# The index is the geometry's own — measured on the DEDUPLICATED spine,
+		# so it can differ from the caller's when the spine carried a repeated
+		# click.
+		"via_station_index": int(routed.get("via_station_index", -1)),
+		"via_station_layer": via_station_layer if via_station_index >= 0 else "",
+		"via_station_points": routed.get("via_station_points", []),
+		"via_station_splits": routed.get("via_station_splits", []),
+		"via_size_mm": via_size, "via_drill_mm": via_drill,
 	})
+
+
+## The VIA STATION a plan carries, in the one form both writers need:
+## {active, layer, splits, points, error}. `active` is false — and every other
+## field empty — unless the plan really routed through a station, so neither
+## writer re-derives "is this a two-layer bus" from three keys that could
+## disagree. A plan that NAMES a station layer but whose splits or points do
+## not line up with its nets, or whose cut would leave a run with one point, is
+## an `error` rather than a silent single-layer bus: the writers refuse on it
+## BEFORE touching the board, so a malformed plan can never throw mid-commit
+## past the rollback.
+static func _bus_station_runs(plan: Dictionary) -> Dictionary:
+	var inactive := {"active": false, "layer": "", "splits": [], "points": [], "error": ""}
+	var station_layer: String = str(plan.get("via_station_layer", ""))
+	if station_layer.is_empty():
+		return inactive
+	var raw_splits: Variant = plan.get("via_station_splits", [])
+	var raw_points: Variant = plan.get("via_station_points", [])
+	var splits: Array = raw_splits if raw_splits is Array else []
+	var points: Array = raw_points if raw_points is Array else []
+	var polylines: Array = plan.get("polylines", [])
+	var count: int = (plan.get("nets", []) as Array).size()
+	if splits.size() != count or points.size() != count or polylines.size() != count:
+		inactive["error"] = "Bus plan names via station layer %s but carries %d split(s) and %d via point(s) for %d net(s)." % [
+			station_layer, splits.size(), points.size(), count]
+		return inactive
+	for i in range(count):
+		var poly: PackedVector2Array = polylines[i]
+		var cut: int = int(splits[i])
+		if not (splits[i] is int) or not (points[i] is Vector2) or cut < 1 or cut > poly.size() - 2:
+			inactive["error"] = "Bus plan's via station cut on net %s (index %s of %d points) leaves no copper on one side." % [
+				str((plan.get("nets", []) as Array)[i]), str(splits[i]), poly.size()]
+			return inactive
+	return {"active": true, "layer": station_layer, "splits": splits, "points": points, "error": ""}
+
+
+## Undo everything a half-finished bus put on the board. Vias as well as traces:
+## a station's via is created between two of its net's traces, so a refusal on
+## the SECOND run would otherwise leave a hole in copper nothing joins.
+static func _bus_rollback(data, trace_ids: Array, via_ids: Array) -> void:
+	for tid in trace_ids:
+		data.remove_trace(str(tid))
+	for vid in via_ids:
+		data.remove_via_by_id(str(vid))
 
 
 ## MUTATES. Takes any plan that HAS geometry — clean or bad-but-buildable — and
@@ -8641,6 +8739,13 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 ## this board uses), then ONE save_to_history call for the whole batch — one
 ## journal step for the whole bus, one undo removes all N.
 ##
+## A plan with a VIA STATION lands TWO traces and ONE through via per net
+## instead: the polyline is cut at its via point, each half authored on its own
+## layer, and the via added with data.add_via at the same through span
+## minerva_pcb_place_via and every committed route use. That is the board's only
+## representation of a run that changes layer — a Trace carries ONE layer — so a
+## bus via is indistinguishable from any other via to DRC, Gerber and undo.
+##
 ## FAIL-CLOSED MID-BATCH: create_trace_entity refusing net i is defensive
 ## (bus_plan already checked has_net/layer) but handled anyway — every trace
 ## already created THIS call is rolled back with data.remove_trace before
@@ -8657,17 +8762,45 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	var widths: Array = plan.get("widths", [])
 	var polylines: Array = plan.get("polylines", [])
 	var layer: String = str(plan.get("layer", ""))
+	var station: Dictionary = _bus_station_runs(plan)
+	if not str(station["error"]).is_empty():
+		return {"ok": false, "error": str(station["error"]), "findings": []}
+	var station_active: bool = bool(station["active"])
+	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var created_ids: Array[String] = []
+	var created_via_ids: Array[String] = []
 	for i in range(nets.size()):
-		var trace = data.create_trace_entity(str(nets[i]), layer, polylines[i], float(widths[i]))
-		if trace == null:
-			for tid in created_ids:
-				data.remove_trace(tid)
-			return {"ok": false, "error": "Bus was refused by the board model on net %s." % str(nets[i]), "findings": []}
-		created_ids.append(str(trace.id))
+		var poly: PackedVector2Array = polylines[i]
+		var runs: Array = [poly]
+		var run_layers: Array = [layer]
+		if station_active:
+			var cut: int = int((station["splits"] as Array)[i])
+			runs = [poly.slice(0, cut + 1), poly.slice(cut)]
+			run_layers = [layer, str(station["layer"])]
+		for r in range(runs.size()):
+			var trace = data.create_trace_entity(
+				str(nets[i]), str(run_layers[r]), runs[r], float(widths[i]))
+			if trace == null:
+				_bus_rollback(data, created_ids, created_via_ids)
+				return {"ok": false, "error": "Bus was refused by the board model on net %s." % str(nets[i]), "findings": []}
+			created_ids.append(str(trace.id))
+		if not station_active:
+			continue
+		var via_id := str(data.add_via({
+			"position": (station["points"] as Array)[i],
+			"net_name": str(nets[i]),
+			"size": float(plan.get("via_size_mm", _BUS_DEFAULT_VIA_SIZE_MM)),
+			"drill": float(plan.get("via_drill_mm", _BUS_DEFAULT_VIA_DRILL_MM)),
+			"from_layer": str(via_span[0]), "to_layer": str(via_span[1]),
+		}))
+		if via_id.is_empty():
+			_bus_rollback(data, created_ids, created_via_ids)
+			return {"ok": false, "error": "The board model refused the via station on net %s." % str(nets[i]), "findings": []}
+		created_via_ids.append(via_id)
 	data.save_to_history(history_label)
-	return {"ok": true, "error": "", "trace_ids": created_ids, "nets": nets,
-		"widths": widths, "layer": layer, "findings": plan.get("findings", [])}
+	return {"ok": true, "error": "", "trace_ids": created_ids, "via_ids": created_via_ids,
+		"nets": nets, "widths": widths, "layer": layer,
+		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", [])}
 
 
 ## GHOST twin of bus_commit_plan: the SAME plan and the SAME gate (buildable
@@ -8706,21 +8839,31 @@ static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 	var polylines: Array = plan.get("polylines", [])
 	var layer: String = str(plan.get("layer", ""))
 	var revision: int = int(data.board_revision) if data != null else 0
+	var station: Dictionary = _bus_station_runs(plan)
+	if not str(station["error"]).is_empty():
+		return {"ok": false, "error": str(station["error"]), "findings": []}
 	var landed: Array = []
 	var holds: Array = []
 	for i in range(nets.size()):
 		var poly: PackedVector2Array = polylines[i]
+		# Segment j runs poly[j]→poly[j+1], so the cut index is the FIRST
+		# segment on the far side of the via.
+		var cut: int = int((station["splits"] as Array)[i]) if bool(station["active"]) else -1
 		var segs: Array = []
 		for j in range(poly.size() - 1):
 			segs.append({
 				"start": [poly[j].x, poly[j].y],
 				"end": [poly[j + 1].x, poly[j + 1].y],
-				"layer": layer,
+				"layer": layer if (cut < 0 or j < cut) else str(station["layer"]),
 			})
+		var ghost_vias: Array = []
+		if cut >= 0:
+			var at: Vector2 = (station["points"] as Array)[i]
+			ghost_vias.append([at.x, at.y])
 		var rec: Dictionary = {
 			"net": str(nets[i]),
 			"segments": segs,
-			"vias": [],
+			"vias": ghost_vias,
 			"source_hints": [],
 			"source_hint_ids": [],
 			"width_override": float(widths[i]),
@@ -8739,7 +8882,8 @@ static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 	return {
 		"ok": true, "error": "",
 		"proposed": landed.size(), "candidates": landed, "holds": holds,
-		"nets": nets, "widths": widths, "layer": layer, "findings": findings,
+		"nets": nets, "widths": widths, "layer": layer,
+		"via_station_layer": str(station["layer"]), "findings": findings,
 	}
 
 
@@ -8776,7 +8920,8 @@ static func bus_findings_sentence(findings: Array) -> String:
 
 ## Shared arg → plan parsing for the two bus MCP handlers (_route_bus_direct
 ## and _workspace_propose_bus): ordered nets + spine points + one source and one
-## target pad per net + layer + width_override, then bus_plan. Returns
+## target pad per net + layer + width_override + the optional via station, then
+## bus_plan. Returns
 ## bus_plan's own {ok, error, ...} shape so a parse refusal and a plan refusal
 ## surface identically.
 static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
@@ -8811,7 +8956,26 @@ static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
 			return {"ok": false, "error": "layer is required (the board declares %d copper layers, not exactly 1)." % declared.size()}
 
 	var width_override: float = float(args.get("width_override", 0.0))
-	return bus_plan(data, nets, pts, layer, sources, targets, width_override)
+
+	# THE VIA STATION IS ONE FACT IN TWO ARGUMENTS, so half of it is refused
+	# rather than half-honoured: an index with no layer would silently plan a
+	# single-layer bus, and a layer with no index a bus whose second layer
+	# nothing ever reaches.
+	var station_index := -1
+	var station_layer := ""
+	if args.has("via_station_index") or args.has("via_station_layer"):
+		if not args.has("via_station_index") or not args.has("via_station_layer"):
+			return {"ok": false, "error": "a via station needs BOTH via_station_index (which spine vertex carries it) and via_station_layer (the copper layer the bus continues on past it)."}
+		var raw_station: Variant = args.get("via_station_index")
+		# JSON numbers arrive as floats; only an integral one names a vertex.
+		if not (raw_station is int or raw_station is float) or int(raw_station) < 0 \
+				or float(raw_station) != floorf(float(raw_station)):
+			return {"ok": false, "error": "via_station_index must be a non-negative integer index into points"}
+		station_index = int(raw_station)
+		station_layer = str(args.get("via_station_layer", ""))
+
+	return bus_plan(data, nets, pts, layer, sources, targets, width_override,
+		station_index, station_layer)
 
 
 ## Parse an MCP pin-ref array ("U1.1", ...) into a PackedStringArray, or null
@@ -8858,6 +9022,7 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 		"nets": out.get("nets", []),
 		"widths": out.get("widths", []),
 		"layer": str(out.get("layer", "")),
+		"via_station_layer": str(out.get("via_station_layer", "")),
 		"findings": findings,
 		"note": "ghost candidates landed in the routing workspace; no copper was committed — resolve via minerva_pcb_workspace_commit/_reject/pin.",
 	}
@@ -9358,18 +9523,20 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	if not bool(plan.get("buildable", false)):
 		return _err(str(plan.get("error", "Bus was refused.")))
 
-	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d traces)" % (plan.get("nets", []) as Array).size())
+	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d nets)" % (plan.get("nets", []) as Array).size())
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "Bus was refused by the board model.")))
 
 	var findings: Array = result.get("findings", []) if result.get("findings", []) is Array else []
 	var reply: Dictionary = {
 		"trace_ids": result.get("trace_ids", []),
+		"via_ids": result.get("via_ids", []),
 		"nets": result.get("nets", []),
 		"widths": result.get("widths", []),
 		"layer": str(result.get("layer", "")),
+		"via_station_layer": str(result.get("via_station_layer", "")),
 		"findings": findings,
-		"undo_note": "one board history step: Ctrl+Z (or PCBData.undo) removes all traces this call created.",
+		"undo_note": "one board history step: Ctrl+Z (or PCBData.undo) removes all traces and vias this call created.",
 	}
 	if not findings.is_empty():
 		reply["note"] = "%d bus rule(s) broke and the copper landed anyway so it can be corrected: %s. Fix it in place (move a pad, redraw the spine, minerva_pcb_delete_traces) or undo the whole step." \
