@@ -4016,13 +4016,48 @@ static func _list_vias(host, _args: Dictionary) -> Dictionary:
 ## validate, create_trace_entity to build — rather than a parallel one. One
 ## implementation, one set of refusals, one undo history. Run
 ## minerva_pcb_drc / minerva_pcb_drc_geometric afterwards; the reply says so.
+##
+## TRACE-END ANCHORS (`start` / `end`, each {trace_id, end: "start"|"end"}) are
+## the verb's twin of the canvas's third anchor kind, with the same rules: the
+## end must be FREE (pcb_data.free-end rule), a start end lends the run its net
+## and layer (a supplied net_name/layer must agree), an end end must already
+## agree on both, and the result is the SAME trace EXTENDED — one journal row,
+## one undo step, id kept — never a second entity. A gesture that starts on a
+## trace end and also finishes on one extends the start trace only, exactly as
+## the click does.
 static func _add_trace(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
 
+	var start_end: Dictionary = {}
+	if args.has("start"):
+		start_end = _trace_end_arg(data, args["start"], "start")
+		if not bool(start_end.get("ok", false)):
+			return start_end["reply"]
+	var finish_end: Dictionary = {}
+	if args.has("end"):
+		finish_end = _trace_end_arg(data, args["end"], "end")
+		if not bool(finish_end.get("ok", false)):
+			return finish_end["reply"]
+	var extending: bool = not start_end.is_empty() or not finish_end.is_empty()
+	if extending and args.has("width_mm"):
+		return _err("width_mm cannot be set when extending a trace — the trace keeps its own width")
+
 	var net_name: String = str(args.get("net_name", ""))
 	var layer_in: String = str(args.get("layer", ""))
+	if not start_end.is_empty():
+		var lend = start_end["trace"]
+		if not net_name.is_empty() and net_name != str(lend.net_name):
+			return {"success": false, "error": "trace_end_net_mismatch",
+				"note": "the start trace end is on net '%s', not '%s' — a trace inherits its net from the end it starts on; omit net_name"
+					% [str(lend.net_name), net_name]}
+		net_name = str(lend.net_name)
+		if not layer_in.is_empty() and PcbLayerStack.kicad_to_canon(layer_in) != str(lend.layer):
+			return {"success": false, "error": "trace_end_layer_mismatch",
+				"note": "the start trace end is on layer '%s', not '%s' — one polyline lives on one layer; omit layer"
+					% [str(lend.layer), layer_in]}
+		layer_in = str(lend.layer)
 	if layer_in.is_empty():
 		return _err("layer is required (\"top\", \"bottom\", \"in1\"..., or a KiCad copper name)")
 	var layer: String = PcbLayerStack.kicad_to_canon(layer_in)
@@ -4042,11 +4077,24 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 	if not (raw_points is Array):
 		return _err("points must be an array of [x_mm, y_mm] pairs")
 	var pts := PackedVector2Array()
+	if not start_end.is_empty():
+		pts.append(start_end["position"] as Vector2)
 	for entry in (raw_points as Array):
 		var pair: Variant = _parse_xy_pair(entry)
 		if pair == null:
 			return _err("every entry in points must be [x_mm, y_mm]; got %s" % str(entry))
 		pts.append(pair as Vector2)
+	if not finish_end.is_empty():
+		var target = finish_end["trace"]
+		if str(target.layer) != layer:
+			return {"success": false, "error": "trace_end_layer_mismatch",
+				"note": "the end trace end is on layer '%s' and this run is on '%s' — one polyline lives on one layer; end on a via to change layer"
+					% [str(target.layer), layer]}
+		if str(target.net_name) != net_name:
+			return {"success": false, "error": "trace_end_net_mismatch",
+				"note": "the end trace end is on net '%s', not '%s' — one polyline cannot carry two nets; end on a pad or via instead"
+					% [str(target.net_name), net_name]}
+		pts.append(finish_end["position"] as Vector2)
 
 	# THE HUMAN TOOL'S OWN GUARD, not a re-implementation of it. Covers the
 	# net/layer/point-count rules in one place, so an agent and a click are
@@ -4069,6 +4117,38 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 		if is_nan(width) or is_inf(width) or width < 0.0:
 			return _err("width_mm must be a positive number, or 0 to use the board's authored width (got %s)"
 				% str(args["width_mm"]))
+	if extending:
+		# The canvas's rule: a run that STARTED on a trace end extends that
+		# trace as drawn; one that only FINISHED on one extends the target with
+		# the run reversed, so the polyline stays one piece.
+		var grow: Dictionary = start_end if not start_end.is_empty() else finish_end
+		var run := pts.duplicate()
+		if start_end.is_empty():
+			run.reverse()
+		var grown_id: String = str((grow["trace"]).id)
+		var error: String = str(data.extend_trace(grown_id, str(grow["which"]), run))
+		if not error.is_empty():
+			return {"success": false, "error": "trace_not_extendable", "note": error}
+		data.save_to_history("Extend trace")
+		var grown = data.get_trace(grown_id)
+		var all_points: Array = []
+		for p in grown.waypoints:
+			all_points.append([_mm((p as Vector2).x), _mm((p as Vector2).y)])
+		return _ok({
+			"trace_id": grown_id,
+			"extended_from": str(grow["which"]),
+			"net_name": net_name,
+			"layer": layer,
+			"width_mm": _mm(float(grown.width)),
+			"point_count": grown.waypoints.size(),
+			"segment_count": maxi(0, grown.waypoints.size() - 1),
+			"points": all_points,
+			"trace_count": data.traces.size(),
+			"note": ("the existing trace was extended in place (same id) — this verb runs no DRC, "
+				+ "exactly as the canvas Trace tool does not. Run minerva_pcb_drc and "
+				+ "minerva_pcb_drc_geometric to find out what it touched."),
+		})
+
 	var trace = data.create_trace_entity(net_name, layer, pts, width)
 	if trace == null:
 		return _err("the board model refused this trace — see the log")
@@ -4090,6 +4170,37 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 			+ "Trace tool does not. Run minerva_pcb_drc (connectivity) and "
 			+ "minerva_pcb_drc_geometric (clearances) to find out what it touched."),
 	})
+
+
+## Resolve one of _add_trace's `start` / `end` arguments — {trace_id, end} — to
+## {ok, trace, which, position} or {ok: false, reply}. The end must exist and
+## be FREE by the model's rule (pcb_data.trace_end_is_joined): an end already
+## on a pad, in a via or on same-net copper is refused as trace_end_not_free,
+## the same end the canvas declines to offer as an anchor.
+static func _trace_end_arg(data, raw: Variant, label: String) -> Dictionary:
+	if not (raw is Dictionary):
+		return {"ok": false, "reply": _err("%s must be {trace_id, end: \"start\"|\"end\"}" % label)}
+	var spec: Dictionary = raw
+	var trace_id: String = str(spec.get("trace_id", ""))
+	var which: String = str(spec.get("end", ""))
+	if trace_id.is_empty():
+		return {"ok": false, "reply": _err("%s.trace_id is required" % label)}
+	if which != data.TRACE_END_START and which != data.TRACE_END_END:
+		return {"ok": false, "reply": _err("%s.end must be \"start\" or \"end\", got \"%s\"" % [label, which])}
+	var trace = data.get_trace(trace_id)
+	if trace == null:
+		return {"ok": false, "reply": {"success": false, "error": "no_such_trace",
+			"note": "no trace '%s' on this board" % trace_id}}
+	if trace.waypoints.size() < 2:
+		return {"ok": false, "reply": {"success": false, "error": "trace_end_not_free",
+			"note": "trace '%s' has no run to continue" % trace_id}}
+	if data.trace_end_is_joined(trace_id, which):
+		return {"ok": false, "reply": {"success": false, "error": "trace_end_not_free",
+			"note": "the %s end of trace '%s' already touches a pad, a via or same-net copper — a joined end is not somewhere to continue from"
+				% [which, trace_id]}}
+	var position: Vector2 = trace.waypoints[0] if which == data.TRACE_END_START \
+		else trace.waypoints[trace.waypoints.size() - 1]
+	return {"ok": true, "trace": trace, "which": which, "position": position}
 
 
 ## Propose ONE via — a ghost via for review, the Proposals-area twin of

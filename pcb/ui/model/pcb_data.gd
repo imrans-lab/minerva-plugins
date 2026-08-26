@@ -968,6 +968,135 @@ func set_trace_waypoints(trace_id: String, points) -> void:
 	trace.waypoints = wp
 
 
+## The two names a trace END goes by, in extend_trace and free_trace_end_at.
+const TRACE_END_START := "start"
+const TRACE_END_END := "end"
+
+## Coincidence epsilon (mm) for "this trace end touches that copper" — the same
+## pad-centre slack the dangling-copper sweep grants, applied to copper distance.
+const TRACE_END_JOIN_EPS_MM := 0.05
+
+
+## Is the given end of a trace already JOINED to other copper: on a pad's land,
+## inside a via's disc, or on a same-net trace? An end that is joined is not a
+## loose end, so it is not something to continue drawing from.
+##
+## The credit is the copper's own geometry: pin_copper_distance for pads (0 on
+## the land), the via's radius for vias, and is_point_near (width/2 + eps) for
+## a same-net trace. A different-net trace under the end is a short, not a join,
+## and does not count. Zones are not consulted.
+func trace_end_is_joined(trace_id: String, end: String) -> bool:
+	var trace = get_trace(trace_id)
+	if trace == null or trace.waypoints.size() < 2:
+		return false
+	var pt: Vector2 = trace.waypoints[0] if end == TRACE_END_START \
+		else trace.waypoints[trace.waypoints.size() - 1]
+	for comp_id in components:
+		var comp = components[comp_id]
+		for pin_name in comp.get_all_pin_positions():
+			if comp.pin_copper_distance(str(pin_name), pt) <= TRACE_END_JOIN_EPS_MM:
+				return true
+	if not get_via_at(pt, TRACE_END_JOIN_EPS_MM).is_empty():
+		return true
+	for other_id in traces:
+		if other_id == trace_id:
+			continue
+		var other = traces[other_id]
+		if other.net_name == trace.net_name and other.is_point_near(pt, TRACE_END_JOIN_EPS_MM):
+			return true
+	return false
+
+
+## The FREE trace end nearest `position` within `tol` (inclusive), or {}:
+## {trace_id, end, position, net}. Which end is asked of the geometry library
+## (end_index_at, start first); a joined end is skipped, so a two-point stub
+## shorter than `tol` whose start is joined still offers its free end.
+##
+## `visible_filter` is the view's predicate, applied inside the walk exactly as
+## get_trace_at applies it. Nearest wins; ties keep the earlier trace.
+func free_trace_end_at(position: Vector2, tol: float, visible_filter := Callable()) -> Dictionary:
+	var best: Dictionary = {}
+	var best_d := INF
+	for trace_id in traces:
+		var trace = traces[trace_id]
+		if visible_filter.is_valid() and not visible_filter.call(trace):
+			continue
+		var pts := PackedVector2Array(trace.waypoints)
+		if pts.size() < 2:
+			continue
+		var idx := PcbTraceGeometry.end_index_at(pts, position, tol)
+		if idx < 0:
+			continue
+		var last := pts.size() - 1
+		var candidates: Array = [idx]
+		if idx == 0 and pts[last].distance_to(position) <= tol:
+			candidates.append(last)
+		for i in candidates:
+			var end := TRACE_END_START if i == 0 else TRACE_END_END
+			if trace_end_is_joined(trace_id, end):
+				continue
+			var d := pts[i].distance_to(position)
+			if d < best_d:
+				best_d = d
+				best = {"trace_id": trace_id, "end": end, "position": pts[i],
+					"net": str(trace.net_name)}
+			break
+	return best
+
+
+## Grow a trace's polyline from one of its ends so it stays ONE piece: `points`
+## are ordered AWAY from that end (the end itself may lead them and is dropped,
+## as is any point repeating its predecessor). Appended after the last point
+## for TRACE_END_END, prepended in reverse before the first for TRACE_END_START.
+## Returns "" on success or the refusal in the model's words; a refusal changes
+## nothing. The trace keeps its id, net, layer and width — a polyline has one
+## of each.
+##
+## Journalled as ONE extend_trace row; history is NOT snapshotted here (the house
+## rule: the caller owns the undo step).
+func extend_trace(trace_id: String, end: String, points: PackedVector2Array) -> String:
+	var trace = get_trace(trace_id)
+	if trace == null:
+		return "No such trace \"%s\"." % trace_id
+	if end != TRACE_END_START and end != TRACE_END_END:
+		return "A trace end is \"%s\" or \"%s\", not \"%s\"." % [TRACE_END_START, TRACE_END_END, end]
+	if trace.waypoints.size() < 2:
+		return "Trace \"%s\" has no run to extend." % trace_id
+	var anchor: Vector2 = trace.waypoints[0] if end == TRACE_END_START \
+		else trace.waypoints[trace.waypoints.size() - 1]
+	var added := PackedVector2Array()
+	for p in points:
+		var previous: Vector2 = anchor if added.is_empty() else added[added.size() - 1]
+		if previous.is_equal_approx(p):
+			continue
+		added.append(p)
+	if added.is_empty():
+		return "Nothing to extend with — every point sits on the trace's %s." % end
+	var old_count: int = trace.waypoints.size()
+	if end == TRACE_END_END:
+		for p in added:
+			trace.waypoints.append(p)
+	else:
+		var grown: Array[Vector2] = []
+		for i in range(added.size() - 1, -1, -1):
+			grown.append(added[i])
+		for p in trace.waypoints:
+			grown.append(p)
+		trace.waypoints = grown
+	record_change("extend_trace", {
+		"trace_id": trace_id,
+		"end": end,
+		"net_name": trace.net_name,
+		"layer": trace.layer,
+		"old_point_count": old_count,
+		"point_count": trace.waypoints.size(),
+		"added_count": added.size(),
+	})
+	trace_changed.emit(trace_id)
+	data_changed.emit()
+	return ""
+
+
 ## Clear all traces and vias.
 ##
 ## Per the ID COUNTER INVARIANT (see the statement near _next_trace_id), this
@@ -2348,7 +2477,7 @@ func trace_author_error(net_name: String, layer: String, point_count: int) -> St
 	if point_count < 2:
 		return "A trace needs at least 2 points (%d placed)." % point_count
 	if net_name.is_empty():
-		return "A trace must name a net — the one carried by the pad or via it starts on."
+		return "A trace must name a net — the one carried by the pad, via or trace end it starts on."
 	if not has_net(net_name):
 		return "Net \"%s\" is not declared on this board." % net_name
 	if layer.is_empty():

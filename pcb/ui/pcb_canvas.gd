@@ -797,6 +797,7 @@ const TRACE_PAD_SNAP_MM := 1.27
 ## type "Pad".
 const ANCHOR_PAD := "pad"
 const ANCHOR_VIA := "via"
+const ANCHOR_TRACE_END := "trace_end"
 ## Width in mm the trace tool is armed to, set by the panel's width box. 0.0 —
 ## the resting state — means "use the board's design rule"
 ## (pcb_data.authored_trace_width), which is what the tool did before this control
@@ -815,6 +816,13 @@ var _trace_layer: String = ""
 ## "U1.22" (a pad) or "via_3" (a via) — the anchor the trace started from, for
 ## the preview label, the commit message and the ratsnest focus lock.
 var _trace_start_ref: String = ""
+## {trace_id, end} when the gesture STARTED from a free trace end: the commit
+## then extends that trace instead of minting a new one. Empty otherwise.
+var _trace_extend: Dictionary = {}
+## {trace_id, end} when the gesture FINISHED on a free trace end and started on
+## a pad or via: the commit extends that trace with the run, reversed. Set only
+## for the press that commits; empty otherwise.
+var _trace_join: Dictionary = {}
 ## Live rubber-band point (the cursor), only meaningful while drawing.
 var _trace_preview: Vector2 = Vector2.ZERO
 var _trace_has_preview: bool = false
@@ -7888,8 +7896,8 @@ func _trace_via_at(world_pos: Vector2) -> Dictionary:
 	}
 
 
-## What a trace-tool click may anchor to: a PAD, else a VIA, else {} — and {} is
-## precisely what makes the click a waypoint instead.
+## What a trace-tool click may anchor to: a PAD, else a VIA, else a free TRACE
+## END, else {} — and {} is precisely what makes the click a waypoint instead.
 ##
 ## PAD FIRST, deliberately. The two hit tests can both claim one click only where
 ## a via sits inside a pad (via-in-pad), and there the PAD keeps winning: every
@@ -7905,7 +7913,37 @@ func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
 	var pad_hit := _trace_pad_at(world_pos)
 	if not pad_hit.is_empty():
 		return pad_hit
-	return _trace_via_at(world_pos)
+	var via_hit := _trace_via_at(world_pos)
+	if not via_hit.is_empty():
+		return via_hit
+	return _trace_end_at(world_pos)
+
+
+## Resolve a click to a FREE trace end, in the same anchor shape plus `end`
+## ("start" | "end"): {ref: trace_id, kind, end, position, net}. The net is the
+## trace's own, and a netless trace comes back with net "" so _start_trace can
+## refuse it BY NAME, exactly as a netless via is.
+##
+## THIRD RUNG of the ladder, below pad and via: where a pad or a via and a trace
+## end are both within snap, the pad or via wins — every click that resolved
+## before this rung existed still resolves the same way. "Free" is the model's
+## rule (pcb_data.free_trace_end_at): an end already on a pad, in a via or on
+## same-net copper is joined, and a joined end is not an anchor. Same snap
+## radius as a pad (TRACE_PAD_SNAP_MM) and the same visibility rule as the
+## trace pick (_trace_visible): hidden copper is not clickable copper.
+func _trace_end_at(world_pos: Vector2) -> Dictionary:
+	if data == null:
+		return {}
+	var hit: Dictionary = data.free_trace_end_at(world_pos, TRACE_PAD_SNAP_MM, _trace_visible)
+	if hit.is_empty():
+		return {}
+	return {
+		"ref": str(hit["trace_id"]),
+		"kind": ANCHOR_TRACE_END,
+		"end": str(hit["end"]),
+		"position": hit["position"],
+		"net": str(hit["net"]),
+	}
 
 
 ## How an anchor is NAMED to the user: "Pad U1.1", "Via via_3". Now that two
@@ -7914,7 +7952,10 @@ func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
 ## a PAD — the pre-anchor shape, which several callers (and test_pcb_ratsnest's
 ## direct _start_trace call) still hand in.
 static func _trace_anchor_label(hit: Dictionary) -> String:
-	return "%s %s" % [str(hit.get("kind", ANCHOR_PAD)).capitalize(), str(hit.get("ref", ""))]
+	var kind := str(hit.get("kind", ANCHOR_PAD))
+	if kind == ANCHOR_TRACE_END:
+		return "Trace end %s" % str(hit.get("ref", ""))
+	return "%s %s" % [kind.capitalize(), str(hit.get("ref", ""))]
 
 
 ## The width a new trace is drawn and committed at, in mm.
@@ -8001,14 +8042,20 @@ func _trace_append_point(point: Vector2) -> bool:
 ## under the cursor plainly IS copper.
 func _start_trace(hit: Dictionary) -> void:
 	if hit.is_empty():
-		trace_tool_message.emit("Start a trace on a pad or a via — that is where its net comes from.")
+		trace_tool_message.emit("Start a trace on a pad, a via or a free trace end — that is where its net comes from.")
 		return
 	var anchor_net := str(hit.get("net", ""))
 	if anchor_net.is_empty():
-		trace_tool_message.emit("%s is on no net — a trace inherits its net from the pad or via it starts on."
+		trace_tool_message.emit("%s is on no net — a trace inherits its net from the pad, via or trace end it starts on."
 			% _trace_anchor_label(hit))
 		return
+	var kind := str(hit.get("kind", ANCHOR_PAD))
+	# A trace end CONTINUES its trace, so the layer is that trace's own, not the
+	# working layer: a polyline lives on one layer, and the run being added is
+	# part of it.
 	var layer := trace_author_layer()
+	if kind == ANCHOR_TRACE_END:
+		layer = str(data.get_trace(str(hit.get("ref", ""))).layer)
 	if layer.is_empty():
 		trace_tool_message.emit("This board declares no copper layer to draw a trace on.")
 		return
@@ -8018,6 +8065,9 @@ func _start_trace(hit: Dictionary) -> void:
 	_trace_start_ref = str(hit.get("ref", ""))
 	_trace_points = PackedVector2Array([hit.get("position", Vector2.ZERO)])
 	_trace_has_preview = false
+	_trace_extend = {}
+	if kind == ANCHOR_TRACE_END:
+		_trace_extend = {"trace_id": _trace_start_ref, "end": str(hit.get("end", ""))}
 	# The one place the destination is chosen. extract() is O(board) and runs
 	# once per gesture here, not per frame — and only for a PAD start, because
 	# focus() answers by matching a PAD ref (see PcbRatsnest.focus): handed a via
@@ -8025,10 +8075,14 @@ func _start_trace(hit: Dictionary) -> void:
 	# therefore locks no destination; the ratsnest draws exactly as it does when
 	# no gesture is in progress.
 	_trace_focus = {}
-	if str(hit.get("kind", ANCHOR_PAD)) == ANCHOR_PAD:
+	if kind == ANCHOR_PAD:
 		_trace_focus = PcbRatsnest.focus(PcbRatsnest.extract(data), _trace_start_ref)
-	trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad or via to finish." % [
-		_trace_start_ref, _trace_net, _trace_layer])
+	if kind == ANCHOR_TRACE_END:
+		trace_tool_message.emit("Extending %s from its %s end (%s) on %s — click waypoints, click a pad, via or trace end to finish." % [
+			_trace_start_ref, str(hit.get("end", "")), _trace_net, _trace_layer])
+	else:
+		trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad, via or trace end to finish." % [
+			_trace_start_ref, _trace_net, _trace_layer])
 	queue_redraw()
 
 
@@ -8049,7 +8103,34 @@ func _start_trace(hit: Dictionary) -> void:
 ## asymmetry is not an oversight: the start is where the net is INHERITED, so a
 ## netless anchor there leaves the trace with no answer at all, while at the end
 ## the trace already has its net and the anchor merely says where it stops.
+##
+## A TRACE END is held to a STRICTER rule than a pad or via, because finishing
+## on one does not merely stop there — it makes the run PART of that trace. A
+## polyline has one net and one layer, so a trace end on another net, or on
+## another layer, is refused by name and the placed points are kept (finish on
+## a pad or a via instead; a via is how a run changes layer). A gesture that
+## itself STARTED from a trace end extends ITS OWN trace with the run, and the
+## target trace is left as it is — the run ends on the target's end point, so
+## the two are joined copper without being one polyline.
 func _finish_trace_on_anchor(hit: Dictionary) -> void:
+	if str(hit.get("kind", ANCHOR_PAD)) == ANCHOR_TRACE_END:
+		var target = data.get_trace(str(hit.get("ref", "")))
+		if target == null:
+			return
+		if str(target.layer) != _trace_layer:
+			trace_tool_message.emit("%s is on %s and this run is on %s — one polyline lives on one layer; finish on a via to change layer." % [
+				_trace_anchor_label(hit), str(target.layer), _trace_layer])
+			return
+		if str(target.net_name) != _trace_net:
+			trace_tool_message.emit("%s is on net %s, not %s — one polyline cannot carry two nets; finish on a pad or via instead." % [
+				_trace_anchor_label(hit), str(target.net_name), _trace_net])
+			return
+		_trace_append_point(hit.get("position", Vector2.ZERO))
+		_trace_has_preview = false
+		if _trace_extend.is_empty():
+			_trace_join = {"trace_id": str(hit.get("ref", "")), "end": str(hit.get("end", ""))}
+		_commit_trace()
+		return
 	_trace_append_point(hit.get("position", Vector2.ZERO))
 	_trace_has_preview = false
 	var end_net := str(hit.get("net", ""))
@@ -8081,7 +8162,31 @@ func _commit_trace(warning: String = "") -> void:
 	if not refusal.is_empty():
 		# Keep the placed points: the fix for "needs 2 points" is another click,
 		# not redrawing from scratch.
+		_trace_join = {}
 		trace_tool_message.emit(refusal)
+		return
+
+	# EXTENSION, not a new entity: the gesture began on a free trace end
+	# (_trace_extend) or ended on one (_trace_join). The run is handed to the
+	# model ordered AWAY from that end — as drawn when it started there, reversed
+	# when it finished there — and the trace keeps its id, net, layer and width.
+	if not _trace_extend.is_empty() or not _trace_join.is_empty():
+		var grow: Dictionary = _trace_extend if not _trace_extend.is_empty() else _trace_join
+		var run := _trace_points.duplicate()
+		if _trace_extend.is_empty():
+			run.reverse()
+		var error: String = data.extend_trace(str(grow["trace_id"]), str(grow["end"]), run)
+		if not error.is_empty():
+			_trace_join = {}
+			trace_tool_message.emit(error)
+			return
+		data.save_to_history("Extend trace")
+		var grown_count: int = data.get_trace(str(grow["trace_id"])).waypoints.size()
+		var extended := "Extended %s from its %s end on %s (%s, now %d points)." % [
+			str(grow["trace_id"]), str(grow["end"]), _trace_layer, _trace_net, grown_count]
+		_reset_trace_draw()
+		trace_tool_message.emit(extended)
+		queue_redraw()
 		return
 
 	# create_trace_entity's contract is unchanged: it reads a positive width as
@@ -8126,6 +8231,8 @@ func _reset_trace_draw() -> void:
 	_trace_net = ""
 	_trace_layer = ""
 	_trace_start_ref = ""
+	_trace_extend = {}
+	_trace_join = {}
 	_trace_has_preview = false
 	# The focus is gesture state and leaves nothing behind: every commit, cancel
 	# and tool switch reaches here, and the next gesture computes its own.

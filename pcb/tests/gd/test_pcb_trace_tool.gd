@@ -36,6 +36,7 @@ const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.
 ## The MCP verb surface. Section 6 asserts the AGENT path and the CLICK path
 ## land the same copper, so it has to call the real verb, not a stand-in.
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const PCBTraceScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_trace.gd")
 
 var _pass := 0
 var _fail := 0
@@ -103,6 +104,7 @@ func _init() -> void:
 	_test_double_click_second_press()
 	_test_netless_refusal_names_every_anchor_kind()
 	_test_working_layer_is_not_the_view()
+	_test_trace_end_anchor()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -899,3 +901,177 @@ func _trace_layers(data) -> Array:
 		out.append(str((t as Dictionary).get("layer", "")))
 	out.sort()
 	return out
+
+
+## 10. THE TRACE-END ANCHOR: a free end continues its trace.
+##
+## FIXTURE: a VCC trace from pad U1.1 (10,10) to (20,10). Its start end sits on
+## the pad (joined); its end at (20,10) touches nothing — the nearest pad, R1.1,
+## is 10 mm away against a 1.27 mm snap, and there is no via — so it is FREE.
+##
+## ORACLE, every leg: the SERIALIZED board (trace count, id, every point),
+## data.history / data.change_journal, and the model's own free_trace_end_at —
+## never the tool's message and never its buffers. The click's result and the
+## verb's are compared point for point.
+func _test_trace_end_anchor() -> void:
+	print("\n-- trace-end anchor: a free end continues its trace --")
+	var stub_pts: Array = [Vector2(10.0, 10.0), Vector2(20.0, 10.0)]
+
+	# (a) START from the free end, finish on pad R1.1: ONE trace, the ORIGINAL id,
+	# waypoints (10,10),(20,10),(24,16),(30,10). Clicked 0.3 mm off the end so a
+	# kept click point would read (20.3,10) and fail the exact-point check.
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var seed = data.create_trace_entity("VCC", "top", stub_pts)
+	data.save_to_history("baseline")
+	var seed_id: String = str(seed.id)
+	var h0: int = data.history.size()
+	var j0: int = data.change_journal.size()
+	canvas._handle_trace_click(Vector2(20.3, 10.0), false)
+	canvas._handle_trace_click(Vector2(24.0, 16.0), false)
+	canvas._handle_trace_click(Vector2(30.0, 10.0), false)
+	var after: Array = _serialized_traces(data)
+	check("(a) still exactly ONE trace on the board", after.size() == 1, "traces=%d" % after.size())
+	var grown_pts: Array = _points_of(after[0]) if after.size() == 1 else []
+	check("(a) …with the ORIGINAL id", after.size() == 1 and str(after[0].get("id", "")) == seed_id,
+			str(after))
+	check("(a) …and the run appended after the free end: (10,10),(20,10),(24,16),(30,10)",
+			grown_pts == [Vector2(10, 10), Vector2(20, 10), Vector2(24, 16), Vector2(30, 10)],
+			str(grown_pts))
+	check("(a) history grew by exactly ONE step", data.history.size() - h0 == 1,
+			"delta=%d" % (data.history.size() - h0))
+	var rows: Array = []
+	for e in data.change_journal.slice(j0):
+		rows.append(str((e as Dictionary).get("action", "")))
+	check("(a) exactly one journal row, and it is extend_trace (no add_trace)",
+			rows == ["extend_trace"], str(rows))
+	check("(a) undo restores the two-point stub",
+			data.undo() and _points_of(_serialized_traces(data)[0]) == stub_pts)
+	data.redo()
+	canvas.free()
+
+	# (b) FINISH on a free end. Trace R1.1 (30,10) -> (20,10): its END is free.
+	# Draw from pad U1.1 (10,10) and click the free end: the run is appended to
+	# the target, reversed, so the polyline stays one piece: (30,10),(20,10),(10,10).
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	var target = data.create_trace_entity("VCC", "top", [Vector2(30.0, 10.0), Vector2(20.0, 10.0)])
+	data.save_to_history("baseline")
+	h0 = data.history.size()
+	canvas._handle_trace_click(Vector2(10.0, 10.0), false)
+	canvas._handle_trace_click(Vector2(20.3, 10.0), false)
+	after = _serialized_traces(data)
+	check("(b) finishing on a free end leaves ONE trace", after.size() == 1, "traces=%d" % after.size())
+	check("(b) …the target's own id", after.size() == 1 and str(after[0].get("id", "")) == str(target.id))
+	check("(b) …grown by the run, reversed: (30,10),(20,10),(10,10)",
+			after.size() == 1 and _points_of(after[0]) == [Vector2(30, 10), Vector2(20, 10), Vector2(10, 10)],
+			str(after))
+	check("(b) one history step", data.history.size() - h0 == 1)
+	canvas.free()
+
+	# (c) NETLESS trace end is refused BY NAME and writes nothing.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	var netless = PCBTraceScript.new()
+	netless.net_name = ""
+	netless.layer = "top"
+	netless.waypoints.append(Vector2(40.0, 30.0))
+	netless.waypoints.append(Vector2(46.0, 30.0))
+	data.add_trace(netless)
+	var msgs: Array = []
+	canvas.trace_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	j0 = data.change_journal.size()
+	canvas._handle_trace_click(Vector2(46.2, 30.0), false)
+	var said: String = str(msgs[0]) if not msgs.is_empty() else ""
+	check("(c) the netless trace end is refused, naming the kind and the trace",
+			said.contains("Trace end") and said.contains(str(netless.id)) and said.contains("no net"), said)
+	check("(c) …and nothing was written", data.change_journal.size() == j0
+			and _serialized_traces(data).size() == 1)
+	canvas.free()
+
+	# (d) A JOINED end is not an anchor. A: (10,10)->(20,10); B: (20,10)->(20,20),
+	# both VCC. A's end and B's start meet, so neither is free; B's end (20,20)
+	# is. Asked of the model first, then of a gesture: with nothing in progress a
+	# click beside the joined point is an off-anchor refusal, not a start.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	data.create_trace_entity("VCC", "top", [Vector2(10.0, 10.0), Vector2(20.0, 10.0)])
+	var b = data.create_trace_entity("VCC", "top", [Vector2(20.0, 10.0), Vector2(20.0, 20.0)])
+	check("(d) the model offers NO free end at the joint",
+			data.free_trace_end_at(Vector2(20.3, 10.0), canvas.TRACE_PAD_SNAP_MM).is_empty())
+	var free_end: Dictionary = data.free_trace_end_at(Vector2(20.0, 20.3), canvas.TRACE_PAD_SNAP_MM)
+	check("(d) …while B's far end IS free (so geometry, not the rule, excluded the joint)",
+			str(free_end.get("trace_id", "")) == str(b.id) and str(free_end.get("end", "")) == "end",
+			str(free_end))
+	msgs = []
+	canvas.trace_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	j0 = data.change_journal.size()
+	canvas._handle_trace_click(Vector2(20.3, 10.0), false)
+	check("(d) a click at the joint starts nothing (off-anchor refusal, board untouched)",
+			msgs.size() == 1 and str(msgs[0]).begins_with("Start a trace")
+			and data.change_journal.size() == j0, str(msgs))
+	canvas.free()
+
+	# (e) PAD WINS over a coincident free end. Trace (20,10)->(29,10): its end is
+	# 1 mm from R1.1's centre — a bare-point pad, so 1 mm from its copper: free,
+	# and inside the 1.27 mm snap of a click on the pad. Clicking the pad centre
+	# must start a NEW trace from R1.1, not continue the stub: after finishing
+	# on C1.1 the board holds TWO traces and the stub is unchanged.
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	var stub = data.create_trace_entity("VCC", "top", [Vector2(20.0, 10.0), Vector2(29.0, 10.0)])
+	check("(e) fixture: the stub's end IS a free end within snap of the pad click",
+			str(data.free_trace_end_at(Vector2(30.0, 10.0), canvas.TRACE_PAD_SNAP_MM).get("trace_id", ""))
+				== str(stub.id))
+	canvas._handle_trace_click(Vector2(30.0, 10.0), false)
+	canvas._handle_trace_click(Vector2(30.0, 25.0), false)
+	after = _serialized_traces(data)
+	check("(e) the pad won: a SECOND trace was minted", after.size() == 2, "traces=%d" % after.size())
+	var stub_after = data.get_trace(str(stub.id))
+	check("(e) …and the stub is untouched",
+			stub_after != null and PackedVector2Array(stub_after.waypoints)
+				== PackedVector2Array([Vector2(20.0, 10.0), Vector2(29.0, 10.0)]))
+	canvas.free()
+
+	# (f) MCP PARITY. The verb given the trace end as `start` and the two
+	# remaining points authors the SAME polyline (a) did, on the same id.
+	rig = _rig()
+	data = rig[1]
+	var host = rig[2]
+	var seed_v = data.create_trace_entity("VCC", "top", stub_pts)
+	data.save_to_history("baseline")
+	h0 = data.history.size()
+	var res: Dictionary = PanelTools._add_trace(host, {
+		"start": {"trace_id": str(seed_v.id), "end": "end"},
+		"points": [[24.0, 16.0], [30.0, 10.0]],
+	})
+	check("(f) the verb accepted a trace-end start with no net_name/layer", bool(res.get("success", false)), str(res))
+	after = _serialized_traces(data)
+	check("(f) the verb's polyline equals the click's, on the seed's id",
+			after.size() == 1 and str(after[0].get("id", "")) == str(seed_v.id)
+			and _points_of(after[0]) == grown_pts, "%s vs %s" % [str(after), str(grown_pts)])
+	check("(f) the verb reports extended_from=end and the grown point count",
+			str(res.get("extended_from", "")) == "end" and int(res.get("point_count", 0)) == 4, str(res))
+	check("(f) one history step for the verb too", data.history.size() - h0 == 1)
+	# The verb refuses what the click declines: the seed's START end sits on
+	# pad U1.1 and is joined.
+	res = PanelTools._add_trace(host, {
+		"start": {"trace_id": str(seed_v.id), "end": "start"}, "points": [[5.0, 5.0]]})
+	check("(f) a joined end is refused as trace_end_not_free",
+			str(res.get("error", "")) == "trace_end_not_free", str(res))
+	# …and a finish on a free end joins by extending, like (b).
+	var target_v = data.create_trace_entity("GND", "top", [Vector2(30.0, 25.0), Vector2(40.0, 25.0)])
+	res = PanelTools._add_trace(host, {
+		"net_name": "GND", "layer": "top", "points": [[40.0, 35.0]],
+		"end": {"trace_id": str(target_v.id), "end": "end"}})
+	var joined = data.get_trace(str(target_v.id))
+	check("(f) an `end` anchor appends the run reversed to the target: (30,25),(40,25),(40,35)",
+			bool(res.get("success", false)) and joined != null
+			and PackedVector2Array(joined.waypoints)
+				== PackedVector2Array([Vector2(30, 25), Vector2(40, 25), Vector2(40, 35)]), str(res))
+	rig[0].free()
