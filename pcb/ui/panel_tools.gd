@@ -64,6 +64,7 @@ const _PcbRouteCandidateScript := preload("model/pcb_route_candidate.gd")
 ## and pinned by test_pcb_bus_geometry.gd — a standing pin this file consumes
 ## and never edits). Zero imports itself.
 const BusGeom := preload("model/pcb_bus_geometry.gd")
+const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 const StagedEntities := preload("model/pcb_staged_entities.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
@@ -6110,8 +6111,7 @@ static func _route_quality(c) -> Dictionary:
 	var manhattan: float = 0.0
 	for run in runs:
 		var pts: Array = run
-		manhattan += absf((pts[pts.size() - 1] as Vector2).x - (pts[0] as Vector2).x) \
-			+ absf((pts[pts.size() - 1] as Vector2).y - (pts[0] as Vector2).y)
+		manhattan += PcbTraceGeometry.manhattan_distance(pts[0] as Vector2, pts[pts.size() - 1] as Vector2)
 		# Leg-walk, carrying the last NON-DEGENERATE direction across
 		# zero-length legs (cold review F3): a router that emits a degenerate
 		# zero-length segment AT a corner must not make that genuine bend
@@ -8595,47 +8595,6 @@ static func _bus_canon_layer(name: String) -> String:
 	return PcbLayerStack.kicad_to_canon(name) if PcbLayerStack.is_copper(name) else ""
 
 
-## The point on segment `a0`→`a1` nearest `p`; `a0` for a zero-length segment.
-static func _bus_closest_on_segment(a0: Vector2, a1: Vector2, p: Vector2) -> Vector2:
-	var ab: Vector2 = a1 - a0
-	var len2: float = ab.length_squared()
-	if len2 <= 0.0:
-		return a0
-	return a0 + ab * clampf((p - a0).dot(ab) / len2, 0.0, 1.0)
-
-
-## Closest approach between two segments: {distance, a, b}, `a` on the first and
-## `b` on the second.
-##
-## GENERAL, deliberately unlike pcb_bus_geometry.gd's own segment measurement,
-## which documents that everything reaching it is axis-aligned and therefore
-## reads "the bounding boxes overlap" as "the segments share a point". Bus
-## copper is axis-aligned; an EXISTING trace on the board is whatever a router
-## or a human left there, so a diagonal one would be reported as touching
-## whenever its box merely overlapped — a false short, on every crossing corner.
-##
-## Disjoint segments are two disjoint convex sets, so their closest approach is
-## attained at an endpoint of at least one of them: the intersection test plus
-## four point-to-segment projections are the whole answer. Collinear overlap,
-## which segment_intersects_segment does not report, lands an endpoint of one on
-## the other and so measures zero through the projections.
-static func _bus_segment_gap(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> Dictionary:
-	var hit: Variant = Geometry2D.segment_intersects_segment(a0, a1, b0, b1)
-	if hit is Vector2:
-		var at: Vector2 = hit
-		return {"distance": 0.0, "a": at, "b": at}
-	var best: Dictionary = {"distance": INF, "a": a0, "b": b0}
-	for p in [a0, a1]:
-		var q: Vector2 = _bus_closest_on_segment(b0, b1, p)
-		if p.distance_to(q) < float(best["distance"]):
-			best = {"distance": p.distance_to(q), "a": p, "b": q}
-	for p in [b0, b1]:
-		var q: Vector2 = _bus_closest_on_segment(a0, a1, p)
-		if p.distance_to(q) < float(best["distance"]):
-			best = {"distance": p.distance_to(q), "a": q, "b": p}
-	return best
-
-
 ## Every piece of copper ALREADY on the board a bus could land on, as
 ## [{kind, what, ref, net, all_layers, layers, bounds, ...}].
 ##
@@ -8711,7 +8670,7 @@ static func _bus_board_copper(data) -> Array:
 			"net": str(trace.net_name),
 			"all_layers": false, "layers": {canon: true},
 			"points": trace.waypoints, "half": half, "centre_only": false,
-			"bounds": _bus_points_bounds(trace.waypoints).grow(half + _BUS_FOREIGN_TOLERANCE_MM),
+			"bounds": PcbTraceGeometry.bounds(PackedVector2Array(trace.waypoints)).grow(half + _BUS_FOREIGN_TOLERANCE_MM),
 		})
 	return items
 
@@ -8861,20 +8820,6 @@ static func _bus_station_corridor_findings(data, nets: PackedStringArray,
 	return out
 
 
-## The axis-aligned box holding every point of `points`.
-static func _bus_points_bounds(points) -> Rect2:
-	var box := Rect2()
-	var first := true
-	for p in points:
-		var at: Vector2 = p
-		if first:
-			box = Rect2(at, Vector2.ZERO)
-			first = false
-		else:
-			box = box.expand(at)
-	return box
-
-
 ## Does this board item have copper on `probe_layer`? An empty `probe_layer`
 ## means the bus copper being measured spans the stack (a station via), and so
 ## meets everything.
@@ -8913,18 +8858,16 @@ static func _bus_item_on_layer(item: Dictionary, probe_layer: String) -> bool:
 static func _bus_item_gap(item: Dictionary, a0: Vector2, a1: Vector2) -> Dictionary:
 	var kind: String = str(item["kind"])
 	if kind == "trace":
-		var pts: Array = item["points"]
-		var best: Dictionary = {"distance": INF, "a": a0, "b": a0}
-		for i in range(pts.size() - 1):
-			var b0: Vector2 = pts[i]
-			var b1: Vector2 = pts[i + 1]
-			var g: Dictionary = _bus_segment_gap(a0, a1, b0, b1)
-			if float(g["distance"]) < float(best["distance"]):
-				best = g
+		# The GENERAL segment gap, deliberately unlike the bus module's own
+		# axis-aligned shortcut: an existing trace is whatever a router or a
+		# human left there, and a diagonal one would read as touching whenever
+		# its box merely overlapped — a false short on every crossing corner.
+		var best: Dictionary = PcbTraceGeometry.segment_to_polyline_gap(
+			PackedVector2Array(item["points"]), a0, a1)
 		best["distance"] = float(best["distance"]) - float(item["half"])
 		return best
 	var centre: Vector2 = item["centre"]
-	var near: Vector2 = _bus_closest_on_segment(a0, a1, centre)
+	var near: Vector2 = PcbTraceGeometry.closest_point_on_segment(centre, a0, a1)
 	if kind == "via":
 		return {"distance": near.distance_to(centre) - float(item["radius"]),
 			"a": near, "b": centre}
@@ -8996,7 +8939,7 @@ static func _bus_foreign_copper_findings(data, nets: PackedStringArray, widths: 
 		var bus_net: String = str(nets[index])
 		var half: float = float(probe["half"])
 		var probe_layer: String = str(probe["layer"])
-		var box: Rect2 = _bus_points_bounds(pts).grow(
+		var box: Rect2 = PcbTraceGeometry.bounds(pts).grow(
 			half + maxf(0.0, clearance) + _BUS_FOREIGN_TOLERANCE_MM)
 		for k in range(items.size()):
 			var item: Dictionary = items[k]

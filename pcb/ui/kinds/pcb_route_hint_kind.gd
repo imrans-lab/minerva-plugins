@@ -41,6 +41,7 @@ const _ANCHOR_TYPE_PAD := "pcb/pad"
 ## preload() consts.
 const _Self := preload("pcb_route_hint_kind.gd")
 const _PcbLayerStack := preload("../model/pcb_layer_stack.gd")
+const _PcbTraceGeometry := preload("../model/pcb_trace_geometry.gd")
 
 ## Anchor-marker HIT-TEST slack, document-space (board mm). Kept for
 ## hit_test()'s zoom-less corridor sweep only — DRAWN marker size is
@@ -1086,7 +1087,8 @@ static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, thr
 			continue
 		var seg_start := _to_vec2((seg as Dictionary).get("start", [0, 0]))
 		var seg_end := _to_vec2((seg as Dictionary).get("end", [0, 0]))
-		var proj := _project_on_segment(seg_start, seg_end, click)
+		var proj := _PcbTraceGeometry.closest_point_on_segment(click, seg_start, seg_end,
+			_PcbTraceGeometry.LEGACY_DEGENERATE_LEN_SQ)
 		var d := proj.distance_to(click)
 		if d < best_dist:
 			best_dist = d
@@ -1359,7 +1361,8 @@ func nearest_bend_insertion(annotation: Dictionary, doc_pos: Vector2, threshold:
 	for i in range(full.size() - 1):
 		var a: Vector2 = full[i]
 		var b: Vector2 = full[i + 1]
-		var proj := _project_on_segment(a, b, doc_pos)
+		var proj := _PcbTraceGeometry.closest_point_on_segment(doc_pos, a, b,
+			_PcbTraceGeometry.LEGACY_DEGENERATE_LEN_SQ)
 		var d := proj.distance_to(doc_pos)
 		if d < best_dist:
 			best_dist = d
@@ -1386,15 +1389,6 @@ func nearest_bend_insertion(annotation: Dictionary, doc_pos: Vector2, threshold:
 	var lead := full.size() - bend_count - 1
 	return {"point": best_point,
 		"insert_at": clampi(best_seg + 1 - lead, 0, bend_count)}
-
-
-static func _project_on_segment(a: Vector2, b: Vector2, p: Vector2) -> Vector2:
-	var ab := b - a
-	var len_sq := ab.length_squared()
-	if len_sq < 0.0001:
-		return a
-	var t := clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
-	return a + ab * t
 
 
 # ── Validation (beyond the envelope schema) ──────────────────────────────────
@@ -1905,11 +1899,8 @@ func hit_test(annotation: Dictionary, point: Vector2, threshold: float) -> bool:
 		return true
 
 	# Swept distance to the waypoint polyline.
-	var pts := _waypoint_points(annotation)
-	for i in range(pts.size() - 1):
-		if _dist_point_to_segment(point, pts[i], pts[i + 1]) <= effective:
-			return true
-	return false
+	return _PcbTraceGeometry.point_near_polyline(_waypoint_points(annotation), point,
+		effective, false, _PcbTraceGeometry.LEGACY_DEGENERATE_LEN_SQ)
 
 
 ## INV-4: a HINT bounds, waypoint-derived and correctly so (see hit_test above).
@@ -2216,12 +2207,3 @@ static func _candidate_marker_of(payload: Dictionary) -> String:
 		if not value.is_empty():
 			return "%s=%s" % [key, value]
 	return "unknown"
-
-
-static func _dist_point_to_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
-	var ab := b - a
-	var len_sq := ab.length_squared()
-	if len_sq < 0.0001:
-		return p.distance_to(a)
-	var t := clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
-	return p.distance_to(a + ab * t)

@@ -61,6 +61,7 @@ static func drop_coincident_points(points: Array) -> Array:
 	return out
 const PcbRouteTask := preload("pcb_route_task.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
+const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 
 ## Emitted when a candidate is inserted.
 signal candidate_added(id: String)
@@ -3428,21 +3429,12 @@ func _segment_hit(c, position: Vector2) -> Dictionary:
 			continue
 		var tol: float = maxf(float(seg.get("width", 0.25)) * 0.5, EDIT_MIN_TOL_MM)
 		for leg in range(pts.size() - 1):
-			var proj := _project_on_segment(position, pts[leg], pts[leg + 1])
+			var proj := PcbTraceGeometry.closest_point_on_segment(position, pts[leg], pts[leg + 1])
 			var d: float = position.distance_to(proj)
 			if d <= tol and d < best_d:
 				best_d = d
 				best = {"segment_index": i, "leg": leg, "point": proj}
 	return best
-
-
-## Closest point on the SEGMENT ab (not the infinite line) to p.
-static func _project_on_segment(p: Vector2, a: Vector2, b: Vector2) -> Vector2:
-	var ab := b - a
-	var len_sq := ab.length_squared()
-	if len_sq <= 0.0:
-		return a
-	return a + ab * clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
 
 
 ## Do these two segments share an endpoint (within EDIT_EPS_MM)? THE adjacency

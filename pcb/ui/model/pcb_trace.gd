@@ -7,6 +7,7 @@ extends RefCounted
 ## locked ride in canonical Extra (mirrors pcb/internal/board/minpcb.go).
 
 const _Self := preload("pcb_trace.gd")
+const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 
 ## Unique identifier for this trace
 var id: String = ""
@@ -97,104 +98,34 @@ func get_end() -> Vector2:
 	return waypoints[waypoints.size() - 1]
 
 
-## Calculate the total length of the trace
+## Total polyline length in mm.
 func get_length() -> float:
-	if waypoints.size() < 2:
-		return 0.0
-
-	var total := 0.0
-	for i in range(waypoints.size() - 1):
-		total += waypoints[i].distance_to(waypoints[i + 1])
-	return total
+	return PcbTraceGeometry.length(PackedVector2Array(waypoints))
 
 
-## Get the bounding rectangle of the trace
+## The bounding rectangle of the trace, padded by half its width on every side.
 func get_bounding_rect() -> Rect2:
-	if waypoints.is_empty():
-		return Rect2()
-
-	var min_pos := waypoints[0]
-	var max_pos := waypoints[0]
-
-	for point in waypoints:
-		min_pos.x = minf(min_pos.x, point.x)
-		min_pos.y = minf(min_pos.y, point.y)
-		max_pos.x = maxf(max_pos.x, point.x)
-		max_pos.y = maxf(max_pos.y, point.y)
-
-	# Account for trace width
-	var half_width := width / 2.0
-	min_pos -= Vector2(half_width, half_width)
-	max_pos += Vector2(half_width, half_width)
-
-	return Rect2(min_pos, max_pos - min_pos)
+	return PcbTraceGeometry.bounds(PackedVector2Array(waypoints), width / 2.0)
 
 
-## Check if a point is near this trace (within threshold distance)
+## Check if a point is near this trace: within `threshold` of the copper, i.e.
+## within threshold + width/2 of the centreline.
 func is_point_near(point: Vector2, threshold: float = 0.5) -> bool:
-	var effective_threshold := threshold + width / 2.0
-
-	for i in range(waypoints.size() - 1):
-		var dist := _point_to_segment_distance(point, waypoints[i], waypoints[i + 1])
-		if dist <= effective_threshold:
-			return true
-
-	return false
+	return PcbTraceGeometry.point_near_polyline(PackedVector2Array(waypoints), point,
+		threshold + width / 2.0, false, PcbTraceGeometry.LEGACY_DEGENERATE_LEN_SQ)
 
 
-## Get the closest point on the trace to a given point
+## Get the closest point on the trace to a given point (the point itself for an
+## empty trace).
 func get_closest_point(point: Vector2) -> Vector2:
-	if waypoints.is_empty():
-		return point
-
-	if waypoints.size() == 1:
-		return waypoints[0]
-
-	var closest := waypoints[0]
-	var min_dist := INF
-
-	for i in range(waypoints.size() - 1):
-		var segment_closest := _closest_point_on_segment(point, waypoints[i], waypoints[i + 1])
-		var dist := point.distance_to(segment_closest)
-		if dist < min_dist:
-			min_dist = dist
-			closest = segment_closest
-
-	return closest
+	return PcbTraceGeometry.closest_on_polyline(PackedVector2Array(waypoints), point,
+		false, PcbTraceGeometry.LEGACY_DEGENERATE_LEN_SQ)["point"] as Vector2
 
 
-## Calculate distance from point to line segment
-func _point_to_segment_distance(point: Vector2, seg_start: Vector2, seg_end: Vector2) -> float:
-	return point.distance_to(_closest_point_on_segment(point, seg_start, seg_end))
-
-
-## Find the closest point on a line segment to a given point
-func _closest_point_on_segment(point: Vector2, seg_start: Vector2, seg_end: Vector2) -> Vector2:
-	var seg := seg_end - seg_start
-	var seg_len_sq := seg.length_squared()
-
-	if seg_len_sq < 0.0001:
-		return seg_start
-
-	var t := clampf((point - seg_start).dot(seg) / seg_len_sq, 0.0, 1.0)
-	return seg_start + t * seg
-
-
-## Find the segment index closest to a point
+## Find the segment index closest to a point (-1 below two waypoints)
 func get_closest_segment_index(point: Vector2) -> int:
-	if waypoints.size() < 2:
-		return -1
-
-	var best_idx := 0
-	var min_dist := INF
-
-	for i in range(waypoints.size() - 1):
-		var dist := _point_to_segment_distance(point, waypoints[i], waypoints[i + 1])
-		if dist < min_dist:
-			min_dist = dist
-			best_idx = i
-
-	return best_idx
+	return PcbTraceGeometry.closest_on_polyline(PackedVector2Array(waypoints), point,
+		false, PcbTraceGeometry.LEGACY_DEGENERATE_LEN_SQ)["segment"] as int
 
 
 ## Create a deep copy of this trace

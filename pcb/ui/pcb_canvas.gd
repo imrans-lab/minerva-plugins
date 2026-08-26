@@ -43,6 +43,7 @@ const PCBDataScript := preload("model/pcb_data.gd")
 ## a standing pin this unit consumes and never edits). Zero imports itself, so
 ## preloading it here adds no further dependency weight.
 const BusGeom := preload("model/pcb_bus_geometry.gd")
+const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 ## The MCP tool surface (panel_tools.gd) is preloaded HERE too, for the bus
 ## tool only: bus_plan()/bus_commit_plan() (its static funcs) are the ONE
 ## shared implementation of "resolve per-net widths, compute offsets, run the
@@ -1986,8 +1987,7 @@ func _disconnect_marker_still_valid(m: Dictionary) -> bool:
 		var trace = data.traces[trace_id]
 		if str(trace.net_name) != net or trace.waypoints.is_empty():
 			continue
-		if (trace.waypoints[0] as Vector2).distance_to(pt) <= 0.01 \
-				or (trace.waypoints[trace.waypoints.size() - 1] as Vector2).distance_to(pt) <= 0.01:
+		if PcbTraceGeometry.end_index_at(PackedVector2Array(trace.waypoints), pt, 0.01) >= 0:
 			return true
 	return false
 
@@ -5673,20 +5673,13 @@ func _apply_drag_delta(delta: Vector2) -> void:
 		if comp != null:
 			comp.position = _drag_origins[KIND_COMPONENT][comp_id] + delta
 	for trace_id in _drag_origins.get(KIND_TRACE, {}):
-		data.set_trace_waypoints(trace_id, _translated(_drag_origins[KIND_TRACE][trace_id], delta))
+		data.set_trace_waypoints(trace_id, PcbTraceGeometry.translated(_drag_origins[KIND_TRACE][trace_id], delta))
 	for zone_id in _drag_origins.get(KIND_ZONE, {}):
-		data.set_zone_outline(zone_id, _translated(_drag_origins[KIND_ZONE][zone_id], delta))
+		data.set_zone_outline(zone_id, PcbTraceGeometry.translated(_drag_origins[KIND_ZONE][zone_id], delta))
 	for via_id in _drag_origins.get(KIND_VIA, {}):
 		var via: Dictionary = data.get_via(via_id)
 		if not via.is_empty():
 			via["position"] = _drag_origins[KIND_VIA][via_id] + delta
-
-
-static func _translated(points: PackedVector2Array, delta: Vector2) -> PackedVector2Array:
-	var moved := PackedVector2Array()
-	for p in points:
-		moved.append(p + delta)
-	return moved
 
 
 ## Finish a drag-move: journal each entity that actually moved, then take ONE
@@ -6317,11 +6310,7 @@ func _zone_at(world_pos: Vector2) -> String:
 
 
 func _point_near_outline(p: Vector2, pts: PackedVector2Array, tol: float) -> bool:
-	for i in pts.size():
-		var closest := Geometry2D.get_closest_point_to_segment(p, pts[i], pts[(i + 1) % pts.size()])
-		if p.distance_to(closest) <= tol:
-			return true
-	return false
+	return PcbTraceGeometry.point_near_polyline(pts, p, tol, true)
 
 
 ## Which committed cutout a Select-tool click at `world_pos` picks, or "".
@@ -6511,17 +6500,10 @@ func _reset_zone_vertex_drag() -> void:
 func _zone_edge_insertion(pts: PackedVector2Array, world_pos: Vector2, tol: float) -> Dictionary:
 	if pts.size() < PCBDataScript.MIN_ZONE_OUTLINE_POINTS:
 		return {}
-	var best_dist := INF
-	var best_point := Vector2.ZERO
-	var best_edge := -1
-	for i in pts.size():
-		var closest := Geometry2D.get_closest_point_to_segment(world_pos, pts[i], pts[(i + 1) % pts.size()])
-		var d := world_pos.distance_to(closest)
-		if d < best_dist:
-			best_dist = d
-			best_point = closest
-			best_edge = i
-	if best_edge < 0 or best_dist > tol:
+	var nearest := PcbTraceGeometry.closest_on_polyline(pts, world_pos, true)
+	var best_edge: int = nearest["segment"]
+	var best_point: Vector2 = nearest["point"]
+	if best_edge < 0 or float(nearest["distance"]) > tol:
 		return {}
 	return {"index": best_edge + 1, "point": best_point}
 
@@ -8751,11 +8733,8 @@ func _drop_armed_bus_station(path_ended: bool = false) -> void:
 ## never behind the station itself — which is what the caller reads as "that
 ## click was not ahead of the station" and refuses.
 func _bus_straight_on_from_station(p: Vector2) -> Vector2:
-	var station: Vector2 = _bus_spine_points[_bus_station_index]
-	var d: Vector2 = station - _bus_spine_points[_bus_station_index - 1]
-	var u := Vector2(signf(d.x), 0.0) if is_zero_approx(d.y) else Vector2(0.0, signf(d.y))
-	var along: float = (p - station).dot(u)
-	return station if along <= 0.0 else station + u * along
+	return PcbTraceGeometry.advance_along_axis(
+		_bus_spine_points[_bus_station_index - 1], _bus_spine_points[_bus_station_index], p)
 
 
 ## `p` moved onto whichever axis it travels furthest along from `prev`.
@@ -8765,8 +8744,7 @@ func _bus_straight_on_from_station(p: Vector2) -> Vector2:
 ## click is ever exactly on an axis, so without this every path but a snapped
 ## one would be refused after the fact.
 func _bus_axis_point(prev: Vector2, p: Vector2) -> Vector2:
-	var d := p - prev
-	return Vector2(p.x, prev.y) if absf(d.x) >= absf(d.y) else Vector2(prev.x, p.y)
+	return PcbTraceGeometry.snap_to_axis(prev, p)
 
 
 ## The pads a target click accepts: every pad on a picked net EXCEPT that net's
@@ -10349,18 +10327,9 @@ func _witness_at(world_pos: Vector2) -> Dictionary:
 		var a: Vector2 = item["closest"]
 		var b: Vector2 = item["witness"]
 		if a.distance_to(b) > 0.0001 \
-				and _project_on_segment_static(world_pos, a, b).distance_to(world_pos) <= bar_tol:
+				and PcbTraceGeometry.distance_to_segment(world_pos, a, b) <= bar_tol:
 			return item
 	return {}
-
-
-static func _project_on_segment_static(p: Vector2, a: Vector2, b: Vector2) -> Vector2:
-	var ab := b - a
-	var len_sq := ab.length_squared()
-	if len_sq <= 0.0:
-		return a
-	var t: float = clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
-	return a + ab * t
 
 
 # ── candidate junction drag (Epoch UX3 station 6a) ───────────────────────────
@@ -10655,26 +10624,13 @@ func _candidate_at(world_pos: Vector2) -> String:
 		# screen-px slack divided by zoom — the px-constants-through-the-zoom
 		# idiom used by the trace and vertex picks above.
 		var tol: float = float(item["width"]) * 0.5 + CANDIDATE_HIT_SLACK_PX / zoom
-		var pts: Array = item["points"]
-		for i in range(pts.size() - 1):
-			if _dist_point_to_segment(world_pos, pts[i], pts[i + 1]) <= tol:
-				seg_hit = str(item["candidate_id"])
-				break
+		# The pick measures the candidate's exact segment geometry through the
+		# model-level library, never through the annotation kind (INV-4 keeps
+		# the two paths apart).
+		if PcbTraceGeometry.point_near_polyline(PackedVector2Array(item["points"]), world_pos, tol):
+			seg_hit = str(item["candidate_id"])
 
 	return via_hit if not via_hit.is_empty() else seg_hit
-
-
-## Perpendicular distance from `p` to the SEGMENT ab (not the infinite line):
-## the projection is clamped to [0,1] so the endpoints answer for anything past
-## them. Static + local because the pick must not reach into the annotation kind
-## for it (INV-4 keeps the two paths apart, helpers included).
-static func _dist_point_to_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
-	var ab := b - a
-	var len_sq := ab.length_squared()
-	if len_sq <= 0.0:
-		return p.distance_to(a)
-	var t: float = clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
-	return p.distance_to(a + ab * t)
 
 
 ## The selected route candidate's id, or "" — the public read surface named in the

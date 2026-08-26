@@ -51,6 +51,7 @@ const PCBComponentScript := preload("pcb_component.gd")
 const PCBNetScript := preload("pcb_net.gd")
 const PCBTraceScript := preload("pcb_trace.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
+const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 
 ## Signals for reactive UI updates (panel relays these to drive dirty state).
 signal data_changed()
@@ -3763,24 +3764,7 @@ func get_trace_count() -> int:
 ## INSIDE a closed outline is deliberately NOT a hit here (see
 ## get_zones_in_region, which adds that case only for keepouts).
 static func region_touches_polyline(points, region: Rect2) -> bool:
-	var pts := PackedVector2Array(points)
-	for p in pts:
-		if region.has_point(p):
-			return true
-	if pts.size() < 2:
-		return false
-	var corners := PackedVector2Array([
-		region.position,
-		Vector2(region.end.x, region.position.y),
-		region.end,
-		Vector2(region.position.x, region.end.y),
-	])
-	for i in range(pts.size() - 1):
-		for c in 4:
-			if Geometry2D.segment_intersects_segment(
-					pts[i], pts[i + 1], corners[c], corners[(c + 1) % 4]) != null:
-				return true
-	return false
+	return PcbTraceGeometry.polyline_touches_rect(PackedVector2Array(points), region)
 
 
 ## Snap a position to the grid

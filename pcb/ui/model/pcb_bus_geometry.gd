@@ -155,6 +155,8 @@ extends RefCounted
 ## points instead of one; see offset_polyline's return-shape note.
 const MITER_LIMIT := 4.0
 
+const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
+
 ## Below this, two consecutive spine points are the SAME point and the segment
 ## between them has no direction to offset along. In mm — one nanometre, far
 ## below anything the canvas can author (points land on a quarter-grid), while a
@@ -487,7 +489,7 @@ static func bundle_routes(
 		if station < 1 or station > pts.size() - 2:
 			return _unbuildable("A via station needs spine on both sides of it — vertex %d is at an end of this %d-point spine."
 				% [via_station_index, pts.size()])
-		if _axis_unit(pts[station] - pts[station - 1]) != _axis_unit(pts[station + 1] - pts[station]):
+		if PcbTraceGeometry.axis_unit(pts[station] - pts[station - 1]) != PcbTraceGeometry.axis_unit(pts[station + 1] - pts[station]):
 			return _unbuildable("The bus spine bends at via-station vertex %d — a station is a straight run across carrying a via, not a corner."
 				% via_station_index)
 
@@ -500,9 +502,9 @@ static func bundle_routes(
 		findings.append(_finding(FINDING_SPINE_DOUBLES_BACK, doubles_back, []))
 
 	var last: int = pts.size() - 1
-	var u_src := _axis_unit(pts[1] - pts[0])
+	var u_src := PcbTraceGeometry.axis_unit(pts[1] - pts[0])
 	var n_src := Vector2(-u_src.y, u_src.x)
-	var u_tgt := _axis_unit(pts[last] - pts[last - 1])
+	var u_tgt := PcbTraceGeometry.axis_unit(pts[last] - pts[last - 1])
 	var n_tgt := Vector2(-u_tgt.y, u_tgt.x)
 
 	# Pads in each end's own frame: `perp` across the bundle (same sign
@@ -601,7 +603,7 @@ static func bundle_routes(
 	var u_st := Vector2.ZERO
 	var n_st := Vector2.ZERO
 	if station >= 0:
-		u_st = _axis_unit(pts[station] - pts[station - 1])
+		u_st = PcbTraceGeometry.axis_unit(pts[station] - pts[station - 1])
 		n_st = Vector2(-u_st.y, u_st.x)
 
 	var polylines: Array = []
@@ -751,50 +753,15 @@ static func _route_separation(a: PackedVector2Array, b: PackedVector2Array) -> D
 		"a": Vector2.ZERO, "b": Vector2.ZERO}
 	for i in range(a.size() - 1):
 		for j in range(b.size() - 1):
-			var gap := _segment_separation(a[i], a[i + 1], b[j], b[j + 1])
+			# Every segment here is AXIS-ALIGNED (the spine by refusal, the legs
+			# by construction), which is what lets the box-overlap shortcut and
+			# its overlap-centre witness stand in for a general segment test.
+			var gap := PcbTraceGeometry.axis_aligned_segment_gap(a[i], a[i + 1], b[j], b[j + 1])
 			if float(gap["distance"]) < float(best["distance"]):
 				best = gap
 				if float(best["distance"]) <= 0.0:
 					return best
 	return best
-
-
-## The closest approach between two segments: {distance, at, a, b} — see
-## _route_separation for the fields.
-##
-## Every segment reaching here is AXIS-ALIGNED — the spine is
-## (_spine_diagonal_error refuses anything else) and the legs are built by
-## _station_point, which copies
-## one coordinate rather than recomputing it. An axis-aligned segment IS its own
-## bounding box, so "the boxes overlap" and "the segments share a point" are the
-## same statement, and the overlap box's centre is a point they genuinely share.
-##
-## Disjoint segments are two disjoint convex sets, so their closest approach is
-## attained at an endpoint of at least one of them: four point-to-segment tests
-## are the whole answer, no parametric solve needed.
-static func _segment_separation(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vector2) -> Dictionary:
-	var lo_x: float = maxf(minf(a0.x, a1.x), minf(b0.x, b1.x))
-	var hi_x: float = minf(maxf(a0.x, a1.x), maxf(b0.x, b1.x))
-	var lo_y: float = maxf(minf(a0.y, a1.y), minf(b0.y, b1.y))
-	var hi_y: float = minf(maxf(a0.y, a1.y), maxf(b0.y, b1.y))
-	if lo_x <= hi_x and lo_y <= hi_y:
-		var shared := Vector2((lo_x + hi_x) * 0.5, (lo_y + hi_y) * 0.5)
-		return {"distance": 0.0, "at": shared, "a": shared, "b": shared}
-	var best := _endpoint_gap(a0, b0, b1)
-	for candidate in [_endpoint_gap(a1, b0, b1), _endpoint_gap(b0, a0, a1), _endpoint_gap(b1, a0, a1)]:
-		if float(candidate["distance"]) < float(best["distance"]):
-			best = candidate
-	return best
-
-
-## Point `p` against segment `a`-`b`: {distance, at, a, b}, `at` the midpoint of
-## the gap so a message can name somewhere between the two nets rather than on
-## one, `a`/`b` its two ends so a witness can draw the gap itself.
-static func _endpoint_gap(p: Vector2, a: Vector2, b: Vector2) -> Dictionary:
-	var ab: Vector2 = b - a
-	var len2: float = ab.length_squared()
-	var q: Vector2 = a if len2 <= 0.0 else a + ab * clampf((p - a).dot(ab) / len2, 0.0, 1.0)
-	return {"distance": p.distance_to(q), "at": (p + q) * 0.5, "a": p, "b": q}
 
 
 ## The input with consecutive duplicate points removed.
@@ -850,14 +817,14 @@ static func _finding(type: String, message: String, nets: Array,
 ##
 ## EXACT zero, not is_zero_approx: a segment with any non-zero dx and dy is a
 ## diagonal, and the alternative to refusing it is silently moving a point the
-## caller placed. Exactness also buys the legs their frame — _axis_unit can
+## caller placed. Exactness also buys the legs their frame — axis_unit can
 ## return a unit vector with no rounding at all, so every emitted segment is
 ## axis-aligned in float rather than to within an ulp. Nothing downstream here
 ## can round it, which is why this one is a hard refusal rather than a finding.
 static func _spine_diagonal_error(pts: PackedVector2Array) -> String:
 	for i in range(pts.size() - 1):
 		var d: Vector2 = pts[i + 1] - pts[i]
-		if d.x != 0.0 and d.y != 0.0:
+		if not PcbTraceGeometry.is_axis_aligned(d):
 			return "Bus spine segment %d→%d moves on both axes (dx %.3fmm, dy %.3fmm) — a bus bends at 90 degrees only, so its spine has to as well." % [i, i + 1, d.x, d.y]
 	return ""
 
@@ -1002,12 +969,6 @@ static func _via_station_findings(pts: PackedVector2Array, station: int, fan: fl
 				% [station, after, fan, margin],
 			[], after - fan, margin, pts[station]))
 	return out
-
-
-## The unit vector along an axis-aligned, non-zero `d`, built rather than
-## normalized so it is EXACTLY (+-1, 0) or (0, +-1).
-static func _axis_unit(d: Vector2) -> Vector2:
-	return Vector2(signf(d.x), 0.0) if d.y == 0.0 else Vector2(0.0, signf(d.y))
 
 
 ## Is a SIDEWAYS pad's centre already under its own lane's copper — within
