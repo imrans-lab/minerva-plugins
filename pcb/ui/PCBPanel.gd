@@ -6592,7 +6592,7 @@ const _MODE_HINTS := {
 	8: "Click a pad or via to start, click waypoints, click a pad or via to finish",   # TRACE
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
-	11: "Click a source pad per net (2+), click clear board BEHIND them to start the path, then click each net's target pad · Enter commits",  # BUS
+	11: "Click a source pad per net (2+), click clear board past them (the way the bus will run) to start the path, then click each net's target pad · Enter commits",  # BUS
 	12: "Click empty space for a standalone via · click a trace to snap, inherit its net, and bisect it",  # VIA
 }
 const _ROUTE_FLOW_LABELS := {

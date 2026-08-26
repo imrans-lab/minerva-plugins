@@ -979,12 +979,15 @@ const BUS_TARGET_MARKER_RADIUS_PX := 5.0
 const BUS_SUGGESTION_MARKER_RADIUS_PX := 8.0
 
 ## WHERE A BUS SPINE HAS TO START, in one place because it is said in two: the
-## teach line the picks carry, and the transient the second pick emits. Every
-## net's breakout leg runs FORWARD from the spine's first vertex into the
-## bundle, so a spine begun beside the pin column leaves each source pad PAST
-## the start — pcb_bus_geometry's bus_pad_inside_corridor finding, whose own
-## advice uses these same words — and the legs fold back over each other.
-const BUS_PATH_START_HINT := "click clear of the pads to start the path BEHIND the source pads, before them along its first segment, so every leg runs forward into the bundle"
+## teach line the picks carry, and the transient the second pick emits. The
+## spine is the trunk between the two fan-outs: each source leg reaches BACK
+## from the spine's start to its pad, so the start has to sit past the source
+## pads in the direction the bus runs. A start placed before the pads leaves
+## each pad past it — pcb_bus_geometry's bus_pad_inside_corridor finding, whose
+## own advice uses these same words — and the legs fold back over each other.
+## A pad column lying ALONG the spine is the exception: it is left sideways
+## from each pad's own row, and the start can sit beside it.
+const BUS_PATH_START_HINT := "click clear of the pads to start the path past the source pads, in the direction the bus will run — the legs reach back from the start to the pads (a pad column lying along the path is left sideways from each pad's row)"
 
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)

@@ -867,20 +867,39 @@ func _run_structural_refusals() -> void:
 	# A pad 5mm INSIDE the bundle: its leg would have to run backwards through
 	# the fan-out to reach its station.
 	#
-	# THE ADVICE HALF IS PINNED TOO ("BEHIND"/"PAST"): the canvas teach line
+	# THE ADVICE HALF IS PINNED TOO: the canvas teach line
 	# (pcb_canvas.BUS_PATH_START_HINT) tells the user where to start BEFORE the
 	# spine exists, and this finding tells them after — the two have to name the
-	# same place or one of them is teaching a trap.
+	# same place or one of them is teaching a trap. The place is "past the
+	# source pads" / "short of the target pads": the spine runs AWAY from the
+	# sources and STOPS before the targets, its legs reaching back and out. The
+	# number is signed the same way: A's pad at x 5 is 5mm past a start at x 0;
+	# B's pad at x 97 is 3mm short of an end at x 100. "BEHIND" is banned from
+	# both — read either way it once sent readers to the wrong side.
+	var inside_source: Dictionary = BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
+		names, _pv([Vector2(5, -5), Vector2(-10, 5)]), targets, [0.2, 0.2], 0.3)
 	check_bad_but_buildable("a source pad past the start of the spine is named by net",
-		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
-			names, _pv([Vector2(5, -5), Vector2(-10, 5)]), targets,
-			[0.2, 0.2], 0.3),
-		2, ["\"A\"", "5.000mm past", "BEHIND the source pads"])
+		inside_source, 2, ["\"A\"", "5.000mm past", "start it past the source pads"])
+	check("…and the advice never says BEHIND",
+		not str(inside_source.get("error", "")).contains("BEHIND"))
+	var inside_target: Dictionary = BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
+		names, sources, _pv([Vector2(110, -5), Vector2(97, 5)]), [0.2, 0.2], 0.3)
 	check_bad_but_buildable("a target pad short of the end of the spine is named by net",
-		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
-			names, sources, _pv([Vector2(110, -5), Vector2(97, 5)]),
-			[0.2, 0.2], 0.3),
-		2, ["\"B\"", "3.000mm short", "PAST the target pads"])
+		inside_target, 2, ["\"B\"", "3.000mm short", "end it short of the target pads"])
+	check("…and never says PAST the target pads",
+		not str(inside_target.get("error", "")).contains("PAST"))
+	# THE SAME PADS WITH THE SPINE WHERE THE ADVICE PUTS IT: started past the
+	# sources (x 6 > 5) and ended short of the targets (x 96 < 97). No corridor
+	# finding — the advice, followed, clears it.
+	var followed: Dictionary = BusGeom.bundle_routes(_pv([Vector2(6, 0), Vector2(96, 0)]),
+		names, _pv([Vector2(5, -5), Vector2(-10, 5)]), _pv([Vector2(110, -5), Vector2(97, 5)]),
+		[0.2, 0.2], 0.3)
+	var corridor := false
+	for f in followed.get("findings", []):
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_PAD_INSIDE_CORRIDOR:
+			corridor = true
+	check("a spine started past the sources and ended short of the targets raises no corridor finding",
+		bool(followed.get("buildable", false)) and not corridor)
 
 	# ROOM. Three 0.2mm tracks at 0.3mm clearance fan out over 1.0mm at each
 	# end and need 0.5mm (the widest offset) of bundle clear of both. A 1.2mm

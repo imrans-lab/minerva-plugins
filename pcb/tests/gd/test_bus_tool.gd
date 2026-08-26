@@ -623,10 +623,11 @@ func _test_a_trace_is_not_a_bus_anchor() -> void:
 	# the pin column leaves every source pad inside the corridor, so "clear of
 	# the pads" alone is the sentence that walks a user into that finding.
 	check("…the picks are untouched, and the teach line says where the path "
-			+ "starts — BEHIND the source pads, not merely clear of them",
+			+ "starts — past the source pads the way the bus runs, not merely clear of them",
 			canvas._bus_nets == (["NA", "NB"] as Array[String])
-				and canvas.bus_teach_line().contains("BEHIND the source pads")
-				and canvas.bus_teach_line().contains("first segment"),
+				and canvas.bus_teach_line().contains("past the source pads")
+				and canvas.bus_teach_line().contains("reach back")
+				and not canvas.bus_teach_line().contains("BEHIND"),
 			"picks %s / teach %s" % [str(canvas._bus_nets), canvas.bus_teach_line()])
 	check("…and nothing was written", _board_state(data) == quiet, str(_board_state(data)))
 

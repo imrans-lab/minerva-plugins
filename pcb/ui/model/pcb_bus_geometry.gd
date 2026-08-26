@@ -528,12 +528,12 @@ static func bundle_routes(
 		# others; a sideways pad has no forward leg, so the rule is not its.
 		if not src_sideways[i] and float(src_axial[i]) > _MIN_SEGMENT_MM:
 			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
-				"Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start BEHIND the source pads, before them along its first segment."
+				"Net \"%s\"'s source pad is %.3fmm past the start of the spine, along its first segment — the spine is the trunk between the two fan-outs and its legs reach BACK from its start to the source pads, so start it past the source pads in the direction the bus runs (level with them is fine), never before them. A pad column lying along the spine is left sideways from each pad's own row and needs no room."
 					% [net_names[i], float(src_axial[i])],
 				[net_names[i]], float(src_axial[i]), 0.0, sources[i]))
 		if not tgt_sideways[i] and float(tgt_axial[i]) > _MIN_SEGMENT_MM:
 			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
-				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end PAST the target pads, beyond them along its last segment."
+				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine, along its last segment — the legs reach OUT from the spine's end to the target pads, so end it short of the target pads (level with them is fine), never past them. A pad column lying along the spine is left sideways from each pad's own row and needs no room."
 					% [net_names[i], float(tgt_axial[i])],
 				[net_names[i]], float(tgt_axial[i]), 0.0, targets[i]))
 
