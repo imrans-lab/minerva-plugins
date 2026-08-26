@@ -8858,58 +8858,19 @@ func _bus_pin_copper_layers(comp, pin_name: String) -> PackedStringArray:
 	return out
 
 
-## The copper layers the picked SOURCE pads reach, as one union. Empty when any
-## source is unreadable, so a single unresolved footprint silences the note
-## rather than letting it advise from half the bus.
-func _bus_source_copper_layers() -> PackedStringArray:
-	var out := PackedStringArray()
-	if data == null:
-		return PackedStringArray()
-	for i in range(_bus_nets.size()):
-		var ref: String = str(_bus_net_refs[i]) if i < _bus_net_refs.size() else ""
-		var net_obj = data.get_net(_bus_nets[i])
-		if net_obj == null:
-			return PackedStringArray()
-		var reaches := PackedStringArray()
-		for pin in net_obj.pins:
-			var comp_id := str((pin as Dictionary).get("component_id", ""))
-			var pin_name := str((pin as Dictionary).get("pin_name", ""))
-			# Matched by REBUILDING the ref rather than by splitting it: the
-			# same construction _bus_target_candidates uses, and a component id
-			# carrying a dot cannot be split back apart.
-			if "%s.%s" % [comp_id, pin_name] != ref:
-				continue
-			var comp = data.get_component(comp_id)
-			if comp == null:
-				return PackedStringArray()
-			reaches = _bus_pin_copper_layers(comp, pin_name)
-			break
-		if reaches.is_empty():
-			return PackedStringArray()
-		for canon in reaches:
-			if not out.has(canon):
-				out.append(canon)
-	return out
-
-
 ## THE LAYER THE PATH HAS TO START ON, named before the first click freezes it,
 ## or "" when the working layer is already right (or cannot be judged).
 ##
 ## A BUS IS ONE LAYER PLUS AT MOST ONE STATION, so where it ENDS is decided by
-## where it STARTS. Two shapes of that, both invisible until the gesture is too
-## far along to fix:
+## where it STARTS — and one shape of that is a geometric fact rather than a
+## routing preference: NO candidate target has copper on the working layer, and
+## they all share one other layer. The bus as drawn cannot land at all, and
+## starting on that other layer spends no station. Invisible until the gesture
+## is too far along to fix, hence said here.
 ##
-##   TARGETS NOWHERE NEAR THE WORKING LAYER — no candidate has copper on it, and
-##   they all share one other layer. Starting there spends no station at all.
-##
-##   TARGETS ON THE WORKING LAYER AND NOWHERE ELSE, with sources that also reach
-##   the other side. Drawing this flat works — but the one station available
-##   leads AWAY from the targets, so a bus that needs the other side at all has
-##   to start there and switch ONTO the working layer. The user who learns that
-##   at the second switch has already drawn the path.
-##
-## SILENT WHENEVER THE ADVICE WOULD BE A GUESS: an unreadable pad, one candidate
-## disagreeing with the others, sources with no copper off the working layer.
+## SILENT WHENEVER THE ADVICE WOULD BE A GUESS: an unreadable pad, a candidate
+## that does reach the working layer, or candidates that disagree about which
+## other layer they are on.
 func _bus_off_layer_target_note(layer: String) -> String:
 	if data == null or _bus_nets.size() < 2 or not PcbLayerStack.is_copper(layer):
 		return ""
@@ -8918,8 +8879,6 @@ func _bus_off_layer_target_note(layer: String) -> String:
 	if candidates.is_empty():
 		return ""
 	var elsewhere := PackedStringArray()
-	var none_on_working := true
-	var all_only_working := true
 	for raw_cand in candidates:
 		var cand: Dictionary = raw_cand
 		var comp = data.get_component(str(cand.get("component", "")))
@@ -8928,34 +8887,20 @@ func _bus_off_layer_target_note(layer: String) -> String:
 		var reaches := _bus_pin_copper_layers(comp, str(cand.get("pin", "")))
 		if reaches.is_empty():
 			return ""
+		# ONE candidate reachable flat settles the whole note: the path as drawn
+		# can land, so there is nothing to say before the first click.
 		if reaches.has(working):
-			none_on_working = false
-		if reaches.size() != 1 or reaches[0] != working:
-			all_only_working = false
+			return ""
 		for canon in reaches:
-			if canon != working and not elsewhere.has(canon):
+			if not elsewhere.has(canon):
 				elsewhere.append(canon)
-
+	if elsewhere.size() != 1:
+		return ""
 	var working_name := _bus_layer_name(working)
-	if none_on_working and elsewhere.size() == 1:
-		var target_side := _bus_layer_name(elsewhere[0])
-		return (" No target pad for these nets has copper on %s — every one is on %s, and a bus changes layer at most once."
-			+ " For a one-layer bus, set the toolbar Layer chooser to %s before the path's first click (Esc drops a path already started).") 			% [working_name, target_side, target_side]
-
-	if not all_only_working:
-		return ""
-	# The sources decide whether the other side is even reachable: a bus whose
-	# sources are surface copper on the working layer too has no other side to
-	# start from, and its geometry says so on its own.
-	var start_side := PackedStringArray()
-	for canon in _bus_source_copper_layers():
-		if canon != working and not start_side.has(canon):
-			start_side.append(canon)
-	if start_side.size() != 1:
-		return ""
-	var other := _bus_layer_name(start_side[0])
-	return (" Every target pad is on %s only, and a bus starts on one layer and switches once — a station from %s would lead AWAY from them."
-		+ " If this bus needs the other side, start it on %s (toolbar Layer chooser, before the path's first click) and let the station switch onto %s.") 		% [working_name, working_name, other, working_name]
+	var target_side := _bus_layer_name(elsewhere[0])
+	return (" No target pad for these nets has copper on %s — every one is on %s, and a bus changes layer at most once."
+			+ " For a one-layer bus, set the toolbar Layer chooser to %s before the path's first click (Esc drops a path already started).") \
+		% [working_name, target_side, target_side]
 
 
 ## Re-ask the ratsnest which pad each picked net is LIKELY to run to, one

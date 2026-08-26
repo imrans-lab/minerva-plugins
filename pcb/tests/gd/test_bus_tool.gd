@@ -147,6 +147,7 @@ func _init() -> void:
 	await _test_the_station_verb_matches_the_station_gesture()
 	await _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost()
 	_test_a_station_via_names_the_layer_it_lands_on()
+	_test_unreachable_targets_still_name_the_layer_to_start_on()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -2385,6 +2386,12 @@ func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
 			str(result.get("note", "")).contains("landed anyway")
 				and str(result.get("note", "")).contains("T1.3"),
 			str(result.get("note", "")))
+	# THE WHOLE REPLY, not just `note`: the agent reads every field, so a start-
+	# layer suggestion re-entering the verb on ANY key is caught here.
+	check("…and no field of the reply advises a layer to start the bus on",
+			not str(result).contains("start it on")
+				and not str(result).contains("Layer chooser"),
+			str(result))
 	check("one undo removes the bus and leaves the seeded copper",
 			data.undo() and _serialized_traces(data).size() == int(quiet[0]))
 
@@ -2410,10 +2417,12 @@ func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
 	var msgs := _collect(canvas)
 	canvas._handle_bus_click(LGA_SRC_A, false)    # NA
 	canvas._handle_bus_click(LGA_SRC_B, false)    # NB
-	# THE TWO-LAYER TEACH, read at the two moments it is offered. This fixture
-	# IS the trap: U1's sources are through-hole (copper both sides) and every
-	# T1 land is F.Cu-only, so the single station a bus gets leads AWAY from the
-	# targets — a bus that needs B.Cu at all has to start there.
+	# THE LAYER TEACH, read at the two moments it is offered. This is the
+	# ORDINARY through-hole-to-SMD bus: U1's sources are through-hole (copper
+	# both sides) and every T1 land is F.Cu-only, so the path as drawn reaches
+	# its targets. Nothing may be said here about starting on the other side —
+	# which side such a bus runs on is the designer's call, not the tool's — and
+	# the teach line still has to teach the gesture it always taught.
 	var sources_teach: String = canvas.bus_teach_line()
 	canvas._handle_bus_click(LGA_PATH_1, false)   # ends SOURCES
 	var path_began: String = _last(msgs)
@@ -2422,14 +2431,16 @@ func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
 	canvas._handle_bus_click(LGA_TGT_A, false)    # ends PATH, target NA
 	canvas._handle_bus_click(LGA_TGT_B, false)    # target NB
 	canvas._commit_bus()
-	check("the gesture committed the same two traces, having said BEFORE the "
-			+ "first path click — and again as the layer froze — that a bus "
-			+ "needing the other side starts on B.Cu and switches onto F.Cu",
+	check("the gesture committed the same two traces, and NEITHER moment "
+			+ "advised a start layer for a bus whose targets it can already reach",
 			_serialized_traces(gesture_data).size() == 3
-				and sources_teach.contains("Every target pad is on F.Cu only")
-				and sources_teach.contains("start it on B.Cu")
-				and sources_teach.contains("switch onto F.Cu")
-				and path_began.contains("start it on B.Cu"),
+				and sources_teach.contains("2 nets picked")
+				and sources_teach.contains("rings mark where each may end")
+				and not sources_teach.contains("start it on")
+				and not sources_teach.contains("Layer chooser")
+				and path_began.contains("Path for [NA → NB] on F.Cu")
+				and not path_began.contains("start it on")
+				and not path_began.contains("Layer chooser"),
 			"%s || teach: %s || began: %s" % [str(_board_state(gesture_data)),
 				sources_teach, path_began])
 	check("the status line names the foreign pad, its net and the pad NB crosses",
@@ -2488,3 +2499,115 @@ func _test_a_station_via_names_the_layer_it_lands_on() -> void:
 			findings.size() == 1 and not hit.is_empty(), str(_finding_keys(findings)))
 		check("…and the finding says %s" % side,
 			str(hit.get("layer", "")) == side, str(hit.get("layer", "")))
+
+
+# ── 13d. THE ONE START-LAYER NOTE LEFT ────────────────────────────────────────
+#
+# The bus tool says which layer to START on in exactly one case: NO candidate
+# target has copper on the working layer and they all sit on one other layer.
+# The bus as drawn cannot land at all — a geometric fact about the board, not a
+# preference about how to route it.
+#
+# ORACLES:
+#   THE TEACH/STATUS STRINGS — read at BOTH moments the note is offered (the
+#     SOURCES teach line, and the message emitted as the first path click
+#     freezes the layer), required to name the working layer, the side every
+#     target is on, and the chooser that fixes it.
+#   THE SAME BOARD WITH THE CHOOSER TAKEN — working layer B.Cu, where the very
+#     same pads ARE reachable flat and the note must go silent. This is the half
+#     that fails if the note ever fires on a bus that can land.
+#   THE BOARD TRIPLE — traces/history/journal, unchanged while the note is only
+#     advice, then +2 traces in ONE journal step once the B.Cu bus commits.
+
+## The LGA board with the target part flipped onto the BOTTOM side: every T1
+## land is then B.Cu-only, while U1's through-hole sources still reach both.
+func _bottom_target_board() -> Dictionary:
+	var board := _lga_board()
+	for raw_comp in (board["components"] as Array):
+		var comp: Dictionary = raw_comp
+		if str(comp.get("ref", "")) == "T1":
+			comp["layer"] = "bottom"
+	return board
+
+
+## [canvas, data] on that board, bus tool live, working layer set BEFORE any
+## pick so the chooser is the only thing that differs between the two halves.
+func _bottom_target_rig(layer: String) -> Array:
+	var data := PCBData.new()
+	data.from_board_dict(_bottom_target_board())
+	var canvas = PcbCanvasScript.new()
+	canvas.data = data
+	canvas.zoom = 8.0
+	canvas.snap_to_grid = false
+	var pad_host := StubPadHost.new()
+	pad_host.pads = [
+		{"component": "U1", "pin": "1", "position": LGA_SRC_A},
+		{"component": "U1", "pin": "2", "position": LGA_SRC_B},
+		{"component": "T1", "pin": "2", "position": LGA_TGT_B},
+		{"component": "T1", "pin": "4", "position": LGA_TGT_A},
+	]
+	canvas.set_pin_inspector_host(pad_host)
+	canvas.set_tool_mode(canvas.ToolMode.BUS)
+	canvas.working_layer = layer
+	return [canvas, data]
+
+
+func _test_unreachable_targets_still_name_the_layer_to_start_on() -> void:
+	print("\n-- (13d) targets with no copper on the working layer name the chooser --")
+	var rig := _bottom_target_rig("top")
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	var quiet := _board_state(data)
+	canvas._handle_bus_click(LGA_SRC_A, false)    # NA
+	canvas._handle_bus_click(LGA_SRC_B, false)    # NB
+	var sources_teach: String = canvas.bus_teach_line()
+	canvas._handle_bus_click(LGA_PATH_1, false)   # ends SOURCES — freezes F.Cu
+	var path_began: String = _last(msgs)
+	check("the SOURCES teach line names the working layer, the side every target "
+			+ "is on, and the chooser that fixes it",
+			sources_teach.contains("No target pad for these nets has copper on F.Cu")
+				and sources_teach.contains("every one is on B.Cu")
+				and sources_teach.contains("Layer chooser to B.Cu"),
+			sources_teach)
+	check("…and the same words land again as the first path click freezes the layer",
+			path_began.contains("No target pad for these nets has copper on F.Cu")
+				and path_began.contains("Layer chooser to B.Cu"),
+			path_began)
+	check("…having written nothing — this is advice, not a refusal",
+			_board_state(data) == quiet, "%s (was %s)" % [str(_board_state(data)), str(quiet)])
+	canvas.free()
+
+	# THE CHOOSER TAKEN. Same pads, same clicks, working layer B.Cu: the targets
+	# are now reachable flat, so the note goes silent and the bus lands.
+	var ok_rig := _bottom_target_rig("bottom")
+	var ok_canvas = ok_rig[0]
+	var ok_data = ok_rig[1]
+	var ok_msgs := _collect(ok_canvas)
+	var before := _board_state(ok_data)
+	ok_canvas._handle_bus_click(LGA_SRC_A, false)
+	ok_canvas._handle_bus_click(LGA_SRC_B, false)
+	var ok_teach: String = ok_canvas.bus_teach_line()
+	ok_canvas._handle_bus_click(LGA_PATH_1, false)
+	var ok_began: String = _last(ok_msgs)
+	ok_canvas._handle_bus_click(LGA_PATH_2, false)
+	ok_canvas._handle_bus_click(LGA_PATH_3, false)
+	ok_canvas._handle_bus_click(LGA_TGT_A, false)
+	ok_canvas._handle_bus_click(LGA_TGT_B, false)
+	ok_canvas._commit_bus()
+	check("on B.Cu the note is silent — and both moments still teach the gesture",
+			ok_teach.contains("2 nets picked")
+				and not ok_teach.contains("No target pad")
+				and not ok_teach.contains("Layer chooser")
+				and ok_began.contains("Path for [NA → NB] on B.Cu")
+				and not ok_began.contains("No target pad")
+				and not ok_began.contains("Layer chooser"),
+			"teach: %s || began: %s" % [ok_teach, ok_began])
+	check("…and the bus committed its two B.Cu runs in ONE journal step",
+			_serialized_traces(ok_data).size() == int(before[0]) + 2
+				and ok_data.history.size() == int(before[1]) + 1,
+			"board %s (was %s)" % [str(_board_state(ok_data)), str(before)])
+	var landed := _traces_by_net_and_layer(ok_data)
+	check("…one trace per net, both on bottom",
+			landed.has("NA|bottom") and landed.has("NB|bottom"), str(landed.keys()))
+	ok_canvas.free()
