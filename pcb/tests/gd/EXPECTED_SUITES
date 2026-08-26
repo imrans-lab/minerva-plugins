@@ -30,7 +30,12 @@
 # adds six assertions in its own section, and the invariants walk's new metric
 # oracle adds one per routed case. 61 is MEASURED (61 passed, 0 failed), never
 # derived by reading.
-test_bus_breakout_geometry.gd assertions=61
+# 61 -> 95: refusals split into unbuildable vs bad-but-buildable (nine cases
+# reclassified onto a helper that also demands the geometry), the crowded-
+# copper finding's measured/required/witness checks, and the via station
+# (hand-derived fan, split indices, via pitch, two refusals, one finding, and
+# two more invariant cases). MEASURED: 95 passed, 0 failed.
+test_bus_breakout_geometry.gd assertions=95
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.
@@ -43,7 +48,12 @@ test_bus_breakout_geometry.gd assertions=61
 # refused-first-press probe and a too-short refusal), the per-net airline test,
 # and the teach-line check. MEASURED on a run; the source count is lower
 # because section 5's route checks expand per net.
-test_bus_tool.gd assertions=148
+# 148 -> 218: the finish double-click on the last landed target, the
+# crossing bus that lands and is named, findings reaching the verb reply and
+# the ghost, the layer switch that becomes a via station (gesture and verb,
+# compared board to board), a fractional verb index and a torn station plan
+# both refused. MEASURED: 223 passed, 0 failed.
+test_bus_tool.gd assertions=223
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
