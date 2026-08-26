@@ -124,20 +124,19 @@ func HandleGerbers(ctx context.Context, w *bridge.Worker, params json.RawMessage
 
 var DRC = ToolSpec{
 	Name: "minerva_pcb_drc",
-	Description: "Run a CONNECTIVITY/topology check over a canonical PCB board (pad centers " +
-		"+ trace centerlines; NOT a geometric copper DRC — use minerva_pcb_drc_geometric for copper " +
-		"clearance/width/annular). Pure " +
-		"Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. " +
-		"Returns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured " +
-		"and located: 'wrong_net_pad' (a trace endpoint on, or a segment passing over, a different-net pad -> short) " +
-		"{net, at:[x,y], pad:{ref,pin,net}}; 'crossing' (two same-layer different-net traces " +
-		"that intersect, deduped per net-pair-per-layer) {nets:[a,b], layer, at}; " +
-		"'dangling_endpoint' (a leaf trace endpoint reaching no pad/via/same-net copper -> " +
-		"open) {net, at}; 'layer_change_no_via' (a net's top and bottom copper meet with no " +
-		"via or through-hole pad -> missing via) {net, at}. T-junction taps and same-" +
-		"component internal-net pads are credited so they don't read as false opens. " +
-		"Scope: checks key off trace endpoints/segments — this is NOT a full ratsnest/" +
-		"connectivity check; a pad with no trace routed near it is not flagged as unrouted.",
+	Description: "Run a CONNECTIVITY/topology check over a canonical PCB board (pad centers + trace centerlines; NOT a" +
+		" geometric copper DRC — use minerva_pcb_drc_geometric for copper clearance/width/annular). Pure Pyth" +
+		"on, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. Holding an editor? Use mi" +
+		"nerva_pcb_board_drc {editor_name} — it checks the LIVE board in place with no export round-trip. Ret" +
+		"urns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured and located: 'wrong_n" +
+		"et_pad' (a trace endpoint on, or a segment passing over, a different-net pad -> short) {net, at:[x,y" +
+		"], pad:{ref,pin,net}}; 'crossing' (two same-layer different-net traces that intersect, deduped per n" +
+		"et-pair-per-layer) {nets:[a,b], layer, at}; 'dangling_endpoint' (a leaf trace endpoint reaching no p" +
+		"ad/via/same-net copper -> open) {net, at}; 'layer_change_no_via' (a net's top and bottom copper meet" +
+		" with no via or through-hole pad -> missing via) {net, at}. T-junction taps and same-component inter" +
+		"nal-net pads are credited so they don't read as false opens. Scope: checks key off trace endpoints/s" +
+		"egments — this is NOT a full ratsnest/connectivity check; a pad with no trace routed near it is not " +
+		"flagged as unrouted.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -155,39 +154,34 @@ func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (j
 
 var DRCGeometric = ToolSpec{
 	Name: "minerva_pcb_drc_geometric",
-	Description: "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR — real " +
-		"pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args " +
-		"{yaml:<board source>} or {board:<board object>}. Compiles the board to the " +
-		"ResolvedBoard IR, then checks GC1 min trace width, GC2 copper-copper clearance, " +
-		"GC3 drill/finished-hole (finished-hole is a necessary pre-DFM check — the IR " +
-		"carries drill diameter, not the plated finished bore), GC4 annular ring, GC5 " +
-		"copper-to-edge, GC6 hole-to-hole, GC7 filled-pour clearance, GC8 solder-mask " +
-		"sliver, GC10 hole-to-copper, and GC11 hole-to-edge (an unconditional containment " +
-		"refusal for a bore that crosses the outline or enters a cutout, plus a " +
-		"proximity check that runs only when the profile declares min_hole_to_edge_mm). " +
-		"GC9 silkscreen DFM (legend stroke width and legend-to-pad) is ADVISORY: its rows " +
-		"appear in a separate top-level `advisories` array and are counted, but are NOT in " +
-		"`findings` and NEVER change `verdict` — legend is cosmetic and is warned, never " +
-		"fatal. Floors declared OPTIONAL by a profile (hole-to-copper, hole-to-edge, the " +
-		"silk pair, feature-specific drill minima) are enforced only when that profile " +
-		"states them. `counts` reports ROWS, not check coverage: zero can mean either " +
-		"'the profile stated no floor' or 'the check ran and found no row'. A GC9 failure " +
-		"is explicit as a counted `gc9_silk_indeterminate` advisory, never inferred from " +
-		"the two measuring counts. " +
-		"NEVER a false clean: modeled copper is exact or a superset (fail-safe), and " +
-		"unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a " +
-		"discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, " +
-		"verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, " +
-		"entity_id, net_id, layer, measured_mm, required_mm, witness}], advisories:[...same " +
-		"shape...], counts, not_evaluated:[{check, floor, reason, scope?}], " +
-		"static_warnings:{rows:[{code, count, severity, message, refs, refs_omitted?}], digest, total}} or " +
-		"indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. " +
-		"`not_evaluated` names every rule whose floor the selected profile (or the board, for " +
-		"gc12_trace_direction) does not declare, so a zero count that means NOT MEASURED can be told " +
-		"from one that means clean. `static_warnings` collapses the per-entity compile warnings into " +
-		"one row per code with a digest that is stable across identical calls; pass verbose_warnings:true " +
-		"to get the flat `warnings` list beside it. " +
-		"Distinct from minerva_pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
+	Description: "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR — real pad/trace/via/hole copper " +
+		"geometry, pure Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. Holdin" +
+		"g an editor? Use minerva_pcb_board_drc {editor_name, geometric: true} — it checks the LIVE board in " +
+		"place with no export round-trip. Compiles the board to the ResolvedBoard IR, then checks GC1 min tra" +
+		"ce width, GC2 copper-copper clearance, GC3 drill/finished-hole (finished-hole is a necessary pre-DFM" +
+		" check — the IR carries drill diameter, not the plated finished bore), GC4 annular ring, GC5 copper-" +
+		"to-edge, GC6 hole-to-hole, GC7 filled-pour clearance, GC8 solder-mask sliver, GC10 hole-to-copper, a" +
+		"nd GC11 hole-to-edge (an unconditional containment refusal for a bore that crosses the outline or en" +
+		"ters a cutout, plus a proximity check that runs only when the profile declares min_hole_to_edge_mm)." +
+		" GC9 silkscreen DFM (legend stroke width and legend-to-pad) is ADVISORY: its rows appear in a separa" +
+		"te top-level `advisories` array and are counted, but are NOT in `findings` and NEVER change `verdict" +
+		"` — legend is cosmetic and is warned, never fatal. Floors declared OPTIONAL by a profile (hole-to-co" +
+		"pper, hole-to-edge, the silk pair, feature-specific drill minima) are enforced only when that profil" +
+		"e states them. `counts` reports ROWS, not check coverage: zero can mean either 'the profile stated n" +
+		"o floor' or 'the check ran and found no row'. A GC9 failure is explicit as a counted `gc9_silk_indet" +
+		"erminate` advisory, never inferred from the two measuring counts. NEVER a false clean: modeled coppe" +
+		"r is exact or a superset (fail-safe), and unresolved/unsupported geometry FAILS CLOSED to an indeter" +
+		"minate result. Returns a discriminated union — determinate {ok:true, scope:'geometric', verifies_geo" +
+		"metry:true, verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, en" +
+		"tity_id, net_id, layer, measured_mm, required_mm, witness}], advisories:[...same shape...], counts, " +
+		"not_evaluated:[{check, floor, reason, scope?}], static_warnings:{rows:[{code, count, severity, messa" +
+		"ge, refs, refs_omitted?}], digest, total}} or indeterminate {ok:false, verdict:'indeterminate', erro" +
+		"r:{kind}} with NO clean/findings. `not_evaluated` names every rule whose floor the selected profile " +
+		"(or the board, for gc12_trace_direction) does not declare, so a zero count that means NOT MEASURED c" +
+		"an be told from one that means clean. `static_warnings` collapses the per-entity compile warnings in" +
+		"to one row per code with a digest that is stable across identical calls; pass verbose_warnings:true " +
+		"to get the flat `warnings` list beside it. Distinct from minerva_pcb_drc (connectivity/topology only" +
+		"). Corroborated against kicad-cli DRC.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
