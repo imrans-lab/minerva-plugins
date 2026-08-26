@@ -613,8 +613,17 @@ func _test_a_trace_is_not_a_bus_anchor() -> void:
 			+ "the copper is what starts the path",
 			_last(msgs).contains("trace") and _last(msgs).contains("not a bus anchor")
 				and _last(msgs).contains("clear of the copper"), _last(msgs))
-	check("…the picks are untouched", canvas._bus_nets == (["NA", "NB"] as Array[String]),
-			"got %s" % str(canvas._bus_nets))
+	# WHERE the path starts is pinned here rather than in its own case: this is
+	# the one SOURCES-phase moment in the suite with the full net list picked,
+	# which is exactly when the teach line has to say it. A spine begun beside
+	# the pin column leaves every source pad inside the corridor, so "clear of
+	# the pads" alone is the sentence that walks a user into that finding.
+	check("…the picks are untouched, and the teach line says where the path "
+			+ "starts — BEHIND the source pads, not merely clear of them",
+			canvas._bus_nets == (["NA", "NB"] as Array[String])
+				and canvas.bus_teach_line().contains("BEHIND the source pads")
+				and canvas.bus_teach_line().contains("first segment"),
+			"picks %s / teach %s" % [str(canvas._bus_nets), canvas.bus_teach_line()])
 	check("…and nothing was written", _board_state(data) == quiet, str(_board_state(data)))
 
 	# The PATH phase is PERMISSIVE, and that is the whole scope of the rule.
@@ -1046,8 +1055,17 @@ func _test_a_crossing_commits_and_is_named() -> void:
 	canvas._handle_bus_click(TGT_A, false)
 
 	var live_refusal: String = str(canvas.bus_refusal())
-	check("the live preview still calls this bus refused, naming both nets",
-			live_refusal.contains("NB") and live_refusal.contains("NC"), live_refusal)
+	# THE CLASS, not only the words: this plan HAS geometry, so the finish
+	# gesture below lands it. The panel leads its status line with these two
+	# readings, and telling this apart from a plan that writes nothing is the
+	# whole difference between "will land with N findings" and "REFUSED".
+	check("the live preview names both nets, and reports the plan as one that "
+			+ "still LANDS — buildable, with findings to count",
+			live_refusal.contains("NB") and live_refusal.contains("NC")
+				and bool(canvas.bus_plan_buildable())
+				and int(canvas.bus_finding_count()) >= 1,
+			"%s (buildable=%s findings=%d)" % [live_refusal,
+				str(canvas.bus_plan_buildable()), int(canvas.bus_finding_count())])
 
 	canvas._commit_bus()
 
@@ -1278,8 +1296,19 @@ func _test_a_layer_switch_mid_path_is_a_via_station() -> void:
 	# ONE station per bus: the second switch is refused by name rather than
 	# quietly moving the station out from under the geometry drawn around it.
 	canvas.working_layer = "top"
-	check("a second layer switch is refused, naming the station it already has",
-			_last(msgs).contains("already has a via station") and int(canvas._bus_station_index) == 1,
+	# AND IT NAMES THE WAY OUT, which is NOT "pick this layer again". The run
+	# past the station is on the station's layer, so a bus that has to END on
+	# F.Cu must have STARTED on B.Cu; advice that sent the user back to the same
+	# start layer would walk them into this same refusal a second time.
+	check("a second layer switch is refused, naming the station it already has "
+			+ "AND the start layer that would end the bus where it was asked for",
+			_last(msgs).contains("already has a via station")
+				and int(canvas._bus_station_index) == 1
+				and _last(msgs).contains("switches once")
+				and _last(msgs).contains("To END on F.Cu")
+				and _last(msgs).contains("START on B.Cu")
+				and _last(msgs).contains("Esc")
+				and _last(msgs).contains("Layer chooser to B.Cu"),
 			_last(msgs))
 
 	canvas._handle_bus_click(PATH_2, false)
@@ -2380,14 +2409,28 @@ func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
 	var msgs := _collect(canvas)
 	canvas._handle_bus_click(LGA_SRC_A, false)    # NA
 	canvas._handle_bus_click(LGA_SRC_B, false)    # NB
+	# THE TWO-LAYER TEACH, read at the two moments it is offered. This fixture
+	# IS the trap: U1's sources are through-hole (copper both sides) and every
+	# T1 land is F.Cu-only, so the single station a bus gets leads AWAY from the
+	# targets — a bus that needs B.Cu at all has to start there.
+	var sources_teach: String = canvas.bus_teach_line()
 	canvas._handle_bus_click(LGA_PATH_1, false)   # ends SOURCES
+	var path_began: String = _last(msgs)
 	canvas._handle_bus_click(LGA_PATH_2, false)
 	canvas._handle_bus_click(LGA_PATH_3, false)
 	canvas._handle_bus_click(LGA_TGT_A, false)    # ends PATH, target NA
 	canvas._handle_bus_click(LGA_TGT_B, false)    # target NB
 	canvas._commit_bus()
-	check("the gesture committed the same two traces",
-			_serialized_traces(gesture_data).size() == 3, str(_board_state(gesture_data)))
+	check("the gesture committed the same two traces, having said BEFORE the "
+			+ "first path click — and again as the layer froze — that a bus "
+			+ "needing the other side starts on B.Cu and switches onto F.Cu",
+			_serialized_traces(gesture_data).size() == 3
+				and sources_teach.contains("Every target pad is on F.Cu only")
+				and sources_teach.contains("start it on B.Cu")
+				and sources_teach.contains("switch onto F.Cu")
+				and path_began.contains("start it on B.Cu"),
+			"%s || teach: %s || began: %s" % [str(_board_state(gesture_data)),
+				sources_teach, path_began])
 	check("the status line names the foreign pad, its net and the pad NB crosses",
 			_last(msgs).contains("T1.3") and _last(msgs).contains("FVCC")
 				and _last(msgs).contains("T1.1"), _last(msgs))

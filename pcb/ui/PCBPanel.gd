@@ -1492,17 +1492,40 @@ func bus_refusal_text() -> String:
 	return str(_canvas.bus_refusal())
 
 
+## Whether the bus tool's live plan would still LAND its copper on the finish
+## gesture — false only for the plan that has no geometry to write. Read from
+## the canvas on every call, for the same reason bus_refusal_text is.
+func bus_plan_lands() -> bool:
+	if _canvas == null or _canvas.tool_mode != _PcbCanvasScript.ToolMode.BUS:
+		return true
+	return bool(_canvas.bus_plan_buildable())
+
+
+## How many rules the bus tool's live plan breaks; 0 when it is clean, when
+## there is no plan, and when the plan is the unbuildable kind.
+func bus_finding_count() -> int:
+	if _canvas == null or _canvas.tool_mode != _PcbCanvasScript.ToolMode.BUS:
+		return 0
+	return int(_canvas.bus_finding_count())
+
+
 ## What colour one pip is painted in.
 ##
-## A REFUSED PLAN REPLACES THE PALETTE rather than adding a fourth pip state:
+## A FLAGGED PLAN REPLACES THE PALETTE rather than adding a fourth pip state:
 ## the pips go on saying which phase is live, and the colour they say it in is
-## what carries "this plan would be refused". The tint is pulled from the canvas
+## what carries "this plan breaks a rule". The tint is pulled from the canvas
 ## (BUS_REFUSAL_COLOR — the same colour it tints the spine with) rather than
 ## re-chosen here, so the two surfaces cannot drift apart.
 ##
+## ONE COLOUR FOR BOTH CLASSES OF NO, deliberately: a plan that lands with
+## findings and one that writes nothing both mean "read the line before you
+## finish this bus", and a 3px pip cannot carry the difference between them —
+## bus_status_lead's words can, and do. A second tint would also split the badge
+## from the spine, which has only the one.
+##
 ## Pure and static so the tint can be checked without painting a button.
-static func bus_badge_pip_color(state: String, refused: bool) -> Color:
-	if not refused:
+static func bus_badge_pip_color(state: String, flagged: bool) -> Color:
+	if not flagged:
 		if state == "active":
 			return _BUS_BADGE_ACTIVE_COLOR
 		return _BUS_BADGE_DONE_COLOR if state == "done" else _BUS_BADGE_PENDING_COLOR
@@ -1525,11 +1548,11 @@ func _draw_bus_phase_badge(btn: Button) -> void:
 	var step := bus_phase_step()
 	if step < 0:
 		return
-	var refused := not bus_refusal_text().is_empty()
+	var flagged := not bus_refusal_text().is_empty()
 	for pip in bus_badge_pips(btn.size, step, int(_PcbCanvasScript.BusPhase.size())):
 		var centre: Vector2 = (pip as Dictionary)["centre"]
 		var state := str((pip as Dictionary)["state"])
-		var color := bus_badge_pip_color(state, refused)
+		var color := bus_badge_pip_color(state, flagged)
 		if state == "active":
 			btn.draw_circle(centre, _BUS_BADGE_ACTIVE_RADIUS, color)
 		elif state == "done":
@@ -6523,8 +6546,31 @@ func _set_status(text: String) -> void:
 ## The held condition every status write is prefixed with, or "" when there is
 ## none.
 func _status_lead() -> String:
-	var bus_refusal := bus_refusal_text()
-	return "" if bus_refusal.is_empty() else "BUS REFUSED: %s  •  " % bus_refusal
+	return bus_status_lead(bus_refusal_text(), bus_plan_lands(), bus_finding_count())
+
+
+## THE HELD LEAD'S WORDS, from what the live plan already knows about itself.
+##
+## TWO CLASSES OF NO, and the lead has to tell them apart, because the finish
+## gesture treats them differently: a plan with no geometry writes nothing, and
+## "REFUSED" is the truth about it; a plan that breaks rules but HAS geometry
+## LANDS its copper and repeats the broken rules in the commit summary, so
+## leading with "refused" for that one teaches that the commit is broken when
+## what is broken is the bus. Counting the findings here matches the summary's
+## own "%d rule(s) broke" sentence, and tells the reader that the words after
+## the colon are the FIRST of several.
+##
+## `findings` is never 0 alongside a landing plan's refusal words: those words
+## ARE its first finding's message (panel_tools._bus_planned).
+##
+## Pure and static so both classes can be read without a canvas to drive.
+static func bus_status_lead(refusal: String, lands: bool, findings: int) -> String:
+	if refusal.is_empty():
+		return ""
+	if not lands:
+		return "BUS REFUSED: %s  •  " % refusal
+	return "BUS WILL LAND WITH %d FINDING%s: %s  •  " % [
+		findings, "" if findings == 1 else "S", refusal]
 
 
 ## While-armed gesture grammar (docket 019fb933d4a9): the teaching prose that
@@ -6546,7 +6592,7 @@ const _MODE_HINTS := {
 	8: "Click a pad or via to start, click waypoints, click a pad or via to finish",   # TRACE
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
-	11: "Click a source pad per net (2+), click clear of the pads to path it, then click each net's target pad · Enter commits",  # BUS
+	11: "Click a source pad per net (2+), click clear board BEHIND them to start the path, then click each net's target pad · Enter commits",  # BUS
 	12: "Click empty space for a standalone via · click a trace to snap, inherit its net, and bisect it",  # VIA
 }
 const _ROUTE_FLOW_LABELS := {

@@ -491,13 +491,13 @@ static func bundle_routes(
 		var from_start: Vector2 = sources[i] - pts[0]
 		if from_start.dot(u_src) > _MIN_SEGMENT_MM:
 			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
-				"Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start clear of the pads it fans out to."
+				"Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start BEHIND the source pads, before them along its first segment."
 					% [net_names[i], from_start.dot(u_src)],
 				[net_names[i]], from_start.dot(u_src), 0.0, sources[i]))
 		var from_end: Vector2 = targets[i] - pts[last]
 		if from_end.dot(u_tgt) < -_MIN_SEGMENT_MM:
 			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
-				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end clear of the pads it fans out to."
+				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end PAST the target pads, beyond them along its last segment."
 					% [net_names[i], -from_end.dot(u_tgt)],
 				[net_names[i]], -from_end.dot(u_tgt), 0.0, targets[i]))
 		src_perp.append(from_start.dot(n_src))

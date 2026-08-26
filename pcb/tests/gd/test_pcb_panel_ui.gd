@@ -15,8 +15,8 @@ extends SceneTree
 
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const DRIVER_PATH := "res://test/helpers/plugin_panel_driver.gd"
-## The shared bus plan — the ORACLE the held-refusal test below reads its
-## expected words out of. See _test_bus_refusal_is_held.
+## The shared bus plan — the ORACLE the held-lead test below reads its expected
+## words, class and finding count out of. See _test_bus_refusal_is_held.
 const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
 
 var _pass_count: int = 0
@@ -1196,23 +1196,33 @@ func _test_bus_phase_badge() -> void:
 # standing status line (not the 2s transient sink — a refusal that expires is a
 # refusal nobody reads) and the phase badge's colour.
 #
-# ORACLE: THE SHARED PLAN'S OWN WORDS. panel_tools.bus_plan — the one function
-# the gesture, both MCP verbs and the commit all call — is asked to plan the
-# SAME fixture geometry directly, and its refusal string is what the canvas, the
-# panel accessor and the rendered status label are each held to, verbatim. The
-# refusal RULES are not being tested here (test_bus_breakout_geometry.gd and
-# test_pcb_bus_geometry.gd own those); what is tested is that the words reach
-# the user and stay reachable.
+# AND IT SAYS WHICH KIND OF "no" IT IS. A plan that breaks a rule but has
+# geometry COMMITS on the finish gesture; only a plan with no geometry writes
+# nothing. One word for both would teach the user that the commit is broken, so
+# the lead reads the plan's own `buildable` flag and finding count, not just its
+# words. The badge keeps ONE colour for both: it says "read the line", and the
+# line says which.
+#
+# ORACLE: THE SHARED PLAN'S OWN WORDS AND FLAGS. panel_tools.bus_plan — the one
+# function the gesture, both MCP verbs and the commit all call — is asked to
+# plan the SAME fixture geometry directly, and its error string, its `buildable`
+# flag and its finding count are what the canvas, the panel accessors and the
+# rendered status label are each held to. The refusal RULES are not being tested
+# here (test_bus_breakout_geometry.gd and test_pcb_bus_geometry.gd own those);
+# what is tested is that the words reach the user, stay reachable, and describe
+# what the finish gesture will actually do.
 
 ## A second path vertex 0.1mm from the first. The badge board's two 0.2mm nets
 ## at 0.3mm clearance ride lanes at ±0.25mm, so a 0.1mm spine segment is
 ## shorter than the widest offset and the inner track would fold back on
-## itself — bus_plan's inner-fold refusal, reached while still PATHING.
+## itself — bus_plan's inner-fold FINDING, reached while still PATHING. It is
+## bad-but-buildable, so this fixture is also the "will land with findings"
+## class the held lead has to distinguish.
 const BADGE_FOLD := Vector2(25.1, 25.0)
 
 
 func _test_bus_refusal_is_held() -> void:
-	print("\n-- a refused bus plan is named in the status line, and HELD there --")
+	print("\n-- a flagged bus plan is named in the status line, and HELD there --")
 	var panel: Variant = await _mount_panel_in_tree()
 	var canvas: Variant = panel._canvas
 	var P := load(PANEL_PATH)
@@ -1248,19 +1258,47 @@ func _test_bus_refusal_is_held() -> void:
 		PackedVector2Array([BADGE_PATH_1, BADGE_FOLD]), "top",
 		PackedStringArray(["U1.1", "U2.1"]), PackedStringArray())
 	var expected := str(oracle.get("error", ""))
-	check("refusal oracle: bus_plan itself refuses this spine, and says why",
-			not bool(oracle.get("ok", true)) and not expected.is_empty(), expected)
+	var oracle_findings: Array = oracle.get("findings", []) if oracle.get("findings", []) is Array else []
+	# THE ORACLE IS THE PLAN'S OWN CLASS. A fold is bad-but-BUILDABLE: the
+	# finish gesture lands this copper and repeats the broken rules, so the
+	# words the panel holds must say that and not "refused".
+	check("refusal oracle: bus_plan itself flags this spine, says why, and "
+			+ "would still BUILD it",
+			not bool(oracle.get("ok", true)) and not expected.is_empty()
+				and bool(oracle.get("buildable", false)) and oracle_findings.size() >= 1,
+			"%s (buildable=%s findings=%d)" % [expected,
+				str(oracle.get("buildable", false)), oracle_findings.size()])
 
 	canvas._handle_bus_click(BADGE_FOLD, false)
 	check("refusal: the canvas reports the refusal in bus_plan's own words",
 			canvas.bus_refusal() == expected, canvas.bus_refusal())
-	check("refusal: the panel reads those same words back off the canvas",
-			panel.bus_refusal_text() == expected, panel.bus_refusal_text())
+	check("refusal: the panel reads those same words — and the same CLASS — "
+			+ "back off the canvas, holding no copy of either",
+			panel.bus_refusal_text() == expected
+				and bool(canvas.bus_plan_buildable()) and bool(panel.bus_plan_lands())
+				and int(canvas.bus_finding_count()) == oracle_findings.size()
+				and int(panel.bus_finding_count()) == oracle_findings.size(),
+			"%s (lands=%s findings=%d)" % [panel.bus_refusal_text(),
+				str(panel.bus_plan_lands()), int(panel.bus_finding_count())])
 	check("refusal: the crossing was announced exactly once, as refused",
 			announced == [true], str(announced))
-	check("refusal: the STATUS LINE carries the reason",
-			str(panel._status_label.text).contains(expected),
-			str(panel._status_label.text))
+	# BOTH CLASSES OF NO, in one place. The live one is the buildable kind, so
+	# the line counts findings and must not say REFUSED; the geometry-less kind
+	# is unreachable by clicking this fixture (every gesture-made plan has
+	# geometry), so it is read off the pure builder the label goes through.
+	var lands_lead := "BUS WILL LAND WITH %d FINDING%s:" % [
+		oracle_findings.size(), "" if oracle_findings.size() == 1 else "S"]
+	check("refusal: the STATUS LINE carries the reason, led by what the finish "
+			+ "gesture will DO — this bus lands, and only a plan with no "
+			+ "geometry is still called REFUSED",
+			str(panel._status_label.text).contains(expected)
+				and str(panel._status_label.text).contains(lands_lead)
+				and not str(panel._status_label.text).contains("BUS REFUSED")
+				and P.bus_status_lead(expected, false, 0).begins_with("BUS REFUSED: " + expected)
+				and P.bus_status_lead(expected, true, 1).begins_with("BUS WILL LAND WITH 1 FINDING: ")
+				and P.bus_status_lead("", true, 0) == "",
+			"%s || unbuildable lead: %s" % [str(panel._status_label.text),
+				P.bus_status_lead(expected, false, 0)])
 	check("refusal: …and the full text is on the tooltip, which no ellipsis trims",
 			str(panel._status_label.tooltip_text).contains(expected),
 			str(panel._status_label.tooltip_text))

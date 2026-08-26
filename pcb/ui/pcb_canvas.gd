@@ -978,6 +978,14 @@ const BUS_TARGET_MARKER_RADIUS_PX := 5.0
 ## the alternatives beside it into something that looks illegal.
 const BUS_SUGGESTION_MARKER_RADIUS_PX := 8.0
 
+## WHERE A BUS SPINE HAS TO START, in one place because it is said in two: the
+## teach line the picks carry, and the transient the second pick emits. Every
+## net's breakout leg runs FORWARD from the spine's first vertex into the
+## bundle, so a spine begun beside the pin column leaves each source pad PAST
+## the start — pcb_bus_geometry's bus_pad_inside_corridor finding, whose own
+## advice uses these same words — and the legs fold back over each other.
+const BUS_PATH_START_HINT := "click clear of the pads to start the path BEHIND the source pads, before them along its first segment, so every leg runs forward into the bundle"
+
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)
 var board_edge_color: Color = Color(0.4, 0.4, 0.4, 1.0)
@@ -8290,7 +8298,10 @@ func _draw_trace_preview() -> void:
 ## gesture lands the copper and repeats the broken rules in the summary, so the
 ## user has traces to correct instead of an argument to win. Only a plan with no
 ## geometry at all (bus_plan's `buildable` == false) writes nothing — see
-## _commit_bus.
+## _commit_bus. WHICH of the two a plan is cannot be read off the words, so
+## bus_plan_buildable() and bus_finding_count() carry it: the panel's held lead
+## says "will land with N finding(s)" for the buildable one and keeps "REFUSED"
+## for the one that writes nothing.
 
 
 ## THE PHASE, as a BusPhase int, for surfaces outside this canvas — the toolbar
@@ -8342,6 +8353,28 @@ func _bus_plan_refusal(plan: Dictionary) -> String:
 ## a refusal that can outlive the geometry that caused it.
 func bus_refusal() -> String:
 	return _bus_plan_refusal(_bus_current_plan())
+
+
+## WHICH CLASS THE LIVE PLAN'S "no" IS — the half bus_refusal()'s words cannot
+## carry. False only for a plan with NO geometry, the one class a finish gesture
+## writes nothing for; a plan that breaks rules but has geometry LANDS, so a
+## surface leading with "refused" for it would teach that the commit is broken.
+##
+## True when there is nothing to judge yet: a bus not yet drawn is not a bus
+## that cannot be built.
+##
+## PULLED, never pushed, like bus_refusal() and bus_phase() beside it.
+func bus_plan_buildable() -> bool:
+	var plan := _bus_current_plan()
+	return true if plan.is_empty() else bool(plan.get("buildable", false))
+
+
+## HOW MANY RULES the live plan breaks — the other half of the class. 0 for a
+## clean plan, for no plan at all, and for an unbuildable one (which carries its
+## refusal instead of findings).
+func bus_finding_count() -> int:
+	var raw: Variant = _bus_current_plan().get("findings", [])
+	return (raw as Array).size() if raw is Array else 0
 
 
 ## Re-read the live refusal and ping the outside surfaces when it changed.
@@ -8432,7 +8465,7 @@ func _handle_bus_source_click(world_pos: Vector2) -> void:
 	_bus_net_points.append(hit.get("position", world_pos))
 	_refresh_bus_suggestions()
 	var msg := "Bus: [%s] (%d picked)" % [_bus_nets_joined(), _bus_nets.size()]
-	msg += " — click clear of the pads to start the path." if _bus_nets.size() >= 2 \
+	msg += (" — %s." % BUS_PATH_START_HINT) if _bus_nets.size() >= 2 \
 		else " — pick at least 1 more net."
 	bus_tool_message.emit(msg)
 	queue_redraw()
@@ -8616,14 +8649,18 @@ func _begin_bus_path(world_pos: Vector2) -> void:
 	# The teach line names the ARMED destination — a draft-armed bus proposes
 	# on the plain commit gesture, and saying otherwise here would teach the
 	# user to expect copper.
+	var began := ""
 	if authoring_destination == DEST_DRAFT:
-		bus_tool_message.emit(
-			"Path for [%s] on %s — click vertices, then a pad per net (switch the working layer to via the bundle onto it); DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)."
-				% [_bus_nets_joined(), _bus_layer_display()])
+		began = "Path for [%s] on %s — click vertices, then a pad per net (switch the working layer to via the bundle onto it); DRAFT armed: Enter PROPOSES ghosts for review, no copper lands (Esc cancels)." \
+			% [_bus_nets_joined(), _bus_layer_display()]
 	else:
-		bus_tool_message.emit(
-			"Path for [%s] on %s — click vertices, then a pad per net to land its target (switch the working layer to via the bundle onto it); Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)."
-				% [_bus_nets_joined(), _bus_layer_display()])
+		began = "Path for [%s] on %s — click vertices, then a pad per net to land its target (switch the working layer to via the bundle onto it); Enter then commits COPPER, Shift+Enter PROPOSES ghosts for review (Esc cancels)." \
+			% [_bus_nets_joined(), _bus_layer_display()]
+	# Said again at the moment the layer FREEZES, not only in the teach line
+	# before it: this is the last click after which the chooser stops deciding
+	# which layer this bus runs on.
+	began += _bus_off_layer_target_note(_bus_layer)
+	bus_tool_message.emit(began)
 	queue_redraw()
 
 
@@ -8668,8 +8705,18 @@ func _arm_bus_via_station(layer: String) -> void:
 		# Past a placed station the bundle is on the station's layer, so ANY
 		# other copper layer — the original one included — is a second switch.
 		if layer != _bus_station_layer:
-			bus_tool_message.emit("This bus already has a via station at vertex %d, onto %s — one station per bus (Esc restarts the path)."
-				% [_bus_station_index, _bus_layer_name(_bus_station_layer)])
+			# THE WAY OUT IS NAMED, and it is NOT "choose this layer again".
+			# Where a bus ENDS is decided by where it STARTS: the run past the
+			# station is on the station's layer, so a bundle that has to finish
+			# on `layer` must have BEGUN on the other one. Redrawing from the
+			# same start layer — which is what a bare "set the chooser to
+			# <layer>" would tell the user to do — walks straight back here.
+			var end_on := _bus_layer_name(layer)
+			var start_on := _bus_layer_name(_bus_station_layer if layer == _bus_layer else _bus_layer)
+			bus_tool_message.emit(("This bus already has a via station at vertex %d, onto %s — a bus starts on one layer and switches once."
+				+ " To END on %s, START on %s and switch at the station: press Esc to drop the path, set the toolbar Layer chooser to %s, then redraw.")
+				% [_bus_station_index, _bus_layer_name(_bus_station_layer),
+					end_on, start_on, start_on])
 		return
 	if layer == _bus_layer:
 		# A return to the layer the bundle is already on: nothing to switch to.
@@ -8764,6 +8811,151 @@ func _bus_nets_with_candidates() -> PackedStringArray:
 		if not out.has(net):
 			out.append(net)
 	return out
+
+
+## Every COPPER layer the board declares, canonical and deduplicated — the reach
+## of a through-hole barrel, which pierces the whole stack. Empty on a board
+## that declares no copper, which the note below reads as "cannot measure".
+func _bus_declared_copper_layers() -> PackedStringArray:
+	var out := PackedStringArray()
+	var declared: Array = data.layers if data else []
+	for raw in declared:
+		var name := str(raw)
+		if not PcbLayerStack.is_copper(name):
+			continue
+		var canon := PcbLayerStack.kicad_to_canon(name)
+		if not out.has(canon):
+			out.append(canon)
+	return out
+
+
+## The copper layers ONE PIN's lands reach, canonical. EMPTY means NOT READABLE
+## HERE — a pin whose footprint never resolved has no lands to measure — and is
+## the fail-open answer the note below stays silent on. A through-hole land
+## answers with the WHOLE declared stack rather than with empty, because "both
+## sides" and "unknown" lead to opposite advice.
+##
+## Same reading panel_tools._bus_board_copper takes of the same lands: a land
+## declaring no layer of its own sits on the side its component is placed on.
+func _bus_pin_copper_layers(comp, pin_name: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var lands: Array = comp.lands_for_pin(pin_name)
+	if lands.is_empty():
+		return PackedStringArray()
+	for raw_land in lands:
+		var land: Dictionary = raw_land
+		if str(land.get("type", "smd")).to_lower() in THT_PAD_TYPES:
+			return _bus_declared_copper_layers()
+		for raw_layer in (land.get("layers", []) as Array):
+			var canon := str(raw_layer)
+			if not PcbLayerStack.is_copper(canon):
+				continue
+			canon = PcbLayerStack.kicad_to_canon(canon)
+			if not out.has(canon):
+				out.append(canon)
+	if out.is_empty() and PcbLayerStack.is_copper(str(comp.layer)):
+		out.append(PcbLayerStack.kicad_to_canon(str(comp.layer)))
+	return out
+
+
+## The copper layers the picked SOURCE pads reach, as one union. Empty when any
+## source is unreadable, so a single unresolved footprint silences the note
+## rather than letting it advise from half the bus.
+func _bus_source_copper_layers() -> PackedStringArray:
+	var out := PackedStringArray()
+	if data == null:
+		return PackedStringArray()
+	for i in range(_bus_nets.size()):
+		var ref: String = str(_bus_net_refs[i]) if i < _bus_net_refs.size() else ""
+		var net_obj = data.get_net(_bus_nets[i])
+		if net_obj == null:
+			return PackedStringArray()
+		var reaches := PackedStringArray()
+		for pin in net_obj.pins:
+			var comp_id := str((pin as Dictionary).get("component_id", ""))
+			var pin_name := str((pin as Dictionary).get("pin_name", ""))
+			# Matched by REBUILDING the ref rather than by splitting it: the
+			# same construction _bus_target_candidates uses, and a component id
+			# carrying a dot cannot be split back apart.
+			if "%s.%s" % [comp_id, pin_name] != ref:
+				continue
+			var comp = data.get_component(comp_id)
+			if comp == null:
+				return PackedStringArray()
+			reaches = _bus_pin_copper_layers(comp, pin_name)
+			break
+		if reaches.is_empty():
+			return PackedStringArray()
+		for canon in reaches:
+			if not out.has(canon):
+				out.append(canon)
+	return out
+
+
+## THE LAYER THE PATH HAS TO START ON, named before the first click freezes it,
+## or "" when the working layer is already right (or cannot be judged).
+##
+## A BUS IS ONE LAYER PLUS AT MOST ONE STATION, so where it ENDS is decided by
+## where it STARTS. Two shapes of that, both invisible until the gesture is too
+## far along to fix:
+##
+##   TARGETS NOWHERE NEAR THE WORKING LAYER — no candidate has copper on it, and
+##   they all share one other layer. Starting there spends no station at all.
+##
+##   TARGETS ON THE WORKING LAYER AND NOWHERE ELSE, with sources that also reach
+##   the other side. Drawing this flat works — but the one station available
+##   leads AWAY from the targets, so a bus that needs the other side at all has
+##   to start there and switch ONTO the working layer. The user who learns that
+##   at the second switch has already drawn the path.
+##
+## SILENT WHENEVER THE ADVICE WOULD BE A GUESS: an unreadable pad, one candidate
+## disagreeing with the others, sources with no copper off the working layer.
+func _bus_off_layer_target_note(layer: String) -> String:
+	if data == null or _bus_nets.size() < 2 or not PcbLayerStack.is_copper(layer):
+		return ""
+	var working := PcbLayerStack.kicad_to_canon(layer)
+	var candidates := _bus_target_candidates()
+	if candidates.is_empty():
+		return ""
+	var elsewhere := PackedStringArray()
+	var none_on_working := true
+	var all_only_working := true
+	for raw_cand in candidates:
+		var cand: Dictionary = raw_cand
+		var comp = data.get_component(str(cand.get("component", "")))
+		if comp == null:
+			return ""
+		var reaches := _bus_pin_copper_layers(comp, str(cand.get("pin", "")))
+		if reaches.is_empty():
+			return ""
+		if reaches.has(working):
+			none_on_working = false
+		if reaches.size() != 1 or reaches[0] != working:
+			all_only_working = false
+		for canon in reaches:
+			if canon != working and not elsewhere.has(canon):
+				elsewhere.append(canon)
+
+	var working_name := _bus_layer_name(working)
+	if none_on_working and elsewhere.size() == 1:
+		var target_side := _bus_layer_name(elsewhere[0])
+		return (" No target pad for these nets has copper on %s — every one is on %s, and a bus changes layer at most once."
+			+ " For a one-layer bus, set the toolbar Layer chooser to %s before the path's first click (Esc drops a path already started).") 			% [working_name, target_side, target_side]
+
+	if not all_only_working:
+		return ""
+	# The sources decide whether the other side is even reachable: a bus whose
+	# sources are surface copper on the working layer too has no other side to
+	# start from, and its geometry says so on its own.
+	var start_side := PackedStringArray()
+	for canon in _bus_source_copper_layers():
+		if canon != working and not start_side.has(canon):
+			start_side.append(canon)
+	if start_side.size() != 1:
+		return ""
+	var other := _bus_layer_name(start_side[0])
+	return (" Every target pad is on %s only, and a bus starts on one layer and switches once — a station from %s would lead AWAY from them."
+		+ " If this bus needs the other side, start it on %s (toolbar Layer chooser, before the path's first click) and let the station switch onto %s.") 		% [working_name, working_name, other, working_name]
 
 
 ## Re-ask the ratsnest which pad each picked net is LIKELY to run to, one
@@ -9113,7 +9305,7 @@ func _bus_not_ready_message() -> String:
 		return "Nothing to commit yet — click a pad on one of the bus nets to land its target."
 	if _bus_nets.is_empty():
 		return "Nothing to commit — click the pads this bus starts from."
-	return "Nothing to commit yet — click clear of the pads to start the path."
+	return "Nothing to commit yet — %s." % BUS_PATH_START_HINT
 
 
 ## Whether Esc / right-click has anything of this tool's to cancel — armed at
@@ -9244,7 +9436,8 @@ func bus_teach_line() -> String:
 			return _bus_path_teach_line()
 		BusPhase.TARGETS:
 			return _bus_targets_status()
-	return "%d nets picked — rings mark where each may end; click clear of the pads to start the path." % count \
+	return "%d nets picked — rings mark where each may end; %s.%s" \
+			% [count, BUS_PATH_START_HINT, _bus_off_layer_target_note(trace_author_layer())] \
 		if count >= 2 else "%d net picked — rings mark where it may end; pick at least 1 more." % count
 
 

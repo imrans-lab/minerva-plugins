@@ -854,16 +854,21 @@ func _run_structural_refusals() -> void:
 
 	# A pad 5mm INSIDE the bundle: its leg would have to run backwards through
 	# the fan-out to reach its station.
+	#
+	# THE ADVICE HALF IS PINNED TOO ("BEHIND"/"PAST"): the canvas teach line
+	# (pcb_canvas.BUS_PATH_START_HINT) tells the user where to start BEFORE the
+	# spine exists, and this finding tells them after — the two have to name the
+	# same place or one of them is teaching a trap.
 	check_bad_but_buildable("a source pad past the start of the spine is named by net",
 		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
 			names, _pv([Vector2(5, -5), Vector2(-10, 5)]), targets,
 			[0.2, 0.2], 0.3),
-		2, ["\"A\"", "5.000mm past"])
+		2, ["\"A\"", "5.000mm past", "BEHIND the source pads"])
 	check_bad_but_buildable("a target pad short of the end of the spine is named by net",
 		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
 			names, sources, _pv([Vector2(110, -5), Vector2(97, 5)]),
 			[0.2, 0.2], 0.3),
-		2, ["\"B\"", "3.000mm short"])
+		2, ["\"B\"", "3.000mm short", "PAST the target pads"])
 
 	# ROOM. Three 0.2mm tracks at 0.3mm clearance fan out over 1.0mm at each
 	# end and need 0.5mm (the widest offset) of bundle clear of both. A 1.2mm
