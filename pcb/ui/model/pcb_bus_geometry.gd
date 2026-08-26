@@ -432,10 +432,20 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## non-positive means "the vias claim no more room than the tracks do", so
 ## nothing widens.
 ##
+## `open_targets`, when given, is one bool per net: true means that net has NO
+## target — its `targets` entry is ignored — and its route ends OPEN at the end
+## of its own lane (the lane's last offset point at the spine's end; past the
+## via on a station bus), with no target leg. An open net takes no part in the
+## target end's ladder, sideways rule or pad findings, and its target station is
+## reported as 0.0 and left out of `target_order`. Its copper is still measured
+## like everyone else's: a landed net's target leg that crosses an open lane on
+## its way to its pad is a clearance finding, not something hidden. Empty (the
+## default) lands every net.
+##
 ## Returns, whenever geometry could be built (see the header's "two classes of
 ## no"):
 ##   {ok, buildable: true, error, findings, offsets, source_stations,
-##    target_stations, source_order, target_order, polylines,
+##    target_stations, source_order, target_order, polylines, open_targets,
 ##    via_station_index, via_station_offsets, via_station_points,
 ##    via_station_splits}
 ## The four via-station keys are EMPTY (via_station_index -1) for a bus with no
@@ -457,13 +467,23 @@ static func bundle_routes(
 		widths: Array,
 		clearance: float,
 		via_station_index: int = -1,
-		via_diameter: float = 0.0) -> Dictionary:
+		via_diameter: float = 0.0,
+		open_targets: Array = []) -> Dictionary:
 	var n: int = net_names.size()
 	if n == 0:
 		return _unbuildable("A bus needs at least one net (none given).")
 	if sources.size() != n or targets.size() != n or widths.size() != n:
 		return _unbuildable("A bus needs one source, one target and one width per net (%d nets, %d sources, %d targets, %d widths)."
 			% [n, sources.size(), targets.size(), widths.size()])
+	if not open_targets.is_empty() and open_targets.size() != n:
+		return _unbuildable("open_targets needs one flag per net (%d nets, %d flags)." % [n, open_targets.size()])
+	var open: Array = []
+	var landed: Array = []
+	for i in range(n):
+		var is_open: bool = not open_targets.is_empty() and bool(open_targets[i])
+		open.append(is_open)
+		if not is_open:
+			landed.append(i)
 	for i in range(n):
 		# Zero width is what would let two departure stations coincide (their
 		# spacing is pitch_between of the two widths and the clearance, which a
@@ -513,18 +533,29 @@ static func bundle_routes(
 	# its axial sign is flipped and both ends read the same way: a pad outside
 	# the spine is negative, a pad past the spine's end positive.
 	var src_perp: Array = []
-	var tgt_perp: Array = []
 	var src_axial: Array = []
-	var tgt_axial: Array = []
 	for i in range(n):
 		var from_start: Vector2 = sources[i] - pts[0]
-		var from_end: Vector2 = targets[i] - pts[last]
 		src_perp.append(from_start.dot(n_src))
-		tgt_perp.append(from_end.dot(n_tgt))
 		src_axial.append(from_start.dot(u_src))
-		tgt_axial.append(-from_end.dot(u_tgt))
 	var src_sideways: Array = _sideways_tracks(src_perp, src_axial, widths, clearance)
-	var tgt_sideways: Array = _sideways_tracks(tgt_perp, tgt_axial, widths, clearance)
+	# The target end is solved over the LANDED nets only — an open net has no
+	# pad there to measure, order or fan out — in subset arrays indexed by
+	# position in `landed`, then spread back over every net below.
+	var tgt_perp_l: Array = []
+	var tgt_axial_l: Array = []
+	var tgt_widths_l: Array = []
+	var tgt_offsets_l: Array = []
+	var tgt_names_l := PackedStringArray()
+	var offsets: Array = cumulative_offsets(widths, clearance)
+	for i in landed:
+		var from_end: Vector2 = targets[i] - pts[last]
+		tgt_perp_l.append(from_end.dot(n_tgt))
+		tgt_axial_l.append(-from_end.dot(u_tgt))
+		tgt_widths_l.append(widths[i])
+		tgt_offsets_l.append(offsets[i])
+		tgt_names_l.append(net_names[i])
+	var tgt_sideways_l: Array = _sideways_tracks(tgt_perp_l, tgt_axial_l, tgt_widths_l, clearance)
 	for i in range(n):
 		# A pad past the spine's end folds its FORWARD leg back over the
 		# others; a sideways pad has no forward leg, so the rule is not its.
@@ -533,13 +564,15 @@ static func bundle_routes(
 				"Net \"%s\"'s source pad is %.3fmm past the start of the spine, along its first segment — the spine is the trunk between the two fan-outs and its legs reach BACK from its start to the source pads, so start it past the source pads in the direction the bus runs (level with them is fine), never before them. A pad column lying along the spine is left sideways from each pad's own row and needs no room."
 					% [net_names[i], float(src_axial[i])],
 				[net_names[i]], float(src_axial[i]), 0.0, sources[i]))
-		if not tgt_sideways[i] and float(tgt_axial[i]) > _MIN_SEGMENT_MM:
+		if open[i]:
+			continue
+		var k: int = landed.find(i)
+		if not tgt_sideways_l[k] and float(tgt_axial_l[k]) > _MIN_SEGMENT_MM:
 			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
 				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine, along its last segment — the legs reach OUT from the spine's end to the target pads, so end it short of the target pads (level with them is fine), never past them. A pad column lying along the spine is left sideways from each pad's own row and needs no room."
-					% [net_names[i], float(tgt_axial[i])],
-				[net_names[i]], float(tgt_axial[i]), 0.0, targets[i]))
+					% [net_names[i], float(tgt_axial_l[k])],
+				[net_names[i]], float(tgt_axial_l[k]), 0.0, targets[i]))
 
-	var offsets: Array = cumulative_offsets(widths, clearance)
 	# THE WIDENING, and the only geometry a station adds: each track steps out
 	# to a via offset before the station and back after it. Nothing moves when
 	# the via pitch is no wider than the track pitch, and `fan` is then 0 —
@@ -555,11 +588,28 @@ static func bundle_routes(
 	var src := _departure_stations(src_perp, src_axial, src_sideways, offsets, widths,
 		clearance, net_names, "source")
 	findings.append_array(src["findings"])
-	var tgt := _departure_stations(tgt_perp, tgt_axial, tgt_sideways, offsets, widths,
-		clearance, net_names, "target")
+	var tgt := _departure_stations(tgt_perp_l, tgt_axial_l, tgt_sideways_l, tgt_offsets_l,
+		tgt_widths_l, clearance, tgt_names_l, "target")
 	findings.append_array(tgt["findings"])
 	var src_stations: Array = src["stations"]
-	var tgt_stations: Array = tgt["stations"]
+	# Spread the landed-only target answers back over every net. An open net
+	# gets no station (0.0 in the report) and INF for the corner-snap rule, so
+	# no landed leg is ever declined a snap on account of a leg that is not
+	# there; the target order is translated back to net indices.
+	var tgt_stations: Array = []
+	var tgt_snap_stations: Array = []
+	var tgt_sideways: Array = []
+	for i in range(n):
+		tgt_stations.append(0.0)
+		tgt_snap_stations.append(INF)
+		tgt_sideways.append(false)
+	for k in range(landed.size()):
+		tgt_stations[landed[k]] = (tgt["stations"] as Array)[k]
+		tgt_snap_stations[landed[k]] = (tgt["stations"] as Array)[k]
+		tgt_sideways[landed[k]] = tgt_sideways_l[k]
+	var tgt_order: Array = []
+	for k in (tgt["order"] as Array):
+		tgt_order.append(landed[int(k)])
 
 	# Room check. The fan-outs eat into the first and last segments, and what is
 	# left has to still be a bundle: at least the widest offset, which is the
@@ -574,7 +624,8 @@ static func bundle_routes(
 	var span_tgt := 0.0
 	for i in range(n):
 		span_src = maxf(span_src, float(src_stations[i]))
-		span_tgt = maxf(span_tgt, float(tgt_stations[i]))
+		if not open[i]:
+			span_tgt = maxf(span_tgt, float(tgt_stations[i]))
 	for i in range(last):
 		# The two segments the station sits between are judged by the station's
 		# own rule below, which measures the same margin and names the station —
@@ -622,9 +673,13 @@ static func bundle_routes(
 		var d: float = float(src_stations[i]) if src_sideways[i] else _leg_station(
 			float(src_stations[i]), _lane_corner(lane, true, pts[0], u_src),
 			i, src_stations, widths, clearance)
-		var e: float = float(tgt_stations[i]) if tgt_sideways[i] else _leg_station(
-			float(tgt_stations[i]), _lane_corner(tgt_lane, false, pts[last], -u_tgt),
-			i, tgt_stations, widths, clearance)
+		# An OPEN net turns nowhere at the target end: its lane keeps the offset
+		# polyline's own last point and no leg is built.
+		var e: float = 0.0
+		if not open[i]:
+			e = float(tgt_stations[i]) if tgt_sideways[i] else _leg_station(
+				float(tgt_stations[i]), _lane_corner(tgt_lane, false, pts[last], -u_tgt),
+				i, tgt_snap_stations, widths, clearance)
 		# Every point of a leg is placed by _leg_point: on the station line for
 		# a ladder pad, on the pad's own row for a sideways one. A pad already
 		# on its own lane, or already at its own station, makes a leg
@@ -639,7 +694,8 @@ static func bundle_routes(
 			head.append(sources[i])
 			head.append(_leg_point(src_sideways[i], sources[i], pts[0], u_src, d, sources[i]))
 		var tail := PackedVector2Array()
-		if not _pad_under_lane(tgt_sideways[i], float(tgt_perp[i]), offset, float(widths[i])):
+		if not open[i] and not _pad_under_lane(tgt_sideways[i],
+				(targets[i] - pts[last]).dot(n_tgt), offset, float(widths[i])):
 			tail.append(_leg_point(tgt_sideways[i], targets[i], pts[last], u_tgt, -e, targets[i]))
 			tail.append(targets[i])
 
@@ -649,8 +705,9 @@ static func bundle_routes(
 		# `lane` is not 1:1 with the spine there.
 		lane[0] = _leg_point(src_sideways[i], sources[i], pts[0], u_src, d, lane[0])
 		if station < 0:
-			lane[lane.size() - 1] = _leg_point(tgt_sideways[i], targets[i], pts[last],
-				u_tgt, -e, lane[lane.size() - 1])
+			if not open[i]:
+				lane[lane.size() - 1] = _leg_point(tgt_sideways[i], targets[i], pts[last],
+					u_tgt, -e, lane[lane.size() - 1])
 			var route := head
 			route.append_array(lane)
 			route.append_array(tail)
@@ -671,8 +728,9 @@ static func bundle_routes(
 		run_a = _drop_duplicate_points(run_a)
 
 		lane_b[0] = exit_pt + n_st * offset
-		lane_b[lane_b.size() - 1] = _leg_point(tgt_sideways[i], targets[i], pts[last],
-			u_tgt, -e, lane_b[lane_b.size() - 1])
+		if not open[i]:
+			lane_b[lane_b.size() - 1] = _leg_point(tgt_sideways[i], targets[i], pts[last],
+				u_tgt, -e, lane_b[lane_b.size() - 1])
 		var run_b := PackedVector2Array()
 		run_b.append(via_point)
 		run_b.append(exit_pt + n_st * v)
@@ -703,8 +761,9 @@ static func bundle_routes(
 		"findings": findings,
 		"offsets": offsets,
 		"source_stations": src_stations, "target_stations": tgt_stations,
-		"source_order": src["order"], "target_order": tgt["order"],
+		"source_order": src["order"], "target_order": tgt_order,
 		"polylines": polylines,
+		"open_targets": open,
 		"via_station_index": station,
 		"via_station_offsets": via_offsets if station >= 0 else [],
 		"via_station_points": station_points,

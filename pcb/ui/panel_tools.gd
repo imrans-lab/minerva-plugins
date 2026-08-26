@@ -9210,8 +9210,17 @@ static func _bus_foreign_finding(hit: Dictionary, items: Array, nets: PackedStri
 ## plan then carries via_station_splits/via_station_points, the cut each net's
 ## polyline takes and the via centre it takes it at.
 ##
+## OPEN ENDS: a `target_pins` entry of "" means that net has NO target — its
+## track ends open at the end of its own lane (past the via, on the station
+## layer, for a station bus) as a free end the Trace tool can continue from.
+## The plan is still `complete` (it is committable) and carries `open_nets`,
+## the names of those nets in bus order; findings are raised for landed nets
+## exactly as before and never for a target that does not exist, while the open
+## copper itself is still measured against the board like any other. An EMPTY
+## target_pins stays the corridor-only preview and is not committable.
+##
 ## Returns {ok, buildable, findings, error, complete, nets, widths, offsets,
-## polylines, layer, source_pins, target_pins, via_station_index,
+## polylines, layer, source_pins, target_pins, open_nets, via_station_index,
 ## via_station_layer, via_station_points, via_station_splits, via_size_mm,
 ## via_drill_mm}.
 ##
@@ -9331,13 +9340,38 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 			"via_size_mm": via_size, "via_drill_mm": via_drill,
 		})
 
-	var targets: Dictionary = bus_pad_anchors(data, nets, target_pins, "target")
+	if target_pins.size() != nets.size():
+		return _bus_unbuildable("A bus needs one target pin per net (%d nets, %d target pins)." % [nets.size(), target_pins.size()])
+	# The landed nets resolve their pads; an open net contributes a placeholder
+	# point the geometry ignores and a flag it honours.
+	var open_flags: Array = []
+	var open_nets: Array = []
+	var landed_nets: Array = []
+	var landed_pins := PackedStringArray()
+	for i in range(nets.size()):
+		var is_open: bool = str(target_pins[i]).is_empty()
+		open_flags.append(is_open)
+		if is_open:
+			open_nets.append(str(nets[i]))
+		else:
+			landed_nets.append(nets[i])
+			landed_pins.append(target_pins[i])
+	var targets: Dictionary = bus_pad_anchors(data, landed_nets, landed_pins, "target")
 	if not bool(targets["ok"]):
 		return _bus_unbuildable(str(targets["error"]))
+	var target_points := PackedVector2Array()
+	var landed_at: int = 0
+	for i in range(nets.size()):
+		if open_flags[i]:
+			target_points.append(Vector2.ZERO)
+		else:
+			target_points.append((targets["points"] as PackedVector2Array)[landed_at])
+			landed_at += 1
 
 	var routed: Dictionary = BusGeom.bundle_routes(
-		spine_points, net_names, sources["points"], targets["points"], widths, clearance,
-		via_station_index, via_size if via_station_index >= 0 else 0.0)
+		spine_points, net_names, sources["points"], target_points, widths, clearance,
+		via_station_index, via_size if via_station_index >= 0 else 0.0,
+		open_flags if not open_nets.is_empty() else [])
 	if not bool(routed.get("buildable", false)):
 		return _bus_unbuildable(str(routed.get("error", "The bus geometry was refused.")))
 	findings.append_array(routed.get("findings", []) as Array)
@@ -9368,7 +9402,7 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		"complete": true,
 		"nets": nets.duplicate(), "widths": widths, "offsets": routed["offsets"],
 		"polylines": routed["polylines"], "layer": layer,
-		"source_pins": source_pins, "target_pins": target_pins,
+		"source_pins": source_pins, "target_pins": target_pins, "open_nets": open_nets,
 		"source_stations": routed["source_stations"], "target_stations": routed["target_stations"],
 		"source_order": routed["source_order"], "target_order": routed["target_order"],
 		# The index is the geometry's own — measured on the DEDUPLICATED spine,
@@ -9508,12 +9542,14 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 		layer, str(station["layer"])))
 	return {"ok": true, "error": "", "trace_ids": created_ids, "via_ids": created_via_ids,
 		"nets": nets, "widths": widths, "layer": layer,
-		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", [])}
+		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", []),
+		"open_nets": (plan.get("open_nets", []) as Array).duplicate()}
 
 
-## The `details` of a bus commit's journal row: {nets, layer, via_station_layer,
-## trace_ids, via_ids, finding_count, finding_types: {type: count}, findings:
-## [{type, nets, layer, foreign_ref?, pad_ref?}]}. Findings are summarised to
+## The `details` of a bus commit's journal row: {nets, open_nets, layer,
+## via_station_layer, trace_ids, via_ids, finding_count, finding_types:
+## {type: count}, findings: [{type, nets, layer, foreign_ref?, pad_ref?}]}.
+## `open_nets` names the nets whose track ended open, in bus order. Findings are summarised to
 ## their machine-readable keys rather than carried whole — the prose is what the
 ## status line and verb reply already showed; the journal keeps the facts.
 static func _bus_journal_details(plan: Dictionary, trace_ids: Array, via_ids: Array,
@@ -9533,6 +9569,7 @@ static func _bus_journal_details(plan: Dictionary, trace_ids: Array, via_ids: Ar
 		summary.append(row)
 	return {
 		"nets": (plan.get("nets", []) as Array).duplicate(),
+		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
 		"layer": layer,
 		"via_station_layer": via_station_layer,
 		"trace_ids": trace_ids.duplicate(),
@@ -9624,6 +9661,7 @@ static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 		"proposed": landed.size(), "candidates": landed, "holds": holds,
 		"nets": nets, "widths": widths, "layer": layer,
 		"via_station_layer": str(station["layer"]), "findings": findings,
+		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
 	}
 
 
@@ -9646,6 +9684,18 @@ static func _bus_findings_for_candidate(findings: Array, net_name: String, cid: 
 		copy["subjects"] = [{"candidate_id": cid, "net": net_name}]
 		out.append(copy)
 	return out
+
+
+## What both bus verbs and the canvas say about the lanes that ended OPEN, or
+## "" when every net landed — one wording, so agent and human read the same.
+static func bus_open_sentence(open_nets: Array) -> String:
+	if open_nets.is_empty():
+		return ""
+	var names := PackedStringArray()
+	for n in open_nets:
+		names.append(str(n))
+	return "%d lane(s) end open (%s) — finish them with the Trace tool from their free ends." % [
+		open_nets.size(), ", ".join(names)]
 
 
 ## Every finding's own words, in one line — the form both bus verbs and the
@@ -9685,7 +9735,7 @@ static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "sources is required: one \"Component.Pin\" pad per net, in the same order as nets — the pad each track leaves from."}
 	var targets = _bus_pin_refs(args.get("targets"))
 	if targets == null:
-		return {"ok": false, "error": "targets is required: one \"Component.Pin\" pad per net, in the same order as nets — the pad each track runs to."}
+		return {"ok": false, "error": "targets is required: one \"Component.Pin\" pad per net, in the same order as nets — the pad each track runs to, or \"\" to leave that net's lane ending open."}
 
 	var layer: String = str(args.get("layer", ""))
 	if layer.is_empty():
@@ -9764,11 +9814,15 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 		"layer": str(out.get("layer", "")),
 		"via_station_layer": str(out.get("via_station_layer", "")),
 		"findings": findings,
+		"open_nets": out.get("open_nets", []),
 		"note": "ghost candidates landed in the routing workspace; no copper was committed — resolve via minerva_pcb_workspace_commit/_reject/pin.",
 	}
 	if not findings.is_empty():
 		reply["note"] = "%d bus rule(s) broke and the ghosts were proposed anyway so they can be corrected: %s. Nothing was committed — resolve via minerva_pcb_workspace_commit/_reject/pin." \
 			% [findings.size(), bus_findings_sentence(findings)]
+	var open_words: String = bus_open_sentence(out.get("open_nets", []) as Array)
+	if not open_words.is_empty():
+		reply["note"] = "%s %s" % [str(reply["note"]), open_words]
 	var cross: Dictionary = await _cross_candidate_check(host, workspace, data)
 	if not cross.is_empty():
 		reply["cross_candidate_check"] = cross
@@ -10276,11 +10330,15 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 		"layer": str(result.get("layer", "")),
 		"via_station_layer": str(result.get("via_station_layer", "")),
 		"findings": findings,
+		"open_nets": result.get("open_nets", []),
 		"undo_note": "one board history step: Ctrl+Z (or PCBData.undo) removes all traces and vias this call created.",
 	}
 	if not findings.is_empty():
 		reply["note"] = "%d bus rule(s) broke and the copper landed anyway so it can be corrected: %s. Fix it in place (move a pad, redraw the spine, minerva_pcb_delete_traces) or undo the whole step." \
 			% [findings.size(), bus_findings_sentence(findings)]
+	var open_words: String = bus_open_sentence(result.get("open_nets", []) as Array)
+	if not open_words.is_empty():
+		reply["note"] = open_words if not reply.has("note") else "%s %s" % [str(reply["note"]), open_words]
 	return _ok(reply)
 
 

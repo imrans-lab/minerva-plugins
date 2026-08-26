@@ -9073,11 +9073,17 @@ func bus_target_guidance() -> Array:
 		var suggested := _bus_suggested_refs[i] if i < _bus_suggested_refs.size() else ""
 		if not refs.has(suggested):
 			suggested = ""
+		var target_ref: String = _bus_target_refs[i] if i < _bus_target_refs.size() else ""
 		out.append({
 			"index": i,
 			"net": _bus_nets[i],
 			"source_ref": _bus_net_refs[i],
-			"target_ref": _bus_target_refs[i] if i < _bus_target_refs.size() else "",
+			"target_ref": target_ref,
+			# How this net ENDS if committed now: its target pad, or "open" in
+			# TARGETS where a commit would leave its lane ending free. Drawn in
+			# the preview label as "NB → open".
+			"ending": target_ref if not target_ref.is_empty() \
+				else ("open" if _bus_phase == BusPhase.TARGETS else ""),
 			"target_at": _bus_target_points[i] if i < _bus_target_points.size() else Vector2.ZERO,
 			"suggested_ref": suggested,
 			"candidates": mine,
@@ -9222,7 +9228,7 @@ func _bus_targets_status() -> String:
 		if authoring_destination == DEST_DRAFT:
 			return "every net has a target — to PROPOSE ghosts for review, %s." % how
 		return "every net has a target — to commit COPPER, %s; Shift+Enter proposes ghosts." % how
-	return "still needs a target pad: %s." % ", ".join(missing)
+	return "no target yet for %s — click a pad on each, or double-click clear of the pads / press Enter to commit with those lanes ending OPEN (free ends the Trace tool can finish)." % ", ".join(missing)
 
 
 func _bus_nets_without_targets() -> PackedStringArray:
@@ -9287,11 +9293,10 @@ func _commit_bus(propose: bool = false) -> void:
 	if _bus_phase != BusPhase.TARGETS:
 		bus_tool_message.emit(_bus_not_ready_message())
 		return
-	var missing := _bus_nets_without_targets()
-	if not missing.is_empty():
-		bus_tool_message.emit("Nothing committed — no target pad yet for %s. Click one on each net."
-			% ", ".join(missing))
-		return
+	# NO "every net must land" gate here: a net without a target commits with
+	# its lane ending OPEN as a free end (bus_plan's "" target pin), which the
+	# Trace tool can continue from. The double-click ON a landed target keeps
+	# its own finished-bus rule (_commit_bus_on_landed_target).
 	# A DRAFT-armed bus tool proposes on EVERY commit gesture — plain
 	# Enter/double-click included. Shift stays the direct tool's propose
 	# modifier; the Proposals-area toggle is the modifier-free doorway onto the
@@ -9323,6 +9328,7 @@ func _commit_bus(propose: bool = false) -> void:
 		if not held.is_empty():
 			prop_summary += " %d net(s) held by a pinned candidate." % held.size()
 		prop_summary += _bus_findings_sentence(plan, "proposed")
+		prop_summary += _bus_open_sentence(plan)
 		_reset_bus_tool(false)
 		bus_tool_message.emit(prop_summary)
 		queue_redraw()
@@ -9346,9 +9352,19 @@ func _commit_bus(propose: bool = false) -> void:
 			trace_ids.size(), via_ids.size(), _bus_layer_display(), _bus_station_index,
 			_bus_layer_name(_bus_station_layer), _bus_nets_joined()]
 	summary += _bus_findings_sentence(plan, "landed")
+	summary += _bus_open_sentence(plan)
 	_reset_bus_tool(false)
 	bus_tool_message.emit(summary)
 	queue_redraw()
+
+
+## What the commit says about lanes that ended OPEN — panel_tools' one wording,
+## so the status line and the verb reply agree — or "" when every net landed.
+func _bus_open_sentence(plan: Dictionary) -> String:
+	var open_nets: Array = plan.get("open_nets", []) if plan.get("open_nets", []) is Array else []
+	if open_nets.is_empty():
+		return ""
+	return " " + _PanelToolsScript.bus_open_sentence(open_nets)
 
 
 ## What the commit says ON TOP of its summary when the plan broke a rule and
@@ -9720,6 +9736,11 @@ func _draw_bus_preview() -> void:
 
 	if font != null and not screen_pts.is_empty():
 		var label := "Bus [%s] @ %s  ·  %d pts" % [_bus_nets_joined(), _bus_layer, _bus_spine_points.size()]
+		if _bus_phase == BusPhase.TARGETS:
+			var endings := PackedStringArray()
+			for row in bus_target_guidance():
+				endings.append("%s → %s" % [str(row["net"]), str(row["ending"])])
+			label = "Bus [%s] @ %s  ·  %d pts" % [", ".join(endings), _bus_layer, _bus_spine_points.size()]
 		if _bus_station_index >= 0:
 			label += "  ·  via station v%d → %s" % [_bus_station_index, _bus_station_layer]
 		if refused:

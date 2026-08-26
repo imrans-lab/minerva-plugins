@@ -154,6 +154,8 @@ func _init() -> void:
 	await _test_a_crowding_station_still_lands()
 	await _test_the_journal_records_what_stood_at_commit()
 	_test_unreachable_targets_still_name_the_layer_to_start_on()
+	_test_an_open_lane_commits_as_a_free_end()
+	await _test_the_open_verb_matches_the_open_gesture()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -537,13 +539,14 @@ func _test_nothing_lands_until_the_bus_is_finished() -> void:
 	check("a net's own source pad is refused as its target, by name",
 			_last(msgs).contains("U2.1") and _last(msgs).contains("source"), _last(msgs))
 
-	# Two of three targets: still not committable.
+	# Two of three targets: landing them writes nothing by itself, and the tool
+	# names the net still open — a commit from here would land NC's lane
+	# open-ended (section 15), which is why this block no longer presses Enter.
 	canvas._handle_bus_click(TGT_A, false)
 	canvas._handle_bus_click(TGT_B, false)
-	canvas._commit_bus()
-	check("Enter with 2 of 3 nets targeted writes nothing", _board_state(data) == quiet,
+	check("landing 2 of 3 targets writes nothing", _board_state(data) == quiet,
 			str(_board_state(data)))
-	check("…and names the net still missing one",
+	check("…and the tool names the net still without one",
 			_last(msgs).contains("NC"), _last(msgs))
 
 	# The Esc ladder peels one phase per press and abandons without copper.
@@ -2976,3 +2979,180 @@ func _test_unreachable_targets_still_name_the_layer_to_start_on() -> void:
 	check("…one trace per net, both on bottom",
 			landed.has("NA|bottom") and landed.has("NB|bottom"), str(landed.keys()))
 	ok_canvas.free()
+
+
+# ── 15. OPEN-ENDED BUS: a net without a target ends at its lane's end ─────────
+#
+# The bus is a generator of parallel traces, and an author may land the lanes
+# and finish some legs by hand. A net left without a target commits with its
+# trace ending OPEN at the end of its lane — a free end — while the landed nets
+# route exactly as a bus of just those nets would.
+#
+# HAND-DERIVED. NA is left open; its lane is the -0.5 offset (y = 19.5) of the
+# spine (20,20)->(120,20), so its route is the source leg the full bus gives it
+# — (10,10),(21,10),(21,19.5) — then the lane to the spine's end: (120,19.5).
+# With NA out of the target ladder, NB (offset 0) leaves FIRST at station 0.0
+# (x = 120.0) and NC one pitch (0.5) inward at x = 119.5 — where the full bus
+# had NB at 119.5 and NC at 119.0. NB's leg at x = 120 from y = 20 down to 42
+# sits exactly one pitch (0.5) from NA's open lane end at (120,19.5), so the
+# clearance rule measures 0.5 against a 0.5 requirement and raises nothing.
+#
+# ORACLE: the serialized traces (count, per-net points), data.history, the
+# add_bus journal row's open_nets, free_trace_end_at on the model, and the
+# status message — the verb section compares its copper to this gesture's.
+
+func _open_routes() -> Dictionary:
+	return {
+		"NA": [SRC_A, Vector2(21.0, 10.0), Vector2(21.0, 19.5), Vector2(120.0, 19.5)],
+		"NB": [SRC_B, Vector2(20.5, 12.0), Vector2(20.5, 20.0),
+			Vector2(120.0, 20.0), Vector2(120.0, 42.0), TGT_B],
+		"NC": [SRC_C, Vector2(20.0, 14.0), Vector2(20.0, 20.5),
+			Vector2(119.5, 20.5), Vector2(119.5, 44.0), TGT_C],
+	}
+
+
+func _test_an_open_lane_commits_as_a_free_end() -> void:
+	print("\n-- (15) a net without a target commits with its lane ending open --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_B, false)   # ends PATH, target NB
+	canvas._handle_bus_click(TGT_C, false)   # NC landed; NA left open
+
+	# The teach line and the guidance both say NA would end open.
+	check("the TARGETS teach line offers the open-ended commit and names NA",
+			canvas.bus_teach_line().contains("NA") and canvas.bus_teach_line().to_lower().contains("open"),
+			canvas.bus_teach_line())
+	var endings: Dictionary = {}
+	for row in canvas.bus_target_guidance():
+		endings[str(row["net"])] = str(row["ending"])
+	check("guidance reads NA -> open, NB -> V2.1, NC -> V3.1",
+			endings == {"NA": "open", "NB": "V2.1", "NC": "V3.1"}, str(endings))
+
+	var before := _board_state(data)
+	var j0: int = data.change_journal.size()
+	_double_click(canvas, EMPTY)             # clear of the pads: the commit
+	var by_net := _traces_by_net(data)
+	check("three traces landed, one per net", by_net.size() == 3, str(by_net.keys()))
+	check("…in ONE history step", data.history.size() == int(before[1]) + 1,
+			"history %d (was %d)" % [data.history.size(), int(before[1])])
+	var want := _open_routes()
+	for net in ["NA", "NB", "NC"]:
+		if not by_net.has(net):
+			check("bus trace for %s exists" % net, false)
+			continue
+		_check_route(net, _points_of(by_net[net]), want[net])
+	var bus_rows: Array = []
+	for e in data.change_journal.slice(j0):
+		if str((e as Dictionary).get("action", "")) == "add_bus":
+			bus_rows.append(e)
+	check("exactly one add_bus journal row, naming NA as the open net",
+			bus_rows.size() == 1
+				and ((bus_rows[0] as Dictionary).get("details", {}) as Dictionary).get("open_nets", []) == ["NA"],
+			str(bus_rows))
+	check("the status line says one lane ends open, names NA and the Trace tool",
+			_last(msgs).contains("1 lane") and _last(msgs).contains("open")
+				and _last(msgs).contains("NA") and _last(msgs).contains("Trace tool"),
+			_last(msgs))
+	# THE FREE END: the model offers NA's lane end as a trace end to continue.
+	var free_end: Dictionary = data.free_trace_end_at(Vector2(120.0, 19.5), data.TRACE_SNAP_MM)
+	check("NA's lane end (120,19.5) is a FREE end of NA's trace",
+			by_net.has("NA") and str(free_end.get("trace_id", "")) == str(by_net["NA"].get("id", ""))
+				and str(free_end.get("end", "")) == "end", str(free_end))
+	check("…and a landed end is not (NB's end sits on its pad)",
+			data.free_trace_end_at(TGT_B, data.TRACE_SNAP_MM).is_empty())
+	check("one undo removes the whole open-ended bus", data.undo() and data.get_trace_count() == 0)
+	canvas.free()
+
+	# WITH A STATION: the open lane crosses the via and ends on the station
+	# layer. NA's top run is the full station bus's own (source leg, fan-out into
+	# the via at (70,18.9)); its bottom run leaves the via, fans back to the
+	# lane (71.1,18.9)->(71.1,19.5) and runs to the spine's end (120,19.5).
+	rig = _rig()
+	canvas = rig[0]
+	data = rig[1]
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas.working_layer = "bottom"
+	canvas._handle_bus_click(STATION, false)
+	canvas._handle_bus_click(PATH_2, false)
+	canvas._handle_bus_click(TGT_B, false)
+	canvas._handle_bus_click(TGT_C, false)
+	var quiet := _board_state(data)
+	_double_click(canvas, EMPTY)
+	var runs := _traces_by_net_and_layer(data)
+	check("station bus: six runs and three vias landed in one step",
+			runs.size() == 6 and _serialized_vias(data).size() == 3
+				and data.history.size() == int(quiet[1]) + 1,
+			"runs %s vias %d" % [str(runs.keys()), _serialized_vias(data).size()])
+	if runs.has("NA|top") and runs.has("NA|bottom"):
+		_check_route("NA|top", _points_of(runs["NA|top"]), _expected_station_runs()["NA|top"])
+		_check_route("NA|bottom (open)", _points_of(runs["NA|bottom"]),
+			[Vector2(70.0, 18.9), Vector2(71.1, 18.9), Vector2(71.1, 19.5), Vector2(120.0, 19.5)])
+		var open_end: Dictionary = data.free_trace_end_at(Vector2(120.0, 19.5), data.TRACE_SNAP_MM)
+		check("the open end is the BOTTOM run's free end",
+				str(open_end.get("trace_id", "")) == str(runs["NA|bottom"].get("id", ""))
+					and str(open_end.get("end", "")) == "end", str(open_end))
+	else:
+		check("NA's two runs exist", false, str(runs.keys()))
+	canvas.free()
+
+
+func _test_the_open_verb_matches_the_open_gesture() -> void:
+	print("\n-- (15b) minerva_pcb_route_bus_direct with a \"\" target == the open gesture --")
+	var data := PCBData.new()
+	data.from_board_dict(_board())
+	var host := StubMcpHost.new()
+	host.data = data
+	var quiet := _board_state(data)
+	var result: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["", "V2.1", "V3.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+		"layer": "top",
+	})
+	check("the verb accepts an empty target for NA", bool(result.get("success", false)), str(result))
+	check("…reporting open_nets == [NA] and saying so in the note",
+			(result.get("open_nets", []) as Array) == ["NA"]
+				and str(result.get("note", "")).contains("open") and str(result.get("note", "")).contains("NA"),
+			str(result))
+	check("…with no findings raised for the target NA does not have",
+			(result.get("findings", []) as Array).is_empty(), str(result.get("findings", [])))
+	check("…in one history step", data.history.size() == int(quiet[1]) + 1)
+	var by_net := _traces_by_net(data)
+	var want := _open_routes()
+	for net in ["NA", "NB", "NC"]:
+		if not by_net.has(net):
+			check("verb trace for %s exists" % net, false)
+			continue
+		_check_route("verb %s" % net, _points_of(by_net[net]), want[net])
+
+	# The PROPOSAL twin mirrors it: three ghosts, NA's ending at its lane's end.
+	var data_p := PCBData.new()
+	data_p.from_board_dict(_board())
+	var ws = PcbRoutingWorkspace.new()
+	var plan: Dictionary = PanelToolsScript.bus_plan(data_p, ["NA", "NB", "NC"],
+		PackedVector2Array([PATH_1, PATH_2]), "top",
+		PackedStringArray(["U1.1", "U2.1", "U3.1"]), PackedStringArray(["", "V2.1", "V3.1"]))
+	check("the open plan is complete (committable) and names NA open",
+			bool(plan.get("complete", false)) and (plan.get("open_nets", []) as Array) == ["NA"],
+			str(plan.get("open_nets", [])))
+	var out: Dictionary = PanelToolsScript.bus_propose_plan(ws, data_p, plan)
+	check("bus_propose_plan proposes three ghosts and reports open_nets == [NA]",
+			bool(out.get("ok", false)) and int(out.get("proposed", 0)) == 3
+				and (out.get("open_nets", []) as Array) == ["NA"], str(out))
+	var na_ghost: Dictionary = {}
+	for c in out.get("candidates", []) as Array:
+		if str((c as Dictionary).get("net", "")) == "NA":
+			na_ghost = c
+	check("NA's ghost has three segments (source leg + lane, no target leg)",
+			int(na_ghost.get("segment_count", -1)) == 3, str(na_ghost))
+	check("…and nothing was committed by the proposal", _serialized_traces(data_p).is_empty())
