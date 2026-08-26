@@ -958,11 +958,10 @@ func _run_pads_already_on_their_lanes() -> void:
 ## the corner instead and the two meet at ONE vertex. The other two tracks are
 ## unaffected: their corners are 1.85mm and 0.95mm past their stations.
 ##
-## THE ORACLES beyond the point lists are the two properties that make the
-## corner clean, and neither reads a coordinate off the routes: every segment of
-## every route is at least as long as its track is wide, and BCLK's route
-## touches the y its lane holds along the first spine segment exactly once — a
-## stub of any length would touch it twice.
+## THE ORACLE beyond the point lists is the property that makes the corner
+## clean, and it reads no coordinate off the routes: every segment of every
+## route is at least as long as its track is wide, which a stub of any length
+## would break.
 func _run_leg_lands_on_its_lane_corner() -> void:
 	print("-- a station within a track width of its lane's corner lands on it --")
 	var widths: Array = [0.25, 0.25, 0.25]
