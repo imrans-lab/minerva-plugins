@@ -1,0 +1,9 @@
+# The counterpart to vector 390: 0 is legal for the island area and NOT for the
+# thickness. A validator that cannot tell an authored 0 from an absent key (a
+# plain float64 field on the Go side) fails one of the two.
+version: 1
+name: ZoneMinThicknessZero
+width_mm: 20
+height_mm: 20
+design_rules:
+  zone_min_thickness_mm: 0

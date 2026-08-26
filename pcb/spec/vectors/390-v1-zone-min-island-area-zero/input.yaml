@@ -1,0 +1,10 @@
+# A stated 0 island area is a POLICY ("cull no island by size"), not an unset
+# marker: it must be accepted, and it must survive as an authored value rather
+# than collapsing into the default.
+version: 1
+name: ZoneMinIslandAreaZero
+width_mm: 20
+height_mm: 20
+design_rules:
+  zone_min_thickness_mm: 0.2
+  zone_min_island_area_mm2: 0

@@ -1,0 +1,6 @@
+version: 1
+name: ZoneMinThicknessNonNumeric
+width_mm: 20
+height_mm: 20
+design_rules:
+  zone_min_thickness_mm: wide

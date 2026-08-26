@@ -235,6 +235,25 @@ type DesignRules struct {
 	DiffPairGapMM   float64 `json:"diff_pair_gap_mm,omitempty" yaml:"diff_pair_gap_mm,omitempty"`
 	DiffPairWidthMM float64 `json:"diff_pair_width_mm,omitempty" yaml:"diff_pair_width_mm,omitempty"`
 
+	// Zone-fill minima — the two rules that decide what a pour fill may keep
+	// (see "Zone minima" in docs/board-yaml.md). Typed rather than left to
+	// Extra because Validate judges them.
+	//
+	// POINTERS, unlike the plain float64s above, because "unset" and an
+	// authored value are different states here. Nil means the compiler derives
+	// the default (the profile's min_trace_width_mm; the area of one default
+	// via land). An authored 0 is a stated policy — legal for the island area
+	// ("cull no island by size"), refused for the thickness (a pour with no
+	// minimum width is a missing rule, not a rule). A plain float64 would
+	// collapse the two states, and omitempty would drop an authored 0 on
+	// marshal.
+	//
+	// Ranges are enforced by Validate; the VALUE TYPE is enforced at unmarshal
+	// (probeDesignRules) so a mistyped value carries the shared code instead of
+	// yaml.v3's native decode error.
+	ZoneMinThicknessMM   *float64 `json:"zone_min_thickness_mm,omitempty" yaml:"zone_min_thickness_mm,omitempty"`
+	ZoneMinIslandAreaMM2 *float64 `json:"zone_min_island_area_mm2,omitempty" yaml:"zone_min_island_area_mm2,omitempty"`
+
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 

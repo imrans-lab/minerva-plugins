@@ -47,5 +47,38 @@ func ProbeJSONBoard(raw json.RawMessage) error {
 			}
 		}
 	}
+	return probeJSONDesignRules(top["design_rules"])
+}
+
+// probeJSONDesignRules is the JSON-side sibling of the design-rule type probe
+// in UnmarshalYAML: a zone-fill minimum that is not a JSON number gets the
+// shared invalid_design_rule code rather than encoding/json's own decode
+// error. A null value is "unset"; a design_rules that is not an object is left
+// to the typed decode, which owns that shape.
+func probeJSONDesignRules(raw json.RawMessage) error {
+	if raw == nil || isJSONNull(raw) {
+		return nil
+	}
+	var rules map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		return nil
+	}
+	for _, key := range designRuleNumKeys {
+		v, ok := rules[key]
+		if !ok || isJSONNull(v) {
+			continue
+		}
+		// Decode as a bare value and demand a number TOKEN: json.Number on
+		// its own would also accept a quoted numeric string ("0.15").
+		dec := json.NewDecoder(bytes.NewReader(v))
+		dec.UseNumber()
+		var any interface{}
+		if err := dec.Decode(&any); err != nil {
+			return fmt.Errorf("invalid_design_rule: design_rules.%s must be a number", key)
+		}
+		if _, isNumber := any.(json.Number); !isNumber {
+			return fmt.Errorf("invalid_design_rule: design_rules.%s must be a number", key)
+		}
+	}
 	return nil
 }

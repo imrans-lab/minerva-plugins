@@ -48,6 +48,13 @@ var entityListKeys = []string{"components", "nets", "traces", "vias",
 // pin-override fields that must decode as numbers.
 var overrideNumKeys = []string{"drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm"}
 
+// designRuleNumKeys mirrors _DESIGN_RULE_NUM_KEYS in board_validate.py — the
+// typed design_rules fields whose VALUE TYPE is part of the shared boundary.
+// Only the zone-fill minima are listed: the older typed numbers in DesignRules
+// (clearance_mm and friends) are plain float64s that Validate does not judge,
+// so a mistyped one is a Go-codec superset rejection, not a shared code.
+var designRuleNumKeys = []string{"zone_min_thickness_mm", "zone_min_island_area_mm2"}
+
 // UnmarshalYAML parses YAML source into a Board. Unknown top-level and
 // per-component keys are preserved via the structs' inline Extra maps rather
 // than dropped.
@@ -56,7 +63,8 @@ var overrideNumKeys = []string{"drill_mm", "annulus_diameter_mm", "pad_width_mm"
 // reject, WITH the shared code string, cases the typed decode would either
 // mishandle or report with a native, code-less error: a non-integer version
 // (unsupported_schema_version), a non-sequence or null-item entity collection
-// (invalid_board_structure), or a mistyped pin-override field
+// (invalid_board_structure), a mistyped zone-fill minimum (invalid_design_rule),
+// or a mistyped pin-override field
 // (invalid_pin_override). Wrapping these at unmarshal is what lets the vector
 // runner assert code parity on unmarshal-time rejections (finding 019f8b7fb07e,
 // parts 3 & 4).
@@ -121,6 +129,27 @@ func probeNodeTree(doc *yaml.Node) error {
 			if resolveAlias(item).Tag == "!!null" {
 				return fmt.Errorf("board: unmarshal yaml: invalid_board_structure: "+
 					"%q[%d] is a null item", key, idx)
+			}
+		}
+	}
+
+	// Zone-fill minimum field types. Same mechanism as the pin overrides below:
+	// the typed *float64 fields cannot decode a string / bool / mapping, and
+	// yaml.v3's native TypeError carries no shared code, so reject here with
+	// invalid_design_rule — the code Validate uses for an out-of-range value and
+	// the worker's compiler uses for both. A null value is "unset" (the compiler
+	// derives the default), not a violation. Mirrors _check_design_rules in
+	// board_validate.py, which does the type and range check together because it
+	// parses an untyped dict.
+	if rules := nodeMapValue(root, "design_rules"); rules != nil && rules.Kind == yaml.MappingNode {
+		for _, key := range designRuleNumKeys {
+			n := nodeMapValue(rules, key)
+			if n == nil || n.Tag == "!!null" {
+				continue
+			}
+			if n.Tag != "!!int" && n.Tag != "!!float" {
+				return fmt.Errorf("board: unmarshal yaml: invalid_design_rule: "+
+					"design_rules %q must be a number", key)
 			}
 		}
 	}

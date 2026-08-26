@@ -69,12 +69,35 @@ geometry is deferred emitter work (`019f88a0c84f`) — at this boundary the
 override is validated and recorded, and the footprint stays authoritative for
 emission.
 
+## Zone-fill minima (`design_rules`)
+
+Two `design_rules` keys decide what a pour fill may keep, and both sides judge
+them:
+
+| key | rule |
+|---|---|
+| `zone_min_thickness_mm` | a **positive** finite number of millimetres. `0` is refused — a pour with no minimum width is a missing rule, not a rule |
+| `zone_min_island_area_mm2` | a **non-negative** finite number of mm². `0` IS a setting: "cull no island by size" |
+
+Either violation is `invalid_design_rule`, the same code the compiler emits. An
+ABSENT (or null) key is not a value: it stays absent from the source and the
+compiler derives the default (`docs/board-yaml.md`, "Zone minima"). Go models
+both as typed `*float64` fields — pointers, so an authored `0` and an absent key
+stay distinguishable — and rejects a non-numeric value at unmarshal, on both the
+YAML and the JSON (`pcb.serialize`) paths, with the
+same code, exactly as it does for a pin override.
+
+These two are the only `design_rules` members inside the shared boundary. The
+other typed numbers in the block (`clearance_mm` and friends) are plain Go
+floats that `Validate` does not judge, so a mistyped one is a Go-codec superset
+rejection, not a shared code.
+
 ## Boundary scope (what the vectors can and cannot pin)
 
 The shared boundary is the INTERSECTION of rules both sides enforce:
 schema-version dispatch, persistent-id validity AND per-domain uniqueness,
-entity-collection shape (list, no null item), and pin-override field types.
-Vectors live in that intersection.
+entity-collection shape (list, no null item), pin-override field types, and the
+`design_rules` zone-fill minima. Vectors live in that intersection.
 
 Outside it, the two implementations legitimately differ and no vector may
 straddle the difference:
@@ -87,7 +110,11 @@ straddle the difference:
   version (`'2'`) and a whole-float version (`2.0`) do not decode as an integer,
   so the Go codec rejects them explicitly (see above) to match Python. A
   duplicate mapping key errors in yaml.v3 but is last-wins in PyYAML — that one
-  is a parser property kept aligned in code, not asserted as a vector.
+  is a parser property kept aligned in code, not asserted as a vector. An
+  exponent form without a sign (`1e-3`, `1.0e3`) is a float to yaml.v3 and a
+  STRING to PyYAML's YAML 1.1 resolver, so a numeric design-rule or override
+  value written that way is accepted by Go and refused by Python — write
+  numbers in plain decimal; no vector expresses the exponent form.
 - **Top-level entity-collection shape IS a shared rule.** Each of the five
   top-level entity collections — `components`, `nets`, `traces`, `vias`,
   `mounting_holes` — that is present but not a list (`traces: {}`, `nets: 5`)
@@ -101,8 +128,9 @@ straddle the difference:
   `yaml.Node` tree for both cases so the rejection carries the shared code at
   unmarshal time. Nested / auxiliary containers (`points`, `layers`,
   `annotations`, `route_hints`, `design_rules`) are NOT in this rule — their
-  shape is enforced by the Go codec (a superset) and the full compiler, not by
-  this validator.
+  SHAPE is enforced by the Go codec (a superset) and the full compiler, not by
+  this validator. (The zone-fill minima INSIDE `design_rules` are a separate,
+  shared VALUE rule — see above.)
 
 ## Adding a vector
 

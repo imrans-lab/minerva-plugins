@@ -15,7 +15,10 @@
 // the same vector is rejected on both sides.
 package board
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Validate enforces the shared boundary on a parsed Board:
 //   - schema version must be 1 or 2;
@@ -28,7 +31,9 @@ import "fmt"
 //     has a structurally valid outline and names a net/layer that exists. See
 //     validateZones;
 //   - every cutout (likewise not version-gated) has an outline that is a
-//     polygon. See validateCutouts.
+//     polygon. See validateCutouts;
+//   - the typed zone-fill minima in design_rules are in range. See
+//     validateDesignRules.
 //
 // The error codes (unsupported_schema_version, unminted_persistent_id,
 // duplicate_persistent_id) are the SAME strings the Python compiler and
@@ -67,6 +72,13 @@ func Validate(b *Board) error {
 	// first-violation order (these two codes are new in GA-1; appending them
 	// changes no existing board's reported code).
 	if err := validateCopperEntityLayers(b); err != nil {
+		return err
+	}
+	// Design-rule VALUES after the structural checks, so every code that
+	// predates this one keeps its position in the first-violation order.
+	// board_validate.py calls its mirror at the same point; the value TYPE is
+	// probed earlier still, at decode, where Python has no separate stage.
+	if err := validateDesignRules(b); err != nil {
 		return err
 	}
 	// Component.Assembly is a closed token set: "" (assembled normally) or
@@ -433,6 +445,39 @@ func validateCopperEntityLayers(b *Board) error {
 		}
 		if v.ToLayer != "" && !knownLayers[v.ToLayer] {
 			return fmt.Errorf("via_unknown_layer: vias[%d] to_layer %q is not in the declared layer stack", i, v.ToLayer)
+		}
+	}
+	return nil
+}
+
+// validateDesignRules enforces the VALUE RANGE of the typed zone-fill minima.
+// Their value TYPE is enforced earlier, by the codec (probeDesignRules), which
+// emits the same invalid_design_rule code so a mistyped and an out-of-range
+// value are one diagnostic from a caller's point of view.
+//
+// The two rules mirror the worker's compile_board._zone_fill_minima verbatim,
+// so validate and compile cannot disagree about a stated fabrication parameter.
+//
+//   - zone_min_thickness_mm must be POSITIVE and finite. A pour with no
+//     minimum width is not a policy, it is a missing one.
+//   - zone_min_island_area_mm2 must be NON-NEGATIVE and finite. 0 is a real
+//     setting — "cull no island by size" — not an unset marker.
+//
+// A nil pointer is "unset" and stays legal on both: the compiler derives the
+// default. Version-independent, like the zone and cutout rules — a negative
+// millimetre is wrong in either identity era. Mirrored string-for-string by
+// board_validate.py's _check_design_rules.
+func validateDesignRules(b *Board) error {
+	if v := b.DesignRules.ZoneMinThicknessMM; v != nil {
+		if math.IsNaN(*v) || math.IsInf(*v, 0) || *v <= 0 {
+			return fmt.Errorf("invalid_design_rule: design_rules.zone_min_thickness_mm "+
+				"must be a positive number of millimetres; got %v", *v)
+		}
+	}
+	if v := b.DesignRules.ZoneMinIslandAreaMM2; v != nil {
+		if math.IsNaN(*v) || math.IsInf(*v, 0) || *v < 0 {
+			return fmt.Errorf("invalid_design_rule: design_rules.zone_min_island_area_mm2 "+
+				"must be a non-negative number of mm^2; got %v", *v)
 		}
 	}
 	return nil

@@ -56,4 +56,7 @@ _BOUNDARY_MESSAGES = {
     "duplicate_persistent_id": "a persistent id is duplicated within its entity domain",
     "invalid_board_structure": "a top-level entity collection is malformed or carries a null item",
     "invalid_pin_override": "a pin override field has the wrong type",
+    "invalid_design_rule": ("a design_rules value is out of range or the wrong type "
+                            "(zone_min_thickness_mm must be positive; "
+                            "zone_min_island_area_mm2 must be non-negative)"),
 }

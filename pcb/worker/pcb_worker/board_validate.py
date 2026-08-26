@@ -7,7 +7,10 @@ dispatch, v2 persistent-id validity, typed pin-override field types (which the
 Go codec enforces structurally at unmarshal, and this validator — parsing an
 untyped dict — re-checks explicitly), and zone structure (:func:`_check_zones`,
 added in epoch 4 with docket 019f9a73e5a2 / bug 019fb0a7aea7 item 4, when the
-compiler stopped refusing the ``zones`` key outright).
+compiler stopped refusing the ``zones`` key outright), and the typed zone-fill
+minima in ``design_rules`` (:func:`_check_design_rules`, which Go models as typed
+``*float64`` fields so the same malformed value is refused on both sides rather
+than passing validate and failing compile).
 
 It operates on a PARSED board dict and does NOT resolve footprints or geometry —
 that is the full compiler (compile_board.py). The committed vectors in
@@ -48,6 +51,20 @@ _ZONE_KIND_COPPER_POUR = "copper_pour"
 _ZONE_KIND_KEEPOUT = "keepout"
 _ZONE_KINDS = frozenset({"", _ZONE_KIND_COPPER_POUR, _ZONE_KIND_KEEPOUT})
 
+# The typed zone-fill minima, in Go's own check order. Mirrors designRuleNumKeys
+# in internal/board/yaml.go (the value-TYPE probe) and validateDesignRules in
+# internal/board/validate.go (the RANGE check); this module does both at once
+# because it parses an untyped dict and has no separate codec stage. Kept as
+# literals here rather than imported from the compiler for the same reason the
+# zone kinds are: this file is the Go-PARITY boundary, so what it accepts must
+# track Go's constants, not a compiler-side derivation that could move
+# independently.
+_DESIGN_RULE_NUM_KEYS = ("zone_min_thickness_mm", "zone_min_island_area_mm2")
+# A stated 0 is a POLICY for the island area ("cull no island by size") and a
+# missing rule for the thickness (a pour with no minimum width), so only the
+# former admits it.
+_DESIGN_RULE_ZERO_OK = frozenset({"zone_min_island_area_mm2"})
+
 
 def _check_entity_ids(entity: str, item_lists: "list[list]", codes: list) -> None:
     """Append the first persistent-id violation across one entity DOMAIN (one or more
@@ -79,7 +96,8 @@ def validate_board_v2(board: dict) -> list[str]:
     for the layer stack — ``invalid_layer_name``, ``duplicate_layer``,
     ``incomplete_layer_stack``, ``invalid_layer_stack_order`` — for zones —
     ``invalid_zone_outline``, ``invalid_zone_kind``, ``zone_unknown_net``,
-    ``zone_unknown_layer`` — and for cutouts, ``invalid_cutout_outline``.
+    ``zone_unknown_layer`` — for cutouts, ``invalid_cutout_outline`` — and for the
+    typed zone-fill minima in ``design_rules``, ``invalid_design_rule``.
     """
     if not isinstance(board, dict):
         return ["invalid_board_structure"]
@@ -101,8 +119,11 @@ def validate_board_v2(board: dict) -> list[str]:
     # raw node tree for the same). The list is deliberately not described by a COUNT:
     # a stated count goes stale the next time an entity is modelled, which is exactly
     # how bug 019fb0a7aea7 happened. Nested / auxiliary containers (points, layers,
-    # annotations, route_hints, design_rules) are the documented Go-codec superset,
-    # enforced by the codec and the full compiler, not re-checked here.
+    # annotations, route_hints) are the documented Go-codec superset, enforced by
+    # the codec and the full compiler, not re-checked here. design_rules is a
+    # PARTIAL exception: its container shape is still the codec's, but the two
+    # typed zone-fill minima inside it are a shared rule (see
+    # _check_design_rules).
     lists: dict[str, list] = {}
     for key in ("components", "nets", "traces", "vias",
                 "mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts"):
@@ -126,6 +147,11 @@ def validate_board_v2(board: dict) -> list[str]:
     # identical first code on both sides (the two codes are new in GA-1;
     # appending here keeps every pre-GA-1 code's position unchanged).
     _check_copper_entity_layers(lists["traces"], lists["vias"], board, codes)
+    # Design-rule VALUES after the structural checks, where Go's Validate calls
+    # validateDesignRules, so every code that predates this one keeps its place.
+    # Go probes the value TYPE earlier, at decode; here type and range are one
+    # pass, so a mistyped value sits later in Python's order than in Go's.
+    _check_design_rules(board, codes)
 
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
@@ -167,6 +193,40 @@ def validate_board_v2(board: dict) -> list[str]:
             if isinstance(pin, dict):
                 codes.extend(_override_problems(pin.get("override")))
     return codes
+
+
+def _check_design_rules(board: dict, codes: list) -> None:
+    """Mirror of Go's ``validateDesignRules`` (plus the codec's type probe):
+    append ``invalid_design_rule`` for the FIRST malformed zone-fill minimum.
+
+    ``design_rules.zone_min_thickness_mm`` must be a positive finite number of
+    millimetres; ``design_rules.zone_min_island_area_mm2`` must be a
+    non-negative finite number of mm^2, where ``0`` is a real setting rather
+    than an unset marker. An ABSENT (or null) key stays legal on both sides and
+    keeps the compiler's derived default. Version-independent, like the zone and
+    cutout rules — a negative millimetre is wrong in either identity era.
+
+    These are the same two rules ``compile_board._zone_fill_minima`` enforces
+    under the same code, so a malformed value fails at the SHARED boundary.
+
+    A ``design_rules`` value that is not a mapping is NOT coded here: Go's codec
+    rejects it at unmarshal (``DesignRules`` is a struct), so Go's Validate never
+    sees one, the same division of labour the other auxiliary containers follow.
+    """
+    rules = board.get("design_rules")
+    if not isinstance(rules, dict):
+        return
+    for key in _DESIGN_RULE_NUM_KEYS:
+        value = rules.get(key)
+        if value is None:
+            continue
+        # _is_number excludes bool and non-finite floats, matching Go: the codec
+        # probe refuses a !!bool / !!str tag, and validateDesignRules refuses a
+        # NaN or an infinity that decoded fine.
+        if not _is_number(value) or value < 0 or (
+                value == 0 and key not in _DESIGN_RULE_ZERO_OK):
+            codes.append("invalid_design_rule")
+            return
 
 
 def _check_copper_entity_layers(traces: list, vias: list, board: dict,

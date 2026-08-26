@@ -229,10 +229,14 @@ is deleted silently. An orphan fragment **at or above** the island minimum is
 not culled: the compile refuses it (`zone_fill_failed`) so the author decides
 whether to stitch it, extend the pour, or shrink the outline.
 
-These two keys are compile-time rules only: `Validate` (Go) carries them in
-`design_rules` untyped and does not check them, so a malformed value (negative,
-non-numeric) passes `validate` and is refused by `compile` with
-`invalid_design_rule`.
+Both keys are part of the **shared validation boundary**, not compile-time rules
+only: `Validate` (Go) models them as typed `design_rules` fields and checks their
+range, the worker's `compile` checks them again, and a malformed value (negative,
+non-numeric, a zero thickness) is refused by BOTH with `invalid_design_rule` — so
+a board cannot clear `validate` and then fail `compile` on a fabrication
+parameter it stated. An UNSTATED key is not a value: it stays absent from the
+source, and the default in the table above is derived at compile. The committed
+cross-language vectors that pin this are `spec/vectors/350-*` through `400-*`.
 
 **A `copper_pour` zone is AUTHORABLE, COMPILABLE, and FABRICABLE (solid connect
 only); a `keepout` zone is AUTHORABLE, COMPILABLE, and enforced by routing and

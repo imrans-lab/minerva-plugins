@@ -19,7 +19,7 @@ from pcb_worker.board_validate import validate_board_v2
 
 # pcb/worker/tests/ -> parents[2] == pcb/, so pcb/spec/vectors.
 VECTORS = Path(__file__).resolve().parents[2] / "spec" / "vectors"
-_MIN_VECTORS = 34  # committed floor — keep in lockstep with vectors_test.go minVectors
+_MIN_VECTORS = 40  # committed floor — keep in lockstep with vectors_test.go minVectors
 
 
 def _vector_names() -> list[str]:
@@ -80,3 +80,41 @@ def test_v2_minted_alias_holes_across_keys_pass():
         pth_holes=[{"id": "hole:" + "2" * 32, "x_mm": 2, "y_mm": 2, "diameter_mm": 2.0}],
         npth_holes=[{"id": "hole:" + "3" * 32, "x_mm": 3, "y_mm": 3, "diameter_mm": 3.0}])
     assert validate_board_v2(board) == []
+
+
+# The zone-fill minima are a shared VALUE rule inside design_rules (vectors
+# 350-400). These cover the shapes a YAML vector cannot express as cleanly: a
+# null value, a bool that is technically an int in Python, and a design_rules
+# container the Go codec — not this validator — is responsible for refusing.
+def _minima_board(**rules) -> dict:
+    return {"version": 1, "name": "M", "width_mm": 20, "height_mm": 20,
+            "design_rules": rules}
+
+
+def test_zone_minima_null_is_unset_not_malformed():
+    board = _minima_board(zone_min_thickness_mm=None, zone_min_island_area_mm2=None)
+    assert validate_board_v2(board) == []
+
+
+def test_zone_minima_booleans_are_refused():
+    # bool subclasses int; a `true` thickness is a typo, not 1mm.
+    assert "invalid_design_rule" in validate_board_v2(
+        _minima_board(zone_min_thickness_mm=True))
+    assert "invalid_design_rule" in validate_board_v2(
+        _minima_board(zone_min_island_area_mm2=False))
+
+
+def test_zone_minima_non_finite_is_refused():
+    assert "invalid_design_rule" in validate_board_v2(
+        _minima_board(zone_min_thickness_mm=float("inf")))
+    assert "invalid_design_rule" in validate_board_v2(
+        _minima_board(zone_min_island_area_mm2=float("nan")))
+
+
+def test_a_non_mapping_design_rules_is_left_to_the_go_codec():
+    # Go's DesignRules is a struct, so a scalar fails its typed decode and this
+    # mirror never sees one — coding it here would make Python stricter than Go
+    # on a shape no vector can express.
+    assert validate_board_v2(
+        {"version": 1, "name": "M", "width_mm": 20, "height_mm": 20,
+         "design_rules": 5}) == []

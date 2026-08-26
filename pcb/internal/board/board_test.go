@@ -360,3 +360,111 @@ func TestComponentAssemblyExcludeRoundTripsAndValidates(t *testing.T) {
 		t.Fatalf("typo token must refuse with invalid_component, got %v", err)
 	}
 }
+
+// TestZoneMinimaRoundTripAndUnsetDistinction pins what the *float64 fields buy
+// over plain float64s: an AUTHORED 0 island area survives both codecs as a
+// stated policy, while an unset key stays absent so the compiler's derived
+// default still applies. The two states are separately meaningful, and 0 is the
+// only value where they would collapse.
+func TestZoneMinimaRoundTripAndUnsetDistinction(t *testing.T) {
+	thickness, island := 0.2, 0.0
+	b := &Board{
+		Version: 1, Name: "minima", WidthMM: 20, HeightMM: 15,
+		DesignRules: DesignRules{
+			ZoneMinThicknessMM:   &thickness,
+			ZoneMinIslandAreaMM2: &island,
+		},
+	}
+	if err := Validate(b); err != nil {
+		t.Fatalf("a positive thickness with a zero island area must validate: %v", err)
+	}
+
+	y, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	if !strings.Contains(string(y), "zone_min_island_area_mm2: 0") {
+		t.Fatalf("YAML dropped an authored zero island area:\n%s", string(y))
+	}
+	back, err := UnmarshalYAML(y)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	if back.DesignRules.ZoneMinIslandAreaMM2 == nil ||
+		*back.DesignRules.ZoneMinIslandAreaMM2 != 0 {
+		t.Fatalf("YAML round trip lost the authored zero: %+v", back.DesignRules)
+	}
+	if back.DesignRules.ZoneMinThicknessMM == nil ||
+		*back.DesignRules.ZoneMinThicknessMM != 0.2 {
+		t.Fatalf("YAML round trip lost the thickness: %+v", back.DesignRules)
+	}
+
+	// The IPC boundary keeps both, and keeps the untyped extras beside them.
+	b.DesignRules.Extra = map[string]interface{}{"copper_weight_oz": 2.0}
+	j, err := json.Marshal(b.DesignRules)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var d DesignRules
+	if err := json.Unmarshal(j, &d); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if d.ZoneMinIslandAreaMM2 == nil || *d.ZoneMinIslandAreaMM2 != 0 ||
+		d.ZoneMinThicknessMM == nil || *d.ZoneMinThicknessMM != 0.2 {
+		t.Fatalf("JSON dropped a zone minimum: %s", string(j))
+	}
+	if d.Extra["copper_weight_oz"] != 2.0 {
+		t.Fatalf("typing the minima broke DesignRules Extra: %#v", d.Extra)
+	}
+
+	// UNSET is a third state, distinct from either number: the key is absent
+	// from the source and the pointer comes back nil, so the compiler derives
+	// the default rather than reading an accidental 0.
+	bare, err := UnmarshalYAML([]byte("version: 1\nname: bare\nwidth_mm: 20\nheight_mm: 15\n"))
+	if err != nil {
+		t.Fatalf("UnmarshalYAML bare: %v", err)
+	}
+	if bare.DesignRules.ZoneMinThicknessMM != nil ||
+		bare.DesignRules.ZoneMinIslandAreaMM2 != nil {
+		t.Fatalf("absent keys must stay unset: %+v", bare.DesignRules)
+	}
+	if err := Validate(bare); err != nil {
+		t.Fatalf("a board stating no minima must validate: %v", err)
+	}
+	out, err := MarshalYAML(bare)
+	if err != nil {
+		t.Fatalf("MarshalYAML bare: %v", err)
+	}
+	if strings.Contains(string(out), "zone_min_") {
+		t.Fatalf("unset minima must not be synthesized into source:\n%s", string(out))
+	}
+}
+
+// A zone-fill minimum arriving over the JSON channel as a string or a bool is
+// refused with the shared code, the same answer the YAML path gives; a number,
+// an authored zero and a null all pass the probe (null is "unset").
+func TestProbeJSONDesignRulesSharedCode(t *testing.T) {
+	refused := []string{
+		`{"design_rules":{"zone_min_thickness_mm":"wide"}}`,
+		`{"design_rules":{"zone_min_island_area_mm2":true}}`,
+		`{"design_rules":{"zone_min_thickness_mm":"0.15"}}`,
+		`{"design_rules":{"zone_min_thickness_mm":[1]}}`,
+	}
+	for _, src := range refused {
+		err := ProbeJSONBoard(json.RawMessage(src))
+		if err == nil || !strings.HasPrefix(err.Error(), "invalid_design_rule") {
+			t.Fatalf("%s: want invalid_design_rule, got %v", src, err)
+		}
+	}
+	accepted := []string{
+		`{"design_rules":{"zone_min_thickness_mm":0.15,"zone_min_island_area_mm2":0}}`,
+		`{"design_rules":{"zone_min_thickness_mm":null}}`,
+		`{"design_rules":null}`,
+		`{}`,
+	}
+	for _, src := range accepted {
+		if err := ProbeJSONBoard(json.RawMessage(src)); err != nil {
+			t.Fatalf("%s: want nil, got %v", src, err)
+		}
+	}
+}
