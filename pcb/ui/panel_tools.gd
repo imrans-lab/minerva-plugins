@@ -8565,7 +8565,7 @@ static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: St
 		var copper: Dictionary = _bus_pad_layers(comp, pin)
 		pads.append({"ref": "%s.%s" % [str(comp.id), pin], "net": net_name,
 			"centre": points[i], "all_layers": copper["all_layers"],
-			"layers": copper["layers"]})
+			"layers": copper["layers"], "no_copper": bool(copper.get("no_copper", false))})
 	return {"ok": true, "error": "", "points": points, "pads": pads}
 
 
@@ -8674,6 +8674,8 @@ static func _bus_board_copper(data) -> Array:
 				# Half-DIAGONAL, so the box holds the land at any rotation.
 				reach = maxf(reach, offset.distance_to(pin_local) + size.length() * 0.5)
 			var copper: Dictionary = _bus_pad_layers(comp, pin)
+			if bool(copper.get("no_copper", false)):
+				continue
 			var centre: Vector2 = comp.get_pin_world_position(pin)
 			items.append({
 				"kind": "pad", "what": "pad", "ref": "%s.%s" % [str(comp.id), pin],
@@ -8714,9 +8716,13 @@ static func _bus_board_copper(data) -> Array:
 	return items
 
 
-## Which copper layers one pad is on: {all_layers, layers} — `all_layers` true
-## for a through-hole land (its barrel crosses the stack) or a pin with no land
-## geometry at all, else `layers` the canonical copper ids its SMD lands name.
+## Which copper layers one pad is on: {all_layers, layers, no_copper} —
+## `all_layers` true for a plated through-hole land (its barrel crosses the
+## stack) or a pin with no land geometry at all, else `layers` the canonical
+## copper ids its SMD lands name. An UNPLATED hole (np_thru_hole) is a hole and
+## nothing more — no barrel, no ring, no copper on any layer — so a pin whose
+## lands are all unplated is `no_copper`: it is not on any layer, and it is
+## not copper another net could be foreign to.
 ##
 ## A land naming no copper layer of its own sits on the side its component is
 ## placed on; a component with no readable side is taken as everywhere, which
@@ -8727,23 +8733,29 @@ static func _bus_pad_layers(comp, pin: String) -> Dictionary:
 	var lands: Array = comp.lands_for_pin(pin)
 	var all_layers: bool = lands.is_empty()
 	var layers: Dictionary = {}
+	var unplated := 0
 	for raw_land in lands:
 		var land: Dictionary = raw_land
 		var land_type := str(land.get("type", "smd")).to_lower()
-		if land_type == "thru_hole" or land_type == "np_thru_hole":
+		if land_type == "np_thru_hole":
+			unplated += 1
+			continue
+		if land_type == "thru_hole":
 			all_layers = true
 			continue
 		for raw_layer in (land.get("layers", []) as Array):
 			var canon := _bus_canon_layer(str(raw_layer))
 			if not canon.is_empty():
 				layers[canon] = true
+	if not lands.is_empty() and unplated == lands.size():
+		return {"all_layers": false, "layers": {}, "no_copper": true}
 	if not all_layers and layers.is_empty():
 		var side := _bus_canon_layer(str(comp.layer))
 		if side.is_empty():
 			all_layers = true
 		else:
 			layers[side] = true
-	return {"all_layers": all_layers, "layers": layers}
+	return {"all_layers": all_layers, "layers": layers, "no_copper": false}
 
 
 ## One finding per bus pad whose leg lands on a layer the pad has no copper on.
@@ -8763,11 +8775,13 @@ static func _bus_pad_off_layer_findings(pads: Array, landing: String, role: Stri
 			continue
 		var layers: Array = (pad.get("layers", {}) as Dictionary).keys()
 		layers.sort()
-		if canon.is_empty() or layers.is_empty() or canon in layers:
+		var no_copper: bool = bool(pad.get("no_copper", false))
+		if canon.is_empty() or (not no_copper and (layers.is_empty() or canon in layers)):
 			continue
 		var net: String = str(pad.get("net", ""))
 		var ref: String = str(pad.get("ref", ""))
-		var on := ", ".join(PackedStringArray(layers))
+		var on := "no layer at all (an unplated hole)" if no_copper \
+			else ", ".join(PackedStringArray(layers))
 		var way_out := ""
 		if role == "source":
 			way_out = "Start the bus on %s instead, or bus from a pad that is on %s." % [on, landing]
@@ -8795,7 +8809,10 @@ static func _bus_pad_off_layer_findings(pads: Array, landing: String, role: Stri
 ## them is at least the clearance — so the foreign-copper pass has nothing to
 ## say — but less than a routing corridor: `trace_width` plus `clearance` on
 ## each side of it, the room one track needs to pass between the via's ring and
-## the pad's copper. Measured ring edge to copper edge with the same
+## the pad's copper. THAT TRACK IS THE PAD'S, NOT THE BUS'S: the corridor is
+## kept for whatever will one day route to the walled-off pad, so its width is
+## the board's rule (design_rule_trace_width), and the bus's own track widths
+## play no part in it. Measured ring edge to copper edge with the same
 ## pin_copper_distance rule the foreign pass uses for pads, so the two findings
 ## split a single scale at the clearance and never both name one pair.
 static func _bus_station_corridor_findings(data, nets: PackedStringArray,

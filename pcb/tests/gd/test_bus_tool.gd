@@ -52,6 +52,7 @@ extends SceneTree
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
 const PanelToolsScript := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const ComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
 
@@ -2583,6 +2584,27 @@ func _test_a_leg_on_a_layer_its_pad_is_not_on_is_named() -> void:
 				and _off_layer_by_pad(_findings_of(stationed)).is_empty(),
 			"error=%s findings=%s" % [str(stationed.get("error", "")),
 				str(_finding_keys(_findings_of(stationed)))])
+
+	# AN UNPLATED HOLE IS NOT COPPER. A pin whose only land is np_thru_hole has
+	# no barrel and no ring, so it is on no layer: as a bus anchor it is off
+	# every layer, and as board copper it is nothing a bus can be foreign to.
+	var npth = ComponentScript.from_dict({"id": "H1", "name": "H1", "position": {"x": 5.0, "y": 5.0},
+		"pads": [{"number": "1", "type": "np_thru_hole", "shape": "circle",
+			"position": {"x": 0.0, "y": 0.0}, "size": {"width": 3.0, "height": 3.0},
+			"drill": {"x": 3.0, "y": 3.0}, "layers": ["F.Cu", "B.Cu"]}]})
+	var copper: Dictionary = PanelToolsScript._bus_pad_layers(npth, "1")
+	check("an np_thru_hole land is known-no-copper, on no layer",
+			bool(copper.get("no_copper", false)) and not bool(copper.get("all_layers", true))
+				and (copper.get("layers", {}) as Dictionary).is_empty(),
+			str(copper))
+	var npth_hits: Array = PanelToolsScript._bus_pad_off_layer_findings(
+		[{"ref": "H1.1", "net": "NA", "centre": Vector2(5.0, 5.0),
+			"all_layers": false, "layers": {}, "no_copper": true}], "top", "target")
+	check("…so a leg landing on it is named off-layer, as an unplated hole",
+			npth_hits.size() == 1
+				and str((npth_hits[0] as Dictionary).get("message", "")).contains("unplated")
+				and str((npth_hits[0] as Dictionary).get("pad_ref", "")) == "H1.1",
+			str(npth_hits))
 
 
 func _test_an_off_layer_leg_reaches_the_agent() -> void:
