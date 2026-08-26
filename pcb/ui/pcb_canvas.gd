@@ -943,10 +943,11 @@ var _bus_station_layer: String = ""
 ## Enter), so only the SPINE and the TARGETS actually vary frame to frame.
 ## Recomputing the full plan — width lookup included — on every motion tick is
 ## pure waste past the first frame at an unchanged spine. Keyed on exactly the
-## arguments bus_plan is CALLED with, target pins included: those are empty
-## until every net has one (see _bus_plan_target_pins), so landing a target
-## part-way through changes nothing the plan reads and must not throw the memo
-## away. _draw_bus_preview skips the call entirely when the key matches.
+## arguments bus_plan is CALLED with, target pins included: empty while
+## pathing, the live target array ("" per open net) from TARGETS on (see
+## _bus_plan_target_pins), so landing, clearing or reordering a target replans
+## and nothing else does. _draw_bus_preview skips the call entirely when the
+## key matches.
 ## Cleared on _reset_bus_tool so a stale cache is never read into a new
 ## arming.
 var _bus_plan_cache_key: Array = []
@@ -6265,11 +6266,24 @@ func _cut_trace_here(trace_id: String, world_pos: Vector2) -> void:
 	if not error.is_empty():
 		trace_tool_message.emit(error)
 		return
+	_retire_commits_owning_trace(trace_id)
 	data.save_to_history("Cut trace")
 	var trace = data.get_trace(trace_id)
 	trace_tool_message.emit("Cut %s at vertex %d — %d points kept, the tail dropped." % [
 		trace_id, at, trace.waypoints.size() if trace != null else 0])
 	queue_redraw()
+
+
+## Copper a COMMITTED route candidate owns has just changed shape (a cut or an
+## extension keeps the trace's id, so the delete path's presence check would
+## not notice): retire that commit inside the same history step, as
+## panel_tools does for its verbs. Returns the retired candidate ids.
+func _retire_commits_owning_trace(trace_id: String) -> Array:
+	if _routing_workspace == null or not _routing_workspace.has_method("retire_commits_owning_trace"):
+		return []
+	if data != null and data.has_method("bind_routing_workspace"):
+		data.bind_routing_workspace(_routing_workspace)
+	return _routing_workspace.retire_commits_owning_trace(trace_id)
 
 
 ## The per-entity noun, verb-first: "Erase trace", "Delete R1", "Delete via".
@@ -8161,6 +8175,10 @@ func _finish_trace_on_anchor(hit: Dictionary) -> void:
 		var target = data.get_trace(str(hit.get("ref", "")))
 		if target == null:
 			return
+		if not _trace_extend.is_empty() and str(_trace_extend["trace_id"]) == str(hit.get("ref", "")):
+			trace_tool_message.emit("%s is the other end of the trace this run is extending — joining them would close it into a loop; finish on a pad or via instead."
+				% _trace_anchor_label(hit))
+			return
 		if str(target.layer) != _trace_layer:
 			trace_tool_message.emit("%s is on %s and this run is on %s — one polyline lives on one layer; finish on a via to change layer." % [
 				_trace_anchor_label(hit), str(target.layer), _trace_layer])
@@ -8224,6 +8242,7 @@ func _commit_trace(warning: String = "") -> void:
 			_trace_join = {}
 			trace_tool_message.emit(error)
 			return
+		_retire_commits_owning_trace(str(grow["trace_id"]))
 		data.save_to_history("Extend trace")
 		var grown_count: int = data.get_trace(str(grow["trace_id"])).waypoints.size()
 		var extended := "Extended %s from its %s end on %s (%s, now %d points)." % [
@@ -8568,9 +8587,12 @@ func _dispatch_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 	_bus_path_press_appended = false
 	_bus_target_press_cleared = {}
 	# A click on a pick's NUMBER reorders the lanes, in the two phases where
-	# the pips are the thing being read (SOURCES and TARGETS); it is checked
-	# before the phase's own verb so the number never doubles as a toggle.
-	if _bus_phase != BusPhase.PATH:
+	# the pips are the thing being read (SOURCES and TARGETS). THE PAD WINS
+	# over the glyph, as a pad wins over a via and a trace end everywhere else
+	# on this canvas: at 0.1" pitch the digit box beside one pick sits on the
+	# next pad in the row, and a click on that pad has to pick or target its
+	# net, never move the neighbour's lane.
+	if _bus_phase != BusPhase.PATH and _trace_pad_at(world_pos).is_empty():
 		var pip: int = _bus_pip_label_at(world_pos)
 		if pip >= 0:
 			_reorder_bus_lane(pip, Input.is_key_pressed(KEY_SHIFT))
@@ -8613,7 +8635,6 @@ func _reorder_bus_lane(i: int, inward: bool) -> void:
 		bus_tool_message.emit(PcbBusLabels.reorder_end_message(_bus_nets[i], inward))
 		return
 	_swap_bus_lanes(i, j)
-	_bus_target_press_cleared = {}
 	bus_tool_message.emit("%s is now lane %d (%s) — [%s]. %s" % [
 		_bus_nets[j], j + 1, "inward" if inward else "outward", _bus_nets_joined(),
 		bus_teach_line()])
@@ -9465,7 +9486,7 @@ func _bus_open_sentence(plan: Dictionary) -> String:
 	var open_nets: Array = plan.get("open_nets", []) if plan.get("open_nets", []) is Array else []
 	if open_nets.is_empty():
 		return ""
-	return " " + _PanelToolsScript.bus_open_sentence(open_nets)
+	return " " + PcbBusLabels.bus_open_sentence(open_nets)
 
 
 ## What the commit says ON TOP of its summary when the plan broke a rule and
@@ -9750,11 +9771,14 @@ func _draw_bus_airlines() -> void:
 			_draw_dashed_line(p1, p2, c, AIRWIRE_DASH_WIDTH_PX, AIRWIRE_DASH_PERIOD_PX)
 
 
-## The target refs to plan with: the whole array once every net has one, and
-## EMPTY otherwise — bus_plan's own "corridor only, do not commit" input, which
-## previews the bundle's lanes while the path is still being drawn.
+## The target refs to plan with: EMPTY while the path is being drawn —
+## bus_plan's own "corridor only, do not commit" input, which previews the
+## bundle's lanes — and, from TARGETS on, the live target array as it stands,
+## "" for every net still open, which is EXACTLY what _commit_bus will plan
+## with: the ghost draws the landed legs and the open lanes, and the refusal,
+## finding count and advisory the panel holds judge the plan the commit uses.
 func _bus_plan_target_pins() -> PackedStringArray:
-	if not _bus_nets_without_targets().is_empty():
+	if _bus_phase != BusPhase.TARGETS:
 		return PackedStringArray()
 	return PackedStringArray(_bus_target_refs)
 

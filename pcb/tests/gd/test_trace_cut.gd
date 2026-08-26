@@ -14,6 +14,7 @@ extends SceneTree
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
+const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 
 var _pass := 0
 var _fail := 0
@@ -23,10 +24,23 @@ var _fail := 0
 ## get_board_data() (same stand-in shape as test_trace_identity_delete.gd).
 class _StubHost extends RefCounted:
 	var _data
-	func _init(d) -> void:
+	var _panel = null
+	func _init(d, panel = null) -> void:
 		_data = d
+		_panel = panel
 	func get_board_data():
 		return _data
+	func get_panel():
+		return _panel
+
+
+## The panel seam panel_tools._get_workspace reads: get_routing_workspace().
+class _StubPanel extends RefCounted:
+	var _ws
+	func _init(ws) -> void:
+		_ws = ws
+	func get_routing_workspace():
+		return _ws
 
 
 func _init() -> void:
@@ -36,6 +50,7 @@ func _init() -> void:
 	_run_verb_forms_agree()
 	_run_cut_end_is_free_unless_joined()
 	_run_menu_item()
+	_run_locked_and_committed_copper()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -276,3 +291,67 @@ func _menu_index(canvas, text: String) -> int:
 		if str(canvas.context_menu.get_item_text(i)).begins_with(text):
 			return i
 	return -1
+
+
+# ── 6. a locked trace refuses; committed copper retires its commit ───────────
+
+## A workspace record whose committed copper IS the fixture's five-point run.
+func _record_for_run() -> Dictionary:
+	var segs: Array = []
+	for i in range(_RUN.size() - 1):
+		segs.append({"start": [(_RUN[i] as Vector2).x, (_RUN[i] as Vector2).y],
+			"end": [(_RUN[i + 1] as Vector2).x, (_RUN[i + 1] as Vector2).y], "layer": "top"})
+	return {"net": "VCC", "segments": segs, "vias": [], "source_hints": [],
+		"source_hint_ids": [], "width_override": 0.2}
+
+
+func _run_locked_and_committed_copper() -> void:
+	print("-- 6. a locked trace is refused; cutting committed copper retires the commit --")
+	var rig := _data_with_trace()
+	var data = rig[0]
+	var id: String = rig[1]
+	data.get_trace(id).locked = true
+	var refused: Dictionary = PanelTools._cut_trace(_StubHost.new(data), {"trace_id": id, "at_index": 2})
+	check("the verb refuses a locked trace as trace_locked",
+		str(refused.get("error", "")) == "trace_locked" and _points(data, id).size() == 5, str(refused))
+	data.get_trace(id).locked = false
+
+	# COMMITTED COPPER, through the verb: the candidate's commit lands the trace,
+	# the cut changes its shape, and the commit is retired in the same step.
+	var data_v = PCBData.new()
+	data_v.from_board_dict(_board())
+	data_v.save_to_history("baseline")
+	var ws = PcbRoutingWorkspace.new()
+	var cid := str(ws.ingest_record(_record_for_run(), int(data_v.board_revision)))
+	var committed: Dictionary = ws.commit(cid, data_v)
+	check("fixture: the candidate committed one trace", bool(committed.get("ok", false))
+		and (committed.get("trace_ids", []) as Array).size() == 1, str(committed))
+	var owned: String = str((committed.get("trace_ids", []) as Array)[0]) if (committed.get("trace_ids", []) as Array).size() == 1 else ""
+	var host := _StubHost.new(data_v, _StubPanel.new(ws))
+	var h0: int = data_v.history.size()
+	var res: Dictionary = PanelTools._cut_trace(host, {"trace_id": owned, "at_index": 2})
+	check("the cut succeeds and reports the retired commit",
+		bool(res.get("success", false)) and (res.get("reopened_candidate_ids", []) as Array) == [cid], str(res))
+	check("…the candidate is no longer committed and its task is open again",
+		str(ws.get_candidate(cid).disposition) != "committed"
+			and str(ws.task_state(str(ws.get_candidate(cid).task_id))) != "closed",
+		"%s / %s" % [str(ws.get_candidate(cid).disposition), str(ws.task_state(str(ws.get_candidate(cid).task_id)))])
+	check("…in ONE history step with the cut", data_v.history.size() - h0 == 1)
+
+	# The same through the CANVAS menu path.
+	var data_c = PCBData.new()
+	data_c.from_board_dict(_board())
+	data_c.save_to_history("baseline")
+	var ws_c = PcbRoutingWorkspace.new()
+	var cid_c := str(ws_c.ingest_record(_record_for_run(), int(data_c.board_revision)))
+	var committed_c: Dictionary = ws_c.commit(cid_c, data_c)
+	var owned_c: String = str((committed_c.get("trace_ids", []) as Array)[0]) if (committed_c.get("trace_ids", []) as Array).size() == 1 else ""
+	var canvas = PcbCanvasScript.new()
+	canvas.data = data_c
+	canvas.zoom = 10.0
+	canvas.set_routing_workspace(ws_c)
+	canvas._cut_trace_here(owned_c, Vector2(20.3, 20.0))
+	check("the canvas cut retires the commit too",
+		_points(data_c, owned_c).size() == 3 and str(ws_c.get_candidate(cid_c).disposition) != "committed",
+		"%d points, %s" % [_points(data_c, owned_c).size(), str(ws_c.get_candidate(cid_c).disposition)])
+	canvas.free()

@@ -502,8 +502,14 @@ is optional. It runs no DRC — the copper is on the board when it returns.
 
 A trace has three kinds of anchor: a pad, a via, and a **free trace end** — an
 end that touches no pad copper, no via disc and no same-net trace (within
-`PCBData.TRACE_END_JOIN_EPS_MM`, 0.05 mm, of the copper itself). A joined end
-is not an anchor. The verb names one as `{trace_id, end: "start"|"end"}`:
+`PCBData.TRACE_END_JOIN_EPS_MM`, 0.05 mm, of the copper itself). The rule is
+net-blind for pads and vias but net-aware for traces: a pad or via of ANY net
+under the end makes it not free, a different-net trace under it does not (that
+is a short for DRC, not a join), and zones are never consulted — an end lying
+in a same-net pour still reads as free. A joined end is not an anchor, and a
+LOCKED trace offers none (`trace_locked` from the verb). Continuing a trace
+from one of its own ends to its other end is refused (`trace_end_same_trace`):
+that would close it into a loop. The verb names one as `{trace_id, end: "start"|"end"}`:
 
 - **`start`** — the run CONTINUES that trace: `PCBData.extend_trace` appends the
   points after its `end` (or prepends them, reversed, before its `start`), and
@@ -524,6 +530,8 @@ is not an anchor. The verb names one as `{trace_id, end: "start"|"end"}`:
   on" sentence.
 - The reply carries `extended_from` and the whole grown polyline
   (`points`, `point_count`); one `extend_trace` journal row, one undo step.
+  Copper a COMMITTED route candidate owns retires that commit inside the same
+  step (`reopened_candidate_ids`), exactly as `minerva_pcb_delete_traces` does.
 
 The canvas does the same: a click within `PCBData.TRACE_SNAP_MM` (1.27 mm) of a
 free end anchors on it (pad and via win where they overlap it), the label reads
@@ -542,7 +550,9 @@ row and one undo step. Name the vertex as `at_index` (0-based) or as
 (`trace_not_cuttable`: index 0 would be a delete, the last index a no-op — the
 caller chooses deliberately), as is a 2-point trace (no interior). The reply's
 `free_end` says whether the new end is a free end (see above) or already sits
-on a pad, a via or same-net copper. Runs no DRC.
+on a pad, a via or same-net copper. A locked trace is refused (`trace_locked`);
+copper a committed route candidate owns retires that commit in the same step
+(`reopened_candidate_ids`). Runs no DRC.
 
 **Redoing a bad exit** — a bus leg that landed on the wrong pad, a hand-routed
 run one bend too far: select the trace → right-click at the last good bend →

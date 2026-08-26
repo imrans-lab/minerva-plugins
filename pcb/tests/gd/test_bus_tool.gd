@@ -161,6 +161,9 @@ func _init() -> void:
 	await _test_the_open_verb_matches_the_open_gesture()
 	_test_every_lane_wears_its_net()
 	_test_lane_order_is_a_visible_choice()
+	_test_a_neighbouring_pad_outranks_the_glyph()
+	_test_the_live_plan_is_the_commit_plan()
+	_test_an_all_open_station_bus_lands_deliberately()
 	await _test_a_crossing_bus_is_told_a_clean_order()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -3439,3 +3442,132 @@ func _has_end_crossing(routed: Dictionary) -> bool:
 		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_END_CROSSING:
 			return true
 	return false
+
+
+# ── 17c. THE PAD WINS OVER THE GLYPH ─────────────────────────────────────────
+#
+# At 0.1" pitch and zoom 8 the digit box beside one pick (12–22 px right) sits
+# on the next pad of the row (20.3 px right). A click on that pad has to pick
+# its net, never move the neighbour's lane. ORACLE: _bus_nets after the click.
+
+func _test_a_neighbouring_pad_outranks_the_glyph() -> void:
+	print("\n-- (17c) a pad 2.54 mm right of a pick outranks the pick's number --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var host = rig[2]
+	var board: Dictionary = _board()
+	board["components"].append(_part("U4", 12.54, 10.0))
+	board["components"].append(_part("U5", 12.54, 30.0))
+	board["nets"].append({"name": "ND", "pins": ["U4.1", "U5.1"]})
+	var data = PCBData.new()
+	data.from_board_dict(board)
+	canvas.data = data
+	host.pads.append({"component": "U4", "pin": "1", "position": Vector2(12.54, 10.0)})
+	host.pads.append({"component": "U5", "pin": "1", "position": Vector2(12.54, 30.0)})
+	canvas._handle_bus_click(SRC_A, false)                    # NA
+	canvas._handle_bus_click(Vector2(12.54, 10.0), false)     # U4.1, inside NA's digit box
+	check("a click on the neighbouring pad ADDS its net rather than reordering",
+			canvas._bus_nets == (["NA", "ND"] as Array[String]), str(canvas._bus_nets))
+	canvas._handle_bus_click(SRC_B, false)                    # NB, lane 3
+	canvas._handle_bus_click(_pip_number_click(canvas, 2), false)   # NB's digit: no pad there
+	check("…while the glyph with no pad under it still reorders",
+			canvas._bus_nets == (["NA", "NB", "ND"] as Array[String]), str(canvas._bus_nets))
+	canvas.free()
+
+
+# ── 17d. THE LIVE PLAN IS THE COMMIT PLAN ────────────────────────────────────
+#
+# In TARGETS the preview plans with the same target array the commit uses —
+# "" per open net — so the ghost shows the landed legs and the open lanes and
+# the held status judges the copper that would land. With NB (the middle
+# lane, y = 20) left open, NA's leg at x = 120 runs from y = 19.5 through
+# (120, 20), which is NB's open lane END: the clearance measurement reads a
+# 0 mm gap and names both nets, BEFORE any commit. No pad moves: the fixture
+# crosses as it stands once the middle net is the open one.
+
+func _test_the_live_plan_is_the_commit_plan() -> void:
+	print("\n-- (17d) in TARGETS the live plan carries the open nets the commit will land --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas._handle_bus_click(PATH_2, false)
+	check("PATH: the live plan is the corridor-only preview (no target pins)",
+			canvas._bus_plan_target_pins().is_empty() and not bool(canvas._bus_current_plan().get("complete", true)))
+	canvas._handle_bus_click(TGT_A, false)   # ends PATH, lands NA
+	canvas._handle_bus_click(TGT_C, false)   # NC landed; NB open
+	var plan: Dictionary = canvas._bus_current_plan()
+	check("TARGETS: the plan is planned with the live targets, \"\" for NB",
+			canvas._bus_plan_target_pins() == PackedStringArray(["V1.1", "", "V3.1"]),
+			str(canvas._bus_plan_target_pins()))
+	check("…so it is complete and carries open_nets == [NB]",
+			bool(plan.get("complete", false)) and (plan.get("open_nets", []) as Array) == ["NB"],
+			str(plan.get("open_nets", [])))
+	var polys: Array = plan.get("polylines", [])
+	check("…and its ghosts are the landed legs plus the open lane ending at (120,20)",
+			polys.size() == 3 and (polys[0] as PackedVector2Array)[(polys[0] as PackedVector2Array).size() - 1] == TGT_A
+				and (polys[1] as PackedVector2Array)[(polys[1] as PackedVector2Array).size() - 1] == Vector2(120.0, 20.0),
+			str(polys))
+	check("the held refusal names the crossing of NA's leg and NB's open lane before commit",
+			canvas.bus_refusal().contains("NA") and canvas.bus_refusal().contains("NB")
+				and canvas.bus_finding_count() >= 1 and canvas.bus_plan_buildable(),
+			canvas.bus_refusal())
+	var before := _board_state(data)
+	_double_click(canvas, EMPTY)
+	check("…and the commit lands exactly that plan: 3 traces, NB open, in one step",
+			_traces_by_net(data).size() == 3 and data.history.size() == int(before[1]) + 1
+				and _points_of(_traces_by_net(data)["NB"])[_points_of(_traces_by_net(data)["NB"]).size() - 1] == Vector2(120.0, 20.0))
+	canvas.free()
+
+
+# ── 17e. AN ALL-OPEN STATION BUS, deliberately ───────────────────────────────
+#
+# Landing the lanes and finishing every leg by hand is allowed: every net open,
+# through a via station, lands N top runs, N vias and N open bottom runs in
+# one step, every bottom end free, and the sentence names all three nets.
+
+func _test_an_all_open_station_bus_lands_deliberately() -> void:
+	print("\n-- (17e) an all-open station bus lands lanes, vias and free ends --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var data = rig[1]
+	var msgs := _collect(canvas)
+	canvas._handle_bus_click(SRC_A, false)
+	canvas._handle_bus_click(SRC_B, false)
+	canvas._handle_bus_click(SRC_C, false)
+	canvas._handle_bus_click(PATH_1, false)
+	canvas.working_layer = "bottom"
+	canvas._handle_bus_click(STATION, false)
+	canvas._handle_bus_click(PATH_2, false)
+	_double_click(canvas, DBL_END)            # ends PATH with no target landed
+	check("fixture: TARGETS reached with every net open",
+			canvas.bus_phase() == canvas.BusPhase.TARGETS and canvas._bus_nets_without_targets().size() == 3)
+	var before := _board_state(data)
+	var j0: int = data.change_journal.size()
+	_double_click(canvas, EMPTY)
+	var runs := _traces_by_net_and_layer(data)
+	check("six runs and three vias landed in one history step",
+			runs.size() == 6 and _serialized_vias(data).size() == 3
+				and data.history.size() == int(before[1]) + 1,
+			"runs %s vias %d" % [str(runs.keys()), _serialized_vias(data).size()])
+	var free_ends := 0
+	for net in ["NA", "NB", "NC"]:
+		var run: Dictionary = runs.get("%s|bottom" % net, {})
+		var pts := _points_of(run)
+		if not pts.is_empty():
+			var found: Dictionary = data.free_trace_end_at(pts[pts.size() - 1], data.TRACE_SNAP_MM)
+			if str(found.get("trace_id", "")) == str(run.get("id", "")) and str(found.get("end", "")) == "end":
+				free_ends += 1
+	check("every bottom run ends free, past the via", free_ends == 3, "free ends %d" % free_ends)
+	var bus_row: Dictionary = {}
+	for e in data.change_journal.slice(j0):
+		if str((e as Dictionary).get("action", "")) == "add_bus":
+			bus_row = e
+	check("the add_bus row names all three nets as open",
+			(bus_row.get("details", {}) as Dictionary).get("open_nets", []) == ["NA", "NB", "NC"], str(bus_row))
+	check("…and the status sentence names them",
+			_last(msgs).contains("3 lane") and _last(msgs).contains("NA, NB, NC"), _last(msgs))
+	canvas.free()

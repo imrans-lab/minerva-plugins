@@ -989,8 +989,12 @@ const TRACE_END_JOIN_EPS_MM := 0.05
 ##
 ## The credit is the copper's own geometry: pin_copper_distance for pads (0 on
 ## the land), the via's radius for vias, and is_point_near (width/2 + eps) for
-## a same-net trace. A different-net trace under the end is a short, not a join,
-## and does not count. Zones are not consulted.
+## a trace. NET-BLIND for pads and vias, NET-AWARE for traces, deliberately: a
+## pad or via of ANY net under the end makes it "not free" (continuing from
+## there would draw through copper that is not yours), while only a SAME-NET
+## trace joins — a different-net trace under the end is a short for DRC to
+## name, not a join. Zones are not consulted at all, so an end lying in a
+## same-net pour still reads as free.
 func trace_end_is_joined(trace_id: String, end: String) -> bool:
 	var trace = get_trace(trace_id)
 	if trace == null or trace.waypoints.size() < 2:
@@ -1014,12 +1018,14 @@ func trace_end_is_joined(trace_id: String, end: String) -> bool:
 
 
 ## The FREE trace end nearest `position` within `tol` (inclusive), or {}:
-## {trace_id, end, position, net}. Which end is asked of the geometry library
-## (end_index_at, start first); a joined end is skipped, so a two-point stub
-## shorter than `tol` whose start is joined still offers its free end.
+## {trace_id, end, position, net}. BOTH ends of every trace are measured and
+## the nearest free one overall wins — a short stub whose two ends are both
+## within `tol` answers with the nearer end, not the first one tested. On an
+## exact tie the earlier trace keeps it, then its start. A joined end
+## (trace_end_is_joined) and a LOCKED trace offer nothing.
 ##
 ## `visible_filter` is the view's predicate, applied inside the walk exactly as
-## get_trace_at applies it. Nearest wins; ties keep the earlier trace.
+## get_trace_at applies it.
 func free_trace_end_at(position: Vector2, tol: float, visible_filter := Callable()) -> Dictionary:
 	var best: Dictionary = {}
 	var best_d := INF
@@ -1027,26 +1033,21 @@ func free_trace_end_at(position: Vector2, tol: float, visible_filter := Callable
 		var trace = traces[trace_id]
 		if visible_filter.is_valid() and not visible_filter.call(trace):
 			continue
+		if bool(trace.locked):
+			continue
 		var pts := PackedVector2Array(trace.waypoints)
 		if pts.size() < 2:
 			continue
-		var idx := PcbTraceGeometry.end_index_at(pts, position, tol)
-		if idx < 0:
-			continue
-		var last := pts.size() - 1
-		var candidates: Array = [idx]
-		if idx == 0 and pts[last].distance_to(position) <= tol:
-			candidates.append(last)
-		for i in candidates:
-			var end := TRACE_END_START if i == 0 else TRACE_END_END
+		for end in [TRACE_END_START, TRACE_END_END]:
+			var pt: Vector2 = pts[0] if end == TRACE_END_START else pts[pts.size() - 1]
+			var d := pt.distance_to(position)
+			if d > tol or d >= best_d:
+				continue
 			if trace_end_is_joined(trace_id, end):
 				continue
-			var d := pts[i].distance_to(position)
-			if d < best_d:
-				best_d = d
-				best = {"trace_id": trace_id, "end": end, "position": pts[i],
-					"net": str(trace.net_name)}
-			break
+			best_d = d
+			best = {"trace_id": trace_id, "end": end, "position": pt,
+				"net": str(trace.net_name)}
 	return best
 
 

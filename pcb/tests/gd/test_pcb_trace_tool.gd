@@ -1075,3 +1075,44 @@ func _test_trace_end_anchor() -> void:
 			and PackedVector2Array(joined.waypoints)
 				== PackedVector2Array([Vector2(30, 25), Vector2(40, 25), Vector2(40, 35)]), str(res))
 	rig[0].free()
+
+	# (g) NEAREST END WINS on a short stub: a 2 mm free-floating trace has both
+	# ends within snap of any click on it; a click 0.3 mm past its END must
+	# answer the end, not the start that is tested first.
+	rig = _rig()
+	data = rig[1]
+	var stub2 = data.create_trace_entity("VCC", "top", [Vector2(40.0, 30.0), Vector2(42.0, 30.0)])
+	var near_end: Dictionary = data.free_trace_end_at(Vector2(42.3, 30.0), data.TRACE_SNAP_MM)
+	check("(g) a click 0.3 mm past a 2 mm stub's END answers its end",
+			str(near_end.get("trace_id", "")) == str(stub2.id) and str(near_end.get("end", "")) == "end",
+			str(near_end))
+	var near_start: Dictionary = data.free_trace_end_at(Vector2(39.7, 30.0), data.TRACE_SNAP_MM)
+	check("(g) …and 0.3 mm before its START answers the start",
+			str(near_start.get("end", "")) == "start", str(near_start))
+	# (h) LOCKED: a locked trace offers no free end, to the click or the verb.
+	stub2.locked = true
+	check("(h) a locked trace offers no free end",
+			data.free_trace_end_at(Vector2(42.3, 30.0), data.TRACE_SNAP_MM).is_empty())
+	var locked_res: Dictionary = PanelTools._add_trace(rig[2], {
+		"start": {"trace_id": str(stub2.id), "end": "end"}, "points": [[50.0, 30.0]]})
+	check("(h) …and the verb refuses it as trace_locked",
+			str(locked_res.get("error", "")) == "trace_locked", str(locked_res))
+	stub2.locked = false
+	# (i) A LOOP IS REFUSED: starting from one free end and finishing on the
+	# same trace's other end would close it — refused by name, nothing written.
+	canvas = rig[0]
+	msgs = []
+	canvas.trace_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	j0 = data.change_journal.size()
+	canvas._handle_trace_click(Vector2(42.3, 30.0), false)   # start from the END
+	canvas._handle_trace_click(Vector2(42.0, 36.0), false)   # a waypoint
+	canvas._handle_trace_click(Vector2(39.7, 30.0), false)   # the same trace's START
+	check("(i) finishing on the extended trace's own other end is refused, naming the loop",
+			str(msgs[msgs.size() - 1]).contains("loop") and data.change_journal.size() == j0
+				and PackedVector2Array(stub2.waypoints).size() == 2, str(msgs))
+	var loop_res: Dictionary = PanelTools._add_trace(rig[2], {
+		"start": {"trace_id": str(stub2.id), "end": "end"},
+		"end": {"trace_id": str(stub2.id), "end": "start"}, "points": [[42.0, 36.0]]})
+	check("(i) …and the verb refuses the same as trace_end_same_trace",
+			str(loop_res.get("error", "")) == "trace_end_same_trace", str(loop_res))
+	canvas.free()

@@ -1590,6 +1590,30 @@ func reconcile_committed_copper(board) -> Array:
 	return retired
 
 
+## Retire the commit of every committed candidate whose recorded copper
+## includes `trace_id` — the EDIT twin of reconcile_committed_copper: a cut or
+## an extension keeps the trace's id, so the presence check above would find
+## the copper still there while its geometry no longer is the candidate's.
+## Same compensation (uncommit: prior disposition, cleared ids, task reopened,
+## verdict staled); returns the retired candidate ids.
+func retire_commits_owning_trace(trace_id: String) -> Array:
+	var retired: Array = []
+	if trace_id.is_empty() or _commit_transaction_active:
+		return retired
+	for raw_id in candidates.keys():
+		var cid := str(raw_id)
+		var c = get_candidate(cid)
+		if c == null or str(c.disposition) != "committed":
+			continue
+		var rec: Dictionary = correlations.get(cid, {})
+		var tids: Array = rec.get("committed_trace_ids", []) if rec.get("committed_trace_ids", []) is Array else []
+		if not (trace_id in tids):
+			continue
+		if uncommit(cid):
+			retired.append(cid)
+	return retired
+
+
 ## Bridged ADD-VIA route-through (T2.3): the correlated annotation's segments/vias
 ## have just been edited (a via inserted) — re-derive the candidate's geometry
 ## from that SAME updated raw route data so both stores stay identical, and bump

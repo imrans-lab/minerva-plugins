@@ -4044,6 +4044,10 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 		if not bool(finish_end.get("ok", false)):
 			return finish_end["reply"]
 	var extending: bool = not start_end.is_empty() or not finish_end.is_empty()
+	if not start_end.is_empty() and not finish_end.is_empty() \
+			and str((start_end["trace"]).id) == str((finish_end["trace"]).id):
+		return {"success": false, "error": "trace_end_same_trace",
+			"note": "start and end name the two ends of the same trace — that would close it into a loop; end on a pad or via instead"}
 	if extending and args.has("width_mm"):
 		return _err("width_mm cannot be set when extending a trace — the trace keeps its own width")
 
@@ -4132,12 +4136,13 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 		var error: String = str(data.extend_trace(grown_id, str(grow["which"]), run))
 		if not error.is_empty():
 			return {"success": false, "error": "trace_not_extendable", "note": error}
+		var reopened: Array = _retire_commits_owning_trace(host, data, grown_id)
 		data.save_to_history("Extend trace")
 		var grown = data.get_trace(grown_id)
 		var all_points: Array = []
 		for p in grown.waypoints:
 			all_points.append([_mm((p as Vector2).x), _mm((p as Vector2).y)])
-		return _ok({
+		var grown_reply: Dictionary = {
 			"trace_id": grown_id,
 			"extended_from": str(grow["which"]),
 			"net_name": net_name,
@@ -4150,7 +4155,11 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 			"note": ("the existing trace was extended in place (same id) — this verb runs no DRC, "
 				+ "exactly as the canvas Trace tool does not. Run minerva_pcb_drc and "
 				+ "minerva_pcb_drc_geometric to find out what it touched."),
-		})
+		}
+		if not reopened.is_empty():
+			grown_reply["reopened_candidate_ids"] = reopened
+			grown_reply["note"] = str(grown_reply["note"]) + " The trace was copper a committed route candidate owned — that commit is retired and its routing task is open again."
+		return _ok(grown_reply)
 
 	var trace = data.create_trace_entity(net_name, layer, pts, width)
 	if trace == null:
@@ -4191,6 +4200,9 @@ static func _cut_trace(host, args: Dictionary) -> Dictionary:
 	if trace == null:
 		return {"success": false, "error": "no_such_trace",
 			"note": "no trace '%s' on this board" % trace_id}
+	if bool(trace.locked):
+		return {"success": false, "error": "trace_locked",
+			"note": "trace '%s' is locked — unlock it before cutting it" % trace_id}
 	var at_index: int = -1
 	if args.has("at_index"):
 		if not (args["at_index"] is int or args["at_index"] is float) \
@@ -4210,19 +4222,42 @@ static func _cut_trace(host, args: Dictionary) -> Dictionary:
 					% [trace_id, snap, float(args["x_mm"]), float(args["y_mm"])]}
 	else:
 		return _err("give at_index, or x_mm + y_mm to pick the nearest interior vertex")
+	var count_before: int = trace.waypoints.size()
 	var error: String = str(data.cut_trace(trace_id, at_index))
 	if not error.is_empty():
 		return {"success": false, "error": "trace_not_cuttable", "note": error}
+	# Copper a COMMITTED candidate owns has just changed shape under it: retire
+	# that commit inside this same history step, as _delete_traces does.
+	var reopened: Array = _retire_commits_owning_trace(host, data, trace_id)
 	data.save_to_history("Cut trace")
 	var kept: int = trace.waypoints.size()
-	return _ok({
+	var reply: Dictionary = {
 		"trace_id": trace_id,
 		"at_index": at_index,
 		"kept_point_count": kept,
-		"dropped_count": int(data.change_journal[data.change_journal.size() - 1]["details"]["dropped_count"]),
+		"dropped_count": count_before - kept,
 		"free_end": not data.trace_end_is_joined(trace_id, data.TRACE_END_END),
 		"trace_count": data.traces.size(),
-	})
+	}
+	if not reopened.is_empty():
+		reply["reopened_candidate_ids"] = reopened
+		reply["note"] = "the cut trace was copper a committed route candidate owned — that commit is retired and its routing task is open again"
+	return _ok(reply)
+
+
+## The edit twin of _reconcile_committed_copper: retire the commit of any
+## candidate whose recorded copper includes `trace_id`, because its geometry
+## just changed under it. Placed BEFORE the caller's snapshot, so one history
+## step carries the edit and the retired commit together.
+static func _retire_commits_owning_trace(host, data, trace_id: String) -> Array:
+	if data == null or not is_instance_valid(data):
+		return []
+	var workspace = _get_workspace(host)
+	if workspace == null or not workspace.has_method("retire_commits_owning_trace"):
+		return []
+	if data.has_method("bind_routing_workspace"):
+		data.bind_routing_workspace(workspace)
+	return workspace.retire_commits_owning_trace(trace_id)
 
 
 ## Resolve one of _add_trace's `start` / `end` arguments — {trace_id, end} — to
@@ -4244,6 +4279,9 @@ static func _trace_end_arg(data, raw: Variant, label: String) -> Dictionary:
 	if trace == null:
 		return {"ok": false, "reply": {"success": false, "error": "no_such_trace",
 			"note": "no trace '%s' on this board" % trace_id}}
+	if bool(trace.locked):
+		return {"ok": false, "reply": {"success": false, "error": "trace_locked",
+			"note": "trace '%s' is locked — unlock it before continuing it" % trace_id}}
 	if trace.waypoints.size() < 2:
 		return {"ok": false, "reply": {"success": false, "error": "trace_end_not_free",
 			"note": "trace '%s' has no run to continue" % trace_id}}
@@ -9704,18 +9742,6 @@ static func _bus_findings_for_candidate(findings: Array, net_name: String, cid: 
 	return out
 
 
-## What both bus verbs and the canvas say about the lanes that ended OPEN, or
-## "" when every net landed — one wording, so agent and human read the same.
-static func bus_open_sentence(open_nets: Array) -> String:
-	if open_nets.is_empty():
-		return ""
-	var names := PackedStringArray()
-	for n in open_nets:
-		names.append(str(n))
-	return "%d lane(s) end open (%s) — finish them with the Trace tool from their free ends." % [
-		open_nets.size(), ", ".join(names)]
-
-
 ## Every finding's own words, in one line — the form both bus verbs and the
 ## canvas gesture report a bad-but-buildable bus with, so agent and human are
 ## told the same thing.
@@ -9838,7 +9864,7 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 	if not findings.is_empty():
 		reply["note"] = "%d bus rule(s) broke and the ghosts were proposed anyway so they can be corrected: %s. Nothing was committed — resolve via minerva_pcb_workspace_commit/_reject/pin." \
 			% [findings.size(), bus_findings_sentence(findings)]
-	var open_words: String = bus_open_sentence(out.get("open_nets", []) as Array)
+	var open_words: String = PcbBusLabels.bus_open_sentence(out.get("open_nets", []) as Array)
 	if not open_words.is_empty():
 		reply["note"] = "%s %s" % [str(reply["note"]), open_words]
 	var cross: Dictionary = await _cross_candidate_check(host, workspace, data)
@@ -10359,7 +10385,7 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 		if not advice.is_empty():
 			reply["clean_order"] = Array(result.get("clean_order", PackedStringArray()))
 			reply["note"] = "%s Advisory: %s" % [str(reply["note"]), advice]
-	var open_words: String = bus_open_sentence(result.get("open_nets", []) as Array)
+	var open_words: String = PcbBusLabels.bus_open_sentence(result.get("open_nets", []) as Array)
 	if not open_words.is_empty():
 		reply["note"] = open_words if not reply.has("note") else "%s %s" % [str(reply["note"]), open_words]
 	return _ok(reply)

@@ -73,6 +73,18 @@ static func lanes_summary(rows: Array) -> String:
 	return " · ".join(lane_lines(rows))
 
 
+## What both bus verbs and the canvas say about the lanes that ended OPEN, or
+## "" when every net landed — one wording, so agent and human read the same.
+static func bus_open_sentence(open_nets: Array) -> String:
+	if open_nets.is_empty():
+		return ""
+	var names := PackedStringArray()
+	for n in open_nets:
+		names.append(str(n))
+	return "%d lane(s) end open (%s) — finish them with the Trace tool from their free ends." % [
+		open_nets.size(), ", ".join(names)]
+
+
 ## The advisory a crossing bus is given — "pick order NA, NC, NB would leave the
 ## bundle clean." — or "" when `order` is empty (no clean order, or not
 ## searched). Advisory only; nothing re-sorts on its own.
