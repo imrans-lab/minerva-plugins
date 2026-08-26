@@ -46,6 +46,8 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_import_trace_geometry` | segment→polyline merge; `data.new_trace()` factory; preserves supplied ids |
 | `minerva_pcb_export_trace_geometry` | round-trips with the import shape; stamps `trace_id` / via `id` |
 | `minerva_pcb_delete_traces` | removes named traces/vias without clearing the board |
+| `minerva_pcb_add_trace` | `data.create_trace_entity`, or `data.extend_trace` when `start`/`end` names a free trace end (below); one journalled step |
+| `minerva_pcb_cut_trace` | `data.cut_trace` at an interior vertex, by `at_index` or by `x_mm`/`y_mm` (below); one journalled step |
 | `minerva_pcb_get_image` | snapshot-style via `host.render_content_to_image`; null-safe headless |
 | `minerva_pcb_apply_route_hints` | route the open route hints → RouteCandidates in the routing workspace (default) or committed traces (`commit=true`); see the route-correction loop below |
 | `minerva_pcb_list_zones` | read-only; summary per zone (`zone_id`, `kind`, `net`, `layer`, `point_count`) |
@@ -488,6 +490,66 @@ that every segment names its trace, then pass the ids you chose.
 is not supported.** A trace is deleted whole or not at all. To shorten one today,
 delete it and import the geometry you want in its place.
 
+## Drawing and continuing a trace (`minerva_pcb_add_trace`)
+
+The canvas Trace tool's verb twin, through the SAME model path
+(`PCBData.trace_author_error` → `create_trace_entity`), so an agent and a
+click are refused for the same reasons in the same words. `net_name`,
+`layer` and `points` (`[[x_mm, y_mm], …]`, 2+) draw a new trace; `width_mm`
+is optional. It runs no DRC — the copper is on the board when it returns.
+
+### Trace-end anchors (`start` / `end`)
+
+A trace has three kinds of anchor: a pad, a via, and a **free trace end** — an
+end that touches no pad copper, no via disc and no same-net trace (within
+`PCBData.TRACE_END_JOIN_EPS_MM`, 0.05 mm, of the copper itself). A joined end
+is not an anchor. The verb names one as `{trace_id, end: "start"|"end"}`:
+
+- **`start`** — the run CONTINUES that trace: `PCBData.extend_trace` appends the
+  points after its `end` (or prepends them, reversed, before its `start`), and
+  the trace keeps its id, net, layer and width. `net_name` and `layer` may be
+  omitted; given, they must agree (`trace_end_net_mismatch`,
+  `trace_end_layer_mismatch`). `width_mm` is refused — a polyline has one width.
+- **`end`** — the run finishes ON that free end and is appended to that trace,
+  reversed, so the polyline stays one piece. The target must already share the
+  run's net and layer (same two refusals: one polyline cannot carry two nets or
+  live on two layers — end on a pad or via instead; a via is how a run changes
+  layer). A run that both starts and ends on a trace end extends the START
+  trace only; the two traces then touch, which is joined copper.
+- Refusals, changing nothing: `no_such_trace`, `trace_end_not_free` (the end
+  already touches a pad, a via or same-net copper), the two mismatches,
+  `trace_not_extendable` (the model's words, e.g. every point sat on the end),
+  and `trace_not_authorable` — which is how a NETLESS start trace is refused,
+  with the model's own "must name a net … the pad, via or trace end it starts
+  on" sentence.
+- The reply carries `extended_from` and the whole grown polyline
+  (`points`, `point_count`); one `extend_trace` journal row, one undo step.
+
+The canvas does the same: a click within `PCBData.TRACE_SNAP_MM` (1.27 mm) of a
+free end anchors on it (pad and via win where they overlap it), the label reads
+`Trace end trace:…`, a netless trace end is refused by name exactly as a
+netless via is, and the trace's own layer — not the working layer — is where
+the continuation lands.
+
+## Cutting a trace at a vertex (`minerva_pcb_cut_trace`)
+
+The verb twin of the canvas's right-click **Cut here** on a trace, through
+`PCBData.cut_trace`: the trace keeps its id and its waypoints up to and
+including the cut vertex; the tail is dropped in one journalled `cut_trace`
+row and one undo step. Name the vertex as `at_index` (0-based) or as
+`x_mm`/`y_mm`, which picks the nearest INTERIOR vertex within `TRACE_SNAP_MM`
+(`no_vertex_in_reach` when none is). Cutting at an end is refused by name
+(`trace_not_cuttable`: index 0 would be a delete, the last index a no-op — the
+caller chooses deliberately), as is a 2-point trace (no interior). The reply's
+`free_end` says whether the new end is a free end (see above) or already sits
+on a pad, a via or same-net copper. Runs no DRC.
+
+**Redoing a bad exit** — a bus leg that landed on the wrong pad, a hand-routed
+run one bend too far: select the trace → right-click at the last good bend →
+**Cut here** → arm Draw ▸ Trace and click the new free end → draw the leg
+again. The same three steps from an agent: `minerva_pcb_cut_trace`, then
+`minerva_pcb_add_trace` with `start: {trace_id, end: "end"}`.
+
 ## Route-correction collaboration loop (`minerva_pcb_apply_route_hints`)
 
 Closes the route-correction loop (agent-router child `019eb47eb567`, DCR
@@ -723,13 +785,33 @@ out. It authors copper directly, the same altitude as Draw ▸ Trace — it does
 not touch the router or the routing workspace.
 
 **`sources` and `targets` are required**, one `"Component.Pin"` ref per net in
-the same order as `nets`, each on the net at its own index. A bus that stops
-short of the pads is not connected copper, so there is no arg shape that asks
-for one. Each track peels off at its own departure station, and the call is
-REFUSED — naming both nets and the end — when two nets' breakout legs cannot
-be ordered without crossing. Nothing is re-sorted, rerouted or moved to
-another layer to make a crossing go away. The spine must be axis-aligned and
-must start clear of the source pads and end clear of the target pads.
+the same order as `nets`, each on the net at its own index. Each track peels
+off at its own departure station; when two nets' breakout legs cannot be
+ordered without crossing, the copper LANDS and a `bus_end_crossing` finding
+names both nets and the end (a bad-but-buildable bus is committed so it can be
+corrected — only a bus with no geometry is refused). Nothing is re-sorted,
+rerouted or moved to another layer to make a crossing go away. The spine must
+be axis-aligned and must start clear of the source pads and end clear of the
+target pads.
+
+**Open-ended lanes.** A `targets` entry of `""` (the array stays one entry per
+net) lands that net's lane with NO target leg: its trace ends at the end of its
+lane — past the via, on the station layer, for a station bus — as a FREE end
+(see `minerva_pcb_add_trace`'s trace-end anchors). No corridor or off-layer
+finding is raised for a target that does not exist; the open copper is still
+measured against the board like any other. The reply's `open_nets` names them
+and `note` says "N lane(s) end open (…) — finish them with the Trace tool from
+their free ends." An EMPTY `targets` is not this: it is the corridor-only
+preview, which no verb can commit.
+
+**Lane order and the clean-order advisory.** Lane 1 is the lane on the LEFT of
+the spine looking along it from the sources to the targets (the most negative
+offset in `cumulative_offsets`). When the plan carries a `bus_end_crossing`
+finding, `pcb_bus_geometry.clean_pick_order` tries every order of up to four
+nets against `bundle_routes`' own findings on the same spine and pads and the
+first order with no end crossing comes back as `clean_order`, with the
+sentence "pick order NA, NB, NC would leave the bundle clean." appended to
+`note`. Advisory only — nothing re-sorts; five or more nets are not searched.
 
 **Order is the caller's order**, always. `pcb_bus_geometry.gd`'s
 `cumulative_offsets` deliberately does NOT re-sort nets by any geometric
@@ -779,13 +861,13 @@ on that net, else the board's own `design_rules.trace_width_mm` default (same
 rule `authored_trace_width()` gives a fresh trace). `width_override`, when
 given, replaces every net's width uniformly.
 
-**The INNER-FOLD GUARD** (`pcb_bus_geometry.gd:78-82`'s documented gap,
-assigned to this tool layer): a segment shorter than the widest `|offset|` in
-the bus would make the inner offset polyline fold back on itself — copper
-crossing itself. Refused, never silently accepted, naming the offending
-segment (by endpoint index) and the offset that tripped it. The canvas
-preview shows the same refusal live, before Enter is ever pressed (tinted
-spine + the reason appended to the on-canvas label).
+**The INNER-FOLD FINDING** (`bus_plan`): a segment shorter than the widest
+`|offset|` in the bus would make the inner offset polyline fold back on itself
+— copper crossing itself. It is a bad-but-buildable finding
+(`bus_inner_fold`), never silently accepted: the copper lands and the finding
+names the offending segment (by endpoint index) and the offset that tripped
+it. The canvas preview shows it live, before Enter is ever pressed (tinted
+spine + the reason held in the status line).
 
 **One undo step for the whole bus.** Every net's trace is created before the
 single `save_to_history` call, so `Ctrl+Z` (or `PCBData.undo()`) removes all
@@ -879,14 +961,28 @@ tool's schema: authored and validated only — routing, DRC and Gerber export
 all ignore a cutout today (see "Cut-outs" in `board-yaml.md`).
 
 **Draw ▸ Trace** — draws real copper directly, bypassing the router (Hints ▸
-Trace below instead asks the router for a route). Click a pad **or a via** to
-start — the trace takes that anchor's net — then click each waypoint, then
-click another pad or via to finish on its centre (or double-click/Enter to end
-it where it is; Esc/right-click cancels). A via anchors for the same reason a
-pad does: it already carries a net, and a via is where a hand-routed run
-changes layer, so it is where the next leg of that run begins or ends. An
-anchor on NO net is refused by name when you start on it (the trace would have
-no net to inherit), and merely named out loud when you finish on it. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
+Trace below instead asks the router for a route). Click a pad, a via **or a
+free trace end** to start — the trace takes that anchor's net — then click
+each waypoint, then click another anchor to finish on its centre (or
+double-click/Enter to end it where it is; Esc/right-click cancels). A via
+anchors for the same reason a pad does: it already carries a net, and a via is
+where a hand-routed run changes layer, so it is where the next leg of that run
+begins or ends. A **free trace end** — an end touching no pad, via or same-net
+copper — anchors because it is where a run stopped: starting on one EXTENDS
+that trace (same id; the run is added to its polyline, on the trace's own
+layer), and finishing on one appends your run to that trace. A joined end is
+not an anchor; where a pad or via and a trace end are both within snap, the
+pad or via wins. An anchor on NO net is refused by name when you start on it
+(the trace would have no net to inherit), and merely named out loud when you
+finish on a pad or via; finishing on a trace end of another net or another
+layer is refused instead, keeping your points — one polyline carries one net
+on one layer.
+
+**Cut here** (right-click a trace) — drops everything after the interior
+vertex nearest the click (within the pad snap); greyed beside an end vertex,
+since cutting there would be a delete or a no-op. One undo step. The new end is
+a free end, so the recipe for a bad exit is: right-click at the last good bend
+→ Cut here → Draw ▸ Trace from that end. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
 freely. Drawn at the width set in the sidebar's trace-width box, on the
 toolbar's **working layer** — the F.Cu / B.Cu chooser. That chooser sets where
 copper goes and nothing else: it never changes what the canvas shows, and
@@ -916,19 +1012,41 @@ places another, snapped to the axis it travels furthest along so the bus is
 Manhattan by construction. From here on a vertex over a trace is fine — the
 bus commits on its own layer. **TARGETS** — a click on a pad of one of
 the bus's own nets ends PATH and lands that net's target; every legal pad is
-ringed on screen and an illegal one is refused by name. Enter then COMMITS
-(Shift+Enter proposes ghosts) and refuses, naming the nets, any bus that still
-has a target missing — committing is its own act, never the gesture that
-finishes the bus. Esc/right-click peels ONE phase per press. Which phase you are in is marked on
+ringed on screen and an illegal one is refused by name. Enter or a
+double-click clear of the pads then COMMITS (Shift+Enter proposes ghosts); a
+net still without a target commits with its lane ending OPEN — a free end the
+Trace tool can finish — and the status line says how many lanes end open.
+Committing is its own act, never the click that lands a target. Esc/right-click
+peels ONE phase per press.
+
+**Every lane wears its net.** Each net's pip, rings, ghost track and airline
+share that net's ratsnest colour; the ghost carries "NA → V1.1" (or "NA →
+open" / "NA → ?") at its far end; every eligible ring is labelled with its
+net, the ratsnest's suggestion is the dashed ring, the landed target the solid
+one. The whole mapping is readable at once in the standing status line while
+the tool is armed — "lanes: 1 NA  U1.1 → V1.1 · 2 NB  U2.1 → open". The
+canvas builds it from `bus_target_guidance()` rows (`lane_index`, `color`,
+`ending`); no MCP verb reads the live gesture, so an agent's lane map is the
+`nets` order it passed plus the reply's `open_nets`.
+
+**Lane order is pick order, and a visible choice.** Lane 1 is the lane on the
+left of the spine looking from the sources to the targets. In SOURCES and
+TARGETS, click a pick's NUMBER (the label beside its pip ring — the pad itself
+still toggles the net) to move that net one lane outward, toward lane 1;
+Shift+click moves it inward; at either end the click is a no-op that says so.
+Everything per net moves together, targets included, and the ghosts replan.
+When the picked order makes two legs cross, the status line adds "pick order
+NA, NB, NC would leave the bundle clean." (up to four nets; advisory only). Which phase you are in is marked on
 the Bus button itself for as long as the tool is armed — three pips along its
 bottom edge, filled up to the live one, in the order named above. It does not
 time out and it does not move with the board, so glancing away never loses it.
 While pathing, N
 ghost tracks preview live, coloured by net; once every target is picked the
-ghosts are the whole pad-to-pad routes that would commit. Refuses (spine
-tinted red, reason shown) a spine segment shorter than the widest track offset
-and any pair of nets whose breakout legs would cross. All N traces land in ONE
-undo step. See the "Bus tool" section above for
+ghosts are the whole pad-to-pad routes that would commit. A spine segment
+shorter than the widest track offset, or a pair of nets whose breakout legs
+cross, tints the spine and is held in the status line — and still lands, named,
+so it can be corrected (only a bus with no geometry is refused). All N traces
+land in ONE undo step. See the "Bus tool" section above for
 `minerva_pcb_route_bus_direct`, the MCP parity tool calling the exact same
 commit path.
 

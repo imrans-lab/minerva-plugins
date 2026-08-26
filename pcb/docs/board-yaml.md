@@ -161,7 +161,9 @@ not more entries in it.
 
 The canonical ↔ KiCad mapping has one source of truth per language —
 `worker/agent_router/layers.py`, mirrored value-for-value by
-`ui/model/pcb_layer_stack.gd` — and the two directions are deliberately
+`ui/model/pcb_layer_stack.gd` (one of the GD-side library modules; see
+`model-layering.md` for how those modules, `PCBData`'s mutators and the
+surfaces divide the work) — and the two directions are deliberately
 asymmetric:
 
 - **Write / export** (`canon_to_kicad`) **fails closed**: an empty or unknown
