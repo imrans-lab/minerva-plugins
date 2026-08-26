@@ -159,6 +159,7 @@ func _init() -> void:
 	_test_unreachable_targets_still_name_the_layer_to_start_on()
 	_test_an_open_lane_commits_as_a_free_end()
 	await _test_the_open_verb_matches_the_open_gesture()
+	await _test_dry_run_reads_the_bus_and_writes_nothing()
 	_test_every_lane_wears_its_net()
 	_test_lane_order_is_a_visible_choice()
 	_test_a_neighbouring_pad_outranks_the_glyph()
@@ -3641,3 +3642,97 @@ func _test_an_all_open_station_bus_lands_deliberately() -> void:
 	check("…and the status sentence names them",
 			_last(msgs).contains("3 lane") and _last(msgs).contains("NA, NB, NC"), _last(msgs))
 	canvas.free()
+
+
+# ── 15c. dry_run: READ THE BUS, WRITE NOTHING ────────────────────────────────
+#
+# ORACLE: the board's own serialization (JSON of to_board_dict), history.size()
+# and change_journal.size() before and after the dry run — byte-identical — and
+# the COMMITTING call's reply on the very same inputs and board, which the dry
+# run's reply must equal once the ids the commit legitimately minted (trace_ids,
+# via_ids, the per-net trace_id/via_id/free_end) and the two mode-specific notes
+# are set aside. Two buses, so both halves of the reply are exercised: a station
+# bus with an open lane (vias, two runs per net, a free end) and a reversed-order
+# bus that crosses (findings, note, clean_order).
+
+## A reply with everything the commit minted, and the mode words, removed.
+func _bus_reply_sans_ids(reply: Dictionary) -> Dictionary:
+	var out: Dictionary = reply.duplicate(true)
+	for key in ["trace_ids", "via_ids", "dry_run", "undo_note", "dry_run_note"]:
+		out.erase(key)
+	if out.has("note"):
+		out["note"] = str(out["note"]).replace("would land anyway", "landed anyway")
+	var detail: Array = out.get("nets_detail", []) if out.get("nets_detail", []) is Array else []
+	for raw in detail:
+		var entry: Dictionary = raw
+		entry.erase("via_id")
+		entry.erase("free_end")
+		for run in (entry.get("traces", []) as Array):
+			(run as Dictionary).erase("trace_id")
+	return out
+
+
+func _test_dry_run_reads_the_bus_and_writes_nothing() -> void:
+	print("\n-- (15c) minerva_pcb_route_bus_direct dry_run: the commit's reply, and no write --")
+	var cases: Array = [
+		{"label": "station bus with an open lane", "args": {
+			"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+			"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["", "V2.1", "V3.1"],
+			"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 70.0, "y_mm": 20.0},
+				{"x_mm": 120.0, "y_mm": 20.0}],
+			"layer": "top", "via_station_index": 1, "via_station_layer": "bottom"}},
+		{"label": "reversed pick order (crosses, with findings)", "args": {
+			"editor_name": "PCB1", "nets": ["NC", "NB", "NA"],
+			"sources": ["U3.1", "U2.1", "U1.1"], "targets": ["V3.1", "V2.1", "V1.1"],
+			"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+			"layer": "top"}},
+	]
+	for case in cases:
+		var label: String = str(case["label"])
+		var args: Dictionary = case["args"]
+		var data := PCBData.new()
+		data.from_board_dict(_board())
+		var host := StubMcpHost.new()
+		host.data = data
+		var board_before: String = JSON.stringify(data.to_board_dict())
+		var history_before: int = data.history.size()
+		var journal_before: int = data.change_journal.size()
+
+		var dry_args: Dictionary = args.duplicate(true)
+		dry_args["dry_run"] = true
+		var dry: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", dry_args)
+		check("%s: the dry run succeeds and says it is one" % label,
+				bool(dry.get("success", false)) and bool(dry.get("dry_run", false))
+					and dry.has("dry_run_note") and not dry.has("undo_note"), str(dry))
+		check("%s: the dry run minted no ids" % label,
+				(dry.get("trace_ids", []) as Array).is_empty() and (dry.get("via_ids", []) as Array).is_empty(),
+				str(dry))
+		check("%s: the board, its history and its journal are byte-identical after the dry run" % label,
+				JSON.stringify(data.to_board_dict()) == board_before
+					and data.history.size() == history_before
+					and data.change_journal.size() == journal_before,
+				"history %d -> %d, journal %d -> %d" % [history_before, data.history.size(),
+					journal_before, data.change_journal.size()])
+
+		var committed: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", args)
+		check("%s: the same call without dry_run commits" % label,
+				bool(committed.get("success", false)) and not bool(committed.get("dry_run", true))
+					and committed.has("undo_note")
+					and not (committed.get("trace_ids", []) as Array).is_empty()
+					and data.history.size() == history_before + 1, str(committed))
+		var dry_norm: String = JSON.stringify(_bus_reply_sans_ids(dry))
+		var commit_norm: String = JSON.stringify(_bus_reply_sans_ids(committed))
+		check("%s: minus the minted ids and the mode notes, the two replies are identical" % label,
+				dry_norm == commit_norm, "\n    dry:    %s\n    commit: %s" % [dry_norm, commit_norm])
+		# The dry run's per-net account carries the geometry but no board ids.
+		var detail: Array = dry.get("nets_detail", []) if dry.get("nets_detail", []) is Array else []
+		var idless := detail.size() == 3
+		for raw in detail:
+			var entry: Dictionary = raw
+			if str(entry.get("via_id", "x")) != "" or (entry.has("free_end") and entry.get("free_end") != null):
+				idless = false
+			for run in (entry.get("traces", []) as Array):
+				if str((run as Dictionary).get("trace_id", "x")) != "" \
+						or ((run as Dictionary).get("points", []) as Array).size() < 2:
+					idless = false
+		check("%s: the dry run's nets_detail has every polyline and no id" % label, idless, str(detail))

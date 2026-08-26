@@ -845,6 +845,16 @@ MCP bus verbs — not independently maintained copies of the same math. A plan
 with no targets is the canvas's live corridor PREVIEW only; `bus_commit_plan`
 and `bus_propose_plan` both refuse it.
 
+**Read before you write: `dry_run: true`.** `minerva_pcb_route_bus_direct`
+with `dry_run: true` runs the same plan through the same gates and returns the
+identical reply — `findings`, `note`, `open_nets`, `clean_order`, `nets_detail`
+with every lane's offset and polyline — with `trace_ids`/`via_ids` empty,
+`dry_run: true` and a `dry_run_note` in place of `undo_note`, and writes
+nothing: the board, its history and its change journal are untouched
+(`panel_tools.bus_dry_run_plan`). An agent reads a bus's findings this way
+instead of landing and deleting copper; when a reviewable on-screen ghost is
+wanted, `minerva_pcb_workspace_propose_bus` is the call.
+
 **The reply carries what the next verb needs.** Rule for every copper-creating
 verb: return the coordinates and ids the NEXT call needs, never ids alone. Both
 bus verbs reply with `nets_detail` (built by `panel_tools.bus_nets_detail`), one

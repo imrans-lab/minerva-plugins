@@ -9650,6 +9650,29 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 		"clean_order": PackedStringArray(plan.get("clean_order", PackedStringArray()))}
 
 
+## DRY RUN twin of bus_commit_plan: the SAME gates (buildable and complete, a
+## coherent station) and the SAME reply shape, with nothing written — no trace,
+## no via, no history step, no journal row. trace_ids/via_ids are empty and
+## nets_detail carries the geometry with empty ids and a null free_end, exactly
+## as a proposal's does. Lets an agent read a bus's findings, lane offsets and
+## polylines before deciding to commit, propose a ghost, or redraw the spine.
+static func bus_dry_run_plan(plan: Dictionary) -> Dictionary:
+	if not bool(plan.get("ok", false)) and not bool(plan.get("buildable", false)):
+		return {"ok": false, "error": str(plan.get("error", "Bus was refused.")), "findings": []}
+	if not bool(plan.get("complete", false)):
+		return {"ok": false, "error": _BUS_INCOMPLETE_PLAN, "findings": []}
+	var station: Dictionary = _bus_station_runs(plan)
+	if not str(station["error"]).is_empty():
+		return {"ok": false, "error": str(station["error"]), "findings": []}
+	return {"ok": true, "error": "", "dry_run": true, "trace_ids": [], "via_ids": [],
+		"nets": plan.get("nets", []), "widths": plan.get("widths", []),
+		"layer": str(plan.get("layer", "")),
+		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", []),
+		"open_nets": (plan.get("open_nets", []) as Array).duplicate(),
+		"nets_detail": bus_nets_detail(plan, station, [], []),
+		"clean_order": PackedStringArray(plan.get("clean_order", PackedStringArray()))}
+
+
 ## The per-net account of a bus, for the two bus verbs' replies: everything the
 ## NEXT verb needs, so an agent never has to export the board and hunt for the
 ## polyline that ends at the spine. One entry per net, in bus order:
@@ -10494,12 +10517,16 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	if not bool(plan.get("buildable", false)):
 		return _err(str(plan.get("error", "Bus was refused.")))
 
-	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d nets)" % (plan.get("nets", []) as Array).size())
+	# dry_run: the same plan, the same gates, the same reply — and no write.
+	var dry_run: bool = bool(args.get("dry_run", false))
+	var result: Dictionary = bus_dry_run_plan(plan) if dry_run \
+		else bus_commit_plan(data, plan, "Add bus (%d nets)" % (plan.get("nets", []) as Array).size())
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "Bus was refused by the board model.")))
 
 	var findings: Array = result.get("findings", []) if result.get("findings", []) is Array else []
 	var reply: Dictionary = {
+		"dry_run": dry_run,
 		"trace_ids": result.get("trace_ids", []),
 		"via_ids": result.get("via_ids", []),
 		"nets": result.get("nets", []),
@@ -10509,11 +10536,15 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 		"findings": findings,
 		"open_nets": result.get("open_nets", []),
 		"nets_detail": result.get("nets_detail", []),
-		"undo_note": "one board history step: Ctrl+Z (or PCBData.undo) removes all traces and vias this call created.",
 	}
+	if dry_run:
+		reply["dry_run_note"] = "nothing was written: no trace, via, history step or journal row. Call again without dry_run to commit, or minerva_pcb_workspace_propose_bus for a reviewable ghost."
+	else:
+		reply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes all traces and vias this call created."
 	if not findings.is_empty():
-		reply["note"] = "%d bus rule(s) broke and the copper landed anyway so it can be corrected: %s. Fix it in place (move a pad, redraw the spine, minerva_pcb_delete_traces) or undo the whole step." \
-			% [findings.size(), bus_findings_sentence(findings)]
+		var landing: String = "would land anyway" if dry_run else "landed anyway"
+		reply["note"] = "%d bus rule(s) broke and the copper %s so it can be corrected: %s. Fix it in place (move a pad, redraw the spine, minerva_pcb_delete_traces) or undo the whole step." \
+			% [findings.size(), landing, bus_findings_sentence(findings)]
 		var advice: String = PcbBusLabels.clean_order_sentence(
 			PackedStringArray(result.get("clean_order", PackedStringArray())))
 		if not advice.is_empty():
