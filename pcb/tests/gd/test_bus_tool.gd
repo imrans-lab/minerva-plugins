@@ -151,6 +151,7 @@ func _init() -> void:
 	_test_a_station_via_names_the_layer_it_lands_on()
 	_test_a_station_that_walls_a_pad_off_is_named()
 	await _test_a_crowding_station_still_lands()
+	await _test_the_journal_records_what_stood_at_commit()
 	_test_unreachable_targets_still_name_the_layer_to_start_on()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -2753,6 +2754,94 @@ func _test_a_crowding_station_still_lands() -> void:
 	check("…and the reply names the walled-off pad, in the note too",
 			named and str(result.get("note", "")).contains("P1.1"),
 			str(result.get("note", "")))
+
+
+# ── 13g. THE JOURNAL SAYS WHAT STOOD AT COMMIT ────────────────────────────────
+#
+# The model journals one add_trace row per trace it creates; those rows say
+# nothing about the bus they belong to. bus_commit_plan appends ONE more row
+# per bus carrying the finding types with counts, the copper they name, and
+# the ids created — so the journal can say afterwards which findings stood
+# when the copper landed.
+#
+# ORACLES: the newest row read through the verb's own accessor (and the verb),
+# against section 13's known finding set on the seeded LGA board (four
+# foreign-copper findings naming T1.3 and T1.1 among them) and against the
+# clean section-1 bus (a row with zero findings). The add_trace rows are still
+# there, one per trace, ahead of it.
+
+## The newest journal row, as the verb reads it.
+func _newest_journal_row(data) -> Dictionary:
+	var rows: Array = data.get_change_journal()
+	return rows[rows.size() - 1] if not rows.is_empty() else {}
+
+
+func _test_the_journal_records_what_stood_at_commit() -> void:
+	print("\n-- (13g) a bus commit journals its findings and ids in one row --")
+	var rig := _lga_rig_data()
+	var data = rig[0]
+	var before: int = data.change_journal.size()
+	var plan: Dictionary = _lga_plan(data, "top")
+	var result: Dictionary = PanelToolsScript.bus_commit_plan(data, plan, "Add bus (2 nets)")
+	check("the bad-but-buildable bus committed", bool(result.get("ok", false)),
+			str(result.get("error", "")))
+	check("the journal grew by the two add_trace rows plus ONE bus row",
+			data.change_journal.size() == before + 3,
+			"grew by %d" % (data.change_journal.size() - before))
+	var row := _newest_journal_row(data)
+	var details: Dictionary = row.get("details", {})
+	check("the newest row is the bus row", str(row.get("action", "")) == "add_bus", str(row))
+	check("…counting the four foreign-copper findings and nothing else",
+			details.get("finding_types", {}) == {FOREIGN: 4}
+				and int(details.get("finding_count", -1)) == 4,
+			str(details.get("finding_types", {})))
+	var named: Array = []
+	for raw in details.get("findings", []) as Array:
+		named.append(str((raw as Dictionary).get("foreign_ref", "")))
+	check("…naming the two pads the legs ran through",
+			"T1.3" in named and "T1.1" in named, str(named))
+	check("…and carrying the nets, the layer and the two trace ids it created",
+			(details.get("nets", []) as Array) == ["NA", "NB"]
+				and str(details.get("layer", "")) == "top"
+				and (details.get("trace_ids", []) as Array) == (result.get("trace_ids", []) as Array)
+				and (details.get("trace_ids", []) as Array).size() == 2
+				and (details.get("via_ids", []) as Array).is_empty(),
+			str(details))
+	var rows: Array = data.get_change_journal()
+	check("the add_trace rows before it keep their shape",
+			rows.size() >= 3
+				and str((rows[rows.size() - 2] as Dictionary).get("action", "")) == "add_trace"
+				and str((rows[rows.size() - 3] as Dictionary).get("action", "")) == "add_trace",
+			str(rows.slice(maxi(0, rows.size() - 3))))
+	check("one undo still removes the bus", data.undo() and _serialized_traces(data).size() == 1)
+
+	# THE CLEAN BUS: the row exists with zero findings, so its presence is a
+	# record, not a verdict. Read through the MCP verb this time.
+	var clean_data := PCBData.new()
+	clean_data.from_board_dict(_board())
+	var host := StubMcpHost.new()
+	host.data = clean_data
+	var landed: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB", "NC"],
+		"sources": ["U1.1", "U2.1", "U3.1"], "targets": ["V1.1", "V2.1", "V3.1"],
+		"points": [{"x_mm": PATH_1.x, "y_mm": PATH_1.y}, {"x_mm": PATH_2.x, "y_mm": PATH_2.y}],
+		"layer": "top",
+	})
+	check("the clean bus landed with no findings",
+			bool(landed.get("success", false)) and (landed.get("findings", []) as Array).is_empty(),
+			str(landed))
+	var read: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_get_change_journal", {
+		"editor_name": "PCB1", "limit": 1})
+	var entries: Array = read.get("entries", []) if read.get("entries", []) is Array else []
+	var clean_row: Dictionary = entries[0] if not entries.is_empty() else {}
+	var clean_details: Dictionary = clean_row.get("details", {})
+	check("the verb's newest entry is the bus row, with zero findings and three trace ids",
+			str(clean_row.get("action", "")) == "add_bus"
+				and int(clean_details.get("finding_count", -1)) == 0
+				and (clean_details.get("finding_types", {}) as Dictionary).is_empty()
+				and (clean_details.get("trace_ids", []) as Array).size() == 3
+				and (clean_details.get("nets", []) as Array) == ["NA", "NB", "NC"],
+			str(clean_row))
 
 
 # ── 13d. THE ONE START-LAYER NOTE LEFT ────────────────────────────────────────

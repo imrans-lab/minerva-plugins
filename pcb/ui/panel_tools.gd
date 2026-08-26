@@ -9377,9 +9377,47 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 			return {"ok": false, "error": "The board model refused the via station on net %s." % str(nets[i]), "findings": []}
 		created_via_ids.append(via_id)
 	data.save_to_history(history_label)
+	# ONE journal row for the bus as a whole, after the per-trace add_trace rows
+	# the model wrote: what stood at commit — the findings the author was shown
+	# and landed anyway, the copper they name, and the ids this call created —
+	# so the journal can answer "was that short reported?" after the fact.
+	data.record_change("add_bus", _bus_journal_details(plan, created_ids, created_via_ids,
+		layer, str(station["layer"])))
 	return {"ok": true, "error": "", "trace_ids": created_ids, "via_ids": created_via_ids,
 		"nets": nets, "widths": widths, "layer": layer,
 		"via_station_layer": str(station["layer"]), "findings": plan.get("findings", [])}
+
+
+## The `details` of a bus commit's journal row: {nets, layer, via_station_layer,
+## trace_ids, via_ids, finding_count, finding_types: {type: count}, findings:
+## [{type, nets, layer, foreign_ref?, pad_ref?}]}. Findings are summarised to
+## their machine-readable keys rather than carried whole — the prose is what the
+## status line and verb reply already showed; the journal keeps the facts.
+static func _bus_journal_details(plan: Dictionary, trace_ids: Array, via_ids: Array,
+		layer: String, via_station_layer: String) -> Dictionary:
+	var findings: Array = plan.get("findings", []) if plan.get("findings", []) is Array else []
+	var types: Dictionary = {}
+	var summary: Array = []
+	for raw in findings:
+		var f: Dictionary = raw
+		var type := str(f.get("type", ""))
+		types[type] = int(types.get(type, 0)) + 1
+		var row: Dictionary = {"type": type, "nets": f.get("nets", []),
+			"layer": str(f.get("layer", ""))}
+		for key in ["foreign_ref", "foreign_net", "pad_ref"]:
+			if f.has(key):
+				row[key] = f[key]
+		summary.append(row)
+	return {
+		"nets": (plan.get("nets", []) as Array).duplicate(),
+		"layer": layer,
+		"via_station_layer": via_station_layer,
+		"trace_ids": trace_ids.duplicate(),
+		"via_ids": via_ids.duplicate(),
+		"finding_count": findings.size(),
+		"finding_types": types,
+		"findings": summary,
+	}
 
 
 ## GHOST twin of bus_commit_plan: the SAME plan and the SAME gate (buildable
