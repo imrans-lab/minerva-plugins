@@ -1097,7 +1097,29 @@ func _test_trace_end_anchor() -> void:
 		"start": {"trace_id": str(stub2.id), "end": "end"}, "points": [[50.0, 30.0]]})
 	check("(h) …and the verb refuses it as trace_locked",
 			str(locked_res.get("error", "")) == "trace_locked", str(locked_res))
+	# THE MODEL refuses a locked trace on its own, writing no row.
+	j0 = data.change_journal.size()
+	var model_locked: String = data.extend_trace(str(stub2.id), "end", PackedVector2Array([Vector2(50.0, 30.0)]))
+	check("(h) extend_trace itself refuses a locked trace, recognisably, writing no row",
+			data.is_locked_refusal(model_locked) and data.change_journal.size() == j0
+				and stub2.waypoints.size() == 2, model_locked)
 	stub2.locked = false
+	# (j) AN END THAT STOPPED BEING FREE is refused at the write: the pick said
+	# free, then a same-net trace landed on the end before the extension.
+	var picked_free: Dictionary = data.free_trace_end_at(Vector2(42.3, 30.0), data.TRACE_SNAP_MM)
+	check("(j) fixture: the stub's end reads free before the joiner lands",
+			str(picked_free.get("end", "")) == "end")
+	var joiner = data.create_trace_entity("VCC", "top", [Vector2(42.0, 30.0), Vector2(42.0, 25.0)])
+	j0 = data.change_journal.size()
+	var model_joined: String = data.extend_trace(str(stub2.id), "end", PackedVector2Array([Vector2(50.0, 30.0)]))
+	check("(j) extend_trace refuses the now-joined end, recognisably, writing no row",
+			data.is_joined_end_refusal(model_joined) and data.change_journal.size() == j0
+				and stub2.waypoints.size() == 2, model_joined)
+	var joined_res: Dictionary = PanelTools._add_trace(rig[2], {
+		"start": {"trace_id": str(stub2.id), "end": "end"}, "points": [[50.0, 30.0]]})
+	check("(j) …and the verb names it trace_end_not_free",
+			str(joined_res.get("error", "")) == "trace_end_not_free", str(joined_res))
+	data.remove_trace(str(joiner.id))   # the stub's end is free again for (i)
 	# (i) A LOOP IS REFUSED: starting from one free end and finishing on the
 	# same trace's other end would close it — refused by name, nothing written.
 	canvas = rig[0]

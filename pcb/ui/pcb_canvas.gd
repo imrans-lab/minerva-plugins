@@ -6254,6 +6254,8 @@ func _delete_picked_entity(hit_kind: String, hit_id: String, verb: String) -> bo
 ## Cut the trace at its interior vertex nearest `world_pos` (within
 ## TRACE_PAD_SNAP_MM): the model's cut_trace, then ONE history step. A miss or a
 ## model refusal is a named message on the trace channel, and changes nothing.
+## The new end is a free end unless something already joins it (the verb's
+## reply says which with free_end).
 func _cut_trace_here(trace_id: String, world_pos: Vector2) -> void:
 	if not data or trace_id.is_empty() or _unit_locked(KIND_TRACE, trace_id):
 		return

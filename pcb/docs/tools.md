@@ -556,7 +556,8 @@ copper a committed route candidate owns retires that commit in the same step
 
 **Redoing a bad exit** — a bus leg that landed on the wrong pad, a hand-routed
 run one bend too far: select the trace → right-click at the last good bend →
-**Cut here** → arm Draw ▸ Trace and click the new free end → draw the leg
+**Cut here** → arm Draw ▸ Trace and click the new end — a free end unless
+something already joins it (`free_end` in the verb reply) → draw the leg
 again. The same three steps from an agent: `minerva_pcb_cut_trace`, then
 `minerva_pcb_add_trace` with `start: {trace_id, end: "end"}`.
 
@@ -991,8 +992,9 @@ on one layer.
 **Cut here** (right-click a trace) — drops everything after the interior
 vertex nearest the click (within the pad snap); greyed beside an end vertex,
 since cutting there would be a delete or a no-op. One undo step. The new end is
-a free end, so the recipe for a bad exit is: right-click at the last good bend
-→ Cut here → Draw ▸ Trace from that end. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
+a free end unless something already joins it (`free_end` in the verb reply),
+so the recipe for a bad exit is: right-click at the last good bend → Cut here
+→ Draw ▸ Trace from that end. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
 freely. Drawn at the width set in the sidebar's trace-width box, on the
 toolbar's **working layer** — the F.Cu / B.Cu chooser. That chooser sets where
 copper goes and nothing else: it never changes what the canvas shows, and

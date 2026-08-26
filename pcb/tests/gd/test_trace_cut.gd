@@ -314,6 +314,12 @@ func _run_locked_and_committed_copper() -> void:
 	var refused: Dictionary = PanelTools._cut_trace(_StubHost.new(data), {"trace_id": id, "at_index": 2})
 	check("the verb refuses a locked trace as trace_locked",
 		str(refused.get("error", "")) == "trace_locked" and _points(data, id).size() == 5, str(refused))
+	# THE MODEL refuses on its own: a direct caller gets the same "no".
+	var j_locked: int = data.change_journal.size()
+	var model_said: String = data.cut_trace(id, 2)
+	check("cut_trace itself refuses a locked trace, recognisably, writing no row",
+		data.is_locked_refusal(model_said) and _points(data, id).size() == 5
+			and data.change_journal.size() == j_locked, model_said)
 	data.get_trace(id).locked = false
 
 	# COMMITTED COPPER, through the verb: the candidate's commit lands the trace,

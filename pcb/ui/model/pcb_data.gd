@@ -974,6 +974,20 @@ func set_trace_waypoints(trace_id: String, points) -> void:
 ## read this ONE number so an agent's point reaches exactly as far as a click.
 const TRACE_SNAP_MM := 1.27
 
+## The two refusals every trace mutator below raises ITSELF, before touching a
+## waypoint, so a direct model caller is held to the same rule the surfaces
+## show earlier: a locked trace, and an end that is no longer free. The
+## surfaces recognise them with is_locked_refusal / is_joined_end_refusal and
+## map them to their own error names (trace_locked, trace_end_not_free).
+const _LOCKED_REFUSAL_MARK := "is locked — unlock it first"
+const _JOINED_END_REFUSAL_MARK := "already touches a pad, a via or same-net copper"
+
+static func is_locked_refusal(refusal: String) -> bool:
+	return refusal.contains(_LOCKED_REFUSAL_MARK)
+
+static func is_joined_end_refusal(refusal: String) -> bool:
+	return refusal.contains(_JOINED_END_REFUSAL_MARK)
+
 ## The two names a trace END goes by, in extend_trace and free_trace_end_at.
 const TRACE_END_START := "start"
 const TRACE_END_END := "end"
@@ -1075,10 +1089,10 @@ func nearest_interior_vertex(trace_id: String, position: Vector2, tol: float) ->
 ## joins it (trace_end_is_joined). Returns "" on success or the refusal in the
 ## model's words; a refusal changes nothing.
 ##
-## Refused BY NAME rather than reinterpreted: an index at either end would be a
-## whole-trace delete (index 0) or a no-op (the last), and both are answers the
-## caller has to choose deliberately, not fall into; a 2-point trace has no
-## interior to cut at.
+## Refused BY NAME rather than reinterpreted: a LOCKED trace; an index at
+## either end, which would be a whole-trace delete (index 0) or a no-op (the
+## last) — both answers the caller has to choose deliberately, not fall into;
+## a 2-point trace, which has no interior to cut at.
 ##
 ## Journalled as ONE cut_trace row; history is NOT snapshotted here (the house
 ## rule: the caller owns the undo step).
@@ -1086,6 +1100,8 @@ func cut_trace(trace_id: String, at_index: int) -> String:
 	var trace = get_trace(trace_id)
 	if trace == null:
 		return "No such trace \"%s\"." % trace_id
+	if bool(trace.locked):
+		return "Trace \"%s\" %s." % [trace_id, _LOCKED_REFUSAL_MARK]
 	var count: int = trace.waypoints.size()
 	if count < 3:
 		return "Trace \"%s\" has %d points — nothing between its ends to cut at." % [trace_id, count]
@@ -1113,8 +1129,9 @@ func cut_trace(trace_id: String, at_index: int) -> String:
 ## as is any point repeating its predecessor). Appended after the last point
 ## for TRACE_END_END, prepended in reverse before the first for TRACE_END_START.
 ## Returns "" on success or the refusal in the model's words; a refusal changes
-## nothing. The trace keeps its id, net, layer and width — a polyline has one
-## of each.
+## nothing. A LOCKED trace and an end that is JOINED at the moment of the call
+## are refused here, whatever a pick said earlier. The trace keeps its id, net,
+## layer and width — a polyline has one of each.
 ##
 ## Journalled as ONE extend_trace row; history is NOT snapshotted here (the house
 ## rule: the caller owns the undo step).
@@ -1124,8 +1141,15 @@ func extend_trace(trace_id: String, end: String, points: PackedVector2Array) -> 
 		return "No such trace \"%s\"." % trace_id
 	if end != TRACE_END_START and end != TRACE_END_END:
 		return "A trace end is \"%s\" or \"%s\", not \"%s\"." % [TRACE_END_START, TRACE_END_END, end]
+	if bool(trace.locked):
+		return "Trace \"%s\" %s." % [trace_id, _LOCKED_REFUSAL_MARK]
 	if trace.waypoints.size() < 2:
 		return "Trace \"%s\" has no run to extend." % trace_id
+	# Re-asked at mutation time, not trusted from the pick: copper can join
+	# the end between the click that chose it and the commit.
+	if trace_end_is_joined(trace_id, end):
+		return "The %s end of trace \"%s\" %s — a joined end is not somewhere to continue from." % [
+			end, trace_id, _JOINED_END_REFUSAL_MARK]
 	var anchor: Vector2 = trace.waypoints[0] if end == TRACE_END_START \
 		else trace.waypoints[trace.waypoints.size() - 1]
 	var added := PackedVector2Array()

@@ -4135,7 +4135,12 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 		var grown_id: String = str((grow["trace"]).id)
 		var error: String = str(data.extend_trace(grown_id, str(grow["which"]), run))
 		if not error.is_empty():
-			return {"success": false, "error": "trace_not_extendable", "note": error}
+			var name := "trace_not_extendable"
+			if data.is_locked_refusal(error):
+				name = "trace_locked"
+			elif data.is_joined_end_refusal(error):
+				name = "trace_end_not_free"
+			return {"success": false, "error": name, "note": error}
 		var reopened: Array = _retire_commits_owning_trace(host, data, grown_id)
 		data.save_to_history("Extend trace")
 		var grown = data.get_trace(grown_id)
@@ -4225,7 +4230,9 @@ static func _cut_trace(host, args: Dictionary) -> Dictionary:
 	var count_before: int = trace.waypoints.size()
 	var error: String = str(data.cut_trace(trace_id, at_index))
 	if not error.is_empty():
-		return {"success": false, "error": "trace_not_cuttable", "note": error}
+		return {"success": false,
+			"error": "trace_locked" if data.is_locked_refusal(error) else "trace_not_cuttable",
+			"note": error}
 	# Copper a COMMITTED candidate owns has just changed shape under it: retire
 	# that commit inside this same history step, as _delete_traces does.
 	var reopened: Array = _retire_commits_owning_trace(host, data, trace_id)
