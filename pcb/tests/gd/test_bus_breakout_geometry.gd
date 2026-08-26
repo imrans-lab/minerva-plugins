@@ -23,6 +23,13 @@ extends SceneTree
 ## departure stations or ordering rules; it fails on copper that crosses, or
 ## merely crowds, however the geometry arrived at it.
 ##
+## TWO CLASSES OF "NO" are pinned separately below. check_refused is for the
+## UNBUILDABLE set — nothing could be drawn, so nothing comes back.
+## check_bad_but_buildable is for the rest: the rule broke, the geometry came
+## back anyway, and the caller is expected to land it and correct it. A change
+## that collapsed the second class into the first would still produce the right
+## words, and fails on the missing polylines.
+##
 ## Run via pcb/scripts/run-gd-tests.sh <minerva-checkout>.
 
 const BusGeom := preload("res://../../minerva-plugins/pcb/ui/model/pcb_bus_geometry.gd")
@@ -98,12 +105,15 @@ func check_points(desc: String, got: PackedVector2Array, want: Array) -> void:
 		printerr("  FAIL: %s\n    want: %s\n    got:  %s" % [desc, str(want), str(got)])
 
 
-## Assert the call was refused, and that the refusal SAYS what is wrong: every
-## fragment must appear in the message. Naming the offending nets is half the
-## contract, so a refusal that fires with the wrong story still fails here.
+## Assert the call was UNBUILDABLE: no geometry could exist, so none came back,
+## and the message SAYS what is wrong — every fragment must appear in it. Naming
+## the offending nets is half the contract, so a refusal that fires with the
+## wrong story still fails here.
 func check_refused(desc: String, result: Dictionary, fragments: Array) -> void:
 	var message := str(result.get("error", ""))
-	var ok := not bool(result.get("ok", true)) and not result.has("polylines")
+	var ok := not bool(result.get("ok", true)) \
+		and not bool(result.get("buildable", true)) \
+		and not result.has("polylines")
 	for fragment in fragments:
 		if not message.contains(str(fragment)):
 			ok = false
@@ -112,7 +122,43 @@ func check_refused(desc: String, result: Dictionary, fragments: Array) -> void:
 		print("  PASS: %s — \"%s\"" % [desc, message])
 	else:
 		_fail += 1
-		printerr("  FAIL: %s\n    got: ok=%s error=\"%s\"" % [desc, str(result.get("ok")), message])
+		printerr("  FAIL: %s\n    got: ok=%s buildable=%s error=\"%s\"" % [
+			desc, str(result.get("ok")), str(result.get("buildable")), message])
+
+
+## Assert the call was BAD BUT BUILDABLE: `ok` false because a rule broke, but
+## the geometry came back anyway — one usable polyline per net — with the broken
+## rules itemised in `findings` and `error` carrying the first one's words.
+##
+## The distinction is the whole point of the two helpers: a caller cannot
+## correct copper that was never drawn, so a rule that CAN be drawn through must
+## hand back what it drew. A regression that turned one of these back into a
+## bare refusal would still satisfy the fragments and fails here on the geometry.
+func check_bad_but_buildable(desc: String, result: Dictionary, routes: int,
+		fragments: Array) -> void:
+	var message := str(result.get("error", ""))
+	var polylines: Array = result.get("polylines", [])
+	var findings: Array = result.get("findings", [])
+	var ok := not bool(result.get("ok", true)) \
+		and bool(result.get("buildable", false)) \
+		and polylines.size() == routes \
+		and not findings.is_empty() \
+		and str((findings[0] as Dictionary).get("message", "")) == message
+	for poly in polylines:
+		if (poly as PackedVector2Array).size() < 2:
+			ok = false
+	for fragment in fragments:
+		if not message.contains(str(fragment)):
+			ok = false
+	if ok:
+		_pass += 1
+		print("  PASS: %s — %d route(s), %d finding(s), \"%s\"" % [
+			desc, polylines.size(), findings.size(), message])
+	else:
+		_fail += 1
+		printerr("  FAIL: %s\n    got: ok=%s buildable=%s routes=%d findings=%d error=\"%s\"" % [
+			desc, str(result.get("ok")), str(result.get("buildable")),
+			polylines.size(), findings.size(), message])
 
 
 func _pv(arr: Array) -> PackedVector2Array:
@@ -383,48 +429,50 @@ func _routes_touch(a: PackedVector2Array, b: PackedVector2Array) -> bool:
 
 
 func _run_crossing_refusals() -> void:
-	print("-- crossings are refused by name, never untangled --")
+	print("-- crossings are named and drawn, never untangled --")
 	# TWO NETS, PADS SWAPPED. Lanes are [-0.25, +0.25] (0.2mm tracks at 0.3mm
 	# clearance, pitch 0.5). A is picked first so it rides the -0.25 lane, but
 	# A's pad is BELOW the bundle at y +5 and B's is ABOVE at y -5. A has to
 	# climb across B's lane and B has to drop across A's, at whichever station
 	# each leaves: whoever goes first is crossed by the other. There is no
-	# ordering that avoids it, so the only honest answer is a refusal.
-	check_refused("swapped source pads refuse, naming both nets",
+	# ordering that avoids it, so the copper crosses and the finding says so —
+	# it is drawn anyway, because a crossing that was never drawn cannot be
+	# corrected.
+	check_bad_but_buildable("swapped source pads are named, and still drawn",
 		BusGeom.bundle_routes(
 			_pv([Vector2(0, 0), Vector2(100, 0)]),
 			PackedStringArray(["SDA", "SCL"]),
 			_pv([Vector2(-10, 5), Vector2(-10, -5)]),
 			_pv([Vector2(110, -5), Vector2(110, 5)]),
 			[0.2, 0.2], 0.3),
-		["\"SDA\"", "\"SCL\"", "source"])
+		2, ["\"SDA\"", "\"SCL\"", "source"])
 
 	# THE SAME PADS AS _run_straight_bundle, PICKED IN THE OPPOSITE ORDER. Pick
 	# order decides track position and is never re-sorted, so reversing it puts
 	# every net on the far side of the bundle from where its pads are. A tool
 	# that quietly re-sorted to make a bus work would return the straight case's
-	# bundle again here; this one refuses.
-	check_refused("reversing the pick order refuses instead of re-sorting",
+	# bundle again here; this one crosses, and says so.
+	check_bad_but_buildable("reversing the pick order is reported, not re-sorted",
 		BusGeom.bundle_routes(
 			_pv([Vector2(0, 0), Vector2(100, 0)]),
 			PackedStringArray(["C", "B", "A"]),
 			_pv([Vector2(-10, -6), Vector2(-10, -8), Vector2(-10, -10)]),
 			_pv([Vector2(110, 24), Vector2(110, 22), Vector2(110, 20)]),
 			[0.2, 0.2, 0.2], 0.3),
-		["\"C\"", "\"B\"", "source"])
+		3, ["\"C\"", "\"B\"", "source"])
 
 	# CROSSING AT THE FAR END ONLY. Same source pads as the bend case, but the
 	# target pads run the other way along the board edge: their perpendicular
 	# coordinates are 5, 3, 1 against lanes -0.6, +0.2, +0.6. The source end is
-	# perfectly routable; the refusal must name the TARGET end.
-	check_refused("a crossing at the target end names that end",
+	# perfectly routable; the finding must name the TARGET end.
+	check_bad_but_buildable("a crossing at the target end names that end",
 		BusGeom.bundle_routes(
 			_pv([Vector2(0, 0), Vector2(30, 0), Vector2(30, 30)]),
 			PackedStringArray(["A", "B", "C"]),
 			_pv([Vector2(-5, -4), Vector2(-5, -3), Vector2(-5, -2)]),
 			_pv([Vector2(25, 35), Vector2(27, 35), Vector2(29, 35)]),
 			[1.0, 0.2, 0.2], 0.2),
-		["\"A\"", "\"B\"", "target"])
+		3, ["\"A\"", "\"B\"", "target"])
 
 
 ## THE METRIC GAP between two whole routes, in mm — the independent oracle for
@@ -451,6 +499,69 @@ func _min_gap(a: PackedVector2Array, b: PackedVector2Array) -> float:
 	return best
 
 
+## THE COPPER A BAD BUS HANDS BACK, checked against oracles that know nothing
+## about how it was built.
+##
+## The case is the crowded one above: spine (0,0)->(100,0), SDA from (-8,-2.20)
+## to (110,20), SCL from (-6,-1.95) to (110,22), 0.2mm tracks at 0.3mm
+## clearance. Its pad legs run 0.25mm apart where 0.5mm is required, so the
+## bundle is illegal — and it is exactly that copper the user has to be given in
+## order to move a pad and fix it.
+##
+## ORACLES, none of them the module's own arithmetic:
+##   - the four pad coordinates written above, against each route's two ends;
+##   - a dx/dy scan of every emitted segment, for Manhattan;
+##   - this suite's OWN _min_gap, against the finding's measured_mm — an
+##     implementation that reported one number and drew another fails here;
+##   - the hand-derived pitch 0.1 + 0.3 + 0.1 = 0.5, against required_mm;
+##   - the witness PAIR's own separation, against the same measurement, so the
+##     gap bar the canvas draws is the gap the finding claims.
+func _check_crowded_copper(result: Dictionary) -> void:
+	var a := _route(result, 0)
+	var b := _route(result, 1)
+	if a.size() < 2 or b.size() < 2:
+		check("the crowded bundle handed back both routes", false)
+		return
+	check("SDA still runs pad to pad",
+		a[0].distance_to(Vector2(-8, -2.20)) <= EPS
+			and a[a.size() - 1].distance_to(Vector2(110, 20)) <= EPS)
+	check("SCL still runs pad to pad",
+		b[0].distance_to(Vector2(-6, -1.95)) <= EPS
+			and b[b.size() - 1].distance_to(Vector2(110, 22)) <= EPS)
+
+	var diagonals := 0
+	for route in [a, b]:
+		var pts: PackedVector2Array = route
+		for i in range(pts.size() - 1):
+			var d: Vector2 = pts[i + 1] - pts[i]
+			if absf(d.x) > EPS and absf(d.y) > EPS:
+				diagonals += 1
+	check("illegal copper is still Manhattan copper", diagonals == 0)
+
+	var findings: Array = result.get("findings", [])
+	var clearance: Dictionary = {}
+	for f in findings:
+		if str((f as Dictionary).get("type", "")) == BusGeom.FINDING_CLEARANCE:
+			clearance = f
+			break
+	if clearance.is_empty():
+		check("the crowded bundle raised a clearance finding", false)
+		return
+	check_near("the finding's measured_mm is what this suite measures",
+		float(clearance.get("measured_mm", -1.0)), _min_gap(a, b), MEASURE_EPS)
+	check_near("its required_mm is the hand-derived pitch",
+		float(clearance.get("required_mm", -1.0)), 0.5, MEASURE_EPS)
+	var closest: Array = clearance.get("closest", [])
+	var witness: Array = clearance.get("witness", [])
+	if closest.size() < 2 or witness.size() < 2:
+		check("the finding carries the pair it measured", false)
+		return
+	check_near("the witness pair spans exactly the gap the finding reports",
+		Vector2(float(closest[0]), float(closest[1])).distance_to(
+			Vector2(float(witness[0]), float(witness[1]))),
+		float(clearance.get("measured_mm", -1.0)), MEASURE_EPS)
+
+
 func _point_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
 	var ab: Vector2 = b - a
 	var len2: float = ab.length_squared()
@@ -471,7 +582,7 @@ func _point_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
 ## CASE 1 — A LEG AGAINST A LANE FROM A DISTANT PART OF THE SPINE.
 ##
 ## Spine (0,0) -> (100,0) -> (100,100) -> (-30,100). Every joint is a 90-degree
-## turn and no joint doubles back, so _spine_shape_error allows it; the third
+## turn and no joint doubles back, so neither spine-shape rule fires; the third
 ## arm nonetheless runs WEST, back past the first arm's start. Two 0.2mm tracks
 ## at 0.3mm clearance give lanes [-0.25, +0.25] and a 0.5mm pitch.
 ##
@@ -531,28 +642,29 @@ func _run_clearance_refusals() -> void:
 		_pv([Vector2(-10, 150), Vector2(-10, 152)]),
 		_pv([Vector2(-40, 200), Vector2(-40, 198)]),
 		[0.2, 0.2], 0.3)
-	check_refused("a leg crossing a lane from a distant part of the spine is refused by name",
-		folded, ["\"A\"", "\"B\"", "cross at (0.000, 99.750)"])
-	check("that refusal is the measurement's, not either end's ordering rule",
+	check_bad_but_buildable("a leg crossing a lane from a distant part of the spine is named",
+		folded, 2, ["\"A\"", "\"B\"", "cross at (0.000, 99.750)"])
+	check("that finding is the measurement's, not either end's ordering rule",
 		not str(folded.get("error", "")).contains("end —"))
 
-	check_refused("the spine folded back onto its own start is refused as a cross",
+	check_bad_but_buildable("the spine folded back onto its own start is named as a cross",
 		BusGeom.bundle_routes(
 			_pv([Vector2(0, 0), Vector2(100, 0), Vector2(100, 100), Vector2(0, 100)]),
 			PackedStringArray(["SDA", "SCL"]),
 			_pv([Vector2(-10, 150), Vector2(-10, 152)]),
 			_pv([Vector2(-10, 90), Vector2(-10, 88)]),
 			[0.2, 0.2], 0.3),
-		["\"SDA\"", "\"SCL\"", "cross at ("])
+		2, ["\"SDA\"", "\"SCL\"", "cross at ("])
 
-	check_refused("breakout legs running parallel inside the clearance are refused by name",
-		BusGeom.bundle_routes(
-			_pv([Vector2(0, 0), Vector2(100, 0)]),
-			PackedStringArray(["SDA", "SCL"]),
-			_pv([Vector2(-8, -2.20), Vector2(-6, -1.95)]),
-			_pv([Vector2(110, 20), Vector2(110, 22)]),
-			[0.2, 0.2], 0.3),
-		["\"SDA\"", "\"SCL\"", "0.250mm apart", "need 0.500mm"])
+	var crowded: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(100, 0)]),
+		PackedStringArray(["SDA", "SCL"]),
+		_pv([Vector2(-8, -2.20), Vector2(-6, -1.95)]),
+		_pv([Vector2(110, 20), Vector2(110, 22)]),
+		[0.2, 0.2], 0.3)
+	check_bad_but_buildable("breakout legs running parallel inside the clearance are named",
+		crowded, 2, ["\"SDA\"", "\"SCL\"", "0.250mm apart", "need 0.500mm"])
+	_check_crowded_copper(crowded)
 
 	var near_miss: Dictionary = BusGeom.bundle_routes(
 		_pv([Vector2(0, 0), Vector2(100, 0)]),
@@ -581,35 +693,35 @@ func _run_structural_refusals() -> void:
 
 	# (0,0) -> (50,0) -> (20,0) reverses along the same axis: the offset lanes
 	# would fold back over their neighbours.
-	check_refused("a spine that doubles back is refused",
+	check_bad_but_buildable("a spine that doubles back is named — the fold is drawn, not hidden",
 		BusGeom.bundle_routes(
 			_pv([Vector2(0, 0), Vector2(50, 0), Vector2(20, 0)]),
 			names, sources, targets, [0.2, 0.2], 0.3),
-		["doubles back", "point 1"])
+		2, ["doubles back", "point 1"])
 
 	# A pad 5mm INSIDE the bundle: its leg would have to run backwards through
 	# the fan-out to reach its station.
-	check_refused("a source pad past the start of the spine is refused by name",
+	check_bad_but_buildable("a source pad past the start of the spine is named by net",
 		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
 			names, _pv([Vector2(5, -5), Vector2(-10, 5)]), targets,
 			[0.2, 0.2], 0.3),
-		["\"A\"", "5.000mm past"])
-	check_refused("a target pad short of the end of the spine is refused by name",
+		2, ["\"A\"", "5.000mm past"])
+	check_bad_but_buildable("a target pad short of the end of the spine is named by net",
 		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(100, 0)]),
 			names, sources, _pv([Vector2(110, -5), Vector2(97, 5)]),
 			[0.2, 0.2], 0.3),
-		["\"B\"", "3.000mm short"])
+		2, ["\"B\"", "3.000mm short"])
 
 	# ROOM. Three 0.2mm tracks at 0.3mm clearance fan out over 1.0mm at each
 	# end and need 0.5mm (the widest offset) of bundle clear of both. A 1.2mm
 	# spine has 2.0mm of fan-out to hold and nothing left over.
-	check_refused("a spine too short for its own fan-outs is refused",
+	check_bad_but_buildable("a spine too short for its own fan-outs is named",
 		BusGeom.bundle_routes(_pv([Vector2(0, 0), Vector2(1.2, 0)]),
 			PackedStringArray(["A", "B", "C"]),
 			_pv([Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
 			_pv([Vector2(110, 20), Vector2(110, 22), Vector2(110, 24)]),
 			[0.2, 0.2, 0.2], 0.3),
-		["0→1", "1.200mm", "2.000mm", "0.500mm"])
+		3, ["0→1", "1.200mm", "2.000mm", "0.500mm"])
 
 	# A zero-width track is what would let two departure stations coincide, so
 	# it is refused rather than clamped.

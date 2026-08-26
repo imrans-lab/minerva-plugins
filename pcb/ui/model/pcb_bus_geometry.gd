@@ -72,14 +72,34 @@ extends RefCounted
 ##   is a trimming/clipping problem, not a join problem) and no trimming is done
 ##   here. A caller of offset_polyline must either refuse a spine with segments
 ##   shorter than the widest offset or accept the fold; bundle_routes below
-##   refuses, and so does the tool layer that calls offset_polyline directly.
+##   NAMES it (see "two classes of no") and hands the folded copper over, and so
+##   does the tool layer that calls offset_polyline directly.
 ## - CLOSED POLYGONS. These are open polylines; the first and last vertices get
 ##   plain segment-end treatment, never a join.
 ## - PADS SPREAD ALONG THE CORRIDOR. bundle_routes reaches pads that lie beyond
 ##   the spine's ends. A row of pads running PARALLEL to the bundle, each one
 ##   wanting its own perpendicular drop at its own position along the spine, is
 ##   a different construction (the stations would come from the pads instead of
-##   being built distinct) and is refused by name, not served.
+##   being built distinct) and is named in a finding, not served.
+##
+##
+## TWO CLASSES OF "NO" -- READ BEFORE ADDING A CHECK
+## -------------------------------------------------
+## UNBUILDABLE means no geometry can exist: no nets, a missing source/target/
+## width, fewer than two distinct spine points, a diagonal segment. There is
+## nothing to hand back, so bundle_routes returns {ok:false, buildable:false}
+## and no polylines.
+##
+## BAD BUT BUILDABLE means the geometry exists and breaks a rule: two nets
+## closer than their pitch, an end whose legs cannot be ordered, a pad inside
+## the corridor, a spine shorter than its own fan-outs, a spine that doubles
+## back. Those return {ok:false, buildable:true} WITH the polylines and one
+## FINDING per broken rule. The caller decides whether that copper lands;
+## copper that exists can be corrected, and a refusal that lands nothing leaves
+## nothing to correct.
+##
+## `ok` therefore means CLEAN, not "returned something". A caller that wants
+## the geometry regardless reads `buildable`.
 
 
 ## Miter length beyond which an interior joint is bevelled instead of mitered,
@@ -116,6 +136,14 @@ const _MIN_SEGMENT_MM := 1e-6
 ## a fraction of a pitch (0.25mm of 0.5mm in the case that found this), never by
 ## a micron.
 const _CLEARANCE_TOLERANCE_MM := 1e-3
+
+## Finding `type` values. One per rule a BUILDABLE bundle can break, so a
+## consumer can branch on the rule without parsing the message prose.
+const FINDING_SPINE_DOUBLES_BACK := "bus_spine_doubles_back"
+const FINDING_PAD_INSIDE_CORRIDOR := "bus_pad_inside_corridor"
+const FINDING_END_CROSSING := "bus_end_crossing"
+const FINDING_SPINE_TOO_SHORT := "bus_spine_too_short"
+const FINDING_CLEARANCE := "bus_clearance"
 
 
 ## The parallel polyline at signed perpendicular `offset` from `points`.
@@ -291,9 +319,11 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ##     along has to wait until that track has turned in.
 ##
 ## Ties keep the caller's order. When the two rules demand that each of a pair
-## goes before the other, the pads cannot be reached without a crossing: the
-## call is REFUSED and both nets are named. Nothing is reordered, rerouted or
-## moved to another layer to make a crossing go away.
+## goes before the other, the pads cannot be reached without a crossing: both
+## nets are named in a FINDING and the departure order falls back to the
+## caller's for whatever the rules could not decide. Nothing is reordered,
+## rerouted or moved to another layer to make a crossing go away — the copper
+## crosses, and says so.
 ##
 ## THOSE RULES ARE NOT THE WHOLE GUARANTEE, and the gap is in two directions.
 ## They compare a leg only with the lanes and pad legs at its OWN end, so they
@@ -306,8 +336,9 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## returned. No two nets may come closer than pitch_between(width_i, width_j,
 ## clearance) — the same rule that spaces the lanes, applied to every pair of
 ## segments in the two whole polylines, pads and legs included. Closer than
-## that is refused by name like everything else here. This module authors copper
-## with no DRC gate downstream of it, so the measurement is the gate.
+## that is a FINDING like everything else here. This module authors copper with
+## no DRC gate downstream of it, so the measurement is the only place the gap
+## is ever measured.
 ##
 ## AXIS-ALIGNED ONLY, unlike offset_polyline above: a spine segment with a
 ## non-zero dx AND dy is refused rather than rounded onto an axis, because no
@@ -315,21 +346,25 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## pad's own coordinate is carried into the corner unchanged instead of being
 ## rebuilt from a dot product, which would leave an ulp of diagonal behind.
 ##
-## The pads must lie OUTSIDE the spine: a source pad no further along than the
+## The pads should lie OUTSIDE the spine: a source pad no further along than the
 ## spine's first point, a target pad no nearer than its last. Pads spread ALONG
-## the corridor (a header running parallel to the bundle) are refused by that
-## rule, and deliberately: their legs would have to drop perpendicular at each
-## pad's own position, which is a different construction from this one and has
-## no distinct-station guarantee.
+## the corridor (a header running parallel to the bundle) break that rule, and
+## are reported rather than served: their legs would have to drop perpendicular
+## at each pad's own position, which is a different construction from this one
+## and has no distinct-station guarantee.
 ##
-## Returns, on success:
-##   {ok: true, error: "", offsets, source_stations, target_stations,
-##    source_order, target_order, polylines}
-## `polylines[i]` runs from sources[i] to targets[i]; the station arrays give
-## each track's departure distance from the spine's first (source) and last
-## (target) point; the order arrays give the track indices in departure order.
-## On refusal: {ok: false, error: "..."} and nothing else — one field to check,
-## the shape the tool layer's own refusals already use.
+## Returns, whenever geometry could be built (see the header's "two classes of
+## no"):
+##   {ok, buildable: true, error, findings, offsets, source_stations,
+##    target_stations, source_order, target_order, polylines}
+## `ok` is true only when `findings` is empty; `error` is findings[0].message
+## otherwise, so a caller that still checks one string reads the same words it
+## always did. `polylines[i]` runs from sources[i] to targets[i]; the station
+## arrays give each track's departure distance from the spine's first (source)
+## and last (target) point; the order arrays give the track indices in
+## departure order.
+## When NOTHING could be built: {ok: false, buildable: false, error, findings:
+## []} and no geometry.
 static func bundle_routes(
 		spine: PackedVector2Array,
 		net_names: PackedStringArray,
@@ -339,9 +374,9 @@ static func bundle_routes(
 		clearance: float) -> Dictionary:
 	var n: int = net_names.size()
 	if n == 0:
-		return _refused("A bus needs at least one net (none given).")
+		return _unbuildable("A bus needs at least one net (none given).")
 	if sources.size() != n or targets.size() != n or widths.size() != n:
-		return _refused("A bus needs one source, one target and one width per net (%d nets, %d sources, %d targets, %d widths)."
+		return _unbuildable("A bus needs one source, one target and one width per net (%d nets, %d sources, %d targets, %d widths)."
 			% [n, sources.size(), targets.size(), widths.size()])
 	for i in range(n):
 		# Zero width is what would let two departure stations coincide (their
@@ -349,15 +384,23 @@ static func bundle_routes(
 		# board is allowed to declare as 0.0), so it is refused here rather than
 		# clamped — the distinct-station guarantee is the whole point.
 		if float(widths[i]) <= 0.0:
-			return _refused("Net \"%s\" has no trace width (%.3fmm) — a track with no copper has no lane to leave the bundle from."
+			return _unbuildable("Net \"%s\" has no trace width (%.3fmm) — a track with no copper has no lane to leave the bundle from."
 				% [net_names[i], float(widths[i])])
 
 	var pts := _drop_duplicate_points(spine)
 	if pts.size() < 2:
-		return _refused("The bus spine needs at least 2 distinct points (%d given)." % spine.size())
-	var shape_error := _spine_shape_error(pts)
-	if not shape_error.is_empty():
-		return _refused(shape_error)
+		return _unbuildable("The bus spine needs at least 2 distinct points (%d given)." % spine.size())
+	var diagonal := _spine_diagonal_error(pts)
+	if not diagonal.is_empty():
+		return _unbuildable(diagonal)
+
+	# From here on every rule is BUILDABLE-but-illegal: it names a finding and
+	# the construction carries on, so the caller ends up holding copper it can
+	# correct instead of a refusal it cannot.
+	var findings: Array = []
+	var doubles_back := _spine_doubles_back_error(pts)
+	if not doubles_back.is_empty():
+		findings.append(_finding(FINDING_SPINE_DOUBLES_BACK, doubles_back, []))
 
 	var last: int = pts.size() - 1
 	var u_src := _axis_unit(pts[1] - pts[0])
@@ -372,22 +415,24 @@ static func bundle_routes(
 	for i in range(n):
 		var from_start: Vector2 = sources[i] - pts[0]
 		if from_start.dot(u_src) > _MIN_SEGMENT_MM:
-			return _refused("Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start clear of the pads it fans out to."
-				% [net_names[i], from_start.dot(u_src)])
+			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
+				"Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start clear of the pads it fans out to."
+					% [net_names[i], from_start.dot(u_src)],
+				[net_names[i]], from_start.dot(u_src), 0.0, sources[i]))
 		var from_end: Vector2 = targets[i] - pts[last]
 		if from_end.dot(u_tgt) < -_MIN_SEGMENT_MM:
-			return _refused("Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end clear of the pads it fans out to."
-				% [net_names[i], -from_end.dot(u_tgt)])
+			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
+				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end clear of the pads it fans out to."
+					% [net_names[i], -from_end.dot(u_tgt)],
+				[net_names[i]], -from_end.dot(u_tgt), 0.0, targets[i]))
 		src_perp.append(from_start.dot(n_src))
 		tgt_perp.append(from_end.dot(n_tgt))
 
 	var offsets: Array = cumulative_offsets(widths, clearance)
 	var src := _departure_stations(src_perp, offsets, widths, clearance, net_names, "source")
-	if not bool(src["ok"]):
-		return src
+	findings.append_array(src["findings"])
 	var tgt := _departure_stations(tgt_perp, offsets, widths, clearance, net_names, "target")
-	if not bool(tgt["ok"]):
-		return tgt
+	findings.append_array(tgt["findings"])
 	var src_stations: Array = src["stations"]
 	var tgt_stations: Array = tgt["stations"]
 
@@ -409,8 +454,10 @@ static func bundle_routes(
 		var seg_len: float = pts[i].distance_to(pts[i + 1])
 		var fanned: float = (span_src if i == 0 else 0.0) + (span_tgt if i == last - 1 else 0.0)
 		if seg_len - fanned < margin:
-			return _refused("Bus spine segment %d→%d is %.3fmm long; the fan-outs on it take %.3fmm and the bundle still needs %.3fmm of straight run clear of them. Lengthen the spine or move the pads."
-				% [i, i + 1, seg_len, fanned, margin])
+			findings.append(_finding(FINDING_SPINE_TOO_SHORT,
+				"Bus spine segment %d→%d is %.3fmm long; the fan-outs on it take %.3fmm and the bundle still needs %.3fmm of straight run clear of them. Lengthen the spine or move the pads."
+					% [i, i + 1, seg_len, fanned, margin],
+				[], seg_len - fanned, margin, (pts[i] + pts[i + 1]) * 0.5))
 
 	var polylines: Array = []
 	for i in range(n):
@@ -418,9 +465,10 @@ static func bundle_routes(
 		var lane := offset_polyline(pts, offset)
 		var d: float = float(src_stations[i])
 		var e: float = float(tgt_stations[i])
-		# The spine is axis-aligned with no reversal, so every joint miters to a
-		# single point and `lane` runs one point per spine vertex; only its two
-		# ENDS move, inward to this track's own stations.
+		# Only the lane's two ENDS move, inward to this track's own stations.
+		# Indexed from the ends rather than by spine vertex on purpose: a spine
+		# that doubles back bevels its reversal into TWO offset points, so
+		# `lane` is not 1:1 with the spine there.
 		lane[0] = _station_point(pts[0], u_src, d, lane[0])
 		lane[lane.size() - 1] = _station_point(pts[last], u_tgt, -e, lane[lane.size() - 1])
 		var route := PackedVector2Array()
@@ -433,14 +481,14 @@ static func bundle_routes(
 		# of those legs zero-length; the corner is then the same point twice.
 		polylines.append(_drop_duplicate_points(route))
 
-	# THE GATE. Everything above reasons about one end of the spine at a time
-	# and about crossings only; this measures the finished copper.
-	var too_close := _clearance_error(polylines, net_names, widths, clearance)
-	if not too_close.is_empty():
-		return _refused(too_close)
+	# THE MEASUREMENT. Everything above reasons about one end of the spine at a
+	# time and about crossings only; this measures the finished copper.
+	findings.append_array(_clearance_findings(polylines, net_names, widths, clearance))
 
 	return {
-		"ok": true, "error": "",
+		"ok": findings.is_empty(), "buildable": true,
+		"error": "" if findings.is_empty() else str((findings[0] as Dictionary)["message"]),
+		"findings": findings,
 		"offsets": offsets,
 		"source_stations": src_stations, "target_stations": tgt_stations,
 		"source_order": src["order"], "target_order": tgt["order"],
@@ -448,15 +496,16 @@ static func bundle_routes(
 	}
 
 
-## Two nets whose finished routes are closer than the clearance rule allows, as
-## a refusal message, or "" when every pair clears.
+## One finding per pair of nets whose finished routes are closer than the
+## clearance rule allows; empty when every pair clears.
 ##
 ## The required separation is pitch_between of the PAIR's own two widths, the
 ## same figure cumulative_offsets uses to space their lanes — so a bundle whose
 ## lanes are correctly spaced measures exactly its requirement and passes, and
-## anything the breakout legs do to bring two nets closer than that fails.
-static func _clearance_error(polylines: Array, net_names: PackedStringArray,
-		widths: Array, clearance: float) -> String:
+## anything the breakout legs do to bring two nets closer than that is reported.
+static func _clearance_findings(polylines: Array, net_names: PackedStringArray,
+		widths: Array, clearance: float) -> Array:
+	var out: Array = []
 	for i in range(polylines.size()):
 		for j in range(i + 1, polylines.size()):
 			var need: float = pitch_between(float(widths[i]), float(widths[j]), clearance)
@@ -465,16 +514,27 @@ static func _clearance_error(polylines: Array, net_names: PackedStringArray,
 			if got >= need - _CLEARANCE_TOLERANCE_MM:
 				continue
 			var at: Vector2 = gap["at"]
+			var message := ""
 			if got <= _CLEARANCE_TOLERANCE_MM:
-				return "Nets \"%s\" and \"%s\" cross at (%.3f, %.3f) — their finished routes are one piece of copper there, which is a short between two nets. Redraw the spine, reorder the picked nets or move their pads." % [net_names[i], net_names[j], at.x, at.y]
-			return "Nets \"%s\" and \"%s\" run %.3fmm apart near (%.3f, %.3f) — their %.3fmm and %.3fmm tracks at %.3fmm clearance need %.3fmm between centrelines. Move their pads apart or redraw the spine." % [net_names[i], net_names[j], got, at.x, at.y, float(widths[i]), float(widths[j]), maxf(0.0, clearance), need]
-	return ""
+				message = "Nets \"%s\" and \"%s\" cross at (%.3f, %.3f) — their finished routes are one piece of copper there, which is a short between two nets. Redraw the spine, reorder the picked nets or move their pads." % [net_names[i], net_names[j], at.x, at.y]
+			else:
+				message = "Nets \"%s\" and \"%s\" run %.3fmm apart near (%.3f, %.3f) — their %.3fmm and %.3fmm tracks at %.3fmm clearance need %.3fmm between centrelines. Move their pads apart or redraw the spine." % [net_names[i], net_names[j], got, at.x, at.y, float(widths[i]), float(widths[j]), maxf(0.0, clearance), need]
+			var f := _finding(FINDING_CLEARANCE, message,
+				[net_names[i], net_names[j]], got, need, at)
+			# The measured PAIR, so a witness can draw the gap it names rather
+			# than a bare dot at its midpoint.
+			f["closest"] = [float((gap["a"] as Vector2).x), float((gap["a"] as Vector2).y)]
+			f["witness"] = [float((gap["b"] as Vector2).x), float((gap["b"] as Vector2).y)]
+			out.append(f)
+	return out
 
 
-## The closest approach between two whole routes: {distance, at}, where `at` is
-## a point at that closest approach, for the refusal to quote.
+## The closest approach between two whole routes: {distance, at, a, b}, where
+## `at` is a point at that closest approach for the message to quote and `a`/`b`
+## are the two points the gap was measured between.
 static func _route_separation(a: PackedVector2Array, b: PackedVector2Array) -> Dictionary:
-	var best: Dictionary = {"distance": INF, "at": Vector2.ZERO}
+	var best: Dictionary = {"distance": INF, "at": Vector2.ZERO,
+		"a": Vector2.ZERO, "b": Vector2.ZERO}
 	for i in range(a.size() - 1):
 		for j in range(b.size() - 1):
 			var gap := _segment_separation(a[i], a[i + 1], b[j], b[j + 1])
@@ -485,10 +545,12 @@ static func _route_separation(a: PackedVector2Array, b: PackedVector2Array) -> D
 	return best
 
 
-## The closest approach between two segments: {distance, at}.
+## The closest approach between two segments: {distance, at, a, b} — see
+## _route_separation for the fields.
 ##
-## Every segment reaching here is AXIS-ALIGNED — the spine is (_spine_shape_error
-## refuses anything else) and the legs are built by _station_point, which copies
+## Every segment reaching here is AXIS-ALIGNED — the spine is
+## (_spine_diagonal_error refuses anything else) and the legs are built by
+## _station_point, which copies
 ## one coordinate rather than recomputing it. An axis-aligned segment IS its own
 ## bounding box, so "the boxes overlap" and "the segments share a point" are the
 ## same statement, and the overlap box's centre is a point they genuinely share.
@@ -502,7 +564,8 @@ static func _segment_separation(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vecto
 	var lo_y: float = maxf(minf(a0.y, a1.y), minf(b0.y, b1.y))
 	var hi_y: float = minf(maxf(a0.y, a1.y), maxf(b0.y, b1.y))
 	if lo_x <= hi_x and lo_y <= hi_y:
-		return {"distance": 0.0, "at": Vector2((lo_x + hi_x) * 0.5, (lo_y + hi_y) * 0.5)}
+		var shared := Vector2((lo_x + hi_x) * 0.5, (lo_y + hi_y) * 0.5)
+		return {"distance": 0.0, "at": shared, "a": shared, "b": shared}
 	var best := _endpoint_gap(a0, b0, b1)
 	for candidate in [_endpoint_gap(a1, b0, b1), _endpoint_gap(b0, a0, a1), _endpoint_gap(b1, a0, a1)]:
 		if float(candidate["distance"]) < float(best["distance"]):
@@ -510,13 +573,14 @@ static func _segment_separation(a0: Vector2, a1: Vector2, b0: Vector2, b1: Vecto
 	return best
 
 
-## Point `p` against segment `a`-`b`: {distance, at}, `at` the midpoint of the
-## gap so a refusal can name somewhere between the two nets rather than on one.
+## Point `p` against segment `a`-`b`: {distance, at, a, b}, `at` the midpoint of
+## the gap so a message can name somewhere between the two nets rather than on
+## one, `a`/`b` its two ends so a witness can draw the gap itself.
 static func _endpoint_gap(p: Vector2, a: Vector2, b: Vector2) -> Dictionary:
 	var ab: Vector2 = b - a
 	var len2: float = ab.length_squared()
 	var q: Vector2 = a if len2 <= 0.0 else a + ab * clampf((p - a).dot(ab) / len2, 0.0, 1.0)
-	return {"distance": p.distance_to(q), "at": (p + q) * 0.5}
+	return {"distance": p.distance_to(q), "at": (p + q) * 0.5, "a": p, "b": q}
 
 
 ## The input with consecutive duplicate points removed.
@@ -535,23 +599,59 @@ static func _drop_duplicate_points(points: PackedVector2Array) -> PackedVector2A
 	return out
 
 
-## The one-field refusal every bundle_routes exit shares.
-static func _refused(message: String) -> Dictionary:
-	return {"ok": false, "error": message}
+## The UNBUILDABLE exit: no geometry could be built, so none is returned. The
+## `buildable` flag is what a caller reads to tell this apart from a bundle that
+## exists and breaks a rule.
+static func _unbuildable(message: String) -> Dictionary:
+	return {"ok": false, "buildable": false, "error": message, "findings": []}
 
 
-## Why this spine cannot carry a pad-to-pad bus, or "" when it can.
+## ONE broken rule on a bundle that was built anyway.
+##
+## The geometry keys (closest/witness/midpoint, as [x, y] pairs) mirror the
+## draft-check finding shape the routing workspace already stores and the canvas
+## already draws witnesses from, so a bus finding needs no second renderer. `at`
+## may be null for a rule with no single place on the board — those stay
+## readable as text and simply draw no witness.
+static func _finding(type: String, message: String, nets: Array,
+		measured_mm: float = 0.0, required_mm: float = 0.0,
+		at: Variant = null) -> Dictionary:
+	var out: Dictionary = {
+		"type": type,
+		"message": message,
+		"nets": nets,
+		"measured_mm": measured_mm,
+		"required_mm": required_mm,
+	}
+	if at is Vector2:
+		var p: Vector2 = at
+		out["closest"] = [p.x, p.y]
+		out["witness"] = [p.x, p.y]
+		out["midpoint"] = [p.x, p.y]
+	return out
+
+
+## The UNBUILDABLE spine defect — a diagonal segment — or "" when every segment
+## is axis-aligned.
 ##
 ## EXACT zero, not is_zero_approx: a segment with any non-zero dx and dy is a
 ## diagonal, and the alternative to refusing it is silently moving a point the
 ## caller placed. Exactness also buys the legs their frame — _axis_unit can
 ## return a unit vector with no rounding at all, so every emitted segment is
-## axis-aligned in float rather than to within an ulp.
-static func _spine_shape_error(pts: PackedVector2Array) -> String:
+## axis-aligned in float rather than to within an ulp. Nothing downstream here
+## can round it, which is why this one is a hard refusal rather than a finding.
+static func _spine_diagonal_error(pts: PackedVector2Array) -> String:
 	for i in range(pts.size() - 1):
 		var d: Vector2 = pts[i + 1] - pts[i]
 		if d.x != 0.0 and d.y != 0.0:
 			return "Bus spine segment %d→%d moves on both axes (dx %.3fmm, dy %.3fmm) — a bus bends at 90 degrees only, so its spine has to as well." % [i, i + 1, d.x, d.y]
+	return ""
+
+
+## The BUILDABLE spine defect — a reversal — or "" when the spine never turns
+## back on itself. offset_polyline bevels a reversal into two points rather
+## than dividing by zero, so the lanes exist; they just fold over each other.
+static func _spine_doubles_back_error(pts: PackedVector2Array) -> String:
 	for i in range(1, pts.size() - 1):
 		if (pts[i] - pts[i - 1]).dot(pts[i + 1] - pts[i]) < 0.0:
 			return "The bus spine doubles back at point %d — every track would fold over the one beside it there." % i
@@ -587,10 +687,15 @@ static func _station_point(origin: Vector2, u: Vector2, axial: float, through: V
 ## alone — so the caller hands over the target end unchanged and gets stations
 ## measured backwards from the spine's last point.
 ##
-## Returns {ok, error, stations, order} or the shared one-field refusal.
+## ALWAYS returns stations: {ok, findings, stations, order}. A pair that each
+## have to leave before the other, or a longer loop of the same, is a FINDING —
+## the order then falls back to the caller's for whatever the rules could not
+## decide, so the tracks still get distinct stations and the crossing shows up
+## in the copper rather than swallowing it.
 static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array,
 		clearance: float, net_names: PackedStringArray, end_label: String) -> Dictionary:
 	var n: int = pad_perp.size()
+	var findings: Array = []
 	# leaves_first[i][j]: track i has to be off the bundle before track j is.
 	var leaves_first: Array = []
 	for i in range(n):
@@ -615,8 +720,10 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 	for i in range(n):
 		for j in range(i + 1, n):
 			if leaves_first[i][j] and leaves_first[j][i]:
-				return _refused("Nets \"%s\" and \"%s\" cross at the %s end — neither can leave the bundle before the other. Reorder the picked nets or move their pads."
-					% [net_names[i], net_names[j], end_label])
+				findings.append(_finding(FINDING_END_CROSSING,
+					"Nets \"%s\" and \"%s\" cross at the %s end — neither can leave the bundle before the other. Reorder the picked nets or move their pads."
+						% [net_names[i], net_names[j], end_label],
+					[net_names[i], net_names[j]]))
 
 	var indegree := PackedInt32Array()
 	indegree.resize(n)
@@ -637,14 +744,24 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 				pick = k
 				break
 		if pick < 0:
+			# A LOOP the rules cannot untangle. Report it once — the direct
+			# pair above may already have named it — then break the loop on the
+			# caller's own order, which is the tie-break the whole function
+			# uses wherever the rules do not decide.
+			if findings.is_empty():
+				findings.append(_finding(FINDING_END_CROSSING,
+					_cycle_refusal(leaves_first, placed, net_names, end_label), []))
+			for k in range(n):
+				if not placed[k]:
+					pick = k
+					break
+		if pick < 0:
 			break
 		placed[pick] = true
 		order.append(pick)
 		for j in range(n):
 			if leaves_first[pick][j]:
 				indegree[j] -= 1
-	if order.size() < n:
-		return _refused(_cycle_refusal(leaves_first, placed, net_names, end_label))
 
 	var stations: Array = []
 	for i in range(n):
@@ -653,10 +770,11 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 	for k in range(1, n):
 		run += pitch_between(float(widths[order[k - 1]]), float(widths[order[k]]), clearance)
 		stations[order[k]] = run
-	return {"ok": true, "error": "", "stations": stations, "order": order}
+	return {"ok": findings.is_empty(), "findings": findings,
+		"stations": stations, "order": order}
 
 
-## Two nets from a cycle of "leaves first" rules, named in a refusal.
+## Two nets from a cycle of "leaves first" rules, named in a finding.
 ##
 ## Reached only when the ordering could not be completed AND no pair contradicts
 ## each other directly, i.e. three or more nets chain into a loop. Every

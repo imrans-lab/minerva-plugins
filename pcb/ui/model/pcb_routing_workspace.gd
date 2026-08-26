@@ -114,8 +114,9 @@ var frozen: Dictionary = {}
 ## The finding the UI has selected ("" = none).
 var selected_finding_id: String = ""
 
-## Stored findings per candidate (candidate_id -> Array). Populated by validation
-## in a later task; empty for now.
+## Stored findings per candidate (candidate_id -> Array). Written by
+## apply_check_result (a worker verdict) and by set_findings (an author that
+## measured its own geometry).
 var _findings: Dictionary = {}
 
 ## Monotonic id counters (last-issued number; next id is counter+1).
@@ -744,9 +745,22 @@ func set_validation(id: String, value: String) -> void:
 	validation_changed.emit(id)
 
 
-## Stored findings for a candidate (empty until a later task populates them).
+## Stored findings for a candidate (empty until a writer populates them).
 func findings_for_candidate(id: String) -> Array:
 	return _findings.get(id, [])
+
+
+## Replace a candidate's stored findings.
+##
+## apply_check_result below is the usual writer — a worker measured the geometry
+## and answered. This is the seam for an author that measured its own geometry
+## BEFORE ingesting it (the bus tool, which computes its own clearances) so its
+## ghosts carry their violations without a worker round trip. Unknown ids are
+## ignored: findings never outlive the candidate they name.
+func set_findings(id: String, items: Array) -> void:
+	if not candidates.has(id):
+		return
+	_findings[id] = items
 
 
 # ── T2.4 draft-check state machine (IPC-decoupled) ────────────────────────────

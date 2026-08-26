@@ -24,6 +24,10 @@ extends SceneTree
 ##     status string is not evidence that no copper landed; the board is.
 ##   REFUSALS REACH THE USER — the bus_tool_message signal's text, required to
 ##     NAME the offending nets/pads, not merely to be non-empty.
+##   A BAD BUS STILL LANDS — the serialized trace list and history.size() after
+##     a bus that breaks a rule, plus a segment-overlap scan over the COMMITTED
+##     points proving the copper really does cross. "Nothing was committed" is
+##     asserted only where the geometry could not exist at all.
 ##   MANHATTAN — every segment of every committed trace, measured for a non-zero
 ##     dx AND dy. That test asserts on the copper, not on the spine buffer the
 ##     axis snap writes.
@@ -125,7 +129,7 @@ func _init() -> void:
 	_test_double_click_grammar()
 	_test_the_finished_bus_commits_from_a_landed_target()
 	_test_manhattan_from_sloppy_clicks()
-	_test_crossing_refusal_names_both_nets()
+	_test_a_crossing_commits_and_is_named()
 	_test_propose_is_pad_to_pad_and_writes_no_copper()
 	_test_where_each_net_may_end()
 	_test_the_airline_says_where_each_net_is_headed()
@@ -137,6 +141,7 @@ func _init() -> void:
 	# later, unscheduled tick — possibly after _init() has printed Results and
 	# quit() — and silently not count.
 	await _test_mcp_direct_verb_matches_the_gesture()
+	await _test_a_bad_bus_reaches_the_agent_and_the_ghost()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -902,8 +907,9 @@ func _test_the_finished_bus_commits_from_a_landed_target() -> void:
 			"refs %s, board %s" % [str(canvas._bus_target_refs), str(_board_state(data))])
 	canvas.free()
 
-	# A refused plan refuses through this gesture exactly as it does through
-	# Enter, and the target press 1 took back is not lost to the refusal.
+	# A BUS THAT BREAKS A RULE COMMITS THROUGH THIS GESTURE. The owner's rule:
+	# corrections need copper to correct, so the finish gesture lands the traces
+	# and says what broke rather than arguing.
 	rig = _rig()
 	canvas = rig[0]
 	data = rig[1]
@@ -918,13 +924,12 @@ func _test_the_finished_bus_commits_from_a_landed_target() -> void:
 	canvas._handle_bus_click(TGT_A, false)
 	quiet = _board_state(data)
 	_double_click(canvas, TGT_C)             # NC is _bus_nets[0] in this order
-	check("a refused bus refuses through this gesture too, naming both crossing nets",
-			_last(msgs).contains("NB") and _last(msgs).contains("NC")
-				and _board_state(data) == quiet,
-			"%s / %s" % [_last(msgs), str(_board_state(data))])
-	check("…and the target its first press cleared is back, not lost to the refusal",
-			canvas._bus_nets_without_targets().is_empty(),
-			"missing %s" % str(canvas._bus_nets_without_targets()))
+	check("a crossing bus COMMITS through this gesture — 3 traces, one journal step",
+			_traces_by_net(data).size() == 3
+				and data.history.size() == int(quiet[1]) + 1,
+			"board %s (was %s)" % [str(_board_state(data)), str(quiet)])
+	check("…and the message names both crossing nets",
+			_last(msgs).contains("NB") and _last(msgs).contains("NC"), _last(msgs))
 	canvas.free()
 
 
@@ -974,18 +979,29 @@ func _test_manhattan_from_sloppy_clicks() -> void:
 	canvas.free()
 
 
-# ── 7. A CROSSING IS REFUSED, BY NAME, AND STAYS REFUSED ──────────────────────
+# ── 7. A CROSSING COMMITS, BY NAME ────────────────────────────────────────────
 #
 # Picking the same three nets in the REVERSE perpendicular order puts NB's lane
 # inside NC's breakout band and NC's pad inside NB's: each would have to leave
-# the bundle before the other. pcb_bus_geometry refuses that rather than
-# re-sorting the picks, and this pins that the refusal reaches the user with
-# both nets named — and that the gesture is KEPT, so the fix is one more click.
+# the bundle before the other. pcb_bus_geometry names that rather than
+# re-sorting the picks — and, since the geometry can still be drawn, the bus
+# LANDS so the user has traces to correct. The old behaviour (write nothing,
+# argue) left nothing to correct; that is the change this pins.
 #
-# ORACLE: the emitted message's text plus the board-state triple.
+# THE PREVIEW IS UNCHANGED: the plan is still `ok == false`, so the spine keeps
+# its refusal tint and the panel keeps holding the reason — only the commit
+# moved.
+#
+# ORACLES, none of them the emitted message alone:
+#   THE COPPER LANDED — the serialized trace list and history.size().
+#   THE COPPER REALLY CROSSES — a segment-box overlap scan written here over
+#     the COMMITTED points, so the finding is about physical copper, not about
+#     an ordering rule that fired on nothing.
+#   THE REASON REACHED THE USER — the message names both nets and the end.
+#   THE PREVIEW STILL REFUSES — canvas.bus_refusal() read BEFORE the commit.
 
-func _test_crossing_refusal_names_both_nets() -> void:
-	print("\n-- (7) two nets that cannot both go first: named refusal, no copper --")
+func _test_a_crossing_commits_and_is_named() -> void:
+	print("\n-- (7) two nets that cannot both go first: named, and committed anyway --")
 	var rig := _rig()
 	var canvas = rig[0]
 	var data = rig[1]
@@ -1000,17 +1016,57 @@ func _test_crossing_refusal_names_both_nets() -> void:
 	canvas._handle_bus_click(TGT_C, false)
 	canvas._handle_bus_click(TGT_B, false)
 	canvas._handle_bus_click(TGT_A, false)
+
+	var live_refusal := canvas.bus_refusal()
+	check("the live preview still calls this bus refused, naming both nets",
+			live_refusal.contains("NB") and live_refusal.contains("NC"), live_refusal)
+
 	canvas._commit_bus()
 
-	check("the refusal names BOTH nets that cross",
+	check("the bus COMMITTED anyway — 3 traces in one journal step",
+			_traces_by_net(data).size() == 3
+				and data.history.size() == int(quiet[1]) + 1,
+			"board %s (was %s)" % [str(_board_state(data)), str(quiet)])
+	check("the message names BOTH nets that cross",
 			_last(msgs).contains("NB") and _last(msgs).contains("NC"), _last(msgs))
 	check("…and which END of the bus they cross at", _last(msgs).contains("source"), _last(msgs))
-	check("…and nothing was written", _board_state(data) == quiet, str(_board_state(data)))
-	check("the gesture is KEPT so the user can fix it — picks, path and targets all intact",
-			canvas._bus_nets.size() == 3 and canvas._bus_spine_points.size() == 2
-				and canvas._bus_nets_without_targets().is_empty())
+	check("…and says the copper landed so it can be corrected",
+			_last(msgs).contains("Added bus") and _last(msgs).contains("correct"),
+			_last(msgs))
 
+	var by_net := _traces_by_net(data)
+	var touching := 0
+	var nets := ["NA", "NB", "NC"]
+	for i in range(nets.size()):
+		for j in range(i + 1, nets.size()):
+			if not (by_net.has(nets[i]) and by_net.has(nets[j])):
+				continue
+			if _copper_touches(_points_of(by_net[nets[i]]), _points_of(by_net[nets[j]])):
+				touching += 1
+	check("the committed copper really does cross — the finding is about copper, not a rule",
+			touching > 0, "%d touching pairs" % touching)
+
+	check("one undo removes the whole bad bus", data.undo() and data.get_trace_count() == 0)
 	canvas.free()
+
+
+## Do two AXIS-ALIGNED polylines share a point? Written here, over the
+## SERIALIZED copper, and deliberately not the module's own routine: an
+## axis-aligned segment is its own bounding box, so "the boxes overlap" and
+## "the segments meet" are the same statement.
+func _copper_touches(a: Array, b: Array) -> bool:
+	for i in range(a.size() - 1):
+		for j in range(b.size() - 1):
+			var a0: Vector2 = a[i]
+			var a1: Vector2 = a[i + 1]
+			var b0: Vector2 = b[j]
+			var b1: Vector2 = b[j + 1]
+			if minf(a0.x, a1.x) <= maxf(b0.x, b1.x) + EPS \
+					and minf(b0.x, b1.x) <= maxf(a0.x, a1.x) + EPS \
+					and minf(a0.y, a1.y) <= maxf(b0.y, b1.y) + EPS \
+					and minf(b0.y, b1.y) <= maxf(a0.y, a1.y) + EPS:
+				return true
+	return false
 
 
 # ── 8. THE PROPOSE PATH INHERITS THE SAME PAD-TO-PAD PLAN ─────────────────────
@@ -1589,3 +1645,114 @@ func _test_the_two_pickers_agree_on_a_tie() -> void:
 	check("the tie goes to the lower component ref, not to whichever was seen first",
 			str(by_bus.get("ref", "")) == "A8.1", "got %s" % str(by_bus.get("ref", "")))
 	canvas.free()
+
+
+# ── 11. THE BAD BUS REACHES THE AGENT AND THE GHOST ───────────────────────────
+#
+# The canvas gesture (section 7) is one of three doorways onto the same plan.
+# This pins the other two on the SAME reverse-order crossing, plus the line that
+# must NOT move: a bus with no geometry at all still writes nothing.
+#
+# ORACLES:
+#   THE COPPER — the serialized trace list and history.size() on a board driven
+#     only through panel_tools.handle. The verb's own reply is not evidence.
+#   THE FINDINGS ARE ATTACHED, NOT MERELY RETURNED — read back out of a real
+#     RoutingWorkspace through findings_for_candidate(), the same reader the
+#     canvas witness renderer uses, and matched against the candidate id each
+#     one claims as its subject.
+#   UNBUILDABLE IS STILL UNBUILDABLE — an undeclared net through the MCP verb
+#     and a diagonal spine through bus_plan, both measured on the board.
+
+func _test_a_bad_bus_reaches_the_agent_and_the_ghost() -> void:
+	print("\n-- (11) a bad bus commits through MCP and proposes with its findings --")
+	var data := PCBData.new()
+	data.from_board_dict(_board())
+	var host := StubMcpHost.new()
+	host.data = data
+	var quiet := _board_state(data)
+
+	# Section 7's crossing, through the agent's doorway.
+	var crossed: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NC", "NB", "NA"],
+		"sources": ["U3.1", "U2.1", "U1.1"], "targets": ["V3.1", "V2.1", "V1.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+		"layer": "top",
+	})
+	check("the verb reports success — the copper landed", bool(crossed.get("success", false)),
+			str(crossed))
+	check("…3 traces in one journal step, read off the board itself",
+			_traces_by_net(data).size() == 3 and data.history.size() == int(quiet[1]) + 1,
+			str(_board_state(data)))
+	var findings: Array = crossed.get("findings", []) if crossed.get("findings", []) is Array else []
+	check("…and the broken rules came back as findings", not findings.is_empty(), str(crossed))
+	var named := false
+	for f in findings:
+		var msg := str((f as Dictionary).get("message", ""))
+		if msg.contains("NB") and msg.contains("NC"):
+			named = true
+	check("…at least one naming both crossing nets", named, str(findings))
+	check("…and the note tells the caller it landed anyway",
+			str(crossed.get("note", "")).contains("landed anyway"), str(crossed.get("note", "")))
+	check("one undo removes the whole bad bus", data.undo() and data.get_trace_count() == 0)
+
+	var before := _board_state(data)
+
+	# UNBUILDABLE 1: an undeclared net. Nothing to draw, so nothing lands.
+	var absent: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NOT_A_NET"],
+		"sources": ["U1.1", "U2.1"], "targets": ["V1.1", "V2.1"],
+		"points": [{"x_mm": 20.0, "y_mm": 20.0}, {"x_mm": 120.0, "y_mm": 20.0}],
+		"layer": "top",
+	})
+	check("an undeclared net is still refused outright",
+			not bool(absent.get("success", true)), str(absent))
+	check("…and writes nothing", _board_state(data) == before, str(_board_state(data)))
+
+	# UNBUILDABLE 2: a diagonal spine. No rounding here is one a fab would agree
+	# with, so there is no geometry to hand back and none to commit.
+	var diagonal: Dictionary = PanelToolsScript.bus_plan(
+		data, ["NA", "NB", "NC"], PackedVector2Array([PATH_1, Vector2(120.0, 33.0)]), "top",
+		PackedStringArray(["U1.1", "U2.1", "U3.1"]), PackedStringArray(["V1.1", "V2.1", "V3.1"]))
+	check("a diagonal spine plans as UNBUILDABLE, with no geometry at all",
+			not bool(diagonal.get("ok", true)) and not bool(diagonal.get("buildable", true))
+				and not diagonal.has("polylines"),
+			str(diagonal.get("error", "")))
+	check("…and bus_commit_plan refuses it even when handed it directly",
+			not bool(PanelToolsScript.bus_commit_plan(data, diagonal, "unbuildable").get("ok", true)))
+	check("…still nothing written", _board_state(data) == before, str(_board_state(data)))
+
+	# THE GHOST HALF: the same crossing, proposed instead of committed.
+	var ws = PcbRoutingWorkspace.new()
+	var plan: Dictionary = PanelToolsScript.bus_plan(
+		data, ["NC", "NB", "NA"], PackedVector2Array([PATH_1, PATH_2]), "top",
+		PackedStringArray(["U3.1", "U2.1", "U1.1"]), PackedStringArray(["V3.1", "V2.1", "V1.1"]))
+	check("the crossing plan is BAD BUT BUILDABLE, and complete",
+			not bool(plan.get("ok", true)) and bool(plan.get("buildable", false))
+				and bool(plan.get("complete", false)),
+			str(plan.get("error", "")))
+	var out: Dictionary = PanelToolsScript.bus_propose_plan(ws, data, plan)
+	check("it proposes 3 ghosts anyway",
+			bool(out.get("ok", false)) and int(out.get("proposed", 0)) == 3,
+			str(out.get("error", "")))
+	check("…and the board is still untouched", _board_state(data) == before, str(_board_state(data)))
+
+	var carried := 0
+	var misfiled := 0
+	for cand in ws.list_candidates():
+		var cid := str(cand.candidate_id)
+		var stored: Array = ws.findings_for_candidate(cid)
+		if stored.is_empty():
+			continue
+		carried += 1
+		for f in stored:
+			var fd: Dictionary = f
+			var nets: Array = fd.get("nets", []) if fd.get("nets", []) is Array else []
+			if not nets.is_empty() and not (str(cand.net) in nets):
+				misfiled += 1
+			var subjects: Array = fd.get("subjects", []) if fd.get("subjects", []) is Array else []
+			if subjects.is_empty() \
+					or str((subjects[0] as Dictionary).get("candidate_id", "")) != cid:
+				misfiled += 1
+	check("every ghost carries the findings that name its own net, filed under itself",
+			carried == 3 and misfiled == 0,
+			"%d ghosts with findings, %d mis-filed" % [carried, misfiled])

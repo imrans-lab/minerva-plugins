@@ -8231,6 +8231,13 @@ func _draw_trace_preview() -> void:
 ## bus_refusal() is therefore the same kind of
 ## pulled reading bus_phase() is, and the panel holds its words in the status
 ## line and tints the badge with them for as long as the refusal stands.
+##
+## BUT A REFUSED PLAN STILL COMMITS when its geometry exists. The tint above
+## means "this bus breaks a rule", not "this bus cannot be written": the finish
+## gesture lands the copper and repeats the broken rules in the summary, so the
+## user has traces to correct instead of an argument to win. Only a plan with no
+## geometry at all (bus_plan's `buildable` == false) writes nothing — see
+## _commit_bus.
 
 
 ## THE PHASE, as a BusPhase int, for surfaces outside this canvas — the toolbar
@@ -8855,9 +8862,18 @@ func _bus_nets_joined() -> String:
 ## gesture; every path out of it that is not a finished bus writes nothing and
 ## says why, so the tool cannot commit a bus the user could not finish.
 ##
-## `propose` (Shift+Enter): the same ok'd plan lands as workspace GHOST
-## candidates via panel_tools.bus_propose_plan — the identical function
-## minerva_pcb_workspace_propose_bus calls — instead of copper.
+## A BUS THAT BREAKS A RULE STILL COMMITS, as long as the geometry exists
+## (bus_plan's `buildable` — see pcb_bus_geometry.gd's "two classes of no"):
+## the traces land and the broken rules are said out loud alongside the summary,
+## because a bad route can be corrected and a refusal leaves nothing to correct.
+## A plan with no geometry at all still writes nothing. The live preview is
+## unchanged either way — a bad plan is still `ok == false`, so the spine keeps
+## its refusal tint and the panel keeps holding the reason.
+##
+## `propose` (Shift+Enter): the same plan lands as workspace GHOST candidates
+## via panel_tools.bus_propose_plan — the identical function
+## minerva_pcb_workspace_propose_bus calls — instead of copper, findings and
+## all.
 func _commit_bus(propose: bool = false) -> void:
 	if not data or tool_mode != ToolMode.BUS:
 		return
@@ -8878,10 +8894,10 @@ func _commit_bus(propose: bool = false) -> void:
 	var plan: Dictionary = _PanelToolsScript.bus_plan(
 		data, _bus_nets, _bus_spine_points, _bus_layer,
 		PackedStringArray(_bus_net_refs), PackedStringArray(_bus_target_refs))
-	if not bool(plan.get("ok", false)):
+	if not bool(plan.get("buildable", false)):
 		# Keep the whole gesture — picks, path AND targets: the fix for a
-		# crossing pair or a corner too tight is another target pad or a wider
-		# corner, not redrawing the bus from scratch.
+		# diagonal spine or an unresolvable pad is one more click, not redrawing
+		# the bus from scratch.
 		bus_tool_message.emit(str(plan.get("error", "Bus was refused.")))
 		return
 
@@ -8895,6 +8911,7 @@ func _commit_bus(propose: bool = false) -> void:
 			int(out.get("proposed", 0)), _bus_layer_display(), _bus_nets_joined()]
 		if not held.is_empty():
 			prop_summary += " %d net(s) held by a pinned candidate." % held.size()
+		prop_summary += _bus_findings_sentence(plan, "proposed")
 		_reset_bus_tool(false)
 		bus_tool_message.emit(prop_summary)
 		queue_redraw()
@@ -8909,9 +8926,25 @@ func _commit_bus(propose: bool = false) -> void:
 	var trace_ids: Array = result.get("trace_ids", [])
 	var summary := "Added bus: %d traces on %s (%s)." % [
 		trace_ids.size(), _bus_layer_display(), _bus_nets_joined()]
+	summary += _bus_findings_sentence(plan, "landed")
 	_reset_bus_tool(false)
 	bus_tool_message.emit(summary)
 	queue_redraw()
+
+
+## What the commit says ON TOP of its summary when the plan broke a rule and
+## landed anyway, or "" when it was clean.
+##
+## The findings' own words, verbatim — they already name the nets and quote the
+## measured and required millimetres, and this is the one place the human is
+## told, so nothing is abbreviated out of them here. Same sentence
+## panel_tools.bus_findings_sentence gives the two MCP verbs.
+func _bus_findings_sentence(plan: Dictionary, outcome: String) -> String:
+	var findings: Array = plan.get("findings", []) if plan.get("findings", []) is Array else []
+	if findings.is_empty():
+		return ""
+	return " %d rule(s) broke and it %s anyway so you can correct it: %s" % [
+		findings.size(), outcome, _PanelToolsScript.bus_findings_sentence(findings)]
 
 
 ## What Enter answers with in a phase that has nothing to commit — the verb the
@@ -9204,8 +9237,10 @@ func _draw_bus_preview() -> void:
 		draw_arc(cursor_pt, TRACE_PREVIEW_VERTEX_RADIUS_PX, 0.0, TAU, 16,
 			spine_color, 1.5)
 
-	# N ghost polylines — only once the plan is valid (a refused plan has no
-	# polylines to show; the tinted spine above already carries the refusal).
+	# N ghost polylines — CLEAN plans only. A bad-but-buildable plan does carry
+	# polylines, and deliberately does not draw them: ghosts in net colour read
+	# as "this is what you get", which is the one thing a bundle inside its own
+	# clearance must not say. The tinted spine above carries it instead.
 	# Net colour where the net has one, layer colour otherwise — mirrors
 	# _draw_zone_preview's fallback.
 	if bool(plan.get("ok", false)):
