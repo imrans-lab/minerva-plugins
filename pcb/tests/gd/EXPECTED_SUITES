@@ -46,7 +46,7 @@
 # 116 -> 122: a pad already under its lane's copper gets no reach at all, and a
 # pad half-to-one track width off its lane is named bus_sub_width_stub (+6).
 # MEASURED: 122 passed, 0 failed.
-test_bus_breakout_geometry.gd assertions=122
+test_bus_breakout_geometry.gd assertions=123
 # The canvas bus tool's pin-to-pin gesture and the plan its two MCP verbs
 # share. The board triple (traces, history, change journal) is the oracle for
 # every "this gesture wrote nothing" claim, read before the commit verb.
@@ -84,7 +84,7 @@ test_bus_breakout_geometry.gd assertions=122
 # incl. the path-start-beside-a-pick pin). MEASURED: 362 passed, 0 failed.
 # 362 -> 375: a pad under the number glyph is picked (17c), the TARGETS plan
 # is the commit plan (17d), an all-open station bus (17e). MEASURED: 375.
-test_bus_tool.gd assertions=375
+test_bus_tool.gd assertions=419
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
@@ -117,7 +117,7 @@ test_parity_bridge.gd assertions=79
 test_pcb_annotation_host_semantics.gd assertions=185
 test_pcb_apply_route_hints.gd assertions=89
 test_pcb_backend_lifecycle.gd assertions=52
-test_pcb_bus_geometry.gd assertions=83
+test_pcb_bus_geometry.gd assertions=90
 test_pcb_canvas_input_probe.gd assertions=123
 test_pcb_cutout.gd assertions=38
 test_pcb_drc_propose.gd assertions=23 real-worker
@@ -149,7 +149,7 @@ test_pcb_panel_tools_migration.gd assertions=68
 # check( calls is the assertion count.
 # 200 -> 202: the standing bus status line carries the lane map and the
 # tooltip its untrimmed form (+2). MEASURED: 202 passed, 0 failed.
-test_pcb_panel_ui.gd assertions=202
+test_pcb_panel_ui.gd assertions=226
 # 49 -> 57: the copper-extent pad pick adds four probes run over a part built
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.
@@ -291,7 +291,7 @@ test_via_edit_and_fab_stage.gd assertions=93
 # Provisional until the first trustworthy post-fix run, per the sibling NEW
 # entries above; the deliberate RED baseline run (helper + wiring absent)
 # reports fewer and fails — that failing run is the point, not a stale pin.
-test_board_by_path.gd assertions=63
+test_board_by_path.gd assertions=83
 # NEW (DCR 01a022ab356c acceptance): "proposal" means ghost trace only —
 # B one-call span-propose (mints the intent internally; spans+hint_ids =
 # union), C orphan-reroute terminal fallback with ingest task-key override,
