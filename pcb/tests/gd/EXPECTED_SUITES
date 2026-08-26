@@ -79,7 +79,12 @@ test_bus_breakout_geometry.gd assertions=122
 # +12), a station that walls a pad off is named (13e/13f, +9), and the
 # add_bus journal row (13g, +10). MEASURED: 289 passed, 0 failed.
 # 289 -> 291: an unplated hole is on no layer at all (+2). MEASURED: 291.
-test_bus_tool.gd assertions=291
+# 291 -> 362: open-ended commit (15/15b, +27), every lane wears its net (16,
+# +15), lane order by number click + clean-order advisory (17/17b, +29
+# incl. the path-start-beside-a-pick pin). MEASURED: 362 passed, 0 failed.
+# 362 -> 375: a pad under the number glyph is picked (17c), the TARGETS plan
+# is the commit plan (17d), an all-open station bus (17e). MEASURED: 375.
+test_bus_tool.gd assertions=375
 test_candidate_canvas.gd assertions=281
 # Bug 01a007f1dd02 — canonical wire form for the worker channels. Pinned at
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
@@ -142,7 +147,9 @@ test_pcb_panel_tools_migration.gd assertions=68
 # by the badge — one wide test of 17 assertions (_test_bus_refusal_is_held).
 # Its one loop ANDs three states into a single check(), so the source count of
 # check( calls is the assertion count.
-test_pcb_panel_ui.gd assertions=200
+# 200 -> 202: the standing bus status line carries the lane map and the
+# tooltip its untrimmed form (+2). MEASURED: 202 passed, 0 failed.
+test_pcb_panel_ui.gd assertions=202
 # 49 -> 57: the copper-extent pad pick adds four probes run over a part built
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.
@@ -161,7 +168,14 @@ test_pcb_route_hint_mcp_parity.gd assertions=19
 # Section 9 (the working layer authors, the view only shows): 9 checks that
 # choosing a layer moves where the trace lands and hiding or filtering a
 # layer does not — 77 -> 86. MEASURED: 86 passed, 0 failed.
-test_pcb_trace_tool.gd assertions=86
+# 86 -> 110: section 10, a free trace end is an anchor — start extends the
+# same trace, finish joins by extending, netless/joined/pad-wins refusals,
+# and minerva_pcb_add_trace agrees (+24). MEASURED: 110 passed, 0 failed.
+# 110 -> 116: nearest free end across a short stub, a locked trace offers
+# none, and finishing on the same trace's other end is refused (+6).
+# 116 -> 120: the model itself refuses a locked trace and an end that gained
+# copper between the pick and the write (+4). MEASURED: 120.
+test_pcb_trace_tool.gd assertions=120
 # Re-pinned 28 → 34 with OFC-5's menu-revealed drawing-width section (BT-OFC5,
 # 6 checks; the section-registry count check updates in place).
 test_pcb_width_prefs.gd assertions=34
@@ -302,3 +316,14 @@ test_sidecar_constraint_survival.gd assertions=14
 # owns that). Real-worker: sections 1 and 2 compare the COMPILER's regions
 # against what the model holds, and a canned fill can only agree with itself.
 test_zone_fill_transport.gd assertions=31 real-worker
+# NEW: the one trace-geometry library (point/segment/polyline primitives,
+# gaps, axis checks, trace-end test, translate, bounds), every case
+# hand-derived. MEASURED: 89 passed, 0 failed.
+test_pcb_trace_geometry.gd assertions=89
+# NEW: cut a trace at an interior vertex — model op, refusals, the verb's
+# index and coordinate forms, the free end afterward, the context menu.
+# MEASURED: 43 passed, 0 failed.
+# 43 -> 49: a locked trace refuses the verb; a cut or extend retires the
+# committed candidate that owned the trace, canvas and verb (+6).
+# 49 -> 50: cut_trace refuses a locked trace on its own (+1). MEASURED: 50.
+test_trace_cut.gd assertions=50
