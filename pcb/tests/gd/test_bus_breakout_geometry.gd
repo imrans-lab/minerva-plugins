@@ -65,6 +65,8 @@ func _init() -> void:
 	_run_structural_refusals()
 	_run_pads_already_on_their_lanes()
 	_run_leg_lands_on_its_lane_corner()
+	_run_pads_along_the_spine()
+	_run_pad_under_its_lane()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -818,6 +820,16 @@ func _run_clearance_refusals() -> void:
 	check_bad_but_buildable("breakout legs running parallel inside the clearance are named",
 		crowded, 2, ["\"SDA\"", "\"SCL\"", "0.250mm apart", "need 0.500mm"])
 	_check_crowded_copper(crowded)
+	# STAGGERED PADS ARE NOT A COLUMN. 0.25mm apart across the bundle is inside
+	# the pitch but outside the 0.2mm track, so both stay on the ladder — SCL
+	# at station 0, SDA at 0.5 — and the copper CROWDS, as measured above. Sent
+	# sideways instead, SCL's leg at x -6 would cross SDA's lane, which starts
+	# at x -8: a short in place of a named crowd.
+	var stations: Array = crowded.get("source_stations", [])
+	check("staggered pads stay on the ladder — stations 0.5 / 0, neither a pad row",
+		stations.size() == 2
+			and absf(float(stations[0]) - 0.5) <= EPS
+			and absf(float(stations[1]) - 0.0) <= EPS)
 
 	var near_miss: Dictionary = BusGeom.bundle_routes(
 		_pv([Vector2(0, 0), Vector2(100, 0)]),
@@ -1003,4 +1015,223 @@ func _run_leg_lands_on_its_lane_corner() -> void:
 	check("no segment of any route is shorter than its own track is wide", stub.is_empty())
 	if not stub.is_empty():
 		printerr("    " + stub)
+
+	# THE ACROSS CASE STAYS ON THE LADDER. These pads sit 0.65mm apart ACROSS
+	# the horizontal first segment, so every station is a ladder step measured
+	# inward from the spine's start — 0, 0.45, 0.9 in pick order — and not one
+	# of them is a pad row. Together with the three point lists above this is
+	# the pin that the sideways construction below leaves this shape alone.
+	var stations: Array = result["source_stations"]
+	check("the across case keeps its ladder stations 0 / 0.45 / 0.9",
+		stations.size() == 3
+			and absf(float(stations[0]) - 0.0) <= EPS
+			and absf(float(stations[1]) - 0.45) <= EPS
+			and absf(float(stations[2]) - 0.9) <= EPS)
+
+
+## A SIDEWAYS PAD NEAR ITS OWN LANE draws no sub-width reach.
+##
+## Spine (0,0)->(100,0), two 0.2mm tracks at 0.3mm clearance: lanes -0.25 (A)
+## and +0.25 (B). Sources A (-10, 0.17) and B (-5, 0.17) share a column along
+## the spine, so both are sideways. B's centre is 0.08mm from its lane — under
+## the lane's copper (half-width 0.1) — so B's route starts ON the lane in its
+## own row, (-5, 0.25), with no 0.08mm jog; A's centre is 0.42mm from its lane
+## and gets an ordinary jog. Targets (110,20)/(110,22) are the straight
+## bundle's: A leaves first, stations 0 / 0.5.
+##
+##     A: (-10,0.17) (-10,-0.25) (100,-0.25) (100,20) (110,20)
+##     B: (-5,0.25) (99.5,0.25) (99.5,22) (110,22)
+##
+## ORACLE beyond the points: a walk over every run of every route finds none
+## shorter than its track is wide. THE SAME PADS AT y 0.10 put B 0.15mm from its
+## lane — past the copper's edge, short of a track width — a jog no
+## construction can lengthen; it is drawn and named as a stub, by net, with its
+## own length.
+func _run_pad_under_its_lane() -> void:
+	print("-- a sideways pad under its lane starts on it; a pad a fraction off is a named stub --")
+	var widths: Array = [0.2, 0.2]
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(100, 0)]),
+		PackedStringArray(["A", "B"]),
+		_pv([Vector2(-10, 0.17), Vector2(-5, 0.17)]),
+		_pv([Vector2(110, 20), Vector2(110, 22)]),
+		widths, 0.3)
+	check("the near-lane column routes clean", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+	check_points("A: 0.42mm off its lane, an ordinary sideways jog",
+		_route(result, 0),
+		[Vector2(-10, 0.17), Vector2(-10, -0.25), Vector2(100, -0.25),
+		 Vector2(100, 20), Vector2(110, 20)])
+	check_points("B: 0.08mm off its lane, the route starts on the lane in B's row",
+		_route(result, 1),
+		[Vector2(-5, 0.25), Vector2(99.5, 0.25), Vector2(99.5, 22), Vector2(110, 22)])
+	var stub := ""
+	for i in range(2):
+		var route: PackedVector2Array = _route(result, i)
+		for s in range(route.size() - 1):
+			var seg: float = route[s].distance_to(route[s + 1])
+			if seg < float(widths[i]) - EPS:
+				stub = "net %d segment %d is %.6fmm on a %.3fmm track" % [i, s, seg, float(widths[i])]
+	check("no run of either route is shorter than its track is wide", stub.is_empty())
+	if not stub.is_empty():
+		printerr("    " + stub)
+
+	var stubbed: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(100, 0)]),
+		PackedStringArray(["A", "B"]),
+		_pv([Vector2(-10, 0.10), Vector2(-5, 0.10)]),
+		_pv([Vector2(110, 20), Vector2(110, 22)]),
+		widths, 0.3)
+	check_bad_but_buildable("a pad 0.15mm off its lane is a named stub, drawn anyway",
+		stubbed, 2, ["\"B\"", "0.150mm run", "stub"])
+	var first: Array = stubbed.get("findings", [])
+	check("…filed under its own finding type",
+		not first.is_empty()
+			and str((first[0] as Dictionary).get("type", "")) == BusGeom.FINDING_SUB_WIDTH_STUB)
+
+
+## PADS SPREAD ALONG THE SPINE'S AXIS leave their column sideways.
+##
+## THE LIVE COLUMN: three 1.7mm THT pads at x 56.43, y 50.097 / 52.637 / 55.177,
+## with the spine starting BESIDE the column and running down: (58.5,57.5) ->
+## (58.5,86). u = (0,1), n = (-1,0), so a pad's perpendicular coordinate is
+## 58.5 - x = 2.07 for all three, and its axial one is y - 57.5: -7.403,
+## -4.863, -2.323. Three 0.25mm tracks at 0.2mm clearance: pitch 0.45, lanes
+## [-0.45, 0, +0.45] in pick order, i.e. x = 58.95, 58.5, 58.05.
+##
+## Every pad shares its column with the other two (same perpendicular, rows
+## 2.54mm apart), so each one is SIDEWAYS: no leg runs down the column, the
+## station is the pad's own row, and the route is pad -> (lane x, pad y) -> lane.
+## Picked furthest-first (GPIO6 at y 50.097 takes x 58.95, the lane furthest
+## from the column), each leg sweeps only lanes that begin nearer the spine
+## than its own row, so nothing crosses.
+##
+## TARGET pads sit past the end, east of the spine, spread ACROSS it: GPIO6
+## (64,92), GPIO5 (62,92), GPIO4 (60,92) — perpendicular -5.5, -3.5, -1.5
+## against lanes -0.45, 0, +0.45. GPIO4's band [-1.5, 0.45] holds both other
+## lanes, so it leaves first; GPIO5's holds GPIO6's; departure order GPIO4,
+## GPIO5, GPIO6 at stations 0, 0.45, 0.9 measured back from y 86: legs at y 86,
+## 85.55, 85.1. That end is the ordinary ladder, so this one case exercises
+## both constructions on one bus.
+##
+##     GPIO6: (56.43,50.097) (58.95,50.097) (58.95,85.1) (64,85.1) (64,92)
+##     GPIO5: (56.43,52.637) (58.5,52.637)  (58.5,85.55) (62,85.55) (62,92)
+##     GPIO4: (56.43,55.177) (58.05,55.177) (58.05,86)   (60,86)    (60,92)
+##
+## ORACLES that owe nothing to those point lists:
+##   - no segment of any net comes within pad radius (0.85) + clearance (0.2)
+##     + half its own width of another net's pad centre — the live defect ran
+##     every leg through the pads below it at distance ZERO;
+##   - no two nets share a point (_routes_touch) and none come closer than
+##     their pitch (_min_gap);
+##   - every segment is axis-aligned and at least a track width long.
+##
+## THE SAME PADS PICKED NEAREST-FIRST put GPIO4 on the lane furthest from the
+## column: its leg at y 55.177 has to cross GPIO5's lane (x 58.5), which has
+## run since y 52.637. Named as a crossing at the source end, drawn anyway.
+##
+## TWO COLUMNS WITH THEIR ROWS LINED UP — an LGA under the spine's end — put two
+## sideways legs in one row, which no pick order separates. Spine (0,0)->(30,0)
+## with the four-net source column of the invariants suite; targets A (35,2),
+## B (33,2), C (35,4), D (33,4): A and B share the column at y 2, C and D the
+## one at y 4, and A and C share the row x 35. Named by its own finding type,
+## naming A and C and the target end, drawn anyway.
+func _run_pads_along_the_spine() -> void:
+	print("-- pads spread along the spine leave their column sideways --")
+	var widths: Array = [0.25, 0.25, 0.25]
+	var sources := _pv([Vector2(56.43, 50.097), Vector2(56.43, 52.637), Vector2(56.43, 55.177)])
+	var targets := _pv([Vector2(64, 92), Vector2(62, 92), Vector2(60, 92)])
+	var result: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(58.5, 57.5), Vector2(58.5, 86)]),
+		PackedStringArray(["GPIO6", "GPIO5", "GPIO4"]),
+		sources, targets, widths, 0.2)
+	check("the live column routes clean", bool(result.get("ok", false)))
+	if not bool(result.get("ok", false)):
+		printerr("    refused: " + str(result.get("error", "")))
+		return
+
+	check_points("GPIO6: sideways at y 50.097 onto the far lane, ladder leg at y 85.1",
+		_route(result, 0),
+		[Vector2(56.43, 50.097), Vector2(58.95, 50.097), Vector2(58.95, 85.1),
+		 Vector2(64, 85.1), Vector2(64, 92)])
+	check_points("GPIO5: sideways at y 52.637 onto the spine's own lane, leg at y 85.55",
+		_route(result, 1),
+		[Vector2(56.43, 52.637), Vector2(58.5, 52.637), Vector2(58.5, 85.55),
+		 Vector2(62, 85.55), Vector2(62, 92)])
+	check_points("GPIO4: sideways at y 55.177 onto the near lane, leg at y 86",
+		_route(result, 2),
+		[Vector2(56.43, 55.177), Vector2(58.05, 55.177), Vector2(58.05, 86),
+		 Vector2(60, 86), Vector2(60, 92)])
+	var stations: Array = result["source_stations"]
+	check("each sideways station is its pad's own row behind the spine's start",
+		stations.size() == 3
+			and absf(float(stations[0]) + 7.403) <= EPS
+			and absf(float(stations[1]) + 4.863) <= EPS
+			and absf(float(stations[2]) + 2.323) <= EPS)
+
+	var polylines: Array = result["polylines"]
+	var reach := 0.85 + 0.2
+	var hit := ""
+	for i in range(polylines.size()):
+		var route: PackedVector2Array = polylines[i]
+		for j in range(polylines.size()):
+			if j == i:
+				continue
+			for pad in [sources[j], targets[j]]:
+				for s in range(route.size() - 1):
+					var gap: float = _point_segment(pad, route[s], route[s + 1])
+					if gap < reach + float(widths[i]) * 0.5 - MEASURE_EPS:
+						hit = "net %d segment %d is %.3fmm from net %d's pad" % [i, s, gap, j]
+	check("no leg comes within pad radius + clearance of a foreign pad", hit.is_empty())
+	if not hit.is_empty():
+		printerr("    " + hit)
+
+	var bad := ""
+	for i in range(polylines.size()):
+		for j in range(i + 1, polylines.size()):
+			if _routes_touch(polylines[i], polylines[j]):
+				bad = "nets %d and %d share copper" % [i, j]
+			var need: float = BusGeom.pitch_between(float(widths[i]), float(widths[j]), 0.2)
+			if _min_gap(polylines[i], polylines[j]) < need - MEASURE_EPS:
+				bad = "nets %d and %d are closer than %.3f" % [i, j, need]
+	check("no two nets overlap or crowd each other", bad.is_empty())
+	if not bad.is_empty():
+		printerr("    " + bad)
+
+	var shape := ""
+	for i in range(polylines.size()):
+		var route: PackedVector2Array = polylines[i]
+		for s in range(route.size() - 1):
+			var d: Vector2 = route[s + 1] - route[s]
+			if absf(d.x) > EPS and absf(d.y) > EPS:
+				shape = "net %d segment %d is diagonal" % [i, s]
+			if d.length() < float(widths[i]) - EPS:
+				shape = "net %d segment %d is a %.6fmm stub" % [i, s, d.length()]
+	check("every segment is Manhattan and at least a track width long", shape.is_empty())
+	if not shape.is_empty():
+		printerr("    " + shape)
+
+	check_bad_but_buildable("picked nearest-first, the column crossing is named for what it is",
+		BusGeom.bundle_routes(
+			_pv([Vector2(58.5, 57.5), Vector2(58.5, 86)]),
+			PackedStringArray(["GPIO4", "GPIO5", "GPIO6"]),
+			_pv([Vector2(56.43, 55.177), Vector2(56.43, 52.637), Vector2(56.43, 50.097)]),
+			_pv([Vector2(60, 92), Vector2(62, 92), Vector2(64, 92)]),
+			widths, 0.2),
+		3, ["\"GPIO4\"", "\"GPIO5\"", "source", "along the spine", "furthest along the column"])
+
+	var lga: Dictionary = BusGeom.bundle_routes(
+		_pv([Vector2(0, 0), Vector2(30, 0)]),
+		PackedStringArray(["A", "B", "C", "D"]),
+		_pv([Vector2(-10, -12), Vector2(-10, -10), Vector2(-10, -8), Vector2(-10, -6)]),
+		_pv([Vector2(35, 2), Vector2(33, 2), Vector2(35, 4), Vector2(33, 4)]),
+		[0.2, 0.2, 0.2, 0.2], 0.3)
+	check_bad_but_buildable("two columns with their rows lined up are named, and drawn",
+		lga, 4, ["\"A\"", "\"C\"", "target", "along the spine", "share a row"])
+	var lga_findings: Array = lga.get("findings", [])
+	check("that finding carries its own type",
+		not lga_findings.is_empty()
+			and str((lga_findings[0] as Dictionary).get("type", "")) == BusGeom.FINDING_PADS_ALONG_SPINE)
 

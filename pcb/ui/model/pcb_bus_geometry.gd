@@ -76,11 +76,12 @@ extends RefCounted
 ##   does the tool layer that calls offset_polyline directly.
 ## - CLOSED POLYGONS. These are open polylines; the first and last vertices get
 ##   plain segment-end treatment, never a join.
-## - PADS SPREAD ALONG THE CORRIDOR. bundle_routes reaches pads that lie beyond
-##   the spine's ends. A row of pads running PARALLEL to the bundle, each one
-##   wanting its own perpendicular drop at its own position along the spine, is
-##   a different construction (the stations would come from the pads instead of
-##   being built distinct) and is named in a finding, not served.
+## - TWO PAD COLUMNS SIDE BY SIDE ALONG THE CORRIDOR. bundle_routes serves a
+##   pad column that runs PARALLEL to the bundle by leaving each pad sideways
+##   at its own row (see its "SIDEWAYS" note). Two such columns whose rows line
+##   up — an LGA under the end of the spine — put two sideways legs in one row,
+##   which no departure order separates; that is named in a finding, not
+##   served.
 ##
 ##
 ## TWO CLASSES OF "NO" -- READ BEFORE ADDING A CHECK
@@ -181,6 +182,8 @@ const FINDING_END_CROSSING := "bus_end_crossing"
 const FINDING_SPINE_TOO_SHORT := "bus_spine_too_short"
 const FINDING_CLEARANCE := "bus_clearance"
 const FINDING_VIA_STATION_CROWDED := "bus_via_station_crowded"
+const FINDING_PADS_ALONG_SPINE := "bus_pads_along_spine"
+const FINDING_SUB_WIDTH_STUB := "bus_sub_width_stub"
 
 
 ## The parallel polyline at signed perpendicular `offset` from `points`.
@@ -393,11 +396,30 @@ static func cumulative_offsets(widths: Array, clearance: float) -> Array:
 ## rebuilt from a dot product, which would leave an ulp of diagonal behind.
 ##
 ## The pads should lie OUTSIDE the spine: a source pad no further along than the
-## spine's first point, a target pad no nearer than its last. Pads spread ALONG
-## the corridor (a header running parallel to the bundle) break that rule, and
-## are reported rather than served: their legs would have to drop perpendicular
-## at each pad's own position, which is a different construction from this one
-## and has no distinct-station guarantee.
+## spine's first point, a target pad no nearer than its last.
+##
+## SIDEWAYS LEGS. The ladder above assumes each pad's first leg — the one that
+## runs PARALLEL to the spine from the pad to its station — crosses nothing.
+## A pad column that runs parallel to the bundle (a THT header beside a
+## vertical first segment) breaks that: every pad's parallel leg would run down
+## the column through the pads nearer the spine, and the legs would lie on one
+## line. So a pad that shares a column with another pad of the bus (their
+## perpendicular coordinates within a track width of each other, their axial ones at
+## least a pitch apart) is a SIDEWAYS pad: it has no parallel leg at all, its
+## station IS its own axial position — behind the spine's end, so the station
+## is negative — and its lane runs from that row. Each such pad leaves its
+## column perpendicular to it, in its own row, and the rows are spaced by the
+## pads' own pitch. Its corner keeps the pad's axial coordinate exactly, as the
+## across case keeps the perpendicular one. Sideways pads take no part in the
+## ladder and never snap to a lane corner (_leg_station), and being past the
+## spine's end is no defect for one: it has no forward leg to fold back.
+##
+## The sideways construction is clean only when the lanes are picked in column
+## order — the pad furthest along the column from the spine takes the lane
+## furthest from the column, so each leg sweeps only lanes that begin nearer
+## the spine than its own row. Any other pick order, a ladder pad whose leg has
+## to cross a sideways lane, or a second column whose rows line up with the
+## first (two sideways legs in one row) is named in a finding and built anyway.
 ##
 ## `via_station_index` names ONE interior vertex of `spine` (the array as GIVEN,
 ## duplicates and all — it is translated onto the deduplicated spine here) that
@@ -484,24 +506,36 @@ static func bundle_routes(
 	var n_tgt := Vector2(-u_tgt.y, u_tgt.x)
 
 	# Pads in each end's own frame: `perp` across the bundle (same sign
-	# convention as the offsets), the axial component only checked, never kept.
+	# convention as the offsets) and `axial` measured INWARD from that end of
+	# the spine — the target end is the source end of the reversed spine, so
+	# its axial sign is flipped and both ends read the same way: a pad outside
+	# the spine is negative, a pad past the spine's end positive.
 	var src_perp: Array = []
 	var tgt_perp: Array = []
+	var src_axial: Array = []
+	var tgt_axial: Array = []
 	for i in range(n):
 		var from_start: Vector2 = sources[i] - pts[0]
-		if from_start.dot(u_src) > _MIN_SEGMENT_MM:
-			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
-				"Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start BEHIND the source pads, before them along its first segment."
-					% [net_names[i], from_start.dot(u_src)],
-				[net_names[i]], from_start.dot(u_src), 0.0, sources[i]))
 		var from_end: Vector2 = targets[i] - pts[last]
-		if from_end.dot(u_tgt) < -_MIN_SEGMENT_MM:
-			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
-				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end PAST the target pads, beyond them along its last segment."
-					% [net_names[i], -from_end.dot(u_tgt)],
-				[net_names[i]], -from_end.dot(u_tgt), 0.0, targets[i]))
 		src_perp.append(from_start.dot(n_src))
 		tgt_perp.append(from_end.dot(n_tgt))
+		src_axial.append(from_start.dot(u_src))
+		tgt_axial.append(-from_end.dot(u_tgt))
+	var src_sideways: Array = _sideways_tracks(src_perp, src_axial, widths, clearance)
+	var tgt_sideways: Array = _sideways_tracks(tgt_perp, tgt_axial, widths, clearance)
+	for i in range(n):
+		# A pad past the spine's end folds its FORWARD leg back over the
+		# others; a sideways pad has no forward leg, so the rule is not its.
+		if not src_sideways[i] and float(src_axial[i]) > _MIN_SEGMENT_MM:
+			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
+				"Net \"%s\"'s source pad is %.3fmm past the start of the spine — a breakout leg runs from the spine back to its pad, so the spine has to start BEHIND the source pads, before them along its first segment."
+					% [net_names[i], float(src_axial[i])],
+				[net_names[i]], float(src_axial[i]), 0.0, sources[i]))
+		if not tgt_sideways[i] and float(tgt_axial[i]) > _MIN_SEGMENT_MM:
+			findings.append(_finding(FINDING_PAD_INSIDE_CORRIDOR,
+				"Net \"%s\"'s target pad is %.3fmm short of the end of the spine — a breakout leg runs from the spine out to its pad, so the spine has to end PAST the target pads, beyond them along its last segment."
+					% [net_names[i], float(tgt_axial[i])],
+				[net_names[i]], float(tgt_axial[i]), 0.0, targets[i]))
 
 	var offsets: Array = cumulative_offsets(widths, clearance)
 	# THE WIDENING, and the only geometry a station adds: each track steps out
@@ -516,9 +550,11 @@ static func bundle_routes(
 		fan_at = _via_station_fan_distances(offsets, via_offsets, widths, clearance, via_diameter)
 		for f in fan_at:
 			fan = maxf(fan, float(f))
-	var src := _departure_stations(src_perp, offsets, widths, clearance, net_names, "source")
+	var src := _departure_stations(src_perp, src_axial, src_sideways, offsets, widths,
+		clearance, net_names, "source")
 	findings.append_array(src["findings"])
-	var tgt := _departure_stations(tgt_perp, offsets, widths, clearance, net_names, "target")
+	var tgt := _departure_stations(tgt_perp, tgt_axial, tgt_sideways, offsets, widths,
+		clearance, net_names, "target")
 	findings.append_array(tgt["findings"])
 	var src_stations: Array = src["stations"]
 	var tgt_stations: Array = tgt["stations"]
@@ -580,27 +616,39 @@ static func bundle_routes(
 		var tgt_lane: PackedVector2Array = lane if station < 0 else lane_b
 		# Each leg turns at its own station, EXCEPT where that would leave a
 		# sub-width remnant of the lane between it and the lane's own corner.
-		var d: float = _leg_station(float(src_stations[i]),
-			_lane_corner(lane, true, pts[0], u_src), i, src_stations, widths, clearance)
-		var e: float = _leg_station(float(tgt_stations[i]),
-			_lane_corner(tgt_lane, false, pts[last], -u_tgt), i, tgt_stations, widths, clearance)
-		# A pad already on its own lane, or already at its own station, makes a
-		# leg zero-length; the corner is then the same point twice, which is why
+		# A sideways pad's station is its own row and never moves.
+		var d: float = float(src_stations[i]) if src_sideways[i] else _leg_station(
+			float(src_stations[i]), _lane_corner(lane, true, pts[0], u_src),
+			i, src_stations, widths, clearance)
+		var e: float = float(tgt_stations[i]) if tgt_sideways[i] else _leg_station(
+			float(tgt_stations[i]), _lane_corner(tgt_lane, false, pts[last], -u_tgt),
+			i, tgt_stations, widths, clearance)
+		# Every point of a leg is placed by _leg_point: on the station line for
+		# a ladder pad, on the pad's own row for a sideways one. A pad already
+		# on its own lane, or already at its own station, makes a leg
+		# zero-length; the corner is then the same point twice, which is why
 		# every run below is deduplicated before it is used.
+		# A SIDEWAYS pad whose centre already sits under its lane's copper has
+		# no reach to draw: the run from its centre to the lane's centreline
+		# would be shorter than the track is wide, a stub, so the route begins
+		# on the lane in the pad's row and the pad is met by the copper itself.
 		var head := PackedVector2Array()
-		head.append(sources[i])
-		head.append(_station_point(pts[0], u_src, d, sources[i]))
+		if not _pad_under_lane(src_sideways[i], float(src_perp[i]), offset, float(widths[i])):
+			head.append(sources[i])
+			head.append(_leg_point(src_sideways[i], sources[i], pts[0], u_src, d, sources[i]))
 		var tail := PackedVector2Array()
-		tail.append(_station_point(pts[last], u_tgt, -e, targets[i]))
-		tail.append(targets[i])
+		if not _pad_under_lane(tgt_sideways[i], float(tgt_perp[i]), offset, float(widths[i])):
+			tail.append(_leg_point(tgt_sideways[i], targets[i], pts[last], u_tgt, -e, targets[i]))
+			tail.append(targets[i])
 
 		# Only the lane's two ENDS move, inward to this track's own stations.
 		# Indexed from the ends rather than by spine vertex on purpose: a spine
 		# that doubles back bevels its reversal into TWO offset points, so
 		# `lane` is not 1:1 with the spine there.
-		lane[0] = _station_point(pts[0], u_src, d, lane[0])
+		lane[0] = _leg_point(src_sideways[i], sources[i], pts[0], u_src, d, lane[0])
 		if station < 0:
-			lane[lane.size() - 1] = _station_point(pts[last], u_tgt, -e, lane[lane.size() - 1])
+			lane[lane.size() - 1] = _leg_point(tgt_sideways[i], targets[i], pts[last],
+				u_tgt, -e, lane[lane.size() - 1])
 			var route := head
 			route.append_array(lane)
 			route.append_array(tail)
@@ -621,7 +669,8 @@ static func bundle_routes(
 		run_a = _drop_duplicate_points(run_a)
 
 		lane_b[0] = exit_pt + n_st * offset
-		lane_b[lane_b.size() - 1] = _station_point(pts[last], u_tgt, -e, lane_b[lane_b.size() - 1])
+		lane_b[lane_b.size() - 1] = _leg_point(tgt_sideways[i], targets[i], pts[last],
+			u_tgt, -e, lane_b[lane_b.size() - 1])
 		var run_b := PackedVector2Array()
 		run_b.append(via_point)
 		run_b.append(exit_pt + n_st * v)
@@ -643,6 +692,7 @@ static func bundle_routes(
 
 	# THE MEASUREMENT. Everything above reasons about one end of the spine at a
 	# time and about crossings only; this measures the finished copper.
+	findings.append_array(_stub_findings(polylines, net_names, widths))
 	findings.append_array(_clearance_findings(polylines, net_names, widths, clearance))
 
 	return {
@@ -960,6 +1010,38 @@ static func _axis_unit(d: Vector2) -> Vector2:
 	return Vector2(signf(d.x), 0.0) if d.y == 0.0 else Vector2(0.0, signf(d.y))
 
 
+## Is a SIDEWAYS pad's centre already under its own lane's copper — within
+## half the track width of the lane's centreline? Such a pad has no reach to
+## draw; its route starts on the lane. A pad exactly on the lane counts too,
+## harmlessly: its reach was zero-length and dropped anyway.
+static func _pad_under_lane(sideways: bool, pad_perp: float, lane_perp: float,
+		width: float) -> bool:
+	return sideways and absf(pad_perp - lane_perp) <= width * 0.5 + _CLEARANCE_TOLERANCE_MM
+
+
+## One finding per net whose finished route carries a run that is shorter than
+## its own track is wide but not zero — copper a fab renders as a notch and DRC
+## measures as a defect. A ladder pad half a track to a whole track off its
+## lane, or a sideways pad the same distance off (nearer than that it is under
+## the lane and drawn without a reach), lands here; no leg construction can
+## make that jog longer, since its length IS the pad's offset from the lane.
+static func _stub_findings(polylines: Array, net_names: PackedStringArray, widths: Array) -> Array:
+	var out: Array = []
+	for i in range(polylines.size()):
+		var route: PackedVector2Array = polylines[i]
+		var width: float = float(widths[i])
+		for s in range(route.size() - 1):
+			var run: float = route[s].distance_to(route[s + 1])
+			if run <= _MIN_SEGMENT_MM or run >= width - _CLEARANCE_TOLERANCE_MM:
+				continue
+			out.append(_finding(FINDING_SUB_WIDTH_STUB,
+				"Net \"%s\"'s route has a %.3fmm run at (%.3f, %.3f) on a %.3fmm track — a stub shorter than the copper is wide, which a fab renders as a notch. Move the pad onto its lane, or a full track width off it."
+					% [net_names[i], run, route[s].x, route[s].y, width],
+				[net_names[i]], run, width, (route[s] + route[s + 1]) * 0.5))
+			break
+	return out
+
+
 ## The point `axial` mm along `u` from `origin`, on the same perpendicular line
 ## as `through`.
 ##
@@ -971,6 +1053,20 @@ static func _station_point(origin: Vector2, u: Vector2, axial: float, through: V
 	if u.y == 0.0:
 		return Vector2(origin.x + u.x * axial, through.y)
 	return Vector2(through.x, origin.y + u.y * axial)
+
+
+## Where a breakout leg turns, on the perpendicular line through `through`.
+##
+## A ladder pad turns `axial` mm along `u` from `origin` — _station_point. A
+## SIDEWAYS pad turns in its own row: the axial coordinate is COPIED from `pad`
+## rather than rebuilt from the station it was measured into, so the pad and
+## its corner share that coordinate to the bit and the run between them is
+## either exactly zero (dropped) or exactly perpendicular to the spine.
+static func _leg_point(sideways: bool, pad: Vector2, origin: Vector2, u: Vector2,
+		axial: float, through: Vector2) -> Vector2:
+	if sideways:
+		return _station_point(pad, u, 0.0, through)
+	return _station_point(origin, u, axial, through)
 
 
 ## How far inward from `origin` along `u` the lane's OWN corner sits, in the
@@ -1030,23 +1126,37 @@ static func _leg_station(station: float, corner: float, index: int,
 ## Where each track leaves the bundle at ONE end, as a distance measured inward
 ## from that end of the spine.
 ##
-## `pad_perp` and `lane_perp` are that end's frame: the pad's and the lane's
-## perpendicular coordinates. Both ends solve the same problem — the target end
-## is the source end of the reversed spine, which negates every perpendicular
-## coordinate, and every test below is a containment test that negation leaves
-## alone — so the caller hands over the target end unchanged and gets stations
-## measured backwards from the spine's last point.
+## `pad_perp`, `pad_axial` and `lane_perp` are that end's frame: the pad's
+## perpendicular and axial coordinates and the lane's perpendicular one. Both
+## ends solve the same problem — the target end is the source end of the
+## reversed spine, which negates every coordinate, and every test below is a
+## containment test that negation leaves alone — so the caller hands over the
+## target end in that reversed frame and gets stations measured backwards from
+## the spine's last point.
+##
+## `sideways[i]` (_sideways_tracks) marks the pads that share a column running
+## along the spine. Those take no part in the ladder: each one's station is its
+## own axial coordinate — its lane runs from its row and its leg leaves the
+## column perpendicular to it — and the rows are spaced by the pads, not by the
+## pitch rule. The pairs a sideways leg cannot avoid are named by
+## _sideways_findings; the ladder below is built over the remaining tracks
+## only.
 ##
 ## ALWAYS returns stations: {ok, findings, stations, order}. A pair that each
 ## have to leave before the other, or a longer loop of the same, is a FINDING —
 ## the order then falls back to the caller's for whatever the rules could not
 ## decide, so the tracks still get distinct stations and the crossing shows up
-## in the copper rather than swallowing it.
-static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array,
-		clearance: float, net_names: PackedStringArray, end_label: String) -> Dictionary:
+## in the copper rather than swallowing it. `order` lists the sideways tracks
+## first, outermost row first, then the ladder's departure order.
+static func _departure_stations(pad_perp: Array, pad_axial: Array, sideways: Array,
+		lane_perp: Array, widths: Array, clearance: float,
+		net_names: PackedStringArray, end_label: String) -> Dictionary:
 	var n: int = pad_perp.size()
-	var findings: Array = []
+	var findings: Array = _sideways_findings(sideways, pad_perp, pad_axial, lane_perp,
+		widths, clearance, net_names, end_label)
 	# leaves_first[i][j]: track i has to be off the bundle before track j is.
+	# Only ladder tracks take part; a sideways track is already off the bundle
+	# behind the spine's end, and is marked placed from the start.
 	var leaves_first: Array = []
 	for i in range(n):
 		var row: Array = []
@@ -1054,6 +1164,8 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 			row.append(false)
 		leaves_first.append(row)
 	for i in range(n):
+		if sideways[i]:
+			continue
 		# The band track i's own perpendicular leg sweeps through, closed and
 		# widened by the duplicate-point tolerance: a leg that ENDS on another
 		# track's lane is touching copper, which is a conflict to order around,
@@ -1061,7 +1173,7 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 		var lo: float = minf(float(pad_perp[i]), float(lane_perp[i])) - _MIN_SEGMENT_MM
 		var hi: float = maxf(float(pad_perp[i]), float(lane_perp[i])) + _MIN_SEGMENT_MM
 		for j in range(n):
-			if j == i:
+			if j == i or sideways[j]:
 				continue
 			if float(lane_perp[j]) >= lo and float(lane_perp[j]) <= hi:
 				leaves_first[i][j] = true
@@ -1078,8 +1190,11 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 	var indegree := PackedInt32Array()
 	indegree.resize(n)
 	var placed: Array = []
+	var ladder_count := 0
 	for i in range(n):
-		placed.append(false)
+		placed.append(bool(sideways[i]))
+		if not sideways[i]:
+			ladder_count += 1
 	for i in range(n):
 		for j in range(n):
 			if leaves_first[i][j]:
@@ -1087,7 +1202,7 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 	# Lowest index first among the tracks nothing is waiting on, so the caller's
 	# order survives wherever the rules do not decide the question.
 	var order: Array = []
-	while order.size() < n:
+	while order.size() < ladder_count:
 		var pick := -1
 		for k in range(n):
 			if not placed[k] and indegree[k] == 0:
@@ -1115,13 +1230,124 @@ static func _departure_stations(pad_perp: Array, lane_perp: Array, widths: Array
 
 	var stations: Array = []
 	for i in range(n):
-		stations.append(0.0)
+		stations.append(float(pad_axial[i]) if sideways[i] else 0.0)
 	var run := 0.0
-	for k in range(1, n):
+	for k in range(1, order.size()):
 		run += pitch_between(float(widths[order[k - 1]]), float(widths[order[k]]), clearance)
 		stations[order[k]] = run
+	var first: Array = []
+	for i in range(n):
+		if sideways[i]:
+			first.append(i)
+	first.sort_custom(func(a: int, b: int) -> bool:
+		return float(stations[a]) < float(stations[b]))
+	first.append_array(order)
 	return {"ok": findings.is_empty(), "findings": findings,
-		"stations": stations, "order": order}
+		"stations": stations, "order": first}
+
+
+## Which tracks at one end share a pad column that runs ALONG the spine, as one
+## bool per track.
+##
+## Two pads are column-mates when their perpendicular coordinates differ by
+## less than the narrower of their two tracks — the parallel leg of one would
+## carry its own copper over the other's centre — and their axial coordinates
+## are at least a pitch apart, so they are two rows, not one crowded one. The
+## test is deliberately that tight: pads STAGGERED by a fraction of a pitch are
+## not a column, and a sideways leg from the outer one would cross the inner
+## one's lane where the ladder only crowds it. A crowd is measured and named;
+## a crossing is a short. Those pairs stay on the ladder, as do pads closer
+## than a pitch on both axes, which no leg construction serves.
+static func _sideways_tracks(pad_perp: Array, pad_axial: Array, widths: Array,
+		clearance: float) -> Array:
+	var n: int = pad_perp.size()
+	var out: Array = []
+	for i in range(n):
+		out.append(false)
+	for i in range(n):
+		for j in range(i + 1, n):
+			var need: float = pitch_between(float(widths[i]), float(widths[j]), clearance) \
+				- _CLEARANCE_TOLERANCE_MM
+			var column: float = minf(float(widths[i]), float(widths[j]))
+			if absf(float(pad_perp[i]) - float(pad_perp[j])) < column \
+					and absf(float(pad_axial[i]) - float(pad_axial[j])) >= need:
+				out[i] = true
+				out[j] = true
+	return out
+
+
+## The crossings a SIDEWAYS leg cannot avoid, each named for what it is.
+##
+## A sideways track i owns two pieces of copper at this end: its lane, running
+## from its own row inward, and the leg in that row sweeping the perpendicular
+## band from its pad to its lane. Against each other track j that gives:
+##
+##   - j sideways in the SAME ROW (rows closer than a pitch, bands within a
+##     pitch of each other): two legs on one line — the two-column case, which
+##     no pick order separates;
+##   - j's lane inside i's band and already running at i's row (j's row lies
+##     further out): the lanes were picked out of column order;
+##   - j a ladder track whose band holds i's lane: j's leg, at a station inside
+##     the spine, has to cross a lane that has run since i's row;
+##   - j a ladder track whose pad line lies in i's band, with j's pad no nearer
+##     the spine than i's row: j's parallel leg runs through i's row.
+##
+## The crossing itself is also measured by _clearance_findings; this names the
+## cause.
+static func _sideways_findings(sideways: Array, pad_perp: Array, pad_axial: Array,
+		lane_perp: Array, widths: Array, clearance: float,
+		net_names: PackedStringArray, end_label: String) -> Array:
+	var out: Array = []
+	var n: int = sideways.size()
+	for i in range(n):
+		if not sideways[i]:
+			continue
+		var lo: float = minf(float(pad_perp[i]), float(lane_perp[i])) - _MIN_SEGMENT_MM
+		var hi: float = maxf(float(pad_perp[i]), float(lane_perp[i])) + _MIN_SEGMENT_MM
+		var row: float = float(pad_axial[i])
+		for j in range(n):
+			if j == i:
+				continue
+			var need: float = pitch_between(float(widths[i]), float(widths[j]), clearance) \
+				- _CLEARANCE_TOLERANCE_MM
+			var lane_in_band: bool = float(lane_perp[j]) >= lo and float(lane_perp[j]) <= hi
+			var pad_in_band: bool = float(pad_perp[j]) >= lo and float(pad_perp[j]) <= hi
+			if sideways[j]:
+				var lo_j: float = minf(float(pad_perp[j]), float(lane_perp[j]))
+				var hi_j: float = maxf(float(pad_perp[j]), float(lane_perp[j]))
+				# One row or two: a pair within a pitch of each other is one
+				# crowded row and is named ONCE, as that, never also as a
+				# crossing from the other side of the pair.
+				var same_row: bool = absf(row - float(pad_axial[j])) < need
+				if same_row and j < i:
+					continue
+				if same_row and lo <= hi_j + need and lo_j <= hi + need:
+					out.append(_finding(FINDING_PADS_ALONG_SPINE,
+						"Nets \"%s\" and \"%s\" both lie along the spine at the %s end, each in a pad column that runs beside the bundle, and their two pads share a row (%.3fmm apart along the spine, where two legs need %.3fmm) — each leaves its column sideways in its own row, so their legs would run over each other. Draw the spine so it leaves this pad group across the columns, or bus the two columns separately."
+							% [net_names[i], net_names[j], end_label,
+								absf(row - float(pad_axial[j])), need],
+						[net_names[i], net_names[j]], absf(row - float(pad_axial[j])), need))
+				elif not same_row and lane_in_band and float(pad_axial[j]) < row:
+					out.append(_finding(FINDING_END_CROSSING,
+						"Nets \"%s\" and \"%s\" cross at the %s end — both lie along the spine in a pad column beside the bundle, and \"%s\", the pad further out along that column, rides a lane between \"%s\"'s pad and its own lane. Pick the nets so the pad furthest along the column takes the lane furthest from it."
+							% [net_names[i], net_names[j], end_label, net_names[j], net_names[i]],
+						[net_names[i], net_names[j]]))
+				continue
+			var lo_j: float = minf(float(pad_perp[j]), float(lane_perp[j])) - _MIN_SEGMENT_MM
+			var hi_j: float = maxf(float(pad_perp[j]), float(lane_perp[j])) + _MIN_SEGMENT_MM
+			if float(lane_perp[i]) >= lo_j and float(lane_perp[i]) <= hi_j:
+				out.append(_finding(FINDING_END_CROSSING,
+					"Nets \"%s\" and \"%s\" cross at the %s end — \"%s\" lies along the spine in a pad column beside the bundle and its lane runs from its own row, so \"%s\"'s leg into the bundle has to cross it. Pick the nets so \"%s\" rides a lane on the pad side of \"%s\", or move its pad."
+						% [net_names[i], net_names[j], end_label, net_names[i], net_names[j],
+							net_names[j], net_names[i]],
+					[net_names[i], net_names[j]]))
+			elif pad_in_band and float(pad_axial[j]) <= row + _MIN_SEGMENT_MM:
+				out.append(_finding(FINDING_END_CROSSING,
+					"Nets \"%s\" and \"%s\" cross at the %s end — \"%s\" lies along the spine in a pad column beside the bundle and leaves it sideways in its own row, and \"%s\"'s leg runs along the spine through that row. Move \"%s\"'s pad clear of the row, or redraw the spine."
+						% [net_names[i], net_names[j], end_label, net_names[i], net_names[j],
+							net_names[j]],
+					[net_names[i], net_names[j]]))
+	return out
 
 
 ## Two nets from a cycle of "leaves first" rules, named in a finding.
