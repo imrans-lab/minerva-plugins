@@ -224,7 +224,7 @@ compiler does with them:
 | `zone_min_thickness_mm` | the selected manufacturer profile's `min_trace_width_mm` | a fill region (or any orphan fragment) thinner than this everywhere is a **sliver** and is culled; must be a positive number |
 | `zone_min_island_area_mm2` | the area of one default via land, `pi/4 * via_diameter_mm^2` | an orphan fragment (no same-net copper touching it on its layer) with total area below this is **etch scrap** and is culled; `0` means "cull no island by size"; must be non-negative |
 
-Every cull is reported as a `zone_fill_culled` WARNING with the region's area and layer — nothing
+Every cull is reported in a `zone_fill_culled` WARNING on its zone, one per zone, naming each region's kind, bounds and area — nothing
 is deleted silently. An orphan fragment **at or above** the island minimum is
 not culled: the compile refuses it (`zone_fill_failed`) so the author decides
 whether to stitch it, extend the pour, or shrink the outline.
