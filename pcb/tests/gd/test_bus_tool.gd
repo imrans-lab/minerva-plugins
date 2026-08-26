@@ -146,6 +146,8 @@ func _init() -> void:
 	await _test_a_bad_bus_reaches_the_agent_and_the_ghost()
 	await _test_the_station_verb_matches_the_station_gesture()
 	await _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost()
+	_test_a_leg_on_a_layer_its_pad_is_not_on_is_named()
+	await _test_an_off_layer_leg_reaches_the_agent()
 	_test_a_station_via_names_the_layer_it_lands_on()
 	_test_unreachable_targets_still_name_the_layer_to_start_on()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -2051,8 +2053,11 @@ func _test_the_station_verb_matches_the_station_gesture() -> void:
 		PackedVector2Array([PATH_1, STATION, PATH_2]), "top",
 		PackedStringArray(["U1.1", "U2.1", "U3.1"]), PackedStringArray(["V1.1", "V2.1", "V3.1"]),
 		0.0, 1, "bottom")
+	# BUILDABLE, not clean: V3.1 is a top-only land and this station takes
+	# the bus to bottom, so the plan carries that pad's off-layer finding —
+	# the probe only needs a routed station plan to tear.
 	check("the torn-plan probe starts from a routed station plan",
-			bool(torn.get("ok", false)) and (torn.get("via_station_splits", []) as Array).size() == 3, str(torn.get("error", "")))
+			bool(torn.get("buildable", false)) and (torn.get("via_station_splits", []) as Array).size() == 3, str(torn.get("error", "")))
 	torn["via_station_splits"] = [torn["via_station_splits"][0]]
 	var torn_out: Dictionary = PanelToolsScript.bus_commit_plan(data_b, torn, "torn")
 	check("a station plan with a missing cut is refused, naming the mismatch",
@@ -2173,6 +2178,8 @@ const LGA_CLEARANCE_MM := 0.2
 ## implementation: it is a wire value a consumer branches on, so this file is
 ## where a rename has to be noticed. The two are held equal below.
 const FOREIGN := "bus_foreign_copper"
+## Likewise the off-layer pad rule's wire value, held equal to the tool's below.
+const OFF_LAYER := "bus_pad_off_layer"
 
 
 ## A through-hole pin of the source column: a 0.8mm drill in a 1.6mm annulus, so
@@ -2335,10 +2342,14 @@ func _test_foreign_copper_is_named_and_still_lands() -> void:
 			str(via_hit.get("message", "")))
 
 	# THE LAYER RULE. The target part's lands are SMD and the seeded trace is on
-	# top; only the via and the through-hole source column cross the stack.
+	# top; only the via and the through-hole source column cross the stack. The
+	# two top-only TARGET pads are then under legs on bottom, which is the
+	# off-layer rule's own case (14) and keys on its type alone here.
 	var below: Dictionary = _lga_plan(data, "bottom")
-	check("on the other layer only the through-the-stack copper is still named",
-			_finding_keys(_findings_of(below)) == ["%s|NA|%s" % [FOREIGN, via_id]],
+	var below_expected: Array = ["%s|NA|%s" % [FOREIGN, via_id], OFF_LAYER, OFF_LAYER]
+	below_expected.sort()
+	check("on the other layer only the through-the-stack copper is still foreign",
+			_finding_keys(_findings_of(below)) == below_expected,
 			str(_finding_keys(_findings_of(below))))
 
 	# THE CONTROL. Section 1's fixture routes a clean bus past pads on three
@@ -2472,6 +2483,132 @@ func _test_foreign_copper_reaches_the_agent_the_gesture_and_the_ghost() -> void:
 	check("…and NA's own via finding is filed under NA",
 			("%s|NA|%s" % [FOREIGN, ghost_via]) in (per_net.get("NA", []) as Array),
 			str(per_net.get("NA", [])))
+
+
+# ── 14. A BUS LEG THAT LANDS ON A LAYER ITS OWN PAD IS NOT ON ────────────────
+#
+# THE LIVE DEFECT: a bus on B.Cu from a through-hole column to an SMD part on
+# top, with no station. The legs ended on bottom under top-only pads — copper
+# that joins nothing, an open — and the tool said nothing; connectivity DRC
+# found the dangling ends afterwards.
+#
+# THE FIXTURE is section 13's LGA board: U1's pins are through-hole, T1's lands
+# are 0.6mm SMD squares on the side T1 is placed on (top). The same bus planned
+# on bottom is the defect; the same bus with a station back to top is not.
+#
+# ORACLES:
+#   THE FINDING — one per top-only target pad, naming the pad, the layers it
+#     IS on and the layer the leg lands on, read against the fixture's own
+#     facts (T1.4 and T1.2; top; bottom) and never a through-hole source pad.
+#   THE STATION — a station to top makes the target legs land on top, so no
+#     off-layer finding remains; buildable, so the geometry itself is not the
+#     reason the finding went away.
+#   THE BOARD — trace count and history either side of the verb: the copper
+#     still lands, in one journal step, with the findings in the reply.
+
+## The spine of the station variant: section 13's LGA path with a straight
+## interior vertex between its first two, for the station to sit on.
+const LGA_STATION_AT := Vector2(26.0, 10.0)
+
+
+## The off-layer findings of `findings`, keyed by the pad each one names.
+func _off_layer_by_pad(findings: Array) -> Dictionary:
+	var out: Dictionary = {}
+	for raw in findings:
+		var f: Dictionary = raw
+		if str(f.get("type", "")) == OFF_LAYER:
+			out[str(f.get("pad_ref", ""))] = f
+	return out
+
+
+func _test_a_leg_on_a_layer_its_pad_is_not_on_is_named() -> void:
+	print("\n-- (14) a leg landing on a layer its own pad has no copper on is named --")
+	check("the type this suite pins is the type the tool emits",
+			PanelToolsScript.BUS_FINDING_PAD_OFF_LAYER == OFF_LAYER,
+			str(PanelToolsScript.BUS_FINDING_PAD_OFF_LAYER))
+	var data := PCBData.new()
+	data.from_board_dict(_lga_board())
+
+	var below: Dictionary = _lga_plan(data, "bottom")
+	check("the bottom bus is BAD BUT BUILDABLE",
+			not bool(below.get("ok", true)) and bool(below.get("buildable", false)),
+			str(below.get("error", "")))
+	var by_pad := _off_layer_by_pad(_findings_of(below))
+	var pads: Array = by_pad.keys()
+	pads.sort()
+	check("exactly the two top-only target pads are named, never the through-hole sources",
+			pads == ["T1.2", "T1.4"], str(pads))
+	var hit: Dictionary = by_pad.get("T1.4", {})
+	check("the finding names the bus net, the pad, its copper layers and the landing layer",
+			str(hit.get("message", "")).contains("NA")
+				and str(hit.get("message", "")).contains("T1.4")
+				and str(hit.get("message", "")).contains("top")
+				and str(hit.get("message", "")).contains("bottom")
+				and (hit.get("pad_layers", []) as Array) == ["top"]
+				and str(hit.get("layer", "")) == "bottom"
+				and str(hit.get("net_name", "")) == "NA",
+			str(hit))
+	check("…calls it an open and says how a station fixes it",
+			str(hit.get("message", "")).contains("open")
+				and str(hit.get("message", "")).contains("Layer chooser")
+				and str(hit.get("message", "")).contains("via_station_layer"),
+			str(hit.get("message", "")))
+	check("…carrying a witness at the pad the ghost renderer can draw",
+			(hit.get("closest", []) as Array).size() == 2
+				and absf(float((hit.get("closest", [0, 0]) as Array)[0]) - LGA_TGT_A.x) <= EPS
+				and absf(float((hit.get("closest", [0, 0]) as Array)[1]) - LGA_TGT_A.y) <= EPS,
+			str(hit.get("closest", [])))
+
+	# THE CONTROL on the same layer: T1's lands are on top, so a top bus lands
+	# every leg on copper. Section 13 already pins its foreign-copper set.
+	check("the same bus on top raises no off-layer finding",
+			_off_layer_by_pad(_findings_of(_lga_plan(data, "top"))).is_empty(),
+			str(_finding_keys(_findings_of(_lga_plan(data, "top")))))
+
+	# THE STATION: bottom out of the through-hole column, up to top before the
+	# SMD part. The target legs are then on the pads' own layer.
+	var stationed: Dictionary = PanelToolsScript.bus_plan(
+		data, ["NA", "NB"],
+		PackedVector2Array([LGA_PATH_1, LGA_STATION_AT, LGA_PATH_2, LGA_PATH_3]), "bottom",
+		PackedStringArray(["U1.1", "U1.2"]), PackedStringArray(["T1.4", "T1.2"]),
+		0.0, 1, "top")
+	check("with a station to top the plan is buildable and no off-layer finding remains",
+			bool(stationed.get("buildable", false))
+				and _off_layer_by_pad(_findings_of(stationed)).is_empty(),
+			"error=%s findings=%s" % [str(stationed.get("error", "")),
+				str(_finding_keys(_findings_of(stationed)))])
+
+
+func _test_an_off_layer_leg_reaches_the_agent() -> void:
+	print("\n-- (14b) …and the verb lands the copper and returns the finding --")
+	var data := PCBData.new()
+	data.from_board_dict(_lga_board())
+	var host := StubMcpHost.new()
+	host.data = data
+	var quiet := _board_state(data)
+	var result: Dictionary = await PanelToolsScript.handle(host, "minerva_pcb_route_bus_direct", {
+		"editor_name": "PCB1", "nets": ["NA", "NB"],
+		"sources": ["U1.1", "U1.2"], "targets": ["T1.4", "T1.2"],
+		"points": [{"x_mm": LGA_PATH_1.x, "y_mm": LGA_PATH_1.y},
+			{"x_mm": LGA_PATH_2.x, "y_mm": LGA_PATH_2.y},
+			{"x_mm": LGA_PATH_3.x, "y_mm": LGA_PATH_3.y}],
+		"layer": "bottom",
+	})
+	check("the verb reports success — the copper landed", bool(result.get("success", false)),
+			str(result))
+	check("…2 bus traces, in ONE journal step",
+			_serialized_traces(data).size() == int(quiet[0]) + 2
+				and data.history.size() == int(quiet[1]) + 1,
+			"board %s (was %s)" % [str(_board_state(data)), str(quiet)])
+	var by_pad := _off_layer_by_pad(result.get("findings", []) as Array)
+	var pads: Array = by_pad.keys()
+	pads.sort()
+	check("…and the reply names both top-only target pads", pads == ["T1.2", "T1.4"], str(pads))
+	check("…with the note telling the caller it landed anyway, naming a pad and the station args",
+			str(result.get("note", "")).contains("landed anyway")
+				and str(result.get("note", "")).contains("T1.4")
+				and str(result.get("note", "")).contains("via_station_index"),
+			str(result.get("note", "")))
 
 
 ## A through via touches every copper layer, so what it lands on is named on

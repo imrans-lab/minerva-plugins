@@ -8432,6 +8432,13 @@ const BUS_FINDING_INNER_FOLD := "bus_inner_fold"
 ## to as bare coordinates and cannot even tell which net one belongs to.
 const BUS_FINDING_FOREIGN_COPPER := "bus_foreign_copper"
 
+## The THIRD finding type raised in this file: a bus leg that lands on a layer
+## its own pad has no copper on — an SMD pad on the other side of the board
+## from the layer the leg runs on. The copper ends under the pad with nothing
+## to join, which is an open by construction, and nothing in bundle_routes can
+## see it: that module knows pads as bare points, not as copper on a layer.
+const BUS_FINDING_PAD_OFF_LAYER := "bus_pad_off_layer"
+
 ## How far inside the board's clearance a bus route may measure against another
 ## net's copper before the pass below calls it a violation, in mm. Mirrors
 ## pcb_bus_geometry.gd's own _CLEARANCE_TOLERANCE_MM — an independent constant
@@ -8529,6 +8536,7 @@ static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: St
 		return {"ok": false, "points": PackedVector2Array(), "error":
 			"A bus needs one %s pin per net (%d nets, %d %s pins)." % [role, nets.size(), pins.size(), role]}
 	var points := PackedVector2Array()
+	var pads: Array = []
 	for i in range(nets.size()):
 		var net_name: String = str(nets[i])
 		var ref: String = str(pins[i])
@@ -8545,7 +8553,13 @@ static func bus_pad_anchors(data, nets: Array, pins: PackedStringArray, role: St
 					% [ref, pin_net if not pin_net.is_empty() else "(none)", net_name, role]}
 		var comp = resolved["comp"]
 		points.append(comp.get_pin_world_position(pin))
-	return {"ok": true, "error": "", "points": points}
+		# The pad as COPPER, not just a point: which layers it is on, so the
+		# plan can tell whether the leg that reaches it lands on one of them.
+		var copper: Dictionary = _bus_pad_layers(comp, pin)
+		pads.append({"ref": "%s.%s" % [str(comp.id), pin], "net": net_name,
+			"centre": points[i], "all_layers": copper["all_layers"],
+			"layers": copper["layers"]})
+	return {"ok": true, "error": "", "points": points, "pads": pads}
 
 
 # ── THE BOARD-AWARE PASS: bus copper against ANOTHER NET'S copper ────────────
@@ -8646,36 +8660,18 @@ static func _bus_board_copper(data) -> Array:
 			var lands: Array = comp.lands_for_pin(pin)
 			var pin_local: Vector2 = comp.pins.get(pin, Vector2.ZERO)
 			var reach := 0.0
-			var all_layers: bool = lands.is_empty()
-			var layers: Dictionary = {}
 			for raw_land in lands:
 				var land: Dictionary = raw_land
 				var size: Vector2 = land.get("size", Vector2.ZERO)
 				var offset: Vector2 = land.get("position", Vector2.ZERO)
 				# Half-DIAGONAL, so the box holds the land at any rotation.
 				reach = maxf(reach, offset.distance_to(pin_local) + size.length() * 0.5)
-				var land_type := str(land.get("type", "smd")).to_lower()
-				if land_type == "thru_hole" or land_type == "np_thru_hole":
-					all_layers = true
-					continue
-				for raw_layer in (land.get("layers", []) as Array):
-					var canon := _bus_canon_layer(str(raw_layer))
-					if not canon.is_empty():
-						layers[canon] = true
-			if not all_layers and layers.is_empty():
-				# A land naming no copper layer of its own sits on the side its
-				# component is placed on; a component with no readable side is
-				# taken as everywhere, which is the fail-closed reading.
-				var side := _bus_canon_layer(str(comp.layer))
-				if side.is_empty():
-					all_layers = true
-				else:
-					layers[side] = true
+			var copper: Dictionary = _bus_pad_layers(comp, pin)
 			var centre: Vector2 = comp.get_pin_world_position(pin)
 			items.append({
 				"kind": "pad", "what": "pad", "ref": "%s.%s" % [str(comp.id), pin],
 				"net": str(pin_nets.get("%s.%s" % [str(comp.id), pin], "")),
-				"all_layers": all_layers, "layers": layers,
+				"all_layers": copper["all_layers"], "layers": copper["layers"],
 				"comp": comp, "pin": pin, "centre": centre,
 				"centre_only": lands.is_empty(),
 				"bounds": Rect2(centre, Vector2.ZERO).grow(reach + _BUS_FOREIGN_TOLERANCE_MM),
@@ -8709,6 +8705,83 @@ static func _bus_board_copper(data) -> Array:
 			"bounds": _bus_points_bounds(trace.waypoints).grow(half + _BUS_FOREIGN_TOLERANCE_MM),
 		})
 	return items
+
+
+## Which copper layers one pad is on: {all_layers, layers} — `all_layers` true
+## for a through-hole land (its barrel crosses the stack) or a pin with no land
+## geometry at all, else `layers` the canonical copper ids its SMD lands name.
+##
+## A land naming no copper layer of its own sits on the side its component is
+## placed on; a component with no readable side is taken as everywhere, which
+## is the fail-closed reading for the foreign-copper pass (it meets every
+## probe) and the fail-open one for the off-layer rule (no leg can miss it) —
+## a pad the board cannot place on a layer is not a pad this file can judge.
+static func _bus_pad_layers(comp, pin: String) -> Dictionary:
+	var lands: Array = comp.lands_for_pin(pin)
+	var all_layers: bool = lands.is_empty()
+	var layers: Dictionary = {}
+	for raw_land in lands:
+		var land: Dictionary = raw_land
+		var land_type := str(land.get("type", "smd")).to_lower()
+		if land_type == "thru_hole" or land_type == "np_thru_hole":
+			all_layers = true
+			continue
+		for raw_layer in (land.get("layers", []) as Array):
+			var canon := _bus_canon_layer(str(raw_layer))
+			if not canon.is_empty():
+				layers[canon] = true
+	if not all_layers and layers.is_empty():
+		var side := _bus_canon_layer(str(comp.layer))
+		if side.is_empty():
+			all_layers = true
+		else:
+			layers[side] = true
+	return {"all_layers": all_layers, "layers": layers}
+
+
+## One finding per bus pad whose leg lands on a layer the pad has no copper on.
+##
+## `pads` is bus_pad_anchors' `pads` for one end, `landing` the layer that
+## end's legs run on — the plan's own layer at the source end; past a via
+## station, the station's layer at the target end. A through-hole pad is on
+## every layer and never raises this. The way out differs by end: a source leg
+## is on the layer the bus STARTS on, so the fix is to start it elsewhere; a
+## target leg can be brought to the pad's layer by a station before it.
+static func _bus_pad_off_layer_findings(pads: Array, landing: String, role: String) -> Array:
+	var out: Array = []
+	var canon := _bus_canon_layer(landing)
+	for raw in pads:
+		var pad: Dictionary = raw
+		if bool(pad.get("all_layers", false)):
+			continue
+		var layers: Array = (pad.get("layers", {}) as Dictionary).keys()
+		layers.sort()
+		if canon.is_empty() or layers.is_empty() or canon in layers:
+			continue
+		var net: String = str(pad.get("net", ""))
+		var ref: String = str(pad.get("ref", ""))
+		var on := ", ".join(PackedStringArray(layers))
+		var way_out := ""
+		if role == "source":
+			way_out = "Start the bus on %s instead, or bus from a pad that is on %s." % [on, landing]
+		else:
+			way_out = "Switch the Layer chooser before this pad to add a via station that brings the bus to %s (via_station_index and via_station_layer on minerva_pcb_route_bus_direct), or bus to a pad that is on %s." % [on, landing]
+		var centre: Vector2 = pad.get("centre", Vector2.ZERO)
+		out.append({
+			"type": BUS_FINDING_PAD_OFF_LAYER,
+			"message": "Net \"%s\"'s %s pad %s has copper on %s only, and its bus leg lands on %s — the copper ends under the pad with nothing to join, which is an open. %s"
+				% [net, role, ref, on, landing, way_out],
+			"nets": [net],
+			"measured_mm": 0.0,
+			"required_mm": 0.0,
+			"layer": landing,
+			"pad_ref": ref,
+			"pad_layers": layers,
+			"closest": [centre.x, centre.y],
+			"witness": [centre.x, centre.y],
+			"midpoint": [centre.x, centre.y],
+		})
+	return out
 
 
 ## The axis-aligned box holding every point of `points`.
@@ -9054,6 +9127,9 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	var sources: Dictionary = bus_pad_anchors(data, nets, source_pins, "source")
 	if not bool(sources["ok"]):
 		return _bus_unbuildable(str(sources["error"]))
+	# A source leg is always on the plan's own layer, so this end is judged
+	# before the targets exist and the preview can already say so.
+	findings.append_array(_bus_pad_off_layer_findings(sources["pads"], layer, "source"))
 
 	if target_pins.is_empty():
 		var lanes: Array = []
@@ -9082,6 +9158,9 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 	if not bool(routed.get("buildable", false)):
 		return _bus_unbuildable(str(routed.get("error", "The bus geometry was refused.")))
 	findings.append_array(routed.get("findings", []) as Array)
+	# The target legs run on whichever layer the bus is on when it gets there.
+	findings.append_array(_bus_pad_off_layer_findings(targets["pads"],
+		via_station_layer if via_station_index >= 0 else layer, "target"))
 	# THE BOARD-AWARE PASS, and the only rule here that looks at anything other
 	# than the bus. Runs LAST because it measures the FINISHED routes — legs,
 	# lanes, station fans and the station's own vias — against the copper the
