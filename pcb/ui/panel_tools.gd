@@ -146,6 +146,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _export_trace_geometry(host, args)
 		"minerva_pcb_delete_traces":
 			return _delete_traces(host, args)
+		"minerva_pcb_cut_trace":
+			return _cut_trace(host, args)
 		"minerva_pcb_get_image":
 			return await _get_image(host, args)
 		"minerva_pcb_set_view":
@@ -4169,6 +4171,56 @@ static func _add_trace(host, args: Dictionary) -> Dictionary:
 		"note": ("copper is on the board now — this verb runs no DRC, exactly as the canvas "
 			+ "Trace tool does not. Run minerva_pcb_drc (connectivity) and "
 			+ "minerva_pcb_drc_geometric (clearances) to find out what it touched."),
+	})
+
+
+## Cut ONE trace at an interior vertex — the MCP twin of the canvas's "Cut
+## here" item, through the same model call (pcb_data.cut_trace) and the same
+## refusals. The vertex is given as at_index, or as x_mm/y_mm, which picks the
+## nearest INTERIOR vertex within the canvas's pad snap radius exactly as the
+## click does (pcb_data.nearest_interior_vertex). One journal row, one undo step.
+static func _cut_trace(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var trace_id: String = str(args.get("trace_id", ""))
+	if trace_id.is_empty():
+		return _err("trace_id is required")
+	var trace = data.get_trace(trace_id)
+	if trace == null:
+		return {"success": false, "error": "no_such_trace",
+			"note": "no trace '%s' on this board" % trace_id}
+	var at_index: int = -1
+	if args.has("at_index"):
+		if not (args["at_index"] is int or args["at_index"] is float) \
+				or float(args["at_index"]) != floorf(float(args["at_index"])):
+			return _err("at_index must be a whole number, got %s" % str(args["at_index"]))
+		at_index = int(args["at_index"])
+	elif args.has("x_mm") or args.has("y_mm"):
+		for key in ["x_mm", "y_mm"]:
+			if not args.has(key) or not (args[key] is float or args[key] is int):
+				return _err("x_mm and y_mm are both required for the coordinate form, as numbers")
+		var snap: float = data.TRACE_SNAP_MM
+		at_index = data.nearest_interior_vertex(trace_id,
+			Vector2(float(args["x_mm"]), float(args["y_mm"])), snap)
+		if at_index < 0:
+			return {"success": false, "error": "no_vertex_in_reach",
+				"note": "no interior vertex of '%s' within %.2f mm of (%.3f, %.3f) — a trace is cut at a bend, not at an end (minerva_pcb_delete_traces for that)"
+					% [trace_id, snap, float(args["x_mm"]), float(args["y_mm"])]}
+	else:
+		return _err("give at_index, or x_mm + y_mm to pick the nearest interior vertex")
+	var error: String = str(data.cut_trace(trace_id, at_index))
+	if not error.is_empty():
+		return {"success": false, "error": "trace_not_cuttable", "note": error}
+	data.save_to_history("Cut trace")
+	var kept: int = trace.waypoints.size()
+	return _ok({
+		"trace_id": trace_id,
+		"at_index": at_index,
+		"kept_point_count": kept,
+		"dropped_count": int(data.change_journal[data.change_journal.size() - 1]["details"]["dropped_count"]),
+		"free_end": not data.trace_end_is_joined(trace_id, data.TRACE_END_END),
+		"trace_count": data.traces.size(),
 	})
 
 

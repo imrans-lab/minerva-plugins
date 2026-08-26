@@ -233,7 +233,9 @@ func _init() -> void:
 	# mounting holes could be written and never read back, so a pattern that had
 	# been silently rewritten was invisible to every surface. Also
 	# executor:"panel".
-	check("total registered tool count == 109", registered.size() == 109,
+	# (109 -> 110): minerva_pcb_cut_trace — a trace cut at an interior vertex,
+	# the verb twin of the canvas's "Cut here" item. executor:"panel".
+	check("total registered tool count == 110", registered.size() == 110,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

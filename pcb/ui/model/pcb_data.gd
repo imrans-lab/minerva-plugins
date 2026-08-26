@@ -968,6 +968,12 @@ func set_trace_waypoints(trace_id: String, points) -> void:
 	trace.waypoints = wp
 
 
+## How far (mm) a click reaches for a pad, a free trace end or a trace vertex
+## — half a 0.1" pitch, so a click between two DIP pads is a miss rather than a
+## coin toss. The canvas's TRACE_PAD_SNAP_MM and the verbs' coordinate forms
+## read this ONE number so an agent's point reaches exactly as far as a click.
+const TRACE_SNAP_MM := 1.27
+
 ## The two names a trace END goes by, in extend_trace and free_trace_end_at.
 const TRACE_END_START := "start"
 const TRACE_END_END := "end"
@@ -1042,6 +1048,63 @@ func free_trace_end_at(position: Vector2, tol: float, visible_filter := Callable
 					"net": str(trace.net_name)}
 			break
 	return best
+
+
+## Nearest INTERIOR vertex of a trace to `position` within `tol` (inclusive),
+## or -1: interior means neither the first nor the last waypoint. Strict walk,
+## the earlier vertex wins a tie. The end vertices are not offered here at all,
+## because cutting at an end is a delete or a no-op — see cut_trace.
+func nearest_interior_vertex(trace_id: String, position: Vector2, tol: float) -> int:
+	var trace = get_trace(trace_id)
+	if trace == null:
+		return -1
+	var best := -1
+	var best_d := INF
+	for i in range(1, trace.waypoints.size() - 1):
+		var d: float = (trace.waypoints[i] as Vector2).distance_to(position)
+		if d <= tol and d < best_d:
+			best_d = d
+			best = i
+	return best
+
+
+## Cut a trace at one of its INTERIOR vertices: the trace keeps its id and the
+## waypoints up to and including `at_index`; everything after is dropped. The
+## cut vertex becomes the trace's end — a free end unless something already
+## joins it (trace_end_is_joined). Returns "" on success or the refusal in the
+## model's words; a refusal changes nothing.
+##
+## Refused BY NAME rather than reinterpreted: an index at either end would be a
+## whole-trace delete (index 0) or a no-op (the last), and both are answers the
+## caller has to choose deliberately, not fall into; a 2-point trace has no
+## interior to cut at.
+##
+## Journalled as ONE cut_trace row; history is NOT snapshotted here (the house
+## rule: the caller owns the undo step).
+func cut_trace(trace_id: String, at_index: int) -> String:
+	var trace = get_trace(trace_id)
+	if trace == null:
+		return "No such trace \"%s\"." % trace_id
+	var count: int = trace.waypoints.size()
+	if count < 3:
+		return "Trace \"%s\" has %d points — nothing between its ends to cut at." % [trace_id, count]
+	if at_index <= 0 or at_index >= count - 1:
+		return "Index %d is an end of trace \"%s\" (interior is 1..%d) — cutting there would delete it or change nothing; delete it or pick an interior vertex." \
+			% [at_index, trace_id, count - 2]
+	var kept: Array[Vector2] = []
+	for i in range(at_index + 1):
+		kept.append(trace.waypoints[i])
+	trace.waypoints = kept
+	record_change("cut_trace", {
+		"trace_id": trace_id,
+		"at_index": at_index,
+		"dropped_count": count - (at_index + 1),
+		"net_name": trace.net_name,
+		"layer": trace.layer,
+	})
+	trace_changed.emit(trace_id)
+	data_changed.emit()
+	return ""
 
 
 ## Grow a trace's polyline from one of its ends so it stays ONE piece: `points`

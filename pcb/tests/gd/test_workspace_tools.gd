@@ -1418,8 +1418,9 @@ func _run_removal_manifest_tools_absent() -> void:
 	# SR2FAB (107 -> 109): minerva_pcb_export_yaml and
 	# minerva_pcb_list_mounting_holes. Both executor:"panel", so the Go pin at
 	# 19 backend tools is unaffected.
-	check_eq("manifest tool count == 109 (ALL manifest.json tools[] entries)",
-		names.size(), 109)
+	# (109 -> 110): minerva_pcb_cut_trace, executor:"panel"; the Go pin stays.
+	check_eq("manifest tool count == 110 (ALL manifest.json tools[] entries)",
+		names.size(), 110)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

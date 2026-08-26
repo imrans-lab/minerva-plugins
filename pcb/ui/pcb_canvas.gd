@@ -789,7 +789,7 @@ const CUTOUT_PREVIEW_VERTEX_RADIUS_PX := 3.0
 ## impossible to place a waypoint anywhere near a component. 1.27 mm is half a
 ## 0.1" pitch: within that much of a pad's COPPER (pad_at measures to the land,
 ## not to its centre) the nearest pad is unambiguously the pad clicked.
-const TRACE_PAD_SNAP_MM := 1.27
+const TRACE_PAD_SNAP_MM: float = PCBDataScript.TRACE_SNAP_MM
 ## The two things a trace may be ANCHORED to — the kinds carried in the anchor
 ## dictionary _trace_pad_at / _trace_via_at both return. Named rather than
 ## spelled inline because three call sites branch on the value (the focus lock,
@@ -1474,6 +1474,8 @@ const MENU_ID_COMPONENT_PROPOSE_MOVE := 449
 ## the DRAWING width — the width the armed Trace tool will commit — is chosen
 ## at the point of use instead of a standing Tools-area control.
 const MENU_ID_SET_DRAW_WIDTH := 450
+## "Cut here" on a trace: drop the tail after the vertex nearest the press.
+const MENU_ID_CUT_TRACE := 451
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1574,6 +1576,15 @@ func _add_context_menu_target_items() -> void:
 		# cannot reach on purpose. The item selects the trace and asks the panel to
 		# focus that row; it does not set a width itself.
 		context_menu.add_item("Set trace width…", MENU_ID_SET_TRACE_WIDTH)
+		# CUT HERE: the vertex nearest the press within the pad snap radius,
+		# asked of the model (nearest_interior_vertex). Shown-but-disabled when
+		# no interior vertex is within reach — an end vertex is a delete or a
+		# no-op, which cut_trace refuses by name — so the item says "not here"
+		# instead of silently missing.
+		var cut_at: int = data.nearest_interior_vertex(target_id, context_menu_world_pos, TRACE_PAD_SNAP_MM)
+		context_menu.add_item("Cut here (drop the tail after this vertex)", MENU_ID_CUT_TRACE)
+		if cut_at < 0 or _unit_locked(kind, target_id):
+			context_menu.set_item_disabled(context_menu.item_count - 1, true)
 
 	# SPIKE 019ff8615fbe (owner ruling R2): propose-move lives IN universal
 	# select — a one-shot arm; the part's next drag stages a ghost instead of
@@ -1638,6 +1649,8 @@ func _on_context_menu_pressed(id: int) -> void:
 			_request_trace_width_edit(str(_context_menu_target[1]))
 		MENU_ID_SET_DRAW_WIDTH:  # OFC-5 — reveal the panel's authoring-width box
 			edit_draw_width_requested.emit()
+		MENU_ID_CUT_TRACE:  # the frozen press target and press position
+			_cut_trace_here(str(_context_menu_target[1]), context_menu_world_pos)
 		MENU_ID_DELETE_TARGET:  # B1u5 — delete the entity the press picked
 			_delete_picked_entity(str(_context_menu_target[0]), str(_context_menu_target[1]), "Delete")
 		MENU_ID_DELETE_ANNOTATION_BEND:  # Station 6 fix F1 — the frozen bend hit
@@ -6226,6 +6239,28 @@ func _delete_picked_entity(hit_kind: String, hit_id: String, verb: String) -> bo
 		selection_changed.emit()
 	queue_redraw()
 	return true
+
+
+## Cut the trace at its interior vertex nearest `world_pos` (within
+## TRACE_PAD_SNAP_MM): the model's cut_trace, then ONE history step. A miss or a
+## model refusal is a named message on the trace channel, and changes nothing.
+func _cut_trace_here(trace_id: String, world_pos: Vector2) -> void:
+	if not data or trace_id.is_empty() or _unit_locked(KIND_TRACE, trace_id):
+		return
+	var at: int = data.nearest_interior_vertex(trace_id, world_pos, TRACE_PAD_SNAP_MM)
+	if at < 0:
+		trace_tool_message.emit("No interior vertex of %s within %.2f mm of the click — a trace is cut at a bend, not at an end (delete it for that)."
+			% [trace_id, TRACE_PAD_SNAP_MM])
+		return
+	var error: String = data.cut_trace(trace_id, at)
+	if not error.is_empty():
+		trace_tool_message.emit(error)
+		return
+	data.save_to_history("Cut trace")
+	var trace = data.get_trace(trace_id)
+	trace_tool_message.emit("Cut %s at vertex %d — %d points kept, the tail dropped." % [
+		trace_id, at, trace.waypoints.size() if trace != null else 0])
+	queue_redraw()
 
 
 ## The per-entity noun, verb-first: "Erase trace", "Delete R1", "Delete via".

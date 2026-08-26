@@ -319,6 +319,22 @@
       }
     },
     {
+      "name": "minerva_pcb_cut_trace",
+      "description": "Cut ONE committed trace at an INTERIOR vertex: the trace keeps its id and its waypoints up to and including that vertex; the tail after it is dropped. The MCP twin of the canvas's right-click 'Cut here' on a trace, through the same model rule. Name the vertex by at_index (0-based into the trace's points; get them from minerva_pcb_export_trace_geometry or the add_trace reply) OR by x_mm+y_mm, which picks the nearest interior vertex within the canvas's snap radius (1.27 mm) exactly as a click does. Exactly one journalled, undoable step. The new end is then a FREE end (reply free_end: true) unless it already sits on a pad, a via or same-net copper, and a free end can be continued by minerva_pcb_add_trace's start/end anchors. Refused by name, changing nothing: no_such_trace; no_vertex_in_reach (coordinate form found no interior vertex within snap); trace_not_cuttable (the model's own words — the index is an end, which would be a delete or a no-op, or the trace has fewer than 3 points). Reply {trace_id, at_index, kept_point_count, dropped_count, free_end, trace_count}. Runs no DRC.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "trace_id": {"type": "string", "description": "The trace to cut"},
+          "at_index": {"type": "integer", "description": "0-based index of the INTERIOR vertex to cut at (1 .. point_count-2). Use this or x_mm+y_mm."},
+          "x_mm": {"type": "number", "description": "With y_mm: pick the nearest interior vertex within 1.27 mm of this point"},
+          "y_mm": {"type": "number", "description": "See x_mm"}
+        },
+        "required": ["editor_name", "trace_id"]
+      }
+    },
+    {
       "name": "minerva_pcb_delete_traces",
       "description": "Delete a SUBSET of committed traces and vias by identity, without touching the rest of the board. Use this instead of exporting everything, filtering, and re-importing (import_trace_geometry clears the whole board first). Get the ids from minerva_pcb_export_trace_geometry, which stamps a trace_id on every segment and an id on every via. AT LEAST ONE of trace_ids, via_ids or net_name is REQUIRED — a call with none of them is an error, because deleting nothing and deleting everything must never be the same request. An EMPTY net_name (or empty id arrays) does not count as supplying a selector, so a call carrying only net_name:\"\" is that same error rather than a no-op. Selection is by identity ONLY — trace_ids, via_ids and net_name are combined as a union, and a trace named by both trace_ids and net_name is deleted and counted exactly once — and there is deliberately no region/bounding-box selector: to clear traces in an area, export, filter on the real coordinates yourself, then name the ids you chose. net_name selects traces only, never vias; name a via by id to remove it. Partial-trace clipping (splitting a trace at a boundary) is not supported — a trace is deleted whole or not at all. Naming an id that does not exist is NOT an error: the ids that do exist are deleted and the stale ones come back in missing_trace_ids/missing_via_ids. An EMPTY-string id is reported there too rather than skipped — that is what you get from an item predating stable ids, whose id key the export omits entirely. Those two keys are present only when you supplied the corresponding selector, so an empty array means 'checked, none stale' while an absent key means 'you named none'. Deleting copper that a COMMITTED route candidate owns retires that commit and REOPENS its routing task, so the workspace stops reporting that span as routed \u2014 the reply then carries reopened_candidate_ids (absent when no committed candidate was touched), and those candidates come back live, with any DRC verdict they held staled, to be re-checked or rerouted rather than re-committed blind over the copper that survived. Undoable in one step via the board's normal undo (the copper and the retired commit return together).",
       "executor": "panel",
