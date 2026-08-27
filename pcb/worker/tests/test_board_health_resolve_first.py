@@ -44,10 +44,13 @@ REPO_PCB = TESTS_DIR.parent.parent  # pcb/
 
 # Every canonical board YAML in the repo that _load accepts (the spec vectors
 # are schema-migration inputs, not boards, and stay out). A new board fixture
-# joins the census by landing in one of these directories.
+# joins the census by landing in one of these directories — testdata/ itself
+# included, which is where the standalone benches sit (hitl_bench, zone_fill,
+# coupon_jlc1, parity_corners, gd_handoff_cutout).
 CORPUS = sorted(
     [
         *(REPO_PCB / "spikes").rglob("*.yaml"),
+        *(TESTS_DIR / "testdata").glob("*.yaml"),
         *(TESTS_DIR / "testdata" / "assembly_boards").glob("*.yaml"),
         *(TESTS_DIR / "testdata" / "gerber_boards").glob("*.yaml"),
     ]
