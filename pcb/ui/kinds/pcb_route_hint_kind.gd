@@ -18,7 +18,15 @@ extends AnnotationKind
 ##     source_pins:  Array["U1.15", …]                       (optional)
 ##     dest_pins:    Array["J2.3", …]                        (optional)
 ##     text:         author instruction body                (optional)
-##     waypoints:    Array[[x_mm, y_mm]]                     (optional, board mm)
+##     waypoints:    Array of corners (optional, board mm). Each entry is
+##                   either [x_mm, y_mm] — a plain corner — or
+##                   {"x": x_mm, "y": y_mm, "layer": "<copper>"}, a corner the
+##                   run CHANGES LAYER at. A layer-carrying waypoint is how one
+##                   hint says "F.Cu, duck under here, back up there, F.Cu":
+##                   apply_route_hints materializes a through via exactly there
+##                   (sized from the board's design_rules), so the hop is part
+##                   of the hint instead of a separate orphan via ghost.
+##                   See model/pcb_hint_waypoint.gd for the shape rules.
 ##
 ## Envelope tolerance: the OLD skeleton payload (only hint_type/layer/text/
 ## waypoints) keeps validating and rendering — every new field is optional.
@@ -41,6 +49,8 @@ const _ANCHOR_TYPE_PAD := "pcb/pad"
 ## preload() consts.
 const _Self := preload("pcb_route_hint_kind.gd")
 const _PcbLayerStack := preload("../model/pcb_layer_stack.gd")
+const _PcbHintWaypoint := preload("../model/pcb_hint_waypoint.gd")
+const _PcbRouteCandidate := preload("../model/pcb_route_candidate.gd")
 const _PcbTraceGeometry := preload("../model/pcb_trace_geometry.gd")
 
 ## Anchor-marker HIT-TEST slack, document-space (board mm). Kept for
@@ -1008,13 +1018,25 @@ class ViaInsertTool:
 			_toast("No board data is bound — the via was not proposed.")
 			return true
 
-		var res: Dictionary = workspace.propose_via(doc_pos, "", 0.8, 0.4, panel.get_data())
+		# OWNERSHIP FROM THE SELECTION (work item 01a04106bd). A via clicked
+		# while a route hint is selected SERVES that hint, and says so — the
+		# human's click and minerva_pcb_propose_via's `for_hint` land the same
+		# ownership record, so an agent reading workspace_list never has to
+		# match via coordinates to hint segments by eye. No selection means an
+		# unowned ghost, which is still perfectly legal.
+		var owner_hint := _selected_route_hint_id()
+		var owner_net := _selected_route_hint_net(owner_hint)
+		# 0.0/0.0 = "size it from the board's design_rules" (bug 01a03b87473c).
+		var res: Dictionary = workspace.propose_via(
+			doc_pos, owner_net, 0.0, 0.0, panel.get_data(), owner_hint)
 		if bool(res.get("ok", false)):
 			var actual: Array = res.get("at", [doc_pos.x, doc_pos.y])
+			var owner_suffix := (" for hint %s" % owner_hint) if not owner_hint.is_empty() \
+				else " — UNOWNED (select a route hint before clicking to attribute it)"
 			var trace_id := str(res.get("trace_id", ""))
 			if trace_id.is_empty():
-				_toast("Via PROPOSED at (%.3f, %.3f) — standalone ghost, not copper. Accept it to place it."
-					% [float(actual[0]), float(actual[1])])
+				_toast("Via PROPOSED at (%.3f, %.3f)%s — ghost, not copper. Accept it to place it."
+					% [float(actual[0]), float(actual[1]), owner_suffix])
 			else:
 				_toast("Via PROPOSED on trace %s at (%.3f, %.3f), net %s — Accept will materialize the junction."
 					% [trace_id, float(actual[0]), float(actual[1]), str(res.get("net_name", ""))])
@@ -1022,6 +1044,34 @@ class ViaInsertTool:
 			_toast("Via proposal refused (%s): %s"
 				% [str(res.get("error", "unknown")), str(res.get("message", ""))])
 		return true
+
+
+	## The selected annotation's id when it IS a route hint, else "". This is
+	## the whole "which hint does this via serve" question on the canvas side.
+	func _selected_route_hint_id() -> String:
+		if _host == null or not _host.has_method("get_selected_annotation_id"):
+			return ""
+		var sel := str(_host.get_selected_annotation_id())
+		if sel.is_empty() or not _host.has_method("get_by_id"):
+			return ""
+		var ann: Dictionary = _host.get_by_id(sel)
+		return sel if str(ann.get("kind", "")) == "pcb_route_hint" else ""
+
+
+	## The net a selected hint declares (kind_payload.net_names[0]), or "".
+	## Deliberately NOT a pin-ref resolution: this side has no board net table,
+	## and propose_via's own resolver refuses a net that conflicts with copper
+	## the via lands on, so a blank here is safe where a guess would not be.
+	func _selected_route_hint_net(hint_id: String) -> String:
+		if hint_id.is_empty() or _host == null or not _host.has_method("get_by_id"):
+			return ""
+		var kp: Variant = _host.get_by_id(hint_id).get("kind_payload", {})
+		if not (kp is Dictionary):
+			return ""
+		var names: Variant = (kp as Dictionary).get("net_names", [])
+		if names is Array and not (names as Array).is_empty():
+			return str((names as Array)[0])
+		return ""
 
 
 	## Host toast → the panel status line (duck-typed; silent when absent).
@@ -1325,9 +1375,18 @@ func bend_points(annotation: Dictionary) -> Array:
 func with_bend_points(annotation: Dictionary, new_bends: Array) -> Dictionary:
 	var new_ann := annotation.duplicate(true)
 	var payload: Dictionary = (new_ann.get("kind_payload", {}) as Dictionary).duplicate(true)
+	# LAYER HOPS SURVIVE A BEND EDIT (work item 01a04106bd). Rebuilding every
+	# bend as a bare [x, y] would silently dissolve a waypoint's `layer` — and
+	# with it the via the route materializes there — the first time anyone
+	# dragged a corner. Index-aligned against the bends this replaces, which is
+	# the contract bend_points()/with_bend_points already share.
+	# An insert/delete simply has no prior entry at that index, and lands plain.
+	var prior_entries: Array = _bend_entries(payload)
 	var bend_arrays: Array = []
-	for b in new_bends:
-		bend_arrays.append([(b as Vector2).x, (b as Vector2).y])
+	for i in range(new_bends.size()):
+		var pos: Vector2 = new_bends[i] as Vector2
+		var carried: Variant = prior_entries[i] if i < prior_entries.size() else null
+		bend_arrays.append(_PcbHintWaypoint.with_position(carried, pos))
 	if payload.has("dest_point"):
 		payload["waypoints"] = bend_arrays
 	else:
@@ -1343,6 +1402,20 @@ func with_bend_points(annotation: Dictionary, new_bends: Array) -> Dictionary:
 			payload["waypoints"] = out
 	new_ann["kind_payload"] = payload
 	return new_ann
+
+
+## The RAW waypoint entries that bend_points() reports, in the same order and
+## in whatever shape they are stored ([x,y] or {x,y,layer}). Used to carry a
+## bend's layer across an edit; bend_points() itself deliberately returns bare
+## positions, because every geometry consumer wants Vector2.
+func _bend_entries(payload: Dictionary) -> Array:
+	var raw: Variant = payload.get("waypoints", [])
+	var wp: Array = (raw as Array) if raw is Array else []
+	if payload.has("dest_point"):
+		return wp
+	if wp.size() < 3:
+		return []
+	return wp.slice(1, wp.size() - 1)
 
 
 ## Nearest point ON the full rendered polyline (anchor→bends→dest) to
@@ -1428,6 +1501,20 @@ func validate(annotation: Dictionary) -> Array:
 	for key in ["source_pins", "dest_pins", "waypoints"]:
 		if payload.has(key) and not (payload[key] is Array):
 			errors.append({"field": "kind_payload.%s" % key, "message": "%s must be an Array" % key})
+
+	# Per-waypoint shape + LAYER HOP validation (work item 01a04106bd). A
+	# waypoint may name the copper layer the run changes to at that corner; a
+	# name that is not copper is refused here rather than becoming a via on a
+	# layer that does not exist. Declared-stack membership is NOT checked at
+	# this layer — validate() has an annotation, not a board — the worker's
+	# materialize path fails closed on that (route_bridge._route_from_
+	# waypoint_stops), which is where the declared stack is actually known.
+	if payload.get("waypoints", []) is Array:
+		var wps: Array = payload["waypoints"]
+		for i in range(wps.size()):
+			var wp_error := _PcbHintWaypoint.error_for(wps[i])
+			if not wp_error.is_empty():
+				errors.append({"field": "kind_payload.waypoints[%d]" % i, "message": wp_error})
 
 	# Self-referencing rejection: a hint from a pad to itself is meaningless.
 	var src: Array = _string_array(payload.get("source_pins", []))
@@ -1620,6 +1707,13 @@ func _has_live_candidate(hint_id: String, host) -> bool:
 		# ONE hop in this walk that reads a member off `c` directly instead
 		# of duck-typing through has_method first.
 		if not ("source_hint_ids" in c):
+			continue
+		# A PROPOSED VIA ENTITY (work item 01a04106bd) records the hint it
+		# SERVES, not an answer to that hint's routing question. The route is
+		# still unproposed, so the hint must keep its full corridor —
+		# collapsing it to markers would hide the very line the user is
+		# placing duck-under vias along.
+		if _PcbRouteCandidate.is_proposed_via_entity(c):
 			continue
 		for hid in c.source_hint_ids:
 			if str(hid) == hint_id:

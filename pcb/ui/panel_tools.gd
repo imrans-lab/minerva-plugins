@@ -72,6 +72,7 @@ const _PcbCopperOwnership := preload("model/pcb_copper_ownership.gd")
 const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 const PcbBusLabels := preload("model/pcb_bus_labels.gd")
+const PcbViaDimensions := preload("model/pcb_via_dimensions.gd")
 const StagedEntities := preload("model/pcb_staged_entities.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
@@ -2314,7 +2315,8 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 		if not cand_id.is_empty() and workspace.has_method("sync_candidate_geometry"):
 			var new_segments: Array = result.get("segments", []) if result.get("segments", []) is Array else []
 			var new_vias: Array = new_kp.get("vias", []) if new_kp.get("vias", []) is Array else []
-			bridged_synced = bool(workspace.sync_candidate_geometry(cand_id, new_segments, new_vias))
+			bridged_synced = bool(workspace.sync_candidate_geometry(
+				cand_id, new_segments, new_vias, _get_data(host)))
 
 	return _ok({
 		"via_count": result.get("via_count", 0),
@@ -3133,15 +3135,22 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		if draft_context.get("draft_placements", null) is Array else []
 	var proposals: Array = []
 	var holds: Array = []
+	var unresolved_widths: Array = []
 	for rec in records:
 		var pts: Array = rec.get("polyline", [])
 		if pts.size() < 2:
 			continue  # degenerate polyline — _write_one_proposal used to skip these too
-		var cid: String = str(workspace.ingest_record(rec, revision))
+		var cid: String = str(workspace.ingest_record(rec, revision, data))
 		# last_ingest_holds is PER CALL and ingest_record resets it on entry — see
 		# _ingest_result_into_workspace's identical accumulation-in-loop note.
 		for hold in workspace.last_ingest_holds:
 			holds.append(hold)
+		# Same per-call accumulation for a route whose copper width could not be
+		# resolved (bug 01a02c480d50). The ghost lands — a candidate is a
+		# question, not a board edit — but commit refuses it by name, so the
+		# state has to be visible HERE rather than at accept time.
+		for miss in workspace.last_ingest_unresolved_widths:
+			unresolved_widths.append(miss)
 		if cid.is_empty():
 			continue  # HELD — the task's active candidate is pinned; see `holds`
 		if not draft_snapshot.is_empty():
@@ -3190,6 +3199,11 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		"proposed": proposals.size(),
 		"proposals": proposals,
 		"holds": holds,
+		# Routes whose copper width could not be resolved (bug 01a02c480d50) —
+		# their candidates carry width 0.0 / width_source "unresolved" and
+		# commit refuses them by name. The fail-closed replacement for the
+		# invented 0.25mm. Empty on every ordinary propose.
+		"unresolved_widths": unresolved_widths,
 		"unrouted": result.get("unrouted", []),
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
@@ -3263,11 +3277,21 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		if not (route is Dictionary):
 			continue
 		var net: String = str(route.get("net", ""))
-		# The width the ROUTER drew this net at — see _route_width. The 0.25mm
-		# literal below is reached only when the reply carries no width at all.
+		# The width the ROUTER drew this net at — see _route_width.
+		#
+		# FAIL CLOSED, no invented literal (bug 01a02c480d50). This is the path
+		# that writes physical copper, so "I could not resolve a width" must not
+		# resolve to 0.25mm: a board would gain 0.25mm traces with nothing in any
+		# report saying the number was guessed rather than sourced. The route
+		# lays no copper and names what it could not resolve; the rest of the
+		# reply's routes are unaffected, exactly as for unusable segments below.
 		var width: float = _route_width(route, source_hints, net)
 		if width <= 0.0:
-			width = 0.25
+			failed.append({"net": net, "reason":
+				"no trace width could be resolved: the route reply carries no "
+				+ "effective_routing_rules.trace_width_mm and no source hint for this net "
+				+ "authors a width_mm — no copper was created for it"})
+			continue
 		var by_layer := {}
 		for seg in route.get("segments", []):
 			if not (seg is Dictionary):
@@ -3317,13 +3341,9 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		# added. top<->bottom stays correct at ANY declared depth (epoch GA-1):
 		# a THROUGH via spans the whole stack by definition, and through is the
 		# only via kind v1 models — blind/buried never materialize here.
-		var dr: Dictionary = data.design_rules if data.design_rules is Dictionary else {}
-		var via_size: float = float(dr.get("via_diameter_mm", 0.0))
-		if via_size <= 0.0:
-			via_size = 0.8
-		var via_drill: float = float(dr.get("via_drill_mm", 0.0))
-		if via_drill <= 0.0:
-			via_drill = 0.4
+		var via_dims: Dictionary = PcbViaDimensions.from_board(data)
+		var via_size: float = float(via_dims["diameter"])
+		var via_drill: float = float(via_dims["drill"])
 		var _via_span: Array = PcbLayerStack.default_through_via_span()
 		for via in route.get("vias", []):
 			created_via_ids.append(data.add_via({
@@ -4418,6 +4438,15 @@ static func _trace_end_arg(data, raw: Variant, label: String) -> Dictionary:
 ## No layer argument: a v1 via joins every copper layer, so there is nothing to
 ## choose. Which layer a RUN continues on past a via is a routing decision and
 ## belongs to a trace verb.
+##
+## `for_hint` (work item 01a04106bd) NAMES THE ROUTE HINT THIS VIA SERVES, and
+## with it the ghost stops being an orphan. The HITL that filed it: four ghosts
+## came back with net "", task_id "" and source_hint_ids [], and the agent
+## recovered which hint each belonged to only by matching coordinates to hint
+## segments by eye — a second hint nearby would have made that ambiguous. Given
+## a hint id, the via records it and INHERITS THAT HINT'S NET when no net_name
+## was passed. Given neither, the via is still proposed (an unassigned via is
+## legitimate) and every listing labels it `owner: "none"`.
 static func _propose_via(host, args: Dictionary) -> Dictionary:
 	var ctx: Dictionary = _workspace_ctx(host)
 	if not bool(ctx.get("ok", false)):
@@ -4439,14 +4468,31 @@ static func _propose_via(host, args: Dictionary) -> Dictionary:
 			return _err("%s must be a number, got %s" % [key, str(args[key])])
 
 	var pos := Vector2(float(args["x_mm"]), float(args["y_mm"]))
-	var size_mm := float(args.get("size_mm", 0.8))
-	var drill_mm := float(args.get("drill_mm", 0.4))
+	# 0.0 means "the board's design_rules decide" — the resolution lives in
+	# PcbViaDimensions, one rule for every via this plugin creates (bug
+	# 01a03b87473c). An explicit size_mm/drill_mm still outranks the rules.
+	var size_mm := float(args.get("size_mm", 0.0))
+	var drill_mm := float(args.get("drill_mm", 0.0))
 	var net_name: String = str(args.get("net_name", ""))
+
+	# OWNERSHIP: the route hint this via serves, and the net it inherits from it.
+	var for_hint: String = str(args.get("for_hint", ""))
+	if not for_hint.is_empty():
+		var owner_ann: Dictionary = host.get_by_id(for_hint) if host.has_method("get_by_id") else {}
+		if owner_ann.is_empty():
+			return {"success": false, "error": "hint_not_found",
+				"note": "no annotation '%s' on this board — for_hint must name a pcb_route_hint" % for_hint}
+		if str(owner_ann.get("kind", "")) != "pcb_route_hint":
+			return {"success": false, "error": "not_a_route_hint",
+				"note": "annotation '%s' is a '%s', not a pcb_route_hint — a via can only be owned by a route hint"
+					% [for_hint, str(owner_ann.get("kind", ""))]}
+		if net_name.is_empty():
+			net_name = _resolve_hint_net_for_seeding(_dict_or_empty(owner_ann.get("kind_payload")), data)
 
 	# ONE proposal gate for both surfaces. RoutingWorkspace calls the board's
 	# canonical via_author_error and also sees live candidate vias, which PCBData
 	# alone cannot: two ghost proposals at one point must not both be accepted.
-	var res: Dictionary = workspace.propose_via(pos, net_name, size_mm, drill_mm, data)
+	var res: Dictionary = workspace.propose_via(pos, net_name, size_mm, drill_mm, data, for_hint)
 	if not bool(res.get("ok", false)):
 		return {"success": false, "error": str(res.get("error", "propose_via_refused")),
 			"note": str(res.get("message", ""))}
@@ -4459,12 +4505,19 @@ static func _propose_via(host, args: Dictionary) -> Dictionary:
 		"net_name": str(res.get("net_name", net_name)),
 		"trace_id": str(res.get("trace_id", "")),
 		"snapped_to_trace": bool(res.get("snapped_to_trace", false)),
-		"size_mm": _mm(size_mm),
-		"drill_mm": _mm(drill_mm),
+		"size_mm": _mm(float(res.get("size_mm", 0.0))),
+		"drill_mm": _mm(float(res.get("drill_mm", 0.0))),
 		"from_layer": str(res.get("from_layer", "top")),
 		"to_layer": str(res.get("to_layer", "bottom")),
-		"note": "a GHOST via — nothing is on the board yet. Accept it with "
-			+ "minerva_pcb_workspace_commit, or drop it with minerva_pcb_workspace_reject.",
+		"for_hint": for_hint,
+		"owner": ("hint %s" % for_hint) if not for_hint.is_empty() else "none",
+		"note": ("a GHOST via — nothing is on the board yet. Accept it with "
+			+ "minerva_pcb_workspace_commit, or drop it with minerva_pcb_workspace_reject.")
+			+ ("" if not for_hint.is_empty() else
+				" UNOWNED: it names no route hint (for_hint) "
+				+ ("and no net" if net_name.is_empty() else "")
+				+ " — every listing will show it as owner:none, and nothing but its "
+				+ "coordinates says what it is for."),
 	})
 
 
@@ -6118,9 +6171,16 @@ static func _reconcile_hint_lifecycle(host, workspace) -> void:
 		return
 	var committed_hint_ids: Dictionary = {}
 	for c in workspace.list_candidates():
-		if c != null and str(c.disposition) == "committed":
-			for hid in c.source_hint_ids:
-				committed_hint_ids[str(hid)] = true
+		if c == null or str(c.disposition) != "committed":
+			continue
+		# OWNERSHIP IS NOT CONSUMPTION (work item 01a04106bd): a via ENTITY
+		# (no copper, one via) carries the hint it SERVES, not an answer to it.
+		# A committed hole must never count as the copper backing an applied
+		# hint — that is exactly the reopen this reconcile exists to perform.
+		if _PcbRouteCandidateScript.is_proposed_via_entity(c):
+			continue
+		for hid in c.source_hint_ids:
+			committed_hint_ids[str(hid)] = true
 	for ann in host.get_all_annotations():
 		if not (ann is Dictionary):
 			continue
@@ -6238,6 +6298,23 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		var f: Array = workspace.findings_for_candidate(cid)
 		if not f.is_empty():
 			rec["finding_count"] = f.size()
+	# VIA-ENTITY OWNERSHIP (work item 01a04106bd). A candidate that is exactly
+	# ONE VIA and no copper is a proposed via ENTITY, and the HITL question
+	# asked of every one of them is "what is this for?". Answer it on the row
+	# rather than leaving an agent to match coordinates to hint segments by eye:
+	# `owner_hint_ids` is who it serves, `owner` is the one-word verdict, and an
+	# ownerless one SAYS SO — it stays perfectly legal (an unassigned via is a
+	# real workflow), it is just never again mistaken for an attributed one.
+	if _PcbRouteCandidateScript.is_proposed_via_entity(c):
+		var owners: Array = _string_list(c.source_hint_ids)
+		rec["owner_hint_ids"] = owners
+		rec["owner"] = ("hint %s" % str(owners[0])) if not owners.is_empty() else "none"
+		if owners.is_empty():
+			rec["unowned"] = true
+			rec["unowned_note"] = "unowned via ghost: it names no route hint" \
+				+ ("" if not str(c.net).is_empty() else " and no net") \
+				+ " — re-propose it with for_hint (minerva_pcb_propose_via) to say what it serves"
+
 	# Route-quality metrics (Epoch UX2 station 4, docket 019fde36651a — the
 	# HITL-5 lesson mechanized: nothing in the loop scored route QUALITY, so
 	# satisfying-the-collision-signal masqueraded as done and a human had to
@@ -6950,6 +7027,7 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		if draft_context.get("draft_placements", null) is Array else []
 	var landed: Array = []
 	var holds: Array = []
+	var unresolved_widths: Array = []
 	# F4 (cold review): merge absorption's dropped-constraint conflicts —
 	# same per-call accumulation idiom as `holds` above (workspace.
 	# last_ingest_constraint_conflicts is reset at the start of every
@@ -6957,11 +7035,16 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 	# ingest caused).
 	var constraint_conflicts: Array = []
 	for rec in records:
-		var cid: String = str(workspace.ingest_record(rec, revision))
+		var cid: String = str(workspace.ingest_record(rec, revision, data))
 		for hold in workspace.last_ingest_holds:
 			holds.append(hold)
 		for conflict in workspace.last_ingest_constraint_conflicts:
 			constraint_conflicts.append(conflict)
+		# Routes whose copper width could not be resolved (bug 01a02c480d50) —
+		# same per-call accumulation idiom as `holds`. The ghost lands; commit
+		# is what refuses it.
+		for miss in workspace.last_ingest_unresolved_widths:
+			unresolved_widths.append(miss)
 		if cid.is_empty():
 			continue
 		# OFC-3: draft-placement provenance becomes durable candidate state
@@ -6999,6 +7082,8 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		"proposed": landed.size(),
 		"candidates": landed,
 		"holds": holds,
+		# See _ingest_result_into_workspace's key of the same name.
+		"unresolved_widths": unresolved_widths,
 		"routes_returned": (result.get("routes", []) as Array).size() if result.get("routes", []) is Array else 0,
 		"unrouted": result.get("unrouted", []),
 		"stuck": _stuck_from_result(result),
@@ -8465,7 +8550,13 @@ static func _reroute_precheck(host, args: Dictionary) -> Dictionary:
 	# no_source_hints / source_hints_missing refusals; a candidate with NO
 	# endpoints either still fails closed — an unscopable run must never
 	# silently widen to the whole board.
-	var hint_ids: Array = _string_list(c.source_hint_ids)
+	# OWNERSHIP IS NOT AN ANSWER (work item 01a04106bd): a via ENTITY (no
+	# copper, one via) carries the hint it SERVES on source_hint_ids. Rerouting
+	# is about a hint's ROUTE, never about a hole, so a via ghost scopes as
+	# HINT-LESS exactly as it did before ownership existed — and, carrying no
+	# endpoints either, falls through to the gate below as unscopable_candidate.
+	var hint_ids: Array = [] if _PcbRouteCandidateScript.is_proposed_via_entity(c) \
+		else _string_list(c.source_hint_ids)
 	var source_hints: Array = _gather_route_hints(host, hint_ids) if not hint_ids.is_empty() else []
 	if hint_ids.is_empty() or source_hints.is_empty():
 		# ≥2 DEDUPED well-formed refs (fix cold review f5): a single terminal,
@@ -10046,7 +10137,7 @@ static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
 			"source_hint_ids": [],
 			"width_override": float(widths[i]),
 		}
-		var cid: String = str(workspace.ingest_record(rec, revision))
+		var cid: String = str(workspace.ingest_record(rec, revision, data))
 		# last_ingest_holds is PER CALL and ingest_record resets it on entry —
 		# accumulate in-loop, same as _ingest_result_into_workspace.
 		for hold in workspace.last_ingest_holds:
@@ -10657,7 +10748,10 @@ static func _edit_candidate_insert_via(workspace, cid: String, args: Dictionary,
 					% [str(declared), canon_to],
 				"declared_layers": declared.duplicate()}
 
-	return workspace.add_via(cid, position, from_layer, to_layer)
+	# `data` rides along so the inserted via takes its diameter/drill from the
+	# board's design_rules, like every other via this plugin creates
+	# (bug 01a03b87473c).
+	return workspace.add_via(cid, position, from_layer, to_layer, data)
 
 
 ## Parse an [x_mm, y_mm] wire pair into a Vector2, or null when malformed —

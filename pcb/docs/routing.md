@@ -873,6 +873,57 @@ counterexample is regression-locked in
 `tests/agent_router/test_pathfinder.py`, alongside a test that a genuinely
 collinear run still collapses — so "stop simplifying" cannot pass as a fix.
 
+## Layer-hop waypoints — one hint, one duck-under (work item `01a04106bd`)
+
+A `pcb_route_hint`'s `kind_payload.waypoints` entry has two shapes:
+
+| shape | meaning |
+|---|---|
+| `[x_mm, y_mm]` | a plain corner |
+| `{"x": mm, "y": mm, "layer": "<copper>"}` | a corner **the run changes layer at** |
+
+`layer` is a canonical copper id (`top` / `in1`..`in30` / `bottom`) or a KiCad
+copper name; `PcbLayerStack` owns the translation and nothing here invents one.
+
+**The rule.** Walking source pad → waypoints → destination pad,
+`route_bridge._route_from_waypoint_stops` keeps the run on the hint's own
+`kind_payload.layer` until a waypoint names a *different* copper layer. That
+waypoint ends the current run, gets **one through via at exactly that point**,
+and the run continues on the named layer. So one hint says "F.Cu, duck under
+here, back up there, F.Cu", and the vias are a property of the corners rather
+than four separate ghosts an agent has to match to segments by eye — the live
+HITL that filed this.
+
+**What is deliberately not a hop.** A waypoint with no `layer` key, or an empty
+one, is an ordinary corner: absent means "stay on the layer you are on", never
+"default to the top". A waypoint restating the layer the run is *already* on is
+an ordinary corner too — punching a hole to change nothing would be a drill hit
+nobody asked for.
+
+**It takes the as-drawn path whatever `detail_level` says.** `detail_level` is
+inferred from waypoint COUNT (`PcbAnnotationHost._derive_detail_level` calls 2-3
+bends `guided`), and a two-hop duck-under is short. Naming where copper changes
+side is by construction drawing your own path, so
+`materialize_detailed_hints` accepts a layer-carrying hint regardless of the
+inferred level.
+
+**Fail-closed, same rule as authored segments.** A waypoint layer that is not
+copper, or that the board does not declare, raises — the hint falls back to
+engine-guided routing with a warning naming it. "in7" as a typo and "in7" as a
+plane are indistinguishable, so an undeclared name is refused rather than
+fabricated.
+
+**Not honoured on the ENGINE path.** A hint steered by a task
+`routing_constraint`, or one setting `allow_layer_change`, hands every layer
+decision to the engine — the corridor there is a soft attraction field, not a
+verbatim statement. `hints_to_router` therefore drops the hops and **says so**
+in a warning naming the hint: a silent drop would look exactly like the via
+evaporation this work exists to end.
+
+**Via size comes from the board**, at proposal time — see "Where candidate
+dimensions come from" below. The worker emits hop vias positionally (`[x, y]`),
+the shape every consumer already speaks.
+
 ## Fail-closed reasons
 
 | `error.kind` | Meaning |
@@ -1064,7 +1115,23 @@ routed shape that carries neither key.
 A route reply carries geometry but not sizes, and the fail-closed ruling forbids
 approximated copper, so both values are sourced explicitly:
 
-- **Trace width** — the width the run *actually routed at*. Since E2 that is
+- **Trace width** — the width the run *actually routed at*. **And when there is
+  none, the copper-creating path REFUSES** (bug `01a02c480d50`): both
+  `panel_tools._materialize_routes` (apply-and-commit) and
+  `RoutingWorkspace._create_candidate_for_route` (propose → commit) used to fall
+  back to a literal `0.25`. That fires only on a reply carrying no width stamp —
+  an older worker, or a path that skipped the attach — but it is an invented
+  number on the one path that ends in fabricated copper, and it is silent: the
+  board would gain 0.25mm traces with nothing in any report saying so.
+
+  Now the **copper-creating** paths refuse and name what they could not
+  resolve: `_materialize_routes` skips the route into `failed[]` (no traces, no
+  vias, the source hint not consumed), and `RoutingWorkspace.commit` refuses
+  `unmodelable_segment` — "zero-width copper is not copper" — which it already
+  did for a zero width; removing the invention is what lets a zero reach it.
+  The **candidate** still lands: a ghost is a question, not a board edit. It
+  carries width `0.0` and `width_source: "unresolved"`, and the propose replies
+  name it in `unresolved_widths[]`. Since E2 that is
   literally the value `_effective_routing_rules` resolved and handed to the
   engine (`kw["trace_width"]`, precedence table above), passed on to the overlay:
   one variable, not two derivations that agree by coincidence. A proposal cleared
@@ -1077,6 +1144,22 @@ approximated copper, so both values are sourced explicitly:
 - **Via diameter / drill** — the board's own authored routing defaults
   (`design_rules.via_diameter_mm` / `via_drill_mm`), which is what acceptance
   writes. The engine's vias are positional only.
+
+  **Resolved at PROPOSAL time, through one rule** (bug `01a03b87473c`). The
+  panel's `pcb/ui/model/pcb_via_dimensions.gd` is now the single place that
+  answers "how big is this via": an explicit per-call size outranks
+  `design_rules`, which outranks the 0.8/0.4 constants. Every via the plugin
+  creates goes through it — router candidates, `minerva_pcb_propose_via`
+  ghosts, candidate `add_via` inserts, and the copper `workspace_commit` writes.
+
+  It used to be four rules, and one of them stamped a literal:
+  `PcbRouteCandidate.make_via`'s `0.8`/`0.4` *parameter defaults* were what
+  `_create_candidate_for_route` handed every ingested via, so a candidate via
+  was BORN at 0.8/0.4. The rescue meant to catch that (`_via_dimensions`) only
+  substitutes when the stamped value is **zero**, and 0.8 is never zero — so a
+  ghost rendered and committed at 0.8 on a board whose rules said 0.6, while
+  the direct-commit path honoured 0.6. Two paths, one hole, two answers.
+  `0.0` is now the only value that means "nobody has said yet".
 
 If a value cannot be sourced, the overlay fails closed (`unsupported_geometry`)
 rather than guess one. Same `error.kind` vocabulary as the table above, plus

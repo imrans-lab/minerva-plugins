@@ -829,6 +829,15 @@ rerouted or moved to another layer to make a crossing go away. The spine must
 be axis-aligned and must start clear of the source pads and end clear of the
 target pads.
 
+**END THE SPINE SHORT OF, OR LEVEL WITH, THE LAST TARGET PAD'S COLUMN.** This
+is the one rule to know before picking `points`. Each track leaves the bundle
+at its own departure station and turns to its target, so a spine that runs
+*past* the target column forces every lane to double back, and the crossing and
+corridor findings that produces read as a placement problem when the spine is
+the problem. In the 2026-08-26 HITL all three buses needed **no pin change at
+all** once the spine ended level with the target column — the findings were
+never about the pads.
+
 **Open-ended lanes.** A `targets` entry of `""` (the array stays one entry per
 net) lands that net's lane with NO target leg: its trace ends at the end of its
 lane — past the via, on the station layer, for a station bus — as a FREE end
@@ -1317,9 +1326,30 @@ click waypoints, then click a pad or double-click empty space to finish
 (Esc/right-click cancels). This authors a route REQUEST for the router, not
 copper — see Draw ▸ Trace above for drawing copper directly.
 
+A hint's waypoints may carry a **layer** — see "Layer-hop waypoints" in
+`docs/routing.md`. An entry is either `[x_mm, y_mm]` (a plain corner) or
+`{"x": mm, "y": mm, "layer": "<copper>"}` (a corner the run changes layer at,
+where the router places one through via sized from the board's `design_rules`).
+That is how ONE hint expresses "F.Cu, duck under here, back up there, F.Cu"
+instead of an unroutable straight line plus separate via ghosts. Moving or
+inserting a bend — canvas or `minerva_pcb_hint_move_bend` /
+`_insert_bend` — preserves whatever layer that waypoint carried; deleting the
+bend deletes the hop with it.
+
 **Hints ▸ Edit Hint** — click a committed route hint to select it, drag a
 handle to move a bend, right-click a handle to delete it, click a segment to
 insert a new bend (Esc or switching tools exits).
+
+**Via proposals carry an owner** (work item `01a04106bd`). A via proposed with
+`minerva_pcb_propose_via`'s `for_hint` — or clicked on canvas while a route
+hint is selected — records that hint on the candidate's `source_hint_ids` and
+inherits its net, so `minerva_pcb_workspace_list` shows the row as
+`owner: "hint <id>"`. Proposed with neither, it is still a legal ghost and
+still commits, but every listing marks it `owner: "none"` / `unowned: true`:
+"which hint is this via for" is then READ off the listing rather than inferred
+by matching via coordinates to hint segments by eye, which is exactly what an
+agent had to do in the HITL that filed this. Via size comes from the board's
+`design_rules` unless `size_mm`/`drill_mm` say otherwise.
 
 **Hints ▸ Add Via** — click a route-hint annotation carrying segment geometry
 to select it, then click a point on its route to split the segment, add a

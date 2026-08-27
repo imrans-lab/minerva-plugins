@@ -206,7 +206,7 @@ test_trace_identity_delete.gd assertions=213
 # commit after the first green run.
 test_copper_identity_ownership.gd real-worker
 test_workspace_check.gd assertions=46
-test_workspace_ingest.gd assertions=76
+test_workspace_ingest.gd assertions=77
 test_workspace_persistence.gd assertions=76
 test_workspace_tools.gd assertions=1189
 test_zone_select_delete.gd assertions=50
@@ -365,3 +365,10 @@ test_copper_contact_vectors.gd
 # the behaviour, so no count has been MEASURED yet — pinning a number nobody
 # ran would be a guess wearing a gate's clothes. Pin it on the first green run.
 test_trace_pour_terminator.gd
+
+# Work item 01a04106bd + remoras 01a03b87473c / 01a02c480d50: via ownership
+# (propose_via for_hint), design-rule via sizing at proposal time, the removal
+# of the invented 0.25mm width, and the panel half of layer-hop waypoints.
+# UNPINNED on purpose — the assertion count is pinned in its own commit once
+# the suite has been RUN, not derived from reading it.
+test_hint_hops_and_via_owners.gd

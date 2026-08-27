@@ -63,6 +63,7 @@ const PcbRouteTask := preload("pcb_route_task.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 const PcbCopperOwnership := preload("pcb_copper_ownership.gd")
+const PcbViaDimensions := preload("pcb_via_dimensions.gd")
 
 ## Emitted when a candidate is inserted.
 signal candidate_added(id: String)
@@ -231,6 +232,22 @@ var last_ingest_constraint_conflicts: Array = []
 ## not durable design state), and running the pass again on the repaired
 ## stores must leave it empty (the pass's own idempotence contract).
 var last_load_reconciliation: Array = []
+
+## Routes the LAST ingest could not resolve a copper width for (bug
+## 01a02c480d50): one entry per such route, {"net", "hint_ids", "reason"}.
+## Per-call, like last_ingest_holds.
+##
+## A route reply is supposed to carry the width the router actually drew at
+## (segments[].width_mm, stamped by methods._attach_effective_routing_rules).
+## When it carries none AND no source hint authored one AND the caller supplied
+## no override, there is no width — and the answer to that is NOT to invent
+## 0.25mm, which is what this code used to do: an invented width becomes copper
+## the board is fabricated at, with nothing in any report saying it was guessed.
+##
+## The candidate STILL LANDS (a ghost is a question, not a board edit) at width
+## 0.0 with width_source "unresolved", and commit() refuses it by name. This
+## list is how a propose reply says which routes are in that state.
+var last_ingest_unresolved_widths: Array = []
 
 ## The most recent REFUSED disposition move (empty when the last one was legal):
 ## {"candidate_id","from","to","error","verb"}. Kept so a UI/tool caller that
@@ -1076,9 +1093,10 @@ func _vias_wire(c) -> Array:
 ## ingest_task_held signal). See the policy block in _create_candidate_for_route.
 ## The returned id array is therefore SHORTER than the reply's route list when
 ## any task was held — read last_ingest_holds to say which and why.
-func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], base_board_revision: int = 0) -> Array:
+func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], base_board_revision: int = 0, board = null) -> Array:
 	last_ingest_holds = []  # per-call: holds describe THIS ingest, not history
 	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
+	last_ingest_unresolved_widths = []  # per-call (see the field's own doc)
 	var new_ids: Array = []
 	for route in router_reply.get("routes", []):
 		if not (route is Dictionary):
@@ -1091,7 +1109,7 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 			str(route_dict.get("net", "")),
 			route_dict.get("segments", []),
 			route_dict.get("vias", []),
-			source_hints, base_board_revision, null, route_span)
+			source_hints, base_board_revision, null, route_span, 0.0, "", [], board)
 		if not new_id.is_empty():
 			# The worker's finer width vocabulary, upgraded onto the candidate
 			# exactly as ingest_record does it for the correlated path. The
@@ -1137,7 +1155,7 @@ static func _route_width_source(route: Dictionary) -> String:
 ## is the ONLY caller that supplies it, so only THIS path stops recomputing a
 ## worse answer from raw `source_hints` (see _create_candidate_for_route).
 ## ingest_routing_result has no such stamp available and is left untouched.
-func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
+func ingest_record(record: Dictionary, base_board_revision: int = 0, board = null) -> String:
 	# Reentrancy guard (see _apply_disposition): a handler landing a NEW
 	# candidate mid-commit would change the very live set the deferred INV-2
 	# pass is about to score.
@@ -1147,6 +1165,7 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 	last_ingest_holds = []  # per-call (see ingest_routing_result)
 	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
 	last_ingest_constraint_conflicts = []  # per-call (see the field's own doc)
+	last_ingest_unresolved_widths = []  # per-call (see the field's own doc)
 	var hints: Array = record.get("source_hints", []) if record.get("source_hints", []) is Array else []
 	var explicit_hint_ids: Array = record.get("source_hint_ids", []) if record.get("source_hint_ids", []) is Array else []
 	var span: Dictionary = record.get("span", {}) if record.get("span", {}) is Dictionary else {}
@@ -1157,7 +1176,8 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 		hints, base_board_revision, explicit_hint_ids, span,
 		float(record.get("width_override", 0.0)),
 		str(record.get("task_key_override", "")),
-		record.get("endpoints_override", []) if record.get("endpoints_override", []) is Array else [])
+		record.get("endpoints_override", []) if record.get("endpoints_override", []) is Array else [],
+		board)
 	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
 	# DURABLE candidate state, not just a reply stamp — the commit preflight's
 	# staleness comparison (ERR_CONSTRAINT_STALE) reads it back from here, and
@@ -1210,10 +1230,21 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0) -> String:
 ## which holds the prior candidate) pins the key and carries the terminals
 ## onto the fallback generation so it stays reroutable. Empty (the defaults)
 ## leaves every derived path byte-identical.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = []) -> String:
+## `board` (bug 01a03b87473c) is the LIVE board, used for exactly one thing here:
+## resolving each via's diameter/drill from its design_rules AT PROPOSAL TIME.
+## null (the headless default) resolves to PcbViaDimensions' constants — the
+## honest "no rules were declared" answer, never a silent override of real ones.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
+	# THE VIA SIZE IS THE BOARD'S, resolved once, here. It used to be
+	# PcbRouteCandidate.make_via's 0.8/0.4 parameter defaults, which meant a
+	# candidate via was BORN at 0.8/0.4 and _via_dimensions' rescue — which only
+	# fires on a ZERO stamp — could never correct it. A ghost therefore rendered
+	# and committed at 0.8 on a board whose rules said otherwise, while the
+	# direct-commit path honoured them: two paths, one hole, two answers.
+	var via_dims: Dictionary = PcbViaDimensions.from_board(board)
 
 	var use_explicit: bool = explicit_hint_ids is Array
 	var hint_ids: Array = []
@@ -1232,6 +1263,43 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		# this caller has no production consumer and no per-route hint_ids to
 		# read instead).
 		hint_ids = _hint_ids_for_net(source_hints, net)
+	# ── WIDTH RESOLVED BEFORE ANY TASK BOOKKEEPING (bug 01a02c480d50) ────────
+	# Hoisted above ensure_task/supersede so the width verdict and its
+	# provenance are settled in one place, before any state moves.
+	var width: float
+	var width_hints: Array
+	if use_explicit:
+		width = _width_from_hints(attribution_hints)
+		width_hints = attribution_hints
+	else:
+		width = _width_for_net(source_hints, net)
+		width_hints = _hints_matching_net(source_hints, net)
+	if width_override > 0.0:
+		width = width_override
+	# UNRESOLVED WIDTH IS RECORDED, NOT INVENTED (bug 01a02c480d50). A segment
+	# whose width comes from none of the three real sources (caller override,
+	# the router's own per-segment width_mm, an authored hint width) used to be
+	# stamped 0.25mm — an invented number that reached fabricated copper with
+	# nothing in any report saying it was guessed.
+	#
+	# THE REFUSAL BELONGS TO COPPER, NOT TO THE GHOST. A candidate is a
+	# question, not a board edit, so it still lands — with width 0.0 and
+	# width_source "unresolved", which commit()'s own pre-flight refuses by name
+	# ("zero-width copper is not copper", ERR_UNMODELABLE_SEGMENT). The ghost is
+	# visible and namable; what cannot happen is copper at a width nobody chose.
+	var width_unresolved := false
+	if width <= 0.0:
+		for seg_pre in segs:
+			if seg_pre is Dictionary and float((seg_pre as Dictionary).get("width_mm", 0.0)) <= 0.0:
+				width_unresolved = true
+				break
+	if width_unresolved:
+		last_ingest_unresolved_widths.append({
+			"net": net, "hint_ids": hint_ids.duplicate(),
+			"reason": "the route reply carries no segment width and no source hint authors one; "
+				+ "the candidate cannot be committed until a width is resolved",
+		})
+
 	var span_key := PcbRouteTask.span_key(span)
 	var task_key := _task_key(net, hint_ids, span_key)
 	if not task_key_override.is_empty():
@@ -1294,29 +1362,25 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	cand.base_board_revision = base_board_revision
 	cand.source_hint_ids = _to_string_typed_array(hint_ids)
 
-	var width: float
-	var width_hints: Array
 	if use_explicit:
 		cand.endpoints = _endpoints_from_hints(attribution_hints)
 		if cand.endpoints.is_empty() and not endpoints_override.is_empty():
 			# Same {component, pin} dict shape _endpoints_from_hints emits —
 			# the override IS a prior candidate's endpoints, carried forward.
 			cand.endpoints = endpoints_override.duplicate(true)
-		width = _width_from_hints(attribution_hints)
-		width_hints = attribution_hints
 	else:
 		cand.endpoints = _endpoints_for_net(source_hints, net)
-		width = _width_for_net(source_hints, net)
-		width_hints = _hints_matching_net(source_hints, net)
 	# WIDTH PROVENANCE (UX4 station 10, 019fd0ab5af8): record WHICH source
-	# sized the copper, so _width_from_hints' silent 0.25mm fallback is
-	# distinguishable from an authored 0.25mm at review. ingest_record
-	# upgrades this to the worker's finer vocabulary when the route record
-	# carried effective rules.
+	# sized the copper. `width` itself was resolved above, before the task
+	# bookkeeping. ingest_record upgrades this to the worker's finer vocabulary
+	# when the route record carried effective rules.
 	cand.width_source = "hint" if _hints_supply_width(width_hints) else "default"
 	if width_override > 0.0:
-		width = width_override
 		cand.width_source = "caller_option"
+	elif width_unresolved:
+		# NAMED, not "default" — the review question is exactly "did anyone
+		# choose this width", and 0.0 with a bland label is the old silence.
+		cand.width_source = "unresolved"
 
 	for seg in segs:
 		if not (seg is Dictionary):
@@ -1336,7 +1400,8 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		# ACTUALLY drew that net at, after its whole precedence chain (caller
 		# option, hint, the net's class minimum, the width the net's EXISTING
 		# copper establishes, the board's default). The hint derivation sees hints
-		# only, and falls back to 0.25mm when none carries a width.
+		# only, and yields 0.0 when none carries a width (the pre-flight above
+		# has already refused the route in that case).
 		#
 		# `width_override` outranks both: that is a caller who resolved an exact
 		# per-trace width itself (bus propose), not a fallback.
@@ -1349,7 +1414,8 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 
 	for via in vias:
 		var pos := _via_pt(via)
-		cand.add_via(PcbRouteCandidate.make_via("", pos, via_span[0], via_span[1]))
+		cand.add_via(PcbRouteCandidate.make_via("", pos, via_span[0], via_span[1],
+			float(via_dims["diameter"]), float(via_dims["drill"])))
 
 	if cand.segments.is_empty() and cand.vias.is_empty():
 		# Everything this route carried collapsed. Honour the documented
@@ -1736,7 +1802,7 @@ func retire_commits_owning_trace(trace_id: String) -> Array:
 ## are the router `{start,end,layer}` shape; raw vias are positional [x,y] (the
 ## exact shapes _create_candidate_for_route already parses). Widths are preserved
 ## from the candidate's existing first segment. Returns true on success.
-func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Array) -> bool:
+func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Array, board = null) -> bool:
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return false
@@ -1749,9 +1815,18 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 		return false
 	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
 	var via_span: Array = PcbLayerStack.default_through_via_span()
-	var width := 0.25
+	var via_dims: Dictionary = PcbViaDimensions.from_board(board)
+	# The candidate's OWN established width, never an invented one (bug
+	# 01a02c480d50). A candidate with no segment to take a width from has no
+	# width this re-derivation could honestly give the new copper, so the sync
+	# is refused rather than stamping a literal onto geometry that ends up
+	# fabricated.
+	var width := 0.0
 	if not c.segments.is_empty() and c.segments[0] is Dictionary:
-		width = float((c.segments[0] as Dictionary).get("width", 0.25))
+		width = float((c.segments[0] as Dictionary).get("width", 0.0))
+	if width <= 0.0:
+		push_warning("[RoutingWorkspace] sync_candidate_geometry refused: %s carries no resolvable copper width" % candidate_id)
+		return false
 
 	var new_segments: Array = []
 	for seg in segs_raw:
@@ -1770,7 +1845,8 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 	var new_vias: Array = []
 	for via in vias_raw:
 		var pos := _via_pt(via)
-		new_vias.append(PcbRouteCandidate.make_via(next_via_id(), pos, via_span[0], via_span[1]))
+		new_vias.append(PcbRouteCandidate.make_via(next_via_id(), pos, via_span[0], via_span[1],
+			float(via_dims["diameter"]), float(via_dims["drill"])))
 
 	c.segments = new_segments
 	c.vias = new_vias
@@ -2036,9 +2112,8 @@ static func _pin_ref_to_endpoint(pin_ref) -> Dictionary:
 
 
 ## Widest authored trace width among the source hints that target `net`
-## (mirrors panel_tools._width_for_net); falls back to 0.25mm — the same
-## default _materialize_routes applies when no hint specifies a width — so a
-## shadow candidate's width matches what would actually be committed.
+## (mirrors panel_tools._width_for_net); 0.0 when none does — see
+## _width_from_hints on why that is not 0.25mm.
 ## A FALLBACK ONLY: a routed segment carrying the worker's own `width_mm`
 ## outranks whatever this returns. This decides only a reply that carries no
 ## routed width at all.
@@ -2051,10 +2126,15 @@ static func _width_for_net(source_hints: Array, net: String) -> float:
 
 
 ## Widest authored trace width from an EXPLICIT hint list — no net_names
-## filtering. Falls back to 0.25mm — the same default _materialize_routes
-## applies when no hint specifies a width. Shared extraction logic for both
-## _width_for_net (legacy, net-name-matched hints) and ingest_record's
-## explicit-attribution path (docket 019fa109766f).
+## filtering. Shared extraction logic for both _width_for_net (legacy,
+## net-name-matched hints) and ingest_record's explicit-attribution path
+## (docket 019fa109766f).
+##
+## 0.0 means NO HINT AUTHORED A WIDTH, and that is the answer — not 0.25mm.
+## The literal that used to sit here (bug 01a02c480d50) was the last invented
+## number on a path that ends in fabricated copper: a board would gain 0.25mm
+## traces with nothing in any report saying the width was guessed rather than
+## resolved. Callers fail closed on 0.0 instead.
 static func _width_from_hints(hints: Array) -> float:
 	var w := 0.0
 	for hint in hints:
@@ -2064,14 +2144,13 @@ static func _width_from_hints(hints: Array) -> float:
 		var hw := float(kp.get("width_mm", 0.0))
 		if hw > w:
 			w = hw
-	if w <= 0.0:
-		w = 0.25
 	return w
 
 
 ## Did any hint actually AUTHOR a width? The provenance half of
 ## _width_from_hints (UX4 station 10): true = the value above came from a
-## hint, false = it is the silent 0.25mm fallback.
+## hint, false = no hint authored one (the caller then has only the router's
+## own per-segment width, or a refusal).
 static func _hints_supply_width(hints: Array) -> bool:
 	for hint in hints:
 		if not (hint is Dictionary):
@@ -2451,26 +2530,34 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 	# candidate.constraint_revision is the DURABLE generation stamp
 	# (ingest_record); -1 (generated unconstrained / pre-provenance record)
 	# is stale against ANY current constraint by the same rule.
-	var governing := _governing_constraint_revision(c)
-	if governing >= 0 and int(c.constraint_revision) < governing:
-		return _verb_error(ERR_CONSTRAINT_STALE,
-			"candidate '%s' was generated against constraint revision %d but the governing constraint has advanced to revision %d — re-propose/reroute under the current constraint (minerva_pcb_workspace_reroute_route), or remove it with reroute_route's clear_constraint:true, before committing"
-				% [candidate_id, int(c.constraint_revision), governing], candidate_id)
-	# CLEARED-CONSTRAINT STALENESS (Codex 1049 finding 1): with no live
-	# constraint (governing -1) a candidate STAMPED with one (constraint_
-	# revision >= 0, at or below a task's clear floor) was generated under a
-	# corridor the user explicitly REMOVED — e.g. clear_constraint whose
-	# router leg failed, leaving the prior constrained candidate live.
-	# Committing it would land the very copper the clear moved away from.
-	# A candidate generated unconstrained (stamp -1 / no key) — including
-	# everything proposed AFTER the clear — commits freely: unguided is
-	# exactly what the clear asked for.
-	if governing < 0 and int(c.constraint_revision) >= 0:
-		var cleared_floor := _governing_constraint_floor(c)
-		if cleared_floor > 0 and int(c.constraint_revision) <= cleared_floor:
+	#
+	# A VIA ENTITY IS OUT OF SCOPE HERE (work item 01a04106bd). Its
+	# source_hint_ids record the hint it SERVES, not an answer to that hint's
+	# routing question — no corridor ever steered a hole. Without this skip,
+	# `for_hint` would turn a perfectly legal via ghost into a
+	# constraint_stale_candidate refusal the moment its owner hint gained (or
+	# cleared) a corridor.
+	if not _is_standalone_via_candidate(c):
+		var governing := _governing_constraint_revision(c)
+		if governing >= 0 and int(c.constraint_revision) < governing:
 			return _verb_error(ERR_CONSTRAINT_STALE,
-				"candidate '%s' was generated under constraint revision %d, but that constraint has since been CLEARED (clear_constraint) — its copper follows a corridor the user removed; re-propose (unguided) or reroute before committing"
-					% [candidate_id, int(c.constraint_revision)], candidate_id)
+				"candidate '%s' was generated against constraint revision %d but the governing constraint has advanced to revision %d — re-propose/reroute under the current constraint (minerva_pcb_workspace_reroute_route), or remove it with reroute_route's clear_constraint:true, before committing"
+					% [candidate_id, int(c.constraint_revision), governing], candidate_id)
+		# CLEARED-CONSTRAINT STALENESS (Codex 1049 finding 1): with no live
+		# constraint (governing -1) a candidate STAMPED with one (constraint_
+		# revision >= 0, at or below a task's clear floor) was generated under a
+		# corridor the user explicitly REMOVED — e.g. clear_constraint whose
+		# router leg failed, leaving the prior constrained candidate live.
+		# Committing it would land the very copper the clear moved away from.
+		# A candidate generated unconstrained (stamp -1 / no key) — including
+		# everything proposed AFTER the clear — commits freely: unguided is
+		# exactly what the clear asked for.
+		if governing < 0 and int(c.constraint_revision) >= 0:
+			var cleared_floor := _governing_constraint_floor(c)
+			if cleared_floor > 0 and int(c.constraint_revision) <= cleared_floor:
+				return _verb_error(ERR_CONSTRAINT_STALE,
+					"candidate '%s' was generated under constraint revision %d, but that constraint has since been CLEARED (clear_constraint) — its copper follows a corridor the user removed; re-propose (unguided) or reroute before committing"
+						% [candidate_id, int(c.constraint_revision)], candidate_id)
 
 	# GEOMETRY PRE-FLIGHT. Everything the board write needs, checked up front.
 	if c.segments.is_empty() and c.vias.is_empty():
@@ -2747,8 +2834,9 @@ func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
 				correlations[str(plans[j]["candidate_id"])] = bad_rec
 			return _rollback_commit(board, all_trace_ids, all_via_ids,
 				cid, "the candidate refused the committed transition after the copper was written")
+		var consumed: Array = _consumed_hint_ids_for(c)
 		var rec: Dictionary = correlations.get(cid, {})
-		rec["consumed_hint_ids"] = _to_string_array(c.source_hint_ids)
+		rec["consumed_hint_ids"] = consumed
 		correlations[cid] = rec
 		results.append({
 			"candidate_id": cid,
@@ -2756,7 +2844,7 @@ func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
 			"net": str(c.net),
 			"trace_ids": member_copper["trace_ids"],
 			"via_ids": member_copper["via_ids"],
-			"consumed_hint_ids": _to_string_array(c.source_hint_ids),
+			"consumed_hint_ids": consumed.duplicate(),
 			"validation_at_commit": str(pf["validation_at_commit"]),
 		})
 	# Standalone proposals that intentionally targeted an existing trace become
@@ -2830,11 +2918,39 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 
 # ── INV-3: the PATH-SCOPED via/layer edit entry ───────────────────────────────
 
-## True only for the DCR's via-as-entity candidate. Router candidates may also
-## carry no trace segments in an unhappy/partial answer, but they retain task or
-## source-hint provenance. The entity verb deliberately creates neither: its
-## whole meaning is exactly one independent via at one point.
+## True for the DCR's via-as-entity candidate — the one thing that needs the
+## stronger, re-validated-at-commit placement contract.
+##
+## IDENTIFIED BY ITS OWN MARK, not by missing provenance (work item
+## 01a04106bd). It used to require task_id AND source_hint_ids to be EMPTY,
+## which was true only because propose_via had no way to say who a via was for.
+## Now it does — `for_hint` records the owning route hint — so an OWNED via
+## ghost would have silently lost its entity contract (commit-time
+## resolve_via_target re-check, the batch overlap gate) purely for having an
+## owner. propose_via stamps `proposed_entity` on the via it mints; the
+## provenance-absence test stays as the fallback for candidates persisted
+## before that mark existed.
+## The hints a commit of `candidate` CONSUMES — i.e. answers, so panel_tools
+## flips them open -> applied.
+##
+## OWNERSHIP IS NOT CONSUMPTION (work item 01a04106bd). A via-entity ghost now
+## records the route hint it SERVES on source_hint_ids, and without this that
+## record would close the hint the moment the via committed: the hint's route
+## has not been laid, only one of its hop holes, and an applied hint is excluded
+## from the next propose. So a via entity consumes nothing; its provenance stays
+## on the candidate, where a listing can read it.
+static func _consumed_hint_ids_for(candidate) -> Array:
+	if _is_standalone_via_candidate(candidate):
+		return []
+	return _to_string_array(candidate.source_hint_ids)
+
+
 static func _is_standalone_via_candidate(candidate) -> bool:
+	if PcbRouteCandidate.is_proposed_via_entity(candidate):
+		return true
+	# LEGACY FALLBACK: a ghost persisted before the mark existed. Its only
+	# signature is the absence of provenance, which is exactly what ownership
+	# retired — so this arm can never fire for a NEW via ghost, owned or not.
 	return candidate != null \
 		and candidate.segments.is_empty() and candidate.vias.size() == 1 \
 		and str(candidate.task_id).is_empty() and candidate.source_hint_ids.is_empty()
@@ -2844,18 +2960,8 @@ static func _is_standalone_via_candidate(candidate) -> bool:
 ## the gate and materializer cannot disagree when a legacy candidate omitted its
 ## explicit diameter/drill and relies on board design-rule defaults.
 static func _via_dimensions(via: Dictionary, board) -> Dictionary:
-	var dr: Dictionary = board.design_rules if board.design_rules is Dictionary else {}
-	var diameter := float(via.get("diameter", 0.0))
-	if diameter <= 0.0:
-		diameter = float(dr.get("via_diameter_mm", 0.0))
-	if diameter <= 0.0:
-		diameter = 0.8
-	var drill := float(via.get("drill", 0.0))
-	if drill <= 0.0:
-		drill = float(dr.get("via_drill_mm", 0.0))
-	if drill <= 0.0:
-		drill = 0.4
-	return {"diameter": diameter, "drill": drill}
+	return PcbViaDimensions.from_board(board,
+		float(via.get("diameter", 0.0)), float(via.get("drill", 0.0)))
 
 
 ## A live candidate via already claims this point even though it is not board
@@ -2932,16 +3038,35 @@ static func _standalone_batch_via_error(plans: Array) -> Dictionary:
 ##
 ## `net` may be empty — an unassigned via is legitimate (the fiber-laser
 ## workflow orders via-only boards and lases copper against them later).
+##
+## `for_hint_id` (work item 01a04106bd) is the route hint this via SERVES. The
+## HITL that filed it: four ghosts came back with net "", task_id "" and
+## source_hint_ids [], and the agent recovered which hint they belonged to only
+## by matching coordinates to hint segments by eye — a second hint nearby would
+## have made that ambiguous. Naming the owner records it instead of leaving it
+## to be inferred. A ghost with NO owner is still legal (that is the fiber-laser
+## case, and an exploratory click); listings label it unowned rather than
+## refusing it. The owner is recorded as source_hint_ids, NOT as a task_id: the
+## via ghost is not an ANSWER to the hint's routing question and must not sit in
+## the task's answer slot beside the route candidate that is.
+##
+## `diameter`/`drill` are 0.0-means-"the board decides": they resolve through
+## PcbViaDimensions from the board's design_rules (bug 01a03b87473c). A caller
+## passing a positive value still outranks the rules.
 ## Returns {ok:true, candidate_id, via_id, at} or {ok:false, error, message}.
-func propose_via(position: Vector2, net: String = "", diameter: float = 0.8,
-		drill: float = 0.4, board = null) -> Dictionary:
+func propose_via(position: Vector2, net: String = "", diameter: float = 0.0,
+		drill: float = 0.0, board = null, for_hint_id: String = "") -> Dictionary:
 	if _commit_transaction_active:
 		return _verb_error(ERR_COMMIT_IN_PROGRESS,
 			"a commit transaction is applying; new candidates are refused from its signal handlers")
 	if board == null or not is_instance_valid(board) or not board.has_method("resolve_via_target"):
 		return _verb_error(ERR_NO_BOARD,
 			"a standalone via proposal needs the live board's placement rule")
-	var target: Dictionary = board.resolve_via_target(position, diameter, drill, net)
+	var dims: Dictionary = PcbViaDimensions.from_board(board, diameter, drill)
+	var resolved_diameter := float(dims["diameter"])
+	var resolved_drill := float(dims["drill"])
+	var target: Dictionary = board.resolve_via_target(
+		position, resolved_diameter, resolved_drill, net)
 	var placement_error := "" if bool(target.get("ok", false)) \
 		else str(target.get("error", "the via cannot be placed there"))
 	var resolved_position: Vector2 = target.get("position", position)
@@ -2953,11 +3078,16 @@ func propose_via(position: Vector2, net: String = "", diameter: float = 0.8,
 	var span: Array = PcbLayerStack.default_through_via_span()
 	var c = PcbRouteCandidate.new()
 	c.net = str(target.get("net_name", net))
+	if not for_hint_id.is_empty():
+		c.source_hint_ids = _to_string_typed_array([for_hint_id])
 	var via_id := next_via_id()
 	var via: Dictionary = PcbRouteCandidate.make_via(
-		via_id, resolved_position, str(span[0]), str(span[1]), diameter, drill)
+		via_id, resolved_position, str(span[0]), str(span[1]),
+		resolved_diameter, resolved_drill)
 	via["authored_net"] = net
 	via["junction_trace_id"] = str(target.get("trace_id", ""))
+	# The entity mark _is_standalone_via_candidate keys off — see its doc.
+	via["proposed_entity"] = true
 	c.add_via(via)
 	var cid := str(add_candidate(c))
 	if cid.is_empty():
@@ -2966,7 +3096,9 @@ func propose_via(position: Vector2, net: String = "", diameter: float = 0.8,
 		"at": [resolved_position.x, resolved_position.y], "net_name": str(c.net),
 		"trace_id": str(target.get("trace_id", "")),
 		"snapped_to_trace": bool(target.get("snapped", false)),
-		"from_layer": str(span[0]), "to_layer": str(span[1])}
+		"from_layer": str(span[0]), "to_layer": str(span[1]),
+		"for_hint": for_hint_id,
+		"size_mm": resolved_diameter, "drill_mm": resolved_drill}
 
 
 ## Insert a via into a candidate at `position`, flipping the run DOWNSTREAM of
@@ -2998,7 +3130,7 @@ func propose_via(position: Vector2, net: String = "", diameter: float = 0.8,
 ## legal point — a nudged via is copper the user did not ask for.
 ##
 ## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
-func add_via(candidate_id: String, position: Vector2, from_layer: String, to_layer: String) -> Dictionary:
+func add_via(candidate_id: String, position: Vector2, from_layer: String, to_layer: String, board = null) -> Dictionary:
 	# Reentrancy guard (see _apply_disposition): a geometry edit mid-commit
 	# would mutate a member the transaction has already planned from.
 	if _commit_transaction_active:
@@ -3142,7 +3274,11 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 	head_pts.append(at)
 	var tail_pts: Array = [at]
 	tail_pts.append_array(pts.slice(leg + 1, pts.size()))
-	var width := float(hit_seg.get("width", 0.25))
+	# The segment's own width, verbatim. 0.0 (a segment that somehow carries
+	# none) is left as 0.0 on purpose — commit's pre-flight refuses zero-width
+	# copper by name, which is the honest outcome; inventing a literal here
+	# would put a width nobody chose onto fabricated copper (bug 01a02c480d50).
+	var width := float(hit_seg.get("width", 0.0))
 	var head := PcbRouteCandidate.make_segment(str(hit_seg.get("id", "")), canon_from, width, head_pts,
 		bool(hit_seg.get("locked", false)))
 	var tail := PcbRouteCandidate.make_segment(next_segment_id(), canon_to, width, tail_pts, false)
@@ -3168,7 +3304,9 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 	# emitter, DRC), and blind/buried is out of scope v1.
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var via_id := next_via_id()
-	c.add_via(PcbRouteCandidate.make_via(via_id, at, via_span[0], via_span[1]))
+	var via_dims: Dictionary = PcbViaDimensions.from_board(board)
+	c.add_via(PcbRouteCandidate.make_via(via_id, at, via_span[0], via_span[1],
+		float(via_dims["diameter"]), float(via_dims["drill"])))
 	c.candidate_revision = int(c.candidate_revision) + 1
 	# INV-2, geometry half: this candidate's own copper moved, so its verdict is
 	# gone. Its findings go with it (see mark_stale) — they name segment ids that

@@ -2171,21 +2171,23 @@ func _run_ux1_width_provenance() -> void:
 		str(rec.get("width_source", "")), "hint")
 
 	# NO WORKER PROVENANCE (Epoch UX4 station 10, 019fd0ab5af8 — the oracle
-	# this group existed for, now DEEPENED): the record still carries width_mm
-	# (the candidate's own segment width) and the WORKSPACE's ingest verdict
-	# as width_source — the seeded hint authors NO width, so the 0.25mm
-	# fallback now SAYS "default" instead of being indistinguishable from an
-	# intentional 0.25.
+	# this group existed for, DEEPENED again by bug 01a02c480d50): the record
+	# still carries width_mm (the candidate's own segment width) and the
+	# WORKSPACE's ingest verdict as width_source. The seeded hint authors NO
+	# width and this reply stamps none, so there is NO width — and the answer to
+	# that is 0.0 + "unresolved", not the 0.25mm literal that used to stand in
+	# for it. commit() refuses zero-width copper by name, so nothing gets
+	# fabricated at a width nobody chose.
 	var plain: Dictionary = _multipad_reply([hint_id])
 	shim.reply = plain
 	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
 	var recs2: Array = out2.get("candidates", [])
 	if recs2.size() > 0:
 		var rec2: Dictionary = recs2[0]
-		check_eq("no worker provenance ⇒ width_mm is the segment width (the fallback)",
-			float(rec2.get("width_mm", -1.0)), 0.25)
+		check_eq("no width from ANY source ⇒ width_mm 0.0, never an invented 0.25",
+			float(rec2.get("width_mm", -1.0)), 0.0)
 		check_eq("…and width_source says so BY NAME (the silent fallback, visible)",
-			str(rec2.get("width_source", "")), "default")
+			str(rec2.get("width_source", "")), "unresolved")
 
 	ctx["driver"].free_panel(ctx["panel"])
 

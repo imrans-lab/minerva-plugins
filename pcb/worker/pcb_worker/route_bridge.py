@@ -1582,6 +1582,45 @@ def _waypoints_of(envelope: dict) -> list[list[float]]:
     return _points_from_raw(kp.get("waypoints"))
 
 
+def _waypoint_stops_of(envelope: dict) -> list[tuple[list[float], Optional[str]]]:
+    """kind_payload.waypoints as [(xy, authored_layer_or_None), ...].
+
+    THE LAYER-HOP CHANNEL (work item 01a04106bd). A waypoint may be authored as
+    ``{"x": mm, "y": mm, "layer": "<copper>"}`` instead of ``[x, y]``, and that
+    ``layer`` means "the run CHANGES to this copper layer here". It is how one
+    hint says "F.Cu, duck under there, back up here, F.Cu" — the intent the
+    owner's HITL had to express as an un-routable straight line plus four
+    orphan via ghosts an agent then matched to segments by eye.
+
+    A missing/blank ``layer`` is a PLAIN corner, not a defaulted one: absent
+    means "keep going on the layer you are on". The layer name is returned
+    RAW (unmapped) so the caller can quote what the author actually wrote in a
+    refusal; _canon_layer is applied there, where a bad name has a hint id to
+    be reported against.
+
+    Positions parse exactly as _waypoints_of does, so a hint that carries no
+    layers at all yields the identical polyline.
+    """
+    kp = envelope.get("kind_payload") or {}
+    raw = kp.get("waypoints")
+    out: list[tuple[list[float], Optional[str]]] = []
+    if not isinstance(raw, list):
+        return out
+    for wp in raw:
+        if isinstance(wp, (list, tuple)) and len(wp) >= 2:
+            out.append(([float(wp[0]), float(wp[1])], None))
+        elif isinstance(wp, dict) and "x" in wp and "y" in wp:
+            layer = wp.get("layer")
+            layer = str(layer).strip() if isinstance(layer, str) else None
+            out.append(([float(wp["x"]), float(wp["y"])], layer or None))
+    return out
+
+
+def _hint_has_waypoint_layers(envelope: dict) -> bool:
+    """True iff any of this hint's waypoints names a layer to hop onto."""
+    return any(layer for _xy_, layer in _waypoint_stops_of(envelope))
+
+
 def _corridor_from_task_constraint(
     constraint: Any, warnings: Optional[list[dict]] = None, hint_id: str = "",
 ) -> tuple[list[list[float]], Optional[str], Optional[int]]:
@@ -1740,6 +1779,63 @@ def _authored_vias(raw_vias: Any) -> list:
     return [_xy(v, f"via {i}") for i, v in enumerate(raw_vias)]
 
 
+def _route_from_waypoint_stops(
+    src_xy: list, stops: list, dst_xy: list, base_layer: str,
+    declared_layers: Any = None,
+) -> tuple[list[dict], list[list[float]]]:
+    """pad -> waypoints -> pad as (segments, hop vias), honouring waypoint layers.
+
+    THE HOP RULE (work item 01a04106bd). Walking source pad to destination pad,
+    the run stays on ``base_layer`` (the hint's own kind_payload.layer) until a
+    waypoint NAMES a different copper layer. That waypoint ends the current run,
+    gets a THROUGH via, and the run continues on the named layer. One hint
+    therefore expresses "F.Cu, duck under here, back up there, F.Cu" and the
+    vias land exactly where the author put the corners — nothing downstream has
+    to infer which orphan via belongs to which segment.
+
+    A waypoint restating the layer the run is ALREADY on is a plain corner, not
+    a hop: no via. Punching a hole in the board to change nothing would be
+    copper (and a drill hit) the author did not ask for.
+
+    FAILS CLOSED (ValueError) on a layer name that is unreadable or that the
+    board does not declare — the same rule and the same reason as
+    _authored_segments: "in7" as a typo and "in7" as a plane are
+    indistinguishable, so an undeclared name is refused rather than fabricated.
+
+    Vias are positional ``[x, y]``, the shape every consumer already speaks
+    (see _authored_vias); their diameter and drill come from the board's own
+    design_rules at acceptance, never from here.
+    """
+    declared = _declared_kicad_layers(declared_layers)
+    current = base_layer
+    walk: list[tuple[list[float], Optional[str]]] = [(list(src_xy), None)]
+    walk += [(list(xy), layer) for xy, layer in stops]
+    walk.append((list(dst_xy), None))
+
+    segments: list[dict] = []
+    vias: list[list[float]] = []
+    for i in range(len(walk) - 1):
+        start_xy = walk[i][0]
+        end_xy, end_layer_raw = walk[i + 1]
+        # Zero-length hops are skipped, not refused — same filter the plain
+        # waypoint path has always applied.
+        if start_xy != end_xy:
+            segments.append({"start": [start_xy[0], start_xy[1]],
+                             "end": [end_xy[0], end_xy[1]],
+                             "layer": current})
+        if not end_layer_raw:
+            continue
+        hop = _canon_layer(end_layer_raw)  # raises ValueError on a bad name
+        if declared and hop not in declared:
+            raise ValueError(
+                f"waypoint layer {end_layer_raw!r} is not declared by this "
+                f"board (declared: {sorted(declared)})")
+        if hop != current:
+            vias.append([end_xy[0], end_xy[1]])
+            current = hop
+    return segments, vias
+
+
 def materialize_detailed_hints(
     hint_envelopes: list[dict],
     board: Board,
@@ -1792,7 +1888,15 @@ def materialize_detailed_hints(
             continue
         if str(kp.get("hint_type", "")) != "single_trace":
             continue
-        if str(kp.get("detail_level", "")) != "detailed":
+        # LAYER-CARRYING WAYPOINTS TAKE THIS PATH WHATEVER detail_level SAYS
+        # (work item 01a04106bd). A hint that names where the copper changes
+        # side is drawing its own path by construction — that is not something
+        # a soft attraction field can express — and detail_level is INFERRED
+        # FROM WAYPOINT COUNT (PcbAnnotationHost._derive_detail_level calls 2-3
+        # bends "guided"), so a short two-hop duck-under would otherwise lose
+        # its authored vias for being short.
+        hops_authored = _hint_has_waypoint_layers(env)
+        if str(kp.get("detail_level", "")) != "detailed" and not hops_authored:
             continue
         if bool(kp.get("allow_layer_change")):
             # U3 (epoch GA-2, item 019f709e9dbd): a detailed hint that OPTS
@@ -1885,17 +1989,17 @@ def materialize_detailed_hints(
                     f"detailed hint names an unusable layer ({exc}) — "
                     "falling back to engine-guided routing"})
                 continue
-            pts = [[src.position[0], src.position[1]]]
-            pts += _waypoints_of(env)
-            pts.append([dst.position[0], dst.position[1]])
-            segments = [
-                {"start": [pts[i][0], pts[i][1]],
-                 "end": [pts[i + 1][0], pts[i + 1][1]],
-                 "layer": layer}
-                for i in range(len(pts) - 1)
-                if pts[i] != pts[i + 1]
-            ]
-            vias = []
+            try:
+                segments, vias = _route_from_waypoint_stops(
+                    [src.position[0], src.position[1]],
+                    _waypoint_stops_of(env),
+                    [dst.position[0], dst.position[1]],
+                    layer, declared_layers)
+            except ValueError as exc:
+                warnings.append({"id": ann_id, "message":
+                    f"detailed hint carries an unusable waypoint layer ({exc}) — "
+                    "falling back to engine-guided routing"})
+                continue
         if not segments:
             warnings.append({"id": ann_id, "message":
                 "detailed hint has no usable geometry — skipped"})
@@ -2076,6 +2180,22 @@ def hints_to_router(
         else:
             effective_waypoints = waypoints
             effective_layer = layer
+
+        # AUTHORED LAYER HOPS ARE NOT HONOURED HERE, and say so (work item
+        # 01a04106bd). A waypoint's `layer` is an instruction to change copper
+        # AT that point with a via — a verbatim, as-drawn statement. This is the
+        # ENGINE path: the corridor is a soft attraction field and the engine
+        # owns every layer decision on it, so the hops are dropped. That is a
+        # legitimate outcome (a constraint corridor or allow_layer_change hint
+        # deliberately hands layer choice to the engine), but a SILENT one would
+        # look exactly like the via evaporation this item exists to end.
+        if _hint_has_waypoint_layers(env):
+            warnings.append({"id": ann_id, "message":
+                "waypoint layer hop(s) are NOT placed on this path: the hint is "
+                "routed by the engine (a task corridor steers it, or it sets "
+                "allow_layer_change), which owns every layer change and its "
+                "vias. Clear the corridor / allow_layer_change to have the "
+                "authored hops materialized verbatim instead."})
 
         # F2 (cold review, Epoch UX1 station 9): duplicated-authority guard.
         # An override APPLIES (constraint_pts is truthy) and this hint's own

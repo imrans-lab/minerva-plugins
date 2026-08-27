@@ -28,6 +28,7 @@ extends RefCounted
 const _Self := preload("pcb_route_candidate.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbRouteTask := preload("pcb_route_task.gd")
+const PcbViaDimensions := preload("pcb_via_dimensions.gd")
 
 ## Legal values for the two orthogonal status axes.
 const DISPOSITIONS := ["proposed", "pinned", "frozen", "superseded", "rejected", "committed"]
@@ -288,7 +289,14 @@ static func make_segment(id: String, layer: String, width: float, points: Array,
 
 
 ## Build a via dict.
-static func make_via(id: String, position: Vector2, from_layer: String, to_layer: String, diameter: float = 0.8, drill: float = 0.4, locked: bool = false) -> Dictionary:
+##
+## The diameter/drill DEFAULTS are the last-resort constants, not a policy: a
+## caller that has a board must resolve them through PcbViaDimensions and pass
+## the answer. Leaving 0.8/0.4 as bare literals here is what made every ingested
+## candidate via ignore design_rules (bug 01a03b87473c) — the sizes were stamped
+## before anything with a board ever saw the via, and the downstream rescue only
+## fires on a ZERO stamp.
+static func make_via(id: String, position: Vector2, from_layer: String, to_layer: String, diameter: float = PcbViaDimensions.DEFAULT_DIAMETER_MM, drill: float = PcbViaDimensions.DEFAULT_DRILL_MM, locked: bool = false) -> Dictionary:
 	return {
 		"id": id, "position": position,
 		"from_layer": from_layer, "to_layer": to_layer,
@@ -302,6 +310,35 @@ func add_segment(seg: Dictionary) -> void:
 
 func add_via(via: Dictionary) -> void:
 	vias.append(via)
+
+
+## True iff `candidate` is a PROPOSED VIA ENTITY — the ghost
+## minerva_pcb_propose_via / the canvas Via-proposal gesture mint: exactly one
+## via, no copper, and its own `proposed_entity` mark.
+##
+## THE MARK, NOT THE SHAPE (work item 01a04106bd). Ownership made "has no
+## provenance" useless as the test — a via ghost now records the route hint it
+## SERVES on source_hint_ids — and the shape alone is ambiguous, because a
+## router candidate can legitimately come back vias-only on a partial answer.
+## Only propose_via stamps the mark, so only it matches.
+##
+## Every surface that must tell "a hole somebody proposed" from "an answer to a
+## routing question" asks HERE: commit's consumed-hint record, the hint's render
+## mode, the lifecycle reconcile, reroute scoping, and the listing's owner label.
+## Static + duck-typed so the annotation kind can reach it without a workspace.
+static func is_proposed_via_entity(candidate) -> bool:
+	# `in` guards, not bare reads: callers hand this duck-typed objects (the
+	# annotation kind's workspace walk is explicitly degrade-tolerant), and a
+	# stand-in without these members must answer "no", not error.
+	if candidate == null or not ("segments" in candidate) or not ("vias" in candidate):
+		return false
+	if not (candidate.segments as Array).is_empty():
+		return false
+	if (candidate.vias as Array).size() != 1:
+		return false
+	var only_via = (candidate.vias as Array)[0]
+	return only_via is Dictionary \
+		and bool((only_via as Dictionary).get("proposed_entity", false))
 
 
 # ── via-span legality (surfaced via the shared PcbLayerStack contract) ─────────
