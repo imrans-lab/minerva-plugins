@@ -914,6 +914,14 @@ func duplicate_component():
 	return copy
 
 
+## Pad keys the worker emits ONLY when the footprint authored them, carried
+## verbatim through decode -> encode so a panel round trip cannot re-default a
+## land's corner radius, its mask/paste opening, or its authored-shape
+## provenance. Order fixed so the serialized key order is stable.
+const PAD_OPTIONAL_KEYS: Array = [
+	"corner_rratio", "raw_shape", "solder_mask_margin", "solder_paste_margin"]
+
+
 ## Serialize the pads array to a JSON-safe list (shared by to_dict/to_board_dict).
 func _pads_to_list() -> Array:
 	var pads_list := []
@@ -942,6 +950,15 @@ func _pads_to_list() -> Array:
 		var pad_rotation := float(pad.get("rotation", 0.0))
 		if pad_rotation != 0.0:
 			entry["rotation"] = pad_rotation
+		# The fab-affecting optionals, present-only in exact parity with the
+		# worker's two producers (resolve._pads_from_parsed,
+		# footprint_def.to_board_pad_dicts): a pad that carried none stays
+		# byte-identical, and a pad that carried them keeps them. Dropping them
+		# here re-defaulted every roundrect's corner radius and every land's
+		# mask opening the moment a board was saved from the panel.
+		for key in PAD_OPTIONAL_KEYS:
+			if pad.has(key):
+				entry[key] = pad[key]
 		pads_list.append(entry)
 	return pads_list
 
@@ -974,7 +991,7 @@ func _pads_from_list(pads_data: Array) -> void:
 		elif drill_raw is float or drill_raw is int:
 			var d := float(drill_raw)
 			drill_vec = Vector2(d, d)
-		pads.append({
+		var pad := {
 			"number": pad_data.get("number", ""),
 			"type": pad_data.get("type", "smd"),
 			"shape": pad_data.get("shape", "rect"),
@@ -986,7 +1003,18 @@ func _pads_from_list(pads_data: Array) -> void:
 			"rotation": float(pad_data.get("rotation", 0.0)),
 			"drill": drill_vec,
 			"layers": pad_data.get("layers", [])
-		})
+		}
+		# The fab-affecting optionals ride along: corner_rratio is the
+		# roundrect's real corner radius (as a fraction of the short side),
+		# raw_shape is the footprint-AUTHORED shape token, and the two margins
+		# are per-side mask/paste growth over copper. Present-only, so a key
+		# that was absent stays absent and `pad.has(key)` on the way back out
+		# asks the same "was this authored" question the worker asked.
+		for key in PAD_OPTIONAL_KEYS:
+			var value: Variant = pad_data.get(key)
+			if value != null:
+				pad[key] = value
+		pads.append(pad)
 
 
 ## Synthesize render pads from geometry-bearing canonical pins. Worker-authored

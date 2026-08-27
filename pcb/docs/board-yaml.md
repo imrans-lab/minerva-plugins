@@ -489,12 +489,44 @@ persistent id, matching `isMintedID`'s width and alphabet exactly. A zone drawn
 in the editor is therefore identity-complete from the moment it is created, on
 v1 and v2 boards alike.
 
+### Geometry authority: full vs partial
+
+A component's geometry is **FULL** when it carries a `pads` key holding a list.
+That list is then the sole pad authority and the footprint library is **not
+consulted at all** — so a board compiles, DRCs and fabricates on a machine whose
+library does not stock the part it was authored against. `graphics`, present or
+absent, is the sole graphic authority beside it; a component with pads and no
+graphics compiles with a `component_graphics_absent` warning, because it really
+will be fabricated with no silkscreen or courtyard. An explicit `pads: []` means
+exactly **zero pads**, which is how a graphics-only pseudo-component (a logo, a
+revision marking) is expressed.
+
+Geometry is **PARTIAL** when there is no `pads` key. The `footprint` ref is
+resolved from the library and stays the geometry authority, with inline `pins`
+acting as per-pad-number overrides — the rule described below. A component with
+no inline pads and an unresolvable ref still fails `footprint_unresolved`.
+
+The trigger is the `pads` **key**, not its contents, so the two states cannot
+overlap. A `pads` list that cannot be read as geometry is refused
+(`invalid_component_geometry`); it is never quietly demoted to the library path,
+which would substitute one part's copper for another's.
+
+Each pad carries `{number, type, shape, position{x,y}, size{width,height},
+drill{x,y}, layers}` plus the fab-affecting optionals the footprint authored —
+`corner_rratio`, `raw_shape`, `solder_mask_margin`, `solder_paste_margin`,
+`rotation`. Those five are **present-only**: absent means the footprint stated
+none, which is a different fact from stating zero, and every producer and
+consumer of this shape preserves the difference. `size: {width: null, height:
+null}` likewise means "no authored size", and the fail-closed sizeless-SMD gate
+is what refuses to fabricate it.
+
 ### Pin-geometry authority: the `override` sub-struct
 
-The **locked footprint is authoritative** for pad geometry. The inline pin
-fields `drill_mm` / `annulus_diameter_mm` / `pad_width_mm` / `pad_height_mm` /
-`plated` are **deprecated in v2**: they duplicate what the footprint defines, and
-a board carrying both forces consumers to guess which wins.
+Within the PARTIAL case the **locked footprint is authoritative** for pad
+geometry. The inline pin fields `drill_mm` / `annulus_diameter_mm` /
+`pad_width_mm` / `pad_height_mm` / `plated` are **deprecated in v2**: they
+duplicate what the footprint defines, and a board carrying both forces consumers
+to guess which wins.
 
 A v2 board expresses an *intentional* deviation only through the explicit typed
 `override` sub-struct on a pin:
@@ -547,7 +579,7 @@ importer (`board.ImportMinpcb`) applies this and returns a warnings list.
 | component `rotation`                        | `rotation_deg`                  | |
 | component `properties.value`               | `value`                         | |
 | component `pins` (`name`→`{x,y}` map)       | `pins` (list of `{number,x_mm,y_mm}`) | key → `number` |
-| component render fields (`pads`, `color`, `local_bounds`, `width`, `height`, `has_pad_geometry`, `bbox_center_offset`, `label_visible`, `locked`, `footprint_id`) | component `Extra` (inline) | carried losslessly into YAML, no warning |
+| component render fields (`pads`, `color`, `local_bounds`, `width`, `height`, `has_pad_geometry`, `bbox_center_offset`, `label_visible`, `locked`, `footprint_id`) | component `Extra` (inline) | carried losslessly into YAML, no warning. `pads` is **not** render-only to the compiler — see "Geometry authority: full vs partial" |
 | `nets` (`name`→object map)                  | `nets` (list, sorted by name)   | |
 | net `pins` (`[{component_id, pin_name}]`)   | `pins` (`["U1.8", ...]`)        | flattened to `Ref.Pad` |
 | net `color` / `properties` / `is_power_net` | net `Extra` (inline)            | carried losslessly |

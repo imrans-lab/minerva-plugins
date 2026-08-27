@@ -46,6 +46,7 @@ from agent_router.layers import (CANON_TO_KICAD, canon_to_kicad,
                                  inner_layer_index, is_copper, kicad_to_canon)
 
 from . import bless
+from . import inline_footprint
 from .board_schema import (
     _BOUNDARY_MESSAGES,
     _OVERRIDE_NUM_KEYS,
@@ -2926,99 +2927,140 @@ def compile_board(
         if side is None:
             continue
 
-        # The entry is read from the layer that WOULD supply this ref (first in
-        # the chain whose lock contains it), so a malformed entry is judged on
-        # the same layer resolution will use — never the seed's entry beside an
-        # override's file.
-        supplier = lookup_footprint_layer(fp_ref, chain)
-        entry = supplier.lock.get(fp_ref) if supplier is not None else None
-        if entry is not None and (not isinstance(entry, dict)
-                                  or not isinstance(entry.get("path"), str)
-                                  or not isinstance(entry.get("sha256"), str)):
-            diags.error("lock_entry_malformed",
-                        f"component {ref!r}: lock entry for {fp_ref!r} is malformed", comp_ref)
-            continue
-        # THE BOARD'S OWN LOCK (K20, DCR 019ffc52c358), read before resolution
-        # so a pinned-but-missing ref can say what it was pinned TO.
-        pinned = _board_library_lock(board).get(fp_ref)
-        try:
-            supplied = resolve_footprint_layered(fp_ref, chain=chain)
-        except FootprintLookupError as exc:
-            if pinned:
-                # An ACTIONABLE refusal, not just "not found": the board knows
-                # exactly which bytes it wants, so say so and where they came
-                # from. Without this the user is told a name is missing and left
-                # to guess which of several same-named parts was meant.
-                diags.error(
-                    "footprint_pinned_but_missing",
-                    f"component {ref!r}: {fp_ref!r} is pinned to sha256 "
-                    f"{str(pinned.get('sha256', ''))[:12]}… but no library layer supplies it"
-                    + (f"; it came from {pinned.get('source')!r} when the board was locked"
-                       if pinned.get("source") else "")
-                    + (f" (layer {pinned.get('layer')!r})" if pinned.get("layer") else ""),
-                    comp_ref)
-            else:
-                diags.error("footprint_unresolved", f"component {ref!r}: {exc}", comp_ref)
-            continue
-        parsed = supplied.parsed
-
-        # IDENTITY, NOT NAME. The layer chain has already proven the FILE matches
-        # its own layer's lock; this asks the different question K20 exists for —
-        # is it the content THIS BOARD consumed? A user layer legitimately
-        # overriding a seed part under the same name is exactly the case that
-        # silently changes copper, and it is the case this catches.
-        #
-        # FAIL CLOSED. A mismatch is refused, never resolved-anyway-with-a-
-        # warning: the whole value of a lock is that a rebuild either reproduces
-        # the board or stops. Provenance is reported to make it repairable, but
-        # only the sha adjudicates — refusing because a layer was RENAMED would
-        # break boards whose copper never moved.
-        if pinned:
-            expected = str(pinned.get("sha256", ""))
-            actual = str((entry or {}).get("sha256", ""))
-            if not expected:
-                # A pin with no usable sha CANNOT adjudicate, and staying quiet
-                # about it is the worst option available: the board looks
-                # locked, compiles clean, and is pinned to nothing. Say so
-                # rather than let a malformed entry masquerade as protection.
-                diags.warning(
-                    "library_pin_unusable",
-                    f"component {ref!r}: the lock entry for {fp_ref!r} carries no sha256, "
-                    f"so this footprint is NOT pinned — re-lock the board to restore it",
-                    comp_ref)
-            elif expected and not actual:
-                # The MIRROR of library_pin_unusable: the board knows what it
-                # wants, but the supplying layer's entry carries no sha to
-                # compare against, so the pin cannot fire. Same reasoning, same
-                # refusal to stay quiet — a pin that cannot adjudicate must not
-                # look like a pin that adjudicated and passed.
-                diags.warning(
-                    "library_pin_uncheckable",
-                    f"component {ref!r}: {fp_ref!r} is pinned, but the supplying layer "
-                    f"{supplied.layer!r} has no sha256 for it — the pin could NOT be checked",
-                    comp_ref)
-            elif expected and actual and expected != actual:
-                diags.error(
-                    "library_lock_mismatch",
-                    f"component {ref!r}: {fp_ref!r} is pinned to sha256 {expected[:12]}… "
-                    f"but layer {supplied.layer!r} supplies {actual[:12]}…. The board locked "
-                    f"different content than the library now provides; resolve by restoring "
-                    f"the pinned content or re-locking the board deliberately.",
-                    comp_ref)
+        # THE BOARD'S OWN GEOMETRY WINS when it carries any (see
+        # inline_footprint's FULL vs PARTIAL rule). A component whose `pads`
+        # list is present needs no library hit and must not take one: the
+        # library on this machine may not stock the part at all, and where it
+        # does it may hold different bytes under the same name. The pads the
+        # board was routed against are the pads it gets fabricated with.
+        if inline_footprint.carries_full_geometry(comp):
+            try:
+                definition = inline_footprint.footprint_from_component(comp, fp_ref)
+            except inline_footprint.InlineGeometryError as exc:
+                # Fail-closed rather than falling through to the library: a
+                # silent substitution here is one part's copper standing in
+                # for another's.
+                diags.error("invalid_component_geometry",
+                            f"component {ref!r}: inline pad geometry is unreadable: {exc}",
+                            comp_ref)
                 continue
+            provenance = definition.provenance
+            # Says the consequence, not just the fact: the board's list is
+            # taken as the COMPLETE copper for this part, so a library
+            # footprint feature the board never recorded is neither
+            # fabricated nor adjudicated here. The pad-capability guards below
+            # still bind — they judge the geometry the board DID state.
+            diags.info(
+                "footprint_from_board",
+                f"component {ref!r}: geometry came from the board's own pads/graphics and is "
+                f"taken as complete; the library was not consulted for {fp_ref!r}, so no "
+                f"footprint feature outside this list is fabricated",
+                comp_ref)
+            if not definition.graphics:
+                # The board owns BOTH halves once it owns either, so a missing
+                # `graphics` list means the part really is drawn with no silk or
+                # courtyard. Said out loud rather than left to be discovered on
+                # a bare fabricated board.
+                diags.warning(
+                    "component_graphics_absent",
+                    f"component {ref!r} carries its own pads but no graphics, so it "
+                    f"will be fabricated with no silkscreen or courtyard; re-resolve "
+                    f"it against {fp_ref!r} to attach them",
+                    comp_ref)
+        else:
+            # The entry is read from the layer that WOULD supply this ref (first in
+            # the chain whose lock contains it), so a malformed entry is judged on
+            # the same layer resolution will use — never the seed's entry beside an
+            # override's file.
+            supplier = lookup_footprint_layer(fp_ref, chain)
+            entry = supplier.lock.get(fp_ref) if supplier is not None else None
+            if entry is not None and (not isinstance(entry, dict)
+                                      or not isinstance(entry.get("path"), str)
+                                      or not isinstance(entry.get("sha256"), str)):
+                diags.error("lock_entry_malformed",
+                            f"component {ref!r}: lock entry for {fp_ref!r} is malformed", comp_ref)
+                continue
+            # THE BOARD'S OWN LOCK (K20, DCR 019ffc52c358), read before resolution
+            # so a pinned-but-missing ref can say what it was pinned TO.
+            pinned = _board_library_lock(board).get(fp_ref)
+            try:
+                supplied = resolve_footprint_layered(fp_ref, chain=chain)
+            except FootprintLookupError as exc:
+                if pinned:
+                    # An ACTIONABLE refusal, not just "not found": the board knows
+                    # exactly which bytes it wants, so say so and where they came
+                    # from. Without this the user is told a name is missing and left
+                    # to guess which of several same-named parts was meant.
+                    diags.error(
+                        "footprint_pinned_but_missing",
+                        f"component {ref!r}: {fp_ref!r} is pinned to sha256 "
+                        f"{str(pinned.get('sha256', ''))[:12]}… but no library layer supplies it"
+                        + (f"; it came from {pinned.get('source')!r} when the board was locked"
+                           if pinned.get("source") else "")
+                        + (f" (layer {pinned.get('layer')!r})" if pinned.get("layer") else ""),
+                        comp_ref)
+                else:
+                    diags.error("footprint_unresolved", f"component {ref!r}: {exc}", comp_ref)
+                continue
+            parsed = supplied.parsed
 
-        entry = entry or {}
-        provenance = Provenance(
-            source_id=fp_ref,
-            sha256=entry.get("sha256"),
-            license=entry.get("license"),
-            # WHICH LAYER the bytes came from (S9). Recorded for every compile,
-            # including the default seed-only one, because "the seed supplied
-            # it" is a fact worth stating rather than an absence to infer — and
-            # it costs nothing: Provenance is outside every digest.
-            library_layer=supplied.layer,
-        )
-        definition = FootprintDefinition.from_kicad_parsed(parsed, provenance=provenance)
+            # IDENTITY, NOT NAME. The layer chain has already proven the FILE matches
+            # its own layer's lock; this asks the different question K20 exists for —
+            # is it the content THIS BOARD consumed? A user layer legitimately
+            # overriding a seed part under the same name is exactly the case that
+            # silently changes copper, and it is the case this catches.
+            #
+            # FAIL CLOSED. A mismatch is refused, never resolved-anyway-with-a-
+            # warning: the whole value of a lock is that a rebuild either reproduces
+            # the board or stops. Provenance is reported to make it repairable, but
+            # only the sha adjudicates — refusing because a layer was RENAMED would
+            # break boards whose copper never moved.
+            if pinned:
+                expected = str(pinned.get("sha256", ""))
+                actual = str((entry or {}).get("sha256", ""))
+                if not expected:
+                    # A pin with no usable sha CANNOT adjudicate, and staying quiet
+                    # about it is the worst option available: the board looks
+                    # locked, compiles clean, and is pinned to nothing. Say so
+                    # rather than let a malformed entry masquerade as protection.
+                    diags.warning(
+                        "library_pin_unusable",
+                        f"component {ref!r}: the lock entry for {fp_ref!r} carries no sha256, "
+                        f"so this footprint is NOT pinned — re-lock the board to restore it",
+                        comp_ref)
+                elif expected and not actual:
+                    # The MIRROR of library_pin_unusable: the board knows what it
+                    # wants, but the supplying layer's entry carries no sha to
+                    # compare against, so the pin cannot fire. Same reasoning, same
+                    # refusal to stay quiet — a pin that cannot adjudicate must not
+                    # look like a pin that adjudicated and passed.
+                    diags.warning(
+                        "library_pin_uncheckable",
+                        f"component {ref!r}: {fp_ref!r} is pinned, but the supplying layer "
+                        f"{supplied.layer!r} has no sha256 for it — the pin could NOT be checked",
+                        comp_ref)
+                elif expected and actual and expected != actual:
+                    diags.error(
+                        "library_lock_mismatch",
+                        f"component {ref!r}: {fp_ref!r} is pinned to sha256 {expected[:12]}… "
+                        f"but layer {supplied.layer!r} supplies {actual[:12]}…. The board locked "
+                        f"different content than the library now provides; resolve by restoring "
+                        f"the pinned content or re-locking the board deliberately.",
+                        comp_ref)
+                    continue
+
+            entry = entry or {}
+            provenance = Provenance(
+                source_id=fp_ref,
+                sha256=entry.get("sha256"),
+                license=entry.get("license"),
+                # WHICH LAYER the bytes came from (S9). Recorded for every compile,
+                # including the default seed-only one, because "the seed supplied
+                # it" is a fact worth stating rather than an absence to infer — and
+                # it costs nothing: Provenance is outside every digest.
+                library_layer=supplied.layer,
+            )
+            definition = FootprintDefinition.from_kicad_parsed(parsed, provenance=provenance)
         clean = _adjudicate_footprint(definition, fp_ref, policy, requested_outputs, board, diags)
         if clean is None:
             continue

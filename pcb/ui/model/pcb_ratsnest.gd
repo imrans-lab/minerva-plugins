@@ -242,11 +242,14 @@ static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 ##   circle    — the exact disc: the centre point with the radius as swell.
 ##   oval      — the exact stadium: the long-axis segment with the short
 ##               half-axis as swell.
-##   roundrect — the maximum-corner-radius roundrect (the inscribed stadium),
-##               which every roundrect of the same size contains; the model
-##               does not carry the authored corner radius, so the smallest
-##               member of the family is the one that cannot overhang.
-##   unknown   — as roundrect: the stadium inscribed in the stated size.
+##   roundrect — exact, when the pad carries its corner radius: the rectangle
+##               shrunk by that radius on each side, swollen by the radius —
+##               the roundrect's own Minkowski decomposition. Without a stated
+##               radius it falls back to the maximum-corner-radius member (the
+##               inscribed stadium), which every roundrect of the same size
+##               contains and so cannot overhang.
+##   unknown   — as a radius-less roundrect: the stadium inscribed in the
+##               stated size.
 ##
 ## ROTATION: a pad has its OWN rotation within the footprint, composed with the
 ## component's — the pad's offset turns with the component only, the pad's body
@@ -296,10 +299,11 @@ static func _pad_geometry_key(pad: Dictionary) -> String:
 		for layer in declared:
 			layer_names.append(_canon(layer))
 	layer_names.sort()
-	return "%s|%s|%s|%s|%s|%s|%s|%s" % [
+	return "%s|%s|%s|%s|%s|%s|%s|%s|%s" % [
 		str(pos.x), str(pos.y), str(pad.get("type", "smd")),
 		str(pad.get("shape", "rect")), str(size.x), str(size.y),
-		str(pad.get("rotation", 0.0)), ",".join(layer_names)]
+		str(pad.get("rotation", 0.0)), str(pad.get("corner_rratio", null)),
+		",".join(layer_names)]
 
 
 ## One physical land as one uniform-layer node. `logical_centre` is retained
@@ -327,6 +331,12 @@ static func _physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
 	var pad_pos: Vector2 = pad.get("position", Vector2.ZERO)
 	var half: Vector2 = (pad.get("size", Vector2(1, 1)) as Vector2) * 0.5
 	var shape := str(pad.get("shape", "rect")).strip_edges().to_lower()
+	# An AUTHORED zero corner radius is a SHARP rectangle, and the distinction
+	# between "no ratio stated" and "ratio 0.0" is one the compiler preserves —
+	# so read it here too rather than lumping both into the family fallback.
+	var corner_mm := _corner_radius_mm(pad, half)
+	if shape == "roundrect" and corner_mm <= 0.0 and pad.has("corner_rratio"):
+		shape = "rect"
 	var land_centre: Vector2 = comp.position + (comp_xform * pad_pos)
 	var route_at := logical_centre if only_land else land_centre
 
@@ -346,6 +356,22 @@ static func _physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
 			extra_lines.append(PackedVector2Array([logical_centre]))
 		return _make_node([quad], extra_lines, 0.0, layers, route_at)
 
+	# An AUTHORED roundrect is modelled exactly: the corner radius is a fraction
+	# of the short side, and the land is the rectangle shrunk by that radius on
+	# every side, swollen back by it. Under-modelling it as the inscribed
+	# stadium (what a pad with no stated radius still gets, below) drops the
+	# four corner regions, and copper landing in a corner then reads as not
+	# touching — which keeps an airwire the fabricated board does not need.
+	# Only strictly BETWEEN the degenerate ends: a zero radius is the rect above
+	# and a maximal one is the stadium below, both already exact.
+	if shape == "roundrect" and corner_mm > 0.0 and corner_mm < minf(half.x, half.y):
+		var inner := half - Vector2(corner_mm, corner_mm)
+		var core := PackedVector2Array()
+		for corner_pt in [Vector2(-inner.x, -inner.y), Vector2(inner.x, -inner.y),
+				Vector2(inner.x, inner.y), Vector2(-inner.x, inner.y)]:
+			core.append(comp.position + (comp_xform * (pad_pos + (pad_xform * (corner_pt as Vector2)))))
+		return _make_node([core], [], corner_mm, layers, route_at)
+
 	# Disc or stadium: a segment (a point, for the disc) swollen by the short
 	# half-axis. The pin centre is not added as a separate entry here — the
 	# node's swell would grow it into a phantom disc anywhere the two fields
@@ -358,6 +384,18 @@ static func _physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
 		comp.position + (comp_xform * (pad_pos + (pad_xform * axis))),
 	])
 	return _make_node([], [land_line], radius, layers, route_at)
+
+
+## A roundrect pad's corner radius in mm, or 0.0 when the pad does not state
+## one. `corner_rratio` is the worker's own encoding — the radius as a fraction
+## of the SHORT side, clamped to the [0, 0.5] the schema admits — so this reads
+## the authored land rather than re-deriving a family default the emitters may
+## not agree with.
+static func _corner_radius_mm(pad: Dictionary, half: Vector2) -> float:
+	var ratio = pad.get("corner_rratio", null)
+	if not (ratio is float or ratio is int):
+		return 0.0
+	return clampf(float(ratio), 0.0, 0.5) * minf(half.x, half.y) * 2.0
 
 
 ## Every piece of NON-PAD copper carrying this net: traces, vias and copper

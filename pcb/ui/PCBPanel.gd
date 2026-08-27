@@ -48,6 +48,7 @@ const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
 const _PcbBoardHistoryScript: Script = preload("pcb_board_history.gd")
+const _PcbLoadChecksScript: Script = preload("model/pcb_load_checks.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
@@ -6080,6 +6081,14 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 		load_result["annotations_sidecar"] = "adopted"
 		if sidecar_restored > 0:
 			load_result["annotations_restored"] = sidecar_restored
+	# GUI PARITY for the fail-closed checks. Every verdict above is honest in
+	# the reply an agent reads; an owner who never sees that reply had no way to
+	# tell an indeterminate check from a clean one, which makes it fail-OPEN for
+	# the only person who can act on it. Held as a status lead — it describes
+	# the board, so it must outlast the transient messages that follow — and
+	# recomputed on every load, so a board that measures cleanly clears it.
+	_load_check_lead = _PcbLoadChecksScript.status_lead(load_result)
+	_set_status(_status_base_text)
 	return {"ok": true, "result": load_result}
 
 
@@ -6641,11 +6650,20 @@ func _set_status(text: String) -> void:
 	_status_label.tooltip_text = full
 
 
+## What the last board load's checks could not determine, held until the next
+## load answers. Written ONLY by load_board_from_yaml (see _status_lead).
+var _load_check_lead: String = ""
+
+
 ## The held condition every status write is prefixed with, or "" when there is
 ## none.
+##
+## An INDETERMINATE load-time check leads even the bus refusal: a refusal is
+## about the gesture in hand and clears when the gesture does, while "this board
+## was never measured" is true of everything done to the board afterwards.
 func _status_lead() -> String:
-	return bus_status_lead(bus_refusal_text(), bus_plan_lands(), bus_finding_count(),
-		bus_advisory_text())
+	return _load_check_lead + bus_status_lead(bus_refusal_text(), bus_plan_lands(),
+		bus_finding_count(), bus_advisory_text())
 
 
 ## The live plan's order advisory, in the canvas's words, or "" — read on every

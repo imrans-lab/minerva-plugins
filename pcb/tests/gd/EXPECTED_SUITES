@@ -136,6 +136,10 @@ test_pcb_panel_layout.gd assertions=150
 test_pcb_panel_model.gd assertions=186
 test_pcb_panel_tools.gd assertions=211
 test_pcb_panel_tools_migration.gd assertions=68
+# Authored, never executed — pins at testex. The pad codec's fab optionals,
+# the roundrect land at its authored corner radius, and the load-time
+# indeterminate lead. Source count is 27; do NOT trust it, measure it.
+test_pcb_pad_fidelity.gd
 # Epoch NLC (154 -> 158): the Tools-area Via button adds four assertions to this
 # suite's tool-button walk. Found by RUNNING it after the DCR picker removal —
 # it is outside the NLC delta the owner scoped, so nothing had exercised it since
