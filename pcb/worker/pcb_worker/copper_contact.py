@@ -48,8 +48,10 @@ from .drc_geom_primitives import (
     AABB,
     Capsule,
     OrientedRect,
+    Polygon,
     RoundedRect,
     convex_edge_distance,
+    polygon_edge_distance,
 )
 from .geometry import rotate_local_offset
 
@@ -60,13 +62,14 @@ from .geometry import rotate_local_offset
 #: vectors under ``pcb/spec/contact`` are what proves they do.
 TOUCH_EPS_MM = 1e-3
 
-#: Node kinds. ``ZONE_REGION`` is the seam the zone station fills: one filled
-#: pour region becomes a node like any other and every consumer below already
-#: reads it.
+#: Node kinds. ``ZONE_REGION`` is one FILLED pour region, a conductor like any
+#: other. ``NO_COPPER`` is the one node that joins nothing at all — see
+#: :func:`no_copper_node`.
 PAD = "pad"
 TRACE_SEG = "trace_seg"
 VIA = "via"
 ZONE_REGION = "zone_region"
+NO_COPPER = "no_copper"
 
 
 @dataclass(frozen=True)
@@ -96,8 +99,16 @@ def layers_meet(a: ContactNode, b: ContactNode) -> bool:
 def _shape_gap(s1: Any, s2: Any) -> float:
     """Edge-to-edge millimetres between two primitives, negative when they
     overlap is NOT promised — the kernel clamps at 0 for overlapping shapes,
-    which is all a contact test needs. A new shape family (a pour region) is one
-    more branch HERE; the predicate above it does not change."""
+    which is all a contact test needs.
+
+    TWO KERNELS, chosen by shape family. A pour region is a ring that clearance
+    carving and void fracturing both make CONCAVE, which the convex kernel
+    cannot measure, so it carries its own; everything else is convex. This is
+    the branch the predicate above never has to grow."""
+    if isinstance(s1, Polygon):
+        return polygon_edge_distance(s1, s2)
+    if isinstance(s2, Polygon):
+        return polygon_edge_distance(s2, s1)
     return convex_edge_distance(s1, s2)
 
 
@@ -105,6 +116,8 @@ def node_gap(a: ContactNode, b: ContactNode) -> float:
     """Smallest edge-to-edge distance between the two pieces, in mm. ``inf``
     when they share no layer — copper on different layers has no gap to
     measure, it simply is not the same conductor."""
+    if not a.shapes or not b.shapes:
+        return math.inf   # a node with no copper has no gap to measure
     if not layers_meet(a, b):
         return math.inf
     if not _aabb_within(a.aabb, b.aabb, TOUCH_EPS_MM):
@@ -174,9 +187,33 @@ def via_node(pt: tuple[float, float], diameter_mm: float,
 
 def region_node(shapes: tuple[Any, ...],
                 layers: frozenset[str] | None) -> ContactNode:
-    """A poured region as one conductor. The zone station supplies the fill's
-    convex pieces; nothing else here changes."""
+    """One FILLED pour region as one conductor.
+
+    The shapes are the region's rings (:class:`Polygon`), taken from the
+    COMPILED fill and never from the authored outline: carving cuts one outline
+    into regions that do not conduct to each other, so the outline would credit
+    joins the copper does not make.
+    """
     return _node(ZONE_REGION, layers, tuple(shapes))
+
+
+def no_copper_node(pt: tuple[float, float]) -> ContactNode:
+    """A land that is NOT copper, and so joins nothing.
+
+    An UNPLATED through-hole is the case: a drilled mechanical hole. Its
+    footprint pad still declares copper layers (KiCad writes ``*.Cu`` on an
+    ``np_thru_hole`` line), and CAM plates nothing there — so a node built from
+    those layers would bridge the whole stack through a hole with no barrel,
+    which is the one error direction that deletes a real open.
+
+    It is a NODE rather than a dropped pad because the pin still EXISTS: a board
+    may name it on a net, and the honest report is "this pin's copper reaches
+    nothing", not "this pin is absent". Empty shapes are what make it join
+    nothing — :func:`node_gap` returns infinity for a node with no copper — and
+    the empty layer set says the same thing a second way.
+    """
+    return ContactNode(kind=NO_COPPER, layers=frozenset(), shapes=(),
+                       aabb=AABB(pt[0], pt[1], pt[0], pt[1]))
 
 
 def pad_node(geom, centre: tuple[float, float], angle_deg: float,
@@ -190,7 +227,14 @@ def pad_node(geom, centre: tuple[float, float], angle_deg: float,
     both already composed by the caller — this builder never re-derives a
     placement. ``unknown_land_radius_mm`` is the coincidence disc a pad with no
     stated copper size falls back to (see the module note).
+
+    AN UNPLATED HOLE IS NOT A CONDUCTOR and comes back as
+    :func:`no_copper_node`, whatever its footprint declares — see there.
     """
+    from .pad_source import is_unplated_hole
+
+    if is_unplated_hole(geom):
+        return no_copper_node(centre)
     shape = _land_shape(geom, centre, angle_deg, unknown_land_radius_mm)
     return _node(PAD, layers, (shape,))
 

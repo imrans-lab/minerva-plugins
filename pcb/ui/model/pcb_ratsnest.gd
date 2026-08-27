@@ -62,14 +62,15 @@ const PcbBusLabels := preload("pcb_bus_labels.gd")
 ## two pieces ARE joined is one question the whole plugin asks, so it is
 ## asked there. Re-exported below for callers holding this script.
 const PcbCopperContact := preload("pcb_copper_contact.gd")
+const PcbZoneCopper := preload("pcb_zone_copper.gd")
 ## Zone decoding statics (outline points + kind normalisation) live on the data
 ## model that defines the zone dict's shape; reached through the script, not an
 ## instance, exactly as pcb_canvas.gd reaches them.
 const PCBDataScript := preload("pcb_data.gd")
 
 ## COINCIDENCE TOLERANCE and the geometry-less pin's assumed copper radius —
-## the CONTACT module's numbers, aliased so this module's own uses (the fill
-## ring's area floor) and the predicate cannot drift apart.
+## the CONTACT module's numbers, aliased so a caller reading this module's
+## re-exports need not reach for a second preload to get its tolerances.
 const TOUCH_EPS_MM := PcbCopperContact.TOUCH_EPS_MM
 const FALLBACK_PAD_RADIUS_MM := PcbCopperContact.FALLBACK_PAD_RADIUS_MM
 
@@ -223,116 +224,17 @@ static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Arr
 	for zone in zones:
 		if PCBDataScript.zone_kind(zone) != "copper_pour":
 			continue
-		# Zones spell their net "net" (pcb_data.build_zone_payload); "net_name"
-		# is accepted as the fallback the other kinds use.
-		if str((zone as Dictionary).get("net", (zone as Dictionary).get("net_name", ""))) != net_name:
+		if PcbZoneCopper.zone_net(zone as Dictionary) != net_name:
 			continue
-		# A pour conducts as its COMPILED FILL, never as its authored outline.
-		# Clearance carving and keepouts can cut one outline into several
-		# regions that do not conduct to each other, so the outline overstates
-		# what is joined. Each filled region is its OWN conductor node; a pour
-		# whose fill is absent (or computed empty) contributes no connection at
-		# all — an unproven join stays an airwire rather than a silent merge.
-		for region in _zone_fill_regions(zone):
-			pieces.append(PcbCopperContact.region_node(region,
-				(zone as Dictionary).get("layer", "top")))
+		# What a pour conducts is PcbZoneCopper's question — one reader of the
+		# compiled fill, shared with the Trace tool's terminator, so the copper
+		# a click may land on and the copper this reports as joined are one set.
+		# Each filled region is its OWN conductor node; a pour whose fill is
+		# absent (or computed empty) contributes no connection at all — an
+		# unproven join stays an airwire rather than a silent merge.
+		pieces.append_array(PcbZoneCopper.region_nodes(zone as Dictionary))
 
 	return pieces
-
-
-## A pour's compiled fill regions, when the zone dict carries them: `fill` is an
-## Array of regions, each an Array of {x_mm, y_mm} points — the same point
-## encoding as the authored outline, one polygon ring per separately filled
-## region. Returns them as PackedVector2Array polygons; empty when the fill is
-## absent or legitimately produced no copper.
-##
-## DAMAGED FILL DATA IS NOT COPPER. Any damage anywhere in the fill — a region
-## that is not an Array, a point that is not a finite-numbered {x_mm, y_mm}
-## Dictionary, a ring that encloses no area — rejects the ENTIRE fill, intact
-## sibling regions included: a fill that is partly wrong is a compile output
-## that cannot be trusted, and treating any of it as copper could erase an
-## airwire the board still needs. Rejection only ever KEEPS airwires.
-static func _zone_fill_regions(zone: Dictionary) -> Array:
-	var out: Array = []
-	var fill = zone.get("fill")
-	if not (fill is Array):
-		return out
-	for region in fill:
-		var pts := _fill_region_ring(region)
-		if pts.is_empty():
-			return []
-		out.append(pts)
-	return out
-
-
-## One fill region decoded into its polygon ring, or empty when the region is
-## not usable as copper. Every point must be present, a Dictionary, and carry
-## finite numeric x_mm AND y_mm — a damaged point is never repaired with a
-## defaulted coordinate and never skipped, because either builds a
-## plausible-looking shape out of data that no longer describes one. The ring
-## must also enclose real area: a collinear or coincident ring is a line, not
-## a region of copper.
-##
-## The area is judged on the payload's own numbers, BEFORE the reduction to
-## Vector2: that reduction rounds each coordinate to the vector type's
-## precision, and a shoelace sum over absolute board coordinates carries the
-## rounding as cancellation noise that grows with the ring's distance from the
-## origin — enough to lift a zero-area ring past the cutoff. The reduced points
-## must remain finite too: a finite Float64 coordinate can overflow Vector2 and
-## turn a bounded polygon into infinite geometry. See _ring_area_2x for how the
-## sum is kept at the ring's own scale.
-static func _fill_region_ring(region) -> PackedVector2Array:
-	var empty := PackedVector2Array()
-	if not (region is Array):
-		return empty
-	var xs := PackedFloat64Array()
-	var ys := PackedFloat64Array()
-	for p in region:
-		if not (p is Dictionary):
-			return empty
-		var x = (p as Dictionary).get("x_mm")
-		var y = (p as Dictionary).get("y_mm")
-		if not (_finite_number(x) and _finite_number(y)):
-			return empty
-		xs.append(float(x))
-		ys.append(float(y))
-	if xs.size() < 3:
-		return empty
-	# Less enclosed area than the coincidence tolerance can resolve is no
-	# area at all.
-	if _ring_area_2x(xs, ys) <= TOUCH_EPS_MM * TOUCH_EPS_MM:
-		return empty
-	var pts := PackedVector2Array()
-	for i in xs.size():
-		var point := Vector2(xs[i], ys[i])
-		if not (is_finite(point.x) and is_finite(point.y)):
-			return empty
-		pts.append(point)
-	return pts
-
-
-static func _finite_number(v) -> bool:
-	if v is int:
-		return true
-	return v is float and is_finite(v)
-
-
-## Twice the area a ring encloses (shoelace), sign dropped. Every coordinate
-## is translated to the ring's first point before it enters the sum, so the
-## terms — and their float cancellation noise — scale with the ring's own
-## extent rather than with where the ring sits on the board: the verdict is
-## the same at any offset from the origin.
-static func _ring_area_2x(xs: PackedFloat64Array, ys: PackedFloat64Array) -> float:
-	var s := 0.0
-	var n := xs.size()
-	for i in n:
-		var j := (i + 1) % n
-		var ax := xs[i] - xs[0]
-		var ay := ys[i] - ys[0]
-		var bx := xs[j] - xs[0]
-		var by := ys[j] - ys[0]
-		s += ax * by - bx * ay
-	return absf(s)
 
 
 ## A copy of `entries` ordered by a caller-supplied string key, with the key's

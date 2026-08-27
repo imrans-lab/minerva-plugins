@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from pcb_worker import copper_contact
+from pcb_worker.drc_geom_primitives import Polygon
 from pcb_worker.pad_source import PadGeom
 
 VECTORS = Path(__file__).resolve().parents[2] / "spec" / "contact"
@@ -30,14 +31,14 @@ def _pad_geom(spec: dict) -> PadGeom:
     hands the builder — no shortcut construction of a shape."""
     w, h = spec["size"]
     pad_type = spec.get("type", "smd")
-    drilled = pad_type == "thru_hole"
+    drilled = pad_type in ("thru_hole", "np_thru_hole")
     return PadGeom(
         number=spec.get("number", "1"),
         x=spec["at"][0], y=spec["at"][1],
         width=float(w), height=float(h),
         drill=(float(spec.get("drill_mm", 0.4)) if drilled else None),
         annulus=(float(w) if drilled else None),
-        plated=True,
+        plated=(pad_type != "np_thru_hole"),
         shape=spec["shape"],
         corner_rratio=spec.get("corner_rratio"),
         solder_mask_margin=None,
@@ -62,6 +63,24 @@ def _pad_node(spec: dict):
         1000.0)
 
 
+def _region_node(spec: dict):
+    """The vector's pour region as the conductor node the fill builds: one ring,
+    on the zone's own layer."""
+    ring = tuple((float(x), float(y)) for (x, y) in spec["ring"])
+    layer = spec.get("layer")
+    return copper_contact.region_node(
+        (Polygon(ring),), frozenset({layer}) if layer else None)
+
+
+def _target_node(case: dict):
+    """The copper the vector's run is measured AGAINST — a pad's land, or a
+    pour's filled region. Two builders, ONE predicate: that is the whole point
+    of the node shape, so these vectors exercise both through it."""
+    if "region" in case:
+        return _region_node(case["region"])
+    return _pad_node(case["pad"])
+
+
 def _copper_node(spec: dict):
     a = (spec["a"][0], spec["a"][1])
     width = float(spec.get("width_mm", 0.0))
@@ -74,13 +93,13 @@ def _copper_node(spec: dict):
 
 @pytest.mark.parametrize("name,case", _cases(), ids=lambda v: v if isinstance(v, str) else "")
 def test_contact_vector(name: str, case: dict) -> None:
-    pad = _pad_node(case["pad"])
+    target = _target_node(case)
     copper = _copper_node(case["copper"])
-    got = copper_contact.nodes_touch(copper, pad)
+    got = copper_contact.nodes_touch(copper, target)
     assert got is bool(case["touches"]), (
         f"{name}: expected touches={case['touches']}, got {got}. "
         f"{case['why']} (measured gap "
-        f"{copper_contact.node_gap(copper, pad):.6f}mm)")
+        f"{copper_contact.node_gap(copper, target):.6f}mm)")
 
 
 def test_the_predicate_is_symmetric() -> None:
@@ -88,10 +107,10 @@ def test_the_predicate_is_symmetric() -> None:
     its own argument order, so an asymmetric implementation would answer
     differently for the DRC than for the trace verbs."""
     for name, case in _cases():
-        pad = _pad_node(case["pad"])
+        target = _target_node(case)
         copper = _copper_node(case["copper"])
-        assert (copper_contact.nodes_touch(copper, pad)
-                is copper_contact.nodes_touch(pad, copper)), name
+        assert (copper_contact.nodes_touch(copper, target)
+                is copper_contact.nodes_touch(target, copper)), name
 
 
 def test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc() -> None:

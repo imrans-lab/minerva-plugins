@@ -113,6 +113,25 @@ func _pad_node(spec: Dictionary) -> Dictionary:
 		Vector2(float(at[0]), float(at[1])), false)
 
 
+## The vector's pour region as the conductor node the fill builds: one ring, on
+## the zone's own layer.
+func _region_node(spec: Dictionary) -> Dictionary:
+	var ring := PackedVector2Array()
+	for p in (spec["ring"] as Array):
+		var xy: Array = p
+		ring.append(Vector2(float(xy[0]), float(xy[1])))
+	return Contact.region_node(ring, spec.get("layer", "top"))
+
+
+## The copper the vector's run is measured AGAINST — a pad's land, or a pour's
+## filled region. Two builders, ONE predicate: that is the whole point of the
+## node shape, so these vectors exercise both through it.
+func _target_node(case: Dictionary) -> Dictionary:
+	if case.has("region"):
+		return _region_node(case["region"])
+	return _pad_node(case["pad"])
+
+
 func _copper_node(spec: Dictionary) -> Dictionary:
 	var a: Array = spec["a"]
 	var start := Vector2(float(a[0]), float(a[1]))
@@ -131,9 +150,9 @@ func _run_vector(name: String) -> void:
 	if case.is_empty():
 		check("%s: case.json parses" % name, false)
 		return
-	var pad := _pad_node(case["pad"])
+	var target := _target_node(case)
 	var copper := _copper_node(case["copper"])
-	var got := Contact.nodes_touch(copper, pad)
+	var got := Contact.nodes_touch(copper, target)
 	var want := bool(case["touches"])
 	if got != want:
 		printerr("  %s: %s" % [name, str(case.get("why", ""))])
@@ -149,9 +168,9 @@ func _run_symmetry(names: PackedStringArray) -> void:
 		var case := _case(name)
 		if case.is_empty():
 			continue
-		var pad := _pad_node(case["pad"])
+		var target := _target_node(case)
 		var copper := _copper_node(case["copper"])
-		if Contact.nodes_touch(copper, pad) != Contact.nodes_touch(pad, copper):
+		if Contact.nodes_touch(copper, target) != Contact.nodes_touch(target, copper):
 			asymmetric += 1
 			printerr("  asymmetric: %s" % name)
 	check("the predicate answers the same in both argument orders",

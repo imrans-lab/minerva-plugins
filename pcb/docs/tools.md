@@ -503,13 +503,16 @@ is optional. It runs no DRC — the copper is on the board when it returns.
 ### Trace-end anchors (`start` / `end`)
 
 A trace has three kinds of anchor: a pad, a via, and a **free trace end** — an
-end that touches no pad copper, no via disc and no same-net trace (within
-`PCBData.TRACE_END_JOIN_EPS_MM`, 0.05 mm, of the copper itself). The rule is
-net-blind for pads and vias but net-aware for traces: a pad or via of ANY net
-under the end makes it not free, a different-net trace under it does not (that
-is a short for DRC, not a join), and zones are never consulted — an end lying
-in a same-net pour still reads as free. A joined end is not an anchor, and a
-LOCKED trace offers none (`trace_locked` from the verb). Continuing a trace
+end that touches no pad copper, no via disc, no same-net trace (within
+`PCBData.TRACE_END_JOIN_EPS_MM`, 0.05 mm, of the copper itself) and no same-net
+pour **fill**. The rule is net-blind for pads and vias but net-aware for traces
+and pours: a pad or via of ANY net under the end makes it not free, while
+different-net trace or pour copper under it does not (that is a short for DRC,
+not a join). A pour joins as its COMPILED fill, never as its outline, and a pour
+with no computed fill joins nothing — so an end the Trace tool just finished on
+a plane is not offered straight back as a loose end to continue from. A joined
+end is not an anchor, and a LOCKED trace offers none (`trace_locked` from the
+verb). Continuing a trace
 from one of its own ends to its other end is refused (`trace_end_same_trace`):
 that would close it into a loop. The verb names one as `{trace_id, end: "start"|"end"}`:
 
@@ -1135,8 +1138,9 @@ all ignore a cutout today (see "Cut-outs" in `board-yaml.md`).
 **Draw ▸ Trace** — draws real copper directly, bypassing the router (Hints ▸
 Trace below instead asks the router for a route). Click a pad, a via **or a
 free trace end** to start — the trace takes that anchor's net — then click
-each waypoint, then click another anchor to finish on its centre (or
-double-click/Enter to end it where it is; Esc/right-click cancels). A via
+each waypoint, then click another anchor to finish on its centre, **or click
+inside a pour on your own net to finish there** (or double-click/Enter to end
+it where it is; Esc/right-click cancels). A via
 anchors for the same reason a pad does: it already carries a net, and a via is
 where a hand-routed run changes layer, so it is where the next leg of that run
 begins or ends. A **free trace end** — an end touching no pad, via or same-net
@@ -1144,7 +1148,20 @@ copper — anchors because it is where a run stopped: starting on one EXTENDS
 that trace (same id; the run is added to its polyline, on the trace's own
 layer), and finishing on one appends your run to that trace. A joined end is
 not an anchor; where a pad or via and a trace end are both within snap, the
-pad or via wins. An anchor on NO net is refused by name when you start on it
+pad or via wins.
+
+A **same-net pour** is the fourth thing a run can finish on, and on a
+plane-returned board it is what most GND runs actually end on: one click inside
+the plane ends the run there, with no double-click and no free end left behind.
+It is the only net-scoped anchor — a click inside a pour of a DIFFERENT net is
+a waypoint, not a landing, and a run left ending there reads as an open to the
+connectivity DRC and a short to the geometric one, which is what it is. What
+the click lands on is the pour's COMPILED fill, so a click inside the outline
+but inside a carved void or over an unfilled pour ends nothing, and a hidden
+pour is not clickable at all. A pour cannot START a run: a trace inherits its
+net from where it starts, and a plane has no place in particular to start from.
+
+An anchor on NO net is refused by name when you start on it
 (the trace would have no net to inherit), and merely named out loud when you
 finish on a pad or via; finishing on a trace end of another net or another
 layer is refused instead, keeping your points — one polyline carries one net

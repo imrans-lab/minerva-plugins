@@ -1,0 +1,35 @@
+{
+  "name": "130-endpoint-clear-of-a-pour-fill-region",
+  "why": "Same square. The cap centre is at x=20.3, which is 0.300mm outside the x=20 edge, and the 0.4mm run's cap radius is 0.200mm \u2014 so the copper stops 0.100mm short of the plane. That is 100x the 0.001mm coincidence tolerance, so no float noise can close it.",
+  "region": {
+    "ring": [
+      [
+        10.0,
+        10.0
+      ],
+      [
+        20.0,
+        10.0
+      ],
+      [
+        20.0,
+        20.0
+      ],
+      [
+        10.0,
+        20.0
+      ]
+    ],
+    "layer": "bottom"
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      20.3,
+      15.0
+    ],
+    "width_mm": 0.4,
+    "layer": "bottom"
+  },
+  "touches": false
+}

@@ -358,6 +358,21 @@ def is_through_hole(pad: "PadGeom") -> bool:
     return is_th_drill(pad.drill)
 
 
+def is_unplated_hole(pad: "PadGeom") -> bool:
+    """A drilled pad with NO barrel: a mechanical hole, not a conductor.
+
+    The ONE definition, because two consumers act on it and they must not
+    diverge: the mask emitters open the mask to the bare drill
+    (:func:`pad_mask_margin`), and the contact predicate gives it no copper at
+    all (``copper_contact.pad_node``). KiCad still writes ``*.Cu`` on an
+    ``np_thru_hole`` pad line, so the layer list cannot be asked this question —
+    the plating can, from either the ``np_thru_hole`` type token or a
+    ``plated: false`` flag, which are two spellings of one fact.
+    """
+    return is_through_hole(pad) and (pad.pad_type == "np_thru_hole"
+                                     or not pad.plated)
+
+
 # Circle width/height must agree to within this to be a faithful circle.
 _SHAPE_TOL_MM = 1e-6
 
@@ -592,7 +607,7 @@ def pad_mask_margin(pad: "PadGeom", mask_clearance: float) -> float:
     this on an NPTH pad — its NPTH branch emits the literal drill — so the margin-0
     branch is a no-op for gerber's plated-TH/SMD call sites and load-bearing only for
     kicad, which emits (solder_mask_margin) on the np_thru_hole line too.)"""
-    if is_through_hole(pad) and not (pad.plated and pad.pad_type != "np_thru_hole"):
+    if is_unplated_hole(pad):
         return 0.0
     return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
 

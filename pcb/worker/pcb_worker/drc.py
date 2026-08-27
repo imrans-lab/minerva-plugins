@@ -25,7 +25,8 @@ Pure Python, no KiCad binary — operates on the same canonical board dict
   B. crossing          — two trace segments on the SAME layer, DIFFERENT nets,
                          that intersect  -> deduped per (net-pair, layer).
   C. dangling_endpoint — a LEAF trace endpoint (degree 1 in its net) that reaches
-                         no pad, via, or other same-net copper  -> open.
+                         no pad, via, same-net POUR FILL, or other same-net
+                         copper  -> open.
   D. layer_change_no_via — a net's top-side and bottom-side copper meet at a point
                          that is neither a via nor a through-hole pad -> missing via.
 
@@ -55,9 +56,9 @@ from typing import Any, NamedTuple
 
 from agent_router import layers as _layers
 
-from . import copper_contact
+from . import copper_contact, zone_copper
 from .geometry import rotate_local_offset as _rotate
-from .pad_source import has_copper, is_through_hole, iter_pads
+from .pad_source import has_copper, is_through_hole, is_unplated_hole, iter_pads
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
 # layer"; it defaults to the board's clearance rule (same value the wrong-net
@@ -334,7 +335,11 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             # so a non-finite drill is not fail-closed here; is_through_hole's
             # isfinite guard means it is simply not counted as a through-hole (never
             # NaN-classified), matching the emitters' post-validation behaviour.
-            through_hole = is_through_hole(pad)
+            # UNPLATED holes are excluded here, not merely given no contact
+            # copper: `through_hole` is also what makes a pad permissive on
+            # every layer (`occupies`) and what lets check D call a layer
+            # hand-off resolved. A hole with no barrel does neither.
+            through_hole = is_through_hole(pad) and not is_unplated_hole(pad)
             # PASTE-ONLY apertures are not pads. KiCad splits a QFN thermal pad
             # into several unnumbered `(pad "" smd ... (layers "F.Paste"))`
             # nodes; they are stencil geometry with no copper and no net. Left
@@ -558,7 +563,10 @@ def _check_crossings(segs) -> list[dict]:
     return findings
 
 
-def _check_dangling(segs, pads, vias, clr) -> list[dict]:
+def _check_dangling(segs, pads, vias, clr, pours: dict) -> list[dict]:
+    """``pours`` maps a net name to its filled pour regions (see
+    :mod:`zone_copper`); a net with no entry has no plane, or none that could be
+    measured."""
     findings: list[dict] = []
     # Per-net endpoint degree (endpoints authored to the same coord coincide).
     by_net: dict = defaultdict(list)
@@ -602,6 +610,17 @@ def _check_dangling(segs, pads, vias, clr) -> list[dict]:
                        for p in pads if p.contact is not None):
                     continue
                 if any(_dist(pt, v) <= clr for v in vias):
+                    continue
+                # POUR CREDIT — SAME NET ONLY, unlike the pad credit above.
+                # The pad credit can be net-blind because a foreign pad touching
+                # this copper is itself reported (a short by check A, a clearance
+                # violation by GC2). NOTHING here reports a trace end that stops
+                # inside a FOREIGN plane — check A compares traces to pads only —
+                # so crediting one would turn a real defect into silence. An end
+                # in the wrong plane keeps reading as an open until the geometric
+                # DRC names it as the short it is.
+                if any(copper_contact.nodes_touch(end, region)
+                       for region in pours.get(net, ())):
                     continue
                 # T-junction credit: on the interior of another same-net segment.
                 if any(_point_on_segment_interior(pt, o.a, o.b, MERGE_EPS_MM)
@@ -745,8 +764,13 @@ def _board_clearance(board: dict) -> float:
 
 
 def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
-                    clr: float) -> int:
+                    clr: float, regions: list | None = None) -> int:
     """How many disconnected pin ISLANDS this net's copper leaves, >= 1.
+
+    ``regions`` are this net's FILLED pour regions (:mod:`zone_copper`). They
+    are union-find members like any other conductor — the plane is copper, and
+    on a board whose return path is the plane it is the copper that joins most
+    of the net.
 
     Union-find over the net's own pads + trace segments, joined by the SAME
     credits the violation checks above extend (a finding and a completeness
@@ -767,6 +791,11 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
         copper (census correction 019fd5fdeef3c; a same-net plus-sign pair is
         one island, not two). Cross-layer crossings earn NO such credit —
         different layers overlap freely and only connect at a via/TH pad;
+      * a POUR REGION joins any pad or segment its copper reaches, through the
+        same contact predicate, and joins a via whose centre lies IN it — a
+        barrel of any real diameter contains its own centre, so that credit
+        invents no copper. Two regions of one net join where they overlap
+        (same-net pours may overlap; each fills independently);
       * a via joins every same-net segment endpoint within ``clr`` of it —
         the harvest carries each via's POSITION and its declared NET (see
         _harvest_vias); the position is the "a via exists here" fact layer
@@ -782,9 +811,10 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
     if len(net_pads) < 2:
         return 1  # one pin (or none harvested) cannot be an island count > 1
     net_segs = [s for s in segs if s.net == net]
+    net_regions = list(regions or ())
 
     n_pads = len(net_pads)
-    parent = list(range(n_pads + len(net_segs)))
+    parent = list(range(n_pads + len(net_segs) + len(net_regions)))
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -798,6 +828,15 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
             parent[rb] = ra
 
     seg_node = n_pads
+    region_node = n_pads + len(net_segs)
+    for ri, region in enumerate(net_regions):
+        for pi, pad in enumerate(net_pads):
+            if pad.contact is not None and copper_contact.nodes_touch(
+                    region, pad.contact):
+                union(pi, region_node + ri)
+        for rj in range(ri + 1, len(net_regions)):
+            if copper_contact.nodes_touch(region, net_regions[rj]):
+                union(region_node + ri, region_node + rj)
     for si, seg in enumerate(net_segs):
         swept = seg.node()
         for pi, pad in enumerate(net_pads):
@@ -810,6 +849,9 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
             # predicate rather than being asked again here.
             if copper_contact.nodes_touch(swept, pad.contact):
                 union(pi, seg_node + si)
+        for ri, region in enumerate(net_regions):
+            if copper_contact.nodes_touch(swept, region):
+                union(region_node + ri, seg_node + si)
         for sj in range(si + 1, len(net_segs)):
             other = net_segs[sj]
             # Copper-copper credits at COINCIDENCE epsilon, not clearance
@@ -850,14 +892,25 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
                     if _dist(seg.a, v) <= clr or _dist(seg.b, v) <= clr]
         touching += [pi for pi, pad in enumerate(net_pads)
                      if _dist(pad.pt, v) <= clr]
+        if net_regions:
+            centre = copper_contact.via_node((v[0], v[1]), 0.0, None)
+            touching += [region_node + ri
+                         for ri, region in enumerate(net_regions)
+                         if copper_contact.nodes_touch(centre, region)]
         for node in touching[1:]:
             union(touching[0], node)
 
     return len({find(pi) for pi in range(n_pads)})
 
 
-def connectivity_completeness(board: dict, scope_nets=None) -> dict:
+def connectivity_completeness(board: dict, scope_nets=None, *,
+                              pours: dict | None = None,
+                              pour_reason: str | None = None) -> dict:
     """Which in-scope nets are missing or only partially wired.
+
+    ``pours``/``pour_reason`` are :func:`zone_copper.pour_nodes`' two halves,
+    passed in by a caller that already computed them (``run_drc`` does) so one
+    check costs one fill; computed here when they are not.
 
     HITL-4 (docs/llm-ergonomics.md F2). ``scope_nets`` narrows the census to
     the nets a run was ASKED about (``None`` = every net the board declares —
@@ -873,7 +926,8 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
          "partial": [{"net": name,   # copper exists but leaves > 1 pin island
                       "pin_groups": k}],
          "indeterminate": [{"net": name,   # copper the kernel cannot judge
-                            "reason": "zone_copper"}],
+                            "reason": "zone_copper",
+                            "detail": str}],  # why the pour fill is missing
          "fabrication_stage": str,   # the board's DECLARED intent ("routed"
                                      #   when it declares none)
          "routing_deferred": bool,   # derived: does that stage say these nets
@@ -894,15 +948,17 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
     Every key is ALWAYS present here (this is the internal census; reply
     surfaces apply their own absent-when-empty conventions). Nets with fewer
     than two pins are never incomplete — there is nothing to connect.
-    Zone-carrying nets count as having copper (never ``missing_copper``);
-    they are COMPLETE when the trace+via graph alone joins every pin (zone
-    copper only ever adds — epoch CPN1 narrowing) and INDETERMINATE when
-    islands remain that the pour may or may not bridge (module note above).
+    Zone-carrying nets count as having copper (never ``missing_copper``). A pour
+    whose FILL was computed is measured like any other copper and its net is
+    judged for real; only a pour whose fill could NOT be computed leaves its net
+    INDETERMINATE, and then the row says why (:mod:`zone_copper`).
     """
     clr = _board_clearance(board)
     pads = _harvest_pads(board)
     segs = _harvest_segments(board)
     vias = _harvest_vias(board)
+    if pours is None or pour_reason is None:
+        pours, pour_reason = zone_copper.pour_nodes(board)
 
     pin_counts: dict[str, int] = {}
     for net in _list(board.get("nets")):
@@ -910,8 +966,9 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
             pin_counts[net["name"]] = len(_list(net.get("pins")))
 
     trace_nets = {s.net for s in segs}
-    zone_nets = {z.get("net") for z in _list(board.get("zones"))
-                 if isinstance(z, dict) and z.get("net")}
+    # COPPER POURS ONLY — a keepout emits no copper, so a net named by one has
+    # gained nothing. zone_copper is the one reader of that distinction.
+    zone_nets = zone_copper.zone_nets(board)
     # ONE reader of via ownership. This used to re-read board["vias"] directly
     # with its own truthiness rule while the harvest applied a stricter
     # non-empty-str rule — two readers of one fact, and they disagreed: a via
@@ -931,19 +988,18 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
                 or name in netted_via_nets):
             missing.append(name)
             continue
-        groups = _net_pin_groups(name, pads, segs, vias, clr)
-        if name in zone_nets:
-            # 019fd5fdeef3b: a pour IS copper, but pour connectivity is a
-            # geometry question this centerline kernel cannot answer. NARROWED
-            # in epoch CPN1 (the coupon's return pour blocked its own promote):
-            # when the TRACE+VIA graph ALONE already joins every pin into one
-            # group, the net is COMPLETE — zone copper can only ADD connections,
-            # never remove one, so the unanswerable pour question cannot change
-            # the verdict. Only a zone-bearing net whose trace graph leaves
-            # islands stays INDETERMINATE (the pour might bridge them, might
-            # not — never falsely "partial", never auto-complete).
+        groups = _net_pin_groups(name, pads, segs, vias, clr,
+                                 pours.get(name))
+        if name in zone_nets and pour_reason:
+            # THE FILL COULD NOT BE COMPUTED, so nothing about this plane was
+            # measured. Islands the pour MIGHT bridge stay unjudged — never
+            # falsely "partial", never auto-complete. When the trace+via graph
+            # alone already joins every pin the net is COMPLETE regardless:
+            # copper can only ADD connections, so an unmeasured pour cannot
+            # change that verdict.
             if groups > 1:
-                indeterminate.append({"net": name, "reason": "zone_copper"})
+                indeterminate.append({"net": name, "reason": "zone_copper",
+                                      "detail": pour_reason})
             continue
         if groups > 1:
             partial.append({"net": name, "pin_groups": groups})
@@ -1004,21 +1060,22 @@ def net_pin_group_count(board: dict, net: str) -> int | None:
     islands") instead of leaving the caller with a bare whole-board count.
     Same union-find + credits as :func:`connectivity_completeness` (which
     stays the one classifier — this answers a count question, not a
-    missing/partial/indeterminate one). None when the census cannot judge
-    the net: fewer than two pins (nothing to connect), or zone copper on it
-    (pour connectivity is indeterminate for this centerline kernel —
-    019fd5fdeef3b's rule, mirrored)."""
+    missing/partial/indeterminate one). None when the census cannot judge the
+    net: fewer than two pins (nothing to connect), or a pour on it whose FILL
+    could not be computed (nothing was measured, so there is no count to
+    report — mirrors the classifier's indeterminate row)."""
     pin_count = 0
     for n in _list(board.get("nets")):
         if isinstance(n, dict) and n.get("name") == net:
             pin_count = len(_list(n.get("pins")))
     if pin_count < 2:
         return None
-    for z in _list(board.get("zones")):
-        if isinstance(z, dict) and z.get("net") == net:
-            return None
+    pours, pour_reason = zone_copper.pour_nodes(board)
+    if pour_reason and net in zone_copper.zone_nets(board):
+        return None
     return _net_pin_groups(net, _harvest_pads(board), _harvest_segments(board),
-                           _harvest_vias(board), _board_clearance(board))
+                           _harvest_vias(board), _board_clearance(board),
+                           pours.get(net))
 
 
 # ---------------------------------------------------------------------------
@@ -1042,11 +1099,14 @@ def run_drc(board: dict) -> dict:
     pads = _harvest_pads(board)
     segs = _harvest_segments(board)
     vias = _harvest_vias(board)
+    # ONE fill per run, shared by the dangling credit and the census below, so
+    # the two cannot disagree about what the plane conducts.
+    pours, pour_reason = zone_copper.pour_nodes(board)
 
     findings: list[dict] = []
     findings += _check_wrong_net_pad(segs, pads, clr)
     findings += _check_crossings(segs)
-    findings += _check_dangling(segs, pads, vias, clr)
+    findings += _check_dangling(segs, pads, vias, clr, pours)
     findings += _check_layer_change(segs, pads, vias, clr)
 
     counts = {
@@ -1064,7 +1124,8 @@ def run_drc(board: dict) -> dict:
     # follow the absent-key contract (an empty list is not a fact worth a
     # key). `complete` is tri-state and the census carries its standing
     # `approximate` honesty label (work item 019fd5fdeef3, DCR 019fd5fd9084).
-    completeness = connectivity_completeness(board)
+    completeness = connectivity_completeness(board, pours=pours,
+                                             pour_reason=pour_reason)
 
     out = {
         "ok": True,

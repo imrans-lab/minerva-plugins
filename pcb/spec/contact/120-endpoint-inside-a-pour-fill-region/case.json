@@ -1,0 +1,35 @@
+{
+  "name": "120-endpoint-inside-a-pour-fill-region",
+  "why": "The region is the axis-aligned square x in [10,20], y in [10,20] on bottom. The end cap sits at (15,15) \u2014 5.000mm from each of the four edges \u2014 so the point is INSIDE the ring and the edge-to-edge gap is 0. This is containment, not proximity: the nearest edge is 40x further away than the 0.125mm cap radius, so no edge credit is involved. A trace end anywhere on a plane is on that plane.",
+  "region": {
+    "ring": [
+      [
+        10.0,
+        10.0
+      ],
+      [
+        20.0,
+        10.0
+      ],
+      [
+        20.0,
+        20.0
+      ],
+      [
+        10.0,
+        20.0
+      ]
+    ],
+    "layer": "bottom"
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      15.0,
+      15.0
+    ],
+    "width_mm": 0.25,
+    "layer": "bottom"
+  },
+  "touches": true
+}

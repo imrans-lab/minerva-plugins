@@ -55,6 +55,7 @@ const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 ## The plugin-wide copper-contact predicate. "Is this end joined" is the same
 ## question the DRC and the pin inspector ask, so it is asked there.
 const PcbCopperContact := preload("pcb_copper_contact.gd")
+const PcbZoneCopper := preload("pcb_zone_copper.gd")
 
 ## Signals for reactive UI updates (panel relays these to drive dirty state).
 signal data_changed()
@@ -1031,12 +1032,17 @@ const TRACE_END_JOIN_EPS_MM := 0.05
 ## same answer the DRC gives — a wide run whose end sits off a pad centre still
 ## covers the land, and measuring the bare point said otherwise.
 ##
-## NET-BLIND for pads and vias, NET-AWARE for traces, deliberately: a pad or via
-## of ANY net under the end makes it "not free" (continuing from there would
-## draw through copper that is not yours), while only a SAME-NET trace joins — a
-## different-net trace under the end is a short for DRC to name, not a join.
-## Zones are not consulted at all, so an end lying in a same-net pour still
-## reads as free.
+## NET-BLIND for pads and vias, NET-AWARE for traces AND POURS, deliberately: a
+## pad or via of ANY net under the end makes it "not free" (continuing from there
+## would draw through copper that is not yours), while only SAME-NET trace or
+## pour copper joins — different-net copper under the end is a short for DRC to
+## name, not a join.
+##
+## A POUR JOINS AS ITS COMPILED FILL (PcbZoneCopper), never as its outline, and a
+## pour with no computed fill joins nothing. That is the same copper the Trace
+## tool lets a click land on and the same the connectivity DRC credits, so an end
+## the tool just finished on a plane is not offered straight back as a loose end
+## to continue from.
 func trace_end_is_joined(trace_id: String, end: String) -> bool:
 	var trace = get_trace(trace_id)
 	if trace == null or trace.waypoints.size() < 2:
@@ -1058,7 +1064,7 @@ func trace_end_is_joined(trace_id: String, end: String) -> bool:
 		var other = traces[other_id]
 		if other.net_name == trace.net_name and other.is_point_near(pt, TRACE_END_JOIN_EPS_MM):
 			return true
-	return false
+	return not PcbZoneCopper.pour_hit(zones, cap, str(trace.net_name)).is_empty()
 
 
 ## The FREE trace end nearest `position` within `tol` (inclusive), or {}:

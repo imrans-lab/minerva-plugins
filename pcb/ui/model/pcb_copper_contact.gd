@@ -121,6 +121,24 @@ static func region_node(region: PackedVector2Array, layer) -> Dictionary:
 		region[0] if region.size() > 0 else Vector2.ZERO)
 
 
+## A land that is NOT copper, and so joins nothing.
+##
+## An UNPLATED through-hole is the case: a drilled mechanical hole. Its footprint
+## pad still declares copper layers (KiCad writes *.Cu on an np_thru_hole line),
+## and CAM plates nothing there — so a node built from those layers would bridge
+## the whole stack through a hole with no barrel, which is the one error
+## direction that deletes a real open.
+##
+## It is a NODE rather than a dropped pad because the pin still EXISTS: a board
+## may name it on a net, and the honest report is "this pin's copper reaches
+## nothing", not "this pin is absent". EMPTY GEOMETRY is what makes it join
+## nothing — nodes_touch compares polys and lines, and a node with neither can
+## match no pair — and the empty layer set is deliberately NOT relied on, since
+## an empty layer set reads as UNKNOWN and meets everything.
+static func no_copper_node(at: Vector2) -> Dictionary:
+	return make_node([], [], 0.0, {}, at)
+
+
 ## One logical pin as one node per physical land where the footprint resolved,
 ## or one small disc at the pin centre when it did not.
 ##
@@ -194,17 +212,21 @@ static func pad_geometry_key(pad: Dictionary) -> String:
 ## turns with both. Same CW degree convention as the component (see
 ## pcb_component.get_transform), so a land is measured where it is fabricated.
 ##
-## LAYERS: a through-hole barrel pierces every declared copper layer; an SMD
-## pad has copper only where the footprint says (falling back to the side the
+## LAYERS: a PLATED through-hole barrel pierces every declared copper layer; an
+## SMD pad has copper only where the footprint says (falling back to the side the
 ## part is mounted on). A pin with NO pad geometry is given the whole stack —
 ## nothing in the model says which side its copper is on, and its component is
-## already badged as unresolved on the canvas.
+## already badged as unresolved on the canvas. An UNPLATED hole gets no copper at
+## all (see no_copper_node) — the same reading CAM and the bus tool already take.
 static func physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
 		logical_centre: Vector2, only_land: bool) -> Dictionary:
 
 	var pad_type := str(pad.get("type", "smd"))
+	if pad_type == "np_thru_hole":
+		return no_copper_node(comp.position + (comp.get_transform()
+			* (pad.get("position", Vector2.ZERO) as Vector2)))
 	var layers: Dictionary
-	if pad_type in ["thru_hole", "np_thru_hole"]:
+	if pad_type == "thru_hole":
 		layers = layer_set(stack)
 	else:
 		var declared = pad.get("layers", [])

@@ -19,9 +19,9 @@ Every reply carries a `scope` token, and no two are spelled alike.
 **cannot verify a clearance, a trace width, or an annular ring**. Its findings
 are connectivity faults: `wrong_net_pad` (endpoint on, or segment passing over,
 a different-net pad → short), `crossing` (two different-net traces intersect),
-`dangling_endpoint` (a leaf endpoint reaching no pad/via → open),
-`layer_change_no_via` (missing via). **A zero-finding `drc` result is a topology
-pass, not a proof the copper is geometrically clean.**
+`dangling_endpoint` (a leaf endpoint reaching no pad, via or same-net pour fill
+→ open), `layer_change_no_via` (missing via). **A zero-finding `drc` result is a
+topology pass, not a proof the copper is geometrically clean.**
 
 **One question here reads real copper: does this copper JOIN this pad?** The
 `dangling_endpoint` credit and the completeness census both ask
@@ -40,6 +40,51 @@ inspector, the ratsnest). Neither side can call the other while the answer is
 needed, so the two implementations are pinned against each other by the shared
 vectors in `spec/contact` — both `worker/tests/test_copper_contact_vectors.py`
 and `tests/gd/test_copper_contact_vectors.gd` enumerate that directory.
+
+**An UNPLATED hole joins nothing.** KiCad writes `*.Cu` on an `np_thru_hole`
+pad line, which declares where copper must be kept *away*, not where copper is —
+so a predicate reading that layer list hands a drilled mechanical hole an
+all-layer land, i.e. a via with the hole's full diameter as its barrel. Both
+implementations refuse it: `copper_contact.pad_node` and
+`pcb_copper_contact.physical_pad_node` return a node with no copper, and the
+connectivity harvest also stops counting such a pad as a through-hole for
+`layer_change_no_via`'s "a TH pad resolves this hand-off" credit. The pad is
+still a node, not a dropped pad: a board may name it on a net, and the honest
+report is "this pin's copper reaches nothing".
+
+### A FILLED pour is copper
+
+The four checks and the census read a copper pour as its **compiled fill**
+(`pcb_worker.zone_copper`), one `copper_contact` region node per filled region.
+The fill is what survives clearance carving, keepouts, cutouts and the edge
+inset, and those can cut one outline into regions that do not conduct to each
+other — so the authored outline would credit joins the copper does not make.
+
+**The fill is recomputed from the board under check, every time, and a `fill`
+carried by a board document is ignored.** A fill is a compile output about one
+exact board; a census that trusts a stored one reports a pad as already served
+by the plane when it is not. That makes a stale fill *unrepresentable* here
+rather than something to detect. (The panel reaches the same place from the
+other side: its fill is in-memory only, entered solely through
+`pcb_data.adopt_zone_fill` and stripped by every projection that could outlive
+the board it describes.)
+
+Three states, and they mean different things:
+
+| pour state | what it is | census |
+|---|---|---|
+| fill computed, non-empty | copper | judged for real — `partial` or complete |
+| fill computed, **empty** | a real answer: the outline was wholly consumed by keepouts, clearance or the edge inset | judged on traces + vias alone |
+| fill **not** computed | the compile refused (an arc in the outline, authored thermal relief, two foreign pours claiming one patch) — nothing was measured | `indeterminate`, with `detail` carrying the refusal |
+
+An **unfilled** pour is the third state, not a fourth. A **keepout** is none of
+them: it is a prohibition on copper and emits none, so a net whose only zone is
+a keepout has gained no copper and reads `missing_copper`.
+
+**The pour credit is same-net only**, unlike the net-blind pad credit. A foreign
+pad touching this copper is itself reported (a short by check A, a clearance
+violation by GC2); *nothing* reports a run that stops inside a foreign plane, so
+crediting one would turn a real defect into silence.
 
 ## `drc_geometric` — geometric copper DRC (IR-based, fail-closed)
 

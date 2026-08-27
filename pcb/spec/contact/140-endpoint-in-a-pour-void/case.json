@@ -1,0 +1,67 @@
+{
+  "name": "140-endpoint-in-a-pour-void",
+  "why": "A FRACTURED KEYHOLE ring \u2014 the shape a fill uses to express a void, because the Gerber region primitive it is emitted through has no hole. The outer square is x,y in [0,20]; the void is x,y in [8,12]; a zero-width slit along y=10 joins the void to the left edge. The end cap is at (10,10), the void's centre. A ray to +x crosses the ring at x=12 and at x=20 \u2014 TWO crossings, EVEN, so the point is outside the copper; the horizontal slit edges lie along the ray and cross it nowhere. The nearest real edge is 2.000mm away, so there is no proximity credit either. The authored OUTLINE would have said inside, which is exactly why a pour conducts as its fill.",
+  "region": {
+    "ring": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        20.0,
+        0.0
+      ],
+      [
+        20.0,
+        20.0
+      ],
+      [
+        0.0,
+        20.0
+      ],
+      [
+        0.0,
+        10.0
+      ],
+      [
+        8.0,
+        10.0
+      ],
+      [
+        8.0,
+        12.0
+      ],
+      [
+        12.0,
+        12.0
+      ],
+      [
+        12.0,
+        8.0
+      ],
+      [
+        8.0,
+        8.0
+      ],
+      [
+        8.0,
+        10.0
+      ],
+      [
+        0.0,
+        10.0
+      ]
+    ],
+    "layer": "bottom"
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      10.0,
+      10.0
+    ],
+    "width_mm": 0.0,
+    "layer": "bottom"
+  },
+  "touches": false
+}

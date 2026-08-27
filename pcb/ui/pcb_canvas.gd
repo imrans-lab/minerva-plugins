@@ -61,6 +61,8 @@ const _PanelToolsScript := preload("panel_tools.gd")
 ## copper actually on the board. Pure statics over the board model; this file
 ## only draws the answer.
 const PcbRatsnest := preload("model/pcb_ratsnest.gd")
+const PcbCopperContact := preload("model/pcb_copper_contact.gd")
+const PcbZoneCopper := preload("model/pcb_zone_copper.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -808,6 +810,7 @@ const TRACE_PAD_SNAP_MM: float = PCBDataScript.TRACE_SNAP_MM
 const ANCHOR_PAD := "pad"
 const ANCHOR_VIA := "via"
 const ANCHOR_TRACE_END := "trace_end"
+const ANCHOR_POUR := "pour"
 ## Width in mm the trace tool is armed to, set by the panel's width box. 0.0 —
 ## the resting state — means "use the board's design rule"
 ## (pcb_data.authored_trace_width), which is what the tool did before this control
@@ -7903,12 +7906,14 @@ func _draw_cutout_preview() -> void:
 ## an answer, and copper that invents its own net answer is copper on the wrong
 ## net.
 ##
-## THERE ARE TWO KINDS OF ANCHOR — a pad, and a VIA. A via qualifies for exactly
-## the reason a pad does: it carries a net of its own (pcb_data's via dicts hold
-## "net_name", which minerva_pcb_place_via validates against the declared net
-## table). It has to qualify, because a via is WHERE COPPER CHANGES LAYER — a
-## hand-routed run that drops to the bottom layer lands on a via, and with pads
-## as the only anchor the next leg of that run could neither begin nor end on it.
+## FOUR KINDS OF THING CAN BE AN ANCHOR — a pad, a VIA, a free TRACE END and a
+## same-net POUR — and each qualifies for the reason a pad does: it is copper
+## whose net already has an answer. A via has to qualify because it is WHERE
+## COPPER CHANGES LAYER: a hand-routed run that drops to the bottom layer lands
+## on one, and with pads alone the next leg could neither begin nor end there. A
+## pour has to qualify because on a plane-returned board it is what most runs
+## actually end on. The first three can also START a run; a pour cannot (see
+## _trace_pour_at).
 
 ## Resolve a click to a pad and its net.
 ##
@@ -7993,6 +7998,10 @@ func _trace_via_at(world_pos: Vector2) -> Dictionary:
 ## must not move ground under it.
 ##
 ## Same pad-then-other-thing shape the eraser's own pick ladder uses.
+##
+## THE POUR IS LAST, and it answers only while a run is in progress — so it too
+## can only claim clicks that used to be a miss, and it never moves ground under
+## a gesture that has not started.
 func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
 	var pad_hit := _trace_pad_at(world_pos)
 	if not pad_hit.is_empty():
@@ -8000,7 +8009,59 @@ func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
 	var via_hit := _trace_via_at(world_pos)
 	if not via_hit.is_empty():
 		return via_hit
-	return _trace_end_at(world_pos)
+	var end_hit := _trace_end_at(world_pos)
+	if not end_hit.is_empty():
+		return end_hit
+	return _trace_pour_at(world_pos)
+
+
+## Resolve a click INSIDE A SAME-NET POUR to that pour, in the SAME anchor shape
+## the three rungs above return — so the finish path never learns it landed on a
+## plane rather than on a pad.
+##
+## A PLANE IS A TERMINATOR because it is copper the run genuinely joins: a GND
+## tap does not need a pad to end on, it needs the pour, and before this the only
+## way to stop there was a double-click, which left a FREE END that the DRC then
+## reported as dangling. What the run lands on is the COMPILED FILL, read through
+## PcbZoneCopper — the same regions the ratsnest counts as joined and the same
+## the worker's connectivity DRC measures — so a click the tool accepts is a join
+## those two agree exists. An unfilled pour therefore terminates nothing: its
+## copper has not been computed, and a landing on unproven copper is exactly the
+## silent merge the fill's absence is meant to prevent.
+##
+## FOURTH RUNG, and the only NET-SCOPED one. The predicate is net-blind (copper
+## either meets copper or it does not), so the net is decided here: a click in a
+## FOREIGN plane is not an anchor at all and falls through to being a waypoint,
+## which leaves the run ending inside that plane with a free end — read as
+## dangling by the connectivity DRC and as a short by the geometric one, which is
+## what a run stopped in the wrong plane IS.
+##
+## ONLY WHILE A RUN IS IN PROGRESS. A trace INHERITS its net from where it
+## starts, and a plane is one net over a large area with no place in particular
+## to start from; the three rungs above remain the only ways to begin.
+func _trace_pour_at(world_pos: Vector2) -> Dictionary:
+	if data == null or _trace_points.is_empty() or _trace_net.is_empty():
+		return {}
+	var at := _author_point(world_pos)
+	var probe := PcbCopperContact.endpoint_node(at, trace_author_width(),
+		_trace_layer)
+	# HIDDEN COPPER IS NOT CLICKABLE COPPER — the rule the via and trace-end
+	# rungs already follow. The view predicate is applied HERE rather than
+	# inside the pour reader, which answers a copper question and should not
+	# learn about the canvas at all.
+	var visible: Array = []
+	for zone in data.zones:
+		if zone is Dictionary and _zone_visible(zone as Dictionary):
+			visible.append(zone)
+	var hit := PcbZoneCopper.pour_hit(visible, probe, _trace_net)
+	if hit.is_empty():
+		return {}
+	return {
+		"ref": str(hit.get("id", "")),
+		"kind": ANCHOR_POUR,
+		"position": at,
+		"net": _trace_net,
+	}
 
 
 ## Resolve a click to a FREE trace end, in the same anchor shape plus `end`
@@ -8039,6 +8100,8 @@ static func _trace_anchor_label(hit: Dictionary) -> String:
 	var kind := str(hit.get("kind", ANCHOR_PAD))
 	if kind == ANCHOR_TRACE_END:
 		return "Trace end %s" % str(hit.get("ref", ""))
+	if kind == ANCHOR_POUR:
+		return "the %s pour" % str(hit.get("net", ""))
 	return "%s %s" % [kind.capitalize(), str(hit.get("ref", ""))]
 
 
@@ -8162,11 +8225,11 @@ func _start_trace(hit: Dictionary) -> void:
 	if kind == ANCHOR_PAD:
 		_trace_focus = PcbRatsnest.focus(PcbRatsnest.extract(data), _trace_start_ref)
 	if kind == ANCHOR_TRACE_END:
-		trace_tool_message.emit("Extending %s from its %s end (%s) on %s — click waypoints, click a pad, via or trace end to finish." % [
-			_trace_start_ref, str(hit.get("end", "")), _trace_net, _trace_layer])
+		trace_tool_message.emit("Extending %s from its %s end (%s) on %s — click waypoints, click a pad, via, trace end or a %s pour to finish." % [
+			_trace_start_ref, str(hit.get("end", "")), _trace_net, _trace_layer, _trace_net])
 	else:
-		trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad, via or trace end to finish." % [
-			_trace_start_ref, _trace_net, _trace_layer])
+		trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad, via, trace end or a %s pour to finish." % [
+			_trace_start_ref, _trace_net, _trace_layer, _trace_net])
 	queue_redraw()
 
 

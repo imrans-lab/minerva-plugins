@@ -1,0 +1,32 @@
+{
+  "name": "150-unplated-hole-land-joins-nothing",
+  "why": "MountingHole_3.2mm_M3's own pad, verbatim: (pad 1 np_thru_hole circle (size 3.2 3.2) (drill 3.2) (layers *.Cu *.Mask)). The end cap is dead centre on that land, 1.600mm inside its stated edge \u2014 the most generous placement there is, and the one that would read as touching under any geometry at all. It still does not touch: an unplated hole is drilled, never plated, so it has no barrel and no copper. The *.Cu on the pad line declares where copper must be kept AWAY, not where copper is.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "circle",
+    "size": [
+      3.2,
+      3.2
+    ],
+    "rotation_deg": 0.0,
+    "drill_mm": 3.2,
+    "type": "np_thru_hole",
+    "layers": [
+      "top",
+      "bottom"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      0.0,
+      0.0
+    ],
+    "width_mm": 0.25,
+    "layer": "top"
+  },
+  "touches": false
+}

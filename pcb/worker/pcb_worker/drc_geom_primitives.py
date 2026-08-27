@@ -125,6 +125,96 @@ class OrientedRect:
         return AABB(min(xs), min(ys), max(xs), max(ys))
 
 
+@dataclass(frozen=True)
+class Polygon:
+    """A closed ring of copper that is NOT required to be convex.
+
+    The one concave primitive here, and it exists for one conductor: a zone's
+    FILLED region. Clearance carving makes a pour concave, and the fracture that
+    expresses a void as a self-touching keyhole ring makes it more so — so the
+    convex kernel below cannot measure it and this shape carries its own
+    distance function (:func:`polygon_edge_distance`).
+
+    ``points`` is the ring in order; the closing edge back to ``points[0]`` is
+    implied and never stored. Edges are walked by index rather than materialised,
+    because a real pour ring runs to hundreds of points and every contact test
+    would otherwise rebuild that list.
+    """
+
+    points: tuple[tuple[float, float], ...]
+
+    def aabb(self) -> AABB:
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        return AABB(min(xs), min(ys), max(xs), max(ys))
+
+
+def point_in_ring(ring: tuple[tuple[float, float], ...],
+                  px: float, py: float) -> bool:
+    """Even-odd containment for a ring that may be concave or self-touching.
+
+    A KEYHOLE ring — the fracture that joins a void to the outer boundary with a
+    zero-width slit — is exactly why the rule is even-odd: a point in the void
+    crosses the outer boundary once and the void's boundary once, so it counts
+    EVEN and reads as outside, which is the copper truth (the void is not
+    copper). A winding rule would count it inside.
+
+    A point ON the boundary is INSIDE. Boundary contact is contact, and for the
+    caller (a contact predicate) that is the fact being asked for.
+    """
+    n = len(ring)
+    if n < 3:
+        return False
+    inside = False
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        if point_segment_distance(px, py, x1, y1, x2, y2) <= EPS:
+            return True
+        if (y1 > py) != (y2 > py):
+            xc = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+            if xc > px:
+                inside = not inside
+    return inside
+
+
+def polygon_edge_distance(poly: Polygon, other) -> float:
+    """Edge-to-edge millimetres between a ring and any other copper shape.
+
+    Zero or negative when the two overlap; ``other`` may be another
+    :class:`Polygon` or anything :func:`_decompose` accepts. Mirrors
+    :func:`convex_edge_distance`'s contract (core distance minus the other
+    shape's inflation radius) so a caller can pick between them on shape type
+    alone and read one number either way.
+    """
+    ring = poly.points
+    n1 = len(ring)
+    if isinstance(other, Polygon):
+        v2, r2, other_ring = other.points, 0.0, other.points
+    else:
+        v2, e2, solid2, r2 = _decompose(other)
+        other_ring = v2 if solid2 else ()
+    if any(point_in_ring(ring, x, y) for (x, y) in v2):
+        return -r2
+    if other_ring and any(
+            (point_in_ring(other_ring, x, y) if isinstance(other, Polygon)
+             else _point_in_convex(other_ring, x, y)) for (x, y) in ring):
+        return -r2
+    edges2 = (tuple((other.points[i], other.points[(i + 1) % len(other.points)])
+                    for i in range(len(other.points)))
+              if isinstance(other, Polygon) else e2)
+    best = math.inf
+    for i in range(n1):
+        a, b = ring[i], ring[(i + 1) % n1]
+        for c, d in edges2:
+            dd = segment_segment_distance(a, b, c, d)
+            if dd < best:
+                best = dd
+                if best <= EPS:
+                    return -r2
+    return best - r2
+
+
 # ---------------------------------------------------------------------------
 # Exact point / segment distance kernels.
 # ---------------------------------------------------------------------------

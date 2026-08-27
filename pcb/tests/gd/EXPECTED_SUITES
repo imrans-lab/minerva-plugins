@@ -346,3 +346,8 @@ test_trace_cut.gd assertions=50
 # two-file edit for no gain. Pin it if the fixed section ever grows teeth of
 # its own.
 test_copper_contact_vectors.gd
+# NEW: a same-net pour is a terminator for the canvas Trace tool, and an
+# unplated hole joins nothing. UNPINNED: authored in the same change that added
+# the behaviour, so no count has been MEASURED yet — pinning a number nobody
+# ran would be a guess wearing a gate's clothes. Pin it on the first green run.
+test_trace_pour_terminator.gd

@@ -27,13 +27,17 @@ cannot be added without one of them going red.
 {
   "name":  "...",
   "why":   "the hand derivation — the numbers, not the intent",
+  // The copper the run is measured AGAINST: exactly ONE of `pad` or `region`.
   "pad":   { "at": [x_mm, y_mm],          // land CENTRE, board frame
              "shape": "rect|roundrect|circle|oval",
              "size": [w_mm, h_mm],        // the land's full extent
              "rotation_deg": 0.0,         // land angle, KiCad clockwise
              "corner_rratio": 0.25,       // roundrect only; omit otherwise
-             "type": "smd|thru_hole",
+             "drill_mm": 3.2,             // drilled types only
+             "type": "smd|thru_hole|np_thru_hole",
              "layers": ["top"] },
+  "region":{ "ring": [[x_mm, y_mm], ...], // ONE filled pour region
+             "layer": "bottom" },
   "copper":{ "kind": "segment|endpoint",
              "a": [x_mm, y_mm],
              "b": [x_mm, y_mm],           // segment only
@@ -42,6 +46,10 @@ cannot be added without one of them going red.
   "touches": true
 }
 ```
+
+`region` is a pour's COMPILED FILL ring, never its authored outline, and it may
+be concave or a self-touching keyhole — that is what a fill looks like once
+clearance carving and voids are in it (see `140-endpoint-in-a-pour-void`).
 
 `endpoint` is the round cap at ONE end of a run — what "is this end landed?"
 asks. `segment` is the whole swept stadium — what "does this run reach the pad?"
@@ -58,7 +66,12 @@ whose expectation cannot be arrived at with a ruler does not belong here.
   `pins[]` and `pads[].position` disagree. The worker has one position per pad
   and no second field to disagree with. These vectors compare LAND geometry, so
   they set the land centre and the pin centre to the same point.
-* **Vias, zone fill regions, trace-to-trace.** The predicate takes them as node
-  kinds, but a pad is where the two sides had drifted, so a pad is what is
-  pinned here. Extend the schema with a new `copper.kind` when a second kind
-  starts mattering.
+* **Vias and trace-to-trace.** The predicate takes them as node kinds, but
+  nothing has drifted there yet. Extend the schema with a new `copper.kind`
+  when one of them starts mattering.
+* **THE NET.** The predicate is net-BLIND: two pieces of copper either meet or
+  they do not, and which potentials may be joined is the CALLER's rule. So
+  "a run must not end in a foreign-net pour" cannot be pinned here — it is
+  pinned where the net is decided, on each side separately: the worker's
+  same-net pour credit in `worker/tests/test_zone_copper_drc.py`, and the Trace
+  tool's terminator in `tests/gd/test_trace_pour_terminator.gd`.
