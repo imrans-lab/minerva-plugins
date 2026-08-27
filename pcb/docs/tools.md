@@ -1080,6 +1080,30 @@ board is never echoed (`PCBPanel.worker_check` → `panel_tools._board_drc`).
 plain channels taking `{board}`: a live-board form of each would be a new
 verb, so they were left alone.
 
+## Every board-carrying panel channel rides the same by-ref path (bug `01a0414891`)
+
+`pcb.fab_preview`, `pcb.mask_view`, `pcb.zone_fill`, `pcb.board_health` and
+`pcb.assembly_check` used to inline the whole board, so `View > Fab preview`
+died `payload_too_large` on the smart-remote class of board — 221 KB of board
+into a 64 KiB pipe. All five now go through `PCBPanel._payload_by_ref`, the ONE
+snapshot sender `pcb.route` / `pcb.serialize` / `pcb.draft_check` /
+`pcb.promote_check` already used: over the limit the board becomes
+`{board_path, board_digest}` (201 bytes on that board) and the worker's
+`board_model.load_board` resolves it, digest-verified, exactly as it resolves
+`yaml`. No saved board file is needed — the snapshot is written by the panel,
+so an unsaved board travels the same way. Under the limit the payload is
+unchanged.
+
+**An overlay flag is only ever true while artwork is on screen.**
+`show_fab_preview` and `show_mask` are raised before their fetch runs. A fetch
+that comes back with nothing now takes the flag back down and puts the reason
+in the status bar's held lead (`ui/model/pcb_overlay_fetch.gd`, the same
+mechanism `pcb_load_checks.status_lead` uses); `minerva_pcb_view_state` reports
+that flag as `false` and carries the same sentence under
+`overlay_unavailable: {flag: reason}`. A board EDIT under a live preview is a
+different case and is unchanged: the artwork is dropped, the flag stays up and
+the canvas says "re-open Fab Preview".
+
 ## Worker (already live — credited, not re-created)
 
 | Tool | Worker method | Purpose |

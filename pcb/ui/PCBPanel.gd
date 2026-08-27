@@ -49,6 +49,7 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
 const _PcbBoardHistoryScript: Script = preload("pcb_board_history.gd")
 const _PcbLoadChecksScript: Script = preload("model/pcb_load_checks.gd")
+const _PcbOverlayFetchScript: Script = preload("model/pcb_overlay_fetch.gd")
 ## The pin→net invariant: used here for the load-time conflict report only —
 ## the membership VERBS run on panel_tools, which preloads the same module.
 const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
@@ -4496,6 +4497,10 @@ func view_flag_names() -> Array:
 func set_view_flag(flag: String, value: bool) -> bool:
 	if _canvas == null or not (flag in view_flag_names()):
 		return false
+	# A fresh raise supersedes whatever the last attempt failed with, and a
+	# lowered overlay is no longer claiming anything — either way the standing
+	# reason retires before the refetch below can write a new one.
+	_clear_overlay_lead(flag)
 	_canvas.set(flag, value)
 	if flag == "show_mask" and value:
 		# Fetch on demand rather than on every load: the overlay is off by
@@ -4513,7 +4518,12 @@ func set_view_flag(flag: String, value: bool) -> bool:
 			# changed, which is the one lie this view must never tell.
 			_canvas.set_fab_preview([], [], "")
 	_canvas.queue_redraw()
-	return true
+	# THE FLAG IS THE ANSWER, NOT THE REQUEST (bug 01a0414891). A refetch that
+	# came back with nothing has already taken the flag back down
+	# (_retract_overlay), and a raise that did not stick is not an applied view.
+	# Reporting it as one is what left minerva_pcb_view_state answering
+	# show_fab_preview:true over an empty canvas.
+	return bool(_canvas.get(flag)) == value
 
 
 ## Structured layout state for MCP/tests — lets an agent verify responsive
@@ -6326,13 +6336,16 @@ func board_health_check(board: Dictionary) -> Dictionary:
 	# Canonical wire form at the seam (01a007f1dd02): the enriched dict blew
 	# the broker's 64 KiB cap on real boards; the worker resolves for itself.
 	# Applied here so EVERY caller — the load path included — is covered.
+	# The wire form is smaller, NOT small: smart-remote-v2 measures 57 KB of it,
+	# 8 KB under the cap, so the by-ref send below is what actually keeps this
+	# channel alive as boards grow (bug 01a0414891).
 	board = _PanelToolsScript.canonical_wire_board(board)
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
 	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.board_health", {"board": board}, 30000)
+		"pcb.board_health", _payload_by_ref({"board": board}, "board"), 30000)
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
@@ -6352,7 +6365,7 @@ func mask_view_check(board: Dictionary) -> Dictionary:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
 	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.mask_view", {"board": board}, 30000)
+		"pcb.mask_view", _payload_by_ref({"board": board}, "board"), 30000)
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
@@ -6412,8 +6425,12 @@ func fab_preview_check(board: Dictionary) -> Dictionary:
 	if ipc == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
+	# BY-REF like every other board-carrying sender (bug 01a0414891): this
+	# channel sent the whole board by value, so View > Fab preview died
+	# payload_too_large on the smart-remote class of board — 221 KB into a
+	# 64 KiB pipe — and the flag stayed up over an empty canvas.
 	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.fab_preview", {"board": board}, 60000)
+		"pcb.fab_preview", _payload_by_ref({"board": board}, "board"), 60000)
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
@@ -6457,10 +6474,14 @@ func _refresh_fab_preview() -> void:
 		_canvas.set_fab_preview([], [], "stale — the board changed while the preview was rendering; re-open Fab Preview")
 		return
 	if not bool(reply.get("ok", false)):
-		var err: Dictionary = _dict_or_empty(reply.get("error"))
-		_canvas.set_fab_preview([], [], "unavailable — " + str(
-			err.get("message", err.get("kind", "unknown"))))
+		# NOTHING IS ON SCREEN, so nothing may claim to be. The note this used
+		# to leave was drawn INSIDE the preview — invisible the moment the
+		# preview is not drawn — so the reason moves to the held status lead
+		# and the flag comes down with the artwork (bug 01a0414891).
+		_canvas.set_fab_preview([], [], "")
+		_retract_overlay("show_fab_preview", reply)
 		return
+	_clear_overlay_lead("show_fab_preview")
 	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	var layers: Array = result.get("layers", [])
 	var unrendered: Array = result.get("unrendered", [])
@@ -6495,9 +6516,13 @@ func _refresh_mask_view() -> void:
 	if _canvas == null or not bool(_canvas.get("show_mask")):
 		return  # toggled off (or panel torn down) while the worker ran
 	if not bool(reply.get("ok", false)):
-		var err: Dictionary = _dict_or_empty(reply.get("error"))
-		_canvas.set_mask_view([], "unavailable — " + str(err.get("message", err.get("kind", "unknown"))))
+		# Same rule as the fab preview above: the overlay is empty, so the flag
+		# that says it is drawn comes down and the reason goes where a human
+		# will actually read it.
+		_canvas.set_mask_view([], "")
+		_retract_overlay("show_mask", reply)
 		return
+	_clear_overlay_lead("show_mask")
 	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	var indeterminate: Array = result.get("indeterminate", [])
 	var note := ""
@@ -6532,7 +6557,7 @@ func zone_fill_check(board: Dictionary) -> Dictionary:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
 	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.zone_fill", {"board": board}, 30000)
+		"pcb.zone_fill", _payload_by_ref({"board": board}, "board"), 30000)
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
@@ -6608,7 +6633,7 @@ func assembly_check(board: Dictionary) -> Dictionary:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
 	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.assembly_check", {"board": board}, 30000)
+		"pcb.assembly_check", _payload_by_ref({"board": board}, "board"), 30000)
 	# Same envelope normalisation as route_board: direct worker {ok, result},
 	# or the broker's {success, result:{ok, result}} double wrap.
 	if result.has("ok"):
@@ -6687,8 +6712,47 @@ var _load_check_lead: String = ""
 ## about the gesture in hand and clears when the gesture does, while "this board
 ## was never measured" is true of everything done to the board afterwards.
 func _status_lead() -> String:
-	return _load_check_lead + bus_status_lead(bus_refusal_text(), bus_plan_lands(),
-		bus_finding_count(), bus_advisory_text())
+	return _load_check_lead \
+		+ _PcbOverlayFetchScript.status_lead(_overlay_leads) \
+		+ bus_status_lead(bus_refusal_text(), bus_plan_lands(),
+			bus_finding_count(), bus_advisory_text())
+
+
+## WHY AN OVERLAY IS OFF THAT THE USER ASKED TO BE ON, canvas flag name ->
+## reason. Written ONLY by the two functions below (see _status_lead); empty
+## whenever every overlay the user raised is actually drawn.
+var _overlay_leads: Dictionary = {}
+
+
+## AN OVERLAY THAT FAILED TO FETCH TAKES ITS FLAG DOWN WITH IT (bug 01a0414891).
+##
+## The flag is a claim that the view is on screen. When the fetch returns
+## nothing there is nothing on screen, and leaving it up told BOTH readers
+## otherwise: the View menu drew a check beside an empty view, and
+## minerva_pcb_view_state reported show_fab_preview true to an agent that then
+## read the blank canvas as the board's true state. The failure note the canvas
+## used to carry is drawn inside the overlay, so a retracted view cannot show
+## it — the reason moves here, to the held lead, where it outlasts the next
+## transient message like every other standing condition.
+func _retract_overlay(flag: String, reply: Dictionary) -> void:
+	if _canvas != null:
+		_canvas.set(flag, false)
+	_overlay_leads[flag] = _PcbOverlayFetchScript.failure_reason(reply)
+	_set_status(_status_base_text)
+
+
+## The overlay is up and holding artwork (or the user lowered it): whatever it
+## last failed with is over.
+func _clear_overlay_lead(flag: String) -> void:
+	if _overlay_leads.erase(flag):
+		_set_status(_status_base_text)
+
+
+## Why each overlay the user raised is nevertheless off, or {} when none is —
+## the MCP mirror of the status lead above, so an agent reading view_state gets
+## the same sentence the human reads (panel_tools._view_state).
+func overlay_notes() -> Dictionary:
+	return _overlay_leads.duplicate()
 
 
 ## The live plan's order advisory, in the canvas's words, or "" — read on every

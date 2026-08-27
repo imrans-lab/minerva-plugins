@@ -1630,7 +1630,10 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 ##
 ## ALWAYS RETURNS THE FULL RESULTING STATE, whether or not it changed anything —
 ## a setter whose reply an agent has to guess at is a setter it has to follow
-## with a getter, and there is no getter to follow it with.
+## with a getter, and there is no getter to follow it with. `flags` is read off
+## the LIVE canvas after the writes settle, so an overlay whose on-demand fetch
+## failed reads false; `overlay_unavailable` (present only then) carries the
+## reason, the same sentence the status bar shows the human.
 ##
 ## Writes (all optional, all absolute rather than relative — an absolute view is
 ## idempotent, and a toggle needs a read the caller may not have done):
@@ -1825,13 +1828,24 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 			"kicad": PcbLayerStack.canon_to_kicad(str(canon)) if PcbLayerStack.is_copper(canon) else "",
 			"hidden": bool(canvas.is_layer_hidden(str(canon))) if canvas.has_method("is_layer_hidden") else false,
 		})
-	return _ok({
+	# WHY A FLAG A CALLER JUST RAISED READS FALSE (bug 01a0414891). show_mask and
+	# show_fab_preview come back down when their worker fetch returns nothing —
+	# the flag may only claim a view that is actually on screen. The human is
+	# told in the status lead; without this key the agent would see the flag
+	# quietly false with no reason anywhere in the reply. Absent when every
+	# raised overlay is drawn.
+	var overlay_out: Dictionary = panel.overlay_notes() \
+		if panel.has_method("overlay_notes") else {}
+	var out: Dictionary = {
 		"flags": flags_out,
 		"layers": layers_out,
 		"trace_layer_filter": str(canvas.get("trace_layer_filter")),
 		"working_layer": str(canvas.get("working_layer")),
 		"changed": changed,
-	})
+	}
+	if not overlay_out.is_empty():
+		out["overlay_unavailable"] = overlay_out
+	return _ok(out)
 
 
 static func _set_view(host, args: Dictionary) -> Dictionary:

@@ -1,0 +1,89 @@
+extends RefCounted
+## WHETHER AN OVERLAY IS ACTUALLY ON SCREEN, and what to tell a human when it
+## is not (bug 01a0414891, work item 01a0227029da).
+##
+## Off-tree module — NO class_name, reached by relative preload. Every function
+## is STATIC and pure: a worker reply in, one line out.
+##
+## THE PROBLEM. show_fab_preview and show_mask are canvas DRAW FLAGS the View
+## menu raises BEFORE the artwork is fetched. A failed fetch left the flag
+## standing: minerva_pcb_view_state reported the preview as up while the canvas
+## held nothing, and the only trace of the failure was a note drawn INSIDE an
+## overlay that was not being drawn. Both readers — the human at the View menu
+## and the agent reading view_state — were told a view existed that did not.
+## On the smart-remote class of board the fetch failed every time, because the
+## request carried the whole board into the broker's 64 KiB pipe.
+##
+## THE RULE. The flag is a claim about what is on screen, so it may stand only
+## while an overlay is actually held. A fetch that came back with nothing
+## retracts it and says why through the HELD STATUS LEAD — the same channel
+## pcb_load_checks.status_lead writes, for the same reason: a verdict that is
+## honest only in JSON is invisible to an owner who works from the GUI.
+##
+## NOT THE STALE CASE. A board edit under a live preview clears the artwork and
+## leaves the flag up with "re-open Fab Preview" drawn on the canvas — a
+## standing instruction inside a view that IS being drawn, not a claim about
+## artwork that is missing. PCBPanel._invalidate_fab_preview owns that path and
+## nothing here sees it.
+
+## The overlays this module governs, canvas flag name -> the human's word for it
+## (the View menu's own label). A flag absent from here is reported by its raw
+## name rather than dropped.
+const OVERLAY_LABELS: Dictionary = {
+	"show_fab_preview": "Fab preview",
+	"show_mask": "Mask openings",
+}
+
+## The payload-cap refusal, by every name it arrives under.
+##
+## MATCHED ON THE MESSAGE, of necessity: the broker refuses with
+## PluginErrors.payload_too_large ({error_code:"payload_too_large",
+## error_message:"Payload too large: N bytes (limit: M bytes)"}) and the panel's
+## five *_check envelope normalisations keep only error_message, so the words
+## are what survives to here. Case-insensitive (findn), and all three spellings
+## are accepted so a code that does reach us is recognised too.
+const _CAP_MARKERS: Array[String] = ["payload_too_large", "too_large", "too large"]
+
+## What a human can do about the cap refusal once the board itself travels by
+## reference: the only way back to it is a snapshot file that could not be
+## written (panel_tools.board_payload_by_ref_if_large returns the original
+## payload on any write failure, deliberately, so the broker refuses loudly).
+const _CAP_NOTE := "the board could not be snapshotted for the worker, so the request went whole and was refused as too large — check free space and write permission under the Minerva user data directory"
+
+
+## Why an overlay fetch came back with nothing, in a human's words. "" for a
+## reply that succeeded.
+##
+## THE REPLY'S OWN WORDS when it supplied any — the same rule
+## pcb_load_checks._note follows, so this line cannot drift from what the
+## channel actually said.
+static func failure_reason(reply: Dictionary) -> String:
+	if bool(reply.get("ok", false)):
+		return ""
+	var raw: Variant = reply.get("error")
+	var error: Dictionary = raw if raw is Dictionary else {}
+	var kind := str(error.get("kind", ""))
+	var message := str(error.get("message", ""))
+	for marker in _CAP_MARKERS:
+		if kind.findn(marker) != -1 or message.findn(marker) != -1:
+			return _CAP_NOTE
+	if not message.is_empty():
+		return message
+	if not kind.is_empty():
+		return kind
+	return "the worker returned no result and no reason"
+
+
+## The held status lead for every overlay currently retracted, or "" when none
+## is. `leads` maps canvas flag name -> reason.
+##
+## It LEADS the status line because the label ellipsizes on overflow; the
+## tooltip carries the rest (PCBPanel._set_status).
+static func status_lead(leads: Dictionary) -> String:
+	if leads.is_empty():
+		return ""
+	var parts := PackedStringArray()
+	for flag in leads:
+		parts.append("%s OFF — %s" % [
+			str(OVERLAY_LABELS.get(str(flag), str(flag))), str(leads[flag])])
+	return "%s  •  " % "  •  ".join(parts)

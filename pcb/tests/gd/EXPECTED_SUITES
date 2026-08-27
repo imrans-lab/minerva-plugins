@@ -316,7 +316,7 @@ test_via_edit_and_fab_stage.gd assertions=93
 # Provisional until the first trustworthy post-fix run, per the sibling NEW
 # entries above; the deliberate RED baseline run (helper + wiring absent)
 # reports fewer and fails — that failing run is the point, not a stale pin.
-test_board_by_path.gd assertions=83
+test_board_by_path.gd assertions=137
 # NEW (DCR 01a022ab356c acceptance): "proposal" means ghost trace only —
 # B one-call span-propose (mints the intent internally; spans+hint_ids =
 # union), C orphan-reroute terminal fallback with ingest task-key override,

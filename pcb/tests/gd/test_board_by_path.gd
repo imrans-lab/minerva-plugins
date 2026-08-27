@@ -32,6 +32,20 @@ extends SceneTree
 ## Handler-side twins: pcb/worker/tests/test_board_by_path.py (Python route
 ## arm), pcb/internal/tools/board_by_path_test.go (Go codec arms).
 ##
+## SECOND STATION (bug 01a0414891). Five more board-carrying senders were still
+## inline — pcb.fab_preview, pcb.mask_view, pcb.zone_fill, pcb.board_health,
+## pcb.assembly_check — so View > Fab preview died payload_too_large on the
+## smart-remote class of board and the three advisory channels died silently.
+## Measured on smart_remote_v2_board.yaml through the worker's own request entry
+## point: 221,369 bytes by value (fab_preview / mask_view / zone_fill), 57,087
+## for the canonical-wire pair, 201 bytes by reference for all five. Section 1
+## rows 1h-1m and Section 2 rows 2c-2f pin them.
+##
+## And the flag that CLAIMED the view: a failed fetch left show_fab_preview
+## standing over an empty canvas, in the View menu and in
+## minerva_pcb_view_state alike. Section 4 pins the retraction and the visible
+## reason (ui/model/pcb_overlay_fetch.gd).
+##
 ## Run: godot --headless --path src --script \
 ##   res://../../minerva-plugins/pcb/tests/gd/test_board_by_path.gd
 
@@ -79,6 +93,12 @@ class CaptureIPC extends Node:
 	## broker + Go actually produce, so consumer-level tests exercise the
 	## real unwrap depth.
 	var overrides: Dictionary = {}
+	## Per-channel BROKER REFUSAL: await_reply answers the broker's OWN failure
+	## shape ({success:false, error_code, error_message}) instead of a result.
+	## payload_too_large is exactly this shape — the refusal a board that could
+	## not be snapshotted to a file still earns, and the only way this channel
+	## can still fail once the board travels by reference.
+	var failures: Dictionary = {}
 	var _reply_id := ""
 	var _last_channel := ""
 
@@ -102,6 +122,8 @@ class CaptureIPC extends Node:
 		if reply_id != _reply_id:
 			return {"success": false, "error_code": "timeout",
 				"error_message": "no captured request"}
+		if failures.has(_last_channel):
+			return failures[_last_channel]
 		if overrides.has(_last_channel):
 			return {"success": true,
 				"result": {"ok": true, "result": overrides[_last_channel]}}
@@ -338,6 +360,63 @@ func _init() -> void:
 		not FileAccess.file_exists(reply_path))
 	ipc.overrides.clear()
 
+	# Bug 01a0414891: the OTHER five board-carrying senders were left inline, so
+	# every one of them died payload_too_large on the smart-remote class of
+	# board — View > Fab preview visibly, the three advisory channels silently.
+	# MEASURED on smart_remote_v2_board.yaml through the worker's own request
+	# entry point: 221,369 bytes by value for fab_preview / mask_view /
+	# zone_fill, 57,087 for the canonical-wire pair (8 KB under the cap, one
+	# component from dying), 201 bytes by reference for all five, and every one
+	# of them answers ok=true on the by-ref payload.
+	#
+	# Section 1's load→deserialize replaced the live board with the canned tiny
+	# one; put the oversized board back so each sender's own to_board_dict is
+	# over the cap.
+	panel.get_data().from_board_dict(_oversized_board())
+
+	# Fab preview and the mask overlay are driven through set_view_flag — the
+	# ONE path the View menu click and minerva_pcb_view_state both take — so
+	# these rows exercise the production entry, not just the request builder.
+	ipc.captured.clear()
+	await panel.set_view_flag("show_fab_preview", true)
+	var fab_req: Dictionary = ipc.last_payload("pcb.fab_preview")
+	check("1h1: View > Fab preview reaches the pcb.fab_preview channel",
+		not fab_req.is_empty())
+	_check_by_ref("1h2 fab_preview", fab_req, "board")
+
+	ipc.captured.clear()
+	await panel.set_view_flag("show_mask", true)
+	var mask_req: Dictionary = ipc.last_payload("pcb.mask_view")
+	check("1i1: the mask overlay reaches the pcb.mask_view channel",
+		not mask_req.is_empty())
+	_check_by_ref("1i2 mask_view", mask_req, "board")
+
+	# The three advisory channels, at their own sender entries — the seams the
+	# load path, the placement verbs and the pour refresh call.
+	ipc.captured.clear()
+	await panel.zone_fill_check(panel.get_data().to_board_dict())
+	var zone_req: Dictionary = ipc.last_payload("pcb.zone_fill")
+	check("1j1: zone_fill_check reaches the pcb.zone_fill channel",
+		not zone_req.is_empty())
+	_check_by_ref("1j2 zone_fill", zone_req, "board")
+
+	# board_health and assembly_check already shrink the board to its canonical
+	# WIRE form (01a007f1dd02). Smaller is not small: on the real board that is
+	# 57 KB against a 64 KiB cap, so the by-ref send is what keeps them alive.
+	ipc.captured.clear()
+	await panel.board_health_check(panel.get_data().to_board_dict())
+	var health_req: Dictionary = ipc.last_payload("pcb.board_health")
+	check("1k1: board_health_check reaches the pcb.board_health channel",
+		not health_req.is_empty())
+	_check_by_ref("1k2 board_health", health_req, "board")
+
+	ipc.captured.clear()
+	await panel.assembly_check(panel.get_data().to_board_dict())
+	var asm_req: Dictionary = ipc.last_payload("pcb.assembly_check")
+	check("1m1: assembly_check reaches the pcb.assembly_check channel",
+		not asm_req.is_empty())
+	_check_by_ref("1m2 assembly_check", asm_req, "board")
+
 	# ── Section 2: small board keeps today's inline wire shape ───────────────
 	# Unchanged-behavior invariants: green before AND after the fix.
 	print("\n-- 2: small board unchanged --")
@@ -348,6 +427,34 @@ func _init() -> void:
 	var small_route := ipc2.last_payload("pcb.route")
 	check("2a: small board still inlines 'board'", small_route.has("board"))
 	check("2b: small board carries no board_path", not small_route.has("board_path"))
+
+	# Every channel this station wired keeps the inline shape under the cap —
+	# the unchanged-behavior half of the fix, green before AND after.
+	ipc2.captured.clear()
+	await panel2.set_view_flag("show_fab_preview", true)
+	var small_fab: Dictionary = ipc2.last_payload("pcb.fab_preview")
+	check("2c: pcb.fab_preview inlines a small board",
+		small_fab.has("board") and not small_fab.has("board_path"),
+		"keys=%s" % str(small_fab.keys()))
+	ipc2.captured.clear()
+	await panel2.set_view_flag("show_mask", true)
+	var small_mask: Dictionary = ipc2.last_payload("pcb.mask_view")
+	check("2c2: pcb.mask_view inlines a small board",
+		small_mask.has("board") and not small_mask.has("board_path"),
+		"keys=%s" % str(small_mask.keys()))
+	ipc2.captured.clear()
+	await panel2.zone_fill_check(panel2.get_data().to_board_dict())
+	var small_zone: Dictionary = ipc2.last_payload("pcb.zone_fill")
+	check("2d: pcb.zone_fill inlines a small board",
+		small_zone.has("board") and not small_zone.has("board_path"))
+	await panel2.board_health_check(panel2.get_data().to_board_dict())
+	var small_health: Dictionary = ipc2.last_payload("pcb.board_health")
+	check("2e: pcb.board_health inlines a small board",
+		small_health.has("board") and not small_health.has("board_path"))
+	await panel2.assembly_check(panel2.get_data().to_board_dict())
+	var small_asm: Dictionary = ipc2.last_payload("pcb.assembly_check")
+	check("2f: pcb.assembly_check inlines a small board",
+		small_asm.has("board") and not small_asm.has("board_path"))
 
 	# ── Section 3: minerva_pcb_board_drc, the live-board DRC verb ────────────
 	# {editor_name} checks the LIVE board through the backend DRC tools, by
@@ -421,6 +528,99 @@ func _init() -> void:
 		and (small.get("findings", ["x"]) as Array).is_empty())
 	ipc2.overrides.clear()
 
+	# ── Section 4: an overlay flag is true only while artwork is on screen ───
+	#
+	# Bug 01a0414891, second half. show_fab_preview and show_mask are raised
+	# BEFORE their fetch runs, and a failed fetch used to leave the flag
+	# standing: the View menu drew a check beside an empty view and
+	# minerva_pcb_view_state answered show_fab_preview:true to an agent that
+	# then read the blank canvas as the board. The only trace of the failure was
+	# a note drawn INSIDE an overlay that was not being drawn.
+	#
+	# ORACLE: the canvas flag and the panel's status label after a refused
+	# fetch — the two surfaces a human and an agent actually read — plus the
+	# reply minerva_pcb_view_state returns. The refusal injected is the broker's
+	# OWN payload_too_large shape, the only failure still reachable once the
+	# board travels by reference (an unwritable snapshot dir).
+	print("\n-- 4: a failed overlay fetch retracts its flag and says why --")
+	var rig4 := _rig(_oversized_board())
+	var panel4 = rig4["panel"]
+	var ipc4: CaptureIPC = rig4["ipc"]
+	# VERBATIM from PluginErrors.payload_too_large — the words the host broker
+	# actually refuses with, not a paraphrase. The five *_check normalisations
+	# keep only error_message, so those words are the only thing left to
+	# recognise the cap refusal by; a fixture that invented its own would pass
+	# while production read the same failure as an anonymous worker error.
+	var refusal := {"success": false, "error_code": "payload_too_large",
+		"error_message": "Payload too large: 221369 bytes (limit: 65536 bytes)"}
+	ipc4.failures["pcb.fab_preview"] = refusal
+	var raised: bool = await panel4.set_view_flag("show_fab_preview", true)
+	check("4a: a refused fab_preview fetch leaves show_fab_preview FALSE",
+		not bool(panel4._canvas.get("show_fab_preview")))
+	check("4b: ...and set_view_flag reports the raise did not stick", not raised)
+	check("4c: ...and the status bar LEADS with the reason",
+		str(panel4._status_label.text).findn("Fab preview OFF") != -1,
+		str(panel4._status_label.text))
+	check("4d: ...in words, not as a wire code — the cap refusal names the snapshot",
+		str(panel4._status_label.text).findn("snapshot") != -1,
+		str(panel4._status_label.text))
+
+	ipc4.failures["pcb.mask_view"] = refusal
+	await panel4.set_view_flag("show_mask", true)
+	check("4e: a refused mask_view fetch leaves show_mask FALSE",
+		not bool(panel4._canvas.get("show_mask")))
+	check("4f: ...and its reason leads too, beside the preview's",
+		str(panel4._status_label.text).findn("Mask openings OFF") != -1,
+		str(panel4._status_label.text))
+
+	# The MCP mirror: an agent gets the same sentence the human reads, and the
+	# flag it just asked for reads false rather than true-over-nothing.
+	var host4 = panel4._annotation_host
+	var vs: Dictionary = await PanelTools.handle(host4, "minerva_pcb_view_state",
+		{"editor_name": "PCB1"})
+	var vs_flags: Dictionary = vs.get("flags", {})
+	var vs_notes: Dictionary = vs.get("overlay_unavailable", {})
+	check("4g: view_state reports the retracted flag false",
+		bool(vs.get("success", false)) and not bool(vs_flags.get("show_fab_preview", true)),
+		str(vs))
+	check("4h: ...and names why, for both overlays",
+		vs_notes.has("show_fab_preview") and vs_notes.has("show_mask")
+			and str(vs_notes.get("show_fab_preview", "")).findn("too large") != -1,
+		str(vs_notes))
+
+	# A SUCCESSFUL fetch is the other half of the invariant: the flag stands and
+	# nothing is held against it.
+	ipc4.failures.clear()
+	var raised_ok: bool = await panel4.set_view_flag("show_fab_preview", true)
+	check("4i: a fetch that returned artwork leaves the flag UP",
+		raised_ok and bool(panel4._canvas.get("show_fab_preview")))
+	check("4j: ...and retires the reason it last failed with",
+		str(panel4._status_label.text).findn("Fab preview OFF") == -1,
+		str(panel4._status_label.text))
+
+	# Lowering an overlay by hand retires a standing reason: the user is no
+	# longer asking for the view, so nothing is owed about it.
+	ipc4.failures["pcb.mask_view"] = refusal
+	await panel4.set_view_flag("show_mask", true)
+	await panel4.set_view_flag("show_mask", false)
+	check("4k: lowering an overlay retires its standing reason",
+		str(panel4._status_label.text).findn("Mask openings OFF") == -1,
+		str(panel4._status_label.text))
+	ipc4.failures.clear()
+
+	# ── 4u: pcb_overlay_fetch, the pure module ───────────────────────────────
+	print("\n-- 4u: pcb_overlay_fetch (pure) --")
+	var OverlayFetch: Variant = load("res://../../minerva-plugins/pcb/ui/model/pcb_overlay_fetch.gd")
+	check("4u1: a successful reply has no failure reason",
+		str(OverlayFetch.failure_reason({"ok": true, "result": {}})).is_empty())
+	check("4u2: a reply's OWN words are carried, never restated",
+		str(OverlayFetch.failure_reason({"ok": false,
+			"error": {"kind": "compile", "message": "unmodelable land on R3"}}))
+			== "unmodelable land on R3")
+	check("4u3: no retracted overlay means no lead at all",
+		str(OverlayFetch.status_lead({})).is_empty())
+
+	panel4.free()
 	panel.free()
 	panel2.free()
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
