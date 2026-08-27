@@ -413,8 +413,16 @@ An id can be claimed **once per import**, and that holds for traces and vias
 alike. If one supplied id maps to several disconnected polylines — or the same
 via id arrives twice — the first claimant keeps it and the rest are minted
 fresh; no copper is dropped and none is overwritten. Traces and vias are
-separate id spaces (`trace_N` / `via_N`) with separate counters, so a trace and
-a via spelled identically never block each other.
+separate id spaces (`trace:<hex>` / `via:<hex>`) so a trace and a via spelled
+identically never block each other.
+
+**Ids survive a reload.** A freshly minted trace or via id is a persistent token
+(`trace:<32 hex>`, `via:<32 hex>` — see board-yaml.md "Persistent identity"), so
+an id you hold from before `minerva_pcb_export_yaml` is still the id after
+`minerva_pcb_load_board`. Older boards carrying ordinal `trace_7` / `via_12`
+handles still load and still delete by those handles, but the deserialize
+migration re-mints them, so an ordinal id **does not** survive the round trip;
+re-read the ids after a load if that is what you have.
 
 ### Partial success
 
@@ -437,6 +445,15 @@ an absent key means "you named none, so there was nothing to check".
 was queried and has no traces), never a stand-in for "not computed". Note it
 cannot distinguish a net that exists and is unrouted from a net name you
 mistyped; both count zero.
+
+### "committed by" is an ownership claim, and it is checked
+
+`reopened_candidate_ids` / the `note` that names them appear only when the copper
+you deleted was **really** a committed route candidate's. Ownership is keyed by
+id **and** net, with the candidate's own geometry bounds as the tiebreak: a
+sidecar record whose id resolves to copper on another net, or nowhere near the
+candidate, is dropped rather than believed. Copper you drew by hand therefore
+reports no "committed by" even when a stale record happens to name its id.
 
 A request with no selector at all is the one hard error: deleting nothing and
 deleting everything must never be the same request. An **empty** `net_name`, or
@@ -1032,6 +1049,17 @@ not pick a winner and does not drop a membership the source deliberately wrote:
 load reply's `warnings` and in the panel's held status lead (`NET CONFLICT: …`).
 Reconnecting the pin with `connect_net` heals it — the move sweeps every foreign
 membership, not just the first.
+
+**A routing-sidecar record this board cannot support is dropped, and named.**
+The load restores `<board>.routing.json` beside the board, and every committed
+route candidate's recorded copper ids are then checked against the board that
+just arrived. A claim on copper that is gone, or on copper belonging to another
+net, is DROPPED rather than re-attached to whatever now carries that id; a
+candidate left claiming nothing has its commit retired and its routing task
+reopened. Each such drop is named in the load reply's `warnings`
+(`stale routing-sidecar ownership record dropped for candidate …`). This is what
+keeps a later `minerva_pcb_delete_traces` from reporting "committed by" a
+candidate that never routed the copper you deleted.
 
 ## DRC over the live board (`minerva_pcb_board_drc`)
 

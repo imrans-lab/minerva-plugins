@@ -65,6 +65,7 @@ const _PcbNetMembershipScript := preload("model/pcb_net_membership.gd")
 ## refusals from the canonical const set instead of re-listing it — a second copy
 ## of the terminal set is a second thing to keep in step with the legality table.
 const _PcbRouteCandidateScript := preload("model/pcb_route_candidate.gd")
+const _PcbCopperOwnership := preload("model/pcb_copper_ownership.gd")
 ## C5 (S3+S4, DCR 019fb572b888): the pure bus-geometry module (S1+S2, shipped
 ## and pinned by test_pcb_bus_geometry.gd — a standing pin this file consumes
 ## and never edits). Zero imports itself.
@@ -1463,6 +1464,11 @@ static func _delete_traces(host, args: Dictionary) -> Dictionary:
 				missing_via_ids.append(vid)
 			else:
 				via_ids_to_delete.append(vid)
+
+	# Ownership pre-check (see _prune_foreign_commit_claims): a stale claim has to
+	# be dropped while its copper is still on the board, or phase 3 cannot tell a
+	# lie from a loss.
+	_prune_foreign_commit_claims(host, data)
 
 	# ── Phase 2: apply. Traces go by id through PCBData.remove_trace; vias go by
 	# id through remove_via_by_id, NEVER by index — remove_via is positional and
@@ -4338,6 +4344,10 @@ static func _retire_commits_owning_trace(host, data, trace_id: String) -> Array:
 		return []
 	if data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(workspace)
+	# Same ownership pre-check the delete verbs run (bug 01a040f6d7): an edit
+	# must not retire a commit whose record merely NAMES this trace's id while
+	# the copper belongs to another net.
+	_prune_foreign_commit_claims(host, data)
 	return workspace.retire_commits_owning_trace(trace_id)
 
 
@@ -4697,6 +4707,7 @@ static func _delete_via(host, args: Dictionary) -> Dictionary:
 	# board and `data.vias` no longer holds it.
 	var pos: Vector2 = data.via_position(via)
 	var net_name: String = str(via.get("net_name", ""))
+	_prune_foreign_commit_claims(host, data)  # see _delete_traces' phase-2 note
 	if not data.remove_via_by_id(via_id):
 		return _err("Unknown via: %s" % via_id)
 	# A via a COMMITTED candidate owns is a layer change that candidate's route
@@ -6004,6 +6015,27 @@ static func _workspace_ctx(host) -> Dictionary:
 	# cannot be closed synchronously.
 	_reconcile_hint_lifecycle(host, workspace)
 	return {"ok": true, "ws": workspace, "data": data}
+
+
+## OWNERSHIP PRE-CHECK, run BEFORE copper is removed or reshaped (bug
+## 01a040f6d7). _reconcile_committed_copper below runs AFTER the removal, where a
+## lying record and a genuine loss look identical — both name an id the board no
+## longer carries. Asked HERE, while the copper is still resolvable, the two
+## separate: a claim on copper that belongs to another net is dropped, so the
+## edit that follows can only ever retire a commit that really owned what it
+## just lost. PRUNE-ONLY: a claim on an id that already resolves to nothing is
+## left for the reconcile to report as the loss it is, and no candidate is
+## uncommitted here. Silent by design — the drop is warned inside the workspace,
+## and the load_board that restored the record is where it is reported.
+##
+## Three callers: _delete_traces, _delete_via and _retire_commits_owning_trace.
+static func _prune_foreign_commit_claims(host, data) -> void:
+	if data == null or not is_instance_valid(data):
+		return
+	var workspace = _get_workspace(host)
+	if workspace == null or not workspace.has_method("prune_foreign_copper_claims"):
+		return
+	workspace.prune_foreign_copper_claims(_PcbCopperOwnership.index_from_board(data))
 
 
 ## Wiring for the copper-loss reconcile: resolve the routing workspace, BIND it

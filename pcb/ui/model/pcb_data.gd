@@ -51,6 +51,7 @@ const PCBComponentScript := preload("pcb_component.gd")
 const PCBNetScript := preload("pcb_net.gd")
 const PCBTraceScript := preload("pcb_trace.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
+const PcbEntityId := preload("pcb_entity_id.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 ## The plugin-wide copper-contact predicate. "Is this end joined" is the same
 ## question the DRC and the pin inspector ask, so it is asked there.
@@ -199,31 +200,27 @@ signal journal_entry_added(entry: Dictionary)
 
 ## ── ID COUNTER INVARIANT (stated ONCE, here — every site below CITES this,
 ## none re-derives it) ──────────────────────────────────────────────────────
-## Every path that admits a trace or via id — whether minted fresh by add_trace/
-## add_via or supplied from outside (import, board load, undo/redo restore) —
-## MUST leave the corresponding counter (_next_trace_id / _next_via_id) at or
-## above the highest id it admitted. NO PATH MAY EVER LOWER A COUNTER: not
-## clear_traces(), not clear(), not undo/redo's _restore_state. An id is never
-## reused within a session, so a stale-HIGH counter is always benign (it only
-## skips numbers) while a stale-LOW one is a collision waiting to happen —
-## `traces` is an id-keyed Dictionary, so a colliding mint OVERWRITES rather
-## than duplicates. ACCEPTED COST: an exported-then-reimported board renumbers
-## upward forever — safety over tidy numbering (owner ruling, docket
-## 019fa172dd21 comment 868). Sites this governs: reserve_trace_id/
-## reserve_via_id (the reservation half — a supplied id must push the counter
-## up), and clear_traces/clear/_restore_state (the "never lower it" half).
+## Trace and via ids are MINTED PERSISTENT TOKENS now ("trace:<32hex>" —
+## see PcbEntityId for the policy and why), so nothing this model mints can ever
+## collide with anything. The counters below survive for the LEGACY ORDINAL ids
+## ("trace_7"/"via_12") that boards, .minpcb imports and old sidecars still carry:
+## every path that admits an id — supplied from outside on import, board load or
+## undo/redo restore — MUST leave the corresponding counter at or above the
+## highest ORDINAL it admitted, and NO PATH MAY EVER LOWER ONE (not
+## clear_traces(), not clear(), not _restore_state). `traces` is an id-keyed
+## Dictionary, so a colliding id OVERWRITES rather than duplicates, which is the
+## loss this guards (owner ruling, docket 019fa172dd21 comment 868). Sites this
+## governs: reserve_trace_id/reserve_via_id (the reservation half) and
+## clear_traces/clear/_restore_state (the "never lower it" half).
 
-## Next trace ID counter. Governed by the ID COUNTER INVARIANT above.
+## High-water mark over the LEGACY ordinal trace ids this board has admitted.
+## Governed by the ID COUNTER INVARIANT above.
 var _next_trace_id: int = 1
 
-## Next via ID counter (T2.3). Vias are plain dicts (no wrapper class); a via
-## minted here carries a stable "id" ("via_N") so a committed route's copper can
-## be referenced by a durable identity that survives to_board_dict()/reload. The
-## id rides in the via dict's extra-key passthrough (_via_to_board_dict /
+## Via twin of _next_trace_id. Vias are plain dicts (no wrapper class); a via's
+## "id" rides in the extra-key passthrough (_via_to_board_dict /
 ## _vias_from_board_list already copy unknown keys), so no serialisation change
-## is needed. Restored to a HIGH-WATER MARK on load so post-load mints never
-## collide with loaded ids (mirrors RoutingWorkspace's counter policy). Governed
-## by the ID COUNTER INVARIANT above.
+## was needed for it. Governed by the ID COUNTER INVARIANT above.
 var _next_via_id: int = 1
 
 
@@ -795,8 +792,7 @@ func find_net_for_pin(component_id: String, pin_name: String) -> String:
 ## Add a trace
 func add_trace(trace) -> void:
 	if trace.id.is_empty():
-		trace.id = "trace_%d" % _next_trace_id
-		_next_trace_id += 1
+		trace.id = mint_entity_id("trace")
 	else:
 		# A caller-supplied id must not let a LATER auto-mint collide with it —
 		# the same high-water contract add_via already applies to via ids, via
@@ -1257,13 +1253,15 @@ func clear_traces() -> void:
 	data_changed.emit()
 
 
-## Add a via. Mints a stable "id" ("via_N") when the caller did not supply one
-## (T2.3) so committed copper carries a durable identity across serialisation.
-## Returns the via's id.
+## Add a via. Mints a PERSISTENT id ("via:<32hex>", see PcbEntityId) when the
+## caller did not supply one, so committed copper carries an identity that
+## survives export_yaml → load_board — the ordinal "via_N" this used to mint did
+## not: pcb.deserialize's v1→v2 migration re-minted it on every load, which is
+## why an agent holding a via id got `missing_via_ids` after a reload and why the
+## routing sidecar's committed_via_ids went dangling. Returns the via's id.
 func add_via(via_data: Dictionary) -> String:
 	if str(via_data.get("id", "")).is_empty():
-		via_data["id"] = "via_%d" % _next_via_id
-		_next_via_id += 1
+		via_data["id"] = mint_entity_id("via")
 	else:
 		# A caller-supplied id must not let a later auto-mint collide with it.
 		_next_via_id = maxi(_next_via_id, _stable_id_suffix(str(via_data["id"])) + 1)
@@ -1273,16 +1271,11 @@ func add_via(via_data: Dictionary) -> String:
 	return str(via_data["id"])
 
 
-## Trailing integer of a stable id like "via_12"/"trace_7" -> 12/7; 0 if none.
-## Feeds the high-water restoration so post-load mints never collide with ids
-## that arrived from outside. Shared by BOTH id families (add_via/_load_vias for
-## vias, add_trace for traces) — one parser, one contract.
+## Trailing integer of a LEGACY ordinal id ("via_12"/"trace_7" -> 12/7); 0 for a
+## minted id, which carries no "_". Thin delegate to PcbEntityId.ordinal_suffix;
+## kept under this name because the reservation sites here already call it.
 static func _stable_id_suffix(id: String) -> int:
-	var idx := id.rfind("_")
-	if idx < 0 or idx + 1 >= id.length():
-		return 0
-	var tail := id.substr(idx + 1)
-	return int(tail) if tail.is_valid_int() else 0
+	return PcbEntityId.ordinal_suffix(id)
 
 
 ## Remove a via by index.
@@ -1458,11 +1451,6 @@ func get_vias_in_region(region: Rect2) -> Array[String]:
 
 #region Zone Management
 
-## Entropy width of a minted persistent id — 16 bytes → 32 lowercase hex chars.
-## MIRRORS internal/board/migrate.go's mintedIDBytes; internal/board/validate.go
-## isMintedID() checks EXACTLY this width, so the two must not drift.
-const MINTED_ID_BYTES := 16
-
 ## Fewest points that make a zone outline a polygon. MIRRORS internal/board's
 ## Validate (`invalid_zone_outline`) and is now the ONE place the UI states it:
 ## zone_author_error refuses a create below it, set_zone_outline refuses a write
@@ -1472,25 +1460,12 @@ const MIN_ZONE_OUTLINE_POINTS := 3
 
 ## Mint a fresh persistent entity id: "<entity_type>:<32 lowercase hex>".
 ##
-## THE FORMAT IS THE CONTRACT, not a convention. internal/board/validate.go's
-## isMintedID() accepts exactly "<type>:" + 32 chars from [0-9a-f]; anything else
-## (empty, "zone_1", uppercase hex, a short tail) is UNMINTED and fails
-## `unminted_persistent_id` on a v2 board. This is the FIRST UI-side minter: the
-## trace/via counters above mint ORDINAL handles ("trace_7"/"via_12") which are
-## deliberately NOT persistent ids — internal/board treats those legacy shapes as
-## unminted and re-mints them at the v1→v2 migration boundary. Zones get the real
-## thing because the contract names this exact gap: MigrateV1toV2 is the only
-## other minter, so before this tool a zone hand-added to a v2 board had no way to
-## acquire an id (docs/board-yaml.md, "Where a zone's id comes from").
-##
-## Entropy comes from Crypto (Godot's CSPRNG), not randi(), matching Go's
-## crypto/rand for the same reason it does: a mint is a one-time write and these
-## ids must stay globally unique across independently edited boards, which is what
-## lets a persistent id SUBSUME the old board-namespacing rule. 128 bits makes
-## that collision probability negligible.
+## Thin delegate to PcbEntityId.mint, which owns the id POLICY (why minted and
+## not content-hashed, why this exact shape, and what the deserialize boundary
+## does to an id that does not match it). Kept under this name because every mint
+## site in this model already calls it.
 static func mint_entity_id(entity_type: String) -> String:
-	# hex_encode() emits LOWERCASE hex, which isMintedID requires.
-	return "%s:%s" % [entity_type, Crypto.new().generate_random_bytes(MINTED_ID_BYTES).hex_encode()]
+	return PcbEntityId.mint(entity_type)
 
 
 ## Why the proposed zone cannot be authored, or "" when it can.
@@ -2614,26 +2589,11 @@ func trace_author_error(net_name: String, layer: String, point_count: int) -> St
 ## Create an authored trace and add it to the board. Returns the new trace
 ## object, or null when trace_author_error refused it.
 ##
-## MINTED, NOT ORDINAL — and this is the whole reason the path exists rather than
-## callers just using add_trace(). add_trace() mints "trace_7" for an id-less
-## trace; internal/board/migrate.go's isMintedID() rejects that shape, so on a v2
-## board Validate() fails `unminted_persistent_id` and pcb.serialize — a
-## fail-closed WHOLE-BOARD write gate — refuses to save the entire board, not
-## merely the one trace. The ordinal handles are the v1 ordinal-bridge era's, and
-## MigrateV1toV2 is what re-mints them; a trace authored today should not need
-## rescuing by a migration.
-##
-## add_trace() itself is DELIBERATELY UNCHANGED: its behaviour for its existing
-## callers (importers, the router's commit path, undo/redo restore) is load-
-## bearing — the ID COUNTER INVARIANT above is built on those ordinals — and
-## re-minting under them would renumber ids they hand back and forth. Instead this
-## path pre-sets the id and hands the trace to add_trace, which takes the
-## caller-supplied-id branch. That branch high-waters _next_trace_id via
-## _stable_id_suffix(); a minted id contains no "_", so it returns 0 and the
-## counter is left exactly where it was. Verified, not assumed — the minted path
-## therefore cannot perturb ordinal minting for anyone else. Journalling,
-## trace_changed and data_changed all come from add_trace, so there is one
-## add-a-trace code path, not two.
+## AUTHORING RULES, not identity: add_trace() mints the same persistent id this
+## path pre-sets (see PcbEntityId), so the two differ only in that this one
+## refuses geometry trace_author_error() rejects and applies the board's authored
+## width. Journalling, trace_changed and data_changed all come from add_trace, so
+## there is one add-a-trace code path, not two.
 ##
 ## History is NOT snapshotted here (no mutator in this file snapshots itself —
 ## the caller decides where an undo step begins and ends); the canvas commit path
@@ -3622,8 +3582,7 @@ func from_board_dict(data: Dictionary) -> void:
 		if td is Dictionary:
 			var trace = PCBTraceScript.from_board_dict(td)
 			if trace.id.is_empty():
-				trace.id = "trace_%d" % _next_trace_id
-				_next_trace_id += 1
+				trace.id = mint_entity_id("trace")
 			else:
 				# Same high-water contract _load_vias applies to via ids. This
 				# path writes traces[trace.id] directly rather than through

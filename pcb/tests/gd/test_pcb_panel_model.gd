@@ -28,6 +28,7 @@ const PCB_COMPONENT_PATH := MODEL_DIR + "pcb_component.gd"
 const PCB_NET_PATH := MODEL_DIR + "pcb_net.gd"
 const PCB_TRACE_PATH := MODEL_DIR + "pcb_trace.gd"
 const PCB_SPATIAL_PATH := MODEL_DIR + "pcb_spatial_index.gd"
+const PcbEntityId := preload("res://../../minerva-plugins/pcb/ui/model/pcb_entity_id.gd")
 
 var _pass_count: int = 0
 var _fail_count: int = 0
@@ -297,12 +298,18 @@ func _test_clear_traces_journals_contents() -> void:
 
 
 ## Owner ruling (docket 019fa172dd21 comment 868): clear_traces()/clear() must
-## NEVER lower _next_trace_id / _next_via_id. Proven here by minting an
-## explicit HIGH id, clearing, then minting an id-less one and asserting the
-## new id keeps climbing rather than restarting at 1 — a restart would collide
-## the very next time an entity from before the clear reappeared (e.g. via
-## undo), which is exactly what test_trace_identity_delete.gd's group 14
-## exercises end to end via the real import->undo->mint path.
+## never let a post-clear mint reproduce an id that was on the board before it —
+## a collision the very next time an entity from before the clear reappears (e.g.
+## via undo), which is what test_trace_identity_delete.gd's group 14 exercises
+## end to end via the real import->undo->mint path.
+##
+## RE-STATED for minted ids (bug 01a040f6d7): the mint is now a persistent
+## "trace:<32hex>" / "via:<32hex>" token rather than an ordinal, so the property
+## the ruling asked for holds by CONSTRUCTION rather than by a counter. This test
+## therefore asserts the property itself — the post-clear mint is a persistent id
+## and is not the pre-clear handle — instead of the ordinal it used to predict.
+## The legacy ordinal counters still exist for SUPPLIED ordinal ids, which is
+## what the explicit high ids below still exercise on the way in.
 func _test_counters_never_lowered_by_clear_traces_and_clear() -> void:
 	print("\n-- clear_traces()/clear() never lower the id counters (owner ruling) --")
 
@@ -323,12 +330,14 @@ func _test_counters_never_lowered_by_clear_traces_and_clear() -> void:
 	minted_trace.add_waypoint(Vector2(2, 2))
 	minted_trace.add_waypoint(Vector2(3, 3))
 	data.add_trace(minted_trace)
-	check("trace counter climbed past 100 rather than resetting to 1",
-			minted_trace.id == "trace_101", "got %s" % minted_trace.id)
+	check("the post-clear trace mint is a persistent id, not a reused ordinal",
+			PcbEntityId.is_minted("trace", str(minted_trace.id))
+				and str(minted_trace.id) != "trace_100", "got %s" % minted_trace.id)
 
 	var minted_via_id: String = data.add_via({"position": Vector2(9, 9), "net_name": "Y"})
-	check("via counter climbed past 50 rather than resetting to 1",
-			minted_via_id == "via_51", "got %s" % minted_via_id)
+	check("the post-clear via mint is a persistent id, not a reused ordinal",
+			PcbEntityId.is_minted("via", minted_via_id) and minted_via_id != "via_50",
+			"got %s" % minted_via_id)
 
 	# clear() — same expectation, the ruling covers both methods.
 	var data2 = _PCBData.new()
@@ -347,12 +356,14 @@ func _test_counters_never_lowered_by_clear_traces_and_clear() -> void:
 	minted_trace2.add_waypoint(Vector2(2, 2))
 	minted_trace2.add_waypoint(Vector2(3, 3))
 	data2.add_trace(minted_trace2)
-	check("clear() also leaves the trace counter climbing, not reset (matches clear_traces)",
-			minted_trace2.id == "trace_201", "got %s" % minted_trace2.id)
+	check("clear() leaves the trace mint persistent and collision-free too",
+			PcbEntityId.is_minted("trace", str(minted_trace2.id))
+				and str(minted_trace2.id) != "trace_200", "got %s" % minted_trace2.id)
 
 	var minted_via_id2: String = data2.add_via({"position": Vector2(9, 9), "net_name": "Y"})
-	check("clear() leaves the via counter climbing too",
-			minted_via_id2 == "via_81", "got %s" % minted_via_id2)
+	check("clear() leaves the via mint persistent and collision-free too",
+			PcbEntityId.is_minted("via", minted_via_id2) and minted_via_id2 != "via_80",
+			"got %s" % minted_via_id2)
 
 
 ## R1 defect D (unfiled, small): remove_via(index) and remove_via_by_id(id)

@@ -196,6 +196,15 @@ test_proposal_attribution.gd assertions=33
 test_routing_workspace_model.gd assertions=168
 test_routing_workspace_v2.gd assertions=395
 test_trace_identity_delete.gd assertions=213
+# Bug 01a040f6d7 + its HITL finding: stable copper identity and honest
+# ownership. Group 2 drives the REAL pcb-plugin binary (pcb.serialize ->
+# pcb.deserialize, the exact codec export_yaml/load_board use), so the id
+# round trip is measured rather than modelled -> `real-worker`.
+# DELIBERATELY UNPINNED assertion count on first registration: the number has
+# never been MEASURED on a run, and a count derived by reading the source is
+# exactly what this manifest's own header refuses. Pin it in its own reviewed
+# commit after the first green run.
+test_copper_identity_ownership.gd real-worker
 test_workspace_check.gd assertions=46
 test_workspace_ingest.gd assertions=76
 test_workspace_persistence.gd assertions=76

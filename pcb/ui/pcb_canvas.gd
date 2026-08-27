@@ -62,6 +62,7 @@ const _PanelToolsScript := preload("panel_tools.gd")
 ## only draws the answer.
 const PcbRatsnest := preload("model/pcb_ratsnest.gd")
 const PcbCopperContact := preload("model/pcb_copper_contact.gd")
+const PcbCopperOwnership := preload("model/pcb_copper_ownership.gd")
 const PcbZoneCopper := preload("model/pcb_zone_copper.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
@@ -6312,6 +6313,12 @@ func _retire_commits_owning_trace(trace_id: String) -> Array:
 		return []
 	if data != null and data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(_routing_workspace)
+	# Ownership pre-check, the gesture twin of panel_tools' (bug 01a040f6d7):
+	# a record that merely NAMES this trace's id while the copper is on another
+	# net has that claim dropped, so the edit retires nothing it should not.
+	if data != null and _routing_workspace.has_method("prune_foreign_copper_claims"):
+		_routing_workspace.prune_foreign_copper_claims(
+			PcbCopperOwnership.index_from_board(data))
 	return _routing_workspace.retire_commits_owning_trace(trace_id)
 
 

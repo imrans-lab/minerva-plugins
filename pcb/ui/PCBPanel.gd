@@ -6046,8 +6046,21 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 			# on quarantine; a missing sidecar RESETS a bound store so a
 			# document switch drops the prior board's drafts). Inside the
 			# _restoring gate — load_from_dict emits `changed` unconditionally.
-			_PcbRoutingSidecarScript.load_into_workspace(
+			var sidecar_status: Dictionary = _PcbRoutingSidecarScript.load_into_workspace(
 				source_path, _routing_workspace, _data.to_board_dict(), 0, _staged_entities)
+			# Bug 01a040f6d7: a sidecar ownership record this board cannot
+			# support was DROPPED rather than re-attached to whatever now
+			# carries that id. Say so on the reply — the agent that called
+			# load_board is the one whose next delete_traces would otherwise
+			# have been told "committed by" a candidate that owns nothing.
+			for finding in (sidecar_status.get("stale_ownership", []) as Array):
+				var f: Dictionary = finding if finding is Dictionary else {}
+				warnings.append(("stale routing-sidecar ownership record dropped for candidate %s "
+					+ "(net %s): traces %s, vias %s%s") % [
+						str(f.get("candidate_id", "")), str(f.get("net", "")),
+						str(f.get("dropped_trace_ids", [])), str(f.get("dropped_via_ids", [])),
+						" — its commit was retired and its routing task reopened"
+							if bool(f.get("uncommitted", false)) else ""])
 	_restoring = false
 
 	# Reflect the new board in the toolbar/status and frame it in the canvas —

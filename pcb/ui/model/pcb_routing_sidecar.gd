@@ -40,6 +40,7 @@ extends RefCounted
 ##     form. Strings are length-prefixed so no delimiter can collide.
 
 const _Self := preload("pcb_routing_sidecar.gd")
+const PcbCopperOwnership := preload("pcb_copper_ownership.gd")
 
 ## Current on-disk schema. Bump ONLY on a breaking change (and teach _migrate).
 const SCHEMA_VERSION: int = 1
@@ -207,6 +208,16 @@ static func save_workspace(board_path: String, workspace, board_dict: Dictionary
 ##   "quarantine_stale" — future/unknown schema_version OR missing token OR
 ##                        fingerprint MISMATCH → candidates loaded (if possible)
 ##                        with ALL validation=stale, dispositions preserved.
+## A "loaded_clean" load also runs the RESTORE-TIME OWNERSHIP AUDIT (bug
+## 01a040f6d7): a committed candidate whose recorded copper ids do not resolve on
+## THIS board, or resolve to copper on another net, has that claim dropped and is
+## uncommitted if nothing provable is left. The per-candidate findings ride back
+## as `stale_ownership` (ABSENT when empty), so the caller can surface them —
+## silently re-attaching a stale record to whatever now carries that id is
+## exactly the false "committed by" this closes. It runs ONLY on the coherent
+## path: it is a destructive repair, and a quarantined sidecar is one whose board
+## has already been proved different, where "the ids do not resolve" carries no
+## information.
 static func load_into_workspace(board_path: String, workspace, current_board_dict: Dictionary,
 		_current_board_revision: int = 0, staged_store = null) -> Dictionary:
 	if workspace == null:
@@ -295,8 +306,33 @@ static func load_into_workspace(board_path: String, workspace, current_board_dic
 			"stored_fingerprint": stored_fp, "current_fingerprint": current_fp,
 		}
 
-	return {"status": "loaded_clean", "candidate_count": count,
-		"staged_count": staged_count, "stored_fingerprint": stored_fp}
+	# COHERENT BOARD ONLY. The audit is a DESTRUCTIVE repair — it edits the
+	# ownership records and can uncommit — so it may only run once the
+	# fingerprint has proved this is the board the sidecar was written against.
+	# On a quarantine the copper legitimately differs (Save-As, an edit between
+	# sessions, an unknown schema) and "every id fails to resolve" would mean
+	# nothing; mark_all_stale is the honest answer there, and the delete/edit
+	# verbs' own pre-check still refuses to attribute copper to a stale claim.
+	return _with_ownership({"status": "loaded_clean", "candidate_count": count,
+		"staged_count": staged_count, "stored_fingerprint": stored_fp},
+		_audit_ownership(workspace, current_board_dict))
+
+
+## Run the restore-time ownership audit against the board that just loaded.
+## Tolerates a workspace that predates the method (duck-typed seam, same as every
+## other call in this file).
+static func _audit_ownership(workspace, current_board_dict: Dictionary) -> Array:
+	if workspace == null or not workspace.has_method("drop_unowned_commit_records"):
+		return []
+	return workspace.drop_unowned_commit_records(
+		PcbCopperOwnership.index_from_dict(current_board_dict))
+
+
+## ADDITIVE, ABSENT WHEN EMPTY — the rule the rest of this envelope keeps.
+static func _with_ownership(status: Dictionary, stale_ownership: Array) -> Dictionary:
+	if not stale_ownership.is_empty():
+		status["stale_ownership"] = stale_ownership
+	return status
 
 
 # ── schema migration (forward hook) ───────────────────────────────────────────

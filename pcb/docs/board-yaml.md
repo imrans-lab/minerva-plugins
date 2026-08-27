@@ -482,12 +482,23 @@ still fails `unminted_persistent_id` unless the author writes a
 hand-added trace has, and it fails closed rather than silently accepting an
 id-less entity.
 
-What has changed is that hand-editing is no longer the only route. The PCB
-plugin's canvas now has a zone creation tool, and `pcb_data.create_zone` mints a
-real `zone:<hex>` id through `mint_entity_id` — the FIRST UI-side minter of a
-persistent id, matching `isMintedID`'s width and alphabet exactly. A zone drawn
-in the editor is therefore identity-complete from the moment it is created, on
-v1 and v2 boards alike.
+What has changed is that hand-editing is no longer the only route. **The PCB
+plugin mints persistent ids UI-side for every entity it creates** — traces, vias,
+zones, cut-outs and placements alike — through one policy file,
+`ui/model/pcb_entity_id.gd`, whose `mint`/`is_minted` match `isMintedID`'s width
+and alphabet exactly. Copper drawn in the editor is identity-complete from the
+moment it is created, on v1 and v2 boards alike.
+
+**Why that matters beyond hand-editing.** The panel used to mint ORDINAL handles
+(`trace_7`, `via_12`) for traces and vias. `isMintedID` reads those as unminted,
+so `MigrateV1toV2` — which runs on **every** `pcb.deserialize` of a v1 board —
+replaced them with fresh random tokens on every load. An agent holding a via id
+across `export_yaml` → `load_board` got `missing_via_ids` back, and the routing
+sidecar's `committed_via_ids` went dangling on each reload (bug `01a040f6d7`).
+Minting the contract shape UI-side is what makes an id survive the round trip
+unchanged. Ordinal ids are still **accepted** everywhere they were before (old
+boards, `.minpcb` imports, `import_trace_geometry` payloads); nothing mints one
+any more.
 
 ### Geometry authority: full vs partial
 

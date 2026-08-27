@@ -62,6 +62,7 @@ static func drop_coincident_points(points: Array) -> Array:
 const PcbRouteTask := preload("pcb_route_task.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
+const PcbCopperOwnership := preload("pcb_copper_ownership.gd")
 
 ## Emitted when a candidate is inserted.
 signal candidate_added(id: String)
@@ -1549,6 +1550,9 @@ func uncommit(candidate_id: String) -> bool:
 ## no claim about board copper.
 func reconcile_committed_copper(board) -> Array:
 	var retired: Array = []
+	# Built once, lazily, on the first committed candidate that claims copper.
+	var copper_index: Dictionary = {}
+	var copper_index_built := false
 	if board == null or not is_instance_valid(board):
 		return retired
 	if not (board.has_method("get_trace") and board.has_method("find_via_index")):
@@ -1571,23 +1575,134 @@ func reconcile_committed_copper(board) -> Array:
 		var vids: Array = rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []
 		if tids.is_empty() and vids.is_empty():
 			continue
-		var lost := false
-		for tid in tids:
-			if board.get_trace(str(tid)) == null:
-				lost = true
-				break
-		if not lost:
-			for vid in vids:
-				if int(board.find_via_index(str(vid))) < 0:
-					lost = true
-					break
-		if not lost:
+		# OWNERSHIP, not mere presence (bug 01a040f6d7). A recorded id whose
+		# copper is present but belongs to another net / sits somewhere else is
+		# FOREIGN: the record is lying and this candidate must claim nothing
+		# through it. Prune those first so the loss question below is asked only
+		# about copper this candidate really owns — otherwise deleting a
+		# stranger's trace retires this commit and the reply says "committed by",
+		# which is the false attribution the bug reported.
+		if not copper_index_built:
+			copper_index = PcbCopperOwnership.index_from_board(board)
+			copper_index_built = true
+		var audited: Dictionary = PcbCopperOwnership.audit(c, copper_index, tids, vids)
+		if PcbCopperOwnership.has_foreign(audited):
+			_prune_foreign_copper_claim(cid, audited)
+		# PARTIAL LOSS COUNTS AS LOSS — but only over ids the prune LEFT in the
+		# record. An entirely-foreign record now claims nothing, so it reports
+		# nothing; a record that mixes a lie with a genuine loss still reports
+		# the loss.
+		if (audited["missing_trace_ids"] as Array).is_empty() \
+				and (audited["missing_via_ids"] as Array).is_empty():
 			continue
 		# uncommit does the whole compensation: prior disposition restored, the
 		# dead copper ids cleared, the task reopened, the live set staled.
 		if uncommit(cid):
 			retired.append(cid)
 	return retired
+
+
+## PRUNE-ONLY ownership pass, for callers that are about to CHANGE the copper
+## (the delete verbs' pre-check). Every committed candidate's claim is checked
+## against `copper_index`; ids that resolve to copper the candidate does not own
+## are removed. MISSING ids are LEFT ALONE and no candidate is uncommitted —
+## after the caller's edit, a missing id is a genuine loss and
+## reconcile_committed_copper is what must see it. Returns the candidate ids
+## whose claim shrank.
+func prune_foreign_copper_claims(copper_index: Dictionary) -> Array:
+	var pruned: Array = []
+	if _commit_transaction_active:
+		return pruned
+	for raw_id in candidates.keys():
+		var cid := str(raw_id)
+		var c = get_candidate(cid)
+		if c == null or str(c.disposition) != "committed":
+			continue
+		var rec: Dictionary = correlations.get(cid, {})
+		var tids: Array = rec.get("committed_trace_ids", []) if rec.get("committed_trace_ids", []) is Array else []
+		var vids: Array = rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []
+		if tids.is_empty() and vids.is_empty():
+			continue
+		var audited: Dictionary = PcbCopperOwnership.audit(c, copper_index, tids, vids)
+		if not PcbCopperOwnership.has_foreign(audited):
+			continue
+		_prune_foreign_copper_claim(cid, audited)
+		pruned.append(cid)
+	return pruned
+
+
+## Drop the FOREIGN half of one candidate's ownership claim and say so. The
+## record keeps the ids it can still prove; the ids it cannot are removed rather
+## than left to be re-attached to whoever now carries them.
+func _prune_foreign_copper_claim(candidate_id: String, audited: Dictionary) -> void:
+	var rec: Dictionary = correlations.get(candidate_id, {})
+	rec["committed_trace_ids"] = _to_string_array(
+		(audited["owned_trace_ids"] as Array) + (audited["missing_trace_ids"] as Array))
+	rec["committed_via_ids"] = _to_string_array(
+		(audited["owned_via_ids"] as Array) + (audited["missing_via_ids"] as Array))
+	correlations[candidate_id] = rec
+	var c = get_candidate(candidate_id)
+	push_warning(("[RoutingWorkspace] dropped a stale ownership claim on candidate %s (net %s): "
+		+ "traces %s / vias %s resolve to copper this candidate does not own") % [
+			candidate_id, str(c.net) if c != null else "",
+			str(audited.get("foreign_trace_ids", [])), str(audited.get("foreign_via_ids", []))])
+
+
+## RESTORE-TIME ownership audit (bug 01a040f6d7, HITL half). Every committed
+## candidate's recorded copper ids are checked against the board that just
+## loaded; ids that resolve to copper the candidate does not own are DROPPED from
+## the record, and a candidate left claiming nothing at all is UNCOMMITTED (its
+## task reopens) rather than left holding a claim it cannot prove.
+##
+## This runs where a sidecar meets a board — RoutingSidecar.load_into_workspace —
+## because that is the seam a stale record crosses. `copper_index` comes from
+## PcbCopperOwnership.index_from_dict(current_board_dict): the restore has the
+## board as a dict, not as a PCBData.
+##
+## Returns one finding per affected candidate:
+##   {candidate_id, net, dropped_trace_ids, dropped_via_ids, uncommitted:bool}
+func drop_unowned_commit_records(copper_index: Dictionary) -> Array:
+	var findings: Array = []
+	if _commit_transaction_active:
+		return findings
+	for raw_id in candidates.keys():
+		var cid := str(raw_id)
+		var c = get_candidate(cid)
+		if c == null or str(c.disposition) != "committed":
+			continue
+		var rec: Dictionary = correlations.get(cid, {})
+		var tids: Array = rec.get("committed_trace_ids", []) if rec.get("committed_trace_ids", []) is Array else []
+		var vids: Array = rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []
+		if tids.is_empty() and vids.is_empty():
+			continue  # mark_committed's annotation-accept shape: claims nothing
+		var audited: Dictionary = PcbCopperOwnership.audit(c, copper_index, tids, vids)
+		var dropped_traces: Array = (audited["foreign_trace_ids"] as Array) \
+			+ (audited["missing_trace_ids"] as Array)
+		var dropped_vias: Array = (audited["foreign_via_ids"] as Array) \
+			+ (audited["missing_via_ids"] as Array)
+		if dropped_traces.is_empty() and dropped_vias.is_empty():
+			continue
+		var net := str(c.net)
+		rec["committed_trace_ids"] = _to_string_array(audited["owned_trace_ids"] as Array)
+		rec["committed_via_ids"] = _to_string_array(audited["owned_via_ids"] as Array)
+		correlations[cid] = rec
+		# Nothing provable left ⇒ the commit itself cannot stand. uncommit clears
+		# the record, restores the prior disposition and reopens the task.
+		var uncommitted := false
+		if (rec["committed_trace_ids"] as Array).is_empty() \
+				and (rec["committed_via_ids"] as Array).is_empty():
+			uncommitted = uncommit(cid)
+		push_warning(("[RoutingWorkspace] stale sidecar ownership record for candidate %s (net %s): "
+			+ "dropped traces %s, vias %s%s") % [cid, net, str(dropped_traces),
+				str(dropped_vias), " — commit retired, task reopened" if uncommitted else ""])
+		findings.append({
+			"candidate_id": cid,
+			"net": net,
+			"dropped_trace_ids": _to_string_array(dropped_traces),
+			"dropped_via_ids": _to_string_array(dropped_vias),
+			"uncommitted": uncommitted,
+		})
+	return findings
 
 
 ## Retire the commit of every committed candidate whose recorded copper
