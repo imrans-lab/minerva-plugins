@@ -257,26 +257,12 @@ static func _sorted_by_key(entries, key_of: Callable) -> Array:
 	return out
 
 
-## The copper layers a via's barrel touches: its two endpoints plus everything
-## between them in the declared stack. (Only through spans are modeled — see
-## PcbLayerStack.is_legal_via_span — so in practice this is the whole stack; a
-## blind/buried span would yield fewer layers.)
+## The copper layers a via's barrel touches — re-exported from PcbCopperContact,
+## which owns the derivation now that the region read's layers_touched asks the
+## same question. One implementation, so the two cannot report different
+## barrels.
 static func _via_span(via: Dictionary, stack: PackedStringArray) -> Array:
-	var from_layer := _canon(via.get("from_layer", "top"))
-	var to_layer := _canon(via.get("to_layer", "bottom"))
-	var lo := -1
-	var hi := -1
-	for i in stack.size():
-		if stack[i] == from_layer:
-			lo = i
-		if stack[i] == to_layer:
-			hi = i
-	if lo < 0 or hi < 0:
-		return [from_layer, to_layer]
-	var out: Array = []
-	for i in range(mini(lo, hi), maxi(lo, hi) + 1):
-		out.append(stack[i])
-	return out
+	return PcbCopperContact.via_span(via, stack)
 
 
 # ── TOUCH + MEASURE: re-exports of the shared contact module ─────────────────

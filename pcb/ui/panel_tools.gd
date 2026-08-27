@@ -56,6 +56,11 @@ const _PcbBoardHistoryScript := preload("pcb_board_history.gd")
 ## duck-typed `data` reference — mirrors pcb_canvas.gd's own PCBDataScript
 ## const, same off-tree preload-by-path convention.
 const _PcbDataScript := preload("model/pcb_data.gd")
+## The region read (work item 01a03f9dd6): ONE call for everything inside a
+## board rectangle. Its own file — this one is a god file and gets DISPATCH
+## WIRING ONLY. It also owns the per-via layers_touched derivation that
+## minerva_pcb_list_vias below now reports.
+const _PcbRegionDescribe := preload("model/pcb_region_describe.gd")
 ## The pin→net invariant and the two membership verbs. Kept off panel_tools
 ## so the "a pin is on one net" rule has one home both this surface and the
 ## panel's loader read.
@@ -153,6 +158,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _select(host, args)
 		"minerva_pcb_spatial_query":
 			return _spatial_query(host, args)
+		"minerva_pcb_describe_region":
+			return _describe_region(host, args)
 		"minerva_pcb_describe_component":
 			return _describe_component(host, args)
 		"minerva_pcb_import_csv":
@@ -1189,6 +1196,42 @@ static func _spatial_query(host, args: Dictionary) -> Dictionary:
 		Vector2(radius * 2.0, radius * 2.0))
 	reply["copper"] = _copper_in_region(data, region)
 	return _ok(reply)
+
+
+## ONE READ of a board rectangle (work item 01a03f9dd6) — components with their
+## pad rows, traces with their free ends, vias with the layers their copper
+## really meets, pours with their outlines, keepouts, cutouts and the notes
+## anchored inside.
+##
+## READ-ONLY: nothing here mutates the board or journals anything.
+##
+## DISPATCH WIRING ONLY. Every answer is assembled in
+## model/pcb_region_describe.gd, out of the surfaces that already own the
+## rules — this file is a god file and does not get the region read's body.
+##
+## An EMPTY region is a legitimate answer, not an error: empty arrays, and the
+## reply's `searched` list is what says the arrays are empty because nothing is
+## there rather than because nothing was looked for.
+static func _describe_region(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	for key in ["x_mm", "y_mm", "width_mm", "height_mm"]:
+		if not args.has(key):
+			return _err("%s is required — the region is a rectangle in board mm (x_mm, y_mm = its top-left corner)" % key)
+	var width := float(args.get("width_mm", 0.0))
+	var height := float(args.get("height_mm", 0.0))
+	if width <= 0.0 or height <= 0.0:
+		return _err("width_mm and height_mm must be greater than 0 (got %s x %s) — x_mm/y_mm name the corner, not the opposite corner" % [str(width), str(height)])
+	var layer_in := str(args.get("layer", ""))
+	if not layer_in.is_empty() and not PcbLayerStack.is_copper(layer_in):
+		return _err("layer '%s' is not a copper layer — use \"top\", \"bottom\", \"in1\"..., a KiCad copper name, or omit it for every layer" % layer_in)
+	var region := Rect2(Vector2(float(args["x_mm"]), float(args["y_mm"])),
+		Vector2(width, height))
+	var annotations: Array = []
+	if host != null and host.has_method("get_all_annotations"):
+		annotations = host.get_all_annotations() as Array
+	return _ok(_PcbRegionDescribe.describe(data, region, layer_in, annotations))
 
 
 ## Every non-component entity the board has in `region`, using the SAME model
@@ -4264,26 +4307,27 @@ static func _list_mounting_holes(host, _args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
+## LAYERS_TOUCHED (work item 01a03f9dd6). from_layer/to_layer say what the
+## barrel SPANS; every through via spans the whole stack, so the span cannot
+## show a via that joins nothing on one side. layers_touched answers the other
+## question — which copper layers have copper actually MEETING the barrel — by
+## the shared contact predicate, the same one the connectivity DRC and the trace
+## free-end rule read. It NAMES the fact and judges nothing: "this via is
+## stranded" stays DRC's verdict to give.
+##
+## The board's copper is indexed ONCE for the whole list rather than per via
+## (PcbRegionDescribe.build_copper_index) — rebuilding it inside the loop is
+## what would turn a cheap read into a slow one on a real board.
 static func _list_vias(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
 	var vias_arr: Array = []
+	if data.vias.is_empty():
+		return _ok({"via_count": 0, "vias": vias_arr})
+	var copper: Dictionary = _PcbRegionDescribe.build_copper_index(data)
 	for via in data.vias:
-		var pos: Vector2 = data.via_position(via)
-		var entry := {
-			"x_mm": _mm(pos.x),
-			"y_mm": _mm(pos.y),
-			"net_name": str(via.get("net_name", "")),
-			"from_layer": str(via.get("from_layer", "")),
-			"to_layer": str(via.get("to_layer", "")),
-			"size_mm": _mm(float(via.get("size", 0.8))),
-			"drill_mm": _mm(float(via.get("drill", 0.4))),
-		}
-		var via_id: String = str(via.get("id", ""))
-		if not via_id.is_empty():
-			entry["via_id"] = via_id
-		vias_arr.append(entry)
+		vias_arr.append(_PcbRegionDescribe.via_entry(data, via, copper))
 	return _ok({"via_count": vias_arr.size(), "vias": vias_arr})
 
 

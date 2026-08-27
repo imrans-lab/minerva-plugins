@@ -486,3 +486,31 @@ static func copper_joins_pin(copper: Dictionary, comp, pin_name: String,
 		if nodes_touch(copper, land as Dictionary):
 			return true
 	return false
+
+
+## The copper layers a via's barrel occupies: its two endpoints plus everything
+## between them in the declared stack. (Only through spans are modelled — see
+## PcbLayerStack.is_legal_via_span — so in practice this is the whole stack; a
+## blind/buried span would yield fewer layers.) A span naming a layer the board
+## does not declare answers with its two endpoints rather than guessing what
+## lies between two names the stack cannot order.
+##
+## Lives here, beside via_node, because two callers now need it: the ratsnest's
+## same-net copper sweep and the region read's layers_touched. Two copies is how
+## one of them ends up reporting a different barrel from the other.
+static func via_span(via: Dictionary, stack: PackedStringArray) -> Array:
+	var from_layer := canon(via.get("from_layer", "top"))
+	var to_layer := canon(via.get("to_layer", "bottom"))
+	var lo := -1
+	var hi := -1
+	for i in stack.size():
+		if stack[i] == from_layer:
+			lo = i
+		if stack[i] == to_layer:
+			hi = i
+	if lo < 0 or hi < 0:
+		return [from_layer, to_layer]
+	var out: Array = []
+	for i in range(mini(lo, hi), maxi(lo, hi) + 1):
+		out.append(stack[i])
+	return out

@@ -52,6 +52,7 @@ const _PcbLayerStack := preload("../model/pcb_layer_stack.gd")
 const _PcbHintWaypoint := preload("../model/pcb_hint_waypoint.gd")
 const _PcbRouteCandidate := preload("../model/pcb_route_candidate.gd")
 const _PcbTraceGeometry := preload("../model/pcb_trace_geometry.gd")
+const _PcbRegionDescribe := preload("../model/pcb_region_describe.gd")
 
 ## Anchor-marker HIT-TEST slack, document-space (board mm). Kept for
 ## hit_test()'s zoom-less corridor sweep only — DRAWN marker size is
@@ -2093,16 +2094,12 @@ func run_action(action_id: String, annotation: Dictionary, phase: String, host: 
 ## Read the anchor's board-space point. Prefers anchor.id {x,y} (board.point);
 ## falls back to anchor.snapshot.position [x,y] (pad anchors carry {component,pin}
 ## in id, so the snapshot position is the authoritative board-mm point for them).
+##
+## ONE reader, in PcbRegionDescribe — the region read filters notes by the same
+## point this hint renders on, and two readers of one wire shape is how they end
+## up disagreeing about where an annotation is.
 static func _anchor_position(annotation: Dictionary) -> Vector2:
-	var anchor: Variant = annotation.get("anchor", null)
-	if anchor is Dictionary:
-		var id: Variant = (anchor as Dictionary).get("id", null)
-		if id is Dictionary and (id as Dictionary).has("x") and (id as Dictionary).has("y"):
-			return Vector2(float((id as Dictionary)["x"]), float((id as Dictionary)["y"]))
-		var snap: Variant = (anchor as Dictionary).get("snapshot", null)
-		if snap is Dictionary:
-			return _to_vec2((snap as Dictionary).get("position", [0, 0]))
-	return Vector2.ZERO
+	return _PcbRegionDescribe.anchor_point(annotation)
 
 
 ## The polyline points for render/hit-test/bounds. Two storage conventions

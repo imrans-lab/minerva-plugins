@@ -43,6 +43,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_swap_nets` | exchange two pins' nets, ONE undo step; a netless pin is a legal side, two netless pins are not |
 | `minerva_pcb_select` | SET the whole canvas selection, pads included (`"Component.Pin"`); the multi mirror of `minerva_pcb_get_selection`, where `minerva_pcb_point` is the single-entity form |
 | `minerva_pcb_spatial_query` | spatial index `get_components_near` + `describe_relative_position`; empty ref → `get_components` shape |
+| `minerva_pcb_describe_region` | read-only; ONE read of a board rectangle — components with pad rows, traces with `free_ends`, vias with `layers_touched`, pours with outlines + `fill_region_count`, keepouts, cutouts, anchored notes. Assembled in `model/pcb_region_describe.gd` out of the surfaces that already own each rule (below) |
 | `minerva_pcb_describe_component` | golden-parity; spatial `describe_component_context` |
 | `minerva_pcb_get_change_journal` | model change journal |
 | `minerva_pcb_import_csv` | model `from_csv` |
@@ -76,7 +77,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_ungroup` | `data.ungroup_components`; accepts `group_id` or `component_ids` (below) |
 | `minerva_pcb_set_group_member_offset` | `data.set_member_offset`; every refusal (unknown/ungrouped/anchor/locked) diagnosed at the tool layer, current-value guard (below) |
 | `minerva_pcb_set_trace_width` | `data.set_trace_width`; one journalled step, current-value guard, out-of-range **refused** (below) |
-| `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`) (below) |
+| `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`, `layers_spanned`, `layers_touched`) — the row is built by `pcb_region_describe.via_entry`, shared with `describe_region` (below) |
 | `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
 | `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
@@ -142,6 +143,98 @@ order depends on the distinction.
 canvas is armed, so the next trace they draw really is that wide. A human turn
 of that same box writes the preference back, so the agent's read and the human's
 control are two views of one value.
+
+## The region read (`minerva_pcb_describe_region`, work item 01a03f9dd6)
+
+Understanding the ground around one part used to cost five verbs and a hand
+cross-reference: `list_zones` + `describe_zone` twice + `get_components` (all 37
+parts) + `spatial_query` + `pin_info`. `spatial_query` already sweeps a
+rectangle, but its copper block reports **ID lists** — no pad nets, no zone
+outlines, no trace free ends — so the answers still had to be reassembled from
+other verbs, and the reassembly is where a reader gets it wrong.
+
+`describe_region` is that rectangle answered once. It lives in
+`ui/model/pcb_region_describe.gd`; `panel_tools.gd` gets **dispatch wiring
+only** (arg validation and the envelope), because that file is already a god
+file.
+
+**Nothing in it is a new rule.** Every answer is the answer an existing surface
+already gives:
+
+| the reply says | the rule comes from |
+| --- | --- |
+| what is in the rectangle | `data.get_components_in_region` / `get_traces_in_region` / `get_vias_in_region` / `get_zones_in_region` / `cutouts_in_region` — the same sweeps the human's marquee walks and `spatial_query`'s copper block reads |
+| a pad | `PcbPadRow.rows_for_component` — THE pad row, the shape `get_selection`, `pin_info`, `free_pins` and the move/rotate replies all emit |
+| `free_ends` | `pcb_data.trace_end_is_joined`, negated — the same predicate the canvas Trace tool refuses to draw from and the connectivity DRC credits (pads by the shared contact predicate, vias by coincidence, same-net traces and same-net POUR FILL) |
+| a pour's outline / whether it conducts | `zone_outline_points` → `zone_outline_to_list`, and `PcbZoneCopper.fill_regions` for `fill_region_count` |
+| `layers_touched` | `PcbCopperContact.nodes_touch`, per layer (below) |
+| a note's anchor point | `pcb_region_describe.anchor_point`, which `PcbRouteHintKind._anchor_position` now delegates to — one reader of the v2 anchor wire shape |
+
+So a region read cannot disagree with the verb it summarises.
+
+**A trace crossing the boundary is listed WHOLE**, with all of its points. A
+clipped polyline would describe copper that does not exist, and where a run goes
+is most of why the region was asked about.
+
+**Pours and keepouts are reported apart.** They are one entity type in the model
+and two different things to a reader: a pour is copper an agent may land on, a
+keepout is copper it may not create. `fill_region_count: 0` on a pour means it
+conducts **nothing** yet — the difference between "there is ground here" and
+"there is a request for ground here".
+
+**An empty region is an answer, not an error**: empty arrays, plus the
+`searched` list, which is what tells a reader an array is empty because nothing
+is there rather than because nothing was looked for. (Same reason
+`spatial_query`'s copper block carries one.)
+
+**View state is ignored**, exactly as `spatial_query`'s copper block ignores it:
+the human's marquee honours layer visibility because a person selects what they
+can see, while an agent asking what is in a rectangle is asking about the
+BOARD. An answer that changed with someone else's View menu would be
+unreproducible from the agent's side. The reply says so.
+
+**`layer` filters copper, never components.** Traces, vias (by the layers their
+barrel spans), zones, keepouts and pads are filtered; a through-hole pad is on
+every layer and so passes any filter. A component is a physical part with a
+mounting side, not copper on one layer — dropping it because its pads are
+elsewhere would hide the thing the agent is standing next to — so its `pads`
+array is filtered instead.
+
+**Notes** are the annotations whose ANCHOR POINT lies inside the rectangle. The
+point, not the rendered bounds: a marker's bounds are a view concept that
+changes with zoom, while the point it was dropped on is board geometry.
+
+### `layers_touched` (also on `minerva_pcb_list_vias`)
+
+`from_layer`/`to_layer` say what a via's barrel **spans**. Every through via
+spans the whole stack — `PcbLayerStack.is_legal_via_span` admits nothing else —
+so the span cannot show a via that joins nothing on one side. That was
+invisible over MCP: an agent could see a via existed and could not see whether
+either end reached copper.
+
+`layers_touched` walks the span one layer at a time and asks the **shared
+contact predicate** (`PcbCopperContact.nodes_touch`) whether the barrel's disc
+*on that layer* meets any pad land, any trace's swept copper, or any pour's
+compiled fill there — the same three conductor kinds the connectivity DRC and
+the ratsnest read, through the same builders. `layers_spanned` is reported
+beside it so the two claims are never confused.
+
+It is **net-blind, and it judges nothing.** A via whose bottom side meets
+nothing is reported as touching only its top; a via meeting a foreign net's
+copper is reported as touching that layer. "This via is stranded" and "this via
+is a short" are DRC's verdicts to give, and a read verb that folded a verdict
+into a fact would take that judgement away from the reader who asked for the
+fact.
+
+The board's copper is indexed **once per call**
+(`pcb_region_describe.build_copper_index`), not once per via: rebuilding it in
+the innermost loop is what turns a whole-board `list_vias` into a slow read.
+Vias are deliberately absent from the index — a via meeting only another via
+says nothing about whether either reaches a conductor.
+
+`PcbCopperContact.via_span` is the one derivation of "which layers does this
+barrel occupy"; `pcb_ratsnest._via_span` delegates to it, so the ratsnest's
+same-net sweep and this read cannot describe different barrels.
 
 ## Board-via tools (`minerva_pcb_list_vias` / `delete_via`, B1-U2)
 

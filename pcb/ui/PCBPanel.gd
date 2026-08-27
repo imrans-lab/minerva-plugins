@@ -5155,16 +5155,57 @@ func _on_component_lock_changed(message: String) -> void:
 	_show_transient_status(message)
 
 
-## Show a message in the status bar, then fall back to the standing status after
-## 2s. The ONE transient-status pathway — the component-lock channel and the zone
-## tools' feedback channel both land here rather than each growing their own timer.
+## How long a transient status message stands before the line reverts to what
+## _update_status has to say.
+const TRANSIENT_STATUS_SECONDS := 2.0
+
+## The clear that is still pending, and the message it belongs to.
+##
+## A SceneTreeTimer cannot be cancelled, so the pending clear is identified by a
+## TOKEN instead: every message takes the next one, and a timeout whose token is
+## no longer current has been superseded and does nothing. Holding the timer
+## itself as well is what lets a test read the pending clear.
+var _transient_status_token: int = 0
+var _transient_status_timer: SceneTreeTimer = null
+
+
+## Show a message in the status bar for TRANSIENT_STATUS_SECONDS, then fall back
+## to the standing status. The ONE transient-status pathway — the component-lock
+## channel and the zone tools' feedback channel both land here rather than each
+## growing their own timer.
+##
+## RESTARTS THE CLOCK (bug 01a03820df78). Each message used to arm its OWN
+## uncancelled 2s timer, so two messages less than 2s apart left two clears
+## queued and the FIRST one — armed by the message already gone from the line —
+## wiped the SECOND one early. A message that arrives at t=1.9s used to be
+## visible for 0.1s. Now the pending clear is superseded: the newest message
+## always gets the full window.
+##
+## The HELD LEADS are untouched by any of this. _status_lead's load-check,
+## overlay and bus-refusal parts are conditions, not messages: they ride every
+## write through _set_status and survive both the message and its clear (see
+## _set_status's own note).
 func _show_transient_status(message: String) -> void:
 	_set_status(message)
-	# Clear the transient message after 2s (guard: tree may be gone).
-	if is_inside_tree():
-		get_tree().create_timer(2.0).timeout.connect(func() -> void:
-			if is_instance_valid(_status_label):
-				_update_status())
+	if not is_inside_tree():
+		return
+	_transient_status_token += 1
+	var token: int = _transient_status_token
+	_transient_status_timer = get_tree().create_timer(TRANSIENT_STATUS_SECONDS)
+	_transient_status_timer.timeout.connect(func() -> void:
+		_clear_transient_status(token))
+
+
+## Revert the status line, unless a newer message has superseded this clear.
+##
+## Also the seam a test drives: firing a stale token must leave the newer
+## message standing.
+func _clear_transient_status(token: int) -> void:
+	if token != _transient_status_token:
+		return
+	_transient_status_timer = null
+	if is_instance_valid(_status_label):
+		_update_status()
 
 
 ## Backend lifecycle: lazy start-on-demand + process-identity verification

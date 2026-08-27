@@ -379,3 +379,16 @@ test_hint_hops_and_via_owners.gd
 # reading the source, which is exactly the false pin this file exists to
 # prevent. Pin it from the first trustworthy run.
 test_pcb_pin_select.gd
+
+# NEW — work item 01a03f9dd6: minerva_pcb_describe_region (ONE read of a board
+# rectangle) and layers_touched on it and on minerva_pcb_list_vias. UNPINNED on
+# purpose: the station that wrote it runs static gates only, so an assertions=
+# count here would be derived by reading the source, which is exactly the false
+# pin this file exists to prevent. Pin it from the first trustworthy run.
+test_describe_region.gd
+
+# NEW — remora 01a03820df78: a transient status message wiped early by the
+# PREVIOUS message's uncancelled 2s timer. Section 1 measures the item's own
+# oracle in REAL TIME and so takes ~3.5s of wall clock; that cost is the point —
+# the defect is about a clock. UNPINNED for the same reason as the entry above.
+test_transient_status.gd
