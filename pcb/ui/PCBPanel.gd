@@ -53,6 +53,10 @@ const _PcbOverlayFetchScript: Script = preload("model/pcb_overlay_fetch.gd")
 ## The pin→net invariant: used here for the load-time conflict report only —
 ## the membership VERBS run on panel_tools, which preloads the same module.
 const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
+## DCR 01a0410c62 — the pad-selection sidebar section and the pad ROW shape it
+## renders (the same rows minerva_pcb_get_selection returns).
+const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section.gd")
+const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
@@ -395,6 +399,8 @@ var _inspect_pin_button: Button = null
 ## _update_properties already use).
 var _delete_button: Button = null
 var _pin_info_section: VBoxContainer = null
+## The pad-selection section (DCR 01a0410c62) — see _build_sidebar.
+var _pin_selection_section: VBoxContainer = null
 var _pin_info_ref_label: Label = null
 var _pin_info_value_label: Label = null
 var _pin_info_members_label: Label = null
@@ -1156,7 +1162,8 @@ func _build_ui() -> void:
 	_canvas.component_selected.connect(func(_id: String) -> void:
 		_update_status(); _update_properties())
 	_canvas.selection_changed.connect(func() -> void:
-		_update_status(); _update_properties(); _update_delete_button())
+		_update_status(); _update_properties(); _update_delete_button()
+		refresh_pin_selection_section())
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 	_canvas.pin_selected.connect(_on_pin_selected)
@@ -1696,8 +1703,11 @@ func _build_sidebar() -> VBoxContainer:
 		"Pan the view (drag anywhere)",
 		"pan_24.png")
 
-	# Pin inspector (WC-1) — a TRUE toggle (unlike the Select/Pan radio tools):
-	# pressed arms INSPECT_PIN, pressed-again exits back to Select.
+	# Pin Select (DCR 01a0410c62 — WC-1's pin inspector, grown into a selection
+	# tool). A TRUE toggle, unlike the Select/Pan radio tools: pressed arms
+	# INSPECT_PIN, pressed-again exits back to Select. It sits HERE, beside
+	# Select and Pan, because picking a pad is a selection act, not a drawing
+	# one — and the DCR asks for it in the selection area.
 	_inspect_pin_button = Button.new()
 	_inspect_pin_button.name = "InspectPinButton"
 	var inspect_icon := _load_icon("inspect_pin_24.png")
@@ -1705,7 +1715,8 @@ func _build_sidebar() -> VBoxContainer:
 		_inspect_pin_button.icon = inspect_icon
 	else:
 		_inspect_pin_button.text = "Pin"
-	_inspect_pin_button.tooltip_text = _wrap_tooltip("Click a pin to see its info (Shift+P)")
+	_inspect_pin_button.tooltip_text = _wrap_tooltip(
+		"Pin Select (P) — click a pad to select it, shift-click to add or remove")
 	_inspect_pin_button.toggle_mode = true
 	_inspect_pin_button.pressed.connect(_on_inspect_pin_button_pressed)
 	tools_flow.add_child(_inspect_pin_button)
@@ -2024,7 +2035,55 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar_content.add_child(HSeparator.new())
 	_sidebar_content.add_child(_build_pin_info_section())
 
+	# DCR 01a0410c62 — the PAD SELECTION section, below the one-pin Pin Info
+	# section it complements: the selected pads' rows, the component's free
+	# pins, and the two net edits a pad selection affords. Hidden until pads
+	# are selected; driven by selection_changed, not by pin_selected, so the
+	# Pin Info section's own contract is untouched.
+	_pin_selection_section = _PcbPinSelectionSectionScript.new()
+	_pin_selection_section.move_net_requested.connect(_on_move_net_requested)
+	_pin_selection_section.swap_nets_requested.connect(_on_swap_nets_requested)
+	_sidebar_content.add_child(_pin_selection_section)
+
 	return _sidebar
+
+
+## "Move net to…" from the pad-selection section — the SAME one-undo-step model
+## op minerva_pcb_move_net runs. Refusals are named in the status line rather
+## than swallowed: the human asked for something the netlist cannot do.
+func _on_move_net_requested(from_ref: String, to_ref: String) -> void:
+	if _data == null:
+		return
+	var result: Dictionary = _PcbNetMembershipScript.move_net(_data, from_ref, to_ref)
+	if result.has("error"):
+		_show_transient_status("Move net refused: %s" % str(result["error"]))
+		return
+	_show_transient_status("Moved %s from %s to %s." % [
+		str(result.get("net_name", "")), from_ref, to_ref])
+	refresh_pin_selection_section()
+
+
+## "Swap nets" from the pad-selection section — same rule as the move above.
+func _on_swap_nets_requested(ref_a: String, ref_b: String) -> void:
+	if _data == null:
+		return
+	var result: Dictionary = _PcbNetMembershipScript.swap_nets(_data, ref_a, ref_b)
+	if result.has("error"):
+		_show_transient_status("Swap nets refused: %s" % str(result["error"]))
+		return
+	_show_transient_status("Swapped the nets of %s and %s." % [ref_a, ref_b])
+	refresh_pin_selection_section()
+
+
+## Re-describe the pad-selection section against the live canvas selection.
+## Called from the selection_changed feed and after either net edit.
+func refresh_pin_selection_section() -> void:
+	if _pin_selection_section == null or not is_instance_valid(_pin_selection_section):
+		return
+	var refs: Array = []
+	if _canvas != null and is_instance_valid(_canvas):
+		refs = Array(_canvas.selected_pad_refs)
+	_pin_selection_section.update_for(_data, refs)
 
 
 ## Properties section (legacy clone): ID / Position / Rotation / Layer /
@@ -3470,12 +3529,96 @@ func point_at_entity(kind: String, id: String) -> Dictionary:
 		_canvas.queue_redraw()
 		_show_transient_status("Assistant points at annotation %s." % id)
 		return {"ok": true}
+	var resolved: Dictionary = _resolve_selectable(kind, id)
+	if not bool(resolved.get("ok", false)):
+		return resolved
+	_canvas._clear_selection_all()
+	# A pad goes through the canvas's own setter so the Pin Info section follows
+	# the point the way it follows a click; every other kind is a plain add.
+	if str(resolved["canvas_kind"]) == _canvas.KIND_PAD:
+		_canvas.set_selected_pads([id])
+	else:
+		_canvas._add_to_selection(str(resolved["canvas_kind"]), id)
+	_canvas.selection_changed.emit()
+	_canvas.queue_redraw()
+	_show_transient_status("Assistant points at %s %s." % [kind, id])
+	return {"ok": true}
+
+
+## SELECT a whole list of entities at once — the agent's half of the deixis
+## (minerva_pcb_select), and the reason point_at_entity's per-kind resolution
+## lives in _resolve_selectable rather than inside it. The selection is cleared
+## ONCE and every entry lands through the same _add_to_selection choke point a
+## click uses, so the human sees the agent's pick exactly as their own.
+##
+## `entries` is [{kind, id}]; a pad's id is its "REF.PIN" address. Entries that
+## do not resolve are REPORTED, not fatal — pointing at four pads of which one
+## has been deleted should still light the other three.
+func select_entities(entries: Array) -> Dictionary:
+	if _canvas == null:
+		return {"ok": false, "error": "no_canvas", "message": "selection needs a live canvas"}
+	var plan: Array = []
+	var not_found: Array = []
+	var annotations := PackedStringArray()
+	for raw in entries:
+		if not (raw is Dictionary):
+			continue
+		var kind := str((raw as Dictionary).get("kind", "")).strip_edges()
+		var id := str((raw as Dictionary).get("id", "")).strip_edges()
+		if kind == "annotation":
+			if _annotation_host != null and not (_annotation_host.get_by_id(id) as Dictionary).is_empty():
+				annotations.append(id)
+			else:
+				not_found.append({"kind": kind, "id": id, "error": "not_found"})
+			continue
+		var resolved: Dictionary = _resolve_selectable(kind, id)
+		if bool(resolved.get("ok", false)):
+			plan.append({"kind": kind, "id": id, "canvas_kind": str(resolved["canvas_kind"])})
+		else:
+			not_found.append({"kind": kind, "id": id,
+				"error": str(resolved.get("error", "not_found"))})
+
+	_canvas._clear_selection_all()
+	var pads: Array = []
+	for row in plan:
+		if str((row as Dictionary)["canvas_kind"]) == _canvas.KIND_PAD:
+			pads.append(str((row as Dictionary)["id"]))
+		else:
+			_canvas._add_to_selection(str((row as Dictionary)["canvas_kind"]),
+				str((row as Dictionary)["id"]))
+	# Pads go through the canvas's own setter so the Pin Info section follows
+	# the agent's pick the way it follows a click.
+	if not pads.is_empty():
+		_canvas.set_selected_pads(pads)
+	if not annotations.is_empty() and _annotation_host != null:
+		_annotation_host.set_selected_annotation_ids(annotations, str(annotations[-1]))
+	_canvas.selection_changed.emit()
+	_canvas.queue_redraw()
+	_show_transient_status("Assistant selected %d item(s)." % (plan.size() + annotations.size()))
+	var out: Dictionary = {"ok": true, "selected": plan.size() + annotations.size()}
+	if not not_found.is_empty():
+		out["not_found"] = not_found
+	return out
+
+
+## Does `kind`/`id` name something this canvas can select, and under which
+## KIND_* does it live? {ok:true, canvas_kind} or the same structured refusal
+## point_at_entity has always returned (unknown_kind / not_found).
+func _resolve_selectable(kind: String, id: String) -> Dictionary:
 	var canvas_kind := ""
 	var exists := false
 	match kind:
 		"component":
 			canvas_kind = _canvas.KIND_COMPONENT
 			exists = _data != null and _data.get_component(id) != null
+		"pad":
+			# DCR 01a0410c62: a pad is addressed by "REF.PIN", not by a minted
+			# id — it has no identity of its own in the board model.
+			canvas_kind = _canvas.KIND_PAD
+			var parts: Array = _PcbPadRowScript.parse_ref(id)
+			if not parts.is_empty() and _data != null:
+				var pad_comp = _data.get_component(str(parts[0]))
+				exists = pad_comp != null and pad_comp.pins.has(str(parts[1]))
 		"trace":
 			canvas_kind = _canvas.KIND_TRACE
 			exists = _data != null and _data.traces.has(id)
@@ -3503,15 +3646,10 @@ func point_at_entity(kind: String, id: String) -> Dictionary:
 				and not str(_staged_entities.staged_id_for_entity(id)).is_empty()
 		_:
 			return {"ok": false, "error": "unknown_kind",
-				"message": "kind must be one of: component, trace, via, zone, cutout, candidate, staged, annotation"}
+				"message": "kind must be one of: pad, component, trace, via, zone, cutout, candidate, staged, annotation"}
 	if not exists:
 		return {"ok": false, "error": "not_found", "message": "no %s '%s' on this board" % [kind, id]}
-	_canvas._clear_selection_all()
-	_canvas._add_to_selection(canvas_kind, id)
-	_canvas.selection_changed.emit()
-	_canvas.queue_redraw()
-	_show_transient_status("Assistant points at %s %s." % [kind, id])
-	return {"ok": true}
+	return {"ok": true, "canvas_kind": canvas_kind}
 
 
 ## HITL-7c: "Set hint width…" reveal — bind the row to THIS hint, load its

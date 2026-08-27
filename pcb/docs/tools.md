@@ -38,6 +38,10 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_delete_component` | |
 | `minerva_pcb_connect_net` | model `connect_pin_to_net` (auto-creates net). MOVES: a pin belongs to at most one net, so any other membership is removed in the same call and named in the reply's `moved`; one undo step (see Pin→net membership below) |
 | `minerva_pcb_disconnect_net` | removal half of the pair; `net_name` is an optional GUARD (`pin_not_on_net` refuses the whole call), one undo step |
+| `minerva_pcb_free_pins` | one component's pins on NO net, as pad rows; `side` filters to one side/column of the part, `exclude_roles` drops what the board's own pin table flags (see The pad row below) |
+| `minerva_pcb_move_net` | move one pin's net onto another pin, ONE undo step; a displaced destination membership is named under `displaced` |
+| `minerva_pcb_swap_nets` | exchange two pins' nets, ONE undo step; a netless pin is a legal side, two netless pins are not |
+| `minerva_pcb_select` | SET the whole canvas selection, pads included (`"Component.Pin"`); the multi mirror of `minerva_pcb_get_selection`, where `minerva_pcb_point` is the single-entity form |
 | `minerva_pcb_spatial_query` | spatial index `get_components_near` + `describe_relative_position`; empty ref → `get_components` shape |
 | `minerva_pcb_describe_component` | golden-parity; spatial `describe_component_context` |
 | `minerva_pcb_get_change_journal` | model change journal |
@@ -693,6 +697,7 @@ other lacks.
 | `minerva_pcb_export_yaml` | the live board as canonical YAML TEXT — UNGATED and writes nothing, so a board the promote gate refuses can still be read out and diffed. Refuses a `path` by name: `minerva_pcb_promote` is the only verb that writes the canonical file |
 | `minerva_pcb_list_mounting_holes` | mounting holes read back (position/diameter/plated, snapped), with a placement advisory for coincident or collinear holes — a pattern no geometric check covers |
 | `minerva_pcb_point` | the get_selection MIRROR — select an entity FOR the human (deixis both ways) |
+| `minerva_pcb_select` | the same mirror for a WHOLE selection, pads included — `pads: ["U1S.GPIO38", …]` or `entities: [{kind, id}]`; returns get_selection's own read of the result |
 | `minerva_pcb_hint_move_bend` / `_insert_bend` / `_delete_bend` | micro hint edits, one revision each; superseded refuses with the sanctioned exits |
 | `minerva_pcb_clear_hints_by_author` | the dock menu's MCP twin (human/ai/all; workflow-class only) |
 
@@ -1070,6 +1075,69 @@ reopened. Each such drop is named in the load reply's `warnings`
 keeps a later `minerva_pcb_delete_traces` from reporting "committed by" a
 candidate that never routed the copper you deleted.
 
+## The pad row, and the pad verbs (DCR `01a0410c62`)
+
+**A pad is a thing you can point at.** Universal Select picks the whole part;
+the **Pin Select** tool (the Select group's third button, keyboard **P**,
+Shift+P still works) picks a PAD. Click one to select it, shift-click to add or
+remove, Escape or an empty click to clear. The owner's sentence is the
+acceptance case: select two pads, say *"see these pins? move them to the other
+side of U1S"*, and the agent reads the selection rather than guessing a refdes
+from a coordinate.
+
+**One shape, defined once.** `pcb/ui/model/pcb_pad_row.gd` owns THE pad row, and
+every surface that describes a pad emits exactly it:
+
+```json
+{"kind": "pad", "ref": "U1S.GPIO8", "component": "U1S", "pin": "GPIO8",
+ "net": "I2C_SDA", "position": {"x_mm": 41.5, "y_mm": 22.86},
+ "layer": "top", "side": "east",
+ "approach_sides": ["east"], "roles": ["strapping"]}
+```
+
+| field | means |
+| --- | --- |
+| `ref` / `component` / `pin` | the one address form; a pad has no minted id of its own |
+| `net` | the net holding the pin, `""` when free |
+| `position` | the pad's WORLD centre, at the same quantum every other reply uses |
+| `layer` | `top` / `bottom`, or `all` for a through-hole barrel |
+| `side` | which side/COLUMN of its own component the pad sits on — this is what makes *"the other side of U1S"* a filter instead of a coordinate scan |
+| `approach_sides` | which way a board-rule trace can LEAVE the pad, clear of the part's own other lands |
+| `roles` | what the board's pin table says the pin is for |
+
+`side` and `approach_sides` are different questions and the names are close: the
+first is about the PART's geometry, the second about the ROUTE's.
+
+It appears in `minerva_pcb_get_selection` (selected pads), `minerva_pcb_pin_info`
+(plus that tool's own `pin_name` / `net_members` / `trace_ids`),
+`minerva_pcb_free_pins`, and in the `pads` array `minerva_pcb_move_component`,
+`minerva_pcb_move_relative` and `minerva_pcb_rotate_component` now carry — so
+"where did pin 1 land after that rotation?" is answered by the move's own reply
+instead of a second round trip. (`minerva_pcb_rotate_component`'s description
+also states the convention outright: the angle is CLOCKWISE in the board's
+y-down frame, so a pad WEST of the origin lands SOUTH at 90 and NORTH at 270.)
+
+**Roles come from the board, never from memory.** A pin's canonical dict may
+carry `roles: [strapping]`; every key beyond `number` / `x_mm` / `y_mm`
+round-trips verbatim through `pcb_component.pin_extra`, the Go board model's
+`Pin.Extra` and the canonical YAML, so a socket's pin table is authored once in
+the board document and read everywhere. A board that declares nothing answers
+`roles: []` — the vocabulary the docs and the sidebar are written against is
+`strapping`, `uart_console`, `jtag`, `onboard_led`, `adc`, and a board may add
+its own.
+
+**Move and swap are one undo step each.** Both go through
+`pcb/ui/model/pcb_net_membership.gd` (the only writer of a net's `pins` list)
+composed by `pcb_undo_step.compose`, exactly as connect/disconnect are. The
+sidebar's "Move net to…" and "Swap nets" buttons and the two MCP verbs run the
+SAME model op, so the human's click and the agent's call cannot diverge.
+
+**Deixis runs both ways.** `minerva_pcb_get_selection` answers *"which pins is
+the human pointing at?"*; `minerva_pcb_select` answers *"look at THESE"* for a
+whole selection — the pads land through the same choke points a click uses, and
+the reply carries `get_selection`'s own read of the result so the two cannot
+disagree.
+
 ## DRC over the live board (`minerva_pcb_board_drc`)
 
 `minerva_pcb_drc` and `minerva_pcb_drc_geometric` are backend tools that take
@@ -1163,9 +1231,18 @@ grid); drag empty canvas to box-select; `R` rotates the selection.
 **Pan** — drag anywhere while armed. Also works from any other tool: right-
 drag, middle-drag, or hold Space and drag.
 
-**Inspect Pin (Shift+P)** — click a pin to see its info in the Pin Info
-section; press the button again to exit (clicking empty canvas just clears
-the readout — the tool stays armed).
+**Pin Select (P, or Shift+P)** — click a pad to SELECT it: its copper is
+haloed, the Pin Info section fills, and the Pin Selection section below shows
+the pad's row (net, side, roles), the component's free pins under a side
+filter, and the two net edits — "Move net to…" and, with exactly two pads
+selected, "Swap nets". Shift-click adds or removes a pad; a shift-click on
+empty canvas leaves the selection alone, so a multi-pad selection survives a
+missed click. A plain click on empty canvas clears it; Escape clears
+everything; press the button again to exit to Select. The pad selection is
+what `minerva_pcb_get_selection` reports, and what `minerva_pcb_select` sets
+from the other side. (This is WC-1's pin inspector grown into a selection
+tool, DCR `01a0410c62` — one pad-picking mode, not two, so Shift+P still
+arms it and the single-click readout behaves exactly as it did.)
 
 **Group / ungroup (Ctrl/Cmd+G / Ctrl/Cmd+Shift+G)** — with 2+ components
 selected, groups them so they move as one; ungroups the selected group.

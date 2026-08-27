@@ -1423,8 +1423,14 @@ func _run_removal_manifest_tools_absent() -> void:
 	# verb twins of Ctrl+Z / Ctrl+Shift+Z; executor:"panel", the Go pin stays.
 	# (112 -> 113): minerva_pcb_board_drc, the live-board DRC verb;
 	# executor:"panel", the Go pin stays.
-	check_eq("manifest tool count == 113 (ALL manifest.json tools[] entries)",
-		names.size(), 113)
+	# STALE-PIN CORRECTION, found by this station: the disconnect_net round
+	# bumped the sibling pin in test_manifest_tool_registration.gd from 113 to
+	# 114 and left THIS one at 113, so this check has been failing against
+	# main ever since — the exact "only one of the two pins moved" failure the
+	# comment above warns about. 113 -> 114 (disconnect_net) -> 118 (DCR
+	# 01a0410c62's pad family: free_pins, move_net, swap_nets, select).
+	check_eq("manifest tool count == 118 (ALL manifest.json tools[] entries)",
+		names.size(), 118)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

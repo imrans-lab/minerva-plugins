@@ -151,6 +151,15 @@ func _build_fixture_board(d) -> void:
 	# U1.2 stays unconnected — no connect_pin_to_net call.
 
 
+
+## A pin_info reply's world position as [x, y]. The reply carries the pad row's
+## {x_mm, y_mm} (DCR 01a0410c62); this reads it back as the pair the checks
+## above compare against get_pin_world_position, so the shape lives in ONE place
+## in this suite too.
+func _pos_of(reply: Dictionary) -> Array:
+	var pos: Dictionary = reply.get("position", {})
+	return [float(pos.get("x_mm", NAN)), float(pos.get("y_mm", NAN))]
+
 # ── synthetic input helpers (copied convention from test_pcb_canvas_input_probe.gd) ──
 
 func _push_button(pos: Vector2, btn: int, pressed: bool) -> void:
@@ -296,11 +305,16 @@ func _test_e2e_1_scenario() -> void:
 		str(r1.get("display_name", "")) == "GND", "got %s" % str(r1))
 	check("D: MCP U1.1 net_members matches UI ([U2.A])",
 		r1.get("net_members", []) == ["U2.A"], "got %s" % str(r1.get("net_members", [])))
-	# docket 019fd0ab4c65: reply now carries "position" — the pad's WORLD
+	# docket 019fd0ab4c65: the reply carries "position" — the pad's WORLD
 	# position in board mm, matching pcb_component.get_pin_world_position
 	# exactly (same rigid-body transform pad_at()/pin_info() use internally).
+	# DCR 01a0410c62 changed its SHAPE from the bare [x, y] pair to the pad
+	# row's {x_mm, y_mm}: pin_info now answers in the ONE pad-row shape
+	# minerva_pcb_get_selection and minerva_pcb_free_pins also use, and two
+	# spellings of the same coordinate in one reply family is the drift that
+	# shape exists to prevent. Same numbers, same quantum.
 	check("D: MCP U1.1 position matches get_pin_world_position",
-		r1.get("position", []) == [world_1.x, world_1.y], "got %s" % str(r1.get("position", [])))
+		_pos_of(r1) == [world_1.x, world_1.y], "got %s" % str(r1.get("position", {})))
 
 	var r15: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info", {"editor_name": EDITOR_NAME, "ref": "U1.15"})
 	check("D: MCP U1.15 pin_name matches UI ('3V3')",
@@ -310,7 +324,7 @@ func _test_e2e_1_scenario() -> void:
 	check("D: MCP U1.15 net_members matches UI ([U3.1])",
 		r15.get("net_members", []) == ["U3.1"], "got %s" % str(r15.get("net_members", [])))
 	check("D: MCP U1.15 position matches get_pin_world_position",
-		r15.get("position", []) == [world_15.x, world_15.y], "got %s" % str(r15.get("position", [])))
+		_pos_of(r15) == [world_15.x, world_15.y], "got %s" % str(r15.get("position", {})))
 
 	var r2: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info", {"editor_name": EDITOR_NAME, "ref": "U1.2"})
 	check("D: MCP U1.2 display_name = '(unconnected)'",
@@ -318,7 +332,7 @@ func _test_e2e_1_scenario() -> void:
 	check("D: MCP U1.2 net_members is empty",
 		(r2.get("net_members", []) as Array).is_empty(), "got %s" % str(r2.get("net_members", [])))
 	check("D: MCP U1.2 position present even though the pin is unconnected",
-		r2.get("position", []) == [world_2.x, world_2.y], "got %s" % str(r2.get("position", [])))
+		_pos_of(r2) == [world_2.x, world_2.y], "got %s" % str(r2.get("position", {})))
 
 	# x_mm/y_mm variant hits the same pad as the ref variant.
 	var r_xy: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info",
@@ -326,7 +340,7 @@ func _test_e2e_1_scenario() -> void:
 	check("D: MCP x_mm/y_mm resolves the same pin as ref", str(r_xy.get("ref", "")) == "U1.1",
 		"got %s" % str(r_xy))
 	check("D: MCP x_mm/y_mm variant also carries position (both resolution paths covered)",
-		r_xy.get("position", []) == [world_1.x, world_1.y], "got %s" % str(r_xy.get("position", [])))
+		_pos_of(r_xy) == [world_1.x, world_1.y], "got %s" % str(r_xy.get("position", {})))
 
 	# ── E. Click empty space clears; malformed/unknown MCP refs error cleanly. ──
 	_last_pin_selected = {"__unset__": true}

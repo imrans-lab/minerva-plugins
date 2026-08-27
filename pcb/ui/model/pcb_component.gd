@@ -555,24 +555,29 @@ func _derive_bounds_from_graphics() -> bool:
 	return true
 
 
-## Get a pad's world-space position and size, accounting for component rotation
+## THE land-to-world transform — one answer, for every surface that has to know
+## where a piece of pad copper physically is (bug 01a0380585b4).
+##
+## Returns {position: world centre, size: the land's own size, rotation: the
+## land's world angle in BOARD degrees — the CW/KiCad convention `rotation`
+## itself is in, so a Godot-space consumer NEGATES it exactly as get_transform
+## and _land_distance do}. The three compose exactly as _land_distance measures:
+## the OFFSET turns with the component only, the BODY with the component's
+## rotation and the land's own. Size is never swapped — a 90-degree turn is
+## carried by `rotation`, which is what lets an arbitrary angle work at all and
+## what makes the drawn rectangle and the hit-test rectangle one rectangle.
+##
+## Before this was the one answer it disagreed with the model twice: it turned
+## the offset by +rotation where every other path (get_transform, the worker,
+## KiCad) turns it by -rotation, and it swapped width/height on `int(rotation) %
+## 180 == 90`, which is false for -90. Callers wanting an axis-aligned box build
+## it from these three (pcb_pad_approach.land_rect).
 func get_pad_world_transform(pad: Dictionary) -> Dictionary:
-	var rot_rad := deg_to_rad(rotation)
 	var local_pos: Vector2 = pad.get("position", Vector2.ZERO)
-	var local_size: Vector2 = pad.get("size", Vector2(1, 1))
-
-	# Rotate position around component center
-	var world_pos := position + local_pos.rotated(rot_rad)
-
-	# For 90/270 rotation, swap width and height
-	var world_size := local_size
-	if int(rotation) % 180 == 90:
-		world_size = Vector2(local_size.y, local_size.x)
-
 	return {
-		"position": world_pos,
-		"size": world_size,
-		"rotation": rotation
+		"position": position + (get_transform() * local_pos),
+		"size": pad.get("size", Vector2(1, 1)) as Vector2,
+		"rotation": rotation + float(pad.get("rotation", 0.0)),
 	}
 
 

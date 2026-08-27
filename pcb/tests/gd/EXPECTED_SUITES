@@ -372,3 +372,10 @@ test_trace_pour_terminator.gd
 # UNPINNED on purpose — the assertion count is pinned in its own commit once
 # the suite has been RUN, not derived from reading it.
 test_hint_hops_and_via_owners.gd
+
+# NEW — DCR 01a0410c62 (Pin Select), remora 01a0380585b4 (one land-to-world
+# transform), and the 2026-08-26 HITL rotation finding. UNPINNED on purpose:
+# this station runs no suites, so an assertions= count here would be derived by
+# reading the source, which is exactly the false pin this file exists to
+# prevent. Pin it from the first trustworthy run.
+test_pcb_pin_select.gd

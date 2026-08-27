@@ -243,7 +243,14 @@ func _init() -> void:
 	# minerva_pcb_drc / _drc_geometric stay backend, so the Go pin at 19 holds.
 	# (113 -> 114): minerva_pcb_disconnect_net — the removal half of the pin→net
 	# membership pair. executor:"panel", so the Go pin at 19 still holds.
-	check("total registered tool count == 114", registered.size() == 114,
+	# DCR 01a0410c62 (114 -> 118): the PAD family — minerva_pcb_free_pins (the
+	# per-component "what is available", filterable by side and by the board's
+	# own pin-table roles), minerva_pcb_move_net and minerva_pcb_swap_nets (the
+	# two net edits a pad selection affords, each ONE undo step), and
+	# minerva_pcb_select (the whole-selection mirror of get_selection, where
+	# minerva_pcb_point is the single-entity form). All four executor:"panel",
+	# so the Go pin at 19 still holds.
+	check("total registered tool count == 118", registered.size() == 118,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

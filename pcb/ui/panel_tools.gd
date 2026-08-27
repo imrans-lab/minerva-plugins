@@ -60,6 +60,9 @@ const _PcbDataScript := preload("model/pcb_data.gd")
 ## so the "a pin is on one net" rule has one home both this surface and the
 ## panel's loader read.
 const _PcbNetMembershipScript := preload("model/pcb_net_membership.gd")
+## DCR 01a0410c62 — THE pad row. Every verb that describes a pad (get_selection,
+## pin_info, free_pins, the move/rotate replies) emits this one shape.
+const _PcbPadRowScript := preload("model/pcb_pad_row.gd")
 ## C4a: the disposition legality vocabulary (DISPOSITIONS, TERMINAL_DISPOSITIONS
 ## and the named refusal codes). Preloaded so the workspace verb tools NAME their
 ## refusals from the canonical const set instead of re-listing it — a second copy
@@ -138,6 +141,16 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _connect_net(host, args)
 		"minerva_pcb_disconnect_net":
 			return _disconnect_net(host, args)
+		# DCR 01a0410c62 — the pad family: what is free on a part, and the two
+		# net edits a pad selection affords. Each is ONE undo step.
+		"minerva_pcb_free_pins":
+			return _free_pins(host, args)
+		"minerva_pcb_move_net":
+			return _move_net(host, args)
+		"minerva_pcb_swap_nets":
+			return _swap_nets(host, args)
+		"minerva_pcb_select":
+			return _select(host, args)
 		"minerva_pcb_spatial_query":
 			return _spatial_query(host, args)
 		"minerva_pcb_describe_component":
@@ -505,20 +518,12 @@ static func _pin_info(host, args: Dictionary) -> Dictionary:
 	var result: Dictionary = info.duplicate(true)
 	result["display_name"] = host.pin_display_name(info) if host.has_method("pin_display_name") else ""
 
-	# docket 019fd0ab4c65: pin_info gains "position" — the pad's WORLD position
-	# in board mm, via the same rigid-body transform pad_at()/pin_info() use
-	# internally (pcb_component.get_pin_world_position, applies rotation +
-	# component origin). Both resolution paths (ref and x_mm/y_mm hit-test)
-	# converge on `component`/`pin` above, so one lookup here covers both.
-	# Additive only — a data-resolution miss here degrades to no "position"
-	# key rather than failing a request that host.pin_info() already answered.
-	var data = _resolve_data(host)
-	if data is Object:
-		var comp = data.get_component(component)
-		if comp != null:
-			var world_pos: Vector2 = comp.get_pin_world_position(pin)
-			result["position"] = [_mm(world_pos.x), _mm(world_pos.y)]
-
+	# `position` (docket 019fd0ab4c65) is NOT stamped here any more. It arrives
+	# with the rest of the pad row from host.pin_info, as {x_mm, y_mm} — the
+	# shape minerva_pcb_get_selection and minerva_pcb_free_pins also use (DCR
+	# 01a0410c62). This surface used to overwrite it with a bare [x, y] pair
+	# computed from the same get_pin_world_position call, which meant one reply
+	# family spelled one coordinate two ways; the row is the one spelling.
 	return _ok(result)
 
 
@@ -715,6 +720,26 @@ static func _with_snap_disclosure(reply: Dictionary, requested_x: float, request
 	return reply
 
 
+## Stamp a placement reply with WHERE EVERY PAD LANDED (HITL 2026-08-26, DCR
+## 01a0410c62's pad row). A move or a rotate answers "the component is at x,y,
+## rotation 90" and an agent then has to work out for itself which way pin 1
+## went — twice in one session an agent guessed the rotation convention
+## backwards and routed to the wrong end of a part. The pads are right here in
+## the model at the moment of the reply, so the second round trip through
+## pin_info was pure ceremony. Same row shape get_selection and free_pins use.
+##
+## Only stamped onto a SUCCESS: a refusal moved nothing, and rows on it would
+## read as "here is where it went".
+static func _with_pad_rows(data, reply: Dictionary, component_id: String) -> Dictionary:
+	if not bool(reply.get("success", false)) or data == null:
+		return reply
+	var comp = data.get_component(component_id)
+	if comp == null:
+		return reply
+	reply["pads"] = _PcbPadRowScript.rows_for_component(data, comp)
+	return reply
+
+
 static func _move_component(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -746,13 +771,15 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 		# Work item 019fd5fe2724: assembly re-check on every mutating exit (the
 		# helper no-ops on a locked-group refusal — nothing moved).
 		return await _with_assembly_after_placement(host, data,
-			_with_dangling_copper(data, group_reply, pre_pins))
+			_with_pad_rows(data, _with_dangling_copper(data, group_reply, pre_pins),
+				component_id))
 	data.move_component(component_id, new_pos)
 	data.save_to_history("Move " + component_id)
-	return await _with_assembly_after_placement(host, data, _with_dangling_copper(data,
-		_with_snap_disclosure(_ok({"component_id": component_id,
-			"x": _mm(new_pos.x), "y": _mm(new_pos.y)}),
-			asked_x, asked_y, new_pos), pre_pins))
+	return await _with_assembly_after_placement(host, data, _with_pad_rows(data,
+		_with_dangling_copper(data,
+			_with_snap_disclosure(_ok({"component_id": component_id,
+				"x": _mm(new_pos.x), "y": _mm(new_pos.y)}),
+				asked_x, asked_y, new_pos), pre_pins), component_id))
 
 
 ## Shared group-move half of move_component / move_relative.
@@ -843,11 +870,13 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 				reply[key] = group_reply[key]
 			# Work item 019fd5fe2724: mutating exit — see _add_component's stamp.
 			return await _with_assembly_after_placement(host, data,
-				_with_dangling_copper(data, _ok(reply), pre_pins))
+				_with_pad_rows(data, _with_dangling_copper(data, _ok(reply), pre_pins),
+					component_id))
 		data.move_component(component_id, landed)
 		data.save_to_history("Move " + component_id)
 		return await _with_assembly_after_placement(host, data,
-			_with_dangling_copper(data, _ok(reply), pre_pins))
+			_with_pad_rows(data, _with_dangling_copper(data, _ok(reply), pre_pins),
+				component_id))
 
 	# Non-mutating exit (component unknown to the model — interpretation only):
 	# nothing moved, so no cache invalidation and no assembly re-check.
@@ -889,18 +918,21 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 		var turned: Array = data.rotate_group(component_id, new_rotation - comp.rotation)
 		data.end_batch("Rotate group (%d)" % turned.size())
 		# Work item 019fd5fe2724: mutating exit — see _add_component's stamp.
-		return await _with_assembly_after_placement(host, data, _with_dangling_copper(data, _ok({
-			"component_id": component_id,
-			"rotation": comp.rotation,
-			"group_id": group_id,
-			"rotated_components": turned,
-			"rotated_count": turned.size(),
-		}), pre_pins))
+		return await _with_assembly_after_placement(host, data, _with_pad_rows(data,
+			_with_dangling_copper(data, _ok({
+				"component_id": component_id,
+				"rotation": comp.rotation,
+				"group_id": group_id,
+				"rotated_components": turned,
+				"rotated_count": turned.size(),
+			}), pre_pins), component_id))
 
 	data.rotate_component(component_id, new_rotation)
 	data.save_to_history("Rotate " + component_id)
-	return await _with_assembly_after_placement(host, data, _with_dangling_copper(data,
-		_ok({"component_id": component_id, "rotation": new_rotation}), pre_pins))
+	return await _with_assembly_after_placement(host, data, _with_pad_rows(data,
+		_with_dangling_copper(data,
+			_ok({"component_id": component_id, "rotation": new_rotation}), pre_pins),
+		component_id))
 
 
 static func _delete_component(host, args: Dictionary) -> Dictionary:
@@ -970,6 +1002,142 @@ static func _disconnect_net(host, args: Dictionary) -> Dictionary:
 		result["success"] = false
 		return result
 	return _ok(result)
+
+
+## What is AVAILABLE on a part: its pins on no net, as pad rows (DCR
+## 01a0410c62). A VERB rather than a flag on minerva_pcb_pin_info, deliberately
+## — pin_info answers about ONE named pin and an agent that already knows the
+## pin does not need this; "what is free over there" is the question asked when
+## you do NOT know the pin, and a verb with its own name is findable in the tool
+## list where an optional argument on somebody else's verb is not.
+##
+## `side` filters to one side/COLUMN of the part ("free pins on the west column
+## of U1S" is a read, not a coordinate scan). `exclude_roles` drops pins the
+## board's own pin table flags — the owner's live filter is
+## ["strapping","uart_console","onboard_led"]. Roles come from the BOARD (a
+## pin's `roles` key, preserved verbatim through the canonical document), never
+## from an agent's memory of a devkit; a board that declares none returns [].
+static func _free_pins(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var component_id: String = str(args.get("component_id", "")).strip_edges()
+	if component_id.is_empty():
+		return _err("component_id is required")
+	var comp = data.get_component(component_id)
+	if comp == null:
+		return _err("Component not found: %s" % component_id)
+	var side: String = str(args.get("side", "")).strip_edges().to_lower()
+	if not side.is_empty() and not (side in ["north", "east", "south", "west"]):
+		return _err("side must be one of: north, east, south, west")
+	var exclude: Array = _array_or_empty(args.get("exclude_roles"))
+	var rows: Array = _PcbPadRowScript.free_pins(data, comp, side, exclude)
+	var reply: Dictionary = {
+		"component_id": component_id,
+		"free_count": rows.size(),
+		"free_pins": rows,
+		"pin_count": comp.pins.size(),
+	}
+	if not side.is_empty():
+		reply["side"] = side
+	if not exclude.is_empty():
+		reply["excluded_roles"] = exclude
+	if rows.is_empty():
+		reply["note"] = "every pin of %s that matches the filter is already on a net" % component_id
+	return _ok(reply)
+
+
+## MOVE one pin's net onto another pin, ONE undo step (DCR 01a0410c62 — the
+## verb twin of the pad selection's "Move net to…"). The source pin comes off
+## the net, the destination goes on it, and a destination that was on another
+## net is taken off it and named under `displaced`.
+static func _move_net(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var from_ref: String = str(args.get("from", "")).strip_edges()
+	var to_ref: String = str(args.get("to", "")).strip_edges()
+	if from_ref.is_empty() or to_ref.is_empty():
+		return _err("from and to are required, each a \"Component.Pin\" ref")
+	var result: Dictionary = _PcbNetMembershipScript.move_net(data, from_ref, to_ref)
+	if result.has("error"):
+		result["success"] = false
+		return result
+	result["pads"] = _PcbPadRowScript.rows_for_refs(data, [from_ref, to_ref])
+	_refresh_pad_selection(host)
+	return _ok(result)
+
+
+## EXCHANGE the nets of two pins, ONE undo step — the BTN3/BTN4 swap the owner
+## does by hand today, and the verb twin of the selection's "Swap nets".
+static func _swap_nets(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var pins: Array = _array_or_empty(args.get("pins"))
+	if pins.size() != 2:
+		return _err("pins must name exactly two pads, e.g. [\"U1S.8\", \"U1S.9\"]")
+	var ref_a: String = str(pins[0]).strip_edges()
+	var ref_b: String = str(pins[1]).strip_edges()
+	var result: Dictionary = _PcbNetMembershipScript.swap_nets(data, ref_a, ref_b)
+	if result.has("error"):
+		result["success"] = false
+		return result
+	result["pads"] = _PcbPadRowScript.rows_for_refs(data, [ref_a, ref_b])
+	_refresh_pad_selection(host)
+	return _ok(result)
+
+
+## THE MIRROR of minerva_pcb_get_selection for a WHOLE selection (DCR
+## 01a0410c62): the agent sets what is selected, so "these are the pins I mean"
+## is something it can SHOW rather than describe. minerva_pcb_point is the
+## single-entity form and stays exactly as it was; this one takes a list and
+## adds pads, addressed by their "REF.PIN" row address.
+##
+## Returns the resulting selection through _get_selection itself, so what this
+## verb says it selected and what the deictic read reports cannot diverge.
+static func _select(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("select_entities"):
+		return _err("no live panel — selection is a canvas concept")
+	var entries: Array = []
+	for raw in _array_or_empty(args.get("pads")):
+		entries.append({"kind": "pad", "id": str(raw)})
+	for raw in _array_or_empty(args.get("entities")):
+		if raw is Dictionary:
+			entries.append({"kind": str((raw as Dictionary).get("kind", "")),
+				"id": str((raw as Dictionary).get("id", ""))})
+	if entries.is_empty():
+		return _err("pads (\"Component.Pin\" refs) or entities ([{kind, id}]) is required")
+	var res: Dictionary = panel.select_entities(entries)
+	if not bool(res.get("ok", false)):
+		return {"success": false, "error": str(res.get("error", "select_failed")),
+			"note": str(res.get("message", ""))}
+	var reply: Dictionary = {"selected": int(res.get("selected", 0))}
+	if res.has("not_found"):
+		reply["not_found"] = res["not_found"]
+	var read: Dictionary = _get_selection(host, {})
+	if read.has("selection"):
+		reply["selection"] = read["selection"]
+	reply["note"] = "the canvas selection is now this — the human sees it lit exactly as their own click would show it"
+	return _ok(reply)
+
+
+## An argument that must be a list, or an empty one. The typed-Dictionary
+## guard's twin (see _dict_or_empty): an agent that sends a string where an
+## array belongs gets a named refusal from the caller's own emptiness check
+## rather than a cast to null and a crash three lines later.
+static func _array_or_empty(value) -> Array:
+	return value as Array if value is Array else []
+
+
+## Nudge the panel's pad-selection sidebar after an MCP net edit. A net move
+## changes what the section says without changing WHAT is selected, so nothing
+## on the selection_changed feed would repaint it. No-op headless.
+static func _refresh_pad_selection(host) -> void:
+	var panel = _get_panel(host)
+	if panel != null and panel.has_method("refresh_pin_selection_section"):
+		panel.refresh_pin_selection_section()
 
 
 static func _spatial_query(host, args: Dictionary) -> Dictionary:
@@ -7261,6 +7429,18 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 		entries.append({"kind": "zone", "id": str(zone_id)})
 	for cutout_id in state.get("cutouts", []):
 		entries.append({"kind": "cutout", "id": str(cutout_id)})
+
+	# PADS (DCR 01a0410c62) — the pin-level half of the deixis. The owner's
+	# sentence is "see these pins? move them to the other side of U1S": the
+	# human picks pads with the Pin Select tool, and THIS is where the agent
+	# reads which ones. One shape, defined once in pcb_pad_row and reused by
+	# pin_info, the free-pins read and the move/rotate replies, so a pad
+	# described by any of them is described the same way. `id` is the row's own
+	# "REF.PIN" address — a pad has no minted id of its own.
+	for pad_row in _PcbPadRowScript.rows_for_refs(data, state.get("pads", [])):
+		var pad_entry: Dictionary = pad_row
+		pad_entry["id"] = str(pad_entry.get("ref", ""))
+		entries.append(pad_entry)
 
 	for cid in state.get("candidates", []):
 		if workspace == null:

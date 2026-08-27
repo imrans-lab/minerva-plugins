@@ -35,7 +35,10 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 ## T1.5: the ONE canonical layer contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
-const _PcbPadApproach := preload("model/pcb_pad_approach.gd")
+## THE pad row (DCR 01a0410c62) — the shape pin_info answers in, shared with
+## minerva_pcb_get_selection and minerva_pcb_free_pins. It is also what reaches
+## pcb_pad_approach now, so this file no longer preloads that module directly.
+const _PcbPadRow := preload("model/pcb_pad_row.gd")
 ## The plugin-wide copper-contact predicate — what "this trace touches this
 ## pad" means, shared with the trace verbs and the connectivity DRC.
 const _PcbCopperContact := preload("model/pcb_copper_contact.gd")
@@ -996,10 +999,11 @@ func pad_at(doc_pos: Vector2, radius_mm: float = 5.0,
 
 
 ## PUBLIC, side-effect-free pin-detail lookup (WC-1 pin inspector, contract §2).
-## {} on an unknown component/pin, else {ref: "Component.Pin", pin_name: String
-## (footprint geometry name via pcb_component.get_pin_name, "" if none),
-## net: String ("" if unconnected), net_members: [other "Component.Pin" refs on
-## the same net], trace_ids: [String], trace_count: int}.
+## {} on an unknown component/pin, else THE PAD ROW (pcb_pad_row: kind, ref,
+## component, pin, net, position, layer, side, approach_sides, roles) plus the
+## inspector's own extras: pin_name (footprint geometry name via
+## pcb_component.get_pin_name, "" if none), net_members (other "Component.Pin"
+## refs on the same net), trace_ids, trace_count.
 ##
 ## trace_ids: traces on the pin's net whose COPPER reaches the pad, through the
 ## shared contact predicate (_PcbCopperContact) — the trace's swept width against
@@ -1042,26 +1046,24 @@ func pin_info(component: String, pin: String) -> Dictionary:
 			if _PcbCopperContact.copper_joins_pin(run, comp, pin, stack):
 				trace_ids.append(str(trace.id))
 
-	# UX4 station 10 (work item 019fd0ab4c65): the pad's WORLD position — an
-	# agent asking "what's on this pin" almost always needs where it is next
-	# (routing a hint to it, pointing at it, checking a witness against it),
-	# and re-deriving it needed a second tool call through get_pin_position.
-	var world_pos: Vector2 = comp.get_pin_world_position(pin)
-	# The sides a board-rule-width trace can reach this pad from, clear of the
-	# component's other pads — what an agent otherwise derives by hand from
-	# pitch, pad size, width and clearance.
-	var rules: Array = _PcbPadApproach.board_rules(data)
-	return {
-		"ref": "%s.%s" % [component, pin],
-		"pin_name": pin_name,
-		"net": net,
-		"net_members": net_members,
-		"trace_ids": trace_ids,
-		"trace_count": trace_ids.size(),
-		"position": {"x_mm": _mm(world_pos.x), "y_mm": _mm(world_pos.y)},
-		"approach_sides": Array(_PcbPadApproach.pin_approach_sides(comp, pin,
-			float(rules[0]), float(rules[1]))),
-	}
+	# THE PAD ROW (DCR 01a0410c62) is the base of this answer, not a variant of
+	# it: ref / net / position / layer / side / approach_sides / roles come from
+	# pcb_pad_row, the same shape minerva_pcb_get_selection returns for a
+	# selected pad and minerva_pcb_free_pins returns for an available one. What
+	# this reply adds on top is what only the INSPECTOR knows — the pin's
+	# footprint name, who else is on its net, and which copper actually touches
+	# its land.
+	#
+	# (UX4 station 10, work item 019fd0ab4c65 put `position` here: an agent
+	# asking "what's on this pin" almost always needs where it is next, and
+	# re-deriving it cost a second call through get_pin_position. The row keeps
+	# that, at the same quantum.)
+	var info: Dictionary = _PcbPadRow.row(data, comp, pin)
+	info["pin_name"] = pin_name
+	info["net_members"] = net_members
+	info["trace_ids"] = trace_ids
+	info["trace_count"] = trace_ids.size()
+	return info
 
 
 ## Native-parity display rule (contract §2): footprint geometry pin_name wins

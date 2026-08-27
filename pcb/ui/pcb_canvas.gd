@@ -45,6 +45,11 @@ const PCBDataScript := preload("model/pcb_data.gd")
 const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbBusLabels := preload("model/pcb_bus_labels.gd")
 const PcbPadApproach := preload("model/pcb_pad_approach.gd")
+## The Pin Select tool's rules (DCR 01a0410c62) — what a click picks, what it
+## does to the pad selection, and where the selected copper is. Its plumbing
+## (events, paint, storage) stays here; the rules do not.
+const PcbPinSelectTool := preload("pcb_pin_select_tool.gd")
+const PcbPadRow := preload("model/pcb_pad_row.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 ## The MCP tool surface (panel_tools.gd) is preloaded HERE too, for the bus
 ## tool only: bus_plan()/bus_commit_plan() (its static funcs) are the ONE
@@ -339,6 +344,13 @@ const KIND_CANDIDATE := "candidate"
 ##     store's staged_N key — render/selection/menu all speak canonical ids
 ##     and resolve the store entry via staged_id_for_entity.
 const KIND_STAGED := "staged"
+## DCR 01a0410c62 — a PAD, selected by the Pin Select tool. Its id is the pad
+## ROW's address, "REF.PIN", not a minted entity id: a pad has no identity of
+## its own in the board model, it is a pin of a component, and every surface
+## that talks about one (pin_info, get_selection, the free-pins read, the
+## net-move verbs) already addresses it that way. Appended at the END, same
+## append-only rule as the kinds above.
+const KIND_PAD := "pad"
 
 var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
@@ -355,6 +367,11 @@ var selected_candidate_ids: Array[String] = []
 ## Selected staged entities (UX4 S4), by CANONICAL payload id. Same list-backed
 ## shape as every kind above so the selection choke points work unchanged.
 var selected_staged_ids: Array[String] = []
+## Selected pads, by "REF.PIN" (DCR 01a0410c62). List-backed like every kind
+## above, so _selection_of / _add_to_selection / selection_snapshot /
+## _clear_selection all work on pads without a special case. MULTI by design:
+## the owner's sentence is "see these pins?", which is two of them.
+var selected_pad_refs: Array[String] = []
 
 ## The staged review verbs, emitted by the context-menu seam
 ## (_add_staged_menu_seam) with the CANONICAL entity id. The panel connects
@@ -1044,6 +1061,9 @@ var selection_border_color: Color = Color(0.4, 0.6, 0.9, 1.0)
 ## Pad colors (copper/solder appearance)
 var pad_copper_color: Color = Color(0.85, 0.65, 0.3, 1.0)  # Copper/gold for THT
 var pad_smd_color: Color = Color(0.75, 0.55, 0.25, 1.0)    # SMD pads
+## Pin Select halo (DCR 01a0410c62) — the same cyan-white a selected trace does
+## NOT use, so a lit pad reads as a pad and not as copper the Select tool grabbed.
+var pad_selected_color: Color = Color(0.35, 0.95, 1.0, 1.0)
 var drill_hole_color: Color = Color(0.08, 0.08, 0.08, 1.0) # Drill holes (match background)
 # Mask-opening overlay fills (WYSIWYG G4) — KiCad-adjacent hues: front magenta,
 # back teal, translucent so the copper underneath stays legible.
@@ -1969,6 +1989,11 @@ func _draw() -> void:
 	# markers are review chrome — late, over everything they annotate.
 	_draw_propose_arm_chrome()
 	_draw_disconnect_markers()
+
+	# The pad halo is drawn whatever the armed tool is — a pad selection made
+	# with Pin Select stays visible while the human switches to Trace to route
+	# from it, exactly as a component selection survives a tool change.
+	_draw_selected_pads()
 
 	if tool_mode == ToolMode.INSPECT_PIN and not _inspect_hover_label.is_empty():
 		_draw_inspect_hover_label()
@@ -3336,18 +3361,24 @@ func _draw_locked_hatch(screen_poly: PackedVector2Array) -> void:
 		d += spacing
 
 
+## The geometry the pad renderer draws ONE land at — a named seam over
+## pcb_component.get_pad_world_transform so "the rendered rectangle" is a thing
+## a test can hold, and so the renderer cannot quietly grow a second opinion
+## about where copper is (bug 01a0380585b4). {position, size, rotation} in world
+## mm / board CW degrees; the caller negates the angle for screen space.
+func pad_draw_geometry(comp, pad: Dictionary) -> Dictionary:
+	return comp.get_pad_world_transform(pad)
+
+
 ## Draw pads with accurate geometry from KiCAD footprint.
 ##
 ## `tht_only` renders ONLY the through-hole lands, for a component whose body is
 ## on another copper layer than the one being viewed (see _component_visibility).
 ## Defaults false, so the full-render callers are unchanged.
-func _draw_component_pads(comp, xform: Transform2D, tht_only: bool = false) -> void:
-	var pad_rot: float = -comp.rotation
-
+func _draw_component_pads(comp, _xform: Transform2D, tht_only: bool = false) -> void:
 	for pad in comp.pads:
 		var pad_type: String = pad.get("type", "smd")
 		var pad_shape: String = pad.get("shape", "rect")
-		var local_pos: Vector2 = pad.get("position", Vector2.ZERO)
 		var pad_size: Vector2 = pad.get("size", Vector2(1, 1))
 
 		var is_tht := pad_type in THT_PAD_TYPES
@@ -3357,9 +3388,15 @@ func _draw_component_pads(comp, xform: Transform2D, tht_only: bool = false) -> v
 		if tht_only and not is_tht:
 			continue
 
-		var world_pos: Vector2 = comp.position + (xform * local_pos)
-		var screen_pos := world_to_screen(world_pos)
-		var screen_size := pad_size * zoom
+		# ONE land-to-world transform, shared with the copper hit test (bug
+		# 01a0380585b4). This used to draw every land at -comp.rotation and
+		# ignore the land's OWN rotation, while pin_copper_distance honoured it
+		# — so for a turned land the copper you could see was not the copper you
+		# could click, and now that pads are clickable that is user-visible.
+		var world: Dictionary = pad_draw_geometry(comp, pad)
+		var screen_pos := world_to_screen(world["position"] as Vector2)
+		var screen_size := (world["size"] as Vector2) * zoom
+		var pad_rot: float = -float(world["rotation"])
 
 		var draw_color := pad_copper_color
 		if pad_type == "smd":
@@ -3779,11 +3816,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_corridor_click(world_pos, event.double_click)
 				return
 
-			# Pin inspector (WC-1): click selects the nearest pad within radius,
-			# or clears when empty space is clicked. Owns the click outright —
-			# no select/drag/box-select fallthrough while the mode is active.
+			# Pin Select (WC-1's inspector, DCR 01a0410c62): click selects the
+			# nearest pad within radius, shift-click adds/removes, an empty
+			# click clears. Owns the click outright — no select/drag/box-select
+			# fallthrough while the mode is active, which is also why a
+			# shift-click here can never be read as shift-box-select.
 			if tool_mode == ToolMode.INSPECT_PIN:
-				_handle_inspect_pin_click(world_pos)
+				_handle_inspect_pin_click(world_pos, event.shift_pressed)
 				return
 
 			# Zone tools (unit 4): each left-click places a vertex; a double-click
@@ -4507,8 +4546,10 @@ func _handle_key_input(event: InputEventKey) -> void:
 			_clear_selection_all()
 			queue_redraw()
 		KEY_P:
-			if event.shift_pressed:
-				_toggle_inspect_pin_mode()
+			# P arms Pin Select (DCR 01a0410c62); Shift+P is kept as the WC-1
+			# inspector's original binding and does the same thing. Bare P was
+			# free — the only KEY_P branch on this canvas was the shift one.
+			_toggle_inspect_pin_mode()
 		KEY_R:
 			# Keyboard twin of the corner rotate handles (docket 019fcb93d367).
 			# Shift+R = counter-clockwise. Kept as an EXTRA, never the primary
@@ -4595,6 +4636,8 @@ func _selection_of(kind: String) -> Array[String]:
 			return selected_candidate_ids
 		KIND_STAGED:
 			return selected_staged_ids
+		KIND_PAD:
+			return selected_pad_refs
 	var empty: Array[String] = []
 	return empty
 
@@ -4617,6 +4660,7 @@ func selection_snapshot() -> Dictionary:
 		"cutouts": selected_cutout_ids.duplicate(),
 		"candidates": selected_candidate_ids.duplicate(),
 		"staged": selected_staged_ids.duplicate(),
+		"pads": selected_pad_refs.duplicate(),
 	}
 
 
@@ -4796,6 +4840,12 @@ func _clear_selection(announce := true) -> void:
 	# above: "clear the selection" means everything this canvas is SHOWING as
 	# selected (staged are likewise excluded from selection_count()).
 	selected_staged_ids.clear()
+	# Pads clear with everything else, for the candidate rationale above: one
+	# Select, one Escape. The Pin Info section follows through pin_selected,
+	# emitted by the Pin Select tool's own clear path.
+	if not selected_pad_refs.is_empty():
+		selected_pad_refs.clear()
+		pin_selected.emit({})
 	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
 	# there is nothing for it to belong to (cold-review F1 — the deselect click
@@ -7437,12 +7487,80 @@ func _exit_inspect_pin_mode() -> void:
 	set_tool_mode(ToolMode.SELECT)
 
 
-## Click handling for INSPECT_PIN: nearest pad (host.pad_at, default 5mm radius
-## per contract §2) → host.pin_info → pin_selected; a miss clears (empty dict).
-func _handle_inspect_pin_click(world_pos: Vector2) -> void:
-	var info := _lookup_pin_info(world_pos)
-	pin_selected.emit(info)
+## Click handling for INSPECT_PIN — the Pin Select tool (DCR 01a0410c62).
+##
+## The pick is unchanged (nearest pad's copper through host.pad_at, contract
+## §2's 5mm radius) and pin_selected still carries the pin_info dict the Pin
+## Info section reads, so the inspector's contract holds verbatim. What is new
+## is that the pick is ALSO a selection: PcbPinSelectTool owns the algebra
+## (click replaces, shift-click toggles, shift-click on empty space keeps a
+## multi-pad selection the human built), the ids live in selected_pad_refs like
+## every other kind, and selection_changed fires ONCE so get_selection, the
+## sidebar and the status line all read the same pick.
+func _handle_inspect_pin_click(world_pos: Vector2, additive: bool = false) -> void:
+	var ref := PcbPinSelectTool.pick(_pin_inspector_host, world_pos,
+		_inspectable_component_filter())
+	var next: Array = PcbPinSelectTool.apply_click(selected_pad_refs, ref, additive)
+	var changed := next != Array(selected_pad_refs)
+	selected_pad_refs.assign(next)
+	# The Pin Info section shows ONE pin: the pad this click landed on, or
+	# nothing when the click cleared the selection. A shift-click that removed a
+	# pad leaves the section on whatever is still selected last.
+	pin_selected.emit(_pin_info_for_ref(ref if selected_pad_refs.has(ref) \
+		else (str(selected_pad_refs[-1]) if not selected_pad_refs.is_empty() else "")))
+	if changed:
+		selection_changed.emit()
 	queue_redraw()
+
+
+## host.pin_info for a "REF.PIN" address, {} for "" or an unresolvable ref.
+func _pin_info_for_ref(ref: String) -> Dictionary:
+	if ref.is_empty() or _pin_inspector_host == null \
+			or not _pin_inspector_host.has_method("pin_info"):
+		return {}
+	var parts: Array = PcbPadRow.parse_ref(ref)
+	if parts.is_empty():
+		return {}
+	return _pin_inspector_host.pin_info(str(parts[0]), str(parts[1]))
+
+
+## Set the pad selection outright — the agent's half of the deixis
+## (minerva_pcb_select). Goes through the SAME state a click writes and emits
+## the same one selection_changed, so the human sees the agent's pads lit
+## exactly as their own click would show them. Returns the refs that landed.
+func set_selected_pads(refs: Array) -> Array:
+	var landed: Array[String] = []
+	for raw in refs:
+		var ref := str(raw)
+		if not ref.is_empty() and not landed.has(ref):
+			landed.append(ref)
+	selected_pad_refs.assign(landed)
+	pin_selected.emit(_pin_info_for_ref(str(landed[-1]) if not landed.is_empty() else ""))
+	queue_redraw()
+	return Array(landed)
+
+
+## Light every selected pad's copper, land by land, through the SAME transform
+## the pad renderer draws it at (PcbPinSelectTool.land_transforms →
+## pcb_component.get_pad_world_transform) — a halo that could sit anywhere else
+## would re-open exactly the rendered-vs-hit-test split bug 01a0380585b4 closed.
+## A pin with no land geometry gets a ring at its position instead.
+func _draw_selected_pads() -> void:
+	if data == null or selected_pad_refs.is_empty():
+		return
+	for ref in selected_pad_refs:
+		for raw in PcbPinSelectTool.land_transforms(data, str(ref)):
+			var world: Dictionary = raw
+			var center := world_to_screen(world["position"] as Vector2)
+			var land_size := (world["size"] as Vector2) * zoom
+			if land_size.x <= 0.0 or land_size.y <= 0.0:
+				draw_arc(center, 6.0, 0, TAU, 20, pad_selected_color, 2.0)
+				continue
+			var corners := _get_rotated_rect_points(center,
+				land_size + Vector2(4.0, 4.0), -float(world["rotation"]))
+			var outline := corners.duplicate()
+			outline.append(corners[0])
+			draw_polyline(outline, pad_selected_color, 2.0)
 
 
 ## Hover feedback: nearest-pad label at the cursor (native L1444 parity).
@@ -7452,27 +7570,12 @@ func _update_inspect_hover(world_pos: Vector2, screen_pos: Vector2) -> void:
 	var label := ""
 	if _pin_inspector_host != null and _pin_inspector_host.has_method("pad_at"):
 		var hit: Dictionary = _pin_inspector_host.pad_at(
-			world_pos, 5.0, _inspectable_component_filter())
+			world_pos, PcbPinSelectTool.PICK_RADIUS_MM, _inspectable_component_filter())
 		if not hit.is_empty():
 			label = "%s.%s" % [str(hit.get("component", "")), str(hit.get("pin", ""))]
 	if label != _inspect_hover_label:
 		_inspect_hover_label = label
 		queue_redraw()
-
-
-## host.pad_at → host.pin_info in one step; {} when the host is unbound, no pad
-## is within radius, or pin_info can't resolve the hit (defensive — pad_at and
-## pin_info are backed by the same live board model so this should not diverge).
-func _lookup_pin_info(world_pos: Vector2) -> Dictionary:
-	if _pin_inspector_host == null or not _pin_inspector_host.has_method("pad_at"):
-		return {}
-	var hit: Dictionary = _pin_inspector_host.pad_at(
-		world_pos, 5.0, _inspectable_component_filter())
-	if hit.is_empty():
-		return {}
-	if not _pin_inspector_host.has_method("pin_info"):
-		return {}
-	return _pin_inspector_host.pin_info(str(hit.get("component", "")), str(hit.get("pin", "")))
 
 
 ## Layer-view predicate for the pin inspector (bug 019fb59c1a89): a pad is

@@ -19,6 +19,7 @@ extends RefCounted
 ## Off-tree module — NO class_name, reached by relative preload.
 
 const _PcbUndoStepScript := preload("pcb_undo_step.gd")
+const _PcbPadRowScript := preload("pcb_pad_row.gd")
 
 
 ## Every net that currently lists this pin. Normally 0 or 1 entries — the plural
@@ -113,6 +114,109 @@ static func disconnect_pins(data, pins: Array, expected_net: String = "") -> Dic
 	if not not_connected.is_empty():
 		out["not_connected"] = not_connected
 	return out
+
+
+## MOVE one pin's net onto another pin, as ONE undo step — the "Move net to…"
+## act on a pad selection. The source pin comes off the net and the destination
+## pin goes on it; a destination that was on some OTHER net is taken off it
+## (connect_pin_to_net's own move rule) and that displacement is REPORTED,
+## because it is the one fact the caller cannot read back afterwards.
+##
+## Refusals mutate nothing and name themselves: same_pin, pin_not_found,
+## pin_has_no_net (there is no net to move).
+static func move_net(data, from_ref: String, to_ref: String) -> Dictionary:
+	if from_ref == to_ref:
+		return {"error": "same_pin", "note": "source and destination are the same pin"}
+	var from_pair := _ref_pair(data, from_ref)
+	if from_pair.is_empty():
+		return {"error": "pin_not_found", "pin": from_ref}
+	var to_pair := _ref_pair(data, to_ref)
+	if to_pair.is_empty():
+		return {"error": "pin_not_found", "pin": to_ref}
+
+	var holders := nets_holding(data, str(from_pair[0]), str(from_pair[1]))
+	if holders.is_empty():
+		return {"error": "pin_has_no_net", "pin": from_ref,
+			"note": "there is no net on %s to move — connect it first" % from_ref}
+	var net_name := str(holders[0])
+	var displaced: Array = []
+	for other in nets_holding(data, str(to_pair[0]), str(to_pair[1])):
+		if str(other) != net_name:
+			displaced.append({"pin": to_ref, "from": str(other)})
+
+	_PcbUndoStepScript.compose(data, "Move %s to %s" % [net_name, to_ref],
+		func() -> Variant:
+			for held in holders:
+				data.disconnect_pin_from_net(str(held), str(from_pair[0]), str(from_pair[1]))
+			data.connect_pin_to_net(net_name, str(to_pair[0]), str(to_pair[1]))
+			return null)
+
+	var out := {"net_name": net_name, "from": from_ref, "to": to_ref}
+	if not displaced.is_empty():
+		out["displaced"] = displaced
+	return out
+
+
+## EXCHANGE the nets of two pins, as ONE undo step — the BTN3/BTN4 swap the
+## owner does by hand today. A pin on no net is a legal side of the swap (the
+## other pin's net moves to it and it gives back nothing), but two netless pins
+## have nothing to exchange and are refused.
+##
+## Refusals mutate nothing and name themselves: same_pin, pin_not_found,
+## nothing_to_swap, already_same_net.
+static func swap_nets(data, ref_a: String, ref_b: String) -> Dictionary:
+	if ref_a == ref_b:
+		return {"error": "same_pin", "note": "a pin cannot swap nets with itself"}
+	var pair_a := _ref_pair(data, ref_a)
+	if pair_a.is_empty():
+		return {"error": "pin_not_found", "pin": ref_a}
+	var pair_b := _ref_pair(data, ref_b)
+	if pair_b.is_empty():
+		return {"error": "pin_not_found", "pin": ref_b}
+
+	var held_a := nets_holding(data, str(pair_a[0]), str(pair_a[1]))
+	var held_b := nets_holding(data, str(pair_b[0]), str(pair_b[1]))
+	if held_a.is_empty() and held_b.is_empty():
+		return {"error": "nothing_to_swap", "note":
+			"neither %s nor %s is on a net" % [ref_a, ref_b]}
+	var net_a := str(held_a[0]) if not held_a.is_empty() else ""
+	var net_b := str(held_b[0]) if not held_b.is_empty() else ""
+	if net_a == net_b:
+		return {"error": "already_same_net", "net_name": net_a,
+			"note": "both pins are already on %s — a swap would change nothing" % net_a}
+
+	_PcbUndoStepScript.compose(data, "Swap nets %s / %s" % [ref_a, ref_b],
+		func() -> Variant:
+			# Both memberships come off FIRST: connecting one pin before the
+			# other has let go would hand connect_pin_to_net a pin that is
+			# still on the net it is about to receive.
+			for held in held_a:
+				data.disconnect_pin_from_net(str(held), str(pair_a[0]), str(pair_a[1]))
+			for held in held_b:
+				data.disconnect_pin_from_net(str(held), str(pair_b[0]), str(pair_b[1]))
+			if not net_b.is_empty():
+				data.connect_pin_to_net(net_b, str(pair_a[0]), str(pair_a[1]))
+			if not net_a.is_empty():
+				data.connect_pin_to_net(net_a, str(pair_b[0]), str(pair_b[1]))
+			return null)
+
+	return {"swapped": [
+		{"pin": ref_a, "was": net_a, "now": net_b},
+		{"pin": ref_b, "was": net_b, "now": net_a},
+	]}
+
+
+## "REF.PIN" → [component_id, pin] when the board really carries that pin,
+## else []. The two verbs above address pins the way the pad row and the canvas
+## selection do, rather than by a second {component, pin} argument shape.
+static func _ref_pair(data, ref: String) -> Array:
+	var parts := _PcbPadRowScript.parse_ref(ref)
+	if parts.is_empty() or data == null:
+		return []
+	var comp = data.get_component(str(parts[0]))
+	if comp == null or not comp.pins.has(str(parts[1])):
+		return []
+	return [str(parts[0]), str(parts[1])]
 
 
 ## Pins a canonical board dict lists under more than one net, one sentence each,

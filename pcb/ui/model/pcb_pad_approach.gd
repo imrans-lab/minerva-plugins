@@ -61,12 +61,25 @@ static func _spans(lo: float, hi: float, c: float, half: float) -> bool:
 	return hi > c - half and lo < c + half
 
 
-## A land's world rectangle from the {position, size} pcb_component.
-## get_pad_world_transform hands back.
+## A land's axis-aligned world BOX from the {position, size, rotation}
+## pcb_component.get_pad_world_transform hands back: the box that contains the
+## land at its world angle. Judging a turned land by its box errs on the
+## blocking side, which is the side this module wants to err on.
+##
+## The angle is honoured HERE rather than by a width/height swap inside the
+## transform, so an arbitrary land angle (and a negative component angle, which
+## the old swap's `int(rotation) % 180 == 90` test missed) lands correctly.
 static func land_rect(world: Dictionary) -> Rect2:
 	var pos: Vector2 = world.get("position", Vector2.ZERO)
 	var size: Vector2 = world.get("size", Vector2.ZERO)
-	return Rect2(pos - size * 0.5, size)
+	var half: Vector2 = size * 0.5
+	var rot := deg_to_rad(-float(world.get("rotation", 0.0)))
+	if is_zero_approx(sin(rot)) and is_zero_approx(cos(rot) - 1.0):
+		return Rect2(pos - half, size)
+	var extent := Vector2(
+		absf(half.x * cos(rot)) + absf(half.y * sin(rot)),
+		absf(half.x * sin(rot)) + absf(half.y * cos(rot)))
+	return Rect2(pos - extent, extent * 2.0)
 
 
 ## approach_sides for pin `pin` of component `comp` at the board's `width` and
