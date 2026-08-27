@@ -101,7 +101,14 @@
 #      line with the actual worker error before falling back; read that, not
 #      the green assertion count.
 #
-# All three are covered by negative self-tests: scripts/test-gd-runner.sh
+#   4. STALE-BUNDLE PRE-FLIGHT (bug 01a039ac850c). Layer 3 catches the fallback
+#      but not its most common cause — the binary running a stale pcb_worker out
+#      of the INSTALLED runtime bundle instead of worker/. scripts/probe-worker-
+#      methods.py diffs the two method registries and fails the whole run, by
+#      method name, before the first suite launches. Execution only; skipped
+#      under the sandbox seam. See the block just above the allowlist below.
+#
+# The first three are covered by negative self-tests: scripts/test-gd-runner.sh
 # plants a compile error, a forced worker-false, an assertion-count drift, a
 # mid-suite SCRIPT ERROR, an invalid allowlist regex, a duplicate manifest
 # row and a duplicate attribute into sandbox suite dirs and asserts this
@@ -383,6 +390,32 @@ if [ "${PREFLIGHT_ONLY}" -eq 1 ]; then
   echo "      Execution needs Minerva's native GDExtensions built and is a"
   echo "      local gate — see pcb/docs/gd-tests.md."
   exit 0
+fi
+
+# STALE-RUNTIME-BUNDLE PRE-FLIGHT (bug 01a039ac850c). Execution only: it needs
+# the built pcb-plugin binary, which --preflight-only deliberately does without.
+#
+# The real-worker gate at the bottom of the loop can say a suite fell back to
+# canned results; it cannot say WHY. The usual why is invisible from here: the
+# binary resolves its interpreter to the INSTALLED PBS runtime bundle, whose
+# site-packages carries its own pcb_worker copy that shadows the repo worker/
+# tree the binary's log line names. A worker method added after that bundle was
+# built answers "unknown method", every real-worker suite calling it degrades to
+# canned, and a plugin reinstall does not refresh the bundle. Name the missing
+# methods here instead of after a full suite run.
+#
+# Skipped under RUN_GD_TESTS_SUITE_DIR (the scripts/test-gd-runner.sh sandbox
+# seam): those planted suites print canned Results lines and never reach a
+# worker, so a stale bundle is not a fact about them.
+if [ "${#manifest_real_worker[@]}" -gt 0 ] && [ -z "${RUN_GD_TESTS_SUITE_DIR:-}" ]; then
+  echo "Probing the live pcb worker's method set (stale-bundle check)..."
+  python3 "${SCRIPT_DIR}/probe-worker-methods.py"
+  probe_rc=$?
+  if [ "${probe_rc}" -ne 0 ]; then
+    echo "error: refusing to run ${#manifest_real_worker[@]} real-worker suite(s) against this worker (see above)" >&2
+    exit "${probe_rc}"
+  fi
+  echo
 fi
 
 # Known-harness-diagnostics allowlist (execution only — preflight executes
