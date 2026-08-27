@@ -542,9 +542,10 @@ static func copper_joins_pin(copper: Dictionary, comp, pin_name: String,
 ## does not declare answers with its two endpoints rather than guessing what
 ## lies between two names the stack cannot order.
 ##
-## Lives here, beside via_node, because two callers now need it: the ratsnest's
-## same-net copper sweep and the region read's layers_touched. Two copies is how
-## one of them ends up reporting a different barrel from the other.
+## Lives here, beside via_node, because several callers need it: the ratsnest's
+## same-net copper sweep, the region read's layers_touched, and the trace verbs'
+## free-end test. Two copies is how one of them ends up reporting a different
+## barrel from the other.
 static func via_span(via: Dictionary, stack: PackedStringArray) -> Array:
 	var from_layer := canon(via.get("from_layer", "top"))
 	var to_layer := canon(via.get("to_layer", "bottom"))

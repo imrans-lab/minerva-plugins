@@ -226,8 +226,10 @@ class _Pad:
     copper with a bottom-layer trace passing under it, which is ordinary
     routing -- yet a layer-blind reader called it a short (check A) AND, worse,
     let it JOIN two islands of a net (the pin-group census), which fails open.
-    ``through_hole`` stays as the separate, cheaper fact the emitters share;
-    ``occupies`` is what the layer-sensitive checks ask."""
+    ``through_hole`` stays as the separate, cheaper fact the emitters share.
+    THE LAYER SET IS THE CONTACT NODE'S: every check measures copper through
+    the shared predicate, which meets layers on the way, and ``occupies`` reads
+    that same node — so there is no second layer rule here to drift from it."""
 
     __slots__ = ("ref", "pin", "net", "x", "y", "through_hole", "layers",
                  "contact")
@@ -247,16 +249,17 @@ class _Pad:
         self.contact = contact
 
     def occupies(self, layer) -> bool:
-        """Whether this pad has copper on ``layer`` (a canonical id).
+        """Whether this pad's copper reaches ``layer`` (a canonical id).
 
-        PERMISSIVE when unknown: a through-hole spans the stack, and a pad
-        harvested from the inline-pin fallback declares no layers at all -- for
-        those, every layer answers True, which is exactly the pre-layer-aware
-        behaviour. Only a pad that positively declares its copper layers can
-        say no."""
-        if self.through_hole or not self.layers:
+        ONE DERIVATION: the contact node's own layer set, which is what every
+        check actually measures against. PERMISSIVE when that set is None — a
+        plated barrel spans the stack, and a pad from the inline-pin fallback
+        declares no layers at all. Only a pad that positively states its copper
+        layers can say no.
+        """
+        if self.contact is None or self.contact.layers is None:
             return True
-        return layer in self.layers
+        return layer in self.contact.layers
 
     @property
     def pt(self):
@@ -345,9 +348,9 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             # isfinite guard means it is simply not counted as a through-hole (never
             # NaN-classified), matching the emitters' post-validation behaviour.
             # UNPLATED holes are excluded here, not merely given no contact
-            # copper: `through_hole` is also what makes a pad permissive on
-            # every layer (`occupies`) and what lets check D call a layer
-            # hand-off resolved. A hole with no barrel does neither.
+            # copper: `through_hole` is also what makes a pad's copper span the
+            # stack and what lets check D call a layer hand-off resolved. A
+            # hole with no barrel does neither.
             through_hole = is_through_hole(pad) and not is_unplated_hole(pad)
             # PASTE-ONLY apertures are not pads. KiCad splits a QFN thermal pad
             # into several unnumbered `(pad "" smd ... (layers "F.Paste"))`
@@ -373,8 +376,15 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             # (a compiled-IR pad carries its combined angle and rides a
             # zero-rotation top-side component, so the fold is right there too).
             land_deg = transform.angle(_num(pad.rotation))
+            # A PLATED BARREL IS COPPER ON EVERY LAYER IT PASSES, so its
+            # contact node is layer-blind even when the footprint lists only
+            # F.Cu/B.Cu. That is what `occupies` has always said; stating it
+            # only there left an inner-layer run ending on the barrel reading
+            # as dangling. (An UNPLATED hole never reaches here as a
+            # through_hole — see above — and pad_node gives it no copper.)
             contact = copper_contact.pad_node(
-                pad, (px, py), land_deg, canon, unknown_land_radius)
+                pad, (px, py), land_deg,
+                None if through_hole else canon, unknown_land_radius)
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
                              px, py, through_hole, canon, contact))
     return pads
@@ -421,45 +431,66 @@ def _harvest_segments(board: dict) -> list[_Seg]:
 
 
 class _HarvestedVia(NamedTuple):
-    """A via's position plus its declared ``net`` (``None`` when unstated).
+    """A via's position, its declared ``net`` (``None`` when unstated), and its
+    barrel as a :class:`copper_contact.ContactNode`.
 
-    A NAMEDTUPLE so ``v[0]`` / ``v[1]`` still read as x / y: every distance
-    test here indexes rather than unpacks (:func:`_dist`), so the
-    position-only consumers — check C's dangling credit and check D's
-    layer-change resolution — keep working byte-for-byte unchanged while the
-    ownership rides along for the one consumer that needs it, the copper
-    CENSUS (see :func:`_net_pin_groups`, Codex review 1086 finding 5).
+    A NAMEDTUPLE so ``v[0]`` / ``v[1]`` still read as x / y for check D's
+    authored-coincidence test, which asks whether a via was PLACED at a
+    hand-off point rather than whether copper reaches it. Every credit that
+    asks about COPPER — the dangling endpoint credit and the census — reads
+    ``contact`` instead, so a barrel joins a run it sits under wherever along
+    that run it sits, not only near an endpoint.
     """
 
     x: float
     y: float
     net: object
+    contact: object
 
 
 def _harvest_vias(board: dict) -> list[_HarvestedVia]:
-    """Harvest via positions, each carrying its declared net (see below).
+    """Harvest each via as a position, its declared net, and its BARREL.
 
-    A canonical via may now carry first-class from_layer/to_layer (top/bottom
-    span; see pcb_data.gd / board-yaml.md), but every DRC use of a via
-    (check C's dangling-endpoint credit, check D's layer_change_no_via
-    resolution) only needs to know THAT a via exists at a point, not which
-    two layers it bridges — under the v1 THROUGH-VIA model (epoch GA-3) every
-    via joins ALL declared copper layers at its point, at ANY stack depth, so
-    the position-only credit both checks use is exactly right for N-layer
-    boards too. This function never mutates board["vias"], so
-    from_layer/to_layer are never dropped from the source data — they simply
-    aren't load-bearing for these two checks. If a partial (blind/buried)
-    via needs a layer-aware credit, extend this to a small (x, y, from, to)
-    tuple/dataclass and thread the span into checks C/D's distance tests.
+    A canonical via may carry first-class from_layer/to_layer (top/bottom span;
+    see pcb_data.gd / board-yaml.md), but under the v1 THROUGH-VIA model (epoch
+    GA-3) every via joins ALL declared copper layers at its point, at ANY stack
+    depth, so the barrel is built layer-blind. This function never mutates
+    board["vias"], so from_layer/to_layer are never dropped from the source
+    data — they simply aren't load-bearing yet. A partial (blind/buried) via
+    needs the span threaded into the node's layer set here, and nowhere else,
+    because the credits downstream already ask the contact predicate.
     """
     out: list[_HarvestedVia] = []
+    unknown_radius = _board_clearance(board)
     for via in _list(board.get("vias")):
         if not isinstance(via, dict):
             continue
         net = via.get("net")
-        out.append(_HarvestedVia(_num(via.get("x_mm")), _num(via.get("y_mm")),
-                                 net if isinstance(net, str) and net else None))
+        x, y = _num(via.get("x_mm")), _num(via.get("y_mm"))
+        out.append(_HarvestedVia(
+            x, y, net if isinstance(net, str) and net else None,
+            # LAYERS None: under the v1 through-via model a barrel is copper on
+            # every layer at its point, which is what makes a top run and a
+            # bottom run join through it.
+            copper_contact.via_node((x, y), 2.0 * _via_radius(via, unknown_radius),
+                                    None)))
     return out
+
+
+def _via_radius(via: dict, unknown_radius_mm: float) -> float:
+    """A via's outer copper radius: half its stated diameter, or — when it
+    states none — the board's coincidence tolerance.
+
+    THE SAME RULE :func:`copper_contact.pad_node` gives a land of unknown size,
+    for the same reason: a via that declares no diameter has no geometry to be
+    exact about, and the coincidence disc is exactly the credit the old
+    centre-distance test gave it. A via that DOES declare one is measured as
+    the copper it declares, even when that is smaller.
+    """
+    dia = _opt_num(via.get("diameter_mm"))
+    if dia is None or not math.isfinite(dia) or dia <= 0.0:
+        return unknown_radius_mm
+    return dia / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -485,10 +516,14 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
     the strength of the correct landing hid the short from both passes at once
     — the along-segment pass defers every pad near an end to this one.
 
-    MEASURE: centerline to pad CENTER, the module's standing basis. Pad EXTENT
-    is never read, so a wide land whose copper the centerline misses by more
-    than ``clr`` is the geometric DRC's finding rather than this one — this
-    check under-reports, it never invents copper it cannot see.
+    MEASURE: the run's swept copper to the pad's LAND, edge to edge, through
+    the shared contact predicate (:func:`copper_contact.node_gap`) — still at
+    ``clr``, so this stays a clearance-scale check and not a bare touch test.
+    Reading the LAND rather than the pad CENTRE is what makes the finding about
+    the copper that is actually shorted: a wide land is reported from its edge,
+    and a hole with NO copper (an unplated mounting hole, whose footprint still
+    writes ``*.Cu``) is reported never, because there is nothing there to short
+    to.
     """
     findings: list[dict] = []
     seen_at_ends: set = set()
@@ -500,11 +535,13 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
             # one of them told the reader to move the trace far enough to clear
             # that one — which the other still forbids. Ordered by distance so
             # the nearest still reads first.
+            end = seg.end_node(pt)
             foreign = [p for p in pads
-                       if p.net != seg.net and _dist(pt, p.pt) <= clr
-                       and p.occupies(seg.layer)]
-            for pad in sorted(foreign, key=lambda p: (_dist(pt, p.pt), str(p.ref),
-                                                      str(p.pin))):
+                       if p.net != seg.net and p.contact is not None
+                       and copper_contact.nodes_within(end, p.contact, clr)]
+            for pad in sorted(foreign,
+                              key=lambda p: (copper_contact.node_gap(end, p.contact),
+                                             str(p.ref), str(p.pin))):
                 key = (seg.net, _round_pt(pt), pad.ref, pad.pin)
                 if key in seen_at_ends:
                     continue
@@ -515,14 +552,18 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
                     "at": [round(pt[0], 3), round(pt[1], 3)],
                     "pad": {"ref": pad.ref, "pin": pad.pin, "net": pad.net},
                 })
+        swept = seg.node()
+        ends = (seg.end_node(seg.a), seg.end_node(seg.b))
         for pad in pads:
-            if pad.net == seg.net or not pad.occupies(seg.layer):
+            if pad.net == seg.net or pad.contact is None:
                 continue
-            if _dist(pad.pt, seg.a) <= clr or _dist(pad.pt, seg.b) <= clr:
+            if not copper_contact.nodes_within(swept, pad.contact, clr):
+                continue
+            if any(copper_contact.nodes_within(e, pad.contact, clr) for e in ends):
                 continue  # the endpoint pass owns this pad
+            # The report still names a point ON THE RUN, which is what a router
+            # has to move; the gap that decided the finding is land-to-copper.
             at = _closest_point_on_segment(pad.pt, seg.a, seg.b)
-            if _dist(pad.pt, at) > clr:
-                continue
             # One row per (segment, pad): the segment by its authored geometry
             # rather than by identity, so a duplicated trace cannot report the
             # same short twice. A pad on a shared polyline VERTEX is not
@@ -634,7 +675,11 @@ def _check_dangling(segs, pads, vias, clr, pours: dict) -> list[dict]:
                 if any(copper_contact.nodes_touch(end, p.contact)
                        for p in pads if p.contact is not None):
                     continue
-                if any(_dist(pt, v) <= clr for v in vias):
+                # A BARREL IS COPPER WITH EXTENT, so this asks the contact
+                # predicate, not a centre distance: an end that stops on the
+                # far side of a via's annulus is landed on it, and an end that
+                # merely comes within clearance of a bare point is not.
+                if any(copper_contact.nodes_touch(end, v.contact) for v in vias):
                     continue
                 # POUR CREDIT — SAME NET ONLY, unlike the pad credit above.
                 # The pad credit can be net-blind because a foreign pad touching
@@ -817,15 +862,15 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
         one island, not two). Cross-layer crossings earn NO such credit —
         different layers overlap freely and only connect at a via/TH pad;
       * a POUR REGION joins any pad or segment its copper reaches, through the
-        same contact predicate, and joins a via whose centre lies IN it — a
-        barrel of any real diameter contains its own centre, so that credit
-        invents no copper. Two regions of one net join where they overlap
-        (same-net pours may overlap; each fills independently);
-      * a via joins every same-net segment endpoint within ``clr`` of it —
-        the harvest carries each via's POSITION and its declared NET (see
-        _harvest_vias); the position is the "a via exists here" fact layer
-        bridging needs, and the net is what keeps a FOREIGN conductor from
-        joining this net's islands.
+        same contact predicate, and joins a via whose barrel reaches it. Two
+        regions of one net join where they overlap (same-net pours may overlap;
+        each fills independently);
+      * a via joins every same-net pad, segment and pour region its BARREL
+        reaches, through the same contact predicate — a barrel sitting on a
+        run's interior is copper on that run, which is how a probe pad is
+        strapped to a plane. The harvest carries each via's declared NET (see
+        _harvest_vias), and that is what keeps a FOREIGN conductor from joining
+        this net's islands.
 
     Segments on different layers joined at a COINCIDENT point are joined here
     without demanding the via: check D (layer_change_no_via) already reports
@@ -854,6 +899,9 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
 
     seg_node = n_pads
     region_node = n_pads + len(net_segs)
+    # Built ONCE: the pad/region sweeps below and the via loop at the end all
+    # measure against the same swept copper.
+    seg_nodes = [seg.node() for seg in net_segs]
     for ri, region in enumerate(net_regions):
         for pi, pad in enumerate(net_pads):
             if pad.contact is not None and copper_contact.nodes_touch(
@@ -863,7 +911,7 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
             if copper_contact.nodes_touch(region, net_regions[rj]):
                 union(region_node + ri, region_node + rj)
     for si, seg in enumerate(net_segs):
-        swept = seg.node()
+        swept = seg_nodes[si]
         for pi, pad in enumerate(net_pads):
             if pad.contact is None:
                 continue
@@ -913,15 +961,19 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
         # connection. Only an explicit mismatch is excluded.
         if v.net is not None and v.net != net:
             continue
-        touching = [seg_node + si for si, seg in enumerate(net_segs)
-                    if _dist(seg.a, v) <= clr or _dist(seg.b, v) <= clr]
+        # ONE PREDICATE for all three, against the barrel's real copper. The
+        # segment credit used to compare the via CENTRE with the two segment
+        # ENDPOINTS, so a via dropped anywhere along a run's interior — the
+        # ordinary way a test point is strapped to a plane — joined nothing,
+        # and its net reported an island that the copper does not have.
+        touching = [seg_node + si for si, node in enumerate(seg_nodes)
+                    if copper_contact.nodes_touch(v.contact, node)]
         touching += [pi for pi, pad in enumerate(net_pads)
-                     if _dist(pad.pt, v) <= clr]
-        if net_regions:
-            centre = copper_contact.via_node((v[0], v[1]), 0.0, None)
-            touching += [region_node + ri
-                         for ri, region in enumerate(net_regions)
-                         if copper_contact.nodes_touch(centre, region)]
+                     if pad.contact is not None
+                     and copper_contact.nodes_touch(v.contact, pad.contact)]
+        touching += [region_node + ri
+                     for ri, region in enumerate(net_regions)
+                     if copper_contact.nodes_touch(v.contact, region)]
         for node in touching[1:]:
             union(touching[0], node)
 

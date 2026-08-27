@@ -72,12 +72,23 @@ def _region_node(spec: dict):
         (Polygon(ring),), frozenset({layer}) if layer else None)
 
 
+def _trace_node(spec: dict):
+    """The vector's trace as the swept copper a whole run is: what a via or a
+    land is measured against when the RUN is the target rather than the probe."""
+    return copper_contact.segment_node(
+        (spec["a"][0], spec["a"][1]), (spec["b"][0], spec["b"][1]),
+        float(spec.get("width_mm", 0.0)), spec.get("layer"))
+
+
 def _target_node(case: dict):
-    """The copper the vector's run is measured AGAINST — a pad's land, or a
-    pour's filled region. Two builders, ONE predicate: that is the whole point
-    of the node shape, so these vectors exercise both through it."""
+    """The copper the vector's probe is measured AGAINST — a pad's land, a
+    pour's filled region, or a trace's swept run. Three builders, ONE predicate:
+    that is the whole point of the node shape, so these vectors exercise all of
+    them through it."""
     if "region" in case:
         return _region_node(case["region"])
+    if "trace" in case:
+        return _trace_node(case["trace"])
     return _pad_node(case["pad"])
 
 
@@ -85,6 +96,14 @@ def _copper_node(spec: dict):
     a = (spec["a"][0], spec["a"][1])
     width = float(spec.get("width_mm", 0.0))
     layer = spec.get("layer")
+    if spec["kind"] == "via":
+        # LAYERS FROM THE CASE, not None: a vector that states a span is the
+        # only way these vectors can ever pin a blind/buried barrel, and the
+        # through span every board writes today says the same thing either way.
+        layers = spec.get("layers")
+        return copper_contact.via_node(
+            a, float(spec.get("diameter_mm", 0.0)),
+            frozenset(layers) if layers else None)
     if spec["kind"] == "endpoint":
         return copper_contact.endpoint_node(a, width, layer)
     b = (spec["b"][0], spec["b"][1])

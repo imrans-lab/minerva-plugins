@@ -138,11 +138,23 @@ def node_gap(a: ContactNode, b: ContactNode) -> float:
     return best
 
 
+def nodes_within(a: ContactNode, b: ContactNode, limit_mm: float) -> bool:
+    """Is the edge-to-edge gap between these two pieces at most ``limit_mm``?
+
+    THE BOUNDED FORM of :func:`node_gap`, and the only place a cheap reject is
+    sound: knowing the answer is "further than the limit" is enough, so the
+    AABB test can throw the pair out before any shape arithmetic. A caller
+    asking a clearance-scale question (check A's foreign-land short) gets the
+    same measure and the same rejection as one asking about contact.
+    """
+    if not _aabb_within(a.aabb, b.aabb, limit_mm):
+        return False   # cheap reject, so the DRC sweeps stay cheap
+    return node_gap(a, b) <= limit_mm + EPS
+
+
 def nodes_touch(a: ContactNode, b: ContactNode) -> bool:
     """THE predicate: are these two pieces of copper one conductor?"""
-    if not _aabb_within(a.aabb, b.aabb, TOUCH_EPS_MM):
-        return False   # cheap reject, so the DRC sweeps stay cheap
-    return node_gap(a, b) <= TOUCH_EPS_MM + EPS
+    return nodes_within(a, b, TOUCH_EPS_MM)
 
 
 def _aabb_within(a: AABB, b: AABB, slack: float) -> bool:

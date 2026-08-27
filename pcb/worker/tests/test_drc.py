@@ -289,10 +289,14 @@ def test_a_correct_landing_does_not_hide_a_foreign_pad_at_the_same_end():
     assert f["net"] == "NA"
     assert f["at"] == [10.0, 5.0]
     assert f["pad"] == {"ref": "B1", "pin": "1", "net": "NB"}
-    # ...and moving the foreign land out of clearance clears it, so the check
-    # is a distance test and not a blanket "any pad near an end" report.
+    # ...and moving the foreign LAND out of clearance clears it, so the check
+    # is a distance test and not a blanket "any pad near an end" report. B1's
+    # land is 1mm tall, so its copper reaches 0.5mm below its centre and the
+    # 0.25mm run's end cap reaches 0.125mm above y=5: at y=6.0 they are 0.375mm
+    # apart, clear of the 0.2mm rule. (A centre-based measure called y=5.5
+    # clear, while the two pieces of copper were in fact overlapping.)
     board = yaml.safe_load(_OWN_AND_FOREIGN_AT_ONE_END)
-    board["components"][2]["y_mm"] = 5.5
+    board["components"][2]["y_mm"] = 6.0
     assert _run(board)["counts"]["wrong_net_pad"] == 0
 
 

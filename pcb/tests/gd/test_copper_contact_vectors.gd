@@ -125,12 +125,26 @@ func _region_node(spec: Dictionary) -> Dictionary:
 	return Contact.region_node(ring, spec.get("layer", "top"))
 
 
-## The copper the vector's run is measured AGAINST — a pad's land, or a pour's
-## filled region. Two builders, ONE predicate: that is the whole point of the
-## node shape, so these vectors exercise both through it.
+## The vector's trace as the swept copper a whole run is: what a via or a land
+## is measured against when the RUN is the target rather than the probe.
+func _trace_node(spec: Dictionary) -> Dictionary:
+	var a: Array = spec["a"]
+	var b: Array = spec["b"]
+	return Contact.trace_node(PackedVector2Array([
+			Vector2(float(a[0]), float(a[1])),
+			Vector2(float(b[0]), float(b[1]))]),
+		float(spec.get("width_mm", 0.0)), spec.get("layer", "top"))
+
+
+## The copper the vector's probe is measured AGAINST — a pad's land, a pour's
+## filled region, or a trace's swept run. Three builders, ONE predicate: that is
+## the whole point of the node shape, so these vectors exercise all of them
+## through it.
 func _target_node(case: Dictionary) -> Dictionary:
 	if case.has("region"):
 		return _region_node(case["region"])
+	if case.has("trace"):
+		return _trace_node(case["trace"])
 	return _pad_node(case["pad"])
 
 
@@ -139,6 +153,14 @@ func _copper_node(spec: Dictionary) -> Dictionary:
 	var start := Vector2(float(a[0]), float(a[1]))
 	var width := float(spec.get("width_mm", 0.0))
 	var layer = spec.get("layer", "top")
+	if str(spec["kind"]) == "via":
+		# LAYERS FROM THE CASE, not the whole stack: a vector that states a span
+		# is the only way these vectors can ever pin a blind/buried barrel, and
+		# the through span every board writes today says the same thing either
+		# way. The RADIUS is half the stated diameter — the panel stores a via's
+		# "size" as its outer diameter (PCBData.via_radius).
+		return Contact.via_node(start, float(spec.get("diameter_mm", 0.0)) * 0.5,
+			spec.get("layers", []))
 	if str(spec["kind"]) == "endpoint":
 		return Contact.endpoint_node(start, width, layer)
 	var b: Array = spec["b"]

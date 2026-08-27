@@ -1025,14 +1025,14 @@ static func is_joined_end_refusal(refusal: String) -> bool:
 const TRACE_END_START := "start"
 const TRACE_END_END := "end"
 
-## Coincidence epsilon (mm) for "this trace end touches a VIA or another trace".
-## Pads do not use it: their credit is the shared contact predicate, which
-## measures real copper and needs no slack around a centre.
+## Coincidence epsilon (mm) for "this trace end touches another trace".
+## Pads and VIAS do not use it: their credit is the shared contact predicate,
+## which measures real copper and needs no slack around a centre.
 const TRACE_END_JOIN_EPS_MM := 0.05
 
 
 ## Is the given end of a trace already JOINED to other copper: on a pad's land,
-## inside a via's disc, or on a same-net trace? An end that is joined is not a
+## on a via's annulus, or on a same-net trace? An end that is joined is not a
 ## loose end, so it is not something to continue drawing from.
 ##
 ## THE PAD CREDIT IS THE SHARED CONTACT PREDICATE (PcbCopperContact): this end's
@@ -1065,8 +1065,18 @@ func trace_end_is_joined(trace_id: String, end: String) -> bool:
 			if PcbCopperContact.copper_joins_pin(cap, comp, str(pin_name), stack,
 					PcbCopperContact.unknown_land_radius(self)):
 				return true
-	if not get_via_at(pt, TRACE_END_JOIN_EPS_MM).is_empty():
-		return true
+	# A BARREL IS COPPER WITH EXTENT, measured by the same predicate the pads
+	# use: this end's swept cap against the via's annulus. get_via_at answered
+	# this before, and it is a CLICK-PICK — it measures a bare point against the
+	# annulus (so a wide run stopping just off the barrel read as free, while
+	# the worker's dangling credit called it landed) and it skips a via carrying
+	# no id, which has copper all the same.
+	for via in vias:
+		var barrel := PcbCopperContact.via_node(
+			via_position(via as Dictionary), via_radius(via as Dictionary),
+			PcbCopperContact.via_span(via as Dictionary, stack))
+		if PcbCopperContact.nodes_touch(cap, barrel):
+			return true
 	for other_id in traces:
 		if other_id == trace_id:
 			continue

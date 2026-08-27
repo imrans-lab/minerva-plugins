@@ -1,0 +1,17 @@
+{
+  "name": "200-via-on-a-segment-interior",
+  "why": "A 0.8mm via dropped at (5.0, 0.0) — dead centre of a 10mm run, 5mm from either end, and nowhere near an endpoint. Its centre lies ON the centreline, so the gap is 0mm however wide either piece is. This is how a probe pad is strapped to the plane below it, and an endpoint-only via credit scored it as no join at all.",
+  "trace": {
+    "a": [0.0, 0.0],
+    "b": [10.0, 0.0],
+    "width_mm": 0.5,
+    "layer": "top"
+  },
+  "copper": {
+    "kind": "via",
+    "a": [5.0, 0.0],
+    "diameter_mm": 0.8,
+    "layers": ["top", "bottom"]
+  },
+  "touches": true
+}

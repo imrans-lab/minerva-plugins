@@ -27,7 +27,8 @@ cannot be added without one of them going red.
 {
   "name":  "...",
   "why":   "the hand derivation — the numbers, not the intent",
-  // The copper the run is measured AGAINST: exactly ONE of `pad` or `region`.
+  // The copper the probe is measured AGAINST: exactly ONE of `pad`, `region`
+  // or `trace`.
   "pad":   { "at": [x_mm, y_mm],          // land CENTRE, board frame
              "shape": "rect|roundrect|circle|oval|<unmodelled>",
              "size": [w_mm, h_mm],        // the land's full extent
@@ -38,10 +39,16 @@ cannot be added without one of them going red.
              "layers": ["top"] },
   "region":{ "ring": [[x_mm, y_mm], ...], // ONE filled pour region
              "layer": "bottom" },
-  "copper":{ "kind": "segment|endpoint",
-             "a": [x_mm, y_mm],
+  "trace": { "a": [x_mm, y_mm],           // ONE run, as its swept width
+             "b": [x_mm, y_mm],
+             "width_mm": 0.5,
+             "layer": "top" },
+  "copper":{ "kind": "segment|endpoint|via",
+             "a": [x_mm, y_mm],           // via: the barrel centre
              "b": [x_mm, y_mm],           // segment only
-             "width_mm": 0.25,
+             "width_mm": 0.25,            // segment / endpoint only
+             "diameter_mm": 0.8,          // via only: OUTER copper diameter
+             "layers": ["top", "bottom"], // via only: the barrel's span
              "layer": "top" },
   "touches": true
 }
@@ -62,6 +69,14 @@ clearance carving and voids are in it (see `140-endpoint-in-a-pour-void`).
 asks. `segment` is the whole swept stadium — what "does this run reach the pad?"
 asks. They are separate kinds because an end must not be credited by copper at
 the other end of its own segment.
+
+`via` is a barrel: a disc of the stated OUTER diameter, on the layers the span
+names. Pair it with a `trace` target for the question cases 200/210 ask — *does
+a via sitting under a run join that run?* — which has one answer wherever along
+the run it sits, endpoint or interior. Note the two builders take different
+units: `copper_contact.via_node` is handed a DIAMETER and
+`PcbCopperContact.via_node` a RADIUS, so each runner converts and the vector
+states the diameter.
 
 Every `why` is derived by hand from the geometry and states its numbers. A case
 whose expectation cannot be arrived at with a ruler does not belong here.
@@ -92,9 +107,10 @@ landed, 0.25 mm off centre is clear by 0.05 mm.
   `pins[]` and `pads[].position` disagree. The worker has one position per pad
   and no second field to disagree with. These vectors compare LAND geometry, so
   they set the land centre and the pin centre to the same point.
-* **Vias and trace-to-trace.** The predicate takes them as node kinds, but
-  nothing has drifted there yet. Extend the schema with a new `copper.kind`
-  when one of them starts mattering.
+* **Trace-to-trace.** The predicate takes it as a node kind, but nothing has
+  drifted there yet. Extend the schema with a new `copper.kind` when it starts
+  mattering. (Vias were on this list until a via under a run's interior turned
+  out to be credited on one side and not the other — cases 200/210.)
 * **THE NET.** The predicate is net-BLIND: two pieces of copper either meet or
   they do not, and which potentials may be joined is the CALLER's rule. So
   "a run must not end in a foreign-net pour" cannot be pinned here — it is

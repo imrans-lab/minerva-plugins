@@ -99,6 +99,12 @@ extends SceneTree
 ##      moves the answer, every other airwire recedes without any leaving the
 ##      picture, a capture copy draws the same thing, and commit and cancel both
 ##      leave nothing behind.
+##
+##  14. A VIA IS COPPER WITH EXTENT, ANYWHERE ALONG A RUN. A probe pair strapped
+##      to the plane by one via at the exact midpoint of their run — the panel
+##      half of the worker's own oracle — joins; the same via slid 0.66mm off
+##      the centreline (0.01mm past half-width + annulus) does not; and the
+##      free-end verb reads that same annulus rather than a point-in-disc pick.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -127,6 +133,7 @@ func _init() -> void:
 	_run_route_focus_aims_at_copper()
 	_run_route_focus_survives_quieting()
 	_run_route_focus_canvas_gesture()
+	_run_a_via_is_copper_with_extent()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1512,3 +1519,87 @@ func _run_route_focus_canvas_gesture() -> void:
 
 	canvas.free()
 	copy.free()
+
+
+# ── 14. a via is copper with extent, anywhere along a run ────────────────────
+
+## The probe pair strapped to the plane by ONE mid-run via — the panel half of
+## the worker's own oracle (worker/tests/test_via_copper_credit.py), built from
+## the same numbers so the two sides answer one question the same way.
+##
+## GND's copper is TWO islands: TP1's pair + the plane, and C1/C2 twenty
+## millimetres away. The pair reaches the plane only through the 0.8 mm via at
+## (8.0, 30.0), which sits at the exact midpoint of their 0.5 mm run, 1.4 mm
+## from either end — so nothing about this join is an ENDPOINT fact. The shape
+## agreement underneath is pinned by spec/contact cases 200/210.
+func _via_strap_board(vias: Array):
+	var fill := _rect_outline(Vector2(2, 20), Vector2(30, 40))
+	return _board({
+		"width_mm": 60.0, "height_mm": 60.0,
+		"components": [
+			_part("TP1", 8.0, 30.0, [
+				{"number": "1", "x_mm": -1.4, "y_mm": 0.0,
+					"pad_width_mm": 1.25, "pad_height_mm": 1.75},
+				{"number": "2", "x_mm": 1.4, "y_mm": 0.0,
+					"pad_width_mm": 1.25, "pad_height_mm": 1.75}]),
+			_part("J1", 20.0, 30.0, [
+				_tht_pin("1", -2.54, 0.0), _tht_pin("2", 2.54, 0.0)]),
+			_part("C1", 45.0, 50.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("C2", 49.0, 50.0, [_smd_pin("1", 0.0, 0.0)]),
+		],
+		"nets": [{"name": "GND",
+			"pins": ["TP1.1", "TP1.2", "J1.1", "J1.2", "C1.1", "C2.1"]}],
+		"traces": [
+			_trace("t_probe", "GND", "top", Vector2(6.6, 30.0), Vector2(9.4, 30.0), 0.5),
+			_trace("t_open", "GND", "top", Vector2(45.0, 50.0), Vector2(49.0, 50.0)),
+		],
+		"vias": vias,
+		"zones": [{"id": "z_gnd", "layer": "bottom", "kind": "copper_pour",
+			"net": "GND", "outline": fill, "fill": [fill]}],
+	})
+
+
+func _strap_via(y: float) -> Dictionary:
+	return {"id": "v_strap", "x_mm": 8.0, "y_mm": y, "drill_mm": 0.4,
+		"diameter_mm": 0.8, "net": "GND",
+		"from_layer": "top", "to_layer": "bottom"}
+
+
+## One board, one via, one end: does that end read as joined?
+func _end_on_a_via_board(end_x: float):
+	return _board({
+		"components": [], "nets": [],
+		"traces": [_trace("t", "SIG", "top",
+			Vector2(20.0, 10.0), Vector2(end_x, 10.0), 1.0)],
+		"vias": [{"id": "v", "x_mm": 10.0, "y_mm": 10.0, "drill_mm": 0.4,
+			"diameter_mm": 0.8, "net": "SIG",
+			"from_layer": "top", "to_layer": "bottom"}],
+	})
+
+
+func _run_a_via_is_copper_with_extent() -> void:
+	print("-- 14. a via is copper with extent, anywhere along a run --")
+	check_eq("a via on a run's INTERIOR joins that run to the plane",
+		_remaining(Ratsnest.compute(_via_strap_board([_strap_via(30.0)])), "GND"), 1)
+	check_eq("…and without it the probe pair is its own island",
+		_remaining(Ratsnest.compute(_via_strap_board([])), "GND"), 2)
+
+	# ANTI-CREDIT-EVERYTHING. The same via slid 0.66 mm off the centreline:
+	# copper reaches 0.25 mm (half the run) + 0.40 mm (the annulus) = 0.65 mm,
+	# so 0.01 mm of laminate is left and the join is still owed. It is also
+	# still 1.4 mm from either end of the run, so no endpoint rule saves it.
+	check_eq("a via 0.66 mm off the centreline joins nothing",
+		_remaining(Ratsnest.compute(
+			_via_strap_board([_strap_via(30.66)])), "GND"), 2)
+
+	# THE FREE-END VERB READS THE SAME COPPER. A 1.0 mm run reaches 0.5 mm past
+	# its end and the annulus 0.4 mm past the barrel centre, so an end 0.6 mm
+	# out is landed and one 1.0 mm out is not — neither of which a bare
+	# point-in-disc pick could tell apart, and both of which the worker's
+	# dangling credit answers the same way.
+	var landed = _end_on_a_via_board(10.6)
+	check("a run ending on a via's annulus is NOT a free end",
+		landed.trace_end_is_joined("t", landed.TRACE_END_END))
+	var clear = _end_on_a_via_board(11.0)
+	check("…and one 0.1 mm clear of it still is",
+		not clear.trace_end_is_joined("t", clear.TRACE_END_END))
