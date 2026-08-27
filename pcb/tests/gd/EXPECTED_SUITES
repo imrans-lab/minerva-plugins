@@ -132,7 +132,11 @@ test_pcb_legacy_annotation_migration.gd assertions=53
 # The pin→net invariant (a pin belongs to at most one net): connect MOVES,
 # minerva_pcb_disconnect_net removes, each is ONE undo step, and get_nets /
 # pin_info / the board dict handed to pcb.serialize are held to one answer.
-test_pcb_net_membership.gd assertions=51
+# 51 -> 70: a membership write that cannot be done is refused rather than
+# half-done (section 6) — an unknown pin and a malformed entry refuse the whole
+# connect, a net-guarded disconnect removes only that net's membership, and
+# move/swap refuse a pin held by two nets by name. MEASURED: 70 passed, 0 failed.
+test_pcb_net_membership.gd assertions=70
 # SR2FAB S9 added ONE assertion (get_layout_state carries
 # fabrication_stage). 149 -> 150 is an AUTHORED count; see the note on
 # test_draft_composer.gd above.
@@ -198,9 +202,18 @@ test_trace_identity_delete.gd assertions=213
 # modelled -> `real-worker`.
 test_copper_identity_ownership.gd assertions=41 real-worker
 test_workspace_check.gd assertions=46
-test_workspace_ingest.gd assertions=77
-test_workspace_persistence.gd assertions=76
-test_workspace_tools.gd assertions=1189
+# 77 -> 84: the reply's effective width outranks a hint width when the segments
+# carry none, and an unresolved width reaches the draft checker as 0.0 rather
+# than a nominal 0.25. MEASURED: 84 passed, 0 failed.
+test_workspace_ingest.gd assertions=84
+# 76 -> 85: group 10, a persisted via with no dimensions restores UNRESOLVED and
+# takes the board's design_rules at commit (with an authored size as the
+# negative control). MEASURED: 85 passed, 0 failed.
+test_workspace_persistence.gd assertions=85
+# 1189 -> 1192: the width-provenance group grew the copper-creating half — the
+# segments' own width_mm outranks the hint and the board, and a route drawn at
+# two widths commits both. MEASURED: 1192 passed, 0 failed.
+test_workspace_tools.gd assertions=1192
 test_zone_select_delete.gd assertions=50
 test_ux3_contracts.gd assertions=44
 test_staged_entities.gd assertions=72
@@ -358,11 +371,15 @@ test_trace_pour_terminator.gd assertions=12
 
 # Via ownership (propose_via for_hint), design-rule via sizing at proposal time,
 # no invented trace width, and the panel half of layer-hop waypoints.
-test_hint_hops_and_via_owners.gd assertions=59
+# 59 -> 68: inserting or deleting a bend BEFORE a layer-carrying one leaves the
+# hop on its own corner (5f/5g/5h). MEASURED: 68 passed, 0 failed.
+test_hint_hops_and_via_owners.gd assertions=68
 
 # Pin Select, the one land-to-world transform shared by the renderer and the
 # hit test, and the rotation convention a placement reply states.
-test_pcb_pin_select.gd assertions=106
+# 106 -> 110: an UNPLATED hole is on no copper layer ("none"), not on all of
+# them, and the row agrees with the contact predicate. MEASURED: 110 passed.
+test_pcb_pin_select.gd assertions=110
 
 # minerva_pcb_describe_region (ONE read of a board rectangle) and
 # layers_touched on it and on minerva_pcb_list_vias.
@@ -378,4 +395,8 @@ test_transient_status.gd assertions=17
 # negative controls, the board_graphics round trip through
 # to_board_dict/from_board_dict, one-undo-step add and delete, the three MCP
 # verbs, and canvas pick/select/delete.
-test_board_graphics.gd assertions=61
+# 61 -> 75: bounds report the INK (half a stroke past the centreline), an
+# unminted supplied id is refused before the Go gate sees it, several polylines
+# plus one id is refused, and both selection seams reach a board graphic.
+# MEASURED: 75 passed, 0 failed.
+test_board_graphics.gd assertions=75

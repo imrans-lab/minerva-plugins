@@ -234,6 +234,49 @@ def test_single_crossing():
     assert f["at"] == [5.0, 5.0]
 
 
+# (c2) A net-A trace landing CORRECTLY on its own pad, with a foreign net-B pad
+# 0.15 mm away — inside the 0.2 mm clearance. The correct landing used to veto
+# the whole endpoint, and the along-segment pass defers every pad near an end to
+# the endpoint pass, so the short was reported by neither.
+_OWN_AND_FOREIGN_AT_ONE_END = """
+version: 1
+name: ownandforeign
+width_mm: 12
+height_mm: 12
+design_rules: {clearance_mm: 0.2}
+components:
+  - {ref: A1, footprint: R, x_mm: 0, y_mm: 5, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+  - {ref: A2, footprint: R, x_mm: 10, y_mm: 5, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+  - {ref: B1, footprint: R, x_mm: 10, y_mm: 5.15, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+nets:
+  - {name: NA, pins: ['A1.1', 'A2.1']}
+  - {name: NB, pins: ['B1.1']}
+traces:
+  - {net: NA, layer: top, width_mm: 0.25,
+     points: [{x_mm: 0, y_mm: 5}, {x_mm: 10, y_mm: 5}]}
+"""
+
+
+def test_a_correct_landing_does_not_hide_a_foreign_pad_at_the_same_end():
+    """Reaching its own pad says the trace arrived; it says nothing about the
+    other net's land inside clearance of that same point, which is shorted
+    either way."""
+    r = _run(yaml.safe_load(_OWN_AND_FOREIGN_AT_ONE_END))
+    assert r["counts"]["wrong_net_pad"] == 1
+    f = _of_type(r, "wrong_net_pad")[0]
+    assert f["net"] == "NA"
+    assert f["at"] == [10.0, 5.0]
+    assert f["pad"] == {"ref": "B1", "pin": "1", "net": "NB"}
+    # ...and moving the foreign land out of clearance clears it, so the check
+    # is a distance test and not a blanket "any pad near an end" report.
+    board = yaml.safe_load(_OWN_AND_FOREIGN_AT_ONE_END)
+    board["components"][2]["y_mm"] = 5.5
+    assert _run(board)["counts"]["wrong_net_pad"] == 0
+
+
 def test_single_wrong_net_pad():
     r = _run(yaml.safe_load(_WRONG_NET))
     assert r["counts"]["wrong_net_pad"] == 1

@@ -43,6 +43,7 @@ const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const PadRow := preload("res://../../minerva-plugins/pcb/ui/model/pcb_pad_row.gd")
 const PinSelectTool := preload("res://../../minerva-plugins/pcb/ui/pcb_pin_select_tool.gd")
 const PadApproach := preload("res://../../minerva-plugins/pcb/ui/model/pcb_pad_approach.gd")
+const CopperContact := preload("res://../../minerva-plugins/pcb/ui/model/pcb_copper_contact.gd")
 
 var _pass := 0
 var _fail := 0
@@ -213,6 +214,36 @@ func _test_1_pad_row() -> void:
 	check_near("1a: position is the pad's WORLD x", float(pos6.get("x_mm", 0.0)), 32.54)
 	check_near("1a: position is the pad's WORLD y", float(pos6.get("y_mm", 0.0)), 18.73)
 	check_eq("1a: an F.Cu land on a top part is on 'top'", str(row6.get("layer", "")), "top")
+
+	# THE HOLE TRIO. A plated barrel really does pierce every copper layer; an
+	# UNPLATED one is drilled and never plated, so it is on NO layer — the same
+	# reading the contact predicate takes (physical_pad_node returns a
+	# no_copper_node for it). Answering "all" for both made a mechanical hole
+	# look like the best-connected pin on the part.
+	var holes = data.new_component()
+	holes.id = "H1"
+	holes.position = Vector2(80.0, 40.0)
+	holes.has_pad_geometry = true
+	holes.pins = {"1": Vector2(0.0, 0.0), "2": Vector2(2.0, 0.0)}
+	holes.pads = [
+		{"number": "1", "type": "thru_hole", "shape": "circle",
+		 "position": Vector2(0.0, 0.0), "size": Vector2(1.6, 1.6),
+		 "rotation": 0.0, "drill": Vector2(0.8, 0.8), "layers": ["F.Cu", "B.Cu"]},
+		{"number": "2", "type": "np_thru_hole", "shape": "circle",
+		 "position": Vector2(2.0, 0.0), "size": Vector2(3.2, 3.2),
+		 "rotation": 0.0, "drill": Vector2(3.2, 3.2), "layers": ["F.Cu", "B.Cu"]},
+	]
+	data.add_component(holes)
+	check_eq("1a2: a PLATED barrel is on every copper layer",
+		PadRow.layer_for_pin(holes, "1"), "all")
+	check_eq("1a2: an UNPLATED hole is on none of them, not all of them",
+		PadRow.layer_for_pin(holes, "2"), "none")
+	check_eq("1a2: …and the row says the same thing the model does",
+		str((PadRow.row(data, holes, "2") as Dictionary).get("layer", "")), "none")
+	check("1a2: …which is what the contact predicate already says",
+		not CopperContact.node_has_copper(CopperContact.physical_pad_node(
+			holes, holes.pads[1], PackedStringArray(["top", "bottom"]),
+			Vector2.ZERO, false)))
 
 	# SIDE — the whole point of "the other side of U1S". East-column pins say
 	# east, west-column pins say west, and the CORNER pins resolve to their

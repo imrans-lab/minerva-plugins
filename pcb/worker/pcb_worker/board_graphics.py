@@ -59,7 +59,9 @@ from __future__ import annotations
 from typing import Any
 
 from . import board_font
+from .canonical_id import derive_id
 from .geometry import place_point
+from .silk_source import SILK_GRAPHIC_WIDTH_MM, SILK_TEXT_WIDTH_MM
 from .resolved_board import (
     BoardGraphic,
     CircleGeometry,
@@ -88,12 +90,11 @@ __all__ = [
 #: the board rim. See the module docstring for why each exclusion is fail-closed.
 ALLOWED_ROLES = frozenset({LayerRole.SILK, LayerRole.COURTYARD})
 
-#: Widths default to the SAME constants component silk uses, read from
+#: Widths default to the SAME constants component silk uses — ALIASED from
 #: silk_source rather than restated, so a board legend and a footprint legend
-#: cannot end up on different floors. Imported lazily inside the functions that
-#: need them to keep this module's import graph as small as silk_source's own.
-DEFAULT_TEXT_WIDTH_MM = 0.15
-DEFAULT_GRAPHIC_WIDTH_MM = 0.15
+#: cannot end up on different floors when one of the two is retuned.
+DEFAULT_TEXT_WIDTH_MM = SILK_TEXT_WIDTH_MM
+DEFAULT_GRAPHIC_WIDTH_MM = SILK_GRAPHIC_WIDTH_MM
 #: Cap height of a text entry that does not say. 1.0 mm matches
 #: ``silk_source.REFDES_TEXT_SIZE_MM`` so unspecified board text reads the same
 #: size as a designator.
@@ -233,11 +234,16 @@ def build_board_graphics(board: dict, board_id: str, diags) -> tuple[BoardGraphi
                         f"board_graphics[{ordinal}] is not a mapping", ref)
             continue
 
+        # An ABSENT id is derived from the ordinal, not refused: v1 carries no
+        # persistent ids at all (board_validate and Go's Validate only demand a
+        # minted graphic id from v2 on), so refusing here would reject boards
+        # both validators call valid — spec vector 450 is exactly that board.
+        # Derived the way every other v1 child id is (canonical_id.derive_id,
+        # board-namespaced), so the id is stable for a compile-from-scratch and
+        # two boards carrying the same artwork still get distinct ids.
         graphic_id = entry.get("id")
         if not isinstance(graphic_id, str) or not graphic_id:
-            diags.error("invalid_board_structure",
-                        f"board_graphics[{ordinal}] has no id", ref)
-            continue
+            graphic_id = derive_id("graphic", board_id, "board_graphics", str(ordinal))
         ref = SourceRef(EntityKind.GRAPHIC, graphic_id)
 
         layer_id = entry.get("layer")
@@ -347,9 +353,24 @@ def _build_geometry(kind: str, entry: dict, graphic_id: str, ref, diags):
         # here means no consumer downstream needs a fifth geometry case.
         return PolygonGeometry(points=points)
 
-    points = tuple(
-        p for p in (_point_pair(v) for v in entry.get("points", []) or ()) if p is not None
-    )
+    raw_points = entry.get("points") or ()
+    if not isinstance(raw_points, (list, tuple)):
+        diags.error("invalid_board_graphic",
+                    f"{kind} graphic {graphic_id} points must be a list", ref)
+        return None
+    # REFUSED, not filtered: dropping a bad point joins its two neighbours into
+    # a segment nobody authored, and the result is artwork that looks authored
+    # and is not. The whole entry goes back to its author instead.
+    collected: list[tuple[float, float]] = []
+    for position, value in enumerate(raw_points):
+        point = _point_pair(value)
+        if point is None:
+            diags.error("invalid_board_graphic",
+                        f"{kind} graphic {graphic_id} point {position} is not an "
+                        f"{{x_mm, y_mm}} mapping ({value!r})", ref)
+            return None
+        collected.append(point)
+    points = tuple(collected)
     minimum = 3 if kind == "poly" else 2
     if len(points) < minimum:
         diags.error("invalid_board_graphic",

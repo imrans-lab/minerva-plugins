@@ -3633,6 +3633,12 @@ func _resolve_selectable(kind: String, id: String) -> Dictionary:
 		"cutout":
 			canvas_kind = _canvas.KIND_CUTOUT
 			exists = _data != null and not (_data.get_cutout(id) as Dictionary).is_empty()
+		"board_graphic":
+			# Board-level artwork is selectable on the canvas, so the agent's
+			# half of the deixis has to reach it too — otherwise "select that
+			# copyright line" is a thing only a human can do.
+			canvas_kind = _canvas.KIND_BOARD_GRAPHIC
+			exists = _data != null and not (_data.get_board_graphic(id) as Dictionary).is_empty()
 		"candidate":
 			canvas_kind = _canvas.KIND_CANDIDATE
 			exists = _routing_workspace != null and _routing_workspace.get_candidate(id) != null
@@ -3645,7 +3651,7 @@ func _resolve_selectable(kind: String, id: String) -> Dictionary:
 				and not str(_staged_entities.staged_id_for_entity(id)).is_empty()
 		_:
 			return {"ok": false, "error": "unknown_kind",
-				"message": "kind must be one of: pad, component, trace, via, zone, cutout, candidate, staged, annotation"}
+				"message": "kind must be one of: pad, component, trace, via, zone, cutout, board_graphic, candidate, staged, annotation"}
 	if not exists:
 		return {"ok": false, "error": "not_found", "message": "no %s '%s' on this board" % [kind, id]}
 	return {"ok": true, "canvas_kind": canvas_kind}

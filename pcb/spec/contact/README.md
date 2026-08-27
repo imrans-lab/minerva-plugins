@@ -66,6 +66,25 @@ the other end of its own segment.
 Every `why` is derived by hand from the geometry and states its numbers. A case
 whose expectation cannot be arrived at with a ruler does not belong here.
 
+## The unknown-land disc
+
+A pin whose footprint never resolved states no land at all, so neither side has
+geometry to be exact about. Both give it a **disc of the board's own
+`design_rules.clearance_mm`**, falling back to **0.2 mm** when the board
+declares none:
+
+* worker — `drc._board_clearance` feeds `copper_contact.pad_node`'s
+  `unknown_land_radius_mm` (`drc.DEFAULT_COINCIDENT_MM`)
+* panel — `pcb_copper_contact.unknown_land_radius`
+  (`DEFAULT_UNKNOWN_LAND_RADIUS_MM`)
+
+**No vector can pin this**, because every vector states a size and the fallback
+is therefore never the answer inside one. It is pinned instead by the fallback
+test each runner carries beside the vector walk
+(`test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc` and
+`_run_unknown_land`), and both probe the same two points: 0.15 mm off centre is
+landed, 0.25 mm off centre is clear by 0.05 mm.
+
 ## Deliberately out of scope
 
 * **The pin centre.** A single-land pad node on the panel side also carries the

@@ -1043,7 +1043,8 @@ func pin_info(component: String, pin: String) -> Dictionary:
 				continue
 			var run := _PcbCopperContact.trace_node(pts, float(trace.width),
 				trace.layer)
-			if _PcbCopperContact.copper_joins_pin(run, comp, pin, stack):
+			if _PcbCopperContact.copper_joins_pin(run, comp, pin, stack,
+					_PcbCopperContact.unknown_land_radius(data)):
 				trace_ids.append(str(trace.id))
 
 	# THE PAD ROW is the base of this answer, not a variant of it: ref / net /

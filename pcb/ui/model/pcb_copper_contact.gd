@@ -55,11 +55,33 @@ const PcbLayerStack := preload("pcb_layer_stack.gd")
 const TOUCH_EPS_MM := 0.001
 
 ## Copper radius assumed for a pin with NO pad geometry (an unresolved
-## footprint — the canvas already badges those components). Traces are drawn
-## pad-snapped to the pin centre, so the routed case lands at distance 0 and
-## does not depend on this number; it only decides whether copper PASSING NEAR
-## a geometry-less pin counts as touching it.
-const FALLBACK_PAD_RADIUS_MM := 0.3
+## footprint — the canvas already badges those components) when no board is in
+## hand to ask. Traces are drawn pad-snapped to the pin centre, so the routed
+## case lands at distance 0 and does not depend on this number; it only decides
+## whether copper PASSING NEAR a geometry-less pin counts as touching it.
+##
+## THE BOARD'S OWN CLEARANCE IS THE RULE — see unknown_land_radius below. This
+## constant is only the answer when the board declares none, and it equals
+## drc.DEFAULT_COINCIDENT_MM on the worker side, which runs the same derivation
+## (drc._board_clearance feeding copper_contact.pad_node's
+## unknown_land_radius_mm). Two different numbers meant a geometry-less pin
+## probed 0.25 mm off centre was joined on one side of the boundary and clear on
+## the other.
+const DEFAULT_UNKNOWN_LAND_RADIUS_MM := 0.2
+
+
+## The assumed copper radius for a geometry-less pin ON THIS BOARD: its declared
+## `design_rules.clearance_mm`, else DEFAULT_UNKNOWN_LAND_RADIUS_MM. Duck-typed
+## on `design_rules`, so a null/rule-less board answers with the default — the
+## same answer a headless caller gets.
+static func unknown_land_radius(data) -> float:
+	if data == null or not is_instance_valid(data) or not ("design_rules" in data):
+		return DEFAULT_UNKNOWN_LAND_RADIUS_MM
+	var rules = data.design_rules
+	if not (rules is Dictionary):
+		return DEFAULT_UNKNOWN_LAND_RADIUS_MM
+	var clearance := float((rules as Dictionary).get("clearance_mm", 0.0))
+	return clearance if clearance > 0.0 else DEFAULT_UNKNOWN_LAND_RADIUS_MM
 
 
 # ── NODES ─────────────────────────────────────────────────────────────────────
@@ -156,8 +178,11 @@ static func node_has_copper(node: Dictionary) -> bool:
 ## or one small disc at the pin centre when it did not.
 ##
 ## `stack` is the board's declared copper layers, for the kinds of copper that
-## pierce every layer.
-static func pad_nodes(comp, pin_name: String, stack: PackedStringArray) -> Array:
+## pierce every layer. `unknown_land_radius_mm` is the disc a geometry-less pin
+## gets — pass unknown_land_radius(data) wherever a board is in hand, so the
+## panel and the worker read one number.
+static func pad_nodes(comp, pin_name: String, stack: PackedStringArray,
+		unknown_land_radius_mm: float = DEFAULT_UNKNOWN_LAND_RADIUS_MM) -> Array:
 	var centre: Vector2 = comp.get_pin_world_position(pin_name)
 	var centre_line := PackedVector2Array([centre])
 	var matches: Array = []
@@ -169,7 +194,7 @@ static func pad_nodes(comp, pin_name: String, stack: PackedStringArray) -> Array
 					"key": pad_geometry_key(pad as Dictionary)})
 	if matches.is_empty():
 		return [make_node([], [centre_line],
-			FALLBACK_PAD_RADIUS_MM, layer_set(stack), centre)]
+			unknown_land_radius_mm, layer_set(stack), centre)]
 	# The source list is not an electrical ordering. Geometry first makes a
 	# reversed-but-identical footprint produce the same node and island order;
 	# source_order only distinguishes physically identical records.
@@ -496,8 +521,9 @@ static func copper_stack(data) -> PackedStringArray:
 ## inspector's "which traces touch this pad" — so a pad the inspector reports as
 ## touched is a pad the verbs refuse to draw from.
 static func copper_joins_pin(copper: Dictionary, comp, pin_name: String,
-		stack: PackedStringArray) -> bool:
-	for land in pad_nodes(comp, pin_name, stack):
+		stack: PackedStringArray,
+		unknown_land_radius_mm: float = DEFAULT_UNKNOWN_LAND_RADIUS_MM) -> bool:
+	for land in pad_nodes(comp, pin_name, stack, unknown_land_radius_mm):
 		if nodes_touch(copper, land as Dictionary):
 			return true
 	return false

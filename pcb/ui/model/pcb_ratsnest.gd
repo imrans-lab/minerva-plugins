@@ -72,7 +72,7 @@ const PCBDataScript := preload("pcb_data.gd")
 ## the CONTACT module's numbers, aliased so a caller reading this module's
 ## re-exports need not reach for a second preload to get its tolerances.
 const TOUCH_EPS_MM := PcbCopperContact.TOUCH_EPS_MM
-const FALLBACK_PAD_RADIUS_MM := PcbCopperContact.FALLBACK_PAD_RADIUS_MM
+const DEFAULT_UNKNOWN_LAND_RADIUS_MM := PcbCopperContact.DEFAULT_UNKNOWN_LAND_RADIUS_MM
 
 ## A net needing MORE than this many joins is quieted (see solve()). Signal
 ## nets need a handful of joins; distribution nets — ground, rails, a bussed
@@ -157,7 +157,8 @@ static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 		if comp == null:
 			continue
 		var ref := "%s.%s" % [comp_id, pin_name]
-		var lands := _pad_nodes(comp, pin_name, stack)
+		var lands := _pad_nodes(comp, pin_name, stack,
+			PcbCopperContact.unknown_land_radius(data))
 		for land_order in lands.size():
 			var node: Dictionary = lands[land_order]
 			node["ref"] = ref
@@ -179,9 +180,12 @@ static func _net_pads(data, net, stack: PackedStringArray) -> Array:
 	return pads
 
 
-## One logical pin as one node per physical land (see PcbCopperContact).
-static func _pad_nodes(comp, pin_name: String, stack: PackedStringArray) -> Array:
-	return PcbCopperContact.pad_nodes(comp, pin_name, stack)
+## One logical pin as one node per physical land (see PcbCopperContact). The
+## radius is the BOARD's, so an airwire and the worker's census agree about
+## whether copper near a geometry-less pin reaches it.
+static func _pad_nodes(comp, pin_name: String, stack: PackedStringArray,
+		unknown_land_radius_mm: float = PcbCopperContact.DEFAULT_UNKNOWN_LAND_RADIUS_MM) -> Array:
+	return PcbCopperContact.pad_nodes(comp, pin_name, stack, unknown_land_radius_mm)
 
 
 static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Array:

@@ -296,7 +296,8 @@ static func build_copper_index(data) -> Dictionary:
 	for comp_id in data.components:
 		var comp = data.components[comp_id]
 		for pin_name in comp.get_all_pin_positions():
-			nodes.append_array(PcbCopperContact.pad_nodes(comp, str(pin_name), stack))
+			nodes.append_array(PcbCopperContact.pad_nodes(comp, str(pin_name), stack,
+				PcbCopperContact.unknown_land_radius(data)))
 	for trace_id in data.traces:
 		var trace = data.traces[trace_id]
 		if trace.waypoints.size() < 2:

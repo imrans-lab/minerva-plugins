@@ -449,12 +449,12 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
     and consumers key off the type — and ``at`` says which stretch it is (an
     endpoint coordinate vs. the closest point on the run).
 
-    The endpoint pass keeps its OWN-NET VETO: a trace terminating on its own
-    pad is a correct landing even when a foreign pad sits within clearance of
-    that same point, which is a spacing question for the geometric DRC and not
-    a mis-route. Mid-run there is no such ambiguity — nothing is landing — so
-    each foreign pad the centerline passes over is judged on its own, and a run
-    driven across several of them reports each one.
+    A FOREIGN PAD IS REPORTED WHETHER OR NOT THE END ALSO LANDS CORRECTLY.
+    Landing on its own pad says the trace reached its destination; it says
+    nothing about the other net's land sitting within clearance of that same
+    point, and that land is shorted either way. Vetoing the whole endpoint on
+    the strength of the correct landing hid the short from both passes at once
+    — the along-segment pass defers every pad near an end to this one.
 
     MEASURE: centerline to pad CENTER, the module's standing basis. Pad EXTENT
     is never read, so a wide land whose copper the centerline misses by more
@@ -466,20 +466,16 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
     seen_along: set = set()
     for seg in segs:
         for pt in (seg.a, seg.b):
-            near = [p for p in pads
-                    if _dist(pt, p.pt) <= clr and p.occupies(seg.layer)]
-            if not near:
-                continue
-            nets_here = {p.net for p in near}
-            if seg.net in nets_here:
-                continue  # correctly lands on its own net's pad
             # EVERY foreign pad crowding this end, not just the nearest one. An
             # end wedged between two foreign lands shorts to BOTH, and naming
             # one of them told the reader to move the trace far enough to clear
             # that one — which the other still forbids. Ordered by distance so
             # the nearest still reads first.
-            for pad in sorted(near, key=lambda p: (_dist(pt, p.pt), str(p.ref),
-                                                   str(p.pin))):
+            foreign = [p for p in pads
+                       if p.net != seg.net and _dist(pt, p.pt) <= clr
+                       and p.occupies(seg.layer)]
+            for pad in sorted(foreign, key=lambda p: (_dist(pt, p.pt), str(p.ref),
+                                                      str(p.pin))):
                 key = (seg.net, _round_pt(pt), pad.ref, pad.pin)
                 if key in seen_at_ends:
                     continue
@@ -494,7 +490,7 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
             if pad.net == seg.net or not pad.occupies(seg.layer):
                 continue
             if _dist(pad.pt, seg.a) <= clr or _dist(pad.pt, seg.b) <= clr:
-                continue  # the endpoint pass owns this pad, veto included
+                continue  # the endpoint pass owns this pad
             at = _closest_point_on_segment(pad.pt, seg.a, seg.b)
             if _dist(pad.pt, at) > clr:
                 continue

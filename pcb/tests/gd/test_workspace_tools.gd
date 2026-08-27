@@ -2210,6 +2210,49 @@ func _run_ux1_width_provenance() -> void:
 
 	ctx["driver"].free_panel(ctx["panel"])
 
+	# THE COPPER-CREATING PATH obeys the same precedence. Here the SEGMENTS
+	# carry the width and nothing else does — the most specific statement in the
+	# reply, the one the worker only ever setdefaults — while a hint and the
+	# board both say 0.25mm.
+	var ctx3: Dictionary = await _panel_context()
+	ctx3["data"].design_rules = {"trace_width_mm": 0.25}
+	var hints3: Array = [{"id": str(ctx3["hint_id"]), "kind_payload": {
+		"net_names": ["N1"], "width_mm": 0.25,
+		"source_pins": ["U1.3"], "dest_pins": ["U2.7"]}}]
+	var stamped_reply: Dictionary = _multipad_reply([str(ctx3["hint_id"])])
+	for seg in (stamped_reply["routes"][0]["segments"] as Array):
+		(seg as Dictionary)["width_mm"] = 0.5
+	var applied: Dictionary = PanelTools._materialize_routes(
+		ctx3["host"], ctx3["data"], stamped_reply, hints3)
+	check("segment-stamped reply lays copper", int(applied.get("traces_added", 0)) > 0)
+	var all_stamped := true
+	for tid in (applied.get("trace_ids", []) as Array):
+		var t = ctx3["data"].traces.get(str(tid))
+		if t == null or absf(float(t.width) - 0.5) > 1e-6:
+			all_stamped = false
+	check("every committed trace is the SEGMENTS' 0.5mm, not the 0.25mm the hint and the board both name",
+		all_stamped)
+
+	# MIXED widths in one reply: one trace carries one width, so the route
+	# becomes one trace per (layer, width) rather than one trace at whichever
+	# width won. The two F.Cu runs here are disconnected AND differently sized.
+	var mixed_reply: Dictionary = _multipad_reply([str(ctx3["hint_id"])])
+	var mixed_segs: Array = mixed_reply["routes"][0]["segments"]
+	(mixed_segs[0] as Dictionary)["width_mm"] = 0.5
+	(mixed_segs[1] as Dictionary)["width_mm"] = 0.5
+	(mixed_segs[2] as Dictionary)["width_mm"] = 0.75
+	var mixed: Dictionary = PanelTools._materialize_routes(
+		ctx3["host"], ctx3["data"], mixed_reply, hints3)
+	var mixed_widths: Array = []
+	for tid in (mixed.get("trace_ids", []) as Array):
+		var mt = ctx3["data"].traces.get(str(tid))
+		if mt != null:
+			mixed_widths.append(snappedf(float(mt.width), 0.001))
+	mixed_widths.sort()
+	check_eq("a route drawn at two widths commits BOTH, one trace per (layer, width)",
+		mixed_widths, [0.5, 0.5, 0.75])
+	ctx3["driver"].free_panel(ctx3["panel"])
+
 
 ## Station 5 (docket 019fce3ac3f5 item 2): the ~28 per-component
 ## emitter-capability warnings ("feature_omitted", "captured_geometry_not_emitted",

@@ -503,13 +503,15 @@ static func _via_from_json(via: Dictionary) -> Dictionary:
 	if out.has("position") and out["position"] is Dictionary:
 		var pd: Dictionary = out["position"]
 		out["position"] = Vector2(float(pd.get("x", 0.0)), float(pd.get("y", 0.0)))
-	# Same one rule every other via path takes: a sidecar has no board in hand,
-	# so an unstated size resolves to PcbViaDimensions' constants rather than
-	# to literals that could drift from them.
-	var dims: Dictionary = PcbViaDimensions.resolve({},
-		float(out.get("diameter", 0.0)), float(out.get("drill", 0.0)))
-	out["diameter"] = dims["diameter"]
-	out["drill"] = dims["drill"]
+	# AN UNSTATED SIZE STAYS 0.0 — the one "nobody has said yet" value
+	# (PcbViaDimensions' own contract). A sidecar has no board in hand, so
+	# stamping the 0.8/0.4 constants here restored a legacy via at 0.8/0.4 on a
+	# board whose design_rules say otherwise, and the commit-time resolution can
+	# only rescue a ZERO stamp: it could not tell that 0.8 from an authored one.
+	# Left at 0.0, the board's rules answer at commit/materialize, exactly as
+	# they do for a via that was never persisted.
+	out["diameter"] = maxf(0.0, float(out.get("diameter", 0.0)))
+	out["drill"] = maxf(0.0, float(out.get("drill", 0.0)))
 	out["locked"] = bool(out.get("locked", false))
 	out["id"] = str(out.get("id", ""))
 	return out

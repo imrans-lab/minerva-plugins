@@ -29,6 +29,7 @@ const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/p
 const StagedEntities := preload("res://../../minerva-plugins/pcb/ui/model/pcb_staged_entities.gd")
 const PcbRoutingSidecar := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_sidecar.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
+const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 const PluginPanelDriver := preload("res://test/helpers/plugin_panel_driver.gd")
 
 var _pass := 0
@@ -48,6 +49,7 @@ func _init() -> void:
 	_run_per_net_attribution()
 	_run_mounting_hole_keepout()
 	_run_staged_persistence()
+	_run_legacy_via_dimensions()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -592,3 +594,64 @@ func _run_staged_persistence() -> void:
 	check("…and no staged zone leaked into zones",
 		not (str(payload.get("id", "")) in zone_ids))
 	_cleanup(path)
+
+
+# ── 10. a persisted via with no dimensions is UNRESOLVED, not defaulted ───────
+#
+# A sidecar has no board in hand, so a via written before ghosts carried sizes
+# restores with none. Stamping the 0.8/0.4 constants at load looked harmless and
+# was not: the commit-time resolution can only rescue a ZERO size, so those
+# constants survived it and the restored ghost drilled 0.8/0.4 into a board
+# whose own rules say 0.60/0.30 — while every un-persisted via on the same
+# board honoured them.
+
+func _run_legacy_via_dimensions() -> void:
+	print("-- 10. a dimensionless persisted via takes the BOARD's rules --")
+	var board = PCBData.new()
+	board.set_board_size(80.0, 60.0)
+	board.design_rules = {"via_diameter_mm": 0.60, "via_drill_mm": 0.30}
+
+	var restored = PcbRouteCandidate.from_dict({
+		"candidate_id": "cand_legacy", "task_id": "N9|legacy", "net": "N9",
+		"disposition": "proposed", "validation": "clean",
+		"segments": [{"layer": "top", "width": 0.3,
+			"points": [{"x": 0.0, "y": 0.0}, {"x": 5.0, "y": 0.0}]}],
+		"vias": [{"position": {"x": 5.0, "y": 0.0},
+			"from_layer": "top", "to_layer": "bottom"}],
+	})
+	check_eq("a dimensionless persisted via restores UNRESOLVED, not at the 0.8 constant",
+		float((restored.vias[0] as Dictionary).get("diameter", -1.0)), 0.0)
+	check_eq("...and its drill likewise, not 0.4",
+		float((restored.vias[0] as Dictionary).get("drill", -1.0)), 0.0)
+
+	var ws = PcbRoutingWorkspace.new()
+	var cid := str(ws.add_candidate(restored))
+	var out: Dictionary = ws.commit(cid, board)
+	check("the restored candidate commits", bool(out.get("ok", false)))
+	var via_ids: Array = out.get("via_ids", [])
+	check_eq("one via landed", via_ids.size(), 1)
+	if via_ids.size() == 1:
+		var landed: Dictionary = board.get_via(str(via_ids[0]))
+		check_eq("the copper is the BOARD's 0.60mm pad, not the 0.8mm constant",
+			float(landed.get("size", 0.0)), 0.60)
+		check_eq("...and the BOARD's 0.30mm drill, not 0.4mm",
+			float(landed.get("drill", 0.0)), 0.30)
+
+	# NEGATIVE CONTROL: a size the sidecar DOES state is authored, and the board
+	# never overrides it.
+	var authored = PcbRouteCandidate.from_dict({
+		"candidate_id": "cand_sized", "task_id": "N9|sized", "net": "N9",
+		"disposition": "proposed", "validation": "clean",
+		"segments": [{"layer": "top", "width": 0.3,
+			"points": [{"x": 20.0, "y": 0.0}, {"x": 25.0, "y": 0.0}]}],
+		"vias": [{"position": {"x": 25.0, "y": 0.0}, "diameter": 0.9, "drill": 0.5,
+			"from_layer": "top", "to_layer": "bottom"}],
+	})
+	check_eq("an AUTHORED diameter round-trips untouched",
+		float((authored.vias[0] as Dictionary).get("diameter", 0.0)), 0.9)
+	var sized_out: Dictionary = ws.commit(str(ws.add_candidate(authored)), board)
+	var sized_ids: Array = sized_out.get("via_ids", [])
+	check_eq("one authored via landed", sized_ids.size(), 1)
+	if sized_ids.size() == 1:
+		check_eq("...and commits at ITS size, not the board's rule",
+			float((board.get_via(str(sized_ids[0])) as Dictionary).get("size", 0.0)), 0.9)

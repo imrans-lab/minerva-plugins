@@ -486,3 +486,58 @@ func _run_ingest_record_routed_width_wins() -> void:
 		float(bus_cand.segments[0].get("width")), 0.6)
 	check_eq("...and reports itself as the caller's own width",
 		str(bus_cand.width_source), "caller_option")
+
+	# THE REPLY'S EFFECTIVE STAMP OUTRANKS A HINT WIDTH even when the segments
+	# carry none. The record's `width` is the answer panel_tools already
+	# resolved (stamp first, hints only if the reply said nothing), so this side
+	# re-deriving 0.25mm from the hint would commit a width the router did not
+	# route at — and the ghost the reviewer approves would not be the copper.
+	var stamp_hint := {
+		"id": "hint_s",
+		"kind_payload": {
+			"net_names": ["VOUT"], "width_mm": 0.25,
+			"source_pins": ["U1.1"], "dest_pins": ["U4.2"],
+		},
+	}
+	var stamp_record := {
+		"net": "VOUT",
+		"segments": [
+			{"start": [0.0, 0.0], "end": [3.0, 0.0], "layer": "F.Cu"},
+			{"start": [3.0, 0.0], "end": [3.0, 4.0], "layer": "F.Cu"},
+		],
+		"vias": [],
+		"source_hint_ids": ["hint_s"],
+		"source_hints": [stamp_hint],
+		"width": 0.5,
+		"effective_width_mm": 0.5,
+		"effective_width_source": "net_class",
+	}
+	var stamp_cand = ws.get_candidate(str(ws.ingest_record(stamp_record, 4)))
+	check("stamped candidate resolves", stamp_cand != null)
+	if stamp_cand == null:
+		return
+	check_eq("the WORKER's effective 0.5mm sizes the copper, not the hint's 0.25mm",
+		float(stamp_cand.segments[0].get("width")), 0.5)
+	check_eq("...on every segment",
+		float(stamp_cand.segments[1].get("width")), 0.5)
+	check_eq("...and the width_source is the worker's, not this side's verdict",
+		str(stamp_cand.width_source), "net_class")
+
+	# THE CHECKER SEES WHAT COMMIT SEES. When nothing resolved a width the
+	# candidate's copper is 0.0, and the draft_check wire shape has to say 0.0
+	# too: a nominal 0.25 there measured copper nobody proposed and reported it
+	# clean, while commit() refuses that same candidate by name.
+	var bare_record := {
+		"net": "NOWIDTH",
+		"segments": [{"start": [0.0, 0.0], "end": [3.0, 0.0], "layer": "F.Cu"}],
+		"vias": [], "source_hint_ids": [], "source_hints": [],
+	}
+	var bare_cand = ws.get_candidate(str(ws.ingest_record(bare_record, 4)))
+	check("width-less candidate resolves", bare_cand != null)
+	if bare_cand == null:
+		return
+	check_eq("its copper is unresolved, not defaulted",
+		float(bare_cand.segments[0].get("width")), 0.0)
+	var wire: Array = ws._segments_wire(bare_cand)
+	check_eq("and the checker is sent that same 0.0, never a nominal 0.25",
+		float((wire[0] as Dictionary).get("width", -1.0)), 0.0)

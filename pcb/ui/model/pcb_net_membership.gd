@@ -41,8 +41,32 @@ static func nets_holding(data, component_id: String, pin_name: String) -> Array:
 ## Returns {net_name, connected_pins, moved?} where `moved` is [{pin, from}] for
 ## each pin taken off another net — the one fact the caller cannot recover
 ## afterwards, since the previous membership is gone by the time it reads back.
+##
+## VALIDATED BEFORE ANYTHING IS WRITTEN, and refused ALL-OR-NOTHING: a malformed
+## entry is not dropped (that reports success for work nobody did) and a pin the
+## board does not carry is not connected (that writes a ref into the netlist no
+## component answers to, invisible until export). Refusals name themselves:
+## invalid_pin, pin_not_found.
 static func connect_pins(data, net_name: String, pins: Array) -> Dictionary:
-	var pairs := _pin_pairs(pins)
+	var checked := _pin_pairs_checked(pins)
+	var invalid: Array = checked["invalid"]
+	if not invalid.is_empty():
+		return {
+			"error": "invalid_pin",
+			"note": "every entry needs both a component and a pin; nothing was connected",
+			"invalid": invalid,
+		}
+	var pairs: Array = checked["pairs"]
+	var missing: Array = []
+	for pair in pairs:
+		if not _board_has_pin(data, str(pair[0]), str(pair[1])):
+			missing.append("%s.%s" % [pair[0], pair[1]])
+	if not missing.is_empty():
+		return {
+			"error": "pin_not_found",
+			"note": "the board carries no such pin; nothing was connected",
+			"pins": missing,
+		}
 	var connected: Array = []
 	var moved: Array = []
 	for pair in pairs:
@@ -87,7 +111,12 @@ static func disconnect_pins(data, pins: Array, expected_net: String = "") -> Dic
 		if not expected_net.is_empty() and not holders.has(expected_net):
 			wrong_net.append({"pin": ref, "net": str(holders[0])})
 			continue
-		plan.append({"ref": ref, "pair": pair, "nets": holders})
+		# THE GUARD NARROWS WHAT IS REMOVED, not just what is allowed. On a
+		# conflicted board a pin can be listed on two nets, and "take it off
+		# GND" must leave the other membership exactly where it was — removing
+		# both would silently resolve a conflict the caller never mentioned.
+		var targets: Array = [expected_net] if not expected_net.is_empty() else holders
+		plan.append({"ref": ref, "pair": pair, "nets": targets})
 
 	if not wrong_net.is_empty():
 		return {
@@ -138,6 +167,15 @@ static func move_net(data, from_ref: String, to_ref: String) -> Dictionary:
 	if holders.is_empty():
 		return {"error": "pin_has_no_net", "pin": from_ref,
 			"note": "there is no net on %s to move — connect it first" % from_ref}
+	# A CONFLICTED SOURCE IS REFUSED BY NAME. Taking holders[0] picks by
+	# Dictionary iteration order, so which of the two nets moved would depend on
+	# how the board was loaded — and the other one would be silently dropped off
+	# the pin as well. Both are named so the caller can say which it meant.
+	if holders.size() > 1:
+		return {"error": "pin_on_multiple_nets", "pin": from_ref, "nets": holders,
+			"note": "%s is listed on %d nets (%s) — disconnect it from all but the "
+				% [from_ref, holders.size(), ", ".join(PackedStringArray(holders))]
+				+ "one you mean before moving it"}
 	var net_name := str(holders[0])
 	var displaced: Array = []
 	for other in nets_holding(data, str(to_pair[0]), str(to_pair[1])):
@@ -179,6 +217,15 @@ static func swap_nets(data, ref_a: String, ref_b: String) -> Dictionary:
 	if held_a.is_empty() and held_b.is_empty():
 		return {"error": "nothing_to_swap", "note":
 			"neither %s nor %s is on a net" % [ref_a, ref_b]}
+	# Same refusal as move_net's, and for the same reason: a pin on two nets has
+	# no single net to give, and held_x[0] would pick one by load order.
+	for side in [[ref_a, held_a], [ref_b, held_b]]:
+		var held: Array = side[1]
+		if held.size() > 1:
+			return {"error": "pin_on_multiple_nets", "pin": str(side[0]), "nets": held,
+				"note": "%s is listed on %d nets (%s) — a swap has no single net to "
+					% [str(side[0]), held.size(), ", ".join(PackedStringArray(held))]
+					+ "exchange until that is resolved"}
 	var net_a := str(held_a[0]) if not held_a.is_empty() else ""
 	var net_b := str(held_b[0]) if not held_b.is_empty() else ""
 	if net_a == net_b:
@@ -258,6 +305,35 @@ static func conflict_status_lead(notes: PackedStringArray) -> String:
 	if notes.is_empty():
 		return ""
 	return "NET CONFLICT: %s  •  " % "  •  ".join(notes)
+
+
+## True when `data` really carries this component's pin. The membership verbs
+## address pins by {component, pin}, so this is the by-parts form of the check
+## _ref_pair does for a "REF.PIN" string.
+static func _board_has_pin(data, component_id: String, pin_name: String) -> bool:
+	if data == null:
+		return false
+	var comp = data.get_component(component_id)
+	return comp != null and comp.pins.has(pin_name)
+
+
+## _pin_pairs, plus the entries it could not read: {pairs: [[comp, pin], …],
+## invalid: [<the offending entry, described>]}. A caller that must refuse a
+## malformed entry rather than drop it reads this one.
+static func _pin_pairs_checked(pins: Array) -> Dictionary:
+	var pairs: Array = []
+	var invalid: Array = []
+	for entry in pins:
+		if not (entry is Dictionary):
+			invalid.append(str(entry))
+			continue
+		var comp := str((entry as Dictionary).get("component", ""))
+		var pin := str((entry as Dictionary).get("pin", ""))
+		if comp.is_empty() or pin.is_empty():
+			invalid.append(str(entry))
+			continue
+		pairs.append([comp, pin])
+	return {"pairs": pairs, "invalid": invalid}
 
 
 ## Normalise the verbs' [{component, pin}] argument array to [[comp, pin], …],

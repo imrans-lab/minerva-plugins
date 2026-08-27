@@ -995,7 +995,14 @@ static func _connect_net(host, args: Dictionary) -> Dictionary:
 	if pins.is_empty():
 		return _err("pins array is required")
 
-	return _ok(_PcbNetMembershipScript.connect_pins(data, net_name, pins))
+	var connected: Dictionary = _PcbNetMembershipScript.connect_pins(data, net_name, pins)
+	# A refusal is all-or-nothing and reports itself — never wrapped as success
+	# with an empty result, which is what an unreadable or unknown pin used to
+	# look like from here.
+	if connected.has("error"):
+		connected["success"] = false
+		return connected
+	return _ok(connected)
 
 
 ## The removal half of the membership pair. `net_name` is OPTIONAL and acts as a
@@ -3503,33 +3510,47 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		# lays no copper and names what it could not resolve; the rest of the
 		# reply's routes are unaffected, exactly as for unusable segments below.
 		var width: float = _route_width(route, source_hints, net, data)
-		if width <= 0.0:
-			failed.append({"net": net, "reason":
-				"no trace width could be resolved for net '%s': the route reply carries no " % net
-				+ "effective_routing_rules.trace_width_mm, no source hint for this net "
-				+ "authors a width_mm, the net has no established copper and the board "
-				+ "declares no design_rules.trace_width_mm — no copper was created for it"})
-			continue
-		var by_layer := {}
+		# GROUPED BY LAYER **AND WIDTH**. A segment that states its own
+		# `width_mm` is copper the worker sized for that stretch specifically,
+		# and one trace carries one width — so a route drawn at two widths
+		# becomes two traces rather than one trace at whichever width won.
+		# `width` above is the route-wide fallback for segments that state none.
+		var by_group := {}
+		var unresolved := false
 		for seg in route.get("segments", []):
 			if not (seg is Dictionary):
 				continue
+			var seg_width: float = maxf(0.0, float(seg.get("width_mm", 0.0)))
+			if seg_width <= 0.0:
+				seg_width = width
+			if seg_width <= 0.0:
+				unresolved = true
+				break
 			var lyr: String = str(seg.get("layer", "F.Cu"))
-			if not by_layer.has(lyr):
-				by_layer[lyr] = []
-			by_layer[lyr].append({
+			var key := "%s|%s" % [lyr, seg_width]
+			if not by_group.has(key):
+				by_group[key] = {"layer": lyr, "width": seg_width, "segments": []}
+			(by_group[key]["segments"] as Array).append({
 				"start": _arr_to_vec2(seg.get("start", [0, 0])),
 				"end": _arr_to_vec2(seg.get("end", [0, 0])),
 			})
+		if unresolved:
+			failed.append({"net": net, "reason":
+				"no trace width could be resolved for net '%s': the route reply carries no " % net
+				+ "segment width_mm or effective_routing_rules.trace_width_mm, no source hint "
+				+ "for this net authors a width_mm, the net has no established copper and the "
+				+ "board declares no design_rules.trace_width_mm — no copper was created for it"})
+			continue
 		var made_any := false
-		for lyr in by_layer:
-			for polyline in _build_polylines_from_segments(by_layer[lyr]):
+		for key in by_group:
+			var group: Dictionary = by_group[key]
+			for polyline in _build_polylines_from_segments(group["segments"]):
 				if polyline.size() < 2:
 					continue
 				var trace = data.new_trace()
 				trace.net_name = net
-				trace.layer = PcbLayerStack.kicad_to_canon(lyr)
-				trace.width = width
+				trace.layer = PcbLayerStack.kicad_to_canon(str(group["layer"]))
+				trace.width = float(group["width"])
 				for point in polyline:
 					trace.waypoints.append(point)
 				data.add_trace(trace)
@@ -3980,22 +4001,32 @@ static func _route_layer(route: Dictionary) -> String:
 
 ## The width this route's copper is ACTUALLY drawn at, in mm.
 ##
-## AUTHORITATIVE over `_width_for_net` below, which sees hints only. The worker
-## resolves the width (methods.py `_effective_routing_rules_detailed` plus the
-## per-net step) and stamps it per route as
-## `effective_routing_rules.trace_width_mm.value`, covering an explicit caller
-## option, a hint-authored width, the net's class minimum, the width the net's
-## own EXISTING copper establishes and the board's default, in that order.
+## THE REPLY OUTRANKS THE HINTS, most specific first:
 ##
-## Falls back to the hint derivation only when the reply carries no stamp at
-## all: an older worker, or a path that skipped the attach. Same absent-key
-## contract as every other field read off a route reply.
+## 1. the SEGMENTS' own `width_mm`, when they all state the same one. The
+##    worker only ever `setdefault`s this key, so a value that IS there was
+##    stated for that stretch of copper specifically (a detailed hint, a
+##    reroute given an explicit width) and is the same value ir_candidates
+##    checks the overlay at. Nothing coarser may overrule it.
+## 2. `effective_routing_rules.trace_width_mm.value`, the ROUTE-wide width the
+##    worker resolved (methods.py `_effective_routing_rules_detailed` plus the
+##    per-net step): an explicit caller option, a hint-authored width, the net's
+##    class minimum, the width the net's own EXISTING copper establishes, the
+##    board's default — in that order, already decided.
+## 3. the hint derivation below (`_width_for_net`), which sees hints only. It
+##    runs when the reply carries no width at all: an older worker, or a path
+##    that skipped the attach. Same absent-key contract as every other field
+##    read off a route reply.
+## 4. the BOARD (PcbTraceWidth): the net's own established copper, then
+##    design_rules.trace_width_mm.
 ##
-## When neither answers, the BOARD does (PcbTraceWidth): the net's own
-## established copper, then design_rules.trace_width_mm. A missing width is
-## RESOLVED, not invented — 0.0 comes back only when no source anywhere has an
-## answer, and the callers refuse rather than pick a number.
+## A missing width is RESOLVED, not invented — 0.0 comes back only when no
+## source anywhere has an answer, and the callers refuse rather than pick a
+## number.
 static func _route_width(route: Dictionary, source_hints: Array, net: String, data = null) -> float:
+	var stamped: float = _route_segment_width(route)
+	if stamped > 0.0:
+		return stamped
 	var routed: float = _route_effective_width(route)
 	if routed > 0.0:
 		return routed
@@ -4003,6 +4034,27 @@ static func _route_width(route: Dictionary, source_hints: Array, net: String, da
 	if hinted > 0.0:
 		return hinted
 	return float(PcbTraceWidth.from_board(data, net)["width"])
+
+
+## The width this route's SEGMENTS state, when every one of them states the
+## same positive one; 0.0 otherwise.
+##
+## Unanimity is the condition because this answers a ROUTE-wide question. A
+## route whose segments were drawn at different widths has no single answer to
+## give here — `_materialize_routes` reads each segment's own width and commits
+## one trace per (layer, width) instead, so nothing is lost by declining.
+static func _route_segment_width(route: Dictionary) -> float:
+	var seen := 0.0
+	for seg in route.get("segments", []):
+		if not (seg is Dictionary):
+			continue
+		var w: float = maxf(0.0, float((seg as Dictionary).get("width_mm", 0.0)))
+		if w <= 0.0:
+			return 0.0
+		if seen > 0.0 and not is_equal_approx(w, seen):
+			return 0.0
+		seen = w
+	return seen
 
 
 ## `effective_routing_rules.trace_width_mm.value` off one route, or 0.0 when the
@@ -5512,6 +5564,13 @@ static func _add_graphic(host, args: Dictionary) -> Dictionary:
 	# board for the next undo to half-restore.
 	var payloads: Array = []
 	var requested_id := str(args.get("id", ""))
+	# ONE ID NAMES ONE GRAPHIC. Several polylines are several graphics, and the
+	# id used to be applied to none of them — the caller asked for artwork it
+	# could delete by that id and got artwork it could not.
+	if not requested_id.is_empty() and specs.size() > 1:
+		return _err(("id names ONE graphic, but %d polylines are %d graphics. "
+			+ "Add them one call at a time to give each its own id, or drop id "
+			+ "to have one minted per polyline.") % [specs.size(), specs.size()])
 	for i in specs.size():
 		var built: Dictionary = PcbBoardGraphic.build_geometry(
 			layer, specs[i], width_mm,
@@ -7682,6 +7741,19 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 		entries.append({"kind": "zone", "id": str(zone_id)})
 	for cutout_id in state.get("cutouts", []):
 		entries.append({"kind": "cutout", "id": str(cutout_id)})
+
+	# BOARD GRAPHICS — the canvas can select one, so "what have I got selected"
+	# has to be able to say so. Described by the same summary the list/add verbs
+	# report, so one graphic reads the same however it is reached.
+	for graphic_id in state.get("board_graphics", []):
+		var g_entry: Dictionary = {"kind": "board_graphic", "id": str(graphic_id)}
+		if data != null and data.has_method("get_board_graphic"):
+			var graphic: Dictionary = data.get_board_graphic(str(graphic_id))
+			if not graphic.is_empty():
+				g_entry.merge(PcbBoardGraphic.summary(graphic), true)
+				g_entry["kind"] = "board_graphic"
+				g_entry["id"] = str(graphic_id)
+		entries.append(g_entry)
 
 	# PADS — the pin-level half of the deixis. This is what makes "see these
 	# pins? move them to the other side of U1S" answerable: the human picks pads

@@ -19,10 +19,12 @@ self-report.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pytest
+import yaml
 
-from pcb_worker import board_font, board_graphics
+from pcb_worker import board_font, board_graphics, board_validate, silk_source
 from pcb_worker.compile_board import compile_board
 from pcb_worker.gerber import build_gerbers_ir
 from pcb_worker.resolved_board import (
@@ -31,6 +33,8 @@ from pcb_worker.resolved_board import (
     PolylineGeometry,
     ResolutionSuccess,
 )
+
+VECTORS = Path(__file__).resolve().parents[2] / "spec" / "vectors"
 
 GRAPHIC_ID = "graphic:" + "a" * 32
 OTHER_ID = "graphic:" + "b" * 32
@@ -331,13 +335,63 @@ def test_malformed_entries_are_errors_not_silent_drops():
           "points": [{"x_mm": 1, "y_mm": 1}]}, "too few points"),
         ({"id": GRAPHIC_ID, "layer": "F.SilkS", "kind": "circle",
           "center": {"x_mm": 1, "y_mm": 1}, "radius": 0}, "non-positive radius"),
-        ({"layer": "F.SilkS", "kind": "text", "text": "x",
-          "position": {"x_mm": 1, "y_mm": 1}}, "no id"),
     ]
     for entry, why in cases:
         codes = _codes(_board(entry))
         assert any(c in ("invalid_board_graphic", "invalid_board_structure")
                    for c in codes), f"{why} was accepted: {codes}"
+
+
+# --------------------------------------------------------------------------
+# v1 artwork carries no persistent id
+# --------------------------------------------------------------------------
+
+def test_an_id_less_v1_graphic_compiles(tmp_path):
+    """Spec vector 450 is a v1 board whose only artwork has no id, and BOTH
+    validators call it valid — ids are a v2 demand. A compiler that refused it
+    would be the validator/compiler drift the vectors exist to catch."""
+    board = yaml.safe_load(
+        (VECTORS / "450-v1-board-graphics-valid" / "input.yaml").read_text())
+    board.setdefault("design_rules", {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                                      "via_diameter_mm": 0.6, "via_drill_mm": 0.3})
+    assert board_validate.validate_board_v2(board) == []
+    compiled = _compiled(board)
+    assert len(compiled.board_graphics) == 1
+    # Derived, board-namespaced, and the same on a recompile of the same bytes.
+    assert compiled.board_graphics[0].id.startswith("graphic:")
+    assert _compiled(board).board_graphics[0].id == compiled.board_graphics[0].id
+
+
+def test_id_less_graphics_get_distinct_derived_ids():
+    board = _compiled(_board(
+        {"layer": "F.SilkS", "kind": "line", "start": {"x_mm": 1, "y_mm": 1},
+         "end": {"x_mm": 5, "y_mm": 1}},
+        {"layer": "F.SilkS", "kind": "line", "start": {"x_mm": 1, "y_mm": 3},
+         "end": {"x_mm": 5, "y_mm": 3}}))
+    ids = [g.id for g in board.board_graphics]
+    assert len(set(ids)) == 2, ids
+
+
+# --------------------------------------------------------------------------
+# A malformed point refuses the whole entry
+# --------------------------------------------------------------------------
+
+def test_a_malformed_point_refuses_the_whole_polyline():
+    """Filtering the bad point would join its two neighbours into a segment
+    nobody authored — artwork that looks authored and is not."""
+    board = _board({"id": GRAPHIC_ID, "layer": "F.SilkS", "kind": "polyline",
+                    "points": [{"x_mm": 1, "y_mm": 1},
+                               {"x_mm": "nope", "y_mm": 5},
+                               {"x_mm": 9, "y_mm": 1}]})
+    assert "invalid_board_graphic" in _codes(board)
+    result = compile_board(board)
+    assert not getattr(result, "board", None) or not result.board.board_graphics
+
+
+def test_default_widths_are_the_silk_constants():
+    """One floor for board legend and footprint legend, not two that drift."""
+    assert board_graphics.DEFAULT_TEXT_WIDTH_MM == silk_source.SILK_TEXT_WIDTH_MM
+    assert board_graphics.DEFAULT_GRAPHIC_WIDTH_MM == silk_source.SILK_GRAPHIC_WIDTH_MM
 
 
 def test_a_non_list_container_is_refused():

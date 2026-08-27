@@ -1567,17 +1567,39 @@ def _point_from_raw(wp: Any) -> Optional[list[float]]:
     *{"x_mm":…, "y_mm":…} — the mm-suffixed spelling the panel's
       PcbHintWaypoint.position_of also accepts.
 
-    Anything else is None rather than an exception: one malformed point must
-    not blank the whole corridor.
+    Anything else is None rather than an exception — INCLUDING a point of the
+    right shape whose coordinates are not numbers ({"x": "bad", "y": 1}). These
+    envelopes arrive straight off the wire, so a non-numeric coordinate is a
+    caller mistake, and float() raising out of here took down the whole
+    materialization instead of refusing the one hint that carries it.
     """
-    if isinstance(wp, (list, tuple)) and len(wp) >= 2:
-        return [float(wp[0]), float(wp[1])]
-    if isinstance(wp, dict):
-        if "x" in wp and "y" in wp:
-            return [float(wp["x"]), float(wp["y"])]
-        if "x_mm" in wp and "y_mm" in wp:
-            return [float(wp["x_mm"]), float(wp["y_mm"])]
+    try:
+        if isinstance(wp, (list, tuple)) and len(wp) >= 2:
+            return [float(wp[0]), float(wp[1])]
+        if isinstance(wp, dict):
+            if "x" in wp and "y" in wp:
+                return [float(wp["x"]), float(wp["y"])]
+            if "x_mm" in wp and "y_mm" in wp:
+                return [float(wp["x_mm"]), float(wp["y_mm"])]
+    except (TypeError, ValueError):
+        return None
     return None
+
+
+def _unreadable_waypoints(envelope: dict) -> list[int]:
+    """Positions in this hint's ``kind_payload.waypoints`` that carry no
+    readable x/y.
+
+    The callers refuse the whole hint by name when this is non-empty rather
+    than routing the surviving corners: dropping a corner joins its two
+    neighbours into a run the author never drew, and on the verbatim path that
+    run is what gets committed as copper.
+    """
+    kp = envelope.get("kind_payload") or {}
+    raw = kp.get("waypoints") if isinstance(kp, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [i for i, wp in enumerate(raw) if _point_from_raw(wp) is None]
 
 
 def _points_from_raw(raw: Any) -> list[list[float]]:
@@ -2013,6 +2035,13 @@ def materialize_detailed_hints(
                     f"detailed hint names an unusable layer ({exc}) — "
                     "falling back to engine-guided routing"})
                 continue
+            bad_waypoints = _unreadable_waypoints(env)
+            if bad_waypoints:
+                warnings.append({"id": ann_id, "message":
+                    f"detailed hint waypoint(s) {bad_waypoints} carry no readable "
+                    "x/y — falling back to engine-guided routing rather than "
+                    "committing a corner the author never drew"})
+                continue
             try:
                 segments, vias = _route_from_waypoint_stops(
                     [src.position[0], src.position[1]],
@@ -2099,6 +2128,13 @@ def hints_to_router(
             continue
 
         layer = _canon_layer(kp.get("layer", "F.Cu"))
+        bad_waypoints = _unreadable_waypoints(env)
+        if bad_waypoints:
+            warnings.append({"id": str(env.get("id", "")), "message":
+                f"waypoint(s) {bad_waypoints} carry no readable x/y — hint "
+                "skipped rather than steered down a corridor the author never "
+                "drew"})
+            continue
         waypoints = _waypoints_of(env)
 
         w = _num(kp.get("width_mm"))

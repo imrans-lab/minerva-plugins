@@ -21,9 +21,10 @@ per-pad-number overrides. Nothing on that path changes.
 
 The trigger is the ``pads`` KEY, not its contents, so the two states cannot
 overlap and an authoring mistake cannot silently drift a board from one to the
-other.
+other. A present ``pads`` key whose value is not a list (``null``, a mapping)
+is therefore a FULL component with unreadable geometry, not a PARTIAL one.
 
-FAIL-CLOSED: a ``pads`` list that is not readable as pad geometry raises
+FAIL-CLOSED: a ``pads`` value that is not readable as pad geometry raises
 :class:`InlineGeometryError`. It is never quietly demoted to the library path —
 that would substitute one part's copper for another's without a word.
 
@@ -62,14 +63,20 @@ class InlineGeometryError(ValueError):
 
 
 def carries_full_geometry(comp: Any) -> bool:
-    """True when *comp* carries its own pad list — see FULL vs PARTIAL above.
+    """True when *comp* carries a ``pads`` KEY — see FULL vs PARTIAL above.
 
     Deliberately NOT ``pad_source.has_resolved_pads``: that predicate answers
     "are there resolved pads to iterate", so it reads an empty list as nothing
     to iterate. This one answers "who owns this component's geometry", and an
     empty list is a full, deliberate answer to that question — zero pads.
+
+    Deliberately NOT ``isinstance(..., list)`` either: a component that states
+    ``pads`` and states it wrong (``null``, a mapping) has claimed geometry
+    ownership, and answering False there would hand its copper back to the
+    library — the silent substitution the whole module exists to prevent.
+    ``footprint_from_component`` is what refuses the malformed value.
     """
-    return isinstance(comp, dict) and isinstance(comp.get("pads"), list)
+    return isinstance(comp, dict) and "pads" in comp
 
 
 def footprint_from_component(comp: dict, fp_ref: str) -> FootprintDefinition:
@@ -78,7 +85,11 @@ def footprint_from_component(comp: dict, fp_ref: str) -> FootprintDefinition:
     Named for the ``footprint`` ref it stands in for, so two components carrying
     identical geometry under one name still intern to one definition.
     """
-    pads = _pads(comp.get("pads") or [])
+    raw_pads = comp.get("pads")
+    if not isinstance(raw_pads, list):
+        raise InlineGeometryError(
+            f"pads is present but is not a list of pads (got {raw_pads!r})")
+    pads = _pads(raw_pads)
     graphics, graphic_markers = _graphics(comp.get("graphics"), fp_ref)
     return FootprintDefinition(
         name=fp_ref,
@@ -137,10 +148,18 @@ def _graphics(raw_graphics: Any,
     also mints the ``malformed_graphic`` markers a bad entry deserves. Absent or
     non-list graphics mean none, never an error: graphics are documentation, and
     the pads above are the fabrication-critical half.
+
+    An entry that is not a mapping at all is NOT dropped: it is replaced by an
+    undecodable stand-in so it earns the same ``malformed_graphic`` marker, and
+    so the entries after it keep the ``graphic:<ordinal>`` ids they would have
+    had. Dropping it would report a footprint drawn with artwork nobody can see
+    is missing.
     """
     if not isinstance(raw_graphics, list):
         return (), ()
-    normalized = [_normalize_graphic(g) for g in raw_graphics if isinstance(g, dict)]
+    normalized = [_normalize_graphic(g) if isinstance(g, dict)
+                  else {"kind": f"<not a mapping: {g!r}>"}
+                  for g in raw_graphics]
     decoded = FootprintDefinition.from_kicad_parsed(
         {"name": fp_ref, "graphics": normalized})
     return decoded.graphics, decoded.unsupported
@@ -227,8 +246,16 @@ def _layers(raw: Any, index: int) -> tuple[Layer, ...]:
         return ()
     if not isinstance(raw, list):
         raise InlineGeometryError(f"pads[{index}].layers is not a list")
-    return tuple(Layer.from_id(value) for value in raw
-                 if isinstance(value, str) and value)
+    # Refused by name rather than filtered: a dropped entry is a land that
+    # silently stops touching a layer it was authored on (copper, mask, paste),
+    # which no downstream gate can notice.
+    layers: list[Layer] = []
+    for position, value in enumerate(raw):
+        if not isinstance(value, str) or not value:
+            raise InlineGeometryError(
+                f"pads[{index}].layers[{position}] {value!r} is not a layer name")
+        layers.append(Layer.from_id(value))
+    return tuple(layers)
 
 
 def _is_finite(value: Any) -> bool:

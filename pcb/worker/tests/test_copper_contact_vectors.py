@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from pcb_worker import copper_contact
+from pcb_worker import copper_contact, drc
 from pcb_worker.drc_geom_primitives import Polygon
 from pcb_worker.pad_source import PadGeom
 
@@ -117,13 +117,22 @@ def test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc() -> None:
     """The inline-pin fallback has no land to be exact about, so it keeps the
     credit the centreline kernel always gave it: a disc of the board's own
     coincidence tolerance. Expressed as a shape, so there is still ONE
-    predicate rather than a second code path."""
+    predicate rather than a second code path.
+
+    THE PANEL RUNS THE SAME RULE — pcb_copper_contact.unknown_land_radius, with
+    DEFAULT_UNKNOWN_LAND_RADIUS_MM equal to the default below — and
+    tests/gd/test_copper_contact_vectors.gd probes these same two points. No
+    vector can pin this: every vector states a size, so the fallback is never
+    the answer inside one.
+    """
+    assert drc._board_clearance({}) == drc.DEFAULT_COINCIDENT_MM == 0.2
     sizeless = PadGeom(
         number="1", x=0.0, y=0.0, width=None, height=None, drill=None,
         annulus=None, plated=True, shape="rect", corner_rratio=None,
         solder_mask_margin=None, solder_paste_margin=None, pad_type="smd",
         layers=[], from_resolve=False)
-    pad = copper_contact.pad_node(sizeless, (0.0, 0.0), 0.0, None, 0.2)
+    pad = copper_contact.pad_node(sizeless, (0.0, 0.0), 0.0, None,
+                                  drc._board_clearance({}))
     inside = copper_contact.endpoint_node((0.15, 0.0), 0.0, "top")
     outside = copper_contact.endpoint_node((0.25, 0.0), 0.0, "top")
     assert copper_contact.nodes_touch(inside, pad)

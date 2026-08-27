@@ -288,12 +288,51 @@ def test_footprint_from_component_reports_the_offending_field():
     ({"pads": []}, True),
     ({"pads": [{"number": "1"}]}, True),
     ({}, False),
-    ({"pads": None}, False),
-    ({"pads": {}}, False),
+    # Present but malformed is still FULL: the component claimed geometry
+    # ownership, so it gets refused rather than handed back to the library.
+    ({"pads": None}, True),
+    ({"pads": {}}, True),
     ({"graphics": [{"kind": "line"}]}, False),
 ])
 def test_full_versus_partial_is_decided_by_the_pads_key(comp, expected):
     assert carries_full_geometry(comp) is expected
+
+
+@pytest.mark.parametrize("bad_pads", [None, {}, {"1": {}}, "none", 0])
+def test_a_pads_key_that_is_not_a_list_is_refused_not_demoted(bad_pads):
+    """A resolvable ref is used deliberately: demotion would COMPILE, so the
+    refusal proves ``pads: null`` never silently becomes the library's copper."""
+    board = _minimal_board(components=[{
+        "ref": "R7", "footprint": "Resistor_SMD:R_0805_2012Metric",
+        "x_mm": 10, "y_mm": 10, "rotation_deg": 0, "layer": "top",
+        "pads": bad_pads,
+    }])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_component_geometry" in _errors(result)
+
+
+def test_a_non_string_layer_entry_is_refused_by_name():
+    """A dropped layer entry is a land that stops touching copper/mask/paste
+    with nothing downstream able to notice."""
+    with pytest.raises(InlineGeometryError) as excinfo:
+        footprint_from_component({"pads": [
+            {"number": "1", "type": "smd", "position": {"x": 0.0, "y": 0.0},
+             "size": {"width": 1.0, "height": 1.0},
+             "layers": ["F.Cu", 42]}]}, UNKNOWN_REF)
+    assert "pads[0].layers[1]" in str(excinfo.value)
+
+
+def test_a_non_mapping_graphic_is_marked_not_dropped():
+    """The bad entry earns a marker, and the entry after it keeps its id."""
+    definition = footprint_from_component({"pads": [], "graphics": [
+        None,
+        {"kind": "line", "layer": "F.SilkS", "width": 0.12,
+         "start": [0.0, 0.0], "end": [1.0, 0.0]},
+    ]}, UNKNOWN_REF)
+    assert [marker.feature for marker in definition.unsupported] == \
+        ["malformed_graphic"]
+    assert [graphic.source_id for graphic in definition.graphics] == ["graphic:1"]
 
 
 def test_drill_axes_survive_the_round_trip():

@@ -204,6 +204,7 @@ func _init() -> void:
 	await _run_disconnect()
 	await _run_load_conflicts()
 	await _run_undo_step_helper()
+	await _run_refusals_write_nothing()
 	_teardown()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -437,3 +438,83 @@ func _run_undo_step_helper() -> void:
 	UndoStep.compose(data, "Touches nothing", func() -> Variant: return null)
 	check_eq("5c: a body that mutates nothing leaves no history step",
 		data.history.size(), depth_quiet)
+
+
+# ── 6: a membership write that cannot be done is refused, not half-done ──────
+#
+# Every case here used to WRITE. connect_net dropped a malformed entry and
+# reported success for it, and happily listed a pin no component carries — a ref
+# the netlist keeps and nothing on the board answers to, invisible until export.
+# The disconnect guard removed EVERY membership of a conflicted pin rather than
+# the one it was told about, silently resolving a conflict nobody mentioned. And
+# move/swap read holders[0] on such a pin: which net moved depended on load
+# order, and the other membership was dropped along the way.
+
+func _conflicted_board() -> Dictionary:
+	var board: Dictionary = _fixture_board()
+	board["nets"] = [
+		{"name": "GND", "pins": ["U1.5", "U2.1"]},
+		{"name": "SDA", "pins": ["U3.1", "U1.5"]},
+	]
+	return board
+
+
+func _run_refusals_write_nothing() -> void:
+	print("\n-- 6: refusals write nothing --")
+	await _rig(_fixture_board())
+	var data = _data()
+	var depth_before: int = data.history.size()
+
+	var nope: Dictionary = await _panel.handle_tool("minerva_pcb_connect_net",
+		{"net_name": "GND", "pins": [
+			{"component": "U1", "pin": "6"}, {"component": "NOPE", "pin": "1"}]})
+	check("6a: a pin the board does not carry refuses the call",
+		not bool(nope.get("success", true)), str(nope))
+	check_eq("6a: by name", str(nope.get("error", "")), "pin_not_found")
+	check("6a: naming the pin it could not find",
+		str(nope.get("pins", [])).contains("NOPE.1"), str(nope))
+	var after_bad: Dictionary = await _nets_from_verb()
+	check("6a: the VALID pin in the same call was not connected — all or nothing",
+		not (after_bad.get("GND", []) as Array).has("U1.6"), str(after_bad))
+	check("6a: and the netlist gained no ref no component answers to",
+		not (after_bad.get("GND", []) as Array).has("NOPE.1"), str(after_bad))
+	check_eq("6a: no history step was written", data.history.size(), depth_before)
+
+	var bad: Dictionary = await _panel.handle_tool("minerva_pcb_connect_net",
+		{"net_name": "GND", "pins": [{"component": "U1"}]})
+	check("6b: an entry naming no pin refuses, rather than being dropped",
+		not bool(bad.get("success", true)), str(bad))
+	check_eq("6b: by name", str(bad.get("error", "")), "invalid_pin")
+	check_eq("6b: still no history step", data.history.size(), depth_before)
+
+	# ── the guard NARROWS the removal ────────────────────────────────────────
+	await _rig(_conflicted_board())
+	var conflicted_data = _data()
+	check_eq("6c: the fixture really lists U1.5 on two nets",
+		Membership.nets_holding(conflicted_data, "U1", "5").size(), 2)
+	var off: Dictionary = await _panel.handle_tool("minerva_pcb_disconnect_net",
+		{"net_name": "GND", "pins": [{"component": "U1", "pin": "5"}]})
+	check("6c: the guarded disconnect succeeds", bool(off.get("success", false)), str(off))
+	check_eq("6c: ONLY the named net's membership went",
+		str(Membership.nets_holding(conflicted_data, "U1", "5")), str(["SDA"]))
+	check_eq("6c: and the reply names only that one removal",
+		str(off.get("disconnected", [])), str([{"pin": "U1.5", "net": "GND"}]))
+
+	# ── move / swap refuse a source that is on two nets ──────────────────────
+	await _rig(_conflicted_board())
+	var two_net = _data()
+	var moved: Dictionary = Membership.move_net(two_net, "U1.5", "U3.1")
+	check_eq("6d: move_net refuses a pin held by two nets",
+		str(moved.get("error", "")), "pin_on_multiple_nets")
+	check("6d: naming BOTH nets rather than picking by load order",
+		str(moved.get("nets", [])).contains("GND") and str(moved.get("nets", [])).contains("SDA"),
+		str(moved))
+	check_eq("6d: and it moved nothing",
+		Membership.nets_holding(two_net, "U1", "5").size(), 2)
+
+	var swapped: Dictionary = Membership.swap_nets(two_net, "U1.5", "U2.1")
+	check_eq("6e: swap_nets refuses the same source for the same reason",
+		str(swapped.get("error", "")), "pin_on_multiple_nets")
+	check_eq("6e: naming the pin", str(swapped.get("pin", "")), "U1.5")
+	check_eq("6e: and swapped nothing",
+		str(Membership.nets_holding(two_net, "U2", "1")), str(["GND"]))

@@ -126,6 +126,27 @@ def test_a_filled_pour_joins_the_pins_its_traces_leave_apart():
     assert drc._net_pin_groups("GND", *args, pours["GND"]) == 1
 
 
+def test_a_stated_schema_version_is_never_rewritten_to_v1():
+    """The fill path defaults an ABSENT version to v1 so a version-less board
+    the census measures is one the filler can compile. A version the board
+    STATES is a different thing: rewriting a bad one to 1 would fill copper off
+    a reading of the board no other gate shares."""
+    from pcb_worker import zone_copper
+    resolved = _resolved(_board(
+        zones=[{"id": "z1", "kind": "copper_pour", "net": "GND",
+                "layer": "top", "outline": _rect(2, 2, 18, 18)}]))
+
+    versionless = {k: v for k, v in resolved.items() if k != "version"}
+    nodes, reason = zone_copper.pour_nodes(versionless)
+    assert reason == "", reason
+    assert nodes.get("GND"), "a version-less board still fills"
+
+    for bad in ("2", 2.0, None):
+        nodes, reason = zone_copper.pour_nodes({**resolved, "version": bad})
+        assert nodes == {}, f"version {bad!r} was filled anyway"
+        assert "version" in reason, reason
+
+
 def test_a_pour_joins_only_its_own_net():
     """A plane is one potential. It must not close another net's gap, and a run
     that stops inside it must not be credited by it.

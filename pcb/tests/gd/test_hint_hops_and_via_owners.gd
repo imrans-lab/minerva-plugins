@@ -462,6 +462,45 @@ func _s5_bend_edit_preserves_layer() -> void:
 	check("5e2: the hops are the two that actually change layer",
 		hops == [1, 3])
 
+	# INSERTING A CORNER BEFORE THE HOP must not move the hop. Index alignment
+	# handed the new plain corner the hop's layer and pushed the real hop's
+	# corner onto the next entry — the duck-under, and its via, silently
+	# relocated to a stretch of the run the author never chose.
+	var inserted: Array = bends.duplicate()
+	inserted.insert(0, Vector2(25.0, 20.0))
+	var after_insert: Dictionary = kind.with_bend_points(ann, inserted)
+	var ins_wps: Array = (after_insert["kind_payload"] as Dictionary)["waypoints"]
+	check_eq("5f: the inserted corner is PLAIN (it gained no hop)",
+		PcbHintWaypoint.layer_of(ins_wps[0]), "")
+	check_eq("5f2: the hop stayed on ITS corner, now one index later",
+		PcbHintWaypoint.layer_of(ins_wps[2]), "bottom")
+	check("5f3: at the position it always had",
+		PcbHintWaypoint.position_of(ins_wps[2]) == [30.0, 20.0])
+	check_eq("5f4: still exactly one hop, so still exactly one via",
+		PcbHintWaypoint.layer_change_indices(ins_wps, "F.Cu").size(), 1)
+
+	# DELETING A CORNER BEFORE THE HOP is the same rule from the other side.
+	var deleted: Array = bends.duplicate()
+	deleted.remove_at(0)
+	var after_delete: Dictionary = kind.with_bend_points(ann, deleted)
+	var del_wps: Array = (after_delete["kind_payload"] as Dictionary)["waypoints"]
+	check_eq("5g: the hop followed its corner down an index, not stayed put",
+		PcbHintWaypoint.layer_of(del_wps[0]), "bottom")
+	check("5g2: still at its own position",
+		PcbHintWaypoint.position_of(del_wps[0]) == [30.0, 20.0])
+	check("5g3: and the corner after it is still plain",
+		PcbHintWaypoint.layer_of(del_wps[1]).is_empty())
+
+	# A corner inserted AFTER the hop leaves everything before it alone.
+	var tail: Array = bends.duplicate()
+	tail.append(Vector2(42.0, 20.0))
+	var after_tail: Dictionary = kind.with_bend_points(ann, tail)
+	var tail_wps: Array = (after_tail["kind_payload"] as Dictionary)["waypoints"]
+	check_eq("5h: an insert after the hop moves nothing",
+		PcbHintWaypoint.layer_of(tail_wps[1]), "bottom")
+	check("5h2: and the appended corner is plain",
+		PcbHintWaypoint.layer_of(tail_wps[3]).is_empty())
+
 
 # ══ 6. waypoint shape/layer validation ═══════════════════════════════════════
 

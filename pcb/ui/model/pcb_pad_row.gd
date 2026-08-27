@@ -236,9 +236,17 @@ static func side_for_pin(comp, pin: String) -> String:
 	return best_x if frac_x < frac_y else best_y
 
 
-## Which copper the pad is on: "all" for a through-hole barrel, else the side
-## its land declares, else the side the part is mounted on. A pin with no land
-## geometry (a bare point pin) answers with the part's own layer.
+## Which copper the pad is on: "all" for a PLATED through-hole barrel, "none"
+## for an unplated one, else the side its land declares, else the side the part
+## is mounted on. A pin with no land geometry (a bare point pin) answers with
+## the part's own layer.
+##
+## AN UNPLATED HOLE IS NOT ON EVERY LAYER, it is on no layer: it is drilled and
+## never plated, so there is no barrel and no copper. It used to answer "all" —
+## the same word the one pad that really does reach every layer uses — which
+## read as "this mechanical hole is the best-connected pin on the part".
+## "none" is the same reading pcb_copper_contact.physical_pad_node takes (it
+## returns a no_copper_node there), so the row and the contact predicate agree.
 static func layer_for_pin(comp, pin: String) -> String:
 	if comp == null:
 		return ""
@@ -246,7 +254,10 @@ static func layer_for_pin(comp, pin: String) -> String:
 		var land: Dictionary = raw
 		if str(land.get("number", "")) != pin:
 			continue
-		if str(land.get("type", "smd")) in THT_PAD_TYPES:
+		var land_type := str(land.get("type", "smd"))
+		if land_type == "np_thru_hole":
+			return "none"
+		if land_type in THT_PAD_TYPES:
 			return "all"
 		var layers: Array = land.get("layers", []) as Array
 		var has_front := false

@@ -1017,9 +1017,13 @@ func _segments_wire(c) -> Array:
 		out.append({
 			"id": str((seg as Dictionary).get("id", "")),
 			"layer": str((seg as Dictionary).get("layer", "top")),
-			# READ path: this wire shape is sent to the checker, never to
-			# add_trace, so the nominal fallback shapes no copper.
-			"width": float((seg as Dictionary).get("width", 0.25)),
+			# THE RESOLVED WIDTH, and 0.0 when it is unresolved — never a
+			# nominal literal. This wire shape is what the checker measures the
+			# candidate at, so inventing 0.25mm here checked copper nobody
+			# proposed and told the reviewer it was clean; commit() refuses a
+			# zero-width segment by name, and the checker must see the same
+			# geometry commit does.
+			"width": float((seg as Dictionary).get("width", 0.0)),
 			"points": pts,
 		})
 	return out
@@ -1188,7 +1192,12 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 		# else the hint derivation). Reading it here is what keeps ONE width
 		# derivation between the annotation projection and the candidate,
 		# instead of this side re-deriving a worse answer from raw hints.
-		float(record.get("width", 0.0)))
+		float(record.get("width", 0.0)),
+		# The ROUTER's own width for this route, kept distinct from the record's
+		# `width` above: that one falls through to the board's default, and the
+		# board must not outrank an authored hint. Absent-key contract — a reply
+		# that stamped nothing passes 0.0 and changes nothing.
+		float(record.get("effective_width_mm", 0.0)))
 	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
 	# DURABLE candidate state, not just a reply stamp — the commit preflight's
 	# staleness comparison (ERR_CONSTRAINT_STALE) reads it back from here, and
@@ -1249,10 +1258,17 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 ## unresolved — the honest "no rules were declared" answer, never a silent
 ## override of real ones.
 ## `stated_width` is the width the CALLER already resolved for this route (the
-## normalized record's `width`: the reply's own effective-rules stamp, else the
-## hint derivation). It outranks the board's answers and loses to
-## `width_override`; 0.0 means the caller resolved none.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null, stated_width: float = 0.0) -> String:
+## normalized record's `width`, whose last rung is the BOARD's own default). It
+## outranks nothing but an unresolved width, precisely because that last rung
+## must not beat an authored hint; 0.0 means the caller resolved none.
+## `reply_width` is the width the ROUTER stated for this route (the record's
+## `effective_width_mm` — the worker's own resolution, which already weighed the
+## caller option, the hint, the net class and the net's existing copper). It
+## outranks the hint re-derivation below and the board, and loses only to
+## `width_override`: re-deriving 0.25mm from a hint here would commit a width
+## the router did not route at. A segment that carries its OWN `width_mm` is
+## more specific still and wins over all of them, per segment, further down.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null, stated_width: float = 0.0, reply_width: float = 0.0) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -1292,8 +1308,15 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	else:
 		width = _width_for_net(source_hints, net)
 		width_hints = _hints_matching_net(source_hints, net)
+	# THE ROUTER'S OWN ANSWER OUTRANKS THIS SIDE'S HINT RE-DERIVATION: it
+	# already weighed those hints and something more specific beat them, so
+	# re-deriving here would commit a width the router did not route at.
+	# `stated_width` stays BELOW the hints — its last rung is the board's
+	# default, which must never outrank a width someone authored.
 	if width_override > 0.0:
 		width = width_override
+	elif reply_width > 0.0:
+		width = reply_width
 	elif width <= 0.0 and stated_width > 0.0:
 		width = stated_width
 	# A MISSING WIDTH IS RESOLVED, NOT INVENTED. When neither the caller, the

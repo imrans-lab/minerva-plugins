@@ -117,11 +117,16 @@ def _compilable(board: dict) -> dict:
     it claims, so a board it happily measures can still be one the compiler
     refuses to resolve. Refusing here would report a pour as unmeasurable for a
     reason that has nothing to do with the pour — the fill path must tolerate
-    exactly what the census tolerates. An absent version means v1, the schema's
-    own oldest shape; a version the board DOES state is never overridden, so a
-    genuinely bad one still fails as it should.
+    exactly what the census tolerates.
+
+    ONLY AN ABSENT KEY DEFAULTS. An absent version means v1, the schema's own
+    oldest shape. A version the board STATES is never touched, whatever it says:
+    rewriting a stated ``"2"`` or ``2.0`` to 1 would compile a board the schema
+    gate refuses, so the plane's copper would be measured off a reading of the
+    board nobody else shares. A bad stated version fails in the compiler and the
+    pour reads back as indeterminate with that as its detail.
     """
-    if isinstance(board.get("version"), int):
+    if "version" in board:
         return board
     return {**board, "version": 1}
 

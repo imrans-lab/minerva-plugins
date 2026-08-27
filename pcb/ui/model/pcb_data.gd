@@ -1062,7 +1062,8 @@ func trace_end_is_joined(trace_id: String, end: String) -> bool:
 	for comp_id in components:
 		var comp = components[comp_id]
 		for pin_name in comp.get_all_pin_positions():
-			if PcbCopperContact.copper_joins_pin(cap, comp, str(pin_name), stack):
+			if PcbCopperContact.copper_joins_pin(cap, comp, str(pin_name), stack,
+					PcbCopperContact.unknown_land_radius(self)):
 				return true
 	if not get_via_at(pt, TRACE_END_JOIN_EPS_MM).is_empty():
 		return true

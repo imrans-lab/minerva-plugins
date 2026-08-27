@@ -160,16 +160,30 @@ static func display(graphic: Dictionary) -> Dictionary:
 	return out
 
 
-## Axis-aligned board-mm bounds of a graphic, or a zero Rect2 when it draws
-## nothing. Reported by the authoring verbs so a caller can see where its
-## artwork landed without re-deriving the font.
+## Axis-aligned board-mm bounds of the INK — the stroke, not the centreline —
+## or a zero Rect2 when the graphic draws nothing. Reported by the authoring
+## verbs so a caller can see where its artwork landed without re-deriving the
+## font, which is a question about what is on the board: a 0.15mm line drawn
+## along the rim of the board overhangs it by 0.075mm, and a bounds that stops
+## at the centreline says it fits.
 static func bounds(graphic: Dictionary) -> Rect2:
 	var shown := display(graphic)
+	var half: float = maxf(0.0, width_of(graphic)) * 0.5
 	if shown["circle"] != null:
 		var c: Vector2 = shown["circle"]["center"]
-		var r: float = shown["circle"]["radius"]
+		var r: float = float(shown["circle"]["radius"]) + half
 		return Rect2(c - Vector2(r, r), Vector2(r * 2.0, r * 2.0))
-	return PcbBoardFont.bounds_of(shown["polylines"])
+	var strokes: Array = shown["polylines"]
+	var drawn := false
+	for stroke in strokes:
+		if (stroke as Array).size() > 0:
+			drawn = true
+			break
+	if not drawn:
+		# Nothing drawn is nothing to grow — a zero Rect2 grown by half a stroke
+		# would report ink around the origin.
+		return Rect2()
+	return PcbBoardFont.bounds_of(strokes).grow(half)
 
 
 static func bounds_dict(graphic: Dictionary) -> Dictionary:
@@ -196,6 +210,9 @@ static func build_text(text: String, x_mm: float, y_mm: float, layer: String,
 			[layer, ", ".join(ALLOWED_LAYERS)]}
 	if size_mm <= 0.0:
 		return {"ok": false, "error": "size_mm must be > 0, got %s" % size_mm}
+	var id_error := _id_error(id)
+	if not id_error.is_empty():
+		return {"ok": false, "error": id_error}
 	var graphic := {
 		"id": id if not id.is_empty() else PcbEntityId.mint(ENTITY_TYPE),
 		"layer": layer,
@@ -226,6 +243,9 @@ static func build_geometry(layer: String, spec: Dictionary, width_mm: float = -1
 		return {"ok": false, "error":
 			"kind %s is not raw geometry; expected line, circle, poly, polyline or rect"
 			% kind}
+	var id_error := _id_error(id)
+	if not id_error.is_empty():
+		return {"ok": false, "error": id_error}
 	var graphic := {
 		"id": id if not id.is_empty() else PcbEntityId.mint(ENTITY_TYPE),
 		"layer": layer,
@@ -252,6 +272,21 @@ static func build_geometry(layer: String, spec: Dictionary, width_mm: float = -1
 					"%s requires at least %d points, got %d" % [kind, minimum, pts.size()]}
 			graphic["points"] = pts
 	return {"ok": true, "graphic": graphic}
+
+
+## "" when `id` may be used as this graphic's identity, else why not.
+##
+## A SUPPLIED ID MUST BE MINTED. Go's Validate refuses an unminted graphic id on
+## a v2 board (`unminted_persistent_id`), and that refusal arrives at save or
+## export — long after the caller has been told its artwork landed, and against
+## the WHOLE board rather than the one entry. Refusing here says which id was
+## wrong, while there is still only one. An EMPTY id is not an error: it means
+## "mint me one".
+static func _id_error(id: String) -> String:
+	if id.is_empty() or PcbEntityId.is_minted(ENTITY_TYPE, id):
+		return ""
+	return ("id %s is not a minted board-graphic id (%s:<32 lowercase hex>); "
+		+ "omit it to have one minted") % [id, ENTITY_TYPE]
 
 
 ## Does `world_pos` (board mm) land on this graphic's painted body, within

@@ -222,6 +222,23 @@ def test_4b_non_copper_waypoint_layer_is_refused_too():
     assert "unusable waypoint layer" in _messages(result)
 
 
+def test_4c_a_non_numeric_coordinate_refuses_the_hint_by_name():
+    """These envelopes arrive straight off the wire, so a coordinate that is
+    not a number is a caller mistake — not a reason for the whole route call to
+    raise, and not a corner to quietly drop (dropping it joins the neighbours
+    into a run nobody drew)."""
+    result = _route(_hint([
+        [20.0, 20.32],
+        {"x": "bad", "y": 20.32, "layer": "bottom"},
+        [35.0, 20.32],
+    ]))
+    assert "ann1" in [w.get("id") for w in result["warnings"]]
+    msgs = _messages(result)
+    assert "no readable x/y" in msgs
+    for route in result.get("routes") or []:
+        assert route.get("as_drawn") is not True
+
+
 # ---------------------------------------------------------------------------
 # 5. The ENGINE path cannot honour hops — and must never drop them silently
 # ---------------------------------------------------------------------------

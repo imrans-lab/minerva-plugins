@@ -16,6 +16,7 @@ extends SceneTree
 
 const Contact := preload("res://../../minerva-plugins/pcb/ui/model/pcb_copper_contact.gd")
 const PCBComponentScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
+const PCBDataScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 
 const VECTOR_DIR := "res://../../minerva-plugins/pcb/spec/contact"
 
@@ -181,6 +182,13 @@ func _run_symmetry(names: PackedStringArray) -> void:
 ## the small assumed disc — the one place the model guesses, and it guesses
 ## SMALL so copper merely passing near an unresolved pin does not read as
 ## landed on it.
+##
+## THE DISC IS THE BOARD'S CLEARANCE, the same derivation the worker runs
+## (drc._board_clearance feeding copper_contact.pad_node's
+## unknown_land_radius_mm), defaulting to the same number when the board
+## declares none. A panel-only 0.3 answered "joined" for a probe 0.25 mm off
+## centre that the census called clear — a disagreement no vector could catch,
+## because every vector states a size.
 func _run_unknown_land() -> void:
 	var comp = PCBComponentScript.new()
 	comp.id = "U9"
@@ -189,11 +197,32 @@ func _run_unknown_land() -> void:
 	comp.layer = "top"
 	comp.has_pad_geometry = false
 	comp.pins = {"1": Vector2(0.0, 0.0)}
-	# FALLBACK_PAD_RADIUS_MM is 0.3 and the probe carries no width, so 0.25mm
-	# out is on the assumed copper and 0.35mm out is 0.05mm clear of it.
-	var inside := Contact.endpoint_node(Vector2(0.25, 0.0), 0.0, "top")
-	var outside := Contact.endpoint_node(Vector2(0.35, 0.0), 0.0, "top")
+	# The default radius is 0.2 and the probe carries no width, so 0.15mm out is
+	# on the assumed copper and 0.25mm out is 0.05mm clear of it — the SAME two
+	# probes worker/tests/test_copper_contact_vectors.py measures.
+	check("the default disc is the worker's default coincidence tolerance",
+		is_equal_approx(Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM, 0.2))
+	var inside := Contact.endpoint_node(Vector2(0.15, 0.0), 0.0, "top")
+	var outside := Contact.endpoint_node(Vector2(0.25, 0.0), 0.0, "top")
 	check("a geometry-less pin is reached inside its assumed radius",
 		Contact.copper_joins_pin(inside, comp, "1", _stack()))
 	check("a geometry-less pin is not reached outside it",
 		not Contact.copper_joins_pin(outside, comp, "1", _stack()))
+
+	# A BOARD THAT DECLARES A CLEARANCE SETS THE DISC. Same rule as the worker's,
+	# so the 0.25mm probe flips together on both sides rather than only here.
+	var loose = PCBDataScript.new()
+	loose.design_rules = {"clearance_mm": 0.35}
+	check("the board's own clearance is the radius",
+		is_equal_approx(Contact.unknown_land_radius(loose), 0.35))
+	check("...and the probe that was clear is now landed",
+		Contact.copper_joins_pin(outside, comp, "1", _stack(),
+			Contact.unknown_land_radius(loose)))
+	var plain = PCBDataScript.new()
+	plain.design_rules = {}
+	check("a board declaring no clearance falls back to the shared default",
+		is_equal_approx(Contact.unknown_land_radius(plain),
+			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))
+	check("and so does no board at all (the headless answer)",
+		is_equal_approx(Contact.unknown_land_radius(null),
+			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))

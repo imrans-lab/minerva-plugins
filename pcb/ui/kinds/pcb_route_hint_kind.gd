@@ -1377,17 +1377,17 @@ func with_bend_points(annotation: Dictionary, new_bends: Array) -> Dictionary:
 	var new_ann := annotation.duplicate(true)
 	var payload: Dictionary = (new_ann.get("kind_payload", {}) as Dictionary).duplicate(true)
 	# LAYER HOPS SURVIVE A BEND EDIT. Rebuilding every bend as a bare [x, y]
-	# would silently dissolve a waypoint's `layer` — and
-	# with it the via the route materializes there — the first time anyone
-	# dragged a corner. Index-aligned against the bends this replaces, which is
-	# the contract bend_points()/with_bend_points already share.
-	# An insert/delete simply has no prior entry at that index, and lands plain.
-	var prior_entries: Array = _bend_entries(payload)
+	# would silently dissolve a waypoint's `layer` — and with it the via the
+	# route materializes there — the first time anyone dragged a corner.
+	# Carried onto the bend it BELONGS to, not onto whatever now sits at the
+	# same index: an insert or delete EARLIER in the path shifts every later
+	# corner by one, and index alignment moved the hop (and its via) onto a
+	# different corner of the run. See _aligned_prior_entries.
+	var prior_entries: Array = _aligned_prior_entries(_bend_entries(payload), new_bends)
 	var bend_arrays: Array = []
 	for i in range(new_bends.size()):
 		var pos: Vector2 = new_bends[i] as Vector2
-		var carried: Variant = prior_entries[i] if i < prior_entries.size() else null
-		bend_arrays.append(_PcbHintWaypoint.with_position(carried, pos))
+		bend_arrays.append(_PcbHintWaypoint.with_position(prior_entries[i], pos))
 	if payload.has("dest_point"):
 		payload["waypoints"] = bend_arrays
 	else:
@@ -1403,6 +1403,57 @@ func with_bend_points(annotation: Dictionary, new_bends: Array) -> Dictionary:
 			payload["waypoints"] = out
 	new_ann["kind_payload"] = payload
 	return new_ann
+
+
+## The prior bend entry that BELONGS to each new bend, aligned by the EDIT that
+## produced `new_bends` rather than by raw index. One entry per new bend; null
+## where the new bend has no ancestor (the freshly inserted corner).
+##
+## The callers make exactly three kinds of edit, and the size says which:
+##   - same size  -> a MOVE: bend i is still bend i, wherever it was dragged to.
+##   - one more   -> an INSERT: everything from the insertion point on shifts
+##                   up by one, and the new corner itself is plain.
+##   - one fewer  -> a DELETE: everything after the removed corner shifts down.
+## The insertion/removal point is found by walking until the positions stop
+## agreeing, which is exact here because a single edit only ever moves ONE
+## corner. Any other reshape falls back to index alignment — the old behaviour,
+## which is the best guess available when the edit cannot be named.
+func _aligned_prior_entries(prior: Array, new_bends: Array) -> Array:
+	var out: Array = []
+	var n: int = new_bends.size()
+	var p: int = prior.size()
+	if n == p + 1:
+		var at: int = _divergence_index(prior, new_bends, p)
+		for i in range(n):
+			if i < at:
+				out.append(prior[i])
+			elif i == at:
+				out.append(null)
+			else:
+				out.append(prior[i - 1])
+		return out
+	if n + 1 == p:
+		var at2: int = _divergence_index(prior, new_bends, n)
+		for i in range(n):
+			out.append(prior[i] if i < at2 else prior[i + 1])
+		return out
+	for i in range(n):
+		out.append(prior[i] if i < p else null)
+	return out
+
+
+## The first index at which `prior` and `new_bends` stop describing the same
+## corner — i.e. where the inserted/removed bend sits. `fallback` is the answer
+## when they agree all the way along (the edit was at the very end).
+func _divergence_index(prior: Array, new_bends: Array, fallback: int) -> int:
+	var limit: int = mini(prior.size(), new_bends.size())
+	for i in range(limit):
+		var was: Array = _PcbHintWaypoint.position_of(prior[i])
+		var now: Vector2 = new_bends[i] as Vector2
+		if was.size() < 2 or not (is_equal_approx(float(was[0]), now.x)
+				and is_equal_approx(float(was[1]), now.y)):
+			return i
+	return fallback
 
 
 ## The RAW waypoint entries that bend_points() reports, in the same order and
