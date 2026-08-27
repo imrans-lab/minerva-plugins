@@ -1,0 +1,30 @@
+{
+  "name": "100-rotated-land-45-mirror-outside",
+  "why": "The mirror of 090 about the x axis. (1.0, 1.0) projects 0mm along the land's long axis and 1.414mm across it \u2014 0.914mm clear of copper. The two vectors together pin the rotation sign; either alone can be satisfied by both.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "rect",
+    "size": [
+      4.0,
+      1.0
+    ],
+    "rotation_deg": 45.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      1.0,
+      1.0
+    ],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": false
+}

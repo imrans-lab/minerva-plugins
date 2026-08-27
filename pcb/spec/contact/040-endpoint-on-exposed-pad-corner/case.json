@@ -1,0 +1,30 @@
+{
+  "name": "040-endpoint-on-exposed-pad-corner",
+  "why": "A stub ending 0.5/0.25mm off the centre of a 1.68x1.68 exposed pad. Both offsets are under the 0.84mm half-extent, so the end is on the copper; the 0.559mm centre distance is what a centre-to-centre rule sees instead.",
+  "pad": {
+    "at": [
+      5.0,
+      5.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.68,
+      1.68
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      5.5,
+      4.75
+    ],
+    "width_mm": 0.25,
+    "layer": "top"
+  },
+  "touches": true
+}

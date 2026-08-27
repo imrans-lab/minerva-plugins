@@ -1,0 +1,31 @@
+{
+  "name": "070-roundrect-corner-is-rounded",
+  "why": "A 2.0x2.0 roundrect with a 0.5mm corner radius has an inner core of 0.5/0.5. The point (0.9, 0.9) is 0.566mm from the nearest core corner, 0.066mm outside the copper \u2014 and inside the bounding box that a clearance check would conservatively use.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "roundrect",
+    "size": [
+      2.0,
+      2.0
+    ],
+    "rotation_deg": 0.0,
+    "corner_rratio": 0.25,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      0.9,
+      0.9
+    ],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": false
+}

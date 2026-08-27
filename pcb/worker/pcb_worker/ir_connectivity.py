@@ -16,12 +16,16 @@ compiles once and feeds BOTH halves of its reply from that single compile. There
 is deliberately no raw-dict and no best-effort-resolve fallback on this path: the
 compiled IR is the only pad census.
 
-DELIBERATELY NOT GEOMETRY. The connectivity kernel reasons about pad CENTERS and
-trace CENTERLINES only (see docs/drc.md); it cannot verify a clearance, width or
-annular ring, and this projection does not give it the ability to. Pad EXTENTS
-are not projected — geometric copper DRC (:mod:`drc_geometric`) owns that, over
-the same IR. Adding geometry semantics to the legacy kernel is explicitly out of
-scope (Codex E1 review, comment 773).
+STILL NOT A GEOMETRIC DRC. The connectivity kernel cannot verify a clearance, a
+width rule or an annular ring, and this projection does not give it the ability
+to — geometric copper DRC (:mod:`drc_geometric`) owns those, over the same IR.
+
+Pad LANDS are projected, for one question only: whether copper JOINS a pad. That
+is answered by the shared contact predicate (:mod:`copper_contact`), which needs
+real extent — a route ending on the far edge of a big land is landed, and a
+pad-centre distance says it is dangling. The land rides as ``comp["pads"]``
+through the neutral owner's own dict builder, so the pad this projection hands
+the kernel is byte-for-byte the pad the fab emitters shape.
 
 COORDINATE CONVENTION: components are emitted at the origin with zero rotation
 and their pins carry ABSOLUTE board positions, because the IR has already placed
@@ -39,6 +43,7 @@ from collections import Counter
 from agent_router.layers import kicad_to_canon
 
 from .ir_pads import UnsupportedGeometry, iter_ir_pads
+from .pad_source import placed_pad_to_resolved_dict
 from .resolved_board import ResolvedBoard
 
 
@@ -87,7 +92,7 @@ def connectivity_board(rb: ResolvedBoard) -> dict:
         comp = components.get(ir_pad.ref)
         if comp is None:
             comp = {"ref": ir_pad.ref, "x_mm": 0.0, "y_mm": 0.0,
-                    "rotation_deg": 0.0, "pins": []}
+                    "rotation_deg": 0.0, "pins": [], "pads": []}
             components[ir_pad.ref] = comp
         pin: dict = {"number": ir_pad.human_number,
                      "x_mm": float(pad.position[0]),
@@ -116,6 +121,17 @@ def connectivity_board(rb: ResolvedBoard) -> dict:
             # electrical land from KiCad's legal paste-only aperture node.
             pin["layers"] = [layer.id for layer in pad.layers]
         comp["pins"].append(pin)
+        # THE LAND ITSELF, beside the pin. The kernel's pad-contact predicate
+        # (drc._harvest_pads -> copper_contact) needs real copper extent, and a
+        # canonical `pin` carries none — so a route ending on the edge of a big
+        # land read as dangling on THIS path while the same board read as
+        # landed through resolve's comp["pads"]. Emitted through the neutral
+        # owner's own dict builder, so the projected pad is byte-for-byte the
+        # pad the fab emitters shape. Positions are already absolute and the
+        # component rides at zero rotation (see the module note), which is the
+        # frame a resolved pad dict is read in.
+        comp["pads"].append(
+            placed_pad_to_resolved_dict(pad, ir_pad.human_number))
         pin_ref_by_pad_id[pad.id] = _pin_ref(ir_pad.ref, ir_pad.human_number)
 
     nets: list[dict] = []

@@ -1,11 +1,19 @@
 """Connectivity/topology check over a canonical board model.
 
-NOT a geometric copper DRC. Every check below reads pad CENTERS and trace
-CENTERLINES only — never copper extents, pad shapes, trace widths, or mask
-geometry — so it CANNOT verify clearances. A zero-finding result means "no
+NOT a geometric copper DRC. It CANNOT verify a clearance, a width rule, an
+annular ring or mask geometry, and a zero-finding result means "no
 connectivity/topology fault found", NOT "geometrically or fab clean". Real
 geometric-copper DRC + manufacturer DFM need resolved pad/trace geometry (the
 ResolvedBoard IR, docket 019f7abf55c2) and are reported separately (019f7abf7e7b).
+
+ONE PLACE READS REAL COPPER EXTENT: whether a piece of copper JOINS a pad. That
+question is answered by the shared contact predicate (:mod:`copper_contact`) —
+the run's swept width against the pad's land — because a pad-centre distance
+gets it wrong in both directions: a wide trace ending off-centre reads as an
+open, and a run driven across a land reads as unconnected. Everything ELSE here
+is still centreline-to-centre: the shorts (check A) measure a centreline against
+a pad CENTER, deliberately, so this module keeps under-reporting a clearance it
+has no standing to judge.
 
 Pure Python, no KiCad binary — operates on the same canonical board dict
 (``board_model.load_board``) that gerber.py / kicad.py consume. Four connectivity checks:
@@ -26,8 +34,9 @@ FALSE-POSITIVE GUARDS (mandatory — a DRC that cries wolf is useless):
   * T-junction credit: a leaf endpoint lying on the INTERIOR of another same-net
     segment counts as connected (not just shared endpoints) — else GND taps read
     as opens.
-  * Any-pad credit for dangling: an endpoint touching *any* pad (even a wrong-net
-    one) is copper-connected, so it is a short (check A), never an open (check C).
+  * Any-pad credit for dangling: an endpoint whose copper reaches *any* pad (even
+    a wrong-net one) is copper-connected, so it is a short (check A), never an
+    open (check C).
     This also means a leaf ending on ANY pad of its component is never a false
     open — same-component same-net pads (module internal nets, e.g. an ESP32's
     several GND pins) are internally connected and stay quiet.
@@ -46,6 +55,7 @@ from typing import Any, NamedTuple
 
 from agent_router import layers as _layers
 
+from . import copper_contact
 from .geometry import rotate_local_offset as _rotate
 from .pad_source import has_copper, is_through_hole, iter_pads
 
@@ -215,9 +225,11 @@ class _Pad:
     ``through_hole`` stays as the separate, cheaper fact the emitters share;
     ``occupies`` is what the layer-sensitive checks ask."""
 
-    __slots__ = ("ref", "pin", "net", "x", "y", "through_hole", "layers")
+    __slots__ = ("ref", "pin", "net", "x", "y", "through_hole", "layers",
+                 "contact")
 
-    def __init__(self, ref, pin, net, x, y, through_hole, layers=None):
+    def __init__(self, ref, pin, net, x, y, through_hole, layers=None,
+                 contact=None):
         self.ref = ref
         self.pin = pin
         self.net = net
@@ -225,6 +237,10 @@ class _Pad:
         self.y = y
         self.through_hole = through_hole
         self.layers = layers
+        #: This land as a :class:`copper_contact.ContactNode` — the ONE thing
+        #: every "does copper reach this pad" question below asks. Built at
+        #: harvest so the sweeps do not rebuild geometry per comparison.
+        self.contact = contact
 
     def occupies(self, layer) -> bool:
         """Whether this pad has copper on ``layer`` (a canonical id).
@@ -251,13 +267,27 @@ class _Seg:
     mixed "top" with "F.Cu" spellings compared them UNEQUAL and under-detected
     crossings between them."""
 
-    __slots__ = ("net", "layer", "a", "b")
+    __slots__ = ("net", "layer", "a", "b", "width")
 
-    def __init__(self, net, layer, a, b):
+    def __init__(self, net, layer, a, b, width=0.0):
         self.net = net
         self.layer = layer
         self.a = a
         self.b = b
+        #: SWEPT WIDTH, in mm. The centreline alone cannot answer whether a run
+        #: covers a land, so the pad-contact predicate needs the real copper; a
+        #: board stating no width keeps 0.0 (the bare centreline) rather than a
+        #: guessed one.
+        self.width = width
+
+    def node(self):
+        """This segment's swept copper."""
+        return copper_contact.segment_node(self.a, self.b, self.width,
+                                           self.layer)
+
+    def end_node(self, pt):
+        """The copper at ONE end of this segment (its round cap)."""
+        return copper_contact.endpoint_node(pt, self.width, self.layer)
 
 
 def _pin_net_map(board: dict) -> dict[tuple[str, str], str]:
@@ -280,6 +310,10 @@ def _pin_net_map(board: dict) -> dict[tuple[str, str], str]:
 
 def _harvest_pads(board: dict) -> list[_Pad]:
     pin_net = _pin_net_map(board)
+    # The fallback reach for a pad that states no copper size — the board's own
+    # coincidence tolerance, which is exactly the credit such a pad has always
+    # been given. See copper_contact._land_shape.
+    unknown_land_radius = _board_clearance(board)
     pads: list[_Pad] = []
     for comp in _list(board.get("components")):
         if not isinstance(comp, dict):
@@ -319,8 +353,16 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             else:
                 canon = frozenset(_layers.kicad_to_canon(lay) for lay in declared
                                   if _layers.is_copper(lay)) or None
+            # BOARD angle of the land: the placement angle composed with the
+            # pad's own, both in the one clockwise convention _rotate applies to
+            # the offset just above (a compiled-IR pad carries its combined
+            # angle and rides a zero-rotation component, so the sum is right on
+            # that path too).
+            land_deg = rot + _num(pad.rotation)
+            contact = copper_contact.pad_node(
+                pad, (cx + ox, cy + oy), land_deg, canon, unknown_land_radius)
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
-                             cx + ox, cy + oy, through_hole, canon))
+                             cx + ox, cy + oy, through_hole, canon, contact))
     return pads
 
 
@@ -338,8 +380,9 @@ def _harvest_segments(board: dict) -> list[_Seg]:
         layer = _layers.kicad_to_canon(tr.get("layer"))
         pts = [(_num(p.get("x_mm")), _num(p.get("y_mm")))
                for p in _list(tr.get("points")) if isinstance(p, dict)]
+        width = max(_num(tr.get("width_mm")), 0.0)
         for a, b in zip(pts, pts[1:]):
-            segs.append(_Seg(net, layer, a, b))
+            segs.append(_Seg(net, layer, a, b, width))
     return segs
 
 
@@ -425,17 +468,23 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
             nets_here = {p.net for p in near}
             if seg.net in nets_here:
                 continue  # correctly lands on its own net's pad
-            pad = min(near, key=lambda p: _dist(pt, p.pt))
-            key = (seg.net, _round_pt(pt), pad.ref, pad.pin)
-            if key in seen_at_ends:
-                continue
-            seen_at_ends.add(key)
-            findings.append({
-                "type": "wrong_net_pad",
-                "net": seg.net,
-                "at": [round(pt[0], 3), round(pt[1], 3)],
-                "pad": {"ref": pad.ref, "pin": pad.pin, "net": pad.net},
-            })
+            # EVERY foreign pad crowding this end, not just the nearest one. An
+            # end wedged between two foreign lands shorts to BOTH, and naming
+            # one of them told the reader to move the trace far enough to clear
+            # that one — which the other still forbids. Ordered by distance so
+            # the nearest still reads first.
+            for pad in sorted(near, key=lambda p: (_dist(pt, p.pt), str(p.ref),
+                                                   str(p.pin))):
+                key = (seg.net, _round_pt(pt), pad.ref, pad.pin)
+                if key in seen_at_ends:
+                    continue
+                seen_at_ends.add(key)
+                findings.append({
+                    "type": "wrong_net_pad",
+                    "net": seg.net,
+                    "at": [round(pt[0], 3), round(pt[1], 3)],
+                    "pad": {"ref": pad.ref, "pin": pad.pin, "net": pad.net},
+                })
         for pad in pads:
             if pad.net == seg.net or not pad.occupies(seg.layer):
                 continue
@@ -450,8 +499,13 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
             # double-billed either — it is within clr of both segments' shared
             # endpoint, so both hand it to the endpoint pass, which dedupes on
             # the point.
-            key = (seg.net, seg.layer, _round_pt(seg.a), _round_pt(seg.b),
-                   pad.ref, pad.pin)
+            #
+            # THE ENDPOINT PAIR IS SORTED, because a segment is the same copper
+            # whichever way its two ends are written: A->B and B->A keyed
+            # differently, so a board carrying both spellings of one run
+            # reported the foreign land it crosses twice.
+            key = (seg.net, seg.layer) + tuple(sorted(
+                (_round_pt(seg.a), _round_pt(seg.b)))) + (pad.ref, pad.pin)
             if key in seen_along:
                 continue
             seen_along.add(key)
@@ -526,6 +580,14 @@ def _check_dangling(segs, pads, vias, clr) -> list[dict]:
                     continue
                 # Any pad (any net) -> copper-connected (short, not open).
                 #
+                # THE PAD CREDIT IS THE SHARED CONTACT PREDICATE: this end's own
+                # swept copper against the pad's land (copper_contact), so a
+                # wide run landing off-centre, an end anywhere on a big exposed
+                # pad, and a rotated roundrect land all read as landed — and an
+                # end that genuinely stops short of the copper still reads as
+                # open. The END cap is measured, not the whole segment, so
+                # copper at the far end cannot credit this one.
+                #
                 # DEPENDENCY, stated because this check is net-BLIND on purpose
                 # (cold review of the CPN1 repair round): a foreign-net pad or
                 # via that suppresses a dangling finding here is itself either
@@ -535,7 +597,9 @@ def _check_dangling(segs, pads, vias, clr) -> list[dict]:
                 # too. run_drc ALONE is topology-only and will read such an
                 # endpoint as clean; the promote gate composes both, which is
                 # what makes the silence here safe rather than merely quiet.
-                if any(_dist(pt, p.pt) <= clr for p in pads):
+                end = seg.end_node(pt)
+                if any(copper_contact.nodes_touch(end, p.contact)
+                       for p in pads if p.contact is not None):
                     continue
                 if any(_dist(pt, v) <= clr for v in vias):
                     continue
@@ -688,10 +752,11 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
     credits the violation checks above extend (a finding and a completeness
     verdict must not disagree about what "touches" means):
 
-      * a segment endpoint within ``clr`` of a pad CENTER joins pad<->segment
-        (the wrong_net_pad / dangling credit, same-net restricted here);
-      * a pad CENTER on a segment's interior joins too — same-net copper run
-        straight across a pad is physically connected copper;
+      * a segment whose swept copper reaches a pad's LAND joins pad<->segment,
+        through the shared contact predicate (:mod:`copper_contact`) the
+        dangling credit also reads. One call covers landing ON the pad and
+        running THROUGH it: same-net copper driven straight across a land is
+        physically connected copper and needs no separate interior test;
       * two segments join at COINCIDENT endpoints (within
         COPPER_COINCIDENT_EPS_MM — NOT clearance; see the constant's rationale
         for the census correction 019fd5fdeef3a and the pad/via asymmetry),
@@ -734,11 +799,16 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
 
     seg_node = n_pads
     for si, seg in enumerate(net_segs):
+        swept = seg.node()
         for pi, pad in enumerate(net_pads):
-            if not pad.occupies(seg.layer):
-                continue   # copper on another layer joins nothing here
-            if (_dist(seg.a, pad.pt) <= clr or _dist(seg.b, pad.pt) <= clr
-                    or _point_on_segment_interior(pad.pt, seg.a, seg.b, clr)):
+            if pad.contact is None:
+                continue
+            # ONE call covers both ways copper reaches a land: an END on it, and
+            # a run driven THROUGH it. A stadium-to-land distance does not care
+            # which stretch of the run is nearest, so the pass-through tap needs
+            # no separate interior test — and the layer check rides inside the
+            # predicate rather than being asked again here.
+            if copper_contact.nodes_touch(swept, pad.contact):
                 union(pi, seg_node + si)
         for sj in range(si + 1, len(net_segs)):
             other = net_segs[sj]

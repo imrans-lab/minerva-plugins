@@ -810,10 +810,11 @@ def _from_resolved(pad: dict) -> PadGeom:
     )
 
 
-def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
-    """A board-absolute :class:`PlacedPad` (K2 IR) -> a :class:`PadGeom` — the
-    IR-NATIVE pad accessor the fab emitters use so they consume the ResolvedBoard
-    directly (C5: the IR->loose-dict adapter is gone).
+def placed_pad_to_resolved_dict(pad: "PlacedPad", number: str) -> dict:
+    """A board-absolute :class:`PlacedPad` (K2 IR) -> the RESOLVED-PAD DICT the
+    IR-NATIVE pad accessor is built on, so a consumer that needs to hand a pad
+    to a loose-dict reader (:mod:`ir_connectivity`'s projection) emits exactly
+    what :func:`placed_pad_to_geom` consumes rather than a second mapping.
 
     It projects the PlacedPad into the resolved-pad dict shape and reuses
     :func:`_from_resolved`, so the IR path and the raw loose-dict path apply the SAME
@@ -858,4 +859,10 @@ def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
     # carried: an override-annulus pad stays a round annulus regardless of raw_shape.
     if pad.raw_shape is not None and pad.annulus is None:
         d["raw_shape"] = pad.raw_shape
-    return _from_resolved(d)
+    return d
+
+
+def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
+    """The same IR pad as a :class:`PadGeom`, through the resolved-dict shape
+    above so the IR and loose-dict paths cannot apply different rules."""
+    return _from_resolved(placed_pad_to_resolved_dict(pad, number))

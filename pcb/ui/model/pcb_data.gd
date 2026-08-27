@@ -52,6 +52,9 @@ const PCBNetScript := preload("pcb_net.gd")
 const PCBTraceScript := preload("pcb_trace.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
+## The plugin-wide copper-contact predicate. "Is this end joined" is the same
+## question the DRC and the pin inspector ask, so it is asked there.
+const PcbCopperContact := preload("pcb_copper_contact.gd")
 
 ## Signals for reactive UI updates (panel relays these to drive dirty state).
 signal data_changed()
@@ -1013,8 +1016,9 @@ static func is_joined_end_refusal(refusal: String) -> bool:
 const TRACE_END_START := "start"
 const TRACE_END_END := "end"
 
-## Coincidence epsilon (mm) for "this trace end touches that copper" — the same
-## pad-centre slack the dangling-copper sweep grants, applied to copper distance.
+## Coincidence epsilon (mm) for "this trace end touches a VIA or another trace".
+## Pads do not use it: their credit is the shared contact predicate, which
+## measures real copper and needs no slack around a centre.
 const TRACE_END_JOIN_EPS_MM := 0.05
 
 
@@ -1022,24 +1026,29 @@ const TRACE_END_JOIN_EPS_MM := 0.05
 ## inside a via's disc, or on a same-net trace? An end that is joined is not a
 ## loose end, so it is not something to continue drawing from.
 ##
-## The credit is the copper's own geometry: pin_copper_distance for pads (0 on
-## the land), the via's radius for vias, and is_point_near (width/2 + eps) for
-## a trace. NET-BLIND for pads and vias, NET-AWARE for traces, deliberately: a
-## pad or via of ANY net under the end makes it "not free" (continuing from
-## there would draw through copper that is not yours), while only a SAME-NET
-## trace joins — a different-net trace under the end is a short for DRC to
-## name, not a join. Zones are not consulted at all, so an end lying in a
-## same-net pour still reads as free.
+## THE PAD CREDIT IS THE SHARED CONTACT PREDICATE (PcbCopperContact): this end's
+## own swept copper against the land. The trace's WIDTH is what makes this the
+## same answer the DRC gives — a wide run whose end sits off a pad centre still
+## covers the land, and measuring the bare point said otherwise.
+##
+## NET-BLIND for pads and vias, NET-AWARE for traces, deliberately: a pad or via
+## of ANY net under the end makes it "not free" (continuing from there would
+## draw through copper that is not yours), while only a SAME-NET trace joins — a
+## different-net trace under the end is a short for DRC to name, not a join.
+## Zones are not consulted at all, so an end lying in a same-net pour still
+## reads as free.
 func trace_end_is_joined(trace_id: String, end: String) -> bool:
 	var trace = get_trace(trace_id)
 	if trace == null or trace.waypoints.size() < 2:
 		return false
 	var pt: Vector2 = trace.waypoints[0] if end == TRACE_END_START \
 		else trace.waypoints[trace.waypoints.size() - 1]
+	var stack := PcbCopperContact.copper_stack(self)
+	var cap := PcbCopperContact.endpoint_node(pt, float(trace.width), trace.layer)
 	for comp_id in components:
 		var comp = components[comp_id]
 		for pin_name in comp.get_all_pin_positions():
-			if comp.pin_copper_distance(str(pin_name), pt) <= TRACE_END_JOIN_EPS_MM:
+			if PcbCopperContact.copper_joins_pin(cap, comp, str(pin_name), stack):
 				return true
 	if not get_via_at(pt, TRACE_END_JOIN_EPS_MM).is_empty():
 		return true

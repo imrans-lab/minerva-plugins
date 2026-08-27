@@ -36,6 +36,9 @@ const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 ## T1.5: the ONE canonical layer contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 const _PcbPadApproach := preload("model/pcb_pad_approach.gd")
+## The plugin-wide copper-contact predicate — what "this trace touches this
+## pad" means, shared with the trace verbs and the connectivity DRC.
+const _PcbCopperContact := preload("model/pcb_copper_contact.gd")
 
 ## Storage: Array of v2 envelope Dictionaries.
 var _annotations: Array = []
@@ -998,9 +1001,11 @@ func pad_at(doc_pos: Vector2, radius_mm: float = 5.0,
 ## net: String ("" if unconnected), net_members: [other "Component.Pin" refs on
 ## the same net], trace_ids: [String], trace_count: int}.
 ##
-## trace_ids: traces on the pin's net whose start or end waypoint lands on the
-## pad (within _PAD_HIT_RADIUS_MM — traces are drawn pad-snapped, so this is a
-## tolerance, not a second hit-test system).
+## trace_ids: traces on the pin's net whose COPPER reaches the pad, through the
+## shared contact predicate (_PcbCopperContact) — the trace's swept width against
+## the land. Reported for a run driven THROUGH the pad as well as one ending on
+## it, because both are copper on the land; and NOT reported for a run that stops
+## short of it, however near the pad centre it aims.
 func pin_info(component: String, pin: String) -> Dictionary:
 	var data = _board_data()
 	if data == null:
@@ -1025,13 +1030,16 @@ func pin_info(component: String, pin: String) -> Dictionary:
 
 	var trace_ids: Array = []
 	if not net.is_empty():
-		var pad_pos: Vector2 = comp.get_pin_world_position(pin)
+		var stack := _PcbCopperContact.copper_stack(data)
 		for trace in data.get_traces_for_net(net):
 			if trace == null:
 				continue
-			var start: Vector2 = trace.get_start()
-			var end: Vector2 = trace.get_end()
-			if start.distance_to(pad_pos) <= _PAD_HIT_RADIUS_MM or end.distance_to(pad_pos) <= _PAD_HIT_RADIUS_MM:
+			var pts := PackedVector2Array(trace.waypoints)
+			if pts.is_empty():
+				continue
+			var run := _PcbCopperContact.trace_node(pts, float(trace.width),
+				trace.layer)
+			if _PcbCopperContact.copper_joins_pin(run, comp, pin, stack):
 				trace_ids.append(str(trace.id))
 
 	# UX4 station 10 (work item 019fd0ab4c65): the pad's WORLD position — an

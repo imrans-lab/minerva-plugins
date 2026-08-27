@@ -8,20 +8,38 @@ Every reply carries a `scope` token, and no two are spelled alike.
 |---|---|---|---|
 | MCP tool | `minerva_pcb_drc` | `minerva_pcb_drc_geometric` | attached to `route()` |
 | `scope` | `"connectivity"` | `"geometric"` | `"geometric_candidate"` |
-| What it reads | pad **centers** + trace **centerlines** | real **copper + hole geometry** (the ResolvedBoard IR) | the same, over base copper **+ proposed** copper |
+| What it reads | trace **centerlines**, plus real pad **lands** for the ONE question of whether copper joins a pad | real **copper + hole geometry** (the ResolvedBoard IR) | the same, over base copper **+ proposed** copper |
 | Question | is the net **topology/connectivity** sane? | is the **copper geometrically** legal? | does **this proposal** introduce a geometric violation? |
 | Kernel | `pcb_worker.drc` (`run_drc`) | `pcb_worker.drc_geometric` (`run_geometric_drc`) | the same kernel, unchanged |
 | Reply shape | legacy `{ok, result:{findings, counts}}` | the geometric **result union** (see below), verbatim | the **candidate union** (see below) |
 
 ## `drc` — connectivity / topology (legacy, NOT geometric)
 
-`_drc` runs the centerline checker over a best-effort-resolved board. It reasons
-about pad centers and trace centerlines only, so it **cannot verify a clearance,
-a trace width, or an annular ring**. Its findings are connectivity faults:
-`wrong_net_pad` (endpoint on, or segment passing over, a different-net pad → short), `crossing` (two
-different-net traces intersect), `dangling_endpoint` (a leaf endpoint reaching no
-pad/via → open), `layer_change_no_via` (missing via). **A zero-finding `drc`
-result is a topology pass, not a proof the copper is geometrically clean.**
+`_drc` runs the centerline checker over a best-effort-resolved board. It
+**cannot verify a clearance, a trace width, or an annular ring**. Its findings
+are connectivity faults: `wrong_net_pad` (endpoint on, or segment passing over,
+a different-net pad → short), `crossing` (two different-net traces intersect),
+`dangling_endpoint` (a leaf endpoint reaching no pad/via → open),
+`layer_change_no_via` (missing via). **A zero-finding `drc` result is a topology
+pass, not a proof the copper is geometrically clean.**
+
+**One question here reads real copper: does this copper JOIN this pad?** The
+`dangling_endpoint` credit and the completeness census both ask
+`pcb_worker.copper_contact` — the run's **swept width** against the pad's
+**land** — because a pad-centre distance is wrong in both directions: a wide run
+ending off-centre reads as an open, and a run driven across a land reads as
+unconnected. An end that genuinely stops short of the copper still reports.
+A pad with no stated copper size keeps the old credit, expressed as a disc of
+the board's coincidence tolerance about its centre. The SHORT checks are
+unchanged and still measure a centreline against a pad **centre**, so this
+module keeps under-reporting a clearance it has no standing to judge.
+
+The panel answers the same question with the same rule, in
+`ui/model/pcb_copper_contact.gd` (the trace verbs' free-end test, the pin
+inspector, the ratsnest). Neither side can call the other while the answer is
+needed, so the two implementations are pinned against each other by the shared
+vectors in `spec/contact` — both `worker/tests/test_copper_contact_vectors.py`
+and `tests/gd/test_copper_contact_vectors.gd` enumerate that directory.
 
 ## `drc_geometric` — geometric copper DRC (IR-based, fail-closed)
 
@@ -219,9 +237,11 @@ payload, never replacing it.
 
 Since Round E1 (`019f97d021a8`) its pad census comes from the **compiled IR**, via
 `ir_connectivity.connectivity_board` — the same compile the router consumes, so
-the two halves of one route reply cannot disagree about which pads exist. That is
-a shared *census*, not shared geometry: the projection carries pad centers and net
-ownership only, so this surface remains centerline-scoped exactly as above.
+the two halves of one route reply cannot disagree about which pads exist. The projection carries each pad's
+**land** beside its centre, through the neutral pad-geometry owner's own dict
+builder, so the pad-contact rule answers identically on this path and on the
+standalone `drc` method. Everything else about this surface remains
+centreline-scoped exactly as above.
 
 ## Candidate overlay — geometric DRC **before** acceptance
 

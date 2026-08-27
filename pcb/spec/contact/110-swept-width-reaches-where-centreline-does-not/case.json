@@ -1,0 +1,34 @@
+{
+  "name": "110-swept-width-reaches-where-centreline-does-not",
+  "why": "A 1.0mm run passing 0.9mm off the centre of a 1.0x1.0 land. The CENTRELINE clears the copper by 0.4mm; the swept width overlaps it by 0.1mm. The trace width is the whole difference.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.0,
+      1.0
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "segment",
+    "a": [
+      -5.0,
+      0.9
+    ],
+    "b": [
+      5.0,
+      0.9
+    ],
+    "width_mm": 1.0,
+    "layer": "top"
+  },
+  "touches": true
+}

@@ -1,0 +1,30 @@
+{
+  "name": "060-oval-land-is-a-stadium-not-a-box",
+  "why": "A 2.0x1.0 oval land is the segment x=-0.5..0.5 swollen by 0.5, not a box. The point (0.98, 0.45) is inside the 1.0/0.5 box but 0.658mm from the axis, 0.158mm clear of the copper.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "oval",
+    "size": [
+      2.0,
+      1.0
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      0.98,
+      0.45
+    ],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": false
+}

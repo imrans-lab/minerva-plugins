@@ -1,0 +1,30 @@
+{
+  "name": "090-rotated-land-45-inside",
+  "why": "A 4.0x1.0 land at 45deg. Under the KiCad clockwise placement convention its long axis runs along (0.7071, -0.7071). The point (1.0, -1.0) projects 1.414mm along that axis (half-length 2.0) and 0mm across it (half-width 0.5): inside. The opposite sign convention would put it 1.414mm across.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "rect",
+    "size": [
+      4.0,
+      1.0
+    ],
+    "rotation_deg": 45.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      1.0,
+      -1.0
+    ],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": true
+}

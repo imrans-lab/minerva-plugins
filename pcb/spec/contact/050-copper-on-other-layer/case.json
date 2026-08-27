@@ -1,0 +1,30 @@
+{
+  "name": "050-copper-on-other-layer",
+  "why": "The geometry of 040 exactly, with the copper on the far side of the board. A top-side land shares nothing with a bottom-side run.",
+  "pad": {
+    "at": [
+      5.0,
+      5.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.68,
+      1.68
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      5.5,
+      4.75
+    ],
+    "width_mm": 0.25,
+    "layer": "bottom"
+  },
+  "touches": false
+}

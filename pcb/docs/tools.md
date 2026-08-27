@@ -525,7 +525,9 @@ that would close it into a loop. The verb names one as `{trace_id, end: "start"|
   layer). A run that both starts and ends on a trace end extends the START
   trace only; the two traces then touch, which is joined copper.
 - Refusals, changing nothing: `no_such_trace`, `trace_end_not_free` (the end
-  already touches a pad, a via or same-net copper), the two mismatches,
+  already touches a pad, a via or same-net copper — a pad counts when the run's
+  **swept width** reaches its **land**, the same rule the connectivity DRC's
+  `dangling_endpoint` credit reads), the two mismatches,
   `trace_not_extendable` (the model's words, e.g. every point sat on the end),
   and `trace_not_authorable` — which is how a NETLESS start trace is refused,
   with the model's own "must name a net … the pad, via or trace end it starts

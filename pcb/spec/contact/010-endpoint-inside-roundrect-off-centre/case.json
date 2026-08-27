@@ -1,0 +1,31 @@
+{
+  "name": "010-endpoint-inside-roundrect-off-centre",
+  "why": "A 1.0mm run ending 0.25/0.25mm off a 1.3x4.5 roundrect land's centre. The centre distance is 0.354mm, past any coincidence tolerance; the point is 0.25 <= 0.65-0.26 and 0.25 <= 2.25-0.26 from the centre in the land's own frame, so it is inside the roundrect's inner core. Gap 0.",
+  "pad": {
+    "at": [
+      10.0,
+      10.0
+    ],
+    "shape": "roundrect",
+    "size": [
+      1.3,
+      4.5
+    ],
+    "rotation_deg": 0.0,
+    "corner_rratio": 0.2,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      10.25,
+      10.25
+    ],
+    "width_mm": 1.0,
+    "layer": "top"
+  },
+  "touches": true
+}

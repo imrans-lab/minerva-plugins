@@ -1,0 +1,112 @@
+"""The worker half of the shared pad-contact vectors (pcb/spec/contact).
+
+The GDScript suite tests/gd/test_copper_contact_vectors.gd runs the SAME
+directory against the panel's implementation. Both enumerate it, so a case the
+two sides answer differently cannot be added without one of them going red.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+import pytest
+
+from pcb_worker import copper_contact
+from pcb_worker.pad_source import PadGeom
+
+VECTORS = Path(__file__).resolve().parents[2] / "spec" / "contact"
+
+
+def _cases() -> list[tuple[str, dict]]:
+    found = sorted(p for p in VECTORS.glob("*/case.json"))
+    assert found, f"no contact vectors under {VECTORS}"
+    return [(p.parent.name, json.loads(p.read_text())) for p in found]
+
+
+def _pad_geom(spec: dict) -> PadGeom:
+    """The vector's pad as the neutral pad-geometry record the real harvest
+    hands the builder — no shortcut construction of a shape."""
+    w, h = spec["size"]
+    pad_type = spec.get("type", "smd")
+    drilled = pad_type == "thru_hole"
+    return PadGeom(
+        number=spec.get("number", "1"),
+        x=spec["at"][0], y=spec["at"][1],
+        width=float(w), height=float(h),
+        drill=(float(spec.get("drill_mm", 0.4)) if drilled else None),
+        annulus=(float(w) if drilled else None),
+        plated=True,
+        shape=spec["shape"],
+        corner_rratio=spec.get("corner_rratio"),
+        solder_mask_margin=None,
+        solder_paste_margin=None,
+        pad_type=pad_type,
+        layers=list(spec.get("layers") or []),
+        from_resolve=True,
+        rotation=float(spec.get("rotation_deg", 0.0)),
+        raw_shape=spec["shape"],
+    )
+
+
+def _pad_node(spec: dict):
+    layers = spec.get("layers")
+    return copper_contact.pad_node(
+        _pad_geom(spec), (spec["at"][0], spec["at"][1]),
+        float(spec.get("rotation_deg", 0.0)),
+        frozenset(layers) if layers else None,
+        # A vector always states a size, so the unknown-land fallback is never
+        # the answer here; a number that would obviously change a verdict is
+        # passed so a silent fall-through to it cannot pass unnoticed.
+        1000.0)
+
+
+def _copper_node(spec: dict):
+    a = (spec["a"][0], spec["a"][1])
+    width = float(spec.get("width_mm", 0.0))
+    layer = spec.get("layer")
+    if spec["kind"] == "endpoint":
+        return copper_contact.endpoint_node(a, width, layer)
+    b = (spec["b"][0], spec["b"][1])
+    return copper_contact.segment_node(a, b, width, layer)
+
+
+@pytest.mark.parametrize("name,case", _cases(), ids=lambda v: v if isinstance(v, str) else "")
+def test_contact_vector(name: str, case: dict) -> None:
+    pad = _pad_node(case["pad"])
+    copper = _copper_node(case["copper"])
+    got = copper_contact.nodes_touch(copper, pad)
+    assert got is bool(case["touches"]), (
+        f"{name}: expected touches={case['touches']}, got {got}. "
+        f"{case['why']} (measured gap "
+        f"{copper_contact.node_gap(copper, pad):.6f}mm)")
+
+
+def test_the_predicate_is_symmetric() -> None:
+    """Copper reaching copper is not a directed relation. Every consumer picks
+    its own argument order, so an asymmetric implementation would answer
+    differently for the DRC than for the trace verbs."""
+    for name, case in _cases():
+        pad = _pad_node(case["pad"])
+        copper = _copper_node(case["copper"])
+        assert (copper_contact.nodes_touch(copper, pad)
+                is copper_contact.nodes_touch(pad, copper)), name
+
+
+def test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc() -> None:
+    """The inline-pin fallback has no land to be exact about, so it keeps the
+    credit the centreline kernel always gave it: a disc of the board's own
+    coincidence tolerance. Expressed as a shape, so there is still ONE
+    predicate rather than a second code path."""
+    sizeless = PadGeom(
+        number="1", x=0.0, y=0.0, width=None, height=None, drill=None,
+        annulus=None, plated=True, shape="rect", corner_rratio=None,
+        solder_mask_margin=None, solder_paste_margin=None, pad_type="smd",
+        layers=[], from_resolve=False)
+    pad = copper_contact.pad_node(sizeless, (0.0, 0.0), 0.0, None, 0.2)
+    inside = copper_contact.endpoint_node((0.15, 0.0), 0.0, "top")
+    outside = copper_contact.endpoint_node((0.25, 0.0), 0.0, "top")
+    assert copper_contact.nodes_touch(inside, pad)
+    assert not copper_contact.nodes_touch(outside, pad)
+    assert math.isclose(copper_contact.node_gap(outside, pad), 0.05, abs_tol=1e-9)

@@ -338,3 +338,11 @@ test_pcb_trace_geometry.gd assertions=89
 # committed candidate that owned the trace, canvas and verb (+6).
 # 49 -> 50: cut_trace refuses a locked trace on its own (+1). MEASURED: 50.
 test_trace_cut.gd assertions=50
+# NEW: the panel half of the SHARED pad-contact vectors under spec/contact —
+# the worker runs the same directory (worker/tests/test_copper_contact_vectors.py),
+# so a case the two sides answer differently cannot be added without one of
+# them going red. UNPINNED on purpose: the assertion count is one per vector
+# directory plus four fixed checks, so pinning it would make adding a vector a
+# two-file edit for no gain. Pin it if the fixed section ever grows teeth of
+# its own.
+test_copper_contact_vectors.gd

@@ -1,0 +1,31 @@
+{
+  "name": "080-roundrect-inside-near-corner",
+  "why": "The same land as 070. The point (0.8, 0.8) is 0.424mm from the nearest core corner, 0.076mm inside the copper \u2014 the corner region an inscribed stadium would wrongly drop.",
+  "pad": {
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "roundrect",
+    "size": [
+      2.0,
+      2.0
+    ],
+    "rotation_deg": 0.0,
+    "corner_rratio": 0.25,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      0.8,
+      0.8
+    ],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": true
+}

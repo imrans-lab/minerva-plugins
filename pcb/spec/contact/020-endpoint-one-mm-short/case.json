@@ -1,0 +1,30 @@
+{
+  "name": "020-endpoint-one-mm-short",
+  "why": "A 0.25mm run whose end cap (radius 0.125) stops with its leading edge at x=11.5 while the 1.0x1.0 land's right edge is at x=10.5. Gap 1.0mm. A rule that cannot say no here is not a rule.",
+  "pad": {
+    "at": [
+      10.0,
+      10.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.0,
+      1.0
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      11.625,
+      10.0
+    ],
+    "width_mm": 0.25,
+    "layer": "top"
+  },
+  "touches": false
+}

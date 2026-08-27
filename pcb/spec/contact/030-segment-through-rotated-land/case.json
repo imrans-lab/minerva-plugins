@@ -1,0 +1,35 @@
+{
+  "name": "030-segment-through-rotated-land",
+  "why": "A run driven ACROSS a land it never ends on. The 1.25x1.75 land at 270deg presents 1.75 across x and 1.25 across y, half-extents 0.875/0.625, inner core 0.625/0.375 after the 0.25mm corner radius. The centreline sits 0.2mm off the centre in y and spans the land in x, so it is inside the core.",
+  "pad": {
+    "at": [
+      20.0,
+      30.0
+    ],
+    "shape": "roundrect",
+    "size": [
+      1.25,
+      1.75
+    ],
+    "rotation_deg": 270.0,
+    "corner_rratio": 0.2,
+    "type": "smd",
+    "layers": [
+      "top"
+    ]
+  },
+  "copper": {
+    "kind": "segment",
+    "a": [
+      30.0,
+      30.2
+    ],
+    "b": [
+      10.0,
+      30.2
+    ],
+    "width_mm": 0.25,
+    "layer": "top"
+  },
+  "touches": true
+}

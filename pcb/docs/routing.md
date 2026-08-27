@@ -1002,7 +1002,9 @@ if they are not — a prefix of confidently-wrong reasons is worse than none.
 `route()` compiles **once**. The router consumes the ResolvedBoard; DRC-at-propose
 consumes `ir_connectivity.connectivity_board(rb)` — a normalized projection of the
 *same* compiled board into the dict language the legacy connectivity kernel
-already speaks (pad centers, net ownership, existing traces/vias). There is **no**
+already speaks (pad centres AND their lands, net ownership, existing
+traces/vias — the lands because the kernel's pad-contact rule measures real
+copper; see docs/drc.md). There is **no**
 raw-dict and **no** best-effort-resolve fallback on the canonical path.
 
 Since `019f70ebc9ed` the router's half is **two** projections, not one — the
