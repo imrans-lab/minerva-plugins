@@ -141,9 +141,9 @@ test_pcb_net_membership.gd assertions=70
 # fabrication_stage). 149 -> 150 is an AUTHORED count; see the note on
 # test_draft_composer.gd above.
 test_pcb_panel_layout.gd assertions=150
-test_pcb_panel_model.gd assertions=186
+test_pcb_panel_model.gd assertions=193
 test_pcb_panel_tools.gd assertions=211
-test_pcb_panel_tools_migration.gd assertions=68
+test_pcb_panel_tools_migration.gd assertions=74
 # The pad codec's fab optionals, the roundrect land at its authored corner
 # radius, and the load-time indeterminate lead.
 test_pcb_pad_fidelity.gd assertions=27

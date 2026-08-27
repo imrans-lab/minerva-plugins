@@ -201,6 +201,34 @@ func check_keys_subset(desc: String, result: Dictionary, required: Array) -> voi
 		missing.is_empty())
 
 
+## The placement verbs stamp the moved part's pad rows onto their success reply
+## (panel_tools._with_pad_rows), so the caller sees where every pin LANDED
+## without a second round trip. Assert the rows are real — a key holding an
+## empty list, or rows for some other part, would pass a key-set check while
+## carrying nothing.
+func check_pad_rows(desc: String, reply: Dictionary, component_id: String) -> void:
+	var rows_v: Variant = reply.get("pads")
+	check("%s — pads is a non-empty array (got %s)" % [desc, str(rows_v)],
+		rows_v is Array and not (rows_v as Array).is_empty())
+	if not (rows_v is Array):
+		return
+	var bad: Array = []
+	for r in (rows_v as Array):
+		if not (r is Dictionary):
+			bad.append(r)
+			continue
+		var row: Dictionary = r
+		var pos: Variant = row.get("position")
+		if str(row.get("kind", "")) != "pad" \
+				or str(row.get("component", "")) != component_id \
+				or str(row.get("ref", "")) != "%s.%s" % [component_id, str(row.get("pin", ""))] \
+				or not (pos is Dictionary and (pos as Dictionary).has("x_mm") \
+					and (pos as Dictionary).has("y_mm")):
+			bad.append(row)
+	check("%s — every pad row is a well-formed row for %s (bad: %s)"
+		% [desc, component_id, str(bad)], bad.is_empty())
+
+
 func _args(extra: Dictionary = {}) -> Dictionary:
 	var a := {"editor_name": EDITOR}
 	a.merge(extra, true)
@@ -251,7 +279,9 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	print("\n-- move_component --")
 	# On-grid again (see add_component above) — the lean common shape.
 	var mv := await d("minerva_pcb_move_component", _args({"component_id": "U9", "x": 22.86, "y": 12.7}))
-	check_keys("move_component shape", mv, ["success", "component_id", "x", "y", "assembly"])
+	check_keys("move_component shape", mv,
+		["success", "component_id", "x", "y", "assembly", "pads"])
+	check_pad_rows("move_component pads", mv, "U9")
 	var snapped_pos: Vector2 = data.snap_to_grid(Vector2(22.86, 12.7))
 	check_approx("model x mutated (snapped)", data.get_component("U9").position.x, snapped_pos.x)
 
@@ -262,15 +292,19 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	# caller's — when it lands off-grid the UX2 station-6 disclosure pair
 	# rides along. Pin the shape EITHER way, and that the pair travels
 	# together (snapped ⇒ requested, never one without the other).
-	var mr_expected := ["success", "component_id", "new_x", "new_y", "interpreted_direction", "assembly"]
+	var mr_expected := ["success", "component_id", "new_x", "new_y",
+		"interpreted_direction", "assembly", "pads"]
 	if mr.has("snapped"):
 		mr_expected.append_array(["snapped", "requested"])
 	check_keys("move_relative shape", mr, mr_expected)
+	check_pad_rows("move_relative pads", mr, "U9")
 	check("move_relative echoes direction", str(mr.get("interpreted_direction", "")) == "right")
 
 	print("\n-- rotate_component --")
 	var rot := await d("minerva_pcb_rotate_component", _args({"component_id": "U9", "degrees": 90}))
-	check_keys("rotate_component shape", rot, ["success", "component_id", "rotation", "assembly"])
+	check_keys("rotate_component shape", rot,
+		["success", "component_id", "rotation", "assembly", "pads"])
+	check_pad_rows("rotate_component pads", rot, "U9")
 	check_approx("model rotation mutated", data.get_component("U9").rotation, 90.0)
 
 	print("\n-- get_pin_position --")

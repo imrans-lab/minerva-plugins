@@ -1400,8 +1400,10 @@ grid); drag empty canvas to box-select; `R` rotates the selection.
 **Pan** — drag anywhere while armed. Also works from any other tool: right-
 drag, middle-drag, or hold Space and drag.
 
-**Pin Select (P, or Shift+P)** — click a pad to SELECT it: its copper is
-haloed, the Pin Info section fills, and the Pin Selection section below shows
+**Inspect Pin / Pin Select (P, or Shift+P)** — the toolbar button and the
+status bar call this tool *Inspect Pin*; the sidebar section it fills is *Pin
+Selection*. Click a pad to SELECT it: its copper is haloed, the Pin Info
+section fills, and the Pin Selection section below shows
 the pad's row (net, side, roles), the component's free pins under a side
 filter, and the two net edits — "Move net to…" and, with exactly two pads
 selected, "Swap nets". Shift-click adds or removes a pad; a shift-click on

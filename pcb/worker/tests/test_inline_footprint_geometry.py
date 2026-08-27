@@ -26,6 +26,7 @@ import yaml
 
 from pcb_worker.compile_board import compile_board
 from pcb_worker.inline_footprint import (
+    BOARD_LIBRARY_LAYER,
     InlineGeometryError,
     carries_full_geometry,
     footprint_from_component,
@@ -232,6 +233,55 @@ def test_pins_stay_overrides_when_the_board_carries_no_pads():
     assert isinstance(result, ResolutionSuccess), _errors(result)
     assert result.board.components[0].placed_pads, "the library supplied the pads"
     assert result.board.components[0].provenance.library_layer != "board"
+
+
+#: The board dict the PANEL emits for a pins-only part — every render-detail key
+#: ``pcb_component.to_board_dict`` parks in canonical Extra, and NO ``pads`` key,
+#: because the part carries no lands of its own. Pin positions are the library's
+#: own R_0805 pad centres, so the coincidence check has something to agree with.
+def _panel_pins_only_component() -> dict:
+    return {
+        "ref": "U1", "footprint": "Resistor_SMD:R_0805_2012Metric",
+        "x_mm": 10.0, "y_mm": 10.0, "rotation_deg": 0.0, "layer": "top",
+        "pins": [{"number": "1", "x_mm": -0.9125, "y_mm": 0.0},
+                 {"number": "2", "x_mm": 0.9125, "y_mm": 0.0}],
+        "footprint_id": "", "width": 5.0, "height": 2.5,
+        "local_bounds": {"x": -2.5, "y": -1.25, "w": 5.0, "h": 2.5},
+        "has_pad_geometry": False, "graphics": [],
+        "bbox_center_offset": {"x": 0.0, "y": 0.0},
+        "properties": {}, "color": {"r": 0.2, "g": 0.6, "b": 0.3, "a": 1.0},
+        "label_visible": True, "locked": False,
+    }
+
+
+def test_a_panel_pins_only_component_resolves_from_the_library():
+    """The panel's own board dict for a part with no lands takes the PARTIAL
+    path — the regression that broke every routing verb driven from the panel.
+
+    The panel used to emit ``pads`` unconditionally, so a pins-only part crossed
+    the wire claiming ``pads: []`` — zero lands, library not consulted — and
+    every board it was on was refused with ``pin_without_pad``. Pinned from the
+    panel's shape (render-detail Extra and all), not a hand-trimmed component,
+    because the whole defect was in which keys that shape carries.
+    """
+    board = _minimal_board(components=[_panel_pins_only_component()])
+    assert not carries_full_geometry(board["components"][0])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    component = result.board.components[0]
+    assert len(component.placed_pads) == 2, "the library supplied both lands"
+    assert component.provenance.library_layer != BOARD_LIBRARY_LAYER
+
+
+def test_the_same_component_claiming_zero_lands_is_refused():
+    """The discriminator for the test above: with ``pads: []`` added — and
+    nothing else changed — the identical component is refused by name. So the
+    pass above is the ABSENT key doing the work, not a tolerant compiler."""
+    comp = _panel_pins_only_component()
+    comp["pads"] = []
+    result = compile_board(_minimal_board(components=[comp]))
+    assert isinstance(result, ResolutionFailure)
+    assert "pin_without_pad" in _errors(result)
 
 
 # ---------------------------------------------------------------------------

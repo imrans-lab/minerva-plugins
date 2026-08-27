@@ -100,6 +100,20 @@ var pads: Array = []
 ## Whether pad geometry has been loaded from footprint library
 var has_pad_geometry: bool = false
 
+## Whether the `pads` list is this component's own geometry AUTHORITY — true
+## when the dict this component was loaded from carried a `pads` key.
+##
+## The worker reads the KEY, not its contents
+## (inline_footprint.carries_full_geometry): a present `pads` list says "these
+## are ALL the lands, do not consult the library", so an EMPTY list is a real
+## answer (zero pads — a graphics-only pseudo-component like a silk logo) while
+## an ABSENT key is a pins-only part that still needs a library resolve.
+## has_pad_geometry cannot carry this distinction: it is derived from the lands
+## themselves being non-empty. Emitting `pads: []` for a pins-only component
+## made the worker refuse the whole board with "pin '1' has no matching
+## footprint pad".
+var pads_authored: bool = false
+
 ## The COMPONENT-level resolved fact (bug 019ff4a9a0d7), distinct from the
 ## PAD-level has_pad_geometry above: a silk-only footprint resolves with zero
 ## pads, so the pad marker alone cannot say "this component is resolved". Set
@@ -879,6 +893,7 @@ func duplicate_component():
 	copy.footprint_id = footprint_id
 	copy.pads = pads.duplicate(true)
 	copy.has_pad_geometry = has_pad_geometry
+	copy.pads_authored = pads_authored
 	copy.graphics = graphics.duplicate(true)
 	copy.bbox_center_offset = bbox_center_offset
 	copy.local_bounds = local_bounds
@@ -897,6 +912,14 @@ func duplicate_component():
 ## provenance. Order fixed so the serialized key order is stable.
 const PAD_OPTIONAL_KEYS: Array = [
 	"corner_rratio", "raw_shape", "solder_mask_margin", "solder_paste_margin"]
+
+
+## Whether a serialized dict should carry a `pads` key at all: the component
+## really has lands, or it authored an explicitly empty list. A pins-only
+## component emits NO key, so the worker resolves its footprint from the
+## library instead of reading "zero pads" (see pads_authored).
+func _emits_pads() -> bool:
+	return pads_authored or not pads.is_empty()
 
 
 ## Serialize the pads array to a JSON-safe list (shared by to_dict/to_board_dict).
@@ -1097,7 +1120,7 @@ func to_dict() -> Dictionary:
 		var pin_pos: Vector2 = pins[pin_name]
 		pins_dict[pin_name] = {"x": pin_pos.x, "y": pin_pos.y}
 
-	return {
+	var d := {
 		"id": id,
 		"footprint": get_footprint_name(),
 		"footprint_id": footprint_id,
@@ -1129,6 +1152,12 @@ func to_dict() -> Dictionary:
 		"canonical_extra": canonical_extra.duplicate(true),
 		"pin_extra": pin_extra.duplicate(true)
 	}
+	# A pins-only component states no `pads` key on EITHER codec (_emits_pads).
+	# Undo history round-trips through this shape, so an undo must not turn a
+	# library-resolved part into one claiming zero lands.
+	if not _emits_pads():
+		d.erase("pads")
+	return d
 
 
 ## Deserialize from dictionary (legacy .minpcb shape)
@@ -1168,7 +1197,9 @@ func load_from_dict(data: Dictionary) -> void:
 	footprint_resolved = bool(data.get("footprint_resolved", false))
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
-	_pads_from_list(data.get("pads", []))
+	var raw_pads: Variant = data.get("pads")
+	pads_authored = raw_pads is Array
+	_pads_from_list(raw_pads if pads_authored else [])
 	_graphics_from_list(data.get("graphics", []))
 	_refdes_from_list(data.get("refdes_graphics", []))
 
@@ -1262,7 +1293,10 @@ func to_board_dict() -> Dictionary:
 	d["local_bounds"] = {
 		"x": local_bounds.position.x, "y": local_bounds.position.y,
 		"w": local_bounds.size.x, "h": local_bounds.size.y}
-	d["pads"] = _pads_to_list()
+	# Present-only: the `pads` KEY is what tells the worker the board owns this
+	# component's geometry outright (_emits_pads / pads_authored).
+	if _emits_pads():
+		d["pads"] = _pads_to_list()
 	d["has_pad_geometry"] = has_pad_geometry
 	d["graphics"] = _graphics_to_list()
 	d["bbox_center_offset"] = {"x": bbox_center_offset.x, "y": bbox_center_offset.y}
@@ -1336,9 +1370,15 @@ func load_from_board_dict(data: Dictionary) -> void:
 	# NO `pads` array — synthesize the render pads from that pin geometry so a
 	# whole-board load (minerva_pcb_load_board) renders real pads, not
 	# placeholders. Fit the body to the pads only when the dict gave no size.
-	var explicit_pads: Array = data.get("pads", [])
-	if not explicit_pads.is_empty():
-		_pads_from_list(explicit_pads)
+	# Branch on the KEY, matching the worker's own FULL-vs-PARTIAL rule: a
+	# stated `pads` list is the complete set of lands even when it is empty, so
+	# synthesizing pads from the pins there would invent copper the board says
+	# it does not have. A `pads` value that is not a list is unreadable as
+	# geometry and takes the pins path.
+	var raw_pads: Variant = data.get("pads")
+	pads_authored = raw_pads is Array
+	if pads_authored:
+		_pads_from_list(raw_pads)
 	else:
 		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
 	_graphics_from_list(data.get("graphics", []))

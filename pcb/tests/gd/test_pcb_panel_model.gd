@@ -68,6 +68,7 @@ func _init() -> void:
 	_test_mounting_holes_roundtrip()
 	_test_rotation_sign_lands_on_traces()
 	_test_null_pad_size_is_skipped_not_invented()
+	_test_pads_key_states_the_geometry_authority()
 	_test_remove_net_journals_like_remove_trace()
 	_test_clear_traces_journals_contents()
 	_test_counters_never_lowered_by_clear_traces_and_clear()
@@ -154,6 +155,75 @@ func _test_null_pad_size_is_skipped_not_invented() -> void:
 		check("no pad carries the invented 1.0x1.0 land",
 				not kept.get("size", Vector2.ZERO).is_equal_approx(Vector2.ONE))
 
+
+## The `pads` KEY is a claim of geometry OWNERSHIP, so the panel may only state
+## it when the component really carries lands. The worker's rule
+## (inline_footprint.carries_full_geometry): a present `pads` list is the
+## COMPLETE set of lands and the library is never consulted, so `pads: []` means
+## exactly zero pads. Emitting it unconditionally sent every pins-only part over
+## the wire claiming zero lands, and the worker refused the whole board with
+## "component 'U1' pin '1' has no matching footprint pad".
+##
+## Three states, all three round-tripped through BOTH codecs — to_dict is the
+## undo-history shape, so a snapshot must not change which state a part is in.
+func _test_pads_key_states_the_geometry_authority() -> void:
+	print("\n-- the pads key states who owns the geometry --")
+
+	# (a) Pins-only: no lands anywhere, so nothing to state. Pin geometry is
+	# absent too (no drill_mm/pad_width_mm), so nothing is synthesized either.
+	var pins_only = _PCBComponent.new()
+	pins_only.load_from_board_dict({
+		"ref": "U1", "footprint": "TH_TestPoint", "x_mm": 10.0, "y_mm": 10.0,
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]})
+	check("pins-only: the board dict states NO pads key",
+			not pins_only.to_board_dict().has("pads"),
+			"got %s" % str(pins_only.to_board_dict().get("pads", null)))
+	check("pins-only: the legacy/undo dict states no pads key either",
+			not pins_only.to_dict().has("pads"))
+	var pins_only_restored = _PCBComponent.new()
+	pins_only_restored.load_from_dict(pins_only.to_dict())
+	check("pins-only: an undo snapshot round trip keeps the key absent",
+			not pins_only_restored.to_board_dict().has("pads"))
+
+	# (b) An AUTHORED empty list is a real answer — the bench's LOGO_R12, a
+	# silk-only pseudo-component with zero copper. It must survive as `pads: []`,
+	# never decay into the absent-key (resolve-me-from-the-library) state.
+	var logo = _PCBComponent.new()
+	logo.load_from_board_dict({
+		"ref": "LOGO_R12", "footprint": "Minerva_Fixture:LOGO_Owl",
+		"x_mm": 46.0, "y_mm": 140.0, "pads": [],
+		"graphics": [{"layer": "F.SilkS", "kind": "circle",
+			"center": [0.0, 0.0], "radius": 2.0, "width": 0.15}]})
+	var logo_board: Dictionary = logo.to_board_dict()
+	check("graphics-only: an authored empty pads list round-trips as pads: []",
+			logo_board.has("pads") and (logo_board["pads"] as Array).is_empty(),
+			"got %s" % str(logo_board.get("pads", "<absent>")))
+	var logo_restored = _PCBComponent.new()
+	logo_restored.load_from_dict(logo.to_dict())
+	var logo_again: Dictionary = logo_restored.to_board_dict()
+	check("graphics-only: an undo snapshot keeps the explicit empty list",
+			logo_again.has("pads") and (logo_again["pads"] as Array).is_empty(),
+			"got %s" % str(logo_again.get("pads", "<absent>")))
+
+	# (c) Real lands travel, unchanged — the part whose footprint no library
+	# stocks and whose own list is therefore the only geometry anywhere.
+	var inline_part = _PCBComponent.new()
+	inline_part.load_from_board_dict({
+		"ref": "U12A", "footprint": "Bench_Nowhere_1206",
+		"x_mm": 22.0, "y_mm": 140.0,
+		"pins": [{"number": "1", "x_mm": -1.5, "y_mm": 0.0}],
+		"pads": [{"number": "1", "type": "smd", "shape": "rect",
+			"position": {"x": -1.5, "y": 0.0},
+			"size": {"width": 1.2, "height": 1.6},
+			"layers": ["F.Cu", "F.Mask", "F.Paste"]}]})
+	var inline_board: Dictionary = inline_part.to_board_dict()
+	var inline_pads: Array = inline_board.get("pads", [])
+	check("inline lands: the authored land survives to the board dict",
+			inline_pads.size() == 1
+			and str((inline_pads[0] as Dictionary).get("number", "")) == "1",
+			"got %s" % str(inline_pads))
+	check("inline lands: the land is stated as pad geometry",
+			inline_part.has_pad_geometry)
 
 ## R1 defect A (docket 019fa17326b5): remove_net must produce one journal entry
 ## and one trace_changed signal PER removed trace, identical to what
