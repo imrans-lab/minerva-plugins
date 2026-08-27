@@ -241,7 +241,9 @@ func _init() -> void:
 	# (112 -> 113): minerva_pcb_board_drc — the LIVE-BOARD form of the two DRC
 	# verbs (editor_name in, findings out, by-ref over the cap). executor:"panel";
 	# minerva_pcb_drc / _drc_geometric stay backend, so the Go pin at 19 holds.
-	check("total registered tool count == 113", registered.size() == 113,
+	# (113 -> 114): minerva_pcb_disconnect_net — the removal half of the pin→net
+	# membership pair. executor:"panel", so the Go pin at 19 still holds.
+	check("total registered tool count == 114", registered.size() == 114,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

@@ -56,6 +56,10 @@ const _PcbBoardHistoryScript := preload("pcb_board_history.gd")
 ## duck-typed `data` reference — mirrors pcb_canvas.gd's own PCBDataScript
 ## const, same off-tree preload-by-path convention.
 const _PcbDataScript := preload("model/pcb_data.gd")
+## The pin→net invariant and the two membership verbs. Kept off panel_tools
+## so the "a pin is on one net" rule has one home both this surface and the
+## panel's loader read.
+const _PcbNetMembershipScript := preload("model/pcb_net_membership.gd")
 ## C4a: the disposition legality vocabulary (DISPOSITIONS, TERMINAL_DISPOSITIONS
 ## and the named refusal codes). Preloaded so the workspace verb tools NAME their
 ## refusals from the canonical const set instead of re-listing it — a second copy
@@ -130,6 +134,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _delete_component(host, args)
 		"minerva_pcb_connect_net":
 			return _connect_net(host, args)
+		"minerva_pcb_disconnect_net":
+			return _disconnect_net(host, args)
 		"minerva_pcb_spatial_query":
 			return _spatial_query(host, args)
 		"minerva_pcb_describe_component":
@@ -928,6 +934,9 @@ static func _delete_component(host, args: Dictionary) -> Dictionary:
 	return _ok({"deleted": component_id})
 
 
+## Membership is a MOVE, not an addition: pins already on another net are taken
+## off it here, and the reply names them under `moved`. One undo step for the
+## whole call (pcb_net_membership composes it).
 static func _connect_net(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -939,25 +948,26 @@ static func _connect_net(host, args: Dictionary) -> Dictionary:
 	if pins.is_empty():
 		return _err("pins array is required")
 
-	var operations: Array = []
-	for pin_info in pins:
-		if pin_info is Dictionary:
-			var comp_id: String = str(pin_info.get("component", ""))
-			var pin_name: String = str(pin_info.get("pin", ""))
-			if not comp_id.is_empty() and not pin_name.is_empty():
-				operations.append({"component": comp_id, "pin": pin_name})
+	return _ok(_PcbNetMembershipScript.connect_pins(data, net_name, pins))
 
-	var connected: Array = []
-	for op in operations:
-		connected.append("%s.%s" % [str(op.component), str(op.pin)])
 
-	var result := {"success": true, "net_name": str(net_name), "connected_pins": connected}
-	if JSON.stringify(result).is_empty():
-		return _err("Internal serialization error")
-
-	for op in operations:
-		data.connect_pin_to_net(net_name, op.component, op.pin)
-	return result
+## The removal half of the membership pair. `net_name` is OPTIONAL and acts as a
+## guard, not a selector — a pin belongs to at most one net, so naming it is a
+## way of saying which net you believe holds the pin, and being told when that
+## belief is stale rather than having the wrong membership removed.
+static func _disconnect_net(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var pins: Array = args.get("pins", [])
+	if pins.is_empty():
+		return _err("pins array is required")
+	var result: Dictionary = _PcbNetMembershipScript.disconnect_pins(
+		data, pins, str(args.get("net_name", "")))
+	if result.has("error"):
+		result["success"] = false
+		return result
+	return _ok(result)
 
 
 static func _spatial_query(host, args: Dictionary) -> Dictionary:

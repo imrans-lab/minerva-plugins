@@ -186,7 +186,7 @@
     },
     {
       "name": "minerva_pcb_connect_net",
-      "description": "Connect component pins to a net (creates net if it doesn't exist). Get pin names from minerva_pcb_describe_component first. Requires editor_name from minerva_list_editors.",
+      "description": "Move component pins onto a net (creates the net if it doesn't exist). A pin belongs to at most ONE net, so this MOVES: a pin already on another net is taken off that net in the SAME operation \u2014 there is no way to leave a pin on two nets, which would be a netlist short. The reply's `moved` array names every pin that changed net ({pin, from}) and is absent when nothing moved. The whole call is ONE undo step: minerva_pcb_undo restores every previous membership at once. Use minerva_pcb_disconnect_net to take a pin off its net without giving it a new one. Get pin names from minerva_pcb_describe_component first. Requires editor_name from minerva_list_editors.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -203,6 +203,27 @@
           }
         },
         "required": ["editor_name", "net_name", "pins"]
+      }
+    },
+    {
+      "name": "minerva_pcb_disconnect_net",
+      "description": "Remove component pins from the net they are on \u2014 the removal half of minerva_pcb_connect_net. A pin belongs to at most one net, so `net_name` is OPTIONAL and is a GUARD, not a selector: give it to state which net you believe holds the pins and be refused (pin_not_on_net, naming the net each pin is actually on, nothing mutated) when that belief is stale, or omit it to take each pin off whatever net holds it. The whole call is ONE undo step. Returns {success, disconnected: [{pin, net}], not_connected?} where not_connected lists pins that were already on no net \u2014 not an error, they are already in the asked-for state. Requires editor_name from minerva_list_editors.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "pins": {
+            "type": "array",
+            "description": "Array of pin references: [{\"component\": \"U1\", \"pin\": \"8\"}, ...]",
+            "items": {
+              "type": "object",
+              "properties": {"component": {"type": "string"}, "pin": {"type": "string"}}
+            }
+          },
+          "net_name": {"type": "string", "description": "Optional guard: the net you believe holds these pins. A pin on a different net refuses the whole call rather than being taken off a net you did not mean."}
+        },
+        "required": ["editor_name", "pins"]
       }
     },
     {

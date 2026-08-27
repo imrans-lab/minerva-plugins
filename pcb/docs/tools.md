@@ -36,7 +36,8 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_move_relative` | NL move via `host.get_spatial_index().interpret_relative_move` |
 | `minerva_pcb_rotate_component` | |
 | `minerva_pcb_delete_component` | |
-| `minerva_pcb_connect_net` | model `connect_pin_to_net` (auto-creates net) |
+| `minerva_pcb_connect_net` | model `connect_pin_to_net` (auto-creates net). MOVES: a pin belongs to at most one net, so any other membership is removed in the same call and named in the reply's `moved`; one undo step (see Pin→net membership below) |
+| `minerva_pcb_disconnect_net` | removal half of the pair; `net_name` is an optional GUARD (`pin_not_on_net` refuses the whole call), one undo step |
 | `minerva_pcb_spatial_query` | spatial index `get_components_near` + `describe_relative_position`; empty ref → `get_components` shape |
 | `minerva_pcb_describe_component` | golden-parity; spatial `describe_component_context` |
 | `minerva_pcb_get_change_journal` | model change journal |
@@ -977,6 +978,55 @@ and refuse with `nothing_to_undo` / `nothing_to_redo` at either end of the
 history. A selection drag on the canvas only becomes a move once the pointer has
 travelled `DRAG_TRAVEL_PX` (3 px), so a click with a wobble in it
 records no step to undo.
+
+## Pin→net membership (`minerva_pcb_connect_net` / `minerva_pcb_disconnect_net`)
+
+**A pin belongs to at most one net.** That invariant is enforced in the model
+(`PCBData.connect_pin_to_net`), not at the tool layer, so the canvas, the loader
+and both verbs get it for free.
+
+**One representation.** Membership lives in each net's own `pins` list and
+nowhere else — there is no per-pin `net` field. `minerva_pcb_get_nets` walks
+that list; `minerva_pcb_pin_info`, the canvas pad labels and the route-intent
+same-net guard go through `PCBData.find_net_for_pin`, which walks the same list;
+`to_board_dict()` emits it, which is what `pcb.serialize` and
+`minerva_pcb_export_yaml` turn into YAML. So the surfaces cannot disagree about
+what a net holds. They could disagree about what a *pin* holds —
+`find_net_for_pin` answers with the first net it finds, while `get_nets` and the
+YAML show every net a pin is listed on — but only while a pin is on two nets,
+which the invariant forbids.
+
+**Connect MOVES.** `connect_net` takes the pin off every other net in the same
+operation. The reply names what changed:
+
+```json
+{"success": true, "net_name": "SDA", "connected_pins": ["U1.5"],
+ "moved": [{"pin": "U1.5", "from": "GND"}]}
+```
+
+`moved` is absent when nothing was taken off another net. It is the one fact the
+caller cannot read back afterwards — by then the previous membership is gone.
+
+**Disconnect takes a pin off its net.** `net_name` is optional and is a GUARD,
+not a selector: name it to state which net you believe holds the pins and be
+refused (`pin_not_on_net`, naming the net each pin is actually on, nothing
+mutated) if that belief is stale. A pin already on no net comes back under
+`not_connected` and is not an error.
+
+**One undo step each.** Both verbs compose all their model mutations into a
+single history step via `pcb/ui/model/pcb_undo_step.gd` — a thin, guaranteed-
+closing wrapper around `PCBData.begin_batch` / `end_batch`. One
+`minerva_pcb_undo` restores every previous membership at once (in the nets list,
+in `pin_info`, and in the exported YAML, because all three read the one list);
+`minerva_pcb_redo` re-applies the move.
+
+**A conflicted source is reported, not resolved.** `minerva_pcb_load_board` is
+the one place a pin can arrive already listed under two nets. The loader does
+not pick a winner and does not drop a membership the source deliberately wrote:
+`pcb/ui/model/pcb_net_membership.gd` `conflicts()` names each such pin in the
+load reply's `warnings` and in the panel's held status lead (`NET CONFLICT: …`).
+Reconnecting the pin with `connect_net` heals it — the move sweeps every foreign
+membership, not just the first.
 
 ## DRC over the live board (`minerva_pcb_board_drc`)
 

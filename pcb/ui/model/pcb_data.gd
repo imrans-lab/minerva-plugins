@@ -715,8 +715,29 @@ func remove_net(net_name: String) -> void:
 		data_changed.emit()
 
 
-## Connect a pin to a net
+## Connect a pin to a net. This MOVES: a pin belongs to at most ONE net, so any
+## membership on a different net is removed in the same call — otherwise the pin
+## stays on both and the board carries a netlist short that only some readers
+## (get_nets, to_board_dict) show while others (find_net_for_pin, and so
+## pin_info and the canvas) silently answer with whichever net comes first.
+##
+## The foreign memberships go through the journalled remover rather than a bare
+## erase (the same rule remove_net follows), so a move reads as disconnect+
+## connect in the change journal. PLURAL, because a board loaded from a source
+## that already listed the pin twice is healed here rather than half-healed.
+##
+## Mutators do not self-snapshot history: a caller that wants the move to be ONE
+## undo step wraps it — see pcb_undo_step.gd.
 func connect_pin_to_net(net_name: String, component_id: String, pin_name: String) -> void:
+	var moved := false
+	for other in nets.keys():
+		if other != net_name and nets[other].has_pin(component_id, pin_name):
+			disconnect_pin_from_net(str(other), component_id, pin_name)
+			moved = true
+	# Already exactly here and nowhere else: no journal row for a no-op.
+	if not moved and nets.has(net_name) and nets[net_name].has_pin(component_id, pin_name):
+		return
+
 	if not nets.has(net_name):
 		# Create the net if it doesn't exist
 		var net = PCBNetScript.new()

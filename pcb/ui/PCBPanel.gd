@@ -49,6 +49,9 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
 const _PcbBoardHistoryScript: Script = preload("pcb_board_history.gd")
 const _PcbLoadChecksScript: Script = preload("model/pcb_load_checks.gd")
+## The pin→net invariant: used here for the load-time conflict report only —
+## the membership VERBS run on panel_tools, which preloads the same module.
+const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
@@ -5964,6 +5967,14 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	var board: Dictionary = _dict_or_empty(payload.get("board"))
 	var warnings: Array = payload.get("warnings", [])
 
+	# A pin the incoming source lists under TWO nets is a netlist short, and the
+	# live model answers "which net" arbitrarily for it (find_net_for_pin takes
+	# the first). Name it rather than resolve it: dropping a membership the
+	# source deliberately wrote is the model's call to make, not the loader's.
+	var net_conflicts: PackedStringArray = _PcbNetMembershipScript.conflicts(board)
+	for note in net_conflicts:
+		warnings.append(note)
+
 	# Rebuild the live board (from_board_dict emits data_changed; suppress the
 	# dirty relay for the whole load like the project-file restore path).
 	_restoring = true
@@ -6087,7 +6098,8 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	# the only person who can act on it. Held as a status lead — it describes
 	# the board, so it must outlast the transient messages that follow — and
 	# recomputed on every load, so a board that measures cleanly clears it.
-	_load_check_lead = _PcbLoadChecksScript.status_lead(load_result)
+	_load_check_lead = _PcbNetMembershipScript.conflict_status_lead(net_conflicts) \
+		+ _PcbLoadChecksScript.status_lead(load_result)
 	_set_status(_status_base_text)
 	return {"ok": true, "result": load_result}
 

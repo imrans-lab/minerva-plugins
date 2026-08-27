@@ -129,6 +129,13 @@ test_pcb_explicit_propose.gd assertions=68 real-worker
 test_pcb_hint_refine_loop.gd assertions=64 real-worker
 test_pcb_single_trace_tool.gd assertions=98 real-worker
 test_pcb_legacy_annotation_migration.gd assertions=53
+# The pin→net invariant (a pin belongs to at most one net): connect MOVES,
+# minerva_pcb_disconnect_net removes, each is ONE undo step, and get_nets /
+# pin_info / the board dict handed to pcb.serialize are held to one answer.
+# UNPINNED ON PURPOSE — authored, never executed (this station runs no suites),
+# so an assertions= count here would be a guess, and a guessed pin is the one
+# failure mode this file exists to prevent.
+test_pcb_net_membership.gd
 # SR2FAB S9 added ONE assertion (get_layout_state carries
 # fabrication_stage). 149 -> 150 is an AUTHORED count; see the note on
 # test_draft_composer.gd above.
