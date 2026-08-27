@@ -126,8 +126,15 @@ class CaptureIPC extends Node:
 		if overrides.has(_last_channel):
 			return {"success": true,
 				"result": {"ok": true, "result": overrides[_last_channel]}}
+		# The advisory channels are answered too: `assembly` for board_health,
+		# and a bare `status` for a direct assembly_check. Without them every
+		# load through this stub degrades to indeterminate — the correct
+		# fail-closed reading of a check nobody answered — and would hold a
+		# "CHECK INDETERMINATE" lead over every later status line read here.
 		return {"success": true, "result": {"ok": true, "result": {
 			"success": true, "routes": [], "unrouted": [], "yaml": "name: canned",
+			"status": "pass", "findings": [],
+			"assembly": {"status": "pass", "findings": []},
 			"board": {"version": 1, "name": "canned", "width_mm": 1.0,
 				"height_mm": 1.0, "components": [], "nets": []},
 			"warnings": []}}}

@@ -2839,8 +2839,8 @@ def compile_board(
     # owns the fail-closed geometry rules (strictly-interior, disjoint).
     # ``cutouts: {}`` is still refused — by the shared validate boundary
     # (``invalid_board_structure``), same presence-not-truthiness rule as ever.
-    #board_graphics LEFT THIS LIST in the round that gave
-    # board-level artwork a real owner (:mod:`board_graphics`). It compiles into
+    # ``board_graphics`` LEFT THIS LIST once board-level artwork gained a real
+    # owner (:mod:`board_graphics`). It compiles into
     # ResolvedBoard.board_graphics, both fab emitters draw it, and geometric DRC
     # projects it as silk — the same four-way landing zones and cutouts each had
     # to make before their own refusals were lifted. A malformed CONTAINER is

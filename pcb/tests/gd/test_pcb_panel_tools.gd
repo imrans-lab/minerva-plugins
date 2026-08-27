@@ -283,9 +283,11 @@ func _run_golden_parity() -> void:
 		str((ga.get("assembly", {}) as Dictionary).get("status", "")), "indeterminate")
 
 	print("\n-- GOLDEN: move_component shape --")
-	# Legacy → {success, component_id, x, y} + the 019fd5fe2724 `assembly` key.
 	var gm := await h("minerva_pcb_move_component", _args({"component_id": "C3", "x": 12.7, "y": 53.34}))
-	check_keys("move_component result", gm, ["success", "component_id", "x", "y", "assembly"])
+	# `pads` rides along with every move/rotate reply — the one pad-row shape
+	# the selection verbs share, so a caller that just moved a part can read its
+	# new pad positions without a second round trip.
+	check_keys("move_component result", gm, ["success", "component_id", "x", "y", "assembly", "pads"])
 
 	print("\n-- GOLDEN: spatial_query shape --")
 	# Legacy → {success, reference, radius_mm, nearby_count, nearby:[{id, relationship}]}
@@ -535,6 +537,7 @@ func _run_get_image() -> void:
 
 const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
 const PCB_NET_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_net.gd"
+const PcbLayerStack := preload("res://../../minerva-plugins/pcb/ui/model/pcb_layer_stack.gd")
 const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
 const PANEL_SOURCE_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 
@@ -787,8 +790,15 @@ func _boundary_description_promises_are_true() -> void:
 		check("manifest parses for the prose scan", false)
 		return
 
-	# KiCad aliases are what F1 shipped. They are never valid canonical ids.
+	# KiCad aliases are what F1 shipped — into a ZONE-authoring tool, whose
+	# model accepts canonical ids only. They are not universally refused: a tool
+	# that resolves its layer through PcbLayerStack takes them. So the oracle is
+	# per-tool ACCEPTANCE, executed below, not the presence of the token.
 	var kicad_aliases := ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]
+	# The tools whose `layer` is authored through the ZONE validator
+	# (data.zone_layer_error), which is canonical-only.
+	var zone_layer_tools := ["minerva_pcb_create_zone", "minerva_pcb_propose_zone",
+		"minerva_pcb_set_zone_layer"]
 	var offenders: Array = []
 	for entry in (parsed as Dictionary).get("tools", []):
 		var e: Dictionary = entry
@@ -798,13 +808,19 @@ func _boundary_description_promises_are_true() -> void:
 		var props: Dictionary = schema.get("properties", {})
 		if not props.has("layer"):
 			continue
+		var tool_name := str(e.get("name", ""))
 		var desc := str((props["layer"] as Dictionary).get("description", ""))
 		for alias in kicad_aliases:
 			# An alias may be NAMED as a counter-example ("NOT F.Cu") — that is
-			# the F1 fix's own wording and must not read as a regression. Only an
-			# alias offered WITHOUT a negation is an offender.
-			if desc.find(alias) >= 0 and desc.findn("not ") < 0:
-				offenders.append("%s.layer offers %s" % [str(e.get("name", "")), alias])
+			# the F1 fix's own wording and must not read as a regression.
+			if desc.find(alias) < 0 or desc.findn("not ") >= 0:
+				continue
+			# EXECUTED, per tool: offering a token the tool's own model accepts
+			# is honest schema prose; offering one it refuses is F1.
+			var refused: bool = not str(data.zone_layer_error(alias)).is_empty() \
+				if tool_name in zone_layer_tools else not PcbLayerStack.is_copper(alias)
+			if refused:
+				offenders.append("%s.layer offers %s" % [tool_name, alias])
 	check("no panel tool's `layer` description offers a KiCad alias the model "
 			+ "refuses (offenders: %s)" % str(offenders), offenders.is_empty())
 

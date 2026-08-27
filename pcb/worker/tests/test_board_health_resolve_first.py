@@ -93,10 +93,11 @@ def test_quadlayer_canonical_census_reports_split_net():
     )
     partial = {p["net"]: p["pin_groups"] for p in result.get("partial", [])}
     assert partial.get("SIG") == 2, f"SIG must be 2 pin_groups (got: {result})"
+    # GND rides a pour; the census computes the fill and judges the net for
+    # real rather than declaring it unmeasurable.
     indet = {e["net"]: e["reason"] for e in result.get("indeterminate", [])}
-    assert indet.get("GND") == "zone_copper", (
-        f"GND rides zone copper -> indeterminate (got: {result})"
-    )
+    assert "GND" not in indet, f"GND must be judged, not indeterminate (got: {result})"
+    assert partial.get("GND") == 2, f"GND must be 2 pin_groups (got: {result})"
 
 
 # ---------------------------------------------------------------------------

@@ -144,7 +144,7 @@
     },
     {
       "name": "minerva_pcb_move_relative",
-      "description": "Move a component using natural language direction. On success the reply may carry dangling_copper (same shape as minerva_pcb_move_component's). snap_to_grid:false lands exactly on the interpreted point instead of the 2.54mm grid. The reply's new_x/new_y are where the part actually LANDED; when the grid snap lands the part somewhere other than requested, the reply carries snapped:true + requested:[x,y] beside the landed coordinates — always read the reply's coordinates as the truth. On success the reply carries pads: [PAD ROW,...] — EVERY pad of the component at its new pose ({kind:'pad', ref, component, pin, net, position:{x_mm,y_mm}, layer, side, approach_sides, roles}), so where pin 1 landed is IN THIS REPLY and needs no follow-up minerva_pcb_pin_info call.",
+      "description": "Move a component using natural language direction (e.g., 'down a bit', 'closer to U3'). On success the reply may carry dangling_copper (same shape as minerva_pcb_move_component's). snap_to_grid:false lands exactly on the interpreted point instead of the 2.54mm grid. The reply's new_x/new_y are where the part actually LANDED; when the grid snap lands the part somewhere other than requested, the reply carries snapped:true + requested:[x,y] beside the landed coordinates — always read the reply's coordinates as the truth. On success the reply carries pads: [PAD ROW,...] — EVERY pad of the component at its new pose ({kind:'pad', ref, component, pin, net, position:{x_mm,y_mm}, layer, side, approach_sides, roles}), so where pin 1 landed is IN THIS REPLY and needs no follow-up minerva_pcb_pin_info call.",
       "executor": "panel",
       "input_schema": {
         "type": "object",

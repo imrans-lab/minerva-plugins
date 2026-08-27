@@ -64,6 +64,7 @@ const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
 const PcbCopperOwnership := preload("pcb_copper_ownership.gd")
 const PcbViaDimensions := preload("pcb_via_dimensions.gd")
+const PcbTraceWidth := preload("pcb_trace_width.gd")
 
 ## Emitted when a candidate is inserted.
 signal candidate_added(id: String)
@@ -239,10 +240,12 @@ var last_load_reconciliation: Array = []
 ##
 ## A route reply is supposed to carry the width the router actually drew at
 ## (segments[].width_mm, stamped by methods._attach_effective_routing_rules).
-## When it carries none AND no source hint authored one AND the caller supplied
-## no override, there is no width — and the answer to that is NOT to invent
-## 0.25mm, which is what this code used to do: an invented width becomes copper
-## the board is fabricated at, with nothing in any report saying it was guessed.
+## When it carries none, the width is RESOLVED — the caller's override, then
+## the record's own stated width, then the net's established copper, then the
+## board's design_rules.trace_width_mm (PcbTraceWidth). A route lands here only
+## when every one of those is silent, and the answer to that is NOT to invent a
+## number: an invented width becomes copper the board is fabricated at, with
+## nothing in any report saying it was guessed.
 ##
 ## The candidate STILL LANDS (a ghost is a question, not a board edit) at width
 ## 0.0 with width_source "unresolved", and commit() refuses it by name. This
@@ -1179,7 +1182,13 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 		float(record.get("width_override", 0.0)),
 		str(record.get("task_key_override", "")),
 		record.get("endpoints_override", []) if record.get("endpoints_override", []) is Array else [],
-		board)
+		board,
+		# The record's `width` is the width the panel ALREADY resolved for this
+		# route (panel_tools._route_width: the reply's effective-rules stamp,
+		# else the hint derivation). Reading it here is what keeps ONE width
+		# derivation between the annotation projection and the candidate,
+		# instead of this side re-deriving a worse answer from raw hints.
+		float(record.get("width", 0.0)))
 	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
 	# DURABLE candidate state, not just a reply stamp — the commit preflight's
 	# staleness comparison (ERR_CONSTRAINT_STALE) reads it back from here, and
@@ -1232,11 +1241,18 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 ## which holds the prior candidate) pins the key and carries the terminals
 ## onto the fallback generation so it stays reroutable. Empty (the defaults)
 ## leaves every derived path byte-identical.
-## `board` is the LIVE board, used for exactly one thing here:
-## resolving each via's diameter/drill from its design_rules AT PROPOSAL TIME.
-## null (the headless default) resolves to PcbViaDimensions' constants — the
-## honest "no rules were declared" answer, never a silent override of real ones.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null) -> String:
+## `board` is the LIVE board, used for two things here: resolving each via's
+## diameter/drill from its design_rules AT PROPOSAL TIME, and answering the
+## copper width when nothing upstream did (PcbTraceWidth — the net's own
+## established copper, then design_rules.trace_width_mm). null (the headless
+## default) resolves vias to PcbViaDimensions' constants and leaves the width
+## unresolved — the honest "no rules were declared" answer, never a silent
+## override of real ones.
+## `stated_width` is the width the CALLER already resolved for this route (the
+## normalized record's `width`: the reply's own effective-rules stamp, else the
+## hint derivation). It outranks the board's answers and loses to
+## `width_override`; 0.0 means the caller resolved none.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null, stated_width: float = 0.0) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -1278,17 +1294,25 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		width_hints = _hints_matching_net(source_hints, net)
 	if width_override > 0.0:
 		width = width_override
-	# UNRESOLVED WIDTH IS RECORDED, NOT INVENTED. A segment
-	# whose width comes from none of the three real sources (caller override,
-	# the router's own per-segment width_mm, an authored hint width) used to be
-	# stamped 0.25mm — an invented number that reached fabricated copper with
-	# nothing in any report saying it was guessed.
-	#
+	elif width <= 0.0 and stated_width > 0.0:
+		width = stated_width
+	# A MISSING WIDTH IS RESOLVED, NOT INVENTED. When neither the caller, the
+	# reply's own stamp nor an authored hint sized this copper, the BOARD is
+	# asked next — the net's own established copper first, then
+	# design_rules.trace_width_mm — the same ladder the router walks. Only when
+	# the board has no answer either is the width genuinely unresolved.
+	var board_source := ""
+	if width <= 0.0:
+		var board_width: Dictionary = PcbTraceWidth.from_board(board, net)
+		if float(board_width["width"]) > 0.0:
+			width = float(board_width["width"])
+			board_source = str(board_width["source"])
 	# THE REFUSAL BELONGS TO COPPER, NOT TO THE GHOST. A candidate is a
-	# question, not a board edit, so it still lands — with width 0.0 and
-	# width_source "unresolved", which commit()'s own pre-flight refuses by name
-	# ("zero-width copper is not copper", ERR_UNMODELABLE_SEGMENT). The ghost is
-	# visible and namable; what cannot happen is copper at a width nobody chose.
+	# question, not a board edit, so an unresolved route still lands — with
+	# width 0.0 and width_source "unresolved", which commit()'s own pre-flight
+	# refuses by name ("zero-width copper is not copper",
+	# ERR_UNMODELABLE_SEGMENT). The ghost is visible and namable; what cannot
+	# happen is copper at a width nobody chose.
 	var width_unresolved := false
 	if width <= 0.0:
 		for seg_pre in segs:
@@ -1298,7 +1322,8 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	if width_unresolved:
 		last_ingest_unresolved_widths.append({
 			"net": net, "hint_ids": hint_ids.duplicate(),
-			"reason": "the route reply carries no segment width and no source hint authors one; "
+			"reason": "no width could be resolved for net '%s': the route reply carries no segment width, no source hint authors one, the net has no established copper and the board declares no design_rules.trace_width_mm; "
+				% net
 				+ "the candidate cannot be committed until a width is resolved",
 		})
 
@@ -1379,6 +1404,9 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	cand.width_source = "hint" if _hints_supply_width(width_hints) else "default"
 	if width_override > 0.0:
 		cand.width_source = "caller_option"
+	elif not board_source.is_empty():
+		# The BOARD sized this copper — name which of its two answers did.
+		cand.width_source = board_source
 	elif width_unresolved:
 		# NAMED, not "default" — the review question is exactly "did anyone
 		# choose this width", and 0.0 with a bland label is the old silence.
@@ -2595,9 +2623,12 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 					% [str(seg_dict.get("id", "")), pts.size()], candidate_id)
 		var w := float(seg_dict.get("width", 0.0))
 		if w <= 0.0:
+			# Name the NET: the caller's next move is to give this net a width
+			# (a hint, a design rule, or copper it can inherit from), and a
+			# segment id alone does not say which net is missing one.
 			return _verb_error(ERR_UNMODELABLE_SEGMENT,
-				"segment '%s' declares width %s — zero-width copper is not copper"
-					% [str(seg_dict.get("id", "")), str(w)], candidate_id)
+				"segment '%s' on net '%s' declares width %s — zero-width copper is not copper; no width could be resolved from the route reply, a source hint, the net's existing copper or design_rules.trace_width_mm"
+					% [str(seg_dict.get("id", "")), str(c.net), str(w)], candidate_id)
 		seg_plan.append({
 			"id": str(seg_dict.get("id", "")),
 			"layer": PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "top")),

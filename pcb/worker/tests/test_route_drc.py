@@ -1349,13 +1349,22 @@ def test_a_pour_only_net_still_reads_indeterminate_on_both_ledgers():
     summary = payload["drc_summary"]
     assert summary["complete"] is None
     assert summary["missing_copper"] == []
-    assert summary["indeterminate"] == [
-        {"net": "EXIST", "reason": "zone_copper"}]
+    # The row carries the fill's own refusal as `detail` — the honest
+    # information about WHY the pour could not be measured. Asserted as
+    # "present and non-empty" rather than verbatim: the reason belongs to the
+    # compiler, and pinning its wording here would make an unrelated message
+    # change read as a census regression.
+    assert len(summary["indeterminate"]) == 1
+    row = summary["indeterminate"][0]
+    assert row["net"] == "EXIST"
+    assert row["reason"] == "zone_copper"
+    assert isinstance(row["detail"], str) and row["detail"]
 
+    # The BOARD ledger carries the identical row — same net, same reason, same
+    # detail — so the scoped summary and the whole-board census never disagree
+    # about which nets could not be judged.
     health = _board_health(board, [], board)
-    assert {"net": "EXIST", "reason": "zone_copper"} in health["indeterminate"]
-    assert health["indeterminate"] == [
-        {"net": "EXIST", "reason": "zone_copper"}]
+    assert health["indeterminate"] == [row]
 
 
 # ---------------------------------------------------------------------------

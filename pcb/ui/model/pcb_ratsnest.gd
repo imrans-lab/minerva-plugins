@@ -282,6 +282,13 @@ static func _layers_meet(a: Dictionary, b: Dictionary) -> bool:
 	return PcbCopperContact.layers_meet(a, b)
 
 
+## Whether a node is copper at all — an unplated hole's land is not, and must
+## never be an airwire endpoint (its empty layer set would report every join it
+## represented as staying on one layer).
+static func _has_copper(node: Dictionary) -> bool:
+	return PcbCopperContact.node_has_copper(node)
+
+
 static func _seg_count(pts: PackedVector2Array) -> int:
 	return PcbCopperContact.seg_count(pts)
 
@@ -490,10 +497,12 @@ static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Arr
 	for i in nodes.size():
 		if island_of[i] < 0:
 			continue   # copper in no pad-bearing island: nothing bridges to it
+		if not _has_copper(nodes[i]):
+			continue   # an unplated hole's land is not somewhere an airwire lands
 		for j in range(i + 1, nodes.size()):
 			var ia := island_of[i]
 			var ib := island_of[j]
-			if ib < 0 or ia == ib:
+			if ib < 0 or ia == ib or not _has_copper(nodes[j]):
 				continue
 			var near := _nearest_targets(
 				nodes[i], i < pad_count, nodes[j], j < pad_count)
@@ -654,9 +663,11 @@ static func _focus_in_bundle(bundle: Dictionary, origin_ref: String,
 
 	var best := {}
 	for i in origin_lands:
+		if not _has_copper(nodes[i]):
+			continue   # see _spanning_edges: a no-copper land is not an endpoint
 		for j in nodes.size():
 			var ib := island_of[j]
-			if ib < 0 or ib == home:
+			if ib < 0 or ib == home or not _has_copper(nodes[j]):
 				continue
 			var near := _nearest_targets(nodes[i], true, nodes[j], j < pads.size())
 			var cand := {

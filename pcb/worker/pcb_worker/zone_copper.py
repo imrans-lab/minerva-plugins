@@ -86,7 +86,7 @@ def pour_nodes(board: dict) -> tuple[dict[str, list], str]:
         # take the plane's copper away with it, while dropped copper, drill or
         # design rules stay fatal here as everywhere.
         compiled = _compile.compile_board(
-            board, requested_outputs=_compile.V1_ROUTING_OUTPUTS)
+            _compilable(board), requested_outputs=_compile.V1_ROUTING_OUTPUTS)
     except Exception as exc:  # a fill fault is data, never a crashed DRC
         return {}, f"the pour fill could not be computed: {exc}"
     if isinstance(compiled, ResolutionFailure):
@@ -107,6 +107,23 @@ def pour_nodes(board: dict) -> tuple[dict[str, list], str]:
                 copper_contact.region_node(
                     (Polygon(tuple(polygon.points)),), layers))
     return nodes, NO_ZONES
+
+
+def _compilable(board: dict) -> dict:
+    """``board`` with the one field the compiler requires and the census does
+    not: ``version``.
+
+    The census reads the board dict directly and never asks what schema version
+    it claims, so a board it happily measures can still be one the compiler
+    refuses to resolve. Refusing here would report a pour as unmeasurable for a
+    reason that has nothing to do with the pour — the fill path must tolerate
+    exactly what the census tolerates. An absent version means v1, the schema's
+    own oldest shape; a version the board DOES state is never overridden, so a
+    genuinely bad one still fails as it should.
+    """
+    if isinstance(board.get("version"), int):
+        return board
+    return {**board, "version": 1}
 
 
 def zone_nets(board: dict) -> set[str]:

@@ -1912,8 +1912,8 @@ def materialize_detailed_hints(
             continue
         if str(kp.get("hint_type", "")) != "single_trace":
             continue
-        # LAYER-CARRYING WAYPOINTS TAKE THIS PATH WHATEVER detail_level SAYS
-        #. A hint that names where the copper changes
+        # LAYER-CARRYING WAYPOINTS TAKE THIS PATH WHATEVER detail_level SAYS.
+        # A hint that names where the copper changes
         # side is drawing its own path by construction — that is not something
         # a soft attraction field can express — and detail_level is INFERRED
         # FROM WAYPOINT COUNT (PcbAnnotationHost._derive_detail_level calls 2-3
@@ -2205,8 +2205,8 @@ def hints_to_router(
             effective_waypoints = waypoints
             effective_layer = layer
 
-        # AUTHORED LAYER HOPS ARE NOT HONOURED HERE, and say so (work item
-        #). A waypoint's `layer` is an instruction to change copper
+        # AUTHORED LAYER HOPS ARE NOT HONOURED HERE, and say so.
+        # A waypoint's `layer` is an instruction to change copper
         # AT that point with a via — a verbatim, as-drawn statement. This is the
         # ENGINE path: the corridor is a soft attraction field and the engine
         # owns every layer decision on it, so the hops are dropped. That is a

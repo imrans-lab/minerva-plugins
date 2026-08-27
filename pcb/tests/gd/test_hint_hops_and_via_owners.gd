@@ -174,6 +174,18 @@ func _panel_context() -> Dictionary:
 		"ws": panel.get_routing_workspace(), "data": panel.get_data()}
 
 
+## Remove the board's own trace-width rule.
+##
+## design_rules.trace_width_mm is a REAL rung of the width ladder — a widthless
+## route on a board that declares one resolves to it. Sections 3 and 4 prove
+## what happens when NO source anywhere has an answer, so they take that rung
+## away rather than relying on the fixture board never having had it.
+func _strip_board_trace_width(data) -> void:
+	var dr: Dictionary = (data.design_rules as Dictionary).duplicate()
+	dr.erase("trace_width_mm")
+	data.design_rules = dr
+
+
 func _free_ctx(ctx: Dictionary) -> void:
 	ctx["driver"].free_panel(ctx["panel"])
 
@@ -303,6 +315,7 @@ func _s3_materialize_fails_closed_on_width() -> void:
 	var ctx: Dictionary = await _panel_context()
 	var host = ctx["host"]
 	var data = ctx["data"]
+	_strip_board_trace_width(data)
 
 	# A widthless hint, so no hint width can rescue the reply either. This is
 	# the ONLY input that ever reached the 0.25mm literal.
@@ -352,6 +365,7 @@ func _s4_propose_fails_closed_on_width() -> void:
 	var shim := RouterShim.new(ctx["host"], _hop_reply(0.0))
 	var host = ctx["host"]
 	var data = ctx["data"]
+	_strip_board_trace_width(data)
 
 	var hint_id := str(host.add_route_hint_at(15.0, 20.0, "", "F.Cu", "single_trace", []))
 	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))

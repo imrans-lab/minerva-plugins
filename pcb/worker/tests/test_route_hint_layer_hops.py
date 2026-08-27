@@ -60,6 +60,24 @@ def _board() -> dict:
     }
 
 
+def _bridge_board() -> dict:
+    """The same topology as :func:`_board`, with INLINE pins.
+
+    The route() METHOD compiles the board, so its fixture names a footprint the
+    seed library resolves. The pure bridge call does NOT compile: it reads the
+    dict as given, and a component whose pads live only in a library footprint
+    has no pads at all as far as ``board.get_pad`` is concerned — every hint
+    endpoint would fail to resolve for a reason that has nothing to do with
+    layer hops. Same split as test_route_as_drawn's two fixtures.
+    """
+    board = _board()
+    for comp in board["components"]:
+        comp["footprint"] = "HEADER"
+        comp["pins"] = [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                         "pad_width_mm": 1.7, "pad_height_mm": 1.7}]
+    return board
+
+
 def _hint(waypoints, _id: str = "ann1", **kp_overrides) -> dict:
     kp = {
         "hint_type": "single_trace",
@@ -232,7 +250,7 @@ def test_5_engine_path_warns_that_authored_hops_were_not_placed():
 
 
 def test_6_bridge_emits_hop_vias_positionally():
-    board = route_bridge.board_to_router(_board())
+    board = route_bridge.board_to_router(_bridge_board())
     routes, nets, warnings, ids = route_bridge.materialize_detailed_hints(
         [_hint([{"x": 25.0, "y": 20.32, "layer": "bottom"}])],
         board, declared_layers=["top", "bottom"])
@@ -250,7 +268,7 @@ def test_6_bridge_emits_hop_vias_positionally():
 def test_6b_dict_shaped_waypoints_without_a_layer_are_plain_corners():
     """{"x","y"} has always been an accepted position shape; adding `layer` to
     the vocabulary must not make a layer-less dict mean anything new."""
-    board = route_bridge.board_to_router(_board())
+    board = route_bridge.board_to_router(_bridge_board())
     routes, _nets, warnings, _ids = route_bridge.materialize_detailed_hints(
         [_hint([{"x": 25.0, "y": 20.32}])], board,
         declared_layers=["top", "bottom"])

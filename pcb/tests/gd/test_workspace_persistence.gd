@@ -120,7 +120,13 @@ func _seed_board() -> Object:
 	t_bot.id = "t_bot"; t_bot.net_name = "N1"; t_bot.layer = "bottom"; t_bot.width = 0.3
 	t_bot.waypoints.append(Vector2(10, 0)); t_bot.waypoints.append(Vector2(15, 0))
 	data.add_trace(t_bot)
+	# EXPLICIT via id, exactly as the traces above get explicit ids: an
+	# unstated id is MINTED from a CSPRNG, so two content-identical seed boards
+	# would differ in via identity alone — and the fingerprint (which hashes
+	# the board dict) would report a board that never changed as a different
+	# board. The checks here compare boards built by two separate seed calls.
 	data.add_via({
+		"id": "via:11111111111111111111111111111111",
 		"position": Vector2(5, 0), "size": 0.8, "drill": 0.4,
 		"net_name": "N1", "from_layer": "top", "to_layer": "bottom",
 	})

@@ -115,12 +115,17 @@ def _shape_gap(s1: Any, s2: Any) -> float:
 def node_gap(a: ContactNode, b: ContactNode) -> float:
     """Smallest edge-to-edge distance between the two pieces, in mm. ``inf``
     when they share no layer — copper on different layers has no gap to
-    measure, it simply is not the same conductor."""
+    measure, it simply is not the same conductor.
+
+    A REAL DISTANCE at any separation, so a caller can say how far apart two
+    pieces are and not merely whether they touch. The AABB cheap-reject that
+    keeps the O(pads x segments) sweeps affordable lives in :func:`nodes_touch`,
+    which is the only place a bound on the answer is sound: it would turn every
+    gap wider than the touch epsilon into ``inf`` here.
+    """
     if not a.shapes or not b.shapes:
         return math.inf   # a node with no copper has no gap to measure
     if not layers_meet(a, b):
-        return math.inf
-    if not _aabb_within(a.aabb, b.aabb, TOUCH_EPS_MM):
         return math.inf
     best = math.inf
     for s1 in a.shapes:
@@ -135,6 +140,8 @@ def node_gap(a: ContactNode, b: ContactNode) -> float:
 
 def nodes_touch(a: ContactNode, b: ContactNode) -> bool:
     """THE predicate: are these two pieces of copper one conductor?"""
+    if not _aabb_within(a.aabb, b.aabb, TOUCH_EPS_MM):
+        return False   # cheap reject, so the DRC sweeps stay cheap
     return node_gap(a, b) <= TOUCH_EPS_MM + EPS
 
 

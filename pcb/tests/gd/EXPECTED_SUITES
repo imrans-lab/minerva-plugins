@@ -132,10 +132,7 @@ test_pcb_legacy_annotation_migration.gd assertions=53
 # The pin→net invariant (a pin belongs to at most one net): connect MOVES,
 # minerva_pcb_disconnect_net removes, each is ONE undo step, and get_nets /
 # pin_info / the board dict handed to pcb.serialize are held to one answer.
-# UNPINNED ON PURPOSE — authored, never executed (this station runs no suites),
-# so an assertions= count here would be a guess, and a guessed pin is the one
-# failure mode this file exists to prevent.
-test_pcb_net_membership.gd
+test_pcb_net_membership.gd assertions=51
 # SR2FAB S9 added ONE assertion (get_layout_state carries
 # fabrication_stage). 149 -> 150 is an AUTHORED count; see the note on
 # test_draft_composer.gd above.
@@ -143,10 +140,9 @@ test_pcb_panel_layout.gd assertions=150
 test_pcb_panel_model.gd assertions=186
 test_pcb_panel_tools.gd assertions=211
 test_pcb_panel_tools_migration.gd assertions=68
-# Authored, never executed — pins at testex. The pad codec's fab optionals,
-# the roundrect land at its authored corner radius, and the load-time
-# indeterminate lead. Source count is 27; do NOT trust it, measure it.
-test_pcb_pad_fidelity.gd
+# The pad codec's fab optionals, the roundrect land at its authored corner
+# radius, and the load-time indeterminate lead.
+test_pcb_pad_fidelity.gd assertions=27
 # Epoch NLC (154 -> 158): the Tools-area Via button adds four assertions to this
 # suite's tool-button walk. Found by RUNNING it after the DCR picker removal —
 # it is outside the NLC delta the owner scoped, so nothing had exercised it since
@@ -200,10 +196,7 @@ test_trace_identity_delete.gd assertions=213
 # pcb-plugin binary (pcb.serialize -> pcb.deserialize, the exact codec
 # export_yaml/load_board use), so the id round trip is measured rather than
 # modelled -> `real-worker`.
-# DELIBERATELY UNPINNED assertion count: the number has never been MEASURED on a
-# run, and a count derived by reading the source is exactly what this manifest's
-# own header refuses. Pin it after the first green run.
-test_copper_identity_ownership.gd real-worker
+test_copper_identity_ownership.gd assertions=41 real-worker
 test_workspace_check.gd assertions=46
 test_workspace_ingest.gd assertions=77
 test_workspace_persistence.gd assertions=76
@@ -358,44 +351,31 @@ test_trace_cut.gd assertions=50
 # two-file edit for no gain. Pin it if the fixed section ever grows teeth of
 # its own.
 test_copper_contact_vectors.gd
-# NEW: a same-net pour is a terminator for the canvas Trace tool, and an
-# unplated hole joins nothing. UNPINNED: authored in the same change that added
-# the behaviour, so no count has been MEASURED yet — pinning a number nobody
-# ran would be a guess wearing a gate's clothes. Pin it on the first green run.
-test_trace_pour_terminator.gd
+# A same-net pour is a terminator for the canvas Trace tool, and an unplated
+# hole joins nothing — including for the ratsnest, which must never let a hole
+# with no barrel answer whether a join crosses layers.
+test_trace_pour_terminator.gd assertions=12
 
 # Via ownership (propose_via for_hint), design-rule via sizing at proposal time,
 # no invented trace width, and the panel half of layer-hop waypoints.
-# UNPINNED on purpose — the assertion count is pinned once the suite has been
-# RUN, not derived from reading it.
-test_hint_hops_and_via_owners.gd
+test_hint_hops_and_via_owners.gd assertions=59
 
-# NEW — Pin Select, the one land-to-world transform shared by the renderer and
-# the hit test, and the rotation convention a placement reply states. UNPINNED
-# on purpose: an assertions= count here would be derived by reading the source,
-# which is exactly the false pin this file exists to prevent. Pin it from the
-# first trustworthy run.
-test_pcb_pin_select.gd
+# Pin Select, the one land-to-world transform shared by the renderer and the
+# hit test, and the rotation convention a placement reply states.
+test_pcb_pin_select.gd assertions=106
 
-# NEW — minerva_pcb_describe_region (ONE read of a board rectangle) and
-# layers_touched on it and on minerva_pcb_list_vias. UNPINNED on purpose: an
-# assertions= count here would be derived by reading the source, which is
-# exactly the false pin this file exists to prevent. Pin it from the first
-# trustworthy run.
-test_describe_region.gd
+# minerva_pcb_describe_region (ONE read of a board rectangle) and
+# layers_touched on it and on minerva_pcb_list_vias.
+test_describe_region.gd assertions=146
 
-# NEW — a transient status message must not be wiped early by the PREVIOUS
-# message's uncancelled 2s timer. Section 1 measures that in REAL TIME and so
-# takes ~3.5s of wall clock; that cost is the point — the rule is about a clock.
-# UNPINNED for the same reason as the entry above.
-test_transient_status.gd
+# A transient status message must not be wiped early by the PREVIOUS message's
+# uncancelled 2s timer. Section 1 measures that in REAL TIME and so takes ~3.5s
+# of wall clock; that cost is the point — the rule is about a clock.
+test_transient_status.gd assertions=17
 
-# NEW — board-level silk text and graphics. Covers the panel half: the GDScript font mirror's fixture numbers, the B.SilkS mirror
-# convention (risk R7) asserted point-for-point with negative controls, the
-# board_graphics round trip through to_board_dict/from_board_dict, one-undo-step
-# add and delete, the three MCP verbs, and canvas pick/select/delete.
-#
-# UNPINNED: the station that added it ran static gates only, and this file's own
-# rule is not to pin a count nobody has measured on a run. Pin it at the first
-# green run.
-test_board_graphics.gd
+# Board-level silk text and graphics, panel half: the GDScript font mirror's
+# fixture numbers, the B.SilkS mirror convention asserted point-for-point with
+# negative controls, the board_graphics round trip through
+# to_board_dict/from_board_dict, one-undo-step add and delete, the three MCP
+# verbs, and canvas pick/select/delete.
+test_board_graphics.gd assertions=61

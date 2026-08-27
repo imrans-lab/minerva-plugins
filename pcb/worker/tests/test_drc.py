@@ -606,7 +606,16 @@ def test_a_zone_counts_as_copper_but_is_indeterminate_not_complete():
     assert r["missing_copper"] == []
     assert "partial" not in r
     assert r["complete"] is None
-    assert r["indeterminate"] == [{"net": "VCC_5V", "reason": "zone_copper"}]
+    # The row carries the fill's own refusal as `detail` — the honest
+    # information about WHY the pour could not be measured. Asserted as
+    # "present and non-empty" rather than verbatim: the reason belongs to
+    # the compiler, and pinning its wording here would make an unrelated
+    # message change read as a census regression.
+    assert len(r["indeterminate"]) == 1
+    row = r["indeterminate"][0]
+    assert row["net"] == "VCC_5V"
+    assert row["reason"] == "zone_copper"
+    assert isinstance(row["detail"], str) and row["detail"]
 
 
 def test_a_known_defect_outranks_an_indeterminate_zone():
@@ -634,7 +643,16 @@ def test_a_known_defect_outranks_an_indeterminate_zone():
     r = _run(board)
     assert r["complete"] is False
     assert r["missing_copper"] == ["VCC_5V"]
-    assert r["indeterminate"] == [{"net": "GNDZ", "reason": "zone_copper"}]
+    # The row carries the fill's own refusal as `detail` — the honest
+    # information about WHY the pour could not be measured. Asserted as
+    # "present and non-empty" rather than verbatim: the reason belongs to
+    # the compiler, and pinning its wording here would make an unrelated
+    # message change read as a census regression.
+    assert len(r["indeterminate"]) == 1
+    row = r["indeterminate"][0]
+    assert row["net"] == "GNDZ"
+    assert row["reason"] == "zone_copper"
+    assert isinstance(row["detail"], str) and row["detail"]
 
 
 def test_parallel_traces_a_clearance_apart_do_not_union():
@@ -810,7 +828,16 @@ def test_zone_net_with_trace_islands_stays_indeterminate():
     connect the pins, might not — indeterminate, never auto-complete and
     never falsely partial."""
     census = drc.connectivity_completeness(_zone_net_board(with_bridge_trace=False))
-    assert census["indeterminate"] == [{"net": "GNDZ", "reason": "zone_copper"}]
+    # The row carries the fill's own refusal as `detail` — the honest
+    # information about WHY the pour could not be measured. Asserted as
+    # "present and non-empty" rather than verbatim: the reason belongs to
+    # the compiler, and pinning its wording here would make an unrelated
+    # message change read as a census regression.
+    assert len(census["indeterminate"]) == 1
+    row = census["indeterminate"][0]
+    assert row["net"] == "GNDZ"
+    assert row["reason"] == "zone_copper"
+    assert isinstance(row["detail"], str) and row["detail"]
     assert census["complete"] is None
     assert census["partial"] == []
 

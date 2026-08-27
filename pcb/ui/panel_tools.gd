@@ -80,6 +80,7 @@ const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 const PcbBusLabels := preload("model/pcb_bus_labels.gd")
 const PcbViaDimensions := preload("model/pcb_via_dimensions.gd")
+const PcbTraceWidth := preload("model/pcb_trace_width.gd")
 const PcbBoardGraphic := preload("model/pcb_board_graphic.gd")
 const StagedEntities := preload("model/pcb_staged_entities.gd")
 
@@ -3256,8 +3257,9 @@ static func _resolve_hint_net_for_seeding(kp: Dictionary, data) -> String:
 ## canonical candidate — plus the once-resolved provenance/width and the flattened
 ## polyline/layer the annotation badge needs. `source_hints` rides along so the
 ## workspace resolves width/hint-ids/endpoints from the identical inputs the
-## annotation side used.
-static func _normalize_route_records(result: Dictionary, source_hints: Array) -> Array:
+## annotation side used, and `data` is the live board — the last two rungs of
+## the width ladder (see _route_width) live there.
+static func _normalize_route_records(result: Dictionary, source_hints: Array, data = null) -> Array:
 	var records: Array = []
 	for route in result.get("routes", []):
 		if not (route is Dictionary):
@@ -3267,7 +3269,7 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 			"net": net,
 			"segments": (route.get("segments", []) as Array).duplicate(true) if route.get("segments", []) is Array else [],
 			"vias": (route.get("vias", []) as Array).duplicate(true) if route.get("vias", []) is Array else [],
-			"width": _route_width(route, source_hints, net),
+			"width": _route_width(route, source_hints, net, data),
 			"source_hint_ids": _route_hint_ids(route),
 			"polyline": _route_polyline(route),
 			"layer": _route_layer(route),
@@ -3339,7 +3341,7 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		return ctx.get("reply")
 	var workspace = ctx["ws"]
 
-	var records: Array = _normalize_route_records(result, source_hints)
+	var records: Array = _normalize_route_records(result, source_hints, data)
 	var revision: int = int(data.board_revision) if data != null else 0
 	# OFC-3 provenance, F1-repaired (Codex 1188): consumed from the
 	# COMPOSE-TIME draft_context the route reply carried — never re-sampled
@@ -3413,10 +3415,11 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		"proposed": proposals.size(),
 		"proposals": proposals,
 		"holds": holds,
-		# Routes whose copper width could not be resolved —
-		# their candidates carry width 0.0 / width_source "unresolved" and
-		# commit refuses them by name. The fail-closed replacement for the
-		# invented 0.25mm. Empty on every ordinary propose.
+		# Routes no source could size: not the reply's stamp, not a hint, not
+		# the net's own copper, not the board's design rule. Their candidates
+		# carry width 0.0 / width_source "unresolved" and commit refuses them
+		# by name, rather than fabricating copper at an invented width. Empty
+		# on every ordinary propose.
 		"unresolved_widths": unresolved_widths,
 		"unrouted": result.get("unrouted", []),
 		"stuck": _stuck_from_result(result),
@@ -3499,12 +3502,13 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		# report saying the number was guessed rather than sourced. The route
 		# lays no copper and names what it could not resolve; the rest of the
 		# reply's routes are unaffected, exactly as for unusable segments below.
-		var width: float = _route_width(route, source_hints, net)
+		var width: float = _route_width(route, source_hints, net, data)
 		if width <= 0.0:
 			failed.append({"net": net, "reason":
-				"no trace width could be resolved: the route reply carries no "
-				+ "effective_routing_rules.trace_width_mm and no source hint for this net "
-				+ "authors a width_mm — no copper was created for it"})
+				"no trace width could be resolved for net '%s': the route reply carries no " % net
+				+ "effective_routing_rules.trace_width_mm, no source hint for this net "
+				+ "authors a width_mm, the net has no established copper and the board "
+				+ "declares no design_rules.trace_width_mm — no copper was created for it"})
 			continue
 		var by_layer := {}
 		for seg in route.get("segments", []):
@@ -3983,14 +3987,22 @@ static func _route_layer(route: Dictionary) -> String:
 ## option, a hint-authored width, the net's class minimum, the width the net's
 ## own EXISTING copper establishes and the board's default, in that order.
 ##
-## Falls back to the hint derivation (and to 0.0) only when the reply carries no
-## stamp at all: an older worker, or a path that skipped the attach. Same
-## absent-key contract as every other field read off a route reply.
-static func _route_width(route: Dictionary, source_hints: Array, net: String) -> float:
+## Falls back to the hint derivation only when the reply carries no stamp at
+## all: an older worker, or a path that skipped the attach. Same absent-key
+## contract as every other field read off a route reply.
+##
+## When neither answers, the BOARD does (PcbTraceWidth): the net's own
+## established copper, then design_rules.trace_width_mm. A missing width is
+## RESOLVED, not invented — 0.0 comes back only when no source anywhere has an
+## answer, and the callers refuse rather than pick a number.
+static func _route_width(route: Dictionary, source_hints: Array, net: String, data = null) -> float:
 	var routed: float = _route_effective_width(route)
 	if routed > 0.0:
 		return routed
-	return _width_for_net(source_hints, net)
+	var hinted: float = _width_for_net(source_hints, net)
+	if hinted > 0.0:
+		return hinted
+	return float(PcbTraceWidth.from_board(data, net)["width"])
 
 
 ## `effective_routing_rules.trace_width_mm.value` off one route, or 0.0 when the
@@ -7419,7 +7431,7 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 	# task_key_override / endpoints_override / width_override so a
 	# hint-unattributed answer lands on the asking task instead of a phantom
 	# "net|" key. Empty (the default) is byte-identical to the old behavior.
-	var records: Array = _normalize_route_records(result, source_hints)
+	var records: Array = _normalize_route_records(result, source_hints, data)
 	if not record_overrides.is_empty():
 		for rec_v in records:
 			if rec_v is Dictionary:

@@ -416,6 +416,12 @@ func _panel_context(mounted: bool = false) -> Dictionary:
 			await process_frame
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
+	# The board declares a trace width, as every authored board does. The
+	# multipad fixture reply carries no width of its own, so this design rule is
+	# what sizes its copper — the last rung of the width ladder, and the reason
+	# a widthless reply is committable here. The one group that tests the
+	# ladder's END (_run_ux1_width_provenance) clears it deliberately.
+	panel.get_data().design_rules = {"trace_width_mm": 0.3}
 	var seeded := _seed_source_hint(host)
 	var shim := RouterShim.new(host, _multipad_reply([str(seeded[0])]))
 	return {
@@ -2189,6 +2195,10 @@ func _run_ux1_width_provenance() -> void:
 	# nobody chose.
 	var plain: Dictionary = _multipad_reply([hint_id])
 	shim.reply = plain
+	# NO board answer either: strip the design rule _panel_context authored, so
+	# every rung of the ladder — reply stamp, hint, the net's own copper, the
+	# board's default — is genuinely silent.
+	ctx["data"].design_rules = {}
 	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
 	var recs2: Array = out2.get("candidates", [])
 	if recs2.size() > 0:

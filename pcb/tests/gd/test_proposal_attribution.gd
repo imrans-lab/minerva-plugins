@@ -304,6 +304,11 @@ func _run_deletion_path_teeth() -> void:
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
 	var data = panel.get_data()
+	# The fixture routes state no width of their own, so the board's own rule
+	# sizes their copper. This section is about hint attribution on a PARTIAL
+	# failure, not about the width ladder — net B fails for having no usable
+	# segments, and it has to be the only reason either route fails.
+	data.design_rules = {"trace_width_mm": 0.25}
 
 	var hint_a_id := _seed_pin_only_hint(host, "U1.1", "U2.1")
 	var hint_b_id := _seed_pin_only_hint(host, "U3.1", "U4.1")

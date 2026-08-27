@@ -73,6 +73,9 @@ func _data_with(graphics: Array):
 	var data = PCBData.new()
 	for g in graphics:
 		data.add_board_graphic(g)
+	# A BASELINE history entry: undo() restores the PREVIOUS entry, so a board
+	# whose history holds only the post-delete snapshot has nothing to undo to.
+	data.save_to_history("baseline")
 	return data
 
 

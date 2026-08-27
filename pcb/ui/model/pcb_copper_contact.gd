@@ -139,6 +139,19 @@ static func no_copper_node(at: Vector2) -> Dictionary:
 	return make_node([], [], 0.0, {}, at)
 
 
+## True when a node models actual copper.
+##
+## A no_copper_node — an unplated hole's land — carries neither polys nor lines.
+## It touches nothing (the predicate has nothing to compare), and it is nowhere
+## an airwire can land either: its layer set is EMPTY, which reads as UNKNOWN
+## and so "meets" every other layer. Anything that reports about where copper
+## joins must skip it, or a hole with no barrel will answer a question only
+## copper can answer.
+static func node_has_copper(node: Dictionary) -> bool:
+	return not (node.get("polys", []) as Array).is_empty() \
+		or not (node.get("lines", []) as Array).is_empty()
+
+
 ## One logical pin as one node per physical land where the footprint resolved,
 ## or one small disc at the pin centre when it did not.
 ##
