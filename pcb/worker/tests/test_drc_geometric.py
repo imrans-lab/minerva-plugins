@@ -27,6 +27,7 @@ from pcb_worker.drc_geom_primitives import (
     segment_segment_distance,
     segment_segment_witness,
 )
+from pcb_worker.geometry import place_point
 from pcb_worker.drc_geometric import (
     CopperPrimitive,
     Projection,
@@ -504,7 +505,20 @@ def test_gc6_above_threshold_passes():
 # ---------------------------------------------------------------------------
 
 
-def test_rotated_smd_pad_projects_oriented_rect_with_angle():
+def test_a_forty_five_degree_land_turns_the_way_its_placement_does():
+    """A rotated pad's LAND must be turned by the same convention that places
+    its centre: the board frame's Y grows downward, so a KiCad angle is applied
+    as ``radians(-deg)`` (``geometry.rotate_local_offset``), never
+    ``radians(+deg)``. Multiples of 90 hide the difference under a rectangle's
+    own symmetry; at 45 degrees the two answers are mirror images of each other
+    about the pad centre, and copper the checker measures 90 degrees away from
+    where the fab cuts it is a false clean waiting to happen.
+
+    The oracle is the placement transform itself — ``geometry.place_point``
+    applied by hand to the land's four corner OFFSETS. That is an independent
+    derivation: the projection reaches its corners through ``OrientedRect``,
+    which carries a rotation matrix of its own.
+    """
     board = _base(
         components=[{"ref": "R1", "footprint": "R_0805", "x_mm": 20, "y_mm": 20,
                      "rotation_deg": 45, "layer": "top"}])
@@ -512,7 +526,13 @@ def test_rotated_smd_pad_projects_oriented_rect_with_angle():
     rects = [c.shape for c in proj.copper
              if c.kind == "smd_pad" and isinstance(c.shape, OrientedRect)]
     assert rects, "expected a rotated SMD rectangular land"
-    assert any(abs(r.angle - math.radians(45)) < 1e-9 for r in rects)
+    for rect in rects:
+        expected = [place_point(rect.cx, rect.cy, 45.0, sx * rect.hw, sy * rect.hh)
+                    for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        for got, want in zip(rect.corners(), expected):
+            assert math.dist(got, want) < 1e-9, (
+                f"land corner {got} but the placement convention puts it at "
+                f"{want} — the land is turned the wrong way (radians(+deg))")
 
 
 def test_rotated_th_pad_annular_ring_is_rotation_invariant():

@@ -34,6 +34,7 @@ from pcb_worker.resolve import ResolveCoincidenceError, resolve_board
 
 HERE = Path(__file__).resolve().parent
 BOARD_YAML = HERE / "testdata" / "footprints" / "resolve_corners.yaml"
+PARITY_CORNERS = HERE / "testdata" / "parity_corners.yaml"
 
 
 def _load_board() -> dict:
@@ -487,3 +488,45 @@ def test_resolve_states_the_component_level_resolved_fact():
     assert "footprint_resolved" not in tolerant["components"][0], (
         "a component whose footprint did NOT resolve must stay pristine — "
         "stamping the fact here would retire the unresolved badge falsely")
+
+
+def test_resolved_pads_stay_footprint_local_so_the_compile_round_trip_is_stable():
+    """A resolved component's ``pads`` are footprint-LOCAL, with the FOOTPRINT's
+    own layer names — even for a part mounted on the BOTTOM.
+
+    That is not an oversight, it is the contract this dict has with
+    ``inline_footprint``: the panel persists what resolve returns, and a board
+    carrying a ``pads`` key compiles from those bytes instead of the library, so
+    ``compile_board`` applies the placement — the bottom mirror and the F/B layer
+    swap included — to whatever is in here. Baking the side in at resolve time
+    would flip a bottom part twice: its copper would land back on the top of the
+    board, and its offsets back where the un-mirrored ones were.
+
+    Pinned by compiling the SAME board both ways. The side belongs to the
+    PLACEMENT, and a consumer that reads these pads without placing them (the
+    connectivity harvest does place them, via geometry.component_transform) is
+    the thing that has to change, not this frame.
+    """
+    from pcb_worker import compile_board as cb
+    from pcb_worker import inline_footprint
+
+    board = yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8"))
+    resolved = resolve.resolve_board_best_effort(board)
+
+    # SW10 is the bottom-side SMD part; its footprint states the FRONT layers.
+    sw10 = next(c for c in resolved["components"] if c["ref"] == "SW10")
+    assert sw10["layer"] == "bottom"
+    assert inline_footprint.carries_full_geometry(sw10)
+    assert sw10["pads"][0]["layers"] == ["F.Cu", "F.Mask", "F.Paste"]
+    assert (sw10["pads"][0]["position"], sw10["pads"][1]["position"]) == (
+        {"x": -3.0, "y": 0.0}, {"x": 3.0, "y": 0.0})
+
+    def placed(compiled):
+        comp = next(c for c in compiled.board.components if c.ref == "SW10")
+        return {pad.source_id: (pad.position, tuple(l.id for l in pad.layers))
+                for pad in comp.placed_pads}
+
+    from_library = placed(cb.compile_board(board))
+    from_resolved = placed(cb.compile_board(resolved))
+    assert from_resolved == from_library
+    assert from_library["pad:A:0"] == ((17.0, 12.0), ("B.Cu", "B.Mask", "B.Paste"))

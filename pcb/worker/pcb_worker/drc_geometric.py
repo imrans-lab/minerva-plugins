@@ -158,6 +158,7 @@ from .ir_pads import (
     smd_shape,
 )
 from . import mask_source, silk_source
+from .geometry import rotation_radians
 from .mask_source import MaskOpening
 from .pad_source import placed_pad_to_geom
 from .ir_projection import (
@@ -1271,7 +1272,10 @@ def _mask_shape(opening: MaskOpening):
     """
     x, y = opening.x, opening.y
     w, h = opening.width, opening.height
-    angle = math.radians(opening.angle_deg)
+    # Same y-down convention the land itself is shaped with
+    # (geometry.rotation_radians): a mask opening measured with the opposite
+    # sign would sit mirrored over the copper it is supposed to expose.
+    angle = rotation_radians(opening.angle_deg)
 
     if opening.shape == "circle":
         return Capsule.disc(x, y, w / 2.0)

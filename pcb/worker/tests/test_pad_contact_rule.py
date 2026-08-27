@@ -186,10 +186,8 @@ def test_the_projected_board_carries_the_land_the_rule_needs():
     positive land size, and its contact node reaches a probe 0.5mm off the pad
     centre — which a 0.2mm coincidence disc cannot do.
 
-    NOT a cross-path equality assertion. The raw harvest does not mirror
-    bottom-side footprints (see the out-of-scope note in drc._harvest_pads'
-    caller); the two paths place this fixture's bottom-side U2 differently, and
-    that predates the contact rule.
+    About LAND EXTENT only; whether the two paths agree on WHERE each land sits
+    is the separate assertion below.
     """
     board = methods._maybe_resolve(
         yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8")), {})
@@ -209,6 +207,59 @@ def test_the_projected_board_carries_the_land_the_rule_needs():
         probe = copper_contact.endpoint_node((pad.x + 0.5, pad.y), 0.0, None)
         assert copper_contact.nodes_touch(probe, pad.contact), (
             f"{pad.ref}.{pad.pin} projected without usable land geometry")
+
+
+def test_the_two_paths_place_one_board_identically_bottom_side_included():
+    """WHERE a pad's copper is, answered twice, and the two answers must match.
+
+    The kernel is fed from two directions and each derives placement its own
+    way, so this is a real cross-check rather than a tautology:
+
+      * the RAW path (``drc._harvest_pads`` over the resolved board dict) starts
+        from footprint-LOCAL offsets and places them itself, through
+        ``geometry.component_transform``;
+      * the PROJECTED path hands it ``ir_connectivity.connectivity_board``,
+        whose pads are already ABSOLUTE — placed by the compiler, off a
+        ``FootprintDefinition``, in a different module.
+
+    The fixture's U2 is the case that separates them: a bottom-side DIP socket
+    turned 90 degrees, with pin 4 at local (7.62, 5.08). Bottom mirrors local y
+    to -5.08; the quarter turn (clockwise in this y-down frame) sends
+    (7.62, -5.08) to (-5.08, -7.62); the placement at (28, 20) lands it at
+    (22.92, 12.38). Skipping the mirror puts it at (33.08, 12.38) — 10.16mm
+    away, over copper that is not there.
+
+    The two censuses are not identical in MEMBERSHIP, deliberately: the
+    projection drops U3's unplated pad, because a bare mechanical hole is not an
+    electrical entity, while the raw harvest keeps it as copper-free geometry.
+    That difference is about what a hole IS, not about where anything sits, so
+    it is named here rather than smoothed over.
+    """
+    board = methods._maybe_resolve(
+        yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8")), {})
+    rb = compile_board.compile_board(board).board
+    projected = ir_connectivity.connectivity_board(rb)
+
+    harvested = drc._harvest_pads(board)
+
+    def positions(pads):
+        return {(p.ref, p.pin): (round(p.x, 6), round(p.y, 6)) for p in pads}
+
+    raw = positions(harvested)
+    ir = positions(drc._harvest_pads(projected))
+    assert set(raw) - set(ir) == {("U3", "3")}
+    assert {k: v for k, v in raw.items() if k in ir} == ir
+
+    assert raw[("U2", "4")] == (22.92, 12.38)
+
+    # And the SIDE the raw path reports for a bottom-mounted SMD part, whose
+    # footprint states F.Cu — so its layer is DERIVED from the placement rather
+    # than authored. This one used to come back on the top of the board.
+    by_pin = {(p.ref, p.pin): p for p in harvested}
+    assert by_pin[("SW10", "A")].layers == frozenset({"bottom"})
+    # A through-hole land spans the stack whichever side its part is mounted on,
+    # which the harvest states as the permissive None.
+    assert by_pin[("U2", "4")].layers is None
 
 
 def _bench() -> dict:

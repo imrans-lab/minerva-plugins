@@ -42,10 +42,12 @@ FALSE-POSITIVE GUARDS (mandatory — a DRC that cries wolf is useless):
     open — same-component same-net pads (module internal nets, e.g. an ESP32's
     several GND pins) are internally connected and stay quiet.
 
-DRY: pad absolute positions reuse geometry.rotate_local_offset (KiCad CW
-convention, math.radians(-deg)) so DRC and the fabrication compiler agree
-byte-for-byte on where a rotated pad lands. This module owns only the net<->pad
-wiring and the segment geometry that gerber has no need for.
+DRY: pad absolute positions, land angles and board layers all come from ONE
+placement rule, geometry.component_transform -> PlacementTransform — the very
+transform compile_board applies — so DRC and the fabrication compiler agree
+byte-for-byte on where a rotated or bottom-MOUNTED pad lands and which side its
+copper is on. This module owns only the net<->pad wiring and the segment
+geometry that gerber has no need for.
 """
 
 from __future__ import annotations
@@ -57,7 +59,8 @@ from typing import Any, NamedTuple
 from agent_router import layers as _layers
 
 from . import copper_contact, zone_copper
-from .geometry import rotate_local_offset as _rotate
+from .geometry import PlacementTransform, component_transform
+from .resolved_board import Layer
 from .pad_source import has_copper, is_through_hole, is_unplated_hole, iter_pads
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
@@ -320,15 +323,21 @@ def _harvest_pads(board: dict) -> list[_Pad]:
         if not isinstance(comp, dict):
             continue
         ref = comp.get("ref")
-        cx, cy = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
-        rot = _num(comp.get("rotation_deg"))
+        # ONE placement rule, shared with the compiler: rotation AND the
+        # bottom-side mirror come from geometry.PlacementTransform, built off
+        # the component's own authored side. This harvest used to rotate but
+        # never mirror, so a bottom-mounted part's pads were checked where its
+        # top-side twin would sit — up to a whole footprint away from the copper
+        # the fab path (compile_board._place_component, the same transform)
+        # actually places.
+        transform = component_transform(comp)
         # iter_pads PREFERS resolved comp["pads"] (real footprint pad CENTERS) and
         # otherwise reconstructs the exact per-pin fallback used inline before —
         # DRC uses only the pad center + through-hole flag (no pad SIZE), so
         # gate-OFF is a pure no-op (see pad_source).
         for pad in iter_pads(comp):
             num = str(pad.number)
-            ox, oy = _rotate(pad.x, pad.y, rot)
+            px, py = transform.point((pad.x, pad.y))
             # is_through_hole is the SHARED predicate the two emitters also use, so
             # DRC classifies TH-vs-SMD identically (no third hand-written literal to
             # drift — bug 019f91c1420c). DRC runs iter_pads WITHOUT require_smd_size,
@@ -352,23 +361,43 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             # fallback (no layer list => still copper).
             if not has_copper(pad):
                 continue
-            declared = pad.layers or []
+            declared = _placed_layers(transform, pad.layers or [])
             if any(lay == "*.Cu" for lay in declared):
                 canon = None          # spans the stack -> permissive
             else:
                 canon = frozenset(_layers.kicad_to_canon(lay) for lay in declared
                                   if _layers.is_copper(lay)) or None
             # BOARD angle of the land: the placement angle composed with the
-            # pad's own, both in the one clockwise convention _rotate applies to
-            # the offset just above (a compiled-IR pad carries its combined
-            # angle and rides a zero-rotation component, so the sum is right on
-            # that path too).
-            land_deg = rot + _num(pad.rotation)
+            # pad's own, through the same transform that placed the offset just
+            # above — so a bottom-side component's land turns with its mirror
+            # (a compiled-IR pad carries its combined angle and rides a
+            # zero-rotation top-side component, so the fold is right there too).
+            land_deg = transform.angle(_num(pad.rotation))
             contact = copper_contact.pad_node(
-                pad, (cx + ox, cy + oy), land_deg, canon, unknown_land_radius)
+                pad, (px, py), land_deg, canon, unknown_land_radius)
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
-                             cx + ox, cy + oy, through_hole, canon, contact))
+                             px, py, through_hole, canon, contact))
     return pads
+
+
+def _placed_layers(transform: PlacementTransform, declared: list) -> list:
+    """The BOARD layers a pad's footprint-declared layers occupy once placed.
+
+    A layer name is an absolute board fact, not a footprint-local one: the F.Cu
+    land of a bottom-mounted part is B.Cu copper. The flip is the compiler's own
+    (``PlacementTransform.layer`` via ``Layer.flipped``), so wildcards like
+    ``*.Cu`` survive here exactly as they do on the compiled path. A token
+    ``Layer`` cannot read is passed through untouched — the canonical fold above
+    already fails visible on junk, and a name that never reached the fold has no
+    side to swap.
+    """
+    out: list = []
+    for name in declared:
+        if isinstance(name, str) and name:
+            out.append(transform.layer(Layer.from_id(name)).id)
+        else:
+            out.append(name)
+    return out
 
 
 def _harvest_segments(board: dict) -> list[_Seg]:

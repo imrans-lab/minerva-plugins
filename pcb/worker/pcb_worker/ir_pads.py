@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator
 
 from .drc_geom_primitives import Capsule, OrientedRect
+from .geometry import rotation_radians
 from .pad_source import placed_pad_to_geom, th_land
 from .resolved_board import LayerRole, ResolvedBoard
 
@@ -168,7 +169,11 @@ def pad_land(pad, number: str, ref: str) -> tuple[LandDisc, Any]:
     classify into a modelable family — fail-closed rather than guess."""
     geom = placed_pad_to_geom(pad, number)
     shaped, shape_token, w, h, _rr = th_land(geom)
-    angle = math.radians(pad.rotation_deg)
+    # The land turns the way the PLACEMENT does: this frame's Y grows
+    # downward, so the angle is negated before any rotation matrix
+    # (geometry.rotation_radians). A 45-degree pad checked with the raw
+    # radians() lands mirrored about the pad centre versus its own copper.
+    angle = rotation_radians(pad.rotation_deg)
     if not shaped:
         # Round annulus: the neutral owner exposes the land DIAMETER as PadGeom.annulus.
         dia = geom.annulus
@@ -201,7 +206,7 @@ def smd_shape(pad, number: str, ref: str) -> Any:
         # be defensive rather than emit copper we cannot model.
         raise UnsupportedGeometry(
             f"pad {ref}.{number}: SMD pad has no copper size in the IR")
-    angle = math.radians(pad.rotation_deg)
+    angle = rotation_radians(pad.rotation_deg)  # y-down convention, as in pad_land
     if geom.shape == "circle":
         return Capsule.disc(pad.position[0], pad.position[1], float(w) / 2.0)
     return OrientedRect(pad.position[0], pad.position[1],

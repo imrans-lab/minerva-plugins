@@ -9,11 +9,12 @@ Two layers of coverage:
     known defects were 2 wrong-net shorts + 7 different-net crossings.
     ``parity_corners.yaml`` was authored for the CROSS-SURFACE geometry parity
     gate, not for connectivity DRC, so it does not happen to reproduce that
-    defect shape — measured, it reports exactly ONE dangling endpoint (its
-    routed N_OBL trace's far end does not land on the SW9.A pad it is nominally
-    headed for) and nothing else. That is still a real, exact, regression-worthy
-    claim; it is just a smaller one than the withdrawn board made. NEVER repair
-    this module by restoring the deleted fixture from git history.
+    defect shape — measured, it reports one dangling endpoint (its routed N_OBL
+    trace's far end does not land on the SW9.A pad it is nominally headed for)
+    plus the N_BOT run's shorts against U2's unnetted pins, and nothing else.
+    That is still a real, exact, regression-worthy claim; it is just a smaller
+    one than the withdrawn board made. NEVER repair this module by restoring the
+    deleted fixture from git history.
   * ISOLATION goldens — tiny hand-built boards that each trip exactly one check,
     proving every check fires (and that the clean board stays clean). These
     still carry the crossing / wrong-net-pad / layer-change-no-via / dangling
@@ -72,11 +73,13 @@ def test_drc_result_declares_connectivity_scope_not_geometric():
 
 
 def test_parity_corners_exact_findings():
+    """Read UNRESOLVED, so the pad census is the fixture's own inline pins —
+    U2 declares only pins 1, 2 and 4."""
     board = yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8"))
     r = _run(board)
     assert r["ok"] is True
     assert r["counts"] == {
-        "wrong_net_pad": 0,
+        "wrong_net_pad": 1,
         "crossing": 0,
         "dangling_endpoint": 1,
         "layer_change_no_via": 0,
@@ -91,20 +94,36 @@ def test_parity_corners_exact_findings():
     assert dangling[0]["net"] == "N_OBL"
     assert dangling[0]["at"] == [7.0, 22.0]
 
+    # The one short, and it is REAL: U2 is bottom-mounted and turned 90 degrees,
+    # so its pin 2 (local 0, 2.54) mirrors and turns onto (25.46, 20.0) — which
+    # is on the N_BOT run from U2.1 (28, 20) to the via at (20, 20), and pin 2
+    # belongs to no net. The harvest used to place that pad at (30.54, 20.0),
+    # off the end of the run, and reported the board clean.
+    shorts = _of_type(r, "wrong_net_pad")
+    assert len(shorts) == 1
+    assert shorts[0]["net"] == "N_BOT"
+    assert shorts[0]["at"] == [25.46, 20.0]
+    assert shorts[0]["pad"] == {"ref": "U2", "pin": "2", "net": None}
+
     # No noise from the other checks.
-    assert _of_type(r, "wrong_net_pad") == []
     assert _of_type(r, "crossing") == []
     assert _of_type(r, "layer_change_no_via") == []
 
 
 def test_parity_corners_via_worker_method():
+    """The method RESOLVES first, so U2's census is its DIP-6 footprint's six
+    pads rather than the three the fixture authors inline. Pin 3 (local 0, 5.08)
+    joins pin 2 on the N_BOT run, at (22.92, 20.0) — the second short the
+    unresolved read above cannot see because that pad is not in the file."""
     resp = handle_request({"id": "d1", "method": "drc",
                            "params": {"yaml": PARITY_CORNERS.read_text(encoding="utf-8")}})
     assert resp["id"] == "d1"
     assert resp["ok"] is True
-    assert resp["result"]["counts"]["wrong_net_pad"] == 0
+    assert resp["result"]["counts"]["wrong_net_pad"] == 2
     assert resp["result"]["counts"]["crossing"] == 0
     assert resp["result"]["counts"]["dangling_endpoint"] == 1
+    assert sorted(f["at"] for f in resp["result"]["findings"]
+                  if f["type"] == "wrong_net_pad") == [[22.92, 20.0], [25.46, 20.0]]
 
 
 # ---------------------------------------------------------------------------

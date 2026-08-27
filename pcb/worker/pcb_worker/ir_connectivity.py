@@ -27,12 +27,15 @@ pad-centre distance says it is dangling. The land rides as ``comp["pads"]``
 through the neutral owner's own dict builder, so the pad this projection hands
 the kernel is byte-for-byte the pad the fab emitters shape.
 
-COORDINATE CONVENTION: components are emitted at the origin with zero rotation
-and their pins carry ABSOLUTE board positions, because the IR has already placed
-them. ``drc._harvest_pads`` composes ``component position + rotate(pin offset)``,
-which for a zero placement is the identity — so the IR's own placement (including
-bottom-side mirroring) reaches the kernel unchanged rather than being re-derived
-from a rotation the kernel would apply a second time.
+COORDINATE CONVENTION: components are emitted at the origin, with zero rotation,
+NO ``layer`` key, and pins carrying ABSOLUTE board positions — because the IR has
+already placed them. ``drc._harvest_pads`` places every pad through
+``geometry.component_transform``, and that transform reads all three of those
+fields: an absent layer is the top side, so the whole placement (translation,
+rotation AND the bottom-side mirror) collapses to the identity and the IR's own
+placement reaches the kernel unchanged. Emitting the component's real ``layer``
+here would mirror a bottom-side part a second time; the side it actually sits on
+travels instead on each pad's already-flipped ``layers`` list.
 """
 
 from __future__ import annotations

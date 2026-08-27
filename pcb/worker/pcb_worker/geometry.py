@@ -94,6 +94,20 @@ def is_top(layer: Any) -> bool:
     )
 
 
+def rotation_radians(deg: float) -> float:
+    """A KiCad placement/land angle as RADIANS for this y-down board frame.
+
+    The one conversion for any consumer that feeds an angle to a rotation matrix
+    of its own — an oriented land rectangle, a mask aperture — rather than going
+    through :func:`rotate_local_offset`. Plain ``math.radians`` turns such a
+    primitive the WRONG WAY: the angle is clockwise in a frame whose Y grows
+    downward (see the module docstring), so it is negated before the standard
+    CCW matrix. Every multiple of 90 hides the difference under the rectangle's
+    own symmetry; a 45-degree land does not.
+    """
+    return math.radians(-deg)
+
+
 def rotate_local_offset(px: float, py: float, deg: float) -> tuple[float, float]:
     """Rotate a component-LOCAL pad offset by *deg* using KiCad's footprint-angle
     convention, so the resulting flash lands on KiCad's own absolute pad position.
@@ -106,7 +120,7 @@ def rotate_local_offset(px: float, py: float, deg: float) -> tuple[float, float]
     """
     if deg == 0.0:
         return px, py
-    r = math.radians(-deg)
+    r = rotation_radians(deg)
     c, s = math.cos(r), math.sin(r)
     return px * c - py * s, px * s + py * c
 
@@ -193,3 +207,36 @@ class PlacementTransform:
         if isinstance(local, PolygonGeometry):
             return PolygonGeometry(tuple(self.point(point) for point in local.points))
         raise TypeError(f"unsupported graphic geometry {type(local)!r}")
+
+
+def _placement_num(value: Any) -> float:
+    """One placement field of a board dict as a float; unreadable reads as 0.0.
+
+    The tolerant reading the loose-dict consumers have always applied to an
+    absent or junk coordinate — they must still produce a board to look at.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
+def component_transform(comp: dict) -> PlacementTransform:
+    """The board placement of one canonical-board COMPONENT dict.
+
+    THE placement rule for the loose-dict readers (connectivity DRC), built from
+    the same three authored facts ``compile_board._place_component`` reads —
+    ``x_mm``/``y_mm``, ``rotation_deg`` and ``layer`` — and returning the same
+    :class:`PlacementTransform` it builds. Rotation and the BOTTOM-side mirror
+    therefore cannot be applied on the compiled path and skipped on the raw one,
+    which is exactly how a bottom-mounted part's pads came to be checked at the
+    position its top-side twin would occupy.
+
+    An unrecognized ``layer`` raises through :func:`is_top`: a component on a
+    layer this pipeline cannot fabricate has no side to be placed on.
+    """
+    return PlacementTransform(
+        position=(_placement_num(comp.get("x_mm")),
+                  _placement_num(comp.get("y_mm"))),
+        rotation_deg=_placement_num(comp.get("rotation_deg")),
+        side=Side.TOP if is_top(comp.get("layer")) else Side.BOTTOM,
+    )

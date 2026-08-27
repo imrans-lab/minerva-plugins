@@ -1,0 +1,30 @@
+{
+  "name": "190-bottom-side-land-joins-bottom-copper",
+  "why": "The geometry of 040 and 050 with BOTH the land and the run moved to the back of the board. The 0.5/0.25mm offsets are the same ones 040 derives against the 0.84mm half-extent, so the end is on the copper. Completing that pair matters because a bottom-mounted part's land is the one whose side is DERIVED (the footprint states F.Cu; the placement flips it): 040 says a top land joins top copper, 050 says it does not join bottom copper, and only this case fails if a bottom land is left reading as top.",
+  "pad": {
+    "at": [
+      5.0,
+      5.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.68,
+      1.68
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "bottom"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      5.5,
+      4.75
+    ],
+    "width_mm": 0.25,
+    "layer": "bottom"
+  },
+  "touches": true
+}

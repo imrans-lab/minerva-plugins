@@ -283,9 +283,9 @@ components:
 # Reached ONLY by bottom copper. A through-hole land on purpose: its copper is
 # on every layer, so the bottom run lands on it under both the connectivity
 # harvest and the compiled IR, and the row's answer cannot turn on which of the
-# two surfaces you asked. (A top-side SMD land placed `layer: bottom` does NOT
-# read the same way on both: the compiled IR flips it to B.Cu, the loose-dict
-# connectivity harvest leaves it on F.Cu.)
+# two surfaces you asked. (A `layer: bottom` SMD land now reads the same way on
+# both — the connectivity harvest places and flips it through the compiler's own
+# transform — but a through-hole land needs no such agreement to be reached.)
 - ref: TP5B
   footprint: TH_TestPoint
   x_mm: 33.0
