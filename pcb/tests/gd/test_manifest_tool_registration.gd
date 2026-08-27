@@ -243,7 +243,7 @@ func _init() -> void:
 	# minerva_pcb_drc / _drc_geometric stay backend, so the Go pin at 19 holds.
 	# (113 -> 114): minerva_pcb_disconnect_net — the removal half of the pin→net
 	# membership pair. executor:"panel", so the Go pin at 19 still holds.
-	# DCR 01a0410c62 (114 -> 118): the PAD family — minerva_pcb_free_pins (the
+	# 114 -> 118: the PAD family — minerva_pcb_free_pins (the
 	# per-component "what is available", filterable by side and by the board's
 	# own pin-table roles), minerva_pcb_move_net and minerva_pcb_swap_nets (the
 	# two net edits a pad selection affords, each ONE undo step), and
@@ -251,10 +251,10 @@ func _init() -> void:
 	# minerva_pcb_point is the single-entity form). All four executor:"panel",
 	# so the Go pin at 19 still holds.
 	# (119 -> 122): the board-graphics family — minerva_pcb_add_silk_text,
-	# minerva_pcb_add_graphic and minerva_pcb_delete_graphic (DCR 01a0418dc6).
+	# minerva_pcb_add_graphic and minerva_pcb_delete_graphic.
 	# All three are executor:"panel", so the Go pin at 19 backend tools still
 	# holds unchanged.
-	# DERIVED, not measured: this station runs no suites. The number is COUNTED
+	# DERIVED, not measured. The number is COUNTED
 	# off manifest.json's tools[] (119 entries plus the three added in the same
 	# change), which is the same array the check reads back, so it is arithmetic
 	# rather than a guess at a run's output. Its twin in test_workspace_tools.gd

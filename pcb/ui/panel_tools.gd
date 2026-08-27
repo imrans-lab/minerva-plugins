@@ -56,8 +56,7 @@ const _PcbBoardHistoryScript := preload("pcb_board_history.gd")
 ## duck-typed `data` reference — mirrors pcb_canvas.gd's own PCBDataScript
 ## const, same off-tree preload-by-path convention.
 const _PcbDataScript := preload("model/pcb_data.gd")
-## The region read (work item 01a03f9dd6): ONE call for everything inside a
-## board rectangle. Its own file — this one is a god file and gets DISPATCH
+## The region read: ONE call for everything inside a board rectangle. Its own file — this one is a god file and gets DISPATCH
 ## WIRING ONLY. It also owns the per-via layers_touched derivation that
 ## minerva_pcb_list_vias below now reports.
 const _PcbRegionDescribe := preload("model/pcb_region_describe.gd")
@@ -65,8 +64,8 @@ const _PcbRegionDescribe := preload("model/pcb_region_describe.gd")
 ## so the "a pin is on one net" rule has one home both this surface and the
 ## panel's loader read.
 const _PcbNetMembershipScript := preload("model/pcb_net_membership.gd")
-## DCR 01a0410c62 — THE pad row. Every verb that describes a pad (get_selection,
-## pin_info, free_pins, the move/rotate replies) emits this one shape.
+## THE pad row. Every verb that describes a pad (get_selection, pin_info,
+## free_pins, the move/rotate replies) emits this one shape.
 const _PcbPadRowScript := preload("model/pcb_pad_row.gd")
 ## C4a: the disposition legality vocabulary (DISPOSITIONS, TERMINAL_DISPOSITIONS
 ## and the named refusal codes). Preloaded so the workspace verb tools NAME their
@@ -147,8 +146,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _connect_net(host, args)
 		"minerva_pcb_disconnect_net":
 			return _disconnect_net(host, args)
-		# DCR 01a0410c62 — the pad family: what is free on a part, and the two
-		# net edits a pad selection affords. Each is ONE undo step.
+		# The pad family: what is free on a part, and the two net edits a pad
+		# selection affords. Each is ONE undo step.
 		"minerva_pcb_free_pins":
 			return _free_pins(host, args)
 		"minerva_pcb_move_net":
@@ -532,12 +531,12 @@ static func _pin_info(host, args: Dictionary) -> Dictionary:
 	var result: Dictionary = info.duplicate(true)
 	result["display_name"] = host.pin_display_name(info) if host.has_method("pin_display_name") else ""
 
-	# `position` (docket 019fd0ab4c65) is NOT stamped here any more. It arrives
-	# with the rest of the pad row from host.pin_info, as {x_mm, y_mm} — the
-	# shape minerva_pcb_get_selection and minerva_pcb_free_pins also use (DCR
-	# 01a0410c62). This surface used to overwrite it with a bare [x, y] pair
-	# computed from the same get_pin_world_position call, which meant one reply
-	# family spelled one coordinate two ways; the row is the one spelling.
+	# `position` is NOT stamped here. It arrives with the rest of the pad row
+	# from host.pin_info, as {x_mm, y_mm} — the shape
+	# minerva_pcb_get_selection and minerva_pcb_free_pins also use. Overwriting
+	# it here with a bare [x, y] from the same get_pin_world_position call would
+	# make one reply family spell one coordinate two ways; the row is the one
+	# spelling.
 	return _ok(result)
 
 
@@ -734,13 +733,12 @@ static func _with_snap_disclosure(reply: Dictionary, requested_x: float, request
 	return reply
 
 
-## Stamp a placement reply with WHERE EVERY PAD LANDED (HITL 2026-08-26, DCR
-## 01a0410c62's pad row). A move or a rotate answers "the component is at x,y,
-## rotation 90" and an agent then has to work out for itself which way pin 1
-## went — twice in one session an agent guessed the rotation convention
-## backwards and routed to the wrong end of a part. The pads are right here in
-## the model at the moment of the reply, so the second round trip through
-## pin_info was pure ceremony. Same row shape get_selection and free_pins use.
+## Stamp a placement reply with WHERE EVERY PAD LANDED. A move or a rotate that
+## only answers "the component is at x,y, rotation 90" leaves the caller to work
+## out which way pin 1 went, and a rotation convention guessed backwards routes
+## to the wrong end of a part. The pads are in the model at the moment of the
+## reply, so a second round trip through pin_info is pure ceremony. Same row
+## shape get_selection and free_pins use.
 ##
 ## Only stamped onto a SUCCESS: a refusal moved nothing, and rows on it would
 ## read as "here is where it went".
@@ -1018,12 +1016,11 @@ static func _disconnect_net(host, args: Dictionary) -> Dictionary:
 	return _ok(result)
 
 
-## What is AVAILABLE on a part: its pins on no net, as pad rows (DCR
-## 01a0410c62). A VERB rather than a flag on minerva_pcb_pin_info, deliberately
-## — pin_info answers about ONE named pin and an agent that already knows the
-## pin does not need this; "what is free over there" is the question asked when
-## you do NOT know the pin, and a verb with its own name is findable in the tool
-## list where an optional argument on somebody else's verb is not.
+## What is AVAILABLE on a part: its pins on no net, as pad rows. A VERB rather
+## than a flag on minerva_pcb_pin_info, deliberately — pin_info answers about ONE
+## named pin, and "what is free over there" is the question asked when you do NOT
+## know the pin. A verb with its own name is findable in the tool list where an
+## optional argument on somebody else's verb is not.
 ##
 ## `side` filters to one side/COLUMN of the part ("free pins on the west column
 ## of U1S" is a read, not a coordinate scan). `exclude_roles` drops pins the
@@ -1061,8 +1058,8 @@ static func _free_pins(host, args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
-## MOVE one pin's net onto another pin, ONE undo step (DCR 01a0410c62 — the
-## verb twin of the pad selection's "Move net to…"). The source pin comes off
+## MOVE one pin's net onto another pin, ONE undo step — the verb twin of the
+## pad selection's "Move net to…". The source pin comes off
 ## the net, the destination goes on it, and a destination that was on another
 ## net is taken off it and named under `displaced`.
 static func _move_net(host, args: Dictionary) -> Dictionary:
@@ -1102,9 +1099,9 @@ static func _swap_nets(host, args: Dictionary) -> Dictionary:
 	return _ok(result)
 
 
-## THE MIRROR of minerva_pcb_get_selection for a WHOLE selection (DCR
-## 01a0410c62): the agent sets what is selected, so "these are the pins I mean"
-## is something it can SHOW rather than describe. minerva_pcb_point is the
+## THE MIRROR of minerva_pcb_get_selection for a WHOLE selection: the caller
+## sets what is selected, so "these are the pins I mean" is something it can
+## SHOW rather than describe. minerva_pcb_point is the
 ## single-entity form and stays exactly as it was; this one takes a list and
 ## adds pads, addressed by their "REF.PIN" row address.
 ##
@@ -1205,8 +1202,7 @@ static func _spatial_query(host, args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
-## ONE READ of a board rectangle (work item 01a03f9dd6) — components with their
-## pad rows, traces with their free ends, vias with the layers their copper
+## ONE READ of a board rectangle — components with their pad rows, traces with their free ends, vias with the layers their copper
 ## really meets, pours with their outlines, keepouts, cutouts and the notes
 ## anchored inside.
 ##
@@ -2047,12 +2043,12 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 			"kicad": PcbLayerStack.canon_to_kicad(str(canon)) if PcbLayerStack.is_copper(canon) else "",
 			"hidden": bool(canvas.is_layer_hidden(str(canon))) if canvas.has_method("is_layer_hidden") else false,
 		})
-	# WHY A FLAG A CALLER JUST RAISED READS FALSE (bug 01a0414891). show_mask and
+	# WHY A FLAG A CALLER JUST RAISED READS FALSE. show_mask and
 	# show_fab_preview come back down when their worker fetch returns nothing —
 	# the flag may only claim a view that is actually on screen. The human is
-	# told in the status lead; without this key the agent would see the flag
-	# quietly false with no reason anywhere in the reply. Absent when every
-	# raised overlay is drawn.
+	# told in the status lead; without this key the flag would read quietly
+	# false with no reason anywhere in the reply. Absent when every raised
+	# overlay is drawn.
 	var overlay_out: Dictionary = panel.overlay_notes() \
 		if panel.has_method("overlay_notes") else {}
 	var out: Dictionary = {
@@ -3364,7 +3360,7 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		for hold in workspace.last_ingest_holds:
 			holds.append(hold)
 		# Same per-call accumulation for a route whose copper width could not be
-		# resolved (bug 01a02c480d50). The ghost lands — a candidate is a
+		# resolved. The ghost lands — a candidate is a
 		# question, not a board edit — but commit refuses it by name, so the
 		# state has to be visible HERE rather than at accept time.
 		for miss in workspace.last_ingest_unresolved_widths:
@@ -3417,7 +3413,7 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		"proposed": proposals.size(),
 		"proposals": proposals,
 		"holds": holds,
-		# Routes whose copper width could not be resolved (bug 01a02c480d50) —
+		# Routes whose copper width could not be resolved —
 		# their candidates carry width 0.0 / width_source "unresolved" and
 		# commit refuses them by name. The fail-closed replacement for the
 		# invented 0.25mm. Empty on every ordinary propose.
@@ -3497,7 +3493,7 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		var net: String = str(route.get("net", ""))
 		# The width the ROUTER drew this net at — see _route_width.
 		#
-		# FAIL CLOSED, no invented literal (bug 01a02c480d50). This is the path
+		# FAIL CLOSED, no invented literal. This is the path
 		# that writes physical copper, so "I could not resolve a width" must not
 		# resolve to 0.25mm: a board would gain 0.25mm traces with nothing in any
 		# report saying the number was guessed rather than sourced. The route
@@ -4314,8 +4310,7 @@ static func _list_mounting_holes(host, _args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
-## LAYERS_TOUCHED (work item 01a03f9dd6). from_layer/to_layer say what the
-## barrel SPANS; every through via spans the whole stack, so the span cannot
+## LAYERS_TOUCHED. from_layer/to_layer say what the barrel SPANS; every through via spans the whole stack, so the span cannot
 ## show a via that joins nothing on one side. layers_touched answers the other
 ## question — which copper layers have copper actually MEETING the barrel — by
 ## the shared contact predicate, the same one the connectivity DRC and the trace
@@ -4604,7 +4599,7 @@ static func _retire_commits_owning_trace(host, data, trace_id: String) -> Array:
 		return []
 	if data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(workspace)
-	# Same ownership pre-check the delete verbs run (bug 01a040f6d7): an edit
+	# Same ownership pre-check the delete verbs run: an edit
 	# must not retire a commit whose record merely NAMES this trace's id while
 	# the copper belongs to another net.
 	_prune_foreign_commit_claims(host, data)
@@ -4658,12 +4653,11 @@ static func _trace_end_arg(data, raw: Variant, label: String) -> Dictionary:
 ## choose. Which layer a RUN continues on past a via is a routing decision and
 ## belongs to a trace verb.
 ##
-## `for_hint` (work item 01a04106bd) NAMES THE ROUTE HINT THIS VIA SERVES, and
-## with it the ghost stops being an orphan. The HITL that filed it: four ghosts
-## came back with net "", task_id "" and source_hint_ids [], and the agent
-## recovered which hint each belonged to only by matching coordinates to hint
-## segments by eye — a second hint nearby would have made that ambiguous. Given
-## a hint id, the via records it and INHERITS THAT HINT'S NET when no net_name
+## `for_hint` NAMES THE ROUTE HINT THIS VIA SERVES, and with it the ghost stops
+## being an orphan. Without it a ghost carries net "", task_id "" and
+## source_hint_ids [], and which hint it belongs to is recoverable only by
+## matching coordinates to hint segments by eye — ambiguous the moment a second
+## hint is nearby. Given a hint id, the via records it and INHERITS THAT HINT'S NET when no net_name
 ## was passed. Given neither, the via is still proposed (an unassigned via is
 ## legitimate) and every listing labels it `owner: "none"`.
 static func _propose_via(host, args: Dictionary) -> Dictionary:
@@ -4688,8 +4682,8 @@ static func _propose_via(host, args: Dictionary) -> Dictionary:
 
 	var pos := Vector2(float(args["x_mm"]), float(args["y_mm"]))
 	# 0.0 means "the board's design_rules decide" — the resolution lives in
-	# PcbViaDimensions, one rule for every via this plugin creates (bug
-	# 01a03b87473c). An explicit size_mm/drill_mm still outranks the rules.
+	# PcbViaDimensions, one rule for every via this plugin creates. An explicit
+	# size_mm/drill_mm still outranks the rules.
 	var size_mm := float(args.get("size_mm", 0.0))
 	var drill_mm := float(args.get("drill_mm", 0.0))
 	var net_name: String = str(args.get("net_name", ""))
@@ -5356,14 +5350,14 @@ static func _create_cutout(host, args: Dictionary) -> Dictionary:
 	})
 
 
-# ── DCR 01a0418dc6: BOARD-LEVEL GRAPHICS ──────────────────────────────────────
-# Artwork the BOARD owns rather than a component. Before these verbs the only
-# graphic owner was a footprint, so board text had to be hung off whatever part
-# happened to be nearby — smart-remote-v2 carries 65 hand-generated B.SilkS
-# polylines attached to TP1, a test point, in absolute board coordinates.
+# ── BOARD-LEVEL GRAPHICS ──────────────────────────────────────────────────────
+# Artwork the BOARD owns rather than a component. The only other graphic owner
+# is a footprint, so without these verbs board text has to be hung off whatever
+# part happens to be nearby, in absolute board coordinates that part's placement
+# then corrupts.
 #
-# Both authoring verbs are ONE journalled undo step (mutate, then
-# save_to_history — the mutate-then-snapshot order bug 019fb5ad791c fixed), mint
+# Both authoring verbs are ONE journalled undo step (mutate, THEN
+# save_to_history — snapshotting first makes redo silently do nothing), mint
 # their id through PcbEntityId so it is the same "<type>:<32hex>" token the Go
 # codec and the Python validator accept, and reply with that id plus the bounds
 # the artwork actually occupies.
@@ -5530,8 +5524,8 @@ static func _add_graphic(host, args: Dictionary) -> Dictionary:
 
 ## Delete one board graphic by id. ONE undo step, and an unknown id is an
 ## explicit error rather than a silent no-op — the same contract _delete_zone
-## keeps. Mutate THEN snapshot (bug 019fb5ad791c: snapshotting first makes redo
-## silently do nothing).
+## keeps. Mutate THEN snapshot — snapshotting first makes redo silently do
+## nothing.
 static func _delete_graphic(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -6506,8 +6500,8 @@ static func _workspace_ctx(host) -> Dictionary:
 	return {"ok": true, "ws": workspace, "data": data}
 
 
-## OWNERSHIP PRE-CHECK, run BEFORE copper is removed or reshaped (bug
-## 01a040f6d7). _reconcile_committed_copper below runs AFTER the removal, where a
+## OWNERSHIP PRE-CHECK, run BEFORE copper is removed or reshaped.
+## _reconcile_committed_copper below runs AFTER the removal, where a
 ## lying record and a genuine loss look identical — both name an id the board no
 ## longer carries. Asked HERE, while the copper is still resolvable, the two
 ## separate: a claim on copper that belongs to another net is dropped, so the
@@ -6588,7 +6582,7 @@ static func _reconcile_hint_lifecycle(host, workspace) -> void:
 	for c in workspace.list_candidates():
 		if c == null or str(c.disposition) != "committed":
 			continue
-		# OWNERSHIP IS NOT CONSUMPTION (work item 01a04106bd): a via ENTITY
+		# OWNERSHIP IS NOT CONSUMPTION: a via ENTITY
 		# (no copper, one via) carries the hint it SERVES, not an answer to it.
 		# A committed hole must never count as the copper backing an applied
 		# hint — that is exactly the reopen this reconcile exists to perform.
@@ -6713,10 +6707,10 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		var f: Array = workspace.findings_for_candidate(cid)
 		if not f.is_empty():
 			rec["finding_count"] = f.size()
-	# VIA-ENTITY OWNERSHIP (work item 01a04106bd). A candidate that is exactly
-	# ONE VIA and no copper is a proposed via ENTITY, and the HITL question
-	# asked of every one of them is "what is this for?". Answer it on the row
-	# rather than leaving an agent to match coordinates to hint segments by eye:
+	# VIA-ENTITY OWNERSHIP. A candidate that is exactly ONE VIA and no copper is
+	# a proposed via ENTITY, and the question asked of every one of them is
+	# "what is this for?". Answer it on the row rather than leaving a reader to
+	# match coordinates to hint segments by eye:
 	# `owner_hint_ids` is who it serves, `owner` is the one-word verdict, and an
 	# ownerless one SAYS SO — it stays perfectly legal (an unassigned via is a
 	# real workflow), it is just never again mistaken for an attributed one.
@@ -7455,7 +7449,7 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 			holds.append(hold)
 		for conflict in workspace.last_ingest_constraint_conflicts:
 			constraint_conflicts.append(conflict)
-		# Routes whose copper width could not be resolved (bug 01a02c480d50) —
+		# Routes whose copper width could not be resolved —
 		# same per-call accumulation idiom as `holds`. The ghost lands; commit
 		# is what refuses it.
 		for miss in workspace.last_ingest_unresolved_widths:
@@ -7677,10 +7671,9 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 	for cutout_id in state.get("cutouts", []):
 		entries.append({"kind": "cutout", "id": str(cutout_id)})
 
-	# PADS (DCR 01a0410c62) — the pin-level half of the deixis. The owner's
-	# sentence is "see these pins? move them to the other side of U1S": the
-	# human picks pads with the Pin Select tool, and THIS is where the agent
-	# reads which ones. One shape, defined once in pcb_pad_row and reused by
+	# PADS — the pin-level half of the deixis. This is what makes "see these
+	# pins? move them to the other side of U1S" answerable: the human picks pads
+	# with the Pin Select tool, and THIS is where the caller reads which ones. One shape, defined once in pcb_pad_row and reused by
 	# pin_info, the free-pins read and the move/rotate replies, so a pad
 	# described by any of them is described the same way. `id` is the row's own
 	# "REF.PIN" address — a pad has no minted id of its own.
@@ -8977,7 +8970,7 @@ static func _reroute_precheck(host, args: Dictionary) -> Dictionary:
 	# no_source_hints / source_hints_missing refusals; a candidate with NO
 	# endpoints either still fails closed — an unscopable run must never
 	# silently widen to the whole board.
-	# OWNERSHIP IS NOT AN ANSWER (work item 01a04106bd): a via ENTITY (no
+	# OWNERSHIP IS NOT AN ANSWER: a via ENTITY (no
 	# copper, one via) carries the hint it SERVES on source_hint_ids. Rerouting
 	# is about a hint's ROUTE, never about a hole, so a via ghost scopes as
 	# HINT-LESS exactly as it did before ownership existed — and, carrying no
@@ -9307,14 +9300,6 @@ const BUS_FINDING_STATION_CROWDS_PAD := "bus_station_crowds_pad"
 ## above, and for the same reason: Vector2 is 32-bit float, so copper laid out
 ## EXACTLY at its clearance measures that clearance only to within an ulp.
 const _BUS_FOREIGN_TOLERANCE_MM := 1e-3
-
-## Via pad and drill a bus station falls back to when the board's design_rules
-## block declares neither, in mm. The SAME pair RoutingWorkspace._via_dimensions
-## falls back to, so a via a bus drops and a via a committed route drops measure
-## the same on a board that states no rule.
-const _BUS_DEFAULT_VIA_SIZE_MM := 0.8
-const _BUS_DEFAULT_VIA_DRILL_MM := 0.4
-
 
 ## A plan that HAS geometry, clean or not: `ok` iff nothing was found, `error`
 ## the first finding's words.
@@ -9982,13 +9967,11 @@ static func bus_plan(data, nets: Array, spine_points: PackedVector2Array, layer:
 		widths.append(width_override if width_override > 0.0 else bus_net_width(data, str(net_name)))
 	var clearance: float = data.design_rule_clearance()
 	var offsets: Array = BusGeom.cumulative_offsets(widths, clearance)
-	var design_rules: Dictionary = data.design_rules if data.design_rules is Dictionary else {}
-	var via_size := float(design_rules.get("via_diameter_mm", 0.0))
-	if via_size <= 0.0:
-		via_size = _BUS_DEFAULT_VIA_SIZE_MM
-	var via_drill := float(design_rules.get("via_drill_mm", 0.0))
-	if via_drill <= 0.0:
-		via_drill = _BUS_DEFAULT_VIA_DRILL_MM
+	# ONE rule for every via this plugin creates, so a via a bus drops and a via
+	# a committed route drops measure the same on the same board.
+	var via_dims: Dictionary = PcbViaDimensions.from_board(data)
+	var via_size: float = via_dims["diameter"]
+	var via_drill: float = via_dims["drill"]
 
 	# INNER-FOLD FINDING. Checked against the WIDEST |offset| in the whole bus
 	# (pcb_bus_geometry.gd's own wording), on the DEDUPLICATED spine — a
@@ -10312,6 +10295,11 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	var station: Dictionary = gate["station"]
 	var station_active: bool = bool(station["active"])
 	var via_span: Array = PcbLayerStack.default_through_via_span()
+	# ONE rule for every via this plugin creates: the plan's own numbers when it
+	# carries them (bus_plan resolves them against this same board), else the
+	# board's design_rules, else the constants.
+	var station_via_dims: Dictionary = PcbViaDimensions.from_board(data,
+		float(plan.get("via_size_mm", 0.0)), float(plan.get("via_drill_mm", 0.0)))
 	var created_ids: Array[String] = []
 	var created_via_ids: Array[String] = []
 	# Per net, in bus order: the trace ids each net produced (one, or two
@@ -10339,8 +10327,8 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 		var via_id := str(data.add_via({
 			"position": (station["points"] as Array)[i],
 			"net_name": str(nets[i]),
-			"size": float(plan.get("via_size_mm", _BUS_DEFAULT_VIA_SIZE_MM)),
-			"drill": float(plan.get("via_drill_mm", _BUS_DEFAULT_VIA_DRILL_MM)),
+			"size": station_via_dims["diameter"],
+			"drill": station_via_dims["drill"],
 			"from_layer": str(via_span[0]), "to_layer": str(via_span[1]),
 		}))
 		if via_id.is_empty():
@@ -11176,8 +11164,7 @@ static func _edit_candidate_insert_via(workspace, cid: String, args: Dictionary,
 				"declared_layers": declared.duplicate()}
 
 	# `data` rides along so the inserted via takes its diameter/drill from the
-	# board's design_rules, like every other via this plugin creates
-	# (bug 01a03b87473c).
+	# board's design_rules, like every other via this plugin creates.
 	return workspace.add_via(cid, position, from_layer, to_layer, data)
 
 

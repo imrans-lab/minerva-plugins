@@ -45,8 +45,8 @@ const PCBDataScript := preload("model/pcb_data.gd")
 const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbBusLabels := preload("model/pcb_bus_labels.gd")
 const PcbPadApproach := preload("model/pcb_pad_approach.gd")
-## The Pin Select tool's rules (DCR 01a0410c62) — what a click picks, what it
-## does to the pad selection, and where the selected copper is. Its plumbing
+## The Pin Select tool's rules — what a click picks, what it does to the pad
+## selection, and where the selected copper is. Its plumbing
 ## (events, paint, storage) stays here; the rules do not.
 const PcbPinSelectTool := preload("pcb_pin_select_tool.gd")
 const PcbPadRow := preload("model/pcb_pad_row.gd")
@@ -72,7 +72,7 @@ const PcbZoneCopper := preload("model/pcb_zone_copper.gd")
 const PcbBoardGraphic := preload("model/pcb_board_graphic.gd")
 ## THE fit answer, shared by every caller that frames something (zoom_to_fit,
 ## frame_rect, _frame_board_for_capture) so a docked narrow pane and a wide one
-## cannot disagree about what "the whole board" is — bug 01a040f7523e.
+## cannot disagree about what "the whole board" is.
 const PcbViewFit := preload("pcb_view_fit.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
@@ -345,15 +345,15 @@ const KIND_CANDIDATE := "candidate"
 ##     store's staged_N key — render/selection/menu all speak canonical ids
 ##     and resolve the store entry via staged_id_for_entity.
 const KIND_STAGED := "staged"
-## DCR 01a0410c62 — a PAD, selected by the Pin Select tool. Its id is the pad
-## ROW's address, "REF.PIN", not a minted entity id: a pad has no identity of
+## A PAD, selected by the Pin Select tool. Its id is the pad ROW's address,
+## "REF.PIN", not a minted entity id: a pad has no identity of
 ## its own in the board model, it is a pin of a component, and every surface
 ## that talks about one (pin_info, get_selection, the free-pins read, the
 ## net-move verbs) already addresses it that way. Appended at the END, same
 ## append-only rule as the kinds above.
 const KIND_PAD := "pad"
-## DCR 01a0418dc6 — a BOARD-LEVEL GRAPHIC: silk legend or courtyard
-## documentation the board owns rather than a component. Appended at the END,
+## A BOARD-LEVEL GRAPHIC: silk legend or courtyard documentation the board owns
+## rather than a component. Appended at the END,
 ## same append-only rule as every kind above.
 ##
 ## SELECT + DRAW + PICK + DELETE are implemented; MOVE and LOCK are not, and
@@ -380,10 +380,10 @@ var selected_candidate_ids: Array[String] = []
 ## Selected staged entities (UX4 S4), by CANONICAL payload id. Same list-backed
 ## shape as every kind above so the selection choke points work unchanged.
 var selected_staged_ids: Array[String] = []
-## Selected pads, by "REF.PIN" (DCR 01a0410c62). List-backed like every kind
-## above, so _selection_of / _add_to_selection / selection_snapshot /
-## _clear_selection all work on pads without a special case. MULTI by design:
-## the owner's sentence is "see these pins?", which is two of them.
+## Selected pads, by "REF.PIN". List-backed like every kind above, so
+## _selection_of / _add_to_selection / selection_snapshot / _clear_selection all
+## work on pads without a special case. MULTI by design — "see these pins?" is
+## more than one of them.
 var selected_pad_refs: Array[String] = []
 
 ## The staged review verbs, emitted by the context-menu seam
@@ -1074,8 +1074,7 @@ var selection_border_color: Color = Color(0.4, 0.6, 0.9, 1.0)
 ## Pad colors (copper/solder appearance)
 var pad_copper_color: Color = Color(0.85, 0.65, 0.3, 1.0)  # Copper/gold for THT
 var pad_smd_color: Color = Color(0.75, 0.55, 0.25, 1.0)    # SMD pads
-## Pin Select halo (DCR 01a0410c62) — the same cyan-white a selected trace does
-## NOT use, so a lit pad reads as a pad and not as copper the Select tool grabbed.
+## Pin Select halo — the same cyan-white a selected trace does NOT use, so a lit pad reads as a pad and not as copper the Select tool grabbed.
 var pad_selected_color: Color = Color(0.35, 0.95, 1.0, 1.0)
 var drill_hole_color: Color = Color(0.08, 0.08, 0.08, 1.0) # Drill holes (match background)
 # Mask-opening overlay fills (WYSIWYG G4) — KiCad-adjacent hues: front magenta,
@@ -1937,8 +1936,8 @@ func _draw() -> void:
 	if show_traces:
 		_draw_traces()
 
-	# BOARD-LEVEL silk and courtyard (DCR 01a0418dc6). Drawn here — above copper,
-	# below previews and overlays — because that is what printed ink IS: it goes
+	# BOARD-LEVEL silk and courtyard. Drawn here — above copper, below previews
+	# and overlays — because that is what printed ink IS: it goes
 	# on last, over everything the fab already laid down. It sits beside the mask
 	# rung rather than inside _draw_components() for the plain reason that it
 	# belongs to no component; its geometry is already board-absolute, so it
@@ -3409,8 +3408,8 @@ func _draw_locked_hatch(screen_poly: PackedVector2Array) -> void:
 ## The geometry the pad renderer draws ONE land at — a named seam over
 ## pcb_component.get_pad_world_transform so "the rendered rectangle" is a thing
 ## a test can hold, and so the renderer cannot quietly grow a second opinion
-## about where copper is (bug 01a0380585b4). {position, size, rotation} in world
-## mm / board CW degrees; the caller negates the angle for screen space.
+## about where copper is. {position, size, rotation} in world mm / board CW
+## degrees; the caller negates the angle for screen space.
 func pad_draw_geometry(comp, pad: Dictionary) -> Dictionary:
 	return comp.get_pad_world_transform(pad)
 
@@ -3433,11 +3432,11 @@ func _draw_component_pads(comp, _xform: Transform2D, tht_only: bool = false) -> 
 		if tht_only and not is_tht:
 			continue
 
-		# ONE land-to-world transform, shared with the copper hit test (bug
-		# 01a0380585b4). This used to draw every land at -comp.rotation and
-		# ignore the land's OWN rotation, while pin_copper_distance honoured it
-		# — so for a turned land the copper you could see was not the copper you
-		# could click, and now that pads are clickable that is user-visible.
+		# ONE land-to-world transform, shared with the copper hit test. Drawing
+		# every land at -comp.rotation while ignoring the land's OWN rotation
+		# splits the render from pin_copper_distance, which honours it: for a
+		# turned land the copper you can see is then not the copper you can
+		# click, and pads are clickable.
 		var world: Dictionary = pad_draw_geometry(comp, pad)
 		var screen_pos := world_to_screen(world["position"] as Vector2)
 		var screen_size := (world["size"] as Vector2) * zoom
@@ -3957,8 +3956,7 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_corridor_click(world_pos, event.double_click)
 				return
 
-			# Pin Select (WC-1's inspector, DCR 01a0410c62): click selects the
-			# nearest pad within radius, shift-click adds/removes, an empty
+			# Pin Select: click selects the nearest pad within radius, shift-click adds/removes, an empty
 			# click clears. Owns the click outright — no select/drag/box-select
 			# fallthrough while the mode is active, which is also why a
 			# shift-click here can never be read as shift-box-select.
@@ -4687,9 +4685,9 @@ func _handle_key_input(event: InputEventKey) -> void:
 			_clear_selection_all()
 			queue_redraw()
 		KEY_P:
-			# P arms Pin Select (DCR 01a0410c62); Shift+P is kept as the WC-1
-			# inspector's original binding and does the same thing. Bare P was
-			# free — the only KEY_P branch on this canvas was the shift one.
+			# P arms Pin Select; Shift+P is kept as the pin inspector's original
+			# binding and does the same thing. Bare P was free — the only KEY_P
+			# branch on this canvas was the shift one.
 			_toggle_inspect_pin_mode()
 		KEY_R:
 			# Keyboard twin of the corner rotate handles (docket 019fcb93d367).
@@ -5928,8 +5926,8 @@ func _capture_drag_origins() -> void:
 	# enforcement here too: there is no fourth walk below to forget, and
 	# _apply_drag_delta only ever touches what landed in _drag_origins.
 	#
-	# BOARD GRAPHICS ARE ALSO DELIBERATELY NOT CAPTURED (DCR 01a0418dc6), the
-	# same idiom as vias and cutouts above. v1 ships AUTHOR + DELETE only: text
+	# BOARD GRAPHICS ARE ALSO DELIBERATELY NOT CAPTURED, the same idiom as vias
+	# and cutouts above. AUTHOR + DELETE only: text
 	# is placed by minerva_pcb_add_silk_text at a stated position and there is no
 	# in-panel text tool, no drag handle and no vertex editing, so no gesture
 	# legitimately changes a board graphic's geometry after it is written. Not
@@ -6216,7 +6214,7 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			# the derived "<id>#<k>" per-stroke ids the worker's compiler mints for
 			# the IR. A text graphic is one object here however many strokes it
 			# draws, so one delete removes the whole legend and one undo restores
-			# it (DCR 01a0418dc6).
+			# it.
 			return data.remove_board_graphic(entity_id)
 		KIND_CANDIDATE:
 			# NEVER REMOVED THROUGH THIS PATH (S3), and the case is here to say so
@@ -6570,9 +6568,9 @@ func _retire_commits_owning_trace(trace_id: String) -> Array:
 		return []
 	if data != null and data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(_routing_workspace)
-	# Ownership pre-check, the gesture twin of panel_tools' (bug 01a040f6d7):
-	# a record that merely NAMES this trace's id while the copper is on another
-	# net has that claim dropped, so the edit retires nothing it should not.
+	# Ownership pre-check, the gesture twin of panel_tools'. A record that merely
+	# NAMES this trace's id while the copper is on another net has that claim
+	# dropped, so the edit retires nothing it should not.
 	if data != null and _routing_workspace.has_method("prune_foreign_copper_claims"):
 		_routing_workspace.prune_foreign_copper_claims(
 			PcbCopperOwnership.index_from_board(data))
@@ -7699,16 +7697,15 @@ func _exit_inspect_pin_mode() -> void:
 	set_tool_mode(ToolMode.SELECT)
 
 
-## Click handling for INSPECT_PIN — the Pin Select tool (DCR 01a0410c62).
+## Click handling for INSPECT_PIN — the Pin Select tool.
 ##
-## The pick is unchanged (nearest pad's copper through host.pad_at, contract
-## §2's 5mm radius) and pin_selected still carries the pin_info dict the Pin
-## Info section reads, so the inspector's contract holds verbatim. What is new
-## is that the pick is ALSO a selection: PcbPinSelectTool owns the algebra
-## (click replaces, shift-click toggles, shift-click on empty space keeps a
-## multi-pad selection the human built), the ids live in selected_pad_refs like
-## every other kind, and selection_changed fires ONCE so get_selection, the
-## sidebar and the status line all read the same pick.
+## The pick is the nearest pad's copper through host.pad_at (5mm radius), and
+## pin_selected carries the pin_info dict the Pin Info section reads. The pick is
+## ALSO a selection: PcbPinSelectTool owns the algebra (click replaces,
+## shift-click toggles, shift-click on empty space keeps a multi-pad selection),
+## the ids live in selected_pad_refs like every other kind, and
+## selection_changed fires ONCE so get_selection, the sidebar and the status
+## line all read the same pick.
 func _handle_inspect_pin_click(world_pos: Vector2, additive: bool = false) -> void:
 	var ref := PcbPinSelectTool.pick(_pin_inspector_host, world_pos,
 		_inspectable_component_filter())
@@ -7736,10 +7733,10 @@ func _pin_info_for_ref(ref: String) -> Dictionary:
 	return _pin_inspector_host.pin_info(str(parts[0]), str(parts[1]))
 
 
-## Set the pad selection outright — the agent's half of the deixis
+## Set the pad selection outright — the caller's half of the deixis
 ## (minerva_pcb_select). Goes through the SAME state a click writes and emits
-## the same one selection_changed, so the human sees the agent's pads lit
-## exactly as their own click would show them. Returns the refs that landed.
+## the same one selection_changed, so the human sees those pads lit exactly as
+## their own click would show them. Returns the refs that landed.
 func set_selected_pads(refs: Array) -> Array:
 	var landed: Array[String] = []
 	for raw in refs:
@@ -7755,7 +7752,7 @@ func set_selected_pads(refs: Array) -> Array:
 ## Light every selected pad's copper, land by land, through the SAME transform
 ## the pad renderer draws it at (PcbPinSelectTool.land_transforms →
 ## pcb_component.get_pad_world_transform) — a halo that could sit anywhere else
-## would re-open exactly the rendered-vs-hit-test split bug 01a0380585b4 closed.
+## would re-open exactly the rendered-vs-hit-test split this shares away.
 ## A pin with no land geometry gets a ring at its position instead.
 func _draw_selected_pads() -> void:
 	if data == null or selected_pad_refs.is_empty():
@@ -8314,20 +8311,15 @@ func _trace_via_at(world_pos: Vector2) -> Dictionary:
 ## What a trace-tool click may anchor to: a PAD, else a VIA, else a free TRACE
 ## END, else {} — and {} is precisely what makes the click a waypoint instead.
 ##
-## PAD FIRST, deliberately. The two hit tests can both claim one click only where
-## a via sits inside a pad (via-in-pad), and there the PAD keeps winning: every
-## click that resolved to a pad before the via rung existed still resolves to the
-## same pad, so the new rung can only ever answer clicks that used to be a MISS.
-## That is the opposite of _entity_at's ladder, where VIA outranks COMPONENT, and
-## the difference is the point — that ladder picks whatever is drawn on top of a
-## fresh selection gesture, while this one is grafted onto an established one and
-## must not move ground under it.
+## PAD FIRST, deliberately. Pad and via can both claim one click only where a via
+## sits inside a pad, and there the PAD wins, so the via rung only ever answers
+## clicks that would otherwise MISS. That is the opposite of _entity_at's ladder,
+## where VIA outranks COMPONENT: that ladder picks whatever is drawn on top for a
+## fresh selection gesture, while this one is grafted onto an in-progress one and
+## must not move ground under it. Same shape the eraser's pick ladder uses.
 ##
-## Same pad-then-other-thing shape the eraser's own pick ladder uses.
-##
-## THE POUR IS LAST, and it answers only while a run is in progress — so it too
-## can only claim clicks that used to be a miss, and it never moves ground under
-## a gesture that has not started.
+## THE POUR IS LAST, and answers only while a run is in progress — so it too can
+## only claim clicks that would otherwise miss.
 func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
 	var pad_hit := _trace_pad_at(world_pos)
 	if not pad_hit.is_empty():
@@ -8346,20 +8338,17 @@ func _trace_anchor_at(world_pos: Vector2) -> Dictionary:
 ## plane rather than on a pad.
 ##
 ## A PLANE IS A TERMINATOR because it is copper the run genuinely joins: a GND
-## tap does not need a pad to end on, it needs the pour, and before this the only
-## way to stop there was a double-click, which left a FREE END that the DRC then
-## reported as dangling. What the run lands on is the COMPILED FILL, read through
-## PcbZoneCopper — the same regions the ratsnest counts as joined and the same
-## the worker's connectivity DRC measures — so a click the tool accepts is a join
-## those two agree exists. An unfilled pour therefore terminates nothing: its
-## copper has not been computed, and a landing on unproven copper is exactly the
-## silent merge the fill's absence is meant to prevent.
+## tap needs the pour, not a pad. What the run lands on is the COMPILED FILL,
+## read through PcbZoneCopper — the same regions the ratsnest counts as joined
+## and the worker's connectivity DRC measures — so a click the tool accepts is a
+## join those two agree exists. An UNFILLED pour therefore terminates nothing:
+## its copper has not been computed, and landing on unproven copper is the silent
+## merge the fill's absence is there to prevent.
 ##
-## FOURTH RUNG, and the only NET-SCOPED one. The predicate is net-blind (copper
-## either meets copper or it does not), so the net is decided here: a click in a
-## FOREIGN plane is not an anchor at all and falls through to being a waypoint,
-## which leaves the run ending inside that plane with a free end — read as
-## dangling by the connectivity DRC and as a short by the geometric one, which is
+## THE ONLY NET-SCOPED RUNG. The contact predicate is net-blind, so the net is
+## decided here: a click in a FOREIGN plane is not an anchor and falls through to
+## being a waypoint, leaving the run ending inside that plane with a free end —
+## dangling to the connectivity DRC and a short to the geometric one, which is
 ## what a run stopped in the wrong plane IS.
 ##
 ## ONLY WHILE A RUN IS IN PROGRESS. A trace INHERITS its net from where it
@@ -11713,8 +11702,8 @@ func get_selected_cutouts() -> Array[String]:
 	return selected_cutout_ids.duplicate()
 
 
-## The selected board-graphic ids (DCR 01a0418dc6). Completes the per-kind read
-## surface the same way get_selected_cutouts does.
+## The selected board-graphic ids. Completes the per-kind read surface the same
+## way get_selected_cutouts does.
 func get_selected_board_graphics() -> Array[String]:
 	return selected_board_graphic_ids.duplicate()
 

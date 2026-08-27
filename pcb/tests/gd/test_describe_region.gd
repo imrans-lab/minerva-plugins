@@ -1,15 +1,16 @@
 extends SceneTree
-## Work item 01a03f9dd6 — minerva_pcb_describe_region, and layers_touched on
-## both it and minerva_pcb_list_vias.
+## minerva_pcb_describe_region, and layers_touched on both it and
+## minerva_pcb_list_vias.
 ##
 ## Run (via a Minerva checkout as the Godot host — NEVER the live checkout):
 ##   pcb/scripts/run-gd-tests.sh <path-to-minerva-checkout>
 ##
-## THE GAP. Understanding the ground around ONE part cost five verbs and a hand
-## cross-reference: list_zones + describe_zone twice + get_components (37 parts)
-## + spatial_query + pin_info. spatial_query already sweeps a rectangle, but its
-## copper block returns bare ID LISTS — no pad nets, no zone outlines, no trace
-## free ends — so the answers still had to be reassembled by hand.
+## THE GAP. Understanding the ground around ONE part otherwise costs five verbs
+## and a hand cross-reference: list_zones + describe_zone per zone +
+## get_components (the whole board) + spatial_query + pin_info. spatial_query
+## already sweeps a rectangle, but its copper block returns bare ID LISTS — no
+## pad nets, no zone outlines, no trace free ends — so the answers still have to
+## be reassembled by hand.
 ##
 ## THE FIXTURE is the LGA board test_bus_tool.gd's foreign-copper section uses
 ## (a THT source column, a 4-pad SMD target part, four nets), re-declared here
@@ -78,7 +79,7 @@ var _fail := 0
 
 
 func _init() -> void:
-	print("=== describe_region + layers_touched (item 01a03f9dd6) ===\n")
+	print("=== describe_region + layers_touched ===\n")
 	await _run_pads_and_parts()
 	await _run_open_lane_free_end()
 	await _run_pour_and_keepout()

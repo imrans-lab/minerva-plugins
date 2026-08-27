@@ -1,22 +1,21 @@
 """Layer-hop waypoints — one hint expresses "F.Cu, duck under here, F.Cu".
 
-Work item 01a04106bd. THE HITL that filed it: the owner drew one F.Cu route
-hint across a corridor blocked by VBAT_F and the buck cluster, then proposed
-FOUR separate vias to duck under the obstacles. The hint was un-routable as
-drawn, the four via ghosts carried no net and no owner, and the agent recovered
-the intent only by matching via coordinates to hint segments BY EYE.
+Without a layer on the waypoint, an F.Cu hint across a blocked corridor is
+un-routable as drawn and has to be paired with separate via proposals that carry
+no net and no owner — which via belongs to which segment is then recoverable
+only by matching coordinates to hint segments BY EYE.
 
-A waypoint may now carry a ``layer``: the run CHANGES to that copper layer at
-that point, and the materializer places one through via exactly there. The hop
-is a property of the corner, so there is nothing left to geometry-match.
+A waypoint may carry a ``layer``: the run CHANGES to that copper layer at that
+point, and the materializer places one through via exactly there. The hop is a
+property of the corner, so there is nothing left to geometry-match.
 
 Everything here is measured through the real entry points — the pure bridge
 call and ``handle_request("route", ...)`` — never through a private helper, so
 a green run is a statement about what an agent actually gets back.
 
-FAILS AGAINST OLD: every assertion about a via or a B.Cu segment. The previous
-waypoint-derived path flattened every segment onto the hint's single
-``kind_payload.layer`` and hardcoded ``vias = []``.
+A waypoint-derived path that flattens every segment onto the hint's single
+``kind_payload.layer`` and hardcodes ``vias = []`` fails every assertion here
+about a via or a B.Cu segment.
 
 Same conventions as test_route_as_drawn.py.
 """
@@ -122,7 +121,7 @@ def test_1_one_layer_change_yields_exactly_one_via_at_the_hop():
 
 
 # ---------------------------------------------------------------------------
-# 2. Duck under AND back: the HITL's actual intent, in ONE hint
+# 2. Duck under AND back, in ONE hint
 # ---------------------------------------------------------------------------
 
 

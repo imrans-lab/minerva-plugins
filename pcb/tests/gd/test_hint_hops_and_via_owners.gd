@@ -1,35 +1,25 @@
 extends SceneTree
-## ACCEPTANCE — work item 01a04106bd + remoras 01a03b87473c / 01a02c480d50.
+## ACCEPTANCE: a via's OWNER, a via's SIZE and a trace's WIDTH are all resolved,
+## never invented.
 ##
-## Three defects, one station, all of them about a number or an owner that was
-## INVENTED instead of resolved:
-##
-##   1. OWNERSHIP (01a04106bd). minerva_pcb_propose_via took neither the net nor
-##      the hint a via serves, so the live HITL's four duck-under ghosts came
-##      back with net "", task_id "" and source_hint_ids [] — the agent
-##      recovered which hint each belonged to by matching coordinates to hint
-##      segments BY EYE. `for_hint` records it; listings label an ownerless
-##      ghost rather than leaving it indistinguishable from an owned one.
-##   2. VIA SIZE (01a03b87473c). PcbRouteCandidate.make_via's 0.8/0.4 PARAMETER
-##      DEFAULTS were what _create_candidate_for_route stamped onto every
-##      ingested via, and _via_dimensions' rescue only fires on a ZERO stamp —
-##      0.8 is never zero. A ghost rendered and committed at 0.8 on a board
-##      whose rules said 0.6, while the direct-commit path honoured 0.6.
-##   3. INVENTED WIDTH (01a02c480d50). Both panel paths that turn a route reply
-##      into copper fell back to a literal 0.25mm when the reply carried no
-##      width — silently, on the one path that ends in fabricated copper.
+##   1. OWNERSHIP. A proposed via records the route hint it SERVES (`for_hint`)
+##      and inherits that hint's net. Without it a ghost carries net "",
+##      task_id "" and source_hint_ids [], and which hint it belongs to is
+##      recoverable only by matching coordinates to hint segments BY EYE.
+##      Listings label an ownerless ghost rather than leaving it
+##      indistinguishable from an owned one.
+##   2. VIA SIZE. A via's diameter/drill come from the board's design_rules.
+##      A non-zero literal stamped at ingest cannot be rescued downstream —
+##      _via_dimensions only fires on a ZERO stamp — so a ghost would render and
+##      commit at 0.8 on a board whose rules say 0.6, while the direct-commit
+##      path honours 0.6.
+##   3. INVENTED WIDTH. A route reply carrying no width makes the
+##      copper-creating paths REFUSE, rather than fall back to a literal 0.25mm
+##      silently on the one path that ends in fabricated copper.
 ##
 ## Plus the panel half of layer-hop waypoints: a waypoint may carry `layer`,
 ## and a bend edit must not dissolve it. (The ROUTING half of that feature is
 ## worker-side and is proven in worker/tests/test_route_hint_layer_hops.py.)
-##
-## RED/GREEN: every section here FAILS against the pre-station code.
-##   1c/1d — source_hint_ids/[owner] did not exist (propose_via had no for_hint).
-##   2b/2c — the ingested via was 0.8/0.4 regardless of design_rules.
-##   3b    — the widthless route produced 0.25mm copper instead of refusing.
-##   4b    — the widthless propose landed a 0.25mm candidate.
-##   5b    — with_bend_points rewrote every bend as [x, y], erasing the layer.
-##   6b    — validate() ignored waypoint entry shape entirely.
 ##
 ## Harness: test_dcr_proposal_ghost.gd's driver + RouterShim idiom. The router
 ## worker is Python and does not run under the gd scaffold; everything under
@@ -202,7 +192,7 @@ func _row_for(reply: Dictionary, cid: String) -> Dictionary:
 
 
 func _init() -> void:
-	print("=== 01a04106bd + 01a03b87473c + 01a02c480d50 acceptance ===\n")
+	print("=== via owner, via size, trace width ===\n")
 	await process_frame
 	await _s1_via_ownership()
 	await _s2_via_size_from_design_rules()
@@ -298,7 +288,7 @@ func _s2_via_size_from_design_rules() -> void:
 			float(v.get("drill", 0.0)), BOARD_VIA_DRILL_MM)
 
 	# 2d: the standalone proposal path answers identically — the two must not
-	# disagree about one hole, which is what the remora is about.
+	# disagree about one hole.
 	var ghost: Dictionary = PanelTools._propose_via(shim, _args({"x_mm": 22.0, "y_mm": 27.0}))
 	check_near("2d: a propose_via ghost takes the board's diameter too",
 		float(ghost.get("size_mm", 0.0)), BOARD_VIA_DIAMETER_MM)
@@ -442,7 +432,21 @@ func _s5_bend_edit_preserves_layer() -> void:
 		PcbHintWaypoint.layer_of(wps[0]).is_empty()
 		and PcbHintWaypoint.layer_of(wps[2]).is_empty())
 	check_eq("5d: exactly one hop, so exactly one via",
-		PcbHintWaypoint.layer_change_indices(wps).size(), 1)
+		PcbHintWaypoint.layer_change_indices(wps, "F.Cu").size(), 1)
+
+	# A waypoint may RESTATE the layer the run is already on. That is a plain
+	# corner, and counting it as a hop would put a via on screen where the
+	# worker's materializer places none.
+	var restated: Array = [
+		{"x": 25.0, "y": 20.0, "layer": "F.Cu"},
+		{"x": 30.0, "y": 20.0, "layer": "bottom"},
+		{"x": 35.0, "y": 20.0, "layer": "B.Cu"},
+		{"x": 40.0, "y": 20.0, "layer": "top"},
+	]
+	var hops: Array = PcbHintWaypoint.layer_change_indices(restated, "F.Cu")
+	check_eq("5e: a waypoint restating the current layer is no hop", hops.size(), 2)
+	check("5e2: the hops are the two that actually change layer",
+		hops == [1, 3])
 
 
 # ══ 6. waypoint shape/layer validation ═══════════════════════════════════════

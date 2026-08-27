@@ -196,14 +196,13 @@ test_proposal_attribution.gd assertions=33
 test_routing_workspace_model.gd assertions=168
 test_routing_workspace_v2.gd assertions=395
 test_trace_identity_delete.gd assertions=213
-# Bug 01a040f6d7 + its HITL finding: stable copper identity and honest
-# ownership. Group 2 drives the REAL pcb-plugin binary (pcb.serialize ->
-# pcb.deserialize, the exact codec export_yaml/load_board use), so the id
-# round trip is measured rather than modelled -> `real-worker`.
-# DELIBERATELY UNPINNED assertion count on first registration: the number has
-# never been MEASURED on a run, and a count derived by reading the source is
-# exactly what this manifest's own header refuses. Pin it in its own reviewed
-# commit after the first green run.
+# Stable copper identity and honest ownership. Group 2 drives the REAL
+# pcb-plugin binary (pcb.serialize -> pcb.deserialize, the exact codec
+# export_yaml/load_board use), so the id round trip is measured rather than
+# modelled -> `real-worker`.
+# DELIBERATELY UNPINNED assertion count: the number has never been MEASURED on a
+# run, and a count derived by reading the source is exactly what this manifest's
+# own header refuses. Pin it after the first green run.
 test_copper_identity_ownership.gd real-worker
 test_workspace_check.gd assertions=46
 test_workspace_ingest.gd assertions=77
@@ -261,11 +260,10 @@ test_inner_layer_via_guard.gd assertions=39
 # other alone, and re-asserting the same value changes nothing. MEASURED:
 # 76 passed, 0 failed — the first run of this suite; the 57 above was never
 # executed and the run confirms the batch's count, not the provisional one.
-# 76 -> 95: group 8 pins fit:true against the CURRENT viewport rect (bug
-# 01a040f7523e — a narrow docked pane left the board a sliver). Three
-# viewport aspects x five checks, plus the bare-board case and the
-# overhanging part. DERIVED, not measured (2 + 5*3 + 2 = 19): the station
-# that wrote it runs static gates only. Confirm on the first run.
+# 76 -> 95: group 8 pins fit:true against the CURRENT viewport rect — a narrow
+# docked pane must not leave the board a sliver. Three viewport aspects x five
+# checks, plus the bare-board case and the overhanging part. DERIVED, not
+# measured (2 + 5*3 + 2 = 19). Confirm on the first run.
 test_view_state.gd assertions=95
 # NEW at epoch NLC C2 (item 019fff60e05a): minerva_pcb_place_via, the direct
 # board via. Grown at C3 (item 01a001c39aa3) with minerva_pcb_add_trace's two
@@ -366,35 +364,33 @@ test_copper_contact_vectors.gd
 # ran would be a guess wearing a gate's clothes. Pin it on the first green run.
 test_trace_pour_terminator.gd
 
-# Work item 01a04106bd + remoras 01a03b87473c / 01a02c480d50: via ownership
-# (propose_via for_hint), design-rule via sizing at proposal time, the removal
-# of the invented 0.25mm width, and the panel half of layer-hop waypoints.
-# UNPINNED on purpose — the assertion count is pinned in its own commit once
-# the suite has been RUN, not derived from reading it.
+# Via ownership (propose_via for_hint), design-rule via sizing at proposal time,
+# no invented trace width, and the panel half of layer-hop waypoints.
+# UNPINNED on purpose — the assertion count is pinned once the suite has been
+# RUN, not derived from reading it.
 test_hint_hops_and_via_owners.gd
 
-# NEW — DCR 01a0410c62 (Pin Select), remora 01a0380585b4 (one land-to-world
-# transform), and the 2026-08-26 HITL rotation finding. UNPINNED on purpose:
-# this station runs no suites, so an assertions= count here would be derived by
-# reading the source, which is exactly the false pin this file exists to
-# prevent. Pin it from the first trustworthy run.
+# NEW — Pin Select, the one land-to-world transform shared by the renderer and
+# the hit test, and the rotation convention a placement reply states. UNPINNED
+# on purpose: an assertions= count here would be derived by reading the source,
+# which is exactly the false pin this file exists to prevent. Pin it from the
+# first trustworthy run.
 test_pcb_pin_select.gd
 
-# NEW — work item 01a03f9dd6: minerva_pcb_describe_region (ONE read of a board
-# rectangle) and layers_touched on it and on minerva_pcb_list_vias. UNPINNED on
-# purpose: the station that wrote it runs static gates only, so an assertions=
-# count here would be derived by reading the source, which is exactly the false
-# pin this file exists to prevent. Pin it from the first trustworthy run.
+# NEW — minerva_pcb_describe_region (ONE read of a board rectangle) and
+# layers_touched on it and on minerva_pcb_list_vias. UNPINNED on purpose: an
+# assertions= count here would be derived by reading the source, which is
+# exactly the false pin this file exists to prevent. Pin it from the first
+# trustworthy run.
 test_describe_region.gd
 
-# NEW — remora 01a03820df78: a transient status message wiped early by the
-# PREVIOUS message's uncancelled 2s timer. Section 1 measures the item's own
-# oracle in REAL TIME and so takes ~3.5s of wall clock; that cost is the point —
-# the defect is about a clock. UNPINNED for the same reason as the entry above.
+# NEW — a transient status message must not be wiped early by the PREVIOUS
+# message's uncancelled 2s timer. Section 1 measures that in REAL TIME and so
+# takes ~3.5s of wall clock; that cost is the point — the rule is about a clock.
+# UNPINNED for the same reason as the entry above.
 test_transient_status.gd
 
-# NEW — DCR 01a0418dc6 (board-level silk text and graphics). Covers the panel
-# half: the GDScript font mirror's fixture numbers, the B.SilkS mirror
+# NEW — board-level silk text and graphics. Covers the panel half: the GDScript font mirror's fixture numbers, the B.SilkS mirror
 # convention (risk R7) asserted point-for-point with negative controls, the
 # board_graphics round trip through to_board_dict/from_board_dict, one-undo-step
 # add and delete, the three MCP verbs, and canvas pick/select/delete.

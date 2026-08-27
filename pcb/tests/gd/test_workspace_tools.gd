@@ -1427,13 +1427,12 @@ func _run_removal_manifest_tools_absent() -> void:
 	# bumped the sibling pin in test_manifest_tool_registration.gd from 113 to
 	# 114 and left THIS one at 113, so this check has been failing against
 	# main ever since — the exact "only one of the two pins moved" failure the
-	# comment above warns about. 113 -> 114 (disconnect_net) -> 118 (DCR
-	# 01a0410c62's pad family: free_pins, move_net, swap_nets, select).
+	# comment above warns about. 113 -> 114 (disconnect_net) -> 118 (the pad
+	# family: free_pins, move_net, swap_nets, select).
 	# 119 -> 122: the board-graphics family — minerva_pcb_add_silk_text,
-	# minerva_pcb_add_graphic, minerva_pcb_delete_graphic (DCR 01a0418dc6).
-	# DERIVED by COUNTING manifest.json's tools[], not measured on a run — the
-	# station that added them runs static gates only. Its twin in
-	# test_manifest_tool_registration.gd moved in the same change.
+	# minerva_pcb_add_graphic, minerva_pcb_delete_graphic.
+	# DERIVED by COUNTING manifest.json's tools[], not measured on a run. Its
+	# twin in test_manifest_tool_registration.gd moves with it.
 	check_eq("manifest tool count == 122 (ALL manifest.json tools[] entries)",
 		names.size(), 122)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
@@ -2181,14 +2180,13 @@ func _run_ux1_width_provenance() -> void:
 	check_eq("…width_source is relayed verbatim, never reinterpreted",
 		str(rec.get("width_source", "")), "hint")
 
-	# NO WORKER PROVENANCE (Epoch UX4 station 10, 019fd0ab5af8 — the oracle
-	# this group existed for, DEEPENED again by bug 01a02c480d50): the record
-	# still carries width_mm (the candidate's own segment width) and the
-	# WORKSPACE's ingest verdict as width_source. The seeded hint authors NO
-	# width and this reply stamps none, so there is NO width — and the answer to
-	# that is 0.0 + "unresolved", not the 0.25mm literal that used to stand in
-	# for it. commit() refuses zero-width copper by name, so nothing gets
-	# fabricated at a width nobody chose.
+	# NO WORKER PROVENANCE — the oracle this group exists for. The record still
+	# carries width_mm (the candidate's own segment width) and the WORKSPACE's
+	# ingest verdict as width_source. The seeded hint authors NO width and this
+	# reply stamps none, so there is NO width — and the answer to that is
+	# 0.0 + "unresolved", never a 0.25mm literal standing in for it. commit()
+	# refuses zero-width copper by name, so nothing gets fabricated at a width
+	# nobody chose.
 	var plain: Dictionary = _multipad_reply([hint_id])
 	shim.reply = plain
 	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())

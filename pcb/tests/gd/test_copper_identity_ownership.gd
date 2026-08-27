@@ -1,6 +1,5 @@
 extends SceneTree
-## ACCEPTANCE — bug 01a040f6d7 (+ its HITL finding): stable copper identity and
-## HONEST ownership.
+## ACCEPTANCE: stable copper identity and HONEST ownership.
 ##
 ## TWO DEFECTS, ONE ROOT.
 ##
@@ -97,7 +96,7 @@ func check_eq(desc: String, actual, expected) -> void:
 
 
 func _init() -> void:
-	print("=== Copper identity + ownership (bug 01a040f6d7) ===\n")
+	print("=== Copper identity + ownership ===\n")
 	_driver = PluginPanelDriver.new()
 	_run_minted_ids()
 	_run_round_trip_keeps_ids()

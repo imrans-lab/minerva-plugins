@@ -233,8 +233,8 @@ var last_ingest_constraint_conflicts: Array = []
 ## stores must leave it empty (the pass's own idempotence contract).
 var last_load_reconciliation: Array = []
 
-## Routes the LAST ingest could not resolve a copper width for (bug
-## 01a02c480d50): one entry per such route, {"net", "hint_ids", "reason"}.
+## Routes the LAST ingest could not resolve a copper width for: one entry per
+## such route, {"net", "hint_ids", "reason"}.
 ## Per-call, like last_ingest_holds.
 ##
 ## A route reply is supposed to carry the width the router actually drew at
@@ -1014,6 +1014,8 @@ func _segments_wire(c) -> Array:
 		out.append({
 			"id": str((seg as Dictionary).get("id", "")),
 			"layer": str((seg as Dictionary).get("layer", "top")),
+			# READ path: this wire shape is sent to the checker, never to
+			# add_trace, so the nominal fallback shapes no copper.
 			"width": float((seg as Dictionary).get("width", 0.25)),
 			"points": pts,
 		})
@@ -1230,7 +1232,7 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 ## which holds the prior candidate) pins the key and carries the terminals
 ## onto the fallback generation so it stays reroutable. Empty (the defaults)
 ## leaves every derived path byte-identical.
-## `board` (bug 01a03b87473c) is the LIVE board, used for exactly one thing here:
+## `board` is the LIVE board, used for exactly one thing here:
 ## resolving each via's diameter/drill from its design_rules AT PROPOSAL TIME.
 ## null (the headless default) resolves to PcbViaDimensions' constants — the
 ## honest "no rules were declared" answer, never a silent override of real ones.
@@ -1263,7 +1265,7 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		# this caller has no production consumer and no per-route hint_ids to
 		# read instead).
 		hint_ids = _hint_ids_for_net(source_hints, net)
-	# ── WIDTH RESOLVED BEFORE ANY TASK BOOKKEEPING (bug 01a02c480d50) ────────
+	# ── WIDTH RESOLVED BEFORE ANY TASK BOOKKEEPING ────────
 	# Hoisted above ensure_task/supersede so the width verdict and its
 	# provenance are settled in one place, before any state moves.
 	var width: float
@@ -1276,7 +1278,7 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		width_hints = _hints_matching_net(source_hints, net)
 	if width_override > 0.0:
 		width = width_override
-	# UNRESOLVED WIDTH IS RECORDED, NOT INVENTED (bug 01a02c480d50). A segment
+	# UNRESOLVED WIDTH IS RECORDED, NOT INVENTED. A segment
 	# whose width comes from none of the three real sources (caller override,
 	# the router's own per-segment width_mm, an authored hint width) used to be
 	# stamped 0.25mm — an invented number that reached fabricated copper with
@@ -1641,7 +1643,7 @@ func reconcile_committed_copper(board) -> Array:
 		var vids: Array = rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []
 		if tids.is_empty() and vids.is_empty():
 			continue
-		# OWNERSHIP, not mere presence (bug 01a040f6d7). A recorded id whose
+		# OWNERSHIP, not mere presence. A recorded id whose
 		# copper is present but belongs to another net / sits somewhere else is
 		# FOREIGN: the record is lying and this candidate must claim nothing
 		# through it. Prune those first so the loss question below is asked only
@@ -1714,7 +1716,7 @@ func _prune_foreign_copper_claim(candidate_id: String, audited: Dictionary) -> v
 			str(audited.get("foreign_trace_ids", [])), str(audited.get("foreign_via_ids", []))])
 
 
-## RESTORE-TIME ownership audit (bug 01a040f6d7, HITL half). Every committed
+## RESTORE-TIME ownership audit. Every committed
 ## candidate's recorded copper ids are checked against the board that just
 ## loaded; ids that resolve to copper the candidate does not own are DROPPED from
 ## the record, and a candidate left claiming nothing at all is UNCOMMITTED (its
@@ -1725,8 +1727,10 @@ func _prune_foreign_copper_claim(candidate_id: String, audited: Dictionary) -> v
 ## PcbCopperOwnership.index_from_dict(current_board_dict): the restore has the
 ## board as a dict, not as a PCBData.
 ##
-## Returns one finding per affected candidate:
-##   {candidate_id, net, dropped_trace_ids, dropped_via_ids, uncommitted:bool}
+## Returns findings, one per candidate PER REASON — a candidate whose record is
+## both lying and short of copper produces two:
+##   {candidate_id, net, reason:"foreign"|"missing",
+##    dropped_trace_ids, dropped_via_ids, uncommitted:bool}
 func drop_unowned_commit_records(copper_index: Dictionary) -> Array:
 	var findings: Array = []
 	if _commit_transaction_active:
@@ -1742,11 +1746,12 @@ func drop_unowned_commit_records(copper_index: Dictionary) -> Array:
 		if tids.is_empty() and vids.is_empty():
 			continue  # mark_committed's annotation-accept shape: claims nothing
 		var audited: Dictionary = PcbCopperOwnership.audit(c, copper_index, tids, vids)
-		var dropped_traces: Array = (audited["foreign_trace_ids"] as Array) \
-			+ (audited["missing_trace_ids"] as Array)
-		var dropped_vias: Array = (audited["foreign_via_ids"] as Array) \
-			+ (audited["missing_via_ids"] as Array)
-		if dropped_traces.is_empty() and dropped_vias.is_empty():
+		var foreign_traces: Array = audited["foreign_trace_ids"] as Array
+		var foreign_vias: Array = audited["foreign_via_ids"] as Array
+		var missing_traces: Array = audited["missing_trace_ids"] as Array
+		var missing_vias: Array = audited["missing_via_ids"] as Array
+		if foreign_traces.is_empty() and foreign_vias.is_empty() \
+				and missing_traces.is_empty() and missing_vias.is_empty():
 			continue
 		var net := str(c.net)
 		rec["committed_trace_ids"] = _to_string_array(audited["owned_trace_ids"] as Array)
@@ -1758,16 +1763,30 @@ func drop_unowned_commit_records(copper_index: Dictionary) -> Array:
 		if (rec["committed_trace_ids"] as Array).is_empty() \
 				and (rec["committed_via_ids"] as Array).is_empty():
 			uncommitted = uncommit(cid)
-		push_warning(("[RoutingWorkspace] stale sidecar ownership record for candidate %s (net %s): "
-			+ "dropped traces %s, vias %s%s") % [cid, net, str(dropped_traces),
-				str(dropped_vias), " — commit retired, task reopened" if uncommitted else ""])
-		findings.append({
-			"candidate_id": cid,
-			"net": net,
-			"dropped_trace_ids": _to_string_array(dropped_traces),
-			"dropped_via_ids": _to_string_array(dropped_vias),
-			"uncommitted": uncommitted,
-		})
+		# FOREIGN and MISSING are reported SEPARATELY, never as one list: the
+		# first says the record is lying about copper that belongs to someone
+		# else, the second says the candidate's own copper was deleted. Only
+		# the second is a true, useful report about this candidate's work.
+		for reason in [PcbCopperOwnership.FOREIGN, PcbCopperOwnership.MISSING]:
+			var is_foreign: bool = reason == PcbCopperOwnership.FOREIGN
+			var traces: Array = foreign_traces if is_foreign else missing_traces
+			var vias: Array = foreign_vias if is_foreign else missing_vias
+			if traces.is_empty() and vias.is_empty():
+				continue
+			var words := "claims copper it does not own" if is_foreign \
+				else "claims copper that is no longer on the board"
+			push_warning(("[RoutingWorkspace] sidecar ownership record for candidate %s "
+				+ "(net %s) %s: dropped traces %s, vias %s%s") % [cid, net, words,
+					str(traces), str(vias),
+					" — commit retired, task reopened" if uncommitted else ""])
+			findings.append({
+				"candidate_id": cid,
+				"net": net,
+				"reason": reason,
+				"dropped_trace_ids": _to_string_array(traces),
+				"dropped_via_ids": _to_string_array(vias),
+				"uncommitted": uncommitted,
+			})
 	return findings
 
 
@@ -1816,8 +1835,8 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 	last_ingest_degenerate_segments = 0  # per-call (see the field's own doc)
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var via_dims: Dictionary = PcbViaDimensions.from_board(board)
-	# The candidate's OWN established width, never an invented one (bug
-	# 01a02c480d50). A candidate with no segment to take a width from has no
+	# The candidate's OWN established width, never an invented one. A candidate
+	# with no segment to take a width from has no
 	# width this re-derivation could honestly give the new copper, so the sync
 	# is refused rather than stamping a literal onto geometry that ends up
 	# fabricated.
@@ -2127,14 +2146,12 @@ static func _width_for_net(source_hints: Array, net: String) -> float:
 
 ## Widest authored trace width from an EXPLICIT hint list — no net_names
 ## filtering. Shared extraction logic for both _width_for_net (legacy,
-## net-name-matched hints) and ingest_record's explicit-attribution path
-## (docket 019fa109766f).
+## net-name-matched hints) and ingest_record's explicit-attribution path.
 ##
-## 0.0 means NO HINT AUTHORED A WIDTH, and that is the answer — not 0.25mm.
-## The literal that used to sit here (bug 01a02c480d50) was the last invented
-## number on a path that ends in fabricated copper: a board would gain 0.25mm
-## traces with nothing in any report saying the width was guessed rather than
-## resolved. Callers fail closed on 0.0 instead.
+## 0.0 means NO HINT AUTHORED A WIDTH, and that is the answer — not a nominal
+## width. A literal here would be an invented number on a path that ends in
+## fabricated copper: the board would gain traces at a width nothing in any
+## report says was guessed. Callers fail closed on 0.0 instead.
 static func _width_from_hints(hints: Array) -> float:
 	var w := 0.0
 	for hint in hints:
@@ -2531,7 +2548,7 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 	# (ingest_record); -1 (generated unconstrained / pre-provenance record)
 	# is stale against ANY current constraint by the same rule.
 	#
-	# A VIA ENTITY IS OUT OF SCOPE HERE (work item 01a04106bd). Its
+	# A VIA ENTITY IS OUT OF SCOPE HERE. Its
 	# source_hint_ids record the hint it SERVES, not an answer to that hint's
 	# routing question — no corridor ever steered a hole. Without this skip,
 	# `for_hint` would turn a perfectly legal via ghost into a
@@ -2543,7 +2560,7 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 			return _verb_error(ERR_CONSTRAINT_STALE,
 				"candidate '%s' was generated against constraint revision %d but the governing constraint has advanced to revision %d — re-propose/reroute under the current constraint (minerva_pcb_workspace_reroute_route), or remove it with reroute_route's clear_constraint:true, before committing"
 					% [candidate_id, int(c.constraint_revision), governing], candidate_id)
-		# CLEARED-CONSTRAINT STALENESS (Codex 1049 finding 1): with no live
+		# CLEARED-CONSTRAINT STALENESS: with no live
 		# constraint (governing -1) a candidate STAMPED with one (constraint_
 		# revision >= 0, at or below a task's clear floor) was generated under a
 		# corridor the user explicitly REMOVED — e.g. clear_constraint whose
@@ -2761,22 +2778,17 @@ func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
 				return _rollback_commit(board, rb_traces, all_via_ids + via_ids,
 					cid, "board refused a trace for segment '%s'" % str(plan["id"]))
 			trace_ids.append(tid)
-		var dr: Dictionary = board.design_rules if board.design_rules is Dictionary else {}
 		for via_dict in pf["via_plan"]:
-			var via_size := float(via_dict.get("diameter", 0.0))
-			if via_size <= 0.0:
-				via_size = float(dr.get("via_diameter_mm", 0.0))
-			if via_size <= 0.0:
-				via_size = 0.8
-			var via_drill := float(via_dict.get("drill", 0.0))
-			if via_drill <= 0.0:
-				via_drill = float(dr.get("via_drill_mm", 0.0))
-			if via_drill <= 0.0:
-				via_drill = 0.4
+			# ONE rule for every via this plugin creates: the plan's own size
+			# when it states one, else the board's design_rules, else the
+			# constants. See PcbViaDimensions.
+			var via_dims: Dictionary = PcbViaDimensions.from_board(board,
+				float(via_dict.get("diameter", 0.0)),
+				float(via_dict.get("drill", 0.0)))
 			var vid := str(board.add_via({
 				"position": via_dict.get("position"),
-				"size": via_size,
-				"drill": via_drill,
+				"size": via_dims["diameter"],
+				"drill": via_dims["drill"],
 				"net_name": net,
 				"from_layer": str(via_dict.get("from_layer", "top")),
 				"to_layer": str(via_dict.get("to_layer", "bottom")),
@@ -2921,19 +2933,17 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 ## True for the DCR's via-as-entity candidate — the one thing that needs the
 ## stronger, re-validated-at-commit placement contract.
 ##
-## IDENTIFIED BY ITS OWN MARK, not by missing provenance (work item
-## 01a04106bd). It used to require task_id AND source_hint_ids to be EMPTY,
-## which was true only because propose_via had no way to say who a via was for.
-## Now it does — `for_hint` records the owning route hint — so an OWNED via
-## ghost would have silently lost its entity contract (commit-time
-## resolve_via_target re-check, the batch overlap gate) purely for having an
-## owner. propose_via stamps `proposed_entity` on the via it mints; the
+## IDENTIFIED BY ITS OWN MARK, not by missing provenance. Requiring task_id AND
+## source_hint_ids to be EMPTY would silently strip an OWNED via ghost of its
+## entity contract (the commit-time resolve_via_target re-check, the batch
+## overlap gate) purely for naming the hint it serves, which `for_hint` now
+## records. propose_via stamps `proposed_entity` on the via it mints; the
 ## provenance-absence test stays as the fallback for candidates persisted
 ## before that mark existed.
 ## The hints a commit of `candidate` CONSUMES — i.e. answers, so panel_tools
 ## flips them open -> applied.
 ##
-## OWNERSHIP IS NOT CONSUMPTION (work item 01a04106bd). A via-entity ghost now
+## OWNERSHIP IS NOT CONSUMPTION. A via-entity ghost now
 ## records the route hint it SERVES on source_hint_ids, and without this that
 ## record would close the hint the moment the via committed: the hint's route
 ## has not been laid, only one of its hop holes, and an applied hint is excluded
@@ -3039,20 +3049,19 @@ static func _standalone_batch_via_error(plans: Array) -> Dictionary:
 ## `net` may be empty — an unassigned via is legitimate (the fiber-laser
 ## workflow orders via-only boards and lases copper against them later).
 ##
-## `for_hint_id` (work item 01a04106bd) is the route hint this via SERVES. The
-## HITL that filed it: four ghosts came back with net "", task_id "" and
-## source_hint_ids [], and the agent recovered which hint they belonged to only
-## by matching coordinates to hint segments by eye — a second hint nearby would
-## have made that ambiguous. Naming the owner records it instead of leaving it
-## to be inferred. A ghost with NO owner is still legal (that is the fiber-laser
+## `for_hint_id` is the route hint this via SERVES. Without it a ghost carries
+## net "", task_id "" and source_hint_ids [], and which hint it belongs to can
+## only be recovered by matching coordinates to hint segments by eye — ambiguous
+## the moment a second hint is nearby. Naming the owner records it instead of
+## leaving it to be inferred. A ghost with NO owner is still legal (the fiber-laser
 ## case, and an exploratory click); listings label it unowned rather than
 ## refusing it. The owner is recorded as source_hint_ids, NOT as a task_id: the
 ## via ghost is not an ANSWER to the hint's routing question and must not sit in
 ## the task's answer slot beside the route candidate that is.
 ##
 ## `diameter`/`drill` are 0.0-means-"the board decides": they resolve through
-## PcbViaDimensions from the board's design_rules (bug 01a03b87473c). A caller
-## passing a positive value still outranks the rules.
+## PcbViaDimensions from the board's design_rules. A caller passing a positive
+## value still outranks the rules.
 ## Returns {ok:true, candidate_id, via_id, at} or {ok:false, error, message}.
 func propose_via(position: Vector2, net: String = "", diameter: float = 0.0,
 		drill: float = 0.0, board = null, for_hint_id: String = "") -> Dictionary:
@@ -3277,7 +3286,7 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 	# The segment's own width, verbatim. 0.0 (a segment that somehow carries
 	# none) is left as 0.0 on purpose — commit's pre-flight refuses zero-width
 	# copper by name, which is the honest outcome; inventing a literal here
-	# would put a width nobody chose onto fabricated copper (bug 01a02c480d50).
+	# would put a width nobody chose onto fabricated copper.
 	var width := float(hit_seg.get("width", 0.0))
 	var head := PcbRouteCandidate.make_segment(str(hit_seg.get("id", "")), canon_from, width, head_pts,
 		bool(hit_seg.get("locked", false)))
@@ -3704,6 +3713,8 @@ func _segment_hit(c, position: Vector2) -> Dictionary:
 				pts.append(p)
 		if pts.size() < 2:
 			continue
+		# TOLERANCE path: a nominal width only sizes the pick radius here, so
+		# the fallback affects what the cursor grabs, never what gets drawn.
 		var tol: float = maxf(float(seg.get("width", 0.25)) * 0.5, EDIT_MIN_TOL_MM)
 		for leg in range(pts.size() - 1):
 			var proj := PcbTraceGeometry.closest_point_on_segment(position, pts[leg], pts[leg + 1])

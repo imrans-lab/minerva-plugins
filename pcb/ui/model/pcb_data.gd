@@ -160,7 +160,7 @@ var zones: Array[Dictionary] = []
 var cutouts: Array[Dictionary] = []
 
 ## Board-LEVEL graphics — silk legend and courtyard documentation the BOARD
-## owns, not a component (DCR 01a0418dc6; Go's board.Graphic struct).
+## owns, not a component (Go's board.Graphic struct).
 ##
 ## HELD VERBATIM, same discipline and same reasoning as zones and cutouts above:
 ## the canonical dict pcb.deserialize hands over is the dict kept and the dict
@@ -222,8 +222,7 @@ signal journal_entry_added(entry: Dictionary)
 ## highest ORDINAL it admitted, and NO PATH MAY EVER LOWER ONE (not
 ## clear_traces(), not clear(), not _restore_state). `traces` is an id-keyed
 ## Dictionary, so a colliding id OVERWRITES rather than duplicates, which is the
-## loss this guards (owner ruling, docket 019fa172dd21 comment 868). Sites this
-## governs: reserve_trace_id/reserve_via_id (the reservation half) and
+## loss this guards. Sites this governs: reserve_trace_id/reserve_via_id (the reservation half) and
 ## clear_traces/clear/_restore_state (the "never lower it" half).
 
 ## High-water mark over the LEGACY ordinal trace ids this board has admitted.

@@ -578,7 +578,7 @@ def _project_silk(rb: ResolvedBoard) -> tuple[tuple[SilkPrimitive, ...],
                 side=refdes_side, geometry=prim, width_mm=prim.width,
                 origin="refdes", ref=comp.ref))
 
-    # BOARD-LEVEL legend (DCR 01a0418dc6) — artwork with no owning component.
+    # BOARD-LEVEL legend — artwork with no owning component.
     # It MUST be projected here: the emitter draws it, so silk rules that skipped
     # it would clear a board whose fabricated legend violates them, which is the
     # false clean this whole projection exists to prevent. Board graphics are

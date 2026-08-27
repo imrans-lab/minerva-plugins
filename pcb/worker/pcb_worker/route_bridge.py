@@ -364,6 +364,9 @@ def board_to_router(canonical_board: dict) -> Board:
             continue
         t_net = str(trace.get("net", "")) or None
         t_layer = _layers.canon_to_kicad(str(trace.get("layer") or "top"))
+        # OBSTACLE path: this width only sizes existing copper the router must
+        # keep clear of, so a nominal fallback widens an obstacle rather than
+        # inventing the width of anything drawn.
         width = _num(trace.get("width_mm")) or 0.25
         points = [p for p in (trace.get("points") or [])
                   if isinstance(p, dict)]
@@ -1552,22 +1555,42 @@ def _net_for_hint(envelope: dict, board: Board, warnings: list[dict]) -> Optiona
     return None
 
 
+def _point_from_raw(wp: Any) -> Optional[list[float]]:
+    """ONE wire point as [x, y], or None when it carries no readable pair.
+
+    Three spellings are one point, and all three must be read or an author's
+    corner disappears without anyone being told:
+
+    *[x, y] — the array pair panels actually send;
+    *{"x":…, "y":…} — a JSON round trip of a GDScript Vector2 (see
+      PcbRouteTask's own _constraint_to_json);
+    *{"x_mm":…, "y_mm":…} — the mm-suffixed spelling the panel's
+      PcbHintWaypoint.position_of also accepts.
+
+    Anything else is None rather than an exception: one malformed point must
+    not blank the whole corridor.
+    """
+    if isinstance(wp, (list, tuple)) and len(wp) >= 2:
+        return [float(wp[0]), float(wp[1])]
+    if isinstance(wp, dict):
+        if "x" in wp and "y" in wp:
+            return [float(wp["x"]), float(wp["y"])]
+        if "x_mm" in wp and "y_mm" in wp:
+            return [float(wp["x_mm"]), float(wp["y_mm"])]
+    return None
+
+
 def _points_from_raw(raw: Any) -> list[list[float]]:
     """Parse a wire point list into [[x, y], …] float pairs, bit-exact.
 
-    Tolerates both the array-pair wire shape (``[[x, y], …]``, what panels
-    actually send) and a ``{"x":…, "y":…}`` dict shape (what a JSON round trip
-    of a GDScript Vector2 corridor also produces — see PcbRouteTask's own
-    _constraint_to_json). Anything else in the list is skipped rather than
-    raising: one malformed point must not blank the whole corridor.
+    Each entry goes through _point_from_raw; unreadable entries are skipped.
     """
     out: list[list[float]] = []
     if isinstance(raw, list):
         for wp in raw:
-            if isinstance(wp, (list, tuple)) and len(wp) >= 2:
-                out.append([float(wp[0]), float(wp[1])])
-            elif isinstance(wp, dict) and "x" in wp and "y" in wp:
-                out.append([float(wp["x"]), float(wp["y"])])
+            point = _point_from_raw(wp)
+            if point is not None:
+                out.append(point)
     return out
 
 
@@ -1585,12 +1608,13 @@ def _waypoints_of(envelope: dict) -> list[list[float]]:
 def _waypoint_stops_of(envelope: dict) -> list[tuple[list[float], Optional[str]]]:
     """kind_payload.waypoints as [(xy, authored_layer_or_None), ...].
 
-    THE LAYER-HOP CHANNEL (work item 01a04106bd). A waypoint may be authored as
-    ``{"x": mm, "y": mm, "layer": "<copper>"}`` instead of ``[x, y]``, and that
-    ``layer`` means "the run CHANGES to this copper layer here". It is how one
-    hint says "F.Cu, duck under there, back up here, F.Cu" — the intent the
-    owner's HITL had to express as an un-routable straight line plus four
-    orphan via ghosts an agent then matched to segments by eye.
+    THE LAYER-HOP CHANNEL. A waypoint may be authored as
+    ``{"x": mm, "y": mm, "layer": "<copper>"}`` (or the ``x_mm``/``y_mm``
+    spelling) instead of ``[x, y]``, and that ``layer`` means "the run CHANGES
+    to this copper layer here". It is how ONE hint says "F.Cu, duck under
+    there, back up here, F.Cu" — an intent that otherwise has to be drawn as an
+    un-routable straight line plus orphan via ghosts something else matches to
+    segments by eye.
 
     A missing/blank ``layer`` is a PLAIN corner, not a defaulted one: absent
     means "keep going on the layer you are on". The layer name is returned
@@ -1607,12 +1631,12 @@ def _waypoint_stops_of(envelope: dict) -> list[tuple[list[float], Optional[str]]
     if not isinstance(raw, list):
         return out
     for wp in raw:
-        if isinstance(wp, (list, tuple)) and len(wp) >= 2:
-            out.append(([float(wp[0]), float(wp[1])], None))
-        elif isinstance(wp, dict) and "x" in wp and "y" in wp:
-            layer = wp.get("layer")
-            layer = str(layer).strip() if isinstance(layer, str) else None
-            out.append(([float(wp["x"]), float(wp["y"])], layer or None))
+        point = _point_from_raw(wp)
+        if point is None:
+            continue
+        layer = wp.get("layer") if isinstance(wp, dict) else None
+        layer = str(layer).strip() if isinstance(layer, str) else None
+        out.append((point, layer or None))
     return out
 
 
@@ -1785,7 +1809,7 @@ def _route_from_waypoint_stops(
 ) -> tuple[list[dict], list[list[float]]]:
     """pad -> waypoints -> pad as (segments, hop vias), honouring waypoint layers.
 
-    THE HOP RULE (work item 01a04106bd). Walking source pad to destination pad,
+    THE HOP RULE. Walking source pad to destination pad,
     the run stays on ``base_layer`` (the hint's own kind_payload.layer) until a
     waypoint NAMES a different copper layer. That waypoint ends the current run,
     gets a THROUGH via, and the run continues on the named layer. One hint
@@ -1889,7 +1913,7 @@ def materialize_detailed_hints(
         if str(kp.get("hint_type", "")) != "single_trace":
             continue
         # LAYER-CARRYING WAYPOINTS TAKE THIS PATH WHATEVER detail_level SAYS
-        # (work item 01a04106bd). A hint that names where the copper changes
+        #. A hint that names where the copper changes
         # side is drawing its own path by construction — that is not something
         # a soft attraction field can express — and detail_level is INFERRED
         # FROM WAYPOINT COUNT (PcbAnnotationHost._derive_detail_level calls 2-3
@@ -2182,7 +2206,7 @@ def hints_to_router(
             effective_layer = layer
 
         # AUTHORED LAYER HOPS ARE NOT HONOURED HERE, and say so (work item
-        # 01a04106bd). A waypoint's `layer` is an instruction to change copper
+        #). A waypoint's `layer` is an instruction to change copper
         # AT that point with a via — a verbatim, as-drawn statement. This is the
         # ENGINE path: the corridor is a soft attraction field and the engine
         # owns every layer decision on it, so the hops are dropped. That is a

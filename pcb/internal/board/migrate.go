@@ -137,7 +137,7 @@ func MigrateV1toV2(b *Board, mint IDSource) (int, error) {
 		}
 	}
 	// Board graphics, ATOMIC with the graphic id loop in Validate for the same
-	// reason cutouts are (DCR 01a0418dc6). `ensure` leaves an already-minted
+	// reason cutouts are. `ensure` leaves an already-minted
 	// "graphic:<32hex>" alone, so a board authored through the panel — which
 	// mints its own ids via pcb_entity_id.gd — keeps the id the user's undo
 	// history and delete-by-id already refer to. Only an absent or

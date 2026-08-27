@@ -118,9 +118,8 @@ straddle the difference:
 - **Top-level entity-collection shape IS a shared rule.** The collections are
   `components`, `nets`, `traces`, `vias`, `mounting_holes`, `pth_holes`,
   `npth_holes`, `zones`, `cutouts` and `board_graphics` — named rather than
-  COUNTED, because a stated count goes stale the next time an entity is modelled,
-  which is exactly how bug `019fb0a7aea7` happened (this sentence said "five"
-  long after the list reached nine). The authorities are `entityListKeys` in
+  COUNTED, because a stated count goes stale the next time an entity is modelled.
+  The authorities are `entityListKeys` in
   `internal/board/yaml.go` and the matching tuple in
   `worker/pcb_worker/board_validate.py`; they must name the same keys, or a
   malformed collection fails closed in one language and passes in the other.

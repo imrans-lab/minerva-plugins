@@ -1,13 +1,12 @@
 extends VBoxContainer
-## The sidebar section for a PAD selection (DCR 01a0410c62).
+## The sidebar section for a PAD selection.
 ##
-## The Pin Info section above it answers "what is this ONE pin" and is
-## unchanged. This one answers the three questions the owner actually asks with
-## pads selected:
+## The Pin Info section above it answers "what is this ONE pin". This one
+## answers the three questions asked with pads selected:
 ##
 ##   which pins are these?   one pad ROW per selected pad — net, side, roles —
-##                           the same rows minerva_pcb_get_selection hands the
-##                           agent, so the human and the agent are reading the
+##                           the same rows minerva_pcb_get_selection hands a
+##                           caller, so the human and the caller are reading the
 ##                           same sentence.
 ##   what is free?           the component's pins on no net, filterable by side
 ##                           ("free pins on the west column of U1S"), each

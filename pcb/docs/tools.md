@@ -147,13 +147,13 @@ canvas is armed, so the next trace they draw really is that wide. A human turn
 of that same box writes the preference back, so the agent's read and the human's
 control are two views of one value.
 
-## The region read (`minerva_pcb_describe_region`, work item 01a03f9dd6)
+## The region read (`minerva_pcb_describe_region`)
 
-Understanding the ground around one part used to cost five verbs and a hand
-cross-reference: `list_zones` + `describe_zone` twice + `get_components` (all 37
-parts) + `spatial_query` + `pin_info`. `spatial_query` already sweeps a
+Understanding the ground around one part otherwise costs five verbs and a hand
+cross-reference: `list_zones` + `describe_zone` per zone + `get_components` (the
+whole board) + `spatial_query` + `pin_info`. `spatial_query` already sweeps a
 rectangle, but its copper block reports **ID lists** — no pad nets, no zone
-outlines, no trace free ends — so the answers still had to be reassembled from
+outlines, no trace free ends — so the answers still have to be reassembled from
 other verbs, and the reassembly is where a reader gets it wrong.
 
 `describe_region` is that rectangle answered once. It lives in
@@ -392,13 +392,12 @@ interior to the rim, pairwise-disjoint bounding boxes, no self-intersection,
 no zero area — all under `invalid_cutout_outline`; see `docs/board-yaml.md`'s
 "Cut-outs" section for the full contract.
 
-## Board graphics (`minerva_pcb_add_silk_text` / `add_graphic` / `delete_graphic`, DCR `01a0418dc6`)
+## Board graphics (`minerva_pcb_add_silk_text` / `add_graphic` / `delete_graphic`)
 
-Artwork the **board** owns rather than a component. Before these verbs the only
-graphic owner was a footprint, so board text had to be hung off whatever part
-happened to be nearby: smart-remote-v2 carries 65 hand-generated `B.SilkS`
-polylines attached to **TP1**, a 1206 test point, in absolute board coordinates
-that TP1's own placement would have corrupted the moment anyone moved it.
+Artwork the **board** owns rather than a component. Without these verbs the only
+graphic owner is a footprint, so board text has to be hung off whatever part
+happens to be nearby, in absolute board coordinates that the part's own placement
+corrupts the moment anyone moves it.
 
 The full schema — every field, the layer allow-list and the mirroring convention
 — is in `docs/board-yaml.md` under "Board graphics". What follows is the verb
@@ -1011,9 +1010,8 @@ is the one rule to know before picking `points`. Each track leaves the bundle
 at its own departure station and turns to its target, so a spine that runs
 *past* the target column forces every lane to double back, and the crossing and
 corridor findings that produces read as a placement problem when the spine is
-the problem. In the 2026-08-26 HITL all three buses needed **no pin change at
-all** once the spine ended level with the target column — the findings were
-never about the pads.
+the problem. A bus whose spine ends level with the target column usually needs
+**no pin change at all**; read the spine before you read the pads.
 
 **Open-ended lanes.** A `targets` entry of `""` (the array stays one entry per
 net) lands that net's lane with NO target leg: its trace ends at the end of its
@@ -1247,15 +1245,14 @@ reopened. Each such drop is named in the load reply's `warnings`
 keeps a later `minerva_pcb_delete_traces` from reporting "committed by" a
 candidate that never routed the copper you deleted.
 
-## The pad row, and the pad verbs (DCR `01a0410c62`)
+## The pad row, and the pad verbs
 
 **A pad is a thing you can point at.** Universal Select picks the whole part;
 the **Pin Select** tool (the Select group's third button, keyboard **P**,
 Shift+P still works) picks a PAD. Click one to select it, shift-click to add or
-remove, Escape or an empty click to clear. The owner's sentence is the
-acceptance case: select two pads, say *"see these pins? move them to the other
-side of U1S"*, and the agent reads the selection rather than guessing a refdes
-from a coordinate.
+remove, Escape or an empty click to clear. That is what makes *"see these pins?
+move them to the other side of U1S"* answerable: the selection is read, rather
+than a refdes guessed from a coordinate.
 
 **One shape, defined once.** `pcb/ui/model/pcb_pad_row.gd` owns THE pad row, and
 every surface that describes a pad emits exactly it:
@@ -1329,12 +1326,12 @@ board is never echoed (`PCBPanel.worker_check` → `panel_tools._board_drc`).
 plain channels taking `{board}`: a live-board form of each would be a new
 verb, so they were left alone.
 
-## Every board-carrying panel channel rides the same by-ref path (bug `01a0414891`)
+## Every board-carrying panel channel rides the same by-ref path
 
 `pcb.fab_preview`, `pcb.mask_view`, `pcb.zone_fill`, `pcb.board_health` and
-`pcb.assembly_check` used to inline the whole board, so `View > Fab preview`
-died `payload_too_large` on the smart-remote class of board — 221 KB of board
-into a 64 KiB pipe. All five now go through `PCBPanel._payload_by_ref`, the ONE
+`pcb.assembly_check` all go through `PCBPanel._payload_by_ref` rather than
+inlining the whole board, which fails `payload_too_large` once a board outgrows
+the 64 KiB pipe. `_payload_by_ref` is the ONE
 snapshot sender `pcb.route` / `pcb.serialize` / `pcb.draft_check` /
 `pcb.promote_check` already used: over the limit the board becomes
 `{board_path, board_digest}` (201 bytes on that board) and the worker's
@@ -1412,9 +1409,8 @@ empty canvas leaves the selection alone, so a multi-pad selection survives a
 missed click. A plain click on empty canvas clears it; Escape clears
 everything; press the button again to exit to Select. The pad selection is
 what `minerva_pcb_get_selection` reports, and what `minerva_pcb_select` sets
-from the other side. (This is WC-1's pin inspector grown into a selection
-tool, DCR `01a0410c62` — one pad-picking mode, not two, so Shift+P still
-arms it and the single-click readout behaves exactly as it did.)
+from the other side. There is one pad-picking mode, not two: Shift+P arms it
+and the single-click readout is the pin inspector's.
 
 **Group / ungroup (Ctrl/Cmd+G / Ctrl/Cmd+Shift+G)** — with 2+ components
 selected, groups them so they move as one; ungroups the selected group.
@@ -1589,16 +1585,15 @@ bend deletes the hop with it.
 handle to move a bend, right-click a handle to delete it, click a segment to
 insert a new bend (Esc or switching tools exits).
 
-**Via proposals carry an owner** (work item `01a04106bd`). A via proposed with
+**Via proposals carry an owner**. A via proposed with
 `minerva_pcb_propose_via`'s `for_hint` — or clicked on canvas while a route
 hint is selected — records that hint on the candidate's `source_hint_ids` and
 inherits its net, so `minerva_pcb_workspace_list` shows the row as
 `owner: "hint <id>"`. Proposed with neither, it is still a legal ghost and
 still commits, but every listing marks it `owner: "none"` / `unowned: true`:
 "which hint is this via for" is then READ off the listing rather than inferred
-by matching via coordinates to hint segments by eye, which is exactly what an
-agent had to do in the HITL that filed this. Via size comes from the board's
-`design_rules` unless `size_mm`/`drill_mm` say otherwise.
+by matching via coordinates to hint segments by eye. Via size comes from the
+board's `design_rules` unless `size_mm`/`drill_mm` say otherwise.
 
 **Hints ▸ Add Via** — click a route-hint annotation carrying segment geometry
 to select it, then click a point on its route to split the segment, add a

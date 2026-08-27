@@ -274,28 +274,39 @@ def _land_shape(geom, centre: tuple[float, float], angle_deg: float,
 def _sized_shape(token: str, w: float, h: float, rratio: float | None,
                  cx: float, cy: float, angle: float,
                  unknown_land_radius_mm: float) -> Any:
-    """A land of known size as its EXACT copper. An unrecognised shape token
-    falls back to the oriented rectangle of the stated size — the family every
-    modelled land is inscribed in, which for a CONTACT test is the permissive
-    direction and so is reported honestly here rather than silently."""
+    """A land of known size as its EXACT copper, or as a shape INSCRIBED in it.
+
+    ``rect`` is the oriented quad and ``roundrect`` keeps its authored corner
+    radius, both exact; an authored ratio of zero is a SHARP rect, which is a
+    different land from "no ratio stated". Everything else — ``oval``,
+    ``circle``, a roundrect carrying no ratio, and any token this build does
+    not recognise — is the STADIUM inscribed in the stated size: exact for the
+    oval and the circle, and for the other two the conservative reading, since
+    every roundrect of that size contains that stadium. Boxing them to the
+    oriented rectangle instead would credit copper in the corners the
+    fabricated land may not have, and this predicate must never over-state
+    copper (see the module header). The GDScript side draws the same families,
+    and the shared vectors under ``pcb/spec/contact`` are what prove it.
+    """
     token = (token or "rect").strip().lower()
     if w <= 0 or h <= 0:
         return Capsule.disc(cx, cy, unknown_land_radius_mm)
-    if token == "circle":
-        return Capsule.disc(cx, cy, w / 2.0)
-    if token == "oval":
-        radius = min(w, h) / 2.0
-        extent = max(w, h) / 2.0 - radius
-        # The long axis lies along the land's own x when it is the wider side.
-        dx, dy = ((extent * math.cos(angle), extent * math.sin(angle))
-                  if w >= h else
-                  (-extent * math.sin(angle), extent * math.cos(angle)))
-        return Capsule(cx - dx, cy - dy, cx + dx, cy + dy, radius)
+    if token == "rect":
+        return OrientedRect(cx, cy, w / 2.0, h / 2.0, angle)
     if token == "roundrect" and rratio is not None:
         radius = max(min(float(rratio), 0.5), 0.0) * min(w, h)
-        if radius > 0.0:
+        if radius <= 0.0:
+            return OrientedRect(cx, cy, w / 2.0, h / 2.0, angle)
+        if radius < min(w, h) / 2.0:
             return RoundedRect(cx, cy, w / 2.0, h / 2.0, radius, angle)
-    return OrientedRect(cx, cy, w / 2.0, h / 2.0, angle)
+        # A maximal corner radius IS the stadium; built once, below.
+    radius = min(w, h) / 2.0
+    extent = max(w, h) / 2.0 - radius
+    # The long axis lies along the land's own x when it is the wider side.
+    dx, dy = ((extent * math.cos(angle), extent * math.sin(angle))
+              if w >= h else
+              (-extent * math.sin(angle), extent * math.cos(angle)))
+    return Capsule(cx - dx, cy - dy, cx + dx, cy + dy, radius)
 
 
 def _board_angle_rad(angle_deg: float) -> float:

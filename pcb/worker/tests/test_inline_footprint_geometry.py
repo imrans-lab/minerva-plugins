@@ -245,11 +245,21 @@ def test_pins_stay_overrides_when_the_board_carries_no_pads():
      "size": {"width": -1.0, "height": 1.0}},
     {"number": "1", "type": "smd", "position": {"x": 0.0, "y": 0.0},
      "size": {"width": 1.0, "height": 1.0}, "corner_rratio": "wide"},
+    # Finite but out of range: the reader accepts it (it only asks "is this a
+    # number"), so this one is refused by PadDefinition's own range check —
+    # a different exception type reaching the same diagnostic.
+    {"number": "1", "type": "smd", "shape": "roundrect",
+     "position": {"x": 0.0, "y": 0.0}, "size": {"width": 1.0, "height": 1.0},
+     "corner_rratio": 0.9},
     "not-a-mapping",
 ])
 def test_unreadable_inline_geometry_is_refused(bad_pad):
     """A resolvable footprint ref is deliberately used: falling through to the
-    library would COMPILE, so the refusal proves the reader never demotes."""
+    library would COMPILE, so the refusal proves the reader never demotes.
+
+    Malformed geometry is refused whether the inline reader or the geometry
+    dataclass is the one that catches it.
+    """
     board = _minimal_board(components=[{
         "ref": "R8", "footprint": "Resistor_SMD:R_0805_2012Metric",
         "x_mm": 10, "y_mm": 10, "rotation_deg": 0, "layer": "top",

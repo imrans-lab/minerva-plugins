@@ -2,7 +2,7 @@ extends RefCounted
 ## PcbCopperOwnership — does this route candidate REALLY own the copper carrying
 ## the id it recorded?
 ##
-## ── THE BUG THIS ANSWERS (plugins.dct 01a040f6d7) ─────────────────────────────
+## ── WHY OWNERSHIP IS CHECKED, NOT ASSUMED ────────────────────────────────────
 ## A committed candidate records the ids of the copper its commit produced
 ## (RoutingWorkspace.correlations[cid].committed_trace_ids / _via_ids). Every
 ## consumer then treated that recorded id as PROOF of ownership — "is trace_5

@@ -124,13 +124,12 @@ def test_a_run_driven_through_a_land_joins_it():
 
 
 def test_one_run_written_both_ways_reports_one_short():
-    """Remora 01a03c708db0. The board carries the SAME run twice, once as
-    A->B and once as B->A, both crossing the foreign GND land at (15,10).
+    """The board carries the SAME run twice, once as A->B and once as B->A,
+    both crossing the foreign GND land at (15,10).
 
     A segment is the same copper whichever way its ends are written, so this is
-    one short. The along-run dedup key used to be built from the endpoints in
-    authored order, so the two spellings keyed apart and the reply billed the
-    board twice for one fault.
+    ONE short. An along-run dedup key built from the endpoints in authored order
+    keys the two spellings apart and bills the board twice for one fault.
     """
     run = [{"x_mm": 5.0, "y_mm": 10.0}, {"x_mm": 25.0, "y_mm": 10.0}]
     board = _board(
@@ -150,12 +149,11 @@ def test_one_run_written_both_ways_reports_one_short():
 
 
 def test_two_foreign_pads_crowding_one_end_are_both_named():
-    """Remora 01a03c6b0f95. A SIG run ends at (10,10) with a GND land 0.15mm
-    above it and a VCC land 0.15mm below — both inside the 0.2mm clearance.
+    """A SIG run ends at (10,10) with a GND land 0.15mm above it and a VCC land
+    0.15mm below — both inside the 0.2mm clearance.
 
-    The end shorts to BOTH. The endpoint pass used to name only the NEAREST,
-    which told the reader to move the trace clear of one land while the other
-    still forbade the same point.
+    The end shorts to BOTH. Naming only the NEAREST tells the reader to move the
+    trace clear of one land while the other still forbids the same point.
     """
     board = _board(
         "crowded",

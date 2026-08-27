@@ -292,10 +292,9 @@ static func make_segment(id: String, layer: String, width: float, points: Array,
 ##
 ## The diameter/drill DEFAULTS are the last-resort constants, not a policy: a
 ## caller that has a board must resolve them through PcbViaDimensions and pass
-## the answer. Leaving 0.8/0.4 as bare literals here is what made every ingested
-## candidate via ignore design_rules (bug 01a03b87473c) — the sizes were stamped
-## before anything with a board ever saw the via, and the downstream rescue only
-## fires on a ZERO stamp.
+## the answer. A bare literal here would be stamped before anything holding a
+## board ever saw the via, and the downstream rescue only fires on a ZERO stamp
+## — so an ingested candidate via would silently ignore design_rules.
 static func make_via(id: String, position: Vector2, from_layer: String, to_layer: String, diameter: float = PcbViaDimensions.DEFAULT_DIAMETER_MM, drill: float = PcbViaDimensions.DEFAULT_DRILL_MM, locked: bool = false) -> Dictionary:
 	return {
 		"id": id, "position": position,
@@ -316,11 +315,10 @@ func add_via(via: Dictionary) -> void:
 ## minerva_pcb_propose_via / the canvas Via-proposal gesture mint: exactly one
 ## via, no copper, and its own `proposed_entity` mark.
 ##
-## THE MARK, NOT THE SHAPE (work item 01a04106bd). Ownership made "has no
-## provenance" useless as the test — a via ghost now records the route hint it
-## SERVES on source_hint_ids — and the shape alone is ambiguous, because a
-## router candidate can legitimately come back vias-only on a partial answer.
-## Only propose_via stamps the mark, so only it matches.
+## THE MARK, NOT THE SHAPE. "Has no provenance" is not the test: a via ghost
+## records the route hint it SERVES on source_hint_ids. Nor is the shape, which
+## is ambiguous — a router candidate can legitimately come back vias-only on a
+## partial answer. Only propose_via stamps the mark, so only it matches.
 ##
 ## Every surface that must tell "a hole somebody proposed" from "an answer to a
 ## routing question" asks HERE: commit's consumed-hint record, the hint's render
@@ -456,6 +454,10 @@ static func from_dict(data: Dictionary):
 
 # ── JSON helpers for segment/via geometry (Vector2 <-> {x,y}) ──────────────────
 
+## A segment's WIDTH round-trips as 0.0 when the segment states none, never as
+## an invented number: the commit pre-flight refuses a zero-width segment by
+## name, and a default stamped here would hand it a width nobody authored and
+## turn that refusal into fabricated copper.
 static func _segment_to_json(seg: Dictionary) -> Dictionary:
 	var pts: Array = []
 	for p in seg.get("points", []):
@@ -466,7 +468,7 @@ static func _segment_to_json(seg: Dictionary) -> Dictionary:
 	return {
 		"id": str(seg.get("id", "")),
 		"layer": str(seg.get("layer", "top")),
-		"width": float(seg.get("width", 0.25)),
+		"width": float(seg.get("width", 0.0)),
 		"points": pts,
 		"locked": bool(seg.get("locked", false)),
 	}
@@ -482,7 +484,7 @@ static func _segment_from_json(seg: Dictionary) -> Dictionary:
 	return {
 		"id": str(seg.get("id", "")),
 		"layer": str(seg.get("layer", "top")),
-		"width": float(seg.get("width", 0.25)),
+		"width": float(seg.get("width", 0.0)),
 		"points": pts,
 		"locked": bool(seg.get("locked", false)),
 	}
@@ -501,8 +503,13 @@ static func _via_from_json(via: Dictionary) -> Dictionary:
 	if out.has("position") and out["position"] is Dictionary:
 		var pd: Dictionary = out["position"]
 		out["position"] = Vector2(float(pd.get("x", 0.0)), float(pd.get("y", 0.0)))
-	out["diameter"] = float(out.get("diameter", 0.8))
-	out["drill"] = float(out.get("drill", 0.4))
+	# Same one rule every other via path takes: a sidecar has no board in hand,
+	# so an unstated size resolves to PcbViaDimensions' constants rather than
+	# to literals that could drift from them.
+	var dims: Dictionary = PcbViaDimensions.resolve({},
+		float(out.get("diameter", 0.0)), float(out.get("drill", 0.0)))
+	out["diameter"] = dims["diameter"]
+	out["drill"] = dims["drill"]
 	out["locked"] = bool(out.get("locked", false))
 	out["id"] = str(out.get("id", ""))
 	return out

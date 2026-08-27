@@ -555,8 +555,8 @@ func _derive_bounds_from_graphics() -> bool:
 	return true
 
 
-## THE land-to-world transform — one answer, for every surface that has to know
-## where a piece of pad copper physically is (bug 01a0380585b4).
+## THE land-to-world transform — one answer for every surface that has to know
+## where a piece of pad copper physically is.
 ##
 ## Returns {position: world centre, size: the land's own size, rotation: the
 ## land's world angle in BOARD degrees — the CW/KiCad convention `rotation`

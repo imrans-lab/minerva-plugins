@@ -208,7 +208,7 @@ type Board struct {
 
 	// BoardGraphics is artwork owned by the BOARD rather than by a component:
 	// silk legend (a copyright line, a board name, a polarity mark) and
-	// courtyard documentation (DCR 01a0418dc6).
+	// courtyard documentation.
 	//
 	// WHY IT HAD TO BE TYPED. Before this field, a top-level `board_graphics:`
 	// key rode Board.Extra — it survived a round trip, but it was invisible to

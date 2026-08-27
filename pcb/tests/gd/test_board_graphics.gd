@@ -1,11 +1,10 @@
 extends SceneTree
-## Board-level graphics on the panel side — DCR 01a0418dc6.
+## Board-level graphics on the panel side.
 ##
-## Artwork the BOARD owns rather than a component. Before it, the only graphic
-## owner was a footprint, so smart-remote-v2's back-side copyright line is 65
-## hand-generated B.SilkS polylines hung off TP1 — a test point — in absolute
-## board coordinates that TP1's own placement would have corrupted the moment
-## anyone moved it.
+## Artwork the BOARD owns rather than a component. The only other graphic owner
+## is a footprint, so without this a back-side copyright line has to be hung off
+## whatever part is nearby, in absolute board coordinates that part's own
+## placement corrupts the moment anyone moves it.
 ##
 ## WHY THIS SUITE EXISTS ALONGSIDE THE PYTHON ONE. The panel derives its preview
 ## strokes from the GDScript font mirror and the worker derives the FABRICATED
@@ -37,7 +36,7 @@ var _fail := 0
 
 
 func _init() -> void:
-	print("=== Board graphics (DCR 01a0418dc6) ===\n")
+	print("=== Board graphics ===\n")
 	_run_font_fixture_numbers()
 	_run_mirror_convention()
 	_run_model_round_trip()

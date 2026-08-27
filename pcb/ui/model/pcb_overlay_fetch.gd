@@ -1,24 +1,22 @@
 extends RefCounted
 ## WHETHER AN OVERLAY IS ACTUALLY ON SCREEN, and what to tell a human when it
-## is not (bug 01a0414891, work item 01a0227029da).
+## is not.
 ##
 ## Off-tree module — NO class_name, reached by relative preload. Every function
 ## is STATIC and pure: a worker reply in, one line out.
 ##
 ## THE PROBLEM. show_fab_preview and show_mask are canvas DRAW FLAGS the View
-## menu raises BEFORE the artwork is fetched. A failed fetch left the flag
-## standing: minerva_pcb_view_state reported the preview as up while the canvas
-## held nothing, and the only trace of the failure was a note drawn INSIDE an
-## overlay that was not being drawn. Both readers — the human at the View menu
-## and the agent reading view_state — were told a view existed that did not.
-## On the smart-remote class of board the fetch failed every time, because the
-## request carried the whole board into the broker's 64 KiB pipe.
+## menu raises BEFORE the artwork is fetched. A failed fetch that leaves the flag
+## standing tells both readers a view exists that does not: the View menu draws a
+## check beside an empty canvas, and minerva_pcb_view_state reports the preview
+## as up. A note drawn INSIDE the missing overlay is no help — it is not drawn
+## either.
 ##
 ## THE RULE. The flag is a claim about what is on screen, so it may stand only
 ## while an overlay is actually held. A fetch that came back with nothing
 ## retracts it and says why through the HELD STATUS LEAD — the same channel
 ## pcb_load_checks.status_lead writes, for the same reason: a verdict that is
-## honest only in JSON is invisible to an owner who works from the GUI.
+## honest only in JSON is invisible to anyone working from the GUI.
 ##
 ## NOT THE STALE CASE. A board edit under a live preview clears the artwork and
 ## leaves the flag up with "re-open Fab Preview" drawn on the canvas — a

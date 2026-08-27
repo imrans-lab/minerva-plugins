@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Board-level graphics (DCR 01a0418dc6) — the codec half.
+// Board-level graphics — the codec half.
 //
 // WHY THE FIELD IS TYPED RATHER THAN LEFT IN Board.Extra. An unmodelled
 // top-level `board_graphics:` key already round-tripped through Extra before

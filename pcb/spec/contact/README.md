@@ -29,7 +29,7 @@ cannot be added without one of them going red.
   "why":   "the hand derivation — the numbers, not the intent",
   // The copper the run is measured AGAINST: exactly ONE of `pad` or `region`.
   "pad":   { "at": [x_mm, y_mm],          // land CENTRE, board frame
-             "shape": "rect|roundrect|circle|oval",
+             "shape": "rect|roundrect|circle|oval|<unmodelled>",
              "size": [w_mm, h_mm],        // the land's full extent
              "rotation_deg": 0.0,         // land angle, KiCad clockwise
              "corner_rratio": 0.25,       // roundrect only; omit otherwise
@@ -46,6 +46,13 @@ cannot be added without one of them going red.
   "touches": true
 }
 ```
+
+A land both sides model exactly (`rect`, `circle`, `oval`, a `roundrect`
+carrying `corner_rratio`) is compared as that exact copper. Anything else — a
+ratio-less `roundrect`, or a token neither side knows — is compared as the
+STADIUM inscribed in the stated size, which every land of that size contains,
+so an unmodelled shape can never manufacture copper. Cases 160-180 pin that,
+and a token like `trapezoid` is admitted here on purpose to state it.
 
 `region` is a pour's COMPILED FILL ring, never its authored outline, and it may
 be concave or a self-touching keyhole — that is what a fill looks like once

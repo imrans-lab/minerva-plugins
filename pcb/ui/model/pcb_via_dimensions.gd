@@ -8,21 +8,14 @@ extends RefCounted
 ## per-call override outranking them and a last-resort constant only when the
 ## board declares nothing.
 ##
-## ── WHY THIS FILE EXISTS (bug 01a03b87473c) ───────────────────────────────────
-## The rule used to live in four places at once, and one of them stamped a
-## LITERAL. PcbRouteCandidate.make_via's `0.8`/`0.4` parameter defaults were the
-## values RoutingWorkspace._create_candidate_for_route handed every ingested via,
-## so a proposed via was BORN at 0.8/0.4 no matter what the board's rules said.
-## The rescue that was supposed to catch that — _via_dimensions — only
-## substitutes design_rules when the stamped value is ZERO, and 0.8 is never
-## zero. So the ghost rendered and committed at 0.8 on a board whose rules said
-## 0.6, while the direct-commit path (bus_commit_plan, place_via) honoured 0.6.
-## The two paths disagreed about the same hole.
-##
-## The fix is not another rescue: it is that PROPOSAL TIME is when the size is
-## resolved, through this function, and 0.0 is the only value that means
-## "nobody has said yet". Callers that have no board pass {} and get the
-## constants — the honest headless answer, not a silent override of real rules.
+## ── 0.0 IS THE ONLY "NOBODY HAS SAID YET" ────────────────────────────────────
+## The size is resolved at PROPOSAL time, here, and never rescued downstream: a
+## rescue can only recognise an unset value, so a non-zero default stamped
+## anywhere upstream survives it. A via born at 0.8 renders and commits at 0.8 on
+## a board whose rules say 0.6, while the direct-commit paths (bus_commit_plan,
+## place_via) honour 0.6 — two paths, one hole, two answers. Callers that have no
+## board pass {} and get the constants: the honest headless answer, not a silent
+## override of real rules.
 ##
 ## Off-tree plugin: NO class_name; reached by relative preload.
 

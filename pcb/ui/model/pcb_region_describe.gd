@@ -5,13 +5,12 @@ extends RefCounted
 ## pcb_canvas.gd's port note). Every function here is STATIC and pure; the board
 ## is never mutated.
 ##
-## ── WHY ──────────────────────────────────────────────────────────────────────
-## Understanding the copper around ONE part cost five verbs and a hand
-## cross-reference: list_zones + describe_zone (twice) + get_components (all 37
-## parts) + spatial_query + pin_info. spatial_query already sweeps a rectangle,
-## but it reports copper as bare ID LISTS — no pad nets, no zone outlines, no
-## trace free ends — so the answers still had to be reassembled by hand from
-## other verbs, and the reassembly is where a reader gets it wrong.
+## Understanding the copper around ONE part otherwise costs five verbs and a
+## hand cross-reference: list_zones + describe_zone per zone + get_components
+## (the whole board) + spatial_query + pin_info. spatial_query already sweeps a
+## rectangle, but it reports copper as bare ID LISTS — no pad nets, no zone
+## outlines, no trace free ends — so the answers still have to be reassembled by
+## hand, and the reassembly is where a reader gets it wrong.
 ##
 ## ── NOTHING HERE IS A NEW RULE ───────────────────────────────────────────────
 ## Every answer is the answer some existing surface already gives:

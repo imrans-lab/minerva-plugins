@@ -32,14 +32,13 @@ extends SceneTree
 ## Handler-side twins: pcb/worker/tests/test_board_by_path.py (Python route
 ## arm), pcb/internal/tools/board_by_path_test.go (Go codec arms).
 ##
-## SECOND STATION (bug 01a0414891). Five more board-carrying senders were still
-## inline — pcb.fab_preview, pcb.mask_view, pcb.zone_fill, pcb.board_health,
-## pcb.assembly_check — so View > Fab preview died payload_too_large on the
-## smart-remote class of board and the three advisory channels died silently.
-## Measured on smart_remote_v2_board.yaml through the worker's own request entry
-## point: 221,369 bytes by value (fab_preview / mask_view / zone_fill), 57,087
-## for the canonical-wire pair, 201 bytes by reference for all five. Section 1
-## rows 1h-1m and Section 2 rows 2c-2f pin them.
+## FIVE MORE SENDERS carry a board: pcb.fab_preview, pcb.mask_view,
+## pcb.zone_fill, pcb.board_health, pcb.assembly_check. Inline, View > Fab
+## preview dies payload_too_large on a real board and the three advisory channels
+## die silently. Measured on smart_remote_v2_board.yaml through the worker's own
+## request entry point: 221,369 bytes by value (fab_preview / mask_view /
+## zone_fill), 57,087 for the canonical-wire pair, 201 bytes by reference for all
+## five. Section 1 rows 1h-1m and Section 2 rows 2c-2f pin them.
 ##
 ## And the flag that CLAIMED the view: a failed fetch left show_fab_preview
 ## standing over an empty canvas, in the View menu and in
@@ -360,9 +359,9 @@ func _init() -> void:
 		not FileAccess.file_exists(reply_path))
 	ipc.overrides.clear()
 
-	# Bug 01a0414891: the OTHER five board-carrying senders were left inline, so
-	# every one of them died payload_too_large on the smart-remote class of
-	# board — View > Fab preview visibly, the three advisory channels silently.
+	# The OTHER five board-carrying senders, left inline, each die
+	# payload_too_large on a real board — View > Fab preview visibly, the three
+	# advisory channels silently.
 	# MEASURED on smart_remote_v2_board.yaml through the worker's own request
 	# entry point: 221,369 bytes by value for fab_preview / mask_view /
 	# zone_fill, 57,087 for the canonical-wire pair (8 KB under the cap, one
@@ -401,8 +400,8 @@ func _init() -> void:
 	_check_by_ref("1j2 zone_fill", zone_req, "board")
 
 	# board_health and assembly_check already shrink the board to its canonical
-	# WIRE form (01a007f1dd02). Smaller is not small: on the real board that is
-	# 57 KB against a 64 KiB cap, so the by-ref send is what keeps them alive.
+	# WIRE form. Smaller is not small: on this board that is 57 KB against a
+	# 64 KiB cap, so the by-ref send is what keeps them alive.
 	ipc.captured.clear()
 	await panel.board_health_check(panel.get_data().to_board_dict())
 	var health_req: Dictionary = ipc.last_payload("pcb.board_health")
@@ -428,8 +427,8 @@ func _init() -> void:
 	check("2a: small board still inlines 'board'", small_route.has("board"))
 	check("2b: small board carries no board_path", not small_route.has("board_path"))
 
-	# Every channel this station wired keeps the inline shape under the cap —
-	# the unchanged-behavior half of the fix, green before AND after.
+	# Every channel here keeps the inline shape while it is under the cap — the
+	# unchanged-behaviour half, green either way.
 	ipc2.captured.clear()
 	await panel2.set_view_flag("show_fab_preview", true)
 	var small_fab: Dictionary = ipc2.last_payload("pcb.fab_preview")
@@ -530,12 +529,11 @@ func _init() -> void:
 
 	# ── Section 4: an overlay flag is true only while artwork is on screen ───
 	#
-	# Bug 01a0414891, second half. show_fab_preview and show_mask are raised
-	# BEFORE their fetch runs, and a failed fetch used to leave the flag
-	# standing: the View menu drew a check beside an empty view and
-	# minerva_pcb_view_state answered show_fab_preview:true to an agent that
-	# then read the blank canvas as the board. The only trace of the failure was
-	# a note drawn INSIDE an overlay that was not being drawn.
+	# show_fab_preview and show_mask are raised BEFORE their fetch runs, so a
+	# failed fetch that leaves the flag standing has the View menu drawing a
+	# check beside an empty view and minerva_pcb_view_state answering
+	# show_fab_preview:true over a blank canvas. A note drawn INSIDE the missing
+	# overlay is no trace at all — it is not drawn either.
 	#
 	# ORACLE: the canvas flag and the panel's status label after a refused
 	# fetch — the two surfaces a human and an agent actually read — plus the

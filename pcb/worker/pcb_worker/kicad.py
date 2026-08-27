@@ -510,7 +510,7 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
             )
 
     # Board-level graphics — silk legend and courtyard documentation that
-    # belongs to the BOARD rather than to any footprint (DCR 01a0418dc6).
+    # belongs to the BOARD rather than to any footprint.
     #
     # Drawn as ``gr_*`` nodes, which is KiCad's own board-level graphic family
     # and the same one the Edge.Cuts rim above uses. Text is NOT emitted as
@@ -1405,7 +1405,7 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
         "traces": _kicad_trace_dicts(board, net_name_of),
         "vias": _kicad_via_dicts(board, net_name_of),
         "zones": _kicad_zone_dicts(board, net_name_of),
-        # Board-level artwork (DCR 01a0418dc6). The geometry projection is the
+        # Board-level artwork. The geometry projection is the
         # SHARED one (ir_projection.board_graphic_to_dict), so this emitter and
         # the gerber emitter read the same dict shape for the same primitive —
         # the whole reason that module exists. Only the id rides along on top,

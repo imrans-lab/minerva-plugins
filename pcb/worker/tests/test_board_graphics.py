@@ -1,7 +1,7 @@
 """Board-level graphics: schema, compilation, fabrication, and the R7 mirror.
 
 Board graphics are artwork the BOARD owns rather than a component (DCR
-01a0418dc6). Before them the only graphic owner was a footprint, which is why
+). Before them the only graphic owner was a footprint, which is why
 smart-remote-v2's back-side copyright line is 65 hand-generated B.SilkS
 polylines hung off TP1 — a 1206 test point at (8, 30) — with every point in
 absolute board coordinates that TP1's own placement would have corrupted the

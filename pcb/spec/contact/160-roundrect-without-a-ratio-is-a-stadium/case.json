@@ -1,0 +1,19 @@
+{
+  "name": "160-roundrect-without-a-ratio-is-a-stadium",
+  "why": "A roundrect land that states no corner ratio has no exact copper to model, so it is taken as the largest-cornered member of its family: the stadium inscribed in the 2.0x1.0 size — radius min(2.0,1.0)/2 = 0.5, centreline from (-0.5, 0) to (0.5, 0). Every roundrect of that size contains that stadium, so it cannot overhang the real land. The point (0.95, 0.45) is 0.45 past the segment end and 0.45 off its axis, so sqrt(0.45^2 + 0.45^2) = 0.636396mm from the centreline and 0.136396mm clear of the copper. It sits INSIDE the 2.0x1.0 bounding rectangle (0.05mm in from each edge), so a land boxed to that rectangle would wrongly report a join.",
+  "pad": {
+    "at": [0.0, 0.0],
+    "shape": "roundrect",
+    "size": [2.0, 1.0],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": ["top"]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [0.95, 0.45],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": false
+}

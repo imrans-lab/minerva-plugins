@@ -1019,15 +1019,15 @@ class ViaInsertTool:
 			_toast("No board data is bound — the via was not proposed.")
 			return true
 
-		# OWNERSHIP FROM THE SELECTION (work item 01a04106bd). A via clicked
-		# while a route hint is selected SERVES that hint, and says so — the
-		# human's click and minerva_pcb_propose_via's `for_hint` land the same
-		# ownership record, so an agent reading workspace_list never has to
-		# match via coordinates to hint segments by eye. No selection means an
-		# unowned ghost, which is still perfectly legal.
+		# OWNERSHIP FROM THE SELECTION. A via clicked while a route hint is
+		# selected SERVES that hint, and says so — the human's click and
+		# minerva_pcb_propose_via's `for_hint` land the same ownership record,
+		# so a reader of workspace_list never has to match via coordinates to
+		# hint segments by eye. No selection means an unowned ghost, which is
+		# still perfectly legal.
 		var owner_hint := _selected_route_hint_id()
 		var owner_net := _selected_route_hint_net(owner_hint)
-		# 0.0/0.0 = "size it from the board's design_rules" (bug 01a03b87473c).
+		# 0.0/0.0 = "size it from the board's design_rules".
 		var res: Dictionary = workspace.propose_via(
 			doc_pos, owner_net, 0.0, 0.0, panel.get_data(), owner_hint)
 		if bool(res.get("ok", false)):
@@ -1376,8 +1376,8 @@ func bend_points(annotation: Dictionary) -> Array:
 func with_bend_points(annotation: Dictionary, new_bends: Array) -> Dictionary:
 	var new_ann := annotation.duplicate(true)
 	var payload: Dictionary = (new_ann.get("kind_payload", {}) as Dictionary).duplicate(true)
-	# LAYER HOPS SURVIVE A BEND EDIT (work item 01a04106bd). Rebuilding every
-	# bend as a bare [x, y] would silently dissolve a waypoint's `layer` — and
+	# LAYER HOPS SURVIVE A BEND EDIT. Rebuilding every bend as a bare [x, y]
+	# would silently dissolve a waypoint's `layer` — and
 	# with it the via the route materializes there — the first time anyone
 	# dragged a corner. Index-aligned against the bends this replaces, which is
 	# the contract bend_points()/with_bend_points already share.
@@ -1503,8 +1503,8 @@ func validate(annotation: Dictionary) -> Array:
 		if payload.has(key) and not (payload[key] is Array):
 			errors.append({"field": "kind_payload.%s" % key, "message": "%s must be an Array" % key})
 
-	# Per-waypoint shape + LAYER HOP validation (work item 01a04106bd). A
-	# waypoint may name the copper layer the run changes to at that corner; a
+	# Per-waypoint shape + LAYER HOP validation. A waypoint may name the copper
+	# layer the run changes to at that corner; a
 	# name that is not copper is refused here rather than becoming a via on a
 	# layer that does not exist. Declared-stack membership is NOT checked at
 	# this layer — validate() has an annotation, not a board — the worker's
@@ -1709,8 +1709,8 @@ func _has_live_candidate(hint_id: String, host) -> bool:
 		# of duck-typing through has_method first.
 		if not ("source_hint_ids" in c):
 			continue
-		# A PROPOSED VIA ENTITY (work item 01a04106bd) records the hint it
-		# SERVES, not an answer to that hint's routing question. The route is
+		# A PROPOSED VIA ENTITY records the hint it SERVES, not an answer to
+		# that hint's routing question. The route is
 		# still unproposed, so the hint must keep its full corridor —
 		# collapsing it to markers would hide the very line the user is
 		# placing duck-under vias along.

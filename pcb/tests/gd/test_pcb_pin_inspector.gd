@@ -153,8 +153,8 @@ func _build_fixture_board(d) -> void:
 
 
 ## A pin_info reply's world position as [x, y]. The reply carries the pad row's
-## {x_mm, y_mm} (DCR 01a0410c62); this reads it back as the pair the checks
-## above compare against get_pin_world_position, so the shape lives in ONE place
+## {x_mm, y_mm}; this reads it back as the pair the checks above compare
+## against get_pin_world_position, so the shape lives in ONE place
 ## in this suite too.
 func _pos_of(reply: Dictionary) -> Array:
 	var pos: Dictionary = reply.get("position", {})
@@ -305,14 +305,13 @@ func _test_e2e_1_scenario() -> void:
 		str(r1.get("display_name", "")) == "GND", "got %s" % str(r1))
 	check("D: MCP U1.1 net_members matches UI ([U2.A])",
 		r1.get("net_members", []) == ["U2.A"], "got %s" % str(r1.get("net_members", [])))
-	# docket 019fd0ab4c65: the reply carries "position" — the pad's WORLD
-	# position in board mm, matching pcb_component.get_pin_world_position
-	# exactly (same rigid-body transform pad_at()/pin_info() use internally).
-	# DCR 01a0410c62 changed its SHAPE from the bare [x, y] pair to the pad
-	# row's {x_mm, y_mm}: pin_info now answers in the ONE pad-row shape
-	# minerva_pcb_get_selection and minerva_pcb_free_pins also use, and two
-	# spellings of the same coordinate in one reply family is the drift that
-	# shape exists to prevent. Same numbers, same quantum.
+	# The reply carries "position" — the pad's WORLD position in board mm,
+	# matching pcb_component.get_pin_world_position exactly (same rigid-body
+	# transform pad_at()/pin_info() use internally). Its shape is the pad row's
+	# {x_mm, y_mm}, not a bare [x, y] pair: pin_info answers in the ONE pad-row
+	# shape minerva_pcb_get_selection and minerva_pcb_free_pins also use, and
+	# two spellings of one coordinate in one reply family is the drift that
+	# shape exists to prevent.
 	check("D: MCP U1.1 position matches get_pin_world_position",
 		_pos_of(r1) == [world_1.x, world_1.y], "got %s" % str(r1.get("position", {})))
 

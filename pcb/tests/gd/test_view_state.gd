@@ -421,16 +421,16 @@ func _run_working_layer_is_not_view() -> void:
 	await _unmount(ctx["panel"])
 
 
-# ── 8. fit:true frames the whole board in the CURRENT viewport (01a040f7523e) ──
+# ── 8. fit:true frames the whole board in the CURRENT viewport ───────────────
 #
-# THE BUG. minerva_pcb_set_view {fit:true} in a narrow docked pane framed a
-# region that left the 90x100 board a sliver at the edge — the owner read it as
-# "the board disappeared". The on-screen fit framed the COMPONENT bounding box
-# (a fixed 10mm margin around whatever parts existed) while the CAPTURE fit
-# framed the board outline union the parts: two derivations of "the whole
-# board", disagreeing on the same board, and the on-screen one framing nothing
-# recognisable when the parts sat in one corner — or leaving the camera
-# untouched entirely when there were none.
+# THE RULE. minerva_pcb_set_view {fit:true} in a narrow docked pane must not
+# frame a region that leaves a 90x100 board a sliver at the edge — which reads,
+# on screen, as the board having disappeared. That is what an on-screen fit over
+# the COMPONENT bounding box (a fixed 10mm margin around whatever parts exist)
+# gives while the CAPTURE fit frames the board outline union the parts: two
+# derivations of "the whole board" disagreeing on the same board, the on-screen
+# one framing nothing recognisable when the parts sit in one corner, and leaving
+# the camera untouched entirely when there are none.
 #
 # THE ORACLE, stated once and applied at three viewport aspects (wide-short,
 # large-landscape, tall-narrow): the board's own mm bounds lie fully inside the

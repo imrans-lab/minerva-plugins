@@ -456,16 +456,13 @@ validation — the aliases no longer bypass the v2 identity/validation gate (fin
 ## Board graphics
 
 `board_graphics` is artwork the **board** owns rather than a component: a
-copyright line, a board name, a polarity mark, a courtyard note. It landed with
-DCR `01a0418dc6`.
+copyright line, a board name, a polarity mark, a courtyard note.
 
-**Why it had to exist.** Every graphic primitive before it was owned by a
-footprint and placed by that component's transform. There was no legal owner for
-"a line of text on the back of this board", so smart-remote-v2's back-side
-copyright line was authored as **65 hand-generated `B.SilkS` polylines hung off
-TP1** — a 1206 test point at (8, 30) — with every point in *absolute board*
-coordinates that TP1's own placement would have corrupted the moment anyone
-moved the part. The geometry was correct only because nothing ever touched TP1.
+Every other graphic primitive is owned by a footprint and placed by that
+component's transform, so without this collection "a line of text on the back of
+this board" has no legal owner: it has to be hung off whatever part happens to be
+nearby, as absolute board coordinates that the part's own placement corrupts the
+moment anyone moves it.
 
 ### The entry
 
@@ -620,16 +617,15 @@ zones, cut-outs and placements alike — through one policy file,
 and alphabet exactly. Copper drawn in the editor is identity-complete from the
 moment it is created, on v1 and v2 boards alike.
 
-**Why that matters beyond hand-editing.** The panel used to mint ORDINAL handles
-(`trace_7`, `via_12`) for traces and vias. `isMintedID` reads those as unminted,
-so `MigrateV1toV2` — which runs on **every** `pcb.deserialize` of a v1 board —
-replaced them with fresh random tokens on every load. An agent holding a via id
-across `export_yaml` → `load_board` got `missing_via_ids` back, and the routing
-sidecar's `committed_via_ids` went dangling on each reload (bug `01a040f6d7`).
-Minting the contract shape UI-side is what makes an id survive the round trip
-unchanged. Ordinal ids are still **accepted** everywhere they were before (old
-boards, `.minpcb` imports, `import_trace_geometry` payloads); nothing mints one
-any more.
+**Why the shape matters beyond hand-editing.** `isMintedID` reads an ORDINAL
+handle (`trace_7`, `via_12`) as unminted, and `MigrateV1toV2` — which runs on
+**every** `pcb.deserialize` of a v1 board — replaces an unminted id with a fresh
+random token. An id that is not minted in the contract shape therefore changes on
+every load: an id held across `export_yaml` → `load_board` comes back as
+`missing_via_ids`, and a routing sidecar's `committed_via_ids` go dangling.
+Minting UI-side is what makes an id survive the round trip unchanged. Ordinal ids
+are still **accepted** everywhere (old boards, `.minpcb` imports,
+`import_trace_geometry` payloads); nothing mints one.
 
 ### Geometry authority: full vs partial
 

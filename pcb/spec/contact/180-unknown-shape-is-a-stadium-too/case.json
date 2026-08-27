@@ -1,0 +1,19 @@
+{
+  "name": "180-unknown-shape-is-a-stadium-too",
+  "why": "A shape token neither side models gets the same conservative reading as a ratio-less roundrect: the stadium inscribed in the stated size, here radius 0.5 with a centreline from (-0.5, 0) to (0.5, 0). So (0.95, 0.45) is sqrt(0.45^2 + 0.45^2) = 0.636396mm from the centreline, 0.136396mm clear of the copper, exactly as in case 160 — while the 2.0x1.0 bounding rectangle would contain it. An unmodelled land must never manufacture copper it may not have.",
+  "pad": {
+    "at": [0.0, 0.0],
+    "shape": "trapezoid",
+    "size": [2.0, 1.0],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": ["top"]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [0.95, 0.45],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": false
+}

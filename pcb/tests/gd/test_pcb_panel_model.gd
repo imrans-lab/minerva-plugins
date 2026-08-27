@@ -303,11 +303,11 @@ func _test_clear_traces_journals_contents() -> void:
 ## via undo), which is what test_trace_identity_delete.gd's group 14 exercises
 ## end to end via the real import->undo->mint path.
 ##
-## RE-STATED for minted ids (bug 01a040f6d7): the mint is now a persistent
-## "trace:<32hex>" / "via:<32hex>" token rather than an ordinal, so the property
-## the ruling asked for holds by CONSTRUCTION rather than by a counter. This test
-## therefore asserts the property itself — the post-clear mint is a persistent id
-## and is not the pre-clear handle — instead of the ordinal it used to predict.
+## STATED FOR MINTED IDS: a mint is a persistent "trace:<32hex>" / "via:<32hex>"
+## token rather than an ordinal, so the property holds by CONSTRUCTION rather
+## than by a counter. This test therefore asserts the property itself — the
+## post-clear mint is a persistent id and is not the pre-clear handle — rather
+## than predicting an ordinal.
 ## The legacy ordinal counters still exist for SUPPLIED ordinal ids, which is
 ## what the explicit high ids below still exercise on the way in.
 func _test_counters_never_lowered_by_clear_traces_and_clear() -> void:

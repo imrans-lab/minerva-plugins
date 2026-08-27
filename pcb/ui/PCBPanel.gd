@@ -53,8 +53,8 @@ const _PcbOverlayFetchScript: Script = preload("model/pcb_overlay_fetch.gd")
 ## The pin→net invariant: used here for the load-time conflict report only —
 ## the membership VERBS run on panel_tools, which preloads the same module.
 const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
-## DCR 01a0410c62 — the pad-selection sidebar section and the pad ROW shape it
-## renders (the same rows minerva_pcb_get_selection returns).
+## The pad-selection sidebar section and the pad ROW shape it renders (the same
+## rows minerva_pcb_get_selection returns).
 const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section.gd")
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
@@ -399,7 +399,7 @@ var _inspect_pin_button: Button = null
 ## _update_properties already use).
 var _delete_button: Button = null
 var _pin_info_section: VBoxContainer = null
-## The pad-selection section (DCR 01a0410c62) — see _build_sidebar.
+## The pad-selection section — see _build_sidebar.
 var _pin_selection_section: VBoxContainer = null
 var _pin_info_ref_label: Label = null
 var _pin_info_value_label: Label = null
@@ -1703,11 +1703,10 @@ func _build_sidebar() -> VBoxContainer:
 		"Pan the view (drag anywhere)",
 		"pan_24.png")
 
-	# Pin Select (DCR 01a0410c62 — WC-1's pin inspector, grown into a selection
-	# tool). A TRUE toggle, unlike the Select/Pan radio tools: pressed arms
-	# INSPECT_PIN, pressed-again exits back to Select. It sits HERE, beside
-	# Select and Pan, because picking a pad is a selection act, not a drawing
-	# one — and the DCR asks for it in the selection area.
+	# Pin Select — the pin inspector grown into a selection tool. A TRUE toggle,
+	# unlike the Select/Pan radio tools: pressed arms INSPECT_PIN, pressed-again
+	# exits back to Select. It sits HERE, beside Select and Pan, because picking
+	# a pad is a selection act, not a drawing one.
 	_inspect_pin_button = Button.new()
 	_inspect_pin_button.name = "InspectPinButton"
 	var inspect_icon := _load_icon("inspect_pin_24.png")
@@ -2035,7 +2034,7 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar_content.add_child(HSeparator.new())
 	_sidebar_content.add_child(_build_pin_info_section())
 
-	# DCR 01a0410c62 — the PAD SELECTION section, below the one-pin Pin Info
+	# The PAD SELECTION section, below the one-pin Pin Info
 	# section it complements: the selected pads' rows, the component's free
 	# pins, and the two net edits a pad selection affords. Hidden until pads
 	# are selected; driven by selection_changed, not by pin_selected, so the
@@ -3612,8 +3611,8 @@ func _resolve_selectable(kind: String, id: String) -> Dictionary:
 			canvas_kind = _canvas.KIND_COMPONENT
 			exists = _data != null and _data.get_component(id) != null
 		"pad":
-			# DCR 01a0410c62: a pad is addressed by "REF.PIN", not by a minted
-			# id — it has no identity of its own in the board model.
+			# A pad is addressed by "REF.PIN", not by a minted id — it has no
+			# identity of its own in the board model.
 			canvas_kind = _canvas.KIND_PAD
 			var parts: Array = _PcbPadRowScript.parse_ref(id)
 			if not parts.is_empty() and _data != null:
@@ -4656,11 +4655,11 @@ func set_view_flag(flag: String, value: bool) -> bool:
 			# changed, which is the one lie this view must never tell.
 			_canvas.set_fab_preview([], [], "")
 	_canvas.queue_redraw()
-	# THE FLAG IS THE ANSWER, NOT THE REQUEST (bug 01a0414891). A refetch that
-	# came back with nothing has already taken the flag back down
-	# (_retract_overlay), and a raise that did not stick is not an applied view.
-	# Reporting it as one is what left minerva_pcb_view_state answering
-	# show_fab_preview:true over an empty canvas.
+	# THE FLAG IS THE ANSWER, NOT THE REQUEST. A refetch that came back with
+	# nothing has already taken the flag back down (_retract_overlay), and a
+	# raise that did not stick is not an applied view — reporting it as one
+	# leaves minerva_pcb_view_state answering show_fab_preview:true over an
+	# empty canvas.
 	return bool(_canvas.get(flag)) == value
 
 
@@ -5174,12 +5173,11 @@ var _transient_status_timer: SceneTreeTimer = null
 ## channel and the zone tools' feedback channel both land here rather than each
 ## growing their own timer.
 ##
-## RESTARTS THE CLOCK (bug 01a03820df78). Each message used to arm its OWN
-## uncancelled 2s timer, so two messages less than 2s apart left two clears
-## queued and the FIRST one — armed by the message already gone from the line —
-## wiped the SECOND one early. A message that arrives at t=1.9s used to be
-## visible for 0.1s. Now the pending clear is superseded: the newest message
-## always gets the full window.
+## RESTARTS THE CLOCK. A pending clear is superseded rather than left queued, so
+## the newest message always gets the full window. Arming a fresh uncancelled 2s
+## timer per message instead would let two messages less than 2s apart queue two
+## clears, and the FIRST — armed by the message already gone from the line —
+## would wipe the SECOND early: a message arriving at t=1.9s is visible 0.1s.
 ##
 ## The HELD LEADS are untouched by any of this. _status_lead's load-check,
 ## overlay and bus-refusal parts are conditions, not messages: they ride every
@@ -6237,16 +6235,22 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 			# _restoring gate — load_from_dict emits `changed` unconditionally.
 			var sidecar_status: Dictionary = _PcbRoutingSidecarScript.load_into_workspace(
 				source_path, _routing_workspace, _data.to_board_dict(), 0, _staged_entities)
-			# Bug 01a040f6d7: a sidecar ownership record this board cannot
-			# support was DROPPED rather than re-attached to whatever now
-			# carries that id. Say so on the reply — the agent that called
-			# load_board is the one whose next delete_traces would otherwise
-			# have been told "committed by" a candidate that owns nothing.
+			# A sidecar ownership record this board cannot support is DROPPED
+			# rather than re-attached to whatever now carries that id. Say so on
+			# the reply — whoever called load_board is who a later
+			# delete_traces would otherwise tell "committed by" about a
+			# candidate that owns nothing.
 			for finding in (sidecar_status.get("stale_ownership", []) as Array):
 				var f: Dictionary = finding if finding is Dictionary else {}
+				# One line per REASON. "copper that is gone" and "copper that
+				# belongs to something else" call for different reactions, so
+				# they are never blended into one sentence.
+				var why := "pointed at copper on the board that it does not own" \
+					if str(f.get("reason", "")) == "foreign" \
+					else "pointed at copper that is no longer on the board"
 				warnings.append(("stale routing-sidecar ownership record dropped for candidate %s "
-					+ "(net %s): traces %s, vias %s%s") % [
-						str(f.get("candidate_id", "")), str(f.get("net", "")),
+					+ "(net %s): it %s — traces %s, vias %s%s") % [
+						str(f.get("candidate_id", "")), str(f.get("net", "")), why,
 						str(f.get("dropped_trace_ids", [])), str(f.get("dropped_via_ids", [])),
 						" — its commit was retired and its routing task reopened"
 							if bool(f.get("uncommitted", false)) else ""])
@@ -6515,9 +6519,9 @@ func board_health_check(board: Dictionary) -> Dictionary:
 	# Canonical wire form at the seam (01a007f1dd02): the enriched dict blew
 	# the broker's 64 KiB cap on real boards; the worker resolves for itself.
 	# Applied here so EVERY caller — the load path included — is covered.
-	# The wire form is smaller, NOT small: smart-remote-v2 measures 57 KB of it,
-	# 8 KB under the cap, so the by-ref send below is what actually keeps this
-	# channel alive as boards grow (bug 01a0414891).
+	# The wire form is smaller, NOT small — a real board can sit a few KB under
+	# the cap — so the by-ref send below is what actually keeps this channel
+	# alive as boards grow.
 	board = _PanelToolsScript.canonical_wire_board(board)
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
@@ -6604,10 +6608,9 @@ func fab_preview_check(board: Dictionary) -> Dictionary:
 	if ipc == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
-	# BY-REF like every other board-carrying sender (bug 01a0414891): this
-	# channel sent the whole board by value, so View > Fab preview died
-	# payload_too_large on the smart-remote class of board — 221 KB into a
-	# 64 KiB pipe — and the flag stayed up over an empty canvas.
+	# BY-REF like every other board-carrying sender. Sending the whole board by
+	# value dies payload_too_large once a board outgrows the 64 KiB pipe, and
+	# the View > Fab preview flag then stays up over an empty canvas.
 	var result: Dictionary = await _request_with_backend_ensure(
 		"pcb.fab_preview", _payload_by_ref({"board": board}, "board"), 60000)
 	if result.has("ok"):
@@ -6653,10 +6656,10 @@ func _refresh_fab_preview() -> void:
 		_canvas.set_fab_preview([], [], "stale — the board changed while the preview was rendering; re-open Fab Preview")
 		return
 	if not bool(reply.get("ok", false)):
-		# NOTHING IS ON SCREEN, so nothing may claim to be. The note this used
-		# to leave was drawn INSIDE the preview — invisible the moment the
-		# preview is not drawn — so the reason moves to the held status lead
-		# and the flag comes down with the artwork (bug 01a0414891).
+		# NOTHING IS ON SCREEN, so nothing may claim to be. The reason goes to
+		# the held status lead rather than into the preview — a note drawn
+		# INSIDE the preview is invisible the moment the preview is not drawn —
+		# and the flag comes down with the artwork.
 		_canvas.set_fab_preview([], [], "")
 		_retract_overlay("show_fab_preview", reply)
 		return
@@ -6903,16 +6906,16 @@ func _status_lead() -> String:
 var _overlay_leads: Dictionary = {}
 
 
-## AN OVERLAY THAT FAILED TO FETCH TAKES ITS FLAG DOWN WITH IT (bug 01a0414891).
+## AN OVERLAY THAT FAILED TO FETCH TAKES ITS FLAG DOWN WITH IT.
 ##
 ## The flag is a claim that the view is on screen. When the fetch returns
-## nothing there is nothing on screen, and leaving it up told BOTH readers
-## otherwise: the View menu drew a check beside an empty view, and
-## minerva_pcb_view_state reported show_fab_preview true to an agent that then
-## read the blank canvas as the board's true state. The failure note the canvas
-## used to carry is drawn inside the overlay, so a retracted view cannot show
-## it — the reason moves here, to the held lead, where it outlasts the next
-## transient message like every other standing condition.
+## nothing there is nothing on screen, and leaving the flag up tells BOTH readers
+## otherwise: the View menu draws a check beside an empty view, and
+## minerva_pcb_view_state reports show_fab_preview true to a caller that then
+## reads the blank canvas as the board's true state. The failure note the canvas
+## draws is inside the overlay, so a retracted view cannot show it — the reason
+## is held here instead, on the lead, where it outlasts the next transient
+## message like every other standing condition.
 func _retract_overlay(flag: String, reply: Dictionary) -> void:
 	if _canvas != null:
 		_canvas.set(flag, false)

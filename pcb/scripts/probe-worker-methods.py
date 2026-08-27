@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stale-runtime-bundle probe for the pcb worker (bug 01a039ac850c).
+"""Stale-runtime-bundle probe for the pcb worker.
 
 WHAT GOES WRONG WITHOUT THIS. The pcb-plugin Go binary does not run the
 repo's worker source. It resolves a Python interpreter through
@@ -226,7 +226,7 @@ def main() -> int:
     print("  Real-worker GD suites calling these methods will fall back to canned", file=sys.stderr)
     print("  results and cannot certify anything. Rebuild/refresh the runtime bundle", file=sys.stderr)
     print("  (a plugin reinstall does NOT do it) or point the binary at a dev", file=sys.stderr)
-    print("  interpreter. See bug 01a039ac850c.", file=sys.stderr)
+    print("  interpreter.", file=sys.stderr)
     print("", file=sys.stderr)
     return 1
 

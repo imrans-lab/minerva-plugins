@@ -101,7 +101,7 @@
 #      line with the actual worker error before falling back; read that, not
 #      the green assertion count.
 #
-#   4. STALE-BUNDLE PRE-FLIGHT (bug 01a039ac850c). Layer 3 catches the fallback
+#   4. STALE-BUNDLE PRE-FLIGHT. Layer 3 catches the fallback
 #      but not its most common cause — the binary running a stale pcb_worker out
 #      of the INSTALLED runtime bundle instead of worker/. scripts/probe-worker-
 #      methods.py diffs the two method registries and fails the whole run, by
@@ -392,7 +392,7 @@ if [ "${PREFLIGHT_ONLY}" -eq 1 ]; then
   exit 0
 fi
 
-# STALE-RUNTIME-BUNDLE PRE-FLIGHT (bug 01a039ac850c). Execution only: it needs
+# STALE-RUNTIME-BUNDLE PRE-FLIGHT. Execution only: it needs
 # the built pcb-plugin binary, which --preflight-only deliberately does without.
 #
 # The real-worker gate at the bottom of the loop can say a suite fell back to

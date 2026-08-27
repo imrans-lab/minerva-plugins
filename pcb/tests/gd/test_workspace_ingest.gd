@@ -326,8 +326,8 @@ func _run_ingest_record_unattributed_is_empty() -> void:
 	check_eq("unattributed route -> EMPTY source_hint_ids (never the whole selected set)",
 		cand.source_hint_ids.size(), 0)
 	check_eq("unattributed route -> empty endpoints (no false attribution)", cand.endpoints.size(), 0)
-	# 01a02c480d50: the 0.25mm this used to assert was INVENTED — no hint, no
-	# routed width, no caller option supplied one. The candidate still lands
+	# A 0.25mm here would be INVENTED — no hint, no routed width and no caller
+	# option supplied one. The candidate still lands
 	# (a ghost is a question, not a board edit); it lands at 0.0, says
 	# "unresolved", and commit refuses it by name rather than fabricating
 	# copper at a width nobody chose.

@@ -208,8 +208,8 @@ static func save_workspace(board_path: String, workspace, board_dict: Dictionary
 ##   "quarantine_stale" — future/unknown schema_version OR missing token OR
 ##                        fingerprint MISMATCH → candidates loaded (if possible)
 ##                        with ALL validation=stale, dispositions preserved.
-## A "loaded_clean" load also runs the RESTORE-TIME OWNERSHIP AUDIT (bug
-## 01a040f6d7): a committed candidate whose recorded copper ids do not resolve on
+## A "loaded_clean" load also runs the RESTORE-TIME OWNERSHIP AUDIT: a
+## committed candidate whose recorded copper ids do not resolve on
 ## THIS board, or resolve to copper on another net, has that claim dropped and is
 ## uncommitted if nothing provable is left. The per-candidate findings ride back
 ## as `stale_ownership` (ABSENT when empty), so the caller can surface them —

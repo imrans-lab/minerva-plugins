@@ -2839,7 +2839,7 @@ def compile_board(
     # owns the fail-closed geometry rules (strictly-interior, disjoint).
     # ``cutouts: {}`` is still refused — by the shared validate boundary
     # (``invalid_board_structure``), same presence-not-truthiness rule as ever.
-    # ``board_graphics`` LEFT THIS LIST in DCR 01a0418dc6, the round that gave
+    #board_graphics LEFT THIS LIST in the round that gave
     # board-level artwork a real owner (:mod:`board_graphics`). It compiles into
     # ResolvedBoard.board_graphics, both fab emitters draw it, and geometric DRC
     # projects it as silk — the same four-way landing zones and cutouts each had
@@ -2944,10 +2944,14 @@ def compile_board(
         if inline_footprint.carries_full_geometry(comp):
             try:
                 definition = inline_footprint.footprint_from_component(comp, fp_ref)
-            except inline_footprint.InlineGeometryError as exc:
+            except (ValueError, TypeError) as exc:
                 # Fail-closed rather than falling through to the library: a
                 # silent substitution here is one part's copper standing in
-                # for another's.
+                # for another's. Broader than InlineGeometryError on purpose —
+                # the reader validates shape, but the PadDefinition/graphic
+                # dataclasses validate range and type and raise bare
+                # ValueError/TypeError, and both kinds of malformed geometry
+                # have to land on this diagnostic rather than escape.
                 diags.error("invalid_component_geometry",
                             f"component {ref!r}: inline pad geometry is unreadable: {exc}",
                             comp_ref)
@@ -2988,7 +2992,7 @@ def compile_board(
                 diags.error("lock_entry_malformed",
                             f"component {ref!r}: lock entry for {fp_ref!r} is malformed", comp_ref)
                 continue
-            # THE BOARD'S OWN LOCK (K20, DCR 019ffc52c358), read before resolution
+            # THE BOARD'S OWN LOCK, read before resolution
             # so a pinned-but-missing ref can say what it was pinned TO.
             pinned = _board_library_lock(board).get(fp_ref)
             try:
@@ -3110,7 +3114,7 @@ def compile_board(
     vias = _build_vias(board, board_id, net_id_by_name, version, diags)
     holes = _build_holes(board, board_id, version, diags)
     zones = _build_zones(board, board_id, net_id_by_name, version, diags, design_rules)
-    # Board-level artwork (DCR 01a0418dc6). Its own module: the builder owns a
+    # Board-level artwork. Its own module: the builder owns a
     # font, five geometry kinds and a fail-closed layer rule, none of which this
     # file should grow. Text entries expand to N open-polyline primitives here,
     # so every downstream consumer sees plain geometry and no consumer needs to

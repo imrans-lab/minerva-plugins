@@ -873,7 +873,7 @@ counterexample is regression-locked in
 `tests/agent_router/test_pathfinder.py`, alongside a test that a genuinely
 collinear run still collapses — so "stop simplifying" cannot pass as a fix.
 
-## Layer-hop waypoints — one hint, one duck-under (work item `01a04106bd`)
+## Layer-hop waypoints — one hint, one duck-under
 
 A `pcb_route_hint`'s `kind_payload.waypoints` entry has two shapes:
 
@@ -891,8 +891,7 @@ copper name; `PcbLayerStack` owns the translation and nothing here invents one.
 waypoint ends the current run, gets **one through via at exactly that point**,
 and the run continues on the named layer. So one hint says "F.Cu, duck under
 here, back up there, F.Cu", and the vias are a property of the corners rather
-than four separate ghosts an agent has to match to segments by eye — the live
-HITL that filed this.
+than separate ghosts something else has to match to segments by eye.
 
 **What is deliberately not a hop.** A waypoint with no `layer` key, or an empty
 one, is an ordinary corner: absent means "stay on the layer you are on", never
@@ -1116,22 +1115,20 @@ A route reply carries geometry but not sizes, and the fail-closed ruling forbids
 approximated copper, so both values are sourced explicitly:
 
 - **Trace width** — the width the run *actually routed at*. **And when there is
-  none, the copper-creating path REFUSES** (bug `01a02c480d50`): both
-  `panel_tools._materialize_routes` (apply-and-commit) and
-  `RoutingWorkspace._create_candidate_for_route` (propose → commit) used to fall
-  back to a literal `0.25`. That fires only on a reply carrying no width stamp —
-  an older worker, or a path that skipped the attach — but it is an invented
-  number on the one path that ends in fabricated copper, and it is silent: the
-  board would gain 0.25mm traces with nothing in any report saying so.
+  none, the copper-creating path REFUSES** rather than substituting a nominal
+  width. A reply can carry no width stamp (an older worker, or a path that
+  skipped the attach), and a default filled in there would be an invented number
+  on the one path that ends in fabricated copper — silently: the board would gain
+  traces at a width nothing in any report says was guessed.
 
-  Now the **copper-creating** paths refuse and name what they could not
+  So the **copper-creating** paths refuse and name what they could not
   resolve: `_materialize_routes` skips the route into `failed[]` (no traces, no
   vias, the source hint not consumed), and `RoutingWorkspace.commit` refuses
-  `unmodelable_segment` — "zero-width copper is not copper" — which it already
-  did for a zero width; removing the invention is what lets a zero reach it.
+  `unmodelable_segment` — "zero-width copper is not copper", the same refusal a
+  zero width already got; not inventing a number is what lets a zero reach it.
   The **candidate** still lands: a ghost is a question, not a board edit. It
   carries width `0.0` and `width_source: "unresolved"`, and the propose replies
-  name it in `unresolved_widths[]`. Since E2 that is
+  name it in `unresolved_widths[]`. That is
   literally the value `_effective_routing_rules` resolved and handed to the
   engine (`kw["trace_width"]`, precedence table above), passed on to the overlay:
   one variable, not two derivations that agree by coincidence. A proposal cleared
@@ -1145,21 +1142,19 @@ approximated copper, so both values are sourced explicitly:
   (`design_rules.via_diameter_mm` / `via_drill_mm`), which is what acceptance
   writes. The engine's vias are positional only.
 
-  **Resolved at PROPOSAL time, through one rule** (bug `01a03b87473c`). The
-  panel's `pcb/ui/model/pcb_via_dimensions.gd` is now the single place that
+  **Resolved at PROPOSAL time, through one rule.** The
+  panel's `pcb/ui/model/pcb_via_dimensions.gd` is the single place that
   answers "how big is this via": an explicit per-call size outranks
   `design_rules`, which outranks the 0.8/0.4 constants. Every via the plugin
   creates goes through it — router candidates, `minerva_pcb_propose_via`
   ghosts, candidate `add_via` inserts, and the copper `workspace_commit` writes.
 
-  It used to be four rules, and one of them stamped a literal:
-  `PcbRouteCandidate.make_via`'s `0.8`/`0.4` *parameter defaults* were what
-  `_create_candidate_for_route` handed every ingested via, so a candidate via
-  was BORN at 0.8/0.4. The rescue meant to catch that (`_via_dimensions`) only
-  substitutes when the stamped value is **zero**, and 0.8 is never zero — so a
-  ghost rendered and committed at 0.8 on a board whose rules said 0.6, while
-  the direct-commit path honoured 0.6. Two paths, one hole, two answers.
-  `0.0` is now the only value that means "nobody has said yet".
+  **`0.0` is the only value that means "nobody has said yet".** A non-zero
+  default stamped anywhere upstream cannot be rescued downstream: a rescue can
+  only recognise an unset value, so a via born at 0.8 renders and commits at 0.8
+  on a board whose rules say 0.6, while the direct-commit path honours 0.6 —
+  two paths, one hole, two answers. Resolving at proposal time is what keeps
+  there from being a second answer to rescue.
 
 If a value cannot be sourced, the overlay fails closed (`unsupported_geometry`)
 rather than guess one. Same `error.kind` vocabulary as the table above, plus

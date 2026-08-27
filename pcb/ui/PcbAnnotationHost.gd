@@ -35,7 +35,7 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 ## T1.5: the ONE canonical layer contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
-## THE pad row (DCR 01a0410c62) — the shape pin_info answers in, shared with
+## THE pad row — the shape pin_info answers in, shared with
 ## minerva_pcb_get_selection and minerva_pcb_free_pins. It is also what reaches
 ## pcb_pad_approach now, so this file no longer preloads that module directly.
 const _PcbPadRow := preload("model/pcb_pad_row.gd")
@@ -1046,18 +1046,17 @@ func pin_info(component: String, pin: String) -> Dictionary:
 			if _PcbCopperContact.copper_joins_pin(run, comp, pin, stack):
 				trace_ids.append(str(trace.id))
 
-	# THE PAD ROW (DCR 01a0410c62) is the base of this answer, not a variant of
-	# it: ref / net / position / layer / side / approach_sides / roles come from
+	# THE PAD ROW is the base of this answer, not a variant of it: ref / net /
+	# position / layer / side / approach_sides / roles come from
 	# pcb_pad_row, the same shape minerva_pcb_get_selection returns for a
 	# selected pad and minerva_pcb_free_pins returns for an available one. What
 	# this reply adds on top is what only the INSPECTOR knows — the pin's
 	# footprint name, who else is on its net, and which copper actually touches
 	# its land.
 	#
-	# (UX4 station 10, work item 019fd0ab4c65 put `position` here: an agent
-	# asking "what's on this pin" almost always needs where it is next, and
-	# re-deriving it cost a second call through get_pin_position. The row keeps
-	# that, at the same quantum.)
+	# `position` belongs here rather than behind a second call: whoever asks
+	# "what's on this pin" almost always needs where it is next, and
+	# re-deriving it costs a round trip through get_pin_position.
 	var info: Dictionary = _PcbPadRow.row(data, comp, pin)
 	info["pin_name"] = pin_name
 	info["net_members"] = net_members

@@ -1,13 +1,13 @@
 extends SceneTree
-## Remora 01a03820df78 (sev 3) — a transient status message wiped early.
+## A transient status message must not be wiped early.
 ##
 ## Run (via a Minerva checkout as the Godot host — NEVER the live checkout):
 ##   pcb/scripts/run-gd-tests.sh <path-to-minerva-checkout>
 ##
-## THE DEFECT. _show_transient_status armed a fresh 2s SceneTreeTimer per
-## message and never cancelled the one already pending, so two messages less
-## than 2s apart left TWO clears queued and the FIRST — armed by a message
-## already gone from the line — wiped the SECOND. A message arriving at t=1.9s
+## THE RULE. Arming a fresh 2s SceneTreeTimer per message without cancelling the
+## one already pending leaves TWO clears queued for two messages less than 2s
+## apart, and the FIRST — armed by a message already gone from the line — wipes
+## the SECOND. A message arriving at t=1.9s
 ## was visible for 0.1s. The user's report: "the status line blinks out
 ## immediately when two things happen at once".
 ##
@@ -44,7 +44,7 @@ var _fail := 0
 
 
 func _init() -> void:
-	print("=== transient status (remora 01a03820df78) ===\n")
+	print("=== transient status ===\n")
 	await _run_second_message_survives_the_first_deadline()
 	await _run_supersede_seam()
 	await _run_held_leads_are_untouched()

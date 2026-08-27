@@ -1,12 +1,12 @@
 extends RefCounted
 ## The Pin Select tool — a PAD is a thing you can point at.
 ##
-## DCR 01a0410c62. Universal Select picks the whole part (U1S, 44 pins); until
-## this tool the human could not say "this pin", and get_selection could not
-## report one, so every pin-level question ("what net is this?", "move these two
-## to the other column") was answered by an agent guessing a refdes from a
-## coordinate. The owner's sentence is the acceptance case: select two pads,
-## say "move these to the other side of U1S", and the agent reads the selection.
+## Universal Select picks the whole part (44 pins on one part is not unusual),
+## so without this tool the human cannot say "this pin" and get_selection cannot
+## report one: every pin-level question ("what net is this?", "move these two to
+## the other column") gets answered by guessing a refdes from a coordinate. The
+## acceptance case is "select two pads, say move these to the other side of
+## U1S", and the selection is what gets read.
 ##
 ## THIS FILE IS THE TOOL'S RULES, not its plumbing. pcb_canvas.gd owns the
 ## input events, the paint and the selection storage (KIND_PAD rides the same

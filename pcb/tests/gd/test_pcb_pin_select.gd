@@ -1,25 +1,23 @@
 extends SceneTree
 ## A PAD IS A THING YOU CAN POINT AT — the Pin Select tool, the pad row, and
-## the two net edits a pad selection affords (DCR 01a0410c62 + comment 92,
-## remora 01a0380585b4, and the 2026-08-26 HITL rotation finding).
+## the two net edits a pad selection affords.
 ##
-## The owner's sentence is the acceptance case: select two pads, say "see these
-## pins? move them to the other side of U1S", and the agent reads the selection.
-## Before this station Universal Select picked the whole 44-pin part, nothing
-## returned kind:'pad', and the agent answered pin-level questions by guessing a
-## refdes from a coordinate.
+## THE ACCEPTANCE CASE: select two pads, say "see these pins? move them to the
+## other side of U1S", and the selection is what gets read. Universal Select
+## picks the whole 44-pin part, so without a pad selection nothing returns
+## kind:'pad' and a pin-level question can only be answered by guessing a refdes
+## from a coordinate.
 ##
-## RED AGAINST THE OLD TREE, section by section:
-##   1  pcb_pad_row.gd did not exist — no `side`, no `roles`, no one shape.
-##   2  the renderer drew every land at the COMPONENT's rotation and ignored
-##      the land's own, while pin_copper_distance honoured it. 2c is the
-##      remora's own oracle and it is the check that proves the fix: on the old
-##      renderer the drawn corner sits where the hit test says there is no
-##      copper, and the copper the hit test finds is not drawn.
-##   3  the canvas had no pad selection at all (selected_pad_refs, KIND_PAD,
-##      the "pads" key of selection_snapshot); bare P did nothing.
-##   4  minerva_pcb_get_selection returned no pad entries; free_pins,
-##      move_net, swap_nets and select did not exist.
+## What each section pins:
+##   1  pcb_pad_row.gd — ONE pad shape, with `side` and `roles`.
+##   2  the renderer and pin_copper_distance take the SAME land-to-world
+##      transform. 2c is the discriminating check: drawing a land at the
+##      COMPONENT's rotation while the hit test honours the land's own puts the
+##      drawn corner where the hit test says there is no copper.
+##   3  the canvas pad selection (selected_pad_refs, KIND_PAD, the "pads" key of
+##      selection_snapshot) and bare P.
+##   4  minerva_pcb_get_selection's pad entries; free_pins, move_net,
+##      swap_nets and select.
 ##   5  move/rotate replies carried no `pads`, so "where did pin 1 land" was a
 ##      second round trip — the trip an agent got backwards twice in one night.
 ##
@@ -165,7 +163,7 @@ func _build_fixture(d) -> void:
 	d.add_component(j2)
 
 	# A 2-pad part for the rotation convention (section 5): pad 1 is the WEST
-	# one, the ordinary chip-resistor convention the HITL finding is about.
+	# one, the ordinary chip-resistor convention.
 	var r1 = d.new_component()
 	r1.id = "R1"
 	r1.position = Vector2(60.0, 10.0)
@@ -274,7 +272,7 @@ func _test_1_pad_row() -> void:
 	check_eq("1g: a ref with no pin is not a ref", PadRow.parse_ref("U1S"), [])
 
 
-# ── 2. ONE LAND-TO-WORLD TRANSFORM (remora 01a0380585b4) ─────────────────────
+# ── 2. ONE LAND-TO-WORLD TRANSFORM ───────────────────────────────────────────
 
 func _test_2_land_transform() -> void:
 	print("\n-- 2. rendered geometry == hit-test geometry, for a ROTATED land --")
@@ -293,7 +291,7 @@ func _test_2_land_transform() -> void:
 	check("2a: …and never swaps width for height to fake it",
 		(drawn["size"] as Vector2) == Vector2(2.0, 0.5), str(drawn["size"]))
 
-	# 2b. THE ORACLE (the remora states it): every corner of the rendered
+	# 2b. THE ORACLE: every corner of the rendered
 	# rectangle is inside pin_copper_distance's zero-distance region, and a
 	# point just beyond each corner is outside it. Corners are derived exactly
 	# as _draw_component_pads derives them — centre + corner rotated by the
@@ -534,7 +532,7 @@ func _test_4_verbs() -> void:
 		not bool(empty_call.get("success", true)), str(empty_call))
 
 
-# ── 5. WHERE DID PIN 1 LAND? (HITL 2026-08-26) ───────────────────────────────
+# ── 5. WHERE DID PIN 1 LAND? ─────────────────────────────────────────────────
 
 func _test_5_placement_replies() -> void:
 	print("\n-- 5. move/rotate replies say where every pad went --")
@@ -548,9 +546,12 @@ func _test_5_placement_replies() -> void:
 	check_near("5a: pin 1 is where the model says it is",
 		float(((pads[0] as Dictionary).get("position", {}) as Dictionary).get("y_mm", 0.0)), 40.0)
 
-	# THE CONVENTION. Rotation is CLOCKWISE in the board's y-down frame, so a
-	# pad WEST of the origin lands SOUTH at 90 — the fact an agent guessed
-	# backwards twice, now readable straight off the reply.
+	# THE CONVENTION, pinned so it cannot be read backwards. `degrees` is the
+	# KiCad angle the panel and the worker both apply as R(-angle) in the
+	# board's Y-DOWN frame: a positive angle carries the +x axis toward -y. So
+	# a pad WEST of the origin lands SOUTH (+y) at 90 and NORTH (-y) at 270 —
+	# the same rule minerva_pcb_rotate_component's description states, now
+	# readable straight off the reply.
 	var r90: Dictionary = await panel.handle_tool("minerva_pcb_rotate_component",
 		{"component_id": "R1", "degrees": 90})
 	check("5b: the rotate succeeds", bool(r90.get("success", false)), str(r90))

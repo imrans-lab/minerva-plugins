@@ -247,7 +247,9 @@ static func physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
 	# between "no ratio stated" and "ratio 0.0" is one the compiler preserves —
 	# so read it here too rather than lumping both into the family fallback.
 	var corner_mm := corner_radius_mm(pad, half)
-	if shape == "roundrect" and corner_mm <= 0.0 and pad.has("corner_rratio"):
+	var authored_ratio = pad.get("corner_rratio", null)
+	var states_ratio: bool = authored_ratio is float or authored_ratio is int
+	if shape == "roundrect" and corner_mm <= 0.0 and states_ratio:
 		shape = "rect"
 	var land_centre: Vector2 = comp.position + (comp_xform * pad_pos)
 	var route_at := logical_centre if only_land else land_centre

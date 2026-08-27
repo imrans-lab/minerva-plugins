@@ -186,7 +186,7 @@ def validate_board_v2(board: dict) -> list[str]:
         # — the same order Go's Validate walks and MigrateV1toV2 mints in, so a
         # board violating two domains yields the same FIRST code on both sides.
         # Appending rather than inserting is what keeps every existing board's
-        # first-violation code where it was (DCR 01a0418dc6).
+        # first-violation code where it was.
         _check_entity_ids("graphic", [lists["board_graphics"]], codes)
 
     for comp in lists["components"]:

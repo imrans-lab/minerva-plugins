@@ -1,0 +1,19 @@
+{
+  "name": "170-roundrect-without-a-ratio-reaches-along-its-axis",
+  "why": "The same ratio-less 2.0x1.0 roundrect, probed on its long axis. The inscribed stadium's centreline runs (-0.5, 0) to (0.5, 0) with a 0.5 swell, so (0.9, 0) is 0.4mm past the segment end and 0.1mm INSIDE the copper. Pairs with case 160: the land must be the full stadium, not a disc or some smaller assumed shape, so under-modelling shows up here as a missed join while over-modelling shows up there as a phantom one.",
+  "pad": {
+    "at": [0.0, 0.0],
+    "shape": "roundrect",
+    "size": [2.0, 1.0],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": ["top"]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [0.9, 0.0],
+    "width_mm": 0.0,
+    "layer": "top"
+  },
+  "touches": true
+}

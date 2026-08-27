@@ -3,19 +3,17 @@ extends RefCounted
 ## `kind_payload.waypoints`, and the only place that knows a waypoint may name
 ## a copper LAYER.
 ##
-## ── WHY A WAYPOINT CARRIES A LAYER (work item 01a04106bd) ─────────────────────
-## The live HITL: the owner drew one F.Cu hint across a board whose corridor is
-## blocked by VBAT_F and the buck cluster, then proposed FOUR separate vias to
-## duck under the obstacles. The hint was un-routable as drawn, the four via
-## ghosts carried no net and no owner, and the agent recovered the intent only
-## by matching via coordinates to hint segments BY EYE. The intent itself is
-## simple and ordinary — "F.Cu, duck under here, come back up there, F.Cu" — and
-## it had no way to be said.
+## ── WHY A WAYPOINT CARRIES A LAYER ───────────────────────────────────────────
+## "F.Cu, duck under here, come back up there, F.Cu" is an ordinary intent with
+## no other way to be said. Without a layer on the waypoint it has to be drawn
+## as one un-routable straight hint plus separate via proposals that carry no
+## net and no owner, and which via belongs to which segment is then recoverable
+## only by matching coordinates BY EYE.
 ##
-## A waypoint that names a layer says it: the run CHANGES to that layer at that
-## point, and whoever materializes the hint puts the hop via exactly there.
-## There is nothing left for an agent to geometry-match, because the via is not
-## a separate object any more — it is a property of the corner.
+## A waypoint that names a layer says it directly: the run CHANGES to that layer
+## at that point, and whoever materializes the hint puts the hop via exactly
+## there. There is nothing left to geometry-match, because the via is not a
+## separate object any more — it is a property of the corner.
 ##
 ## ── THE TWO SHAPES ────────────────────────────────────────────────────────────
 ##   [x_mm, y_mm]                        — a plain corner (the original shape,
@@ -111,11 +109,30 @@ static func with_position(entry, position: Vector2) -> Variant:
 	return out
 
 
-## Every index in `waypoints` whose entry changes layer, in order. The count of
-## these IS the number of hop vias a materialized hint carries.
-static func layer_change_indices(waypoints: Array) -> Array:
+## Every index in `waypoints` whose entry CHANGES the layer the run is on, in
+## order. The count of these IS the number of hop vias a materialized hint
+## carries.
+##
+## The current layer is tracked along the walk, the same rule the worker's
+## materializer applies: a waypoint that RESTATES the layer the run is already
+## on is a plain corner, not a hop. Punching a hole in the board to change
+## nothing would be copper and a drill hit the author never asked for, and a
+## count taken here that disagreed with the vias the worker actually places is
+## a wrong number on screen.
+##
+## `base_layer` is the layer the run STARTS on — the hint's own `layer`, as a
+## canonical id or a KiCad name. With none given, the first layered waypoint
+## always counts as a hop.
+static func layer_change_indices(waypoints: Array, base_layer: String = "") -> Array:
+	var current := ""
+	var raw_base := base_layer.strip_edges()
+	if not raw_base.is_empty() and PcbLayerStack.is_copper(raw_base):
+		current = PcbLayerStack.kicad_to_canon(raw_base)
 	var out: Array = []
 	for i in range(waypoints.size()):
-		if not layer_of(waypoints[i]).is_empty():
-			out.append(i)
+		var layer := layer_of(waypoints[i])
+		if layer.is_empty() or layer == current:
+			continue
+		out.append(i)
+		current = layer
 	return out

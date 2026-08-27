@@ -1,5 +1,5 @@
 extends RefCounted
-## THE ONE FIT DERIVATION for the PCB canvas (bug 01a040f7523e).
+## THE ONE FIT DERIVATION for the PCB canvas.
 ##
 ## Given content in board mm and a viewport in pixels: what zoom (px/mm) and
 ## what centre show all of that content, as large as the viewport allows? Every
@@ -8,13 +8,12 @@ extends RefCounted
 ## frame (pcb_canvas.frame_rect), and the off-screen capture behind
 ## minerva_pcb_get_image {fit:true} (pcb_canvas._frame_board_for_capture).
 ##
-## There used to be two: the on-screen fit framed the COMPONENT bounding box
-## with a fixed 10 mm margin, while the capture fit framed the BOARD OUTLINE
-## UNION the components with a fractional one. So the two answered "show me the
-## whole board" differently on the same board — and the on-screen one framed
-## nothing recognisable when the parts sat in one corner (or when the board had
-## no parts at all, in which case it left the zoom untouched entirely and the
-## board could sit off-frame: "the board disappeared").
+## THERE MUST NOT BE TWO. An on-screen fit over the COMPONENT bounding box with
+## a fixed 10 mm margin, against a capture fit over the BOARD OUTLINE UNION the
+## components with a fractional one, answers "show me the whole board"
+## differently on the same board — and the on-screen one frames nothing
+## recognisable when the parts sit in one corner, or leaves the zoom untouched
+## entirely when there are no parts, letting the board sit off-frame.
 ##
 ## Pure math on purpose. It never writes zoom/pan_offset — pcb_canvas.gd owns
 ## those and applies the result through set_view_center_zoom.
