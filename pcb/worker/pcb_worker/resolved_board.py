@@ -312,7 +312,34 @@ class PolygonGeometry:
             _point(value, f"PolygonGeometry.points[{index}]")
 
 
-GraphicGeometry: TypeAlias = LineGeometry | CircleGeometry | ArcGeometry | PolygonGeometry
+@dataclass(frozen=True)
+class PolylineGeometry:
+    """An OPEN chain of >= 2 points — the shape a glyph stroke is.
+
+    This is NOT PolygonGeometry with a different name. PolygonGeometry closes
+    back to its first point (every consumer treats it as a ring, and
+    ``silk_source.harvest_graphic`` builds it as ``SilkPoly(..., closed=True)``),
+    which turns a "C" into an "O" and needs three points. An open two-point
+    chain has no representation among the closed primitives at all, and its
+    absence is why board text had to be hand-authored as component-hung
+    geometry before this existed: there was nowhere to put a stroke.
+
+    Two points is legal and common (a crossbar, the dot of an "i"); collapsing
+    those to LineGeometry would make one glyph stroke arrive as a mix of two
+    types, so a polyline stays a polyline at any length.
+    """
+    points: tuple[Point, ...]
+
+    def __post_init__(self) -> None:
+        _tuple(self.points, "PolylineGeometry.points")
+        if len(self.points) < 2:
+            raise ValueError("polyline requires at least two points")
+        for index, value in enumerate(self.points):
+            _point(value, f"PolylineGeometry.points[{index}]")
+
+
+GraphicGeometry: TypeAlias = (LineGeometry | CircleGeometry | ArcGeometry
+                              | PolygonGeometry | PolylineGeometry)
 ContourSegment: TypeAlias = LineGeometry | ArcGeometry
 
 
@@ -820,7 +847,8 @@ class PlacedGraphic:
         for field in ("id", "component_id", "source_id"):
             _nonempty(getattr(self, field), f"PlacedGraphic.{field}")
         _typed(self.layer, Layer, "PlacedGraphic.layer")
-        if not isinstance(self.geometry, (LineGeometry, CircleGeometry, ArcGeometry, PolygonGeometry)):
+        if not isinstance(self.geometry, (LineGeometry, CircleGeometry, ArcGeometry,
+                                          PolygonGeometry, PolylineGeometry)):
             raise TypeError("PlacedGraphic.geometry has an unknown geometry type")
         if self.width_mm is not None:
             _nonnegative(self.width_mm, "PlacedGraphic.width_mm")
@@ -1118,7 +1146,8 @@ class BoardGraphic:
     def __post_init__(self) -> None:
         _nonempty(self.id, "BoardGraphic.id")
         _typed(self.layer, Layer, "BoardGraphic.layer")
-        if not isinstance(self.geometry, (LineGeometry, CircleGeometry, ArcGeometry, PolygonGeometry)):
+        if not isinstance(self.geometry, (LineGeometry, CircleGeometry, ArcGeometry,
+                                          PolygonGeometry, PolylineGeometry)):
             raise TypeError("BoardGraphic.geometry has an unknown geometry type")
         if self.width_mm is not None:
             _nonnegative(self.width_mm, "BoardGraphic.width_mm")

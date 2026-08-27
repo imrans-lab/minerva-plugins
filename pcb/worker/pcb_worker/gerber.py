@@ -80,6 +80,7 @@ from .geometry import (
 # two mentions further down names `place_point`, which still exists in
 # geometry.py; those references stay correct.
 from .ir_projection import (
+    board_graphic_to_dict,
     cutout_dicts,
     cutout_loops_from_dict,
     graphic_to_dict,
@@ -108,6 +109,7 @@ from .resolved_board import (
     DiagnosticSeverity,
     EntityKind,
     HoleKind,
+    LayerRole,
     ResolvedBoard,
     RoundHole,
     Side,
@@ -721,6 +723,54 @@ def _emit_silk(g: _Geometry, graphics, cx: float, cy: float, rot: float,
             flipped = Side.BOTTOM if layer_side is Side.TOP else Side.TOP
             _harvest_silk_graphic(g, cx, cy, rot, graphic, ref,
                                   place_side=Side.BOTTOM, bucket_side=flipped)
+
+
+def _emit_board_graphics(g: _Geometry, board: ResolvedBoard) -> None:
+    """Emit BOARD-LEVEL graphics — artwork that belongs to the board, not to any
+    component (:mod:`board_graphics`).
+
+    THE FRAME, and why this cannot double-mirror (risk R7). A board graphic is
+    board-ABSOLUTE by construction: it has no owning component, so there is no
+    placement transform to apply and nothing here re-derives one. It therefore
+    takes exactly the branch a pre-placed component graphic takes —
+    ``place_side=Side.TOP`` (a no-op placement at identity) with the BUCKET
+    chosen from the layer. The layer is authoritative for side and NO mirror is
+    applied here, which is the same rule ``_emit_silk``'s ``pre_placed=True``
+    branch and ``drc_geometric._project_silk`` both follow.
+
+    Back-side text is already mirror-written when it arrives: ``board_graphics``
+    bakes the X-reflection into the strokes at compile time, in the text's own
+    local frame, because the mirror is a property of the LEGEND (it must read
+    correctly through the board) rather than of the emission. Applying a second
+    mirror here — which is what a "bottom side => mirror" heuristic would do —
+    is exactly the double-flip R7 names, and it would read backwards on the fab
+    while every YAML-level check stayed green.
+
+    The only frame change that still applies is the Y negation every layer takes
+    at ``_Geometry.to_gerber_frame``, which runs later and identically for both
+    silk buckets.
+
+    COURTYARD IS SKIPPED, NOT DROPPED SILENTLY. ``silk_side`` returns None for
+    F.CrtYd/B.CrtYd and the primitive is passed over, exactly as a component's
+    courtyard graphic is: courtyard is a documentation layer that no Gerber
+    package carries (it is not in the nine KiCad default layers, and
+    ``fab_capability.EMITTED_LAYERS`` does not list it). Anything that is
+    neither silk nor courtyard cannot reach here — ``build_board_graphics``
+    fail-closes the layer at compile time — so the else arm raises rather than
+    passing, to keep that guarantee honest if the allow-list ever widens.
+    """
+    for graphic in board.board_graphics:
+        layer_side = silk_source.silk_side(graphic.layer.id)
+        if layer_side is None:
+            if graphic.layer.role is LayerRole.COURTYARD:
+                continue
+            raise ValueError(
+                f"_emit_board_graphics: board graphic {graphic.id} is on "
+                f"{graphic.layer.id!r}, which is neither silk nor courtyard — "
+                f"board_graphics.ALLOWED_ROLES and this emitter disagree")
+        _harvest_silk_graphic(g, 0.0, 0.0, 0.0, board_graphic_to_dict(graphic),
+                              graphic.id, place_side=Side.TOP,
+                              bucket_side=layer_side)
 
 
 def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
@@ -1733,6 +1783,8 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
                      comp.placement.rotation_deg, top,
                      reference_text=board.footprint_for(comp).reference_text)
 
+    _emit_board_graphics(g, board)
+
     for via in board.vias:
         _emit_via(g, via.position[0], via.position[1], via.diameter_mm, via.drill_mm,
                   via.tented_front, via.tented_back, mask_clearance)
@@ -1840,11 +1892,6 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
             f"build_gerbers_ir: board has {len(unfilled)} copper pour(s) with NO "
             f"computed fill ({', '.join(unfilled)}) — refusing to emit fabrication "
             f"that silently drops copper")
-    if board.board_graphics:
-        raise ValueError(
-            f"build_gerbers_ir: board has {len(board.board_graphics)} board-level "
-            f"graphic(s) the gerber bridge does not map yet — refusing to drop them silently")
-
     base = name or (board.name if isinstance(board.name, str) and board.name else None) or "board"
     date = creation_date or PINNED_CREATION_DATE
     set_generation_software("Minerva", "pcb_worker/gerber.py", WORKER_VERSION)

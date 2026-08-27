@@ -1,0 +1,12 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: UnmintedGraphic
+width_mm: 40
+height_mm: 30
+board_graphics:
+  - id: graphic_1
+    layer: F.SilkS
+    kind: polyline
+    points:
+      - {x_mm: 1, y_mm: 1}
+      - {x_mm: 5, y_mm: 1}

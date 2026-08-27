@@ -69,6 +69,7 @@ const PcbRatsnest := preload("model/pcb_ratsnest.gd")
 const PcbCopperContact := preload("model/pcb_copper_contact.gd")
 const PcbCopperOwnership := preload("model/pcb_copper_ownership.gd")
 const PcbZoneCopper := preload("model/pcb_zone_copper.gd")
+const PcbBoardGraphic := preload("model/pcb_board_graphic.gd")
 ## THE fit answer, shared by every caller that frames something (zoom_to_fit,
 ## frame_rect, _frame_board_for_capture) so a docked narrow pane and a wide one
 ## cannot disagree about what "the whole board" is — bug 01a040f7523e.
@@ -351,12 +352,24 @@ const KIND_STAGED := "staged"
 ## net-move verbs) already addresses it that way. Appended at the END, same
 ## append-only rule as the kinds above.
 const KIND_PAD := "pad"
+## DCR 01a0418dc6 — a BOARD-LEVEL GRAPHIC: silk legend or courtyard
+## documentation the board owns rather than a component. Appended at the END,
+## same append-only rule as every kind above.
+##
+## SELECT + DRAW + PICK + DELETE are implemented; MOVE and LOCK are not, and
+## each says so at its own site rather than being left out to look like an
+## oversight (the checklist's own rule). v1 authors artwork through
+## minerva_pcb_add_silk_text / minerva_pcb_add_graphic and removes it by
+## selection or by id; there is no in-panel text tool and no drag handle, so
+## there is no gesture that would legitimately move one.
+const KIND_BOARD_GRAPHIC := "board_graphic"
 
 var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
 var selected_zone_ids: Array[String] = []
 var selected_via_ids: Array[String] = []
 var selected_cutout_ids: Array[String] = []
+var selected_board_graphic_ids: Array[String] = []
 ## Selected route candidates (S3). Backed by a LIST like every other kind so
 ## _selection_of / _add_to_selection / _toggle_entity_selected work unchanged;
 ## the public read surface is get_selected_candidate_id() (singular) because the
@@ -1077,6 +1090,19 @@ var unresolved_badge_color: Color = Color(0.95, 0.65, 0.1, 1.0)
 ## clearly (owner HITL 2026-07-19).
 const UNRESOLVED_BADGE_SIZE := 11.0
 const UNRESOLVED_BADGE_MARGIN := 3.0
+
+## BACK silkscreen (B.SilkS) stroke color. Dimmer and cooler than the front ink
+## for the same reason mask_back_color differs from mask_front_color: the board
+## is drawn from the TOP, so back-side artwork is being seen THROUGH the
+## substrate and must not read as if it were on the near face. It matters more
+## for legend than for anything else on this canvas — back text is drawn
+## MIRRORED, so a reader who cannot tell which side it is on sees only
+## backwards text and reasonably concludes it is a bug.
+##
+## This is the first B.SilkS rendering this canvas has ever had: before board
+## graphics there was no way to author back legend from the panel, so the
+## draw path was front-only and the layer name appeared nowhere in ui/.
+var silk_back_color: Color = Color(0.55, 0.62, 0.70, 0.85)
 
 ## Silkscreen (F.SilkS) stroke color — light/white, matching real silk ink.
 var silk_color: Color = Color(0.9, 0.9, 0.9, 1.0)
@@ -1911,6 +1937,15 @@ func _draw() -> void:
 	if show_traces:
 		_draw_traces()
 
+	# BOARD-LEVEL silk and courtyard (DCR 01a0418dc6). Drawn here — above copper,
+	# below previews and overlays — because that is what printed ink IS: it goes
+	# on last, over everything the fab already laid down. It sits beside the mask
+	# rung rather than inside _draw_components() for the plain reason that it
+	# belongs to no component; its geometry is already board-absolute, so it
+	# needs no xform and no component origin (the same simplification
+	# _draw_mask_openings makes).
+	_draw_board_graphics()
+
 	# Mask openings sit ABOVE copper (the film covers the board; an opening is
 	# a hole in it exposing what is underneath) and BELOW previews/overlays.
 	if show_mask:
@@ -2630,6 +2665,16 @@ func _draw_eraser_hover() -> void:
 			_draw_hover_outline(PCBDataScript.zone_outline_points(data.get_zone(id)))
 		KIND_CUTOUT:
 			_draw_hover_outline(PCBDataScript.zone_outline_points(data.get_cutout(id)))
+		KIND_BOARD_GRAPHIC:
+			# The BOUNDS box, not the artwork itself. A hover outline traced along
+			# a dozen glyph strokes would be an illegible thicket exactly where the
+			# user is trying to read the word; a box says "this whole legend is one
+			# object", which is also what clicking it will select.
+			var bg: Dictionary = data.get_board_graphic(id)
+			if not bg.is_empty():
+				var r: Rect2 = PcbBoardGraphic.bounds(bg).grow(0.2)
+				_draw_hover_outline([r.position, Vector2(r.end.x, r.position.y),
+						r.end, Vector2(r.position.x, r.end.y)])
 		KIND_VIA:
 			var via: Dictionary = data.get_via(id)
 			if not via.is_empty():
@@ -3570,6 +3615,102 @@ func _draw_component_silk(comp, xform: Transform2D) -> void:
 ## silk-to-pad findings on the seed coupon (a designator printed over a
 ## neighbour's pad) were invisible in the editor because only the label —
 ## drawn somewhere else entirely — represented the designator.
+## Is this board graphic on a visible layer?
+##
+## Board graphics ride the EXISTING show_silk / show_courtyard toggles rather
+## than getting one of their own. Two reasons: a user hiding silk means "stop
+## showing me silk", not "stop showing me component silk", and a new toggle
+## would have to be added to CAPTURE_MIRRORED_FIELDS or screenshots would
+## silently disagree with the screen — a mirror this file's own comment says
+## has fallen behind twice.
+func _board_graphic_visible(graphic: Dictionary) -> bool:
+	var layer := PcbBoardGraphic.layer_of(graphic)
+	if PcbBoardGraphic.is_silk(layer):
+		return show_silk
+	if PcbBoardGraphic.is_courtyard(layer):
+		return show_courtyard
+	return false
+
+
+## The stroke colour for one board graphic's layer.
+func _board_graphic_color(graphic: Dictionary) -> Color:
+	var layer := PcbBoardGraphic.layer_of(graphic)
+	if PcbBoardGraphic.is_courtyard(layer):
+		return courtyard_color
+	return silk_back_color if layer.begins_with("B.") else silk_color
+
+
+## Draw every board-level graphic.
+##
+## Geometry is board-ABSOLUTE, so points go straight through world_to_screen with
+## no xform and no component origin — unlike _draw_component_graphics_layer,
+## whose whole transform contract exists because its input is footprint-local.
+##
+## Selected graphics are drawn thicker rather than haloed: a legend is line art
+## with no interior to tint, so the feedback has to live in the stroke itself.
+func _draw_board_graphics() -> void:
+	if data == null:
+		return
+	for bg in data.board_graphics:
+		var graphic: Dictionary = bg
+		if not _board_graphic_visible(graphic):
+			continue
+		var selected := is_entity_selected(KIND_BOARD_GRAPHIC,
+				str(graphic.get("id", "")))
+		# trace_selected_color is the canvas's ONE selection yellow — the halo,
+		# the via ring and the zone outline all reuse it (see the "Selection
+		# halo, reusing trace_selected_color" note above). A legend needs the
+		# same yellow for the same reason, not a colour of its own.
+		var color := trace_selected_color if selected else _board_graphic_color(graphic)
+		var w: float = maxf(PcbBoardGraphic.width_of(graphic) * zoom, silk_min_width_px)
+		if selected:
+			w = maxf(w * 2.0, silk_min_width_px + 2.0)
+		var shown := PcbBoardGraphic.display(graphic)
+		var circle: Variant = shown["circle"]
+		if circle != null:
+			draw_arc(world_to_screen((circle as Dictionary)["center"]),
+					float((circle as Dictionary)["radius"]) * zoom,
+					0.0, TAU, 48, color, w)
+			continue
+		var closed: bool = shown["closed"]
+		for stroke in shown["polylines"]:
+			var pts: PackedVector2Array = []
+			for pv in stroke:
+				pts.append(world_to_screen(pv as Vector2))
+			if pts.size() < 2:
+				continue
+			if closed:
+				pts.append(pts[0])
+			# draw_polyline never closes — which is exactly right for a glyph
+			# stroke (a closed "C" is an "O") and is why the closing point above
+			# is appended explicitly for the kinds that DO close.
+			draw_polyline(pts, color, w)
+
+
+## The board graphic under `world_pos`, or "".
+##
+## The view concern only — draw order, visibility and the tolerance. The
+## geometry test itself is PcbBoardGraphic.hit_test, which walks the same
+## strokes display() paints.
+##
+## Tolerance is the SAME px-through-the-zoom idiom the trace pick uses, widened
+## by half the stroke width so a thick graphic is grabbable along its whole
+## painted body rather than only along its mathematical centreline.
+func _board_graphic_at(world_pos: Vector2) -> String:
+	if data == null:
+		return ""
+	# Reverse order so the graphic drawn LAST (visually on top) is picked first,
+	# which is what the user sees.
+	for i in range(data.board_graphics.size() - 1, -1, -1):
+		var graphic: Dictionary = data.board_graphics[i]
+		if not _board_graphic_visible(graphic):
+			continue
+		var tol: float = 3.0 / maxf(zoom, 0.0001) + PcbBoardGraphic.width_of(graphic) * 0.5
+		if PcbBoardGraphic.hit_test(graphic, world_pos, tol):
+			return str(graphic.get("id", ""))
+	return ""
+
+
 func _draw_component_refdes(comp, xform: Transform2D) -> void:
 	for g in comp.refdes_graphics:
 		var w: float = maxf(float(g.get("width", 0.15)) * zoom, silk_min_width_px)
@@ -4632,6 +4773,8 @@ func _selection_of(kind: String) -> Array[String]:
 			return selected_via_ids
 		KIND_CUTOUT:
 			return selected_cutout_ids
+		KIND_BOARD_GRAPHIC:
+			return selected_board_graphic_ids
 		KIND_CANDIDATE:
 			return selected_candidate_ids
 		KIND_STAGED:
@@ -4658,6 +4801,7 @@ func selection_snapshot() -> Dictionary:
 		"vias": selected_via_ids.duplicate(),
 		"zones": selected_zone_ids.duplicate(),
 		"cutouts": selected_cutout_ids.duplicate(),
+		"board_graphics": selected_board_graphic_ids.duplicate(),
 		"candidates": selected_candidate_ids.duplicate(),
 		"staged": selected_staged_ids.duplicate(),
 		"pads": selected_pad_refs.duplicate(),
@@ -4785,7 +4929,8 @@ func _toggle_entity_selected(kind: String, entity_id: String) -> void:
 ## skip when staged drafts sit in a deleted selection — see its notice.
 func selection_count() -> int:
 	return selected_components.size() + selected_trace_ids.size() \
-		+ selected_zone_ids.size() + selected_via_ids.size() + selected_cutout_ids.size()
+		+ selected_zone_ids.size() + selected_via_ids.size() + selected_cutout_ids.size() \
+		+ selected_board_graphic_ids.size()
 
 
 func has_selection() -> bool:
@@ -4823,6 +4968,10 @@ func _clear_selection(announce := true) -> void:
 	selected_zone_ids.clear()
 	selected_via_ids.clear()
 	selected_cutout_ids.clear()
+	# Board graphics ARE counted by selection_count() (unlike candidates and
+	# staged below): they are real board entities and Delete legitimately acts
+	# on them, so they belong in the batch the count gates.
+	selected_board_graphic_ids.clear()
 	# Candidates ARE cleared here even though they are not counted by
 	# selection_count() (S3): "clear the selection" has to mean everything this
 	# canvas is holding selected, or a plain click on a component would leave a
@@ -4903,6 +5052,18 @@ func _finalize_box_selection() -> void:
 	if _cutout_visible():
 		for cutout_id in data.cutouts_in_region(select_rect):
 			_add_to_selection(KIND_CUTOUT, cutout_id)
+
+	# Board graphics sweep on BOUNDS INTERSECTION, not on a vertex test like the
+	# trace/zone sweeps. A glyph stroke is tiny and there are dozens per string,
+	# so a vertex rule would let a marquee drawn across a word select some of its
+	# letters and not others — and a board graphic is ONE object (one id, one
+	# undo step, one delete), so a partial sweep of it is never what was meant.
+	for bg in data.board_graphics:
+		var bg_id := str((bg as Dictionary).get("id", ""))
+		if bg_id.is_empty() or not _board_graphic_visible(bg):
+			continue
+		if select_rect.intersects(PcbBoardGraphic.bounds(bg)):
+			_add_to_selection(KIND_BOARD_GRAPHIC, bg_id)
 
 	# STAGED ENTITIES ARE SWEPT (UX4 S4 — the DCR's ruled divergence from the
 	# candidate decision below): a staged area is AREA GEOMETRY under review,
@@ -5119,6 +5280,16 @@ func _entity_at(world_pos: Vector2) -> Array:
 	var cutout_id: String = _cutout_at(world_pos)
 	if not cutout_id.is_empty():
 		return [KIND_CUTOUT, cutout_id]
+	# BOARD GRAPHICS ARE THE LAST RUNG, deliberately. Silk is printed ink drawn
+	# OVER everything, and a copyright line or a courtyard box routinely lies
+	# across parts, pads and copper. Picking it above them would make whatever it
+	# covers unclickable — the greedy-area failure the staged rung's comment
+	# describes, except silk covers more of a typical board than any draft does.
+	# Last rung means legend is selectable everywhere it is not competing with a
+	# real board entity, which is exactly where a user means to click it.
+	var board_graphic_id: String = _board_graphic_at(world_pos)
+	if not board_graphic_id.is_empty():
+		return [KIND_BOARD_GRAPHIC, board_graphic_id]
 	return ["", ""]
 
 
@@ -5239,6 +5410,15 @@ func _entity_anchor(kind: String, entity_id: String) -> Vector2:
 			var pts := PCBDataScript.zone_outline_points(data.get_cutout(entity_id))
 			if not pts.is_empty():
 				return pts[0]
+		KIND_BOARD_GRAPHIC:
+			# Answered for the SAME reason KIND_VIA and KIND_CUTOUT are, even though
+			# a board graphic never MOVES either (see _capture_drag_origins): a
+			# drag started on one inside a mixed selection still needs a real snap
+			# reference, and Vector2.ZERO would translate that whole selection to
+			# the board origin on the first motion frame.
+			var bg: Dictionary = data.get_board_graphic(entity_id)
+			if not bg.is_empty():
+				return PcbBoardGraphic.bounds(bg).position
 		KIND_CANDIDATE:
 			# Answered for the SAME reason KIND_VIA and KIND_CUTOUT are, even though
 			# a candidate never MOVES either (see _capture_drag_origins): a drag
@@ -5748,6 +5928,14 @@ func _capture_drag_origins() -> void:
 	# enforcement here too: there is no fourth walk below to forget, and
 	# _apply_drag_delta only ever touches what landed in _drag_origins.
 	#
+	# BOARD GRAPHICS ARE ALSO DELIBERATELY NOT CAPTURED (DCR 01a0418dc6), the
+	# same idiom as vias and cutouts above. v1 ships AUTHOR + DELETE only: text
+	# is placed by minerva_pcb_add_silk_text at a stated position and there is no
+	# in-panel text tool, no drag handle and no vertex editing, so no gesture
+	# legitimately changes a board graphic's geometry after it is written. Not
+	# being captured is the enforcement — _apply_drag_delta only ever touches
+	# what landed in _drag_origins, so there is no extra walk below to forget.
+	#
 	# ROUTE CANDIDATES ARE ALSO DELIBERATELY NOT CAPTURED (S3), same idiom again,
 	# and for the strongest reason of the three: a candidate is not this canvas's
 	# geometry at all. It lives in the RoutingWorkspace, its edits are REVISION-
@@ -5942,6 +6130,13 @@ func _is_entity_locked(kind: String, entity_id: String) -> bool:
 			# either). A cutout is protected the same way a via is: it cannot be
 			# dragged at all (see _capture_drag_origins).
 			return false
+		KIND_BOARD_GRAPHIC:
+			# BOARD GRAPHICS HAVE NO LOCK, same idiom as KIND_VIA and KIND_CUTOUT
+			# above — checked against the graphic dict shape (pcb_board_graphic.gd:
+			# id/layer/kind/width plus the per-kind geometry, no "locked" key) and
+			# board.go's Graphic struct, which has no Locked field either. One is
+			# protected the way a via is: it cannot be dragged at all.
+			return false
 		KIND_CANDIDATE:
 			# CANDIDATES HAVE NO SELECTION LOCK, and this case exists to SAY SO —
 			# the KIND_VIA / KIND_CUTOUT idiom above. There IS a `locked` flag on a
@@ -6016,6 +6211,13 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			return data.remove_via_by_id(entity_id)
 		KIND_CUTOUT:
 			return data.remove_cutout(entity_id)
+		KIND_BOARD_GRAPHIC:
+			# BY ID, and the id is the SOURCE id the user selected — never one of
+			# the derived "<id>#<k>" per-stroke ids the worker's compiler mints for
+			# the IR. A text graphic is one object here however many strokes it
+			# draws, so one delete removes the whole legend and one undo restores
+			# it (DCR 01a0418dc6).
+			return data.remove_board_graphic(entity_id)
 		KIND_CANDIDATE:
 			# NEVER REMOVED THROUGH THIS PATH (S3), and the case is here to say so
 			# rather than let the fall-through answer by accident. Discarding a
@@ -6136,7 +6338,8 @@ func _delete_selection() -> void:
 	# which is the honest state — selection_count() excludes candidates precisely
 	# so this path is not even entered on a candidate-only selection, and no
 	# "nothing deleted" line is emitted about something that was never deletable.
-	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA, KIND_CUTOUT]:
+	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA, KIND_CUTOUT,
+			KIND_BOARD_GRAPHIC]:
 		for entity_id in _selection_of(kind):
 			# _unit_locked, not _is_entity_locked (A4): a group with ANY locked
 			# member refuses deletion whole, for the same reason it refuses to
@@ -6403,6 +6606,15 @@ func _entity_action_label(verb: String, kind: String, entity_id: String) -> Stri
 			return "%s via" % verb
 		KIND_CUTOUT:
 			return "%s cutout" % verb
+		KIND_BOARD_GRAPHIC:
+			# Named by what it IS to the user, not by its kind token: "Delete text"
+			# for a legend and "Delete graphic" for raw geometry. A menu item that
+			# read "Delete board_graphic" would be naming an implementation detail
+			# at the one moment the user is deciding whether to destroy something.
+			var g: Dictionary = data.get_board_graphic(entity_id) if data else {}
+			if str(g.get("kind", "")) == "text":
+				return "%s text" % verb
+			return "%s graphic" % verb
 		KIND_CANDIDATE:
 			# Named here per the checklist even though NO delete path reaches a
 			# candidate today (see _remove_entity / _delete_selection): the noun is
@@ -11499,6 +11711,12 @@ func get_selected_vias() -> Array[String]:
 ## read surface the same way get_selected_vias does.
 func get_selected_cutouts() -> Array[String]:
 	return selected_cutout_ids.duplicate()
+
+
+## The selected board-graphic ids (DCR 01a0418dc6). Completes the per-kind read
+## surface the same way get_selected_cutouts does.
+func get_selected_board_graphics() -> Array[String]:
+	return selected_board_graphic_ids.duplicate()
 
 
 ## Select a component programmatically.

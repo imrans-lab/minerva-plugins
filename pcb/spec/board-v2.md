@@ -30,10 +30,10 @@ codec additionally rejects a non-integer `version` at unmarshal.)
 A minted id is exactly `"<kind>:<32 lowercase hex>"` — a 128-bit crypto-random
 mint, **not** a content hash (a trace's geometry mutates under editing; its
 identity must survive the edit). The kinds are `board`, `trace`, `via`, `hole`,
-`zone`, `cutout`.
+`zone`, `cutout`, `graphic`.
 
 On a **v2** board, the board `id` and the `id` of every trace, via, mounting
-hole, zone and cutout MUST be a well-formed minted id. Anything else — absent, empty, a legacy
+hole, zone, cutout and board graphic MUST be a well-formed minted id. Anything else — absent, empty, a legacy
 ordinal shape like `trace_1` carried in from a `.minpcb` import, uppercase hex,
 or a foreign shape — is `unminted_persistent_id` and fails closed. v1 boards have
 no id requirement.
@@ -115,13 +115,20 @@ straddle the difference:
   STRING to PyYAML's YAML 1.1 resolver, so a numeric design-rule or override
   value written that way is accepted by Go and refused by Python — write
   numbers in plain decimal; no vector expresses the exponent form.
-- **Top-level entity-collection shape IS a shared rule.** Each of the five
-  top-level entity collections — `components`, `nets`, `traces`, `vias`,
-  `mounting_holes` — that is present but not a list (`traces: {}`, `nets: 5`)
+- **Top-level entity-collection shape IS a shared rule.** The collections are
+  `components`, `nets`, `traces`, `vias`, `mounting_holes`, `pth_holes`,
+  `npth_holes`, `zones`, `cutouts` and `board_graphics` — named rather than
+  COUNTED, because a stated count goes stale the next time an entity is modelled,
+  which is exactly how bug `019fb0a7aea7` happened (this sentence said "five"
+  long after the list reached nine). The authorities are `entityListKeys` in
+  `internal/board/yaml.go` and the matching tuple in
+  `worker/pcb_worker/board_validate.py`; they must name the same keys, or a
+  malformed collection fails closed in one language and passes in the other.
+  One that is present but not a list (`traces: {}`, `nets: 5`)
   cannot decode into a Go slice (the codec rejects) and must not silently pass —
   or crash — the Python validator; it is `invalid_board_structure` on both sides
-  (vectors 180/190/200). This holds even for `nets`, which carries no persistent
-  id. A **null item** inside any of the five collections is also
+  (vectors 180/190/200/430). This holds even for `nets`, which carries no persistent
+  id. A **null item** inside any of those collections is also
   `invalid_board_structure` (vector 160): yaml.v3 silently DROPS a null list item
   during slice decode, so a canonical source entity would vanish to make the two
   parsers agree — rejected on both sides instead. The Go codec probes the raw

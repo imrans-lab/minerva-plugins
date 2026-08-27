@@ -392,3 +392,14 @@ test_describe_region.gd
 # oracle in REAL TIME and so takes ~3.5s of wall clock; that cost is the point —
 # the defect is about a clock. UNPINNED for the same reason as the entry above.
 test_transient_status.gd
+
+# NEW — DCR 01a0418dc6 (board-level silk text and graphics). Covers the panel
+# half: the GDScript font mirror's fixture numbers, the B.SilkS mirror
+# convention (risk R7) asserted point-for-point with negative controls, the
+# board_graphics round trip through to_board_dict/from_board_dict, one-undo-step
+# add and delete, the three MCP verbs, and canvas pick/select/delete.
+#
+# UNPINNED: the station that added it ran static gates only, and this file's own
+# rule is not to pin a count nobody has measured on a run. Pin it at the first
+# green run.
+test_board_graphics.gd

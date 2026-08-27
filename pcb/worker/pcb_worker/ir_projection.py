@@ -26,8 +26,10 @@ from .resolved_board import (
     BoardOutline,
     CircleGeometry,
     LineGeometry,
+    BoardGraphic,
     PlacedGraphic,
     PolygonGeometry,
+    PolylineGeometry,
     ProfileOutline,
     RectOutline,
     ResolvedCutout,
@@ -41,6 +43,7 @@ __all__ = [
     "cutout_dicts",
     "cutout_loops_from_dict",
     "graphic_to_dict",
+    "board_graphic_to_dict",
 ]
 
 
@@ -166,6 +169,38 @@ def cutout_loops_from_dict(board: dict) -> list[tuple[str | None, list[tuple[flo
     return loops
 
 
+def _geometry_to_dict(geom) -> dict:
+    """The geometry half of both graphic projections, shared so a kind cannot be
+    spelled one way for a component graphic and another way for a board one.
+
+    Coordinates are emitted as LISTS (the harvest ``isinstance(..., list)``
+    guards reject tuples). Arcs use the modern 3-point ``(start, mid, end)``
+    form, which is exactly what :class:`ArcGeometry` carries. Returns a fresh
+    dict WITHOUT ``layer``/``width`` — the callers own those, because a
+    PlacedGraphic and a BoardGraphic read them off different owners.
+    """
+    if isinstance(geom, LineGeometry):
+        return {"kind": "line",
+                "start": [geom.a[0], geom.a[1]],
+                "end": [geom.b[0], geom.b[1]]}
+    if isinstance(geom, CircleGeometry):
+        return {"kind": "circle",
+                "center": [geom.center[0], geom.center[1]],
+                "radius": geom.radius_mm}
+    if isinstance(geom, ArcGeometry):
+        return {"kind": "arc",
+                "points": [[geom.start[0], geom.start[1]],
+                           [geom.mid[0], geom.mid[1]],
+                           [geom.end[0], geom.end[1]]]}
+    if isinstance(geom, PolygonGeometry):
+        return {"kind": "poly", "points": [[p[0], p[1]] for p in geom.points]}
+    if isinstance(geom, PolylineGeometry):
+        # OPEN chain — distinct from "poly" only in that it does not close.
+        # Glyph strokes arrive here.
+        return {"kind": "polyline", "points": [[p[0], p[1]] for p in geom.points]}
+    raise TypeError(f"unsupported graphic geometry {type(geom)!r}")
+
+
 def graphic_to_dict(graphic: PlacedGraphic) -> dict:
     """One board-ABSOLUTE :class:`PlacedGraphic` → the silk/board-graphic dict shape
     both emitters' harvest paths read. Under the IR's identity component placement
@@ -173,28 +208,27 @@ def graphic_to_dict(graphic: PlacedGraphic) -> dict:
     Coordinates are emitted as LISTS (the harvest ``isinstance(..., list)`` guards
     reject tuples). Arcs use the modern 3-point ``(start, mid, end)`` form, which
     is exactly what :class:`ArcGeometry` carries."""
-    geom = graphic.geometry
-    out: dict = {"layer": graphic.layer.id}
-    if isinstance(geom, LineGeometry):
-        out["kind"] = "line"
-        out["start"] = [geom.a[0], geom.a[1]]
-        out["end"] = [geom.b[0], geom.b[1]]
-    elif isinstance(geom, CircleGeometry):
-        out["kind"] = "circle"
-        out["center"] = [geom.center[0], geom.center[1]]
-        out["radius"] = geom.radius_mm
-    elif isinstance(geom, ArcGeometry):
-        out["kind"] = "arc"
-        out["points"] = [
-            [geom.start[0], geom.start[1]],
-            [geom.mid[0], geom.mid[1]],
-            [geom.end[0], geom.end[1]],
-        ]
-    elif isinstance(geom, PolygonGeometry):
-        out["kind"] = "poly"
-        out["points"] = [[p[0], p[1]] for p in geom.points]
-    else:  # pragma: no cover - GraphicGeometry is a closed union
-        raise TypeError(f"unsupported graphic geometry {type(geom)!r}")
+    out = _geometry_to_dict(graphic.geometry)
+    out["layer"] = graphic.layer.id
+    if graphic.width_mm is not None:
+        out["width"] = graphic.width_mm
+    return out
+
+
+def board_graphic_to_dict(graphic: BoardGraphic) -> dict:
+    """One :class:`BoardGraphic` -> the same loose dict shape
+    :func:`graphic_to_dict` produces for a component-hung
+    :class:`PlacedGraphic`.
+
+    A board graphic has no owning component and its coordinates are already
+    board-ABSOLUTE, so the projection is identical once the layer and geometry
+    are read off — which is exactly why it lives beside its twin rather than in
+    either emitter. The two share the geometry switch through
+    :func:`_geometry_to_dict` so a geometry kind can never be projected one way
+    for a component and another way for the board.
+    """
+    out = _geometry_to_dict(graphic.geometry)
+    out["layer"] = graphic.layer.id
     if graphic.width_mm is not None:
         out["width"] = graphic.width_mm
     return out

@@ -1,0 +1,16 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: DupGraphic
+width_mm: 40
+height_mm: 30
+board_graphics:
+  - id: graphic:11111111111111111111111111111111
+    layer: F.SilkS
+    kind: text
+    text: A
+    position: {x_mm: 2, y_mm: 2}
+  - id: graphic:11111111111111111111111111111111
+    layer: B.SilkS
+    kind: text
+    text: B
+    position: {x_mm: 8, y_mm: 8}

@@ -353,7 +353,8 @@ def harvest_graphic(cx: float, cy: float, rot: float, graphic: dict,
     board-absolute geometry.
 
     Supported kinds (see footprints.py's ``_parse_graphics``): line, circle,
-    poly, arc. Arc has two source forms, BOTH resolved to a TRUE circular arc:
+    poly, polyline, arc. ``poly`` CLOSES back to its first point; ``polyline``
+    does not (glyph strokes and other open chains). Arc has two source forms, BOTH resolved to a TRUE circular arc:
     legacy KiCad ``(center, start, angle)`` (``points`` has 2 entries + an
     ``angle`` field); and the modern KiCad 7/8 3-point ``(start, mid, end)``
     form (``points`` has 3 entries, no ``angle``) — resolved through the
@@ -401,6 +402,22 @@ def harvest_graphic(cx: float, cy: float, rot: float, graphic: dict,
         abs_pts = tuple(_place(cx, cy, rot, side, _num(p[0]), _num(p[1]))
                         for p in pts)
         return SilkHarvest((SilkPoly(abs_pts, width, True),), ())
+
+    if kind == "polyline":
+        # The OPEN twin of "poly", and the ONLY difference is the closed flag.
+        # It exists because a glyph stroke must not gain a closing segment (a
+        # closed "C" is an "O"), which is the same rule refdes_strokes states
+        # for its own return type. Board text authored by
+        # minerva_pcb_add_silk_text arrives on this branch.
+        pts = [p for p in _list(graphic.get("points"))
+               if isinstance(p, list) and len(p) >= 2]
+        if len(pts) < 2:
+            return SilkHarvest((), (SilkWarning(
+                "silk_primitive_unemitted",
+                "silk polyline dropped: fewer than 2 valid points"),))
+        abs_pts = tuple(_place(cx, cy, rot, side, _num(p[0]), _num(p[1]))
+                        for p in pts)
+        return SilkHarvest((SilkPoly(abs_pts, width, False),), ())
 
     if kind == "arc":
         return _harvest_arc(cx, cy, rot, graphic, width, side)

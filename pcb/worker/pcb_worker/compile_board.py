@@ -46,6 +46,7 @@ from agent_router.layers import (CANON_TO_KICAD, canon_to_kicad,
                                  inner_layer_index, is_copper, kicad_to_canon)
 
 from . import bless
+from . import board_graphics as board_graphics_mod
 from . import inline_footprint
 from .board_schema import (
     _BOUNDARY_MESSAGES,
@@ -2838,7 +2839,14 @@ def compile_board(
     # owns the fail-closed geometry rules (strictly-interior, disjoint).
     # ``cutouts: {}`` is still refused — by the shared validate boundary
     # (``invalid_board_structure``), same presence-not-truthiness rule as ever.
-    for unsupported_key in ("board_graphics", "keepouts"):
+    # ``board_graphics`` LEFT THIS LIST in DCR 01a0418dc6, the round that gave
+    # board-level artwork a real owner (:mod:`board_graphics`). It compiles into
+    # ResolvedBoard.board_graphics, both fab emitters draw it, and geometric DRC
+    # projects it as silk — the same four-way landing zones and cutouts each had
+    # to make before their own refusals were lifted. A malformed CONTAINER is
+    # still refused, by validate_board_v2 (``invalid_board_structure``) and again
+    # by the builder.
+    for unsupported_key in ("keepouts",):
         value = board.get(unsupported_key)
         if value is None or (isinstance(value, list) and not value):
             continue
@@ -3102,6 +3110,12 @@ def compile_board(
     vias = _build_vias(board, board_id, net_id_by_name, version, diags)
     holes = _build_holes(board, board_id, version, diags)
     zones = _build_zones(board, board_id, net_id_by_name, version, diags, design_rules)
+    # Board-level artwork (DCR 01a0418dc6). Its own module: the builder owns a
+    # font, five geometry kinds and a fail-closed layer rule, none of which this
+    # file should grow. Text entries expand to N open-polyline primitives here,
+    # so every downstream consumer sees plain geometry and no consumer needs to
+    # know a font exists.
+    board_graphics = board_graphics_mod.build_board_graphics(board, board_id, diags)
 
     # The ordinal-id bridge diagnostic is a v1-only artifact: v2 ids are the
     # persisted minted identity (validated above), not ordinal-derived, so there
@@ -3167,7 +3181,7 @@ def compile_board(
             vias=vias,
             holes=holes,
             zones=zones,
-            board_graphics=(),
+            board_graphics=board_graphics,
             provenance=provenance,
         )
     except (ValueError, TypeError) as exc:

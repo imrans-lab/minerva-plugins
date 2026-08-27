@@ -42,7 +42,8 @@ func MarshalYAML(b *Board) ([]byte, error) {
 // board_validate.py's tuple must name the same keys, or a malformed collection
 // fails closed in one language and passes in the other.
 var entityListKeys = []string{"components", "nets", "traces", "vias",
-	"mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts"}
+	"mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts",
+	"board_graphics"}
 
 // overrideNumKeys mirrors _OVERRIDE_NUM_KEYS in board_validate.py — the typed
 // pin-override fields that must decode as numbers.

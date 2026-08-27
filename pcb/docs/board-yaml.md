@@ -74,6 +74,20 @@ vias:
 mounting_holes:                # optional board-level drilled holes (not on a pad)
   - {x_mm: 5, y_mm: 5, diameter_mm: 3.2, plated: false}   # plated defaults to false (NPTH)
   - {x_mm: 8, y_mm: 5, diameter_mm: 2.0, plated: true, annulus_mm: 3.0}  # PTH: annulus_mm REQUIRED
+board_graphics:                # optional board-OWNED artwork (see "Board graphics")
+  - id: graphic:0123456789abcdef0123456789abcdef
+    layer: B.SilkS             # silk or courtyard ONLY; copper and Edge.Cuts are refused
+    kind: text                 # the board stores the STRING, never its strokes
+    text: (c) 2026 TurnRock
+    position: {x_mm: 10, y_mm: 26}
+    size_mm: 1.2               # CAP HEIGHT in mm
+  - id: graphic:11111111111111111111111111111111
+    layer: F.SilkS
+    kind: polyline             # OPEN chain; `poly` is the closed twin
+    width: 0.15
+    points:
+      - {x_mm: 30, y_mm: 25}
+      - {x_mm: 36, y_mm: 25}
 annotations:                   # OPAQUE passthrough (see below)
   - {id: ann-1, kind: note, text: decoupling near U1}
 route_hints: []                # OPAQUE passthrough (see below)
@@ -439,6 +453,123 @@ round-trips as `mounting_holes` and its holes get uniform id-minting + structura
 validation — the aliases no longer bypass the v2 identity/validation gate (finding
 `019f8b7fb07e` comment 689).
 
+## Board graphics
+
+`board_graphics` is artwork the **board** owns rather than a component: a
+copyright line, a board name, a polarity mark, a courtyard note. It landed with
+DCR `01a0418dc6`.
+
+**Why it had to exist.** Every graphic primitive before it was owned by a
+footprint and placed by that component's transform. There was no legal owner for
+"a line of text on the back of this board", so smart-remote-v2's back-side
+copyright line was authored as **65 hand-generated `B.SilkS` polylines hung off
+TP1** — a 1206 test point at (8, 30) — with every point in *absolute board*
+coordinates that TP1's own placement would have corrupted the moment anyone
+moved the part. The geometry was correct only because nothing ever touched TP1.
+
+### The entry
+
+| field | applies to | meaning |
+|---|---|---|
+| `id` | all | minted `"graphic:<32hex>"` (see "Persistent identity") |
+| `layer` | all | `F.SilkS`, `B.SilkS`, `F.CrtYd` or `B.CrtYd` — **nothing else** |
+| `kind` | all | `text`, `line`, `circle`, `poly`, `polyline`, `rect` |
+| `width` | all | stroke width in mm; defaults to the silk floor (0.15) |
+| `text` | `text` | the string |
+| `position` | `text` | `{x_mm, y_mm}` anchor; the baseline sits on `y_mm` |
+| `size_mm` | `text` | **cap height** in mm (default 1.0) |
+| `rotation_deg` | `text` | rotation about the anchor (default 0) |
+| `h_align` | `text` | `left` (default) or `center` |
+| `mirror` | `text` | override the layer-derived mirroring; normally absent |
+| `start` / `end` | `line`, `rect` | two points; for `rect`, opposite corners |
+| `center` / `radius` | `circle` | centre point and radius in mm |
+| `points` | `poly`, `polyline` | ordered points — `poly` **closes**, `polyline` does not |
+
+Points are the canonical board-level `{x_mm, y_mm}` mapping, the same shape
+`traces[].points`, `zones[].outline` and `cutouts[].outline` use — **not** the
+bare `[x, y]` pair a component's own `graphics` ride with. Go decodes the typed
+`Points []Point` from that mapping alone, so the worker's parser is strict about
+it too: one shape on both sides, or a board parses in one language and is
+refused by the codec that gates every load.
+
+### Text stores what it SAYS, not its strokes
+
+A `text` entry never carries geometry. The strokes are derived on every compile
+from the built-in stroke font (`worker/pcb_worker/board_font.py`, mirrored for
+the panel in `ui/model/pcb_board_font_data.gd`), so:
+
+- the source stays readable and editable — fixing a typo is an edit to one
+  string, not a regeneration of a hundred polylines;
+- the geometry cannot go stale if the font is ever corrected;
+- what the editor draws and what the fab receives come from **one** table.
+
+One entry expands to N stroke primitives in the IR, with derived ids
+`<id>#<k>`. Those derived ids are internal — they exist because the IR needs
+per-primitive identity for diagnostics. Selection, delete-by-id and undo all
+operate on the single source `id`, so one text graphic is one object to a user
+however many strokes it draws.
+
+The font covers all 95 printable ASCII characters. Anything else renders as a
+**box** and is named in the authoring verb's `missing_glyphs` reply — never
+silently dropped, because a dropped character shortens a legend without saying
+so, and a `?` would be a lie the reader cannot detect (`?` is a real glyph).
+
+### Back-side text
+
+`B.SilkS` text is **mirror-written**, automatically, derived from the layer.
+
+A Gerber is plotted as seen from the **top, through the board**, so back legend
+must be mirrored in the file to read correctly once the board is flipped. Tying
+that to the layer rather than to an authored flag means a board cannot carry
+back text that comes out backwards on the fab.
+
+**The mirror is about the text's own anchor, not the board origin.** "Minerva
+v2" at `size_mm: 1.5` anchored at `x_mm: 10` spans x ∈ [10.0, 21.5] on `F.SilkS`
+and x ∈ [-1.5, 10.0] on `B.SilkS` — reflections about x = 10. Reflecting about
+x = 0 would put the label at [-21.5, -10.0], off the board entirely, and would
+mean that asking for text at a position *moved* it. With `h_align: center` the
+text mirrors in place, which is usually what a back-side label wants.
+
+The mirror is applied **once**, when the strokes are derived. The emitters apply
+none of their own: a board graphic is board-absolute, so it takes the same
+`pre_placed` path a compiler-placed component graphic takes — the layer is
+authoritative for side and no further mirror may be applied. Applying a second
+one at emission time is risk **R7**, and it would read backwards on the
+fabricated board while every YAML-level check stayed green, which is why the
+oracle inspects the emitted Gerber with an independent parser rather than
+trusting the emitter's self-report
+(`worker/tests/test_board_graphics.py::test_back_silk_gerber_carries_the_mirrored_strokes`).
+
+### Layers are fail-closed
+
+Silk and courtyard only, and both exclusions are refusals rather than drops:
+
+- **Copper** would be unconnected metal that routing and geometric DRC must
+  reason about with no net — both already treat a copper board graphic as
+  `unsupported_geometry`.
+- **`Edge.Cuts`** already has an owner: the board profile and its `cutouts`. A
+  second way to draw the rim is a second answer to "how big is this board".
+
+A malformed or out-of-vocabulary entry is an **error** (`invalid_board_graphic`),
+never a silent drop. That is the opposite of the warn-and-drop ruling for
+*footprint* silk, deliberately: footprint silk arrives in bulk from a vendored
+library nobody curated, while a board graphic is one object a person placed on
+purpose, whose disappearance would be invisible.
+
+Courtyard graphics are stored, drawn on the canvas and carried into the KiCad
+export, but emit **no Gerber** — courtyard is a documentation layer that is not
+among KiCad's nine default fab layers, exactly as a component's own courtyard
+geometry is skipped.
+
+### What consumes them
+
+| consumer | behaviour |
+|---|---|
+| Gerber (`build_gerbers_ir`) | silk strokes land in `F_SilkS` / `B_SilkS`; courtyard skipped |
+| KiCad export | `gr_line` / `gr_arc` / `gr_circle` on the graphic's own layer |
+| Geometric DRC | projected as silk primitives with `origin: "board_graphic"` |
+| Panel | drawn on the canvas, selectable, deletable, one undo step |
+
 ## Persistent identity (schema v2)
 
 Schema v2 introduces **persistent, mint-once entity identity**. This is the
@@ -450,8 +581,8 @@ any reference to it (Sol K2 review).
 
 ### The `id` field
 
-`Board`, `Trace`, `Via`, `Hole`, `Zone`, and `Cutout` carry an opaque string `id`
-(`"board:<hex>"`, `"trace:<hex>"`, …):
+`Board`, `Trace`, `Via`, `Hole`, `Zone`, `Cutout`, and `Graphic` carry an opaque
+string `id` (`"board:<hex>"`, `"trace:<hex>"`, `"graphic:<hex>"`, …):
 
 - **Mint-once, never recomputed.** The id is assigned exactly once — by the
   v1→v2 migration for existing boards, or at creation for new ones — and is *not*

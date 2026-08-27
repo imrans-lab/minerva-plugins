@@ -399,6 +399,32 @@ func (z *Zone) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// --- Graphic ---
+
+func (g Graphic) MarshalJSON() ([]byte, error) {
+	type alias Graphic
+	base, err := json.Marshal(alias(g))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, g.Extra, knownJSONKeys(reflect.TypeOf(Graphic{})))
+}
+
+func (g *Graphic) UnmarshalJSON(data []byte) error {
+	type alias Graphic
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*g = Graphic(a)
+	extra, err := splitExtra(data, knownJSONKeys(reflect.TypeOf(Graphic{})))
+	if err != nil {
+		return err
+	}
+	g.Extra = extra
+	return nil
+}
+
 // --- Cutout ---
 
 func (c Cutout) MarshalJSON() ([]byte, error) {

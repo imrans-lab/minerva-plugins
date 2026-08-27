@@ -34,6 +34,7 @@ from . import silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .geometry import place_point
 from .ir_projection import (
+    board_graphic_to_dict,
     cutout_dicts,
     cutout_loops_from_dict,
     graphic_to_dict,
@@ -508,6 +509,25 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
                 f'(layer "Edge.Cuts") (width {EDGE_CUTS_WIDTH_MM}))'
             )
 
+    # Board-level graphics — silk legend and courtyard documentation that
+    # belongs to the BOARD rather than to any footprint (DCR 01a0418dc6).
+    #
+    # Drawn as ``gr_*`` nodes, which is KiCad's own board-level graphic family
+    # and the same one the Edge.Cuts rim above uses. Text is NOT emitted as
+    # ``gr_text``: it reaches here already expanded to stroke polylines, so what
+    # KiCad renders is byte-for-byte the artwork the Gerber carries. Emitting a
+    # gr_text instead would hand the DRC oracle a DIFFERENT legend than the one
+    # fabricated — KiCad would re-render the string in ITS font at ITS metrics —
+    # which is exactly the emitter/checker disagreement _emit_silk's frame note
+    # was written to prevent.
+    #
+    # Back-side artwork needs no ``(effects (justify mirror))`` for the same
+    # reason: the mirror is already baked into the coordinates, so a KiCad-side
+    # mirror would be the second flip (risk R7).
+    for graphic in _list(board.get("board_graphics")):
+        if isinstance(graphic, dict):
+            out.extend(_board_graphic_sexprs(graphic))
+
     # Components → footprints.
     for comp in _list(board.get("components")):
         if isinstance(comp, dict):
@@ -804,6 +824,76 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         lines.extend(_footprint_graphics(comp, comp.get("ref"), diagnostics))
     lines.append("  )")
     return "\n".join(lines)
+
+
+def _board_graphic_sexprs(graphic: dict) -> list[str]:
+    """One board-level graphic -> its ``gr_*`` s-expression lines.
+
+    Open and closed chains differ by exactly one segment — the closing one — so
+    they share a walk rather than two near-identical loops. ``poly`` closes,
+    ``polyline`` does not, which is the same distinction
+    :func:`silk_source.harvest_graphic` draws and the reason a glyph stroke
+    cannot be a ``poly`` (a closed "C" is an "O").
+
+    Returns [] for a graphic this emitter cannot draw rather than raising: the
+    layer allow-list is enforced at COMPILE time (board_graphics.ALLOWED_ROLES),
+    so anything unexpected here is a projection bug, and a fab file is not the
+    place to discover it. The gerber emitter's own guard is the loud one.
+    """
+    layer = graphic.get("layer")
+    if not isinstance(layer, str) or not layer:
+        return []
+    width = graphic.get("width")
+    width = width if isinstance(width, (int, float)) and not isinstance(width, bool) \
+        else _SILK_GRAPHIC_WIDTH_MM
+    kind = graphic.get("kind")
+
+    def _pt(value):
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return float(value[0]), float(value[1])
+        return None
+
+    def _chain(points, closed):
+        lines = []
+        count = len(points)
+        span = count if closed else count - 1
+        for index in range(span):
+            x1, y1 = points[index]
+            x2, y2 = points[(index + 1) % count]
+            lines.append(
+                f'  (gr_line (start {x1} {y1}) (end {x2} {y2}) '
+                f'(layer "{_esc(layer)}") (width {width}))')
+        return lines
+
+    if kind == "line":
+        a, b = _pt(graphic.get("start")), _pt(graphic.get("end"))
+        return [] if a is None or b is None else _chain([a, b], False)
+
+    if kind == "circle":
+        center = _pt(graphic.get("center"))
+        radius = graphic.get("radius")
+        if center is None or not isinstance(radius, (int, float)) or isinstance(radius, bool):
+            return []
+        # KiCad's gr_circle takes centre + a point ON the circumference.
+        return [f'  (gr_circle (center {center[0]} {center[1]}) '
+                f'(end {center[0] + float(radius)} {center[1]}) '
+                f'(layer "{_esc(layer)}") (width {width}))']
+
+    if kind in ("poly", "polyline"):
+        points = [q for q in (_pt(v) for v in _list(graphic.get("points"))) if q is not None]
+        if len(points) < 2:
+            return []
+        return _chain(points, kind == "poly")
+
+    if kind == "arc":
+        points = [q for q in (_pt(v) for v in _list(graphic.get("points"))) if q is not None]
+        if len(points) != 3:
+            return []
+        start, mid, end = points
+        return [f'  (gr_arc (start {start[0]} {start[1]}) (mid {mid[0]} {mid[1]}) '
+                f'(end {end[0]} {end[1]}) (layer "{_esc(layer)}") (width {width}))']
+
+    return []
 
 
 def _rect_edges(x1, y1, x2, y2):
@@ -1273,10 +1363,6 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
             f"kicad._ir_board_dict: board has {len(unfilled)} copper pour(s) with "
             f"NO computed fill ({', '.join(unfilled)}) — refusing to hand a DRC "
             f"oracle a board whose copper we never computed")
-    if board.board_graphics:
-        raise ValueError(
-            f"kicad._ir_board_dict: board has {len(board.board_graphics)} board-level "
-            f"graphic(s) the kicad bridge does not map yet — refusing to drop them silently")
     if board.design_rules.net_classes:
         raise ValueError(
             f"kicad._ir_board_dict: board has {len(board.design_rules.net_classes)} net "
@@ -1319,6 +1405,13 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
         "traces": _kicad_trace_dicts(board, net_name_of),
         "vias": _kicad_via_dicts(board, net_name_of),
         "zones": _kicad_zone_dicts(board, net_name_of),
+        # Board-level artwork (DCR 01a0418dc6). The geometry projection is the
+        # SHARED one (ir_projection.board_graphic_to_dict), so this emitter and
+        # the gerber emitter read the same dict shape for the same primitive —
+        # the whole reason that module exists. Only the id rides along on top,
+        # for diagnostics.
+        "board_graphics": [dict(board_graphic_to_dict(g), id=g.id)
+                           for g in board.board_graphics],
     }
 
 

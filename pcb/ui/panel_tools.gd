@@ -81,6 +81,7 @@ const BusGeom := preload("model/pcb_bus_geometry.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 const PcbBusLabels := preload("model/pcb_bus_labels.gd")
 const PcbViaDimensions := preload("model/pcb_via_dimensions.gd")
+const PcbBoardGraphic := preload("model/pcb_board_graphic.gd")
 const StagedEntities := preload("model/pcb_staged_entities.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
@@ -243,6 +244,12 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _describe_cutout(host, args)
 		"minerva_pcb_create_cutout":
 			return _create_cutout(host, args)
+		"minerva_pcb_add_silk_text":
+			return _add_silk_text(host, args)
+		"minerva_pcb_add_graphic":
+			return _add_graphic(host, args)
+		"minerva_pcb_delete_graphic":
+			return _delete_graphic(host, args)
 		"minerva_pcb_delete_cutout":
 			return _delete_cutout(host, args)
 		"minerva_pcb_propose_zone":
@@ -5347,6 +5354,202 @@ static func _create_cutout(host, args: Dictionary) -> Dictionary:
 		"cutout_id": str(cutout.get("id", "")),
 		"point_count": data.zone_outline_points(cutout).size(),
 	})
+
+
+# ── DCR 01a0418dc6: BOARD-LEVEL GRAPHICS ──────────────────────────────────────
+# Artwork the BOARD owns rather than a component. Before these verbs the only
+# graphic owner was a footprint, so board text had to be hung off whatever part
+# happened to be nearby — smart-remote-v2 carries 65 hand-generated B.SilkS
+# polylines attached to TP1, a test point, in absolute board coordinates.
+#
+# Both authoring verbs are ONE journalled undo step (mutate, then
+# save_to_history — the mutate-then-snapshot order bug 019fb5ad791c fixed), mint
+# their id through PcbEntityId so it is the same "<type>:<32hex>" token the Go
+# codec and the Python validator accept, and reply with that id plus the bounds
+# the artwork actually occupies.
+
+
+## Parse one {x_mm, y_mm} point, or null. Board graphics use the canonical
+## board-level point shape, the same one zones, cutouts and traces use — never
+## the bare [x, y] pair component graphics ride with.
+static func _graphic_point(raw) -> Variant:
+	if not (raw is Dictionary) or not raw.has("x_mm") or not raw.has("y_mm"):
+		return null
+	return {"x_mm": float(raw["x_mm"]), "y_mm": float(raw["y_mm"])}
+
+
+static func _graphic_points(raw) -> Variant:
+	if not (raw is Array):
+		return null
+	var out: Array = []
+	for p in raw:
+		var pt = _graphic_point(p)
+		if pt == null:
+			return null
+		out.append(pt)
+	return out
+
+
+## Render a string as stroke-font polylines on a silk layer.
+##
+## B-SIDE TEXT IS MIRRORED, automatically and unconditionally, because a Gerber
+## is plotted as seen from the top THROUGH the board: back legend has to be
+## mirror-written in the file to read correctly once the board is flipped. The
+## mirror is about the text's own anchor, so asking for text at (10, 10) puts it
+## at (10, 10) on either side — it does not move, it reads the other way. The
+## reply says `mirrored` so the caller never has to infer it.
+##
+## The board stores WHAT THE TEXT SAYS, not its strokes: the panel and the
+## worker's compiler both derive glyphs from the same table, so fixing a typo is
+## an edit to one string rather than a regeneration of a hundred polylines.
+static func _add_silk_text(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var text := str(args.get("text", ""))
+	if text.is_empty():
+		return _err("text is required and must not be empty")
+	if not args.has("position"):
+		return _err("position is required: {x_mm, y_mm}")
+	var pos = _graphic_point(args.get("position"))
+	if pos == null:
+		return _err("position needs x_mm and y_mm")
+	var layer := str(args.get("layer", "F.SilkS"))
+	if not PcbBoardGraphic.is_silk(layer):
+		return _err("layer must be F.SilkS or B.SilkS for text, got %s" % layer)
+	var size_mm := float(args.get("size_mm", PcbBoardGraphic.DEFAULT_TEXT_SIZE_MM))
+	var built: Dictionary = PcbBoardGraphic.build_text(
+		text, float(pos["x_mm"]), float(pos["y_mm"]), layer, size_mm,
+		float(args.get("rotation_deg", 0.0)), str(args.get("id", "")),
+		float(args.get("width_mm", -1.0)), str(args.get("h_align", "left")))
+	if not built["ok"]:
+		return _err(built["error"])
+	var stored: Dictionary = data.add_board_graphic(built["graphic"])
+	if stored.is_empty():
+		return _err("Board graphic could not be added (duplicate or malformed id).")
+	data.save_to_history("Add silk text")
+	var reply: Dictionary = PcbBoardGraphic.summary(stored)
+	# Unknown characters draw a BOX and are named here rather than dropped. A
+	# dropped character shortens a legend without saying so; a box is visible in
+	# the editor and this list explains it without a second call.
+	var missing: Array = PcbBoardGraphic.display(stored)["missing"]
+	reply["missing_glyphs"] = missing
+	if not missing.is_empty():
+		reply["note"] = ("%d character(s) have no glyph in the board font and are "
+			+ "drawn as a box: %s") % [missing.size(), ", ".join(missing)]
+	return _ok(reply)
+
+
+## Author raw stroke geometry on a silk or courtyard layer.
+##
+## Accepts exactly one of `polylines`, `points`, `rect` or `circle`. Copper and
+## Edge.Cuts are refused: board-level copper would be unconnected metal that
+## routing and DRC must reason about with no net, and the board rim already has
+## an owner (the profile and its cutouts).
+static func _add_graphic(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var layer := str(args.get("layer", ""))
+	if layer.is_empty():
+		return _err("layer is required: one of %s" % ", ".join(PcbBoardGraphic.ALLOWED_LAYERS))
+	var width_mm := float(args.get("width_mm", -1.0))
+
+	# EXACTLY ONE geometry key. Accepting several and silently preferring one is
+	# how a caller ends up drawing something it did not ask for.
+	var supplied: Array = []
+	for key in ["polylines", "points", "rect", "circle"]:
+		if args.has(key):
+			supplied.append(key)
+	if supplied.size() != 1:
+		return _err("supply exactly one of polylines, points, rect or circle (got %d: %s)"
+			% [supplied.size(), ", ".join(supplied)])
+
+	var specs: Array = []
+	match supplied[0]:
+		"polylines":
+			var raw = args.get("polylines")
+			if not (raw is Array) or (raw as Array).is_empty():
+				return _err("polylines must be a non-empty array of point arrays")
+			for chain in raw:
+				var pts = _graphic_points(chain)
+				if pts == null:
+					return _err("every polyline point needs x_mm and y_mm")
+				specs.append({"kind": "polyline", "points": pts})
+		"points":
+			var pts = _graphic_points(args.get("points"))
+			if pts == null:
+				return _err("every point needs x_mm and y_mm")
+			var closed := bool(args.get("closed", false))
+			specs.append({"kind": "poly" if closed else "polyline", "points": pts})
+		"rect":
+			var r = args.get("rect")
+			if not (r is Dictionary):
+				return _err("rect must be {start:{x_mm,y_mm}, end:{x_mm,y_mm}}")
+			var a = _graphic_point((r as Dictionary).get("start"))
+			var b = _graphic_point((r as Dictionary).get("end"))
+			if a == null or b == null:
+				return _err("rect needs start and end points with x_mm and y_mm")
+			specs.append({"kind": "rect", "start": a, "end": b})
+		"circle":
+			var c = args.get("circle")
+			if not (c is Dictionary):
+				return _err("circle must be {center:{x_mm,y_mm}, radius_mm:<n>}")
+			var centre = _graphic_point((c as Dictionary).get("center"))
+			var radius := float((c as Dictionary).get("radius_mm", 0.0))
+			if centre == null or radius <= 0.0:
+				return _err("circle needs a center with x_mm/y_mm and a positive radius_mm")
+			specs.append({"kind": "circle", "center": centre, "radius": radius})
+
+	# Build EVERY payload before writing ANY of them, so a malformed third chain
+	# refuses the whole call instead of leaving one and a half graphics on the
+	# board for the next undo to half-restore.
+	var payloads: Array = []
+	var requested_id := str(args.get("id", ""))
+	for i in specs.size():
+		var built: Dictionary = PcbBoardGraphic.build_geometry(
+			layer, specs[i], width_mm,
+			requested_id if (i == 0 and specs.size() == 1) else "")
+		if not built["ok"]:
+			return _err(built["error"])
+		payloads.append(built["graphic"])
+
+	data.begin_batch()
+	var written: Array = []
+	for payload in payloads:
+		var stored: Dictionary = data.add_board_graphic(payload)
+		if not stored.is_empty():
+			written.append(PcbBoardGraphic.summary(stored))
+	data.end_batch("Add graphic" if written.size() == 1 else "Add graphic (%d)" % written.size())
+	if written.is_empty():
+		return _err("No graphic was added (duplicate or malformed id).")
+	if written.size() == 1:
+		return _ok(written[0])
+	return _ok({"graphics": written, "graphic_count": written.size()})
+
+
+## Delete one board graphic by id. ONE undo step, and an unknown id is an
+## explicit error rather than a silent no-op — the same contract _delete_zone
+## keeps. Mutate THEN snapshot (bug 019fb5ad791c: snapshotting first makes redo
+## silently do nothing).
+static func _delete_graphic(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var graphic_id := str(args.get("graphic_id", ""))
+	if graphic_id.is_empty():
+		return _err("graphic_id is required")
+	var graphic: Dictionary = data.get_board_graphic(graphic_id)
+	if graphic.is_empty():
+		return _err("Unknown board graphic: %s" % graphic_id)
+	# Read the reply fields BEFORE the removal — afterwards the dict is off the
+	# board and `summary` would be describing something that no longer exists.
+	var summary: Dictionary = PcbBoardGraphic.summary(graphic)
+	if not data.remove_board_graphic(graphic_id):
+		return _err("Unknown board graphic: %s" % graphic_id)
+	data.save_to_history("Delete board graphic " + graphic_id)
+	summary["deleted"] = graphic_id
+	return _ok(summary)
 
 
 # ── Epoch UX4 station 8 (DCR S8): the STAGING family ──────────────────────────

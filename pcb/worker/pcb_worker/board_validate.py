@@ -126,7 +126,8 @@ def validate_board_v2(board: dict) -> list[str]:
     # _check_design_rules).
     lists: dict[str, list] = {}
     for key in ("components", "nets", "traces", "vias",
-                "mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts"):
+                "mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts",
+                "board_graphics"):
         items, ok = _as_list(board.get(key))
         lists[key] = items
         if not ok:
@@ -181,6 +182,12 @@ def validate_board_v2(board: dict) -> list[str]:
         # MigrateV1toV2 mints in, so a board violating two domains yields the
         # same first code on both sides.
         _check_entity_ids("cutout", [lists["cutouts"]], codes)
+        # Board graphics own one collection and are checked LAST, after cutouts
+        # — the same order Go's Validate walks and MigrateV1toV2 mints in, so a
+        # board violating two domains yields the same FIRST code on both sides.
+        # Appending rather than inserting is what keeps every existing board's
+        # first-violation code where it was (DCR 01a0418dc6).
+        _check_entity_ids("graphic", [lists["board_graphics"]], codes)
 
     for comp in lists["components"]:
         if not isinstance(comp, dict):

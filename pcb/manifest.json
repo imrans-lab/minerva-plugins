@@ -817,6 +817,59 @@
       }
     },
     {
+      "name": "minerva_pcb_add_silk_text",
+      "description": "Render a string as silkscreen stroke geometry owned by the BOARD (not by a component). Args {editor_name, text, position:{x_mm,y_mm}, layer, size_mm, rotation_deg?, h_align?, width_mm?, id?}. size_mm is CAP HEIGHT: a capital is exactly that tall. B.SilkS text is MIRRORED automatically so it reads correctly once the board is flipped — a Gerber is plotted as seen from the top THROUGH the board, so back legend must be mirror-written in the file. The mirror is about the text's own anchor, so text asked for at (10,10) sits at (10,10) on either side: it reads the other way, it does not move. The board stores what the text SAYS, not its strokes, so fixing a typo is an edit to one string rather than a regeneration of a hundred polylines. Returns {graphic_id, layer, kind, text, size_mm, rotation_deg, mirrored, width_mm, bounds, missing_glyphs}. Characters with no glyph in the board font are drawn as a BOX and listed in missing_glyphs, never silently dropped. ONE undo step. Remove it with minerva_pcb_delete_graphic, or select it on the canvas and press Delete.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "text": {"type": "string", "description": "The string to render. Printable ASCII is fully covered; any other character draws a box and is reported in missing_glyphs."},
+          "position": {"type": "object", "description": "Anchor in board mm: the text baseline sits on y_mm, and x_mm is the left edge unless h_align is \"center\".", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}, "required": ["x_mm", "y_mm"]},
+          "layer": {"type": "string", "enum": ["F.SilkS", "B.SilkS"], "description": "Silk layer. B.SilkS mirrors the glyphs. Default \"F.SilkS\"."},
+          "size_mm": {"type": "number", "description": "Cap height in mm. Default 1.0, matching a reference designator."},
+          "rotation_deg": {"type": "number", "description": "Rotation about the anchor, KiCad convention. Default 0."},
+          "h_align": {"type": "string", "enum": ["left", "center"], "description": "Anchor at the string's left edge (default) or its centre. A centred back-side label mirrors in place."},
+          "width_mm": {"type": "number", "description": "Stroke width in mm. Default 0.15, the silk text floor."},
+          "id": {"type": "string", "description": "Optional pre-minted \"graphic:<32hex>\" id. Omit to have one minted."}
+        },
+        "required": ["editor_name", "text", "position"]
+      }
+    },
+    {
+      "name": "minerva_pcb_add_graphic",
+      "description": "Author raw stroke geometry owned by the BOARD on a silk or courtyard layer. Args {editor_name, layer, width_mm?, id?} plus EXACTLY ONE of: polylines (array of open point-chains), points (with closed:true for a closed polygon), rect:{start,end}, circle:{center,radius_mm}. Every point is {x_mm, y_mm} in board coordinates — the same shape zone and cutout outlines use, NOT the bare [x,y] pair component graphics ride with. Copper and Edge.Cuts are REFUSED: board-level copper would be unconnected metal with no net, and the board rim already has an owner (the profile and its cutouts). Returns {graphic_id, layer, kind, width_mm, bounds}, or {graphics:[...], graphic_count} when several polylines were supplied. ONE undo step for the whole call. Remove with minerva_pcb_delete_graphic.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "layer": {"type": "string", "enum": ["F.SilkS", "B.SilkS", "F.CrtYd", "B.CrtYd"], "description": "Silk or courtyard layer."},
+          "polylines": {"type": "array", "description": "Open stroke chains. Each chain is an array of >=2 {x_mm,y_mm} points and never closes back to its first point.", "items": {"type": "array", "items": {"type": "object", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}, "required": ["x_mm", "y_mm"]}}},
+          "points": {"type": "array", "description": "A single chain of {x_mm,y_mm} points. Open (>=2 points) unless closed is true, in which case >=3.", "items": {"type": "object", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}, "required": ["x_mm", "y_mm"]}},
+          "closed": {"type": "boolean", "description": "With `points`: close the chain back to its first point. Default false."},
+          "rect": {"type": "object", "description": "Axis-aligned box from two opposite corners.", "properties": {"start": {"type": "object", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}}, "end": {"type": "object", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}}}, "required": ["start", "end"]},
+          "circle": {"type": "object", "description": "Circle outline (not filled).", "properties": {"center": {"type": "object", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}}, "radius_mm": {"type": "number"}}, "required": ["center", "radius_mm"]},
+          "width_mm": {"type": "number", "description": "Stroke width in mm. Default 0.15, the silk graphic floor."},
+          "id": {"type": "string", "description": "Optional pre-minted \"graphic:<32hex>\" id. Omit to have one minted."}
+        },
+        "required": ["editor_name", "layer"]
+      }
+    },
+    {
+      "name": "minerva_pcb_delete_graphic",
+      "description": "Delete one board-level graphic by id. Args {editor_name, graphic_id}. A text graphic is ONE object however many strokes it draws, so one call removes the whole legend and one undo restores it. Returns what was deleted {deleted, graphic_id, layer, kind, bounds, ...}. Unknown graphic_id is an error, not a silent no-op. The GUI equivalent is selecting the artwork on the canvas and pressing Delete, or right-click -> \"Delete text\" / \"Delete graphic\".",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "graphic_id": {"type": "string", "description": "The \"graphic:<32hex>\" id returned by minerva_pcb_add_silk_text or minerva_pcb_add_graphic"}
+        },
+        "required": ["editor_name", "graphic_id"]
+      }
+    },
+    {
       "name": "minerva_pcb_propose_zone",
       "description": "STAGE a zone (copper pour or keepout) as a DRAFT — the staging family's twin of minerva_pcb_create_zone (same args, same validation, same refusal texts), landing a review ghost instead of writing the board. FAMILY NOTE: propose_* tools STAGE BOARD ENTITIES; the unrelated workspace_propose_* tools run the ROUTER. Nothing is journalled and nothing appears on the board until minerva_pcb_staged_accept; the ghost persists via the routing sidecar without an explicit save. A staged keepout also detours DRAFT route proposals (the composed request). Reply: {entity_id, staged_id, kind, net, layer, point_count}.",
       "executor": "panel",

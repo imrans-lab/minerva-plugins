@@ -206,6 +206,26 @@ type Board struct {
 	PTHHoles  []Hole `json:"pth_holes,omitempty" yaml:"pth_holes,omitempty"`
 	NPTHHoles []Hole `json:"npth_holes,omitempty" yaml:"npth_holes,omitempty"`
 
+	// BoardGraphics is artwork owned by the BOARD rather than by a component:
+	// silk legend (a copyright line, a board name, a polarity mark) and
+	// courtyard documentation (DCR 01a0418dc6).
+	//
+	// WHY IT HAD TO BE TYPED. Before this field, a top-level `board_graphics:`
+	// key rode Board.Extra — it survived a round trip, but it was invisible to
+	// id minting, to the entity-list probe, and to Validate. The consequence was
+	// not theoretical: smart-remote-v2's back-side copyright line is 65 B.SilkS
+	// polylines hung off TP1, a test point, in absolute board coordinates,
+	// because the board had no legal owner for them and a component did. An
+	// untyped ride-along would have kept it that way.
+	//
+	// A `text` graphic stores WHAT IT SAYS, not its strokes — the worker's font
+	// derives those on every compile (worker/pcb_worker/board_graphics.py). That
+	// is why this struct has no geometry field for text: there is nothing to
+	// carry, and a baked copy is a copy that goes stale.
+	//
+	// omitempty so a board without artwork round-trips byte-identically.
+	BoardGraphics []Graphic `json:"board_graphics,omitempty" yaml:"board_graphics,omitempty"`
+
 	// Annotations and RouteHints are opaque passthrough — carried losslessly,
 	// never interpreted here.
 	Annotations []Blob `json:"annotations,omitempty" yaml:"annotations,omitempty"`
@@ -582,6 +602,72 @@ type Zone struct {
 // a mounting hole or a zone — so adding it for cutouts alone would make a hole
 // 3 mm off the board edge legal while a cutout there is not. Containment should
 // arrive once, applied to holes+zones+cutouts together.
+// Graphic is one piece of BOARD-LEVEL artwork — see Board.BoardGraphics.
+//
+// ONE STRUCT, SIX KINDS, and the geometry fields are a union discriminated by
+// Kind rather than six structs behind an interface. That is deliberate: YAML and
+// JSON both decode a flat mapping far more simply than a tagged union, every
+// other entity in this codec is a flat struct, and the SEMANTIC validation that
+// would justify the extra machinery ("a circle needs a radius") lives in the
+// worker's compiler, which owns the font and the layer rule anyway. This codec's
+// job is lossless carriage plus identity, and a flat struct does that.
+//
+// Kind is one of: text, line, circle, poly, polyline, rect.
+//   - text            Text + Position + SizeMM + RotationDeg
+//   - line            Start + End
+//   - circle          Center + Radius
+//   - poly            Points, CLOSED (>= 3)
+//   - polyline        Points, OPEN (>= 2) — what a glyph stroke is
+//   - rect            Start + End (opposite corners)
+//
+// Points are the canonical board-level {x_mm, y_mm} mapping, the same shape
+// Trace.Points / Zone.Outline / Cutout.Outline use — NOT the bare [x, y] pair
+// component graphics ride with. The worker's parser is strict about this for
+// the same reason: one shape on both sides, or a board parses in one language
+// and is refused in the other.
+type Graphic struct {
+	// ID is the persistent, mint-once graphic identity (schema v2+) — same
+	// rationale as Zone.ID and Cutout.ID. Opaque token ("graphic:<32 hex>");
+	// empty on v1; omitempty for lossless round-trip.
+	ID string `json:"id,omitempty" yaml:"id,omitempty"`
+
+	// Layer is a silk or courtyard layer ("F.SilkS", "B.SilkS", "F.CrtYd",
+	// "B.CrtYd"). Copper and Edge.Cuts are refused by the worker's compiler,
+	// not here: this codec does not own the layer vocabulary.
+	//
+	// Not omitempty. A graphic with no layer is not a terse graphic, it is a
+	// broken one, and it must not serialize as if the field were optional —
+	// the same reasoning as Zone.Layer.
+	Layer string `json:"layer" yaml:"layer"`
+	Kind  string `json:"kind" yaml:"kind"`
+
+	// Width is the stroke width in mm. Omitempty: absent means "take the
+	// silk default", which the worker resolves from silk_source's constants so
+	// board legend and footprint legend cannot drift onto different floors.
+	Width float64 `json:"width,omitempty" yaml:"width,omitempty"`
+
+	// --- text ---
+	Text        string  `json:"text,omitempty" yaml:"text,omitempty"`
+	Position    *Point  `json:"position,omitempty" yaml:"position,omitempty"`
+	SizeMM      float64 `json:"size_mm,omitempty" yaml:"size_mm,omitempty"`
+	RotationDeg float64 `json:"rotation_deg,omitempty" yaml:"rotation_deg,omitempty"`
+	// Mirror overrides the layer-derived mirroring of text glyphs. A POINTER
+	// because unset and false are different states: unset means "derive from the
+	// layer" (back-side text is mirror-written so it reads correctly through the
+	// board), while an explicit false is a deliberate exception. A plain bool
+	// would collapse the two and omitempty would drop an authored false.
+	Mirror *bool `json:"mirror,omitempty" yaml:"mirror,omitempty"`
+
+	// --- geometry ---
+	Start  *Point  `json:"start,omitempty" yaml:"start,omitempty"`
+	End    *Point  `json:"end,omitempty" yaml:"end,omitempty"`
+	Center *Point  `json:"center,omitempty" yaml:"center,omitempty"`
+	Radius float64 `json:"radius,omitempty" yaml:"radius,omitempty"`
+	Points []Point `json:"points,omitempty" yaml:"points,omitempty"`
+
+	Extra map[string]interface{} `json:"-" yaml:",inline"`
+}
+
 type Cutout struct {
 	// ID is the persistent, mint-once cutout identity (schema v2+) — same
 	// rationale as Trace.ID and Zone.ID: cutouts are reorderable, so an

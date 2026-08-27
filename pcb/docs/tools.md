@@ -68,6 +68,9 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_describe_cutout` | read-only; full cutout incl. outline points (`zone_outline_points` → `zone_outline_to_list` round trip, reused) (below) |
 | `minerva_pcb_create_cutout` | `data.create_cutout`; one journalled step, refused verbatim via `cutout_author_error` (below) |
 | `minerva_pcb_delete_cutout` | `data.remove_cutout`; one journalled step, mirrors `delete_zone`'s idiom (below) |
+| `minerva_pcb_add_silk_text` | `PcbBoardGraphic.build_text` + `data.add_board_graphic`; one journalled step; B.SilkS mirrors (below) |
+| `minerva_pcb_add_graphic` | `PcbBoardGraphic.build_geometry` + `data.add_board_graphic`; one journalled step for the whole call (below) |
+| `minerva_pcb_delete_graphic` | `data.remove_board_graphic`; one journalled step, mirrors `delete_zone`'s idiom (below) |
 | `minerva_pcb_propose_zone` | THE STAGING FAMILY (Epoch UX4, DCR `019fe07523ca`) — arg-identical twin of `create_zone` that lands a review GHOST via `build_zone_payload` + `panel.stage_built_payload` (author "ai"); nothing on the board until accept. NOT the router's `workspace_propose_*` family |
 | `minerva_pcb_propose_cutout` | staging twin of `create_cutout`, same contract as `propose_zone` |
 | `minerva_pcb_staged_list` | live staged drafts (+ `include_terminal` audit trail); rows carry canonical `entity_id` + store `staged_id` + kind/disposition/author/note |
@@ -388,6 +391,82 @@ by the same band. Compile owns the fail-closed geometry rules — strictly
 interior to the rim, pairwise-disjoint bounding boxes, no self-intersection,
 no zero area — all under `invalid_cutout_outline`; see `docs/board-yaml.md`'s
 "Cut-outs" section for the full contract.
+
+## Board graphics (`minerva_pcb_add_silk_text` / `add_graphic` / `delete_graphic`, DCR `01a0418dc6`)
+
+Artwork the **board** owns rather than a component. Before these verbs the only
+graphic owner was a footprint, so board text had to be hung off whatever part
+happened to be nearby: smart-remote-v2 carries 65 hand-generated `B.SilkS`
+polylines attached to **TP1**, a 1206 test point, in absolute board coordinates
+that TP1's own placement would have corrupted the moment anyone moved it.
+
+The full schema — every field, the layer allow-list and the mirroring convention
+— is in `docs/board-yaml.md` under "Board graphics". What follows is the verb
+surface.
+
+### `minerva_pcb_add_silk_text`
+
+`{editor_name, text, position:{x_mm,y_mm}, layer, size_mm, rotation_deg?,
+h_align?, width_mm?, id?}` → `{graphic_id, layer, kind, text, size_mm,
+rotation_deg, mirrored, width_mm, bounds, missing_glyphs}`.
+
+- `size_mm` is **cap height**: a capital is exactly that tall.
+- `layer` is `F.SilkS` or `B.SilkS`. **B-side text is mirrored automatically**,
+  derived from the layer, so back legend reads correctly once the board is
+  flipped. The mirror is about the text's own anchor — text asked for at
+  (10, 10) sits at (10, 10) on either side; it reads the other way, it does not
+  move. The reply's `mirrored` says so, so a caller never has to infer it.
+- The board stores **what the text says**, not its strokes. Fixing a typo is an
+  edit to one string rather than a regeneration of a hundred polylines.
+- Characters with no glyph render as a **box** and are listed in
+  `missing_glyphs`, with a `note` naming them. Never silently dropped.
+
+### `minerva_pcb_add_graphic`
+
+`{editor_name, layer, width_mm?, id?}` plus **exactly one** of `polylines`,
+`points` (+`closed`), `rect:{start,end}`, `circle:{center,radius_mm}` →
+`{graphic_id, layer, kind, width_mm, bounds}`, or `{graphics:[…],
+graphic_count}` when several polylines were supplied.
+
+Supplying zero or several geometry keys is refused by name rather than resolved
+by precedence: silently preferring one is how a caller ends up drawing something
+it did not ask for. Every payload is built **before** any is written, so a
+malformed third chain refuses the whole call instead of leaving one and a half
+graphics for the next undo to half-restore. `layer` is silk or courtyard only —
+copper would be unconnected metal with no net, and the board rim already has an
+owner.
+
+### `minerva_pcb_delete_graphic`
+
+`{editor_name, graphic_id}` → what was deleted. A text graphic is **one object**
+however many strokes it draws, so one call removes the whole legend and one undo
+restores it. An unknown id is an explicit error, never a silent no-op.
+
+### GUI parity
+
+Every one of these has a human affordance, so a GUI-only user is never sent to
+an MCP verb: board graphics are pickable on the canvas (last rung of the pick
+ladder — silk is printed ink drawn over everything, so it must not make what it
+covers unclickable), highlight in the selection colour, sweep into a marquee by
+bounds, and delete through the Delete key, the eraser, or right-click →
+"Delete text" / "Delete graphic". What v1 does **not** have is an in-panel text
+tool or a drag handle: artwork is authored at a stated position and is not
+movable after the fact, which is why `_capture_drag_origins` deliberately does
+not capture it.
+
+### Licence note (out of scope, filed here so it is not lost)
+
+This feature ships its own stroke font (`worker/pcb_worker/board_font.py`,
+authored in-house, 95 printable ASCII glyphs plus an unknown-glyph box) rather
+than widening the pre-existing one. `worker/pcb_worker/stroke_font.py` — the
+26-glyph subset that draws **reference designators** — is extracted from KiCad's
+Newstroke, whose source file `newstroke_font.cpp` carries a **GPL-2.0-or-later**
+header, while this repository ships under a proprietary licence
+(`LICENSE.md`). Widening that table from 26 glyphs to 95 would have deepened an
+exposure that should be shrinking. The existing exposure is **not fixed here**:
+unifying both surfaces on the in-house font would resolve it and give a board one
+typeface instead of two, at the cost of moving every committed refdes Gerber
+golden — its own change, with its own bless.
 
 ## Group tools (`minerva_pcb_group_components` / `ungroup` / `set_group_member_offset`, B2)
 

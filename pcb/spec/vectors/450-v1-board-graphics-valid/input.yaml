@@ -1,0 +1,9 @@
+version: 1
+name: V1BoardGraphics
+width_mm: 40
+height_mm: 30
+board_graphics:
+  - layer: F.CrtYd
+    kind: rect
+    start: {x_mm: 1, y_mm: 1}
+    end: {x_mm: 9, y_mm: 5}

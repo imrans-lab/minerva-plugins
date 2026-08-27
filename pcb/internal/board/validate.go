@@ -168,6 +168,22 @@ func Validate(b *Board) error {
 		}
 		seenCutout[id] = i
 	}
+
+	// Board graphics LAST, appended after cutouts rather than inserted, so no
+	// existing board's first-violation code moves. Same pairing rule as the
+	// cutout block above: this loop and the graphic mint loop in migrate.go MUST
+	// stay together (DCR 01a0418dc6).
+	seenGraphic := make(map[string]int, len(b.BoardGraphics))
+	for i := range b.BoardGraphics {
+		id := b.BoardGraphics[i].ID
+		if !isMintedID("graphic", id) {
+			return fmt.Errorf("unminted_persistent_id: board_graphics[%d] id %q is not minted", i, id)
+		}
+		if j, ok := seenGraphic[id]; ok {
+			return fmt.Errorf("duplicate_persistent_id: board_graphics[%d] id %q duplicates board_graphics[%d]", i, id, j)
+		}
+		seenGraphic[id] = i
+	}
 	return nil
 }
 

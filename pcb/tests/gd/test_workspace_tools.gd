@@ -1429,11 +1429,13 @@ func _run_removal_manifest_tools_absent() -> void:
 	# main ever since — the exact "only one of the two pins moved" failure the
 	# comment above warns about. 113 -> 114 (disconnect_net) -> 118 (DCR
 	# 01a0410c62's pad family: free_pins, move_net, swap_nets, select).
-	# 118 -> 119: minerva_pcb_describe_region (work item 01a03f9dd6). DERIVED by
-	# COUNTING manifest.json's tools[], not measured on a run — the station that
-	# added it runs static gates only. Its twin above moved in the same change.
-	check_eq("manifest tool count == 119 (ALL manifest.json tools[] entries)",
-		names.size(), 119)
+	# 119 -> 122: the board-graphics family — minerva_pcb_add_silk_text,
+	# minerva_pcb_add_graphic, minerva_pcb_delete_graphic (DCR 01a0418dc6).
+	# DERIVED by COUNTING manifest.json's tools[], not measured on a run — the
+	# station that added them runs static gates only. Its twin in
+	# test_manifest_tool_registration.gd moved in the same change.
+	check_eq("manifest tool count == 122 (ALL manifest.json tools[] entries)",
+		names.size(), 122)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

@@ -161,6 +161,7 @@ from . import mask_source, silk_source
 from .mask_source import MaskOpening
 from .pad_source import placed_pad_to_geom
 from .ir_projection import (
+    board_graphic_to_dict,
     cutout_point_loops,
     graphic_to_dict,
     outline_frame,
@@ -303,7 +304,9 @@ class SilkPrimitive:
     SilkCircle / SilkArc / SilkPoly.
 
     ``origin`` distinguishes authored footprint artwork ("graphic") from a
-    SYNTHESIZED reference designator ("refdes"). A designator exists in no IR —
+    SYNTHESIZED reference designator ("refdes") and from BOARD-level artwork
+    that belongs to no component ("board_graphic", whose ``parent_id`` is the
+    board and whose ``ref`` is None). A designator exists in no IR —
     it is generated at emission — so a checker that projected only authored
     graphics would measure a board with no designators on it and clear silk
     rules the fabricated board violates.
@@ -313,7 +316,7 @@ class SilkPrimitive:
     side: Side
     geometry: Any
     width_mm: float
-    origin: str                    # "graphic" | "refdes"
+    origin: str                    # "graphic" | "refdes" | "board_graphic"
     ref: str | None = None         # owning component ref, when there is one
 
 
@@ -574,6 +577,27 @@ def _project_silk(rb: ResolvedBoard) -> tuple[tuple[SilkPrimitive, ...],
                 entity_id=f"{comp.id}:refdes[{idx}]", parent_id=comp.id,
                 side=refdes_side, geometry=prim, width_mm=prim.width,
                 origin="refdes", ref=comp.ref))
+
+    # BOARD-LEVEL legend (DCR 01a0418dc6) — artwork with no owning component.
+    # It MUST be projected here: the emitter draws it, so silk rules that skipped
+    # it would clear a board whose fabricated legend violates them, which is the
+    # false clean this whole projection exists to prevent. Board graphics are
+    # board-absolute and their layer is authoritative for side, so the harvest
+    # runs at identity with no mirror — the same rule the placed-graphic loop
+    # above follows and the same one gerber._emit_board_graphics follows.
+    for graphic in rb.board_graphics:
+        side = silk_source.silk_side(graphic.layer.id)
+        if side is None:
+            continue  # courtyard — documentation, not legend
+        harvest = silk_source.harvest_graphic(
+            0.0, 0.0, 0.0, board_graphic_to_dict(graphic))
+        for warning in harvest.warnings:
+            warnings.append((warning.code, warning.message, None))
+        for prim in harvest.primitives:
+            prims.append(SilkPrimitive(
+                entity_id=graphic.id, parent_id=rb.id, side=side,
+                geometry=prim, width_mm=prim.width, origin="board_graphic",
+                ref=None))
 
     return tuple(prims), tuple(warnings)
 

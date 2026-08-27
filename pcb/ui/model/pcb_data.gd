@@ -159,6 +159,19 @@ var zones: Array[Dictionary] = []
 ## survives this model without a change here.
 var cutouts: Array[Dictionary] = []
 
+## Board-LEVEL graphics — silk legend and courtyard documentation the BOARD
+## owns, not a component (DCR 01a0418dc6; Go's board.Graphic struct).
+##
+## HELD VERBATIM, same discipline and same reasoning as zones and cutouts above:
+## the canonical dict pcb.deserialize hands over is the dict kept and the dict
+## handed back, so a field added to Go's Graphic survives without a change here.
+##
+## A `text` entry stores WHAT IT SAYS (string, anchor, size, rotation) and never
+## its strokes — pcb_board_graphic.display() derives those for drawing from the
+## same glyph table the worker compiles from, which is what keeps the editor
+## preview and the fabricated legend one shape instead of two copies.
+var board_graphics: Array[Dictionary] = []
+
 ## Undo/redo history
 var history: Array[Dictionary] = []
 var history_index: int = -1
@@ -2834,6 +2847,10 @@ func save_to_history(action_name: String = "Change") -> void:
 		# remove_zone, so a cutout absent from a restored snapshot is a cutout
 		# the next undo of an unrelated edit would silently delete.
 		"cutouts": _cutouts_to_list(),
+		# Board graphics ride EVERY snapshot for the reason stated above: a
+		# snapshot is applied WHOLESALE by _restore_state, so a collection absent
+		# from it is a collection DELETED by the next undo of an unrelated edit.
+		"board_graphics": _board_graphics_to_list(),
 		# The layer STACK rides the snapshot as of epoch GA-1, because
 		# set_board_layers is now a mutator: undoing across a stack edit
 		# without this bucket would restore copper onto layers the board no
@@ -3007,6 +3024,7 @@ func _restore_state(state: Dictionary) -> void:
 	_load_mounting_holes(state.get("mounting_holes", []))
 	zones = _zones_from_list(state.get("zones", []))
 	cutouts = _cutouts_from_list(state.get("cutouts", []))
+	board_graphics = _board_graphics_from_list(state.get("board_graphics", []))
 	# Layer stack (epoch GA-1): ABSENT key == leave the stack alone (the
 	# workspace/staged absent-key rule), so only snapshots taken since the
 	# stack became a mutable bucket ever rewrite it.
@@ -3501,6 +3519,11 @@ func to_board_dict() -> Dictionary:
 	# slice is `omitempty` too.
 	if not cutouts.is_empty():
 		out["cutouts"] = _cutouts_to_list()
+	# Same conditional-emit idiom, same reason: `out` above is a fixed literal,
+	# so a key not written here round-trips away on every save. A board with no
+	# artwork stays byte-identical to what it was before board graphics existed.
+	if not board_graphics.is_empty():
+		out["board_graphics"] = _board_graphics_to_list()
 	# Same conditional-emit idiom, same reason: a board that declares no
 	# fabrication stage must serialize byte-identically to before the field
 	# existed. Go's FabricationStage is `omitempty`, and drc.fabrication_stage
@@ -3605,6 +3628,8 @@ func from_board_dict(data: Dictionary) -> void:
 	# fix for the T6 silent-drop: a cutouts key authored in YAML and loaded here
 	# must survive the round-trip, not be erased by a fixed-key from_board_dict.
 	cutouts = _cutouts_from_list(data.get("cutouts", []))
+	# Board graphics (carried verbatim — see the `board_graphics` declaration).
+	board_graphics = _board_graphics_from_list(data.get("board_graphics", []))
 
 	# annotations / route_hints: intentionally ignored — see method doc.
 
@@ -3869,6 +3894,81 @@ func _cutouts_from_list(cutout_list) -> Array[Dictionary]:
 	return result
 
 
+## Deep-copy the board-graphics list on the way OUT. Mirrors _cutouts_to_list.
+func _board_graphics_to_list() -> Array:
+	var result: Array = []
+	for graphic in board_graphics:
+		result.append(graphic.duplicate(true))
+	return result
+
+
+## Deep-copy a canonical or snapshot board-graphics list on the way IN. Mirrors
+## _cutouts_from_list, including dropping non-dict entries rather than
+## tolerating them.
+func _board_graphics_from_list(graphic_list) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if not (graphic_list is Array):
+		return result
+	for gd in graphic_list:
+		if gd is Dictionary:
+			result.append((gd as Dictionary).duplicate(true))
+	return result
+
+
+## Index of a board graphic in `board_graphics` by id, or -1. Mirrors
+## _cutout_index.
+func _board_graphic_index(graphic_id: String) -> int:
+	for i in board_graphics.size():
+		if str(board_graphics[i].get("id", "")) == graphic_id:
+			return i
+	return -1
+
+
+## A board graphic by id — the model's OWN dict (mutating it mutates the board),
+## or {} for an unknown id.
+func get_board_graphic(graphic_id: String) -> Dictionary:
+	var i := _board_graphic_index(graphic_id)
+	return board_graphics[i] if i >= 0 else {}
+
+
+## Append an already-built board graphic (see pcb_board_graphic.build_text /
+## build_geometry, which mint the id and validate the shape). Returns the stored
+## dict, or {} when refused.
+##
+## Mirrors add_cutout_payload: this writes and journals, the history snapshot is
+## the CALLER's job, taken AFTER the mutation.
+func add_board_graphic(payload: Dictionary) -> Dictionary:
+	var gid := str(payload.get("id", ""))
+	if gid.is_empty():
+		push_warning("[PCBData] add_board_graphic refused: payload carries no id")
+		return {}
+	if _board_graphic_index(gid) >= 0:
+		push_warning("[PCBData] add_board_graphic refused: graphic id '%s' already on the board" % gid)
+		return {}
+	var graphic: Dictionary = payload.duplicate(true)
+	board_graphics.append(graphic)
+	record_change("add_board_graphic", {
+		"graphic_id": gid,
+		"layer": str(graphic.get("layer", "")),
+		"kind": str(graphic.get("kind", "")),
+	})
+	data_changed.emit()
+	return graphic
+
+
+## Remove a board graphic by id. True when one was removed, false for an unknown
+## id. Mirrors remove_cutout: record_change + data_changed here, the history
+## snapshot is the CALLER's job, taken after the mutation.
+func remove_board_graphic(graphic_id: String) -> bool:
+	var i := _board_graphic_index(graphic_id)
+	if i < 0:
+		return false
+	record_change("remove_board_graphic", {"graphic_id": graphic_id})
+	board_graphics.remove_at(i)
+	data_changed.emit()
+	return true
+
+
 ## A zone's kind, normalised: "keepout" or "copper_pour".
 ##
 ## Defaults to "copper_pour" for a zone that states no kind, matching the Go
@@ -3941,6 +4041,7 @@ func clear() -> void:
 	mounting_holes.clear()
 	zones.clear()
 	cutouts.clear()
+	board_graphics.clear()
 	history.clear()
 	history_index = -1
 	change_journal.clear()

@@ -250,15 +250,17 @@ func _init() -> void:
 	# minerva_pcb_select (the whole-selection mirror of get_selection, where
 	# minerva_pcb_point is the single-entity form). All four executor:"panel",
 	# so the Go pin at 19 still holds.
-	# (118 -> 119): minerva_pcb_describe_region — ONE read of a board rectangle
-	# (work item 01a03f9dd6). executor:"panel", so the Go pin at 19 still holds.
+	# (119 -> 122): the board-graphics family — minerva_pcb_add_silk_text,
+	# minerva_pcb_add_graphic and minerva_pcb_delete_graphic (DCR 01a0418dc6).
+	# All three are executor:"panel", so the Go pin at 19 backend tools still
+	# holds unchanged.
 	# DERIVED, not measured: this station runs no suites. The number is COUNTED
-	# off manifest.json's tools[] (118 entries plus the one added in the same
+	# off manifest.json's tools[] (119 entries plus the three added in the same
 	# change), which is the same array the check reads back, so it is arithmetic
 	# rather than a guess at a run's output. Its twin in test_workspace_tools.gd
 	# moved with it — a round that bumps only one of the two leaves the other
 	# failing against main, which is exactly what happened at 113 -> 114.
-	check("total registered tool count == 119", registered.size() == 119,
+	check("total registered tool count == 122", registered.size() == 122,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
