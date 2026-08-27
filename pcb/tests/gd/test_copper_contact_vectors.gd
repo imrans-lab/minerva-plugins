@@ -37,6 +37,7 @@ func _init() -> void:
 		_run_vector(name)
 	_run_symmetry(names)
 	_run_unknown_land()
+	_run_loaded_inline_lands()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -226,3 +227,90 @@ func _run_unknown_land() -> void:
 	check("and so does no board at all (the headless answer)",
 		is_equal_approx(Contact.unknown_land_radius(null),
 			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))
+
+
+## THE LOADED-BOARD SEAM: a part that authors its lands INLINE.
+##
+## Every vector above hands physical_pad_node a component this file builds by
+## hand, pads assigned directly — so nothing above can see what the board LOADER
+## does to those lands. A part whose footprint no library can supply authors its
+## geometry inline instead, and the worker writes NO has_pad_geometry key for it
+## (that key is written only on the footprint-resolve success path) while its
+## own predicate still reads the lands as real (pad_source.has_resolved_pads: a
+## non-empty `pads` list). A panel that gated on the key discarded those lands
+## and fell back to a coincidence disc at the pin centre — copper sitting ON a
+## rotated land, or in a roundrect's corner, then read as a FREE end while the
+## connectivity DRC called it joined.
+##
+## The lands and probes are the HITL bench's R9 row, verbatim
+## (worker/tests/testdata/hitl_bench.yaml); the worker's answer for the same
+## four probes is pinned by worker/tests/test_pad_contact_rule.py.
+func _run_loaded_inline_lands() -> void:
+	# U9A: one 2.0 x 0.6 land with its OWN rotation 90 inside a part at rotation
+	# 0, so the copper stands TALL — x 21.7..22.3, y 103.0..105.0.
+	var rotated = _inline_part("U9A", 22.0, 104.0, {
+		"number": "1", "type": "smd", "shape": "rect", "rotation": 90,
+		"position": {"x": 0.0, "y": 0.0},
+		"size": {"width": 2.0, "height": 0.6},
+		"layers": ["F.Cu", "F.Mask", "F.Paste"]})
+	check("an inline land survives the load", rotated.pads.size() == 1)
+	check("the loader states pad geometry from the lands themselves",
+		rotated.has_pad_geometry)
+	# 0.8mm above the pin centre: 0.2mm inside the ROTATED land, 0.5mm outside
+	# the same land unrotated. So this probe measures the pad rotation itself.
+	var probe_a := Contact.endpoint_node(Vector2(22.0, 104.8), 0.25, "top")
+	check("copper inside a rotated inline land is landed on it",
+		Contact.copper_joins_pin(probe_a, rotated, "1", _stack()))
+	var unrotated = _inline_part("U9A", 22.0, 104.0, {
+		"number": "1", "type": "smd", "shape": "rect",
+		"position": {"x": 0.0, "y": 0.0},
+		"size": {"width": 2.0, "height": 0.6},
+		"layers": ["F.Cu", "F.Mask", "F.Paste"]})
+	check("...and clear of the same land unrotated",
+		not Contact.copper_joins_pin(probe_a, unrotated, "1", _stack()))
+
+	# U9B: a 2.0 x 2.0 roundrect with corner_rratio 0.25 — a 0.5mm corner
+	# radius, so the inner core is 0.5 x 0.5 (spec vector 080's land, reached
+	# here through the loader instead of by hand).
+	var corner = _inline_part("U9B", 46.0, 104.0, {
+		"number": "1", "type": "smd", "shape": "roundrect",
+		"corner_rratio": 0.25, "position": {"x": 0.0, "y": 0.0},
+		"size": {"width": 2.0, "height": 2.0},
+		"layers": ["F.Cu", "F.Mask", "F.Paste"]})
+	check("the load keeps the authored corner radius",
+		is_equal_approx(float((corner.pads[0] as Dictionary).get("corner_rratio", 0.0)), 0.25))
+	# 0.424mm from the nearest core corner: 0.076mm INSIDE the copper, and
+	# 0.066mm outside it 0.1mm further out along the diagonal.
+	check("copper in an inline roundrect's corner is landed on it",
+		Contact.copper_joins_pin(
+			Contact.endpoint_node(Vector2(46.8, 104.8), 0.05, "top"),
+			corner, "1", _stack()))
+	check("...and clear of it 0.1mm further out",
+		not Contact.copper_joins_pin(
+			Contact.endpoint_node(Vector2(46.9, 104.9), 0.05, "top"),
+			corner, "1", _stack()))
+
+	# THE TRACE TOOL MUST TERMINATE ON THESE LANDS. Its pad rung ranks a click
+	# by pcb_component.pin_copper_distance — distance to the pad's COPPER, not
+	# to its centre — so the pad a click lands on is the pad the predicate above
+	# credits. A 0.6mm-wide land turned 90 degrees is hittable up its long axis,
+	# which its unrotated self is not, and neither land's centre is anywhere
+	# near these probes.
+	check("a click on the rotated land's copper is 0mm from that pin",
+		is_zero_approx(rotated.pin_copper_distance("1", Vector2(22.0, 104.8))))
+	check("...and the same click is off the copper unrotated",
+		unrotated.pin_copper_distance("1", Vector2(22.0, 104.8)) > 0.4)
+	check("a click in the roundrect land's corner is 0mm from that pin",
+		is_zero_approx(corner.pin_copper_distance("1", Vector2(46.8, 104.8))))
+
+
+## One inline-geometry part as the LOADER makes it, from the canonical board
+## dict the worker sends: no has_pad_geometry key, because its footprint never
+## resolved from a library — the lands are the only statement of its copper.
+func _inline_part(ref: String, x: float, y: float, pad: Dictionary):
+	return PCBComponentScript.from_board_dict({
+		"ref": ref, "footprint": "Bench_InlineLand_1P",
+		"x_mm": x, "y_mm": y, "rotation_deg": 0.0, "layer": "top",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
+		"pads": [pad],
+	})

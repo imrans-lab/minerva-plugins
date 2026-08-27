@@ -21,9 +21,10 @@ from pathlib import Path
 import yaml
 
 from pcb_worker import (compile_board, copper_contact, drc, ir_connectivity,
-                        methods)
+                        methods, pad_source)
 
 PARITY_CORNERS = Path(__file__).resolve().parent / "testdata" / "parity_corners.yaml"
+HITL_BENCH = Path(__file__).resolve().parent / "testdata" / "hitl_bench.yaml"
 
 CLEARANCE = 0.2
 
@@ -208,3 +209,56 @@ def test_the_projected_board_carries_the_land_the_rule_needs():
         probe = copper_contact.endpoint_node((pad.x + 0.5, pad.y), 0.0, None)
         assert copper_contact.nodes_touch(probe, pad.contact), (
             f"{pad.ref}.{pad.pin} projected without usable land geometry")
+
+
+def _bench() -> dict:
+    return yaml.safe_load(HITL_BENCH.read_text(encoding="utf-8"))
+
+
+def _dangling(board: dict) -> set:
+    return {(f["net"], tuple(f["at"]))
+            for f in _run(board)["findings"] if f["type"] == "dangling_endpoint"}
+
+
+def test_inline_authored_lands_are_the_contact_geometry():
+    """A part the footprint library cannot supply authors its lands INLINE, and
+    those lands are the copper the rule measures — the same reading the fab
+    emitters take (iter_pads prefers comp["pads"]).
+
+    THE KEY IS NOT THE FACT. resolve only writes comp["has_pad_geometry"] on
+    its success path, so an inline-geometry part carries real pads and NO such
+    key; the resolved-vs-fallback fact is the pad LIST
+    (pad_source.has_resolved_pads). A consumer that reads the key instead
+    discards the lands and falls back to a coincidence disc at the pin centre —
+    which is what the panel did, reporting copper sitting ON these lands as a
+    free end while this side called it joined (bug 01a044a6d964).
+
+    The bench's R9 row is exactly that geometry, and both probes are decided by
+    a property of the LAND rather than of the pin centre: U9A's own rotation 90
+    (2.0 x 0.6 land standing tall) and U9B's corner_rratio 0.25 (a 0.5mm corner
+    radius on a 2.0 x 2.0 roundrect). tests/gd/test_copper_contact_vectors.gd
+    pins the panel to these same four answers.
+    """
+    board = methods._maybe_resolve(_bench(), {})
+    parts = {c["ref"]: c for c in board["components"]}
+    for ref in ("U9A", "U9B"):
+        assert "has_pad_geometry" not in parts[ref], (
+            f"{ref} now carries the key — this test's premise has moved")
+        assert pad_source.has_resolved_pads(parts[ref]), ref
+
+    # Both R9 ends sit ON their land: 0.2mm inside the rotated one, 0.076mm
+    # inside the roundrect's corner region.
+    assert not {d for d in _dangling(_bench()) if d[0].startswith("R9")}
+
+    # And both flip when the land property that decides them is taken away.
+    unrotated = _bench()
+    for comp in unrotated["components"]:
+        if comp["ref"] == "U9A":
+            comp["pads"][0].pop("rotation")
+    assert ("R9_A", (22.0, 104.8)) in _dangling(unrotated)
+
+    moved = _bench()
+    for trace in moved["traces"]:
+        if trace["net"] == "R9_B":
+            trace["points"][-1] = {"x_mm": 46.9, "y_mm": 104.9}
+    assert ("R9_B", (46.9, 104.9)) in _dangling(moved)

@@ -366,9 +366,13 @@ test_trace_cut.gd assertions=50
 # the worker runs the same directory (worker/tests/test_copper_contact_vectors.py),
 # so a case the two sides answer differently cannot be added without one of
 # them going red. UNPINNED on purpose: the assertion count is one per vector
-# directory plus four fixed checks, so pinning it would make adding a vector a
-# two-file edit for no gain. Pin it if the fixed section ever grows teeth of
-# its own.
+# directory plus the fixed sections, so pinning it would make adding a vector a
+# two-file edit for no gain.
+# The fixed sections are the two things a vector cannot state: the unknown-land
+# disc (no vector is sizeless) and the LOADED-BOARD seam — inline-authored
+# lands, which every vector bypasses by assigning `pads` directly. The latter
+# is the bench's R9 row and is +10 assertions; the total stays unpinned rather
+# than carrying a DERIVED count, since a count here must be MEASURED on a run.
 test_copper_contact_vectors.gd
 # A same-net pour is a terminator for the canvas Trace tool, and an unplated
 # hole joins nothing — including for the ratsnest, which must never let a hole

@@ -338,40 +338,12 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 			height
 		)
 
-	# Load pads
-	pads.clear()
-	var pads_data: Array = geometry.get("pads", [])
-	for pad_data in pads_data:
-		var pos_dict: Dictionary = pad_data.get("position", {})
-		var size_dict: Dictionary = pad_data.get("size", {})
-
-		# Robust drill parsing (handles float, dict, or null)
-		var drill_raw = pad_data.get("drill")
-		var drill_size := Vector2.ZERO
-		if drill_raw is Dictionary:
-			# Slot drill: {x, y} or {width, height}
-			var dx := float(drill_raw.get("x", drill_raw.get("width", 0.0)))
-			var dy := float(drill_raw.get("y", drill_raw.get("height", 0.0)))
-			drill_size = Vector2(dx, dy)
-		elif drill_raw != null and (drill_raw is float or drill_raw is int):
-			var d := float(drill_raw)
-			drill_size = Vector2(d, d)
-
-		var pad := {
-			"number": pad_data.get("number", ""),
-			"name": pad_data.get("name", ""),  # Symbolic pin name from YAML
-			"type": pad_data.get("type", "smd"),
-			"shape": pad_data.get("shape", "rect"),
-			"position": Vector2(pos_dict.get("x", 0), pos_dict.get("y", 0)),
-			"size": Vector2(size_dict.get("width", 1), size_dict.get("height", 1)),
-			# The pad's own rotation WITHIN the footprint, degrees, same CW
-			# convention as the component's rotation_deg. Part of the pad's
-			# shape: a 2.0x0.5 pad at rotation 90 is vertical, not horizontal.
-			"rotation": float(pad_data.get("rotation", 0.0)),
-			"drill": drill_size,  # Now Vector2 for slot support
-			"layers": pad_data.get("layers", [])
-		}
-		pads.append(pad)
+	# Load pads through the ONE pad deserializer, so an imported land keeps the
+	# same fab-affecting optionals (corner_rratio above all) a board-dict land
+	# keeps. A private copy of this loop dropped the authored corner radius, and
+	# the contact predicate then read every imported roundrect as the stadium
+	# inscribed in it — copper on a corner became a false open.
+	_pads_from_list(geometry.get("pads", []))
 
 	# Also update pins dictionary for net connections (electrical pads only)
 	pins.clear()
@@ -988,11 +960,15 @@ func _pads_from_list(pads_data: Array) -> void:
 		var size_h = pad_size.get("height", 1)
 		if size_w == null or size_h == null:
 			continue
-		# Handle both legacy float drill and new Vector2 dict drill
+		# Handle both legacy float drill and new Vector2 dict drill. A slot drill
+		# arrives as {x, y} from the board contract and as {width, height} from
+		# the footprint-geometry import — both spellings mean the same hole.
 		var drill_raw = pad_data.get("drill", 0.0)
 		var drill_vec := Vector2.ZERO
 		if drill_raw is Dictionary:
-			drill_vec = Vector2(drill_raw.get("x", 0), drill_raw.get("y", 0))
+			drill_vec = Vector2(
+				float(drill_raw.get("x", drill_raw.get("width", 0.0))),
+				float(drill_raw.get("y", drill_raw.get("height", 0.0))))
 		elif drill_raw is float or drill_raw is int:
 			var d := float(drill_raw)
 			drill_vec = Vector2(d, d)
@@ -1019,7 +995,24 @@ func _pads_from_list(pads_data: Array) -> void:
 			var value: Variant = pad_data.get(key)
 			if value != null:
 				pad[key] = value
+		# The footprint's symbolic pin name, present-only (get_pin_name reads it).
+		var pad_name := str(pad_data.get("name", ""))
+		if not pad_name.is_empty():
+			pad["name"] = pad_name
 		pads.append(pad)
+	# THE LANDS THEMSELVES ARE THE RESOLVED-VS-FALLBACK FACT, exactly as the
+	# worker defines it (pad_source.has_resolved_pads: a non-empty `pads` list is
+	# the single ground truth, mirrored across the boundary under this key).
+	#
+	# The worker only WRITES has_pad_geometry on the footprint-resolve success
+	# path, so a part that authors its lands inline — geometry the fab emitters
+	# use verbatim — arrives with real pads and no key at all. Trusting the key
+	# alone made every consumer that gates on it (the copper-contact predicate,
+	# the pad renderer, the unresolved badge) discard those lands: contact then
+	# fell back to a coincidence disc at the pin centre and reported copper
+	# sitting ON a land as a free end, while the worker's DRC called it joined.
+	if not pads.is_empty():
+		has_pad_geometry = true
 
 
 ## Synthesize render pads from geometry-bearing canonical pins. Worker-authored

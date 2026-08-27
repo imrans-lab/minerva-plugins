@@ -174,8 +174,9 @@ static func node_has_copper(node: Dictionary) -> bool:
 		or not (node.get("lines", []) as Array).is_empty()
 
 
-## One logical pin as one node per physical land where the footprint resolved,
-## or one small disc at the pin centre when it did not.
+## One logical pin as one node per physical land the part states — whether that
+## geometry came from a resolved footprint or was authored inline on the part —
+## or one small disc at the pin centre when it states none.
 ##
 ## `stack` is the board's declared copper layers, for the kinds of copper that
 ## pierce every layer. `unknown_land_radius_mm` is the disc a geometry-less pin
@@ -186,12 +187,17 @@ static func pad_nodes(comp, pin_name: String, stack: PackedStringArray,
 	var centre: Vector2 = comp.get_pin_world_position(pin_name)
 	var centre_line := PackedVector2Array([centre])
 	var matches: Array = []
-	if comp.has_pad_geometry:
-		for source_order in comp.pads.size():
-			var pad = comp.pads[source_order]
-			if str((pad as Dictionary).get("number", "")) == pin_name:
-				matches.append({"pad": pad, "source_order": source_order,
-					"key": pad_geometry_key(pad as Dictionary)})
+	# THE LAND LIST IS THE QUESTION, not the has_pad_geometry flag beside it:
+	# `pads` non-empty is the worker's own resolved-vs-fallback predicate
+	# (pad_source.has_resolved_pads), and asking it directly is what keeps the
+	# two sides on one answer for a part that authors its lands INLINE — the
+	# worker writes the flag only on the footprint-resolve success path, so
+	# reading the flag here discarded real copper and reported it as free.
+	for source_order in comp.pads.size():
+		var pad = comp.pads[source_order]
+		if str((pad as Dictionary).get("number", "")) == pin_name:
+			matches.append({"pad": pad, "source_order": source_order,
+				"key": pad_geometry_key(pad as Dictionary)})
 	if matches.is_empty():
 		return [make_node([], [centre_line],
 			unknown_land_radius_mm, layer_set(stack), centre)]
