@@ -362,6 +362,66 @@ def test_an_id_less_v1_graphic_compiles(tmp_path):
     assert _compiled(board).board_graphics[0].id == compiled.board_graphics[0].id
 
 
+def test_a_present_but_broken_v1_id_is_refused_not_derived():
+    """Deriving here would turn a caller mistake into a clean compile.
+
+    An id is derived ONLY when the key is genuinely absent. A present ``id``
+    is authored intent, so 123 or "" is a broken record — and swapping it for
+    an ordinal-derived id makes a board that names its artwork wrongly compile
+    exactly like a board that names it not at all.
+    """
+    for broken in (123, "", None, ["graphic:" + "a" * 32]):
+        board = _board({"id": broken, "layer": "F.SilkS", "kind": "line",
+                        "start": {"x_mm": 1, "y_mm": 1},
+                        "end": {"x_mm": 5, "y_mm": 1}})
+        codes = _codes(board)
+        assert "invalid_authored_id" in codes, f"{broken!r} was accepted: {codes}"
+        result = compile_board(board)
+        assert not getattr(result, "board", None) or not result.board.board_graphics
+
+
+def test_a_v2_graphic_id_must_already_be_minted():
+    """v2 identity is PERSISTED, never derived at compile.
+
+    The shared gate (board_validate / Go's Validate) refuses an unminted
+    board_graphics id on a v2 board; the builder must agree, or a path that
+    reaches it without the gate mints an identity the file does not carry.
+    Measured on the builder directly, which is where the drift would live.
+    """
+    class _Sink:
+        def __init__(self):
+            self.codes = []
+
+        def error(self, code, message, ref):
+            self.codes.append(code)
+
+        def warning(self, code, message, ref):
+            self.codes.append(code)
+
+    for unminted in (123, "", "graphic_1", None):
+        sink = _Sink()
+        out = board_graphics.build_board_graphics(
+            {"version": 2,
+             "board_graphics": [{"id": unminted, "layer": "F.SilkS", "kind": "line",
+                                 "start": {"x_mm": 1, "y_mm": 1},
+                                 "end": {"x_mm": 5, "y_mm": 1}}]},
+            "board:" + "c" * 32, 2, sink)
+        assert out == (), f"{unminted!r} reached the IR"
+        assert "unminted_persistent_id" in sink.codes, \
+            f"{unminted!r} was not refused by name: {sink.codes}"
+
+    # Negative control: the minted id compiles, and is used VERBATIM.
+    sink = _Sink()
+    out = board_graphics.build_board_graphics(
+        {"version": 2,
+         "board_graphics": [{"id": GRAPHIC_ID, "layer": "F.SilkS", "kind": "line",
+                             "start": {"x_mm": 1, "y_mm": 1},
+                             "end": {"x_mm": 5, "y_mm": 1}}]},
+        "board:" + "c" * 32, 2, sink)
+    assert sink.codes == []
+    assert [g.id for g in out] == [GRAPHIC_ID]
+
+
 def test_id_less_graphics_get_distinct_derived_ids():
     board = _compiled(_board(
         {"layer": "F.SilkS", "kind": "line", "start": {"x_mm": 1, "y_mm": 1},

@@ -224,7 +224,11 @@ func _test_1_pad_row() -> void:
 	holes.id = "H1"
 	holes.position = Vector2(80.0, 40.0)
 	holes.has_pad_geometry = true
-	holes.pins = {"1": Vector2(0.0, 0.0), "2": Vector2(2.0, 0.0)}
+	# Pins 3 and 4 are the MULTI-LAND shape: one logical pin owning several
+	# physical lands, with the NPTH record listed FIRST. A plated slot or a
+	# drilled-and-soldered shield pin is authored exactly like this.
+	holes.pins = {"1": Vector2(0.0, 0.0), "2": Vector2(2.0, 0.0),
+		"3": Vector2(4.0, 0.0), "4": Vector2(6.0, 0.0)}
 	holes.pads = [
 		{"number": "1", "type": "thru_hole", "shape": "circle",
 		 "position": Vector2(0.0, 0.0), "size": Vector2(1.6, 1.6),
@@ -232,6 +236,18 @@ func _test_1_pad_row() -> void:
 		{"number": "2", "type": "np_thru_hole", "shape": "circle",
 		 "position": Vector2(2.0, 0.0), "size": Vector2(3.2, 3.2),
 		 "rotation": 0.0, "drill": Vector2(3.2, 3.2), "layers": ["F.Cu", "B.Cu"]},
+		{"number": "3", "type": "np_thru_hole", "shape": "circle",
+		 "position": Vector2(4.0, 0.0), "size": Vector2(1.2, 1.2),
+		 "rotation": 0.0, "drill": Vector2(1.2, 1.2), "layers": ["F.Cu", "B.Cu"]},
+		{"number": "3", "type": "smd", "shape": "rect",
+		 "position": Vector2(4.0, 0.0), "size": Vector2(1.6, 1.6),
+		 "rotation": 0.0, "drill": Vector2.ZERO, "layers": ["F.Cu"]},
+		{"number": "4", "type": "np_thru_hole", "shape": "circle",
+		 "position": Vector2(6.0, 0.0), "size": Vector2(1.2, 1.2),
+		 "rotation": 0.0, "drill": Vector2(1.2, 1.2), "layers": ["F.Cu", "B.Cu"]},
+		{"number": "4", "type": "thru_hole", "shape": "circle",
+		 "position": Vector2(6.0, 0.0), "size": Vector2(1.6, 1.6),
+		 "rotation": 0.0, "drill": Vector2(0.8, 0.8), "layers": ["F.Cu", "B.Cu"]},
 	]
 	data.add_component(holes)
 	check_eq("1a2: a PLATED barrel is on every copper layer",
@@ -244,6 +260,17 @@ func _test_1_pad_row() -> void:
 		not CopperContact.node_has_copper(CopperContact.physical_pad_node(
 			holes, holes.pads[1], PackedStringArray(["top", "bottom"]),
 			Vector2.ZERO, false)))
+
+	# THE COPPER-BEARING LANDS ANSWER, not whichever record comes first. Reading
+	# only the first land called pin 3 copper-less because its NPTH record is
+	# listed ahead of the smd land that plainly renders, routes and is committed
+	# to. "none" survives only for a pin with no copper at all — pin 2 above.
+	check_eq("1a3: a pin whose NPTH land is listed first still reports its copper",
+		PadRow.layer_for_pin(holes, "3"), "top")
+	check_eq("1a3: …and the row says the same thing",
+		str((PadRow.row(data, holes, "3") as Dictionary).get("layer", "")), "top")
+	check_eq("1a3: a plated barrel behind an NPTH land is still on every layer",
+		PadRow.layer_for_pin(holes, "4"), "all")
 
 	# SIDE — the whole point of "the other side of U1S". East-column pins say
 	# east, west-column pins say west, and the CORNER pins resolve to their

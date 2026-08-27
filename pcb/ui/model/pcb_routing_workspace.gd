@@ -1138,6 +1138,13 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 ## route carries none (an older worker, or a non-canonical path that skipped the
 ## attach). Absent-key contract, never invented — same as every other stamp read
 ## off a route reply.
+## The two width sources that are DEFAULTS rather than choices: the router
+## reporting "nobody stated one, so I used the fallback". Named here because
+## _create_candidate_for_route's ladder must not let either outrank an authored
+## hint, while every other source in that vocabulary does.
+const _DEFAULT_WIDTH_SOURCES: Array = ["board_rules", "engine_default"]
+
+
 static func _route_width_source(route: Dictionary) -> String:
 	var erules = route.get("effective_routing_rules")
 	if not (erules is Dictionary):
@@ -1197,7 +1204,11 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 		# `width` above: that one falls through to the board's default, and the
 		# board must not outrank an authored hint. Absent-key contract — a reply
 		# that stamped nothing passes 0.0 and changes nothing.
-		float(record.get("effective_width_mm", 0.0)))
+		float(record.get("effective_width_mm", 0.0)),
+		# WHICH source that width came from. A "board_rules"/"engine_default"
+		# stamp is a fallback, not a choice, and must not outrank an authored
+		# hint — see the ladder in _create_candidate_for_route.
+		str(record.get("effective_width_source", "")))
 	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
 	# DURABLE candidate state, not just a reply stamp — the commit preflight's
 	# staleness comparison (ERR_CONSTRAINT_STALE) reads it back from here, and
@@ -1208,10 +1219,34 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 	# provenance becomes DURABLE candidate state, same P1-B idiom as the
 	# constraint stamp above — finer vocabulary than the ingest verdict
 	# _create_candidate_for_route just recorded, so it wins when present.
+	#
+	# ONLY WHEN THE STAMP IS WHAT SIZED THE COPPER, though. A default stamp
+	# ("board_rules"/"engine_default") can LOSE the ladder above to an authored
+	# hint, and naming a width's source after the rung that lost it is the same
+	# provenance lie the stamp exists to prevent — the reviewer's question is
+	# "did anyone choose this width", and the honest answer there is the ingest
+	# verdict "hint".
 	if not cid.is_empty() and candidates.has(cid) \
-			and not str(record.get("effective_width_source", "")).is_empty():
+			and not str(record.get("effective_width_source", "")).is_empty() \
+			and _stamp_sized_the_copper(candidates[cid],
+				float(record.get("effective_width_mm", 0.0))):
 		candidates[cid].width_source = str(record.get("effective_width_source"))
 	return cid
+
+
+## True when `stamp` is the width the candidate's copper actually came out at —
+## the precondition for naming the reply's stamp as this width's provenance.
+## Read off the FIRST segment: _create_candidate_for_route resolves one width for
+## the route and only a segment's own `width_mm` deviates from it, in which case
+## the stamp is what put that number there anyway. A candidate with no segments
+## (vias only) has no copper width to disagree with, so the stamp stands.
+static func _stamp_sized_the_copper(cand, stamp: float) -> bool:
+	if stamp <= 0.0:
+		return false
+	var segs: Array = cand.segments
+	if segs.is_empty():
+		return true
+	return is_equal_approx(float((segs[0] as Dictionary).get("width", 0.0)), stamp)
 
 
 ## Create + add one RouteCandidate from a raw router route (net + raw segments +
@@ -1263,12 +1298,28 @@ func ingest_record(record: Dictionary, base_board_revision: int = 0, board = nul
 ## must not beat an authored hint; 0.0 means the caller resolved none.
 ## `reply_width` is the width the ROUTER stated for this route (the record's
 ## `effective_width_mm` — the worker's own resolution, which already weighed the
-## caller option, the hint, the net class and the net's existing copper). It
-## outranks the hint re-derivation below and the board, and loses only to
-## `width_override`: re-deriving 0.25mm from a hint here would commit a width
-## the router did not route at. A segment that carries its OWN `width_mm` is
-## more specific still and wins over all of them, per segment, further down.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null, stated_width: float = 0.0, reply_width: float = 0.0) -> String:
+## caller option, the hint, the net class and the net's existing copper), and
+## `reply_width_source` is the stamp naming WHICH of those answered
+## (`effective_width_source`: "caller_option" | "hint" | "net_class" |
+## "net_copper" | "board_rules" | "engine_default", or "" from a worker that
+## stamped none).
+##
+## A SPECIFIC stamp outranks the hint re-derivation below: the router already
+## weighed those hints and something more specific beat them, so re-deriving
+## 0.25mm here would commit a width the router did not route at. But the two
+## DEFAULT sources — "board_rules" and "engine_default" — are the router saying
+## "nobody chose one, so I used the fallback", and a fallback must never outrank
+## an authored hint (the same rule that keeps `stated_width` below the hints,
+## for the same reason: its last rung is that board default). On a default stamp
+## the ladder therefore falls through to the hint, and `reply_width` is picked up
+## again as the LAST rung, below the board — so the router's number is demoted,
+## never discarded. An unstamped reply ("") keeps the old precedence: absent-key
+## contract, nothing invented from silence.
+##
+## `width_override` beats all of it, and a segment that carries its OWN
+## `width_mm` is more specific still and wins per segment, further down.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, base_board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0, task_key_override: String = "", endpoints_override: Array = [], board = null, stated_width: float = 0.0, reply_width: float = 0.0,
+		reply_width_source: String = "") -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -1308,14 +1359,17 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	else:
 		width = _width_for_net(source_hints, net)
 		width_hints = _hints_matching_net(source_hints, net)
-	# THE ROUTER'S OWN ANSWER OUTRANKS THIS SIDE'S HINT RE-DERIVATION: it
-	# already weighed those hints and something more specific beat them, so
-	# re-deriving here would commit a width the router did not route at.
-	# `stated_width` stays BELOW the hints — its last rung is the board's
-	# default, which must never outrank a width someone authored.
+	# THE ROUTER'S OWN ANSWER OUTRANKS THIS SIDE'S HINT RE-DERIVATION — as long
+	# as it is a SPECIFIC one. It already weighed those hints and something more
+	# specific beat them, so re-deriving here would commit a width the router did
+	# not route at. A "board_rules"/"engine_default" stamp is the opposite case:
+	# the router is reporting a fallback nobody chose, and a fallback must never
+	# outrank an authored hint. `stated_width` stays BELOW the hints for exactly
+	# that reason too — its own last rung is that board default.
+	var reply_is_default: bool = reply_width_source in _DEFAULT_WIDTH_SOURCES
 	if width_override > 0.0:
 		width = width_override
-	elif reply_width > 0.0:
+	elif reply_width > 0.0 and not reply_is_default:
 		width = reply_width
 	elif width <= 0.0 and stated_width > 0.0:
 		width = stated_width
@@ -1330,6 +1384,12 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		if float(board_width["width"]) > 0.0:
 			width = float(board_width["width"])
 			board_source = str(board_width["source"])
+	# THE DEMOTED DEFAULT STAMP, as the last rung. A "board_rules"/"engine_default"
+	# reply width lost to the hint above; it must not also be thrown away when
+	# nothing else answered (a headless ingest with no board in hand is exactly
+	# that case) — the router's fallback still beats "unresolved".
+	if width <= 0.0 and reply_width > 0.0:
+		width = reply_width
 	# THE REFUSAL BELONGS TO COPPER, NOT TO THE GHOST. A candidate is a
 	# question, not a board edit, so an unresolved route still lands — with
 	# width 0.0 and width_source "unresolved", which commit()'s own pre-flight

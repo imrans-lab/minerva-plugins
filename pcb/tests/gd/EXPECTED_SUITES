@@ -205,11 +205,17 @@ test_workspace_check.gd assertions=46
 # 77 -> 84: the reply's effective width outranks a hint width when the segments
 # carry none, and an unresolved width reaches the draft checker as 0.0 rather
 # than a nominal 0.25. MEASURED: 84 passed, 0 failed.
-test_workspace_ingest.gd assertions=84
+# 84 -> 91: ...except when that stamp names a DEFAULT source (board_rules /
+# engine_default), which loses to an authored hint and is picked up again only
+# as the last rung. MEASURED: 91 passed, 0 failed.
+test_workspace_ingest.gd assertions=91
 # 76 -> 85: group 10, a persisted via with no dimensions restores UNRESOLVED and
 # takes the board's design_rules at commit (with an authored size as the
 # negative control). MEASURED: 85 passed, 0 failed.
-test_workspace_persistence.gd assertions=85
+# 85 -> 88: a NEGATIVE stored dimension is malformed, so the via record is
+# dropped and named rather than clamped into the "unstated" 0.0 that the board
+# then answers. MEASURED: 88 passed, 0 failed.
+test_workspace_persistence.gd assertions=88
 # 1189 -> 1192: the width-provenance group grew the copper-creating half — the
 # segments' own width_mm outranks the hint and the board, and a route drawn at
 # two widths commits both. MEASURED: 1192 passed, 0 failed.
@@ -379,7 +385,10 @@ test_hint_hops_and_via_owners.gd assertions=68
 # hit test, and the rotation convention a placement reply states.
 # 106 -> 110: an UNPLATED hole is on no copper layer ("none"), not on all of
 # them, and the row agrees with the contact predicate. MEASURED: 110 passed.
-test_pcb_pin_select.gd assertions=110
+# 110 -> 113: a logical pin with several physical lands reports from the
+# copper-bearing ones, so an NPTH record listed first no longer answers "none"
+# for a pad that plainly renders and routes. MEASURED: 113 passed, 0 failed.
+test_pcb_pin_select.gd assertions=113
 
 # minerva_pcb_describe_region (ONE read of a board rectangle) and
 # layers_touched on it and on minerva_pcb_list_vias.

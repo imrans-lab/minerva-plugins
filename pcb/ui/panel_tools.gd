@@ -4003,11 +4003,15 @@ static func _route_layer(route: Dictionary) -> String:
 ##
 ## THE REPLY OUTRANKS THE HINTS, most specific first:
 ##
-## 1. the SEGMENTS' own `width_mm`, when they all state the same one. The
-##    worker only ever `setdefault`s this key, so a value that IS there was
-##    stated for that stretch of copper specifically (a detailed hint, a
-##    reroute given an explicit width) and is the same value ir_candidates
-##    checks the overlay at. Nothing coarser may overrule it.
+## 1. the SEGMENTS' own `width_mm`, when they all state the same one — the
+##    value ir_candidates checks the overlay at, so nothing coarser may
+##    overrule it. USUALLY THIS IS RUNG 2 WEARING A SEGMENT'S CLOTHES: the
+##    worker `setdefault`s the route-wide effective width onto every segment
+##    that carries none (methods._attach_effective_routing_rules), so the two
+##    rungs agree on all but the routes where a segment really was drawn at its
+##    own width (a detailed hint, a reroute given an explicit width). Rung 1
+##    matters for those routes, and for the mixed-width route _route_segment_
+##    width declines to answer at all.
 ## 2. `effective_routing_rules.trace_width_mm.value`, the ROUTE-wide width the
 ##    worker resolved (methods.py `_effective_routing_rules_detailed` plus the
 ##    per-net step): an explicit caller option, a hint-authored width, the net's

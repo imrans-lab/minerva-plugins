@@ -655,3 +655,29 @@ func _run_legacy_via_dimensions() -> void:
 	if sized_ids.size() == 1:
 		check_eq("...and commits at ITS size, not the board's rule",
 			float((board.get_via(str(sized_ids[0])) as Dictionary).get("size", 0.0)), 0.9)
+
+	# A NEGATIVE dimension is MALFORMED, not unstated. Clamping it to 0.0
+	# laundered a broken record into the "resolve me from the board" shape
+	# above, so the via committed at the board's 0.60/0.30 and read exactly as
+	# if someone had chosen it. The record is dropped and named instead.
+	var malformed = PcbRouteCandidate.from_dict({
+		"candidate_id": "cand_bad", "task_id": "N9|bad", "net": "N9",
+		"disposition": "proposed", "validation": "clean",
+		"segments": [{"layer": "top", "width": 0.3,
+			"points": [{"x": 40.0, "y": 0.0}, {"x": 45.0, "y": 0.0}]}],
+		"vias": [
+			{"position": {"x": 42.0, "y": 0.0}, "diameter": -0.5, "drill": 0.3,
+				"from_layer": "top", "to_layer": "bottom"},
+			{"position": {"x": 43.0, "y": 0.0}, "diameter": 0.9, "drill": -0.1,
+				"from_layer": "top", "to_layer": "bottom"},
+			{"position": {"x": 45.0, "y": 0.0}, "diameter": 0.9, "drill": 0.5,
+				"from_layer": "top", "to_layer": "bottom"},
+		],
+	})
+	check_eq("a via with a negative dimension is DROPPED, not clamped to unstated",
+		malformed.vias.size(), 1)
+	check_eq("...and the well-formed via beside it survives untouched",
+		float((malformed.vias[0] as Dictionary).get("diameter", 0.0)), 0.9)
+	var bad_out: Dictionary = ws.commit(str(ws.add_candidate(malformed)), board)
+	check_eq("...so only the well-formed hole reaches copper",
+		(bad_out.get("via_ids", []) as Array).size(), 1)

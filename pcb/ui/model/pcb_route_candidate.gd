@@ -422,8 +422,20 @@ func load_from_dict(data: Dictionary) -> void:
 
 	vias.clear()
 	for v in data.get("vias", []):
-		if v is Dictionary:
-			vias.append(_via_from_json(v))
+		if not (v is Dictionary):
+			continue
+		var via := _via_from_json(v)
+		if via.is_empty():
+			# MALFORMED, so DROPPED and NAMED — never clamped into an "unstated"
+			# 0.0, which the commit-time resolution would silently answer with
+			# the board's default. A record claiming a negative hole is a record
+			# whose other numbers cannot be trusted either.
+			push_warning(("[RouteCandidate] %s: dropped a stored via with a "
+				+ "negative diameter/drill (%s/%s) — a negative dimension is "
+				+ "malformed, not unstated") % [candidate_id,
+					str(v.get("diameter", 0.0)), str(v.get("drill", 0.0))])
+			continue
+		vias.append(via)
 
 	source_hint_ids.clear()
 	for h in data.get("source_hint_ids", []):
@@ -498,20 +510,32 @@ static func _via_to_json(via: Dictionary) -> Dictionary:
 	return out
 
 
+## One stored via record, or {} when it is MALFORMED and the caller must drop it.
+##
+## 0.0 (or an absent key) is UNSTATED — the one "nobody has said yet" value
+## (PcbViaDimensions' own contract). A sidecar has no board in hand, so stamping
+## the 0.8/0.4 constants here restored a legacy via at 0.8/0.4 on a board whose
+## design_rules say otherwise, and the commit-time resolution can only rescue a
+## ZERO stamp: it could not tell that 0.8 from an authored one. Left at 0.0, the
+## board's rules answer at commit/materialize, exactly as they do for a via that
+## was never persisted.
+##
+## A NEGATIVE authored dimension is NOT unstated, it is malformed: -0.5 is a
+## hole nothing can drill, and clamping it to 0.0 laundered a broken record into
+## the "resolve me from the board" shape — the via then committed at the board
+## default and read as if someone had chosen it. The record is refused instead,
+## which is the same fail-closed ruling every other malformed stored record gets.
 static func _via_from_json(via: Dictionary) -> Dictionary:
+	var diameter := float(via.get("diameter", 0.0))
+	var drill := float(via.get("drill", 0.0))
+	if diameter < 0.0 or drill < 0.0:
+		return {}
 	var out: Dictionary = via.duplicate(true)
 	if out.has("position") and out["position"] is Dictionary:
 		var pd: Dictionary = out["position"]
 		out["position"] = Vector2(float(pd.get("x", 0.0)), float(pd.get("y", 0.0)))
-	# AN UNSTATED SIZE STAYS 0.0 — the one "nobody has said yet" value
-	# (PcbViaDimensions' own contract). A sidecar has no board in hand, so
-	# stamping the 0.8/0.4 constants here restored a legacy via at 0.8/0.4 on a
-	# board whose design_rules say otherwise, and the commit-time resolution can
-	# only rescue a ZERO stamp: it could not tell that 0.8 from an authored one.
-	# Left at 0.0, the board's rules answer at commit/materialize, exactly as
-	# they do for a via that was never persisted.
-	out["diameter"] = maxf(0.0, float(out.get("diameter", 0.0)))
-	out["drill"] = maxf(0.0, float(out.get("drill", 0.0)))
+	out["diameter"] = diameter
+	out["drill"] = drill
 	out["locked"] = bool(out.get("locked", false))
 	out["id"] = str(out.get("id", ""))
 	return out

@@ -3119,7 +3119,7 @@ def compile_board(
     # file should grow. Text entries expand to N open-polyline primitives here,
     # so every downstream consumer sees plain geometry and no consumer needs to
     # know a font exists.
-    board_graphics = board_graphics_mod.build_board_graphics(board, board_id, diags)
+    board_graphics = board_graphics_mod.build_board_graphics(board, board_id, version, diags)
 
     # The ordinal-id bridge diagnostic is a v1-only artifact: v2 ids are the
     # persisted minted identity (validated above), not ordinal-derived, so there

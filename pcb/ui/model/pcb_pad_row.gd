@@ -247,32 +247,49 @@ static func side_for_pin(comp, pin: String) -> String:
 ## read as "this mechanical hole is the best-connected pin on the part".
 ## "none" is the same reading pcb_copper_contact.physical_pad_node takes (it
 ## returns a no_copper_node there), so the row and the contact predicate agree.
+##
+## ONE LOGICAL PIN MAY OWN SEVERAL PHYSICAL LANDS, and the answer comes from
+## the ones that CARRY COPPER — every land is read, not just the first. A pin
+## whose np_thru_hole land happens to be listed before its smd land is the
+## common shape (a plated-slot part, a shielding pin drilled and soldered),
+## and reading only the first record answered "none" for a pin that is plainly
+## on the front: the pad renders, routes and is committed to, while the row and
+## every consumer downstream of it call it copper-less. NPTH lands are ignored
+## here rather than voting; "none" is the answer only when NO land carries
+## copper.
 static func layer_for_pin(comp, pin: String) -> String:
 	if comp == null:
 		return ""
+	var matched := false
+	var has_copper := false
+	var has_front := false
+	var has_back := false
 	for raw in comp.pads:
 		var land: Dictionary = raw
 		if str(land.get("number", "")) != pin:
 			continue
+		matched = true
 		var land_type := str(land.get("type", "smd"))
 		if land_type == "np_thru_hole":
-			return "none"
+			continue
+		has_copper = true
 		if land_type in THT_PAD_TYPES:
 			return "all"
-		var layers: Array = land.get("layers", []) as Array
-		var has_front := false
-		var has_back := false
-		for l in layers:
+		for l in land.get("layers", []) as Array:
 			var name := str(l)
 			if name.begins_with("F."):
 				has_front = true
 			elif name.begins_with("B."):
 				has_back = true
-		if has_front and not has_back:
-			return "top"
-		if has_back and not has_front:
-			return "bottom"
-		break
+	if matched and not has_copper:
+		return "none"
+	# Both sides (or neither) named across the copper lands is no single side to
+	# report, so the part's own mounting layer answers — the same fall-through a
+	# land with no `layers` at all has always taken.
+	if has_front and not has_back:
+		return "top"
+	if has_back and not has_front:
+		return "bottom"
 	return str(comp.layer)
 
 

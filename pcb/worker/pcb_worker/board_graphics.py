@@ -59,6 +59,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import board_font
+from .board_schema import _is_minted_id
 from .canonical_id import derive_id
 from .geometry import place_point
 from .silk_source import SILK_GRAPHIC_WIDTH_MM, SILK_TEXT_WIDTH_MM
@@ -207,8 +208,13 @@ def _rect_points(entry: dict) -> tuple[tuple[float, float], ...] | None:
     return ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
 
 
-def build_board_graphics(board: dict, board_id: str, diags) -> tuple[BoardGraphic, ...]:
+def build_board_graphics(board: dict, board_id: str, schema_version: int,
+                         diags) -> tuple[BoardGraphic, ...]:
     """Compile the top-level ``board_graphics`` list into IR primitives.
+
+    ``schema_version`` is the board's own ``version``: it decides whether a
+    graphic's id must already be minted (v2) or may be derived from the ordinal
+    (v1, and only when the key is absent) — see the identity block below.
 
     ``diags`` is the compiler's diagnostic sink; every refusal below is an
     ERROR, never a silent drop, because a board graphic is something a person
@@ -234,16 +240,40 @@ def build_board_graphics(board: dict, board_id: str, diags) -> tuple[BoardGraphi
                         f"board_graphics[{ordinal}] is not a mapping", ref)
             continue
 
-        # An ABSENT id is derived from the ordinal, not refused: v1 carries no
-        # persistent ids at all (board_validate and Go's Validate only demand a
-        # minted graphic id from v2 on), so refusing here would reject boards
-        # both validators call valid — spec vector 450 is exactly that board.
-        # Derived the way every other v1 child id is (canonical_id.derive_id,
-        # board-namespaced), so the id is stable for a compile-from-scratch and
-        # two boards carrying the same artwork still get distinct ids.
+        # IDENTITY IS VERSION-DISPATCHED, the same way _validate_child_id does
+        # it for a trace/via/hole/zone.
+        #
+        # v2 REQUIRES the persisted minted "graphic:<32hex>" id — the gate
+        # board_validate._check_entity_ids and Go's Validate both apply to
+        # board_graphics. Deriving one here would hand a v2 board an identity
+        # its own file does not carry, which is exactly the drift the mint
+        # exists to prevent.
+        #
+        # v1 carries no persistent ids at all, so a GENUINELY ABSENT key is
+        # derived from the ordinal — spec vector 450 is that board, and both
+        # validators call it valid. But a PRESENT id is authored intent: 123 or
+        # "" is a broken one, and quietly swapping it for a derived id makes a
+        # caller mistake look like a successful compile.
         graphic_id = entry.get("id")
-        if not isinstance(graphic_id, str) or not graphic_id:
+        if schema_version >= 2:
+            if not _is_minted_id("graphic", graphic_id):
+                diags.error("unminted_persistent_id",
+                            f"board graphic at board_graphics[{ordinal}] carries "
+                            f"{graphic_id!r}, not a minted \"graphic:<32hex>\" id; a "
+                            f"v2 board must be migrated (ids minted at "
+                            f"pcb.deserialize) before compile", ref)
+                continue
+        elif "id" not in entry:
+            # Derived the way every other v1 child id is (canonical_id.derive_id,
+            # board-namespaced), so the id is stable for a compile-from-scratch
+            # and two boards carrying the same artwork still get distinct ids.
             graphic_id = derive_id("graphic", board_id, "board_graphics", str(ordinal))
+        elif not (isinstance(graphic_id, str) and graphic_id):
+            diags.error("invalid_authored_id",
+                        f"board graphic at board_graphics[{ordinal}] has authored id "
+                        f"{graphic_id!r}; an authored id must be a non-empty string",
+                        ref)
+            continue
         ref = SourceRef(EntityKind.GRAPHIC, graphic_id)
 
         layer_id = entry.get("layer")

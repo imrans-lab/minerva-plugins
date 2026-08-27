@@ -523,6 +523,43 @@ func _run_ingest_record_routed_width_wins() -> void:
 	check_eq("...and the width_source is the worker's, not this side's verdict",
 		str(stamp_cand.width_source), "net_class")
 
+	# ...BUT A DEFAULT STAMP IS NOT A CHOICE. "board_rules"/"engine_default" is
+	# the router saying "nobody stated a width, so I used the fallback", and a
+	# fallback must never outrank a width someone authored — the same rule that
+	# keeps the record's own `width` below the hints. Identical fixture to the
+	# net_class case above except for the one word in the stamp, so a wrong
+	# answer here can only be the precedence.
+	var default_record: Dictionary = stamp_record.duplicate(true)
+	default_record["net"] = "VDEF"
+	default_record["effective_width_source"] = "board_rules"
+	(default_record["source_hints"][0] as Dictionary)["kind_payload"]["net_names"] = ["VDEF"]
+	var default_cand = ws.get_candidate(str(ws.ingest_record(default_record, 4)))
+	check("default-stamped candidate resolves", default_cand != null)
+	if default_cand == null:
+		return
+	check_eq("a board_rules stamp LOSES to the hint's authored 0.25mm",
+		float(default_cand.segments[0].get("width")), 0.25)
+	check_eq("...on every segment",
+		float(default_cand.segments[1].get("width")), 0.25)
+	check_eq("...and the provenance names the hint, not the rung that lost",
+		str(default_cand.width_source), "hint")
+
+	# The default is DEMOTED, never discarded: with no hint to lose to it is
+	# still the last rung, and the stamp is then the honest provenance.
+	var lonely_record: Dictionary = default_record.duplicate(true)
+	lonely_record["net"] = "VLONE"
+	lonely_record["source_hints"] = []
+	lonely_record["source_hint_ids"] = []
+	lonely_record["width"] = 0.0
+	var lonely_cand = ws.get_candidate(str(ws.ingest_record(lonely_record, 4)))
+	check("unhinted default-stamped candidate resolves", lonely_cand != null)
+	if lonely_cand == null:
+		return
+	check_eq("with nothing authored, the router's fallback still sizes the copper",
+		float(lonely_cand.segments[0].get("width")), 0.5)
+	check_eq("...and it is named as the source, because it IS the source",
+		str(lonely_cand.width_source), "board_rules")
+
 	# THE CHECKER SEES WHAT COMMIT SEES. When nothing resolved a width the
 	# candidate's copper is 0.0, and the draft_check wire shape has to say 0.0
 	# too: a nominal 0.25 there measured copper nobody proposed and reported it

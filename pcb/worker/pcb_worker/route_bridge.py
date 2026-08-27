@@ -1572,34 +1572,60 @@ def _point_from_raw(wp: Any) -> Optional[list[float]]:
     envelopes arrive straight off the wire, so a non-numeric coordinate is a
     caller mistake, and float() raising out of here took down the whole
     materialization instead of refusing the one hint that carries it.
+
+    NaN and the infinities are the same caller mistake wearing a float's
+    clothes: float("nan") and float("inf") PARSE, so without the finiteness
+    check they arrive as a corner, and every downstream comparison against a
+    NaN is false — a corridor that silently routes nowhere rather than a hint
+    that is refused by name. An integer too large for a float (10**400) raises
+    OverflowError out of float(), which is the same caller mistake again and
+    belongs with TypeError/ValueError, not with a traceback that takes the
+    whole materialization down.
     """
     try:
         if isinstance(wp, (list, tuple)) and len(wp) >= 2:
-            return [float(wp[0]), float(wp[1])]
-        if isinstance(wp, dict):
-            if "x" in wp and "y" in wp:
-                return [float(wp["x"]), float(wp["y"])]
-            if "x_mm" in wp and "y_mm" in wp:
-                return [float(wp["x_mm"]), float(wp["y_mm"])]
-    except (TypeError, ValueError):
+            point = [float(wp[0]), float(wp[1])]
+        elif isinstance(wp, dict) and "x" in wp and "y" in wp:
+            point = [float(wp["x"]), float(wp["y"])]
+        elif isinstance(wp, dict) and "x_mm" in wp and "y_mm" in wp:
+            point = [float(wp["x_mm"]), float(wp["y_mm"])]
+        else:
+            return None
+    except (TypeError, ValueError, OverflowError):
         return None
-    return None
+    if not (math.isfinite(point[0]) and math.isfinite(point[1])):
+        return None
+    return point
 
 
-def _unreadable_waypoints(envelope: dict) -> list[int]:
-    """Positions in this hint's ``kind_payload.waypoints`` that carry no
-    readable x/y.
+def _waypoints_refusal(envelope: dict) -> Optional[str]:
+    """Why this hint's ``kind_payload.waypoints`` cannot be read, or None when
+    every corner is readable.
 
-    The callers refuse the whole hint by name when this is non-empty rather
-    than routing the surviving corners: dropping a corner joins its two
-    neighbours into a run the author never drew, and on the verbatim path that
-    run is what gets committed as copper.
+    The callers refuse the whole hint by name on any reason rather than routing
+    the surviving corners: dropping a corner joins its two neighbours into a
+    run the author never drew, and on the verbatim path that run is what gets
+    committed as copper.
+
+    A PRESENT non-list ``waypoints`` ({"bad": 1}, a bare string) is one of
+    those reasons, not an empty corridor. It used to read as "this hint has no
+    waypoints", which is the shape of a legitimate pins-only hint — so a
+    malformed payload was routed straight past this gate and answered with a
+    pad-to-pad run nobody drew. An ABSENT key still means exactly that
+    (pins-only), and is not a refusal.
     """
     kp = envelope.get("kind_payload") or {}
-    raw = kp.get("waypoints") if isinstance(kp, dict) else None
+    if not isinstance(kp, dict) or "waypoints" not in kp:
+        return None
+    raw = kp.get("waypoints")
+    if raw is None:
+        return None
     if not isinstance(raw, list):
-        return []
-    return [i for i, wp in enumerate(raw) if _point_from_raw(wp) is None]
+        return "kind_payload.waypoints is %s, not a list" % type(raw).__name__
+    bad = [i for i, wp in enumerate(raw) if _point_from_raw(wp) is None]
+    if bad:
+        return "waypoint(s) %s carry no readable x/y" % bad
+    return None
 
 
 def _points_from_raw(raw: Any) -> list[list[float]]:
@@ -2035,12 +2061,12 @@ def materialize_detailed_hints(
                     f"detailed hint names an unusable layer ({exc}) — "
                     "falling back to engine-guided routing"})
                 continue
-            bad_waypoints = _unreadable_waypoints(env)
-            if bad_waypoints:
+            waypoint_refusal = _waypoints_refusal(env)
+            if waypoint_refusal:
                 warnings.append({"id": ann_id, "message":
-                    f"detailed hint waypoint(s) {bad_waypoints} carry no readable "
-                    "x/y — falling back to engine-guided routing rather than "
-                    "committing a corner the author never drew"})
+                    f"detailed hint is unreadable ({waypoint_refusal}) — falling "
+                    "back to engine-guided routing rather than committing a "
+                    "corner the author never drew"})
                 continue
             try:
                 segments, vias = _route_from_waypoint_stops(
@@ -2128,12 +2154,11 @@ def hints_to_router(
             continue
 
         layer = _canon_layer(kp.get("layer", "F.Cu"))
-        bad_waypoints = _unreadable_waypoints(env)
-        if bad_waypoints:
+        waypoint_refusal = _waypoints_refusal(env)
+        if waypoint_refusal:
             warnings.append({"id": str(env.get("id", "")), "message":
-                f"waypoint(s) {bad_waypoints} carry no readable x/y — hint "
-                "skipped rather than steered down a corridor the author never "
-                "drew"})
+                f"{waypoint_refusal} — hint skipped rather than steered down a "
+                "corridor the author never drew"})
             continue
         waypoints = _waypoints_of(env)
 

@@ -239,6 +239,54 @@ def test_4c_a_non_numeric_coordinate_refuses_the_hint_by_name():
         assert route.get("as_drawn") is not True
 
 
+def test_4d_non_finite_and_unfloatable_coordinates_refuse_the_hint():
+    """NaN, the infinities and an integer too big for a float are the same
+    caller mistake as "bad" — and the two that PARSE are the dangerous half.
+
+    float("nan") and float("inf") sail through float(), so without a finiteness
+    check they arrive as a corner; every downstream comparison against NaN is
+    false, so the hint routes nowhere while reporting nothing. A huge int
+    raises OverflowError, which is not one of the exceptions the parser used to
+    catch — it escaped and took the whole route call down instead of refusing
+    the one hint carrying it.
+    """
+    for coordinate in (float("nan"), float("inf"), float("-inf"), 10 ** 400):
+        result = _route(_hint([
+            [20.0, 20.32],
+            {"x": coordinate, "y": 20.32, "layer": "bottom"},
+            [35.0, 20.32],
+        ]))
+        msgs = _messages(result)
+        assert "no readable x/y" in msgs, f"{coordinate!r} was accepted: {msgs}"
+        for route in result.get("routes") or []:
+            assert route.get("as_drawn") is not True
+
+
+def test_4e_a_non_list_waypoints_payload_is_unreadable_not_an_empty_corridor():
+    """`waypoints: {"bad": 1}` is a broken payload, not a pins-only hint.
+
+    Reading it as "no waypoints" is the shape of a legitimate pins-only hint,
+    so the malformed payload used to walk straight past the gate and be
+    answered with a pad-to-pad run the author never drew. An ABSENT key still
+    means pins-only — the negative control below.
+    """
+    for payload in ({"bad": 1}, "nope", 7):
+        result = _route(_hint(payload))
+        msgs = _messages(result)
+        assert "not a list" in msgs, f"{payload!r} was accepted: {msgs}"
+        for route in result.get("routes") or []:
+            assert route.get("as_drawn") is not True
+
+    # Negative control: no `waypoints` key at all is a pins-only hint, and is
+    # not refused by this gate.
+    board = route_bridge.board_to_router(_bridge_board())
+    pins_only = _hint([])
+    pins_only["kind_payload"].pop("waypoints")
+    _routes, _nets, warnings, _ids = route_bridge.materialize_detailed_hints(
+        [pins_only], board, declared_layers=["top", "bottom"])
+    assert not any("not a list" in w.get("message", "") for w in warnings), warnings
+
+
 # ---------------------------------------------------------------------------
 # 5. The ENGINE path cannot honour hops — and must never drop them silently
 # ---------------------------------------------------------------------------
