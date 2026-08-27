@@ -821,7 +821,15 @@ export path). `pcb.route` is now a declared `ipc_channels` entry forwarded to th
 worker `route` method (`internal/tools` `RouteChannel`/`HandleRouteChannel`, bug
 019f3815e9f9), so the route-correction loop is LIVE; `route_board` returns a
 structured `worker_unavailable` (surfaced by the tool as `route_worker_unavailable`
-failure-feedback) only when the IPC channel is genuinely not ready. The
+failure-feedback) only when the IPC channel is genuinely not ready.
+
+A worker that ANSWERS with a refusal is reported differently: its own
+`{ok:false, error:{kind, message}}` envelope (`unsupported_geometry`,
+`unsupported_scope`, `parse`, `route`) is surfaced as `route_worker_refused`
+carrying that `kind` and `message`, so a board-geometry problem never reads as
+an outage. `route_worker_unavailable` is reserved for the no-answer kinds
+(`worker_unavailable`, `worker_error`, or an `{ok:false}` with no error dict);
+`pcb_backend_stopped` stays the backend-not-running affordance. The
 write-back / materialize / lifecycle logic is validated headless against a canned
 `RoutingResult` in `src/test/test_pcb_apply_route_hints.gd` (the worker call is the
 only stubbed seam).

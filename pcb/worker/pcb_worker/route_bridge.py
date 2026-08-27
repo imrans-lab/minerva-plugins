@@ -788,8 +788,14 @@ def _hole_obstacle(hole) -> Obstacle:
     return Obstacle(position=tuple(centre), type="mounting_hole", radius=radius)
 
 
-def resolved_board_to_router(rb: ResolvedBoard) -> Board:
+def resolved_board_to_router(
+    rb: ResolvedBoard, warnings: Optional[list[dict]] = None,
+) -> Board:
     """Project a compiled :class:`ResolvedBoard` onto the engine's ``Board``.
+
+    ``warnings`` is an optional sink (same ``{id, message}`` shape the hint
+    translation uses) for members this projection had to EXCLUDE rather than
+    refuse over — see the net loop.
 
     THE fail-closed seam for canonical routing (Round E, docket 019f783860c8):
     every pad extent, position, side, layer and net here is IR-authoritative, so
@@ -845,14 +851,26 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     pads: list[Pad] = []
     obstacles: list[Obstacle] = []
     pad_by_id: dict[str, Pad] = {}
+    # Pads this projection deliberately keeps OUT of the routable set, by IR pad
+    # id -> (display name, why). A net member found here is excluded from that
+    # net with a warning; a member in NEITHER map is a broken IR ref and still
+    # fails closed. See the net loop below.
+    unroutable: dict[str, tuple[str, str]] = {}
     for ir_pad in iter_ir_pads(rb):
         if ir_pad.is_npth:
             obstacles.append(_npth_obstacle(ir_pad))
+            unroutable[ir_pad.pad.id] = (
+                f"{ir_pad.ref}.{ir_pad.number}",
+                "a non-plated through hole — drilled, never plated, so it "
+                "carries no copper to route to")
             continue
         if not ir_pad.carries_copper:
             # A paste-only KiCad pad primitive is stencil geometry, not a land,
             # endpoint, hole or routing obstacle.  It survives in the resolved IR
             # for CAM but is intentionally absent from the copper router.
+            unroutable[ir_pad.pad.id] = (
+                f"{ir_pad.ref}.{ir_pad.number}",
+                "a paste-only stencil aperture, not a land")
             continue
         if not ir_pad.is_addressable:
             # Copper with no authored pad number (019f97eb6adf). It cannot be a
@@ -874,18 +892,44 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     nets: dict[str, Net] = {}
     for resolved_net in rb.nets:
         net = Net(name=resolved_net.name, number=resolved_net.index, pads=[])
+        excluded = 0
         for pad_ref in resolved_net.pad_refs:
             pad = pad_by_id.get(pad_ref)
             if pad is None:
-                # The IR guarantees pad_refs resolve, so the only way to get here
-                # is a net member that carries no copper (an NPTH pad). Routing to
-                # it is impossible; failing closed beats silently dropping a net
-                # member and reporting the net "routed".
-                raise UnsupportedGeometry(
-                    f"net {resolved_net.name!r} references pad {pad_ref} which "
-                    f"carries no routable copper")
+                known = unroutable.get(pad_ref)
+                if known is None:
+                    # Not a pad this projection chose to skip. The IR guarantees
+                    # pad_refs resolve, so this is a broken reference and there is
+                    # nothing to exclude — fail closed rather than route a net
+                    # whose membership we cannot account for.
+                    raise UnsupportedGeometry(
+                        f"net {resolved_net.name!r} references pad {pad_ref} "
+                        f"which is not a pad of this board")
+                # A net member with no copper is excluded from the NET, not fatal
+                # to the BOARD. A mounting hole deliberately placed on a net is
+                # legal authoring, and refusing over it made every OTHER net on
+                # the board unroutable too. The connection it stands for is still
+                # owed — the DRC census reports that; the router only says it
+                # cannot be the one to deliver it.
+                excluded += 1
+                if warnings is not None:
+                    warnings.append({"id": "", "message":
+                        f"net {resolved_net.name!r}: pad {known[0]} "
+                        f"({pad_ref}) is {known[1]} — it was excluded from the "
+                        f"routed net; the rest of the board still routes"})
+                continue
             pad.net = resolved_net.name
             net.pads.append(pad)
+        if excluded and len(net.pads) < 2 and warnings is not None:
+            # Only worth saying when an exclusion CAUSED it: a net authored with
+            # one pin is ordinary and silent. The engine already skips any net
+            # with fewer than two pads (agent_router.router), so the net stays in
+            # the map — dropping it would make an explicit scope naming it read
+            # as "not a net of this board", which is a worse answer.
+            warnings.append({"id": "", "message":
+                f"net {resolved_net.name!r} has fewer than two routable pads "
+                f"once its copper-less members are excluded — nothing on it "
+                f"can be routed"})
         nets[resolved_net.name] = net
 
     obstacles.extend(_hole_obstacle(hole) for hole in rb.holes)

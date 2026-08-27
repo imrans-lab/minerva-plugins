@@ -52,6 +52,12 @@ extends SceneTree
 ##      existing suite uses). The Propose button's status label shows the
 ##      human-actionable message; the tool result carries the structured
 ##      pcb_backend_stopped error + recovery hint.
+##   G) A worker REFUSAL is not worker silence: the broker replies with the
+##      worker's own {ok:false, error:{kind, message}} envelope → the tool
+##      reports route_worker_refused carrying that kind/message (and the
+##      Propose button says "refused", not "did not answer"), while a
+##      transport failure with no worker envelope still reports
+##      route_worker_unavailable.
 ##   F) Bulk regression: minerva_pcb_apply_route_hints commit=true still works
 ##      through the SAME _materialize_routes machinery — unaffected by S5 (that
 ##      branch never wrote an annotation) — delete-on-commit contract intact.
@@ -124,6 +130,7 @@ func _init() -> void:
 	await _test_c_reject_via_real_dispatch()
 	await _test_d_propose_again_then_accept_via_real_dispatch()
 	await _test_e_backend_stopped_affordance()
+	await _test_g_refusal_is_not_silence()
 	await _test_f_bulk_commit_regression()
 
 	panel.queue_free()
@@ -797,7 +804,7 @@ func _test_d_propose_again_then_accept_via_real_dispatch() -> void:
 ## backend subprocess is registered but not RUNNING — distinct from
 ## test_pcb_apply_route_hints.gd's "no _MinervaIPC at all" worker-unavailable
 ## simulation (that shape stays a generic route_worker_unavailable; THIS shape
-## is the one PCBPanel.route_board()/panel_tools.gd's _router_unavailable must
+## is the one PCBPanel.route_board()/panel_tools.gd's _router_call_failed must
 ## now recognise specifically).
 class SabotageBrokerIpc:
 	extends Node
@@ -868,6 +875,115 @@ func _test_e_backend_stopped_affordance() -> void:
 	# would also want to resolve/redraw a stale failed-propose hint before
 	# moving on rather than have it silently ride along on the next call.
 	host.remove_annotation(fresh_hint_id)
+
+
+# ── G: a worker REFUSAL is not worker silence ────────────────────────────────
+
+## Replies with the worker's OWN {ok:false, error:{kind, message}} envelope —
+## the shape PCBPanel.route_board() forwards verbatim. This is the router
+## ANSWERING and saying no (here: the unsupported_geometry refusal an NPTH
+## mounting hole on a net used to produce for the whole board).
+class RefusingBrokerIpc:
+	extends Node
+	var _reply_id: String = ""
+
+	func on_request(channel: String, _params: Dictionary, reply_id: String) -> void:
+		if channel == "pcb.route":
+			_reply_id = reply_id
+
+	func await_reply(reply_id: String, _timeout_ms: int = 0) -> Dictionary:
+		if reply_id != _reply_id:
+			return {"success": false, "error_code": "timeout", "error_message": "no captured request"}
+		return {"ok": false, "error": {"kind": "unsupported_geometry",
+			"message": "net 'R5_A' references pad placed-pad:mh5-1 which carries no routable copper"}}
+
+
+## Replies the way the broker does when NOTHING answered — no worker envelope,
+## just a transport failure. PCBPanel.route_board() tags that "worker_error".
+## The message deliberately avoids the words "not running", which route_board
+## matches to reach the backend-stopped affordance instead.
+class SilentBrokerIpc:
+	extends Node
+	var _reply_id: String = ""
+
+	func on_request(channel: String, _params: Dictionary, reply_id: String) -> void:
+		if channel == "pcb.route":
+			_reply_id = reply_id
+
+	func await_reply(reply_id: String, _timeout_ms: int = 0) -> Dictionary:
+		if reply_id != _reply_id:
+			return {"success": false, "error_code": "timeout", "error_message": "no captured request"}
+		return {"success": false, "error_code": "timeout",
+			"error_message": "timed out waiting for the backend"}
+
+
+## Both halves of the same mapping, back to back on ONE fixture: the SAME call
+## that reports a refusal as a refusal must still report real silence as
+## route_worker_unavailable. Reported separately they could both pass while the
+## mapping collapsed one into the other.
+func _test_g_refusal_is_not_silence() -> void:
+	print("-- G: worker refusal vs worker silence --")
+
+	var env: Dictionary = host.build_route_hint_envelope(
+		U1_PIN1.x, U1_PIN1.y, "", "F.Cu", "single_trace",
+		[], "human", "", 0.25, ["U1.1"], ["U2.1"])
+	var hint_id := str(host.add_annotation_v2(env))
+	check("G: hint seeded", not hint_id.is_empty())
+	var traces_before: int = data.get_trace_count()
+
+	var refusing := RefusingBrokerIpc.new()
+	refusing.name = "_MinervaIPC"
+	panel.add_child(refusing)
+	panel.request.connect(refusing.on_request)
+
+	var refused: Dictionary = await panel.handle_tool(
+		"minerva_pcb_apply_route_hints", {"commit": false})
+	check("G: refusal is not success", not bool(refused.get("success", true)))
+	check_eq("G: refusal has its OWN error tag, not the outage tag",
+		str(refused.get("error", "")), "route_worker_refused")
+	check_eq("G: refusal carries the worker's kind", str(refused.get("kind", "")),
+		"unsupported_geometry")
+	check("G: refusal carries the worker's message (names the net and the pad)",
+		str(refused.get("message", "")).contains("R5_A")
+			and str(refused.get("message", "")).contains("no routable copper"),
+		str(refused))
+	check("G: refusal echoes the hint ids",
+		(refused.get("hint_ids", []) as Array).has(hint_id), str(refused))
+	check_eq("G: board unmutated by a refused route", data.get_trace_count(), traces_before)
+
+	# The human half: the Propose button must not send the owner to restart a
+	# worker that answered.
+	await _click_propose_button()
+	check("G: status names the refusal, not an outage",
+		panel._status_label.text.contains("refused")
+			and not panel._status_label.text.contains("did not answer"),
+		panel._status_label.text)
+
+	panel.request.disconnect(refusing.on_request)
+	refusing.queue_free()
+	await process_frame
+
+	var silent := SilentBrokerIpc.new()
+	silent.name = "_MinervaIPC"
+	panel.add_child(silent)
+	panel.request.connect(silent.on_request)
+
+	var silence: Dictionary = await panel.handle_tool(
+		"minerva_pcb_apply_route_hints", {"commit": false})
+	check("G: silence is not success", not bool(silence.get("success", true)))
+	check_eq("G: real no-answer STILL maps to route_worker_unavailable",
+		str(silence.get("error", "")), "route_worker_unavailable")
+	check("G: silence carries no worker kind", not silence.has("kind"), str(silence))
+
+	panel.request.disconnect(silent.on_request)
+	silent.queue_free()
+	await process_frame
+
+	check("G: hint still open after both failures",
+		str(host.get_by_id(hint_id).get("lifecycle", "")) == "open")
+	# Same reason E cleans up: route_board() gathers EVERY hint on the host, so
+	# a leftover would ride along on F's scoped commit.
+	host.remove_annotation(hint_id)
 
 
 # ── F: bulk commit=true regression — shared machinery, delete-on-commit intact ─

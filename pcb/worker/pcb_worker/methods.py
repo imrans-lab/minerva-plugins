@@ -2732,8 +2732,13 @@ def _route(params: dict) -> dict:
     # model faithfully produces the same structured zero-route reply — the
     # connectivity projection used to run ahead of the guard, where its failure
     # would have escaped the route error envelope entirely.
+    # Net members the projection had to EXCLUDE (a copper-less pad on a net) —
+    # collected here so they survive into the reply's warnings rather than
+    # taking the whole board down; merged into bridge_warnings below.
+    projection_warnings: list[dict] = []
     try:
-        board = route_bridge.resolved_board_to_router(compiled.board)
+        board = route_bridge.resolved_board_to_router(
+            compiled.board, projection_warnings)
         # The board's FIXED copper: ALREADY-ACCEPTED (T7 019f70ebc9ed) plus any
         # PINNED workspace candidate the caller named (DCR finding 7). Inside the
         # SAME boundary as the other two projections, for the same reason they
@@ -2824,7 +2829,7 @@ def _route(params: dict) -> dict:
     # per hint; this call site's only job is to not lose the key.
     translation = route_bridge.hints_to_router(
         remaining, board, params.get("selection"), params.get("task_constraints"))
-    bridge_warnings = drawn_warnings + translation.warnings
+    bridge_warnings = projection_warnings + drawn_warnings + translation.warnings
     selected_hint_ids = consumed_ids + [
         i for i in translation.selected_ids if i not in consumed_ids]
 

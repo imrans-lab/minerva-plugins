@@ -3248,7 +3248,7 @@ func _on_propose_button_pressed() -> void:
 			# Backend-stopped affordance (bug 019f6c1e0399): names the cause
 			# AND the recovery action, exact wording is this round's call —
 			# the structured machine shape (error/detail/recovery_hint) is
-			# what panel_tools.gd's _router_unavailable already returns.
+			# what panel_tools.gd's _router_call_failed already returns.
 			_set_status("Routing needs the pcb backend — it's stopped. Start it from the Plugin Manager, then retry.")
 		else:
 			_set_status("Propose failed: %s" % str(result.get("note", result.get("error", "unknown error"))))
@@ -6115,7 +6115,7 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	# error_code:"plugin_not_running", error_message:"Plugin is not running"} —
 	# verbatim (no "ok" key, so it falls through the two checks above). Tag it
 	# distinctly from the generic worker_error fallback so panel_tools.gd's
-	# _router_unavailable (and the Propose button) can surface a
+	# _router_call_failed (and the Propose button) can surface a
 	# human-actionable "start it" message instead of an opaque routing
 	# failure. error_message is ALSO matched by substring (not just the code)
 	# so a differently-worded future PluginErrors message still degrades

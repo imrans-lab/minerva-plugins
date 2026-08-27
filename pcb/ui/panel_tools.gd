@@ -2650,7 +2650,7 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 		route_extra["draft_request"] = true
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
-		return _router_unavailable(reply, source_hints)
+		return _router_call_failed(reply, source_hints)
 
 	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	if commit:
@@ -2979,21 +2979,36 @@ static func _span_task_for_hint(hint: Dictionary, kp: Dictionary, data, board_ne
 	}
 
 
-## Structured failure-as-feedback when the worker did not answer.
+## Error kinds that mean the router worker DID NOT ANSWER — no worker envelope
+## came back at all. "worker_unavailable": no IPC bridge reachable (headless, no
+## broker mounted, channel unregistered). "worker_error": the broker replied
+## WITHOUT an {ok,…} envelope (transport or backend fault). "": an {ok:false}
+## carrying no error dict, which says nothing either way. Every OTHER kind is a
+## worker envelope: the worker answered, and its answer was a refusal.
+const _ROUTER_NO_ANSWER_KINDS: Array[String] = ["", "worker_unavailable", "worker_error"]
+
+
+## Structured failure-as-feedback for a route call that produced no result —
+## either because the worker never answered, or because it answered "no".
 ##
 ## Backend-stopped affordance (C5, docket 019f6c465fd8, bug 019f6c1e0399):
 ## PCBPanel.route_board() tags a reply whose error_code was "plugin_not_running"
 ## (the pcb backend subprocess is not RUNNING — PluginScenePanelBroker.
 ## _dispatch_to_plugin_backend's own check) with error.kind ==
-## "plugin_not_running" specifically, distinct from the generic
-## "worker_unavailable" (no IPC bridge reachable at all — e.g. headless
-## tests with no broker mounted) / "worker_error" (some OTHER routing
-## failure) kinds. Callers that need a human-actionable message (the Propose
-## button) key off error=="pcb_backend_stopped"; agents get the same signal
-## plus recovery_hint="start via minerva_plugin_start" in the machine shape.
-static func _router_unavailable(reply: Dictionary, source_hints: Array) -> Dictionary:
+## "plugin_not_running" specifically. Callers that need a human-actionable
+## message (the Propose button) key off error=="pcb_backend_stopped"; agents get
+## the same signal plus recovery_hint="start via minerva_plugin_start" in the
+## machine shape.
+##
+## A WORKER REFUSAL IS NOT SILENCE. The worker's own {ok:false, error:{kind,
+## message}} envelope — unsupported_geometry, unsupported_scope, parse, route —
+## is reported as "route_worker_refused" carrying that kind and message, so the
+## named fix is the board's, not "restart a worker that is running fine".
+## route_worker_unavailable is reserved for the no-answer kinds above.
+static func _router_call_failed(reply: Dictionary, source_hints: Array) -> Dictionary:
 	var err: Dictionary = _dict_or_empty(reply.get("error"))
-	if str(err.get("kind", "")) == "plugin_not_running":
+	var kind: String = str(err.get("kind", ""))
+	if kind == "plugin_not_running":
 		return {
 			"success": false,
 			"error": "pcb_backend_stopped",
@@ -3001,6 +3016,21 @@ static func _router_unavailable(reply: Dictionary, source_hints: Array) -> Dicti
 			"hint_ids": _hint_id_list(source_hints),
 			"recovery_hint": "start via minerva_plugin_start",
 			"note": "Routing needs the pcb backend, and it is not running. Start it (minerva_plugin_start, plugin_id \"pcb\"), then retry.",
+		}
+	if not _ROUTER_NO_ANSWER_KINDS.has(kind):
+		var message: String = str(err.get("message", ""))
+		var note: String = "Router worker refused this run (%s)" % kind
+		if not message.is_empty():
+			note += ": %s" % message
+		note += ". The worker answered — this is the board's geometry or the run's scope, not an outage."
+		return {
+			"success": false,
+			"error": "route_worker_refused",
+			"kind": kind,
+			"message": message,
+			"detail": err,
+			"hint_ids": _hint_id_list(source_hints),
+			"note": note,
 		}
 	return {
 		"success": false,
@@ -7295,7 +7325,7 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	route_extra["draft_request"] = true
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
-		return _router_unavailable(reply, source_hints)
+		return _router_call_failed(reply, source_hints)
 	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	# Narrate the ask boundary (docket 019fcb6f9d20): when the run was
 	# span-scoped, say so — the caller should never have to infer from the
@@ -9119,7 +9149,7 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary, pre: D
 	var reply: Dictionary = await _run_router(
 		host, {"mode": "ids", "ids": _hint_id_list(source_hints)}, route_extra)
 	if not bool(reply.get("ok", false)):
-		return _router_unavailable(reply, source_hints)
+		return _router_call_failed(reply, source_hints)
 
 	# The router answered — NOW retire the prior. A pinned prior would otherwise
 	# HOLD its task and the fresh geometry would be dropped on the floor.

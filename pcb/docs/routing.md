@@ -617,6 +617,18 @@ and each consumer decides:
 | **unnumbered** copper, no net | conservative **obstacle** | excluded | copper |
 | unnumbered copper **on a net** | **fails closed** | fails closed | copper |
 | NPTH (numbered or not) | obstacle | excluded | hole primitive |
+| NPTH **on a net** | obstacle; **dropped from that net**, warned | excluded | hole primitive |
+
+A mounting hole deliberately placed on a net is legal authoring, so a net member
+that carries no copper is dropped from **that net** with a warning naming the net
+and the pad — never a refusal for the board. Refusing made every *other* net
+unroutable too, which is a whole-board outage caused by one hole. The connection
+the hole stands for is still owed; the connectivity census reports that, and the
+router only declines to be the one that delivers it. If the exclusion leaves the
+net with fewer than two routable pads, a second warning says so — the net stays
+in the projection (the engine already skips any net with fewer than two pads, and
+deleting it would make an explicit scope naming it read "not a net of this
+board").
 
 Unnumbered copper degrades to a keepout rather than failing the board: it still
 has to block, but nothing could route *to* it. A **netted** unnumbered pad is a
