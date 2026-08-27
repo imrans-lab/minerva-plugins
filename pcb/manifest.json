@@ -420,7 +420,7 @@
     },
     {
       "name": "minerva_pcb_set_view",
-      "description": "Pan/zoom the PCB board camera so you (and the human watching the panel) can view items at different scales. Drives the live canvas view; then capture it with minerva_pcb_get_image {fit:false}. Provide exactly one framing (first present wins): component_id (frame one part), region (frame a world-mm rect), center_x_mm/center_y_mm/zoom (set centre in mm + zoom in px/mm; omitted axis/zoom keeps current), zoom_factor (multiply current zoom — >1 in, <1 out), or fit:true (whole board). Returns {view:{zoom, center_x_mm, center_y_mm, visible:{x_mm,y_mm,width_mm,height_mm}}}.",
+      "description": "Pan/zoom the PCB board camera so you (and the human watching the panel) can view items at different scales. Drives the live canvas view; then capture it with minerva_pcb_get_image {fit:false}. Provide exactly one framing (first present wins): component_id (frame one part), region (frame a world-mm rect), center_x_mm/center_y_mm/zoom (set centre in mm + zoom in px/mm; omitted axis/zoom keeps current), zoom_factor (multiply current zoom — >1 in, <1 out), or fit:true (the whole board \u2014 its outline UNION any part hanging past that outline \u2014 fitted to the panel's CURRENT viewport rect, so a narrow docked pane frames all of it too). Returns {view:{zoom, center_x_mm, center_y_mm, visible:{x_mm,y_mm,width_mm,height_mm}}} \u2014 the camera you ended up with, so you can see whether the board actually landed in frame.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -433,7 +433,7 @@
           "center_y_mm": {"type": "number", "description": "View centre Y in board mm."},
           "zoom": {"type": "number", "description": "Zoom in pixels-per-mm (clamped to the canvas min/max)."},
           "zoom_factor": {"type": "number", "description": "Multiply the current zoom, keeping the view centre fixed (>1 zooms in, <1 out)."},
-          "fit": {"type": "boolean", "description": "Frame the whole board."}
+          "fit": {"type": "boolean", "description": "Frame the whole board (outline plus any part past its edge) in the panel's current viewport rect."}
         },
         "required": ["editor_name"]
       }

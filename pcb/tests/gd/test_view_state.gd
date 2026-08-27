@@ -45,19 +45,22 @@ func _init() -> void:
 	await _run_types_are_validated()
 	await _run_explicit_filter_wins()
 	await _run_working_layer_is_not_view()
+	await _run_fit_frames_the_whole_board()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
 	quit(1 if _fail > 0 else 0)
 
 
-func check(desc: String, cond: bool) -> void:
+## `detail` is printed only on failure — measured values a reader needs to see
+## the shape of the miss, without one more line of noise per passing check.
+func check(desc: String, cond: bool, detail: String = "") -> void:
 	if cond:
 		_pass += 1
 		print("  PASS: %s" % desc)
 	else:
 		_fail += 1
-		printerr("  FAIL: %s" % desc)
+		printerr("  FAIL: %s%s" % [desc, "" if detail.is_empty() else "  [%s]" % detail])
 
 
 func check_eq(desc: String, actual, expected) -> void:
@@ -414,5 +417,144 @@ func _run_working_layer_is_not_view() -> void:
 	check("a layer off the stack is refused", not bool(undeclared.get("success", true)))
 	check_eq("named layer_not_on_stack", str(undeclared.get("error", "")), "layer_not_on_stack")
 	check_eq("and the working layer is still untouched", str(canvas.working_layer), "in2")
+
+	await _unmount(ctx["panel"])
+
+
+# ── 8. fit:true frames the whole board in the CURRENT viewport (01a040f7523e) ──
+#
+# THE BUG. minerva_pcb_set_view {fit:true} in a narrow docked pane framed a
+# region that left the 90x100 board a sliver at the edge — the owner read it as
+# "the board disappeared". The on-screen fit framed the COMPONENT bounding box
+# (a fixed 10mm margin around whatever parts existed) while the CAPTURE fit
+# framed the board outline union the parts: two derivations of "the whole
+# board", disagreeing on the same board, and the on-screen one framing nothing
+# recognisable when the parts sat in one corner — or leaving the camera
+# untouched entirely when there were none.
+#
+# THE ORACLE, stated once and applied at three viewport aspects (wide-short,
+# large-landscape, tall-narrow): the board's own mm bounds lie fully inside the
+# visible mm rect on BOTH axes, and the tighter axis is nearly filled — "all of
+# it is on screen" and "as large as the viewport allows" are separate claims and
+# the second is the one a too-far-out fit breaks. Both are read off the REPLY,
+# because the reply is what an agent has to act on, and the reply is then
+# checked to agree with the live canvas the renderer reads.
+#
+# WHY THE VIEWPORT IS SET, NOT MEASURED. The production code takes the live
+# canvas rect and nothing else (there is no hardcoded pane size to fit to); the
+# fixture drives that rect directly so all three aspects are reachable without
+# depending on how a 554px-wide panel happens to divide between toolbar,
+# sidebar and canvas.
+
+
+## Board bounds are the fit's whole subject, so name them from the model rather
+## than a literal.
+func _board_rect(data) -> Rect2:
+	return Rect2(0.0, 0.0, float(data.board_width), float(data.board_height))
+
+
+## The reply's visible rect as a Rect2.
+func _visible_rect(view: Dictionary) -> Rect2:
+	var vis: Dictionary = view.get("visible", {})
+	return Rect2(float(vis.get("x_mm", 0.0)), float(vis.get("y_mm", 0.0)),
+		float(vis.get("width_mm", 0.0)), float(vis.get("height_mm", 0.0)))
+
+
+## Is `want` fully inside the visible rect on both axes? Half-open Rect2
+## containment would reject a board whose edge lands exactly on the frame, which
+## is the correct answer for a tight fit, so the comparison is by edge with a
+## float-noise epsilon.
+func _visible_contains(view: Dictionary, want: Rect2) -> bool:
+	var vis := _visible_rect(view)
+	const EPS := 1e-4
+	return want.position.x >= vis.position.x - EPS and want.position.y >= vis.position.y - EPS \
+		and want.end.x <= vis.end.x + EPS and want.end.y <= vis.end.y + EPS
+
+
+## The share of the TIGHTER axis that `want` occupies. Taking the minimum of the
+## two axis zooms means one axis is filled to the padding and the other shows
+## extra board area, so the maximum of the two fills is the tight one.
+func _tight_axis_fill(view: Dictionary, want: Rect2) -> float:
+	var vis := _visible_rect(view)
+	if vis.size.x <= 0.0 or vis.size.y <= 0.0:
+		return 0.0
+	return maxf(want.size.x / vis.size.x, want.size.y / vis.size.y)
+
+
+## Fit against an explicit canvas rect. Set and call in ONE synchronous block:
+## the canvas lives in a MarginContainer that takes its size back on the next
+## layout pass, and _set_view is not a coroutine, so the fit and the get_view it
+## reports both see this rect.
+func _fit_at(host, canvas, viewport_px: Vector2) -> Dictionary:
+	canvas.size = viewport_px
+	return PanelTools._set_view(host, {"fit": true})
+
+
+func _run_fit_frames_the_whole_board() -> void:
+	print("-- 8. fit:true frames the whole board in the current viewport rect --")
+	var ctx: Dictionary = await _ctx()
+	var host = ctx["host"]
+	var canvas = ctx["canvas"]
+	var data = ctx["data"]
+	data.set_board_size(90.0, 100.0)
+	var board := _board_rect(data)
+
+	# A. NO PARTS AT ALL. Fitting the parts' bounding box had nothing to fit, so
+	#    it left zoom and pan where they were and the board sat off-camera.
+	var bare: Dictionary = _fit_at(host, canvas, Vector2(554.0, 300.0))
+	var bare_view: Dictionary = bare.get("view", {})
+	check("bare board: the outline itself is framed", _visible_contains(bare_view, board),
+		"visible=%s board=%s" % [str(_visible_rect(bare_view)), str(board)])
+	check("bare board: and filled to the tighter axis",
+		_tight_axis_fill(bare_view, board) >= 0.85 and _tight_axis_fill(bare_view, board) <= 1.0,
+		"fill=%.3f" % _tight_axis_fill(bare_view, board))
+
+	# B. PARTS IN ONE CORNER — the shape that produced the sliver: a parts-only
+	#    bbox ~14mm across, nowhere near the 90x100 board it sits on.
+	var spots: Array[Vector2] = [Vector2(12.0, 14.0), Vector2(20.0, 22.0), Vector2(26.0, 18.0)]
+	for spot in spots:
+		var part = data.new_component()
+		part.id = "C%d_%d" % [int(spot.x), int(spot.y)]
+		part.position = spot
+		data.add_component(part)
+
+	var viewports: Array[Vector2] = [
+		Vector2(554.0, 300.0),   # the narrow docked pane from the report
+		Vector2(1200.0, 900.0),  # a full-width editor pane
+		Vector2(300.0, 800.0),   # tall and narrow: the other extreme
+	]
+	for vp in viewports:
+		var tag := "%dx%d" % [int(vp.x), int(vp.y)]
+		var res: Dictionary = _fit_at(host, canvas, vp)
+		check("%s: fit succeeds" % tag, bool(res.get("success", false)),
+			"res=%s" % str(res))
+		var view: Dictionary = res.get("view", {})
+		check("%s: the whole board is inside the visible rect" % tag,
+			_visible_contains(view, board),
+			"visible=%s board=%s" % [str(_visible_rect(view)), str(board)])
+		var fill := _tight_axis_fill(view, board)
+		check("%s: and as large as the viewport allows" % tag,
+			fill >= 0.85 and fill <= 1.0, "tight-axis fill=%.3f" % fill)
+		check("%s: the board centre is the view centre" % tag,
+			is_equal_approx(float(view.get("center_x_mm", 0.0)), board.get_center().x)
+			and is_equal_approx(float(view.get("center_y_mm", 0.0)), board.get_center().y),
+			"centre=(%.3f, %.3f)" % [float(view.get("center_x_mm", 0.0)),
+				float(view.get("center_y_mm", 0.0))])
+		check("%s: the reply's zoom is the canvas's own" % tag,
+			is_equal_approx(float(view.get("zoom", 0.0)), float(canvas.zoom)),
+			"reply=%.4f canvas=%.4f" % [float(view.get("zoom", 0.0)), float(canvas.zoom)])
+
+	# C. A PART HANGING OFF THE EDGE stays in frame: "the whole board" is the
+	#    outline UNION the parts, never one or the other.
+	var over = data.new_component()
+	over.id = "OVERHANG"
+	over.position = Vector2(95.0, 50.0)
+	data.add_component(over)
+	var over_bounds: Rect2 = over.get_bounding_rect()
+	var wide: Dictionary = _fit_at(host, canvas, Vector2(554.0, 300.0)).get("view", {})
+	check("overhang: the board is still fully framed", _visible_contains(wide, board),
+		"visible=%s" % str(_visible_rect(wide)))
+	check("overhang: and so is the part past its edge", _visible_contains(wide, over_bounds),
+		"visible=%s part=%s" % [str(_visible_rect(wide)), str(over_bounds)])
 
 	await _unmount(ctx["panel"])

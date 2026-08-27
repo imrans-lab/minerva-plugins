@@ -261,7 +261,12 @@ test_inner_layer_via_guard.gd assertions=39
 # other alone, and re-asserting the same value changes nothing. MEASURED:
 # 76 passed, 0 failed — the first run of this suite; the 57 above was never
 # executed and the run confirms the batch's count, not the provisional one.
-test_view_state.gd assertions=76
+# 76 -> 95: group 8 pins fit:true against the CURRENT viewport rect (bug
+# 01a040f7523e — a narrow docked pane left the board a sliver). Three
+# viewport aspects x five checks, plus the bare-board case and the
+# overhanging part. DERIVED, not measured (2 + 5*3 + 2 = 19): the station
+# that wrote it runs static gates only. Confirm on the first run.
+test_view_state.gd assertions=95
 # NEW at epoch NLC C2 (item 019fff60e05a): minerva_pcb_place_via, the direct
 # board via. Grown at C3 (item 01a001c39aa3) with minerva_pcb_add_trace's two
 # groups — SAME suite on purpose: the pair is one parity gap answered twice and

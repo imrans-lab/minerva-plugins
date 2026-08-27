@@ -1866,8 +1866,15 @@ static func _set_view(host, args: Dictionary) -> Dictionary:
 	elif args.has("zoom_factor"):
 		canvas.zoom_by(float(args["zoom_factor"]))
 	elif bool(args.get("fit", false)):
-		if canvas.has_method("zoom_to_fit"):
-			canvas.zoom_to_fit()
+		if not canvas.has_method("zoom_to_fit"):
+			return _err("PCB canvas cannot fit (no zoom_to_fit)")
+		# Fitting needs a laid-out viewport to fit TO. Without this the fit is a
+		# silent no-op and the reply reports the OLD camera as though it had
+		# moved — the failure that reads as "the board disappeared".
+		var vp: Vector2 = canvas.size
+		if vp.x <= 0.0 or vp.y <= 0.0:
+			return _err("PCB canvas has no viewport rect yet (panel not laid out)")
+		canvas.zoom_to_fit()
 	else:
 		return _err("set_view needs one of: component_id, region, "
 			+ "center_x_mm/center_y_mm/zoom, zoom_factor, or fit:true")

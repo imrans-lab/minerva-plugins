@@ -64,6 +64,10 @@ const PcbRatsnest := preload("model/pcb_ratsnest.gd")
 const PcbCopperContact := preload("model/pcb_copper_contact.gd")
 const PcbCopperOwnership := preload("model/pcb_copper_ownership.gd")
 const PcbZoneCopper := preload("model/pcb_zone_copper.gd")
+## THE fit answer, shared by every caller that frames something (zoom_to_fit,
+## frame_rect, _frame_board_for_capture) so a docked narrow pane and a wide one
+## cannot disagree about what "the whole board" is — bug 01a040f7523e.
+const PcbViewFit := preload("pcb_view_fit.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -11405,44 +11409,19 @@ func select_component(component_id: String, add_to_selection: bool = false) -> v
 		queue_redraw()
 
 
-## Zoom to fit all components.
+## Frame the whole board — the toolbar Fit button, a freshly loaded board, and
+## minerva_pcb_set_view {fit:true}. Fits against the CURRENT viewport rect
+## (`size`, the live laid-out pane), so the same call is correct in a narrow
+## docked pane and in a full-width one; the math is pcb_view_fit.gd's, shared
+## with the capture path so the two cannot drift.
 func zoom_to_fit() -> void:
-	if not data or data.components.is_empty():
-		_center_view()
+	if not data:
 		return
-
-	var min_pos := Vector2(INF, INF)
-	var max_pos := Vector2(-INF, -INF)
-
-	for comp_id in data.components:
-		var comp = data.components[comp_id]
-		var bounds: Rect2 = comp.get_bounding_rect()
-		min_pos.x = minf(min_pos.x, bounds.position.x)
-		min_pos.y = minf(min_pos.y, bounds.position.y)
-		max_pos.x = maxf(max_pos.x, bounds.end.x)
-		max_pos.y = maxf(max_pos.y, bounds.end.y)
-
-	var margin := 10.0
-	min_pos -= Vector2(margin, margin)
-	max_pos += Vector2(margin, margin)
-
-	var content_size := max_pos - min_pos
-	var content_center := (min_pos + max_pos) / 2.0
-
-	if content_size.x <= 0.0 or content_size.y <= 0.0:
-		_center_view()
+	var content := PcbViewFit.board_content_rect(data)
+	var fitted := PcbViewFit.fit_zoom(content, size, min_zoom, max_zoom)
+	if fitted <= 0.0:
 		return
-
-	var zoom_x := size.x / content_size.x
-	var zoom_y := size.y / content_size.y
-	zoom = minf(zoom_x, zoom_y)
-	zoom = clampf(zoom, min_zoom, max_zoom)
-
-	pan_offset = -content_center * zoom
-
-	zoom_changed.emit(zoom)
-	view_changed.emit()
-	queue_redraw()
+	set_view_center_zoom(content.get_center(), fitted)
 
 
 ## Center the view on a world-mm point at an explicit zoom (px/mm), clamped to
@@ -11467,14 +11446,16 @@ func zoom_by(factor: float) -> void:
 	set_view_center_zoom(-pan_offset / zoom, zoom * factor)
 
 
-## Frame an arbitrary world-mm rect to fill the viewport (with a small mm margin)
-## — e.g. to inspect one component. Same fit math as zoom_to_fit, for a sub-region.
+## Frame an arbitrary world-mm rect to fill the viewport — e.g. to inspect one
+## component. Same shared fit math as zoom_to_fit, over a sub-region: the margin
+## here is an ABSOLUTE mm figure the caller asked for (set_view's margin_mm), so
+## the fractional padding is switched off and only that margin applies.
 func frame_rect(bounds: Rect2, margin_mm: float = 2.0) -> void:
 	var content := bounds.grow(margin_mm)
-	if content.size.x <= 0.0 or content.size.y <= 0.0 or size.x <= 0.0 or size.y <= 0.0:
+	var fitted := PcbViewFit.fit_zoom(content, size, min_zoom, max_zoom, 0.0)
+	if fitted <= 0.0:
 		return
-	set_view_center_zoom(content.get_center(),
-		minf(size.x / content.size.x, size.y / content.size.y))
+	set_view_center_zoom(content.get_center(), fitted)
 
 
 ## Current camera as plain data (for the set_view tool to report back): zoom
@@ -11824,28 +11805,19 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 	return img
 
 
-## Fit the whole board (+5% margin) into a capture copy sized to the offscreen
-## viewport. Same math as zoom_to_fit, but against the COPY's size (the requested
-## capture dims), not the on-screen canvas size.
+## Fit the whole board into a capture copy sized to the offscreen viewport. The
+## SAME derivation zoom_to_fit uses (pcb_view_fit.gd), just against the COPY's
+## size — the requested capture dims — instead of the on-screen canvas rect, so
+## a capture and the live pane frame the same board the same way. Assigns the
+## copy's fields directly rather than going through set_view_center_zoom: the
+## copy is off-tree and its signals have no listeners.
 func _frame_board_for_capture(copy) -> void:
-	var min_pos := Vector2.ZERO
-	var max_pos := Vector2(data.board_width, data.board_height)
-	for comp_id in data.components:
-		var b: Rect2 = data.components[comp_id].get_bounding_rect()
-		min_pos.x = minf(min_pos.x, b.position.x)
-		min_pos.y = minf(min_pos.y, b.position.y)
-		max_pos.x = maxf(max_pos.x, b.end.x)
-		max_pos.y = maxf(max_pos.y, b.end.y)
-	var content := max_pos - min_pos
-	var margin := content * 0.05
-	min_pos -= margin
-	max_pos += margin
-	content = max_pos - min_pos
-	if content.x <= 0.0 or content.y <= 0.0:
+	var content := PcbViewFit.board_content_rect(data)
+	var fitted := PcbViewFit.fit_zoom(content, copy.size, copy.min_zoom, copy.max_zoom)
+	if fitted <= 0.0:
 		return
-	copy.zoom = clampf(minf(copy.size.x / content.x, copy.size.y / content.y),
-		copy.min_zoom, copy.max_zoom)
-	copy.pan_offset = -((min_pos + max_pos) / 2.0) * copy.zoom
+	copy.zoom = fitted
+	copy.pan_offset = -content.get_center() * fitted
 
 
 func _on_data_changed() -> void:
