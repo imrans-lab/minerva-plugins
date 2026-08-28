@@ -54,10 +54,6 @@ const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest
 const LoadChecks := preload("res://../../minerva-plugins/pcb/ui/model/pcb_load_checks.gd")
 const PcbCopperDrawOrder := preload("res://../../minerva-plugins/pcb/ui/model/pcb_copper_draw_order.gd")
 
-## Read as text, not loaded: the draw ORDER inside a function body is a property
-## of the source, and nothing at runtime consults its own source.
-const CANVAS_SRC := "res://../../minerva-plugins/pcb/ui/pcb_canvas.gd"
-
 var _pass := 0
 var _fail := 0
 
@@ -271,16 +267,6 @@ func _last_pass_index(plan: Array, kind: String) -> int:
 	return found
 
 
-## The text of one function body in `src`, up to the next top-level `func`.
-func _func_body(src: String, signature: String) -> String:
-	var start := src.find(signature)
-	if start < 0:
-		return ""
-	var rest := src.substr(start + signature.length())
-	var stop := rest.find("\nfunc ")
-	return rest if stop < 0 else rest.substr(0, stop)
-
-
 func _run_copper_paints_in_manufacturing_order() -> void:
 	print("\n-- 4. copper: traces -> lands -> drills, per layer --")
 
@@ -340,22 +326,12 @@ func _run_copper_paints_in_manufacturing_order() -> void:
 			_pass_index(four, PcbCopperDrawOrder.TRACES, "in2")
 					< _pass_index(four, PcbCopperDrawOrder.TRACES, "in1"))
 
-	# The canvas must actually WALK that plan, and must no longer paint lands
-	# with the component bodies — the move is the fix.
-	var src := FileAccess.get_file_as_string(CANVAS_SRC)
-	var copper_body := _func_body(src, "func _draw_copper() -> void:")
-	var draw_body := _func_body(src, "func _draw() -> void:")
-	var component_body := _func_body(src, "func _draw_component(comp) -> void:")
-	check("the canvas dispatches the pass list rather than an order of its own",
-			copper_body.find("PcbCopperDrawOrder.build(") >= 0)
-	check("component BODIES still paint under the copper (%d < %d)"
-					% [draw_body.find("_draw_components()"), draw_body.find("_draw_copper()")],
-			draw_body.find("_draw_components()") >= 0
-			and draw_body.find("_draw_components()") < draw_body.find("_draw_copper()"))
-	check("...and the land render left the component pass entirely",
-			component_body.length() > 200
-			and component_body.find("_draw_component_pads(") < 0
-			and component_body.find("_draw_fallback_pins(") < 0)
+	# The claim that the canvas paints in this order is carried by the build()
+	# assertions above — the plan IS the draw order (_draw_copper dispatches it
+	# and does nothing else). Three grep-the-source assertions used to sit here
+	# as a second oracle; they pinned the spelling of three call sites rather
+	# than any behaviour, and a rename would have failed them while the copper
+	# came out identical.
 
 
 func check(desc: String, cond: bool) -> void:

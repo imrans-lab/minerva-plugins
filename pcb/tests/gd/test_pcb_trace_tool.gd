@@ -42,6 +42,7 @@ const PCBTraceScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_tr
 const PcbTraceAngles := preload("res://../../minerva-plugins/pcb/ui/model/pcb_trace_angles.gd")
 const PcbOptionsMenu := preload("res://../../minerva-plugins/pcb/ui/pcb_options_menu.gd")
 const PcbPrefsScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_prefs.gd")
+const SnapPrefsFixture := preload("res://../../minerva-plugins/pcb/tests/gd/snap_prefs_fixture.gd")
 
 var _pass := 0
 var _fail := 0
@@ -96,8 +97,18 @@ class StubPadHost extends RefCounted:
 		return str(a.get("pin", "")) < str(b.get("pin", ""))
 
 
+## What the three snap preferences held before this run, so the developer's own
+## store is handed back untouched (SnapPrefsFixture).
+var _saved_snaps: Dictionary = {}
+
+
 func _init() -> void:
 	print("=== PCB canvas TRACE tool (BT-93) ===\n")
+	# Sections 13 and 14 read the LIVE snap toggles, which are a real file in
+	# the developer's user:// store — a stored snap_angle=false would turn 13b/c
+	# /f red for a reason unrelated to the code. Reset to the defaults here,
+	# restored before quit.
+	_saved_snaps = SnapPrefsFixture.reset()
 	_test_start_pad_net_inheritance()
 	_test_start_refusals()
 	_test_width_chain()
@@ -110,8 +121,12 @@ func _init() -> void:
 	_test_netless_refusal_names_every_anchor_kind()
 	_test_working_layer_is_not_the_view()
 	_test_trace_end_anchor()
-	_test_angle_snap()
+	# A COROUTINE: 13e pushes real key events through Input, which is buffered
+	# until the next frame, so that section has to await one (test_pcb_canvas
+	# _input_probe.gd's precedent). Awaiting it here keeps the sections ordered.
+	await _test_angle_snap()
 	_test_board_rules_verb_and_menu_are_one_path()
+	SnapPrefsFixture.restore(_saved_snaps)
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1278,6 +1293,13 @@ func _test_angle_snap() -> void:
 	# (e) SHIFT IS THE ESCAPE HATCH — one free-angle segment without changing
 	# the board's rule. Pushed through Input, which is where the canvas reads it
 	# (a gesture is not an event: the modifier is consulted per motion frame).
+	#
+	# EACH PUSH IS FOLLOWED BY A FRAME. Input.parse_input_event is BUFFERED —
+	# Input.is_key_pressed, which `_free_angle_held()` reads, does not report the
+	# key until the buffer is flushed on the next frame. Read in the same frame,
+	# the "holding Shift drops the constraint" check would fail and the "release
+	# restores it" check would pass vacuously, both for the same reason. Same
+	# await-per-event discipline as test_pcb_canvas_input_probe.gd's _set_ctrl.
 	var shift_rig := _rig(0.0, [0, 90])
 	var shift_canvas = shift_rig[0]
 	shift_canvas.snap_to_grid = false
@@ -1290,6 +1312,7 @@ func _test_angle_snap() -> void:
 	shift_down.physical_keycode = KEY_SHIFT
 	shift_down.pressed = true
 	Input.parse_input_event(shift_down)
+	await process_frame
 	check("(13e) holding Shift drops the constraint for the segment being drawn, "
 			+ "without touching the board rule",
 			shift_canvas._trace_allowed_angles().is_empty()
@@ -1300,6 +1323,7 @@ func _test_angle_snap() -> void:
 	shift_up.physical_keycode = KEY_SHIFT
 	shift_up.pressed = false
 	Input.parse_input_event(shift_up)
+	await process_frame
 	check("(13e) …and releasing it puts the constraint straight back",
 			shift_canvas._trace_allowed_angles() == ([0.0, 90.0] as Array[float]),
 			str(shift_canvas._trace_allowed_angles()))
@@ -1393,6 +1417,19 @@ func _test_board_rules_verb_and_menu_are_one_path() -> void:
 		"editor_name": "probe", "trace_angle_mode": "diagonal"})
 	check("(14) an unknown mode names the modes that exist",
 			str(unknown.get("error", "")).contains("octilinear"), str(unknown))
+
+	# A key nobody knows is refused by NAME. The apply loops only read keys they
+	# recognise, so without this a misspelling would report ok with changed:[].
+	var misspelled: Dictionary = PanelTools._board_rules(host, {
+		"editor_name": "probe", "trace_width": 0.3})
+	check("(14) an unknown KEY is refused, naming it and the keys that are accepted",
+			not bool(misspelled.get("success", false))
+				and str(misspelled.get("error", "")).contains("trace_width")
+				and str(misspelled.get("error", "")).contains("trace_width_mm"),
+			str(misspelled))
+	check("(14) …and it changed nothing — no half-write, no silent no-op reported as ok",
+			not (data.design_rules as Dictionary).has("trace_width_mm"),
+			str(data.design_rules))
 
 	# A board declaring a set this menu cannot express says so, rather than
 	# reporting the nearest offered mode.

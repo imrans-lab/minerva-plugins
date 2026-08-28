@@ -151,7 +151,7 @@ func TestAdoptionIsPerKeyNotAllOrNothing(t *testing.T) {
 	}
 }
 
-// THE DESIGNATOR TRAVELS AS AN ANCHOR, NOT AS A PICTURE (bug 01a047a3ae10).
+// THE DESIGNATOR TRAVELS AS AN ANCHOR, NOT AS A PICTURE.
 // Pre-anchor replies carried the rendered strokes, adoption was absent-only,
 // and a board saved with a component's strokes handed them straight back on
 // the next load — so a part copied from another drew the SOURCE's designator

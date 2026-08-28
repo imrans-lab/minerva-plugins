@@ -6315,10 +6315,6 @@ static func _set_trace_width(host, args: Dictionary) -> Dictionary:
 	})
 
 
-## Read one plugin preference. Read-only — journals nothing, writes nothing.
-## Reports the EFFECTIVE value plus whether it was actually stored, because
-## "never chosen" and "chosen and equal to the default" are different facts the
-## panel's seeding order depends on.
 ## Read — and optionally set — the board's OPTIONS block: the allowed trace
 ## directions, the four numeric design rules, the drawing-grid pitch, and the
 ## three per-user snap toggles. The `view_state` shape, for the same reason:
@@ -6329,9 +6325,10 @@ static func _set_trace_width(host, args: Dictionary) -> Dictionary:
 ## (read_state / apply) and this verb only shapes the envelope, so the panel's
 ## Options menu and this tool cannot drift into two rules.
 ##
-## VALIDATED WHOLE, THEN APPLIED WHOLE: a bad mode, a malformed angle list or an
-## out-of-range width changes NOTHING and names what was wrong. The board half
-## of a real change is exactly one undo step however many rules moved.
+## VALIDATED WHOLE, THEN APPLIED WHOLE: a bad mode, a malformed angle list, an
+## unknown key or an out-of-range width changes NOTHING and names what was
+## wrong. The board half of a real change is exactly one undo step however many
+## rules moved.
 ##
 ## `trace_angle_mode` and `allowed_trace_angles_deg` are two spellings of one
 ## rule and passing both is refused rather than silently resolved — a mode IS an
@@ -6358,6 +6355,10 @@ static func _board_rules(host, args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
+## Read one plugin preference. Read-only — journals nothing, writes nothing.
+## Reports the EFFECTIVE value plus whether it was actually stored, because
+## "never chosen" and "chosen and equal to the default" are different facts the
+## panel's seeding order depends on.
 static func _get_preference(_host, args: Dictionary) -> Dictionary:
 	var prefs = _PcbPrefsScript.shared()
 	var key: String = str(args.get("key", ""))

@@ -135,8 +135,8 @@ const _DEFAULT_BOARD := {
 	"height_mm": 40.0,
 	"grid_mm": 2.54,
 	"components": [],
-	# A NEW board declares its routing style, and Octilinear is the default
-	# (owner ruling): the loosest set that still keeps a hand-drawn run on a
+	# A NEW board declares its routing style, and Octilinear is the default:
+	# the loosest set that still keeps a hand-drawn run on a
 	# direction a fab and a reviewer can read at a glance. It is a real board
 	# rule, not a tool habit — the worker's gc12 check enforces it from here.
 	"design_rules": {

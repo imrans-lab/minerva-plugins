@@ -2278,9 +2278,9 @@ func _stack_layers() -> Array:
 ## way round the canvas shows a trace running straight across an open hole,
 ## which is a board no fab makes.
 ##
-## Epoch 6 unit 3b: the stack walk uses the board's DECLARED stack rather than
-## two hardcoded "bottom" / "everything-else" passes, so an inner layer paints
-## in ITS stack position and only when it (or "all") is selected.
+## The stack walk uses the board's DECLARED stack rather than two hardcoded
+## "bottom" / "everything-else" passes, so an inner layer paints in ITS stack
+## position and only when it (or "all") is selected.
 ##
 ## The two eyes are applied while bucketing rather than at dispatch, so the pass
 ## list matches what actually reaches the screen: show_traces gates copper
@@ -2288,12 +2288,15 @@ func _stack_layers() -> Array:
 ## fallback pins of a part that resolved no real pad geometry).
 func _draw_copper() -> void:
 	# Bucket traces by layer ONCE: the stack walk is then one pass over the
-	# board rather than one full pass per declared layer.
+	# board rather than one full pass per declared layer. Keyed by the CANONICAL
+	# id, because that is what _stack_layers() returns: a "B.Cu" spelling
+	# compared raw matches no declared layer and would be appended above the
+	# whole stack instead of painting in the bottom layer's position.
 	var traces_by_layer := {}
 	if show_traces:
 		for trace_id in data.traces:
 			var trace = data.traces[trace_id]
-			var lid := str(trace.layer)
+			var lid := _canonical_layer(str(trace.layer))
 			if not traces_by_layer.has(lid):
 				traces_by_layer[lid] = []
 			traces_by_layer[lid].append(trace)
@@ -2318,7 +2321,11 @@ func _draw_copper() -> void:
 			# LANDS visibility means the part is mounted elsewhere: its
 			# through-hole rings still pierce this view, its SMD copper does not.
 			if visibility == CompVisibility.FULL:
-				var mount := str(comp.layer)
+				# Canonical for the same reason the trace bucket above is: the
+				# stack ids this is matched against are canonical, so a part
+				# whose layer reads "B.Cu"/"back" would otherwise paint its
+				# lands in the above-stack pass rather than on the bottom.
+				var mount := _canonical_layer(str(comp.layer))
 				if not smd_by_layer.has(mount):
 					smd_by_layer[mount] = []
 				smd_by_layer[mount].append(comp)
@@ -8052,8 +8059,8 @@ func _snap_pref(key: String) -> bool:
 ## preview drawn under a different rule from the commit would be a lie, which is
 ## the reason _author_point is one function and the reason this is too.
 ##
-## PRIORITY, highest first (owner ruling: "the snaps get in the way" near small
-## lands):
+## PRIORITY, highest first — the snaps must not get in the way near small
+## lands:
 ##   1. ANGLE. The direction is quantised to the board's
 ##      design_rules.allowed_trace_angles_deg, so a run leaving a land can only
 ##      travel in a direction the board — and the worker's gc12 check — allows.

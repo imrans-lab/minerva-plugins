@@ -212,6 +212,14 @@ and a board silently diverge. **Free removes the key** rather than storing `[]`,
 because the compiler refuses an empty list (see `docs/board-yaml.md`) and an
 absent key is how "no constraint" is spelled everywhere else.
 
+**`allowed_trace_angles_deg: []` therefore means two different things at the two
+ends, and both are correct.** In a board YAML it is `bad_trace_angles` — a
+refusal, because a board that asks for a direction constraint and silently gets
+none fails open invisibly (`docs/board-yaml.md`). Passed to this verb it is
+accepted and read as **Free**: the write path folds it and then *erases* the
+key (`PCBData.set_design_rule_trace_angles`), so what reaches the YAML is the
+absent key the compiler wants, never the empty list it refuses.
+
 **A new board is created Octilinear** (`PCBPanel._DEFAULT_BOARD`) — the loosest
 set that still keeps a hand-drawn run on a direction a fab and a reviewer can
 read at a glance.
@@ -233,7 +241,10 @@ lands:
    the endpoint off the direction step 1 chose, so the *distance* along the
    direction is what the grid quantises — a step of `pitch / max(|ux|, |uy|)`,
    which is the plain pitch for 0 and 90 and `pitch * sqrt(2)` for the
-   diagonals, so both axes still move by whole pitches at once.
+   diagonals, so both axes still move by whole pitches at once. The distance is
+   measured **from the run's anchor**, so a run started on an off-grid pad
+   centre keeps its waypoints on that anchor's grid rather than the board's —
+   unlike zone, cutout and via grid snap, which quantise the point itself.
 
 ### Reply shape
 

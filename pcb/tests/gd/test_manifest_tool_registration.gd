@@ -260,7 +260,10 @@ func _init() -> void:
 	# rather than a guess at a run's output. Its twin in test_workspace_tools.gd
 	# moved with it — a round that bumps only one of the two leaves the other
 	# failing against main, which is exactly what happened at 113 -> 114.
-	check("total registered tool count == 122", registered.size() == 122,
+	# (122 -> 123): minerva_pcb_board_rules — the Options menu's verb twin
+	# (trace-angle mode, the numeric design rules, grid pitch, snap toggles).
+	# executor:"panel", so the Go pin at 19 backend tools still holds.
+	check("total registered tool count == 123", registered.size() == 123,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

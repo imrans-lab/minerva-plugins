@@ -183,10 +183,10 @@ var refdes_anchor: Dictionary = {}:
 		_refresh_refdes_graphics()
 
 ## PRINTED reference designator — the stroke-font glyphs the fab actually
-## prints on silk (WYSIWYG goal 019ff4a5a75a, gap G2), in the SAME
-## footprint-local frame as `graphics`, poly entries only. Kept separate from
-## `graphics` because the loose-dict emitters consume comp["graphics"] and then
-## synthesize the designator themselves — merged strokes would print twice.
+## prints on silk, in the SAME footprint-local frame as `graphics`, poly entries
+## only. Kept separate from `graphics` because the loose-dict emitters consume
+## comp["graphics"] and then synthesize the designator themselves — merged
+## strokes would print twice.
 ##
 ## DERIVED, NEVER STORED. It is a render of `id` at `refdes_anchor`, refreshed
 ## by both setters, and no dict deserializes into it or serializes out of it.
@@ -195,6 +195,13 @@ var refdes_anchor: Dictionary = {}:
 ## copied from another kept drawing the SOURCE's designator, on screen and in
 ## the saved board, for as long as nobody re-resolved it.
 var refdes_graphics: Array = []
+
+## True only while a load_from_* call is filling this component. Both fields the
+## designator is rendered from (`id`, `refdes_anchor`) are set by every load, so
+## without this each load renders the glyphs twice per component and throws the
+## first render away. The loads clear it and refresh ONCE at the end; a live
+## rename or anchor move never sets it, so the setters still self-sync.
+var _loading_fields: bool = false
 
 ## Bounding box center offset from footprint origin (for origin-based positioning)
 ## When has_pad_geometry is true, position = origin, visual center = position + bbox_center_offset
@@ -560,7 +567,8 @@ func _graphics_to_list() -> Array:
 ## Re-render the printed designator from the LIVE ref at the current anchor.
 ## Called by the `id` and `refdes_anchor` setters — that pair is the whole sync
 ## contract, and the reason no caller has to remember to refresh after a
-## rename, a copy, a load or a normalize.
+## rename, a copy, a load or a normalize. A load sets both, so it suppresses the
+## setters with `_loading_fields` and calls this once at the end instead.
 ##
 ## The glyphs, the anchor defaults and the stroke width are the emitter's own
 ## (PcbBoardFont mirrors board_font; silk_source places designator glyphs
@@ -568,6 +576,8 @@ func _graphics_to_list() -> Array:
 ## is what the Gerber will carry. A hidden reference draws nothing, matching
 ## the emitter's authored-hidden rule.
 func _refresh_refdes_graphics() -> void:
+	if _loading_fields:
+		return
 	refdes_graphics = []
 	if id.strip_edges().is_empty() or bool(refdes_anchor.get("hidden", false)):
 		return
@@ -1342,6 +1352,7 @@ func to_dict() -> Dictionary:
 
 ## Deserialize from dictionary (legacy .minpcb shape)
 func load_from_dict(data: Dictionary) -> void:
+	_loading_fields = true
 	id = data.get("id", "")
 	set_footprint_by_name(str(data.get("footprint", "CUSTOM")))
 	footprint_id = data.get("footprint_id", "")
@@ -1420,6 +1431,10 @@ func load_from_dict(data: Dictionary) -> void:
 	canonical_extra.erase("refdes_graphics")
 	var pe = data.get("pin_extra", {})
 	pin_extra = (pe as Dictionary).duplicate(true) if pe is Dictionary else {}
+
+	# ONE render, from the ref and anchor this load finished with.
+	_loading_fields = false
+	_refresh_refdes_graphics()
 
 
 ## Create from dictionary (static constructor, legacy shape)
@@ -1512,6 +1527,7 @@ func to_board_dict() -> Dictionary:
 ## restore, an undo snapshot and a hand-built dict all leave it false, so a
 ## stale flag saved elsewhere cannot survive the load. See footprint_resolved.
 func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
+	_loading_fields = true
 	id = str(data.get("ref", data.get("id", "")))
 	var authored_fp := str(data.get("footprint", "CUSTOM"))
 	set_footprint_by_name(authored_fp)
@@ -1635,6 +1651,10 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 	for k in data:
 		if k not in known:
 			canonical_extra[k] = data[k]
+
+	# ONE render, from the ref and anchor this load finished with.
+	_loading_fields = false
+	_refresh_refdes_graphics()
 
 
 ## Create from a canonical board-contract component dict (static constructor).

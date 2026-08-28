@@ -119,10 +119,25 @@ def _gerber_copper(board: dict):
     return out
 
 
-def _key(x: float, y: float) -> tuple[float, float]:
-    """A coordinate pair as a comparable key — rounded well below the tolerance
-    the two paths could ever differ by for a real placement error."""
-    return (round(x, 6), round(y, 6))
+def _take_nearest(point: tuple[float, float],
+                  pool: list[tuple[float, float]]) -> int | None:
+    """Index in *pool* of the point within ``_TOL_MM`` of *point*, or None.
+
+    NOT a rounded key. Both sides compose their coordinates by float trig, so
+    two agreeing paths can land either side of a rounding boundary — 1.0000004999
+    and 1.0000005001 round to different 1e-6 keys and compare unequal while
+    differing by 2e-13. Matching each point to its nearest partner and judging
+    that distance against the SAME tolerance the router arm uses makes the
+    comparison measure disagreement rather than which side of a boundary the
+    noise fell on.
+    """
+    best: int | None = None
+    best_d = _TOL_MM
+    for i, (px, py) in enumerate(pool):
+        d = max(abs(px - point[0]), abs(py - point[1]))
+        if d < best_d:
+            best, best_d = i, d
+    return best
 
 
 def _census_side(pad) -> bool | None:
@@ -162,23 +177,35 @@ def test_the_gerber_harvest_flashes_copper_where_the_census_checks_it(
             continue
         census = _census_pads(solo)
 
-        census_pts = sorted(_key(p.x, p.y) for p in census)
-        flash_pts = sorted(_key(x, y) for (x, y, _side) in flashed)
-        assert census_pts == flash_pts, (
+        # PAIRED, not set-compared: each census pad claims the nearest unclaimed
+        # flashed point within _TOL_MM, and both sides must end up empty. Missing
+        # points would be a dropped land; leftover flashed points would be copper
+        # the census never checks, which is the same defect read the other way.
+        census_pts = [(p.x, p.y) for p in census]
+        unclaimed = [(x, y) for (x, y, _side) in flashed]
+        unmatched = []
+        for pt in census_pts:
+            hit = _take_nearest(pt, unclaimed)
+            if hit is None:
+                unmatched.append(pt)
+            else:
+                unclaimed.pop(hit)
+        assert not unmatched and not unclaimed, (
             f"{name}:{ref} at ({comp.get('x_mm')}, {comp.get('y_mm')}) "
             f"rot {comp.get('rotation_deg')} layer {comp.get('layer')}: the "
-            f"census checks pads at {census_pts} and the emitter flashes copper "
-            f"at {flash_pts} — one of them is not using "
-            f"geometry.component_transform")
+            f"census checks pads at {sorted(census_pts)} and the emitter flashes "
+            f"copper at {sorted((x, y) for (x, y, _s) in flashed)} — "
+            f"census pads with no copper within {_TOL_MM}mm: {unmatched}; "
+            f"flashed copper no census pad claims: {unclaimed}. One of them is "
+            f"not using geometry.component_transform")
 
-        # Side, per point. A through-hole land claims no side on either surface,
-        # so it drops out of the comparison rather than being asserted equal to
-        # a value neither produces.
-        flash_side = {}
-        for (x, y, side) in flashed:
-            flash_side.setdefault(_key(x, y), side)
+        # Side, per point, matched the same way. A through-hole land claims no
+        # side on either surface, so it drops out of the comparison rather than
+        # being asserted equal to a value neither produces.
         for pad in census:
-            got = flash_side.get(_key(pad.x, pad.y))
+            hit = _take_nearest(
+                (pad.x, pad.y), [(x, y) for (x, y, _side) in flashed])
+            got = flashed[hit][2] if hit is not None else None
             want = _census_side(pad)
             if got is None or want is None:
                 continue

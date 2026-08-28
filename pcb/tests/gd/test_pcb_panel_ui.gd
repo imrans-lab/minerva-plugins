@@ -18,10 +18,14 @@ const DRIVER_PATH := "res://test/helpers/plugin_panel_driver.gd"
 ## The shared bus plan — the ORACLE the held-lead test below reads its expected
 ## words, class and finding count out of. See _test_bus_refusal_is_held.
 const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
+const SnapPrefsFixture := preload("res://../../minerva-plugins/pcb/tests/gd/snap_prefs_fixture.gd")
 
 var _pass_count: int = 0
 var _fail_count: int = 0
 var _driver = null
+## What the three snap preferences held before this run — _test_options_menu
+## toggles one, and the store is a real file in the developer's user:// data.
+var _saved_snaps: Dictionary = {}
 
 
 ## Minimal editor stand-in: PCBPanel._on_panel_loaded reads ctx.editor.tab_title
@@ -33,6 +37,10 @@ class FakeEditor extends RefCounted:
 func _init() -> void:
 	print("=== PCB Panel UI Test ===\n")
 	await process_frame
+	# Before anything reads or writes them: the Options snap toggles live in the
+	# developer's own preference file, so the run starts from the registry
+	# defaults and hands their store back untouched in _finish().
+	_saved_snaps = SnapPrefsFixture.reset()
 
 	_driver = load(DRIVER_PATH).new()
 	check("plugin_panel_driver loads", _driver != null)
@@ -67,6 +75,7 @@ func _init() -> void:
 
 
 func _finish() -> void:
+	SnapPrefsFixture.restore(_saved_snaps)
 	print("\n=== Results: %d passed, %d failed ===" % [_pass_count, _fail_count])
 	if _fail_count > 0:
 		printerr("FAILURES: %d" % _fail_count)
@@ -1705,7 +1714,8 @@ func _test_options_menu() -> void:
 			prefs.get_bool("snap_angle", true) != before
 				and str(data.design_rules) == rules_before,
 			"snap_angle=%s" % str(prefs.get_bool("snap_angle", true)))
-	prefs.set_value("snap_angle", before)   # leave the store as we found it
+	# No hand-restore here: SnapPrefsFixture owns the three snap keys for the
+	# whole run and puts the developer's own values back in _finish().
 
 	panel.queue_free()
 	await process_frame

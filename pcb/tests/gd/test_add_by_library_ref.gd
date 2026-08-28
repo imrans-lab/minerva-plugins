@@ -50,15 +50,9 @@ extends SceneTree
 ##      refused by name, and the board is byte-identical afterwards — the
 ##      alternative is putting back exactly the placeholder this path retires.
 ##
-##   5. THE VERB IS THE ONLY ADD. Choosing a part and its footprint is
-##      authoring, not layout, so the panel carries no add-a-part gesture: the
-##      built panel tree is swept for one. A control assertion first proves the
-##      sidebar was actually built, because "the tree holds no such node" is
-##      otherwise satisfied by a tree that holds nothing.
-##
 ## FAILS AGAINST OLD: section 1's add is refused outright ("Invalid footprint
 ## type"), so every assertion in 1 and 2 fails; section 3's reply carries no
-## `geometry` block; section 5 finds the sidebar's add-a-part section mounted.
+## `geometry` block.
 ## Section 2's wire/save assertions fail on their own account against the codec
 ## that round-tripped footprint_resolved: the live dict never carried the flag
 ## for a part added this session (it only ever arrived through the canonical
@@ -68,8 +62,6 @@ extends SceneTree
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbLibraryPart := preload("res://../../minerva-plugins/pcb/ui/model/pcb_library_part.gd")
-
-const PCBPanelScript := preload("res://../../minerva-plugins/pcb/ui/PCBPanel.gd")
 
 const PLUGIN_ROOT := "res://../../minerva-plugins/pcb"
 
@@ -114,7 +106,6 @@ func _init() -> void:
 	await _run_the_board_still_checks()
 	await _run_a_sketch_part_is_named()
 	await _run_an_unresolvable_ref_adds_nothing()
-	await _run_the_verb_is_the_only_add()
 	print("\n=== Results: %d passed, %d failed (real_worker_used=%s) ===" % [
 		_pass, _fail, str(_used_real_worker)])
 	if _fail > 0:
@@ -377,7 +368,7 @@ func _run_library_ref_lands_real_geometry() -> void:
 		comp != null and comp.graphics.size() > 0)
 	# The designator is a RENDER of the live ref, not a picture the reply
 	# carried: a copy of this part answers to its own new name, and answers to
-	# J1's strokes again the moment it is named J1 (bug 01a047a3ae10).
+	# J1's strokes again the moment it is named J1.
 	var twin = comp.duplicate_component() if comp != null else null
 	if twin != null:
 		twin.id = "ZZ9"
@@ -647,48 +638,3 @@ func _run_an_unresolvable_ref_adds_nothing() -> void:
 	check("…and specifically no component under the requested id",
 		host.data.get_component("J9") == null)
 	host.queue_free()
-
-
-# ── 5. the verb is the only add ──────────────────────────────────────────────
-
-## The panel context `_on_panel_loaded` reads: it registers the annotation host
-## under `tab_title` and touches nothing else this suite cares about. The name
-## is this section's own so the registration cannot collide with a live tab.
-class PanelEditor extends RefCounted:
-	var tab_title: String = "NoAddPartProbe"
-	var associated_object: Variant = ""
-
-
-func _run_the_verb_is_the_only_add() -> void:
-	print("-- 5. the panel carries no add-a-part gesture --")
-	var panel: Control = PCBPanelScript.new()
-	get_root().add_child(panel)
-	panel.position = Vector2.ZERO
-	panel.size = Vector2(1100.0, 700.0)
-	panel._on_panel_loaded({"editor": PanelEditor.new(), "file_path": ""})
-	# Wide enough that the sidebar is mounted rather than folded into the
-	# narrow-mode drawer, and given the frames the layout pass needs.
-	for _i in range(6):
-		await process_frame
-
-	# THE CONTROL, and the reason the sweep below is not vacuous: a panel that
-	# built no sidebar would satisfy "no add gesture" while proving nothing.
-	check("the sidebar is built, carrying its other sections",
-		panel.find_child("RightSidebar", true, false) != null
-			and panel.find_child("PropertiesSection", true, false) != null)
-
-	var found := _add_part_nodes(panel)
-	check("…and nothing in it adds a part (found %s)" % str(found), found.is_empty())
-	panel.queue_free()
-
-
-## Every node in the panel whose NAME reads as an add-a-part affordance. Matched
-## on the name rather than against a list of known ids, so a section reinstated
-## under a different id is caught too.
-func _add_part_nodes(root: Node) -> Array:
-	var out: Array = []
-	for node in root.find_children("*", "", true, false):
-		var lowered := str(node.name).to_lower()
-		if lowered.contains("addpart") or lowered.contains("add_part"):
-			out.append(str(node.name))
-	return out

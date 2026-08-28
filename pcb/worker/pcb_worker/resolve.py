@@ -345,8 +345,8 @@ def _refdes_anchor(parsed: dict) -> dict:
     These are the SAME numbers ``silk_source.refdes_strokes`` places glyphs
     with, so a renderer that strokes the ref through the shared glyph table at
     this anchor reproduces the emitted silk. ``hidden`` carries the
-    authored-hidden ruling (bug 019ff2a6ce1b): a hidden reference prints
-    nothing, so it must draw nothing either.
+    authored-hidden rule: a hidden reference prints nothing, so it must draw
+    nothing either.
     """
     rt = parsed.get("reference_text")
     if not isinstance(rt, dict):

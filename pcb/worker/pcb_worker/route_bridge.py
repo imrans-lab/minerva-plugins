@@ -22,8 +22,7 @@ bottom-side local-Y mirror (pcbnew's own flip, pinned by
 ``k1_bottom_oracle.kicad_pcb``, KiCad 9.0.9) reach the raw path too. Rotating
 without mirroring here projects a bottom-mounted part's lands a whole footprint
 away from the copper the IR routes and the fab emits, so the two builders must
-never diverge on it — the raw path is not owed a compatibility exemption
-(Codex ruling 1).
+never diverge on it — the raw path is not owed a compatibility exemption.
 
 Design constraints (docket 019eb481ae28 / 019eb47eb567, DCR 019dc140):
 

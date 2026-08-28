@@ -266,7 +266,15 @@ static func is_fabricable(comp) -> bool:
 	# is authored board data, so it is the half that survives a reload on a
 	# machine that has not resolved the ref this session (footprint_resolved is
 	# session state and does not).
-	if comp.pads_authored and comp.pads.is_empty():
+	#
+	# `pins.is_empty()` is what makes this match the WORKER rather than merely
+	# agree with it in the silk-only case. compile_board takes the FULL branch
+	# on the `pads` KEY (inline_footprint.carries_full_geometry) and builds a
+	# zero-pad definition without consulting the library — so a pin-less part
+	# fabricates as zero lands. A component that states zero lands AND carries
+	# positioned pins is a `pin_without_pad` ERROR there, and calling it
+	# fabricable here would promise a board the worker refuses.
+	if comp.pads_authored and comp.pads.is_empty() and comp.pins.is_empty():
 		return true
 	return false
 
@@ -286,9 +294,10 @@ static func geometry_state(comp) -> Dictionary:
 		source = "library"
 	elif comp.has_pad_geometry and not comp.pads.is_empty():
 		source = "authored"
-	elif comp.pads_authored and comp.pads.is_empty():
-		# Same case as is_fabricable's authored-empty clause: the board states
-		# zero lands, which is a geometry statement, not an absent one.
+	elif comp.pads_authored and comp.pads.is_empty() and comp.pins.is_empty():
+		# Same case as is_fabricable's authored-empty clause, pin guard and all:
+		# the board states zero lands, which is a geometry statement, not an
+		# absent one.
 		source = "authored"
 	elif comp.footprint == _PcbComponent.FootprintType.MOUNTING_HOLE:
 		source = "mechanical"

@@ -388,7 +388,7 @@ def test_pads_from_parsed_sizeless_matches_footprint_def_projection(tmp_path):
 # printed designators, so the silk collisions GC9 reports (a designator over a
 # neighbour's pad) are invisible in the editor.
 #
-# WHAT THE REPLY OWES IS THE ANCHOR, NOT THE GLYPHS (bug 01a047a3ae10). The
+# WHAT THE REPLY OWES IS THE ANCHOR, NOT THE GLYPHS. The
 # reply used to carry the rendered strokes, and a rendering of a ref is a
 # PICTURE of one particular name: it survived a copy, a rename and a save, so a
 # part copied from its neighbour drew the neighbour's designator ever after.
@@ -415,7 +415,7 @@ def test_the_reply_carries_no_rendered_designator_anywhere():
     """THE STALE-PICTURE GUARD, and the double-print guard in one.
 
     A rendered designator on the payload is a copy of one ref that outlives the
-    ref (01a047a3ae10) — and if it ever reached comp['graphics'], the loose-dict
+    ref — and if it ever reached comp['graphics'], the loose-dict
     emitters (gerber._emit_silk, kicad's footprint graphics) would print the
     designator they already synthesize themselves a second time. Compared as
     GEOMETRY against silk_source's own output, not by key name, so neither

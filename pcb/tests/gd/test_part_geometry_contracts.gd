@@ -359,7 +359,7 @@ func _run_the_pads_key_is_an_authority_claim() -> void:
 # picture of ONE name, so the picture outlived the name: a part copied from its
 # neighbour kept drawing the neighbour's designator, on screen and in every
 # board written afterwards, until something re-resolved it. JP6 on
-# smart-remote-v2 drew JP5 (bug 01a047a3ae10).
+# smart-remote-v2 drew JP5.
 #
 # The strokes are derived now — a render of `id` at `refdes_anchor`, refreshed
 # by both setters — so the questions below have only one possible answer.

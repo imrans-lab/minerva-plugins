@@ -99,7 +99,14 @@ def test_connectivity_drc_matches_the_documented_baseline():
     ], dangling
 
     partial = {row["net"]: row["pin_groups"] for row in result["partial"]}
-    assert partial == {"R1_B": 2, "R3_G": 2, "R5_A": 3,
+    # R5_A is 2, not 3, BY HAND: the net names three pins, and the census
+    # harvests the two probe pads from them. MH5.1 is an unplated bore, which
+    # carries no copper and is therefore not a pad on either census — so it is
+    # neither an island of its own nor a bridge, exactly as the compiled IR's
+    # routing projection excludes it (hitl_bench.yaml's R5 note,
+    # test_npth_is_not_a_pad). Counting it as a third island reported a defect
+    # no amount of routing could ever clear.
+    assert partial == {"R1_B": 2, "R3_G": 2, "R5_A": 2,
                        "R16_A": 3, "R21_B": 2, "R23_B": 2}, partial
 
     assert sorted(result["missing_copper"]) == ["R15_A", "R4_A"], \

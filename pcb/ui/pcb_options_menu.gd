@@ -134,6 +134,18 @@ static func read_state(data, prefs) -> Dictionary:
 	}
 
 
+## Every key `apply` will act on: the two spellings of the trace-angle rule,
+## the numeric board rules (design rules plus `grid_mm`), and the three snap
+## preferences. One list so the refusal below can name what is accepted.
+static func accepted_keys() -> Array[String]:
+	var keys: Array[String] = ["trace_angle_mode", "allowed_trace_angles_deg"]
+	for row in _RULE_ROWS:
+		keys.append(str(row[1]))
+	for row in _SNAP_ROWS:
+		keys.append(str(row[1]))
+	return keys
+
+
 ## Apply any subset of the Options block. Returns
 ## `{ok, error, changed:[names], state:{…}}`.
 ##
@@ -145,6 +157,14 @@ static func read_state(data, prefs) -> Dictionary:
 static func apply(data, prefs, changes: Dictionary) -> Dictionary:
 	var board_writes: Array = []      # [[kind, key, value]]
 	var pref_writes: Array = []       # [[key, bool]]
+
+	# An unrecognised key is a REFUSAL, not a no-op: the loops below only read
+	# keys they know, so a misspelling (`trace_width` for `trace_width_mm`)
+	# would otherwise apply nothing and still report ok.
+	for key in changes:
+		if not accepted_keys().has(str(key)):
+			return _refuse("Unknown key \"%s\". Accepted keys: %s." % [
+				str(key), ", ".join(accepted_keys())])
 
 	# ── validate ────────────────────────────────────────────────────────────
 	if changes.has("trace_angle_mode") or changes.has("allowed_trace_angles_deg"):

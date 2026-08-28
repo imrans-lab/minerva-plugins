@@ -228,6 +228,12 @@ static func snap_point(anchor: Vector2, target: Vector2, angles: Array) -> Vecto
 ## `pitch * sqrt(2)` for 45 and 135 (so both axes move by whole pitches at once),
 ## and the dominant axis for any other declared direction. `snapped` stays on the
 ## line by construction.
+##
+## THE GRID IS THE ANCHOR'S, NOT THE BOARD'S. What is quantised is the distance
+## from the anchor, so waypoints land on multiples of the step measured from
+## wherever the run started — an off-grid anchor (a pad centre) therefore yields
+## waypoints off the absolute board grid, which is a different meaning from the
+## zone / cutout / via grid snap, where the point itself is quantised.
 static func snap_along(anchor: Vector2, snapped: Vector2, pitch_mm: float) -> Vector2:
 	if pitch_mm <= 0.0:
 		return snapped
