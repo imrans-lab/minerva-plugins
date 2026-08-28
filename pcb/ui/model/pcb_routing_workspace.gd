@@ -166,8 +166,10 @@ var _annotation_to_candidate: Dictionary = {}
 ## coherence with the board fingerprint, not this process-local epoch).
 var _workspace_generation: int = 0
 
-## The current board coherence token (compute_board_fingerprint of the live
-## board). The workspace is a pure model with no PCBData dependency, so the OWNER
+## The current board coherence token (compute_board_fingerprint_v2 of the live
+## board — the SAME derivation the durable routing sidecar stamps into
+## `board_fingerprint`, so a board one accepts is a board the other accepts).
+## The workspace is a pure model with no PCBData dependency, so the OWNER
 ## (PCBPanel) sets this before begin_check and keeps it current; begin_check
 ## stamps it into the request and apply_check_result compares the echoed value
 ## against it. Transient — never persisted.

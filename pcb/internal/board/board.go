@@ -274,6 +274,30 @@ type DesignRules struct {
 	ZoneMinThicknessMM   *float64 `json:"zone_min_thickness_mm,omitempty" yaml:"zone_min_thickness_mm,omitempty"`
 	ZoneMinIslandAreaMM2 *float64 `json:"zone_min_island_area_mm2,omitempty" yaml:"zone_min_island_area_mm2,omitempty"`
 
+	// The board's ROUTING-DIRECTION constraint: the trace directions, in
+	// degrees, this board's copper may run at. BOARD state, not rule-profile
+	// state — no board house requires orthogonal routing; the routing style is
+	// the author's choice. The worker's compiler folds each entry into [0, 180)
+	// (a direction and its reverse are one constraint) and the geometric DRC
+	// checks every trace segment against the result.
+	//
+	// Typed rather than left riding in Extra: a SEMANTIC field a consumer
+	// branches on deserves a home in the struct, the same reason the zone-fill
+	// minima above were promoted.
+	//
+	// A POINTER, for the same reason those minima are pointers: "unset" and an
+	// authored value are DIFFERENT STATES here, and the difference is
+	// load-bearing. Free routing is spelled by the key's ABSENCE, while an
+	// authored EMPTY LIST is malformed and the worker's compiler refuses the
+	// board for it (bad_trace_angles — see docs/board-yaml.md "Trace angles"),
+	// precisely so a board that asks for a direction constraint cannot silently
+	// get none. A plain []float64 with omitempty would collapse the two: an
+	// authored `[]` would marshal back out as an absent key, turning that
+	// refusal into free routing — the invisible fail-open the rule exists to
+	// prevent. Nil omits the key; a non-nil empty slice round-trips as `[]` and
+	// stays refusable downstream.
+	AllowedTraceAnglesDeg *[]float64 `json:"allowed_trace_angles_deg,omitempty" yaml:"allowed_trace_angles_deg,omitempty"`
+
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 

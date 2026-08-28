@@ -5433,7 +5433,7 @@ func _on_export_yaml_pressed() -> void:
 ## is NOT mutated — committed candidates already ARE the canonical copper this
 ## file now carries, and their consumed-hint records stay consumed (audit);
 ## (d) the sidecars need no rewrite — their coherence guard is the BOARD
-## fingerprint (compute_board_fingerprint of the live dict), and promotion
+## fingerprint (compute_board_fingerprint_v2 of the live dict), and promotion
 ## changes the file, not the dict, so every fingerprint remains valid; the
 ## annotation sidecar already lives beside the adopted path.
 ##
@@ -6347,8 +6347,16 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# guard would compare against a fingerprint no persisted board can ever have.
 	# The SAVED shape, matching the sidecar's own writer: the token must be one
 	# a persisted board can have, and session-only keys are by definition not.
+	#
+	# ONE DERIVATION with the sidecar — the same function over the same
+	# projection (v2, the canonical-survivor subset save_workspace stamps into
+	# `board_fingerprint`). This used to hash v1 while the sidecar had already
+	# moved to v2, so "the same board" meant two different things: a board the
+	# sidecar loaded clean carried a token no draft reply could match, and a
+	# GD-only key the v1 whole-dict hash sees (and the round trip drops) moved
+	# one token without moving the other.
 	var board_dict: Dictionary = _data.to_saved_board_dict()
-	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint(board_dict)
+	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(board_dict)
 
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
 	# ONE composition for the whole request (round-2 re-review, finding 3).
@@ -6383,8 +6391,8 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# real for a dragged placement and DECORATIVE for a staged or rejected
 	# zone, i.e. blind to half the input class K9 named. Nothing constrains the
 	# choice here: this token is request-local and only ever compared with
-	# itself, unlike workspace.board_token above, which must stay v1 because it
-	# is compared against the durable sidecar's own fingerprint.
+	# itself — unlike workspace.board_token above, which must match the durable
+	# sidecar's own fingerprint and is therefore v2 for that reason instead.
 	var draft_token: String = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(composed)
 
 	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()

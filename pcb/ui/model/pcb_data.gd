@@ -3036,7 +3036,14 @@ func save_to_history(action_name: String = "Change") -> void:
 		# edit without this bucket would leave the declaration behind while
 		# every other bucket rewound. _restore_state's absent-key rule applies
 		# here too — an older snapshot leaves the stage alone.
-		"fabrication_stage": fabrication_stage
+		"fabrication_stage": fabrication_stage,
+		# The board OUTLINE, for the same reason the stack and the stage ride:
+		# set_board_size is a mutator, so without this bucket an undo across a
+		# resize rewound every entity while leaving the outline at its new size —
+		# and the resize was not an undo step at all, because nothing snapshotted
+		# it. Same ABSENT-key rule in _restore_state.
+		"board_width": board_width,
+		"board_height": board_height
 	}
 
 	# BUCKET 8 — the routing workspace's disposition layer (see the block above
@@ -3213,6 +3220,12 @@ func _restore_state(state: Dictionary) -> void:
 		var restored_stage := str(state["fabrication_stage"])
 		fabrication_stage = restored_stage if restored_stage in FAB_STAGES \
 			else FAB_STAGE_ROUTED
+	# Board outline: same ABSENT-key rule as the stack and the stage above, so a
+	# snapshot taken before the outline became a bucket leaves the size alone.
+	if state.has("board_width"):
+		board_width = float(state["board_width"])
+	if state.has("board_height"):
+		board_height = float(state["board_height"])
 
 	# BUCKET 8 — restore the workspace disposition layer LAST, after the board is
 	# whole, so a delegate that reads the board while restoring sees the state

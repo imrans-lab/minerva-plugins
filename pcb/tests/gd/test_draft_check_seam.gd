@@ -25,6 +25,11 @@ const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const BROKER_PATH := "res://Scripts/Services/Plugins/PluginScenePanelBroker.gd"
 const PcbWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
+const PcbSidecar := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_sidecar.gd")
+
+## A scratch board path for section 5: the sidecar writes beside it, and the
+## file is removed again when the section ends.
+const PROBE_BOARD_PATH := "user://tc9_token_probe.pcb.yaml"
 
 var BROKER_CAP: int = load(BROKER_PATH).MAX_PAYLOAD_BYTES
 
@@ -124,6 +129,7 @@ func _init() -> void:
 	await _run_named_faults()
 	await _run_success_unchanged()
 	_run_state_wedge()
+	await _run_token_agreement()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -309,3 +315,63 @@ func _run_state_wedge() -> void:
 	})
 	check_eq("an answered candidate still takes its verdict",
 		str(ws.get_candidate(cid).validation), "violating")
+
+
+# ── 5: the draft check and the durable sidecar agree on "the same board" ────
+#
+# Both answer ONE question — "is the board still the one this was written
+# for" — and they were answering it with two DIFFERENT hashes. check_draft
+# stamped the v1 whole-dict fingerprint while the sidecar has written v2 (the
+# canonical-survivor projection) ever since a promotion's serialize round trip
+# started orphaning v1 sidecars. So a board the sidecar loads CLEAN carried a
+# coherence token no draft reply could ever be checked against, and a GD-only
+# session key — which v1 hashes and v2 does not — moved one token without
+# moving the other.
+#
+# THE ORACLE IS THE FILE, not the hash function: what check_draft stamps on the
+# workspace is compared with the board_fingerprint save_workspace really WROTE
+# for the same board, read back off disk. Recomputing the fingerprint here
+# would only prove the test can call the function the panel calls.
+
+func _run_token_agreement() -> void:
+	print("\n-- 5: the draft token IS the sidecar's board_fingerprint --")
+	var panel = _panel(_tiny_board())
+	var ipc := DraftIPC.new()
+	ipc.bind(panel)
+	ipc.reply = _worker_reply({"per_candidate": {}, "findings": [],
+		"board_token": "", "workspace_generation": 0})
+	# save_workspace DELETES the sidecar for an empty workspace, so give it one
+	# candidate to carry — the section is about the envelope's token, not its
+	# contents.
+	var c = PcbRouteCandidate.new()
+	c.net = "N1"
+	c.task_id = "N1|"
+	c.add_segment(PcbRouteCandidate.make_segment("", "top", 0.3,
+		[Vector2(0, 0), Vector2(5, 0)]))
+	panel.get_routing_workspace().add_candidate(c)
+
+	var first: Array = await _token_pair(panel)
+	check("the draft check stamped a coherence token", not str(first[0]).is_empty())
+	check("the sidecar wrote a board_fingerprint", not str(first[1]).is_empty())
+	check_eq("the draft token IS the sidecar's fingerprint", first[0], first[1])
+
+	# One field of the board moves. BOTH owners must notice it, and they must
+	# still be describing the same board afterwards.
+	panel.get_data().set_board_size(41.0, 31.0)
+	var second: Array = await _token_pair(panel)
+	check("a board edit moved the draft token", second[0] != first[0])
+	check_eq("…and the sidecar moved with it", second[0], second[1])
+
+	PcbSidecar.delete_sidecar(PROBE_BOARD_PATH)
+
+
+## [what check_draft stamps, what the sidecar writes] for the panel's CURRENT
+## board — both taken from the production paths, neither recomputed here.
+func _token_pair(panel) -> Array:
+	await panel.check_draft([])
+	PcbSidecar.save_workspace(PROBE_BOARD_PATH, panel.get_routing_workspace(),
+		panel.get_data().to_saved_board_dict(),
+		int(panel.get_data().board_revision), null)
+	var envelope: Dictionary = PcbSidecar.read_envelope(PROBE_BOARD_PATH)
+	return [str(panel.get_routing_workspace().board_token),
+		str(envelope.get("board_fingerprint", ""))]

@@ -89,6 +89,9 @@ func _init() -> void:
 	# Campaign-2 boundary block (BT-19…22, 53, 71…76). Runs LAST so it can set
 	# up its own board state without disturbing the golden-parity fixtures above.
 	await _run_boundary_mcp_parity()
+	# LAST: this one steps the board BACKWARD (it drives a real undo), so it
+	# must not run ahead of anything that reads the board it rewinds.
+	await _run_board_size_undo()
 
 	_teardown()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -251,6 +254,33 @@ func _run_queries_and_mutations() -> void:
 
 
 # ── golden parity (5 tools, field-by-field) ───────────────────────────────────
+
+## A board resize is ONE undo step, like every other board mutation.
+##
+## It was the exception: the verb mutated the outline and snapshotted nothing,
+## and the model's undo codec carried no outline bucket at all — so an undo
+## across a resize rewound every entity and left the board at its new size,
+## and the resize itself was a step undo walked straight past.
+##
+## THE ORACLE IS THE MODEL AFTER THE UNDO, not the history list: a step that
+## exists but restores nothing looks identical to a working one from the
+## history's side.
+func _run_board_size_undo() -> void:
+	print("\n-- set_board_size is one undo step --")
+	# undo() steps to the state BEHIND the current one, so the resize needs a
+	# snapshot behind it that is not the resize.
+	data.save_to_history("baseline")
+	var before_width: float = data.board_width
+	var before_height: float = data.board_height
+	var resized := await h("minerva_pcb_set_board_size",
+		_args({"width": before_width + 25.0, "height": before_height + 15.0}))
+	check("resize ok", resized.get("success", false))
+	check_approx("the model really resized", data.board_width, before_width + 25.0)
+	check("the resize is an undoable step", data.can_undo())
+	check("undo() succeeds", data.undo())
+	check_approx("undo restores the previous width", data.board_width, before_width)
+	check_approx("undo restores the previous height", data.board_height, before_height)
+
 
 func _run_golden_parity() -> void:
 	print("\n-- GOLDEN: get_components shape --")

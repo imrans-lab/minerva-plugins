@@ -137,6 +137,14 @@ def _opt_num(v: Any) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def _mirror_local_y(v: float) -> float:
+    """Negate a footprint-LOCAL Y for a bottom-side placement (see ``_footprint``).
+
+    Zero is returned unchanged so the mirror never mints ``-0.0``, which would
+    move a pad's emitted bytes without moving any copper."""
+    return -v if v else v
+
+
 def _copper_layer(name: Any) -> str:
     if isinstance(name, str) and name in _LAYER_MAP:
         return _LAYER_MAP[name]
@@ -676,6 +684,24 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
     x, y = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
     rot = _num(comp.get("rotation_deg"))
     layer = _copper_layer(comp.get("layer"))
+    # THE BOTTOM-SIDE PLACEMENT RULE, loose-dict half. Pads arrive footprint-LOCAL
+    # from iter_pads and KiCad applies only translate+rotate on load — it never
+    # re-flips a B.Cu footprint — so a bottom-side component's mirror has to be
+    # baked into the STORED local coordinate. geometry.PlacementTransform states
+    # that one rule as "mirror local Y, then place":
+    # ``place_point(x, y, rot, lx, -ly)``. KiCad's own on-load step is
+    # ``place_point(x, y, rot, stored)`` for either side, so ``stored == (lx, -ly)``
+    # — the negation below IS that rule, taken exactly rather than composed and
+    # re-inverted through float trig. Without it a `layer: bottom` part's copper
+    # landed where its top-side twin's would, which is the same divergence the
+    # census/gerber/router parity closed for the other three dict readers.
+    #
+    # The IR projection has ALREADY baked the mirror in (_kicad_component_to_dict
+    # inverts the placement of a board-ABSOLUTE PlacedPad), and it says so with
+    # `pads_pre_placed` — nothing is mirrored twice. The marker is what
+    # distinguishes the two producers at all: generate_ir IS
+    # generate(_ir_board_dict(board)), so they meet here in one dict shape.
+    mirror_local_y = layer == "B.Cu" and not comp.get("pads_pre_placed")
     # Reference + value designator text go on the component's OWN-SIDE Fab layer:
     # B.Fab for a bottom (B.Cu) footprint, F.Fab otherwise. A bottom footprint's
     # documentation text belongs on B.Fab — pinning it to F.Fab left B.Fab empty and
@@ -719,7 +745,8 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         if pad.number is None:
             continue
         num_s = str(pad.number)
-        px, py = pad.x, pad.y
+        px = pad.x
+        py = _mirror_local_y(pad.y) if mirror_local_y else pad.y
         drill = pad.drill
         net_no = pads_nets.get(num_s)
         net_expr = ""
@@ -1130,6 +1157,11 @@ def _kicad_component_to_dict(board: ResolvedBoard,
         "rotation_deg": rot,
         "layer": "top" if component.placement.side is Side.TOP else "bottom",
         "pads": [_local_pad(pad) for pad in component.placed_pads],
+        # The pads above are already at their FINAL stored local coordinate: the
+        # placement (rotation AND the bottom-side mirror) is baked into the
+        # PlacedPad and only translate+rotate was inverted back out. _footprint
+        # must therefore not apply the mirror a second time.
+        "pads_pre_placed": True,
         # ALL SILK graphics are forwarded — both sides — and the F-only rendering
         # decision is left to _footprint_graphics, which WARNS
         # (`unsupported_graphic_layer`) for anything it will not emit.
@@ -1260,6 +1292,12 @@ def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
         "rotation_deg": 0.0,
         "layer": "top",
         "pads": [pad],
+        # Same contract as the component projection: this pad is already at its
+        # final stored local coordinate (the origin), so _footprint places it
+        # verbatim. Stated rather than relied upon — a hole is top-side here, so
+        # the mirror would be the identity, but the marker is what the emitter
+        # reads and every IR-projected component carries it.
+        "pads_pre_placed": True,
         "graphics": [],
     }
 

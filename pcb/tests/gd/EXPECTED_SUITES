@@ -152,7 +152,9 @@ test_pcb_net_membership.gd assertions=70
 # that a selection still drives the section. AUTHORED: -3 +12.
 test_pcb_panel_layout.gd assertions=163
 test_pcb_panel_model.gd assertions=203
-test_pcb_panel_tools.gd assertions=211
+# 211 -> 217: the board-resize undo step (the verb snapshots, and one undo
+# restores the previous outline) — six checks, HAND-COUNTED from source.
+test_pcb_panel_tools.gd assertions=217
 test_pcb_panel_tools_migration.gd assertions=74
 # The pad codec's fab optionals, the roundrect land at its authored corner
 # radius, and the load-time indeterminate lead.

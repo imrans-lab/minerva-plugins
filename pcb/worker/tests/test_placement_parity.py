@@ -1,14 +1,16 @@
 """EXACTLY ONE placement rule for the loose-dict readers, proved on the corpus.
 
-Three surfaces read a canonical board DICT and each has to decide where a
+Four surfaces read a canonical board DICT and each has to decide where a
 component's pads physically are: the connectivity census (``drc._harvest_pads``),
-the raw Gerber emitter (``gerber._harvest``) and the legacy routing bridge
-(``route_bridge.board_to_router``). The compiled path has no such problem — one
+the raw Gerber emitter (``gerber._harvest``), the legacy routing bridge
+(``route_bridge.board_to_router``) and the KiCad exporter
+(``kicad.generate_kicad_pcb``). The compiled path has no such problem — one
 ``geometry.PlacementTransform`` places everything — but the dict readers each
-used to compose their own, and a rule composed three times is a rule that can
+used to compose their own, and a rule composed four times is a rule that can
 disagree with itself. It did: rotation was applied everywhere and the
 BOTTOM-SIDE MIRROR only in the census, so a back-mounted part's copper was
-checked in one place, flashed in another and routed in a third.
+checked in one place, flashed in another, routed in a third and exported to
+KiCad in a fourth.
 
 THE ORACLE IS THE CENSUS. ``drc._harvest_pads`` delegates to
 ``geometry.component_transform``, the same object ``compile_board`` builds, so it
@@ -23,7 +25,11 @@ WHAT IS COMPARED, and why each is a separate question:
     declared layers and the emitter off the component's placement, so agreement
     is two independent derivations meeting, not one value copied;
   * the ROUTER's pad positions, which come from ``pins`` rather than ``pads``
-    and are therefore a third reading of the same placement.
+    and are therefore a third reading of the same placement;
+  * the .kicad_pcb TEXT, re-read as a fab house would: each stored pad is
+    footprint-LOCAL under its footprint's own ``(at)``, so the absolute is
+    re-derived by the same translate+rotate KiCad performs on load, and the
+    stored copper LAYER is a fourth independent side claim.
 
 Per-component boards, not whole ones: a Gerber harvest also flashes vias and
 board-level holes, and a board-level plated hole lands in the same bucket as a
@@ -33,12 +39,14 @@ still drives the real harvest.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 import yaml
 
-from pcb_worker import drc, gerber, route_bridge
+from pcb_worker import drc, gerber, kicad, route_bridge
+from pcb_worker.geometry import place_point
 from pcb_worker.pad_source import PadGeometryError
 from pcb_worker.resolve import resolve_board_best_effort
 
@@ -166,6 +174,73 @@ def _gerber_copper(board: dict):
             out.append((x, -y, None))
     for (x, y, *_rest) in g.th_shaped:
         out.append((x, -y, None))
+    return out
+
+
+# One emitted footprint header / pad line. The emitter writes both on a single
+# line in a fixed shape, so the file is read back with two regexes rather than a
+# general s-expression parser — and reading the TEXT is what makes this an
+# independent measurement: none of the emitter's internal placement decision is
+# reused, only the bytes a fab house receives.
+_FOOTPRINT_LINE = re.compile(
+    r'^\s*\(footprint "(?:[^"\\]|\\.)*" \(layer "[^"]+"\) '
+    r"\(at (\S+) (\S+) (\S+)\)\s*$")
+_PAD_LINE = re.compile(
+    r'^\s*\(pad "(?:[^"\\]|\\.)*" (\S+) \S+ \(at (\S+) (\S+)(?: \S+)?\)'
+    r"(?:.*?)\(layers ([^)]*)\)")
+
+
+def _kicad_copper(board: dict):
+    """Every COMPONENT pad the .kicad_pcb emitter STORES, as ``(x_mm, y_mm,
+    top)`` in the BOARD frame — or None when the emitter FAILS CLOSED on this
+    component (same ``PadGeometryError`` reasoning as ``_gerber_copper``).
+
+    A .kicad_pcb stores each pad footprint-LOCAL beneath its footprint's own
+    ``(at x y rot)``; KiCad reproduces the absolute on load by applying that
+    translate+rotate and NEVER re-flips a bottom-side footprint, so the same
+    ``place_point`` is applied here to recover what the file actually means.
+    The bottom-side MIRROR must therefore already be in the stored local
+    coordinate — which is precisely what this comparison measures.
+
+    ``top`` is read off the pad's own stored copper layer, a different
+    derivation from the census's: None when the pad claims no side (a
+    through-hole land's ``*.Cu``, or a stencil-only aperture with no copper
+    layer at all).
+    """
+    try:
+        text = kicad.generate_kicad_pcb(board)
+    except PadGeometryError:
+        return None
+    out: list[tuple[float, float, bool | None]] = []
+    fx = fy = frot = 0.0
+    seen_footprint = False
+    for line in text.splitlines():
+        header = _FOOTPRINT_LINE.match(line)
+        if header is not None:
+            fx, fy, frot = (float(header.group(1)), float(header.group(2)),
+                            float(header.group(3)))
+            seen_footprint = True
+            continue
+        pad = _PAD_LINE.match(line)
+        if pad is None or not seen_footprint:
+            continue
+        layers = pad.group(4)
+        # COPPER ONLY, matching the two classes the census deliberately drops
+        # (drc._harvest_pads): a bare unplated bore (np_thru_hole — no barrel,
+        # no land) and a paste-only stencil aperture (a QFN thermal pad's
+        # sub-nodes, which name no copper layer). Counting either here would be
+        # a stored "pad" no census point can ever claim — a comparison artefact,
+        # not a placement disagreement.
+        if pad.group(1) == "np_thru_hole" or ".Cu" not in layers:
+            continue
+        ax, ay = place_point(fx, fy, frot,
+                             float(pad.group(2)), float(pad.group(3)))
+        side: bool | None = None
+        if '"F.Cu"' in layers:
+            side = True
+        elif '"B.Cu"' in layers:
+            side = False
+        out.append((ax, ay, side))
     return out
 
 
@@ -300,6 +375,63 @@ def test_the_router_bridge_projects_pads_where_the_census_checks_them(
                 f"{pad.position} and the census checks {want}")
 
 
+@pytest.mark.parametrize("name,board", CORPUS, ids=[n for n, _ in CORPUS])
+def test_the_kicad_export_stores_pads_where_the_census_checks_them(
+        name: str, board: dict) -> None:
+    """The fourth surface — the .kicad_pcb — stores copper at the census's points.
+
+    Paired both directions for the same reason the Gerber comparison is: a
+    census pad with no stored pad is a dropped land, and a stored pad no census
+    pad claims is copper nothing checks.
+
+    THE FAULT THIS CATCHES: the loose-dict footprint path wrote the raw
+    footprint-local pad offset, so a ``layer: bottom`` part's pads were stored
+    UNMIRRORED and KiCad reproduced them where the part's top-side twin would
+    sit. The other three surfaces had already been brought onto the one
+    ``geometry.component_transform`` rule; this emitter had not, so the same
+    board fabricated one way and exported another.
+    """
+    for comp in _components(board):
+        solo = _solo(board, comp)
+        ref = comp.get("ref")
+        stored = _kicad_copper(solo)
+        if stored is None:
+            continue
+        census = _census_pads(solo)
+
+        census_pts = [(p.x, p.y) for p in census]
+        unclaimed = [(x, y) for (x, y, _side) in stored]
+        unmatched = []
+        for pt in census_pts:
+            hit = _take_nearest(pt, unclaimed)
+            if hit is None:
+                unmatched.append(pt)
+            else:
+                unclaimed.pop(hit)
+        assert not unmatched and not unclaimed, (
+            f"{name}:{ref} at ({comp.get('x_mm')}, {comp.get('y_mm')}) "
+            f"rot {comp.get('rotation_deg')} layer {comp.get('layer')}: the "
+            f"census checks pads at {sorted(census_pts)} and the .kicad_pcb "
+            f"stores copper at {sorted((x, y) for (x, y, _s) in stored)} — "
+            f"census pads with no stored pad within {_TOL_MM}mm: {unmatched}; "
+            f"stored copper no census pad claims: {unclaimed}. One of them is "
+            f"not using geometry.component_transform")
+
+        # Side, per point, matched the same way. A through-hole land claims no
+        # side in either reading and drops out rather than being compared.
+        for pad in census:
+            hit = _take_nearest(
+                (pad.x, pad.y), [(x, y) for (x, y, _side) in stored])
+            got = stored[hit][2] if hit is not None else None
+            want = _census_side(pad)
+            if got is None or want is None:
+                continue
+            assert got is want, (
+                f"{name}:{ref} pad {pad.pin} at ({pad.x}, {pad.y}): the census "
+                f"reads its copper on the {'front' if want else 'back'} and the "
+                f".kicad_pcb stores it on the {'front' if got else 'back'}")
+
+
 def test_the_corpus_walk_actually_compares_a_flipped_part() -> None:
     """The comparisons above are vacuous on an all-front board, and they skip a
     component the emitter fails closed on. Either could hollow them out silently,
@@ -323,6 +455,7 @@ def test_the_corpus_walk_actually_compares_a_flipped_part() -> None:
         flashed = _gerber_copper(solo)
         assert flashed, f"{ref}: the emitter flashed no copper to compare"
         assert _census_pads(solo), f"{ref}: the census harvested no pad to compare"
+        assert _kicad_copper(solo), f"{ref}: the .kicad_pcb stored no pad to compare"
 
     # U2 is the rotated one; without that, a fixture could drift to all-zero
     # placements and the mirror/rotation composition would stop being separable.
@@ -332,3 +465,11 @@ def test_the_corpus_walk_actually_compares_a_flipped_part() -> None:
     # derive independently — the layer-flip half of the rule.
     sides = {side for (_x, _y, side) in _gerber_copper(_solo(board, by_ref["SW10"]))}
     assert sides == {False}, f"SW10's lands should flash on the back, got {sides}"
+
+    # The same claim read out of the .kicad_pcb text: a bottom-side SMD land is
+    # STORED on B.Cu, so the layer half of the rule is measured on the emitter
+    # this file's fourth arm covers, not only on the Gerber one.
+    stored_sides = {side for (_x, _y, side)
+                    in _kicad_copper(_solo(board, by_ref["SW10"]))}
+    assert stored_sides == {False}, (
+        f"SW10's lands should be stored on B.Cu, got {stored_sides}")

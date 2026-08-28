@@ -349,13 +349,22 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 
 # ── Tool implementations (moved verbatim from MCPPcbPanelTools.gd) ───────────
 
+## Resize the board outline. Snapshots history on a real change, the
+## `_set_board_layers` convention below — a resize is a board mutation like any
+## other, and without the snapshot it was the ONE mutation an undo stepped
+## straight past (the model's outline bucket is what makes the step restore a
+## size rather than only the entities).
 static func _set_board_size(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
 	var width: float = float(args.get("width", 100.0))
 	var height: float = float(args.get("height", 100.0))
+	var before_width: float = float(data.board_width)
+	var before_height: float = float(data.board_height)
 	data.set_board_size(width, height)
+	if data.board_width != before_width or data.board_height != before_height:
+		data.save_to_history("Resize board")
 	return _ok({"board_width": width, "board_height": height})
 
 
