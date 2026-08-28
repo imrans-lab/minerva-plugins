@@ -114,7 +114,7 @@ test_manifest_tool_registration.gd assertions=45
 test_mounting_holes_verb.gd
 test_pad_synthesis.gd assertions=8
 test_parity_bridge.gd assertions=79
-test_pcb_annotation_host_semantics.gd assertions=185
+test_pcb_annotation_host_semantics.gd assertions=181
 test_pcb_apply_route_hints.gd assertions=89
 test_pcb_backend_lifecycle.gd assertions=52
 test_pcb_bus_geometry.gd assertions=90
@@ -125,7 +125,7 @@ test_pcb_drc_propose.gd assertions=23 real-worker
 # real_worker_used=true (fixture repairs: resolvable footprints, authored
 # design_rules, in-bounds parts, un-connected BR span; see hint
 # 019ff9a0b471).
-test_pcb_explicit_propose.gd assertions=68 real-worker
+test_pcb_explicit_propose.gd assertions=80 real-worker
 test_pcb_hint_refine_loop.gd assertions=64 real-worker
 test_pcb_single_trace_tool.gd assertions=98 real-worker
 test_pcb_legacy_annotation_migration.gd assertions=53
@@ -140,7 +140,7 @@ test_pcb_net_membership.gd assertions=70
 # SR2FAB S9 added ONE assertion (get_layout_state carries
 # fabrication_stage). 149 -> 150 is an AUTHORED count; see the note on
 # test_draft_composer.gd above.
-test_pcb_panel_layout.gd assertions=150
+test_pcb_panel_layout.gd assertions=154
 test_pcb_panel_model.gd assertions=193
 test_pcb_panel_tools.gd assertions=211
 test_pcb_panel_tools_migration.gd assertions=74
@@ -165,7 +165,7 @@ test_pcb_panel_ui.gd assertions=226
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.
 test_pcb_pin_inspector.gd assertions=57
-test_pcb_ratsnest.gd assertions=136
+test_pcb_ratsnest.gd assertions=141
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev
 # scaffold.
@@ -373,7 +373,7 @@ test_trace_cut.gd assertions=50
 # lands, which every vector bypasses by assigning `pads` directly. The latter
 # is the bench's R9 row and is +10 assertions; the total stays unpinned rather
 # than carrying a DERIVED count, since a count here must be MEASURED on a run.
-test_copper_contact_vectors.gd
+test_copper_contact_vectors.gd assertions=48
 # A same-net pour is a terminator for the canvas Trace tool, and an unplated
 # hole joins nothing — including for the ratsnest, which must never let a hole
 # with no barrel answer whether a join crosses layers.
@@ -420,7 +420,7 @@ test_board_graphics.gd assertions=75
 # the reply AND by the panel's census AND by the worker's refusal, and an
 # unresolvable ref is refused with the board untouched.
 # NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
-test_add_by_library_ref.gd real-worker
+test_add_by_library_ref.gd assertions=42 real-worker
 
 # The three geometry contracts that need no worker: the rotation WORDS mean
 # what the screen shows (asserted on where a pad landed, never on the rotation
@@ -428,7 +428,7 @@ test_add_by_library_ref.gd real-worker
 # and the `pads` key is the board's geometry authority rather than a payload
 # optimisation.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd
+test_part_geometry_contracts.gd assertions=23
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the
@@ -438,4 +438,4 @@ test_part_geometry_contracts.gd
 # layer picker through both the View menu and minerva_pcb_view_state, and both
 # stale paths retracting show_fab_preview with a visible reason.
 # NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
-test_fab_preview_legibility.gd
+test_fab_preview_legibility.gd assertions=59
