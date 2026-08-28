@@ -566,7 +566,7 @@ def _parse_reference_text(root: Any) -> Union[dict, None]:
                     # KiCad authors (size <a> <b>) where the two values are
                     # height/width. Every seed font is SQUARE, so the scalar is
                     # unambiguous when a == b. A non-square font would make the
-                    # index choice load-bearing (and stroke_font.render only
+                    # index choice load-bearing (and board_font.render only
                     # takes one cap-height scalar) — rather than bet on the
                     # order, refuse the capture: return None so the fp_text
                     # falls into the uncaptured-graphic marker (the documented

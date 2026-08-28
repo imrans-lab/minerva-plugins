@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import board_model, gerber, stroke_font
+from pcb_worker import board_font, board_model, gerber
 from pcb_worker.fab_capability import EMITTED_GERBER_SUFFIXES
 
 # Layers that may legitimately carry no plot commands on a given board. See the
@@ -525,7 +525,8 @@ def test_silk_omitted_when_component_has_no_graphics():
     assert g.silk_polys, "expected reference-designator strokes for both components"
     assert all(closed is False for (_pts, _w, closed) in g.silk_polys), \
         "a glyph stroke must be OPEN, never closed back to its first point"
-    expected_strokes = len(stroke_font.render("U1")) + len(stroke_font.render("R1"))
+    expected_strokes = (len(board_font.render("U1").polylines)
+                        + len(board_font.render("R1").polylines))
     assert len(g.silk_polys) == expected_strokes, (
         f"expected {expected_strokes} designator strokes (U1 + R1), got "
         f"{len(g.silk_polys)}")
@@ -949,8 +950,8 @@ def test_refdes_sits_above_its_component_and_reads_upright():
     component in the board frame (Y-DOWN); it must therefore land above it in the
     emitted Gerber too, which is Y-UP — i.e. at a GREATER Gerber y than the part.
 
-    And it must read the right way up. stroke_font's glyph data is Y-DOWN like the
-    rest of the worker (cap top at the more NEGATIVE local y, baseline near 0), so
+    And it must read the right way up. board_font's glyph data is Y-DOWN like the
+    rest of the worker (cap top at the more NEGATIVE local y, baseline at 0), so
     emitted unconverted the characters render mirrored top-to-bottom. Checked as
     the 'A' glyph's own span: the ratio of ink above vs below the anchor tells
     which way the glyph is standing, independently of where it was placed.
@@ -991,7 +992,7 @@ def test_refdes_sits_above_its_component_and_reads_upright():
 
     # Upright, not mirrored: the glyph baseline sits at the anchor and the caps
     # rise ~1 mm ABOVE it. Emitted unconverted the same glyph hangs below it,
-    # because stroke_font draws cap height at NEGATIVE local y (Y-DOWN, like the
+    # because board_font draws cap height at NEGATIVE local y (Y-DOWN, like the
     # board) — so this is the assertion that catches the upside-down designator.
     anchor_y = part_y - gerber.REFDES_LOCAL_Y_MM   # y0 placed into the gerber frame
     above = [y for y in ys if y > anchor_y + 1e-6]

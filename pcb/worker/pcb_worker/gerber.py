@@ -58,7 +58,7 @@ from gerber_writer import (
     set_generation_software,
 )
 
-# stroke_font is NOT imported here any more: designator glyph synthesis moved to
+# The stroke font is NOT imported here: designator glyph synthesis moved to
 # silk_source in CP2 S2, and this module's only remaining references to it are
 # in prose. Re-add the import if code here ever renders glyphs again — but the
 # reason it should not is that a second glyph renderer is a second answer to
@@ -776,7 +776,7 @@ def _emit_board_graphics(g: _Geometry, board: ResolvedBoard) -> None:
 def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
                  top: bool, reference_text: ReferenceTextDefinition | None = None) -> None:
     """Emit one component's REFERENCE DESIGNATOR ("R1", "U3", ...) as F.SilkS
-    stroke geometry (see stroke_font.py — gerber-writer has no text primitive,
+    stroke geometry (see board_font.py — gerber-writer has no text primitive,
     so a designator is drawn as open polylines, same as any other silk shape).
 
     Deliberately called OUTSIDE _emit_silk's graphics-present guard, and as a
@@ -1324,7 +1324,7 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str,
     # resolved graphics ONLY; a component without graphics contributes NO outline
     # silk (K4: the procedural courtyard-box placeholder is retired). The
     # component's reference designator (drawn stroke text, K17 — see
-    # stroke_font.py; gerber-writer has no glyph/text primitive) is ADDITIVE to
+    # board_font.py; gerber-writer has no glyph/text primitive) is ADDITIVE to
     # g.silk_polys and is emitted for every top-side component regardless of
     # whether it has outline graphics at all (_emit_refdes, called outside
     # _emit_silk's graphics-present guard).

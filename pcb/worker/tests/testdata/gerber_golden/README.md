@@ -38,6 +38,21 @@ test (`test_coupon_board.py::TestBackSilkReadsFromTheBack`) rather than a
 one-off bless, because a legend rotated 180° is perfectly byte-stable and
 would re-bless cleanly forever.
 
+**Re-blessed again when the board went to ONE typeface.** Reference designators
+used to be drawn from a separate 26-glyph table (a subset of KiCad's
+GPL-2.0-or-later Newstroke, embedded in a proprietary repo); they now use the
+same in-house `board_font.py` as board legend. EXACTLY the four `*-F_SilkS.gbr`
+files moved — `board`, `drilltest`, `coupon_jlc1`, `quadlayer` — and within
+them only `D01`/`D02` coordinate lines under the existing `%ADD10C,0.15*%`
+aperture: no aperture was added, removed or resized, no copper/mask/paste/
+drill/edge/gbrjob byte changed, and on `coupon_jlc1` the first 153 lines (the
+owl, its baked "TEST COUPON" legend, the board text) are untouched — the whole
+delta is one contiguous designator block. `coupon_jlc1-B_SilkS.gbr` did not
+move: the coupon carries no bottom-side designator. The glyphs themselves are
+what changed shape; the designator's cap height is still exactly 1.0 mm, and
+its baseline now sits ON the anchor instead of 0.047619 mm below it (Newstroke
+drew its baseline at a small negative local y; the 5x7 grid puts it at 0).
+
 ## Pinned versions (byte-stability holds ONLY at these)
 
 | package       | version | role                                          |

@@ -453,19 +453,23 @@ tool or a drag handle: artwork is authored at a stated position and is not
 movable after the fact, which is why `_capture_drag_origins` deliberately does
 not capture it.
 
-### Licence note (out of scope, filed here so it is not lost)
+### One typeface per board
 
-This feature ships its own stroke font (`worker/pcb_worker/board_font.py`,
-authored in-house, 95 printable ASCII glyphs plus an unknown-glyph box) rather
-than widening the pre-existing one. `worker/pcb_worker/stroke_font.py` — the
-26-glyph subset that draws **reference designators** — is extracted from KiCad's
-Newstroke, whose source file `newstroke_font.cpp` carries a **GPL-2.0-or-later**
-header, while this repository ships under a proprietary licence
-(`LICENSE.md`). Widening that table from 26 glyphs to 95 would have deepened an
-exposure that should be shrinking. The existing exposure is **not fixed here**:
-unifying both surfaces on the in-house font would resolve it and give a board one
-typeface instead of two, at the cost of moving every committed refdes Gerber
-golden — its own change, with its own bless.
+Every string this project draws on a board — legend text AND reference
+designators — comes from `worker/pcb_worker/board_font.py` (authored in-house,
+95 printable ASCII glyphs plus an unknown-glyph box, mirrored into
+`ui/model/pcb_board_font_data.gd` for the panel). There is no second font.
+
+Designators used to have their own 26-glyph table extracted from KiCad's
+Newstroke, whose source file carries a **GPL-2.0-or-later** header, in a
+repository that ships under a proprietary licence (`LICENSE.md`). That table is
+deleted. What let it sit unnoticed was the INVENTORY, not the copy:
+`scripts/gen_notice.py` walks `library/footprints.lock.json`, which inventories
+acquired FILES, and a table of literal constants inside a `.py` is not a file.
+`gen_notice.py` now carries an explicit allowlist of source-embedded
+third-party data tables and renders a NOTICE section for it — empty today, and
+`worker/tests/test_notice.py` fails if a source file grows one without being
+declared there.
 
 ## Group tools (`minerva_pcb_group_components` / `ungroup` / `set_group_member_offset`, B2)
 

@@ -6,7 +6,7 @@ Regenerate with:
 
     python3 pcb/scripts/gen_notice.py
 
-This is the license and attribution inventory for the footprint seed library pinned in `pcb/library/footprints.lock.json` (acquisition-lock schema v2 — see `pcb/docs/libraries.md`). It is the RELEASE gate: an entry with an unresolved (`UNKNOWN`) license, an out-of-vocabulary `source_kind`, or a missing `source_ref` refuses generation outright rather than shipping. One section below per DISTINCT license carried by the shipped lock; each entry lists its footprint ref and its acquisition `source_ref`.
+This is the license and attribution inventory for the footprint seed library pinned in `pcb/library/footprints.lock.json` (acquisition-lock schema v2 — see `pcb/docs/libraries.md`). It is the RELEASE gate: an entry with an unresolved (`UNKNOWN`) license, an out-of-vocabulary `source_kind`, or a missing `source_ref` refuses generation outright rather than shipping. One section below per DISTINCT license carried by the shipped lock; each entry lists its footprint ref and its acquisition `source_ref`. A final section inventories third-party data tables embedded directly in source, which no file-provenance lock can see.
 
 ## Apache-2.0
 
@@ -62,4 +62,10 @@ Internal / TurnRock-authored parts. No third-party attribution obligation applie
 - `R_0805` — pcb_worker_seed synthesizer (baae81a 2026-07-18) (synthetic 0805 land — deliberately NOT the official KiCad R_0805 (comment 599 proof) Renamed off the canonical filename 2026-08-20: it collided with the REAL part at the same path, so a lock entry keyed LibNick:Part would have silently resolved to this fixture. Ref key stays bare on purpose.)
 - `TH_TestPoint` — pcb_worker_seed synthesizer (baae81a 2026-07-18)
 
-Total entries: 39
+## Source-embedded third-party data tables
+
+Data tables — glyph outlines, lookup tables, coefficient sets — taken from a third-party source and stored as literal constants inside this project's own source files. The footprint inventory above cannot see these: it inventories acquired FILES, and a table of constants inside a source file is not a file. This section is the second inventory, and it is maintained by hand in `EMBEDDED_DATA_TABLES` in `pcb/scripts/gen_notice.py`.
+
+**None.** Every data table in this project's source is authored in-house. Adding a third-party one means declaring it here.
+
+Total entries: 39 footprints, 0 embedded data tables

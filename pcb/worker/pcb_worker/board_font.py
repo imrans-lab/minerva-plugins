@@ -1,33 +1,36 @@
 """The Minerva 5x7 board-text stroke font — printable ASCII, authored in-house.
 
-WHY A SECOND FONT EXISTS, when ``stroke_font.py`` is right there
------------------------------------------------------------------
-Two independent reasons, and either one alone would be enough:
+THE ONE TYPEFACE
+----------------
+Every character this project draws on a board — legend lines AND reference
+designators — comes from the table below. There is no second font, and adding
+one would be a regression twice over: two typefaces on one board is a
+draughting defect a fabricator sees before we do, and a second glyph table is a
+second place a licence question can hide.
 
-1. COVERAGE. ``stroke_font.py`` carries 26 glyphs — ``A-Z``, ``0-9`` and a ``?``
-   fallback — because a reference designator ("R1", "U3") never needs more. Board
-   text does: a copyright line needs lowercase, a comma, a period and a digit in
-   the same string. Folding lowercase to uppercase (what ``stroke_font._glyph``
-   does) is correct for a designator and wrong for a legend.
+It replaced a 26-glyph refdes font whose coordinates were a subset of a
+GPL-2.0-or-later stroke font, embedded in a repository that ships under a
+proprietary licence (``LICENSE.md``). The mechanism that let that sit unnoticed
+was not the copy itself but the INVENTORY: ``pcb/scripts/gen_notice.py`` walks
+``pcb/library/footprints.lock.json``, which inventories acquired FILES, and a
+table of literal constants inside a ``.py`` is not a file. ``gen_notice.py``
+now carries an explicit allowlist of source-embedded third-party data tables
+and renders a NOTICE section for it, so the next one has to be declared to
+exist. It is empty, and the intent is that it stays that way.
 
-2. LICENCE. ``stroke_font.py``'s glyph data is a subset of KiCad's Newstroke,
-   whose source file ``newstroke_font.cpp`` carries a **GPL-2.0-or-later** header
-   (Copyright (C) 2010 vladimir uryvaev; Copyright (C) 1992-2019 KiCad
-   Developers). This repository ships under a proprietary licence
-   (``LICENSE.md``). Widening an embedded GPL-2 glyph table from 26 characters to
-   95 deepens an exposure that should be shrinking, so this font does not extend
-   Newstroke — it replaces nothing and borrows nothing.
+Every coordinate below was authored for this file against a 5x7 stroke grid.
+No glyph data was copied, converted or traced from any other font. It is
+deliberately plain: a 5x7 stroke alphabet is the "Courier of vector fonts", the
+shape you get from the grid rather than from a designer, and that is exactly
+what makes it safe to author from scratch.
 
-   Every coordinate below was authored for this file against a 5x7 stroke grid.
-   No glyph data was copied, converted or traced from Newstroke, Hershey, or any
-   other font. It is deliberately plain: a 5x7 stroke alphabet is the "Courier of
-   vector fonts", the shape you get from the grid rather than from a designer,
-   and that is exactly what makes it safe to author from scratch.
-
-   The pre-existing Newstroke exposure in ``stroke_font.py`` is NOT fixed here —
-   see docs/tools.md. Unifying both surfaces on this font would fix it and give
-   the board one typeface instead of two, at the cost of moving every committed
-   refdes Gerber golden. That is its own change with its own bless.
+COVERAGE is the other reason the shape of this table is what it is. A reference
+designator ("R1", "U3") only ever needs ``A-Z`` and ``0-9``, but board text
+needs a copyright line's lowercase, comma and period in the same string — so
+the table is the full printable ASCII set, and lowercase is a real glyph rather
+than a fold to uppercase. A designator differs from a legend line only in the
+ARGUMENTS its caller passes (``h_align="center"``, and its own size constant
+``silk_source.REFDES_TEXT_SIZE_MM``), never in the font.
 
 THE GRID
 --------
@@ -43,9 +46,8 @@ so the data stays readable and diffable (a float table is neither).
 
 ``UNIT = 1/6`` converts grid to mm at ``size=1.0``, which makes CAP HEIGHT the
 definition of ``size``: text rendered at ``size_mm=1.5`` has 1.5 mm capitals.
-That is the same thing ``stroke_font.REFDES_TEXT_SIZE_MM = 1.0`` means for a
-designator, so the two fonts agree on what a size number denotes even though
-they disagree on shape.
+It is the same meaning ``silk_source.REFDES_TEXT_SIZE_MM = 1.0`` carries for a
+designator — one definition of "size" for every string on the board.
 
 Baseline lands at y=0 in OUTPUT coordinates (``(gy - 6) * UNIT``), so a rendered
 string sits ON its anchor rather than hanging below it.
@@ -53,10 +55,10 @@ string sits ON its anchor rather than hanging below it.
 WHAT THIS MODULE DOES NOT DO
 ----------------------------
 It does not rotate and it does not translate. ``render`` returns glyph-LOCAL
-polylines anchored at the origin, exactly as ``stroke_font.render`` does, and for
-the identical reason quoted in that module: board geometry has ONE rotation
-implementation (``geometry.place_point``), and baking a second one into a font
-is how a sign error hides. Callers place the result.
+polylines anchored at the origin, because board geometry has ONE rotation
+implementation (``geometry.place_point``) and baking a second one into a font
+is how a sign error hides. Callers place the result — ``silk_source`` does it
+for a designator, and applies the local Y anchor the font does not take.
 
 It DOES mirror, because mirroring is a TEXT-LAYOUT decision, not a placement one:
 back-side legend is mirror-written about the text's own anchor so it reads
@@ -98,8 +100,9 @@ MISSING_GLYPH_CHAR = "�"
 
 # --- The table -------------------------------------------------------------
 # ``char -> (advance_in_grid_units, strokes)``; each stroke is an OPEN polyline
-# of >= 2 grid points. OPEN matters: a closing segment turns "C" into "O", the
-# same trap stroke_font.refdes_strokes documents.
+# of >= 2 grid points. OPEN matters: a closing segment turns "C" into "O" —
+# which is why silk_source.refdes_strokes builds SilkPoly(..., closed=False)
+# for a glyph and never reuses the authored-fp_poly harvest path.
 #
 # Advance is the glyph's own body width; GLYPH_GAP is added between glyphs by
 # render(), never here.

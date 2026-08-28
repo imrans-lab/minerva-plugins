@@ -1,9 +1,30 @@
 #!/usr/bin/env python3
 """Generate pcb/NOTICE.md — the release-gate license/attribution inventory
-for the footprint seed library (epoch LIB1, DCR 019ff568e203 station S5/B6).
+for this project's third-party content (epoch LIB1, DCR 019ff568e203 station
+S5/B6).
+
+TWO INVENTORIES, because third-party content arrives two ways
+--------------------------------------------------------------
+1. ACQUIRED FILES — footprints vendored into ``pcb/library/``, pinned with
+   their provenance in ``footprints.lock.json``. The bulk of this file.
+2. SOURCE-EMBEDDED DATA TABLES — a glyph table, lookup table or coefficient
+   set copied from a third-party source and stored as literal CONSTANTS
+   inside one of our own source files (:data:`EMBEDDED_DATA_TABLES`).
+
+(2) exists because (1) could not see it. A file-provenance lock inventories
+FILES; a table of numbers inside a ``.py`` is not a file, so a 26-glyph subset
+of KiCad's GPL-2.0-or-later Newstroke font lived in
+``pcb/worker/pcb_worker/stroke_font.py`` and appeared in no licence inventory
+anywhere. That table is deleted (reference designators and board legend now
+share the in-house font in ``pcb_worker/board_font.py``) and
+:data:`EMBEDDED_DATA_TABLES` is empty — but the SECTION renders either way, so
+the next embedded table has to be declared to exist rather than merely not
+noticed.
 
 WHAT THIS FILE IS AND WHY IT EXISTS
 ------------------------------------
+WHAT THE FOOTPRINT INVENTORY IS AND WHY IT EXISTS
+--------------------------------------------------
 ``pcb/library/footprints.lock.json`` (acquisition-lock schema v2, see
 ``pcb_worker.footprints`` and ``pcb/docs/libraries.md``) pins every footprint
 the seed library ships, together with its provenance: ``source_kind``,
@@ -35,6 +56,10 @@ EVERY offending ref — if any of the following holds:
 * ``license`` is empty or missing, or contains the substring ``"unknown"``
   (case-insensitive) anywhere in it;
 * ``source_ref`` is empty or missing.
+
+The same three axes apply to every :data:`EMBEDDED_DATA_TABLES` entry, on its
+own fields (``module``, ``license``, ``source_ref``, ``attribution``) — a
+declared table with an unresolved licence must not ship either.
 
 There are currently zero violations in the shipped lock — every entry is
 fully provenanced. The rule exists for the future entry that is NOT: the
@@ -71,7 +96,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Union
+from typing import NamedTuple, Union
 
 # pcb/scripts/this.py -> pcb/, so the worker package is a sibling directory.
 # Same convention as pcb/scripts/capture_emitter_golden.py.
@@ -110,6 +135,63 @@ THIRD_PARTY_ATTRIBUTION = {
         "https://github.com/espressif/kicad-libraries/blob/master/LICENSE."
     ),
 }
+
+class EmbeddedDataTable(NamedTuple):
+    """One third-party DATA TABLE stored as literal constants in our source.
+
+    ``module`` is the repo-relative path of the file that holds it (so a
+    reader can go look), ``what`` names the table itself, and the remaining
+    three fields carry the same obligations an acquired file's lock entry
+    carries: which licence, where it came from, and the attribution text the
+    NOTICE must print to satisfy it.
+
+    A NamedTuple rather than a dataclass on purpose: ``test_notice.py`` loads
+    this script by file path WITHOUT registering it in ``sys.modules`` (it is
+    a script, not an importable package member), and under ``from __future__
+    import annotations`` ``@dataclass`` resolves its field types through
+    ``sys.modules[cls.__module__]`` — which is ``None`` for such a module, so
+    the class definition itself raises at import time. NamedTuple keeps the
+    annotations as strings and does not.
+    """
+
+    module: str
+    what: str
+    license: str
+    source_ref: str
+    attribution: str
+
+
+#: Every third-party data table embedded in this repository's own source.
+#:
+#: EMPTY IS THE CORRECT STATE, and it is a state that has to be maintained
+#: rather than assumed: adding an entry here is the ONLY sanctioned way to
+#: embed third-party data in a source file, and
+#: ``worker/tests/test_notice.py`` fails if the worker source tree grows one
+#: that is not declared. Entries render in ``module`` order.
+#:
+#: A table whose licence is incompatible with this repository's
+#: (``LICENSE.md``) does not belong here at all — declaring it does not make
+#: it shippable, it only makes it visible. This list is for third-party data
+#: we are ENTITLED to redistribute and OBLIGED to attribute.
+EMBEDDED_DATA_TABLES: tuple = ()
+
+EMBEDDED_SECTION_TITLE = "Source-embedded third-party data tables"
+
+EMBEDDED_SECTION_INTRO = (
+    "Data tables — glyph outlines, lookup tables, coefficient sets — taken "
+    "from a third-party source and stored as literal constants inside this "
+    "project's own source files. The footprint inventory above cannot see "
+    "these: it inventories acquired FILES, and a table of constants inside a "
+    "source file is not a file. This section is the second inventory, and it "
+    "is maintained by hand in `EMBEDDED_DATA_TABLES` in "
+    "`pcb/scripts/gen_notice.py`."
+)
+
+EMBEDDED_SECTION_EMPTY = (
+    "**None.** Every data table in this project's source is authored "
+    "in-house. Adding a third-party one means declaring it here."
+)
+
 
 PROPRIETARY_LICENSE = "LicenseRef-TurnRock-Proprietary"
 
@@ -180,6 +262,52 @@ def _gate_violations(entries: dict) -> list:
     return violations
 
 
+def _embedded_violations(tables) -> list:
+    """Every release-gate violation among the declared embedded data tables.
+
+    Same three axes as an acquired footprint (missing provenance, an
+    unresolved ``UNKNOWN`` licence, a missing source_ref), because a declared
+    table carries exactly the same redistribution obligations as a vendored
+    file — the only difference is that nothing else in the repository would
+    have noticed it.
+    """
+    violations: list = []
+    for table in sorted(tables, key=lambda t: t.module):
+        for field in ("module", "what", "license", "source_ref", "attribution"):
+            if not getattr(table, field, None):
+                violations.append(
+                    f"{table.module or '<unnamed table>'}: missing/empty {field}")
+        if table.license and "unknown" in table.license.lower():
+            violations.append(
+                f"{table.module}: license {table.license!r} contains \"unknown\" "
+                f"— an embedded third-party table must not ship with an "
+                f"unresolved licence")
+    return violations
+
+
+def _render_embedded_section(tables) -> list:
+    """The embedded-data-table section's lines.
+
+    It renders even when the list is EMPTY, and that is the point: a section
+    that disappears when there is nothing to declare cannot tell a reader
+    whether the inventory is clean or absent."""
+    lines = [f"## {EMBEDDED_SECTION_TITLE}", "", EMBEDDED_SECTION_INTRO, ""]
+    if not tables:
+        lines.append(EMBEDDED_SECTION_EMPTY)
+        lines.append("")
+        return lines
+    for table in sorted(tables, key=lambda t: t.module):
+        lines.append(f"### `{table.module}` — {table.what}")
+        lines.append("")
+        lines.append(f"License: {table.license}")
+        lines.append("")
+        lines.append(f"Source: {table.source_ref}")
+        lines.append("")
+        lines.append(table.attribution)
+        lines.append("")
+    return lines
+
+
 def _attribution_note(license_name: str) -> str:
     """The attribution paragraph for a license section.
 
@@ -202,11 +330,12 @@ def render_notice(entries: dict) -> str:
     docstring. The gate runs BEFORE any output is built, so a refused run
     never partially renders a NOTICE around the entries that did pass.
     """
-    violations = _gate_violations(entries)
+    violations = _gate_violations(entries) + _embedded_violations(EMBEDDED_DATA_TABLES)
     if violations:
         raise NoticeGateError(
-            "footprint acquisition lock fails the NOTICE release gate "
-            "(fail-closed) — every offending ref:\n  " + "\n  ".join(violations)
+            "the NOTICE release gate refuses (fail-closed) — every offending "
+            "footprint ref and embedded data table:\n  "
+            + "\n  ".join(violations)
         )
 
     by_license: dict = {}
@@ -230,7 +359,9 @@ def render_notice(entries: dict) -> str:
         "an out-of-vocabulary `source_kind`, or a missing `source_ref` "
         "refuses generation outright rather than shipping. One section "
         "below per DISTINCT license carried by the shipped lock; each entry "
-        "lists its footprint ref and its acquisition `source_ref`."
+        "lists its footprint ref and its acquisition `source_ref`. A final "
+        "section inventories third-party data tables embedded directly in "
+        "source, which no file-provenance lock can see."
     )
     lines.append("")
 
@@ -249,7 +380,10 @@ def render_notice(entries: dict) -> str:
             lines.append(piece)
         lines.append("")
 
-    lines.append(f"Total entries: {len(entries)}")
+    lines.extend(_render_embedded_section(EMBEDDED_DATA_TABLES))
+
+    lines.append(f"Total entries: {len(entries)} footprints, "
+                 f"{len(EMBEDDED_DATA_TABLES)} embedded data tables")
     lines.append("")
     return "\n".join(lines)
 

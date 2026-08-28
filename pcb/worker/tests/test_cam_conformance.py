@@ -23,7 +23,7 @@ import re
 
 import pytest
 
-from pcb_worker import gerber, stroke_font
+from pcb_worker import board_font, gerber
 from pcb_worker.fab_capability import SUPPORTED_PAD_SHAPES
 from pcb_worker.gerber import _smd_aperture
 
@@ -657,7 +657,8 @@ def _refdes_straight_count(ref: str = "P1") -> int:
     independent of whatever silk graphics (if any) it authored. Each glyph
     stroke of N points contributes (N - 1) straight interpolations (one
     moveto + (N-1) linetos, per _add_silk_polys)."""
-    return sum(len(stroke) - 1 for stroke in stroke_font.render(ref))
+    return sum(len(stroke) - 1
+               for stroke in board_font.render(ref).polylines)
 
 
 def _silk_signature(text: str) -> tuple[int, int, int]:

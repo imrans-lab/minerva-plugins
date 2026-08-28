@@ -1460,9 +1460,10 @@ def validate_shape() -> None:
     #
     # DELIBERATELY LEFT UNCOVERED, so a later reader does not mistake a full
     # band for full coverage:
-    #   * pcb_worker/stroke_font.py — zero entries. 62 test cases pin it and the
-    #     known defect is LATENT (its only caller renders at size 1.0, where the
-    #     bug is invisible). Lowest risk of the candidates.
+    #   * pcb_worker/board_font.py — zero entries. The glyph table is pinned
+    #     value-for-value by test_board_font.py and by its GDScript mirror, and
+    #     a wrong glyph is a legible defect on the fabricated board rather than
+    #     a silent one. Lowest risk of the candidates.
     #   * gerber.py::_emit_refdes — silk designator presence. Has tests, and silk
     #     is not fabrication-critical the way copper is.
     #   * pcb_worker/kicad.py — still zero entries. Tracked separately as
@@ -1482,8 +1483,8 @@ def validate_shape() -> None:
     #   * zone_fill.py had ZERO entries while being the module that decides what
     #     copper reaches the fab. That is the exact "full band mistaken for full
     #     coverage" shape this list exists to prevent, and it was worse here than
-    #     the items left uncovered above: silk is not fabrication-critical and
-    #     stroke_font's defect is latent, whereas a wrong pour is etched.
+    #     the items left uncovered above: silk is not fabrication-critical and a
+    #     wrong glyph is legible, whereas a wrong pour is etched.
     #   * The three rules added are all DELETE-OR-REFUSE decisions on geometry NO
     #     OTHER CHECK MODELS — the geometric DRC projects pads, traces and vias
     #     and never zone fill, so a defect in them is invisible to every other

@@ -3,9 +3,9 @@
 Gerber has no text primitive (gerber_writer 0.4.3.3 confirmed to have none: it
 ships only writer.py / macros.py / padmasters.py / lutils.py). A reference
 designator ("R1", "U3", ...) therefore reaches the board house only if it is
-drawn as stroke geometry — see pcb_worker/stroke_font.py (a small subset of
-KiCad's own Newstroke font, extracted offline from the dev-only gerbonara
-dependency and cited there; NOT imported at runtime) and gerber._emit_refdes.
+drawn as stroke geometry — see pcb_worker/board_font.py (the ONE in-house
+typeface this project draws with, shared with board legend),
+silk_source.refdes_strokes and gerber._emit_refdes.
 
 ACCEPTANCE (the rewritten, satisfiable criterion — see the D4 brief): every
 placed component's reference designator is present as drawn geometry on ITS OWN
@@ -21,13 +21,10 @@ real content. Corrected rather than deleted because a reader who remembers the
 old rule needs to see it retired, not silently absent.
 
 Coverage:
-  1. stroke_font.py: glyph data is well-formed, matches its cited source
-     (gerbonara's Newstroke, dev-only) to within rounding, and renders OPEN
-     polylines only.
-  2. gerber._emit_refdes: the unit — per-side bucketing, empty-ref no-ops,
+  1. gerber._emit_refdes: the unit — per-side bucketing, empty-ref no-ops,
      output is OPEN polylines at gerber.SILK_LINE_WIDTH_MM, transformed by the
      REAL component placement (not whatever _emit_silk happened to receive).
-  3. End-to-end through BOTH emitter entry points (build_gerbers_ir — the live
+  2. End-to-end through BOTH emitter entry points (build_gerbers_ir — the live
      IR-native path — and build_gerbers — the loose-dict path), each proving
      the headline case revision 1 could not satisfy: a component with NO
      captured silk graphics still gets its designator.
@@ -39,239 +36,36 @@ import re
 
 import pytest
 
-from pcb_worker import gerber, stroke_font
+from pcb_worker import board_font, gerber, silk_source
 from pcb_worker.compile_board import compile_board
 from pcb_worker.geometry import place_point
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
 
 # ---------------------------------------------------------------------------
-# 1. stroke_font.py — the glyph data itself.
-# ---------------------------------------------------------------------------
-
-_ALL_CHARS = [chr(c) for c in range(ord("A"), ord("Z") + 1)] + \
-    [chr(c) for c in range(ord("0"), ord("9") + 1)] + ["?"]
-
-
-def test_render_produces_polylines_of_at_least_two_points():
-    for text in ("R1", "U10", "SW4", "J3", "C22"):
-        polylines = stroke_font.render(text)
-        assert polylines, f"{text!r} rendered nothing"
-        for pts in polylines:
-            assert len(pts) >= 2, f"{text!r}: degenerate stroke {pts}"
-    # NOTE: a closed-loop-LOOKING glyph (e.g. "0", "8", "B") legitimately has a
-    # single stroke whose first and last point coincide — that is the font's
-    # own shape, not this code closing it. What matters is that _emit_refdes
-    # (below) NEVER passes closed=True for a glyph stroke, so _add_silk_polys
-    # never appends a SECOND, synthetic closing segment on top of it.
-
-
-def test_unknown_character_falls_back_to_the_missing_glyph():
-    # A reference designator is always upper-alpha + digits, but the renderer
-    # stays total (never raises) for anything else, falling back to '?'.
-    assert stroke_font.render("#") == stroke_font.render("?")
-    # Lower-case folds to upper (KiCad refs are conventionally upper already).
-    assert stroke_font.render("r1") == stroke_font.render("R1")
-
-
-def test_glyph_table_matches_its_cited_source_newstroke():
-    """Pin the ENTIRE _GLYPHS subset against gerbonara's Newstroke (the dev-only
-    fabrication-verification dependency this table was extracted from and
-    cites — pyproject.toml `[project.optional-dependencies].dev`). This is a
-    TEST-ONLY use of gerbonara (already how this repo uses it elsewhere, e.g.
-    ir_parity.tabulate_gerber / tests/oracle) — stroke_font.py itself imports
-    nothing from gerbonara at runtime; only this test does, and only to prove
-    the citation is accurate."""
-    gerbonara = pytest.importorskip("gerbonara")
-    from gerbonara.newstroke import Newstroke
-
-    ns = Newstroke.load()
-    for c in _ALL_CHARS:
-        want_w, want_strokes = ns.glyphs[c]
-        got_w, got_strokes = stroke_font._GLYPHS[c]
-        assert got_w == pytest.approx(want_w, abs=1e-5), c
-        assert len(got_strokes) == len(want_strokes), c
-        for got_st, want_st in zip(got_strokes, want_strokes):
-            assert len(got_st) == len(want_st), c
-            for (gx, gy), (wx, wy) in zip(got_st, want_st):
-                assert gx == pytest.approx(wx, abs=1e-5), c
-                assert gy == pytest.approx(wy, abs=1e-5), c
-
-
-def test_render_center_alignment_shifts_left_alignment_by_half_the_width():
-    # h_align="center" (the default _emit_refdes uses) must be EXACTLY the
-    # left-aligned render shifted by half the string's total advance width —
-    # not, e.g., half of the first glyph's own bounding box (glyphs carry an
-    # inherent left-side bearing baked into their coordinates, so "does the
-    # leftmost point sit at -width/2" is the WRONG invariant to check).
-    left = stroke_font.render("R1", size=1.0, x0=0.0, y0=0.0, h_align="left")
-    center = stroke_font.render("R1", size=1.0, x0=0.0, y0=0.0, h_align="center")
-    width = stroke_font.text_width("R1", size=1.0)
-    assert len(left) == len(center)
-    for left_st, center_st in zip(left, center):
-        assert len(left_st) == len(center_st)
-        for (lx, ly), (cx, cy) in zip(left_st, center_st):
-            assert cx == pytest.approx(lx - width / 2.0, abs=1e-9)
-            assert cy == pytest.approx(ly, abs=1e-9)
-
-
-# ---------------------------------------------------------------------------
-# 1b. Z5 — render() is scale-linear, and agrees with text_width(), even for
-# strings containing a space.
+# The glyph oracle.
 #
-# render()'s cursor `x` must accumulate in GLYPH-LOCAL (unscaled) units, same
-# as the regular-glyph branch (`x += glyph_w`, no `* size`), and be scaled
-# exactly once at point-emit time (`(px + x) * size`). Before the Z5 fix, the
-# space branch instead did `x += SPACE_WIDTH * size` — a pre-scaled advance
-# that then got scaled AGAIN at emit, i.e. an effective SPACE_WIDTH * size**2
-# term. That is invisible at size=1.0 (size**2 == size — gerber.py's only
-# production caller always renders at REFDES_TEXT_SIZE_MM == 1.0, so no
-# shipped silk output is affected), but breaks both properties below for any
-# size != 1.0 and any string containing a space.
+# Designator glyphs come from board_font — the ONE in-house typeface this
+# project draws with, shared with board legend. It used to be a separate
+# 26-glyph refdes font whose coordinates were a GPL-2.0-or-later subset; the
+# font's own tests live in test_board_font.py, so nothing here re-tests glyph
+# data. What these tests need is the LOCAL strokes the emitter is expected to
+# place, which is font render + the local Y anchor silk_source applies.
 # ---------------------------------------------------------------------------
 
-# Tolerance rationale: every quantity on both sides of these comparisons is
-# produced by the SAME primitive float operations (a handful of + and * on
-# the literal glyph-table constants), just grouped/ordered slightly
-# differently (e.g. `(px + x) * size` vs. `px * size + x * size`). That is
-# only a rounding-mode difference, not an accumulated-error one, so a tight
-# absolute tolerance is appropriate — 1e-9 is ~7 orders of magnitude looser
-# than IEEE-754 double epsilon at these magnitudes (glyph coords are O(1),
-# sizes tested are O(1)-O(10)).
-_TOL = 1e-9
 
-# THE discriminating fixture named in the brief: a space AND a non-unit size.
-# Under the bug this displaces every glyph after the space by
-# SPACE_WIDTH * (size**2 - size) = 0.6 * (4 - 2) = 1.2mm.
-_DISCRIMINATING_TEXT = "R1 C2"
-_DISCRIMINATING_SIZE = 2.0
-
-# A fixture with NO space (or size == 1.0) passes under the bug too — the
-# vacuous case the brief warns against. Included explicitly, at the SAME
-# size as the discriminating fixture, so the two sit side by side and the
-# space (not the size) is visibly what's doing the discriminating.
-_NO_SPACE_CONTROL_TEXT = "R1C2"
-
-
-def _scaled_polylines(polylines, s):
-    return [[(px * s, py * s) for px, py in pts] for pts in polylines]
-
-
-def test_render_scale_linearity_discriminating_fixture_has_a_space():
-    """PRIMARY property, pinned at the exact brief fixture: render("R1 C2",
-    size) must equal render("R1 C2", 1.0) with every point scaled by `size`.
-    This does NOT reference text_width() at all, so a "lazy fix" that instead
-    scales text_width's space term to match render's bug (making the two
-    functions agree with each other while both stay non-linear) still fails
-    this test — only a real fix to render()'s accumulator passes it."""
-    text, size = _DISCRIMINATING_TEXT, _DISCRIMINATING_SIZE
-    base = stroke_font.render(text, size=1.0, x0=0.0, y0=0.0, h_align="left")
-    got = stroke_font.render(text, size=size, x0=0.0, y0=0.0, h_align="left")
-    want = _scaled_polylines(base, size)
-    assert len(got) == len(want)
-    for got_st, want_st in zip(got, want):
-        assert len(got_st) == len(want_st)
-        for (gx, gy), (wx, wy) in zip(got_st, want_st):
-            assert gx == pytest.approx(wx, abs=_TOL)
-            assert gy == pytest.approx(wy, abs=_TOL)
-
-
-def test_render_scale_linearity_no_space_control_passes_either_way():
-    """The vacuous-test control: same size as the discriminating fixture
-    above, but no space in the string. This passes whether or not the Z5 bug
-    is present (the bug lives ONLY in the space branch), which is exactly why
-    a no-space fixture would have been the wrong thing to rely on above."""
-    text, size = _NO_SPACE_CONTROL_TEXT, _DISCRIMINATING_SIZE
-    base = stroke_font.render(text, size=1.0, x0=0.0, y0=0.0, h_align="left")
-    got = stroke_font.render(text, size=size, x0=0.0, y0=0.0, h_align="left")
-    want = _scaled_polylines(base, size)
-    assert len(got) == len(want)
-    for got_st, want_st in zip(got, want):
-        for (gx, gy), (wx, wy) in zip(got_st, want_st):
-            assert gx == pytest.approx(wx, abs=_TOL)
-            assert gy == pytest.approx(wy, abs=_TOL)
-
-
-@pytest.mark.parametrize("text", [
-    "R1 C2",
-    "R1C2",
-    "U10 J3 SW4",     # multiple spaces, compounding the bug if present
-    " R1",            # leading space
-    "R1 ",            # trailing space
-    "R1  C2",         # two consecutive spaces
-    "",                # empty string, degenerate case
-])
-@pytest.mark.parametrize("size", [1.0, 2.0, 0.35, 5.0])
-def test_render_is_scale_linear_property(text, size):
-    """Broader property sweep (beyond the single named fixture above) over
-    strings with/without spaces, at/away from size=1.0, including edge cases
-    (leading/trailing/doubled spaces, empty string). For h_align="left",
-    x0=y0=0: render(t, s) == scale(render(t, 1.0), s)."""
-    base = stroke_font.render(text, size=1.0, x0=0.0, y0=0.0, h_align="left")
-    got = stroke_font.render(text, size=size, x0=0.0, y0=0.0, h_align="left")
-    want = _scaled_polylines(base, size)
-    assert len(got) == len(want), (text, size)
-    for got_st, want_st in zip(got, want):
-        assert len(got_st) == len(want_st), (text, size)
-        for (gx, gy), (wx, wy) in zip(got_st, want_st):
-            assert gx == pytest.approx(wx, abs=_TOL), (text, size)
-            assert gy == pytest.approx(wy, abs=_TOL), (text, size)
-
-
-# Probe character for the render/text_width agreement property below: "I"'s
-# glyph is a single vertical stroke, so BOTH its points sit at the same
-# known, constant glyph-local x. That constancy is what makes it usable as a
-# reference mark (see the docstring of the test that uses it).
-_PROBE_CHAR = "I"
-_PROBE_PX = stroke_font._GLYPHS[_PROBE_CHAR][1][0][0][0]
-
-
-@pytest.mark.parametrize("text", [
-    "R1 C2", "R1C2", "U10 J3 SW4", " R1", "R1 ", "R1  C2", "R1", "",
-])
-@pytest.mark.parametrize("size", [1.0, 2.0, 0.35, 5.0])
-def test_render_advance_matches_text_width(text, size):
-    """SECONDARY property: the horizontal advance render() implies for `text`
-    must equal text_width(text, size).
-
-    render() does not return (or expose) its internal cursor, so "the advance
-    implied by render" has to be observed indirectly. This test appends a
-    PROBE character ("I") whose glyph is a single vertical stroke at a KNOWN,
-    constant glyph-local x (`_PROBE_PX`, both of its points share it) and
-    reads back the x-coordinate of that probe's first rendered point. With
-    h_align="left" and x0=0, render's own emit-time transform is:
-
-        rendered_x = (_PROBE_PX + cursor_before_probe) * size
-                   = _PROBE_PX * size + cursor_before_probe * size
-
-    and `cursor_before_probe * size` is, by construction (a same-units,
-    scale-once accumulator), exactly the quantity text_width(text, size) is
-    defined to equal — text_width sums `glyph_w * size` / `SPACE_WIDTH *
-    size` per character, which is the distributed form of "sum the
-    glyph-unit advances, then multiply by size once". So:
-
-        rendered_x - _PROBE_PX * size == text_width(text, size)
-
-    This indirect readback is deliberately used INSTEAD of two more obvious
-    but unsound alternatives:
-      - Reading render()'s private `x` directly: not part of the public
-        contract, and the whole point is to test the public API's observable
-        behaviour.
-      - Using the rightmost stroke point of `text`'s own trailing character
-        as a stand-in for its advance: unsound in general, because a
-        glyph's ink does not always reach its own advance width (e.g. "I"
-        itself has advance width 0.47619 but its stroke's own px is only
-        0.238095 — using "max x of the trailing glyph" would UNDERSTATE the
-        true advance for most characters in this font).
-    """
-    rendered = stroke_font.render(text + _PROBE_CHAR, size=size, x0=0.0, y0=0.0,
-                                   h_align="left")
-    probe_first_point_x = rendered[-1][0][0]
-    advance = probe_first_point_x - _PROBE_PX * size
-    assert advance == pytest.approx(stroke_font.text_width(text, size), abs=_TOL), (text, size)
+def _refdes_local(text, size=silk_source.REFDES_TEXT_SIZE_MM,
+                  y0=silk_source.REFDES_LOCAL_Y_MM):
+    """The glyph-LOCAL (unplaced) strokes ``silk_source.refdes_strokes``
+    renders for *text* — centred on the anchor, offset by the local Y anchor.
+    Pass ``y0=0.0`` for the authored-reference_text path, which anchors the
+    text itself instead of using the default offset."""
+    return [[(x, y + y0) for x, y in stroke]
+            for stroke in board_font.render(text, size=size,
+                                            h_align="center").polylines]
 
 
 # ---------------------------------------------------------------------------
-# 2. gerber._emit_refdes — the unit.
+# 1. gerber._emit_refdes — the unit.
 # ---------------------------------------------------------------------------
 
 
@@ -291,7 +85,7 @@ def test_emit_refdes_bottom_side_fills_the_bottom_bucket_only():
     g = gerber._Geometry()
     gerber._emit_refdes(g, "R1", 10.0, 10.0, 0.0, top=False)
     assert g.silk_polys == [], "a bottom designator must not leak onto F.SilkS"
-    assert len(g.silk_polys_bot) == len(stroke_font.render("R1")), \
+    assert len(g.silk_polys_bot) == len(_refdes_local("R1")), \
         "the bottom designator did not reach the B.SilkS bucket"
 
 
@@ -324,20 +118,20 @@ def test_emit_refdes_uses_the_real_placement_not_a_template():
     gerber._emit_refdes(g_template, "REF**", 0.0, 0.0, 0.0, top=True)
 
     assert g_instance.silk_polys != g_template.silk_polys
-    assert len(g_instance.silk_polys) == len(stroke_font.render("R7"))
+    assert len(g_instance.silk_polys) == len(_refdes_local("R7"))
 
 
 def test_emit_refdes_transforms_by_the_given_placement():
     """Glyph-local points are rotated + translated by (cx, cy, rot) via the
     SAME place_point every other component-local primitive in this worker
     uses — proven by comparing _emit_refdes's output to a manual place_point
-    transform of stroke_font's own raw glyph points."""
+    transform of the font's own raw glyph points."""
     cx, cy, rot = 12.5, -3.0, 37.0
     g = gerber._Geometry()
     gerber._emit_refdes(g, "A", cx, cy, rot, top=True)
 
-    expected_local = stroke_font.render(
-        "A", size=gerber.REFDES_TEXT_SIZE_MM, x0=0.0, y0=gerber.REFDES_LOCAL_Y_MM)
+    expected_local = _refdes_local("A", size=gerber.REFDES_TEXT_SIZE_MM,
+                                   y0=gerber.REFDES_LOCAL_Y_MM)
     expected = [
         [place_point(cx, cy, rot, lx, ly) for lx, ly in stroke]
         for stroke in expected_local
@@ -366,7 +160,7 @@ def test_emit_refdes_rotation_actually_rotates_the_glyphs():
 
 
 # ---------------------------------------------------------------------------
-# 3. End-to-end through BOTH emitter entry points.
+# 2. End-to-end through BOTH emitter entry points.
 # ---------------------------------------------------------------------------
 
 
@@ -461,8 +255,7 @@ def test_ir_native_path_positions_designator_at_the_real_component_placement():
     assert reference_text.position == (0.0, -4.2), reference_text.position
     assert reference_text.rotation_deg == 0.0
     assert reference_text.size_mm == 1.0, reference_text.size_mm
-    expected_local = stroke_font.render(
-        "MH1", size=reference_text.size_mm, x0=0.0, y0=0.0)
+    expected_local = _refdes_local("MH1", size=reference_text.size_mm, y0=0.0)
     footprint_local_first = place_point(
         reference_text.position[0], reference_text.position[1],
         reference_text.rotation_deg, *expected_local[0][0])
@@ -558,7 +351,7 @@ def test_bottom_designator_reaches_the_serialized_b_silks_and_does_not_leak():
     for text, ref, other_ref in ((b_silk, "BOTREF", "TOPREF"),
                                  (f_silk, "TOPREF", "BOTREF")):
         drawn = len(re.findall(r"D01\*", text))
-        expected = sum(len(stroke) - 1 for stroke in stroke_font.render(ref))
+        expected = sum(len(stroke) - 1 for stroke in _refdes_local(ref))
         assert drawn >= expected, (
             f"{ref}'s designator is under-drawn: {drawn} D01 draws, expected at "
             f"least {expected} for the glyph strokes alone")
@@ -566,9 +359,9 @@ def test_bottom_designator_reaches_the_serialized_b_silks_and_does_not_leak():
     # And the leak direction, on the in-memory buckets where sidedness is
     # unambiguous: each side's bucket holds ONLY its own component's strokes.
     g = gerber._harvest(board, gerber.DEFAULT_MASK_CLEARANCE_MM)
-    assert len(g.silk_polys) == len(stroke_font.render("TOPREF")), \
+    assert len(g.silk_polys) == len(_refdes_local("TOPREF")), \
         f"F.SilkS bucket must hold only TOPREF's strokes; got {len(g.silk_polys)}"
-    assert len(g.silk_polys_bot) == len(stroke_font.render("BOTREF")), \
+    assert len(g.silk_polys_bot) == len(_refdes_local("BOTREF")), \
         f"B.SilkS bucket must hold only BOTREF's strokes; got {len(g.silk_polys_bot)}"
 
 
@@ -599,8 +392,8 @@ def test_every_top_side_component_gets_a_designator_on_a_mixed_board():
     g = gerber._harvest_ir(rb, gerber.DEFAULT_MASK_CLEARANCE_MM)
 
     # MH1 contributes ONLY its designator's own strokes (no outline silk).
-    mh1_strokes = len(stroke_font.render("MH1"))
-    r1_strokes = len(stroke_font.render("R1"))
+    mh1_strokes = len(_refdes_local("MH1"))
+    r1_strokes = len(_refdes_local("R1"))
     assert len(g.silk_polys) == mh1_strokes + r1_strokes, (
         "expected exactly R1's + MH1's designator strokes as the only silk_polys "
         "(R1's own outline silk is lines/arcs, not polys, for this footprint)")

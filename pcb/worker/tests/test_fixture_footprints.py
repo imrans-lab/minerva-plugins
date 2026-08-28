@@ -10,7 +10,7 @@ Three purpose-built seed-library footprints for the public test coupon
     ``gerber._shape_aperture`` branches on, finally reached from a board.
   * ``LOGO_Owl_TestCoupon`` — pad-less silk furniture: a stroke-art owl using
     ALL FOUR silk primitive classes (fp_circle eyes, fp_arc head, fp_poly
-    beak, fp_line body + the stroke_font-baked "TEST COUPON" text). The silk
+    beak, fp_line body + the baked-in "TEST COUPON" text). The silk
     arc/circle emitter paths only library footprints can reach.
   * ``FID_Circle_1mm`` — bare-copper fiducial: 1.0 mm circle pad, 2.0 mm mask
     opening (solder_mask_margin 0.5), and NO paste layer.

@@ -113,7 +113,7 @@ func _run_font_fixture_numbers() -> void:
 		absf(float(odd["width_mm"]) - PcbBoardFont.text_width("AµB", 1.0)) < EPS)
 
 	# Scale linearity with a space in the string — the discriminating fixture for
-	# the double-scaled-advance bug stroke_font.py records against itself.
+	# the double-scaled-advance bug the font this one replaced shipped.
 	check("text_width scales linearly through a space",
 		absf(PcbBoardFont.text_width("R1 C2", 2.0)
 			- PcbBoardFont.text_width("R1 C2", 1.0) * 2.0) < EPS)

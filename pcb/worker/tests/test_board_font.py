@@ -1,10 +1,9 @@
 """The board stroke font, and the parity of its GDScript mirror.
 
-The font is the in-house 5x7 stroke alphabet board text is drawn with
-(pcb_worker/board_font.py). It is NOT the Newstroke subset stroke_font.py uses
-for reference designators — see board_font's module docstring for both reasons
-(coverage, and the GPL-2 provenance of Newstroke against this repo's
-proprietary licence).
+The font is the in-house 5x7 stroke alphabet EVERY string on a board is drawn
+with (pcb_worker/board_font.py) — legend lines and reference designators alike.
+It is the only glyph table in this repository; see board_font's module
+docstring for why there is exactly one.
 
 WHAT THE MIRROR TEST IS FOR. The panel cannot import Python, so the glyph table
 is mirrored into ui/model/pcb_board_font_data.gd by
@@ -78,9 +77,10 @@ def test_size_is_cap_height():
 def test_scale_is_linear_and_width_agrees_with_render():
     """text_width() is the same number render() lays out to, at any size.
 
-    stroke_font.py carries a comment about a double-scaling bug in exactly this
-    relationship (its space advance was scaled twice), so the discriminating
-    fixture here is a string WITH A SPACE at a size != 1.0.
+    The font this one replaced shipped a double-scaling bug in exactly this
+    relationship (its space advance was scaled twice, so render() and
+    text_width() disagreed for any size != 1.0), so the discriminating fixture
+    here is a string WITH A SPACE at a size != 1.0.
     """
     for size in (0.5, 1.0, 1.5, 2.0):
         rendered = board_font.render("R1 C2", size=size)

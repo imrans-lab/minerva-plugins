@@ -9,7 +9,7 @@ WHY THIS MODULE EXISTS (epoch CP2, station S2)
 Before it, silk geometry had TWO owners and was about to get a third:
 
 * ``gerber.py`` harvested footprint silk into its ``_Geometry`` buckets and
-  SYNTHESIZED reference designators from :mod:`stroke_font` at emission time.
+  SYNTHESIZED reference designators from the stroke font at emission time.
 * ``kicad.py`` carried a hand-mirrored copy of the two width constants,
   documented as deliberate ("kicad.py must stay free of gerber_writer") and
   pinned by a cross-emitter equality test.
@@ -71,7 +71,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Union
 
-from . import stroke_font
+from . import board_font
 from .footprint_def import ReferenceTextDefinition
 from .geometry import PlacementTransform, place_point, rotate_local_offset
 from .resolved_board import Side
@@ -166,7 +166,7 @@ SILK_LINE_WIDTH_MM = SILK_TEXT_WIDTH_MM
 
 # Reference-designator TEXT geometry (K17: silk must carry "R1", not just
 # outline graphics — gerber-writer has no text primitive, so this is drawn
-# stroke geometry; see stroke_font.py). Stroke WIDTH is SILK_TEXT_WIDTH_MM: a
+# stroke geometry; see board_font.py). Stroke WIDTH is SILK_TEXT_WIDTH_MM: a
 # designator IS text, so it takes the library's TEXT thickness rather than the
 # graphic-line width — that distinction is exactly why the one constant these
 # used to share had to be split.
@@ -592,10 +592,20 @@ def refdes_strokes(ref: Any, cx: float, cy: float, rot: float,
         size = REFDES_TEXT_SIZE_MM
         rtx = rty = rt_rot = None
 
+    # ONE typeface per board: a designator takes the same in-house 5x7 font as
+    # board legend (board_font), rendered CENTRED on its anchor — which is what
+    # a designator wants and what a left-anchored legend line does not, hence
+    # the h_align argument rather than a second font.
+    #
+    # board_font.render anchors the BASELINE at local y=0 and does not take a
+    # y offset, so the default anchor is applied here. Mirroring is deliberately
+    # NOT requested: bottom-side placement mirrors in _place (the pcbnew-pinned
+    # PlacementTransform), and asking for it twice would cancel out.
+    y0 = 0.0 if reference_text is not None else REFDES_LOCAL_Y_MM
     out: list[SilkPoly] = []
-    for stroke in stroke_font.render(text, size=size, x0=0.0,
-                                     y0=(0.0 if reference_text is not None
-                                         else REFDES_LOCAL_Y_MM)):
+    for glyph_stroke in board_font.render(text, size=size,
+                                          h_align="center").polylines:
+        stroke = [(lx, ly + y0) for (lx, ly) in glyph_stroke]
         if reference_text is not None:
             # Step 1 is TEXT-LOCAL -> FOOTPRINT-LOCAL and stays side-agnostic:
             # the authored anchor is a footprint-local quantity, and mirroring

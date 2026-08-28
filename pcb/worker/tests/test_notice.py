@@ -236,3 +236,162 @@ def test_unmapped_third_party_license_refuses_instead_of_mislabeling(tmp_path):
     assert "Fake:Apache" in apache_section
     assert "no third-party attribution" not in apache_section.lower()
     assert "Fake:Ours" in proprietary_section
+
+
+# ---------------------------------------------------------------------------
+# The SECOND inventory: third-party data tables embedded in our own source.
+#
+# The footprint lock inventories acquired FILES. A table of literal constants
+# inside a .py is not a file, so it appeared in no licence inventory anywhere —
+# which is how a 26-glyph subset of KiCad's GPL-2.0-or-later Newstroke font sat
+# in pcb/worker/pcb_worker/stroke_font.py, drawing every reference designator,
+# in a repository that ships under a proprietary licence. The table is gone
+# (designators and board legend now share pcb_worker/board_font.py, authored
+# in-house) and these two tests are what stop the next one being invisible:
+# one holds the NOTICE section honest, the other reads the source itself.
+# ---------------------------------------------------------------------------
+
+# The worker source that ships. Tests are deliberately EXCLUDED — this file
+# necessarily contains the very strings it searches for, and a fixture is not
+# shipped artwork.
+_SCANNED_SOURCE_ROOTS = (
+    (WORKER / "pcb_worker", "*.py"),
+    (WORKER / "agent_router", "*.py"),
+    (PCB / "ui", "*.gd"),
+)
+
+# What an embedded third-party glyph table LOOKS LIKE, as opposed to what it is
+# called. A future copy will not be helpfully labelled, so the search is for
+# both:
+#
+#   * the family names a stroke font is distributed under, and
+#   * Newstroke's own coordinate fingerprint. Its glyph data is expressed in
+#     units of 1/21 (gerbonara's STROKE_FONT_SCALE), so its coordinates are
+#     n/21 repeating decimals — 0.047619, 0.238095, 0.857143, 1.047619 — which
+#     are numbers no board dimension, clearance or aperture in this project
+#     has any reason to be. board_font.py's own table is INTEGER grid units
+#     scaled once at render time, so it cannot collide with this by accident.
+_EMBEDDED_TABLE_SIGNATURES = (
+    "newstroke",
+    "hershey",
+    "0.047619",
+    "0.238095",
+    "0.857143",
+    "0.952381",
+    "1.047619",
+)
+
+
+def _declared_modules(module) -> set:
+    return {table.module for table in module.EMBEDDED_DATA_TABLES}
+
+
+def test_no_undeclared_third_party_data_table_in_the_shipped_source():
+    """No shipped source file carries a third-party data table's fingerprint
+    unless it is DECLARED in gen_notice.EMBEDDED_DATA_TABLES.
+
+    This is the check the repository did not have. The deleted stroke_font.py
+    named its own source in its docstring and cited it accurately; nothing
+    read that citation, so it never reached a NOTICE, a release gate or a
+    licence review. Grepping the source is crude, and crude is the point — it
+    needs no cooperation from the file that carries the table.
+    """
+    module = _load_gen_notice()
+    declared = _declared_modules(module)
+
+    offences = []
+    for root, glob in _SCANNED_SOURCE_ROOTS:
+        for path in sorted(root.rglob(glob)):
+            rel = path.relative_to(PCB.parent).as_posix()
+            if rel in declared:
+                continue
+            haystack = path.read_text(encoding="utf-8", errors="replace").lower()
+            for signature in _EMBEDDED_TABLE_SIGNATURES:
+                if signature in haystack:
+                    offences.append(f"{rel}: {signature!r}")
+
+    assert not offences, (
+        "shipped source carries the fingerprint of a third-party data table "
+        "that no licence inventory declares. Either the table does not belong "
+        "in a proprietary repository at all, or it must be added to "
+        "EMBEDDED_DATA_TABLES in pcb/scripts/gen_notice.py so the NOTICE "
+        "declares it:\n  " + "\n  ".join(offences))
+
+
+def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_entries(tmp_path):
+    """The NOTICE names every embedded data table, and the section exists even
+    when there are none.
+
+    Three properties in one test, because they are one contract:
+
+    1. The allowlist is EMPTY today, and the shipped NOTICE still carries the
+       section. A section that vanishes when the list is empty cannot tell a
+       reader whether the inventory is clean or simply absent.
+    2. A DECLARED table reaches the rendered NOTICE — module, licence, source
+       and attribution text — so declaring one actually discharges the
+       obligation rather than only satisfying the grep above.
+    3. A declared table with an unresolved licence REFUSES generation, the
+       same fail-closed rule an acquired footprint gets. Declaring a table is
+       not a way to ship an open licence question.
+    """
+    module = _load_gen_notice()
+
+    # 1. Empty today, section present in the file that actually ships.
+    assert module.EMBEDDED_DATA_TABLES == (), (
+        "a third-party data table has been declared; that is allowed, but this "
+        "assertion is the deliberate speed bump — update it together with the "
+        "entry, and make sure the licence is compatible with LICENSE.md")
+    shipped = (PCB / "NOTICE.md").read_text(encoding="utf-8")
+    assert f"## {module.EMBEDDED_SECTION_TITLE}" in shipped
+    assert module.EMBEDDED_SECTION_EMPTY in shipped
+
+    entries = {"Fake:Ours": _compliant_entry("Ours")}
+    lock = _write_lock(tmp_path, entries)
+
+    # 2. A declared table is NAMED in the output.
+    declared = module.EmbeddedDataTable(
+        module="pcb/worker/pcb_worker/fake_table.py",
+        what="a 3-entry synthetic lookup table",
+        license="MIT",
+        source_ref="https://example.invalid/fake-table v1.2",
+        attribution="Copyright (c) nobody. Licensed MIT; this notice satisfies it.",
+    )
+    original = module.EMBEDDED_DATA_TABLES
+    try:
+        module.EMBEDDED_DATA_TABLES = (declared,)
+        rendered = module.generate(lock)
+        section = rendered.split(f"## {module.EMBEDDED_SECTION_TITLE}", 1)[1]
+        assert declared.module in section
+        assert declared.what in section
+        assert declared.license in section
+        assert declared.source_ref in section
+        assert declared.attribution in section
+        assert module.EMBEDDED_SECTION_EMPTY not in rendered
+        assert "1 embedded data tables" in rendered
+
+        # 3. Fail-closed on an unresolved licence, naming the module.
+        module.EMBEDDED_DATA_TABLES = (
+            module.EmbeddedDataTable(
+                module="pcb/worker/pcb_worker/pending.py",
+                what="a glyph table",
+                license="UNKNOWN — pending review",
+                source_ref="somewhere",
+                attribution="tbd",
+            ),
+        )
+        with pytest.raises(module.NoticeGateError) as excinfo:
+            module.generate(lock)
+        assert "pcb/worker/pcb_worker/pending.py" in str(excinfo.value)
+
+        # ...and on a table declared with nothing behind it.
+        module.EMBEDDED_DATA_TABLES = (
+            module.EmbeddedDataTable(module="pcb/worker/pcb_worker/bare.py",
+                                     what="", license="", source_ref="",
+                                     attribution=""),
+        )
+        with pytest.raises(module.NoticeGateError) as excinfo:
+            module.generate(lock)
+        for field in ("what", "license", "source_ref", "attribution"):
+            assert field in str(excinfo.value)
+    finally:
+        module.EMBEDDED_DATA_TABLES = original
