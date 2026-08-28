@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pcb_worker.resolve import resolve_board_best_effort
 from pcb_worker import compile_board, drc
 from pcb_worker.ir_connectivity import connectivity_board
 from pcb_worker.resolved_board import ResolutionSuccess
@@ -42,7 +43,14 @@ PLATED_NEIGHBOURS = {("TP5T", "1"), ("TP5B", "1")}
 
 @pytest.fixture(scope="module")
 def bench() -> dict:
-    return yaml.safe_load(BENCH.read_text(encoding="utf-8"))
+    """The bench as the census reads it: RESOLVED. An inline pin in the YAML
+    carries a position and a net, not a plating — whether a hole has a barrel is
+    a footprint fact, so the raw census can only drop the bore once the library
+    has said what it is. Every production caller resolves before it counts
+    (methods resolve-first), and this fixture does the same.
+    """
+    board = yaml.safe_load(BENCH.read_text(encoding="utf-8"))
+    return resolve_board_best_effort(board)
 
 
 @pytest.fixture(scope="module")

@@ -68,7 +68,17 @@ fi
 # message line. Anything NOT matching one of these is treated as the file's
 # own defect. The list is deliberately narrow: a message family added here
 # by guesswork is a hole in the check.
-RESOLVER_PATTERNS='Could not find base class|Could not resolve script|Could not find type|Cannot infer the type of .* (variable|constant) because the value doesn.t have a set type|Identifier .* not declared in the current scope|Failed to compile depended scripts|Preload file .* does not exist'
+#
+# "Could not resolve class" is the SAME fact as "Could not find base class",
+# spelled for a base named by path (`extends "res://.../pcb_canvas.gd"`, or an
+# inner `class X extends SomePreloadedScript`): the base file exists but does
+# not itself resolve here, because IT extends a Minerva class_name. MEASURED on
+# 4.6.2, both halves: pcb_canvas.gd alone reports "Could not find type
+# \"AnnotationKind\"", and a subclass of a base that DOES resolve (same
+# res://../../ escape, plain RefCounted base) reports nothing at all. It does
+# NOT mask a typo'd base path — a base file that is absent reports "Could not
+# resolve SUPER CLASS PATH", which is not in this list and still fails.
+RESOLVER_PATTERNS='Could not find base class|Could not resolve class|Could not resolve script|Could not find type|Cannot infer the type of .* (variable|constant) because the value doesn.t have a set type|Identifier .* not declared in the current scope|Failed to compile depended scripts|Preload file .* does not exist'
 # Re-promoted out of the resolver family: a preload of a path inside this repo.
 IN_REPO_MISSING_PRELOAD='Preload file "[^"]*minerva-plugins/[^"]*" does not exist'
 

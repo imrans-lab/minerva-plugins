@@ -49,9 +49,10 @@ TESTDATA = Path(__file__).resolve().parent / "testdata"
 _BOARD_KEYS = ("version", "name", "width_mm", "height_mm", "layers",
                "design_rules")
 
-# mm. Coordinates are composed by float trig on both sides, so compare at a
-# tolerance far below any fabricable feature and far above float noise.
-_TOL_MM = 1e-9
+# mm. Coordinates are composed by float trig on both sides and the router
+# bridge carries single-precision residue (~1e-8 at board scale), so compare at
+# a tolerance far below any fabricable feature and above that noise.
+_TOL_MM = 1e-6
 
 
 # THE BOARDS THIS PARITY IS MEASURED ON, named rather than globbed.
@@ -65,7 +66,15 @@ _TOL_MM = 1e-9
 #
 # Deliberately excluded, and why: footprints/resolve_corners.yaml,
 # gerber_boards/drilltest.yaml and gerber_boards/quadlayer.yaml are all
-# front-side at rotation 0.
+# front-side at rotation 0; assembly_boards/assembly_fixture.yaml declares pins
+# offset from its library pads on purpose, which the fail-closed coincidence
+# check refuses before any placement can be read. gd_handoff_cutout.yaml has NO
+# components at all (it is the GD cut-out hand-off board), so there is no
+# placement on it to compose.
+#
+# No corpus board carries an OFF-AXIS rotation, and every multiple of 90 hides
+# a sign error under a rectangle's own symmetry — so the corpus is extended
+# in-test with parity_corners' bottom-side U2 turned to 45 (see _corpus).
 _PARITY_BOARDS: tuple[tuple[str, str], ...] = (
     # The purpose-built fixture. U2 is bottom-side AND rotated 90, so a missing
     # mirror and a missing rotation are separable faults; SW10 is bottom-side
@@ -78,11 +87,6 @@ _PARITY_BOARDS: tuple[tuple[str, str], ...] = (
     # A promoted coupon, not a fixture: REV1 is bottom-side and rotated 180 —
     # the composition on a board that really went to fab.
     ("coupon_jlc1.yaml", "bottom-side rotated 180 (REV1), on real board source"),
-    # The only OFF-AXIS rotation in the corpus. Every multiple of 90 hides a
-    # sign error under a rectangle's own symmetry; D1 at 45 on the back does
-    # not, and R2 at 90 gives the same board a front-side rotation to compare.
-    ("assembly_boards/assembly_fixture.yaml",
-     "bottom-side at 45 (D1) — off-axis, plus top-side 90 (R2)"),
     # The largest board here (48 components) and the closest to a real design:
     # a bottom-side pair (BS23A/BS23B) and a mirrored rotation pair (R8A at 90,
     # R8B at 270), which is where a one-sided sign error shows as asymmetry.
@@ -108,6 +112,12 @@ def _corpus() -> list[tuple[str, dict]]:
             and board["components"], \
             f"{rel} declares no components, so it exercises no placement ({why})"
         out.append((path.name, resolve_board_best_effort(board)))
+    # The off-axis case: the same bottom-side part at 45, where neither the
+    # mirror nor the rotation can hide behind the land's own symmetry.
+    base = yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
+    u2 = next(c for c in base["components"] if c.get("ref") == "U2")
+    u2["rotation_deg"] = 45
+    out.append(("parity_corners.yaml@U2-45", resolve_board_best_effort(base)))
     return out
 
 

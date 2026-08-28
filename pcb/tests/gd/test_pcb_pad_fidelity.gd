@@ -36,10 +36,14 @@ extends SceneTree
 ##      straight across an open hole, a board no fab makes. ORACLE: the draw
 ##      ORDER itself. This canvas is immediate mode and the suites run headless
 ##      with no render device, so there is no child list to index and no pixel
-##      to sample; the observable is the sequence of passes the canvas paints,
-##      which PcbCopperDrawOrder.build() returns as data and pcb_canvas
-##      ._draw_copper() does nothing but walk. The fixture is the reported
-##      board: bottom copper running under a top-mounted through-hole land.
+##      to sample. Three observables, in increasing execution: the sequence of
+##      passes PcbCopperDrawOrder.build() returns as data; the bucket
+##      _bucket_smd_lands routes each land into (which layer's pass paints it,
+##      and whether a paste-only aperture is painted at all); and the sequence
+##      of painter calls _draw_copper() itself makes, recorded by a canvas
+##      subclass that overrides every painter (recording_canvas.gd). The
+##      fixture is the reported board: bottom copper running under a
+##      top-mounted through-hole land.
 ##
 ##   3. AN INDETERMINATE LOAD-TIME CHECK REACHES A HUMAN. The load reply's
 ##      third answer — "this could not be measured" — was honest in JSON and
@@ -54,6 +58,9 @@ const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest
 const LoadChecks := preload("res://../../minerva-plugins/pcb/ui/model/pcb_load_checks.gd")
 const PcbCopperDrawOrder := preload("res://../../minerva-plugins/pcb/ui/model/pcb_copper_draw_order.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
+## The canvas with every copper painter overridden to record instead of draw —
+## the execution-path observable section 4 uses (see the file's own header).
+const RecordingCanvas := preload("res://../../minerva-plugins/pcb/tests/gd/recording_canvas.gd")
 
 var _pass := 0
 var _fail := 0
@@ -268,6 +275,57 @@ func _last_pass_index(plan: Array, kind: String) -> int:
 	return found
 
 
+## Index of the first RecordingCanvas record of this kind, or of this kind with
+## this exact id when one is given ("" means "any"). -1 when there is none.
+func _rec_index(seq: Array, kind: String, id: String) -> int:
+	for i in range(seq.size()):
+		var rec: Dictionary = seq[i]
+		if str(rec["kind"]) == kind and (id.is_empty() or str(rec["id"]) == id):
+			return i
+	return -1
+
+
+## Index of the LAST record of this kind, or -1.
+func _last_rec_index(seq: Array, kind: String) -> int:
+	var found := -1
+	for i in range(seq.size()):
+		if str((seq[i] as Dictionary)["kind"]) == kind:
+			found = i
+	return found
+
+
+## The reported board, as a loadable 2-layer board: bottom copper running under
+## a top-mounted through-hole land, plus a top SMD land. Nothing else — every
+## other entity would only add records between the ones being ordered.
+func _draw_order_board():
+	var d = PCBData.new()
+	d.from_board_dict({
+		"version": 1, "name": "draw-order", "width_mm": 40.0, "height_mm": 30.0,
+		"grid_mm": 2.54, "layers": ["top", "bottom"],
+		"components": [
+			{"ref": "J1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
+			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,
+			 "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
+			 "pads": [{"number": "1", "type": "thru_hole", "shape": "circle",
+				"position": {"x": 0.0, "y": 0.0},
+				"size": {"width": 1.6, "height": 1.6},
+				"drill": 0.8, "layers": ["*.Cu"]}]},
+			{"ref": "R1", "footprint": "CUSTOM", "x_mm": 20.0, "y_mm": 10.0,
+			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,
+			 "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
+			 "pads": [{"number": "1", "type": "smd", "shape": "rect",
+				"position": {"x": 0.0, "y": 0.0},
+				"size": {"width": 1.0, "height": 1.0}, "layers": ["F.Cu"]}]},
+		],
+		"nets": [{"name": "GND", "pins": ["J1.1", "R1.1"]}],
+		"traces": [{"id": "t_bottom", "net": "GND", "layer": "bottom",
+			"width_mm": 0.25,
+			"points": [{"x_mm": 4.0, "y_mm": 10.0}, {"x_mm": 16.0, "y_mm": 10.0}]}],
+		"vias": [], "zones": [],
+	})
+	return d
+
+
 func _run_copper_paints_in_manufacturing_order() -> void:
 	print("\n-- 4. copper: traces -> lands -> drills, per layer --")
 
@@ -360,13 +418,77 @@ func _run_copper_paints_in_manufacturing_order() -> void:
 	check("a top-mounted part's B.Cu land is bucketed into the BOTTOM pass, not "
 			+ "its part's (top=%s bottom=%s)" % [str(top_numbers), str(bottom_numbers)],
 			top_numbers == ["1"] and bottom_numbers == ["2"])
+
+	# WHETHER A LAND IS COPPER AT ALL is the same declaration's other answer.
+	# KiCad splits a thermal pad into unnumbered `(pad "" smd ...
+	# (layers "F.Paste"))` stencil nodes: they are apertures, not lands, and
+	# routing one onto the mount layer paints copper the fab never makes. The
+	# legacy declaration — no `layers` key at all — is the opposite case and
+	# must keep its historical copper. Both readings are the worker's
+	# (pad_source.has_copper, which gerber's copper bucket and drc's pad
+	# harvest gate on).
+	var apertures = PCBComponent.new()
+	apertures.id = "U8"
+	apertures.set_footprint_by_name("CUSTOM")
+	apertures.layer = "top"
+	apertures.has_pad_geometry = true
+	apertures.pads = [
+		{"number": "", "type": "smd", "shape": "rect",
+			"position": Vector2(-1.0, 0.0), "size": Vector2(1.0, 1.0),
+			"rotation": 0.0, "drill": Vector2.ZERO,
+			"layers": ["F.Paste", "F.Mask"]},
+		{"number": "3", "type": "smd", "shape": "rect",
+			"position": Vector2(1.0, 0.0), "size": Vector2(1.0, 1.0),
+			"rotation": 0.0, "drill": Vector2.ZERO},
+	]
+	var aperture_buckets := {}
+	canvas._bucket_smd_lands(apertures, aperture_buckets)
+	var routed: Array = []
+	for lid in aperture_buckets:
+		for entry in aperture_buckets[lid]:
+			routed.append("%s:%s" % [str(lid),
+				str(((entry as Dictionary)["pad"] as Dictionary).get("number", ""))])
+	check("a paste/mask-only aperture names no copper, so it is routed to NO "
+			+ "copper pass — not to its part's mount side (routed=%s)" % str(routed),
+			not routed.has("top:") and not routed.has("bottom:"))
+	check("…while a land declaring no `layers` key at all is the LEGACY case and "
+			+ "still falls back to the mount side (routed=%s)" % str(routed),
+			routed == ["top:3"])
 	canvas.free()
 
-	# The claim that the canvas paints in this order is carried by the build()
-	# assertions above — the plan IS the draw order (_draw_copper dispatches it
-	# and does nothing else). The dispatch itself has no headless observable:
-	# every arm ends in an immediate-mode draw call, so reading it back would
-	# need a render device or a spy on methods GDScript cannot override.
+	# THE DISPATCH ITSELF, EXECUTED. build() states the pass order and
+	# _bucket_smd_lands the routing; what remains unmeasured is that
+	# _draw_copper() really walks that plan and hands each pass to the painter
+	# it names. Every arm ends in a painter METHOD, so a subclass that records
+	# instead of drawing (recording_canvas.gd) observes the whole sequence with
+	# no render device — the older note here said GDScript could not spy on
+	# those methods, which is simply not true of an overridable method.
+	var rec = RecordingCanvas.new()
+	rec.data = _draw_order_board()
+	rec._draw_copper()
+	var seq: Array = rec.records
+	var r_trace := _rec_index(seq, "trace", "t_bottom")
+	var r_smd := _rec_index(seq, "land", "R1.1")
+	var r_tht := _rec_index(seq, "land", "J1.1")
+	var r_last_trace := _last_rec_index(seq, "trace")
+	var r_last_land := _last_rec_index(seq, "land")
+	var r_first_drill := _rec_index(seq, "drill", "")
+	check("the fixture actually painted: a bottom trace, a top SMD land and a "
+			+ "top through-hole land all reached a painter (%s)" % str(seq),
+			r_trace >= 0 and r_smd >= 0 and r_tht >= 0)
+	check("EXECUTED: the bottom trace is painted before the top SMD land above "
+			+ "it (%d < %d)" % [r_trace, r_smd], r_trace >= 0 and r_trace < r_smd)
+	check("EXECUTED: the through-hole land is painted after every trace, so the "
+			+ "trace ends UNDER the land it enters (%d < %d)"
+					% [r_last_trace, r_tht],
+			r_last_trace >= 0 and r_tht > r_last_trace)
+	check("EXECUTED: every drill is a void over all copper — the first drill "
+			+ "follows the last land (%d < %d)" % [r_last_land, r_first_drill],
+			r_first_drill >= 0 and r_first_drill > r_last_land)
+	check("EXECUTED: the drill of the through-hole land is its OWN land's hole, "
+			+ "painted in the drill pass and not beside its copper",
+			_rec_index(seq, "drill", "J1.1") > r_tht)
+	rec.free()
 
 
 func check(desc: String, cond: bool) -> void:

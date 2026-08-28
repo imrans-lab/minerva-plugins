@@ -2364,9 +2364,20 @@ func _draw_copper() -> void:
 ## The layer is the LAND's, not the part's: `pads[].layers` is footprint-local
 ## and comp.placed_pad_layers applies the mount-side flip, so a footprint naming
 ## B.Cu on a top-mounted part paints in the bottom pass rather than following its
-## component onto the top. A land naming no copper layer of its own — no
-## `layers` key, only non-copper tokens, or the "*.Cu" wildcard, which names no
-## single layer — falls back to the part's mount layer.
+## component onto the top.
+##
+## A land that DECLARES a layer list and names no copper in it is a paste/mask
+## stencil aperture, not a land — KiCad splits a thermal pad into unnumbered
+## `(pad "" smd ... (layers "F.Paste"))` nodes — so it enters NO copper pass.
+## Painting it on the mount layer invents copper the fab never makes. Same
+## reading as the worker's pad_source.has_copper (gerber's copper bucket, drc's
+## pad harvest) and pcb_copper_contact.physical_pad_node, which give such a pad
+## a layer set that meets no copper.
+##
+## A land with no `layers` key at all, and one whose only copper claim is the
+## "*.Cu" wildcard (copper, but naming no single layer to paint in), both fall
+## back to the part's mount layer — the legacy/unresolved declaration, whose
+## historical copper reading those same readers preserve.
 ##
 ## Through-hole lands are skipped: they pierce every copper layer and are painted
 ## once, above the whole stack, by the THT pass.
@@ -2375,14 +2386,24 @@ func _bucket_smd_lands(comp, smd_by_layer: Dictionary) -> void:
 	for pad in comp.pads:
 		if str(pad.get("type", "smd")) in THT_PAD_TYPES:
 			continue
+		var declared: Array = comp.placed_pad_layers(pad)
 		var layer_ids: Array = []
-		for raw_layer in comp.placed_pad_layers(pad):
+		var names_copper := false
+		for raw_layer in declared:
+			# The wildcard is copper on every layer, which is no single pass —
+			# it earns the mount-layer fallback below, not a bucket of its own.
+			if str(raw_layer).strip_edges().to_lower() == "*.cu":
+				names_copper = true
+				continue
 			if not PcbLayerStack.is_copper(raw_layer):
 				continue
+			names_copper = true
 			var canon := PcbLayerStack.kicad_to_canon(raw_layer)
 			if not layer_ids.has(canon):
 				layer_ids.append(canon)
 		if layer_ids.is_empty():
+			if not declared.is_empty() and not names_copper:
+				continue
 			layer_ids = [mount]
 		for lid in layer_ids:
 			if not smd_by_layer.has(lid):

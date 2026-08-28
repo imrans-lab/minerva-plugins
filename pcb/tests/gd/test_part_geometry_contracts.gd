@@ -32,8 +32,10 @@ extends SceneTree
 ##      test_canonical_wire_board.gd section C. This suite states the model
 ##      half — a component that carries pads emits the key, a pins-only one does
 ##      not, and a dict stating lands under no has_pad_geometry flag still reads
-##      fabricable — because the wire rule is only sound if the key means what
-##      it says, on both the write side and the read side.
+##      fabricable through BOTH deserializers (the board contract's
+##      load_from_board_dict and the legacy load_from_dict/from_dict pair) —
+##      because the wire rule is only sound if the key means what it says, on
+##      the write side and on every read side.
 ##
 ##   4. THE DRAWN DESIGNATOR IS A RENDER OF THE LIVE REF, not a stored picture
 ##      of the ref it was rendered from. Section 4 states it over the whole
@@ -378,6 +380,30 @@ func _run_the_pads_key_is_an_authority_claim() -> void:
 		PcbLibraryPart.is_fabricable(flagless))
 	check("…with geometry source 'authored': the board owns those lands, no library did",
 		str(PcbLibraryPart.geometry_state(flagless).get("source", "")) == "authored")
+
+	# THE OTHER DOOR. load_from_board_dict reads the board contract; panel state
+	# and .minpcb snapshots come in through the legacy load_from_dict/from_dict
+	# pair, which is a separate parse of the same `pads` key (its own
+	# `pads_authored = raw_pads is Array`, its own position/pins spelling). The
+	# authority rule has to hold on both or the same part reads fabricable from
+	# a board and unbuildable the moment the session restores it.
+	var flagless_legacy = PCBComponent.from_dict({
+		"id": "R9", "footprint": "NoSuchLib:R_0603_Authored",
+		"position": {"x": 12.0, "y": 8.0},
+		"pads": [
+			{"number": "1", "type": "smd", "shape": "rect",
+				"position": {"x": -0.75, "y": 0.0},
+				"size": {"width": 0.9, "height": 0.95}, "layers": ["F.Cu"]},
+			{"number": "2", "type": "smd", "shape": "rect",
+				"position": {"x": 0.75, "y": 0.0},
+				"size": {"width": 0.9, "height": 0.95}, "layers": ["F.Cu"]}]})
+	check("the legacy from_dict/load_from_dict door reads the same flagless pads "
+		+ "list as real lands",
+		flagless_legacy.pads.size() == 2 and flagless_legacy.pads_authored)
+	check("…and reads FABRICABLE through that door too",
+		PcbLibraryPart.is_fabricable(flagless_legacy))
+	check("…with the same 'authored' geometry source",
+		str(PcbLibraryPart.geometry_state(flagless_legacy).get("source", "")) == "authored")
 
 
 # ── 4. The drawn designator is a RENDER of the live ref ──────────────────────
