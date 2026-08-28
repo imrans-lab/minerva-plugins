@@ -75,6 +75,7 @@ const PcbLibraryPart := preload("model/pcb_library_part.gd")
 ## frame_rect, _frame_board_for_capture) so a docked narrow pane and a wide one
 ## cannot disagree about what "the whole board" is.
 const PcbViewFit := preload("pcb_view_fit.gd")
+const PcbFabPreview := preload("model/pcb_fab_preview.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -11864,101 +11865,58 @@ func _draw_approximation_notice() -> void:
 ## ── FAB PREVIEW (WYSIWYG goal 019ff4a5a75a, gap G5; DCR 019ffc52b455; K27) ───
 ##
 ## The emitted artifacts, rendered by the worker from the bytes that ship and
-## handed here as SVG. This canvas does not interpret them: it converts each
-## layer to a texture and draws it. That is the whole point — every other view
-## in this editor is an interpretation, and this one is the artwork itself.
+## handed here as SVG. This canvas does not interpret them: it holds the rows
+## and asks PcbFabPreview to draw them. That module owns the palette, the
+## banner geometry and the picker — everything about how the artwork LOOKS —
+## because none of it is canvas geometry and all of it needed a home that is
+## not this file.
 
 var show_fab_preview: bool = false
-## [{name, kind, sha256, byte_length, texture}] in draw order.
+## [{name, label, key, kind, sha256, byte_length, texture}] in draw order.
 var _fab_preview_layers: Array = []
-## Files the worker emitted but could NOT render, each with a reason. Drawn as
-## text ON the preview: a viewer who cannot see that the artifact set is
-## incomplete would read this view as complete, which is the false-clean the
-## whole goal exists to remove.
+## Files the worker emitted but could NOT render, each with a reason. Shown in
+## the banner: a viewer who cannot see that the artifact set is incomplete
+## would read this view as complete, which is the false-clean the whole goal
+## exists to remove.
 var _fab_preview_unrendered: Array = []
 var _fab_preview_note: String = ""
+## WHICH emitted layer is isolated, or "all". Ten layers composited is a picture
+## of no layer; this is how a human checks one before it is fabricated. Written
+## through set_fab_preview_layer so it can never name a layer that is not held.
+var fab_preview_layer: String = PcbFabPreview.PICK_ALL
 
 
 ## Adopt a worker fab_preview reply. `layers` carries the SVG strings; each is
-## rasterized ONCE here rather than per frame. A layer whose SVG cannot be
-## parsed by the engine joins `unrendered` rather than being dropped, so the
-## count the viewer sees always accounts for every emitted file.
+## recoloured and rasterized ONCE here rather than per frame. A layer the engine
+## cannot parse joins `unrendered` rather than being dropped, so the count the
+## viewer sees always accounts for every emitted file.
 func set_fab_preview(layers: Array, unrendered: Array, note: String = "") -> void:
-	_fab_preview_layers.clear()
-	_fab_preview_unrendered = unrendered.duplicate(true)
+	var adopted := PcbFabPreview.adopt(layers, unrendered, fab_preview_layer, size.x)
+	_fab_preview_layers = adopted["layers"]
+	_fab_preview_unrendered = adopted["unrendered"]
+	fab_preview_layer = str(adopted["pick"])
 	_fab_preview_note = note
-	for entry in layers:
-		if not (entry is Dictionary):
-			# Even a malformed entry is ACCOUNTED FOR. Dropping it silently
-			# would falsify this function's whole contract — the worker
-			# guarantees every emitted file lands in one of its two lists, and
-			# a viewer counting what it can see would be short by one with
-			# nothing to explain it.
-			_fab_preview_unrendered.append({
-				"name": "(malformed layer entry)",
-				"reason": "the worker reply carried a layer that was not a record",
-			})
-			continue
-		var lay: Dictionary = entry
-		var svg := str(lay.get("svg", ""))
-		var img := Image.new()
-		if svg.is_empty() or img.load_svg_from_string(svg, 1.0) != OK:
-			_fab_preview_unrendered.append({
-				"name": str(lay.get("name", "?")),
-				"reason": "the engine could not rasterize the worker's SVG for this layer",
-			})
-			continue
-		_fab_preview_layers.append({
-			"name": str(lay.get("name", "")),
-			"kind": str(lay.get("kind", "")),
-			"sha256": str(lay.get("sha256", "")),
-			"byte_length": int(lay.get("byte_length", 0)),
-			"texture": ImageTexture.create_from_image(img),
-		})
 	queue_redraw()
 
 
+## Every value fab_preview_layer may take for the artwork currently held.
+func fab_preview_layer_choices() -> Array:
+	return PcbFabPreview.choices(_fab_preview_layers)
+
+
+## Isolate one emitted layer (or "all"). False for a layer this artifact set
+## does not contain — the caller reports; this never falls back silently.
+func set_fab_preview_layer(key: String) -> bool:
+	if not (key in fab_preview_layer_choices()):
+		return false
+	fab_preview_layer = key
+	queue_redraw()
+	return true
+
+
 func _draw_fab_preview() -> void:
-	var notice_font := ThemeDB.fallback_font
-	var y := 18.0
-	if _fab_preview_layers.is_empty():
-		draw_string(notice_font, Vector2(12, y), "Fab preview: nothing rendered yet.",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.9, 0.75, 0.3))
-		y += 18.0
-	else:
-		# Every layer shares ONE forced coordinate frame from the worker, so the
-		# textures are the same size and stack without per-layer registration.
-		#
-		# LETTERBOXED, NOT STRETCHED. Filling the canvas rect distorts the board
-		# whenever the canvas and the artwork disagree on aspect — and a
-		# fabrication preview that changes the shape of the board is worse than
-		# no preview, because every judgement a reviewer makes from it about
-		# clearance, spacing or fit is then wrong by an unstated factor.
-		var first_tex: Texture2D = (_fab_preview_layers[0] as Dictionary).get("texture")
-		var art: Vector2 = first_tex.get_size() if first_tex != null else size
-		var fit_scale: float = minf(size.x / maxf(art.x, 1.0), size.y / maxf(art.y, 1.0))
-		var drawn: Vector2 = art * fit_scale
-		var rect := Rect2((size - drawn) * 0.5, drawn)
-		for lay in _fab_preview_layers:
-			var tex: Texture2D = (lay as Dictionary).get("texture")
-			if tex != null:
-				draw_texture_rect(tex, rect, false, Color(1, 1, 1, 0.85))
-	if not _fab_preview_note.is_empty():
-		draw_string(notice_font, Vector2(12, y), _fab_preview_note,
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.85, 0.85, 0.9))
-		y += 18.0
-	# THE INCOMPLETE BANNER — never optional when something did not render.
-	if not _fab_preview_unrendered.is_empty():
-		draw_string(notice_font, Vector2(12, y),
-			"INCOMPLETE — %d emitted file(s) not shown:" % _fab_preview_unrendered.size(),
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0.95, 0.55, 0.2))
-		y += 16.0
-		for u in _fab_preview_unrendered:
-			draw_string(notice_font, Vector2(24, y), "%s — %s" % [
-				str((u as Dictionary).get("name", "?")),
-				str((u as Dictionary).get("reason", ""))],
-				HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.95, 0.7, 0.45))
-			y += 14.0
+	PcbFabPreview.draw(self, size, _fab_preview_layers, _fab_preview_unrendered,
+		_fab_preview_note, fab_preview_layer)
 
 
 ## Every piece of state that decides WHAT THIS CANVAS DRAWS, as one list.
@@ -11996,7 +11954,7 @@ const CAPTURE_MIRRORED_FIELDS := [
 	"selected_staged_ids",
 	# Fab preview replaces the whole view, so it must survive the copy.
 	"show_fab_preview", "_fab_preview_layers", "_fab_preview_unrendered",
-	"_fab_preview_note",
+	"_fab_preview_note", "fab_preview_layer",
 	# The disclosure itself — a screenshot must carry the same admission of
 	# what is approximate that the human sees.
 	"show_approximation_notice",

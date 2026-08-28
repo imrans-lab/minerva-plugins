@@ -429,3 +429,13 @@ test_add_by_library_ref.gd real-worker
 # optimisation.
 # NOT YET PINNED: see above.
 test_part_geometry_contracts.gd
+
+# The fab preview a human can read: every palette ink is MEASURED against the
+# canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the
+# end-to-end arm samples the rasterized pixel of a verbatim emitted silk layer —
+# headless has no rendering device, so this is Image rasterization, not a
+# screenshot. Plus the banner that never touches the board rect, the emitted-
+# layer picker through both the View menu and minerva_pcb_view_state, and both
+# stale paths retracting show_fab_preview with a visible reason.
+# NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
+test_fab_preview_legibility.gd

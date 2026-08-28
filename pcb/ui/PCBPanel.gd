@@ -58,6 +58,7 @@ const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
 const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section.gd")
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 const _PcbLibraryPartScript: Script = preload("model/pcb_library_part.gd")
+const _PcbFabPreviewScript: Script = preload("model/pcb_fab_preview.gd")
 const _PcbAddPartSectionScript: Script = preload("pcb_add_part_section.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
@@ -479,6 +480,9 @@ const _VIEW_MENU_LAYER_ID_BASE := 500
 ## on screen to explain why. Shown ONLY while a filter is in force. Above the
 ## per-layer ids so the same teardown sweep clears it.
 const _VIEW_MENU_CLEAR_FILTER_ID := 999
+## Base id for the View menu's fab-preview layer picker (PcbFabPreview owns the
+## items). Above every other id family so the shared teardown sweep clears it.
+const _VIEW_MENU_FAB_LAYER_ID_BASE := 1000
 
 ## True while restoring persisted state (board load OR annotation sidecar load).
 ## Suppresses the content_changed dirty relay so restoring never marks the tab
@@ -4528,6 +4532,11 @@ func _rebuild_view_menu_layer_eyes(popup: PopupMenu) -> void:
 	for i in range(popup.item_count - 1, -1, -1):
 		if popup.get_item_id(i) >= _VIEW_MENU_LAYER_ID_BASE:
 			popup.remove_item(i)
+	# ABOVE the stack-dependent return below: the fab picker's vocabulary is the
+	# EMITTED artwork, not the board's declared copper, so a board with no stack
+	# still gets it whenever the preview is holding layers.
+	_PcbFabPreviewScript.build_menu_section(popup, _VIEW_MENU_FAB_LAYER_ID_BASE,
+		_canvas._fab_preview_layers, str(_canvas.fab_preview_layer))
 	if _data == null or _data.layers.is_empty():
 		return
 	popup.add_separator("Copper layers", _VIEW_MENU_LAYER_ID_BASE)
@@ -4555,6 +4564,13 @@ func _on_view_menu_id_pressed(id: int) -> void:
 		return
 	if id == _VIEW_MENU_CLEAR_FILTER_ID:
 		set_trace_layer_filter("all")
+		return
+	# BEFORE the per-layer-eye range test below, which is a bare `id >
+	# _VIEW_MENU_LAYER_ID_BASE` and would otherwise swallow these ids. Straight
+	# to the canvas, the same setter minerva_pcb_view_state writes through.
+	if _canvas != null and id >= _VIEW_MENU_FAB_LAYER_ID_BASE:
+		_canvas.set_fab_preview_layer(_PcbFabPreviewScript.menu_key(
+			_canvas._fab_preview_layers, _VIEW_MENU_FAB_LAYER_ID_BASE, id))
 		return
 	if _canvas != null and _data != null and id > _VIEW_MENU_LAYER_ID_BASE:
 		var stack_index := id - _VIEW_MENU_LAYER_ID_BASE - 1
@@ -6617,11 +6633,17 @@ static func _whole_board_token(board: Dictionary) -> String:
 ##
 ## The mask overlay refetches on the same signal because it is cheap; this runs
 ## the whole emission path, so it clears and waits to be asked again.
+##
+## AND TAKES THE FLAG DOWN WITH THE ARTWORK. An emptied preview draws no board,
+## so a raised flag over it is the same false claim a failed fetch makes: the
+## View menu shows a check beside nothing and view_state reports the preview as
+## up. Same retraction, same held lead, same sentence for both readers.
 func _invalidate_fab_preview() -> void:
 	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
 		return
-	_canvas.set_fab_preview([], [],
-		"stale — the board changed; re-open Fab Preview to re-render")
+	_canvas.set_fab_preview([], [], "")
+	_retract_overlay("show_fab_preview", _PcbOverlayFetchScript.stale_reply(
+		_PcbOverlayFetchScript.STALE_BOARD_EDITED))
 
 
 ## pcb.fab_preview round-trip (WYSIWYG G5, DCR 019ffc52b455, K27) — same channel
@@ -6675,8 +6697,11 @@ func _refresh_fab_preview() -> void:
 		return  # toggled off (or panel torn down) while the worker ran
 	if _data == null or _fab_preview_token(_data.to_board_dict()) != requested_token:
 		# The board moved under the request. Show NOTHING and say why, rather
-		# than artwork for a board that no longer exists.
-		_canvas.set_fab_preview([], [], "stale — the board changed while the preview was rendering; re-open Fab Preview")
+		# than artwork for a board that no longer exists — and retract the flag
+		# with it, because nothing is on screen for it to be claiming.
+		_canvas.set_fab_preview([], [], "")
+		_retract_overlay("show_fab_preview", _PcbOverlayFetchScript.stale_reply(
+			_PcbOverlayFetchScript.STALE_BOARD_MOVED_IN_FLIGHT))
 		return
 	if not bool(reply.get("ok", false)):
 		# NOTHING IS ON SCREEN, so nothing may claim to be. The reason goes to

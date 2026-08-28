@@ -1830,6 +1830,17 @@ static func _export_trace_geometry(host, _args: Dictionary) -> Dictionary:
 ## An explicit `trace_layer_filter` in the SAME request is applied last and
 ## wins, so a caller can ask for both and get exactly what they wrote.
 ##
+##   fab_preview_layer: "all" | an emitted layer key ("f_cu", "b_silks", "pth"…)
+##
+## THE ONLY WRITE VALIDATED AFTER IT IS APPLIED, and it has to be: its
+## vocabulary is the ARTIFACT SET, which the `flags` write in this same request
+## may have only just fetched, so there is nothing to validate against
+## beforehand. A key the emitted set does not carry refuses by name, lists what
+## WAS emitted, and reports in `changed` everything that did land — so the
+## resulting view is fully described even though the request failed. Read it
+## back from `fab_preview_layer`; the menu of legal values is
+## `fab_preview_layers`, which is empty until the preview holds artwork.
+##
 ##   working_layer: a declared copper layer id
 ##
 ## THE ONE THING HERE THAT IS NOT VIEW. It is where the canvas AUTHORS copper:
@@ -1986,6 +1997,22 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		if panel.set_trace_layer_filter(want_filter):
 			if not ("trace_layer_filter" in changed):
 				changed.append("trace_layer_filter")
+	# AFTER the flags, of necessity — see the doc block. Straight to the canvas,
+	# the same setter the View menu's picker writes through.
+	if args.has("fab_preview_layer"):
+		var want_fab := str(args.get("fab_preview_layer", "")).strip_edges()
+		var fab_choices: Array = canvas.fab_preview_layer_choices() \
+			if canvas.has_method("fab_preview_layer_choices") else []
+		if not canvas.has_method("set_fab_preview_layer"):
+			return {"success": false, "error": "unsupported",
+				"note": "this panel predates the fab preview layer picker"}
+		if str(canvas.get("fab_preview_layer")) != want_fab:
+			if not canvas.set_fab_preview_layer(want_fab):
+				return {"success": false, "error": "layer_not_emitted",
+					"unknown": want_fab, "available": fab_choices, "changed": changed,
+					"note": "the fab preview holds %s — it has no layer '%s' to isolate"
+						% [str(fab_choices), want_fab]}
+			changed.append("fab_preview_layer")
 	# Independent of everything above: nothing in the view half reads or writes
 	# it, so its ordering among the view writes cannot matter.
 	if set_working and str(canvas.get("working_layer")) != want_working:
@@ -2016,6 +2043,11 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 		"layers": layers_out,
 		"trace_layer_filter": str(canvas.get("trace_layer_filter")),
 		"working_layer": str(canvas.get("working_layer")),
+		# The picker and its menu. `fab_preview_layers` is what the emitted set
+		# actually contains, so a caller never has to guess a key.
+		"fab_preview_layer": str(canvas.get("fab_preview_layer")),
+		"fab_preview_layers": canvas.fab_preview_layer_choices() \
+			if canvas.has_method("fab_preview_layer_choices") else [],
 		"changed": changed,
 	}
 	if not overlay_out.is_empty():

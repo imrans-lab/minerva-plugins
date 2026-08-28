@@ -18,11 +18,14 @@ extends RefCounted
 ## pcb_load_checks.status_lead writes, for the same reason: a verdict that is
 ## honest only in JSON is invisible to anyone working from the GUI.
 ##
-## NOT THE STALE CASE. A board edit under a live preview clears the artwork and
-## leaves the flag up with "re-open Fab Preview" drawn on the canvas — a
-## standing instruction inside a view that IS being drawn, not a claim about
-## artwork that is missing. PCBPanel._invalidate_fab_preview owns that path and
-## nothing here sees it.
+## THE STALE CASE IS THE SAME CASE. A board edit under a live preview clears the
+## artwork, and the earlier shape of this left the flag up with "re-open Fab
+## Preview" drawn on the canvas. But a preview with no layers draws no board, so
+## the flag was claiming a view nobody could see and minerva_pcb_view_state kept
+## reporting it up over an empty canvas — the exact condition the rule above
+## exists to forbid. Both stale paths (a board edit, and a board that moved
+## while the worker ran) now retract through stale_reply below, so there is ONE
+## retraction mechanism and one place the human reads the reason.
 
 ## The fetches this module governs, lead key -> the human's word for it (the
 ## View menu's own label, where one exists). A key absent from here is reported
@@ -55,6 +58,19 @@ const _CAP_MARKERS: Array[String] = ["payload_too_large", "too_large", "too larg
 ## written (panel_tools.board_payload_by_ref_if_large returns the original
 ## payload on any write failure, deliberately, so the broker refuses loudly).
 const _CAP_NOTE := "the board could not be snapshotted for the worker, so the request went whole and was refused as too large — check free space and write permission under the Minerva user data directory"
+
+
+## THE STALE REASONS, as a reply this module's own failure_reason can read.
+##
+## Shaped like a worker refusal on purpose: a stale overlay and a refused one
+## reach the human through the same retraction, the same held lead and the same
+## view_state key, so neither can grow a second half-implemented path.
+const STALE_BOARD_EDITED := "the board changed under it — re-open View ▸ Fab preview (exact) to re-render the emitted artwork"
+const STALE_BOARD_MOVED_IN_FLIGHT := "the board changed while it was rendering — re-open View ▸ Fab preview (exact)"
+
+
+static func stale_reply(reason: String) -> Dictionary:
+	return {"ok": false, "error": {"kind": "stale", "message": reason}}
 
 
 ## Why an overlay fetch came back with nothing, in a human's words. "" for a
