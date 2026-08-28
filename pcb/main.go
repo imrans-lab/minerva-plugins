@@ -295,6 +295,10 @@ func initRegistry() {
 	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
 	// 11). See worker_tools.go.
 	registry.Register(tools.PromoteCheckChannel, tools.HandlePromoteCheckChannel)
+	// pcb.footprint_geometry — one library ref's lands and silk, so a part can
+	// be ADDED by library ref instead of as a sketch the compiler refuses.
+	// See worker_tools.go.
+	registry.Register(tools.FootprintGeometryChannel, tools.HandleFootprintGeometryChannel)
 }
 
 // ---------------------------------------------------------------------------

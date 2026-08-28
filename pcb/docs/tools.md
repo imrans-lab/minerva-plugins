@@ -31,7 +31,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_get_components` | golden-parity return shape |
 | `minerva_pcb_get_nets` | |
 | `minerva_pcb_get_pin_position` | includes `available_pins` self-correction |
-| `minerva_pcb_add_component` | golden-parity; `data.new_component()` factory + `set_footprint_by_name` |
+| `minerva_pcb_add_component` | golden-parity; `data.new_component()` factory + `set_footprint_by_name`; a `Lib:Part` footprint resolves through the `pcb.footprint_geometry` channel first and lands the library's real pads/silk (`pcb_library_part.gd`) |
 | `minerva_pcb_move_component` | golden-parity; snapped |
 | `minerva_pcb_move_relative` | NL move via `host.get_spatial_index().interpret_relative_move` |
 | `minerva_pcb_rotate_component` | |
@@ -1291,8 +1291,12 @@ It appears in `minerva_pcb_get_selection` (selected pads), `minerva_pcb_pin_info
 `minerva_pcb_move_relative` and `minerva_pcb_rotate_component` now carry — so
 "where did pin 1 land after that rotation?" is answered by the move's own reply
 instead of a second round trip. (`minerva_pcb_rotate_component`'s description
-also states the convention outright: the angle is CLOCKWISE in the board's
-y-down frame, so a pad WEST of the origin lands SOUTH at 90 and NORTH at 270.)
+also states the convention outright. The NUMBER is KiCad's: `rotation_deg`
+applies as R(-angle) in the board's y-down frame, so a pad WEST of the origin
+lands SOUTH at 90 and NORTH at 270 — which is a COUNTER-clockwise quarter turn
+as drawn on screen. The WORDS are the screen's, not the number's: `'clockwise'`
+turns the part clockwise as you watch it, which is `rotation - 90`, and it is
+the same turn the canvas R key makes.)
 
 **Roles come from the board, never from memory.** A pin's canonical dict may
 carry `roles: [strapping]`; every key beyond `number` / `x_mm` / `y_mm`

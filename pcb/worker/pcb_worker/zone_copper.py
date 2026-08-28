@@ -170,11 +170,32 @@ def _zone_net_name(resolved, net_id) -> str:
 
 
 def _first_error(failure) -> str:
+    """Why the compile refused, in words that name WHICH PART to fix.
+
+    A pour that cannot be filled takes every join through it down with it, and
+    the reader's next question is always "which component". Reporting only the
+    first error leaves the rest of the offenders silent, so a human fixes one
+    part, re-runs, and meets the same sentence about the next. Every erroring
+    entity is named here instead: the first error in full, then the remaining
+    offenders by id, so one read names the whole set.
+    """
+    lead = ""
+    offenders: list = []
     for diagnostic in failure.diagnostics:
         severity = getattr(diagnostic, "severity", None)
-        if str(getattr(severity, "value", severity)).lower() == "error":
-            return str(getattr(diagnostic, "message", diagnostic))
-    return "the board did not compile"
+        if str(getattr(severity, "value", severity)).lower() != "error":
+            continue
+        if not lead:
+            lead = str(getattr(diagnostic, "message", diagnostic))
+            continue
+        entity = getattr(getattr(diagnostic, "source_ref", None), "entity_id", "")
+        if entity and entity not in offenders:
+            offenders.append(str(entity))
+    if not lead:
+        return "the board did not compile"
+    if offenders:
+        return f"{lead} (also refused: {', '.join(offenders)})"
+    return lead
 
 
 __all__ = ["pour_nodes", "zone_nets"]

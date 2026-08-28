@@ -70,6 +70,7 @@ const PcbCopperContact := preload("model/pcb_copper_contact.gd")
 const PcbCopperOwnership := preload("model/pcb_copper_ownership.gd")
 const PcbZoneCopper := preload("model/pcb_zone_copper.gd")
 const PcbBoardGraphic := preload("model/pcb_board_graphic.gd")
+const PcbLibraryPart := preload("model/pcb_library_part.gd")
 ## THE fit answer, shared by every caller that frames something (zoom_to_fit,
 ## frame_rect, _frame_board_for_capture) so a docked narrow pane and a wide one
 ## cannot disagree about what "the whole board" is.
@@ -3579,25 +3580,13 @@ func _draw_mask_openings() -> void:
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(1.0, 0.75, 0.2))
 
 
-## The ONE definition of "this component renders unresolved" (bug 019ff4a9a0d7)
-## — shared by the badge draw and the badge tooltip so they cannot disagree.
-##
-## The old rule was `not (has_pad_geometry and pads.size() > 0)`, a PAD-level
-## fact used as a proxy for the COMPONENT-level one. A silk-only footprint (a
-## logo, a revision text) resolves with ZERO pads, so the proxy branded it
-## "unresolved — resolve before fabrication" forever, falsely — its render was
-## already complete. The worker now states the component fact directly
-## (comp.footprint_resolved, set only on the resolve success path), and the
-## pad-less exemption keys on THAT, not on emptiness alone: a fallback-pin
-## component also has zero render pads and must keep its badge.
+## "This component renders unresolved" — the badge draw and the badge tooltip
+## read it here so they cannot disagree with each other, and it delegates to
+## PcbLibraryPart.is_fabricable so they cannot disagree with the panel's status
+## lead or with the geometry block every MCP reply carries either. One rule,
+## four surfaces.
 func _component_unresolved(comp) -> bool:
-	if comp.footprint == PCBComponentScript.FootprintType.MOUNTING_HOLE:
-		return false  # legitimately carries no pad geometry
-	if comp.has_pad_geometry and comp.pads.size() > 0:
-		return false  # real footprint pads
-	if comp.footprint_resolved and comp.pads.is_empty():
-		return false  # silk-only footprint: resolved, nothing left to resolve
-	return true
+	return not PcbLibraryPart.is_fabricable(comp)
 
 
 func _draw_component_silk(comp, xform: Transform2D) -> void:

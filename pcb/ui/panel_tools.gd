@@ -83,15 +83,10 @@ const PcbViaDimensions := preload("model/pcb_via_dimensions.gd")
 const PcbTraceWidth := preload("model/pcb_trace_width.gd")
 const PcbBoardGraphic := preload("model/pcb_board_graphic.gd")
 const StagedEntities := preload("model/pcb_staged_entities.gd")
-
-## Footprint names accepted by add_component (mirrors the legacy schema enum;
-## the plugin component enum carries extra values but is set by NAME,
-## off-tree safe). Moved from MCPPcbPanelTools._VALID_FOOTPRINTS verbatim —
-## only add_component (wave 1) used it.
-const _VALID_FOOTPRINTS: Array[String] = [
-	"RESISTOR", "CAPACITOR", "IC_DIP", "IC_QFP", "SWITCH", "CONNECTOR",
-	"LED", "DIODE", "TRANSISTOR", "HEADER", "MOUNTING_HOLE", "MODULE",
-]
+## What a component's geometry IS (library / authored / sketch), and the one
+## construction both add paths run. Owns the sketch-footprint name list too.
+const PcbLibraryPart := preload("model/pcb_library_part.gd")
+const _PcbComponentScript := preload("model/pcb_component.gd")
 
 
 ## Dispatch entry point — called by PCBPanel.handle_tool(tool_name, args).
@@ -545,69 +540,21 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
-	var footprint_str: String = str(args.get("footprint", ""))
-	if footprint_str.is_empty():
-		return _err("footprint is required")
-	if not _VALID_FOOTPRINTS.has(footprint_str.to_upper()):
-		return _err("Invalid footprint type: %s" % footprint_str)
-
-	var x: float = float(args.get("x", 50.0))
-	var y: float = float(args.get("y", 50.0))
-
-	var component_id: String = str(args.get("id", ""))
-	if component_id.is_empty():
-		var prefix: String = footprint_str[0] if footprint_str.length() > 0 else "U"
-		component_id = data.generate_component_id(prefix)
-
-	var comp = data.new_component()
-	comp.id = component_id
-	comp.set_footprint_by_name(footprint_str.to_upper())
-
-	var snap: bool = bool(args.get("snap_to_grid", true))
-	var asked_pos := Vector2(x, y)
-	if snap:
-		comp.position = data.snap_to_grid(asked_pos)
-	else:
-		comp.position = asked_pos
-	comp.rotation = float(args.get("rotation", 0.0))
-
-	var pin_count: int = int(args.get("pin_count", 0))
-	var pin_names: Array = args.get("pin_names", [])
-	if pin_count > 0:
-		var pad_type: String = str(args.get("pad_type", "tht"))
-		var pad_spacing: float = float(args.get("pad_spacing", 2.54))
-		var row_sp: float = float(args.get("row_spacing", 7.62))
-		match footprint_str.to_upper():
-			"HEADER", "CONNECTOR":
-				comp.setup_header_pins(pin_count, pin_names)
-			"IC_DIP":
-				comp.setup_dip_pins(pin_count)
-			"MODULE":
-				comp.setup_module_pins(pin_count)
-			_:
-				comp.setup_generic_pins(pin_count, pad_type, pad_spacing, row_sp)
-	else:
-		comp.setup_standard_pins()
-
-	if args.has("width") or args.has("height"):
-		var custom_width: float = float(args.get("width", comp.width))
-		var custom_height: float = float(args.get("height", comp.height))
-		comp.set_size(custom_width, custom_height)
-
-	if args.has("value"):
-		comp.properties["value"] = args.get("value")
-
+	# The WHOLE construction — sketch layout, library-ref resolve, the refusals
+	# — is PcbLibraryPart.build, so the sidebar's Add Part button and this verb
+	# place the same part and refuse the same things. Nothing touches the board
+	# until the part is in hand.
+	var built: Dictionary = await PcbLibraryPart.build(host, data, args)
+	if not bool(built.get("ok", false)):
+		return _err(str(built.get("error", "the component could not be built")))
+	var comp = built["component"]
 	data.add_component(comp)
-	data.save_to_history("Add " + component_id)
-
+	data.save_to_history("Add " + str(comp.id))
 	# Work item 019fd5fe2724: placement changed — invalidate + re-check assembly,
 	# attach the tri-state as `assembly` (coroutine; handle() awaits this verb).
-	return await _with_assembly_after_placement(host, data, _with_snap_disclosure(_ok({
-		"component_id": component_id,
-		"x": _mm(comp.position.x),
-		"y": _mm(comp.position.y),
-		"pin_count": comp.pins.size(),
-	}), x, y, comp.position))
+	return await _with_assembly_after_placement(host, data, _with_snap_disclosure(
+		_ok(PcbLibraryPart.add_reply(comp, built)),
+		float(args.get("x", 50.0)), float(args.get("y", 50.0)), comp.position))
 
 
 ## Pad-coincidence epsilon (board mm) for the dangling-copper sweep below.
@@ -907,13 +854,18 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 	if not comp:
 		return _err("Component not found: %s" % component_id)
 
+	# The WORDS mean what the human sees turn; the arithmetic behind them lives
+	# with the numeric convention it has to match, in PCBComponent, so the
+	# keyboard gesture and this verb cannot drift.
 	var degrees = args.get("degrees", 90)
 	var new_rotation: float = comp.rotation
 	if degrees is String:
 		if degrees.to_lower() == "clockwise":
-			new_rotation = fmod(comp.rotation + 90.0, 360.0)
+			new_rotation = _PcbComponentScript.clockwise_from(comp.rotation)
 		elif degrees.to_lower() == "counterclockwise":
-			new_rotation = fmod(comp.rotation - 90.0 + 360.0, 360.0)
+			new_rotation = _PcbComponentScript.counterclockwise_from(comp.rotation)
+		else:
+			return _err("degrees must be a number, or the word 'clockwise' or 'counterclockwise' — got '%s'" % str(degrees))
 	else:
 		new_rotation = float(degrees)
 
@@ -3922,12 +3874,15 @@ const _WIRE_DROP_COMPONENT_FIELDS: Array[String] = [
 ## silently sheds the next canonical field someone adds, which is how the
 ## first draft of this helper lost quadlayer's `origin`.
 ##
-## `pads` is conditional: dropped when the worker can re-derive them
-## (component marked footprint_resolved, or its footprint is a "Lib:Name"
-## library ref), KEPT otherwise — for a custom/parametric part the panel's
-## pads are the only geometry anywhere, and dropping them measurably changes
-## the assembly verdict (the ladder's custom-rich-pads probe). `pins` always
-## travel: they are canonical fab geometry and the pad_extent fallback.
+## `pads` is conditional, and the condition is a MEASURED fact, not a shape:
+## dropped only for a component marked `footprint_resolved`, the flag the
+## worker writes on its own resolve success path — precisely when it re-derives
+## the same lands server-side and the wire copy is dead weight. KEPT for
+## everything else, a library-SHAPED ref included: the `pads` KEY declares that
+## the BOARD owns this component's geometry, so dropping it does not shed
+## weight, it demotes a FULL part to a PARTIAL one and hands the worker a ref
+## this host may be unable to resolve. `pins` always travel: they are canonical
+## fab geometry and the pad_extent fallback.
 ##
 ## Idempotent: applying it to its own output is the identity.
 static func canonical_wire_board(board: Dictionary) -> Dictionary:
@@ -3945,9 +3900,7 @@ static func canonical_wire_board(board: Dictionary) -> Dictionary:
 			continue
 		var comp: Dictionary = comp_v
 		var lean := {}
-		var worker_can_rederive_pads: bool = \
-			bool(comp.get("footprint_resolved", false)) \
-			or str(comp.get("footprint", "")).contains(":")
+		var worker_can_rederive_pads: bool = bool(comp.get("footprint_resolved", false))
 		for key in comp:
 			if key in _WIRE_DROP_COMPONENT_FIELDS:
 				continue
@@ -3957,6 +3910,22 @@ static func canonical_wire_board(board: Dictionary) -> Dictionary:
 		comps_out.append(lean)
 	out["components"] = comps_out
 	return out
+
+
+## ONE worker reply, normalised: the channel may hand back the worker's own
+## {ok, result} or the broker's {success, result:{…}} double wrap, and a caller
+## must not have to know which. A broker-level failure becomes the worker's own
+## refusal shape so every caller branches on one thing.
+static func worker_envelope(result: Dictionary, what: String) -> Dictionary:
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
+		return inner if inner.has("ok") else {"ok": true, "result": inner}
+	return {"ok": false, "error": {
+		"kind": str(result.get("error_code", "worker_error")),
+		"message": str(result.get("error_message",
+			result.get("error", "%s failed" % what)))}}
 
 
 ## Run the pcb.assembly_check channel over the LIVE board and return the

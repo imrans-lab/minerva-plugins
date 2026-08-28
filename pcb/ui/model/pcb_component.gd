@@ -371,6 +371,15 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 		pins[num] = pad.get("position", Vector2.ZERO)
 
 
+## Attach a footprint's silk/courtyard graphics and its printed designator —
+## the graphics half of load_pad_geometry above, for the ADD-BY-REF path, which
+## gets its geometry from a single-footprint resolve rather than from a board
+## load. Both lists are in the SAME footprint-local frame as `pads[].position`.
+func load_footprint_graphics(graphics_data: Array, refdes_data: Array) -> void:
+	_graphics_from_list(graphics_data)
+	_refdes_from_list(refdes_data)
+
+
 ## Parse a point from either the worker's native `[x, y]` array shape or the
 ## Godot round-trip `{x:, y:}` dict shape (defensive — `graphics` may arrive
 ## via either channel; see `_graphics_from_list`).
@@ -621,14 +630,33 @@ static func snap_rotation(degrees: float) -> float:
 	return roundf(normalized / 90.0) * 90.0
 
 
-## Rotate clockwise by 90 degrees
+## THE ROTATION WORDS, and what they mean ON SCREEN.
+##
+## The NUMBER is KiCad's: rotation_deg applies as R(-angle) in the panel's
+## y-down board frame (see get_transform), which is the convention the worker's
+## emitters share and must never change. But that makes a POSITIVE angle turn
+## the part COUNTER-clockwise as a human watches it: a pad WEST of the origin
+## lands SOUTH at 90 (west→south is 9 o'clock to 6 o'clock on screen).
+##
+## The words therefore mean what the EYE sees, not what the number does; the
+## numbers are untouched. Static so the panel verb and the canvas key press
+## cannot drift apart.
+static func clockwise_from(degrees: float) -> float:
+	return fmod(degrees - 90.0 + 360.0, 360.0)
+
+
+static func counterclockwise_from(degrees: float) -> float:
+	return fmod(degrees + 90.0, 360.0)
+
+
+## Rotate a quarter turn CLOCKWISE as drawn on screen.
 func rotate_clockwise() -> void:
-	set_rotation(rotation + 90.0)
+	set_rotation(clockwise_from(rotation))
 
 
-## Rotate counter-clockwise by 90 degrees
+## Rotate a quarter turn COUNTER-clockwise as drawn on screen.
 func rotate_counterclockwise() -> void:
-	set_rotation(rotation - 90.0)
+	set_rotation(counterclockwise_from(rotation))
 
 
 ## Initialize standard pin layout for common footprints

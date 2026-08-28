@@ -188,15 +188,30 @@ static func roles_for_pin(comp, pin: String) -> Array:
 	return out
 
 
+## Two pin centres are the same row/column when they lie within this of each
+## other on that axis — pad grids are authored on a pitch, so this only has to
+## absorb float noise from the placement transform, never a real offset.
+const _LANE_TOLERANCE_MM := 0.05
+
+
 ## The side (column) of its own component a pad sits on, in BOARD frame:
 ## north = -y, south = +y, east = +x, west = -x, matching pcb_pad_approach.
 ##
-## The rule is the pad cloud's own box: a pin is on the side whose edge it lies
-## nearest, measured as a FRACTION of that axis's extent so a tall two-column
-## socket and a wide QFN are judged the same way. A corner pin ties at 0 on both
-## axes and the SHORTER axis wins — for a socket that is the column axis, which
-## is what "the east column of U1S" means. A part with one pin, or no extent on
-## either axis, has no side and says "".
+## STRUCTURE FIRST. When the part's pins form exactly TWO COLUMNS (and more
+## than two rows), those columns ARE its sides and the answer is west/east —
+## and symmetrically for exactly two rows. This is measured from the pin cloud,
+## not from the part's aspect, because the box heuristic below gets a WIDE
+## two-column part backwards: a 7.62 x 5.08 DIP-6's shorter axis is the
+## vertical one, so its corner pins tie onto north/south and `free_pins
+## side:"west"` on a 2x3 socket answers with the middle pin alone where a human
+## sees three. A tall socket's answer is unchanged — its columns were already
+## what the tie-break picked.
+##
+## THE BOX, otherwise: a pin is on the side whose edge it lies nearest, measured
+## as a FRACTION of that axis's extent so a tall socket and a wide QFN are
+## judged the same way. A corner pin ties at 0 on both axes and the SHORTER axis
+## wins. A part with one pin, or no extent on either axis, has no side and says
+## "".
 static func side_for_pin(comp, pin: String) -> String:
 	if comp == null or not comp.pins.has(pin) or comp.pins.size() < 2:
 		return ""
@@ -208,6 +223,13 @@ static func side_for_pin(comp, pin: String) -> String:
 		max_p = max_p.max(p)
 	var here: Vector2 = comp.get_pin_world_position(pin)
 	var extent := max_p - min_p
+
+	var columns := _lane_count(comp, true)
+	var rows := _lane_count(comp, false)
+	if columns == 2 and rows != 2:
+		return "west" if (here.x - min_p.x) <= (max_p.x - here.x) else "east"
+	if rows == 2 and columns != 2:
+		return "north" if (here.y - min_p.y) <= (max_p.y - here.y) else "south"
 
 	var best_x := ""
 	var frac_x := INF
@@ -234,6 +256,26 @@ static func side_for_pin(comp, pin: String) -> String:
 	if absf(frac_x - frac_y) < 1e-6:
 		return best_x if extent.x <= extent.y else best_y
 	return best_x if frac_x < frac_y else best_y
+
+
+## How many distinct COLUMNS (`by_x`) or ROWS the part's pin centres fall into,
+## in BOARD frame — the structural read side_for_pin uses before it falls back
+## to the bounding box. Lanes are clustered on _LANE_TOLERANCE_MM.
+static func _lane_count(comp, by_x: bool) -> int:
+	var lanes: Array = []
+	for key in comp.pins:
+		var p: Vector2 = comp.get_pin_world_position(str(key))
+		var v: float = p.x if by_x else p.y
+		var found := false
+		for lane in lanes:
+			if absf(float(lane) - v) <= _LANE_TOLERANCE_MM:
+				found = true
+				break
+		if not found:
+			lanes.append(v)
+			if lanes.size() > 2:
+				return lanes.size()   # more than two: the structural rule does not apply
+	return lanes.size()
 
 
 ## Which copper the pad is on: "all" for a PLATED through-hole barrel, "none"

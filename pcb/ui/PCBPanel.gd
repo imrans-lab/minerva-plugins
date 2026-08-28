@@ -57,6 +57,8 @@ const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
 ## rows minerva_pcb_get_selection returns).
 const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section.gd")
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
+const _PcbLibraryPartScript: Script = preload("model/pcb_library_part.gd")
+const _PcbAddPartSectionScript: Script = preload("pcb_add_part_section.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
@@ -592,6 +594,13 @@ func get_annotation_overlay_parent() -> Control:
 
 
 ## The board model (pcb_data.gd) this panel edits. Exposed for MCP/tests.
+## The board surface, for a sidebar section that needs view coordinates. NOT
+## named get_canvas: CanvasItem already has one, returning a RID, and shadowing
+## it silently detaches this node from the engine's own canvas lookup.
+func get_board_canvas() -> Control:
+	return _canvas
+
+
 func get_data():
 	return _data
 
@@ -2043,6 +2052,14 @@ func _build_sidebar() -> VBoxContainer:
 	_pin_selection_section.move_net_requested.connect(_on_move_net_requested)
 	_pin_selection_section.swap_nets_requested.connect(_on_swap_nets_requested)
 	_sidebar_content.add_child(_pin_selection_section)
+
+	# ADD A PART: the panel had no add affordance at all. The section runs the
+	# SAME panel-tools verb the MCP add runs; the panel hands it only the seams
+	# it owns — itself as the board host, and the status line.
+	_sidebar_content.add_child(HSeparator.new())
+	var add_part: VBoxContainer = _PcbAddPartSectionScript.new()
+	add_part.bind_panel(self, _set_status)
+	_sidebar_content.add_child(add_part)
 
 	return _sidebar
 
@@ -6757,6 +6774,18 @@ func zone_fill_check(board: Dictionary) -> Dictionary:
 		"message": str(result.get("error_message", result.get("error", "zone_fill failed")))}}
 
 
+## ONE library ref's fabricable geometry — the seam add-by-library-ref resolves
+## through. `designator` opts the reply into the printed designator strokes, so
+## a freshly added part draws the text the fab will print.
+func footprint_geometry(ref: String, designator: String = "") -> Dictionary:
+	if get_node_or_null("_MinervaIPC") == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
+		"pcb.footprint_geometry", {"ref": ref, "designator": designator}, 30000),
+		"footprint_geometry")
+
+
 ## The board moved, so what is known about its pours does not: drop every
 ## adopted fill, then ask for a fresh one.
 ##
@@ -6769,6 +6798,7 @@ func _restate_zone_fill() -> void:
 	if _data == null:
 		return
 	_data.clear_zone_fill()
+	_set_status(_status_base_text)  # the lead's part census moved with the board
 	_schedule_zone_fill_refresh()
 
 
@@ -6791,8 +6821,13 @@ func _refresh_zone_fill() -> void:
 		return  # panel torn down while the worker ran
 	if _whole_board_token(_data.to_board_dict()) != requested_token:
 		return
+	# A FAILED FILL IS NEWS: the pours still draw but claim no copper, so every
+	# join through a plane reads as still owed. Held on the status lead.
 	if not bool(reply.get("ok", false)):
+		_overlay_leads["zone_fill"] = _PcbOverlayFetchScript.failure_reason(reply)
+		_set_status(_status_base_text)
 		return
+	_clear_overlay_lead("zone_fill")
 	_data.adopt_zone_fill(_dict_or_empty(reply.get("result")).get("zones", []))
 	if _canvas != null:
 		_canvas.queue_redraw()
@@ -6899,8 +6934,11 @@ var _load_check_lead: String = ""
 ## An INDETERMINATE load-time check leads even the bus refusal: a refusal is
 ## about the gesture in hand and clears when the gesture does, while "this board
 ## was never measured" is true of everything done to the board afterwards.
+## The parts a fab cannot build are read off the LIVE board here rather than
+## cached, so no relay can leave the lead describing a board that has moved on.
 func _status_lead() -> String:
 	return _load_check_lead \
+		+ _PcbLibraryPartScript.board_lead(_data) \
 		+ _PcbOverlayFetchScript.status_lead(_overlay_leads) \
 		+ bus_status_lead(bus_refusal_text(), bus_plan_lands(),
 			bus_finding_count(), bus_advisory_text())

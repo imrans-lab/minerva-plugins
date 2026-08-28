@@ -358,6 +358,18 @@ func assembly_check(board: Dictionary) -> Dictionary:
 		"message": "no panel bound — pcb.assembly_check broker unreachable (headless / before mount)"}}
 
 
+## Library-geometry bridge: ADD-BY-LIBRARY-REF resolves one footprint ref
+## through the panel's pcb.footprint_geometry channel from HERE — same
+## host→panel duck-typed path as assembly_check above. Unlike the assembly
+## advisory, an unreachable panel is a REFUSAL and not a degrade: the caller
+## would otherwise place a part promising lands it does not have.
+func footprint_geometry(ref: String, designator: String = "") -> Dictionary:
+	if _panel != null and is_instance_valid(_panel) and _panel.has_method("footprint_geometry"):
+		return await _panel.footprint_geometry(ref, designator)
+	return {"ok": false, "error": {"kind": "worker_unavailable",
+		"message": "no panel bound — pcb.footprint_geometry broker unreachable (headless / before mount)"}}
+
+
 func _connect_canvas() -> void:
 	if _canvas == null or not is_instance_valid(_canvas):
 		return

@@ -469,3 +469,165 @@ def board_graphic_stats(board: dict) -> dict:
         "silk_graphics": silk,
         "courtyard_graphics": crtyd,
     }
+
+
+# ---------------------------------------------------------------------------
+# ONE footprint's geometry, for a part that does not exist on a board yet.
+# ---------------------------------------------------------------------------
+
+#: Graphic layers a body-extent fallback may be measured from when the
+#: footprint declares no courtyard. Silk is the drawn body outline; the fab
+#: layer carries the assembly outline. Neither is copper, so a part whose only
+#: extent is its pads still gets a box (the pad union) rather than nothing.
+_EXTENT_GRAPHIC_LAYERS = frozenset({"F.SilkS", "B.SilkS", "F.Fab", "B.Fab"})
+_COURTYARD_EXTENT_LAYERS = frozenset({"F.CrtYd", "B.CrtYd"})
+
+
+def footprint_geometry(
+    ref: str,
+    *,
+    designator: str = "",
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+    library_layers=None,
+    wip_root: Union[str, Path, None] = None,
+) -> dict:
+    """One library ref's fabricable geometry, in the panel's own pad shape.
+
+    The board-level resolvers above answer "does this component's footprint
+    still match the pins it was routed against". This answers the question that
+    comes BEFORE a component exists: "what does this library ref actually
+    fabricate as". It is what lets a part be ADDED by library ref with real
+    lands and real silk, through the same seed/wip/user chain
+    (:func:`pcb_worker.bless.live_library_chain`) every compile-bearing call
+    resolves through — so a part the panel could add is a part the worker can
+    compile, by construction, and the two can never disagree about which
+    library supplied it.
+
+    Returns ``{ref, layer, sha256, footprint_name, pads, graphics,
+    refdes_graphics, bounding_box, pad_count, has_pad_geometry}``. ``pads`` is
+    :func:`_pads_from_parsed`'s projection — the SAME shape a resolved board
+    carries, so the panel deserializes an added part and a loaded one through
+    one path. ``bounding_box`` is the panel's ``{width, height, center_x,
+    center_y}`` body box, measured from the courtyard when the footprint
+    declares one (that IS the part's declared extent), else from its drawn
+    outline, else from the union of its lands.
+
+    ``designator`` (the refdes the part will carry) opts into
+    ``refdes_graphics``: the printed designator strokes, in the same
+    footprint-local frame, so a freshly added part draws the text the fab will
+    print instead of waiting for the next board load to attach it.
+
+    Raises :class:`~pcb_worker.footprints.FootprintLookupError` — attributed,
+    naming the ref and the layers searched — when the ref does not resolve.
+    There is no tolerant mode: a caller asking for geometry it cannot get must
+    be told which layers were searched, not handed an empty part.
+    """
+    chain = bless.live_library_chain(
+        wip_root=wip_root, layers=library_layers,
+        library_root=library_root, lockfile=lockfile)
+    supplied = resolve_footprint_layered(ref, chain=chain)
+    parsed = supplied.parsed
+
+    pads = _pads_from_parsed(parsed.get("pads") or [])
+    graphics = [g for g in (parsed.get("graphics") or [])
+                if g.get("layer") in _LEGACY_GRAPHIC_LAYERS]
+    out = {
+        "ref": ref,
+        "layer": supplied.layer,
+        "sha256": str((supplied.entry or {}).get("sha256", "")),
+        "footprint_name": parsed.get("name"),
+        "pads": pads,
+        "graphics": graphics,
+        "bounding_box": _body_box(parsed, pads),
+        "pad_count": len(pads),
+        # The board-dict VIEW of the one resolved-vs-fallback predicate, same
+        # as _resolve_component's — a silk-only footprint honestly reports
+        # False here and is still fully resolved.
+        "has_pad_geometry": bool(pads),
+    }
+    if designator:
+        out["refdes_graphics"] = _refdes_graphics(designator, parsed)
+    return out
+
+
+def _body_box(parsed: dict, pads: list) -> dict:
+    """The panel's ``{width, height, center_x, center_y}`` body box for a
+    footprint, in footprint-LOCAL mm.
+
+    Courtyard first — a footprint that declares one has declared its extent,
+    and that is the box the panel must hit-test and the placement checks must
+    keep clear. Silk/fab outline next, then the union of the lands, so a
+    footprint with no graphics at all still gets a box that contains its
+    copper. A footprint with neither graphics nor pads has no extent and gets
+    a zero box rather than an invented one.
+    """
+    for wanted in (_COURTYARD_EXTENT_LAYERS, _EXTENT_GRAPHIC_LAYERS):
+        points = []
+        for g in (parsed.get("graphics") or []):
+            if g.get("layer") in wanted:
+                points.extend(_graphic_extent_points(g))
+        box = _box_of(points)
+        if box is not None:
+            return box
+    points = []
+    for pad in pads:
+        pos = pad.get("position") or {}
+        size = pad.get("size") or {}
+        x, y = pos.get("x"), pos.get("y")
+        w, h = size.get("width"), size.get("height")
+        if x is None or y is None:
+            continue
+        half_w = (float(w) / 2.0) if w is not None else 0.0
+        half_h = (float(h) / 2.0) if h is not None else 0.0
+        points.append((float(x) - half_w, float(y) - half_h))
+        points.append((float(x) + half_w, float(y) + half_h))
+    box = _box_of(points)
+    return box if box is not None else {
+        "width": 0.0, "height": 0.0, "center_x": 0.0, "center_y": 0.0}
+
+
+def _graphic_extent_points(graphic: dict) -> list:
+    """Every point a parsed graphic contributes to an extent measurement.
+
+    An arc contributes its stored points (its endpoints and, when the parser
+    kept one, its midpoint) rather than its true swept extent: a courtyard is
+    drawn from lines and short fillet arcs, so the understatement is bounded by
+    the fillet radius, and the alternative — reconstructing swept arc extrema
+    here — is a second arc implementation this box does not need.
+    """
+    kind = graphic.get("kind")
+    if kind == "circle":
+        c = graphic.get("center") or (None, None)
+        if c[0] is None or c[1] is None:
+            return []
+        r = float(graphic.get("radius") or 0.0)
+        cx, cy = float(c[0]), float(c[1])
+        return [(cx - r, cy - r), (cx + r, cy + r)]
+    raw = [graphic.get("start"), graphic.get("end")]
+    raw.extend(graphic.get("points") or [])
+    points = []
+    for p in raw:
+        # The parser emits None for an unparseable coordinate rather than
+        # dropping the node, so a malformed graphic contributes nothing to the
+        # extent instead of crashing the measurement.
+        if p is None or len(p) < 2 or p[0] is None or p[1] is None:
+            continue
+        points.append((float(p[0]), float(p[1])))
+    return points
+
+
+def _box_of(points: list):
+    """``{width, height, center_x, center_y}`` for a point cloud, or None when
+    the cloud is empty or has no extent at all (a single point is not a body)."""
+    if not points:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    width = max(xs) - min(xs)
+    height = max(ys) - min(ys)
+    if width <= 0.0 and height <= 0.0:
+        return None
+    return {"width": width, "height": height,
+            "center_x": (max(xs) + min(xs)) / 2.0,
+            "center_y": (max(ys) + min(ys)) / 2.0}

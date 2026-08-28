@@ -413,3 +413,19 @@ test_transient_status.gd assertions=17
 # plus one id is refused, and both selection seams reach a board graphic.
 # MEASURED: 75 passed, 0 failed.
 test_board_graphics.gd assertions=75
+
+# Adding a part BY LIBRARY FOOTPRINT REF, against the real worker: the added
+# part carries the pads the worker itself reports for that footprint, the geometric DRC over the board stays determinate and clean,
+# one sketch part turns that verdict indeterminate and is named at add time by
+# the reply AND by the panel's census AND by the worker's refusal, and an
+# unresolvable ref is refused with the board untouched.
+# NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
+test_add_by_library_ref.gd real-worker
+
+# The three geometry contracts that need no worker: the rotation WORDS mean
+# what the screen shows (asserted on where a pad landed, never on the rotation
+# number), a two-column part reads its columns as west/east whatever its aspect
+# and the `pads` key is the board's geometry authority rather than a payload
+# optimisation.
+# NOT YET PINNED: see above.
+test_part_geometry_contracts.gd

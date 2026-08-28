@@ -171,8 +171,14 @@ func _init() -> void:
 		"CUSTOM part keeps pads — the panel's pads are its only geometry")
 	_check((mw[1] as Dictionary).get("pads", []) == custom_pads,
 		"parametric enum part (RESISTOR) keeps pads")
-	_check(not (mw[2] as Dictionary).has("pads"),
-		"library-ref part (Lib:Part) drops pads — worker re-derives")
+	# A COLON-SHAPED REF IS NOT A LIBRARY THIS HOST HAS. Keying the drop on the
+	# shape of the string hands the worker, on a machine whose library lacks the
+	# part, a component with no pads and a ref it cannot resolve — and under the
+	# FULL/PARTIAL rule the `pads` KEY is the declaration that the BOARD owns the
+	# geometry, so dropping it demotes a FULL part to a PARTIAL one. Only the
+	# MEASURED resolve fact drops pads.
+	_check((mw[2] as Dictionary).get("pads", []) == custom_pads,
+		"library-SHAPED ref with no resolve behind it KEEPS pads — the key is the board's geometry authority, not a size optimisation")
 	_check(not (mw[3] as Dictionary).has("pads"),
 		"footprint_resolved part drops pads even without a colon ref")
 	_check((mw[0] as Dictionary).get("pins") == mixed["components"][0]["pins"],

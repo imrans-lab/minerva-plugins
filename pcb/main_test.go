@@ -132,6 +132,11 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// it, so the preview is an independent read of the shipped bytes.
 		// Same channel idiom.
 		"pcb.fab_preview",
+		// worker-backed — ONE library footprint's lands and silk, forwarding
+		// to the worker's "footprint_geometry" method: what add-by-library-ref
+		// places, resolved through the same chain a compile uses. Same channel
+		// idiom.
+		"pcb.footprint_geometry",
 	}
 	for _, name := range want {
 		if !got[name] {

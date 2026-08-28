@@ -509,6 +509,36 @@ func HandleFabPreviewChannel(ctx context.Context, w *bridge.Worker, params json.
 	return w.Call(ctx, "fab_preview", withLibraryChain(params))
 }
 
+// ---- pcb.footprint_geometry (worker-backed broker CHANNEL) -----------------
+//
+// The ADD-BY-LIBRARY-REF seam. Without this channel the panel can only build
+// a part from its own generic sketch geometry, which the hermetic compiler
+// then refuses by name — leaving a hand-typed pad list as the only way onto a
+// board. This resolves ONE ref through the same seed/wip/user chain
+// (withLibraryChain) every compile-bearing call uses, and hands back the lands
+// and silk in the panel's own pad shape. Geometry the panel can place is
+// therefore geometry the worker can compile, by construction.
+
+var FootprintGeometryChannel = ToolSpec{
+	Name: "pcb.footprint_geometry",
+	Description: "Panel IPC channel for ONE library footprint's fabricable " +
+		"geometry — what add-by-library-ref places. Forwards verbatim to the " +
+		"Python worker's 'footprint_geometry' method. Args: {ref:'LibNick:" +
+		"PartName', designator?:<refdes the part will carry>}. Returns {ok, " +
+		"result:{ref, layer:'seed'|'wip'|'user', sha256, footprint_name, " +
+		"pads:[<board-dict pad>], graphics:[{layer:'F.SilkS'|'F.CrtYd', kind, " +
+		"...}], refdes_graphics?, bounding_box:{width,height,center_x," +
+		"center_y}, pad_count, has_pad_geometry}}. Resolves through the SAME " +
+		"library chain a compile does, so a part this places is a part the " +
+		"worker can fabricate. An unresolvable ref REFUSES by name (the ref " +
+		"and the layers searched) rather than returning an empty part.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleFootprintGeometryChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "footprint_geometry", withLibraryChain(params))
+}
+
 // ---- pcb.promote_check (worker-backed broker CHANNEL) ----------------------
 //
 // Epoch UX3 station 11 (docket 019fdf91b3ac, K13): the PROMOTION GATE — the

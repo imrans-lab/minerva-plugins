@@ -24,12 +24,20 @@ extends RefCounted
 ## artwork that is missing. PCBPanel._invalidate_fab_preview owns that path and
 ## nothing here sees it.
 
-## The overlays this module governs, canvas flag name -> the human's word for it
-## (the View menu's own label). A flag absent from here is reported by its raw
-## name rather than dropped.
+## The fetches this module governs, lead key -> the human's word for it (the
+## View menu's own label, where one exists). A key absent from here is reported
+## by its raw name rather than dropped.
+##
+## `zone_fill` has NO canvas flag behind it, deliberately: the pours are still
+## drawn, they have merely stopped claiming any copper, so there is nothing to
+## retract. What it shares with the overlays is the failure mode — a fill that
+## did not land makes every join through a plane read as still owed, and saying
+## nothing about it is the same defect — so it holds a lead here and rides
+## PCBPanel.overlay_notes() into minerva_pcb_view_state like the rest.
 const OVERLAY_LABELS: Dictionary = {
 	"show_fab_preview": "Fab preview",
 	"show_mask": "Mask openings",
+	"zone_fill": "Pour fill",
 }
 
 ## The payload-cap refusal, by every name it arrives under.

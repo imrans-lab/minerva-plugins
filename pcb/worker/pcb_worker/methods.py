@@ -3733,6 +3733,40 @@ def _footprint_stage(params: dict) -> dict:
                                    "report": _report_summary(report)}}
 
 
+def _footprint_geometry(params: dict) -> dict:
+    """One library ref's fabricable geometry — the ADD-BY-REF seam.
+
+    params: {ref, designator?, wip_root?, library_layers?}
+    Reply:  {ok: True, result: <pcb_worker.resolve.footprint_geometry(...)>}
+
+    This is what lets a part be added to a live board by library ref with real
+    lands and real silk instead of a sketch the compiler will refuse. It
+    resolves through the SAME live chain (_layer_params) every compile-bearing
+    method uses, so geometry the panel could place is geometry the worker can
+    compile — the two cannot disagree about which layer supplied the part.
+
+    Fail-closed and BY NAME: an unresolvable ref raises FootprintLookupError,
+    which names the ref and the layers searched. Handing back an empty part
+    would put exactly the placeholder this method exists to retire back on the
+    board, and the caller would not know.
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("footprint") or params.get("name")
+    if not isinstance(ref, str) or not ref.strip():
+        return {"ok": False, "error": {
+            "kind": "footprint",
+            "message": "ref is required: a library footprint reference "
+                       "'LibNick:PartName'"}}
+    try:
+        result = resolve.footprint_geometry(
+            ref.strip(),
+            designator=str(params.get("designator") or ""),
+            **_layer_params(params))
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    return {"ok": True, "result": result}
+
+
 def _footprint_report(params: dict) -> dict:
     """Fact table + SVG render for one footprint ref — the bless artifacts.
 
@@ -4064,6 +4098,9 @@ _HANDLERS = {
     # bless artifacts, record the verdict. See the section above _init().
     "footprint_stage": lambda req: _footprint_stage(req.get("params") or {}),
     "footprint_report": lambda req: _footprint_report(req.get("params") or {}),
+    # ONE ref's fabricable geometry, for a part that is not on a board yet —
+    # what add-by-library-ref places.
+    "footprint_geometry": lambda req: _footprint_geometry(req.get("params") or {}),
     "footprint_bless": lambda req: _footprint_bless(req.get("params") or {}),
     # Promotion (B7) — the bless gate's exit door: a blessed WIP part moves
     # whole (bless record intact) into the durable user layer, where every
