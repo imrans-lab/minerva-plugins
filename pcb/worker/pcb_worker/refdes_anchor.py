@@ -87,6 +87,8 @@ __all__ = [
     "body_extent_from_parsed",
     "occupied_extent_from_parsed",
     "occupied_extent_from_definition",
+    "body_extent_from_definition",
+    "courtyard_extent_from_definition",
     "default_anchor",
     "anchor_dict_from_parsed",
     "effective_reference_text",
@@ -239,6 +241,44 @@ def occupied_extent_from_definition(
         return None
     return _extent_of([
         *_definition_graphic_points(footprint.graphics, COURTYARD_LAYERS),
+        *_definition_graphic_points(footprint.graphics, OUTLINE_LAYERS),
+        *_definition_pad_points(footprint.pads),
+    ])
+
+
+def courtyard_extent_from_definition(
+        footprint: Union[FootprintDefinition, None]) -> Union[LocalExtent, None]:
+    """The KEEP-OUT envelope a built :class:`FootprintDefinition` declares —
+    its courtyard alone, in footprint-LOCAL mm. None when it declares none.
+
+    A courtyard is drawn deliberately larger than the part, so this is the box
+    that answers "would this ink disappear under the neighbour", while
+    :func:`body_extent_from_definition` answers "under its OWN component".
+    """
+    if footprint is None:
+        return None
+    return _extent_of(_definition_graphic_points(footprint.graphics,
+                                                 COURTYARD_LAYERS))
+
+
+def body_extent_from_definition(
+        footprint: Union[FootprintDefinition, None]) -> Union[LocalExtent, None]:
+    """What a built :class:`FootprintDefinition` PHYSICALLY covers once soldered:
+    its drawn outline and its lands, with the COURTYARD deliberately left out.
+
+    The sibling of :func:`occupied_extent_from_definition`, and the difference is
+    the whole point. A courtyard is a keep-out envelope drawn larger than the
+    part on purpose, so it is the right box to place a designator OUTSIDE of
+    (which is what the default anchor does) and the wrong box to ask "is this
+    ink going to end up under the component body". Legend inside the courtyard
+    but clear of the body is still readable on the assembled board; legend
+    inside the body is not.
+
+    None when the footprint draws no outline and carries no sized land.
+    """
+    if footprint is None:
+        return None
+    return _extent_of([
         *_definition_graphic_points(footprint.graphics, OUTLINE_LAYERS),
         *_definition_pad_points(footprint.pads),
     ])

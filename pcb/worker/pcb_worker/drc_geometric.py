@@ -52,11 +52,15 @@ CHECK SET (C1 per-entity + hole-to-hole; C2 pairwise clearance + edge):
                                 not a floor: openings that MERGE (web <= 0) have
                                 no web between them and are not violations, so
                                 only 0 < web < floor is flagged. [CP2 S5]
-  * GC9 silkscreen DFM       — legend stroke width >= min_silk_width_mm and
-                                legend-to-pad >= min_silk_to_pad_mm. ADVISORY:
-                                reported in the separate ``advisories`` key and
-                                counted, but NOT in ``findings``, so it never
-                                moves ``verdict``. [CP2 S6]
+  * GC9 silkscreen           — two families, both ADVISORY: reported in the
+                                separate ``advisories`` key and counted, but NOT
+                                in ``findings``, so neither moves ``verdict``.
+                                DFM (stroke width >= min_silk_width_mm,
+                                legend-to-pad >= min_silk_to_pad_mm) [CP2 S6],
+                                plus PLACEMENT — legend hidden under a part and
+                                legend printed over other legend, each row
+                                carrying a suggested designator anchor
+                                (drc_silk_placement).
   * GC10 hole-to-copper      — every drilled bore to every FOREIGN copper
                                 primitive >= min_hole_to_copper_mm ("how far can
                                 the drill wander", not "how close may two
@@ -157,7 +161,7 @@ from .ir_pads import (
     pad_land,
     smd_shape,
 )
-from . import mask_source, refdes_anchor, silk_source
+from . import drc_silk_placement, mask_source, refdes_anchor, silk_source
 from .geometry import rotate_local_offset, rotation_radians
 from .mask_source import MaskOpening
 from .pad_source import placed_pad_to_geom
@@ -1337,79 +1341,12 @@ def _silk_anchor(prim: SilkPrimitive) -> tuple[float, float]:
     return tuple(geom.start)
 
 
-def _silk_capsules(prim: SilkPrimitive) -> tuple[Capsule, ...]:
-    """One silk primitive as swept-segment capsules, in the board frame.
-
-    Silk is DRAWN geometry — every primitive is a stroked path, so its physical
-    extent is the centreline swept by half the stroke width. That is exactly a
-    Capsule, which is why no new primitive is needed here (contrast GC8, where
-    mask apertures are filled regions and a roundrect needed exact modelling).
-
-    A CIRCLE and an ARC are approximated by an inscribed polyline, and the
-    approximation direction is chosen deliberately: chord midpoints sit INSIDE
-    the true curve, so the polyline under-states how far the stroke reaches
-    outward. For a silk-to-pad clearance that makes the measured distance
-    LARGER than the truth — the wrong way for fail-safety. The segment count is
-    therefore chosen so the sagitta (max radial error) stays under a tenth of
-    the stroke half-width, and the capsule radius is then inflated by that
-    residual, so the modelled body always CONTAINS the true stroke.
-    """
-    half = prim.width_mm / 2.0
-    geom = prim.geometry
-
-    if isinstance(geom, silk_source.SilkLine):
-        return (Capsule(geom.x1, geom.y1, geom.x2, geom.y2, half),)
-
-    if isinstance(geom, silk_source.SilkPoly):
-        pts = list(geom.points)
-        if len(pts) < 2:
-            return (Capsule(pts[0][0], pts[0][1], pts[0][0], pts[0][1], half),) if pts else ()
-        pairs = list(zip(pts, pts[1:]))
-        if geom.closed and len(pts) > 2:
-            pairs.append((pts[-1], pts[0]))
-        return tuple(Capsule(a[0], a[1], b[0], b[1], half) for a, b in pairs)
-
-    # Circle / arc -> polyline. Both carry a centre and a radius; an arc also
-    # carries a sweep, and a circle is the full-turn case.
-    if isinstance(geom, silk_source.SilkCircle):
-        cx, cy, radius = geom.cx, geom.cy, geom.radius
-        start_ang, sweep = 0.0, 2.0 * math.pi
-    else:
-        cx, cy = geom.center
-        radius = math.hypot(geom.start[0] - cx, geom.start[1] - cy)
-        start_ang = math.atan2(geom.start[1] - cy, geom.start[0] - cx)
-        end_ang = math.atan2(geom.end[1] - cy, geom.end[0] - cx)
-        sweep = end_ang - start_ang
-        # Orientation "+" is counter-clockwise in the board frame; normalise the
-        # sweep into that direction so a wrap does not silently become a tiny arc.
-        if geom.orientation == "+":
-            while sweep <= 0:
-                sweep += 2.0 * math.pi
-        else:
-            while sweep >= 0:
-                sweep -= 2.0 * math.pi
-
-    if radius <= EPS:
-        return (Capsule(cx, cy, cx, cy, half),)
-
-    # sagitta = r * (1 - cos(step/2)); solve for step given the error budget.
-    budget = max(half * 0.1, EPS)
-    if budget >= radius:
-        segments = 4
-    else:
-        step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - budget / radius)))
-        segments = max(4, int(math.ceil(abs(sweep) / step)))
-    step = sweep / segments
-    residual = radius * (1.0 - math.cos(abs(step) / 2.0))
-
-    caps = []
-    for i in range(segments):
-        a0, a1 = start_ang + i * step, start_ang + (i + 1) * step
-        caps.append(Capsule(
-            cx + radius * math.cos(a0), cy + radius * math.sin(a0),
-            cx + radius * math.cos(a1), cy + radius * math.sin(a1),
-            half + residual))
-    return tuple(caps)
+#: Silk as swept capsules — the ONE conversion, owned by
+#: :mod:`drc_silk_placement` because the placement rules there need it too and
+#: the dependency has to run in that direction (this module imports that one).
+#: Kept under the old private name so every existing caller and test reads
+#: unchanged.
+_silk_capsules = drc_silk_placement.silk_capsules
 
 
 #: GC9's rows are ADVISORIES, not violations, and this is where that is decided.
@@ -1446,7 +1383,11 @@ def _silk_capsules(prim: SilkPrimitive) -> tuple[Capsule, ...]:
 #: is always reportable. What they do not do is flip `verdict` to "violations".
 GC9_ADVISORY_TYPES: frozenset[str] = frozenset({
     "gc9_silk_width", "gc9_silk_to_pad", "gc9_silk_indeterminate",
-})
+    # The PLACEMENT half of the family (drc_silk_placement): legend hidden
+    # under a part, and legend printed over other legend. Same advisory
+    # authority as the two floors above — silk is cosmetic — and named here so
+    # a consumer asking "which rows never move the verdict" has one answer.
+}) | drc_silk_placement.ADVISORY_TYPES
 
 
 def _check_gc9_silk(proj: Projection, rb: ResolvedBoard) -> list[dict]:
@@ -2577,6 +2518,11 @@ _COUNT_KEYS = (
     "gc9_silk_width",
     "gc9_silk_to_pad",
     "gc9_silk_indeterminate",
+    # The placement rules (drc_silk_placement). NOT floor-gated: they run on
+    # every board, so a 0 here really does mean "checked and clean" — the one
+    # pair of silk keys that does.
+    drc_silk_placement.SILK_UNDER_PART,
+    drc_silk_placement.SILK_OVER_SILK,
     # CP2 S7 — hole-to-copper. OPTIONAL-tier floor, so this stays 0 under a
     # profile that publishes no PTH-to-track figure; that is "the profile said
     # nothing", not "checked and clean".
@@ -2840,6 +2786,11 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         # the distinction visible rather than inferable.
         try:
             advisories = _check_gc9_silk(proj, rb)
+            # The placement half, inside the SAME scoped try and for the same
+            # reason: it measures cosmetic legend, so a crash in it must not
+            # throw away the blocking findings GC1-GC8/GC10-GC12 already
+            # computed. It reads the same projected silk GC9 does.
+            advisories += drc_silk_placement.check(proj, rb)
         except Exception as exc:  # noqa: BLE001 - cosmetic check, never fatal.
             advisories = [{
                 "type": "gc9_silk_indeterminate",

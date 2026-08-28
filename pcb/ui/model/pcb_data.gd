@@ -326,6 +326,27 @@ func rotate_component(component_id: String, degrees: float) -> void:
 		data_changed.emit()
 
 
+## Move WHERE this component prints its reference designator.
+##
+## `anchor` is the complete footprint-local `{x_mm, y_mm, rotation_deg,
+## size_mm, hidden}` block (pcb_refdes_anchor validates it whole before it gets
+## here). Assigning it re-strokes the label through PcbComponent's own setter,
+## so the canvas redraws from one write.
+func set_refdes_anchor(component_id: String, anchor: Dictionary) -> void:
+	var component = get_component(component_id)
+	if component == null:
+		return
+	var old_anchor: Dictionary = component.refdes_anchor.duplicate()
+	component.refdes_anchor = anchor.duplicate()
+	record_change("set_refdes_anchor", {
+		"component_id": component_id,
+		"old_anchor": old_anchor,
+		"new_anchor": anchor.duplicate()
+	})
+	component_changed.emit(component_id)
+	data_changed.emit()
+
+
 ## Get all component IDs
 func get_component_ids() -> Array[String]:
 	var result: Array[String] = []

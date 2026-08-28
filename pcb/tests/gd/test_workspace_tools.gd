@@ -1441,8 +1441,10 @@ func _run_removal_manifest_tools_absent() -> void:
 	# twin in test_manifest_tool_registration.gd moves with it.
 	# 122 -> 123: minerva_pcb_board_rules, the Options menu's verb twin.
 	# executor:"panel", so the Go pin at 19 backend tools is unaffected.
-	check_eq("manifest tool count == 123 (ALL manifest.json tools[] entries)",
-		names.size(), 123)
+	# 123 -> 124: minerva_pcb_set_refdes, the designator-anchor verb.
+	# executor:"panel", so the Go pin at 19 backend tools is unaffected.
+	check_eq("manifest tool count == 124 (ALL manifest.json tools[] entries)",
+		names.size(), 124)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",
 		"minerva_pcb_view_state" in names)
 	check("the C2 place-via tool is another",

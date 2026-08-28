@@ -70,6 +70,13 @@ const _PcbNetMembershipScript := preload("model/pcb_net_membership.gd")
 ## THE pad row. Every verb that describes a pad (get_selection, pin_info,
 ## free_pins, the move/rotate replies) emits this one shape.
 const _PcbPadRowScript := preload("model/pcb_pad_row.gd")
+## WHERE a component prints its designator: the read, the whole-then-apply
+## validation and the board-frame stroke box behind minerva_pcb_set_refdes.
+## Its own file — this one is a god file and gets DISPATCH WIRING ONLY.
+const _PcbRefdesAnchorScript := preload("model/pcb_refdes_anchor.gd")
+## The two arguments of minerva_pcb_set_refdes that are NOT anchor fields, so
+## an unknown-key refusal can still name the key it refused.
+const _REFDES_ENVELOPE_KEYS: Array[String] = ["editor_name", "component_id"]
 ## C4a: the disposition legality vocabulary (DISPOSITIONS, TERMINAL_DISPOSITIONS
 ## and the named refusal codes). Preloaded so the workspace verb tools NAME their
 ## refusals from the canonical const set instead of re-listing it — a second copy
@@ -230,6 +237,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _delete_via(host, args)
 		"minerva_pcb_board_rules":
 			return _board_rules(host, args)
+		"minerva_pcb_set_refdes":
+			return _set_refdes(host, args)
 		"minerva_pcb_get_preference":
 			return _get_preference(host, args)
 		"minerva_pcb_set_preference":
@@ -6353,6 +6362,42 @@ static func _board_rules(host, args: Dictionary) -> Dictionary:
 	if not warning.is_empty():
 		reply["warning"] = warning
 	return _ok(reply)
+
+
+## Read — and optionally move — WHERE a component prints its designator.
+##
+## Dispatch wiring only: the anchor read, the whole-then-apply validation and
+## the board-frame stroke box all live on pcb_refdes_anchor.gd. What is decided
+## HERE is the two things a verb owes the board: nothing is written unless the
+## whole write validates, and a write that lands is exactly ONE undo step —
+## the same save_to_history pairing every placement verb above uses.
+static func _set_refdes(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var component_id: String = str(args.get("component_id", ""))
+	if component_id.is_empty():
+		return _err("component_id is required")
+	var comp = data.get_component(component_id)
+	if not comp:
+		return _err("Component not found: %s" % component_id)
+
+	var checked: Dictionary = _PcbRefdesAnchorScript.validate(
+		comp, args, _REFDES_ENVELOPE_KEYS)
+	if not bool(checked.get("ok", false)):
+		return _err(str(checked.get("error", "Designator anchor could not be set.")))
+
+	var changed: Array = checked.get("changed", [])
+	if not changed.is_empty():
+		data.set_refdes_anchor(component_id, checked["anchor"])
+		data.save_to_history("Move %s designator" % comp.id)
+	return _ok({
+		"component_id": component_id,
+		"ref": comp.id,
+		"anchor": _PcbRefdesAnchorScript.read_anchor(comp),
+		"bounds": _PcbRefdesAnchorScript.board_bounds(comp),
+		"changed": changed,
+	})
 
 
 ## Read one plugin preference. Read-only — journals nothing, writes nothing.

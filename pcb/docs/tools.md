@@ -83,6 +83,8 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`, `layers_spanned`, `layers_touched`) — the row is built by `pcb_region_describe.via_entry`, shared with `describe_region` (below) |
 | `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
 | `minerva_pcb_board_rules` | the Options menu's verb twin: read/write the board's trace-angle set, its four numeric design rules and its grid pitch, plus the three per-user snap toggles. `view_state` shape — always reports the whole block; validated whole, applied whole; one undo step (below) |
+| `minerva_pcb_set_refdes` | read/move WHERE a component prints its designator; footprint-local anchor, board-frame stroke box in the reply; validated whole, applied whole; one undo step (below) |
+| `minerva_pcb_view_state` | read/set WHAT the canvas is drawing — layer flags, hidden layers, trace-layer filter, working layer; validated whole, applied whole (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
 | `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
 | `minerva_pcb_get_layout_state` | read-only; `PCBPanel.get_layout_state()` plus a `plugin_build` deploy-vintage stamp (below) |
@@ -156,6 +158,59 @@ order depends on the distinction.
 canvas is armed, so the next trace they draw really is that wide. A human turn
 of that same box writes the preference back, so the agent's read and the human's
 control are two views of one value.
+
+## What the canvas is drawing (`minerva_pcb_view_state`)
+
+`minerva_pcb_set_view` aims the camera; **`minerva_pcb_view_state` says what the
+camera is pointed at**, so a caller can interpret its own
+`minerva_pcb_get_image` instead of guessing why a layer is missing from the
+picture. Call it with nothing but `editor_name` to read:
+
+```
+{flags: {show_grid, show_traces, show_silk, show_ratsnest, show_labels,
+         show_courtyard, show_route_candidates, show_drc_witnesses,
+         show_mask, show_fab_preview},
+ layers: [{id, kicad, hidden}, ...],
+ trace_layer_filter, working_layer, changed: []}
+```
+
+**Writes are absolute, not deltas.** `flags` sets any subset by name;
+`hidden_layers` is **the complete set** of canonical layer ids to hide — `[]`
+shows every layer, and every id but one solos that one, which is how an inner
+layer is inspected on its own. Everything is validated before anything is
+applied, the discipline this verb established and `minerva_pcb_board_rules`
+follows: a bad flag name or a layer this board does not declare changes
+*nothing* and names what was wrong.
+
+**A view flag may only claim a view that is really on screen.** Turning
+`show_mask` or `show_fab_preview` on runs the same worker refetch the View menu
+runs, so the overlay a caller then captures is real rather than empty. If that
+refetch comes back with nothing the flag comes **back down** — it reads `false`
+here and `overlay_unavailable: {flag: reason}` carries why, the same sentence
+the status bar shows the human.
+
+`fab_preview_layer` isolates ONE emitted Gerber/drill layer while the fab
+preview is up (`"all"`, or a key from the `fab_preview_layers` list this call
+returns: `f_cu`, `b_cu`, `f_mask`, `f_silks`, `edge_cuts`, `pth`…) — ten layers
+composited is a picture of no layer. It is the one write validated *after* it is
+applied, because its vocabulary is the artifact set the flags in the same call
+may have just fetched: a key the emitted set does not carry refuses with
+`layer_not_emitted`, lists what was emitted, and reports in `changed` whatever
+else already landed.
+
+`trace_layer_filter` (`"all"` or a declared copper layer id) is applied **last**,
+so an explicit value wins. The two compose **asymmetrically**: a specific filter
+beats every per-layer eye, so applying `hidden_layers` resets the filter to
+`"all"` (reported in `changed`) — without that, soloing a layer would change the
+eyes and nothing on screen.
+
+`working_layer` is **not a view control at all**: it is the copper the canvas
+*authors* on — the layer the toolbar chooser names and the trace, zone and bus
+tools draw on. It is read back on every call and written with a declared copper
+layer id (never `"all"`). It composes with nothing above it: setting it changes
+nothing on screen, and no view write moves it. The direct authoring verbs
+(`add_trace`, `create_zone`, `route_bus_direct`) keep their own explicit layer
+arguments and ignore it.
 
 ## The Options menu and its verb (`minerva_pcb_board_rules`, DCR `01a0479d23b1`)
 
@@ -266,6 +321,82 @@ applied whole**, the discipline `view_state` established: an unknown mode, a
 malformed angle list or an out-of-range millimetre value changes *nothing* and
 names what was wrong. `changed` lists only the rules that really moved, and the
 board half of a write is **exactly one undo step** however many rules moved.
+
+## The designator anchor (`minerva_pcb_set_refdes`)
+
+A reference designator ("R1", "U3") is in **no** IR: it is synthesized from the
+component's ref at emission time, and *where* it goes is a separate question
+with two answers — the footprint's own authored reference `fp_text`, or, when it
+authors none, the anchor derived from its body
+(`worker/pcb_worker/refdes_anchor.py`: centred one clearance above the
+courtyard). `minerva_pcb_set_refdes` reads that anchor and moves it.
+
+Call it with nothing but `editor_name` and `component_id` to read:
+
+```
+{component_id, ref,
+ anchor: {x_mm, y_mm, rotation_deg, size_mm, hidden},
+ bounds: {min_x_mm, min_y_mm, max_x_mm, max_y_mm, width_mm, height_mm},
+ changed: []}
+```
+
+**The anchor is footprint-LOCAL and it is the text baseline.** Millimetres in
+the part's own y-down frame, centred horizontally, with the glyphs growing
+*upward* — which is why a `y_mm` of `-2.8` puts the label above the part and why
+the text's own height does not appear in the derivation. Because it is local, it
+rotates and mirrors with the component for free: a part flipped to the back
+keeps its label in the same place relative to its own body.
+
+**`bounds` is the same fact in the BOARD frame** — the box the designator
+strokes actually occupy once placed. It is measured off the strokes the canvas
+draws, through `PcbComponent.get_transform()`, so a caller that just moved a
+label sees where it landed without redoing the placement transform itself. It is
+empty when the designator draws nothing (hidden, or a component with no ref).
+
+### The DRC row is what produces these arguments
+
+`minerva_pcb_drc_geometric` reports two placement advisories beside the two
+silkscreen DFM rules it already carried:
+
+| Row | What it says |
+|---|---|
+| `gc9_silk_under_part` | legend printed inside a foreign component's keep-out envelope, or a designator inside its own part's body/pad extent — ink that disappears when the part is soldered |
+| `gc9_silk_over_silk` | a designator crossing another part's designator or outline, or board-level silk text — two strokes printed as one blot |
+
+Both are **advisory**: silk is cosmetic by this stack's ratified
+output-criticality rule, so they are reported and counted and never move
+`verdict`. A footprint's own body outline sitting inside its own courtyard is
+*never* a finding — that is the footprint convention, not a defect.
+
+Every designator row carries a `suggestion` **in exactly this verb's argument
+shape**: the first compass slot around the part — N, S, E, W, then the diagonals
+— at the footprint's own derived offset that clears both rules *and* the
+existing silk-to-pad clearance. Pass it straight back to `set_refdes`. When no
+slot clears, the suggestion is `hidden: true` and the row says so, because a
+designator printed where nobody can read it is worse than one not printed.
+
+### Writes
+
+Validated whole, then applied whole, the discipline `view_state` established: a
+misspelled key, a non-finite number, a `size_mm` outside 0.2–10 mm (cap height,
+**never clamped**) or a footprint-local offset past ±500 mm changes *nothing*
+and is refused by name. `changed` lists only the fields that really moved, and a
+write that lands is **exactly one undo step**. `hidden: true` prints no
+designator at all, matching the emitter's rule for a footprint whose reference is
+authored hidden.
+
+### Scope — the fabrication path is unchanged
+
+This verb moves the **live panel's** label: the canvas redraws it and panel state
+keeps it across a save/restore. It does **not** reach the fab. The designator
+anchor is a *footprint* fact everywhere on the fabrication path — the Gerber
+emitter and the DRC silk projection both read it through
+`refdes_anchor.effective_reference_text(footprint)`, the board wire carries no
+per-component anchor (`PcbComponent.to_board_dict` does not emit one), and the Go
+codec lists `refdes_anchor` in `DerivedComponentKeys`, which the deserialize
+boundary drops and re-derives. Making an agent's anchor reach the fab means
+promoting it from derived to authored board state — a board-schema change, not a
+panel one.
 
 ## The region read (`minerva_pcb_describe_region`)
 

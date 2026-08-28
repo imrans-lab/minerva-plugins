@@ -263,7 +263,11 @@ func _init() -> void:
 	# (122 -> 123): minerva_pcb_board_rules — the Options menu's verb twin
 	# (trace-angle mode, the numeric design rules, grid pitch, snap toggles).
 	# executor:"panel", so the Go pin at 19 backend tools still holds.
-	check("total registered tool count == 123", registered.size() == 123,
+	# (123 -> 124): minerva_pcb_set_refdes — read/move WHERE a component prints
+	# its designator, the verb the new gc9_silk_under_part / gc9_silk_over_silk
+	# advisories hand their suggestion to. executor:"panel", so the Go pin at 19
+	# backend tools still holds.
+	check("total registered tool count == 124", registered.size() == 124,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

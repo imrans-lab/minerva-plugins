@@ -432,8 +432,14 @@ test_add_by_library_ref.gd assertions=48 real-worker
 # edge, the drawn ref above it, the stroke-width margin, and the teeth (the
 # pre-derivation anchor draws inside the switch body). Counted by hand from the
 # check() call sites.
+# 42 -> 57: section 5, minerva_pcb_set_refdes — the read (anchor, empty
+# changed, a board-frame box straddling the label), the move (box translates by
+# the delta, does not resize, changed names both fields), one undo (one history
+# step, the anchor back, the label back), the panel-state round trip (anchor and
+# strokes), the two refusals plus the untouched anchor, and hidden. Counted by
+# hand from the check() call sites: 15 new, none inside a loop.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd assertions=42
+test_part_geometry_contracts.gd assertions=57
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the

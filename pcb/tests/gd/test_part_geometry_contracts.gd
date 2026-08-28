@@ -56,6 +56,7 @@ const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PCBComponent := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const PcbPadRow := preload("res://../../minerva-plugins/pcb/ui/model/pcb_pad_row.gd")
 const PcbLibraryPart := preload("res://../../minerva-plugins/pcb/ui/model/pcb_library_part.gd")
+const PcbRefdesAnchor := preload("res://../../minerva-plugins/pcb/ui/model/pcb_refdes_anchor.gd")
 
 ## Board mm tolerance — coordinates ride through float32 Vector2 and leave
 ## quantized to 0.1 um, so an exact == against a float64 literal is a coin toss.
@@ -82,6 +83,7 @@ func _init() -> void:
 	await _run_two_column_parts_read_columns_as_sides()
 	_run_the_pads_key_is_an_authority_claim()
 	_run_the_drawn_designator_is_the_live_ref()
+	await _run_the_designator_anchor_is_movable()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -641,3 +643,120 @@ func _strokes_match(drawn: Array, want: Array) -> bool:
 					% [i, j, str(got[j]), str(expect[j])])
 				return false
 	return true
+
+
+# ── 5. moving the designator (`minerva_pcb_set_refdes`) ──────────────────────
+#
+# Section 4 states that the label is a RENDER of (ref, anchor). This section
+# states that an agent can move the anchor — and that the reply tells it where
+# the ink went, in the frame the board is drawn in.
+#
+# THE ORACLE IS THE BOX, NOT THE FIELD. Reading back the anchor you just wrote
+# proves only that a dictionary was stored. Every claim below is measured on
+# `bounds` — the board-frame box of the strokes — or on the strokes themselves,
+# so a verb that stored the anchor and never re-rendered fails.
+
+const REFDES_EDITOR := "RefdesProbe"
+const REFDES_REF := "SW2"
+## A deliberate two-axis move, neither component of which is zero: a box that
+## tracked only x, or only the sign of y, cannot pass the translation check.
+const REFDES_DELTA := Vector2(3.5, -1.25)
+
+
+func _refdes_call(host, args: Dictionary) -> Dictionary:
+	var call_args := {"editor_name": REFDES_EDITOR, "component_id": REFDES_REF}
+	call_args.merge(args)
+	return await PanelTools.handle(host, "minerva_pcb_set_refdes", call_args)
+
+
+## The switch of section 4, on a board, with one baseline history state behind
+## it so `undo` has somewhere to land.
+func _refdes_host() -> ModelHost:
+	var host := _host()
+	var sw = host.data.new_component()
+	sw.id = REFDES_REF
+	sw.set_footprint_by_name("SW_EVP-ASAC1A")
+	sw.position = PIVOT_AT
+	sw.pins = {"1": Vector2(-PAD_OFFSET_MM, 0.0), "2": Vector2(PAD_OFFSET_MM, 0.0)}
+	sw.load_footprint_graphics(SWITCH_COURTYARD, SWITCH_ANCHOR)
+	host.data.add_component(sw)
+	host.data.save_to_history("baseline")
+	return host
+
+
+func _box(reply: Dictionary) -> Dictionary:
+	return (reply.get("bounds", {}) as Dictionary)
+
+
+func _run_the_designator_anchor_is_movable() -> void:
+	print("-- 5. minerva_pcb_set_refdes moves the label and says where it went --")
+	var host := _refdes_host()
+	var data = host.data
+
+	var read := await _refdes_call(host, {})
+	check("a read reports the component's resolved anchor",
+		(read.get("anchor", {}) as Dictionary) == SWITCH_ANCHOR)
+	check("…and writes nothing: changed is empty and no history step was pushed",
+		(read.get("changed", []) as Array).is_empty() and data.history.size() == 1)
+	var before := _box(read)
+	check("…and reports a board-frame box that straddles the label above the part",
+		float(before.get("min_x_mm", 0.0)) < PIVOT_AT.x
+			and float(before.get("max_x_mm", 0.0)) > PIVOT_AT.x
+			and float(before.get("max_y_mm", 0.0)) < PIVOT_AT.y)
+
+	# THE MOVE. The box must translate by exactly the delta — that is the only
+	# assertion here that a store-without-render implementation fails.
+	var moved := await _refdes_call(host, {
+		"x_mm": SWITCH_ANCHOR["x_mm"] + REFDES_DELTA.x,
+		"y_mm": SWITCH_ANCHOR["y_mm"] + REFDES_DELTA.y})
+	var after := _box(moved)
+	check("moving the anchor translates the drawn box by exactly that delta",
+		absf(float(after["min_x_mm"]) - float(before["min_x_mm"]) - REFDES_DELTA.x) < EPS_MM
+			and absf(float(after["min_y_mm"]) - float(before["min_y_mm"]) - REFDES_DELTA.y) < EPS_MM)
+	check("…without resizing it — the same glyphs, somewhere else",
+		absf(float(after["width_mm"]) - float(before["width_mm"])) < EPS_MM
+			and absf(float(after["height_mm"]) - float(before["height_mm"])) < EPS_MM)
+	check("…and changed names the two fields that moved, and only those",
+		", ".join(moved.get("changed", []) as Array) == "x_mm, y_mm")
+
+	# ONE UNDO. The verb pairs its write with exactly one history step, so the
+	# label goes back in one press — and the restored component is a NEW object
+	# rebuilt from the snapshot, which is why the anchor has to survive to_dict.
+	check("the write pushed exactly one history step", data.history.size() == 2)
+	check("one undo puts the anchor back", data.undo()
+		and (data.get_component(REFDES_REF).refdes_anchor as Dictionary) == SWITCH_ANCHOR)
+	var restored := await _refdes_call(host, {})
+	check("…and the label is drawn back where it was",
+		absf(float(_box(restored)["min_x_mm"]) - float(before["min_x_mm"])) < EPS_MM
+			and absf(float(_box(restored)["min_y_mm"]) - float(before["min_y_mm"])) < EPS_MM)
+
+	# PANEL STATE. A restore does not re-resolve, so an agent's anchor has to
+	# ride to_dict/from_dict or it is lost the next time the tab is rebuilt.
+	await _refdes_call(host, {"x_mm": 4.75, "size_mm": 1.4})
+	var live = data.get_component(REFDES_REF)
+	var round_tripped = PCBComponent.from_dict(live.to_dict())
+	check("the moved anchor survives a panel-state round trip",
+		(round_tripped.refdes_anchor as Dictionary) == (live.refdes_anchor as Dictionary))
+	check("…and the restored part redraws the same designator from it",
+		round_tripped.refdes_graphics == live.refdes_graphics)
+
+	# REFUSALS. Validated whole, applied whole: a bad argument changes nothing
+	# and names itself. Nothing is clamped — an agent that had its number
+	# silently adjusted would report the number it sent.
+	var anchor_before: Dictionary = (live.refdes_anchor as Dictionary).duplicate()
+	var typo := await _refdes_call(host, {"size": 1.0})
+	check("an unknown key is refused BY NAME",
+		not bool(typo.get("success", true)) and str(typo.get("error", "")).contains("size"))
+	var too_big := await _refdes_call(host, {
+		"size_mm": PcbRefdesAnchor.MAX_SIZE_MM + 1.0})
+	check("a size_mm past the bound is refused, not clamped",
+		not bool(too_big.get("success", true))
+			and str(too_big.get("error", "")).contains("clamp"))
+	check("…and neither refusal touched the anchor",
+		(data.get_component(REFDES_REF).refdes_anchor as Dictionary) == anchor_before)
+
+	# HIDDEN. No designator means no ink, so there is no box to report either.
+	var hidden := await _refdes_call(host, {"hidden": true})
+	check("hidden:true draws no designator and reports no box",
+		data.get_component(REFDES_REF).refdes_graphics.is_empty()
+			and _box(hidden).is_empty())
