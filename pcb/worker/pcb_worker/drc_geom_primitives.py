@@ -540,21 +540,20 @@ def _overlap_point(v1, e1, p1: bool, v2, e2, p2: bool
                    ) -> tuple[float, float] | None:
     """A point lying on the overlap of two overlapping convex cores, or ``None`` if
     they are disjoint. Prefers a vertex of one core contained in the other, else the
-    crossing point of an intersecting edge pair."""
-    if p1:
-        for x, y in v2:
-            if _point_in_convex(v1, x, y):
-                return (x, y)
-    if p2:
-        for x, y in v1:
-            if _point_in_convex(v2, x, y):
-                return (x, y)
-    for a, b in e1:
-        for c, d in e2:
-            ip = _segment_intersection(a, b, c, d)
-            if ip is not None:
-                return ip
-    return None
+    crossing point of an intersecting edge pair.
+
+    CANONICAL: every equally-valid candidate in the chosen tier is enumerated and
+    the lexicographic minimum (x, then y) is returned, so the witness depends only
+    on the GEOMETRY and not on corner winding, shape argument order, or edge
+    enumeration order. A witness that flips when a rect's corners are re-ordered
+    is unreproducible for whoever is chasing the violation."""
+    contained = [(x, y) for x, y in v2 if p1 and _point_in_convex(v1, x, y)]
+    contained += [(x, y) for x, y in v1 if p2 and _point_in_convex(v2, x, y)]
+    if contained:
+        return min(contained)
+    crossings = [ip for a, b in e1 for c, d in e2
+                 if (ip := _segment_intersection(a, b, c, d)) is not None]
+    return min(crossings) if crossings else None
 
 
 def convex_edge_witness(s1, s2

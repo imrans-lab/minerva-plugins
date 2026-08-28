@@ -210,16 +210,40 @@ func _build_fixture_board(d) -> void:
 	u1.id = "U1"
 	u1.position = U1_PIN1
 	u1.pins = {"1": Vector2(0.0, 0.0)}
+	_give_land(u1)
 	d.add_component(u1)
 
 	var u2 = d.new_component()
 	u2.id = "U2"
 	u2.position = U2_PIN1
 	u2.pins = {"1": Vector2(0.0, 0.0)}
+	_give_land(u2)
 	d.add_component(u2)
 
 	d.connect_pin_to_net("SIG", "U1", "1")
 	d.connect_pin_to_net("SIG", "U2", "1")
+
+
+## One authored SMD land per fixture part, centred on the part's only pin.
+##
+## Without it every fixture component is a SKETCH part, and the board-level
+## unfabricable lead (pcb_library_part.board_lead) prefixes EVERY status label
+## this suite reads — the lead is a standing condition of the board, so it is
+## the fixture that is wrong, not the assertion. The land sits at local (0,0),
+## which is where pin "1" already is, so no click target or pin coordinate in
+## this suite moves. Keeping the parts resolvable is also what the real-worker
+## contract needs (see _with_resolvable_footprints).
+func _give_land(comp) -> void:
+	comp.has_pad_geometry = true
+	comp.pads_authored = true
+	comp.pads = [{
+		"number": "1",
+		"type": "smd",
+		"shape": "rect",
+		"position": Vector2.ZERO,
+		"size": Vector2(1.6, 1.6),
+		"layers": ["F.Cu"],
+	}]
 
 
 # ── input helpers (copied convention from test_pcb_hint_refine_loop.gd) ──────
@@ -995,12 +1019,14 @@ func _test_f_bulk_commit_regression() -> void:
 	u3.id = "U3"
 	u3.position = U3_PIN1
 	u3.pins = {"1": Vector2(0.0, 0.0)}
+	_give_land(u3)
 	data.add_component(u3)
 
 	var u4 = data.new_component()
 	u4.id = "U4"
 	u4.position = U4_PIN1
 	u4.pins = {"1": Vector2(0.0, 0.0)}
+	_give_land(u4)
 	data.add_component(u4)
 
 	data.connect_pin_to_net("SIG2", "U3", "1")

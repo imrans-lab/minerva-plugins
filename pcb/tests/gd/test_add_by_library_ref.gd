@@ -291,8 +291,15 @@ func _wired_board() -> WorkerHost:
 	var host := _host()
 	await _add(host, HEADER_REF, J1_AT, "J1")
 	await _add(host, HEADER_REF, J2_AT, "J2")
-	await PanelTools.handle(host, "minerva_pcb_connect_net",
-		{"editor_name": "AddProbe", "net_name": "TESTNET", "pins": ["J1.1", "J2.1"]})
+	# `pins` is [{component, pin}] — the verb refuses bare "J1.1" strings with
+	# invalid_pin. It used to be called with those strings here, so TESTNET was
+	# never declared and section 3's pour was refused for the wrong reason; the
+	# reply is checked so a silent refusal cannot hide the fixture again.
+	var wired: Dictionary = await PanelTools.handle(host, "minerva_pcb_connect_net",
+		{"editor_name": "AddProbe", "net_name": "TESTNET",
+		"pins": [{"component": "J1", "pin": "1"}, {"component": "J2", "pin": "1"}]})
+	check("fixture: TESTNET wired across both headers (got: %s)" % str(wired.get("error", "")),
+		bool(wired.get("success", false)) and host.data.has_net("TESTNET"))
 	return host
 
 
@@ -518,7 +525,8 @@ func _run_a_sketch_part_is_named() -> void:
 	var zoned := await PanelTools.handle(host, "minerva_pcb_create_zone", {
 		"editor_name": "AddProbe", "kind": "copper_pour", "net": "TESTNET",
 		"layer": "top", "outline": _rect(POUR_MIN, POUR_MAX)})
-	check("a copper pour is authored over both headers", bool(zoned.get("success", false)))
+	check("a copper pour is authored over both headers (got: %s)" % str(zoned.get("error", "")),
+		bool(zoned.get("success", false)))
 
 	var refused := _worker_zone_fill(
 		PanelTools.canonical_wire_board(host.data.to_board_dict()))

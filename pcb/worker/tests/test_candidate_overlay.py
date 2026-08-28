@@ -99,7 +99,10 @@ def test_shorting_proposal_is_caught_before_acceptance():
     # Measured, attributed, and located — not merely "something is wrong".
     assert short["measured_mm"] == -0.15
     assert short["required_mm"] == 0.2
-    assert short["closest"] == [10.0, 20.2]
+    # Canonical witness: the land's short edges at y 17.8 / 20.2 are equally deep
+    # crossings of the shorting run, so _overlap_point returns the lexicographic
+    # minimum — stable whichever way the rotation winds the rect's corners.
+    assert short["closest"] == [10.0, 17.8]
     assert short["layer"] == "top"
 
     # Attribution back to the specific ghost route + its revision, so a canvas can

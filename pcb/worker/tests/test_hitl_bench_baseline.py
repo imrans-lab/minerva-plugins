@@ -51,6 +51,28 @@ def _ring_area_mm2(ring: list) -> float:
     return abs(twice) / 2.0
 
 
+def _outline_box(net: str) -> tuple:
+    """The authored outline bbox of the bench's one pour on `net` — the doc's
+    stable handle on a zone, since the reply carries only a hashed id."""
+    pours = [z for z in _bench()["zones"]
+             if z.get("net") == net and z.get("kind", "copper_pour") == "copper_pour"]
+    assert len(pours) == 1, (net, len(pours))
+    xs = [float(p["x_mm"]) for p in pours[0]["outline"]]
+    ys = [float(p["y_mm"]) for p in pours[0]["outline"]]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _fill_inside(zones: list, box: tuple) -> list:
+    """The fill rings of the one reply zone lying inside `box`. A pour's copper
+    never leaves its own outline, so containment identifies it unambiguously."""
+    hit = [z["fill"] for z in zones
+           if all(box[0] <= float(p["x_mm"]) <= box[2]
+                  and box[1] <= float(p["y_mm"]) <= box[3]
+                  for ring in z["fill"] for p in ring)]
+    assert len(hit) == 1, (box, len(hit))
+    return hit[0]
+
+
 def test_connectivity_drc_matches_the_documented_baseline():
     """`drc` connectivity: 5 dangling ends and nothing else, at the five places
     the doc names, with the six partial nets' island counts and the two nets
@@ -109,11 +131,15 @@ def test_pour_fill_areas_match_the_documented_baseline():
     that changes a pour's shape without splitting it leaves the region COUNT
     alone, so the count on its own would not notice.
     """
-    zones = {z["id"]: z["fill"] for z in _result("zone_fill")["zones"]}
+    zones = _result("zone_fill")["zones"]
+    assert len(zones) == 4, [z["id"] for z in zones]
 
-    expected = {"Z3": 104.0, "Z13": 112.0, "Z21A": 70.0, "Z21B": 70.0}
-    assert sorted(zones) == sorted(expected), sorted(zones)
-    for zone_id, area in expected.items():
-        rings = zones[zone_id]
-        assert len(rings) == 1, (zone_id, len(rings))
-        assert round(_ring_area_mm2(rings[0]), 4) == area, zone_id
+    # KEYED BY THE POUR'S NET, not by the doc's name for it: every compiled zone
+    # id is a board-namespaced hash (compile_board._authored_or_ordinal_id), so
+    # "Z3" is a label the doc gives a row and never an id the reply carries. The
+    # bench's authored outline for that net is what places the fill.
+    for name, net, area in (("Z3", "R3_G", 104.0), ("Z13", "R13_G", 112.0),
+                            ("Z21A", "R21_A", 70.0), ("Z21B", "R21_B", 70.0)):
+        rings = _fill_inside(zones, _outline_box(net))
+        assert len(rings) == 1, (name, len(rings))
+        assert round(_ring_area_mm2(rings[0]), 4) == area, name

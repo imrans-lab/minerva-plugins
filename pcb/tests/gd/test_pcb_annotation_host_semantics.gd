@@ -579,8 +579,11 @@ func _test_no_dock_button_for_route_hint() -> void:
 	var tooltips: Array = _button_tooltips(toolbar)
 	check("no Route Hint button on the Annotate strip",
 			not ("Route Hint" in tooltips), str(tooltips))
+	# Arrow and Text, not Polyline: only kinds whose author_ui() is non-null get
+	# a button, and the core Polyline kind registers none either — so naming it
+	# here would prove nothing about the pass having run.
 	check("core generic kinds still got buttons (the button pass really ran)",
-			"Arrow" in tooltips and "Polyline" in tooltips, str(tooltips))
+			"Arrow" in tooltips and "Text" in tooltips, str(tooltips))
 	toolbar.free()
 
 
