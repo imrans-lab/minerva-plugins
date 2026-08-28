@@ -4007,10 +4007,10 @@ static func _offending_nets(result: Dictionary) -> String:
 	return ", ".join(nets)
 
 
-## New AnnotationAuthorTool instance for a route-flow cluster key. Deliberately
-## bypasses kind.author_ui() (see SingleTraceAuthorTool's class doc) — the
-## kind's author_ui() stays wired to the generic waypoint tool for the dock's
-## own per-kind button.
+## New AnnotationAuthorTool instance for a route-flow cluster key. These are
+## built here rather than through kind.author_ui() (which returns null, so the
+## annotation dock shows no route-hint button): author_ui() is one tool per
+## kind, and this cluster needs three.
 func _new_route_flow_tool(kind_key: String) -> AnnotationAuthorTool:
 	match kind_key:
 		"single_trace":

@@ -22,6 +22,7 @@ extends SceneTree
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const LAYOUT_PATH := "res://../../minerva-plugins/pcb/ui/panel_layout.gd"
 const CANVAS_PATH := "res://../../minerva-plugins/pcb/ui/pcb_canvas.gd"
+const KIND_PATH := "res://../../minerva-plugins/pcb/ui/kinds/pcb_route_hint_kind.gd"
 
 var _pass := 0
 var _fail := 0
@@ -478,6 +479,22 @@ func _test_tool_buttons_render() -> void:
 	for key in expected_route_flow_keys:
 		check("route-flow button registered for \"%s\"" % key,
 			route_flow_buttons.has(key) and (route_flow_buttons[key] as Button) in all_buttons)
+
+	# Each key must still build its own tool. pcb_route_hint's author_ui()
+	# returns null (so the annotation dock offers no route-hint button), which
+	# makes this factory the only path these three tools have to the overlay.
+	var KindScript := load(KIND_PATH)
+	var expected_route_flow_tools := {
+		"single_trace": KindScript.SingleTraceAuthorTool,
+		"edit_hint": KindScript.BendHandleEditTool,
+		"add_via": KindScript.ViaInsertTool,
+	}
+	for key in expected_route_flow_tools:
+		var flow_tool: Object = panel._new_route_flow_tool(key)
+		check("_new_route_flow_tool(\"%s\") builds its own tool" % key,
+			flow_tool != null and flow_tool.get_script() == expected_route_flow_tools[key])
+	check("_new_route_flow_tool returns null for an unknown key",
+		panel._new_route_flow_tool("not_a_route_tool") == null)
 
 	# Named single-instance buttons: Delete (DrawFlow) + Propose (HintsFlow),
 	# neither of which belongs to either dict above (Delete is a plain action

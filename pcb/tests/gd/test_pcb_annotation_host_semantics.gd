@@ -69,7 +69,7 @@ func _init() -> void:
 	_test_kind_validate_payload()
 	_test_kind_path_hit_test()
 	_test_kind_summary_string()
-	_test_author_tool_multiclick()
+	_test_no_dock_button_for_route_hint()
 	_test_capabilities()
 	_test_build_route_hint_envelope_width_mm_absent_by_default()
 	_test_render_mode_gate()
@@ -558,59 +558,43 @@ func _test_kind_summary_string() -> void:
 			kind.summary(sparse).begins_with("route hint, B.Cu"), kind.summary(sparse))
 
 
-# ── 15. author tool multi-click flow ──────────────────────────────────────────
+# ── 15. no annotation-dock button for pcb_route_hint ──────────────────────────
 
-func _test_author_tool_multiclick() -> void:
-	print("\n-- author tool: N clicks + commit → annotation_ready with N waypoints --")
-	var host = _Host.new()   # no canvas → identity transform, screen == doc
+## AnnotationToolbar adds one Annotate-strip button per registered kind whose
+## author_ui() is non-null. pcb_route_hint returns null, so the strip must show
+## no "Route Hint" toggle (it renders as the abbreviation "(R)") — route
+## authoring lives in the panel's Intents cluster, which builds its tools
+## directly instead of through author_ui().
+func _test_no_dock_button_for_route_hint() -> void:
+	print("\n-- pcb_route_hint: author_ui() null → toolbar adds no button --")
 	var kind = _Kind.new()
-	var tool = kind.author_ui()
-	check("author_ui() returns a tool", tool != null)
-	if tool == null:
-		return
-	tool.on_activate(host)
+	check("author_ui() returns null", kind.author_ui() == null)
 
-	var captured := {"env": null, "cancels": 0}
-	tool.annotation_ready.connect(func(e: Dictionary) -> void: captured.env = e)
-	tool.cancelled.connect(func() -> void: captured.cancels += 1)
+	# The real toolbar fed the real pcb registry: the per-kind button pass must
+	# skip pcb_route_hint while still adding the core generics, which is what
+	# proves the pass ran at all rather than silently doing nothing.
+	var host = _Host.new()
+	var toolbar := AnnotationToolbar.new()
+	toolbar.set_registry(host.get_registry())
+	var tooltips: Array = _button_tooltips(toolbar)
+	check("no Route Hint button on the Annotate strip",
+			not ("Route Hint" in tooltips), str(tooltips))
+	check("core generic kinds still got buttons (the button pass really ran)",
+			"Arrow" in tooltips and "Polyline" in tooltips, str(tooltips))
+	toolbar.free()
 
-	# Three distinct clicks, then a repeat click on the last waypoint
-	# (double-click — the commit gesture; the overlay only forwards Escape keys).
-	tool.on_pointer_down(Vector2(0.0, 0.0), MOUSE_BUTTON_LEFT, 0)
-	tool.on_pointer_down(Vector2(10.0, 0.0), MOUSE_BUTTON_LEFT, 0)
-	tool.on_pointer_down(Vector2(10.0, 10.0), MOUSE_BUTTON_LEFT, 0)
-	tool.on_pointer_down(Vector2(10.0, 10.0), MOUSE_BUTTON_LEFT, 0)
 
-	check("double-click commit emitted annotation_ready", captured.env != null)
-	if captured.env != null:
-		var wps: Array = (captured.env as Dictionary).get("kind_payload", {}).get("waypoints", [])
-		check("committed payload carries 3 waypoints", wps.size() == 3, str(wps))
-		var anc: Dictionary = (captured.env as Dictionary).get("anchor", {})
-		check("anchor sits at the first waypoint (0,0)",
-				anc.get("id", {}).get("x", -1) == 0.0 and anc.get("id", {}).get("y", -1) == 0.0)
-		check("committed kind is pcb_route_hint", str((captured.env as Dictionary).get("kind", "")) == "pcb_route_hint")
-
-	# Double-click commit: two distinct clicks then a repeat of the last point.
-	var tool2 = kind.author_ui()
-	tool2.on_activate(host)
-	var cap2 := {"env": null}
-	tool2.annotation_ready.connect(func(e: Dictionary) -> void: cap2.env = e)
-	tool2.on_pointer_down(Vector2(1.0, 1.0), MOUSE_BUTTON_LEFT, 0)
-	tool2.on_pointer_down(Vector2(5.0, 1.0), MOUSE_BUTTON_LEFT, 0)
-	tool2.on_pointer_down(Vector2(5.0, 1.0), MOUSE_BUTTON_LEFT, 0)   # double-click → commit
-	check("double-click commit emitted with 2 waypoints",
-			cap2.env != null and (cap2.env as Dictionary).get("kind_payload", {}).get("waypoints", []).size() == 2)
-
-	# Escape cancels an in-progress path (no annotation_ready, one cancelled).
-	var tool3 = kind.author_ui()
-	tool3.on_activate(host)
-	var cap3 := {"env": null, "cancels": 0}
-	tool3.annotation_ready.connect(func(e: Dictionary) -> void: cap3.env = e)
-	tool3.cancelled.connect(func() -> void: cap3.cancels += 1)
-	tool3.on_pointer_down(Vector2(2.0, 2.0), MOUSE_BUTTON_LEFT, 0)
-	tool3.on_pointer_down(Vector2(3.0, 3.0), MOUSE_BUTTON_LEFT, KEY_ESCAPE)
-	check("Escape cancelled the path (no annotation, one cancelled)",
-			cap3.env == null and cap3.cancels == 1)
+## Tooltip text of every Button under a node. The toolbar always tooltips a
+## kind's full display_name, even when the visible label is a 1–2 char
+## abbreviation, so tooltips are the label-independent way to ask which kinds
+## were given a button.
+func _button_tooltips(node: Node) -> Array:
+	var out: Array = []
+	for child in node.get_children():
+		if child is Button:
+			out.append(str((child as Button).tooltip_text))
+		out.append_array(_button_tooltips(child))
+	return out
 
 
 # ── 16. capabilities reflect reality ──────────────────────────────────────────

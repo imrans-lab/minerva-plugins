@@ -202,133 +202,26 @@ func accepted_anchor_types() -> Array:
 	return [_ANCHOR_TYPE_BOARD_POINT, _ANCHOR_TYPE_PAD]
 
 
-# ── Authoring (waypoint-click) ────────────────────────────────────────────────
+# ── Authoring ──────────────────────────────────────────────────────────────────
 
-## Fresh instance per activation (AnnotationText pattern) so the toolbar can
-## deactivate-then-reactivate without state leak.
+## Null on purpose: AnnotationToolbar gives every registered kind with a
+## non-null author_ui() one dock button, and route authoring is not a single
+## generic gesture. The panel's Intents group instantiates SingleTraceAuthorTool
+## / BendHandleEditTool / ViaInsertTool directly (PCBPanel._new_route_flow_tool),
+## so a non-null return here would only add a duplicate, less specific entry
+## point to the annotation dock.
 func author_ui() -> Object:
-	return WaypointRouteHintAuthorTool.new()
+	return null
 
 
-## Waypoint-click authoring: each left click appends a waypoint (previewed via
-## draw_preview); a double-click (a left click landing on the last waypoint)
-## commits; Escape (via the mods channel — the only key AnnotationOverlay
-## forwards to author tools) or right-click cancels, matching the arrow tool's
-## cancel gestures. On commit the tool emits annotation_ready with a polyline
-## route hint anchored at the FIRST waypoint — envelope construction is
-## delegated to the host's build_route_hint_envelope so the toolbar path and
-## the MCP/test path share one builder.
-class WaypointRouteHintAuthorTool:
-	extends AnnotationAuthorTool
-
-	## Same-position epsilon (board mm) for double-click commit detection.
-	const _COMMIT_EPSILON := 0.001
-
-	var _host: AnnotationHost = null
-	var _waypoints: Array = []       # Array[Vector2] in document (board-mm) space
-	var _preview: Vector2 = Vector2.ZERO
-	var _has_preview: bool = false
-
-	func on_activate(host: AnnotationHost) -> void:
-		_host = host
-		_reset()
-
-	func on_deactivate() -> void:
-		# Clean reset on tool-switch WITHOUT emitting cancelled (arrow convention).
-		_reset()
-		_host = null
-
-	func on_pointer_down(pos: Vector2, button: int, mods: int) -> bool:
-		# Escape (via mods channel) → cancel an in-progress path.
-		if mods == KEY_ESCAPE:
-			if not _waypoints.is_empty():
-				_reset()
-				cancelled.emit()
-				return true
-			return false
-
-		# Right-click → cancel (consistency with the arrow author tool).
-		if button == MOUSE_BUTTON_RIGHT:
-			if not _waypoints.is_empty():
-				_reset()
-				cancelled.emit()
-				return true
-			return false
-
-		if button != MOUSE_BUTTON_LEFT:
-			return false
-		if _host == null:
-			return false
-
-		var doc_pos: Vector2 = _host.transform_screen_to_doc(pos)
-
-		# Double-click semantics: a left click landing on the last waypoint commits.
-		if not _waypoints.is_empty():
-			var last: Vector2 = _waypoints[_waypoints.size() - 1]
-			if last.distance_to(doc_pos) <= _COMMIT_EPSILON:
-				return _try_commit()
-
-		_waypoints.append(doc_pos)
-		_preview = doc_pos
-		_has_preview = true
-		return true
-
-	func on_pointer_move(pos: Vector2) -> void:
-		if _host == null or _waypoints.is_empty():
-			return
-		_preview = _host.transform_screen_to_doc(pos)
-		_has_preview = true
-
-	func draw_preview(ctx: AnnotationRenderContext) -> void:
-		if ctx == null or _waypoints.is_empty():
-			return
-		var base := AnnotationRenderContext.author_color("human")
-		var faded := Color(base.r, base.g, base.b, 0.5)
-		for i in range(1, _waypoints.size()):
-			ctx.draw_line(_waypoints[i - 1], _waypoints[i], faded, 1.0)
-		if _has_preview:
-			ctx.draw_line(_waypoints[_waypoints.size() - 1], _preview, faded, 1.0)
-
-	func _try_commit() -> bool:
-		if _waypoints.is_empty():
-			return false
-		if _host == null or not _host.has_method("build_route_hint_envelope"):
-			push_warning("[pcb_route_hint] author tool active without a pcb host; ignoring commit")
-			_reset()
-			return false
-		var first: Vector2 = _waypoints[0]
-		var wp_arrays: Array = []
-		for wp in _waypoints:
-			wp_arrays.append([wp.x, wp.y])
-		var envelope: Dictionary = _host.call(
-			"build_route_hint_envelope", first.x, first.y, "", "F.Cu", "waypoint", wp_arrays, "human")
-		_reset()
-		annotation_ready.emit(envelope)
-		return true
-
-	func _reset() -> void:
-		_waypoints = []
-		_preview = Vector2.ZERO
-		_has_preview = false
-
-	## Test/introspection accessor — current in-progress waypoint count.
-	func waypoint_count() -> int:
-		return _waypoints.size()
-
-
-## Single-trace authoring: full click-flow state machine (pcb-ui-native-cluster
-## §5, WC-3 round; native parity PCBCanvas.gd@pre-cutover-2026-07-07 ~L2406
-## click flow / ~L1378 live preview — re-implemented, not copied). Distinct
-## from WaypointRouteHintAuthorTool above: that tool stays wired to
-## kind.author_ui() (the dock's generic per-kind "Route Hint" button keeps
-## waypoint-only authoring). This tool is instantiated directly by PCBPanel's
-## dedicated route-flow toolbar cluster (see PCBPanel.gd
-## _build_route_flow_cluster / _new_route_tool) and pushed onto the shared
-## platform AnnotationOverlay — kind.author_ui() is intentionally NOT extended
-## to return this tool, since a kind's author_ui() contract is one-tool-per-kind
-## and the generic dock button must keep its existing (pre-WC-3) behavior.
+## Single-trace authoring: full click-flow state machine (native parity
+## PCBCanvas.gd@pre-cutover-2026-07-07 ~L2406 click flow / ~L1378 live preview
+## — re-implemented, not copied). Instantiated directly by PCBPanel's
+## route-flow cluster (PCBPanel._new_route_flow_tool) and pushed onto the
+## shared platform AnnotationOverlay, not by kind.author_ui(): author_ui() is
+## one tool per kind, and this cluster needs three.
 ##
-## State machine (verbatim, contract §5):
+## State machine:
 ##   IDLE --click pad--> DRAWING(source=pad)     # pad_at snap, radius 5mm
 ##   IDLE --click empty--> DRAWING(source=point)
 ##   DRAWING --click empty--> append waypoint
@@ -344,8 +237,8 @@ class WaypointRouteHintAuthorTool:
 ## (near-)identical screen pixels: the first press's on_pointer_down "click
 ## empty" branch appends a waypoint at that doc-space point; the second
 ## press's on_pointer_down finds that new point within _COMMIT_EPSILON of
-## itself and commits — the exact "click lands on the last placed point"
-## technique WaypointRouteHintAuthorTool already uses above. A programmatic
+## itself and commits — the "click lands on the last placed point"
+## technique. A programmatic
 ## fallback (KEY_ENTER, forwarded via the same pseudo-pointer convention as
 ## Escape/Delete) is ALSO wired for callers that can't reproduce same-pixel
 ## double-click timing (tests, agents): commits dest=point at the last
@@ -355,7 +248,7 @@ class SingleTraceAuthorTool:
 	extends AnnotationAuthorTool
 
 	## Same-position epsilon (board mm) for double-click / Enter commit
-	## detection — matches WaypointRouteHintAuthorTool's constant exactly.
+	## detection.
 	const _COMMIT_EPSILON := 0.001
 	# 2mm, not the native 5mm: on fine-pitch boards a 5mm commit radius
 	# grabbed the destination pad while the user was still placing bends
@@ -2160,8 +2053,7 @@ static func _anchor_position(annotation: Dictionary) -> Vector2:
 ##     proposal annotations — retired S5/C4b, DCR 019f7095c395; a pre-cutover
 ##     .pcbskel may still carry one until migration drops it): `waypoints`
 ##     already carries EVERY point including source and dest
-##     (WaypointRouteHintAuthorTool / the router's routed polyline both build
-##     it that way) — used as-is.
+##     (the router's routed polyline builds it that way) — used as-is.
 ##   * Interior-only (human-authored "single_trace" hints, contract §5 —
 ##     kind_payload.waypoints holds INTERIOR points only): reconstructed here
 ##     as anchor → interior waypoints → dest_point. dest_point is a

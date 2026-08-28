@@ -1207,8 +1207,9 @@ func _backfill_route_hint_dest_point(stored: Dictionary) -> void:
 
 
 ## Build a conformant pcb_route_hint envelope (no id — add_annotation_v2 assigns
-## one). x_mm/y_mm are board millimetres. Shared by add_route_hint_at (MCP/test
-## path) and the kind's RouteHintAuthorTool (toolbar click-to-author path).
+## one). x_mm/y_mm are board millimetres. Shared by add_route_hint_at (the
+## MCP/test path) and by the panel's Intents authoring tools, so every hint —
+## typed or clicked — is built by one function.
 ##
 ## width_mm is Variant, NOT float, and defaults to null (019fa73a191e): a
 ## GDScript float cannot be null, so a typed `float = 0.25` default had no way
