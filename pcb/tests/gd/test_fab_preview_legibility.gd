@@ -17,7 +17,9 @@ extends SceneTree
 ##      edit that darkens an ink reds here. The end-to-end measurement runs a
 ##      VERBATIM emitted silk layer (worker fab_preview output, captured below)
 ##      through the production recolour + rasterize path and samples the
-##      rasterized PIXEL.
+##      rasterized PIXEL — at a coordinate solved from the fixture's OWN path
+##      geometry, so the assertion reads the stroke rather than whatever the
+##      alpha channel happens to peak at.
 ##
 ##      NOT A SCREENSHOT, deliberately and of necessity: headless Godot has no
 ##      rendering device, and minerva_pcb_get_image degrades to a null envelope
@@ -74,6 +76,26 @@ const SILK_SVG := """<?xml version="1.0" encoding="utf-8"?>
     <path d="M 4.0 -15.0 L 36.0 -15.0" fill="none" stroke="black" stroke-linecap="round" stroke-linejoin="round" stroke-width="0.12"/>
   </g>
 </svg>"""
+
+## WHERE THAT STROKE IS, in the same path coordinates written above: the long
+## stroke's two ends, and a point that lies on NEITHER stroke. Sampling a KNOWN
+## coordinate is what makes 1h an assertion about the stroke — a whole-image
+## alpha maximum is satisfied by an opaque ground, or by any other ink, with
+## the stroke entirely absent.
+const STROKE_A := Vector2(4.0, -15.0)
+const STROKE_B := Vector2(36.0, -15.0)
+const OFF_STROKE := Vector2(20.0, -25.0)
+
+## The fixture's own viewBox, verbatim from its header — the second half of the
+## path-to-pixel mapping.
+const VIEWBOX_MIN := Vector2(-0.025, -30.025)
+const VIEWBOX_SIZE := Vector2(40.05, 30.049999999999997)
+
+## Half the sampling window, in pixels. A 0.12 mm stroke across a 40.05 mm
+## viewBox is under 2 px at these raster widths, so the window absorbs the
+## rounding between the exact coordinate and the pixel grid while staying far
+## narrower than the gap to the other stroke.
+const SAMPLE_R := 2
 
 ## A 10 x 300 mm board outline — the 1:30 aspect a WIDTH-only raster cap lets
 ## through. Taken to MAX_RASTER_PX wide it would be 48000 px tall.
@@ -243,7 +265,7 @@ func _run_contrast() -> void:
 	# ── THE END-TO-END MEASUREMENT ───────────────────────────────────────────
 	# Production recolour + production rasterize over a VERBATIM emitted layer,
 	# then the actual pixel.
-	print("-- 1d..1h: the rasterized silk pixel itself --")
+	print("-- 1d..1h3: the rasterized silk pixel itself --")
 	var ink: Color = FabPreview.ink_for("f_silks")
 	var recoloured: String = FabPreview.recolor_svg(SILK_SVG, ink)
 	check("1d: the recolour is total — no black literal survives",
@@ -261,13 +283,21 @@ func _run_contrast() -> void:
 	check("1g: ...at the width it will be drawn at, not the intrinsic 96-dpi size (%d px)"
 		% img.get_width(), float(img.get_width()) >= FabPreview.MIN_RASTER_PX - 1.0)
 
-	var best := _brightest_covered_pixel(img)
-	var alpha: float = best.a * FabPreview.draw_alpha("f_silks", "f_silks")
-	var on_screen: Color = FabPreview.composite(best, alpha, FabPreview.GROUND)
+	var stroke_uv := _path_to_uv((STROKE_A + STROKE_B) * 0.5)
+	var stroke := _covered_pixel_at(img, stroke_uv)
+	check("1h1: the long stroke is WHERE THE SVG PUTS IT — its midpoint is inked (coverage %.2f)"
+		% stroke.a, stroke.a > 0.0, "uv=%s in %dx%d" % [
+			str(stroke_uv), img.get_width(), img.get_height()])
+	var off := _covered_pixel_at(img, _path_to_uv(OFF_STROKE))
+	check("1h2: ...and a coordinate on no stroke is bare (coverage %.2f) — artwork, not a field"
+		% off.a, off.a <= 0.01)
+
+	var alpha: float = stroke.a * FabPreview.draw_alpha("f_silks", "f_silks")
+	var on_screen: Color = FabPreview.composite(stroke, alpha, FabPreview.GROUND)
 	var measured: float = FabPreview.contrast_ratio(on_screen, FabPreview.GROUND)
-	check("1h: a sampled silk stroke pixel reads %.2f:1 against its ground (need %.1f, coverage %.2f)"
-		% [measured, MIN_CONTRAST, best.a], measured >= MIN_CONTRAST,
-		"pixel=%s composited=%s" % [str(best), str(on_screen)])
+	check("1h3: that stroke pixel reads %.2f:1 against its ground (need %.1f, coverage %.2f)"
+		% [measured, MIN_CONTRAST, stroke.a], measured >= MIN_CONTRAST,
+		"pixel=%s composited=%s" % [str(stroke), str(on_screen)])
 
 	# ── THE MEMORY BOUND IS ON THE RASTER, NOT ON ITS WIDTH ──────────────────
 	# A width-only cap lets a tall board straight through: 1:30 at
@@ -287,23 +317,38 @@ func _run_contrast() -> void:
 			"longest=%.0f cap=%.0f" % [longest, FabPreview.MAX_RASTER_DIMENSION_PX])
 
 
-## The most-covered stroke pixel in the raster — the ink the eye actually lands
-## on. Antialiased edges are dimmer by construction and are not what "is this
-## stroke readable" asks about.
-func _brightest_covered_pixel(img: Image) -> Color:
+## One of the fixture's path coordinates as a FRACTION of the raster, whatever
+## width it was rasterized at.
+##
+## Two steps, both read off the SVG above and nothing else:
+##
+##   1. the one group transform, in SVG order — translate(0.025, 30.025), the
+##      scale(1, -1) y flip, then translate(-0.025, 0.025) — which collapses to
+##      (x, -y - 30.0) in user space;
+##   2. the viewBox normalization.
+##
+## The long stroke's midpoint therefore lands at exactly (0.5, 0.5), a number
+## that can be checked by hand against the fixture.
+func _path_to_uv(p: Vector2) -> Vector2:
+	var user := Vector2(p.x + 0.025, -(p.y + 30.025)) + Vector2(-0.025, 0.025)
+	return (user - VIEWBOX_MIN) / VIEWBOX_SIZE
+
+
+## The most-covered pixel within SAMPLE_R of `uv` — the ink the eye lands on at
+## a coordinate the caller already knows the artwork should occupy. Antialiased
+## edges are dimmer by construction and are not what "is this stroke readable"
+## asks about; coverage of ZERO here means the stroke is not drawn at all.
+func _covered_pixel_at(img: Image, uv: Vector2) -> Color:
+	var cx := int(roundf(uv.x * float(img.get_width())))
+	var cy := int(roundf(uv.y * float(img.get_height())))
 	var best := Color(0, 0, 0, 0)
-	var h := img.get_height()
-	# Rows from the middle outward: the fixture's long stroke crosses the centre,
-	# so a fully covered pixel is found in the first row rather than after a
-	# quarter-million get_pixel calls.
-	for i in h:
-		var y := (h / 2 + i) % h
-		for x in img.get_width():
-			var px := img.get_pixel(x, y)
+	for dy in range(-SAMPLE_R, SAMPLE_R + 1):
+		for dx in range(-SAMPLE_R, SAMPLE_R + 1):
+			var px := img.get_pixel(
+				clampi(cx + dx, 0, img.get_width() - 1),
+				clampi(cy + dy, 0, img.get_height() - 1))
 			if px.a > best.a:
 				best = px
-				if best.a >= 0.999:
-					return best
 	return best
 
 

@@ -41,9 +41,14 @@ would re-bless cleanly forever.
 **Re-blessed again when the board went to ONE typeface.** Reference designators
 used to be drawn from a separate 26-glyph table (a subset of KiCad's
 GPL-2.0-or-later Newstroke, embedded in a proprietary repo); they now use the
-same in-house `board_font.py` as board legend. EXACTLY the four `*-F_SilkS.gbr`
-files moved — `board`, `drilltest`, `coupon_jlc1`, `quadlayer` — and within
-them only `D01`/`D02` coordinate lines under the existing `%ADD10C,0.15*%`
+same in-house `board_font.py` as board legend. EXACTLY five `*-F_SilkS.gbr`
+artifacts moved anywhere in the repository — the four in THIS directory
+(`board`, `drilltest`, `coupon_jlc1`, `quadlayer`), plus
+`../../oracle/golden_emitter/board-F_SilkS.gbr`, which is a SECOND, separate
+capture of the same `board` fixture (the emitter drift-pin snapshot) and
+therefore always moves with this directory's `board-F_SilkS.gbr`. The full set
+is enumerable with `git diff --stat <base>..HEAD -- '*.gbr'`. Within all five,
+only `D01`/`D02` coordinate lines under the existing `%ADD10C,0.15*%`
 aperture: no aperture was added, removed or resized, no copper/mask/paste/
 drill/edge/gbrjob byte changed, and on `coupon_jlc1` the first 153 lines (the
 owl, its baked "TEST COUPON" legend, the board text) are untouched — the whole

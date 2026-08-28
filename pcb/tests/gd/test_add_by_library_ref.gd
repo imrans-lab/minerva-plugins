@@ -16,11 +16,11 @@ extends SceneTree
 ## ── WHAT EACH SECTION COVERS ─────────────────────────────────────────────────
 ##
 ##   1. A LIBRARY REF LANDS REAL GEOMETRY. The part added through the verb
-##      carries the pads the WORKER says that footprint has — the two answers
-##      come from the same library through two different calls, so a transport
-##      that reshaped, truncated or invented geometry disagrees here. Silk and
-##      courtyard arrive with it, which is what makes the part fabricable
-##      rather than merely pad-bearing.
+##      carries the pads the LOCKED FOOTPRINT FILE authors. The oracle is that
+##      .kicad_mod, parsed here — asking the worker a second time would compare
+##      one library read against another, and geometry that is consistently
+##      wrong on both sides would pass. Silk and courtyard arrive with it,
+##      which is what makes the part fabricable rather than merely pad-bearing.
 ##
 ##   2. THE BOARD STILL CHECKS. The real worker's geometric DRC over the board
 ##      with the added part is DETERMINATE and clean. This is the whole point:
@@ -31,8 +31,12 @@ extends SceneTree
 ##      indeterminate. That is CORRECT and stays (fail-closed is the hermetic
 ##      rule), so what this section pins is that nobody has to guess why — the
 ##      add reply names it, the panel's own census names it, and the worker's
-##      refusal names the component. Section 2 is the control that makes this
-##      section's failure attributable to the sketch part and nothing else.
+##      refusal names the component. The POUR the status lead promises is
+##      driven for real over the same channel the panel uses: an authored pour
+##      refuses to fill while the sketch part is on the board, names it, and
+##      fills again the moment it is deleted. Section 2 is the control that
+##      makes this section's failure attributable to the sketch part and
+##      nothing else.
 ##
 ##   4. AN UNRESOLVABLE REF ADDS NOTHING. A ref the library does not have is
 ##      refused by name, and the board is byte-identical afterwards — the
@@ -57,6 +61,12 @@ const HEADER_REF := "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
 ## A ref of the right SHAPE that no layer can supply.
 const ABSENT_REF := "NoSuchLibrary_9x9mm:NoSuchPart_Vertical"
 
+## THE ORACLE FILE: the authored footprint HEADER_REF names, and the sha256
+## footprints.lock.json pins it at. Both sides of the add path read this file
+## through the worker; this suite reads the bytes.
+const HEADER_MOD_PATH := PLUGIN_ROOT + "/library/footprints/Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod"
+const HEADER_MOD_SHA := "d5ac19c4d2a8248d6bdb67fee2db15f11d6a63af7c5bd63dd6faf23103b60c1c"
+
 ## Where the two headers go. Far apart and well inside the outline, so a clean
 ## geometric verdict in section 2 is about the parts resolving and not about
 ## some clearance the fixture happened to break.
@@ -64,6 +74,12 @@ const J1_AT := Vector2(10.0, 10.0)
 const J2_AT := Vector2(30.0, 10.0)
 ## The sketch part, placed clear of both.
 const SKETCH_AT := Vector2(20.0, 25.0)
+
+## The pour section 3 authors over both headers. Well inside the 40x40 outline
+## and far larger than anything the compiler carves out of it, so an empty fill
+## is about the fill being REFUSED and not about a pour with nowhere to go.
+const POUR_MIN := Vector2(5.0, 5.0)
+const POUR_MAX := Vector2(35.0, 15.0)
 
 var _pass := 0
 var _fail := 0
@@ -192,6 +208,38 @@ func _worker_geometric_drc(board: Dictionary) -> Dictionary:
 	return inner if inner is Dictionary else {}
 
 
+## The pour fill, over the SAME channel and payload the panel's own
+## PCBPanel.zone_fill_check sends. The canned stand-in mirrors the reply shape
+## and answers the FILLABLE case, so it cannot satisfy the refusal arm.
+func _worker_zone_fill(board: Dictionary) -> Dictionary:
+	return _worker_call("pcb.zone_fill", {"board": board},
+		{"ok": true, "result": {"zones": [
+			{"id": "canned", "fill": [_rect(POUR_MIN, POUR_MAX)]}]}})
+
+
+## Total filled regions across every pour in a zone_fill reply. A pour whose
+## copper was never computed is OMITTED from the reply, so absent and empty
+## both count as zero here — which is what "the fill did not come back" means.
+func _pour_regions(reply: Dictionary) -> int:
+	var result = reply.get("result")
+	if not bool(reply.get("ok", false)) or not (result is Dictionary):
+		return 0
+	var total := 0
+	for entry in (result as Dictionary).get("zones", []):
+		if entry is Dictionary:
+			var fill = (entry as Dictionary).get("fill")
+			if fill is Array:
+				total += (fill as Array).size()
+	return total
+
+
+## A closed rectangular outline in the {x_mm, y_mm} point form the zone verbs
+## and the fill reply both speak.
+func _rect(a: Vector2, b: Vector2) -> Array:
+	return [{"x_mm": a.x, "y_mm": a.y}, {"x_mm": b.x, "y_mm": a.y},
+		{"x_mm": b.x, "y_mm": b.y}, {"x_mm": a.x, "y_mm": b.y}]
+
+
 # ── the host: duck-typed, with the one worker bridge the add path needs ───────
 
 class WorkerHost extends Node:
@@ -267,18 +315,27 @@ func _run_library_ref_lands_real_geometry() -> void:
 	check("the reply names the LIBRARY LAYER that supplied it",
 		not str(reply.get("footprint_layer", "")).is_empty())
 
-	# THE INDEPENDENT ORACLE: ask the worker directly what that footprint's pads
-	# are, and compare against what the component ended up holding. Two calls,
-	# one library; a transport that reshaped or invented geometry fails here.
-	var direct := _worker_footprint_geometry(HEADER_REF, "J1")
-	var direct_pads: Array = (direct.get("result", {}) as Dictionary).get("pads", [])
+	# THE INDEPENDENT ORACLE: the authored footprint FILE, parsed here. A second
+	# call to the worker would compare one library read against another, so
+	# geometry that is wrong the same way on both sides would pass; the
+	# .kicad_mod is the source those reads descend from and nothing in the add
+	# path can reach it.
+	var authored := _authored_pads()
+	check("the oracle is the footprint the lock pins (sha256 matches)",
+		FileAccess.get_sha256(ProjectSettings.globalize_path(HEADER_MOD_PATH))
+			== HEADER_MOD_SHA)
+	var want_numbers: Array = authored.keys()
+	want_numbers.sort()
+	check("…and that file authors two pads (got %s)" % str(want_numbers),
+		want_numbers == ["1", "2"])
+
 	var comp = host.data.get_component("J1")
-	check("the worker itself reports two pads for this footprint (got %d)" % direct_pads.size(),
-		direct_pads.size() == 2)
-	check("the component holds exactly the pads the worker reported",
-		comp != null and comp.pads.size() == direct_pads.size())
-	check("…at the worker's own local positions and sizes",
-		comp != null and _pads_agree(comp.pads, direct_pads))
+	check("the component holds exactly the footprint's pad numbers (got %s)"
+			% str(_pad_numbers(comp)), _pad_numbers(comp) == want_numbers)
+	check("…at the authored local positions, sizes, drills and shapes",
+		_lands_match_authored(comp, authored))
+	check("…and the pose lands each of them at the requested board coordinate",
+		_pins_match_authored(comp, authored, J1_AT))
 
 	# Silk/courtyard are what make it a PART rather than a pair of holes: a
 	# fabricable add has to bring the body outline with the copper.
@@ -286,10 +343,6 @@ func _run_library_ref_lands_real_geometry() -> void:
 		comp != null and comp.graphics.size() > 0)
 	check("the printed reference designator came with it too",
 		comp != null and comp.refdes_graphics.size() > 0)
-
-	# The pin map is rebuilt from the lands, so connect_net can address them.
-	check("its pins are addressable by the footprint's own pad numbers",
-		comp != null and comp.pins.has("1") and comp.pins.has("2"))
 
 	# The board owns the geometry outright now (the FULL rule), so the part
 	# still compiles on a machine whose library lacks the ref.
@@ -308,28 +361,98 @@ func _run_library_ref_lands_real_geometry() -> void:
 	host2.queue_free()
 
 
-## Do two pad lists describe the same copper? Compared by number, local
-## position and size — the fields a fab reads — at the model's own quantum.
-func _pads_agree(held: Array, reported: Array) -> bool:
-	var by_number := {}
-	for p in reported:
-		by_number[str((p as Dictionary).get("number", ""))] = p
-	for pad in held:
+## The authored .kicad_mod's own pad facts, keyed by pad number:
+## {number: {type, shape, position: Vector2, size: Vector2, drill: float}}.
+##
+## Parses the s-expression form directly —
+## `(pad <number> <type> <shape> (at x y) (size w h) (drill d) (layers ...))` —
+## because the point of this oracle is that it shares no code with the resolve
+## path under test.
+func _authored_pads() -> Dictionary:
+	var out := {}
+	var f := FileAccess.open(
+		ProjectSettings.globalize_path(HEADER_MOD_PATH), FileAccess.READ)
+	if f == null:
+		printerr("[test_add_by_library_ref] cannot read the oracle footprint: %s"
+			% HEADER_MOD_PATH)
+		return out
+	var text := f.get_as_text()
+	f.close()
+	var re := RegEx.new()
+	re.compile("\\(pad\\s+(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+\\(at\\s+([-\\d.]+)\\s+([-\\d.]+)\\)\\s+\\(size\\s+([-\\d.]+)\\s+([-\\d.]+)\\)(?:\\s+\\(drill\\s+([-\\d.]+)\\))?")
+	for m in re.search_all(text):
+		out[m.get_string(1)] = {
+			"type": m.get_string(2),
+			"shape": m.get_string(3),
+			"position": Vector2(m.get_string(4).to_float(), m.get_string(5).to_float()),
+			"size": Vector2(m.get_string(6).to_float(), m.get_string(7).to_float()),
+			"drill": m.get_string(8).to_float(),
+		}
+	return out
+
+
+## The pad numbers a component actually holds, sorted.
+func _pad_numbers(comp) -> Array:
+	var out: Array = []
+	if comp == null:
+		return out
+	for pad in comp.pads:
+		out.append(str((pad as Dictionary).get("number", "")))
+	out.sort()
+	return out
+
+
+## One pad's drill diameter, whichever of the model's two encodings it carries
+## (Vector2 for the current form, a bare float for the legacy one).
+func _pad_drill(pad) -> float:
+	var raw = (pad as Dictionary).get("drill", 0.0)
+	if raw is Vector2:
+		return (raw as Vector2).x
+	if raw is Dictionary:
+		return float((raw as Dictionary).get("x", 0.0))
+	return float(raw)
+
+
+## Do the component's lands carry the FILE's numbers? Local position, size,
+## drill, shape and type — the fields a fab reads off a pad.
+func _lands_match_authored(comp, authored: Dictionary) -> bool:
+	if comp == null or comp.pads.size() != authored.size():
+		return false
+	for pad in comp.pads:
 		var num := str((pad as Dictionary).get("number", ""))
-		if not by_number.has(num):
+		if not authored.has(num):
 			return false
-		var want: Dictionary = by_number[num]
-		var want_pos: Dictionary = want.get("position", {})
-		var want_size: Dictionary = want.get("size", {})
+		var want: Dictionary = authored[num]
 		var pos: Vector2 = (pad as Dictionary).get("position", Vector2.ZERO)
 		var size: Vector2 = (pad as Dictionary).get("size", Vector2.ZERO)
-		if absf(pos.x - float(want_pos.get("x", NAN))) > 1.0e-4:
+		if not pos.is_equal_approx(want["position"]):
 			return false
-		if absf(pos.y - float(want_pos.get("y", NAN))) > 1.0e-4:
+		if not size.is_equal_approx(want["size"]):
 			return false
-		if absf(size.x - float(want_size.get("width", NAN))) > 1.0e-4:
+		if absf(_pad_drill(pad) - float(want["drill"])) > 1.0e-4:
 			return false
-		if absf(size.y - float(want_size.get("height", NAN))) > 1.0e-4:
+		if str((pad as Dictionary).get("shape", "")) != str(want["shape"]):
+			return false
+		if str((pad as Dictionary).get("type", "")) != str(want["type"]):
+			return false
+	return true
+
+
+## Does the rebuilt pin map put every authored pad at the BOARD coordinate the
+## add asked for? The pins carry local offsets, so the authored position is
+## transformed by the component's own pose — `origin` is where the add put the
+## part, which is what makes this the assertion that reads the pose rather than
+## the footprint.
+func _pins_match_authored(comp, authored: Dictionary, origin: Vector2) -> bool:
+	if comp == null or comp.pins.size() != authored.size():
+		return false
+	var turn := deg_to_rad(comp.rotation)
+	for num in authored:
+		if not comp.pins.has(num):
+			return false
+		var held: Vector2 = comp.position + (comp.pins[num] as Vector2).rotated(turn)
+		var want: Vector2 = origin + (authored[num]["position"] as Vector2).rotated(turn)
+		if held.distance_to(want) > 1.0e-4:
 			return false
 	return true
 
@@ -388,6 +511,35 @@ func _run_a_sketch_part_is_named() -> void:
 	check("…and the refusal names the offending component rather than the board (got: %s)"
 			% refusal.left(200),
 		refusal.contains("TP2"))
+
+	# THE POUR, DRIVEN. The status lead above only SAYS a sketch part costs the
+	# board its pours; this authors one and runs the panel's own pcb.zone_fill
+	# round-trip over it, so the claim is measured on the fill itself.
+	var zoned := await PanelTools.handle(host, "minerva_pcb_create_zone", {
+		"editor_name": "AddProbe", "kind": "copper_pour", "net": "TESTNET",
+		"layer": "top", "outline": _rect(POUR_MIN, POUR_MAX)})
+	check("a copper pour is authored over both headers", bool(zoned.get("success", false)))
+
+	var refused := _worker_zone_fill(
+		PanelTools.canonical_wire_board(host.data.to_board_dict()))
+	check("the FILL refuses the board too, not only the geometric DRC",
+		not bool(refused.get("ok", true)))
+	var fill_refusal := JSON.stringify(refused.get("error", refused))
+	check("…naming the sketch part that took the pour down (got: %s)"
+			% fill_refusal.left(200),
+		fill_refusal.contains("TP2"))
+
+	# AND IT COMES BACK. Deleting the one sketch part is the only difference
+	# between the two fills, so copper returning is attributable to it alone.
+	var removed := await PanelTools.handle(host, "minerva_pcb_delete_component",
+		{"editor_name": "AddProbe", "component_id": "TP2"})
+	check("the sketch part is deleted", bool(removed.get("success", false))
+		and host.data.get_component("TP2") == null)
+	var refilled := _worker_zone_fill(
+		PanelTools.canonical_wire_board(host.data.to_board_dict()))
+	check("the pour fills once the sketch part is gone", bool(refilled.get("ok", false)))
+	check("…with copper actually in it (regions=%d)" % _pour_regions(refilled),
+		_pour_regions(refilled) > 0)
 	host.queue_free()
 
 

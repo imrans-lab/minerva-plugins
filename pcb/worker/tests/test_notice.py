@@ -247,8 +247,10 @@ def test_unmapped_third_party_license_refuses_instead_of_mislabeling(tmp_path):
 # in pcb/worker/pcb_worker/stroke_font.py, drawing every reference designator,
 # in a repository that ships under a proprietary licence. The table is gone
 # (designators and board legend now share pcb_worker/board_font.py, authored
-# in-house) and these two tests are what stop the next one being invisible:
-# one holds the NOTICE section honest, the other reads the source itself.
+# in-house) and these two tests are what stop the next COPY OF A KNOWN STROKE
+# FONT being invisible: one holds the NOTICE section honest, the other greps
+# the source for the signatures listed below. Neither is a general detector —
+# see the first test's docstring for exactly what falls outside.
 # ---------------------------------------------------------------------------
 
 # The worker source that ships. Tests are deliberately EXCLUDED — this file
@@ -287,14 +289,25 @@ def _declared_modules(module) -> set:
 
 
 def test_no_undeclared_third_party_data_table_in_the_shipped_source():
-    """No shipped source file carries a third-party data table's fingerprint
-    unless it is DECLARED in gen_notice.EMBEDDED_DATA_TABLES.
+    """No shipped source file carries one of the KNOWN glyph-table signatures
+    unless its file is DECLARED in gen_notice.EMBEDDED_DATA_TABLES.
 
     This is the check the repository did not have. The deleted stroke_font.py
     named its own source in its docstring and cited it accurately; nothing
     read that citation, so it never reached a NOTICE, a release gate or a
     licence review. Grepping the source is crude, and crude is the point — it
     needs no cooperation from the file that carries the table.
+
+    WHAT IT DOES NOT DO, stated so nobody reads more assurance into a green
+    run than it carries: it recognises the signatures in
+    ``_EMBEDDED_TABLE_SIGNATURES`` and nothing else, so an unnamed table of
+    numbers from some other source passes; and it skips a source file WHOLE
+    once any table in it is declared, so a second, undeclared table added to
+    an already-declared file passes too. A general detector for "these numbers
+    came from somewhere else" is not available at grep cost, and pretending
+    otherwise is worse than a narrow check that says what it covers. What
+    keeps the declared side honest is the release gate itself: every declared
+    module must exist and carry a resolved licence (``_embedded_violations``).
     """
     module = _load_gen_notice()
     declared = _declared_modules(module)
@@ -322,7 +335,7 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
     """The NOTICE names every embedded data table, and the section exists even
     when there are none.
 
-    Three properties in one test, because they are one contract:
+    Four properties in one test, because they are one contract:
 
     1. The allowlist is EMPTY today, and the shipped NOTICE still carries the
        section. A section that vanishes when the list is empty cannot tell a
@@ -333,6 +346,11 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
     3. A declared table with an unresolved licence REFUSES generation, the
        same fail-closed rule an acquired footprint gets. Declaring a table is
        not a way to ship an open licence question.
+    4. A declared table whose module path is not in the tree REFUSES too. A
+       declaration is the only thing that resolves that path — the grep above
+       merely skips whatever matches it — so an unresolvable one both
+       attributes a file that does not exist and silently stops skipping the
+       file that does.
     """
     module = _load_gen_notice()
 
@@ -348,9 +366,10 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
     entries = {"Fake:Ours": _compliant_entry("Ours")}
     lock = _write_lock(tmp_path, entries)
 
-    # 2. A declared table is NAMED in the output.
+    # 2. A declared table is NAMED in the output. The module is a REAL shipped
+    # path (property 4 refuses one that is not) standing in for a declaration.
     declared = module.EmbeddedDataTable(
-        module="pcb/worker/pcb_worker/fake_table.py",
+        module="pcb/worker/pcb_worker/board_font.py",
         what="a 3-entry synthetic lookup table",
         license="MIT",
         source_ref="https://example.invalid/fake-table v1.2",
@@ -393,5 +412,22 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
             module.generate(lock)
         for field in ("what", "license", "source_ref", "attribution"):
             assert field in str(excinfo.value)
+
+        # 4. ...and on a fully-provenanced declaration whose module is not in
+        # the tree. Every other field is valid here, so this arm can only be
+        # the path check.
+        module.EMBEDDED_DATA_TABLES = (
+            module.EmbeddedDataTable(
+                module="pcb/worker/pcb_worker/not_in_the_tree.py",
+                what="a glyph table",
+                license="MIT",
+                source_ref="https://example.invalid/x v1",
+                attribution="Copyright (c) nobody. Licensed MIT.",
+            ),
+        )
+        with pytest.raises(module.NoticeGateError) as excinfo:
+            module.generate(lock)
+        assert "pcb/worker/pcb_worker/not_in_the_tree.py" in str(excinfo.value)
+        assert "does not exist" in str(excinfo.value)
     finally:
         module.EMBEDDED_DATA_TABLES = original

@@ -52,7 +52,9 @@ EVERY offending ref — if any of the following holds:
 
 The same three axes apply to every :data:`EMBEDDED_DATA_TABLES` entry, on its
 own fields (``module``, ``license``, ``source_ref``, ``attribution``) — a
-declared table with an unresolved licence must not ship either.
+declared table with an unresolved licence must not ship either — plus a fourth
+that only a source-embedded table needs: its declared ``module`` path must
+exist, so a declaration cannot attribute a file that is not in the tree.
 
 There are currently zero violations in the shipped lock — every entry is
 fully provenanced. The rule exists for the future entry that is NOT: the
@@ -64,10 +66,12 @@ NOTICE — and therefore a release — while its license remains unresolved.
 
 DETERMINISM
 -----------
-The output is a pure function of the lock document's entries: refs and
-licenses are visited in sorted order, and nothing here reads the clock, the
-environment, or the filesystem beyond the lockfile itself. Running this
-script twice against an unchanged lock produces byte-identical output.
+The output is a pure function of the lock document's entries and of
+:data:`EMBEDDED_DATA_TABLES`: refs, licenses and tables are visited in sorted
+order, and nothing here reads the clock or the environment. The only
+filesystem reads are the lockfile and one existence check per declared
+embedded table (the gate axis above) — neither reaches the OUTPUT, so running
+this script twice against an unchanged lock produces byte-identical output.
 
 MODES
 -----
@@ -159,8 +163,10 @@ class EmbeddedDataTable(NamedTuple):
 #: EMPTY IS THE CORRECT STATE, and it is a state that has to be maintained
 #: rather than assumed: adding an entry here is the ONLY sanctioned way to
 #: embed third-party data in a source file, and
-#: ``worker/tests/test_notice.py`` fails if the worker source tree grows one
-#: that is not declared. Entries render in ``module`` order.
+#: ``worker/tests/test_notice.py`` fails if the shipped source grows an
+#: undeclared table carrying one of the KNOWN glyph-table signatures it greps
+#: for (family names and Newstroke's coordinate fingerprint) — it is a
+#: signature check, not a general detector. Entries render in ``module`` order.
 #:
 #: A table whose licence is incompatible with this repository's
 #: (``LICENSE.md``) does not belong here at all — declaring it does not make
@@ -263,6 +269,13 @@ def _embedded_violations(tables) -> list:
     table carries exactly the same redistribution obligations as a vendored
     file — the only difference is that nothing else in the repository would
     have noticed it.
+
+    Plus one axis an acquired footprint gets for free from its sha pin: the
+    declared ``module`` must EXIST. Nothing else resolves that path — the
+    source scan in ``worker/tests/test_notice.py`` only skips files it
+    matches against it — so a typo, a rename or a deletion would otherwise
+    leave a NOTICE attributing a file that is not there while silently
+    un-skipping the file that is.
     """
     violations: list = []
     for table in sorted(tables, key=lambda t: t.module):
@@ -275,6 +288,11 @@ def _embedded_violations(tables) -> list:
                 f"{table.module}: license {table.license!r} contains \"unknown\" "
                 f"— an embedded third-party table must not ship with an "
                 f"unresolved licence")
+        if table.module and not (PCB.parent / table.module).is_file():
+            violations.append(
+                f"{table.module}: declared module does not exist (paths are "
+                f"relative to the repository root, the same form the source "
+                f"scan compares against)")
     return violations
 
 
