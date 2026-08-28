@@ -2975,7 +2975,7 @@ const _ROUTER_NO_ANSWER_KINDS: Array[String] = ["", "worker_unavailable", "worke
 ## Structured failure-as-feedback for a route call that produced no result —
 ## either because the worker never answered, or because it answered "no".
 ##
-## Backend-stopped affordance (C5, docket 019f6c465fd8, bug 019f6c1e0399):
+## BACKEND STOPPED is its own answer.
 ## PCBPanel.route_board() tags a reply whose error_code was "plugin_not_running"
 ## (the pcb backend subprocess is not RUNNING — PluginScenePanelBroker.
 ## _dispatch_to_plugin_backend's own check) with error.kind ==
@@ -9606,7 +9606,7 @@ static func _bus_board_copper(data) -> Array:
 	for raw_via in data.vias:
 		var via: Dictionary = raw_via
 		var at: Vector2 = _PcbDataScript.via_position(via)
-		var radius: float = _PcbDataScript.via_radius(via)
+		var radius: float = _PcbDataScript.via_radius(via, data)
 		items.append({
 			"kind": "via", "what": "via", "ref": str(via.get("id", "(id-less via)")),
 			"net": str(via.get("net_name", "")),

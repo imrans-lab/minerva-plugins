@@ -1,4 +1,4 @@
-"""Authored reference-text ROTATION, hand-derived (epoch C, unit C7a).
+"""Authored reference-text ROTATION, hand-derived.
 
 WHY A HAND-DERIVED CASE EXISTS AT ALL
 -------------------------------------
@@ -85,7 +85,7 @@ already proven by the seal named above). The SECOND composed step,
 These are BOARD-frame (Y-down) points -- ``_emit_refdes`` writes directly to
 ``_Geometry.silk_polys`` in that frame (the gerber-frame Y-flip is
 ``_Geometry.to_gerber_frame``, applied later by the harvest entry points, not
-by ``_emit_refdes`` itself — see bug 019fa8011555). Calling
+by ``_emit_refdes`` itself). Calling
 ``gerber._emit_refdes`` directly (same pattern ``test_silk_text.py`` already
 uses for its unit-level cases) keeps this test at the ``_Geometry`` boundary,
 so no frame flip applies.

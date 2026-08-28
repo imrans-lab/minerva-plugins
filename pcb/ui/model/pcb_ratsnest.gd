@@ -218,7 +218,7 @@ static func _net_copper(data, net_name: String, stack: PackedStringArray) -> Arr
 			continue
 		var at: Vector2 = PCBDataScript.via_position(via)
 		pieces.append(PcbCopperContact.via_node(at,
-			PCBDataScript.via_radius(via), _via_span(via, stack)))
+			PCBDataScript.via_radius(via, data), _via_span(via, stack)))
 
 	var zones := _sorted_by_key(data.zones, func(z: Dictionary) -> String:
 		var pts := PCBDataScript.zone_outline_points(z)

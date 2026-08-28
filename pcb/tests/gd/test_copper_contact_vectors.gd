@@ -37,6 +37,7 @@ func _init() -> void:
 		_run_vector(name)
 	_run_symmetry(names)
 	_run_unknown_land()
+	_run_unknown_via()
 	_run_loaded_inline_lands()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -250,6 +251,57 @@ func _run_unknown_land() -> void:
 		is_equal_approx(Contact.unknown_land_radius(null),
 			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))
 
+
+
+## THE UNSIZED VIA — the barrel twin of the unknown land above.
+##
+## A via that declares no diameter gets the same disc an unsized land gets: the
+## board's own clearance, defaulting to DEFAULT_UNKNOWN_LAND_RADIUS_MM. That is
+## the rule drc._via_radius runs, so the two sides credit one barrel the same
+## copper.
+##
+## The probe distance is what separates the two answers this used to have. A
+## fixed 0.8 mm assumption here credited a 0.40 mm radius against the worker's
+## 0.20, so a run ending 0.30 mm off an unsized barrel read joined on the panel
+## and dangling in the census. No vector can catch it: both runners hand
+## `copper.diameter_mm` straight to via_node, so an unsized via inside a case is
+## a zero-radius disc on both sides and reaches neither fallback.
+func _run_unknown_via() -> void:
+	var plain = PCBDataScript.new()
+	plain.design_rules = {}
+	check("an unsized via falls back to the shared coincidence disc",
+		is_equal_approx(PCBDataScript.via_radius({}, plain),
+			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))
+	check("a zero diameter is 'nobody has said', not a zero-sized barrel",
+		is_equal_approx(PCBDataScript.via_radius({"size": 0.0}, plain),
+			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))
+	check("a stated size still wins",
+		is_equal_approx(PCBDataScript.via_radius({"size": 0.8}, plain), 0.4))
+	check("and no board at all is the same headless answer",
+		is_equal_approx(PCBDataScript.via_radius({}),
+			Contact.DEFAULT_UNKNOWN_LAND_RADIUS_MM))
+
+	# The SAME two probes worker/tests/test_copper_contact_vectors.py measures
+	# against the barrel: 0.15mm out is on the assumed copper, 0.30mm out is
+	# 0.10mm clear of it — the distance the old 0.8mm assumption called landed.
+	var barrel := Contact.via_node(Vector2.ZERO,
+		PCBDataScript.via_radius({}, plain), ["top", "bottom"])
+	var near := Contact.endpoint_node(Vector2(0.15, 0.0), 0.0, "top")
+	var far := Contact.endpoint_node(Vector2(0.30, 0.0), 0.0, "top")
+	check("an unsized barrel is reached inside its assumed radius",
+		Contact.nodes_touch(near, barrel))
+	check("an unsized barrel is not reached at the distance the old rule joined",
+		not Contact.nodes_touch(far, barrel))
+
+	# A BOARD THAT DECLARES A CLEARANCE SETS THE DISC, exactly as it does for a
+	# land, so the far probe flips together on both sides rather than only here.
+	var loose = PCBDataScript.new()
+	loose.design_rules = {"clearance_mm": 0.35}
+	check("the board's own clearance is the barrel radius too",
+		is_equal_approx(PCBDataScript.via_radius({}, loose), 0.35))
+	check("...and the probe that was clear is now landed",
+		Contact.nodes_touch(far, Contact.via_node(Vector2.ZERO,
+			PCBDataScript.via_radius({}, loose), ["top", "bottom"])))
 
 ## THE LOADED-BOARD SEAM: a part that authors its lands INLINE.
 ##

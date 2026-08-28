@@ -157,3 +157,33 @@ def test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc() -> None:
     assert copper_contact.nodes_touch(inside, pad)
     assert not copper_contact.nodes_touch(outside, pad)
     assert math.isclose(copper_contact.node_gap(outside, pad), 0.05, abs_tol=1e-9)
+
+
+def test_an_unsized_via_falls_back_to_the_coincidence_disc() -> None:
+    """A via that declares no diameter gets the same disc an unsized LAND gets:
+    the board's own coincidence tolerance, 0.2 mm by default.
+
+    THE PANEL RUNS THE SAME RULE — pcb_data.via_radius delegates to
+    pcb_copper_contact.unknown_land_radius — and
+    tests/gd/test_copper_contact_vectors.gd probes these same two points. The
+    probe distance is chosen to separate the two answers the two sides used to
+    give: the panel credited a fixed 0.8 mm via (radius 0.40) where the worker
+    credited the coincidence disc (radius 0.20), so a run ending 0.30 mm off an
+    unsized barrel read joined on one side and dangling on the other.
+
+    No vector can pin this. Both runners hand `copper.diameter_mm` straight to
+    via_node, so an unsized via inside a case is a ZERO-radius disc on both
+    sides and never reaches either fallback.
+    """
+    assert drc._via_radius({}, drc._board_clearance({})) == 0.2
+    assert drc._via_radius({"diameter_mm": 0.0}, drc._board_clearance({})) == 0.2
+    # A stated diameter still wins, even a small one.
+    assert drc._via_radius({"diameter_mm": 0.8}, drc._board_clearance({})) == 0.4
+
+    barrel = copper_contact.via_node(
+        (0.0, 0.0), 2.0 * drc._via_radius({}, drc._board_clearance({})), None)
+    near = copper_contact.endpoint_node((0.15, 0.0), 0.0, "top")
+    far = copper_contact.endpoint_node((0.30, 0.0), 0.0, "top")
+    assert copper_contact.nodes_touch(near, barrel)
+    assert not copper_contact.nodes_touch(far, barrel)
+    assert math.isclose(copper_contact.node_gap(far, barrel), 0.10, abs_tol=1e-9)

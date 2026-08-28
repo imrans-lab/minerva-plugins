@@ -192,6 +192,14 @@ static func _fetch_geometry(host, ref: String, designator: String) -> Dictionary
 ## performed: the board now carries the lands outright (a `pads` key = the
 ## board is the authority), which is what keeps the part compiling on a machine
 ## whose library does not have the ref.
+##
+## `footprint_resolved` is the WORKER's fact, relayed — `build` reaches this
+## only after `_fetch_geometry` got real geometry back over the
+## pcb.footprint_geometry channel, so the flag records a resolve success rather
+## than asserting one. It is the same fact a worker-deserialized board arrives
+## carrying, which is what lets the badge, the status lead and
+## panel_tools.canonical_wire_board read one flag whichever way the board got
+## here.
 static func apply_geometry(comp, ref: String, geometry: Dictionary) -> void:
 	comp.set_footprint_by_name("CUSTOM")
 	comp.footprint_id = ref

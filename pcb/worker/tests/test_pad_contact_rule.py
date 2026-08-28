@@ -255,11 +255,16 @@ def test_the_two_paths_place_one_board_identically_bottom_side_included():
     # And the SIDE the raw path reports for a bottom-mounted SMD part, whose
     # footprint states F.Cu — so its layer is DERIVED from the placement rather
     # than authored. This one used to come back on the top of the board.
+    #
+    # Read through `occupies`, the ONE derivation — the pad's layer set lives on
+    # its contact node and has no second copy on the _Pad to assert against.
     by_pin = {(p.ref, p.pin): p for p in harvested}
-    assert by_pin[("SW10", "A")].layers == frozenset({"bottom"})
+    assert by_pin[("SW10", "A")].occupies("bottom")
+    assert not by_pin[("SW10", "A")].occupies("top")
     # A through-hole land spans the stack whichever side its part is mounted on,
-    # which the harvest states as the permissive None.
-    assert by_pin[("U2", "4")].layers is None
+    # so it occupies BOTH sides rather than picking one.
+    assert by_pin[("U2", "4")].occupies("top")
+    assert by_pin[("U2", "4")].occupies("bottom")
 
 
 def _bench() -> dict:

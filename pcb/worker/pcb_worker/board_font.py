@@ -8,21 +8,18 @@ one would be a regression twice over: two typefaces on one board is a
 draughting defect a fabricator sees before we do, and a second glyph table is a
 second place a licence question can hide.
 
-It replaced a 26-glyph refdes font whose coordinates were a subset of a
-GPL-2.0-or-later stroke font, embedded in a repository that ships under a
-proprietary licence (``LICENSE.md``). The mechanism that let that sit unnoticed
-was not the copy itself but the INVENTORY: ``pcb/scripts/gen_notice.py`` walks
-``pcb/library/footprints.lock.json``, which inventories acquired FILES, and a
-table of literal constants inside a ``.py`` is not a file. ``gen_notice.py``
-now carries an explicit allowlist of source-embedded third-party data tables
-and renders a NOTICE section for it, so the next one has to be declared to
-exist. It is empty, and the intent is that it stays that way.
-
-Every coordinate below was authored for this file against a 5x7 stroke grid.
-No glyph data was copied, converted or traced from any other font. It is
-deliberately plain: a 5x7 stroke alphabet is the "Courier of vector fonts", the
-shape you get from the grid rather than from a designer, and that is exactly
-what makes it safe to author from scratch.
+PROVENANCE. Every coordinate below was authored for this file against a 5x7
+stroke grid, and this repository ships under a proprietary licence
+(``LICENSE.md``), so a glyph table copied from a third-party font could not sit
+here. The licence inventory cannot check that for itself:
+``pcb/scripts/gen_notice.py`` walks ``pcb/library/footprints.lock.json``, which
+inventories acquired FILES, and a table of literal constants inside a ``.py`` is
+not a file — which is why ``gen_notice.py`` carries a separate explicit
+allowlist of source-embedded third-party data tables. This table is not on it,
+and the list is empty. No glyph data was copied, converted or traced from any
+other font. The design is deliberately plain: a 5x7 stroke alphabet is the
+"Courier of vector fonts", the shape you get from the grid rather than from a
+designer, which is exactly what makes it safe to author from scratch.
 
 COVERAGE is the other reason the shape of this table is what it is. A reference
 designator ("R1", "U3") only ever needs ``A-Z`` and ``0-9``, but board text

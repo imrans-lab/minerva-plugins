@@ -218,31 +218,27 @@ def _closest_point_on_segment(pt, a, b) -> tuple[float, float]:
 
 
 class _Pad:
-    """One harvested pad. ``layers`` is the CANONICAL set of copper layers the
-    pad actually occupies ("top"/"in1"/.../"bottom"), folded once at harvest
-    exactly like :class:`_Seg`.
+    """One harvested pad.
 
     A pad is not a column through the stack. A top-side SMD land shares no
     copper with a bottom-layer trace passing under it, which is ordinary
     routing -- yet a layer-blind reader called it a short (check A) AND, worse,
     let it JOIN two islands of a net (the pin-group census), which fails open.
     ``through_hole`` stays as the separate, cheaper fact the emitters share.
-    THE LAYER SET IS THE CONTACT NODE'S: every check measures copper through
-    the shared predicate, which meets layers on the way, and ``occupies`` reads
-    that same node — so there is no second layer rule here to drift from it."""
+    THE LAYER SET LIVES ON THE CONTACT NODE and nowhere else: every check
+    measures copper through the shared predicate, which meets layers on the
+    way, and ``occupies`` reads that same node, so there is no second layer
+    rule here to drift from it."""
 
-    __slots__ = ("ref", "pin", "net", "x", "y", "through_hole", "layers",
-                 "contact")
+    __slots__ = ("ref", "pin", "net", "x", "y", "through_hole", "contact")
 
-    def __init__(self, ref, pin, net, x, y, through_hole, layers=None,
-                 contact=None):
+    def __init__(self, ref, pin, net, x, y, through_hole, contact=None):
         self.ref = ref
         self.pin = pin
         self.net = net
         self.x = x
         self.y = y
         self.through_hole = through_hole
-        self.layers = layers
         #: This land as a :class:`copper_contact.ContactNode` — the ONE thing
         #: every "does copper reach this pad" question below asks. Built at
         #: harvest so the sweeps do not rebuild geometry per comparison.
@@ -386,7 +382,7 @@ def _harvest_pads(board: dict) -> list[_Pad]:
                 pad, (px, py), land_deg,
                 None if through_hole else canon, unknown_land_radius)
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
-                             px, py, through_hole, canon, contact))
+                             px, py, through_hole, contact))
     return pads
 
 

@@ -48,6 +48,11 @@ Measured through the worker's own entry points on the current file.
 | `board_health` / `check_bom` / `gerbers` / `fab_preview` / `generate` | ok |
 | strict `resolve` | FAILS by contract: `footprint ref 'Bench_RotLand_1P' is not in the seed library lockfile` |
 
+The `drc`, `drc_geometric` and `zone_fill` rows above are ASSERTED in CI by
+`worker/tests/test_hitl_bench_baseline.py`, which reads them through the same
+worker entry points. A drift in a row's answer therefore goes red on a run
+rather than waiting for the next walk. The remaining rows are still walk-only.
+
 ## The rows
 
 | Row | Label | Mode | Cell A | Cell B |

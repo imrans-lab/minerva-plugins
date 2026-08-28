@@ -1349,7 +1349,20 @@ func _ready() -> void:
 ## Losing the window or the control's focus ends any gesture in flight: the
 ## release that would have finished it will never arrive here (cold-review F7).
 ## Kept to the TRANSIENT flags — the selection and the view are not gesture state.
+##
+## RESIZE is the other notification handled here, and it owns one thing: the fab
+## preview's raster, which is made for a canvas width and goes soft when that
+## width grows.
 func _notification(what: int) -> void:
+	if what == NOTIFICATION_RESIZED:
+		# A wider canvas draws the fab artwork bigger than it was rasterized for,
+		# so the held rows are refitted to the new width (PcbFabPreview.refit —
+		# a no-op unless the canvas grew). Nothing else here is size-derived.
+		var refitted: Array = PcbFabPreview.refit(_fab_preview_layers, size.x)
+		if not is_same(refitted, _fab_preview_layers):
+			_fab_preview_layers = refitted
+			queue_redraw()
+		return
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_FOCUS_EXIT:
 		_zone_edge_insert = {}
 		# A claimed annotation gesture is transient gesture state too (B1u3):

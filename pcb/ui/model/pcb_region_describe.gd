@@ -263,7 +263,7 @@ static func layers_touched(data, via: Dictionary, copper: Dictionary = {}) -> Ar
 	var index: Dictionary = copper if not copper.is_empty() else build_copper_index(data)
 	var nodes: Array = index.get("nodes", [])
 	var at: Vector2 = data.via_position(via)
-	var radius: float = data.via_radius(via)
+	var radius: float = data.via_radius(via, data)
 	var out: Array = []
 	for layer in via_span(via, index.get("stack", PackedStringArray())):
 		var barrel := PcbCopperContact.via_node(at, radius, [layer])

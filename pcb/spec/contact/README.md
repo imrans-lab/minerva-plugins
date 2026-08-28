@@ -93,12 +93,23 @@ declares none:
 * panel — `pcb_copper_contact.unknown_land_radius`
   (`DEFAULT_UNKNOWN_LAND_RADIUS_MM`)
 
-**No vector can pin this**, because every vector states a size and the fallback
-is therefore never the answer inside one. It is pinned instead by the fallback
-test each runner carries beside the vector walk
-(`test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc` and
-`_run_unknown_land`), and both probe the same two points: 0.15 mm off centre is
-landed, 0.25 mm off centre is clear by 0.05 mm.
+A via that declares no diameter gets the SAME disc, from the same two places:
+
+* worker — `drc._via_radius`, fed by `drc._board_clearance`
+* panel — `pcb_data.via_radius`, delegating to
+  `pcb_copper_contact.unknown_land_radius`
+
+**No vector can pin either**, because every vector states a size and the
+fallback is therefore never the answer inside one — both runners hand
+`copper.diameter_mm` straight to `via_node`, so an unsized via inside a case is
+a zero-radius disc on both sides. They are pinned instead by the fallback tests
+each runner carries beside the vector walk
+(`test_a_pad_with_no_stated_size_falls_back_to_the_coincidence_disc` /
+`_run_unknown_land`, and `test_an_unsized_via_falls_back_to_the_coincidence_disc`
+/ `_run_unknown_via`). The land pair probes 0.15 mm off centre (landed) and
+0.25 mm (clear by 0.05 mm); the via pair probes 0.15 mm (landed) and 0.30 mm
+(clear by 0.10 mm) — 0.30 mm being the distance a fixed 0.8 mm via assumption on
+the panel called landed while the worker called it dangling.
 
 ## Deliberately out of scope
 

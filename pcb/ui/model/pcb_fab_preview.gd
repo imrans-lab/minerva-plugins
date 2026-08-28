@@ -154,6 +154,14 @@ static func recolor_svg(svg: String, ink: Color) -> String:
 	return svg.replace("=\"black\"", "=\"%s\"" % hex)
 
 
+## The pixel width a layer is actually rasterized at for a canvas this wide —
+## the clamp, said once, so `adopt` records the same number `refit` compares
+## against and a re-raster is decided on the effective width rather than the raw
+## canvas one.
+static func raster_width(target_px: float) -> float:
+	return clampf(target_px, MIN_RASTER_PX, MAX_RASTER_PX)
+
+
 ## Rasterize one recoloured SVG at the width it will be DRAWN at.
 ##
 ## Two loads, deliberately: the intrinsic size is only knowable from a parsed
@@ -167,7 +175,7 @@ static func rasterize(svg: String, target_px: float) -> Image:
 	var intrinsic := float(img.get_width())
 	if intrinsic <= 0.0:
 		return null
-	var scale := clampf(target_px, MIN_RASTER_PX, MAX_RASTER_PX) / intrinsic
+	var scale := raster_width(target_px) / intrinsic
 	if scale <= 1.0:
 		return img
 	var sharp := Image.new()
@@ -199,7 +207,8 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 		var name := str(lay.get("name", "?"))
 		var key := layer_key(name)
 		var svg := str(lay.get("svg", ""))
-		var img: Image = null if svg.is_empty() else rasterize(recolor_svg(svg, ink_for(key)), target_px)
+		var inked := "" if svg.is_empty() else recolor_svg(svg, ink_for(key))
+		var img: Image = null if inked.is_empty() else rasterize(inked, target_px)
 		if img == null:
 			missed.append({"name": name,
 				"reason": "the engine could not rasterize the worker's SVG for this layer"})
@@ -211,12 +220,58 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 			"kind": str(lay.get("kind", "")),
 			"sha256": str(lay.get("sha256", "")),
 			"byte_length": int(lay.get("byte_length", 0)),
+			# THE SOURCE IS KEPT, not just its raster: the artwork outlives the
+			# canvas width it was first drawn for, and `refit` needs the document
+			# back to redraw it sharper. `raster_px` is the width this texture
+			# was actually made at, which is what refit compares against.
+			"svg": inked,
+			"raster_px": raster_width(target_px),
 			"texture": ImageTexture.create_from_image(img),
 		})
 	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return _RANK.get(str(a["key"]), _RANK_DEFAULT) < _RANK.get(str(b["key"]), _RANK_DEFAULT))
 	var pick := held_pick if held_pick in choices(rows) else PICK_ALL
 	return {"layers": rows, "unrendered": missed, "pick": pick}
+
+
+## Re-rasterize held rows for a canvas that has GROWN since they were adopted.
+##
+## `adopt` rasterizes at the width the artwork will be drawn at, which is right
+## until the panel is widened: the texture then stretches and 0.12 mm silk goes
+## soft again, exactly the resolution problem the two-load raster exists to
+## solve. Returns the rows to hold — the same array when nothing moved, so a
+## caller can assign unconditionally and a resize that changes nothing costs one
+## comparison per layer.
+##
+## GROWTH ONLY. A narrower canvas draws the finer raster scaled down, which is
+## already correct and cheaper than re-rasterizing; re-rastering on a shrink
+## would also mean re-decoding every layer through the whole of a drag.
+static func refit(rows: Array, target_px: float) -> Array:
+	var want := raster_width(target_px)
+	var out: Array = []
+	var moved := false
+	for row_v in rows:
+		if not (row_v is Dictionary):
+			out.append(row_v)
+			continue
+		var row: Dictionary = row_v
+		var svg := str(row.get("svg", ""))
+		if svg.is_empty() or want <= float(row.get("raster_px", 0.0)):
+			out.append(row)
+			continue
+		var img := rasterize(svg, want)
+		if img == null:
+			# The document rasterized once already, so this is a transient engine
+			# failure, not a layer we cannot draw: KEEP the coarser texture
+			# rather than dropping a layer out of a complete artifact set.
+			out.append(row)
+			continue
+		var fresh := row.duplicate()
+		fresh["raster_px"] = want
+		fresh["texture"] = ImageTexture.create_from_image(img)
+		out.append(fresh)
+		moved = true
+	return out if moved else rows
 
 
 ## Every value the picker may be set to for the artwork currently held: "all"

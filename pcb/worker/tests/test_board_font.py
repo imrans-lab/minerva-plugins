@@ -77,10 +77,10 @@ def test_size_is_cap_height():
 def test_scale_is_linear_and_width_agrees_with_render():
     """text_width() is the same number render() lays out to, at any size.
 
-    The font this one replaced shipped a double-scaling bug in exactly this
-    relationship (its space advance was scaled twice, so render() and
-    text_width() disagreed for any size != 1.0), so the discriminating fixture
-    here is a string WITH A SPACE at a size != 1.0.
+    The discriminating fixture is a string WITH A SPACE at a size != 1.0: a
+    space carries an advance and no strokes, so an advance scaled twice moves
+    text_width() away from what render() lays out without any polyline moving
+    to show it.
     """
     for size in (0.5, 1.0, 1.5, 2.0):
         rendered = board_font.render("R1 C2", size=size)

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Generate pcb/NOTICE.md — the release-gate license/attribution inventory
-for this project's third-party content (epoch LIB1, DCR 019ff568e203 station
-S5/B6).
+for this project's third-party content.
 
 TWO INVENTORIES, because third-party content arrives two ways
 --------------------------------------------------------------
@@ -11,18 +10,12 @@ TWO INVENTORIES, because third-party content arrives two ways
    set copied from a third-party source and stored as literal CONSTANTS
    inside one of our own source files (:data:`EMBEDDED_DATA_TABLES`).
 
-(2) exists because (1) could not see it. A file-provenance lock inventories
-FILES; a table of numbers inside a ``.py`` is not a file, so a 26-glyph subset
-of KiCad's GPL-2.0-or-later Newstroke font lived in
-``pcb/worker/pcb_worker/stroke_font.py`` and appeared in no licence inventory
-anywhere. That table is deleted (reference designators and board legend now
-share the in-house font in ``pcb_worker/board_font.py``) and
-:data:`EMBEDDED_DATA_TABLES` is empty — but the SECTION renders either way, so
-the next embedded table has to be declared to exist rather than merely not
-noticed.
+(2) exists because (1) CANNOT see it: a file-provenance lock inventories FILES,
+and a table of numbers inside a ``.py`` is not a file, so nothing in the
+acquired-file walk below can reach one. :data:`EMBEDDED_DATA_TABLES` is empty
+and the section renders anyway — an empty declared list is a claim a reader can
+check, where an absent section is only silence.
 
-WHAT THIS FILE IS AND WHY IT EXISTS
-------------------------------------
 WHAT THE FOOTPRINT INVENTORY IS AND WHY IT EXISTS
 --------------------------------------------------
 ``pcb/library/footprints.lock.json`` (acquisition-lock schema v2, see

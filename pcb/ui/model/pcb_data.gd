@@ -1073,7 +1073,7 @@ func trace_end_is_joined(trace_id: String, end: String) -> bool:
 	# no id, which has copper all the same.
 	for via in vias:
 		var barrel := PcbCopperContact.via_node(
-			via_position(via as Dictionary), via_radius(via as Dictionary),
+			via_position(via as Dictionary), via_radius(via as Dictionary, self),
 			PcbCopperContact.via_span(via as Dictionary, stack))
 		if PcbCopperContact.nodes_touch(cap, barrel):
 			return true
@@ -1401,11 +1401,29 @@ static func via_position(via: Dictionary) -> Vector2:
 	return Vector2.ZERO
 
 
-## A via's outer radius in board mm (half its "size", the outer copper diameter).
-## Defaults match add_via's own documented defaults, so a via dict that omits the
-## key measures the same everywhere.
-static func via_radius(via: Dictionary) -> float:
-	return float(via.get("size", 0.8)) / 2.0
+## A via's outer radius in board mm: half its stated "size" (the outer copper
+## diameter), or — when it states none — the board's own coincidence disc.
+##
+## THE FALLBACK IS THE WORKER'S RULE, not a second one (drc._via_radius, and the
+## same disc copper_contact gives a land of unknown size): a via that declares no
+## diameter has no geometry to be exact about, so both sides credit it the
+## coincidence tolerance rather than inventing an annulus. A hard-coded 0.8 here
+## credited a 0.4 mm radius against the worker's 0.2, which put a trace end
+## 0.3 mm off an unsized barrel on the joined side of the panel and the dangling
+## side of the worker.
+##
+## This is NOT the same question PcbViaDimensions answers. That rule decides how
+## big to MAKE a via being proposed; this one measures the copper a via already
+## on the board has. Every via this plugin creates carries a resolved size, so
+## the fallback only ever reaches a via that arrived from foreign YAML.
+##
+## `data` is duck-typed on `design_rules` (PcbCopperContact.unknown_land_radius);
+## omitted, it answers with the same default a headless caller gets.
+static func via_radius(via: Dictionary, data = null) -> float:
+	var size := float(via.get("size", 0.0))
+	if size > 0.0:
+		return size / 2.0
+	return PcbCopperContact.unknown_land_radius(data)
 
 
 ## Which via a click at `position` picks, or "".
@@ -1436,7 +1454,7 @@ func get_via_at(position: Vector2, min_radius: float = 0.0) -> String:
 		if via_id.is_empty():
 			continue
 		var centre := via_position(via)
-		var reach := maxf(via_radius(via), min_radius)
+		var reach := maxf(via_radius(via, self), min_radius)
 		var distance := centre.distance_to(position)
 		if distance <= reach and distance < best_distance:
 			best_distance = distance
@@ -1465,7 +1483,7 @@ func get_vias_in_region(region: Rect2) -> Array[String]:
 		var nearest := Vector2(
 			clampf(centre.x, region.position.x, region.position.x + region.size.x),
 			clampf(centre.y, region.position.y, region.position.y + region.size.y))
-		if nearest.distance_to(centre) <= via_radius(via):
+		if nearest.distance_to(centre) <= via_radius(via, self):
 			result.append(via_id)
 	return result
 
