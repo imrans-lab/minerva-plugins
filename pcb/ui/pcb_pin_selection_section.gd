@@ -1,8 +1,8 @@
 extends VBoxContainer
 ## The sidebar section for a PAD selection.
 ##
-## The Pin Info section above it answers "what is this ONE pin". This one
-## answers the three questions asked with pads selected:
+## The canvas hover card answers "what is this ONE pin". This section answers
+## the three questions asked with pads SELECTED:
 ##
 ##   which pins are these?   one pad ROW per selected pad — net, side, roles —
 ##                           the same rows minerva_pcb_get_selection hands a

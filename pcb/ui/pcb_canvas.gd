@@ -83,6 +83,9 @@ const PcbFabPreview := preload("model/pcb_fab_preview.gd")
 ## The copper pass order (traces → lands → drills, per layer) as data; see
 ## _draw_copper().
 const PcbCopperDrawOrder := preload("model/pcb_copper_draw_order.gd")
+## The on-canvas hover card (entity -> lines, placement, paint). Display-only
+## board facts live THERE, not in the panel sidebar.
+const PcbHoverCard := preload("pcb_hover_card.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -105,7 +108,9 @@ signal component_lock_changed(message: String)
 signal view_changed()
 ## WC-1 pin inspector (INSPECT_PIN mode). Emitted on a pin click with the host's
 ## pin_info() Dictionary, or {} to clear (click on empty space / mode switch /
-## Escape). PCBPanel listens and drives the Pin Info section.
+## Escape). The panel no longer mirrors it into a sidebar readout — the pad's
+## facts are on the hover card — but the signal remains the canvas's public
+## "which pin was picked" doorway.
 signal pin_selected(info: Dictionary)
 
 ## Data reference (pcb_data.gd instance — duck-typed).
@@ -715,9 +720,26 @@ var _pin_inspector_host = null
 var _routing_workspace = null
 var _routing_cutover = null
 
-## Hover state for the INSPECT_PIN nearest-pad label (native L1444 parity).
-var _inspect_hover_label: String = ""
-var _inspect_hover_screen_pos: Vector2 = Vector2.ZERO
+## The pad the INSPECT_PIN pointer is resting on, as "COMPONENT.PIN", or "".
+## Not drawn on its own — it is what the hover card's pad content is resolved
+## from, and the card's first line is this same address.
+var _inspect_hover_ref: String = ""
+
+## THE HOVER CARD's live state (PcbHoverCard owns its content and geometry).
+##
+## `_hover_card_lines` empty means no card. `_hover_card_entity` is the
+## [kind, id] the lines describe — "" kind for a pad, whose id is the REF.PIN —
+## and it is what makes the card cost one resolve per entity CHANGE rather than
+## one per motion event.
+##
+## `_hover_card_anchor` is the canvas-local pointer position at the moment the
+## hovered entity changed. The card is pinned there for as long as that entity
+## stays hovered, the way a tooltip settles instead of chasing the cursor; the
+## anchor is by construction a point ON the entity, and rect_for keeps the card
+## clear of it.
+var _hover_card_lines: PackedStringArray = PackedStringArray()
+var _hover_card_entity: Array = ["", ""]
+var _hover_card_anchor: Vector2 = Vector2.ZERO
 
 ## Trace / zone selection, SINGLE-PICK VIEW of the multi-set above.
 ##
@@ -1357,10 +1379,17 @@ func _ready() -> void:
 ## release that would have finished it will never arrive here (cold-review F7).
 ## Kept to the TRANSIENT flags — the selection and the view are not gesture state.
 ##
-## RESIZE is the other notification handled here, and it owns one thing: the fab
-## preview's raster, which is made for a canvas width and goes soft when that
-## width grows.
+## RESIZE owns one thing: the fab preview's raster, which is made for a canvas
+## width and goes soft when that width grows. MOUSE_EXIT owns the hover card —
+## the pointer leaving the control is the one way a card can be orphaned without
+## a motion event to say so.
 func _notification(what: int) -> void:
+	if what == NOTIFICATION_MOUSE_EXIT:
+		# The pointer left the canvas, so it is over nothing here — and no
+		# motion event will arrive to say so. Without this the card would hang
+		# over the board describing whatever was last under the cursor.
+		clear_hover_card()
+		return
 	if what == NOTIFICATION_RESIZED:
 		# A wider canvas draws the fab artwork bigger than it was rasterized for,
 		# so the held rows are refitted to the new width (PcbFabPreview.refit —
@@ -2055,8 +2084,11 @@ func _draw() -> void:
 	# from it, exactly as a component selection survives a tool change.
 	_draw_selected_pads()
 
-	if tool_mode == ToolMode.INSPECT_PIN and not _inspect_hover_label.is_empty():
-		_draw_inspect_hover_label()
+	# The hover card is the LAST board-facing thing painted: it is a statement
+	# about whatever is under the cursor, so nothing the board draws may cover
+	# it. Only the approximation notice (a statement about the whole view) sits
+	# above it.
+	_draw_hover_card()
 
 	# LAST, over everything, because it is a statement ABOUT the picture rather
 	# than part of it: what in this view is schematic, and where the exact
@@ -4024,15 +4056,6 @@ func _draw_selection_box() -> void:
 	draw_rect(rect, selection_border_color, false, 1.0)
 
 
-## INSPECT_PIN nearest-pad hover label at the cursor (native L1444 parity).
-func _draw_inspect_hover_label() -> void:
-	var pos := _inspect_hover_screen_pos + Vector2(14, -14)
-	var text_size := font.get_string_size(_inspect_hover_label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
-	var bg_rect := Rect2(pos + Vector2(-3, -text_size.y), text_size + Vector2(6, 4))
-	draw_rect(bg_rect, Color(0.05, 0.05, 0.05, 0.85))
-	draw_string(font, pos, _inspect_hover_label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color.WHITE)
-
-
 ## Draw a dashed line
 func _draw_dashed_line(from: Vector2, to: Vector2, color: Color, width: float, dash_length: float) -> void:
 	var direction := (to - from).normalized()
@@ -4531,7 +4554,8 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	# middle/right-drag pan still updates below via is_panning, unaffected by
 	# this branch.
 	if tool_mode == ToolMode.INSPECT_PIN:
-		_update_inspect_hover(world_pos, event.position)
+		_update_inspect_hover(world_pos)
+		_update_hover_card(world_pos, event.position)
 	elif _is_zone_tool():
 		# Rubber-band the edge from the last placed vertex to the cursor. No
 		# component hover while a zone tool is armed — the tool owns the surface,
@@ -4539,6 +4563,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not hovered_component.is_empty():
 			hovered_component = ""
 			queue_redraw()
+		clear_hover_card()
 		if not _zone_points.is_empty():
 			_zone_preview = _author_point(world_pos)
 			_zone_has_preview = true
@@ -4550,6 +4575,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not hovered_component.is_empty():
 			hovered_component = ""
 			queue_redraw()
+		clear_hover_card()
 		if not _trace_points.is_empty():
 			_trace_preview = _trace_candidate_point(world_pos)
 			_trace_has_preview = true
@@ -4560,6 +4586,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not hovered_component.is_empty():
 			hovered_component = ""
 			queue_redraw()
+		clear_hover_card()
 		if not _cutout_points.is_empty():
 			_cutout_preview = _author_point(world_pos)
 			_cutout_has_preview = true
@@ -4571,6 +4598,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not hovered_component.is_empty():
 			hovered_component = ""
 			queue_redraw()
+		clear_hover_card()
 		if _bus_phase == BusPhase.PATH and not _bus_spine_points.is_empty():
 			# Rubber-banded through the same axis constraint the click applies,
 			# so the preview shows the segment that would actually land.
@@ -4599,6 +4627,10 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		elif not str(_eraser_hover[0]).is_empty():
 			_eraser_hover = ["", ""]
 			queue_redraw()
+		# The card rides this branch rather than the tool branches above, which
+		# is exactly the "no card during an authoring run" rule: every branch
+		# with a run in flight returns before reaching here.
+		_update_hover_card(world_pos, event.position)
 
 	if is_panning:
 		pan_offset = pan_start_offset + (event.position - pan_start_mouse)
@@ -5152,8 +5184,8 @@ func _clear_selection(announce := true) -> void:
 	# selected (staged are likewise excluded from selection_count()).
 	selected_staged_ids.clear()
 	# Pads clear with everything else, for the candidate rationale above: one
-	# Select, one Escape. The Pin Info section follows through pin_selected,
-	# emitted by the Pin Select tool's own clear path.
+	# Select, one Escape. Listeners follow through pin_selected, emitted by the
+	# Pin Select tool's own clear path.
 	if not selected_pad_refs.is_empty():
 		selected_pad_refs.clear()
 		pin_selected.emit({})
@@ -7479,6 +7511,10 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 		# station 10) — a leftover outline under Select would promise a
 		# delete no click will perform.
 		_eraser_hover = ["", ""]
+		# Same rule for the hover card: it describes what the OLD tool was
+		# pointing at, and a card outliving its tool would describe a pick the
+		# new tool does not make.
+		clear_hover_card()
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		if leaving_zone_tool:
@@ -7864,7 +7900,7 @@ func _exit_inspect_pin_mode() -> void:
 ## Click handling for INSPECT_PIN — the Pin Select tool.
 ##
 ## The pick is the nearest pad's copper through host.pad_at (5mm radius), and
-## pin_selected carries the pin_info dict the Pin Info section reads. The pick is
+## pin_selected carries the pin_info dict listeners read. The pick is
 ## ALSO a selection: PcbPinSelectTool owns the algebra (click replaces,
 ## shift-click toggles, shift-click on empty space keeps a multi-pad selection),
 ## the ids live in selected_pad_refs like every other kind, and
@@ -7876,9 +7912,9 @@ func _handle_inspect_pin_click(world_pos: Vector2, additive: bool = false) -> vo
 	var next: Array = PcbPinSelectTool.apply_click(selected_pad_refs, ref, additive)
 	var changed := next != Array(selected_pad_refs)
 	selected_pad_refs.assign(next)
-	# The Pin Info section shows ONE pin: the pad this click landed on, or
-	# nothing when the click cleared the selection. A shift-click that removed a
-	# pad leaves the section on whatever is still selected last.
+	# pin_selected names ONE pin: the pad this click landed on, or nothing when
+	# the click cleared the selection. A shift-click that removed a pad reports
+	# whatever is still selected last.
 	pin_selected.emit(_pin_info_for_ref(ref if selected_pad_refs.has(ref) \
 		else (str(selected_pad_refs[-1]) if not selected_pad_refs.is_empty() else "")))
 	if changed:
@@ -7936,18 +7972,18 @@ func _draw_selected_pads() -> void:
 			draw_polyline(outline, pad_selected_color, 2.0)
 
 
-## Hover feedback: nearest-pad label at the cursor (native L1444 parity).
-## Redraws only on an actual label change, not every motion event.
-func _update_inspect_hover(world_pos: Vector2, screen_pos: Vector2) -> void:
-	_inspect_hover_screen_pos = screen_pos
-	var label := ""
+## Hover feedback: which pad the cursor is nearest (native L1444 parity).
+## Resolves once per actual pad change, not on every motion event; the hover
+## card reads the result.
+func _update_inspect_hover(world_pos: Vector2) -> void:
+	var ref := ""
 	if _pin_inspector_host != null and _pin_inspector_host.has_method("pad_at"):
 		var hit: Dictionary = _pin_inspector_host.pad_at(
 			world_pos, PcbPinSelectTool.PICK_RADIUS_MM, _inspectable_component_filter())
 		if not hit.is_empty():
-			label = "%s.%s" % [str(hit.get("component", "")), str(hit.get("pin", ""))]
-	if label != _inspect_hover_label:
-		_inspect_hover_label = label
+			ref = "%s.%s" % [str(hit.get("component", "")), str(hit.get("pin", ""))]
+	if ref != _inspect_hover_ref:
+		_inspect_hover_ref = ref
 		queue_redraw()
 
 
@@ -7968,8 +8004,123 @@ func _inspectable_component_filter() -> Callable:
 
 ## Clears any live pin selection/hover (mode exit, mode switch, empty click).
 func _clear_inspect_pin_selection() -> void:
-	_inspect_hover_label = ""
+	_inspect_hover_ref = ""
+	clear_hover_card()
 	pin_selected.emit({})
+
+#endregion
+
+
+#region Hover Card
+
+## Re-resolve the hover card for the pointer at `world_pos`.
+##
+## COST: the card's content is derived once per hovered-entity CHANGE, not once
+## per motion event — the read verbs behind it walk the board, and a hover that
+## re-described the same part sixty times a second would make a dense board
+## crawl. `_hover_card_entity` is what makes the comparison cheap.
+##
+## WHAT IT DESCRIBES is whatever the ARMED TOOL would act on, so the card can
+## never name one thing while the next click picks another:
+##   INSPECT_PIN  the pad under the cursor (_inspect_hover_ref, the tool's own
+##                nearest-pad resolution)
+##   everything   the entity the SELECTION LADDER picks (_entity_at) —
+##   else         components and traces get a card, other kinds do not (yet)
+func _update_hover_card(world_pos: Vector2, screen_pos: Vector2) -> void:
+	var entity: Array = ["", ""]
+	if not _hover_card_suppressed():
+		entity = _hover_card_target(world_pos)
+	if entity == _hover_card_entity:
+		return
+	_hover_card_entity = entity
+	_hover_card_lines = _hover_card_content(entity)
+	_hover_card_anchor = screen_pos
+	queue_redraw()
+
+
+## The card kind for a pad. Not a selection kind: nothing selects by it, nothing
+## drags by it, and _entity_at never returns it.
+const HOVER_CARD_PAD := "hover_pad"
+
+
+## What the armed tool is pointing at, as [kind, id]. HOVER_CARD_PAD's id is the
+## "REF.PIN" address; the selection ladder has no pad rung of its own, because a
+## pad is not a selectable board entity.
+##
+## The ladder (_entity_at) is what answers for everything else, so the card
+## honours every tie rule the click already follows — a via over a trace, a
+## candidate ghost over the copper beneath it. Those kinds simply get no card;
+## they are not silently mis-described as the entity under them.
+func _hover_card_target(world_pos: Vector2) -> Array:
+	if tool_mode == ToolMode.INSPECT_PIN:
+		return [HOVER_CARD_PAD, _inspect_hover_ref] if not _inspect_hover_ref.is_empty() \
+			else ["", ""]
+	if data == null:
+		return ["", ""]
+	var hit: Array = _entity_at(world_pos)
+	return hit if str(hit[0]) in [KIND_COMPONENT, KIND_TRACE] else ["", ""]
+
+
+## The lines for one [kind, id], through PcbHoverCard — which reads the same
+## derivations the MCP read verbs answer with. No board fact is computed here.
+func _hover_card_content(entity: Array) -> PackedStringArray:
+	var entity_id := str(entity[1])
+	match str(entity[0]):
+		HOVER_CARD_PAD:
+			var parts: Array = PcbPadRow.parse_ref(entity_id)
+			if parts.size() == 2:
+				return PcbHoverCard.pad_lines(_pin_inspector_host,
+					str(parts[0]), str(parts[1]))
+		KIND_COMPONENT:
+			if _pin_inspector_host != null \
+					and _pin_inspector_host.has_method("get_spatial_index"):
+				return PcbHoverCard.component_lines(
+					_pin_inspector_host.get_spatial_index(), entity_id)
+		KIND_TRACE:
+			return PcbHoverCard.trace_lines(data, entity_id)
+	return PackedStringArray()
+
+
+## Is a gesture in flight that the card must stand down for?
+##
+## Checked by BOTH the resolve and the paint, so a gesture that starts without a
+## motion event (a press that begins a marquee, a pan armed from the keyboard)
+## cannot leave a stale card standing over the board while the user drags.
+##
+## The AUTHORING runs (zone/trace/cutout/bus) are absent on purpose: those tools
+## own the pointer in _handle_mouse_motion and clear the card there, so a run in
+## progress has already emptied `_hover_card_lines` rather than suppressing it.
+func _hover_card_suppressed() -> bool:
+	return is_dragging_selection or _selection_drag_pending or is_box_selecting \
+		or is_panning or _placement_drag_active or _propose_pending \
+		or _annotation_gesture or _junction_drag_active or _rotate_drag_active \
+		or not _zone_vertex_drag_id.is_empty()
+
+
+## Drop the card. Cheap and idempotent — safe to call on any state change that
+## invalidates what it says.
+func clear_hover_card() -> void:
+	if _hover_card_lines.is_empty() and str(_hover_card_entity[0]).is_empty():
+		return
+	_hover_card_lines = PackedStringArray()
+	_hover_card_entity = ["", ""]
+	queue_redraw()
+
+
+## Where the card would be painted this frame, or an empty Rect2 when there is
+## none. PUBLIC because it is the only observable the immediate-mode draw has:
+## the paint below does nothing but fill this rectangle.
+func hover_card_rect() -> Rect2:
+	if _hover_card_lines.is_empty() or font == null or _hover_card_suppressed():
+		return Rect2()
+	return PcbHoverCard.rect_for(
+		PcbHoverCard.measure(_hover_card_lines, font, font_size),
+		_hover_card_anchor, size)
+
+
+func _draw_hover_card() -> void:
+	PcbHoverCard.draw_into(self, _hover_card_lines, hover_card_rect(),
+		font, font_size)
 
 #endregion
 

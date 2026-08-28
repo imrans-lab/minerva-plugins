@@ -502,7 +502,7 @@ static func _get_pin_position(host, args: Dictionary) -> Dictionary:
 ## WC-1 pin inspector MCP parity (contract §2/§3): resolves the SAME
 ## host.pad_at()/host.pin_info() the canvas's INSPECT_PIN mode drives, then
 ## adds display_name via host.pin_display_name() so this tool's answer is
-## byte-for-byte what the panel's Pin Info section shows for the same pin.
+## byte-for-byte what the canvas hover card shows for the same pin.
 ## Duck-typed has_method guards (never a class reference — PcbAnnotationHost
 ## is off-tree); a garbage/malformed ref or an x_mm/y_mm miss returns a
 ## structured _err, never a crash.

@@ -26,6 +26,7 @@ extends SceneTree
 
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const REGISTRY_DRIVER := preload("res://test/helpers/panel_tool_registry_driver.gd")
+const HoverCard := preload("res://../../minerva-plugins/pcb/ui/pcb_hover_card.gd")
 
 const EDITOR_NAME := "PinInspectorProbe"
 const PCB_PLUGIN_ID := "pcb"
@@ -130,6 +131,10 @@ func _build_fixture_board(d) -> void:
 		"position": Vector2(8.0, 0.0), "size": Vector2(1.0, 1.0),
 		"drill": Vector2.ZERO, "layers": ["F.Cu"],
 	}]
+	# One pin carries a ROLE from the board's own pin table, so the hover card's
+	# roles line has something real to report and the "no roles declared" branch
+	# is exercised by the other two pins of the same part.
+	u1.pin_extra["15"] = {"roles": ["strapping"]}
 	d.add_component(u1)
 
 	var u2 = d.new_component()
@@ -198,6 +203,19 @@ func _world_to_root_screen(world_pos: Vector2) -> Vector2:
 	return canvas.get_global_transform() * canvas.world_to_screen(world_pos)
 
 
+## The card's "nothing here" spelling, read off the production module so this
+## suite cannot drift from it.
+func _or_dash(value: String) -> String:
+	return value if not value.is_empty() else HoverCard.EMPTY_VALUE
+
+
+func _move_world(world_pos: Vector2) -> void:
+	var ev := InputEventMouseMotion.new()
+	ev.position = _world_to_root_screen(world_pos)
+	ev.global_position = ev.position
+	get_root().push_input(ev, true)
+
+
 func _click_world(world_pos: Vector2) -> void:
 	var pt := _world_to_root_screen(world_pos)
 	_click(pt)
@@ -255,14 +273,18 @@ func _test_e2e_1_scenario() -> void:
 
 	check("A: pin_selected fired for U1.1", str(_last_pin_selected.get("ref", "")) == "U1.1",
 		"got %s" % str(_last_pin_selected))
-	check("A: Pin Info section visible", panel._pin_info_section.visible,
-		"visible=%s" % str(panel._pin_info_section.visible))
-	check("A: ref label shows U1.1-style ref", panel._pin_info_ref_label.text == "U1.1",
-		"got '%s'" % panel._pin_info_ref_label.text)
+	# The pad's facts are on the CANVAS now, not in a sidebar section, and they
+	# arrive on HOVER rather than on the click — so the pointer is moved onto
+	# the same pad and the card is read.
+	_move_world(world_1)
+	await process_frame
+	var a_card := Array(canvas._hover_card_lines)
+	check("A: hover card titles the pad it is over", a_card.size() > 0 and a_card[0] == "U1.1",
+		"got %s" % str(a_card))
 	var a_net := str(_last_pin_selected.get("net", ""))
 	check("A: net name shown (GND, no geometry name)", a_net == "GND", "net='%s'" % a_net)
-	check("A: display value = net (no geometry name to win)",
-		panel._pin_info_value_label.text == "GND", "got '%s'" % panel._pin_info_value_label.text)
+	check("A: card display value = net (no geometry name to win)",
+		a_card.has("Pin: GND"), "got %s" % str(a_card))
 	var a_members: Array = _last_pin_selected.get("net_members", [])
 	check("A: net_members = [U2.A]", a_members == ["U2.A"], "got %s" % str(a_members))
 
@@ -279,8 +301,11 @@ func _test_e2e_1_scenario() -> void:
 	var b_net := str(_last_pin_selected.get("net", ""))
 	check("B: geometry pin_name is '3V3'", b_pin_name == "3V3", "pin_name='%s'" % b_pin_name)
 	check("B: net is still VCC (present, just outranked)", b_net == "VCC", "net='%s'" % b_net)
-	check("B: display value = geometry name, NOT net",
-		panel._pin_info_value_label.text == "3V3", "got '%s'" % panel._pin_info_value_label.text)
+	_move_world(world_15)
+	await process_frame
+	var b_card := Array(canvas._hover_card_lines)
+	check("B: card display value = geometry name, NOT net",
+		b_card.has("Pin: 3V3"), "got %s" % str(b_card))
 
 	# ── C. Click the unconnected pin. ──
 	_last_pin_selected = {"__unset__": true}
@@ -293,8 +318,13 @@ func _test_e2e_1_scenario() -> void:
 		"got %s" % str(_last_pin_selected))
 	var c_net := str(_last_pin_selected.get("net", ""))
 	check("C: net is empty (unconnected)", c_net == "", "net='%s'" % c_net)
-	check("C: display value = '(unconnected)'",
-		panel._pin_info_value_label.text == "(unconnected)", "got '%s'" % panel._pin_info_value_label.text)
+	_move_world(world_2)
+	await process_frame
+	var c_card := Array(canvas._hover_card_lines)
+	check("C: card display value = '(unconnected)'",
+		c_card.has("Pin: (unconnected)"), "got %s" % str(c_card))
+	check("C: an unconnected pad's card says so on its Net line too",
+		c_card.has("Net: %s" % _or_dash("")), "got %s" % str(c_card))
 
 	# ── D. MCP parity: minerva_pcb_pin_info must match the UI exactly, for all
 	#      three pins, plus net_members. ──
@@ -341,6 +371,77 @@ func _test_e2e_1_scenario() -> void:
 	check("D: MCP x_mm/y_mm variant also carries position (both resolution paths covered)",
 		_pos_of(r_xy) == [world_1.x, world_1.y], "got %s" % str(r_xy.get("position", {})))
 
+	# ── D2. THE CARD AND THE VERB CANNOT DISAGREE. Every pad fact on the card is
+	#     compared VERBATIM against the reply minerva_pcb_pin_info just gave for
+	#     the same pad — the card is not allowed its own spelling of a net, a
+	#     role or a layer, because it is not allowed its own derivation. ──
+	for probe in [[world_1, r1], [world_15, r15], [world_2, r2]]:
+		var at: Vector2 = probe[0]
+		var reply: Dictionary = probe[1]
+		var ref := str(reply.get("ref", ""))
+		_move_world(at)
+		await process_frame
+		var card := Array(canvas._hover_card_lines)
+		check("D2: %s card titles the ref the verb reports" % ref,
+			card.size() > 0 and card[0] == ref, "got %s" % str(card))
+		check("D2: %s card display name == the verb's display_name" % ref,
+			card.has("Pin: %s" % str(reply.get("display_name", ""))), "got %s" % str(card))
+		# A fact the verb answers "" for prints as an em dash on the card, which
+		# is the card SAYING "nothing here" rather than leaving a blank row —
+		# so the comparison is against the verb's value or that dash, never
+		# against an empty string.
+		var reply_layer := str(reply.get("layer", ""))
+		check("D2: %s card layer == the verb's layer" % ref,
+			card.has("Layer: %s" % _or_dash(reply_layer)),
+			"got %s (verb layer '%s')" % [str(card), reply_layer])
+		var reply_net := str(reply.get("net", ""))
+		check("D2: %s card net == the verb's net" % ref,
+			card.has("Net: %s" % _or_dash(reply_net)),
+			"got %s (verb net '%s')" % [str(card), reply_net])
+		# ROLES: present as a line exactly when the board declares any, and
+		# naming every role the verb names — [] must not print an empty row.
+		var reply_roles: Array = reply.get("roles", [])
+		var role_line := ""
+		for line in card:
+			if str(line).begins_with("Roles: "):
+				role_line = str(line)
+		if reply_roles.is_empty():
+			check("D2: %s carries no Roles line — the board declares none" % ref,
+				role_line.is_empty(), "got '%s'" % role_line)
+		else:
+			var missing := ""
+			for role in reply_roles:
+				if not role_line.contains(str(role)):
+					missing = str(role)
+			check("D2: %s card Roles names every role the verb reports" % ref,
+				not role_line.is_empty() and missing.is_empty(),
+				"line '%s' missing '%s'" % [role_line, missing])
+
+	# ── D3. IT IS PAINT, NOT A CONTROL: the card stays inside the canvas and
+	#     never covers the point it describes, and no gesture leaves one up. ──
+	_move_world(world_1)
+	await process_frame
+	var rect: Rect2 = canvas.hover_card_rect()
+	check("D3: the card has a rect while a pad is hovered", rect.size.x > 0.0 and rect.size.y > 0.0,
+		"rect=%s" % str(rect))
+	check("D3: the card lies inside the canvas rect",
+		rect.position.x >= 0.0 and rect.position.y >= 0.0
+			and rect.end.x <= canvas.size.x and rect.end.y <= canvas.size.y,
+		"rect=%s canvas=%s" % [str(rect), str(canvas.size)])
+	check("D3: the card does not cover the hovered point",
+		not rect.has_point(canvas.world_to_screen(world_1)),
+		"rect=%s point=%s" % [str(rect), str(canvas.world_to_screen(world_1))])
+	check("D3: the canvas still captures no input for it (mouse_filter unchanged)",
+		canvas.mouse_filter == Control.MOUSE_FILTER_STOP)
+	canvas.is_box_selecting = true
+	check("D3: a marquee in progress suppresses the card entirely",
+		canvas.hover_card_rect() == Rect2(), "rect=%s" % str(canvas.hover_card_rect()))
+	canvas.is_box_selecting = false
+	canvas.is_dragging_selection = true
+	check("D3: so does a selection drag",
+		canvas.hover_card_rect() == Rect2(), "rect=%s" % str(canvas.hover_card_rect()))
+	canvas.is_dragging_selection = false
+
 	# ── E. Click empty space clears; malformed/unknown MCP refs error cleanly. ──
 	_last_pin_selected = {"__unset__": true}
 	_click_world(empty_pt)
@@ -350,8 +451,12 @@ func _test_e2e_1_scenario() -> void:
 
 	check("E: click empty space clears (pin_selected({}))", _last_pin_selected.is_empty(),
 		"got %s" % str(_last_pin_selected))
-	check("E: Pin Info section hidden after clear", not panel._pin_info_section.visible,
-		"visible=%s" % str(panel._pin_info_section.visible))
+	_move_world(empty_pt)
+	await process_frame
+	check("E: hover card is gone one frame after the pointer leaves the pad",
+		canvas._hover_card_lines.is_empty(), "got %s" % str(Array(canvas._hover_card_lines)))
+	check("E: the sidebar carries no Pin Info section at all any more",
+		panel.find_child("PinInfoSection", true, false) == null)
 
 	var r_unknown: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info", {"editor_name": EDITOR_NAME, "ref": "ZZ9.99"})
 	check("E: MCP unknown ref 'ZZ9.99' -> structured error, not a crash",
@@ -389,8 +494,8 @@ func _test_e2e_1_scenario() -> void:
 	await process_frame
 	check("bonus: Escape exits INSPECT_PIN back to Select",
 		canvas.tool_mode == canvas.ToolMode.SELECT, "tool_mode=%d" % canvas.tool_mode)
-	check("bonus: Escape also clears the Pin Info section",
-		not panel._pin_info_section.visible, "visible=%s" % str(panel._pin_info_section.visible))
+	check("bonus: Escape also clears the hover card",
+		canvas._hover_card_lines.is_empty(), "got %s" % str(Array(canvas._hover_card_lines)))
 
 	_push_shift_p()
 	await process_frame

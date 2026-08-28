@@ -15,9 +15,9 @@ extends RefCounted
 ## selection, and where the selected copper is so it can be lit.
 ##
 ## The tool IS the canvas's INSPECT_PIN mode, grown up — one pad-picking mode,
-## not two. Its single-click behaviour is unchanged (nearest pad → pin_selected
-## → the Pin Info section), so the pin inspector's contract still holds; what
-## is new is that the pick is now also a SELECTION, and that shift extends it.
+## not two. Its single-click behaviour is unchanged (nearest pad → pin_selected),
+## so the pin inspector's contract still holds; what is new is that the pick is
+## now also a SELECTION, and that shift extends it.
 ##
 ## Off-tree module — NO class_name, reached by relative preload.
 

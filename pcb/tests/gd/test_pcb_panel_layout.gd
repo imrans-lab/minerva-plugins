@@ -375,20 +375,43 @@ func _test_properties_panel() -> void:
 	check("wide mode: properties expanded",
 		bool(panel.get_layout_state().get("properties_expanded", false)))
 
-	# Select the only component → fields populate.
+	# ── THE SECTION HOLDS CONTROLS ONLY ──────────────────────────────────────
+	# The display-only component rows (ID / Position / Rotation / Layer /
+	# Footprint) moved to the canvas hover card. The oracle is the row LABELS
+	# themselves, read off the live tree: a read-out row is a direct child of
+	# PropertiesBody whose key Label reads one of those names. Scanning the tree
+	# rather than a field means re-adding the rows under any new spelling still
+	# fails this. (Depth is deliberate: "Layer:" is also the ZoneLayerRow's key,
+	# and that row is a GRANDCHILD, inside ZoneRows.)
+	var body: Control = panel.find_child("PropertiesBody", true, false)
+	check("properties body exists", body != null)
+	var readonly_keys := ["ID:", "Position:", "Rotation:", "Layer:", "Footprint:"]
+	var found_readonly := ""
+	for row in body.get_children():
+		for kid in (row as Node).get_children():
+			if kid is Label and (kid as Label).text in readonly_keys:
+				found_readonly = (kid as Label).text
+	check("no read-only component row survives in Properties (found '%s')"
+		% found_readonly, found_readonly.is_empty())
+
+	# ── AND EVERY CONTROL THAT CHANGES THE BOARD IS STILL THERE ──────────────
+	# Named individually, because "the section still has children" would pass
+	# with any one of them deleted.
+	for control_name in ["FabricationStageOption", "OffsetX", "OffsetY",
+			"ZonePropNetOption", "ZonePropLayerOption", "TracePropWidthSpin",
+			"ViaPropNetOption", "ViaPropSizeSpin", "ViaPropDrillSpin"]:
+		check("editing control %s survives" % control_name,
+			panel.find_child(control_name, true, false) != null)
+
+	# Selecting a component still drives the section (the group rows read it).
 	panel._canvas.selected_components.append("U1")
 	panel._canvas.selection_changed.emit()
 	await process_frame
-	var id_label: Label = panel._prop_labels.get("ID", null)
-	check("ID populates on selection", id_label != null and id_label.text == "U1")
-	var pos_label: Label = panel._prop_labels.get("Position", null)
-	check("Position populates", pos_label != null and pos_label.text.begins_with("(30"))
-
-	# Clear selection → dashes.
+	check("selection still drives the properties update without read-out rows",
+		panel.find_child("GroupRows", true, false) != null)
 	panel._canvas.selected_components.clear()
 	panel._canvas.selection_changed.emit()
 	await process_frame
-	check("clears to dash on deselect", id_label.text == "-")
 
 	# Medium mode collapses by default.
 	panel.size = Vector2(600.0, 700.0)

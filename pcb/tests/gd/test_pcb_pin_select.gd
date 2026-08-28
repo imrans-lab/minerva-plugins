@@ -436,8 +436,11 @@ func _test_3_tool_and_selection() -> void:
 	check_eq("3c: a real click SELECTS the pad", Array(canvas.selected_pad_refs), ["U1S.6"])
 	check_eq("3c: …and the snapshot every reader shares carries it",
 		(canvas.selection_snapshot().get("pads", []) as Array), ["U1S.6"])
-	check("3c: …and the Pin Info section still fills, exactly as it did",
-		panel._pin_info_section.visible)
+	# The one-pin READOUT the sidebar used to carry is gone — a pad's facts are
+	# on the canvas hover card now. What survives here is the pad SELECTION,
+	# asserted directly above.
+	check("3c: …and no Pin Info section survives in the sidebar",
+		panel.find_child("PinInfoSection", true, false) == null)
 
 	# Shift extends. The algebra is the tool's, so it is also pinned directly:
 	# a direct call cannot tell you the click arrives, and a click cannot tell

@@ -1677,8 +1677,8 @@ drag, middle-drag, or hold Space and drag.
 
 **Inspect Pin / Pin Select (P, or Shift+P)** — the toolbar button and the
 status bar call this tool *Inspect Pin*; the sidebar section it fills is *Pin
-Selection*. Click a pad to SELECT it: its copper is haloed, the Pin Info
-section fills, and the Pin Selection section below shows
+Selection*. Click a pad to SELECT it: its copper is haloed, the
+hover card names the pin under the cursor, and the Pin Selection section shows
 the pad's row (net, side, roles), the component's free pins under a side
 filter, and the two net edits — "Move net to…" and, with exactly two pads
 selected, "Swap nets". Shift-click adds or removes a pad; a shift-click on
@@ -1883,6 +1883,19 @@ canvas candidate instead, edited via the candidate context menu.
 inspectable candidates in the routing workspace (rendered as ghost traces on
 the canvas); the board itself is not changed until a candidate is committed
 (see the route-correction loop above).
+
+**Hover card** — resting the pointer on a component, a pad or a trace paints a
+small bordered box beside it naming what is there. It is paint, not a control:
+it never takes a click, never covers the point under the cursor, and never
+leaves the canvas rect. A component card carries value, footprint, layer,
+rotation and position; a pad card carries `REF.PIN`, the pin's display name,
+its roles, net and layer; a trace card carries net, width, layer and length.
+Every one of those facts is read from the derivation the matching verb already
+answers with (`minerva_pcb_describe_component`, `minerva_pcb_pin_info`,
+`minerva_pcb_describe_region`), so the card and the verb cannot disagree. The
+card is display-only, which is why the sidebar has no read-only component rows
+and no Pin Info section: the *Properties* section holds only controls that
+CHANGE the board.
 
 **Properties ▸ zone Net / Layer** (re-property an already-drawn zone) — Net
 accepts declared nets only (an undeclared net would make the whole board

@@ -41,7 +41,6 @@ static func _dict_or_empty(v, fallback: Dictionary = {}) -> Dictionary:
 
 const _PcbAnnotationHostScript: Script = preload("PcbAnnotationHost.gd")
 const _PcbDataScript: Script = preload("model/pcb_data.gd")
-const _PcbComponentScript: Script = preload("model/pcb_component.gd")
 const _PcbCanvasScript: Script = preload("pcb_canvas.gd")
 const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.gd")
 const _PanelLayoutScript: Script = preload("panel_layout.gd")
@@ -385,8 +384,6 @@ var _options_menu_button: MenuButton = null
 var _drawer_button: Button = null
 var _export_button: Button = null
 
-## Properties section (round C): field name -> value Label.
-var _prop_labels: Dictionary = {}
 var _properties_body: VBoxContainer = null
 var _properties_collapse_btn: Button = null
 var _properties_expanded := true
@@ -405,8 +402,7 @@ var _offset_y_edit: LineEdit = null
 ## Which component the offset fields currently edit ("" when they are hidden).
 var _offset_component_id: String = ""
 
-## Pin Info section (WC-1 pin inspector). Hidden until a pin is selected;
-## hides again on clear (canvas pin_selected({})).
+## Toolbar toggle for the WC-1 pin inspector (INSPECT_PIN mode).
 var _inspect_pin_button: Button = null
 ## Trash-can (item 019fb92f8b83, delete half): a plain action button, NOT a
 ## radio tool — it never joins _tool_buttons/_toggle_tool_mode's mutual
@@ -415,12 +411,8 @@ var _inspect_pin_button: Button = null
 ## canvas' selection_changed signal, the same wiring _update_status/
 ## _update_properties already use).
 var _delete_button: Button = null
-var _pin_info_section: VBoxContainer = null
 ## The pad-selection section — see _build_sidebar.
 var _pin_selection_section: VBoxContainer = null
-var _pin_info_ref_label: Label = null
-var _pin_info_value_label: Label = null
-var _pin_info_members_label: Label = null
 
 ## In-panel route-flow toolbar cluster (WC-3, contract §5 — a conscious
 ## partial reversal of Round-B "no authoring in panel"). Buttons activate
@@ -1183,7 +1175,6 @@ func _build_ui() -> void:
 		refresh_pin_selection_section())
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
-	_canvas.pin_selected.connect(_on_pin_selected)
 	_canvas.zone_tool_message.connect(_show_transient_status)
 	_canvas.trace_tool_message.connect(_show_transient_status)
 	# Epoch UX3 station 5: the canvas's steered-retry doorway — the router leg
@@ -2059,13 +2050,11 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar_content.add_child(_build_properties_section())
 
 	_sidebar_content.add_child(HSeparator.new())
-	_sidebar_content.add_child(_build_pin_info_section())
 
-	# The PAD SELECTION section, below the one-pin Pin Info
-	# section it complements: the selected pads' rows, the component's free
+	# The PAD SELECTION section: the selected pads' rows, the component's free
 	# pins, and the two net edits a pad selection affords. Hidden until pads
-	# are selected; driven by selection_changed, not by pin_selected, so the
-	# Pin Info section's own contract is untouched.
+	# are selected. This is an EDITING section — the read-only pin readout it
+	# used to sit under now lives in the canvas hover card.
 	_pin_selection_section = _PcbPinSelectionSectionScript.new()
 	_pin_selection_section.move_net_requested.connect(_on_move_net_requested)
 	_pin_selection_section.swap_nets_requested.connect(_on_swap_nets_requested)
@@ -2112,10 +2101,16 @@ func refresh_pin_selection_section() -> void:
 	_pin_selection_section.update_for(_data, refs)
 
 
-## Properties section (legacy clone): ID / Position / Rotation / Layer /
-## Footprint of the single-selected component. Collapsible — wide mode expands
-## it by default, medium collapses it (3-col width is precious); the selection
-## summary also mirrors into the status bar either way.
+## Properties section: the controls that CHANGE the board — the board-level
+## fabrication stage, plus the group / zone / trace / via property editors for
+## whatever is selected. Collapsible — wide mode expands it by default, medium
+## collapses it (3-col width is precious).
+##
+## NOTHING HERE IS A READ-OUT. The component facts this section used to mirror
+## (id, position, rotation, layer, footprint) are display-only, and display-only
+## board facts belong on the canvas hover card, beside the entity they describe
+## — see pcb_hover_card.gd. The status bar still carries the one-line selection
+## summary.
 func _build_properties_section() -> VBoxContainer:
 	var section := VBoxContainer.new()
 	section.name = "PropertiesSection"
@@ -2139,20 +2134,6 @@ func _build_properties_section() -> VBoxContainer:
 	_properties_body.add_child(_build_fabrication_row())
 	_properties_body.add_child(HSeparator.new())
 
-	for field in ["ID", "Position", "Rotation", "Layer", "Footprint"]:
-		var row := HBoxContainer.new()
-		var key_label := Label.new()
-		key_label.text = "%s:" % field
-		key_label.custom_minimum_size.x = 60
-		row.add_child(key_label)
-		var value_label := Label.new()
-		value_label.text = "-"
-		value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		value_label.clip_text = true
-		row.add_child(value_label)
-		_prop_labels[field] = value_label
-		_properties_body.add_child(row)
-
 	_properties_body.add_child(_build_group_rows())
 	_properties_body.add_child(_build_zone_rows())
 	_properties_body.add_child(_build_trace_rows())
@@ -2160,13 +2141,14 @@ func _build_properties_section() -> VBoxContainer:
 	return section
 
 
-## The two component-group rows (A4 stage 2), built in the SAME key-label +
-## value-control shape as the five rows above so the section reads as one thing.
+## The two component-group rows (A4 stage 2), built in the key-label +
+## value-control shape every row in this section shares.
 ##
-## The offset fields are the panel's first EDITABLE property control; everything
-## above them is a read-out. They commit on Enter (text_submitted) and on losing
-## focus, and a refused or malformed edit snaps straight back to the model's
-## value — the model, not the field, is what an offset IS.
+## The offset fields commit on Enter (text_submitted) and on losing focus, and a
+## refused or malformed edit snaps straight back to the model's value — the
+## model, not the field, is what an offset IS. The Group row beside them names
+## which group the offset is measured against, so it is part of the control, not
+## a stray read-out.
 func _build_group_rows() -> VBoxContainer:
 	var box := VBoxContainer.new()
 	box.name = "GroupRows"
@@ -2286,31 +2268,19 @@ func _set_properties_expanded(expanded: bool) -> void:
 		_properties_collapse_btn.text = "Properties" if expanded else "Properties…"
 
 
-## MEASURED RESTRUCTURE (A5): this used to BLANK AND RETURN whenever no component
-## was focused, so a zone-only selection could never reach any property row at
-## all — the zone rows would have been dead UI. The component half is byte-for-byte
-## what it was, only moved into an else-branch, and the zone half now runs on every
-## update regardless of what the component half decided. Nothing about a
-## component-only or empty selection changed.
+## Re-drive every property control against the live selection. Each kind's half
+## runs on every update regardless of what the others decided, so a mixed
+## selection shows every half that has something to say — each describes exactly
+## what it says it describes.
 func _update_properties() -> void:
-	if _prop_labels.is_empty() or _canvas == null or _data == null:
+	if _canvas == null or _data == null:
 		return
 	_update_fabrication_row()
 	var comp = _property_focus_component()
 	if comp == null:
-		for key in _prop_labels:
-			(_prop_labels[key] as Label).text = "-"
 		_hide_group_rows()
 	else:
 		_update_group_rows(comp)
-		(_prop_labels["ID"] as Label).text = str(comp.id)
-		(_prop_labels["Position"] as Label).text = "(%.1f, %.1f)" % [comp.position.x, comp.position.y]
-		(_prop_labels["Rotation"] as Label).text = "%.0f°" % float(comp.rotation)
-		(_prop_labels["Layer"] as Label).text = str(comp.layer)
-		var fp := str(comp.footprint_id)
-		if fp.is_empty() and "FootprintType" in _PcbComponentScript:
-			fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
-		(_prop_labels["Footprint"] as Label).text = fp
 	_update_zone_rows()
 	_update_trace_rows()
 	_update_via_rows()
@@ -3123,53 +3093,6 @@ func _revert_offset_fields() -> void:
 	_offset_y_edit.text = "%.3f" % offset.y
 
 
-## Pin Info section (WC-1, contract §3): Component.Pin + the display rule
-## (geometry pin_name > net > "(unconnected)", via host.pin_display_name so the
-## UI and MCP parity tool compute the SAME string) + net_members. Starts hidden.
-func _build_pin_info_section() -> VBoxContainer:
-	_pin_info_section = VBoxContainer.new()
-	_pin_info_section.name = "PinInfoSection"
-	_pin_info_section.visible = false
-
-	var header := Label.new()
-	header.name = "PinInfoHeader"
-	header.text = "Pin Info"
-	_pin_info_section.add_child(header)
-
-	_pin_info_ref_label = Label.new()
-	_pin_info_ref_label.name = "PinInfoRef"
-	_pin_info_section.add_child(_pin_info_ref_label)
-
-	_pin_info_value_label = Label.new()
-	_pin_info_value_label.name = "PinInfoValue"
-	_pin_info_section.add_child(_pin_info_value_label)
-
-	_pin_info_members_label = Label.new()
-	_pin_info_members_label.name = "PinInfoMembers"
-	_pin_info_members_label.autowrap_mode = TextServer.AUTOWRAP_WORD
-	_pin_info_section.add_child(_pin_info_members_label)
-
-	return _pin_info_section
-
-
-## Canvas pin_selected relay: {} clears + hides; a populated pin_info Dictionary
-## shows "Component.Pin" + the display rule + net members.
-func _on_pin_selected(info: Dictionary) -> void:
-	if _pin_info_section == null:
-		return
-	if info.is_empty():
-		_pin_info_section.visible = false
-		return
-	_pin_info_section.visible = true
-	_pin_info_ref_label.text = str(info.get("ref", ""))
-	var display := ""
-	if _annotation_host != null and _annotation_host.has_method("pin_display_name"):
-		display = _annotation_host.pin_display_name(info)
-	_pin_info_value_label.text = display
-	var members: Array = info.get("net_members", [])
-	_pin_info_members_label.text = "Net members: %s" % (", ".join(members) if not members.is_empty() else "(none)")
-
-
 ## Toolbar toggle handler — a TRUE toggle, mirroring the canvas's Shift+P
 ## behaviour (contract §3): pressed arms INSPECT_PIN, un-pressed exits to Select.
 func _on_inspect_pin_button_pressed() -> void:
@@ -3559,8 +3482,9 @@ func point_at_entity(kind: String, id: String) -> Dictionary:
 	if not bool(resolved.get("ok", false)):
 		return resolved
 	_canvas._clear_selection_all()
-	# A pad goes through the canvas's own setter so the Pin Info section follows
-	# the point the way it follows a click; every other kind is a plain add.
+	# A pad goes through the canvas's own setter so the pad-selection section
+	# follows the point the way it follows a click; every other kind is a plain
+	# add.
 	if str(resolved["canvas_kind"]) == _canvas.KIND_PAD:
 		_canvas.set_selected_pads([id])
 	else:
@@ -3612,8 +3536,8 @@ func select_entities(entries: Array) -> Dictionary:
 		else:
 			_canvas._add_to_selection(str((row as Dictionary)["canvas_kind"]),
 				str((row as Dictionary)["id"]))
-	# Pads go through the canvas's own setter so the Pin Info section follows
-	# the agent's pick the way it follows a click.
+	# Pads go through the canvas's own setter so the pad-selection section
+	# follows the agent's pick the way it follows a click.
 	if not pads.is_empty():
 		_canvas.set_selected_pads(pads)
 	if not annotations.is_empty() and _annotation_host != null:
