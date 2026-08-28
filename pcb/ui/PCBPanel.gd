@@ -5388,7 +5388,7 @@ func export_yaml_text() -> Dictionary:
 			"note": "YAML serialization runs in the pcb backend — plugin IPC not ready"}
 	var result: Dictionary = await _request_with_backend_ensure(
 			"pcb.serialize",
-			_payload_by_ref({"board": _data.to_board_dict()}, "board"), 30000)
+			_payload_by_ref({"board": _data.to_saved_board_dict()}, "board"), 30000)
 
 	if not bool(result.get("success", false)):
 		var code := str(result.get("error_code", ""))
@@ -5494,9 +5494,11 @@ func _on_export_yaml_pressed() -> void:
 ## pcb_component.gd's "Canonical Extra (render detail)" block) — every one
 ## re-derivable from the locked footprint at load, none design intent; the
 ## first real promote shipped all of them into the corpus file via Go's
-## Extra passthrough (K2 residue, found by inspection).
+## Extra passthrough (K2 residue, found by inspection). The base is
+## to_saved_board_dict, so the session-only keys are already gone before this
+## strip runs — the list below is render detail only.
 func _promote_stripped_board() -> Dictionary:
-	var board: Dictionary = _data.to_board_dict()
+	var board: Dictionary = _data.to_saved_board_dict()
 	var render_detail_keys: Array = ["graphics", "pads", "local_bounds",
 		"has_pad_geometry", "bbox_center_offset", "color", "label_visible",
 		"locked", "width", "height", "footprint_id"]
@@ -6180,8 +6182,12 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 
 	# Rebuild the live board (from_board_dict emits data_changed; suppress the
 	# dirty relay for the whole load like the project-file restore path).
+	# resolve_is_live: this dict came back from pcb.deserialize, which resolves
+	# the board against THIS host's library and drops any footprint_resolved the
+	# source carried before stamping its own — so the flags describe this
+	# machine. The file-restore path below deliberately does not say true.
 	_restoring = true
-	_data.from_board_dict(board)
+	_data.from_board_dict(board, true)
 
 	# SIDECAR ADOPTION (Epoch UX2 station 8, docket 019fde57027c — the HITL-4
 	# loss: annotations authored against a file-loaded canonical YAML lived
@@ -6250,7 +6256,7 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 			# document switch drops the prior board's drafts). Inside the
 			# _restoring gate — load_from_dict emits `changed` unconditionally.
 			var sidecar_status: Dictionary = _PcbRoutingSidecarScript.load_into_workspace(
-				source_path, _routing_workspace, _data.to_board_dict(), 0, _staged_entities)
+				source_path, _routing_workspace, _data.to_saved_board_dict(), 0, _staged_entities)
 			# A sidecar ownership record this board cannot support is DROPPED
 			# rather than re-attached to whatever now carries that id. Say so on
 			# the reply — whoever called load_board is who a later
@@ -6373,7 +6379,9 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# answers "is the real board still what this reply was scored against"; the
 	# draft overlay is request-scoped and must never enter it, or the sidecar's
 	# guard would compare against a fingerprint no persisted board can ever have.
-	var board_dict: Dictionary = _data.to_board_dict()
+	# The SAVED shape, matching the sidecar's own writer: the token must be one
+	# a persisted board can have, and session-only keys are by definition not.
+	var board_dict: Dictionary = _data.to_saved_board_dict()
 	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint(board_dict)
 
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
@@ -7144,7 +7152,7 @@ func _flush_sidecars() -> void:
 		_annotation_host.save_sidecar(_file_path)
 	if _routing_workspace != null:
 		_PcbRoutingSidecarScript.save_workspace(
-			_file_path, _routing_workspace, _data.to_board_dict(),
+			_file_path, _routing_workspace, _data.to_saved_board_dict(),
 			int(_data.board_revision), _staged_entities)
 
 
@@ -7177,11 +7185,15 @@ func _exit_tree() -> void:
 
 ## Return the board's save state. Ctrl+S writes this Dict to the .pcbskel file as
 ## JSON (Editor.gd host_owned path). Canonical from now on (port rule 4): the
-## returned shape is to_board_dict(). We ALSO flush annotations to the sidecar
+## returned shape is to_saved_board_dict() — to_board_dict with the session-only
+## keys removed. We ALSO flush annotations to the sidecar
 ## here — the platform does not auto-persist plugin-panel annotation sidecars
 ## (gap register C-15), so the panel owns that write.
 func _on_panel_save_request() -> Dictionary:
-	var board_dict: Dictionary = _data.to_board_dict()
+	# to_SAVED_board_dict: the session-only keys (footprint_resolved) never
+	# reach the file, so reopening it elsewhere cannot inherit this machine's
+	# library. The routing fingerprint below is computed from the same dict.
+	var board_dict: Dictionary = _data.to_saved_board_dict()
 	if _annotation_host != null and not _file_path.is_empty():
 		_annotation_host.save_sidecar(_file_path)
 	# T2a: flush the routing workspace to "<board_path>.routing.json" AFTER the
@@ -7287,7 +7299,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		# path-adoption site for the quarantine/reset rules). Same _restoring
 		# gate — the store's load emits `changed` unconditionally.
 		_PcbRoutingSidecarScript.load_into_workspace(
-			_file_path, _routing_workspace, _data.to_board_dict(), int(_data.board_revision),
+			_file_path, _routing_workspace, _data.to_saved_board_dict(), int(_data.board_revision),
 			_staged_entities)
 
 	# Codex 1047 fix round, verdict 6: deterministic load-time reconciliation

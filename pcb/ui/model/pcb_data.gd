@@ -3562,12 +3562,55 @@ func to_board_dict() -> Dictionary:
 	return out
 
 
+## Per-component keys that describe THIS SESSION rather than the board, and so
+## must never be written into a document. `footprint_resolved` says a resolve
+## succeeded against this machine's library; a file carrying it asserts that
+## fact about every machine the file is ever opened on, and the wire's pad trim
+## believes it (see panel_tools.canonical_wire_board).
+const SESSION_ONLY_COMPONENT_KEYS: Array[String] = ["footprint_resolved"]
+
+
+## The board dict as it is WRITTEN — to_board_dict with the session-only keys
+## removed. Pure over its input so the rule is testable without a board.
+##
+## Two shapes, one source: everything headed for a WORKER goes as
+## to_board_dict() (the session facts are exactly what let the wire drop
+## geometry the worker can re-derive), everything headed for DISK goes through
+## here. Mutates a fresh copy of each component dict, never the caller's.
+static func strip_session_state(board: Dictionary) -> Dictionary:
+	var out := board.duplicate()
+	var comps_v: Variant = board.get("components", [])
+	if not (comps_v is Array):
+		return out
+	var comps_out: Array = []
+	for comp_v in (comps_v as Array):
+		if not (comp_v is Dictionary):
+			comps_out.append(comp_v)
+			continue
+		var comp: Dictionary = (comp_v as Dictionary).duplicate()
+		for key in SESSION_ONLY_COMPONENT_KEYS:
+			comp.erase(key)
+		comps_out.append(comp)
+	out["components"] = comps_out
+	return out
+
+
+## The canonical board dict for PERSISTENCE — the .pcbskel save, the YAML
+## export and the promote all write this rather than to_board_dict().
+func to_saved_board_dict() -> Dictionary:
+	return strip_session_state(to_board_dict())
+
+
 ## Restore board state from a canonical board-contract dict.
 ##
 ## TOLERATES "annotations" / "route_hints" keys by IGNORING them: the Go importer
 ## passes those through opaquely, but this model does not own annotation state —
 ## the platform annotation substrate (PcbAnnotationHost, a panel sibling) does.
-func from_board_dict(data: Dictionary) -> void:
+##
+## `resolve_is_live` is forwarded verbatim to every component — see
+## pcb_component.load_from_board_dict. Only a caller whose dict came straight
+## out of a resolve against THIS machine's library may pass true.
+func from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
 	board_name = str(data.get("name", "Untitled"))
 	board_width = float(data.get("width_mm", 100.0))
 	board_height = float(data.get("height_mm", 100.0))
@@ -3615,7 +3658,7 @@ func from_board_dict(data: Dictionary) -> void:
 	var comp_list: Array = data.get("components", [])
 	for cd in comp_list:
 		if cd is Dictionary:
-			var component = PCBComponentScript.from_board_dict(cd)
+			var component = PCBComponentScript.from_board_dict(cd, resolve_is_live)
 			components[component.id] = component
 
 	# Nets (canonical list → name→object map)

@@ -114,10 +114,21 @@ var has_pad_geometry: bool = false
 ## footprint pad".
 var pads_authored: bool = false
 
-## The COMPONENT-level resolved fact (bug 019ff4a9a0d7), distinct from the
-## PAD-level has_pad_geometry above: a silk-only footprint resolves with zero
-## pads, so the pad marker alone cannot say "this component is resolved". Set
-## by the worker's resolve success path only; absence means unresolved.
+## The COMPONENT-level resolved fact, distinct from the PAD-level
+## has_pad_geometry above: a silk-only footprint resolves with zero pads, so
+## the pad marker alone cannot say "this component is resolved". Set by the
+## worker's resolve success path only; absence means unresolved.
+##
+## SESSION STATE, NOT BOARD DATA. It records that a resolve succeeded against
+## THIS machine's library, which is a fact about the machine, not about the
+## board. load_from_board_dict therefore never restores it from a saved
+## document: a board authored where the library HAD the ref, reopened where it
+## does not, would otherwise claim resolved — and canonical_wire_board would
+## trim the pads off a part the worker here cannot resolve either, handing it a
+## silently pad-less component. It is set only from a resolve performed in this
+## session (pcb_library_part.apply_geometry, or a board load whose caller says
+## the flags came from a live resolve), and to_saved_board_dict strips it back
+## out of everything written to disk.
 var footprint_resolved: bool = false
 
 ## Silk/courtyard graphics attached by the worker's footprint-RESOLVE step
@@ -1326,6 +1337,16 @@ func to_board_dict() -> Dictionary:
 	if _emits_pads():
 		d["pads"] = _pads_to_list()
 	d["has_pad_geometry"] = has_pad_geometry
+	# Present-only, and straight off the live field rather than out of the
+	# canonical_extra passthrough: the flag on the dict must be THIS session's
+	# resolve result, which is what canonical_wire_board reads to decide whether
+	# the worker can re-derive the lands it is about to drop. Emitting it
+	# unconditionally would put `false` on the wire for every unresolved part
+	# for no reader; emitting it from canonical_extra would replay whatever the
+	# document was saved with. to_saved_board_dict strips it from anything that
+	# gets written, so no file ever carries it.
+	if footprint_resolved:
+		d["footprint_resolved"] = true
 	d["graphics"] = _graphics_to_list()
 	d["bbox_center_offset"] = {"x": bbox_center_offset.x, "y": bbox_center_offset.y}
 	d["properties"] = properties.duplicate()
@@ -1336,7 +1357,14 @@ func to_board_dict() -> Dictionary:
 
 
 ## Restore from a canonical board-contract component dict.
-func load_from_board_dict(data: Dictionary) -> void:
+##
+## `resolve_is_live` says whether `data`'s footprint_resolved flags were
+## produced by a resolve run on THIS machine moments ago (the pcb.deserialize
+## board-load path, which resolves against this host's library before replying)
+## rather than read back off a document. Only that caller may say true; a file
+## restore, an undo snapshot and a hand-built dict all leave it false, so a
+## stale flag saved elsewhere cannot survive the load. See footprint_resolved.
+func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
 	id = str(data.get("ref", data.get("id", "")))
 	var authored_fp := str(data.get("footprint", "CUSTOM"))
 	set_footprint_by_name(authored_fp)
@@ -1389,7 +1417,7 @@ func load_from_board_dict(data: Dictionary) -> void:
 				pin_extra[pnum] = extras
 
 	has_pad_geometry = data.get("has_pad_geometry", false)
-	footprint_resolved = bool(data.get("footprint_resolved", false))
+	footprint_resolved = resolve_is_live and bool(data.get("footprint_resolved", false))
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
 	# Render pads: editor-authored boards carry an explicit `pads` array (render
@@ -1445,9 +1473,13 @@ func load_from_board_dict(data: Dictionary) -> void:
 	# below is every key the reads above consumed; anything else is authored
 	# design intent that must survive the round trip verbatim.
 	canonical_extra.clear()
+	# footprint_resolved is listed here so the passthrough cannot re-emit it:
+	# it is session state (see its declaration), and canonical_extra is the one
+	# path by which a saved flag could otherwise reach to_board_dict again.
 	var known := ["ref", "id", "footprint", "footprint_id", "x_mm", "y_mm",
 		"rotation_deg", "layer", "width", "height", "local_bounds", "pads",
-		"has_pad_geometry", "graphics", "bbox_center_offset", "properties",
+		"has_pad_geometry", "footprint_resolved", "graphics",
+		"bbox_center_offset", "properties",
 		"color", "label_visible", "locked", "pins", "value"]
 	for k in data:
 		if k not in known:
@@ -1455,9 +1487,9 @@ func load_from_board_dict(data: Dictionary) -> void:
 
 
 ## Create from a canonical board-contract component dict (static constructor).
-static func from_board_dict(data: Dictionary):
+static func from_board_dict(data: Dictionary, resolve_is_live: bool = false):
 	var component := _Self.new()
-	component.load_from_board_dict(data)
+	component.load_from_board_dict(data, resolve_is_live)
 	return component
 
 

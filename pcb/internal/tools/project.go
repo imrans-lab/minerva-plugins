@@ -308,6 +308,15 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 		// validator which calls it unsupported_schema_version. Fail closed.
 		return nil, fmt.Errorf("pcb.deserialize: invalid board: %w", vErr)
 	}
+	// footprint_resolved is DERIVED, never board source: it says a resolve
+	// succeeded against the library of the machine doing the resolving. A
+	// document that carries one (older boards were saved with it) would
+	// survive adoptResolvedGeometry's absent-only rule and come back out of
+	// this channel asserting a resolve THIS host never performed — and the
+	// panel's wire trim believes the flag and drops the component's pads.
+	// Clearing it here makes the reply's flags mean exactly "resolved here,
+	// just now", on both the enriched and the pure-codec arm.
+	dropDerivedResolveFlags(b)
 	// Board-LOAD enrichment: attach each component's footprint silk/courtyard
 	// graphics, best-effort. No-op when w == nil (the pure codec path). Runs
 	// AFTER validation so we never resolve a board we are about to reject, and
@@ -405,6 +414,22 @@ func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Boa
 	return warnings
 }
 
+// dropDerivedResolveFlags removes the component-level footprint_resolved key
+// from every component's Extra. Called once at the deserialize boundary so the
+// only footprint_resolved a reply can carry is one adoptResolvedGeometry
+// stamped from this host's own resolve. Nil-safe and cheap on a board that
+// carries none.
+func dropDerivedResolveFlags(b *board.Board) {
+	if b == nil {
+		return
+	}
+	for i := range b.Components {
+		if b.Components[i].Extra != nil {
+			delete(b.Components[i].Extra, "footprint_resolved")
+		}
+	}
+}
+
 // adoptResolvedGeometry applies the per-key adoption policy (see
 // attachFootprintGraphics's doc comment) and returns how many components took
 // at least one key. Pure over its inputs so the policy is testable without a
@@ -435,9 +460,11 @@ func adoptResolvedGeometry(b *board.Board, byRef map[string]resolvedComponent) i
 				took = true
 			}
 		}
-		// The component-level resolved fact (bug 019ff4a9a0d7). Boolean and
-		// worker-owned: absence means the best-effort resolve left the
-		// component pristine, so absent stays absent.
+		// The component-level resolved fact. Boolean and worker-owned:
+		// absence means the best-effort resolve left the component pristine,
+		// so absent stays absent. dropDerivedResolveFlags has already cleared
+		// any flag the document carried, so the absent-only guard below can
+		// only ever see a key this pass itself wrote.
 		if r.footprintResolved {
 			if _, exists := b.Components[i].Extra["footprint_resolved"]; !exists {
 				b.Components[i].Extra["footprint_resolved"] = true

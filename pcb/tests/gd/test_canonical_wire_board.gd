@@ -30,10 +30,20 @@ extends SceneTree
 ## tolerant-resolve, dump compact with sorted keys. Any board whose enriched
 ## form clears 64 KiB works; nothing here depends on the specific parts.
 ##
+## SECTION F pins the OTHER half of the same trim: which components the trim is
+## allowed to fire on. footprint_resolved used to round-trip through the
+## component codec, so a by-ref board authored where the library HAD the ref
+## reopened elsewhere still claiming resolved — and the trim dropped the pads
+## off a part the second machine could not resolve either. The flag is session
+## state now: set only from a resolve run here, stripped out of everything
+## written to disk, and never restored from a document.
+##
 ## Run:
 ##   godot --headless --path src --script ../../minerva-plugins/pcb/tests/gd/test_canonical_wire_board.gd
 
 const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
+const COMPONENT_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_component.gd"
+const DATA_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_data.gd"
 const FIXTURE_PATH := "res://../../minerva-plugins/pcb/tests/gd/testdata/payload_cap_fixture.json"
 
 ## The host broker's request-payload ceiling (PluginScenePanelBroker.gd /
@@ -207,6 +217,94 @@ func _init() -> void:
 		"seam: the payload actually sent is under the headroom cap (%d bytes)" % sent_size)
 	_check(host.captured_board == wire,
 		"seam: the verb sends exactly the canonical wire form")
+
+	# ── F. The trim decision is THIS session's resolve, not a saved flag ──────
+	#
+	# THE DEFECT F PINS. footprint_resolved round-tripped through the component
+	# codec: a by-ref board authored where the library HAD the ref was saved
+	# carrying the flag, and reopening it where the library does NOT have the
+	# ref restored it verbatim. The trim above then dropped that component's
+	# `pads` — and the worker on the second machine, with no library hit either,
+	# was handed a PARTIAL part with no lands and no way to get them. Nothing
+	# said so; the board simply stopped compiling.
+	#
+	# The oracle is the pair: the SAME saved document, loaded with and without a
+	# live resolve behind it, must put pads on the wire in the first case and
+	# not in the second.
+	var comp_script: Script = load(COMPONENT_PATH)
+	var data_script: Script = load(DATA_PATH)
+	_check(comp_script != null and data_script != null,
+		"pcb_component.gd and pcb_data.gd load")
+
+	# A by-ref part as MACHINE A saved it: a library ref, real lands, and the
+	# resolved flag A's library earned.
+	var saved_comp := {
+		"ref": "J9", "footprint": "Lib:PinHeader_1x02", "footprint_id": "Lib:PinHeader_1x02",
+		"x_mm": 10.0, "y_mm": 10.0, "rotation_deg": 0.0, "layer": "top",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0},
+			{"number": "2", "x_mm": 2.54, "y_mm": 0.0}],
+		"pads": [
+			{"number": "1", "position": {"x": 0.0, "y": 0.0},
+				"size": {"width": 1.8, "height": 1.8}},
+			{"number": "2", "position": {"x": 2.54, "y": 0.0},
+				"size": {"width": 1.8, "height": 1.8}}],
+		"has_pad_geometry": true,
+		"footprint_resolved": true,
+	}
+
+	# MACHINE B: a plain document load. No resolve ran here, so nothing on this
+	# host has said the ref is resolvable.
+	var reopened = comp_script.new()
+	reopened.load_from_board_dict(saved_comp)
+	var reopened_dict: Dictionary = reopened.to_board_dict()
+	_check(not reopened_dict.has("footprint_resolved"),
+		"a saved footprint_resolved does not survive a document load — the flag is this session's, and this session has not resolved anything")
+	var reopened_wire: Dictionary = tools.canonical_wire_board(
+		{"components": [reopened_dict]})
+	var reopened_wire_comp: Dictionary = reopened_wire["components"][0]
+	_check((reopened_wire_comp.get("pads", []) as Array).size() == 2,
+		"…so the reopened by-ref part still ships its lands — the worker here may not resolve the ref either, and a dropped `pads` KEY demotes it to PARTIAL")
+	_check(str(reopened_wire_comp.get("footprint", "")) == "Lib:PinHeader_1x02",
+		"…under its authored ref, so the worker can still try the library")
+
+	# MACHINE A, or any host whose pcb.deserialize just resolved this board
+	# against its OWN library: the caller says the flags are live, and the trim
+	# fires — which is what keeps a by-ref board's wire small.
+	var live = comp_script.new()
+	live.load_from_board_dict(saved_comp, true)
+	var live_dict: Dictionary = live.to_board_dict()
+	_check(bool(live_dict.get("footprint_resolved", false)),
+		"a load whose flags came from a live resolve keeps them")
+	var live_wire: Dictionary = tools.canonical_wire_board({"components": [live_dict]})
+	_check(not (live_wire["components"][0] as Dictionary).has("pads"),
+		"…and the resolved by-ref part sheds its lands on the wire — the worker re-derives them from the library it just read")
+
+	# A resolve performed IN this session (pcb_library_part.apply_geometry sets
+	# exactly this field) reaches the wire the same way, with no document
+	# involved at all — the case the old codec could not express, because the
+	# flag only ever arrived through the canonical Extra passthrough.
+	var added = comp_script.new()
+	added.load_from_board_dict(saved_comp)
+	added.footprint_resolved = true
+	var added_wire: Dictionary = tools.canonical_wire_board(
+		{"components": [added.to_board_dict()]})
+	_check(not (added_wire["components"][0] as Dictionary).has("pads"),
+		"a part resolved by THIS session's add path sheds its lands on the wire")
+
+	# The save half: whatever the live board says, the document must not carry
+	# the machine-local fact forward to the next machine.
+	var saved_board: Dictionary = data_script.strip_session_state(
+		{"width_mm": 40.0, "components": [live_dict, reopened_dict], "nets": []})
+	var saved_clean := true
+	for comp_v in (saved_board["components"] as Array):
+		if (comp_v as Dictionary).has("footprint_resolved"):
+			saved_clean = false
+	_check(saved_clean,
+		"the SAVED board dict carries no footprint_resolved on any component")
+	var saved_first: Dictionary = saved_board["components"][0]
+	_check(((saved_first.get("pads", []) as Array).size() == 2)
+			and float(saved_board.get("width_mm", 0.0)) == 40.0,
+		"…and strips nothing else — pads, identity and board sections are untouched")
 
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
 	quit(1 if _fail > 0 else 0)

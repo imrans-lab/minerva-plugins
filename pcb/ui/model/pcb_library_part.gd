@@ -200,7 +200,8 @@ static func _fetch_geometry(host, ref: String, designator: String) -> Dictionary
 ## than asserting one. It is the same fact a worker-deserialized board arrives
 ## carrying, which is what lets the badge, the status lead and
 ## panel_tools.canonical_wire_board read one flag whichever way the board got
-## here.
+## here. Both ways are THIS session's resolve: the flag is never restored from
+## a document, and never written into one.
 static func apply_geometry(comp, ref: String, geometry: Dictionary) -> void:
 	comp.set_footprint_by_name("CUSTOM")
 	comp.footprint_id = ref
@@ -245,9 +246,10 @@ static func add_reply(comp, built: Dictionary) -> Dictionary:
 ## that reports a part's geometry state, so they cannot disagree.
 ##
 ## The rule mirrors the worker's own (pad_source.has_resolved_pads plus the
-## component-level footprint_resolved fact): real lands, or a resolved
-## footprint that legitimately has none (a silk-only logo), or a mounting hole,
-## which carries no copper by definition.
+## component-level footprint_resolved fact): real lands, or a footprint that
+## legitimately has none — resolved this session, or with the board itself
+## stating the empty land set (a silk-only logo) — or a mounting hole, which
+## carries no copper by definition.
 static func is_fabricable(comp) -> bool:
 	if comp == null:
 		return false
@@ -256,6 +258,14 @@ static func is_fabricable(comp) -> bool:
 	if comp.has_pad_geometry and not comp.pads.is_empty():
 		return true
 	if comp.footprint_resolved and comp.pads.is_empty():
+		return true
+	# The board STATING an empty `pads` list owns this component's geometry
+	# outright and says it has zero lands — the silk-only pseudo-component the
+	# clause above catches while a resolve is still in memory. That statement
+	# is authored board data, so it is the half that survives a reload on a
+	# machine that has not resolved the ref this session (footprint_resolved is
+	# session state and does not).
+	if comp.pads_authored and comp.pads.is_empty():
 		return true
 	return false
 
@@ -274,6 +284,10 @@ static func geometry_state(comp) -> Dictionary:
 	if comp.footprint_resolved:
 		source = "library"
 	elif comp.has_pad_geometry and not comp.pads.is_empty():
+		source = "authored"
+	elif comp.pads_authored and comp.pads.is_empty():
+		# Same case as is_fabricable's authored-empty clause: the board states
+		# zero lands, which is a geometry statement, not an absent one.
 		source = "authored"
 	elif comp.footprint == _PcbComponent.FootprintType.MOUNTING_HOLE:
 		source = "mechanical"

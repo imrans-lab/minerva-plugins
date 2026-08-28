@@ -214,3 +214,73 @@ func TestAdoptionCarriesTheComponentLevelResolvedFact(t *testing.T) {
 		t.Fatalf("footprint_resolved not adopted: %v", b.Components[0].Extra)
 	}
 }
+
+// A DOCUMENT'S OWN footprint_resolved is not evidence about THIS host. Boards
+// saved before the flag became session state carry it, and adoption is
+// absent-only — so without the drop the flag survives a load on a machine
+// whose library cannot supply the ref, the panel's wire trim believes it, and
+// the worker is handed a component with no lands and no way to resolve any.
+//
+// Oracle: the same board through the same enrichment, once where the resolve
+// answers for the ref and once where it does not. The flag must follow the
+// RESOLVE, not the document.
+func TestDeserializeDropsTheDocumentsOwnResolvedFlag(t *testing.T) {
+	docBoard := func() *board.Board {
+		return &board.Board{Components: []board.Component{
+			{Ref: "J1", Extra: map[string]interface{}{"footprint_resolved": true}},
+		}}
+	}
+
+	// No resolve behind it: the flag the document carried must not survive.
+	stale := docBoard()
+	dropDerivedResolveFlags(stale)
+	adoptResolvedGeometry(stale, map[string]resolvedComponent{})
+	if _, ok := stale.Components[0].Extra["footprint_resolved"]; ok {
+		t.Fatalf("a saved footprint_resolved survived a load this host never resolved: %v",
+			stale.Components[0].Extra)
+	}
+
+	// This host's own resolve answers for the ref: the flag is stamped back.
+	live := docBoard()
+	dropDerivedResolveFlags(live)
+	byRef := resolvedByRef(resolveReply(t,
+		map[string]interface{}{"ref": "J1", "footprint_resolved": true},
+	))
+	if n := adoptResolvedGeometry(live, byRef); n != 1 {
+		t.Fatalf("attached = %d, want 1", n)
+	}
+	if got, _ := live.Components[0].Extra["footprint_resolved"].(bool); !got {
+		t.Fatalf("this host's own resolve did not restamp the fact: %v",
+			live.Components[0].Extra)
+	}
+}
+
+// dropDerivedResolveFlags touches nothing else and tolerates a nil board and a
+// nil Extra map — it runs on every deserialize, including the pure-codec arm.
+func TestDropDerivedResolveFlagsLeavesEverythingElseAlone(t *testing.T) {
+	dropDerivedResolveFlags(nil)
+
+	b := &board.Board{Components: []board.Component{
+		{Ref: "J1", Extra: map[string]interface{}{
+			"footprint_resolved": true,
+			"pads":               []interface{}{map[string]interface{}{"number": "1"}},
+			"has_pad_geometry":   true,
+		}},
+		{Ref: "J2"}, // nil Extra
+	}}
+	dropDerivedResolveFlags(b)
+
+	if _, ok := b.Components[0].Extra["footprint_resolved"]; ok {
+		t.Fatalf("flag not dropped: %v", b.Components[0].Extra)
+	}
+	if _, ok := b.Components[0].Extra["pads"]; !ok {
+		t.Fatalf("the board's own lands were dropped with the flag: %v",
+			b.Components[0].Extra)
+	}
+	if got, _ := b.Components[0].Extra["has_pad_geometry"].(bool); !got {
+		t.Fatalf("has_pad_geometry disturbed: %v", b.Components[0].Extra)
+	}
+	if b.Components[1].Extra != nil {
+		t.Fatalf("a nil Extra map was materialised: %v", b.Components[1].Extra)
+	}
+}

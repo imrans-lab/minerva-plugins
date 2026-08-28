@@ -22,9 +22,17 @@ extends SceneTree
 ##      wrong on both sides would pass. Silk and courtyard arrive with it,
 ##      which is what makes the part fabricable rather than merely pad-bearing.
 ##
-##   2. THE BOARD STILL CHECKS. The real worker's geometric DRC over the board
-##      with the added part is DETERMINATE and clean. This is the whole point:
-##      a part added this way costs the board nothing.
+##   2. THE BOARD STILL CHECKS, AND THE RESOLVE IS WHAT SHRINKS THE WIRE. The
+##      real worker's geometric DRC over the board with the added part is
+##      DETERMINATE and clean. This is the whole point: a part added this way
+##      costs the board nothing. The same board then pins both halves of the
+##      resolved-fact contract: because the parts resolved against THIS
+##      machine's library moments ago, the wire form drops their lands (the
+##      worker re-derives them) — and because that fact is about this machine
+##      and not about the board, the SAVED document carries the lands but not
+##      the claim. A document that carried the claim is what reopened on a
+##      machine whose library lacked the ref, trimmed the pads anyway, and
+##      handed the worker a part with no geometry and no way to get any.
 ##
 ##   3. A SKETCH PART IS NAMED, AT ADD TIME, AND THE BOARD STOPS CHECKING. The
 ##      same board, the same check, one HEADER added: the verdict goes
@@ -51,6 +59,11 @@ extends SceneTree
 ## FAILS AGAINST OLD: section 1's add is refused outright ("Invalid footprint
 ## type"), so every assertion in 1 and 2 fails; section 3's reply carries no
 ## `geometry` block; section 5 finds the sidebar's add-a-part section mounted.
+## Section 2's wire/save assertions fail on their own account against the codec
+## that round-tripped footprint_resolved: the live dict never carried the flag
+## for a part added this session (it only ever arrived through the canonical
+## Extra passthrough, so the wire trimmed nothing), and to_saved_board_dict did
+## not exist.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -482,12 +495,52 @@ func _run_the_board_still_checks() -> void:
 	check("the panel's own census finds nothing unfabricable",
 		PcbLibraryPart.unresolved_ids(host.data).is_empty())
 
+	var full_board: Dictionary = host.data.to_board_dict()
 	var verdict := _worker_geometric_drc(
-		PanelTools.canonical_wire_board(host.data.to_board_dict()))
+		PanelTools.canonical_wire_board(full_board))
 	check("the check is DETERMINATE — the parts resolved (verdict '%s')"
 			% str(verdict.get("verdict", "<none>")),
 		bool(verdict.get("ok", false)) and str(verdict.get("verdict", "")) != "indeterminate")
 	check("…and clean", str(verdict.get("verdict", "")) == "clean")
+
+	# THE RESOLVE THAT JUST HAPPENED IS WHAT SHRINKS THE WIRE. Both headers came
+	# off THIS machine's library moments ago, so the worker on the other end of
+	# the channel can re-derive their lands and the wire form drops them. The
+	# fact is carried by footprint_resolved, which the add path sets from the
+	# real pcb.footprint_geometry reply — session state, never restored from a
+	# document, so this assertion is about the resolve and not about a flag some
+	# earlier save wrote.
+	var wire_board: Dictionary = PanelTools.canonical_wire_board(full_board)
+	var carried_pads := 0
+	var wire_pads := 0
+	for comp in (full_board.get("components", []) as Array):
+		if (comp as Dictionary).has("pads"):
+			carried_pads += 1
+		check("%s reached the board dict marked resolved by this session's library read"
+				% str((comp as Dictionary).get("ref", "?")),
+			bool((comp as Dictionary).get("footprint_resolved", false)))
+	for comp in (wire_board.get("components", []) as Array):
+		if (comp as Dictionary).has("pads"):
+			wire_pads += 1
+	check("the live board dict carries both parts' lands (%d of 2)" % carried_pads,
+		carried_pads == 2)
+	check("…and the wire form carries none of them — resolved here, so the worker re-derives (%d)" % wire_pads,
+		wire_pads == 0)
+
+	# THE SAVE HALF, on the same board: what gets written must not tell the next
+	# machine that ITS library resolved these refs. Reopening a document that
+	# claimed so is what silently handed the worker a pad-less part.
+	var saved_board: Dictionary = host.data.to_saved_board_dict()
+	var saved_flags := 0
+	var saved_pads := 0
+	for comp in (saved_board.get("components", []) as Array):
+		if (comp as Dictionary).has("footprint_resolved"):
+			saved_flags += 1
+		if (comp as Dictionary).has("pads"):
+			saved_pads += 1
+	check("the saved board asserts no resolve (%d flags)" % saved_flags, saved_flags == 0)
+	check("…while keeping the lands it authored, so it opens fabricable anywhere (%d of 2)"
+			% saved_pads, saved_pads == 2)
 	host.queue_free()
 
 
