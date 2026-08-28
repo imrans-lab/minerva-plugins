@@ -12321,8 +12321,10 @@ func set_fab_preview(layers: Array, unrendered: Array, note: String = "",
 	_fab_preview_bounds = PcbFabPreview.board_rect(bounds_board_mm)
 	if not _fab_preview_layers.is_empty() and _fab_preview_bounds.size.x > 0.0:
 		# Opening the view is the one moment the camera may be moved for the
-		# human: from here on it is theirs.
-		frame_rect(_fab_preview_bounds, 1.0)
+		# human: from here on it is theirs. The margin is PcbFabPreview's, not a
+		# local number, so a fitted capture frames the artwork identically —
+		# see _frame_board_for_capture.
+		frame_rect(_fab_preview_bounds, PcbFabPreview.FRAME_MARGIN_MM)
 	queue_redraw()
 
 
@@ -12445,7 +12447,8 @@ func mirror_capture_state_onto(copy) -> void:
 ## Builds a private SubViewport, renders a FRESH copy of this canvas over the SAME
 ## board data at the requested size, waits for the render to actually land
 ## (RenderingServer.frame_post_draw), then reads the texture. Honors width/height.
-## fit=true frames the whole board; fit=false reproduces THIS canvas's current
+## fit=true frames what the canvas is drawing — the emitted artwork under a live
+## fab preview, the whole board otherwise; fit=false reproduces THIS canvas's current
 ## camera (the minerva_pcb_set_view detail) — the world point at the screen centre
 ## is -pan_offset/zoom regardless of viewport size, so copying zoom+pan_offset
 ## preserves centre+scale across the differing size. Returns null in a bare
@@ -12498,13 +12501,26 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 	return img
 
 
-## Fit the whole board into a capture copy sized to the offscreen viewport. The
-## SAME derivation zoom_to_fit uses (pcb_view_fit.gd), just against the COPY's
-## size — the requested capture dims — instead of the on-screen canvas rect, so
-## a capture and the live pane frame the same board the same way. Assigns the
-## copy's fields directly rather than going through set_view_center_zoom: the
-## copy is off-tree and its signals have no listeners.
+## Fit WHAT THE COPY IS DRAWING into a capture copy sized to the offscreen
+## viewport — the emitted artwork while the fab preview is up, the board
+## otherwise. The SAME derivation zoom_to_fit uses (pcb_view_fit.gd), just
+## against the COPY's size — the requested capture dims — instead of the
+## on-screen canvas rect, so a capture and the live pane frame the same thing
+## the same way. The board branch assigns the copy's fields directly rather than
+## going through set_view_center_zoom; the preview branch calls frame_rect, the
+## same doorway the on-screen open uses. Either is safe: the copy is off-tree
+## and its signals have no listeners.
 func _frame_board_for_capture(copy) -> void:
+	# THE PREVIEW FRAMES ITS OWN ARTWORK. While it is up the board is not on
+	# screen at all — the emitted artwork is — and its extent is not the board
+	# rect: it is what the emitter actually drew, the outline plus half a stroke
+	# width. Fitting the BOARD here put a fitted capture of the preview at a
+	# different scale from the screen, with the two extents close enough that
+	# the seam read as a rounding error.
+	if bool(copy.show_fab_preview) and copy._fab_preview_bounds.size.x > 0.0 \
+			and copy._fab_preview_bounds.size.y > 0.0:
+		copy.frame_rect(copy._fab_preview_bounds, PcbFabPreview.FRAME_MARGIN_MM)
+		return
 	var content := PcbViewFit.board_content_rect(data)
 	var fitted := PcbViewFit.fit_zoom(content, copy.size, copy.min_zoom, copy.max_zoom)
 	if fitted <= 0.0:

@@ -10,8 +10,8 @@ extends RefCounted
 ## fg="black" on a `style="background-color:white"` root. Godot's rasterizer
 ## honours the fills and ignores the root style, so stacked layers land as
 ## black-on-transparent over a near-black canvas: present and unreadable, which
-## makes the fabrication gate a human checks by eye read as passed. Three things
-## keep it legible, and all three are here:
+## makes the fabrication gate a human checks by eye read as passed. Four things
+## keep it legible, and all four are here:
 ##
 ##   1. INK. Each layer's SVG is recoloured to a palette entry before it is
 ##      rasterized (recolor_svg). Gerber carries no colour — black is
@@ -24,6 +24,11 @@ extends RefCounted
 ##      size they will be drawn (see adopt).
 ##   3. ONE LAYER AT A TIME. Ten layers composited is a picture of no layer.
 ##      The pick isolates one; "all" keeps the composite for orientation.
+##   4. A RIM, for the inks that are DARK on purpose. A drilled hole and a
+##      board edge are absences of material, and an absence reads dark — but a
+##      dark mark on this near-black ground is no mark at all. Those layers are
+##      rasterized in RIM and drawn five times: four one-pixel offsets in the
+##      rim colour, then the ink itself on top. See RIMMED_KEYS.
 ##
 ## THE BANNER IS NOT ON THE BOARD. Identity, counts and the incomplete-artifact
 ## admission occupy a band ACROSS THE TOP, and the artwork is letterboxed into
@@ -69,10 +74,18 @@ const UNDER_ALPHA := 0.55
 ## reason — those two plus the silk are what a human checks a board BY.
 const TOP_KEYS: Array[String] = ["f_silks", "b_silks", "edge_cuts", "pth", "npth"]
 
-## INK BY EMITTED-LAYER KEY. Every entry clears 4.5:1 against GROUND on its own
-## (pinned by the suite, which recomputes the ratio rather than trusting the
-## table), and neighbouring roles are separated in hue as well as luminance so
-## copper / mask / silk / outline are told apart and not merely seen.
+## INK BY EMITTED-LAYER KEY. Every entry clears 4.5:1 against the ground it is
+## READ against — read_ground, which is GROUND for most inks and RIM for the
+## rimmed ones (pinned by the suite, which recomputes the ratio rather than
+## trusting the table) — and neighbouring roles are separated in hue as well as
+## luminance so copper / mask / silk / outline are told apart and not merely
+## seen.
+##
+## THE HOLES ARE BLACK AND THE OUTLINE IS DARK PURPLE because that is what they
+## ARE: a drill is where the board stops and an edge is where it ends. Neither
+## is a colour on the board, and neither can be told from copper, silk or mask
+## while it is drawn in the same bright register as them. They are the two
+## keys RIMMED_KEYS names, and the rim is what makes them visible.
 const INK := {
 	"f_cu": Color(0.98, 0.62, 0.30),
 	"b_cu": Color(0.42, 0.78, 0.98),
@@ -82,10 +95,46 @@ const INK := {
 	"b_paste": Color(0.66, 0.72, 0.82),
 	"f_silks": Color(0.96, 0.96, 0.96),
 	"b_silks": Color(0.80, 0.72, 0.98),
-	"edge_cuts": Color(1.00, 0.92, 0.35),
-	"pth": Color(1.00, 0.55, 0.62),
-	"npth": Color(0.98, 0.72, 0.45),
+	"edge_cuts": Color(0.32, 0.10, 0.55),
+	"pth": Color(0.00, 0.00, 0.00),
+	"npth": Color(0.00, 0.00, 0.00),
 }
+
+## THE RIM — the light the two dark inks are read against, and the colour their
+## layers are actually RASTERIZED in.
+##
+## Pure white on purpose: the raster carries the rim, and the ink arrives at
+## draw time as a modulate (a multiply). A white carrier multiplies to exactly
+## the requested ink, so one raster serves both draws and nothing has to be
+## rasterized twice. Change this and the ink stops being exact.
+const RIM := Color(1.0, 1.0, 1.0)
+
+## Layers whose ink is DARKER than the ground and so cannot be seen by its own
+## colour. They are drawn with a one-pixel rim (see draw).
+const RIMMED_KEYS: Array[String] = ["pth", "npth", "edge_cuts"]
+
+## How far the rim reaches, in SCREEN pixels — a constant width at every zoom,
+## so it never grows into the artwork it is outlining.
+const RIM_PX := 1.0
+
+## The four offsets the rim is drawn at. Axis-aligned rather than a scaled-up
+## rect: a rect grown about its centre displaces marks by a distance that
+## depends on how far they sit from that centre, so a hole near the middle of
+## the board would get no rim at all.
+const _RIM_OFFSETS: Array[Vector2] = [
+	Vector2(-1.0, 0.0), Vector2(1.0, 0.0), Vector2(0.0, -1.0), Vector2(0.0, 1.0),
+]
+
+## The margin, in board mm, kept around the artwork when the preview FRAMES it.
+##
+## One number, used by both the on-screen open and the off-screen fitted
+## capture, because those two framing the same artwork at two different scales
+## is exactly the WYSIWYG seam a capture exists to close.
+const FRAME_MARGIN_MM := 1.0
+
+## Side of a picker/legend colour chip, in pixels.
+const _SWATCH_PX := 12
+
 ## Inner copper, by stack index read out of the key ("in1_cu" -> 0). Cycled, so
 ## a stack deeper than this list still draws in a legible ink rather than the
 ## grey fallback.
@@ -160,6 +209,37 @@ static func ink_for(key: String) -> Color:
 		if digits.is_valid_int():
 			return INNER_CU_INK[maxi(int(digits) - 1, 0) % INNER_CU_INK.size()]
 	return FALLBACK_INK
+
+
+## Whether this layer is drawn with a rim — true exactly for the inks that are
+## darker than the ground they sit on.
+static func is_rimmed(key: String) -> bool:
+	return key in RIMMED_KEYS
+
+
+## THE GROUND THIS INK IS ACTUALLY READ AGAINST, which is what a contrast ratio
+## is a property of. A rimmed layer's mark is surrounded by RIM, so RIM is the
+## surface its ink has to stand out from; every other ink stands on the canvas.
+static func read_ground(key: String) -> Color:
+	return RIM if is_rimmed(key) else GROUND
+
+
+## The colour a layer's SVG is RECOLOURED to before it is rasterized. A rimmed
+## layer is rasterized in RIM and tinted to its ink at draw time (see
+## draw_modulate); every other layer carries its ink in the raster.
+static func raster_ink(key: String) -> Color:
+	return RIM if is_rimmed(key) else ink_for(key)
+
+
+## The modulate the layer's own texture is drawn with. White for a layer that
+## already carries its ink; the ink itself for a rimmed layer, whose raster is
+## the white rim.
+static func draw_modulate(key: String, pick: String) -> Color:
+	var alpha := draw_alpha(key, pick)
+	if not is_rimmed(key):
+		return Color(1.0, 1.0, 1.0, alpha)
+	var ink := ink_for(key)
+	return Color(ink.r, ink.g, ink.b, alpha)
 
 
 ## Alpha this layer is drawn at, given the current pick. An isolated layer is
@@ -262,7 +342,7 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 		var name := str(lay.get("name", "?"))
 		var key := layer_key(name)
 		var svg := str(lay.get("svg", ""))
-		var inked := "" if svg.is_empty() else recolor_svg(svg, ink_for(key))
+		var inked := "" if svg.is_empty() else recolor_svg(svg, raster_ink(key))
 		var img: Image = null if inked.is_empty() else rasterize(inked, target_px)
 		if img == null:
 			missed.append({"name": name, "kind": MISS_ARTWORK,
@@ -483,9 +563,17 @@ static func draw(ci: CanvasItem, canvas_size: Vector2, rows: Array,
 			if pick != PICK_ALL and key != pick:
 				continue
 			var tex: Texture2D = (row as Dictionary).get("texture")
-			if tex != null:
-				ci.draw_texture_rect(tex, rect, false,
-					Color(1, 1, 1, draw_alpha(key, pick)))
+			if tex == null:
+				continue
+			if is_rimmed(key):
+				# THE RIM FIRST, four axis offsets of the same raster. That
+				# raster is already RIM-coloured, so these draws are untinted
+				# and only the ink draw below carries a colour.
+				var rim_tint := Color(1, 1, 1, draw_alpha(key, pick))
+				for off in _RIM_OFFSETS:
+					ci.draw_texture_rect(tex,
+						Rect2(rect.position + off * RIM_PX, rect.size), false, rim_tint)
+			ci.draw_texture_rect(tex, rect, false, draw_modulate(key, pick))
 	_draw_banner(ci, canvas_size, banner, rows, unrendered, note, pick)
 
 
@@ -525,10 +613,38 @@ static func _draw_banner(ci: CanvasItem, canvas_size: Vector2, banner: Rect2,
 		if y > banner.end.y:
 			return
 		var key := str((row as Dictionary).get("key", ""))
-		ci.draw_rect(Rect2(Vector2(x, y - 8.0), Vector2(9.0, 9.0)), ink_for(key))
+		draw_chip(ci, Rect2(Vector2(x, y - 8.0), Vector2(9.0, 9.0)), key)
 		ci.draw_string(font, Vector2(x + 13.0, y), str((row as Dictionary).get("label", key)),
 			HORIZONTAL_ALIGNMENT_LEFT, int(_LEGEND_CHIP_W - 15.0), 10, BANNER_TEXT)
 		x += _LEGEND_CHIP_W
+
+
+## ── THE COLOUR CHIP, IN BOTH PLACES A HUMAN MEETS IT ────────────────────────
+##
+## The banner legend and the View-menu picker both name a layer by its colour,
+## so both draw the chip HERE — including the rim. A black chip painted flat on
+## the dark banner would be the same invisible mark the rim exists to prevent,
+## and a picker whose swatch disagrees with the canvas is worse than no swatch:
+## it tells a human to look for the wrong colour.
+
+## One layer's chip, drawn the way the canvas paints that layer.
+static func draw_chip(ci: CanvasItem, rect: Rect2, key: String) -> void:
+	if is_rimmed(key):
+		ci.draw_rect(rect, RIM)
+		ci.draw_rect(rect.grow(-RIM_PX), ink_for(key))
+	else:
+		ci.draw_rect(rect, ink_for(key))
+
+
+## The same chip as a menu-item icon.
+static func swatch_texture(key: String) -> ImageTexture:
+	var img := Image.create(_SWATCH_PX, _SWATCH_PX, false, Image.FORMAT_RGBA8)
+	if is_rimmed(key):
+		img.fill(RIM)
+		img.fill_rect(Rect2i(1, 1, _SWATCH_PX - 2, _SWATCH_PX - 2), ink_for(key))
+	else:
+		img.fill(ink_for(key))
+	return ImageTexture.create_from_image(img)
 
 
 ## ── THE VIEW MENU'S PICKER SECTION ──────────────────────────────────────────
@@ -576,9 +692,14 @@ static func build_menu_section(popup: PopupMenu, base_id: int, rows: Array,
 	for i in rows.size():
 		var row: Dictionary = rows[i]
 		var id: int = base_id + 2 + i
-		popup.add_radio_check_item(str(row.get("label", row.get("key", "?"))), id)
-		popup.set_item_checked(popup.get_item_index(id),
-			pick == str(row.get("key", "")))
+		var key := str(row.get("key", ""))
+		popup.add_radio_check_item(str(row.get("label", key if not key.is_empty() else "?")), id)
+		var index := popup.get_item_index(id)
+		popup.set_item_checked(index, pick == key)
+		# THE SWATCH: the row a human picks a layer BY carries the colour that
+		# layer is painted in, rim included (draw_chip's reason).
+		if not key.is_empty():
+			popup.set_item_icon(index, swatch_texture(key))
 
 
 ## The pick a menu id names, or "" for an id outside this section.

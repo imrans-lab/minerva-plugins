@@ -470,5 +470,12 @@ test_part_geometry_contracts.gd assertions=66
 # screenshot. Plus the banner that never touches the board rect, the emitted-
 # layer picker through both the View menu and minerva_pcb_view_state, and both
 # stale paths retracting show_fab_preview with a visible reason.
-# NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
-test_fab_preview_legibility.gd assertions=78
+# 78 -> 100: section 7 (only an edit that reaches the emitter takes the preview
+# down — a re-load of the same board, an MCP preference write and a view change
+# leave it standing, a component move and a board resize do not), section 8 (a
+# fitted capture takes the same camera as the screen, with the board fit as the
+# differing control) and section 9 (black holes, a dark purple outline, the rim
+# they are rasterized in, and the picker swatches that name them), plus one more
+# contrast arm proving every rimmed ink would fail without its rim.
+# Counted by hand from the check() call sites: 22 new, none inside a loop.
+test_fab_preview_legibility.gd assertions=100

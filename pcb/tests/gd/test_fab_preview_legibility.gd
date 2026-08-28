@@ -48,10 +48,26 @@ extends SceneTree
 ##      preview-down arm is the control that proves the gesture is an edit at
 ##      all; the preview-up arm is the claim.
 ##
-##   4. A STALE PREVIEW RETRACTS ITS FLAG. Section 5 drives both stale paths
-##      for real — a board edit under a live preview, and a board that moves
-##      while the worker is running — and reads the flag, the human's status
-##      lead and the agent's overlay_unavailable.
+##   4. A STALE PREVIEW RETRACTS ITS FLAG, AND ONLY A STALE ONE. Section 5
+##      drives both stale paths for real — a board edit under a live preview,
+##      and a board that moves while the worker is running — and reads the
+##      flag, the human's status lead and the agent's overlay_unavailable.
+##      Section 7 drives the other side: the canonical board dict IS what the
+##      worker renders from, so a re-load of the same board, an MCP preference
+##      write and a view change leave the preview standing, while a component
+##      move and a board resize take it down.
+##
+##   5. A FITTED CAPTURE FRAMES WHAT THE SCREEN FRAMES. Section 8 runs the
+##      capture's own framing decision over a real copy canvas and compares the
+##      camera it produces with the camera on screen — with the no-preview
+##      board fit as the control, which is a DIFFERENT camera and is what made
+##      the seam real.
+##
+##   6. THE DARK INKS ARE STILL MARKS. Section 9: holes are black and the
+##      outline dark purple because both are absences of material, so both are
+##      rasterized in the rim colour and tinted at draw time. The rasterized
+##      pixel and the modulate are measured, and the picker's swatches are read
+##      out of a real PopupMenu.
 ##
 ## Run: godot --headless --path src --script \
 ##   res://../../minerva-plugins/pcb/tests/gd/test_fab_preview_legibility.gd
@@ -61,6 +77,7 @@ const FabPreview := preload("res://../../minerva-plugins/pcb/ui/model/pcb_fab_pr
 const OverlayFetch := preload("res://../../minerva-plugins/pcb/ui/model/pcb_overlay_fetch.gd")
 const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
+const PcbViewFit := preload("res://../../minerva-plugins/pcb/ui/pcb_view_fit.gd")
 
 var PanelTools: Variant = load("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 
@@ -225,6 +242,9 @@ func _init() -> void:
 	await _run_mcp_parity()
 	await _run_stale_retraction()
 	await _run_camera_and_input()
+	await _run_survives_non_edits()
+	await _run_capture_framing()
+	_run_dark_inks()
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
 	quit(1 if _fail > 0 else 0)
 
@@ -238,7 +258,11 @@ func _run_contrast() -> void:
 	# suite total depend on how many layers the palette happens to name.
 	var dim: Array = []
 	for key in FabPreview.INK:
-		var ratio: float = FabPreview.contrast_ratio(FabPreview.INK[key], FabPreview.GROUND)
+		# AGAINST THE GROUND IT IS READ ON, which is not the same surface for
+		# every ink: a rimmed layer's mark is surrounded by RIM, so RIM is what
+		# its ink has to stand out from (FabPreview.read_ground).
+		var ratio: float = FabPreview.contrast_ratio(FabPreview.INK[key],
+			FabPreview.read_ground(str(key)))
 		if ratio < MIN_CONTRAST:
 			dim.append("%s=%.2f" % [str(key), ratio])
 	for i in FabPreview.INNER_CU_INK.size():
@@ -249,11 +273,27 @@ func _run_contrast() -> void:
 	var fb: float = FabPreview.contrast_ratio(FabPreview.FALLBACK_INK, FabPreview.GROUND)
 	if fb < MIN_CONTRAST:
 		dim.append("fallback=%.2f" % fb)
-	check("1a: every palette ink clears %.1f:1 on the canvas ground (dim: %s)"
+	check("1a: every palette ink clears %.1f:1 on the ground it is read against (dim: %s)"
 		% [MIN_CONTRAST, str(dim)], dim.is_empty())
+
+	# THE RIM IS LOAD-BEARING, and RIMMED_KEYS must name exactly the inks that
+	# need it. 1a proves none that needs a rim is missing from the list (it
+	# would have failed against the bare ground); this proves none is on the
+	# list that does not need one — otherwise the list could be padded until 1a
+	# passed by moving the goalposts rather than by the palette being readable.
+	var rim_on_ground: float = FabPreview.contrast_ratio(FabPreview.RIM, FabPreview.GROUND)
+	var needless: Array = []
+	for key in FabPreview.RIMMED_KEYS:
+		if FabPreview.contrast_ratio(FabPreview.ink_for(str(key)),
+				FabPreview.GROUND) >= MIN_CONTRAST:
+			needless.append(str(key))
+	check("1a2: the rim reads %.2f:1 on the ground, and every rimmed ink would FAIL without it (needless: %s)"
+		% [rim_on_ground, str(needless)],
+		rim_on_ground >= MIN_CONTRAST and needless.is_empty())
 
 	# THE SANITY ARM. If the luminance maths cannot tell black-on-near-black
 	# from a light ink, 1a proves nothing — this is the shipped defect, scored.
+	# It is also why the drill ink is rimmed rather than left to stand alone.
 	var black_ratio: float = FabPreview.contrast_ratio(Color(0, 0, 0), FabPreview.GROUND)
 	check("1b: ...and the shipped black-on-dark artwork FAILS the same measure (%.2f:1)"
 		% black_ratio, black_ratio < MIN_CONTRAST)
@@ -272,8 +312,12 @@ func _run_contrast() -> void:
 
 	# The other side of that trade: dimming the under-group far enough to carry
 	# silk must not sink it below the graphics bar against the canvas ground.
+	# Rimmed inks are excluded: they are opaque top-group layers whose
+	# readability is a property of their rim (1a/1a2), not of this dimming.
 	var sunk: Array = []
 	for key in FabPreview.INK:
+		if FabPreview.is_rimmed(str(key)):
+			continue
 		var a: float = FabPreview.draw_alpha(str(key), FabPreview.PICK_ALL)
 		var r: float = FabPreview.contrast_ratio(
 			FabPreview.composite(FabPreview.INK[key], a, FabPreview.GROUND),
@@ -868,3 +912,250 @@ func _run_camera_and_input() -> void:
 	check("6p: the artwork's extent reaches an off-screen capture",
 		"_fab_preview_bounds" in canvas.CAPTURE_MIRRORED_FIELDS)
 	canvas.queue_free()
+
+
+# ── 7. THE PREVIEW SURVIVES WHAT DOES NOT REACH THE FAB ───────────────────────
+#
+# WHAT WAS WRONG. Invalidation was wired to the model's generic data_changed,
+# so the POLICY was "any model touch blanks the preview and retracts the View
+# flag" — a re-load of the very same board took the preview down and left the
+# layer picker refusing every layer it had just advertised, with nothing on
+# screen a human could connect to anything they did.
+#
+# THE RULE NOW IS THE BOARD, NOT THE SIGNAL: the canonical board dict is
+# exactly what the worker renders the artwork from, so the preview stands while
+# that dict's token is unchanged and drops the moment it moves. These
+# assertions read the PANEL'S OBSERVABLE STATE — the flag and the held layers —
+# and never which signal fired, because the rule is about the board and a test
+# about the wiring would pass again the next time the wiring was wrong.
+
+
+## The rig of section 5, holding a board with a part on it so a component move
+## is available as the artwork-changing arm.
+func _preview_rig() -> Dictionary:
+	var rig := _rig()
+	var panel = rig["panel"]
+	var ipc: FabIPC = rig["ipc"]
+	panel.get_data().from_board_dict(_board_with_part())
+	ipc.overrides["pcb.fab_preview"] = {
+		"layers": _reply_layers(), "unrendered": [], "warnings": []}
+	return rig
+
+
+## The two observations that together mean "the preview is still up": the flag
+## an agent and the View menu both read, and the artwork actually held.
+func _preview_is_live(panel) -> bool:
+	return bool(panel._canvas.get("show_fab_preview")) \
+		and (panel._canvas._fab_preview_layers as Array).size() == EMITTED.size()
+
+
+func _run_survives_non_edits() -> void:
+	print("\n-- 7: only an edit that reaches the emitter takes the preview down --")
+	var rig := _preview_rig()
+	var panel = rig["panel"]
+	var host = panel._annotation_host
+	await panel.set_view_flag("show_fab_preview", true)
+	check("7a: the preview is up holding artwork before anything touches the model",
+		_preview_is_live(panel))
+
+	# A RE-LOAD OF THE SAME BOARD. The real path a save/reload round trip, an
+	# autosave restate or a redundant load_board takes: data_changed fires,
+	# every layer of the model is rebuilt, and NOT ONE emitted byte differs.
+	var before_reload := JSON.stringify(panel.get_data().to_board_dict(), "", true, true)
+	panel.get_data().from_board_dict(_board_with_part())
+	var after_reload := JSON.stringify(panel.get_data().to_board_dict(), "", true, true)
+	# The precondition rides in the same assertion: if the reload did NOT
+	# reproduce the board byte for byte then this proves nothing about the rule,
+	# and the detail says which half gave way.
+	check("7b: re-loading the SAME board leaves the preview standing",
+		after_reload == before_reload and _preview_is_live(panel),
+		"board unchanged=%s preview live=%s" % [
+			str(after_reload == before_reload), str(_preview_is_live(panel))])
+
+	# An MCP preference write — the owner's own case. It never touches the
+	# board, so it cannot change what the fab receives.
+	var pref: Dictionary = await PanelTools.handle(host, "minerva_pcb_set_preference",
+		{"editor_name": "PCB1", "key": "trace_width_mm", "value": 0.4})
+	check("7c: an MCP preference write goes through AND leaves the preview up",
+		bool(pref.get("success", false)) and _preview_is_live(panel), str(pref))
+
+	# A view change — pan and zoom are the gestures the preview EXISTS to
+	# support (section 6); one of them ending it would be self-defeating.
+	var view: Dictionary = await PanelTools.handle(host, "minerva_pcb_set_view",
+		{"editor_name": "PCB1", "zoom": 12.0})
+	check("7d: a view change goes through AND leaves the preview up",
+		bool(view.get("success", false)) and _preview_is_live(panel), str(view))
+
+	# THE CLAIM IS ONLY WORTH ANYTHING WITH THE OTHER ARM. A component move is
+	# copper, mask, paste and silk all moving at once; the artwork on screen
+	# stops describing the board and must go.
+	var comp_ids: Array = panel.get_data().components.keys()
+	check("7e: CONTROL — the fixture board really does carry a component to move",
+		comp_ids.size() == 1, str(comp_ids))
+	panel.get_data().move_component(str(comp_ids[0]), Vector2(20.0, 12.0))
+	check("7f: moving a component DOES take the preview down",
+		not bool(panel._canvas.get("show_fab_preview"))
+			and (panel._canvas._fab_preview_layers as Array).is_empty())
+	check("7g: ...and says why, in the same words a board edit always did",
+		str(panel._status_label.text).findn("Fab preview OFF") != -1,
+		str(panel._status_label.text))
+	panel.free()
+
+	# THE OUTLINE IS ARTWORK TOO — a resize moves Edge.Cuts and every layer's
+	# frame, and is the case a "components and traces" rule would have missed.
+	var rig2 := _preview_rig()
+	var panel2 = rig2["panel"]
+	await panel2.set_view_flag("show_fab_preview", true)
+	panel2.get_data().set_board_size(55.0, 30.0)
+	check("7h: resizing the board takes the preview down as well",
+		not bool(panel2._canvas.get("show_fab_preview")))
+	panel2.free()
+
+
+# ── 8. A FITTED CAPTURE FRAMES WHAT THE SCREEN FRAMES ─────────────────────────
+#
+# WHAT WAS WRONG. capture_to_image(fit=true) framed the BOARD rect while the
+# preview draws the ARTWORK rect — the outline plus half a stroke width, padded
+# by a fraction of itself instead of by the preview's own margin. The two
+# extents nearly coincide, so the picture an agent captured looked right and
+# was at a different scale from the one the human was looking at: a WYSIWYG
+# seam that reads as a rounding error.
+#
+# capture_to_image itself cannot run here (it returns null with no rendering
+# device, pinned by test_pcb_panel_tools), so this drives the framing decision
+# it delegates to — _frame_board_for_capture over a real copy canvas — and
+# compares the camera it produces with the camera on screen.
+
+func _run_capture_framing() -> void:
+	print("\n-- 8: a fitted capture of the preview is at the screen's scale --")
+	var canvas = await _canvas_rig()
+	canvas.show_fab_preview = true
+	canvas.set_fab_preview(_reply_layers(), [], "note", BOARD_BOUNDS)
+	var on_screen: Rect2 = canvas.fab_preview_screen_rect()
+	check("8a: the screen frames the artwork on adoption",
+		on_screen.size.x > 1.0 and on_screen.size.y > 1.0, str(on_screen))
+
+	# The capture copy, built and mirrored exactly the way capture_to_image
+	# builds it, at the same size so the two cameras are comparable at all.
+	var copy = PcbCanvasScript.new()
+	copy.size = canvas.size
+	copy.data = canvas.data
+	canvas.mirror_capture_state_onto(copy)
+	canvas._frame_board_for_capture(copy)
+	check("8b: the fitted capture takes the SAME camera the screen has",
+		is_equal_approx(copy.zoom, canvas.zoom)
+			and copy.pan_offset.is_equal_approx(canvas.pan_offset),
+		"copy zoom=%.4f pan=%s vs screen zoom=%.4f pan=%s" % [
+			copy.zoom, str(copy.pan_offset), canvas.zoom, str(canvas.pan_offset)])
+	check("8c: ...so the artwork lands in the same rect in both",
+		copy.fab_preview_screen_rect().position.is_equal_approx(on_screen.position)
+			and copy.fab_preview_screen_rect().size.is_equal_approx(on_screen.size),
+		"%s vs %s" % [str(copy.fab_preview_screen_rect()), str(on_screen)])
+
+	# THE CONTROL. Without the preview the fit is still the board fit — and it
+	# is a DIFFERENT camera, which is what made the seam real rather than
+	# theoretical. If these two agreed by accident 8b would prove nothing.
+	var bare = PcbCanvasScript.new()
+	bare.size = canvas.size
+	bare.data = canvas.data
+	bare.show_fab_preview = false
+	canvas._frame_board_for_capture(bare)
+	var board_fit: float = PcbViewFit.fit_zoom(
+		PcbViewFit.board_content_rect(canvas.data), bare.size,
+		bare.min_zoom, bare.max_zoom)
+	check("8d: with no preview the fitted capture still frames the BOARD",
+		is_equal_approx(bare.zoom, board_fit), "%.4f vs %.4f" % [bare.zoom, board_fit])
+	check("8e: CONTROL — the two framings really do differ (%.4f vs %.4f)"
+		% [bare.zoom, copy.zoom], not is_equal_approx(bare.zoom, copy.zoom))
+	copy.queue_free()
+	bare.queue_free()
+	canvas.queue_free()
+
+
+# ── 9. HOLES ARE BLACK, THE OUTLINE IS DARK PURPLE ────────────────────────────
+#
+# Both are ABSENCES of material and read dark, and a dark mark on this ground
+# is no mark at all — so those layers are rasterized in the RIM colour and the
+# ink is applied at draw time, over four offset rim draws. The palette, the
+# banner legend and the View-menu picker all take the colour from one place, so
+# a swatch cannot advertise a colour the canvas does not paint.
+
+func _run_dark_inks() -> void:
+	print("\n-- 9: the two dark inks, their rim, and the swatches that name them --")
+	var drill: Color = FabPreview.ink_for("pth")
+	var edge: Color = FabPreview.ink_for("edge_cuts")
+	check("9a: both drill layers are BLACK",
+		drill == Color(0, 0, 0) and FabPreview.ink_for("npth") == Color(0, 0, 0),
+		"pth=%s npth=%s" % [str(drill), str(FabPreview.ink_for("npth"))])
+	# "Dark purple" described rather than copied: blue-dominant with red second
+	# (that is purple, not blue and not magenta), and darker than the bar an ink
+	# has to clear unaided (that is what makes it need the rim).
+	check("9b: the board outline is a DARK PURPLE",
+		edge.b > edge.r and edge.r > edge.g
+			and FabPreview.contrast_ratio(edge, FabPreview.GROUND) < MIN_CONTRAST,
+		"%s at %.2f:1 on the ground" % [str(edge),
+			FabPreview.contrast_ratio(edge, FabPreview.GROUND)])
+	check("9c: those three keys are exactly the rimmed ones",
+		FabPreview.is_rimmed("pth") and FabPreview.is_rimmed("npth")
+			and FabPreview.is_rimmed("edge_cuts")
+			and not FabPreview.is_rimmed("f_cu")
+			and not FabPreview.is_rimmed("f_silks"))
+
+	# THE PRODUCTION PATH, end to end: adopt a drill layer and read the pixel
+	# that was actually rasterized. A rimmed layer's raster carries the RIM —
+	# the ink arrives as the draw-time modulate — and the two multiplied
+	# together are what the eye receives.
+	var adopted: Dictionary = FabPreview.adopt(
+		_reply_layers(["GerberSpikeBoard-PTH.drl"]), [], "pth", PANEL_W)
+	var rows: Array = adopted["layers"]
+	check("9d: the drill layer is adopted", rows.size() == 1)
+	if rows.size() == 1:
+		var tex: ImageTexture = (rows[0] as Dictionary).get("texture")
+		var pixel := _covered_pixel_at(tex.get_image(),
+			_path_to_uv((STROKE_A + STROKE_B) * 0.5))
+		check("9e: a rimmed layer is RASTERIZED in the rim, not in its ink (%s)"
+			% str(pixel),
+			pixel.a > 0.0 and absf(pixel.r - FabPreview.RIM.r) < 0.02
+				and absf(pixel.g - FabPreview.RIM.g) < 0.02
+				and absf(pixel.b - FabPreview.RIM.b) < 0.02)
+		var mod: Color = FabPreview.draw_modulate("pth", "pth")
+		var painted := Color(pixel.r * mod.r, pixel.g * mod.g, pixel.b * mod.b)
+		check("9f: ...and the modulate multiplies it to exactly the ink (%s)"
+			% str(painted),
+			absf(painted.r - drill.r) < 0.02 and absf(painted.g - drill.g) < 0.02
+				and absf(painted.b - drill.b) < 0.02)
+	check("9g: an un-rimmed layer still carries its ink and is drawn untinted",
+		FabPreview.raster_ink("f_cu") == FabPreview.ink_for("f_cu")
+			and FabPreview.draw_modulate("f_cu", "f_cu") == Color(1, 1, 1, 1))
+
+	# THE PICKER NAMES THE COLOUR THE CANVAS PAINTS. A swatch that disagreed
+	# would send a human looking for the wrong mark.
+	var all_rows: Array = (FabPreview.adopt(_reply_layers(), [],
+		FabPreview.PICK_ALL, PANEL_W))["layers"]
+	var popup := PopupMenu.new()
+	FabPreview.build_menu_section(popup, 1000, all_rows, FabPreview.PICK_ALL)
+	var wrong: Array = []
+	for i in all_rows.size():
+		var key := str((all_rows[i] as Dictionary)["key"])
+		var icon: Texture2D = popup.get_item_icon(popup.get_item_index(1002 + i))
+		if icon == null:
+			wrong.append("%s=no swatch" % key)
+			continue
+		var img := icon.get_image()
+		var centre := img.get_pixel(img.get_width() / 2, img.get_height() / 2)
+		if not _same_ink(centre, FabPreview.ink_for(key)):
+			wrong.append("%s=%s" % [key, str(centre)])
+		# A rimmed layer's chip carries its rim too, or the black one would be
+		# the same invisible mark on the menu that the rim exists to prevent.
+		if FabPreview.is_rimmed(key) and not _same_ink(img.get_pixel(0, 0), FabPreview.RIM):
+			wrong.append("%s=unrimmed chip" % key)
+	check("9h: every picker swatch is the ink that layer is painted in (wrong: %s)"
+		% str(wrong), wrong.is_empty())
+	popup.free()
+
+
+## Two colours the same to the eye, and to an 8-bit image. A swatch is stored
+## as RGBA8, so an ink quantizes to the nearest 1/255 on the way in and an
+## exact comparison would fail on every colour that is not a whole step.
+func _same_ink(a: Color, b: Color) -> bool:
+	return absf(a.r - b.r) < 0.01 and absf(a.g - b.g) < 0.01 and absf(a.b - b.b) < 0.01

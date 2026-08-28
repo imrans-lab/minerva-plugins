@@ -492,6 +492,12 @@ const _VIEW_MENU_CLEAR_FILTER_ID := 999
 ## dirty (W-14; carry-in 3b extends the gate to cover board load).
 var _restoring := false
 
+## THE BOARD THE LIVE FAB PREVIEW WAS RENDERED FROM, as a whole-board token.
+## Empty whenever no artwork is held. Compared against the board's token on
+## every model change to decide whether the preview still describes it — see
+## _invalidate_fab_preview.
+var _fab_preview_board_token := ""
+
 ## Summary of the last one-shot legacy annotation migration ({migrated, warnings}).
 ## Populated by _run_legacy_migration; surfaced on the status bar and exposed for
 ## tests/telemetry via get_last_migration_summary().
@@ -551,11 +557,12 @@ func _init() -> void:
 	# gated by _restoring so board load / seeding never dirties the tab.
 	_data.data_changed.connect(func() -> void:
 		# OUTSIDE the _restoring gate, deliberately (Codex re-review finding 3).
-		# Both whole-board load paths set _restoring = true, and a load is
-		# PRECISELY when a live preview must be dropped: the artwork on screen
-		# now describes a different board entirely, under a label that says it
-		# is what the fab receives. The gate exists to stop a load dirtying the
-		# tab, not to stop it invalidating a stale view.
+		# Both whole-board load paths set _restoring = true, and a load of a
+		# DIFFERENT board is PRECISELY when a live preview must be dropped: the
+		# artwork on screen would describe another board entirely, under a label
+		# that says it is what the fab receives. The gate exists to stop a load
+		# dirtying the tab, not to stop it invalidating a stale view. What is
+		# and is not a stale view is decided inside, on the board itself.
 		_invalidate_fab_preview()
 		# OUTSIDE the _restoring gate too: a board LOAD is when the pours on
 		# screen stop being the pours any held fill describes, and it is also
@@ -4624,6 +4631,7 @@ func set_view_flag(flag: String, value: bool) -> bool:
 			# "what the fab receives" while describing a board that has since
 			# changed, which is the one lie this view must never tell.
 			_canvas.set_fab_preview([], [], "")
+			_fab_preview_board_token = ""
 	_canvas.queue_redraw()
 	# THE FLAG IS THE ANSWER, NOT THE REQUEST. A refetch that came back with
 	# nothing has already taken the flag back down (_retract_overlay), and a
@@ -6549,13 +6557,26 @@ static func _whole_board_token(board: Dictionary) -> String:
 	return JSON.stringify(board, "", true, true).sha256_text()
 
 
-## A LIVE FAB PREVIEW IS INVALIDATED BY ANY BOARD EDIT (Codex review of the
-## epoch tail, finding 1). It is deliberately NOT refetched — the DCR is
+## A LIVE FAB PREVIEW IS INVALIDATED BY ANY CHANGE TO THE BOARD IT WAS RENDERED
+## FROM — and by nothing else. It is deliberately NOT refetched: the DCR is
 ## explicit that the exact preview is on demand and need not keep up with
-## editing — but leaving the previous artwork on screen after an edit is the
+## editing. But leaving the previous artwork on screen after an edit is the
 ## stale-authority case this view must never create. It is the one view in the
 ## editor entitled to say "these are the bytes the fab receives", and that
 ## sentence stops being true the moment the board moves.
+##
+## THE RULE IS THE BOARD, NOT THE SIGNAL. This used to fire on every
+## data_changed, which meant any model touch a user would not call an edit —
+## a re-load of the same board, a mutator that changed nothing — blanked the
+## preview and took the View flag down with it, with nothing on screen to say
+## why. `to_board_dict()` is EXACTLY what the worker renders the artwork from
+## (see _refresh_fab_preview), so its token answers "does the artwork still
+## describe this board" directly, instead of a hand-kept list of which
+## mutators reach copper, silk, mask, paste, drill or outline — a list that
+## drifts silently the first time a mutator is added to the model.
+##
+## The whole-board hash is paid ONLY while the preview is up, which is a
+## deliberate, occasional mode; there is nothing to compare against otherwise.
 ##
 ## The mask overlay refetches on the same signal because it is cheap; this runs
 ## the whole emission path, so it clears and waits to be asked again.
@@ -6566,9 +6587,22 @@ static func _whole_board_token(board: Dictionary) -> String:
 func _invalidate_fab_preview() -> void:
 	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
 		return
-	_canvas.set_fab_preview([], [], "")
-	_retract_overlay("show_fab_preview", _PcbOverlayFetchScript.stale_reply(
+	if _data != null and not _fab_preview_board_token.is_empty() \
+			and _fab_preview_token(_data.to_board_dict()) == _fab_preview_board_token:
+		# Nothing that reaches the emitter moved, so the artwork on screen is
+		# still exactly the bytes this board would ship.
+		return
+	_drop_fab_preview(_PcbOverlayFetchScript.stale_reply(
 		_PcbOverlayFetchScript.STALE_BOARD_EDITED))
+
+
+## Clear the held artwork, forget the board it described, and retract the flag
+## with the given reason. Every "the preview is gone" path goes through here so
+## none can leave the token behind for the next comparison to trust.
+func _drop_fab_preview(reply: Dictionary) -> void:
+	_fab_preview_board_token = ""
+	_canvas.set_fab_preview([], [], "")
+	_retract_overlay("show_fab_preview", reply)
 
 
 ## pcb.fab_preview round-trip (WYSIWYG G5, DCR 019ffc52b455, K27) — same channel
@@ -6614,8 +6648,7 @@ func _refresh_fab_preview() -> void:
 		# The board moved under the request. Show NOTHING and say why, rather
 		# than artwork for a board that no longer exists — and retract the flag
 		# with it, because nothing is on screen for it to be claiming.
-		_canvas.set_fab_preview([], [], "")
-		_retract_overlay("show_fab_preview", _PcbOverlayFetchScript.stale_reply(
+		_drop_fab_preview(_PcbOverlayFetchScript.stale_reply(
 			_PcbOverlayFetchScript.STALE_BOARD_MOVED_IN_FLIGHT))
 		return
 	if not bool(reply.get("ok", false)):
@@ -6623,8 +6656,7 @@ func _refresh_fab_preview() -> void:
 		# the held status lead rather than into the preview — a note drawn
 		# INSIDE the preview is invisible the moment the preview is not drawn —
 		# and the flag comes down with the artwork.
-		_canvas.set_fab_preview([], [], "")
-		_retract_overlay("show_fab_preview", reply)
+		_drop_fab_preview(reply)
 		return
 	_clear_overlay_lead("show_fab_preview")
 	var result: Dictionary = _dict_or_empty(reply.get("result"))
@@ -6651,6 +6683,9 @@ func _refresh_fab_preview() -> void:
 	# camera the editor uses, so the preview pans and zooms and a human can get
 	# close enough to a part to judge it.
 	_canvas.set_fab_preview(layers, unrendered, note, result.get("bounds_board_mm"))
+	# THE BOARD THIS ARTWORK DESCRIBES, remembered. From here a model change is
+	# only an invalidation if it moves this token (_invalidate_fab_preview).
+	_fab_preview_board_token = requested_token
 
 
 ## Refetch the mask overlay from the worker and hand it to the canvas. The
