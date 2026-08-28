@@ -554,11 +554,11 @@
 			"model3d_ref": null,
 			"original_source_path": null,
 			"path": "Minerva_Fixture.pretty/LOGO_Owl_TestCoupon.kicad_mod",
-			"retrieved_at": "2026-08-08",
-			"sha256": "ea506c4ab201c739694e553b6e3b7a42124c3eb2f5bbc055142e93aaf6305f1d",
-			"size_bytes": 9303,
+			"retrieved_at": "2026-08-28",
+			"sha256": "2fe053e296af9344ae063227ff29fd1894dff4feb47a44137b5468a8cad0c2d4",
+			"size_bytes": 6023,
 			"source_kind": "generated",
-			"source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)"
+			"source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08); \"TEST COUPON\" legend strokes regenerated 2026-08-28 from the in-house pcb_worker.board_font 5x7 table (bug 01a045e4da8e) — no third-party glyph data remains"
 		},
 		"Minerva_Fixture:SMD_WeirdPads_2P": {
 			"assembly": {

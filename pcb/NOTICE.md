@@ -55,7 +55,7 @@ Internal / TurnRock-authored parts. No third-party attribution obligation applie
 - `MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm` — authored 2026-08-15 from the MEMSensing MSM261S4030H0R datasheet (Ver.1.0 DOC NO:DS-050), SMT Parameters land pattern: 8 pads 0.9x0.6, columns 1.0mm apart, rows 1.0mm pitch (smart-remote v2b: U3 microphone. TOP PORT so no PCB acoustic hole. NOTE pins 4 (CHIPEN) and 5 (L/R) are straps the module version used to handle: CHIPEN low = mic DISABLED.)
 - `Minerva_Fixture:DAM_MinWeb_2P` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
 - `Minerva_Fixture:FID_Circle_1mm` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
-- `Minerva_Fixture:LOGO_Owl_TestCoupon` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
+- `Minerva_Fixture:LOGO_Owl_TestCoupon` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08); "TEST COUPON" legend strokes regenerated 2026-08-28 from the in-house pcb_worker.board_font 5x7 table (bug 01a045e4da8e) — no third-party glyph data remains
 - `Minerva_Fixture:SMD_WeirdPads_2P` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
 - `Minerva_Fixture:TP_MinAnnular_0p6` — pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)
 - `Minerva_Fixture:TXT_CouponRev` — pcb_worker_seed synthesizer, CP2 S9 revision text (ad072eb 2026-08-11)

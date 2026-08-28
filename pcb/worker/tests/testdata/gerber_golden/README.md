@@ -58,6 +58,31 @@ what changed shape; the designator's cap height is still exactly 1.0 mm, and
 its baseline now sits ON the anchor instead of 0.047619 mm below it (Newstroke
 drew its baseline at a small negative local y; the 5x7 grid puts it at 0).
 
+**Re-blessed once more when the coupon's own baked legend joined that
+typeface** (bug `01a045e4da8e`). `LOGO_Owl_TestCoupon.kicad_mod` drew its
+"TEST COUPON" legend as 96 `fp_line`s generated in 2026-08 from a Newstroke
+subset, which made the footprint's `LicenseRef-TurnRock-Proprietary` lock entry
+— and therefore `pcb/NOTICE.md` — say something untrue about shipped artwork.
+The 96 segments were re-emitted from `board_font.render(..., h_align="center")`
+at the parameters measured off the originals: cap height 1.000 mm, both lines
+centred on the footprint's x=0, baselines at local y 1.652 ("TEST") and 3.052
+("COUPON"), layer `F.SilkS`, stroke width 0.15 mm — so the legend keeps its
+size, box and placement and the coupon layout does not move. 56 segments come
+out instead of 96 (a 5x7 grid needs fewer than a Newstroke outline). The owl
+(`fp_arc`, four `fp_circle`, `fp_poly`, five `fp_line`) and the courtyard are
+byte-identical, and the footprint was re-blessed in
+`pcb/library/footprints.lock.json` (`ea506c4a…` -> `2fe053e2…`).
+
+EXACTLY ONE artifact moved: `coupon_jlc1-F_SilkS.gbr`, in ONE contiguous hunk
+after line 34, 109 lines out and 69 in, every one of them a `D01`/`D02`
+coordinate under the existing `%ADD10C,0.15*%` aperture — no aperture added,
+removed or resized, no copper/mask/paste/drill/edge/gbrjob byte changed, and
+the owl block ahead of the hunk untouched. The moved coordinates stay inside
+the legend's own box (LOGO1 sits at 17.5, 14: y spans exactly -14.652 ..
+-17.052 before and after, x narrows from 14.595 .. 20.357 to 15.083 .. 19.917
+as the narrower glyphs predict). `coupon_jlc1-B_SilkS.gbr` did not move — the
+back legend is `TXT_CouponRev`, not this footprint.
+
 ## Pinned versions (byte-stability holds ONLY at these)
 
 | package       | version | role                                          |
