@@ -49,6 +49,9 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## panel reads (pcb_prefs.shared()), which is what makes an agent's write and a
 ## human's turn of the width box two views of one value rather than two stores.
 const _PcbPrefsScript := preload("model/pcb_prefs.gd")
+## The Options block — one read and one write shared with the panel's Options
+## menu, so a click and this verb are the same operation.
+const _PcbOptionsMenuScript := preload("pcb_options_menu.gd")
 const _PcbBoardHistoryScript := preload("pcb_board_history.gd")
 ## B2 (MCP parity round): static-func + const access for the zone outline
 ## helpers (zone_outline_to_list/zone_outline_points, MIN_ZONE_OUTLINE_POINTS)
@@ -225,6 +228,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _fabrication_stage(host, args)
 		"minerva_pcb_delete_via":
 			return _delete_via(host, args)
+		"minerva_pcb_board_rules":
+			return _board_rules(host, args)
 		"minerva_pcb_get_preference":
 			return _get_preference(host, args)
 		"minerva_pcb_set_preference":
@@ -6314,6 +6319,45 @@ static func _set_trace_width(host, args: Dictionary) -> Dictionary:
 ## Reports the EFFECTIVE value plus whether it was actually stored, because
 ## "never chosen" and "chosen and equal to the default" are different facts the
 ## panel's seeding order depends on.
+## Read — and optionally set — the board's OPTIONS block: the allowed trace
+## directions, the four numeric design rules, the drawing-grid pitch, and the
+## three per-user snap toggles. The `view_state` shape, for the same reason:
+## one verb that always reports the whole block, so a caller can read before it
+## writes and read back what it changed without a second call.
+##
+## THE SAME OPERATION THE MENU RUNS. Both halves live in pcb_options_menu.gd
+## (read_state / apply) and this verb only shapes the envelope, so the panel's
+## Options menu and this tool cannot drift into two rules.
+##
+## VALIDATED WHOLE, THEN APPLIED WHOLE: a bad mode, a malformed angle list or an
+## out-of-range width changes NOTHING and names what was wrong. The board half
+## of a real change is exactly one undo step however many rules moved.
+##
+## `trace_angle_mode` and `allowed_trace_angles_deg` are two spellings of one
+## rule and passing both is refused rather than silently resolved — a mode IS an
+## angle set, and a caller that sent conflicting ones asked two different things.
+static func _board_rules(host, args: Dictionary) -> Dictionary:
+	var data = _get_data(host)
+	var prefs = _PcbPrefsScript.shared()
+	var changes: Dictionary = {}
+	for key in args:
+		var name := str(key)
+		if name == "editor_name":
+			continue
+		changes[name] = args[key]
+	if changes.is_empty():
+		return _ok(_PcbOptionsMenuScript.read_state(data, prefs))
+	var result: Dictionary = _PcbOptionsMenuScript.apply(data, prefs, changes)
+	if not bool(result.get("ok", false)):
+		return _err(str(result.get("error", "Board rules could not be set.")))
+	var reply: Dictionary = _dict_or_empty(result.get("state", {}))
+	reply["changed"] = result.get("changed", [])
+	var warning := str(prefs.take_warning())
+	if not warning.is_empty():
+		reply["warning"] = warning
+	return _ok(reply)
+
+
 static func _get_preference(_host, args: Dictionary) -> Dictionary:
 	var prefs = _PcbPrefsScript.shared()
 	var key: String = str(args.get("key", ""))

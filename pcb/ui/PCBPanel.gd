@@ -56,6 +56,9 @@ const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
 ## The pad-selection sidebar section and the pad ROW shape it renders (the same
 ## rows minerva_pcb_get_selection returns).
 const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section.gd")
+## The Options menu — the control strip's second menu. Declared with `:=` so the
+## parser keeps the GDScript class type and can resolve its static funcs.
+const PcbOptionsMenu := preload("pcb_options_menu.gd")
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 const _PcbLibraryPartScript: Script = preload("model/pcb_library_part.gd")
 const _PcbFabPreviewScript: Script = preload("model/pcb_fab_preview.gd")
@@ -65,6 +68,8 @@ const _PcbFabPreviewScript: Script = preload("model/pcb_fab_preview.gd")
 ## instantiated-script consts above) so the parser keeps the GDScript class type
 ## and can resolve its static funcs — a `Script`-typed const cannot.
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
+## The one definition of design_rules.allowed_trace_angles_deg (see the module).
+const PcbTraceAngles := preload("model/pcb_trace_angles.gd")
 ## B2 (MCP parity round) — deployed-script-vintage stamp, surfaced by
 ## minerva_pcb_get_layout_state's `plugin_build` field. DESIGN CHOICE, and why
 ## the alternatives were rejected:
@@ -130,6 +135,13 @@ const _DEFAULT_BOARD := {
 	"height_mm": 40.0,
 	"grid_mm": 2.54,
 	"components": [],
+	# A NEW board declares its routing style, and Octilinear is the default
+	# (owner ruling): the loosest set that still keeps a hand-drawn run on a
+	# direction a fab and a reviewer can read at a glance. It is a real board
+	# rule, not a tool habit — the worker's gc12 check enforces it from here.
+	"design_rules": {
+		"allowed_trace_angles_deg": PcbTraceAngles.OCTILINEAR_ANGLES,
+	},
 }
 
 var _annotation_host: AnnotationHost = null
@@ -367,6 +379,7 @@ var _dock_parent: VBoxContainer = null
 ## 3-col wants the dock along the bottom; only wide keeps it in the sidebar).
 var _bottom_dock_slot: VBoxContainer = null
 var _view_menu_button: MenuButton = null
+var _options_menu_button: MenuButton = null
 var _drawer_button: Button = null
 var _export_button: Button = null
 
@@ -1308,6 +1321,15 @@ func _build_toolbar() -> HBoxContainer:
 	popup.about_to_popup.connect(_sync_view_menu_checks)
 	popup.id_pressed.connect(_on_view_menu_id_pressed)
 	tb.add_child(_view_menu_button)
+
+	# OPTIONS — the View menu's sibling, and the one surface for the rules a
+	# board is drawn under (trace angles, the numeric design rules, snapping).
+	# Unconditional at every layout mode for the same reason View is: it is a
+	# menu, so it costs one button of toolbar width whatever the flag list does.
+	_options_menu_button = PcbOptionsMenu.new()
+	_options_menu_button.bind(self)
+	_options_menu_button.status_message.connect(_show_transient_status)
+	tb.add_child(_options_menu_button)
 
 	tb.add_child(VSeparator.new())
 
@@ -4696,6 +4718,7 @@ func get_layout_state() -> Dictionary:
 		"sidebar_visible": _sidebar != null and _sidebar.visible,
 		"drawer_open": _drawer_open,
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
+		"options_menu_visible": _options_menu_button != null and _options_menu_button.visible,
 		"properties_expanded": _properties_expanded,
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
 		"plugin_build": PLUGIN_BUILD,
@@ -5145,6 +5168,9 @@ func _drain_pref_warning() -> void:
 ## to mean to be worth anything). Unknown keys never reach here — the tool
 ## validates against the store's registry first.
 func apply_preference(key: String, value: Variant) -> void:
+	# The snap toggles have no panel-side control to push into: the canvas reads
+	# the preference store live on every authoring click, so a write is already
+	# in force by the time this is called.
 	if key != _PcbPrefsScript.KEY_TRACE_WIDTH:
 		return
 	var width := float(value)

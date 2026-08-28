@@ -37,6 +37,11 @@ const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.
 ## land the same copper, so it has to call the real verb, not a stand-in.
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBTraceScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_trace.gd")
+## The ONE definition of design_rules.allowed_trace_angles_deg. Section 13
+## measures the tool against it, and against the worker's gc12 rule it mirrors.
+const PcbTraceAngles := preload("res://../../minerva-plugins/pcb/ui/model/pcb_trace_angles.gd")
+const PcbOptionsMenu := preload("res://../../minerva-plugins/pcb/ui/pcb_options_menu.gd")
+const PcbPrefsScript := preload("res://../../minerva-plugins/pcb/ui/model/pcb_prefs.gd")
 
 var _pass := 0
 var _fail := 0
@@ -105,6 +110,8 @@ func _init() -> void:
 	_test_netless_refusal_names_every_anchor_kind()
 	_test_working_layer_is_not_the_view()
 	_test_trace_end_anchor()
+	_test_angle_snap()
+	_test_board_rules_verb_and_menu_are_one_path()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -126,7 +133,7 @@ func check(desc: String, cond: bool, detail: String = "") -> void:
 ## Two parts, two declared nets, a declared 2-layer stack, and a board rule width
 ## that is DISTINCT from the model default — the C2-CHECK 7 lesson: identical
 ## values mask precedence.
-func _board(rule_width: float = 0.0) -> Dictionary:
+func _board(rule_width: float = 0.0, angles: Array = []) -> Dictionary:
 	var b := {
 		"version": 1, "name": "TraceBoard", "width_mm": 60.0, "height_mm": 40.0,
 		"grid_mm": 2.54,
@@ -146,13 +153,17 @@ func _board(rule_width: float = 0.0) -> Dictionary:
 	}
 	if rule_width > 0.0:
 		b["design_rules"] = {"trace_width_mm": rule_width}
+	if not angles.is_empty():
+		var rules: Dictionary = b.get("design_rules", {})
+		rules["allowed_trace_angles_deg"] = angles
+		b["design_rules"] = rules
 	return b
 
 
-func _rig(rule_width: float = 0.0) -> Array:
+func _rig(rule_width: float = 0.0, angles: Array = []) -> Array:
 	var canvas = PcbCanvasScript.new()
 	var data = PCBData.new()
-	data.from_board_dict(_board(rule_width))
+	data.from_board_dict(_board(rule_width, angles))
 	canvas.data = data
 	canvas.zoom = 8.0
 	canvas.snap_to_grid = false
@@ -1137,4 +1148,259 @@ func _test_trace_end_anchor() -> void:
 		"end": {"trace_id": str(stub2.id), "end": "start"}, "points": [[42.0, 36.0]]})
 	check("(i) …and the verb refuses the same as trace_end_same_trace",
 			str(loop_res.get("error", "")) == "trace_end_same_trace", str(loop_res))
+	canvas.free()
+
+
+## The heading of the single committed trace's one segment, folded the way the
+## board's rule is: degrees in [0, 180) from +X toward +Y in the board's y-down
+## frame. Read off the SERIALIZED entity, never off the tool's buffer.
+func _committed_heading(data) -> float:
+	var traces := _serialized_traces(data)
+	if traces.size() != 1:
+		return -1.0
+	var points: Array = (traces[0] as Dictionary).get("points", [])
+	if points.size() < 2:
+		return -1.0
+	var a: Dictionary = points[0]
+	var b: Dictionary = points[points.size() - 1]
+	return PcbTraceAngles.heading_deg(
+		Vector2(float(a.get("x_mm", 0.0)), float(a.get("y_mm", 0.0))),
+		Vector2(float(b.get("x_mm", 0.0)), float(b.get("y_mm", 0.0))))
+
+
+## The last point of the single committed trace, in board mm.
+func _committed_end(data) -> Vector2:
+	var traces := _serialized_traces(data)
+	if traces.size() != 1:
+		return Vector2.INF
+	var points: Array = (traces[0] as Dictionary).get("points", [])
+	if points.is_empty():
+		return Vector2.INF
+	var p: Dictionary = points[points.size() - 1]
+	return Vector2(float(p.get("x_mm", 0.0)), float(p.get("y_mm", 0.0)))
+
+
+## Draw one run from U1.1 and finish it in open board with a double-click, so
+## the endpoint is a WAYPOINT the snap owns rather than a pad centre the anchor
+## rung owns. Returns the rig.
+func _drag_from_u1(angles: Array, toward: Vector2, snap_grid: bool = false) -> Array:
+	var rig := _rig(0.0, angles)
+	var canvas = rig[0]
+	canvas.snap_to_grid = snap_grid
+	canvas._handle_trace_click(Vector2(10.0, 10.0), false)   # start on U1.1 (VCC)
+	canvas._handle_trace_click(toward, false)                # the snapped waypoint
+	canvas._commit_trace()
+	return rig
+
+
+## 13. THE ANGLE SNAP — the Trace tool draws only in directions the BOARD allows.
+##
+## ORACLE, throughout: the heading of the SERIALIZED trace, measured by the same
+## fold the worker's gc12 check uses (PcbTraceAngles, which mirrors
+## drc_geometric._check_gc12_trace_direction byte for byte on the same 1 um
+## perpendicular tolerance). A run this tool draws must be a run that check
+## passes — that is the whole contract, and measuring the drawn copper against
+## the shared definition rather than against a hand-typed number is what pins it.
+##
+## The drag is 37 degrees on purpose: it is near nothing, so every mode has to
+## move it somewhere different and no two expected answers coincide.
+func _test_angle_snap() -> void:
+	print("-- (13) the Trace tool snaps to design_rules.allowed_trace_angles_deg --")
+	# A 37-degree direction from U1.1, long enough that the snap is unambiguous
+	# and short enough that no snapped end lands within TRACE_SNAP_MM of R1.1
+	# (30,10) or C1.1 (30,25) — an endpoint the anchor rung claimed would be
+	# testing the finish path instead of the snap.
+	var away := Vector2(10.0, 10.0) + Vector2(8.0, 8.0 * tan(deg_to_rad(37.0)))
+
+	# (a) FREE — the board declares nothing, so the tool invents no constraint.
+	var free_rig := _drag_from_u1([], away)
+	check("(13a) a board declaring no angles draws the 37-degree run untouched",
+			is_equal_approx(_committed_heading(free_rig[1]), 37.0),
+			"heading=%f" % _committed_heading(free_rig[1]))
+	free_rig[0].free()
+
+	# (b) MANHATTAN — the same drag lands on an axis. ONE segment, not an L: the
+	# tool quantises the DIRECTION of the run being drawn; a corner is a second
+	# click, which is the human's to place.
+	var man_rig := _drag_from_u1([0, 90], away)
+	var man_data = man_rig[1]
+	check("(13b) …on a Manhattan board the same drag commits ONE segment",
+			(_serialized_traces(man_data)[0] as Dictionary).get("points", []).size() == 2,
+			str(_serialized_traces(man_data)))
+	check("(13b) …running on an axis (37 is nearer 0 than 90, so 0)",
+			is_equal_approx(_committed_heading(man_data), 0.0),
+			"heading=%f" % _committed_heading(man_data))
+	check("(13b) …and gc12's own rule agrees the run conforms",
+			PcbTraceAngles.conforms(Vector2(10.0, 10.0), _committed_end(man_data), [0.0, 90.0]))
+	man_rig[0].free()
+
+	# (c) OCTILINEAR — 37 is nearest 45, and a steep drag is nearest 90. Two
+	# answers from one set, so a snap that always picked the first entry fails.
+	var oct_rig := _drag_from_u1([0, 45, 90, 135], away)
+	check("(13c) an Octilinear board pulls the 37-degree run onto 45",
+			is_equal_approx(_committed_heading(oct_rig[1]), 45.0),
+			"heading=%f" % _committed_heading(oct_rig[1]))
+	oct_rig[0].free()
+	var steep := Vector2(10.0, 10.0) + Vector2(8.0 * tan(deg_to_rad(10.0)), 8.0)
+	var steep_rig := _drag_from_u1([0, 45, 90, 135], steep)
+	check("(13c) …and an 80-degree run onto 90, from the same set",
+			is_equal_approx(_committed_heading(steep_rig[1]), 90.0),
+			"heading=%f" % _committed_heading(steep_rig[1]))
+	steep_rig[0].free()
+
+	# (d) THE FRAME, pinned where a sign error would show. The board frame is
+	# y-DOWN, so a run heading UP-and-right folds to 135, not 45. An asymmetric
+	# set is the only one that can catch a negation: {0,45,90,135} maps to
+	# itself under the y-flip, so it would pass either way.
+	var only45_rig := _rig(0.0, [45])
+	var only45 = only45_rig[0]
+	only45.snap_to_grid = false
+	only45._handle_trace_click(Vector2(30.0, 25.0), false)   # start on C1.1 (GND)
+	only45._handle_trace_click(Vector2(30.0, 25.0) + Vector2(10.0, -6.0), false)
+	only45._commit_trace()
+	check("(13d) a board allowing 45 alone pulls an UP-right drag onto 45 too — "
+			+ "the set is a set of lines, and 45 is the down-right diagonal in the board's y-down frame",
+			is_equal_approx(_committed_heading(only45_rig[1]), 45.0),
+			"heading=%f" % _committed_heading(only45_rig[1]))
+	only45.free()
+	# …and the pure fold agrees, on the two headings the worker's own test pins.
+	check("(13d) heading_deg folds a down-right diagonal to 45",
+			is_equal_approx(PcbTraceAngles.heading_deg(Vector2(5, 5), Vector2(15, 15)), 45.0))
+	check("(13d) …and an up-right diagonal to 135",
+			is_equal_approx(PcbTraceAngles.heading_deg(Vector2(5, 15), Vector2(15, 5)), 135.0))
+	check("(13d) a 45-degree run conforms to Octilinear and NOT to Manhattan",
+			PcbTraceAngles.conforms(Vector2(5, 5), Vector2(15, 15), [0, 45, 90, 135])
+				and not PcbTraceAngles.conforms(Vector2(5, 5), Vector2(15, 15), [0, 90]))
+	check("(13d) …and so does a 135-degree one",
+			PcbTraceAngles.conforms(Vector2(5, 15), Vector2(15, 5), [0, 45, 90, 135])
+				and not PcbTraceAngles.conforms(Vector2(5, 15), Vector2(15, 5), [0, 90]))
+
+	# (e) SHIFT IS THE ESCAPE HATCH — one free-angle segment without changing
+	# the board's rule. Pushed through Input, which is where the canvas reads it
+	# (a gesture is not an event: the modifier is consulted per motion frame).
+	var shift_rig := _rig(0.0, [0, 90])
+	var shift_canvas = shift_rig[0]
+	shift_canvas.snap_to_grid = false
+	shift_canvas._handle_trace_click(Vector2(10.0, 10.0), false)
+	check("(13e) fixture: the run is angle-constrained before Shift goes down",
+			shift_canvas._trace_allowed_angles() == ([0.0, 90.0] as Array[float]),
+			str(shift_canvas._trace_allowed_angles()))
+	var shift_down := InputEventKey.new()
+	shift_down.keycode = KEY_SHIFT
+	shift_down.physical_keycode = KEY_SHIFT
+	shift_down.pressed = true
+	Input.parse_input_event(shift_down)
+	check("(13e) holding Shift drops the constraint for the segment being drawn, "
+			+ "without touching the board rule",
+			shift_canvas._trace_allowed_angles().is_empty()
+				and shift_rig[1].design_rule_trace_angles() == ([0.0, 90.0] as Array[float]),
+			str(shift_canvas._trace_allowed_angles()))
+	var shift_up := InputEventKey.new()
+	shift_up.keycode = KEY_SHIFT
+	shift_up.physical_keycode = KEY_SHIFT
+	shift_up.pressed = false
+	Input.parse_input_event(shift_up)
+	check("(13e) …and releasing it puts the constraint straight back",
+			shift_canvas._trace_allowed_angles() == ([0.0, 90.0] as Array[float]),
+			str(shift_canvas._trace_allowed_angles()))
+	shift_canvas.free()
+
+	# (f) GRID LAST, AND ALONG THE RUN. Quantising x and y independently would
+	# push the endpoint off the direction the angle snap just chose, so the
+	# DISTANCE along the direction is what the grid quantises. On a 2.54 mm
+	# board grid the authoring step is 0.635 mm, and a 45-degree run must land
+	# on whole steps in BOTH axes at once.
+	var grid_rig := _drag_from_u1([0, 45, 90, 135], away, true)
+	var end := _committed_end(grid_rig[1])
+	var delta := end - Vector2(10.0, 10.0)
+	check("(13f) with grid snap on, the 45-degree run is still exactly 45",
+			is_equal_approx(_committed_heading(grid_rig[1]), 45.0),
+			"heading=%f end=%s" % [_committed_heading(grid_rig[1]), str(end)])
+	check("(13f) …and both axes moved by a whole 0.635 mm authoring step",
+			is_equal_approx(delta.x, roundf(delta.x / 0.635) * 0.635)
+				and is_equal_approx(delta.y, roundf(delta.y / 0.635) * 0.635),
+			"delta=%s" % str(delta))
+	grid_rig[0].free()
+
+
+## 14. THE MENU AND THE VERB ARE ONE PATH.
+##
+## ORACLE: the BOARD's own design_rules dict and the model's history depth —
+## read after a write made through the MCP verb, and compared against what the
+## shared read reports. The menu calls the same two functions
+## (PcbOptionsMenu.read_state / apply), so pinning the verb against the model
+## pins both; a second implementation is what this suite exists to prevent.
+func _test_board_rules_verb_and_menu_are_one_path() -> void:
+	print("-- (14) minerva_pcb_board_rules and the Options menu are one path --")
+	var rig := _rig(0.0, [0, 90])
+	var canvas = rig[0]
+	var data = rig[1]
+	var host = rig[2]
+	var prefs = PcbPrefsScript.shared()
+
+	# READ: the verb's reply IS the shared read, and it names the board's mode.
+	var read: Dictionary = PanelTools._board_rules(host, {"editor_name": "probe"})
+	check("(14) the read reports the board's declared set as a named mode",
+			str(read.get("trace_angle_mode", "")) == PcbTraceAngles.MODE_MANHATTAN,
+			str(read))
+	check("(14) …and the same read the menu builds itself from agrees",
+			str(PcbOptionsMenu.read_state(data, prefs).get("trace_angle_mode", "")) == "manhattan")
+	check("(14) a rule the board does not declare reads as 0.0, not as a fallback",
+			is_equal_approx(float((read.get("design_rules", {}) as Dictionary).get("clearance_mm", -1.0)), 0.0),
+			str(read.get("design_rules", {})))
+
+	# WRITE: the mode lands on the BOARD, as one undo step.
+	var depth_before: int = int(data.history_index)
+	var wrote: Dictionary = PanelTools._board_rules(host, {
+		"editor_name": "probe", "trace_angle_mode": "octilinear"})
+	check("(14) writing the mode writes design_rules.allowed_trace_angles_deg on the board",
+			data.design_rule_trace_angles() == ([0.0, 45.0, 90.0, 135.0] as Array[float]),
+			str(data.design_rules))
+	check("(14) …the reply names what moved and reads the new mode back",
+			(wrote.get("changed", []) as Array).has("allowed_trace_angles_deg")
+				and str(wrote.get("trace_angle_mode", "")) == "octilinear", str(wrote))
+	check("(14) …and it is exactly ONE undo step",
+			int(data.history_index) == depth_before + 1,
+			"before=%d after=%d" % [depth_before, int(data.history_index)])
+
+	# The Trace tool reads the new rule immediately — no reload, no re-arm.
+	canvas._handle_trace_click(Vector2(10.0, 10.0), false)
+	check("(14) the Trace tool picks the new set up on the very next click",
+			canvas._trace_allowed_angles() == ([0.0, 45.0, 90.0, 135.0] as Array[float]),
+			str(canvas._trace_allowed_angles()))
+	canvas._cancel_trace_draw(false)
+
+	# FREE removes the key rather than storing an empty list: the worker refuses
+	# `[]` in YAML, and an absent key is how "no constraint" is spelled.
+	PanelTools._board_rules(host, {"editor_name": "probe", "trace_angle_mode": "free"})
+	check("(14) Free REMOVES the key rather than writing an empty list",
+			not (data.design_rules as Dictionary).has("allowed_trace_angles_deg"),
+			str(data.design_rules))
+
+	# REFUSALS change nothing at all, and name what was wrong.
+	var numeric: Dictionary = PanelTools._board_rules(host, {
+		"editor_name": "probe", "trace_width_mm": 0.3, "clearance_mm": 99.0})
+	check("(14) an out-of-range value refuses the WHOLE write — the good half does not land",
+			not bool(numeric.get("success", false))
+				and is_equal_approx(data.design_rule_trace_width(), 0.0),
+			str(numeric))
+	var both: Dictionary = PanelTools._board_rules(host, {
+		"editor_name": "probe", "trace_angle_mode": "manhattan",
+		"allowed_trace_angles_deg": [0, 45]})
+	check("(14) passing a mode AND an angle list is refused, not silently resolved",
+			not bool(both.get("success", false)), str(both))
+	var unknown: Dictionary = PanelTools._board_rules(host, {
+		"editor_name": "probe", "trace_angle_mode": "diagonal"})
+	check("(14) an unknown mode names the modes that exist",
+			str(unknown.get("error", "")).contains("octilinear"), str(unknown))
+
+	# A board declaring a set this menu cannot express says so, rather than
+	# reporting the nearest offered mode.
+	PanelTools._board_rules(host, {"editor_name": "probe", "allowed_trace_angles_deg": [30, 120]})
+	var custom: Dictionary = PanelTools._board_rules(host, {"editor_name": "probe"})
+	check("(14) a set neither mode names reads back as \"custom\"",
+			str(custom.get("trace_angle_mode", "")) == PcbTraceAngles.MODE_CUSTOM, str(custom))
+	check("(14) …carrying the board's own angles, folded and sorted",
+			str(custom.get("allowed_trace_angles_deg", [])) == str([30.0, 120.0] as Array[float]),
+			str(custom.get("allowed_trace_angles_deg", [])))
 	canvas.free()

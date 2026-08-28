@@ -1269,28 +1269,50 @@
       }
     },
     {
-      "name": "minerva_pcb_get_preference",
-      "description": "Read one PCB plugin preference. Plugin-scoped and persistent across app restarts; NOT a Minerva core preference. Returns {key, value, stored, default, description} plus min/max where the key is bounded — `stored` distinguishes \"the user/agent actually chose this\" from \"never chosen, reading the default\", which is what decides whether the preference is consulted at all. Read-only: journals nothing, writes nothing. An unknown key is an error that lists the keys that do exist. Known keys: trace_width_mm.",
+      "name": "minerva_pcb_board_rules",
+      "description": "Read — and optionally set — the RULES this board is drawn under: the directions its traces may run in, the four numeric design rules, the drawing-grid pitch, and the three per-user snap toggles. This is the verb twin of the panel's own Options menu (the control strip's second menu, beside View); both call ONE shared read/write, so a human's click and this call are the same operation rather than two implementations that agree today. Call with nothing but editor_name to read: returns {trace_angle_mode, allowed_trace_angles_deg, offered_modes, design_rules:{trace_width_mm, clearance_mm, via_diameter_mm, via_drill_mm, grid_mm}, snaps:{snap_grid, snap_land, snap_angle}, changed:[]}. A design rule reading 0.0 means THE BOARD DECLARES NONE, which is a different fact from an authored 0.25 — so a caller can tell a rule from a fallback without guessing. TRACE ANGLES ARE A BOARD RULE, not a view flag: the set is written to design_rules.allowed_trace_angles_deg, travels with the YAML, snaps the Trace tool while a human draws, and is enforced on every trace by the worker's gc12_trace_direction check — agent-routed copper included. Entries are directions measured from +X toward +Y in the board's OWN y-down millimetre frame (so on screen the angle sweeps clockwise and 45 is the down-and-right diagonal), folded into [0, 180) because a direction and its reverse are one constraint. trace_angle_mode is the named shorthand: \"manhattan\" ([0, 90]), \"octilinear\" ([0, 45, 90, 135], the default a new board is created with) or \"free\" (the key is REMOVED, which is how \"no direction constraint\" is spelled everywhere in this stack). Pass trace_angle_mode OR allowed_trace_angles_deg, never both — a mode IS an angle set, and two spellings of one rule could disagree. A board declaring some other set reads back as mode \"custom\" and is never coerced to the nearest named one. Writes are VALIDATED WHOLE, THEN APPLIED WHOLE, the discipline minerva_pcb_view_state uses: an unknown mode, a malformed angle list or an out-of-range millimetre value changes NOTHING at all and names what was wrong. Every board rule that really moved is listed in changed, and the board half of the write is exactly ONE undo step however many rules moved. The three snap toggles are PER-USER preferences and not board state (they persist in the same plugin preference store minerva_pcb_get_preference reads): how eagerly a cursor is pulled is a habit of the person drawing, while what it is pulled onto belongs to the board. snap_land governs FINISHING a run on a pad, via or free trace end; STARTING one always uses the land under the cursor, because that is where the run's net comes from.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "key": {"type": "string", "description": "Preference key to read (e.g. trace_width_mm)"}
+          "trace_angle_mode": {"type": "string", "description": "Named angle set: \"manhattan\", \"octilinear\" or \"free\". Mutually exclusive with allowed_trace_angles_deg."},
+          "allowed_trace_angles_deg": {"type": "array", "items": {"type": "number"}, "description": "The angle set spelled out, in degrees from +X toward +Y in the board's y-down frame. Folded into [0, 180) and de-duplicated on write. An EMPTY list means free (the key is removed). Mutually exclusive with trace_angle_mode."},
+          "trace_width_mm": {"type": "number", "description": "design_rules.trace_width_mm — the width a trace gets when nothing more specific says. Within 0.1-5.0; refused, not clamped."},
+          "clearance_mm": {"type": "number", "description": "design_rules.clearance_mm — the board's blanket copper-to-copper separation. Within 0.02-5.0."},
+          "via_diameter_mm": {"type": "number", "description": "design_rules.via_diameter_mm — the pad diameter a new via gets. Within 0.05-5.0."},
+          "via_drill_mm": {"type": "number", "description": "design_rules.via_drill_mm — the drill a new via gets. Within 0.05-5.0."},
+          "grid_mm": {"type": "number", "description": "The board's drawing-grid pitch. Board state like the rules above; the authoring snap uses a quarter of it. Within 0.05-5.08."},
+          "snap_grid": {"type": "boolean", "description": "PER-USER: pull an authoring click onto the drawing grid. Ctrl (Cmd on a Mac) bypasses it for one click either way."},
+          "snap_land": {"type": "boolean", "description": "PER-USER: let a click near a pad, via or free trace end FINISH the run on it. Starting a run always uses the land under the cursor."},
+          "snap_angle": {"type": "boolean", "description": "PER-USER: quantise a run's direction to allowed_trace_angles_deg while drawing. Shift draws one free-angle segment without changing the board rule."}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_get_preference",
+      "description": "Read one PCB plugin preference. Plugin-scoped and persistent across app restarts; NOT a Minerva core preference. Returns {key, value, stored, default, description} plus min/max where the key is bounded — `stored` distinguishes \"the user/agent actually chose this\" from \"never chosen, reading the default\", which is what decides whether the preference is consulted at all. Read-only: journals nothing, writes nothing. An unknown key is an error that lists the keys that do exist. Known keys: trace_width_mm, snap_grid, snap_land, snap_angle. The BOARD's own design rules are not preferences \u2014 read those with minerva_pcb_board_rules.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "key": {"type": "string", "description": "Preference key to read (trace_width_mm, snap_grid, snap_land, snap_angle)"}
         },
         "required": ["editor_name", "key"]
       }
     },
     {
       "name": "minerva_pcb_set_preference",
-      "description": "Write one PCB plugin preference. Plugin-scoped, persisted under the plugin's data directory, survives app restart; NOT a Minerva core preference. The value is validated and CLAMPED to the key's declared range (unlike minerva_pcb_set_trace_width, which refuses out-of-range widths because it writes copper) and the reply reports the stored post-clamp value with {clamped, changed, applied_to_panel}. An unknown key is refused, never silently adopted. Setting trace_width_mm updates the live panel's trace-width box immediately and arms it for the next trace drawn. The arming is IMMEDIATE: the next trace drawn uses this width even on a board declaring design_rules.trace_width_mm. Board-rule precedence applies at seeding time only — on the next board load the declared rule wins again and the preference fills the no-rule case.",
+      "description": "Write one PCB plugin preference. Plugin-scoped, persisted under the plugin's data directory, survives app restart; NOT a Minerva core preference. The value is validated and CLAMPED to the key's declared range (unlike minerva_pcb_set_trace_width, which refuses out-of-range widths because it writes copper) and the reply reports the stored post-clamp value with {clamped, changed, applied_to_panel}. An unknown key is refused, never silently adopted. Known keys: trace_width_mm (a number) plus the three snap toggles snap_grid, snap_land and snap_angle (true/false), which the panel's Options menu turns and the canvas re-reads on every authoring click. A boolean is validated and never clamped \u2014 there is no range to clamp into. Setting trace_width_mm updates the live panel's trace-width box immediately and arms it for the next trace drawn. The arming is IMMEDIATE: the next trace drawn uses this width even on a board declaring design_rules.trace_width_mm. Board-rule precedence applies at seeding time only — on the next board load the declared rule wins again and the preference fills the no-rule case.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "key": {"type": "string", "description": "Preference key to write (e.g. trace_width_mm)"},
-          "value": {"type": "number", "description": "New value. For trace_width_mm: width in mm, clamped into 0.1-5.0."}
+          "key": {"type": "string", "description": "Preference key to write (trace_width_mm, snap_grid, snap_land, snap_angle)"},
+          "value": {"type": ["number", "boolean"], "description": "New value. For trace_width_mm: width in mm, clamped into 0.1-5.0. For a snap toggle: true or false."}
         },
         "required": ["editor_name", "key", "value"]
       }

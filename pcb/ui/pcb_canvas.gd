@@ -51,6 +51,10 @@ const PcbPadApproach := preload("model/pcb_pad_approach.gd")
 const PcbPinSelectTool := preload("pcb_pin_select_tool.gd")
 const PcbPadRow := preload("model/pcb_pad_row.gd")
 const PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
+## The one definition of design_rules.allowed_trace_angles_deg — shared with
+## the Options menu and byte-for-byte with the worker's gc12 direction check.
+const PcbTraceAngles := preload("model/pcb_trace_angles.gd")
+const PcbOptionsPrefs := preload("model/pcb_prefs.gd")
 ## The MCP tool surface (panel_tools.gd) is preloaded HERE too, for the bus
 ## tool only: bus_plan()/bus_commit_plan() (its static funcs) are the ONE
 ## shared implementation of "resolve per-net widths, compute offsets, run the
@@ -4487,7 +4491,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 			hovered_component = ""
 			queue_redraw()
 		if not _trace_points.is_empty():
-			_trace_preview = _author_point(world_pos)
+			_trace_preview = _trace_candidate_point(world_pos)
 			_trace_has_preview = true
 			queue_redraw()
 	elif tool_mode == ToolMode.CUTOUT:
@@ -8001,12 +8005,93 @@ func _author_layer() -> String:
 ##
 ## ANCHOR ENDPOINTS deliberately never come through here — a trace must meet the
 ## pad's, or the via's, actual centre (see _finish_trace_on_anchor).
+##
+## The human's own standing answer is the "Snap to grid" toggle in the Options
+## menu, read through _grid_snap_armed below: the modifier is for one click, the
+## toggle is for a habit, and both reach every drawing tool through this one
+## function. The TRACE tool wraps it (see _trace_candidate_point) because it
+## alone has a previous waypoint to take a direction from.
 func _author_point(world_pos: Vector2) -> Vector2:
-	if _snap_bypass_held():
+	if not _grid_snap_armed():
 		return world_pos
-	if snap_to_grid and data:
-		return data.snap_author_point(world_pos)
-	return world_pos
+	return data.snap_author_point(world_pos)
+
+
+## Is the authoring grid snap in force right now? Three things have to agree:
+## a model to snap against, the canvas flag (which the capture mirror and the
+## placement verbs set per call), and the user's own Options toggle. The no-snap
+## modifier overrides all three for as long as it is held.
+func _grid_snap_armed() -> bool:
+	if _snap_bypass_held() or data == null or not snap_to_grid:
+		return false
+	return _snap_pref(PcbOptionsPrefs.KEY_SNAP_GRID)
+
+
+## True while the FREE-ANGLE modifier is held. Shift, the universal EDA gesture
+## for "this one segment breaks the constraint" — read from Input at the moment
+## of use for the same reason _snap_bypass_held is, so pressing or releasing it
+## mid-gesture changes the rubber band right then.
+##
+## Deliberately a DIFFERENT key from the no-snap modifier: Ctrl already means
+## "ignore the grid", and a run drawn off-grid on an allowed diagonal is a
+## different intent from a run drawn at whatever angle the cursor is at.
+func _free_angle_held() -> bool:
+	return Input.is_key_pressed(KEY_SHIFT)
+
+
+## Are per-user snaps armed? The store is the plugin-wide preference singleton —
+## the same one PCBPanel.get_preferences() hands out and the preference verbs
+## write — so the canvas needs no plumbing to read a toggle the Options menu set.
+func _snap_pref(key: String) -> bool:
+	return PcbOptionsPrefs.shared().get_bool(key, true)
+
+
+## Where the trace tool's next WAYPOINT lands, in board mm.
+##
+## THE ONE RULE, shared by the rubber band and the click that commits it — a
+## preview drawn under a different rule from the commit would be a lie, which is
+## the reason _author_point is one function and the reason this is too.
+##
+## PRIORITY, highest first (owner ruling: "the snaps get in the way" near small
+## lands):
+##   1. ANGLE. The direction is quantised to the board's
+##      design_rules.allowed_trace_angles_deg, so a run leaving a land can only
+##      travel in a direction the board — and the worker's gc12 check — allows.
+##      Shift draws one free-angle segment without touching the board rule;
+##      Free-mode boards declare nothing and reach none of this.
+##   2. LAND. A click near a pad, via or free trace end FINISHES the run on it,
+##      and that rung is upstream of this function entirely (_handle_trace_click
+##      asks _trace_anchor_at first). Turning "Snap to pads" off removes it for
+##      the FINISH only — a run still starts on a land, because that is where its
+##      net comes from.
+##   3. GRID, applied LAST and ALONG the run, so it cannot push the endpoint off
+##      the direction step 1 chose (see PcbTraceAngles.snap_along). With no angle
+##      constraint in force this degrades to the plain authoring snap.
+##
+## Not folded into _author_point: that function is shared with the zone, cutout,
+## bus and via tools, none of which has a previous waypoint to take a direction
+## from.
+func _trace_candidate_point(world_pos: Vector2) -> Vector2:
+	if _trace_points.is_empty():
+		return _author_point(world_pos)
+	var angles: Array[float] = _trace_allowed_angles()
+	if angles.is_empty():
+		return _author_point(world_pos)
+	var anchor: Vector2 = _trace_points[_trace_points.size() - 1]
+	var snapped := PcbTraceAngles.snap_point(anchor, world_pos, angles)
+	if not _grid_snap_armed():
+		return snapped
+	return PcbTraceAngles.snap_along(anchor, snapped,
+		float(data.grid_size) * PCBDataScript.AUTHOR_SNAP_FRACTION)
+
+
+## The directions this run may travel in — empty when the board declares none,
+## when the user has turned the angle snap off, or while Shift is held.
+func _trace_allowed_angles() -> Array[float]:
+	if data == null or _free_angle_held() \
+			or not _snap_pref(PcbOptionsPrefs.KEY_SNAP_ANGLE):
+		return [] as Array[float]
+	return data.design_rule_trace_angles()
 
 
 func _handle_zone_click(world_pos: Vector2, is_double_click: bool) -> void:
@@ -8567,14 +8652,17 @@ func _handle_trace_click(world_pos: Vector2, is_double_click: bool) -> void:
 	var hit := _trace_anchor_at(world_pos)
 
 	if _trace_points.is_empty():
+		# The START always consults the land ladder, whatever "Snap to pads"
+		# says: a trace INHERITS its net from what it starts on, so a start that
+		# ignored the land under the cursor would have no net to adopt.
 		_start_trace(hit)
 		return
 
-	if not hit.is_empty():
+	if not hit.is_empty() and _snap_pref(PcbOptionsPrefs.KEY_SNAP_LAND):
 		_finish_trace_on_anchor(hit)
 		return
 
-	_trace_append_point(_author_point(world_pos))
+	_trace_append_point(_trace_candidate_point(world_pos))
 	_trace_has_preview = false
 	queue_redraw()
 

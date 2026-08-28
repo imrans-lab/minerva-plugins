@@ -82,6 +82,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_set_trace_width` | `data.set_trace_width`; one journalled step, current-value guard, out-of-range **refused** (below) |
 | `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`, `layers_spanned`, `layers_touched`) — the row is built by `pcb_region_describe.via_entry`, shared with `describe_region` (below) |
 | `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
+| `minerva_pcb_board_rules` | the Options menu's verb twin: read/write the board's trace-angle set, its four numeric design rules and its grid pitch, plus the three per-user snap toggles. `view_state` shape — always reports the whole block; validated whole, applied whole; one undo step (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
 | `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
 | `minerva_pcb_get_layout_state` | read-only; `PCBPanel.get_layout_state()` plus a `plugin_build` deploy-vintage stamp (below) |
@@ -129,6 +130,15 @@ Known keys:
 | Key | Type | Range | Meaning |
 |---|---|---|---|
 | `trace_width_mm` | number | 0.1–5.0 | Width new traces start at when the board declares no design rule |
+| `snap_grid` | true/false | — | Pull an authoring click onto the drawing grid (Ctrl/Cmd bypasses it per click) |
+| `snap_land` | true/false | — | Let a click near a pad, via or free trace end FINISH the run on it |
+| `snap_angle` | true/false | — | Quantise a run's direction to the board's allowed angles (Shift draws one free segment) |
+
+The three snap keys are the per-user half of the **Options menu** (below); the
+board's own design rules are not preferences and are read and written with
+`minerva_pcb_board_rules`. A boolean is validated and never clamped — there is
+no range to clamp into — so `set_preference`'s "clamped" flag is always false
+for them.
 
 `get_preference` returns `stored` alongside `value`, because "never chosen"
 and "chosen, and equal to the default" are different facts — the panel's seeding
@@ -146,6 +156,103 @@ order depends on the distinction.
 canvas is armed, so the next trace they draw really is that wide. A human turn
 of that same box writes the preference back, so the agent's read and the human's
 control are two views of one value.
+
+## The Options menu and its verb (`minerva_pcb_board_rules`, DCR `01a0479d23b1`)
+
+The PCB panel's control strip carries a second menu beside **View**:
+**Options**. View says what the canvas is *drawing*; Options says what the board
+is *drawn under*. `minerva_pcb_board_rules` is its verb twin, and both call the
+same two functions in `pcb/ui/pcb_options_menu.gd` — `read_state(data, prefs)`
+and `apply(data, prefs, changes)` — so a human's click and an agent's call are
+one operation rather than two implementations that agree today.
+
+**Two kinds of setting live in the menu, and the split is the design.**
+
+| In the menu | Kind | Where it persists |
+|---|---|---|
+| Trace angles (Manhattan / Octilinear / Free) | **board** | `design_rules.allowed_trace_angles_deg` |
+| Trace width, via diameter, via drill, clearance | **board** | `design_rules.*` |
+| Grid pitch | **board** | `grid_mm` |
+| Snap to grid / to pads / to allowed angles | **per-user** | the plugin preference store |
+
+How eagerly a cursor is pulled is a habit of the person drawing; **what** it is
+pulled onto belongs to the board and travels with the YAML. The three snap keys
+are readable and writable through `minerva_pcb_get_preference` /
+`minerva_pcb_set_preference` as well — they are ordinary registry keys, and the
+`value` argument accepts a boolean for them.
+
+### Trace angles are a BOARD RULE, not a view flag
+
+Choosing a mode writes `design_rules.allowed_trace_angles_deg`. Two things then
+follow from ONE source of truth:
+
+1. the canvas Trace tool **quantises the run's direction** to the allowed set
+   while a human draws — preview and committed copper alike, because both go
+   through `pcb_canvas._trace_candidate_point`;
+2. the worker's `gc12_trace_direction` check **enforces the same set on every
+   trace**, agent-routed and imported copper included, and reports itself *not
+   evaluated* on a board that declares nothing.
+
+The definition both sides fold by is stated once, in
+`pcb/ui/model/pcb_trace_angles.gd` and mirrored in `drc_geometric`'s gc12
+docstring and `docs/board-yaml.md`: **a direction from +X toward +Y in the
+board's own y-down millimetre frame, folded into `[0, 180)`** because a
+direction and its reverse are one constraint. On screen the angle sweeps
+clockwise, so `45` is the down-and-right diagonal. Conformance is a
+**perpendicular distance** (1 um), not an angle, at both ends — an angular
+tolerance is scale-dependent, and the panel and the worker cannot be allowed to
+disagree about a marginal segment.
+
+`trace_angle_mode` is the named shorthand for a set; `allowed_trace_angles_deg`
+spells one out. **Passing both is refused**, never resolved: a mode IS an angle
+set, and a caller that sent conflicting ones asked two different things. A board
+declaring some other set reads back as mode `"custom"` and is never coerced to
+the nearest named one — reporting a rule the board does not carry is how a menu
+and a board silently diverge. **Free removes the key** rather than storing `[]`,
+because the compiler refuses an empty list (see `docs/board-yaml.md`) and an
+absent key is how "no constraint" is spelled everywhere else.
+
+**A new board is created Octilinear** (`PCBPanel._DEFAULT_BOARD`) — the loosest
+set that still keeps a hand-drawn run on a direction a fab and a reviewer can
+read at a glance.
+
+### Snap priority while drawing
+
+Highest first, from the owner's note that "the snaps get in the way" near small
+lands:
+
+1. **Angle** — the direction is quantised first, so a run leaving a land can
+   only travel somewhere the board allows. **Shift draws one free-angle
+   segment** without touching the board rule (Ctrl/Cmd remains the separate
+   "ignore the grid" modifier).
+2. **Land** — a click near a pad, via or free trace end finishes the run on it.
+   `snap_land` turns that off for the **finish** only: starting a run always
+   uses the land under the cursor, because that is where the run's net comes
+   from.
+3. **Grid, last and ALONG the run.** Quantising x and y independently would push
+   the endpoint off the direction step 1 chose, so the *distance* along the
+   direction is what the grid quantises — a step of `pitch / max(|ux|, |uy|)`,
+   which is the plain pitch for 0 and 90 and `pitch * sqrt(2)` for the
+   diagonals, so both axes still move by whole pitches at once.
+
+### Reply shape
+
+A read (nothing but `editor_name`) and a write return the same block:
+
+```
+{trace_angle_mode, allowed_trace_angles_deg, offered_modes,
+ design_rules: {trace_width_mm, clearance_mm, via_diameter_mm, via_drill_mm, grid_mm},
+ snaps: {snap_grid, snap_land, snap_angle},
+ changed: []}
+```
+
+A design rule reading **0.0 means the board declares none** — a different fact
+from an authored 0.25, and the same "0.0 is not an answer" reading
+`design_rule_trace_width` already uses. Writes are **validated whole, then
+applied whole**, the discipline `view_state` established: an unknown mode, a
+malformed angle list or an out-of-range millimetre value changes *nothing* and
+names what was wrong. `changed` lists only the rules that really moved, and the
+board half of a write is **exactly one undo step** however many rules moved.
 
 ## The region read (`minerva_pcb_describe_region`)
 

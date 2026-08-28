@@ -1950,6 +1950,45 @@ def test_gc12_allows_a_forty_five_degree_style_when_the_board_declares_it():
     assert _gc12(res) == []
 
 
+def test_gc12_reads_one_frame_for_the_allowed_set_and_the_segment():
+    """THE DEFINITION, pinned. An allowed entry is a direction from +X toward +Y
+    in the board's own y-DOWN millimetre frame, folded into [0, 180); a
+    segment's heading is atan2(dy, dx) folded the same way. The panel's Trace
+    tool snaps on that identical definition (pcb/ui/model/pcb_trace_angles.gd),
+    so a run it draws is a run this check passes.
+
+    The two diagonals are the whole oracle. In the y-down frame (5,5)->(15,15)
+    heads 45 and (5,15)->(15,5) heads 135, both of them illegal under Manhattan
+    and both legal under octilinear. Neither side of the comparison is negated,
+    and this test would fail if one of them were: negating the allowed set alone
+    swaps which diagonal each is nearest, and negating BOTH is the identity for
+    a set closed under the flip -- so the ASYMMETRIC case below is the one that
+    actually catches a stray sign.
+    """
+    for segment in (((5.0, 5.0), (15.0, 15.0)), ((5.0, 15.0), (15.0, 5.0))):
+        manhattan = _run(_directed_board([0, 90], [segment]))
+        assert len(_gc12(manhattan)) == 1, segment
+        octilinear = _run(_directed_board([0, 45, 90, 135], [segment]))
+        assert _gc12(octilinear) == [], segment
+
+    # ...and the headings each is reported at, which is what says the fold runs
+    # in the y-down frame rather than a flipped one.
+    down_right = _gc12(_run(_directed_board([0, 90], [((5.0, 5.0), (15.0, 15.0))])))
+    assert down_right[0]["measured_angle_deg"] == pytest.approx(45.0)
+    up_right = _gc12(_run(_directed_board([0, 90], [((5.0, 15.0), (15.0, 5.0))])))
+    assert up_right[0]["measured_angle_deg"] == pytest.approx(135.0)
+
+    # THE ASYMMETRIC SET, which is the only one a sign error can survive. A
+    # board allowing 45 alone accepts the down-right diagonal and flags the
+    # up-right one; under a negated allowed set the verdicts would swap.
+    only_45 = _directed_board([45], [((5.0, 5.0), (15.0, 15.0)),
+                                     ((20.0, 15.0), (30.0, 5.0))])
+    findings = _gc12(_run(only_45))
+    assert len(findings) == 1
+    assert findings[0]["measured_angle_deg"] == pytest.approx(135.0)
+    assert findings[0]["nearest_allowed_angle_deg"] == pytest.approx(45.0)
+
+
 def test_gc12_folds_a_direction_and_its_reverse_into_one_rule():
     """0 and 180 are the same constraint on a horizontal run, so a board that
     writes either gets the same answer — and writing both is not two rules."""

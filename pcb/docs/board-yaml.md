@@ -28,6 +28,7 @@ design_rules:                  # board-wide manufacturing constraints
   trace_width_mm: 0.25
   via_diameter_mm: 0.8
   via_drill_mm: 0.4
+  allowed_trace_angles_deg: [0, 45, 90, 135]   # optional; see "Trace angles" below
   zone_min_thickness_mm: 0.15  # optional; see "Zone minima" under "Zones"
   zone_min_island_area_mm2: 0.5 # optional; see "Zone minima" under "Zones"
   net_classes:                 # optional; see "Net classes" below
@@ -452,6 +453,56 @@ NORMALIZES them into the single canonical `mounting_holes` collection (with
 round-trips as `mounting_holes` and its holes get uniform id-minting + structural
 validation — the aliases no longer bypass the v2 identity/validation gate (finding
 `019f8b7fb07e` comment 689).
+
+## Trace angles (`design_rules.allowed_trace_angles_deg`)
+
+The directions this board's traces are allowed to run in. **Optional, and
+absent means unconstrained** — which is what almost every board wants and what
+every reader spells the same way (the compiler resolves an absent key to an
+empty tuple, and the geometric DRC reports `gc12_trace_direction` as *not
+evaluated* rather than clean).
+
+**It is BOARD state, not manufacturer-profile state.** A rule profile records
+what a board HOUSE publishes, and no house requires orthogonal routing;
+Manhattan is a design style its author chose. Putting it in a profile would
+assert a fab capability that does not exist.
+
+**The frame.** An entry is a direction measured **from +X toward +Y in the
+board's own millimetre frame**, which is **y-down** — the frame every `x_mm` /
+`y_mm` in this file uses. On screen the angle therefore sweeps *clockwise*, and
+`45` names the **down-and-right** diagonal.
+
+A direction and its reverse are **one constraint**, so every entry folds into
+`[0, 180)` on load: `0`, `180` and `-180` are three spellings of the same
+horizontal rule, and `-90` folds to `90`. Duplicates after folding collapse.
+
+The two named styles the panel's Options menu offers:
+
+| Style | Set | Meaning |
+|---|---|---|
+| Manhattan | `[0, 90]` | orthogonal only |
+| Octilinear | `[0, 45, 90, 135]` | orthogonal plus both diagonals — **the default a new board is created with** |
+| Free | *key absent* | no direction constraint |
+
+Both named sets are closed under the y-flip, so for them the frame above is
+invisible. An **asymmetric** set (a board declaring only `30`, say) is read in
+the board frame, which is the reason the frame is written down here.
+
+**Malformed is an ERROR, not an ignored key.** A non-list, an empty list, a
+non-numeric entry or a non-finite one refuses the board with `bad_trace_angles`.
+A board that ASKS for a direction constraint and silently gets none is the
+fail-open direction, and it is invisible: every trace passes a check that never
+ran. "No constraint" is spelled by **omitting the key**, never by `[]`.
+
+Three surfaces read this one key and must never disagree about it:
+
+- `pcb_worker.compile_board._allowed_trace_angles` — the fold on load;
+- `pcb_worker.drc_geometric._check_gc12_trace_direction` — the check, measuring
+  a **perpendicular** deviation (1 um) rather than an angle, because an angular
+  tolerance is scale-dependent;
+- `pcb/ui/model/pcb_trace_angles.gd` — the panel's Trace-tool snap and the
+  Options menu, folding identically and on the same tolerance, so a run the
+  tool draws is a run the check passes.
 
 ## Board graphics
 

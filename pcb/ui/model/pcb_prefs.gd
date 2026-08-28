@@ -50,6 +50,15 @@ const SCHEMA_VERSION := 1
 ## key nothing reads.
 const KEY_TRACE_WIDTH := "trace_width_mm"
 
+## Per-USER snap toggles, reached from the panel's Options menu.
+## They are preferences and not board state on purpose: how eagerly a cursor is
+## pulled onto a grid or a land is a habit of the person drawing, while WHAT it
+## is pulled onto is the board's (the grid pitch is `grid_mm`, the angle set is
+## `design_rules.allowed_trace_angles_deg`, and both travel with the YAML).
+const KEY_SNAP_GRID := "snap_grid"
+const KEY_SNAP_LAND := "snap_land"
+const KEY_SNAP_ANGLE := "snap_angle"
+
 
 ## The KNOWN-KEY REGISTRY: the whole contract of this store.
 ##
@@ -72,6 +81,26 @@ static func key_registry() -> Dictionary:
 			"max": _PcbTraceScript.MAX_WIDTH_MM,
 			"description": "Width, in mm, a newly drawn trace starts at when the "
 				+ "board's own design_rules.trace_width_mm does not say.",
+		},
+		KEY_SNAP_GRID: {
+			"type": TYPE_BOOL,
+			"default": true,
+			"description": "Pull an authoring click onto the drawing grid. "
+				+ "Ctrl (Cmd on a Mac) bypasses it for one click either way.",
+		},
+		KEY_SNAP_LAND: {
+			"type": TYPE_BOOL,
+			"default": true,
+			"description": "Let a click near a pad, via or free trace end FINISH "
+				+ "the run on it. Starting a run always uses the land under the "
+				+ "cursor — that is where the run's net comes from.",
+		},
+		KEY_SNAP_ANGLE: {
+			"type": TYPE_BOOL,
+			"default": true,
+			"description": "Quantise a run's direction to the board's "
+				+ "design_rules.allowed_trace_angles_deg while drawing. Shift "
+				+ "draws one free-angle segment without changing the board rule.",
 		},
 	}
 
@@ -179,6 +208,15 @@ func get_float(key: String, fallback: float = 0.0) -> float:
 	if spec.is_empty() or int(spec.get("type", TYPE_NIL)) != TYPE_FLOAT:
 		return fallback
 	return float(get_value(key))
+
+
+## Typed getter for bool keys. A non-bool key returns the fallback rather than a
+## garbled cast, the same contract get_float carries.
+func get_bool(key: String, fallback: bool = true) -> bool:
+	var spec: Dictionary = describe(key)
+	if spec.is_empty() or int(spec.get("type", TYPE_NIL)) != TYPE_BOOL:
+		return fallback
+	return bool(get_value(key))
 
 
 ## Write a preference. Returns:

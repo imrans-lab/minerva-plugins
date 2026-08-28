@@ -53,6 +53,7 @@ const PCBTraceScript := preload("pcb_trace.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbEntityId := preload("pcb_entity_id.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
+const PcbTraceAngles := preload("pcb_trace_angles.gd")
 ## The plugin-wide copper-contact predicate. "Is this end joined" is the same
 ## question the DRC and the pin inspector ask, so it is asked there.
 const PcbCopperContact := preload("pcb_copper_contact.gd")
@@ -2254,6 +2255,13 @@ func add_placement_payload(payload: Dictionary) -> Dictionary:
 const DEFAULT_TRACE_WIDTH_MM := PCBTraceScript.DEFAULT_WIDTH_MM
 
 
+## The canonical numeric design rules a surface may set. The angle set is NOT
+## here — it is a list, not a millimetre scalar, and it has its own setter.
+const DESIGN_RULE_KEYS: Array[String] = [
+	"trace_width_mm", "clearance_mm", "via_diameter_mm", "via_drill_mm",
+]
+
+
 ## The board's OWN declared trace width, or 0.0 when it declares none.
 ##
 ## Split out of authored_trace_width (A7) because the two questions are
@@ -2292,6 +2300,91 @@ func design_rule_trace_width() -> float:
 func design_rule_clearance() -> float:
 	var c := float(design_rules.get("clearance_mm", 0.0))
 	return c if c > 0.0 else 0.0
+
+
+## The directions this board allows its traces to run in, canonical form:
+## degrees in [0, 180), ascending, no duplicates. EMPTY means unconstrained,
+## which is what an absent key means everywhere else in the stack (the worker's
+## compile step returns an empty tuple and gc12 reports itself not evaluated).
+##
+## Folding and de-duplication live in PcbTraceAngles so the panel reads the key
+## exactly as the worker does — a set the tool snapped to and the check then
+## flagged would be the one failure mode this shared reader exists to prevent.
+func design_rule_trace_angles() -> Array[float]:
+	return PcbTraceAngles.normalise(design_rules.get("allowed_trace_angles_deg", []))
+
+
+## Set ONE canonical numeric design rule (`trace_width_mm`, `clearance_mm`,
+## `via_diameter_mm`, `via_drill_mm`). Returns a refusal sentence, or "" on
+## success; a re-set of the value already stored is a silent no-op that journals
+## nothing, matching set_trace_width's current-value guard.
+##
+## MUTATOR CONTRACT (see docs/model-layering.md): validates, writes one
+## change-journal row, emits data_changed, and does NOT snapshot history — the
+## caller owns the undo step.
+##
+## Non-positive is REFUSED rather than stored as "no rule". Clearing a rule is a
+## different intent from setting one, and a setter that silently turned 0 into
+## absence would make "the board declares nothing" unreachable from the same
+## call that sets a real number — see clear_design_rule.
+func set_design_rule(key: String, value_mm: float) -> String:
+	if not key in DESIGN_RULE_KEYS:
+		return "Unknown design rule \"%s\". Known rules: %s." % [
+			key, ", ".join(DESIGN_RULE_KEYS)]
+	if not is_finite(value_mm) or value_mm <= 0.0:
+		return "%s must be a positive, finite number of millimetres." % key
+	var old_value := float(design_rules.get(key, 0.0))
+	if is_equal_approx(old_value, value_mm):
+		return ""
+	design_rules[key] = value_mm
+	record_change("set_design_rule", {
+		"rule": key, "old_value_mm": old_value, "value_mm": value_mm,
+	})
+	data_changed.emit()
+	return ""
+
+
+## Remove a canonical numeric design rule, returning the board to "declares
+## nothing" for it. Same mutator contract; false when the key was already absent.
+func clear_design_rule(key: String) -> bool:
+	if not key in DESIGN_RULE_KEYS or not design_rules.has(key):
+		return false
+	var old_value := float(design_rules.get(key, 0.0))
+	design_rules.erase(key)
+	record_change("set_design_rule", {
+		"rule": key, "old_value_mm": old_value, "value_mm": 0.0,
+	})
+	data_changed.emit()
+	return true
+
+
+## Set the allowed trace directions. `angles` is an authored list in degrees; an
+## EMPTY list removes the key entirely rather than storing `[]`, because the
+## worker refuses an empty list in YAML (an author who wrote one asked for a
+## constraint and got none) while an absent key is the honest spelling of "no
+## direction constraint".
+##
+## Returns a refusal sentence, or "" on success. Same mutator contract as
+## set_design_rule; a re-set of the set already stored journals nothing.
+func set_design_rule_trace_angles(angles) -> String:
+	var checked: Dictionary = PcbTraceAngles.validate(angles)
+	if not bool(checked.get("ok", false)):
+		return str(checked.get("error", "Invalid trace-angle set."))
+	var folded: Array[float] = checked["angles"]
+	var previous := design_rule_trace_angles()
+	if previous == folded:
+		return ""
+	if folded.is_empty():
+		design_rules.erase("allowed_trace_angles_deg")
+	else:
+		design_rules["allowed_trace_angles_deg"] = folded.duplicate()
+	record_change("set_trace_angles", {
+		"old_angles_deg": previous, "angles_deg": folded,
+		"old_mode": PcbTraceAngles.mode_for_angles(previous),
+		"mode": PcbTraceAngles.mode_for_angles(folded),
+	})
+	data_changed.emit()
+	return ""
 
 
 ## The width a newly authored trace gets, in mm.
@@ -2710,6 +2803,30 @@ func set_board_size(new_width: float, new_height: float) -> void:
 	})
 	structure_changed.emit()
 	data_changed.emit()
+
+
+## Set the board's drawing-grid pitch, in mm (`grid_mm` in the YAML). Returns a
+## refusal sentence, or "" on success; re-setting the pitch already stored is a
+## silent no-op.
+##
+## BOARD state, like the size above and unlike the snap TOGGLES, which are
+## per-user preferences: what the cursor lands on belongs to the board, how
+## eagerly it is pulled there belongs to the person drawing.
+##
+## Non-positive is refused. `snap_author_point` divides by this, and a board
+## declaring `grid_mm: 0` would otherwise leave the authoring snap unusable.
+func set_grid_size(new_pitch_mm: float) -> String:
+	if not is_finite(new_pitch_mm) or new_pitch_mm <= 0.0:
+		return "grid_mm must be a positive, finite number of millimetres."
+	if is_equal_approx(grid_size, new_pitch_mm):
+		return ""
+	var old_pitch := grid_size
+	grid_size = new_pitch_mm
+	record_change("set_grid_size", {
+		"old_grid_mm": old_pitch, "grid_mm": new_pitch_mm,
+	})
+	data_changed.emit()
+	return ""
 
 #endregion
 

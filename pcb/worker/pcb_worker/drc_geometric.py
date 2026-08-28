@@ -2437,6 +2437,23 @@ def _check_gc12_trace_direction(proj: Projection, rb: ResolvedBoard) -> list[dic
     ``required_mm`` here is the maximum allowed deviation, not a minimum. The
     angles in ``measured_angle_deg`` / ``nearest_allowed_angle_deg`` are the
     legible half and the reason the finding carries them.
+
+    THE FRAME THE ANGLES ARE IN. An allowed entry is a direction measured from
+    +X toward +Y in the BOARD's own millimetre frame, which is y-DOWN -- the
+    frame every ``x_mm``/``y_mm`` in the source uses. On screen the angle
+    therefore sweeps clockwise, and 45 names the down-and-right diagonal.
+
+    Both sides of the comparison below are taken in that one frame and folded
+    the same way: the allowed direction becomes ``u = (cos a, sin a)`` straight
+    off the stored degrees, and the segment's own heading is
+    ``atan2(dy, dx) mod 180`` off the raw deltas. NEITHER IS NEGATED, and the
+    check is self-consistent for an asymmetric set as much as for a symmetric
+    one -- a board declaring only 30 passes a run heading 30 and flags one
+    heading 150. Manhattan and octilinear happen to be closed under the y-flip,
+    so for them the frame is invisible; this paragraph is what tells a reader
+    which way an asymmetric set leans. The panel's Trace-tool snap folds
+    identically (``pcb/ui/model/pcb_trace_angles.gd``), on this same tolerance,
+    so a run the tool draws is a run this check passes.
     """
     allowed = rb.design_rules.allowed_trace_angles_deg
     if not allowed:

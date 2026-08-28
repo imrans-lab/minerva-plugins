@@ -61,6 +61,7 @@ func _init() -> void:
 	await _test_bus_refusal_is_held()
 	await _test_board_undo_redo()
 	await _test_selection_drag_threshold()
+	await _test_options_menu()
 
 	_finish()
 
@@ -1596,3 +1597,130 @@ func _test_selection_drag_threshold() -> void:
 			"history %d -> %d" % [history_before, data.history.size()])
 	panel.queue_free()
 	await process_frame
+
+
+## The Options menu — the control strip's second menu, and the surface that
+## carries the board's own drawing rules.
+##
+## ORACLE, throughout: the LIVE PopupMenu the panel built (item labels, ids and
+## check state read back off the control), the BOARD's design_rules dict, and
+## the shared read every surface uses — three independent representations.
+## Never the menu module's internal state, which is the thing under test.
+func _test_options_menu() -> void:
+	print("\n-- Options menu: the board's drawing rules, next to View --")
+	var options_script = load("res://../../minerva-plugins/pcb/ui/pcb_options_menu.gd")
+	var angles_script = load("res://../../minerva-plugins/pcb/ui/model/pcb_trace_angles.gd")
+	var panel: Variant = await _mount_panel_in_tree()
+
+	# A NEW board declares Octilinear. Read off the panel's own default-board
+	# constant, because that is what a fresh anonymous editor is handed.
+	var default_rules: Dictionary = (load(PANEL_PATH)._DEFAULT_BOARD as Dictionary).get("design_rules", {})
+	check("a brand-new board declares Octilinear as a real board rule",
+			angles_script.mode_for_angles(default_rules.get("allowed_trace_angles_deg", []))
+				== angles_script.MODE_OCTILINEAR,
+			str(default_rules))
+
+	# The control exists, is a sibling of View in the same toolbar, and survives
+	# every layout mode — the same "unconditional at every width" rule View has.
+	var view_button: Variant = panel._view_menu_button
+	var options_button: Variant = panel._options_menu_button
+	check("the Options menu is in the toolbar beside View",
+			options_button != null and view_button != null
+				and options_button.get_parent() == view_button.get_parent(),
+			str(options_button))
+	var layout = load("res://../../minerva-plugins/pcb/ui/panel_layout.gd")
+	for mode in [layout.MODE_WIDE, layout.MODE_MEDIUM, layout.MODE_NARROW]:
+		panel._apply_layout_mode(mode, true)
+		await process_frame
+		check("Options stays visible at %s, like View" % mode,
+				options_button.visible and view_button.visible)
+		# …and reported as DATA, so an agent can verify the control without a
+		# screenshot — the same obligation view_menu_visible carries.
+		check("…and get_layout_state reports it at %s" % mode,
+				bool(panel.get_layout_state().get("options_menu_visible", false)))
+	panel._apply_layout_mode(layout.MODE_WIDE, true)
+	await process_frame
+
+	# The popup is built from LIVE state on open, so the mode rows have to move
+	# when the board's rule does.
+	var data: Variant = panel.get_data()
+	data.set_design_rule_trace_angles(angles_script.MANHATTAN_ANGLES)
+	var popup: PopupMenu = options_button.get_popup()
+	popup.about_to_popup.emit()
+	await process_frame
+	check("the popup carries one radio row per offered mode",
+			_options_row(popup, "Manhattan") >= 0 and _options_row(popup, "Octilinear") >= 0
+				and _options_row(popup, "Free") >= 0,
+			_options_labels(popup))
+	check("…and the row checked is the one the BOARD declares",
+			popup.is_item_checked(_options_row(popup, "Manhattan"))
+				and not popup.is_item_checked(_options_row(popup, "Octilinear")),
+			_options_labels(popup))
+	check("it also carries the four numeric design rules and the grid pitch",
+			_options_row(popup, "Trace width") >= 0 and _options_row(popup, "Via diameter") >= 0
+				and _options_row(popup, "Via drill") >= 0 and _options_row(popup, "Clearance") >= 0
+				and _options_row(popup, "Grid pitch") >= 0,
+			_options_labels(popup))
+	check("…each row showing the board's CURRENT value, so nothing is edited blind",
+			popup.get_item_text(_options_row(popup, "Grid pitch")).contains("%.2f mm" % float(data.grid_size)),
+			_options_labels(popup))
+	check("and the three snap toggles, checked from the preference store",
+			_options_row(popup, "Snap to grid") >= 0
+				and _options_row(popup, "Snap to pads") >= 0
+				and _options_row(popup, "Snap to allowed angles") >= 0,
+			_options_labels(popup))
+
+	# CLICKING A MODE ROW WRITES THE BOARD — the menu has no path of its own.
+	var octilinear_id: int = popup.get_item_id(_options_row(popup, "Octilinear"))
+	popup.id_pressed.emit(octilinear_id)
+	await process_frame
+	check("choosing a mode from the menu writes design_rules.allowed_trace_angles_deg",
+			data.design_rule_trace_angles() == ([0.0, 45.0, 90.0, 135.0] as Array[float]),
+			str(data.design_rules))
+	check("…and the MCP read of the mode equals the menu's state",
+			str(options_script.read_state(data, panel.get_preferences())
+				.get("trace_angle_mode", "")) == angles_script.MODE_OCTILINEAR)
+
+	# …and a write through the VERB moves the menu, which is the same claim
+	# from the other side: one state, two surfaces.
+	# Through PCBPanel.handle_tool — the entry point PluginToolRegistry calls in
+	# production, not a shortcut into the handler.
+	await panel.handle_tool("minerva_pcb_board_rules",
+		{"editor_name": "probe", "trace_angle_mode": "manhattan"})
+	popup.about_to_popup.emit()
+	await process_frame
+	check("an MCP write moves the menu's checkmark on the next open",
+			popup.is_item_checked(_options_row(popup, "Manhattan"))
+				and not popup.is_item_checked(_options_row(popup, "Octilinear")),
+			_options_labels(popup))
+
+	# A snap toggle is a PREFERENCE, not board state: it flips the store and
+	# leaves design_rules alone.
+	var prefs: Variant = panel.get_preferences()
+	var before: bool = prefs.get_bool("snap_angle", true)
+	var rules_before: String = str(data.design_rules)
+	popup.id_pressed.emit(popup.get_item_id(_options_row(popup, "Snap to allowed angles")))
+	await process_frame
+	check("toggling a snap flips the PREFERENCE and touches no board state",
+			prefs.get_bool("snap_angle", true) != before
+				and str(data.design_rules) == rules_before,
+			"snap_angle=%s" % str(prefs.get_bool("snap_angle", true)))
+	prefs.set_value("snap_angle", before)   # leave the store as we found it
+
+	panel.queue_free()
+	await process_frame
+
+
+## The popup index of the first row whose label starts with `prefix`, or -1.
+func _options_row(popup: PopupMenu, prefix: String) -> int:
+	for i in popup.item_count:
+		if popup.get_item_text(i).begins_with(prefix):
+			return i
+	return -1
+
+
+func _options_labels(popup: PopupMenu) -> String:
+	var out: PackedStringArray = PackedStringArray()
+	for i in popup.item_count:
+		out.append("%d:%s" % [popup.get_item_id(i), popup.get_item_text(i)])
+	return ", ".join(out)
