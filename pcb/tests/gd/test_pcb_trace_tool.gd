@@ -1183,6 +1183,25 @@ func _committed_heading(data) -> float:
 		Vector2(float(b.get("x_mm", 0.0)), float(b.get("y_mm", 0.0))))
 
 
+## The heading of the committed run that STARTS at `from`, folded the same way
+## _committed_heading folds. Selected by its start point rather than by position
+## in the list, so two runs drawn on ONE canvas can each be measured whatever
+## order the serializer emits them in. -1.0 when no run starts there.
+func _heading_of_run_from(data, from: Vector2) -> float:
+	for t in _serialized_traces(data):
+		var points: Array = (t as Dictionary).get("points", [])
+		if points.size() < 2:
+			continue
+		var a: Dictionary = points[0]
+		var start := Vector2(float(a.get("x_mm", 0.0)), float(a.get("y_mm", 0.0)))
+		if start.distance_to(from) > 1.0e-3:
+			continue
+		var b: Dictionary = points[points.size() - 1]
+		return PcbTraceAngles.heading_deg(start,
+			Vector2(float(b.get("x_mm", 0.0)), float(b.get("y_mm", 0.0))))
+	return -1.0
+
+
 ## The last point of the single committed trace, in board mm.
 func _committed_end(data) -> Vector2:
 	var traces := _serialized_traces(data)
@@ -1318,6 +1337,18 @@ func _test_angle_snap() -> void:
 			shift_canvas._trace_allowed_angles().is_empty()
 				and shift_rig[1].design_rule_trace_angles() == ([0.0, 90.0] as Array[float]),
 			str(shift_canvas._trace_allowed_angles()))
+
+	# THE COPPER, not the predicate. `_trace_allowed_angles()` is what the tool
+	# CONSULTS; the run the human gets is what the tool WRITES. Finish the run
+	# through the same click path (a) to (c) use and measure the serialized
+	# heading, so a Shift that dropped the constraint everywhere except in
+	# _trace_candidate_point would fail here.
+	shift_canvas._handle_trace_click(away, false)
+	shift_canvas._commit_trace()
+	check("(13e) …and the run it commits under Shift really is the free 37 degrees",
+			is_equal_approx(_heading_of_run_from(shift_rig[1], Vector2(10.0, 10.0)), 37.0),
+			"heading=%f" % _heading_of_run_from(shift_rig[1], Vector2(10.0, 10.0)))
+
 	var shift_up := InputEventKey.new()
 	shift_up.keycode = KEY_SHIFT
 	shift_up.physical_keycode = KEY_SHIFT
@@ -1327,6 +1358,17 @@ func _test_angle_snap() -> void:
 	check("(13e) …and releasing it puts the constraint straight back",
 			shift_canvas._trace_allowed_angles() == ([0.0, 90.0] as Array[float]),
 			str(shift_canvas._trace_allowed_angles()))
+
+	# ONE SEGMENT, not a mode: the NEXT run on the same canvas snaps again. The
+	# same 37-degree direction, drawn from C1.1 so the two runs are told apart
+	# by where they start rather than by their order in the serializer.
+	var c1 := Vector2(30.0, 25.0)
+	shift_canvas._handle_trace_click(c1, false)
+	shift_canvas._handle_trace_click(c1 + (away - Vector2(10.0, 10.0)), false)
+	shift_canvas._commit_trace()
+	check("(13e) …so the very next run snaps to the axis again (37 is nearer 0)",
+			is_equal_approx(_heading_of_run_from(shift_rig[1], c1), 0.0),
+			"heading=%f" % _heading_of_run_from(shift_rig[1], c1))
 	shift_canvas.free()
 
 	# (f) GRID LAST, AND ALONG THE RUN. Quantising x and y independently would

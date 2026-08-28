@@ -327,9 +327,8 @@ def _resolve_component(
     # owns the same glyph table (pcb/ui/model/pcb_board_font_data.gd mirrors
     # board_font) and knows the ref, so the only fact it cannot derive is
     # WHERE the footprint wants its designator printed. Sending glyphs instead
-    # would send a picture of one particular ref, and a picture goes stale the
-    # moment the component is renamed or copied — which is exactly how a part
-    # came to draw its neighbour's designator.
+    # would send a picture of one particular ref, and that picture goes stale the
+    # moment the component is renamed or copied from.
     comp["refdes_anchor"] = _refdes_anchor(parsed)
 
 

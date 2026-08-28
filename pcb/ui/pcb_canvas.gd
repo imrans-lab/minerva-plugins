@@ -2301,12 +2301,11 @@ func _draw_copper() -> void:
 				traces_by_layer[lid] = []
 			traces_by_layer[lid].append(trace)
 
-	# Bucket lands the same way. SMD copper belongs to the side the part is
-	# mounted on, so it is keyed by mount layer; a through-hole land exists on
-	# every copper layer, so those parts collect in one list drawn above the
-	# whole stack. The branch structure mirrors what _draw_component used to do
-	# inline — same gates, same fallback-pin rule — so which lands appear is
-	# unchanged and only WHEN they are painted moved.
+	# Bucket lands the same way. SURFACE copper is keyed by the layer the LAND
+	# sits on (_bucket_smd_lands, one entry per land); a through-hole land exists
+	# on every copper layer, so those parts collect in one list drawn above the
+	# whole stack. show_pads / show_pins / the per-component visibility decide
+	# WHICH lands enter a bucket, so a land the eyes hide never reaches a pass.
 	var smd_by_layer := {}
 	var tht_comps: Array = []
 	var fallback_comps: Array = []
@@ -2321,14 +2320,7 @@ func _draw_copper() -> void:
 			# LANDS visibility means the part is mounted elsewhere: its
 			# through-hole rings still pierce this view, its SMD copper does not.
 			if visibility == CompVisibility.FULL:
-				# Canonical for the same reason the trace bucket above is: the
-				# stack ids this is matched against are canonical, so a part
-				# whose layer reads "B.Cu"/"back" would otherwise paint its
-				# lands in the above-stack pass rather than on the bottom.
-				var mount := _canonical_layer(str(comp.layer))
-				if not smd_by_layer.has(mount):
-					smd_by_layer[mount] = []
-				smd_by_layer[mount].append(comp)
+				_bucket_smd_lands(comp, smd_by_layer)
 		elif show_pins and visibility == CompVisibility.FULL:
 			fallback_comps.append(comp)
 
@@ -2343,8 +2335,8 @@ func _draw_copper() -> void:
 					for trace in traces_by_layer.get(layer_id, []):
 						_draw_single_trace(trace, layer_id)
 			PcbCopperDrawOrder.SMD_LANDS:
-				for comp in smd_by_layer.get(layer_id, []):
-					_draw_component_pads(comp, PadSet.SMD, PadPhase.LANDS)
+				for land in smd_by_layer.get(layer_id, []):
+					_draw_pad(land["comp"], land["pad"], PadPhase.LANDS)
 			PcbCopperDrawOrder.THT_LANDS:
 				for comp in tht_comps:
 					_draw_component_pads(comp, PadSet.THT, PadPhase.LANDS)
@@ -2363,6 +2355,39 @@ func _draw_copper() -> void:
 				if show_traces:
 					_draw_via_drills()
 				_draw_mounting_hole_drills()
+
+
+## Bucket one component's SURFACE lands into `smd_by_layer`, keyed by the
+## canonical id of the copper layer each land actually occupies — the same keys
+## _stack_layers() returns, so a land paints in its layer's stack position.
+##
+## The layer is the LAND's, not the part's: `pads[].layers` is footprint-local
+## and comp.placed_pad_layers applies the mount-side flip, so a footprint naming
+## B.Cu on a top-mounted part paints in the bottom pass rather than following its
+## component onto the top. A land naming no copper layer of its own — no
+## `layers` key, only non-copper tokens, or the "*.Cu" wildcard, which names no
+## single layer — falls back to the part's mount layer.
+##
+## Through-hole lands are skipped: they pierce every copper layer and are painted
+## once, above the whole stack, by the THT pass.
+func _bucket_smd_lands(comp, smd_by_layer: Dictionary) -> void:
+	var mount := _canonical_layer(str(comp.layer))
+	for pad in comp.pads:
+		if str(pad.get("type", "smd")) in THT_PAD_TYPES:
+			continue
+		var layer_ids: Array = []
+		for raw_layer in comp.placed_pad_layers(pad):
+			if not PcbLayerStack.is_copper(raw_layer):
+				continue
+			var canon := PcbLayerStack.kicad_to_canon(raw_layer)
+			if not layer_ids.has(canon):
+				layer_ids.append(canon)
+		if layer_ids.is_empty():
+			layer_ids = [mount]
+		for lid in layer_ids:
+			if not smd_by_layer.has(lid):
+				smd_by_layer[lid] = []
+			smd_by_layer[lid].append({"comp": comp, "pad": pad})
 
 
 ## Via copper — the barrel's ring plus its selection halo. Above every trace,
@@ -3360,8 +3385,8 @@ func _draw_component(comp) -> void:
 	# LANDS AND PINS ARE NOT DRAWN HERE. They are copper, so they paint in the
 	# copper pass (_draw_copper) above the traces that reach them — a trace
 	# painted over a land would appear to cross its open drill hole. The gates
-	# that decide WHICH lands appear (show_pads / show_pins / visibility) moved
-	# there with them, unchanged.
+	# that decide WHICH lands appear (show_pads / show_pins / visibility) live
+	# there too, beside the lands they gate.
 
 	if body_visible and show_unresolved_badges and _component_unresolved(comp):
 		# _component_screen_poly is the same transform the body used above (and
@@ -3514,9 +3539,10 @@ func pad_draw_geometry(comp, pad: Dictionary) -> Dictionary:
 	return comp.get_pad_world_transform(pad)
 
 
-## Which pads of a component one call draws. An SMD pad is copper on ONE side,
-## so it only ever appears on its mount layer's pass; a through-hole barrel
-## pierces every layer, so its land is painted once above the whole stack.
+## Which pads of a component one call draws. A SURFACE pad is copper on one
+## layer, so it appears only in that layer's pass (which layer is the LAND's
+## own question — see _bucket_smd_lands); a through-hole barrel pierces every
+## layer, so its land is painted once above the whole stack.
 enum PadSet { SMD, THT }
 
 ## Which HALF of a land one call draws: its copper, or the hole drilled through
@@ -3530,57 +3556,63 @@ enum PadPhase { LANDS, DRILLS }
 ## PadSet.SMD with PadPhase.DRILLS draws nothing — surface copper has no hole.
 func _draw_component_pads(comp, pad_set: PadSet, phase: PadPhase) -> void:
 	for pad in comp.pads:
-		var pad_type: String = pad.get("type", "smd")
-		var pad_shape: String = pad.get("shape", "rect")
-		var pad_size: Vector2 = pad.get("size", Vector2(1, 1))
-
-		var is_tht := pad_type in THT_PAD_TYPES
+		var is_tht: bool = str(pad.get("type", "smd")) in THT_PAD_TYPES
 		if is_tht != (pad_set == PadSet.THT):
 			continue
+		_draw_pad(comp, pad, phase)
 
-		# ONE land-to-world transform, shared with the copper hit test. Drawing
-		# every land at -comp.rotation while ignoring the land's OWN rotation
-		# splits the render from pin_copper_distance, which honours it: for a
-		# turned land the copper you can see is then not the copper you can
-		# click, and pads are clickable.
-		var world: Dictionary = pad_draw_geometry(comp, pad)
-		var screen_pos := world_to_screen(world["position"] as Vector2)
-		var screen_size := (world["size"] as Vector2) * zoom
-		var pad_rot: float = -float(world["rotation"])
 
-		if phase == PadPhase.LANDS:
-			var draw_color := pad_copper_color
-			if pad_type == "smd":
-				draw_color = pad_smd_color
-			elif pad_type == "np_thru_hole":
-				draw_color = mounting_hole_color
+## Draw ONE land, in one phase. The per-land entry point _draw_copper's surface
+## pass uses, since that pass is bucketed land-by-land rather than part-by-part
+## (_bucket_smd_lands); _draw_component_pads is the whole-part loop over it.
+func _draw_pad(comp, pad: Dictionary, phase: PadPhase) -> void:
+	var pad_type: String = pad.get("type", "smd")
+	var pad_shape: String = pad.get("shape", "rect")
+	var pad_size: Vector2 = pad.get("size", Vector2(1, 1))
 
-			match pad_shape:
-				"rect":
-					_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
-				"circle":
-					_draw_circle_pad(screen_pos, screen_size, draw_color)
-				"oval":
-					_draw_oval_pad(screen_pos, screen_size, pad_rot, draw_color)
-				"roundrect":
-					_draw_roundrect_pad(screen_pos, screen_size, pad_rot, draw_color)
-				_:
-					_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
-		else:
-			var drill_val = pad.get("drill", Vector2.ZERO)
-			var drill_diameter: float = 0.0
-			if drill_val is Vector2:
-				drill_diameter = maxf(drill_val.x, drill_val.y)
-			elif drill_val is float or drill_val is int:
-				drill_diameter = float(drill_val)
+	# ONE land-to-world transform, shared with the copper hit test. Drawing
+	# every land at -comp.rotation while ignoring the land's OWN rotation
+	# splits the render from pin_copper_distance, which honours it: for a
+	# turned land the copper you can see is then not the copper you can
+	# click, and pads are clickable.
+	var world: Dictionary = pad_draw_geometry(comp, pad)
+	var screen_pos := world_to_screen(world["position"] as Vector2)
+	var screen_size := (world["size"] as Vector2) * zoom
+	var pad_rot: float = -float(world["rotation"])
 
-			if drill_diameter <= 0.0:
-				drill_diameter = minf(pad_size.x, pad_size.y)
+	if phase == PadPhase.LANDS:
+		var draw_color := pad_copper_color
+		if pad_type == "smd":
+			draw_color = pad_smd_color
+		elif pad_type == "np_thru_hole":
+			draw_color = mounting_hole_color
 
-			if drill_diameter > 0.0:
-				var drill_radius := (drill_diameter * zoom) / 2.0
-				draw_circle(screen_pos, maxf(drill_radius, 1.0), drill_hole_color)
-				draw_arc(screen_pos, maxf(drill_radius, 1.0), 0, TAU, 16, Color(0.4, 0.4, 0.4, 0.6), 1.0)
+		match pad_shape:
+			"rect":
+				_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
+			"circle":
+				_draw_circle_pad(screen_pos, screen_size, draw_color)
+			"oval":
+				_draw_oval_pad(screen_pos, screen_size, pad_rot, draw_color)
+			"roundrect":
+				_draw_roundrect_pad(screen_pos, screen_size, pad_rot, draw_color)
+			_:
+				_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
+	else:
+		var drill_val = pad.get("drill", Vector2.ZERO)
+		var drill_diameter: float = 0.0
+		if drill_val is Vector2:
+			drill_diameter = maxf(drill_val.x, drill_val.y)
+		elif drill_val is float or drill_val is int:
+			drill_diameter = float(drill_val)
+
+		if drill_diameter <= 0.0:
+			drill_diameter = minf(pad_size.x, pad_size.y)
+
+		if drill_diameter > 0.0:
+			var drill_radius := (drill_diameter * zoom) / 2.0
+			draw_circle(screen_pos, maxf(drill_radius, 1.0), drill_hole_color)
+			draw_arc(screen_pos, maxf(drill_radius, 1.0), 0, TAU, 16, Color(0.4, 0.4, 0.4, 0.6), 1.0)
 
 
 ## Draw one `comp.graphics` layer (component body outline, markings, courtyard,
@@ -4021,8 +4053,8 @@ func _gui_input(event: InputEvent) -> void:
 
 	# THE FAB PREVIEW OWNS THE SURFACE while it is up, exactly as it owns the
 	# draw. None of the entities the grammar below acts on are on screen, so
-	# only the view gestures survive — see PcbFabPreview.handle_input for why
-	# letting an edit through here destroyed the preview it was aimed at.
+	# only the view gestures survive — see PcbFabPreview.handle_input for why an
+	# edit reaching the board from here would end the preview it was aimed at.
 	if show_fab_preview:
 		PcbFabPreview.handle_input(self, event)
 		return

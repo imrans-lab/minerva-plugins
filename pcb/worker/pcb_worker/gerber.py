@@ -221,12 +221,12 @@ def _list(v: Any) -> list:
     return v if isinstance(v, list) else []
 
 
-# _is_top / _rotate / _transform_point moved to geometry.py (single source of the
-# component-placement transform); _is_top is imported above as a back-compat alias
-# so existing internal callers and drc's historical ``from .gerber import ...``
-# keep resolving. There is no `_rotate` alias any more: a pad's offset rides the
-# whole PlacementTransform (mirror included), which a bare rotation cannot
-# express.
+# _is_top / _rotate / _transform_point live in geometry.py (single source of the
+# component-placement transform); _is_top is imported above under this module's
+# name as well, so callers that reach it through ``from .gerber import ...`` —
+# drc among them — keep resolving. `_rotate` has no such alias: a pad's offset
+# rides the whole PlacementTransform (mirror included), which a bare rotation
+# cannot express.
 
 
 # Silk width policy and the 3-point-arc circumcentre now live in silk_source

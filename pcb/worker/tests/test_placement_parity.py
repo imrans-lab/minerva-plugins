@@ -54,20 +54,60 @@ _BOARD_KEYS = ("version", "name", "width_mm", "height_mm", "layers",
 _TOL_MM = 1e-9
 
 
+# THE BOARDS THIS PARITY IS MEASURED ON, named rather than globbed.
+#
+# A glob over testdata makes coverage a property of whichever files happen to
+# sit there: a fixture added for an unrelated reason silently joins the
+# comparison, and the one board that carries the mirror could be deleted without
+# a single assertion changing. What is under test is a placement COMPOSITION, so
+# a board whose parts are all front-side at rotation 0 composes an identity and
+# can prove nothing — each entry below states which half of the rule it carries.
+#
+# Deliberately excluded, and why: footprints/resolve_corners.yaml,
+# gerber_boards/drilltest.yaml and gerber_boards/quadlayer.yaml are all
+# front-side at rotation 0.
+_PARITY_BOARDS: tuple[tuple[str, str], ...] = (
+    # The purpose-built fixture. U2 is bottom-side AND rotated 90, so a missing
+    # mirror and a missing rotation are separable faults; SW10 is bottom-side
+    # SMD with off-origin lands, so the mirror MOVES copper instead of
+    # cancelling and each land states a side the two surfaces derive
+    # independently; J1/SW9 cover top-side 90 and U3 top-side 180.
+    ("parity_corners.yaml",
+     "bottom-side THT rotated 90 (U2), bottom-side SMD off-origin (SW10), "
+     "top-side 90 and 180"),
+    # A promoted coupon, not a fixture: REV1 is bottom-side and rotated 180 —
+    # the composition on a board that really went to fab.
+    ("coupon_jlc1.yaml", "bottom-side rotated 180 (REV1), on real board source"),
+    # The only OFF-AXIS rotation in the corpus. Every multiple of 90 hides a
+    # sign error under a rectangle's own symmetry; D1 at 45 on the back does
+    # not, and R2 at 90 gives the same board a front-side rotation to compare.
+    ("assembly_boards/assembly_fixture.yaml",
+     "bottom-side at 45 (D1) — off-axis, plus top-side 90 (R2)"),
+    # The largest board here (48 components) and the closest to a real design:
+    # a bottom-side pair (BS23A/BS23B) and a mirrored rotation pair (R8A at 90,
+    # R8B at 270), which is where a one-sided sign error shows as asymmetry.
+    ("hitl_bench.yaml",
+     "bottom-side pair (BS23A/BS23B) and mirrored rotations (R8A/R8B)"),
+    # Rotation with NO mirror, so the rotation half is pinned on a board where
+    # the flip cannot be covering for it.
+    ("zone_fill.yaml", "top-side rotated 90 (R2), no bottom-side part"),
+)
+
+
 def _corpus() -> list[tuple[str, dict]]:
-    """Every corpus board that declares components, resolved the way the
-    fabrication path resolves one (tolerantly — a component the library cannot
-    explain keeps its inline pins, which is a placement case in its own right).
+    """The named boards above, resolved the way the fabrication path resolves
+    one (tolerantly — a component the library cannot explain keeps its inline
+    pins, which is a placement case in its own right).
     """
     out: list[tuple[str, dict]] = []
-    for path in sorted([*TESTDATA.glob("*.yaml"), *TESTDATA.glob("*/*.yaml")]):
+    for rel, why in _PARITY_BOARDS:
+        path = TESTDATA / rel
+        assert path.is_file(), f"named parity board is missing: {path} ({why})"
         board = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(board, dict):
-            continue
-        if not isinstance(board.get("components"), list) or not board["components"]:
-            continue
+        assert isinstance(board, dict) and isinstance(board.get("components"), list) \
+            and board["components"], \
+            f"{rel} declares no components, so it exercises no placement ({why})"
         out.append((path.name, resolve_board_best_effort(board)))
-    assert out, f"no component-bearing boards under {TESTDATA}"
     return out
 
 

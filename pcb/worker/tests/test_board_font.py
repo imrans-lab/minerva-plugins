@@ -207,3 +207,34 @@ def test_gdscript_mirror_carries_the_layout_constants():
         assert match, f"the GD mirror declares no {name}"
         assert float(match.group(1)) == pytest.approx(float(value)), \
             f"{name} differs from the Python table"
+
+
+# The designator "J1" at the default reference anchor, in footprint-LOCAL mm:
+# render at cap height 1.0, centred on the anchor's x, with the baseline placed
+# at REFDES_DEFAULT_Y_MM. Pinned as literal numbers on BOTH sides of the
+# boundary — pcb/tests/gd/test_part_geometry_contracts.gd asserts the panel's
+# render against this same list — so the two fonts are held to one vector
+# rather than each to its own table. The glyph-for-glyph mirror check above
+# proves the TABLES agree; this proves the LAYOUT (advance, gap, baseline,
+# centring) that turns a table into artwork agrees as well.
+REFDES_DEFAULT_Y_MM = -1.5
+
+J1_DEFAULT_STROKES = [
+    [(-0.25, -2.5), (-0.25, -1.6666666667), (-0.4166666667, -1.5),
+     (-0.5833333333, -1.5), (-0.75, -1.6666666667)],
+    [(0.25, -2.3333333333), (0.4166666667, -2.5), (0.4166666667, -1.5)],
+    [(0.0833333333, -1.5), (0.75, -1.5)],
+]
+
+
+def test_a_designator_renders_the_pinned_stroke_vector():
+    """``J1`` at the default anchor draws exactly the pinned polylines."""
+    rendered = board_font.render("J1", size=1.0, h_align="center")
+    placed = [[(x, y + REFDES_DEFAULT_Y_MM) for x, y in stroke]
+              for stroke in rendered.polylines]
+    assert len(placed) == len(J1_DEFAULT_STROKES), placed
+    for got, want in zip(placed, J1_DEFAULT_STROKES):
+        assert len(got) == len(want), (got, want)
+        for (gx, gy), (wx, wy) in zip(got, want):
+            assert gx == pytest.approx(wx, abs=1e-6)
+            assert gy == pytest.approx(wy, abs=1e-6)

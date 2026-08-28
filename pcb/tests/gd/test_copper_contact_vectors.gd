@@ -38,6 +38,7 @@ func _init() -> void:
 	_run_symmetry(names)
 	_run_unknown_land()
 	_run_unknown_via()
+	_run_land_rotation_is_placed()
 	_run_loaded_inline_lands()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -123,6 +124,55 @@ func _pad_node(spec: Dictionary) -> Dictionary:
 	# The vectors compare LAND geometry (see spec/contact/README.md).
 	return Contact.physical_pad_node(comp, land, _stack(),
 		comp.get_pin_world_position("1"), false)
+
+
+## THE LAND'S OWN ANGLE IS PLACED, not merely stored.
+##
+## A vector states a land's rotation and its component's placement separately,
+## and a build that dropped either composition still answers most cases the same
+## way — a square land, or one whose two angles cancel, touches the same copper
+## either way. These two are the pair that cannot: ONE oblong land turned 90
+## inside its footprint, read once on an unrotated part and once on a part turned
+## 90 itself. The board-frame extents must SWAP. A build that ignores the land's
+## own turn, or that fails to compose it with the part's, leaves them equal.
+func _run_land_rotation_is_placed() -> void:
+	var spec := {
+		"at": [1.0, 0.0], "size": [2.0, 0.5], "shape": "rect",
+		"rotation_deg": 90.0, "layers": ["F.Cu"],
+	}
+	var upright_spec := spec.duplicate(true)
+	upright_spec["component"] = {"at": [10.0, 20.0], "rotation_deg": 0.0, "layer": "top"}
+	var turned_spec := spec.duplicate(true)
+	turned_spec["component"] = {"at": [10.0, 20.0], "rotation_deg": 90.0, "layer": "top"}
+
+	var a := _land_extent(_pad_node(upright_spec))
+	var b := _land_extent(_pad_node(turned_spec))
+	check("a land turned 90 inside its footprint stands UP on an unrotated part (got %0.2f x %0.2f)"
+			% [a.x, a.y],
+		is_equal_approx(a.x, 0.5) and is_equal_approx(a.y, 2.0))
+	check("...and lies FLAT once the part is turned 90 too — the two angles compose (got %0.2f x %0.2f)"
+			% [b.x, b.y],
+		is_equal_approx(b.x, 2.0) and is_equal_approx(b.y, 0.5))
+
+	# The land's OFFSET rides the same transform as its angle, so the turned
+	# part carries its land round with it: footprint-local (1, 0) at rotation 90
+	# is one millimetre off the anchor along y.
+	var turned := _pad_node(turned_spec)
+	check("...and the land's centre is placed by that same transform (got %s)"
+			% str(turned["at"]),
+		(turned["at"] as Vector2).is_equal_approx(Vector2(10.0, 19.0)))
+
+
+## The board-frame width and height of a rect land's quad — the shape's own
+## extent, read off the built node rather than re-derived from the spec.
+func _land_extent(node: Dictionary) -> Vector2:
+	var quad: PackedVector2Array = (node["polys"] as Array)[0]
+	var lo: Vector2 = quad[0]
+	var hi: Vector2 = quad[0]
+	for p in quad:
+		lo = Vector2(minf(lo.x, p.x), minf(lo.y, p.y))
+		hi = Vector2(maxf(hi.x, p.x), maxf(hi.y, p.y))
+	return hi - lo
 
 
 ## The vector's pour region as the conductor node the fill builds: one ring, on

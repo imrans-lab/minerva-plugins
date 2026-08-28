@@ -63,10 +63,9 @@ const UNDER_ALPHA := 0.55
 ## Layers that stay at full alpha in the composite: what a human reads a board
 ## BY. Everything else recedes under them.
 ##
-## THE DRILLS ARE IN THIS GROUP, and they were the omission that made the
-## composite unusable: a hole is not an annotation on the copper, it is a
-## feature of the finished board, and at UNDER_ALPHA over a copper bed of
-## similar hue a 0.8 mm hole is a smudge. The outline is here for the same
+## THE DRILLS ARE IN THIS GROUP: a hole is not an annotation on the copper, it
+## is a feature of the finished board, and at UNDER_ALPHA over a copper bed of
+## similar hue a 0.8 mm hole reads as a smudge. The outline is here for the same
 ## reason — those two plus the silk are what a human checks a board BY.
 const TOP_KEYS: Array[String] = ["f_silks", "b_silks", "edge_cuts", "pth", "npth"]
 
@@ -382,15 +381,14 @@ static func banner_lines(rows: Array, unrendered: Array, note: String,
 ## THE UNRENDERED FILES THAT ARE ACTUALLY MISSING FROM THE PICTURE.
 ##
 ## Every emission includes a .gbrjob manifest, which is JSON metadata and has
-## nothing to draw. Counting it as a layer the preview failed to show raised the
-## incomplete banner on EVERY board, and an alarm that is always on is an alarm
-## nobody reads — which is precisely how a genuinely missing copper layer would
-## get through the gate this view exists to be.
+## nothing to draw. Counting it as a layer the preview failed to show would raise
+## the incomplete banner on EVERY board, and an alarm that is always on is an
+## alarm nobody reads — which is how a genuinely missing copper layer would get
+## through the gate this view exists to be.
 ##
 ## The worker labels each skip (`kind`: "job" or "artwork"). The filename is
-## consulted as well, not instead: a preview served by an older worker that
-## labels nothing would otherwise go back to alarming on every board, and the
-## suffix is the same fact the worker classified on.
+## consulted as well, not instead: a preview served by an older worker labels
+## nothing, and the suffix is the same fact the worker classified on.
 static func missing_artwork(unrendered: Array) -> Array:
 	var out: Array = []
 	for u in unrendered:
@@ -636,11 +634,10 @@ static func composite(ink: Color, alpha: float, ground: Color) -> Color:
 ## THAT DROP IS ALSO WHAT KEEPS THE PREVIEW ALIVE. A board edit invalidates a
 ## live preview and takes the View flag down with it, deliberately — artwork
 ## that no longer describes the board must not be shown under a promise that it
-## does. But the canvas used to accept edit drags underneath the preview, so a
-## human dragging to look closer moved whichever component was under the cursor
-## and destroyed the view they were trying to read: the preview blanked, the
-## flag came down, and the layer picker then refused every layer it had just
-## advertised.
+## does. So an edit gesture reaching the board from under the preview would end
+## the preview: the drag a human makes to look closer would move whatever
+## component sits under the cursor, blank the view, drop the flag, and leave the
+## layer picker refusing every layer it had just advertised.
 
 
 ## Route one canvas input event while the preview is up. Returns true when the

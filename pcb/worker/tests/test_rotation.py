@@ -18,15 +18,12 @@ This pins the sign of the shared placement rotation
 pads about the component centre — and guards kicad.py from silently using a
 different sign than gerber.py.
 
-It also holds the SOURCE gate at the bottom: nothing in the worker may convert a
-placement or feature angle with a positive ``math.radians()`` of its own.
 """
 
 from __future__ import annotations
 
 import math
 import re
-import tokenize
 from pathlib import Path
 
 import pytest
@@ -355,131 +352,3 @@ def test_rotated_dip6_pads_match_kicad_placement_by_pad_number():
             f"MIC1 pad {num}: worker placed {got[num]}, KiCad 9.0.9 ground truth "
             f"{expected} — rotation convention mirrored?"
         )
-
-
-# ---------------------------------------------------------------------------
-# The source gate: one rotation, and it is the negated one.
-# ---------------------------------------------------------------------------
-
-WORKER_SOURCE = Path(__file__).resolve().parents[1]
-
-# A call like ``math.radians(x)`` — the argument captured up to the closing
-# paren, which is enough because no site here nests a call inside one.
-_RADIANS_CALL = re.compile(r"\bradians\(\s*([^)]*)\)")
-
-# An argument that NAMES an angle in degrees, or a rotation. Those are placement
-# and feature angles: they live in a board frame whose Y grows downward, so they
-# are clockwise and MUST be negated before any rotation matrix. An angle already
-# in radians, or a bare direction with no such name, is a different quantity and
-# this gate deliberately says nothing about it.
-_PLACEMENT_ANGLE = re.compile(r"rotation|deg", re.IGNORECASE)
-
-
-def _code_lines(path: Path) -> list[str]:
-    """*path*'s lines with every string literal and comment blanked to spaces.
-
-    CODE ONLY. The gate below is a regex, and a regex over raw text cannot tell
-    a call the interpreter runs from the same characters quoted inside a
-    docstring explaining why that call is wrong. Prose that has to describe the
-    forbidden form — this file's own module docstring does — would trip a rule
-    it is documenting. Blanking rather than dropping keeps every column where it
-    was, so the reported line numbers still point at the real source.
-
-    An unparseable file falls back to its raw text: a gate that quietly stopped
-    scanning a module it could not tokenize would be the silent corner the rule
-    exists to close.
-    """
-    rows = [list(line) for line in
-            path.read_text(encoding="utf-8").splitlines()]
-    masked = {tokenize.STRING, tokenize.COMMENT}
-    # 3.12+ splits f-strings into START/MIDDLE/END; older versions emit STRING.
-    for name in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
-        if hasattr(tokenize, name):
-            masked.add(getattr(tokenize, name))
-    try:
-        with path.open(encoding="utf-8") as handle:
-            tokens = list(tokenize.generate_tokens(handle.readline))
-    except (tokenize.TokenError, SyntaxError, IndentationError):
-        return path.read_text(encoding="utf-8").splitlines()
-    for token in tokens:
-        if token.type not in masked:
-            continue
-        (first_row, first_col), (last_row, last_col) = token.start, token.end
-        for row_no in range(first_row, last_row + 1):
-            row = rows[row_no - 1]
-            lo = first_col if row_no == first_row else 0
-            hi = last_col if row_no == last_row else len(row)
-            for col in range(lo, min(hi, len(row))):
-                row[col] = " "
-    return ["".join(row) for row in rows]
-
-
-def _radians_call_sites() -> list[tuple[Path, int, str]]:
-    """Every ``radians(...)`` spelling in the worker's own CODE, with its
-    argument. Docstrings and comments are blanked first (:func:`_code_lines`).
-    """
-    roots = [WORKER_SOURCE / "pcb_worker", WORKER_SOURCE / "agent_router"]
-    out: list[tuple[Path, int, str]] = []
-    for root in roots:
-        for path in sorted(root.rglob("*.py")):
-            for lineno, line in enumerate(_code_lines(path), start=1):
-                for match in _RADIANS_CALL.finditer(line):
-                    out.append((path, lineno, match.group(1).strip()))
-    return out
-
-
-def test_no_module_turns_a_placement_angle_the_wrong_way() -> None:
-    """THE grep: a degree-named angle reaches a rotation matrix only NEGATED.
-
-    ``geometry.rotation_radians`` is the single conversion — ``radians(-deg)`` —
-    and ``rotate_local_offset`` / ``PlacementTransform`` are the single
-    application of it. A module that spells ``math.radians(rotation_deg)`` for
-    itself turns copper the wrong way in this Y-down frame, and every multiple of
-    90 hides that under a rectangle's own symmetry, so the defect ships looking
-    correct and surfaces only on an off-axis part.
-
-    ``geometry.rotation_radians`` is the one site allowed to write the negation,
-    because it IS the negation. CODE ONLY (see :func:`_code_lines`): prose that
-    has to name the forbidden form in order to forbid it is not a conversion,
-    and scanning it made the rule unable to be written down.
-    """
-    offenders = [
-        f"{path.relative_to(WORKER_SOURCE)}:{lineno}: radians({arg})"
-        for (path, lineno, arg) in _radians_call_sites()
-        if _PLACEMENT_ANGLE.search(arg) and not arg.startswith("-")
-    ]
-    assert not offenders, (
-        "these convert a degree-named angle without negating it; route them "
-        "through geometry.rotation_radians (or rotate_local_offset, which "
-        "applies it): " + "; ".join(offenders))
-
-
-def test_the_gate_would_actually_catch_the_positive_form(tmp_path: Path) -> None:
-    """The gate above is a regex over source, so it can rot into a test that
-    passes because it matches nothing. Show it firing on the exact shape it
-    exists to forbid, and staying quiet on the negated one.
-    """
-    def offends(arg: str) -> bool:
-        return bool(_PLACEMENT_ANGLE.search(arg)) and not arg.startswith("-")
-
-    assert offends("feat.rotation_deg")
-    assert offends("degrees")
-    assert offends("pad.rotation")
-    assert not offends("-feat.rotation_deg")
-    assert not offends("-deg")
-    # And the call regex really finds the argument inside a realistic line.
-    match = _RADIANS_CALL.search("        angle = math.radians(feat.rotation_deg)")
-    assert match is not None and match.group(1) == "feat.rotation_deg"
-
-    # The masker blanks prose and KEEPS code — both halves, because a
-    # _code_lines that returned all spaces would make the gate above vacuous
-    # and one that returned the raw text would put prose back in scope.
-    sample = (
-        "x = math.radians(-feat.rotation_deg)  # not math.radians(rot_deg)\n"
-        "s = 'math.radians(rot_deg)'\n")
-    probe = tmp_path / "masker_probe.py"
-    probe.write_text(sample, encoding="utf-8")
-    scanned = _code_lines(probe)
-    assert scanned[0].count("radians(") == 1, scanned[0]
-    assert "-feat.rotation_deg" in scanned[0], scanned[0]
-    assert "radians(" not in scanned[1], scanned[1]

@@ -13,6 +13,7 @@ package tools
 // approximate pads behind a permanent badge.
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -248,6 +249,10 @@ func TestAdoptionCarriesTheComponentLevelResolvedFact(t *testing.T) {
 // Oracle: the same board through the same enrichment, once where the resolve
 // answers for the ref and once where it does not. The flag must follow the
 // RESOLVE, not the document.
+//
+// The stale arm goes through the PUBLIC channel — HandleDeserialize, the
+// pure-codec entry every board load funnels through — rather than calling the
+// drop directly, so removing the call from handleDeserialize turns it red.
 func TestDeserializeDropsTheDocumentsOwnResolvedFlag(t *testing.T) {
 	docBoard := func() *board.Board {
 		return &board.Board{Components: []board.Component{
@@ -255,16 +260,35 @@ func TestDeserializeDropsTheDocumentsOwnResolvedFlag(t *testing.T) {
 		}}
 	}
 
-	// No resolve behind it: the flag the document carried must not survive.
-	stale := docBoard()
-	dropDerivedComponentKeys(stale)
-	adoptResolvedGeometry(stale, map[string]resolvedComponent{})
-	if _, ok := stale.Components[0].Extra["footprint_resolved"]; ok {
-		t.Fatalf("a saved footprint_resolved survived a load this host never resolved: %v",
-			stale.Components[0].Extra)
+	// A DOCUMENT saved with the flag, loaded with no resolve behind it: the
+	// channel's own reply must not carry the flag back out.
+	yaml := "version: 1\nname: Stale\nwidth_mm: 40\nheight_mm: 30\n" +
+		"components:\n  - ref: J1\n    footprint: IC_DIP\n    x_mm: 1\n    y_mm: 2\n" +
+		"    rotation_deg: 0\n    footprint_resolved: true\nnets: []\n"
+	args, _ := json.Marshal(map[string]string{"yaml": yaml})
+	out, err := HandleDeserialize(context.Background(), args)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	var reply struct {
+		Board struct {
+			Components []map[string]interface{} `json:"components"`
+		} `json:"board"`
+	}
+	if err := json.Unmarshal(out, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if len(reply.Board.Components) != 1 {
+		t.Fatalf("want one component back, got %d", len(reply.Board.Components))
+	}
+	if _, ok := reply.Board.Components[0]["footprint_resolved"]; ok {
+		t.Fatalf("pcb.deserialize handed back a saved footprint_resolved this host "+
+			"never resolved: %v", reply.Board.Components[0])
 	}
 
 	// This host's own resolve answers for the ref: the flag is stamped back.
+	// The adoption half has no public seam without a live worker, so it stays a
+	// direct call over the same board shape.
 	live := docBoard()
 	dropDerivedComponentKeys(live)
 	byRef := resolvedByRef(resolveReply(t,

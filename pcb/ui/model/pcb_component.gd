@@ -189,11 +189,9 @@ var refdes_anchor: Dictionary = {}:
 ## strokes would print twice.
 ##
 ## DERIVED, NEVER STORED. It is a render of `id` at `refdes_anchor`, refreshed
-## by both setters, and no dict deserializes into it or serializes out of it.
-## It used to be a worker-rendered blob carried through every codec, which made
-## it a picture of whatever the ref was when it was rendered: a component
-## copied from another kept drawing the SOURCE's designator, on screen and in
-## the saved board, for as long as nobody re-resolved it.
+## by both setters, and no dict deserializes into it or serializes out of it —
+## so the glyphs always spell THIS component's ref rather than whatever ref a
+## carried-through render was made from.
 var refdes_graphics: Array = []
 
 ## True only while a load_from_* call is filling this component. Both fields the

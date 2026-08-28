@@ -241,8 +241,10 @@ lands:
    the endpoint off the direction step 1 chose, so the *distance* along the
    direction is what the grid quantises — a step of `pitch / max(|ux|, |uy|)`,
    which is the plain pitch for 0 and 90 and `pitch * sqrt(2)` for the
-   diagonals, so both axes still move by whole pitches at once. The distance is
-   measured **from the run's anchor**, so a run started on an off-grid pad
+   diagonals, so both axes still move by whole pitches at once. `pitch` here is
+   the AUTHORING pitch — a quarter of the board's `grid_mm`, so 0.635 mm on the
+   2.54 mm default — not `grid_mm` itself, which is the pitch components sit on.
+   The distance is measured **from the run's anchor**, so a run started on an off-grid pad
    centre keeps its waypoints on that anchor's grid rather than the board's —
    unlike zone, cutout and via grid snap, which quantise the point itself.
 

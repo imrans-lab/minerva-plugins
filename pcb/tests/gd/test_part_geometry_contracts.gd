@@ -30,14 +30,17 @@ extends SceneTree
 ##   3. THE `pads` KEY IS THE BOARD'S GEOMETRY AUTHORITY, not a payload
 ##      optimisation. Covered where the drop lives:
 ##      test_canonical_wire_board.gd section C. This suite states the model
-##      half — a component that carries pads emits the key, and a pins-only one
-##      does not — because the wire rule is only sound if the key means what it
-##      says.
+##      half — a component that carries pads emits the key, a pins-only one does
+##      not, and a dict stating lands under no has_pad_geometry flag still reads
+##      fabricable — because the wire rule is only sound if the key means what
+##      it says, on both the write side and the read side.
 ##
 ##   4. THE DRAWN DESIGNATOR IS A RENDER OF THE LIVE REF, not a stored picture
 ##      of the ref it was rendered from. Section 4 states it over the whole
 ##      lifecycle a picture used to survive: rename, copy, board-dict load and
-##      panel-state restore.
+##      panel-state restore — and pins one designator against a stroke vector
+##      taken from the WORKER's font, so the two fonts cannot drift apart while
+##      each stays internally consistent.
 ##
 ## FAILS AGAINST OLD: section 1's two word cases land on the opposite sides;
 ## section 2's DIP case returns one pin where three are asserted; section 4's
@@ -47,6 +50,7 @@ const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PCBComponent := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const PcbPadRow := preload("res://../../minerva-plugins/pcb/ui/model/pcb_pad_row.gd")
+const PcbLibraryPart := preload("res://../../minerva-plugins/pcb/ui/model/pcb_library_part.gd")
 
 ## Board mm tolerance — coordinates ride through float32 Vector2 and leave
 ## quantized to 0.1 um, so an exact == against a float64 literal is a coin toss.
@@ -349,6 +353,32 @@ func _run_the_pads_key_is_an_authority_claim() -> void:
 	check("…and still drops them for a part the library provably resolved (the payload relief)",
 		not (wired_resolved["components"][0] as Dictionary).has("pads"))
 
+	# THE KEY IS THE AUTHORITY; `has_pad_geometry` is only an extra marker of it.
+	# The worker compiles a component FULL on the `pads` KEY alone
+	# (inline_footprint.carries_full_geometry) and writes the flag only on its
+	# own resolve path, so a board can legitimately state real lands and no
+	# flag. The panel must agree, or the canvas would badge unbuildable a part
+	# the fab builds from the board's own geometry. load_from_board_dict is
+	# where the two spellings become one rule — a non-empty pads list sets the
+	# flag — and these two assertions are what hold that.
+	var flagless = PCBComponent.new()
+	flagless.load_from_board_dict({
+		"id": "R9", "footprint": "NoSuchLib:R_0603_Authored",
+		"x_mm": 12.0, "y_mm": 8.0,
+		"pads": [
+			{"number": "1", "type": "smd", "shape": "rect",
+				"position": {"x": -0.75, "y": 0.0},
+				"size": {"width": 0.9, "height": 0.95}, "layers": ["F.Cu"]},
+			{"number": "2", "type": "smd", "shape": "rect",
+				"position": {"x": 0.75, "y": 0.0},
+				"size": {"width": 0.9, "height": 0.95}, "layers": ["F.Cu"]}]})
+	check("a pads-list part carrying NO has_pad_geometry flag loads with real lands",
+		flagless.pads.size() == 2 and flagless.pads_authored)
+	check("…and reads FABRICABLE — the key is the authority, the flag only marks it",
+		PcbLibraryPart.is_fabricable(flagless))
+	check("…with geometry source 'authored': the board owns those lands, no library did",
+		str(PcbLibraryPart.geometry_state(flagless).get("source", "")) == "authored")
+
 
 # ── 4. The drawn designator is a RENDER of the live ref ──────────────────────
 #
@@ -445,3 +475,54 @@ func _run_the_drawn_designator_is_the_live_ref() -> void:
 	check("a panel-state round trip keeps the anchor and redraws the same designator",
 		restored.refdes_anchor == jp5.refdes_anchor
 			and restored.refdes_graphics == jp5.refdes_graphics)
+
+	# THE INDEPENDENT ORACLE. Every assertion above renders the expected value
+	# with the SAME PcbBoardFont as the value under test, so a panel font that
+	# drifted from the worker's would satisfy all of them and the editor would
+	# draw a designator the fab does not print. These numbers come from the
+	# WORKER's font instead (see J1_DEFAULT_STROKES), and
+	# worker/tests/test_board_font.py pins the same list on its side.
+	var j1 = PCBComponent.new()
+	j1.id = "J1"
+	check("a J1 at the DEFAULT anchor strokes the worker font's own J1, to 1e-6 mm",
+		_strokes_match(j1.refdes_graphics, J1_DEFAULT_STROKES))
+
+
+## "J1" at the default designator anchor, in footprint-LOCAL mm: the worker's
+## board_font rendered at cap height 1.0, centred on the anchor's x, with the
+## baseline at REFDES_DEFAULT_Y_MM (-1.5). Generated ONCE from the worker and
+## pasted:
+##
+##   cd pcb/worker && python3 -c "from pcb_worker import board_font; \
+##     print([[(x, y - 1.5) for x, y in s] \
+##       for s in board_font.render('J1', size=1.0, h_align='center').polylines])"
+const J1_DEFAULT_STROKES: Array = [
+	[Vector2(-0.25, -2.5), Vector2(-0.25, -1.6666666667),
+		Vector2(-0.4166666667, -1.5), Vector2(-0.5833333333, -1.5),
+		Vector2(-0.75, -1.6666666667)],
+	[Vector2(0.25, -2.3333333333), Vector2(0.4166666667, -2.5),
+		Vector2(0.4166666667, -1.5)],
+	[Vector2(0.0833333333, -1.5), Vector2(0.75, -1.5)],
+]
+
+
+## Is `drawn` — a refdes_graphics list — stroke-for-stroke and point-for-point
+## within 1e-6 mm of `want`, a list of Vector2 lists? Reports the first
+## disagreement, since "the glyphs differ" is not actionable on its own.
+func _strokes_match(drawn: Array, want: Array) -> bool:
+	if drawn.size() != want.size():
+		printerr("    %d strokes, want %d" % [drawn.size(), want.size()])
+		return false
+	for i in range(drawn.size()):
+		var got: Array = (drawn[i] as Dictionary)["points"]
+		var expect: Array = want[i]
+		if got.size() != expect.size():
+			printerr("    stroke %d has %d points, want %d" % [i, got.size(), expect.size()])
+			return false
+		for j in range(got.size()):
+			var delta: Vector2 = (got[j] as Vector2) - (expect[j] as Vector2)
+			if absf(delta.x) > 1.0e-6 or absf(delta.y) > 1.0e-6:
+				printerr("    stroke %d point %d is %s, want %s"
+					% [i, j, str(got[j]), str(expect[j])])
+				return false
+	return true

@@ -53,6 +53,7 @@ const PCBComponent := preload("res://../../minerva-plugins/pcb/ui/model/pcb_comp
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const LoadChecks := preload("res://../../minerva-plugins/pcb/ui/model/pcb_load_checks.gd")
 const PcbCopperDrawOrder := preload("res://../../minerva-plugins/pcb/ui/model/pcb_copper_draw_order.gd")
+const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
 
 var _pass := 0
 var _fail := 0
@@ -326,12 +327,46 @@ func _run_copper_paints_in_manufacturing_order() -> void:
 			_pass_index(four, PcbCopperDrawOrder.TRACES, "in2")
 					< _pass_index(four, PcbCopperDrawOrder.TRACES, "in1"))
 
+	# WHICH PASS A LAND ACTUALLY LANDS IN, executed rather than planned.
+	#
+	# build() states the ORDER of the passes; _bucket_smd_lands is the other
+	# half of _draw_copper — the routing that decides which pass each land is
+	# handed to — and it is a pure function over a component, so it runs with
+	# no render device. A land's layers are FOOTPRINT-LOCAL: a top-mounted part
+	# whose footprint names B.Cu has bottom copper, and keying the whole part by
+	# its mount side would paint that land on the wrong side of the board.
+	var canvas = PcbCanvasScript.new()
+	var mixed = PCBComponent.new()
+	mixed.id = "U7"
+	mixed.set_footprint_by_name("CUSTOM")
+	mixed.layer = "top"
+	mixed.has_pad_geometry = true
+	mixed.pads = [
+		{"number": "1", "type": "smd", "shape": "rect",
+			"position": Vector2(-1.0, 0.0), "size": Vector2(1.0, 1.0),
+			"rotation": 0.0, "drill": Vector2.ZERO, "layers": ["F.Cu"]},
+		{"number": "2", "type": "smd", "shape": "rect",
+			"position": Vector2(1.0, 0.0), "size": Vector2(1.0, 1.0),
+			"rotation": 0.0, "drill": Vector2.ZERO, "layers": ["B.Cu"]},
+	]
+	var buckets := {}
+	canvas._bucket_smd_lands(mixed, buckets)
+	var top_numbers: Array = []
+	for entry in buckets.get("top", []):
+		top_numbers.append(str(((entry as Dictionary)["pad"] as Dictionary)["number"]))
+	var bottom_numbers: Array = []
+	for entry in buckets.get("bottom", []):
+		bottom_numbers.append(str(((entry as Dictionary)["pad"] as Dictionary)["number"]))
+	check("a top-mounted part's B.Cu land is bucketed into the BOTTOM pass, not "
+			+ "its part's (top=%s bottom=%s)" % [str(top_numbers), str(bottom_numbers)],
+			top_numbers == ["1"] and bottom_numbers == ["2"])
+	canvas.free()
+
 	# The claim that the canvas paints in this order is carried by the build()
 	# assertions above — the plan IS the draw order (_draw_copper dispatches it
-	# and does nothing else). Three grep-the-source assertions used to sit here
-	# as a second oracle; they pinned the spelling of three call sites rather
-	# than any behaviour, and a rename would have failed them while the copper
-	# came out identical.
+	# and does nothing else). The dispatch itself has no headless observable:
+	# every arm ends in an immediate-mode draw call, so reading it back would
+	# need a render device or a spy on methods GDScript cannot override.
 
 
 func check(desc: String, cond: bool) -> void:
