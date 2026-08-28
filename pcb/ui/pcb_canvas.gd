@@ -132,8 +132,13 @@ var show_labels: bool = true
 # paradigm — minerva_pcb_get_selection. The 2026-07-17 toggle existed
 # because 16 proposals' labels were unreadable clutter; the labels are gone
 # now, so the toggle has nothing to toggle.)
+## Draws the NOMINAL pin markers of a part that resolved no land geometry —
+## a sketch of where its copper would be, never real copper. A part whose lands
+## ARE known is not covered by this eye: drawing a nominal marker over real
+## geometry says the copper is somewhere it is not.
 var show_pins: bool = true
 var snap_to_grid: bool = true
+## Draws real resolved LANDS (and the drill voids through them).
 var show_pads: bool = true
 ## Draws a warning badge on components rendered from FALLBACK pins rather than
 ## resolved footprint geometry (has_pad_geometry == false) — the visual mirror of
@@ -141,8 +146,10 @@ var show_pads: bool = true
 ## hermetic-CAM Stage 2 step 4b). A badged component would NOT fabricate as-is.
 ## Mounting holes are exempt (they legitimately carry no pad geometry).
 var show_unresolved_badges: bool = true
-## Draws F.SilkS graphics resolved by the worker's footprint-RESOLVE step
-## (component.graphics — see pcb_component.gd).
+## Draws component silkscreen resolved by the worker's footprint-RESOLVE step
+## (component.graphics — see pcb_component.gd), BOTH faces: artwork is
+## footprint-local, so a part flipped to the bottom prints its front strokes on
+## B.SilkS and they are drawn in the back ink.
 var show_silk: bool = true
 ## SOLDER-MASK OVERLAY (WYSIWYG goal 019ff4a5a75a, gap G4). Renders the board's
 ## mask OPENINGS — where solder mask is ABSENT — as translucent patches over the
@@ -1286,6 +1293,10 @@ const CANDIDATE_VIA_HIT_RADIUS_PX := 6.0
 ## (the dash-pairing rule above stands untouched). The body keeps the
 ## component's own colour at ghost alpha, per the no-recolouring rule.
 const PLACEMENT_GHOST_BODY_ALPHA := 0.40
+## Alpha factor for a ghost's ARTWORK — its lands and its silk. Higher than the
+## body fill: a ghost land has to be read against the copper under it, while the
+## body is only a footprint of where the part goes.
+const PLACEMENT_GHOST_ARTWORK_ALPHA := 0.7
 const PLACEMENT_TETHER_WIDTH_PX := 1.5
 const PLACEMENT_TETHER_ARROW_PX := 8.0
 ## Calm tether: no routed copper touches the part — the move is free.
@@ -2317,7 +2328,9 @@ func _stack_layers() -> Array:
 ## The two eyes are applied while bucketing rather than at dispatch, so the pass
 ## list matches what actually reaches the screen: show_traces gates copper
 ## traces and vias, show_pads gates lands (with show_pins covering the nominal
-## fallback pins of a part that resolved no real pad geometry).
+## fallback pins of a part that resolved no real pad geometry). The per-LAYER
+## eye is applied at dispatch instead, once per pass, and it gates that layer's
+## traces and its lands alike — they are the same copper on the same layer.
 func _draw_copper() -> void:
 	# Bucket traces by layer ONCE: the stack walk is then one pass over the
 	# board rather than one full pass per declared layer. Keyed by the CANONICAL
@@ -2347,12 +2360,18 @@ func _draw_copper() -> void:
 		if visibility == CompVisibility.NONE:
 			continue
 		var has_real_pads: bool = comp.has_pad_geometry and comp.pads.size() > 0
-		if show_pads and has_real_pads:
-			tht_comps.append(comp)
-			# LANDS visibility means the part is mounted elsewhere: its
-			# through-hole rings still pierce this view, its SMD copper does not.
-			if visibility == CompVisibility.FULL:
-				_bucket_smd_lands(comp, smd_by_layer)
+		if has_real_pads:
+			# A part whose lands ARE known never falls back to nominal pins: a
+			# nominal marker drawn where real copper is says the copper is
+			# somewhere it is not, and show_pads off means "do not show me the
+			# lands", not "show me a sketch of them instead".
+			if show_pads:
+				tht_comps.append(comp)
+				# LANDS visibility means the part is mounted elsewhere: its
+				# through-hole rings still pierce this view, its SMD copper
+				# does not.
+				if visibility == CompVisibility.FULL:
+					_bucket_smd_lands(comp, smd_by_layer)
 		elif show_pins and visibility == CompVisibility.FULL:
 			fallback_comps.append(comp)
 
@@ -2367,8 +2386,13 @@ func _draw_copper() -> void:
 					for trace in traces_by_layer.get(layer_id, []):
 						_draw_single_trace(trace, layer_id)
 			PcbCopperDrawOrder.SMD_LANDS:
-				for land in smd_by_layer.get(layer_id, []):
-					_draw_pad(land["comp"], land["pad"], PadPhase.LANDS)
+				# Same eye as that layer's traces: a land is copper ON a layer,
+				# so a closed layer must take the lands with it. Hiding only
+				# the traces leaves lands floating on a layer the view says is
+				# not there.
+				if _layer_visible(layer_id):
+					for land in smd_by_layer.get(layer_id, []):
+						_draw_pad(land["comp"], land["pad"], PadPhase.LANDS)
 			PcbCopperDrawOrder.THT_LANDS:
 				for comp in tht_comps:
 					_draw_component_pads(comp, PadSet.THT, PadPhase.LANDS)
@@ -2418,23 +2442,23 @@ func _bucket_smd_lands(comp, smd_by_layer: Dictionary) -> void:
 	for pad in comp.pads:
 		if str(pad.get("type", "smd")) in THT_PAD_TYPES:
 			continue
-		var declared: Array = comp.placed_pad_layers(pad)
 		var layer_ids: Array = []
-		var names_copper := false
-		for raw_layer in declared:
+		for raw_layer in comp.placed_pad_layers(pad):
 			# The wildcard is copper on every layer, which is no single pass —
 			# it earns the mount-layer fallback below, not a bucket of its own.
 			if str(raw_layer).strip_edges().to_lower() == "*.cu":
-				names_copper = true
 				continue
 			if not PcbLayerStack.is_copper(raw_layer):
 				continue
-			names_copper = true
 			var canon := PcbLayerStack.kicad_to_canon(raw_layer)
 			if not layer_ids.has(canon):
 				layer_ids.append(canon)
 		if layer_ids.is_empty():
-			if not declared.is_empty() and not names_copper:
+			# Named no single copper layer: either it is not copper at all (an
+			# aperture — comp.pad_names_copper is the ONE reading of that, shared
+			# with the placement ghost) or it is the wildcard/legacy case, which
+			# falls back to the mount side.
+			if not comp.pad_names_copper(pad):
 				continue
 			layer_ids = [mount]
 		for lid in layer_ids:
@@ -2903,8 +2927,10 @@ func _placement_ghost_polygon(payload: Dictionary) -> PackedVector2Array:
 	if comp == null:
 		return PackedVector2Array()
 	var pose := _placement_target_pose(payload)
-	# Same sign convention as pcb_component.get_transform (KiCad CW-in-Y-down).
-	var xform := Transform2D(deg_to_rad(-float(pose.get("rot", 0.0))), Vector2.ZERO)
+	# The component's OWN placement rule at the proposed angle — sign convention
+	# and back-side mirror both, so a bottom-mounted part's ghost is reflected
+	# exactly as the part itself is.
+	var xform: Transform2D = comp.transform_at(float(pose.get("rot", 0.0)))
 	var out := PackedVector2Array()
 	for p in comp.get_local_body_polygon():
 		out.append((pose.get("pos") as Vector2) + (xform * p))
@@ -2975,15 +3001,25 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 		draw_string(font, to_px + Vector2(10, 14), "overlaps %s" % ", ".join(offenders),
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, candidate_violation_color)
 
+	# LANDS at the ghost pose: where the part's copper would actually sit. A
+	# reviewer judging a move is judging clearances, and a body outline says
+	# nothing about them. Drawn through _draw_pad — the one land painter — so a
+	# proposed land is the same shape, corner radius and paste-only reading as
+	# the land it becomes on accept.
+	if show_pads and comp.has_pad_geometry and comp.pads.size() > 0:
+		_draw_staged_lands(comp, target, float(pose.get("rot", 0.0)))
+
 	# SILK at the ghost pose (owner ruling A5): the polarity marks — cathode
 	# band, pin-1 dot — ARE the intent a reviewer confirms; a body-only ghost
 	# of a polarized part is unreviewable. Drawn through the shared helper's
 	# origin override (P1 debt D2 — the spike's comp.position swap is gone).
 	if show_silk and comp.graphics.size() > 0:
-		var ghost_silk: Color = silk_color
-		ghost_silk.a *= 0.7
-		var ghost_xform := Transform2D(deg_to_rad(-float(pose.get("rot", 0.0))), Vector2.ZERO)
-		_draw_component_graphics_layer(comp, ghost_xform, "F.SilkS", ghost_silk, silk_min_width_px, target)
+		var ghost_front: Color = silk_color
+		ghost_front.a *= PLACEMENT_GHOST_ARTWORK_ALPHA
+		var ghost_back: Color = silk_back_color
+		ghost_back.a *= PLACEMENT_GHOST_ARTWORK_ALPHA
+		var ghost_xform: Transform2D = comp.transform_at(float(pose.get("rot", 0.0)))
+		_draw_silk_faces(comp, ghost_xform, ghost_front, ghost_back, target)
 
 	# Refdes + author on the ghost so "what and whose" reads without a click.
 	var label := "%s (%s)" % [comp.id, str(entry.get("author", "?"))]
@@ -2993,6 +3029,23 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 			top = p
 	draw_string(font, Vector2(to_px.x - 20, top.y - 6), label,
 		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, tether_color)
+
+
+## One proposed part's LANDS, at the pose it would take. Every land goes through
+## _draw_pad, so shape, corner ratio, land angle and the paste-only-aperture
+## reading are the committed renderer's, not a second opinion drawn beside it.
+##
+## LANDS only, no drill phase: the drill is painted in the board's background
+## colour to punch a void, and punching one for copper that is not on the board
+## yet would erase the committed copper lying under the ghost.
+func _draw_staged_lands(comp, origin: Vector2, rotation_deg: float) -> void:
+	var pose := {"pos": origin, "rot": rotation_deg}
+	for pad in comp.pads:
+		# A paste-only aperture is not a land — the same reading the committed
+		# surface pass takes (_bucket_smd_lands), through the same predicate.
+		if not comp.pad_names_copper(pad):
+			continue
+		_draw_pad(comp, pad, PadPhase.LANDS, pose, PLACEMENT_GHOST_ARTWORK_ALPHA)
 
 
 ## Live collision list for one placement ghost: its (possibly mid-drag)
@@ -3588,8 +3641,16 @@ func _draw_locked_hatch(screen_poly: PackedVector2Array) -> void:
 ## a test can hold, and so the renderer cannot quietly grow a second opinion
 ## about where copper is. {position, size, rotation} in world mm / board CW
 ## degrees; the caller negates the angle for screen space.
-func pad_draw_geometry(comp, pad: Dictionary) -> Dictionary:
-	return comp.get_pad_world_transform(pad)
+##
+## `pose` ({"pos": Vector2, "rot": float}) draws the land at a pose the part is
+## not standing at — a placement PROPOSAL. Empty means the part's own pose, and
+## both routes end in the same placement rule (pcb_component), so a ghost land
+## and the committed land it becomes are the same shape at the same angle.
+func pad_draw_geometry(comp, pad: Dictionary, pose: Dictionary = {}) -> Dictionary:
+	if pose.is_empty():
+		return comp.get_pad_world_transform(pad)
+	return comp.pad_world_transform_at(pad, pose.get("pos", Vector2.ZERO) as Vector2,
+		float(pose.get("rot", 0.0)))
 
 
 ## Which pads of a component one call draws. A SURFACE pad is copper on one
@@ -3618,7 +3679,13 @@ func _draw_component_pads(comp, pad_set: PadSet, phase: PadPhase) -> void:
 ## Draw ONE land, in one phase. The per-land entry point _draw_copper's surface
 ## pass uses, since that pass is bucketed land-by-land rather than part-by-part
 ## (_bucket_smd_lands); _draw_component_pads is the whole-part loop over it.
-func _draw_pad(comp, pad: Dictionary, phase: PadPhase) -> void:
+##
+## THE ONLY LAND PAINTER. `pose` (see pad_draw_geometry) and `alpha` are what a
+## placement ghost needs — a proposed pose, and copper dimmed so it does not
+## read as copper the board already has — and they exist so a proposal goes
+## through this function instead of growing a second land renderer beside it.
+func _draw_pad(comp, pad: Dictionary, phase: PadPhase, pose: Dictionary = {},
+		alpha: float = 1.0) -> void:
 	var pad_type: String = pad.get("type", "smd")
 	var pad_shape: String = pad.get("shape", "rect")
 	var pad_size: Vector2 = pad.get("size", Vector2(1, 1))
@@ -3628,7 +3695,7 @@ func _draw_pad(comp, pad: Dictionary, phase: PadPhase) -> void:
 	# splits the render from pin_copper_distance, which honours it: for a
 	# turned land the copper you can see is then not the copper you can
 	# click, and pads are clickable.
-	var world: Dictionary = pad_draw_geometry(comp, pad)
+	var world: Dictionary = pad_draw_geometry(comp, pad, pose)
 	var screen_pos := world_to_screen(world["position"] as Vector2)
 	var screen_size := (world["size"] as Vector2) * zoom
 	var pad_rot: float = -float(world["rotation"])
@@ -3639,6 +3706,7 @@ func _draw_pad(comp, pad: Dictionary, phase: PadPhase) -> void:
 			draw_color = pad_smd_color
 		elif pad_type == "np_thru_hole":
 			draw_color = mounting_hole_color
+		draw_color.a *= alpha
 
 		match pad_shape:
 			"rect":
@@ -3674,17 +3742,19 @@ func _draw_pad(comp, pad: Dictionary, phase: PadPhase) -> void:
 ## EXACTLY — same `xform` (comp.get_transform(), KiCAD CW rotation) and the
 ## same `comp.position + (xform * local_point)` composition — so the drawn
 ## layer aligns with the copper it was resolved against. Shared by
-## _draw_component_silk (F.SilkS) and _draw_component_courtyard (F.CrtYd) so
-## both layers walk the same geometry-kind handling.
+## _draw_component_silk (both silk faces) and _draw_component_courtyard (both
+## courtyard faces) so every layer walks the same geometry-kind handling.
+##
+## `layer_name` is a BOARD layer, not the footprint's authored one: artwork is
+## footprint-local and flips with the part (comp.graphics_for_placed_layer), so
+## asking for "F.SilkS" gets a top-mounted part's front artwork AND a
+## bottom-mounted part's back-authored artwork, which is what prints there.
 func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String, stroke_color: Color, min_width_px: float, origin = null) -> void:
 	# `origin` (P1, debt D2): a world-mm anchor override. The placement-ghost
 	# render draws this component's silk AT THE PROPOSED POSE, which is not
 	# comp.position — every call without it is byte-identical to before.
 	var base: Vector2 = origin if origin is Vector2 else comp.position
-	for g in comp.graphics:
-		if g.get("layer", "") != layer_name:
-			continue
-
+	for g in comp.graphics_for_placed_layer(layer_name):
 		var kind: String = g.get("kind", "")
 		var w: float = maxf(float(g.get("width", 0.15)) * zoom, min_width_px)
 
@@ -3780,8 +3850,24 @@ func _component_unresolved(comp) -> bool:
 
 
 func _draw_component_silk(comp, xform: Transform2D) -> void:
-	_draw_component_graphics_layer(comp, xform, "F.SilkS", silk_color, silk_min_width_px)
+	_draw_silk_faces(comp, xform, silk_color, silk_back_color)
 	_draw_component_refdes(comp, xform)
+
+
+## BOTH silk faces of one part's artwork, each in its own ink. A part is not
+## silk on one side: its footprint may author back legend directly, and flipping
+## it to the bottom moves every front stroke to the back (comp
+## .placed_graphic_layer). Asking for one face only made a flipped part's
+## legend vanish from the canvas while the fab still printed it.
+##
+## `origin` is the anchor override _draw_component_graphics_layer takes — a
+## placement ghost's proposed pose.
+func _draw_silk_faces(comp, xform: Transform2D, front_ink: Color,
+		back_ink: Color, origin = null) -> void:
+	_draw_component_graphics_layer(comp, xform, "F.SilkS", front_ink,
+		silk_min_width_px, origin)
+	_draw_component_graphics_layer(comp, xform, "B.SilkS", back_ink,
+		silk_min_width_px, origin)
 
 
 ## Draw the PRINTED reference designator (WYSIWYG goal 019ff4a5a75a, gap G2) —
@@ -3816,7 +3902,7 @@ func _board_graphic_color(graphic: Dictionary) -> Color:
 	var layer := PcbBoardGraphic.layer_of(graphic)
 	if PcbBoardGraphic.is_courtyard(layer):
 		return courtyard_color
-	return silk_back_color if layer.begins_with("B.") else silk_color
+	return _silk_ink(layer)
 
 
 ## Draw every board-level graphic.
@@ -3893,6 +3979,10 @@ func _board_graphic_at(world_pos: Vector2) -> String:
 func _draw_component_refdes(comp, xform: Transform2D) -> void:
 	for g in comp.refdes_graphics:
 		var w: float = maxf(float(g.get("width", 0.15)) * zoom, silk_min_width_px)
+		# The designator prints on the silk of the side its part is mounted on,
+		# so a flipped part's ref is back ink seen through the substrate — the
+		# same reading its footprint's silk gets (comp.placed_graphic_layer).
+		var ink: Color = _silk_ink(comp.placed_graphic_layer(g as Dictionary))
 		var poly_points: PackedVector2Array = []
 		for pt in g.get("points", []):
 			var local_pt: Vector2 = pt
@@ -3900,7 +3990,14 @@ func _draw_component_refdes(comp, xform: Transform2D) -> void:
 		if poly_points.size() >= 2:
 			# Glyph strokes are OPEN polylines — a closing segment would turn a
 			# "C" into an "O". draw_polyline never closes; keep it that way.
-			draw_polyline(poly_points, silk_color, w)
+			draw_polyline(poly_points, ink, w)
+
+
+## The ink one BOARD silk layer prints in. Back artwork is seen THROUGH the
+## substrate, so it must not read as if it were on the near face — the same
+## split _board_graphic_color makes for board-level legend.
+func _silk_ink(placed_layer: String) -> Color:
+	return silk_back_color if placed_layer.begins_with("B.") else silk_color
 
 
 ## Draw F.CrtYd (courtyard) graphics — the module's true extent (also what
@@ -3908,7 +4005,11 @@ func _draw_component_refdes(comp, xform: Transform2D) -> void:
 ## size). Dimmer/thinner than silk (courtyard_color/courtyard_min_width_px);
 ## gated by show_courtyard independently of show_silk.
 func _draw_component_courtyard(comp, xform: Transform2D) -> void:
+	# Both faces, for the same reason silk draws both: a flipped part's F.CrtYd
+	# outline is B.CrtYd on the board. One ink — a courtyard is a reference
+	# outline, not artwork read through the substrate.
 	_draw_component_graphics_layer(comp, xform, "F.CrtYd", courtyard_color, courtyard_min_width_px)
+	_draw_component_graphics_layer(comp, xform, "B.CrtYd", courtyard_color, courtyard_min_width_px)
 
 
 ## Fallback pin rendering when pad geometry not available.

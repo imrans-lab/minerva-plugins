@@ -479,3 +479,15 @@ test_part_geometry_contracts.gd assertions=66
 # contrast arm proving every rimmed ink would fail without its rim.
 # Counted by hand from the check() call sites: 22 new, none inside a loop.
 test_fab_preview_legibility.gd assertions=100
+
+# Four ways the board canvas said copper was somewhere it is not, all observed
+# through recording_canvas.gd (the painter-call spy): a part flipped to the
+# bottom whose silk was requested by its authored layer name and so drew on the
+# wrong face or not at all; a hidden copper layer that took its traces away and
+# left its lands painted; a placement ghost that showed a body outline and no
+# lands at all, so the clearances a reviewer judges a move by were invisible;
+# and a fully resolved part drawing NOMINAL pin markers over the real land
+# geometry when lands were hidden and pins shown.
+# Counted by hand from the check()/check_eq() call sites: 16 + 6 + 10 + 6, none
+# inside a loop.
+test_canvas_render_truth.gd assertions=38

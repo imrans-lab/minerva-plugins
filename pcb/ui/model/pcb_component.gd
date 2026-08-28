@@ -18,6 +18,9 @@ const _Self := preload("pcb_component.gd")
 ## worker prints designators with. Used to RENDER this component's ref
 ## rather than store a picture of it (see refdes_graphics).
 const PcbBoardFont := preload("pcb_board_font.gd")
+## The copper-layer vocabulary. Only its SILENT readers are used here
+## (is_copper); the warning-emitting normaliser stays out of the draw path.
+const PcbLayerStack := preload("pcb_layer_stack.gd")
 
 ## Footprint types for visual rendering
 enum FootprintType {
@@ -151,7 +154,11 @@ var footprint_resolved: bool = false
 ## Silk/courtyard graphics attached by the worker's footprint-RESOLVE step
 ## (pcb/worker/pcb_worker/resolve.py), in component-LOCAL mm coords (same
 ## frame as `pads[].position`). Each entry is a Dictionary:
-##   layer: String  - "F.SilkS" or "F.CrtYd"
+##   layer: String  - the layer the FOOTPRINT authored, usually "F.SilkS"
+##                    or "F.CrtYd". It is footprint-local like the coords:
+##                    the BOARD layer a stroke prints on is
+##                    placed_graphic_layer(), which flips it for a
+##                    bottom-mounted part.
 ##   kind: String    - "line", "circle", "arc", or "poly"
 ##   width: float    - stroke width in mm
 ##   start/end: Vector2   (kind == "line")
@@ -342,6 +349,53 @@ func placed_pad_layers(pad: Dictionary) -> Array:
 	return out
 
 
+## The BOARD layer one of this component's `graphics` entries prints on.
+##
+## Artwork is footprint-LOCAL, exactly like `pads[].layers`, so it takes the
+## same flip: on a bottom-mounted part F-authored artwork lands on the back and
+## B-authored artwork lands on the front. That is what KiCad does on flip and
+## what the fab emitter already does (gerber._harvest_component_graphics, the
+## `pre_placed=False` branch) — the canvas reading the authored layer literally
+## is what let a flipped part's silk go missing.
+func placed_graphic_layer(graphic: Dictionary) -> String:
+	var authored := str(graphic.get("layer", ""))
+	if not is_bottom_side():
+		return authored
+	return str(flipped_layer_token(authored))
+
+
+## This component's graphics that print on BOARD layer `layer_name` — the ONE
+## selection every artwork renderer walks, so what is drawn and what a side-aware
+## reader reports cannot drift apart.
+func graphics_for_placed_layer(layer_name: String) -> Array:
+	var out: Array = []
+	for g in graphics:
+		if placed_graphic_layer(g as Dictionary) == layer_name:
+			out.append(g)
+	return out
+
+
+## Does this land claim COPPER at all?
+##
+## A land that DECLARES a layer list naming no copper is a paste/mask stencil
+## aperture, not a land — KiCad splits a thermal pad into unnumbered
+## `(pad "" smd ... (layers "F.Paste"))` nodes — and painting one as copper
+## invents metal the fab never makes. A land with NO `layers` key is the legacy
+## declaration and keeps its historical copper, as does one whose only claim is
+## the "*.Cu" wildcard. Same reading as the worker's pad_source.has_copper.
+func pad_names_copper(pad: Dictionary) -> bool:
+	var declared: Array = placed_pad_layers(pad)
+	if declared.is_empty():
+		return true
+	for raw_layer in declared:
+		# The wildcard is copper on every layer — copper, but no single layer.
+		if str(raw_layer).strip_edges().to_lower() == "*.cu":
+			return true
+		if PcbLayerStack.is_copper(raw_layer):
+			return true
+	return false
+
+
 ## One layer token reflected to the other side of the board. Front/back prefixes
 ## and the canonical top/bottom ids swap; anything else — a wildcard, an inner
 ## layer, an unreadable value — is returned as it came.
@@ -473,7 +527,16 @@ func is_bottom_side() -> bool:
 ## translation separable, which is what lets a proposed pose reuse the same
 ## frame at a different anchor.
 func get_transform() -> Transform2D:
-	var xform := Transform2D(deg_to_rad(-rotation), Vector2.ZERO)
+	return transform_at(rotation)
+
+
+## The SAME frame at an arbitrary angle — the pose a proposal is drawn at, which
+## is not this component's own until the proposal is accepted. Keeping it here
+## means a ghost is placed by the placement rule rather than by a second
+## Transform2D built at the call site, which is how a proposed part came to be
+## drawn unmirrored while its committed self was mirrored.
+func transform_at(rotation_deg: float) -> Transform2D:
+	var xform := Transform2D(deg_to_rad(-rotation_deg), Vector2.ZERO)
 	if is_bottom_side():
 		xform = xform.scaled_local(Vector2(1.0, -1.0))
 	return xform
@@ -761,10 +824,19 @@ func _derive_bounds_from_graphics() -> bool:
 ## 180 == 90`, which is false for -90. Callers wanting an axis-aligned box build
 ## it from these three (pcb_pad_approach.land_rect).
 func get_pad_world_transform(pad: Dictionary) -> Dictionary:
+	return pad_world_transform_at(pad, position, rotation)
+
+
+## The same land geometry at an arbitrary POSE — where this part's copper would
+## be if it were placed at `origin` turned `rotation_deg`. A placement proposal
+## draws its lands through this, so a ghost land and the committed land it
+## becomes are one derivation and cannot disagree about shape, size or angle.
+func pad_world_transform_at(pad: Dictionary, origin: Vector2,
+		rotation_deg: float) -> Dictionary:
 	var local_pos: Vector2 = pad.get("position", Vector2.ZERO)
 	var land_rotation := float(pad.get("rotation", 0.0))
 	return {
-		"position": position + (get_transform() * local_pos),
+		"position": origin + (transform_at(rotation_deg) * local_pos),
 		"size": pad.get("size", Vector2(1, 1)) as Vector2,
 		# The land's BOARD angle. On the front the two angles ADD; on the back
 		# the mirror in get_transform reflects the land's own turn, which
@@ -772,8 +844,8 @@ func get_pad_world_transform(pad: Dictionary) -> Dictionary:
 		# (`rotation_deg + local` on top, `rotation_deg - local` on the bottom).
 		# This is the one land angle stated as a number instead of being carried
 		# by the frame, so it is the one place that spells the sign out.
-		"rotation": (rotation - land_rotation) if is_bottom_side()
-			else (rotation + land_rotation),
+		"rotation": (rotation_deg - land_rotation) if is_bottom_side()
+			else (rotation_deg + land_rotation),
 	}
 
 
