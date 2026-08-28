@@ -54,6 +54,25 @@ extends RefCounted
 ##     trace's waypoints cannot move a witness.
 ##
 ## No randomness, no time, no hashing of pointer identities.
+##
+## ── QUIETING, AND THE ONE JOIN IT MAY NOT THIN AWAY ──────────────────────────
+## A net needing more than QUIET_ABOVE_LINKS joins draws only QUIET_SHOWN_LINKS
+## of them, so a distribution net cannot bury the board in a hairball. Two rules
+## bound what quieting is allowed to hide:
+##
+##   * NOTHING IS DELETED. Every island no drawn link reaches is MARKED in
+##     place, and the net's remaining count is the FULL remainder either way.
+##   * A BARE ISLAND IS DRAWN FIRST. An island whose copper is PADS ALONE — no
+##     trace, via or pour joins it to anything — takes precedence over the
+##     merely shortest joins. That is the island a move or rotate just left
+##     behind, and drawing it is how the picture agrees with a verb that reports
+##     the copper as dangling. Within each group the order is still
+##     shortest-first, so on a net where NOTHING is routed — every island bare —
+##     the picture is exactly what it was before this rule existed.
+##
+## The cap itself never moves: a quieted net still draws QUIET_SHOWN_LINKS
+## links, bare islands included. Beyond that many bare islands the rest are
+## still marked, which is the guarantee this rule rests on.
 
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbBusLabels := preload("pcb_bus_labels.gd")
@@ -79,9 +98,10 @@ const DEFAULT_UNKNOWN_LAND_RADIUS_MM := PcbCopperContact.DEFAULT_UNKNOWN_LAND_RA
 ## reference — need one per pad, so a 36-pad ground net needs 35.
 const QUIET_ABOVE_LINKS := 8
 
-## How many airwires a quieted net still draws: its SHORTEST joins, which are
-## the local hops a designer routes next. The rest are not deleted — they are
-## reported as a count and marked in place (see solve()).
+## How many airwires a quieted net still draws: the joins reaching a BARE island
+## first, then its SHORTEST joins, which are the local hops a designer routes
+## next. The rest are not deleted — they are reported as a count and marked in
+## place (see solve()).
 const QUIET_SHOWN_LINKS := 6
 
 
@@ -347,6 +367,10 @@ static func _point_less(a: Vector2, b: Vector2) -> bool:
 ## net, less one, is exactly how many joins it still takes to make the net
 ## whole. It is reported for a quieted net whether or not that net's links are
 ## drawn, so it does not move when quieting does.
+##
+## "links" are ordered shortest-first, EXCEPT on a quieted net, where the joins
+## reaching a BARE island lead (see the quieting note at the top of this file);
+## each group keeps the spanning tree's own shortest-first order.
 static func solve(bundles: Array) -> Dictionary:
 	var out := {
 		"links": [], "markers": [], "nets": [], "quieted": [], "remaining_total": 0,
@@ -365,12 +389,17 @@ static func solve(bundles: Array) -> Dictionary:
 		# Clamped: the two thresholds are independent, and drawing more links
 		# than the tree has would index past its end.
 		var shown := mini(QUIET_SHOWN_LINKS, remaining) if quieted else remaining
+		# Only the DRAW ORDER changes, and only when links are being withheld:
+		# an unquieted net draws its whole tree, so promoting anything within it
+		# could not add a link and would only reshuffle the array.
+		var draw_edges := _bare_islands_first(
+			edges, _bare_islands(pads.size(), islands)) if quieted else edges
 
 		var net_name: String = (bundle as Dictionary)["net"]
 		var color: Color = (bundle as Dictionary)["color"]
 		var reached := {}
 		for e in range(shown):
-			var edge: Dictionary = edges[e]
+			var edge: Dictionary = draw_edges[e]
 			reached[int(edge["island_a"])] = true
 			reached[int(edge["island_b"])] = true
 			out["links"].append({
@@ -484,8 +513,9 @@ static func _union(parent: Array[int], a: int, b: int) -> void:
 ## pad one millimetre from a routed trace bridges to the trace, not to a pad
 ## fifty millimetres down the same island.
 ##
-## Returned SORTED SHORTEST-FIRST: a quieted net draws the head of this list,
-## its most local hops.
+## Returned SORTED SHORTEST-FIRST. A quieted net draws the head of this list —
+## its most local hops — after solve() has floated the joins reaching a BARE
+## island to the front of it.
 ##
 ## Kruskal over one best edge per island pair.
 static func _spanning_edges(nodes: Array, pad_count: int, islands: Array) -> Array:
@@ -597,6 +627,47 @@ static func _island_of_nodes(node_count: int, islands: Array) -> Array[int]:
 		for n in ((islands[i] as Dictionary)["nodes"] as Array):
 			island_of[int(n)] = i
 	return island_of
+
+
+## The BARE islands, as {island index: true} — the ones whose copper is PADS
+## ALONE, with no trace, via or poured region joining them to anything.
+##
+## Node indices below `pad_count` are pads and the rest are pieces (see
+## _islands), so an island whose node list holds no index at or above the
+## boundary is joined by nothing the board routed. That is the island a move or
+## rotate leaves behind when its pads walk off the copper that held them, and
+## quieting must not thin it away.
+static func _bare_islands(pad_count: int, islands: Array) -> Dictionary:
+	var bare := {}
+	for i in islands.size():
+		var only_pads := true
+		for n in ((islands[i] as Dictionary)["nodes"] as Array):
+			if int(n) >= pad_count:
+				only_pads = false
+				break
+		if only_pads:
+			bare[i] = true
+	return bare
+
+
+## `edges` reordered so every join touching a BARE island comes first — a
+## STABLE partition, so within each group the spanning tree's own shortest-first
+## order survives untouched and no new tie-break is introduced. When every
+## island is bare (a net nothing has routed yet) the partition is the identity
+## and the picture is unchanged.
+static func _bare_islands_first(edges: Array, bare: Dictionary) -> Array:
+	if bare.is_empty():
+		return edges
+	var first: Array = []
+	var rest: Array = []
+	for edge in edges:
+		var e := edge as Dictionary
+		if bare.has(int(e["island_a"])) or bare.has(int(e["island_b"])):
+			first.append(e)
+		else:
+			rest.append(e)
+	first.append_array(rest)
+	return first
 
 
 # ── FOCUS: the one destination a trace started on a pad should reach ──────────

@@ -105,6 +105,17 @@ extends SceneTree
 ##      half of the worker's own oracle — joins; the same via slid 0.66mm off
 ##      the centreline (0.01mm past half-width + annulus) does not; and the
 ##      free-end verb reads that same annulus rather than a point-in-disc pick.
+##
+##  15. QUIETING MAY NOT THIN AWAY A FRESHLY ORPHANED PAD. A plane-shaped net
+##      — twelve pad-and-stub islands 3mm apart, plus one two-pad test point
+##      thirty millimetres away joined only by its own pad-to-pad trace — is
+##      quieted, and the test point is nowhere near the six shortest joins.
+##      Rotating it 90 degrees walks its pads off that trace, leaving each pad
+##      an island with NO copper on it; both are then drawn, the cap still
+##      holds at QUIET_SHOWN_LINKS, and the promoted airwire is longer than
+##      every join it displaced — so it is drawn for being bare, not for being
+##      near. Undoing the rotate takes both airwires away again. On a net small
+##      enough that quieting never engages, the same rotation always drew them.
 
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -134,6 +145,7 @@ func _init() -> void:
 	_run_route_focus_survives_quieting()
 	_run_route_focus_canvas_gesture()
 	_run_a_via_is_copper_with_extent()
+	_run_quieting_never_hides_an_orphaned_pad()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1603,3 +1615,157 @@ func _run_a_via_is_copper_with_extent() -> void:
 	var clear = _end_on_a_via_board(11.0)
 	check("…and one 0.1 mm clear of it still is",
 		not clear.trace_end_is_joined("t", clear.TRACE_END_END))
+
+
+# ── 15. quieting may not thin away a freshly orphaned pad ────────────────────
+
+## A quieted net shaped like a real ground plane: twelve pad-and-stub islands
+## packed on a 4mm grid, plus ONE two-pad test point far away whose only copper
+## is the trace joining its own two pads, pad centre to pad centre.
+##
+## The numbers are chosen so nothing about the test point can enter the six
+## shortest joins by being NEAR: a grid join is 3.0mm (a stub end to the next
+## pad centre), the test point's own two pads are 5.0mm apart, and the test
+## point is more than 30mm from the nearest grid copper. Every grid island
+## carries a stub, so the test point is the only place a rotation can leave a
+## pad with no copper on it at all.
+func _plane_board():
+	var parts: Array = []
+	var pin_refs: Array = []
+	var traces: Array = []
+	for i in 12:
+		var ref := "G%d" % (i + 1)
+		var x := 4.0 + 4.0 * float(i % 4)
+		var y := 4.0 + 4.0 * float(i / 4)
+		parts.append(_part(ref, x, y, [_smd_pin("1", 0.0, 0.0)]))
+		pin_refs.append("%s.1" % ref)
+		traces.append(_trace("s%d" % i, "PLANE", "top",
+			Vector2(x, y), Vector2(x + 1.0, y)))
+	parts.append(_part("TP1", 38.0, 38.0,
+		[_smd_pin("1", -2.5, 0.0), _smd_pin("2", 2.5, 0.0)]))
+	pin_refs.append("TP1.1")
+	pin_refs.append("TP1.2")
+	traces.append(_trace("t_tp", "PLANE", "top",
+		Vector2(35.5, 38.0), Vector2(40.5, 38.0)))
+	return _board({
+		"components": parts,
+		"nets": [{"name": "PLANE", "pins": pin_refs}],
+		"traces": traces,
+	})
+
+
+## The same two-pad-part-on-its-own-trace shape on a net small enough that
+## quieting never engages: two other lands, so the whole spanning tree is drawn.
+func _small_net_board():
+	return _board({
+		"components": [
+			_part("G20", 10.0, 30.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("G21", 10.0, 40.0, [_smd_pin("1", 0.0, 0.0)]),
+			_part("TP2", 30.0, 35.0,
+				[_smd_pin("1", -2.5, 0.0), _smd_pin("2", 2.5, 0.0)]),
+		],
+		"nets": [{"name": "SMALL", "pins": ["G20.1", "G21.1", "TP2.1", "TP2.2"]}],
+		"traces": [_trace("t_tp2", "SMALL", "top",
+			Vector2(27.5, 35.0), Vector2(32.5, 35.0))],
+	})
+
+
+## The pad refs a net's DRAWN airwires land on.
+func _link_refs(result: Dictionary, net: String) -> Dictionary:
+	var out := {}
+	for l in _links_for(result, net):
+		out[str((l as Dictionary)["a_ref"])] = true
+		out[str((l as Dictionary)["b_ref"])] = true
+	return out
+
+
+## The pad refs a net's markers sit on.
+func _marker_refs(result: Dictionary, net: String) -> Dictionary:
+	var out := {}
+	for m in result.get("markers", []):
+		if str((m as Dictionary)["net"]) == net:
+			out[str((m as Dictionary)["ref"])] = true
+	return out
+
+
+func _touches(refs: Dictionary, prefix: String) -> bool:
+	for r in refs:
+		if str(r).begins_with(prefix):
+			return true
+	return false
+
+
+func _run_quieting_never_hides_an_orphaned_pad() -> void:
+	print("-- 15. quieting may not thin away a freshly orphaned pad --")
+	var d = _plane_board()
+
+	# BEFORE. The test point's pads are joined to each other by their own
+	# trace, so its island is routed copper like every other island here, and
+	# quieting is free to leave it undrawn — it carries a marker instead.
+	var before := Ratsnest.compute(d)
+	var row_before: Dictionary = _rows_by_net(before).get("PLANE", {})
+	check("the plane net is quieted", bool(row_before.get("quieted", false)))
+	check_eq("thirteen islands leave twelve joins",
+		int(row_before.get("remaining", -1)), 12)
+	check("no drawn airwire reaches the test point before the rotate",
+		not _touches(_link_refs(before, "PLANE"), "TP1."))
+	check("…it carries a marker instead",
+		_marker_refs(before, "PLANE").has("TP1.1"))
+
+	# THE ROTATE. The pads turn 90 degrees off the trace that held them; the
+	# trace does not move, and now reaches neither of them. Each pad becomes an
+	# island whose copper is the pad and nothing else.
+	d.get_component("TP1").set_rotation(90.0)
+	var after := Ratsnest.compute(d)
+	var row_after: Dictionary = _rows_by_net(after).get("PLANE", {})
+	check_eq("the rotate leaves the two pads as islands of their own",
+		int(row_after.get("remaining", -1)), 13)
+	check("…on a net that is still quieted", bool(row_after.get("quieted", false)))
+	check_eq("…and the cap still holds",
+		_links_for(after, "PLANE").size(), Ratsnest.QUIET_SHOWN_LINKS)
+	var after_links := _link_refs(after, "PLANE")
+	check("BOTH orphaned pads are drawn on",
+		after_links.has("TP1.1") and after_links.has("TP1.2"))
+	check("…so neither is left as only a marker",
+		not _touches(_marker_refs(after, "PLANE"), "TP1."))
+
+	# NOT BY BEING NEAR. The join out to the rest of the plane is more than
+	# thirty millimetres; the grid joins it displaced are three. It is drawn
+	# because the island it reaches has no copper on it, and for no other
+	# reason.
+	var orphan_max := -1.0
+	var other_max := -1.0
+	for l in _links_for(after, "PLANE"):
+		var e := l as Dictionary
+		var length := float(e["length"])
+		if str(e["a_ref"]).begins_with("TP1.") or str(e["b_ref"]).begins_with("TP1."):
+			orphan_max = maxf(orphan_max, length)
+		else:
+			other_max = maxf(other_max, length)
+	check("the promoted airwire is LONGER than every join it displaced",
+		orphan_max > other_max)
+
+	# THE UNDO. Turning the part back puts its pads on their trace again, the
+	# island stops being bare, and the picture returns to what it was.
+	d.get_component("TP1").set_rotation(0.0)
+	var undone := Ratsnest.compute(d)
+	check_eq("undoing the rotate rejoins the pads",
+		int(_rows_by_net(undone).get("PLANE", {}).get("remaining", -1)), 12)
+	check("…and the airwires to the test point go away again",
+		not _touches(_link_refs(undone, "PLANE"), "TP1."))
+	check("…leaving it marked, exactly as before",
+		_marker_refs(undone, "PLANE").has("TP1.1"))
+
+	# THE PLAIN PATH, for contrast: on a net small enough that nothing is
+	# withheld, the same rotation has always drawn both pads' joins.
+	var s = _small_net_board()
+	var small_before := Ratsnest.compute(s)
+	check("a four-land net is not quieted",
+		not bool(_rows_by_net(small_before).get("SMALL", {}).get("quieted", true)))
+	s.get_component("TP2").set_rotation(90.0)
+	var small_after := Ratsnest.compute(s)
+	check_eq("…the same rotate splits its test point too",
+		int(_rows_by_net(small_after).get("SMALL", {}).get("remaining", -1)), 3)
+	var small_links := _link_refs(small_after, "SMALL")
+	check("…and every join is drawn, both orphaned pads included",
+		small_links.has("TP2.1") and small_links.has("TP2.2"))

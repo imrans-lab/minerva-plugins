@@ -165,7 +165,7 @@ test_pcb_panel_ui.gd assertions=243
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.
 test_pcb_pin_inspector.gd assertions=57
-test_pcb_ratsnest.gd assertions=141
+test_pcb_ratsnest.gd assertions=157
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev
 # scaffold.
