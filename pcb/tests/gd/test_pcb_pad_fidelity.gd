@@ -30,6 +30,17 @@ extends SceneTree
 ##      must both still read as the stadium: those are the cases where the
 ##      stadium is exact.
 ##
+##   4. COPPER PAINTS IN MANUFACTURING ORDER. A trace and the through-hole
+##      land it enters are ONE copper shape, and the drill clears the middle of
+##      the barrel — so a canvas that paints the trace last shows copper running
+##      straight across an open hole, a board no fab makes. ORACLE: the draw
+##      ORDER itself. This canvas is immediate mode and the suites run headless
+##      with no render device, so there is no child list to index and no pixel
+##      to sample; the observable is the sequence of passes the canvas paints,
+##      which PcbCopperDrawOrder.build() returns as data and pcb_canvas
+##      ._draw_copper() does nothing but walk. The fixture is the reported
+##      board: bottom copper running under a top-mounted through-hole land.
+##
 ##   3. AN INDETERMINATE LOAD-TIME CHECK REACHES A HUMAN. The load reply's
 ##      third answer — "this could not be measured" — was honest in JSON and
 ##      invisible on screen, which for a GUI-only owner is indistinguishable
@@ -41,6 +52,11 @@ const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PCBComponent := preload("res://../../minerva-plugins/pcb/ui/model/pcb_component.gd")
 const Ratsnest := preload("res://../../minerva-plugins/pcb/ui/model/pcb_ratsnest.gd")
 const LoadChecks := preload("res://../../minerva-plugins/pcb/ui/model/pcb_load_checks.gd")
+const PcbCopperDrawOrder := preload("res://../../minerva-plugins/pcb/ui/model/pcb_copper_draw_order.gd")
+
+## Read as text, not loaded: the draw ORDER inside a function body is a property
+## of the source, and nothing at runtime consults its own source.
+const CANVAS_SRC := "res://../../minerva-plugins/pcb/ui/pcb_canvas.gd"
 
 var _pass := 0
 var _fail := 0
@@ -51,6 +67,7 @@ func _init() -> void:
 	_run_pad_codec_carries_the_fab_optionals()
 	_run_roundrect_land_is_not_the_inscribed_stadium()
 	_run_indeterminate_checks_reach_a_human()
+	_run_copper_paints_in_manufacturing_order()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -232,6 +249,113 @@ func _run_indeterminate_checks_reach_a_human() -> void:
 		"board_drc": {"verdict": "indeterminate", "error": "no compile"}}
 	check_eq("every indeterminate check is named, not just the first",
 		LoadChecks.indeterminate_notes(both).size(), 2)
+
+
+# ── 4. copper paints in manufacturing order ──────────────────────────
+
+## Index of the pass with this kind and layer, or -1.
+func _pass_index(plan: Array, kind: String, layer: String) -> int:
+	for i in range(plan.size()):
+		var step: Dictionary = plan[i]
+		if str(step["kind"]) == kind and str(step["layer"]) == layer:
+			return i
+	return -1
+
+
+## Index of the LAST pass of this kind, whatever layer it names, or -1.
+func _last_pass_index(plan: Array, kind: String) -> int:
+	var found := -1
+	for i in range(plan.size()):
+		if str((plan[i] as Dictionary)["kind"]) == kind:
+			found = i
+	return found
+
+
+## The text of one function body in `src`, up to the next top-level `func`.
+func _func_body(src: String, signature: String) -> String:
+	var start := src.find(signature)
+	if start < 0:
+		return ""
+	var rest := src.substr(start + signature.length())
+	var stop := rest.find("\nfunc ")
+	return rest if stop < 0 else rest.substr(0, stop)
+
+
+func _run_copper_paints_in_manufacturing_order() -> void:
+	print("\n-- 4. copper: traces -> lands -> drills, per layer --")
+
+	# The reported board, reduced: a 2-layer stack, copper on the bottom, and a
+	# top-mounted part whose through-hole land the copper runs under.
+	var plan: Array = PcbCopperDrawOrder.build(["top", "bottom"], ["bottom"], ["top"])
+
+	var i_bottom_traces := _pass_index(plan, PcbCopperDrawOrder.TRACES, "bottom")
+	var i_bottom_lands := _pass_index(plan, PcbCopperDrawOrder.SMD_LANDS, "bottom")
+	var i_top_traces := _pass_index(plan, PcbCopperDrawOrder.TRACES, "top")
+	var i_tht := _pass_index(plan, PcbCopperDrawOrder.THT_LANDS, "")
+	var i_vias := _pass_index(plan, PcbCopperDrawOrder.VIAS, "")
+	var i_drills := _pass_index(plan, PcbCopperDrawOrder.DRILLS, "")
+	var i_last_traces := _last_pass_index(plan, PcbCopperDrawOrder.TRACES)
+
+	check("THE BUG: the bottom trace paints BEFORE the through-hole land it "
+			+ "runs under, so the trace ends under the land (%d < %d)"
+					% [i_bottom_traces, i_tht],
+			i_bottom_traces >= 0 and i_tht > i_bottom_traces)
+	check("no copper of any layer paints after the through-hole lands (%d < %d)"
+					% [i_last_traces, i_tht],
+			i_last_traces >= 0 and i_tht > i_last_traces)
+	check("the drill is a VOID over every piece of copper: it is the last pass "
+			+ "of all (%d of %d)" % [i_drills, plan.size()],
+			i_drills == plan.size() - 1)
+	check("vias carry their ring with the lands and their hole with the drills "
+			+ "(%d < %d < %d)" % [i_tht, i_vias, i_drills],
+			i_tht < i_vias and i_vias < i_drills)
+
+	check("stack order survives: bottom-most copper paints first (%d < %d)"
+					% [i_bottom_traces, i_top_traces],
+			i_bottom_traces < i_top_traces)
+	check("PER LAYER, not one land pass at the end: the bottom lands paint "
+			+ "before the TOP traces, so a top trace crossing over a bottom "
+			+ "land still covers it (%d < %d)" % [i_bottom_lands, i_top_traces],
+			i_bottom_lands >= 0 and i_bottom_lands < i_top_traces)
+	check("...and each layer's lands paint directly after that layer's traces",
+			i_bottom_lands == i_bottom_traces + 1)
+
+	# Layer ids the declared stack never mentions: still painted, never dropped.
+	var odd: Array = PcbCopperDrawOrder.build(["top", "bottom"], ["Mystery.Cu"], ["Mystery.Cu"])
+	var i_odd_traces := _pass_index(odd, PcbCopperDrawOrder.TRACES, "Mystery.Cu")
+	var i_odd_lands := _pass_index(odd, PcbCopperDrawOrder.SMD_LANDS, "Mystery.Cu")
+	check("copper on an UNDECLARED layer still gets a pass — nothing an author "
+			+ "wrote is silently undrawn", i_odd_traces >= 0)
+	check("...and so do lands on one", i_odd_lands >= 0)
+	check("...both above the declared stack, traces still under lands",
+			i_odd_traces > _pass_index(odd, PcbCopperDrawOrder.TRACES, "top")
+			and i_odd_traces < i_odd_lands)
+
+	# The interleave is the stack's, not a hardcoded pair.
+	var four: Array = PcbCopperDrawOrder.build(
+			["top", "in1", "in2", "bottom"], ["in1"], ["top"])
+	check_eq("every declared layer gets its own trace+land pair, plus the three "
+			+ "board-wide passes", four.size(), 4 * 2 + 3)
+	check("an inner layer paints in ITS stack position, under the layers above it",
+			_pass_index(four, PcbCopperDrawOrder.TRACES, "in2")
+					< _pass_index(four, PcbCopperDrawOrder.TRACES, "in1"))
+
+	# The canvas must actually WALK that plan, and must no longer paint lands
+	# with the component bodies — the move is the fix.
+	var src := FileAccess.get_file_as_string(CANVAS_SRC)
+	var copper_body := _func_body(src, "func _draw_copper() -> void:")
+	var draw_body := _func_body(src, "func _draw() -> void:")
+	var component_body := _func_body(src, "func _draw_component(comp) -> void:")
+	check("the canvas dispatches the pass list rather than an order of its own",
+			copper_body.find("PcbCopperDrawOrder.build(") >= 0)
+	check("component BODIES still paint under the copper (%d < %d)"
+					% [draw_body.find("_draw_components()"), draw_body.find("_draw_copper()")],
+			draw_body.find("_draw_components()") >= 0
+			and draw_body.find("_draw_components()") < draw_body.find("_draw_copper()"))
+	check("...and the land render left the component pass entirely",
+			component_body.length() > 200
+			and component_body.find("_draw_component_pads(") < 0
+			and component_body.find("_draw_fallback_pins(") < 0)
 
 
 func check(desc: String, cond: bool) -> void:

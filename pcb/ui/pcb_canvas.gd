@@ -76,6 +76,9 @@ const PcbLibraryPart := preload("model/pcb_library_part.gd")
 ## cannot disagree about what "the whole board" is.
 const PcbViewFit := preload("pcb_view_fit.gd")
 const PcbFabPreview := preload("model/pcb_fab_preview.gd")
+## The copper pass order (traces → lands → drills, per layer) as data; see
+## _draw_copper().
+const PcbCopperDrawOrder := preload("model/pcb_copper_draw_order.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -1922,7 +1925,7 @@ func _draw() -> void:
 
 	_draw_components()
 
-	_draw_mounting_holes()
+	_draw_mounting_hole_rims()
 
 	# Zones sit ABOVE components and BELOW traces. Above components because the
 	# whole point of the antenna keepout is that it overlaps U1's body — drawn
@@ -1948,8 +1951,12 @@ func _draw() -> void:
 	if tool_mode == ToolMode.CUTOUT:
 		_draw_cutout_preview()
 
-	if show_traces:
-		_draw_traces()
+	# ALL COPPER, in manufacturing order: per layer, traces then that layer's
+	# lands, then the through-hole lands and vias above the whole stack, then
+	# every drilled hole as a void. Unconditional — the show_traces / show_pads
+	# eyes are applied INSIDE, because the two halves of copper have separate
+	# toggles but one shared order (see _draw_copper).
+	_draw_copper()
 
 	# BOARD-LEVEL silk and courtyard. Drawn here — above copper, below previews
 	# and overlays — because that is what printed ink IS: it goes
@@ -2255,48 +2262,103 @@ func _stack_layers() -> Array:
 	return ["top", "bottom"]
 
 
-## Draw all traces (bottom-most copper first, top-most copper last, then vias),
-## honoring the layer filter.
+## Draw ALL copper, in the order a board is made: per layer bottom-most first,
+## that layer's traces then that layer's lands; then the through-hole lands and
+## the vias, which pierce the whole stack; then every drilled hole as a void
+## over all of it. PcbCopperDrawOrder.build() owns that order — this function
+## buckets the board by layer, then does nothing but dispatch the passes it
+## returns, so the order asserted there is the order drawn here.
 ##
-## Epoch 6 unit 3b: walks the board's declared stack instead of the two hardcoded
-## "bottom" / "everything-else" passes, so an inner layer paints in ITS stack
-## position and only when it (or "all") is selected. For the 2-layer stack this
-## produces exactly the old order — bottom, then top.
-func _draw_traces() -> void:
-	# Bucket by layer ONCE: the stack walk below is then one pass over the board
-	# rather than one full pass per declared layer.
-	var by_layer := {}
-	for trace_id in data.traces:
-		var trace = data.traces[trace_id]
-		var lid := str(trace.layer)
-		if not by_layer.has(lid):
-			by_layer[lid] = []
-		by_layer[lid].append(trace)
+## Why traces cannot stay above lands: a trace entering a through-hole land is
+## one copper shape with it, and the drill clears the middle. Painted the other
+## way round the canvas shows a trace running straight across an open hole,
+## which is a board no fab makes.
+##
+## Epoch 6 unit 3b: the stack walk uses the board's DECLARED stack rather than
+## two hardcoded "bottom" / "everything-else" passes, so an inner layer paints
+## in ITS stack position and only when it (or "all") is selected.
+##
+## The two eyes are applied while bucketing rather than at dispatch, so the pass
+## list matches what actually reaches the screen: show_traces gates copper
+## traces and vias, show_pads gates lands (with show_pins covering the nominal
+## fallback pins of a part that resolved no real pad geometry).
+func _draw_copper() -> void:
+	# Bucket traces by layer ONCE: the stack walk is then one pass over the
+	# board rather than one full pass per declared layer.
+	var traces_by_layer := {}
+	if show_traces:
+		for trace_id in data.traces:
+			var trace = data.traces[trace_id]
+			var lid := str(trace.layer)
+			if not traces_by_layer.has(lid):
+				traces_by_layer[lid] = []
+			traces_by_layer[lid].append(trace)
 
-	# Backwards through the declared stack: bottom-most copper paints first so
-	# the top-most copper lands on top of it.
-	var stack: Array = _stack_layers()
-	for i in range(stack.size() - 1, -1, -1):
-		var layer_id := str(stack[i])
-		if not by_layer.has(layer_id):
+	# Bucket lands the same way. SMD copper belongs to the side the part is
+	# mounted on, so it is keyed by mount layer; a through-hole land exists on
+	# every copper layer, so those parts collect in one list drawn above the
+	# whole stack. The branch structure mirrors what _draw_component used to do
+	# inline — same gates, same fallback-pin rule — so which lands appear is
+	# unchanged and only WHEN they are painted moved.
+	var smd_by_layer := {}
+	var tht_comps: Array = []
+	var fallback_comps: Array = []
+	for comp_id in data.components:
+		var comp = data.components[comp_id]
+		var visibility := _component_visibility(comp)
+		if visibility == CompVisibility.NONE:
 			continue
-		if _layer_visible(layer_id):
-			for trace in by_layer[layer_id]:
-				_draw_single_trace(trace, layer_id)
-		by_layer.erase(layer_id)
+		var has_real_pads: bool = comp.has_pad_geometry and comp.pads.size() > 0
+		if show_pads and has_real_pads:
+			tht_comps.append(comp)
+			# LANDS visibility means the part is mounted elsewhere: its
+			# through-hole rings still pierce this view, its SMD copper does not.
+			if visibility == CompVisibility.FULL:
+				var mount := str(comp.layer)
+				if not smd_by_layer.has(mount):
+					smd_by_layer[mount] = []
+				smd_by_layer[mount].append(comp)
+		elif show_pins and visibility == CompVisibility.FULL:
+			fallback_comps.append(comp)
 
-	# Traces on a layer the board never declared (an out-of-stack or malformed
-	# layer name). They are DRAWN, not dropped — hiding copper that exists would
-	# be the silent failure — but last, above the declared stack, and still gated
-	# by the filter. Under "all" this is exactly the pre-3b rendering.
-	for undeclared_id in by_layer:
-		if not _layer_visible(undeclared_id):
-			continue
-		for undeclared_trace in by_layer[undeclared_id]:
-			_draw_single_trace(undeclared_trace, str(undeclared_id))
+	for step in PcbCopperDrawOrder.build(
+			_stack_layers(), traces_by_layer.keys(), smd_by_layer.keys()):
+		var layer_id := str(step["layer"])
+		match str(step["kind"]):
+			PcbCopperDrawOrder.TRACES:
+				# The filter still decides: copper that exists is never dropped
+				# for lacking a declared layer, only for a closed eye.
+				if _layer_visible(layer_id):
+					for trace in traces_by_layer.get(layer_id, []):
+						_draw_single_trace(trace, layer_id)
+			PcbCopperDrawOrder.SMD_LANDS:
+				for comp in smd_by_layer.get(layer_id, []):
+					_draw_component_pads(comp, PadSet.SMD, PadPhase.LANDS)
+			PcbCopperDrawOrder.THT_LANDS:
+				for comp in tht_comps:
+					_draw_component_pads(comp, PadSet.THT, PadPhase.LANDS)
+				# Nominal pins are not real copper, but they read as lands and a
+				# trace must not cross them either.
+				for comp in fallback_comps:
+					_draw_fallback_pins(comp, comp.get_transform(), PadPhase.LANDS)
+			PcbCopperDrawOrder.VIAS:
+				if show_traces:
+					_draw_vias()
+			PcbCopperDrawOrder.DRILLS:
+				for comp in tht_comps:
+					_draw_component_pads(comp, PadSet.THT, PadPhase.DRILLS)
+				for comp in fallback_comps:
+					_draw_fallback_pins(comp, comp.get_transform(), PadPhase.DRILLS)
+				if show_traces:
+					_draw_via_drills()
+				_draw_mounting_hole_drills()
 
-	# Vias (on top of all traces) — which is also why the click ladder gives them
-	# the tie against a trace running through them (see _entity_at).
+
+## Via copper — the barrel's ring plus its selection halo. Above every trace,
+## which is also why the click ladder gives a via the tie against a trace
+## running through it (see _entity_at). The barrel's hole is a drill, so it is
+## painted in the drill pass, not here.
+func _draw_vias() -> void:
 	for via in data.vias:
 		# ONE position parser, shared with the click pick and the marquee sweep
 		# (PCBData.via_position), so what is drawn and what is hit can never drift
@@ -2304,7 +2366,6 @@ func _draw_traces() -> void:
 		var pos: Vector2 = world_to_screen(PCBDataScript.via_position(via))
 
 		var outer_radius: float = maxf((via.get("size", 0.8) / 2.0) * zoom, 2.0)
-		var inner_radius: float = (via.get("drill", 0.4) / 2.0) * zoom
 
 		var color := pad_copper_color
 		var net = data.get_net(via.get("net_name", ""))
@@ -2323,6 +2384,13 @@ func _draw_traces() -> void:
 			draw_arc(pos, halo_radius + 3.0, 0.0, TAU, 24, trace_selected_color, 2.0)
 
 		draw_circle(pos, outer_radius, color)
+
+
+## Via holes, as voids over all copper — same geometry the ring above used.
+func _draw_via_drills() -> void:
+	for via in data.vias:
+		var pos: Vector2 = world_to_screen(PCBDataScript.via_position(via))
+		var inner_radius: float = (via.get("drill", 0.4) / 2.0) * zoom
 		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
@@ -2391,7 +2459,7 @@ func _draw_single_trace(trace, layer_id: String) -> void:
 ## pour, and its warning render must not sit under pour geometry.
 ##
 ## WITHIN each pass, zones paint in STACK order — bottom-most copper first, the
-## same _stack_layers() walk _draw_traces uses (epoch GA-1): with N declared
+## same _stack_layers() walk _draw_copper uses (epoch GA-1): with N declared
 ## layers, two overlapping pours on different layers must stack the way the
 ## board physically does, not in board-file insertion order. A zone on an
 ## undeclared layer paints LAST and stays visible, the traces rule exactly —
@@ -2501,7 +2569,7 @@ func _draw_zone(zone: Dictionary, is_keepout: bool, ghost: bool = false) -> void
 ## Vertex handles on the SELECTED zone's outline (A5).
 ##
 ## Same shape and colour language the selected TRACE already uses for its
-## waypoints (draw_circle in trace_selected_color, see _draw_traces) — a selected
+## waypoints (draw_circle in trace_selected_color, see _draw_single_trace) — a selected
 ## polyline-ish entity shows its points, whatever kind it is — just a touch larger,
 ## because these are grabbable and a trace's are not yet.
 ##
@@ -3196,11 +3264,11 @@ func _draw_components() -> void:
 		_draw_component(comp)
 
 
-## Draw board-level mounting holes (structural — not components, not vias).
-## Mirrors the via draw loop in _draw_traces(): resolves position (Vector2 or
-## {x,y} dict), draws an outer rim in mounting_hole_color and an inner drill
-## circle so it reads as a hole.
-func _draw_mounting_holes() -> void:
+## Board-level mounting-hole RIMS (structural — not components, not vias).
+## Mirrors the via draw split in _draw_copper(): resolves position (Vector2 or
+## {x,y} dict) and draws the outer rim here, while the hole itself is a void
+## painted with the other drills (_draw_mounting_hole_drills).
+func _draw_mounting_hole_rims() -> void:
 	for hole in data.mounting_holes:
 		var pos_data = hole.get("position", Vector2.ZERO)
 		var pos: Vector2
@@ -3212,16 +3280,31 @@ func _draw_mounting_holes() -> void:
 			continue
 
 		var outer_radius: float = (hole.get("diameter", 3.2) / 2.0) * zoom
-		var inner_radius: float = outer_radius * 0.8
-
 		draw_circle(pos, maxf(outer_radius, 2.0), mounting_hole_color)
+
+
+## The mounting holes themselves, drawn with the drill pass so the hole is empty
+## whatever copper the board runs past its rim. Same position parser and same
+## rim-to-hole ratio the rim loop above uses.
+func _draw_mounting_hole_drills() -> void:
+	for hole in data.mounting_holes:
+		var pos_data = hole.get("position", Vector2.ZERO)
+		var pos: Vector2
+		if pos_data is Vector2:
+			pos = world_to_screen(pos_data)
+		elif pos_data is Dictionary:
+			pos = world_to_screen(Vector2(pos_data.get("x", 0), pos_data.get("y", 0)))
+		else:
+			continue
+
+		var inner_radius: float = (hole.get("diameter", 3.2) / 2.0) * zoom * 0.8
 		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
 ## Draw a single component using rigid body transform, scoped by the layer filter
-## (see _component_visibility for the rule). Draw ORDER is unchanged from before
-## the filter existed — body, silk, courtyard, pads/pins, badge, label — so the
-## "all" render is byte-for-byte the old one.
+## (see _component_visibility for the rule): body, silk, courtyard, badge, label.
+## Its LANDS are deliberately NOT here — they are copper, and copper paints in
+## _draw_copper above the traces that reach it.
 func _draw_component(comp) -> void:
 	var visibility := _component_visibility(comp)
 	if visibility == CompVisibility.NONE:
@@ -3231,12 +3314,6 @@ func _draw_component(comp) -> void:
 	var body_visible := visibility == CompVisibility.FULL
 
 	var xform: Transform2D = comp.get_transform()
-
-	# Resolved footprint geometry vs the fallback pin renderer. The same
-	# condition the fab emitter uses to fail closed (bug 019f7736b236): a
-	# component WITHOUT real pad geometry is drawn from nominal fallback pins and
-	# would not fabricate as-is — so it is badged (step 4b, canvas degrades).
-	var has_real_pads: bool = comp.has_pad_geometry and comp.pads.size() > 0
 
 	if body_visible:
 		var color: Color = comp.color
@@ -3269,14 +3346,11 @@ func _draw_component(comp) -> void:
 		if show_courtyard and comp.graphics.size() > 0:
 			_draw_component_courtyard(comp, xform)
 
-	if show_pads and has_real_pads:
-		# LANDS: pass tht_only so the SMD pads of an other-side part are skipped
-		# while its through-hole rings still draw. FULL passes false — every pad.
-		_draw_component_pads(comp, xform, not body_visible)
-	elif show_pins and body_visible:
-		# Fallback pins are nominal, not real copper, and a LANDS component has
-		# real pads by construction — so this branch is body-only.
-		_draw_fallback_pins(comp, xform)
+	# LANDS AND PINS ARE NOT DRAWN HERE. They are copper, so they paint in the
+	# copper pass (_draw_copper) above the traces that reach them — a trace
+	# painted over a land would appear to cross its open drill hole. The gates
+	# that decide WHICH lands appear (show_pads / show_pins / visibility) moved
+	# there with them, unchanged.
 
 	if body_visible and show_unresolved_badges and _component_unresolved(comp):
 		# _component_screen_poly is the same transform the body used above (and
@@ -3429,22 +3503,28 @@ func pad_draw_geometry(comp, pad: Dictionary) -> Dictionary:
 	return comp.get_pad_world_transform(pad)
 
 
-## Draw pads with accurate geometry from KiCAD footprint.
-##
-## `tht_only` renders ONLY the through-hole lands, for a component whose body is
-## on another copper layer than the one being viewed (see _component_visibility).
-## Defaults false, so the full-render callers are unchanged.
-func _draw_component_pads(comp, _xform: Transform2D, tht_only: bool = false) -> void:
+## Which pads of a component one call draws. An SMD pad is copper on ONE side,
+## so it only ever appears on its mount layer's pass; a through-hole barrel
+## pierces every layer, so its land is painted once above the whole stack.
+enum PadSet { SMD, THT }
+
+## Which HALF of a land one call draws: its copper, or the hole drilled through
+## it. Splitting them is what lets every drill paint after every piece of
+## copper, so a trace entering a land never appears to cross its open hole.
+enum PadPhase { LANDS, DRILLS }
+
+
+## Draw pads with accurate geometry from KiCAD footprint, one set and one phase
+## at a time (see PadSet / PadPhase, and _draw_copper for the pass order).
+## PadSet.SMD with PadPhase.DRILLS draws nothing — surface copper has no hole.
+func _draw_component_pads(comp, pad_set: PadSet, phase: PadPhase) -> void:
 	for pad in comp.pads:
 		var pad_type: String = pad.get("type", "smd")
 		var pad_shape: String = pad.get("shape", "rect")
 		var pad_size: Vector2 = pad.get("size", Vector2(1, 1))
 
 		var is_tht := pad_type in THT_PAD_TYPES
-
-		# An SMD pad is copper on ONE side; it does not appear on any other
-		# layer's view. A through-hole barrel pierces them all, so its land does.
-		if tht_only and not is_tht:
+		if is_tht != (pad_set == PadSet.THT):
 			continue
 
 		# ONE land-to-world transform, shared with the copper hit test. Drawing
@@ -3457,25 +3537,25 @@ func _draw_component_pads(comp, _xform: Transform2D, tht_only: bool = false) -> 
 		var screen_size := (world["size"] as Vector2) * zoom
 		var pad_rot: float = -float(world["rotation"])
 
-		var draw_color := pad_copper_color
-		if pad_type == "smd":
-			draw_color = pad_smd_color
-		elif pad_type == "np_thru_hole":
-			draw_color = mounting_hole_color
+		if phase == PadPhase.LANDS:
+			var draw_color := pad_copper_color
+			if pad_type == "smd":
+				draw_color = pad_smd_color
+			elif pad_type == "np_thru_hole":
+				draw_color = mounting_hole_color
 
-		match pad_shape:
-			"rect":
-				_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
-			"circle":
-				_draw_circle_pad(screen_pos, screen_size, draw_color)
-			"oval":
-				_draw_oval_pad(screen_pos, screen_size, pad_rot, draw_color)
-			"roundrect":
-				_draw_roundrect_pad(screen_pos, screen_size, pad_rot, draw_color)
-			_:
-				_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
-
-		if is_tht:
+			match pad_shape:
+				"rect":
+					_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
+				"circle":
+					_draw_circle_pad(screen_pos, screen_size, draw_color)
+				"oval":
+					_draw_oval_pad(screen_pos, screen_size, pad_rot, draw_color)
+				"roundrect":
+					_draw_roundrect_pad(screen_pos, screen_size, pad_rot, draw_color)
+				_:
+					_draw_rect_pad(screen_pos, screen_size, pad_rot, draw_color)
+		else:
 			var drill_val = pad.get("drill", Vector2.ZERO)
 			var drill_diameter: float = 0.0
 			if drill_val is Vector2:
@@ -3736,7 +3816,12 @@ func _draw_component_courtyard(comp, xform: Transform2D) -> void:
 
 
 ## Fallback pin rendering when pad geometry not available.
-func _draw_fallback_pins(comp, xform: Transform2D) -> void:
+##
+## Nominal, not real copper — the component it belongs to did not resolve and is
+## badged as unfabricable. It still reads as lands and holes on screen, so it
+## honours the same LANDS/DRILLS split real pads do (see PadPhase): every hole
+## it draws is painted after all copper, not with the ring around it.
+func _draw_fallback_pins(comp, xform: Transform2D, phase: PadPhase) -> void:
 	var is_mounting_hole: bool = comp.footprint == PCBComponentScript.FootprintType.MOUNTING_HOLE
 	var is_tht_footprint: bool = comp.footprint in [
 		PCBComponentScript.FootprintType.IC_DIP,
@@ -3763,10 +3848,12 @@ func _draw_fallback_pins(comp, xform: Transform2D) -> void:
 			var world_pin_pos: Vector2 = comp.position + (xform * local_pin_pos)
 			var pin_screen := world_to_screen(world_pin_pos)
 
-			var annulus_radius: float = hole_radius + (0.5 * zoom)
-			draw_circle(pin_screen, maxf(annulus_radius, 2.0), mounting_hole_color)
-			draw_circle(pin_screen, maxf(hole_radius, 1.5), drill_hole_color)
-			draw_arc(pin_screen, maxf(hole_radius, 1.5), 0, TAU, 24, Color(0.5, 0.5, 0.5, 0.8), 1.5)
+			if phase == PadPhase.LANDS:
+				var annulus_radius: float = hole_radius + (0.5 * zoom)
+				draw_circle(pin_screen, maxf(annulus_radius, 2.0), mounting_hole_color)
+			else:
+				draw_circle(pin_screen, maxf(hole_radius, 1.5), drill_hole_color)
+				draw_arc(pin_screen, maxf(hole_radius, 1.5), 0, TAU, 24, Color(0.5, 0.5, 0.5, 0.8), 1.5)
 
 	elif is_tht_footprint or is_likely_tht:
 		var pad_diameter := 1.7
@@ -3779,16 +3866,17 @@ func _draw_fallback_pins(comp, xform: Transform2D) -> void:
 			var world_pin_pos: Vector2 = comp.position + (xform * local_pin_pos)
 			var pin_screen := world_to_screen(world_pin_pos)
 
-			if pin_name == "1":
+			if phase == PadPhase.DRILLS:
+				draw_circle(pin_screen, maxf(drill_radius, 1.0), drill_hole_color)
+				draw_arc(pin_screen, maxf(drill_radius, 1.0), 0, TAU, 16, Color(0.4, 0.4, 0.4, 0.6), 1.0)
+			elif pin_name == "1":
 				var pad_size := Vector2(pad_diameter, pad_diameter) * zoom
 				_draw_rect_pad(pin_screen, pad_size, -comp.rotation, pad_copper_color)
 			else:
 				draw_circle(pin_screen, maxf(pad_radius, 2.0), pad_copper_color)
 
-			draw_circle(pin_screen, maxf(drill_radius, 1.0), drill_hole_color)
-			draw_arc(pin_screen, maxf(drill_radius, 1.0), 0, TAU, 16, Color(0.4, 0.4, 0.4, 0.6), 1.0)
-
-	else:
+	elif phase == PadPhase.LANDS:
+		# Surface pins have no hole, so they exist only in the lands phase.
 		var pad_size := 1.0
 		var pad_radius := (pad_size * zoom) / 2.0
 
@@ -5205,7 +5293,7 @@ func _filter_masked_route_hints(ids: PackedStringArray, select_rect: Rect2, rout
 ## THE VIA RUNG SITS ABOVE TRACE — the one deliberate decision this unit made
 ## about the ladder (item 019fbb96cf), and the reasoning is worth keeping:
 ##
-##  * PAINT ORDER. Vias draw ON TOP of every trace (_draw_traces paints them last,
+##  * PAINT ORDER. Vias draw ON TOP of every trace (_draw_copper paints them
 ##    after the whole layer stack). "What you see on top is what you click" is the
 ##    rule every direct-manipulation surface keeps, and it is the rule the zone
 ##    vertex handles already keep on this canvas.
@@ -5332,7 +5420,7 @@ func _via_at(world_pos: Vector2) -> String:
 ## Is a via drawable in the current view? The via twin of _trace_visible /
 ## _zone_visible, and the single source for BOTH the click pick and the box
 ## sweep. Takes no via argument because the rule is board-wide: vias ride the
-## show_traces toggle (they are drawn inside _draw_traces) and carry no layer
+## show_traces toggle (they are drawn inside _draw_copper) and carry no layer
 ## filter of their own.
 func _via_visible() -> bool:
 	return show_traces
@@ -5353,7 +5441,7 @@ func _trace_at(world_pos: Vector2) -> String:
 
 ## Is this trace drawable in the current view? The trace twin of
 ## _component_visibility / _zone_visible, and the single source for BOTH the
-## click pick and the box sweep. Mirrors _draw_traces: the layer filter, plus the
+## click pick and the box sweep. Mirrors _draw_copper: the layer filter, plus the
 ## show_traces toggle (hidden copper must not be clickable copper).
 func _trace_visible(trace) -> bool:
 	return show_traces and _layer_visible(_canonical_layer(str(trace.layer)))
@@ -8631,7 +8719,7 @@ func _finish_trace_on_anchor(hit: Dictionary) -> void:
 ##
 ## create_trace_entity → add_trace emits data_changed, which is what marks the tab
 ## dirty (PCBPanel relays it to content_changed) and what repaints the canvas — so
-## the committed trace appears through the ordinary _draw_traces path, with no
+## the committed trace appears through the ordinary _draw_copper path, with no
 ## special case for "just drawn". There is no separate dirty flag to set.
 func _commit_trace(warning: String = "") -> void:
 	if not data or tool_mode != ToolMode.TRACE:
@@ -10590,7 +10678,7 @@ func _candidates_active() -> bool:
 ##   rejected           — never. The user already said no; redrawing it is the
 ##                        canvas arguing with them.
 ##   committed          — never, AND THIS ONE IS THE TRAP: a committed candidate's
-##                        copper IS on the board, drawn by _draw_traces from
+##                        copper IS on the board, drawn by _draw_copper from
 ##                        PCBData as REAL copper. Rendering the ghost too would
 ##                        DOUBLE-DRAW the same route — a brighter, thicker line
 ##                        that reads as a DRC-worthy overlap and is not one. The
@@ -10620,7 +10708,7 @@ func _candidate_via_visible() -> bool:
 
 
 ## THE DERIVATION. Every ghost on this canvas, as flat draw records, in paint
-## order (segments first, then vias — vias land on top, mirroring _draw_traces).
+## order (segments first, then vias — vias land on top, mirroring _draw_copper).
 ##
 ## Each item:
 ##   candidate_id  String   the owning candidate

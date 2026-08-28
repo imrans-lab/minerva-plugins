@@ -11,6 +11,7 @@ is the whole point of naming them.
 | `pcb_bus_geometry.gd` | The parallel-bus construction: mitered offsets, pitch (`pitch_between` is the rule, `lane_pitch_between` the laid spacing, `LANE_PITCH_MARGIN_MM` past it), `bundle_routes` (pad-to-pad routes, via station, open-ended lanes), the clearance measurement, `clean_pick_order`. |
 | `pcb_bus_labels.gd` | The words and colour a bus lane wears: `net_color` (the ratsnest's rule), lane labels/lines, the teach-line rules, the open-lane and clean-order sentences. |
 | `pcb_layer_stack.gd` | Canonical layer names, KiCad aliases, via-span legality. |
+| `pcb_copper_draw_order.gd` | The order the canvas paints copper in, as data: per layer, traces then that layer's lands; then through-hole lands and vias above the whole stack; then every drilled hole as a void. `pcb_canvas._draw_copper()` walks the list and only dispatches. |
 | `pcb_staged_entities.gd`, `pcb_ratsnest.gd`, `pcb_spatial_index.gd`, `pcb_routing_workspace.gd`, … | Their own bounded concerns, same shape. |
 
 New geometry goes into `pcb_trace_geometry.gd` — never into `pcb_canvas.gd`

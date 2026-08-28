@@ -387,7 +387,7 @@ func _run_terminal_dispositions_never_render() -> void:
 		canvas.candidate_draw_items().size(), 4)
 
 	# ── the COMMITTED DOUBLE-DRAW TRAP ────────────────────────────────────────
-	# A committed candidate's copper is on the board and is drawn by _draw_traces
+	# A committed candidate's copper is on the board and is drawn by _draw_copper
 	# from PCBData as REAL copper. If the ghost drew too, the same route would be
 	# painted twice — brighter and thicker, reading as an overlap that is not
 	# one. The board IS the display of a committed candidate.

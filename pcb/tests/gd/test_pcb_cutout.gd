@@ -255,13 +255,13 @@ func _test_draw_order() -> void:
 	var i_zones := body.find("_draw_zones()")
 	var i_preview := body.find("_draw_cutout_preview()")
 	var i_halos := body.find("_draw_cutout_halos()")
-	var i_traces := body.find("_draw_traces()")
+	var i_copper := body.find("_draw_copper()")
 	check("BT-83: every draw call was found",
 			i_board >= 0 and i_cutouts >= 0 and i_components >= 0 and i_zones >= 0
-			and i_preview >= 0 and i_halos >= 0 and i_traces >= 0,
-			"board=%d cutouts=%d comps=%d zones=%d preview=%d halos=%d traces=%d"
+			and i_preview >= 0 and i_halos >= 0 and i_copper >= 0,
+			"board=%d cutouts=%d comps=%d zones=%d preview=%d halos=%d copper=%d"
 					% [i_board, i_cutouts, i_components, i_zones, i_preview, i_halos,
-						i_traces])
+						i_copper])
 
 	check("BT-83: the committed cutout BASE draws AFTER the board rect",
 			i_board < i_cutouts, "board=%d cutouts=%d" % [i_board, i_cutouts])
@@ -274,8 +274,8 @@ func _test_draw_order() -> void:
 	check("BT-83: the selection HALO sits at the same depth as the preview, "
 			+ "above the components", i_components < i_halos)
 	check("BT-83: the preview is still BELOW the copper it is being drawn against "
-			+ "(traces stay the most legible thing)", i_preview < i_traces,
-			"preview=%d traces=%d" % [i_preview, i_traces])
+			+ "(copper stays the most legible thing)", i_preview < i_copper,
+			"preview=%d copper=%d" % [i_preview, i_copper])
 
 
 ## The text of `func _draw()`'s body, up to the next top-level `func`.
