@@ -30,7 +30,7 @@ from typing import Any
 
 from agent_router import layers as _layers
 
-from . import silk_source
+from . import refdes_anchor, silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .geometry import place_point
 from .ir_projection import (
@@ -124,6 +124,13 @@ def _stack_shape_error(stack: list[str]) -> str | None:
 
 def _num(v: Any, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+
+def _coord(v: float) -> str:
+    """One millimetre value as KiCad writes it: an integral value loses its
+    ``.0``. Kept to the designator text, where an anchor of exactly ``0`` is the
+    common case and the s-expression an untouched board emits must not move."""
+    return str(int(v)) if float(v).is_integer() else str(float(v))
 
 
 def _opt_num(v: Any) -> float | None:
@@ -673,11 +680,8 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
     # B.Fab for a bottom (B.Cu) footprint, F.Fab otherwise. A bottom footprint's
     # documentation text belongs on B.Fab — pinning it to F.Fab left B.Fab empty and
     # put bottom designators on the wrong side (finding 019f8b715ca6). Fab (not
-    # F.SilkS) because R5 emits the footprint's REAL silk graphics; a placeholder
-    # reference glyph hard-pinned at local (0, -1.5) with no footprint-aware
-    # placement datum would land ON that real silk and trip KiCad's silkscreen-
-    # overlap DRC. Side-aware Fab designators are standard KiCad assembly practice
-    # and keep the silk layer to the footprint's own faithful outline.
+    # F.SilkS) because R5 emits the footprint's REAL silk graphics, and a second
+    # reference glyph on the silk layer would print the designator twice.
     fab_layer = "B.Fab" if layer == "B.Cu" else "F.Fab"
     # Text on a BACK layer must be MIRRORED or KiCad's DRC raises
     # nonmirrored_text_on_back_layer (verified vs pcbnew 9.0.9: a B.Fab fp_text
@@ -686,8 +690,24 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
     value = comp.get("value") or ""
     pads_nets = pad_net.get(ref, {})
 
+    # WHERE the reference sits is the SAME question the Gerber emitter answers,
+    # so it is read through the same rule rather than hard-pinned at (0, -1.5):
+    # the board's authored `refdes_placement` first, else the `refdes_anchor` the
+    # resolve step attached (the footprint's own fp_text, else the anchor derived
+    # from its body). A board that has never been resolved carries neither and
+    # keeps the historical offset. `hidden` rides along as KiCad's own `hide`
+    # flag, which is what a hidden reference means in a .kicad_pcb.
+    refdes = refdes_anchor.loose_reference_text(comp)
+    ref_x, ref_y = ((0.0, silk_source.REFDES_LOCAL_Y_MM) if refdes is None
+                    else refdes.position)
+    ref_rot = 0.0 if refdes is None else refdes.rotation_deg
+    ref_hide = " hide" if refdes is not None and refdes.hidden else ""
+    ref_at = (f"(at {_coord(ref_x)} {_coord(ref_y)})" if ref_rot == 0.0
+              else f"(at {_coord(ref_x)} {_coord(ref_y)} {_coord(ref_rot)})")
+
     lines = [f'  (footprint "{_esc(str(fp))}" (layer "{layer}") (at {x} {y} {rot})']
-    lines.append(f'    (fp_text reference "{_esc(ref)}" (at 0 -1.5) (layer "{fab_layer}"){fab_effects})')
+    lines.append(f'    (fp_text reference "{_esc(ref)}" {ref_at} '
+                 f'(layer "{fab_layer}"){ref_hide}{fab_effects})')
     lines.append(f'    (fp_text value "{_esc(str(value))}" (at 0 1.5) (layer "{fab_layer}"){fab_effects})')
 
     # iter_pads PREFERS resolved comp["pads"] (real footprint geometry — the SAME
@@ -1101,7 +1121,7 @@ def _kicad_component_to_dict(board: ResolvedBoard,
         _localize_graphic_points(out, px, py, rot)
         return out
 
-    return {
+    out = {
         "ref": component.ref,
         "value": component.value,
         "footprint": definition.name,
@@ -1140,6 +1160,21 @@ def _kicad_component_to_dict(board: ResolvedBoard,
             if silk_source.silk_side(g.layer.id) is not None
         ],
     }
+    # WHERE the designator prints, forwarded as the loose-dict anchor the
+    # emitter reads (ResolvedComponent.refdes — the ONE answer the Gerber
+    # emitter and the DRC silk projection also read, so the .kicad_pcb puts the
+    # reference where the fab prints it). PRESENT-ONLY: a component with no
+    # placement anywhere and no body to measure forwards nothing and the emitter
+    # keeps its historical offset, so no untouched board's s-expression moves.
+    if component.refdes is not None:
+        out["refdes_anchor"] = {
+            "x_mm": component.refdes.position[0],
+            "y_mm": component.refdes.position[1],
+            "rotation_deg": component.refdes.rotation_deg,
+            "size_mm": component.refdes.size_mm,
+            "hidden": component.refdes.hidden,
+        }
+    return out
 
 
 def _localize_graphic_points(graphic_dict: dict, px: float, py: float,

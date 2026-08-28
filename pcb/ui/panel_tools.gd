@@ -6371,6 +6371,10 @@ static func _board_rules(host, args: Dictionary) -> Dictionary:
 ## HERE is the two things a verb owes the board: nothing is written unless the
 ## whole write validates, and a write that lands is exactly ONE undo step —
 ## the same save_to_history pairing every placement verb above uses.
+##
+## A write is AUTHORED BOARD STATE, not a canvas decoration: PCBData.set_refdes_
+## anchor records it as the component's `refdes_placement`, which every disk path
+## writes and the worker honours above the footprint's own reference fp_text.
 static func _set_refdes(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):

@@ -84,6 +84,7 @@ func _init() -> void:
 	_run_the_pads_key_is_an_authority_claim()
 	_run_the_drawn_designator_is_the_live_ref()
 	await _run_the_designator_anchor_is_movable()
+	await _run_the_placement_is_board_state()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -760,3 +761,100 @@ func _run_the_designator_anchor_is_movable() -> void:
 	check("hidden:true draws no designator and reports no box",
 		data.get_component(REFDES_REF).refdes_graphics.is_empty()
 			and _box(hidden).is_empty())
+
+
+# ── 6. the placement is BOARD STATE, not panel decoration ────────────────────
+#
+# Section 5 states that the verb moves the label. This section states that the
+# move SURVIVES: a placement somebody set is written into the board document,
+# comes back on load, and reaches the worker — while a placement nobody set
+# stays absent, so the derivation is free to answer differently on the next
+# resolve or on a machine with a different library.
+#
+# THE ORACLE IS THE DOCUMENT AND THE REDRAWN INK. Every claim is made on the
+# dict `to_saved_board_dict` actually produces, or on the strokes a component
+# rebuilt from that dict draws — never on the field that was just assigned.
+
+## What one component's saved board dict says, or {} when it is not there.
+func _saved_component(data, ref: String) -> Dictionary:
+	for entry in (data.to_saved_board_dict().get("components", []) as Array):
+		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == ref:
+			return entry
+	return {}
+
+
+func _run_the_placement_is_board_state() -> void:
+	print("-- 6. an authored designator placement is written, reloaded and shipped --")
+	var host := _refdes_host()
+	var data = host.data
+
+	# A component nobody has touched authors nothing. Both halves matter: the
+	# authored key must be absent (nobody chose) AND the effective anchor must
+	# be absent (it is this host's derivation, not the board's).
+	var untouched: Dictionary = _saved_component(data, REFDES_REF)
+	check("a component nobody set states no authored placement",
+		not untouched.has("refdes_placement"))
+	check("…and the document carries no derived anchor either",
+		not untouched.has("refdes_anchor"))
+
+	# THE WRITE. A deliberate three-field move so a dict that carried only the
+	# position, or only the default size, cannot pass.
+	var authored := {"x_mm": 1.75, "y_mm": -6.0, "rotation_deg": 0.0,
+		"size_mm": 1.4, "hidden": false}
+	await _refdes_call(host, authored)
+	var saved: Dictionary = _saved_component(data, REFDES_REF)
+	check("after set_refdes the document states the authored placement",
+		(saved.get("refdes_placement", {}) as Dictionary) == authored)
+	check("…and STILL no derived anchor rides to disk beside it",
+		not saved.has("refdes_anchor"))
+
+	# THE RELOAD. A fresh model, fed only the document — no resolve, no worker.
+	# The label has to draw at the authored place from the board alone, or an
+	# agent's placement is lost every time the tab is rebuilt.
+	var reloaded = PCBData.new()
+	reloaded.from_board_dict(data.to_saved_board_dict())
+	var live = data.get_component(REFDES_REF)
+	var back = reloaded.get_component(REFDES_REF)
+	check("a fresh model loaded from that document redraws the same designator",
+		back != null and _strokes_match(back.refdes_graphics, _points_of(live.refdes_graphics)))
+	check("…and re-states the authored placement, so a second save keeps it",
+		(_saved_component(reloaded, REFDES_REF).get("refdes_placement", {}) as Dictionary)
+			== authored)
+
+	# THE OVERLAY. A hand-authored document may state one field; the rest keeps
+	# the derived answer, which is the same rule the worker applies. Fed here
+	# through a board dict carrying BOTH the derived anchor a resolve attached
+	# and a one-field authored block.
+	var overlaid = PCBData.new()
+	var doc: Dictionary = data.to_saved_board_dict()
+	for entry in (doc["components"] as Array):
+		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == REFDES_REF:
+			(entry as Dictionary)["refdes_anchor"] = SWITCH_ANCHOR.duplicate()
+			(entry as Dictionary)["refdes_placement"] = {"y_mm": -8.0}
+	overlaid.from_board_dict(doc)
+	var mixed = overlaid.get_component(REFDES_REF)
+	check("a one-field authored block moves that field",
+		absf(float(mixed.refdes_anchor["y_mm"]) + 8.0) < EPS_MM)
+	check("…and inherits the derived answer for every field it does not state",
+		absf(float(mixed.refdes_anchor["size_mm"]) - float(SWITCH_ANCHOR["size_mm"])) < EPS_MM
+			and absf(float(mixed.refdes_anchor["x_mm"]) - float(SWITCH_ANCHOR["x_mm"])) < EPS_MM)
+
+	# THE WIRE. The worker cannot honour what it is not sent, and the wire trim
+	# drops render enrichment aggressively — the authored placement must not be
+	# among the casualties.
+	var wire: Dictionary = PanelTools.canonical_wire_board(data.to_board_dict())
+	var wired: Dictionary = {}
+	for entry in (wire.get("components", []) as Array):
+		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == REFDES_REF:
+			wired = entry
+	check("the authored placement survives the canonical wire trim",
+		(wired.get("refdes_placement", {}) as Dictionary) == authored)
+
+
+## The point lists of a refdes_graphics array, in the shape `_strokes_match`
+## compares against.
+func _points_of(graphics: Array) -> Array:
+	var out: Array = []
+	for g in graphics:
+		out.append((g as Dictionary)["points"])
+	return out

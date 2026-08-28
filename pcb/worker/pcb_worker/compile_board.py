@@ -48,6 +48,7 @@ from agent_router.layers import (CANON_TO_KICAD, canon_to_kicad,
 from . import bless
 from . import board_graphics as board_graphics_mod
 from . import inline_footprint
+from . import refdes_anchor
 from .board_schema import (
     _BOUNDARY_MESSAGES,
     _OVERRIDE_NUM_KEYS,
@@ -3101,6 +3102,14 @@ def compile_board(
             placed_graphics=placed_graphics,
             provenance=provenance,
             value=raw_value or "",
+            # WHERE this component's designator prints, resolved ONCE here:
+            # the board's authored `refdes_placement` wins, else the
+            # footprint's own reference fp_text, else the derived anchor. On
+            # the FULL arm above the library is deliberately never consulted,
+            # so `clean` carries no authored fp_text and the rule is
+            # authored-else-derived — which is the whole reason the board is
+            # allowed to author one.
+            refdes=refdes_anchor.component_reference_text(comp, clean),
         ))
         for pad in clean.pads:
             resolved_pins.add((ref, pad.number))

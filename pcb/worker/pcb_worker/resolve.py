@@ -48,7 +48,7 @@ from .footprints import (  # noqa: F401 — resolve_footprint re-exported
     resolve_footprint_layered,
 )
 from .pad_source import has_resolved_pads
-from .refdes_anchor import anchor_dict_from_parsed, body_extent_from_parsed
+from .refdes_anchor import anchor_dict_from_component, body_extent_from_parsed
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
 from .pad_types import normalize_pad_type as _normalize_pad_type
 
@@ -328,18 +328,19 @@ def _resolve_component(
     # WHERE the footprint wants its designator printed. Sending glyphs instead
     # would send a picture of one particular ref, and that picture goes stale the
     # moment the component is renamed or copied from.
-    comp["refdes_anchor"] = _refdes_anchor(parsed)
+    comp["refdes_anchor"] = _refdes_anchor(comp, parsed)
 
 
-def _refdes_anchor(parsed: dict) -> dict:
-    """Where this footprint wants its designator printed, footprint-LOCAL.
+def _refdes_anchor(comp: dict, parsed: dict) -> dict:
+    """Where this component's designator gets printed, footprint-LOCAL.
 
-    ``{x_mm, y_mm, rotation_deg, size_mm, hidden}`` — the footprint's OWN
-    authored reference fp_text placement when it declares one, else the anchor
-    DERIVED from its body (``refdes_anchor``: centred just above the courtyard,
-    else the drawn outline, else the lands, else the historical constant).
-    Always a complete anchor, so a renderer never has to guess which half was
-    omitted.
+    ``{x_mm, y_mm, rotation_deg, size_mm, hidden}`` — the whole precedence rule
+    (``refdes_anchor.anchor_dict_from_component``): the BOARD's own authored
+    ``refdes_placement`` block first, else the footprint's OWN authored
+    reference fp_text, else the anchor DERIVED from its body (centred just above
+    the courtyard, else the drawn outline, else the lands, else the historical
+    constant). Always a complete anchor, so a renderer never has to guess which
+    half was omitted.
 
     The derivation is shared with the Gerber emitter and the DRC silk
     projection (``refdes_anchor.effective_reference_text``), so a renderer that
@@ -347,7 +348,7 @@ def _refdes_anchor(parsed: dict) -> dict:
     emitted silk. ``hidden`` carries the authored-hidden rule: a hidden
     reference prints nothing, so it must draw nothing either.
     """
-    return anchor_dict_from_parsed(parsed)
+    return anchor_dict_from_component(comp, parsed)
 
 
 def _pads_from_parsed(fp_pads: list) -> list:

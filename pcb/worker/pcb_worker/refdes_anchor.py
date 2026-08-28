@@ -2,11 +2,21 @@
 
 A designator ("R1", "SW2") is not in any IR: it is synthesized from the
 component's ref by ``silk_source.refdes_strokes``. WHERE it goes is a separate
-question with exactly two answers:
+question, and there is ONE precedence rule for it everywhere:
 
-* the footprint AUTHORED a reference ``fp_text`` on F.SilkS — that placement is
-  the answer, always, and nothing here touches it; or
-* it did not, and the anchor must be DERIVED from the footprint's own body.
+1. the BOARD authored a placement for this component — the optional
+   ``refdes_placement`` block (:data:`COMPONENT_REFDES_KEY`), which a human or
+   an agent SET through ``minerva_pcb_set_refdes``. It wins over everything,
+   because it is the only one of the three that somebody chose;
+2. else the footprint AUTHORED a reference ``fp_text`` on F.SilkS — that
+   placement is the answer and nothing here touches it;
+3. else the anchor is DERIVED from the footprint's own body.
+
+``refdes_placement`` is a PARTIAL overlay, not a replacement: a block that
+states only ``hidden`` (or only ``x_mm``) keeps rules 2/3's answer for every
+field it does not state. That is what makes "hide just this one designator" a
+one-key edit, and it matches the panel verb, which validates a partial write
+against the anchor already in force.
 
 The derived answer used to be a single constant (``silk_source.
 REFDES_LOCAL_Y_MM = -1.5``), which put the text 1.5 mm above the footprint
@@ -83,6 +93,7 @@ __all__ = [
     "COURTYARD_LAYERS",
     "OUTLINE_LAYERS",
     "CLEARANCE_MM",
+    "COMPONENT_REFDES_KEY",
     "LocalExtent",
     "body_extent_from_parsed",
     "occupied_extent_from_parsed",
@@ -91,7 +102,11 @@ __all__ = [
     "courtyard_extent_from_definition",
     "default_anchor",
     "anchor_dict_from_parsed",
+    "anchor_dict_from_component",
+    "authored_placement",
     "effective_reference_text",
+    "component_reference_text",
+    "loose_reference_text",
 ]
 
 #: The declared body envelope. Both sides: a bottom-side footprint draws its
@@ -102,6 +117,13 @@ COURTYARD_LAYERS = frozenset({"F.CrtYd", "B.CrtYd"})
 #: outline; neither is copper, so a footprint whose only extent is its lands
 #: still measures as a body.
 OUTLINE_LAYERS = frozenset({"F.SilkS", "B.SilkS", "F.Fab", "B.Fab"})
+
+#: The per-component key a BOARD authors its designator placement under. Not a
+#: derived key: the Go codec carries it like any other component field and the
+#: deserialize boundary must never drop it (internal/board/minpcb.go). Named so
+#: it cannot be mistaken for the wire's ``refdes_anchor``, which is the
+#: EFFECTIVE placement a resolve computed and is session state on both sides.
+COMPONENT_REFDES_KEY = "refdes_placement"
 
 #: Gap between the body extent's top edge and the designator's INK, in mm.
 #: Roughly KiCad's own hand-placed spacing, and comfortably above the silk
@@ -201,6 +223,124 @@ def effective_reference_text(
     x, y = default_anchor(extent)
     return ReferenceTextDefinition(position=(x, y), rotation_deg=0.0,
                                    size_mm=REFDES_TEXT_SIZE_MM, hidden=False)
+
+
+# ---------------------------------------------------------------------------
+# The AUTHORED placement, and the one precedence rule over it
+# ---------------------------------------------------------------------------
+
+
+def authored_placement(comp: Any) -> Union[dict, None]:
+    """The raw ``refdes_placement`` block a board component states, or None.
+
+    Only "did the board say anything" is answered here — the FIELDS are read by
+    :func:`_overlay`, which is tolerant per field. A block that is present but
+    not a mapping is treated as absent rather than raised on: the panel is the
+    validating writer (``ui/model/pcb_refdes_anchor.gd`` refuses a bad write by
+    name before it ever reaches a document), and a hand-typed YAML typo must not
+    make a board unfabricable over the placement of one legend glyph.
+    """
+    if not isinstance(comp, dict):
+        return None
+    block = comp.get(COMPONENT_REFDES_KEY)
+    return block if isinstance(block, dict) else None
+
+
+def _overlay(base: dict, authored: dict) -> dict:
+    """*base* with every field *authored* states VALIDLY replaced.
+
+    Per-field, so a partial block (the common one is ``{hidden: true}``) keeps
+    the library/derived answer for everything it leaves out. An unreadable
+    field value keeps the base value rather than failing the board — see
+    :func:`authored_placement` for why this reader is the tolerant end.
+    """
+    out = dict(base)
+    for key in ("x_mm", "y_mm", "rotation_deg"):
+        value = _num(authored.get(key))
+        if value is not None:
+            out[key] = value
+    size = _num(authored.get("size_mm"))
+    if size is not None and size > 0.0:
+        out["size_mm"] = size
+    hidden = authored.get("hidden")
+    if isinstance(hidden, bool):
+        out["hidden"] = hidden
+    return out
+
+
+def _anchor_dict(text: Union[ReferenceTextDefinition, None]) -> dict:
+    """A complete anchor dict for *text*, or the historical constant for None."""
+    if text is None:
+        return {"x_mm": 0.0, "y_mm": REFDES_LOCAL_Y_MM, "rotation_deg": 0.0,
+                "size_mm": REFDES_TEXT_SIZE_MM, "hidden": False}
+    return {"x_mm": float(text.position[0]), "y_mm": float(text.position[1]),
+            "rotation_deg": float(text.rotation_deg),
+            "size_mm": float(text.size_mm), "hidden": bool(text.hidden)}
+
+
+def _reference_text(anchor: dict) -> ReferenceTextDefinition:
+    return ReferenceTextDefinition(
+        position=(anchor["x_mm"], anchor["y_mm"]),
+        rotation_deg=anchor["rotation_deg"], size_mm=anchor["size_mm"],
+        hidden=anchor["hidden"])
+
+
+def anchor_dict_from_component(comp: Any, parsed: dict) -> dict:
+    """The EFFECTIVE anchor dict for one board component — the wire shape.
+
+    :func:`anchor_dict_from_parsed` answers rules 2/3 (the footprint's own
+    fp_text, else the derived anchor); this overlays rule 1, the board's own
+    ``refdes_placement``. The resolve step sends this, so the panel draws the
+    designator exactly where the fab will print it whoever placed it.
+    """
+    base = anchor_dict_from_parsed(parsed)
+    authored = authored_placement(comp)
+    return base if authored is None else _overlay(base, authored)
+
+
+def component_reference_text(
+        comp: Any, footprint: Union[FootprintDefinition, None]
+) -> Union[ReferenceTextDefinition, None]:
+    """The placement a SILK CONSUMER should draw one COMPONENT's designator at
+    — the whole precedence rule, from the component dict and its footprint.
+
+    The sibling of :func:`effective_reference_text`, which answers the same
+    question for a footprint with no component in hand. Returning ``None`` for
+    "nothing authored anywhere and no body to measure" is preserved exactly:
+    ``silk_source.refdes_strokes`` reads None as its own constant default, and
+    turning that into a synthetic placement here would move every golden for a
+    bodyless footprint while changing no ink.
+
+    The board's placement is per COMPONENT, so it cannot live on the footprint
+    definition: definitions are interned by content id and two components
+    sharing a footprint would otherwise fork it into two, moving footprint_id —
+    the identity the library lock and the BOM group by.
+    """
+    base = effective_reference_text(footprint)
+    authored = authored_placement(comp)
+    if authored is None:
+        return base
+    return _reference_text(_overlay(_anchor_dict(base), authored))
+
+
+def loose_reference_text(comp: Any) -> Union[ReferenceTextDefinition, None]:
+    """The same answer for a consumer holding only the LOOSE board dict.
+
+    The KiCad export runs on a resolved loose-dict board rather than the IR, so
+    rules 2/3 reach it already computed, as the ``refdes_anchor`` the resolve
+    step attached (:func:`anchor_dict_from_component`). This overlays the
+    board's authored block on top of it, and returns None when there is neither
+    — the same "use the constant default" signal the IR path returns.
+    """
+    wire = comp.get("refdes_anchor") if isinstance(comp, dict) else None
+    base = _anchor_dict(None) if not isinstance(wire, dict) else _overlay(
+        _anchor_dict(None), wire)
+    authored = authored_placement(comp)
+    if authored is None and not isinstance(wire, dict):
+        return None
+    if authored is not None:
+        base = _overlay(base, authored)
+    return _reference_text(base)
 
 
 # ---------------------------------------------------------------------------

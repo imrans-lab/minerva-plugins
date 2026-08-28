@@ -559,12 +559,12 @@ def refdes_strokes(ref: Any, cx: float, cy: float, rot: float,
     coordinates and must be placed by the component's actual placement
     transform regardless.
 
-    ``reference_text`` is the footprint's EFFECTIVE reference fp_text
-    placement, when the caller has a footprint definition to consult — its own
-    authored one, or the anchor derived from its courtyard when it authors none
-    (``refdes_anchor.effective_reference_text``, the one derivation every silk
-    consumer reads). When given, the designator is drawn at that local
-    anchor/rotation/size instead of the fixed ``REFDES_LOCAL_Y_MM`` default:
+    ``reference_text`` is the component's EFFECTIVE designator placement, when
+    the caller has one to consult — the board's own authored
+    ``refdes_placement``, else the footprint's authored fp_text, else the anchor
+    derived from its courtyard (``refdes_anchor.component_reference_text``, the
+    one rule every silk consumer reads). When given, the designator is drawn at
+    that local anchor/rotation/size instead of the fixed ``REFDES_LOCAL_Y_MM`` default:
     glyphs are rendered anchored at the origin, then EACH point goes through
     the text's own local rotate-then-translate BEFORE the component's placement
     transform — a two-step nested transform, because the anchor is

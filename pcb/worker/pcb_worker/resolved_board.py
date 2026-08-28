@@ -19,7 +19,9 @@ from types import MappingProxyType
 from typing import Mapping, Protocol, TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only cycle breaker
-    from .footprint_def import DrillDefinition, FootprintDefinition, PadShape, Provenance
+    from .footprint_def import (
+        DrillDefinition, FootprintDefinition, PadShape, Provenance,
+        ReferenceTextDefinition)
 
 
 Point: TypeAlias = tuple[float, float]
@@ -864,12 +866,31 @@ class ResolvedComponent:
     placed_graphics: tuple[PlacedGraphic, ...]
     provenance: "Provenance"
     value: str = ""
+    #: WHERE this component's designator prints, footprint-LOCAL — the whole
+    #: precedence rule already applied (``refdes_anchor.
+    #: component_reference_text``: the board's authored ``refdes_placement``,
+    #: else the footprint's own reference fp_text, else the anchor derived from
+    #: its body). None means "no placement anywhere and no body to measure", the
+    #: signal ``silk_source.refdes_strokes`` reads as its own constant default.
+    #:
+    #: It lives on the COMPONENT and not on the footprint definition because a
+    #: board authors it per component: definitions are interned by content id,
+    #: so folding it in there would fork one footprint into two and move the
+    #: footprint_id the library lock and the BOM group by. Resolved ONCE, at
+    #: compile, so the Gerber emitter, the DRC silk projection and the placement
+    #: advisories cannot read three different answers.
+    refdes: "ReferenceTextDefinition | None" = None
 
     def __post_init__(self) -> None:
         for field in ("id", "ref", "footprint_id"):
             _nonempty(getattr(self, field), f"ResolvedComponent.{field}")
         if not isinstance(self.value, str):
             raise TypeError("ResolvedComponent.value must be a string")
+        # Duck-typed rather than isinstance: this module deliberately does not
+        # import footprint_def at runtime (see the module docstring).
+        if self.refdes is not None and not hasattr(self.refdes, "position"):
+            raise TypeError(
+                "ResolvedComponent.refdes must be a ReferenceTextDefinition")
         _tuple(self.placed_pads, "ResolvedComponent.placed_pads")
         _tuple(self.placed_graphics, "ResolvedComponent.placed_graphics")
         _unique_ids(self.placed_pads, "ResolvedComponent.placed_pads")

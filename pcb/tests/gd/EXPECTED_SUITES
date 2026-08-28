@@ -438,8 +438,14 @@ test_add_by_library_ref.gd assertions=48 real-worker
 # step, the anchor back, the label back), the panel-state round trip (anchor and
 # strokes), the two refusals plus the untouched anchor, and hidden. Counted by
 # hand from the check() call sites: 15 new, none inside a loop.
+# 57 -> 66: section 6, the authored placement as BOARD STATE — an untouched
+# component states neither key, a set one states the authored placement and
+# still no derived anchor, a fresh model loaded from that document redraws the
+# same designator and re-states the placement, a one-field block moves that
+# field and inherits the rest, and the placement survives the wire trim.
+# Counted by hand from the check() call sites: 9 new, none inside a loop.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd assertions=57
+test_part_geometry_contracts.gd assertions=66
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the

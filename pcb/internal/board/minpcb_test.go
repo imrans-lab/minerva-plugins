@@ -241,6 +241,8 @@ func TestImportDoesNotWarnAboutDerivedComponentKeys(t *testing.T) {
 		"footprint":"EVP-ASAC1A:SW_EVP-ASAC1A","position":{"x":10,"y":10},
 		"refdes_anchor":{"x_mm":-0.635,"y_mm":-4.445,"rotation_deg":0,
 			"size_mm":1,"hidden":false},
+		"refdes_placement":{"x_mm":0,"y_mm":-6.5,"rotation_deg":0,
+			"size_mm":1.2,"hidden":false},
 		"footprint_resolved":true,
 		"refdes_graphics":[],
 		"solder_paste_ratio":0.5}}}`)
@@ -275,5 +277,18 @@ func TestImportDoesNotWarnAboutDerivedComponentKeys(t *testing.T) {
 			t.Errorf("derived key %q was dropped by the importer: %#v",
 				k, b.Components[0].Extra)
 		}
+	}
+	// refdes_placement rides the same silence for the opposite reason: it is
+	// AUTHORED board source (never in DerivedComponentKeys), so it is neither
+	// warned about nor dropped — here OR at the deserialize boundary.
+	for _, w := range warnings {
+		if strings.Contains(w, "refdes_placement") {
+			t.Errorf("the authored designator placement was warned about: %q", w)
+		}
+	}
+	placement, ok := b.Components[0].Extra["refdes_placement"].(map[string]interface{})
+	if !ok || placement["y_mm"] != -6.5 {
+		t.Errorf("the authored designator placement did not survive import: %#v",
+			b.Components[0].Extra)
 	}
 }

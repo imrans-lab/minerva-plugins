@@ -118,22 +118,22 @@ def _of_type(rows, row_type):
 
 
 def _with_anchor(rb, ref: str, anchor: dict):
-    """The same board with ONE component's footprint re-authored to print its
-    reference at *anchor* — how a suggestion is "applied" without inventing a
-    board-level field for it (the designator anchor is a footprint fact today;
-    see ``refdes_anchor.effective_reference_text``). The definition's content id
-    moves with its content, so the component is re-pointed at the new one."""
-    comp = next(c for c in rb.components if c.ref == ref)
-    old = rb.footprint_for(comp)
-    new = dataclasses.replace(old, reference_text=ReferenceTextDefinition(
-        position=(anchor["x_mm"], anchor["y_mm"]),
-        rotation_deg=anchor["rotation_deg"], size_mm=anchor["size_mm"],
-        hidden=anchor["hidden"]))
-    kept = tuple(d for d in rb.footprint_definitions if d.content_id != old.content_id)
-    comps = tuple(dataclasses.replace(c, footprint_id=new.content_id)
-                  if c.ref == ref else c for c in rb.components)
-    return dataclasses.replace(rb, footprint_definitions=kept + (new,),
-                               components=comps)
+    """The same board with ONE component's designator moved to *anchor* — how a
+    suggestion is applied, on the field a board authoring ``refdes_placement``
+    ends up at: ``ResolvedComponent.refdes``, which the compiler resolves once
+    and every silk consumer reads (``refdes_anchor.component_reference_text``).
+
+    Per COMPONENT and not per footprint, which is the point: two parts sharing a
+    footprint take different suggestions, and re-authoring the definition would
+    move the content id the library lock and the BOM group by."""
+    comps = tuple(
+        dataclasses.replace(c, refdes=ReferenceTextDefinition(
+            position=(anchor["x_mm"], anchor["y_mm"]),
+            rotation_deg=anchor["rotation_deg"], size_mm=anchor["size_mm"],
+            hidden=anchor["hidden"]))
+        if c.ref == ref else c
+        for c in rb.components)
+    return dataclasses.replace(rb, components=comps)
 
 
 #: R1's designator lands squarely inside U1's keep-out; R9 sits alone in the

@@ -494,7 +494,7 @@ def test_a_footprint_with_no_authored_anchor_reports_the_emitters_default():
     every such designator on the canvas away from where it prints."""
     from pcb_worker import silk_source
 
-    anchor = resolve._refdes_anchor({})
+    anchor = resolve._refdes_anchor({}, {})
     assert anchor == {"x_mm": 0.0, "y_mm": silk_source.REFDES_LOCAL_Y_MM,
                       "rotation_deg": 0.0,
                       "size_mm": silk_source.REFDES_TEXT_SIZE_MM,

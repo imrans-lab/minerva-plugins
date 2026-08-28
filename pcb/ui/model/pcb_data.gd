@@ -330,13 +330,19 @@ func rotate_component(component_id: String, degrees: float) -> void:
 ##
 ## `anchor` is the complete footprint-local `{x_mm, y_mm, rotation_deg,
 ## size_mm, hidden}` block (pcb_refdes_anchor validates it whole before it gets
-## here). Assigning it re-strokes the label through PcbComponent's own setter,
-## so the canvas redraws from one write.
+## here). It is written to BOTH halves: `refdes_placement` is the AUTHORED
+## record that goes into every document and reaches the fab, and `refdes_anchor`
+## is the effective value the canvas strokes — assigning the latter re-renders
+## the label through PcbComponent's own setter, so one write redraws.
+##
+## This is the ONE writer of `refdes_placement`. A derived anchor never lands
+## here, which is what keeps an unset component honestly unset.
 func set_refdes_anchor(component_id: String, anchor: Dictionary) -> void:
 	var component = get_component(component_id)
 	if component == null:
 		return
 	var old_anchor: Dictionary = component.refdes_anchor.duplicate()
+	component.refdes_placement = anchor.duplicate()
 	component.refdes_anchor = anchor.duplicate()
 	record_change("set_refdes_anchor", {
 		"component_id": component_id,

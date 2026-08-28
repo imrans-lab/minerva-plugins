@@ -709,6 +709,60 @@ consumer of this shape preserves the difference. `size: {width: null, height:
 null}` likewise means "no authored size", and the fail-closed sizeless-SMD gate
 is what refuses to fabricate it.
 
+### The authored designator placement: `refdes_placement`
+
+A reference designator ("R1", "U3") is in no IR — it is synthesized from the
+component's `ref` at emission time — so *where* it prints is its own question,
+with **one precedence rule** everywhere (`worker/pcb_worker/refdes_anchor.py`):
+
+1. the component's **optional** `refdes_placement` block — what a human or an
+   agent SET, through `minerva_pcb_set_refdes`;
+2. else the footprint's own authored reference `fp_text` on F.SilkS;
+3. else the anchor **derived** from the footprint's body: centred one clearance
+   above its courtyard, else its drawn outline, else its lands.
+
+```yaml
+components:
+  - ref: SW1
+    footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+    x_mm: 20
+    y_mm: 14
+    refdes_placement:         # OPTIONAL — absent means "nobody chose"
+      x_mm: 0                 # footprint-LOCAL mm, the part's own y-down frame
+      y_mm: -4.2              # the text BASELINE; glyphs grow upward from it
+      rotation_deg: 0         # within the footprint frame
+      size_mm: 1.0            # cap height
+      hidden: false           # true prints no designator for this component
+```
+
+**Absent means not authored**, and the derivation applies unchanged; a board that
+has never used `set_refdes` serializes exactly as it did before the key existed.
+The derived value is **never** written back as authored — that is what keeps
+"nobody chose" a fact rule 3 is free to answer differently on the next resolve,
+or on a machine with a different library.
+
+The block is a **partial overlay**: every field it omits keeps rules 2/3's
+answer, so `refdes_placement: {hidden: true}` suppresses one designator without
+freezing where it would otherwise have gone.
+
+Because the placement is per **component**, it is not folded into the footprint
+definition — definitions are interned by content id, and two components sharing
+one footprint would fork it in two and move the `footprint_id` the library lock
+and the BOM group by. The compiler resolves the rule once onto
+`ResolvedComponent.refdes`, and the Gerber emitter, the DRC silk projection, the
+GC9 placement advisories and the KiCad export all read that single field.
+
+It is **authored source, not derived**: `refdes_placement` is a known component
+field on the Go side and is deliberately *not* in `DerivedComponentKeys`, so
+`pcb.deserialize` carries it through untouched. Its sibling `refdes_anchor` — the
+*effective* placement a resolve computed — **is** derived, and is dropped and
+recomputed at that boundary.
+
+Note for the FULL case above: that arm never reads the library, so a footprint's
+own `fp_text` is genuinely unavailable to it and the rule there is 1-else-3.
+Authoring `refdes_placement` is the only way to state a placement for a component
+whose board owns its geometry.
+
 ### Pin-geometry authority: the `override` sub-struct
 
 Within the PARTIAL case the **locked footprint is authoritative** for pad

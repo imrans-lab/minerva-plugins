@@ -656,9 +656,12 @@ def _suggest(comp: Any, rb: Any, proj: Any, keepouts: Sequence[_Envelope],
     """
     definition = rb.footprint_for(comp)
     extent = refdes_anchor.occupied_extent_from_definition(definition)
-    authored = definition.reference_text
-    size = authored.size_mm if authored is not None else silk_source.REFDES_TEXT_SIZE_MM
-    rotation = authored.rotation_deg if authored is not None else 0.0
+    # The component's EFFECTIVE placement, not the footprint's raw fp_text: a
+    # suggestion must keep the size and rotation the designator is ACTUALLY
+    # printed at, or taking it silently resizes a label the board authored.
+    in_force = comp.refdes
+    size = in_force.size_mm if in_force is not None else silk_source.REFDES_TEXT_SIZE_MM
+    rotation = in_force.rotation_deg if in_force is not None else 0.0
     hidden = {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": rotation,
               "size_mm": size, "hidden": True, "slot": None}
     if extent is None:

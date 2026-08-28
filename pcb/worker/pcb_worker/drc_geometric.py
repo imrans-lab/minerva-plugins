@@ -161,7 +161,7 @@ from .ir_pads import (
     pad_land,
     smd_shape,
 )
-from . import drc_silk_placement, mask_source, refdes_anchor, silk_source
+from . import drc_silk_placement, mask_source, silk_source
 from .geometry import rotate_local_offset, rotation_radians
 from .mask_source import MaskOpening
 from .pad_source import placed_pad_to_geom
@@ -566,20 +566,14 @@ def _project_silk(rb: ResolvedBoard) -> tuple[tuple[SilkPrimitive, ...],
                     ref=comp.ref))
 
         refdes_side = placement.side
-        # rb.footprint_for, NOT a hand-rolled scan of footprint_definitions.
-        # The emitter uses footprint_for (gerber._harvest_ir) and so does
-        # _project_mask forty lines below; a local `next(..., None)` here is a
-        # third reading of one datum with a DIFFERENT failure mode — it yields
-        # None where footprint_for raises, so a missing definition would make
-        # the emitter refuse while this surface quietly drew the designator at
-        # the default anchor. Unreachable today (construction validates the id),
-        # which is exactly when divergences get written down and forgotten.
-        # The EFFECTIVE anchor, not the raw authored field: a footprint that
-        # authors none gets the courtyard-derived anchor the emitter uses
-        # (refdes_anchor.effective_reference_text), so this projection measures
-        # the designator where the fab will actually print it.
-        reference_text = refdes_anchor.effective_reference_text(
-            rb.footprint_for(comp))
+        # The component's EFFECTIVE placement, read off the SAME field the
+        # Gerber emitter reads (ResolvedComponent.refdes, resolved once at
+        # compile: the board's authored refdes_placement, else the footprint's
+        # own fp_text, else the courtyard-derived anchor). One field rather than
+        # a second derivation here is what stops this projection from measuring
+        # a designator the fab will print somewhere else — which is the only way
+        # a silk rule can produce a false clean.
+        reference_text = comp.refdes
         for idx, prim in enumerate(silk_source.refdes_strokes(
                 comp.ref, placement.position[0], placement.position[1],
                 placement.rotation_deg, reference_text, refdes_side)):

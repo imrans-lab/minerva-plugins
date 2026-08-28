@@ -992,11 +992,16 @@ def test_footprint_fab_text_is_own_side_and_back_is_mirrored():
     # MIRRORED or KiCad DRC raises nonmirrored_text_on_back_layer.
     top = _emit_kicad(_board("R_0805", layer="top"), name="t")
     bot = _emit_kicad(_board("R_0805", layer="bottom"), name="b")
+    # WHERE the reference sits is no longer a fixed (0 -1.5): it is the
+    # component's effective designator placement (refdes_anchor), so this test
+    # matches the LAYER and the MIRROR it exists for and leaves the coordinate
+    # to test_refdes_authored.py, which measures it against the footprint body.
+    ref_re = r'\(fp_text reference "X1" \(at [-\d. ]+\) \(layer "%s"\)%s\)'
     # Top: on F.Fab, NO mirror effects.
-    assert '(fp_text reference "X1" (at 0 -1.5) (layer "F.Fab"))' in top
+    assert re.search(ref_re % ("F.Fab", ""), top), top
     assert '(fp_text value "" (at 0 1.5) (layer "F.Fab"))' in top
     # Bottom: on B.Fab WITH (effects (justify mirror)); NO fp_text left on F.Fab.
-    assert '(fp_text reference "X1" (at 0 -1.5) (layer "B.Fab") (effects (justify mirror)))' in bot
+    assert re.search(ref_re % ("B.Fab", r" \(effects \(justify mirror\)\)"), bot), bot
     assert '(fp_text value "" (at 0 1.5) (layer "B.Fab") (effects (justify mirror)))' in bot
     assert '(layer "F.Fab")' not in bot   # the layer TABLE uses (35 "F.Fab" user), not (layer ...)
 

@@ -28,6 +28,17 @@ FAIL-CLOSED: a ``pads`` value that is not readable as pad geometry raises
 :class:`InlineGeometryError`. It is never quietly demoted to the library path —
 that would substitute one part's copper for another's without a word.
 
+THE DESIGNATOR IS NOT PART OF THIS GEOMETRY, deliberately. A definition built
+here carries no ``reference_text``, and it must not: the library is never read
+on this arm, so the footprint's own authored fp_text is genuinely unavailable,
+and WHERE a designator prints is a per-COMPONENT question anyway (two
+components share one interned definition). The answer is composed one level up
+by ``refdes_anchor.component_reference_text`` and lands on
+``ResolvedComponent.refdes``: the board's own ``refdes_placement`` block when it
+authors one, else the anchor derived from the very pads and graphics this module
+just read. A FULL component is therefore the case where authoring the placement
+on the board is the ONLY way to state one.
+
 SHAPE PARITY: ``shape`` and ``raw_shape`` are read as INDEPENDENT keys, exactly
 as ``pad_source._from_resolved`` reads the same dicts on the loose-dict fab path
 (``shape`` decides the land, ``raw_shape`` is the authored-shape provenance that

@@ -81,7 +81,9 @@ footprint with no authored silk. Arbitrary footprint value/user text is not a
 first-class emitted text primitive; only the reference-designator path is
 vectorized deliberately.
 
-**Where a designator lands.** A footprint that authors its own `fp_text
+**Where a designator lands.** The board decides first: a component carrying a
+`refdes_placement` block (see `board-yaml.md`) is printed exactly there, because
+somebody chose it. Failing that, a footprint that authors its own `fp_text
 reference` on `F.SilkS` decides, and nothing moves it. One that does not gets an
 anchor DERIVED from its body (`worker/pcb_worker/refdes_anchor.py`): the text is
 centred above the top edge of everything the footprint occupies — its courtyard,
@@ -89,8 +91,9 @@ its drawn outline and its lands, unioned — with a 0.25 mm gap to the ink. Only
 footprint with no graphics and no pads at all falls back to the historical fixed
 offset (1.5 mm above the origin). The anchor is footprint-local, so it turns with
 the component's rotation and mirrors onto `B_SilkS` with a bottom-side part. The
-panel, the geometric DRC's silk projection and this emitter all read that one
-derivation, so the editor draws the designator where the fab prints it.
+panel, the geometric DRC's silk projection, the KiCad export and this emitter all
+read that one rule — resolved once at compile onto `ResolvedComponent.refdes` —
+so the editor draws the designator where the fab prints it.
 
 ### Bottom-side components
 

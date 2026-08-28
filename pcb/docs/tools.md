@@ -83,7 +83,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`, `layers_spanned`, `layers_touched`) — the row is built by `pcb_region_describe.via_entry`, shared with `describe_region` (below) |
 | `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
 | `minerva_pcb_board_rules` | the Options menu's verb twin: read/write the board's trace-angle set, its four numeric design rules and its grid pitch, plus the three per-user snap toggles. `view_state` shape — always reports the whole block; validated whole, applied whole; one undo step (below) |
-| `minerva_pcb_set_refdes` | read/move WHERE a component prints its designator; footprint-local anchor, board-frame stroke box in the reply; validated whole, applied whole; one undo step (below) |
+| `minerva_pcb_set_refdes` | read/move WHERE a component prints its designator; the move is AUTHORED board state and reaches the fab; footprint-local anchor, board-frame stroke box in the reply; validated whole, applied whole; one undo step (below) |
 | `minerva_pcb_view_state` | read/set WHAT the canvas is drawing — layer flags, hidden layers, trace-layer filter, working layer; validated whole, applied whole (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
 | `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
@@ -326,10 +326,15 @@ board half of a write is **exactly one undo step** however many rules moved.
 
 A reference designator ("R1", "U3") is in **no** IR: it is synthesized from the
 component's ref at emission time, and *where* it goes is a separate question
-with two answers — the footprint's own authored reference `fp_text`, or, when it
-authors none, the anchor derived from its body
-(`worker/pcb_worker/refdes_anchor.py`: centred one clearance above the
-courtyard). `minerva_pcb_set_refdes` reads that anchor and moves it.
+with **one precedence rule**, in `worker/pcb_worker/refdes_anchor.py`:
+
+1. the **board's own** `refdes_placement` for that component — what
+   `minerva_pcb_set_refdes` writes;
+2. else the footprint's own authored reference `fp_text`;
+3. else the anchor **derived** from the footprint body (centred one clearance
+   above the courtyard).
+
+`minerva_pcb_set_refdes` reads the answer in force and authors rule 1.
 
 Call it with nothing but `editor_name` and `component_id` to read:
 
@@ -385,18 +390,21 @@ write that lands is **exactly one undo step**. `hidden: true` prints no
 designator at all, matching the emitter's rule for a footprint whose reference is
 authored hidden.
 
-### Scope — the fabrication path is unchanged
+### Scope — what you set is what the fab prints
 
-This verb moves the **live panel's** label: the canvas redraws it and panel state
-keeps it across a save/restore. It does **not** reach the fab. The designator
-anchor is a *footprint* fact everywhere on the fabrication path — the Gerber
-emitter and the DRC silk projection both read it through
-`refdes_anchor.effective_reference_text(footprint)`, the board wire carries no
-per-component anchor (`PcbComponent.to_board_dict` does not emit one), and the Go
-codec lists `refdes_anchor` in `DerivedComponentKeys`, which the deserialize
-boundary drops and re-derives. Making an agent's anchor reach the fab means
-promoting it from derived to authored board state — a board-schema change, not a
-panel one.
+A write becomes **authored board state**, not a panel decoration. It lands on the
+component as `refdes_placement` (documented in `board-yaml.md`), so it is written
+by every disk path — the `.pcbskel` save, `export_yaml`, `promote` — survives the
+Go codec as an ordinary component field, and rides the wire to the worker, which
+resolves it into `ResolvedComponent.refdes` **once** at compile. The Gerber
+F.SilkS designator, the DRC silk projection, the GC9 placement advisories and the
+`.kicad_pcb` reference all read that one field, so all four move together.
+
+Two things stay derived on purpose. `refdes_anchor` — the *effective* placement —
+is still a `DerivedComponentKeys` entry the deserialize boundary drops and
+re-derives, because it encodes this host's library. And a placement nobody set is
+still absent: the derived answer is never written back as authored, so an unset
+component keeps following the footprint.
 
 ## The region read (`minerva_pcb_describe_region`)
 

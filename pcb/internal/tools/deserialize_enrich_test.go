@@ -367,3 +367,108 @@ func TestStaleDocumentAnchorLosesToThisHostsResolve(t *testing.T) {
 			"would draw SW2's designator inside the switch body; got %v", got)
 	}
 }
+
+// THE AUTHORED PLACEMENT IS BOARD SOURCE and must cross this boundary
+// untouched, beside its DERIVED sibling, which must not.
+//
+// The two keys look alike on purpose — same five fields, same footprint-local
+// frame — and telling them apart is the whole contract. `refdes_placement` is
+// what a person SET, so deleting it deletes a decision; `refdes_anchor` is what
+// some machine's resolve COMPUTED from it, so keeping a saved one lets a stale
+// library outvote this host.
+//
+// Oracle: the y the DOCUMENT authored (-6.5), which no derivation on this host
+// produces, against the stale y the same document also carried (-1.5), which
+// this host's resolve replaced with -6.5 because it honoured the authored key.
+func TestAuthoredDesignatorPlacementCrossesTheBoundaryAndTheDerivedOneDoesNot(t *testing.T) {
+	authored := map[string]interface{}{
+		"x_mm": 0.0, "y_mm": -6.5, "rotation_deg": 0.0,
+		"size_mm": 1.2, "hidden": false,
+	}
+	// The document: an authored placement plus a STALE effective anchor saved
+	// by an older host, which had never seen the authored key.
+	b := &board.Board{Components: []board.Component{{Ref: "SW2",
+		Extra: map[string]interface{}{
+			"refdes_placement": authored,
+			"refdes_anchor": map[string]interface{}{
+				"x_mm": 0.0, "y_mm": -1.5, "rotation_deg": 0.0,
+				"size_mm": 1.0, "hidden": false,
+			},
+		}}}}
+
+	// What the worker sends back once it has honoured the authored key: the
+	// effective anchor EQUALS the placement.
+	byRef := resolvedByRef(resolveReply(t, map[string]interface{}{
+		"ref": "SW2", "has_pad_geometry": false,
+		"footprint_resolved": true,
+		"refdes_anchor": map[string]interface{}{
+			"x_mm": 0.0, "y_mm": -6.5, "rotation_deg": 0.0,
+			"size_mm": 1.2, "hidden": false,
+		},
+	}))
+
+	dropDerivedComponentKeys(b)
+	kept, ok := b.Components[0].Extra["refdes_placement"].(map[string]interface{})
+	if !ok || kept["y_mm"] != -6.5 || kept["size_mm"] != 1.2 {
+		t.Fatalf("the authored placement was dropped at the deserialize "+
+			"boundary — the one thing on this component somebody actually "+
+			"chose; got %v", b.Components[0].Extra)
+	}
+	if _, stale := b.Components[0].Extra["refdes_anchor"]; stale {
+		t.Fatalf("the stale effective anchor survived the drop: %v",
+			b.Components[0].Extra)
+	}
+
+	// The board that goes to the resolve must still state the authored key,
+	// or the worker has nothing to honour. This is the exact encoding
+	// attachFootprintGraphics sends.
+	wire, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal board for resolve: %v", err)
+	}
+	var sent struct {
+		Components []map[string]interface{} `json:"components"`
+	}
+	if err := json.Unmarshal(wire, &sent); err != nil {
+		t.Fatalf("unmarshal wire board: %v", err)
+	}
+	if _, ok := sent.Components[0]["refdes_placement"]; !ok {
+		t.Fatalf("the authored placement did not reach the worker: %s", wire)
+	}
+
+	if n := adoptResolvedGeometry(b, byRef); n != 1 {
+		t.Fatalf("attached = %d, want 1", n)
+	}
+	got, _ := b.Components[0].Extra["refdes_anchor"].(map[string]interface{})
+	if got["y_mm"] != -6.5 || got["size_mm"] != 1.2 {
+		t.Fatalf("the wire anchor does not equal the authored placement — the "+
+			"panel would draw the designator somewhere the fab will not print "+
+			"it; got %v", got)
+	}
+	if again, _ := b.Components[0].Extra["refdes_placement"].(map[string]interface{}); again["y_mm"] != -6.5 {
+		t.Fatalf("adoption disturbed the authored placement: %v",
+			b.Components[0].Extra)
+	}
+}
+
+// The two keys must stay on opposite sides of the derived list. A one-line
+// slip here is silent: the placement would simply stop reaching the fab, and
+// every other test in this file would still pass.
+func TestTheAuthoredPlacementIsNotADerivedKey(t *testing.T) {
+	for _, k := range board.DerivedComponentKeys {
+		if k == "refdes_placement" {
+			t.Fatalf("refdes_placement is listed as derived — the deserialize " +
+				"boundary would delete every designator anyone has ever placed")
+		}
+	}
+	var found bool
+	for _, k := range board.DerivedComponentKeys {
+		if k == "refdes_anchor" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("refdes_anchor left the derived list — a document's stale " +
+			"effective anchor would outvote this host's own resolve")
+	}
+}

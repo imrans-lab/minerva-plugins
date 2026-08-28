@@ -174,11 +174,17 @@ const REFDES_STROKE_WIDTH_MM := 0.15
 
 ## Where the fab prints this component's designator, in footprint-LOCAL mm:
 ## `{x_mm, y_mm, rotation_deg, size_mm, hidden}` as the worker's resolve
-## measured it (resolve.py::_refdes_anchor) — the footprint's OWN authored
-## reference fp_text placement, or, when it authors none, the anchor derived
-## from its courtyard. The Gerber emitter and the DRC silk projection read the
-## same derivation, so what this draws is where the fab prints. An EMPTY dict
-## means nothing has been measured yet, and the REFDES_DEFAULT_* above applies.
+## measured it (resolve.py::_refdes_anchor) — the board's own AUTHORED
+## `refdes_placement` below, else the footprint's authored reference fp_text,
+## else the anchor derived from its courtyard. The Gerber emitter, the DRC silk
+## projection and the KiCad export read that same rule, so what this draws is
+## where the fab prints. An EMPTY dict means nothing has been measured yet, and
+## the REFDES_DEFAULT_* above applies.
+##
+## This is the EFFECTIVE value, so it is session state: it is never written to
+## a document (to_board_dict does not emit it, and the Go codec lists it in
+## DerivedComponentKeys), because a saved one would freeze one machine's
+## library into the board.
 ##
 ## Library-derived, like `graphics`: it rides panel state (to_dict) so a
 ## restore does not have to re-resolve, and is re-measured by every load's
@@ -187,6 +193,23 @@ var refdes_anchor: Dictionary = {}:
 	set(value):
 		refdes_anchor = value
 		_refresh_refdes_graphics()
+
+## The AUTHORED designator placement — the one a human or an agent SET through
+## `minerva_pcb_set_refdes`, in the same footprint-local `{x_mm, y_mm,
+## rotation_deg, size_mm, hidden}` shape. EMPTY means nobody chose, and the
+## derivation above applies unchanged.
+##
+## Unlike `refdes_anchor` this is BOARD SOURCE: it is written into every
+## document (to_board_dict -> the .pcbskel save, the YAML export, the promote),
+## it survives the Go codec as an ordinary component field, and the worker
+## honours it above the footprint's own fp_text on every fab surface. A DERIVED
+## anchor is never written back here — that is what keeps "nobody chose" a fact
+## the next resolve is free to answer differently.
+##
+## It may be PARTIAL: a block stating only `hidden` keeps the derived position.
+## `_effective_refdes_anchor` is the one overlay, mirroring the worker's
+## refdes_anchor.component_reference_text.
+var refdes_placement: Dictionary = {}
 
 ## PRINTED reference designator — the stroke-font glyphs the fab actually
 ## prints on silk, in the SAME footprint-local frame as `graphics`, poly entries
@@ -520,7 +543,7 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 ## `pads[].position`, and so is the designator anchor.
 func load_footprint_graphics(graphics_data: Array, refdes_anchor_data: Dictionary) -> void:
 	_graphics_from_list(graphics_data)
-	refdes_anchor = refdes_anchor_data
+	_adopt_derived_anchor(refdes_anchor_data)
 
 
 ## Parse a point from either the worker's native `[x, y]` array shape or the
@@ -604,6 +627,27 @@ func _refresh_refdes_graphics() -> void:
 ## an unmeasured anchor is the default anchor, never a crash.
 static func _anchor_from_any(v) -> Dictionary:
 	return (v as Dictionary) if v is Dictionary else {}
+
+
+## The DERIVED anchor `base` with the authored placement laid over it, per
+## field — the panel half of the worker's one precedence rule
+## (worker/pcb_worker/refdes_anchor.py). Authored beats derived; a field the
+## author did not state keeps the derived answer, so `{hidden: true}` hides a
+## designator without freezing where it would otherwise have been.
+func _effective_refdes_anchor(base: Dictionary) -> Dictionary:
+	if refdes_placement.is_empty():
+		return base
+	var out: Dictionary = base.duplicate()
+	for key in refdes_placement:
+		out[key] = refdes_placement[key]
+	return out
+
+
+## Adopt a freshly DERIVED anchor (a resolve reply, a document, a snapshot)
+## through the overlay. The single writer for every derived source, so no load
+## path can forget the authored half.
+func _adopt_derived_anchor(base: Dictionary) -> void:
+	refdes_anchor = _effective_refdes_anchor(base)
 
 
 ## Deserialize a graphics list (shared by from_dict/from_board_dict) into
@@ -1083,6 +1127,7 @@ func duplicate_component():
 	# The anchor, not the strokes: copy.id is already this copy's own name, so
 	# assigning the anchor renders the designator the COPY carries. A copied
 	# blob of strokes is how a part came to draw its source's ref.
+	copy.refdes_placement = refdes_placement.duplicate()
 	copy.refdes_anchor = refdes_anchor.duplicate()
 	copy.bbox_center_offset = bbox_center_offset
 	copy.local_bounds = local_bounds
@@ -1329,6 +1374,11 @@ func to_dict() -> Dictionary:
 		"footprint_resolved": footprint_resolved,
 		"graphics": _graphics_to_list(),
 		"refdes_anchor": refdes_anchor.duplicate(),
+		# The AUTHORED half rides the undo shape too: history round-trips
+		# reconstruct components from this dict, and a snapshot that carried
+		# only the effective anchor would silently demote a placed designator
+		# back to derived on the first undo.
+		"refdes_placement": refdes_placement.duplicate(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
 		"properties": properties.duplicate(),
 		"layer": layer,
@@ -1396,7 +1446,9 @@ func load_from_dict(data: Dictionary) -> void:
 	pads_authored = raw_pads is Array
 	_pads_from_list(raw_pads if pads_authored else [])
 	_graphics_from_list(data.get("graphics", []))
-	refdes_anchor = _anchor_from_any(data.get("refdes_anchor"))
+	# Authored FIRST: the overlay reads it.
+	refdes_placement = _anchor_from_any(data.get("refdes_placement")).duplicate()
+	_adopt_derived_anchor(_anchor_from_any(data.get("refdes_anchor")))
 
 	# U1-render unit 2: when the snapshot gave no explicit size (no local_bounds,
 	# no width/height Extra), replace the untouched default/centered bounds with
@@ -1514,6 +1566,14 @@ func to_board_dict() -> Dictionary:
 	if footprint_resolved:
 		d["footprint_resolved"] = true
 	d["graphics"] = _graphics_to_list()
+	# AUTHORED BOARD STATE, present-only. Absent means nobody set this
+	# component's designator and the worker's derivation applies unchanged, so a
+	# board that has never used set_refdes serializes exactly as it did before
+	# the key existed. `refdes_anchor` is NOT emitted here — it is the effective
+	# value a resolve computes, and writing it would freeze one host's library
+	# into the document (the reason it is a derived key on the Go side).
+	if not refdes_placement.is_empty():
+		d["refdes_placement"] = refdes_placement.duplicate()
 	d["bbox_center_offset"] = {"x": bbox_center_offset.x, "y": bbox_center_offset.y}
 	d["properties"] = properties.duplicate()
 	d["color"] = {"r": color.r, "g": color.g, "b": color.b, "a": color.a}
@@ -1605,7 +1665,12 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 	else:
 		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
 	_graphics_from_list(data.get("graphics", []))
-	refdes_anchor = _anchor_from_any(data.get("refdes_anchor"))
+	# Authored FIRST: the overlay reads it. A document's authored placement is
+	# what makes the label draw where it was SET even before this session's
+	# resolve has answered — and the resolve answers with the same overlay
+	# applied, so the two agree.
+	refdes_placement = _anchor_from_any(data.get("refdes_placement")).duplicate()
+	_adopt_derived_anchor(_anchor_from_any(data.get("refdes_anchor")))
 
 	# U1-render unit 2: when the board dict gave no explicit size (no
 	# local_bounds, no width/height Extra — the same "not (data.has(...))"
@@ -1649,7 +1714,7 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 	var known := ["ref", "id", "footprint", "footprint_id", "x_mm", "y_mm",
 		"rotation_deg", "layer", "width", "height", "local_bounds", "pads",
 		"has_pad_geometry", "footprint_resolved", "graphics",
-		"refdes_anchor", "refdes_graphics",
+		"refdes_anchor", "refdes_graphics", "refdes_placement",
 		"bbox_center_offset", "properties",
 		"color", "label_visible", "locked", "pins", "value"]
 	for k in data:
