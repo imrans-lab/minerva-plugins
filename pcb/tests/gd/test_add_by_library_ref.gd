@@ -199,7 +199,12 @@ func _canned_footprint_geometry() -> Dictionary:
 		"ref": HEADER_REF, "layer": "canned", "sha256": "",
 		"pad_count": 2, "has_pad_geometry": true,
 		"bounding_box": {"width": 3.6, "height": 6.14, "center_x": 0.0, "center_y": 1.27},
-		"graphics": [], "refdes_graphics": [],
+		"graphics": [],
+		# The DEFAULT designator anchor (the emitter's, for a footprint that
+		# authors no reference fp_text). The part strokes its own ref here —
+		# the reply never carries a rendering of one.
+		"refdes_anchor": {"x_mm": 0.0, "y_mm": -1.5, "rotation_deg": 0.0,
+			"size_mm": 1.0, "hidden": false},
 		"pads": [
 			{"number": "1", "type": "thru_hole", "shape": "rect",
 				"position": {"x": 0.0, "y": 0.0},
@@ -212,9 +217,9 @@ func _canned_footprint_geometry() -> Dictionary:
 		]}}
 
 
-func _worker_footprint_geometry(ref: String, designator: String) -> Dictionary:
+func _worker_footprint_geometry(ref: String) -> Dictionary:
 	return _worker_call("pcb.footprint_geometry",
-		{"ref": ref, "designator": designator},
+		{"ref": ref},
 		_canned_footprint_geometry() if ref == HEADER_REF
 			else {"ok": false, "error": {"kind": "footprint",
 				"message": "footprint %s not found in any library layer" % ref}})
@@ -274,8 +279,8 @@ class WorkerHost extends Node:
 		return data
 	func get_panel():
 		return null
-	func footprint_geometry(ref: String, designator: String = "") -> Dictionary:
-		return resolver.call(ref, designator)
+	func footprint_geometry(ref: String) -> Dictionary:
+		return resolver.call(ref)
 
 
 func _host() -> WorkerHost:
@@ -370,8 +375,20 @@ func _run_library_ref_lands_real_geometry() -> void:
 	# fabricable add has to bring the body outline with the copper.
 	check("silk/courtyard graphics came with it (got %d)" % (comp.graphics.size() if comp != null else -1),
 		comp != null and comp.graphics.size() > 0)
-	check("the printed reference designator came with it too",
-		comp != null and comp.refdes_graphics.size() > 0)
+	# The designator is a RENDER of the live ref, not a picture the reply
+	# carried: a copy of this part answers to its own new name, and answers to
+	# J1's strokes again the moment it is named J1 (bug 01a047a3ae10).
+	var twin = comp.duplicate_component() if comp != null else null
+	if twin != null:
+		twin.id = "ZZ9"
+	var twin_renamed: bool = twin != null \
+		and twin.refdes_graphics.size() > 0 \
+		and twin.refdes_graphics != comp.refdes_graphics
+	if twin != null:
+		twin.id = "J1"
+	check("it strokes its OWN ref as the printed designator — a copy follows its new name, and matches again when renamed back",
+		comp != null and comp.refdes_graphics.size() > 0
+			and twin_renamed and twin.refdes_graphics == comp.refdes_graphics)
 
 	# The board owns the geometry outright now (the FULL rule), so the part
 	# still compiles on a machine whose library lacks the ref.

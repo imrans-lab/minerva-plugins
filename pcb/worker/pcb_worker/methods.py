@@ -3758,7 +3758,7 @@ def _footprint_stage(params: dict) -> dict:
 def _footprint_geometry(params: dict) -> dict:
     """One library ref's fabricable geometry — the ADD-BY-REF seam.
 
-    params: {ref, designator?, wip_root?, library_layers?}
+    params: {ref, wip_root?, library_layers?}
     Reply:  {ok: True, result: <pcb_worker.resolve.footprint_geometry(...)>}
 
     This is what lets a part be added to a live board by library ref with real
@@ -3781,9 +3781,7 @@ def _footprint_geometry(params: dict) -> dict:
                        "'LibNick:PartName'"}}
     try:
         result = resolve.footprint_geometry(
-            ref.strip(),
-            designator=str(params.get("designator") or ""),
-            **_layer_params(params))
+            ref.strip(), **_layer_params(params))
     except (bless.BlessError, footprints.FootprintLookupError) as exc:
         return _bless_error(exc)
     return {"ok": True, "result": result}

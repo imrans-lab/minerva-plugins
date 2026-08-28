@@ -1,7 +1,8 @@
 extends SceneTree
-## THE THREE CONTRACTS A PART'S GEOMETRY OWES ITS READERS, none of which needs
+## THE FOUR CONTRACTS A PART'S GEOMETRY OWES ITS READERS, none of which needs
 ## a worker: which way a rotation WORD turns the part on screen, which side of a
-## two-column part a pin is on, and what a component's own `pads` key means.
+## two-column part a pin is on, what a component's own `pads` key means, and
+## which name its printed designator draws.
 ##
 ## Run (via a Minerva scaffold as the Godot host — NEVER the live checkout):
 ##   godot --headless --path <minerva-scaffold>/src \
@@ -33,8 +34,14 @@ extends SceneTree
 ##      does not — because the wire rule is only sound if the key means what it
 ##      says.
 ##
+##   4. THE DRAWN DESIGNATOR IS A RENDER OF THE LIVE REF, not a stored picture
+##      of the ref it was rendered from. Section 4 states it over the whole
+##      lifecycle a picture used to survive: rename, copy, board-dict load and
+##      panel-state restore.
+##
 ## FAILS AGAINST OLD: section 1's two word cases land on the opposite sides;
-## section 2's DIP case returns one pin where three are asserted.
+## section 2's DIP case returns one pin where three are asserted; section 4's
+## copy and load cases draw the ref they were copied from.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -61,10 +68,11 @@ var _fail := 0
 
 
 func _init() -> void:
-	print("=== Part geometry contracts: rotation words, pad-row sides, the pads key ===\n")
+	print("=== Part geometry contracts: rotation words, pad-row sides, the pads key, the drawn designator ===\n")
 	await _run_rotation_words_land_where_the_eye_expects()
 	await _run_two_column_parts_read_columns_as_sides()
 	_run_the_pads_key_is_an_authority_claim()
+	_run_the_drawn_designator_is_the_live_ref()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -340,3 +348,100 @@ func _run_the_pads_key_is_an_authority_claim() -> void:
 		{"components": [resolved]})
 	check("…and still drops them for a part the library provably resolved (the payload relief)",
 		not (wired_resolved["components"][0] as Dictionary).has("pads"))
+
+
+# ── 4. The drawn designator is a RENDER of the live ref ──────────────────────
+#
+# A designator exists nowhere in the authored board: it is glyph geometry, and
+# somebody has to synthesize it. The panel used to be handed the worker's
+# rendering and to store it — on the component, in panel state, and (through
+# the canonical passthrough) in the saved board. A rendering of a ref is a
+# picture of ONE name, so the picture outlived the name: a part copied from its
+# neighbour kept drawing the neighbour's designator, on screen and in every
+# board written afterwards, until something re-resolved it. JP6 on
+# smart-remote-v2 drew JP5 (bug 01a047a3ae10).
+#
+# The strokes are derived now — a render of `id` at `refdes_anchor`, refreshed
+# by both setters — so the questions below have only one possible answer.
+
+## The far-offset authored anchor: a footprint that says where its reference
+## goes. Deliberately nowhere near the default (x-centred, y = -1.5), so a
+## renderer that ignored the anchor cannot accidentally satisfy the assertion.
+const AUTHORED_ANCHOR := {"x_mm": 12.7, "y_mm": -1.9, "rotation_deg": 0.0,
+	"size_mm": 1.2, "hidden": false}
+
+
+## A bare component carrying a ref and an anchor — the only two inputs the
+## designator has. Used as the ORACLE: whatever a renamed, copied or reloaded
+## part draws must equal what a part freshly named that draws.
+func _part(ref: String, anchor: Dictionary = AUTHORED_ANCHOR):
+	var comp = PCBComponent.new()
+	comp.id = ref
+	comp.set_footprint_by_name("CUSTOM")
+	comp.refdes_anchor = anchor
+	return comp
+
+
+func _stroke_x_extent(comp) -> Vector2:
+	var lo := INF
+	var hi := -INF
+	for g in comp.refdes_graphics:
+		for pt in g["points"]:
+			var p: Vector2 = pt
+			lo = minf(lo, p.x)
+			hi = maxf(hi, p.x)
+	return Vector2(lo, hi)
+
+
+func _run_the_drawn_designator_is_the_live_ref() -> void:
+	print("-- 4. the drawn designator is a render of the live ref --")
+	var jp5 = _part("JP5")
+	var jp6 = _part("JP6")
+	check("a component strokes its designator at all",
+		jp5.refdes_graphics.size() > 0 and jp6.refdes_graphics.size() > 0)
+
+	var extent: Vector2 = _stroke_x_extent(jp5)
+	check("…at the footprint's AUTHORED anchor, not the default one",
+		extent.x <= AUTHORED_ANCHOR["x_mm"] and AUTHORED_ANCHOR["x_mm"] <= extent.y
+			and _stroke_x_extent(_part("JP5", {})).y < AUTHORED_ANCHOR["x_mm"])
+
+	# RENAME. The strokes are not a cache anyone has to remember to invalidate.
+	var renamed = _part("JP5")
+	renamed.id = "JP6"
+	check("a rename redraws the designator: it becomes JP6's, and stops being JP5's",
+		renamed.refdes_graphics == jp6.refdes_graphics
+			and renamed.refdes_graphics != jp5.refdes_graphics)
+
+	# COPY — the reported defect. The copy carries the source's anchor (same
+	# footprint) but its own name, and must draw its own name.
+	var copied = jp5.duplicate_component()
+	copied.id = "JP6"
+	check("a copy renamed JP6 draws JP6 — not the strokes it was copied from",
+		copied.refdes_graphics == jp6.refdes_graphics)
+
+	# LOAD. The exact shape of the owner's board: JP6's entry carrying JP5's
+	# rendering, byte-for-byte, because the two were copies.
+	var stale: Dictionary = jp6.to_board_dict()
+	stale["refdes_graphics"] = [{"layer": "F.SilkS", "kind": "poly", "width": 0.15,
+		"points": [{"x": 0.0, "y": -1.5}, {"x": 0.5, "y": -1.5}]}]
+	stale["refdes_anchor"] = AUTHORED_ANCHOR
+	var loaded = PCBComponent.new()
+	loaded.load_from_board_dict(stale)
+	check("a board dict carrying a stale rendering loads showing the component's OWN ref",
+		loaded.refdes_graphics == jp6.refdes_graphics)
+	check("…and the stale rendering does not come back out — no saved board or promote YAML can carry one",
+		not loaded.to_board_dict().has("refdes_graphics"))
+
+	# HIDDEN. A hidden reference prints nothing, so it must draw nothing —
+	# the same ruling the emitter applies at its one glyph owner.
+	var hidden = _part("U9", {"x_mm": 0.0, "y_mm": -1.5, "rotation_deg": 0.0,
+		"size_mm": 1.0, "hidden": true})
+	check("a footprint whose reference is authored HIDDEN draws no designator",
+		hidden.refdes_graphics.is_empty())
+
+	# PANEL STATE. A restore does not re-resolve, so the anchor has to survive
+	# it — the strokes are then re-derived rather than restored.
+	var restored = PCBComponent.from_dict(jp5.to_dict())
+	check("a panel-state round trip keeps the anchor and redraws the same designator",
+		restored.refdes_anchor == jp5.refdes_anchor
+			and restored.refdes_graphics == jp5.refdes_graphics)

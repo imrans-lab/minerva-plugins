@@ -3885,7 +3885,9 @@ static func _feed_assembly_cache(host, assembly: Dictionary, board_revision: int
 
 
 ## Per-component fields canonical_wire_board strips — the panel's RENDER
-## enrichment (worker-attached or panel-derived draw detail). Every entry is
+## enrichment (worker-attached or panel-derived draw detail; refdes_graphics
+## now only ever reaches here on a payload authored before the designator
+## became derived). Every entry is
 ## poison-proven unread by the worker's assembly/board_health kernels
 ## (worker/tests/test_board_health_resolve_first.py): both resolve tolerantly
 ## from the library chain themselves, so shipping these is pure wire weight.

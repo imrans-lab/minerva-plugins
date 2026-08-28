@@ -363,9 +363,9 @@ func assembly_check(board: Dictionary) -> Dictionary:
 ## host→panel duck-typed path as assembly_check above. Unlike the assembly
 ## advisory, an unreachable panel is a REFUSAL and not a degrade: the caller
 ## would otherwise place a part promising lands it does not have.
-func footprint_geometry(ref: String, designator: String = "") -> Dictionary:
+func footprint_geometry(ref: String) -> Dictionary:
 	if _panel != null and is_instance_valid(_panel) and _panel.has_method("footprint_geometry"):
-		return await _panel.footprint_geometry(ref, designator)
+		return await _panel.footprint_geometry(ref)
 	return {"ok": false, "error": {"kind": "worker_unavailable",
 		"message": "no panel bound — pcb.footprint_geometry broker unreachable (headless / before mount)"}}
 

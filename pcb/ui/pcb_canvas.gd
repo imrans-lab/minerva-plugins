@@ -3609,7 +3609,8 @@ func _draw_component_silk(comp, xform: Transform2D) -> void:
 
 
 ## Draw the PRINTED reference designator (WYSIWYG goal 019ff4a5a75a, gap G2) —
-## the worker-derived stroke-font glyphs the fab actually prints, placed by the
+## the stroke-font glyphs the fab actually prints, rendered by the component
+## from its LIVE ref (pcb_component._refresh_refdes_graphics) and placed by the
 ## SAME transform as the footprint silk above so designator, silk and copper
 ## co-register exactly as they do in the emitted Gerber. This is artwork, not
 ## chrome: the floating UI name label near the component is a separate,

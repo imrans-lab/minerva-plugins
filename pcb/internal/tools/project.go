@@ -316,7 +316,7 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 	// panel's wire trim believes the flag and drops the component's pads.
 	// Clearing it here makes the reply's flags mean exactly "resolved here,
 	// just now", on both the enriched and the pure-codec arm.
-	dropDerivedResolveFlags(b)
+	dropDerivedComponentKeys(b)
 	// Board-LOAD enrichment: attach each component's footprint silk/courtyard
 	// graphics, best-effort. No-op when w == nil (the pure codec path). Runs
 	// AFTER validation so we never resolve a board we are about to reject, and
@@ -414,18 +414,31 @@ func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Boa
 	return warnings
 }
 
-// dropDerivedResolveFlags removes the component-level footprint_resolved key
-// from every component's Extra. Called once at the deserialize boundary so the
-// only footprint_resolved a reply can carry is one adoptResolvedGeometry
-// stamped from this host's own resolve. Nil-safe and cheap on a board that
-// carries none.
-func dropDerivedResolveFlags(b *board.Board) {
+// derivedComponentKeys are per-component Extra keys that state something a
+// resolve DERIVES, never something a board authors — so a document carrying
+// one is stating a fact about the machine that wrote it.
+//
+//   - footprint_resolved: "a resolve succeeded against this library".
+//   - refdes_graphics: a picture of one particular designator, written by
+//     pre-anchor boards. It is a copy of a ref, so a component copied from
+//     another carried the SOURCE's designator strokes and drew them forever
+//     after; the renderer strokes the live ref at refdes_anchor now.
+var derivedComponentKeys = []string{"footprint_resolved", "refdes_graphics"}
+
+// dropDerivedComponentKeys removes every derivedComponentKeys entry from every
+// component's Extra. Called once at the deserialize boundary so the only such
+// keys a reply can carry are the ones adoptResolvedGeometry stamped from this
+// host's own resolve. Nil-safe and cheap on a board that carries none.
+func dropDerivedComponentKeys(b *board.Board) {
 	if b == nil {
 		return
 	}
 	for i := range b.Components {
-		if b.Components[i].Extra != nil {
-			delete(b.Components[i].Extra, "footprint_resolved")
+		if b.Components[i].Extra == nil {
+			continue
+		}
+		for _, k := range derivedComponentKeys {
+			delete(b.Components[i].Extra, k)
 		}
 	}
 }
@@ -451,18 +464,22 @@ func adoptResolvedGeometry(b *board.Board, byRef map[string]resolvedComponent) i
 				took = true
 			}
 		}
-		// The printed designator (WYSIWYG G2) — derived silk, adopted like
-		// graphics. Nothing authored ever carries this key (the codec has no
-		// field for it), so absent-only is a formality kept for symmetry.
-		if len(r.refdesGraphics) > 0 {
-			if _, exists := b.Components[i].Extra["refdes_graphics"]; !exists {
-				b.Components[i].Extra["refdes_graphics"] = r.refdesGraphics
+		// WHERE the fab prints this component's designator (WYSIWYG G2) —
+		// the footprint's own reference-text anchor, adopted like graphics.
+		// The strokes themselves are NOT carried: the renderer owns the same
+		// glyph table and strokes the component's live ref, so a renamed or
+		// copied part cannot keep drawing the designator it was rendered from.
+		// dropDerivedComponentKeys has already cleared any strokes an older
+		// document carried, so this pass is the only writer here.
+		if len(r.refdesAnchor) > 0 {
+			if _, exists := b.Components[i].Extra["refdes_anchor"]; !exists {
+				b.Components[i].Extra["refdes_anchor"] = r.refdesAnchor
 				took = true
 			}
 		}
 		// The component-level resolved fact. Boolean and worker-owned:
 		// absence means the best-effort resolve left the component pristine,
-		// so absent stays absent. dropDerivedResolveFlags has already cleared
+		// so absent stays absent. dropDerivedComponentKeys has already cleared
 		// any flag the document carried, so the absent-only guard below can
 		// only ever see a key this pass itself wrote.
 		if r.footprintResolved {
@@ -527,14 +544,14 @@ func callResolveBestEffort(ctx context.Context, w *bridge.Worker, params json.Ra
 }
 
 // resolvedComponent is one component's adoptable enrichment from the resolve
-// reply: its footprint body graphics, its real pad geometry, and its printed
-// reference-designator strokes (WYSIWYG G2 — derived silk the emitters
-// synthesize themselves, carried on a separate key so the loose-dict emit
-// path can never print it twice).
+// reply: its footprint body graphics, its real pad geometry, and the anchor
+// its printed reference designator is stroked at (WYSIWYG G2 — derived silk
+// the emitters synthesize themselves from the ref, so only the placement has
+// to travel).
 type resolvedComponent struct {
 	graphics          []interface{}
 	pads              []interface{}
-	refdesGraphics    []interface{}
+	refdesAnchor      map[string]interface{}
 	hasPadGeometry    bool
 	footprintResolved bool
 }
@@ -557,7 +574,7 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 				Ref            string        `json:"ref"`
 				Graphics       []interface{} `json:"graphics"`
 				Pads           []interface{} `json:"pads"`
-				RefdesGraphics []interface{} `json:"refdes_graphics"`
+				RefdesAnchor   map[string]interface{} `json:"refdes_anchor"`
 				HasPadGeometry bool          `json:"has_pad_geometry"`
 				// The COMPONENT-level resolved fact (bug 019ff4a9a0d7) — a
 				// silk-only footprint resolves with zero pads, so the pad
@@ -574,13 +591,13 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 		if c.Ref == "" {
 			continue
 		}
-		rc := resolvedComponent{graphics: c.Graphics, refdesGraphics: c.RefdesGraphics,
+		rc := resolvedComponent{graphics: c.Graphics, refdesAnchor: c.RefdesAnchor,
 			footprintResolved: c.FootprintResolved}
 		if c.HasPadGeometry {
 			rc.pads = c.Pads
 			rc.hasPadGeometry = true
 		}
-		if len(rc.graphics) == 0 && len(rc.refdesGraphics) == 0 &&
+		if len(rc.graphics) == 0 && len(rc.refdesAnchor) == 0 &&
 			!rc.hasPadGeometry && !rc.footprintResolved {
 			continue
 		}

@@ -151,35 +151,59 @@ func TestAdoptionIsPerKeyNotAllOrNothing(t *testing.T) {
 	}
 }
 
-func TestAdoptionCarriesThePrintedDesignator(t *testing.T) {
-	strokes := []interface{}{map[string]interface{}{
-		"layer": "F.SilkS", "kind": "poly",
-		"points": []interface{}{[]interface{}{0.0, -1.5}, []interface{}{0.5, -1.5}},
-		"width":  0.15,
-	}}
+// THE DESIGNATOR TRAVELS AS AN ANCHOR, NOT AS A PICTURE (bug 01a047a3ae10).
+// Pre-anchor replies carried the rendered strokes, adoption was absent-only,
+// and a board saved with a component's strokes handed them straight back on
+// the next load — so a part copied from another drew the SOURCE's designator
+// for the rest of the board's life. What is adopted now is where the footprint
+// prints its reference; the renderer strokes the component's own ref there.
+//
+// Oracle: a document that arrives carrying strokes must lose them, and must
+// come back out carrying the anchor this host's resolve just measured.
+func TestAdoptionCarriesTheDesignatorAnchorAndDropsSavedStrokes(t *testing.T) {
+	anchor := map[string]interface{}{
+		"x_mm": 0.0, "y_mm": -1.5, "rotation_deg": 0.0,
+		"size_mm": 1.0, "hidden": false,
+	}
 	byRef := resolvedByRef(resolveReply(t,
-		// A silk-only footprint: designator + graphics, NO pads. It must still
-		// be indexed (and adopted) — before refdes existed, "resolved to
-		// nothing adoptable" and "silk-only" were indistinguishable.
+		// A silk-only footprint: designator anchor + graphics, NO pads. It
+		// must still be indexed (and adopted) — before refdes existed,
+		// "resolved to nothing adoptable" and "silk-only" were
+		// indistinguishable.
 		map[string]interface{}{
 			"ref": "REV1", "has_pad_geometry": false,
-			"graphics":        []interface{}{map[string]interface{}{"kind": "line"}},
-			"refdes_graphics": strokes,
+			"graphics":      []interface{}{map[string]interface{}{"kind": "line"}},
+			"refdes_anchor": anchor,
 		},
 	))
 	rev1, ok := byRef["REV1"]
-	if !ok || len(rev1.refdesGraphics) != 1 {
-		t.Fatalf("silk-only component's designator strokes not indexed: %+v", rev1)
+	if !ok || len(rev1.refdesAnchor) != 5 {
+		t.Fatalf("silk-only component's designator anchor not indexed: %+v", rev1)
 	}
 
-	b := &board.Board{Components: []board.Component{{Ref: "REV1"}}}
+	// The board as an OLD document delivers it: someone else's strokes, under
+	// this component's ref.
+	b := &board.Board{Components: []board.Component{{Ref: "REV1",
+		Extra: map[string]interface{}{"refdes_graphics": []interface{}{
+			map[string]interface{}{
+				"layer": "F.SilkS", "kind": "poly",
+				"points": []interface{}{
+					[]interface{}{0.0, -1.5}, []interface{}{0.5, -1.5}},
+				"width": 0.15,
+			}}}}}}
+	dropDerivedComponentKeys(b)
 	if n := adoptResolvedGeometry(b, byRef); n != 1 {
 		t.Fatalf("attached = %d, want 1", n)
 	}
-	if _, ok := b.Components[0].Extra["refdes_graphics"]; !ok {
-		t.Fatalf("refdes_graphics not adopted — the panel would keep showing "+
-			"UI labels instead of the strokes the fab prints; got %v",
+	if _, ok := b.Components[0].Extra["refdes_graphics"]; ok {
+		t.Fatalf("the document's saved designator strokes survived the load — "+
+			"a copied part would go on drawing the ref it was copied from; got %v",
 			b.Components[0].Extra)
+	}
+	got, _ := b.Components[0].Extra["refdes_anchor"].(map[string]interface{})
+	if len(got) != 5 || got["y_mm"] != -1.5 {
+		t.Fatalf("refdes_anchor not adopted — the panel would draw every "+
+			"designator at the default anchor; got %v", b.Components[0].Extra)
 	}
 	if _, ok := b.Components[0].Extra["has_pad_geometry"]; ok {
 		t.Fatalf("has_pad_geometry stamped on a pad-less component")
@@ -233,7 +257,7 @@ func TestDeserializeDropsTheDocumentsOwnResolvedFlag(t *testing.T) {
 
 	// No resolve behind it: the flag the document carried must not survive.
 	stale := docBoard()
-	dropDerivedResolveFlags(stale)
+	dropDerivedComponentKeys(stale)
 	adoptResolvedGeometry(stale, map[string]resolvedComponent{})
 	if _, ok := stale.Components[0].Extra["footprint_resolved"]; ok {
 		t.Fatalf("a saved footprint_resolved survived a load this host never resolved: %v",
@@ -242,7 +266,7 @@ func TestDeserializeDropsTheDocumentsOwnResolvedFlag(t *testing.T) {
 
 	// This host's own resolve answers for the ref: the flag is stamped back.
 	live := docBoard()
-	dropDerivedResolveFlags(live)
+	dropDerivedComponentKeys(live)
 	byRef := resolvedByRef(resolveReply(t,
 		map[string]interface{}{"ref": "J1", "footprint_resolved": true},
 	))
@@ -255,10 +279,10 @@ func TestDeserializeDropsTheDocumentsOwnResolvedFlag(t *testing.T) {
 	}
 }
 
-// dropDerivedResolveFlags touches nothing else and tolerates a nil board and a
+// dropDerivedComponentKeys touches nothing else and tolerates a nil board and a
 // nil Extra map — it runs on every deserialize, including the pure-codec arm.
-func TestDropDerivedResolveFlagsLeavesEverythingElseAlone(t *testing.T) {
-	dropDerivedResolveFlags(nil)
+func TestDropDerivedComponentKeysLeavesEverythingElseAlone(t *testing.T) {
+	dropDerivedComponentKeys(nil)
 
 	b := &board.Board{Components: []board.Component{
 		{Ref: "J1", Extra: map[string]interface{}{
@@ -268,7 +292,7 @@ func TestDropDerivedResolveFlagsLeavesEverythingElseAlone(t *testing.T) {
 		}},
 		{Ref: "J2"}, // nil Extra
 	}}
-	dropDerivedResolveFlags(b)
+	dropDerivedComponentKeys(b)
 
 	if _, ok := b.Components[0].Extra["footprint_resolved"]; ok {
 		t.Fatalf("flag not dropped: %v", b.Components[0].Extra)

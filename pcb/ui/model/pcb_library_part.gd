@@ -114,7 +114,7 @@ static func build(host, data, args: Dictionary) -> Dictionary:
 
 	var geometry: Dictionary = {}
 	if by_ref:
-		var fetched: Dictionary = await _fetch_geometry(host, footprint, component_id)
+		var fetched: Dictionary = await _fetch_geometry(host, footprint)
 		if not bool(fetched.get("ok", false)):
 			return fetched
 		geometry = fetched["geometry"]
@@ -169,10 +169,10 @@ static func _apply_sketch(comp, footprint: String, args: Dictionary) -> void:
 ## A host with no channel (headless model fixtures, or the panel before mount)
 ## is a REFUSAL, not a degrade: the alternative is placing a part with no lands
 ## under a name that promises them.
-static func _fetch_geometry(host, ref: String, designator: String) -> Dictionary:
+static func _fetch_geometry(host, ref: String) -> Dictionary:
 	if host == null or not host.has_method("footprint_geometry"):
 		return {"ok": false, "error": "cannot add '%s' by library ref — the pcb backend is not reachable from this panel, so the footprint could not be resolved. Start the plugin (minerva_plugin_start) and retry." % ref}
-	var reply: Dictionary = await host.footprint_geometry(ref, designator)
+	var reply: Dictionary = await host.footprint_geometry(ref)
 	if bool(reply.get("ok", false)):
 		var result: Variant = reply.get("result")
 		if not (result is Dictionary) or (result as Dictionary).is_empty():
@@ -187,7 +187,7 @@ static func _fetch_geometry(host, ref: String, designator: String) -> Dictionary
 
 ## Write a worker `footprint_geometry` reply onto a component, making it
 ## FABRICABLE: real lands, real silk, the library's own body box, and the
-## printed designator the fab will actually stroke.
+## anchor the fab strokes its printed designator at.
 ##
 ## `pads_authored` is set because the geometry came from a resolve THIS host
 ## performed: the board now carries the lands outright (a `pads` key = the
@@ -216,8 +216,9 @@ static func apply_geometry(comp, ref: String, geometry: Dictionary) -> void:
 	})
 	comp.pads_authored = true
 	comp.footprint_resolved = true
+	var anchor: Variant = geometry.get("refdes_anchor")
 	comp.load_footprint_graphics(
-		geometry.get("graphics", []), geometry.get("refdes_graphics", []))
+		geometry.get("graphics", []), anchor if anchor is Dictionary else {})
 
 
 ## The add verb's reply body for a built component — its identity, where it

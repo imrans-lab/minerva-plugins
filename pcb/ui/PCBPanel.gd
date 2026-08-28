@@ -6751,14 +6751,14 @@ func zone_fill_check(board: Dictionary) -> Dictionary:
 
 
 ## ONE library ref's fabricable geometry — the seam add-by-library-ref resolves
-## through. `designator` opts the reply into the printed designator strokes, so
-## a freshly added part draws the text the fab will print.
-func footprint_geometry(ref: String, designator: String = "") -> Dictionary:
+## through. The reply carries `refdes_anchor`, where the footprint prints its
+## reference, so a freshly added part strokes its own ref where the fab will.
+func footprint_geometry(ref: String) -> Dictionary:
 	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
 	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
-		"pcb.footprint_geometry", {"ref": ref, "designator": designator}, 30000),
+		"pcb.footprint_geometry", {"ref": ref}, 30000),
 		"footprint_geometry")
 
 

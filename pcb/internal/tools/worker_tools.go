@@ -529,10 +529,11 @@ var FootprintGeometryChannel = ToolSpec{
 	Description: "Panel IPC channel for ONE library footprint's fabricable " +
 		"geometry — what add-by-library-ref places. Forwards verbatim to the " +
 		"Python worker's 'footprint_geometry' method. Args: {ref:'LibNick:" +
-		"PartName', designator?:<refdes the part will carry>}. Returns {ok, " +
+		"PartName'}. Returns {ok, " +
 		"result:{ref, layer:'seed'|'wip'|'user', sha256, footprint_name, " +
 		"pads:[<board-dict pad>], graphics:[{layer:'F.SilkS'|'F.CrtYd', kind, " +
-		"...}], refdes_graphics?, bounding_box:{width,height,center_x," +
+		"...}], refdes_anchor:{x_mm,y_mm,rotation_deg,size_mm,hidden}, " +
+		"bounding_box:{width,height,center_x," +
 		"center_y}, pad_count, has_pad_geometry}}. Resolves through the SAME " +
 		"library chain a compile does, so a part this places is a part the " +
 		"worker can fabricate. An unresolvable ref REFUSES by name (the ref " +

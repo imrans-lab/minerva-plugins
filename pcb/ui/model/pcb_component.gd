@@ -14,6 +14,10 @@ extends RefCounted
 ## (undo snapshots + Round-B friction).
 
 const _Self := preload("pcb_component.gd")
+## The panel's half of the board stroke font — the same glyph table the
+## worker prints designators with. Used to RENDER this component's ref
+## rather than store a picture of it (see refdes_graphics).
+const PcbBoardFont := preload("pcb_board_font.gd")
 
 ## Footprint types for visual rendering
 enum FootprintType {
@@ -34,8 +38,14 @@ enum FootprintType {
 	CUSTOM
 }
 
-## Unique identifier (e.g., "SW1", "U3", "R12")
-var id: String = ""
+## Unique identifier (e.g., "SW1", "U3", "R12") — the reference designator, and
+## the text the fab prints on silk. Assigning it re-renders `refdes_graphics`,
+## which is what makes a rename or a copy show the NEW name on the canvas
+## instead of the one the strokes were rendered from.
+var id: String = "":
+	set(value):
+		id = value
+		_refresh_refdes_graphics()
 
 ## Component footprint type
 var footprint: FootprintType = FootprintType.CUSTOM
@@ -142,16 +152,41 @@ var footprint_resolved: bool = false
 ##   points: Array[Vector2], angle: float (optional)  (kind == "arc" or "poly")
 var graphics: Array = []
 
-## PRINTED reference designator — the worker-derived stroke-font glyphs the fab
-## actually prints on silk (WYSIWYG goal 019ff4a5a75a, gap G2), in the SAME
-## footprint-local frame as `graphics`, poly entries only. Kept SEPARATE from
-## `graphics` on purpose, in both directions:
-##   * inbound, the worker attaches it under its own key because the loose-dict
-##     emitters consume comp["graphics"] and then synthesize the designator
-##     themselves — merged strokes would print twice;
-##   * outbound, to_board_dict must NOT carry it (derived, re-attached by every
-##     load's resolve enrichment), while to_dict (panel state) does, so a
-##     project restore keeps the printed designator without re-resolving.
+## The emitter's default designator anchor, for a footprint that authors no
+## reference fp_text of its own — mirrors silk_source.REFDES_LOCAL_Y_MM /
+## REFDES_TEXT_SIZE_MM / SILK_TEXT_WIDTH_MM. A designator centred on the
+## component origin and printed just above it.
+const REFDES_DEFAULT_Y_MM := -1.5
+const REFDES_DEFAULT_SIZE_MM := 1.0
+const REFDES_STROKE_WIDTH_MM := 0.15
+
+## Where the fab prints this component's designator, in footprint-LOCAL mm:
+## `{x_mm, y_mm, rotation_deg, size_mm, hidden}`, the footprint's OWN authored
+## reference fp_text placement as the worker's resolve measured it
+## (resolve.py::_refdes_anchor). An EMPTY dict means nothing has been measured
+## yet, and the REFDES_DEFAULT_* above — the emitter's own default anchor —
+## applies.
+##
+## Library-derived, like `graphics`: it rides panel state (to_dict) so a
+## restore does not have to re-resolve, and is re-measured by every load's
+## resolve enrichment. Assigning it re-renders the strokes.
+var refdes_anchor: Dictionary = {}:
+	set(value):
+		refdes_anchor = value
+		_refresh_refdes_graphics()
+
+## PRINTED reference designator — the stroke-font glyphs the fab actually
+## prints on silk (WYSIWYG goal 019ff4a5a75a, gap G2), in the SAME
+## footprint-local frame as `graphics`, poly entries only. Kept separate from
+## `graphics` because the loose-dict emitters consume comp["graphics"] and then
+## synthesize the designator themselves — merged strokes would print twice.
+##
+## DERIVED, NEVER STORED. It is a render of `id` at `refdes_anchor`, refreshed
+## by both setters, and no dict deserializes into it or serializes out of it.
+## It used to be a worker-rendered blob carried through every codec, which made
+## it a picture of whatever the ref was when it was rendered: a component
+## copied from another kept drawing the SOURCE's designator, on screen and in
+## the saved board, for as long as nobody re-resolved it.
 var refdes_graphics: Array = []
 
 ## Bounding box center offset from footprint origin (for origin-based positioning)
@@ -385,10 +420,11 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 ## Attach a footprint's silk/courtyard graphics and its printed designator —
 ## the graphics half of load_pad_geometry above, for the ADD-BY-REF path, which
 ## gets its geometry from a single-footprint resolve rather than from a board
-## load. Both lists are in the SAME footprint-local frame as `pads[].position`.
-func load_footprint_graphics(graphics_data: Array, refdes_data: Array) -> void:
+## load. The graphics are in the SAME footprint-local frame as
+## `pads[].position`, and so is the designator anchor.
+func load_footprint_graphics(graphics_data: Array, refdes_anchor_data: Dictionary) -> void:
 	_graphics_from_list(graphics_data)
-	_refdes_from_list(refdes_data)
+	refdes_anchor = refdes_anchor_data
 
 
 ## Parse a point from either the worker's native `[x, y]` array shape or the
@@ -436,36 +472,39 @@ func _graphics_to_list() -> Array:
 	return list
 
 
-## Serialize/deserialize the printed-designator strokes (poly-only). The dict
-## shape matches graphics poly entries so a future merge stays trivial.
-func _refdes_to_list() -> Array:
-	var list := []
-	for g in refdes_graphics:
-		var pts_list := []
-		for pt in g.get("points", []):
-			var pv: Vector2 = pt
-			pts_list.append({"x": pv.x, "y": pv.y})
-		list.append({"layer": g.get("layer", "F.SilkS"), "kind": "poly",
-			"points": pts_list, "width": g.get("width", 0.15)})
-	return list
+## Re-render the printed designator from the LIVE ref at the current anchor.
+## Called by the `id` and `refdes_anchor` setters — that pair is the whole sync
+## contract, and the reason no caller has to remember to refresh after a
+## rename, a copy, a load or a normalize.
+##
+## The glyphs, the anchor defaults and the stroke width are the emitter's own
+## (PcbBoardFont mirrors board_font; silk_source places designator glyphs
+## CENTRED on the anchor with the baseline at its y), so what the canvas draws
+## is what the Gerber will carry. A hidden reference draws nothing, matching
+## the emitter's authored-hidden rule.
+func _refresh_refdes_graphics() -> void:
+	refdes_graphics = []
+	if id.strip_edges().is_empty() or bool(refdes_anchor.get("hidden", false)):
+		return
+	var rendered: Dictionary = PcbBoardFont.strokes_for(
+		id,
+		float(refdes_anchor.get("x_mm", 0.0)),
+		float(refdes_anchor.get("y_mm", REFDES_DEFAULT_Y_MM)),
+		float(refdes_anchor.get("size_mm", REFDES_DEFAULT_SIZE_MM)),
+		float(refdes_anchor.get("rotation_deg", 0.0)),
+		false, "center")
+	for stroke in rendered["polylines"]:
+		var pts: Array = stroke
+		if pts.size() >= 2:
+			refdes_graphics.append({
+				"layer": "F.SilkS", "kind": "poly",
+				"width": REFDES_STROKE_WIDTH_MM, "points": pts})
 
 
-func _refdes_from_list(list_data: Array) -> void:
-	refdes_graphics.clear()
-	for g_data in list_data:
-		if not (g_data is Dictionary):
-			continue
-		var pts: Array = []
-		for pt_data in g_data.get("points", []):
-			pts.append(_point_from_any(pt_data))
-		if pts.size() < 2:
-			continue
-		refdes_graphics.append({
-			"layer": str(g_data.get("layer", "F.SilkS")),
-			"kind": "poly",
-			"width": float(g_data.get("width", 0.15)) if g_data.get("width") != null else 0.15,
-			"points": pts,
-		})
+## Read a designator anchor off a dict, tolerating a missing or malformed one:
+## an unmeasured anchor is the default anchor, never a crash.
+static func _anchor_from_any(v) -> Dictionary:
+	return (v as Dictionary) if v is Dictionary else {}
 
 
 ## Deserialize a graphics list (shared by from_dict/from_board_dict) into
@@ -934,6 +973,10 @@ func duplicate_component():
 	copy.has_pad_geometry = has_pad_geometry
 	copy.pads_authored = pads_authored
 	copy.graphics = graphics.duplicate(true)
+	# The anchor, not the strokes: copy.id is already this copy's own name, so
+	# assigning the anchor renders the designator the COPY carries. A copied
+	# blob of strokes is how a part came to draw its source's ref.
+	copy.refdes_anchor = refdes_anchor.duplicate()
 	copy.bbox_center_offset = bbox_center_offset
 	copy.local_bounds = local_bounds
 	copy.locked = locked
@@ -1173,7 +1216,7 @@ func to_dict() -> Dictionary:
 		"has_pad_geometry": has_pad_geometry,
 		"footprint_resolved": footprint_resolved,
 		"graphics": _graphics_to_list(),
-		"refdes_graphics": _refdes_to_list(),
+		"refdes_anchor": refdes_anchor.duplicate(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
 		"properties": properties.duplicate(),
 		"layer": layer,
@@ -1240,7 +1283,7 @@ func load_from_dict(data: Dictionary) -> void:
 	pads_authored = raw_pads is Array
 	_pads_from_list(raw_pads if pads_authored else [])
 	_graphics_from_list(data.get("graphics", []))
-	_refdes_from_list(data.get("refdes_graphics", []))
+	refdes_anchor = _anchor_from_any(data.get("refdes_anchor"))
 
 	# U1-render unit 2: when the snapshot gave no explicit size (no local_bounds,
 	# no width/height Extra), replace the untouched default/centered bounds with
@@ -1271,6 +1314,12 @@ func load_from_dict(data: Dictionary) -> void:
 	# having none.
 	var ce = data.get("canonical_extra", {})
 	canonical_extra = (ce as Dictionary).duplicate(true) if ce is Dictionary else {}
+	# Panel state saved before the designator became derived parked the
+	# rendered strokes in here, and to_board_dict re-emits the passthrough
+	# verbatim — which is how one component's designator reached another
+	# component's saved board. Nothing renders from them any more; drop them
+	# on the way in so no board written from this session can carry them.
+	canonical_extra.erase("refdes_graphics")
 	var pe = data.get("pin_extra", {})
 	pin_extra = (pe as Dictionary).duplicate(true) if pe is Dictionary else {}
 
@@ -1438,7 +1487,7 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 	else:
 		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
 	_graphics_from_list(data.get("graphics", []))
-	_refdes_from_list(data.get("refdes_graphics", []))
+	refdes_anchor = _anchor_from_any(data.get("refdes_anchor"))
 
 	# U1-render unit 2: when the board dict gave no explicit size (no
 	# local_bounds, no width/height Extra — the same "not (data.has(...))"
@@ -1476,9 +1525,13 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 	# footprint_resolved is listed here so the passthrough cannot re-emit it:
 	# it is session state (see its declaration), and canonical_extra is the one
 	# path by which a saved flag could otherwise reach to_board_dict again.
+	# refdes_graphics is listed for the same reason and read by nothing: older
+	# boards carry a RENDERING of some component's designator, and parking it
+	# in the passthrough is what re-emitted one part's name under another's.
 	var known := ["ref", "id", "footprint", "footprint_id", "x_mm", "y_mm",
 		"rotation_deg", "layer", "width", "height", "local_bounds", "pads",
 		"has_pad_geometry", "footprint_resolved", "graphics",
+		"refdes_anchor", "refdes_graphics",
 		"bbox_center_offset", "properties",
 		"color", "label_visible", "locked", "pins", "value"]
 	for k in data:
