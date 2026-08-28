@@ -530,3 +530,29 @@ def test_resolved_pads_stay_footprint_local_so_the_compile_round_trip_is_stable(
     from_resolved = placed(cb.compile_board(resolved))
     assert from_resolved == from_library
     assert from_library["pad:A:0"] == ((17.0, 12.0), ("B.Cu", "B.Mask", "B.Paste"))
+
+
+def test_pad_fallback_box_measures_a_rotated_land_at_its_turned_extent():
+    """A graphics-free footprint's body box comes from the LANDS, turned.
+
+    ``_body_box`` falls back to the union of the pads when a footprint declares
+    neither courtyard nor silk/fab outline. A land carries its own ``rotation``,
+    so measuring ``+/- half_w, +/- half_h`` about its centre understates a
+    turned one — the box the panel hit-tests and the placement checks keep clear
+    would then be smaller than the copper. A 2.0 x 1.0 mm land at 45 degrees
+    spans (2.0 + 1.0) / sqrt(2) = 2.1213 mm on BOTH axes, not 2.0 x 1.0.
+    """
+    import math
+
+    pad = {"position": {"x": 0.0, "y": 0.0},
+           "size": {"width": 2.0, "height": 1.0},
+           "rotation": 45.0}
+    box = resolve._body_box({"graphics": []}, [pad])
+    span = 3.0 / math.sqrt(2.0)
+    assert box["width"] == pytest.approx(span)
+    assert box["height"] == pytest.approx(span)
+    assert (box["center_x"], box["center_y"]) == pytest.approx((0.0, 0.0))
+
+    # The unrotated land is unchanged by the same path — no key, no turn.
+    flat = resolve._body_box({"graphics": []}, [dict(pad, rotation=0.0)])
+    assert (flat["width"], flat["height"]) == pytest.approx((2.0, 1.0))

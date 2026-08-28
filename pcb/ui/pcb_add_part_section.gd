@@ -1,11 +1,6 @@
 extends VBoxContainer
-## The sidebar section that PUTS A PART ON THE BOARD.
-##
-## Before this there was no such affordance at all: a human working from the
-## GUI could move, rotate and delete parts but could not add one, and an agent's
-## only add built ESTIMATED geometry the hermetic worker then refused by name —
-## which took the whole board's geometric DRC and every pour fill down with it.
-## Adding a part was, in practice, YAML-only.
+## The sidebar section that PUTS A PART ON THE BOARD — the GUI's add
+## affordance, and the parity half of minerva_pcb_add_component.
 ##
 ## THE REF IS THE INPUT, deliberately. A footprint ref ("LibNick:PartName") is
 ## what the worker's library chain resolves, so a part added this way carries
@@ -17,10 +12,10 @@ extends VBoxContainer
 ##
 ## THE SKETCH TYPES stay reachable from the same field: typing one of the
 ## generic names (HEADER, RESISTOR, …) places a sketch part, which is a real
-## design act — you place the tap before you have chosen the connector. What
-## the section will not do is let that happen silently; the note under the
-## field says what a sketch part costs BEFORE it is placed, and the panel's
-## held lead names every one on the board until it resolves or goes.
+## design act — you place the tap before you have chosen the connector. It may
+## not happen silently, though: the note under the field says what a sketch part
+## costs BEFORE it is placed, and the panel's held lead names every one on the
+## board until it resolves or goes.
 ##
 ## THE GESTURE RUNS THE MCP VERB, not a private path: the same
 ## panel_tools.handle("minerva_pcb_add_component") an agent calls, with the
@@ -85,11 +80,15 @@ func _init() -> void:
 	_refresh()
 
 
-## Hand the section the two panel seams it runs on. Until this is called the
-## button still draws but refuses, rather than reaching for a null host.
-func bind_panel(panel, status: Callable) -> void:
+## Bind the section to the two panel seams it runs on and hang it under
+## `sidebar` behind its own rule — the panel's whole half of having one. A
+## section that is never mounted still draws its button, but refuses rather than
+## reaching for a null host.
+func mount(panel, sidebar: Node, status: Callable) -> void:
 	_panel = panel
 	_status = status
+	sidebar.add_child(HSeparator.new())
+	sidebar.add_child(self)
 
 
 ## The ref currently typed, trimmed.

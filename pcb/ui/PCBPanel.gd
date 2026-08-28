@@ -480,9 +480,6 @@ const _VIEW_MENU_LAYER_ID_BASE := 500
 ## on screen to explain why. Shown ONLY while a filter is in force. Above the
 ## per-layer ids so the same teardown sweep clears it.
 const _VIEW_MENU_CLEAR_FILTER_ID := 999
-## Base id for the View menu's fab-preview layer picker (PcbFabPreview owns the
-## items). Above every other id family so the shared teardown sweep clears it.
-const _VIEW_MENU_FAB_LAYER_ID_BASE := 1000
 
 ## True while restoring persisted state (board load OR annotation sidecar load).
 ## Suppresses the content_changed dirty relay so restoring never marks the tab
@@ -598,15 +595,15 @@ func get_annotation_overlay_parent() -> Control:
 
 
 ## The board model (pcb_data.gd) this panel edits. Exposed for MCP/tests.
-## The board surface, for a sidebar section that needs view coordinates. NOT
-## named get_canvas: CanvasItem already has one, returning a RID, and shadowing
-## it silently detaches this node from the engine's own canvas lookup.
-func get_board_canvas() -> Control:
-	return _canvas
-
-
 func get_data():
 	return _data
+
+
+## The board surface, for a sidebar section that needs view coordinates. NOT
+## named get_canvas: CanvasItem already has one, returning a RID, and shadowing
+## it detaches this node from the engine's own canvas lookup.
+func get_board_canvas() -> Control:
+	return _canvas
 
 
 ## T2 (S2.2): the shadow routing workspace (pcb_routing_workspace.gd), dual-
@@ -2057,13 +2054,10 @@ func _build_sidebar() -> VBoxContainer:
 	_pin_selection_section.swap_nets_requested.connect(_on_swap_nets_requested)
 	_sidebar_content.add_child(_pin_selection_section)
 
-	# ADD A PART: the panel had no add affordance at all. The section runs the
-	# SAME panel-tools verb the MCP add runs; the panel hands it only the seams
-	# it owns — itself as the board host, and the status line.
-	_sidebar_content.add_child(HSeparator.new())
-	var add_part: VBoxContainer = _PcbAddPartSectionScript.new()
-	add_part.bind_panel(self, _set_status)
-	_sidebar_content.add_child(add_part)
+	# ADD A PART. The section runs the SAME panel-tools verb the MCP add runs;
+	# the panel hands it only the seams it owns — itself as the board host, and
+	# the status line.
+	_PcbAddPartSectionScript.new().mount(self, _sidebar_content, _set_status)
 
 	return _sidebar
 
@@ -4535,8 +4529,7 @@ func _rebuild_view_menu_layer_eyes(popup: PopupMenu) -> void:
 	# ABOVE the stack-dependent return below: the fab picker's vocabulary is the
 	# EMITTED artwork, not the board's declared copper, so a board with no stack
 	# still gets it whenever the preview is holding layers.
-	_PcbFabPreviewScript.build_menu_section(popup, _VIEW_MENU_FAB_LAYER_ID_BASE,
-		_canvas._fab_preview_layers, str(_canvas.fab_preview_layer))
+	_PcbFabPreviewScript.build_canvas_menu(popup, _canvas)
 	if _data == null or _data.layers.is_empty():
 		return
 	popup.add_separator("Copper layers", _VIEW_MENU_LAYER_ID_BASE)
@@ -4565,12 +4558,9 @@ func _on_view_menu_id_pressed(id: int) -> void:
 	if id == _VIEW_MENU_CLEAR_FILTER_ID:
 		set_trace_layer_filter("all")
 		return
-	# BEFORE the per-layer-eye range test below, which is a bare `id >
-	# _VIEW_MENU_LAYER_ID_BASE` and would otherwise swallow these ids. Straight
-	# to the canvas, the same setter minerva_pcb_view_state writes through.
-	if _canvas != null and id >= _VIEW_MENU_FAB_LAYER_ID_BASE:
-		_canvas.set_fab_preview_layer(_PcbFabPreviewScript.menu_key(
-			_canvas._fab_preview_layers, _VIEW_MENU_FAB_LAYER_ID_BASE, id))
+	# BEFORE the per-layer-eye test below, which is a bare `id >
+	# _VIEW_MENU_LAYER_ID_BASE` and would otherwise swallow the picker's ids.
+	if _PcbFabPreviewScript.handle_menu_id(_canvas, id):
 		return
 	if _canvas != null and _data != null and id > _VIEW_MENU_LAYER_ID_BASE:
 		var stack_index := id - _VIEW_MENU_LAYER_ID_BASE - 1
@@ -6552,8 +6542,11 @@ func get_selection_state() -> Dictionary:
 
 ## Whole-board health without a routing run (Epoch UX2 station 9, docket
 ## 019fde571300): the pcb.board_health channel — census + assembly, the same
-## object a route reply's board_health carries. Same envelope normalisation
-## as assembly_check below.
+## object a route reply's board_health carries.
+##
+## This and the three round trips below it (mask_view, fab_preview, zone_fill)
+## differ only in channel, timeout and wire form; panel_tools.worker_envelope
+## normalises the broker's double-wrap for all four, so no two can differ.
 func board_health_check(board: Dictionary) -> Dictionary:
 	# Canonical wire form at the seam (01a007f1dd02): the enriched dict blew
 	# the broker's 64 KiB cap on real boards; the worker resolves for itself.
@@ -6562,41 +6555,21 @@ func board_health_check(board: Dictionary) -> Dictionary:
 	# the cap — so the by-ref send below is what actually keeps this channel
 	# alive as boards grow.
 	board = _PanelToolsScript.canonical_wire_board(board)
-	var ipc := get_node_or_null("_MinervaIPC")
-	if ipc == null:
+	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
-	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.board_health", _payload_by_ref({"board": board}, "board"), 30000)
-	if result.has("ok"):
-		return result
-	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = _dict_or_empty(result.get("result"))
-		if inner.has("ok"):
-			return inner
-		return {"ok": true, "result": inner}
-	return {"ok": false, "error": {"kind": "worker_error",
-		"message": str(result.get("error_message", result.get("error", "board_health failed")))}}
+	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
+		"pcb.board_health", _payload_by_ref({"board": board}, "board"), 30000), "board_health")
 
 
 ## pcb.mask_view round-trip (WYSIWYG G4) — same channel idiom as
 ## board_health_check directly above.
 func mask_view_check(board: Dictionary) -> Dictionary:
-	var ipc := get_node_or_null("_MinervaIPC")
-	if ipc == null:
+	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
-	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.mask_view", _payload_by_ref({"board": board}, "board"), 30000)
-	if result.has("ok"):
-		return result
-	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = _dict_or_empty(result.get("result"))
-		if inner.has("ok"):
-			return inner
-		return {"ok": true, "result": inner}
-	return {"ok": false, "error": {"kind": "worker_error",
-		"message": str(result.get("error_message", result.get("error", "mask_view failed")))}}
+	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
+		"pcb.mask_view", _payload_by_ref({"board": board}, "board"), 30000), "mask_view")
 
 
 ## The coherence token for a fab preview: the WHOLE canonical board, not the
@@ -6634,10 +6607,9 @@ static func _whole_board_token(board: Dictionary) -> String:
 ## The mask overlay refetches on the same signal because it is cheap; this runs
 ## the whole emission path, so it clears and waits to be asked again.
 ##
-## AND TAKES THE FLAG DOWN WITH THE ARTWORK. An emptied preview draws no board,
-## so a raised flag over it is the same false claim a failed fetch makes: the
-## View menu shows a check beside nothing and view_state reports the preview as
-## up. Same retraction, same held lead, same sentence for both readers.
+## THE FLAG COMES DOWN WITH THE ARTWORK: an emptied preview draws no board, so
+## a flag left standing over it is the same false claim a failed fetch makes —
+## same retraction, same held lead, same sentence for both readers.
 func _invalidate_fab_preview() -> void:
 	if _canvas == null or not bool(_canvas.get("show_fab_preview")):
 		return
@@ -6649,24 +6621,14 @@ func _invalidate_fab_preview() -> void:
 ## pcb.fab_preview round-trip (WYSIWYG G5, DCR 019ffc52b455, K27) — same channel
 ## idiom as mask_view_check above.
 func fab_preview_check(board: Dictionary) -> Dictionary:
-	var ipc := get_node_or_null("_MinervaIPC")
-	if ipc == null:
+	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
 	# BY-REF like every other board-carrying sender. Sending the whole board by
 	# value dies payload_too_large once a board outgrows the 64 KiB pipe, and
 	# the View > Fab preview flag then stays up over an empty canvas.
-	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.fab_preview", _payload_by_ref({"board": board}, "board"), 60000)
-	if result.has("ok"):
-		return result
-	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = _dict_or_empty(result.get("result"))
-		if inner.has("ok"):
-			return inner
-		return {"ok": true, "result": inner}
-	return {"ok": false, "error": {"kind": "worker_error",
-		"message": str(result.get("error_message", result.get("error", "fab_preview failed")))}}
+	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
+		"pcb.fab_preview", _payload_by_ref({"board": board}, "board"), 60000), "fab_preview")
 
 
 ## Refetch the exact fabrication preview and hand it to the canvas.
@@ -6782,21 +6744,11 @@ func _schedule_mask_view_refresh() -> void:
 ## full dict of a real board exceeds the broker's payload cap.
 func zone_fill_check(board: Dictionary) -> Dictionary:
 	board = _PanelToolsScript.canonical_wire_board(board)
-	var ipc := get_node_or_null("_MinervaIPC")
-	if ipc == null:
+	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
-	var result: Dictionary = await _request_with_backend_ensure(
-		"pcb.zone_fill", _payload_by_ref({"board": board}, "board"), 30000)
-	if result.has("ok"):
-		return result
-	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = _dict_or_empty(result.get("result"))
-		if inner.has("ok"):
-			return inner
-		return {"ok": true, "result": inner}
-	return {"ok": false, "error": {"kind": "worker_error",
-		"message": str(result.get("error_message", result.get("error", "zone_fill failed")))}}
+	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
+		"pcb.zone_fill", _payload_by_ref({"board": board}, "board"), 30000), "zone_fill")
 
 
 ## ONE library ref's fabricable geometry — the seam add-by-library-ref resolves

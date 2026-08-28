@@ -75,6 +75,13 @@ const SILK_SVG := """<?xml version="1.0" encoding="utf-8"?>
   </g>
 </svg>"""
 
+## A 10 x 300 mm board outline — the 1:30 aspect a WIDTH-only raster cap lets
+## through. Taken to MAX_RASTER_PX wide it would be 48000 px tall.
+const TALL_SVG := """<?xml version="1.0" encoding="utf-8"?>
+<svg width="10mm" height="300mm" viewBox="0 0 10 300" style="background-color:white" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 0.5 0.5 L 9.5 0.5 L 9.5 299.5 L 0.5 299.5 Z" fill="none" stroke="black" stroke-linecap="round" stroke-width="0.12"/>
+</svg>"""
+
 ## The emitted filenames of a real ten-layer board, in EMISSION order (not draw
 ## order) so the sort under test has something to do.
 const EMITTED := [
@@ -261,6 +268,23 @@ func _run_contrast() -> void:
 	check("1h: a sampled silk stroke pixel reads %.2f:1 against its ground (need %.1f, coverage %.2f)"
 		% [measured, MIN_CONTRAST, best.a], measured >= MIN_CONTRAST,
 		"pixel=%s composited=%s" % [str(best), str(on_screen)])
+
+	# ── THE MEMORY BOUND IS ON THE RASTER, NOT ON ITS WIDTH ──────────────────
+	# A width-only cap lets a tall board straight through: 1:30 at
+	# MAX_RASTER_PX wide is 48000 px tall — ~300 MPx of RGBA for ONE of the
+	# eleven layers a board emits.
+	print("-- 1i..1j: a tall board's raster stays inside the memory bounds --")
+	var tall: Image = FabPreview.rasterize(
+		FabPreview.recolor_svg(TALL_SVG, ink), FabPreview.MAX_RASTER_PX)
+	check("1i: the engine rasterizes the 10:300 outline", tall != null)
+	if tall != null:
+		var area := float(tall.get_width()) * float(tall.get_height())
+		var longest := float(maxi(tall.get_width(), tall.get_height()))
+		check("1j: ...inside the area and dimension caps (%d x %d = %.2f MPx)"
+			% [tall.get_width(), tall.get_height(), area / 1.0e6],
+			area <= FabPreview.MAX_RASTER_AREA_PX
+				and longest <= FabPreview.MAX_RASTER_DIMENSION_PX,
+			"longest=%.0f cap=%.0f" % [longest, FabPreview.MAX_RASTER_DIMENSION_PX])
 
 
 ## The most-covered stroke pixel in the raster — the ink the eye actually lands

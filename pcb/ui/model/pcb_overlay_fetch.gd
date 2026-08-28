@@ -19,13 +19,11 @@ extends RefCounted
 ## honest only in JSON is invisible to anyone working from the GUI.
 ##
 ## THE STALE CASE IS THE SAME CASE. A board edit under a live preview clears the
-## artwork, and the earlier shape of this left the flag up with "re-open Fab
-## Preview" drawn on the canvas. But a preview with no layers draws no board, so
-## the flag was claiming a view nobody could see and minerva_pcb_view_state kept
-## reporting it up over an empty canvas — the exact condition the rule above
-## exists to forbid. Both stale paths (a board edit, and a board that moved
-## while the worker ran) now retract through stale_reply below, so there is ONE
-## retraction mechanism and one place the human reads the reason.
+## artwork, and a preview with no layers draws no board — so a flag left up over
+## it claims a view nobody can see, which is the condition the rule above
+## forbids. Both stale paths (a board edit, and a board that moved while the
+## worker ran) retract through stale_reply below, so there is ONE retraction
+## mechanism and one place the human reads the reason.
 
 ## The fetches this module governs, lead key -> the human's word for it (the
 ## View menu's own label, where one exists). A key absent from here is reported

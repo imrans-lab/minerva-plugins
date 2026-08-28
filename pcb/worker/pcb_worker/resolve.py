@@ -37,6 +37,7 @@ from typing import Union
 
 from . import bless
 from .footprint_def import ReferenceTextDefinition
+from .geometry import rotation_radians
 # resolve_footprint is re-exported on purpose: this module's board-level
 # resolvers stopped using it at B7 (they walk a loaded chain via
 # resolve_footprint_layered), but `resolve.resolve_footprint` is a de-facto
@@ -559,8 +560,9 @@ def _body_box(parsed: dict, pads: list) -> dict:
     and that is the box the panel must hit-test and the placement checks must
     keep clear. Silk/fab outline next, then the union of the lands, so a
     footprint with no graphics at all still gets a box that contains its
-    copper. A footprint with neither graphics nor pads has no extent and gets
-    a zero box rather than an invented one.
+    copper — measured from each land's TURNED corners (``_pad_corners``), so a
+    rotated land is not understated. A footprint with neither graphics nor pads
+    has no extent and gets a zero box rather than an invented one.
     """
     for wanted in (_COURTYARD_EXTENT_LAYERS, _EXTENT_GRAPHIC_LAYERS):
         points = []
@@ -580,11 +582,32 @@ def _body_box(parsed: dict, pads: list) -> dict:
             continue
         half_w = (float(w) / 2.0) if w is not None else 0.0
         half_h = (float(h) / 2.0) if h is not None else 0.0
-        points.append((float(x) - half_w, float(y) - half_h))
-        points.append((float(x) + half_w, float(y) + half_h))
+        points.extend(_pad_corners(float(x), float(y), half_w, half_h,
+                                   float(pad.get("rotation") or 0.0)))
     box = _box_of(points)
     return box if box is not None else {
         "width": 0.0, "height": 0.0, "center_x": 0.0, "center_y": 0.0}
+
+
+def _pad_corners(x: float, y: float, half_w: float, half_h: float,
+                 rotation_deg: float) -> list:
+    """The four corners of one land, in footprint-LOCAL mm.
+
+    A land's own ``rotation`` turns it about its centre, so the box must be
+    measured from the TURNED corners: an axis-aligned ``+/- half_w, +/- half_h``
+    understates a rotated rectangle, and a 45-degree land is
+    ``(w + h) / sqrt(2)`` across rather than ``w``. The angle goes through
+    :func:`geometry.rotation_radians` — the pinned clockwise-in-a-y-down-frame
+    convention — so this box turns the same way the emitters flash the land.
+    """
+    corners = [(-half_w, -half_h), (half_w, -half_h),
+               (half_w, half_h), (-half_w, half_h)]
+    if not rotation_deg:
+        return [(x + dx, y + dy) for dx, dy in corners]
+    theta = rotation_radians(rotation_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    return [(x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t)
+            for dx, dy in corners]
 
 
 def _graphic_extent_points(graphic: dict) -> list:

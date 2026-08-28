@@ -18,12 +18,12 @@ extends RefCounted
 ##   — which takes the geometric DRC and every pour fill on the board with it,
 ##   because a plane whose fill cannot be computed credits no joins.
 ##
-## The enums are KEPT, not retired: placing a part before its exact footprint
-## is known is a real design act, and boards, fixtures and habits already
-## depend on them. What is retired is the SILENCE. A sketch part says so in
-## the add reply, wears the canvas's unresolved badge, and is named in the
-## panel's held status lead until it is resolved or removed — so "the board
-## went indeterminate" is never the first news of it.
+## The enums are KEPT: placing a part before its exact footprint is known is a
+## real design act, and boards, fixtures and habits already depend on them. What
+## a sketch part may not do is land SILENTLY — it says so in the add reply,
+## wears the canvas's unresolved badge, and is named in the panel's held status
+## lead until it is resolved or removed, so "the board went indeterminate" is
+## never the first news of it.
 ##
 ## `build` below is the WHOLE construction both add paths run — the MCP verb
 ## and the sidebar's Add Part button call it through one dispatch — so the two
@@ -94,8 +94,8 @@ static func designator_prefix(ref: String) -> String:
 ##
 ## Nothing is constructed until the LIBRARY GEOMETRY IS IN HAND. A ref the
 ## library cannot supply refuses by name and leaves the board untouched —
-## adding it anyway would put back exactly the part the hermetic worker
-## refuses, which is the placeholder the by-ref path exists to retire.
+## adding it anyway would place exactly the estimated-geometry part the
+## hermetic worker refuses by name.
 static func build(host, data, args: Dictionary) -> Dictionary:
 	var footprint: String = str(args.get("footprint", ""))
 	if footprint.is_empty():

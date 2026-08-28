@@ -8,10 +8,10 @@ extends RefCounted
 ##
 ## WHY THIS FILE EXISTS. gerbonara renders every emitted artifact with
 ## fg="black" on a `style="background-color:white"` root. Godot's rasterizer
-## honours the fills and ignores the root style, so ten stacked layers arrived
-## as black-on-transparent over a near-black canvas: the artwork was present and
-## unreadable, and the fabrication gate a human is supposed to check by eye
-## failed open. Three things fix it, and all three are here:
+## honours the fills and ignores the root style, so stacked layers land as
+## black-on-transparent over a near-black canvas: present and unreadable, which
+## makes the fabrication gate a human checks by eye read as passed. Three things
+## keep it legible, and all three are here:
 ##
 ##   1. INK. Each layer's SVG is recoloured to a palette entry before it is
 ##      rasterized (recolor_svg). Gerber carries no colour — black is
@@ -19,7 +19,7 @@ extends RefCounted
 ##      per-layer ink changes nothing about the bytes, whose sha256 is taken
 ##      from the emitted text upstream of this file.
 ##   2. RESOLUTION. Silk strokes are ~0.12 mm. At the SVG's intrinsic size
-##      (mm at 96 dpi) that is well under one pixel, so the text vanished into
+##      (mm at 96 dpi) that is well under one pixel, so the strokes fall into
 ##      the alpha channel regardless of colour. Layers are rasterized at the
 ##      size they will be drawn (see adopt).
 ##   3. ONE LAYER AT A TIME. Ten layers composited is a picture of no layer.
@@ -27,8 +27,8 @@ extends RefCounted
 ##
 ## THE BANNER IS NOT ON THE BOARD. Identity, counts and the incomplete-artifact
 ## admission occupy a band ACROSS THE TOP, and the artwork is letterboxed into
-## what is left (banner_rect / art_rect never intersect). Text drawn over the
-## board hid the very geometry it was describing.
+## what is left (banner_rect / art_rect never intersect). Text over the board
+## hides the geometry it is describing.
 
 ## The pick that shows every emitted layer at once.
 const PICK_ALL := "all"
@@ -92,11 +92,20 @@ const _RANK := {
 }
 const _RANK_DEFAULT := 2
 
-## Rasterization target, in pixels of width. The lower bound keeps sub-pixel
-## silk legible on a narrow panel; the upper bound is what stops eleven layers
-## of RGBA from becoming a memory event on a wide one.
+## Rasterization target, in pixels of WIDTH. The lower bound keeps sub-pixel
+## silk legible on a narrow panel; the upper bound is the widest a layer is ever
+## drawn at.
 const MIN_RASTER_PX := 640.0
 const MAX_RASTER_PX := 1600.0
+
+## THE MEMORY BOUNDS, which a width bound alone is not: a raster is
+## width x width*aspect, so a 10:300 board outline taken to 1600 px wide is
+## 48000 px tall — 300 MPx of RGBA, once per emitted layer. These cap the two
+## quantities that actually cost memory, and raster_width solves the width back
+## out of them. The area cap sits above the square case (1600 x 1600 =
+## 2.56 MPx), so an ordinary board still rasterizes at full width.
+const MAX_RASTER_DIMENSION_PX := 4096.0
+const MAX_RASTER_AREA_PX := 3_000_000.0
 
 const _BANNER_LINE_H := 16.0
 const _BANNER_PAD := 8.0
@@ -158,16 +167,33 @@ static func recolor_svg(svg: String, ink: Color) -> String:
 ## the clamp, said once, so `adopt` records the same number `refit` compares
 ## against and a re-raster is decided on the effective width rather than the raw
 ## canvas one.
-static func raster_width(target_px: float) -> float:
-	return clampf(target_px, MIN_RASTER_PX, MAX_RASTER_PX)
+##
+## `aspect` is the artwork's intrinsic height/width. The memory bounds are on
+## the RASTER, not on its width, so a tall board's width comes down until both
+## hold — below MIN_RASTER_PX if it must, because that is a legibility floor and
+## it yields to a memory ceiling.
+static func raster_width(target_px: float, aspect: float = 1.0) -> float:
+	var tall := maxf(aspect, 0.0001)
+	var width := clampf(target_px, MIN_RASTER_PX, MAX_RASTER_PX)
+	width = minf(width, MAX_RASTER_DIMENSION_PX / tall)   # bounds the height
+	width = minf(width, sqrt(MAX_RASTER_AREA_PX / tall))  # bounds the area
+	# FLOORED: the engine rounds the scaled height up as readily as down, and a
+	# bound that is only met on average is not a bound.
+	return maxf(floorf(width), 1.0)
+
+
+## An image's height/width — the shape the memory bounds are solved against.
+static func aspect_of(img: Image) -> float:
+	return float(img.get_height()) / maxf(float(img.get_width()), 1.0)
 
 
 ## Rasterize one recoloured SVG at the width it will be DRAWN at.
 ##
 ## Two loads, deliberately: the intrinsic size is only knowable from a parsed
-## document, and rendering at the intrinsic size (mm resolved at 96 dpi) is what
-## made 0.12 mm silk sub-pixel. Returns null when the engine cannot parse it —
-## the caller accounts for that file rather than dropping it.
+## document, and the intrinsic size (mm resolved at 96 dpi) puts 0.12 mm silk
+## under one pixel. The first load also supplies the aspect the memory bounds
+## are solved against. Returns null when the engine cannot parse it — the caller
+## accounts for that file rather than dropping it.
 static func rasterize(svg: String, target_px: float) -> Image:
 	var img := Image.new()
 	if img.load_svg_from_string(svg, 1.0) != OK:
@@ -175,7 +201,7 @@ static func rasterize(svg: String, target_px: float) -> Image:
 	var intrinsic := float(img.get_width())
 	if intrinsic <= 0.0:
 		return null
-	var scale := raster_width(target_px) / intrinsic
+	var scale := raster_width(target_px, aspect_of(img)) / intrinsic
 	if scale <= 1.0:
 		return img
 	var sharp := Image.new()
@@ -213,6 +239,7 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 			missed.append({"name": name,
 				"reason": "the engine could not rasterize the worker's SVG for this layer"})
 			continue
+		var aspect := aspect_of(img)
 		rows.append({
 			"name": name,
 			"label": layer_label(name),
@@ -223,9 +250,11 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 			# THE SOURCE IS KEPT, not just its raster: the artwork outlives the
 			# canvas width it was first drawn for, and `refit` needs the document
 			# back to redraw it sharper. `raster_px` is the width this texture
-			# was actually made at, which is what refit compares against.
+			# was made at and `aspect` its shape — together they are what refit
+			# needs to solve the same bounds without reparsing the document.
 			"svg": inked,
-			"raster_px": raster_width(target_px),
+			"aspect": aspect,
+			"raster_px": raster_width(target_px, aspect),
 			"texture": ImageTexture.create_from_image(img),
 		})
 	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -238,8 +267,8 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 ##
 ## `adopt` rasterizes at the width the artwork will be drawn at, which is right
 ## until the panel is widened: the texture then stretches and 0.12 mm silk goes
-## soft again, exactly the resolution problem the two-load raster exists to
-## solve. Returns the rows to hold — the same array when nothing moved, so a
+## soft, which is the resolution problem the two-load raster exists to solve.
+## Returns the rows to hold — the same array when nothing moved, so a
 ## caller can assign unconditionally and a resize that changes nothing costs one
 ## comparison per layer.
 ##
@@ -247,7 +276,6 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 ## already correct and cheaper than re-rasterizing; re-rastering on a shrink
 ## would also mean re-decoding every layer through the whole of a drag.
 static func refit(rows: Array, target_px: float) -> Array:
-	var want := raster_width(target_px)
 	var out: Array = []
 	var moved := false
 	for row_v in rows:
@@ -256,6 +284,7 @@ static func refit(rows: Array, target_px: float) -> Array:
 			continue
 		var row: Dictionary = row_v
 		var svg := str(row.get("svg", ""))
+		var want := raster_width(target_px, float(row.get("aspect", 1.0)))
 		if svg.is_empty() or want <= float(row.get("raster_px", 0.0)):
 			out.append(row)
 			continue
@@ -408,6 +437,34 @@ static func _draw_banner(ci: CanvasItem, canvas_size: Vector2, banner: Rect2,
 ## panel owns WHEN the section exists, this file owns what is in it. Ids are
 ## base_id (the separator), base_id+1 ("All layers"), then base_id+2+row index —
 ## so menu_key below is the exact inverse and the two cannot drift.
+
+## The base id the panel mounts this section at. It sits above every other
+## View-menu id family in PCBPanel, so that popup's one teardown sweep (remove
+## every id at or above its layer base) clears these items with the rest.
+const MENU_ID_BASE := 1000
+
+
+## The picker for whatever artwork `canvas` is holding — the panel's whole half
+## of building it.
+static func build_canvas_menu(popup: PopupMenu, canvas) -> void:
+	if canvas == null:
+		return
+	build_menu_section(popup, MENU_ID_BASE, canvas._fab_preview_layers,
+		str(canvas.fab_preview_layer))
+
+
+## Route a View-menu id to the canvas's pick. Returns true for every id in this
+## section's range, so the caller stops before its own lower ranges — whose
+## tests are open-ended `id > base` comparisons — can swallow one.
+static func handle_menu_id(canvas, id: int) -> bool:
+	if id < MENU_ID_BASE:
+		return false
+	if canvas != null:
+		var key := menu_key(canvas._fab_preview_layers, MENU_ID_BASE, id)
+		if not key.is_empty():
+			canvas.set_fab_preview_layer(key)
+	return true
+
 
 static func build_menu_section(popup: PopupMenu, base_id: int, rows: Array,
 		pick: String) -> void:
