@@ -332,3 +332,38 @@ func TestDropDerivedComponentKeysLeavesEverythingElseAlone(t *testing.T) {
 		t.Fatalf("a nil Extra map was materialised: %v", b.Components[1].Extra)
 	}
 }
+
+// A SAVED designator anchor must not outlive the rule that produced it. The
+// anchor is derived from the footprint (its authored reference text, else its
+// courtyard), so a document saved by an older resolve carries an older
+// derivation — and adoption is absent-only, so without the drop the stale value
+// would win over the fresh one forever.
+//
+// Oracle: the y the resolve returned, which differs from the y the document
+// carried; only a board that lost its saved key can show it.
+func TestStaleDocumentAnchorLosesToThisHostsResolve(t *testing.T) {
+	byRef := resolvedByRef(resolveReply(t,
+		map[string]interface{}{
+			"ref": "SW2", "has_pad_geometry": false,
+			"refdes_anchor": map[string]interface{}{
+				"x_mm": 0.0, "y_mm": -3.625, "rotation_deg": 0.0,
+				"size_mm": 1.0, "hidden": false,
+			},
+		},
+	))
+	// The document as an older host saved it: the pre-courtyard default anchor.
+	b := &board.Board{Components: []board.Component{{Ref: "SW2",
+		Extra: map[string]interface{}{"refdes_anchor": map[string]interface{}{
+			"x_mm": 0.0, "y_mm": -1.5, "rotation_deg": 0.0,
+			"size_mm": 1.0, "hidden": false,
+		}}}}}
+	dropDerivedComponentKeys(b)
+	if n := adoptResolvedGeometry(b, byRef); n != 1 {
+		t.Fatalf("attached = %d, want 1", n)
+	}
+	got, _ := b.Components[0].Extra["refdes_anchor"].(map[string]interface{})
+	if got["y_mm"] != -3.625 {
+		t.Fatalf("the document's stale anchor survived the load — the panel "+
+			"would draw SW2's designator inside the switch body; got %v", got)
+	}
+}

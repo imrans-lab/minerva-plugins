@@ -46,6 +46,30 @@ var knownComponentFields = map[string]bool{
 	"properties": true, "width": true, "height": true, "local_bounds": true,
 	"has_pad_geometry": true, "bbox_center_offset": true, "color": true,
 	"label_visible": true, "locked": true,
+	// DERIVED keys (DerivedComponentKeys below). A document carrying one is
+	// stating a fact about the machine that resolved it, not board source —
+	// pcb.deserialize drops them and re-derives. Warning on a key we are about
+	// to delete would put one line of noise per component in front of the user
+	// for something no author wrote and nobody can fix.
+	"footprint_resolved": true, "refdes_anchor": true, "refdes_graphics": true,
+}
+
+// DerivedComponentKeys are per-component keys a RESOLVE derives, never
+// something a board authors. They are preserved silently on import (above) and
+// DROPPED at the deserialize boundary (internal/tools), so the only such keys a
+// reply carries are the ones this host's own resolve just stamped.
+//
+//   - footprint_resolved: "a resolve succeeded against this library".
+//   - refdes_anchor: WHERE the fab prints the designator. Derived from the
+//     footprint (its authored reference text, else its courtyard), so a stale
+//     one saved by an older resolve would outlive the rule that produced it —
+//     and the adoption is absent-only, so it would win over the fresh value.
+//   - refdes_graphics: a picture of one particular designator, written by
+//     pre-anchor boards. It is a copy of a ref, so a component copied from
+//     another carried the SOURCE's designator strokes and drew them forever
+//     after; the renderer strokes the live ref at refdes_anchor now.
+var DerivedComponentKeys = []string{
+	"footprint_resolved", "refdes_anchor", "refdes_graphics",
 }
 
 // knownNetFields are the per-net keys mapped (name, pins) or intentionally

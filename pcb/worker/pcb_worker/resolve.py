@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Union
 
 from . import bless
-from .geometry import rotation_radians
 # resolve_footprint is re-exported on purpose: this module's board-level
 # resolvers stopped using it at B7 (they walk a loaded chain via
 # resolve_footprint_layered), but `resolve.resolve_footprint` is a de-facto
@@ -49,7 +48,7 @@ from .footprints import (  # noqa: F401 — resolve_footprint re-exported
     resolve_footprint_layered,
 )
 from .pad_source import has_resolved_pads
-from .silk_source import REFDES_LOCAL_Y_MM, REFDES_TEXT_SIZE_MM
+from .refdes_anchor import anchor_dict_from_parsed, body_extent_from_parsed
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
 from .pad_types import normalize_pad_type as _normalize_pad_type
 
@@ -336,28 +335,19 @@ def _refdes_anchor(parsed: dict) -> dict:
     """Where this footprint wants its designator printed, footprint-LOCAL.
 
     ``{x_mm, y_mm, rotation_deg, size_mm, hidden}`` — the footprint's OWN
-    authored reference fp_text placement when it declares one, else the
-    emitter's default anchor (``silk_source.REFDES_LOCAL_Y_MM`` /
-    ``REFDES_TEXT_SIZE_MM``, centred on the origin, upright). Always a
-    complete anchor, so a renderer never has to guess which half was omitted.
+    authored reference fp_text placement when it declares one, else the anchor
+    DERIVED from its body (``refdes_anchor``: centred just above the courtyard,
+    else the drawn outline, else the lands, else the historical constant).
+    Always a complete anchor, so a renderer never has to guess which half was
+    omitted.
 
-    These are the SAME numbers ``silk_source.refdes_strokes`` places glyphs
-    with, so a renderer that strokes the ref through the shared glyph table at
-    this anchor reproduces the emitted silk. ``hidden`` carries the
-    authored-hidden rule: a hidden reference prints nothing, so it must draw
-    nothing either.
+    The derivation is shared with the Gerber emitter and the DRC silk
+    projection (``refdes_anchor.effective_reference_text``), so a renderer that
+    strokes the ref through the shared glyph table at this anchor reproduces the
+    emitted silk. ``hidden`` carries the authored-hidden rule: a hidden
+    reference prints nothing, so it must draw nothing either.
     """
-    rt = parsed.get("reference_text")
-    if not isinstance(rt, dict):
-        return {"x_mm": 0.0, "y_mm": REFDES_LOCAL_Y_MM, "rotation_deg": 0.0,
-                "size_mm": REFDES_TEXT_SIZE_MM, "hidden": False}
-    return {
-        "x_mm": float(rt["x_mm"]),
-        "y_mm": float(rt["y_mm"]),
-        "rotation_deg": float(rt.get("rotation_deg", 0.0)),
-        "size_mm": float(rt.get("size_mm", REFDES_TEXT_SIZE_MM)),
-        "hidden": bool(rt.get("hidden") or False),
-    }
+    return anchor_dict_from_parsed(parsed)
 
 
 def _pads_from_parsed(fp_pads: list) -> list:
@@ -468,14 +458,6 @@ def board_graphic_stats(board: dict) -> dict:
 # ONE footprint's geometry, for a part that does not exist on a board yet.
 # ---------------------------------------------------------------------------
 
-#: Graphic layers a body-extent fallback may be measured from when the
-#: footprint declares no courtyard. Silk is the drawn body outline; the fab
-#: layer carries the assembly outline. Neither is copper, so a part whose only
-#: extent is its pads still gets a box (the pad union) rather than nothing.
-_EXTENT_GRAPHIC_LAYERS = frozenset({"F.SilkS", "B.SilkS", "F.Fab", "B.Fab"})
-_COURTYARD_EXTENT_LAYERS = frozenset({"F.CrtYd", "B.CrtYd"})
-
-
 def footprint_geometry(
     ref: str,
     *,
@@ -531,7 +513,7 @@ def footprint_geometry(
         "footprint_name": parsed.get("name"),
         "pads": pads,
         "graphics": graphics,
-        "bounding_box": _body_box(parsed, pads),
+        "bounding_box": _body_box(parsed),
         "pad_count": len(pads),
         # The board-dict VIEW of the one resolved-vs-fallback predicate, same
         # as _resolve_component's — a silk-only footprint honestly reports
@@ -542,105 +524,21 @@ def footprint_geometry(
     return out
 
 
-def _body_box(parsed: dict, pads: list) -> dict:
+def _body_box(parsed: dict) -> dict:
     """The panel's ``{width, height, center_x, center_y}`` body box for a
     footprint, in footprint-LOCAL mm.
 
-    Courtyard first — a footprint that declares one has declared its extent,
-    and that is the box the panel must hit-test and the placement checks must
-    keep clear. Silk/fab outline next, then the union of the lands, so a
-    footprint with no graphics at all still gets a box that contains its
-    copper — measured from each land's TURNED corners (``_pad_corners``), so a
-    rotated land is not understated. A footprint with neither graphics nor pads
-    has no extent and gets a zero box rather than an invented one.
+    A projection of the shared body extent (``refdes_anchor
+    .body_extent_from_parsed``:
+    courtyard, else the drawn silk/fab outline, else the union of the turned
+    lands) into the shape the panel stores — the same measurement the designator
+    anchor is derived from, so the box the panel hit-tests and the place the fab
+    prints the designator can never be measured differently. A footprint with
+    neither graphics nor pads has no extent and gets a zero box rather than an
+    invented one.
     """
-    for wanted in (_COURTYARD_EXTENT_LAYERS, _EXTENT_GRAPHIC_LAYERS):
-        points = []
-        for g in (parsed.get("graphics") or []):
-            if g.get("layer") in wanted:
-                points.extend(_graphic_extent_points(g))
-        box = _box_of(points)
-        if box is not None:
-            return box
-    points = []
-    for pad in pads:
-        pos = pad.get("position") or {}
-        size = pad.get("size") or {}
-        x, y = pos.get("x"), pos.get("y")
-        w, h = size.get("width"), size.get("height")
-        if x is None or y is None:
-            continue
-        half_w = (float(w) / 2.0) if w is not None else 0.0
-        half_h = (float(h) / 2.0) if h is not None else 0.0
-        points.extend(_pad_corners(float(x), float(y), half_w, half_h,
-                                   float(pad.get("rotation") or 0.0)))
-    box = _box_of(points)
-    return box if box is not None else {
-        "width": 0.0, "height": 0.0, "center_x": 0.0, "center_y": 0.0}
-
-
-def _pad_corners(x: float, y: float, half_w: float, half_h: float,
-                 rotation_deg: float) -> list:
-    """The four corners of one land, in footprint-LOCAL mm.
-
-    A land's own ``rotation`` turns it about its centre, so the box must be
-    measured from the TURNED corners: an axis-aligned ``+/- half_w, +/- half_h``
-    understates a rotated rectangle, and a 45-degree land is
-    ``(w + h) / sqrt(2)`` across rather than ``w``. The angle goes through
-    :func:`geometry.rotation_radians` — the pinned clockwise-in-a-y-down-frame
-    convention — so this box turns the same way the emitters flash the land.
-    """
-    corners = [(-half_w, -half_h), (half_w, -half_h),
-               (half_w, half_h), (-half_w, half_h)]
-    if not rotation_deg:
-        return [(x + dx, y + dy) for dx, dy in corners]
-    theta = rotation_radians(rotation_deg)
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
-    return [(x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t)
-            for dx, dy in corners]
-
-
-def _graphic_extent_points(graphic: dict) -> list:
-    """Every point a parsed graphic contributes to an extent measurement.
-
-    An arc contributes its stored points (its endpoints and, when the parser
-    kept one, its midpoint) rather than its true swept extent: a courtyard is
-    drawn from lines and short fillet arcs, so the understatement is bounded by
-    the fillet radius, and the alternative — reconstructing swept arc extrema
-    here — is a second arc implementation this box does not need.
-    """
-    kind = graphic.get("kind")
-    if kind == "circle":
-        c = graphic.get("center") or (None, None)
-        if c[0] is None or c[1] is None:
-            return []
-        r = float(graphic.get("radius") or 0.0)
-        cx, cy = float(c[0]), float(c[1])
-        return [(cx - r, cy - r), (cx + r, cy + r)]
-    raw = [graphic.get("start"), graphic.get("end")]
-    raw.extend(graphic.get("points") or [])
-    points = []
-    for p in raw:
-        # The parser emits None for an unparseable coordinate rather than
-        # dropping the node, so a malformed graphic contributes nothing to the
-        # extent instead of crashing the measurement.
-        if p is None or len(p) < 2 or p[0] is None or p[1] is None:
-            continue
-        points.append((float(p[0]), float(p[1])))
-    return points
-
-
-def _box_of(points: list):
-    """``{width, height, center_x, center_y}`` for a point cloud, or None when
-    the cloud is empty or has no extent at all (a single point is not a body)."""
-    if not points:
-        return None
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    width = max(xs) - min(xs)
-    height = max(ys) - min(ys)
-    if width <= 0.0 and height <= 0.0:
-        return None
-    return {"width": width, "height": height,
-            "center_x": (max(xs) + min(xs)) / 2.0,
-            "center_y": (max(ys) + min(ys)) / 2.0}
+    extent = body_extent_from_parsed(parsed)
+    if extent is None:
+        return {"width": 0.0, "height": 0.0, "center_x": 0.0, "center_y": 0.0}
+    return {"width": extent.width, "height": extent.height,
+            "center_x": extent.center_x, "center_y": extent.center_y}

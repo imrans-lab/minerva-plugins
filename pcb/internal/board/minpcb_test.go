@@ -226,3 +226,54 @@ func TestImportMinpcbRejectsNullHole(t *testing.T) {
 		}
 	}
 }
+
+// A DERIVED per-component key (DerivedComponentKeys) is carried silently. The
+// panel writes refdes_anchor / footprint_resolved into every component it
+// saves, and pcb.deserialize drops and re-derives them — so warning here would
+// print one line per component about something no author wrote and nobody can
+// act on.
+//
+// Oracle: the warning list, which must mention neither key, next to a genuinely
+// unknown key on the SAME component that must still be warned — so a test that
+// passes because warnings stopped working entirely is not possible.
+func TestImportDoesNotWarnAboutDerivedComponentKeys(t *testing.T) {
+	src := []byte(`{"version":1,"components":{"SW2":{
+		"footprint":"EVP-ASAC1A:SW_EVP-ASAC1A","position":{"x":10,"y":10},
+		"refdes_anchor":{"x_mm":-0.635,"y_mm":-4.445,"rotation_deg":0,
+			"size_mm":1,"hidden":false},
+		"footprint_resolved":true,
+		"refdes_graphics":[],
+		"solder_paste_ratio":0.5}}}`)
+	b, warnings, err := ImportMinpcb(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range warnings {
+		for _, k := range DerivedComponentKeys {
+			if strings.Contains(w, k) {
+				t.Errorf("derived key %q was warned about: %q", k, w)
+			}
+		}
+	}
+	var sawUnknown bool
+	for _, w := range warnings {
+		if strings.Contains(w, "solder_paste_ratio") {
+			sawUnknown = true
+		}
+	}
+	if !sawUnknown {
+		t.Fatalf("a genuinely unknown component field stopped warning; warnings=%v",
+			warnings)
+	}
+	if len(b.Components) != 1 {
+		t.Fatalf("components: want 1, got %d", len(b.Components))
+	}
+	// Silently known, not silently DROPPED: the deserialize boundary is what
+	// removes them, and it can only remove what import preserved.
+	for _, k := range DerivedComponentKeys {
+		if _, ok := b.Components[0].Extra[k]; !ok {
+			t.Errorf("derived key %q was dropped by the importer: %#v",
+				k, b.Components[0].Extra)
+		}
+	}
+}

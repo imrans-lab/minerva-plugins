@@ -42,11 +42,14 @@ extends SceneTree
 ##      lifecycle a picture used to survive: rename, copy, board-dict load and
 ##      panel-state restore — and pins one designator against a stroke vector
 ##      taken from the WORKER's font, so the two fonts cannot drift apart while
-##      each stays internally consistent.
+##      each stays internally consistent. It closes on WHERE the designator
+##      lands: a resolved part draws its ref clear of its own courtyard, which
+##      is the panel half of a rule the fab silk and the DRC projection share.
 ##
 ## FAILS AGAINST OLD: section 1's two word cases land on the opposite sides;
 ## section 2's DIP case returns one pin where three are asserted; section 4's
-## copy and load cases draw the ref they were copied from.
+## copy and load cases draw the ref they were copied from, and its courtyard
+## case draws SW2's designator inside the switch body.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -512,6 +515,92 @@ func _run_the_drawn_designator_is_the_live_ref() -> void:
 	j1.id = "J1"
 	check("a J1 at the DEFAULT anchor strokes the worker font's own J1, to 1e-6 mm",
 		_strokes_match(j1.refdes_graphics, J1_DEFAULT_STROKES))
+
+	_check_the_designator_clears_the_courtyard()
+
+
+## The switch-shaped footprint the worker derives an anchor for: a courtyard
+## spanning local y -3.3 .. +3.4, x -4.25 .. +4.25 (the seat of a 6x6 tactile
+## switch), and the anchor a resolve sends for it.
+##
+## WHY A LITERAL. The panel does not derive this — the worker does
+## (worker/pcb_worker/refdes_anchor.py: the courtyard's top edge, minus a
+## 0.25 mm clearance, minus half the 0.15 mm stroke = -3.625, x-centred on the
+## courtyard) and puts it on the wire. Pinning the number here is the same
+## cross-language contract J1_DEFAULT_STROKES pins for the font: the panel must
+## DRAW what the fab will PRINT, and a worker rule that moved without the panel
+## noticing shows up as a designator drawn on top of the part.
+const SWITCH_COURTYARD: Array = [
+	{"layer": "F.CrtYd", "kind": "line", "width": 0.05,
+		"start": [-4.25, -3.3], "end": [4.25, -3.3]},
+	{"layer": "F.CrtYd", "kind": "line", "width": 0.05,
+		"start": [4.25, -3.3], "end": [4.25, 3.4]},
+	{"layer": "F.CrtYd", "kind": "line", "width": 0.05,
+		"start": [4.25, 3.4], "end": [-4.25, 3.4]},
+	{"layer": "F.CrtYd", "kind": "line", "width": 0.05,
+		"start": [-4.25, 3.4], "end": [-4.25, -3.3]},
+]
+const SWITCH_ANCHOR := {"x_mm": 0.0, "y_mm": -3.625, "rotation_deg": 0.0,
+	"size_mm": 1.0, "hidden": false}
+## The anchor a pre-derivation resolve sent for the SAME footprint: a fixed
+## 1.5 mm above the ORIGIN, which is 1.8 mm INSIDE this courtyard.
+const SWITCH_ANCHOR_OLD := {"x_mm": 0.0, "y_mm": -1.5, "rotation_deg": 0.0,
+	"size_mm": 1.0, "hidden": false}
+
+
+## The lowest (largest-y) point of a component's designator strokes, in
+## footprint-LOCAL mm — the edge that has to stay clear of the body.
+func _stroke_bottom(comp) -> float:
+	var lowest := -INF
+	for g in comp.refdes_graphics:
+		for pt in g["points"]:
+			lowest = maxf(lowest, (pt as Vector2).y)
+	return lowest
+
+
+## The top edge of a component's F.CrtYd graphics, read off the component's own
+## graphics list rather than from any anchor — the independent oracle.
+func _courtyard_top(comp) -> float:
+	var top := INF
+	for g in comp.graphics:
+		if str(g.get("layer", "")) != "F.CrtYd":
+			continue
+		for key in ["start", "end"]:
+			if g.has(key):
+				top = minf(top, (g[key] as Vector2).y)
+	return top
+
+
+## A RESOLVED component draws its designator clear of its own courtyard.
+##
+## The panel is one of the three surfaces that must place a designator in the
+## same spot (the Gerber emitter and the DRC silk projection are the others), and
+## it is the only one a human looks at. It does not derive the anchor — it
+## strokes the ref at the anchor the resolve sent — so what this states is that
+## the wire value and the courtyard beside it agree once drawn.
+func _check_the_designator_clears_the_courtyard() -> void:
+	var sw = PCBComponent.new()
+	sw.id = "SW2"
+	sw.set_footprint_by_name("SW_EVP-ASAC1A")
+	sw.load_footprint_graphics(SWITCH_COURTYARD, SWITCH_ANCHOR)
+	var top := _courtyard_top(sw)
+	check("the fixture's courtyard is the switch's own (top edge at -3.3)",
+		absf(top + 3.3) < EPS_MM)
+	check("a resolved part draws its designator clear of its own courtyard",
+		sw.refdes_graphics.size() > 0 and _stroke_bottom(sw) < top)
+	check("…with the stroke's own width to spare, not merely touching",
+		_stroke_bottom(sw) + 0.5 * PCBComponent.REFDES_STROKE_WIDTH_MM < top)
+
+	# TEETH: the same part at the anchor the fixed-offset resolve used to send
+	# draws INSIDE the switch body, where it is invisible once the part is
+	# soldered. Without this the check above would pass on any anchor that
+	# happens to be above the origin.
+	var old = PCBComponent.new()
+	old.id = "SW2"
+	old.set_footprint_by_name("SW_EVP-ASAC1A")
+	old.load_footprint_graphics(SWITCH_COURTYARD, SWITCH_ANCHOR_OLD)
+	check("…and the pre-derivation anchor would have drawn ON the courtyard",
+		_stroke_bottom(old) > top)
 
 
 ## "J1" at the default designator anchor, in footprint-LOCAL mm: the worker's

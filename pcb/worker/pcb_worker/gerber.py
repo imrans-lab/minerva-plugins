@@ -65,7 +65,7 @@ from gerber_writer import (
 # "what silk is on this board".
 from agent_router.layers import canon_to_kicad
 
-from . import board_model, mask_source, silk_source
+from . import board_model, mask_source, refdes_anchor, silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .footprint_def import ReferenceTextDefinition
 from .geometry import (
@@ -825,11 +825,12 @@ def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
     designator text is rendered in glyph-LOCAL coordinates and must be placed
     by the component's actual placement transform regardless.
 
-    ``reference_text`` (019f77fd6d69) is the footprint's OWN authored
-    reference fp_text placement (``footprint_def.ReferenceTextDefinition``),
-    when the IR-native harvest found one (``ResolvedBoard.footprint_for(comp)
-    .reference_text``) — see ``_harvest_ir``. When given, the synthesized
-    designator is drawn at the footprint's authored local anchor/rotation/size
+    ``reference_text`` is the footprint's EFFECTIVE reference fp_text
+    placement (``footprint_def.ReferenceTextDefinition``) — its own authored
+    one, or the anchor derived from its courtyard when it authors none. The
+    IR-native harvest always supplies it (``refdes_anchor
+    .effective_reference_text``) — see ``_harvest_ir``. When given, the
+    synthesized designator is drawn at that local anchor/rotation/size
     instead of the fixed ``REFDES_LOCAL_Y_MM`` default: glyphs are rendered
     anchored at the origin (``x0=y0=0``), then EACH point goes through the
     text's own local rotate-then-translate (``place_point`` with
@@ -838,8 +839,8 @@ def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
     placement transform (``cx, cy, rot``) — a two-step nested transform,
     because the anchor is footprint-local, not board-absolute. The default
     (``reference_text=None``, e.g. every call from the loose-dict harvest,
-    which has no footprint definition to consult) keeps today's exact
-    single-step placement, unchanged.
+    which has no footprint definition to measure) keeps the historical
+    single-step placement at ``REFDES_LOCAL_Y_MM``.
     """
     # Glyph synthesis + both placement forms live in silk_source (station S2):
     # a designator exists ONLY as synthesized geometry — it is in no IR — so
@@ -1805,15 +1806,20 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         # place_point (_transform_point) every other component-local
         # primitive in this worker goes through.
         #
-        # 019f77fd6d69: pass the footprint's OWN authored reference-text
-        # placement, when it has one, so the designator lands where the
-        # footprint's author actually put it instead of always the fixed
-        # default offset (see _emit_refdes's docstring for the two-step
-        # transform this triggers). footprint_for is the SAME lookup the pad
-        # numbering above already uses on this loop iteration.
+        # Pass the footprint's EFFECTIVE reference-text placement: its own
+        # authored one when it has one, else the anchor derived from its
+        # courtyard (refdes_anchor — the one derivation the panel and the DRC
+        # silk projection also read, so the three cannot place a designator
+        # differently). Either way the designator lands clear of the part
+        # rather than at a fixed offset from its origin, which put the text
+        # inside the body of anything bigger than an 0805. See _emit_refdes's
+        # docstring for the two-step transform this triggers. footprint_for is
+        # the SAME lookup the pad numbering above already uses on this loop
+        # iteration.
         _emit_refdes(g, ref, comp.placement.position[0], comp.placement.position[1],
                      comp.placement.rotation_deg, top,
-                     reference_text=board.footprint_for(comp).reference_text)
+                     reference_text=refdes_anchor.effective_reference_text(
+                         board.footprint_for(comp)))
 
     _emit_board_graphics(g, board)
 

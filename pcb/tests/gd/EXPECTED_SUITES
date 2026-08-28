@@ -422,13 +422,18 @@ test_board_graphics.gd assertions=75
 # NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
 test_add_by_library_ref.gd assertions=48 real-worker
 
-# The three geometry contracts that need no worker: the rotation WORDS mean
+# The four geometry contracts that need no worker: the rotation WORDS mean
 # what the screen shows (asserted on where a pad landed, never on the rotation
-# number), a two-column part reads its columns as west/east whatever its aspect
-# and the `pads` key is the board's geometry authority rather than a payload
-# optimisation.
+# number), a two-column part reads its columns as west/east whatever its aspect,
+# the `pads` key is the board's geometry authority rather than a payload
+# optimisation, and the drawn designator is a render of the LIVE ref placed
+# clear of the part's own courtyard.
+# 38 -> 42: the designator-clearance block — the courtyard fixture's own top
+# edge, the drawn ref above it, the stroke-width margin, and the teeth (the
+# pre-derivation anchor draws inside the switch body). Counted by hand from the
+# check() call sites.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd assertions=38
+test_part_geometry_contracts.gd assertions=42
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the

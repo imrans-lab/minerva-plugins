@@ -416,14 +416,10 @@ func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Boa
 
 // derivedComponentKeys are per-component Extra keys that state something a
 // resolve DERIVES, never something a board authors — so a document carrying
-// one is stating a fact about the machine that wrote it.
-//
-//   - footprint_resolved: "a resolve succeeded against this library".
-//   - refdes_graphics: a picture of one particular designator, written by
-//     pre-anchor boards. It is a copy of a ref, so a component copied from
-//     another carried the SOURCE's designator strokes and drew them forever
-//     after; the renderer strokes the live ref at refdes_anchor now.
-var derivedComponentKeys = []string{"footprint_resolved", "refdes_graphics"}
+// one is stating a fact about the machine that wrote it. The list is the
+// board package's (it is the same set the minpcb importer must NOT warn
+// about), read here as the drop-list.
+var derivedComponentKeys = board.DerivedComponentKeys
 
 // dropDerivedComponentKeys removes every derivedComponentKeys entry from every
 // component's Extra. Called once at the deserialize boundary so the only such

@@ -159,20 +159,26 @@ var footprint_resolved: bool = false
 ##   points: Array[Vector2], angle: float (optional)  (kind == "arc" or "poly")
 var graphics: Array = []
 
-## The emitter's default designator anchor, for a footprint that authors no
-## reference fp_text of its own — mirrors silk_source.REFDES_LOCAL_Y_MM /
-## REFDES_TEXT_SIZE_MM / SILK_TEXT_WIDTH_MM. A designator centred on the
-## component origin and printed just above it.
+## LAST-RESORT designator anchor — mirrors silk_source.REFDES_LOCAL_Y_MM /
+## REFDES_TEXT_SIZE_MM / SILK_TEXT_WIDTH_MM: a designator centred on the
+## component origin and printed 1.5 mm above it.
+##
+## It applies ONLY to a component with no measured anchor at all (an empty
+## `refdes_anchor` — nothing resolved this part yet). A resolved part carries
+## the worker's anchor instead: the footprint's own authored reference fp_text,
+## else the anchor derived from its courtyard (worker refdes_anchor.py), which
+## is what keeps the designator off the body of anything bigger than an 0805.
 const REFDES_DEFAULT_Y_MM := -1.5
 const REFDES_DEFAULT_SIZE_MM := 1.0
 const REFDES_STROKE_WIDTH_MM := 0.15
 
 ## Where the fab prints this component's designator, in footprint-LOCAL mm:
-## `{x_mm, y_mm, rotation_deg, size_mm, hidden}`, the footprint's OWN authored
-## reference fp_text placement as the worker's resolve measured it
-## (resolve.py::_refdes_anchor). An EMPTY dict means nothing has been measured
-## yet, and the REFDES_DEFAULT_* above — the emitter's own default anchor —
-## applies.
+## `{x_mm, y_mm, rotation_deg, size_mm, hidden}` as the worker's resolve
+## measured it (resolve.py::_refdes_anchor) — the footprint's OWN authored
+## reference fp_text placement, or, when it authors none, the anchor derived
+## from its courtyard. The Gerber emitter and the DRC silk projection read the
+## same derivation, so what this draws is where the fab prints. An EMPTY dict
+## means nothing has been measured yet, and the REFDES_DEFAULT_* above applies.
 ##
 ## Library-derived, like `graphics`: it rides panel state (to_dict) so a
 ## restore does not have to re-resolve, and is re-measured by every load's

@@ -176,8 +176,12 @@ SILK_LINE_WIDTH_MM = SILK_TEXT_WIDTH_MM
 # AUTHORITIES, not two values: the day a profile moves the graphic floor, a
 # designator must not follow it. Reading the right name is the whole point.
 REFDES_TEXT_SIZE_MM = 1.0
-# Local (component-frame) anchor, mirroring kicad.py's own hard-pinned
-# designator offset precedent: `(fp_text reference ... (at 0 -1.5) ...)`.
+# LAST-RESORT local (component-frame) anchor, mirroring kicad.py's own
+# hard-pinned designator offset precedent: `(fp_text reference ... (at 0 -1.5)
+# ...)`. It applies only where there is no footprint body to measure — a caller
+# holding a footprint definition passes the effective anchor instead (see
+# refdes_anchor), because 1.5 mm above the ORIGIN is inside the body of any part
+# bigger than an 0805.
 REFDES_LOCAL_Y_MM = -1.5
 
 # Populated here rather than at the __all__ block above so it can reference the
@@ -555,16 +559,18 @@ def refdes_strokes(ref: Any, cx: float, cy: float, rot: float,
     coordinates and must be placed by the component's actual placement
     transform regardless.
 
-    ``reference_text`` (019f77fd6d69) is the footprint's OWN authored reference
-    fp_text placement, when the caller has a footprint definition to consult.
-    When given, the designator is drawn at the footprint's authored local
+    ``reference_text`` is the footprint's EFFECTIVE reference fp_text
+    placement, when the caller has a footprint definition to consult — its own
+    authored one, or the anchor derived from its courtyard when it authors none
+    (``refdes_anchor.effective_reference_text``, the one derivation every silk
+    consumer reads). When given, the designator is drawn at that local
     anchor/rotation/size instead of the fixed ``REFDES_LOCAL_Y_MM`` default:
     glyphs are rendered anchored at the origin, then EACH point goes through
     the text's own local rotate-then-translate BEFORE the component's placement
     transform — a two-step nested transform, because the anchor is
     footprint-local, not board-absolute. The default (``None``, e.g. every call
-    from the loose-dict harvest, which has no footprint definition) keeps the
-    single-step placement.
+    from the loose-dict harvest, which has no footprint definition to measure)
+    keeps the single-step placement at ``REFDES_LOCAL_Y_MM``.
 
     Returns OPEN polylines: a glyph stroke must NEVER gain a closing segment
     back to its first point, unlike an authored fp_poly outline. This is

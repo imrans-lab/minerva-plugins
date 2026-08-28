@@ -157,7 +157,7 @@ from .ir_pads import (
     pad_land,
     smd_shape,
 )
-from . import mask_source, silk_source
+from . import mask_source, refdes_anchor, silk_source
 from .geometry import rotate_local_offset, rotation_radians
 from .mask_source import MaskOpening
 from .pad_source import placed_pad_to_geom
@@ -570,7 +570,12 @@ def _project_silk(rb: ResolvedBoard) -> tuple[tuple[SilkPrimitive, ...],
         # the emitter refuse while this surface quietly drew the designator at
         # the default anchor. Unreachable today (construction validates the id),
         # which is exactly when divergences get written down and forgotten.
-        reference_text = rb.footprint_for(comp).reference_text
+        # The EFFECTIVE anchor, not the raw authored field: a footprint that
+        # authors none gets the courtyard-derived anchor the emitter uses
+        # (refdes_anchor.effective_reference_text), so this projection measures
+        # the designator where the fab will actually print it.
+        reference_text = refdes_anchor.effective_reference_text(
+            rb.footprint_for(comp))
         for idx, prim in enumerate(silk_source.refdes_strokes(
                 comp.ref, placement.position[0], placement.position[1],
                 placement.rotation_deg, reference_text, refdes_side)):
