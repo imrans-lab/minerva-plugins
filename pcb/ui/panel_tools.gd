@@ -10681,7 +10681,13 @@ static func bus_nets_detail(plan: Dictionary, station: Dictionary,
 			var last_pt: Vector2 = (runs[runs.size() - 1] as PackedVector2Array)[
 				(runs[runs.size() - 1] as PackedVector2Array).size() - 1]
 			var tid: String = str(last["trace_id"])
-			entry["free_end"] = {"trace_id": tid, "end": "end"} if not tid.is_empty() else null
+			# Split rather than a ternary: the two answers are a Dictionary and
+			# null, which have no common type. A ghost (propose) run has no
+			# trace id yet, so there is no anchor an agent could pass back.
+			if tid.is_empty():
+				entry["free_end"] = null
+			else:
+				entry["free_end"] = {"trace_id": tid, "end": "end"}
 			entry["free_end_x_mm"] = _mm(last_pt.x)
 			entry["free_end_y_mm"] = _mm(last_pt.y)
 			entry["free_end_layer"] = str(last["layer"])

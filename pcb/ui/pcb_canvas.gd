@@ -8390,10 +8390,10 @@ func _trace_candidate_point(world_pos: Vector2) -> Vector2:
 	if angles.is_empty():
 		return _author_point(world_pos)
 	var anchor: Vector2 = _trace_points[_trace_points.size() - 1]
-	var snapped := PcbTraceAngles.snap_point(anchor, world_pos, angles)
+	var snapped_point := PcbTraceAngles.snap_point(anchor, world_pos, angles)
 	if not _grid_snap_armed():
-		return snapped
-	return PcbTraceAngles.snap_along(anchor, snapped,
+		return snapped_point
+	return PcbTraceAngles.snap_along(anchor, snapped_point,
 		float(data.grid_size) * PCBDataScript.AUTHOR_SNAP_FRACTION)
 
 
@@ -8861,11 +8861,11 @@ func _trace_pour_at(world_pos: Vector2) -> Dictionary:
 	# rungs already follow. The view predicate is applied HERE rather than
 	# inside the pour reader, which answers a copper question and should not
 	# learn about the canvas at all.
-	var visible: Array = []
+	var visible_zones: Array = []
 	for zone in data.zones:
 		if zone is Dictionary and _zone_visible(zone as Dictionary):
-			visible.append(zone)
-	var hit := PcbZoneCopper.pour_hit(visible, probe, _trace_net)
+			visible_zones.append(zone)
+	var hit := PcbZoneCopper.pour_hit(visible_zones, probe, _trace_net)
 	if hit.is_empty():
 		return {}
 	return {
@@ -9957,10 +9957,10 @@ func _bus_declared_copper_layers() -> PackedStringArray:
 	var out := PackedStringArray()
 	var declared: Array = data.layers if data else []
 	for raw in declared:
-		var name := str(raw)
-		if not PcbLayerStack.is_copper(name):
+		var layer_name := str(raw)
+		if not PcbLayerStack.is_copper(layer_name):
 			continue
-		var canon := PcbLayerStack.kicad_to_canon(name)
+		var canon := PcbLayerStack.kicad_to_canon(layer_name)
 		if not out.has(canon):
 			out.append(canon)
 	return out

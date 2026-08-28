@@ -70,7 +70,7 @@ func TestFetchAll_FreshFetch(t *testing.T) {
 	footprintBody := []byte(`(footprint "R_0603_1608Metric")`)
 
 	srv := newFixtureServer(t, map[string][]byte{
-		"/Device.kicad_sym":                             deviceBody,
+		"/Device.kicad_sym": deviceBody,
 		"/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod": footprintBody,
 	})
 
@@ -80,8 +80,8 @@ func TestFetchAll_FreshFetch(t *testing.T) {
 		{Name: "Device.kicad_sym", Kind: "symbol_lib", Dest: "Device.kicad_sym",
 			URL: srv.URL + "/Device.kicad_sym", SHA256: sha256Hex(deviceBody), SizeBytes: int64(len(deviceBody))},
 		{Name: "Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod", Kind: "footprint",
-			Dest: "Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
-			URL:  srv.URL + "/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+			Dest:   "Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+			URL:    srv.URL + "/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
 			SHA256: sha256Hex(footprintBody), SizeBytes: int64(len(footprintBody))},
 	}}
 	lockPath := writeRawLock(t, lockDir, lock)

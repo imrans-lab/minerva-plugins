@@ -7118,12 +7118,18 @@ func _refresh_board_ui() -> void:
 		_canvas.queue_redraw()
 
 
+## Frame the board now if the canvas already has a size, otherwise arm a one-shot
+## fit for the first resize. The is_connected guard matters because a panel can be
+## asked to load more than once (a project deserialize pushes a load request into
+## an already-mounted tab): a second call while the first fit is still pending would
+## otherwise re-connect the same callable and Godot rejects that with
+## ERR_INVALID_PARAMETER. One pending fit per canvas is all the arming this needs.
 func _zoom_to_fit_deferred() -> void:
 	if _canvas == null:
 		return
 	if _canvas.size.x > 0 and _canvas.size.y > 0:
 		_canvas.zoom_to_fit()
-	else:
+	elif not _canvas.resized.is_connected(_canvas.zoom_to_fit):
 		_canvas.resized.connect(_canvas.zoom_to_fit, CONNECT_ONE_SHOT)
 
 

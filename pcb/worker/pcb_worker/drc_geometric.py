@@ -154,7 +154,6 @@ from .drc_geom_primitives import (
     segment_segment_distance,
 )
 from .ir_pads import (
-    IRPad,
     LandDisc,
     UnsupportedGeometry,
     iter_ir_pads,

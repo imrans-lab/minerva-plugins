@@ -172,7 +172,7 @@ test_pcb_pad_fidelity.gd assertions=47
 # check( calls is the assertion count.
 # 200 -> 202: the standing bus status line carries the lane map and the
 # tooltip its untrimmed form (+2). MEASURED: 202 passed, 0 failed.
-test_pcb_panel_ui.gd assertions=243
+test_pcb_panel_ui.gd assertions=249
 # 49 -> 57: the copper-extent pad pick adds four probes run over a part built
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.

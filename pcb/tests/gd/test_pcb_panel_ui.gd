@@ -70,6 +70,7 @@ func _init() -> void:
 	await _test_board_undo_redo()
 	await _test_selection_drag_threshold()
 	await _test_options_menu()
+	await _test_repeat_load_arms_one_fit()
 
 	_finish()
 
@@ -1734,3 +1735,67 @@ func _options_labels(popup: PopupMenu) -> String:
 	for i in popup.item_count:
 		out.append("%d:%s" % [popup.get_item_id(i), popup.get_item_text(i)])
 	return ", ".join(out)
+
+
+# ── Repeated load requests arm exactly one deferred zoom-to-fit ───────────────
+# A panel is asked to load more than once in ordinary use: a project deserialize
+# pushes a load request into an already-mounted tab. The fit is armed ONE-SHOT on
+# the canvas's `resized` when the canvas has no size yet, so a second request
+# arriving before that fires must find the arming already in place and leave it.
+#
+# ORACLE: the canvas's own connection list, and the view it ends up holding. A
+# double arming shows as two connections on `resized`; an arming that outlives
+# its fit shows as a board re-framed on every later resize, throwing away the
+# zoom the owner set. Both are read off the canvas, never off panel bookkeeping.
+
+func _test_repeat_load_arms_one_fit() -> void:
+	print("\n-- repeated load requests arm exactly one deferred zoom-to-fit --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+
+	# Back to an unlaid-out canvas — the state a tab that has not been drawn yet
+	# is in, and the only state in which the fit defers. The container re-imposes
+	# a real size when the panel is resized below.
+	canvas.size = Vector2.ZERO
+	check("fixture: the mounted panel's first fit is already spent",
+			_fit_arm_count(canvas) == 0, str(_fit_arm_count(canvas)))
+
+	_driver.drive_load_merged(panel, "", _canonical_board())
+	check("a load request with an unsized canvas arms one deferred fit",
+			_fit_arm_count(canvas) == 1, str(_fit_arm_count(canvas)))
+
+	_driver.drive_load_merged(panel, "", _canonical_board())
+	check("a SECOND load request leaves that one arming alone",
+			_fit_arm_count(canvas) == 1, str(_fit_arm_count(canvas)))
+
+	# Lay the canvas out: the arming fires, frames the board and is spent.
+	panel.size = Vector2(1000.0, 640.0)
+	for _i in range(6):
+		await process_frame
+	check("the deferred fit ran once the canvas was laid out",
+			canvas.size.x > 0.0 and canvas.pan_offset != Vector2.ZERO,
+			"size=%s pan=%s zoom=%.3f" % [str(canvas.size), str(canvas.pan_offset), canvas.zoom])
+	check("…and the arming is spent, not left standing",
+			_fit_arm_count(canvas) == 0, str(_fit_arm_count(canvas)))
+
+	# One-shot means the owner's own view survives every later resize.
+	canvas.set_view_center_zoom(Vector2(12.0, 9.0), 9.0)
+	panel.size = Vector2(880.0, 560.0)
+	for _i in range(6):
+		await process_frame
+	check("a later resize does not re-frame the board over the owner's view",
+			is_equal_approx(canvas.zoom, 9.0), "zoom=%.3f" % canvas.zoom)
+
+	panel.queue_free()
+	await process_frame
+
+
+## How many zoom_to_fit armings stand on a canvas's `resized` signal.
+func _fit_arm_count(canvas: Control) -> int:
+	var n: int = 0
+	for raw in canvas.resized.get_connections():
+		var conn: Dictionary = raw
+		var cb: Callable = conn.get("callable", Callable())
+		if cb.get_method() == &"zoom_to_fit":
+			n += 1
+	return n

@@ -567,11 +567,11 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 	var payload struct {
 		Board struct {
 			Components []struct {
-				Ref            string        `json:"ref"`
-				Graphics       []interface{} `json:"graphics"`
-				Pads           []interface{} `json:"pads"`
+				Ref            string                 `json:"ref"`
+				Graphics       []interface{}          `json:"graphics"`
+				Pads           []interface{}          `json:"pads"`
 				RefdesAnchor   map[string]interface{} `json:"refdes_anchor"`
-				HasPadGeometry bool          `json:"has_pad_geometry"`
+				HasPadGeometry bool                   `json:"has_pad_geometry"`
 				// The COMPONENT-level resolved fact (bug 019ff4a9a0d7) — a
 				// silk-only footprint resolves with zero pads, so the pad
 				// marker alone cannot say "this component is resolved".

@@ -1418,15 +1418,18 @@ static func _sideways_findings(sideways: Array, pad_perp: Array, pad_axial: Arra
 			var lane_in_band: bool = float(lane_perp[j]) >= lo and float(lane_perp[j]) <= hi
 			var pad_in_band: bool = float(pad_perp[j]) >= lo and float(pad_perp[j]) <= hi
 			if sideways[j]:
-				var lo_j: float = minf(float(pad_perp[j]), float(lane_perp[j]))
-				var hi_j: float = maxf(float(pad_perp[j]), float(lane_perp[j]))
+				# The pair's EXACT span, unlike the padded band the non-sideways
+				# arm below measures — a shared row is judged by `need`, which
+				# already carries the clearance, so no extra padding here.
+				var span_lo_j: float = minf(float(pad_perp[j]), float(lane_perp[j]))
+				var span_hi_j: float = maxf(float(pad_perp[j]), float(lane_perp[j]))
 				# One row or two: a pair within a pitch of each other is one
 				# crowded row and is named ONCE, as that, never also as a
 				# crossing from the other side of the pair.
 				var same_row: bool = absf(row - float(pad_axial[j])) < need
 				if same_row and j < i:
 					continue
-				if same_row and lo <= hi_j + need and lo_j <= hi + need:
+				if same_row and lo <= span_hi_j + need and span_lo_j <= hi + need:
 					out.append(_finding(FINDING_PADS_ALONG_SPINE,
 						"Nets \"%s\" and \"%s\" both lie along the spine at the %s end, each in a pad column that runs beside the bundle, and their two pads share a row (%.3fmm apart along the spine, where two legs need %.3fmm) — each leaves its column sideways in its own row, so their legs would run over each other. Draw the spine so it leaves this pad group across the columns, or bus the two columns separately."
 							% [net_names[i], net_names[j], end_label,
