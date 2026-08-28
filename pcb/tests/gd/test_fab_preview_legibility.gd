@@ -224,7 +224,7 @@ func _init() -> void:
 	_run_picker()
 	await _run_mcp_parity()
 	await _run_stale_retraction()
-	_run_camera_and_input()
+	await _run_camera_and_input()
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
 	quit(1 if _fail > 0 else 0)
 
@@ -707,12 +707,21 @@ func _board_with_part() -> Dictionary:
 
 ## A canvas IN THE TREE holding the artwork — _gui_input returns early outside
 ## it, so a rig that skipped this would assert nothing at all.
+##
+## The frame yield is what makes "in the tree" true rather than merely intended.
+## This suite runs from _init(), the SceneTree's own constructor, and the root
+## Window is only attached to the tree later, in SceneTree.initialize(); a node
+## added to root before that is a child of a rootless Window, so
+## is_inside_tree() stays FALSE and pcb_canvas._gui_input discards every event
+## on its first line. One process_frame lands after initialize(), which
+## propagates the tree down to this canvas (and fires its _enter_tree/_ready).
 func _canvas_rig() -> Variant:
 	var data = PCBData.new()
 	data.from_board_dict(_board_with_part())
 	var canvas = PcbCanvasScript.new()
 	canvas.data = data
 	root.add_child(canvas)
+	await process_frame
 	# AFTER the add: entering the tree can re-run the container sort, and a
 	# canvas sized to nothing would make every screen-rect assertion vacuous.
 	canvas.size = Vector2(PANEL_W, PANEL_H)
@@ -757,7 +766,7 @@ func _run_camera_and_input() -> void:
 			and FabPreview.board_rect({"min_x": 1.0, "min_y": 1.0,
 				"max_x": 1.0, "max_y": 1.0}) == Rect2())
 
-	var canvas = _canvas_rig()
+	var canvas = await _canvas_rig()
 	canvas.set_fab_preview(_reply_layers(), [], "note", BOARD_BOUNDS)
 	check("6c: the preview opens holding the artwork AND its extent",
 		(canvas._fab_preview_layers as Array).size() == EMITTED.size()

@@ -251,6 +251,8 @@ var _tool_buttons: Dictionary = {}   # ToolMode int -> Button
 ## modes, different destination; _sync_tool_buttons lights exactly one family.
 var _draft_tool_buttons: Dictionary = {}
 var _layer_option: OptionButton = null
+## The "Layer:" caption beside it — hidden at narrow (panel_layout.toolbar_captions_fit).
+var _layer_caption: Label = null
 ## Net picker for the zone tools (epoch 6 unit 4). Lives in the sidebar under the
 ## canvas-tools group and is only visible while a zone tool is armed — it is that
 ## tool's arming state, not a persistent board control.
@@ -1335,9 +1337,10 @@ func _build_toolbar() -> HBoxContainer:
 
 	# WORKING-LAYER chooser: where copper is authored, NOT what is shown. Layer
 	# visibility is the View menu's per-layer eyes.
-	var layer_label := Label.new()
-	layer_label.text = "Layer:"
-	tb.add_child(layer_label)
+	_layer_caption = Label.new()
+	_layer_caption.name = "LayerCaption"
+	_layer_caption.text = "Layer:"
+	tb.add_child(_layer_caption)
 
 	_layer_option = OptionButton.new()
 	_layer_option.name = "LayerOption"
@@ -4440,7 +4443,10 @@ func _on_panel_resized() -> void:
 ## view-flags surface at EVERY mode — owner ruling, bug 019fbb6242):
 ##   wide:   sidebar shown; Export button + board label inline.
 ##   medium: sidebar shown; board label → status.
-##   narrow: sidebar behind the drawer toggle; Export lives in the View menu.
+##   narrow: sidebar behind the drawer toggle; Export lives in the View menu;
+##           toolbar captions drop so the control strip still fits (the Options
+##           menu took its minimum to 412px in a 400px pane —
+##           panel_layout.toolbar_captions_fit).
 func _apply_layout_mode(mode: String, force := false) -> void:
 	if mode == _layout_mode and not force:
 		return
@@ -4479,6 +4485,8 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_export_button.visible = not narrow
 	if _board_size_label != null:
 		_board_size_label.visible = wide
+	if _layer_caption != null:
+		_layer_caption.visible = _PanelLayoutScript.toolbar_captions_fit(mode)
 	# Properties default: expanded where width is generous, collapsed in the
 	# 3-col medium tier (the status bar mirrors the selection either way).
 	# Only on a REAL mode change — a force re-apply (drawer toggle) must not
