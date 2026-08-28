@@ -65,7 +65,7 @@ from gerber_writer import (
 # "what silk is on this board".
 from agent_router.layers import canon_to_kicad
 
-from . import board_model, mask_source, refdes_anchor, silk_source
+from . import board_model, mask_source, silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .footprint_def import ReferenceTextDefinition
 from .geometry import (

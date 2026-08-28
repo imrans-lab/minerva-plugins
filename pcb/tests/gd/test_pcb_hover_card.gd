@@ -306,6 +306,32 @@ func _run_placement() -> void:
 	check("…and is still inside the canvas",
 		wide.position.x >= 0.0 and wide.end.x <= canvas_size.x)
 
+	# THE OVERSIZED CARD. A clamp alone cannot keep a card bigger than the panel
+	# inside it — the only legal origin is 0 and the far edge still overhangs —
+	# so the card is CLIPPED to the canvas on the axis it overflows. Oracle: the
+	# canvas rectangle itself, which the returned rect must lie within; the
+	# numbers below are chosen so nothing about the card fits.
+	var cramped := Vector2(120.0, 80.0)
+	var huge: Rect2 = PcbHoverCard.rect_for(
+		Vector2(400.0, 300.0), cramped * 0.5, cramped)
+	check("a card larger than the canvas on BOTH axes never leaves the canvas",
+		huge.position.x >= 0.0 and huge.position.y >= 0.0
+			and huge.end.x <= cramped.x and huge.end.y <= cramped.y)
+	check("…because it is clipped to the canvas, not merely clamped into it",
+		huge.size.x <= cramped.x and huge.size.y <= cramped.y
+			and huge.size.x > 0.0 and huge.size.y > 0.0)
+
+	# Oversized on ONE axis: clipping the width must not cost the other rule.
+	# 400 wide will not fit 120, but 40 tall fits 300 with room either side.
+	var tall_canvas := Vector2(120.0, 300.0)
+	var pointer := Vector2(60.0, 150.0)
+	var clipped: Rect2 = PcbHoverCard.rect_for(
+		Vector2(400.0, 40.0), pointer, tall_canvas)
+	check("a card clipped on one axis still fits the canvas and clears the pointer",
+		clipped.position.x >= 0.0 and clipped.position.y >= 0.0
+			and clipped.end.x <= tall_canvas.x and clipped.end.y <= tall_canvas.y
+			and not clipped.has_point(pointer))
+
 	check_eq("no lines means no rect at all", PcbHoverCard.rect_for(
 		Vector2.ZERO, Vector2(10.0, 10.0), canvas_size), Rect2())
 

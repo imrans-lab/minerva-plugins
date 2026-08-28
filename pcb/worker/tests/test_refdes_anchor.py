@@ -415,21 +415,24 @@ def test_the_anchor_clears_the_outermost_thing_the_footprint_draws():
                     "start": (-2.0, -4.0), "end": (2.0, 2.0)}
     drop = refdes_anchor.CLEARANCE_MM + HALF_STROKE
 
+    # A stroke is centred on its geometry, so each top edge is half a width
+    # above the authored centreline: 0.025 for the 0.05 courtyard, 0.06 for the
+    # 0.12 outline.
     contained = {"name": "fp", "pads": [pad],
                  "graphics": [tucked_outline, courtyard]}
     assert refdes_anchor.anchor_dict_from_parsed(contained)["y_mm"] == \
-        pytest.approx(-3.0 - drop), \
+        pytest.approx(-3.025 - drop), \
         "the courtyard contains the artwork, so the courtyard is the top edge"
 
     poking_out = {"name": "fp", "pads": [pad],
                   "graphics": [tall_outline, courtyard]}
     assert refdes_anchor.anchor_dict_from_parsed(poking_out)["y_mm"] == \
-        pytest.approx(-4.0 - drop), \
+        pytest.approx(-4.06 - drop), \
         "silk drawn ABOVE the courtyard must still be cleared"
 
     silk_only = {"name": "fp", "pads": [pad], "graphics": [tucked_outline]}
     assert refdes_anchor.anchor_dict_from_parsed(silk_only)["y_mm"] == \
-        pytest.approx(-2.0 - drop), \
+        pytest.approx(-2.06 - drop), \
         "no courtyard: the drawn outline is the top edge"
 
     pads_only = {"name": "fp", "pads": [pad], "graphics": []}
@@ -449,7 +452,8 @@ def test_the_panel_body_box_keeps_its_courtyard_first_precedence():
     anchor uses. Sharing the point extractors must not have merged the two.
 
     Oracle: a footprint whose courtyard is SMALLER than its silk. The body box
-    must report the courtyard's 6 mm; the anchor must clear the silk's 4 mm top.
+    must report the courtyard's 6 mm (plus its own 0.05 stroke); the anchor must
+    clear the silk's 4 mm top (plus its 0.12 stroke).
     """
     small_courtyard = {"kind": "line", "layer": "F.CrtYd", "width": 0.05,
                        "start": (-3.0, -3.0), "end": (3.0, 3.0)}
@@ -459,9 +463,9 @@ def test_the_panel_body_box_keeps_its_courtyard_first_precedence():
               "graphics": [tall_silk, small_courtyard]}
 
     body = refdes_anchor.body_extent_from_parsed(parsed)
-    assert (body.min_y, body.max_y) == pytest.approx((-3.0, 3.0))
+    assert (body.min_y, body.max_y) == pytest.approx((-3.025, 3.025))
     occupied = refdes_anchor.occupied_extent_from_parsed(parsed)
-    assert (occupied.min_y, occupied.max_y) == pytest.approx((-4.0, 4.0))
+    assert (occupied.min_y, occupied.max_y) == pytest.approx((-4.06, 4.06))
 
 
 def test_a_single_land_is_not_a_body_but_a_turned_one_is_measured_turned():
@@ -487,3 +491,92 @@ def test_a_single_land_is_not_a_body_but_a_turned_one_is_measured_turned():
     span = 3.0 / math.sqrt(2.0)
     assert extent.width == pytest.approx(span)
     assert extent.height == pytest.approx(span)
+
+
+# ---------------------------------------------------------------------------
+# 6. The ink, not the centreline
+# ---------------------------------------------------------------------------
+
+
+#: An arc authored ON A KNOWN CIRCLE, so this test never has to ask the code
+#: under test where the arc goes. The sweep runs 200 -> 340 degrees, which
+#: passes through 270 — the circle's extreme on Y, and NOT one of the three
+#: control points KiCad stores. A wide stroke on top of that separates "the ink"
+#: from "the geometry".
+_ARC_CENTER = (0.0, 0.0)
+_ARC_RADIUS = 2.0
+_ARC_STROKE_MM = 0.8
+_ARC_ANGLES = (200.0, 210.0, 340.0)  # start, mid, end
+
+
+def _on_arc_circle(degrees: float) -> tuple[float, float]:
+    return (_ARC_CENTER[0] + _ARC_RADIUS * math.cos(math.radians(degrees)),
+            _ARC_CENTER[1] + _ARC_RADIUS * math.sin(math.radians(degrees)))
+
+
+def _tiny_pad() -> dict:
+    return {"number": "1", "type": "smd", "shape": "rect", "x_mm": 0.0,
+            "y_mm": 0.0, "size": (1.0, 1.0), "layers": ["F.Cu"]}
+
+
+def test_the_anchor_clears_an_arcs_true_bow_and_a_thick_strokes_ink():
+    """A footprint whose body is a WIDE arc that bows past both its endpoints.
+
+    Two understatements used to hide here and both put ink on the part: the
+    extent was measured on stored control points (so the bow was invisible) and
+    on centrelines (so half of every stroke was invisible).
+
+    Oracle: the CIRCLE the arc's points were authored on — centre, radius and
+    the three angles are literals above, and 270 degrees is inside the sweep, so
+    the arc provably reaches ``centre_y - radius``. The clearance is measured
+    from that number against the designator's real ink, and the control-point
+    box is asserted to be a DIFFERENT (higher) number, so a regression to it
+    cannot pass.
+    """
+    start, mid, end = (_on_arc_circle(angle) for angle in _ARC_ANGLES)
+    arc = {"kind": "arc", "layer": "F.SilkS", "width": _ARC_STROKE_MM,
+           "points": [list(start), list(mid), list(end)]}
+    parsed = {"name": "ARC_BOW", "pads": [_tiny_pad()], "graphics": [arc]}
+
+    bow_top = _ARC_CENTER[1] - _ARC_RADIUS - _ARC_STROKE_MM / 2.0
+    control_top = min(p[1] for p in (start, mid, end)) - _ARC_STROKE_MM / 2.0
+    assert control_top > bow_top + 0.5, (
+        f"the fixture stopped separating the swept extent {bow_top} from the "
+        f"control-point box {control_top}")
+
+    for label, extent in (
+            ("parsed", refdes_anchor.occupied_extent_from_parsed(parsed)),
+            ("definition", refdes_anchor.occupied_extent_from_definition(
+                FootprintDefinition.from_kicad_parsed(parsed)))):
+        assert extent.min_y == pytest.approx(bow_top), (
+            f"the {label} extent tops out at {extent.min_y}; the arc's ink "
+            f"reaches {bow_top}")
+
+    footprint = FootprintDefinition.from_kicad_parsed(parsed)
+    ink = _ink_bbox(_local_strokes(
+        "R7", refdes_anchor.effective_reference_text(footprint)))
+    assert ink[3] <= bow_top - refdes_anchor.CLEARANCE_MM + 1e-9, (
+        f"the designator's ink reaches y={ink[3]}, less than "
+        f"{refdes_anchor.CLEARANCE_MM} mm clear of the arc's ink at {bow_top}")
+    assert ink[3] > control_top - 10.0, (
+        "the designator floated off the part; clear is not the same as far")
+
+    # KiCad 6 authors the same arc as centre + start + a signed sweep. It must
+    # measure the same, because it IS the same arc — the two forms reach the
+    # extent through different code.
+    legacy = {"kind": "arc", "layer": "F.SilkS", "width": _ARC_STROKE_MM,
+              "points": [list(_ARC_CENTER), list(start)],
+              "angle": -(_ARC_ANGLES[2] - _ARC_ANGLES[0])}
+    legacy_parsed = {"name": "ARC_BOW6", "pads": [_tiny_pad()],
+                     "graphics": [legacy]}
+    assert refdes_anchor.occupied_extent_from_parsed(legacy_parsed).min_y == \
+        pytest.approx(bow_top)
+
+    # The stroke half alone, with no curvature to confuse it: a 0.6 mm line
+    # drawn along y = -1 prints ink to -1.3, and the anchor drops from there.
+    thick_line = {"name": "THICK", "pads": [_tiny_pad()], "graphics": [
+        {"kind": "line", "layer": "F.SilkS", "width": 0.6,
+         "start": (-2.0, -1.0), "end": (2.0, -1.0)}]}
+    assert refdes_anchor.anchor_dict_from_parsed(thick_line)["y_mm"] == \
+        pytest.approx(-1.3 - refdes_anchor.CLEARANCE_MM - HALF_STROKE), \
+        "the anchor was measured from the line's centreline, not its ink"

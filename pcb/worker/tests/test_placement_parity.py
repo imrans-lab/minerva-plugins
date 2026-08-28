@@ -39,6 +39,7 @@ still drives the real harvest.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
@@ -46,7 +47,7 @@ import pytest
 import yaml
 
 from pcb_worker import drc, gerber, kicad, refdes_anchor, route_bridge, silk_source
-from pcb_worker.geometry import place_point
+from pcb_worker.geometry import PlacementTransform, place_point, rotation_radians
 from pcb_worker.pad_source import PadGeometryError
 from pcb_worker.resolve import resolve_board_best_effort
 from pcb_worker.resolved_board import Side
@@ -567,3 +568,123 @@ def test_the_kicad_reference_sits_on_the_silk_the_fab_prints_for_a_bottom_part()
         f"the .kicad_pcb stores SW10's reference at {stored}, outside the "
         f"B.SilkS designator ink {ink} the fab prints — the bottom-side mirror "
         f"is in the pads' stored coordinate but not in the text's")
+
+
+# ---------------------------------------------------------------------------
+# The pad's OWN turn, on the back
+# ---------------------------------------------------------------------------
+
+#: A local pad angle that no rectangle's symmetry can hide. Every multiple of 90
+#: maps a rect onto itself, so a sign error there is invisible; 30 degrees on a
+#: 2.4 x 1.0 land moves all four corners.
+_LOCAL_PAD_ROTATION_DEG = 30.0
+_LOCAL_PAD_SIZE_MM = (2.4, 1.0)
+
+#: The pad line with its ANGLE and SIZE captured — the two facts that together
+#: state where a land's copper actually is. ``_PAD_LINE`` above deliberately
+#: ignores both (it compares centres only), so this is a second reading of the
+#: same bytes rather than a widened one.
+_PAD_POSE_LINE = re.compile(
+    r'^\s*\(pad "((?:[^"\\]|\\.)*)" \S+ \S+ '
+    r"\(at (\S+) (\S+)(?: (\S+))?\) \(size (\S+) (\S+)\)")
+
+
+def _turned_corners(center: tuple[float, float], width: float, height: float,
+                    rotation_deg: float) -> list[tuple[float, float]]:
+    """The four corners of a land of *width* x *height* centred at *center* and
+    turned by *rotation_deg*, sorted so two readings can be compared as sets."""
+    theta = rotation_radians(rotation_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    half_w, half_h = width / 2.0, height / 2.0
+    return sorted(
+        (center[0] + dx * cos_t - dy * sin_t, center[1] + dx * sin_t + dy * cos_t)
+        for dx, dy in ((-half_w, -half_h), (half_w, -half_h),
+                       (half_w, half_h), (-half_w, half_h)))
+
+
+def _kicad_pad_poses(text: str) -> dict[str, tuple[float, float, float, float, float]]:
+    """``{pad number: (board_x, board_y, angle_deg, width, height)}`` for every
+    stored pad, read the way KiCad reads the file: the ``(at)`` beneath the
+    footprint's own ``(at)`` is footprint-local and gets that translate+rotate,
+    while the pad's third value is the pad's ABSOLUTE orientation."""
+    out: dict[str, tuple[float, float, float, float, float]] = {}
+    fx = fy = frot = 0.0
+    for line in text.splitlines():
+        header = _FOOTPRINT_LINE.match(line)
+        if header is not None:
+            fx, fy, frot = (float(header.group(1)), float(header.group(2)),
+                            float(header.group(3)))
+            continue
+        pad = _PAD_POSE_LINE.match(line)
+        if pad is None:
+            continue
+        ax, ay = place_point(fx, fy, frot,
+                             float(pad.group(2)), float(pad.group(3)))
+        angle = float(pad.group(4)) if pad.group(4) else 0.0
+        out[pad.group(1)] = (ax, ay, angle,
+                             float(pad.group(5)), float(pad.group(6)))
+    return out
+
+
+def test_the_kicad_export_mirrors_a_bottom_pads_own_rotation() -> None:
+    """A pad's LOCAL rotation belongs to the same flipped frame its position
+    does, and the .kicad_pcb has to store it that way.
+
+    THE FAULT THIS CATCHES: the loose-dict footprint path mirrored a bottom
+    part's pad COORDINATES and wrote its pad ANGLE raw, so a non-square land
+    turned 30 degrees was exported at its top-side twin's orientation with its
+    centre in the right place — copper the census, the Gerber and KiCad no
+    longer agree about.
+
+    ORACLE: ``geometry.PlacementTransform`` — the rule the compiled path places
+    everything with, and the one the other three surfaces were already brought
+    onto. Its ``point`` is applied to the land's four LOCAL corners and its
+    ``angle`` to the land's local turn; the emitted bytes are re-read
+    independently and rebuilt into corners from the stored size and angle. A
+    dropped or unmirrored angle moves every corner, because 30 degrees is
+    outside the rectangle's own symmetry.
+    """
+    board = yaml.safe_load(
+        (TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
+    resolved = resolve_board_best_effort(board)
+    comp = next(c for c in resolved["components"] if c.get("ref") == "SW10")
+    assert str(comp.get("layer", "")).strip().lower() == "bottom", (
+        "SW10 is the bottom-side part this case rests on")
+    assert not comp.get("pads_pre_placed"), (
+        "this is the LOOSE-dict arm; a pre-placed IR component carries an "
+        "already-absolute pad angle and must not be mirrored again")
+    for pad in comp["pads"]:
+        pad["size"] = {"width": _LOCAL_PAD_SIZE_MM[0],
+                       "height": _LOCAL_PAD_SIZE_MM[1]}
+        pad["rotation"] = _LOCAL_PAD_ROTATION_DEG
+
+    transform = PlacementTransform(
+        position=(float(comp["x_mm"]), float(comp["y_mm"])),
+        rotation_deg=float(comp.get("rotation_deg") or 0.0),
+        side=Side.BOTTOM)
+    stored = _kicad_pad_poses(kicad.generate_kicad_pcb(_solo(resolved, comp)))
+    assert len(stored) == len(comp["pads"]) and stored, (
+        f"expected one stored pad per resolved land, got {sorted(stored)}")
+
+    want_angle = transform.angle(_LOCAL_PAD_ROTATION_DEG)
+    for pad in comp["pads"]:
+        number = str(pad["number"])
+        ax, ay, angle, width, height = stored[number]
+        assert angle == pytest.approx(want_angle), (
+            f"pad {number}: the .kicad_pcb stores its orientation as {angle} "
+            f"degrees; the placement rule says {want_angle} on the back")
+        assert (width, height) == pytest.approx(_LOCAL_PAD_SIZE_MM), (
+            f"pad {number}: the land's own dimensions were not preserved")
+
+        # The corners, both ways. This is the claim the angle number stands for,
+        # and it fails on a dropped mirror even if the angle happened to read
+        # back plausibly.
+        local = _turned_corners(
+            (float(pad["position"]["x"]), float(pad["position"]["y"])),
+            width, height, _LOCAL_PAD_ROTATION_DEG)
+        want = sorted(transform.point(point) for point in local)
+        got = _turned_corners((ax, ay), width, height, angle)
+        for want_point, got_point in zip(want, got):
+            assert got_point == pytest.approx(want_point, abs=_TOL_MM), (
+                f"pad {number}: the .kicad_pcb puts its copper at {got}, the "
+                f"placement rule at {want}")

@@ -128,10 +128,14 @@ test_pcb_drc_propose.gd assertions=23 real-worker
 test_pcb_explicit_propose.gd assertions=80 real-worker
 # The canvas hover card: content vs the fixture, content vs the read verbs
 # (describe_component / describe_region), the placement rules, and a live
-# pointer. AUTHORED count: 8 + 8 + 10 + 26 + 12. The placement section's 26
-# is 7 anchors x 3 checks inside one loop, plus 5 outside it, so the source
+# pointer. AUTHORED count: 8 + 8 + 10 + 29 + 12. The placement section's 29
+# is 7 anchors x 3 checks inside one loop, plus 8 outside it, so the source
 # reads 18 fewer check( calls than it runs.
-test_pcb_hover_card.gd assertions=64
+# 64 -> 67: the OVERSIZED card — a card bigger than the canvas is clipped to it
+# rather than painted past the panel edge (both axes, then one axis with the
+# pointer rule still to satisfy).
+# Counted by hand from the check() call sites: 3 new, none inside a loop.
+test_pcb_hover_card.gd assertions=67
 test_pcb_hint_refine_loop.gd assertions=64 real-worker
 test_pcb_single_trace_tool.gd assertions=98 real-worker
 test_pcb_legacy_annotation_migration.gd assertions=53
@@ -466,8 +470,12 @@ test_add_by_library_ref.gd assertions=48 real-worker
 # partial write authors only the fields the caller sent (hidden on, hidden off),
 # and a restated value is authored anyway while `changed` stays empty.
 # Counted by hand from the check() call sites: 5 new, none inside a loop.
+# 71 -> 72: the reported designator box is the printed INK — the centreline
+# span grown by one whole stroke width — measured against a raw stroke span the
+# box function shares no arithmetic with.
+# Counted by hand from the check() call sites: 1 new, not inside a loop.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd assertions=71
+test_part_geometry_contracts.gd assertions=72
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the

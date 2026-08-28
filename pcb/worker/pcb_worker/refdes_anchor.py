@@ -34,7 +34,10 @@ component's rotation and mirrors on the bottom side, and so does the body it
 was measured against, so the clearance is preserved exactly.
 
 WHAT "THE BODY" MEANS HERE: everything the footprint OCCUPIES — its courtyard,
-its drawn outline (silk/fab) and its lands, UNIONED. For a well-formed
+its drawn outline (silk/fab) and its lands, UNIONED. A graphic occupies its
+INK, not its centreline: the box is grown by half the stroke width on every
+side, and an arc or circle contributes the extent its sweep really reaches (a
+bowed arc reaches past both of its endpoints). For a well-formed
 footprint that is the courtyard, which contains the rest by construction (a
 footprint's own outline inside its own courtyard is the KiCad convention, not a
 collision). The union is what keeps the rule honest for the ones that are not:
@@ -70,12 +73,19 @@ from .footprint_def import (
     PolyGraphic,
     ReferenceTextDefinition,
 )
-from .geometry import rotation_radians
+from .geometry import rotate_local_offset, rotation_radians
 from .silk_source import (
     REFDES_TEXT_SIZE_MM,
     REFDES_LOCAL_Y_MM,
+    SILK_GRAPHIC_WIDTH_MM,
     SILK_TEXT_WIDTH_MM,
+    graphic_width,
 )
+# The arc solve is BORROWED, not re-derived: silk_source._circumcenter is the
+# circle every arc consumer (the silk emitter, the Gerber harvest) already draws
+# an arc on, so a swept extent measured here cannot disagree with the ink that
+# actually gets printed. gerber.py aliases the same private helper.
+from .silk_source import _circumcenter
 
 __all__ = [
     "COURTYARD_LAYERS",
@@ -461,12 +471,14 @@ def _pair(raw: Any) -> Union[tuple[float, float], None]:
 
 def _parsed_graphic_points(graphics: Any,
                            layers: frozenset) -> list[tuple[float, float]]:
-    """Every point the parsed graphics on *layers* contribute.
+    """The INK box corners of every parsed graphic on *layers*.
 
-    An arc contributes its stored control points rather than its true swept
-    extent: courtyards are drawn from lines and short fillet arcs, so the
-    understatement is bounded by the fillet radius, and reconstructing swept
-    extrema here would be a second arc implementation this box does not need.
+    Each graphic contributes the two corners of its own extent grown by HALF ITS
+    STROKE WIDTH, because a plotted stroke is centred on the geometry and its
+    ink reaches that much further on every side. Arcs and circles contribute the
+    extent their SWEEP reaches rather than their stored control points: an arc
+    bows away from its chord, by up to its full radius on a half turn, so the
+    endpoint box can sit entirely inside the printed ink.
     """
     points: list[tuple[float, float]] = []
     if not isinstance(graphics, list):
@@ -474,17 +486,24 @@ def _parsed_graphic_points(graphics: Any,
     for graphic in graphics:
         if not isinstance(graphic, dict) or graphic.get("layer") not in layers:
             continue
-        if graphic.get("kind") == "circle":
+        half = graphic_width(graphic) / 2.0
+        kind = graphic.get("kind")
+        if kind == "circle":
             center = _pair(graphic.get("center"))
             radius = _num(graphic.get("radius"))
             if center is not None and radius is not None:
-                points.extend(_circle_points(center, radius))
+                points.extend(_ink_corners(_circle_points(center, radius), half))
             continue
+        if kind == "arc":
+            points.extend(_ink_corners(_parsed_arc_points(graphic), half))
+            continue
+        drawn: list[tuple[float, float]] = []
         for raw in (graphic.get("start"), graphic.get("end"),
                     *(graphic.get("points") or [])):
             point = _pair(raw)
             if point is not None:
-                points.append(point)
+                drawn.append(point)
+        points.extend(_ink_corners(drawn, half))
     return points
 
 
@@ -512,19 +531,49 @@ def _parsed_pad_points(pads: Any) -> list[tuple[float, float]]:
 
 def _definition_graphic_points(graphics: Sequence[Any],
                                layers: frozenset) -> list[tuple[float, float]]:
+    """The compiled-IR twin of :func:`_parsed_graphic_points` — same ink box,
+    same swept arc, only the field names differ."""
     points: list[tuple[float, float]] = []
     for graphic in graphics:
         if graphic.layer.id not in layers:
             continue
+        half = _definition_width(graphic) / 2.0
         if isinstance(graphic, LineGraphic):
-            points.extend((graphic.a, graphic.b))
+            drawn = [graphic.a, graphic.b]
         elif isinstance(graphic, CircleGraphic):
-            points.extend(_circle_points(graphic.center, graphic.radius_mm))
+            drawn = _circle_points(graphic.center, graphic.radius_mm)
         elif isinstance(graphic, ArcGraphic):
-            points.extend((graphic.start, graphic.mid, graphic.end))
+            drawn = _arc_span_points(graphic.start, graphic.mid, graphic.end)
         elif isinstance(graphic, PolyGraphic):
-            points.extend(graphic.points)
+            drawn = list(graphic.points)
+        else:
+            continue
+        points.extend(_ink_corners(drawn, half))
     return points
+
+
+def _definition_width(graphic: Any) -> float:
+    """Stroke width of one compiled graphic — the same fallback
+    :func:`silk_source.graphic_width` applies to the parsed dict form."""
+    width = _num(getattr(graphic, "width_mm", None))
+    return width if (width is not None and width > 0) else SILK_GRAPHIC_WIDTH_MM
+
+
+def _ink_corners(points: Sequence[tuple[float, float]],
+                 half_width: float) -> list[tuple[float, float]]:
+    """The two opposite corners of *points*' box grown by *half_width*.
+
+    Two corners are enough: every caller folds these into one min/max box, so a
+    per-graphic box grown by its own stroke unions to exactly the ink box. Doing
+    the growth per graphic rather than once at the end is what lets a thin
+    courtyard and a thick outline each carry their own width.
+    """
+    if not points:
+        return []
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return [(min(xs) - half_width, min(ys) - half_width),
+            (max(xs) + half_width, max(ys) + half_width)]
 
 
 def _definition_pad_points(pads: Sequence[Any]) -> list[tuple[float, float]]:
@@ -541,6 +590,79 @@ def _circle_points(center: tuple[float, float],
                    radius: float) -> list[tuple[float, float]]:
     cx, cy = center
     return [(cx - radius, cy - radius), (cx + radius, cy + radius)]
+
+
+_TAU = 2.0 * math.pi
+
+
+def _parsed_arc_points(graphic: dict) -> list[tuple[float, float]]:
+    """The swept extent of one PARSED arc, in both forms
+    ``footprints._parse_graphics`` produces: KiCad 6's centre/start plus an
+    ``angle`` sweep, and KiCad 7/8's three ``points`` (start, mid, end).
+
+    The legacy form is converted into the three-point one by turning its radius
+    vector through half and all of the sweep. ``rotate_local_offset`` is the
+    very turn ``silk_source._harvest_arc`` uses to find that arc's end, so the
+    two cannot disagree about which arc was authored. An arc with neither a mid
+    nor an angle is underspecified and draws as its chord — the same
+    approximation the emitter makes, warned about there.
+    """
+    pts = [p for p in (_pair(raw) for raw in (graphic.get("points") or []))
+           if p is not None]
+    angle = _num(graphic.get("angle"))
+    if angle is not None and angle != 0.0 and len(pts) >= 2:
+        (ccx, ccy), (sx, sy) = pts[0], pts[1]
+        vx, vy = sx - ccx, sy - ccy
+        if vx == 0.0 and vy == 0.0:
+            return []
+        if abs(angle) >= 360.0:
+            # A closed sweep: the three-point solve below degenerates (start and
+            # end coincide, so there is no circumcircle), and the shape is a
+            # circle anyway.
+            return _circle_points((ccx, ccy), math.hypot(vx, vy))
+        mx, my = rotate_local_offset(vx, vy, angle / 2.0)
+        ex, ey = rotate_local_offset(vx, vy, angle)
+        return _arc_span_points((sx, sy), (ccx + mx, ccy + my),
+                                (ccx + ex, ccy + ey))
+    if len(pts) >= 3:
+        return _arc_span_points(pts[0], pts[1], pts[2])
+    return pts
+
+
+def _arc_span_points(start: tuple[float, float], mid: tuple[float, float],
+                     end: tuple[float, float]) -> list[tuple[float, float]]:
+    """*start*, *end*, and every axis extremum the arc through the three points
+    actually sweeps through.
+
+    An arc's bounding box is its endpoints plus whichever of the four cardinal
+    points of its circle fall inside the sweep — between two cardinals the
+    circle is monotone on both axes, so nothing else can be extremal. Both the
+    circle and the sweep DIRECTION come from ``silk_source._circumcenter``,
+    which returns the circumcentre together with twice the signed area of
+    start->mid->end; that sign says whether the turn runs in the increasing- or
+    decreasing-angle direction of this frame.
+
+    Collinear or coincident control points describe a line rather than an arc
+    (the emitter draws them as one), and are then their own whole extent.
+    """
+    solved = _circumcenter(start, mid, end)
+    if solved is None:
+        return [start, mid, end]
+    (cx, cy), d = solved
+    radius = math.hypot(start[0] - cx, start[1] - cy)
+    begin = math.atan2(start[1] - cy, start[0] - cx)
+    sign = 1.0 if d > 0 else -1.0
+    span = (sign * (math.atan2(end[1] - cy, end[0] - cx) - begin)) % _TAU
+
+    def _on(angle: float) -> tuple[float, float]:
+        return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    points = [_on(begin), _on(begin + sign * span)]
+    for quarter in range(4):
+        angle = quarter * (math.pi / 2.0)
+        if (sign * (angle - begin)) % _TAU <= span:
+            points.append(_on(angle))
+    return points
 
 
 def _pad_corners(x: float, y: float, half_w: float, half_h: float,

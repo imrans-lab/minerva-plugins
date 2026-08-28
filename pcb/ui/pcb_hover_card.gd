@@ -192,11 +192,23 @@ static func measure(lines: PackedStringArray, font: Font, font_size: int) -> Vec
 ##   cursor, so covering it would defeat the feature. Every candidate starts a
 ##   full GAP_PX away from the anchor, so none of them can contain it.
 ##
-## FALLBACK: when no diagonal fits (a card larger than the space beside the
-## cursor), the box is clamped into the canvas and then pushed off the anchor
-## along the axis with the most room. A card taller or wider than the canvas
-## itself cannot satisfy both rules; staying inside wins, because half a card is
-## still readable while a card painted outside the panel is not painted at all.
+## FALLBACK, when no diagonal fits (a card larger than the space beside the
+## cursor), in the order the two rules are given up:
+##
+##   1. the card is CLIPPED to the canvas on any axis it overflows, then its
+##      origin clamped inside. Clamping alone cannot keep an oversized card in:
+##      with `size > canvas` the only legal origin is 0 and the far edge still
+##      overhangs, which is exactly what painted a card past the panel edge.
+##      The returned rect is therefore never larger than the canvas, and callers
+##      that assumed `rect.size == size` must read the rect instead.
+##   2. if that still covers the pointer, the card is moved off it: a full gap
+##      to whichever side has more room, else FLUSH against the pointer so it
+##      sits on the card's edge rather than under its middle. A card that fills
+##      the canvas outright cannot clear the pointer at all, and the flush
+##      placement is the closest thing to obeying the rule that is left.
+##
+## Staying inside wins over covering nothing, because half a card is still
+## readable while a card painted outside the panel is not painted at all.
 static func rect_for(size: Vector2, anchor: Vector2, canvas_size: Vector2,
 		gap: float = GAP_PX) -> Rect2:
 	if size == Vector2.ZERO:
@@ -212,14 +224,24 @@ static func rect_for(size: Vector2, anchor: Vector2, canvas_size: Vector2,
 				and candidate.end.x <= canvas_size.x \
 				and candidate.end.y <= canvas_size.y:
 			return candidate
-	var clamped := Rect2(Vector2(
-		clampf(right, 0.0, maxf(0.0, canvas_size.x - size.x)),
-		clampf(below, 0.0, maxf(0.0, canvas_size.y - size.y))), size)
+	var fitted := Vector2(minf(size.x, canvas_size.x), minf(size.y, canvas_size.y))
+	var span := Vector2(maxf(0.0, canvas_size.x - fitted.x),
+		maxf(0.0, canvas_size.y - fitted.y))
+	var clamped := Rect2(Vector2(clampf(right, 0.0, span.x),
+		clampf(below, 0.0, span.y)), fitted)
 	if not clamped.has_point(anchor):
 		return clamped
-	# Push to whichever side of the pointer has more room, then re-clamp.
-	var pushed := above if anchor.y > canvas_size.y * 0.5 else below
-	clamped.position.y = clampf(pushed, 0.0, maxf(0.0, canvas_size.y - size.y))
+	# Still over the pointer. Try a full gap to the roomier side, then flush
+	# above it, then flush below it; the flush placements put the pointer on the
+	# card's own edge, which is the best a nearly-canvas-sized card can do.
+	var roomier := above if anchor.y > canvas_size.y * 0.5 else below
+	var tops: Array[float] = [roomier, anchor.y - fitted.y, anchor.y]
+	for y in tops:
+		var candidate := Rect2(
+			Vector2(clamped.position.x, clampf(y, 0.0, span.y)), fitted)
+		if not candidate.has_point(anchor):
+			return candidate
+	clamped.position.y = clampf(anchor.y - fitted.y, 0.0, span.y)
 	return clamped
 
 

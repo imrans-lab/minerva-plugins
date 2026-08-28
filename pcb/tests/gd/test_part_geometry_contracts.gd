@@ -527,9 +527,10 @@ func _run_the_drawn_designator_is_the_live_ref() -> void:
 ## switch), and the anchor a resolve sends for it.
 ##
 ## WHY A LITERAL. The panel does not derive this — the worker does
-## (worker/pcb_worker/refdes_anchor.py: the courtyard's top edge, minus a
-## 0.25 mm clearance, minus half the 0.15 mm stroke = -3.625, x-centred on the
-## courtyard) and puts it on the wire. Pinning the number here is the same
+## (worker/pcb_worker/refdes_anchor.py: the courtyard's INK top edge, which is
+## -3.3 plus half of its own 0.05 stroke, minus a 0.25 mm clearance, minus half
+## the 0.15 mm text stroke = -3.65, x-centred on the courtyard) and puts it on
+## the wire. Pinning the number here is the same
 ## cross-language contract J1_DEFAULT_STROKES pins for the font: the panel must
 ## DRAW what the fab will PRINT, and a worker rule that moved without the panel
 ## noticing shows up as a designator drawn on top of the part.
@@ -543,7 +544,7 @@ const SWITCH_COURTYARD: Array = [
 	{"layer": "F.CrtYd", "kind": "line", "width": 0.05,
 		"start": [-4.25, 3.4], "end": [-4.25, -3.3]},
 ]
-const SWITCH_ANCHOR := {"x_mm": 0.0, "y_mm": -3.625, "rotation_deg": 0.0,
+const SWITCH_ANCHOR := {"x_mm": 0.0, "y_mm": -3.65, "rotation_deg": 0.0,
 	"size_mm": 1.0, "hidden": false}
 ## The anchor a pre-derivation resolve sent for the SAME footprint: a fixed
 ## 1.5 mm above the ORIGIN, which is 1.8 mm INSIDE this courtyard.
@@ -689,6 +690,20 @@ func _box(reply: Dictionary) -> Dictionary:
 	return (reply.get("bounds", {}) as Dictionary)
 
 
+## The width and height a component's designator strokes span in its OWN frame:
+## centrelines only, read straight off the stroke points with no transform and
+## no stroke width. Independent of `board_bounds` by construction — it shares
+## none of that function's arithmetic.
+func _stroke_span(comp) -> Vector2:
+	var min_p := Vector2(INF, INF)
+	var max_p := Vector2(-INF, -INF)
+	for g in comp.refdes_graphics:
+		for pt in g["points"]:
+			min_p = min_p.min(pt as Vector2)
+			max_p = max_p.max(pt as Vector2)
+	return max_p - min_p
+
+
 func _run_the_designator_anchor_is_movable() -> void:
 	print("-- 5. minerva_pcb_set_refdes moves the label and says where it went --")
 	var host := _refdes_host()
@@ -704,6 +719,18 @@ func _run_the_designator_anchor_is_movable() -> void:
 		float(before.get("min_x_mm", 0.0)) < PIVOT_AT.x
 			and float(before.get("max_x_mm", 0.0)) > PIVOT_AT.x
 			and float(before.get("max_y_mm", 0.0)) < PIVOT_AT.y)
+	# THE BOX IS INK, NOT CENTRELINE. The strokes are polylines with a width, so
+	# what the fab prints reaches half a stroke past them on every side, and a
+	# caller placing a label against a neighbour needs the printed figure. The
+	# part sits at rotation 0 on the top side, so its local frame differs from
+	# the board frame by a translation only and the raw stroke SPAN is directly
+	# comparable to the reported one.
+	var glyph_span := _stroke_span(data.get_component(REFDES_REF))
+	check("…as printed INK: the centreline span grown by one whole stroke width",
+		absf(float(before["width_mm"]) - glyph_span.x
+			- PCBComponent.REFDES_STROKE_WIDTH_MM) < EPS_MM
+			and absf(float(before["height_mm"]) - glyph_span.y
+				- PCBComponent.REFDES_STROKE_WIDTH_MM) < EPS_MM)
 
 	# THE MOVE. The box must translate by exactly the delta — that is the only
 	# assertion here that a store-without-render implementation fails.
@@ -762,7 +789,7 @@ func _run_the_designator_anchor_is_movable() -> void:
 	# came from rides on the ROW, not in the suggestion. Written out here rather
 	# than derived, so a key added on the worker side fails this check.
 	var suggestion := await _refdes_call(host, {
-		"x_mm": 0.0, "y_mm": -3.625, "rotation_deg": 0.0,
+		"x_mm": 0.0, "y_mm": -3.65, "rotation_deg": 0.0,
 		"size_mm": 1.0, "hidden": false})
 	check("a gc9 advisory's suggestion is accepted whole, key for key",
 		bool(suggestion.get("success", false)))

@@ -224,7 +224,10 @@ def _pad_at(px: float, py: float, rotation: float | None) -> str:
     (SB2), which is wrong-as-absolute for a component placed at a non-zero
     rotation. Not fixed here (that path is being replaced by this IR bridge, and a
     fix would churn goldens that encode the pre-existing value); the IR path — the
-    one W8.2 wires into fab — is correct."""
+    one W8.2 wires into fab — is correct. Its BACK-SIDE half is fixed, though:
+    ``_footprint`` negates that local angle for a B.Cu footprint, because the
+    mirror is a property of the side alone and applies at any component
+    rotation."""
     if rotation is not None and rotation != 0.0:
         return f"(at {px} {py} {_num(rotation)})"
     return f"(at {px} {py})"
@@ -757,6 +760,18 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         num_s = str(pad.number)
         px = pad.x
         py = _mirror_local_y(pad.y) if mirror_local_y else pad.y
+        # A pad's OWN local rotation lives in the same mirrored frame its
+        # position does: reflecting the footprint reverses every local turn,
+        # which is the minus sign geometry.PlacementTransform.angle carries on
+        # the back (`rot - local`, against `rot + local` on the front). Without
+        # it a non-square land turned 30 degrees exported at the orientation its
+        # top-side twin would have, while its centre was correctly mirrored.
+        # Gated by the same `mirror_local_y` as the coordinate: the IR producer
+        # forwards an already-ABSOLUTE pad angle with the flip baked in, and
+        # reversing that a second time would undo it.
+        pad_rot = pad.rotation
+        if mirror_local_y and pad_rot:
+            pad_rot = (-pad_rot) % 360.0
         drill = pad.drill
         net_no = pads_nets.get(num_s)
         net_expr = ""
@@ -772,7 +787,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             layer_expr = " ".join(f'"{value}"' for value in paste_layers)
             lines.append(
                 f'    (pad "{_esc(num_s)}" smd {shape_tok} '
-                f'{_pad_at(px, py, pad.rotation)} (size {sw} {sh})'
+                f'{_pad_at(px, py, pad_rot)} (size {sw} {sh})'
                 f'{rratio_suffix} (layers {layer_expr}))'
             )
             continue
@@ -809,7 +824,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             if not plated:
                 lines.append(
                     f'    (pad "{_esc(num_s)}" np_thru_hole circle '
-                    f'{_pad_at(px, py, pad.rotation)} '
+                    f'{_pad_at(px, py, pad_rot)} '
                     f'(size {_num(drill)} {_num(drill)}) (drill {_num(drill)}) '
                     f'(layers "*.Cu" "*.Mask"){mask_expr})'
                 )
@@ -835,7 +850,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 else:
                     tok, suffix = "rect", ""
                 lines.append(
-                    f'    (pad "{_esc(num_s)}" thru_hole {tok} {_pad_at(px, py, pad.rotation)} '
+                    f'    (pad "{_esc(num_s)}" thru_hole {tok} {_pad_at(px, py, pad_rot)} '
                     f'(size {_num(lw)} {_num(lh)}){suffix} (drill {_num(drill)}) '
                     f'(layers "*.Cu" "*.Mask"){mask_expr}{net_expr})'
                 )
@@ -848,7 +863,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 # base) — a collapsing large-negative margin fails CLOSED here.
                 mask_opening_dim(annulus, mask_margin, ref, num_s)
                 lines.append(
-                    f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
+                    f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad_rot)} '
                     f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
                     f'(layers "*.Cu" "*.Mask"){mask_expr}{net_expr})'
                 )
@@ -867,7 +882,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             mask_opening_dim(pad.height, mask_margin, ref, num_s)
             paste, mask = _smd_tech_layers(layer)
             lines.append(
-                f'    (pad "{_esc(num_s)}" smd {shape_tok} {_pad_at(px, py, pad.rotation)} '
+                f'    (pad "{_esc(num_s)}" smd {shape_tok} {_pad_at(px, py, pad_rot)} '
                 f'(size {sw} {sh}){rratio_suffix} '
                 f'(layers "{layer}" "{paste}" "{mask}"){mask_expr}{net_expr})'
             )

@@ -120,15 +120,21 @@ static func _check(key: String, value: Variant) -> Dictionary:
 	return {"ok": true, "value": number}
 
 
-## The BOARD-FRAME box of the designator strokes: `{min_x_mm, min_y_mm,
-## max_x_mm, max_y_mm, width_mm, height_mm}`, or an empty dict when the
-## designator draws nothing (hidden, or an unnamed component).
+## The BOARD-FRAME box of the designator INK: `{min_x_mm, min_y_mm, max_x_mm,
+## max_y_mm, width_mm, height_mm}`, or an empty dict when the designator draws
+## nothing (hidden, or an unnamed component).
 ##
 ## Measured off `refdes_graphics` — the strokes the canvas actually draws —
 ## through the component's ONE footprint-local -> board transform
 ## (PcbComponent.get_transform), so the box turns and mirrors with the part
 ## exactly as the ink does. Deriving it from the anchor and the font metrics
 ## instead would be a second placement implementation to keep in step.
+##
+## Those strokes are CENTRELINES, so the box is grown by half a stroke on every
+## side: the caller asking "where did my label land" is asking about printed
+## ink, and a centreline box understates it by 0.075 mm all round. Growing after
+## the transform is exact because the transform only turns and mirrors — it
+## never scales — so a half-width is the same distance in either frame.
 static func board_bounds(comp) -> Dictionary:
 	var min_p := Vector2(INF, INF)
 	var max_p := Vector2(-INF, -INF)
@@ -143,6 +149,9 @@ static func board_bounds(comp) -> Dictionary:
 			found = true
 	if not found:
 		return {}
+	var half := 0.5 * _PcbComponentScript.REFDES_STROKE_WIDTH_MM
+	min_p -= Vector2(half, half)
+	max_p += Vector2(half, half)
 	return {
 		"min_x_mm": min_p.x, "min_y_mm": min_p.y,
 		"max_x_mm": max_p.x, "max_y_mm": max_p.y,
