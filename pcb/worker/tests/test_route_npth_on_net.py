@@ -2,10 +2,11 @@
 
 An NPTH mounting hole is drilled and never plated, so it carries no copper — that
 is what an NPTH IS, and nothing here changes it. But a board may legitimately
-place one ON a net (a chassis-ground M3 hole; the HITL bench's row 5 stages
-exactly that, `MH5.1` on `R5_A`), and the router's projection used to refuse the
-WHOLE board over it: one unroutable member on ONE net and no net anywhere could
-be routed.
+place one ON a net (a chassis-ground M3 hole; the HITL bench stages exactly that
+twice — `MH5.1` on `R5_A` in row 5, and `MH4.1` as the sole member of `R4_N` in
+row 4, the row the bench added for this behaviour), and the router's projection
+used to refuse the WHOLE board over it: one unroutable member on ONE net and no
+net anywhere could be routed.
 
 The oracles below come from the bench's own per-row answers, not from the
 router's output:
@@ -55,7 +56,8 @@ def _pad_refs(net) -> list[str]:
 
 
 def test_the_projection_drops_the_hole_from_its_net_and_keeps_every_net():
-    """`MH5.1` leaves `R5_A`; the other 24 nets and `R5_A`'s two real lands stay.
+    """`MH5.1` leaves `R5_A`; every one of the bench's 29 nets and `R5_A`'s two
+    real lands stay.
 
     The net itself is KEPT (with one fewer member) rather than deleted: the
     engine already skips any net with fewer than two pads, while deleting it
@@ -65,7 +67,7 @@ def test_the_projection_drops_the_hole_from_its_net_and_keeps_every_net():
     board = route_bridge.resolved_board_to_router(_compiled(_bench()), warnings)
 
     assert _pad_refs(board.nets["R5_A"]) == ["TP5B.1", "TP5T.1"]
-    assert len(board.nets) == 25, sorted(board.nets)
+    assert len(board.nets) == 29, sorted(board.nets)
     assert all("MH5" not in ref
                for net in board.nets.values() for ref in _pad_refs(net))
 
@@ -73,6 +75,14 @@ def test_the_projection_drops_the_hole_from_its_net_and_keeps_every_net():
              if "R5_A" in w["message"] and "MH5.1" in w["message"]]
     assert len(named) == 1, warnings
     assert "excluded" in named[0]
+
+    # Row 4's hole is the SOLE member of its net, so its exclusion empties the
+    # net — and that second consequence is said out loud rather than left for
+    # the reader to notice that nothing was routed there.
+    row4 = [w["message"] for w in warnings if "R4_N" in w["message"]]
+    assert len(row4) == 2, warnings
+    assert any("MH4.1" in m and "excluded" in m for m in row4), row4
+    assert any("fewer than two routable pads" in m for m in row4), row4
 
     # The hole is still a HOLE: dropping it from the net must not drop it from
     # the obstacle set, or copper would route straight through a 3.2 mm bore.

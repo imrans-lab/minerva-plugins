@@ -8,8 +8,8 @@
 #
 # THE LAYOUT IS THE POINT.
 #
-#   * 20 rows, FIXED 12 mm pitch, numbered top to bottom. Row n's centre line is
-#     y = 8 + 12*(n-1), so R1 is at y=8 and R20 at y=236.
+#   * 23 rows, FIXED 12 mm pitch, numbered top to bottom. Row n's centre line is
+#     y = 8 + 12*(n-1), so R1 is at y=8 and R23 at y=272.
 #   * The left 10 mm of every row carries a board-level silk label "R<n> <name>"
 #     on F.SilkS. The label is board_graphics, not a component: it belongs to the
 #     board, and no part placement can drag it out of its row.
@@ -28,25 +28,34 @@
 # tools report. I = the human performs a gesture; the STARTING geometry is
 # pre-placed so there is something to gesture at. blend = one cell of each.
 #
+# ROW NUMBERS ARE STABLE, ROW SUBJECTS ARE NOT. A row keeps its slot and its
+# pitch for the life of the bench so the table stays a table, but a scenario
+# that has been answered is retired and its slot re-used. R4 is the first of
+# those: it used to hold a foreign-net pour, which R3 now answers on its own,
+# and it carries the router's NPTH exclusion instead. The silk label is the
+# authority on what a row is about — read the board, not an old sheet.
+#
 # TWO THINGS THIS FILE DELIBERATELY DOES NOT DO
 #
 #   1. NO UNFILLABLE POUR IS SHIPPED. A pour the filler refuses raises
 #      ZoneFillError, which fails the WHOLE compile — and zone_copper.pour_nodes
 #      then reports EVERY pour on the board as indeterminate, not just the bad
-#      one. Shipping R13's fault would therefore take R3's and R4's answers down
-#      with it. So R13 ships FILLABLE and its fault is the GESTURE (see R13).
+#      one. Shipping R13's fault would therefore take R3's and R21's answers
+#      down with it. So R13 ships FILLABLE and its fault is the GESTURE (R13),
+#      and so is the unfabricable part that has the same effect (R22 B).
 #   2. UNRESOLVABLE FOOTPRINT REFS ARE DELIBERATE, AND THE STRICT `resolve`
-#      SURFACE REFUSES THEM. R9 and R12 carry `Bench_*` refs that are not in the
-#      seed library; their `pads:` lists are the whole geometry authority, so the
-#      board COMPILES, DRCs and fabricates. But `minerva_pcb_resolve` is strict
-#      by contract and errors on any ref it cannot look up, inline pads or not.
+#      SURFACE REFUSES THEM. R9, R12, R21 and R23 carry `Bench_*` refs that are
+#      not in the seed library; their `pads:` lists are the whole geometry
+#      authority, so the board COMPILES, DRCs and fabricates. But
+#      `minerva_pcb_resolve` is strict by contract and errors on any ref it
+#      cannot look up, inline pads or not.
 #      The board LOAD path (resolve_best_effort) is tolerant and is what the
 #      panel uses, so the board opens normally. Use `board_check` / `drc`, not
 #      `resolve`, to prove this board healthy.
 version: 1
 name: hitl-bench
 width_mm: 60
-height_mm: 250
+height_mm: 286
 layers:
 - top
 - bottom
@@ -169,21 +178,31 @@ components:
   - {number: "1", x_mm: 0.0, y_mm: 0.0}
 
 # ===========================================================================
-# R3  pad -> pour, same net                                                [I]
+# R3  pad -> pour, same net, on the BACK                                   [I]
 #
 # MECHANISM: a filled pour is COPPER. A pad sitting in it is joined by the fill,
 # with no trace at all — so drawing from a pad INTO the pour must terminate the
 # run there rather than leaving a free end.
 #
+# THE POUR IS ON B.Cu, which is where a ground plane actually lives, and that
+# makes this ONE row answer what a second row used to: the terminator has to be
+# LAYER-aware as well as net-aware. Both test points are through-hole lands, so
+# they stand in the fill from either side; the RUN is the thing that has to be
+# on the back for the click to land on copper.
+#
 # STARTING STATE (what is shipped): TP3B sits inside the R3_G pour and is joined
 # by the fill. TP3A sits 4.2 mm clear of the pour's left edge with no copper.
 #   R3 start: net R3_G is PARTIAL, pin_groups = 2. It raises NO dangling
 #             finding — there are no traces yet. Zone Z3 fills to ONE region,
-#             104.0000 mm^2.
-# THE GESTURE: draw from TP3A and single-click inside the pour.
+#             104.0000 mm^2, on the BOTTOM layer.
+# THE GESTURE: with the BOTTOM layer active, draw from TP3A and single-click
+#              inside the pour.
 #   R3 after: the run ENDS at that click (no free end to keep dragging); R3_G
 #             leaves the `partial` list entirely, and the run's end raises no
 #             dangling finding because the fill under it IS copper. No airwire.
+#   FALSIFIER: do the same on the TOP layer. There is no copper up there, so
+#              the click is a WAYPOINT, the run keeps going and its end stays
+#              free — one dangling endpoint. Same pour, same net, other side.
 # ===========================================================================
 - ref: TP3A
   footprint: TH_TestPoint
@@ -203,21 +222,29 @@ components:
   - {number: "1", x_mm: 0.0, y_mm: 0.0}
 
 # ===========================================================================
-# R4  a pour that is NOT yours, and a pour with no copper in it            [I]
+# R4  a hole on a net does not stop the router                             [I]
 #
-# MECHANISM: R3's terminator must be net-aware, and it must be FILL-aware. A
-# foreign-net pour is not a place your run may end; and a pour whose fill came
-# back EMPTY is not copper at all, whoever owns it.
+# THIS SLOT WAS RE-USED. It used to hold a foreign-net pour; R3 answers that
+# question on its own now that its pour is on the back, so the slot carries the
+# router's NPTH exclusion instead.
 #
-# R4 A: TP4A is on net R4_A and stands 4.2 mm west of the R4_G pour.
-#       Draw from TP4A and click inside the R4_G pour: that click is a WAYPOINT,
-#       the run keeps going, and the end stays FREE (one dangling endpoint).
-# R4 B: zone Z4B is a real R4_B copper pour, but keepout K4 covers it entirely,
-#       so its fill is COMPUTED and EMPTY — zone_fill reports Z4B with
-#       `fill: []`, and the compile carries a zone_fill_empty WARNING for it.
-#       A click inside Z4B is likewise a waypoint: there is no copper to land on.
-#       (fill: [] is a real answer — "no copper here" — and is a different fact
-#       from a pour whose fill could not be computed. See R13.)
+# MECHANISM: MH4 is a mounting hole hung on net R4_N. It is drilled and never
+# plated, so nothing can be ROUTED to it — but that is a fact about one net
+# MEMBER, not about the board. The projection that hands the board to the
+# router has to exclude the hole from its net and SAY SO, rather than refuse
+# every net on the board over it.
+#
+# R4 A: propose a span TP4A.1 -> TP4B.1 on net R4_A. R4_A has no copper, is
+#       18 mm of clear top layer, and shares nothing with R4_N.
+#       Expected: the call SUCCEEDS — ONE candidate on R4_A, at width 0.25 mm
+#       with source `board_rules` (R4_A has no copper of its own to inherit
+#       from) — and among the reply's warnings, one names `R4_N` and `MH4.1`
+#       as excluded and a second says R4_N has fewer than two routable pads
+#       once the hole is gone. Row 5's hole is named in the same list.
+#       This call used to come back refused, with the whole board unroutable
+#       over one mounting hole; R15's and R16's gestures were blocked by it.
+#       (The hole stays a HOLE: it is still an obstacle, so nothing may be
+#       routed across the 3.2 mm bore. R5 is where that is inspected.)
 # ===========================================================================
 - ref: TP4A
   footprint: TH_TestPoint
@@ -227,16 +254,18 @@ components:
   layer: top
   pins:
   - {number: "1", x_mm: 0.0, y_mm: 0.0}
-- ref: TP4G
+- ref: TP4B
   footprint: TH_TestPoint
-  x_mm: 27.0
+  x_mm: 33.0
   y_mm: 44.0
   rotation_deg: 0
   layer: top
   pins:
   - {number: "1", x_mm: 0.0, y_mm: 0.0}
-- ref: TP4B
-  footprint: TH_TestPoint
+# The hole, parked in cell B so it stands well clear of the span in cell A —
+# the exclusion has to be about the NET, not about anything in the run's way.
+- ref: MH4
+  footprint: MountingHole:MountingHole_3.2mm_M3
   x_mm: 47.0
   y_mm: 44.0
   rotation_deg: 0
@@ -412,7 +441,7 @@ components:
   - {number: "1", x_mm: -0.95, y_mm: 0.0}
 
 # ===========================================================================
-# R9  rotated land, and the rounded corner                                 [I]
+# R9  rotated land, and the rounded corner                             [blend]
 #
 # MECHANISM: two ways the copper a tool DRAWS can disagree with the copper it
 # HIT-TESTS. Both parts author their geometry inline (`pads:`), because the seed
@@ -426,13 +455,18 @@ components:
 #       net R9_A COMPLETE. Delete the pad's `rotation: 90` and that same end
 #       reports `dangling_endpoint at (22.0, 104.8)` — so this row measures the
 #       pad rotation and not something else.
-# R9 B: U9B's land is 2.0 x 2.0 roundrect with corner_rratio 0.25 — a 0.5 mm
+# R9 B: INSPECT ONLY — the human looks, and does not draw. The margin here is
+#       0.0757 mm, which is not a gesture a hand can aim: asking for it is what
+#       made this cell unwalkable. The copper is PRE-ROUTED and the answer is
+#       read off the tools.
+#       U9B's land is 2.0 x 2.0 roundrect with corner_rratio 0.25 — a 0.5 mm
 #       corner radius, so the inner core is 0.5 x 0.5. Trace R9_B is 0.05 mm
 #       wide and ends at (46.8, 104.8): 0.424 mm from the nearest core corner,
-#       0.0757 mm INSIDE the copper. Shipped answer: dangling = 0.
-#       Move that end 0.1 mm further out, to (46.9, 104.9), and it is 0.0657 mm
-#       OUTSIDE: `dangling_endpoint at (46.9, 104.9)`, R9_B partial with 2 pin
-#       groups. pin_info and the canvas must both flip at that boundary.
+#       0.0757 mm INSIDE the copper. Shipped answer: dangling = 0, and
+#       pin_info and the canvas both say joined.
+#       FALSIFIER, for the agent walk and not the hand: move that end to
+#       (46.9, 104.9) in the YAML — 0.0657 mm OUTSIDE — and it reports
+#       `dangling_endpoint at (46.9, 104.9)`, R9_B partial with 2 pin groups.
 #       (The 0.05 mm width is a probe, not fab copper: geometric DRC reports it
 #       as under the profile's minimum trace width. That finding is expected.)
 # ===========================================================================
@@ -587,7 +621,7 @@ components:
 #
 # WHAT IS SHIPPED IS FILLABLE, ON PURPOSE. See the header: one refused pour
 # fails the whole compile, and zone_copper then has NO fill for ANY pour on the
-# board — R3's and R4's answers would go dark with it. So Z13 ships clean and
+# board — R3's and R21's answers would go dark with it. So Z13 ships clean and
 # the FAULT IS THE GESTURE.
 #
 # R13 start: Z13 fills to ONE region, 112.0000 mm^2. Net R13_G has one pin, so
@@ -757,6 +791,246 @@ components:
 #        1200 px, and the chevron closes the dock.
 # ===========================================================================
 
+# ===========================================================================
+# R21 via credit                                                           [P]
+#
+# MECHANISM: a via is COPPER WITH EXTENT, and it joins whatever its barrel
+# touches — including a run it sits in the MIDDLE of. Strapping a probe pad to
+# the plane beneath it with one via dropped on the run's interior is the
+# ordinary way that is done, and a credit that only looked at a run's two ENDS
+# scored it as no join at all.
+#
+# Both cells are the same experiment twice, and only the via moves. The lands
+# are authored inline so they are SMD copper on the FRONT only: a through-hole
+# land would stand in the pour by itself and the via would decide nothing.
+#
+# R21 A: U21A's two lands are joined to each other by a 0.5 mm top run between
+#        their centres, and to nothing else on the front. The via at
+#        (22.0, 248.0) is that run's exact MIDPOINT — 1.4 mm from either end —
+#        and drops into the R21_A pour on the BACK, where TP21C stands.
+#        Expected: net R21_A COMPLETE, pin_groups = 1, dangling = 0.
+#        FALSIFIER: delete that one via and the probe pair is its own island —
+#        R21_A partial, pin_groups = 2. A credit that says yes to everything
+#        passes the first answer and fails this one.
+# R21 B: the same geometry with the via moved 1.0 mm off the run's centreline.
+#        Copper reaches 0.25 mm (half the run) plus 0.40 mm (the annulus) =
+#        0.65 mm, so 0.35 mm of laminate stands between them and nothing is
+#        joined through it.
+#        Expected: R21_B partial, pin_groups = 2, dangling = 0 — both run ends
+#        are still on their own lands, so this is an OPEN and not a loose end.
+# ===========================================================================
+- ref: U21A
+  footprint: Bench_Probe_2P
+  value: PROBE-PAIR
+  x_mm: 22.0
+  y_mm: 248.0
+  rotation_deg: 0
+  layer: top
+  pads:
+  - number: "1"
+    type: smd
+    shape: rect
+    position: {x: -1.4, y: 0.0}
+    size: {width: 1.25, height: 1.75}
+    layers: [F.Cu, F.Mask, F.Paste]
+  - number: "2"
+    type: smd
+    shape: rect
+    position: {x: 1.4, y: 0.0}
+    size: {width: 1.25, height: 1.75}
+    layers: [F.Cu, F.Mask, F.Paste]
+  pins:
+  - {number: "1", x_mm: -1.4, y_mm: 0.0}
+  - {number: "2", x_mm: 1.4, y_mm: 0.0}
+  graphics:
+  - {layer: F.SilkS, kind: line, start: [-2.3, -1.2], end: [2.3, -1.2], width: 0.12}
+  - {layer: F.SilkS, kind: line, start: [-2.3, 1.2], end: [2.3, 1.2], width: 0.12}
+# The plane anchor: a through-hole land standing IN the back pour, so the only
+# path from the probe pair to it runs through the via.
+- ref: TP21C
+  footprint: TH_TestPoint
+  x_mm: 27.0
+  y_mm: 248.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: 0.0}
+- ref: U21B
+  footprint: Bench_Probe_2P
+  value: PROBE-PAIR
+  x_mm: 46.0
+  y_mm: 248.0
+  rotation_deg: 0
+  layer: top
+  pads:
+  - number: "1"
+    type: smd
+    shape: rect
+    position: {x: -1.4, y: 0.0}
+    size: {width: 1.25, height: 1.75}
+    layers: [F.Cu, F.Mask, F.Paste]
+  - number: "2"
+    type: smd
+    shape: rect
+    position: {x: 1.4, y: 0.0}
+    size: {width: 1.25, height: 1.75}
+    layers: [F.Cu, F.Mask, F.Paste]
+  pins:
+  - {number: "1", x_mm: -1.4, y_mm: 0.0}
+  - {number: "2", x_mm: 1.4, y_mm: 0.0}
+  graphics:
+  - {layer: F.SilkS, kind: line, start: [-2.3, -1.2], end: [2.3, -1.2], width: 0.12}
+  - {layer: F.SilkS, kind: line, start: [-2.3, 1.2], end: [2.3, 1.2], width: 0.12}
+- ref: TP21D
+  footprint: TH_TestPoint
+  x_mm: 51.0
+  y_mm: 248.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: 0.0}
+
+# ===========================================================================
+# R22 add a part by library ref                                            [I]
+#
+# MECHANISM: a part added by a LIBRARY REF ("LibNick:PartName") gets the
+# library's own lands, silk and courtyard and is fabricable the moment it
+# lands. A part added as a generic ENUM gets estimated defaults with no
+# library behind them — a SKETCH — and the hermetic worker refuses it by name,
+# which takes the whole board's geometric DRC and EVERY pour fill with it.
+# The two adds must not look alike, and neither may be silent about which it
+# was.
+#
+# WHAT IS SHIPPED: TP22A and a 6 mm top stub that stops in mid-air at
+# (22.0, 260.0) — the exact point pin 1 of the part in R22 A lands on. That
+# stub is DANGLING on purpose; closing it is what the gesture does.
+#
+# R22 A: add `Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical` at
+#        (22.0, 260.0) BY REF, connect its pin 1 to net R22_A, and re-check.
+#        The footprint's pad 1 is a 1.8 x 1.8 thru-hole land at its own local
+#        origin, so it lands dead on the stub's end; pad 2 sits 2.54 mm south
+#        of it, on nothing.
+#        Expected: the add reply's geometry block reads fabricable true,
+#        source "library", pad_count 2; net R22_A is COMPLETE with 1 pin
+#        group; the stub's dangling finding is GONE; and the geometric DRC
+#        gains no finding it did not already have.
+# R22 B: add a generic `HEADER` at (46.0, 260.0) — no colon, no library.
+#        Expected: the add reply's geometry block reads fabricable FALSE,
+#        source "sketch", and carries the note naming the way out; the canvas
+#        wears the unresolved badge; the panel's status lead names the part;
+#        and every pour on the board STOPS FILLING, with the fill refusal
+#        naming the offending component by ref.
+#        THIS IS A GESTURE AND NOT A SHIPPED STATE, for the same reason R13's
+#        fault is one: while that part is on the board NOTHING fills, so R3's
+#        and R21's answers go dark with it. Delete it — or one Undo — to clear.
+# ===========================================================================
+- ref: TP22A
+  footprint: TH_TestPoint
+  x_mm: 16.0
+  y_mm: 260.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: 0.0}
+
+# ===========================================================================
+# R23 a part on the back                                                   [P]
+#
+# MECHANISM: a part placed on the BACK has its footprint-local geometry
+# mirrored about the local Y axis and its layers flipped, so an F.Cu land
+# becomes a B.Cu one and a land authored NORTH of the part origin is placed
+# SOUTH of it. Both parts below are the same footprint and both are
+# `layer: bottom`; the only difference is which side the copper reaching them
+# is on, which is what makes the pair decide one thing.
+#
+# R23 A: BS23A's pad 1 is authored at local (0.0, -2.0) — north of the origin —
+#        so it lands on B.Cu at (22.0, 274.0), SOUTH of it. The 0.25 mm BOTTOM
+#        run from TP23A ends on that land's centre.
+#        Expected: the pad row reports the land on B.Cu at (22.0, 274.0); net
+#        R23_A COMPLETE, 1 pin group, dangling = 0.
+#        FALSIFIER: read that land unmirrored and unflipped — F.Cu at
+#        (22.0, 270.0), where its front-side twin would sit — and the run's end
+#        reports `dangling_endpoint at (22.0, 274.0)` instead.
+# R23 B: the SAME footprint on the SAME side, reached by a run on the TOP
+#        layer. Copper on the other side of the laminate joins nothing without
+#        a via, however exactly it lines up in plan.
+#        Expected: `dangling_endpoint at (46.0, 274.0)`, R23_B partial with
+#        2 pin groups. A land that reads as top-side passes this cell by
+#        accident, which is why A and B are both here.
+# ===========================================================================
+- ref: BS23A
+  footprint: Bench_BottomLand_2P
+  value: BACK-LAND
+  x_mm: 22.0
+  y_mm: 272.0
+  rotation_deg: 0
+  layer: bottom
+  pads:
+  - number: "1"
+    type: smd
+    shape: rect
+    position: {x: 0.0, y: -2.0}
+    size: {width: 1.6, height: 1.0}
+    layers: [F.Cu, F.Mask, F.Paste]
+  - number: "2"
+    type: smd
+    shape: rect
+    position: {x: 0.0, y: 2.0}
+    size: {width: 1.6, height: 1.0}
+    layers: [F.Cu, F.Mask, F.Paste]
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: -2.0}
+  - {number: "2", x_mm: 0.0, y_mm: 2.0}
+  # Authored on F.SilkS; the back-side placement flips it to B.SilkS and
+  # mirrors it, which is the same transform the lands go through.
+  graphics:
+  - {layer: F.SilkS, kind: line, start: [-1.1, -2.8], end: [1.1, -2.8], width: 0.12}
+  - {layer: F.SilkS, kind: line, start: [-1.1, 2.8], end: [1.1, 2.8], width: 0.12}
+- ref: TP23A
+  footprint: TH_TestPoint
+  x_mm: 16.0
+  y_mm: 274.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: 0.0}
+- ref: BS23B
+  footprint: Bench_BottomLand_2P
+  value: BACK-LAND
+  x_mm: 46.0
+  y_mm: 272.0
+  rotation_deg: 0
+  layer: bottom
+  pads:
+  - number: "1"
+    type: smd
+    shape: rect
+    position: {x: 0.0, y: -2.0}
+    size: {width: 1.6, height: 1.0}
+    layers: [F.Cu, F.Mask, F.Paste]
+  - number: "2"
+    type: smd
+    shape: rect
+    position: {x: 0.0, y: 2.0}
+    size: {width: 1.6, height: 1.0}
+    layers: [F.Cu, F.Mask, F.Paste]
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: -2.0}
+  - {number: "2", x_mm: 0.0, y_mm: 2.0}
+  # Authored on F.SilkS; the back-side placement flips it to B.SilkS and
+  # mirrors it, which is the same transform the lands go through.
+  graphics:
+  - {layer: F.SilkS, kind: line, start: [-1.1, -2.8], end: [1.1, -2.8], width: 0.12}
+  - {layer: F.SilkS, kind: line, start: [-1.1, 2.8], end: [1.1, 2.8], width: 0.12}
+- ref: TP23B
+  footprint: TH_TestPoint
+  x_mm: 40.0
+  y_mm: 274.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - {number: "1", x_mm: 0.0, y_mm: 0.0}
+
 nets:
 
 # R1 — A joins, B stops 1.0 mm short.
@@ -775,14 +1049,12 @@ nets:
 - name: R3_G
   pins: [TP3A.1, TP3B.1]
 
-# R4 — R4_A is the foreign net beside the pour; R4_G owns the filled pour;
-#      R4_B owns the pour the keepout empties.
+# R4 — R4_A is the span the router has to deliver; R4_N is the net whose only
+#      member is a hole nothing can be routed to.
 - name: R4_A
-  pins: [TP4A.1]
-- name: R4_G
-  pins: [TP4G.1]
-- name: R4_B
-  pins: [TP4B.1]
+  pins: [TP4A.1, TP4B.1]
+- name: R4_N
+  pins: [MH4.1]
 
 # R5 — MH5.1 is on the net and can never join it (np_thru_hole, no barrel).
 - name: R5_A
@@ -840,6 +1112,24 @@ nets:
 # R16 — four pins, one 0.4 mm trace, two pads still owed.
 - name: R16_A
   pins: [TP16A.1, TP16B.1, TP16C.1, TP16D.1]
+
+# R21 — probe pair plus the land standing in the back pour. The via is the
+#       only thing that can put all three in one group.
+- name: R21_A
+  pins: [U21A.1, U21A.2, TP21C.1]
+- name: R21_B
+  pins: [U21B.1, U21B.2, TP21D.1]
+
+# R22 — one pin and a stub, until the by-ref add lands pin 1 on the stub's end.
+- name: R22_A
+  pins: [TP22A.1]
+
+# R23 — one net per side of the laminate, both reaching the SAME land geometry
+#       on a bottom-mounted part.
+- name: R23_A
+  pins: [TP23A.1, BS23A.1]
+- name: R23_B
+  pins: [TP23B.1, BS23B.1]
 
 traces:
 
@@ -956,6 +1246,48 @@ traces:
   - {x_mm: 15.0, y_mm: 188.0}
   - {x_mm: 21.0, y_mm: 188.0}
 
+# R21 A — pad centre to pad centre, 0.5 mm wide. Its MIDPOINT is where the via
+#         sits, so no endpoint rule is in play on either side.
+- net: R21_A
+  layer: top
+  width_mm: 0.5
+  points:
+  - {x_mm: 20.6, y_mm: 248.0}
+  - {x_mm: 23.4, y_mm: 248.0}
+
+# R21 B — the identical run. Only the via beside it differs.
+- net: R21_B
+  layer: top
+  width_mm: 0.5
+  points:
+  - {x_mm: 44.6, y_mm: 248.0}
+  - {x_mm: 47.4, y_mm: 248.0}
+
+# R22 — the stub that stops in mid-air at the point pin 1 of the by-ref part
+#       will occupy. DANGLING until the gesture lands the part on it.
+- net: R22_A
+  layer: top
+  width_mm: 0.25
+  points:
+  - {x_mm: 16.0, y_mm: 260.0}
+  - {x_mm: 22.0, y_mm: 260.0}
+
+# R23 A — on the BACK, ending on the centre of a back-mounted part's land.
+- net: R23_A
+  layer: bottom
+  width_mm: 0.25
+  points:
+  - {x_mm: 16.0, y_mm: 274.0}
+  - {x_mm: 22.0, y_mm: 274.0}
+
+# R23 B — the same approach on the FRONT, to a land that is not on the front.
+- net: R23_B
+  layer: top
+  width_mm: 0.25
+  points:
+  - {x_mm: 40.0, y_mm: 274.0}
+  - {x_mm: 46.0, y_mm: 274.0}
+
 vias:
 
 # R2 B — via-in-pad under the exposed land. Same net as the pad it sits in.
@@ -971,48 +1303,28 @@ vias:
    x_mm: 22.0, y_mm: 164.0, drill_mm: 0.4, diameter_mm: 0.8, net: R14_A,
    from_layer: top, to_layer: bottom}
 
+# R21 A — ON the run's interior, at its exact midpoint, and inside the pour.
+- {x_mm: 22.0, y_mm: 248.0, drill_mm: 0.4, diameter_mm: 0.8, net: R21_A,
+   from_layer: top, to_layer: bottom}
+
+# R21 B — BESIDE the run, 1.0 mm off its centreline. Copper reaches 0.65 mm,
+#         so 0.35 mm of laminate is left and the two never meet.
+- {x_mm: 46.0, y_mm: 249.0, drill_mm: 0.4, diameter_mm: 0.8, net: R21_B,
+   from_layer: top, to_layer: bottom}
+
 zones:
 
-# R3 — the pour TP3B is already inside. Fills to ONE region.
+# R3 — the pour TP3B is already inside, on the BACK where a ground plane lives.
+#      Fills to ONE region. Both test points are through-hole lands, so they
+#      stand in the fill from either side; only the RUN has a side to get wrong.
 - net: R3_G
-  layer: top
+  layer: bottom
   clearance_mm: 0.2
   outline:
   - {x_mm: 21.0, y_mm: 28.0}
   - {x_mm: 34.0, y_mm: 28.0}
   - {x_mm: 34.0, y_mm: 36.0}
   - {x_mm: 21.0, y_mm: 36.0}
-
-# R4 A — the FOREIGN pour. TP4A (net R4_A) stands 4.2 mm west of it.
-- net: R4_G
-  layer: top
-  clearance_mm: 0.2
-  outline:
-  - {x_mm: 20.0, y_mm: 40.0}
-  - {x_mm: 34.0, y_mm: 40.0}
-  - {x_mm: 34.0, y_mm: 48.0}
-  - {x_mm: 20.0, y_mm: 48.0}
-
-# R4 B — a real pour whose fill comes back EMPTY, because K4 below covers it
-#        completely. Expect `fill: []` from zone_fill and a zone_fill_empty
-#        warning from the compile. NOT the same thing as an uncomputed fill.
-- net: R4_B
-  layer: top
-  clearance_mm: 0.2
-  outline:
-  - {x_mm: 40.0, y_mm: 40.0}
-  - {x_mm: 54.0, y_mm: 40.0}
-  - {x_mm: 54.0, y_mm: 48.0}
-  - {x_mm: 40.0, y_mm: 48.0}
-
-# R4 B — the keepout that empties it. Netless: it applies to all copper.
-- kind: keepout
-  layer: top
-  outline:
-  - {x_mm: 39.5, y_mm: 39.5}
-  - {x_mm: 54.5, y_mm: 39.5}
-  - {x_mm: 54.5, y_mm: 48.5}
-  - {x_mm: 39.5, y_mm: 48.5}
 
 # R13 — SHIPPED FILLABLE. Add `thermal_gap_mm: 0.3` here to make the filler
 #       refuse it; remove it to clear the lead. See the R13 block above for why
@@ -1036,6 +1348,27 @@ zones:
   - {x_mm: 38.0, y_mm: 181.0}
   - {x_mm: 34.0, y_mm: 181.0}
 
+# R21 A — the plane the via drops into. On the BACK, so the front run reaches
+#         it through the via barrel and through nothing else.
+- net: R21_A
+  layer: bottom
+  clearance_mm: 0.2
+  outline:
+  - {x_mm: 19.0, y_mm: 244.5}
+  - {x_mm: 29.0, y_mm: 244.5}
+  - {x_mm: 29.0, y_mm: 251.5}
+  - {x_mm: 19.0, y_mm: 251.5}
+
+# R21 B — its twin, for the via that misses the run.
+- net: R21_B
+  layer: bottom
+  clearance_mm: 0.2
+  outline:
+  - {x_mm: 43.0, y_mm: 244.5}
+  - {x_mm: 53.0, y_mm: 244.5}
+  - {x_mm: 53.0, y_mm: 251.5}
+  - {x_mm: 43.0, y_mm: 251.5}
+
 # ===========================================================================
 # THE ROW LABELS.
 #
@@ -1048,7 +1381,7 @@ board_graphics:
 - {layer: F.SilkS, kind: text, text: "R1 trace end",    position: {x_mm: 0.9, y_mm: 8.25},   size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R2 through pad",  position: {x_mm: 0.9, y_mm: 20.25},  size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R3 pad pour",     position: {x_mm: 0.9, y_mm: 32.25},  size_mm: 0.7}
-- {layer: F.SilkS, kind: text, text: "R4 foreign pour", position: {x_mm: 0.9, y_mm: 44.25},  size_mm: 0.7}
+- {layer: F.SilkS, kind: text, text: "R4 npth route",   position: {x_mm: 0.9, y_mm: 44.25},  size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R5 npth via",     position: {x_mm: 0.9, y_mm: 56.25},  size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R6 swap move",    position: {x_mm: 0.9, y_mm: 68.25},  size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R7 pin select",   position: {x_mm: 0.9, y_mm: 80.25},  size_mm: 0.7}
@@ -1065,3 +1398,6 @@ board_graphics:
 - {layer: F.SilkS, kind: text, text: "R18 fab preview", position: {x_mm: 0.9, y_mm: 212.25}, size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R19 status timer",position: {x_mm: 0.9, y_mm: 224.25}, size_mm: 0.7}
 - {layer: F.SilkS, kind: text, text: "R20 annot dock",  position: {x_mm: 0.9, y_mm: 236.25}, size_mm: 0.7}
+- {layer: F.SilkS, kind: text, text: "R21 via credit",  position: {x_mm: 0.9, y_mm: 248.25}, size_mm: 0.7}
+- {layer: F.SilkS, kind: text, text: "R22 add by ref",  position: {x_mm: 0.9, y_mm: 260.25}, size_mm: 0.7}
+- {layer: F.SilkS, kind: text, text: "R23 part on back",position: {x_mm: 0.9, y_mm: 272.25}, size_mm: 0.7}
