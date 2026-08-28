@@ -1,13 +1,8 @@
 """A designator placement somebody SET reaches the fab.
 
-AUTHORED, NOT EXECUTED in this cycle: task-cycle 9 authors tests and runs them
-in one scoped run afterwards.
-
-THE DEFECT THIS FILE PINS. ``minerva_pcb_set_refdes`` moved a label on the
-canvas and nowhere else: the anchor was a DERIVED key, dropped at every
-boundary, so the Gerber went on printing the designator wherever the footprint
-said. A component now carries an optional ``refdes_placement`` block that is
-board SOURCE, and one precedence rule reads it everywhere —
+WHAT THIS FILE PINS. An anchor a caller sets is board SOURCE, not a canvas
+decoration: a component carries an optional ``refdes_placement`` block, and one
+precedence rule reads it everywhere —
 
     authored placement  >  the footprint's own reference fp_text  >  derived
 
@@ -30,9 +25,6 @@ asserted, not assumed. ``_inline_board`` is FULL (the board owns the geometry,
 the library is never read, so the rule there is 1-else-3) and its parts draw a
 COURTYARD ONLY — no silk of their own — which is what lets the emitted F.SilkS
 be read as designator ink and nothing else.
-
-FAILS AGAINST OLD: every assertion about ``refdes_placement`` fails before the
-key is honoured — the authored components print at the footprint's anchor.
 """
 
 from __future__ import annotations

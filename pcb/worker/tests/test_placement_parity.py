@@ -45,10 +45,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import drc, gerber, kicad, route_bridge
+from pcb_worker import drc, gerber, kicad, refdes_anchor, route_bridge, silk_source
 from pcb_worker.geometry import place_point
 from pcb_worker.pad_source import PadGeometryError
 from pcb_worker.resolve import resolve_board_best_effort
+from pcb_worker.resolved_board import Side
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 
@@ -473,3 +474,96 @@ def test_the_corpus_walk_actually_compares_a_flipped_part() -> None:
                     in _kicad_copper(_solo(board, by_ref["SW10"]))}
     assert stored_sides == {False}, (
         f"SW10's lands should be stored on B.Cu, got {stored_sides}")
+
+
+# ---------------------------------------------------------------------------
+# The designator, on the same mirrored frame
+# ---------------------------------------------------------------------------
+
+#: A designator anchor far enough above the body that the bottom-side mirror
+#: MOVES the label (13 mm between the two answers) instead of folding it onto
+#: itself, which a near-zero offset would.
+_AUTHORED_REF_Y_MM = -6.5
+
+#: Ink is a stroke centreline swept by half a width; a point on the box edge is
+#: allowed that much slack before it counts as outside.
+_INK_SLACK_MM = 0.1
+
+_REFERENCE_LINE = re.compile(
+    r'^\s*\(fp_text reference "([^"]*)" \(at (\S+) (\S+)(?: (\S+))?\)')
+
+
+def _kicad_reference(text: str, ref: str) -> tuple[float, float]:
+    """The BOARD-frame point one component's STORED reference text sits at.
+
+    Read the way KiCad reads it: the fp_text ``(at)`` is footprint-LOCAL beneath
+    its footprint's own ``(at x y rot)``, and KiCad applies that translate+rotate
+    on load and never re-flips a bottom-side footprint. So the same
+    ``place_point`` recovers what the file means, and the bottom-side mirror has
+    to be in the stored coordinate already.
+    """
+    fx = fy = frot = 0.0
+    for line in text.splitlines():
+        header = _FOOTPRINT_LINE.match(line)
+        if header is not None:
+            fx, fy, frot = (float(header.group(1)), float(header.group(2)),
+                            float(header.group(3)))
+            continue
+        found = _REFERENCE_LINE.match(line)
+        if found is not None and found.group(1) == ref:
+            return place_point(fx, fy, frot,
+                               float(found.group(2)), float(found.group(3)))
+    raise AssertionError(f"no fp_text reference for {ref} in the emitted .kicad_pcb")
+
+
+def _ink_box(points) -> tuple[float, float, float, float]:
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _inside(box, point) -> bool:
+    return (box[0] - _INK_SLACK_MM <= point[0] <= box[2] + _INK_SLACK_MM
+            and box[1] - _INK_SLACK_MM <= point[1] <= box[3] + _INK_SLACK_MM)
+
+
+def test_the_kicad_reference_sits_on_the_silk_the_fab_prints_for_a_bottom_part() -> None:
+    """The fifth thing a footprint stores is WHERE its designator prints, and it
+    lives in the same flipped frame the pads do.
+
+    ORACLE: the designator ink itself — ``silk_source.refdes_strokes``, the one
+    glyph owner every silk consumer (the B.SilkS Gerber, the DRC projection)
+    draws through. The stored fp_text is re-read exactly as KiCad reproduces it
+    and must land inside that ink; the UNMIRRORED anchor, which is what a
+    footprint-local coordinate stored raw produces, must land outside it. The
+    two are 13 mm apart on this part, so neither assertion can pass by accident.
+    """
+    board = yaml.safe_load(
+        (TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
+    authored = next(c for c in board["components"] if c.get("ref") == "SW10")
+    assert str(authored.get("layer", "")).strip().lower() == "bottom", (
+        "SW10 is the bottom-side part this case rests on")
+    authored[refdes_anchor.COMPONENT_REFDES_KEY] = {"y_mm": _AUTHORED_REF_Y_MM}
+
+    resolved = resolve_board_best_effort(board)
+    comp = next(c for c in resolved["components"] if c.get("ref") == "SW10")
+    anchor = refdes_anchor.loose_reference_text(comp)
+    assert anchor is not None and anchor.position[1] == pytest.approx(
+        _AUTHORED_REF_Y_MM), f"the authored anchor did not survive resolve: {anchor}"
+
+    cx, cy = float(comp["x_mm"]), float(comp["y_mm"])
+    rot = float(comp.get("rotation_deg") or 0.0)
+    ink = _ink_box([point
+                    for stroke in silk_source.refdes_strokes(
+                        "SW10", cx, cy, rot, anchor, Side.BOTTOM)
+                    for point in stroke.points])
+    unmirrored = place_point(cx, cy, rot, *anchor.position)
+    assert not _inside(ink, unmirrored), (
+        "the fixture no longer separates the mirrored anchor from the raw one")
+
+    stored = _kicad_reference(kicad.generate_kicad_pcb(_solo(resolved, comp)),
+                              "SW10")
+    assert _inside(ink, stored), (
+        f"the .kicad_pcb stores SW10's reference at {stored}, outside the "
+        f"B.SilkS designator ink {ink} the fab prints — the bottom-side mirror "
+        f"is in the pads' stored coordinate but not in the text's")

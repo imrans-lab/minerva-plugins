@@ -150,19 +150,32 @@ static func traces_in_region(data, region: Rect2, want_layer: String) -> Array:
 		if not want_layer.is_empty() \
 				and PcbCopperContact.canon(trace.layer) != want_layer:
 			continue
-		var points: Array = []
-		for p in trace.waypoints:
-			points.append({"x_mm": _mm((p as Vector2).x), "y_mm": _mm((p as Vector2).y)})
-		out.append({
-			"trace_id": str(trace.id),
-			"net": str(trace.net_name),
-			"layer": str(trace.layer),
-			"width_mm": _mm(float(trace.width)),
-			"points": points,
-			"free_ends": free_ends(data, str(trace.id)),
-			"locked": bool(trace.locked),
-		})
+		out.append(trace_row(data, trace, true))
 	return out
+
+
+## ONE trace's row, in the shape the region verb reports it.
+##
+## `free_end_scan` is what a caller pays for: :func:`free_ends` measures both
+## ends against every pad, via, same-net trace and pour on the board, which is
+## the right price for a region read and pure waste for a reader that only wants
+## the trace's own facts (the canvas hover card). Absent rather than empty when
+## it is not asked for, so nobody can read "no free ends" out of "not measured".
+static func trace_row(data, trace, free_end_scan: bool) -> Dictionary:
+	var points: Array = []
+	for p in trace.waypoints:
+		points.append({"x_mm": _mm((p as Vector2).x), "y_mm": _mm((p as Vector2).y)})
+	var row: Dictionary = {
+		"trace_id": str(trace.id),
+		"net": str(trace.net_name),
+		"layer": str(trace.layer),
+		"width_mm": _mm(float(trace.width)),
+		"points": points,
+	}
+	if free_end_scan:
+		row["free_ends"] = free_ends(data, str(trace.id))
+	row["locked"] = bool(trace.locked)
+	return row
 
 
 ## The ends of `trace_id` that are NOT joined to other copper, each with the

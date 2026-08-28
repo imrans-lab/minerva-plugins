@@ -120,23 +120,18 @@ static func trace_lines(data, trace_id: String) -> PackedStringArray:
 	var trace = data.get_trace(trace_id)
 	if trace == null:
 		return PackedStringArray()
-	# The trace's own bounds is the smallest region guaranteed to contain it,
-	# so the region read below is asked exactly one question: this trace.
-	var rows: Array = _PcbRegionDescribe.traces_in_region(
-		data, trace.get_bounding_rect(), "")
-	for raw in rows:
-		var row: Dictionary = raw
-		if str(row.get("trace_id", "")) != trace_id:
-			continue
-		return PackedStringArray([
-			trace_id,
-			"Net: %s" % _or_dash(str(row.get("net", ""))),
-			"Width: %s mm" % _num(float(row.get("width_mm", 0.0))),
-			"Layer: %s" % _or_dash(str(row.get("layer", ""))),
-			"Length: %s mm" % _num(_PcbTraceGeometry.length(
-				_polyline(row.get("points", [])))),
-		])
-	return PackedStringArray()
+	# The row for the trace already in hand, WITHOUT the free-end scan: the card
+	# shows none of it, and paying for it would weigh every pad, via, trace and
+	# pour on the board against this trace's ends on every pointer move.
+	var row: Dictionary = _PcbRegionDescribe.trace_row(data, trace, false)
+	return PackedStringArray([
+		trace_id,
+		"Net: %s" % _or_dash(str(row.get("net", ""))),
+		"Width: %s mm" % _num(float(row.get("width_mm", 0.0))),
+		"Layer: %s" % _or_dash(str(row.get("layer", ""))),
+		"Length: %s mm" % _num(_PcbTraceGeometry.length(
+			_polyline(row.get("points", [])))),
+	])
 
 
 ## An Array of anything into the PackedStringArray String.join needs.

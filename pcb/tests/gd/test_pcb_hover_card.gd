@@ -122,7 +122,7 @@ func _line_value(lines: PackedStringArray, prefix: String) -> String:
 ## One rotated part carrying a value and a library footprint, one 12 mm run of
 ## 0.4 mm copper on GND, and a second part so the board is not a single object.
 func _board():
-	var d = PCBData.new()
+	var d := PCBData.new()
 	d.board_width = 100.0
 	d.board_height = 60.0
 
@@ -160,13 +160,13 @@ func _board():
 ## Detached on purpose: _ready never runs, so the font is set explicitly — the
 ## same font the mounted canvas takes from ThemeDB.
 func _canvas(d):
-	var canvas = PcbCanvasScript.new()
+	var canvas := PcbCanvasScript.new()
 	canvas.size = CANVAS_SIZE
 	canvas.zoom = ZOOM
 	canvas.font = ThemeDB.fallback_font
 	canvas.font_size = ThemeDB.fallback_font_size
 	canvas.set_data(d)
-	var host = PcbAnnotationHostScript.new()
+	var host := PcbAnnotationHostScript.new()
 	host.set_canvas(canvas)
 	canvas.set_pin_inspector_host(host)
 	canvas.set_tool_mode(canvas.ToolMode.SELECT)
@@ -231,7 +231,7 @@ func _run_verb_parity() -> void:
 	print("\n-- 3. the card and the read verb cannot disagree --")
 	var d = _board()
 	var canvas = _canvas(d)
-	var host = PcbAnnotationHostScript.new()
+	var host := PcbAnnotationHostScript.new()
 	host.set_canvas(canvas)
 
 	var described: Dictionary = await PanelTools.handle(host,

@@ -29,7 +29,7 @@ const PcbSidecar := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routin
 
 ## A scratch board path for section 5: the sidecar writes beside it, and the
 ## file is removed again when the section ends.
-const PROBE_BOARD_PATH := "user://tc9_token_probe.pcb.yaml"
+const PROBE_BOARD_PATH := "user://draft_check_token_probe.pcb.yaml"
 
 var BROKER_CAP: int = load(BROKER_PATH).MAX_PAYLOAD_BYTES
 

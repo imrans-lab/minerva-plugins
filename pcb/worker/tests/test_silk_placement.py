@@ -1,8 +1,5 @@
 """Legend that will be unreadable once the parts are on (drc_silk_placement).
 
-AUTHORED, NOT EXECUTED in this cycle: task-cycle 9 authors tests and runs them
-in one scoped run afterwards.
-
 THE ORACLE THIS FILE IS BUILT ON is not "the checker fires" — a checker can
 fire on the wrong pair, or fire on the footprint convention every board on
 earth follows, and still look healthy in a count assertion. It is: TAKE THE
@@ -27,9 +24,6 @@ so each case isolates one rule:
   CHIP   a body so small that two neighbours' designators overlap while their
          courtyards do not — the over-silk case with the under-part rule
          provably silent.
-
-FAILS AGAINST OLD: every test here fails with an ImportError before
-drc_silk_placement exists.
 """
 
 from __future__ import annotations
@@ -45,6 +39,15 @@ from pcb_worker.resolved_board import ResolutionSuccess
 
 UNDER = drc_silk_placement.SILK_UNDER_PART
 OVER = drc_silk_placement.SILK_OVER_SILK
+
+#: The writable fields of minerva_pcb_set_refdes, mirrored from its one
+#: definition — ANCHOR_KEYS in pcb/ui/model/pcb_refdes_anchor.gd, which is the
+#: twin this set must stay equal to. The verb refuses any key outside it, so a
+#: suggestion carrying one more is not the "pass it straight back" shape both
+#: tool descriptions promise. The GD side pins the same contract from the other
+#: end (test_part_geometry_contracts.gd feeds an advisory-shaped suggestion
+#: through validate()).
+SET_REFDES_KEYS = frozenset({"x_mm", "y_mm", "rotation_deg", "size_mm", "hidden"})
 
 
 # ---------------------------------------------------------------------------
@@ -180,9 +183,14 @@ def test_the_suggested_anchor_clears_the_board():
     fails here."""
     rb, rows = _rows([_comp("R1", "T:BOX", BOX, 10, 10),
                       _comp("U1", "T:SLAB", SLAB, 10, 6)])
-    suggestion = _of_type(rows, UNDER)[0]["suggestion"]
+    row = _of_type(rows, UNDER)[0]
+    suggestion = row["suggestion"]
     assert suggestion["hidden"] is False
-    assert suggestion["slot"] in drc_silk_placement.SLOT_ORDER
+    # ANCHOR FIELDS ONLY: the verb refuses any key it does not write, so an
+    # extra key here is a suggestion no caller can pass back unedited. The slot
+    # is row metadata and rides beside the suggestion.
+    assert set(suggestion) == SET_REFDES_KEYS
+    assert row["suggested_slot"] in drc_silk_placement.SLOT_ORDER
 
     moved = _with_anchor(rb, "R1", suggestion)
     assert drc_silk_placement.check(project_board(moved), moved) == []
@@ -199,7 +207,8 @@ def test_a_part_hemmed_in_on_every_side_is_told_to_hide_its_designator():
     assert len(designator) == 1
     suggestion = designator[0]["suggestion"]
     assert suggestion["hidden"] is True
-    assert suggestion["slot"] is None
+    assert set(suggestion) == SET_REFDES_KEYS
+    assert designator[0]["suggested_slot"] is None
     assert "hide" in designator[0]["note"]
 
 

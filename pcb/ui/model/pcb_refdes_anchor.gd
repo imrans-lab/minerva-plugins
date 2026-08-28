@@ -61,10 +61,16 @@ static func read_anchor(comp) -> Dictionary:
 
 ## Validate a whole write against the current anchor.
 ##
-## Returns `{"ok": true, "anchor": {...}, "changed": [...]}` — the anchor the
-## component should be given, with every field present — or
-## `{"ok": false, "error": "..."}`. `changed` lists only the fields whose value
-## actually moved, so a caller can tell "applied" from "already there".
+## Returns `{"ok": true, "anchor": {...}, "placement": {...}, "changed": [...]}`
+## or `{"ok": false, "error": "..."}`.
+##
+## The two dicts are deliberately different halves. `anchor` is the EFFECTIVE
+## value — the current anchor with the write laid over it, every field present —
+## and is what gets drawn. `placement` holds ONLY the fields this caller sent,
+## which is what may be AUTHORED: storing the merged dict instead would freeze
+## whatever the derivation happened to answer into the board the first time
+## somebody hid a label. `changed` lists only the fields whose value actually
+## moved, so a caller can tell "applied" from "already there".
 ##
 ## `args` is the raw tool argument dict; `skip` names the envelope keys that are
 ## not anchor fields (editor_name, component_id) so an unknown-key refusal can
@@ -72,6 +78,7 @@ static func read_anchor(comp) -> Dictionary:
 static func validate(comp, args: Dictionary, skip: Array[String]) -> Dictionary:
 	var current: Dictionary = read_anchor(comp)
 	var next: Dictionary = current.duplicate()
+	var sent: Dictionary = {}
 	var changed: Array[String] = []
 	for raw_key in args:
 		var key := str(raw_key)
@@ -85,10 +92,11 @@ static func validate(comp, args: Dictionary, skip: Array[String]) -> Dictionary:
 		if not bool(checked["ok"]):
 			return checked
 		next[key] = checked["value"]
+		sent[key] = checked["value"]
 	for key in ANCHOR_KEYS:
 		if next[key] != current[key]:
 			changed.append(key)
-	return {"ok": true, "anchor": next, "changed": changed}
+	return {"ok": true, "anchor": next, "placement": sent, "changed": changed}
 
 
 static func _check(key: String, value: Variant) -> Dictionary:

@@ -168,28 +168,29 @@ var DRCGeometric = ToolSpec{
 		"esignator inside its own part's body/pad extent, and `gc9_silk_over_silk` for a designator crossing " +
 		"another part's designator or outline or board-level silk. A footprint's own outline sitting inside i" +
 		"ts OWN courtyard is never a row — that is the footprint convention. Every designator row carries `su" +
-		"ggestion` {x_mm, y_mm, rotation_deg, size_mm, hidden}: the first compass slot around the part (N, S," +
-		" E, W, then the diagonals) at the footprint's own derived offset that clears both placement rules an" +
-		"d the silk-to-pad floor, or hidden:true when no slot clears. That is exactly the argument shape mine" +
-		"rva_pcb_set_refdes takes, so a suggestion can be passed straight back. Advisory rows appear in a sep" +
-		"arate top-level `advisories` array and are counted, but are NOT in `findings` and NEVER change `verd" +
-		"ict` — legend is cosmetic and is warned, never fatal. Floors declared OPTIONAL by a profile (hole-to" +
-		"-copper, hole-to-edge, the silk pair, feature-specific drill minima) are enforced only when that pro" +
-		"file states them. `counts` reports ROWS, not check coverage: zero can mean either 'the profile state" +
-		"d no floor' or 'the check ran and found no row'. A GC9 failure is explicit as a counted `gc9_silk_in" +
-		"determinate` advisory, never inferred from the two measuring counts. NEVER a false clean: modeled co" +
-		"pper is exact or a superset (fail-safe), and unresolved/unsupported geometry FAILS CLOSED to an inde" +
-		"terminate result. Returns a discriminated union — determinate {ok:true, scope:'geometric', verifies_" +
-		"geometry:true, verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type," +
-		" entity_id, net_id, layer, measured_mm, required_mm, witness}], advisories:[...same shape...], count" +
-		"s, not_evaluated:[{check, floor, reason, scope?}], static_warnings:{rows:[{code, count, severity, me" +
-		"ssage, refs, refs_omitted?}], digest, total}} or indeterminate {ok:false, verdict:'indeterminate', e" +
-		"rror:{kind}} with NO clean/findings. `not_evaluated` names every rule whose floor the selected profi" +
-		"le (or the board, for gc12_trace_direction) does not declare, so a zero count that means NOT MEASURE" +
-		"D can be told from one that means clean. `static_warnings` collapses the per-entity compile warnings" +
-		" into one row per code with a digest that is stable across identical calls; pass verbose_warnings:tr" +
-		"ue to get the flat `warnings` list beside it. Distinct from minerva_pcb_drc (connectivity/topology o" +
-		"nly). Corroborated against kicad-cli DRC.",
+		"ggestion` {x_mm, y_mm, rotation_deg, size_mm, hidden} — exactly the argument shape minerva_pcb_set_r" +
+		"efdes takes, so it can be passed straight back unedited — beside a row-level `suggested_slot`: the c" +
+		"ompass slot the suggestion came from (N, S, E, W, then the diagonals), or null when no slot clears a" +
+		"nd the suggestion is hidden:true. The slot chosen is the first at the footprint's own derived offset" +
+		" that clears both placement rules and the silk-to-pad floor. Advisory rows appear in a separate top-" +
+		"level `advisories` array and are counted, but are NOT in `findings` and NEVER change `verdict` — leg" +
+		"end is cosmetic and is warned, never fatal. Floors declared OPTIONAL by a profile (hole-to-copper, h" +
+		"ole-to-edge, the silk pair, feature-specific drill minima) are enforced only when that profile state" +
+		"s them. `counts` reports ROWS, not check coverage: zero can mean either 'the profile stated no floor" +
+		"' or 'the check ran and found no row'. A GC9 failure is explicit as a counted `gc9_silk_indeterminat" +
+		"e` advisory, never inferred from the two measuring counts. NEVER a false clean: modeled copper is ex" +
+		"act or a superset (fail-safe), and unresolved/unsupported geometry FAILS CLOSED to an indeterminate " +
+		"result. Returns a discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:t" +
+		"rue, verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, entity_id" +
+		", net_id, layer, measured_mm, required_mm, witness}], advisories:[...same shape...], counts, not_eva" +
+		"luated:[{check, floor, reason, scope?}], static_warnings:{rows:[{code, count, severity, message, ref" +
+		"s, refs_omitted?}], digest, total}} or indeterminate {ok:false, verdict:'indeterminate', error:{kind" +
+		"}} with NO clean/findings. `not_evaluated` names every rule whose floor the selected profile (or the" +
+		" board, for gc12_trace_direction) does not declare, so a zero count that means NOT MEASURED can be t" +
+		"old from one that means clean. `static_warnings` collapses the per-entity compile warnings into one " +
+		"row per code with a digest that is stable across identical calls; pass verbose_warnings:true to get " +
+		"the flat `warnings` list beside it. Distinct from minerva_pcb_drc (connectivity/topology only). Corr" +
+		"oborated against kicad-cli DRC.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {

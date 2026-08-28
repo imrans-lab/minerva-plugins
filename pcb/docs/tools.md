@@ -331,8 +331,9 @@ with **one precedence rule**, in `worker/pcb_worker/refdes_anchor.py`:
 1. the **board's own** `refdes_placement` for that component — what
    `minerva_pcb_set_refdes` writes;
 2. else the footprint's own authored reference `fp_text`;
-3. else the anchor **derived** from the footprint body (centred one clearance
-   above the courtyard).
+3. else the anchor **derived** from the footprint body: centred one clearance
+   above the UNION of its courtyard, its drawn outline and its lands, so
+   anything reaching past the courtyard still pushes the label clear.
 
 `minerva_pcb_set_refdes` reads the answer in force and authors rule 1.
 
@@ -374,11 +375,13 @@ output-criticality rule, so they are reported and counted and never move
 *never* a finding — that is the footprint convention, not a defect.
 
 Every designator row carries a `suggestion` **in exactly this verb's argument
-shape**: the first compass slot around the part — N, S, E, W, then the diagonals
-— at the footprint's own derived offset that clears both rules *and* the
-existing silk-to-pad clearance. Pass it straight back to `set_refdes`. When no
-slot clears, the suggestion is `hidden: true` and the row says so, because a
-designator printed where nobody can read it is worse than one not printed.
+shape** — the five writable anchor fields and nothing else, so it goes back to
+`set_refdes` unedited. Beside it, on the row, `suggested_slot` names the compass
+slot it came from: the first of N, S, E, W, then the diagonals, at the
+footprint's own derived offset that clears both rules *and* the existing
+silk-to-pad clearance. When no slot clears, `suggested_slot` is `null`, the
+suggestion is `hidden: true` and the row says so, because a designator printed
+where nobody can read it is worse than one not printed.
 
 ### Writes
 

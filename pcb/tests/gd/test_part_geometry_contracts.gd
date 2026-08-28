@@ -198,7 +198,7 @@ func _run_rotation_words_land_where_the_eye_expects() -> void:
 		is_equal_approx(PCBComponent.clockwise_from(0.0), 270.0))
 	check("PCBComponent.counterclockwise_from(0) == 90",
 		is_equal_approx(PCBComponent.counterclockwise_from(0.0), 90.0))
-	var spun = PCBComponent.new()
+	var spun := PCBComponent.new()
 	spun.set_rotation(0.0)
 	spun.rotate_clockwise()
 	check("rotate_clockwise() (the canvas R key) makes the SAME turn as the verb's word",
@@ -258,7 +258,7 @@ func _sides(data, id: String) -> Dictionary:
 
 func _run_two_column_parts_read_columns_as_sides() -> void:
 	print("-- 2. two columns are west/east, whatever the part's aspect --")
-	var data = PCBData.new()
+	var data := PCBData.new()
 
 	# THE WIDE CASE: 3 rows over a 7.62 mm column gap is 7.62 wide x 5.08 tall.
 	# State that it IS wider than tall, so the assertion below is known to be
@@ -324,14 +324,14 @@ func _run_two_column_parts_read_columns_as_sides() -> void:
 
 func _run_the_pads_key_is_an_authority_claim() -> void:
 	print("-- 3. `pads` is emitted only when the board owns the geometry --")
-	var pins_only = PCBComponent.new()
+	var pins_only := PCBComponent.new()
 	pins_only.id = "X1"
 	pins_only.set_footprint_by_name("HEADER")
 	pins_only.pins = {"1": Vector2.ZERO}
 	check("a pins-only component emits NO pads key — the worker must resolve its footprint",
 		not pins_only.to_board_dict().has("pads"))
 
-	var carrying = PCBComponent.new()
+	var carrying := PCBComponent.new()
 	carrying.id = "X2"
 	carrying.set_footprint_by_name("CUSTOM")
 	carrying.load_pad_geometry({
@@ -369,7 +369,7 @@ func _run_the_pads_key_is_an_authority_claim() -> void:
 	# the fab builds from the board's own geometry. load_from_board_dict is
 	# where the two spellings become one rule — a non-empty pads list sets the
 	# flag — and these two assertions are what hold that.
-	var flagless = PCBComponent.new()
+	var flagless := PCBComponent.new()
 	flagless.load_from_board_dict({
 		"id": "R9", "footprint": "NoSuchLib:R_0603_Authored",
 		"x_mm": 12.0, "y_mm": 8.0,
@@ -437,7 +437,7 @@ const AUTHORED_ANCHOR := {"x_mm": 12.7, "y_mm": -1.9, "rotation_deg": 0.0,
 ## designator has. Used as the ORACLE: whatever a renamed, copied or reloaded
 ## part draws must equal what a part freshly named that draws.
 func _part(ref: String, anchor: Dictionary = AUTHORED_ANCHOR):
-	var comp = PCBComponent.new()
+	var comp := PCBComponent.new()
 	comp.id = ref
 	comp.set_footprint_by_name("CUSTOM")
 	comp.refdes_anchor = anchor
@@ -487,7 +487,7 @@ func _run_the_drawn_designator_is_the_live_ref() -> void:
 	stale["refdes_graphics"] = [{"layer": "F.SilkS", "kind": "poly", "width": 0.15,
 		"points": [{"x": 0.0, "y": -1.5}, {"x": 0.5, "y": -1.5}]}]
 	stale["refdes_anchor"] = AUTHORED_ANCHOR
-	var loaded = PCBComponent.new()
+	var loaded := PCBComponent.new()
 	loaded.load_from_board_dict(stale)
 	check("a board dict carrying a stale rendering loads showing the component's OWN ref",
 		loaded.refdes_graphics == jp6.refdes_graphics)
@@ -514,7 +514,7 @@ func _run_the_drawn_designator_is_the_live_ref() -> void:
 	# draw a designator the fab does not print. These numbers come from the
 	# WORKER's font instead (see J1_DEFAULT_STROKES), and
 	# worker/tests/test_board_font.py pins the same list on its side.
-	var j1 = PCBComponent.new()
+	var j1 := PCBComponent.new()
 	j1.id = "J1"
 	check("a J1 at the DEFAULT anchor strokes the worker font's own J1, to 1e-6 mm",
 		_strokes_match(j1.refdes_graphics, J1_DEFAULT_STROKES))
@@ -582,7 +582,7 @@ func _courtyard_top(comp) -> float:
 ## strokes the ref at the anchor the resolve sent — so what this states is that
 ## the wire value and the courtyard beside it agree once drawn.
 func _check_the_designator_clears_the_courtyard() -> void:
-	var sw = PCBComponent.new()
+	var sw := PCBComponent.new()
 	sw.id = "SW2"
 	sw.set_footprint_by_name("SW_EVP-ASAC1A")
 	sw.load_footprint_graphics(SWITCH_COURTYARD, SWITCH_ANCHOR)
@@ -598,7 +598,7 @@ func _check_the_designator_clears_the_courtyard() -> void:
 	# draws INSIDE the switch body, where it is invisible once the part is
 	# soldered. Without this the check above would pass on any anchor that
 	# happens to be above the origin.
-	var old = PCBComponent.new()
+	var old := PCBComponent.new()
 	old.id = "SW2"
 	old.set_footprint_by_name("SW_EVP-ASAC1A")
 	old.load_footprint_graphics(SWITCH_COURTYARD, SWITCH_ANCHOR_OLD)
@@ -756,6 +756,17 @@ func _run_the_designator_anchor_is_movable() -> void:
 	check("…and neither refusal touched the anchor",
 		(data.get_component(REFDES_REF).refdes_anchor as Dictionary) == anchor_before)
 
+	# THE DRC'S OWN SUGGESTION, literal. Every gc9 designator advisory carries a
+	# `suggestion` the tool descriptions promise can be passed straight back, so
+	# the row's key set has to be a subset of what this verb writes — the slot it
+	# came from rides on the ROW, not in the suggestion. Written out here rather
+	# than derived, so a key added on the worker side fails this check.
+	var suggestion := await _refdes_call(host, {
+		"x_mm": 0.0, "y_mm": -3.625, "rotation_deg": 0.0,
+		"size_mm": 1.0, "hidden": false})
+	check("a gc9 advisory's suggestion is accepted whole, key for key",
+		bool(suggestion.get("success", false)))
+
 	# HIDDEN. No designator means no ink, so there is no box to report either.
 	var hidden := await _refdes_call(host, {"hidden": true})
 	check("hidden:true draws no designator and reports no box",
@@ -811,7 +822,7 @@ func _run_the_placement_is_board_state() -> void:
 	# THE RELOAD. A fresh model, fed only the document — no resolve, no worker.
 	# The label has to draw at the authored place from the board alone, or an
 	# agent's placement is lost every time the tab is rebuilt.
-	var reloaded = PCBData.new()
+	var reloaded := PCBData.new()
 	reloaded.from_board_dict(data.to_saved_board_dict())
 	var live = data.get_component(REFDES_REF)
 	var back = reloaded.get_component(REFDES_REF)
@@ -825,7 +836,7 @@ func _run_the_placement_is_board_state() -> void:
 	# the derived answer, which is the same rule the worker applies. Fed here
 	# through a board dict carrying BOTH the derived anchor a resolve attached
 	# and a one-field authored block.
-	var overlaid = PCBData.new()
+	var overlaid := PCBData.new()
 	var doc: Dictionary = data.to_saved_board_dict()
 	for entry in (doc["components"] as Array):
 		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == REFDES_REF:
@@ -849,6 +860,36 @@ func _run_the_placement_is_board_state() -> void:
 			wired = entry
 	check("the authored placement survives the canonical wire trim",
 		(wired.get("refdes_placement", {}) as Dictionary) == authored)
+
+	# THE PARTIAL WRITE, on its own board so nothing earlier can have authored a
+	# field for it. Only what the caller SENT is authored: a verb that stored the
+	# merged effective anchor would freeze this machine's derived position into
+	# the document the first time somebody hid a label, and the next resolve —
+	# or another machine's library — could no longer move it.
+	var partial_host := _refdes_host()
+	var partial_data = partial_host.data
+	await _refdes_call(partial_host, {"hidden": true})
+	check("hiding a designator authors the hidden flag and nothing else",
+		(_saved_component(partial_data, REFDES_REF).get("refdes_placement", {}) as Dictionary)
+			== {"hidden": true})
+	await _refdes_call(partial_host, {"hidden": false})
+	check("…and showing it again leaves no derived position behind",
+		(_saved_component(partial_data, REFDES_REF).get("refdes_placement", {}) as Dictionary)
+			== {"hidden": false})
+
+	# SENT, NOT MOVED. Restating the value the derivation already holds is still
+	# a choice, and it has to be authored: left unwritten, the label the caller
+	# just pinned is free for the next resolve — or another machine's library —
+	# to move. The number comes from the fixture's own anchor, not from a read
+	# of the code under test.
+	var restate_host := _refdes_host()
+	var derived_y := float(SWITCH_ANCHOR["y_mm"])
+	var restated := await _refdes_call(restate_host, {"y_mm": derived_y})
+	check("restating the value already in force authors it all the same",
+		(_saved_component(restate_host.data, REFDES_REF).get("refdes_placement", {}) as Dictionary)
+			== {"y_mm": derived_y})
+	check("…while changed still reports that nothing moved",
+		(restated.get("changed", []) as Array).is_empty())
 
 
 ## The point lists of a refdes_graphics array, in the shape `_strokes_match`

@@ -462,8 +462,12 @@ test_add_by_library_ref.gd assertions=48 real-worker
 # same designator and re-states the placement, a one-field block moves that
 # field and inherits the rest, and the placement survives the wire trim.
 # Counted by hand from the check() call sites: 9 new, none inside a loop.
+# 66 -> 71: the verb accepts a literal advisory-shaped suggestion whole, a
+# partial write authors only the fields the caller sent (hidden on, hidden off),
+# and a restated value is authored anyway while `changed` stays empty.
+# Counted by hand from the check() call sites: 5 new, none inside a loop.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd assertions=66
+test_part_geometry_contracts.gd assertions=71
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the
@@ -482,14 +486,12 @@ test_part_geometry_contracts.gd assertions=66
 # Counted by hand from the check() call sites: 22 new, none inside a loop.
 test_fab_preview_legibility.gd assertions=100
 
-# Four ways the board canvas said copper was somewhere it is not, all observed
-# through recording_canvas.gd (the painter-call spy): a part flipped to the
-# bottom whose silk was requested by its authored layer name and so drew on the
-# wrong face or not at all; a hidden copper layer that took its traces away and
-# left its lands painted; a placement ghost that showed a body outline and no
-# lands at all, so the clearances a reviewer judges a move by were invisible;
-# and a fully resolved part drawing NOMINAL pin markers over the real land
-# geometry when lands were hidden and pins shown.
+# Four claims about what the board canvas paints, all observed through
+# recording_canvas.gd (the painter-call spy): a bottom part's authored artwork
+# prints on the FLIPPED layer; a closed layer eye takes that layer's LANDS with
+# it and not only its traces; a placement ghost draws its lands at the ghost
+# pose, which is what a reviewer judges clearances by; and a part with real land
+# geometry draws no nominal pin markers over it.
 # Counted by hand from the check()/check_eq() call sites: 16 + 6 + 10 + 6, none
 # inside a loop.
 test_canvas_render_truth.gd assertions=38

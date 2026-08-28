@@ -6379,11 +6379,13 @@ static func _board_rules(host, args: Dictionary) -> Dictionary:
 ## the board-frame stroke box all live on pcb_refdes_anchor.gd. What is decided
 ## HERE is the two things a verb owes the board: nothing is written unless the
 ## whole write validates, and a write that lands is exactly ONE undo step —
-## the same save_to_history pairing every placement verb above uses.
+## the same save_to_history pairing every placement verb above uses. A call that
+## sends no anchor field at all is a READ and lands nothing.
 ##
 ## A write is AUTHORED BOARD STATE, not a canvas decoration: PCBData.set_refdes_
-## anchor records it as the component's `refdes_placement`, which every disk path
-## writes and the worker honours above the footprint's own reference fp_text.
+## anchor records the FIELDS THE CALLER SENT as the component's
+## `refdes_placement`, which every disk path writes and the worker honours above
+## the footprint's own reference fp_text; everything else keeps the derivation.
 static func _set_refdes(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -6400,9 +6402,15 @@ static func _set_refdes(host, args: Dictionary) -> Dictionary:
 	if not bool(checked.get("ok", false)):
 		return _err(str(checked.get("error", "Designator anchor could not be set.")))
 
+	# AUTHORED IS WHAT WAS SENT, not what moved. A caller stating the value the
+	# derivation happens to hold right now is still CHOOSING it, and leaving that
+	# unwritten would leave the label free for the next resolve — or another
+	# machine's library — to move. `changed` stays the honest report of which
+	# values actually moved, so "authored" and "moved" are separate answers.
+	var placement: Dictionary = checked.get("placement", {})
 	var changed: Array = checked.get("changed", [])
-	if not changed.is_empty():
-		data.set_refdes_anchor(component_id, checked["anchor"])
+	if not placement.is_empty():
+		data.set_refdes_anchor(component_id, checked["anchor"], placement)
 		data.save_to_history("Move %s designator" % comp.id)
 	return _ok({
 		"component_id": component_id,

@@ -107,6 +107,15 @@ func _land_ids(seq: Array) -> Array:
 	return out
 
 
+## An id list as a SET claim — WHICH ids were painted, whatever order they were
+## dispatched in. Painter ORDER is a separate question, asserted where it is
+## actually the claim.
+func _painted(ids: Array) -> Array:
+	var out: Array = ids.duplicate()
+	out.sort()
+	return out
+
+
 ## The ids of every trace record, in dispatch order.
 func _trace_ids(seq: Array) -> Array:
 	var out: Array = []
@@ -134,7 +143,7 @@ func _same_land(a: Dictionary, b: Dictionary) -> bool:
 ## A part carrying two silk strokes on one authored layer, mounted on `mount`.
 ## Setting `id` renders the designator strokes, which ride the same rule.
 func _silk_part(mount: String, authored_layer: String):
-	var comp = PCBComponent.new()
+	var comp := PCBComponent.new()
 	comp.id = "U1"
 	comp.set_footprint_by_name("CUSTOM")
 	comp.layer = mount
@@ -149,7 +158,7 @@ func _silk_part(mount: String, authored_layer: String):
 
 ## The artwork records _draw_component_silk dispatches for one part.
 func _silk_records(comp) -> Array:
-	var rec = RecordingCanvas.new()
+	var rec := RecordingCanvas.new()
 	rec._draw_component_silk(comp, comp.get_transform())
 	var seq: Array = rec.records.duplicate(true)
 	rec.free()
@@ -199,7 +208,7 @@ func _run_flipped_artwork_prints_where_it_lands() -> void:
 
 	# Ink: back artwork is seen THROUGH the substrate and must not read as if it
 	# were on the near face — the reason the canvas has two silk colours.
-	var canvas = PcbCanvasScript.new()
+	var canvas := PcbCanvasScript.new()
 	check_eq("front artwork is drawn in the front ink",
 		_artwork_color(front_seq, "F.SilkS"), canvas.silk_color)
 	check_eq("back artwork is drawn in the back ink, not the front one",
@@ -225,7 +234,7 @@ func _run_flipped_artwork_prints_where_it_lands() -> void:
 ## sit on its own mount side disappears wholesale with that side
 ## (_component_visibility), so it can never show the gap.
 func _two_sided_board():
-	var d = PCBData.new()
+	var d := PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "layer-eye", "width_mm": 40.0, "height_mm": 30.0,
 		"grid_mm": 2.54, "layers": ["top", "bottom"],
@@ -255,7 +264,7 @@ func _two_sided_board():
 ## Every copper record _draw_copper() dispatches for the two-sided board under
 ## one view setting. `hidden` closes a layer eye; `filter` sets the layer filter.
 func _copper_records(hidden: String, filter: String) -> Array:
-	var rec = RecordingCanvas.new()
+	var rec := RecordingCanvas.new()
 	rec.data = _two_sided_board()
 	if not filter.is_empty():
 		rec.trace_layer_filter = filter
@@ -272,8 +281,9 @@ func _run_hidden_layer_takes_its_lands() -> void:
 
 	var all_visible := _copper_records("", "")
 	check_eq("the control: with every layer visible both lands are painted",
-		_land_ids(all_visible), ["U1.2", "U1.1"])
-	check_eq("…and so are both traces", _trace_ids(all_visible), ["t_bot", "t_top"])
+		_painted(_land_ids(all_visible)), ["U1.1", "U1.2"])
+	check_eq("…and so are both traces",
+		_painted(_trace_ids(all_visible)), ["t_bot", "t_top"])
 
 	var bottom_hidden := _copper_records("bottom", "")
 	check_eq("THE BUG: with the bottom eye closed, the land DECLARED on B.Cu is "
@@ -296,7 +306,7 @@ func _run_hidden_layer_takes_its_lands() -> void:
 ## whose corner ratio is authored, and a through-hole barrel. Off-axis in y, so
 ## a missing back-side mirror shows up as a moved land rather than a no-op.
 func _ghost_part(mount: String):
-	var comp = PCBComponent.new()
+	var comp := PCBComponent.new()
 	comp.id = "P1"
 	comp.set_footprint_by_name("CUSTOM")
 	comp.layer = mount
@@ -319,7 +329,7 @@ func _run_proposed_land_is_the_land_it_becomes() -> void:
 	print("\n-- 3. a placement ghost's lands are the committed lands --")
 
 	var comp = _ghost_part("top")
-	var rec = RecordingCanvas.new()
+	var rec := RecordingCanvas.new()
 
 	# The committed render of this part's copper: what accepting the proposal
 	# would produce.
@@ -409,7 +419,7 @@ func _run_proposed_land_is_the_land_it_becomes() -> void:
 ## Two parts: one with real resolved lands, one with bare positional pins and no
 ## pad geometry at all — the part the nominal marker exists for.
 func _resolved_and_unresolved_board():
-	var d = PCBData.new()
+	var d := PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "nominal", "width_mm": 40.0, "height_mm": 30.0,
 		"grid_mm": 2.54, "layers": ["top", "bottom"],
@@ -432,7 +442,7 @@ func _resolved_and_unresolved_board():
 ## Which parts reached a land painter, and how. Returns {"lands": [...],
 ## "nominal": [...]} of component refs.
 func _land_sources(show_pads: bool, show_pins: bool) -> Dictionary:
-	var rec = RecordingCanvas.new()
+	var rec := RecordingCanvas.new()
 	rec.data = _resolved_and_unresolved_board()
 	rec.show_pads = show_pads
 	rec.show_pins = show_pins

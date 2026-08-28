@@ -719,7 +719,9 @@ with **one precedence rule** everywhere (`worker/pcb_worker/refdes_anchor.py`):
    agent SET, through `minerva_pcb_set_refdes`;
 2. else the footprint's own authored reference `fp_text` on F.SilkS;
 3. else the anchor **derived** from the footprint's body: centred one clearance
-   above its courtyard, else its drawn outline, else its lands.
+   above everything it occupies — its courtyard, its drawn outline and its
+   lands, **unioned**, so a land or an outline stroke outside the courtyard
+   still pushes the label clear.
 
 ```yaml
 components:

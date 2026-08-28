@@ -745,7 +745,7 @@ var _inspect_hover_ref: String = ""
 ## anchor is by construction a point ON the entity, and rect_for keeps the card
 ## clear of it.
 var _hover_card_lines: PackedStringArray = PackedStringArray()
-var _hover_card_entity: Array = ["", ""]
+var _hover_card_entity: Array[String] = ["", ""]
 var _hover_card_anchor: Vector2 = Vector2.ZERO
 
 ## Trace / zone selection, SINGLE-PICK VIEW of the multi-set above.
@@ -3038,12 +3038,32 @@ func _draw_staged_placement(entry: Dictionary) -> void:
 ## LANDS only, no drill phase: the drill is painted in the board's background
 ## colour to punch a void, and punching one for copper that is not on the board
 ## yet would erase the committed copper lying under the ghost.
+##
+## The layer eyes decide here as they do for committed copper: a ghost land on a
+## hidden layer would float on a layer the view says is not there. Which layer
+## each land claims is read through _bucket_smd_lands, the one reading the
+## committed surface pass uses.
 func _draw_staged_lands(comp, origin: Vector2, rotation_deg: float) -> void:
 	var pose := {"pos": origin, "rot": rotation_deg}
+	var smd_by_layer := {}
+	_bucket_smd_lands(comp, smd_by_layer)
+	var visible_smd: Array = []
+	for layer_id in smd_by_layer:
+		if not _layer_visible(str(layer_id)):
+			continue
+		for land in smd_by_layer[layer_id]:
+			var land_pad: Dictionary = (land as Dictionary)["pad"]
+			if not visible_smd.has(land_pad):
+				visible_smd.append(land_pad)
 	for pad in comp.pads:
 		# A paste-only aperture is not a land — the same reading the committed
 		# surface pass takes (_bucket_smd_lands), through the same predicate.
 		if not comp.pad_names_copper(pad):
+			continue
+		# A through-hole land pierces every copper layer, so no single eye hides
+		# it; the committed THT pass draws above the whole stack for that reason.
+		if not str(pad.get("type", "smd")) in THT_PAD_TYPES \
+				and not visible_smd.has(pad):
 			continue
 		_draw_pad(comp, pad, PadPhase.LANDS, pose, PLACEMENT_GHOST_ARTWORK_ALPHA)
 
@@ -4730,8 +4750,10 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 			queue_redraw()
 		# The card rides this branch rather than the tool branches above, which
 		# is exactly the "no card during an authoring run" rule: every branch
-		# with a run in flight returns before reaching here.
-		_update_hover_card(world_pos, event.position)
+		# with a run in flight returns before reaching here. `new_hover` is the
+		# component rung, already answered above — handing it over spares the
+		# card a second walk of the whole pick ladder on every pointer move.
+		_update_hover_card(world_pos, event.position, new_hover)
 
 	if is_panning:
 		pan_offset = pan_start_offset + (event.position - pan_start_mouse)
@@ -5546,7 +5568,7 @@ func _filter_masked_route_hints(ids: PackedStringArray, select_rect: Rect2, rout
 ## as it always did. And with the cutover flag off (the default — see
 ## _candidates_active) this rung returns "" unconditionally, so the ladder is
 ## byte-identical to what it was before this unit.
-func _entity_at(world_pos: Vector2) -> Array:
+func _entity_at(world_pos: Vector2) -> Array[String]:
 	var candidate_id: String = _candidate_at(world_pos)
 	if not candidate_id.is_empty():
 		return [KIND_CANDIDATE, candidate_id]
@@ -8127,10 +8149,11 @@ func _clear_inspect_pin_selection() -> void:
 ##                nearest-pad resolution)
 ##   everything   the entity the SELECTION LADDER picks (_entity_at) —
 ##   else         components and traces get a card, other kinds do not (yet)
-func _update_hover_card(world_pos: Vector2, screen_pos: Vector2) -> void:
-	var entity: Array = ["", ""]
+func _update_hover_card(world_pos: Vector2, screen_pos: Vector2,
+		known_component: String = "") -> void:
+	var entity: Array[String] = ["", ""]
 	if not _hover_card_suppressed():
-		entity = _hover_card_target(world_pos)
+		entity = _hover_card_target(world_pos, known_component)
 	if entity == _hover_card_entity:
 		return
 	_hover_card_entity = entity
@@ -8152,14 +8175,26 @@ const HOVER_CARD_PAD := "hover_pad"
 ## honours every tie rule the click already follows — a via over a trace, a
 ## candidate ghost over the copper beneath it. Those kinds simply get no card;
 ## they are not silently mis-described as the entity under them.
-func _hover_card_target(world_pos: Vector2) -> Array:
+##
+## `known_component` is the component rung a caller has ALREADY answered for this
+## same point. Only the candidate rung sits above it, so re-walking the ladder
+## would ask the same question twice — every rung below it is unreachable when a
+## component is there.
+func _hover_card_target(world_pos: Vector2, known_component: String = "") -> Array[String]:
 	if tool_mode == ToolMode.INSPECT_PIN:
-		return [HOVER_CARD_PAD, _inspect_hover_ref] if not _inspect_hover_ref.is_empty() \
-			else ["", ""]
+		if _inspect_hover_ref.is_empty():
+			return ["", ""]
+		return [HOVER_CARD_PAD, _inspect_hover_ref]
 	if data == null:
 		return ["", ""]
-	var hit: Array = _entity_at(world_pos)
-	return hit if str(hit[0]) in [KIND_COMPONENT, KIND_TRACE] else ["", ""]
+	if not known_component.is_empty():
+		if not _candidate_at(world_pos).is_empty():
+			return ["", ""]
+		return [KIND_COMPONENT, known_component]
+	var hit: Array[String] = _entity_at(world_pos)
+	if str(hit[0]) in [KIND_COMPONENT, KIND_TRACE]:
+		return hit
+	return ["", ""]
 
 
 ## The lines for one [kind, id], through PcbHoverCard — which reads the same
@@ -12631,6 +12666,11 @@ func _frame_board_for_capture(copy) -> void:
 
 
 func _on_data_changed() -> void:
+	# The card describes a board that just changed underneath a resting pointer
+	# (an MCP move, an undo), and nothing re-reads it until the pointer moves —
+	# so a stale Position line would sit on screen. Dropping it is honest; the
+	# next motion event rebuilds it.
+	clear_hover_card()
 	queue_redraw()
 
 

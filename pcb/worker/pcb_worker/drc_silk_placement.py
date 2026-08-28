@@ -44,6 +44,10 @@ clearance. When no slot clears, the suggestion is ``hidden: true`` and the row
 says so: a designator printed nowhere readable is worse than one not printed,
 because it is ink the fab charges for and the assembler mis-reads.
 
+The suggestion holds the five ANCHOR fields and nothing else, so a caller hands
+it to ``minerva_pcb_set_refdes`` unedited (that verb refuses any key outside its
+writable set). The slot it came from rides on the ROW as ``suggested_slot``.
+
 WHY THE SLOTS ARE THE DERIVED DEFAULT, TURNED. ``refdes_anchor`` derives the
 default anchor as "centred just above the occupied extent, one CLEARANCE_MM
 gap clear of it". The N slot here reproduces that number exactly (same extent,
@@ -582,7 +586,7 @@ def _attach_suggestions(rows: list[dict], proj: Any, rb: Any,
     min_to_pad = rb.design_rules.minimums.min_silk_to_pad_mm
     # Foreign legend a moved designator must still clear: everything except the
     # strokes of the designator being moved.
-    cache: dict[str, dict] = {}
+    cache: dict[str, tuple[dict, str | None]] = {}
     for row in rows:
         if row["origin"] != "refdes":
             continue
@@ -592,7 +596,13 @@ def _attach_suggestions(rows: list[dict], proj: Any, rb: Any,
         if comp.id not in cache:
             cache[comp.id] = _suggest(comp, rb, proj, keepouts, bodies,
                                       caps_by_prim, pads_by_side, min_to_pad)
-        row["suggestion"] = dict(cache[comp.id])
+        suggestion, slot = cache[comp.id]
+        # The suggestion carries ANCHOR FIELDS ONLY, so a caller can hand it to
+        # minerva_pcb_set_refdes unedited; the verb refuses any key it does not
+        # write. Which compass slot produced it is row metadata, not an anchor
+        # field, so it rides beside the suggestion.
+        row["suggestion"] = dict(suggestion)
+        row["suggested_slot"] = slot
         if row["suggestion"]["hidden"]:
             row["note"] += ("; no compass slot around the part is clear, so the "
                             "suggestion is to hide the designator rather than "
@@ -646,8 +656,13 @@ def _slot_anchors(extent: Any, ref: str, size_mm: float) -> list[tuple[str, tupl
 
 def _suggest(comp: Any, rb: Any, proj: Any, keepouts: Sequence[_Envelope],
              bodies: dict[str, _Envelope], caps_by_prim: dict,
-             pads_by_side: dict[Side, list], min_to_pad: float | None) -> dict:
+             pads_by_side: dict[Side, list],
+             min_to_pad: float | None) -> tuple[dict, str | None]:
     """The first clear compass slot for one component's designator, or hidden.
+
+    Returns the ANCHOR the designator should take — the five writable fields of
+    minerva_pcb_set_refdes and nothing else — and the slot name it came from
+    (``None`` when nothing cleared and the answer is to hide).
 
     "Clear" means all three rules at once — no keep-out envelope (its own body
     included), no foreign legend, and the silk-to-pad floor the profile
@@ -662,8 +677,8 @@ def _suggest(comp: Any, rb: Any, proj: Any, keepouts: Sequence[_Envelope],
     in_force = comp.refdes
     size = in_force.size_mm if in_force is not None else silk_source.REFDES_TEXT_SIZE_MM
     rotation = in_force.rotation_deg if in_force is not None else 0.0
-    hidden = {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": rotation,
-              "size_mm": size, "hidden": True, "slot": None}
+    hidden = ({"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": rotation,
+               "size_mm": size, "hidden": True}, None)
     if extent is None:
         # No body to measure means no slots to measure from. Hiding is the only
         # honest answer this rule can give.
@@ -689,9 +704,9 @@ def _suggest(comp: Any, rb: Any, proj: Any, keepouts: Sequence[_Envelope],
         if not caps:
             return hidden
         if _slot_is_clear(caps, envelopes, own_body, others, pads, min_to_pad):
-            return {"x_mm": round(ax, 6), "y_mm": round(ay, 6),
-                    "rotation_deg": rotation, "size_mm": size,
-                    "hidden": False, "slot": slot}
+            return ({"x_mm": round(ax, 6), "y_mm": round(ay, 6),
+                     "rotation_deg": rotation, "size_mm": size,
+                     "hidden": False}, slot)
     return hidden
 
 

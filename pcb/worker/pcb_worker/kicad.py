@@ -727,6 +727,16 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
     ref_x, ref_y = ((0.0, silk_source.REFDES_LOCAL_Y_MM) if refdes is None
                     else refdes.position)
     ref_rot = 0.0 if refdes is None else refdes.rotation_deg
+    if layer == "B.Cu":
+        # The reference text is stored in the SAME mirrored local frame the pads
+        # above are, because KiCad applies one flipped frame to a B.Cu footprint's
+        # whole content. The anchor is footprint-LOCAL from BOTH producers — the
+        # IR path pre-places its pads but forwards this anchor local — so the
+        # mirror is decided by the side alone and never by `pads_pre_placed`.
+        # Mirroring the frame also reverses the text's own turn, which is the
+        # minus sign geometry.PlacementTransform.angle carries on the back.
+        ref_y = _mirror_local_y(ref_y)
+        ref_rot = (-ref_rot) % 360.0 if ref_rot else ref_rot
     ref_hide = " hide" if refdes is not None and refdes.hidden else ""
     ref_at = (f"(at {_coord(ref_x)} {_coord(ref_y)})" if ref_rot == 0.0
               else f"(at {_coord(ref_x)} {_coord(ref_y)} {_coord(ref_rot)})")

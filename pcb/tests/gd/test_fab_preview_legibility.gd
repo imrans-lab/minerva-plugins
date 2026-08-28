@@ -718,13 +718,12 @@ func _run_stale_retraction() -> void:
 
 # ── 6. THE PREVIEW IS A VIEW, NOT A PICTURE ───────────────────────────────────
 #
-# WHAT WAS WRONG. The artwork was letterboxed into the canvas rect and drawn
-# there whatever the camera said, so it could not be panned or zoomed and a
-# human could not get close enough to a part to judge it — which is the entire
-# job of a fabrication preview. Worse, the canvas still ran its EDITING grammar
-# underneath: a drag aimed at panning moved whatever was under the cursor, the
-# board edit invalidated the live preview, and the layer picker then refused
-# every layer it had just advertised.
+# The artwork is drawn through the CAMERA, not letterboxed into the canvas
+# rect, so it pans and zooms and a human can get close enough to a part to
+# judge it — which is the whole job of a fabrication preview. While it is up
+# the canvas's EDITING grammar is off: a drag pans instead of moving whatever
+# is under the cursor, so no gesture aimed at the view can invalidate the
+# preview or empty the layer picker under it.
 
 ## The worker's own bounds for the 40 x 30 spike board, in the BOARD
 ## coordinates it reports them in (`bounds_board_mm`) — the outline plus the
@@ -916,13 +915,7 @@ func _run_camera_and_input() -> void:
 
 # ── 7. THE PREVIEW SURVIVES WHAT DOES NOT REACH THE FAB ───────────────────────
 #
-# WHAT WAS WRONG. Invalidation was wired to the model's generic data_changed,
-# so the POLICY was "any model touch blanks the preview and retracts the View
-# flag" — a re-load of the very same board took the preview down and left the
-# layer picker refusing every layer it had just advertised, with nothing on
-# screen a human could connect to anything they did.
-#
-# THE RULE NOW IS THE BOARD, NOT THE SIGNAL: the canonical board dict is
+# THE RULE IS THE BOARD, NOT THE SIGNAL: the canonical board dict is
 # exactly what the worker renders the artwork from, so the preview stands while
 # that dict's token is unchanged and drops the moment it moves. These
 # assertions read the PANEL'S OBSERVABLE STATE — the flag and the held layers —
@@ -972,8 +965,8 @@ func _run_survives_non_edits() -> void:
 		"board unchanged=%s preview live=%s" % [
 			str(after_reload == before_reload), str(_preview_is_live(panel))])
 
-	# An MCP preference write — the owner's own case. It never touches the
-	# board, so it cannot change what the fab receives.
+	# An MCP preference write. It never touches the board, so it cannot change
+	# what the fab receives.
 	var pref: Dictionary = await PanelTools.handle(host, "minerva_pcb_set_preference",
 		{"editor_name": "PCB1", "key": "trace_width_mm", "value": 0.4})
 	check("7c: an MCP preference write goes through AND leaves the preview up",
@@ -1014,12 +1007,11 @@ func _run_survives_non_edits() -> void:
 
 # ── 8. A FITTED CAPTURE FRAMES WHAT THE SCREEN FRAMES ─────────────────────────
 #
-# WHAT WAS WRONG. capture_to_image(fit=true) framed the BOARD rect while the
-# preview draws the ARTWORK rect — the outline plus half a stroke width, padded
-# by a fraction of itself instead of by the preview's own margin. The two
-# extents nearly coincide, so the picture an agent captured looked right and
-# was at a different scale from the one the human was looking at: a WYSIWYG
-# seam that reads as a rounding error.
+# A fitted capture frames the ARTWORK rect — the outline plus half a stroke
+# width, padded by the preview's own margin — which is exactly what the preview
+# draws, so the captured picture is at the scale on screen. That rect and the
+# BOARD rect nearly coincide, so a scale seam between them looks like a
+# rounding error rather than a wrong picture: it has to be measured.
 #
 # capture_to_image itself cannot run here (it returns null with no rendering
 # device, pinned by test_pcb_panel_tools), so this drives the framing decision

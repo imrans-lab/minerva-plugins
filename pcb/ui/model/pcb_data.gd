@@ -328,21 +328,27 @@ func rotate_component(component_id: String, degrees: float) -> void:
 
 ## Move WHERE this component prints its reference designator.
 ##
-## `anchor` is the complete footprint-local `{x_mm, y_mm, rotation_deg,
-## size_mm, hidden}` block (pcb_refdes_anchor validates it whole before it gets
-## here). It is written to BOTH halves: `refdes_placement` is the AUTHORED
-## record that goes into every document and reaches the fab, and `refdes_anchor`
-## is the effective value the canvas strokes — assigning the latter re-renders
-## the label through PcbComponent's own setter, so one write redraws.
+## The two arguments are the two halves pcb_refdes_anchor.validate() returns.
+## `anchor` is the complete EFFECTIVE `{x_mm, y_mm, rotation_deg, size_mm,
+## hidden}` block the canvas strokes — assigning it re-renders the label through
+## PcbComponent's own setter, so one write redraws. `placement` holds only the
+## fields the CALLER stated, and is laid over whatever was authored before:
+## authoring the merged anchor instead would bake this machine's derived
+## position into the board the first time somebody hid a label, and the next
+## resolve could no longer move it.
 ##
-## This is the ONE writer of `refdes_placement`. A derived anchor never lands
-## here, which is what keeps an unset component honestly unset.
-func set_refdes_anchor(component_id: String, anchor: Dictionary) -> void:
+## This is the ONE writer of `refdes_placement`. A derived value never lands
+## here, which is what keeps an unset field honestly unset.
+func set_refdes_anchor(component_id: String, anchor: Dictionary,
+		placement: Dictionary) -> void:
 	var component = get_component(component_id)
 	if component == null:
 		return
 	var old_anchor: Dictionary = component.refdes_anchor.duplicate()
-	component.refdes_placement = anchor.duplicate()
+	var authored: Dictionary = component.refdes_placement.duplicate()
+	for key in placement:
+		authored[key] = placement[key]
+	component.refdes_placement = authored
 	component.refdes_anchor = anchor.duplicate()
 	record_change("set_refdes_anchor", {
 		"component_id": component_id,

@@ -5,67 +5,55 @@ component's ref by ``silk_source.refdes_strokes``. WHERE it goes is a separate
 question, and there is ONE precedence rule for it everywhere:
 
 1. the BOARD authored a placement for this component — the optional
-   ``refdes_placement`` block (:data:`COMPONENT_REFDES_KEY`), which a human or
-   an agent SET through ``minerva_pcb_set_refdes``. It wins over everything,
-   because it is the only one of the three that somebody chose;
+   ``refdes_placement`` block (:data:`COMPONENT_REFDES_KEY`), set through
+   ``minerva_pcb_set_refdes``. It wins over everything, because it is the only
+   one of the three that somebody chose;
 2. else the footprint AUTHORED a reference ``fp_text`` on F.SilkS — that
    placement is the answer and nothing here touches it;
 3. else the anchor is DERIVED from the footprint's own body.
 
-``refdes_placement`` is a PARTIAL overlay, not a replacement: a block that
-states only ``hidden`` (or only ``x_mm``) keeps rules 2/3's answer for every
-field it does not state. That is what makes "hide just this one designator" a
-one-key edit, and it matches the panel verb, which validates a partial write
-against the anchor already in force.
+``refdes_placement`` is a PARTIAL overlay, not a replacement: a block stating
+only ``hidden`` (or only ``x_mm``) keeps rules 2/3's answer for every field it
+does not state, which is what makes "hide just this one designator" a one-key
+edit. The panel verb validates and stores a partial write the same way.
 
-The derived answer used to be a single constant (``silk_source.
-REFDES_LOCAL_Y_MM = -1.5``), which put the text 1.5 mm above the footprint
-ORIGIN — inside the body of anything bigger than an 0805. A 6 x 6 mm tactile
-switch got its designator printed under the switch, where it is invisible the
-moment the part is soldered. This module replaces that constant with the rule
-KiCad's own footprint authors follow by hand: the designator sits clear of the
-part, centred just above the COURTYARD, which is the footprint's declared
-"nothing else may be here" envelope.
-
-THE RULE (footprint-LOCAL mm, board Y-DOWN so "above" is more negative Y):
+THE DERIVED ANCHOR (footprint-LOCAL mm, board Y-DOWN so "above" is more
+negative Y):
 
     x = the occupied extent's x centre
     y = the occupied extent's top edge - CLEARANCE_MM - half the stroke width
 
-``y`` is the text BASELINE, and ``board_font`` grows capitals UPWARD from the
-baseline (cap top at ``-size``), so the text's own height carries it further
-clear of the part rather than back into it — which is why the height does not
-appear in the formula and why a centre-anchored font would need half of it
-added here.
+``y`` is the text BASELINE, and ``board_font`` grows capitals UPWARD from it
+(cap top at ``-size``), so the text's own height carries it further clear of
+the part rather than back into it — which is why the height is not in the
+formula, and why a centre-anchored font would need half of it added here.
 
-The anchor is footprint-LOCAL, so it costs nothing to make it rotate and mirror
-with the part: every consumer already puts it through the component's placement
-transform (``silk_source._place``), which turns it with the component's rotation
-and mirrors it on the bottom side — and the courtyard it was measured against
-turns and mirrors with it, so the clearance is preserved exactly.
+The anchor is footprint-LOCAL, so every consumer puts it through the
+component's placement transform (``silk_source._place``): it turns with the
+component's rotation and mirrors on the bottom side, and so does the body it
+was measured against, so the clearance is preserved exactly.
 
-WHAT "THE BODY" MEANS HERE. The anchor is measured against everything the
-footprint OCCUPIES — its courtyard, its drawn outline (silk/fab) and its lands,
-unioned. For a well-formed footprint that IS the courtyard, which contains the
-rest by construction (a footprint's own body outline sitting inside its
-courtyard is the KiCad convention, not a collision). The union is what keeps the
-rule honest for the ones that are not: a seed socket footprint draws silk 1 mm
-ABOVE its own courtyard, and a courtyard-only measurement would print the
-designator straight through it. With no courtyard the union is simply the silk
-and the lands; with nothing at all — no graphics, no pads — there is no body to
-be clear of and the historical constant applies.
+WHAT "THE BODY" MEANS HERE: everything the footprint OCCUPIES — its courtyard,
+its drawn outline (silk/fab) and its lands, UNIONED. For a well-formed
+footprint that is the courtyard, which contains the rest by construction (a
+footprint's own outline inside its own courtyard is the KiCad convention, not a
+collision). The union is what keeps the rule honest for the ones that are not:
+a footprint drawing silk 1 mm ABOVE its own courtyard would otherwise have the
+designator printed straight through it. With no graphics and no pads at all
+there is no body to be clear of, and ``silk_source.REFDES_LOCAL_Y_MM`` applies.
 
 The panel's BODY BOX is a different question with a different answer
-(``resolve._body_box``: courtyard first, else outline, else lands, one basis
-only) — that box says "how big is this part", where this one says "what must
-the text not print on". They share the point extractors below, not the rule.
+(:func:`body_extent_from_parsed`: courtyard first, else outline, else lands,
+one basis only) — that box says "how big is this part", this one says "what
+must the text not print on". They share the point extractors below, not the
+rule.
 
-TWO SHAPES, ONE RULE. The extent is measured from whichever of the two
-footprint representations the caller holds — the parser's ``parsed`` dict (the
+TWO SHAPES, ONE RULE. The extent is measured from whichever footprint
+representation the caller holds — the parser's ``parsed`` dict (the
 resolve/panel path) or a built ``FootprintDefinition`` (the compiled IR the
-Gerber emitter and the DRC silk projection run on). Only the field names differ;
-the box and the anchor are computed once, here, so the panel, the fab silk and
-the DRC projection cannot drift apart.
+Gerber emitter and the DRC silk projection run on). Only the field names
+differ; the box and the anchor are computed once, here, so the panel, the fab
+silk and the DRC projection cannot drift apart.
 """
 
 from __future__ import annotations
@@ -333,8 +321,9 @@ def loose_reference_text(comp: Any) -> Union[ReferenceTextDefinition, None]:
     — the same "use the constant default" signal the IR path returns.
     """
     wire = comp.get("refdes_anchor") if isinstance(comp, dict) else None
-    base = _anchor_dict(None) if not isinstance(wire, dict) else _overlay(
-        _anchor_dict(None), wire)
+    base = _anchor_dict(None)
+    if isinstance(wire, dict):
+        base = _overlay(base, wire)
     authored = authored_placement(comp)
     if authored is None and not isinstance(wire, dict):
         return None

@@ -1746,7 +1746,7 @@ func _options_labels(popup: PopupMenu) -> String:
 # ORACLE: the canvas's own connection list, and the view it ends up holding. A
 # double arming shows as two connections on `resized`; an arming that outlives
 # its fit shows as a board re-framed on every later resize, throwing away the
-# zoom the owner set. Both are read off the canvas, never off panel bookkeeping.
+# zoom the user set. Both are read off the canvas, never off panel bookkeeping.
 
 func _test_repeat_load_arms_one_fit() -> void:
 	print("\n-- repeated load requests arm exactly one deferred zoom-to-fit --")
@@ -1778,12 +1778,12 @@ func _test_repeat_load_arms_one_fit() -> void:
 	check("…and the arming is spent, not left standing",
 			_fit_arm_count(canvas) == 0, str(_fit_arm_count(canvas)))
 
-	# One-shot means the owner's own view survives every later resize.
+	# One-shot means a view the user set survives every later resize.
 	canvas.set_view_center_zoom(Vector2(12.0, 9.0), 9.0)
 	panel.size = Vector2(880.0, 560.0)
 	for _i in range(6):
 		await process_frame
-	check("a later resize does not re-frame the board over the owner's view",
+	check("a later resize does not re-frame the board over the user's view",
 			is_equal_approx(canvas.zoom, 9.0), "zoom=%.3f" % canvas.zoom)
 
 	panel.queue_free()
