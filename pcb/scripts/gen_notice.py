@@ -271,11 +271,12 @@ def _embedded_violations(tables) -> list:
     have noticed it.
 
     Plus one axis an acquired footprint gets for free from its sha pin: the
-    declared ``module`` must EXIST. Nothing else resolves that path — the
-    source scan in ``worker/tests/test_notice.py`` only skips files it
-    matches against it — so a typo, a rename or a deletion would otherwise
-    leave a NOTICE attributing a file that is not there while silently
-    un-skipping the file that is.
+    declared ``module`` must be a repo-relative path to a file that EXISTS
+    inside the repository (:func:`_module_path_violations`). Nothing else
+    resolves that path — the source scan in ``worker/tests/test_notice.py``
+    only skips files it matches against it — so a typo, a rename or a deletion
+    would otherwise leave a NOTICE attributing a file that is not there while
+    silently un-skipping the file that is.
     """
     violations: list = []
     for table in sorted(tables, key=lambda t: t.module):
@@ -288,12 +289,38 @@ def _embedded_violations(tables) -> list:
                 f"{table.module}: license {table.license!r} contains \"unknown\" "
                 f"— an embedded third-party table must not ship with an "
                 f"unresolved licence")
-        if table.module and not (PCB.parent / table.module).is_file():
-            violations.append(
-                f"{table.module}: declared module does not exist (paths are "
-                f"relative to the repository root, the same form the source "
-                f"scan compares against)")
+        if table.module:
+            violations.extend(_module_path_violations(table.module))
     return violations
+
+
+def _module_path_violations(module: str) -> list:
+    """Why *module* is not a usable declaration path, or an empty list.
+
+    SHAPE BEFORE EXISTENCE. The source scan in ``worker/tests/test_notice.py``
+    skips a file by comparing its path RELATIVE TO THE REPOSITORY ROOT against
+    this string, so only a repo-relative path can ever match one. An absolute
+    path, or one climbing out through ``..``, would satisfy a bare
+    ``is_file()`` against some file outside the repository while matching
+    nothing the scan offers it — attributing a file this repository does not
+    ship and leaving the in-tree file undeclared at the same time. Resolved
+    once more after joining, so a symlink cannot walk out either.
+    """
+    path = Path(module)
+    root = PCB.parent.resolve()
+    if path.is_absolute() or ".." in path.parts:
+        return [f"{module}: declared module must be a repository-relative path "
+                f"(no leading separator, no \"..\"), the only form the source "
+                f"scan can match"]
+    resolved = (root / path).resolve()
+    if not resolved.is_relative_to(root):
+        return [f"{module}: declared module resolves outside the repository "
+                f"root {root}"]
+    if not resolved.is_file():
+        return [f"{module}: declared module does not exist (paths are "
+                f"relative to the repository root, the same form the source "
+                f"scan compares against)"]
+    return []
 
 
 def _render_embedded_section(tables) -> list:

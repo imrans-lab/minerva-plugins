@@ -194,6 +194,12 @@ static func aspect_of(img: Image) -> float:
 ## under one pixel. The first load also supplies the aspect the memory bounds
 ## are solved against. Returns null when the engine cannot parse it — the caller
 ## accounts for that file rather than dropping it.
+##
+## THE SCALE GOES BOTH WAYS. `raster_width` is a bound, not a target to grow
+## towards: a board whose intrinsic mm-at-96-dpi size already exceeds it (wide
+## enough, or tall and narrow enough) has to come DOWN, or the memory bounds
+## hold only for artwork that happened to start small. The engine takes a scale
+## below 1.0; the resize is the fallback for when it refuses one.
 static func rasterize(svg: String, target_px: float) -> Image:
 	var img := Image.new()
 	if img.load_svg_from_string(svg, 1.0) != OK:
@@ -202,11 +208,17 @@ static func rasterize(svg: String, target_px: float) -> Image:
 	if intrinsic <= 0.0:
 		return null
 	var scale := raster_width(target_px, aspect_of(img)) / intrinsic
-	if scale <= 1.0:
+	if is_equal_approx(scale, 1.0):
 		return img
 	var sharp := Image.new()
 	if sharp.load_svg_from_string(svg, scale) == OK:
 		return sharp
+	if scale < 1.0:
+		# Truncating, for the reason raster_width floors: a bound met by
+		# rounding is not met.
+		img.resize(maxi(int(intrinsic * scale), 1),
+			maxi(int(float(img.get_height()) * scale), 1),
+			Image.INTERPOLATE_BILINEAR)
 	return img
 
 

@@ -104,6 +104,14 @@ const TALL_SVG := """<?xml version="1.0" encoding="utf-8"?>
   <path d="M 0.5 0.5 L 9.5 0.5 L 9.5 299.5 L 0.5 299.5 Z" fill="none" stroke="black" stroke-linecap="round" stroke-width="0.12"/>
 </svg>"""
 
+## A 5000 x 200 mm outline: the case where the INTRINSIC raster is already over
+## the caps. mm resolved at 96 dpi is ~18900 px wide before any scaling, so this
+## is the shape a raster step that only ever scales UP hands straight through.
+const OVERSIZED_SVG := """<?xml version="1.0" encoding="utf-8"?>
+<svg width="5000mm" height="200mm" viewBox="0 0 5000 200" style="background-color:white" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 0.5 0.5 L 4999.5 0.5 L 4999.5 199.5 L 0.5 199.5 Z" fill="none" stroke="black" stroke-linecap="round" stroke-width="0.12"/>
+</svg>"""
+
 ## The emitted filenames of a real ten-layer board, in EMISSION order (not draw
 ## order) so the sort under test has something to do.
 const EMITTED := [
@@ -315,6 +323,21 @@ func _run_contrast() -> void:
 			area <= FabPreview.MAX_RASTER_AREA_PX
 				and longest <= FabPreview.MAX_RASTER_DIMENSION_PX,
 			"longest=%.0f cap=%.0f" % [longest, FabPreview.MAX_RASTER_DIMENSION_PX])
+
+	# ...and the caps hold in the other direction too: a board whose INTRINSIC
+	# mm-at-96-dpi raster is already over them must be scaled DOWN, not passed
+	# through because there was nothing to gain by scaling up.
+	var huge: Image = FabPreview.rasterize(
+		FabPreview.recolor_svg(OVERSIZED_SVG, ink), FabPreview.MAX_RASTER_PX)
+	check("1k: the engine rasterizes the 5000 x 200 outline", huge != null)
+	if huge != null:
+		var huge_area := float(huge.get_width()) * float(huge.get_height())
+		var huge_longest := float(maxi(huge.get_width(), huge.get_height()))
+		check("1l: ...an intrinsically oversized board is downscaled inside both caps (%d x %d = %.2f MPx)"
+			% [huge.get_width(), huge.get_height(), huge_area / 1.0e6],
+			huge_area <= FabPreview.MAX_RASTER_AREA_PX
+				and huge_longest <= FabPreview.MAX_RASTER_DIMENSION_PX,
+			"longest=%.0f cap=%.0f" % [huge_longest, FabPreview.MAX_RASTER_DIMENSION_PX])
 
 
 ## One of the fixture's path coordinates as a FRACTION of the raster, whatever

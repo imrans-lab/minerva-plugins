@@ -335,7 +335,7 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
     """The NOTICE names every embedded data table, and the section exists even
     when there are none.
 
-    Four properties in one test, because they are one contract:
+    Five properties in one test, because they are one contract:
 
     1. The allowlist is EMPTY today, and the shipped NOTICE still carries the
        section. A section that vanishes when the list is empty cannot tell a
@@ -351,6 +351,11 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
        merely skips whatever matches it — so an unresolvable one both
        attributes a file that does not exist and silently stops skipping the
        file that does.
+    5. A declaration that reaches OUT of the tree — an absolute path, or one
+       climbing through ``..`` — refuses on shape, before existence. Such a
+       path can name a real file while still matching nothing the scan
+       compares against it, which is property 4's failure with the evidence
+       removed.
     """
     module = _load_gen_notice()
 
@@ -429,5 +434,27 @@ def test_embedded_table_section_renders_empty_and_populated_and_gates_its_own_en
             module.generate(lock)
         assert "pcb/worker/pcb_worker/not_in_the_tree.py" in str(excinfo.value)
         assert "does not exist" in str(excinfo.value)
+
+        # 5. ...and on one that names an EXISTING file the repository does not
+        # ship. Existence alone is the wrong question: the scan above matches
+        # declarations against repo-relative paths, so an absolute path (or a
+        # ".." climbing out of the tree) attributes a file nobody here ships
+        # while the in-tree file it was meant to cover stays unskipped.
+        outside = tmp_path / "elsewhere.py"
+        outside.write_text("# a real file, outside the repository\n",
+                           encoding="utf-8")
+        for escape in (str(outside), "../elsewhere.py"):
+            module.EMBEDDED_DATA_TABLES = (
+                module.EmbeddedDataTable(
+                    module=escape,
+                    what="a glyph table",
+                    license="MIT",
+                    source_ref="https://example.invalid/x v1",
+                    attribution="Copyright (c) nobody. Licensed MIT.",
+                ),
+            )
+            with pytest.raises(module.NoticeGateError) as excinfo:
+                module.generate(lock)
+            assert "repository-relative" in str(excinfo.value), escape
     finally:
         module.EMBEDDED_DATA_TABLES = original
