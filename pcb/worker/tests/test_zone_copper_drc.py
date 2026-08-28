@@ -234,14 +234,20 @@ def test_a_run_that_dead_ends_on_an_unplated_hole_reads_as_the_open_it_is():
     past any coincidence credit, so the hole is the ONLY thing that could join
     them.
 
-    THE NUMBERS, by hand. GND declares three pins. R1.1 with its run is one
-    island, R2.1 with its run is a second, and H1.1 reaches nothing at all,
-    which makes it a third. Both inner ends are leaves landing on no copper, so
-    both are dangling.
+    THE NUMBERS, by hand. GND declares three pins, and the census harvests TWO
+    pads from them: R1.1 with its run is one island, R2.1 with its run is a
+    second. H1.1 is not a pad at all — an unplated bore has no copper, so it is
+    dropped by the harvest exactly as the compiled IR's projection drops it, and
+    it is neither an island nor a bridge. Both inner ends are leaves landing on
+    no copper, so both are dangling.
 
-    FAILS AGAINST THE OLD MODEL, which reported ZERO dangling endpoints and no
-    partial row at all: the hole bridged the two runs into one island and
-    swallowed both open ends. A board with a 2.4mm gap in its ground read clean.
+    THE FAULT THIS BOARD HAS is the 2.4mm gap, and that is what must be
+    reported: partial, and two open ends naming their coordinates. A model that
+    let the hole BRIDGE the runs reports one island and zero dangling — a board
+    with a gap in its ground reading clean, which is the failure this case
+    exists for. A model that let the hole be its OWN island reports three, which
+    reads as an extra defect that no amount of routing can clear: the router's
+    projection has already excluded the hole, so nothing can ever join it.
     """
     result = _drc({
         "version": 1, "name": "npth", "width_mm": 20, "height_mm": 20,
@@ -267,7 +273,7 @@ def test_a_run_that_dead_ends_on_an_unplated_hole_reads_as_the_open_it_is():
                         {"x_mm": 14.05, "y_mm": 12}]}],
     })
 
-    assert _partial(result)["GND"] == 3
+    assert _partial(result)["GND"] == 2
     assert sorted(f["at"] for f in result["findings"]
                   if f["type"] == "dangling_endpoint") == [[8.8, 10.0],
                                                            [11.2, 10.0]]

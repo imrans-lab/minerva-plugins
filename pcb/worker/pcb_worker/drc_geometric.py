@@ -158,7 +158,7 @@ from .ir_pads import (
     smd_shape,
 )
 from . import mask_source, silk_source
-from .geometry import rotation_radians
+from .geometry import rotate_local_offset, rotation_radians
 from .mask_source import MaskOpening
 from .pad_source import placed_pad_to_geom
 from .ir_projection import (
@@ -791,10 +791,17 @@ def _hole_capsules(hole) -> tuple[tuple[Capsule, ...], float, tuple[float, float
         major = max(w, h)
         r = minor / 2.0
         half = (major - minor) / 2.0
-        # Segment along the oval's major axis, rotated by rotation_deg. When
-        # width>=height the major axis is local-x; otherwise local-y.
-        angle = math.radians(feat.rotation_deg) + (0.0 if w >= h else math.pi / 2.0)
-        dx, dy = half * math.cos(angle), half * math.sin(angle)
+        # Half the oval's major axis as a BOARD-frame offset, through the ONE
+        # rotation this worker has (geometry.rotate_local_offset). The axis is
+        # local-x when width>=height, otherwise local-y.
+        #
+        # Composing a matrix here from a raw math.radians() would turn the
+        # feature the wrong way: the angle is clockwise in a Y-down frame and
+        # must be negated first, which is precisely what the shared helper does.
+        # Every multiple of 90 hides the difference under the oval's own
+        # symmetry, so only an off-axis slot exposes it.
+        dx, dy = rotate_local_offset(*((half, 0.0) if w >= h else (0.0, half)),
+                                     feat.rotation_deg)
         cx, cy = feat.position
         cap = Capsule(cx - dx, cy - dy, cx + dx, cy + dy, r)
         return ((cap,), minor, feat.position)

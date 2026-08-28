@@ -61,7 +61,7 @@ rather than waiting for the next walk. The remaining rows are still walk-only.
 | R2 | through pad | P | run driven THROUGH a same-net land → R2_A complete, 1 group | 0.25 mm stub on a QFN exposed pad, fed by a via-in-pad → complete, dangling 0 |
 | R3 | pad pour | I | pour is on **B.Cu**. Draw from TP3A on the BOTTOM layer and single-click inside it: the run ENDS there, R3_G leaves `partial`, no dangling. Start state R3_G partial 2 | *falsifier:* the same draw on the TOP layer — no copper up there, so the click is a waypoint and the end stays free |
 | R4 | npth route | I | propose TP4A.1→TP4B.1 on R4_A: SUCCEEDS, one candidate at 0.25 mm `board_rules`, and the warnings name `R4_N`/`MH4.1` excluded plus "fewer than two routable pads". Used to refuse the whole board | — |
-| R5 | npth via | P | R5_A partial, 3 groups: the M3 hole is drilled and never plated, so the top↔bottom join is still owed; 2 deliberate dangling ends | via V5 fed on top only → `layers_touched ["top"]`, dangling 0 |
+| R5 | npth via | P | R5_A partial, 2 groups: the M3 hole is drilled and never plated, so it is not a pad on either surface and the top↔bottom join is still owed; 2 deliberate dangling ends | via V5 fed on top only → `layers_touched ["top"]`, dangling 0 |
 | R6 | swap move | I | P, click TP6A, shift-click TP6B, Swap nets → ONE Undo restores both | "Move net to…" from TP6C; `export_yaml` agrees with the panel |
 | R7 | pin select | blend | `free_pins` on the 2x3 socket, side "west" → pins 1,2,3; `exclude_roles ["strapping"]` → 2,3 | `select` lights J7.2/J7.3; `get_selection` returns pad rows carrying their roles |
 | R8 | rotation deg | P | R_0805 at rot 90 → pin 1 SOUTH at (22.0, 92.95) | the same at rot 270 → pin 1 NORTH at (46.0, 91.05) |

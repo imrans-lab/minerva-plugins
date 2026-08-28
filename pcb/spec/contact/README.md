@@ -29,7 +29,11 @@ cannot be added without one of them going red.
   "why":   "the hand derivation — the numbers, not the intent",
   // The copper the probe is measured AGAINST: exactly ONE of `pad`, `region`
   // or `trace`.
-  "pad":   { "at": [x_mm, y_mm],          // land CENTRE, board frame
+  "pad":   { "component":                 // OPTIONAL placement; see below
+               { "at": [x_mm, y_mm],      // component anchor, board frame
+                 "rotation_deg": 90.0,
+                 "layer": "top|bottom" },
+             "at": [x_mm, y_mm],          // land CENTRE, board frame
              "shape": "rect|roundrect|circle|oval|<unmodelled>",
              "size": [w_mm, h_mm],        // the land's full extent
              "rotation_deg": 0.0,         // land angle, KiCad clockwise
@@ -60,6 +64,25 @@ ratio-less `roundrect`, or a token neither side knows — is compared as the
 STADIUM inscribed in the stated size, which every land of that size contains,
 so an unmodelled shape can never manufacture copper. Cases 160-180 pin that,
 and a token like `trapezoid` is admitted here on purpose to state it.
+
+## A PLACED land
+
+Without `pad.component` a land states its own board-frame centre, angle and
+layers, and both runners hand them to the predicate untouched. That cannot ask
+the one question a back-mounted part raises, because **no footprint authors the
+side it will end up on**: a package states `F.Cu` and the PLACEMENT decides
+whether that copper is front or back.
+
+So `pad.component` gives the land a component to be placed by. When it is
+present, `at`, `rotation_deg` and `layers` are **footprint-local** and each side
+puts them on the board with its own production rule — the worker through
+`geometry.component_transform` + `drc.placed_pad_layers`, the panel through
+`pcb_component.get_transform` + `pcb_component.placed_pad_layers`. A back-side
+placement does three things, and cases 220/230/240 take one each:
+
+* negates local Y **before** the rotation (the pcbnew footprint flip),
+* swaps every explicit front/back layer token,
+* reverses the sense of the land's own `rotation_deg`.
 
 `region` is a pour's COMPILED FILL ring, never its authored outline, and it may
 be concave or a self-touching keyhole — that is what a fill looks like once

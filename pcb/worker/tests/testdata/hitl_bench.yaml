@@ -281,9 +281,13 @@ components:
 # never plated, so it has no barrel and joins nothing. An author who hangs a net
 # on it has bought a bridge that does not exist.
 #
-# R5 A: net R5_A is PARTIAL with pin_groups = 3 — {TP5T + its top trace},
-#       {TP5B + its bottom trace}, {MH5 alone}. The join is still OWED: only a
-#       real via bridges top to bottom here.
+# R5 A: net R5_A is PARTIAL with pin_groups = 2 — {TP5T + its top trace} and
+#       {TP5B + its bottom trace}. The join is still OWED: only a real via
+#       bridges top to bottom here. MH5.1 is named on the net and is NOT one of
+#       the groups: an unplated bore is a non-pad on both the raw census and the
+#       compiled IR projection, so neither surface offers it as an island a
+#       router could ever close. That it is on the net at all is reported where
+#       it can be acted on — the routing projection excludes it by name.
 #       Both traces are deliberately DANGLING (2 findings, at (22.9, 56) top and
 #       (27.1, 56) bottom): they stop 2.1 mm from the hole centre, which is
 #       0.5 mm clear of the 3.2 mm bore, because there is no copper on it to

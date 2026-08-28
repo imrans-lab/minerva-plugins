@@ -69,8 +69,9 @@ from . import board_model, mask_source, silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .footprint_def import ReferenceTextDefinition
 from .geometry import (
+    PlacementTransform,
+    component_transform,
     is_top as _is_top,
-    rotate_local_offset as _rotate,
 )
 # `place_point as _transform_point` was dropped here in CP2 S8: this module's
 # last caller moved out during the S2-S4 silk extraction and the alias survived
@@ -116,6 +117,13 @@ from .resolved_board import (
     SourceRef,
     ZoneKind,
 )
+
+# The placement a caller whose geometry is ALREADY board-absolute hands the
+# shared pad emitter: no translation, no rotation, no mirror. `_harvest_ir` uses
+# it because the compiler has already applied each component's real transform to
+# every PlacedPad, and a pad's baked absolute angle then folds through unchanged.
+IDENTITY_PLACEMENT = PlacementTransform(position=(0.0, 0.0), rotation_deg=0.0,
+                                        side=Side.TOP)
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest / methods.WORKER_VERSION
 
@@ -214,8 +222,11 @@ def _list(v: Any) -> list:
 
 
 # _is_top / _rotate / _transform_point moved to geometry.py (single source of the
-# component-placement transform); imported above as back-compat aliases so existing
-# internal callers and drc's historical ``from .gerber import ...`` keep resolving.
+# component-placement transform); _is_top is imported above as a back-compat alias
+# so existing internal callers and drc's historical ``from .gerber import ...``
+# keep resolving. There is no `_rotate` alias any more: a pad's offset rides the
+# whole PlacementTransform (mirror included), which a bare rotation cannot
+# express.
 
 
 # Silk width policy and the 3-point-arc circumcentre now live in silk_source
@@ -543,22 +554,36 @@ def _adopt_mask_openings(g: _Geometry, openings) -> None:
         bucket.append(opening.as_emitter_tuple())
 
 
-def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
+def _emit_pads(g: _Geometry, pads, transform: PlacementTransform,
                top: bool, ref, mask_clearance: float) -> None:
     """Emit one component's pads into ``g`` — the SHARED, byte-sensitive pad path
     both the loose-dict harvest (``iter_pads(comp)``) and the IR-native harvest
     (``placed_pad_to_geom(placed)``) drive, so the two cannot diverge. ``pads`` is an
-    iterable of :class:`PadGeom`."""
-    for pad in pads:
-        ox, oy = _rotate(pad.x, pad.y, rot)
-        px, py = cx + ox, cy + oy
+    iterable of :class:`PadGeom`.
 
-        # Aperture rotation SOURCE: each pad's own ABSOLUTE rotation
-        # (PlacedPad.rotation_deg — placement rot + footprint-local pad rot, baked by
-        # the compiler) drives its aperture so per-pad rotation reaches fab. A pad
-        # carrying no rotation falls back to the component rot (=0 under the IR's
-        # identity placement) — a no-op there.
-        pad_angle = pad.rotation if pad.rotation is not None else rot
+    ``transform`` is THE placement rule (:func:`geometry.component_transform`),
+    the very object ``compile_board._place_component`` and ``drc._harvest_pads``
+    build: rotation AND the bottom-side mirror in one place, so a bottom-mounted
+    part's copper cannot be flashed where its top-side twin would sit. The
+    IR-native harvest passes :data:`IDENTITY_PLACEMENT`, its geometry being
+    board-absolute already.
+
+    ``top`` stays a SEPARATE argument from ``transform.side`` and is not
+    redundant: it buckets the flash onto a copper/paste side, and on the IR path
+    the component's real side has to be stated while the placement is identity.
+    """
+    for pad in pads:
+        px, py = transform.point((pad.x, pad.y))
+
+        # Aperture rotation SOURCE: the pad's own footprint-local angle composed
+        # with the placement through the SAME transform that placed its offset,
+        # so a bottom-side land turns with its mirror. On the IR path the pad
+        # already carries its absolute angle (PlacedPad.rotation_deg, itself
+        # built by PlacementTransform.angle) and the identity placement folds it
+        # through unchanged; a pad with no angle of its own is simply the
+        # component's placement angle.
+        pad_angle = transform.angle(
+            0.0 if pad.rotation is None else float(pad.rotation))
 
         drill = pad.drill
         # MASK OPENINGS come from the shared owner, once, for every pad kind —
@@ -890,7 +915,14 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
             continue
         cx, cy = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
         rot = _num(comp.get("rotation_deg"))
-        top = _is_top(comp.get("layer"))
+        # ONE placement rule, the same object the compiler and the connectivity
+        # harvest build off the component's own authored side. Silk and the
+        # designator still take (cx, cy, rot) + `top` because _emit_silk mirrors
+        # a back-side component's artwork itself and refdes glyphs are
+        # synthesized per side; only the pad path composes offsets, so only it
+        # needs the transform.
+        placement = component_transform(comp)
+        top = placement.side is Side.TOP
         ref = comp.get("ref")
 
         # iter_pads PREFERS resolved comp["pads"] (real footprint geometry) and
@@ -899,7 +931,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         # raises PadGeometryError rather than flashing a placeholder land
         # (bug 019f7736b236) — real runs resolve the board first (methods gate).
         _emit_pads(g, iter_pads(comp, require_smd_size=True),
-                   cx, cy, rot, top, ref, mask_clearance)
+                   placement, top, ref, mask_clearance)
         # pre_placed=False: resolve_board graphics are footprint-LOCAL and carry
         # the footprint's own authored layer, so the mirror and the layer flip
         # for a bottom-side component both happen inside _emit_silk.
@@ -1754,7 +1786,7 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         number_of = {p.source_id: p.number for p in board.footprint_for(comp).pads}
         pads = [placed_pad_to_geom(p, number_of.get(p.source_id, ""))
                 for p in comp.placed_pads]
-        _emit_pads(g, pads, 0.0, 0.0, 0.0, top, ref, mask_clearance)
+        _emit_pads(g, pads, IDENTITY_PLACEMENT, top, ref, mask_clearance)
         # Pass ALL placed graphics (NOT pre-filtered to a silk layer):
         # _emit_silk's internal silk-layer filter does the selecting — exactly
         # as the loose-dict path does. A component whose graphics are all

@@ -273,14 +273,18 @@ static func physical_pad_node(comp, pad: Dictionary, stack: PackedStringArray,
 	if pad_type == "thru_hole":
 		layers = layer_set(stack)
 	else:
-		var declared = pad.get("layers", [])
-		layers = layer_set(declared if declared is Array else [])
+		# PLACED layers, not the footprint-local list: a back-mounted part's
+		# F.Cu land is B.Cu copper, and the component owns that flip
+		# (pcb_component.placed_pad_layers) alongside the geometric mirror below.
+		layers = layer_set(comp.placed_pad_layers(pad))
 		if layers.is_empty():
 			layers = layer_set([comp.layer])
 
 	# world(p) = comp.position + comp_xform * (pad_pos + pad_xform * p):
 	# the pad's offset goes through the component transform only, the pad's own
-	# points through both.
+	# points through both. On the back of the board comp_xform also mirrors, so
+	# it reflects the land's own turn on the way through — which is the board
+	# angle a flipped land really has, and why pad_xform needs no sign of its own.
 	var comp_xform: Transform2D = comp.get_transform()
 	var pad_xform := Transform2D(
 		deg_to_rad(-float(pad.get("rotation", 0.0))), Vector2.ZERO)

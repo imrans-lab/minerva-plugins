@@ -225,11 +225,16 @@ def no_copper_node(pt: tuple[float, float]) -> ContactNode:
     those layers would bridge the whole stack through a hole with no barrel,
     which is the one error direction that deletes a real open.
 
-    It is a NODE rather than a dropped pad because the pin still EXISTS: a board
-    may name it on a net, and the honest report is "this pin's copper reaches
-    nothing", not "this pin is absent". Empty shapes are what make it join
-    nothing — :func:`node_gap` returns infinity for a node with no copper — and
-    the empty layer set says the same thing a second way.
+    It is a NODE rather than a raise so that any caller holding such a pad gets
+    an answer in the one shape every conductor takes. Empty shapes are what make
+    it join nothing — :func:`node_gap` returns infinity for a node with no
+    copper — and the empty layer set says the same thing a second way.
+
+    WHO STILL ASKS. The connectivity census does not: ``drc._harvest_pads``
+    drops an unplated hole outright, so the electrical board agrees with the IR
+    projection about what a pad is. This branch answers the callers that hold
+    ONE pad and ask about it directly — the shared spec/contact vectors among
+    them — rather than walking a board.
     """
     return ContactNode(kind=NO_COPPER, layers=frozenset(), shapes=(),
                        aabb=AABB(pt[0], pt[1], pt[0], pt[1]))

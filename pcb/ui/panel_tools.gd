@@ -9669,7 +9669,9 @@ static func _bus_pad_layers(comp, pin: String) -> Dictionary:
 		if land_type == "thru_hole":
 			all_layers = true
 			continue
-		for raw_layer in (land.get("layers", []) as Array):
+		# PLACED layers (pcb_component.placed_pad_layers): a back-mounted part's
+		# F.Cu land is B.Cu copper.
+		for raw_layer in comp.placed_pad_layers(land):
 			var canon := _bus_canon_layer(str(raw_layer))
 			if not canon.is_empty():
 				layers[canon] = true

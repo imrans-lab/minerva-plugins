@@ -1,0 +1,38 @@
+{
+  "name": "230-bottom-placement-flips-the-land-layer",
+  "why": "220's geometry with the probe moved to the FRONT. The footprint authors this land on F.Cu, and a back-side placement flips it to B.Cu - a layer name is an absolute board fact, not a footprint-local one. So the copper at (8.0, 9.7) is on the bottom and a top-layer end reaches nothing there, however exactly it is aimed. 190 says the same thing for a land already stated on the back; this is the case that fails if the FLIP is what is missing, which is the half a board dict actually depends on: no footprint states B.Cu for a part it does not know will be flipped.",
+  "pad": {
+    "component": {
+      "at": [
+        10.0,
+        10.0
+      ],
+      "rotation_deg": 90.0,
+      "layer": "bottom"
+    },
+    "at": [
+      1.0,
+      2.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.6,
+      1.0
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "F.Cu"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      8.0,
+      9.7
+    ],
+    "width_mm": 0.25,
+    "layer": "top"
+  },
+  "touches": false
+}

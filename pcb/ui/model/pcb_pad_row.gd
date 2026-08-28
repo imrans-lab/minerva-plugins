@@ -317,7 +317,9 @@ static func layer_for_pin(comp, pin: String) -> String:
 		has_copper = true
 		if land_type in THT_PAD_TYPES:
 			return "all"
-		for l in land.get("layers", []) as Array:
+		# PLACED layers — a back-mounted part's F.Cu land is B.Cu copper, and
+		# the component owns that flip (pcb_component.placed_pad_layers).
+		for l in comp.placed_pad_layers(land):
 			var name := str(l)
 			if name.begins_with("F."):
 				has_front = true

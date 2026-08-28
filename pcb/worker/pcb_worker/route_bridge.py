@@ -15,14 +15,15 @@ kept for the pure-bridge tests and the hint helpers; it no longer invents a
 nominal land (a pad with no authored geometry now raises) and it is slated for
 retirement with the native pad-list path in E3.
 
-The panel-convention notes below therefore describe the LEGACY builder. Canonical
-routing no longer mirrors raw panel-pin placement: it takes placement from the
-IR. For a top-side component the two agree exactly (the IR's
-``PlacementTransform.point`` calls the very same ``rotate_local_offset``), but for
-a BOTTOM-side component they deliberately differ — the IR mirrors local Y as
-pcbnew does (pinned by ``k1_bottom_oracle.kicad_pcb``, KiCad 9.0.9) while the raw
-path never did. That divergence is the raw path being wrong, not a compatibility
-requirement (Codex ruling 1).
+BOTH builders now place through the SAME rule. ``board_to_router`` composes its
+absolute pad positions with ``geometry.component_transform`` — the very
+:class:`PlacementTransform` the compiler applies — so rotation and the
+bottom-side local-Y mirror (pcbnew's own flip, pinned by
+``k1_bottom_oracle.kicad_pcb``, KiCad 9.0.9) reach the raw path too. Rotating
+without mirroring here projects a bottom-mounted part's lands a whole footprint
+away from the copper the IR routes and the fab emits, so the two builders must
+never diverge on it — the raw path is not owed a compatibility exemption
+(Codex ruling 1).
 
 Design constraints (docket 019eb481ae28 / 019eb47eb567, DCR 019dc140):
 
@@ -32,24 +33,17 @@ Design constraints (docket 019eb481ae28 / 019eb47eb567, DCR 019dc140):
     773) rules that E2 makes ``RoutingGrid`` natively origin-aware rather than
     duplicating a world<->grid transform here.
   * Absolute pad positions (LEGACY builder) are composed the SAME way the panel
-    model does it in pcb/ui/model/pcb_component.gd::get_pin_world_position, so
-    panel and router agree on where a rotated component's pad lands. That
-    convention is:
+    model does it in pcb/ui/model/pcb_component.gd::get_transform, so panel and
+    router agree on where a rotated OR flipped component's pad lands. Both
+    express one rule:
 
-        xform  = Transform2D(deg_to_rad(-rotation_deg))   # Godot CW-positive
-        world  = component_pos + xform * pin_offset
+        world = component_pos + R(-rotation_deg) * mirror_if_bottom(pin_offset)
 
-    which expands (Godot Transform2D basis: x=(cosθ,sinθ), y=(-sinθ,cosθ),
-    θ = -rotation) to the closed form used in ``_rotate_offset`` below:
-
-        wx = cx + px*cos(r) + py*sin(r)
-        wy = cy - px*sin(r) + py*cos(r)          (r = radians(rotation_deg))
-
-    NOTE this deliberately differs from the OTHER panel helper
-    get_pad_world_transform (which uses +rotation via Vector2.rotated); the
-    task pins get_pin_world_position as the canonical panel<->router agreement,
-    because canonical Pin offsets come from the component ``pins`` dict that
-    get_pin_world_position consumes.
+    — the panel as a Godot ``Transform2D(deg_to_rad(-rotation))`` scaled locally
+    by (1, -1) on the back, this module as
+    ``geometry.component_transform(comp).point(...)``. The negated angle is the
+    KiCad clockwise convention in a Y-down frame; the Y negation is pcbnew's
+    footprint flip.
 
   * Waypoint coordinates are carried bit-exact (float() identity, no rounding)
     — a route hint's waypoints are pixel-accurate user corrections and must
@@ -67,7 +61,7 @@ from agent_router.hints import RoutingHints, parse_hints
 from agent_router.router import ExistingSegment, ExistingVia
 from agent_router import layers as _layers
 
-from .geometry import rotate_local_offset
+from .geometry import component_transform
 from .ir_pads import UnsupportedGeometry, iter_ir_pads, pad_copper_shape
 from .ir_projection import outline_cutouts, outline_frame, profile_outer_rect
 from .pad_source import is_th_drill
@@ -172,20 +166,6 @@ def _component_layer(ref: Any, comp: dict) -> str:
         raise UnresolvableComponentLayer(ref, raw, reason) from exc
 
 
-def _rotate_offset(px: float, py: float, rotation_deg: float) -> tuple[float, float]:
-    """Rotate a component-relative pin offset into board space.
-
-    Single source of the transform is pcb_worker.geometry.rotate_local_offset;
-    this thin wrapper keeps the call sites here unchanged. The geometry form
-    (``radians(-deg)``) is algebraically identical to this module's former
-    hand-written ``radians(+deg)`` matrix, and both mirror
-    pcb/ui/model/pcb_component.gd::get_pin_world_position exactly: a Godot
-    Transform2D(deg_to_rad(-rotation)) applied to the offset (a clockwise
-    rotation by ``rotation_deg`` in a right-handed screen frame).
-    """
-    return rotate_local_offset(px, py, rotation_deg)
-
-
 # ---------------------------------------------------------------------------
 # board_to_router
 # ---------------------------------------------------------------------------
@@ -279,12 +259,17 @@ def board_to_router(canonical_board: dict) -> Board:
         if not isinstance(comp, dict):
             continue
         ref = str(comp.get("ref", comp.get("id", "")))
-        cx = _num(comp.get("x_mm"))
-        cy = _num(comp.get("y_mm"))
-        rot = _num(comp.get("rotation_deg"))
         # Fail closed, BY NAME (see UnresolvableComponentLayer). Resolved here,
         # before the pin loop, because every pad below inherits this one value.
         layer = _component_layer(ref, comp)
+        # THE placement rule, shared with the compiler and the connectivity
+        # harvest: rotation AND the bottom-side mirror, off the component's own
+        # authored side, so the router cannot lay copper at coordinates the fab
+        # path does not use. Built AFTER the layer resolution above so a
+        # component with no readable side keeps its named refusal; an
+        # inner-layer component raises here instead, which is correct —
+        # nothing is mounted on In1.Cu.
+        placement = component_transform(comp)
 
         # Render-detail pad geometry (component "Extra" from YAML), matched by
         # pad number for size resolution. Absent for JSON-dict boards.
@@ -301,7 +286,7 @@ def board_to_router(canonical_board: dict) -> Board:
             num = str(pin.get("number", ""))
             px = _num(pin.get("x_mm"))
             py = _num(pin.get("y_mm"))
-            wx, wy = _rotate_offset(px, py, rot)
+            wx, wy = placement.point((px, py))
             drill = _num(pin.get("drill_mm"))
             # Through-hole iff the drill is a FINITE positive diameter — the SAME
             # shared predicate the fab emitters + DRC use (bug 019f920d433f), so the
@@ -312,13 +297,18 @@ def board_to_router(canonical_board: dict) -> Board:
                 component=ref,
                 number=num,
                 net=None,  # filled from net membership below
-                position=(cx + wx, cy + wy),
+                position=(wx, wy),
                 size=_pad_size_for(pin, extra_pads_by_num),
                 shape=str(pin.get("shape", "rect")),
                 pad_type=("thru_hole" if is_th else "smd"),
                 drill=(drill if is_th else None),
                 layer=layer,
-                rotation=rot,
+                # The land's BOARD angle from the same transform that placed its
+                # offset. A canonical pin carries no angle of its own, so this is
+                # the placement angle — folded through ``angle`` anyway rather
+                # than reading rotation_deg raw, so the mirror's sign rule stays
+                # in one place if a pin ever grows one.
+                rotation=placement.angle(0.0),
             )
             pads.append(pad)
             pad_index[(ref, num)] = pad

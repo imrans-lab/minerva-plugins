@@ -26,11 +26,13 @@ KiCad-authored fixture):
     ``rotation`` field; reconciling that is an IMPORT-layer concern — negate at
     import — not this worker's, whose rotation_deg is defined as KiCad-equivalent.)
 
-Equivalence note (why consolidating three call sites is safe): route_bridge's
-former hand-written ``radians(+deg)`` matrix ``(px·cos d + py·sin d,
-−px·sin d + py·cos d)`` is algebraically IDENTICAL to the ``radians(-deg)`` form
-here — expand ``cos(-d)=cos d`` and ``sin(-d)=−sin d`` and both collapse to the
-same closed form. tests/test_geometry.py proves this across many angles.
+Equivalence note (why consolidating call sites onto this one is safe): the
+closed form a caller would otherwise hand-write for a clockwise turn,
+``(px·cos d + py·sin d, −px·sin d + py·cos d)``, is algebraically IDENTICAL to
+what :func:`rotate_local_offset` computes — expand ``cos(-d)=cos d`` and
+``sin(-d)=−sin d`` and the two collapse together. tests/test_geometry.py proves
+it across many angles, so nothing is owed a private matrix on grounds of being
+"the other form".
 """
 
 from __future__ import annotations

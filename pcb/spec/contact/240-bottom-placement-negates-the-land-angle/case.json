@@ -1,0 +1,38 @@
+{
+  "name": "240-bottom-placement-negates-the-land-angle",
+  "why": "A land with a turn OF ITS OWN on a flipped part. U4 sits at (10,10) unturned on the BOTTOM; the land is at the component origin, 2.0 x 0.6, turned 45 within the footprint. Reflecting the footprint reverses the sense of that turn, so the land's board angle is 0 - 45 = -45, and in this y-down frame a board angle of -45 points the long axis along (+x, +y): the unit direction is (0.7071, 0.7071). The probe sits 0.9 mm out along it, at (10.6364, 10.6364), which is 0.9 of the 1.0 mm half-length and dead on the centreline - inside. Leave the angle at +45 and the long axis points along (+x, -y) instead; the same probe is then 0.9 mm off the centreline of a land whose half-width is 0.3, so it misses by 0.6 mm and its 0.125 mm cap does not close that. 090/100 pin the 45-degree land itself on the front; this is the case that fails if only the POSITION is mirrored and the angle is left alone.",
+  "pad": {
+    "component": {
+      "at": [
+        10.0,
+        10.0
+      ],
+      "rotation_deg": 0.0,
+      "layer": "bottom"
+    },
+    "at": [
+      0.0,
+      0.0
+    ],
+    "shape": "rect",
+    "size": [
+      2.0,
+      0.6
+    ],
+    "rotation_deg": 45.0,
+    "type": "smd",
+    "layers": [
+      "F.Cu"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      10.6364,
+      10.6364
+    ],
+    "width_mm": 0.25,
+    "layer": "bottom"
+  },
+  "touches": true
+}

@@ -15,6 +15,7 @@ import pytest
 
 from pcb_worker import copper_contact, drc
 from pcb_worker.drc_geom_primitives import Polygon
+from pcb_worker.geometry import component_transform
 from pcb_worker.pad_source import PadGeom
 
 VECTORS = Path(__file__).resolve().parents[2] / "spec" / "contact"
@@ -51,12 +52,45 @@ def _pad_geom(spec: dict) -> PadGeom:
     )
 
 
+def _placement(spec: dict):
+    """The component a vector's land is placed by, or None when it states none.
+
+    An OPTIONAL `pad.component` block is what turns a vector from a question
+    about a land into a question about a PLACED land — the only way these
+    vectors can pin the flip a back-mounted part applies, since no footprint
+    authors the board side it will end up on. When it is present, `pad.at`,
+    `pad.rotation_deg` and `pad.layers` are FOOTPRINT-LOCAL and this is the rule
+    that puts them on the board; when it is absent every one of them is already
+    board-frame and nothing here moves them.
+
+    Deliberately the production placement (geometry.component_transform), the
+    same object drc._harvest_pads builds, so a case measures the harvest's own
+    rule rather than a restatement of it in a test.
+    """
+    comp = spec.get("component")
+    if comp is None:
+        return None
+    return component_transform({
+        "x_mm": comp["at"][0],
+        "y_mm": comp["at"][1],
+        "rotation_deg": comp.get("rotation_deg", 0.0),
+        "layer": comp.get("layer", "top"),
+    })
+
+
 def _pad_node(spec: dict):
     layers = spec.get("layers")
+    placement = _placement(spec)
+    if placement is None:
+        centre = (spec["at"][0], spec["at"][1])
+        angle = float(spec.get("rotation_deg", 0.0))
+        canon = frozenset(layers) if layers else None
+    else:
+        centre = placement.point((spec["at"][0], spec["at"][1]))
+        angle = placement.angle(float(spec.get("rotation_deg", 0.0)))
+        canon = drc.placed_pad_layers(placement, list(layers or []))
     return copper_contact.pad_node(
-        _pad_geom(spec), (spec["at"][0], spec["at"][1]),
-        float(spec.get("rotation_deg", 0.0)),
-        frozenset(layers) if layers else None,
+        _pad_geom(spec), centre, angle, canon,
         # A vector always states a size, so the unknown-land fallback is never
         # the answer here; a number that would obviously change a verdict is
         # passed so a silent fall-through to it cannot pass unnoticed.

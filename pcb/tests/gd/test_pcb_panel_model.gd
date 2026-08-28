@@ -67,6 +67,7 @@ func _init() -> void:
 	_test_spatial_query()
 	_test_mounting_holes_roundtrip()
 	_test_rotation_sign_lands_on_traces()
+	_test_bottom_side_placement_is_one_transform()
 	_test_null_pad_size_is_skipped_not_invented()
 	_test_pads_key_states_the_geometry_authority()
 	_test_remove_net_journals_like_remove_trace()
@@ -917,6 +918,96 @@ func _test_rotation_sign_lands_on_traces() -> void:
 	# And it must be inside the 80x110 board, not hanging off the bottom.
 	check("MIC1.WS world pos is on-board (y <= 110)", wp.y <= 110.0,
 			"got y=%.2f" % wp.y)
+
+
+## ONE TRANSFORM FOR A FLIPPED PART, checked where it would otherwise be three.
+##
+## pcbnew's footprint flip negates local Y before the placement rotation, so a
+## back-mounted part's lands, silk and designator are reflected about the
+## footprint's own x axis and its explicit front/back layers swap. Three panel
+## surfaces have to know that: what the canvas DRAWS, what the pad picker
+## HIT-TESTS, and what to_board_dict hands the worker. They agree here only
+## because they all read pcb_component.get_transform / placed_pad_layers — the
+## shared spec/contact vectors (220/230/240) pin the same rule for the contact
+## predicate, and this pins it for the surfaces those vectors do not reach.
+##
+## THE NUMBERS, by hand. U2 sits at (10, 10) turned 90 on the BOTTOM, carrying
+## one 1.6 x 1.0 land at footprint-local (1.0, 2.0). The flip sends local y to
+## -y, giving (1.0, -2.0); the KiCad clockwise turn maps (x, y) to (y, -x) at 90,
+## giving (-2.0, -1.0); translation lands the centre at (8.0, 9.0). Without the
+## mirror it would be (12.0, 9.0) — 4 mm away, and the land is only 1.6 mm
+## across, so nothing about the two overlaps.
+##
+## SERIALIZATION MUST NOT MOVE. A land is stored footprint-local and the worker
+## applies the same placement rule to it, so baking the mirror into to_board_dict
+## would flip it twice and put a back part's copper on the front.
+func _test_bottom_side_placement_is_one_transform() -> void:
+	print("\n-- bottom-side placement: draw, hit-test and serialization share one transform --")
+	var comp = _PCBComponent.new()
+	comp.id = "U2"
+	comp.position = Vector2(10.0, 10.0)
+	comp.rotation = 90.0
+	comp.layer = "bottom"
+	comp.pins = {"1": Vector2(1.0, 2.0)}
+	comp.pads = [{
+		"number": "1", "type": "smd", "shape": "rect",
+		"position": Vector2(1.0, 2.0), "size": Vector2(1.6, 1.0),
+		"rotation": 0.0, "drill": Vector2.ZERO, "layers": ["F.Cu"],
+	}]
+
+	var mirrored := Vector2(8.0, 9.0)
+	var unmirrored := Vector2(12.0, 9.0)
+
+	var wp: Vector2 = comp.get_pin_world_position("1")
+	check("a back-side pin is placed mirrored, at (8, 9)",
+			wp.is_equal_approx(mirrored),
+			"got %s (an unmirrored panel gives %s)" % [str(wp), str(unmirrored)])
+
+	var placed: Dictionary = comp.get_pad_world_transform(comp.pads[0])
+	check("the drawn land sits on the same point the pin does",
+			(placed["position"] as Vector2).is_equal_approx(wp),
+			"got %s" % str(placed["position"]))
+	check("a 0-degree land on a part turned 90 has board angle 90",
+			is_equal_approx(float(placed["rotation"]), 90.0),
+			"got %.3f" % float(placed["rotation"]))
+
+	check("the hit test finds copper at the mirrored land centre",
+			is_equal_approx(comp.pin_copper_distance("1", mirrored), 0.0),
+			"got %.4f mm" % comp.pin_copper_distance("1", mirrored))
+	check("...and none where an unmirrored part would have put it",
+			comp.pin_copper_distance("1", unmirrored) > 0.5,
+			"got %.4f mm" % comp.pin_copper_distance("1", unmirrored))
+
+	var placed_layers: Array = comp.placed_pad_layers(comp.pads[0])
+	check("the F.Cu land of a back-mounted part is B.Cu copper",
+			placed_layers.size() == 1 and str(placed_layers[0]) == "B.Cu",
+			"got %s" % str(placed_layers))
+
+	var serialized: Dictionary = comp.to_board_dict()
+	var out_pads: Array = serialized.get("pads", [])
+	var out_pad: Dictionary = out_pads[0] if out_pads.size() > 0 else {}
+	var out_pos: Dictionary = out_pad.get("position", {})
+	check("serialization keeps the land footprint-local, not mirrored",
+			out_pads.size() == 1
+			and is_equal_approx(float(out_pos.get("x", -1.0)), 1.0)
+			and is_equal_approx(float(out_pos.get("y", -1.0)), 2.0),
+			"got %s" % str(out_pos))
+	check("...and keeps its authored layer, not the placed one",
+			str((out_pad.get("layers", []) as Array)[0]) == "F.Cu",
+			"got %s" % str(out_pad.get("layers", [])))
+
+	# A land with a turn OF ITS OWN: reflecting the footprint reverses the sense
+	# of that turn, so the two angles SUBTRACT on the back and ADD on the front.
+	comp.pads[0]["rotation"] = 45.0
+	check("a flipped part subtracts its land's own angle (90 - 45)",
+			is_equal_approx(
+				float((comp.get_pad_world_transform(comp.pads[0]))["rotation"]),
+				45.0))
+	comp.layer = "top"
+	check("...and a front-side part adds it (90 + 45)",
+			is_equal_approx(
+				float((comp.get_pad_world_transform(comp.pads[0]))["rotation"]),
+				135.0))
 
 
 func check(description: String, condition: bool, detail: String = "") -> void:

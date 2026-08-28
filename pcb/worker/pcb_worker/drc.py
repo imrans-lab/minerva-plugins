@@ -337,17 +337,34 @@ def _harvest_pads(board: dict) -> list[_Pad]:
         for pad in iter_pads(comp):
             num = str(pad.number)
             px, py = transform.point((pad.x, pad.y))
+            # AN UNPLATED HOLE IS NOT A PAD, which is the same reading the IR
+            # projection takes (ir_pads.IRPad.carries_copper, which
+            # ir_connectivity.connectivity_board drops) — and now the only one.
+            # KiCad writes an np_thru_hole on `*.Cu` so the bore spans the stack,
+            # so the copper test below would pass it; the pad TYPE still says
+            # there is no barrel and no land.
+            #
+            # Harvesting it as a copper-free node instead — on the reasoning that
+            # the PIN still exists — costs more than it buys. A net naming a
+            # chassis-ground M3 hole then carries an island nothing can ever join,
+            # so the census reports a permanent `partial` for a defect no router
+            # can fix, while the router's projection of the same board has
+            # already excluded the hole. Dropping it costs nothing real: an end
+            # stopping on a bare bore is still a `dangling_endpoint`, and copper
+            # the hole fails to bridge still splits its net into the islands it
+            # really has.
+            if is_unplated_hole(pad):
+                continue
             # is_through_hole is the SHARED predicate the two emitters also use, so
             # DRC classifies TH-vs-SMD identically (no third hand-written literal to
             # drift — bug 019f91c1420c). DRC runs iter_pads WITHOUT require_smd_size,
             # so a non-finite drill is not fail-closed here; is_through_hole's
             # isfinite guard means it is simply not counted as a through-hole (never
             # NaN-classified), matching the emitters' post-validation behaviour.
-            # UNPLATED holes are excluded here, not merely given no contact
-            # copper: `through_hole` is also what makes a pad's copper span the
-            # stack and what lets check D call a layer hand-off resolved. A
-            # hole with no barrel does neither.
-            through_hole = is_through_hole(pad) and not is_unplated_hole(pad)
+            # It is also what makes a pad's copper span the stack and what lets
+            # check D call a layer hand-off resolved — neither of which an
+            # unplated hole may claim, which is why the skip above precedes it.
+            through_hole = is_through_hole(pad)
             # PASTE-ONLY apertures are not pads. KiCad splits a QFN thermal pad
             # into several unnumbered `(pad "" smd ... (layers "F.Paste"))`
             # nodes; they are stencil geometry with no copper and no net. Left
@@ -360,12 +377,7 @@ def _harvest_pads(board: dict) -> list[_Pad]:
             # fallback (no layer list => still copper).
             if not has_copper(pad):
                 continue
-            declared = _placed_layers(transform, pad.layers or [])
-            if any(lay == "*.Cu" for lay in declared):
-                canon = None          # spans the stack -> permissive
-            else:
-                canon = frozenset(_layers.kicad_to_canon(lay) for lay in declared
-                                  if _layers.is_copper(lay)) or None
+            canon = placed_pad_layers(transform, pad.layers or [])
             # BOARD angle of the land: the placement angle composed with the
             # pad's own, through the same transform that placed the offset just
             # above — so a bottom-side component's land turns with its mirror
@@ -404,6 +416,31 @@ def _placed_layers(transform: PlacementTransform, declared: list) -> list:
         else:
             out.append(name)
     return out
+
+
+def placed_pad_layers(transform: PlacementTransform,
+                      declared: list) -> "frozenset[str] | None":
+    """The CANONICAL copper layers one land occupies once its component is placed
+    — the whole reading, from footprint-local tokens to the layer set the contact
+    predicate compares.
+
+    Public because it IS the rule, not a step in one: the shared spec/contact
+    vectors place a footprint-local land through this and
+    :func:`geometry.component_transform` so the case they measure is the case
+    this harvest builds, and the panel answers the same question in
+    ``pcb_component.placed_pad_layers``.
+
+    ``None`` means PERMISSIVE — meets copper on any layer. Two different inputs
+    earn it, and they mean the same thing here: a ``*.Cu`` wildcard, which
+    genuinely spans the stack, and a land that declares no readable copper layer
+    at all, which has stated nothing to be constrained by (the unresolved
+    inline-pin fallback).
+    """
+    placed = _placed_layers(transform, declared)
+    if any(lay == "*.Cu" for lay in placed):
+        return None
+    return frozenset(_layers.kicad_to_canon(lay) for lay in placed
+                     if _layers.is_copper(lay)) or None
 
 
 def _harvest_segments(board: dict) -> list[_Seg]:
@@ -516,10 +553,10 @@ def _check_wrong_net_pad(segs, pads, clr) -> list[dict]:
     the shared contact predicate (:func:`copper_contact.node_gap`) — still at
     ``clr``, so this stays a clearance-scale check and not a bare touch test.
     Reading the LAND rather than the pad CENTRE is what makes the finding about
-    the copper that is actually shorted: a wide land is reported from its edge,
-    and a hole with NO copper (an unplated mounting hole, whose footprint still
-    writes ``*.Cu``) is reported never, because there is nothing there to short
-    to.
+    the copper that is actually shorted: a wide land is reported from its edge.
+    A hole with NO copper (an unplated mounting hole, whose footprint still
+    writes ``*.Cu``) is reported never — it is not a pad and the harvest never
+    yields one, so there is nothing here to short to.
     """
     findings: list[dict] = []
     seen_at_ends: set = set()

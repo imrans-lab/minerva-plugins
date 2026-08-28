@@ -84,15 +84,24 @@ func _case(name: String) -> Dictionary:
 	return parsed if parsed is Dictionary else {}
 
 
-## The vector's pad as a REAL component carrying one land: the component sits at
-## the origin unrotated and the land holds the board-frame centre and angle, so
-## the same builder the board walk uses produces the node.
+## The vector's pad as a REAL component carrying one land, so the same builder
+## the board walk uses produces the node.
+##
+## An OPTIONAL `pad.component` block gives that component a PLACEMENT — position,
+## rotation and side. With it, the land's `at`, `rotation_deg` and `layers` are
+## FOOTPRINT-LOCAL and pcb_component.get_transform / placed_pad_layers put them
+## on the board; that is the only way these vectors can pin what a back-mounted
+## part does to its own lands, since no footprint authors the side it will end up
+## on. Without it the component sits at the origin unrotated on the front and the
+## land holds the board-frame centre and angle, exactly as before.
 func _pad_node(spec: Dictionary) -> Dictionary:
+	var placement: Dictionary = spec.get("component", {})
 	var comp = PCBComponentScript.new()
 	comp.id = "P1"
-	comp.position = Vector2.ZERO
-	comp.rotation = 0.0
-	comp.layer = "top"
+	var anchor: Array = placement.get("at", [0.0, 0.0])
+	comp.position = Vector2(float(anchor[0]), float(anchor[1]))
+	comp.rotation = float(placement.get("rotation_deg", 0.0))
+	comp.layer = str(placement.get("layer", "top"))
 	comp.has_pad_geometry = true
 	var at: Array = spec["at"]
 	var size: Array = spec["size"]
@@ -113,7 +122,7 @@ func _pad_node(spec: Dictionary) -> Dictionary:
 	# zero-swell point, which the worker has no second field to disagree with.
 	# The vectors compare LAND geometry (see spec/contact/README.md).
 	return Contact.physical_pad_node(comp, land, _stack(),
-		Vector2(float(at[0]), float(at[1])), false)
+		comp.get_pin_world_position("1"), false)
 
 
 ## The vector's pour region as the conductor node the fill builds: one ring, on

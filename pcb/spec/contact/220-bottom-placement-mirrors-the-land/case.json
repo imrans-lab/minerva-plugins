@@ -1,0 +1,38 @@
+{
+  "name": "220-bottom-placement-mirrors-the-land",
+  "why": "The first case whose land is stated FOOTPRINT-LOCAL and placed by a component, which is the only way to ask whether the two sides place a back-mounted part the same way. U2 sits at (10,10) turned 90 on the BOTTOM. Placing local (1.0, 2.0): the flip negates local y to (1.0, -2.0); the KiCad clockwise turn in this y-down frame sends (x,y) to (y,-x) at 90, giving (-2.0, -1.0); translation lands the centre at (8.0, 9.0). Skipping the mirror puts it at (12.0, 9.0) and mirroring AFTER the turn puts it at (12.0, 11.0) - three distinct points, so the offset is off-axis on purpose. The land is 1.6 x 1.0 with no turn of its own, so its board angle is the placement's 90 and its copper spans x 7.5..8.5, y 8.2..9.8. The probe sits at (8.0, 9.7), 0.1 mm inside the far y edge; an uncomposed land angle of 0 would span y 8.5..9.5 instead and leave the probe 0.2 mm out, which its 0.125 mm cap cannot reach.",
+  "pad": {
+    "component": {
+      "at": [
+        10.0,
+        10.0
+      ],
+      "rotation_deg": 90.0,
+      "layer": "bottom"
+    },
+    "at": [
+      1.0,
+      2.0
+    ],
+    "shape": "rect",
+    "size": [
+      1.6,
+      1.0
+    ],
+    "rotation_deg": 0.0,
+    "type": "smd",
+    "layers": [
+      "F.Cu"
+    ]
+  },
+  "copper": {
+    "kind": "endpoint",
+    "a": [
+      8.0,
+      9.7
+    ],
+    "width_mm": 0.25,
+    "layer": "bottom"
+  },
+  "touches": true
+}

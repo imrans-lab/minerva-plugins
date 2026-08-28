@@ -12,9 +12,14 @@ within 1µm:
   * gerber.py  — flashed D03 pad centres in the emitted F_Cu.gbr, and
   * kicad.py   — pads of the generated .kicad_pcb, read back through the reader.
 
-This pins the sign of gerber._rotate against ground truth (the old +deg/CCW form
-mirrored pads about the component centre) and guards kicad.py from silently using
-a different sign than gerber.py.
+This pins the sign of the shared placement rotation
+(``geometry.rotate_local_offset``, which the emitters reach through
+``geometry.PlacementTransform``) against ground truth — the +deg/CCW form mirrors
+pads about the component centre — and guards kicad.py from silently using a
+different sign than gerber.py.
+
+It also holds the SOURCE gate at the bottom: nothing in the worker may convert a
+placement or feature angle with a positive ``math.radians()`` of its own.
 """
 
 from __future__ import annotations
@@ -164,10 +169,10 @@ def test_gerber_pad_centres_match_kicad_ground_truth():
         "this premise if that is now unavoidable)"
     )
 
-    # The fixture pins carry no per-pad `rotation`, so the aperture angle still
-    # comes from the component rotation_deg (the emitter only
-    # overrides it when a pad carries its own absolute rotation) — this stays a
-    # faithful check of gerber._rotate's sign against the KiCad ground truth.
+    # The fixture pins carry no per-pad `rotation`, so the aperture angle is
+    # the component's placement angle composed with a zero land angle — this
+    # stays a faithful check of the shared transform's sign against the KiCad
+    # ground truth.
     files = gerber.build_gerbers(board, name="rot")
 
     # SMD component on top -> flashes land on F_Cu.
@@ -349,3 +354,85 @@ def test_rotated_dip6_pads_match_kicad_placement_by_pad_number():
             f"MIC1 pad {num}: worker placed {got[num]}, KiCad 9.0.9 ground truth "
             f"{expected} — rotation convention mirrored?"
         )
+
+
+# ---------------------------------------------------------------------------
+# The source gate: one rotation, and it is the negated one.
+# ---------------------------------------------------------------------------
+
+WORKER_SOURCE = Path(__file__).resolve().parents[1]
+
+# A call like ``math.radians(x)`` — the argument captured up to the closing
+# paren, which is enough because no site here nests a call inside one.
+_RADIANS_CALL = re.compile(r"\bradians\(\s*([^)]*)\)")
+
+# An argument that NAMES an angle in degrees, or a rotation. Those are placement
+# and feature angles: they live in a board frame whose Y grows downward, so they
+# are clockwise and MUST be negated before any rotation matrix. An angle already
+# in radians, or a bare direction with no such name, is a different quantity and
+# this gate deliberately says nothing about it.
+_PLACEMENT_ANGLE = re.compile(r"rotation|deg", re.IGNORECASE)
+
+
+def _radians_call_sites() -> list[tuple[Path, int, str]]:
+    """Every ``radians(...)`` spelling in the worker's own source, with its
+    argument.
+
+    Line-based, and DOCSTRINGS COUNT — deliberately. A comment that writes the
+    positive form is how the positive form gets re-derived: the next reader
+    copies the prose. Treating a written call the same as a compiled one costs a
+    rewording and buys a rule with no quiet corner to hide in.
+    """
+    roots = [WORKER_SOURCE / "pcb_worker", WORKER_SOURCE / "agent_router"]
+    out: list[tuple[Path, int, str]] = []
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            for lineno, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), start=1):
+                for match in _RADIANS_CALL.finditer(line):
+                    out.append((path, lineno, match.group(1).strip()))
+    return out
+
+
+def test_no_module_turns_a_placement_angle_the_wrong_way() -> None:
+    """THE grep: a degree-named angle reaches a rotation matrix only NEGATED.
+
+    ``geometry.rotation_radians`` is the single conversion — ``radians(-deg)`` —
+    and ``rotate_local_offset`` / ``PlacementTransform`` are the single
+    application of it. A module that spells ``math.radians(rotation_deg)`` for
+    itself turns copper the wrong way in this Y-down frame, and every multiple of
+    90 hides that under a rectangle's own symmetry, so the defect ships looking
+    correct and surfaces only on an off-axis part.
+
+    ``geometry.rotation_radians`` is the one site allowed to write the negation,
+    because it IS the negation. Prose is scanned along with code (see
+    :func:`_radians_call_sites`), so a docstring may not spell the positive form
+    either.
+    """
+    offenders = [
+        f"{path.relative_to(WORKER_SOURCE)}:{lineno}: radians({arg})"
+        for (path, lineno, arg) in _radians_call_sites()
+        if _PLACEMENT_ANGLE.search(arg) and not arg.startswith("-")
+    ]
+    assert not offenders, (
+        "these convert a degree-named angle without negating it; route them "
+        "through geometry.rotation_radians (or rotate_local_offset, which "
+        "applies it): " + "; ".join(offenders))
+
+
+def test_the_gate_would_actually_catch_the_positive_form() -> None:
+    """The gate above is a regex over source, so it can rot into a test that
+    passes because it matches nothing. Show it firing on the exact shape it
+    exists to forbid, and staying quiet on the negated one.
+    """
+    def offends(arg: str) -> bool:
+        return bool(_PLACEMENT_ANGLE.search(arg)) and not arg.startswith("-")
+
+    assert offends("feat.rotation_deg")
+    assert offends("degrees")
+    assert offends("pad.rotation")
+    assert not offends("-feat.rotation_deg")
+    assert not offends("-deg")
+    # And the call regex really finds the argument inside a realistic line.
+    match = _RADIANS_CALL.search("        angle = math.radians(feat.rotation_deg)")
+    assert match is not None and match.group(1) == "feat.rotation_deg"

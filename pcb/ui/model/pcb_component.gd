@@ -86,6 +86,13 @@ var properties: Dictionary = {}
 ## Layer: "top" or "bottom"
 var layer: String = "top"
 
+## The tokens that name the BACK of the board, matching the worker's
+## geometry.BOTTOM_LAYER_NAMES exactly — one vocabulary for "which side is this
+## part mounted on" across the boundary. Read by is_bottom_side(), which
+## get_transform() calls on every draw, so the test is a silent lookup rather
+## than the warning-emitting PcbLayerStack normaliser.
+const BACK_SIDE_TOKENS: Array = ["bottom", "b.cu", "back"]
+
 ## Whether this component is locked (skipped during hit-testing)
 var locked: bool = false
 
@@ -275,6 +282,49 @@ func pin_copper_distance(pin_name: String, point: Vector2) -> float:
 		get_pin_world_position(pin_name), lands_for_pin(pin_name), point)
 
 
+## The BOARD layers one of this component's lands occupies.
+##
+## The other half of the placement rule get_transform carries: `pads[].layers`
+## is FOOTPRINT-LOCAL, like `pads[].position`, so the F.Cu land of a
+## bottom-mounted part is B.Cu copper on the board and every explicit front/back
+## token swaps. A wildcard ("*.Cu") already names both sides and survives
+## untouched, as does a token this model does not recognise — the readers
+## downstream fail visibly on junk, and a name with no side has no side to swap.
+##
+## Same rule as the worker's drc._placed_layers / PlacementTransform.layer, and
+## it is the reason a land may state its own layers at all: without the flip a
+## back-side land reads as front copper and every side-aware answer (contact,
+## the pin inspector's side, bus legs) inverts for exactly the parts that are
+## hardest to see.
+func placed_pad_layers(pad: Dictionary) -> Array:
+	var declared: Variant = pad.get("layers", [])
+	if not (declared is Array):
+		return []
+	if not is_bottom_side():
+		return declared
+	var out: Array = []
+	for name in (declared as Array):
+		out.append(flipped_layer_token(name))
+	return out
+
+
+## One layer token reflected to the other side of the board. Front/back prefixes
+## and the canonical top/bottom ids swap; anything else — a wildcard, an inner
+## layer, an unreadable value — is returned as it came.
+static func flipped_layer_token(name: Variant) -> Variant:
+	var text := str(name)
+	var low := text.to_lower()
+	if low.begins_with("f."):
+		return "B." + text.substr(2)
+	if low.begins_with("b."):
+		return "F." + text.substr(2)
+	if low == "top":
+		return "bottom"
+	if low == "bottom":
+		return "top"
+	return name
+
+
 ## The lands of one pin — the `pads` entries carrying its number. A footprint
 ## may declare several for one electrical pin (a split thermal land), and none
 ## at all when it never resolved.
@@ -314,6 +364,11 @@ static func pin_copper_distance_from(origin: Vector2, xform: Transform2D,
 ## ROTATION: a land's OFFSET turns with the component only, its BODY with the
 ## component's rotation and its own — same CW degree convention throughout (see
 ## get_transform), so the copper is measured where it is fabricated.
+##
+## THE BACK OF THE BOARD needs nothing extra here. `xform` carries the mirror,
+## so undoing it lands the probe in true footprint-local coordinates, where the
+## land sits at its authored offset and its authored angle — which is exactly
+## what the +rotation step below undoes.
 static func _land_distance(land: Dictionary, origin: Vector2,
 		xform: Transform2D, point: Vector2) -> float:
 	var half: Vector2 = (land.get("size", Vector2(1, 1)) as Vector2) * 0.5
@@ -347,17 +402,47 @@ func get_pin_name(pin_number: String) -> String:
 	return ""
 
 
-## Get the Transform2D for this component (rotation around anchor/origin)
+## Whether this part is mounted on the BACK of the board — the fact that decides
+## whether footprint-local geometry is mirrored on its way to board space.
+func is_bottom_side() -> bool:
+	return str(layer).strip_edges().to_lower() in BACK_SIDE_TOKENS
+
+
+## THE footprint-local -> board transform for this component: ONE object every
+## surface composes with, so draw, hit-test and every measurement agree by
+## construction rather than by three matching edits.
+##
+##     board_point = position + get_transform() * footprint_local_point
+##
+## ROTATION. `rotation` is the canonical rotation_deg, defined KiCad-equivalent:
+## KiCad applies a footprint angle as R(radians(-angle)) in board space (its
+## angle is CW in the Y-down file frame). The worker matches this exactly
+## (geometry.rotate_local_offset and everything delegating to it), so the panel
+## MUST too — hence deg_to_rad(-rotation) — or pads/silk/pins desync from the
+## fab for 90/270 parts. Do NOT "fix" this to +rotation: if a board's 90/270
+## parts land off their traces, the DATA has the wrong-sign rotation (e.g. a
+## stale pre-KiCad-convention negation at import), not this.
+##
+## MIRROR. pcbnew's footprint flip NEGATES LOCAL Y before applying the rotation,
+## so a back-side part's lands, silk and designator are reflected about the
+## footprint's own x axis. `scaled_local` right-multiplies, which is exactly that
+## order — mirror first, then turn — and matches geometry.PlacementTransform.point
+## (`if side is BOTTOM: ly = -ly` ahead of place_point). Because the reflection
+## lives IN the transform, a land's own `rotation` needs no separate sign rule
+## here: its body is built inside this frame and comes out turning the right way
+## (see pcb_copper_contact.physical_pad_node and _land_distance). The one place
+## that cannot inherit it is a land angle handed OUT as a board number —
+## get_pad_world_transform — which folds the same sign explicitly.
+##
+## The transform is footprint-local -> board OFFSET only; `position` is added by
+## the caller, as the formula above shows. That keeps the offset and the
+## translation separable, which is what lets a proposed pose reuse the same
+## frame at a different anchor.
 func get_transform() -> Transform2D:
-	# rotation is the canonical rotation_deg, which is defined KiCad-equivalent:
-	# KiCad applies a footprint angle as R(radians(-angle)) in board space (its
-	# angle is CW in the Y-down file frame). The worker matches this exactly
-	# (gerber._rotate / route_bridge / kicad_io all use radians(-rotation_deg)),
-	# so the panel MUST too — hence deg_to_rad(-rotation) — or pads/silk/pins
-	# desync from the fab for 90/270 parts. Do NOT "fix" this to +rotation: if a
-	# board's 90/270 parts land off their traces, the DATA has the wrong-sign
-	# rotation (e.g. a stale pre-KiCad-convention negation at import), not this.
-	return Transform2D(deg_to_rad(-rotation), Vector2.ZERO)
+	var xform := Transform2D(deg_to_rad(-rotation), Vector2.ZERO)
+	if is_bottom_side():
+		xform = xform.scaled_local(Vector2(1.0, -1.0))
+	return xform
 
 
 ## Get local body polygon for drawing (4 corners relative to anchor)
@@ -619,10 +704,18 @@ func _derive_bounds_from_graphics() -> bool:
 ## it from these three (pcb_pad_approach.land_rect).
 func get_pad_world_transform(pad: Dictionary) -> Dictionary:
 	var local_pos: Vector2 = pad.get("position", Vector2.ZERO)
+	var land_rotation := float(pad.get("rotation", 0.0))
 	return {
 		"position": position + (get_transform() * local_pos),
 		"size": pad.get("size", Vector2(1, 1)) as Vector2,
-		"rotation": rotation + float(pad.get("rotation", 0.0)),
+		# The land's BOARD angle. On the front the two angles ADD; on the back
+		# the mirror in get_transform reflects the land's own turn, which
+		# NEGATES it — the same fold geometry.PlacementTransform.angle applies
+		# (`rotation_deg + local` on top, `rotation_deg - local` on the bottom).
+		# This is the one land angle stated as a number instead of being carried
+		# by the frame, so it is the one place that spells the sign out.
+		"rotation": (rotation - land_rotation) if is_bottom_side()
+			else (rotation + land_rotation),
 	}
 
 
@@ -1128,7 +1221,6 @@ func _pads_from_list(pads_data: Array) -> void:
 ## the body box is fitted to the synthesized pad extents.
 func _pads_from_canonical_pins(pin_list: Array, fit_body: bool) -> void:
 	pads.clear()
-	var copper_layer := "B.Cu" if layer == "bottom" else "F.Cu"
 	var synthesized := false
 	for pd in pin_list:
 		if not (pd is Dictionary):
@@ -1162,7 +1254,13 @@ func _pads_from_canonical_pins(pin_list: Array, fit_body: bool) -> void:
 			pad["shape"] = "rect"
 			pad["size"] = Vector2(pw if pw > 0.0 else 1.0, ph if ph > 0.0 else 1.0)
 			pad["drill"] = Vector2.ZERO
-			pad["layers"] = [copper_layer]
+			# FOOTPRINT-LOCAL, like every other field on a land: the front face
+			# of the package. placed_pad_layers turns it into B.Cu for a
+			# back-mounted part, and to_board_dict hands the worker the same
+			# local list its own placement rule expects. Naming the BOARD side
+			# here would be flipped a second time downstream, landing a back
+			# part's copper on the front.
+			pad["layers"] = ["F.Cu"]
 		else:
 			# Bare positional pin (no pad geometry) — no render pad.
 			continue

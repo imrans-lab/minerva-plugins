@@ -9583,7 +9583,9 @@ func _bus_pin_copper_layers(comp, pin_name: String) -> PackedStringArray:
 		var land: Dictionary = raw_land
 		if str(land.get("type", "smd")).to_lower() in THT_PAD_TYPES:
 			return _bus_declared_copper_layers()
-		for raw_layer in (land.get("layers", []) as Array):
+		# PLACED layers (pcb_component.placed_pad_layers): a back-mounted part's
+		# F.Cu land is B.Cu copper.
+		for raw_layer in comp.placed_pad_layers(land):
 			var canon := str(raw_layer)
 			if not PcbLayerStack.is_copper(canon):
 				continue
