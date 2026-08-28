@@ -38,6 +38,16 @@ extends SceneTree
 ##      ids invert exactly, and minerva_pcb_view_state reads and writes the
 ##      same value through the same setter.
 ##
+##   3b. THE PREVIEW IS A VIEW, NOT A PICTURE. Section 6 drives the real
+##      camera: the artwork is placed through the same world-to-screen
+##      transform the editor's own view uses, so it MOVES with a pan and GROWS
+##      with a zoom — two observations of the same rect at two camera states,
+##      which a fixed letterbox cannot satisfy. The same section drives a real
+##      drag through the canvas's own _gui_input twice — once with the preview
+##      down, once with it up — and reads the BOARD DICT after each. The
+##      preview-down arm is the control that proves the gesture is an edit at
+##      all; the preview-up arm is the claim.
+##
 ##   4. A STALE PREVIEW RETRACTS ITS FLAG. Section 5 drives both stale paths
 ##      for real — a board edit under a live preview, and a board that moves
 ##      while the worker is running — and reads the flag, the human's status
@@ -49,6 +59,8 @@ extends SceneTree
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const FabPreview := preload("res://../../minerva-plugins/pcb/ui/model/pcb_fab_preview.gd")
 const OverlayFetch := preload("res://../../minerva-plugins/pcb/ui/model/pcb_overlay_fetch.gd")
+const PcbCanvasScript := preload("res://../../minerva-plugins/pcb/ui/pcb_canvas.gd")
+const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 
 var PanelTools: Variant = load("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 
@@ -212,6 +224,7 @@ func _init() -> void:
 	_run_picker()
 	await _run_mcp_parity()
 	await _run_stale_retraction()
+	_run_camera_and_input()
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
 	quit(1 if _fail > 0 else 0)
 
@@ -418,11 +431,45 @@ func _run_banner_geometry() -> void:
 	check("2h: an isolated layer names its own file and hash",
 		str(one[0]).findn("F_SilkS") != -1 and str(one[0]).findn("sha ") != -1,
 		str(one[0]))
-	var incomplete: Array = FabPreview.banner_lines(rows, [
-		{"name": "job.gbrjob", "reason": "metadata, not artwork"}], note,
+	# THE ALARM MEANS SOMETHING, which is a claim about both directions.
+	#
+	# Every emission carries a .gbrjob manifest — JSON metadata with nothing to
+	# draw — so counting it as a layer the preview failed to show raised
+	# INCOMPLETE on every board that ever previewed. An alarm that is always on
+	# is an alarm nobody reads, and the one it would have to survive is a real
+	# missing copper layer.
+	var job_only: Array = FabPreview.banner_lines(rows, [
+		{"name": "job.gbrjob", "kind": FabPreview.MISS_JOB,
+			"reason": "job manifest — metadata, not artwork"}], note,
 		FabPreview.PICK_ALL)
-	check("2i: an incomplete artifact set is still admitted, in the banner",
-		"INCOMPLETE — 1 emitted file(s) not shown:" in incomplete)
+	var alarmed := func(lines: Array) -> bool:
+		for l in lines:
+			if str(l).begins_with("INCOMPLETE"):
+				return true
+		return false
+	check("2i: a complete emission does NOT alarm over its own job manifest",
+		not alarmed.call(job_only), str(job_only))
+	check("2j: ...but the manifest is still accounted for, unalarmingly",
+		"(1 emitted file(s) carry no artwork — job manifest)" in job_only,
+		str(job_only))
+	var missing: Array = FabPreview.banner_lines(rows, [
+		{"name": "job.gbrjob", "kind": FabPreview.MISS_JOB, "reason": "metadata"},
+		{"name": "Board-F_Cu.gbr", "kind": FabPreview.MISS_ARTWORK,
+			"reason": "gerbonara could not parse the emitted file"}], note,
+		FabPreview.PICK_ALL)
+	check("2k: a genuinely missing artwork layer DOES alarm, and names itself",
+		alarmed.call(missing) and "INCOMPLETE — 1 emitted artwork file(s) not shown:"
+			in missing and str(missing).findn("F_Cu") != -1, str(missing))
+	# An older worker labels nothing. Falling back to the suffix keeps the alarm
+	# honest on both sides rather than reverting to always-on.
+	var unlabelled: Array = FabPreview.banner_lines(rows, [
+		{"name": "job.gbrjob", "reason": "metadata"},
+		{"name": "Board-B_Cu.gbr", "reason": "unreadable"}], note,
+		FabPreview.PICK_ALL)
+	check("2l: an unlabelled skip is classified by its suffix, not counted blind",
+		alarmed.call(unlabelled)
+			and "INCOMPLETE — 1 emitted artwork file(s) not shown:" in unlabelled,
+		str(unlabelled))
 
 
 # ── 3. THE PICKER ─────────────────────────────────────────────────────────────
@@ -623,3 +670,192 @@ func _run_stale_retraction() -> void:
 		str(panel._status_label.text).findn("Fab preview OFF") == -1,
 		str(panel._status_label.text))
 	panel.free()
+
+
+# ── 6. THE PREVIEW IS A VIEW, NOT A PICTURE ───────────────────────────────────
+#
+# WHAT WAS WRONG. The artwork was letterboxed into the canvas rect and drawn
+# there whatever the camera said, so it could not be panned or zoomed and a
+# human could not get close enough to a part to judge it — which is the entire
+# job of a fabrication preview. Worse, the canvas still ran its EDITING grammar
+# underneath: a drag aimed at panning moved whatever was under the cursor, the
+# board edit invalidated the live preview, and the layer picker then refused
+# every layer it had just advertised.
+
+## The worker's own bounds for the 40 x 30 spike board, in the BOARD
+## coordinates it reports them in (`bounds_board_mm`) — the outline plus the
+## half stroke-width the artwork actually occupies.
+const BOARD_BOUNDS := {"min_x": -0.025, "min_y": -0.025,
+	"max_x": 40.025, "max_y": 30.025}
+
+## Where the one part sits, and how far the drag travels. 40 px at zoom 10 is
+## 4 mm — well past DRAG_TRAVEL_PX, and past the 2.54 mm grid the move snaps to,
+## so a move that lands must change the board.
+const PART_MM := Vector2(5.0, 5.0)
+const DRAG_PX := Vector2(40.0, 0.0)
+
+
+func _board_with_part() -> Dictionary:
+	var board := _tiny_board("camera")
+	board["grid_mm"] = 2.54
+	board["components"] = [{"ref": "R1", "footprint": "R_0805", "value": "1k",
+		"x_mm": PART_MM.x, "y_mm": PART_MM.y, "rotation_deg": 0.0, "layer": "top",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+			"pad_width_mm": 1.0, "pad_height_mm": 1.0}]}]
+	return board
+
+
+## A canvas IN THE TREE holding the artwork — _gui_input returns early outside
+## it, so a rig that skipped this would assert nothing at all.
+func _canvas_rig() -> Variant:
+	var data = PCBData.new()
+	data.from_board_dict(_board_with_part())
+	var canvas = PcbCanvasScript.new()
+	canvas.data = data
+	root.add_child(canvas)
+	# AFTER the add: entering the tree can re-run the container sort, and a
+	# canvas sized to nothing would make every screen-rect assertion vacuous.
+	canvas.size = Vector2(PANEL_W, PANEL_H)
+	return canvas
+
+
+func _press(canvas, at: Vector2, pressed: bool) -> void:
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.position = at
+	canvas._gui_input(ev)
+
+
+func _motion(canvas, at: Vector2) -> void:
+	var ev := InputEventMouseMotion.new()
+	ev.position = at
+	canvas._gui_input(ev)
+
+
+## The whole board as ONE comparable value. Serialized rather than compared as a
+## Dictionary so the assertion cannot quietly become a reference check.
+func _board_text(canvas) -> String:
+	return JSON.stringify(canvas.data.to_board_dict(), "", true, true)
+
+
+## Press, travel, release — the gesture a human makes trying to move the view.
+func _drag(canvas, from: Vector2, to: Vector2) -> void:
+	_press(canvas, from, true)
+	_motion(canvas, to)
+	_press(canvas, to, false)
+
+
+func _run_camera_and_input() -> void:
+	print("\n-- 6: the artwork rides the board camera, and only the camera --")
+
+	check("6a: the reply's bounds become a board-space rect",
+		FabPreview.board_rect(BOARD_BOUNDS).size.is_equal_approx(Vector2(40.05, 30.05)),
+		str(FabPreview.board_rect(BOARD_BOUNDS)))
+	check("6b: a missing or degenerate bounds reply places nothing",
+		FabPreview.board_rect(null) == Rect2()
+			and FabPreview.board_rect({"min_x": 1.0, "min_y": 1.0,
+				"max_x": 1.0, "max_y": 1.0}) == Rect2())
+
+	var canvas = _canvas_rig()
+	canvas.set_fab_preview(_reply_layers(), [], "note", BOARD_BOUNDS)
+	check("6c: the preview opens holding the artwork AND its extent",
+		(canvas._fab_preview_layers as Array).size() == EMITTED.size()
+			and canvas._fab_preview_bounds.size.x > 0.0)
+
+	# THE CAMERA CONVENTION, written out from pcb_canvas's own declaration
+	# (world_to_screen = world*zoom + pan_offset + size/2) rather than read back
+	# out of the function under test.
+	canvas.zoom = 10.0
+	canvas.pan_offset = Vector2.ZERO
+	var placed: Rect2 = canvas.fab_preview_screen_rect()
+	var expect_pos: Vector2 = canvas._fab_preview_bounds.position * 10.0 + canvas.size / 2.0
+	check("6d: the artwork lands where the board camera puts it",
+		placed.position.is_equal_approx(expect_pos)
+			and placed.size.is_equal_approx(canvas._fab_preview_bounds.size * 10.0),
+		"%s vs %s" % [str(placed), str(expect_pos)])
+
+	# TWO OBSERVATIONS AT TWO CAMERA STATES. A letterbox into the canvas rect
+	# answers both identically, which is exactly what was wrong.
+	canvas.pan_offset = Vector2(37.0, -11.0)
+	var panned: Rect2 = canvas.fab_preview_screen_rect()
+	check("6e: a pan MOVES the artwork by the pan, and only by the pan",
+		(panned.position - placed.position).is_equal_approx(Vector2(37.0, -11.0))
+			and panned.size.is_equal_approx(placed.size), str(panned))
+	canvas.pan_offset = Vector2.ZERO
+	canvas.zoom = 20.0
+	var zoomed: Rect2 = canvas.fab_preview_screen_rect()
+	check("6f: a zoom GROWS it by the zoom — the board can be inspected closely",
+		zoomed.size.is_equal_approx(placed.size * 2.0), str(zoomed))
+	check("6g: ...and it is that rect the draw places the artwork in",
+		FabPreview.placement(canvas.size, Vector2(640, 480), 40.0, zoomed) == zoomed)
+	check("6h: ...while a reply with no bounds still letterboxes, as before",
+		FabPreview.placement(canvas.size, Vector2(640, 480), 40.0, Rect2())
+			== FabPreview.art_rect(canvas.size, Vector2(640, 480), 40.0))
+
+	# ── THE INPUT HALF ──────────────────────────────────────────────────────
+	#
+	# THE CONTROL ARM FIRST. Without it "the board did not move" is satisfied by
+	# a gesture that was never an edit — a threshold not crossed, a component
+	# not hit, a canvas not in the tree.
+	canvas.show_fab_preview = false
+	canvas.zoom = 10.0
+	canvas.pan_offset = Vector2.ZERO
+	var grab: Vector2 = canvas.world_to_screen(PART_MM)
+	var before := _board_text(canvas)
+	_drag(canvas, grab, grab + DRAG_PX)
+	check("6i: CONTROL — with the preview down that drag really does edit the board",
+		_board_text(canvas) != before, "the gesture never moved the part; 6j proves nothing")
+
+	# THE CLAIM. Same canvas, same gesture, preview up.
+	canvas.data.from_board_dict(_board_with_part())
+	canvas.show_fab_preview = true
+	canvas.zoom = 10.0
+	canvas.pan_offset = Vector2.ZERO
+	var guarded_before := _board_text(canvas)
+	var selection_before: Array = (canvas.selected_components as Array).duplicate()
+	var pan_before: Vector2 = canvas.pan_offset
+	_drag(canvas, grab, grab + DRAG_PX)
+	check("6j: under the preview the SAME drag leaves the board untouched",
+		_board_text(canvas) == guarded_before)
+	check("6k: ...because it panned the view instead",
+		(canvas.pan_offset - pan_before).is_equal_approx(DRAG_PX),
+		str(canvas.pan_offset))
+	check("6l: ...and nothing was selected out from under the human either",
+		(canvas.selected_components as Array) == selection_before)
+
+	# The wheel is the other half of "I cannot see parts closely". Driven from a
+	# zoom where the artwork is ALREADY drawn wider than it was rasterized for,
+	# so 6n is a statement about the refit and not about the clamp's floor.
+	canvas.zoom = 30.0
+	var zoom_before: float = canvas.zoom
+	var wheel := InputEventMouseButton.new()
+	wheel.button_index = MOUSE_BUTTON_WHEEL_UP
+	wheel.pressed = true
+	wheel.position = canvas.size / 2.0
+	canvas._gui_input(wheel)
+	check("6m: the wheel zooms the preview", canvas.zoom > zoom_before,
+		"%f -> %f" % [zoom_before, canvas.zoom])
+	# Zooming in draws the artwork wider than it was rasterized for, which is the
+	# resolution half of the legibility problem arriving through the camera.
+	var raster: float = float((canvas._fab_preview_layers[0] as Dictionary)
+		.get("raster_px", 0.0))
+	check("6n: ...and the raster is refit to the width it is now drawn at",
+		raster >= minf(canvas.fab_preview_screen_rect().size.x,
+			FabPreview.MAX_RASTER_PX) - 2.0,
+		"raster=%.0f drawn=%.0f" % [raster, canvas.fab_preview_screen_rect().size.x])
+
+	# A key that deletes on the live canvas must do nothing over artwork.
+	var key := InputEventKey.new()
+	key.keycode = KEY_DELETE
+	key.pressed = true
+	var key_before := _board_text(canvas)
+	canvas._gui_input(key)
+	check("6o: no key reaches the board while the preview owns the surface",
+		_board_text(canvas) == key_before)
+
+	# The extent is DRAW STATE: a capture without it would place the artwork
+	# somewhere else than the screen does.
+	check("6p: the artwork's extent reaches an off-screen capture",
+		"_fab_preview_bounds" in canvas.CAPTURE_MIRRORED_FIELDS)
+	canvas.queue_free()

@@ -791,8 +791,9 @@ def _fab_preview(params: dict) -> dict:
     params: {board|yaml} (anything ``_load`` accepts), plus optional ``name``.
     Reply: {ok: True, result: {
         layers: [{name, kind, sha256, byte_length, svg}],
-        unrendered: [{name, reason}],
+        unrendered: [{name, reason, kind: "job" | "artwork"}],
         bounds_mm: {min_x, min_y, max_x, max_y} | None,
+        bounds_board_mm: {min_x, min_y, max_x, max_y} | None,
         warnings: [...]}}
 
     EVERY EMITTED FILE IS ACCOUNTED FOR, in exactly one of ``layers`` or
@@ -801,6 +802,22 @@ def _fab_preview(params: dict) -> dict:
     the same false-clean direction the mask view refuses, and the precise
     failure this goal exists to remove. The caller must surface ``unrendered``;
     it is never empty-by-omission.
+
+    ``unrendered`` ENTRIES ARE NOT ALL THE SAME NEWS, and the ``kind`` field is
+    what lets a viewer tell them apart. ``"job"`` is a file that carries no
+    artwork by definition (the ``.gbrjob`` manifest every emission includes) —
+    accounted for, but nothing is missing from the picture. ``"artwork"`` is a
+    layer that SHOULD have been drawable and was not, which is the only case a
+    viewer may raise an incomplete alarm on. Without the split every board
+    alarms on its own job manifest, and an alarm that is always on hides the
+    one that matters.
+
+    ``bounds_board_mm`` IS THE SAME EXTENT IN THE CALLER'S COORDINATES. The
+    emitter negates y on the way into Gerber (see ``gerber._harvest_ir``), so
+    ``bounds_mm`` — which is read back off the artifacts — is in Gerber space
+    and cannot be handed to a board-space camera. The conversion is done HERE,
+    where the negation is owned, rather than re-derived by every viewer that
+    wants to place the artwork over the board it describes.
 
     ONE SHARED COORDINATE FRAME: every layer is rendered with ``force_bounds``
     set to the UNION of all layer bounds, so the SVGs overlay exactly. Rendering
@@ -842,7 +859,7 @@ def _fab_preview(params: dict) -> dict:
     for fname, text in files.items():
         lower = fname.lower()
         if lower.endswith(".gbrjob"):
-            unrendered.append({"name": fname, "reason":
+            unrendered.append({"name": fname, "kind": "job", "reason":
                                "job manifest (.gbrjob) — metadata, not artwork; nothing to draw"})
             continue
         try:
@@ -855,7 +872,7 @@ def _fab_preview(params: dict) -> dict:
         except Exception as exc:
             # NEVER a silent drop: an artifact we emitted but cannot read back
             # is a finding about our own output, and the caller must see it.
-            unrendered.append({"name": fname,
+            unrendered.append({"name": fname, "kind": "artwork",
                                "reason": f"gerbonara could not parse the emitted file: {exc}"})
             continue
         parsed.append((fname, kind, obj))
@@ -886,7 +903,7 @@ def _fab_preview(params: dict) -> dict:
         try:
             svg = str(obj.to_svg(force_bounds=force_bounds, arg_unit=MM, svg_unit=MM))
         except Exception as exc:
-            unrendered.append({"name": fname,
+            unrendered.append({"name": fname, "kind": "artwork",
                                "reason": f"parsed but could not be rendered: {exc}"})
             continue
         layers.append({
@@ -903,6 +920,11 @@ def _fab_preview(params: dict) -> dict:
         "bounds_mm": None if bounds is None else {
             "min_x": bounds[0], "min_y": bounds[1],
             "max_x": bounds[2], "max_y": bounds[3]},
+        # THE SAME RECTANGLE, un-negated: board y grows downward, Gerber y
+        # upward, so the two y bounds swap as well as flip sign.
+        "bounds_board_mm": None if bounds is None else {
+            "min_x": bounds[0], "min_y": -bounds[3],
+            "max_x": bounds[2], "max_y": -bounds[1]},
         "warnings": warnings,
     }}
 

@@ -495,13 +495,18 @@ var FabPreviewChannel = ToolSpec{
 		"Forwards verbatim to the Python worker's 'fab_preview' method. Args: " +
 		"{board:<canonical Board dict>} or {yaml}, optional {name}. Returns " +
 		"{ok, result:{layers:[{name, kind:'gerber'|'drill', sha256, " +
-		"byte_length, svg}], unrendered:[{name, reason}], bounds_mm, " +
-		"warnings}}. The SVGs are rendered from the emitted bytes by a " +
-		"different library than the one that wrote them, and every layer " +
-		"shares one forced coordinate frame so they overlay exactly. EVERY " +
-		"emitted file appears in exactly one of 'layers' or 'unrendered' with " +
-		"a named reason — a viewer that ignored 'unrendered' would present a " +
-		"KNOWN-INCOMPLETE artifact set as complete.",
+		"byte_length, svg}], unrendered:[{name, reason, kind:'job'|'artwork'}], " +
+		"bounds_mm, bounds_board_mm, warnings}}. The SVGs are rendered from " +
+		"the emitted bytes by a different library than the one that wrote " +
+		"them, and every layer shares one forced coordinate frame so they " +
+		"overlay exactly. EVERY emitted file appears in exactly one of " +
+		"'layers' or 'unrendered' with a named reason — a viewer that ignored " +
+		"'unrendered' would present a KNOWN-INCOMPLETE artifact set as " +
+		"complete. An 'unrendered' entry of kind 'job' carries no artwork by " +
+		"definition (the .gbrjob manifest) and is NOT a missing layer; only " +
+		"kind 'artwork' is. 'bounds_mm' is in Gerber space (y negated); " +
+		"'bounds_board_mm' is the same extent in board coordinates, which is " +
+		"what a viewer places the artwork with.",
 	InputSchema: json.RawMessage(`{"type":"object"}`),
 }
 

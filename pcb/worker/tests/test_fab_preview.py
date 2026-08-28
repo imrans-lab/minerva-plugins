@@ -125,3 +125,76 @@ def test_bounds_are_reported_for_a_real_board():
     assert bounds is not None
     assert bounds["max_x"] > bounds["min_x"]
     assert bounds["max_y"] > bounds["min_y"]
+
+
+def test_only_the_job_manifest_is_labelled_not_artwork():
+    """A viewer cannot raise an honest "incomplete" alarm without knowing which
+    skips are missing ARTWORK and which are files that never had any. Every
+    emission carries a .gbrjob, so a viewer that counted it raised the alarm on
+    every board — and an alarm that is always on is one nobody reads, which is
+    how a genuinely missing copper layer would pass the gate.
+
+    ORACLE: the emitted filenames, from the SHIPPING path. The label is checked
+    against the suffix each file actually has, not against the label itself.
+
+    MUTATIONS THIS CATCHES: dropping the ``kind`` field (the viewer has nothing
+    to filter on); labelling every skip "job" (which would hide a real
+    unreadable layer behind the manifest's excuse); labelling the manifest
+    "artwork" (the alarm comes back on every board).
+    """
+    result = _preview()
+    emitted = set(_emitted().keys())
+    for entry in result["unrendered"]:
+        assert entry["name"] in emitted, entry
+        expected = "job" if entry["name"].lower().endswith(".gbrjob") else "artwork"
+        assert entry.get("kind") == expected, entry
+
+    # The whole point, stated as the viewer sees it: a healthy board has NOTHING
+    # missing from its picture, so nothing for it to alarm about.
+    missing = [u for u in result["unrendered"] if u.get("kind") != "job"]
+    assert missing == [], missing
+    assert [u for u in result["unrendered"] if u.get("kind") == "job"], \
+        "the .gbrjob manifest is always skipped and must still be reported"
+
+
+def test_bounds_come_back_in_the_caller_s_own_coordinates():
+    """The preview is only placeable over the board it describes if its extent
+    is expressed the way the caller expresses the board. The emitter negates y
+    on the way into Gerber, so ``bounds_mm`` — read back off the artifacts — is
+    y-up and describes a rectangle BELOW the origin. A viewer handed only that
+    either draws the board upside down or re-derives the emitter's sign
+    convention for itself.
+
+    ORACLE: the board YAML's own outline, which is an independent derivation of
+    where the board is — nothing in the preview path produced it.
+
+    MUTATIONS THIS CATCHES: copying ``bounds_mm`` through unflipped (the y range
+    would not contain the board at all); flipping x instead of y; swapping the
+    min/max pair only, or negating only one of them (either leaves an inverted
+    rectangle).
+    """
+    board = _board()
+    width = float(board["width_mm"])
+    height = float(board["height_mm"])
+    bounds = _preview()["bounds_board_mm"]
+    assert bounds is not None
+
+    # A well-formed rectangle, in the direction board coordinates run.
+    assert bounds["max_x"] > bounds["min_x"]
+    assert bounds["max_y"] > bounds["min_y"]
+
+    # THE BOARD IS INSIDE IT. The artwork's extent is the union of every layer,
+    # so it is the outline plus at most a stroke half-width of margin — never
+    # the outline reflected through the origin, which is what the unflipped
+    # bounds would be.
+    margin = 1.0
+    assert -margin <= bounds["min_x"] <= margin, bounds
+    assert -margin <= bounds["min_y"] <= margin, bounds
+    assert width - margin <= bounds["max_x"] <= width + margin, bounds
+    assert height - margin <= bounds["max_y"] <= height + margin, bounds
+
+    # ...and it is genuinely a conversion, not the Gerber rectangle relabelled.
+    gerber = _preview()["bounds_mm"]
+    assert bounds["min_y"] == -gerber["max_y"]
+    assert bounds["max_y"] == -gerber["min_y"]
+    assert bounds["min_x"] == gerber["min_x"]

@@ -33,6 +33,13 @@ extends RefCounted
 ## The pick that shows every emitted layer at once.
 const PICK_ALL := "all"
 
+## The two kinds of `unrendered` entry. A JOB file (the .gbrjob manifest) has no
+## artwork to draw and nothing is missing from the picture without it; an
+## ARTWORK file is a layer that should have been drawable and was not. Only the
+## second raises the incomplete banner — see missing_artwork.
+const MISS_JOB := "job"
+const MISS_ARTWORK := "artwork"
+
 ## The canvas ground this view paints for itself, so the contrast of every ink
 ## below is a property of this file rather than of the caller's clear colour.
 const GROUND := Color(0.08, 0.08, 0.08)
@@ -55,7 +62,13 @@ const UNDER_ALPHA := 0.55
 
 ## Layers that stay at full alpha in the composite: what a human reads a board
 ## BY. Everything else recedes under them.
-const TOP_KEYS: Array[String] = ["f_silks", "b_silks", "edge_cuts"]
+##
+## THE DRILLS ARE IN THIS GROUP, and they were the omission that made the
+## composite unusable: a hole is not an annotation on the copper, it is a
+## feature of the finished board, and at UNDER_ALPHA over a copper bed of
+## similar hue a 0.8 mm hole is a smudge. The outline is here for the same
+## reason — those two plus the silk are what a human checks a board BY.
+const TOP_KEYS: Array[String] = ["f_silks", "b_silks", "edge_cuts", "pth", "npth"]
 
 ## INK BY EMITTED-LAYER KEY. Every entry clears 4.5:1 against GROUND on its own
 ## (pinned by the suite, which recomputes the ratio rather than trusting the
@@ -85,10 +98,15 @@ const FALLBACK_INK := Color(0.85, 0.85, 0.85)
 
 ## Draw order within the composite, low first. A layer whose key is unknown
 ## sits with copper: it is more likely to be copper than to be an outline.
+##
+## DRILLS SIT ABOVE THE SILK, not below it: silk is printed and a hole is
+## drilled through everything printed on it, so a hole hidden under a silk
+## outline is the one place the composite would disagree with the finished
+## board. Only the board outline draws over them.
 const _RANK := {
 	"f_mask": 0, "b_mask": 0, "f_paste": 1, "b_paste": 1,
-	"f_cu": 2, "b_cu": 2, "pth": 3, "npth": 3,
-	"f_silks": 4, "b_silks": 4, "edge_cuts": 5,
+	"f_cu": 2, "b_cu": 2, "f_silks": 3, "b_silks": 3,
+	"pth": 4, "npth": 4, "edge_cuts": 5,
 }
 const _RANK_DEFAULT := 2
 
@@ -238,7 +256,7 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 	var missed: Array = unrendered.duplicate(true)
 	for entry in layers:
 		if not (entry is Dictionary):
-			missed.append({"name": "(malformed layer entry)",
+			missed.append({"name": "(malformed layer entry)", "kind": MISS_ARTWORK,
 				"reason": "the worker reply carried a layer that was not a record"})
 			continue
 		var lay: Dictionary = entry
@@ -248,7 +266,7 @@ static func adopt(layers: Array, unrendered: Array, held_pick: String,
 		var inked := "" if svg.is_empty() else recolor_svg(svg, ink_for(key))
 		var img: Image = null if inked.is_empty() else rasterize(inked, target_px)
 		if img == null:
-			missed.append({"name": name,
+			missed.append({"name": name, "kind": MISS_ARTWORK,
 				"reason": "the engine could not rasterize the worker's SVG for this layer"})
 			continue
 		var aspect := aspect_of(img)
@@ -349,12 +367,43 @@ static func banner_lines(rows: Array, unrendered: Array, note: String,
 			int(row.get("byte_length", 0)), str(row.get("sha256", "")).substr(0, 12)])
 	if not note.is_empty():
 		lines.append(note)
-	if not unrendered.is_empty():
-		lines.append("INCOMPLETE — %d emitted file(s) not shown:" % unrendered.size())
-		for u in unrendered:
+	var missing := missing_artwork(unrendered)
+	if not missing.is_empty():
+		lines.append("INCOMPLETE — %d emitted artwork file(s) not shown:" % missing.size())
+		for u in missing:
 			lines.append("    %s — %s" % [str((u as Dictionary).get("name", "?")),
 				str((u as Dictionary).get("reason", ""))])
+	var carried := unrendered.size() - missing.size()
+	if carried > 0:
+		lines.append("(%d emitted file(s) carry no artwork — job manifest)" % carried)
 	return lines
+
+
+## THE UNRENDERED FILES THAT ARE ACTUALLY MISSING FROM THE PICTURE.
+##
+## Every emission includes a .gbrjob manifest, which is JSON metadata and has
+## nothing to draw. Counting it as a layer the preview failed to show raised the
+## incomplete banner on EVERY board, and an alarm that is always on is an alarm
+## nobody reads — which is precisely how a genuinely missing copper layer would
+## get through the gate this view exists to be.
+##
+## The worker labels each skip (`kind`: "job" or "artwork"). The filename is
+## consulted as well, not instead: a preview served by an older worker that
+## labels nothing would otherwise go back to alarming on every board, and the
+## suffix is the same fact the worker classified on.
+static func missing_artwork(unrendered: Array) -> Array:
+	var out: Array = []
+	for u in unrendered:
+		if not (u is Dictionary):
+			out.append(u)
+			continue
+		var entry: Dictionary = u
+		if str(entry.get("kind", "")) == MISS_JOB:
+			continue
+		if str(entry.get("name", "")).to_lower().ends_with(".gbrjob"):
+			continue
+		out.append(entry)
+	return out
 
 
 ## How many legend rows the chips wrap into. 0 when there is no legend (a single
@@ -391,16 +440,46 @@ static func art_rect(canvas_size: Vector2, art_px: Vector2, banner_h: float) -> 
 	return Rect2(free.position + (free.size - drawn) * 0.5, drawn)
 
 
+## THE ARTWORK'S RECTANGLE IN BOARD MILLIMETRES, from the worker's
+## `bounds_board_mm`. An empty Rect2 when the reply carried none — the caller
+## then has nothing to place the artwork with and falls back to the letterbox.
+##
+## The worker converts out of Gerber's y-up space for us (see its
+## `bounds_board_mm`), so this is a read, not a derivation: nothing here knows
+## the emitter's sign convention and nothing here should.
+static func board_rect(bounds) -> Rect2:
+	if not (bounds is Dictionary):
+		return Rect2()
+	var b: Dictionary = bounds
+	var min_x := float(b.get("min_x", 0.0))
+	var min_y := float(b.get("min_y", 0.0))
+	var w := float(b.get("max_x", 0.0)) - min_x
+	var h := float(b.get("max_y", 0.0)) - min_y
+	if w <= 0.0 or h <= 0.0:
+		return Rect2()
+	return Rect2(min_x, min_y, w, h)
+
+
 ## Draw the whole preview onto `ci`. Ground, artwork, banner — in that order,
-## so the banner is opaque over the ground and the artwork never reaches it.
+## so the banner is opaque over the ground and the artwork is never drawn over
+## the text describing it.
+##
+## `art_screen` IS THE CAMERA. When it has area the artwork is drawn exactly
+## there — the caller solved it through the same world-to-screen transform the
+## editor's own view uses, so the preview pans and zooms with the board instead
+## of being a fixed-size picture of it. A preview you cannot magnify cannot be
+## inspected, which is the whole job of the view. An empty rect falls back to
+## letterboxing the artwork into what the banner leaves, which is the only thing
+## available when the reply carried no bounds.
 static func draw(ci: CanvasItem, canvas_size: Vector2, rows: Array,
-		unrendered: Array, note: String, pick: String) -> void:
+		unrendered: Array, note: String, pick: String,
+		art_screen: Rect2 = Rect2()) -> void:
 	ci.draw_rect(Rect2(Vector2.ZERO, canvas_size), GROUND)
 	var banner := banner_rect(canvas_size, rows, unrendered, note, pick)
 	if not rows.is_empty():
 		var first: Texture2D = (rows[0] as Dictionary).get("texture")
 		var art: Vector2 = first.get_size() if first != null else canvas_size
-		var rect := art_rect(canvas_size, art, banner.size.y)
+		var rect := placement(canvas_size, art, banner.size.y, art_screen)
 		for row in rows:
 			var key := str((row as Dictionary).get("key", ""))
 			if pick != PICK_ALL and key != pick:
@@ -410,6 +489,17 @@ static func draw(ci: CanvasItem, canvas_size: Vector2, rows: Array,
 				ci.draw_texture_rect(tex, rect, false,
 					Color(1, 1, 1, draw_alpha(key, pick)))
 	_draw_banner(ci, canvas_size, banner, rows, unrendered, note, pick)
+
+
+## WHERE THE ARTWORK GOES: the camera's rect when there is one, the letterbox
+## when there is not. Separated from `draw` because it is the whole placement
+## decision and a headless suite can read it, while nothing about a
+## draw_texture_rect call can be read back.
+static func placement(canvas_size: Vector2, art_px: Vector2, banner_h: float,
+		art_screen: Rect2) -> Rect2:
+	if art_screen.size.x > 0.0 and art_screen.size.y > 0.0:
+		return art_screen
+	return art_rect(canvas_size, art_px, banner_h)
 
 
 static func _draw_banner(ci: CanvasItem, canvas_size: Vector2, banner: Rect2,
@@ -532,3 +622,87 @@ static func composite(ink: Color, alpha: float, ground: Color) -> Color:
 		ink.r * alpha + ground.r * (1.0 - alpha),
 		ink.g * alpha + ground.g * (1.0 - alpha),
 		ink.b * alpha + ground.b * (1.0 - alpha))
+
+
+## ── THE CAMERA, WHILE THE PREVIEW IS UP ─────────────────────────────────────
+##
+## The fab preview REPLACES the canvas view: while it is drawn, none of the
+## entities the editor's click grammar acts on are on screen. So the canvas
+## routes its whole input here instead, and exactly the VIEW gestures stay
+## live — any drag pans, the wheel and the pinch zoom, the trackpad pan
+## scrolls. Everything else (select, move, the drawing tools, the delete keys)
+## is dropped for as long as the preview is up.
+##
+## THAT DROP IS ALSO WHAT KEEPS THE PREVIEW ALIVE. A board edit invalidates a
+## live preview and takes the View flag down with it, deliberately — artwork
+## that no longer describes the board must not be shown under a promise that it
+## does. But the canvas used to accept edit drags underneath the preview, so a
+## human dragging to look closer moved whichever component was under the cursor
+## and destroyed the view they were trying to read: the preview blanked, the
+## flag came down, and the layer picker then refused every layer it had just
+## advertised.
+
+
+## Route one canvas input event while the preview is up. Returns true when the
+## event was consumed (always, for the events this handles).
+static func handle_input(canvas, event: InputEvent) -> bool:
+	if canvas == null:
+		return false
+	if event is InputEventMouseButton:
+		return _handle_button(canvas, event as InputEventMouseButton)
+	if event is InputEventMouseMotion:
+		if not bool(canvas.is_panning):
+			return true
+		canvas.pan_offset = canvas.pan_start_offset \
+			+ (event.position - canvas.pan_start_mouse)
+		canvas.view_changed.emit()
+		canvas.queue_redraw()
+		return true
+	if event is InputEventPanGesture:
+		canvas._handle_pan_gesture(event)
+		return true
+	if event is InputEventMagnifyGesture:
+		canvas._handle_magnify_gesture(event)
+		_resharpen(canvas)
+		return true
+	# Keys included: no board edit may originate from a view that is not drawing
+	# the board.
+	return true
+
+
+static func _handle_button(canvas, event: InputEventMouseButton) -> bool:
+	match event.button_index:
+		MOUSE_BUTTON_WHEEL_UP:
+			canvas._zoom_at(event.position, 1.2)
+			_resharpen(canvas)
+		MOUSE_BUTTON_WHEEL_DOWN:
+			canvas._zoom_at(event.position, 0.8)
+			_resharpen(canvas)
+		MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT:
+			# ANY button drags the view. There is no second gesture to
+			# disambiguate against here, and the button a human reaches for
+			# first is the left one.
+			canvas.is_panning = event.pressed
+			if event.pressed:
+				canvas.grab_focus()
+				canvas.pan_start_mouse = event.position
+				canvas.pan_start_offset = canvas.pan_offset
+	return true
+
+
+## Re-rasterize the held layers for the size they are now DRAWN at.
+##
+## `refit` exists because a texture made for one width goes soft when it is
+## drawn wider, and zooming in is exactly that — the resolution half of the
+## legibility problem, arriving through the camera instead of through a panel
+## resize. It re-rasterizes only layers that actually grew, and MAX_RASTER_PX
+## bounds how far that can go, so a zoom gesture costs at most a couple of
+## re-rasters over the whole zoom range and nothing at all once there.
+static func _resharpen(canvas) -> void:
+	var drawn := float(canvas.fab_preview_screen_rect().size.x)
+	if drawn <= 0.0:
+		return
+	var refitted: Array = refit(canvas._fab_preview_layers, drawn)
+	if not is_same(refitted, canvas._fab_preview_layers):
+		canvas._fab_preview_layers = refitted
+		canvas.queue_redraw()

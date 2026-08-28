@@ -3919,6 +3919,14 @@ func _gui_input(event: InputEvent) -> void:
 	if not is_inside_tree() or not data:
 		return
 
+	# THE FAB PREVIEW OWNS THE SURFACE while it is up, exactly as it owns the
+	# draw. None of the entities the grammar below acts on are on screen, so
+	# only the view gestures survive — see PcbFabPreview.handle_input for why
+	# letting an edit through here destroyed the preview it was aimed at.
+	if show_fab_preview:
+		PcbFabPreview.handle_input(self, event)
+		return
+
 	if event is InputEventMouseButton:
 		_handle_mouse_button(event)
 	elif event is InputEventMouseMotion:
@@ -11893,6 +11901,12 @@ var _fab_preview_layers: Array = []
 ## exists to remove.
 var _fab_preview_unrendered: Array = []
 var _fab_preview_note: String = ""
+## The artwork's extent in BOARD millimetres, as the worker reported it
+## (`bounds_board_mm`). This is what lets the preview be placed through the same
+## camera the editor's own view uses, so it pans and zooms with the board; an
+## empty rect means the reply carried no bounds and the artwork is letterboxed
+## into the canvas instead.
+var _fab_preview_bounds: Rect2 = Rect2()
 ## WHICH emitted layer is isolated, or "all". Ten layers composited is a picture
 ## of no layer; this is how a human checks one before it is fabricated. Written
 ## through set_fab_preview_layer so it can never name a layer that is not held.
@@ -11903,13 +11917,32 @@ var fab_preview_layer: String = PcbFabPreview.PICK_ALL
 ## recoloured and rasterized ONCE here rather than per frame. A layer the engine
 ## cannot parse joins `unrendered` rather than being dropped, so the count the
 ## viewer sees always accounts for every emitted file.
-func set_fab_preview(layers: Array, unrendered: Array, note: String = "") -> void:
+## `bounds_board_mm` is the worker's artwork extent in board millimetres. With
+## it the preview is placed through the board camera and FRAMED on adoption, so
+## the view opens showing the whole artwork and then pans and zooms like the
+## board; without it the artwork is letterboxed into the canvas as before.
+func set_fab_preview(layers: Array, unrendered: Array, note: String = "",
+		bounds_board_mm = null) -> void:
 	var adopted := PcbFabPreview.adopt(layers, unrendered, fab_preview_layer, size.x)
 	_fab_preview_layers = adopted["layers"]
 	_fab_preview_unrendered = adopted["unrendered"]
 	fab_preview_layer = str(adopted["pick"])
 	_fab_preview_note = note
+	_fab_preview_bounds = PcbFabPreview.board_rect(bounds_board_mm)
+	if not _fab_preview_layers.is_empty() and _fab_preview_bounds.size.x > 0.0:
+		# Opening the view is the one moment the camera may be moved for the
+		# human: from here on it is theirs.
+		frame_rect(_fab_preview_bounds, 1.0)
 	queue_redraw()
+
+
+## Where the emitted artwork lands on screen, through the board camera — empty
+## when no bounds were reported, which is the signal to letterbox instead.
+func fab_preview_screen_rect() -> Rect2:
+	if _fab_preview_bounds.size.x <= 0.0 or _fab_preview_bounds.size.y <= 0.0:
+		return Rect2()
+	return Rect2(world_to_screen(_fab_preview_bounds.position),
+		_fab_preview_bounds.size * zoom)
 
 
 ## Every value fab_preview_layer may take for the artwork currently held.
@@ -11929,7 +11962,7 @@ func set_fab_preview_layer(key: String) -> bool:
 
 func _draw_fab_preview() -> void:
 	PcbFabPreview.draw(self, size, _fab_preview_layers, _fab_preview_unrendered,
-		_fab_preview_note, fab_preview_layer)
+		_fab_preview_note, fab_preview_layer, fab_preview_screen_rect())
 
 
 ## Every piece of state that decides WHAT THIS CANVAS DRAWS, as one list.
@@ -11967,7 +12000,7 @@ const CAPTURE_MIRRORED_FIELDS := [
 	"selected_staged_ids",
 	# Fab preview replaces the whole view, so it must survive the copy.
 	"show_fab_preview", "_fab_preview_layers", "_fab_preview_unrendered",
-	"_fab_preview_note", "fab_preview_layer",
+	"_fab_preview_note", "fab_preview_layer", "_fab_preview_bounds",
 	# The disclosure itself — a screenshot must carry the same admission of
 	# what is approximate that the human sees.
 	"show_approximation_notice",

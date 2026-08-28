@@ -2008,10 +2008,18 @@ static func _view_state(host, args: Dictionary) -> Dictionary:
 				"note": "this panel predates the fab preview layer picker"}
 		if str(canvas.get("fab_preview_layer")) != want_fab:
 			if not canvas.set_fab_preview_layer(want_fab):
+				# WHY IT HOLDS NOTHING is the actionable half. An empty picker
+				# is almost never a mis-typed key: it is a preview that was
+				# never fetched, or one a board edit retracted between the read
+				# that listed the layers and this write.
+				var empty_note := "" if fab_choices.size() > 1 else \
+					" — the preview is holding no artwork at all; " \
+					+ "raise View > Fab preview (show_fab_preview) and read " \
+					+ "overlay_unavailable if it does not stay up"
 				return {"success": false, "error": "layer_not_emitted",
 					"unknown": want_fab, "available": fab_choices, "changed": changed,
-					"note": "the fab preview holds %s — it has no layer '%s' to isolate"
-						% [str(fab_choices), want_fab]}
+					"note": "the fab preview holds %s — it has no layer '%s' to isolate%s"
+						% [str(fab_choices), want_fab, empty_note]}
 			changed.append("fab_preview_layer")
 	# Independent of everything above: nothing in the view half reads or writes
 	# it, so its ordering among the view writes cannot matter.

@@ -6693,7 +6693,11 @@ func _refresh_fab_preview() -> void:
 	var warnings: Array = result.get("warnings", [])
 	if not warnings.is_empty():
 		note += " — %d emitter warning(s)" % warnings.size()
-	_canvas.set_fab_preview(layers, unrendered, note)
+	# THE BOUNDS ARE WHAT MAKE IT A VIEW rather than a picture: with the
+	# artwork's extent in board millimetres the canvas draws it through the same
+	# camera the editor uses, so the preview pans and zooms and a human can get
+	# close enough to a part to judge it.
+	_canvas.set_fab_preview(layers, unrendered, note, result.get("bounds_board_mm"))
 
 
 ## Refetch the mask overlay from the worker and hand it to the canvas. The
