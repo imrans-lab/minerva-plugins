@@ -59,7 +59,6 @@ const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 const _PcbLibraryPartScript: Script = preload("model/pcb_library_part.gd")
 const _PcbFabPreviewScript: Script = preload("model/pcb_fab_preview.gd")
-const _PcbAddPartSectionScript: Script = preload("pcb_add_part_section.gd")
 ## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
 ## working-layer chooser shows KiCad names and carries canonical ids — see
 ## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
@@ -597,13 +596,6 @@ func get_annotation_overlay_parent() -> Control:
 ## The board model (pcb_data.gd) this panel edits. Exposed for MCP/tests.
 func get_data():
 	return _data
-
-
-## The board surface, for a sidebar section that needs view coordinates. NOT
-## named get_canvas: CanvasItem already has one, returning a RID, and shadowing
-## it detaches this node from the engine's own canvas lookup.
-func get_board_canvas() -> Control:
-	return _canvas
 
 
 ## T2 (S2.2): the shadow routing workspace (pcb_routing_workspace.gd), dual-
@@ -2053,11 +2045,6 @@ func _build_sidebar() -> VBoxContainer:
 	_pin_selection_section.move_net_requested.connect(_on_move_net_requested)
 	_pin_selection_section.swap_nets_requested.connect(_on_swap_nets_requested)
 	_sidebar_content.add_child(_pin_selection_section)
-
-	# ADD A PART. The section runs the SAME panel-tools verb the MCP add runs;
-	# the panel hands it only the seams it owns — itself as the board host, and
-	# the status line.
-	_PcbAddPartSectionScript.new().mount(self, _sidebar_content, _set_status)
 
 	return _sidebar
 

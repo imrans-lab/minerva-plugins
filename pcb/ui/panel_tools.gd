@@ -541,9 +541,8 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	if not (data is Object):
 		return data
 	# The WHOLE construction — sketch layout, library-ref resolve, the refusals
-	# — is PcbLibraryPart.build, so the sidebar's Add Part button and this verb
-	# place the same part and refuse the same things. Nothing touches the board
-	# until the part is in hand.
+	# — is PcbLibraryPart.build. This verb is the ONLY path a part takes onto
+	# the board; nothing touches the board until the part is in hand.
 	var built: Dictionary = await PcbLibraryPart.build(host, data, args)
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "the component could not be built")))

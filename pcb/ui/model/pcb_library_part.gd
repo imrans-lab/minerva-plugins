@@ -25,9 +25,10 @@ extends RefCounted
 ## lead until it is resolved or removed, so "the board went indeterminate" is
 ## never the first news of it.
 ##
-## `build` below is the WHOLE construction both add paths run — the MCP verb
-## and the sidebar's Add Part button call it through one dispatch — so the two
-## cannot diverge in what they place or in what they refuse.
+## `build` below is the WHOLE construction an add runs. A part reaches the board
+## only through minerva_pcb_add_component — the panel offers no add affordance,
+## because choosing a part and its footprint is authoring, not layout — so this
+## module is the single place deciding what lands and what is refused.
 
 const _PcbComponent := preload("pcb_component.gd")
 
