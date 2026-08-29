@@ -476,15 +476,11 @@ func _test_overwide_trace_keeps_its_copper() -> void:
 			is_equal_approx(after, OVERWIDE),
 			"got %.3f — displaying a trace re-widened its copper" % after)
 
-	# And the row, if it is showing, is inside its own declared contract — a
-	# SpinBox reporting a value outside [min, max] would be a lying control.
-	var row_spin := panel.find_child("TracePropWidthSpin", true, false) as SpinBox
-	if row_spin != null:
-		check("the property spin never reports a value outside its own declared range",
-				row_spin.value >= row_spin.min_value - 0.0001
-				and row_spin.value <= row_spin.max_value + 0.0001,
-				"value=%.3f range=[%.3f, %.3f]"
-						% [row_spin.value, row_spin.min_value, row_spin.max_value])
+	# The sidebar no longer carries a per-trace width row (trace width is
+	# edited over MCP), so there is no property control to range-check here.
+	check("no per-trace width property row survives in the sidebar",
+			panel.find_child("TracePropWidthSpin", true, false) == null,
+			"a TracePropWidthSpin is back in the sidebar")
 
 	panel.queue_free()
 	await process_frame
