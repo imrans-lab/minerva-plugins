@@ -186,8 +186,10 @@ func _test_wide_mode() -> void:
 
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
 	check("sidebar node exists + visible", sidebar != null and sidebar.visible)
-	check("sidebar is the wide-mode width panel_layout owns, not a row's accident",
-		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px("wide")) < 1.0)
+	check("sidebar is the width panel_layout owns for 1100 px, not a row's accident",
+		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px(1100.0)) < 1.0)
+	check("…and at 1100 px that is more than the two-button floor",
+		sidebar != null and sidebar.size.x > load(LAYOUT_PATH).SIDEBAR_MIN_PX + 1.0)
 	check("toolbar fits without h-scroll", _toolbar_fits(panel))
 	check("panel min width fits the pane (no row inflates it)", _panel_min_fits(panel))
 
@@ -212,18 +214,19 @@ func _test_medium_mode() -> void:
 		canvas != null and canvas.size.x > 600.0 * 0.5)
 
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
-	check("sidebar is the medium-mode width panel_layout owns",
-		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px("medium")) < 1.0)
-	# The tool flows must WRAP, not stack: Select, Pan and Pin Select share a
-	# row at this width (the regression that motivated the owned width was one
-	# button per row once the Properties rows stopped propping the column open).
+	check("sidebar is the width panel_layout owns for 600 px",
+		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px(600.0)) < 1.0)
+	# The tool flows must WRAP, not stack: the column is never narrower than
+	# two buttons, so Select and Pan share a row at every width (the regression
+	# that motivated the owned width was one button per row once the
+	# Properties rows stopped propping the column open — then the content VBox
+	# was found to lack the expand flag the ScrollContainer needs).
 	var tools_flow: Control = panel.find_child("ToolsFlow", true, false)
-	var same_row := tools_flow != null and tools_flow.get_child_count() >= 3
+	var same_row := tools_flow != null and tools_flow.get_child_count() >= 2
 	if same_row:
-		var y0: float = (tools_flow.get_child(0) as Control).position.y
-		for i in range(3):
-			same_row = same_row and absf((tools_flow.get_child(i) as Control).position.y - y0) < 1.0
-	check("Select, Pan and Pin Select sit on ONE row of the tools flow", same_row)
+		same_row = absf((tools_flow.get_child(0) as Control).position.y
+			- (tools_flow.get_child(1) as Control).position.y) < 1.0
+	check("Select and Pan sit on ONE row of the tools flow", same_row)
 
 	_teardown(panel)
 

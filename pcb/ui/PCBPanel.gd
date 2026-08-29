@@ -1581,10 +1581,9 @@ func _load_icon(fname: String) -> Texture2D:
 func _build_sidebar() -> VBoxContainer:
 	_sidebar = VBoxContainer.new()
 	_sidebar.name = "RightSidebar"
-	# Width is per layout mode (panel_layout.sidebar_width_px), re-applied by
-	# _apply_layout_mode; the medium value is the resting default.
-	_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(
-		_PanelLayoutScript.MODE_MEDIUM)
+	# Width follows the panel's own width (panel_layout.sidebar_width_px),
+	# re-applied on every resize by _on_panel_resized.
+	_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(size.x)
 	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	# B3b height relief (docket 019fbbad9dac comment 970): RightSidebar's own
@@ -3314,6 +3313,9 @@ func _on_panel_redo_request() -> bool:
 func _on_panel_resized() -> void:
 	if _sidebar == null:
 		return
+	# The sidebar's width tracks the panel continuously; only the MODE has
+	# hysteresis.
+	_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(size.x)
 	var mode: String = _PanelLayoutScript.mode_for_width(size.x, _layout_mode)
 	if mode != _layout_mode:
 		_apply_layout_mode(mode)
@@ -3342,7 +3344,7 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_drawer_open = false  # drawer starts closed; canvas gets the width
 
 	if _sidebar != null:
-		_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(mode)
+		_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(size.x)
 		var show_sidebar := (not narrow) or _drawer_open
 		if _sidebar.visible and not show_sidebar and _dock_pane_in_sidebar():
 			# Never hide the annotation toolbar with a live author tool — the
