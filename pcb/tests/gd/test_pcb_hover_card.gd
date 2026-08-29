@@ -74,7 +74,11 @@ const TRACE_LENGTH := 12.0
 const ZONE_ID := "zone:1"
 const ZONE_NET := "GND"
 const ZONE_LAYER := "top"
-const ZONE_CENTRE := Vector2(17.5, 50.0)
+## A point ON the pour's outline (midpoint of its 10..25 mm top edge), not
+## inside it: _zone_at claims a copper pour only within a few px of its edge —
+## an area claim over a pour's interior would make everything under the pour
+## unpickable. A keepout is the one zone kind picked by its interior.
+const ZONE_EDGE := Vector2(17.5, 45.0)
 const VIA_ID := "via_1"
 const VIA_POS := Vector2(80.0, 50.0)
 const VIA_NET := "GND"
@@ -144,7 +148,7 @@ func _line_value(lines: PackedStringArray, prefix: String) -> String:
 
 ## One rotated part carrying a value and a library footprint, one 12 mm run of
 ## 0.4 mm copper on GND, a second part so the board is not a single object, a
-## GND pour on the bottom layer and a via, each placed clear of everything else.
+## GND pour on the top layer and a via, each placed clear of everything else.
 func _board():
 	var d := PCBData.new()
 	d.board_width = 100.0
@@ -600,7 +604,7 @@ func _run_zone_via_group() -> void:
 	get_root().add_child(canvas)
 	canvas.size = CANVAS_SIZE
 	await process_frame
-	_motion(canvas, ZONE_CENTRE)
+	_motion(canvas, ZONE_EDGE)
 	check("hovering a zone raises its card",
 		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == ZONE_ID)
 	_motion(canvas, VIA_POS)
