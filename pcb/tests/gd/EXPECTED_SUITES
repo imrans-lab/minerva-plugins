@@ -532,3 +532,4 @@ test_fab_preview_legibility.gd assertions=100
 # Counted by hand from the check()/check_eq() call sites: 16 + 6 + 10 + 6, none
 # inside a loop.
 test_canvas_render_truth.gd assertions=38
+test_refdes_anchor_document_load.gd assertions=12 real-worker

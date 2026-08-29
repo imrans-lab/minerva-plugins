@@ -713,6 +713,18 @@ func _adopt_derived_anchor(base: Dictionary) -> void:
 	refdes_anchor = _effective_refdes_anchor(base)
 
 
+## The same adoption for a wire value that arrives AFTER the load — a resolve
+## reply answering a board that was opened as a document, which carries no
+## derived anchor of its own. Returns whether the anchor actually moved.
+func adopt_derived_anchor(anchor_data: Variant) -> bool:
+	var base: Dictionary = _anchor_from_any(anchor_data)
+	if base.is_empty():
+		return false
+	var before: Dictionary = refdes_anchor.duplicate()
+	_adopt_derived_anchor(base)
+	return refdes_anchor != before
+
+
 ## Deserialize a graphics list (shared by from_dict/from_board_dict) into
 ## `graphics`, normalizing points to Vector2 regardless of source shape
 ## (worker `[x,y]` arrays vs. round-tripped `{x:,y:}` dicts).

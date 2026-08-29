@@ -296,6 +296,15 @@ def anchor_dict_from_component(comp: Any, parsed: dict) -> dict:
     return base if authored is None else _overlay(base, authored)
 
 
+def anchor_dict_from_definition(
+        comp: Any, footprint: Union[FootprintDefinition, None]) -> dict:
+    """The wire anchor for a component measured on a BUILT definition — the
+    representation compile_board holds. Same precedence as
+    :func:`anchor_dict_from_component`, so a component whose geometry the board
+    owns gets, on the wire, exactly the anchor the emitters print at."""
+    return _anchor_dict(component_reference_text(comp, footprint))
+
+
 def component_reference_text(
         comp: Any, footprint: Union[FootprintDefinition, None]
 ) -> Union[ReferenceTextDefinition, None]:

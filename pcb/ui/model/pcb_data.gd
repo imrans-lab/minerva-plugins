@@ -275,6 +275,24 @@ func get_component(component_id: String):
 	return components.get(component_id, null)
 
 
+## Take the DERIVED designator anchors a worker resolve put on `board`'s
+## components, by ref, onto the live components. Anchors only: the board's
+## own pads, graphics and placements are not touched, so a reply that arrives
+## after the user has started editing cannot roll anything back. Returns how
+## many designators moved; emits data_changed once when any did.
+func adopt_derived_anchors(board: Dictionary) -> int:
+	var moved := 0
+	for entry in (board.get("components", []) as Array):
+		if not (entry is Dictionary):
+			continue
+		var comp = components.get(str((entry as Dictionary).get("ref", "")), null)
+		if comp != null and comp.adopt_derived_anchor((entry as Dictionary).get("refdes_anchor")):
+			moved += 1
+	if moved > 0:
+		data_changed.emit()
+	return moved
+
+
 ## Check if a component exists
 func has_component(component_id: String) -> bool:
 	return components.has(component_id)

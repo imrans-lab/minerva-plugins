@@ -48,7 +48,9 @@ from .footprints import (  # noqa: F401 — resolve_footprint re-exported
     resolve_footprint_layered,
 )
 from .pad_source import has_resolved_pads
-from .refdes_anchor import (anchor_dict_from_component, anchor_dict_from_parsed,
+from . import inline_footprint
+from .refdes_anchor import (anchor_dict_from_component, anchor_dict_from_definition,
+                            anchor_dict_from_parsed,
                             body_extent_from_parsed)
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
 from .pad_types import normalize_pad_type as _normalize_pad_type
@@ -228,11 +230,29 @@ def _resolve_component(
     Raises ResolveError (no footprint ref), FootprintLookupError (not in library),
     or ResolveCoincidenceError (pads disagree with pins) — the caller decides
     whether to propagate (strict) or leave the component inline (best-effort).
-    Nothing is mutated until AFTER the coincidence check passes, so a raising
-    component is left pristine (inline).
+    Nothing the LIBRARY supplies is written until AFTER the coincidence check
+    passes, so a raising component keeps its own geometry (inline). The one
+    write before that point is the designator anchor of a component that owns
+    its geometry — derived from the board's own body, it needs no library.
     """
     ref = str(comp.get("ref", ""))
     fp_ref = comp.get("footprint")
+    # A component that owns its geometry (a `pads` KEY — FULL, see
+    # inline_footprint) prints its designator relative to the body the BOARD
+    # states, which is what the emitters measure; the library footprint's body
+    # can be a different shape entirely. That anchor needs no library, so it is
+    # stamped before the lookup below can raise: a best-effort resolve that
+    # leaves such a part inline still hands the panel the anchor the fab uses.
+    own_anchor = False
+    if inline_footprint.carries_full_geometry(comp):
+        try:
+            own = inline_footprint.footprint_from_component(
+                comp, fp_ref if isinstance(fp_ref, str) else "")
+        except (ValueError, TypeError):
+            own = None  # unreadable inline geometry: the compiler names it
+        if own is not None:
+            comp["refdes_anchor"] = anchor_dict_from_definition(comp, own)
+            own_anchor = True
     if not isinstance(fp_ref, str) or fp_ref == "":
         raise ResolveError(f"component {ref!r} has no footprint ref to resolve")
 
@@ -329,7 +349,8 @@ def _resolve_component(
     # WHERE the footprint wants its designator printed. Sending glyphs instead
     # would send a picture of one particular ref, and that picture goes stale the
     # moment the component is renamed or copied from.
-    comp["refdes_anchor"] = _refdes_anchor(comp, parsed)
+    if not own_anchor:  # PARTIAL: the library footprint is the body
+        comp["refdes_anchor"] = _refdes_anchor(comp, parsed)
 
 
 def _refdes_anchor(comp: dict, parsed: dict) -> dict:

@@ -580,3 +580,72 @@ def test_the_anchor_clears_an_arcs_true_bow_and_a_thick_strokes_ink():
     assert refdes_anchor.anchor_dict_from_parsed(thick_line)["y_mm"] == \
         pytest.approx(-1.3 - refdes_anchor.CLEARANCE_MM - HALF_STROKE), \
         "the anchor was measured from the line's centreline, not its ink"
+
+
+# ---------------------------------------------------------------------------
+# 9. The resolve wire and the compiled IR agree for a part that owns its body
+# ---------------------------------------------------------------------------
+
+def _full_geometry_component(ref: str, footprint: str, *, wide: bool) -> dict:
+    """An 0805 whose `pads` key makes the board its sole geometry authority.
+    `wide` adds a silk line reaching 24 mm east — board art parked on a part,
+    the shape that showed the defect."""
+    graphics = [{"kind": "poly", "layer": "F.CrtYd", "width": 0.05, "points": [
+        {"x": -1.68, "y": -0.95}, {"x": 1.68, "y": -0.95},
+        {"x": 1.68, "y": 0.95}, {"x": -1.68, "y": 0.95}]}]
+    if wide:
+        graphics.append({"kind": "line", "layer": "F.SilkS", "width": 0.15,
+                         "start": {"x": 10.0, "y": 0.0}, "end": {"x": 24.0, "y": 0.0}})
+    return {
+        "ref": ref, "footprint": footprint, "value": "1k",
+        "x_mm": 10.0, "y_mm": 10.0, "rotation_deg": 0.0, "layer": "top",
+        "pins": [{"number": "1", "x_mm": -0.9125, "y_mm": 0.0},
+                 {"number": "2", "x_mm": 0.9125, "y_mm": 0.0}],
+        "pads": [{"number": n, "type": "smd", "shape": "roundrect",
+                  "position": {"x": x, "y": 0.0}, "size": {"width": 1.025, "height": 1.4},
+                  "layers": ["F.Cu", "F.Mask", "F.Paste"], "drill": {"x": 0.0, "y": 0.0}}
+                 for n, x in (("1", -0.9125), ("2", 0.9125))],
+        "graphics": graphics,
+    }
+
+
+def test_resolve_anchors_a_board_owned_body_where_the_compiler_prints_it():
+    """A component with a `pads` key is the authority for its own body, and
+    the emitters measure the designator against THAT body. The resolve wire
+    used to measure the LIBRARY footprint's body instead, so the panel drew
+    the label beside the pads while the Gerber printed it past the part's
+    parked silk.
+
+    Oracle: the compiled IR's ResolvedComponent.refdes — the production
+    emitter path, reached without the resolve step — plus the hand-computed
+    box for the wide part (courtyard ink -1.705..1.705 / -0.975.., silk ink
+    9.925..24.075): centre 11.185, baseline -0.975 - 0.25 - 0.075.
+    Two parts: one whose ref the library supplies (the resolve runs to the
+    end) and one whose ref it does not (best-effort leaves it inline) — the
+    anchor must come from the board's body in both cases, because neither
+    needs the library to have one.
+    """
+    from pcb_worker import resolve
+
+    board = {
+        "version": 1, "name": "owned-body", "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.6, "via_drill_mm": 0.3},
+        "components": [
+            _full_geometry_component("R1", "Resistor_SMD:R_0805_2012Metric", wide=True),
+            _full_geometry_component("TP1", "NoSuchLibrary:TestPoint", wide=True),
+        ],
+        "nets": [],
+    }
+    compiled = {c.ref: c.refdes for c in compile_board(board).board.components}
+    assert set(compiled) == {"R1", "TP1"}
+    for comp in resolve.resolve_board_best_effort(board)["components"]:
+        wire = comp["refdes_anchor"]
+        printed = compiled[comp["ref"]]
+        assert (wire["x_mm"], wire["y_mm"]) == pytest.approx(printed.position), comp["ref"]
+        assert (wire["x_mm"], wire["y_mm"]) == pytest.approx((11.185, -1.3)), comp["ref"]
+        assert wire["hidden"] is printed.hidden
+    resolved = {c["ref"]: c for c in resolve.resolve_board_best_effort(board)["components"]}
+    assert resolved["R1"]["footprint_resolved"] is True
+    assert "footprint_resolved" not in resolved["TP1"]  # left inline, anchor still stamped

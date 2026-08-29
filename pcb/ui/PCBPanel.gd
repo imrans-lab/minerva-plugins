@@ -5244,6 +5244,41 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	return {"ok": true, "result": load_result}
 
 
+## Derived designator anchors for a board that arrived as a DOCUMENT: the
+## anchor is a derived key and a document carries none, so the worker is asked
+## for the same enrichment the YAML import gets and ONLY the anchors are
+## adopted. Asynchronous, so the load never waits on a cold worker. Guarded the
+## way _refresh_zone_fill is: an answer is adopted only by the board that asked
+## — any change to the board while the worker ran (another load, an edit) makes
+## the answer stale, and the question is asked again for the board that is
+## here now, a bounded number of times. Adopted inside the restore gate,
+## because a derived value arriving is not an edit. The board goes over whole,
+## as zone fill sends it, not in the wire-trimmed form: a part that owns its
+## geometry is measured against the graphics it carries, and the wire trim
+## drops them.
+func _adopt_worker_anchors() -> void:
+	for _attempt in 3:
+		if get_node_or_null("_MinervaIPC") == null or _data == null:
+			return
+		var requested: Dictionary = _data.to_board_dict()
+		var requested_token: String = _whole_board_token(requested)
+		var result: Dictionary = await _request_with_backend_ensure("pcb.deserialize",
+			_payload_by_ref({"board": requested}, "board"), 30000)
+		if _data == null:
+			return
+		if _whole_board_token(_data.to_board_dict()) != requested_token:
+			continue
+		var payload = _unwrap_to_board(result)
+		if payload == null:
+			return
+		var was_restoring := _restoring
+		_restoring = true
+		_data.adopt_derived_anchors(_dict_or_empty(payload.get("board")))
+		_restoring = was_restoring
+		return
+	push_warning("pcb: designator anchors not adopted — the board kept changing while the worker answered")
+
+
 ## Recursively unwrap broker/worker envelopes ({ok|success, result:{…}}) down to
 ## the dict that directly carries a `board` key. Returns that dict (board +
 ## warnings siblings) or null when no board is present.
@@ -6206,6 +6241,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	elif doc.has("width_mm") or doc.has("components") or doc.has("name"):
 		# Canonical board dict.
 		_data.from_board_dict(doc)
+		_adopt_worker_anchors()
 	# else: unknown/empty body — keep whatever board is already loaded.
 
 	# Annotation persistence for this board file (restored, not edited).

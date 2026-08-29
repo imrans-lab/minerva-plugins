@@ -23,6 +23,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -250,6 +251,7 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 	var a struct {
 		YAML        string          `json:"yaml"`
 		MinpcbJSON  json.RawMessage `json:"minpcb_json"`
+		Board       json.RawMessage `json:"board"`
 		BoardPath   string          `json:"board_path"`
 		BoardDigest string          `json:"board_digest"`
 	}
@@ -260,7 +262,7 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 			return nil, fmt.Errorf("pcb.deserialize: parse params: %w", err)
 		}
 	}
-	if a.YAML == "" && len(a.MinpcbJSON) == 0 && a.BoardPath != "" {
+	if a.YAML == "" && len(a.MinpcbJSON) == 0 && len(a.Board) == 0 && a.BoardPath != "" {
 		// Board-by-reference arm — see HandleSerialize. Inline yaml/minpcb
 		// take precedence; the snapshot file is board source (YAML) verified
 		// against its sha256 before a byte of it is parsed.
@@ -268,7 +270,14 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 		if err != nil {
 			return nil, fmt.Errorf("pcb.deserialize: %w", err)
 		}
-		a.YAML = string(raw)
+		// The snapshot is whichever document the caller held: the panel's
+		// board dict (a JSON object) or canonical YAML text. A flow-style YAML
+		// document also opens with '{' but is not valid JSON, so it stays YAML.
+		if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(trimmed) {
+			a.Board = trimmed
+		} else {
+			a.YAML = string(raw)
+		}
 	}
 
 	var (
@@ -281,6 +290,21 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 		b, err = board.UnmarshalYAML([]byte(a.YAML))
 	case len(a.MinpcbJSON) > 0:
 		b, warnings, err = board.ImportMinpcb(unwrapJSON(a.MinpcbJSON))
+	case len(a.Board) > 0:
+		// The live board dict, read exactly as pcb.serialize reads it — so a
+		// panel that holds a board (not a document) can have it resolved in
+		// place. Probe first: a bare json.Unmarshal collapses a null component
+		// silently.
+		if err = board.ProbeJSONBoard(a.Board); err == nil {
+			var live board.Board
+			if err = json.Unmarshal(a.Board, &live); err == nil {
+				board.NormalizeHoles(&live)
+				b = &live
+			}
+		}
+		if err != nil {
+			err = fmt.Errorf("board dict (JSON): %w", err)
+		}
 	default:
 		return echoState(ctx, params) // project_file compatibility fallback
 	}

@@ -246,6 +246,50 @@ func TestDeserializeAcceptsBoardPath(t *testing.T) {
 	}
 }
 
+func TestDeserializeAcceptsTheLiveBoardDict(t *testing.T) {
+	// A panel holds a board dict, not a document; it hands that dict over
+	// inline when small and as a JSON snapshot when large, and gets it back
+	// through the same enrichment a YAML import gets.
+	// The panel's wire shape: a v2 board with a part that owns its geometry
+	// (pads + graphics, the keys the codec must carry through untouched).
+	dict := `{"version":2,"id":"board:00000000000000000000000000000000","name":"BJ",` +
+		`"width_mm":40,"height_mm":30,"layers":["top","bottom"],` +
+		`"design_rules":{"clearance_mm":0.2,"trace_width_mm":0.3,"via_diameter_mm":0.8,"via_drill_mm":0.4},` +
+		`"components":[{"ref":"R1","footprint":"Resistor_SMD:R_0805_2012Metric","value":"1k",` +
+		`"x_mm":10,"y_mm":10,"rotation_deg":0,"layer":"top",` +
+		`"pins":[{"number":"1","x_mm":-0.9125,"y_mm":0},{"number":"2","x_mm":0.9125,"y_mm":0}],` +
+		`"pads":[{"number":"1","type":"smd","shape":"roundrect","position":{"x":-0.9125,"y":0},` +
+		`"size":{"width":1.025,"height":1.4},"layers":["F.Cu","F.Mask","F.Paste"],"drill":{"x":0,"y":0}}],` +
+		`"graphics":[{"kind":"line","layer":"F.SilkS","width":0.12,"start":{"x":-0.2,"y":-0.7},"end":{"x":0.2,"y":-0.7}}]}],` +
+		`"nets":[],"traces":[],"vias":[],"zones":[]}`
+	path, digest := writeSnapshot(t, "board.json", dict)
+	for name, args := range map[string]string{
+		"inline": `{"board":` + dict + `}`,
+		"by-ref": fmt.Sprintf(`{"board_path":%q,"board_digest":%q}`, path, digest),
+	} {
+		out, err := HandleDeserialize(context.Background(), json.RawMessage(args))
+		if err != nil {
+			t.Fatalf("%s: deserialize board dict: %v", name, err)
+		}
+		var r struct {
+			Board map[string]interface{} `json:"board"`
+		}
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Board == nil || r.Board["name"] != "BJ" {
+			t.Fatalf("%s: board missing or wrong: %s", name, out)
+		}
+		comp := r.Board["components"].([]interface{})[0].(map[string]interface{})
+		if _, ok := comp["pads"]; !ok {
+			t.Fatalf("%s: the part's own pads did not survive the codec: %s", name, out)
+		}
+		if _, ok := comp["graphics"]; !ok {
+			t.Fatalf("%s: the part's own graphics did not survive the codec: %s", name, out)
+		}
+	}
+}
+
 func TestDeserializeBoardPathRequiresDigest(t *testing.T) {
 	path, _ := writeSnapshot(t, "board.yaml", "version: 1\nname: BP\n")
 	args := json.RawMessage(fmt.Sprintf(`{"board_path":%q}`, path))
