@@ -89,6 +89,10 @@ def main() -> int:
         content = reply.get("result", {}).get("content", [])
         text = content[0].get("text", "{}") if content else "{}"
         envelope = json.loads(text)  # {"ok": bool, "result"|"error": ...}
+        if not envelope.get("ok"):
+            # The binary relays the worker's stderr ([worker] lines) on its
+            # own stderr; a failed call is unreadable without it.
+            envelope["stderr_tail"] = proc.stderr.read()[-4000:]
         print(json.dumps(envelope))
         return 0
     except Exception as exc:  # noqa: BLE001

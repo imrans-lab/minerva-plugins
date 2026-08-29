@@ -21,6 +21,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,11 +66,14 @@ func PythonPath(req PythonPathRequest) (string, error) {
 		PluginVersion:  req.PluginVersion,
 		DataDir:        DataDir(req.PluginID),
 	}
-	if root, err := EnsureRuntime(ensureReq); err == nil {
+	root, err := EnsureRuntime(ensureReq)
+	if err == nil {
 		return RuntimePython(root), nil
 	}
-	// (Embedded tier failure intentionally falls through to dev fallbacks.
-	// The caller's host.notify path surfaces a toast on the failure path.)
+	// Embedded tier failure falls through to the dev fallbacks, but it is
+	// logged: a production binary landing on a PATH python is otherwise
+	// indistinguishable from a working install until its first worker call.
+	log.Printf("[runtime] embedded runtime unavailable (%v) — falling back to venv / PATH python", err)
 
 	// Tier 2: dev venv next to the worker source.
 	if workerDir != "" {
