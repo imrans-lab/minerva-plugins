@@ -1905,8 +1905,10 @@ with (`minerva_pcb_describe_component`, `minerva_pcb_pin_info`,
 `minerva_pcb_describe_region`, `minerva_pcb_describe_zone`,
 `minerva_pcb_list_vias`), so the card and the verb cannot disagree.
 
-**The sidebar carries no property editors.** Its one board-level row is the
-fabrication-stage picker (`minerva_pcb_fabrication_stage`'s GUI half). A
+**The sidebar carries no property editors.** Its one board-level row is a
+bare read-out of the fabrication stage — the stage token and nothing else,
+empty until a board is loaded; declaring a stage is
+`minerva_pcb_fabrication_stage` only. A
 selected trace's width, a via's net/size/drill, a zone's net/layer, a group
 member's offset and the two net edits are MCP-only — `minerva_pcb_set_trace_width`,
 `minerva_pcb_update_via`, `minerva_pcb_set_zone_net` / `set_zone_layer`,

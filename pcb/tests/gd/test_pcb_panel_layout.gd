@@ -381,8 +381,9 @@ func _test_sidebar_has_no_properties_section() -> void:
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
 	check("the fabrication row is in the sidebar",
 		sidebar != null and sidebar.find_child("FabricationRow", true, false) != null)
-	check("…and its picker still exists",
-		panel.find_child("FabricationStageOption", true, false) != null)
+	check("…and it is a bare read-out label, not a picker",
+		panel.find_child("FabricationStageLabel", true, false) is Label
+			and panel.find_child("FabricationStageOption", true, false) == null)
 
 	_teardown(panel)
 

@@ -272,11 +272,13 @@ var _trace_width_spin: SpinBox = null
 ## current width stays visible in the menu item's own label.
 var _draw_width_revealed := false
 
-## The board's declared fabrication stage picker (DCR 01a0033a12a9 change 3) —
-## the one sidebar row that edits the BOARD. Per-entity edits (trace width, via
-## net/size/drill, zone net/layer, group offsets, move/swap nets) are MCP-only;
-## the read-outs that used to sit beside them are on the canvas hover card.
-var _fabrication_stage_option: OptionButton = null
+## The board's declared fabrication stage, as a bare read-out: the stage token
+## and nothing else, empty until a board has been loaded. Declaring a stage is
+## minerva_pcb_fabrication_stage's job.
+var _fabrication_stage_label: Label = null
+## True once a board came in through load_board_from_yaml or a project-file
+## restore — the seeded default board at construction is not "loaded".
+var _board_loaded := false
 
 var _board_size_label: Label = null
 var _status_label: Label = null
@@ -471,6 +473,9 @@ func _init() -> void:
 		# screen stop being the pours any held fill describes, and it is also
 		# when a fresh one is wanted.
 		_restate_zone_fill()
+		# Same reason: the stage read-out must say what THIS board declares
+		# the moment it is loaded, undone or written by the verb.
+		_update_fabrication_row()
 		if not _restoring:
 			content_changed.emit()
 			_schedule_mask_view_refresh())
@@ -1964,72 +1969,33 @@ func _update_properties() -> void:
 	_update_fabrication_row()
 
 
-## The board's FABRICATION STAGE row (DCR 01a0033a12a9 change 3) — the GUI half
-## of minerva_pcb_fabrication_stage.
-##
-## A DROPDOWN OF THE THREE KNOWN STAGES, taken from the model's own FAB_STAGES,
-## so the control cannot offer a token the write gate would refuse. What it CAN
-## still offer is "vias_only" on a board that has traces — that refusal depends
-## on board contents, not on the token, so it surfaces as the model's own
-## sentence and the picker snaps back.
+## The fabrication-stage read-out: a Label whose text is the stage token the
+## board declares — nothing else — and "" while no board has been loaded.
+## Read-only on purpose: the stage is declared through
+## minerva_pcb_fabrication_stage, like every other board edit the sidebar no
+## longer carries. Refreshed from the model's data_changed, so a load, an
+## undo and a verb write all land on it at once.
 func _build_fabrication_row() -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.name = "FabricationRow"
-	var key := Label.new()
-	key.text = "Fabrication:"
-	key.custom_minimum_size.x = 60
-	row.add_child(key)
-	_fabrication_stage_option = OptionButton.new()
-	_fabrication_stage_option.name = "FabricationStageOption"
-	_fabrication_stage_option.tooltip_text = _wrap_tooltip(
-		"What this board IS for manufacturing. \"routed\" means every net is "
-		+ "meant to be wired. The other two say unrouted nets are intended, so "
-		+ "the completeness check reports them as the job rather than as "
-		+ "defects — \"vias_only\" is a drilled, plated board with no copper "
-		+ "runs at all (drill now, lase the traces later).")
-	_fabrication_stage_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_fabrication_stage_option.clip_text = true
-	for stage in _PcbDataScript.FAB_STAGES:
-		var idx := _fabrication_stage_option.item_count
-		_fabrication_stage_option.add_item(str(stage))
-		_fabrication_stage_option.set_item_metadata(idx, str(stage))
-	_fabrication_stage_option.item_selected.connect(_on_fabrication_stage_selected)
-	row.add_child(_fabrication_stage_option)
+	_fabrication_stage_label = Label.new()
+	_fabrication_stage_label.name = "FabricationStageLabel"
+	_fabrication_stage_label.tooltip_text = _wrap_tooltip(
+		"The board's declared fabrication stage. \"routed\" means every net is "
+		+ "meant to be wired; \"routing_deferred\" and \"vias_only\" say unrouted "
+		+ "nets are intended, so the completeness check reports them as the job "
+		+ "rather than as defects. Set it with minerva_pcb_fabrication_stage.")
+	_fabrication_stage_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_fabrication_stage_label.clip_text = true
+	row.add_child(_fabrication_stage_label)
 	return row
 
 
 func _update_fabrication_row() -> void:
-	if _fabrication_stage_option == null or _data == null:
+	if _fabrication_stage_label == null:
 		return
-	var current := str(_data.fabrication_stage)
-	for i in range(_fabrication_stage_option.item_count):
-		if str(_fabrication_stage_option.get_item_metadata(i)) == current:
-			# select(), not item_selected — assigning through the signal would
-			# re-declare the stage the board already has on every refresh,
-			# pushing dead undo steps.
-			_fabrication_stage_option.select(i)
-			return
-
-
-func _on_fabrication_stage_selected(index: int) -> void:
-	if _fabrication_stage_option == null or _data == null:
-		return
-	var chosen := str(_fabrication_stage_option.get_item_metadata(index))
-	# NO-OP PICKS MUST NOT REACH save_to_history — Godot's OptionButton emits
-	# item_selected for every popup pick including the one already showing, and
-	# a dead undo step makes the user's next Ctrl+Z appear to do nothing. The
-	# model returns "" for both "no change" and a real write, so the guard is
-	# here rather than there.
-	if chosen == str(_data.fabrication_stage):
-		return
-	var refusal: String = _data.set_fabrication_stage(chosen)
-	if not refusal.is_empty():
-		_show_transient_status(refusal)
-		_update_fabrication_row()
-		return
-	_data.save_to_history("Set fabrication stage")
-	_show_transient_status("Fabrication stage: %s" % chosen)
-	_update_status()
+	_fabrication_stage_label.text = str(_data.fabrication_stage) \
+		if _board_loaded and _data != null else ""
 
 
 ## Populate the re-property layer picker from the declared copper stack, selecting
@@ -5105,6 +5071,7 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	# source carried before stamping its own — so the flags describe this
 	# machine. The file-restore path below deliberately does not say true.
 	_restoring = true
+	_board_loaded = true
 	_data.from_board_dict(board, true)
 
 	# SIDECAR ADOPTION (Epoch UX2 station 8, docket 019fde57027c — the HITL-4
@@ -6205,6 +6172,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 
 	# Restoring saved state — suppress the dirty relay for the whole load.
 	_restoring = true
+	_board_loaded = true
 	if doc.has("board") and doc["board"] is Dictionary:
 		# Legacy skeleton shape → migrate to canonical, then load.
 		_data.from_board_dict(_migrate_skeleton_shape(doc))

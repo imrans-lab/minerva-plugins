@@ -45,7 +45,7 @@ func _init() -> void:
 	await _run_fabrication_stage_defaults_to_routed()
 	await _run_fabrication_stage_declares_and_refuses()
 	await _run_fabrication_stage_round_trips_and_undoes()
-	await _run_fabrication_stage_picker_is_the_gui_half()
+	await _run_fabrication_stage_label_is_a_bare_readout()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -446,35 +446,29 @@ func _run_fabrication_stage_round_trips_and_undoes() -> void:
 
 # ── 11. the GUI half of the declaration ───────────────────────────────────────
 
-func _run_fabrication_stage_picker_is_the_gui_half() -> void:
-	print("-- 11. the Fabrication picker declares a stage with no MCP call --")
+func _run_fabrication_stage_label_is_a_bare_readout() -> void:
+	print("-- 11. the sidebar's fabrication read-out is the stage token, or nothing --")
 	var ctx: Dictionary = await _ctx()
 	var panel = ctx["panel"]
 	var data = ctx["data"]
 
-	# A via-only board is the fiber-laser customer's actual deliverable and the
-	# owner drives this panel with buttons only, so an MCP-only declaration
-	# would leave the person who most needs it unable to make it.
-	check("the picker exists", panel._fabrication_stage_option != null)
-	check_eq("offering exactly the three known stages",
-		panel._fabrication_stage_option.item_count, 3)
-	check("...and it is BOARD-level, so it is visible with nothing selected",
-		panel._fabrication_stage_option.visible)
+	# The label is the only board-level control left in the sidebar, and it is
+	# a READ-OUT: the stage token verbatim, nothing to click, declared only by
+	# minerva_pcb_fabrication_stage (owner ruling 2026-08-28, work item
+	# 01a04b9c9064).
+	var label: Label = panel._fabrication_stage_label
+	check("the read-out exists and is a plain Label", label != null and label is Label)
+	check("no picker survives", panel.find_child("FabricationStageOption", true, false) == null)
+	check_eq("before any board is loaded it is EMPTY, not the seeded default",
+		label.text, "")
 
-	# It shows what the board says, not a stale default.
+	# A restore is a load: the read-out follows the model through data_changed.
+	panel._board_loaded = true
 	data.set_fabrication_stage("routing_deferred")
-	panel._update_properties()
-	check_eq("the picker follows the model",
-		str(panel._fabrication_stage_option.get_item_metadata(
-			panel._fabrication_stage_option.selected)), "routing_deferred")
-
-	# DRIVE THE CONTROL. Find vias_only's index rather than assuming the order.
-	var target := -1
-	for i in range(panel._fabrication_stage_option.item_count):
-		if str(panel._fabrication_stage_option.get_item_metadata(i)) == "vias_only":
-			target = i
-	check("vias_only is offered", target >= 0)
-	panel._on_fabrication_stage_selected(target)
-	check_eq("picking it declared it on the BOARD", str(data.fabrication_stage), "vias_only")
+	check_eq("after a load the text is the stage token, and only that",
+		label.text, "routing_deferred")
+	var write: Dictionary = PanelTools._fabrication_stage(ctx["host"], {"stage": "vias_only"})
+	check("the verb declares", bool(write.get("success", false)))
+	check_eq("…and the read-out follows the verb with no panel call", label.text, "vias_only")
 
 	await _unmount(ctx["panel"])
