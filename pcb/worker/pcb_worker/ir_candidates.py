@@ -93,6 +93,11 @@ That partition IS the delta, exactly. Candidates only ADD copper primitives:
 GC1/GC3/GC4/GC5 are per-entity, and GC2/GC6 enumerate pairs — so no base-only
 finding can appear or disappear because a candidate was added. A second kernel
 run over the base board alone would produce precisely ``baseline``.
+
+The kernel's ADVISORY rows (the legend family) need no partition: they measure
+silkscreen, and an overlay adds copper only, so they are board state by
+construction. They ride on ``baseline["advisories"]`` and are counted into
+``baseline["counts"]``, which therefore matches a whole-board run's ``counts``.
 """
 
 from __future__ import annotations
@@ -641,6 +646,23 @@ def check_candidates(rb: ResolvedBoard, candidates: list, *,
         for cid in overlay.candidate_ids
     }
 
+    # ADVISORY ROWS ARE ALWAYS THE BOARD'S, never a candidate's. The advisory
+    # family is the legend one (GC9's width/to-pad/indeterminate rows and the
+    # silk PLACEMENT rules), and every one of those measures silkscreen against
+    # a pad, a courtyard or other silk. An overlay adds copper TRACES AND VIAS
+    # ONLY — never a component, a pad or a legend primitive — so no advisory
+    # here can name candidate geometry. They are reported under `baseline` and
+    # counted there: dropping them would hide a real board fault from a caller
+    # that only ever runs propose, and charging them to a proposal would be the
+    # "a dirty board vetoes an honest proposal" fault this surface exists to
+    # prevent. Counting them here is also what keeps `baseline["counts"]` equal
+    # to the counts a whole-board run reports, since the kernel counts
+    # advisories alongside findings.
+    advisories = list(union.get("advisories", []))
+    for advisory in advisories:
+        baseline_counts[advisory["type"]] = \
+            baseline_counts.get(advisory["type"], 0) + 1
+
     for finding in union.get("findings", []):
         subjects = finding_subjects(finding, overlay)
         named = [s for s in subjects if s["candidate_id"] != BOARD_SUBJECT_ID]
@@ -676,8 +698,11 @@ def check_candidates(rb: ResolvedBoard, candidates: list, *,
         "counts": counts,
         "per_candidate": per_candidate,
         "baseline": {
+            # `verdict` reads the BLOCKING rows only, exactly as the kernel's
+            # does: an advisory never flips a verdict anywhere.
             "verdict": "violations" if baseline else "clean",
             "findings": baseline,
+            "advisories": advisories,
             "counts": baseline_counts,
         },
         "warnings": list(union.get("warnings", [])),

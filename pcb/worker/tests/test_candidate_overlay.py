@@ -220,6 +220,17 @@ def test_baseline_is_reported_separately_and_never_charged_to_a_candidate():
     for finding in union["baseline"]["findings"]:
         assert "subjects" not in finding
 
+    # The kernel's ADVISORY rows are board state too, and they are the reason
+    # the counts above agree: an overlay adds copper only, so a legend advisory
+    # can never belong to a candidate. They must be reported (not silently
+    # dropped by this surface) and they must be on the baseline, not charged to
+    # the proposal.
+    assert union["baseline"]["advisories"] == whole_board["advisories"]
+    assert whole_board["advisories"], (
+        "the fixture should still exercise an advisory rule; without one this "
+        "assertion proves nothing")
+    assert "advisories" not in union
+
 
 def test_a_clean_candidate_on_a_dirty_board_is_reported_clean():
     """Case (a) over a board that is NOT clean: the candidate verdict is about the

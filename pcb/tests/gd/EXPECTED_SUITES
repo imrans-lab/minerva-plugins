@@ -100,7 +100,7 @@ test_epoch6_fix_regressions.gd assertions=9
 # testex). Left UNPINNED on purpose: an assertions= count guessed by
 # reading is exactly the false pin this attribute exists to prevent. Pin it
 # from the first trustworthy run, as test_layer_stack.gd does above.
-test_export_yaml_verb.gd
+test_export_yaml_verb.gd assertions=34
 test_geometric_drc_surface.gd assertions=31
 # GA-1 grew this suite (stack_shape_error matrix, stack_for_count,
 # inner_index_any, the set_board_layers model/handler section) and retired the

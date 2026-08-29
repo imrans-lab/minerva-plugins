@@ -31,9 +31,11 @@ import pytest
 from pcb_worker import silk_source
 from pcb_worker.drc_geom_primitives import Capsule, OrientedRect
 from pcb_worker.drc_geometric import (
+    GC9_ADVISORY_TYPES,
     CopperPrimitive,
     Projection,
     SilkPrimitive,
+    _COUNT_KEYS,
     _check_gc9_silk,
     _silk_capsules,
 )
@@ -333,18 +335,20 @@ def test_every_gc9_row_type_is_declared_advisory():
     """The list that decides blocking-vs-advisory must cover every row GC9 can
     emit. A type missing from it would silently become a BLOCKING violation, and
     on a legend rule that means refusing real boards."""
-    from pcb_worker.drc_geometric import GC9_ADVISORY_TYPES
-
     emitted = _run(
         silk=[_line(0, 0.6, 1, 0.6, width=0.12)],
         copper=[_pad(0.5, 0.0)],
         warnings=[("silk_primitive_unemitted", "x", "R1")],
         width=WIDTH_FLOOR, to_pad=PAD_FLOOR)
     assert {f["type"] for f in emitted} <= GC9_ADVISORY_TYPES
-    # And the reverse: nothing is declared advisory that GC9 cannot produce, so
-    # the set cannot quietly grow to cover a check that SHOULD block.
+    # And the reverse, stated against the module's own key registry rather than
+    # a copy of it: the advisory family is EXACTLY the gc9_ count keys. A new
+    # legend row that is added to _COUNT_KEYS but left out of the advisory set
+    # would fail here (it would block real boards), and a non-legend check
+    # slipped into the advisory set would fail here too (it would stop
+    # blocking). Neither direction can go stale as the family grows.
     assert GC9_ADVISORY_TYPES == {
-        "gc9_silk_width", "gc9_silk_to_pad", "gc9_silk_indeterminate"}
+        key for key in _COUNT_KEYS if key.startswith("gc9_")}
 
 
 def test_silk_advisories_do_not_flip_the_verdict_but_are_counted():
@@ -381,14 +385,12 @@ def test_silk_advisories_do_not_flip_the_verdict_but_are_counted():
         "the coupon should still exercise this rule; if it no longer does, the "
         "coupon stopped being representative of real authoring")
     assert drc["advisories"], "advisory rows must be returned, not just counted"
-    assert all(a["type"] in GC9_TYPES for a in drc["advisories"])
+    assert all(a["type"] in GC9_ADVISORY_TYPES for a in drc["advisories"])
 
     # ...and none of it blocks.
     assert drc["verdict"] == "clean"
     assert drc["findings"] == []
 
-
-GC9_TYPES = {"gc9_silk_width", "gc9_silk_to_pad", "gc9_silk_indeterminate"}
 
 
 def test_a_gc9_crash_does_not_take_down_the_blocking_verdict(monkeypatch):

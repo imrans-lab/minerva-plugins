@@ -310,6 +310,20 @@ func _run_by_ref() -> void:
 # Not red-first, deliberately. Extracting export_yaml_text() out of the button
 # body is a refactor, and these are what say the refactor kept its promises.
 
+## The ONE-SHOT half of the status line — what THIS gesture said.
+##
+## _set_status writes `_status_lead() + message`, and a lead is a STANDING
+## condition of the board that every later message is prefixed with. This rig's
+## R1 carries no footprint, so "1 part have no fabricable geometry" leads every
+## line here, exactly as it would on screen. The gesture's own words are the
+## suffix; asserting the whole label would be asserting the standing lead too,
+## and would break whenever an unrelated board condition gained a lead.
+func _status_message(panel) -> String:
+	var full := str(panel._status_label.text)
+	var lead := str(panel._status_lead())
+	return full.substr(lead.length()) if full.begins_with(lead) else full
+
+
 func _run_unchanged_behaviour() -> void:
 	print("\n-- 4: unchanged behaviour (green both sides) --")
 	var rig := _rig(_tiny_board())
@@ -318,7 +332,7 @@ func _run_unchanged_behaviour() -> void:
 	# 4a: the button with no IPC at all still says so, in its own words.
 	await panel._on_export_yaml_pressed()
 	check_eq("4a: the button reports a missing backend",
-		str(panel._status_label.text),
+		_status_message(panel),
 		"YAML export unavailable — plugin IPC not ready.")
 
 	# 4b: a successful export still renders the byte count. test_board_by_path
@@ -329,7 +343,7 @@ func _run_unchanged_behaviour() -> void:
 	ipc.reply = _ok_envelope({"yaml": "name: s1-export\n"})
 	await panel._on_export_yaml_pressed()
 	check("4b: the button reports the byte count",
-		str(panel._status_label.text).begins_with("YAML exported ("),
+		_status_message(panel).begins_with("YAML exported ("),
 		str(panel._status_label.text))
 
 	# 4c: a failed export still says failed, with the reason on the line.
@@ -337,8 +351,8 @@ func _run_unchanged_behaviour() -> void:
 		"error_message": "pcb worker exited 137"}
 	await panel._on_export_yaml_pressed()
 	check("4c: the button reports a failure by reason",
-		str(panel._status_label.text).begins_with("YAML export failed:")
-		and str(panel._status_label.text).contains("exited 137"),
+		_status_message(panel).begins_with("YAML export failed:")
+		and _status_message(panel).contains("exited 137"),
 		str(panel._status_label.text))
 
 	# 4d: promote's path guards are untouched — adding an ungated reader must

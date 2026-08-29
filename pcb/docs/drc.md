@@ -316,7 +316,8 @@ of candidates.
 
 - **Determinate**: `{ok:true, scope:"geometric_candidate",
   verifies_geometry:true, verdict:"clean"|"violations", findings, counts,
-  per_candidate, baseline, board_id, source_digest, rule_profile, warnings}`.
+  per_candidate, baseline, board_id, source_digest, rule_profile, warnings}` —
+  where `baseline` is `{verdict, findings, advisories, counts}`.
 - **Indeterminate**: the same envelope every other geometric failure uses
   (built by `drc_geometric.geometric_indeterminate`, re-scoped):
   `{ok:false, scope:"geometric_candidate", verifies_geometry:false,
@@ -341,6 +342,11 @@ Findings naming at least one candidate entity are `findings`; everything else is
 *is* the delta: candidates only add primitives, GC1/GC3/GC4/GC5 are per-entity
 and GC2/GC6 enumerate pairs, so no base-only finding can appear or disappear
 because a candidate was added.
+
+The kernel's **advisory** rows (the legend family) need no partition: they
+measure silkscreen, and an overlay adds copper only, so they are board state by
+construction. They ride on `baseline.advisories` and are counted into
+`baseline.counts`, which therefore equals the `counts` of a whole-board run.
 
 **Fail-closed, no approximated copper.** An unknown net, an unknown/foreign
 copper layer, a zero-length leg, a segment with no declared width, a via with no

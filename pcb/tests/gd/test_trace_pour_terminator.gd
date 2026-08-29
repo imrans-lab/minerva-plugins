@@ -272,6 +272,14 @@ func _test_a_carved_void_terminates_nothing() -> void:
 ## spot. F1.1 is an SMD land on the BOTTOM, 1mm to the right, overlapping the
 ## hole's 3mm land but not the 2mm top land.
 ##
+## F1 IS MOUNTED ON THE BOTTOM AND AUTHORS ITS LAND ON "F.Cu". `pads[].layers`
+## are FOOTPRINT-local, exactly like `pads[].position`: the placement rule flips
+## them for a bottom-mounted part (PcbComponent.placed_pad_layers), so a land a
+## footprint authors on the front is what prints on the BACK once the part is
+## placed there. Spelling it "B.Cu" here would put the land on TOP, overlapping
+## J1's own top land — one island, and the join this section is about would
+## never be owed.
+##
 ## ORACLE, by hand. J1's top land spans x in [9,11] on TOP; F1's spans x in
 ## [10,12] on BOTTOM — they overlap in plan but share no layer, so they are two
 ## islands and the net owes ONE join. The unplated hole's land spans x in
@@ -308,7 +316,7 @@ func _test_an_unplated_hole_joins_nothing() -> void:
 				"pads": [{"number": "1", "type": "smd", "shape": "rect",
 					"position": {"x": 0.0, "y": 0.0},
 					"size": {"width": 2.0, "height": 2.0},
-					"layers": ["B.Cu"]}]},
+					"layers": ["F.Cu"]}]},
 		],
 		"nets": [{"name": "NPTHNET", "pins": ["J1.1", "F1.1"]}],
 		"traces": [], "vias": [], "zones": [],
