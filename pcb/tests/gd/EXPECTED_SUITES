@@ -134,7 +134,11 @@ test_pcb_explicit_propose.gd assertions=80 real-worker
 # rather than painted past the panel edge (both axes, then one axis with the
 # pointer rule still to satisfy).
 # Counted by hand from the check() call sites: 3 new, none inside a loop.
-test_pcb_hover_card.gd assertions=67
+# 67 -> 81: section 6, the Options toggle (work item 01a04b85e620) — verb
+# read/apply of the key, no card on hover while off, the pin-inspector click
+# that raises one anyway, its release when the toggle returns, and the 19 px
+# clearance. 14 new check() calls, none inside a loop.
+test_pcb_hover_card.gd assertions=81
 test_pcb_hint_refine_loop.gd assertions=64 real-worker
 test_pcb_single_trace_tool.gd assertions=98 real-worker
 test_pcb_legacy_annotation_migration.gd assertions=53

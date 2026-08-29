@@ -747,6 +747,11 @@ var _inspect_hover_ref: String = ""
 var _hover_card_lines: PackedStringArray = PackedStringArray()
 var _hover_card_entity: Array[String] = ["", ""]
 var _hover_card_anchor: Vector2 = Vector2.ZERO
+## A card a pin-inspector CLICK raised while the hover-card preference is off.
+## It ignores pointer motion and stands until cleared (next inspector click,
+## tool change, board change, pointer leaving the canvas) or until the
+## preference comes back on, when ordinary hover takes over again.
+var _hover_card_pinned: bool = false
 
 ## Trace / zone selection, SINGLE-PICK VIEW of the multi-set above.
 ##
@@ -8035,6 +8040,8 @@ func _handle_inspect_pin_click(world_pos: Vector2, additive: bool = false) -> vo
 	var next: Array = PcbPinSelectTool.apply_click(selected_pad_refs, ref, additive)
 	var changed := next != Array(selected_pad_refs)
 	selected_pad_refs.assign(next)
+	_pin_hover_card_for_pad(ref if selected_pad_refs.has(ref) else "",
+		world_to_screen(world_pos))
 	# pin_selected names ONE pin: the pad this click landed on, or nothing when
 	# the click cleared the selection. A shift-click that removed a pad reports
 	# whatever is still selected last.
@@ -8151,8 +8158,12 @@ func _clear_inspect_pin_selection() -> void:
 ##   else         components and traces get a card, other kinds do not (yet)
 func _update_hover_card(world_pos: Vector2, screen_pos: Vector2,
 		known_component: String = "") -> void:
+	var enabled := _hover_card_enabled()
+	if _hover_card_pinned and not enabled:
+		return
+	_hover_card_pinned = false
 	var entity: Array[String] = ["", ""]
-	if not _hover_card_suppressed():
+	if enabled and not _hover_card_suppressed():
 		entity = _hover_card_target(world_pos, known_component)
 	if entity == _hover_card_entity:
 		return
@@ -8236,10 +8247,33 @@ func _hover_card_suppressed() -> bool:
 ## Drop the card. Cheap and idempotent — safe to call on any state change that
 ## invalidates what it says.
 func clear_hover_card() -> void:
+	_hover_card_pinned = false
 	if _hover_card_lines.is_empty() and str(_hover_card_entity[0]).is_empty():
 		return
 	_hover_card_lines = PackedStringArray()
 	_hover_card_entity = ["", ""]
+	queue_redraw()
+
+
+## The per-user Options toggle (PcbPrefs.KEY_HOVER_CARD), read live so a menu
+## click takes effect on the next pointer move without any plumbing.
+func _hover_card_enabled() -> bool:
+	return PcbOptionsPrefs.shared().get_bool(PcbOptionsPrefs.KEY_HOVER_CARD, true)
+
+
+## Raise a pad's card ON PURPOSE, anchored at the click — the pin inspector's
+## way of showing a pad while the hover card is switched off. With the toggle
+## on this does nothing: hover already shows the pad and would fight a pin.
+func _pin_hover_card_for_pad(ref: String, screen_pos: Vector2) -> void:
+	if _hover_card_enabled():
+		return
+	clear_hover_card()
+	if ref.is_empty():
+		return
+	_hover_card_entity = [HOVER_CARD_PAD, ref]
+	_hover_card_lines = _hover_card_content(_hover_card_entity)
+	_hover_card_anchor = screen_pos
+	_hover_card_pinned = not _hover_card_lines.is_empty()
 	queue_redraw()
 
 

@@ -82,7 +82,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_set_trace_width` | `data.set_trace_width`; one journalled step, current-value guard, out-of-range **refused** (below) |
 | `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`, `layers_spanned`, `layers_touched`) — the row is built by `pcb_region_describe.via_entry`, shared with `describe_region` (below) |
 | `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
-| `minerva_pcb_board_rules` | the Options menu's verb twin: read/write the board's trace-angle set, its four numeric design rules and its grid pitch, plus the three per-user snap toggles. `view_state` shape — always reports the whole block; validated whole, applied whole; one undo step (below) |
+| `minerva_pcb_board_rules` | the Options menu's verb twin: read/write the board's trace-angle set, its four numeric design rules and its grid pitch, plus the per-user toggles (three snaps, hover card). `view_state` shape — always reports the whole block; validated whole, applied whole; one undo step (below) |
 | `minerva_pcb_set_refdes` | read/move WHERE a component prints its designator; the move is AUTHORED board state and reaches the fab; footprint-local anchor, board-frame stroke box in the reply; validated whole, applied whole; one undo step (below) |
 | `minerva_pcb_view_state` | read/set WHAT the canvas is drawing — layer flags, hidden layers, trace-layer filter, working layer; validated whole, applied whole (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
@@ -135,8 +135,9 @@ Known keys:
 | `snap_grid` | true/false | — | Pull an authoring click onto the drawing grid (Ctrl/Cmd bypasses it per click) |
 | `snap_land` | true/false | — | Let a click near a pad, via or free trace end FINISH the run on it |
 | `snap_angle` | true/false | — | Quantise a run's direction to the board's allowed angles (Shift draws one free segment) |
+| `hover_card` | true/false | — | Paint the hover card on the canvas; off, only a pin-inspector click raises one |
 
-The three snap keys are the per-user half of the **Options menu** (below); the
+The three snap keys and `hover_card` are the per-user half of the **Options menu** (below); the
 board's own design rules are not preferences and are read and written with
 `minerva_pcb_board_rules`. A boolean is validated and never clamped — there is
 no range to clamp into — so `set_preference`'s "clamped" flag is always false
@@ -311,6 +312,7 @@ A read (nothing but `editor_name`) and a write return the same block:
 {trace_angle_mode, allowed_trace_angles_deg, offered_modes,
  design_rules: {trace_width_mm, clearance_mm, via_diameter_mm, via_drill_mm, grid_mm},
  snaps: {snap_grid, snap_land, snap_angle},
+ view: {hover_card},
  changed: []}
 ```
 
@@ -1889,8 +1891,12 @@ the canvas); the board itself is not changed until a candidate is committed
 
 **Hover card** — resting the pointer on a component, a pad or a trace paints a
 small bordered box beside it naming what is there. It is paint, not a control:
-it never takes a click, never covers the point under the cursor, and never
-leaves the canvas rect. A component card carries value, footprint, layer,
+it never takes a click, never covers the point under the cursor (19 px of
+clearance), and never leaves the canvas rect. *Options ▸ View ▸ Show hover
+card* (preference `hover_card`) switches it off; while off, a click on a pad
+with the pin inspector armed still raises that pad's card at the click, and it
+stands until the next inspector click, a tool change, a board change or the
+pointer leaving the canvas. A component card carries value, footprint, layer,
 rotation and position; a pad card carries `REF.PIN`, the pin's display name,
 its roles, net and layer; a trace card carries net, width, layer and length.
 Every one of those facts is read from the derivation the matching verb already

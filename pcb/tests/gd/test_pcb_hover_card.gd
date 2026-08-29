@@ -27,6 +27,11 @@ extends SceneTree
 ##   4  LIVE CANVAS. A real mouse-motion event over a part raises a card; a
 ##      motion onto empty board drops it in the same frame; and a drag, a
 ##      marquee or an authoring run has none at all.
+##   5  THE OPTIONS TOGGLE (work item 01a04b85e620). With `hover_card` off no
+##      motion raises a card, but a pin-inspector click still raises the
+##      clicked pad's card at the click, and it stands while the pointer
+##      roams; turning the toggle back on hands the card back to hover. The
+##      Options menu's read_state / apply carry the key like the snaps.
 ##
 ## ── WHAT IS DELIBERATELY NOT HERE ────────────────────────────────────────────
 ## No pixel is asserted — pcb_canvas draws in immediate mode, so a finished
@@ -41,6 +46,9 @@ const PcbHoverCard := preload("res://../../minerva-plugins/pcb/ui/pcb_hover_card
 const PcbAnnotationHostScript := preload("res://../../minerva-plugins/pcb/ui/PcbAnnotationHost.gd")
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
+const PcbPrefs := preload("res://../../minerva-plugins/pcb/ui/model/pcb_prefs.gd")
+const PcbOptionsMenu := preload("res://../../minerva-plugins/pcb/ui/pcb_options_menu.gd")
+const PrefsFixture := preload("res://../../minerva-plugins/pcb/tests/gd/snap_prefs_fixture.gd")
 
 ## Pixels per mm for every canvas in this suite. Pinned so the screen points the
 ## placement assertions use are hand-derivable from the fixture's board mm.
@@ -71,6 +79,7 @@ func _init() -> void:
 	await _run_verb_parity()
 	_run_placement()
 	await _run_live_canvas()
+	await _run_toggle()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -416,6 +425,93 @@ func _run_live_canvas() -> void:
 
 	get_root().remove_child(canvas)
 	canvas.free()
+
+
+# ── 6. the Options toggle ────────────────────────────────────────────────────
+#
+# ORACLE: the same real events as section 5, against the plugin-wide preference
+# store (reset and restored around the section, so the developer's own choice
+# neither leaks in nor is overwritten).
+
+func _run_toggle() -> void:
+	print("\n-- 6. the hover-card toggle, and the pin-inspector click that beats it --")
+	var saved: Dictionary = PrefsFixture.reset()
+	var prefs = PcbPrefs.shared()
+	var d = _board()
+	var canvas = _canvas(d)
+	get_root().add_child(canvas)
+	canvas.size = CANVAS_SIZE
+	await process_frame
+
+	# The menu's verb twin carries the key and flips it — the same apply the
+	# menu click runs, so the menu is covered without popping one.
+	var state: Dictionary = PcbOptionsMenu.read_state(d, prefs)
+	check("read_state reports the toggle on by default",
+		bool((state.get("view", {}) as Dictionary).get(PcbPrefs.KEY_HOVER_CARD, false)))
+	var result: Dictionary = PcbOptionsMenu.apply(d, prefs, {PcbPrefs.KEY_HOVER_CARD: false})
+	check("apply turns it off and names the change",
+		bool(result.get("ok", false)) and Array(result.get("changed", [])).has(PcbPrefs.KEY_HOVER_CARD))
+	check("…and read_state now reports it off",
+		not bool((PcbOptionsMenu.read_state(d, prefs)["view"] as Dictionary).get(
+			PcbPrefs.KEY_HOVER_CARD, true)))
+
+	_motion(canvas, U1_POS)
+	check("off: hovering a part raises no card", canvas._hover_card_lines.is_empty())
+	_motion(canvas, (TRACE_A + TRACE_B) * 0.5)
+	check("off: hovering copper raises no card", canvas._hover_card_lines.is_empty())
+
+	# The pin inspector's click is the one deliberate way to ask for a card.
+	canvas.set_tool_mode(canvas.ToolMode.INSPECT_PIN)
+	var pad: Vector2 = d.get_component("U1").get_pin_world_position("1")
+	_motion(canvas, pad)
+	check("off: the inspector's hover raises no card either", canvas._hover_card_lines.is_empty())
+	_click(canvas, pad)
+	check("off: clicking a pad with the inspector raises its card",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1.1")
+	var rect: Rect2 = canvas.hover_card_rect()
+	check("…anchored at the click: inside the canvas and clear of the pad",
+		rect.size.x > 0.0 and not rect.has_point(canvas.world_to_screen(pad)))
+	_motion(canvas, Vector2(90.0, 55.0))
+	check("…and it stands while the pointer roams",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1.1")
+	_click(canvas, Vector2(90.0, 55.0))
+	check("an inspector click on empty board drops it", canvas._hover_card_lines.is_empty())
+
+	_click(canvas, pad)
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	check("leaving the inspector drops a clicked card", canvas._hover_card_lines.is_empty())
+
+	# Back on: hover owns the card again, and a pinned card is released to it.
+	canvas.set_tool_mode(canvas.ToolMode.INSPECT_PIN)
+	_click(canvas, pad)
+	PcbOptionsMenu.apply(d, prefs, {PcbPrefs.KEY_HOVER_CARD: true})
+	_motion(canvas, Vector2(90.0, 55.0))
+	check("on again: the next motion hands the card back to hover",
+		canvas._hover_card_lines.is_empty())
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	_motion(canvas, U1_POS)
+	check("on again: hovering a part raises its card",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1")
+
+	# The clearance the owner asked for: a full 19 px between pointer and card.
+	var placed: Rect2 = PcbHoverCard.rect_for(Vector2(100.0, 40.0), Vector2(300.0, 300.0), CANVAS_SIZE)
+	check("the card sits 19 px off the pointer",
+		placed.position.x - 300.0 >= 19.0 and placed.position.y - 300.0 >= 19.0)
+
+	get_root().remove_child(canvas)
+	canvas.free()
+	PrefsFixture.restore(saved)
+
+
+## One real left-click (press then release) at a board point, canvas-local.
+func _click(canvas, world_pos: Vector2) -> void:
+	for pressed in [true, false]:
+		var ev := InputEventMouseButton.new()
+		ev.button_index = MOUSE_BUTTON_LEFT
+		ev.pressed = pressed
+		ev.position = canvas.world_to_screen(world_pos)
+		ev.global_position = ev.position
+		canvas._gui_input(ev)
 
 
 ## One real mouse-motion event at a board point, in the canvas's own local

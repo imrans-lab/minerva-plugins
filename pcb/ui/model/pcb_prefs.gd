@@ -59,6 +59,10 @@ const KEY_SNAP_GRID := "snap_grid"
 const KEY_SNAP_LAND := "snap_land"
 const KEY_SNAP_ANGLE := "snap_angle"
 
+## Per-USER view toggle: whether the canvas paints the hover card at all. Off,
+## the only card left is the one a pin-inspector click raises on purpose.
+const KEY_HOVER_CARD := "hover_card"
+
 
 ## The KNOWN-KEY REGISTRY: the whole contract of this store.
 ##
@@ -101,6 +105,13 @@ static func key_registry() -> Dictionary:
 			"description": "Quantise a run's direction to the board's "
 				+ "design_rules.allowed_trace_angles_deg while drawing. Shift "
 				+ "draws one free-angle segment without changing the board rule.",
+		},
+		KEY_HOVER_CARD: {
+			"type": TYPE_BOOL,
+			"default": true,
+			"description": "Paint the hover card when the pointer rests on a "
+				+ "component, pad or trace. Off, a pin-inspector click still "
+				+ "raises the clicked pad's card.",
 		},
 	}
 

@@ -12,8 +12,9 @@ extends MenuButton
 ##     board change — the SAME model mutator the MCP verb calls.
 ##
 ##   Per-USER preferences, which are habits and belong to the person drawing:
-##     the three snap toggles (grid / land / angle). They persist in the plugin
-##     preference store and are the same values the preference verbs read.
+##     the three snap toggles (grid / land / angle) and the hover-card toggle.
+##     They persist in the plugin preference store and are the same values the
+##     preference verbs read.
 ##
 ## The angle set is board state and not a view flag because a rule the tool
 ## snapped to but the board did not carry would be advice, not a rule: the
@@ -41,6 +42,7 @@ const _ID_MODE_BASE := MENU_ID_BASE + 1      # + index into OFFERED_MODES
 const _ID_MODE_CUSTOM := MENU_ID_BASE + 9    # the read-only "board declares…" row
 const _ID_RULE_BASE := MENU_ID_BASE + 20     # + index into _RULE_ROWS
 const _ID_SNAP_BASE := MENU_ID_BASE + 40     # + index into _SNAP_ROWS
+const _ID_VIEW_BASE := MENU_ID_BASE + 50     # + index into _VIEW_ROWS
 
 ## The numeric board rules this menu edits, in menu order:
 ## [label, key, min_mm, max_mm]. `key` is a DESIGN_RULE_KEYS entry, or
@@ -58,6 +60,12 @@ const _SNAP_ROWS := [
 	["Snap to grid", PcbPrefs.KEY_SNAP_GRID],
 	["Snap to pads and trace ends", PcbPrefs.KEY_SNAP_LAND],
 	["Snap to allowed angles", PcbPrefs.KEY_SNAP_ANGLE],
+]
+
+## The per-user view toggles, in menu order: [label, preference key]. Same
+## shape as the snaps, reported under their own `view` block.
+const _VIEW_ROWS := [
+	["Show hover card", PcbPrefs.KEY_HOVER_CARD],
 ]
 
 ## The rule key that is not a design rule. Kept as a constant because three
@@ -125,25 +133,35 @@ static func read_state(data, prefs) -> Dictionary:
 	var snaps: Dictionary = {}
 	for row in _SNAP_ROWS:
 		snaps[str(row[1])] = _snap_enabled(prefs, str(row[1]))
+	var view: Dictionary = {}
+	for row in _VIEW_ROWS:
+		view[str(row[1])] = _snap_enabled(prefs, str(row[1]))
 	return {
 		"trace_angle_mode": PcbTraceAngles.mode_for_angles(angles),
 		"allowed_trace_angles_deg": angles,
 		"offered_modes": PcbTraceAngles.OFFERED_MODES.duplicate(),
 		"design_rules": rules,
 		"snaps": snaps,
+		"view": view,
 	}
 
 
 ## Every key `apply` will act on: the two spellings of the trace-angle rule,
-## the numeric board rules (design rules plus `grid_mm`), and the three snap
-## preferences. One list so the refusal below can name what is accepted.
+## the numeric board rules (design rules plus `grid_mm`), and the per-user
+## toggles (snaps and view). One list so the refusal below can name what is
+## accepted.
 static func accepted_keys() -> Array[String]:
 	var keys: Array[String] = ["trace_angle_mode", "allowed_trace_angles_deg"]
 	for row in _RULE_ROWS:
 		keys.append(str(row[1]))
-	for row in _SNAP_ROWS:
+	for row in _toggle_rows():
 		keys.append(str(row[1]))
 	return keys
+
+
+## Every per-user toggle this menu owns, snaps then view, as [label, key] rows.
+static func _toggle_rows() -> Array:
+	return _SNAP_ROWS + _VIEW_ROWS
 
 
 ## Apply any subset of the Options block. Returns
@@ -198,7 +216,7 @@ static func apply(data, prefs, changes: Dictionary) -> Dictionary:
 			return _refuse(refusal)
 		board_writes.append(["grid" if key == GRID_KEY else "rule", key, value])
 
-	for row in _SNAP_ROWS:
+	for row in _toggle_rows():
 		var key := str(row[1])
 		if not changes.has(key):
 			continue
@@ -249,7 +267,7 @@ static func apply(data, prefs, changes: Dictionary) -> Dictionary:
 		"state": read_state(data, prefs)}
 
 
-## Is one snap toggle on? The reader every surface uses, so a missing store
+## Is one per-user toggle on? The reader every surface uses, so a missing store
 ## reads as "on" — the behaviour this editor has always had — rather than
 ## silently disabling a snap because a preference file could not be opened.
 static func _snap_enabled(prefs, key: String) -> bool:
@@ -323,12 +341,23 @@ func _rebuild() -> void:
 		popup.set_item_checked(popup.get_item_index(_ID_SNAP_BASE + i),
 			bool(snaps.get(str(row[1]), true)))
 
+	popup.add_separator("View", MENU_ID_BASE + 45)
+	var view: Dictionary = state["view"]
+	for i in _VIEW_ROWS.size():
+		var row: Array = _VIEW_ROWS[i]
+		popup.add_check_item(str(row[0]), _ID_VIEW_BASE + i)
+		popup.set_item_checked(popup.get_item_index(_ID_VIEW_BASE + i),
+			bool(view.get(str(row[1]), true)))
+
 
 func _on_id_pressed(id: int) -> void:
+	var toggle_key := ""
 	if id >= _ID_SNAP_BASE and id < _ID_SNAP_BASE + _SNAP_ROWS.size():
-		var key := str(_SNAP_ROWS[id - _ID_SNAP_BASE][1])
-		var now: bool = _snap_enabled(_prefs(), key)
-		_run({key: not now})
+		toggle_key = str(_SNAP_ROWS[id - _ID_SNAP_BASE][1])
+	elif id >= _ID_VIEW_BASE and id < _ID_VIEW_BASE + _VIEW_ROWS.size():
+		toggle_key = str(_VIEW_ROWS[id - _ID_VIEW_BASE][1])
+	if not toggle_key.is_empty():
+		_run({toggle_key: not _snap_enabled(_prefs(), toggle_key)})
 		return
 	if id >= _ID_RULE_BASE and id < _ID_RULE_BASE + _RULE_ROWS.size():
 		_open_value_dialog(_RULE_ROWS[id - _ID_RULE_BASE])
@@ -361,9 +390,10 @@ func _confirmation(result: Dictionary) -> String:
 		var mode := str(state.get("trace_angle_mode", ""))
 		return "Trace angles: %s." % str(PcbTraceAngles.MODE_LABELS.get(mode, mode))
 	var first := str(changed[0])
-	for row in _SNAP_ROWS:
+	for row in _toggle_rows():
 		if str(row[1]) == first:
-			var on: bool = bool((state.get("snaps", {}) as Dictionary).get(first, true))
+			var block := "snaps" if _SNAP_ROWS.has(row) else "view"
+			var on: bool = bool((state.get(block, {}) as Dictionary).get(first, true))
 			return "%s: %s." % [str(row[0]), "on" if on else "off"]
 	var rules: Dictionary = state.get("design_rules", {})
 	return "%s set to %.2f mm." % [first, float(rules.get(first, 0.0))]

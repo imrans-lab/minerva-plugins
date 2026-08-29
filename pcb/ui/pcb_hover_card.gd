@@ -34,8 +34,9 @@ const _PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 const PAD_PX := Vector2(8.0, 5.0)
 ## Clearance kept between the hovered point and the nearest card edge. Also what
 ## guarantees the card cannot contain that point: every candidate placement
-## starts a full gap away from it.
-const GAP_PX := 14.0
+## starts a full gap away from it. 19 px: the owner found 14 too tight to read
+## past the cursor (work item 01a04b85e620).
+const GAP_PX := 19.0
 ## Extra leading between rows, on top of the font's own line height.
 const LINE_GAP_PX := 2.0
 const BORDER_PX := 1.0
