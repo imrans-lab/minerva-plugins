@@ -57,3 +57,20 @@ static func mode_for_width(width: float, current: String = "") -> String:
 ## both of which are reachable elsewhere (the View menu, the status bar).
 static func toolbar_captions_fit(mode: String) -> bool:
 	return mode != MODE_NARROW
+
+
+## The right sidebar's width per mode, in px. OWNED here rather than left to
+## the widest row that happens to be mounted: the sidebar never expands, so
+## its width IS its minimum, and until work item 01a04b9c9064 that minimum was
+## an accident of the Properties rows' key labels and pickers — deleting them
+## dropped the column to its 120 px floor and the tool flows stopped wrapping.
+## Budget: a 24 px icon button is ~36 px with theme padding, 4 px apart, so
+## 184 seats four per row and 240 seats six plus the annotation dock pane that
+## lives in the sidebar in wide mode. Narrow uses the medium width for its
+## drawer.
+const SIDEBAR_WIDE_PX := 240.0
+const SIDEBAR_MEDIUM_PX := 184.0
+
+
+static func sidebar_width_px(mode: String) -> float:
+	return SIDEBAR_WIDE_PX if mode == MODE_WIDE else SIDEBAR_MEDIUM_PX

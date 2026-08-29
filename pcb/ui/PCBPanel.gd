@@ -276,6 +276,9 @@ var _draw_width_revealed := false
 ## and nothing else, empty until a board has been loaded. Declaring a stage is
 ## minerva_pcb_fabrication_stage's job.
 var _fabrication_stage_label: Label = null
+## The divider above the sidebar's dock parent; visible only while the
+## annotation pane is mounted there (wide mode).
+var _dock_separator: HSeparator = null
 ## True once a board came in through load_board_from_yaml or a project-file
 ## restore — the seeded default board at construction is not "loaded".
 var _board_loaded := false
@@ -1578,7 +1581,10 @@ func _load_icon(fname: String) -> Texture2D:
 func _build_sidebar() -> VBoxContainer:
 	_sidebar = VBoxContainer.new()
 	_sidebar.name = "RightSidebar"
-	_sidebar.custom_minimum_size.x = 120
+	# Width is per layout mode (panel_layout.sidebar_width_px), re-applied by
+	# _apply_layout_mode; the medium value is the resting default.
+	_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(
+		_PanelLayoutScript.MODE_MEDIUM)
 	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	# B3b height relief (docket 019fbbad9dac comment 970): RightSidebar's own
@@ -1946,7 +1952,14 @@ func _build_sidebar() -> VBoxContainer:
 	# _route_flow_mode_label stays null; _update_route_flow_mode_label is
 	# null-guarded, so every update site is a safe no-op.
 
-	_sidebar_content.add_child(HSeparator.new())
+	# The dock's divider is shown only while a pane actually sits in the
+	# sidebar (wide mode) — _sync_dock_pane_mode owns it. In medium/narrow the
+	# pane lives in the bottom strip and the parent below is empty, so a
+	# standing separator would divide nothing from nothing.
+	_dock_separator = HSeparator.new()
+	_dock_separator.name = "DockSeparator"
+	_dock_separator.visible = false
+	_sidebar_content.add_child(_dock_separator)
 
 	# Platform annotation dock mounts here (Editor duck-types
 	# get_annotation_dock_parent — round A). Fills the remaining column.
@@ -1955,8 +1968,8 @@ func _build_sidebar() -> VBoxContainer:
 	_dock_parent.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_sidebar_content.add_child(_dock_parent)
 
-	# The board's fabrication stage — a bare row, no section around it.
-	_sidebar_content.add_child(HSeparator.new())
+	# The board's fabrication stage — a bare row at the foot of the column,
+	# no section and no divider around it.
 	_sidebar_content.add_child(_build_fabrication_row())
 
 	return _sidebar
@@ -3148,13 +3161,15 @@ func _find_dock_pane() -> Node:
 ## internal arrangement (RIGHT = column for the sidebar, BOTTOM = strip).
 func _sync_dock_pane_mode() -> void:
 	var pane := _find_dock_pane()
+	var wide := _layout_mode == _PanelLayoutScript.MODE_WIDE
+	if _dock_separator != null:
+		_dock_separator.visible = wide and pane != null and is_instance_valid(pane)
 	if pane == null or not is_instance_valid(pane):
 		return
 	var slot := _current_dock_slot()
 	if slot != null and pane.get_parent() != slot:
 		pane.get_parent().remove_child(pane)
 		slot.add_child(pane)
-	var wide := _layout_mode == _PanelLayoutScript.MODE_WIDE
 	if pane is Control:
 		(pane as Control).size_flags_vertical = \
 			Control.SIZE_EXPAND_FILL if wide else Control.SIZE_SHRINK_END
@@ -3322,6 +3337,7 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_drawer_open = false  # drawer starts closed; canvas gets the width
 
 	if _sidebar != null:
+		_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(mode)
 		var show_sidebar := (not narrow) or _drawer_open
 		if _sidebar.visible and not show_sidebar and _dock_pane_in_sidebar():
 			# Never hide the annotation toolbar with a live author tool — the

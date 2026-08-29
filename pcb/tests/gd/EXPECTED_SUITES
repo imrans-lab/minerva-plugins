@@ -167,7 +167,10 @@ test_pcb_net_membership.gd assertions=70
 # 163 -> 148 (work item 01a04b9c9064): the Properties section is gone, so §7's
 # 15 checks become 6 (four "no such node", the fabrication row, its picker), and
 # the 6-check trace-width reveal test (§10) went with the reveal. -15 +6 -6.
-test_pcb_panel_layout.gd assertions=148
+# 148 -> 153 (sidebar width + dividers, same work item): wide +1 (owned
+# width), medium +2 (owned width, three tools on one row), §7 +2 (no divider
+# above the fabrication row, dock divider hidden off-wide).
+test_pcb_panel_layout.gd assertions=153
 test_pcb_panel_model.gd assertions=203
 # 211 -> 217: the board-resize undo step (the verb snapshots, and one undo
 # restores the previous outline) — six checks, HAND-COUNTED from source.

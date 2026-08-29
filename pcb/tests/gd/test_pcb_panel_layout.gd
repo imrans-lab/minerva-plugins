@@ -186,6 +186,8 @@ func _test_wide_mode() -> void:
 
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
 	check("sidebar node exists + visible", sidebar != null and sidebar.visible)
+	check("sidebar is the wide-mode width panel_layout owns, not a row's accident",
+		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px("wide")) < 1.0)
 	check("toolbar fits without h-scroll", _toolbar_fits(panel))
 	check("panel min width fits the pane (no row inflates it)", _panel_min_fits(panel))
 
@@ -208,6 +210,20 @@ func _test_medium_mode() -> void:
 	var canvas: Control = panel._canvas
 	check("canvas keeps majority width",
 		canvas != null and canvas.size.x > 600.0 * 0.5)
+
+	var sidebar: Control = panel.find_child("RightSidebar", true, false)
+	check("sidebar is the medium-mode width panel_layout owns",
+		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px("medium")) < 1.0)
+	# The tool flows must WRAP, not stack: Select, Pan and Pin Select share a
+	# row at this width (the regression that motivated the owned width was one
+	# button per row once the Properties rows stopped propping the column open).
+	var tools_flow: Control = panel.find_child("ToolsFlow", true, false)
+	var same_row := tools_flow != null and tools_flow.get_child_count() >= 3
+	if same_row:
+		var y0: float = (tools_flow.get_child(0) as Control).position.y
+		for i in range(3):
+			same_row = same_row and absf((tools_flow.get_child(i) as Control).position.y - y0) < 1.0
+	check("Select, Pan and Pin Select sit on ONE row of the tools flow", same_row)
 
 	_teardown(panel)
 
@@ -384,6 +400,16 @@ func _test_sidebar_has_no_properties_section() -> void:
 	check("…and it is a bare read-out label, not a picker",
 		panel.find_child("FabricationStageLabel", true, false) is Label
 			and panel.find_child("FabricationStageOption", true, false) == null)
+	# No orphan dividers: nothing separates the fabrication row from what is
+	# above it, and the dock divider stays hidden while the pane is not in the
+	# sidebar (700 px is medium, where the pane lives in the bottom strip).
+	var fab_row: Control = sidebar.find_child("FabricationRow", true, false)
+	var content: Node = fab_row.get_parent()
+	var above: Node = content.get_child(fab_row.get_index() - 1)
+	check("no separator sits directly above the fabrication row", not (above is HSeparator))
+	var dock_sep: Control = panel.find_child("DockSeparator", true, false)
+	check("the dock divider is hidden while the pane is not in the sidebar",
+		dock_sep != null and not dock_sep.visible)
 
 	_teardown(panel)
 
