@@ -3337,7 +3337,6 @@ func _on_panel_resized() -> void:
 func _apply_layout_mode(mode: String, force := false) -> void:
 	if mode == _layout_mode and not force:
 		return
-	var mode_changed := mode != _layout_mode
 	var entering_narrow := mode == _PanelLayoutScript.MODE_NARROW \
 		and _layout_mode != _PanelLayoutScript.MODE_NARROW
 	_layout_mode = mode
