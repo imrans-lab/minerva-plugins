@@ -566,10 +566,8 @@ code was needed).
 never a silent no-op.
 
 **The two setters return `""` from the model for BOTH a real write and "no
-change needed"**, so the tool layer copies the same current-value guard
-`PCBPanel.gd`'s zone property panel already uses (`_on_zone_prop_net_selected`
-/ `_on_zone_prop_layer_selected`): compare the zone's stored value to the
-requested one *before* calling the model. A match replies
+change needed"**, so the tool layer keeps a current-value guard: compare the
+zone's stored value to the requested one *before* calling the model. A match replies
 `{success:true, changed:false}` without touching the model or the undo
 history; a real change calls the setter and, on success, takes exactly one
 `save_to_history` step. `set_zone_layer`'s guard keeps the model's own
@@ -1577,9 +1575,9 @@ its own.
 
 **Move and swap are one undo step each.** Both go through
 `pcb/ui/model/pcb_net_membership.gd` (the only writer of a net's `pins` list)
-composed by `pcb_undo_step.compose`, exactly as connect/disconnect are. The
-sidebar's "Move net to…" and "Swap nets" buttons and the two MCP verbs run the
-SAME model op, so the human's click and the agent's call cannot diverge.
+composed by `pcb_undo_step.compose`, exactly as connect/disconnect are. They
+are MCP-only: the sidebar has no net-editing controls (owner ruling, work item
+01a04b9c9064 — these are an agent's edits, not a human's).
 
 **Deixis runs both ways.** `minerva_pcb_get_selection` answers *"which pins is
 the human pointing at?"*; `minerva_pcb_select` answers *"look at THESE"* for a
@@ -1681,14 +1679,14 @@ grid); drag empty canvas to box-select; `R` rotates the selection.
 drag, middle-drag, or hold Space and drag.
 
 **Inspect Pin / Pin Select (P, or Shift+P)** — the toolbar button and the
-status bar call this tool *Inspect Pin*; the sidebar section it fills is *Pin
-Selection*. Click a pad to SELECT it: its copper is haloed, the
-hover card names the pin under the cursor, and the Pin Selection section shows
-the pad's row (net, side, roles), the component's free pins under a side
-filter, and the two net edits — "Move net to…" and, with exactly two pads
-selected, "Swap nets". Shift-click adds or removes a pad; a shift-click on
-empty canvas leaves the selection alone, so a multi-pad selection survives a
-missed click. A plain click on empty canvas clears it; Escape clears
+status bar call this tool *Inspect Pin*. Click a pad to SELECT it: its copper
+is haloed and the hover card for that pad comes up at the click and STAYS —
+pinned until the next inspector click, a tool or board change, the pointer
+leaving the canvas, or (with the hover card on) the pointer resting on another
+pad. There is no sidebar section for a pad selection: the pad's facts are the
+card, and the net edits are the verbs. Shift-click adds or removes a pad; a
+shift-click on empty canvas leaves the selection alone, so a multi-pad
+selection survives a missed click. A plain click on empty canvas clears it; Escape clears
 everything; press the button again to exit to Select. The pad selection is
 what `minerva_pcb_get_selection` reports, and what `minerva_pcb_select` sets
 from the other side. There is one pad-picking mode, not two: Shift+P arms it
@@ -1895,26 +1893,27 @@ it never takes a click, never covers the point under the cursor (19 px of
 clearance), and never leaves the canvas rect. *Options ▸ View ▸ Show hover
 card* (preference `hover_card`) switches it off; while off, a click on a pad
 with the pin inspector armed still raises that pad's card at the click, and it
-stands until the next inspector click, a tool change, a board change or the
-pointer leaving the canvas. A component card carries value, footprint, layer,
-rotation and position; a pad card carries `REF.PIN`, the pin's display name,
-its roles, net and layer; a trace card carries net, width, layer and length.
-Every one of those facts is read from the derivation the matching verb already
-answers with (`minerva_pcb_describe_component`, `minerva_pcb_pin_info`,
-`minerva_pcb_describe_region`), so the card and the verb cannot disagree. The
-card is display-only, which is why the sidebar has no read-only component rows
-and no Pin Info section: the *Properties* section holds only controls that
-CHANGE the board.
+stands until the next inspector click, a tool change, a board change, the
+pointer leaving the canvas or — with the toggle on — the pointer resting on
+another entity. A component card carries value, footprint, layer, rotation,
+position and, for a grouped part, its group (member count, anchor, lock); a pad
+card carries `REF.PIN`, the pin's display name, its roles, net and layer; a
+trace card carries net, width, layer and length; a zone card carries kind, net
+and layer; a via card carries position, net, size and drill. Every one of
+those facts is read from the derivation the matching verb already answers
+with (`minerva_pcb_describe_component`, `minerva_pcb_pin_info`,
+`minerva_pcb_describe_region`, `minerva_pcb_describe_zone`,
+`minerva_pcb_list_vias`), so the card and the verb cannot disagree.
 
-**Properties ▸ zone Net / Layer** (re-property an already-drawn zone) — Net
-accepts declared nets only (an undeclared net would make the whole board
-unexportable); Layer accepts the board's declared copper stack only (moving a
-zone off the stack would make the board unexportable).
-
-**Properties ▸ trace Width** (re-property an already-drawn, selected trace) —
-changing it re-widens that one trace as a single undoable step; it does not
-touch the width used for new traces (that is the sidebar trace-width box
-above).
+**The sidebar carries no property editors.** Its one board-level row is the
+fabrication-stage picker (`minerva_pcb_fabrication_stage`'s GUI half). A
+selected trace's width, a via's net/size/drill, a zone's net/layer, a group
+member's offset and the two net edits are MCP-only — `minerva_pcb_set_trace_width`,
+`minerva_pcb_update_via`, `minerva_pcb_set_zone_net` / `set_zone_layer`,
+`minerva_pcb_set_group_member_offset`, `minerva_pcb_move_net` / `swap_nets` —
+each a single undoable step with the model's own refusal text (owner ruling,
+work item 01a04b9c9064). Options ▸ *Trace width…* is a different thing: the
+board's design-rule default for NEW traces.
 
 ## Coexistence & name collision (until cutover)
 

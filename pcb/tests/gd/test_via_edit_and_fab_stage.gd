@@ -42,7 +42,6 @@ func _init() -> void:
 	await _run_update_via_refusal_changes_nothing()
 	await _run_growing_a_via_onto_a_trace_snaps_and_inherits()
 	await _run_update_via_noop_is_success_not_refusal()
-	await _run_via_property_rows_are_the_gui_half()
 	await _run_fabrication_stage_defaults_to_routed()
 	await _run_fabrication_stage_declares_and_refuses()
 	await _run_fabrication_stage_round_trips_and_undoes()
@@ -337,77 +336,6 @@ func _run_update_via_noop_is_success_not_refusal() -> void:
 	# needed changing" from "I refused you".
 	check("but reports changed:false", not bool(res.get("changed", true)))
 	check_eq("and pushed NO undo step", data.history.size(), before_history)
-
-	await _unmount(ctx["panel"])
-
-
-# ── 7. the GUI half — the owner drives this panel with buttons only ───────────
-
-func _run_via_property_rows_are_the_gui_half() -> void:
-	print("-- 7. the Properties via rows edit a selected via without any MCP call --")
-	var ctx: Dictionary = await _ctx()
-	var panel = ctx["panel"]
-	var host = ctx["host"]
-	var data = ctx["data"]
-	# get_canvas lives on the annotation HOST, not the panel (PcbAnnotationHost
-	# owns it) — the sibling suite documents the same trap.
-	var canvas = ctx["host"].get_canvas()
-	check("the host exposes the canvas", canvas != null)
-	if canvas == null:
-		await _unmount(ctx["panel"])
-		return
-
-	var via_id := _place(host, 14.0, 6.0, "GND")
-
-	# Hidden until exactly one via is selected — the rule the trace and zone
-	# rows already keep, because with two selected there is no single drill a
-	# box could show.
-	panel._update_properties()
-	check("the via rows are hidden with nothing selected", not panel._via_prop_rows.visible)
-
-	canvas._add_to_selection(canvas.KIND_VIA, via_id)
-	panel._update_properties()
-	check("selecting one via reveals them", panel._via_prop_rows.visible)
-	check_approx("the size box shows the board's value", panel._via_prop_size_spin.value, 0.8)
-	check_approx("the drill box shows the board's value", panel._via_prop_drill_spin.value, 0.4)
-	check("the position read-out names the via", via_id in panel._via_prop_position_label.text)
-
-	# The net picker offers "(unassigned)" plus the declared nets, and nothing
-	# else — a control that could offer an undeclared net would be the UI lying
-	# about a contract update_via enforces anyway.
-	check_eq("the net picker offers unassigned + 3 declared nets",
-		panel._via_prop_net_option.item_count, 4)
-	check_eq("the first entry is the real unassigned option",
-		str(panel._via_prop_net_option.get_item_metadata(0)), "")
-
-	# DRIVE THE CONTROL, not the model behind it. This is the assertion that
-	# distinguishes "the row is wired" from "the row is decoration".
-	panel._via_prop_size_spin.value = 1.4
-	check_approx("turning the size box re-sized the BOARD's via",
-		float(data.get_via(via_id).get("size", 0.0)), 1.4)
-
-	# Pick a net the via does NOT already have. Index 1 is the first declared net
-	# in sorted order, which is "GND" — the net this fixture placed the via on —
-	# so asserting against it passed even with the whole commit path deleted.
-	# Found by mutation, not by reading: a vacuous assertion looks exactly like a
-	# real one until something is broken underneath it.
-	var wanted := ""
-	var wanted_idx := -1
-	for i in range(1, panel._via_prop_net_option.item_count):
-		var candidate := str(panel._via_prop_net_option.get_item_metadata(i))
-		if candidate != str(data.get_via(via_id).get("net_name", "")):
-			wanted = candidate
-			wanted_idx = i
-			break
-	check("the fixture picks a net the via does not already carry", wanted_idx > 0)
-	panel._on_via_prop_net_selected(wanted_idx)
-	check_eq("picking a net in the dropdown re-netted the BOARD's via",
-		str(data.get_via(via_id).get("net_name", "")), wanted)
-
-	# A refused GUI edit must snap back rather than leaving the box lying.
-	panel._via_prop_drill_spin.value = 3.0   # wider than the 1.4 pad
-	check("a refused drill leaves the model alone",
-		float(data.get_via(via_id).get("drill", 0.0)) < 1.4)
 
 	await _unmount(ctx["panel"])
 

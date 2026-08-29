@@ -60,7 +60,6 @@ func _init() -> void:
 	await _test_reclick_disarm()
 	await _test_reclick_triple_agreement()
 	await _test_first_click_and_cross_tool_unchanged()
-	await _test_width_menu_focus_at_every_tier()
 	await _test_check_button_and_ghost_readout()
 	await _test_propose_selection_scope_and_retry_narration()
 	await _test_intent_parity_and_width_picker()
@@ -249,15 +248,11 @@ func _test_annotation_host_registration() -> void:
 	_driver.free_panel(panel)
 
 
-## The TRACE context menu (B1u5, docket 019fbb968e — owner comment 962: the width
-## editor already existed and was undiscoverable).
-##
-## Pins the canvas→panel half of the item: "Set trace width…" must SELECT the trace
-## and REVEAL the panel's existing width row — not set a width itself. That is what
-## keeps the no-op guard, the model refusal string and the single journalled
-## set_trace_width call in one place instead of two.
+## The per-target context menu (B1u5): Delete for a trace, a via, a part and a
+## group, each naming what the click will remove. A trace's width is set by
+## minerva_pcb_set_trace_width, so the menu carries no width item.
 func _test_trace_context_menu() -> void:
-	print("\n-- trace right-click: Set trace width… + Delete trace (B1u5) --")
+	print("\n-- right-click: Delete trace / via / part / group (B1u5) --")
 	var panel: Variant = _driver.load_panel(PANEL_PATH)
 	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
 	panel.get_data().from_board_dict(_canonical_board())
@@ -273,66 +268,15 @@ func _test_trace_context_menu() -> void:
 	canvas._context_menu_edge_insert = {}
 	canvas._context_menu_target = [canvas.KIND_TRACE, trace_id]
 	canvas._update_context_menu_for_selection()
-	check("trace menu offers Set trace width…", _menu_has(canvas, "Set trace width…"))
 	check("trace menu offers Delete trace", _menu_has(canvas, "Delete trace"))
 	check("trace menu does NOT offer vertex items",
 			not _menu_has(canvas, "Delete vertex") and not _menu_has(canvas, "Insert vertex here"))
-
-	# Set trace width… → the trace becomes the whole selection and the row appears.
-	canvas._on_context_menu_pressed(canvas.MENU_ID_SET_TRACE_WIDTH)
-	check("Set trace width… selects exactly that trace",
-			canvas.get_selected_traces().size() == 1
-			and str(canvas.get_selected_traces()[0]) == trace_id)
-	check("…and the panel's width row is now showing that trace",
-			panel._trace_prop_rows != null and panel._trace_prop_rows.visible
-			and panel._trace_prop_trace_id == trace_id,
-			"visible=%s id=%s" % [
-				str(panel._trace_prop_rows != null and panel._trace_prop_rows.visible),
-				panel._trace_prop_trace_id])
-
-	# The commit still runs through the ROW's handler — one journalled step, and a
-	# repeat of the same value must not push a second (the dead-undo-step guard).
-	var before: int = data.change_journal.size()
-	panel._on_trace_prop_width_changed(0.4)
-	check("the row's handler is what re-widens the trace",
-			is_equal_approx(float(data.get_trace(trace_id).width), 0.4))
-	check("…journalled exactly once", data.change_journal.size() == before + 1,
-			"journal grew by %d" % (data.change_journal.size() - before))
-	panel._on_trace_prop_width_changed(0.4)
-	check("a no-op re-commit adds no dead undo step",
-			data.change_journal.size() == before + 1)
 
 	# Delete trace, through the same journalled remover the eraser uses.
 	canvas._context_menu_target = [canvas.KIND_TRACE, trace_id]
 	canvas._on_context_menu_pressed(canvas.MENU_ID_DELETE_TARGET)
 	check("Delete trace removes it", data.get_trace(trace_id) == null)
 	check("…and undo brings it back", data.undo() and data.get_trace(trace_id) != null)
-
-	# THE FIX FOR COLD-REVIEW F1, at every tier. "Set trace width…" has to CLEAR
-	# THE PATH to the row, not just set the row's own visible flag: medium
-	# collapses Properties by default and narrow hides the sidebar behind the
-	# drawer, so a handler that only checked the row would land the owner back in
-	# comment 962 — the item does nothing visible — in two tiers out of three.
-	var layout = load("res://../../minerva-plugins/pcb/ui/panel_layout.gd")
-	for mode in [layout.MODE_WIDE, layout.MODE_MEDIUM, layout.MODE_NARROW]:
-		panel._apply_layout_mode(mode, true)
-		panel._set_properties_expanded(false)  # the medium default, forced everywhere
-		canvas._context_menu_target = [canvas.KIND_TRACE, trace_id]
-		canvas._on_context_menu_pressed(canvas.MENU_ID_SET_TRACE_WIDTH)
-		check("%s: Set trace width… expands the Properties section" % mode,
-				panel._properties_expanded
-				and panel._properties_body != null and panel._properties_body.visible,
-				"expanded=%s body_visible=%s" % [
-					str(panel._properties_expanded),
-					str(panel._properties_body != null and panel._properties_body.visible)])
-		check("%s: …and the width row itself is showing" % mode,
-				panel._trace_prop_rows.visible and panel._trace_prop_trace_id == trace_id)
-		if mode == layout.MODE_NARROW:
-			check("narrow: …and the drawer is opened so the sidebar is on screen",
-					panel._drawer_open and panel._sidebar != null and panel._sidebar.visible,
-					"drawer_open=%s sidebar_visible=%s" % [
-						str(panel._drawer_open),
-						str(panel._sidebar != null and panel._sidebar.visible)])
 
 	# The other three targets name themselves, and a LOCKED one is shown-but-
 	# disabled rather than missing (so the lock is the visible reason).
@@ -659,50 +603,6 @@ func _tool_state(panel: Variant, canvas: Variant) -> Dictionary:
 			pressed.append(int(k))
 	pressed.sort()
 	return {"mode": int(canvas.tool_mode), "pressed": pressed}
-
-
-## BT-68 — "Set trace width…" at EVERY layout tier: the SpinBox ends up both
-## VISIBLE IN TREE and HOLDING FOCUS.
-##
-## ORACLE: two properties, at all three tiers. 9b887e9 pins the row's `visible`
-## flag and the drawer; visibility alone is what the first fix satisfied while
-## the caret was still nowhere — the medium tier (Properties collapsed by
-## default) being the dead end. Reveal assertions are taken AFTER deferred frames
-## per hint pcb-plugin/scroll-reveal-needs-deferred-frame.
-func _test_width_menu_focus_at_every_tier() -> void:
-	print("\n-- BT-68: width menu → SpinBox visible AND focused, all three tiers --")
-	var panel: Variant = await _mount_panel_in_tree()
-	var canvas: Variant = panel._canvas
-	var data: Variant = panel.get_data()
-	var trace_id: String = str(data.get_trace_ids()[0])
-	canvas._create_context_menu()
-	var layout = load("res://../../minerva-plugins/pcb/ui/panel_layout.gd")
-
-	for mode in [layout.MODE_WIDE, layout.MODE_MEDIUM, layout.MODE_NARROW]:
-		panel._apply_layout_mode(mode, true)
-		panel._set_properties_expanded(false)      # the collapsed medium default
-		panel._drawer_open = false
-		for _i in range(4):
-			await process_frame
-
-		canvas._context_menu_target = [canvas.KIND_TRACE, trace_id]
-		canvas._on_context_menu_pressed(canvas.MENU_ID_SET_TRACE_WIDTH)
-		# The reveal defers one layout pass on purpose (hint
-		# pcb-plugin/scroll-reveal-needs-deferred-frame) — assert after it lands.
-		for _i in range(6):
-			await process_frame
-
-		var spin: Variant = panel._trace_prop_width_spin
-		check("BT-68 %s: the width SpinBox is VISIBLE IN TREE" % mode,
-				spin != null and spin.is_visible_in_tree(),
-				"spin=%s expanded=%s drawer=%s" % [str(spin != null),
-						str(panel._properties_expanded), str(panel._drawer_open)])
-		check("BT-68 %s: …and it HOLDS FOCUS, ready to type" % mode,
-				spin != null and spin.get_line_edit().has_focus(),
-				"focus_owner=%s" % str(panel.get_viewport().gui_get_focus_owner()))
-
-	panel.queue_free()
-	await process_frame
 
 
 # ── Epoch UX3 station 3 (docket 019fdf90662a): Check button + ghost readout ───

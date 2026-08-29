@@ -420,7 +420,7 @@ func _probe_pan_tool_and_gestures() -> void:
 ## Viewport.push_input can prove the OLD path is no longer wired up underneath it —
 ## which is the half that actually changed.
 func _probe_right_click_context_menu() -> void:
-	_begin_section("_probe_right_click_context_menu", 6)
+	_begin_section("_probe_right_click_context_menu", 4)
 	print("\n-- right-click is a menu, not a delete (B1u5) --")
 	var pc := await _mount_panel()
 	var panel = pc[0]
@@ -472,34 +472,6 @@ func _probe_right_click_context_menu() -> void:
 
 	if canvas.context_menu != null:
 		canvas.context_menu.hide()
-
-	# "Set trace width…" with Properties COLLAPSED — the cold-review F1 case, in a
-	# REALLY MOUNTED panel, which is the only place is_visible_in_tree and
-	# has_focus mean anything. The headless suite proves the flags flip; this
-	# proves the SpinBox the owner has to type into is actually on screen and
-	# actually holding the caret.
-	var trace = load("res://../../minerva-plugins/pcb/ui/model/pcb_trace.gd").new()
-	trace.net_name = "VCC"
-	trace.layer = "top"
-	trace.width = 0.25
-	var wps: Array[Vector2] = [Vector2(8.0, 8.0), Vector2(24.0, 8.0)]
-	trace.waypoints = wps
-	data.add_trace(trace)
-	var trace_ids: Array = data.get_trace_ids()
-	if trace_ids.is_empty():
-		check("probe fixture produced a trace to width-edit", false)
-	else:
-		panel._set_properties_expanded(false)
-		canvas._request_trace_width_edit(str(trace_ids[0]))
-		await process_frame
-		var spin = panel._trace_prop_width_spin
-		check("collapsed Properties: the width SpinBox ends up VISIBLE IN TREE",
-				spin != null and spin.is_visible_in_tree(),
-				"spin=%s visible_in_tree=%s properties_expanded=%s" % [
-					str(spin != null), str(spin != null and spin.is_visible_in_tree()),
-					str(panel._properties_expanded)])
-		check("…and holding focus, ready to type",
-				spin != null and spin.get_line_edit().has_focus())
 
 	panel.queue_free()
 	await process_frame

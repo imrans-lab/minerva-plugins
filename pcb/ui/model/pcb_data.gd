@@ -990,7 +990,7 @@ func get_traces_in_region(region: Rect2, visible_filter := Callable()) -> Array[
 ## set_zone_net carries: re-setting the width a trace already has journals
 ## nothing and still returns "". A caller that snapshots MUST compare first or it
 ## pushes an empty undo step and the user's next Ctrl+Z appears to do nothing
-## (cold-review F3). See PCBPanel._on_trace_prop_width_changed for the guard.
+## (cold-review F3). See panel_tools._set_trace_width for the guard.
 ##
 ## Every rule lives on pcb_trace.width_error — ONE contract, shared with the
 ## width spin box's bounds and the preference registry. Out of range is REFUSED,
@@ -1866,7 +1866,7 @@ func set_zone_outline(zone_id: String, points) -> bool:
 ## field itself first — save_to_history appends unconditionally, with no dedupe
 ## against the previous snapshot, so an unguarded caller pushes an EMPTY undo step
 ## and the user's next Ctrl+Z appears to do nothing (cold-review F3). See
-## PCBPanel._on_zone_prop_net_selected for the guard.
+## panel_tools._set_zone_net for the guard.
 func set_zone_net(zone_id: String, net_name: String) -> String:
 	var i := _zone_index(zone_id)
 	if i < 0:

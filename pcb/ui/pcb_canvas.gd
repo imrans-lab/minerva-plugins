@@ -464,17 +464,6 @@ const ANNOTATION_BEND_HIT_PX := 12.0
 const ANNOTATION_HIT_SLACK_PX := 8.0
 var hovered_component: String = ""
 
-## The component the user last CLICKED, when it is still selected — Illustrator's
-## "key object" (A4 stage 2).
-##
-## Needed because selecting a group member selects the WHOLE group, so
-## "the one component the user is working on" can no longer be inferred from a
-## selection of size 1. The panel's offset editor asks this which member's offset
-## to show; nothing about rendering, hit-testing or the selection set itself reads
-## it. Cleared by _clear_selection, but NOT maintained on every removal path
-## (shift-click toggle-out leaves it stale), so a consumer must re-validate
-## against the live selection before trusting it — _property_focus_component does.
-var focused_component: String = ""
 
 ## Interaction state
 var is_panning: bool = false
@@ -644,14 +633,6 @@ signal bus_phase_changed(phase: int)
 ## long as the geometry causing it stands — the panel's status line and the
 ## toolbar's phase badge. The words are read back from bus_refusal().
 signal bus_refusal_changed(refused: bool)
-## The context menu's "Set trace width…" item asking the PANEL to reveal and focus
-## its existing width SpinBox (B1u5, owner comment 962: the numeric editor already
-## existed and was undiscoverable). A SIGNAL rather than a canvas-side dialog
-## because there is no dialog anywhere in this panel — every numeric edit is an
-## inline sidebar row, and the row already owns the no-op guard, the refusal
-## routing and the single journalled set_trace_width call. The canvas must not
-## grow a second way to set a width.
-signal edit_trace_width_requested(trace_id: String)
 
 ## OFC-5: the drawing-width twin of the signal above — asks the panel to
 ## reveal + focus its (now menu-revealed, no longer standing) authoring-width
@@ -747,10 +728,11 @@ var _inspect_hover_ref: String = ""
 var _hover_card_lines: PackedStringArray = PackedStringArray()
 var _hover_card_entity: Array[String] = ["", ""]
 var _hover_card_anchor: Vector2 = Vector2.ZERO
-## A card a pin-inspector CLICK raised while the hover-card preference is off.
-## It ignores pointer motion and stands until cleared (next inspector click,
-## tool change, board change, pointer leaving the canvas) or until the
-## preference comes back on, when ordinary hover takes over again.
+## A card a pin-inspector CLICK raised — the clicked pad's, anchored at the
+## click, whatever the hover-card preference says. It stands while the pointer
+## roams empty board and is released by the next inspector click, a tool or
+## board change, the pointer leaving the canvas, or (with the preference on)
+## the pointer resting on a DIFFERENT entity, which hover then describes.
 var _hover_card_pinned: bool = false
 
 ## Trace / zone selection, SINGLE-PICK VIEW of the multi-set above.
@@ -1571,7 +1553,6 @@ func _context_menu_separate() -> void:
 ## the per-target items claim 42x so an id alone says which section it came from.
 const MENU_ID_DELETE_VERTEX := 421
 const MENU_ID_INSERT_VERTEX := 422
-const MENU_ID_SET_TRACE_WIDTH := 423
 const MENU_ID_DELETE_TARGET := 424
 ## C4a — the route-candidate verb block (43x, kept apart from the 42x per-target
 ## BOARD block above because these mutate the routing WORKSPACE and never the
@@ -1710,12 +1691,6 @@ func _add_context_menu_target_items() -> void:
 		return
 
 	if kind == KIND_TRACE:
-		# THE ENTRY POINT THE OWNER COULD NOT FIND (comment 962). The width editor
-		# already existed as a sidebar row that only appears once exactly one trace
-		# is selected — which is precisely the state a user who has not found it
-		# cannot reach on purpose. The item selects the trace and asks the panel to
-		# focus that row; it does not set a width itself.
-		context_menu.add_item("Set trace width…", MENU_ID_SET_TRACE_WIDTH)
 		# CUT HERE: the vertex nearest the press within the pad snap radius,
 		# asked of the model (nearest_interior_vertex). Shown-but-disabled when
 		# no interior vertex is within reach — an end vertex is a delete or a
@@ -1785,8 +1760,6 @@ func _on_context_menu_pressed(id: int) -> void:
 			var ins := _context_menu_edge_insert
 			if not ins.is_empty():
 				_insert_zone_vertex(str(ins["zone_id"]), int(ins["index"]), ins["point"])
-		MENU_ID_SET_TRACE_WIDTH:  # B1u5 — reveal the panel's existing width row
-			_request_trace_width_edit(str(_context_menu_target[1]))
 		MENU_ID_SET_DRAW_WIDTH:  # OFC-5 — reveal the panel's authoring-width box
 			edit_draw_width_requested.emit()
 		MENU_ID_CUT_TRACE:  # the frozen press target and press position
@@ -1894,33 +1867,6 @@ func _delete_annotation_bend(hit: Dictionary) -> void:
 	bends.remove_at(index)
 	router.update_annotation(ann_id, kind.with_bend_points(ann, bends))
 	queue_redraw()
-
-
-## "Set trace width…": make the trace the WHOLE selection, then ask the panel to
-## reveal and focus its width row.
-##
-## Selecting first is not a side effect, it is the mechanism: the row is driven by
-## "exactly one trace selected" (_update_trace_rows), so a menu item that focused
-## the row without selecting would focus a hidden control, and one that set a width
-## without selecting would edit something the sidebar is not showing. Selecting is
-## also the recoverable half — a mispicked trace is re-picked by clicking another,
-## which is the whole reason the owner ruled for a menu (comment 945).
-##
-## ORDER: selection first, signal second. The panel rebuilds its property rows off
-## selection_changed, so the row exists by the time the focus request arrives.
-func _request_trace_width_edit(trace_id: String) -> void:
-	if trace_id.is_empty() or data == null or data.get_trace(trace_id) == null:
-		return
-	# ONE selection_changed for one menu action (cold-review F6): the clear is
-	# silenced and the single emit below covers both halves, so the panel rebuilds
-	# its property rows once — against the final selection, not against the empty
-	# one it passed through — and the row is populated by the time the focus
-	# request goes out.
-	_clear_selection(false)
-	_add_to_selection(KIND_TRACE, trace_id)
-	selection_changed.emit()
-	queue_redraw()
-	edit_trace_width_requested.emit(trace_id)
 
 
 func _show_context_menu(screen_pos: Vector2) -> void:
@@ -4454,12 +4400,6 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				# A shift-click that REMOVED the entity must not then drag it;
 				# anything still selected under the cursor anchors the move.
 				if is_entity_selected(hit_kind, hit_id):
-					# Remember WHICH component was clicked (A4) — with a group
-					# selection this is the only thing that distinguishes one
-					# member from another, and it is what the panel's offset
-					# editor edits. Set only when the click leaves it selected.
-					if hit_kind == KIND_COMPONENT:
-						focused_component = hit_id
 					# JUNCTION DRAG on a SELECTED ghost (Epoch UX3 station 6):
 					# a press ON one of the candidate's junctions arms the
 					# guarded move_junction gesture instead of the generic
@@ -5317,7 +5257,6 @@ func _clear_selection(announce := true) -> void:
 	if not selected_pad_refs.is_empty():
 		selected_pad_refs.clear()
 		pin_selected.emit({})
-	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
 	# there is nothing for it to belong to (cold-review F1 — the deselect click
 	# itself used to fire one). _commit_zone_edge_insert re-checks selection too;
@@ -8155,16 +8094,22 @@ func _clear_inspect_pin_selection() -> void:
 ##   INSPECT_PIN  the pad under the cursor (_inspect_hover_ref, the tool's own
 ##                nearest-pad resolution)
 ##   everything   the entity the SELECTION LADDER picks (_entity_at) —
-##   else         components and traces get a card, other kinds do not (yet)
+##   else         components, traces, zones and vias get a card; candidate
+##                ghosts, cutouts and board graphics do not
+##
+## A PINNED card (an inspector click, _pin_hover_card_for_pad) is left alone by
+## motion over nothing; motion onto another entity replaces it, hover having
+## something better to say — unless the preference is off, when hover says
+## nothing and the pinned card is all there is.
 func _update_hover_card(world_pos: Vector2, screen_pos: Vector2,
 		known_component: String = "") -> void:
 	var enabled := _hover_card_enabled()
-	if _hover_card_pinned and not enabled:
-		return
-	_hover_card_pinned = false
 	var entity: Array[String] = ["", ""]
 	if enabled and not _hover_card_suppressed():
 		entity = _hover_card_target(world_pos, known_component)
+	if _hover_card_pinned and (not enabled or str(entity[0]).is_empty()):
+		return
+	_hover_card_pinned = false
 	if entity == _hover_card_entity:
 		return
 	_hover_card_entity = entity
@@ -8184,8 +8129,9 @@ const HOVER_CARD_PAD := "hover_pad"
 ##
 ## The ladder (_entity_at) is what answers for everything else, so the card
 ## honours every tie rule the click already follows — a via over a trace, a
-## candidate ghost over the copper beneath it. Those kinds simply get no card;
-## they are not silently mis-described as the entity under them.
+## candidate ghost over the copper beneath it. A kind without a card (a ghost,
+## a cutout, a board graphic) gets none; it is not silently mis-described as
+## the entity under it.
 ##
 ## `known_component` is the component rung a caller has ALREADY answered for this
 ## same point. Only the candidate rung sits above it, so re-walking the ladder
@@ -8203,7 +8149,7 @@ func _hover_card_target(world_pos: Vector2, known_component: String = "") -> Arr
 			return ["", ""]
 		return [KIND_COMPONENT, known_component]
 	var hit: Array[String] = _entity_at(world_pos)
-	if str(hit[0]) in [KIND_COMPONENT, KIND_TRACE]:
+	if str(hit[0]) in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA]:
 		return hit
 	return ["", ""]
 
@@ -8225,6 +8171,10 @@ func _hover_card_content(entity: Array) -> PackedStringArray:
 					_pin_inspector_host.get_spatial_index(), entity_id)
 		KIND_TRACE:
 			return PcbHoverCard.trace_lines(data, entity_id)
+		KIND_ZONE:
+			return PcbHoverCard.zone_lines(data, entity_id)
+		KIND_VIA:
+			return PcbHoverCard.via_lines(data, entity_id)
 	return PackedStringArray()
 
 
@@ -8262,11 +8212,9 @@ func _hover_card_enabled() -> bool:
 
 
 ## Raise a pad's card ON PURPOSE, anchored at the click — the pin inspector's
-## way of showing a pad while the hover card is switched off. With the toggle
-## on this does nothing: hover already shows the pad and would fight a pin.
+## readout for the pad it just selected, whatever the hover-card preference
+## says. An empty ref (a click on nothing) drops whatever card stood.
 func _pin_hover_card_for_pad(ref: String, screen_pos: Vector2) -> void:
-	if _hover_card_enabled():
-		return
 	clear_hover_card()
 	if ref.is_empty():
 		return
