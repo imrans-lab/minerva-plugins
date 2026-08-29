@@ -145,8 +145,8 @@ static func disconnect_pins(data, pins: Array, expected_net: String = "") -> Dic
 	return out
 
 
-## MOVE one pin's net onto another pin, as ONE undo step — the "Move net to…"
-## act on a pad selection. The source pin comes off the net and the destination
+## MOVE one pin's net onto another pin, as ONE undo step — what
+## minerva_pcb_move_net runs. The source pin comes off the net and the destination
 ## pin goes on it; a destination that was on some OTHER net is taken off it
 ## (connect_pin_to_net's own move rule) and that displacement is REPORTED,
 ## because it is the one fact the caller cannot read back afterwards.

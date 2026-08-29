@@ -17,6 +17,12 @@ extends RefCounted
 ##   a trace       pcb_region_describe.traces_in_region — the row
 ##                 minerva_pcb_describe_region reports for that trace, with
 ##                 its length summed over the very points that row carries
+##   a zone        data.get_zone + zone_kind — what minerva_pcb_describe_zone
+##                 returns
+##   a via         pcb_region_describe.via_entry — the row minerva_pcb_list_vias
+##                 returns for that via
+##   a group line  data.group_member_ids / group_anchor_id / is_group_locked —
+##                 the facts minerva_pcb_group_components reports back
 ##
 ## So the card and the verb cannot disagree. Adding a line means finding the
 ## surface that already owns the answer, never writing a second rule.
@@ -34,8 +40,9 @@ const _PcbTraceGeometry := preload("model/pcb_trace_geometry.gd")
 const PAD_PX := Vector2(8.0, 5.0)
 ## Clearance kept between the hovered point and the nearest card edge. Also what
 ## guarantees the card cannot contain that point: every candidate placement
-## starts a full gap away from it.
-const GAP_PX := 14.0
+## starts a full gap away from it. 19 px: the owner found 14 too tight to read
+## past the cursor (work item 01a04b85e620).
+const GAP_PX := 19.0
 ## Extra leading between rows, on top of the font's own line height.
 const LINE_GAP_PX := 2.0
 const BORDER_PX := 1.0
@@ -54,12 +61,14 @@ const EMPTY_VALUE := "—"
 
 # ── CONTENT ──────────────────────────────────────────────────────────────────
 
-## A component's card: refdes, value, footprint, layer, rotation, position.
+## A component's card: refdes, value, footprint, layer, rotation, position, and
+## — for a grouped part only — its group (member count, anchor, lock).
 ## Empty when the board has no such component — an empty card is what says
 ## "nothing to show", so callers never need a second "is there anything" call.
 ##
 ## `spatial` is a pcb_spatial_index bound to the live board (duck-typed, as
-## every cross-module reach in this plugin is).
+## every cross-module reach in this plugin is); the group facts are read off
+## the board it is bound to.
 static func component_lines(spatial, component_id: String) -> PackedStringArray:
 	if spatial == null or component_id.is_empty():
 		return PackedStringArray()
@@ -67,7 +76,7 @@ static func component_lines(spatial, component_id: String) -> PackedStringArray:
 	if ctx.is_empty():
 		return PackedStringArray()
 	var pos: Dictionary = ctx.get("position", {})
-	return PackedStringArray([
+	var lines := PackedStringArray([
 		str(ctx.get("id", component_id)),
 		"Value: %s" % _or_dash(str(ctx.get("value", ""))),
 		"Footprint: %s" % _or_dash(str(ctx.get("footprint", ""))),
@@ -76,6 +85,14 @@ static func component_lines(spatial, component_id: String) -> PackedStringArray:
 		"Position: (%s, %s) mm" % [_num(float(pos.get("x", 0.0))),
 			_num(float(pos.get("y", 0.0)))],
 	])
+	var data = spatial.data
+	var group_id := str(data.component_group_id(component_id)) if data != null else ""
+	if not group_id.is_empty():
+		lines.append("Group: %d parts, anchor %s%s" % [
+			data.group_member_ids(group_id).size(),
+			str(data.group_anchor_id(group_id)),
+			" (locked)" if data.is_group_locked(group_id) else ""])
+	return lines
 
 
 ## A pad's card: REF.PIN, the pin's display name, its roles, its net, its layer.
@@ -131,6 +148,44 @@ static func trace_lines(data, trace_id: String) -> PackedStringArray:
 		"Layer: %s" % _or_dash(str(row.get("layer", ""))),
 		"Length: %s mm" % _num(_PcbTraceGeometry.length(
 			_polyline(row.get("points", [])))),
+	])
+
+
+## A zone's card: id, kind, net, layer — the fields minerva_pcb_describe_zone
+## answers with, read the same way (get_zone + zone_kind).
+static func zone_lines(data, zone_id: String) -> PackedStringArray:
+	if data == null or zone_id.is_empty():
+		return PackedStringArray()
+	var zone: Dictionary = data.get_zone(zone_id)
+	if zone.is_empty():
+		return PackedStringArray()
+	return PackedStringArray([
+		zone_id,
+		"Kind: %s" % _or_dash(str(data.zone_kind(zone))),
+		"Net: %s" % _or_dash(str(zone.get("net", ""))),
+		"Layer: %s" % _or_dash(str(zone.get("layer", ""))),
+	])
+
+
+## A via's card: id, position, net, size, drill — read off the row
+## pcb_region_describe.via_entry emits, which is what minerva_pcb_list_vias
+## returns for that via. via_entry builds the board's copper index to answer
+## span/touch, which the card does not show; the cost is paid once per hovered
+## via, not per pointer move (the canvas derives content on entity change).
+static func via_lines(data, via_id: String) -> PackedStringArray:
+	if data == null or via_id.is_empty():
+		return PackedStringArray()
+	var via: Dictionary = data.get_via(via_id)
+	if via.is_empty():
+		return PackedStringArray()
+	var row: Dictionary = _PcbRegionDescribe.via_entry(data, via)
+	return PackedStringArray([
+		via_id,
+		"Position: (%s, %s) mm" % [_num(float(row.get("x_mm", 0.0))),
+			_num(float(row.get("y_mm", 0.0)))],
+		"Net: %s" % _or_dash(str(row.get("net_name", ""))),
+		"Size: %s mm" % _num(float(row.get("size_mm", 0.0))),
+		"Drill: %s mm" % _num(float(row.get("drill_mm", 0.0))),
 	])
 
 

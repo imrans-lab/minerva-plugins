@@ -1040,10 +1040,10 @@ static func _free_pins(host, args: Dictionary) -> Dictionary:
 	return _ok(reply)
 
 
-## MOVE one pin's net onto another pin, ONE undo step — the verb twin of the
-## pad selection's "Move net to…". The source pin comes off
-## the net, the destination goes on it, and a destination that was on another
-## net is taken off it and named under `displaced`.
+## MOVE one pin's net onto another pin, ONE undo step — the only surface for
+## it (the sidebar has no net editors). The source pin comes off the net, the
+## destination goes on it, and a destination that was on another net is taken
+## off it and named under `displaced`.
 static func _move_net(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -1057,12 +1057,11 @@ static func _move_net(host, args: Dictionary) -> Dictionary:
 		result["success"] = false
 		return result
 	result["pads"] = _PcbPadRowScript.rows_for_refs(data, [from_ref, to_ref])
-	_refresh_pad_selection(host)
 	return _ok(result)
 
 
-## EXCHANGE the nets of two pins, ONE undo step — the BTN3/BTN4 swap the owner
-## does by hand today, and the verb twin of the selection's "Swap nets".
+## EXCHANGE the nets of two pins, ONE undo step — the BTN3/BTN4 swap, and like
+## move_net the only surface for it.
 static func _swap_nets(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -1077,7 +1076,6 @@ static func _swap_nets(host, args: Dictionary) -> Dictionary:
 		result["success"] = false
 		return result
 	result["pads"] = _PcbPadRowScript.rows_for_refs(data, [ref_a, ref_b])
-	_refresh_pad_selection(host)
 	return _ok(result)
 
 
@@ -1122,15 +1120,6 @@ static func _select(host, args: Dictionary) -> Dictionary:
 ## rather than a cast to null and a crash three lines later.
 static func _array_or_empty(value) -> Array:
 	return value as Array if value is Array else []
-
-
-## Nudge the panel's pad-selection sidebar after an MCP net edit. A net move
-## changes what the section says without changing WHAT is selected, so nothing
-## on the selection_changed feed would repaint it. No-op headless.
-static func _refresh_pad_selection(host) -> void:
-	var panel = _get_panel(host)
-	if panel != null and panel.has_method("refresh_pin_selection_section"):
-		panel.refresh_pin_selection_section()
 
 
 static func _spatial_query(host, args: Dictionary) -> Dictionary:
@@ -5200,8 +5189,7 @@ static func _delete_zone(host, args: Dictionary) -> Dictionary:
 
 
 ## Re-assign a zone's net. data.set_zone_net returns "" for BOTH a real write
-## and "no change needed", so this copies the current-value guard PCBPanel's
-## own net picker uses (_on_zone_prop_net_selected, ~PCBPanel.gd:1221): compare
+## and "no change needed", so a current-value guard sits here: compare
 ## the zone's stored net to the requested one FIRST, and reply a no-op success
 ## without ever calling the model or journalling — an unguarded caller would
 ## push an empty undo step (cold-review F3 in pcb_data.gd's own docs). A real
@@ -5227,8 +5215,7 @@ static func _set_zone_net(host, args: Dictionary) -> Dictionary:
 	return _ok({"zone_id": zone_id, "net": net_name, "changed": true})
 
 
-## Re-assign a zone's copper layer. Same no-op guard as set_zone_net, and same
-## source (PCBPanel._on_zone_prop_layer_selected, ~PCBPanel.gd:1246) —
+## Re-assign a zone's copper layer. Same no-op guard as set_zone_net —
 ## INCLUDING its asymmetry: an empty layer never short-circuits the guard
 ## (there is no legitimate "current" empty layer to match), so it always
 ## reaches the model and comes back as that setter's own refusal ("no layer

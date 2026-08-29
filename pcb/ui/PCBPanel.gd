@@ -54,7 +54,6 @@ const _PcbOverlayFetchScript: Script = preload("model/pcb_overlay_fetch.gd")
 const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
 ## The pad-selection sidebar section and the pad ROW shape it renders (the same
 ## rows minerva_pcb_get_selection returns).
-const _PcbPinSelectionSectionScript: Script = preload("pcb_pin_selection_section.gd")
 ## The Options menu — the control strip's second menu. Declared with `:=` so the
 ## parser keeps the GDScript class type and can resolve its static funcs.
 const PcbOptionsMenu := preload("pcb_options_menu.gd")
@@ -273,73 +272,16 @@ var _trace_width_spin: SpinBox = null
 ## current width stays visible in the menu item's own label.
 var _draw_width_revealed := false
 
-## ── Zone re-property rows (A5) ────────────────────────────────────────────────
-## Properties-section controls that EDIT THE SELECTED ZONE, as distinct from the
-## two sidebar pickers above, which ARM THE TOOL that authors a NEW one. Separate
-## control instances on purpose: the arming pickers carry a placeholder that means
-## "not chosen yet" / "follow the view filter" — states a committed zone cannot be
-## in — and sharing one widget between "what am I about to draw" and "what is this
-## thing I selected" would make every rebuild of one clobber the other.
-## They populate from the SAME sources (get_net_names, and the declared copper
-## stack via _declared_copper_layer_choices, which the arming layer picker now
-## calls too).
-var _zone_prop_rows: VBoxContainer = null
-var _zone_kind_row: HBoxContainer = null
-var _zone_kind_value_label: Label = null
-var _zone_prop_net_row: HBoxContainer = null
-var _zone_prop_net_option: OptionButton = null
-var _zone_prop_layer_row: HBoxContainer = null
-var _zone_prop_layer_option: OptionButton = null
-## WHICH zone the rows describe (""  = none). The zone twin of
-## _offset_component_id, and read by the commit handlers so a selection change
-## racing a dropdown cannot re-property a zone the user is no longer looking at.
-var _zone_prop_zone_id: String = ""
-
-## The selected TRACE's property row (A7, docket 019fb92f07e2) — one editable
-## field, its width. Built in the same key-label + value-control shape as the
-## zone rows above and shown/hidden by the same rule (exactly one selected trace,
-## or it hides: with two selected there is no single width a box could show).
-## A mixed component+trace+zone selection shows every half that applies, which is
-## what the A5 restructure of _update_properties made possible.
-var _trace_prop_rows: VBoxContainer = null
-var _trace_prop_width_spin: SpinBox = null
-## WHICH trace the row edits ("" = none) — the trace twin of _zone_prop_zone_id,
-## for the same reason: a selection change racing a spin-box commit must not
-## re-width a trace the user is no longer looking at.
-var _trace_prop_trace_id: String = ""
-
-## The selected VIA's property rows (DCR 01a0033a12a9 change 2). Built in the
-## same key-label + value-control shape as the trace and zone rows beside them.
-##
-## THIS IS THE GUI HALF OF update_via, NOT A CONVENIENCE. The owner drives this
-## panel with buttons only, so a via edit shipped as minerva_pcb_update_via
-## alone would be half done — the same mistake this epoch already made once,
-## when C2 recorded the place-via gap closed while the owner still had no
-## button. Position stays draggable on the canvas and is a READ-OUT here;
-## net, size and drill have no other affordance at all.
-## Spin bounds for the via pad/drill boxes. Deliberately WIDE rather than the
-## currently-legal window: the binding rule (drill < pad) is a relation between
-## the two boxes, so a max derived from the sibling would move under the cursor
-## mid-edit. PCBData.update_via is what refuses; these only keep the boxes
-## inside the range a fabricator could ever drill. The floor is the same 0.05 mm
-## via_author_error already treats as the smallest meaningful via footprint.
-const VIA_PROP_MIN_MM := 0.05
-const VIA_PROP_MAX_MM := 5.0
-
-## The board's declared fabrication stage picker (DCR 01a0033a12a9 change 3).
-## Board-level, so unlike every other control in the Properties section it is
-## always visible and never keyed to a selection.
-var _fabrication_stage_option: OptionButton = null
-
-var _via_prop_rows: VBoxContainer = null
-var _via_prop_position_label: Label = null
-var _via_prop_net_option: OptionButton = null
-var _via_prop_size_spin: SpinBox = null
-var _via_prop_drill_spin: SpinBox = null
-## WHICH via the rows edit ("" = none) — the via twin of _trace_prop_trace_id,
-## and for the same reason: a selection change racing a spin-box commit must not
-## re-size a via the user is no longer looking at.
-var _via_prop_via_id: String = ""
+## The board's declared fabrication stage, as a bare read-out: the stage token
+## and nothing else, empty until a board has been loaded. Declaring a stage is
+## minerva_pcb_fabrication_stage's job.
+var _fabrication_stage_label: Label = null
+## The divider above the sidebar's dock parent; visible only while the
+## annotation pane is mounted there (wide mode).
+var _dock_separator: HSeparator = null
+## True once a board came in through load_board_from_yaml or a project-file
+## restore — the seeded default board at construction is not "loaded".
+var _board_loaded := false
 
 var _board_size_label: Label = null
 var _status_label: Label = null
@@ -357,23 +299,9 @@ var _sidebar: VBoxContainer = null
 ## only what lives INSIDE it changed. Every add_child that used to target
 ## _sidebar directly now targets this instead.
 var _sidebar_content: VBoxContainer = null
-## The ScrollContainer wrapping _sidebar_content (B3b). Kept as a member — not
-## just a _build_sidebar local — so the reveal path (_on_edit_trace_width_requested
-## / _reveal_trace_width_spin, F3 cold review 2026-08-01, round 2) can
-## explicitly scroll a specific row into view.
-##
-## follow_focus is ALSO set true here, for the general "keyboard Tab lands on
-## a control the scroll then keeps visible" behavior a scrollable sidebar
-## should have. It is NOT what fixes the trace-width reveal, and round 1's
-## claim that it was measured load-bearing there was WRONG — corrected in
-## round 2: that measurement was confounded by a same-frame ordering bug (see
-## _reveal_trace_width_spin) that affected follow_focus's own internal
-## scroll-on-focus exactly the same way it affected the explicit
-## ensure_control_visible call. Once the reveal is properly DEFERRED one
-## layout pass, ensure_control_visible alone reaches 31/31px visible at both
-## reference panes (500px and 400px) with follow_focus removed entirely —
-## verified by mutation. follow_focus is kept for the keyboard path, which
-## this round did not build a test for.
+## The ScrollContainer wrapping _sidebar_content (B3b). Kept as a member so the
+## deferred reveal paths (_reveal_hint_width_spin, _reveal_draw_width_spin) can
+## scroll a specific row into view; follow_focus covers the keyboard-Tab path.
 var _sidebar_scroll: ScrollContainer = null
 var _dock_parent: VBoxContainer = null
 ## Bottom strip slot for the annotation dock (medium/narrow — HITL note:
@@ -384,24 +312,6 @@ var _options_menu_button: MenuButton = null
 var _drawer_button: Button = null
 var _export_button: Button = null
 
-var _properties_body: VBoxContainer = null
-var _properties_collapse_btn: Button = null
-var _properties_expanded := true
-
-## Component-group rows (A4 stage 2). BOTH start hidden and only appear for a
-## grouped component, so the Properties section on a board with no groups renders
-## exactly the five rows it always did.
-##   _group_row    — read-out: member count, anchor ref, locked marker.
-##   _offset_row   — the editable X/Y offset of ONE member from its group anchor.
-##                   Hidden for the anchor itself (it IS the origin).
-var _group_row: HBoxContainer = null
-var _group_value_label: Label = null
-var _offset_row: HBoxContainer = null
-var _offset_x_edit: LineEdit = null
-var _offset_y_edit: LineEdit = null
-## Which component the offset fields currently edit ("" when they are hidden).
-var _offset_component_id: String = ""
-
 ## Toolbar toggle for the WC-1 pin inspector (INSPECT_PIN mode).
 var _inspect_pin_button: Button = null
 ## Trash-can (item 019fb92f8b83, delete half): a plain action button, NOT a
@@ -411,8 +321,6 @@ var _inspect_pin_button: Button = null
 ## canvas' selection_changed signal, the same wiring _update_status/
 ## _update_properties already use).
 var _delete_button: Button = null
-## The pad-selection section — see _build_sidebar.
-var _pin_selection_section: VBoxContainer = null
 
 ## In-panel route-flow toolbar cluster (WC-3, contract §5 — a conscious
 ## partial reversal of Round-B "no authoring in panel"). Buttons activate
@@ -568,6 +476,9 @@ func _init() -> void:
 		# screen stop being the pours any held fill describes, and it is also
 		# when a fresh one is wanted.
 		_restate_zone_fill()
+		# Same reason: the stage read-out must say what THIS board declares
+		# the moment it is loaded, undone or written by the verb.
+		_update_fabrication_row()
 		if not _restoring:
 			content_changed.emit()
 			_schedule_mask_view_refresh())
@@ -1178,8 +1089,7 @@ func _build_ui() -> void:
 	_canvas.component_selected.connect(func(_id: String) -> void:
 		_update_status(); _update_properties())
 	_canvas.selection_changed.connect(func() -> void:
-		_update_status(); _update_properties(); _update_delete_button()
-		refresh_pin_selection_section())
+		_update_status(); _update_properties(); _update_delete_button())
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 	_canvas.zone_tool_message.connect(_show_transient_status)
@@ -1202,7 +1112,6 @@ func _build_ui() -> void:
 	# _on_bus_refusal_changed. Also not routed to the transient status: a
 	# refusal that expires is a refusal the user never reads.
 	_canvas.bus_refusal_changed.connect(_on_bus_refusal_changed)
-	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
 	_canvas.edit_draw_width_requested.connect(_on_edit_draw_width_requested)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
@@ -1672,7 +1581,9 @@ func _load_icon(fname: String) -> Texture2D:
 func _build_sidebar() -> VBoxContainer:
 	_sidebar = VBoxContainer.new()
 	_sidebar.name = "RightSidebar"
-	_sidebar.custom_minimum_size.x = 120
+	# Width follows the panel's own width (panel_layout.sidebar_width_px),
+	# re-applied on every resize by _on_panel_resized.
+	_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(size.x)
 	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 	# B3b height relief (docket 019fbbad9dac comment 970): RightSidebar's own
@@ -1694,18 +1605,24 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_sidebar_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_sidebar_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	# General "keyboard focus stays on screen" behavior for a scrollable
-	# sidebar. NOT what fixes the trace-width reveal (see
-	# _reveal_trace_width_spin, F3 round 2) — that path's own explicit
-	# ensure_control_visible call, deferred one layout pass, is what reaches
-	# 31/31px visible at both reference panes; verified by mutation that this
-	# flag can be removed entirely once the reveal is properly deferred. Kept
-	# for the keyboard-Tab path, which this round did not build a test for.
+	# Keyboard focus stays on screen in a scrollable sidebar. The programmatic
+	# reveals still call ensure_control_visible themselves, one layout pass
+	# deferred — a same-frame call races the layout pass the reveal queued.
 	_sidebar_scroll.follow_focus = true
 	_sidebar.add_child(_sidebar_scroll)
 
 	_sidebar_content = VBoxContainer.new()
 	_sidebar_content.name = "RightSidebarContent"
+	# EXPAND on BOTH axes is what makes a ScrollContainer hand its child the
+	# full viewport; without it the content sits at its own minimum. Width:
+	# one button wide once no row is wider than a button, every FlowContainer
+	# wrapping one child per line. Height: the annotation dock parent's
+	# expand-fill has no slack to claim, so in wide mode the pane's list
+	# stays at its floor with the rest of the column blank. Expand distributes
+	# surplus only — it never raises the minimum, so the B3b height relief
+	# above still holds.
+	_sidebar_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_sidebar_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_sidebar_scroll.add_child(_sidebar_content)
 
 	## Three labeled tool sections (docket 019fb5624e2e; sectioning corrected
@@ -2044,7 +1961,14 @@ func _build_sidebar() -> VBoxContainer:
 	# _route_flow_mode_label stays null; _update_route_flow_mode_label is
 	# null-guarded, so every update site is a safe no-op.
 
-	_sidebar_content.add_child(HSeparator.new())
+	# The dock's divider is shown only while a pane actually sits in the
+	# sidebar (wide mode) — _sync_dock_pane_mode owns it. In medium/narrow the
+	# pane lives in the bottom strip and the parent below is empty, so a
+	# standing separator would divide nothing from nothing.
+	_dock_separator = HSeparator.new()
+	_dock_separator.name = "DockSeparator"
+	_dock_separator.visible = false
+	_sidebar_content.add_child(_dock_separator)
 
 	# Platform annotation dock mounts here (Editor duck-types
 	# get_annotation_dock_parent — round A). Fills the remaining column.
@@ -2053,909 +1977,65 @@ func _build_sidebar() -> VBoxContainer:
 	_dock_parent.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_sidebar_content.add_child(_dock_parent)
 
-	_sidebar_content.add_child(HSeparator.new())
-	_sidebar_content.add_child(_build_properties_section())
-
-	_sidebar_content.add_child(HSeparator.new())
-
-	# The PAD SELECTION section: the selected pads' rows, the component's free
-	# pins, and the two net edits a pad selection affords. Hidden until pads
-	# are selected. This is an EDITING section — the read-only pin readout it
-	# used to sit under now lives in the canvas hover card.
-	_pin_selection_section = _PcbPinSelectionSectionScript.new()
-	_pin_selection_section.move_net_requested.connect(_on_move_net_requested)
-	_pin_selection_section.swap_nets_requested.connect(_on_swap_nets_requested)
-	_sidebar_content.add_child(_pin_selection_section)
+	# The board's fabrication stage — a bare row at the foot of the column,
+	# no section and no divider around it.
+	_sidebar_content.add_child(_build_fabrication_row())
 
 	return _sidebar
 
 
-## "Move net to…" from the pad-selection section — the SAME one-undo-step model
-## op minerva_pcb_move_net runs. Refusals are named in the status line rather
-## than swallowed: the human asked for something the netlist cannot do.
-func _on_move_net_requested(from_ref: String, to_ref: String) -> void:
-	if _data == null:
-		return
-	var result: Dictionary = _PcbNetMembershipScript.move_net(_data, from_ref, to_ref)
-	if result.has("error"):
-		_show_transient_status("Move net refused: %s" % str(result["error"]))
-		return
-	_show_transient_status("Moved %s from %s to %s." % [
-		str(result.get("net_name", "")), from_ref, to_ref])
-	refresh_pin_selection_section()
-
-
-## "Swap nets" from the pad-selection section — same rule as the move above.
-func _on_swap_nets_requested(ref_a: String, ref_b: String) -> void:
-	if _data == null:
-		return
-	var result: Dictionary = _PcbNetMembershipScript.swap_nets(_data, ref_a, ref_b)
-	if result.has("error"):
-		_show_transient_status("Swap nets refused: %s" % str(result["error"]))
-		return
-	_show_transient_status("Swapped the nets of %s and %s." % [ref_a, ref_b])
-	refresh_pin_selection_section()
-
-
-## Re-describe the pad-selection section against the live canvas selection.
-## Called from the selection_changed feed and after either net edit.
-func refresh_pin_selection_section() -> void:
-	if _pin_selection_section == null or not is_instance_valid(_pin_selection_section):
-		return
-	var refs: Array = []
-	if _canvas != null and is_instance_valid(_canvas):
-		refs = Array(_canvas.selected_pad_refs)
-	_pin_selection_section.update_for(_data, refs)
-
-
-## Properties section: the controls that CHANGE the board — the board-level
-## fabrication stage, plus the group / zone / trace / via property editors for
-## whatever is selected. Collapsible — wide mode expands it by default, medium
-## collapses it (3-col width is precious).
-##
-## NOTHING HERE IS A READ-OUT. The component facts this section used to mirror
-## (id, position, rotation, layer, footprint) are display-only, and display-only
-## board facts belong on the canvas hover card, beside the entity they describe
-## — see pcb_hover_card.gd. The status bar still carries the one-line selection
-## summary.
-func _build_properties_section() -> VBoxContainer:
-	var section := VBoxContainer.new()
-	section.name = "PropertiesSection"
-
-	_properties_collapse_btn = Button.new()
-	_properties_collapse_btn.name = "PropertiesHeader"
-	_properties_collapse_btn.text = "Properties"
-	_properties_collapse_btn.flat = true
-	_properties_collapse_btn.toggle_mode = true
-	_properties_collapse_btn.pressed.connect(func() -> void:
-		_set_properties_expanded(not _properties_expanded))
-	section.add_child(_properties_collapse_btn)
-
-	_properties_body = VBoxContainer.new()
-	_properties_body.name = "PropertiesBody"
-	section.add_child(_properties_body)
-
-	# BOARD-LEVEL, so it goes FIRST and stays visible whatever is selected —
-	# every row below it describes the selection instead. The separator is what
-	# marks that change of subject.
-	_properties_body.add_child(_build_fabrication_row())
-	_properties_body.add_child(HSeparator.new())
-
-	_properties_body.add_child(_build_group_rows())
-	_properties_body.add_child(_build_zone_rows())
-	_properties_body.add_child(_build_trace_rows())
-	_properties_body.add_child(_build_via_rows())
-	return section
-
-
-## The two component-group rows (A4 stage 2), built in the key-label +
-## value-control shape every row in this section shares.
-##
-## The offset fields commit on Enter (text_submitted) and on losing focus, and a
-## refused or malformed edit snaps straight back to the model's value — the
-## model, not the field, is what an offset IS. The Group row beside them names
-## which group the offset is measured against, so it is part of the control, not
-## a stray read-out.
-func _build_group_rows() -> VBoxContainer:
-	var box := VBoxContainer.new()
-	box.name = "GroupRows"
-
-	_group_row = HBoxContainer.new()
-	_group_row.name = "GroupRow"
-	_group_row.visible = false
-	var group_key := Label.new()
-	group_key.text = "Group:"
-	group_key.custom_minimum_size.x = 60
-	_group_row.add_child(group_key)
-	_group_value_label = Label.new()
-	_group_value_label.name = "GroupValue"
-	_group_value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_group_value_label.clip_text = true
-	_group_row.add_child(_group_value_label)
-	box.add_child(_group_row)
-
-	_offset_row = HBoxContainer.new()
-	_offset_row.name = "OffsetRow"
-	_offset_row.visible = false
-	var offset_key := Label.new()
-	offset_key.text = "Offset:"
-	offset_key.custom_minimum_size.x = 60
-	_offset_row.add_child(offset_key)
-	_offset_x_edit = _build_offset_edit("OffsetX", "X mm")
-	_offset_row.add_child(_offset_x_edit)
-	_offset_y_edit = _build_offset_edit("OffsetY", "Y mm")
-	_offset_row.add_child(_offset_y_edit)
-	box.add_child(_offset_row)
-
-	return box
-
-
-func _build_offset_edit(edit_name: String, hint: String) -> LineEdit:
-	var edit := LineEdit.new()
-	edit.name = edit_name
-	edit.placeholder_text = hint
-	edit.tooltip_text = _wrap_tooltip("%s offset from the group anchor, in mm" % hint)
-	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	edit.custom_minimum_size.x = 48
-	edit.text_submitted.connect(func(_t: String) -> void: _commit_member_offset())
-	edit.focus_exited.connect(_commit_member_offset)
-	return edit
-
-
-## The selected zone's property rows (A5), built in the SAME key-label +
-## value-control shape as the component rows above and the group rows beside them,
-## so the section still reads as one thing whichever kind is selected.
-##
-## KIND is a read-out, not a control. A pour and a keepout are different entities
-## with different rules (a pour must name a net; a keepout must not carry one
-## here), and "turn this pour into a keepout" is an authoring decision, not a
-## property tweak — offering it as a dropdown would quietly strip a net.
-##
-## The NET row is POURS ONLY, hidden (not merely disabled) for a keepout — the
-## exact rule, and the exact reasoning, the arming picker already follows: a
-## visible control is a request for input, and asking for a net the model will
-## refuse is the UI lying about the contract.
-func _build_zone_rows() -> VBoxContainer:
-	_zone_prop_rows = VBoxContainer.new()
-	_zone_prop_rows.name = "ZoneRows"
-	_zone_prop_rows.visible = false
-
-	_zone_kind_row = HBoxContainer.new()
-	_zone_kind_row.name = "ZoneKindRow"
-	var kind_key := Label.new()
-	kind_key.text = "Zone:"
-	kind_key.custom_minimum_size.x = 60
-	_zone_kind_row.add_child(kind_key)
-	_zone_kind_value_label = Label.new()
-	_zone_kind_value_label.name = "ZoneKindValue"
-	_zone_kind_value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_zone_kind_value_label.clip_text = true
-	_zone_kind_row.add_child(_zone_kind_value_label)
-	_zone_prop_rows.add_child(_zone_kind_row)
-
-	_zone_prop_net_row = HBoxContainer.new()
-	_zone_prop_net_row.name = "ZoneNetRow"
-	var net_key := Label.new()
-	net_key.text = "Net:"
-	net_key.custom_minimum_size.x = 60
-	_zone_prop_net_row.add_child(net_key)
-	_zone_prop_net_option = OptionButton.new()
-	_zone_prop_net_option.name = "ZonePropNetOption"
-	_zone_prop_net_option.tooltip_text = _wrap_tooltip("Net this pour is tied to (declared nets only)")
-	_zone_prop_net_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_zone_prop_net_option.clip_text = true
-	_zone_prop_net_option.item_selected.connect(_on_zone_prop_net_selected)
-	_zone_prop_net_row.add_child(_zone_prop_net_option)
-	_zone_prop_rows.add_child(_zone_prop_net_row)
-
-	_zone_prop_layer_row = HBoxContainer.new()
-	_zone_prop_layer_row.name = "ZoneLayerRow"
-	var layer_key := Label.new()
-	layer_key.text = "Layer:"
-	layer_key.custom_minimum_size.x = 60
-	_zone_prop_layer_row.add_child(layer_key)
-	_zone_prop_layer_option = OptionButton.new()
-	_zone_prop_layer_option.name = "ZonePropLayerOption"
-	_zone_prop_layer_option.tooltip_text = _wrap_tooltip("Copper layer this zone sits on (declared stack only)")
-	_zone_prop_layer_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_zone_prop_layer_option.clip_text = true
-	_zone_prop_layer_option.item_selected.connect(_on_zone_prop_layer_selected)
-	_zone_prop_layer_row.add_child(_zone_prop_layer_option)
-	_zone_prop_rows.add_child(_zone_prop_layer_row)
-
-	return _zone_prop_rows
-
-
-func _set_properties_expanded(expanded: bool) -> void:
-	_properties_expanded = expanded
-	if _properties_body != null:
-		_properties_body.visible = expanded
-	if _properties_collapse_btn != null:
-		_properties_collapse_btn.button_pressed = expanded
-		_properties_collapse_btn.text = "Properties" if expanded else "Properties…"
-
-
-## Re-drive every property control against the live selection. Each kind's half
-## runs on every update regardless of what the others decided, so a mixed
-## selection shows every half that has something to say — each describes exactly
-## what it says it describes.
+## Re-read the board-level fabrication row from the model.
 func _update_properties() -> void:
-	if _canvas == null or _data == null:
+	if _data == null:
 		return
 	_update_fabrication_row()
-	var comp = _property_focus_component()
-	if comp == null:
-		_hide_group_rows()
-	else:
-		_update_group_rows(comp)
-	_update_zone_rows()
-	_update_trace_rows()
-	_update_via_rows()
 
 
-## Drive the zone re-property rows for the selected zone.
-##
-## EXACTLY ONE selected zone, or the rows hide — the same rule the component half
-## applies to a multi-selection (_property_focus_component returns null for two
-## loose parts): with two zones selected there is no single thing a dropdown could
-## re-property. A mixed component+zone selection shows BOTH halves, which is
-## honest: each describes what it says it describes.
-func _update_zone_rows() -> void:
-	if _zone_prop_rows == null:
-		return
-	var selected: Array = _canvas.get_selected_zones()
-	if selected.size() != 1:
-		_hide_zone_rows()
-		return
-	var zone_id := str(selected[0])
-	var zone: Dictionary = _data.get_zone(zone_id)
-	if zone.is_empty():
-		_hide_zone_rows()
-		return
-
-	_zone_prop_zone_id = zone_id
-	_zone_prop_rows.visible = true
-	var kind: String = _data.zone_kind(zone)
-	var is_keepout := kind == "keepout"
-	_zone_kind_value_label.text = "keepout" if is_keepout else "copper pour"
-	_zone_prop_net_row.visible = not is_keepout
-	if not is_keepout:
-		_rebuild_zone_prop_net_option(str(zone.get("net", "")))
-	_rebuild_zone_prop_layer_option(str(zone.get("layer", "")))
-
-
-func _hide_zone_rows() -> void:
-	_zone_prop_zone_id = ""
-	if _zone_prop_rows != null:
-		_zone_prop_rows.visible = false
-
-
-## The selected TRACE's property rows (A7). ONE row so far — its width — built in
-## the same key-label + value-control shape as the zone rows above, with a
-## SpinBox for the same reason the arming control uses one: width is continuous,
-## so there is no list of legal values to pick from.
-##
-## Bounded by the SAME contract the model setter enforces (pcb_trace MIN/MAX),
-## so a value the box can express is a value the board will accept — a control
-## that could offer 40 mm and then be refused would be the UI lying about the
-## contract, the rule the zone pickers already follow.
-func _build_trace_rows() -> VBoxContainer:
-	_trace_prop_rows = VBoxContainer.new()
-	_trace_prop_rows.name = "TraceRows"
-	_trace_prop_rows.visible = false
-
-	var row := HBoxContainer.new()
-	row.name = "TraceWidthRow"
-	var key := Label.new()
-	key.text = "Width:"
-	key.custom_minimum_size.x = 60
-	row.add_child(key)
-
-	_trace_prop_width_spin = SpinBox.new()
-	_trace_prop_width_spin.name = "TracePropWidthSpin"
-	_trace_prop_width_spin.tooltip_text = _wrap_tooltip("Width of the selected trace, in mm (re-widens it)")
-	_trace_prop_width_spin.min_value = _PcbTraceScript.MIN_WIDTH_MM
-	_trace_prop_width_spin.max_value = _PcbTraceScript.MAX_WIDTH_MM
-	_trace_prop_width_spin.step = 0.05
-	_trace_prop_width_spin.suffix = "mm"
-	_trace_prop_width_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_trace_prop_width_spin.value_changed.connect(_on_trace_prop_width_changed)
-	row.add_child(_trace_prop_width_spin)
-	_trace_prop_rows.add_child(row)
-
-	return _trace_prop_rows
-
-
-## Drive the trace property row for the selected trace. EXACTLY ONE selected
-## trace or the row hides — the same rule the zone half applies, and for the same
-## reason: with two traces selected there is no single width a box could show.
-func _update_trace_rows() -> void:
-	if _trace_prop_rows == null:
-		return
-	var selected: Array = _canvas.get_selected_traces()
-	if selected.size() != 1:
-		_hide_trace_rows()
-		return
-	var trace_id := str(selected[0])
-	var trace = _data.get_trace(trace_id)
-	if trace == null:
-		_hide_trace_rows()
-		return
-	_trace_prop_trace_id = trace_id
-	_trace_prop_rows.visible = true
-	# set_value_no_signal for the SAME reason the arming box uses it: assigning
-	# would fire value_changed and commit the box's step-rounded number back onto
-	# the trace, so merely SELECTING a 0.254 mm trace would silently re-width it
-	# to 0.25 and push an undo step nobody asked for.
-	_trace_prop_width_spin.set_value_no_signal(float(trace.width))
-
-
-func _hide_trace_rows() -> void:
-	_trace_prop_trace_id = ""
-	if _trace_prop_rows != null:
-		_trace_prop_rows.visible = false
-
-
-## The board's FABRICATION STAGE row (DCR 01a0033a12a9 change 3) — the GUI half
-## of minerva_pcb_fabrication_stage, and the only control in this section that
-## describes the BOARD rather than the selection.
-##
-## IT HAS TO BE A GUI CONTROL, not just a verb. A via-only board is the fiber-
-## laser customer's actual deliverable, and the owner drives this panel with
-## buttons only — shipping the declaration as MCP alone would leave the person
-## who most needs it unable to make it. That is the mistake this epoch already
-## made once with place_via.
-##
-## A DROPDOWN OF THE THREE KNOWN STAGES, taken from the model's own FAB_STAGES,
-## so the control cannot offer a token the write gate would refuse. What it CAN
-## still offer is "vias_only" on a board that has traces — that refusal depends
-## on board contents, not on the token, so it surfaces as the model's own
-## sentence and the picker snaps back, the contract _build_offset_edit set.
+## The fabrication-stage read-out: a Label whose text is the stage token the
+## board declares — nothing else — and "" while no board has been loaded.
+## Read-only on purpose: the stage is declared through
+## minerva_pcb_fabrication_stage, like every other board edit the sidebar no
+## longer carries. Refreshed from the model's data_changed, so a load, an
+## undo and a verb write all land on it at once.
 func _build_fabrication_row() -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.name = "FabricationRow"
-	var key := Label.new()
-	key.text = "Fabrication:"
-	key.custom_minimum_size.x = 60
-	row.add_child(key)
-	_fabrication_stage_option = OptionButton.new()
-	_fabrication_stage_option.name = "FabricationStageOption"
-	_fabrication_stage_option.tooltip_text = _wrap_tooltip(
-		"What this board IS for manufacturing. \"routed\" means every net is "
-		+ "meant to be wired. The other two say unrouted nets are intended, so "
-		+ "the completeness check reports them as the job rather than as "
-		+ "defects — \"vias_only\" is a drilled, plated board with no copper "
-		+ "runs at all (drill now, lase the traces later).")
-	_fabrication_stage_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_fabrication_stage_option.clip_text = true
-	for stage in _PcbDataScript.FAB_STAGES:
-		var idx := _fabrication_stage_option.item_count
-		_fabrication_stage_option.add_item(str(stage))
-		_fabrication_stage_option.set_item_metadata(idx, str(stage))
-	_fabrication_stage_option.item_selected.connect(_on_fabrication_stage_selected)
-	row.add_child(_fabrication_stage_option)
+	_fabrication_stage_label = Label.new()
+	_fabrication_stage_label.name = "FabricationStageLabel"
+	_fabrication_stage_label.tooltip_text = _wrap_tooltip(
+		"The board's declared fabrication stage. \"routed\" means every net is "
+		+ "meant to be wired; \"routing_deferred\" and \"vias_only\" say unrouted "
+		+ "nets are intended, so the completeness check reports them as the job "
+		+ "rather than as defects. Set it with minerva_pcb_fabrication_stage.")
+	_fabrication_stage_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_fabrication_stage_label.clip_text = true
+	row.add_child(_fabrication_stage_label)
 	return row
 
 
 func _update_fabrication_row() -> void:
-	if _fabrication_stage_option == null or _data == null:
+	if _fabrication_stage_label == null:
 		return
-	var current := str(_data.fabrication_stage)
-	for i in range(_fabrication_stage_option.item_count):
-		if str(_fabrication_stage_option.get_item_metadata(i)) == current:
-			# select(), not item_selected — assigning through the signal would
-			# re-declare the stage the board already has on every properties
-			# refresh, pushing dead undo steps. Same rule the spin boxes keep
-			# with set_value_no_signal.
-			_fabrication_stage_option.select(i)
-			return
-
-
-func _on_fabrication_stage_selected(index: int) -> void:
-	if _fabrication_stage_option == null or _data == null:
-		return
-	var chosen := str(_fabrication_stage_option.get_item_metadata(index))
-	# NO-OP PICKS MUST NOT REACH save_to_history — Godot's OptionButton emits
-	# item_selected for every popup pick including the one already showing, and
-	# a dead undo step makes the user's next Ctrl+Z appear to do nothing. The
-	# model returns "" for both "no change" and a real write, so the guard is
-	# here rather than there (the zone net picker's precedent).
-	if chosen == str(_data.fabrication_stage):
-		return
-	var refusal: String = _data.set_fabrication_stage(chosen)
-	if not refusal.is_empty():
-		_show_transient_status(refusal)
-		_update_fabrication_row()
-		return
-	_data.save_to_history("Set fabrication stage")
-	_show_transient_status("Fabrication stage: %s" % chosen)
-	_update_status()
-
-
-## The selected VIA's property rows (DCR 01a0033a12a9 change 2) — the GUI half
-## of PCBData.update_via, built in the same key-label + value-control shape as
-## the trace and zone rows above.
-##
-## POSITION IS A READ-OUT, not a field. A via already moves by dragging it, and
-## that gesture goes through the same model rule these controls do; adding a
-## second numeric editor for the same fact would be two places to change one
-## thing. It is shown because a via the user has just dragged onto a trace gets
-## SNAPPED to that centreline, and a read-out is how they see where it landed.
-##
-## NET IS A DROPDOWN OF DECLARED NETS PLUS "unassigned", for the reason the zone
-## picker gives: a control that could offer a net the board does not declare
-## would be the UI lying about a contract update_via enforces anyway. The
-## unassigned entry is real — a standalone via legitimately carries no net, and
-## via-only boards are built entirely out of them.
-##
-## SIZE AND DRILL ARE SPINBOXES with generous bounds rather than boxes narrowed
-## to the currently-legal window. The one rule that binds them (drill smaller
-## than pad, the difference being the annular ring) is a RELATION between the
-## two, so a max that tracked the other box would move under the user's cursor
-## mid-edit. Instead a refused edit shows the model's own words and snaps the
-## box back to the board's value — the contract _build_offset_edit already sets
-## for the first editable control in this panel.
-func _build_via_rows() -> VBoxContainer:
-	_via_prop_rows = VBoxContainer.new()
-	_via_prop_rows.name = "ViaRows"
-	_via_prop_rows.visible = false
-
-	var pos_row := HBoxContainer.new()
-	pos_row.name = "ViaPositionRow"
-	var pos_key := Label.new()
-	pos_key.text = "Via:"
-	pos_key.custom_minimum_size.x = 60
-	pos_row.add_child(pos_key)
-	_via_prop_position_label = Label.new()
-	_via_prop_position_label.name = "ViaPositionValue"
-	_via_prop_position_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_via_prop_position_label.clip_text = true
-	pos_row.add_child(_via_prop_position_label)
-	_via_prop_rows.add_child(pos_row)
-
-	var net_row := HBoxContainer.new()
-	net_row.name = "ViaNetRow"
-	var net_key := Label.new()
-	net_key.text = "Net:"
-	net_key.custom_minimum_size.x = 60
-	net_row.add_child(net_key)
-	_via_prop_net_option = OptionButton.new()
-	_via_prop_net_option.name = "ViaPropNetOption"
-	_via_prop_net_option.tooltip_text = _wrap_tooltip(
-		"Net this via belongs to (declared nets only). A via sitting on a trace "
-		+ "takes that trace's net whatever is picked here.")
-	_via_prop_net_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_via_prop_net_option.clip_text = true
-	_via_prop_net_option.item_selected.connect(_on_via_prop_net_selected)
-	net_row.add_child(_via_prop_net_option)
-	_via_prop_rows.add_child(net_row)
-
-	var size_row := HBoxContainer.new()
-	size_row.name = "ViaSizeRow"
-	var size_key := Label.new()
-	size_key.text = "Pad:"
-	size_key.custom_minimum_size.x = 60
-	size_row.add_child(size_key)
-	_via_prop_size_spin = _build_via_spin("ViaPropSizeSpin",
-		"Via pad diameter in mm. Must stay larger than the drill — the "
-		+ "difference is the annular ring.")
-	_via_prop_size_spin.value_changed.connect(_on_via_prop_size_changed)
-	size_row.add_child(_via_prop_size_spin)
-	_via_prop_rows.add_child(size_row)
-
-	var drill_row := HBoxContainer.new()
-	drill_row.name = "ViaDrillRow"
-	var drill_key := Label.new()
-	drill_key.text = "Drill:"
-	drill_key.custom_minimum_size.x = 60
-	drill_row.add_child(drill_key)
-	_via_prop_drill_spin = _build_via_spin("ViaPropDrillSpin",
-		"Via drill diameter in mm. Must stay smaller than the pad.")
-	_via_prop_drill_spin.value_changed.connect(_on_via_prop_drill_changed)
-	drill_row.add_child(_via_prop_drill_spin)
-	_via_prop_rows.add_child(drill_row)
-
-	return _via_prop_rows
-
-
-func _build_via_spin(spin_name: String, hint: String) -> SpinBox:
-	var spin := SpinBox.new()
-	spin.name = spin_name
-	spin.tooltip_text = _wrap_tooltip(hint)
-	spin.min_value = VIA_PROP_MIN_MM
-	spin.max_value = VIA_PROP_MAX_MM
-	spin.step = 0.05
-	spin.suffix = "mm"
-	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	return spin
-
-
-## Drive the via property rows for the selected via. EXACTLY ONE selected via or
-## the rows hide — the same rule the trace and zone halves apply, and for the
-## same reason: with two selected there is no single drill a box could show.
-func _update_via_rows() -> void:
-	if _via_prop_rows == null:
-		return
-	var selected: Array = _canvas.get_selected_vias()
-	if selected.size() != 1:
-		_hide_via_rows()
-		return
-	var via_id := str(selected[0])
-	var via: Dictionary = _data.get_via(via_id)
-	if via.is_empty():
-		_hide_via_rows()
-		return
-	_via_prop_via_id = via_id
-	_via_prop_rows.visible = true
-	var pos: Vector2 = _data.via_position(via)
-	_via_prop_position_label.text = "%s  (%.3f, %.3f)" % [via_id, pos.x, pos.y]
-	_rebuild_via_prop_net_option(str(via.get("net_name", "")))
-	# set_value_no_signal for the SAME reason the trace width box uses it:
-	# assigning would fire value_changed and commit the box's step-rounded number
-	# back onto the via, so merely SELECTING a 0.635 mm via would silently
-	# re-size it to 0.65 and push an undo step nobody asked for.
-	_via_prop_size_spin.set_value_no_signal(float(via.get("size", 0.8)))
-	_via_prop_drill_spin.set_value_no_signal(float(via.get("drill", 0.4)))
-
-
-func _hide_via_rows() -> void:
-	_via_prop_via_id = ""
-	if _via_prop_rows != null:
-		_via_prop_rows.visible = false
-
-
-## Populate the via net picker from the board's declared nets, with a real
-## "unassigned" entry at the top carrying "" as its metadata.
-func _rebuild_via_prop_net_option(current_net: String) -> void:
-	if _via_prop_net_option == null:
-		return
-	_via_prop_net_option.clear()
-	_via_prop_net_option.add_item("(unassigned)")
-	_via_prop_net_option.set_item_metadata(0, "")
-	var names: Array = _data.get_net_names()
-	names.sort()
-	var selected := 0
-	for net_name in names:
-		var idx := _via_prop_net_option.item_count
-		_via_prop_net_option.add_item(str(net_name))
-		_via_prop_net_option.set_item_metadata(idx, str(net_name))
-		if str(net_name) == current_net:
-			selected = idx
-	_via_prop_net_option.select(selected)
-
-
-func _on_via_prop_net_selected(index: int) -> void:
-	if _via_prop_net_option == null:
-		return
-	var meta: Variant = _via_prop_net_option.get_item_metadata(index)
-	_commit_via_edit({"net_name": str(meta) if meta != null else ""})
-
-
-func _on_via_prop_size_changed(value: float) -> void:
-	_commit_via_edit({"size": value})
-
-
-func _on_via_prop_drill_changed(value: float) -> void:
-	_commit_via_edit({"drill": value})
-
-
-## The ONE commit path behind all three via controls.
-##
-## NO-OP PICKS MUST NOT REACH save_to_history, the rule the zone net picker
-## records: Godot's OptionButton emits item_selected for EVERY popup pick,
-## including the entry already showing. update_via answers that itself — it
-## returns ok with moved:false when nothing actually differs — so the guard
-## lives in the model rather than being re-derived per control, and a SpinBox
-## re-entering its own value is covered by the same branch.
-##
-## A REFUSAL SHOWS THE MODEL'S OWN WORDS and re-reads the rows from the board,
-## which snaps the offending control back to the value the via actually has.
-func _commit_via_edit(changes: Dictionary) -> void:
-	if _via_prop_via_id.is_empty() or _data == null:
-		return
-	var via_id := _via_prop_via_id
-	_data.begin_batch()
-	var res: Dictionary = _data.update_via(via_id, changes)
-	_data.end_batch("Edit via " + via_id)
-	if not bool(res.get("ok", false)):
-		_show_transient_status(str(res.get("message", "The via cannot be edited that way.")))
-		_update_properties()
-		return
-	if not bool(res.get("moved", false)):
-		return
-	if bool(res.get("snapped", false)):
-		_show_transient_status("Via snapped onto its trace at (%.3f, %.3f)."
-			% [(res.get("position", Vector2.ZERO) as Vector2).x,
-				(res.get("position", Vector2.ZERO) as Vector2).y])
-	if _canvas != null:
-		_canvas.queue_redraw()
-	_update_properties()
-	_update_status()
-
-
-## The canvas context menu's "Set trace width…" landing (B1u5, owner comment 962:
-## the numeric editor already existed and nobody could find it).
-##
-## NO SECOND EDITOR — but it does more than reveal one row. It CLEARS THE PATH to
-## the SpinBox built by _build_trace_rows and then focuses it, so the commit still
-## runs through _on_trace_prop_width_changed, which owns the no-op guard (no dead
-## undo step), the model's refusal string verbatim in the status bar, and the
-## single journalled data.set_trace_width. A menu item that set a width itself
-## would be a second mutation path onto the same field, with its own copy of all
-## three rules to keep in step; there is also no dialog anywhere in this panel to
-## put one in.
-##
-## CLEARING THE PATH IS THE WHOLE POINT, and getting it wrong reproduces the very
-## complaint this item exists to answer (cold-review F1, empirically proven). The
-## row's own `visible` flag is NOT enough: it lives inside _properties_body, which
-## _apply_layout_mode COLLAPSES BY DEFAULT in the medium (3-column) tier
-## (`_set_properties_expanded(wide)`), and the whole sidebar hides behind
-## _drawer_open in narrow. A handler that only checked the row would leave the
-## owner picking "Set trace width…" in a medium pane and seeing nothing happen at
-## all — comment 962's bug, delivered by its own fix. So enclosures are opened
-## first, in outside-in order (drawer, then section, then row); the row-visible
-## test that used to sit here now lives in _reveal_trace_width_spin, one layout
-## pass later (below).
-##
-## B3b (cold review F3, 2026-08-01) added a FOURTH enclosure this handler did not
-## originally know about: RightSidebarScroll, the ScrollContainer the sidebar's
-## rows now live inside (see _sidebar_scroll). Opening the drawer/section/row
-## enclosures is not enough if the target row is still scrolled OUT of the
-## viewport — is_visible_in_tree is true for a clipped-but-mounted control, so a
-## same-frame grab_focus() would silently succeed on an invisible field (measured:
-## 28px below the fold at the round's own 500px reference pane, fully hidden at
-## 400px). ROUND 2 (cold review, same day): the FIRST fix attempt called
-## ensure_control_visible in the SAME frame as the drawer/section expansion above
-## and was STILL wrong — that call races the just-triggered expansion's own
-## layout pass and clamps its scroll target short by exactly one row height
-## (measured: pane 500px, the SpinBox landed with its top edge exactly ON the
-## viewport's bottom edge — 0 of 31px actually visible, not the "fine" a
-## boundary-touching Rect2.intersects() check wrongly reported). The fix is to
-## DEFER the reveal one layout pass — call_deferred("_reveal_trace_width_spin"),
-## the same idiom _sync_dock_pane_mode uses for the identical class of race — so
-## ensure_control_visible runs against the POST-expansion layout instead of the
-## pre-expansion one. Verified by mutation: 31/31px visible at BOTH reference
-## panes with the deferred call; 0/31 at 500px (31/31 at 400px, the marginal case
-## happens to survive there) when called same-frame instead.
-##
-## The canvas selects the trace BEFORE emitting, and selection_changed drives
-## _update_properties, so the row is already populated by the time we get here. The
-## re-drive below is the belt for that braces: if some future ordering change left
-## the row stale, focusing a control showing another trace's width would be worse
-## than a wasted call.
-func _on_edit_trace_width_requested(trace_id: String) -> void:
-	if _trace_prop_trace_id != trace_id:
-		_update_trace_rows()
-	if _trace_prop_rows == null or not _trace_prop_rows.visible:
-		return
-
-	# Outside in: drawer, then section. The drawer relayouts through
-	# _apply_layout_mode(force), which leaves the expanded state alone on a forced
-	# re-apply (`if mode_changed:` guards _set_properties_expanded there) — so this
-	# order is safe today AND stays safe if that guard is ever relaxed, which the
-	# reverse order would not.
-	if _layout_mode == _PanelLayoutScript.MODE_NARROW and not _drawer_open:
-		_on_drawer_toggled()
-	if not _properties_expanded:
-		_set_properties_expanded(true)
-
-	if _trace_prop_width_spin == null:
-		return
-	# F3 ROUND 2 (cold review 2026-08-01): the scroll-reveal + focus is
-	# DEFERRED one layout pass, same idiom _sync_dock_pane_mode uses
-	# (call_deferred, see _build_ui's comment on it) for exactly the same
-	# reason — a same-frame call races the drawer/section expansion just
-	# triggered above. MEASURED root cause: ensure_control_visible() called
-	# in the SAME frame as _set_properties_expanded(true)/_on_drawer_toggled()
-	# clamps its scroll target against the PRE-expansion content height, short
-	# by exactly one row (measured: pane 500, spin_y lands [468,499] against
-	# viewport [50,468] — ZERO of 31px visible, the control flush against and
-	# entirely BELOW the fold). One deferred call, after the just-triggered
-	# expansion's own sort_children pass has run, targets the POST-expansion
-	# layout and lands fully on-screen (measured: spin_y [437,468] — 31/31px
-	# visible). See _reveal_trace_width_spin.
-	call_deferred("_reveal_trace_width_spin")
-
-
-## The deferred second half of _on_edit_trace_width_requested (F3 round 2):
-## scrolls the SpinBox into view and focuses its LineEdit, one layout pass
-## after the drawer/section enclosures were opened. Re-checks visibility
-## itself rather than trusting the caller's frame — is_visible_in_tree can
-## still be false if the drawer/section reveal was itself refused for some
-## reason between the two calls (e.g. the panel was torn down mid-flight).
-func _reveal_trace_width_spin() -> void:
-	if _trace_prop_width_spin == null or not is_instance_valid(_trace_prop_width_spin):
-		return
-	var line_edit := _trace_prop_width_spin.get_line_edit()
-	# grab_focus() on a control outside the tree is a hard engine error, and the
-	# panel is legitimately un-mounted in the headless suites that drive this hook.
-	# is_visible_in_tree (not .visible) because a focused control inside a hidden
-	# ancestor is exactly the dead end above.
-	if line_edit == null or not line_edit.is_inside_tree():
-		return
-	if not line_edit.is_visible_in_tree():
-		return
-	# Scroll the fourth enclosure open BEFORE focusing — a control can be
-	# is_visible_in_tree() (not clipped by a hidden ancestor's .visible flag)
-	# while still sitting outside the scroll viewport's current scroll offset.
-	# _sidebar_scroll.follow_focus is also set true, but MEASURED as
-	# insufficient alone for this programmatic path — this explicit call is
-	# required alongside it (see _sidebar_scroll's own doc comment).
-	if _sidebar_scroll != null:
-		_sidebar_scroll.ensure_control_visible(_trace_prop_width_spin)
-	line_edit.grab_focus()
-	line_edit.select_all()
-
-
-## Re-width the selected trace. ONE journalled, undoable step; the MODEL owns
-## every rule that could refuse it (pcb_data.set_trace_width → pcb_trace.
-## width_error) and its refusal string is what the user is shown, after which the
-## box is re-read from the model — the board is the truth, the control is a view
-## of it, the same contract the zone re-property rows keep.
-##
-## NO-OP EDITS MUST NOT REACH save_to_history (cold-review F3, the guard the zone
-## handlers carry): SpinBox emits value_changed for a re-typed identical value,
-## and set_trace_width returns "" for "no change needed" exactly as it does for a
-## real write — so an unguarded commit would push a dead "Set trace width" step
-## and the user's next Ctrl+Z would appear to do nothing.
-func _on_trace_prop_width_changed(value: float) -> void:
-	if _trace_prop_trace_id.is_empty() or _data == null:
-		return
-	var trace_id := _trace_prop_trace_id
-	var trace = _data.get_trace(trace_id)
-	if trace == null:
-		return
-	if is_equal_approx(float(trace.width), value):
-		return
-	var refusal: String = _data.set_trace_width(trace_id, value)
-	if not refusal.is_empty():
-		_show_transient_status(refusal)
-		_update_properties()
-		return
-	_data.save_to_history("Set trace width")
-	if _canvas != null:
-		_canvas.queue_redraw()
-	_update_properties()
-
-
-## Populate the re-property net picker from the board's declared nets, selecting
-## the pour's current one.
-##
-## Entry 0 is the same "Net…" placeholder carrying "" the arming picker uses, and
-## it is here for the same reason: "this pour names no declared net" is a REAL
-## state a loaded board can be in (a net deleted out from under it), and a picker
-## that silently displayed some other net instead would be lying about the board.
-## Choosing it is not a silent no-op either — set_zone_net refuses an empty net on
-## a pour, visibly, which is exactly the message the user needs.
-func _rebuild_zone_prop_net_option(current_net: String) -> void:
-	if _zone_prop_net_option == null:
-		return
-	_zone_prop_net_option.clear()
-	_zone_prop_net_option.add_item("Net…")
-	_zone_prop_net_option.set_item_metadata(0, "")
-	var names: Array = _data.get_net_names()
-	names.sort()
-	var selected := 0
-	for net_name in names:
-		var idx := _zone_prop_net_option.item_count
-		_zone_prop_net_option.add_item(str(net_name))
-		_zone_prop_net_option.set_item_metadata(idx, str(net_name))
-		if str(net_name) == current_net:
-			selected = idx
-	_zone_prop_net_option.select(selected)
+	_fabrication_stage_label.text = str(_data.fabrication_stage) \
+		if _board_loaded and _data != null else ""
 
 
 ## Populate the re-property layer picker from the declared copper stack, selecting
 ## the zone's current layer.
 ##
-## Re-derive every copper-layer picker from the board's declared stack (epoch
-## GA-1). One handler on structure_changed rather than three ad-hoc calls, so a
-## stack edit — MCP tool, dialog, or undo/redo — cannot refresh some pickers
-## and strand others. The zone-properties picker rebuilds only while its pane
-## is bound to a zone; _show_zone_properties owns that path.
+## Re-derive both copper-layer pickers from the board's declared stack (epoch
+## GA-1). One handler on structure_changed rather than two ad-hoc calls, so a
+## stack edit — MCP tool, dialog, or undo/redo — cannot refresh one picker and
+## strand the other.
 func _rebuild_copper_layer_pickers() -> void:
 	_rebuild_layer_option()
 	_rebuild_zone_layer_option()
 
 
-## NO placeholder entry, unlike the arming picker: "follow the working layer" is a
-## meaningful answer for a zone about to be DRAWN and a meaningless one for a zone
-## that already exists on a layer. A board that declares no copper layers gets a
-## single disabled entry saying so, and the control goes disabled — the visible
-## half of the fail-closed refusal set_zone_layer makes in the model.
-func _rebuild_zone_prop_layer_option(current_layer: String) -> void:
-	if _zone_prop_layer_option == null:
-		return
-	_zone_prop_layer_option.clear()
-	var choices: Array = _declared_copper_layer_choices()
-	if choices.is_empty():
-		_zone_prop_layer_option.add_item("(board declares no layers)")
-		_zone_prop_layer_option.set_item_metadata(0, "")
-		_zone_prop_layer_option.select(0)
-		_zone_prop_layer_option.disabled = true
-		return
-	_zone_prop_layer_option.disabled = false
-	var canon_current := PcbLayerStack.kicad_to_canon(current_layer) if not current_layer.is_empty() else ""
-	var selected := -1
-	for choice in choices:
-		var idx := _zone_prop_layer_option.item_count
-		_zone_prop_layer_option.add_item(str(choice["label"]))
-		_zone_prop_layer_option.set_item_metadata(idx, str(choice["canon"]))
-		if str(choice["canon"]) == canon_current:
-			selected = idx
-	if selected < 0:
-		# The zone sits on a layer this board does not declare (an off-contract
-		# board, or one whose stack changed under it). Show the truth rather than
-		# silently pointing at some other layer the zone is not on.
-		_zone_prop_layer_option.add_item("%s (not declared)" % current_layer)
-		_zone_prop_layer_option.set_item_metadata(_zone_prop_layer_option.item_count - 1, "")
-		selected = _zone_prop_layer_option.item_count - 1
-	_zone_prop_layer_option.select(selected)
-
-
-## Re-property the selected pour's net. ONE journalled, undoable step; the MODEL
-## owns every rule that could refuse it (undeclared net, keepout, off-stack layer
-## — see pcb_data.set_zone_net), and its refusal string is what the user is shown.
-## A refusal re-reads the model into the picker rather than leaving the chosen
-## entry standing: the board is the truth, the dropdown is a view of it — the same
-## contract _commit_member_offset keeps with the offset fields.
-func _on_zone_prop_net_selected(index: int) -> void:
-	if _zone_prop_zone_id.is_empty() or _data == null or _zone_prop_net_option == null:
-		return
-	var meta: Variant = _zone_prop_net_option.get_item_metadata(index)
-	var chosen := str(meta) if meta != null else ""
-	var zone_id := _zone_prop_zone_id
-	# NO-OP PICKS MUST NOT REACH save_to_history (cold-review F3). Godot's
-	# OptionButton emits item_selected for EVERY popup pick, including the entry
-	# already showing, and set_zone_net returns "" for "no change needed" exactly
-	# as it does for a real write — so opening the dropdown and re-picking the
-	# current net would push a dead "Set zone net" step. The user's next Ctrl+Z
-	# would then appear to do nothing, and the one after it would eat a real edit.
-	if str(_data.get_zone(zone_id).get("net", "")) == chosen:
-		return
-	var refusal: String = _data.set_zone_net(zone_id, chosen)
-	if not refusal.is_empty():
-		_show_transient_status(refusal)
-		_update_properties()
-		return
-	_data.save_to_history("Set zone net")
-	if _canvas != null:
-		_canvas.queue_redraw()
-	_update_properties()
-
-
-## Re-property the selected zone's copper layer. Same contract as the net handler
-## above, and the same one-step-per-change history shape.
-func _on_zone_prop_layer_selected(index: int) -> void:
-	if _zone_prop_zone_id.is_empty() or _data == null or _zone_prop_layer_option == null:
-		return
-	var meta: Variant = _zone_prop_layer_option.get_item_metadata(index)
-	var chosen := str(meta) if meta != null else ""
-	var zone_id := _zone_prop_zone_id
-	# Same no-op guard as the net handler above (cold-review F3). The comparison
-	# is RAW stored value vs the picker's canonical id — deliberately, so a zone
-	# storing a KiCad name never equals the canonical pick and "F.Cu" -> "top"
-	# stays a real normalising write, not a no-op.
-	var current := str(_data.get_zone(zone_id).get("layer", ""))
-	if not chosen.is_empty() and current == chosen:
-		return
-	var refusal: String = _data.set_zone_layer(zone_id, chosen)
-	if not refusal.is_empty():
-		_show_transient_status(refusal)
-		_update_properties()
-		return
-	_data.save_to_history("Set zone layer")
-	if _canvas != null:
-		_canvas.queue_redraw()
-	_update_properties()
-
-
 ## The board's declared COPPER layers as [{label, canon}], KiCad label + canonical
-## metadata. ONE list, two pickers: the zone ARMING picker and the zone
-## RE-PROPERTY picker both build from it, so the layers you can draw on and the
-## layers you can move a zone to can never drift apart. Lifted verbatim out of
-## _rebuild_zone_layer_option, whose reasoning (copper only, KiCad presentation,
-## canonical comparison) is stated there.
+## metadata — what the zone arming picker and the layer-stack dialog build from.
+## Lifted out of _rebuild_zone_layer_option, whose reasoning (copper only, KiCad
+## presentation, canonical comparison) is stated there.
 func _declared_copper_layer_choices() -> Array:
 	var choices: Array = []
 	var declared: Array = _data.layers if _data != null else ["top", "bottom"]
@@ -2969,135 +2049,6 @@ func _declared_copper_layer_choices() -> Array:
 			label = raw
 		choices.append({"label": label, "canon": canon})
 	return choices
-
-
-## WHICH component the Properties section describes.
-##
-## Selecting one component still means that component — unchanged, and the ONLY
-## case a board with no groups can reach. A GROUP selection (A4) resolves to the
-## member the user last clicked (the canvas' focused_component, Illustrator's key
-## object), falling back to the anchor. A multi-select of LOOSE parts still
-## resolves to null and still blanks the section, exactly as before.
-func _property_focus_component():
-	var sel: Array = _canvas.get_selected_components()
-	if sel.size() == 1:
-		return _data.get_component(sel[0])
-	var group_id := _selected_group_id()
-	if group_id.is_empty():
-		return null
-	var focused: String = str(_canvas.focused_component)
-	if focused.is_empty() or not sel.has(focused):
-		focused = str(_data.group_anchor_id(group_id))
-	return _data.get_component(focused)
-
-
-## The group id when the selection is EXACTLY one whole group, else "".
-##
-## "Exactly": every selected component carries the same non-empty group id AND the
-## selection holds every member of it. Anything looser — two groups, a group plus
-## a loose part — is a multi-selection and gets the blank section, because there is
-## no single part whose offsets could be shown.
-func _selected_group_id() -> String:
-	var sel: Array = _canvas.get_selected_components()
-	if sel.size() < 2:
-		return ""
-	var group_id: String = str(_data.component_group_id(sel[0]))
-	if group_id.is_empty():
-		return ""
-	for comp_id in sel:
-		if str(_data.component_group_id(comp_id)) != group_id:
-			return ""
-	if _data.group_member_ids(group_id).size() != sel.size():
-		return ""
-	return group_id
-
-
-func _hide_group_rows() -> void:
-	_offset_component_id = ""
-	if _group_row != null:
-		_group_row.visible = false
-	if _offset_row != null:
-		_offset_row.visible = false
-
-
-## Drive the group read-out and the offset editor for the focused component.
-##
-## The offset fields are NOT overwritten while they have focus — otherwise a
-## selection-changed relay firing mid-typing would rewrite the digits under the
-## user's cursor. They go read-only (not hidden) when the group is locked, so the
-## values stay legible while the whole-unit lock refuses edits.
-func _update_group_rows(comp) -> void:
-	if _group_row == null or _offset_row == null:
-		return
-	var group_id: String = str(comp.group_id())
-	if group_id.is_empty():
-		_hide_group_rows()
-		return
-
-	var members: Array = _data.group_member_ids(group_id)
-	var locked: bool = _data.is_group_locked(group_id)
-	_group_row.visible = true
-	_group_value_label.text = "%d parts, anchor %s%s" % [
-		members.size(), _data.group_anchor_id(group_id), " (locked)" if locked else ""]
-
-	if _data.is_group_anchor(str(comp.id)):
-		# The anchor IS the origin — it has no offset to edit. Moving it means
-		# moving the whole group, which is what a drag does.
-		_offset_component_id = ""
-		_offset_row.visible = false
-		return
-
-	_offset_component_id = str(comp.id)
-	_offset_row.visible = true
-	var offset: Vector2 = _data.member_offset(_offset_component_id)
-	if not _offset_x_edit.has_focus():
-		_offset_x_edit.text = "%.3f" % offset.x
-	if not _offset_y_edit.has_focus():
-		_offset_y_edit.text = "%.3f" % offset.y
-	_offset_x_edit.editable = not locked
-	_offset_y_edit.editable = not locked
-
-
-## Apply the typed offset to exactly the focused member.
-##
-## ONE history step, and the model owns every rule that could refuse it (unknown
-## component, ungrouped, anchor, whole-unit lock, no actual change — see
-## pcb_data.set_member_offset). A refusal or a malformed number re-reads the model
-## into the fields rather than leaving the typed text standing: the board is the
-## truth, the field is a view of it.
-func _commit_member_offset() -> void:
-	if _offset_component_id.is_empty() or _data == null:
-		return
-	var raw_x := _offset_x_edit.text.strip_edges()
-	var raw_y := _offset_y_edit.text.strip_edges()
-	if not raw_x.is_valid_float() or not raw_y.is_valid_float():
-		_revert_offset_fields()
-		return
-	var component_id := _offset_component_id
-	if not _data.set_member_offset(component_id, Vector2(raw_x.to_float(), raw_y.to_float())):
-		_revert_offset_fields()
-		return
-	_data.save_to_history("Offset %s" % component_id)
-	if _canvas != null:
-		_canvas.queue_redraw()
-	_update_properties()
-
-
-## Snap both offset fields back to the model's value after a REFUSED commit.
-## _update_group_rows deliberately skips a field that has keyboard focus (so it
-## never clobbers live typing), but on the Enter path focus never leaves — the
-## refused text would stand while the model holds the old value (cold-review A4
-## note 3). After a refusal the typed text is exactly what must not stand, so
-## write the fields unconditionally.
-func _revert_offset_fields() -> void:
-	_update_properties()
-	if _offset_component_id.is_empty() or _data == null or _offset_row == null:
-		return
-	if not _offset_row.visible:
-		return
-	var offset: Vector2 = _data.member_offset(_offset_component_id)
-	_offset_x_edit.text = "%.3f" % offset.x
-	_offset_y_edit.text = "%.3f" % offset.y
 
 
 ## Toolbar toggle handler — a TRUE toggle, mirroring the canvas's Shift+P
@@ -3637,8 +2588,8 @@ func _on_edit_hint_width_requested(hint_id: String) -> void:
 	call_deferred("_reveal_hint_width_spin")
 
 
-## Deferred focus half — same one-layout-pass rule _reveal_trace_width_spin
-## records (a same-frame ensure_control_visible races the reveal above).
+## Deferred focus half: a same-frame ensure_control_visible races the layout
+## pass the reveal above just queued, so this runs one pass later.
 func _reveal_hint_width_spin() -> void:
 	if _hint_width_spin == null or not is_instance_valid(_hint_width_spin):
 		return
@@ -4219,13 +3170,15 @@ func _find_dock_pane() -> Node:
 ## internal arrangement (RIGHT = column for the sidebar, BOTTOM = strip).
 func _sync_dock_pane_mode() -> void:
 	var pane := _find_dock_pane()
+	var wide := _layout_mode == _PanelLayoutScript.MODE_WIDE
+	if _dock_separator != null:
+		_dock_separator.visible = wide and pane != null and is_instance_valid(pane)
 	if pane == null or not is_instance_valid(pane):
 		return
 	var slot := _current_dock_slot()
 	if slot != null and pane.get_parent() != slot:
 		pane.get_parent().remove_child(pane)
 		slot.add_child(pane)
-	var wide := _layout_mode == _PanelLayoutScript.MODE_WIDE
 	if pane is Control:
 		(pane as Control).size_flags_vertical = \
 			Control.SIZE_EXPAND_FILL if wide else Control.SIZE_SHRINK_END
@@ -4365,6 +3318,9 @@ func _on_panel_redo_request() -> bool:
 func _on_panel_resized() -> void:
 	if _sidebar == null:
 		return
+	# The sidebar's width tracks the panel continuously; only the MODE has
+	# hysteresis.
+	_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(size.x)
 	var mode: String = _PanelLayoutScript.mode_for_width(size.x, _layout_mode)
 	if mode != _layout_mode:
 		_apply_layout_mode(mode)
@@ -4381,7 +3337,6 @@ func _on_panel_resized() -> void:
 func _apply_layout_mode(mode: String, force := false) -> void:
 	if mode == _layout_mode and not force:
 		return
-	var mode_changed := mode != _layout_mode
 	var entering_narrow := mode == _PanelLayoutScript.MODE_NARROW \
 		and _layout_mode != _PanelLayoutScript.MODE_NARROW
 	_layout_mode = mode
@@ -4393,6 +3348,7 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_drawer_open = false  # drawer starts closed; canvas gets the width
 
 	if _sidebar != null:
+		_sidebar.custom_minimum_size.x = _PanelLayoutScript.sidebar_width_px(size.x)
 		var show_sidebar := (not narrow) or _drawer_open
 		if _sidebar.visible and not show_sidebar and _dock_pane_in_sidebar():
 			# Never hide the annotation toolbar with a live author tool — the
@@ -4418,12 +3374,6 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_board_size_label.visible = wide
 	if _layer_caption != null:
 		_layer_caption.visible = _PanelLayoutScript.toolbar_captions_fit(mode)
-	# Properties default: expanded where width is generous, collapsed in the
-	# 3-col medium tier (the status bar mirrors the selection either way).
-	# Only on a REAL mode change — a force re-apply (drawer toggle) must not
-	# clobber the user's manual expand/collapse choice.
-	if mode_changed:
-		_set_properties_expanded(wide)
 	_update_status()
 
 
@@ -4659,7 +3609,6 @@ func get_layout_state() -> Dictionary:
 		"drawer_open": _drawer_open,
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
 		"options_menu_visible": _options_menu_button != null and _options_menu_button.visible,
-		"properties_expanded": _properties_expanded,
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
 		"plugin_build": PLUGIN_BUILD,
 		# The board's DECLARED manufacturing intent. It decides whether the
@@ -5019,26 +3968,22 @@ func seeded_trace_width() -> float:
 	return _PcbTraceScript.DEFAULT_WIDTH_MM
 
 
-## OFC-5: the canvas menu's "Set drawing width…" landing. Same shape as
-## _on_edit_trace_width_requested (menu reveals + focuses the ONE existing
-## editor; commits keep flowing through _on_trace_width_changed, which owns
-## the preference write and the override) — the sidebar box just stops being
-## standing furniture.
+## OFC-5: the canvas menu's "Set drawing width…" landing — the menu reveals and
+## focuses the ONE existing editor; commits keep flowing through
+## _on_trace_width_changed, which owns the preference write and the override.
 func _on_edit_draw_width_requested() -> void:
 	if _trace_width_spin == null:
 		return
 	_draw_width_revealed = true
 	_trace_width_spin.visible = true
 	_sync_trace_width_spin()
-	# Deferred for the same measured reason _on_edit_trace_width_requested
-	# defers (F3 round 2): a same-frame focus races the layout pass that the
-	# visibility flip just queued.
+	# Deferred: a same-frame focus races the layout pass that the visibility
+	# flip just queued.
 	call_deferred("_reveal_draw_width_spin")
 
 
-## The deferred second half of _on_edit_draw_width_requested — mirrors
-## _reveal_trace_width_spin's guards (headless mounts legitimately never
-## have the control in a visible tree).
+## The deferred second half of _on_edit_draw_width_requested. Guarded because
+## headless mounts legitimately never have the control in a visible tree.
 func _reveal_draw_width_spin() -> void:
 	if _trace_width_spin == null or not is_instance_valid(_trace_width_spin):
 		return
@@ -6153,6 +5098,7 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	# source carried before stamping its own — so the flags describe this
 	# machine. The file-restore path below deliberately does not say true.
 	_restoring = true
+	_board_loaded = true
 	_data.from_board_dict(board, true)
 
 	# SIDECAR ADOPTION (Epoch UX2 station 8, docket 019fde57027c — the HITL-4
@@ -7253,6 +6199,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 
 	# Restoring saved state — suppress the dirty relay for the whole load.
 	_restoring = true
+	_board_loaded = true
 	if doc.has("board") and doc["board"] is Dictionary:
 		# Legacy skeleton shape → migrate to canonical, then load.
 		_data.from_board_dict(_migrate_skeleton_shape(doc))

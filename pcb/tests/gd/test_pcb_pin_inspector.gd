@@ -27,6 +27,7 @@ extends SceneTree
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const REGISTRY_DRIVER := preload("res://test/helpers/panel_tool_registry_driver.gd")
 const HoverCard := preload("res://../../minerva-plugins/pcb/ui/pcb_hover_card.gd")
+const PrefsFixture := preload("res://../../minerva-plugins/pcb/tests/gd/snap_prefs_fixture.gd")
 
 const EDITOR_NAME := "PinInspectorProbe"
 const PCB_PLUGIN_ID := "pcb"
@@ -59,7 +60,11 @@ func _init() -> void:
 		return
 
 	_test_pad_at_units()
+	# The card assertions read the hover-card preference; the developer's own
+	# stored choice must neither leak in nor be overwritten.
+	var saved_prefs: Dictionary = PrefsFixture.reset()
 	await _test_e2e_1_scenario()
+	PrefsFixture.restore(saved_prefs)
 
 	panel.queue_free()
 	await process_frame
@@ -293,12 +298,17 @@ func _test_e2e_1_scenario() -> void:
 
 	check("A: pin_selected fired for U1.1", str(_last_pin_selected.get("ref", "")) == "U1.1",
 		"got %s" % str(_last_pin_selected))
-	# The pad's facts are on the CANVAS now, not in a sidebar section, and they
-	# arrive on HOVER rather than on the click — so the pointer is moved onto
-	# the same pad and the card is read.
-	_move_world(world_1)
+	# The pad's facts are on the CANVAS, not in a sidebar section: the click
+	# raises the clicked pad's card and PINS it, so it survives the pointer
+	# roaming off onto empty board and is read here after exactly that.
+	_move_world(_empty_world_point())
 	await process_frame
 	var a_card := Array(canvas._hover_card_lines)
+	check("A: the clicked pad's card is up after the pointer moved onto empty board",
+		a_card.size() > 0 and a_card[0] == "U1.1", "got %s" % str(a_card))
+	_move_world(world_1)
+	await process_frame
+	a_card = Array(canvas._hover_card_lines)
 	check("A: hover card titles the pad it is over", a_card.size() > 0 and a_card[0] == "U1.1",
 		"got %s" % str(a_card))
 	var a_net := str(_last_pin_selected.get("net", ""))

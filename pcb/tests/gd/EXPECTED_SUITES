@@ -117,7 +117,9 @@ test_pcb_annotation_host_semantics.gd assertions=181
 test_pcb_apply_route_hints.gd assertions=89
 test_pcb_backend_lifecycle.gd assertions=52
 test_pcb_bus_geometry.gd assertions=90
-test_pcb_canvas_input_probe.gd assertions=123
+# 123 -> 121: the collapsed-Properties width-reveal case left with the
+# Properties section (work item 01a04b9c9064); its probe floor is 6 -> 4.
+test_pcb_canvas_input_probe.gd assertions=121
 test_pcb_cutout.gd assertions=38
 test_pcb_drc_propose.gd assertions=23 real-worker
 # Pinned at OFC testex 2026-08-13 — the first run where all three proved
@@ -134,7 +136,16 @@ test_pcb_explicit_propose.gd assertions=80 real-worker
 # rather than painted past the panel edge (both axes, then one axis with the
 # pointer rule still to satisfy).
 # Counted by hand from the check() call sites: 3 new, none inside a loop.
-test_pcb_hover_card.gd assertions=67
+# 67 -> 81: section 6, the Options toggle (work item 01a04b85e620) — verb
+# read/apply of the key, no card on hover while off, the pin-inspector click
+# that raises one anyway, its release when the toggle returns, and the 19 px
+# clearance. 14 new check() calls, none inside a loop.
+# 81 -> 110 (work item 01a04b9c9064): section 6's "hands back to hover" check
+# becomes two (a pinned card survives empty board, a different pad replaces
+# it: +1), and section 7 adds zone and via cards vs the fixture (6 + 7), vs
+# describe_zone / list_vias (4 + 6), the Group line (3) and a live pointer over
+# each (2) = 28. None inside a loop; counted from the diff's check( lines.
+test_pcb_hover_card.gd assertions=110
 test_pcb_hint_refine_loop.gd assertions=64 real-worker
 test_pcb_single_trace_tool.gd assertions=98 real-worker
 test_pcb_legacy_annotation_migration.gd assertions=53
@@ -153,7 +164,17 @@ test_pcb_net_membership.gd assertions=70
 # the three read-out assertions are replaced by two "no read-out row survives"
 # checks, a nine-name loop over the editing controls that MUST survive, and one
 # that a selection still drives the section. AUTHORED: -3 +12.
-test_pcb_panel_layout.gd assertions=163
+# 163 -> 148 (work item 01a04b9c9064): the Properties section is gone, so §7's
+# 15 checks become 6 (four "no such node", the fabrication row, its picker), and
+# the 6-check trace-width reveal test (§10) went with the reveal. -15 +6 -6.
+# 148 -> 154 (sidebar width + dividers, same work item): wide +2 (owned
+# width for 1100 px, above the two-button floor), medium +2 (owned width for
+# 600 px, two tools on one row), §7 +2 (no divider above the fabrication row,
+# dock divider hidden off-wide).
+# 154 -> 156: the dock-migrates test checks the sidebar content fills the
+# scroll viewport and the dock parent gets the column's slack (vertical
+# expand on RightSidebarContent).
+test_pcb_panel_layout.gd assertions=156
 test_pcb_panel_model.gd assertions=203
 # 211 -> 217: the board-resize undo step (the verb snapshots, and one undo
 # restores the previous outline) — six checks, HAND-COUNTED from source.
@@ -175,7 +196,11 @@ test_pcb_pad_fidelity.gd assertions=47
 # check( calls is the assertion count.
 # 200 -> 202: the standing bus status line carries the lane map and the
 # tooltip its untrimmed form (+2). MEASURED: 202 passed, 0 failed.
-test_pcb_panel_ui.gd assertions=249
+# 249 -> 230 (work item 01a04b9c9064): the context menu lost "Set trace
+# width…" with the Properties width row it revealed — 13 checks out of the
+# trace-menu test (the item, the select-and-reveal, the row commit, the
+# three-tier expand loop) and the 6-check BT-68 focus test. Counted from source.
+test_pcb_panel_ui.gd assertions=230
 # 49 -> 57: the copper-extent pad pick adds four probes run over a part built
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.
@@ -185,7 +210,9 @@ test_pcb_panel_ui.gd assertions=249
 # reply for the SAME pad (5 assertions x 3 probes = 15, the roles if/else being
 # two source lines but one assertion), and D3 pins the card's paint invariants
 # (6). AUTHORED: -1 +1 +15 +6 +1.
-test_pcb_pin_inspector.gd assertions=79
+# 79 -> 80: an inspector click PINS the clicked pad's card, read after the
+# pointer moved onto empty board (work item 01a04b9c9064).
+test_pcb_pin_inspector.gd assertions=80
 test_pcb_ratsnest.gd assertions=157
 # OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
 # the current core contract — verified 43/0 at OFC testex on the dev
@@ -334,7 +361,10 @@ test_direct_copper_verbs.gd assertions=147
 # which sorts to "GND" — the net the fixture had already placed the via on — so
 # it passed with the entire GUI commit path deleted. The added assertion pins
 # that the chosen net differs from the one the via carries.
-test_via_edit_and_fab_stage.gd assertions=93
+# 93 -> 81: group 7 (the sidebar via rows) is gone with the Properties section
+# — via net/size/drill are edited by minerva_pcb_update_via only (work item
+# 01a04b9c9064). The fabrication picker's group 11 stays.
+test_via_edit_and_fab_stage.gd assertions=81
 # NEW (work item 01a0223ec9e271269fd664fcf90dd20b): board-by-path + digest —
 # the panel-sender half of the 64KiB broker-cap regression (route/serialize/
 # deserialize all inlined O(board) payloads). COUNT = 63 by construction

@@ -64,10 +64,9 @@ func _init() -> void:
 	await _test_dock_parent_hook()
 	await _test_dock_pane_migrates()
 	await _test_transitions_preserve_board()
-	await _test_properties_panel()
+	await _test_sidebar_has_no_properties_section()
 	await _test_tool_buttons_render()
 	await _test_panel_height_relief()
-	await _test_trace_width_reveal_scrolls_into_view()
 	_test_tooltip_length_invariant()
 	_test_wrap_tooltip_preserves_content()
 	await _test_mode_tables_track_the_enum()
@@ -187,6 +186,10 @@ func _test_wide_mode() -> void:
 
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
 	check("sidebar node exists + visible", sidebar != null and sidebar.visible)
+	check("sidebar is the width panel_layout owns for 1100 px, not a row's accident",
+		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px(1100.0)) < 1.0)
+	check("…and at 1100 px that is more than the two-button floor",
+		sidebar != null and sidebar.size.x > load(LAYOUT_PATH).SIDEBAR_MIN_PX + 1.0)
 	check("toolbar fits without h-scroll", _toolbar_fits(panel))
 	check("panel min width fits the pane (no row inflates it)", _panel_min_fits(panel))
 
@@ -209,6 +212,21 @@ func _test_medium_mode() -> void:
 	var canvas: Control = panel._canvas
 	check("canvas keeps majority width",
 		canvas != null and canvas.size.x > 600.0 * 0.5)
+
+	var sidebar: Control = panel.find_child("RightSidebar", true, false)
+	check("sidebar is the width panel_layout owns for 600 px",
+		sidebar != null and absf(sidebar.size.x - load(LAYOUT_PATH).sidebar_width_px(600.0)) < 1.0)
+	# The tool flows must WRAP, not stack: the column is never narrower than
+	# two buttons, so Select and Pan share a row at every width (the regression
+	# that motivated the owned width was one button per row once the
+	# Properties rows stopped propping the column open — then the content VBox
+	# was found to lack the expand flag the ScrollContainer needs).
+	var tools_flow: Control = panel.find_child("ToolsFlow", true, false)
+	var same_row := tools_flow != null and tools_flow.get_child_count() >= 2
+	if same_row:
+		same_row = absf((tools_flow.get_child(0) as Control).position.y
+			- (tools_flow.get_child(1) as Control).position.y) < 1.0
+	check("Select and Pan sit on ONE row of the tools flow", same_row)
 
 	_teardown(panel)
 
@@ -296,6 +314,18 @@ func _test_dock_pane_migrates() -> void:
 	check("wide: pane sits in the sidebar slot", pane.get_parent() == sidebar_slot)
 	check("wide: pane arranged RIGHT",
 		int(pane.get("dock_mode")) == DockPaneScript.DockMode.RIGHT)
+	# The pane must be handed the column's SLACK, not its own floor: the
+	# sidebar content fills the scroll viewport and the dock parent takes what
+	# the rows above leave (work item 01a04b9c9064 — the list used to sit at
+	# MIN_LIST_HEIGHT with the rest of the column blank).
+	var scroll: Control = panel.find_child("RightSidebarScroll", true, false)
+	var content: Control = panel.find_child("RightSidebarContent", true, false)
+	check("wide: the sidebar content fills the scroll viewport's height",
+		scroll != null and content != null and content.size.y >= scroll.size.y - 1.0)
+	var fab_row: Control = panel.find_child("FabricationRow", true, false)
+	check("wide: the dock parent is taller than its pane's list floor",
+		sidebar_slot.size.y > 3.0 * float(pane.get("_dock_scroll").custom_minimum_size.y)
+			and fab_row != null and fab_row.size.y < sidebar_slot.size.y)
 
 	panel.size = Vector2(600.0, 700.0)  # → medium
 	for _i in range(4):
@@ -364,61 +394,37 @@ func _test_transitions_preserve_board() -> void:
 	_teardown(panel)
 
 
-# ── 7. Properties section (round C) ────────────────────────────────────────────
+# ── 7. No Properties section, no Pin Selection section ────────────────────────
+#
+# Owner ruling (work item 01a04b9c9064): per-entity edits are MCP-only and
+# read-outs live on the canvas hover card, so the sidebar carries ONE board-level
+# row — the fabrication stage — with no section chrome around it.
 
-func _test_properties_panel() -> void:
-	print("\n-- properties section --")
+func _test_sidebar_has_no_properties_section() -> void:
+	print("\n-- no Properties / Pin Selection section; the fabrication row stands alone --")
 	var panel := await _mount_panel_at(1100.0)
 
-	var section: Control = panel.find_child("PropertiesSection", true, false)
-	check("properties section exists in sidebar", section != null)
-	check("wide mode: properties expanded",
-		bool(panel.get_layout_state().get("properties_expanded", false)))
+	for gone in ["PropertiesSection", "PropertiesHeader", "PropertiesBody",
+			"PinSelectionSection"]:
+		check("no node named %s anywhere in the panel" % gone,
+			panel.find_child(gone, true, false) == null)
 
-	# ── THE SECTION HOLDS CONTROLS ONLY ──────────────────────────────────────
-	# The display-only component rows (ID / Position / Rotation / Layer /
-	# Footprint) moved to the canvas hover card. The oracle is the row LABELS
-	# themselves, read off the live tree: a read-out row is a direct child of
-	# PropertiesBody whose key Label reads one of those names. Scanning the tree
-	# rather than a field means re-adding the rows under any new spelling still
-	# fails this. (Depth is deliberate: "Layer:" is also the ZoneLayerRow's key,
-	# and that row is a GRANDCHILD, inside ZoneRows.)
-	var body: Control = panel.find_child("PropertiesBody", true, false)
-	check("properties body exists", body != null)
-	var readonly_keys := ["ID:", "Position:", "Rotation:", "Layer:", "Footprint:"]
-	var found_readonly := ""
-	for row in body.get_children():
-		for kid in (row as Node).get_children():
-			if kid is Label and (kid as Label).text in readonly_keys:
-				found_readonly = (kid as Label).text
-	check("no read-only component row survives in Properties (found '%s')"
-		% found_readonly, found_readonly.is_empty())
-
-	# ── AND EVERY CONTROL THAT CHANGES THE BOARD IS STILL THERE ──────────────
-	# Named individually, because "the section still has children" would pass
-	# with any one of them deleted.
-	for control_name in ["FabricationStageOption", "OffsetX", "OffsetY",
-			"ZonePropNetOption", "ZonePropLayerOption", "TracePropWidthSpin",
-			"ViaPropNetOption", "ViaPropSizeSpin", "ViaPropDrillSpin"]:
-		check("editing control %s survives" % control_name,
-			panel.find_child(control_name, true, false) != null)
-
-	# Selecting a component still drives the section (the group rows read it).
-	panel._canvas.selected_components.append("U1")
-	panel._canvas.selection_changed.emit()
-	await process_frame
-	check("selection still drives the properties update without read-out rows",
-		panel.find_child("GroupRows", true, false) != null)
-	panel._canvas.selected_components.clear()
-	panel._canvas.selection_changed.emit()
-	await process_frame
-
-	# Medium mode collapses by default.
-	panel.size = Vector2(600.0, 700.0)
-	for _i in range(4):
-		await process_frame
-	check("medium mode: properties collapsed",
-		not bool(panel.get_layout_state().get("properties_expanded", true)))
+	var sidebar: Control = panel.find_child("RightSidebar", true, false)
+	check("the fabrication row is in the sidebar",
+		sidebar != null and sidebar.find_child("FabricationRow", true, false) != null)
+	check("…and it is a bare read-out label, not a picker",
+		panel.find_child("FabricationStageLabel", true, false) is Label
+			and panel.find_child("FabricationStageOption", true, false) == null)
+	# No orphan dividers: nothing separates the fabrication row from what is
+	# above it, and the dock divider stays hidden while the pane is not in the
+	# sidebar (700 px is medium, where the pane lives in the bottom strip).
+	var fab_row: Control = sidebar.find_child("FabricationRow", true, false)
+	var content: Node = fab_row.get_parent()
+	var above: Node = content.get_child(fab_row.get_index() - 1)
+	check("no separator sits directly above the fabrication row", not (above is HSeparator))
+	var dock_sep: Control = panel.find_child("DockSeparator", true, false)
+	check("the dock divider is hidden while the pane is not in the sidebar",
+		dock_sep != null and not dock_sep.visible)
 
 	_teardown(panel)
 
@@ -624,96 +630,6 @@ func _test_panel_height_relief() -> void:
 
 	# Back to SELECT so nothing stays armed past this suite.
 	panel._canvas.set_tool_mode(PcbCanvasScript.ToolMode.SELECT)
-	_teardown(panel)
-
-
-# ── 10. Trace-width reveal survives the sidebar scroll (B3b F3, cold review
-#       2026-08-01) ─────────────────────────────────────────────────────────
-
-func _trace_board() -> Dictionary:
-	return {
-		"version": 1, "name": "Layout", "width_mm": 60.0, "height_mm": 40.0, "grid_mm": 2.54,
-		"components": [
-			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 20.0, "rotation_deg": 0.0,
-				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}, {"number": "2", "x_mm": 5.0, "y_mm": 0.0}]},
-		],
-		"nets": [{"name": "N1", "pins": ["U1.1", "U1.2"]}],
-		"traces": [
-			{"net": "N1", "layer": "top", "width_mm": 0.25,
-				"points": [{"x_mm": 0.0, "y_mm": 0.0}, {"x_mm": 5.0, "y_mm": 0.0}]},
-		],
-		"vias": [],
-	}
-
-
-## Vertical pixel overlap between `control`'s screen rect and `scroll`'s
-## viewport screen rect — 0.0 when fully below/above the fold, up to
-## control's own height when fully visible.
-##
-## NOT a Rect2.intersects() boolean (that was this helper's round-1 shape, and
-## it was WRONG): a control can touch the viewport's edge with ZERO area — its
-## own TOP edge sitting exactly on the viewport's BOTTOM edge — while being
-## entirely OFF-screen below the fold. Round-2 cold review measured exactly
-## this case (pane 500px: spin_y=[468,499] against viewport_y=[50,468], a
-## zero-area touch at the bottom edge, i.e. 0 of 31px actually visible) and
-## the round-1 version of this helper, called with include_borders=true,
-## counted that touch as "on screen" — the comment here previously claimed
-## "a zero-area edge touch is still fully on-screen", which is BACKWARDS: a
-## zero-area touch at an edge is exactly the boundary between visible and
-## not, and in the measured case it was entirely on the "not" side. Returning
-## the actual overlapping HEIGHT instead of a boolean makes "just touching"
-## and "fully visible" distinguishable, which is the whole point of the pin.
-func _visible_px_height(scroll: ScrollContainer, control: Control) -> float:
-	var s := scroll.get_global_rect()
-	var c := control.get_global_rect()
-	var top := maxf(s.position.y, c.position.y)
-	var bottom := minf(s.position.y + s.size.y, c.position.y + c.size.y)
-	return maxf(0.0, bottom - top)
-
-
-## Reproduces the reviewer's measurement: at the round's own 500px reference
-## pane (and the smaller 400px one) the "Set trace width…" reveal must leave
-## the SpinBox's LineEdit both VISIBLE inside the scroll viewport and FOCUSED
-## — not merely is_visible_in_tree(), which the scroll-clipped row already
-## satisfies and is exactly what let this regression through undetected.
-func _test_trace_width_reveal_scrolls_into_view() -> void:
-	print("\n-- F3: Set trace width… reveal ends with the SpinBox visible + focused --")
-	var panel := await _mount_panel_at(1100.0)
-	panel.get_data().from_board_dict(_trace_board())
-	for _i in range(4):
-		await process_frame
-
-	var trace_id: String = str(panel.get_data().get_trace_ids()[0])
-	# Production selects the trace on the canvas BEFORE emitting
-	# edit_trace_width_requested (see the handler's own doc comment) — match
-	# that here rather than calling the handler cold, which would trip its
-	# _update_trace_rows -> get_selected_traces().size() != 1 guard and hide
-	# the row instead of revealing it.
-	var selected_ids: Array[String] = [trace_id]
-	panel._canvas.selected_trace_ids = selected_ids
-
-	for pane_height in [500.0, 400.0]:
-		panel.size = Vector2(1100.0, pane_height)
-		for _i in range(8):
-			await process_frame
-
-		panel._on_edit_trace_width_requested(trace_id)
-		for _i in range(6):
-			await process_frame
-
-		var spin: Control = panel._trace_prop_width_spin
-		var scroll: ScrollContainer = panel.find_child("RightSidebarScroll", true, false)
-		var line_edit: LineEdit = spin.get_line_edit() if spin != null else null
-		var visible_px := _visible_px_height(scroll, spin) if (scroll != null and spin != null) else 0.0
-
-		check("pane %dpx: width row visible in tree" % int(pane_height),
-			spin != null and spin.is_visible_in_tree())
-		check("pane %dpx: SpinBox has visible pixels inside the scroll viewport (%.1f of %.1f px — not merely touching the fold)" % [
-				int(pane_height), visible_px, spin.size.y if spin != null else 0.0],
-			visible_px > 0.0)
-		check("pane %dpx: LineEdit holds focus after the reveal" % int(pane_height),
-			line_edit != null and line_edit.has_focus())
-
 	_teardown(panel)
 
 

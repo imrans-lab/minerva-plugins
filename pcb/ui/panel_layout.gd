@@ -57,3 +57,23 @@ static func mode_for_width(width: float, current: String = "") -> String:
 ## both of which are reachable elsewhere (the View menu, the status bar).
 static func toolbar_captions_fit(mode: String) -> bool:
 	return mode != MODE_NARROW
+
+
+## The right sidebar's width for a panel width, in px — RESPONSIVE, a share of
+## the room there is, clamped to a column of two tool buttons at the least and
+## six at the most (owner ruling 2026-08-28: "2 at min, then 4 or more at max,
+## depending on available X room"). OWNED here rather than left to the widest
+## row that happens to be mounted: the sidebar never expands, so its width IS
+## its minimum, and until work item 01a04b9c9064 that minimum was an accident
+## of the Properties rows' key labels and pickers.
+## Budget: a 24 px icon button is ~36 px with theme padding, 4 px apart, plus
+## the column's own margins — 88 seats two, 244 seats six. At the 20 % share a
+## 480 px pane gives 96 (two), 600 gives 120 (three), 900 gives 180 (four),
+## 1220 and up gives the six-wide cap.
+const SIDEBAR_SHARE := 0.20
+const SIDEBAR_MIN_PX := 88.0
+const SIDEBAR_MAX_PX := 244.0
+
+
+static func sidebar_width_px(panel_width: float) -> float:
+	return clampf(panel_width * SIDEBAR_SHARE, SIDEBAR_MIN_PX, SIDEBAR_MAX_PX)

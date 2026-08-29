@@ -42,11 +42,10 @@ func _init() -> void:
 	await _run_update_via_refusal_changes_nothing()
 	await _run_growing_a_via_onto_a_trace_snaps_and_inherits()
 	await _run_update_via_noop_is_success_not_refusal()
-	await _run_via_property_rows_are_the_gui_half()
 	await _run_fabrication_stage_defaults_to_routed()
 	await _run_fabrication_stage_declares_and_refuses()
 	await _run_fabrication_stage_round_trips_and_undoes()
-	await _run_fabrication_stage_picker_is_the_gui_half()
+	await _run_fabrication_stage_label_is_a_bare_readout()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -341,77 +340,6 @@ func _run_update_via_noop_is_success_not_refusal() -> void:
 	await _unmount(ctx["panel"])
 
 
-# ── 7. the GUI half — the owner drives this panel with buttons only ───────────
-
-func _run_via_property_rows_are_the_gui_half() -> void:
-	print("-- 7. the Properties via rows edit a selected via without any MCP call --")
-	var ctx: Dictionary = await _ctx()
-	var panel = ctx["panel"]
-	var host = ctx["host"]
-	var data = ctx["data"]
-	# get_canvas lives on the annotation HOST, not the panel (PcbAnnotationHost
-	# owns it) — the sibling suite documents the same trap.
-	var canvas = ctx["host"].get_canvas()
-	check("the host exposes the canvas", canvas != null)
-	if canvas == null:
-		await _unmount(ctx["panel"])
-		return
-
-	var via_id := _place(host, 14.0, 6.0, "GND")
-
-	# Hidden until exactly one via is selected — the rule the trace and zone
-	# rows already keep, because with two selected there is no single drill a
-	# box could show.
-	panel._update_properties()
-	check("the via rows are hidden with nothing selected", not panel._via_prop_rows.visible)
-
-	canvas._add_to_selection(canvas.KIND_VIA, via_id)
-	panel._update_properties()
-	check("selecting one via reveals them", panel._via_prop_rows.visible)
-	check_approx("the size box shows the board's value", panel._via_prop_size_spin.value, 0.8)
-	check_approx("the drill box shows the board's value", panel._via_prop_drill_spin.value, 0.4)
-	check("the position read-out names the via", via_id in panel._via_prop_position_label.text)
-
-	# The net picker offers "(unassigned)" plus the declared nets, and nothing
-	# else — a control that could offer an undeclared net would be the UI lying
-	# about a contract update_via enforces anyway.
-	check_eq("the net picker offers unassigned + 3 declared nets",
-		panel._via_prop_net_option.item_count, 4)
-	check_eq("the first entry is the real unassigned option",
-		str(panel._via_prop_net_option.get_item_metadata(0)), "")
-
-	# DRIVE THE CONTROL, not the model behind it. This is the assertion that
-	# distinguishes "the row is wired" from "the row is decoration".
-	panel._via_prop_size_spin.value = 1.4
-	check_approx("turning the size box re-sized the BOARD's via",
-		float(data.get_via(via_id).get("size", 0.0)), 1.4)
-
-	# Pick a net the via does NOT already have. Index 1 is the first declared net
-	# in sorted order, which is "GND" — the net this fixture placed the via on —
-	# so asserting against it passed even with the whole commit path deleted.
-	# Found by mutation, not by reading: a vacuous assertion looks exactly like a
-	# real one until something is broken underneath it.
-	var wanted := ""
-	var wanted_idx := -1
-	for i in range(1, panel._via_prop_net_option.item_count):
-		var candidate := str(panel._via_prop_net_option.get_item_metadata(i))
-		if candidate != str(data.get_via(via_id).get("net_name", "")):
-			wanted = candidate
-			wanted_idx = i
-			break
-	check("the fixture picks a net the via does not already carry", wanted_idx > 0)
-	panel._on_via_prop_net_selected(wanted_idx)
-	check_eq("picking a net in the dropdown re-netted the BOARD's via",
-		str(data.get_via(via_id).get("net_name", "")), wanted)
-
-	# A refused GUI edit must snap back rather than leaving the box lying.
-	panel._via_prop_drill_spin.value = 3.0   # wider than the 1.4 pad
-	check("a refused drill leaves the model alone",
-		float(data.get_via(via_id).get("drill", 0.0)) < 1.4)
-
-	await _unmount(ctx["panel"])
-
-
 # ── 8. the stage a board declares nothing about ───────────────────────────────
 
 func _run_fabrication_stage_defaults_to_routed() -> void:
@@ -518,35 +446,29 @@ func _run_fabrication_stage_round_trips_and_undoes() -> void:
 
 # ── 11. the GUI half of the declaration ───────────────────────────────────────
 
-func _run_fabrication_stage_picker_is_the_gui_half() -> void:
-	print("-- 11. the Fabrication picker declares a stage with no MCP call --")
+func _run_fabrication_stage_label_is_a_bare_readout() -> void:
+	print("-- 11. the sidebar's fabrication read-out is the stage token, or nothing --")
 	var ctx: Dictionary = await _ctx()
 	var panel = ctx["panel"]
 	var data = ctx["data"]
 
-	# A via-only board is the fiber-laser customer's actual deliverable and the
-	# owner drives this panel with buttons only, so an MCP-only declaration
-	# would leave the person who most needs it unable to make it.
-	check("the picker exists", panel._fabrication_stage_option != null)
-	check_eq("offering exactly the three known stages",
-		panel._fabrication_stage_option.item_count, 3)
-	check("...and it is BOARD-level, so it is visible with nothing selected",
-		panel._fabrication_stage_option.visible)
+	# The label is the only board-level control left in the sidebar, and it is
+	# a READ-OUT: the stage token verbatim, nothing to click, declared only by
+	# minerva_pcb_fabrication_stage (owner ruling 2026-08-28, work item
+	# 01a04b9c9064).
+	var label: Label = panel._fabrication_stage_label
+	check("the read-out exists and is a plain Label", label != null and label is Label)
+	check("no picker survives", panel.find_child("FabricationStageOption", true, false) == null)
+	check_eq("before any board is loaded it is EMPTY, not the seeded default",
+		label.text, "")
 
-	# It shows what the board says, not a stale default.
+	# A restore is a load: the read-out follows the model through data_changed.
+	panel._board_loaded = true
 	data.set_fabrication_stage("routing_deferred")
-	panel._update_properties()
-	check_eq("the picker follows the model",
-		str(panel._fabrication_stage_option.get_item_metadata(
-			panel._fabrication_stage_option.selected)), "routing_deferred")
-
-	# DRIVE THE CONTROL. Find vias_only's index rather than assuming the order.
-	var target := -1
-	for i in range(panel._fabrication_stage_option.item_count):
-		if str(panel._fabrication_stage_option.get_item_metadata(i)) == "vias_only":
-			target = i
-	check("vias_only is offered", target >= 0)
-	panel._on_fabrication_stage_selected(target)
-	check_eq("picking it declared it on the BOARD", str(data.fabrication_stage), "vias_only")
+	check_eq("after a load the text is the stage token, and only that",
+		label.text, "routing_deferred")
+	var write: Dictionary = PanelTools._fabrication_stage(ctx["host"], {"stage": "vias_only"})
+	check("the verb declares", bool(write.get("success", false)))
+	check_eq("…and the read-out follows the verb with no panel call", label.text, "vias_only")
 
 	await _unmount(ctx["panel"])

@@ -27,6 +27,15 @@ extends SceneTree
 ##   4  LIVE CANVAS. A real mouse-motion event over a part raises a card; a
 ##      motion onto empty board drops it in the same frame; and a drag, a
 ##      marquee or an authoring run has none at all.
+##   5  THE OPTIONS TOGGLE (work item 01a04b85e620). With `hover_card` off no
+##      motion raises a card, but a pin-inspector click still raises the
+##      clicked pad's card at the click, and it stands while the pointer
+##      roams empty board; with the toggle on, resting on a DIFFERENT pad
+##      replaces it. The Options menu's read_state / apply carry the key.
+##   6  ZONE, VIA AND GROUP (work item 01a04b9c9064). The read-outs the sidebar
+##      used to carry: a zone card (kind, net, layer) and a via card (position,
+##      net, size, drill) against the fixture and against describe_zone /
+##      list_vias, and a Group line on a grouped part's card.
 ##
 ## ── WHAT IS DELIBERATELY NOT HERE ────────────────────────────────────────────
 ## No pixel is asserted — pcb_canvas draws in immediate mode, so a finished
@@ -41,6 +50,9 @@ const PcbHoverCard := preload("res://../../minerva-plugins/pcb/ui/pcb_hover_card
 const PcbAnnotationHostScript := preload("res://../../minerva-plugins/pcb/ui/PcbAnnotationHost.gd")
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
+const PcbPrefs := preload("res://../../minerva-plugins/pcb/ui/model/pcb_prefs.gd")
+const PcbOptionsMenu := preload("res://../../minerva-plugins/pcb/ui/pcb_options_menu.gd")
+const PrefsFixture := preload("res://../../minerva-plugins/pcb/tests/gd/snap_prefs_fixture.gd")
 
 ## Pixels per mm for every canvas in this suite. Pinned so the screen points the
 ## placement assertions use are hand-derivable from the fixture's board mm.
@@ -59,6 +71,15 @@ const TRACE_WIDTH := 0.4
 const TRACE_A := Vector2(50.0, 40.0)
 const TRACE_B := Vector2(62.0, 40.0)
 const TRACE_LENGTH := 12.0
+const ZONE_ID := "zone:1"
+const ZONE_NET := "GND"
+const ZONE_LAYER := "top"
+const ZONE_CENTRE := Vector2(17.5, 50.0)
+const VIA_ID := "via_1"
+const VIA_POS := Vector2(80.0, 50.0)
+const VIA_NET := "GND"
+const VIA_SIZE := 0.8
+const VIA_DRILL := 0.4
 
 var _pass := 0
 var _fail := 0
@@ -71,6 +92,8 @@ func _init() -> void:
 	await _run_verb_parity()
 	_run_placement()
 	await _run_live_canvas()
+	await _run_toggle()
+	await _run_zone_via_group()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -120,7 +143,8 @@ func _line_value(lines: PackedStringArray, prefix: String) -> String:
 # ── the fixture ──────────────────────────────────────────────────────────────
 
 ## One rotated part carrying a value and a library footprint, one 12 mm run of
-## 0.4 mm copper on GND, and a second part so the board is not a single object.
+## 0.4 mm copper on GND, a second part so the board is not a single object, a
+## GND pour on the bottom layer and a via, each placed clear of everything else.
 func _board():
 	var d := PCBData.new()
 	d.board_width = 100.0
@@ -152,6 +176,13 @@ func _board():
 	t.add_waypoint(TRACE_A)
 	t.add_waypoint(TRACE_B)
 	d.add_trace(t)
+
+	d.add_zone_payload({"id": ZONE_ID, "kind": "copper_pour", "net": ZONE_NET,
+		"layer": ZONE_LAYER, "outline": [
+			{"x_mm": 10.0, "y_mm": 45.0}, {"x_mm": 25.0, "y_mm": 45.0},
+			{"x_mm": 25.0, "y_mm": 55.0}, {"x_mm": 10.0, "y_mm": 55.0}]})
+	d.add_via({"id": VIA_ID, "position": VIA_POS, "size": VIA_SIZE, "drill": VIA_DRILL,
+		"net_name": VIA_NET, "from_layer": "top", "to_layer": "bottom"})
 	return d
 
 
@@ -217,8 +248,8 @@ func _run_trace_content() -> void:
 
 	check_eq("a trace the board does not have gets NO card",
 		canvas._hover_card_content([canvas.KIND_TRACE, "T99"]).size(), 0)
-	check_eq("a kind with no card (a via, a zone) gets NO card",
-		canvas._hover_card_content([canvas.KIND_VIA, "via_1"]).size(), 0)
+	check_eq("a kind with no card (a cutout) gets NO card",
+		canvas._hover_card_content([canvas.KIND_CUTOUT, "cutout_1"]).size(), 0)
 
 
 # ── 3. content vs the read verbs ─────────────────────────────────────────────
@@ -416,6 +447,178 @@ func _run_live_canvas() -> void:
 
 	get_root().remove_child(canvas)
 	canvas.free()
+
+
+# ── 6. the Options toggle ────────────────────────────────────────────────────
+#
+# ORACLE: the same real events as section 5, against the plugin-wide preference
+# store (reset and restored around the section, so the developer's own choice
+# neither leaks in nor is overwritten).
+
+func _run_toggle() -> void:
+	print("\n-- 6. the hover-card toggle, and the pin-inspector click that beats it --")
+	var saved: Dictionary = PrefsFixture.reset()
+	var prefs = PcbPrefs.shared()
+	var d = _board()
+	var canvas = _canvas(d)
+	get_root().add_child(canvas)
+	canvas.size = CANVAS_SIZE
+	await process_frame
+
+	# The menu's verb twin carries the key and flips it — the same apply the
+	# menu click runs, so the menu is covered without popping one.
+	var state: Dictionary = PcbOptionsMenu.read_state(d, prefs)
+	check("read_state reports the toggle on by default",
+		bool((state.get("view", {}) as Dictionary).get(PcbPrefs.KEY_HOVER_CARD, false)))
+	var result: Dictionary = PcbOptionsMenu.apply(d, prefs, {PcbPrefs.KEY_HOVER_CARD: false})
+	check("apply turns it off and names the change",
+		bool(result.get("ok", false)) and Array(result.get("changed", [])).has(PcbPrefs.KEY_HOVER_CARD))
+	check("…and read_state now reports it off",
+		not bool((PcbOptionsMenu.read_state(d, prefs)["view"] as Dictionary).get(
+			PcbPrefs.KEY_HOVER_CARD, true)))
+
+	_motion(canvas, U1_POS)
+	check("off: hovering a part raises no card", canvas._hover_card_lines.is_empty())
+	_motion(canvas, (TRACE_A + TRACE_B) * 0.5)
+	check("off: hovering copper raises no card", canvas._hover_card_lines.is_empty())
+
+	# The pin inspector's click is the one deliberate way to ask for a card.
+	canvas.set_tool_mode(canvas.ToolMode.INSPECT_PIN)
+	var pad: Vector2 = d.get_component("U1").get_pin_world_position("1")
+	_motion(canvas, pad)
+	check("off: the inspector's hover raises no card either", canvas._hover_card_lines.is_empty())
+	_click(canvas, pad)
+	check("off: clicking a pad with the inspector raises its card",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1.1")
+	var rect: Rect2 = canvas.hover_card_rect()
+	check("…anchored at the click: inside the canvas and clear of the pad",
+		rect.size.x > 0.0 and not rect.has_point(canvas.world_to_screen(pad)))
+	_motion(canvas, Vector2(90.0, 55.0))
+	check("…and it stands while the pointer roams",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1.1")
+	_click(canvas, Vector2(90.0, 55.0))
+	check("an inspector click on empty board drops it", canvas._hover_card_lines.is_empty())
+
+	_click(canvas, pad)
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	check("leaving the inspector drops a clicked card", canvas._hover_card_lines.is_empty())
+
+	# Back on: a pinned card survives motion over nothing, and hover replaces
+	# it the moment the pointer rests on another pad.
+	canvas.set_tool_mode(canvas.ToolMode.INSPECT_PIN)
+	_click(canvas, pad)
+	PcbOptionsMenu.apply(d, prefs, {PcbPrefs.KEY_HOVER_CARD: true})
+	_motion(canvas, Vector2(90.0, 55.0))
+	check("on again: motion onto empty board leaves the clicked pad's card up",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1.1")
+	_motion(canvas, d.get_component("U1").get_pin_world_position("2"))
+	check("on again: resting on a different pad replaces it",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1.2")
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	_motion(canvas, U1_POS)
+	check("on again: hovering a part raises its card",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == "U1")
+
+	# The clearance the owner asked for: a full 19 px between pointer and card.
+	var placed: Rect2 = PcbHoverCard.rect_for(Vector2(100.0, 40.0), Vector2(300.0, 300.0), CANVAS_SIZE)
+	check("the card sits 19 px off the pointer",
+		placed.position.x - 300.0 >= 19.0 and placed.position.y - 300.0 >= 19.0)
+
+	get_root().remove_child(canvas)
+	canvas.free()
+	PrefsFixture.restore(saved)
+
+
+# ── 7. zone, via and group cards ─────────────────────────────────────────────
+#
+# ORACLE: the fixture's own numbers, then the replies minerva_pcb_describe_zone
+# and minerva_pcb_list_vias give for the same entities, then a live pointer.
+
+func _run_zone_via_group() -> void:
+	print("\n-- 7. zone, via and group cards say what the board says --")
+	var d = _board()
+	var canvas = _canvas(d)
+
+	var zone: PackedStringArray = canvas._hover_card_content([canvas.KIND_ZONE, ZONE_ID])
+	check("the zone id is the card's title line", zone.size() > 0 and zone[0] == ZONE_ID)
+	check("zone kind", _has_line(zone, "Kind: copper_pour"))
+	check("zone net", _has_line(zone, "Net: %s" % ZONE_NET))
+	check("zone layer", _has_line(zone, "Layer: %s" % ZONE_LAYER))
+	check("nothing else — four lines", zone.size() == 4)
+	check_eq("a zone the board does not have gets NO card",
+		canvas._hover_card_content([canvas.KIND_ZONE, "zone:99"]).size(), 0)
+
+	var via: PackedStringArray = canvas._hover_card_content([canvas.KIND_VIA, VIA_ID])
+	check("the via id is the card's title line", via.size() > 0 and via[0] == VIA_ID)
+	check("via position, in board mm", _has_line(via, "Position: (80, 50) mm"))
+	check("via net", _has_line(via, "Net: %s" % VIA_NET))
+	check("via size", _has_line(via, "Size: 0.8 mm"))
+	check("via drill", _has_line(via, "Drill: 0.4 mm"))
+	check("nothing else — five lines", via.size() == 5)
+	check_eq("a via the board does not have gets NO card",
+		canvas._hover_card_content([canvas.KIND_VIA, "via_99"]).size(), 0)
+
+	# Parity with the verbs, through the real doorway.
+	var host := PcbAnnotationHostScript.new()
+	host.set_canvas(canvas)
+	var described: Dictionary = await PanelTools.handle(host,
+		"minerva_pcb_describe_zone", {"zone_id": ZONE_ID})
+	check("describe_zone answered at all", bool(described.get("success", false)))
+	check("card kind == the verb's kind", _has_line(zone, "Kind: %s" % str(described.get("kind", ""))))
+	check("card net == the verb's net", _has_line(zone, "Net: %s" % str(described.get("net", ""))))
+	check("card layer == the verb's layer", _has_line(zone, "Layer: %s" % str(described.get("layer", ""))))
+
+	var listed: Dictionary = await PanelTools.handle(host, "minerva_pcb_list_vias", {})
+	check("list_vias answered at all", bool(listed.get("success", false)))
+	var row: Dictionary = {}
+	for raw in (listed.get("vias", []) as Array):
+		if str((raw as Dictionary).get("via_id", "")) == VIA_ID:
+			row = raw
+	check("list_vias really listed the via", not row.is_empty())
+	check("card net == the verb's net_name", _has_line(via, "Net: %s" % str(row.get("net_name", ""))))
+	check("card size == the verb's size_mm",
+		_near(_line_value(via, "Size: ").trim_suffix(" mm").to_float(), float(row.get("size_mm", NAN))))
+	check("card drill == the verb's drill_mm",
+		_near(_line_value(via, "Drill: ").trim_suffix(" mm").to_float(), float(row.get("drill_mm", NAN))))
+	var card_pos := _line_value(via, "Position: (").trim_suffix(") mm").split(", ")
+	check("card position == the verb's x_mm/y_mm",
+		card_pos.size() == 2
+			and _near(card_pos[0].to_float(), float(row.get("x_mm", NAN)))
+			and _near(card_pos[1].to_float(), float(row.get("y_mm", NAN))))
+
+	# A grouped part carries its group; a loose part carries no Group line.
+	var group_id: String = d.group_components(["U1", "U2"])
+	check("fixture: the two parts were grouped", not group_id.is_empty())
+	var grouped: PackedStringArray = canvas._hover_card_content([canvas.KIND_COMPONENT, "U1"])
+	check("a grouped part's card names its group",
+		_has_line(grouped, "Group: 2 parts, anchor %s" % str(d.group_anchor_id(group_id))))
+	d.ungroup_components(["U1", "U2"])
+	var loose: PackedStringArray = canvas._hover_card_content([canvas.KIND_COMPONENT, "U2"])
+	check("an ungrouped part's card has no Group line", _line_value(loose, "Group: ").is_empty())
+
+	# A real pointer raises them through the same chain as parts and traces.
+	get_root().add_child(canvas)
+	canvas.size = CANVAS_SIZE
+	await process_frame
+	_motion(canvas, ZONE_CENTRE)
+	check("hovering a zone raises its card",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == ZONE_ID)
+	_motion(canvas, VIA_POS)
+	check("hovering a via raises its card",
+		Array(canvas._hover_card_lines).size() > 0 and canvas._hover_card_lines[0] == VIA_ID)
+	get_root().remove_child(canvas)
+	canvas.free()
+
+
+## One real left-click (press then release) at a board point, canvas-local.
+func _click(canvas, world_pos: Vector2) -> void:
+	for pressed in [true, false]:
+		var ev := InputEventMouseButton.new()
+		ev.button_index = MOUSE_BUTTON_LEFT
+		ev.pressed = pressed
+		ev.position = canvas.world_to_screen(world_pos)
+		ev.global_position = ev.position
+		canvas._gui_input(ev)
 
 
 ## One real mouse-motion event at a board point, in the canvas's own local
