@@ -84,7 +84,8 @@ def main() -> int:
         proc.wait(timeout=15)
 
         if "error" in reply:
-            print(json.dumps({"ok": False, "error": str(reply["error"])}))
+            print(json.dumps({"ok": False, "error": str(reply["error"]),
+                              "stderr_tail": proc.stderr.read()[-4000:]}))
             return 0
         content = reply.get("result", {}).get("content", [])
         text = content[0].get("text", "{}") if content else "{}"

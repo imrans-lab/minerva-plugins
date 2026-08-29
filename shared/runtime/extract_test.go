@@ -341,3 +341,28 @@ func TestIsExtractedRuntimePath(t *testing.T) {
 		t.Errorf("RuntimeRoot = %q, want %q", got, tmp)
 	}
 }
+
+// Git-for-Windows sha256sum hashes in binary mode and writes
+// "<sha> *<path>"; a bundle built there must still verify.
+func TestManifestValid_AcceptsBinaryModeLines(t *testing.T) {
+	dir := t.TempDir()
+	body := []byte("print('hi')\n")
+	if err := os.MkdirAll(filepath.Join(dir, "DLLs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "DLLs", "x.pyd"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(body)
+	manifest := fmt.Sprintf("%s *./DLLs/x.pyd\n", hex.EncodeToString(sum[:]))
+	if err := os.WriteFile(filepath.Join(dir, "manifest.sha256"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := manifestValid(dir)
+	if err != nil || !ok {
+		t.Fatalf("binary-mode manifest line rejected: ok=%v err=%v", ok, err)
+	}
+	if _, err := manifestValid(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("missing manifest must be a cache miss, not an error: %v", err)
+	}
+}

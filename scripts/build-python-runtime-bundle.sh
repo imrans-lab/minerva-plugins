@@ -560,6 +560,10 @@ fi
 # manifest.sha256 — per-file checksums for post-extract tampering detection
 # --------------------------------------------------------------------------
 
+# One line per file: "<sha256>  <relative path>". Both hashers print that on
+# POSIX; Git-for-Windows sha256sum hashes in binary mode and marks it
+# "<sha256> *<path>", which the runtime verifier (shared/runtime/extract.go
+# manifestValid) would reject — so the sed below canonicalises either form.
 echo "[$TRIPLE] generating manifest.sha256"
 if command -v sha256sum >/dev/null 2>&1; then
   HASHER="sha256sum"
@@ -570,7 +574,7 @@ fi
   cd "$STAGE_DIR" && \
   find . -type f ! -name manifest.sha256 -print | sort \
     | xargs -I{} $HASHER {} \
-    | sed 's| \./| |' \
+    | sed -E 's|^([0-9a-fA-F]{64}) [ *]\./|\1  |' \
     > manifest.sha256
 )
 

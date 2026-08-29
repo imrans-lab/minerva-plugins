@@ -228,13 +228,17 @@ func manifestValid(dir string) (bool, error) {
 		if line == "" {
 			continue
 		}
-		// Format: "<sha256-hex>  <relative-path>"
+		// Format: "<sha256-hex>  <relative-path>", or the binary-mode
+		// "<sha256-hex> *<relative-path>" that sha256sum emits on Windows.
 		parts := strings.SplitN(line, "  ", 2)
+		if len(parts) != 2 {
+			parts = strings.SplitN(line, " *", 2)
+		}
 		if len(parts) != 2 {
 			return false, fmt.Errorf("malformed manifest line: %q", line)
 		}
 		wantSum := strings.TrimSpace(parts[0])
-		relPath := strings.TrimSpace(parts[1])
+		relPath := strings.TrimPrefix(strings.TrimSpace(parts[1]), "*")
 		if relPath == "" {
 			continue
 		}
