@@ -63,7 +63,7 @@ static func toolbar_captions_fit(mode: String) -> bool:
 ## the widest row that happens to be mounted: the sidebar never expands, so
 ## its width IS its minimum, and until work item 01a04b9c9064 that minimum was
 ## an accident of the Properties rows' key labels and pickers — deleting them
-## dropped the column to its 120 px floor and the tool flows stopped wrapping.
+## dropped the column to its 120 px floor.
 ## Budget: a 24 px icon button is ~36 px with theme padding, 4 px apart, so
 ## 184 seats four per row and 240 seats six plus the annotation dock pane that
 ## lives in the sidebar in wide mode. Narrow uses the medium width for its

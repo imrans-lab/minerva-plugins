@@ -1614,6 +1614,11 @@ func _build_sidebar() -> VBoxContainer:
 
 	_sidebar_content = VBoxContainer.new()
 	_sidebar_content.name = "RightSidebarContent"
+	# EXPAND is what makes a ScrollContainer hand its child the full width;
+	# without it the content sits at its own minimum — one button wide once
+	# no row is wider than a button — and every FlowContainer below wraps to
+	# one child per line with the rest of the column empty.
+	_sidebar_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_sidebar_scroll.add_child(_sidebar_content)
 
 	## Three labeled tool sections (docket 019fb5624e2e; sectioning corrected
