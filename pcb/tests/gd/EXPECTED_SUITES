@@ -171,7 +171,10 @@ test_pcb_net_membership.gd assertions=70
 # width for 1100 px, above the two-button floor), medium +2 (owned width for
 # 600 px, two tools on one row), §7 +2 (no divider above the fabrication row,
 # dock divider hidden off-wide).
-test_pcb_panel_layout.gd assertions=154
+# 154 -> 156: the dock-migrates test checks the sidebar content fills the
+# scroll viewport and the dock parent gets the column's slack (vertical
+# expand on RightSidebarContent).
+test_pcb_panel_layout.gd assertions=156
 test_pcb_panel_model.gd assertions=203
 # 211 -> 217: the board-resize undo step (the verb snapshots, and one undo
 # restores the previous outline) — six checks, HAND-COUNTED from source.

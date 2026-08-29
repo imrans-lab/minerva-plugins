@@ -314,6 +314,18 @@ func _test_dock_pane_migrates() -> void:
 	check("wide: pane sits in the sidebar slot", pane.get_parent() == sidebar_slot)
 	check("wide: pane arranged RIGHT",
 		int(pane.get("dock_mode")) == DockPaneScript.DockMode.RIGHT)
+	# The pane must be handed the column's SLACK, not its own floor: the
+	# sidebar content fills the scroll viewport and the dock parent takes what
+	# the rows above leave (work item 01a04b9c9064 — the list used to sit at
+	# MIN_LIST_HEIGHT with the rest of the column blank).
+	var scroll: Control = panel.find_child("RightSidebarScroll", true, false)
+	var content: Control = panel.find_child("RightSidebarContent", true, false)
+	check("wide: the sidebar content fills the scroll viewport's height",
+		scroll != null and content != null and content.size.y >= scroll.size.y - 1.0)
+	var fab_row: Control = panel.find_child("FabricationRow", true, false)
+	check("wide: the dock parent is taller than its pane's list floor",
+		sidebar_slot.size.y > 3.0 * float(pane.get("_dock_scroll").custom_minimum_size.y)
+			and fab_row != null and fab_row.size.y < sidebar_slot.size.y)
 
 	panel.size = Vector2(600.0, 700.0)  # → medium
 	for _i in range(4):

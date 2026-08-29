@@ -1613,11 +1613,16 @@ func _build_sidebar() -> VBoxContainer:
 
 	_sidebar_content = VBoxContainer.new()
 	_sidebar_content.name = "RightSidebarContent"
-	# EXPAND is what makes a ScrollContainer hand its child the full width;
-	# without it the content sits at its own minimum — one button wide once
-	# no row is wider than a button — and every FlowContainer below wraps to
-	# one child per line with the rest of the column empty.
+	# EXPAND on BOTH axes is what makes a ScrollContainer hand its child the
+	# full viewport; without it the content sits at its own minimum. Width:
+	# one button wide once no row is wider than a button, every FlowContainer
+	# wrapping one child per line. Height: the annotation dock parent's
+	# expand-fill has no slack to claim, so in wide mode the pane's list
+	# stays at its floor with the rest of the column blank. Expand distributes
+	# surplus only — it never raises the minimum, so the B3b height relief
+	# above still holds.
 	_sidebar_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_sidebar_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_sidebar_scroll.add_child(_sidebar_content)
 
 	## Three labeled tool sections (docket 019fb5624e2e; sectioning corrected
