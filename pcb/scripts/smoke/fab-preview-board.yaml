@@ -1,0 +1,35 @@
+# Real-bundle smoke fixture for pcb.fab_preview: one FULL-geometry part (its
+# `pads` key makes the board the sole pad authority, so no library is read)
+# on a two-layer board. Exercises the whole preview path — compile, Gerber +
+# Excellon emit, and the independent-reader re-parse that draws the SVGs.
+version: 1
+name: fab-preview-smoke
+width_mm: 10
+height_mm: 8
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.6
+  via_drill_mm: 0.3
+components:
+  - ref: R1
+    footprint: Resistor_SMD:R_0805_2012Metric
+    value: 1k
+    x_mm: 5
+    y_mm: 4
+    rotation_deg: 0
+    layer: top
+    pins:
+      - {number: "1", x_mm: -0.9125, y_mm: 0}
+      - {number: "2", x_mm: 0.9125, y_mm: 0}
+    pads:
+      - {number: "1", type: smd, shape: roundrect, position: {x: -0.9125, y: 0}, size: {width: 1.025, height: 1.4}, layers: [F.Cu, F.Mask, F.Paste], drill: {x: 0, y: 0}}
+      - {number: "2", type: smd, shape: roundrect, position: {x: 0.9125, y: 0}, size: {width: 1.025, height: 1.4}, layers: [F.Cu, F.Mask, F.Paste], drill: {x: 0, y: 0}}
+    graphics:
+      - {kind: line, layer: F.SilkS, start: {x: -0.227, y: -0.735}, end: {x: 0.227, y: -0.735}, width: 0.12}
+      - {kind: line, layer: F.SilkS, start: {x: -0.227, y: 0.735}, end: {x: 0.227, y: 0.735}, width: 0.12}
+      - {kind: poly, layer: F.CrtYd, width: 0.05, points: [{x: -1.68, y: -0.95}, {x: 1.68, y: -0.95}, {x: 1.68, y: 0.95}, {x: -1.68, y: 0.95}]}
+nets:
+  - name: N1
+    pins: ["R1.1", "R1.2"]

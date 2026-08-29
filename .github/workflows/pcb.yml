@@ -718,6 +718,30 @@ jobs:
       - name: MCP stdio smoke (initialize + tools/list)
         run: python3 ../scripts/smoke/mcp_smoke.py build/pcb-plugin${{ matrix.ext }}
 
+      # Drive ONE worker method end-to-end through the packed binary and its
+      # embedded runtime. The smoke above proves the protocol; it never starts
+      # the Python worker, so a wheel missing from the bundle (an import that
+      # only happens inside a method) is invisible to it and to every dev-lane
+      # test, which run the worker out of worker/.venv. fab_preview is the
+      # method that imports the most beyond the worker package, so it is the
+      # one that fails first when the bundle is short a dependency.
+      - name: Real-bundle worker call (pcb.fab_preview renders a board)
+        env:
+          MINERVA_PLUGIN_DATA_DIR: ${{ runner.temp }}/pcb-plugin-data
+        run: |
+          python3 -c "import json; json.dump({'yaml': open('scripts/smoke/fab-preview-board.yaml').read()}, open('build/fab-preview-request.json','w'))"
+          python3 scripts/e2e_route_stdio.py build/pcb-plugin${{ matrix.ext }} build/fab-preview-request.json pcb.fab_preview > build/fab-preview-reply.json
+          python3 - <<'PY'
+          import json
+          reply = json.load(open("build/fab-preview-reply.json"))
+          if not reply.get("ok"):
+              raise SystemExit("fab_preview failed through the packed binary: %s" % reply.get("error"))
+          layers = [l["name"] for l in reply["result"]["layers"]]
+          if len(layers) < 9:
+              raise SystemExit("fab_preview rendered %d layers, expected >= 9: %s" % (len(layers), layers))
+          print("fab_preview rendered", len(layers), "layers:", ", ".join(layers))
+          PY
+
       - name: Pack release tarball
         run: |
           PLATFORM="${{ matrix.target }}"

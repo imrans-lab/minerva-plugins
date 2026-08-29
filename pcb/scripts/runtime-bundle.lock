@@ -13,14 +13,23 @@ PBS_TAG="20260510"
 CPYTHON="3.12.13"
 
 # Runtime deps only — the worker's [project.dependencies], EXACT pins for
-# reproducibility. dev extras (pytest, pygerber, gerbonara) must NEVER enter
-# the bundle: pygerber/gerbonara are the CAM oracle and shipping the oracle
-# beside the emitter would let a packaging mistake grade its own homework.
-# pyclipper is the one native wheel; cp312 coverage verified in
-# worker/pyproject.toml's wheel-availability note (manylinux x86_64 +
+# reproducibility. dev extras (pytest, pygerber) must NEVER enter the bundle:
+# pygerber is the CAM oracle the test suite grades the emitter with, and
+# shipping the oracle beside the emitter would let a packaging mistake grade
+# its own homework. pyclipper is the one native wheel; cp312 coverage verified
+# in worker/pyproject.toml's wheel-availability note (manylinux x86_64 +
 # 2_28_aarch64 + macosx universal2 + win_amd64) — so unlike cad, pcb ships
 # the FULL platform matrix including linux-arm64.
 PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0"
+
+# gerbonara is a RUNTIME dependency: pcb.fab_preview re-parses the emitted
+# Gerber/Excellon bytes with it — a reader independent of the writer is the
+# whole point of that preview — so a bundle without it answers every preview
+# with ModuleNotFoundError. Pure-Python (py3-none-any). --no-deps because its
+# metadata declares click/rtree/quart, which only its CLI and web viewer
+# import; the reader path we ship touches none of them, and LAYER1_IMPORTS
+# below is the check that this stays true.
+PIP_NO_DEPS_PKGS="gerbonara==1.6.3"
 
 # ── EXPECTED BYTES (acceptance check K23, work item 019ffc543d1d) ────────────
 #
@@ -55,9 +64,11 @@ PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0"
 #     unverified value.
 #   ripgrep — https://github.com/BurntSushi/ripgrep releases/download/$RG_VERSION/...
 #     License: MIT OR Unlicense.
-#   wheels — PyPI, versions pinned in PIP_PKGS above. PyYAML MIT; pyclipper MIT
-#     (Clipper itself Boost-1.0); gerber-writer NOT CONFIRMED (Ucamco —
-#     possibly Apache-2.0, recorded as MIT without a source).
+#   wheels — PyPI, versions pinned in PIP_PKGS / PIP_NO_DEPS_PKGS above.
+#     PyYAML MIT; pyclipper MIT (Clipper itself Boost-1.0); gerbonara
+#     Apache-2.0 (License-Expression in its wheel METADATA); gerber-writer NOT
+#     CONFIRMED (Ucamco — possibly Apache-2.0, recorded as MIT without a
+#     source).
 #
 # UNRESOLVED LICENSES, using this repo's own convention for them (see
 # scripts/gen_notice.py, which fails the release gate on any entry whose
@@ -86,7 +97,7 @@ PIP_REQUIRE_HASHES_FILE=""
 # Layer-1 import self-test (native builds only; cross targets skip). Imports
 # every runtime dep plus both first-party worker packages, so an empty or
 # mis-copied site-packages fails the bundle build, not the first user.
-LAYER1_IMPORTS="import yaml; import gerber_writer; import pyclipper; import pcb_worker; import agent_router"
+LAYER1_IMPORTS="import yaml; import gerber_writer; import pyclipper; import gerbonara; import pcb_worker; import agent_router"
 
 # First-party worker code copied into site-packages. Both packages from
 # worker/pyproject.toml's wheel target: pcb_worker (the JSON-RPC worker) and

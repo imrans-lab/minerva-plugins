@@ -69,6 +69,11 @@ for v in PBS_TAG CPYTHON WORKER_SOURCE_DIR WORKER_PACKAGES BUNDLE_OUT_DIR; do
   fi
 done
 : "${PIP_PKGS:=}"
+# Wheels installed WITHOUT their declared dependencies — for a package whose
+# metadata pulls in more than the code path we ship ever imports. Each entry
+# must then be covered by LAYER1_IMPORTS, which is what proves the omission
+# was safe.
+: "${PIP_NO_DEPS_PKGS:=}"
 : "${LAYER1_IMPORTS:=}"
 
 # --------------------------------------------------------------------------
@@ -233,6 +238,8 @@ mkdir -p "$SITE_PACKAGES"
 
 # shellcheck disable=SC2206
 DEPS=( $PIP_PKGS )
+# shellcheck disable=SC2206
+NODEPS=( $PIP_NO_DEPS_PKGS )
 
 if [ ${#DEPS[@]} -eq 0 ]; then
   echo "[$TRIPLE] WARNING: PIP_PKGS empty in lock file (only worker source will be bundled)" >&2
@@ -295,6 +302,10 @@ for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','
         "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: "${DEPS[@]}"
     fi
   fi
+  if [ ${#NODEPS[@]} -gt 0 ]; then
+    PYTHONNOUSERSITE=1 \
+      "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: --no-deps "${NODEPS[@]}"
+  fi
 else
   echo "[$TRIPLE] cross build: pip install via host python with --platform=$WHEEL_PLATS"
   # --only-binary=:all: on the native path above (review of 019ffc543d1d):
@@ -324,6 +335,15 @@ else
       --abi "$ABI" \
       --only-binary=:all: \
       "${DEPS[@]}"
+  fi
+  if [ ${#NODEPS[@]} -gt 0 ]; then
+    "$HOST_PY" -m pip install --no-cache-dir --no-input \
+      --target "$SITE_PACKAGES" \
+      "${PLAT_ARGS[@]}" \
+      --python-version "$PY_MAJOR_MINOR" \
+      --abi "$ABI" \
+      --only-binary=:all: --no-deps \
+      "${NODEPS[@]}"
   fi
 fi
 

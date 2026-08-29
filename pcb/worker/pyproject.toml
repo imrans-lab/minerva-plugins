@@ -52,6 +52,13 @@ dependencies = [
     "pyyaml>=6.0,<7",
     "gerber-writer==0.4.3.3",
     "pyclipper==1.4.0",
+    # gerbonara: the independent Gerber + Excellon READER pcb.fab_preview
+    # re-parses the emitted bytes with before drawing them — a preview drawn
+    # by the library that wrote the file would only show what the writer
+    # meant, not what a fab receives. Pure Python. The runtime bundle installs
+    # it --no-deps (scripts/runtime-bundle.lock): its declared click/rtree/
+    # quart serve only its CLI and web viewer, which nothing here imports.
+    "gerbonara==1.6.3",
 ]
 
 [project.optional-dependencies]
@@ -76,13 +83,6 @@ dev = [
     # gerber test suite for round-trip parsing of every emitted layer (not a
     # runtime dependency). Pinned to the spike's validated version.
     "pygerber==2.4.3",
-    # gerbonara: independent, unified Gerber + Excellon + IPC-356 reader used
-    # ONLY by the fabrication-verification test harness (not a runtime dependency,
-    # no FCIB). Justified as ADDITIVE over pygerber because pygerber parses only
-    # RS-274X Gerber — it does NOT read Excellon drill files or IPC-356, which we
-    # need for drill-to-copper registration checks. Pinned to the version proven
-    # importable + round-tripping the current exporter output on CPython 3.12.
-    "gerbonara==1.6.3",
 ]
 
 [tool.pytest.ini_options]
