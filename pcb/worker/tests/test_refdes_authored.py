@@ -250,7 +250,10 @@ def test_the_authored_placement_outranks_the_footprint_and_the_derived_rule():
     """
     board = _library_board()
     library_anchor = _parsed(AUTHORED_FP)["reference_text"]
-    assert _parsed(PLAIN_FP)["reference_text"] is None, (
+    # parse_kicad_mod omits the key entirely for a footprint that authors no
+    # qualifying reference fp_text (see footprints.parse_kicad_mod), so this
+    # reads it the way every consumer does.
+    assert _parsed(PLAIN_FP).get("reference_text") is None, (
         f"{PLAIN_FP} started authoring a reference fp_text — U1/U3 no longer "
         f"isolate rules 1 and 3")
 

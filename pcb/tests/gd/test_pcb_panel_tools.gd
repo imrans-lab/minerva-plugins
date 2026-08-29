@@ -306,8 +306,10 @@ func _run_golden_parity() -> void:
 	# ON-GRID (multiples of 2.54): the UX2 station-6 snap disclosure adds
 	# snapped/requested only for off-grid requests — this golden pins the
 	# lean common shape (conditional keys pinned in test_workspace_tools 23f).
+	# `geometry` is unconditional (PcbLibraryPart.add_reply): every add reports
+	# whether the part it just landed is fabricable, sketch or library-sourced.
 	var ga := await h("minerva_pcb_add_component", _args({"id": "C3", "footprint": "CAPACITOR", "x": 10.16, "y": 50.8}))
-	check_keys("add_component result", ga, ["success", "component_id", "x", "y", "pin_count", "assembly"])
+	check_keys("add_component result", ga, ["success", "component_id", "x", "y", "pin_count", "assembly", "geometry"])
 	check_eq("component_id echoed", ga.get("component_id", ""), "C3")
 	check_eq("placement verb attaches the tri-state assembly verdict (indeterminate headless)",
 		str((ga.get("assembly", {}) as Dictionary).get("status", "")), "indeterminate")

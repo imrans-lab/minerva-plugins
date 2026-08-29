@@ -48,7 +48,8 @@ from .footprints import (  # noqa: F401 — resolve_footprint re-exported
     resolve_footprint_layered,
 )
 from .pad_source import has_resolved_pads
-from .refdes_anchor import anchor_dict_from_component, body_extent_from_parsed
+from .refdes_anchor import (anchor_dict_from_component, anchor_dict_from_parsed,
+                            body_extent_from_parsed)
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
 from .pad_types import normalize_pad_type as _normalize_pad_type
 
@@ -488,10 +489,13 @@ def footprint_geometry(
     declares one (that IS the part's declared extent), else from its drawn
     outline, else from the union of its lands.
 
-    ``refdes_anchor`` is where this footprint prints its designator (see
-    :func:`_refdes_anchor`), so a freshly added part draws its ref where the
-    fab will stroke it instead of waiting for the next board load. It does not
-    depend on the refdes itself — the renderer already knows that.
+    ``refdes_anchor`` is where this footprint prints its designator — the
+    FOOTPRINT half of the precedence rule (its own authored fp_text, else the
+    anchor derived from its body), because no component exists yet to author a
+    ``refdes_placement`` over it. A freshly added part therefore draws its ref
+    where the fab will stroke it instead of waiting for the next board load,
+    and the board's own override lands on the next resolve. It does not depend
+    on the refdes itself — the renderer already knows that.
 
     Raises :class:`~pcb_worker.footprints.FootprintLookupError` — attributed,
     naming the ref and the layers searched — when the ref does not resolve.
@@ -520,7 +524,7 @@ def footprint_geometry(
         # as _resolve_component's — a silk-only footprint honestly reports
         # False here and is still fully resolved.
         "has_pad_geometry": bool(pads),
-        "refdes_anchor": _refdes_anchor(parsed),
+        "refdes_anchor": anchor_dict_from_parsed(parsed),
     }
     return out
 

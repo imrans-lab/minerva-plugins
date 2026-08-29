@@ -408,15 +408,20 @@ func _test_3_tool_and_selection() -> void:
 	var w7: Vector2 = u1s.get_pin_world_position("7")
 	# A guaranteed pad-free point derived from the canvas's OWN laid-out rect,
 	# not a board-mm literal — the same rule test_pcb_pin_inspector.gd states.
-	var empty_pt: Vector2 = canvas.screen_to_world(Vector2(24.0, canvas.size.y - 24.0))
+	# Re-derived at every use rather than cached: the sidebar grows a section
+	# when a pad is selected, which NARROWS the canvas, and a world point taken
+	# from the earlier layout then maps outside it — the click would land on the
+	# sidebar and never reach the tool.
 	check("3a: the empty point really is pad-free (fixture sanity)",
-		host.pad_at(empty_pt).is_empty(), str(host.pad_at(empty_pt)))
+		host.pad_at(_empty_world_point()).is_empty(),
+		str(host.pad_at(_empty_world_point())))
 
 	# Focus the canvas with a real click, then arm with a real BARE P — the
 	# binding the DCR asks for, and the one that had to be proved free.
-	_click_world(empty_pt)
+	var focus_pt := _empty_world_point()
+	_click_world(focus_pt)
 	await process_frame
-	_release_world(empty_pt)
+	_release_world(focus_pt)
 	await process_frame
 	check("3b: SELECT is the resting tool", canvas.tool_mode == canvas.ToolMode.SELECT,
 		"tool_mode=%d" % canvas.tool_mode)
@@ -471,9 +476,10 @@ func _test_3_tool_and_selection() -> void:
 	check_eq("3f: a pin with no land geometry still gets a mark",
 		PinSelectTool.land_transforms(data, "J2.1").size(), 1)
 
-	_click_world(empty_pt)
+	var clear_pt := _empty_world_point()
+	_click_world(clear_pt)
 	await process_frame
-	_release_world(empty_pt)
+	_release_world(clear_pt)
 	await process_frame
 	check_eq("3g: a plain click on empty canvas clears the pads",
 		Array(canvas.selected_pad_refs), [])
@@ -664,6 +670,12 @@ func _push_key(code: int, shift: bool) -> void:
 	ev.shift_pressed = shift
 	ev.pressed = true
 	get_root().push_input(ev, true)
+
+
+## A pad-free board point that is ON the canvas as it is laid out RIGHT NOW.
+## Derived from the canvas's own rect corner, never cached — see section 3a.
+func _empty_world_point() -> Vector2:
+	return canvas.screen_to_world(Vector2(24.0, canvas.size.y - 24.0))
 
 
 func _world_to_root_screen(world_pos: Vector2) -> Vector2:

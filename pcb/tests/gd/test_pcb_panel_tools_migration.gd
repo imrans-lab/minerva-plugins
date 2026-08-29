@@ -259,10 +259,12 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	# ON-GRID coordinates (multiples of 2.54) on purpose: UX2 station 6's snap
 	# disclosure adds snapped/requested ONLY when the grid moved the request,
 	# so the strict shape here pins the lean COMMON case; the conditional keys
-	# have their own pins (test_workspace_tools 23f).
+	# have their own pins (test_workspace_tools 23f). `geometry` is
+	# unconditional (PcbLibraryPart.add_reply) — every add reports the
+	# fabricable/source state of the part it just landed.
 	var add := await d("minerva_pcb_add_component", _args({"id": "U9", "footprint": "IC_DIP", "x": 20.32, "y": 10.16}))
 	check("add_component dispatched ok", add.get("success", false), str(add))
-	check_keys("add_component shape", add, ["success", "component_id", "x", "y", "pin_count", "assembly"])
+	check_keys("add_component shape", add, ["success", "component_id", "x", "y", "pin_count", "assembly", "geometry"])
 	check("component landed in the model", data.has_component("U9"))
 
 	print("\n-- add_component invalid footprint --")

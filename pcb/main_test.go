@@ -694,7 +694,19 @@ func TestPCBWorkerStdioSmoke_ErrorEnvelope(t *testing.T) {
 // tool. Whenever the result carries its own nested "ok" key, that must be
 // true as well.
 func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
-	c, cleanup := startPlugin(t, "pcb-plugin-schema-args")
+	// The inner-ok check below makes this sweep sensitive to the ambient
+	// plugin data dir: minerva_pcb_check_libraries reports ok:false when a
+	// FETCHED library set exists that simply does not carry the spike board's
+	// footprint names (R_0805/C_0805/TH_TestPoint) — a correct answer about
+	// the board, not a schema lie. Pinning an empty data dir gives every
+	// library-backed tool its documented "nothing fetched yet" degenerate
+	// shape (ok:true, missing_data:true), so this sweep measures schema
+	// binding only, identically on a dev machine and on a clean checkout.
+	// The shipped seed layer lives under MINERVA_PCB_ROOT, not the data dir,
+	// so minerva_pcb_footprint_report still resolves knownValues["ref"].
+	c, cleanup := startPluginWithEnv(t, "pcb-plugin-schema-args", []string{
+		"MINERVA_PLUGIN_DATA_DIR=" + t.TempDir(),
+	})
 	defer cleanup()
 
 	board, err := os.ReadFile(filepath.Join("spikes", "gerber", "board.yaml"))

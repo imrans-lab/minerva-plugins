@@ -199,6 +199,13 @@ func _push_escape() -> void:
 	get_root().push_input(ev, true)
 
 
+## A pad-free board point that is ON the canvas as it is laid out RIGHT NOW.
+## Derived from the canvas's own rect corner, never cached — see the fixture
+## sanity check for why.
+func _empty_world_point() -> Vector2:
+	return canvas.screen_to_world(Vector2(24.0, canvas.size.y - 24.0))
+
+
 func _world_to_root_screen(world_pos: Vector2) -> Vector2:
 	return canvas.get_global_transform() * canvas.world_to_screen(world_pos)
 
@@ -209,11 +216,19 @@ func _or_dash(value: String) -> String:
 	return value if not value.is_empty() else HoverCard.EMPTY_VALUE
 
 
+## One real hover motion at a board point, handed to the canvas the way the
+## viewport hands it over: `Control._gui_input` receives CANVAS-LOCAL px.
+##
+## Pushed at the canvas rather than through `get_root().push_input` because a
+## motion with NO button held has no `gui.mouse_focus` to route by, and the
+## headless viewport has no live pointer for `gui_find_control` to hit-test
+## with — the event is simply dropped. The button gestures above keep using
+## push_input: a press establishes that focus, so they route.
 func _move_world(world_pos: Vector2) -> void:
 	var ev := InputEventMouseMotion.new()
-	ev.position = _world_to_root_screen(world_pos)
-	ev.global_position = ev.position
-	get_root().push_input(ev, true)
+	ev.position = canvas.world_to_screen(world_pos)
+	ev.global_position = canvas.get_global_transform() * ev.position
+	canvas._gui_input(ev)
 
 
 func _click_world(world_pos: Vector2) -> void:
@@ -241,17 +256,22 @@ func _test_e2e_1_scenario() -> void:
 	# not the wider pin spread this fixture uses) does not necessarily cover
 	# every board-mm coordinate, so a hardcoded "far" point can land outside the
 	# fitted view and silently miss the canvas control entirely.
-	var empty_pt: Vector2 = canvas.screen_to_world(Vector2(24.0, canvas.size.y - 24.0))
-	check("fixture: empty_pt is actually pad-free (sanity)", host.pad_at(empty_pt).is_empty(),
-		"pad_at(empty_pt)=%s" % str(host.pad_at(empty_pt)))
+	# Re-derived at every use rather than cached: the sidebar grows a section
+	# once a pad is selected, which NARROWS the canvas, and a world point taken
+	# from the earlier layout then maps outside it — the click would land on the
+	# sidebar and never reach the tool.
+	check("fixture: the empty point is actually pad-free (sanity)",
+		host.pad_at(_empty_world_point()).is_empty(),
+		"pad_at(empty)=%s" % str(host.pad_at(_empty_world_point())))
 
 	# ── A. Toggle inspect mode via Shift+P (real key event), then click a
 	#      net-connected, non-geometry pad. ──
 	# Grab focus first (a real click on empty space, SELECT tool still active —
 	# same mechanism the existing canvas probe relies on for keyboard tests).
-	_click_world(empty_pt)
+	var focus_pt := _empty_world_point()
+	_click_world(focus_pt)
 	await process_frame
-	_release_world(empty_pt)
+	_release_world(focus_pt)
 	await process_frame
 
 	check("A: SELECT is the resting tool before toggling",
@@ -444,14 +464,15 @@ func _test_e2e_1_scenario() -> void:
 
 	# ── E. Click empty space clears; malformed/unknown MCP refs error cleanly. ──
 	_last_pin_selected = {"__unset__": true}
-	_click_world(empty_pt)
+	var clear_pt := _empty_world_point()
+	_click_world(clear_pt)
 	await process_frame
-	_release_world(empty_pt)
+	_release_world(clear_pt)
 	await process_frame
 
 	check("E: click empty space clears (pin_selected({}))", _last_pin_selected.is_empty(),
 		"got %s" % str(_last_pin_selected))
-	_move_world(empty_pt)
+	_move_world(_empty_world_point())
 	await process_frame
 	check("E: hover card is gone one frame after the pointer leaves the pad",
 		canvas._hover_card_lines.is_empty(), "got %s" % str(Array(canvas._hover_card_lines)))

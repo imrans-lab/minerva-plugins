@@ -584,3 +584,44 @@ def test_pad_fallback_box_measures_a_rotated_land_at_its_turned_extent():
     # The unrotated land is unchanged by the same path — no key, no turn.
     flat = resolve._body_box({"graphics": [], "pads": [dict(pad, rotation=0.0)]})
     assert (flat["width"], flat["height"]) == pytest.approx((2.0, 1.0))
+
+
+def test_footprint_geometry_carries_a_complete_designator_anchor():
+    """``resolve.footprint_geometry`` answers for a ref with NO component yet.
+
+    It is the only caller of the anchor rule that has no board component to
+    overlay, so it takes the FOOTPRINT half: the .kicad_mod's own reference
+    fp_text when it declares one, else the anchor derived from the body. This
+    is the path the panel's add-by-library-ref runs through, and a break here
+    is invisible to every board-level test — the add is simply refused.
+
+    Oracle: the two .kicad_mod files parsed here. D_SMA states its own
+    reference placement, so the reply must reproduce those numbers verbatim;
+    R_0805_2012Metric states none, so the reply must still be a COMPLETE
+    anchor and must sit clear above the land it would otherwise print over.
+    """
+    library = Path(__file__).parents[2] / "library" / "footprints"
+
+    def authored(lib: str, name: str):
+        parsed = parse_kicad_mod(
+            (library / f"{lib}.pretty" / f"{name}.kicad_mod").read_text(
+                encoding="utf-8"))
+        return parsed, parsed.get("reference_text")
+
+    _, sma_text = authored("Diode_SMD", "D_SMA")
+    assert sma_text is not None, "D_SMA stopped authoring a reference fp_text"
+    sma = resolve.footprint_geometry("Diode_SMD:D_SMA")["refdes_anchor"]
+    for key in ("x_mm", "y_mm", "rotation_deg", "size_mm"):
+        assert sma[key] == pytest.approx(sma_text[key]), (
+            f"footprint_geometry moved D_SMA's authored {key}: {sma}")
+    assert sma["hidden"] is False
+
+    plain_parsed, plain_text = authored("Resistor_SMD", "R_0805_2012Metric")
+    assert plain_text is None, "R_0805_2012Metric started authoring an fp_text"
+    plain = resolve.footprint_geometry(
+        "Resistor_SMD:R_0805_2012Metric")["refdes_anchor"]
+    assert set(plain) == {"x_mm", "y_mm", "rotation_deg", "size_mm", "hidden"}
+    top = min(p["y_mm"] for p in plain_parsed["pads"])
+    assert plain["y_mm"] < top, (
+        f"the derived anchor {plain} is not clear of the lands (top {top})")
+    assert plain["size_mm"] > 0.0 and plain["hidden"] is False
