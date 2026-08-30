@@ -251,6 +251,56 @@ func TestWorkerErrorString(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 6b: an error payload's unmodelled structured fields survive the trip
+// ---------------------------------------------------------------------------
+
+// A worker refusal carries domain fields this transport does not model — a
+// blocked_by list, a refusal code. They must reach the tool boundary intact,
+// so decode captures them and encode puts them back where the worker had
+// them: at the top level of the error object.
+func TestWorkerErrorPreservesUnmodelledFields(t *testing.T) {
+	t.Parallel()
+	const payload = `{"kind":"assembly_not_compilable","message":"8 error(s) blocked it",` +
+		`"blocked_by":[{"code":"pin_pad_desync","entity_id":"R1.1"}],"code":"missing_mpn"}`
+
+	var we bridge.WorkerError
+	if err := json.Unmarshal([]byte(payload), &we); err != nil {
+		t.Fatalf("unmarshal WorkerError: %v", err)
+	}
+	if we.Kind != "assembly_not_compilable" {
+		t.Errorf("Kind = %q, want \"assembly_not_compilable\"", we.Kind)
+	}
+	if len(we.Extra) != 2 {
+		t.Fatalf("Extra = %v, want blocked_by and code", we.Extra)
+	}
+
+	out, err := json.Marshal(&we)
+	if err != nil {
+		t.Fatalf("marshal WorkerError: %v", err)
+	}
+	var round map[string]any
+	if err := json.Unmarshal(out, &round); err != nil {
+		t.Fatalf("unmarshal re-encoded WorkerError: %v", err)
+	}
+	blocked, ok := round["blocked_by"].([]any)
+	if !ok || len(blocked) != 1 {
+		t.Fatalf("re-encoded error dropped blocked_by: %s", out)
+	}
+	if round["code"] != "missing_mpn" {
+		t.Errorf("re-encoded error dropped code: %s", out)
+	}
+
+	// An error with nothing unmodelled still encodes to the plain shape.
+	plain, err := json.Marshal(&bridge.WorkerError{Kind: "parse", Message: "bad yaml"})
+	if err != nil {
+		t.Fatalf("marshal plain WorkerError: %v", err)
+	}
+	if string(plain) != `{"kind":"parse","message":"bad yaml"}` {
+		t.Errorf("plain WorkerError encoding changed: %s", plain)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 7: Shutdown is a no-op when worker is not running
 // ---------------------------------------------------------------------------
 
