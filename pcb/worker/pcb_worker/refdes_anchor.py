@@ -98,6 +98,8 @@ __all__ = [
     "occupied_extent_from_definition",
     "body_extent_from_definition",
     "courtyard_extent_from_definition",
+    "fab_extent_from_definition",
+    "land_extent_from_definition",
     "default_anchor",
     "anchor_dict_from_parsed",
     "anchor_dict_from_component",
@@ -115,6 +117,15 @@ COURTYARD_LAYERS = frozenset({"F.CrtYd", "B.CrtYd"})
 #: outline; neither is copper, so a footprint whose only extent is its lands
 #: still measures as a body.
 OUTLINE_LAYERS = frozenset({"F.SilkS", "B.SilkS", "F.Fab", "B.Fab"})
+
+#: The ASSEMBLY drawing alone — the fab layers, without the printed silk.
+#: Silk is deliberately asymmetric (a cathode bar, a pin-1 dot, a polarity
+#: chevron), so a box measured over it is off the part it draws; measured over
+#: this library, ``D_SMA``'s silk box centre sits 3.05 mm from its fab box
+#: centre. Fab carries the body and nothing else, which is what makes it the
+#: basis for a question about where the part's middle IS rather than about what
+#: must not be printed on.
+FAB_LAYERS = frozenset({"F.Fab", "B.Fab"})
 
 #: The per-component key a BOARD authors its designator placement under. Not a
 #: derived key: the Go codec carries it like any other component field and the
@@ -430,6 +441,37 @@ def body_extent_from_definition(
         *_definition_graphic_points(footprint.graphics, OUTLINE_LAYERS),
         *_definition_pad_points(footprint.pads),
     ])
+
+
+def fab_extent_from_definition(
+        footprint: Union[FootprintDefinition, None]) -> Union[LocalExtent, None]:
+    """The ASSEMBLY DRAWING's box for a built :class:`FootprintDefinition` — its
+    fab-layer outline alone, in footprint-LOCAL mm. None when it draws none.
+
+    The third sibling of :func:`occupied_extent_from_definition` (courtyard +
+    outline + lands, "what must the text avoid") and
+    :func:`body_extent_from_definition` (outline + lands, "what does the part
+    cover once soldered"): this one answers "where did the footprint's author
+    draw the component BODY", which is the only one of the three a nozzle
+    centre can be measured from — see :data:`FAB_LAYERS`.
+    """
+    if footprint is None:
+        return None
+    return _extent_of(_definition_graphic_points(footprint.graphics, FAB_LAYERS))
+
+
+def land_extent_from_definition(
+        footprint: Union[FootprintDefinition, None]) -> Union[LocalExtent, None]:
+    """The LANDS' box for a built :class:`FootprintDefinition` — every pad's
+    turned corners, no graphics at all. None when it carries no sized land.
+
+    The fallback basis for a footprint that draws no fab outline: the pads are
+    where the part is soldered, so their box is the part's own footprint even
+    when nobody drew its body.
+    """
+    if footprint is None:
+        return None
+    return _extent_of(_definition_pad_points(footprint.pads))
 
 
 def _first_extent(*groups: Iterable[tuple[float, float]]) -> Union[LocalExtent, None]:

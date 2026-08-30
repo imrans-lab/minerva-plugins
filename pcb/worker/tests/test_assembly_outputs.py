@@ -16,6 +16,15 @@ regime requires for this unit):
     stated independently of any hardcoded string: the expectation is computed
     in-test straight from the fixture's own YAML, so it cannot drift with the
     emitter.
+
+BOTH CUTOVER SEALS SURVIVED THE ASSEMBLY-ANCHOR UNIT, and that is a finding
+rather than an accident. Rows now carry the resolved body-centre ANCHOR instead
+of the placement position, which moved the emitted coordinate of every part
+whose footprint origin is not its body centre — but every footprint this fixture
+places (R_0805, D_SMA, and two excluded pieces of furniture) is already centred
+on its own origin, so its anchors compose back onto its positions exactly. That
+makes this file the "nothing moved that should not have" half of that unit's
+oracle; the half where things DO move is test_assembly_anchor.py.
   * test_bom_groups_by_footprint_value_mpn — BOM grouping seal.
   * test_*_identity_refusal* — the part-identity contract.
   * test_*_house_refusal* — the per-house capability refusal.
@@ -99,7 +108,10 @@ def test_cpl_rows_match_hand_derived_values():
     """assembly_resolved.yaml, by inspection, THEN through the MEASURED
     coordinate frame (module docstring's COORDINATE FRAME section: X
     verbatim, Y NEGATED — proven against a real ``kicad-cli 9.0.9 pcb export
-    pos`` run):
+    pos`` run). The emitted coordinate is the resolved body-centre ANCHOR, which
+    for R_0805 and D_SMA composes back onto the authored position because both
+    footprints are already centred on their own origin (measured:
+    test_assembly_anchor.py):
       R1: x_mm=10.0 y_mm=5.0  rotation_deg=0  layer=top    -> (10.0, -5.0, 0.0, top)
       R2: x_mm=15.0 y_mm=5.0  rotation_deg=90 layer=top    -> (15.0, -5.0, 90.0, top)
       D1: x_mm=12.5 y_mm=14.0 rotation_deg=45 layer=bottom -> (12.5, -14.0, 45.0, bottom)
@@ -137,7 +149,11 @@ def test_cpl_csv_bytes_are_unchanged_by_the_compiled_cutover():
     compiled IR — header, ref order, CRLF endings, 4-decimal fixed point,
     Top/Bottom capitalisation, negated Y and verbatim rotation, all identical.
     A coordinate or rotation that moved during the plumbing swap breaks here
-    and nowhere subtler."""
+    and nowhere subtler.
+
+    It survived the assembly-anchor unit unchanged, which is the point: those
+    bytes are now the anchor's, and they are the same bytes, because this
+    fixture's footprints are centred on their origins."""
     result = ao.build_cpl(_compiled(_load()), "jlc", name="afix")
     assert list(result.keys()) == ["afix-cpl-jlc.csv"]
     expected = (
@@ -158,7 +174,14 @@ def test_rows_match_the_raw_dict_arithmetic_they_replaced():
 
     This is what makes "the plumbing swap changed nothing it should not" a
     measured claim rather than a hardcoded one — it holds for whatever the
-    fixture says, not only for the three rows spelled out above."""
+    fixture says, not only for the three rows spelled out above.
+
+    IT IS ALSO A CONDITIONAL CLAIM NOW, and the condition is worth stating: the
+    emitted coordinate is the body-centre anchor, and it equals the authored
+    x_mm/y_mm only for a footprint whose origin IS its body centre. That is true
+    of every footprint this fixture places and false of, for example, any
+    PinSocket. A future edit that gives this fixture a pin-1-origin footprint
+    must expect the anchor, not the position — see test_assembly_anchor.py."""
     board = _load()
     authored = {c["ref"]: c for c in board["components"]}
     compiled = _compiled(board)

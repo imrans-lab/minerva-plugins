@@ -797,6 +797,58 @@ class Placement:
         _typed(self.side, Side, "Placement.side")
 
 
+#: How a :class:`PhysicalPlacement` anchor was measured. Carried as data rather
+#: than inferred, so a preview, a manifest or a house can see WHICH of the
+#: footprint's own drawings answered "where is the middle of this part" — the
+#: three answers are not equally trustworthy and an order should never have to
+#: guess which one it got.
+ANCHOR_BASIS_FAB = "fab_outline"
+ANCHOR_BASIS_LANDS = "lands"
+ANCHOR_BASIS_ORIGIN = "footprint_origin"
+ANCHOR_BASES = (ANCHOR_BASIS_FAB, ANCHOR_BASIS_LANDS, ANCHOR_BASIS_ORIGIN)
+
+
+@dataclass(frozen=True)
+class PhysicalPlacement:
+    """ONE part an assembly house actually picks up and puts down.
+
+    A component is a DRAWING; this is a PART. The two coincide for almost every
+    component, and deliberately do not for a synthetic expansion — one drawn
+    socket standing for the two strips that get soldered — which is why the
+    house's row count is taken from here and never from the component list.
+
+    ``anchor`` is the coordinate a pick-and-place file carries: the centre of
+    the part's body, in BOARD millimetres, in the board's own Y-DOWN frame (the
+    CPL emitter negates Y at its own boundary). ``origin`` is the footprint
+    datum the same part is drawn against — the number that USED to be emitted
+    as the placement coordinate. Both are kept because the difference between
+    them is the whole content of "the placement position is not a centroid":
+    a consumer can say how far a part moved without re-deriving anything.
+
+    ``rotation_deg`` is already normalized into ``[0, 360)`` and ``side`` is the
+    parent's — an expansion places copies of one part on one side of one board.
+    """
+
+    ref: str
+    origin: Point
+    anchor: Point
+    rotation_deg: float
+    side: Side
+    anchor_basis: str
+
+    def __post_init__(self) -> None:
+        _nonempty(self.ref, "PhysicalPlacement.ref")
+        _point(self.origin, "PhysicalPlacement.origin")
+        _point(self.anchor, "PhysicalPlacement.anchor")
+        _finite(self.rotation_deg, "PhysicalPlacement.rotation_deg")
+        if not 0.0 <= self.rotation_deg < 360.0:
+            raise ValueError("PhysicalPlacement.rotation_deg must be in [0, 360)")
+        _typed(self.side, Side, "PhysicalPlacement.side")
+        if self.anchor_basis not in ANCHOR_BASES:
+            raise ValueError(
+                f"PhysicalPlacement.anchor_basis must be one of {ANCHOR_BASES}")
+
+
 @dataclass(frozen=True)
 class PlacedPad:
     id: str
@@ -895,6 +947,19 @@ class ResolvedComponent:
     #: default only because it follows the two above; the compiler always
     #: supplies it.
     assembly: "ResolvedAssembly | None" = None
+    #: THE PARTS, as opposed to the drawing: one entry per physically placed
+    #: part, each carrying the resolved body-centre anchor an assembly house is
+    #: told to put its nozzle on (``assembly_anchor.physical_placements``).
+    #: Ordinary components resolve to exactly one, under their own ref; a
+    #: component carrying an authored ``assembly.placements`` expansion resolves
+    #: to one per authored placement, with the expansion offset already composed
+    #: against this component's rotation and side.
+    #:
+    #: Resolved ONCE, here, for the same reason ``refdes`` is: the CPL, the BOM's
+    #: quantities, the assembly preview and the order manifest must not each
+    #: compose that transform and reach three different answers. Empty means the
+    #: compiler attached nothing, which the assembly emitters refuse by name.
+    physical_placements: tuple[PhysicalPlacement, ...] = ()
 
     def __post_init__(self) -> None:
         for field in ("id", "ref", "footprint_id"):
@@ -920,6 +985,11 @@ class ResolvedComponent:
             raise ValueError("placed pad component_id does not match component")
         if any(g.component_id != self.id for g in self.placed_graphics):
             raise ValueError("placed graphic component_id does not match component")
+        _tuple(self.physical_placements, "ResolvedComponent.physical_placements")
+        placement_refs = [item.ref for item in self.physical_placements]
+        if len(placement_refs) != len(set(placement_refs)):
+            raise ValueError(
+                "ResolvedComponent.physical_placements repeats a designator")
 
 
 @dataclass(frozen=True)

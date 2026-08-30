@@ -667,9 +667,14 @@ var ExportAssembly = ToolSpec{
 		"derived from ONE strict compilation of the board — the same compilation the " +
 		"gerbers come from — so a board that does not compile yields NO BOM and NO CPL: " +
 		"that refuses as kind \"assembly_not_compilable\" with a blocked_by list naming " +
-		"every component/footprint that stopped the compile. CPL rotation is " +
-		"emitted verbatim from the authored rotation_deg (KiCad-equivalent clockwise " +
-		"convention); CPL Y is the authored y_mm negated, X verbatim. Calls the worker's " +
+		"every component/footprint that stopped the compile. CPL coordinates are the " +
+		"resolved ASSEMBLY ANCHOR — the part's body-box centre, not the footprint " +
+		"origin x_mm/y_mm place — with Y negated and X verbatim, unmirrored on the " +
+		"bottom side; rotation is the composed placement angle, which reads as " +
+		"JLCPCB's counter-clockwise-positive convention in the emitted frame. A " +
+		"component authoring assembly.placements expands into one BOM quantity and " +
+		"one CPL row per authored placement, its offset composed against the parent's " +
+		"rotation and side. Calls the worker's " +
 		"assembly_bom then assembly_cpl methods over the same board+profile — whichever " +
 		"refuses first is the error this tool surfaces.",
 	InputSchema: json.RawMessage(`{

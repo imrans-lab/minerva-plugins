@@ -57,6 +57,16 @@ ROTATION CONVENTION — read before touching any rotation math here:
     upload flow is documented to accept a KiCad-generated position file
     as-is. So the emitter's job is to reproduce THAT number faithfully.
 
+    AND THAT IS ALREADY JLC's COUNTER-CLOCKWISE-POSITIVE CONVENTION, which is
+    not a coincidence and not a second decision: the angle is clockwise in a
+    Y-DOWN frame, and negating Y (which the COORDINATE FRAME section below
+    does to every row) conjugates a clockwise turn into a counter-clockwise
+    one. In the frame the CSV is actually written in, a part at rotation 90
+    has turned 90 degrees COUNTER-CLOCKWISE from its rotation-0 pose — on BOTH
+    sides of the board, because the bottom-side mirror cancels against that
+    same Y negation. Proven on real library geometry, rather than by this
+    argument, in ``tests/test_assembly_anchor.py``.
+
     NON-CLAIM (the trap the docket names explicitly): this is NOT the same
     thing as "the part will mount right-side-up in JLC's SMT feeder." JLC's
     OWN internal component-library images sometimes disagree with a
@@ -76,21 +86,39 @@ ROTATION CONVENTION — read before touching any rotation math here:
     IMPORT time, before a component ever reaches this module — so
     ``rotation_deg`` here is already KiCad-equivalent by the time we see it.)
 
-COORDINATE FRAME — MEASURED, NOT ASSUMED. CPL X is the resolved placement's
-X VERBATIM; CPL Y is its Y NEGATED. (``Placement.position`` is
-``(comp["x_mm"], comp["y_mm"])`` verbatim and ``Placement.rotation_deg`` is
-``float(rotation or 0.0)`` verbatim — compile_board threads both through
-unchanged — so reading them from the IR instead of the dict changes no emitted
-number.) This is proven
+ASSEMBLY ANCHOR — WHAT THE COORDINATE IS. A CPL row carries the PART's centre,
+not the drawing's datum. ``x_mm``/``y_mm`` place the FOOTPRINT ORIGIN, and where
+that origin sits on the part is a property of the footprint: measured over
+``pcb/library/footprints``, 14 of 39 put it on pin 1 and 18 resolve an anchor
+somewhere other than their origin, so emitting the placement position as a
+pick-and-place coordinate is wrong by up to half a package. Every row below
+therefore reads ``ResolvedComponent.physical_placements`` — the resolved,
+explicitly-based body-centre anchors ``assembly_anchor`` composes at compile
+time — and never ``Placement.position``. One consequence stated plainly, since
+it changed numbers a caller may have on file: the emitted coordinate of every
+part whose footprint origin differs from its body centre MOVED when that anchor
+landed; a part whose origin already IS its body centre (every chip-scale SMD
+footprint in the seed library) emits exactly what it emitted before.
+
+The same list is also what makes a SYNTHETIC EXPANSION real. One drawn
+component carrying ``assembly.placements`` stands for several soldered parts,
+and each contributes its own CPL row under its own authored designator and its
+own BOM quantity — the expansion offset already composed against the parent's
+rotation and side, once, by the compiler.
+
+COORDINATE FRAME — MEASURED, NOT ASSUMED. CPL X is the resolved anchor's
+X VERBATIM; CPL Y is its Y NEGATED. This is proven
 against KiCad itself, not inferred from a Y-down/Y-up label — full command,
 measured output table, and the byte-exact seal are in
 ``tests/test_assembly_outputs.py::test_cpl_y_matches_kicad_cli_position_file_oracle``
 (this runtime module deliberately does not name the dev/CI-only export tool
 here; see ``tests/test_kicad_cli_boundary.py`` — STANDING GUARD 2 — which
 forbids that in shipped worker code and is why the citation lives in the test
-instead). Summary of the finding: PosX matches authored ``x_mm`` exactly;
-PosY is the NEGATION of authored ``y_mm``; Rot matches authored
-``rotation_deg`` VERBATIM (confirming the ROTATION CONVENTION section above);
+instead). Summary of the finding: PosX matches the placed footprint
+ORIGIN's X exactly; PosY is the NEGATION of its Y; Rot matches authored
+``rotation_deg`` VERBATIM (confirming the ROTATION CONVENTION section above)
+— a finding about the FRAME, which the anchor above is expressed in and does
+not disturb;
 a bottom-side part's X is UNMIRRORED (the reference exporter only negates X
 for bottom parts under an opt-in flag, which the oracle run did NOT pass —
 the omission is the profile decision this module makes: match the tool's
@@ -234,26 +262,50 @@ def _check_identity(profile: HouseProfile, ref: str, assembly) -> None:
             f"emit a BOM/CPL row with a blank identity cell (part-identity contract)")
 
 
+def _physical_placements_of(component):
+    """The PARTS this component resolves to, or a NAMED refusal.
+
+    Same contract and same reason as :func:`_assembly_of`: the compiler attaches
+    at least one to every component it admits, so an empty tuple means an IR
+    built by something other than the compiler reached an order emitter. Read as
+    "this component places nothing" it would silently drop a part from the
+    order — including, for an expansion, every part but the one that shares the
+    component's own ref."""
+    placements = getattr(component, "physical_placements", ())
+    if not placements:
+        raise AssemblyBoardError(
+            f"component {component.ref!r} carries no resolved physical placements; "
+            f"assembly outputs are derived only from a strict compilation")
+    return placements
+
+
 def _emitting_components(board, profile: HouseProfile,
                          excluded: list[str] | None):
     """Every compiled component that contributes rows, paired with its resolved
-    assembly facts, in board order. A non-populated part (board furniture, or a
-    DNP) is RECORDED in ``excluded`` and skipped BEFORE the identity contract:
-    a fiducial has no MPN and must not be refused for lacking one."""
+    assembly facts and the PARTS it places, in board order. A non-populated part
+    (board furniture, or a DNP) is RECORDED in ``excluded`` and skipped BEFORE
+    the identity contract: a fiducial has no MPN and must not be refused for
+    lacking one.
+
+    ``excluded`` records the PHYSICAL refs, not the component ref: a
+    non-populated component that expands into several parts leaves several
+    designators out of the order, and naming only the drawing would under-report
+    what a house is not being sent."""
     for component in board.components:
         assembly = _assembly_of(component)
+        placements = _physical_placements_of(component)
         if not assembly.populate:
             if excluded is not None:
-                excluded.append(component.ref)
+                excluded.extend(item.ref for item in placements)
             continue
         _check_identity(profile, component.ref, assembly)
-        yield component, assembly
+        yield component, assembly, placements
 
 
 def _bom_rows(board, profile: HouseProfile,
               excluded: list[str] | None = None) -> list[BomRow]:
     groups: dict[tuple, dict] = {}
-    for component, assembly in _emitting_components(board, profile, excluded):
+    for component, assembly, placements in _emitting_components(board, profile, excluded):
         # The AUTHORED footprint string, not the IR's content-hash
         # footprint_id: the BOM's Footprint column names a part a purchaser
         # recognizes. (assembly.package is its intended eventual home per the
@@ -265,7 +317,11 @@ def _bom_rows(board, profile: HouseProfile,
             "refs": [], "value": component.value, "footprint": footprint,
             "mpn": assembly.mpn,
         })
-        grp["refs"].append(component.ref)
+        # ONE REF PER PART, not per drawing: a component carrying a synthetic
+        # expansion contributes each authored physical designator, so a grouped
+        # row's qty is the number of parts a house buys rather than the number
+        # of symbols the board draws.
+        grp["refs"].extend(item.ref for item in placements)
     rows = [
         BomRow(
             refs=tuple(sorted(g["refs"])), value=g["value"], footprint=g["footprint"],
@@ -280,24 +336,25 @@ def _bom_rows(board, profile: HouseProfile,
 def _cpl_rows(board, profile: HouseProfile,
               excluded: list[str] | None = None) -> list[CplRow]:
     rows: list[CplRow] = []
-    for component, assembly in _emitting_components(board, profile, excluded):
-        placement = component.placement
-        # Y NEGATED, X VERBATIM — see module docstring's COORDINATE FRAME
-        # section (the measured oracle citation lives in
-        # tests/test_assembly_outputs.py, not here — STANDING GUARD 2). X is
-        # NOT mirrored on the bottom side either (the reference exporter's
-        # default: its opt-in bottom-X-negate flag was NOT applied — the
-        # profile decision this module makes, documented at the point of use
-        # as instructed). Rotation is normalized into [0, 360) and otherwise
-        # emitted verbatim.
-        rows.append(CplRow(
-            ref=component.ref,
-            x_mm=float(placement.position[0]),
-            y_mm=-float(placement.position[1]),
-            rotation_deg=float(placement.rotation_deg) % 360.0,
-            side=placement.side.value,
-            mpn=assembly.mpn,
-        ))
+    for component, assembly, placements in _emitting_components(board, profile, excluded):
+        for physical in placements:
+            # THE ANCHOR, NOT THE POSITION — see the module docstring's ASSEMBLY
+            # ANCHOR section. Then Y NEGATED, X VERBATIM (COORDINATE FRAME
+            # section; the measured oracle citation lives in
+            # tests/test_assembly_outputs.py, not here — STANDING GUARD 2). X is
+            # NOT mirrored on the bottom side either (the reference exporter's
+            # default: its opt-in bottom-X-negate flag was NOT applied — the
+            # profile decision this module makes, documented at the point of use
+            # as instructed). Rotation arrives already normalized into [0, 360)
+            # and is otherwise the composed placement angle, verbatim.
+            rows.append(CplRow(
+                ref=physical.ref,
+                x_mm=float(physical.anchor[0]),
+                y_mm=-float(physical.anchor[1]),
+                rotation_deg=float(physical.rotation_deg),
+                side=physical.side.value,
+                mpn=assembly.mpn,
+            ))
     rows.sort(key=lambda r: r.ref)
     return rows
 

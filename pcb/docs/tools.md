@@ -1652,6 +1652,12 @@ calling both worker methods over the same board+profile, refusals (unknown
 house, missing part identity) surfaced verbatim via the same `isError`
 convention every other worker-backed tool uses.
 
+A CPL row's coordinate is the **assembly anchor** — the part's body-box centre,
+composed through its rotation and side — not the `x_mm`/`y_mm` that place the
+footprint origin, and a component authoring `assembly.placements` contributes
+one row per authored placement rather than one per drawing. See "The assembly
+anchor" in `docs/board-yaml.md`.
+
 ## Retired (superseded — NOT reimplemented)
 
 | Legacy tool | Replacement |

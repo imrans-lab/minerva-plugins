@@ -45,6 +45,7 @@ from typing import Iterable, Union
 from agent_router.layers import (CANON_TO_KICAD, canon_to_kicad,
                                  inner_layer_index, is_copper, kicad_to_canon)
 
+from . import assembly_anchor
 from . import assembly_spec
 from . import bless
 from . import board_graphics as board_graphics_mod
@@ -3100,16 +3101,17 @@ def compile_board(
             diags.error("invalid_component_assembly", str(exc), comp_ref)
             continue
 
+        placement = Placement(
+            position=(float(comp["x_mm"]), float(comp["y_mm"])),
+            rotation_deg=float(rotation or 0.0),
+            side=side,
+        )
         interned.setdefault(clean.content_id, clean)
         components.append(ResolvedComponent(
             id=component_id,
             ref=ref,
             footprint_id=clean.content_id,
-            placement=Placement(
-                position=(float(comp["x_mm"]), float(comp["y_mm"])),
-                rotation_deg=float(rotation or 0.0),
-                side=side,
-            ),
+            placement=placement,
             placed_pads=placed_pads,
             placed_graphics=placed_graphics,
             provenance=provenance,
@@ -3123,6 +3125,15 @@ def compile_board(
             # allowed to author one.
             refdes=refdes_anchor.component_reference_text(comp, clean),
             assembly=assembly,
+            # THE PARTS this drawing stands for, anchored on the same pass that
+            # places the copper: one entry per physically placed part, each
+            # carrying the body-centre coordinate an assembly house is told to
+            # centre its nozzle on. A synthetic expansion composes its authored
+            # offset against THIS component's rotation and side here, once, so
+            # the CPL, the BOM's quantities and a preview cannot each compose
+            # that transform and disagree (assembly_anchor).
+            physical_placements=assembly_anchor.physical_placements(
+                ref, placement, assembly, clean),
         ))
         for pad in clean.pads:
             resolved_pins.add((ref, pad.number))

@@ -566,9 +566,14 @@ it verbatim: every land, graphic and courtyard point is
 `geometry.PlacementTransform`). Nothing re-anchors it.
 
 Where that origin *sits on the part* is a property of the footprint, and the
-seed library is split down the middle — measured over
-`pcb/library/footprints/`, **14 of 35 footprints put their origin on pin 1 and
-21 do not**:
+seed library is split down the middle — re-measured over
+`pcb/library/footprints/` (39 footprints), **14 put their origin on pin 1 and
+25 do not**; separately, **18 resolve an assembly anchor somewhere other than
+their origin** (see "The assembly anchor" below). The two counts are not the
+same set: a single-pad fiducial or test point has pin 1 on the origin *and* its
+body centred there, while a couple of connectors are body-off-origin without
+having pin 1 there. (An earlier revision of this table said "14 of 35" — the
+count of files was wrong, the count of pin-1 origins was right.)
 
 | footprint | pin 1 relative to origin |
 |---|---|
@@ -588,7 +593,36 @@ is consulted at all.
 The practical consequence: **the placement position is not an assembly
 centroid**, and a pick-and-place file that emits it as one is wrong by half a
 package on most SMD parts. Deriving that centroid is the assembly exporter's
-job, not this field's.
+job, not this field's — and it does it: see "The assembly anchor" below.
+
+### The assembly anchor
+
+Every physically placed part carries a **resolved assembly anchor**: the centre
+of its body's bounding box, in board millimetres, composed through the
+component's own rotation and side. That is the coordinate the CPL emits, and it
+is deliberately not `x_mm`/`y_mm` — a house is told where to **centre** the part.
+
+The anchor is measured from the footprint on a three-step ladder, and **which
+step answered is recorded** on the placement (`anchor_basis`) rather than left
+to be inferred:
+
+| basis | meaning |
+|---|---|
+| `fab_outline` | the fab-layer (`F.Fab`/`B.Fab`) body outline — KiCad's own assembly drawing, and the right answer whenever a footprint has one. |
+| `lands` | every pad's box, for a footprint that draws no fab outline. |
+| `footprint_origin` | the footprint has neither — silk-only board furniture — so the anchor is the origin, **said out loud**. |
+
+Silk and the courtyard are deliberately **not** bases. Silk is drawn asymmetric
+on purpose (a cathode bar, a pin-1 dot): measured on this library, `D_SMA`'s
+silk box centre sits 3.05 mm from its fab box centre. A courtyard is a keep-out
+envelope drawn larger than the part, by different margins on different edges.
+
+`assembly.placements` composes on top of this: each authored `offset_mm` is
+resolved in the parent's own local frame — through the parent's rotation and
+the bottom-side mirror — and each expanded part gets its own anchor, its own
+composed rotation and its own CPL row. On the bottom side a per-placement
+`rotation_deg` **subtracts** from the parent's rather than adding, because the
+side mirror turns a rotation into its inverse.
 
 ## Trace angles (`design_rules.allowed_trace_angles_deg`)
 
