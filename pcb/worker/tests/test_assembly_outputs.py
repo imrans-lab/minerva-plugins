@@ -305,6 +305,46 @@ def test_absent_assembly_fields_fall_back_to_their_pre_block_sources():
     assert row.part_number == "C25804"          # the mpn
 
 
+def test_a_present_but_empty_column_is_emitted_blank_not_filled_from_its_fallback():
+    """FALLBACK IS KEYED ON ABSENCE, NOT ON TRUTH. A column falls back only
+    when the resolved field is ``None``; a field that is PRESENT AND EMPTY is a
+    blank cell the author asked for, and an ``or`` fallback cannot tell the two
+    apart — it prints the fallback into a column that was deliberately blanked.
+
+    Measured at the emitter's own boundary on a real compiled IR, because the
+    compile-time identity fold ahead of it maps an authored blank onto absent
+    (see the test below) and would otherwise hide which rule this pins. The
+    oracle is the rendered LINE: two empty cells, not "10k" and "R_0805"."""
+    import dataclasses
+
+    board = _compiled(_minimal(value="10k", footprint="R_0805", assembly={
+        "mpn": "RC0805FR-0710KL", "house_parts": {"jlcpcb": "C84376"}}))
+    component = board.components[0]
+    board = dataclasses.replace(board, components=(dataclasses.replace(
+        component, assembly=dataclasses.replace(
+            component.assembly, comment="", package="")),))
+
+    result = ao.build_bom(board, "jlc")
+    assert result.rows[0].comment == ""
+    assert result.rows[0].footprint == ""
+    assert next(iter(result.values())).splitlines()[1] == ",R1,,C84376"
+
+
+def test_an_authored_blank_is_folded_to_absent_before_the_emitter_sees_it():
+    """WHERE A YAML-LEVEL BLANK ACTUALLY GOES, stated so the emitter rule above
+    is not mistaken for an end-to-end promise. assembly_spec's identity
+    precedence takes the first NON-BLANK string across the block, the top-level
+    scalar and the properties mapping, so ``comment: ""`` reaches the IR as
+    ``None`` and the column falls back. The oracle is the rendered line."""
+    board = _compiled(_minimal(value="10k", footprint="R_0805", assembly={
+        "comment": "", "package": "", "mpn": "M1"}))
+    resolved = board.components[0].assembly
+    assert resolved.comment is None and resolved.package is None
+
+    result = ao.build_bom(board, "jlc")
+    assert next(iter(result.values())).splitlines()[1] == "10k,R1,R_0805,M1"
+
+
 def test_the_house_part_number_is_chosen_by_the_profile():
     """A board may carry several houses' catalogue numbers. Which one is
     ordered against is the SELECTED profile's, read under its own
@@ -359,6 +399,55 @@ def test_bom_different_mpn_same_footprint_value_are_separate_rows():
     assert len(result.rows) == 3
     refs = {row.refs for row in result.rows}
     assert ("R1",) in refs and ("R2",) in refs
+
+
+def _pair(first_assembly: dict, second_assembly: dict) -> dict:
+    """A two-component board that compiles, both parts identical in every
+    authored field except the assembly block each carries."""
+    board = _minimal()
+    template = board["components"][0]
+    board["components"] = [
+        dict(template, ref="R1", x_mm=5.0, assembly=first_assembly),
+        dict(template, ref="R2", x_mm=12.0, assembly=second_assembly),
+    ]
+    return board
+
+
+def test_two_refs_with_different_mpn_never_share_a_row_that_reports_one_of_them():
+    """A GROUPED ROW ASSERTS ITS mpn OF EVERY REF ON IT. R1 and R2 print the
+    same three cells — same comment, same package, same house catalogue number,
+    which is what actually gets ordered — but name DIFFERENT manufacturer
+    parts. Merging them leaves one row carrying one component's mpn for both
+    designators, and a caller reconciling the BOM against a distributor quote
+    is then handed a part number that is wrong for R2 with nothing in the row
+    to say so. The grouping key therefore covers mpn, not only the emitted
+    cells.
+
+    THE ORACLE IS WHAT THE ROWS REPORT, not only what the CSV renders: the
+    house number is identical on both lines, so a CSV-only assertion would pass
+    on the merged row too."""
+    result = ao.build_bom(_compiled(_pair(
+        {"mpn": "RC0805FR-0710KL", "package": "0805", "comment": "RES 10k",
+         "house_parts": {"jlcpcb": "C84376"}},
+        {"mpn": "ERJ6ENF1002V", "package": "0805", "comment": "RES 10k",
+         "house_parts": {"jlcpcb": "C84376"}})), "jlc")
+
+    reported = {row.refs: row.mpn for row in result.rows}
+    assert reported == {("R1",): "RC0805FR-0710KL", ("R2",): "ERJ6ENF1002V"}
+    assert all(row.qty == 1 for row in result.rows)
+
+
+def test_one_mpn_across_both_refs_still_groups_into_a_single_row():
+    """The other side of the same key: mpn splits a row only where the
+    components disagree about it. Two parts that agree on everything the row
+    asserts stay ONE line with both designators, so the wider key did not turn
+    every board into one row per component."""
+    block = {"mpn": "RC0805FR-0710KL", "package": "0805", "comment": "RES 10k",
+             "house_parts": {"jlcpcb": "C84376"}}
+    result = ao.build_bom(_compiled(_pair(dict(block), dict(block))), "jlc")
+    assert [(row.refs, row.mpn, row.qty) for row in result.rows] == [
+        (("R1", "R2"), "RC0805FR-0710KL", 2)]
+    assert next(iter(result.values())).splitlines()[1] == 'RES 10k,"R1,R2",0805,C84376'
 
 
 @pytest.mark.parametrize("key,bad", [("value", 10), ("footprint", 12345)])

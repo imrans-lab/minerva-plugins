@@ -220,7 +220,12 @@ class BomRow:
     a renderer never re-decides what a column means and two renderers cannot
     decide differently. ``mpn`` rides alongside as the manufacturer's own
     number: it is what ``part_number`` falls back to, and a caller comparing an
-    order against a distributor quote needs both."""
+    order against a distributor quote needs both.
+
+    ``mpn`` DESCRIBES EVERY REF ON THE LINE, because the grouping key in
+    :func:`_walk` covers it. A row therefore never reports a part number that
+    is true of only some of its designators — the failure a reconciler cannot
+    detect and the reason the row does not simply carry the first component's."""
 
     refs: tuple[str, ...]
     comment: str
@@ -329,19 +334,27 @@ def _walk(board, profile: HouseProfile):
         # manufacturer's part number. The AUTHORED footprint string is used,
         # never the IR's content-hash footprint_id, because this column names a
         # part a purchaser recognizes.
-        comment = assembly.comment or component.value
-        footprint = assembly.package or assembly.footprint_ref
-        part_number = dict(assembly.house_parts).get(profile.house_part_id) or assembly.mpn
+        #
+        # FALLBACK ON ABSENCE, NOT ON FALSITY. Each test is ``is None``, never
+        # ``or``: a field that is PRESENT AND EMPTY is an authored blank cell,
+        # and ``or`` cannot tell it from an absent one — it would print the
+        # fallback into a column the author deliberately blanked.
+        comment = component.value if assembly.comment is None else assembly.comment
+        footprint = (assembly.footprint_ref if assembly.package is None
+                     else assembly.package)
+        house_number = dict(assembly.house_parts).get(profile.house_part_id)
+        part_number = assembly.mpn if house_number is None else house_number
 
-        # BOM GROUPING KEY = THE COMPLETE EMITTED IDENTITY, i.e. every cell of
-        # the rendered row except the Designator list itself. Grouping on a
-        # narrower key (the part number alone) would merge two rows a house
-        # reads as different parts; grouping on a wider one would split a row
-        # over a difference the file never carries. It is therefore built from
-        # the RESOLVED columns above, not the authored fields behind them: two
-        # components that print identically are one line whichever field each
-        # authored it in.
-        key = (footprint, comment, part_number or "")
+        # BOM GROUPING KEY = EVERYTHING THE ROW ASSERTS ABOUT ALL OF ITS REFS:
+        # every cell of the rendered row except the Designator list, PLUS the
+        # ``mpn`` the row carries beside those cells. Grouping on a narrower key
+        # (the part number alone) would merge two rows a house reads as
+        # different parts; grouping on a key narrower than what the ROW reports
+        # lets one line report one component's mpn for refs it does not
+        # describe. The emitted cells come from the RESOLVED columns above, not
+        # the authored fields behind them, so two components that print
+        # identically are one line whichever field each authored it in.
+        key = (footprint, comment, part_number or "", assembly.mpn or "")
         grp = groups.setdefault(key, {
             "refs": [], "comment": comment, "footprint": footprint,
             "part_number": part_number, "mpn": assembly.mpn,
