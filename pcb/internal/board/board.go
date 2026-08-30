@@ -302,8 +302,12 @@ type DesignRules struct {
 }
 
 // Component is a placed part. Ref is the reference designator (legacy/
-// pcb-architect `id`). Position is the footprint origin (pin-1 location,
-// KiCAD convention) — NOT the geometric centre.
+// pcb-architect `id`). Position is the footprint's OWN origin — the datum the
+// `.kicad_mod` places its pads relative to, applied verbatim by the compiler's
+// PlacementTransform — NOT the geometric centre and NOT necessarily pin 1. It
+// coincides with pin 1 only in footprints authored that way (most through-hole
+// connectors and DIPs); KiCad's SMD chip footprints put it at the body centre.
+// See docs/board-yaml.md "Where x_mm / y_mm actually put a footprint".
 type Component struct {
 	Ref         string  `json:"ref" yaml:"ref"`
 	Footprint   string  `json:"footprint" yaml:"footprint"`
@@ -314,15 +318,17 @@ type Component struct {
 	Layer       string  `json:"layer,omitempty" yaml:"layer,omitempty"`
 	Pins        []Pin   `json:"pins,omitempty" yaml:"pins,omitempty"`
 
-	// Assembly marks board FURNITURE (fiducials, silk logos): "exclude" keeps
-	// the component out of BOM/CPL outputs without tripping the part-identity
-	// contract (epoch CPN1, docket 019fe2fb07f8). First-classed rather than
-	// parked in Extra for the same reason PadWidthMM/PadHeightMM were promoted
-	// (see Pin below): a SEMANTIC field a consumer branches on deserves a
-	// typed home and a validation site (Validate refuses any non-"exclude"
-	// value), not an untyped ride-along whose misspelling travels silently.
-	// Empty means "assembled normally".
-	Assembly string `json:"assembly,omitempty" yaml:"assembly,omitempty"`
+	// Assembly is what an assembly house has to buy and place for this
+	// component: populate/DNP, part identity, house catalogue numbers, paste
+	// policy, and the authored designators of any synthetic expansion. Nil
+	// means nothing was authored, which is "populated, identity unstated" —
+	// the state every board that predates the block is in.
+	//
+	// The field was originally a bare string carrying the single token
+	// "exclude" (board furniture: fiducials, silk logos). That scalar is still
+	// accepted and MIGRATED at decode into the structured non-populated state,
+	// so only one shape reaches any reader. See assembly.go.
+	Assembly *ComponentAssembly `json:"assembly,omitempty" yaml:"assembly,omitempty"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }

@@ -309,55 +309,79 @@ func TestMalformedYAMLReturnsError(t *testing.T) {
 	}
 }
 
-// TestComponentAssemblyExcludeRoundTripsAndValidates covers the epoch-CPN1
-// furniture flag (docket 019fe2fb07f8): Component.Assembly survives both
-// serialization boundaries as a TYPED field, "" and "exclude" validate, and a
-// present unrecognized token refuses with invalid_component — mirroring the
-// worker's assembly_outputs._is_assembly_excluded so a typo never travels as
-// "not excluded".
-func TestComponentAssemblyExcludeRoundTripsAndValidates(t *testing.T) {
-	b := &Board{
-		Version: 1, Name: "furniture", WidthMM: 20, HeightMM: 15,
-		Components: []Component{
-			{Ref: "C1", Footprint: "C_0805", XMM: 5, YMM: 5},
-			{Ref: "FID1", Footprint: "FID", XMM: 2, YMM: 2, Assembly: "exclude"},
-		},
+// TestLegacyAssemblyScalarMigratesAndStillRoundTrips is the "loads exactly as
+// it does today" half of the schema change: a board authored with the pre-block
+// `assembly: exclude` scalar must keep loading, keep meaning "no BOM/CPL row",
+// and reach every reader in the ONE structured shape — through BOTH codecs,
+// since the panel forwards over JSON what a YAML load produced.
+//
+// It also pins the fail-closed half: a typo'd scalar refuses rather than
+// travelling as "not excluded" and landing a fiducial in a BOM.
+func TestLegacyAssemblyScalarMigratesAndStillRoundTrips(t *testing.T) {
+	const src = `version: 1
+name: furniture
+width_mm: 20
+height_mm: 15
+components:
+  - {ref: C1, footprint: C_0805, x_mm: 5, y_mm: 5}
+  - {ref: FID1, footprint: FID, x_mm: 2, y_mm: 2, assembly: exclude}
+`
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("legacy scalar must still load: %v", err)
 	}
 	if err := Validate(b); err != nil {
-		t.Fatalf("exclude should validate: %v", err)
+		t.Fatalf("migrated legacy board must validate: %v", err)
+	}
+	if b.Components[0].Assembly != nil {
+		t.Fatalf("a component with no assembly key must stay nil, got %+v", b.Components[0].Assembly)
+	}
+	if !b.Components[0].Assembly.Populated() {
+		t.Fatalf("a component with no assembly block is populated")
+	}
+	fid := b.Components[1].Assembly
+	if fid == nil || fid.Populate == nil || *fid.Populate {
+		t.Fatalf("scalar exclude must migrate to populate:false, got %+v", fid)
+	}
+	if fid.Populated() {
+		t.Fatalf("migrated furniture must not report as populated")
 	}
 
-	// YAML round trip keeps the field.
+	// The migration is what gets written back: re-emitted structured, and the
+	// structured form loads to the same state.
 	y, err := MarshalYAML(b)
 	if err != nil {
 		t.Fatalf("MarshalYAML: %v", err)
 	}
+	if strings.Contains(string(y), "assembly: exclude") {
+		t.Fatalf("migrated board re-emitted the legacy scalar:\n%s", string(y))
+	}
 	back, err := UnmarshalYAML(y)
 	if err != nil {
-		t.Fatalf("UnmarshalYAML: %v", err)
+		t.Fatalf("re-load of the migrated document: %v", err)
 	}
-	if back.Components[1].Assembly != "exclude" {
-		t.Fatalf("YAML dropped Assembly: %+v", back.Components[1])
+	if back.Components[1].Assembly.Populated() {
+		t.Fatalf("re-load lost the migrated populate:false")
 	}
 
-	// JSON round trip keeps the field (the IPC boundary).
-	j, err := json.Marshal(b.Components[1])
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
+	// The JSON/IPC boundary migrates the same scalar the same way.
 	var c Component
-	if err := json.Unmarshal(j, &c); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
+	if err := json.Unmarshal([]byte(`{"ref":"FID1","assembly":"exclude"}`), &c); err != nil {
+		t.Fatalf("JSON legacy scalar: %v", err)
 	}
-	if c.Assembly != "exclude" {
-		t.Fatalf("JSON dropped Assembly: %s", string(j))
+	if c.Assembly.Populated() {
+		t.Fatalf("JSON scalar exclude did not migrate: %+v", c.Assembly)
 	}
 
-	// A typo is invalid_component, never silently "not excluded".
-	b.Components[1].Assembly = "exlcude"
-	err = Validate(b)
-	if err == nil || !strings.Contains(err.Error(), "invalid_component") {
-		t.Fatalf("typo token must refuse with invalid_component, got %v", err)
+	// A typo is a refusal on both codecs, never "not excluded".
+	if _, err := UnmarshalYAML([]byte(strings.Replace(src, "exclude", "exlcude", 1))); err == nil ||
+		!strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("YAML typo token must refuse with invalid_component_assembly, got %v", err)
+	}
+	var typo Component
+	if err := json.Unmarshal([]byte(`{"ref":"FID1","assembly":"exlcude"}`), &typo); err == nil ||
+		!strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("JSON typo token must refuse with invalid_component_assembly, got %v", err)
 	}
 }
 

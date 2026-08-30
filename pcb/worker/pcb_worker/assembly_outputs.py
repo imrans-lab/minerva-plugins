@@ -175,21 +175,25 @@ def _resolve_profile(profile_id) -> HouseProfile:
 def _component_property(comp: dict, key: str) -> str | None:
     """Read an identity field off a component's authored dict entry.
 
-    Checked in two places, both tolerant/optional passthrough per the
-    canonical board-yaml contract (docs/board-yaml.md Extra fields): a
-    top-level scalar (``comp["mpn"]``) or a nested ``properties`` mapping
-    (``comp["properties"]["mpn"]``) — the latter so a future structured
-    properties bag (part-identity contract item 019f761fe518) is honored
-    without a second reader needing to be written.
+    Checked in THREE places, in precedence order — the first non-blank string
+    wins:
+
+      1. the structured ``assembly`` block (``comp["assembly"]["mpn"]``), the
+         canonical home for part identity (docs/board-yaml.md "Assembly");
+      2. a top-level scalar (``comp["mpn"]``), the pre-block authoring form;
+      3. a nested ``properties`` mapping (``comp["properties"]["mpn"]``), so a
+         structured properties bag is honored without a second reader.
+
+    The block is checked FIRST because it is the explicit, typed authority;
+    ordering it above the legacy scalars cannot change any board that predates
+    the block, since none of them carry one.
     """
-    direct = comp.get(key)
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
-    props = comp.get("properties")
-    if isinstance(props, dict):
-        nested = props.get(key)
-        if isinstance(nested, str) and nested.strip():
-            return nested.strip()
+    for source in (comp.get("assembly"), comp, comp.get("properties")):
+        if not isinstance(source, dict):
+            continue
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 
@@ -257,23 +261,42 @@ def _resolve_side(raw_layer, ref: str) -> str:
 
 
 def _is_assembly_excluded(comp: dict, ref: str) -> bool:
-    """A component authoring ``assembly: exclude`` is board FURNITURE — a
-    fiducial, a silk logo — physically on the board but never picked, placed,
-    or purchased, so it belongs in NO BOM/CPL row and must not trip the
-    part-identity contract (epoch CPN1, docket 019fe2fb07f8).
+    """Whether ``comp`` contributes NO BOM/CPL row: board furniture (a fiducial,
+    a silk logo) or a part marked do-not-populate. Either way it is physically
+    on the board but never picked, placed, or purchased, so it belongs in no row
+    and must not trip the part-identity contract (epoch CPN1, docket
+    019fe2fb07f8).
 
-    Fail-closed on the value: ``exclude`` is the only recognized token, and a
-    present-but-unrecognized value REFUSES rather than being read as "not
-    excluded" — a typo (``exlcude``) silently landing a fiducial in the BOM
-    with a fabricated identity requirement is exactly the quiet wrong-answer
-    this module's every other refusal exists to prevent."""
+    Two authored forms, one answer — the Go codec migrates the legacy scalar at
+    decode (internal/board/assembly.go), but this module reads the RAW board
+    dict, which may arrive by a path that never crossed that codec, so both are
+    read here:
+
+      * ``assembly: exclude`` — the pre-block scalar;
+      * ``assembly: {populate: false, ...}`` — the structured block.
+
+    Fail-closed on the value in both forms: a scalar other than ``exclude``, or
+    a non-boolean ``populate``, REFUSES rather than being read as "not
+    excluded". A typo (``exlcude``) silently landing a fiducial in the BOM with
+    a fabricated identity requirement is exactly the quiet wrong answer this
+    module's every other refusal exists to prevent."""
     raw = comp.get("assembly")
     if raw is None:
         return False
     if raw == "exclude":
         return True
+    if isinstance(raw, dict):
+        populate = raw.get("populate")
+        if populate is None:
+            return False
+        if isinstance(populate, bool):
+            return not populate
+        raise AssemblyBoardError(
+            f"component {ref!r} assembly.populate must be a boolean when "
+            f"present, got {populate!r}")
     raise AssemblyBoardError(
-        f"component {ref!r} assembly must be 'exclude' when present, got {raw!r}")
+        f"component {ref!r} assembly must be a mapping or the legacy 'exclude' "
+        f"scalar, got {raw!r}")
 
 
 def _check_identity(profile: HouseProfile, ref: str, comp: dict) -> None:

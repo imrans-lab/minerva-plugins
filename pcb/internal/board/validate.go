@@ -81,17 +81,18 @@ func Validate(b *Board) error {
 	if err := validateDesignRules(b); err != nil {
 		return err
 	}
-	// Component.Assembly is a closed token set: "" (assembled normally) or
-	// "exclude" (board furniture, no BOM/CPL row — epoch CPN1). A present
-	// unrecognized value refuses HERE, mirroring the worker's
-	// assembly_outputs._is_assembly_excluded, so a typo ("exlcude") never
-	// travels as "not excluded" and lands furniture in a BOM.
+	// Component.Assembly: closed token sets and authored-designator hygiene.
+	// The SHAPE of the block is already settled by its codecs (assembly.go),
+	// which refuse an unknown key and migrate the legacy "exclude" scalar; what
+	// is left to judge is the values — the paste token, finite placement
+	// transforms, and the rule that no two physical parts share a designator.
 	for i := range b.Components {
-		if a := b.Components[i].Assembly; a != "" && a != "exclude" {
-			return fmt.Errorf(
-				"invalid_component: components[%d] (%s) assembly must be \"exclude\" when present, got %q",
-				i, b.Components[i].Ref, a)
+		if err := validateComponentAssembly(&b.Components[i], i); err != nil {
+			return err
 		}
+	}
+	if err := validatePlacementRefUniqueness(b); err != nil {
+		return err
 	}
 	if err := validateFabricationStage(b); err != nil {
 		return err

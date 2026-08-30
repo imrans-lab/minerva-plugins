@@ -545,3 +545,13 @@ test_refdes_anchor_document_load.gd assertions=12 real-worker
 # Counted by hand from the check() call sites: 4 + 4 + 6 + 3 + 5, none inside
 # a loop.
 test_pcb_note_hooks.gd assertions=22
+
+# The per-component `assembly` block survives a promote. The panel does not
+# model it — it rides PcbComponent.canonical_extra, the verbatim passthrough —
+# so the suite drives the passthrough (board dict, duplicate, undo codec), then
+# the REAL worker over pcb.serialize -> pcb.deserialize, checking every field
+# and every authored placement ref on the board that comes back, plus the
+# legacy `assembly: exclude` scalar arriving migrated and a board with no
+# assembly data arriving with no assembly key.
+# Counted by hand from the check() call sites: 6 + 16 + 3, none inside a loop.
+test_assembly_schema_roundtrip.gd assertions=25 real-worker

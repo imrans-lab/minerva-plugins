@@ -41,6 +41,13 @@ pin (`path`/`sha256`/`size_bytes`) plus provenance: `source_kind`
 `source_ref`, `license`, `retrieved_at`, `layer`, and reserved slots
 (`original_source_path`, `converter_version`, `model3d_ref`, `assembly`
 with MPN/distributor part numbers/package/orientation convention, `bless`).
+
+An entry's `assembly` slot is **provenance about the footprint** — which part
+this geometry was drawn and blessed for — and nothing reads it into a board.
+The **board YAML's own `assembly` block is the sole authority** for what gets
+bought and placed, and a lock value is never a fallback for a missing board
+value; see "Assembly (`assembly`)" in `docs/board-yaml.md` for the precedence
+rule and what happens when the two disagree.
 `pcb_worker.footprints.load_lock_document()` is the one loader: it accepts a
 v1 flat file read-only (normalized, `schema_version: 1`) and refuses anything
 else fail-closed. The census test

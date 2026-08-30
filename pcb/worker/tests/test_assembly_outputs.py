@@ -355,7 +355,7 @@ def test_neither_output_mentions_paste():
 
 
 # ---------------------------------------------------------------------------
-# assembly: exclude — board furniture (epoch CPN1, docket 019fe2fb07f8)
+# The assembly block — board furniture and do-not-populate
 # ---------------------------------------------------------------------------
 
 
@@ -404,10 +404,75 @@ def test_unrecognized_assembly_value_is_named_refusal():
     (that lands a fiducial in the BOM with a fabricated identity demand)."""
     board = _furniture_board()
     board["components"][1]["assembly"] = "exlcude"
-    with pytest.raises(ao.AssemblyBoardError, match="assembly must be 'exclude'"):
+    with pytest.raises(ao.AssemblyBoardError, match="legacy 'exclude' scalar"):
         ao.build_bom(board, "jlc")
-    with pytest.raises(ao.AssemblyBoardError, match="assembly must be 'exclude'"):
+    with pytest.raises(ao.AssemblyBoardError, match="legacy 'exclude' scalar"):
         ao.build_cpl(board, "jlc")
+
+
+def test_structured_block_reads_the_same_as_the_legacy_scalar():
+    """The Go codec migrates `assembly: exclude` to `{populate: false}`, so a
+    promoted board reaches this module in the STRUCTURED shape. Both forms must
+    produce identical outputs — otherwise the migration silently changes what
+    gets ordered. The board here is _furniture_board with its two scalars
+    rewritten; every assertion is the scalar tests' assertion."""
+    board = _furniture_board()
+    for comp in board["components"][1:]:
+        comp["assembly"] = {"populate": False}
+    bom = ao.build_bom(board, "jlc")
+    assert [r.refs for r in bom.rows] == [("C1",)]
+    assert bom.excluded_refs == ("LOGO1", "FID1")
+    cpl = ao.build_cpl(board, "jlc")
+    assert [r.ref for r in cpl.rows] == ["C1"]
+    assert cpl.excluded_refs == ("LOGO1", "FID1")
+
+
+def test_populated_block_does_not_exclude_and_carries_identity():
+    """A block that says populate:true is NOT an exclusion, and its `mpn` is
+    the component's identity — the block is where part identity lives, so a
+    board that moved its mpn there must not read as missing one."""
+    board = {"name": "populated", "components": [
+        {"ref": "R1", "footprint": "R_0805", "value": "10k",
+         "x_mm": 5, "y_mm": 5, "layer": "top",
+         "assembly": {"populate": True, "mpn": "RC0805FR-0710KL",
+                      "manufacturer": "Yageo", "paste": "auto"}},
+    ]}
+    bom = ao.build_bom(board, "jlc")
+    assert [r.refs for r in bom.rows] == [("R1",)]
+    assert bom.rows[0].mpn == "RC0805FR-0710KL"
+    assert bom.excluded_refs == ()
+    assert ao.build_cpl(board, "jlc").rows[0].mpn == "RC0805FR-0710KL"
+
+
+def test_block_mpn_wins_over_the_legacy_top_level_scalar():
+    """Precedence, stated once and pinned here: the structured block is the
+    explicit authority, the top-level scalar is the pre-block form."""
+    board = {"name": "both", "components": [
+        {"ref": "R1", "footprint": "R_0805", "value": "10k",
+         "x_mm": 5, "y_mm": 5, "layer": "top", "mpn": "OLD-PART",
+         "assembly": {"mpn": "NEW-PART"}},
+    ]}
+    assert ao.build_bom(board, "jlc").rows[0].mpn == "NEW-PART"
+
+
+def test_empty_block_is_not_an_exclusion_and_still_needs_identity():
+    """An `assembly: {}` block states nothing: the component is populated, and
+    the identity contract applies to it in full."""
+    board = {"name": "empty-block", "components": [
+        {"ref": "R1", "footprint": "R_0805", "value": "10k",
+         "x_mm": 5, "y_mm": 5, "layer": "top", "assembly": {}},
+    ]}
+    with pytest.raises(ao.AssemblyIdentityError, match="R1"):
+        ao.build_bom(board, "jlc")
+
+
+def test_non_boolean_populate_is_a_named_refusal():
+    """`populate: "false"` (a string) must not be read as truthy-and-populated:
+    the one thing this module never does is guess."""
+    board = _furniture_board()
+    board["components"][1]["assembly"] = {"populate": "false"}
+    with pytest.raises(ao.AssemblyBoardError, match="populate must be a boolean"):
+        ao.build_bom(board, "jlc")
 
 
 def test_no_exclusions_keeps_side_channel_empty():

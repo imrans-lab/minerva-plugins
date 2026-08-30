@@ -40,8 +40,9 @@ components:
   - ref: U1                    # reference designator
     footprint: Package_DIP:DIP-6_W7.62mm_Socket   # KiCAD footprint id, or a seed alias
     value: NE555               # optional
-    x_mm: 20                   # footprint origin (pin-1 location, KiCAD convention)
-    y_mm: 12
+    x_mm: 20                   # the FOOTPRINT'S OWN origin — see "Where x_mm /
+    y_mm: 12                   # y_mm actually put a footprint" below. NOT the
+                               # body centre, and not always pin 1.
     rotation_deg: 90
     layer: top
     symbol: Device:NE555P      # OPTIONAL, unmodeled — carried in Extra (see below);
@@ -454,6 +455,132 @@ round-trips as `mounting_holes` and its holes get uniform id-minting + structura
 validation — the aliases no longer bypass the v2 identity/validation gate (finding
 `019f8b7fb07e` comment 689).
 
+## Assembly (`assembly`)
+
+What an assembly house has to **buy and place** for one component. Optional, and
+per-component: a board mid-layout has chosen no parts yet and must still load,
+serialize, route and fabricate. What an assembly EXPORT requires is a separate
+gate that refuses by name — this block's job is to carry the author's answer
+losslessly, not to demand one.
+
+```yaml
+components:
+  - ref: U2
+    x_mm: 10
+    y_mm: 10
+    assembly:
+      populate: true                     # false = DNP (see below)
+      manufacturer: Yageo
+      mpn: RC0805FR-0710KL
+      package: 0805                      # the BOM's Footprint/package column
+      comment: 10k 1% 1/8W               # the BOM's Comment column
+      house_parts: {jlcpcb: C84376}      # house id -> that house's catalogue number
+      paste: auto                        # auto | include | exclude
+  - ref: J1S
+    x_mm: 30
+    y_mm: 10
+    assembly:
+      mpn: PPTC071LFBN-RC
+      placements:                        # one drawn part, two soldered parts
+        - {ref: J1S_A, offset_mm: {x: 0, y: 0}, rotation_deg: 0}
+        - {ref: J1S_B, offset_mm: {x: 22.86, y: 0}, rotation_deg: 0}
+```
+
+| field | meaning |
+|---|---|
+| `populate` | `false` marks the part **do-not-populate**: it stays in the gerbers (its lands are still etched) and leaves **both** assembly CSVs, logged by ref. Absent means populated. |
+| `manufacturer` / `mpn` | the orderable part's identity. |
+| `package` | the package name an assembly BOM prints, independent of the footprint id the board routes against. |
+| `comment` | the BOM's human-facing description column. |
+| `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. |
+| `paste` | `auto` (the default) lets the compiler decide from the land type; `include` / `exclude` is the author overriding it. |
+| `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. |
+
+**Unknown keys inside `assembly` are REFUSED**, not preserved — the opposite of
+the board's general Extra-passthrough rule (see "Losslessness & the warnings
+list"). This block is the only source of part identity for an order, so `mpm:
+C123` silently vanishing and resurfacing later as "missing mpn", or a mistyped
+`offset_mm` quietly placing a part at its parent's origin, is exactly the quiet
+wrong answer the order path exists to refuse. Both codecs enforce it
+(`internal/board/assembly.go`).
+
+### Expansion refs are AUTHORED
+
+`placements` exists for one drawn component that stands for several identical
+physical parts — a socket strip drawn once and soldered twice. Each entry's
+`ref` is the designator that part is actually placed under, and it is
+**authored**: stable across exports, and unique board-wide. An exporter that
+invented these would rename a part between two orders of the same design, and
+`Validate` refuses a board where two physical parts would share one designator
+(`duplicate_assembly_designator`). `offset_mm` is measured in the parent
+component's own frame, before the parent's rotation and side are applied.
+
+### The legacy `assembly: exclude` scalar
+
+The block began as a bare scalar, `assembly: exclude`, marking board
+**furniture** (a fiducial, a silk logo) that must never reach a BOM or CPL row.
+Boards in the field still carry it. **Both codecs accept it and migrate it on
+the spot** to the structured non-populated state:
+
+```
+assembly: exclude     ==>     assembly: {populate: false}
+```
+
+so exactly one shape reaches every reader and no consumer branches on the
+authored form. A migrated board re-emits in the structured form the next time it
+is serialized; that rewrite **is** the migration. A scalar other than `exclude`
+refuses — a typo reading as "not excluded" would land a fiducial in a BOM with a
+fabricated part number.
+
+### Precedence: board YAML wins over the footprint lock
+
+The footprint lock (`pcb/library/footprints.lock.json`) carries its own
+`assembly` block per entry — `mpn`, `dist_part_numbers`, `package`,
+`orientation_convention`. **That block is PROVENANCE ABOUT THE FOOTPRINT, not an
+assertion about any board that places it**: it records which part the geometry
+was drawn and blessed for, and it rides the bless report so a reviewer sees the
+identity the lock will carry.
+
+**The board YAML is the sole authority for a board's assembly data.** No
+compiler, exporter or validator reads a lock's assembly fields into a board, and
+a lock value is never a fallback for a missing board value — a populated
+component with no identity is a **named refusal**, not a silent library lookup.
+Where the two disagree there is nothing to reconcile; the lock is a note about
+the drawing, the YAML is the order.
+
+### Where `x_mm` / `y_mm` actually put a footprint
+
+A component's `x_mm` / `y_mm` place the **footprint's own origin** — the datum
+the `.kicad_mod` states its pad `(at …)` offsets relative to. Resolution applies
+it verbatim: every land, graphic and courtyard point is
+`origin + rotate(local_offset)` (`compile_board._place_component` via
+`geometry.PlacementTransform`). Nothing re-anchors it.
+
+Where that origin *sits on the part* is a property of the footprint, and the
+seed library is split down the middle — measured over
+`pcb/library/footprints/`, **14 of 35 footprints put their origin on pin 1 and
+21 do not**:
+
+| footprint | pin 1 relative to origin |
+|---|---|
+| `Package_DIP:DIP-6_W7.62mm_Socket` | `(0, 0)` — origin **is** pin 1 |
+| `Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical` | `(0, 0)` — origin **is** pin 1 |
+| `Resistor_SMD:R_0805_2012Metric` | `(-0.9125, 0)` — origin is the **body centre** |
+| `Package_TO_SOT_SMD:SOT-23` | `(-0.9375, -0.95)` — origin is the **body centre** |
+| `Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm` | `(-1.4625, -0.75)` — origin is the **body centre** |
+
+So "the origin is pin 1" — which earlier revisions of this document asserted
+twice — is **true only of KiCad's through-hole connector and DIP families**, and
+false for every SMD chip footprint here. Under FULL geometry authority (a
+component carrying its own `pads` key, see "Geometry authority") the origin is
+whatever datum the board author wrote those pad offsets against, and no library
+is consulted at all.
+
+The practical consequence: **the placement position is not an assembly
+centroid**, and a pick-and-place file that emits it as one is wrong by half a
+package on most SMD parts. Deriving that centroid is the assembly exporter's
+job, not this field's.
+
 ## Trace angles (`design_rules.allowed_trace_angles_deg`)
 
 The directions this board's traces are allowed to run in. **Optional, and
@@ -820,7 +947,7 @@ importer (`board.ImportMinpcb`) applies this and returns a warnings list.
 | `layers`                                    | `layers`                        | copied as-is; must satisfy the stack rules in "Layer stack" |
 | `components` (`id`→object **map**)          | `components` (**list**, sorted by id) | deterministic order |
 | component `id`                              | `ref`                           | reference designator |
-| component `position.{x,y}`                  | `x_mm` / `y_mm`                 | origin = pin 1 |
+| component `position.{x,y}`                  | `x_mm` / `y_mm`                 | the footprint's own origin — see "Where x_mm / y_mm actually put a footprint" |
 | component `rotation`                        | `rotation_deg`                  | |
 | component `properties.value`               | `value`                         | |
 | component `pins` (`name`→`{x,y}` map)       | `pins` (list of `{number,x_mm,y_mm}`) | key → `number` |
