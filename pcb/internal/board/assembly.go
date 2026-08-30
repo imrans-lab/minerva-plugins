@@ -94,7 +94,16 @@ type ComponentAssembly struct {
 	// position, under the component's own ref. The refs here are AUTHORED and
 	// must be stable and unique board-wide — an exporter that invented them
 	// would rename a part between two orders of the same design.
-	Placements []AssemblyPlacement `json:"placements,omitempty" yaml:"placements,omitempty"`
+	//
+	// A POINTER, for the same reason Populate is: absent and authored-empty are
+	// two states that must not collapse. `placements: []` says "this drawing
+	// stands for several parts" and then names none, which the export gate
+	// refuses by name (assembly_empty_expansion); a plain slice with omitempty
+	// would re-serialize that key away, so a board that had been through this
+	// codec would export as an ordinary one-part component instead. Nil omits
+	// the key, a non-nil pointer emits it — including when it points at an
+	// empty list.
+	Placements *[]AssemblyPlacement `json:"placements,omitempty" yaml:"placements,omitempty"`
 }
 
 // AssemblyPlacement is one physically placed instance of a component.
@@ -114,6 +123,52 @@ type AssemblyOffset struct {
 	Y float64 `json:"y" yaml:"y"`
 }
 
+// UnmarshalYAML carries the block's unknown-key refusal INSIDE the offset. A
+// mistyped axis (`{xx: 22.86, y: 0}`) would otherwise leave x at its zero value
+// and place the expanded part at its parent's origin — the same quiet wrong
+// answer refusing an unknown outer key exists to prevent, one level down.
+func (o *AssemblyOffset) UnmarshalYAML(node *yaml.Node) error {
+	n := resolveAlias(node)
+	if n == nil || n.Tag == "!!null" {
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf(assemblyErrCode + ": assembly placement offset_mm must be a mapping of x/y millimetres")
+	}
+	if err := refuseUnknownKeys(yamlMappingKeys(n), reflect.TypeOf(AssemblyOffset{}), "assembly placement offset_mm"); err != nil {
+		return err
+	}
+	type plain AssemblyOffset
+	var q plain
+	if err := n.Decode(&q); err != nil {
+		return wrapAssemblyErr(err)
+	}
+	*o = AssemblyOffset(q)
+	return nil
+}
+
+// UnmarshalJSON is the offset's IPC-boundary twin of UnmarshalYAML.
+func (o *AssemblyOffset) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return fmt.Errorf(assemblyErrCode+": assembly placement offset_mm must be an object of x/y millimetres: %w", err)
+	}
+	if err := refuseUnknownKeys(jsonObjectKeys(raw), reflect.TypeOf(AssemblyOffset{}), "assembly placement offset_mm"); err != nil {
+		return err
+	}
+	type plain AssemblyOffset
+	var q plain
+	if err := json.Unmarshal(trimmed, &q); err != nil {
+		return wrapAssemblyErr(err)
+	}
+	*o = AssemblyOffset(q)
+	return nil
+}
+
 // Populated reports whether this component is picked and placed. Nil-safe: a
 // component with no assembly block at all is populated, which is what keeps a
 // board that predates the block loading exactly as it always did.
@@ -124,14 +179,33 @@ func (a *ComponentAssembly) Populated() bool {
 	return *a.Populate
 }
 
+// PlacementList is the authored expansion as a plain slice, nil-safe. Callers
+// that only walk the placements use this; callers that have to tell an absent
+// key from an authored-empty one read ExpansionAuthored instead.
+func (a *ComponentAssembly) PlacementList() []AssemblyPlacement {
+	if a == nil || a.Placements == nil {
+		return nil
+	}
+	return *a.Placements
+}
+
+// ExpansionAuthored reports whether a `placements` LIST was authored at all,
+// whatever its length — the distinction the pointer field exists to keep.
+func (a *ComponentAssembly) ExpansionAuthored() bool {
+	return a != nil && a.Placements != nil
+}
+
 // EmittedRefs returns the designators this component actually contributes to an
-// assembly output: its placements' refs, or its own ref when it has none.
+// assembly output: its placements' refs, or its own ref when it has none. An
+// authored-empty expansion names the component's own ref here, which is exactly
+// why the export gate refuses it rather than trusting this answer.
 func (c *Component) EmittedRefs() []string {
-	if c.Assembly == nil || len(c.Assembly.Placements) == 0 {
+	placements := c.Assembly.PlacementList()
+	if len(placements) == 0 {
 		return []string{c.Ref}
 	}
-	refs := make([]string, 0, len(c.Assembly.Placements))
-	for _, p := range c.Assembly.Placements {
+	refs := make([]string, 0, len(placements))
+	for _, p := range placements {
 		refs = append(refs, p.Ref)
 	}
 	return refs
@@ -314,8 +388,9 @@ func validateComponentAssembly(c *Component, i int) error {
 				"carries an empty house id or part number (%q: %q)", i, c.Ref, house, part)
 		}
 	}
-	for j := range a.Placements {
-		p := &a.Placements[j]
+	placements := a.PlacementList()
+	for j := range placements {
+		p := &placements[j]
 		if p.Ref == "" {
 			return fmt.Errorf("invalid_component: components[%d] (%s) assembly.placements[%d] "+
 				"has no ref — expanded designators are AUTHORED, never invented", i, c.Ref, j)
@@ -358,8 +433,9 @@ func validatePlacementRefUniqueness(b *Board) error {
 		if c.Assembly == nil {
 			continue
 		}
-		for j := range c.Assembly.Placements {
-			ref := c.Assembly.Placements[j].Ref
+		placements := c.Assembly.PlacementList()
+		for j := range placements {
+			ref := placements[j].Ref
 			if prev, seen := placed[ref]; seen {
 				return fmt.Errorf("duplicate_assembly_designator: components[%d] (%s) "+
 					"assembly.placements[%d] ref %q is already placed by components[%d] (%s)",

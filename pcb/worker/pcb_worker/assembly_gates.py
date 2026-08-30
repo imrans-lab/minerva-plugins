@@ -13,10 +13,14 @@ one:
 * :data:`CODE_DUPLICATE_DESIGNATOR` — one designator, one physical part.
   CASE-FOLDED, board-wide, over every physical placement including the
   non-populated ones: a house's uploader does not distinguish case, so ``C1``
-  and ``c1`` in one order is a coin toss over which part gets placed. The Go
-  validator refuses the exact-match subset (``duplicate_assembly_designator``,
-  internal/board/assembly.go); this covers what that leaves out — component refs
-  colliding with each other, and every case-fold collision.
+  and ``c1`` in one order is a coin toss over which part gets placed. What
+  reaches this gate is only what the two EXACT-match checks upstream leave: the
+  compiler refuses two components sharing a ref, naming it
+  (``duplicate_component_ref``, compile_board), and the Go validator refuses an
+  expansion placing two parts under one designator
+  (``duplicate_assembly_designator``, internal/board/assembly.go). So an exact
+  duplicate never gets this far, and every collision this gate reports is one
+  that survives exact comparison — a case fold.
 * :data:`CODE_ROW_REF_LIMIT` — a grouped BOM row's Designator cell is one CSV
   field, and over the profile's cap a house silently truncates the tail.
 * :data:`CODE_NON_METRIC_COORDINATES` — the emitter writes bare millimetre
@@ -263,7 +267,8 @@ def check_row_limits(bom_rows, profile: AssemblyProfile) -> None:
     for row in bom_rows:
         if len(row.refs) <= limit:
             continue
-        identity = " / ".join(part for part in (row.value, row.footprint, row.mpn) if part)
+        identity = " / ".join(
+            part for part in (row.comment, row.footprint, row.part_number) if part)
         raise AssemblyGateError(
             CODE_ROW_REF_LIMIT,
             f"grouped BOM row [{identity}] carries {len(row.refs)} designators, over the "

@@ -110,41 +110,56 @@ def test_every_assembly_capable_profile_has_a_renderer_wired():
 # ---------------------------------------------------------------------------
 
 
+def test_a_profile_cannot_require_a_field_the_identity_model_lacks():
+    """The requirement set is CLOSED over what the resolved assembly actually
+    carries. A profile asking for ``distributor_pn`` — a field no board can put
+    on a ResolvedAssembly — could never be satisfied by any board, so it refuses
+    where it is WRITTEN rather than silently refusing every export that selected
+    it. The refusal names the offending field and the set that is available."""
+    with pytest.raises(ao.AssemblyProfileError) as exc_info:
+        replace(ao.PROFILES["jlc"], identity_required=("mpn", "distributor_pn"))
+    message = str(exc_info.value)
+    assert "distributor_pn" in message
+    assert "mpn" in message  # the known set is spelled out, not just the fault
+
+
 def test_identity_refusal_names_every_missing_field_not_just_the_first():
-    """The fixture already supplies ``mpn`` for every component (it is
-    IDENTITY-CLEAN by construction, per assembly_fixture.yaml's own header),
-    so adding a SECOND required field the fixture does NOT supply
-    (``distributor_pn``) isolates the "every missing field is named, not just
-    the first" claim from the already-covered single-field case in
-    test_assembly_outputs.py."""
+    """The fixture supplies ``mpn`` for every component and ``manufacturer``
+    for R1 alone, so a profile requiring BOTH isolates the "every missing field
+    is named, not just the first" claim: the refusal must name R2's missing
+    manufacturer and must NOT name mpn, which R2 has."""
     two_field_profile = replace(
-        ao.PROFILES["jlc"], identity_required=("mpn", "distributor_pn"))
+        ao.PROFILES["jlc"], identity_required=("mpn", "manufacturer"))
     ao.PROFILES["synthetic-two-field"] = two_field_profile
     try:
         board = _compiled(_load())
         with pytest.raises(ao.AssemblyIdentityError) as exc_info:
             ao.build_bom(board, "synthetic-two-field")
         message = str(exc_info.value)
-        assert "distributor_pn" in message
-        assert "mpn" not in message.split("identity field(s) ")[1].split(" for")[0]
-        assert "R1" in message  # first component reached, alphabetically first ref group
+        missing = message.split("identity field(s) ")[1].split(" for")[0]
+        assert missing == "manufacturer"
+        assert "R2" in message  # R1 carries both and passes; R2 is the first fault
     finally:
         del ao.PROFILES["synthetic-two-field"]
 
 
 def test_identity_satisfied_when_all_required_fields_present():
-    # NOTE: id stays "jlc" (only identity_required is widened) — build_bom's
-    # renderer dispatch keys off profile.id, and a truly new id needs its own
-    # renderer branch (see test_every_assembly_capable_profile_has_a_renderer_
-    # wired above); that is a SEPARATE claim from the one this test makes.
+    # NOTE: id stays "jlc" (only identity_required is widened) — the renderer
+    # table keys off profile.id, and a truly new id needs its own entry (see
+    # test_every_assembly_capable_profile_has_a_renderer_wired above); that is a
+    # SEPARATE claim from the one this test makes.
     two_field_profile = replace(
-        ao.PROFILES["jlc"], identity_required=("mpn", "distributor_pn"))
+        ao.PROFILES["jlc"], identity_required=("mpn", "manufacturer"))
     ao.PROFILES["synthetic-two-field"] = two_field_profile
     try:
         board = _load()
         for comp in board["components"]:
-            comp["distributor_pn"] = f"DIST-{comp['ref']}"
+            comp.setdefault("assembly", {})
+            if isinstance(comp["assembly"], dict):
+                comp["assembly"]["manufacturer"] = f"MFR-{comp['ref']}"
         result = ao.build_bom(_compiled(board), "synthetic-two-field")
+        # Every component now carries its own manufacturer, which is part of no
+        # emitted column, so the grouping is the fixture's usual two rows.
         assert len(result.rows) == 2
     finally:
         del ao.PROFILES["synthetic-two-field"]
@@ -198,18 +213,22 @@ def test_non_string_mpn_is_treated_as_missing_not_coerced():
         ao.build_bom(_compiled(board), "jlc")
 
 
-def test_duplicate_refs_are_refused_before_any_row_is_emitted():
-    """GAP CLOSED BY THE CUTOVER. The raw-dict path did not de-duplicate or
-    validate ref uniqueness, so two components sharing a designator produced
-    two CPL rows with the same Designator — almost certainly wrong for a real
-    assembly order, and characterized here as a known gap rather than endorsed.
-
-    Deriving from the compiled IR closes it for free: component ids are derived
-    from the ref, so a duplicate breaks the board invariant and there is no CSV
-    to be wrong."""
+def test_duplicate_component_refs_refuse_by_name_naming_the_designator():
+    """Two components under one designator is a common authoring mistake and
+    gets an ACTIONABLE refusal: the compiler names the ref, upstream of any
+    emitter, so no CSV exists to be wrong. It used to surface as the late,
+    generic ``board_invariant`` — true but silent about which designator was
+    authored twice."""
     board = _load()
     board["components"].append(dict(board["components"][0]))  # duplicate R1
-    assert "board_invariant" in _compile_errors(board)
+    result = compile_board(board)
+    assert not isinstance(result, ResolutionSuccess)
+    errors = [d for d in result.diagnostics if d.severity is DiagnosticSeverity.ERROR]
+    codes = {d.code for d in errors}
+    assert "duplicate_component_ref" in codes
+    assert "board_invariant" not in codes  # named upstream, not by the late invariant
+    named = next(d for d in errors if d.code == "duplicate_component_ref")
+    assert "R1" in named.message
 
 
 def test_blank_footprint_is_refused_rather_than_grouped_under_the_empty_string():
@@ -230,5 +249,5 @@ def test_blank_value_still_groups_under_the_empty_string():
     board = _load()
     board["components"][0]["value"] = ""
     result = ao.build_bom(_compiled(board), "jlc")
-    blank = next(row for row in result.rows if row.value == "")
+    blank = next(row for row in result.rows if row.comment == "")
     assert blank.refs == ("R1",)

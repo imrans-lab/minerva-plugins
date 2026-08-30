@@ -2904,6 +2904,9 @@ def compile_board(
     components: list[ResolvedComponent] = []
     pad_ids_by_net: dict[str, list[str]] = {}
     resolved_pins: set[tuple[str, str]] = set()
+    # ref -> the position of the component that claimed it, so a repeat is
+    # refused BY NAME here rather than later as a generic board_invariant.
+    ref_owner: dict[str, int] = {}
 
     for position, comp in enumerate(_dict_items(board, "components", "component", diags)):
         raw_ref = comp.get("ref")
@@ -2915,6 +2918,22 @@ def compile_board(
             diags.error("invalid_component",
                         f"component {position} has a non-string/empty ref {raw_ref!r}", comp_ref)
             continue
+        # DUPLICATE REFS, NAMED. Every id in the compiled board is derived from
+        # the ref, so a repeat used to surface only as the late generic
+        # ``board_invariant`` ("resolved board rejected: ...") — true, but it
+        # named neither the designator nor the fact that it was authored twice,
+        # on one of the commonest authoring mistakes there is. One designator
+        # names one part in the netlist, the BOM and the CPL alike.
+        previous = ref_owner.get(ref)
+        if previous is not None:
+            diags.error(
+                "duplicate_component_ref",
+                f"component {ref!r} at position {position} reuses the reference designator "
+                f"of the component at position {previous}; one designator names exactly one "
+                f"physical part",
+                comp_ref)
+            continue
+        ref_owner[ref] = position
         if not isinstance(fp_ref, str) or not fp_ref:
             diags.error("invalid_component", f"component {ref!r} has no footprint ref", comp_ref)
             continue

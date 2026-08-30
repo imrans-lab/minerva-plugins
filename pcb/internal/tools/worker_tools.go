@@ -692,9 +692,14 @@ var ExportAssembly = ToolSpec{
 		"should show, today assembly_anchor_unmeasured — a populated part whose " +
 		"footprint draws neither a fab body outline nor a sized land, so the emitted " +
 		"coordinate is its drawn origin rather than a measured centre. Both lists are " +
-		"absent when empty. Calls the worker's " +
-		"assembly_bom then assembly_cpl methods over the same board+profile — whichever " +
-		"refuses first is the error this tool surfaces.",
+		"absent when empty. The BOM's Comment column is assembly.comment (falling " +
+		"back to the component's value), its Footprint column is assembly.package " +
+		"(falling back to the authored footprint ref), and its part-number column is " +
+		"assembly.house_parts entry for the selected house (falling back to " +
+		"assembly.mpn) — so a board carrying two houses' catalogue numbers ships the " +
+		"selected house's. Calls the worker's assembly_package method ONCE: both CSVs " +
+		"come from one compilation and one walk, which is what makes them describe the " +
+		"same board.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -707,24 +712,25 @@ var ExportAssembly = ToolSpec{
 	}`),
 }
 
-// assemblyCallReply is the shape ONE worker call (assembly_bom or
-// assembly_cpl) replies with on success: {files:{filename:content}, ...}.
+// assemblyPackageReply is the shape the worker's assembly_package method
+// replies with on success: both CSVs in one files map, with bom_file/cpl_file
+// naming which entry is which so this side never re-derives a filename.
 // This tool always calls with out_dir stripped (see stripOutDir), so the
 // worker's own "written" field is never populated here and is deliberately
 // not decoded — disk writing is this tool's OWN job, done in Go, only after
-// BOTH calls succeed (see HandleExportAssembly's HALF-WRITE fix comment).
-// Exactly one entry in files per call, since each call emits exactly one CSV.
+// the whole package is known to have succeeded (HALF-WRITE fix comment below).
 //
 // The two HONEST-OUTCOME lists ride along and are FORWARDED, not summarized.
 // Both are absent-when-empty on the worker side and stay absent here. Dropping
-// them — which this decoder used to do for ExcludedComponents — silently hides
-// from an agent the two things a CSV cannot say for itself: which parts the
-// house is deliberately NOT being sent, and which parts the pipeline could not
-// measure. Advisories are raw JSON because their entry shape belongs to
-// assembly_gates, and re-declaring it here would give the same finding two
-// definitions to drift between.
-type assemblyCallReply struct {
+// them silently hides from an agent the two things a CSV cannot say for
+// itself: which parts the house is deliberately NOT being sent, and which
+// parts the pipeline could not measure. Advisories are raw JSON because their
+// entry shape belongs to assembly_gates, and re-declaring it here would give
+// the same finding two definitions to drift between.
+type assemblyPackageReply struct {
 	Files              map[string]string `json:"files"`
+	BomFile            string            `json:"bom_file"`
+	CplFile            string            `json:"cpl_file"`
 	ExcludedComponents []string          `json:"excluded_components"`
 	Advisories         []json.RawMessage `json:"advisories"`
 }
@@ -739,19 +745,23 @@ type assemblyOutputSummary struct {
 	Path     string `json:"path,omitempty"`
 }
 
-// decodeAssemblyReply pulls one worker call's reply apart: the (single)
-// filename+content pair out of {files:{filename:content}}, plus the whole reply
-// so its honest-outcome lists can be forwarded. Nothing is written here —
-// writing is HandleExportAssembly's job, deferred until BOTH calls are known
-// to have succeeded.
-func decodeAssemblyReply(raw json.RawMessage) (r assemblyCallReply, filename, content string, err error) {
+// decodeAssemblyPackage pulls the worker's one-call package reply apart, and
+// REFUSES a reply that does not carry both named files rather than emitting a
+// half package under an empty filename. Nothing is written here — writing is
+// HandleExportAssembly's job, deferred until the whole package has succeeded.
+func decodeAssemblyPackage(raw json.RawMessage) (assemblyPackageReply, error) {
+	var r assemblyPackageReply
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return r, "", "", fmt.Errorf("decode assembly worker reply: %w", err)
+		return r, fmt.Errorf("decode assembly worker reply: %w", err)
 	}
-	for f, c := range r.Files {
-		filename, content = f, c
+	for _, named := range []struct{ what, name string }{{"bom", r.BomFile}, {"cpl", r.CplFile}} {
+		if name := named.name; name == "" {
+			return r, fmt.Errorf("assembly worker reply names no %s file", named.what)
+		} else if _, ok := r.Files[name]; !ok {
+			return r, fmt.Errorf("assembly worker reply names %s file %q but does not carry it", named.what, name)
+		}
 	}
-	return r, filename, content, nil
+	return r, nil
 }
 
 // csvDataRowCount counts non-empty data lines in the emitted CSV, excluding
@@ -773,19 +783,13 @@ func csvDataRowCount(content string) int {
 }
 
 // stripOutDir returns params with out_dir removed. HandleExportAssembly ALWAYS
-// computes both assembly_bom and assembly_cpl with out_dir stripped —
-// HALF-WRITE FIX (cold review, elevated finding): forwarding out_dir straight
-// to both worker calls (mirroring every other worker-backed tool's
-// convention, e.g. HandleGerbers) would let the worker write the BOM CSV to
-// disk on the FIRST call, then strand that file if the SECOND call refuses
-// for a reason the BOM computation never hits — measured live: an invalid
-// x_mm/y_mm (or a bad rotation_deg/layer token) fails only
-// assembly_outputs._cpl_rows/_resolve_side, never _bom_rows, since BOM rows
-// carry no position/side column. A refusal must be all-or-nothing: zero
-// artifacts on disk either way. So this tool computes BOTH CSVs first (worker
-// never touches disk), then — only once both have succeeded — writes both
-// itself, in Go (see writeAssemblyFile below), with the first file removed
-// again if the second write fails for a filesystem-level reason.
+// computes the package with out_dir stripped — HALF-WRITE FIX (cold review,
+// elevated finding): a refusal must be all-or-nothing, zero artifacts on disk
+// either way, and the writes are two separate filesystem operations however
+// few worker calls produced their contents. So this tool computes both CSVs
+// first (worker never touches disk), then writes both itself, in Go (see
+// writeAssemblyFile below), with the first file removed again if the second
+// write fails for a filesystem-level reason.
 func stripOutDir(params json.RawMessage) json.RawMessage {
 	var m map[string]interface{}
 	if len(params) == 0 {
@@ -824,38 +828,35 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 	}
 	_ = json.Unmarshal(params, &p) // best-effort; empty/malformed falls through to the defaults below
 
-	// Compute BOTH CSVs BEFORE writing anything — see stripOutDir's doc
-	// comment (HALF-WRITE fix).
+	// ONE worker call, deliberately. assembly_package compiles the board once
+	// and walks it once, so the BOM and the CPL are rendered from a single
+	// resolved board. Calling assembly_bom and then assembly_cpl would be two
+	// compilations, and the reference-set gate inside each proves only that
+	// THAT walk agreed with itself: library or footprint state moving between
+	// the two calls would return a BOM and a CPL describing different boards
+	// with both gates green.
 	//
-	// withLibraryChain is REQUIRED here, not decorative: both assembly methods
-	// now strict-compile the board before emitting, so without the host's live
+	// withLibraryChain is REQUIRED here, not decorative: the assembly methods
+	// strict-compile the board before emitting, so without the host's live
 	// layer chain a board whose footprints come from the user or blessed-WIP
-	// layers would refuse with footprint_unresolved. They joined the
-	// compile-bearing calls the moment they started compiling.
+	// layers would refuse with footprint_unresolved.
 	computeParams := withLibraryChain(stripOutDir(params))
 
-	bomRaw, err := w.Call(ctx, "assembly_bom", computeParams)
+	packageRaw, err := w.Call(ctx, "assembly_package", computeParams)
 	if err != nil {
 		return nil, err
 	}
-	bomReply, bomFilename, bomContent, err := decodeAssemblyReply(bomRaw)
+	reply, err := decodeAssemblyPackage(packageRaw)
 	if err != nil {
 		return nil, err
 	}
-
-	cplRaw, err := w.Call(ctx, "assembly_cpl", computeParams)
-	if err != nil {
-		return nil, err
-	}
-	_, cplFilename, cplContent, err := decodeAssemblyReply(cplRaw)
-	if err != nil {
-		return nil, err
-	}
+	bomFilename, bomContent := reply.BomFile, reply.Files[reply.BomFile]
+	cplFilename, cplContent := reply.CplFile, reply.Files[reply.CplFile]
 
 	bomSummary := assemblyOutputSummary{Filename: bomFilename, Rows: csvDataRowCount(bomContent)}
 	cplSummary := assemblyOutputSummary{Filename: cplFilename, Rows: csvDataRowCount(cplContent)}
 
-	// Both computations succeeded — NOW write, only here, and only both
+	// The computation succeeded — NOW write, only here, and only both
 	// together: if the CPL write fails after the BOM write already landed,
 	// remove the BOM file too, so a filesystem-level fault leaves zero
 	// artifacts exactly like a worker-level refusal does.
@@ -874,26 +875,23 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 
 	profile := p.Profile
 	if profile == "" {
-		profile = "jlc" // mirrors the worker's own default (methods.py _assembly_bom/_assembly_cpl)
+		profile = "jlc" // mirrors the worker's own default (methods.py _assembly_package)
 	}
-	reply := map[string]interface{}{
+	out := map[string]interface{}{
 		"profile": profile,
 		"bom":     bomSummary,
 		"cpl":     cplSummary,
 	}
-	// Taken from the BOM call alone, deliberately: both calls walk the SAME
-	// compilation of the SAME board through the SAME gates, so the two lists are
-	// equal by construction, and merging them would only be able to produce
-	// duplicates. Absent-when-empty, matching the worker's own idiom — a caller
-	// that sees no "advisories" key has been told there are none, not that the
-	// tool forgot to ask.
-	if len(bomReply.ExcludedComponents) > 0 {
-		reply["excluded_components"] = bomReply.ExcludedComponents
+	// Absent-when-empty, matching the worker's own idiom — a caller that sees
+	// no "advisories" key has been told there are none, not that the tool
+	// forgot to ask. There is one list of each because there was one walk.
+	if len(reply.ExcludedComponents) > 0 {
+		out["excluded_components"] = reply.ExcludedComponents
 	}
-	if len(bomReply.Advisories) > 0 {
-		reply["advisories"] = bomReply.Advisories
+	if len(reply.Advisories) > 0 {
+		out["advisories"] = reply.Advisories
 	}
-	data, err := json.Marshal(reply)
+	data, err := json.Marshal(out)
 	if err != nil {
 		return nil, err
 	}

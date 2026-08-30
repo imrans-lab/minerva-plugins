@@ -59,8 +59,8 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// the worker's "lock_libraries" method.
 		"minerva_pcb_lock_libraries",
 		// worker-backed — pre-assembly BOM+CPL package (D0-5, docket
-		// 019fc2f8b903): exposes the worker's assembly_bom + assembly_cpl
-		// methods, shipped worker-side by C8 with no agent-facing tool until now.
+		// 019fc2f8b903): exposes the worker's assembly_package method — both
+		// CSVs from one compilation.
 		"minerva_pcb_export_assembly",
 		// worker-backed — the rendered-bless surface (S3/B2, docket
 		// 019ff5687b99): the library TRUST BOUNDARY. Stage a .kicad_mod into

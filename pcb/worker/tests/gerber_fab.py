@@ -7,7 +7,7 @@ property of WHICH helper a test hands it to, never a hidden per-name allowlist:
   the way ``methods._gerbers`` does: COMPILE (strict) -> ``gerber.build_gerbers_ir``
   (board-absolute pads, per-pad rotation, bottom-side mirror). It FAILS CLOSED —
   a board that does not compile RAISES, never a silent reroute onto the tolerant
-  loose-dict emitter (bug 019f917bbe18). Every production board, golden-as-
+  loose-dict emitter. Every production board, golden-as-
   production-oracle, determinism gate, and gerbonara production case uses this.
 
 * :func:`build_raw_emitter` — the RAW loose-dict emitter ``gerber.build_gerbers``,
@@ -52,7 +52,7 @@ def compile_fixture(path, base: str, who: str):
                  if d.severity is DiagnosticSeverity.ERROR]
         raise RuntimeError(
             f"{who}: production compile FAILED for {base!r} — failing CLOSED "
-            f"with no raw-dict fallback (bug 019f917bbe18); error codes: {codes}")
+            f"with no raw-dict fallback; error codes: {codes}")
     return result.board
 
 
@@ -61,7 +61,7 @@ def build_fab(path, base: str, **kwargs) -> gerber.GerberResult:
     mirroring ``methods._gerbers``: ``build_gerbers_ir(compile_board(src).board)``
     (board-absolute pads, per-pad rotation, bottom-mirror).
 
-    FAIL-CLOSED (bug 019f917bbe18): a board that does NOT compile RAISES — there
+    FAIL-CLOSED: a board that does NOT compile RAISES — there
     is NO raw-dict fallback and NO per-fixture allowlist. A raw loose-dict fixture
     that legitimately cannot compile (e.g. ``drilltest``) is emitted via the
     explicitly-named :func:`build_raw_emitter`, never by reaching this function

@@ -25,7 +25,7 @@ func fullAssemblyBoard() *Board {
 					Comment:      "1x7 2.54mm socket strip",
 					HouseParts:   map[string]string{"jlcpcb": "C41376161"},
 					Paste:        PasteExclude,
-					Placements: []AssemblyPlacement{
+					Placements: &[]AssemblyPlacement{
 						{Ref: "J1S_A", OffsetMM: &AssemblyOffset{X: 0, Y: 0}, RotationDeg: 0},
 						{Ref: "J1S_B", OffsetMM: &AssemblyOffset{X: 22.86, Y: 0}, RotationDeg: 180},
 					},
@@ -60,21 +60,22 @@ func assertFullAssembly(t *testing.T, where string, b *Board) {
 	if a.Paste != PasteExclude {
 		t.Fatalf("%s: paste lost: %q", where, a.Paste)
 	}
-	if len(a.Placements) != 2 {
-		t.Fatalf("%s: expected 2 placements, got %d", where, len(a.Placements))
+	placements := a.PlacementList()
+	if len(placements) != 2 {
+		t.Fatalf("%s: expected 2 placements, got %d", where, len(placements))
 	}
-	if a.Placements[0].Ref != "J1S_A" || a.Placements[1].Ref != "J1S_B" {
-		t.Fatalf("%s: a placement REF was dropped or renamed: %+v", where, a.Placements)
+	if placements[0].Ref != "J1S_A" || placements[1].Ref != "J1S_B" {
+		t.Fatalf("%s: a placement REF was dropped or renamed: %+v", where, placements)
 	}
-	if a.Placements[1].OffsetMM == nil || a.Placements[1].OffsetMM.X != 22.86 ||
-		a.Placements[1].OffsetMM.Y != 0 || a.Placements[1].RotationDeg != 180 {
-		t.Fatalf("%s: a placement transform was dropped: %+v", where, a.Placements[1])
+	if placements[1].OffsetMM == nil || placements[1].OffsetMM.X != 22.86 ||
+		placements[1].OffsetMM.Y != 0 || placements[1].RotationDeg != 180 {
+		t.Fatalf("%s: a placement transform was dropped: %+v", where, placements[1])
 	}
 	// The zero-valued transform is the trap: an omitempty'd 0 offset must not
 	// come back as a MISSING offset that a later reader defaults differently.
-	if a.Placements[0].OffsetMM == nil || a.Placements[0].OffsetMM.X != 0 ||
-		a.Placements[0].OffsetMM.Y != 0 {
-		t.Fatalf("%s: the authored zero offset did not survive: %+v", where, a.Placements[0])
+	if placements[0].OffsetMM == nil || placements[0].OffsetMM.X != 0 ||
+		placements[0].OffsetMM.Y != 0 {
+		t.Fatalf("%s: the authored zero offset did not survive: %+v", where, placements[0])
 	}
 }
 
@@ -164,6 +165,11 @@ func TestAssemblyRefusesRatherThanDropping(t *testing.T) {
 	decodeCases := []struct{ name, body string }{
 		{"unknown assembly field", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {mpm: C123}}\n"},
 		{"unknown placement field", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, offset: {x: 1, y: 0}}]}}\n"},
+		// The NESTED typo: the outer key is spelled right, so nothing above
+		// catches it, and x defaults to 0 — the part lands on its parent's
+		// origin rather than 22.86 mm away.
+		{"unknown offset_mm axis", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, offset_mm: {xx: 22.86, y: 0}}]}}\n"},
+		{"offset_mm is a scalar", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, offset_mm: 22.86}]}}\n"},
 		{"assembly is a list", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: [populate]}\n"},
 	}
 	for _, c := range decodeCases {
@@ -221,5 +227,111 @@ func TestEmittedRefsIsTheDesignatorSource(t *testing.T) {
 	got := b.Components[1].EmittedRefs()
 	if len(got) != 2 || got[0] != "J1S_A" || got[1] != "J1S_B" {
 		t.Fatalf("an expanded component emits its authored refs, got %v", got)
+	}
+}
+
+// TestNestedOffsetTypoRefusesOnBothCodecs is the nested half of the
+// unknown-key rule, on the boundary the panel actually holds a board over. The
+// outer `offset_mm` key is spelled correctly, so the placement's own key check
+// passes; only the axis is wrong, and an accepted `{xx: …}` would leave X at 0
+// and emit the expanded part at its parent's origin.
+func TestNestedOffsetTypoRefusesOnBothCodecs(t *testing.T) {
+	const src = `{"ref":"R1","footprint":"R_0805","assembly":{"placements":[{"ref":"R1_A","offset_mm":{"xx":22.86,"y":0}}]}}`
+	var c Component
+	err := json.Unmarshal([]byte(src), &c)
+	if err == nil || !strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("JSON: want invalid_component_assembly for a mistyped axis, got %v (decoded %+v)", err, c.Assembly)
+	}
+	if !strings.Contains(err.Error(), "xx") {
+		t.Fatalf("JSON: the refusal must NAME the key that was not understood, got %v", err)
+	}
+}
+
+// TestAuthoredEmptyExpansionSurvivesBothCodecs is the migration-boundary half
+// of the empty-expansion fault. `placements: []` is a REFUSAL the export gate
+// owns (assembly_empty_expansion), and it can only refuse a fault that is still
+// on the board: a codec that re-serialized the key away would hand the exporter
+// an ordinary one-part component and the order would ship silently wrong.
+//
+// The three arms are the three hops a real board makes: the YAML document a
+// promote writes, the JSON pipe the panel holds it over, and the pair.
+func TestAuthoredEmptyExpansionSurvivesBothCodecs(t *testing.T) {
+	const src = `version: 1
+name: empty-expansion
+width_mm: 20
+height_mm: 15
+components:
+  - {ref: R1, footprint: R_0805, x_mm: 5, y_mm: 5, assembly: {mpn: C25804, placements: []}}
+`
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	assertAuthoredEmpty := func(where string, b *Board) {
+		t.Helper()
+		a := b.Components[0].Assembly
+		if a == nil || !a.ExpansionAuthored() {
+			t.Fatalf("%s: the authored-empty expansion was erased; assembly=%+v", where, a)
+		}
+		if len(a.PlacementList()) != 0 {
+			t.Fatalf("%s: an empty expansion gained placements: %+v", where, a.PlacementList())
+		}
+	}
+	assertAuthoredEmpty("decode", b)
+
+	y, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	if !strings.Contains(string(y), "placements") {
+		t.Fatalf("the re-emitted document dropped the authored key:\n%s", string(y))
+	}
+	yBack, err := UnmarshalYAML(y)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML round two: %v", err)
+	}
+	assertAuthoredEmpty("YAML", yBack)
+
+	j, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(j), `"placements":[]`) {
+		t.Fatalf("the JSON hop dropped the authored key: %s", string(j))
+	}
+	var jBack Board
+	if err := json.Unmarshal(j, &jBack); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	assertAuthoredEmpty("JSON", &jBack)
+
+	crossed, err := MarshalYAML(&jBack)
+	if err != nil {
+		t.Fatalf("MarshalYAML after the JSON hop: %v", err)
+	}
+	crossBack, err := UnmarshalYAML(crossed)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML after the JSON hop: %v", err)
+	}
+	assertAuthoredEmpty("JSON→YAML", crossBack)
+
+	// The control: a board with NO placements key must not grow one, or every
+	// ordinary component would start carrying an empty list.
+	plain, err := UnmarshalYAML([]byte(`version: 1
+name: plain
+width_mm: 20
+height_mm: 15
+components:
+  - {ref: R1, footprint: R_0805, x_mm: 5, y_mm: 5, assembly: {mpn: C25804}}
+`))
+	if err != nil {
+		t.Fatalf("UnmarshalYAML (plain): %v", err)
+	}
+	py, err := MarshalYAML(plain)
+	if err != nil {
+		t.Fatalf("MarshalYAML (plain): %v", err)
+	}
+	if strings.Contains(string(py), "placements") {
+		t.Fatalf("an absent expansion grew a placements key:\n%s", string(py))
 	}
 }

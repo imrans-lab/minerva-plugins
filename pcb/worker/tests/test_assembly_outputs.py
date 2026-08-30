@@ -25,7 +25,7 @@ places (R_0805, D_SMA, and two excluded pieces of furniture) is already centred
 on its own origin, so its anchors compose back onto its positions exactly. That
 makes this file the "nothing moved that should not have" half of that unit's
 oracle; the half where things DO move is test_assembly_anchor.py.
-  * test_bom_groups_by_footprint_value_mpn — BOM grouping seal.
+  * test_bom_groups_by_the_emitted_columns — BOM grouping seal.
   * test_*_identity_refusal* — the part-identity contract.
   * test_*_house_refusal* — the per-house capability refusal.
   * test_uncompilable_board_* — the deliberate capability regression, named.
@@ -199,8 +199,10 @@ def test_rows_match_the_raw_dict_arithmetic_they_replaced():
 
     for bom_row in ao.build_bom(compiled, "jlc").rows:
         for ref in bom_row.refs:
+            # The fixture authors no `package` and no `comment`, so both columns
+            # fall back to the pre-block sources this arm compares against.
             assert bom_row.footprint == authored[ref]["footprint"]
-            assert bom_row.value == authored[ref].get("value", "")
+            assert bom_row.comment == authored[ref].get("value", "")
 
 
 def test_cpl_rotation_normalizes_negative_and_over_360():
@@ -238,26 +240,101 @@ def test_unusable_layer_never_reaches_the_emitter(layer):
 # ---------------------------------------------------------------------------
 
 
-def test_bom_groups_by_footprint_value_mpn():
-    """R1 + R2 share (R_0805, "10k", C25804) -> ONE grouped row with both refs
-    and qty=2 — even though R1 authors its mpn in the structured assembly block
-    and R2 in the pre-block top-level scalar. D1 (Diode_SMD:D_SMA, 1N4148,
-    C2128, authored in a properties mapping) is its own row, qty=1."""
+def test_bom_groups_by_the_emitted_columns():
+    """R1 + R2 print identically (R_0805, "10k", C25804) -> ONE grouped row with
+    both refs and qty=2 — even though R1 authors its part number as a
+    ``house_parts`` entry inside the structured block and R2 as the pre-block
+    top-level ``mpn`` scalar. That is the point of grouping on the RESOLVED
+    columns: what a house reads is one line, so the file carries one line. D1
+    (Diode_SMD:D_SMA, 1N4148, C2128, authored in a properties mapping) is its
+    own row, qty=1."""
     result = ao.build_bom(_compiled(_load()), "jlc")
     assert len(result.rows) == 2
 
     by_footprint = {row.footprint: row for row in result.rows}
     r0805 = by_footprint["R_0805"]
     assert r0805.refs == ("R1", "R2")
-    assert r0805.value == "10k"
-    assert r0805.mpn == "C25804"
+    assert r0805.comment == "10k"
+    assert r0805.part_number == "C25804"
     assert r0805.qty == 2
 
     diode = by_footprint["Diode_SMD:D_SMA"]
     assert diode.refs == ("D1",)
-    assert diode.value == "1N4148"
-    assert diode.mpn == "C2128"
+    assert diode.comment == "1N4148"
+    assert diode.part_number == "C2128"
     assert diode.qty == 1
+
+
+# ---------------------------------------------------------------------------
+# BOM columns — the schema's own fields reach the file
+# ---------------------------------------------------------------------------
+
+
+def test_each_authored_assembly_field_reaches_its_own_bom_column():
+    """The schema (docs/board-yaml.md) gives ``package``, ``comment`` and
+    ``house_parts`` a BOM column each. A component authoring all three must
+    print all three — not its ``value``, its KiCad footprint string and its
+    ``mpn``, which are what those columns fall back to. Ordering the wrong part
+    is the failure this whole path exists to prevent, so the assertion is on
+    the rendered LINE, not only on the row object."""
+    board = _compiled(_minimal(value="10k", footprint="R_0805", assembly={
+        "mpn": "RC0805FR-0710KL",
+        "package": "0805",
+        "comment": "RES 10k 1% 0805",
+        "house_parts": {"jlcpcb": "C84376"},
+    }))
+    result = ao.build_bom(board, "jlc")
+    row = result.rows[0]
+    assert row.comment == "RES 10k 1% 0805"     # not "10k"
+    assert row.footprint == "0805"              # not "R_0805"
+    assert row.part_number == "C84376"          # not the mpn
+    assert row.mpn == "RC0805FR-0710KL"         # still carried, beside it
+
+    line = next(iter(result.values())).splitlines()[1]
+    assert line == "RES 10k 1% 0805,R1,0805,C84376"
+
+
+def test_absent_assembly_fields_fall_back_to_their_pre_block_sources():
+    """The other half of the column contract: exactly one fallback per column,
+    and it is the shape boards used before the block existed."""
+    board = _compiled(_minimal(value="10k", footprint="R_0805",
+                               assembly={"mpn": "C25804"}))
+    row = ao.build_bom(board, "jlc").rows[0]
+    assert row.comment == "10k"                 # the component's value
+    assert row.footprint == "R_0805"            # the authored footprint ref
+    assert row.part_number == "C25804"          # the mpn
+
+
+def test_the_house_part_number_is_chosen_by_the_profile():
+    """A board may carry several houses' catalogue numbers. Which one is
+    ordered against is the SELECTED profile's, read under its own
+    ``house_part_id`` — never the first entry, and never a house the caller did
+    not ask for."""
+    board = _compiled(_minimal(assembly={
+        "mpn": "RC0805FR-0710KL",
+        "house_parts": {"jlcpcb": "C84376", "aaa-house": "AAA-000"},
+    }))
+    assert ao.PROFILES["jlc"].house_part_id == "jlcpcb"
+    assert ao.build_bom(board, "jlc").rows[0].part_number == "C84376"
+
+
+def test_a_house_number_for_another_house_only_is_not_used():
+    """A number authored for a DIFFERENT house must not be ordered against;
+    the column falls back to the mpn, which at least names the real part."""
+    board = _compiled(_minimal(assembly={
+        "mpn": "RC0805FR-0710KL", "house_parts": {"aaa-house": "AAA-000"},
+    }))
+    assert ao.build_bom(board, "jlc").rows[0].part_number == "RC0805FR-0710KL"
+
+
+def test_two_parts_differing_only_in_comment_are_separate_rows():
+    """The grouping key is the emitted identity, so a difference the file DOES
+    carry splits the row — otherwise one line would claim one description for
+    two parts a purchaser was told apart."""
+    board = _load()
+    board["components"][0]["assembly"]["comment"] = "RES 10k 1% 0805"
+    result = ao.build_bom(_compiled(board), "jlc")
+    assert {row.refs for row in result.rows} == {("R1",), ("R2",), ("D1",)}
 
 
 def test_bom_csv_hand_derived_bytes():

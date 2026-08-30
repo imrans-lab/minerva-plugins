@@ -6,10 +6,11 @@ of a production gerber build and compares the flash coordinates to a hand-derive
 table. A cell passes only when what the board authored and what the stencil
 carries agree.
 
-WHAT THIS CAUGHT WHEN IT WAS WRITTEN. Before it, ``assembly.paste`` was carried
-on the IR and read by nobody: ``paste: exclude`` on a do-not-populate part
-emitted exactly the same apertures as ``paste: include``. Both DNP cells were
-indistinguishable in the one artifact that decides where solder goes.
+THE MATRIX IS THE POINT: ``paste: exclude`` and ``paste: include`` on a
+do-not-populate part must differ in the one artifact that decides where solder
+goes. A ``paste`` value carried on the IR and read by no emitter would leave the
+two DNP cells indistinguishable on the stencil, which is what these cells
+measure and refuse.
 
 THE THROUGH-HOLE SEAL (:func:`test_through_hole_part_emits_no_paste`) is a
 REGRESSION test for a fact, not a rule: paste participation is read strictly off

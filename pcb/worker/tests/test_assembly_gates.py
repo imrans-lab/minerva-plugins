@@ -160,9 +160,12 @@ def test_per_component_refusal_names_every_component_carrying_the_fault(emit):
 @pytest.mark.parametrize("emit", EMITTERS)
 def test_case_folding_designator_collision_refuses(emit):
     """An assembly house's uploader does not distinguish case, so ``R1`` and
-    ``r1`` reaching one order is a coin toss over which part gets placed. The Go
-    validator's own uniqueness check is exact-match and deliberately skips
-    component refs, so this collision reaches the emitters unrefused."""
+    ``r1`` reaching one order is a coin toss over which part gets placed. Every
+    check upstream compares refs EXACTLY — the compiler's own
+    ``duplicate_component_ref`` and the Go validator's
+    ``duplicate_assembly_designator`` alike — so a collision that only appears
+    after case-folding reaches the emitters unrefused, and this gate is the only
+    thing standing between it and an order."""
     board = _board(_component("R1", 10, 10), _component("r1", 20, 10))
     error = _refusal(emit, board, ag.CODE_DUPLICATE_DESIGNATOR, "r1", "ref")
     assert error.refs == ("R1", "r1")

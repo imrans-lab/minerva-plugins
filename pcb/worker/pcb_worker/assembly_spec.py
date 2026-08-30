@@ -99,9 +99,10 @@ class ResolvedAssembly:
     """What an assembly house buys and places for one compiled component.
 
     ``footprint_ref`` is the component's AUTHORED ``footprint`` string. It rides
-    here because the BOM's Footprint column is that string today, and the IR
-    otherwise keeps only ``footprint_id`` — a content hash that names the
-    geometry, not the part a purchaser recognizes.
+    here because it is what the BOM's Footprint column falls back to when no
+    ``package`` is authored, and the IR otherwise keeps only ``footprint_id`` —
+    a content hash that names the geometry, not the part a purchaser
+    recognizes.
 
     ``house_parts`` is a sorted tuple of ``(house id, catalogue number)`` pairs
     rather than a mapping, so the whole object stays hashable and frozen like

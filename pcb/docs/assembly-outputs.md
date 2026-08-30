@@ -9,6 +9,35 @@ describing one board and Gerbers describing another. The emitter is
 `assembly_gates.py` and are tabulated in `board-yaml.md` under "Hard gates on
 assembly export".
 
+## What each BOM column carries
+
+The schema gives three `assembly` fields a column of their own, and each is read
+with exactly one fallback to the pre-block source it supersedes:
+
+| column | authored field | fallback when absent |
+|---|---|---|
+| Comment | `assembly.comment` | the component's `value` |
+| Footprint | `assembly.package` | the authored `footprint` ref |
+| part number ("LCSC Part #" for `jlc`) | `assembly.house_parts[<house>]` | `assembly.mpn` |
+
+`<house>` is the selected profile's own `house_part_id` — the id a board names
+that house's catalogue number under (`jlcpcb` for the `jlc` profile). Selecting
+by profile rather than by position is what keeps a board carrying two houses'
+numbers from ordering against the wrong one. A grouped BOM row's identity is
+these RESOLVED cells, so two components that print identically are one line
+whichever field each authored it in, and a difference the file carries splits
+the row.
+
+## One compilation for the pair
+
+`build_package` is the entry point for both files, and the
+`minerva_pcb_export_assembly` tool reaches it through the worker's single
+`assembly_package` call. Asking for the BOM and then the CPL is **two**
+compilations: the reference-set gate inside each proves only that THAT walk
+agreed with itself, so library or footprint state moving between the two calls
+would return a BOM and a CPL describing different resolved boards with both gates
+green. `build_bom` and `build_cpl` remain the single-artifact entry points.
+
 ## What the coordinate is
 
 A CPL row carries the **assembly anchor** — the part's body-box centre, composed

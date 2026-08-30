@@ -10,10 +10,16 @@ strictly compile refuses by name (:func:`not_compilable_error`), never with a
 traceback and never with a partial CSV.
 
 ONE EMISSION, TWO FILES. :func:`emit` builds the BOM rows AND the CPL rows in a
-single walk, and :func:`build_bom` / :func:`build_cpl` render out of it. That is
-what lets the reference-set gate compare the files a caller actually receives
-rather than a third derivation of the board — and why asking for only the BOM
-still refuses when the CPL would have disagreed with it.
+single walk, and every builder renders out of one emission. That is what lets
+the reference-set gate compare the files a caller actually receives rather than
+a third derivation of the board — and why asking for only the BOM still refuses
+when the CPL would have disagreed with it.
+
+The pair therefore has its OWN entry point, :func:`build_package`. Calling
+:func:`build_bom` and then :func:`build_cpl` is two emissions of two
+compilations, and the agreement gate inside each proves only that THAT walk was
+self-consistent; nothing there compares one call to the other. A caller that
+wants both files must ask for both at once.
 
 A house-format-agnostic CORE (:func:`_walk`) plus exactly ONE house-specific
 renderer (JLCPCB-style CSV, ``PROFILES["jlc"]``). An unrecognized or
@@ -25,7 +31,28 @@ PART-IDENTITY CONTRACT. A component the selected profile requires identity for
 (:class:`AssemblyIdentityError`) naming the ref, never a blank cell. Where the
 profile requires nothing, a blank field is emitted and a blank value/footprint
 stays a warning — the contract is a stricter, profile-gated rule on top of that,
-not a relaxation of it.
+not a relaxation of it. A profile may only require a field the identity model
+carries (``assembly_spec.IDENTITY_FIELDS``); one that names anything else
+refuses when the PROFILE is built, because a requirement nothing can satisfy
+would otherwise refuse every board that ever selected it.
+
+WHAT EACH BOM COLUMN CARRIES, and what it falls back to. The schema
+(docs/board-yaml.md) gives three of the assembly block's fields a column of
+their own, and each is read here with ONE defined fallback to the pre-block
+source it supersedes:
+
+===================== ============================ ========================
+column                authored field               fallback when absent
+===================== ============================ ========================
+Comment               ``assembly.comment``         the component's ``value``
+Footprint             ``assembly.package``         the authored footprint ref
+house catalogue no.   ``assembly.house_parts[h]``  ``assembly.mpn``
+===================== ============================ ========================
+
+``h`` is the profile's own :attr:`HouseProfile.house_part_id` — the id a board
+names THAT house's number under. Selecting by profile rather than by position
+is what keeps a board that carries two houses' numbers from shipping the wrong
+one; which id a house answers to is a dialect fact, so it is a profile field.
 
 HARD GATES, NAMED. Before either file is rendered the rows both emitters built
 go through :mod:`assembly_gates`. Every gate refuses with a stable code naming
@@ -43,14 +70,16 @@ carrying ``assembly.placements`` contributes one CPL row and one BOM quantity
 per authored placement, the offset already composed against the parent's
 rotation and side, once, by the compiler.
 
-FRAME AND ROTATION, both measured against a real ``kicad-cli`` position-file
-run: CPL X is the anchor's X VERBATIM, CPL Y is its Y NEGATED, bottom-side X is
-UNMIRRORED, and ``Rotation`` is the authored ``rotation_deg`` verbatim (modulo
-360) — which reads as JLC's counter-clockwise-positive convention precisely
-because Y is negated. Do not touch the arithmetic in :func:`_walk` without
-reading ``docs/assembly-outputs.md``, which carries the oracle, the measured
-table and the two non-claims (this is not a promise a part mounts
-right-side-up, and a BOM/CPL pair is not a stencil).
+FRAME AND ROTATION, both measured against a real position-file run by the
+dev/CI-only export tool this module may not name (STANDING GUARD 2,
+``tests/test_kicad_cli_boundary.py``): CPL X is the anchor's X VERBATIM, CPL Y
+is its Y NEGATED, bottom-side X is UNMIRRORED, and ``Rotation`` is the authored
+``rotation_deg`` verbatim (modulo 360) — which reads as JLC's
+counter-clockwise-positive convention precisely because Y is negated. Do not
+touch the arithmetic in :func:`_walk` without reading
+``docs/assembly-outputs.md``, which carries the oracle, the measured table and
+the two non-claims (this is not a promise a part mounts right-side-up, and a
+BOM/CPL pair is not a stencil).
 """
 
 from __future__ import annotations
@@ -58,6 +87,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import assembly_gates
+from .assembly_spec import IDENTITY_FIELDS
 
 CSV_EOL = "\r\n"  # JLC's own templates ship CRLF; keep it stable either way.
 
@@ -103,6 +133,12 @@ class HouseProfile:
     display_name: str
     supports_assembly: bool
     identity_required: tuple[str, ...] = ()
+    #: The id a board names THIS house's catalogue number under in
+    #: ``assembly.house_parts``. Separate from ``id`` because that is the
+    #: caller's short selector while this is the board's own spelling for the
+    #: house; empty means the two coincide. Read through
+    #: :attr:`house_part_id`, never directly.
+    house_part_key: str = ""
     # DIALECT PARAMETERS, defaulted rather than hard-coded at the point of
     # comparison. The real figures are facts a house publishes and the service-
     # profile work pins; the gates read them off whatever profile is selected,
@@ -112,6 +148,26 @@ class HouseProfile:
     min_designator_separation_mm: float = (
         assembly_gates.DEFAULT_MIN_DESIGNATOR_SEPARATION_MM)
     coordinate_unit: str = assembly_gates.METRIC_COORDINATE_UNIT
+
+    def __post_init__(self) -> None:
+        # A profile may only require identity the model can actually carry. A
+        # requirement outside IDENTITY_FIELDS is unsatisfiable by construction —
+        # every board selecting the profile would refuse for a field no author
+        # can supply — so it refuses HERE, where the profile is written, rather
+        # than silently at every export.
+        unknown = [f for f in self.identity_required if f not in IDENTITY_FIELDS]
+        if unknown:
+            raise AssemblyProfileError(
+                f"assembly profile {self.id!r} requires identity field(s) "
+                f"{'/'.join(unknown)}, which the resolved assembly model does not carry; "
+                f"a board could never satisfy it. Known identity fields: "
+                f"{'/'.join(IDENTITY_FIELDS)}")
+
+    @property
+    def house_part_id(self) -> str:
+        """The ``assembly.house_parts`` key this profile's catalogue number is
+        read from."""
+        return self.house_part_key or self.id
 
 
 # The ONE JLC-style profile this unit ships (scope: "house-format-agnostic
@@ -128,6 +184,10 @@ PROFILES: dict[str, HouseProfile] = {
     "jlc": HouseProfile(
         id="jlc", display_name="JLCPCB", supports_assembly=True,
         identity_required=("mpn",),
+        # Boards name JLC's catalogue by the house's full id, not the short
+        # profile selector — measured on the shipped fixtures, which all author
+        # ``house_parts: {jlcpcb: …}``.
+        house_part_key="jlcpcb",
     ),
     "oshpark": HouseProfile(
         id="oshpark", display_name="OSH Park", supports_assembly=False,
@@ -153,9 +213,19 @@ def _resolve_profile(profile_id) -> HouseProfile:
 
 @dataclass(frozen=True)
 class BomRow:
+    """One grouped BOM line, in EMITTED COLUMNS rather than authored fields.
+
+    Each field below is a cell of the rendered row, already resolved through
+    the module docstring's column table (authored field, else its fallback), so
+    a renderer never re-decides what a column means and two renderers cannot
+    decide differently. ``mpn`` rides alongside as the manufacturer's own
+    number: it is what ``part_number`` falls back to, and a caller comparing an
+    order against a distributor quote needs both."""
+
     refs: tuple[str, ...]
-    value: str
+    comment: str
     footprint: str
+    part_number: str | None
     mpn: str | None
     qty: int
 
@@ -253,22 +323,28 @@ def _walk(board, profile: HouseProfile):
             continue
         _check_identity(profile, component.ref, assembly)
 
+        # THE DOCUMENTED COLUMNS, each with its ONE fallback (module docstring).
+        # The fallbacks are what a board authored before the block existed: the
+        # component's value, the footprint string it routes against, and the
+        # manufacturer's part number. The AUTHORED footprint string is used,
+        # never the IR's content-hash footprint_id, because this column names a
+        # part a purchaser recognizes.
+        comment = assembly.comment or component.value
+        footprint = assembly.package or assembly.footprint_ref
+        part_number = dict(assembly.house_parts).get(profile.house_part_id) or assembly.mpn
+
         # BOM GROUPING KEY = THE COMPLETE EMITTED IDENTITY, i.e. every cell of
         # the rendered row except the Designator list itself. Grouping on a
         # narrower key (the part number alone) would merge two rows a house
         # reads as different parts; grouping on a wider one would split a row
-        # over a difference the file never carries.
-        #
-        # The AUTHORED footprint string, not the IR's content-hash footprint_id:
-        # the BOM's Footprint column names a part a purchaser recognizes.
-        # (assembly.package is its intended eventual home per the schema, but
-        # moving the column would change what a house is sent and is not this
-        # unit's job.)
-        footprint = assembly.footprint_ref
-        key = (footprint, component.value, assembly.mpn or "")
+        # over a difference the file never carries. It is therefore built from
+        # the RESOLVED columns above, not the authored fields behind them: two
+        # components that print identically are one line whichever field each
+        # authored it in.
+        key = (footprint, comment, part_number or "")
         grp = groups.setdefault(key, {
-            "refs": [], "value": component.value, "footprint": footprint,
-            "mpn": assembly.mpn,
+            "refs": [], "comment": comment, "footprint": footprint,
+            "part_number": part_number, "mpn": assembly.mpn,
         })
         # ONE REF PER PART, not per drawing: a component carrying a synthetic
         # expansion contributes each authored physical designator, so a grouped
@@ -296,12 +372,12 @@ def _walk(board, profile: HouseProfile):
 
     bom = [
         BomRow(
-            refs=tuple(sorted(g["refs"])), value=g["value"], footprint=g["footprint"],
-            mpn=g["mpn"], qty=len(g["refs"]),
+            refs=tuple(sorted(g["refs"])), comment=g["comment"], footprint=g["footprint"],
+            part_number=g["part_number"], mpn=g["mpn"], qty=len(g["refs"]),
         )
         for g in groups.values()
     ]
-    bom.sort(key=lambda r: (r.footprint, r.value, r.refs[0] if r.refs else ""))
+    bom.sort(key=lambda r: (r.footprint, r.comment, r.refs[0] if r.refs else ""))
     cpl.sort(key=lambda r: r.ref)
     return bom, cpl, tuple(excluded), placed
 
@@ -358,7 +434,7 @@ def _render_jlc_bom(rows: list[BomRow]) -> str:
     lines = [_csv_line(["Comment", "Designator", "Footprint", "LCSC Part #"])]
     for row in rows:
         lines.append(_csv_line([
-            row.value, ",".join(row.refs), row.footprint, row.mpn or "",
+            row.comment, ",".join(row.refs), row.footprint, row.part_number or "",
         ]))
     return CSV_EOL.join(lines) + CSV_EOL
 
@@ -394,6 +470,28 @@ class AssemblyResult(dict):
         self.advisories = advisories
 
 
+#: ``profile id -> (BOM renderer, CPL renderer)``. One table, so a profile
+#: declared assembly-capable with no renderer is one missing entry rather than
+#: two divergent dispatch branches.
+_RENDERERS = {"jlc": (_render_jlc_bom, _render_jlc_cpl)}
+
+
+def _renderers(profile: HouseProfile):
+    try:
+        return _RENDERERS[profile.id]
+    except KeyError:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
+        raise AssemblyProfileError(
+            f"no renderer wired for profile {profile.id!r}") from None
+
+
+def bom_filename(profile: HouseProfile, name: str | None = None) -> str:
+    return f"{name or 'board'}-bom-{profile.id}.csv"
+
+
+def cpl_filename(profile: HouseProfile, name: str | None = None) -> str:
+    return f"{name or 'board'}-cpl-{profile.id}.csv"
+
+
 def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
     """House-agnostic BOM extraction rendered through ``profile_id``'s house
     format. ``board`` is a compiled ``resolved_board.ResolvedBoard`` — the same
@@ -401,13 +499,8 @@ def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyRes
     AssemblyIdentityError / AssemblyBoardError / AssemblyGateError — never
     returns a partial or best-guess result."""
     emission = emit(board, profile_id)
-    base = name or "board"
-    if emission.profile.id == "jlc":
-        content = _render_jlc_bom(emission.bom)
-    else:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
-        raise AssemblyProfileError(
-            f"no BOM renderer wired for profile {emission.profile.id!r}")
-    return AssemblyResult({f"{base}-bom-{emission.profile.id}.csv": content},
+    render_bom, _ = _renderers(emission.profile)
+    return AssemblyResult({bom_filename(emission.profile, name): render_bom(emission.bom)},
                           list(emission.bom), emission.excluded_refs,
                           emission.advisories)
 
@@ -417,15 +510,42 @@ def build_cpl(board, profile_id: str, *, name: str | None = None) -> AssemblyRes
     ``profile_id``'s house format. Same compiled-IR input and same fail-closed
     contract as :func:`build_bom`."""
     emission = emit(board, profile_id)
-    base = name or "board"
-    if emission.profile.id == "jlc":
-        content = _render_jlc_cpl(emission.cpl)
-    else:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
-        raise AssemblyProfileError(
-            f"no CPL renderer wired for profile {emission.profile.id!r}")
-    return AssemblyResult({f"{base}-cpl-{emission.profile.id}.csv": content},
+    _, render_cpl = _renderers(emission.profile)
+    return AssemblyResult({cpl_filename(emission.profile, name): render_cpl(emission.cpl)},
                           list(emission.cpl), emission.excluded_refs,
                           emission.advisories)
+
+
+@dataclass(frozen=True)
+class AssemblyPackage:
+    """Both order files from ONE emission of ONE compiled board.
+
+    THE ORDER BOUNDARY. A caller that wants the pair must come through here
+    rather than calling :func:`build_bom` and :func:`build_cpl` in turn: those
+    are two emissions, and if the board, library or footprint state moves
+    between them the two files describe two different resolved boards while the
+    reference-set gate inside each still passes. The gate compares the rows of
+    ONE walk, so it can only prove the two files agree when there is one walk.
+
+    ``files`` is the ``{filename: content}`` mapping the writers take; the two
+    name fields say which entry is which without re-deriving a filename."""
+
+    emission: AssemblyEmission
+    bom_file: str
+    cpl_file: str
+    files: dict[str, str]
+
+
+def build_package(board, profile_id: str, *, name: str | None = None) -> AssemblyPackage:
+    """Both order CSVs from one compilation, one walk and one gate run."""
+    emission = emit(board, profile_id)
+    render_bom, render_cpl = _renderers(emission.profile)
+    bom_file = bom_filename(emission.profile, name)
+    cpl_file = cpl_filename(emission.profile, name)
+    return AssemblyPackage(
+        emission=emission, bom_file=bom_file, cpl_file=cpl_file,
+        files={bom_file: render_bom(emission.bom),
+               cpl_file: render_cpl(emission.cpl)})
 
 
 # ---------------------------------------------------------------------------

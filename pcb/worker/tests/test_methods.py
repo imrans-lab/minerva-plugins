@@ -326,8 +326,9 @@ def test_check_bom_footprint_found_and_suggestions_with_lib_dir(board_yaml):
 
 
 # ---------------------------------------------------------------------------
-# assembly_bom / assembly_cpl — RPC wiring only (see test_assembly_outputs.py
-# for emitter mechanics: grouping, rotation convention, identity refusal).
+# assembly_bom / assembly_cpl / assembly_package — RPC wiring only (see
+# test_assembly_outputs.py for emitter mechanics: grouping, rotation
+# convention, identity refusal).
 # ---------------------------------------------------------------------------
 
 ASSEMBLY_BOARD = (Path(__file__).resolve().parent / "testdata" / "assembly_boards"
@@ -430,6 +431,48 @@ def test_assembly_bom_and_gerbers_describe_the_same_board():
                  if c.get("assembly") != "exclude"
                  and (c.get("assembly") or {}).get("populate") is not False}
     assert placed == populated
+
+
+def test_assembly_package_returns_both_csvs_from_one_call(assembly_yaml):
+    """The combined boundary is ONE dispatch call, and it names which file is
+    which. Two calls would be two compilations, and a BOM and a CPL from two
+    compilations can describe two different boards while each call's own
+    reference-set gate still passes."""
+    resp = _call("assembly_package", {"yaml": assembly_yaml, "name": "afix"})
+    assert resp["ok"] is True
+    result = resp["result"]
+    assert result["bom_file"] == "afix-bom-jlc.csv"
+    assert result["cpl_file"] == "afix-cpl-jlc.csv"
+    assert set(result["files"]) == {"afix-bom-jlc.csv", "afix-cpl-jlc.csv"}
+    assert "LCSC Part #" in result["files"]["afix-bom-jlc.csv"]
+    assert "Rotation" in result["files"]["afix-cpl-jlc.csv"]
+    # Both files come out of one walk, so they name the same designators.
+    import csv
+
+    bom = list(csv.reader(result["files"]["afix-bom-jlc.csv"].splitlines()))
+    cpl = list(csv.reader(result["files"]["afix-cpl-jlc.csv"].splitlines()))
+    bom_refs = {ref for row in bom[1:] for ref in row[1].split(",")}
+    assert bom_refs == {row[0] for row in cpl[1:]}
+    assert result["excluded_components"] == ["FID1", "TXT1"]
+
+
+def test_assembly_package_refuses_an_uncompilable_board_with_no_file(assembly_yaml):
+    """One refusal for the pair: an order is all-or-nothing, so the package
+    method must not return a BOM for a board whose CPL could not be built."""
+    resp = _call("assembly_package",
+                 {"yaml": UNCOMPILABLE_ASSEMBLY_BOARD.read_text(encoding="utf-8")})
+    assert resp["ok"] is False
+    assert "result" not in resp
+    assert resp["error"]["kind"] == "assembly_not_compilable"
+    assert resp["error"]["blocked_by"]
+
+
+def test_assembly_package_writes_both_files_to_out_dir(assembly_yaml, tmp_path):
+    resp = _call("assembly_package", {"yaml": assembly_yaml, "out_dir": str(tmp_path)})
+    assert resp["ok"] is True
+    assert len(resp["result"]["written"]) == 2
+    assert (tmp_path / "board-bom-jlc.csv").is_file()
+    assert (tmp_path / "board-cpl-jlc.csv").is_file()
 
 
 def test_assembly_bom_writes_out_dir(assembly_yaml, tmp_path):

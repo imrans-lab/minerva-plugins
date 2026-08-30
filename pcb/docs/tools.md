@@ -1637,7 +1637,7 @@ the canvas says "re-open Fab Preview".
 | `minerva_pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills |
 | `minerva_pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` |
 | `minerva_pcb_check_bom` | `check_bom` | BOM extraction + validation |
-| `minerva_pcb_export_assembly` | `assembly_bom` + `assembly_cpl` | pre-assembly order package (BOM + CPL/pick-and-place CSVs, house profile — `jlc` today) |
+| `minerva_pcb_export_assembly` | `assembly_package` | pre-assembly order package (BOM + CPL/pick-and-place CSVs from ONE compilation, house profile — `jlc` today) |
 | `minerva_pcb_fetch_libraries` / `minerva_pcb_library_status` | (in-process Go) | library data dir |
 
 Gerber/fab export shipped via `minerva_pcb_gerbers` (docket `019eb47ddebc`). See
@@ -1645,12 +1645,13 @@ Gerber/fab export shipped via `minerva_pcb_gerbers` (docket `019eb47ddebc`). See
 fab-correctness HITL gate; `docs/worker.md` for the worker method.
 
 Assembly export (`minerva_pcb_export_assembly`, docket `019fc2f8b903`, D0-5):
-C8 shipped the `assembly_bom`/`assembly_cpl` worker methods
-(`worker/pcb_worker/assembly_outputs.py`) with dispatch tests but no
-agent-facing tool; this round is the Go/manifest wiring only — one MCP tool
-calling both worker methods over the same board+profile, refusals (unknown
-house, missing part identity) surfaced verbatim via the same `isError`
-convention every other worker-backed tool uses.
+one MCP tool over `worker/pcb_worker/assembly_outputs.py`, making a SINGLE
+`assembly_package` worker call so both CSVs come from one compilation and one
+walk of the board — two calls would be two compilations, and the agreement gate
+inside each says nothing about the other. Refusals (unknown house, missing part
+identity, any hard gate) are surfaced verbatim via the same `isError` convention
+every other worker-backed tool uses. The worker also exposes `assembly_bom` and
+`assembly_cpl` for a caller that wants one artifact.
 
 A CPL row's coordinate is the **assembly anchor** — the part's body-box centre,
 composed through its rotation and side — not the `x_mm`/`y_mm` that place the

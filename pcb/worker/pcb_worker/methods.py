@@ -1368,14 +1368,21 @@ def _check_bom(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# assembly_bom / assembly_cpl — pre-assembled-order package outputs.
+# assembly_bom / assembly_cpl / assembly_package — pre-assembled-order outputs.
 #
-# Both COMPILE first, through the same `_compile_or_fail` prologue and the same
-# FAB capability profile `_gerbers` uses, then emit from the resulting
-# ResolvedBoard IR. One order, one board: the CSVs and the gerbers now derive
-# from the same compilation instead of the CSVs being read off the raw board
-# dict. The FAB profile is deliberate rather than a narrower assembly-only one
-# — a board whose gerbers are refused must not still yield an order's CSVs.
+# All three COMPILE first, through the same `_compile_or_fail` prologue and the
+# same FAB capability profile `_gerbers` uses, then emit from the resulting
+# ResolvedBoard IR. One order, one board: the CSVs and the gerbers derive from
+# the same compilation instead of the CSVs being read off the raw board dict.
+# The FAB profile is deliberate rather than a narrower assembly-only one — a
+# board whose gerbers are refused must not still yield an order's CSVs.
+#
+# `assembly_package` is the method a caller wanting BOTH files uses, and it is
+# ONE compilation and ONE walk. Two calls would be two compilations: the BOM
+# and the CPL could then describe different resolved boards — a footprint
+# re-blessed or a library layer changed in between is enough — while the
+# reference-set gate inside each call still passed, because that gate compares
+# the rows of its own walk and has nothing to say about the other call's.
 #
 # Return/write-to-disk convention deliberately mirrors `_gerbers`
 # ({files, written, warnings}), so a caller that already knows how to consume a
@@ -1511,6 +1518,37 @@ def _assembly_cpl(params: dict) -> dict:
         return written
     result = _assembly_reply(files, compiled)
     result["written"] = written
+    return {"ok": True, "result": result}
+
+
+def _assembly_package(params: dict) -> dict:
+    """Generate BOTH order CSVs from ONE compilation. Same params and same
+    reply convention as `_assembly_bom`, plus `bom_file` / `cpl_file` naming
+    which entry of `files` is which, so a caller never has to reconstruct a
+    filename to tell them apart."""
+    compiled = _compile_for_assembly(params)
+    if _is_error_reply(compiled):
+        return compiled
+
+    profile_id = params.get("profile") or "jlc"
+    base_name = params.get("name") if isinstance(params.get("name"), str) else None
+    try:
+        package = assembly_outputs.build_package(compiled.board, profile_id, name=base_name)
+    except Exception as exc:  # see _assembly_bom's comment: the dispatcher's
+        # broad-catch convention over caller-supplied board data, backstopping
+        # the named assembly_outputs errors.
+        return {"ok": False, "error": _assembly_refusal(exc)}
+
+    files = assembly_outputs.AssemblyResult(
+        package.files, list(package.emission.bom),
+        package.emission.excluded_refs, package.emission.advisories)
+    written = _write_assembly_files(files, params.get("out_dir"))
+    if _is_error_reply(written):
+        return written
+    result = _assembly_reply(files, compiled)
+    result["written"] = written
+    result["bom_file"] = package.bom_file
+    result["cpl_file"] = package.cpl_file
     return {"ok": True, "result": result}
 
 
@@ -4197,6 +4235,7 @@ _HANDLERS = {
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "assembly_bom": lambda req: _assembly_bom(req.get("params") or {}),
     "assembly_cpl": lambda req: _assembly_cpl(req.get("params") or {}),
+    "assembly_package": lambda req: _assembly_package(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),
     "draft_check": lambda req: _draft_check(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),

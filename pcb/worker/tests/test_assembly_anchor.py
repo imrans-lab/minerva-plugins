@@ -1,13 +1,12 @@
-"""The ASSEMBLY ANCHOR and the transform that places it — the seals for the
-task that CHANGED NUMBERS a caller already had on file.
+"""The ASSEMBLY ANCHOR and the transform that places it.
 
-Before this unit, a CPL row carried the component's authored ``x_mm``/``y_mm``:
-the FOOTPRINT ORIGIN. A house is told where to CENTRE a part, so for every
-footprint whose origin is not its body centre — 18 of the 39 seed footprints,
-14 of them because their origin is pin 1 — that coordinate was wrong by up to
-half a package, and by 30.85 mm on the DevKit socket set. Every row
-now carries ``PhysicalPlacement.anchor``, the resolved body-box centre. These
-tests are the oracle in BOTH directions:
+A CPL row carries ``PhysicalPlacement.anchor`` — the resolved body-box centre —
+and NOT the component's authored ``x_mm``/``y_mm``, which place the FOOTPRINT
+ORIGIN. A house is told where to CENTRE a part, so for every footprint whose
+origin is not its body centre — 18 of the 39 seed footprints, 14 of them because
+their origin is pin 1 — emitting the origin is wrong by up to half a package,
+and by 30.85 mm on the DevKit socket set. These tests are the oracle in BOTH
+directions:
 
   * a footprint whose origin already IS its body centre must emit EXACTLY what
     it emitted before (the Q rows below, plus every existing seal in
@@ -171,9 +170,8 @@ def test_a_footprint_already_centred_on_its_origin_does_not_move(ref, position):
     """THE ORACLE IN THE OTHER DIRECTION. SOT-23's body centre IS its origin, so
     the transform composes the anchor back onto the placement position — at
     every angle and on both sides — and the emitted coordinate is bit-for-bit
-    the authored one this unit inherited. If a part like this ever moves, the
-    anchor derivation has acquired an offset from something that is not the
-    body.
+    the authored one. If a part like this ever moves, the anchor derivation has
+    acquired an offset from something that is not the body.
 
     Exact equality, not approx: the local anchor is (0, 0), and the transform
     short-circuits a zero offset to the position itself rather than through any
@@ -391,9 +389,8 @@ def test_emitted_rotation_turns_the_part_counter_clockwise(at_zero, turned):
 
 def test_bottom_side_coordinates_are_not_mirrored():
     """JLCPCB'S OTHER CONVENTION, PROVEN: bottom-side coordinates are NOT
-    mirrored — they are stated in the same top-view frame as everything else.
-    (JLC stopped mirroring them in November 2023; a mirrored file is now the
-    wrong file.)
+    mirrored — they are stated in the same top-view frame as everything else, so
+    a mirrored file is the wrong file.
 
     Two SOT-23s at the same rotation, one per side. The bottom part's emitted X
     is its authored X, unnegated, and — the sharper claim, because an X negation

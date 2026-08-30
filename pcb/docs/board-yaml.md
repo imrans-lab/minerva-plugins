@@ -499,19 +499,41 @@ components:
 |---|---|
 | `populate` | `false` marks the part **do-not-populate**: it stays in the gerbers (its lands are still etched) and leaves **both** assembly CSVs, logged by ref. Absent means populated. |
 | `manufacturer` / `mpn` | the orderable part's identity. |
-| `package` | the package name an assembly BOM prints, independent of the footprint id the board routes against. |
-| `comment` | the BOM's human-facing description column. |
-| `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. |
+| `package` | the package name the BOM's Footprint column prints, independent of the footprint id the board routes against. Absent, that column falls back to the authored `footprint`. |
+| `comment` | the BOM's Comment column. Absent, it falls back to the component's `value`. |
+| `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. The BOM's part-number column prints the entry for the **selected** house; absent, it falls back to `mpn`. |
 | `paste` | `auto` (the default) leaves the footprint's own layer list to decide; `exclude` drops this part's stencil apertures; `include` declines to drop them. See "Solder paste is authored, never invented" below. |
 | `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. |
+
+The three column fields resolve to the BOM's cells with exactly one fallback
+each, applied once at emit time so no consumer re-decides what a column means:
+
+| BOM column | authored field | fallback when absent |
+|---|---|---|
+| Comment | `assembly.comment` | the component's `value` |
+| Footprint | `assembly.package` | the authored `footprint` ref |
+| part number (e.g. "LCSC Part #") | `assembly.house_parts[<selected house>]` | `assembly.mpn` |
+
+Which key names the selected house is a **dialect** fact carried on the house
+profile, not a guess: the `jlc` profile reads `house_parts.jlcpcb`. A board
+carrying two houses' numbers therefore ships the selected house's, never the
+first one written.
+
+**An authored empty `placements: []` is a fault that is KEPT, not tidied away.**
+It says "this drawing stands for several parts" and then names none, which the
+export gate refuses (`assembly_empty_expansion`). Both codecs round-trip the
+empty list rather than dropping the key, so a board that has been through a load
+and a save still carries the fault for the gate to find; an absent key stays
+absent.
 
 **Unknown keys inside `assembly` are REFUSED**, not preserved — the opposite of
 the board's general Extra-passthrough rule (see "Losslessness & the warnings
 list"). This block is the only source of part identity for an order, so `mpm:
 C123` silently vanishing and resurfacing later as "missing mpn", or a mistyped
 `offset_mm` quietly placing a part at its parent's origin, is exactly the quiet
-wrong answer the order path exists to refuse. Both codecs enforce it
-(`internal/board/assembly.go`).
+wrong answer the order path exists to refuse. Both codecs enforce it at every
+level of the block, including **inside** `offset_mm`: `{xx: 22.86, y: 0}`
+refuses rather than defaulting x to 0 (`internal/board/assembly.go`).
 
 ### Expansion refs are AUTHORED
 
@@ -556,7 +578,7 @@ compiles and fabricates while carrying any of them.
 
 | code | refuses when |
 |---|---|
-| `assembly_duplicate_designator` | one designator names two physical parts — including a collision that only appears after case-folding, which an uploader will not distinguish. |
+| `assembly_duplicate_designator` | one designator names two physical parts. In practice this is the CASE-FOLD collision (`C1` and `c1`), which an uploader will not distinguish: an exact repeat is already refused upstream — two components sharing a ref by the compiler (`duplicate_component_ref`, naming the ref), two placements sharing one by `Validate` (`duplicate_assembly_designator`). |
 | `assembly_reference_set_mismatch` | the BOM and the CPL name different designators after expansion. |
 | `assembly_row_ref_limit` | a grouped BOM row carries more designators than the profile's `max_refs_per_row`, where a house would silently truncate the tail. |
 | `assembly_placements_too_close` | two designators on one side sit closer than the profile's `min_designator_separation_mm` — usually a synthetic expansion whose `offset_mm` is missing or zero. |
