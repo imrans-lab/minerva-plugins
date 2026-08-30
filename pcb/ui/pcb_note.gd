@@ -2,39 +2,26 @@ extends RefCounted
 ## THE NOTE A PCB TAB HANDS THE HOST — the plugin_data note behind Save to Note
 ## and the chat-inject toggle, and the restore that reopens the board from it.
 ##
-## Without these hooks the host falls back to a raw screenshot of the panel
-## viewport (Editor._create_plugin_scene_screenshot_note): a flat image note of
-## whatever camera the user was on, carrying no board, so the note cannot be
-## reopened and a zoomed-in tab injects a corner of the board into the chat.
+## Three parts:
 ##
-## Three parts, and the split between them is the design:
-##
-##   payload    the SAVED board dict — PCBData.to_saved_board_dict, the exact
-##              shape _on_panel_save_request writes to a .pcbskel and
-##              from_board_dict reads back. Restoring it into a fresh panel
-##              therefore yields the same board, and a note written on one
-##              machine does not carry this machine's library resolution
-##              (that is what "saved" strips).
+##   payload    the SAVED board dict — PCBData.to_saved_board_dict, the shape
+##              _on_panel_save_request writes and from_board_dict reads back, so
+##              a fresh panel restores the same board and the note never carries
+##              this machine's library resolution (the saved form strips it).
 ##
 ##   preview    the canvas rendered FIT TO THE BOARD, off-screen, at a
-##              resolution where the designators survive — not a crop of the
-##              live camera. Same capture body minerva_pcb_get_image uses.
+##              resolution where designators survive — the same awaiting
+##              pcb_canvas.capture_to_image the MCP image export uses. The hook
+##              is therefore a coroutine, and the host awaits it.
 ##
-##   alt text   a caption of facts the model ALREADY HOLDS: name, size, stack,
-##              fabrication stage, counts, source path. NOTHING IS COMPUTED FOR
-##              THE NOTE — no DRC, no worker round trip, no pour fill. A note is
-##              what the user is looking at, and making it a report card would
-##              both stall the toggle on a worker call and put a verdict in the
-##              chat that no one asked for.
-##
-## The create hook is a coroutine: the host awaits it, so the preview comes
-## from the same awaiting pcb_canvas.capture_to_image the MCP image export
-## uses — one capture path, one framing.
+##   alt text   a caption of facts the model already holds: name, size, stack,
+##              fabrication stage, counts, source path. Nothing is computed for
+##              the note — no DRC, no worker round trip, no pour fill.
 ##
 ## A capture that cannot run (headless, canvas detached) leaves preview_image
-## out of the note. The host then substitutes its own panel screenshot where it
-## can take one; where it cannot, the host drops the plugin_data shape and the
-## note degrades to a plain screenshot note.
+## out. The host substitutes its own panel screenshot where it can take one;
+## where it cannot, it drops the plugin_data shape and the note degrades to a
+## plain screenshot note.
 
 const PcbViewFit := preload("pcb_view_fit.gd")
 
