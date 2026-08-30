@@ -25,7 +25,10 @@ places (R_0805, D_SMA, and two excluded pieces of furniture) is already centred
 on its own origin, so its anchors compose back onto its positions exactly. That
 makes this file the "nothing moved that should not have" half of that unit's
 oracle; the half where things DO move is test_assembly_anchor.py.
-  * test_bom_groups_by_the_emitted_columns — BOM grouping seal.
+  * test_bom_groups_by_the_emitted_columns — BOM grouping seal. The fixture
+    authors ``package`` on BOTH resistors so this seal measures grouping rather
+    than an authoring asymmetry; the asymmetry gets its own board and its own
+    test (test_bom_asymmetric_package_authoring_splits_the_row).
   * test_*_identity_refusal* — the part-identity contract.
   * test_*_house_refusal* — the per-house capability refusal.
   * test_uncompilable_board_* — the deliberate capability regression, named.
@@ -173,8 +176,10 @@ def test_rows_match_the_raw_dict_arithmetic_they_replaced():
     """The same oracle as above, stated so it cannot go stale with a fixture
     edit: the expectation is derived HERE, in the test, from the fixture's own
     authored dict using the arithmetic the retired raw-dict path used (x
-    verbatim, y negated, rotation modulo 360, layer as side, footprint string
-    as the BOM Footprint cell). Every populated component must match.
+    verbatim, y negated, rotation modulo 360, layer as side). Every populated
+    component must match. The BOM arm derives its two columns from the
+    documented column table rather than from the retired path's footprint
+    string, because the Footprint column now prefers an authored `package`.
 
     This is what makes "the plumbing swap changed nothing it should not" a
     measured claim rather than a hardcoded one — it holds for whatever the
@@ -199,10 +204,17 @@ def test_rows_match_the_raw_dict_arithmetic_they_replaced():
 
     for bom_row in ao.build_bom(compiled, "jlc").rows:
         for ref in bom_row.refs:
-            # The fixture authors no `package` and no `comment`, so both columns
-            # fall back to the pre-block sources this arm compares against.
-            assert bom_row.footprint == authored[ref]["footprint"]
-            assert bom_row.comment == authored[ref].get("value", "")
+            comp = authored[ref]
+            block = comp.get("assembly")
+            block = block if isinstance(block, dict) else {}
+            # The Footprint column is the authored `package` read through the
+            # identity fold's precedence — structured block, then the pre-block
+            # top-level scalar — and the footprint ref only where neither
+            # authors one. `comment` is authored nowhere here, so the Comment
+            # column is the component's own value.
+            package = block.get("package") or comp.get("package")
+            assert bom_row.footprint == (package or comp["footprint"])
+            assert bom_row.comment == comp.get("value", "")
 
 
 def test_cpl_rotation_normalizes_negative_and_over_360():
@@ -241,18 +253,20 @@ def test_unusable_layer_never_reaches_the_emitter(layer):
 
 
 def test_bom_groups_by_the_emitted_columns():
-    """R1 + R2 print identically (R_0805, "10k", C25804) -> ONE grouped row with
-    both refs and qty=2 — even though R1 authors its part number as a
-    ``house_parts`` entry inside the structured block and R2 as the pre-block
-    top-level ``mpn`` scalar. That is the point of grouping on the RESOLVED
-    columns: what a house reads is one line, so the file carries one line. D1
-    (Diode_SMD:D_SMA, 1N4148, C2128, authored in a properties mapping) is its
-    own row, qty=1."""
+    """R1 + R2 print identically ("0805", "10k", C25804) -> ONE grouped row with
+    both refs and qty=2 — even though R1 authors its package and its part
+    number inside the structured block (the latter as a ``house_parts`` entry)
+    and R2 authors both as pre-block top-level scalars. That is the point of
+    grouping on the RESOLVED columns: what a house reads is one line, so the
+    file carries one line. The Footprint cell is ``0805``, the authored
+    package, not the ``R_0805`` footprint ref it falls back to. D1
+    (Diode_SMD:D_SMA, 1N4148, C2128, authored in a properties mapping) authors
+    no package, so its cell IS the footprint ref; it is its own row, qty=1."""
     result = ao.build_bom(_compiled(_load()), "jlc")
     assert len(result.rows) == 2
 
     by_footprint = {row.footprint: row for row in result.rows}
-    r0805 = by_footprint["R_0805"]
+    r0805 = by_footprint["0805"]
     assert r0805.refs == ("R1", "R2")
     assert r0805.comment == "10k"
     assert r0805.part_number == "C25804"
@@ -378,12 +392,26 @@ def test_two_parts_differing_only_in_comment_are_separate_rows():
 
 
 def test_bom_csv_hand_derived_bytes():
+    """assembly_resolved.yaml, by inspection, through the column table in
+    assembly_outputs' docstring — Comment = ``assembly.comment`` else ``value``,
+    Footprint = ``assembly.package`` else the footprint ref, LCSC = the jlcpcb
+    ``house_parts`` entry else ``mpn``:
+
+      R1 -> ("10k", "0805", "C25804")   package + house number from the block
+      R2 -> ("10k", "0805", "C25804")   package + mpn as top-level scalars
+      D1 -> ("1N4148", "Diode_SMD:D_SMA", "C2128")   no package, no house entry
+
+    R1 and R2 agree on all four grouping-key fields (those three plus mpn
+    "C25804"), so they are ONE line whose Designator cell is CSV-quoted for the
+    comma it contains. Rows sort by (Footprint, Comment, first ref), and "0805"
+    sorts before "Diode_SMD:D_SMA" — '0' precedes 'D' — so the resistor line is
+    first. FID1/TXT1 are furniture and contribute nothing."""
     result = ao.build_bom(_compiled(_load()), "jlc", name="afix")
     assert list(result.keys()) == ["afix-bom-jlc.csv"]
     expected = (
         "Comment,Designator,Footprint,LCSC Part #\r\n"
+        '10k,"R1,R2",0805,C25804\r\n'
         "1N4148,D1,Diode_SMD:D_SMA,C2128\r\n"
-        '10k,"R1,R2",R_0805,C25804\r\n'
     )
     assert result["afix-bom-jlc.csv"] == expected
 
@@ -392,13 +420,27 @@ def test_bom_different_mpn_same_footprint_value_are_separate_rows():
     """Two components sharing (footprint, value) but authored with DIFFERENT
     mpn are NOT collapsed into one row — an mpn is part of the identity a
     grouped BOM row asserts, so merging would silently claim one part number
-    for two potentially-different real parts."""
+    for two potentially-different real parts.
+
+    THE mpn HAS TO BE THE ONLY DIFFERENCE, or the split proves nothing about
+    it. R2 authors no ``house_parts``, so changing its mpn alone would also
+    change its LCSC cell (that column falls back to the mpn) and the row would
+    split on the Footprint/LCSC key before mpn was ever consulted. Giving R2
+    R1's house number holds all four emitted columns identical, so mpn is the
+    single field the two disagree about and the single reason they split."""
     board = _load()
-    board["components"][1]["mpn"] = "C99999"  # R2 diverges from R1
+    board["components"][1]["assembly"] = {"house_parts": {"jlcpcb": "C25804"}}
+    board["components"][1]["mpn"] = "C99999"  # R2 diverges from R1, in mpn only
     result = ao.build_bom(_compiled(board), "jlc")
     assert len(result.rows) == 3
-    refs = {row.refs for row in result.rows}
-    assert ("R1",) in refs and ("R2",) in refs
+
+    rows = {row.refs: row for row in result.rows}
+    assert ("R1",) in rows and ("R2",) in rows
+    r1, r2 = rows[("R1",)], rows[("R2",)]
+    # Every emitted cell agrees; only the mpn riding beside them differs.
+    assert (r1.comment, r1.footprint, r1.part_number) == ("10k", "0805", "C25804")
+    assert (r2.comment, r2.footprint, r2.part_number) == ("10k", "0805", "C25804")
+    assert (r1.mpn, r2.mpn) == ("C25804", "C99999")
 
 
 def _pair(first_assembly: dict, second_assembly: dict) -> dict:
@@ -448,6 +490,40 @@ def test_one_mpn_across_both_refs_still_groups_into_a_single_row():
     assert [(row.refs, row.mpn, row.qty) for row in result.rows] == [
         (("R1", "R2"), "RC0805FR-0710KL", 2)]
     assert next(iter(result.values())).splitlines()[1] == 'RES 10k,"R1,R2",0805,C84376'
+
+
+def test_bom_asymmetric_package_authoring_splits_the_row():
+    """AUTHORING ``package`` ON ONE PART AND NOT ITS TWIN SPLITS THE ROW, and
+    that is correct rather than a grouping bug. The Footprint column prints the
+    authored package when there is one and the footprint ref when there is not,
+    so two otherwise-identical parts print ``0805`` and ``R_0805`` — two
+    different cells, therefore two different grouping keys, therefore two lines
+    with qty=1 each.
+
+    Pinned on its OWN board rather than inside a grouping seal. The seals exist
+    to prove that parts a house reads as one part arrive as one line; a fixture
+    that authored the package asymmetrically would satisfy them by splitting on
+    this instead, and they would stop measuring grouping without ever going
+    red. Here the split IS the claim.
+
+    The oracle is both cells: the row a purchaser reads carries the package the
+    author wrote, and the row whose author wrote none carries the footprint ref
+    it falls back to. Everything else about the two parts — value, footprint,
+    mpn, and therefore the LCSC cell that falls back to it — is identical."""
+    result = ao.build_bom(_compiled(_pair(
+        {"mpn": "C25804", "package": "0805"},
+        {"mpn": "C25804"})), "jlc")
+
+    assert [(row.refs, row.footprint, row.qty) for row in result.rows] == [
+        (("R1",), "0805", 1),
+        (("R2",), "R_0805", 1),
+    ]
+    assert all(row.comment == "10k" and row.part_number == "C25804"
+               and row.mpn == "C25804" for row in result.rows)
+    assert next(iter(result.values())).splitlines()[1:] == [
+        "10k,R1,0805,C25804",
+        "10k,R2,R_0805,C25804",
+    ]
 
 
 @pytest.mark.parametrize("key,bad", [("value", 10), ("footprint", 12345)])

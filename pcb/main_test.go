@@ -871,7 +871,9 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	}
 
 	// --- happy path: both files written, row counts match C8's seals -------
-	// (2 grouped BOM rows: R_0805 x2 refs + the diode; 3 CPL rows: one per
+	// (2 grouped BOM rows: the 0805 resistor group x2 refs + the diode; the
+	// resistors group because the fixture authors `package` on BOTH of them,
+	// so both print the same Footprint cell; 3 CPL rows: one per
 	// POPULATED component — the fixture's fiducial and coupon text are board
 	// furniture and contribute no row — hand-derived in
 	// worker/tests/test_assembly_outputs.py).

@@ -17,13 +17,20 @@
 # requires.
 #
 # Deliberately exercises:
-#   * two components sharing (footprint, value, mpn) -> one grouped BOM line
-#     with two refs (R1, R2);
+#   * two components sharing every EMITTED BOM column (package, value, part
+#     number) -> one grouped BOM line with two refs (R1, R2). `package` is
+#     authored on BOTH, because the Footprint column prints the authored
+#     package when there is one and the footprint ref when there is not: a
+#     board that authored it on only one of the pair would print `0805` beside
+#     `R_0805` and split the row on the asymmetry rather than on anything the
+#     grouping seals are about. The asymmetry itself is measured on its own
+#     board (test_bom_asymmetric_package_authoring_splits_the_row);
 #   * a non-zero rotation (R2 @ 90) and a BOTTOM-side off-axis one (D1 @ 45);
 #   * all THREE authored homes for part identity — the structured assembly
-#     block (R1), the pre-block top-level scalar (R2), and a nested properties
-#     mapping (D1) — so the compile-time precedence fold is covered by the
-#     board every emitter test already loads;
+#     block (R1), the pre-block top-level scalars (R2, which carries both its
+#     `mpn` and its `package` there), and a nested properties mapping (D1) — so
+#     the compile-time precedence fold is covered by the board every emitter
+#     test already loads;
 #   * BOTH non-populated forms — the legacy `assembly: exclude` scalar (FID1)
 #     and the structured `populate: false` (TXT1) — which must contribute no
 #     BOM row, no CPL row, and no identity requirement.
@@ -51,13 +58,18 @@ components:
     assembly:
       mpn: C25804
       manufacturer: Yageo
-      package: 0805
+      # QUOTED: the identity fold takes strings only, and an unquoted package
+      # whose digits happen to parse as a number (0402, 0603) would reach the
+      # IR as None and silently fall back to the footprint ref.
+      package: "0805"
       house_parts: {jlcpcb: C25804}
-  # Identity as the pre-block top-level scalar; groups with R1 regardless.
+  # Identity as pre-block top-level scalars — mpn AND package, so R1 and R2
+  # print the same Footprint cell from two different authored homes.
   - ref: R2
     footprint: R_0805
     value: "10k"
     mpn: C25804
+    package: "0805"
     x_mm: 15.0
     y_mm: 5.0
     rotation_deg: 90
