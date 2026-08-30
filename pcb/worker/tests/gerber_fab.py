@@ -40,6 +40,22 @@ def load_board(path) -> dict:
     return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
 
 
+def compile_fixture(path, base: str, who: str):
+    """Strict-compile a fixture to its ResolvedBoard, or RAISE naming the error
+    codes. The ONE compile step every production-path helper here shares, so a
+    fixture cannot compile differently depending on which artifact is being
+    built — which is the same property the production path itself now has, with
+    gerbers and BOM/CPL both derived from one compilation."""
+    result = compile_board(load_board(path))
+    if not isinstance(result, ResolutionSuccess):
+        codes = [d.code for d in result.diagnostics
+                 if d.severity is DiagnosticSeverity.ERROR]
+        raise RuntimeError(
+            f"{who}: production compile FAILED for {base!r} — failing CLOSED "
+            f"with no raw-dict fallback (bug 019f917bbe18); error codes: {codes}")
+    return result.board
+
+
 def build_fab(path, base: str, **kwargs) -> gerber.GerberResult:
     """Compile + emit a fixture through the PRODUCTION IR-native fab path,
     mirroring ``methods._gerbers``: ``build_gerbers_ir(compile_board(src).board)``
@@ -52,15 +68,8 @@ def build_fab(path, base: str, **kwargs) -> gerber.GerberResult:
     and silently rerouting a golden / determinism / geometry-diff / gerbonara
     oracle onto the tolerant emitter while production correctly fails.
     """
-    src = load_board(path)
-    result = compile_board(src)
-    if not isinstance(result, ResolutionSuccess):
-        codes = [d.code for d in result.diagnostics
-                 if d.severity is DiagnosticSeverity.ERROR]
-        raise RuntimeError(
-            f"build_fab: production compile FAILED for {base!r} — failing CLOSED "
-            f"with no raw-dict fallback (bug 019f917bbe18); error codes: {codes}")
-    return gerber.build_gerbers_ir(result.board, name=base, **kwargs)
+    return gerber.build_gerbers_ir(compile_fixture(path, base, "build_fab"),
+                                   name=base, **kwargs)
 
 
 def build_raw_emitter(path, base: str, **kwargs) -> gerber.GerberResult:
@@ -82,9 +91,11 @@ def build_raw_emitter(path, base: str, **kwargs) -> gerber.GerberResult:
 
 
 def build_assembly_bom(path, base: str, **kwargs) -> assembly_outputs.AssemblyResult:
-    """Emit a fixture's JLC BOM (C8, docket 019f763cdf5b) — operates on the RAW
-    loose board dict, mirroring ``methods._assembly_bom`` exactly (no IR
-    compile; see ``assembly_outputs.py``'s module docstring for why).
+    """Emit a fixture's JLC BOM, mirroring ``methods._assembly_bom`` exactly:
+    strict compile, then emit from the ResolvedBoard — the SAME compilation
+    :func:`build_fab` gerbers the board from, which is the whole point of the
+    cutover (one order, one board). Same fail-closed contract, via the shared
+    :func:`compile_fixture`.
 
     Accepts and IGNORES a ``creation_date`` kwarg so this can share
     ``test_determinism_gate.py``'s parametrized CASES list with the Gerber
@@ -94,11 +105,13 @@ def build_assembly_bom(path, base: str, **kwargs) -> assembly_outputs.AssemblyRe
     which is the correct (not merely convenient) result for this emitter.
     """
     kwargs.pop("creation_date", None)
-    return assembly_outputs.build_bom(load_board(path), "jlc", name=base, **kwargs)
+    board = compile_fixture(path, base, "build_assembly_bom")
+    return assembly_outputs.build_bom(board, "jlc", name=base, **kwargs)
 
 
 def build_assembly_cpl(path, base: str, **kwargs) -> assembly_outputs.AssemblyResult:
     """Emit a fixture's JLC CPL — see :func:`build_assembly_bom` (same
     contract, same reason ``creation_date`` is accepted-and-ignored)."""
     kwargs.pop("creation_date", None)
-    return assembly_outputs.build_cpl(load_board(path), "jlc", name=base, **kwargs)
+    board = compile_fixture(path, base, "build_assembly_cpl")
+    return assembly_outputs.build_cpl(board, "jlc", name=base, **kwargs)

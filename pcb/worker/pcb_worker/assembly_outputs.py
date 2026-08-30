@@ -2,15 +2,23 @@
 placement list / pick-and-place) for pre-assembled board ordering (docket
 019f763cdf5b).
 
-Scope, deliberately narrow (C8, epoch C):
+Scope:
 
-  * Operates on the RAW canonical board dict (the same loose-dict shape
-    ``board_model.extract_bom`` already reads), NOT the compiled
-    ``ResolvedBoard`` IR. This mirrors the one BOM path that already ships
-    (``board_model.extract_bom``) rather than growing ``resolved_board.py`` /
-    ``compile_board.py`` with a new per-component "properties" field this unit
-    was not asked to model. A component's identity fields (MPN etc.) are read
-    straight off its authored dict entry.
+  * ONE COMPILATION FEEDS EVERY ORDER ARTIFACT. Both emitters read the compiled
+    ``ResolvedBoard`` IR — the same object ``gerber.build_gerbers_ir`` reads —
+    and nothing else. They used to read the RAW canonical board dict instead,
+    which meant a single order could carry CSVs describing one board and
+    gerbers describing another: the dict path emitted rows for placements the
+    compiler had never resolved, footprints no library supplies, and pins whose
+    declared positions the coincidence check refuses. Every coordinate, side,
+    rotation, value and part identity below now comes from a component the
+    compiler admitted.
+
+    THE DELIBERATE CAPABILITY REGRESSION this creates, stated rather than
+    discovered: a board that cannot strictly compile could produce a BOM and a
+    CPL before, and cannot now. That outcome is a NAMED, structured refusal
+    identifying what blocked compilation (:func:`not_compilable_error`) — never
+    a traceback, and never a partial CSV.
   * House-format-agnostic CORE (:func:`_bom_rows` / :func:`_cpl_rows`) plus
     exactly ONE house-specific renderer (JLCPCB-style CSV, ``PROFILES["jlc"]``).
     An unrecognized or assembly-incapable house id is a NAMED refusal
@@ -68,8 +76,12 @@ ROTATION CONVENTION — read before touching any rotation math here:
     IMPORT time, before a component ever reaches this module — so
     ``rotation_deg`` here is already KiCad-equivalent by the time we see it.)
 
-COORDINATE FRAME — MEASURED, NOT ASSUMED. CPL X is the authored ``x_mm``
-VERBATIM; CPL Y is the authored ``y_mm`` NEGATED (``-y_mm``). This is proven
+COORDINATE FRAME — MEASURED, NOT ASSUMED. CPL X is the resolved placement's
+X VERBATIM; CPL Y is its Y NEGATED. (``Placement.position`` is
+``(comp["x_mm"], comp["y_mm"])`` verbatim and ``Placement.rotation_deg`` is
+``float(rotation or 0.0)`` verbatim — compile_board threads both through
+unchanged — so reading them from the IR instead of the dict changes no emitted
+number.) This is proven
 against KiCad itself, not inferred from a Y-down/Y-up label — full command,
 measured output table, and the byte-exact seal are in
 ``tests/test_assembly_outputs.py::test_cpl_y_matches_kicad_cli_position_file_oracle``
@@ -84,8 +96,8 @@ for bottom parts under an opt-in flag, which the oracle run did NOT pass —
 the omission is the profile decision this module makes: match the tool's
 DEFAULT, not the opt-in). This is also consistent with ``gerber.py``'s own
 ``_Geometry.to_gerber_frame`` (gerber.py:466), which negates Y at its harvest
-boundary for the identical reason: the canonical board dict's ``y_mm`` is
-Y-DOWN, and every consumer outside that one frame (Gerber's Y-up plot frame,
+boundary for the identical reason: the placement frame is Y-DOWN, and every
+consumer outside that one frame (Gerber's Y-up plot frame,
 KiCad's own position-file export) negates it. A CPL is not a Gerber layer and
 is not re-derived through ``_Geometry`` — this module negates Y itself, at
 its own row-construction boundary (:func:`_cpl_rows`), rather than importing
@@ -97,9 +109,6 @@ WRONG — corrected here after running the oracle referenced above.
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-from .board_model import _as_list, _is_number
-from .geometry import BOTTOM_LAYER_NAMES, TOP_LAYER_NAMES
 
 CSV_EOL = "\r\n"  # JLC's own templates ship CRLF; keep it stable either way.
 
@@ -117,11 +126,15 @@ class AssemblyIdentityError(ValueError):
 
 
 class AssemblyBoardError(ValueError):
-    """The board dict itself is structurally unusable for assembly output
-    (mirrors board_model.extract_bom's error shape, but this module fails
-    closed with an exception rather than an {"ok": False} payload — callers
-    that want the tolerant shape should catch this, matching how
-    ``gerber.build_gerbers_ir`` callers already catch emitter exceptions)."""
+    """The COMPILED board handed to an emitter is not usable for assembly
+    output — today, a component the compiler did not attach assembly facts to.
+    Fails closed with an exception rather than an {"ok": False} payload, which
+    is how ``gerber.build_gerbers_ir`` callers already handle emitter faults.
+
+    The board-SHAPE faults this used to raise (a non-mapping board, a component
+    with no ref, a non-string value or footprint, an unrecognized layer) are now
+    the compiler's, and a board carrying any of them refuses before an emitter
+    is reached — see :func:`not_compilable_error`."""
 
 
 @dataclass(frozen=True)
@@ -172,31 +185,6 @@ def _resolve_profile(profile_id) -> HouseProfile:
     return profile
 
 
-def _component_property(comp: dict, key: str) -> str | None:
-    """Read an identity field off a component's authored dict entry.
-
-    Checked in THREE places, in precedence order — the first non-blank string
-    wins:
-
-      1. the structured ``assembly`` block (``comp["assembly"]["mpn"]``), the
-         canonical home for part identity (docs/board-yaml.md "Assembly");
-      2. a top-level scalar (``comp["mpn"]``), the pre-block authoring form;
-      3. a nested ``properties`` mapping (``comp["properties"]["mpn"]``), so a
-         structured properties bag is honored without a second reader.
-
-    The block is checked FIRST because it is the explicit, typed authority;
-    ordering it above the legacy scalars cannot change any board that predates
-    the block, since none of them carry one.
-    """
-    for source in (comp.get("assembly"), comp, comp.get("properties")):
-        if not isinstance(source, dict):
-            continue
-        value = source.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
 @dataclass(frozen=True)
 class BomRow:
     refs: tuple[str, ...]
@@ -216,96 +204,29 @@ class CplRow:
     mpn: str | None
 
 
-def _iter_components(board: dict):
-    if not isinstance(board, dict):
-        raise AssemblyBoardError(f"board must be a mapping, got {type(board).__name__}")
-    for i, comp in enumerate(_as_list(board.get("components"))):
-        if not isinstance(comp, dict):
-            raise AssemblyBoardError(f"components[{i}] must be a mapping")
-        ref = comp.get("ref")
-        if not isinstance(ref, str) or not ref:
-            raise AssemblyBoardError(f"components[{i}] is missing 'ref'")
-        yield ref, comp
+def _assembly_of(component):
+    """The component's resolved assembly facts, or a NAMED refusal.
 
-
-def _resolve_side(raw_layer, ref: str) -> str:
-    """Map a component's authored ``layer`` to "top"/"bottom", MIRRORING
-    ``compile_board._resolve_side`` (compile_board.py:2549-2562) field-for-
-    field — this module must not be laxer than the compiler on the same
-    input: absent (``None``) defaults to top (the legacy "no side authored"
-    shape), a recognized token resolves, and anything else — INCLUDING a
-    present-but-empty string — is a NAMED refusal, never a silent top
-    default. ``geometry.is_top`` was used here previously and is WRONG for
-    this purpose: it folds "" into the same "absent -> top" bucket as
-    ``None`` (its own docstring: "absence is the legacy shape for the
-    default side"), which is a real behavioral difference from compile_board
-    and a cross-surface fail-open a caller could trigger with
-    ``layer: ""``.
-
-    Token vocabulary now read from geometry.TOP_LAYER_NAMES /
-    BOTTOM_LAYER_NAMES — the single authority both this function and
-    compile_board._resolve_side read (docket 019fc3105828), so the "field-
-    for-field" claim above can no longer drift by hand-edit. The refusal
-    shape (raise AssemblyBoardError) stays local, unchanged, and still
-    deliberately different from compile_board's (return None + diags.error)."""
-    if raw_layer is None:
-        return "top"
-    token = str(raw_layer).strip().lower()
-    if token in TOP_LAYER_NAMES:
-        return "top"
-    if token in BOTTOM_LAYER_NAMES:
-        return "bottom"
-    raise AssemblyBoardError(
-        f"component {ref!r}: unrecognized layer/side {raw_layer!r} — refusing "
-        f"to default it to top (mirrors compile_board._resolve_side)")
-
-
-def _is_assembly_excluded(comp: dict, ref: str) -> bool:
-    """Whether ``comp`` contributes NO BOM/CPL row: board furniture (a fiducial,
-    a silk logo) or a part marked do-not-populate. Either way it is physically
-    on the board but never picked, placed, or purchased, so it belongs in no row
-    and must not trip the part-identity contract (epoch CPN1, docket
-    019fe2fb07f8).
-
-    Two authored forms, one answer — the Go codec migrates the legacy scalar at
-    decode (internal/board/assembly.go), but this module reads the RAW board
-    dict, which may arrive by a path that never crossed that codec, so both are
-    read here:
-
-      * ``assembly: exclude`` — the pre-block scalar;
-      * ``assembly: {populate: false, ...}`` — the structured block.
-
-    Fail-closed on the value in both forms: a scalar other than ``exclude``, or
-    a non-boolean ``populate``, REFUSES rather than being read as "not
-    excluded". A typo (``exlcude``) silently landing a fiducial in the BOM with
-    a fabricated identity requirement is exactly the quiet wrong answer this
-    module's every other refusal exists to prevent."""
-    raw = comp.get("assembly")
-    if raw is None:
-        return False
-    if raw == "exclude":
-        return True
-    if isinstance(raw, dict):
-        populate = raw.get("populate")
-        if populate is None:
-            return False
-        if isinstance(populate, bool):
-            return not populate
+    A compiled component always carries them (compile_board attaches one to
+    every component it admits), so ``None`` means an IR built by something
+    other than the compiler reached an order emitter — refused rather than read
+    as "this part has no assembly facts", which would silently drop its
+    identity requirement."""
+    assembly = getattr(component, "assembly", None)
+    if assembly is None:
         raise AssemblyBoardError(
-            f"component {ref!r} assembly.populate must be a boolean when "
-            f"present, got {populate!r}")
-    raise AssemblyBoardError(
-        f"component {ref!r} assembly must be a mapping or the legacy 'exclude' "
-        f"scalar, got {raw!r}")
+            f"component {component.ref!r} carries no resolved assembly block; "
+            f"assembly outputs are derived only from a strict compilation")
+    return assembly
 
 
-def _check_identity(profile: HouseProfile, ref: str, comp: dict) -> None:
-    """Raise AssemblyIdentityError, naming the component, when ``comp`` lacks
-    an identity field ``profile`` REQUIRES. Side-effect-only: callers read the
-    actual values back through :func:`_component_property` afterward, so a
-    profile with an EMPTY requirement set still surfaces an informational
-    value (e.g. mpn) when the author supplied one, without requiring it."""
-    missing = [f for f in profile.identity_required if _component_property(comp, f) is None]
+def _check_identity(profile: HouseProfile, ref: str, assembly) -> None:
+    """Raise AssemblyIdentityError, naming the component, when it lacks an
+    identity field ``profile`` REQUIRES. Side-effect-only: callers read the
+    actual values back off ``assembly`` afterward, so a profile with an EMPTY
+    requirement set still surfaces an informational value (e.g. mpn) when the
+    author supplied one, without requiring it."""
+    missing = [f for f in profile.identity_required if getattr(assembly, f, None) is None]
     if missing:
         raise AssemblyIdentityError(
             f"component {ref!r} is missing required identity field(s) "
@@ -313,41 +234,38 @@ def _check_identity(profile: HouseProfile, ref: str, comp: dict) -> None:
             f"emit a BOM/CPL row with a blank identity cell (part-identity contract)")
 
 
-def _require_optional_str(comp: dict, key: str, ref: str) -> str:
-    """A present value for ``key`` must be a string or the sort/group key
-    below (mixed str/int tuples) TypeErrors with a bare traceback instead of
-    a named refusal. Mirrors compile_board.py:2223-2229's identical check for
-    ``value`` ("the canonical contract types Component.Value as a string; a
-    present non-string value must not be stringified... review 630") —
-    applied here to BOTH ``value`` and ``footprint`` since both sit in the
-    same BOM sort/group key and either can poison it the same way."""
-    raw = comp.get(key)
-    if raw is not None and not isinstance(raw, str):
-        raise AssemblyBoardError(
-            f"component {ref!r} {key} must be a string, got {raw!r}")
-    return raw or ""
+def _emitting_components(board, profile: HouseProfile,
+                         excluded: list[str] | None):
+    """Every compiled component that contributes rows, paired with its resolved
+    assembly facts, in board order. A non-populated part (board furniture, or a
+    DNP) is RECORDED in ``excluded`` and skipped BEFORE the identity contract:
+    a fiducial has no MPN and must not be refused for lacking one."""
+    for component in board.components:
+        assembly = _assembly_of(component)
+        if not assembly.populate:
+            if excluded is not None:
+                excluded.append(component.ref)
+            continue
+        _check_identity(profile, component.ref, assembly)
+        yield component, assembly
 
 
-def _bom_rows(board: dict, profile: HouseProfile,
+def _bom_rows(board, profile: HouseProfile,
               excluded: list[str] | None = None) -> list[BomRow]:
     groups: dict[tuple, dict] = {}
-    for ref, comp in _iter_components(board):
-        if _is_assembly_excluded(comp, ref):
-            # Skipped BEFORE the identity contract: furniture has no MPN and
-            # must not be refused for lacking one. The ref is RECORDED, never
-            # silently dropped — the reply carries it as an advisory.
-            if excluded is not None:
-                excluded.append(ref)
-            continue
-        value = _require_optional_str(comp, "value", ref)
-        footprint = _require_optional_str(comp, "footprint", ref)
-        _check_identity(profile, ref, comp)
-        mpn = _component_property(comp, "mpn")
-        key = (footprint, value, mpn or "")
+    for component, assembly in _emitting_components(board, profile, excluded):
+        # The AUTHORED footprint string, not the IR's content-hash
+        # footprint_id: the BOM's Footprint column names a part a purchaser
+        # recognizes. (assembly.package is its intended eventual home per the
+        # schema, but moving the column would change what a house is sent and
+        # is not this unit's job.)
+        footprint = assembly.footprint_ref
+        key = (footprint, component.value, assembly.mpn or "")
         grp = groups.setdefault(key, {
-            "refs": [], "value": value, "footprint": footprint, "mpn": mpn,
+            "refs": [], "value": component.value, "footprint": footprint,
+            "mpn": assembly.mpn,
         })
-        grp["refs"].append(ref)
+        grp["refs"].append(component.ref)
     rows = [
         BomRow(
             refs=tuple(sorted(g["refs"])), value=g["value"], footprint=g["footprint"],
@@ -359,36 +277,26 @@ def _bom_rows(board: dict, profile: HouseProfile,
     return rows
 
 
-def _cpl_rows(board: dict, profile: HouseProfile,
+def _cpl_rows(board, profile: HouseProfile,
               excluded: list[str] | None = None) -> list[CplRow]:
     rows: list[CplRow] = []
-    for ref, comp in _iter_components(board):
-        if _is_assembly_excluded(comp, ref):
-            # Same skip-before-identity as _bom_rows; a fiducial is placed by
-            # the FAB (it is bare copper), not by the assembly line.
-            if excluded is not None:
-                excluded.append(ref)
-            continue
-        _check_identity(profile, ref, comp)
-        mpn = _component_property(comp, "mpn")
-        x_mm, y_mm = comp.get("x_mm"), comp.get("y_mm")
-        if not _is_number(x_mm) or not _is_number(y_mm):
-            raise AssemblyBoardError(f"component {ref!r} has a non-numeric x_mm/y_mm")
-        rotation = comp.get("rotation_deg")
-        if rotation is not None and not _is_number(rotation):
-            raise AssemblyBoardError(f"component {ref!r} has a non-numeric rotation_deg")
-        rotation_deg = float(rotation or 0.0) % 360.0
-        side = _resolve_side(comp.get("layer"), ref)
+    for component, assembly in _emitting_components(board, profile, excluded):
+        placement = component.placement
         # Y NEGATED, X VERBATIM — see module docstring's COORDINATE FRAME
         # section (the measured oracle citation lives in
         # tests/test_assembly_outputs.py, not here — STANDING GUARD 2). X is
         # NOT mirrored on the bottom side either (the reference exporter's
         # default: its opt-in bottom-X-negate flag was NOT applied — the
         # profile decision this module makes, documented at the point of use
-        # as instructed).
+        # as instructed). Rotation is normalized into [0, 360) and otherwise
+        # emitted verbatim.
         rows.append(CplRow(
-            ref=ref, x_mm=float(x_mm), y_mm=-float(y_mm),
-            rotation_deg=rotation_deg, side=side, mpn=mpn,
+            ref=component.ref,
+            x_mm=float(placement.position[0]),
+            y_mm=-float(placement.position[1]),
+            rotation_deg=float(placement.rotation_deg) % 360.0,
+            side=placement.side.value,
+            mpn=assembly.mpn,
         ))
     rows.sort(key=lambda r: r.ref)
     return rows
@@ -447,10 +355,12 @@ class AssemblyResult(dict):
         self.excluded_refs = excluded_refs
 
 
-def build_bom(board: dict, profile_id: str, *, name: str | None = None) -> AssemblyResult:
+def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
     """House-agnostic BOM extraction rendered through ``profile_id``'s house
-    format. Raises AssemblyProfileError / AssemblyIdentityError /
-    AssemblyBoardError — never returns a partial or best-guess result."""
+    format. ``board`` is a compiled ``resolved_board.ResolvedBoard`` — the same
+    object the gerber emitter reads. Raises AssemblyProfileError /
+    AssemblyIdentityError / AssemblyBoardError — never returns a partial or
+    best-guess result."""
     profile = _resolve_profile(profile_id)
     excluded: list[str] = []
     rows = _bom_rows(board, profile, excluded)
@@ -463,9 +373,10 @@ def build_bom(board: dict, profile_id: str, *, name: str | None = None) -> Assem
                           tuple(excluded))
 
 
-def build_cpl(board: dict, profile_id: str, *, name: str | None = None) -> AssemblyResult:
+def build_cpl(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
     """House-agnostic CPL/pick-and-place extraction rendered through
-    ``profile_id``'s house format. Same fail-closed contract as build_bom."""
+    ``profile_id``'s house format. Same compiled-IR input and same fail-closed
+    contract as :func:`build_bom`."""
     profile = _resolve_profile(profile_id)
     excluded: list[str] = []
     rows = _cpl_rows(board, profile, excluded)
@@ -476,3 +387,52 @@ def build_cpl(board: dict, profile_id: str, *, name: str | None = None) -> Assem
         raise AssemblyProfileError(f"no CPL renderer wired for profile {profile.id!r}")
     return AssemblyResult({f"{base}-cpl-{profile.id}.csv": content}, rows,
                           tuple(excluded))
+
+
+# ---------------------------------------------------------------------------
+# The named refusal for a board that cannot be compiled at all.
+# ---------------------------------------------------------------------------
+
+#: The refusal kind an order surface sees when the board did not compile. Its
+#: own name, distinct from the generic ``compile`` kind the fab tools use,
+#: because it reports a CAPABILITY REGRESSION a caller may remember working:
+#: BOM/CPL used to be emitted off the raw board dict and are now derived from
+#: the same strict compilation the gerbers are.
+NOT_COMPILABLE_KIND = "assembly_not_compilable"
+
+
+def not_compilable_error(compile_error: dict) -> dict:
+    """Re-shape a compile failure into the NAMED assembly refusal.
+
+    Takes the ``{kind, message, diagnostics}`` error payload the shared strict-
+    compile prologue produces and returns the ``error`` payload the assembly
+    surfaces refuse with. ``blocked_by`` is the ERROR-severity subset, each
+    entry naming the code and the entity (component, pad, footprint) that
+    blocked the compile, so a caller sees WHICH part stopped the order rather
+    than a bare "compile failed". The full diagnostic list rides along
+    unchanged so nothing is lost by summarising.
+
+    Works on the serialized payload rather than the ``ResolutionFailure``
+    object so this module keeps its one-way dependency: emitters read the IR,
+    they do not import the compiler."""
+    diagnostics = compile_error.get("diagnostics") or []
+    blocked_by = [
+        {
+            "code": d.get("code", ""),
+            "entity_kind": (d.get("source_ref") or {}).get("entity_kind", ""),
+            "entity_id": (d.get("source_ref") or {}).get("entity_id", ""),
+            "message": d.get("message", ""),
+        }
+        for d in diagnostics if d.get("severity") == "error"
+    ]
+    named = "; ".join(f"{b['code']} on {b['entity_id']}" for b in blocked_by[:5])
+    if len(blocked_by) > 5:
+        named += f"; (+{len(blocked_by) - 5} more)"
+    message = (
+        "assembly outputs (BOM/CPL) are derived from ONE strict compilation of the "
+        "board — the same compilation the gerbers come from — so a board that does "
+        "not compile yields no BOM and no CPL. "
+        + (f"{len(blocked_by)} error(s) blocked it: {named}" if blocked_by
+           else str(compile_error.get("message", "board could not be compiled"))))
+    return {"kind": NOT_COMPILABLE_KIND, "message": message,
+            "blocked_by": blocked_by, "diagnostics": diagnostics}

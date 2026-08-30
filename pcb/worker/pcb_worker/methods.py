@@ -1368,13 +1368,39 @@ def _check_bom(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# assembly_bom / assembly_cpl — pre-assembled-order package outputs (docket
-# 019f763cdf5b, C8). Operate on the RAW canonical board dict, the same input
-# `_check_bom` already reads (NOT the compiled ResolvedBoard IR — see
-# assembly_outputs.py's module docstring for why). Return/write-to-disk
-# convention deliberately mirrors `_gerbers` ({files, written}), so a caller
-# that already knows how to consume a gerbers reply needs no new shape.
+# assembly_bom / assembly_cpl — pre-assembled-order package outputs.
+#
+# Both COMPILE first, through the same `_compile_or_fail` prologue and the same
+# FAB capability profile `_gerbers` uses, then emit from the resulting
+# ResolvedBoard IR. One order, one board: the CSVs and the gerbers now derive
+# from the same compilation instead of the CSVs being read off the raw board
+# dict. The FAB profile is deliberate rather than a narrower assembly-only one
+# — a board whose gerbers are refused must not still yield an order's CSVs.
+#
+# Return/write-to-disk convention deliberately mirrors `_gerbers`
+# ({files, written, warnings}), so a caller that already knows how to consume a
+# gerbers reply needs no new shape.
 # ---------------------------------------------------------------------------
+
+
+def _compile_for_assembly(params: dict):
+    """The shared prologue for both assembly emitters: parse, then strict
+    compile, or a NAMED refusal.
+
+    An uncompilable board is the deliberate capability regression the cutover
+    creates — BOM/CPL used to be emitted off the raw dict — so it refuses under
+    its own `assembly_not_compilable` kind, naming every diagnostic that
+    blocked the compile, rather than under the generic compile kind."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_or_fail(board, _layer_params(params))
+    if _is_error_reply(compiled):
+        return {"ok": False,
+                "error": assembly_outputs.not_compilable_error(compiled["error"])}
+    return compiled
+
 
 def _write_assembly_files(files: dict, out_dir) -> list | dict:
     """Shared out_dir writer for assembly outputs — same convention as
@@ -1399,15 +1425,14 @@ def _assembly_bom(params: dict) -> dict:
     """Generate a house-formatted BOM CSV. params: yaml|board, profile
     (house id, default "jlc" — the only assembly-capable profile shipped),
     name (base filename), out_dir (optional disk write)."""
-    try:
-        board = _load(params)
-    except board_model.BoardParseError as exc:
-        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_for_assembly(params)
+    if _is_error_reply(compiled):
+        return compiled
 
     profile_id = params.get("profile") or "jlc"
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
-        files = assembly_outputs.build_bom(board, profile_id, name=base_name)
+        files = assembly_outputs.build_bom(compiled.board, profile_id, name=base_name)
     except Exception as exc:  # matches _gerbers' own comment: "geometry/library
         # faults reported as data, not crash" (methods.py _gerbers, above) —
         # a broad catch here is the dispatcher's established convention for an
@@ -1421,9 +1446,13 @@ def _assembly_bom(params: dict) -> dict:
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
-    result = {"files": files, "written": written}
-    # Absent-when-empty (the UX4 advisory idiom): furniture skipped by
-    # `assembly: exclude` is REPORTED, never silently missing from the BOM.
+    # Compile WARNING/INFO diagnostics ride along, same shape and same reason as
+    # `_gerbers`: the board these CSVs describe is the compiled one, so what the
+    # compiler said about it must not vanish on the way to an order.
+    result = {"files": files, "written": written,
+              "warnings": [_diagnostic_to_payload(d) for d in compiled.diagnostics]}
+    # Absent-when-empty (the UX4 advisory idiom): a component the board marks
+    # non-populated is REPORTED, never silently missing from the BOM.
     if files.excluded_refs:
         result["excluded_components"] = list(files.excluded_refs)
     return {"ok": True, "result": result}
@@ -1432,15 +1461,14 @@ def _assembly_bom(params: dict) -> dict:
 def _assembly_cpl(params: dict) -> dict:
     """Generate a house-formatted CPL/pick-and-place CSV. Same params/return
     convention as `_assembly_bom`."""
-    try:
-        board = _load(params)
-    except board_model.BoardParseError as exc:
-        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_for_assembly(params)
+    if _is_error_reply(compiled):
+        return compiled
 
     profile_id = params.get("profile") or "jlc"
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
-        files = assembly_outputs.build_cpl(board, profile_id, name=base_name)
+        files = assembly_outputs.build_cpl(compiled.board, profile_id, name=base_name)
     except Exception as exc:  # see _assembly_bom's comment: matches _gerbers'
         # broad-catch convention ("geometry/library faults reported as data,
         # not crash"), backstopping the named assembly_outputs errors.
@@ -1449,7 +1477,8 @@ def _assembly_cpl(params: dict) -> dict:
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
-    result = {"files": files, "written": written}
+    result = {"files": files, "written": written,
+              "warnings": [_diagnostic_to_payload(d) for d in compiled.diagnostics]}
     # Absent-when-empty — see _assembly_bom.
     if files.excluded_refs:
         result["excluded_components"] = list(files.excluded_refs)

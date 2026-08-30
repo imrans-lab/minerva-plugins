@@ -80,7 +80,10 @@ _TOL_MM = 1e-6
 # offset from its library pads on purpose, which the fail-closed coincidence
 # check refuses before any placement can be read. gd_handoff_cutout.yaml has NO
 # components at all (it is the GD cut-out hand-off board), so there is no
-# placement on it to compose.
+# placement on it to compose. assembly_boards/assembly_resolved.yaml DOES
+# compile and does carry a bottom-side part at 45 degrees, but it is authored
+# to hold the BOM/CPL emitters' hand-derived numbers steady — adding it to a
+# geometry corpus would put a second owner on those coordinates.
 #
 # No corpus board carries an OFF-AXIS rotation, and every multiple of 90 hides
 # a sign error under a rectangle's own symmetry — so the corpus is extended

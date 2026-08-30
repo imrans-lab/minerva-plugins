@@ -39,7 +39,11 @@ SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
 QUAD_BOARD = HERE / "testdata" / "gerber_boards" / "quadlayer.yaml"
 ZONE_BOARD = HERE / "testdata" / "zone_fill.yaml"
-ASSEMBLY_BOARD = HERE / "testdata" / "assembly_boards" / "assembly_fixture.yaml"
+# The COMPILABLE assembly fixture: BOM/CPL are now derived from a strict
+# compilation, so the determinism claim has to be measured on a board that
+# has one. Its uncompilable twin (assembly_fixture.yaml) is the refusal
+# fixture in test_assembly_outputs.py.
+ASSEMBLY_BOARD = HERE / "testdata" / "assembly_boards" / "assembly_resolved.yaml"
 
 # (board path, base name, builder). Spike -> PRODUCTION fab path (compile -> IR);
 # drilltest -> raw loose-dict emitter (explicit drift fixture, not production).

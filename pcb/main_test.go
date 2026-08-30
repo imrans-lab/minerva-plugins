@@ -844,24 +844,37 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 // house id) — all through the REAL plugin binary + worker, over stdio,
 // exactly like every other tool's coverage in this file.
 //
-// Uses the C8 assembly fixture (worker/tests/testdata/assembly_boards/
-// assembly_fixture.yaml), NOT the shared spikes/gerber/board.yaml spike
+// Uses the COMPILABLE assembly fixture (worker/tests/testdata/assembly_boards/
+// assembly_resolved.yaml), NOT the shared spikes/gerber/board.yaml spike
 // board — that board carries no "mpn" on any component and would refuse
 // under every assembly-capable profile (see the carve-out comment in
 // TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly above).
+//
+// Both CSVs are now derived from ONE strict compilation of the board, the same
+// compilation the gerbers come from, so the fixture has to be a board that
+// compiles. Its uncompilable twin (assembly_fixture.yaml) is exercised below
+// as the named-refusal subcase — it is a board a house could never build that
+// the retired raw-dict path emitted clean CSVs for anyway.
 func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	c, cleanup := startPlugin(t, "pcb-plugin-export-assembly")
 	defer cleanup()
 
-	fixturePath := filepath.Join("worker", "tests", "testdata", "assembly_boards", "assembly_fixture.yaml")
+	fixturePath := filepath.Join("worker", "tests", "testdata", "assembly_boards", "assembly_resolved.yaml")
 	fixture, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Fatalf("read assembly fixture: %v", err)
 	}
+	uncompilablePath := filepath.Join("worker", "tests", "testdata", "assembly_boards", "assembly_fixture.yaml")
+	uncompilable, err := os.ReadFile(uncompilablePath)
+	if err != nil {
+		t.Fatalf("read uncompilable assembly fixture: %v", err)
+	}
 
 	// --- happy path: both files written, row counts match C8's seals -------
 	// (2 grouped BOM rows: R_0805 x2 refs + the diode; 3 CPL rows: one per
-	// component — hand-derived in worker/tests/test_assembly_outputs.py).
+	// POPULATED component — the fixture's fiducial and coupon text are board
+	// furniture and contribute no row — hand-derived in
+	// worker/tests/test_assembly_outputs.py).
 	outDir := t.TempDir()
 	env := c.call("minerva_pcb_export_assembly", map[string]any{
 		"yaml": string(fixture), "name": "afix", "out_dir": outDir,
@@ -922,10 +935,11 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	// --- identity refusal passthrough: missing mpn names the component -----
 	// Mirrors worker/tests/test_methods.py::test_assembly_bom_missing_identity_is_named_refusal
 	// exactly (same replace-first-occurrence mutation of the same fixture) —
-	// removes ONLY R1's mpn (R2 keeps its own), so the message naming "R1"
-	// specifically is a real assertion, not a coincidence of every component
-	// losing its mpn at once.
-	noIdentity := mustMutateFixture(t, string(fixture), "    mpn: C25804\n", "")
+	// removes ONLY R1's mpn — the one inside its structured assembly block, at
+	// six-space indent; R2 authors its own as a pre-block top-level scalar at
+	// four — so the message naming "R1" specifically is a real assertion, not a
+	// coincidence of every component losing its mpn at once.
+	noIdentity := mustMutateFixture(t, string(fixture), "      mpn: C25804\n", "")
 	idEnv := c.call("minerva_pcb_export_assembly", map[string]any{"yaml": noIdentity})
 	if idEnv["ok"] != false {
 		t.Fatalf("minerva_pcb_export_assembly (missing mpn) ok != false: %v", idEnv)
@@ -957,46 +971,62 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	}
 	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly unknown-house refusal — %q", houseMsg)
 
-	// --- no-stray-artifact: a CPL-ONLY board fault must leave ZERO files on
-	// disk, not a stray BOM CSV (cold review, HALF-WRITE elevated finding).
-	// assembly_outputs._bom_rows never reads x_mm/y_mm (BOM has no position
-	// column), but _cpl_rows requires them numeric — so a non-numeric x_mm
-	// passes BOM's checks cleanly while failing CPL's (measured live: a bad
-	// "layer" token does NOT reach assembly_outputs at all — methods._load's
-	// migration normalizes/coerces it before assembly_outputs ever sees the
-	// board, confirmed by direct venv repro). A naive bom-then-cpl sequence
-	// that lets the WORKER write out_dir on each call independently would
-	// write the BOM file on the first (successful) call, then leave it
-	// stranded when the second call refuses. This must never happen: a
-	// refusal is all-or-nothing, zero artifacts either way.
-	cplOnlyFaultBoard := mustMutateFixture(t, string(fixture), "x_mm: 12.5\n", "x_mm: \"bad\"\n")
-	strayDir := t.TempDir()
-	strayEnv := c.call("minerva_pcb_export_assembly", map[string]any{
-		"yaml": cplOnlyFaultBoard, "name": "stray", "out_dir": strayDir,
+	// --- UNCOMPILABLE BOARD: named refusal, zero artifacts ------------------
+	//
+	// The deliberate capability regression, at the tool boundary. This fixture
+	// declares pins 0.05mm off their library pads, names a footprint no library
+	// supplies, and omits two required via rules; the raw-dict emitter produced
+	// a clean BOM and CPL for it anyway, which is the two-boards-in-one-order
+	// defect the cutover closes. It must now refuse under its OWN kind, name
+	// the pads and the footprint that blocked the compile, and leave nothing on
+	// disk — never a traceback, never a partial CSV.
+	//
+	// This subcase also carries the HALF-WRITE property (cold review, elevated
+	// finding): a refusal is all-or-nothing. HandleExportAssembly computes both
+	// CSVs before writing either, so no out_dir file survives a refusal from
+	// either worker call.
+	uncompilableDir := t.TempDir()
+	uncEnv := c.call("minerva_pcb_export_assembly", map[string]any{
+		"yaml": string(uncompilable), "name": "unc", "out_dir": uncompilableDir,
 	})
-	if strayEnv["ok"] != false {
-		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) ok != false: %v", strayEnv)
+	if uncEnv["ok"] != false {
+		t.Fatalf("minerva_pcb_export_assembly (uncompilable board) ok != false: %v", uncEnv)
 	}
-	strayErr := asMap(t, strayEnv["error"], "export_assembly CPL-only-fault error")
-	if strayErr["kind"] != "assembly" {
-		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) error.kind = %v, want \"assembly\"", strayErr["kind"])
+	uncErr := asMap(t, uncEnv["error"], "export_assembly uncompilable-board error")
+	if uncErr["kind"] != "assembly_not_compilable" {
+		t.Fatalf("minerva_pcb_export_assembly (uncompilable board) error.kind = %v, want \"assembly_not_compilable\"", uncErr["kind"])
 	}
-	strayMsg, _ := strayErr["message"].(string)
-	if !strings.Contains(strayMsg, "D1") || !strings.Contains(strayMsg, "x_mm") {
-		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) message does not name the component/bad field verbatim: %q", strayMsg)
+	blocked, ok := uncErr["blocked_by"].([]any)
+	if !ok || len(blocked) == 0 {
+		t.Fatalf("minerva_pcb_export_assembly (uncompilable board) error carries no blocked_by list: %v", uncErr)
 	}
-	entries, err := os.ReadDir(strayDir)
+	blockedIDs := make(map[string]bool, len(blocked))
+	for _, b := range blocked {
+		entry := asMap(t, b, "export_assembly blocked_by entry")
+		if entry["code"] == "" {
+			t.Fatalf("minerva_pcb_export_assembly blocked_by entry has no code: %v", entry)
+		}
+		if id, _ := entry["entity_id"].(string); id != "" {
+			blockedIDs[id] = true
+		}
+	}
+	for _, want := range []string{"R1.1", "R1.2", "R2.1", "R2.2", "D1"} {
+		if !blockedIDs[want] {
+			t.Fatalf("minerva_pcb_export_assembly (uncompilable board) blocked_by does not name %q: %v", want, blocked)
+		}
+	}
+	entries, err := os.ReadDir(uncompilableDir)
 	if err != nil {
-		t.Fatalf("read strayDir: %v", err)
+		t.Fatalf("read uncompilableDir: %v", err)
 	}
 	if len(entries) != 0 {
 		names := make([]string, 0, len(entries))
 		for _, e := range entries {
 			names = append(names, e.Name())
 		}
-		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) left stray file(s) on disk: %v — a refusal must leave zero artifacts", names)
+		t.Fatalf("minerva_pcb_export_assembly (uncompilable board) left stray file(s) on disk: %v — a refusal must leave zero artifacts", names)
 	}
-	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly CPL-only fault leaves zero artifacts on disk — %q", strayMsg)
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly refuses an uncompilable board by name, zero artifacts — %v", uncErr["message"])
 }
 
 // ---------------------------------------------------------------------------

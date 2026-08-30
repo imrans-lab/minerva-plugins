@@ -663,7 +663,11 @@ var ExportAssembly = ToolSpec{
 		"in which case both CSVs are also written to disk. Refusals are NAMED, never a " +
 		"silent best-guess format or a blank identity cell: a component the profile requires " +
 		"identity for (jlc requires mpn) and lacks it refuses naming the component ref; an " +
-		"unrecognized or assembly-incapable house id refuses naming the id. CPL rotation is " +
+		"unrecognized or assembly-incapable house id refuses naming the id. Both CSVs are " +
+		"derived from ONE strict compilation of the board — the same compilation the " +
+		"gerbers come from — so a board that does not compile yields NO BOM and NO CPL: " +
+		"that refuses as kind \"assembly_not_compilable\" with a blocked_by list naming " +
+		"every component/footprint that stopped the compile. CPL rotation is " +
 		"emitted verbatim from the authored rotation_deg (KiCad-equivalent clockwise " +
 		"convention); CPL Y is the authored y_mm negated, X verbatim. Calls the worker's " +
 		"assembly_bom then assembly_cpl methods over the same board+profile — whichever " +
@@ -788,7 +792,13 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 
 	// Compute BOTH CSVs BEFORE writing anything — see stripOutDir's doc
 	// comment (HALF-WRITE fix).
-	computeParams := stripOutDir(params)
+	//
+	// withLibraryChain is REQUIRED here, not decorative: both assembly methods
+	// now strict-compile the board before emitting, so without the host's live
+	// layer chain a board whose footprints come from the user or blessed-WIP
+	// layers would refuse with footprint_unresolved. They joined the
+	// compile-bearing calls the moment they started compiling.
+	computeParams := withLibraryChain(stripOutDir(params))
 
 	bomRaw, err := w.Call(ctx, "assembly_bom", computeParams)
 	if err != nil {

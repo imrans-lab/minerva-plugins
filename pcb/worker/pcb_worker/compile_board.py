@@ -45,6 +45,7 @@ from typing import Iterable, Union
 from agent_router.layers import (CANON_TO_KICAD, canon_to_kicad,
                                  inner_layer_index, is_copper, kicad_to_canon)
 
+from . import assembly_spec
 from . import bless
 from . import board_graphics as board_graphics_mod
 from . import inline_footprint
@@ -3088,6 +3089,17 @@ def compile_board(
             continue
         placed_pads, placed_graphics = placed
 
+        # WHAT THE ASSEMBLY HOUSE BUYS AND PLACES, resolved on the same pass that
+        # resolves the copper — so BOM, CPL and gerbers cannot describe two
+        # different boards (assembly_spec). A malformed block is fail-closed
+        # under the SAME code the Go codec refuses with, so one refusal name
+        # covers the block on both surfaces.
+        try:
+            assembly = assembly_spec.resolve_assembly(comp, fp_ref, ref)
+        except assembly_spec.AssemblySpecError as exc:
+            diags.error("invalid_component_assembly", str(exc), comp_ref)
+            continue
+
         interned.setdefault(clean.content_id, clean)
         components.append(ResolvedComponent(
             id=component_id,
@@ -3110,6 +3122,7 @@ def compile_board(
             # authored-else-derived — which is the whole reason the board is
             # allowed to author one.
             refdes=refdes_anchor.component_reference_text(comp, clean),
+            assembly=assembly,
         ))
         for pad in clean.pads:
             resolved_pins.add((ref, pad.number))
@@ -3435,9 +3448,9 @@ def _resolve_side(raw_layer, ref: str, comp_ref: SourceRef,
     (never default an unrecognized value to TOP — review 621 MF1).
 
     Token vocabulary read from geometry.TOP_LAYER_NAMES / BOTTOM_LAYER_NAMES —
-    the single authority (docket 019fc3105828); the refusal shape here (return
-    None + diags.error) stays local to this module, deliberately not unified
-    with assembly_outputs._resolve_side's raise-based one."""
+    the single authority (docket 019fc3105828). This is now the ONLY side
+    adjudicator on the order path too: assembly_outputs used to carry a mirror
+    of this rule for the raw board dict and reads Placement.side instead."""
     if raw_layer is None:
         return Side.TOP
     token = str(raw_layer).strip().lower()

@@ -463,6 +463,15 @@ serialize, route and fabricate. What an assembly EXPORT requires is a separate
 gate that refuses by name — this block's job is to carry the author's answer
 losslessly, not to demand one.
 
+**Assembly export requires a board that strictly compiles.** The BOM and the CPL
+are derived from the same compiled board the gerbers come from — one order, one
+board — so a board the compiler refuses produces no CSVs at all. That refusal is
+named (`assembly_not_compilable`) and lists every component, pad and footprint
+that blocked the compile. Before the cutover the CSVs were read straight off the
+board YAML, which meant an order could carry CSVs describing one board and
+gerbers describing another; the capability that was lost is the ability to
+export an order for a board nobody could build.
+
 ```yaml
 components:
   - ref: U2

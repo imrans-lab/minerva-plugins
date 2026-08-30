@@ -5,9 +5,10 @@ KiCad export, DRC, and routing after the K2/K3 migration.  It contains no
 preview fallbacks or unsupported placeholders.  A compiler instead returns a
 ``ResolutionSuccess`` (board plus warnings) or ``ResolutionFailure``.
 
-This module intentionally does not import :mod:`footprint_def` at runtime.
-Footprint definitions import the shared Layer/diagnostic contracts from here;
-using a forward annotation in the board keeps that dependency one-way.
+This module intentionally does not import :mod:`footprint_def` or
+:mod:`assembly_spec` at runtime.  Both import the shared Layer/diagnostic
+contracts from here; using forward annotations in the board keeps those
+dependencies one-way.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from types import MappingProxyType
 from typing import Mapping, Protocol, TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:  # pragma: no cover - annotation-only cycle breaker
+    from .assembly_spec import ResolvedAssembly
     from .footprint_def import (
         DrillDefinition, FootprintDefinition, PadShape, Provenance,
         ReferenceTextDefinition)
@@ -880,6 +882,19 @@ class ResolvedComponent:
     #: compile, so the Gerber emitter, the DRC silk projection and the placement
     #: advisories cannot read three different answers.
     refdes: "ReferenceTextDefinition | None" = None
+    #: WHAT AN ASSEMBLY HOUSE BUYS AND PLACES for this component — part
+    #: identity, populate/DNP, paste policy, house catalogue numbers, and the
+    #: authored refs of any expanded physical placements
+    #: (``assembly_spec.resolve_assembly``). It rides the IR so BOM, CPL and
+    #: gerbers derive from ONE compilation: an order whose CSVs were read off a
+    #: loose board dict while its gerbers came from here could describe two
+    #: different boards.
+    #:
+    #: None means the compiler attached nothing, which the assembly emitters
+    #: refuse by name rather than read as "no assembly facts". The field keeps a
+    #: default only because it follows the two above; the compiler always
+    #: supplies it.
+    assembly: "ResolvedAssembly | None" = None
 
     def __post_init__(self) -> None:
         for field in ("id", "ref", "footprint_id"):
@@ -891,6 +906,10 @@ class ResolvedComponent:
         if self.refdes is not None and not hasattr(self.refdes, "position"):
             raise TypeError(
                 "ResolvedComponent.refdes must be a ReferenceTextDefinition")
+        # Same duck-typing, same reason: assembly_spec reads loose board dicts,
+        # which this module stays free of.
+        if self.assembly is not None and not hasattr(self.assembly, "footprint_ref"):
+            raise TypeError("ResolvedComponent.assembly must be a ResolvedAssembly")
         _tuple(self.placed_pads, "ResolvedComponent.placed_pads")
         _tuple(self.placed_graphics, "ResolvedComponent.placed_graphics")
         _unique_ids(self.placed_pads, "ResolvedComponent.placed_pads")

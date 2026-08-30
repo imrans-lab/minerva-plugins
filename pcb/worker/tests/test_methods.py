@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from pcb_worker.methods import handle_request
 
@@ -330,7 +331,11 @@ def test_check_bom_footprint_found_and_suggestions_with_lib_dir(board_yaml):
 # ---------------------------------------------------------------------------
 
 ASSEMBLY_BOARD = (Path(__file__).resolve().parent / "testdata" / "assembly_boards"
-                  / "assembly_fixture.yaml")
+                  / "assembly_resolved.yaml")
+# Its uncompilable twin: pins offset from their library pads, a footprint in no
+# library, two missing via rules. The raw-dict emitter produced clean CSVs for
+# it; the compiled path must refuse it by name.
+UNCOMPILABLE_ASSEMBLY_BOARD = ASSEMBLY_BOARD.with_name("assembly_fixture.yaml")
 
 
 @pytest.fixture()
@@ -369,12 +374,62 @@ def test_assembly_bom_house_without_assembly_service_is_named_refusal(assembly_y
 
 
 def test_assembly_bom_missing_identity_is_named_refusal():
-    src = ASSEMBLY_BOARD.read_text(encoding="utf-8").replace("    mpn: C25804\n", "", 1)
+    # Drops R1's mpn from its structured assembly block (6-space indent); R2's
+    # pre-block top-level scalar (4-space) is deliberately left alone, so the
+    # refusal has to name R1 specifically rather than the whole board.
+    src = ASSEMBLY_BOARD.read_text(encoding="utf-8").replace(
+        "      mpn: C25804\n", "", 1)
     resp = _call("assembly_bom", {"yaml": src})
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "assembly"
     assert "R1" in resp["error"]["message"]
     assert "mpn" in resp["error"]["message"]
+
+
+def test_assembly_bom_uncompilable_board_refuses_by_name_with_no_csv():
+    """THE DELIBERATE CAPABILITY REGRESSION, at the dispatch boundary. This
+    board used to produce a clean BOM off the raw dict. It now refuses under
+    its own kind, names every component/pad/footprint that blocked the
+    compile, and returns NO result — never a traceback, never a partial CSV."""
+    resp = _call("assembly_bom",
+                 {"yaml": UNCOMPILABLE_ASSEMBLY_BOARD.read_text(encoding="utf-8")})
+    assert resp["ok"] is False
+    assert "result" not in resp
+    error = resp["error"]
+    assert error["kind"] == "assembly_not_compilable"
+    assert "traceback" not in error
+    named = {b["entity_id"] for b in error["blocked_by"]}
+    assert {"R1.1", "R1.2", "R2.1", "R2.2"} <= named
+    assert "D1" in named
+
+
+def test_assembly_cpl_refuses_the_same_uncompilable_board_the_same_way():
+    """BOM and CPL are two dispatch entries; if only one refused, an order
+    could still be half-assembled from a board that does not compile."""
+    resp = _call("assembly_cpl",
+                 {"yaml": UNCOMPILABLE_ASSEMBLY_BOARD.read_text(encoding="utf-8")})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "assembly_not_compilable"
+    assert resp["error"]["blocked_by"]
+
+
+def test_assembly_bom_and_gerbers_describe_the_same_board():
+    """The point of the cutover, asserted end to end: the gerbers and the CSVs
+    are emitted from the same board, so every designator the CPL places has a
+    compiled component behind it and vice versa. A board that yields one must
+    yield the other."""
+    src = ASSEMBLY_BOARD.read_text(encoding="utf-8")
+    cpl = _call("assembly_cpl", {"yaml": src})
+    gerbers = _call("gerbers", {"yaml": src})
+    assert cpl["ok"] is True and gerbers["ok"] is True
+
+    placed = {row.split(",")[0] for row in
+              next(iter(cpl["result"]["files"].values())).splitlines()[1:]}
+    board = yaml.safe_load(src)
+    populated = {c["ref"] for c in board["components"]
+                 if c.get("assembly") != "exclude"
+                 and (c.get("assembly") or {}).get("populate") is not False}
+    assert placed == populated
 
 
 def test_assembly_bom_writes_out_dir(assembly_yaml, tmp_path):
