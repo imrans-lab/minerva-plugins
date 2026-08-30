@@ -1658,6 +1658,17 @@ footprint origin, and a component authoring `assembly.placements` contributes
 one row per authored placement rather than one per drawing. See "The assembly
 anchor" in `docs/board-yaml.md`.
 
+Every export runs the **hard gates** first — duplicate or case-folding
+designators, BOM/CPL reference-set inequality, the profile's per-row designator
+cap and minimum placement separation, an authored-but-empty expansion, an
+undecided paste policy on a do-not-populate part, missing profile-required
+identity, a non-metric profile dialect. Each refuses with a stable `code` naming
+the component and the field; the full table is in `docs/board-yaml.md` under
+"Hard gates on assembly export". The reply also carries two absent-when-empty
+lists: `excluded_components` (do-not-populate designators left out of both CSVs,
+still etched in the gerbers) and `advisories` (findings to SHOW, not refuse —
+today a populated part whose body the pipeline could not measure).
+
 ## Retired (superseded — NOT reimplemented)
 
 | Legacy tool | Replacement |

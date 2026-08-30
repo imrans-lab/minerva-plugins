@@ -19,7 +19,7 @@ Scope:
     CPL before, and cannot now. That outcome is a NAMED, structured refusal
     identifying what blocked compilation (:func:`not_compilable_error`) — never
     a traceback, and never a partial CSV.
-  * House-format-agnostic CORE (:func:`_bom_rows` / :func:`_cpl_rows`) plus
+  * House-format-agnostic CORE (:func:`_walk`, one pass, both files) plus
     exactly ONE house-specific renderer (JLCPCB-style CSV, ``PROFILES["jlc"]``).
     An unrecognized or assembly-incapable house id is a NAMED refusal
     (:class:`AssemblyProfileError`) — never a silent best-guess format.
@@ -31,6 +31,20 @@ Scope:
     emitted with an empty field, same as today's ``extract_bom`` (a blank
     value/footprint is a warning, not a fatal — the identity contract adds a
     STRICTER, profile-gated rule on top of that, it does not relax it).
+
+  * HARD GATES, NAMED. Before either file is rendered, the rows both emitters
+    built are put through :mod:`assembly_gates` — designator uniqueness,
+    BOM/CPL reference-set equality, the profile's per-row designator cap and
+    minimum placement separation, and the per-component authored-expansion and
+    do-not-populate-paste rules. Every one refuses with a stable code naming the
+    component and the field. ADVISORIES (what the pipeline could not measure)
+    ride back on the result instead of refusing.
+  * ONE EMISSION, TWO FILES. :func:`emit` builds the BOM rows AND the CPL rows in
+    a single walk of the compiled board, and both :func:`build_bom` and
+    :func:`build_cpl` render out of it. That is what lets the reference-set gate
+    compare the files a caller actually receives rather than a third derivation
+    of the board — and it is why asking for only the BOM still refuses when the
+    CPL would have disagreed with it.
 
 PASTE NON-CLAIM: neither output here says anything about solder-paste
 coverage. Paste is emitted by ``gerber.py`` (``F_Paste``/``B_Paste``) and is
@@ -128,7 +142,7 @@ boundary for the identical reason: the placement frame is Y-DOWN, and every
 consumer outside that one frame (Gerber's Y-up plot frame,
 KiCad's own position-file export) negates it. A CPL is not a Gerber layer and
 is not re-derived through ``_Geometry`` — this module negates Y itself, at
-its own row-construction boundary (:func:`_cpl_rows`), rather than importing
+its own row-construction boundary (:func:`_walk`), rather than importing
 gerber.py's frame converter. An earlier draft of this module claimed KiCad's
 position-file export does NOT flip Y; that claim was never measured and was
 WRONG — corrected here after running the oracle referenced above.
@@ -138,6 +152,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import assembly_gates
+
 CSV_EOL = "\r\n"  # JLC's own templates ship CRLF; keep it stable either way.
 
 
@@ -146,11 +162,17 @@ class AssemblyProfileError(ValueError):
     assembly (BOM/CPL) service at all — a NAMED refusal, never a silent
     best-guess format or a fallback to a different house's columns."""
 
+    #: Stable refusal name, carried the same way assembly_gates.AssemblyGateError
+    #: carries one, so every assembly refusal reaches a surface with a code.
+    code = "assembly_profile"
+
 
 class AssemblyIdentityError(ValueError):
     """A component lacks an identity field the selected profile REQUIRES
     (e.g. MPN) — a NAMED refusal identifying the component ref, never a
     blank BOM/CPL cell."""
+
+    code = "assembly_missing_identity"
 
 
 class AssemblyBoardError(ValueError):
@@ -164,6 +186,8 @@ class AssemblyBoardError(ValueError):
     the compiler's, and a board carrying any of them refuses before an emitter
     is reached — see :func:`not_compilable_error`."""
 
+    code = "assembly_board_not_resolved"
+
 
 @dataclass(frozen=True)
 class HouseProfile:
@@ -174,6 +198,15 @@ class HouseProfile:
     display_name: str
     supports_assembly: bool
     identity_required: tuple[str, ...] = ()
+    # DIALECT PARAMETERS, defaulted rather than hard-coded at the point of
+    # comparison. The real figures are facts a house publishes and the service-
+    # profile work pins; the gates read them off whatever profile is selected,
+    # so filling in a measured limit later is a data change, not a code change.
+    # Defaults and rationale live in assembly_gates.
+    max_refs_per_row: int = assembly_gates.DEFAULT_MAX_REFS_PER_ROW
+    min_designator_separation_mm: float = (
+        assembly_gates.DEFAULT_MIN_DESIGNATOR_SEPARATION_MM)
+    coordinate_unit: str = assembly_gates.METRIC_COORDINATE_UNIT
 
 
 # The ONE JLC-style profile this unit ships (scope: "house-format-agnostic
@@ -256,10 +289,16 @@ def _check_identity(profile: HouseProfile, ref: str, assembly) -> None:
     author supplied one, without requiring it."""
     missing = [f for f in profile.identity_required if getattr(assembly, f, None) is None]
     if missing:
-        raise AssemblyIdentityError(
+        error = AssemblyIdentityError(
             f"component {ref!r} is missing required identity field(s) "
             f"{'/'.join(missing)} for assembly profile {profile.id!r} — refusing to "
             f"emit a BOM/CPL row with a blank identity cell (part-identity contract)")
+        # The refusal's SUBJECT, carried structurally as well as in the prose, so
+        # a surface can point at the component and the field without parsing the
+        # sentence — the same contract assembly_gates.AssemblyGateError has.
+        error.component = ref
+        error.field = "/".join(f"assembly.{f}" for f in missing)
+        raise error
 
 
 def _physical_placements_of(component):
@@ -279,38 +318,47 @@ def _physical_placements_of(component):
     return placements
 
 
-def _emitting_components(board, profile: HouseProfile,
-                         excluded: list[str] | None):
-    """Every compiled component that contributes rows, paired with its resolved
-    assembly facts and the PARTS it places, in board order. A non-populated part
-    (board furniture, or a DNP) is RECORDED in ``excluded`` and skipped BEFORE
-    the identity contract: a fiducial has no MPN and must not be refused for
-    lacking one.
+def _walk(board, profile: HouseProfile):
+    """ONE walk of the compiled board producing everything both files and every
+    gate need: the grouped BOM rows, the CPL rows, the designators left out, and
+    the (designator, owning component) pairs the uniqueness gate names collisions
+    with.
+
+    A non-populated part (board furniture, or a DNP) is RECORDED as excluded and
+    contributes no row, BEFORE the identity contract: a fiducial has no MPN and
+    must not be refused for lacking one. It still passes the per-component gates
+    and still owns its designator — being unbought does not make a part invisible
+    to the board.
 
     ``excluded`` records the PHYSICAL refs, not the component ref: a
     non-populated component that expands into several parts leaves several
     designators out of the order, and naming only the drawing would under-report
-    what a house is not being sent."""
+    what a house is not being sent.
+    """
+    groups: dict[tuple, dict] = {}
+    cpl: list[CplRow] = []
+    excluded: list[str] = []
+    placed: list[tuple[str, str]] = []
     for component in board.components:
         assembly = _assembly_of(component)
         placements = _physical_placements_of(component)
+        placed.extend((item.ref, component.ref) for item in placements)
         if not assembly.populate:
-            if excluded is not None:
-                excluded.extend(item.ref for item in placements)
+            excluded.extend(item.ref for item in placements)
             continue
         _check_identity(profile, component.ref, assembly)
-        yield component, assembly, placements
 
-
-def _bom_rows(board, profile: HouseProfile,
-              excluded: list[str] | None = None) -> list[BomRow]:
-    groups: dict[tuple, dict] = {}
-    for component, assembly, placements in _emitting_components(board, profile, excluded):
-        # The AUTHORED footprint string, not the IR's content-hash
-        # footprint_id: the BOM's Footprint column names a part a purchaser
-        # recognizes. (assembly.package is its intended eventual home per the
-        # schema, but moving the column would change what a house is sent and
-        # is not this unit's job.)
+        # BOM GROUPING KEY = THE COMPLETE EMITTED IDENTITY, i.e. every cell of
+        # the rendered row except the Designator list itself. Grouping on a
+        # narrower key (the part number alone) would merge two rows a house
+        # reads as different parts; grouping on a wider one would split a row
+        # over a difference the file never carries.
+        #
+        # The AUTHORED footprint string, not the IR's content-hash footprint_id:
+        # the BOM's Footprint column names a part a purchaser recognizes.
+        # (assembly.package is its intended eventual home per the schema, but
+        # moving the column would change what a house is sent and is not this
+        # unit's job.)
         footprint = assembly.footprint_ref
         key = (footprint, component.value, assembly.mpn or "")
         grp = groups.setdefault(key, {
@@ -322,21 +370,7 @@ def _bom_rows(board, profile: HouseProfile,
         # row's qty is the number of parts a house buys rather than the number
         # of symbols the board draws.
         grp["refs"].extend(item.ref for item in placements)
-    rows = [
-        BomRow(
-            refs=tuple(sorted(g["refs"])), value=g["value"], footprint=g["footprint"],
-            mpn=g["mpn"], qty=len(g["refs"]),
-        )
-        for g in groups.values()
-    ]
-    rows.sort(key=lambda r: (r.footprint, r.value, r.refs[0] if r.refs else ""))
-    return rows
 
-
-def _cpl_rows(board, profile: HouseProfile,
-              excluded: list[str] | None = None) -> list[CplRow]:
-    rows: list[CplRow] = []
-    for component, assembly, placements in _emitting_components(board, profile, excluded):
         for physical in placements:
             # THE ANCHOR, NOT THE POSITION — see the module docstring's ASSEMBLY
             # ANCHOR section. Then Y NEGATED, X VERBATIM (COORDINATE FRAME
@@ -347,7 +381,7 @@ def _cpl_rows(board, profile: HouseProfile,
             # profile decision this module makes, documented at the point of use
             # as instructed). Rotation arrives already normalized into [0, 360)
             # and is otherwise the composed placement angle, verbatim.
-            rows.append(CplRow(
+            cpl.append(CplRow(
                 ref=physical.ref,
                 x_mm=float(physical.anchor[0]),
                 y_mm=-float(physical.anchor[1]),
@@ -355,8 +389,48 @@ def _cpl_rows(board, profile: HouseProfile,
                 side=physical.side.value,
                 mpn=assembly.mpn,
             ))
-    rows.sort(key=lambda r: r.ref)
-    return rows
+
+    bom = [
+        BomRow(
+            refs=tuple(sorted(g["refs"])), value=g["value"], footprint=g["footprint"],
+            mpn=g["mpn"], qty=len(g["refs"]),
+        )
+        for g in groups.values()
+    ]
+    bom.sort(key=lambda r: (r.footprint, r.value, r.refs[0] if r.refs else ""))
+    cpl.sort(key=lambda r: r.ref)
+    return bom, cpl, tuple(excluded), placed
+
+
+@dataclass(frozen=True)
+class AssemblyEmission:
+    """Both files' rows from one walk, plus what rode along with them.
+
+    Returned whole so a caller that wants both — a package builder, a preview —
+    compiles and walks the board ONCE. :func:`build_bom` and :func:`build_cpl`
+    are thin renderers over this."""
+
+    profile: HouseProfile
+    bom: tuple[BomRow, ...]
+    cpl: tuple[CplRow, ...]
+    excluded_refs: tuple[str, ...]
+    advisories: tuple[dict, ...]
+
+
+def emit(board, profile_id: str) -> AssemblyEmission:
+    """Walk the compiled board once, run every hard gate, collect the
+    advisories — or refuse by name. The single entry point behind both files."""
+    profile = _resolve_profile(profile_id)
+    assembly_gates.check_profile(profile)
+    assembly_gates.check_components(board)
+    bom, cpl, excluded, placed = _walk(board, profile)
+    assembly_gates.check_designators(placed)
+    assembly_gates.check_reference_sets(bom, cpl)
+    assembly_gates.check_row_limits(bom, profile)
+    assembly_gates.check_placement_spacing(cpl, profile, dict(placed))
+    return AssemblyEmission(profile=profile, bom=tuple(bom), cpl=tuple(cpl),
+                            excluded_refs=excluded,
+                            advisories=assembly_gates.advisories(board))
 
 
 def _csv_line(fields) -> str:
@@ -403,47 +477,51 @@ class AssemblyResult(dict):
     structured data rather than re-parsing the CSV. ``excluded_refs`` is the
     second side channel (epoch CPN1): the refs skipped by ``assembly:
     exclude``, in board order — always a tuple, empty when nothing was
-    excluded, so a reply can surface the advisory absent-when-empty."""
+    excluded, so a reply can surface the advisory absent-when-empty.
+    ``advisories`` is the third and follows the same absent-when-empty idiom:
+    findings a surface should SHOW without refusing (assembly_gates)."""
 
     def __init__(self, files: dict[str, str], rows,
-                 excluded_refs: tuple[str, ...] = ()):
+                 excluded_refs: tuple[str, ...] = (),
+                 advisories: tuple[dict, ...] = ()):
         super().__init__(files)
         self.rows = rows
         self.excluded_refs = excluded_refs
+        self.advisories = advisories
 
 
 def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
     """House-agnostic BOM extraction rendered through ``profile_id``'s house
     format. ``board`` is a compiled ``resolved_board.ResolvedBoard`` — the same
     object the gerber emitter reads. Raises AssemblyProfileError /
-    AssemblyIdentityError / AssemblyBoardError — never returns a partial or
-    best-guess result."""
-    profile = _resolve_profile(profile_id)
-    excluded: list[str] = []
-    rows = _bom_rows(board, profile, excluded)
+    AssemblyIdentityError / AssemblyBoardError / AssemblyGateError — never
+    returns a partial or best-guess result."""
+    emission = emit(board, profile_id)
     base = name or "board"
-    if profile.id == "jlc":
-        content = _render_jlc_bom(rows)
+    if emission.profile.id == "jlc":
+        content = _render_jlc_bom(emission.bom)
     else:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
-        raise AssemblyProfileError(f"no BOM renderer wired for profile {profile.id!r}")
-    return AssemblyResult({f"{base}-bom-{profile.id}.csv": content}, rows,
-                          tuple(excluded))
+        raise AssemblyProfileError(
+            f"no BOM renderer wired for profile {emission.profile.id!r}")
+    return AssemblyResult({f"{base}-bom-{emission.profile.id}.csv": content},
+                          list(emission.bom), emission.excluded_refs,
+                          emission.advisories)
 
 
 def build_cpl(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
     """House-agnostic CPL/pick-and-place extraction rendered through
     ``profile_id``'s house format. Same compiled-IR input and same fail-closed
     contract as :func:`build_bom`."""
-    profile = _resolve_profile(profile_id)
-    excluded: list[str] = []
-    rows = _cpl_rows(board, profile, excluded)
+    emission = emit(board, profile_id)
     base = name or "board"
-    if profile.id == "jlc":
-        content = _render_jlc_cpl(rows)
+    if emission.profile.id == "jlc":
+        content = _render_jlc_cpl(emission.cpl)
     else:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
-        raise AssemblyProfileError(f"no CPL renderer wired for profile {profile.id!r}")
-    return AssemblyResult({f"{base}-cpl-{profile.id}.csv": content}, rows,
-                          tuple(excluded))
+        raise AssemblyProfileError(
+            f"no CPL renderer wired for profile {emission.profile.id!r}")
+    return AssemblyResult({f"{base}-cpl-{emission.profile.id}.csv": content},
+                          list(emission.cpl), emission.excluded_refs,
+                          emission.advisories)
 
 
 # ---------------------------------------------------------------------------

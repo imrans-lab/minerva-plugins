@@ -674,7 +674,25 @@ var ExportAssembly = ToolSpec{
 		"JLCPCB's counter-clockwise-positive convention in the emitted frame. A " +
 		"component authoring assembly.placements expands into one BOM quantity and " +
 		"one CPL row per authored placement, its offset composed against the parent's " +
-		"rotation and side. Calls the worker's " +
+		"rotation and side. HARD GATES run before either file is rendered and each " +
+		"refuses with a stable code naming the component and the field: " +
+		"assembly_duplicate_designator (a designator repeated, or repeated only after " +
+		"case-folding), assembly_reference_set_mismatch (BOM and CPL naming different " +
+		"designators), assembly_row_ref_limit (a grouped BOM row over the profile's " +
+		"max_refs_per_row), assembly_placements_too_close (two designators on one side " +
+		"under the profile's min_designator_separation_mm — usually a synthetic " +
+		"expansion with a zero offset), assembly_empty_expansion (assembly.placements " +
+		"authored but naming none), assembly_paste_undecided (a not-populated part " +
+		"whose lands take solder paste with assembly.paste still \"auto\" — author " +
+		"include or exclude), assembly_missing_identity, and " +
+		"assembly_non_metric_coordinates. A do-not-populate part keeps its copper, " +
+		"mask and drill in the gerbers, leaves BOTH CSVs, and is listed in " +
+		"excluded_components; assembly.paste: exclude additionally drops its stencil " +
+		"apertures. ADVISORIES do not refuse: advisories[] carries findings the caller " +
+		"should show, today assembly_anchor_unmeasured — a populated part whose " +
+		"footprint draws neither a fab body outline nor a sized land, so the emitted " +
+		"coordinate is its drawn origin rather than a measured centre. Both lists are " +
+		"absent when empty. Calls the worker's " +
 		"assembly_bom then assembly_cpl methods over the same board+profile — whichever " +
 		"refuses first is the error this tool surfaces.",
 	InputSchema: json.RawMessage(`{
@@ -696,8 +714,19 @@ var ExportAssembly = ToolSpec{
 // not decoded — disk writing is this tool's OWN job, done in Go, only after
 // BOTH calls succeed (see HandleExportAssembly's HALF-WRITE fix comment).
 // Exactly one entry in files per call, since each call emits exactly one CSV.
+//
+// The two HONEST-OUTCOME lists ride along and are FORWARDED, not summarized.
+// Both are absent-when-empty on the worker side and stay absent here. Dropping
+// them — which this decoder used to do for ExcludedComponents — silently hides
+// from an agent the two things a CSV cannot say for itself: which parts the
+// house is deliberately NOT being sent, and which parts the pipeline could not
+// measure. Advisories are raw JSON because their entry shape belongs to
+// assembly_gates, and re-declaring it here would give the same finding two
+// definitions to drift between.
 type assemblyCallReply struct {
-	Files map[string]string `json:"files"`
+	Files              map[string]string `json:"files"`
+	ExcludedComponents []string          `json:"excluded_components"`
+	Advisories         []json.RawMessage `json:"advisories"`
 }
 
 // assemblyOutputSummary is this tool's per-file reply shape. The worker's own
@@ -710,19 +739,19 @@ type assemblyOutputSummary struct {
 	Path     string `json:"path,omitempty"`
 }
 
-// decodeAssemblyFile pulls the (single) filename+content pair out of one
-// worker call's {files:{filename:content}} reply, without writing anything —
+// decodeAssemblyReply pulls one worker call's reply apart: the (single)
+// filename+content pair out of {files:{filename:content}}, plus the whole reply
+// so its honest-outcome lists can be forwarded. Nothing is written here —
 // writing is HandleExportAssembly's job, deferred until BOTH calls are known
 // to have succeeded.
-func decodeAssemblyFile(raw json.RawMessage) (filename, content string, err error) {
-	var r assemblyCallReply
+func decodeAssemblyReply(raw json.RawMessage) (r assemblyCallReply, filename, content string, err error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return "", "", fmt.Errorf("decode assembly worker reply: %w", err)
+		return r, "", "", fmt.Errorf("decode assembly worker reply: %w", err)
 	}
 	for f, c := range r.Files {
 		filename, content = f, c
 	}
-	return filename, content, nil
+	return r, filename, content, nil
 }
 
 // csvDataRowCount counts non-empty data lines in the emitted CSV, excluding
@@ -809,7 +838,7 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 	if err != nil {
 		return nil, err
 	}
-	bomFilename, bomContent, err := decodeAssemblyFile(bomRaw)
+	bomReply, bomFilename, bomContent, err := decodeAssemblyReply(bomRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -818,7 +847,7 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 	if err != nil {
 		return nil, err
 	}
-	cplFilename, cplContent, err := decodeAssemblyFile(cplRaw)
+	_, cplFilename, cplContent, err := decodeAssemblyReply(cplRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -847,11 +876,24 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 	if profile == "" {
 		profile = "jlc" // mirrors the worker's own default (methods.py _assembly_bom/_assembly_cpl)
 	}
-	data, err := json.Marshal(map[string]interface{}{
+	reply := map[string]interface{}{
 		"profile": profile,
 		"bom":     bomSummary,
 		"cpl":     cplSummary,
-	})
+	}
+	// Taken from the BOM call alone, deliberately: both calls walk the SAME
+	// compilation of the SAME board through the SAME gates, so the two lists are
+	// equal by construction, and merging them would only be able to produce
+	// duplicates. Absent-when-empty, matching the worker's own idiom — a caller
+	// that sees no "advisories" key has been told there are none, not that the
+	// tool forgot to ask.
+	if len(bomReply.ExcludedComponents) > 0 {
+		reply["excluded_components"] = bomReply.ExcludedComponents
+	}
+	if len(bomReply.Advisories) > 0 {
+		reply["advisories"] = bomReply.Advisories
+	}
+	data, err := json.Marshal(reply)
 	if err != nil {
 		return nil, err
 	}

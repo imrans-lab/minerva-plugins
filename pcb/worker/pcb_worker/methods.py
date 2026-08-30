@@ -1402,6 +1402,45 @@ def _compile_for_assembly(params: dict):
     return compiled
 
 
+def _assembly_refusal(exc: Exception) -> dict:
+    """One assembly refusal, as the error payload every assembly surface uses.
+
+    `code` is the STABLE refusal name (assembly_gates' gate codes, or the
+    emitter exceptions' own class-level codes); the prose names the component
+    and the field. Both ride so a surface can match on the code and SHOW the
+    sentence without parsing it. An exception carrying no code is a backstop
+    fault, not a gate, and keeps the bare `assembly` kind alone."""
+    payload = {"kind": "assembly", "message": str(exc)}
+    for field in ("code", "component", "field"):
+        value = getattr(exc, field, None)
+        if value:
+            payload[field] = value
+    refs = getattr(exc, "refs", ())
+    if refs:
+        payload["refs"] = list(refs)
+    return payload
+
+
+def _assembly_reply(files, compiled) -> dict:
+    """The shared success payload both assembly emitters return.
+
+    Compile WARNING/INFO diagnostics ride along, same shape and same reason as
+    `_gerbers`: the board these CSVs describe is the compiled one, so what the
+    compiler said about it must not vanish on the way to an order. The two
+    absent-when-empty keys (the UX4 advisory idiom) are the honest-outcome half:
+    a component the board marks non-populated is REPORTED rather than silently
+    missing from the CSVs, and an ADVISORY — something the pipeline could not
+    measure, such as a part whose body it could not find — is SHOWN without
+    refusing. The caller fills in `written` afterwards."""
+    result = {"files": files, "written": [],
+              "warnings": [_diagnostic_to_payload(d) for d in compiled.diagnostics]}
+    if files.excluded_refs:
+        result["excluded_components"] = list(files.excluded_refs)
+    if files.advisories:
+        result["advisories"] = [dict(a) for a in files.advisories]
+    return result
+
+
 def _write_assembly_files(files: dict, out_dir) -> list | dict:
     """Shared out_dir writer for assembly outputs — same convention as
     `_gerbers`'s inline writer (utf-8 text, one file per dict entry)."""
@@ -1441,20 +1480,13 @@ def _assembly_bom(params: dict) -> dict:
         # BoardError, all ValueError subclasses) is the common case; the broad
         # catch is the backstop so nothing escapes handle_request's own
         # try/except as a bare {"kind":"python", "traceback": ...} reply.
-        return {"ok": False, "error": {"kind": "assembly", "message": str(exc)}}
+        return {"ok": False, "error": _assembly_refusal(exc)}
 
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
-    # Compile WARNING/INFO diagnostics ride along, same shape and same reason as
-    # `_gerbers`: the board these CSVs describe is the compiled one, so what the
-    # compiler said about it must not vanish on the way to an order.
-    result = {"files": files, "written": written,
-              "warnings": [_diagnostic_to_payload(d) for d in compiled.diagnostics]}
-    # Absent-when-empty (the UX4 advisory idiom): a component the board marks
-    # non-populated is REPORTED, never silently missing from the BOM.
-    if files.excluded_refs:
-        result["excluded_components"] = list(files.excluded_refs)
+    result = _assembly_reply(files, compiled)
+    result["written"] = written
     return {"ok": True, "result": result}
 
 
@@ -1472,16 +1504,13 @@ def _assembly_cpl(params: dict) -> dict:
     except Exception as exc:  # see _assembly_bom's comment: matches _gerbers'
         # broad-catch convention ("geometry/library faults reported as data,
         # not crash"), backstopping the named assembly_outputs errors.
-        return {"ok": False, "error": {"kind": "assembly", "message": str(exc)}}
+        return {"ok": False, "error": _assembly_refusal(exc)}
 
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
-    result = {"files": files, "written": written,
-              "warnings": [_diagnostic_to_payload(d) for d in compiled.diagnostics]}
-    # Absent-when-empty — see _assembly_bom.
-    if files.excluded_refs:
-        result["excluded_components"] = list(files.excluded_refs)
+    result = _assembly_reply(files, compiled)
+    result["written"] = written
     return {"ok": True, "result": result}
 
 

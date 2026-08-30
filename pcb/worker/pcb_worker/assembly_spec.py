@@ -36,6 +36,16 @@ an authored, stable ref. This module validates the shape and hands the offsets
 and rotations on verbatim; composing them against the parent's own rotation and
 side is a transform question, and the transform is owned by the placement work,
 not by this reader.
+
+AUTHORED-EMPTY IS NOT ABSENT, which is why ``expansion_authored`` is carried
+alongside the placements themselves. ``placements: []`` and no ``placements``
+key at all both leave an empty tuple, and the anchor pass then resolves BOTH to
+one implicit part under the component's own ref — so without the flag, a
+component whose author said "this drawing stands for several parts" and then
+named none would ship as an ordinary single part. The flag is the only surviving
+evidence of the difference; the ORDER GATE is what refuses on it
+(``assembly_gates``), not this reader, because a board mid-layout must still
+load, compile and gerber.
 """
 
 from __future__ import annotations
@@ -106,6 +116,9 @@ class ResolvedAssembly:
     house_parts: tuple[tuple[str, str], ...]
     paste: str
     placements: tuple[AssemblyPlacementSpec, ...]
+    #: Whether a ``placements`` LIST was authored, regardless of its length —
+    #: see the module docstring's AUTHORED-EMPTY section.
+    expansion_authored: bool = False
 
     def __post_init__(self) -> None:
         if not self.footprint_ref:
@@ -250,11 +263,13 @@ def resolve_assembly(comp: dict, footprint_ref: str, ref: str) -> ResolvedAssemb
             f"component {ref!r} assembly.paste must be one of "
             f"{'/'.join(PASTE_TOKENS)}, got {paste!r}")
     identity = {key: _identity(comp, block, key) for key in IDENTITY_FIELDS}
+    raw_placements = block.get("placements")
     return ResolvedAssembly(
         footprint_ref=footprint_ref,
         populate=populate,
         house_parts=_house_parts(block.get("house_parts"), ref),
         paste=paste,
-        placements=_placements(block.get("placements"), ref),
+        placements=_placements(raw_placements, ref),
+        expansion_authored=isinstance(raw_placements, list),
         **identity,
     )

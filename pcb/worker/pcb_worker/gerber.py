@@ -66,6 +66,7 @@ from gerber_writer import (
 from agent_router.layers import canon_to_kicad
 
 from . import board_model, mask_source, silk_source
+from .assembly_spec import PASTE_AUTO, PASTE_EXCLUDE
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .footprint_def import ReferenceTextDefinition
 from .geometry import (
@@ -555,7 +556,7 @@ def _adopt_mask_openings(g: _Geometry, openings) -> None:
 
 
 def _emit_pads(g: _Geometry, pads, transform: PlacementTransform,
-               top: bool, ref, mask_clearance: float) -> None:
+               top: bool, ref, mask_clearance: float, *, paste: bool = True) -> None:
     """Emit one component's pads into ``g`` — the SHARED, byte-sensitive pad path
     both the loose-dict harvest (``iter_pads(comp)``) and the IR-native harvest
     (``placed_pad_to_geom(placed)``) drive, so the two cannot diverge. ``pads`` is an
@@ -571,7 +572,18 @@ def _emit_pads(g: _Geometry, pads, transform: PlacementTransform,
     ``top`` stays a SEPARATE argument from ``transform.side`` and is not
     redundant: it buckets the flash onto a copper/paste side, and on the IR path
     the component's real side has to be stated while the placement is identity.
+
+    ``paste=False`` SUPPRESSES this component's stencil apertures entirely — the
+    board author's ``assembly.paste: exclude``, applied here because a stencil is
+    a fab output and this is where fab outputs are built. It suppresses only; it
+    never ADDS an aperture, so ``assembly.paste: include`` is simply the absence
+    of suppression and cannot conjure paste onto a footprint that declares none.
+    Copper, mask and drill are untouched either way: a do-not-populate part keeps
+    its lands, which is what makes it populatable later.
     """
+    # Chosen ONCE per component, not per pad, so the suppression cannot be
+    # applied to some of a part's lands and not others.
+    emit_paste = _emit_paste if paste else _skip_paste
     for pad in pads:
         px, py = transform.point((pad.x, pad.y))
 
@@ -615,8 +627,8 @@ def _emit_pads(g: _Geometry, pads, transform: PlacementTransform,
                     # opening came from mask_source above, in the same aperture
                     # family enlarged per axis — no circularizing).
                     g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
-                    _emit_paste(g, pad, px, py, land_shape, lw, lh, lrratio,
-                                pad_angle, ref)
+                    emit_paste(g, pad, px, py, land_shape, lw, lh, lrratio,
+                               pad_angle, ref)
                 else:
                     # Round land: the plated TH copper ring. FAIL-CLOSED if the pad
                     # resolved no annulus — never the retired `pad.annulus or drill*2`
@@ -626,8 +638,8 @@ def _emit_pads(g: _Geometry, pads, transform: PlacementTransform,
                     g.th_annuli.append((px, py, annulus, "ComponentPad"))
                     # Stencil follows the ROUND land, not pad.shape (a defaulted-rect
                     # TH pad's copper IS a circle here — see th_land).
-                    _emit_paste(g, pad, px, py, "circle", annulus, annulus, None,
-                                0.0, ref)
+                    emit_paste(g, pad, px, py, "circle", annulus, annulus, None,
+                               0.0, ref)
             # An UNPLATED (np_thru_hole) pad emits NO copper at all — its
             # drill-size mask opening already came from mask_source above, which
             # is where the rule and its rationale now live.
@@ -647,8 +659,12 @@ def _emit_pads(g: _Geometry, pads, transform: PlacementTransform,
             # this component's side only) came from mask_source above.
             # A copper pad's stencil aperture follows that land; a paste-only pad
             # uses its own authored shape as the aperture base.
-            _emit_paste(g, pad, px, py, pad.shape, w, h, pad.corner_rratio,
-                        pad_angle, ref)
+            emit_paste(g, pad, px, py, pad.shape, w, h, pad.corner_rratio,
+                       pad_angle, ref)
+
+
+def _skip_paste(*_args, **_kwargs) -> None:
+    """The ``assembly.paste: exclude`` stand-in for :func:`_emit_paste`."""
 
 
 def _emit_paste(g: _Geometry, pad, px: float, py: float, shape: str,
@@ -1790,7 +1806,16 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         number_of = {p.source_id: p.number for p in board.footprint_for(comp).pads}
         pads = [placed_pad_to_geom(p, number_of.get(p.source_id, ""))
                 for p in comp.placed_pads]
-        _emit_pads(g, pads, IDENTITY_PLACEMENT, top, ref, mask_clearance)
+        # THE BOARD'S OWN PASTE DECISION, applied here because the stencil is a
+        # fab output. `exclude` drops this component's apertures; `auto` and
+        # `include` both leave the footprint's own layer list to decide, which is
+        # why include can never add paste a footprint does not declare. The
+        # AMBIGUOUS combination — a not-populated part whose lands take paste,
+        # left on `auto` — is refused at ORDER time (assembly_gates), not here: a
+        # bare board's gerbers stay buildable while that question is open.
+        paste = getattr(comp.assembly, "paste", PASTE_AUTO) if comp.assembly else PASTE_AUTO
+        _emit_pads(g, pads, IDENTITY_PLACEMENT, top, ref, mask_clearance,
+                   paste=paste != PASTE_EXCLUDE)
         # Pass ALL placed graphics (NOT pre-filtered to a silk layer):
         # _emit_silk's internal silk-layer filter does the selecting — exactly
         # as the loose-dict path does. A component whose graphics are all

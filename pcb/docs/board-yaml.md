@@ -502,7 +502,7 @@ components:
 | `package` | the package name an assembly BOM prints, independent of the footprint id the board routes against. |
 | `comment` | the BOM's human-facing description column. |
 | `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. |
-| `paste` | `auto` (the default) lets the compiler decide from the land type; `include` / `exclude` is the author overriding it. |
+| `paste` | `auto` (the default) leaves the footprint's own layer list to decide; `exclude` drops this part's stencil apertures; `include` declines to drop them. See "Solder paste is authored, never invented" below. |
 | `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. |
 
 **Unknown keys inside `assembly` are REFUSED**, not preserved — the opposite of
@@ -523,6 +523,59 @@ invented these would rename a part between two orders of the same design, and
 `Validate` refuses a board where two physical parts would share one designator
 (`duplicate_assembly_designator`). `offset_mm` is measured in the parent
 component's own frame, before the parent's rotation and side are applied.
+
+### Solder paste is authored, never invented
+
+`paste` decides only whether this component's stencil apertures are
+**suppressed**. It can never add one: a footprint that declares no `F.Paste` /
+`B.Paste` participation gets no aperture under any value, because the gerber
+emitter reads paste participation strictly off each pad's resolved layer list
+(so a through-hole part emits no paste unless its footprint genuinely asks for
+paste-in-hole reflow, and a paste-only SMD aperture node still emits one).
+
+* `auto` — the footprint decides. The default.
+* `include` — the footprint decides, and the author has said so on purpose. Same
+  emitted apertures as `auto`; the difference is that the question was answered.
+* `exclude` — **no** stencil apertures for this component, whatever its
+  footprint declares. Copper, mask and drill are untouched, which is what keeps a
+  do-not-populate part populatable later.
+
+**A not-populated part whose lands take paste, left on `auto`, refuses at export
+time** (`assembly_paste_undecided`). There is no defensible default: paste under
+a part nobody places is either deliberate — hand-populated later, or populated by
+a different board — or a stencil defect that bridges bare lands. Boards carrying
+the legacy `assembly: exclude` scalar on such a footprint have to answer it once;
+their gerbers are unaffected either way.
+
+### Hard gates on assembly export
+
+These run over the compiled board before either CSV is rendered, and each
+refuses with a stable code naming the component and the field responsible. They
+are export-time gates, not load-time validation: a board mid-layout still loads,
+compiles and fabricates while carrying any of them.
+
+| code | refuses when |
+|---|---|
+| `assembly_duplicate_designator` | one designator names two physical parts — including a collision that only appears after case-folding, which an uploader will not distinguish. |
+| `assembly_reference_set_mismatch` | the BOM and the CPL name different designators after expansion. |
+| `assembly_row_ref_limit` | a grouped BOM row carries more designators than the profile's `max_refs_per_row`, where a house would silently truncate the tail. |
+| `assembly_placements_too_close` | two designators on one side sit closer than the profile's `min_designator_separation_mm` — usually a synthetic expansion whose `offset_mm` is missing or zero. |
+| `assembly_empty_expansion` | `placements` is authored and names nothing, which resolves back to a single part under the component's own ref. |
+| `assembly_paste_undecided` | a not-populated part's lands take paste and `paste` is still `auto`. |
+| `assembly_missing_identity` | a populated part lacks an identity field the selected profile requires. |
+| `assembly_non_metric_coordinates` | the selected profile states a coordinate unit other than millimetres. |
+
+The per-row and per-placement thresholds are **profile parameters**, not
+constants: the figures a particular house publishes are dialect facts the service
+profile supplies.
+
+**Advisories do not refuse.** An export also returns `advisories[]` — things the
+pipeline could not measure, which a caller should show and a human should judge.
+Today there is one: `assembly_anchor_unmeasured`, a **populated** part whose
+footprint draws neither a fab body outline nor a sized land, so the emitted
+coordinate is its drawn origin rather than a measured centre (see "The assembly
+anchor"). Silk-only furniture lands there legitimately, which is why it cannot be
+a gate.
 
 ### The legacy `assembly: exclude` scalar
 
