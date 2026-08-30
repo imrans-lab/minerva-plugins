@@ -533,3 +533,15 @@ test_fab_preview_legibility.gd assertions=100
 # inside a loop.
 test_canvas_render_truth.gd assertions=38
 test_refdes_anchor_document_load.gd assertions=12 real-worker
+
+# A PCB tab's note carries the BOARD, not a picture of one: the plugin_data
+# payload restored into a fresh model matches the source's whole-board token
+# (taken over the saved form — the machine's library resolution is deliberately
+# left behind, and read on both sides), the preview is the capture the module
+# ASKS FOR (headless has no rendering device, so a stand-in canvas records the
+# size and the fit flag and returns an Image of exactly that size), the caption
+# is one exact hand-computed string, and a payload from another schema version
+# is refused without touching the loaded board.
+# Counted by hand from the check() call sites: 5 + 4 + 6 + 3 + 5, none inside
+# a loop.
+test_pcb_note_hooks.gd assertions=23

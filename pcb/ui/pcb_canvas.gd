@@ -12563,8 +12563,8 @@ func mirror_capture_state_onto(copy) -> void:
 ## editor background for a plugin-hosted / non-foreground panel.
 ##
 ## Builds a private SubViewport, renders a FRESH copy of this canvas over the SAME
-## board data at the requested size, waits for the render to actually land
-## (RenderingServer.frame_post_draw), then reads the texture. Honors width/height.
+## board data at the requested size, forces the render to land, then reads the
+## texture. Honors width/height.
 ## fit=true frames what the canvas is drawing — the emitted artwork under a live
 ## fab preview, the whole board otherwise; fit=false reproduces THIS canvas's current
 ## camera (the minerva_pcb_set_view detail) — the world point at the screen centre
@@ -12572,13 +12572,38 @@ func mirror_capture_state_onto(copy) -> void:
 ## preserves centre+scale across the differing size. Returns null in a bare
 ## --headless run (no render target) or when detached, so the caller emits its
 ## graceful null envelope (test contract §1c).
+##
+## Yields ONE idle frame (process_frame fires even when the app is otherwise
+## idle) to reach a clean main-thread point before capture_to_image_now forces
+## the draw. The previous code awaited RenderingServer.frame_post_draw, which
+## does NOT fire while the app is idle/unfocused — so a 2nd/3rd capture stalled
+## past the MCP timeout.
 func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
+	# The headless early-out is repeated here, ahead of the yield, so a headless
+	# caller still gets its null WITHOUT waiting on a frame — some suites await
+	# this from a point where no idle frame has run yet.
 	if DisplayServer.get_name() == "headless":
-		return null
-	if data == null or not is_inside_tree():
 		return null
 	var tree := get_tree()
 	if tree == null:
+		return null
+	await tree.process_frame
+	return capture_to_image_now(width, height, fit)
+
+
+## The capture body, WITHOUT the idle-frame yield — for a caller that cannot
+## await: pcb_note's create-note hook, which the host invokes synchronously
+## (PluginScenePanelHost.invoke_create_note is not awaited, so a hook that
+## suspends never returns its Dictionary).
+##
+## There is only this one capture. The awaiting entry point above is a yield in
+## front of it, not a second rendering path — an MCP capture and a note preview
+## that framed the board differently would be two answers to "show me the
+## board".
+func capture_to_image_now(width: int, height: int, fit: bool = true) -> Image:
+	if DisplayServer.get_name() == "headless":
+		return null
+	if data == null or not is_inside_tree():
 		return null
 
 	var viewport := SubViewport.new()
@@ -12601,13 +12626,9 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 		copy.pan_offset = pan_offset
 
 	copy.queue_redraw()
-	# Yield ONE idle frame (process_frame fires even when the app is otherwise
-	# idle) to reach a clean main-thread point, then FORCE a synchronous draw so
-	# the offscreen viewport renders NOW. The previous code awaited
-	# RenderingServer.frame_post_draw, which does NOT fire while the app is
-	# idle/unfocused — so a 2nd/3rd capture stalled past the MCP timeout. force_draw
-	# renders deterministically without depending on the throttled main loop.
-	await tree.process_frame
+	# FORCE a synchronous draw so the offscreen viewport renders NOW: force_draw
+	# renders deterministically without depending on the throttled main loop,
+	# which does not tick while the app is idle/unfocused.
 	RenderingServer.force_draw(false)
 
 	var img: Image = viewport.get_texture().get_image()

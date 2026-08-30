@@ -47,6 +47,8 @@ const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
 const _PcbBoardHistoryScript: Script = preload("pcb_board_history.gd")
+## The plugin_data note this tab hands the host — payload, preview, caption.
+const _PcbNoteScript: Script = preload("pcb_note.gd")
 const _PcbLoadChecksScript: Script = preload("model/pcb_load_checks.gd")
 const _PcbOverlayFetchScript: Script = preload("model/pcb_overlay_fetch.gd")
 ## The pin→net invariant: used here for the load-time conflict report only —
@@ -6315,6 +6317,38 @@ func _on_panel_load_request(document: Dictionary) -> void:
 
 	_refresh_board_ui()
 	_zoom_to_fit_deferred()
+
+
+# ── plugin_data notes (Save to Note / chat inject / Edit-from-note) ───────────
+#
+# Both hooks are WIRING: pcb_note.gd owns the payload, the caption and the
+# preview capture. The panel supplies the three things only it holds — the
+# model, the live canvas, and the canonical source path — and, on the way back,
+# the refresh a load owes the UI.
+
+## Plugin → Note: the board this tab is showing, as a plugin_data note (see
+## pcb_note.gd for the payload/preview/caption split and why this cannot await).
+func _on_panel_create_note_request(ctx: Dictionary) -> Dictionary:
+	return _PcbNoteScript.build_note(ctx, _data, _canvas, _canonical_source_path)
+
+
+## Note → Plugin: rebuild the board from a note payload this panel wrote.
+##
+## A restore is not an edit: the whole rebuild runs inside the _restoring gate
+## so the model's data_changed does not dirty the tab, and the UI is then
+## refreshed and refit exactly as the document-load path does — _on_data_changed
+## only queue_redraw()s, so without the refit the board opens under the previous
+## board's camera.
+func _on_panel_restore_from_note(payload: Dictionary) -> bool:
+	_restoring = true
+	var restored: bool = _PcbNoteScript.restore_board(payload, _data)
+	_restoring = false
+	if not restored:
+		return false
+	_board_loaded = true
+	_refresh_board_ui()
+	_zoom_to_fit_deferred()
+	return true
 
 
 ## Run the one-shot legacy → sidecar migration through the annotation host, persist
