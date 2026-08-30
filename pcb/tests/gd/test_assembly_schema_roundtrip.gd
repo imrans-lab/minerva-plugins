@@ -307,8 +307,10 @@ func _run_board_without_assembly() -> void:
 	plain_board["components"] = [_component("C1", 5.0, null), _component("R2", 20.0, null)]
 	var yaml_text := _promote_to_yaml(plain_board)
 	check("3a. it serializes", yaml_text != "")
+	# Match the KEY, not the word: the fixture board is named "assembly-roundtrip",
+	# so a bare substring test finds its own `name:` line and can never pass.
 	check("3b. no assembly key appears anywhere in the document",
-		yaml_text != "" and not yaml_text.contains("assembly"),
+		yaml_text != "" and not yaml_text.contains("assembly:"),
 		yaml_text)
 	var back := _load_from_yaml(yaml_text)
 	check("3c. it loads back with both components and no assembly key",
