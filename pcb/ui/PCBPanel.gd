@@ -6327,9 +6327,10 @@ func _on_panel_load_request(document: Dictionary) -> void:
 # the refresh a load owes the UI.
 
 ## Plugin → Note: the board this tab is showing, as a plugin_data note (see
-## pcb_note.gd for the payload/preview/caption split and why this cannot await).
+## pcb_note.gd for the payload/preview/caption split). A coroutine: the host
+## awaits it, and the preview capture yields a frame.
 func _on_panel_create_note_request(ctx: Dictionary) -> Dictionary:
-	return _PcbNoteScript.build_note(ctx, _data, _canvas, _canonical_source_path)
+	return await _PcbNoteScript.build_note(ctx, _data, _canvas, _canonical_source_path)
 
 
 ## Note → Plugin: rebuild the board from a note payload this panel wrote.
@@ -6348,6 +6349,7 @@ func _on_panel_restore_from_note(payload: Dictionary) -> bool:
 	_board_loaded = true
 	_refresh_board_ui()
 	_zoom_to_fit_deferred()
+	_adopt_worker_anchors()
 	return true
 
 

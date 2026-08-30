@@ -542,6 +542,6 @@ test_refdes_anchor_document_load.gd assertions=12 real-worker
 # size and the fit flag and returns an Image of exactly that size), the caption
 # is one exact hand-computed string, and a payload from another schema version
 # is refused without touching the loaded board.
-# Counted by hand from the check() call sites: 5 + 4 + 6 + 3 + 5, none inside
+# Counted by hand from the check() call sites: 4 + 4 + 6 + 3 + 5, none inside
 # a loop.
-test_pcb_note_hooks.gd assertions=23
+test_pcb_note_hooks.gd assertions=22

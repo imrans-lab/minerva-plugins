@@ -27,17 +27,14 @@ extends RefCounted
 ##              both stall the toggle on a worker call and put a verdict in the
 ##              chat that no one asked for.
 ##
-## SYNCHRONOUS ON PURPOSE, and this is a hard host constraint rather than a
-## preference: PluginScenePanelHost.invoke_create_note calls the hook WITHOUT
-## awaiting it, so a hook that awaits anything returns a coroutine handle in
-## place of its Dictionary and the host discards it. That is why the capture
-## goes through pcb_canvas.capture_to_image_now — the same off-screen body as
-## capture_to_image, minus the idle-frame yield — rather than capture_to_image.
+## The create hook is a coroutine: the host awaits it, so the preview comes
+## from the same awaiting pcb_canvas.capture_to_image the MCP image export
+## uses — one capture path, one framing.
 ##
-## A capture that cannot run (headless, canvas detached) is not a failure: the
-## payload goes out without preview_image and the host backfills its own panel
-## screenshot, so the note still round-trips; it just carries the host's picture
-## instead of the fitted one.
+## A capture that cannot run (headless, canvas detached) leaves preview_image
+## out of the note. The host then substitutes its own panel screenshot where it
+## can take one; where it cannot, the host drops the plugin_data shape and the
+## note degrades to a plain screenshot note.
 
 const PcbViewFit := preload("pcb_view_fit.gd")
 
@@ -84,7 +81,7 @@ static func build_note(ctx: Dictionary, data, canvas, source_path: String) -> Di
 		"payload": payload,
 		"preview_alt_text": caption(data, source_path),
 	}
-	var preview: Image = capture_preview(canvas, data)
+	var preview: Image = await capture_preview(canvas, data)
 	if preview != null and not preview.is_empty():
 		note["preview_image"] = preview
 	return note
@@ -142,15 +139,15 @@ static func caption(data, source_path: String) -> String:
 
 
 ## Render the preview off-screen through the canvas's own capture. Null (no
-## preview, host backfills) when there is no canvas, when it is detached, or in
-## a headless run with no render target.
+## preview) when there is no canvas, when it is detached, or in a headless run
+## with no render target.
 static func capture_preview(canvas, data) -> Image:
 	if canvas == null or not is_instance_valid(canvas):
 		return null
-	if not canvas.has_method("capture_to_image_now"):
+	if not canvas.has_method("capture_to_image"):
 		return null
 	var size: Vector2i = preview_size(data)
-	return canvas.capture_to_image_now(size.x, size.y, true)
+	return await canvas.capture_to_image(size.x, size.y, true)
 
 
 ## The capture size: the board content's OWN aspect, scaled so the long edge is
