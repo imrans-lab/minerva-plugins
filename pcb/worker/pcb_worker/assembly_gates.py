@@ -1,94 +1,73 @@
 """The HARD GATES an assembly order has to pass, and the ADVISORIES it carries.
 
-An order package is submitted once, paid for, and manufactured. Every check
-below therefore REFUSES BY NAME — a stable code, plus prose naming the component
-and the FIELD responsible — rather than emitting a file that is merely
-plausible. "Best effort" is the failure mode this module exists to remove: a
-CSV that is syntactically fine and describes the wrong board costs a reel of
-parts and a fortnight.
+An order package is submitted once, paid for, and manufactured, so every check
+below REFUSES BY NAME — a stable code plus prose naming the component and the
+FIELD responsible — rather than emitting a file that is merely plausible.
 
-WHAT EACH REFUSAL PROTECTS, stated so a later reader can tell a real gate from a
-tidy one:
+WHAT EACH REFUSAL PROTECTS, so a later reader can tell a real gate from a tidy
+one:
 
-* :data:`CODE_REFERENCE_SET_MISMATCH` — the BOM and the CPL must name the SAME
-  set of designators after expansion. A house buys from one file and places from
-  the other; a designator in only one of them is either a part that arrives and
-  is never placed, or a placement with nothing to place.
-* :data:`CODE_DUPLICATE_DESIGNATOR` — one designator, one physical part. Checked
+* :data:`CODE_REFERENCE_SET_MISMATCH` — a house buys from the BOM and places
+  from the CPL, so a designator in only one of them is either a part that
+  arrives and is never placed or a placement with nothing to place.
+* :data:`CODE_DUPLICATE_DESIGNATOR` — one designator, one physical part.
   CASE-FOLDED, board-wide, over every physical placement including the
-  non-populated ones: a house's uploader and its operators do not agree on case,
-  and ``C1`` / ``c1`` reaching the same order is a coin toss over which part gets
-  placed. The Go validator already refuses the exact-match subset of this
-  (``duplicate_assembly_designator``, internal/board/assembly.go); this covers
-  what that one deliberately leaves out — component refs colliding with each
-  other, and every case-fold collision.
+  non-populated ones: a house's uploader does not distinguish case, so ``C1``
+  and ``c1`` in one order is a coin toss over which part gets placed. The Go
+  validator refuses the exact-match subset (``duplicate_assembly_designator``,
+  internal/board/assembly.go); this covers what that leaves out — component refs
+  colliding with each other, and every case-fold collision.
 * :data:`CODE_ROW_REF_LIMIT` — a grouped BOM row's Designator cell is one CSV
-  field, and every house caps how many refs it will read out of one. Over the
-  cap the tail is silently truncated, which is exactly a wrong order that looks
-  right. The cap is a PROFILE parameter (see PROFILE PARAMETERS below).
+  field, and over the profile's cap a house silently truncates the tail.
 * :data:`CODE_NON_METRIC_COORDINATES` — the emitter writes bare millimetre
-  numbers. A profile whose dialect states any other coordinate unit would have
-  those numbers read as that unit.
-* :data:`CODE_PLACEMENTS_TOO_CLOSE` — two designators on the same side closer
-  than the profile's minimum are two parts in one place: the ordinary cause is a
-  synthetic expansion whose authored ``offset_mm`` is missing or zero, which
-  emits two rows on top of each other and reads as a legitimate order.
+  numbers, which a profile stating another coordinate unit would misread.
+* :data:`CODE_PLACEMENTS_TOO_CLOSE` — two designators in one place; the ordinary
+  cause is a synthetic expansion whose authored ``offset_mm`` is missing or zero.
 * :data:`CODE_EMPTY_EXPANSION` — a component that authored ``placements`` and
-  named none. It resolves to one implicit part under its own ref, so the board
-  ships as though the expansion had never been written.
+  named none, which resolves back to one implicit part under its own ref.
 * :data:`CODE_PASTE_UNDECIDED` — a NOT-populated part whose lands still take
-  solder paste, with ``assembly.paste`` left on ``auto``. There is no defensible
-  default: paste under a part nobody places is either deliberate (the board is
-  hand-populated later, or a variant populates it) or a stencil defect that
-  bridges bare lands. The author decides, by writing ``include`` or ``exclude``.
+  solder paste, with ``assembly.paste`` on ``auto``. There is no defensible
+  default: it is either deliberate (hand-populated later, or a variant populates
+  it) or a stencil defect that bridges bare lands, so the author decides.
 
-ALREADY ENFORCED ELSEWHERE — not duplicated here, on purpose:
+ALREADY ENFORCED ELSEWHERE, deliberately not duplicated: non-finite transforms
+(``assembly_spec._finite`` at compile, ``resolved_board.PhysicalPlacement`` at
+IR construction) and profile-required part identity
+(``assembly_outputs._check_identity``). Neither can reach an emitter, so a copy
+here would be unreachable code asserting a property the type already carries.
 
-* Non-finite transforms. ``assembly_spec._finite`` refuses a non-finite authored
-  ``offset_mm`` / ``rotation_deg`` naming the component AND the key, at compile;
-  ``resolved_board.PhysicalPlacement.__post_init__`` refuses a non-finite anchor,
-  origin or rotation, and an out-of-range angle, at IR construction. Neither can
-  reach an emitter, so a third copy here would be unreachable code asserting a
-  property the type already carries.
-* Profile-required part identity. ``assembly_outputs._check_identity`` refuses,
-  naming the component and the missing field(s), driven by the profile's own
-  ``identity_required`` tuple — which reads any ``ResolvedAssembly`` field name,
-  so a profile that comes to require ``package`` or ``comment`` needs no code
-  here.
-
-PROFILE PARAMETERS. Every threshold is read off the selected ``HouseProfile``
-with a default, never hard-coded at the point of comparison, because the real
-figures are DIALECT facts a house states and the profile work pins later. The
-defaults below are what this unit measured to be reasonable and are explicitly
-NOT a claim about any particular house's published limit.
+PROFILE PARAMETERS. Every threshold is read off the selected profile rather than
+hard-coded at the point of comparison, because the real figures are DIALECT
+facts a house states. The defaults here are reasonable starting values, NOT a
+claim about any particular house's published limit.
 
 WHAT A REFUSAL NAMES. Most gates name one component and one authored key. Two
-cannot, and say so by leaving ``component`` unset rather than picking an
-arbitrary one: :data:`CODE_ROW_REF_LIMIT` is about a GROUPED row that several
-components share equally, and :data:`CODE_REFERENCE_SET_MISMATCH` is about two
-files disagreeing. Both name every designator involved in ``refs`` instead,
-which is the thing an author can act on.
+cannot and say so by leaving ``component`` unset rather than picking one:
+:data:`CODE_ROW_REF_LIMIT` is about a GROUPED row several components share, and
+:data:`CODE_REFERENCE_SET_MISMATCH` is about two files disagreeing. Both name
+every designator involved in ``refs`` instead.
 
-NOT TO BE CONFUSED WITH ``assembly_advisory``, which is the board-health
-assemblability checker (a tri-state DFM verdict over a tolerantly-resolved
-board). This module is the ORDER path: gates that stop an export, and one
-advisory that rides back on it.
+NOT ``assembly_advisory``, which is the board-health assemblability checker (a
+tri-state DFM verdict over a tolerantly-resolved board). This module is the
+ORDER path.
 
 ADVISORIES ARE NOT REFUSALS. :func:`advisories` reports what the pipeline could
-not measure. Today that is one thing: a POPULATED part whose anchor fell all the
-way through the basis ladder to ``footprint_origin``, meaning the footprint drew
-neither a fab body outline nor a sized land, so the coordinate being emitted as
-the part's centre is really its drawn datum. Silk-only board furniture lands
-there legitimately, which is exactly why this cannot be a refusal — and why the
-advisory is scoped to POPULATED parts, the only ones a nozzle visits.
+not measure — today, a POPULATED part whose anchor fell through the basis ladder
+to ``footprint_origin``, so the coordinate emitted as its centre is really its
+drawn datum. Silk-only board furniture lands there legitimately, which is why
+this cannot be a refusal and why it is scoped to POPULATED parts, the only ones
+a nozzle visits.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Protocol
 
-from .assembly_spec import PASTE_AUTO, PASTE_EXCLUDE, PASTE_INCLUDE
-from .resolved_board import ANCHOR_BASIS_ORIGIN, LayerRole
+from .assembly_spec import (PASTE_AUTO, PASTE_EXCLUDE, PASTE_INCLUDE,
+                            ResolvedAssembly)
+from .resolved_board import (ANCHOR_BASIS_ORIGIN, LayerRole, ResolvedBoard,
+                             ResolvedComponent)
 
 # --- refusal codes ---------------------------------------------------------
 
@@ -134,15 +113,22 @@ class AssemblyGateError(ValueError):
         self.refs = tuple(refs)
 
 
-def _param(profile, name: str, default):
-    """A profile threshold, defaulted. Read by NAME off whatever profile object
-    a caller supplies, so the profile type can grow a parameter without this
-    module importing it (which would close an import cycle with the emitters)."""
-    value = getattr(profile, name, None)
-    return default if value is None else value
+class AssemblyProfile(Protocol):
+    """The slice of a house profile the gates read.
+
+    Structural, not an import: the concrete type is
+    ``assembly_outputs.HouseProfile``, and that module already imports this one
+    for the threshold defaults below — naming the class here would close the
+    cycle. A Protocol states the same contract without it, so the gates read
+    real attributes rather than duck-typed lookups."""
+
+    id: str
+    coordinate_unit: str
+    max_refs_per_row: int
+    min_designator_separation_mm: float
 
 
-def emits_paste(component) -> bool:
+def emits_paste(component: ResolvedComponent) -> bool:
     """Does any of this component's resolved lands reach a paste layer?
 
     The honest question behind the paste policy: not "is it SMD" but "would this
@@ -151,23 +137,23 @@ def emits_paste(component) -> bool:
     emitter acts on — so the gate and the output cannot disagree about which
     parts have a paste decision to make."""
     return any(layer.role is LayerRole.PASTE
-               for pad in getattr(component, "placed_pads", ())
+               for pad in component.placed_pads
                for layer in pad.layers)
 
 
-def check_profile(profile) -> None:
+def check_profile(profile: AssemblyProfile) -> None:
     """Profile-level gates, run before the board is walked."""
-    unit = _param(profile, "coordinate_unit", METRIC_COORDINATE_UNIT)
+    unit = profile.coordinate_unit
     if unit != METRIC_COORDINATE_UNIT:
         raise AssemblyGateError(
             CODE_NON_METRIC_COORDINATES,
-            f"assembly profile {getattr(profile, 'id', profile)!r} states coordinate_unit "
+            f"assembly profile {profile.id!r} states coordinate_unit "
             f"{unit!r}, but the CPL renderer writes bare {METRIC_COORDINATE_UNIT} numbers "
             f"— refusing to emit millimetres under a non-metric dialect",
             field="coordinate_unit")
 
 
-def _component_faults(component, assembly):
+def _component_faults(component: ResolvedComponent, assembly: ResolvedAssembly):
     """Every per-component gate this component fails, as
     ``(code, field, message)``. Both faults below are checked for POPULATED and
     NOT-populated components alike: authored nonsense is just as reachable on a
@@ -189,7 +175,7 @@ def _component_faults(component, assembly):
                f"{PASTE_EXCLUDE!r} to drop them (no paste under a part nobody places)")
 
 
-def check_components(board) -> None:
+def check_components(board: ResolvedBoard) -> None:
     """The per-component gates, over the whole board in one pass.
 
     COLLECTED, NOT RAISED ON SIGHT. A board that migrated from the pre-block
@@ -201,7 +187,7 @@ def check_components(board) -> None:
     faults: dict[str, list[tuple[str, str, str]]] = {}
     order: list[str] = []
     for component in board.components:
-        assembly = getattr(component, "assembly", None)
+        assembly = component.assembly
         if assembly is None:
             continue
         for code, field, message in _component_faults(component, assembly):
@@ -270,10 +256,10 @@ def check_reference_sets(bom_rows, cpl_rows) -> None:
         field="Designator", refs=tuple(bom_only + cpl_only))
 
 
-def check_row_limits(bom_rows, profile) -> None:
+def check_row_limits(bom_rows, profile: AssemblyProfile) -> None:
     """No grouped BOM row may carry more designators than the profile admits in
     one Designator cell."""
-    limit = _param(profile, "max_refs_per_row", DEFAULT_MAX_REFS_PER_ROW)
+    limit = profile.max_refs_per_row
     for row in bom_rows:
         if len(row.refs) <= limit:
             continue
@@ -281,7 +267,7 @@ def check_row_limits(bom_rows, profile) -> None:
         raise AssemblyGateError(
             CODE_ROW_REF_LIMIT,
             f"grouped BOM row [{identity}] carries {len(row.refs)} designators, over the "
-            f"{getattr(profile, 'id', profile)!r} profile's max_refs_per_row of {limit} "
+            f"{profile.id!r} profile's max_refs_per_row of {limit} "
             f"(first {row.refs[0]!r}, last {row.refs[-1]!r}) — a house reading only the "
             f"first {limit} would place the rest with nothing ordered for them. Split the "
             f"row by authoring distinct identities (a reference-prefix family per row) or "
@@ -289,9 +275,14 @@ def check_row_limits(bom_rows, profile) -> None:
             field="max_refs_per_row", refs=row.refs)
 
 
-def check_placement_spacing(cpl_rows, profile, owner_of_ref=None) -> None:
+def check_placement_spacing(cpl_rows, profile: AssemblyProfile,
+                            owner_of_ref=None) -> None:
     """No two designators on the SAME side may sit closer than the profile's
     minimum separation.
+
+    SCOPE: only POPULATED parts, because only they have CPL rows — a
+    do-not-populate part sitting on top of a populated one passes this gate
+    silently, which is intended, since nothing is placed there.
 
     Swept in X order rather than compared pairwise, so a board with thousands of
     parts costs one sort: rows further apart in X than the threshold cannot be
@@ -302,8 +293,7 @@ def check_placement_spacing(cpl_rows, profile, owner_of_ref=None) -> None:
     designators — for an expansion those differ, and the component is the thing
     an author edits."""
     owners = owner_of_ref or {}
-    limit = float(_param(profile, "min_designator_separation_mm",
-                         DEFAULT_MIN_DESIGNATOR_SEPARATION_MM))
+    limit = float(profile.min_designator_separation_mm)
     if limit <= 0:
         return
     order = sorted(cpl_rows, key=lambda r: (r.x_mm, r.y_mm, r.ref))
@@ -319,7 +309,7 @@ def check_placement_spacing(cpl_rows, profile, owner_of_ref=None) -> None:
                     CODE_PLACEMENTS_TOO_CLOSE,
                     f"designators {near.ref!r} and {other.ref!r} are placed "
                     f"{distance:.4f} mm apart on the {near.side} side, under the "
-                    f"{getattr(profile, 'id', profile)!r} profile's "
+                    f"{profile.id!r} profile's "
                     f"min_designator_separation_mm of {limit} — two parts cannot occupy "
                     f"one place; the usual cause is a synthetic expansion whose authored "
                     f"offset_mm is missing or zero",
@@ -328,7 +318,7 @@ def check_placement_spacing(cpl_rows, profile, owner_of_ref=None) -> None:
                     refs=(near.ref, other.ref))
 
 
-def advisories(board) -> tuple[dict, ...]:
+def advisories(board: ResolvedBoard) -> tuple[dict, ...]:
     """What the pipeline could not MEASURE — reported, never refused.
 
     See the module docstring's ADVISORIES section for why an unmeasured anchor
@@ -336,7 +326,7 @@ def advisories(board) -> tuple[dict, ...]:
     gate."""
     out: list[dict] = []
     for component in board.components:
-        assembly = getattr(component, "assembly", None)
+        assembly = component.assembly
         if assembly is None or not assembly.populate:
             continue
         refs = tuple(item.ref for item in component.physical_placements

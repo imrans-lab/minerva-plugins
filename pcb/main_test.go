@@ -981,10 +981,9 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	// the pads and the footprint that blocked the compile, and leave nothing on
 	// disk — never a traceback, never a partial CSV.
 	//
-	// This subcase also carries the HALF-WRITE property (cold review, elevated
-	// finding): a refusal is all-or-nothing. HandleExportAssembly computes both
-	// CSVs before writing either, so no out_dir file survives a refusal from
-	// either worker call.
+	// This subcase also carries the HALF-WRITE property: a refusal is
+	// all-or-nothing. HandleExportAssembly computes both CSVs before writing
+	// either, so no out_dir file survives a refusal from either worker call.
 	uncompilableDir := t.TempDir()
 	uncEnv := c.call("minerva_pcb_export_assembly", map[string]any{
 		"yaml": string(uncompilable), "name": "unc", "out_dir": uncompilableDir,

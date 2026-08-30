@@ -1,151 +1,56 @@
-"""Assembly-package outputs: BOM (bill of materials) + CPL (component
-placement list / pick-and-place) for pre-assembled board ordering (docket
-019f763cdf5b).
+"""Assembly-package outputs: the BOM (bill of materials) and CPL (component
+placement list / pick-and-place) for a pre-assembled board order.
 
-Scope:
+ONE COMPILATION FEEDS EVERY ORDER ARTIFACT. Both emitters read the compiled
+``ResolvedBoard`` IR — the same object ``gerber.build_gerbers_ir`` reads — and
+nothing else, so a single order cannot carry CSVs describing one board and
+gerbers describing another. Every coordinate, side, rotation, value and part
+identity below comes from a component the compiler admitted; a board that cannot
+strictly compile refuses by name (:func:`not_compilable_error`), never with a
+traceback and never with a partial CSV.
 
-  * ONE COMPILATION FEEDS EVERY ORDER ARTIFACT. Both emitters read the compiled
-    ``ResolvedBoard`` IR — the same object ``gerber.build_gerbers_ir`` reads —
-    and nothing else. They used to read the RAW canonical board dict instead,
-    which meant a single order could carry CSVs describing one board and
-    gerbers describing another: the dict path emitted rows for placements the
-    compiler had never resolved, footprints no library supplies, and pins whose
-    declared positions the coincidence check refuses. Every coordinate, side,
-    rotation, value and part identity below now comes from a component the
-    compiler admitted.
+ONE EMISSION, TWO FILES. :func:`emit` builds the BOM rows AND the CPL rows in a
+single walk, and :func:`build_bom` / :func:`build_cpl` render out of it. That is
+what lets the reference-set gate compare the files a caller actually receives
+rather than a third derivation of the board — and why asking for only the BOM
+still refuses when the CPL would have disagreed with it.
 
-    THE DELIBERATE CAPABILITY REGRESSION this creates, stated rather than
-    discovered: a board that cannot strictly compile could produce a BOM and a
-    CPL before, and cannot now. That outcome is a NAMED, structured refusal
-    identifying what blocked compilation (:func:`not_compilable_error`) — never
-    a traceback, and never a partial CSV.
-  * House-format-agnostic CORE (:func:`_walk`, one pass, both files) plus
-    exactly ONE house-specific renderer (JLCPCB-style CSV, ``PROFILES["jlc"]``).
-    An unrecognized or assembly-incapable house id is a NAMED refusal
-    (:class:`AssemblyProfileError`) — never a silent best-guess format.
-  * PART-IDENTITY CONTRACT: a component the selected profile requires identity
-    for (today: ``mpn``) and that lacks it is a NAMED, structured refusal
-    (:class:`AssemblyIdentityError`) naming the component ref — never a blank
-    BOM/CPL cell. A component the profile does NOT require identity for (no
-    profile selected, or a future profile with an empty requirement set) is
-    emitted with an empty field, same as today's ``extract_bom`` (a blank
-    value/footprint is a warning, not a fatal — the identity contract adds a
-    STRICTER, profile-gated rule on top of that, it does not relax it).
+A house-format-agnostic CORE (:func:`_walk`) plus exactly ONE house-specific
+renderer (JLCPCB-style CSV, ``PROFILES["jlc"]``). An unrecognized or
+assembly-incapable house id is a NAMED refusal (:class:`AssemblyProfileError`),
+never a silent best-guess format.
 
-  * HARD GATES, NAMED. Before either file is rendered, the rows both emitters
-    built are put through :mod:`assembly_gates` — designator uniqueness,
-    BOM/CPL reference-set equality, the profile's per-row designator cap and
-    minimum placement separation, and the per-component authored-expansion and
-    do-not-populate-paste rules. Every one refuses with a stable code naming the
-    component and the field. ADVISORIES (what the pipeline could not measure)
-    ride back on the result instead of refusing.
-  * ONE EMISSION, TWO FILES. :func:`emit` builds the BOM rows AND the CPL rows in
-    a single walk of the compiled board, and both :func:`build_bom` and
-    :func:`build_cpl` render out of it. That is what lets the reference-set gate
-    compare the files a caller actually receives rather than a third derivation
-    of the board — and it is why asking for only the BOM still refuses when the
-    CPL would have disagreed with it.
+PART-IDENTITY CONTRACT. A component the selected profile requires identity for
+(today: ``mpn``) and that lacks it is a NAMED refusal
+(:class:`AssemblyIdentityError`) naming the ref, never a blank cell. Where the
+profile requires nothing, a blank field is emitted and a blank value/footprint
+stays a warning — the contract is a stricter, profile-gated rule on top of that,
+not a relaxation of it.
 
-PASTE NON-CLAIM: neither output here says anything about solder-paste
-coverage. Paste is emitted by ``gerber.py`` (``F_Paste``/``B_Paste``) and is
-fail-closed there since docket 019fb0155d93/019fb079ce60 (see
-``fab_capability.FABRICATION_CRITICAL_OUTPUTS``). A BOM/CPL pair is NOT a
-stencil and must never be read as one.
+HARD GATES, NAMED. Before either file is rendered the rows both emitters built
+go through :mod:`assembly_gates`. Every gate refuses with a stable code naming
+the component and the field; ADVISORIES (what the pipeline could not measure)
+ride back on the result instead of refusing.
 
-ROTATION CONVENTION — read before touching any rotation math here:
-
-    CPL ``Rotation`` is emitted VERBATIM from the component's authored
-    ``rotation_deg`` (normalized to ``[0, 360)`` only — no sign change, no
-    trigonometry). This is deliberately the SAME number ``compile_board``
-    threads unchanged into ``Placement.rotation_deg`` (compile_board.py:2275,
-    ``rotation_deg=float(rotation or 0.0)``) and the SAME convention
-    ``geometry.py`` documents as "KiCad-equivalent": KiCad applies a footprint
-    ``(at x y rot)`` angle CLOCKWISE in the file's Y-down frame
-    (``math.radians(-deg)``), exactly matching
-    ``agent_router/kicad_io.py::_transform_position`` (`rad =
-    math.radians(-rotation)` — "KiCad uses clockwise rotation in screen
-    coords", kicad_io.py:495). geometry.py is the pinned single source for
-    this (tests/test_rotation.py, tests/test_geometry.py:73, docket
-    019f3ba0f455). KiCad's own Footprint Position File plugin dumps this same
-    stored angle unmodified — it does not re-sign it — and JLCPCB's SMT
-    upload flow is documented to accept a KiCad-generated position file
-    as-is. So the emitter's job is to reproduce THAT number faithfully.
-
-    AND THAT IS ALREADY JLC's COUNTER-CLOCKWISE-POSITIVE CONVENTION, which is
-    not a coincidence and not a second decision: the angle is clockwise in a
-    Y-DOWN frame, and negating Y (which the COORDINATE FRAME section below
-    does to every row) conjugates a clockwise turn into a counter-clockwise
-    one. In the frame the CSV is actually written in, a part at rotation 90
-    has turned 90 degrees COUNTER-CLOCKWISE from its rotation-0 pose — on BOTH
-    sides of the board, because the bottom-side mirror cancels against that
-    same Y negation. Proven on real library geometry, rather than by this
-    argument, in ``tests/test_assembly_anchor.py``.
-
-    NON-CLAIM (the trap the docket names explicitly): this is NOT the same
-    thing as "the part will mount right-side-up in JLC's SMT feeder." JLC's
-    OWN internal component-library images sometimes disagree with a
-    footprint's 0-degree reference — a PER-PART-TYPE calibration problem
-    ("JLCPCB rotation cheat sheet"), not a board-wide sign convention. JLC's
-    own placement-review UI is where a customer catches and corrects that
-    class of error; it is a part-identity/library-modeling problem
-    (coordinated with contract item 019f761fe518), not something a coordinate
-    transform in THIS module can discover from a board YAML alone. Emitting
-    the wrong global sign here would rotate EVERY part; not correcting a
-    per-part JLC calibration quirk rotates at most a few footprint families —
-    the two are different bugs with different owners, and this module claims
-    to fix only the first one.
-
-    (Boards authored in the pcb-architect dialect use the OPPOSITE sign for
-    their own ``rotation`` field; per geometry.py, that is reconciled at
-    IMPORT time, before a component ever reaches this module — so
-    ``rotation_deg`` here is already KiCad-equivalent by the time we see it.)
-
-ASSEMBLY ANCHOR — WHAT THE COORDINATE IS. A CPL row carries the PART's centre,
-not the drawing's datum. ``x_mm``/``y_mm`` place the FOOTPRINT ORIGIN, and where
-that origin sits on the part is a property of the footprint: measured over
-``pcb/library/footprints``, 14 of 39 put it on pin 1 and 18 resolve an anchor
-somewhere other than their origin, so emitting the placement position as a
-pick-and-place coordinate is wrong by up to half a package. Every row below
-therefore reads ``ResolvedComponent.physical_placements`` — the resolved,
-explicitly-based body-centre anchors ``assembly_anchor`` composes at compile
-time — and never ``Placement.position``. One consequence stated plainly, since
-it changed numbers a caller may have on file: the emitted coordinate of every
-part whose footprint origin differs from its body centre MOVED when that anchor
-landed; a part whose origin already IS its body centre (every chip-scale SMD
-footprint in the seed library) emits exactly what it emitted before.
-
-The same list is also what makes a SYNTHETIC EXPANSION real. One drawn
-component carrying ``assembly.placements`` stands for several soldered parts,
-and each contributes its own CPL row under its own authored designator and its
-own BOM quantity — the expansion offset already composed against the parent's
+THE COORDINATE IS THE ASSEMBLY ANCHOR, not the drawing datum. ``x_mm``/``y_mm``
+place the FOOTPRINT ORIGIN, and where that sits on the part is a property of the
+footprint: over ``pcb/library/footprints``, 14 of 39 put it on pin 1 and 18
+resolve an anchor somewhere other than their origin. Every row therefore reads
+``ResolvedComponent.physical_placements`` — the resolved body-centre anchors
+``assembly_anchor`` composes at compile time — and never ``Placement.position``.
+The same list is what makes a SYNTHETIC EXPANSION real: one drawn component
+carrying ``assembly.placements`` contributes one CPL row and one BOM quantity
+per authored placement, the offset already composed against the parent's
 rotation and side, once, by the compiler.
 
-COORDINATE FRAME — MEASURED, NOT ASSUMED. CPL X is the resolved anchor's
-X VERBATIM; CPL Y is its Y NEGATED. This is proven
-against KiCad itself, not inferred from a Y-down/Y-up label — full command,
-measured output table, and the byte-exact seal are in
-``tests/test_assembly_outputs.py::test_cpl_y_matches_kicad_cli_position_file_oracle``
-(this runtime module deliberately does not name the dev/CI-only export tool
-here; see ``tests/test_kicad_cli_boundary.py`` — STANDING GUARD 2 — which
-forbids that in shipped worker code and is why the citation lives in the test
-instead). Summary of the finding: PosX matches the placed footprint
-ORIGIN's X exactly; PosY is the NEGATION of its Y; Rot matches authored
-``rotation_deg`` VERBATIM (confirming the ROTATION CONVENTION section above)
-— a finding about the FRAME, which the anchor above is expressed in and does
-not disturb;
-a bottom-side part's X is UNMIRRORED (the reference exporter only negates X
-for bottom parts under an opt-in flag, which the oracle run did NOT pass —
-the omission is the profile decision this module makes: match the tool's
-DEFAULT, not the opt-in). This is also consistent with ``gerber.py``'s own
-``_Geometry.to_gerber_frame`` (gerber.py:466), which negates Y at its harvest
-boundary for the identical reason: the placement frame is Y-DOWN, and every
-consumer outside that one frame (Gerber's Y-up plot frame,
-KiCad's own position-file export) negates it. A CPL is not a Gerber layer and
-is not re-derived through ``_Geometry`` — this module negates Y itself, at
-its own row-construction boundary (:func:`_walk`), rather than importing
-gerber.py's frame converter. An earlier draft of this module claimed KiCad's
-position-file export does NOT flip Y; that claim was never measured and was
-WRONG — corrected here after running the oracle referenced above.
+FRAME AND ROTATION, both measured against a real ``kicad-cli`` position-file
+run: CPL X is the anchor's X VERBATIM, CPL Y is its Y NEGATED, bottom-side X is
+UNMIRRORED, and ``Rotation`` is the authored ``rotation_deg`` verbatim (modulo
+360) — which reads as JLC's counter-clockwise-positive convention precisely
+because Y is negated. Do not touch the arithmetic in :func:`_walk` without
+reading ``docs/assembly-outputs.md``, which carries the oracle, the measured
+table and the two non-claims (this is not a promise a part mounts
+right-side-up, and a BOM/CPL pair is not a stencil).
 """
 
 from __future__ import annotations
@@ -372,15 +277,14 @@ def _walk(board, profile: HouseProfile):
         grp["refs"].extend(item.ref for item in placements)
 
         for physical in placements:
-            # THE ANCHOR, NOT THE POSITION — see the module docstring's ASSEMBLY
-            # ANCHOR section. Then Y NEGATED, X VERBATIM (COORDINATE FRAME
-            # section; the measured oracle citation lives in
-            # tests/test_assembly_outputs.py, not here — STANDING GUARD 2). X is
-            # NOT mirrored on the bottom side either (the reference exporter's
-            # default: its opt-in bottom-X-negate flag was NOT applied — the
-            # profile decision this module makes, documented at the point of use
-            # as instructed). Rotation arrives already normalized into [0, 360)
-            # and is otherwise the composed placement angle, verbatim.
+            # THE ANCHOR, NOT THE POSITION. Then Y NEGATED, X VERBATIM, and X
+            # NOT mirrored on the bottom side (the reference exporter's default;
+            # its opt-in bottom-X-negate flag is deliberately not matched).
+            # Rotation arrives already normalized into [0, 360) and is otherwise
+            # the composed placement angle, verbatim. The measured oracle for all
+            # of it is in tests/test_assembly_outputs.py — it may not be cited
+            # from shipped worker code (STANDING GUARD 2) — and is written up in
+            # docs/assembly-outputs.md.
             cpl.append(CplRow(
                 ref=physical.ref,
                 x_mm=float(physical.anchor[0]),

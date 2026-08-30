@@ -1387,10 +1387,10 @@ def _compile_for_assembly(params: dict):
     """The shared prologue for both assembly emitters: parse, then strict
     compile, or a NAMED refusal.
 
-    An uncompilable board is the deliberate capability regression the cutover
-    creates — BOM/CPL used to be emitted off the raw dict — so it refuses under
-    its own `assembly_not_compilable` kind, naming every diagnostic that
-    blocked the compile, rather than under the generic compile kind."""
+    An uncompilable board refuses under its own `assembly_not_compilable` kind,
+    naming every diagnostic that blocked the compile, rather than under the
+    generic compile kind — a caller can then tell "this board cannot be
+    ordered" from "this request was malformed"."""
     try:
         board = _load(params)
     except board_model.BoardParseError as exc:

@@ -53,6 +53,8 @@ from pcb_worker.resolved_board import (
     ANCHOR_BASIS_FAB, ANCHOR_BASIS_LANDS, ANCHOR_BASIS_ORIGIN,
     DiagnosticSeverity, ResolutionSuccess,
 )
+# The CPL byte seal for assembly_resolved.yaml has exactly one owner.
+from tests.test_assembly_outputs import RESOLVED_FIXTURE_CPL
 
 BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
 ANCHOR_FIXTURE = BOARDS / "assembly_anchor.yaml"
@@ -186,18 +188,16 @@ def test_a_footprint_already_centred_on_its_origin_does_not_move(ref, position):
 def test_the_existing_emitter_fixture_is_byte_identical():
     """The same claim on the board every OTHER assembly test measures. Every
     footprint in assembly_resolved.yaml (R_0805, D_SMA, and two excluded pieces
-    of furniture) is centred on its own origin, so this unit changed not one
-    character of what that board emits — which is why
-    test_assembly_outputs.py's byte-exact cutover oracle is still a valid seal
-    rather than a rewritten expectation."""
+    of furniture) is centred on its own origin, so the anchor composes back onto
+    the authored position and that board's CPL is unchanged character for
+    character.
+
+    The expected bytes are IMPORTED, not restated: test_assembly_outputs.py owns
+    them (RESOLVED_FIXTURE_CPL), so this test cannot drift into agreeing with a
+    stale copy."""
     content = next(iter(ao.build_cpl(
         _compiled(RESOLVED_FIXTURE), "jlc", name="afix").values()))
-    assert content == (
-        "Designator,Mid X,Mid Y,Layer,Rotation\r\n"
-        "D1,12.5000,-14.0000,Bottom,45.0000\r\n"
-        "R1,10.0000,-5.0000,Top,0.0000\r\n"
-        "R2,15.0000,-5.0000,Top,90.0000\r\n"
-    )
+    assert content == RESOLVED_FIXTURE_CPL
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +327,8 @@ def test_the_whole_fixture_renders_the_hand_derived_table():
 
 def test_bom_and_cpl_place_exactly_the_same_designators():
     """The expansion has to reach BOTH emitters or an order describes two
-    different part counts. Not the A3 gate — this is the property that gate will
-    check, held at the point the expansion is consumed."""
+    different part counts — the property held at the point the expansion is
+    consumed, rather than at the reference-set gate that also enforces it."""
     board = _compiled()
     bom_refs = {ref for row in ao.build_bom(board, "jlc").rows for ref in row.refs}
     cpl_refs = {row.ref for row in ao.build_cpl(board, "jlc").rows}

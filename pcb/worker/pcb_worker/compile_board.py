@@ -3459,9 +3459,9 @@ def _resolve_side(raw_layer, ref: str, comp_ref: SourceRef,
     (never default an unrecognized value to TOP — review 621 MF1).
 
     Token vocabulary read from geometry.TOP_LAYER_NAMES / BOTTOM_LAYER_NAMES —
-    the single authority (docket 019fc3105828). This is now the ONLY side
-    adjudicator on the order path too: assembly_outputs used to carry a mirror
-    of this rule for the raw board dict and reads Placement.side instead."""
+    the single authority. This is also the ONLY side adjudicator on the order
+    path: the assembly emitters read Placement.side rather than re-reading the
+    authored token."""
     if raw_layer is None:
         return Side.TOP
     token = str(raw_layer).strip().lower()

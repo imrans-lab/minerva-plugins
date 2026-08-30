@@ -625,8 +625,7 @@ seed library is split down the middle — re-measured over
 their origin** (see "The assembly anchor" below). The two counts are not the
 same set: a single-pad fiducial or test point has pin 1 on the origin *and* its
 body centred there, while a couple of connectors are body-off-origin without
-having pin 1 there. (An earlier revision of this table said "14 of 35" — the
-count of files was wrong, the count of pin-1 origins was right.)
+having pin 1 there.
 
 | footprint | pin 1 relative to origin |
 |---|---|
@@ -636,9 +635,8 @@ count of files was wrong, the count of pin-1 origins was right.)
 | `Package_TO_SOT_SMD:SOT-23` | `(-0.9375, -0.95)` — origin is the **body centre** |
 | `Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm` | `(-1.4625, -0.75)` — origin is the **body centre** |
 
-So "the origin is pin 1" — which earlier revisions of this document asserted
-twice — is **true only of KiCad's through-hole connector and DIP families**, and
-false for every SMD chip footprint here. Under FULL geometry authority (a
+So "the origin is pin 1" is **true only of KiCad's through-hole connector and
+DIP families**, and false for every SMD chip footprint here. Under FULL geometry authority (a
 component carrying its own `pads` key, see "Geometry authority") the origin is
 whatever datum the board author wrote those pad offsets against, and no library
 is consulted at all.

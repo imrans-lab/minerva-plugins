@@ -10,8 +10,7 @@ extends SceneTree
 ## not model it: it rides `PcbComponent.canonical_extra`, the verbatim
 ## passthrough for canonical keys the model has no field for. A passthrough that
 ## drops one key is invisible until an order goes out with the wrong part in it —
-## which is exactly how `assembly: exclude` and `mpn` were lost once already
-## (epoch CPN1).
+## which is exactly how `assembly: exclude` and `mpn` were lost once already.
 ##
 ## THE ORACLE, in one sentence: a promote → deserialize → load round trip that
 ## drops any assembly field or any placement ref fails this suite.
@@ -234,50 +233,50 @@ func _run_real_worker_round_trip() -> void:
 	check("2a. pcb.serialize accepted a board carrying the structured block",
 		yaml_text != "",
 		"empty yaml — the contract refused the block")
-	check("2b. the emitted document carries the part identity",
-		yaml_text.contains("PPTC071LFBN-RC") and yaml_text.contains("C41376161"))
-	check("2c. the emitted document carries both authored placement refs",
-		yaml_text.contains("J1S_A") and yaml_text.contains("J1S_B"))
-	check("2d. the legacy scalar was MIGRATED, not re-emitted",
+	# No "the YAML text contains the mpn / the placement refs" checks here: 2d-2k
+	# below read those same values off the board that comes BACK, which a
+	# serialize-side drop cannot survive. A substring check would only restate
+	# them more weakly.
+	check("2b. the legacy scalar was MIGRATED, not re-emitted",
 		not yaml_text.contains("assembly: exclude"),
 		yaml_text)
 
 	var back := _load_from_yaml(yaml_text)
-	check("2e. pcb.deserialize returned a board",
+	check("2c. pcb.deserialize returned a board",
 		back.has("components") and (back["components"] as Array).size() == 3)
 
 	var j1s := _component_by_ref(back, "J1S")
 	var a: Dictionary = j1s.get("assembly", {}) if j1s.get("assembly") is Dictionary else {}
-	check("2f. the block came back at all", not a.is_empty(), str(j1s))
-	check("2g. populate survived as an authored true (not omitted away)",
+	check("2d. the block came back at all", not a.is_empty(), str(j1s))
+	check("2e. populate survived as an authored true (not omitted away)",
 		a.get("populate") == true, str(a.get("populate")))
-	check("2h. manufacturer / mpn / package / comment all survived",
+	check("2f. manufacturer / mpn / package / comment all survived",
 		str(a.get("manufacturer", "")) == "Sullins"
 			and str(a.get("mpn", "")) == "PPTC071LFBN-RC"
 			and str(a.get("package", "")) == "PinSocket_1x07_P2.54mm"
 			and str(a.get("comment", "")) == "1x7 2.54mm socket strip",
 		str(a))
-	check("2i. house_parts survived, keyed by house",
+	check("2g. house_parts survived, keyed by house",
 		(a.get("house_parts", {}) as Dictionary).get("jlcpcb", "") == "C41376161",
 		str(a.get("house_parts")))
-	check("2j. paste survived", str(a.get("paste", "")) == "exclude", str(a.get("paste")))
+	check("2h. paste survived", str(a.get("paste", "")) == "exclude", str(a.get("paste")))
 
 	var back_placements: Array = a.get("placements", []) if a.get("placements") is Array else []
-	check("2k. both placements survived, in authored order",
+	check("2i. both placements survived, in authored order",
 		back_placements.size() == 2
 			and str((back_placements[0] as Dictionary).get("ref", "")) == "J1S_A"
 			and str((back_placements[1] as Dictionary).get("ref", "")) == "J1S_B",
 		str(back_placements))
 	var second: Dictionary = back_placements[1] if back_placements.size() == 2 else {}
 	var offset: Dictionary = second.get("offset_mm", {}) if second.get("offset_mm") is Dictionary else {}
-	check("2l. the placement transform survived (offset + rotation)",
+	check("2j. the placement transform survived (offset + rotation)",
 		abs(float(offset.get("x", -1.0)) - 22.86) < EPS
 			and abs(float(offset.get("y", -1.0))) < EPS
 			and abs(float(second.get("rotation_deg", -1.0)) - 180.0) < EPS,
 		str(second))
 	var first: Dictionary = back_placements[0] if back_placements.size() == 2 else {}
 	var zero_offset: Dictionary = first.get("offset_mm", {}) if first.get("offset_mm") is Dictionary else {}
-	check("2m. the AUTHORED ZERO offset survived as a stated zero, not an absent key",
+	check("2k. the AUTHORED ZERO offset survived as a stated zero, not an absent key",
 		first.has("offset_mm")
 			and abs(float(zero_offset.get("x", -1.0))) < EPS
 			and abs(float(zero_offset.get("y", -1.0))) < EPS,
@@ -285,17 +284,17 @@ func _run_real_worker_round_trip() -> void:
 
 	var fid := _component_by_ref(back, "FID1")
 	var fid_a: Dictionary = fid.get("assembly", {}) if fid.get("assembly") is Dictionary else {}
-	check("2n. the legacy scalar arrived as the structured non-populated state",
+	check("2l. the legacy scalar arrived as the structured non-populated state",
 		fid_a.get("populate") == false, str(fid.get("assembly")))
 
 	var c1 := _component_by_ref(back, "C1")
-	check("2o. a component that authored nothing still carries no assembly key",
+	check("2m. a component that authored nothing still carries no assembly key",
 		not c1.has("assembly"), str(c1.get("assembly")))
 
 	# And the board that comes back re-enters the panel model losslessly — the
 	# last hop of a real load.
 	var reloaded: Variant = PcbComponent.from_board_dict(j1s)
-	check("2p. the round-tripped block re-enters the panel model unchanged",
+	check("2n. the round-tripped block re-enters the panel model unchanged",
 		_same(reloaded.to_board_dict().get("assembly"), a),
 		JSON.stringify(reloaded.to_board_dict().get("assembly")))
 

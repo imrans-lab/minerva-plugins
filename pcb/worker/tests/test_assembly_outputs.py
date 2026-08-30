@@ -56,6 +56,18 @@ BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
 FIXTURE = BOARDS / "assembly_resolved.yaml"
 UNCOMPILABLE_FIXTURE = BOARDS / "assembly_fixture.yaml"
 
+#: THE ONE PLACE these bytes are written down. Every other test that needs the
+#: CPL of ``assembly_resolved.yaml`` imports this rather than re-typing it, so
+#: an intended format change is edited once and an unintended one cannot be
+#: half-updated into agreement. Sealed by
+#: :func:`test_cpl_csv_bytes_are_unchanged_by_the_compiled_cutover`.
+RESOLVED_FIXTURE_CPL = (
+    "Designator,Mid X,Mid Y,Layer,Rotation\r\n"
+    "D1,12.5000,-14.0000,Bottom,45.0000\r\n"
+    "R1,10.0000,-5.0000,Top,0.0000\r\n"
+    "R2,15.0000,-5.0000,Top,90.0000\r\n"
+)
+
 
 def _load(path: Path = FIXTURE) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -106,19 +118,17 @@ def _minimal(**component) -> dict:
 
 def test_cpl_rows_match_hand_derived_values():
     """assembly_resolved.yaml, by inspection, THEN through the MEASURED
-    coordinate frame (module docstring's COORDINATE FRAME section: X
-    verbatim, Y NEGATED — proven against a real ``kicad-cli 9.0.9 pcb export
-    pos`` run). The emitted coordinate is the resolved body-centre ANCHOR, which
+    coordinate frame (docs/assembly-outputs.md: X verbatim, Y NEGATED —
+    proven against a real ``kicad-cli 9.0.9 pcb export pos`` run). The emitted coordinate is the resolved body-centre ANCHOR, which
     for R_0805 and D_SMA composes back onto the authored position because both
     footprints are already centred on their own origin (measured:
     test_assembly_anchor.py):
       R1: x_mm=10.0 y_mm=5.0  rotation_deg=0  layer=top    -> (10.0, -5.0, 0.0, top)
       R2: x_mm=15.0 y_mm=5.0  rotation_deg=90 layer=top    -> (15.0, -5.0, 90.0, top)
       D1: x_mm=12.5 y_mm=14.0 rotation_deg=45 layer=bottom -> (12.5, -14.0, 45.0, bottom)
-    Rotation is emitted VERBATIM (module docstring's ROTATION CONVENTION) — no
-    sign flip, no trigonometry — so rotation stays exact arithmetic identity
-    with the authored YAML; only Y changes sign. D1's X is UNMIRRORED despite
-    being bottom-side (kicad-cli's default; see module docstring).
+    Rotation is emitted VERBATIM — no sign flip, no trigonometry — so rotation
+    stays exact arithmetic identity with the authored YAML; only Y changes sign.
+    D1's X is UNMIRRORED despite being bottom-side (kicad-cli's default).
     FID1/TXT1 are board furniture and contribute no row.
     Rows sort by ref: D1, R1, R2.
     """
@@ -156,13 +166,7 @@ def test_cpl_csv_bytes_are_unchanged_by_the_compiled_cutover():
     fixture's footprints are centred on their origins."""
     result = ao.build_cpl(_compiled(_load()), "jlc", name="afix")
     assert list(result.keys()) == ["afix-cpl-jlc.csv"]
-    expected = (
-        "Designator,Mid X,Mid Y,Layer,Rotation\r\n"
-        "D1,12.5000,-14.0000,Bottom,45.0000\r\n"
-        "R1,10.0000,-5.0000,Top,0.0000\r\n"
-        "R2,15.0000,-5.0000,Top,90.0000\r\n"
-    )
-    assert result["afix-cpl-jlc.csv"] == expected
+    assert result["afix-cpl-jlc.csv"] == RESOLVED_FIXTURE_CPL
 
 
 def test_rows_match_the_raw_dict_arithmetic_they_replaced():
