@@ -41,6 +41,7 @@ spelling whether or not discovery has run — see the durable hint
 | `minerva_pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills — see `docs/gerbers.md` |
 | `minerva_pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` (real data this round — see `docs/libraries.md`) |
 | `minerva_pcb_check_bom` | `check_bom` | BOM extraction + validation |
+| _(not exposed yet)_ | `order_package` | the whole order package — gerber archive + both CSVs + checklist + preflight + manifest, from ONE compilation, written atomically. See `docs/order-package.md` |
 | — (health) | `init`, `ping` | version/liveness handshake |
 
 Every method returns the bridge envelope `{"ok": bool, "result"|"error": …}`

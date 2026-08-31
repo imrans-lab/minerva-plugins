@@ -15,6 +15,10 @@ or explicitly not looked at, all come from the SELECTED SERVICE PROFILE —
 `service-profiles.md`. `jlc` selects the dialect and claims no tier;
 `jlcpcb-economic` selects the tier and turns on its compatibility checks.
 
+These two CSVs are two of the six artifacts in a complete order package —
+`order-package.md` covers the archive allowlist, the digest projection, the
+readiness states and the atomic write.
+
 ## What each BOM column carries
 
 The schema gives three `assembly` fields a column of their own, and each is read

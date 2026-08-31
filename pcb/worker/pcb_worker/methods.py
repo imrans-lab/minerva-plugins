@@ -29,7 +29,8 @@ from typing import Any
 
 from . import (assembly_advisory, assembly_outputs, bless, board_model,
                compile_board, drc, footprints, gerber, ir_candidates,
-               ir_connectivity, kicad, libcheck, net_class_policy, resolve)
+               ir_connectivity, kicad, libcheck, net_class_policy,
+               order_package, order_provenance, order_write, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -1454,22 +1455,18 @@ def _assembly_reply(files, compiled) -> dict:
 
 
 def _write_assembly_files(files: dict, out_dir) -> list | dict:
-    """Shared out_dir writer for assembly outputs — same convention as
-    `_gerbers`'s inline writer (utf-8 text, one file per dict entry)."""
+    """Shared out_dir writer for assembly outputs, ALL-OR-NOTHING.
+
+    Every file is written to a temporary neighbour before any destination name
+    is touched (`order_write.write_files`), so a fault part-way through leaves
+    the directory holding neither CSV rather than a BOM with no CPL beside it.
+    Same reply convention as `_gerbers`'s inline writer otherwise."""
     if not (isinstance(out_dir, str) and out_dir.strip()):
         return []
     try:
-        os.makedirs(out_dir, exist_ok=True)
-        written = []
-        for fname, text in files.items():
-            p = Path(out_dir) / fname
-            data = text.encode("utf-8")
-            p.write_bytes(data)
-            written.append({"path": str(p), "bytes_written": len(data)})
-        return written
+        return order_write.write_files(out_dir, files)
     except OSError as exc:
-        return {"ok": False, "error": {
-            "kind": "io", "message": f"failed to write to out_dir: {exc}"}}
+        return {"ok": False, "error": {"kind": "io", "message": str(exc)}}
 
 
 def _assembly_bom(params: dict) -> dict:
@@ -1555,6 +1552,107 @@ def _assembly_package(params: dict) -> dict:
     result["written"] = written
     result["bom_file"] = package.bom_file
     result["cpl_file"] = package.cpl_file
+    return {"ok": True, "result": result}
+
+
+# ---------------------------------------------------------------------------
+# order_package — THE WHOLE ORDER, from ONE compilation.
+#
+# `assembly_package` proved the two CSVs describe one board. This proves the
+# GERBERS describe that same board too: the archive, both CSVs, the checklist,
+# the preflight report and the manifest all derive from a single
+# `_compile_or_fail`, so nothing in the package can have been read off a board
+# some other call compiled. That also closes the cost the split RPCs carried —
+# a caller assembling an order used to compile once for the gerbers and again
+# for the CSVs.
+#
+# WRITING IS ALL-OR-NOTHING and is the WORKER's job here, unlike the two-CSV
+# path where the Go tool strips out_dir and writes both files itself: a package
+# is a DIRECTORY, and a directory can be staged and moved into place in one
+# step (order_write.publish_directory), which is a stronger guarantee than any
+# per-file sequence. A caller that wants the bytes without the disk write
+# simply omits out_dir.
+# ---------------------------------------------------------------------------
+
+
+def _order_package_refusal(exc: Exception) -> dict:
+    """An order-package refusal, carrying the BLOCKED preflight beside the
+    named error.
+
+    A blocked board produces no package, so the report a caller would have read
+    out of preflight.json is delivered here instead — the same three readiness
+    states, with package_generated honestly false and order_page_verified as
+    unrecordable as it is everywhere else."""
+    payload = _assembly_refusal(exc)
+    payload["preflight"] = order_package.blocked_report(
+        payload.get("code", "assembly"), payload["message"],
+        component=payload.get("component"), field=payload.get("field"),
+        refs=payload.get("refs", ()))
+    return payload
+
+
+def _order_package(params: dict) -> dict:
+    """Emit the complete order package for one service profile.
+
+    params: yaml|board (the board source), profile (house/service id, default
+    "jlc"), out_dir (optional — writes the package DIRECTORY there, atomically),
+    overwrite (replace an existing package directory), source_path (the board
+    file's own path, read for git state only).
+
+    Returns {directory, outputs:[{file, sha256, bytes}], readiness, preflight,
+    source, advisories, unchecked_rules, ip_questions, written, warnings}.
+    `outputs` rather than the `files` key the gerbers/assembly replies use,
+    because this one carries DIGESTS and not contents: gerbers.zip is binary and
+    the set is large, so a caller wanting the bytes asks for out_dir."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_or_fail(board, _layer_params(params))
+    if _is_error_reply(compiled):
+        error = assembly_outputs.not_compilable_error(compiled["error"])
+        error["preflight"] = order_package.blocked_report(
+            error["kind"], error["message"])
+        return {"ok": False, "error": error}
+
+    profile_id = params.get("profile") or "jlc"
+    source_path = params.get("source_path")
+    warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+    try:
+        package = order_package.build(
+            board, compiled.board, profile_id,
+            source_path=source_path if isinstance(source_path, str) else None,
+            compile_diagnostics=warnings)
+    except Exception as exc:  # see _assembly_bom: the dispatcher's broad-catch
+        # convention over caller-supplied board data, backstopping the named
+        # order_package / assembly_outputs / provenance refusals.
+        return {"ok": False, "error": _order_package_refusal(exc)}
+
+    written: list = []
+    out_dir = params.get("out_dir")
+    if isinstance(out_dir, str) and out_dir.strip():
+        try:
+            written = package.write(out_dir, overwrite=bool(params.get("overwrite")))
+        except OSError as exc:
+            return {"ok": False, "error": {"kind": "io", "message": str(exc)}}
+
+    result = {
+        "directory": package.directory,
+        "outputs": package.manifest["package"]["outputs"] + [
+            {"file": order_package.MANIFEST_FILE, "sha256": None,
+             "bytes": len(package.files[order_package.MANIFEST_FILE].encode("utf-8"))}],
+        "readiness": package.preflight["readiness"],
+        "preflight": package.preflight,
+        "source": package.manifest["source"],
+        "written": written,
+        "warnings": warnings,
+    }
+    if package.advisories:
+        result["advisories"] = [dict(a) for a in package.advisories]
+    if package.unchecked:
+        result["unchecked_rules"] = [dict(u) for u in package.unchecked]
+    if package.ip_questions:
+        result["ip_questions"] = [dict(q) for q in package.ip_questions]
     return {"ok": True, "result": result}
 
 
@@ -4242,6 +4340,9 @@ _HANDLERS = {
     "assembly_bom": lambda req: _assembly_bom(req.get("params") or {}),
     "assembly_cpl": lambda req: _assembly_cpl(req.get("params") or {}),
     "assembly_package": lambda req: _assembly_package(req.get("params") or {}),
+    # The WHOLE order package (gerber archive + both CSVs + checklist +
+    # preflight + manifest) from ONE compilation, written atomically.
+    "order_package": lambda req: _order_package(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),
     "draft_check": lambda req: _draft_check(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),
