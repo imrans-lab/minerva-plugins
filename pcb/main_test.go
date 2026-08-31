@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -738,6 +741,20 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 		"ref":  "R_0805",
 	}
 
+	// Tools that STAY in the sweep even though their correct answer to a
+	// yaml-only dispatch of the mpn-less spike board is a refusal: the sweep
+	// asserts the refusal is the NAMED one (docket 01a0561d8505). This is what
+	// keeps the schema binding covered — rename the declared "yaml" property
+	// and the constructed args carry no board at all, so the worker's _load
+	// fails before the identity gate and the refusal stops naming R1/mpn,
+	// which fails below. A plain carve-out (`continue`) would have hidden
+	// exactly that rename behind a dedicated test still sending "yaml".
+	expectedRefusalSubstrings := map[string][]string{
+		// jlc's identity gate: assembly_missing_identity naming component R1
+		// and its missing mpn field.
+		"minerva_pcb_order_package": {"R1", "mpn"},
+	}
+
 	specs := agentFacingBrokerSpecs(t)
 	names := make([]string, 0, len(specs))
 	for name := range specs {
@@ -801,18 +818,6 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 			// TestPCBWorkerStdioSmoke_ExportAssembly instead.
 			continue
 		}
-		if name == "minerva_pcb_order_package" {
-			// Same carve-out as minerva_pcb_export_assembly directly above,
-			// for the same reason (docket 01a0561d8505): the package strict-
-			// compiles the same mpn-less spike board through the same identity
-			// gate, so a yaml-only dispatch is a NAMED refusal
-			// (assembly_missing_identity naming R1) every time — correct
-			// behaviour, not a schema mismatch. Exercised properly (happy path
-			// with every file read back off disk + identity refusal carrying
-			// the blocked preflight) by TestPCBWorkerStdioSmoke_OrderPackage
-			// instead.
-			continue
-		}
 		spec := specs[name]
 		var schema map[string]any
 		if err := json.Unmarshal(spec.InputSchema, &schema); err != nil {
@@ -828,6 +833,23 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 		}
 
 		env := c.call(name, args)
+		if wants, refuses := expectedRefusalSubstrings[name]; refuses {
+			if env["ok"] != false {
+				t.Errorf("%s: yaml-only dispatch of the mpn-less spike board must be a named refusal, got ok=%v: %v",
+					name, env["ok"], env)
+				continue
+			}
+			errMap, _ := env["error"].(map[string]any)
+			msg, _ := errMap["message"].(string)
+			for _, want := range wants {
+				if !strings.Contains(msg, want) {
+					t.Errorf("%s: refusal does not name %q — the declared schema may no longer carry the board content this sweep sends: %q",
+						name, want, msg)
+				}
+			}
+			t.Logf("STDIO SMOKE PASS: %s refused by name using only its declared schema keys", name)
+			continue
+		}
 		if env["ok"] != true {
 			t.Errorf("%s: dispatch using ONLY its declared-schema keys (%v) failed — "+
 				"declared schema may not match what the worker actually consumes: %v",
@@ -1050,18 +1072,20 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// minerva_pcb_order_package (docket 01a0561d8505 — the coverage half of the
-// sweep carve-out above)
+// minerva_pcb_order_package (docket 01a0561d8505 — the content half; the
+// schema binding stays covered by the sweep's expected-refusal entry above)
 // ---------------------------------------------------------------------------
 
-// TestPCBWorkerStdioSmoke_OrderPackage is the dispatch-level test the
-// DeclaredSchemaArgsOnly carve-out owes: excusing the tool from the generic
-// sweep without this would leave it untested over stdio. Happy path (the whole
-// package directory written, every named file read back OFF DISK — the reply's
-// own list is exactly what a success-without-writing regression leaves
-// untouched) and the identity refusal (named component/field, blocked
-// preflight attached, zero artifacts), through the REAL plugin binary +
-// worker, like every other tool's coverage in this file.
+// TestPCBWorkerStdioSmoke_OrderPackage is the dispatch-level coverage the
+// sweep's expected-refusal entry pairs with (the sweep proves the schema
+// binding; this proves the tool). Happy path: the whole package directory
+// written, every reported digest recomputed FROM THE BYTES ON DISK, and
+// fixture-specific content asserted in the BOM, CPL, preflight, manifest and
+// archive — existence-and-size alone would pass a regression that wrote the
+// right filenames full of unrelated data and reported invented hashes. Then
+// the identity refusal (named component/field, blocked preflight attached,
+// zero artifacts), through the REAL plugin binary + worker, like every other
+// tool's coverage in this file.
 func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 	c, cleanup := startPlugin(t, "pcb-plugin-order-package")
 	defer cleanup()
@@ -1095,7 +1119,7 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 	if !isList || len(outputs) == 0 {
 		t.Fatalf("minerva_pcb_order_package outputs is not a non-empty list: %v", res["outputs"])
 	}
-	listed := map[string]bool{}
+	listedSha := map[string]string{}
 	for _, item := range outputs {
 		entry := asMap(t, item, "order_package outputs entry")
 		file, _ := entry["file"].(string)
@@ -1103,31 +1127,113 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 		if file == "" || len(sha) != 64 {
 			t.Fatalf("minerva_pcb_order_package output entry missing file/sha256: %v", entry)
 		}
-		listed[file] = true
+		listedSha[file] = sha
 	}
+	// Every reported digest is recomputed from the file's own bytes on disk —
+	// the reply claiming a hash is not the file having it.
 	pkgDir := filepath.Join(outDir, "AssemblyResolved-jlc")
+	diskBytes := map[string][]byte{}
 	for _, want := range []string{"gerbers.zip", "bom.csv", "cpl.csv",
 		"assembly-preview.svg", "ORDER-CHECKLIST.md", "preflight.json",
 		"order-manifest.json"} {
-		if !listed[want] {
+		sha, ok := listedSha[want]
+		if !ok {
 			t.Fatalf("minerva_pcb_order_package outputs does not list %q: %v", want, res["outputs"])
 		}
-		info, statErr := os.Stat(filepath.Join(pkgDir, want))
-		if statErr != nil {
-			t.Fatalf("minerva_pcb_order_package did not write %s: %v", want, statErr)
+		raw, readErr := os.ReadFile(filepath.Join(pkgDir, want))
+		if readErr != nil {
+			t.Fatalf("minerva_pcb_order_package did not write %s: %v", want, readErr)
 		}
-		if info.Size() == 0 {
-			t.Fatalf("minerva_pcb_order_package wrote an empty %s", want)
+		diskBytes[want] = raw
+		if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != sha {
+			t.Fatalf("minerva_pcb_order_package %s: reported sha256 %s but the bytes on disk hash to %s", want, sha, got)
 		}
 	}
-	bomBytes, err := os.ReadFile(filepath.Join(pkgDir, "bom.csv"))
+
+	// Fixture-specific content, not just headers: the grouped R1/R2 BOM line
+	// with its LCSC part, and D1's own part number.
+	bom := string(diskBytes["bom.csv"])
+	for _, want := range []string{"LCSC Part #", `10k,"R1,R2",0805,C25804`, "C2128"} {
+		if !strings.Contains(bom, want) {
+			t.Fatalf("minerva_pcb_order_package bom.csv missing %q: %q", want, bom)
+		}
+	}
+	// A whole hand-derived CPL row (test_assembly_outputs' seals), verbatim.
+	cpl := string(diskBytes["cpl.csv"])
+	for _, want := range []string{"Designator,Mid X,Mid Y,Layer,Rotation",
+		"R1,10.0000,-5.0000,Top,0.0000", "D1,12.5000,-14.0000,Bottom,45.0000"} {
+		if !strings.Contains(cpl, want) {
+			t.Fatalf("minerva_pcb_order_package cpl.csv missing %q: %q", want, cpl)
+		}
+	}
+	// preflight.json parses and reports THIS board's state.
+	var preflightDoc map[string]any
+	if err := json.Unmarshal(diskBytes["preflight.json"], &preflightDoc); err != nil {
+		t.Fatalf("preflight.json is not JSON: %v", err)
+	}
+	if preflightDoc["board"] != "AssemblyResolved" || preflightDoc["profile"] != "jlc" {
+		t.Fatalf("preflight.json names the wrong board/profile: %v/%v", preflightDoc["board"], preflightDoc["profile"])
+	}
+	if status, _ := preflightDoc["status"].(string); status != "pass" && status != "advisories" {
+		t.Fatalf("preflight.json status = %v, want pass/advisories on the happy path", preflightDoc["status"])
+	}
+	if unchecked, _ := preflightDoc["unchecked"].([]any); len(unchecked) == 0 {
+		t.Fatalf("preflight.json unchecked list is empty — it is documented to never be")
+	}
+	// order-manifest.json parses, names the board, and its recorded digests
+	// agree with the bytes beside it (the manifest cannot record its own).
+	var manifestDoc map[string]any
+	if err := json.Unmarshal(diskBytes["order-manifest.json"], &manifestDoc); err != nil {
+		t.Fatalf("order-manifest.json is not JSON: %v", err)
+	}
+	if board := asMap(t, manifestDoc["board"], "manifest.board"); board["name"] != "AssemblyResolved" {
+		t.Fatalf("order-manifest.json board.name = %v, want AssemblyResolved", board["name"])
+	}
+	pkg := asMap(t, manifestDoc["package"], "manifest.package")
+	if pkg["directory"] != "AssemblyResolved-jlc" {
+		t.Fatalf("order-manifest.json package.directory = %v", pkg["directory"])
+	}
+	manifestOutputs, _ := pkg["outputs"].([]any)
+	if len(manifestOutputs) != 6 {
+		t.Fatalf("order-manifest.json records %d outputs, want 6 (everything but itself)", len(manifestOutputs))
+	}
+	for _, item := range manifestOutputs {
+		entry := asMap(t, item, "manifest outputs entry")
+		file, _ := entry["file"].(string)
+		raw, ok := diskBytes[file]
+		if !ok {
+			t.Fatalf("order-manifest.json records %q, which the package did not write", file)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != entry["sha256"] {
+			t.Fatalf("order-manifest.json %s: recorded sha256 %v but the bytes on disk hash to %s", file, entry["sha256"], got)
+		}
+	}
+	// The archive holds THIS board's fabrication set: nine gerber layers plus
+	// the job file, named for the board, and nothing else.
+	zr, err := zip.NewReader(bytes.NewReader(diskBytes["gerbers.zip"]), int64(len(diskBytes["gerbers.zip"])))
 	if err != nil {
-		t.Fatalf("read written bom.csv: %v", err)
+		t.Fatalf("gerbers.zip does not open as a zip: %v", err)
 	}
-	if !strings.Contains(string(bomBytes), "LCSC Part #") {
-		t.Fatalf("minerva_pcb_order_package bom.csv missing JLC header: %q", string(bomBytes))
+	gotMembers := map[string]bool{}
+	for _, f := range zr.File {
+		gotMembers[f.Name] = true
 	}
-	t.Logf("STDIO SMOKE PASS: minerva_pcb_order_package happy path — %v written to disk", res["directory"])
+	wantMembers := []string{
+		"AssemblyResolved-F_Cu.gbr", "AssemblyResolved-B_Cu.gbr",
+		"AssemblyResolved-F_Mask.gbr", "AssemblyResolved-B_Mask.gbr",
+		"AssemblyResolved-F_Paste.gbr", "AssemblyResolved-B_Paste.gbr",
+		"AssemblyResolved-F_SilkS.gbr", "AssemblyResolved-B_SilkS.gbr",
+		"AssemblyResolved-Edge_Cuts.gbr", "AssemblyResolved-job.gbrjob",
+	}
+	if len(gotMembers) != len(wantMembers) {
+		t.Fatalf("gerbers.zip carries %d members, want %d: %v", len(gotMembers), len(wantMembers), zr.File)
+	}
+	for _, want := range wantMembers {
+		if !gotMembers[want] {
+			t.Fatalf("gerbers.zip is missing %q", want)
+		}
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_order_package happy path — %v written, digests verified against disk", res["directory"])
 
 	// --- identity refusal: named, blocked preflight attached, zero files ----
 	// Same replace-first-occurrence mutation as the export_assembly test —

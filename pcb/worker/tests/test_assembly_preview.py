@@ -260,14 +260,16 @@ def test_the_inherited_anchor_is_named_on_the_page():
     This is deliberately a sentence and not a check: the anchors were measured,
     the parts are the right distance apart, and every hard gate passes — the
     boundary the DCR draws here is a person."""
-    stripped = _rendered(_stripped())[0]
+    # Phrases are asserted against the JOINED page prose, not the raw file:
+    # the notes wrap, and a wrap break inside a phrase must not decide this.
+    stripped = _page_prose(_rendered(_stripped())[0])
     assert "U3S_A, U3S_B" in stripped
     assert "U4S_A, U4S_B" in stripped
     assert "U5S_A, U5S_B" in stripped
     assert "anchor_mm" in stripped
 
     repaired = _rendered(_compiled(OVERRIDE_FIXTURE))[0]
-    assert "U3S_A, U3S_B" not in repaired
+    assert "U3S_A, U3S_B" not in _page_prose(repaired)
     for group in _placement_groups(repaired).values():
         assert group.get("data-anchor-basis") == ANCHOR_BASIS_AUTHORED
 
@@ -282,13 +284,13 @@ def test_a_half_authored_expansion_names_the_placement_that_inherited():
     sibling is not (it is not wrong), and the sentence says a sibling did state
     one, which is what tells a reader this is a half-finished expansion rather
     than an unstated one."""
-    svg = _rendered(_half_stripped())[0]
-    assert "U3S_B — one drawing, 2 parts, and a SIBLING placement" in svg
+    prose = _page_prose(_rendered(_half_stripped())[0])
+    assert "U3S_B — one drawing, 2 parts, and a SIBLING placement" in prose
     # NOT the all-inherited sentence, and nothing at all about the two
     # components that authored every anchor.
-    assert "U3S_A, U3S_B" not in svg
-    assert "U4S_A, U4S_B" not in svg
-    assert "U5S_A, U5S_B" not in svg
+    assert "U3S_A, U3S_B" not in prose
+    assert "U4S_A, U4S_B" not in prose
+    assert "U5S_A, U5S_B" not in prose
 
 
 def test_an_expansion_draws_one_body_per_component_and_one_crosshair_per_part():
@@ -445,7 +447,7 @@ def test_a_one_terminal_part_says_why_it_carries_no_mark():
     assert "one terminal" in note
 
     svg, _, _ = _rendered(board)
-    assert "TP1 — no pin-1 mark: one terminal" in svg
+    assert "TP1 — no pin-1 mark: one terminal" in _page_prose(svg)
     # The unpopulated part is DRAWN and labelled, but claims nothing: an empty
     # spot on a board is either deliberate or a dropped part, and those look
     # identical unless the page says which.
@@ -496,15 +498,99 @@ def test_the_page_states_the_frame_it_is_drawn_in():
     not mirrored, and that rotation is counter-clockwise-positive — the three
     facts a reader needs to compare it with the house's own preview."""
     svg, _, _ = _rendered(_compiled(ANCHOR_FIXTURE))
-    assert "UNMIRRORED" in svg
-    assert "counter-clockwise-positive" in svg
-    assert "the board's Y negated" in svg
-    assert "cpl.csv" in svg
+    prose = _page_prose(svg)
+    assert "UNMIRRORED" in prose
+    assert "counter-clockwise-positive" in prose
+    assert "the board's Y negated" in prose
+    assert "cpl.csv" in prose
 
 
 # ---------------------------------------------------------------------------
 # The page must not clip its own words, and a label must be readable.
+#
+# GROUND TRUTH FOR TEXT WIDTH IS NOT THE MODULE'S ESTIMATOR. The no-clipping
+# property was once asserted with the same `_est_text_width` the renderer
+# wraps with, which makes underestimation invisible by construction: a glyph
+# the estimator buckets too narrow fits the estimate and overflows the render,
+# and the test cannot see it (measured: 56 space-separated '+' estimated
+# 754 px against the 760 px budget and rendered 772.9 px). So the tables below
+# are the EXACT advances out of DejaVu Sans / DejaVu Sans Bold 2.37 (hmtx,
+# units-per-em 2048, rounded to 4 decimals) — the first face in the page's
+# stylesheet stack — sourced from the font files, not from the code under
+# test. DejaVu Sans Mono advances one width for every glyph in both weights.
 # ---------------------------------------------------------------------------
+
+_DEJAVU_EM = {
+    " ": 0.3179, "!": 0.4009, "\"": 0.4600, "#": 0.8379, "$": 0.6362,
+    "%": 0.9502, "&": 0.7798, "'": 0.2749, "(": 0.3901, ")": 0.3901,
+    "*": 0.5000, "+": 0.8379, ",": 0.3179, "-": 0.3608, ".": 0.3179,
+    "/": 0.3369, "0": 0.6362, "1": 0.6362, "2": 0.6362, "3": 0.6362,
+    "4": 0.6362, "5": 0.6362, "6": 0.6362, "7": 0.6362, "8": 0.6362,
+    "9": 0.6362, ":": 0.3369, ";": 0.3369, "<": 0.8379, "=": 0.8379,
+    ">": 0.8379, "?": 0.5308, "@": 1.0000, "A": 0.6841, "B": 0.6860,
+    "C": 0.6982, "D": 0.7700, "E": 0.6318, "F": 0.5752, "G": 0.7749,
+    "H": 0.7520, "I": 0.2949, "J": 0.2949, "K": 0.6558, "L": 0.5571,
+    "M": 0.8628, "N": 0.7480, "O": 0.7871, "P": 0.6030, "Q": 0.7871,
+    "R": 0.6948, "S": 0.6348, "T": 0.6108, "U": 0.7319, "V": 0.6841,
+    "W": 0.9888, "X": 0.6851, "Y": 0.6108, "Z": 0.6851, "[": 0.3901,
+    "\\": 0.3369, "]": 0.3901, "^": 0.8379, "_": 0.5000, "`": 0.5000,
+    "a": 0.6128, "b": 0.6348, "c": 0.5498, "d": 0.6348, "e": 0.6152,
+    "f": 0.3521, "g": 0.6348, "h": 0.6338, "i": 0.2778, "j": 0.2778,
+    "k": 0.5791, "l": 0.2778, "m": 0.9741, "n": 0.6338, "o": 0.6118,
+    "p": 0.6348, "q": 0.6348, "r": 0.4111, "s": 0.5210, "t": 0.3921,
+    "u": 0.6338, "v": 0.5918, "w": 0.8179, "x": 0.5918, "y": 0.5918,
+    "z": 0.5249, "{": 0.6362, "|": 0.3369, "}": 0.6362, "~": 0.8379,
+    "°": 0.5000, "·": 0.3179, "—": 1.0000, "–": 0.5000, "’": 0.3179,
+    "‘": 0.3179, "“": 0.5181, "”": 0.5181, "±": 0.8379, "×": 0.8379,
+    "µ": 0.6362, "Ω": 0.7642,
+}
+_DEJAVU_BOLD_EM = {
+    " ": 0.3481, "!": 0.4561, "\"": 0.5210, "#": 0.8379, "$": 0.6958,
+    "%": 1.0020, "&": 0.8721, "'": 0.3062, "(": 0.4570, ")": 0.4570,
+    "*": 0.5229, "+": 0.8379, ",": 0.3799, "-": 0.4150, ".": 0.3799,
+    "/": 0.3652, "0": 0.6958, "1": 0.6958, "2": 0.6958, "3": 0.6958,
+    "4": 0.6958, "5": 0.6958, "6": 0.6958, "7": 0.6958, "8": 0.6958,
+    "9": 0.6958, ":": 0.3999, ";": 0.3999, "<": 0.8379, "=": 0.8379,
+    ">": 0.8379, "?": 0.5801, "@": 1.0000, "A": 0.7739, "B": 0.7622,
+    "C": 0.7339, "D": 0.8301, "E": 0.6831, "F": 0.6831, "G": 0.8208,
+    "H": 0.8369, "I": 0.3721, "J": 0.3721, "K": 0.7749, "L": 0.6372,
+    "M": 0.9951, "N": 0.8369, "O": 0.8501, "P": 0.7329, "Q": 0.8501,
+    "R": 0.7700, "S": 0.7202, "T": 0.6821, "U": 0.8120, "V": 0.7739,
+    "W": 1.1030, "X": 0.7710, "Y": 0.7241, "Z": 0.7251, "[": 0.4570,
+    "\\": 0.3652, "]": 0.4570, "^": 0.8379, "_": 0.5000, "`": 0.5000,
+    "a": 0.6748, "b": 0.7158, "c": 0.5928, "d": 0.7158, "e": 0.6782,
+    "f": 0.4351, "g": 0.7158, "h": 0.7119, "i": 0.3428, "j": 0.3428,
+    "k": 0.6650, "l": 0.3428, "m": 1.0420, "n": 0.7119, "o": 0.6870,
+    "p": 0.7158, "q": 0.7158, "r": 0.4932, "s": 0.5952, "t": 0.4780,
+    "u": 0.7119, "v": 0.6519, "w": 0.9238, "x": 0.6450, "y": 0.6519,
+    "z": 0.5820, "{": 0.7119, "|": 0.3652, "}": 0.7119, "~": 0.8379,
+    "°": 0.5000, "·": 0.3799, "—": 1.0000, "–": 0.5000, "’": 0.3799,
+    "‘": 0.3799, "“": 0.6572, "”": 0.6572, "±": 0.8379, "×": 0.8379,
+    "µ": 0.7358, "Ω": 0.8501,
+}
+_DEJAVU_MONO_EM = 0.6021
+
+
+def _real_text_width(text: str, size: float, *, bold: bool = False,
+                     mono: bool = False) -> float:
+    """What the text really advances in DejaVu, from the tables above."""
+    if mono:
+        return len(text) * _DEJAVU_MONO_EM * size
+    table = _DEJAVU_BOLD_EM if bold else _DEJAVU_EM
+    missing = sorted({ch for ch in text if ch not in table})
+    assert not missing, (
+        f"page text carries characters outside the test's advance table — "
+        f"extend the table from the font before trusting a width: {missing!r}")
+    return sum(table[ch] for ch in text) * size
+
+
+def _text_face(element) -> tuple[float, bool, bool]:
+    """``(size, bold, mono)`` the stylesheet gives this page-space text."""
+    cls = (element.get("class") or "").split()
+    size = 17.0 if "title" in cls else 12.0
+    bold = any(token in cls
+               for token in ("title", "prose-strong", "cell-head", "cell-off"))
+    return size, bold, "mono" in cls
 
 
 def _page_space_texts(svg: str):
@@ -517,56 +603,115 @@ def _page_space_texts(svg: str):
             yield child
 
 
-@pytest.mark.parametrize("fixture", [ANCHOR_FIXTURE, OVERRIDE_FIXTURE])
-def test_no_page_text_runs_past_the_pages_own_edge(fixture):
-    """The header once carried a 207-character sentence whose tail rendered
-    past the page's declared width — cut off in a drawing whose entire purpose
-    is being looked at. Every page-space line must fit inside the page.
+def _page_prose(svg: str) -> str:
+    """All page-space text joined with spaces, in document order. Wrapping
+    breaks a sentence into several ``<text>`` elements at a space, so a
+    multiword phrase is asserted against THIS — where it always survives —
+    rather than against the raw file, where it lives or dies on where the
+    break currently falls."""
+    return " ".join((element.text or "") for element in _page_space_texts(svg))
 
-    Width is taken from the module's own estimator, which is deliberately
-    WIDER than DejaVu Sans's real advances (the widest face in the
-    stylesheet's stack): the estimate fitting implies the render fits. An
-    unwrapped line of the old header length estimates far past the page edge,
-    so this fails on any return of the overflow."""
-    svg, _, _ = _rendered(_compiled(fixture))
+
+def _assert_page_texts_fit(svg: str) -> int:
+    """Every page-space line REALLY fits the declared page width, measured
+    with the font's own advances — and the module's estimate stays at or above
+    the real width, which is the contract the wrap relies on."""
     root = ET.fromstring(svg)
     page_w = float(root.get("width"))
     checked = 0
     for element in _page_space_texts(svg):
-        cls = element.get("class") or ""
-        size = 17.0 if "title" in cls else 12.0
-        bold = any(token in cls for token in ("title", "prose-strong", "cell-head"))
+        size, bold, mono = _text_face(element)
         x = float(element.get("x"))
-        width = ap._est_text_width(element.text or "", size, bold=bold)
-        assert x + width <= page_w, (
-            f"page text runs off the page ({x + width:.0f}px > {page_w:.0f}px): "
-            f"{element.text!r}")
+        text = element.text or ""
+        real = _real_text_width(text, size, bold=bold, mono=mono)
+        estimate = ap._est_text_width(text, size, bold=bold, mono=mono)
+        assert estimate >= real, (
+            f"the estimator undercuts the font ({estimate:.1f}px < "
+            f"{real:.1f}px): {text!r}")
+        assert x + real <= page_w, (
+            f"page text runs off the page ({x + real:.0f}px > {page_w:.0f}px): "
+            f"{text!r}")
         checked += 1
-    assert checked > 10, "the page stopped emitting its own prose"
+    return checked
 
 
-def test_placement_labels_cover_no_lands_no_marks_and_not_each_other():
-    """A label drawn across a pad row, a crosshair or its neighbour's label
-    cannot be read, and a label that cannot be read does not do its job. The
-    override fixture is the dense case that showed it: two bottom-side rows
-    whose labels used to sit directly across their own lands.
+@pytest.mark.parametrize("fixture", [ANCHOR_FIXTURE, OVERRIDE_FIXTURE])
+def test_no_page_text_runs_past_the_pages_own_edge(fixture):
+    """The header once carried a 207-character sentence whose tail rendered
+    past the page's declared width — cut off in a drawing whose entire purpose
+    is being looked at. Every page-space line must fit inside the page,
+    measured against the FONT's advances, not the estimator's."""
+    svg, _, _ = _rendered(_compiled(fixture))
+    assert _assert_page_texts_fit(svg) > 10, (
+        "the page stopped emitting its own prose")
 
-    The label boxes are read back OFF THE PAGE (each ``<text>``'s own
-    translate() and anchor), sized with the module's deliberately-wide
-    estimator; the lands and crosshairs are rebuilt from the same board. The
-    oracle is plain geometry: no intersection."""
-    board = _compiled(OVERRIDE_FIXTURE)
-    package = ao.build_package(board, PROFILE)
-    svg = ap.render(board, package.emission)
 
-    obstacles = []
-    for component in board.components:
-        obstacles.extend(ap._drawing(board, component).pad_boxes)
-    for row in package.emission.cpl:
-        obstacles.extend(ap._mark_boxes(float(row.x_mm), float(row.y_mm),
-                                        float(row.rotation_deg)))
+def test_the_estimator_is_an_upper_bound_for_every_tabled_glyph():
+    """The wrap fits lines by estimate and the browser draws them by advance,
+    so the estimate must sit at or above the real advance for EVERY glyph in
+    every face the page uses — checked glyph by glyph against the font tables,
+    including the ~0.84 em run ('+ = < > ^ ~') the old buckets carried at
+    0.68 em. An off-table glyph must err wider than anything DejaVu has."""
+    for ch, advance in _DEJAVU_EM.items():
+        assert ap._est_text_width(ch, 1000.0) >= advance * 1000.0, repr(ch)
+    for ch, advance in _DEJAVU_BOLD_EM.items():
+        assert ap._est_text_width(ch, 1000.0, bold=True) >= advance * 1000.0, (
+            repr(ch))
+    for ch in _DEJAVU_EM:
+        assert (ap._est_text_width(ch, 1000.0, mono=True)
+                >= _DEJAVU_MONO_EM * 1000.0), repr(ch)
+    # Not in the tables, not in DejaVu's repertoire at any width DejaVu has.
+    assert ap._est_text_width("木", 1000.0) > 2016.0
 
-    label_boxes = {}
+
+def test_wrap_never_yields_a_line_that_renders_past_the_budget():
+    """The wrap's whole guarantee, measured with the font's own advances: no
+    emitted line renders past the budget and no character is dropped — for
+    prose, for the '+'-row the old estimator passed straight through, and for
+    a single token wider than the entire budget, which word wrapping alone
+    cannot place at all."""
+    cases = [
+        " ".join(["+"] * 56),   # renders 772.9px; the old estimate said 754px
+        "x" * 400,              # one unbreakable token
+        "W" * 90 + " then ordinary words after the monster token",
+        "an ordinary sentence that wraps on spaces like the header does",
+    ]
+    for case in cases:
+        lines = ap._wrap(case, ap.PROSE_BUDGET_PX, 12.0)
+        for line in lines:
+            assert _real_text_width(line, 12.0) <= ap.PROSE_BUDGET_PX, (
+                f"wrapped line still renders past the budget: {line!r}")
+        assert "".join(lines).replace(" ", "") == case.replace(" ", ""), (
+            f"wrap dropped characters from {case!r}")
+
+
+def test_a_board_with_unbreakable_long_names_still_fits_its_page():
+    """The guarantee end to end, on board data chosen to break it: a board
+    name longer than the whole prose budget (the title line was never wrapped
+    at all) and a designator far wider than its table column's minimum. Every
+    page-space line still fits the declared width."""
+    board = _compiled_dict({
+        "version": 1, "name": "B" + "oard" * 60, "width_mm": 30,
+        "height_mm": 20, "origin": {"x_mm": 0, "y_mm": 0},
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "R" + "EALLYLONGDESIGNATOR" * 3,
+             "footprint": "Resistor_SMD:R_0805_2012Metric", "value": "10k",
+             "x_mm": 8.0, "y_mm": 8.0, "rotation_deg": 0, "layer": "top",
+             "assembly": {"mpn": "C25804"}},
+        ],
+    })
+    svg, _, _ = _rendered(board)
+    assert _assert_page_texts_fit(svg) > 10
+
+
+def _label_boxes(svg: str) -> dict:
+    """Each placement label's REAL ink box, read back off the page (its own
+    translate() and anchor) and sized with the font tables above — not with
+    the module's estimator, which is part of what these tests judge."""
+    boxes = {}
     for ref, group in _placement_groups(svg).items():
         label = next(el for el in group.iter(f"{SVG_NS}text")
                      if (el.get("class") or "").endswith("-label"))
@@ -575,12 +720,69 @@ def test_placement_labels_cover_no_lands_no_marks_and_not_each_other():
         bx, by = (float(v) for v in
                   transform[len("translate("):].split(")")[0].split(","))
         anchor = label.get("text-anchor") or "start"
-        width = ap._est_text_width(label.text, ap.REF_TEXT_MM, bold=True)
+        width = _real_text_width(label.text, ap.REF_TEXT_MM, bold=True)
         left = (bx - width if anchor == "end"
                 else bx - width / 2.0 if anchor == "middle" else bx)
-        label_boxes[ref] = (left, by - ap.REF_TEXT_MM * ap.LABEL_DESCENT,
-                            left + width, by + ap.REF_TEXT_MM * ap.LABEL_ASCENT)
+        boxes[ref] = (left, by - ap.REF_TEXT_MM * ap.LABEL_DESCENT,
+                      left + width, by + ap.REF_TEXT_MM * ap.LABEL_ASCENT)
+    return boxes
 
+
+def _body_outline_segments(component) -> list:
+    """Thin boxes along a component's REAL body stroke, rebuilt by this test
+    from the placed graphics of the same layer ladder the page draws (fab
+    first, silk second) — straight segments only, which is all the shared
+    fixtures' bodies contain. Independent of the module's own band builder."""
+    from pcb_worker.board_graphics import (LineGeometry, PolygonGeometry,
+                                           PolylineGeometry)
+    from pcb_worker.resolved_board import LayerRole
+    for role in (LayerRole.FAB, LayerRole.SILK):
+        segments = []
+        for graphic in component.placed_graphics:
+            if graphic.layer.role is not role:
+                continue
+            geometry = graphic.geometry
+            if isinstance(geometry, LineGeometry):
+                runs = [[ao.cpl_frame_point(geometry.a),
+                         ao.cpl_frame_point(geometry.b)]]
+            elif isinstance(geometry, (PolygonGeometry, PolylineGeometry)):
+                points = [ao.cpl_frame_point(p) for p in geometry.points]
+                if isinstance(geometry, PolygonGeometry):
+                    points = points + points[:1]
+                runs = [points]
+            else:
+                continue  # the shared fixtures draw no curved bodies
+            for run in runs:
+                for (x1, y1), (x2, y2) in zip(run, run[1:]):
+                    segments.append((min(x1, x2) - 0.07, min(y1, y2) - 0.07,
+                                     max(x1, x2) + 0.07, max(y1, y2) + 0.07))
+        if segments:
+            return segments
+    return []
+
+
+def test_placement_labels_cover_no_lands_no_marks_and_not_each_other():
+    """A label drawn across a pad row, a body outline, a crosshair or its
+    neighbour's label cannot be read, and a label that cannot be read does not
+    do its job. The override fixture is the dense case that showed it: two
+    bottom-side rows whose labels used to sit directly across their own lands.
+
+    The label boxes are read back OFF THE PAGE and sized with the font tables;
+    the lands, body strokes and crosshairs are rebuilt from the same board.
+    The oracle is plain geometry: no intersection."""
+    board = _compiled(OVERRIDE_FIXTURE)
+    package = ao.build_package(board, PROFILE)
+    svg = ap.render(board, package.emission)
+
+    obstacles = []
+    for component in board.components:
+        obstacles.extend(ap._drawing(board, component).pad_boxes)
+        obstacles.extend(_body_outline_segments(component))
+    for row in package.emission.cpl:
+        obstacles.extend(ap._mark_boxes(float(row.x_mm), float(row.y_mm),
+                                        float(row.rotation_deg)))
+
+    label_boxes = _label_boxes(svg)
     assert len(label_boxes) == 6, "the fixture stopped placing six parts"
     for ref, box in label_boxes.items():
         for obstacle in obstacles:
@@ -590,3 +792,53 @@ def test_placement_labels_cover_no_lands_no_marks_and_not_each_other():
             if other != ref:
                 assert ap._overlap_area(box, other_box) == 0.0, (
                     f"{ref}'s label covers {other}'s label")
+
+
+def test_a_label_dodges_the_body_outline_not_the_drawings_bounds():
+    """THE BOUNDS SHORTCUT, refused. Banding ``drawing.bounds()`` bands the
+    combined box of pads AND body, so a part whose pads sit far outside its
+    body leaves the whole span between body edge and pad un-banded — the east
+    label candidate starts just past the crosshair, crosses the REAL outline
+    at x = +2, meets nothing before the pads out at ±14, and is accepted
+    straight through the body edge. This board is exactly that shape: a 4 mm
+    square body, two pads 14 mm out, a clear centre row.
+
+    The body edges below are HAND-STATED from the fixture (a ±2 mm square on
+    a part at (30, 12), y negated into the emitted frame) — not read from any
+    module geometry."""
+    def pad(number: str, x: float) -> dict:
+        return {"number": number, "type": "smd", "shape": "rect",
+                "position": {"x": x, "y": 0.0},
+                "size": {"width": 1.6, "height": 1.6},
+                "layers": ["F.Cu", "F.Mask", "F.Paste"]}
+
+    board = _compiled_dict({
+        "version": 1, "name": "BodyBand", "width_mm": 60, "height_mm": 24,
+        "origin": {"x_mm": 0, "y_mm": 0}, "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "U1", "footprint": "Nowhere:NotAPart", "value": "",
+             "x_mm": 30.0, "y_mm": 12.0, "rotation_deg": 0, "layer": "top",
+             "assembly": {"mpn": "C99999"},
+             "pads": [pad("1", -14.0), pad("2", 14.0)],
+             "graphics": [{"kind": "poly", "layer": "F.Fab", "width": 0.1,
+                           "points": [{"x": -2.0, "y": -2.0},
+                                      {"x": 2.0, "y": -2.0},
+                                      {"x": 2.0, "y": 2.0},
+                                      {"x": -2.0, "y": 2.0}]}]},
+        ],
+    })
+    svg, _, _ = _rendered(board)
+    box = _label_boxes(svg)["U1"]
+    cx, cy, half = 30.0, -12.0, 2.0
+    edges = [
+        (cx - half, cy - half, cx + half, cy - half),  # south
+        (cx - half, cy + half, cx + half, cy + half),  # north
+        (cx - half, cy - half, cx - half, cy + half),  # west
+        (cx + half, cy - half, cx + half, cy + half),  # east
+    ]
+    for x1, y1, x2, y2 in edges:
+        band = (x1 - 0.07, y1 - 0.07, x2 + 0.07, y2 + 0.07)
+        assert ap._overlap_area(box, band) == 0.0, (
+            f"U1's label is drawn through its body outline at {band}")

@@ -124,6 +124,9 @@ PAGE_PAD_PX = 24.0
 PROSE_BUDGET_PX = 760.0
 HEADER_LINE_PX = 16.0
 TABLE_LINE_PX = 15.0
+#: Per-column MINIMUM widths; :func:`_column_widths` grows a column whose
+#: widest cell or heading needs more, so the grid is stable on ordinary boards
+#: and elastic on one with a forty-character designator.
 TABLE_COLUMN_PX = (120.0, 96.0, 96.0, 74.0, 78.0)
 TABLE_GUTTER_PX = 34.0
 #: Above this many placements the emitted-row table splits into two columns
@@ -173,47 +176,104 @@ def _n(value: float) -> str:
 
 # --- text metrics, estimated DELIBERATELY WIDE ------------------------------
 #
-# The page has no font engine, so a line's width is estimated from per-glyph
-# advance buckets chosen to sit AT OR ABOVE DejaVu Sans's real advances (the
-# first face in the stylesheet's stack, and the widest of them). Overestimating
-# only wraps a line a word early; underestimating is how a sentence walks off
-# the page edge, so every bucket errs wide.
+# The page has no font engine, so a line's width is bounded from per-glyph
+# ADVANCE TABLES: DejaVu Sans / DejaVu Sans Bold hmtx advances (v2.37,
+# units-per-em 2048 — the first face in the stylesheet's stack and the widest
+# of them), each value padded 2% and ceiled to 3 decimals, so the table is an
+# upper bound on the rendered advance rather than an estimate of it (the pad
+# also absorbs kerning, which in this face only ever tightens). A glyph
+# outside the tables gets :data:`_FALLBACK_EM`, wider than every glyph DejaVu
+# carries in either weight, so an exotic character in a board name over-wraps
+# instead of overflowing. Overestimating only wraps a line a word early;
+# underestimating is how a sentence walks off the page edge.
 
-_WIDE_CHARS = set("mwMW—&%@#")        # ~0.82–1.0 em
-_NARROW_CHARS = set("iljtfrI.,:;'’()[]| ")  # <= ~0.41 em
+_ADVANCES_EM = {
+    " ": 0.325, "!": 0.409, "\"": 0.470, "#": 0.855, "$": 0.649, "%": 0.970,
+    "&": 0.796, "'": 0.281, "(": 0.398, ")": 0.398, "*": 0.510, "+": 0.855,
+    ",": 0.325, "-": 0.369, ".": 0.325, "/": 0.344, "0": 0.649, "1": 0.649,
+    "2": 0.649, "3": 0.649, "4": 0.649, "5": 0.649, "6": 0.649, "7": 0.649,
+    "8": 0.649, "9": 0.649, ":": 0.344, ";": 0.344, "<": 0.855, "=": 0.855,
+    ">": 0.855, "?": 0.542, "@": 1.020, "A": 0.698, "B": 0.700, "C": 0.713,
+    "D": 0.786, "E": 0.645, "F": 0.587, "G": 0.791, "H": 0.767, "I": 0.301,
+    "J": 0.301, "K": 0.669, "L": 0.569, "M": 0.881, "N": 0.764, "O": 0.803,
+    "P": 0.616, "Q": 0.803, "R": 0.709, "S": 0.648, "T": 0.624, "U": 0.747,
+    "V": 0.698, "W": 1.009, "X": 0.699, "Y": 0.624, "Z": 0.699, "[": 0.398,
+    "\\": 0.344, "]": 0.398, "^": 0.855, "_": 0.510, "`": 0.510, "a": 0.626,
+    "b": 0.648, "c": 0.561, "d": 0.648, "e": 0.628, "f": 0.360, "g": 0.648,
+    "h": 0.647, "i": 0.284, "j": 0.284, "k": 0.591, "l": 0.284, "m": 0.994,
+    "n": 0.647, "o": 0.625, "p": 0.648, "q": 0.648, "r": 0.420, "s": 0.532,
+    "t": 0.400, "u": 0.647, "v": 0.604, "w": 0.835, "x": 0.604, "y": 0.604,
+    "z": 0.536, "{": 0.649, "|": 0.344, "}": 0.649, "~": 0.855, "°": 0.510,
+    "·": 0.325, "—": 1.020, "–": 0.510, "’": 0.325, "‘": 0.325, "“": 0.529,
+    "”": 0.529, "±": 0.855, "×": 0.855, "µ": 0.649, "Ω": 0.780,
+}
+_ADVANCES_BOLD_EM = {
+    " ": 0.356, "!": 0.466, "\"": 0.532, "#": 0.855, "$": 0.710, "%": 1.022,
+    "&": 0.890, "'": 0.313, "(": 0.467, ")": 0.467, "*": 0.534, "+": 0.855,
+    ",": 0.388, "-": 0.424, ".": 0.388, "/": 0.373, "0": 0.710, "1": 0.710,
+    "2": 0.710, "3": 0.710, "4": 0.710, "5": 0.710, "6": 0.710, "7": 0.710,
+    "8": 0.710, "9": 0.710, ":": 0.408, ";": 0.408, "<": 0.855, "=": 0.855,
+    ">": 0.855, "?": 0.592, "@": 1.020, "A": 0.790, "B": 0.778, "C": 0.749,
+    "D": 0.847, "E": 0.697, "F": 0.697, "G": 0.838, "H": 0.854, "I": 0.380,
+    "J": 0.380, "K": 0.791, "L": 0.650, "M": 1.016, "N": 0.854, "O": 0.868,
+    "P": 0.748, "Q": 0.868, "R": 0.786, "S": 0.735, "T": 0.696, "U": 0.829,
+    "V": 0.790, "W": 1.126, "X": 0.787, "Y": 0.739, "Z": 0.740, "[": 0.467,
+    "\\": 0.373, "]": 0.467, "^": 0.855, "_": 0.510, "`": 0.510, "a": 0.689,
+    "b": 0.731, "c": 0.605, "d": 0.731, "e": 0.692, "f": 0.444, "g": 0.731,
+    "h": 0.727, "i": 0.350, "j": 0.350, "k": 0.679, "l": 0.350, "m": 1.063,
+    "n": 0.727, "o": 0.701, "p": 0.731, "q": 0.731, "r": 0.504, "s": 0.608,
+    "t": 0.488, "u": 0.727, "v": 0.665, "w": 0.943, "x": 0.658, "y": 0.665,
+    "z": 0.594, "{": 0.727, "|": 0.373, "}": 0.727, "~": 0.855, "°": 0.510,
+    "·": 0.388, "—": 1.020, "–": 0.510, "’": 0.388, "‘": 0.388, "“": 0.671,
+    "”": 0.671, "±": 0.855, "×": 0.855, "µ": 0.751, "Ω": 0.868,
+}
+#: DejaVu Sans Mono advances one width for every glyph in BOTH weights
+#: (0.6021 em, v2.37), padded the same way. The emitted-rows table renders in
+#: the ``mono`` class, whose narrow letters are WIDER than their sans
+#: advances, so mono text must never be measured with the sans tables.
+_MONO_EM = 0.615
+#: Wider than every glyph DejaVu Sans carries in either weight (max 2.016 em,
+#: bold). What actually renders for an off-table glyph is some fallback face
+#: this page cannot know, so the bound errs past the widest face it names.
+_FALLBACK_EM = 2.05
 
 
-def _est_text_width(body: str, size: float, *, bold: bool = False) -> float:
+def _est_text_width(body: str, size: float, *, bold: bool = False,
+                    mono: bool = False) -> float:
     """A width the rendered text will not exceed, in ``size``'s own unit."""
-    total = 0.0
-    for ch in str(body):
-        if ch in _WIDE_CHARS:
-            total += 1.05
-        elif ch in _NARROW_CHARS:
-            total += 0.45
-        elif ch.isupper() or ch.isdigit():
-            total += 0.82
-        else:
-            total += 0.68
-    # Weight 600 renders as the bold face where no semibold exists, and DejaVu
-    # Sans Bold runs up to ~10% wider than the regular advances above.
-    return total * size * (1.10 if bold else 1.0)
+    if mono:
+        return sum(_MONO_EM if ch in _ADVANCES_EM else _FALLBACK_EM
+                   for ch in str(body)) * size
+    table = _ADVANCES_BOLD_EM if bold else _ADVANCES_EM
+    return sum(table.get(ch, _FALLBACK_EM) for ch in str(body)) * size
 
 
 def _wrap(body: str, budget: float, size: float, *, bold: bool = False
           ) -> list[str]:
-    """Greedy word wrap against :func:`_est_text_width`. Words are never split,
-    so a phrase a test greps for survives intact when it fits one line."""
-    words = str(body).split(" ")
+    """Greedy word wrap against :func:`_est_text_width`. Words are kept whole
+    while they fit — so a phrase a test greps for survives intact when it fits
+    one line — but a single token wider than the whole budget is split by
+    characters: no input, board names included, may run off the page."""
+    def over(text: str) -> bool:
+        return _est_text_width(text, size, bold=bold) > budget
+
     lines: list[str] = []
     line = ""
-    for word in words:
+    for word in str(body).split(" "):
         candidate = word if not line else f"{line} {word}"
-        if line and _est_text_width(candidate, size, bold=bold) > budget:
+        if line and over(candidate):
             lines.append(line)
             line = word
         else:
             line = candidate
+        # A lone over-budget token cannot be placed by word wrapping at all:
+        # peel full lines off its front, one character short of the budget.
+        while over(line) and len(line) > 1:
+            head = line
+            while len(head) > 1 and over(head):
+                head = head[:-1]
+            lines.append(head)
+            line = line[len(head):]
     if line:
         lines.append(line)
     return lines or [""]
@@ -245,6 +305,29 @@ def _polyline(points, *, cls: str, closed: bool) -> str:
 _circumcenter = silk_source._circumcenter
 
 
+def _arc_geometry(start, mid, end):
+    """One three-point arc solve: ``(center, radius, start_angle, span, sweep)``
+    or ``None`` for a collinear or absurd-radius triple.
+
+    Shared by the emitted path, the swept extent AND the perimeter sampling the
+    label layout dodges, so all three describe the same circle."""
+    solved = _circumcenter(start, mid, end)
+    if solved is None:
+        return None
+    (cx, cy), d = solved
+    radius = math.hypot(start[0] - cx, start[1] - cy)
+    if not math.isfinite(radius) or radius > silk_source._ARC_MAX_RADIUS_MM:
+        return None
+    # SWEEP is read off the frame the points are already in: `d > 0` is the
+    # increasing-angle turn of THIS frame, and inside the drawing group SVG's
+    # own positive sweep is the same direction. No sign correction anywhere.
+    sweep = 1 if d > 0 else 0
+    start_angle = math.atan2(start[1] - cy, start[0] - cx)
+    theta = math.atan2(end[1] - cy, end[0] - cx) - start_angle
+    span = theta % (2.0 * math.pi) if sweep else (-theta) % (2.0 * math.pi)
+    return (cx, cy), radius, start_angle, span, sweep
+
+
 def _arc_ink(start, mid, end, *, cls: str):
     """A three-point arc as an SVG elliptical-arc path, PLUS the points its ink
     actually occupies.
@@ -264,20 +347,10 @@ def _arc_ink(start, mid, end, *, cls: str):
     sits off its own body and rings it in red if so, and the page's viewBox,
     which would crop a non-rectangular board outline off the drawing. So the
     path and its extent are returned from ONE solve and cannot disagree."""
-    solved = _circumcenter(start, mid, end)
+    solved = _arc_geometry(start, mid, end)
     if solved is None:
         return _polyline((start, mid, end), cls=cls, closed=False), [start, mid, end]
-    (cx, cy), d = solved
-    radius = math.hypot(start[0] - cx, start[1] - cy)
-    if not math.isfinite(radius) or radius > silk_source._ARC_MAX_RADIUS_MM:
-        return _polyline((start, mid, end), cls=cls, closed=False), [start, mid, end]
-    # SWEEP is read off the frame the points are already in: `d > 0` is the
-    # increasing-angle turn of THIS frame, and inside the drawing group SVG's
-    # own positive sweep is the same direction. No sign correction anywhere.
-    sweep = 1 if d > 0 else 0
-    start_angle = math.atan2(start[1] - cy, start[0] - cx)
-    theta = math.atan2(end[1] - cy, end[0] - cx) - start_angle
-    span = theta % (2.0 * math.pi) if sweep else (-theta) % (2.0 * math.pi)
+    (cx, cy), radius, start_angle, span, sweep = solved
     large = 1 if span > math.pi else 0
     path = (f'<path class="{cls}" d="M {_n(start[0])},{_n(start[1])} '
             f'A {_n(radius)},{_n(radius)} 0 {large} {sweep} '
@@ -332,6 +405,12 @@ class _Drawing:
     #: label layout dodges lands specifically — a label across a body outline
     #: is legible, a label across a pad row is not.
     pad_boxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+    #: Thin boxes along the BODY OUTLINE'S OWN STROKE, from the same graphics
+    #: the outline is drawn from. The labels dodge these; the drawing's
+    #: ``bounds()`` box is NOT a substitute, because remote pads stretch it
+    #: past the body and a label can then cross the real outline while sitting
+    #: comfortably inside the inflated box.
+    body_bands: list[tuple[float, float, float, float]] = field(default_factory=list)
     pin_one: tuple[float, float] | None = None
     pin_one_note: str = ""
 
@@ -451,6 +530,61 @@ def _graphic_ink(geometry, cls: str):
     return "", []
 
 
+def _graphic_perimeter(geometry) -> list[list[tuple[float, float]]]:
+    """The polylines one placed graphic's STROKE actually follows, in the
+    emitted frame — the curve itself, not its bounding extent. Circles and arcs
+    come back sampled finely enough that banding the pieces bands the curve."""
+    to_frame = assembly_outputs.cpl_frame_point
+    if isinstance(geometry, LineGeometry):
+        return [[to_frame(geometry.a), to_frame(geometry.b)]]
+    if isinstance(geometry, CircleGeometry):
+        cx, cy = to_frame(geometry.center)
+        radius = float(geometry.radius_mm)
+        steps = max(12, int(math.ceil(2.0 * math.pi * radius)))
+        return [[(cx + radius * math.cos(2.0 * math.pi * i / steps),
+                  cy + radius * math.sin(2.0 * math.pi * i / steps))
+                 for i in range(steps + 1)]]
+    if isinstance(geometry, ArcGeometry):
+        start = to_frame(geometry.start)
+        mid = to_frame(geometry.mid)
+        end = to_frame(geometry.end)
+        solved = _arc_geometry(start, mid, end)
+        if solved is None:
+            return [[start, mid, end]]
+        (cx, cy), radius, start_angle, span, sweep = solved
+        step = 1.0 if sweep else -1.0
+        steps = max(4, int(math.ceil(span * radius)))
+        return [[(cx + radius * math.cos(start_angle + step * span * i / steps),
+                  cy + radius * math.sin(start_angle + step * span * i / steps))
+                 for i in range(steps + 1)]]
+    if isinstance(geometry, (PolygonGeometry, PolylineGeometry)):
+        points = [to_frame(p) for p in geometry.points]
+        if isinstance(geometry, PolygonGeometry) and len(points) > 1:
+            points = points + [points[0]]
+        return [points] if len(points) > 1 else []
+    return []
+
+
+def _ink_bands(paths, half: float = 0.12
+               ) -> list[tuple[float, float, float, float]]:
+    """Thin boxes hugging every stroke in *paths*, so a label dodging them
+    dodges the INK. Each segment is cut into ~1 mm pieces first: one box per
+    piece stays tight to a diagonal stroke where the whole segment's box would
+    blanket the rectangle it spans."""
+    boxes: list[tuple[float, float, float, float]] = []
+    for path in paths:
+        for (x1, y1), (x2, y2) in zip(path, path[1:]):
+            pieces = max(1, int(math.ceil(math.hypot(x2 - x1, y2 - y1))))
+            for i in range(pieces):
+                ax = x1 + (x2 - x1) * i / pieces
+                ay = y1 + (y2 - y1) * i / pieces
+                bx = x1 + (x2 - x1) * (i + 1) / pieces
+                by = y1 + (y2 - y1) * (i + 1) / pieces
+                boxes.append((min(ax, bx) - half, min(ay, by) - half,
+                              max(ax, bx) + half, max(ay, by) + half))
+    return boxes
+
+
 def _outline_ink(component, cls: str):
     """The component's BODY, and which layer answered.
 
@@ -461,6 +595,7 @@ def _outline_ink(component, cls: str):
     for basis, role in ((OUTLINE_FAB, LayerRole.FAB), (OUTLINE_SILK, LayerRole.SILK)):
         ink: list[str] = []
         points: list[tuple[float, float]] = []
+        perimeters: list[list[tuple[float, float]]] = []
         for graphic in component.placed_graphics:
             if graphic.layer.role is not role:
                 continue
@@ -468,9 +603,10 @@ def _outline_ink(component, cls: str):
             if fragment:
                 ink.append(fragment)
                 points.extend(extent)
+                perimeters.extend(_graphic_perimeter(graphic.geometry))
         if ink:
-            return basis, ink, points
-    return OUTLINE_LANDS, [], []
+            return basis, ink, points, perimeters
+    return OUTLINE_LANDS, [], [], []
 
 
 def _lands_box(points, cls: str) -> str:
@@ -502,11 +638,18 @@ def _drawing(board, component) -> _Drawing:
             pad_boxes.append((min(p[0] for p in extent), min(p[1] for p in extent),
                               max(p[0] for p in extent), max(p[1] for p in extent)))
 
-    basis, body_ink, body_points = _outline_ink(component, body_cls)
+    basis, body_ink, body_points, perimeters = _outline_ink(component, body_cls)
     if basis == OUTLINE_LANDS:
         box = _lands_box(pad_points, body_cls)
         if box:
             body_ink = [box]
+            # The lands box IS this drawing's body stroke, so its rectangle's
+            # perimeter is what the labels dodge.
+            xs = [p[0] for p in pad_points]
+            ys = [p[1] for p in pad_points]
+            corners = [(min(xs), min(ys)), (max(xs), min(ys)),
+                       (max(xs), max(ys)), (min(xs), max(ys))]
+            perimeters = [corners + corners[:1]]
         else:
             basis = OUTLINE_NONE
 
@@ -514,6 +657,7 @@ def _drawing(board, component) -> _Drawing:
     drawing = _Drawing(ref=component.ref, populate=populate, side=side,
                        outline_basis=basis, ink=pad_ink + body_ink,
                        points=pad_points + body_points, pad_boxes=pad_boxes,
+                       body_bands=_ink_bands(perimeters),
                        pin_one=mark, pin_one_note=note)
     if mark is not None:
         drawing.ink.append(
@@ -579,17 +723,6 @@ def _mark_boxes(x: float, y: float, rotation_deg: float
 def _label_body(cells) -> str:
     """The label's text — the emitted designator, rotation and side cells."""
     return f"{cells[0]}  {cells[4]}°  {cells[3]}"
-
-
-def _edge_bands(box, half: float = 0.12
-                ) -> list[tuple[float, float, float, float]]:
-    """A drawn extent's perimeter as four thin bands. Labels dodge these so a
-    body outline is never stroked through the middle of a designator."""
-    min_x, min_y, max_x, max_y = box
-    return [(min_x - half, min_y - half, max_x + half, min_y + half),
-            (min_x - half, max_y - half, max_x + half, max_y + half),
-            (min_x - half, min_y - half, min_x + half, max_y + half),
-            (max_x - half, min_y - half, max_x + half, max_y + half)]
 
 
 def _label_plan(x: float, y: float, body: str, obstacles
@@ -870,9 +1003,29 @@ def _expansion_notes(board) -> list[str]:
     return out
 
 
+def _column_widths(rows, cells_by_ref, columns) -> list[float]:
+    """Column widths: the layout minimums, grown to fit the widest heading or
+    cell actually in the column. A long designator therefore widens its column
+    — and through the returned table width, the page — instead of running
+    under its neighbour or off the page edge."""
+    count = max([len(columns)] + [len(cells_by_ref[row.ref]) for row in rows])
+    widths = [TABLE_COLUMN_PX[i] if i < len(TABLE_COLUMN_PX) else 80.0
+              for i in range(count)]
+    gap = 14.0  # clear space before the next column's text
+    for i, heading in enumerate(columns):
+        widths[i] = max(widths[i],
+                        _est_text_width(heading, 12.0, bold=True) + gap)
+    for row in rows:
+        for i, cell in enumerate(cells_by_ref[row.ref]):
+            widths[i] = max(widths[i],
+                            _est_text_width(cell, 12.0, mono=True) + gap)
+    return widths
+
+
 def _table(rows, cells_by_ref, off_body_refs, columns, x: float, y: float
-           ) -> tuple[list[str], float]:
-    """The emitted CPL rows, as text, beside the picture.
+           ) -> tuple[list[str], float, float]:
+    """The emitted CPL rows, as text, beside the picture: ``(ink, cursor,
+    width)``, where ``width`` is what the page must reserve for the table.
 
     Present because the house's quote page shows a parsed table of the same
     rows, and comparing two tables is a check a person can actually complete —
@@ -880,30 +1033,33 @@ def _table(rows, cells_by_ref, off_body_refs, columns, x: float, y: float
     if not rows:
         return ([f'<text class="prose" x="{_n(x)}" y="{_n(y)}">no placements: '
                  f'every part on this board is marked not-populated</text>'],
-                y + TABLE_LINE_PX)
+                y + TABLE_LINE_PX, 0.0)
     ink: list[str] = []
+    widths = _column_widths(rows, cells_by_ref, columns)
     per_column = len(rows) if len(rows) <= TABLE_SPLIT_ROWS else (len(rows) + 1) // 2
-    block_width = sum(TABLE_COLUMN_PX) + TABLE_GUTTER_PX
+    block_width = sum(widths) + TABLE_GUTTER_PX
+    blocks = 1
     for index, row in enumerate(rows):
         column, line = divmod(index, per_column)
+        blocks = max(blocks, column + 1)
         left = x + column * block_width
         top = y + (line + 1) * TABLE_LINE_PX
         if line == 0:
-            for offset, heading in zip(_column_offsets(), columns):
+            for offset, heading in zip(_column_offsets(widths), columns):
                 ink.append(f'<text class="cell-head" x="{_n(left + offset)}" '
                            f'y="{_n(y)}">{_esc(heading)}</text>')
             ink.append(f'<path class="rule" d="M {_n(left)},{_n(y + 4)} '
-                       f'h {_n(sum(TABLE_COLUMN_PX))}"/>')
+                       f'h {_n(sum(widths))}"/>')
         cls = "cell-off" if row.ref in off_body_refs else "cell"
-        for offset, cell in zip(_column_offsets(), cells_by_ref[row.ref]):
+        for offset, cell in zip(_column_offsets(widths), cells_by_ref[row.ref]):
             ink.append(f'<text class="{cls} mono" x="{_n(left + offset)}" '
                        f'y="{_n(top)}">{_esc(cell)}</text>')
-    return ink, y + (per_column + 1) * TABLE_LINE_PX
+    return ink, y + (per_column + 1) * TABLE_LINE_PX, block_width * blocks
 
 
-def _column_offsets():
+def _column_offsets(widths):
     offset = 0.0
-    for width in TABLE_COLUMN_PX:
+    for width in widths:
         yield offset
         offset += width
 
@@ -943,14 +1099,13 @@ def render(board, emission) -> str:
     basis_by_ref = {physical.ref: physical.anchor_basis
                     for component in board.components
                     for physical in component.physical_placements}
-    # What every label must dodge: every land on the page, every drawn body's
-    # perimeter, every crosshair's own ink (its neighbours' and its own), and
-    # each label already placed.
+    # What every label must dodge: every land on the page, every drawn body
+    # outline's OWN STROKE (its bounds() box is inflated by remote pads and
+    # says nothing about where the outline actually runs), every crosshair's
+    # ink (its neighbours' and its own), and each label already placed.
     pad_obstacles = [box for drawing in drawings for box in drawing.pad_boxes]
     for drawing in drawings:
-        box = drawing.bounds()
-        if box is not None:
-            pad_obstacles.extend(_edge_bands(box))
+        pad_obstacles.extend(drawing.body_bands)
     cross_obstacles = [box for row in emission.cpl
                        for box in _mark_boxes(float(row.x_mm), float(row.y_mm),
                                               float(row.rotation_deg))]
@@ -992,8 +1147,14 @@ def render(board, emission) -> str:
 
     body: list[str] = []
     cursor = PAGE_PAD_PX + 18.0
-    body.append(f'<text class="title" x="{_n(PAGE_PAD_PX)}" y="{_n(cursor)}">'
-                f'{_esc(board.name)} — assembly preview</text>')
+    # The board NAME is board data, so the title wraps like the prose does —
+    # a long name becomes more title lines, never ink past the page edge.
+    for index, wrapped in enumerate(_wrap(f"{board.name} — assembly preview",
+                                          PROSE_BUDGET_PX, 17.0, bold=True)):
+        if index:
+            cursor += 22.0
+        body.append(f'<text class="title" x="{_n(PAGE_PAD_PX)}" '
+                    f'y="{_n(cursor)}">{_esc(wrapped)}</text>')
     cursor += HEADER_LINE_PX + 4.0
     # Prose is wrapped to the page's guaranteed MINIMUM content width, so no
     # header sentence can run past the right edge of any page this file emits.
@@ -1047,12 +1208,11 @@ def render(board, emission) -> str:
                 f'The rows as emitted — compare these against the house\'s parsed '
                 f'table</text>')
     cursor += HEADER_LINE_PX + 6.0
-    table, cursor = _table(emission.cpl, cells_by_ref, off_body_refs,
-                           profile.cpl_columns, PAGE_PAD_PX, cursor)
+    table, cursor, table_width = _table(emission.cpl, cells_by_ref,
+                                        off_body_refs, profile.cpl_columns,
+                                        PAGE_PAD_PX, cursor)
     body.extend(table)
 
-    block = sum(TABLE_COLUMN_PX) + TABLE_GUTTER_PX
-    table_width = block * (2 if len(emission.cpl) > TABLE_SPLIT_ROWS else 1)
     page_w = max(draw_w, table_width, 760.0) + PAGE_PAD_PX * 2
     page_h = cursor + PAGE_PAD_PX
 
