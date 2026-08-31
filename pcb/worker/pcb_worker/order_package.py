@@ -1,12 +1,13 @@
 """THE ORDER PACKAGE: every file a house is sent, from one compilation, with a
 digest for each and an honest statement of what was and was not established.
 
-ONE ACTION, ONE COMPILATION, SIX ARTIFACTS::
+ONE ACTION, ONE COMPILATION, SEVEN ARTIFACTS::
 
     <board>-<profile>/
       gerbers.zip           fabrication files ONLY (see the allowlist below)
       bom.csv               what to buy
       cpl.csv               where to put it
+      assembly-preview.svg  what we claimed, drawn, for a person to disagree with
       ORDER-CHECKLIST.md    the order-form choices no uploaded file encodes
       preflight.json        what was checked, advised, and not looked at
       order-manifest.json   the audit record, including a digest per output
@@ -41,8 +42,9 @@ READINESS IS THREE SEPARATE CLAIMS, and the package makes only two of them:
 
 DETERMINISM. Everything except the manifest is byte-identical across runs of the
 same input: the archive pins its member order and timestamps, the CSVs and the
-Gerbers were already deterministic, and the checklist and preflight report carry
-no clock. The manifest is the one file that carries the export time, which is
+Gerbers were already deterministic, the preview is drawn in board order from
+fixed-precision coordinates, and the checklist and preflight report carry no
+clock. The manifest is the one file that carries the export time, which is
 also why it is the one file whose digest it does not record — a file cannot
 contain its own hash.
 """
@@ -61,13 +63,18 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-from . import assembly_outputs, gerber, order_provenance, order_write
+from . import (assembly_outputs, assembly_preview, gerber,
+               order_provenance, order_write)
 
 #: The package layout, in build order. The checklist and the preflight report
 #: are digested by the manifest, so they are produced before it.
 GERBER_ARCHIVE = "gerbers.zip"
 BOM_FILE = "bom.csv"
 CPL_FILE = "cpl.csv"
+#: The one artifact NOBODY UPLOADS. It is drawn from the same emission the CPL
+#: is written from and exists to be looked at before paying — see
+#: :mod:`assembly_preview`.
+PREVIEW_FILE = assembly_preview.PREVIEW_FILE
 CHECKLIST_FILE = "ORDER-CHECKLIST.md"
 PREFLIGHT_FILE = "preflight.json"
 MANIFEST_FILE = "order-manifest.json"
@@ -487,6 +494,11 @@ def build(board_source: dict, board, profile_id: str, *,
         GERBER_ARCHIVE: archive,
         BOM_FILE: assembly.files[assembly.bom_file],
         CPL_FILE: assembly.files[assembly.cpl_file],
+        # Rendered from ``assembly.emission`` — the SAME walk cpl.csv is written
+        # from, not a second one over the same board. A preview built from its
+        # own emission would be a picture of a board that merely looks like the
+        # one in the envelope.
+        PREVIEW_FILE: assembly_preview.render(board, assembly.emission),
     }
     digests = {name: digest(content) for name, content in files.items()}
 
@@ -599,6 +611,15 @@ def render_checklist(*, board, profile, provenance, digests, advisories,
         f"({'/'.join(ARCHIVE_ALLOWED_SUFFIXES)}). Do not add the manifest, this "
         f"checklist or a README to it.")
     add("")
+    add("## Open this before you upload anything")
+    add("")
+    add(f"- `{PREVIEW_FILE}` — sha256 `{digests[PREVIEW_FILE]}`. Opens in any "
+        f"browser. It draws every part's body and lands from the board's own "
+        f"geometry and every centroid, rotation and designator from `{CPL_FILE}`, "
+        f"in the frame that file is written in. A crosshair that is not on the "
+        f"middle of the part it names is a placement this order gets wrong, and "
+        f"this is the last point at which that costs nothing.")
+    add("")
     add("## Order-form choices these files do not encode")
     add("")
     add("Fill each in as you set it, so the order can be repeated:")
@@ -622,9 +643,11 @@ def render_checklist(*, board, profile, provenance, digests, advisories,
     add("")
     add("- [ ] Every part in the BOM is the part you meant, and the house "
         "selected it rather than substituting")
-    add("- [ ] The house's placement preview shows each part the right way "
-        "round — rotation zero follows its own tape orientation, not ours")
-    add("- [ ] Polarity and pin-1 markings on the preview match the design")
+    add(f"- [ ] `{PREVIEW_FILE}` and the house's own placement preview agree. "
+        f"Ours shows what WE claimed; theirs shows THEIR part turned the way "
+        f"THEIR tape holds it — a disagreement between the two is the thing to "
+        f"stop for, and rotation zero follows their tape orientation, not ours")
+    add("- [ ] Polarity and pin-1 markings on both previews match the design")
     if excluded:
         add(f"- [ ] {len(excluded)} part(s) are deliberately NOT populated and "
             f"are absent from both CSVs: "

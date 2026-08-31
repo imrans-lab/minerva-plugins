@@ -105,12 +105,12 @@ def _members(package) -> tuple[str, ...]:
 
 
 def test_the_package_emits_exactly_the_named_layout():
-    """Six artifacts under one directory named for the board and the profile.
+    """Seven artifacts under one directory named for the board and the profile.
     A package with a file nobody expected is a package a reader cannot check."""
     package = _package()
     assert package.directory == f"{BOARD_NAME}-{SERVICE}"
     assert set(package.files) == {
-        op.GERBER_ARCHIVE, op.BOM_FILE, op.CPL_FILE,
+        op.GERBER_ARCHIVE, op.BOM_FILE, op.CPL_FILE, op.PREVIEW_FILE,
         op.CHECKLIST_FILE, op.PREFLIGHT_FILE, op.MANIFEST_FILE}
 
 
@@ -150,7 +150,7 @@ def test_the_package_documents_sit_beside_the_archive_not_inside_it():
     package = _package()
     members = set(_members(package))
     for name in (op.MANIFEST_FILE, op.PREFLIGHT_FILE, op.CHECKLIST_FILE,
-                 op.BOM_FILE, op.CPL_FILE):
+                 op.BOM_FILE, op.CPL_FILE, op.PREVIEW_FILE):
         assert name not in members
 
 
@@ -539,6 +539,36 @@ def test_the_checklist_is_the_only_place_the_quote_page_result_is_recorded():
     assert "Quote-page record (a person fills this in)" in text
     assert "Order number" in text
     assert op.ORDER_PAGE_NOTE.split(".")[0] in text
+
+
+def test_the_preview_is_drawn_from_the_packages_own_emission():
+    """The preview is not a seventh opinion about the board: it is rendered from
+    the SAME ``AssemblyEmission`` ``cpl.csv`` is written from, inside the one
+    compilation the package is built on. This pins that its designators are the
+    CPL's designators — the deeper oracle, cell for cell, is
+    ``tests/test_assembly_preview.py``."""
+    package = _package()
+    preview = package.files[op.PREVIEW_FILE]
+    rows = [line.split(",")[0]
+            for line in package.files[op.CPL_FILE].split("\r\n")[1:] if line]
+    assert rows
+    for ref in rows:
+        assert f'data-ref="{ref}"' in preview
+    assert preview.count('class="placement"') == len(rows)
+
+
+def test_the_preview_is_something_to_open_and_not_something_to_upload():
+    """It is the one artifact in the package that is for us. The checklist has to
+    put it BEFORE the upload step — after payment it is worth nothing — and the
+    archive allowlist has to keep it out of the fabrication zip."""
+    package = _package()
+    text = package.files[op.CHECKLIST_FILE]
+    upload_section = text.split("## Upload these")[1].split("\n## ")[0]
+    assert op.PREVIEW_FILE not in upload_section
+    assert "## Open this before you upload anything" in text
+    assert package.digests[op.PREVIEW_FILE] in text
+    with pytest.raises(op.OrderPackageError):
+        op.build_archive({op.PREVIEW_FILE: "<svg/>"})
 
 
 def test_the_checklist_digests_are_the_files_a_person_uploads():

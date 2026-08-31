@@ -81,8 +81,21 @@ emitter makes.
 `gerber.py`'s `_Geometry.to_gerber_frame` negates Y at its own harvest boundary
 for the identical reason — the placement frame is Y-down, and every consumer
 outside it negates. A CPL is not a Gerber layer and is not re-derived through
-`_Geometry`: `assembly_outputs._walk` negates Y itself, at its own
-row-construction boundary.
+`_Geometry`: `assembly_outputs.cpl_frame_point` negates Y, and `_walk` calls it
+at its own row-construction boundary.
+
+### Two functions carry this convention out of the module
+
+`cpl_frame_point(point)` is the board-to-emitted frame map; `cpl_cells(row,
+profile)` is a row's emitted TEXT — designator, X, Y, layer token, rotation, in
+the profile's column order. The CSV renderer is written in terms of both, and so
+is the local assembly preview (`assembly_preview.py`, `order-package.md`). That
+is deliberate and it is the whole reason the two exist as named functions: the
+picture a person checks before paying prints the SAME STRINGS the file carries,
+rather than a second formatting of the same float that agrees until somebody
+changes a rounding rule. Anything else that has to place a board feature beside
+an emitted coordinate goes through these; a second spelling of the negation is a
+sign error waiting to disagree with the file a house was sent.
 
 ## Rotation convention
 

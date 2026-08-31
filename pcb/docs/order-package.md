@@ -8,6 +8,7 @@ person needs and the house never sees.
   gerbers.zip           fabrication files ONLY
   bom.csv               what to buy
   cpl.csv               where to put it
+  assembly-preview.svg  what we claimed, drawn, for a person to disagree with
   ORDER-CHECKLIST.md    the order-form choices no uploaded file encodes
   preflight.json        what was checked, advised, and not looked at
   order-manifest.json   the audit record, with a digest per output
@@ -80,6 +81,61 @@ printing two different revisions refuses for the same reason.
 
 The export timestamp is NOT on the board. It lives in the manifest, so
 regenerating a package next month does not require editing the design.
+
+## The assembly preview
+
+`assembly-preview.svg` is the one artifact in the package nobody uploads. It is
+the last point at which a wrongly-placed or wrongly-turned part costs nothing,
+and it is rendered by `assembly_preview.py` from the SAME `AssemblyEmission`
+`cpl.csv` is written from — not a second walk of the same board.
+
+**Two layers, from two different places, on purpose.** The body outlines, the
+lands and the pin-1 land come from the compiled board's own placed geometry —
+the same ink the Gerbers carry. The crosshair, the designator, the rotation tick
+and the side come from the CPL rows. They are not two computations of one
+answer; they are answers to two different questions — "where did we draw this
+part" and "where did we tell the house to put it" — plotted in one frame so the
+gap between them is a distance a person can see.
+
+**The frame is the CPL's frame**, through `assembly_outputs.cpl_frame_point`: X
+verbatim, Y negated, bottom-side X unmirrored, both sides in one picture. Every
+printed number is a string from `assembly_outputs.cpl_cells`, so the page and
+the file cannot round differently. Inside the flipped drawing group SVG's own
+`rotate()` turns counter-clockwise, which is the emitted convention, so the
+rotation tick is drawn at the emitted angle with no sign arithmetic.
+
+**What it shows, and what it deliberately does not.** Body outline (fab layer,
+else silk, else the lands' box — whichever it was is named on the page), every
+land, the pin-1 land, the claimed centroid, its rotation and its side, plus the
+emitted rows as a text table to hold beside the house's parsed one. Not copper,
+traces, zones, mask or silk legend: this is not a fabrication preview, and every
+extra layer is ink competing with the four things a person is meant to check.
+A part the order does not populate is drawn greyed and labelled `DNP`, carrying
+no crosshair, because a deliberately empty spot and a part somebody dropped from
+the order look identical otherwise.
+
+**Pin 1 is marked on every part with more than one distinct pad number.** The
+rule is not narrower because board data cannot tell a resistor from an LED: the
+two sit on identical land patterns and differ only in a part number, and this
+DCR puts no part-semantics database in scope. A part with one terminal, or with
+unnumbered pads, or with no pad 1, is left unmarked AND SAID SO on the page —
+an absent mark must never read as a part somebody checked and found symmetric.
+
+**Two ways a wrong anchor becomes visible.** A crosshair that lands outside its
+own drawing's ink is ringed with a leader back to the part it names. That is the
+easy half. The harder half is a wrong anchor that lands INSIDE the drawing — the
+shape the `anchor_mm` key exists for, where several parts inherit one anchor
+measured off the whole drawing — which no ring should fire on because it is a
+legal shape. The lands are drawn so a crosshair sitting between two pin rows
+rather than on one can be seen, and every drawing that placed more than one part
+without stating an anchor per placement is listed by name on the page. Neither
+is a check with a code and neither raises an advisory: the DCR draws this
+boundary at a person, not at a rule.
+
+**Self-contained.** One SVG, no script, no external stylesheet, no web font, no
+remote image. A person on a laptop opens it in a browser with no toolchain,
+which is the only delivery that survives being the last check before payment.
+The file is deterministic, because the manifest digests it.
 
 ## Readiness — three separate claims
 

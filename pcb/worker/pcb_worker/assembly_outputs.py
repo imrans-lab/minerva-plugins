@@ -95,6 +95,13 @@ touch the arithmetic in :func:`_walk` without reading
 ``docs/assembly-outputs.md``, which carries the oracle, the measured table and
 the two non-claims (this is not a promise a part mounts right-side-up, and a
 BOM/CPL pair is not a stencil).
+
+TWO FUNCTIONS CARRY THAT CONVENTION OUT OF THIS MODULE, and they are the only
+way anything else may reproduce it. :func:`cpl_frame_point` is the board-to-CPL
+frame map; :func:`cpl_cells` is a row's emitted TEXT. The assembly preview
+(:mod:`assembly_preview`) draws with the first and prints the second, so the
+picture a person checks before paying and the file a house is sent are one
+derivation rather than two implementations that agree today.
 """
 
 from __future__ import annotations
@@ -330,6 +337,37 @@ class CplRow:
     mpn: str | None
 
 
+def cpl_frame_point(point) -> tuple[float, float]:
+    """A BOARD-frame millimetre point in the EMITTED CPL frame: X verbatim, Y
+    NEGATED, and X NOT mirrored on the bottom side.
+
+    THE ONE PLACE THAT NEGATION HAPPENS. The board's frame is Y-DOWN and the
+    emitted frame is Y-UP, and every consumer that has to draw a board feature
+    beside an emitted coordinate — the local assembly preview is the one that
+    does — has to cross that boundary. A second spelling of it somewhere else
+    is a sign error waiting to disagree with the CSV a house was sent, on the
+    axis where a wrong answer still looks like a plausible board.
+    """
+    return float(point[0]), -float(point[1])
+
+
+def cpl_cells(row: CplRow, profile: HouseProfile) -> tuple[str, ...]:
+    """One CPL row as the CELLS it is emitted as, in ``profile.cpl_columns``
+    order — designator, X, Y, layer token, rotation.
+
+    THE ONE PLACE A PLACEMENT BECOMES TEXT. The CSV renderer writes these
+    strings and the assembly preview PRINTS these strings, so the number a
+    person reads off the drawing before paying is not a second formatting of
+    the same float — it is the same string, built once. A preview that rounded
+    differently would disagree with the file at the fourth decimal, which is
+    exactly the size of the errors it exists to catch."""
+    return (row.ref,
+            _fmt_mm(row.x_mm) + profile.coordinate_suffix,
+            _fmt_mm(row.y_mm) + profile.coordinate_suffix,
+            profile.layer_token(row.side),
+            _fmt_mm(row.rotation_deg))
+
+
 def _assembly_of(component):
     """The component's resolved assembly facts, or a NAMED refusal.
 
@@ -459,10 +497,11 @@ def _walk(board, profile: HouseProfile):
             # of it is in tests/test_assembly_outputs.py — it may not be cited
             # from shipped worker code (STANDING GUARD 2) — and is written up in
             # docs/assembly-outputs.md.
+            x_mm, y_mm = cpl_frame_point(physical.anchor)
             cpl.append(CplRow(
                 ref=physical.ref,
-                x_mm=float(physical.anchor[0]),
-                y_mm=-float(physical.anchor[1]),
+                x_mm=x_mm,
+                y_mm=y_mm,
                 rotation_deg=float(physical.rotation_deg),
                 side=physical.side.value,
                 mpn=assembly.mpn,
@@ -562,13 +601,7 @@ def _render_jlc_bom(rows: list[BomRow], profile: HouseProfile) -> str:
 def _render_jlc_cpl(rows: list[CplRow], profile: HouseProfile) -> str:
     lines = [_csv_line(profile.cpl_columns)]
     for row in rows:
-        lines.append(_csv_line([
-            row.ref,
-            _fmt_mm(row.x_mm) + profile.coordinate_suffix,
-            _fmt_mm(row.y_mm) + profile.coordinate_suffix,
-            profile.layer_token(row.side),
-            _fmt_mm(row.rotation_deg),
-        ]))
+        lines.append(_csv_line(cpl_cells(row, profile)))
     return CSV_EOL.join(lines) + CSV_EOL
 
 
