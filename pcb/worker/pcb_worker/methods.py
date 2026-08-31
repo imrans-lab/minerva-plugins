@@ -1576,10 +1576,13 @@ def _order_package_refusal(exc: Exception) -> dict:
     states, with package_generated honestly false and order_page_verified as
     unrecordable as it is everywhere else."""
     payload = _assembly_refusal(exc)
+    geometric = getattr(exc, "geometric", None)
+    if geometric is not None:
+        payload["geometric"] = geometric
     payload["preflight"] = order_package.blocked_report(
         payload.get("code", "assembly"), payload["message"],
         component=payload.get("component"), field=payload.get("field"),
-        refs=payload.get("refs", ()))
+        refs=payload.get("refs", ()), geometric=geometric)
     return payload
 
 
@@ -1649,6 +1652,8 @@ def _order_package(params: dict) -> dict:
         # manifest records would hide a dropped fab feature from the caller.
         "warnings": [dict(item) for item in package.warnings],
     }
+    if package.blockers:
+        result["blockers"] = [dict(item) for item in package.blockers]
     if package.advisories:
         result["advisories"] = [dict(a) for a in package.advisories]
     if package.unchecked:

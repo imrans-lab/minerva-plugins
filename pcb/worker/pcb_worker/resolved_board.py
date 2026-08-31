@@ -247,6 +247,9 @@ class Diagnostic:
     code: str
     message: str
     source_ref: SourceRef
+    # Stable display classification.  Empty means no special salience; callers
+    # must never infer impact by searching the human-readable message.
+    impact: str = ""
 
     def __post_init__(self) -> None:
         _typed(self.severity, DiagnosticSeverity, "Diagnostic.severity")
@@ -262,7 +265,7 @@ def diagnostic_payload(d: Diagnostic) -> dict:
     forwarded. The ``source_ref`` shape mirrors
     ``footprint_def._unsupported_to_payload``.
     """
-    return {
+    out = {
         "severity": d.severity.value,
         "code": d.code,
         "message": d.message,
@@ -272,6 +275,9 @@ def diagnostic_payload(d: Diagnostic) -> dict:
             "detail": d.source_ref.detail,
         },
     }
+    if d.impact:
+        out["impact"] = d.impact
+    return out
 
 
 class CapabilityPolicy(Protocol):

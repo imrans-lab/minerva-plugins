@@ -785,10 +785,18 @@ def _mark_boxes(x: float, y: float, rotation_deg: float
 
 def _label_body(cells) -> str:
     """The label's text — the emitted designator, rotation and side cells,
-    fitted to :data:`LABEL_MAX_MM`: the designator is board data of unbounded
-    length, and every label box feeds the page's own extent."""
-    return _fit_text(f"{cells[0]}  {cells[4]}°  {cells[3]}",
-                     LABEL_MAX_MM, REF_TEXT_MM, bold=True)
+    fitted to :data:`LABEL_MAX_MM` without ever cutting the rotation or side.
+
+    The designator is unbounded board data; rotation and side are the two facts
+    a person needs to distinguish otherwise identical placement marks.  Fit
+    only the unbounded field into the space left by that fixed suffix.  Fitting
+    the combined string used to let a long reference erase both facts.
+    """
+    suffix = f"  {cells[4]}°  {cells[3]}"
+    suffix_width = _est_text_width(suffix, REF_TEXT_MM, bold=True)
+    ref = _fit_text(str(cells[0]), max(0.0, LABEL_MAX_MM - suffix_width),
+                    REF_TEXT_MM, bold=True)
+    return ref + suffix
 
 
 def _label_plan(x: float, y: float, body: str, obstacles

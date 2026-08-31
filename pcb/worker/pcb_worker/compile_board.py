@@ -503,16 +503,17 @@ class _Diagnostics:
         self.has_error = False
 
     def add(self, severity: DiagnosticSeverity, code: str, message: str,
-            source_ref: SourceRef) -> None:
-        self._items.append(Diagnostic(severity, code, message, source_ref))
+            source_ref: SourceRef, *, impact: str = "") -> None:
+        self._items.append(Diagnostic(severity, code, message, source_ref, impact))
         if severity is DiagnosticSeverity.ERROR:
             self.has_error = True
 
     def error(self, code: str, message: str, ref: SourceRef) -> None:
         self.add(DiagnosticSeverity.ERROR, code, message, ref)
 
-    def warning(self, code: str, message: str, ref: SourceRef) -> None:
-        self.add(DiagnosticSeverity.WARNING, code, message, ref)
+    def warning(self, code: str, message: str, ref: SourceRef, *,
+                impact: str = "") -> None:
+        self.add(DiagnosticSeverity.WARNING, code, message, ref, impact=impact)
 
     def info(self, code: str, message: str, ref: SourceRef) -> None:
         self.add(DiagnosticSeverity.INFO, code, message, ref)
@@ -1246,7 +1247,8 @@ def _adjudicate_footprint(
             else:
                 diags.warning("feature_omitted",
                               f"footprint {ref!r}: {marker.feature} on {marker.domain.value} "
-                              f"({marker.detail}) is not fabricated in v1", marker.source_ref)
+                              f"({marker.detail}) is not fabricated in v1", marker.source_ref,
+                              impact="fabrication")
 
     judge(definition.unsupported)
     for pad in definition.pads:
@@ -1566,7 +1568,7 @@ def _place_component(
                       f"component {ref!r}: captured pad/graphic participation on "
                       f"{sorted(unemitted)} is documentation-only — outside the emitter "
                       f"capability profile",
-                      SourceRef(EntityKind.COMPONENT, ref))
+                      SourceRef(EntityKind.COMPONENT, ref), impact="documentation")
     return tuple(placed_pads), tuple(placed_graphics)
 
 
@@ -1647,7 +1649,7 @@ def _apply_pin_override(
                 diags.warning("override_drill_squared_slot",
                               f"component {ref!r} pin {pad.number!r}: override.drill_mm replaces a "
                               f"non-round footprint drill {drill.size} with a round {float(drill_mm)}mm "
-                              f"hole", pad_ref)
+                              f"hole", pad_ref, impact="fabrication")
             drill = replace(drill, size=(float(drill_mm), float(drill_mm)))
 
     # Plating — through-hole only; a no-op on an SMD (drill-less) pad.
@@ -2288,7 +2290,8 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
                     diags.warning("alias_plating_overridden",
                                   f"{key}[{ordinal}]: explicit plated={explicit} overridden by "
                                   f"the {key!r} alias (the key declares plating); folded as "
-                                  f"plated={default_plated}", hole_ref)
+                                  f"plated={default_plated}", hole_ref,
+                                  impact="fabrication")
             # AUTHORED annulus (finding 019f8dbb7104): a PLATED board hole's copper
             # ring must be AUTHORED, not invented — so both emitters emit the SAME
             # copper (no kicad-2x-drill vs gerber-drill-only divergence).
@@ -3000,7 +3003,7 @@ def compile_board(
                     f"component {ref!r} carries its own pads but no graphics, so it "
                     f"will be fabricated with no silkscreen or courtyard; re-resolve "
                     f"it against {fp_ref!r} to attach them",
-                    comp_ref)
+                    comp_ref, impact="documentation")
         else:
             # The entry is read from the layer that WOULD supply this ref (first in
             # the chain whose lock contains it), so a malformed entry is judged on
@@ -3278,7 +3281,7 @@ def compile_board(
             "zone_fill_culled",
             f"zone {zone_id} dropped {len(rows)} unfabricable region(s) totalling "
             f"{total:.6f} mm^2 from its fill:\n  - {detail}",
-            SourceRef(EntityKind.ZONE, zone_id))
+            SourceRef(EntityKind.ZONE, zone_id), impact="fabrication")
 
     for zone in resolved.zones:
         if zone.kind is not ZoneKind.COPPER_POUR:
@@ -3294,7 +3297,7 @@ def compile_board(
                 f"zone {zone.id} on {zone.layer.id} computed a fill with NO copper: "
                 f"its outline is entirely consumed by keepouts, clearance or the "
                 f"board-edge inset. The pour is empty, not uncomputed",
-                SourceRef(EntityKind.ZONE, zone.id))
+                SourceRef(EntityKind.ZONE, zone.id), impact="fabrication")
             continue
         diags.info(
             "zone_filled",

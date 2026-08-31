@@ -227,6 +227,8 @@ static func _run_package(panel, exporter: Dictionary, out_dir: String,
 	out["written"] = _as_array(result.get("written", []))
 	out["readiness"] = _as_dict(result.get("readiness", {}))
 	out["preflight"] = _as_dict(result.get("preflight", {}))
+	out["blockers"] = _as_array(result.get("blockers",
+		out["preflight"].get("blockers", [])))
 	out["source"] = _as_dict(result.get("source", {}))
 	out["advisories"] = _as_array(result.get("advisories", []))
 	out["unchecked_rules"] = _as_array(result.get("unchecked_rules", []))
@@ -411,6 +413,21 @@ static func finding_line(entry: Dictionary) -> String:
 	return "• %s — %s: %s" % [head, about, message]
 
 
+## Findings stay bounded on screen, but the cap must not let repetitive
+## documentation-only notes hide a fabrication-affecting warning that happened
+## to arrive later in component order.  This is display ordering only; the
+## complete original-order list remains in preflight.json and the manifest.
+static func _finding_salience(entry: Dictionary) -> int:
+	var severity := str(entry.get("severity", "")).to_lower()
+	var score := 300 if severity == "error" else 200 if severity == "warning" else 100
+	var impact := str(entry.get("impact", "")).to_lower()
+	if impact == "fabrication":
+		score += 200
+	elif impact == "documentation":
+		score -= 100
+	return score
+
+
 ## One titled section, or nothing at all when there is nothing to say. Returns
 ## its lines rather than appending into the caller's, so the section list stays
 ## a value the caller composes.
@@ -420,12 +437,27 @@ static func _section(title: String, entries: Array) -> PackedStringArray:
 		return lines
 	lines.append("")
 	lines.append("%s (%d)" % [title, entries.size()])
+	# Array.sort_custom is not stable. Decorate each row with its original index
+	# and use that as an explicit tiebreak so equal-salience findings retain the
+	# producer's deterministic order on every platform.
+	var ranked: Array = []
 	for i in entries.size():
+		ranked.append({"entry": entries[i], "index": i,
+			"salience": _finding_salience(_as_dict(entries[i]))})
+	ranked.sort_custom(func(a, b):
+		var left := _as_dict(a)
+		var right := _as_dict(b)
+		var left_score := int(left.get("salience", 0))
+		var right_score := int(right.get("salience", 0))
+		return (left_score > right_score) if left_score != right_score else \
+			int(left.get("index", 0)) < int(right.get("index", 0)))
+	var ordered: Array = ranked.map(func(row): return _as_dict(row).get("entry", {}))
+	for i in ordered.size():
 		if i >= _REPORT_SECTION_CAP:
 			lines.append("  … and %d more — every one of them is in preflight.json"
-				% (entries.size() - _REPORT_SECTION_CAP))
+				% (ordered.size() - _REPORT_SECTION_CAP))
 			break
-		lines.append("  %s" % finding_line(_as_dict(entries[i])))
+		lines.append("  %s" % finding_line(_as_dict(ordered[i])))
 	return lines
 
 
@@ -457,7 +489,10 @@ static func report_lines(result: Dictionary) -> PackedStringArray:
 		lines.append("  order_page_verified: not recorded — %s"
 			% str(readiness.get("order_page_verified_note", "")))
 
-	lines.append_array(_section("BLOCKERS — nothing was written",
+	var package_generated := bool(readiness.get("package_generated", false))
+	lines.append_array(_section(
+		"BLOCKERS — package is quote/reference only" if package_generated
+		else "BLOCKERS — nothing was written",
 		_as_array(result.get("blockers", []))))
 	var blocked_by := _as_array(result.get("blocked_by", []))
 	if not blocked_by.is_empty():

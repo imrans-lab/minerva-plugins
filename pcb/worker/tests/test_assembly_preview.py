@@ -959,6 +959,11 @@ def test_a_pathological_designator_cannot_grow_the_page_without_limit():
     assert any(t.startswith("RXXX") and t.endswith("...") for t in texts), (
         "no visibly truncated designator text on the page")
     assert not any(monster in t for t in texts)
+    placement = _placement_groups(svg)[monster]
+    label = next(el for el in placement.iter(f"{SVG_NS}text")
+                 if (el.get("class") or "").endswith("-label"))
+    assert label.text.endswith("0.0000°  Top"), (
+        "truncating a long reference must not erase rotation or side")
     # The truth is not lost: the emitted file and the machine-readable half of
     # the page still carry the designator whole.
     assert monster in cpl

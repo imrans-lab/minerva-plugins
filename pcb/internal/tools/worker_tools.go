@@ -964,8 +964,16 @@ var orderPackageDescription = "Emit the WHOLE order package for one manufacturin
 	"live board to a snapshot file and sends it this way) and is recorded as \"inline\", so " +
 	"how a board travelled can never change what its provenance claims. Because every " +
 	"artifact derives from one compilation, the archive and the CSVs cannot describe two " +
-	"different boards. Returns {directory, outputs:[{file, sha256, bytes}], readiness, " +
-	"preflight, source, written, warnings, advisories?, unchecked_rules?, ip_questions?}. " +
+	"different boards. The geometric DRC runs over that SAME resolved board before any " +
+	"artifact is emitted: a profile that selects a manufacturing service refuses violations " +
+	"as order_package_geometric_violations; the dialect-only jlc selector instead emits an " +
+	"honestly BLOCKED quote/reference package with named blockers. An indeterminate check " +
+	"always refuses as order_package_geometric_indeterminate; the full " +
+	"geometric verdict rides preflight and the manifest. The archive then cross-checks each " +
+	"Gerber's own X2 FileFunction/FilePolarity identity against its .gbrjob path assignment, " +
+	"so syntactically valid layer-swapped bytes refuse as order_package_archive_semantics. " +
+	"Returns {directory, outputs:[{file, sha256, bytes}], readiness, " +
+	"preflight, source, written, warnings, blockers?, advisories?, unchecked_rules?, ip_questions?}. " +
 	"WITHOUT out_dir nothing is written and the reply is the digests; WITH it the whole " +
 	"directory is staged and moved into place in ONE step, so a reader sees a complete " +
 	"package or none, and an existing directory is not replaced unless overwrite is set. " +
@@ -973,17 +981,21 @@ var orderPackageDescription = "Emit the WHOLE order package for one manufacturin
 	"proves and all it proves; preflight_status is pass|advisories|blocked over the checks " +
 	"that ran AND over the compile/emitter WARNING channel; order_page_verified is null every time — there is no parameter that sets it, " +
 	"because only a person who uploaded these files and read the quote page can record it. " +
-	"A BLOCKED board produces NO FILES and refuses by name, carrying the preflight report " +
-	"that would have been written: assembly_not_compilable (with blocked_by naming every " +
+	"A REFUSED board produces NO FILES and carries the blocked report that would have been " +
+	"written: assembly_not_compilable (with blocked_by naming every " +
 	"component/footprint that stopped the compile), the assembly hard gates " +
 	"(assembly_duplicate_designator, assembly_reference_set_mismatch, assembly_row_ref_limit, " +
 	"assembly_placements_too_close, assembly_empty_expansion, assembly_paste_undecided, " +
 	"assembly_missing_identity, assembly_non_metric_coordinates), the selected service's own " +
 	"blockers (assembly_service_fab_profile_mismatch, assembly_service_side_unsupported, " +
-	"assembly_service_board_size_unsupported) and the provenance mismatches. ADVISORIES " +
+	"assembly_service_board_size_unsupported), a selected service's geometric violations, " +
+	"geometric indeterminate verdicts and provenance mismatches. The dialect-only jlc " +
+	"selector is the exception: geometric violations produce files for a mid-layout quote, " +
+	"blockers[], package_generated true and preflight_status blocked; its checklist says the " +
+	"package is reference-only. ADVISORIES " +
 	"NEVER REFUSE and each names its component: an unmeasured assembly anchor, the tooling " +
 	"holes the house adds after upload, the component-to-edge suggestion, absent provenance " +
-	"silk. `warnings` carries the COMPILE and GERBER-EMITTER diagnostics for this board — the " +
+	"silk, or a geometric-DFM advisory. `warnings` carries the COMPILE and GERBER-EMITTER diagnostics for this board — the " +
 	"compiler and the emitter talking about the board rather than the service talking about " +
 	"the order. They never refuse, but they DO move preflight_status off pass: a captured " +
 	"feature the emitter dropped means these files are not a complete rendering of the board. " +

@@ -1257,6 +1257,9 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 	}
 	memberBytes := map[string][]byte{}
 	for _, f := range zr.File {
+		if _, duplicate := memberBytes[f.Name]; duplicate {
+			t.Fatalf("gerbers.zip carries duplicate member name %q", f.Name)
+		}
 		rc, openErr := f.Open()
 		if openErr != nil {
 			t.Fatalf("gerbers.zip member %s does not open: %v", f.Name, openErr)
@@ -1275,6 +1278,24 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 		"AssemblyResolved-F_SilkS.gbr", "AssemblyResolved-B_SilkS.gbr",
 		"AssemblyResolved-Edge_Cuts.gbr", "AssemblyResolved-job.gbrjob",
 	}
+	wantFunctions := map[string]string{
+		"AssemblyResolved-F_Cu.gbr":      "TF.FileFunction,Copper,L1,Top,Signal*",
+		"AssemblyResolved-B_Cu.gbr":      "TF.FileFunction,Copper,L2,Bot,Signal*",
+		"AssemblyResolved-F_Mask.gbr":    "TF.FileFunction,Soldermask,Top*",
+		"AssemblyResolved-B_Mask.gbr":    "TF.FileFunction,Soldermask,Bot*",
+		"AssemblyResolved-F_Paste.gbr":   "TF.FileFunction,SolderPaste,Top*",
+		"AssemblyResolved-B_Paste.gbr":   "TF.FileFunction,SolderPaste,Bot*",
+		"AssemblyResolved-F_SilkS.gbr":   "TF.FileFunction,Legend,Top*",
+		"AssemblyResolved-B_SilkS.gbr":   "TF.FileFunction,Legend,Bot*",
+		"AssemblyResolved-Edge_Cuts.gbr": "TF.FileFunction,Profile,NP*",
+	}
+	// Count the archive ENTRIES before consulting the name-keyed map. A zip may
+	// legally carry duplicate names; a map collapses them, so eleven entries
+	// consisting of these ten names plus one duplicate used to look exactly like
+	// the expected ten-member archive.
+	if len(zr.File) != len(wantMembers) {
+		t.Fatalf("gerbers.zip carries %d entries, want %d: %v", len(zr.File), len(wantMembers), zr.File)
+	}
 	if len(memberBytes) != len(wantMembers) {
 		t.Fatalf("gerbers.zip carries %d members, want %d: %v", len(memberBytes), len(wantMembers), zr.File)
 	}
@@ -1290,6 +1311,13 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 			text := string(raw)
 			if !strings.Contains(text, "%FSLAX") || !strings.Contains(text, "M02*") {
 				t.Fatalf("gerbers.zip member %s does not read as a Gerber layer (no %%FSLAX / M02*): %d bytes", want, len(raw))
+			}
+			// Syntax alone cannot distinguish top copper renamed as bottom copper.
+			// Bind the member name to the layer's own X2 semantic declaration; the
+			// production archive gate separately cross-checks these declarations
+			// against the .gbrjob manifest.
+			if function := wantFunctions[want]; !strings.Contains(text, function) {
+				t.Fatalf("gerbers.zip member %s does not declare expected X2 function %q", want, function)
 			}
 		}
 	}

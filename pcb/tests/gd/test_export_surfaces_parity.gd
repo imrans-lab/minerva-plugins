@@ -592,27 +592,67 @@ func _run_named_per_component_report() -> void:  # coroutine: awaits a refusal
 	check("6e: order_page_verified is shown as unrecorded, not as a failed check",
 		report.contains("order_page_verified: not recorded"), report)
 
-	# 6f: a refusal report leads with the refusal and names the blocked
+	# 6f: the on-screen cap is a salience boundary, not an arrival-order lottery.
+	# Thirteen repetitive documentation warnings arriving before a copper drop
+	# used to consume every visible row and hide the only fabrication-affecting
+	# fact behind "and more".
+	var noisy_warnings: Array = []
+	for i in 13:
+		noisy_warnings.append({"severity": "warning", "code": "feature_omitted",
+			"message": "wording may change without changing rank",
+			"impact": "documentation",
+			"source_ref": {"entity_kind": "component", "entity_id": "R%d" % i}})
+	noisy_warnings.append({"severity": "warning", "code": "feature_omitted",
+		"message": "another freely rewordable description",
+		"impact": "fabrication",
+		"source_ref": {"entity_kind": "component", "entity_id": "U2"}})
+	var salient := result.duplicate(true)
+	salient["warnings"] = noisy_warnings
+	var salient_report := "\n".join(PcbExport.report_lines(salient))
+	check("6f: fabrication-affecting warnings survive the visible report cap",
+		salient_report.contains("another freely rewordable description") and salient_report.contains("U2"),
+		salient_report)
+	var tied := [
+		{"severity": "warning", "code": "first", "message": "one"},
+		{"severity": "warning", "code": "second", "message": "two"},
+	]
+	var tied_report := "\n".join(PcbExport._section("TIED", tied))
+	check("6f: equal-salience findings retain producer order",
+		tied_report.find("first") < tied_report.find("second"), tied_report)
+	var blocked_generated := result.duplicate(true)
+	blocked_generated["readiness"] = {"package_generated": true,
+		"preflight_status": "blocked", "order_page_verified": null,
+		"order_page_verified_note": "human only"}
+	blocked_generated["blockers"] = [{"code": "gc1_trace_width",
+		"message": "trace is below the selected rule-profile floor",
+		"impact": "fabrication"}]
+	var blocked_report := "\n".join(PcbExport.report_lines(blocked_generated))
+	check("6f: a generated blocked package is labelled reference-only",
+		blocked_report.contains("BLOCKERS — package is quote/reference only")
+		and not blocked_report.contains("BLOCKERS — nothing was written"),
+		blocked_report)
+
+	# 6g: a refusal report leads with the refusal and names the blocked
 	# component, so the first line a person reads is what to fix.
 	var refused: Dictionary = await PcbExport.run(null, "jlcpcb-economic")
-	check_eq("6f: a panel-less run refuses", bool(refused.get("ok", true)), false)
+	check_eq("6g: a panel-less run refuses", bool(refused.get("ok", true)), false)
 	var refused_report := "\n".join(PcbExport.report_lines(refused))
-	check("6f: the refusal report leads with REFUSED",
+	check("6g: the refusal report leads with REFUSED",
 		refused_report.contains("REFUSED: no_panel"), refused_report)
 
-	# 6g: a clean package needs no dialog; a refusal always gets one.
-	check_eq("6g: a clean package raises no report",
+	# 6h: a clean package needs no dialog; a refusal always gets one.
+	check_eq("6h: a clean package raises no report",
 		PcbExport.has_report({"ok": true, "kind": "package"}), false)
-	check_eq("6g: a package with advisories does",
+	check_eq("6h: a package with advisories does",
 		PcbExport.has_report(result), true)
-	# 6g: and a package whose ONLY finding is the unchecked list does too. Every
+	# 6h: and a package whose ONLY finding is the unchecked list does too. Every
 	# package carries one — uploader acceptance and licence compatibility are
 	# unconditional — so a predicate that ignored it suppressed the report on
 	# exactly the exports a person is most likely to over-trust.
-	check_eq("6g: unchecked rules alone raise a report",
+	check_eq("6h: unchecked rules alone raise a report",
 		PcbExport.has_report({"ok": true, "kind": "package",
 			"unchecked_rules": _profile_unchecked()}), true)
-	check_eq("6g: a refusal always does", PcbExport.has_report(refused), true)
+	check_eq("6h: a refusal always does", PcbExport.has_report(refused), true)
 
 
 # ── 7: the YAML exporter is still itself ────────────────────────────────────

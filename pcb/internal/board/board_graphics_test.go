@@ -246,31 +246,47 @@ func TestArtworkFreeBoardIsByteIdentical(t *testing.T) {
 	}
 }
 
-// The real board that motivated the feature. Its back-side legend is hung off
-// TP1 as COMPONENT graphics in absolute coordinates, and this change must not
-// touch it: those keys ride Component.Extra and are none of this collection's
-// business. Skipped when the sibling checkout is absent, so this suite stays
-// runnable on its own.
-func TestSmartRemoteV2RoundTripsUnchanged(t *testing.T) {
-	const path = "/home/imran/gitlab/ccsandbox/smart-remote-v2/eda/smart_remote_v2_board.yaml"
+// Frozen fixtures pin BOTH endpoints of the smart-remote artwork migration.
+// A mutable sibling checkout is useful integration evidence, but it is not a
+// deterministic unit-test oracle: its owner is expected to edit it.
+func TestArtworkRepresentationsRoundTripUnchanged(t *testing.T) {
+	cases := []struct {
+		name, path, representation string
+	}{
+		{"legacy-component", "testdata/board_graphics_legacy.yaml", "legacy"},
+		{"top-level", "testdata/board_graphics_top_level.yaml", "top-level"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertArtworkRoundTrip(t, tc.path, tc.representation)
+		})
+	}
+}
+
+func assertArtworkRoundTrip(t *testing.T, path, representation string) {
+	t.Helper()
 	src, err := os.ReadFile(path)
 	if err != nil {
-		t.Skipf("smart-remote-v2 checkout not present: %v", err)
+		t.Fatalf("read fixture: %v", err)
 	}
 	b, err := UnmarshalYAML(src)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(b.BoardGraphics) != 0 {
-		t.Fatalf("the board declares no board_graphics, got %d", len(b.BoardGraphics))
 	}
 	out, err := MarshalYAML(b)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if string(src) != string(out) {
-		t.Fatalf("smart-remote-v2 no longer round-trips byte-identically (%d in, %d out)",
+		t.Fatalf("artwork fixture no longer round-trips byte-identically (%d in, %d out)",
 			len(src), len(out))
+	}
+	if representation == "top-level" ||
+		(representation == "either" && len(b.BoardGraphics) > 0) {
+		if len(b.BoardGraphics) == 0 {
+			t.Fatal("top-level board_graphics disappeared")
+		}
+		return
 	}
 	var tp1 *Component
 	for i := range b.Components {
@@ -281,8 +297,22 @@ func TestSmartRemoteV2RoundTripsUnchanged(t *testing.T) {
 	if tp1 == nil {
 		t.Fatal("TP1 is missing from the board")
 	}
-	graphics, ok := tp1.Extra["graphics"].([]interface{})
-	if !ok || len(graphics) == 0 {
-		t.Fatalf("TP1's component-hung graphics did not survive: %T", tp1.Extra["graphics"])
+	legacyGraphics, ok := tp1.Extra["graphics"].([]interface{})
+	if !ok || len(legacyGraphics) == 0 {
+		t.Fatal("legacy TP1.graphics disappeared")
 	}
+	if representation == "legacy" && len(b.BoardGraphics) != 0 {
+		t.Fatal("legacy fixture moved representations during a plain codec round trip")
+	}
+}
+
+// Optional live smoke: set MINERVA_SMART_REMOTE_BOARD to the canonical YAML
+// path when intentionally checking the owner's current board.  The normal unit
+// suite never reads mutable state outside this repository.
+func TestLiveSmartRemoteV2RoundTripSmoke(t *testing.T) {
+	path := os.Getenv("MINERVA_SMART_REMOTE_BOARD")
+	if path == "" {
+		t.Skip("MINERVA_SMART_REMOTE_BOARD is not set")
+	}
+	assertArtworkRoundTrip(t, path, "either")
 }

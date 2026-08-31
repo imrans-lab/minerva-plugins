@@ -289,7 +289,8 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
     # B.SilkS geometry, and the reader needs the layer to go look at.
     warn_layer = "B.SilkS" if bottom else "F.SilkS"
     for warning in result.warnings:
-        g.warn(warning.code, warning.message, _silk_ref(ref, warn_layer))
+        g.warn(warning.code, warning.message, _silk_ref(ref, warn_layer),
+               impact="documentation")
 
     lines = g.silk_lines_bot if bottom else g.silk_lines
     circles = g.silk_circles_bot if bottom else g.silk_circles
@@ -410,9 +411,10 @@ class _Geometry:
         # cannot silently cancel the first.
         self.frame = "board"
 
-    def warn(self, code: str, message: str, ref: SourceRef) -> None:
+    def warn(self, code: str, message: str, ref: SourceRef, *,
+             impact: str = "") -> None:
         self.diagnostics.append(
-            Diagnostic(DiagnosticSeverity.WARNING, code, message, ref))
+            Diagnostic(DiagnosticSeverity.WARNING, code, message, ref, impact))
 
     def to_gerber_frame(self) -> "_Geometry":
         """BOARD frame (Y-DOWN) -> GERBER frame (Y-UP): negate every Y, in place.
@@ -897,7 +899,8 @@ def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
         g.warn("plated_hole_no_annulus_copper",
                f"plated hole {key}[{idx}] at ({hx}, {hy}) has no annulus_mm — "
                f"drilled but NO copper ring emitted (author annulus_mm)",
-               SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
+               SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"),
+               impact="fabrication")
     # An UNPLATED board hole emits no copper; its drill-size mask opening on both
     # sides came from mask_source above, which is where that ratified rule
     # (finding 019f901a9966) and its pcbnew verification now live.
@@ -1004,7 +1007,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                        f"drill feature dropped: {key}[{idx}] has non-positive "
                        f"diameter ({dia}) at ({hx}, {hy})",
                        SourceRef(EntityKind.HOLE, f"{key}[{idx}]",
-                                 f"({hx}, {hy})"))
+                                 f"({hx}, {hy})"), impact="fabrication")
                 continue
             # The pth_holes / npth_holes alias KEY is authoritative for plating (an
             # explicit `plated` is overridden by the key), matching Go's

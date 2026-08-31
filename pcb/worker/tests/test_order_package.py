@@ -21,9 +21,10 @@ THE ORACLES, named, because each of these turns on a different one:
     into an artifact.
   * READINESS. The failure this catches is the tempting one — reporting a
     package as orderable because serialization succeeded. ``order_page_verified``
-    has no writer, and a blocked board produces no files at all. ``pass`` is
-    also refused over a WARNING: a package whose own list records a dropped
-    drill is not a complete rendering of the board.
+    has no writer. A selected service's blocker produces no files; the
+    dialect-only quote path may produce an honestly blocked reference package.
+    ``pass`` is also refused over a WARNING: a package whose own list records a
+    dropped drill is not a complete rendering of the board.
   * PROVENANCE IS EVIDENCE OR IT IS LABELLED. A revision is read only from the
     file the WORKER opened (``load_board``'s digest-checked by-reference arm),
     and every git record says which basis it has. The failure this catches is a
@@ -49,6 +50,7 @@ YAML file per fact would hide which one is under test.
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
 import re
@@ -246,7 +248,8 @@ def test_the_archive_claim_describes_only_the_check_production_runs():
     its suite's checks overstates itself exactly the way one that hides a
     finding understates itself."""
     reason = op.UNCHECKED_UPLOADER["reason"]
-    assert "allowlist" in reason
+    assert "allowlist" in reason and "X2" in reason and ".gbrjob" in reason
+    assert "geometry" in reason
     assert "parse checks" not in reason
     package = _package()
     shipped = {item["id"]: item["reason"] for item in package.unchecked}
@@ -280,6 +283,64 @@ def test_every_archived_layer_parses_with_an_independent_reader():
         elif name.endswith(".drl"):
             parsed = ExcellonFile.from_string(text, filename=name)
             assert parsed is not None, name
+
+
+def test_archive_semantics_refuse_a_top_bottom_layer_swap():
+    """Syntax is not identity: both swapped members still parse as Gerber.
+
+    Their own X2 FileFunction declarations are independent of the path rows in
+    the job manifest, so the production archive gate must bind the two before
+    zipping.  This is the counterexample the independent-parser oracle alone
+    cannot see.
+    """
+    files = dict(gerber.build_gerbers_ir(_compiled(_board())))
+    top = f"{BOARD_NAME}-F_Cu.gbr"
+    bottom = f"{BOARD_NAME}-B_Cu.gbr"
+    files[top], files[bottom] = files[bottom], files[top]
+    with pytest.raises(op.OrderPackageError) as caught:
+        op.build_archive(files)
+    assert caught.value.code == op.CODE_ARCHIVE_SEMANTICS
+    assert caught.value.field in (top, bottom)
+    assert "layer-swapped" in str(caught.value)
+
+
+def test_archive_semantics_refuse_a_syntactic_but_unidentified_gerber():
+    """A format statement and terminator do not establish a layer's role."""
+    files = dict(gerber.build_gerbers_ir(_compiled(_board())))
+    name = f"{BOARD_NAME}-F_Cu.gbr"
+    files[name] = "%FSLAX46Y46*%\nM02*\n"
+    with pytest.raises(op.OrderPackageError) as caught:
+        op.build_archive(files)
+    assert caught.value.code == op.CODE_ARCHIVE_SEMANTICS
+    assert caught.value.field == name
+    assert "FileFunction/FilePolarity" in str(caught.value)
+
+
+def test_archive_semantics_pin_current_inner_copper_vocabulary():
+    """The X2/job normalizer is intentionally coupled to this emitter.
+
+    A future emitter may distinguish Plane or Mixed copper.  Until it does,
+    every inner file says ``...,Inr,Signal`` while its job row says
+    ``...,Inr``; this real four-layer package makes that coupling explicit.
+    """
+    board = _board(
+        layers=["top", "in1", "in2", "bottom"],
+        design_rules={
+            "rule_profile": "jlcpcb-4layer",
+            "clearance_mm": 0.2, "trace_width_mm": 0.25,
+            "via_diameter_mm": 0.8, "via_drill_mm": 0.4,
+        })
+    package = _package(board, DIALECT_ONLY)
+    with zipfile.ZipFile(BytesIO(package.files[op.GERBER_ARCHIVE])) as archive:
+        files = {name: archive.read(name).decode("utf-8")
+                 for name in archive.namelist()}
+    job_name = next(name for name in files if name.endswith(".gbrjob"))
+    rows = {row["Path"]: row for row in json.loads(files[job_name])["FilesAttributes"]}
+    for layer, expected in (("In1", "Copper,L2,Inr"),
+                            ("In2", "Copper,L3,Inr")):
+        name = f"{BOARD_NAME}-{layer}_Cu.gbr"
+        assert f"TF.FileFunction,{expected},Signal*" in files[name]
+        assert rows[name]["FileFunction"] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +522,106 @@ def test_a_generated_package_claims_generation_and_nothing_more():
     assert readiness["preflight_status"] in (op.PREFLIGHT_PASS,
                                              op.PREFLIGHT_ADVISORIES)
     assert "order_page_verified" in readiness["order_page_verified_note"]
+    assert package.preflight["geometric"]["verdict"] == "clean"
+    assert package.manifest["checks"]["geometric"]["verdict"] == "clean"
+
+
+def test_a_geometrically_illegal_board_is_blocked_before_any_file(tmp_path):
+    """Selecting a fab profile is not checking it: the kernel must actually run.
+
+    The compiler admits this 0.05 mm trace as authored geometry; JLC's selected
+    profile sets a 0.10 mm floor, which GC1 enforces.  Before the release gate
+    existed this exact board still produced all seven order artifacts.
+    """
+    board = _board(
+        nets=[{"name": "N", "pins": ["R1.1", "R2.1"]}],
+        traces=[{"net": "N", "layer": "top", "width_mm": 0.05,
+                 "points": [{"x_mm": 10.0, "y_mm": 10.0},
+                            {"x_mm": 20.0, "y_mm": 10.0}]}])
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": board, "profile": SERVICE,
+                   "out_dir": str(tmp_path)}})
+    assert reply["ok"] is False
+    error = reply["error"]
+    assert error["code"] == op.CODE_GEOMETRIC_VIOLATIONS
+    assert error["geometric"]["verdict"] == "violations"
+    assert "gc1_trace_width" in {
+        row["type"] for row in error["geometric"]["findings"]}
+    assert error["preflight"]["geometric"] == error["geometric"]
+    assert error["preflight"]["readiness"]["package_generated"] is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_dialect_only_geometric_violation_generates_a_blocked_quote_package(tmp_path):
+    """The no-service selector is the DCR's mid-layout quote escape hatch.
+
+    Its bytes can be internally consistent without claiming that a selected
+    manufacturer can build them.  Every geometric violation therefore remains
+    a named blocker, but package generation itself succeeds and the checklist
+    says the package is reference-only.
+    """
+    board = _board(
+        nets=[{"name": "N", "pins": ["R1.1", "R2.1"]}],
+        traces=[{"net": "N", "layer": "top", "width_mm": 0.05,
+                 "points": [{"x_mm": 10.0, "y_mm": 10.0},
+                            {"x_mm": 20.0, "y_mm": 10.0}]}])
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": board, "profile": DIALECT_ONLY,
+                   "out_dir": str(tmp_path)}})
+    assert reply["ok"] is True, reply
+    result = reply["result"]
+    assert result["readiness"]["package_generated"] is True
+    assert result["readiness"]["preflight_status"] == op.PREFLIGHT_BLOCKED
+    assert result["preflight"]["blockers"] == result["blockers"]
+    assert "gc1_trace_width" in {row["code"] for row in result["blockers"]}
+    assert all(row["impact"] == "fabrication" for row in result["blockers"])
+    package_dir = tmp_path / result["directory"]
+    assert package_dir.is_dir()
+    assert {path.name for path in package_dir.iterdir()} == {
+        op.GERBER_ARCHIVE, op.BOM_FILE, op.CPL_FILE, op.PREVIEW_FILE,
+        op.CHECKLIST_FILE, op.PREFLIGHT_FILE, op.MANIFEST_FILE}
+    checklist = (package_dir / op.CHECKLIST_FILE).read_text(encoding="utf-8")
+    assert "BLOCKED — quote/reference package only" in checklist
+    assert "gc1_trace_width" in checklist
+
+
+def test_an_indeterminate_geometric_check_is_a_release_refusal(monkeypatch):
+    """Fail-closed means a check fault cannot degrade to an advisory package."""
+    union = {
+        "ok": False, "scope": "geometric", "verifies_geometry": False,
+        "verdict": "indeterminate",
+        "error": {"kind": "unsupported_geometry", "message": "probe"},
+    }
+    monkeypatch.setattr(op.drc_geometric, "run_geometric_drc",
+                        lambda *_args, **_kwargs: union)
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": _board(), "profile": SERVICE}})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == op.CODE_GEOMETRIC_INDETERMINATE
+    assert reply["error"]["geometric"] == union
+    assert reply["error"]["preflight"]["status"] == op.PREFLIGHT_BLOCKED
+
+
+def test_non_finite_geometric_evidence_refuses_strict_json(monkeypatch):
+    """JSON artifacts must never contain Python's non-standard bare NaN token."""
+    union = {
+        "ok": True, "scope": "geometric", "verifies_geometry": True,
+        "verdict": "clean", "findings": [],
+        "advisories": [{"type": "probe", "measured_mm": math.nan}],
+    }
+    monkeypatch.setattr(op.drc_geometric, "run_geometric_drc",
+                        lambda *_args, **_kwargs: union)
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": _board(), "profile": DIALECT_ONLY}})
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == op.CODE_JSON_INVALID
+    assert reply["error"]["field"] == "geometric"
+    assert "geometric" not in reply["error"]
+    json.dumps(reply, allow_nan=False)
 
 
 def test_absent_provenance_is_an_advisory_and_still_produces_a_package():
@@ -808,7 +969,20 @@ def test_the_worker_names_the_file_it_read_and_never_the_caller_s_path():
 # ---------------------------------------------------------------------------
 
 
-def test_a_dropped_feature_stops_the_package_reporting_pass():
+def _suppress_geometric_advisories(monkeypatch):
+    """Expose a true pass baseline for status-transition tests only."""
+    real = op.drc_geometric.run_geometric_drc
+
+    def without_advisories(*args, **kwargs):
+        result = dict(real(*args, **kwargs))
+        result["advisories"] = []
+        return result
+
+    monkeypatch.setattr(op.drc_geometric, "run_geometric_drc",
+                        without_advisories)
+
+
+def test_a_dropped_feature_stops_the_package_reporting_pass(monkeypatch):
     """A WARNING is the compiler or the emitter saying something about the board
     did not reach these files. Reporting `pass` beside a list that records a
     dropped drill is the one lie this whole package exists to stop telling, so
@@ -818,6 +992,7 @@ def test_a_dropped_feature_stops_the_package_reporting_pass():
     that is the only shape whose advisory list is empty — over the tiered
     profile the house-tooling advisory already holds the status off `pass` and
     this contrast would be invisible."""
+    _suppress_geometric_advisories(monkeypatch)
     board = _stamped_board()
     compiled = _compiled(board)
     clean = op.build(board, compiled, DIALECT_ONLY)
@@ -833,10 +1008,11 @@ def test_a_dropped_feature_stops_the_package_reporting_pass():
     assert warned.preflight["warnings"] == [dict(COMPILE_PROBE)]
 
 
-def test_pass_never_means_everything_was_checked():
+def test_pass_never_means_everything_was_checked(monkeypatch):
     """Even `pass` ships a non-empty unchecked list — uploader acceptance and
     licence compatibility are on every package — so the status is a statement
     about the checks that ran and never about the ones that did not."""
+    _suppress_geometric_advisories(monkeypatch)
     package = op.build(_stamped_board(), _compiled(_stamped_board()),
                        DIALECT_ONLY)
     assert package.preflight["status"] == op.PREFLIGHT_PASS

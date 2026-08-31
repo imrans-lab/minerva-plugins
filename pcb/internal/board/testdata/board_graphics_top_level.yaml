@@ -1,0 +1,17 @@
+version: 1
+name: artwork-top-level
+width_mm: 20
+height_mm: 20
+design_rules: {}
+components: []
+nets: []
+board_graphics:
+    - id: graphic:0123456789abcdef0123456789abcdef
+      layer: B.SilkS
+      kind: polyline
+      width: 0.15
+      points:
+        - x_mm: 1
+          y_mm: 2
+        - x_mm: 3
+          y_mm: 4

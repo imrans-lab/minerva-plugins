@@ -32,8 +32,11 @@ READINESS IS THREE SEPARATE CLAIMS, and the package makes only two of them:
    what serialization proves, and it is ALL that serialization proves.
 2. ``preflight_status`` — ``pass``, ``advisories`` or ``blocked``, over the
    checks the selected service actually ran AND the WARNING channel of the one
-   compilation and the one emission. A blocked board yields no package; its
-   report is the refusal. ``pass`` never covers the ``unchecked`` list, which is
+   compilation and the one emission. A selected manufacturing service refuses
+   when its geometric floors are violated. The dialect-only selector may emit
+   a mid-layout quote/reference package with ``package_generated=true`` and a
+   blocked preflight; its checklist names every blocker and says not to submit
+   it for manufacture. ``pass`` never covers the ``unchecked`` list, which is
    always non-empty: it is the statement of what nothing looked at.
 3. ``order_page_verified`` — a person uploaded these files and wrote down what
    the quote page said. There is no input to this module that can set it and no
@@ -69,8 +72,8 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-from . import (assembly_outputs, assembly_preview, board_model, gerber,
-               order_provenance, order_write, resolved_board)
+from . import (assembly_outputs, assembly_preview, board_model, drc_geometric,
+               gerber, order_provenance, order_write, resolved_board)
 from .board_model import (BASIS_CALLER_ASSERTED, BASIS_INLINE,  # noqa: F401
                           BASIS_WORKER_READ)
 
@@ -103,6 +106,10 @@ PREFLIGHT_VERSION = 1
 #: the same way every other assembly refusal carries one.
 CODE_ARCHIVE_CONTENT = "order_package_archive_content"
 CODE_ARCHIVE_INCOMPLETE = "order_package_archive_incomplete"
+CODE_ARCHIVE_SEMANTICS = "order_package_archive_semantics"
+CODE_GEOMETRIC_VIOLATIONS = "order_package_geometric_violations"
+CODE_GEOMETRIC_INDETERMINATE = "order_package_geometric_indeterminate"
+CODE_JSON_INVALID = "order_package_json_invalid"
 
 #: Rules this package deliberately does not claim to have checked. Same
 #: ``{id, reason}`` shape the service profile's own unchecked list uses, so the
@@ -111,9 +118,10 @@ CODE_ARCHIVE_INCOMPLETE = "order_package_archive_incomplete"
 UNCHECKED_UPLOADER = {
     "id": "gerber_archive_uploader_acceptance",
     "reason": ("whether a house's uploader parses this archive is only settled "
-               "by uploading it. The member allowlist is the ONLY check this "
-               "package runs over the archive — nothing here re-parses a layer "
-               "— and an allowlist is necessary, not sufficient"),
+               "by uploading it. This package allowlists members and binds each "
+               "Gerber's X2 function/polarity identity to its .gbrjob path, but "
+               "nothing here independently re-parses or compares the plotted "
+               "geometry — those checks are necessary, not sufficient"),
 }
 UNCHECKED_LICENCE = {
     "id": "ip_licence_compatibility",
@@ -132,10 +140,12 @@ NO_SERVICE_NOTE = (
 class OrderPackageError(ValueError):
     """A package refused by name, before any byte reached disk."""
 
-    def __init__(self, code: str, message: str, *, field: str | None = None):
+    def __init__(self, code: str, message: str, *, field: str | None = None,
+                 geometric: dict | None = None):
         super().__init__(message)
         self.code = code
         self.field = field
+        self.geometric = geometric
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +191,7 @@ def build_archive(files) -> bytes:
             CODE_ARCHIVE_INCOMPLETE,
             f"refusing to emit an empty {GERBER_ARCHIVE}: the board produced no "
             f"fabrication files")
+    check_archive_semantics(files)
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in sorted(files):
@@ -190,6 +201,120 @@ def build_archive(files) -> bytes:
             info.create_system = 3  # Unix, pinned: the host OS must not show up
             archive.writestr(info, files[name].encode("utf-8"))
     return buffer.getvalue()
+
+
+_GERBER_FUNCTION = re.compile(r"TF\.FileFunction,([^*]+)\*")
+_GERBER_POLARITY = re.compile(r"TF\.FilePolarity,([^*]+)\*")
+
+
+def _job_function(function: str) -> str:
+    """Normalize an in-file X2 function to the job-file vocabulary.
+
+    Gerber X2 and Gerber Job deliberately spell three functions differently;
+    the emitter records that distinction in :mod:`gerber`.  Normalizing only
+    those measured differences lets the archive bind each layer's own semantic
+    declaration to the path the job file assigns it without guessing from
+    geometry or from a filename suffix.
+    """
+    if function.startswith("Copper,") and function.endswith(",Signal"):
+        return function[:-len(",Signal")]
+    if function.startswith("Paste,"):
+        return "SolderPaste," + function[len("Paste,"):]
+    if function.startswith("Soldermask,"):
+        return "SolderMask," + function[len("Soldermask,"):]
+    if function == "Profile,NP":
+        return "Profile"
+    return function
+
+
+def check_archive_semantics(files) -> None:
+    """Bind every fabrication member's declared role to the job manifest.
+
+    Parsing a Gerber proves syntax, not identity: top-copper bytes remain a
+    valid Gerber when renamed as bottom copper.  Every emitted Gerber carries
+    its own X2 FileFunction/FilePolarity declarations, and the job file carries
+    the declaration expected at each path.  Requiring those independent
+    declarations to agree catches layer swaps before an archive is built.
+
+    Excellon has no equivalent job-file row in this emitter, so its PTH/NPTH
+    split is bound to the explicit generator comment rather than inferred from
+    the hole coordinates.
+    """
+    jobs = [(name, text) for name, text in files.items()
+            if name.endswith(".gbrjob")]
+    if len(jobs) != 1:
+        raise OrderPackageError(
+            CODE_ARCHIVE_SEMANTICS,
+            f"{GERBER_ARCHIVE} requires exactly one .gbrjob semantic manifest; "
+            f"found {len(jobs)}")
+    job_name, job_text = jobs[0]
+    try:
+        job = json.loads(job_text)
+        rows = job["FilesAttributes"]
+    except (TypeError, ValueError, KeyError) as exc:
+        raise OrderPackageError(
+            CODE_ARCHIVE_SEMANTICS,
+            f"{job_name!r} does not carry a readable FilesAttributes table: {exc}",
+            field=job_name) from exc
+    if not isinstance(rows, list):
+        raise OrderPackageError(
+            CODE_ARCHIVE_SEMANTICS,
+            f"{job_name!r} FilesAttributes must be a list", field=job_name)
+
+    by_path: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("Path"), str):
+            raise OrderPackageError(
+                CODE_ARCHIVE_SEMANTICS,
+                f"{job_name!r} carries a malformed FilesAttributes row",
+                field=job_name)
+        path = row["Path"]
+        if path in by_path:
+            raise OrderPackageError(
+                CODE_ARCHIVE_SEMANTICS,
+                f"{job_name!r} assigns {path!r} more than once", field=path)
+        by_path[path] = row
+
+    gerber_names = {name for name in files if name.endswith(".gbr")}
+    if set(by_path) != gerber_names:
+        missing = sorted(gerber_names - set(by_path))
+        extra = sorted(set(by_path) - gerber_names)
+        raise OrderPackageError(
+            CODE_ARCHIVE_SEMANTICS,
+            f"{job_name!r} does not describe exactly the emitted Gerbers "
+            f"(missing={missing}, extra={extra})", field=job_name)
+
+    for name in sorted(gerber_names):
+        text = files[name]
+        function = _GERBER_FUNCTION.search(text)
+        polarity = _GERBER_POLARITY.search(text)
+        if function is None or polarity is None:
+            raise OrderPackageError(
+                CODE_ARCHIVE_SEMANTICS,
+                f"{name!r} lacks its X2 FileFunction/FilePolarity identity",
+                field=name)
+        row = by_path[name]
+        actual = (_job_function(function.group(1)), polarity.group(1))
+        expected = (row.get("FileFunction"), row.get("FilePolarity"))
+        if actual != expected:
+            raise OrderPackageError(
+                CODE_ARCHIVE_SEMANTICS,
+                f"{name!r} declares function/polarity {actual!r}, but "
+                f"{job_name!r} assigns {expected!r}; refusing a renamed or "
+                "layer-swapped fabrication member",
+                field=name)
+
+    for name, text in sorted(files.items()):
+        if not name.endswith(".drl"):
+            continue
+        marker = ("PLATED THROUGH HOLES" if name.endswith("-PTH.drl")
+                  else "NON-PLATED HOLES" if name.endswith("-NPTH.drl")
+                  else None)
+        if marker is None or marker not in text:
+            raise OrderPackageError(
+                CODE_ARCHIVE_SEMANTICS,
+                f"{name!r} does not declare the drill role its filename claims",
+                field=name)
 
 
 def archive_members(data: bytes) -> tuple[str, ...]:
@@ -455,7 +580,7 @@ def readiness(*, generated: bool, status: str) -> dict:
 
 
 def blocked_report(code: str, message: str, *, component=None, field=None,
-                   refs=()) -> dict:
+                   refs=(), geometric=None) -> dict:
     """The preflight a REFUSED export reports. No package exists, so this is the
     whole answer: the third readiness state is still unrecordable and the first
     is honestly false."""
@@ -466,12 +591,15 @@ def blocked_report(code: str, message: str, *, component=None, field=None,
         blocker["field"] = field
     if refs:
         blocker["refs"] = list(refs)
-    return {"preflight_version": PREFLIGHT_VERSION,
-            "status": PREFLIGHT_BLOCKED,
-            "blockers": [blocker],
-            "advisories": [],
-            "unchecked": [],
-            "readiness": readiness(generated=False, status=PREFLIGHT_BLOCKED)}
+    report = {"preflight_version": PREFLIGHT_VERSION,
+              "status": PREFLIGHT_BLOCKED,
+              "blockers": [blocker],
+              "advisories": [],
+              "unchecked": [],
+              "readiness": readiness(generated=False, status=PREFLIGHT_BLOCKED)}
+    if geometric is not None:
+        report["geometric"] = geometric
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +617,7 @@ class OrderPackage:
     digests: dict
     manifest: dict
     preflight: dict
+    blockers: tuple
     advisories: tuple
     unchecked: tuple
     ip_questions: tuple
@@ -501,6 +630,34 @@ class OrderPackage:
         """Publish the package under ``out_dir`` as ONE visible step."""
         return order_write.publish_directory(out_dir, self.directory, self.files,
                                              overwrite=overwrite)
+
+
+def _geometric_finding(row: dict, *, blocking: bool = False) -> dict:
+    """Adapt a geometric row to the package's named report shape.
+
+    The full machine verdict is preserved under ``preflight.geometric``; this
+    projection is the compact row consumed by the GUI/MCP report.  ``layer``
+    and ``impact`` stay structured: display salience must not depend on prose.
+    """
+    code = str(row.get("type") or "geometric_advisory")
+    measured = row.get("measured_mm")
+    required = row.get("required_mm")
+    relation = ""
+    if measured is not None and required is not None:
+        relation = f" ({measured} mm measured; {required} mm required)"
+    component = row.get("ref")
+    layer = row.get("layer")
+    grade = "blocking finding" if blocking else "advisory"
+    message = f"geometric DRC {grade} {code}{relation}"
+    if layer:
+        message += f" on {layer}"
+    out = {"code": code, "message": message, "scope": "geometric",
+           "impact": "fabrication"}
+    if component:
+        out["component"] = component
+    if layer:
+        out["layer"] = layer
+    return out
 
 
 def build(board_source: dict, board, profile_id: str, *,
@@ -520,9 +677,52 @@ def build(board_source: dict, board, profile_id: str, *,
     told how the board arrived has been told nothing that could earn a
     revision."""
     provenance, provenance_advisories = order_provenance.check(board_source)
-
     assembly = assembly_outputs.build_package(board, profile_id)
     profile = assembly.emission.profile
+
+    # A rule profile selected at compile time supplies the geometric floors; it
+    # does not itself compare the finished copper against them.  Run the
+    # fail-closed geometric kernel over THIS SAME ResolvedBoard before emitting
+    # a byte.  Calling compile_board again here would break the package's single-
+    # compilation invariant and could check a different library snapshot than
+    # the one the files describe.
+    geometric = drc_geometric.run_geometric_drc(
+        board, warnings=tuple(compile_diagnostics))
+    # Python's json.dumps otherwise emits bare NaN/Infinity tokens.  Validate
+    # the externally supplied union before copying it into two JSON artifacts;
+    # an invalid union is neither a report nor evidence and must fail by name.
+    try:
+        json.dumps(geometric, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise OrderPackageError(
+            CODE_JSON_INVALID,
+            f"geometric DRC returned a value that cannot be represented as "
+            f"strict JSON: {exc}", field="geometric") from exc
+    verdict = geometric.get("verdict")
+    geometric_blockers: tuple[dict, ...] = ()
+    if verdict == "violations":
+        findings = tuple(geometric.get("findings") or ())
+        if profile.service is not None:
+            raise OrderPackageError(
+                CODE_GEOMETRIC_VIOLATIONS,
+                f"geometric DRC reports {len(findings)} fabrication-rule "
+                "violation(s); refusing a package that claims a selected "
+                "manufacturing service",
+                field="design_rules.rule_profile", geometric=geometric)
+        # The dialect-only selector deliberately claims no manufacturer.  The
+        # owner-approved DCR permits mid-layout quote exports, labelled
+        # honestly: files can be internally consistent while preflight is
+        # blocked.  Keep every violation named and do not call it an advisory.
+        geometric_blockers = tuple(
+            _geometric_finding(row, blocking=True) for row in findings)
+    if verdict not in ("clean", "violations"):
+        kind = (geometric.get("error") or {}).get("kind", "unknown")
+        raise OrderPackageError(
+            CODE_GEOMETRIC_INDETERMINATE,
+            f"geometric DRC is indeterminate ({kind}); refusing to generate "
+            "an unverifiable order package",
+            field="design_rules.rule_profile", geometric=geometric)
+
     gerbers = gerber.build_gerbers_ir(board)
     archive = build_archive(gerbers)
     # The emitter's OWN warning channel, read off the value it returned (a copy
@@ -533,7 +733,11 @@ def build(board_source: dict, board, profile_id: str, *,
     emission_warnings = tuple(resolved_board.diagnostic_payload(d)
                               for d in getattr(gerbers, "diagnostics", ()))
 
-    advisories = tuple(assembly.emission.advisories) + tuple(provenance_advisories)
+    geometric_advisories = tuple(
+        _geometric_finding(row) for row in geometric.get("advisories") or ())
+    advisories = (tuple(assembly.emission.advisories)
+                  + tuple(provenance_advisories)
+                  + geometric_advisories)
     unchecked = (tuple(assembly.emission.unchecked)
                  + (UNCHECKED_UPLOADER, UNCHECKED_LICENCE))
     questions = tuple(ip_questions(board))
@@ -546,7 +750,8 @@ def build(board_source: dict, board, profile_id: str, *,
     # to stop making. They are advisory, not blocking: the files are still
     # emitted, and the WARNINGS section of the preflight report says which
     # feature went missing.
-    status = (PREFLIGHT_ADVISORIES if (advisories or questions or warnings)
+    status = (PREFLIGHT_BLOCKED if geometric_blockers else
+              PREFLIGHT_ADVISORIES if (advisories or questions or warnings)
               else PREFLIGHT_PASS)
 
     directory = package_directory_name(board.name, profile.id)
@@ -564,8 +769,8 @@ def build(board_source: dict, board, profile_id: str, *,
 
     files[CHECKLIST_FILE] = render_checklist(
         board=board, profile=profile, provenance=provenance, digests=digests,
-        advisories=advisories, unchecked=unchecked, questions=questions,
-        excluded=not_populated(board))
+        blockers=geometric_blockers, advisories=advisories,
+        unchecked=unchecked, questions=questions, excluded=not_populated(board))
     digests[CHECKLIST_FILE] = digest(files[CHECKLIST_FILE])
 
     preflight = {
@@ -573,7 +778,7 @@ def build(board_source: dict, board, profile_id: str, *,
         "status": status,
         "board": board.name,
         "profile": profile.id,
-        "blockers": [],
+        "blockers": [dict(item) for item in geometric_blockers],
         "advisories": [dict(item) for item in advisories],
         "unchecked": [dict(item) for item in unchecked],
         "ip_questions": [dict(item) for item in questions],
@@ -581,6 +786,7 @@ def build(board_source: dict, board, profile_id: str, *,
         # what moved the status above and a report that states a status it
         # cannot account for sends a reader to the wrong file.
         "warnings": [dict(item) for item in warnings],
+        "geometric": geometric,
         "readiness": readiness(generated=True, status=status),
     }
     files[PREFLIGHT_FILE] = _json(preflight)
@@ -613,15 +819,18 @@ def build(board_source: dict, board, profile_id: str, *,
         "licences": licences(board),
         "ip_questions": [dict(item) for item in questions],
         "checks": {"status": status,
+                   "blockers": [dict(item) for item in geometric_blockers],
                    "advisories": [dict(item) for item in advisories],
                    "unchecked": [dict(item) for item in unchecked],
-                   "warnings": [dict(item) for item in warnings]},
+                   "warnings": [dict(item) for item in warnings],
+                   "geometric": geometric},
         "readiness": readiness(generated=True, status=status),
     }
     files[MANIFEST_FILE] = _json(manifest)
 
     return OrderPackage(directory=directory, files=files, digests=digests,
                         manifest=manifest, preflight=preflight,
+                        blockers=geometric_blockers,
                         advisories=advisories, unchecked=unchecked,
                         ip_questions=questions, warnings=warnings)
 
@@ -632,7 +841,14 @@ def _encoded(content) -> bytes:
 
 def _json(payload: dict) -> str:
     """One spelling for every JSON artifact: sorted keys, trailing newline."""
-    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    try:
+        return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False,
+                          allow_nan=False) + "\n"
+    except (TypeError, ValueError) as exc:
+        raise OrderPackageError(
+            CODE_JSON_INVALID,
+            f"order-package record cannot be represented as strict JSON: {exc}",
+            field="json") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -640,7 +856,7 @@ def _json(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_checklist(*, board, profile, provenance, digests, advisories,
+def render_checklist(*, board, profile, provenance, digests, blockers, advisories,
                      unchecked, questions, excluded) -> str:
     """The human half of the order.
 
@@ -666,6 +882,18 @@ def render_checklist(*, board, profile, provenance, digests, advisories,
         f"{provenance['design_revision'] or '— none —'} "
         f"({provenance['state']})")
     add(f"Source digest: `{provenance['source_digest']}`")
+    if blockers:
+        add("")
+        add("## BLOCKED — quote/reference package only")
+        add("")
+        add("This package was generated because the selected dialect claims no "
+            "manufacturing service. Do not submit it for manufacture until every "
+            "blocking finding below is cleared:")
+        add("")
+        for item in blockers:
+            where = item.get("component") or item.get("layer") or "board-wide"
+            add(f"- `{item.get('code', '')}` ({where}): "
+                f"{item.get('message', '')}")
     add("")
     add("## Upload these, and only these")
     add("")
