@@ -43,6 +43,18 @@ non-boolean ``populate``, REFUSES: a typo that quietly lands a fiducial in a
 BOM with a fabricated identity requirement is the quiet wrong answer the whole
 order path exists to prevent.
 
+PER-PLACEMENT ANCHOR. An expansion child has NO geometry of its own — the
+parent's footprint draws all of it, and the child is a ref plus a transform — so
+without an authored answer every child inherits ONE anchor measured off the
+parent's whole body. That is right when the drawing IS the part and wrong the
+moment the drawing spreads several parts across itself: the DevKit socket set
+draws two 1x22 rows whose true centres are (-11.43, 26.67) and (+11.43, 26.67),
+while its fab box centre — the number every child would otherwise inherit — is
+(0, 30.8485), between the rows and on neither. An optional ``anchor_mm``, stated
+in the placement's own local frame and read here verbatim, is that answer;
+absent, the parent-measured anchor still applies and nothing changes. It is
+carried, not composed, for the same reason the offsets are.
+
 PLACEMENTS are carried, not composed. ``placements`` expands one authored
 component into the several identical physical parts it stands for, each under
 an authored, stable ref. This module validates the shape and hands the offsets
@@ -85,7 +97,7 @@ IDENTITY_FIELDS = ("manufacturer", "mpn", "package", "comment")
 _BLOCK_KEYS = frozenset(("populate", "paste", "house_parts", "placements")
                         + IDENTITY_FIELDS)
 
-_PLACEMENT_KEYS = frozenset(("ref", "offset_mm", "rotation_deg"))
+_PLACEMENT_KEYS = frozenset(("ref", "offset_mm", "rotation_deg", "anchor_mm"))
 
 
 class AssemblySpecError(ValueError):
@@ -100,11 +112,17 @@ class AssemblyPlacementSpec:
     """One physically placed instance of a component. ``offset_mm`` is in the
     PARENT's local frame, before the parent's rotation and side are applied —
     stated here because that is what makes it a transform input rather than a
-    board coordinate."""
+    board coordinate.
+
+    ``anchor_mm`` is this part's own body centre, measured from THIS placement's
+    origin, and ``None`` means "not authored" — the anchor pass then measures
+    one off the parent footprint. See the module docstring's PER-PLACEMENT
+    ANCHOR section."""
 
     ref: str
     offset_mm: tuple[float, float] | None
     rotation_deg: float
+    anchor_mm: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +202,24 @@ def _finite(value, field: str, ref: str) -> float:
     return number
 
 
+def _point_mm(raw, field: str, ref: str) -> tuple[float, float] | None:
+    """A placement's ``{x, y}`` millimetre mapping, or ``None`` when absent.
+
+    Both placement points read through here, so an unknown axis refuses the same
+    way under either key: a mistyped ``{xx: 22.86, y: 0}`` accepted with x
+    defaulted to 0 would place the part — or its anchor — at the parent's origin.
+    A missing axis inside an otherwise well-formed mapping IS 0.0, because the
+    key was written and only one axis was needed."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"x", "y"}:
+        raise AssemblySpecError(
+            f"component {ref!r} assembly.{field} must be a mapping "
+            f"of x/y millimetres, got {raw!r}")
+    return (_finite(raw.get("x", 0.0), f"{field}.x", ref),
+            _finite(raw.get("y", 0.0), f"{field}.y", ref))
+
+
 def _placements(raw, ref: str) -> tuple[AssemblyPlacementSpec, ...]:
     if raw is None:
         return ()
@@ -213,20 +249,13 @@ def _placements(raw, ref: str) -> tuple[AssemblyPlacementSpec, ...]:
                 f"component {ref!r} assembly.{where} repeats the designator "
                 f"{placement_ref!r}; each physical placement needs its own")
         seen.add(placement_ref)
-        raw_offset = item.get("offset_mm")
-        offset: tuple[float, float] | None = None
-        if raw_offset is not None:
-            if not isinstance(raw_offset, dict) or set(raw_offset) - {"x", "y"}:
-                raise AssemblySpecError(
-                    f"component {ref!r} assembly.{where}.offset_mm must be a mapping "
-                    f"of x/y millimetres, got {raw_offset!r}")
-            offset = (_finite(raw_offset.get("x", 0.0), f"{where}.offset_mm.x", ref),
-                      _finite(raw_offset.get("y", 0.0), f"{where}.offset_mm.y", ref))
+        offset = _point_mm(item.get("offset_mm"), f"{where}.offset_mm", ref)
+        anchor = _point_mm(item.get("anchor_mm"), f"{where}.anchor_mm", ref)
         raw_rotation = item.get("rotation_deg")
         rotation = 0.0 if raw_rotation is None else _finite(
             raw_rotation, f"{where}.rotation_deg", ref)
         out.append(AssemblyPlacementSpec(ref=placement_ref, offset_mm=offset,
-                                         rotation_deg=rotation))
+                                         rotation_deg=rotation, anchor_mm=anchor))
     return tuple(out)
 
 

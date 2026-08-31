@@ -49,14 +49,15 @@ from pcb_worker.compile_board import compile_board
 from pcb_worker.footprint_def import FootprintDefinition
 from pcb_worker.footprints import parse_kicad_mod
 from pcb_worker.resolved_board import (
-    ANCHOR_BASIS_FAB, ANCHOR_BASIS_LANDS, ANCHOR_BASIS_ORIGIN,
-    DiagnosticSeverity, ResolutionSuccess,
+    ANCHOR_BASIS_AUTHORED, ANCHOR_BASIS_FAB, ANCHOR_BASIS_LANDS,
+    ANCHOR_BASIS_ORIGIN, DiagnosticSeverity, ResolutionSuccess,
 )
 # The CPL byte seal for assembly_resolved.yaml has exactly one owner.
 from tests.test_assembly_outputs import RESOLVED_FIXTURE_CPL
 
 BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
 ANCHOR_FIXTURE = BOARDS / "assembly_anchor.yaml"
+OVERRIDE_FIXTURE = BOARDS / "assembly_anchor_override.yaml"
 RESOLVED_FIXTURE = BOARDS / "assembly_resolved.yaml"
 LIBRARY = Path(__file__).resolve().parents[2] / "library" / "footprints"
 
@@ -65,6 +66,17 @@ LIBRARY = Path(__file__).resolve().parents[2] / "library" / "footprints"
 SOCKET_ANCHOR_Y = 7.62
 #: The DevKit row pitch the U rows expand across.
 ROW_PITCH = 22.86
+
+# --- the override fixture's three measured numbers, each derivable from a part
+#     a purchaser holds rather than from the .kicad_mod ------------------------
+#: Half the socket set's row spacing (22.86 mm, stated in the footprint's descr).
+ROW_HALF_SPACING = 11.43
+#: Half a 1x22 strip's pin span: 21 x 2.54 / 2. Where the STRIP's centre is.
+STRIP_ANCHOR_Y = 26.67
+#: Where the PARENT's fab box centres — the whole two-row body, i.e. the DevKit
+#: module. The number every child inherits when no anchor is authored, and the
+#: one that is right for neither strip.
+SOCKET_SET_FAB_ANCHOR_Y = 30.8485
 
 
 def _compiled(path: Path = ANCHOR_FIXTURE):
@@ -76,6 +88,23 @@ def _compiled(path: Path = ANCHOR_FIXTURE):
             "fixture did not compile: "
             + ", ".join(d.code for d in result.diagnostics
                         if d.severity is DiagnosticSeverity.ERROR))
+    return result.board
+
+
+def _compiled_without_authored_anchors(path: Path = OVERRIDE_FIXTURE):
+    """The SAME fixture with every ``anchor_mm`` key removed and nothing else
+    touched — the control arm of the override oracle. Built by mutation rather
+    than by a second fixture file so the two arms cannot drift apart in some
+    other field and quietly stop being the same board."""
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    removed = 0
+    for component in document["components"]:
+        for placement in component["assembly"]["placements"]:
+            removed += placement.pop("anchor_mm", None) is not None
+    assert removed == 6, "the fixture stopped authoring the anchors under test"
+    result = compile_board(document)
+    if not isinstance(result, ResolutionSuccess):
+        raise AssertionError("stripped fixture did not compile")
     return result.board
 
 
@@ -444,3 +473,197 @@ def test_a_component_with_no_resolved_placements_is_a_named_refusal():
     with pytest.raises(ao.AssemblyBoardError) as exc_info:
         ao.build_cpl(stripped, "jlc")
     assert "physical placements" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# The per-placement anchor: a drawing that spreads several parts across itself.
+# ---------------------------------------------------------------------------
+
+
+def test_the_socket_set_footprint_measures_what_the_override_fixture_claims():
+    """THE PREMISE OF THE OVERRIDE TESTS, pinned like the fixture footprints
+    above so a library edit breaks loudly rather than rewriting the answers.
+
+    The DevKit socket set draws ONE fab body box over BOTH strips —
+    (-12.93, -1.1)..(12.93, 62.797), centring at (0, 30.8485), which is the
+    module that plugs in rather than either soldered part. Its 44 pads sit in
+    two rows at x -11.43 and +11.43, each spanning y 0..53.34, so each STRIP
+    centres at (+/-11.43, 26.67). The fab centre lies BETWEEN the two strips and
+    on neither of them, and it is 4.1785 mm north of both.
+    """
+    socket_set = _definition(
+        "Espressif.pretty/ESP32-S3-DevKitC-1_SocketSet_2x22_THT.kicad_mod")
+    fab = refdes_anchor.fab_extent_from_definition(socket_set)
+    assert (fab.min_x, fab.min_y, fab.max_x, fab.max_y) == pytest.approx(
+        (-12.93, -1.1, 12.93, 62.797))
+    assert (fab.center_x, fab.center_y) == pytest.approx(
+        (0.0, SOCKET_SET_FAB_ANCHOR_Y))
+
+    rows: dict[float, list[float]] = {}
+    for pad in socket_set.pads:
+        rows.setdefault(pad.position[0], []).append(pad.position[1])
+    assert sorted(rows) == pytest.approx([-ROW_HALF_SPACING, ROW_HALF_SPACING])
+    for x, ys in rows.items():
+        assert len(ys) == 22
+        assert (min(ys) + max(ys)) / 2 == pytest.approx(STRIP_ANCHOR_Y)
+    # The gap the fixture's authored anchors close, said as one number.
+    assert SOCKET_SET_FAB_ANCHOR_Y - STRIP_ANCHOR_Y == pytest.approx(4.1785)
+
+
+def test_without_an_authored_anchor_every_child_inherits_the_parents():
+    """THE DEFECT, AND THE OTHER DIRECTION OF THE ORACLE. Strip the six
+    ``anchor_mm`` keys and nothing else: ONE anchor is measured off the parent
+    footprint and every expanded part is handed it, so both strips of every
+    component are placed on the module's centre rather than on their own.
+
+    Hand-derived from (0, 30.8485) and the transform:
+
+      U3S  parent (30, 20), rotation 0, top
+           both anchors -> y 20 + 30.8485 = 50.8485, at x 18.57 and 41.43
+      U4S  parent (100, 80), rotation 90, BOTTOM
+           mirror (0, 30.8485) -> (0, -30.8485); R_cw(90) -> (-30.8485, 0)
+           both anchors -> x 100 - 30.8485 = 69.1515
+      U5S  parent (30, 110), the DCR worked example's own offsets
+           both anchors -> y 140.8485, at x 30 and 52.86
+
+    Every pair is a correct 22.86 mm apart and every one of them is wrong.
+    """
+    places = _placements(_compiled_without_authored_anchors())
+    for ref in ("U3S_A", "U3S_B", "U4S_A", "U4S_B", "U5S_A", "U5S_B"):
+        assert places[ref].anchor_basis == ANCHOR_BASIS_FAB
+
+    assert _xy(places["U3S_A"]) == pytest.approx(
+        (30.0 - ROW_HALF_SPACING, 20.0 + SOCKET_SET_FAB_ANCHOR_Y))
+    assert _xy(places["U3S_B"]) == pytest.approx(
+        (30.0 + ROW_HALF_SPACING, 20.0 + SOCKET_SET_FAB_ANCHOR_Y))
+    assert _xy(places["U4S_A"]) == pytest.approx(
+        (100.0 - SOCKET_SET_FAB_ANCHOR_Y, 80.0 + ROW_HALF_SPACING))
+    assert _xy(places["U4S_B"]) == pytest.approx(
+        (100.0 - SOCKET_SET_FAB_ANCHOR_Y, 80.0 - ROW_HALF_SPACING))
+    assert _xy(places["U5S_A"]) == pytest.approx(
+        (30.0, 110.0 + SOCKET_SET_FAB_ANCHOR_Y))
+    assert _xy(places["U5S_B"]) == pytest.approx(
+        (30.0 + ROW_PITCH, 110.0 + SOCKET_SET_FAB_ANCHOR_Y))
+
+
+def test_the_inherited_anchors_pass_every_existing_gate():
+    """WHY THIS NEEDED A SCHEMA KEY RATHER THAN A CHECK. The six wrong anchors
+    above are not merely unrefused — nothing in the order path can see them. The
+    spacing gate is the only one that looks at where parts are, and it only asks
+    whether two designators are too CLOSE; two anchors a correct 22.86 mm apart
+    clear it whatever point they are both measured from. The whole package
+    builds, and it carries no advisory either, because every anchor WAS measured
+    — off the wrong body.
+
+    The first thing that would notice is a person looking at a placement
+    preview, which is exactly why the honest datum has to be authorable.
+    """
+    board = _compiled_without_authored_anchors()
+    package = ao.build_package(board, "jlc", name="stripped")
+    assert package.emission.advisories == ()
+    rows = _cpl_rows(board)
+    assert math.hypot(rows["U3S_B"].x_mm - rows["U3S_A"].x_mm,
+                      rows["U3S_B"].y_mm - rows["U3S_A"].y_mm) == pytest.approx(ROW_PITCH)
+
+
+def test_an_authored_anchor_puts_each_part_on_its_own_body_centre():
+    """THE ORACLE. U3S authors one origin per strip and one anchor per strip,
+    and both numbers come off the purchased part: 11.43 is half the 22.86 mm row
+    spacing the footprint states in its own ``descr``, and 26.67 is half a 1x22
+    strip's pin span (21 x 2.54 / 2).
+
+      U3S_A  offset (-11.43, 0) -> origin (18.57, 20)
+             anchor (0, 26.67) in its own frame -> (18.57, 46.67)
+      U3S_B  offset (+11.43, 0) -> origin (41.43, 20)
+             anchor (0, 26.67) in its own frame -> (41.43, 46.67)
+
+    Each is that strip's true centre. The ORIGINS are identical to the stripped
+    arm's, which is what makes the anchor the only thing the key changed.
+    """
+    places = _placements(_compiled(OVERRIDE_FIXTURE))
+    stripped = _placements(_compiled_without_authored_anchors())
+
+    assert _xy(places["U3S_A"]) == pytest.approx(
+        (30.0 - ROW_HALF_SPACING, 20.0 + STRIP_ANCHOR_Y))
+    assert _xy(places["U3S_B"]) == pytest.approx(
+        (30.0 + ROW_HALF_SPACING, 20.0 + STRIP_ANCHOR_Y))
+    for ref in ("U3S_A", "U3S_B"):
+        assert places[ref].origin == pytest.approx(stripped[ref].origin)
+        assert places[ref].anchor != stripped[ref].anchor
+
+
+def test_an_authored_anchor_is_recorded_as_authored_not_measured():
+    """A figure a person wrote down and a box measured off a drawing are not the
+    same kind of answer, so they do not share a basis token. A consumer reading
+    ``fab_outline`` on an authored anchor would be told the geometry agrees with
+    a number no drawing was consulted for."""
+    places = _placements(_compiled(OVERRIDE_FIXTURE))
+    assert {p.anchor_basis for p in places.values()} == {ANCHOR_BASIS_AUTHORED}
+
+
+def test_an_authored_anchor_rides_the_child_transform():
+    """The authored number is stated in the placement's OWN local frame and is
+    then turned and mirrored by the same object that places the copper — it is
+    not a board coordinate and not a shortcut around the transform.
+
+    U4S: parent (100, 80), rotation 90, BOTTOM, offsets +/-11.43 in x.
+
+      U4S_A  offset (-11.43, 0): mirror -> (-11.43, 0);
+             R_cw(90)-(x, y) = (y, -x) -> (0, 11.43)   origin (100, 91.43)
+             anchor (0, 26.67): mirror -> (0, -26.67);
+             R_cw(90) -> (-26.67, 0)                   -> (73.33, 91.43)
+      U4S_B  offset (+11.43, 0) -> (0, -11.43)         origin (100, 68.57)
+             same anchor                               -> (73.33, 68.57)
+
+    An anchor added to the origin WITHOUT the transform would leave both at
+    x 100 and put them 26.67 mm north; one that skipped only the bottom mirror
+    would land at x 126.67. The measured fallback lands at x 69.1515, so the
+    override moves x by exactly the 4.1785 mm the premise test names.
+    """
+    places = _placements(_compiled(OVERRIDE_FIXTURE))
+    assert places["U4S_A"].origin == pytest.approx((100.0, 80.0 + ROW_HALF_SPACING))
+    assert places["U4S_B"].origin == pytest.approx((100.0, 80.0 - ROW_HALF_SPACING))
+    assert _xy(places["U4S_A"]) == pytest.approx(
+        (100.0 - STRIP_ANCHOR_Y, 80.0 + ROW_HALF_SPACING))
+    assert _xy(places["U4S_B"]) == pytest.approx(
+        (100.0 - STRIP_ANCHOR_Y, 80.0 - ROW_HALF_SPACING))
+    assert places["U4S_A"].rotation_deg == pytest.approx(90.0)
+    assert places["U4S_A"].side.value == "bottom"
+
+
+def test_an_authored_anchor_repairs_the_worked_examples_own_offsets():
+    """U5S carries the DCR worked example's offsets VERBATIM — (0, 0) and
+    (22.86, 0), which put both origins on the parent's datum line rather than on
+    either strip — and repairs it with the anchor ALONE, without moving an
+    authored offset or re-drawing anything.
+
+    Both placements state the same (-11.43, 26.67), because both strips sit
+    11.43 mm west of their own placement's origin: A's origin IS the parent
+    datum and the west strip is 11.43 west of it; B's origin is 22.86 east of
+    the datum while the east strip is only 11.43 east of it. The result is the
+    same pair of true strip centres U3S reaches from the other authoring.
+    """
+    places = _placements(_compiled(OVERRIDE_FIXTURE))
+    assert places["U5S_A"].origin == pytest.approx((30.0, 110.0))
+    assert places["U5S_B"].origin == pytest.approx((30.0 + ROW_PITCH, 110.0))
+    assert _xy(places["U5S_A"]) == pytest.approx(
+        (30.0 - ROW_HALF_SPACING, 110.0 + STRIP_ANCHOR_Y))
+    assert _xy(places["U5S_B"]) == pytest.approx(
+        (30.0 + ROW_HALF_SPACING, 110.0 + STRIP_ANCHOR_Y))
+
+
+def test_the_override_fixture_renders_the_hand_derived_table():
+    """One seal over all six parts in the emitted frame — X verbatim, Y negated,
+    four fixed decimals — so a change anywhere in the chain lands here as well as
+    in the focused test that owns it."""
+    content = next(iter(ao.build_cpl(
+        _compiled(OVERRIDE_FIXTURE), "jlc", name="override").values()))
+    assert content == (
+        "Designator,Mid X,Mid Y,Layer,Rotation\r\n"
+        "U3S_A,18.5700,-46.6700,Top,0.0000\r\n"
+        "U3S_B,41.4300,-46.6700,Top,0.0000\r\n"
+        "U4S_A,73.3300,-91.4300,Bottom,90.0000\r\n"
+        "U4S_B,73.3300,-68.5700,Bottom,90.0000\r\n"
+        "U5S_A,18.5700,-136.6700,Top,0.0000\r\n"
+        "U5S_B,41.4300,-136.6700,Top,0.0000\r\n"
+    )

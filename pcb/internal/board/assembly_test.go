@@ -26,7 +26,12 @@ func fullAssemblyBoard() *Board {
 					HouseParts:   map[string]string{"jlcpcb": "C41376161"},
 					Paste:        PasteExclude,
 					Placements: &[]AssemblyPlacement{
-						{Ref: "J1S_A", OffsetMM: &AssemblyOffset{X: 0, Y: 0}, RotationDeg: 0},
+						// A's anchor states an authored ZERO x — the axis a
+						// value-typed field would omitempty away.
+						{Ref: "J1S_A", OffsetMM: &AssemblyOffset{X: 0, Y: 0},
+							AnchorMM: &AssemblyOffset{X: 0, Y: 7.62}, RotationDeg: 0},
+						// B authors no anchor at all: absent must stay absent,
+						// or every board would start carrying one.
 						{Ref: "J1S_B", OffsetMM: &AssemblyOffset{X: 22.86, Y: 0}, RotationDeg: 180},
 					},
 				},
@@ -77,6 +82,21 @@ func assertFullAssembly(t *testing.T, where string, b *Board) {
 		placements[0].OffsetMM.Y != 0 {
 		t.Fatalf("%s: the authored zero offset did not survive: %+v", where, placements[0])
 	}
+	// THE ANCHOR IS AN ASSEMBLY FIELD, so losing it across a round trip is the
+	// same hard gate every field above is under — and it is the field most able
+	// to be lost quietly, because the board still compiles, still gerbers and
+	// still passes every order gate with the parent's anchor inherited in its
+	// place. Its x is an authored 0 for the same reason the offset's is.
+	if placements[0].AnchorMM == nil || placements[0].AnchorMM.X != 0 ||
+		placements[0].AnchorMM.Y != 7.62 {
+		t.Fatalf("%s: the authored placement anchor did not survive: %+v", where, placements[0])
+	}
+	// And the other half: a placement that authored NO anchor must not gain one,
+	// or the parent-measured anchor it is entitled to would be overwritten by a
+	// zero pair the author never wrote.
+	if placements[1].AnchorMM != nil {
+		t.Fatalf("%s: a placement with no authored anchor grew one: %+v", where, placements[1])
+	}
 }
 
 // TestStructuredAssemblyRoundTripsBothCodecs is the schema oracle: promote
@@ -94,6 +114,13 @@ func TestStructuredAssemblyRoundTripsBothCodecs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalYAML: %v", err)
 	}
+	// Exactly ONE anchor_mm in the document: the authored one is written and the
+	// unauthored one is not invented. A value-typed field would emit both (Go's
+	// json omitempty never omits a struct) and a reader would then be told the
+	// second strip's centre is its own origin.
+	if n := strings.Count(string(y), "anchor_mm"); n != 1 {
+		t.Fatalf("want exactly 1 anchor_mm in the emitted document, got %d:\n%s", n, string(y))
+	}
 	yBack, err := UnmarshalYAML(y)
 	if err != nil {
 		t.Fatalf("UnmarshalYAML:\n%s\n%v", string(y), err)
@@ -103,6 +130,9 @@ func TestStructuredAssemblyRoundTripsBothCodecs(t *testing.T) {
 	j, err := json.Marshal(b)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
+	}
+	if n := strings.Count(string(j), "anchor_mm"); n != 1 {
+		t.Fatalf("want exactly 1 anchor_mm on the JSON hop, got %d: %s", n, string(j))
 	}
 	var jBack Board
 	if err := json.Unmarshal(j, &jBack); err != nil {
@@ -170,6 +200,11 @@ func TestAssemblyRefusesRatherThanDropping(t *testing.T) {
 		// origin rather than 22.86 mm away.
 		{"unknown offset_mm axis", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, offset_mm: {xx: 22.86, y: 0}}]}}\n"},
 		{"offset_mm is a scalar", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, offset_mm: 22.86}]}}\n"},
+		// The anchor decodes through the same point type, so it inherits both
+		// refusals: a mistyped axis accepted with x defaulted to 0 would anchor
+		// the part on its own origin instead of its body centre.
+		{"unknown anchor_mm axis", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, anchor_mm: {xx: 0, y: 26.67}}]}}\n"},
+		{"anchor_mm is a scalar", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, anchor_mm: 26.67}]}}\n"},
 		{"assembly is a list", "  - {ref: R1, x_mm: 1, y_mm: 1, assembly: [populate]}\n"},
 	}
 	for _, c := range decodeCases {
@@ -184,6 +219,9 @@ func TestAssemblyRefusesRatherThanDropping(t *testing.T) {
 			"  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {paste: maybe}}\n", "invalid_component"},
 		{"placement with no ref",
 			"  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{offset_mm: {x: 1, y: 0}}]}}\n",
+			"invalid_component"},
+		{"non-finite anchor_mm",
+			"  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: R1_A, anchor_mm: {x: .inf, y: 0}}]}}\n",
 			"invalid_component"},
 		{"two placements share a designator",
 			"  - {ref: R1, x_mm: 1, y_mm: 1, assembly: {placements: [{ref: X}, {ref: X}]}}\n",

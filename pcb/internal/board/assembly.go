@@ -4,7 +4,8 @@
 // component: whether it is populated at all, what part it is, which house
 // catalogue number stands for it, whether its lands get paste, and — for a
 // synthetic component that stands for several identical physical parts — the
-// designators those parts are actually placed under.
+// designators those parts are actually placed under and, where the drawing's
+// own body centre is not each part's, where each part's centre sits.
 //
 // # Two authored forms, one model
 //
@@ -112,18 +113,38 @@ type AssemblyPlacement struct {
 	// OffsetMM is measured in the PARENT COMPONENT's local frame, before the
 	// parent's own rotation and side are applied. A pointer so an absent key
 	// stays absent through both codecs rather than emitting a zero offset.
-	OffsetMM    *AssemblyOffset `json:"offset_mm,omitempty" yaml:"offset_mm,omitempty"`
+	OffsetMM *AssemblyOffset `json:"offset_mm,omitempty" yaml:"offset_mm,omitempty"`
+	// AnchorMM is where THIS part's body centre sits relative to THIS
+	// placement's own origin — the point a nozzle is told to centre on. Absent,
+	// the compiler measures one anchor off the parent footprint and every
+	// expanded part inherits it, which is only right when the drawing is the
+	// part. A drawing that stands for several parts spread across it has one
+	// body centre per part and none of them is the parent's, so each placement
+	// states its own.
+	//
+	// Same frame as OffsetMM's result: the placement's local millimetres,
+	// before the parent's rotation and side, which the compiler then composes.
+	// A pointer for the same reason OffsetMM is one — an authored anchor of
+	// (0, 0) is a real answer and must not re-serialize as an absent key.
+	AnchorMM    *AssemblyOffset `json:"anchor_mm,omitempty" yaml:"anchor_mm,omitempty"`
 	RotationDeg float64         `json:"rotation_deg,omitempty" yaml:"rotation_deg,omitempty"`
 }
 
-// AssemblyOffset is a millimetre offset. The unit rides the KEY (`offset_mm`)
-// rather than each member, so the members are the bare axes.
+// AssemblyOffset is a millimetre point on a placement — the shape both
+// `offset_mm` and `anchor_mm` take. The unit rides the KEY rather than each
+// member, so the members are the bare axes. A Go unmarshaler is handed a value
+// and not the key it hung under, so the refusals below name the pair of keys
+// this shape serves rather than guessing at one of them.
 type AssemblyOffset struct {
 	X float64 `json:"x" yaml:"x"`
 	Y float64 `json:"y" yaml:"y"`
 }
 
-// UnmarshalYAML carries the block's unknown-key refusal INSIDE the offset. A
+// assemblyPointWhat labels this shape in a refusal. Both placement keys decode
+// through the same type, so the label names both.
+const assemblyPointWhat = "assembly placement point (offset_mm / anchor_mm)"
+
+// UnmarshalYAML carries the block's unknown-key refusal INSIDE the point. A
 // mistyped axis (`{xx: 22.86, y: 0}`) would otherwise leave x at its zero value
 // and place the expanded part at its parent's origin — the same quiet wrong
 // answer refusing an unknown outer key exists to prevent, one level down.
@@ -133,9 +154,9 @@ func (o *AssemblyOffset) UnmarshalYAML(node *yaml.Node) error {
 		return nil
 	}
 	if n.Kind != yaml.MappingNode {
-		return fmt.Errorf(assemblyErrCode + ": assembly placement offset_mm must be a mapping of x/y millimetres")
+		return fmt.Errorf(assemblyErrCode + ": " + assemblyPointWhat + " must be a mapping of x/y millimetres")
 	}
-	if err := refuseUnknownKeys(yamlMappingKeys(n), reflect.TypeOf(AssemblyOffset{}), "assembly placement offset_mm"); err != nil {
+	if err := refuseUnknownKeys(yamlMappingKeys(n), reflect.TypeOf(AssemblyOffset{}), assemblyPointWhat); err != nil {
 		return err
 	}
 	type plain AssemblyOffset
@@ -147,7 +168,7 @@ func (o *AssemblyOffset) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// UnmarshalJSON is the offset's IPC-boundary twin of UnmarshalYAML.
+// UnmarshalJSON is the point's IPC-boundary twin of UnmarshalYAML.
 func (o *AssemblyOffset) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -155,9 +176,9 @@ func (o *AssemblyOffset) UnmarshalJSON(data []byte) error {
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &raw); err != nil {
-		return fmt.Errorf(assemblyErrCode+": assembly placement offset_mm must be an object of x/y millimetres: %w", err)
+		return fmt.Errorf(assemblyErrCode+": "+assemblyPointWhat+" must be an object of x/y millimetres: %w", err)
 	}
-	if err := refuseUnknownKeys(jsonObjectKeys(raw), reflect.TypeOf(AssemblyOffset{}), "assembly placement offset_mm"); err != nil {
+	if err := refuseUnknownKeys(jsonObjectKeys(raw), reflect.TypeOf(AssemblyOffset{}), assemblyPointWhat); err != nil {
 		return err
 	}
 	type plain AssemblyOffset
@@ -399,11 +420,17 @@ func validateComponentAssembly(c *Component, i int) error {
 			return fmt.Errorf("invalid_component: components[%d] (%s) assembly.placements[%d] (%s) "+
 				"rotation_deg is not finite", i, c.Ref, j, p.Ref)
 		}
-		if p.OffsetMM != nil {
-			for _, v := range []float64{p.OffsetMM.X, p.OffsetMM.Y} {
+		for _, pair := range []struct {
+			key   string
+			point *AssemblyOffset
+		}{{"offset_mm", p.OffsetMM}, {"anchor_mm", p.AnchorMM}} {
+			if pair.point == nil {
+				continue
+			}
+			for _, v := range []float64{pair.point.X, pair.point.Y} {
 				if math.IsNaN(v) || math.IsInf(v, 0) {
 					return fmt.Errorf("invalid_component: components[%d] (%s) assembly.placements[%d] (%s) "+
-						"offset_mm is not finite", i, c.Ref, j, p.Ref)
+						"%s is not finite", i, c.Ref, j, p.Ref, pair.key)
 				}
 			}
 		}

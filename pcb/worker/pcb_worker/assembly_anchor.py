@@ -14,7 +14,21 @@ bounding box of the part's body, in footprint-local millimetres, put through the
 component's own placement transform. Deliberately NOT an area centroid — a
 nozzle centres on the extent of what it picks up, and every basis is a box.
 
-THE BASIS LADDER (:data:`resolved_board.ANCHOR_BASES` names the three outcomes):
+AN EXPANSION CHILD MAY STATE ITS OWN ANCHOR, and needs to whenever the drawing
+spreads several parts across itself. A child carries NO geometry — the parent's
+footprint draws all of it — so with nothing authored every child inherits the
+one anchor measured off the parent's whole body. Right when the drawing is the
+part; wrong for the DevKit socket set, whose two 1x22 rows have their own
+centres at (-11.43, 26.67) and (+11.43, 26.67) while the parent's fab box
+centres at (0, 30.8485), between the rows and on neither — and wrong QUIETLY,
+because two anchors the correct distance apart clear the spacing gate.
+``assembly.placements[].anchor_mm`` is that answer, stated in the placement's
+own local frame and composed through the same child transform a measured anchor
+is. It records the basis :data:`resolved_board.ANCHOR_BASIS_AUTHORED`, so a
+reader is never told a figure a person wrote down was measured off a drawing.
+
+THE BASIS LADDER (:data:`resolved_board.ANCHOR_BASES` names the three MEASURED
+outcomes):
 
 1. ``fab_outline`` — the fab-layer body outline, which is KiCad's own assembly
    drawing, drawn for exactly this audience.
@@ -63,6 +77,7 @@ from .assembly_spec import AssemblyPlacementSpec
 from .geometry import PlacementTransform
 from .refdes_anchor import fab_extent_from_definition, land_extent_from_definition
 from .resolved_board import (
+    ANCHOR_BASIS_AUTHORED,
     ANCHOR_BASIS_FAB,
     ANCHOR_BASIS_LANDS,
     ANCHOR_BASIS_ORIGIN,
@@ -110,8 +125,11 @@ def physical_placements(component_ref: str, placement: Placement, assembly,
     authored ``assembly.placements`` entry for a synthetic expansion, each
     carrying the authored ref and the offset composed against this component's
     rotation and side.
+
+    The footprint is measured ONCE, outside the loop, because it is the parent's
+    drawing and every child that did not author an ``anchor_mm`` shares it.
     """
-    anchor_local, basis = footprint_anchor(footprint)
+    measured_local, measured_basis = footprint_anchor(footprint)
     parent = PlacementTransform(position=placement.position,
                                 rotation_deg=placement.rotation_deg,
                                 side=placement.side)
@@ -121,12 +139,21 @@ def physical_placements(component_ref: str, placement: Placement, assembly,
         rotation = parent.angle(spec.rotation_deg)
         child = PlacementTransform(position=origin, rotation_deg=rotation,
                                    side=placement.side)
+        # AUTHORED WINS, tested against None rather than truthiness: an anchor
+        # of (0, 0) says "this part's centre IS its own origin", which is a
+        # different statement from not having answered.
+        authored = spec.anchor_mm is not None
+        anchor_local = spec.anchor_mm if authored else measured_local
         placements.append(PhysicalPlacement(
             ref=spec.ref,
             origin=origin,
+            # The authored anchor rides the CHILD's transform, exactly as a
+            # measured one does — so it is written in the untransformed local
+            # frame a datasheet states, and is turned and mirrored by the same
+            # object that places the copper.
             anchor=child.point(anchor_local),
             rotation_deg=rotation,
             side=placement.side,
-            anchor_basis=basis,
+            anchor_basis=ANCHOR_BASIS_AUTHORED if authored else measured_basis,
         ))
     return tuple(placements)

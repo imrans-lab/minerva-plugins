@@ -1,0 +1,94 @@
+# THE PER-PLACEMENT ANCHOR fixture: a synthetic component whose drawing spreads
+# SEVERAL parts across itself, where one anchor measured off the parent is right
+# for none of them.
+#
+# ONE FOOTPRINT, the real one the order needs — Espressif:
+# ESP32-S3-DevKitC-1_SocketSet_2x22_THT, measured before it was chosen:
+#
+#   * its F.Fab body box is (-12.93, -1.1)..(12.93, 62.797), so the anchor the
+#     basis ladder measures is (0, 30.8485) — the centre of the whole two-row
+#     body, which is the DevKit module, not either socket strip;
+#   * its 44 pads sit in two rows at x -11.43 and +11.43, each spanning
+#     y 0..53.34, so each STRIP's own centre is (-11.43, 26.67) and
+#     (+11.43, 26.67). Neither is the fab centre, and the fab centre is between
+#     them.
+#
+# Every strip anchor below is (0, 26.67) in its own placement's frame: 26.67 is
+# half a 1x22 strip's pin span (21 x 2.54 / 2), the number the purchased part's
+# own datasheet gives, and 11.43 is half the 22.86 mm row spacing the footprint
+# states in its own `descr`. Nothing here is derivable only by opening a
+# .kicad_mod — which is the whole reason this key exists rather than
+# compensating offsets.
+#
+# THREE COMPONENTS, each for one claim:
+#
+#   U3S  the plain case: each placement's origin is its own strip's pin 1, and
+#        its anchor is that strip's centre.
+#   U4S  the same expansion through a parent rotation AND the bottom side, so an
+#        authored anchor that failed to ride the child transform lands 4.1785 mm
+#        away in x and cannot pass.
+#   U5S  the DCR's own worked example offsets — (0, 0) and (22.86, 0), which put
+#        both origins on the parent datum line rather than on each strip —
+#        repaired by the anchor ALONE, without moving an authored offset. Both
+#        anchors read (-11.43, 26.67) because both strips sit 11.43 mm west of
+#        their own placement's origin: A's origin is the parent datum and the
+#        west strip is 11.43 west of it, and B's origin is 22.86 east of the
+#        datum while the east strip is only 11.43 east of it.
+#
+# Deliberately NO nets: every claim here is geometry, and a net list would only
+# add a way for the fixture to stop compiling for an unrelated reason.
+version: 1
+name: AssemblyAnchorOverride
+width_mm: 200
+height_mm: 200
+origin: {x_mm: 0, y_mm: 0}
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+
+components:
+  # --- the plain case: one origin per strip, one anchor per strip.
+  - ref: U3S
+    footprint: Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT
+    value: DevKit socket set
+    x_mm: 30.0
+    y_mm: 20.0
+    rotation_deg: 0
+    layer: top
+    assembly:
+      mpn: C41376161
+      placements:
+        - {ref: U3S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 0}
+        - {ref: U3S_B, offset_mm: {x: 11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 0}
+
+  # --- the same expansion turned and mirrored: the authored anchor has to ride
+  #     the child's transform exactly as a measured one does.
+  - ref: U4S
+    footprint: Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT
+    value: DevKit socket set
+    x_mm: 100.0
+    y_mm: 80.0
+    rotation_deg: 90
+    layer: bottom
+    assembly:
+      mpn: C41376161
+      placements:
+        - {ref: U4S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 0}
+        - {ref: U4S_B, offset_mm: {x: 11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 0}
+
+  # --- the DCR worked example's offsets, repaired by the anchor alone.
+  - ref: U5S
+    footprint: Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT
+    value: DevKit socket set
+    x_mm: 30.0
+    y_mm: 110.0
+    rotation_deg: 0
+    layer: top
+    assembly:
+      mpn: C41376161
+      placements:
+        - {ref: U5S_A, offset_mm: {x: 0, y: 0}, anchor_mm: {x: -11.43, y: 26.67}, rotation_deg: 0}
+        - {ref: U5S_B, offset_mm: {x: 22.86, y: 0}, anchor_mm: {x: -11.43, y: 26.67}, rotation_deg: 0}

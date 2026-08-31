@@ -805,7 +805,13 @@ class Placement:
 ANCHOR_BASIS_FAB = "fab_outline"
 ANCHOR_BASIS_LANDS = "lands"
 ANCHOR_BASIS_ORIGIN = "footprint_origin"
-ANCHOR_BASES = (ANCHOR_BASIS_FAB, ANCHOR_BASIS_LANDS, ANCHOR_BASIS_ORIGIN)
+#: Not measured at all: the placement authored its own ``anchor_mm``. Its own
+#: token so the two ways a number can be right stay distinguishable — a
+#: measurement off a drawing, or a figure a person wrote down — and so the
+#: unmeasured-anchor advisory cannot fire on a part whose author answered.
+ANCHOR_BASIS_AUTHORED = "authored"
+ANCHOR_BASES = (ANCHOR_BASIS_FAB, ANCHOR_BASIS_LANDS, ANCHOR_BASIS_ORIGIN,
+                ANCHOR_BASIS_AUTHORED)
 
 
 @dataclass(frozen=True)

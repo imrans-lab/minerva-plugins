@@ -42,8 +42,9 @@ green. `build_bom` and `build_cpl` remain the single-artifact entry points.
 
 A CPL row carries the **assembly anchor** — the part's body-box centre, composed
 through its rotation and side — not the `x_mm`/`y_mm` that place the footprint
-origin. See "The assembly anchor" in `board-yaml.md` for the basis ladder and
-why silk and the courtyard are not bases.
+origin. See "The assembly anchor" in `board-yaml.md` for the basis ladder, why
+silk and the courtyard are not bases, and how an expansion whose parts do not
+share the drawing's centre states one anchor per placement (`anchor_mm`).
 
 ## Coordinate frame — measured, not assumed
 

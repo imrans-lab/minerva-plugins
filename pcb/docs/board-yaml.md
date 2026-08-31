@@ -493,6 +493,8 @@ components:
       placements:                        # one drawn part, two soldered parts
         - {ref: J1S_A, offset_mm: {x: 0, y: 0}, rotation_deg: 0}
         - {ref: J1S_B, offset_mm: {x: 22.86, y: 0}, rotation_deg: 0}
+        # ...and, where the drawing's own centre is not each part's centre:
+        #   {ref: J1S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}}
 ```
 
 | field | meaning |
@@ -503,7 +505,7 @@ components:
 | `comment` | the BOM's Comment column. Absent, it falls back to the component's `value`. |
 | `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. The BOM's part-number column prints the entry for the **selected** house; absent, it falls back to `mpn`. |
 | `paste` | `auto` (the default) leaves the footprint's own layer list to decide; `exclude` drops this part's stencil apertures; `include` declines to drop them. See "Solder paste is authored, never invented" below. |
-| `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. |
+| `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. Each entry takes `ref`, `offset_mm`, `rotation_deg` and `anchor_mm`. |
 
 The three column fields resolve to the BOM's cells with exactly one fallback
 each, applied once at emit time so no consumer re-decides what a column means:
@@ -532,8 +534,9 @@ list"). This block is the only source of part identity for an order, so `mpm:
 C123` silently vanishing and resurfacing later as "missing mpn", or a mistyped
 `offset_mm` quietly placing a part at its parent's origin, is exactly the quiet
 wrong answer the order path exists to refuse. Both codecs enforce it at every
-level of the block, including **inside** `offset_mm`: `{xx: 22.86, y: 0}`
-refuses rather than defaulting x to 0 (`internal/board/assembly.go`).
+level of the block, including **inside** a placement's `offset_mm` and
+`anchor_mm`: `{xx: 22.86, y: 0}` refuses rather than defaulting x to 0
+(`internal/board/assembly.go`).
 
 ### Identity values are QUOTED strings, and a blank one means absent
 
@@ -573,7 +576,9 @@ physical parts — a socket strip drawn once and soldered twice. Each entry's
 invented these would rename a part between two orders of the same design, and
 `Validate` refuses a board where two physical parts would share one designator
 (`duplicate_assembly_designator`). `offset_mm` is measured in the parent
-component's own frame, before the parent's rotation and side are applied.
+component's own frame, before the parent's rotation and side are applied, and
+`anchor_mm` states that part's own body centre in its placement's frame (see
+"A placement may state its own anchor" under "The assembly anchor").
 
 ### Solder paste is authored, never invented
 
@@ -713,6 +718,7 @@ to be inferred:
 | `fab_outline` | the fab-layer (`F.Fab`/`B.Fab`) body outline — KiCad's own assembly drawing, and the right answer whenever a footprint has one. |
 | `lands` | every pad's box, for a footprint that draws no fab outline. |
 | `footprint_origin` | the footprint has neither — silk-only board furniture — so the anchor is the origin, **said out loud**. |
+| `authored` | not measured at all: this placement stated its own `anchor_mm` (below). Its own token, so a figure a person wrote down is never reported as a box measured off a drawing. |
 
 Silk and the courtyard are deliberately **not** bases. Silk is drawn asymmetric
 on purpose (a cathode bar, a pin-1 dot): measured on this library, `D_SMA`'s
@@ -725,6 +731,52 @@ the bottom-side mirror — and each expanded part gets its own anchor, its own
 composed rotation and its own CPL row. On the bottom side a per-placement
 `rotation_deg` **subtracts** from the parent's rather than adding, because the
 side mirror turns a rotation into its inverse.
+
+#### A placement may state its own anchor (`anchor_mm`)
+
+An expansion child has **no geometry of its own** — the parent's footprint draws
+all of it, and the child is a ref plus a transform. So with nothing authored,
+the one anchor measured off the parent's whole body is handed to every child.
+That is right when the drawing **is** the part, and wrong the moment one drawing
+spreads several parts across itself.
+
+The DevKit socket set is the worked case. It draws one `F.Fab` body box over
+both strips — `(-12.93, -1.1)..(12.93, 62.797)`, centring at `(0, 30.8485)` —
+which is the module that plugs in, not either soldered part. Its two 22-pad rows
+sit at x `-11.43` and `+11.43`, each spanning y `0..53.34`, so each **strip**
+centres at `(±11.43, 26.67)`. The inherited anchor lies between the two strips
+and on neither, 4.1785 mm north of both.
+
+**Nothing in the order path catches that.** The only gate that looks at where
+parts are asks whether two designators are too *close*
+(`assembly_placements_too_close`); two anchors a correct 22.86 mm apart clear it
+whatever point they are both measured from. Both files build, and no advisory
+fires — the anchors *were* measured, off the wrong body. The first thing that
+notices is a person reading a placement preview.
+
+`anchor_mm` is the answer:
+
+```yaml
+placements:
+  - {ref: U1S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}}
+  - {ref: U1S_B, offset_mm: {x: 11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}}
+```
+
+* It is stated in **this placement's own local frame**, before the parent's
+  rotation and side — the same frame `offset_mm`'s result is in — and it is then
+  composed through the same transform that places the copper. It is not a board
+  coordinate.
+* **Absent means absent**: the parent-measured anchor still applies and a board
+  that does not author one is unchanged. An authored `{x: 0, y: 0}` is a real
+  answer ("this part's centre is its own origin"), not an absence, and both
+  codecs round-trip it rather than dropping the key.
+* Both numbers above come off the **purchased part**: `11.43` is half the
+  22.86 mm row spacing the footprint states in its own `descr`, and `26.67` is
+  half a 1x22 strip's pin span (21 × 2.54 / 2). That is the point of the key —
+  a compensating offset that folded in the `4.1785` gap would be derivable only
+  by opening the `.kicad_mod`.
+* A placement that authors one records the `authored` basis, so no consumer is
+  told the number was measured.
 
 ## Trace angles (`design_rules.allowed_trace_angles_deg`)
 

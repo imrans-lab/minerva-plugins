@@ -1656,9 +1656,13 @@ every other worker-backed tool uses. The worker also exposes `assembly_bom` and
 A CPL row's coordinate is the **assembly anchor** — the part's body-box centre,
 composed through its rotation and side — not the `x_mm`/`y_mm` that place the
 footprint origin, and a component authoring `assembly.placements` contributes
-one row per authored placement rather than one per drawing. See "The assembly
-anchor" in `docs/board-yaml.md`, and `docs/assembly-outputs.md` for the emitted
-file's coordinate frame and rotation convention.
+one row per authored placement rather than one per drawing. Each of those parts
+inherits the anchor measured off the parent footprint unless its placement
+authors its own `anchor_mm` — which it has to whenever one drawing spreads
+several parts across itself, because the parent's body centre is then the centre
+of none of them. See "The assembly anchor" in `docs/board-yaml.md`, and
+`docs/assembly-outputs.md` for the emitted file's coordinate frame and rotation
+convention.
 
 Every export runs the **hard gates** first — duplicate or case-folding
 designators, BOM/CPL reference-set inequality, the profile's per-row designator

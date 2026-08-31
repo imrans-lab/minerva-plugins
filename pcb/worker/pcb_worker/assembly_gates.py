@@ -60,7 +60,9 @@ not measure — today, a POPULATED part whose anchor fell through the basis ladd
 to ``footprint_origin``, so the coordinate emitted as its centre is really its
 drawn datum. Silk-only board furniture lands there legitimately, which is why
 this cannot be a refusal and why it is scoped to POPULATED parts, the only ones
-a nozzle visits.
+a nozzle visits. A placement that authored its own ``anchor_mm`` records the
+``authored`` basis instead and is deliberately not reported: the pipeline did
+not measure it, but somebody answered.
 """
 
 from __future__ import annotations

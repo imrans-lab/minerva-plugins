@@ -218,6 +218,40 @@ def test_placements_carry_authored_refs_offsets_and_rotations():
     assert resolved.placements[1].rotation_deg == 180.0
 
 
+def test_a_placement_anchor_is_carried_verbatim_and_absent_by_default():
+    """``anchor_mm`` is read exactly like ``offset_mm`` and handed on unchanged.
+    ABSENT IS None, not a zero pair: the anchor pass measures one off the parent
+    footprint when nothing was authored, and it can only tell the two apart if
+    "not authored" has its own value."""
+    resolved = _resolve(assembly={"placements": [
+        {"ref": "U1S_A"},
+        {"ref": "U1S_B", "offset_mm": {"x": 22.86, "y": 0},
+         "anchor_mm": {"x": -11.43, "y": 26.67}},
+    ]})
+    assert resolved.placements[0].anchor_mm is None
+    assert resolved.placements[1].anchor_mm == (-11.43, 26.67)
+
+
+def test_an_authored_zero_anchor_is_an_answer_and_not_an_absence():
+    """The truthiness trap. ``(0.0, 0.0)`` says "this part's centre IS its own
+    placement origin", which is a real claim about a real part — a reader that
+    fell back on falsity rather than on ``None`` would silently measure the
+    parent's body instead."""
+    resolved = _resolve(assembly={"placements": [
+        {"ref": "U1S_A", "anchor_mm": {"x": 0, "y": 0}}]})
+    assert resolved.placements[0].anchor_mm == (0.0, 0.0)
+    assert resolved.placements[0].anchor_mm is not None
+
+
+@pytest.mark.parametrize("key", ["offset_mm", "anchor_mm"])
+def test_one_missing_axis_inside_an_authored_point_is_zero(key):
+    """A written key with one axis means the other is 0 — the axis that was not
+    needed. The same rule for both points, because they read through one
+    helper."""
+    resolved = _resolve(assembly={"placements": [{"ref": "A", key: {"y": 26.67}}]})
+    assert getattr(resolved.placements[0], key) == (0.0, 26.67)
+
+
 def test_emitted_refs_are_the_component_ref_until_placements_expand_it():
     assert _resolve().emitted_refs("R1") == ("R1",)
     expanded = _resolve(assembly={"placements": [{"ref": "U1S_A"}, {"ref": "U1S_B"}]})
@@ -230,6 +264,9 @@ def test_emitted_refs_are_the_component_ref_until_placements_expand_it():
     [{"ref": "A"}, {"ref": "A"}],                # repeated designator
     [{"ref": "A", "offest_mm": {"x": 0}}],       # typo'd key
     [{"ref": "A", "offset_mm": {"x": float("inf"), "y": 0}}],
+    [{"ref": "A", "anchor_mm": {"xx": 0, "y": 26.67}}],   # typo'd anchor axis
+    [{"ref": "A", "anchor_mm": 26.67}],                   # a scalar, not a point
+    [{"ref": "A", "anchor_mm": {"x": 0, "y": float("nan")}}],
     [{"ref": "A", "rotation_deg": "90"}],
     {"ref": "A"},                                # a mapping, not a list
 ])
