@@ -71,6 +71,24 @@ def load_board(params: dict) -> dict:
         "or params.board_path (str)")
 
 
+def source_file_path(params: dict) -> str | None:
+    """The path :func:`load_board` READ this board from, or ``None`` when it
+    arrived inline.
+
+    Written beside ``load_board`` and in the same priority order, because a
+    caller recording provenance needs the file THIS worker opened rather than a
+    path it was told about: only the by-reference arm reads a file, and it reads
+    one whose bytes it verified against ``board_digest`` first.
+    """
+    if isinstance(params.get("yaml"), str):
+        return None
+    if isinstance(params.get("board"), dict):
+        return None
+    if isinstance(params.get("board_path"), str):
+        return params["board_path"]
+    return None
+
+
 def _parse_board_text(source: str) -> dict:
     """Parse board source text (YAML; JSON parses too) into a mapping."""
     import yaml

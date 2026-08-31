@@ -1586,10 +1586,17 @@ def _order_package_refusal(exc: Exception) -> dict:
 def _order_package(params: dict) -> dict:
     """Emit the complete order package for one service profile.
 
-    params: yaml|board (the board source), profile (house/service id, default
-    "jlc"), out_dir (optional — writes the package DIRECTORY there, atomically),
-    overwrite (replace an existing package directory), source_path (the board
-    file's own path, read for git state only).
+    params: yaml|board|board_path (the board source), profile (house/service id,
+    default "jlc"), out_dir (optional — writes the package DIRECTORY there,
+    atomically), overwrite (replace an existing package directory), source_path
+    (a path the caller says the board came from).
+
+    THE MANIFEST'S GIT RECORD IS READ OFF THE FILE THIS WORKER OPENED — the
+    board_path arm, whose bytes were digest-checked before they were parsed —
+    and never off source_path. A caller's path is recorded as a claim, with no
+    revision taken from it: an identical copy of a board inside an unrelated
+    repository is indistinguishable from the original, so trusting the path
+    would lend that repository's revision to this design.
 
     Returns {directory, outputs:[{file, sha256, bytes}], readiness, preflight,
     source, advisories, unchecked_rules, ip_questions, written, warnings}.
@@ -1608,12 +1615,18 @@ def _order_package(params: dict) -> dict:
         return {"ok": False, "error": error}
 
     profile_id = params.get("profile") or "jlc"
-    source_path = params.get("source_path")
+    # The path this worker READ the board from (None unless the by-reference arm
+    # was used) and the path a caller merely NAMED, kept apart all the way to
+    # the manifest.
+    read_path = board_model.source_file_path(params)
+    asserted_path = params.get("source_path")
     compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
     try:
         package = order_package.build(
             board, compiled.board, profile_id,
-            source_path=source_path if isinstance(source_path, str) else None,
+            source_file_path=read_path,
+            asserted_source_path=(asserted_path
+                                  if isinstance(asserted_path, str) else None),
             compile_diagnostics=compile_warnings)
     except Exception as exc:  # see _assembly_bom: the dispatcher's broad-catch
         # convention over caller-supplied board data, backstopping the named

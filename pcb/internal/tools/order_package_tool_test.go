@@ -140,9 +140,19 @@ func TestOrderPackageIsOneEntryForBothSurfaces(t *testing.T) {
 	// Every argument the panel path and the document path actually send. A
 	// missing property is a caller-visible gap, not a cosmetic one: the host
 	// validates against this schema before the handler ever runs.
-	for _, key := range []string{"yaml", "board", "profile", "out_dir", "overwrite", "source_path"} {
+	for _, key := range []string{"yaml", "board", "board_path", "board_digest",
+		"profile", "out_dir", "overwrite", "source_path"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("input schema declares no %q", key)
+		}
+	}
+	// The by-reference arm is the ONLY one that earns a git revision, so it has
+	// to be reachable: an undeclared board_path is refused by the host's schema
+	// validation before the handler runs, which would leave every package's
+	// provenance permanently unavailable.
+	for _, phrase := range []string{"worker-read", "caller-asserted"} {
+		if !strings.Contains(OrderPackage.Description, phrase) {
+			t.Errorf("description does not tell a caller about %q provenance", phrase)
 		}
 	}
 	// The refusal names the description promises must BE in the description —

@@ -249,6 +249,20 @@ revision onto bytes it does not describe. Absent, the manifest records "the
 board source was supplied inline, not as a file in a repository", which is
 exactly true of a live editor board.
 
+Every git record says which BASIS it has, so a reader can tell a measurement
+from a claim without knowing how the call was made:
+
+| basis | what it means | revision? |
+| --- | --- | --- |
+| `worker-read` | the worker opened the board file itself, through `board_path` with its mandatory `board_digest` | yes, plus `dirty` |
+| `caller-asserted` | the board came inline and a caller named a path it says the board came from | no — the path is recorded as `asserted_path` and nothing is read from it |
+| `inline` | the board came inline and no path was named (the panel's shape) | no |
+
+Only the first is evidence. Parsing a caller's path and checking that it holds
+the same board does NOT promote it: an identical COPY of the design inside an
+unrelated clean repository passes that check, and accepting it would record that
+repository's revision as this board's provenance.
+
 ### What the panel shows, and the warnings nobody used to render
 
 A refusal always opens a report; a package that generated opens one when it has

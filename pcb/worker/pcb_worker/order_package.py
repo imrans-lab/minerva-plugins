@@ -42,6 +42,13 @@ READINESS IS THREE SEPARATE CLAIMS, and the package makes only two of them:
    export that inferred it would be claiming an answer from a page it never
    loaded.
 
+PROVENANCE IS EVIDENCE OR IT IS LABELLED. The manifest's ``source.git`` block
+carries a ``basis``: ``worker-read`` when this worker opened the board file
+itself and can speak for the repository holding it, ``caller-asserted`` when a
+caller merely named a path (no revision is read then), and ``inline`` when no
+path exists at all. A revision only ever appears under the first. See
+:func:`git_state`.
+
 DETERMINISM. Everything except the manifest is byte-identical across runs of the
 same input: the archive pins its member order and timestamps, the CSVs and the
 Gerbers were already deterministic, the preview is drawn in board order from
@@ -65,7 +72,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-from . import (assembly_outputs, assembly_preview, board_model, gerber,
+from . import (assembly_outputs, assembly_preview, gerber,
                order_provenance, order_write, resolved_board)
 
 #: The package layout, in build order. The checklist and the preflight report
@@ -206,74 +213,69 @@ def package_directory_name(board_name: str, profile_id: str) -> str:
     return f"{_safe_name(board_name)}-{_safe_name(profile_id)}"
 
 
-def _path_holds_source(path: Path, source_digest: str):
-    """``None`` when the file at ``path`` IS the source that digests to
-    ``source_digest``; otherwise the unavailable record saying why not.
-
-    The comparison is the package's own projection, so a stamped and an
-    unstamped copy of one design bind alike — the digest slot is normalized out
-    before either side is hashed."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return {"available": False, "path": str(path),
-                "reason": f"{path} could not be read, so nothing binds a "
-                          f"revision to this board: {exc}"}
-    try:
-        parsed = board_model.load_board({"yaml": text})
-        found = order_provenance.source_digest(parsed)
-    except Exception as exc:  # any parse fault: the file is not this board
-        return {"available": False, "path": str(path),
-                "reason": f"{path} does not parse as a canonical board, so "
-                          f"nothing binds a revision to this board: {exc}"}
-    if found != source_digest:
-        return {"available": False, "path": str(path),
-                "reason": f"{path} holds a different board than the one in this "
-                          f"package (that file projects to {found[:8]}, this "
-                          f"package to {source_digest[:8]}), so its repository's "
-                          f"revision is not this design's provenance"}
-    return None
+#: How the manifest's git record came to name a path. Every record carries one,
+#: so a reader never has to infer whether a path was measured or claimed.
+BASIS_WORKER_READ = "worker-read"
+BASIS_CALLER_ASSERTED = "caller-asserted"
+BASIS_INLINE = "inline"
 
 
-def git_state(source_path, source_digest: str) -> dict:
+def git_state(read_path, asserted_path=None) -> dict:
     """The revision the board source sits at, or a NAMED reason there is none.
 
-    Read from the repository holding the source file, never from a caller
-    parameter: a git revision a caller could supply is a claim, not evidence.
-    Absent ``source_path`` — a board handed over inline, which is the ordinary
-    MCP shape — is reported as unavailable rather than guessed at.
+    EVIDENCE AND ASSERTION ARE DIFFERENT SHAPES, and the ``basis`` key says
+    which one this record is:
 
-    THE PATH IS BOUND TO THE BOARD BEFORE ANY REVISION IS READ. ``source_path``
-    is caller input and the digest is evidence, so the file is loaded and
-    projected through :func:`order_provenance.source_digest` and must reproduce
-    ``source_digest`` — the digest of the board these artifacts were built from
-    — before git is consulted at all. Without that binding, a board passed with
-    a path into an unrelated clean repository would present that repository's
-    revision as this design's provenance: caller input laundered into evidence.
-    A path that cannot be read, cannot be parsed, or parses to a different board
-    is reported unavailable by reason, never silently."""
-    if not source_path:
-        return {"available": False,
+    * ``worker-read`` — this worker opened ``read_path`` itself and parsed the
+      board out of those bytes (``load_board``'s by-reference arm, whose digest
+      check ran before the read was trusted). A file it opened is evidence about
+      that file, so its repository's revision is this design's revision, and
+      ``available`` can be true.
+    * ``caller-asserted`` — the board arrived inline and a caller named a path
+      it says the board came from. Nothing here opened that board from that
+      file, so no revision is read at all: the path is recorded as the claim it
+      is. Checking that the file parses to the same board does NOT promote it,
+      because an identical copy of one design sitting in an unrelated clean
+      repository passes that check and would hand this design that repository's
+      revision.
+    * ``inline`` — a board handed over inline with no path named, which is the
+      ordinary MCP shape. Said by name rather than left blank, because a blank
+      field reads as "clean".
+
+    ``asserted_path`` is ignored whenever ``read_path`` is present: a path this
+    worker read outranks one it was told about, and the record names the file
+    that was read.
+    """
+    if not read_path:
+        if asserted_path:
+            return {"available": False, "basis": BASIS_CALLER_ASSERTED,
+                    "asserted_path": str(asserted_path),
+                    "reason": "the board was supplied inline and this path is "
+                              "the caller's claim about where it came from, not "
+                              "a file this tool read, so no revision was taken "
+                              "from it. Load the board by reference "
+                              "(board_path) to record a measured revision"}
+        return {"available": False, "basis": BASIS_INLINE,
                 "reason": "the board source was supplied inline, not as a file "
                           "in a repository"}
-    path = Path(source_path)
-    bound = _path_holds_source(path, source_digest)
-    if bound is not None:
-        return bound
+    path = Path(read_path)
     directory = path.parent if path.is_file() else path
     try:
         rev = subprocess.run(
             ["git", "-C", str(directory), "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=10, check=False)
         if rev.returncode != 0:
-            return {"available": False,
+            return {"available": False, "basis": BASIS_WORKER_READ,
+                    "path": str(path),
                     "reason": f"{directory} is not inside a git repository"}
         status = subprocess.run(
             ["git", "-C", str(directory), "status", "--porcelain"],
             capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        return {"available": False, "reason": f"git could not be run: {exc}"}
-    return {"available": True, "revision": rev.stdout.strip(),
+        return {"available": False, "basis": BASIS_WORKER_READ,
+                "path": str(path), "reason": f"git could not be run: {exc}"}
+    return {"available": True, "basis": BASIS_WORKER_READ,
+            "revision": rev.stdout.strip(),
             "dirty": bool(status.stdout.strip()), "path": str(path)}
 
 
@@ -517,7 +519,7 @@ class OrderPackage:
 
 
 def build(board_source: dict, board, profile_id: str, *,
-          source_path=None, generated_at=None,
+          source_file_path=None, asserted_source_path=None, generated_at=None,
           compile_diagnostics=()) -> OrderPackage:
     """Assemble the whole order package from ONE compiled board.
 
@@ -526,7 +528,11 @@ def build(board_source: dict, board, profile_id: str, *,
     ``ResolvedBoard`` every artifact derives from. ``compile_diagnostics`` are
     that compilation's own diagnostics, already serialized; the EMITTER's are
     read here and both end up in one ``warnings`` list, the way the gerbers
-    reply merges the two channels."""
+    reply merges the two channels.
+
+    ``source_file_path`` is the file the worker itself read this board out of,
+    and ``asserted_source_path`` is a path a caller merely named; see
+    :func:`git_state` for why the manifest keeps them apart."""
     provenance, provenance_advisories = order_provenance.check(board_source)
 
     assembly = assembly_outputs.build_package(board, profile_id)
@@ -611,7 +617,7 @@ def build(board_source: dict, board, profile_id: str, *,
                                      "finalized bytes, and hashing this file "
                                      "on disk reproduces that value"}},
         "source": {**provenance,
-                   "git": git_state(source_path, provenance["source_digest"])},
+                   "git": git_state(source_file_path, asserted_source_path)},
         "board": {"name": board.name, "id": board.id,
                   "fab_rule_profile": board.design_rules.rule_profile.id},
         "profile": _profile_record(profile),

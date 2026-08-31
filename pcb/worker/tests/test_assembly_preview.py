@@ -110,24 +110,36 @@ def _rendered(board):
     return svg, package.files[package.cpl_file], package.emission
 
 
+def _groups(svg: str, cls: str) -> list:
+    """Every ``<g class="...">`` on the page, in document order.
+
+    A LIST, so that counting these counts ELEMENTS. Collecting them straight
+    into a dict keyed by ``data-ref`` is what a count must not be taken off: two
+    groups carrying one ref collapse into one entry, so a page drawing a body
+    per PART rather than per component would count the same as a correct one."""
+    root = ET.fromstring(svg)
+    return [element for element in root.iter(f"{SVG_NS}g")
+            if element.get("class") == cls]
+
+
+def _by_ref(groups: list) -> dict:
+    """``{data-ref: group}``, with a repeated ref an ERROR rather than a silent
+    overwrite — the collapse above, refused at the one place it can happen."""
+    refs = [group.get("data-ref") for group in groups]
+    assert len(set(refs)) == len(refs), f"a ref is drawn twice: {refs}"
+    return dict(zip(refs, groups))
+
+
 def _placement_groups(svg: str) -> dict:
     """Every ``<g class="placement">`` in the drawing, by designator."""
-    root = ET.fromstring(svg)
-    groups = {}
-    for element in root.iter(f"{SVG_NS}g"):
-        if element.get("class") == "placement":
-            groups[element.get("data-ref")] = element
-    return groups
+    return _by_ref(_groups(svg, "placement"))
 
 
 def _drawing_groups(svg: str) -> dict:
     """Every ``<g class="drawing">`` on the page, by component ref. A drawing is
     per COMPONENT and a placement is per PART, which is the whole distinction an
     expansion turns on, so the two are counted separately off the same page."""
-    root = ET.fromstring(svg)
-    return {element.get("data-ref"): element
-            for element in root.iter(f"{SVG_NS}g")
-            if element.get("class") == "drawing"}
+    return _by_ref(_groups(svg, "drawing"))
 
 
 def _cpl_cells(cpl: str) -> dict:
@@ -292,12 +304,17 @@ def test_an_expansion_draws_one_body_per_component_and_one_crosshair_per_part():
     and produced exactly the picture this test exists to rule out."""
     board = _compiled(OVERRIDE_FIXTURE)
     svg, _, _ = _rendered(board)
-    groups = _placement_groups(svg)
-    bodies = _drawing_groups(svg)
-    assert {"U3S_A", "U3S_B", "U4S_A", "U4S_B", "U5S_A", "U5S_B"} == set(groups)
-    assert {"U3S", "U4S", "U5S"} == set(bodies)
-    assert len(bodies) == len(board.components) == 3
-    assert len(groups) == 2 * len(bodies)
+    crosshairs = _groups(svg, "placement")
+    bodies = _groups(svg, "drawing")
+    # ELEMENTS first, refs second: the count says there are three bodies and six
+    # crosshairs, and _by_ref says no ref is drawn twice. A page carrying a body
+    # per part would fail the first; a page repeating one body would fail the
+    # second. Keyed lookups alone pass both.
+    assert (len(bodies), len(crosshairs)) == (3, 6)
+    assert {"U3S", "U4S", "U5S"} == set(_by_ref(bodies))
+    assert {"U3S_A", "U3S_B", "U4S_A", "U4S_B",
+            "U5S_A", "U5S_B"} == set(_by_ref(crosshairs))
+    assert len(bodies) == len(board.components)
 
 
 # ---------------------------------------------------------------------------
@@ -328,11 +345,16 @@ def test_a_major_arc_reaches_a_full_radius_past_its_own_endpoints():
     """THE CASE THE THREE CONTROL POINTS CANNOT SEE. Both ends sit at x = 1,
     a tenth of a millimetre apart, and the sweep goes the long way round: the
     ink reaches a full radius above, below and to the left of them. Reading the
-    extent off the triple reported a 0.2 mm-tall sliver for ink 2 mm tall."""
+    extent off the triple reported a 0.2 mm-tall sliver for ink 2 mm tall.
+
+    THE WHOLE BOX IS DERIVED FROM THE CIRCLE, not read off the picture. The
+    three points are symmetric about y = 0, so the centre sits on that axis at
+    (cx, 0) with (cx + 1)^2 = (cx - 1)^2 + 0.1^2 — cx = 0.0025 — and the radius
+    is cx + 1 = 1.0025. The sweep passes the left, top and bottom of that
+    circle but not its right, so the box is x from cx - r = -1.0 to the
+    endpoints' own x = 1.0, and y from cy - r to cy + r = +/-1.0025."""
     box = _arc_box((1.0, -0.1), (-1.0, 0.0), (1.0, 0.1))
-    assert box[0] == pytest.approx(-1.0025, abs=1e-3)
-    assert box[1] == pytest.approx(-1.0025, abs=1e-3)
-    assert box[3] == pytest.approx(1.0025, abs=1e-3)
+    assert box == pytest.approx((-1.0, -1.0025, 1.0, 1.0025), abs=1e-9)
     # Both directions round the same circle cover the same ink.
     assert _arc_box((1.0, 0.1), (-1.0, 0.0), (1.0, -0.1)) == pytest.approx(box)
 

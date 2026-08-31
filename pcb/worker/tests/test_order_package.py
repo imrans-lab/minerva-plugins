@@ -24,11 +24,13 @@ THE ORACLES, named, because each of these turns on a different one:
     has no writer, and a blocked board produces no files at all. ``pass`` is
     also refused over a WARNING: a package whose own list records a dropped
     drill is not a complete rendering of the board.
-  * PROVENANCE IS BOUND TO THE BOARD. ``source_path`` is caller input and the
-    git record is evidence, so the file has to parse to the very board being
-    packaged before a revision is read off its repository. The failure this
-    catches is a path into an unrelated clean repository lending that
-    repository's revision to this design.
+  * PROVENANCE IS EVIDENCE OR IT IS LABELLED. A revision is read only from the
+    file the WORKER opened (``load_board``'s digest-checked by-reference arm),
+    and every git record says which basis it has. The failure this catches is a
+    caller's claim wearing the shape of a measurement: parsing the named file
+    and comparing digests does NOT establish provenance, because an identical
+    COPY of the board inside an unrelated clean repository passes that and lends
+    that repository's revision to this design.
   * ALL-OR-NOTHING. A half-written package is worse than none, because its
     manifest describes files that are not there and somebody can still upload
     it. Including the bytes of a file a failed write would have replaced: a new
@@ -48,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import stat
 import subprocess
 import zipfile
@@ -574,30 +577,46 @@ def test_git_state_is_unavailable_rather_than_guessed_for_an_inline_board():
     """A board handed over inline has no repository. Saying so by name is the
     honest answer; a blank field reads as "clean"."""
     package = _package()
-    assert package.manifest["source"]["git"]["available"] is False
-    assert package.manifest["source"]["git"]["reason"]
-
-
-def test_a_source_path_holding_another_board_lends_no_revision(tmp_path):
-    """THE LAUNDERING CASE. ``source_path`` is caller input; the manifest's git
-    block is evidence. Point one board at a file inside an unrelated, clean
-    repository and the old code reported that repository's HEAD as this
-    design's provenance — an unverifiable claim wearing the costume of a
-    measurement. The path has to parse to THIS board first."""
-    repo = tmp_path / "somebody-elses-repo"
-    _git_repo(repo)
-    package = _package(source_path=str(repo / "unrelated.txt"))
     git = package.manifest["source"]["git"]
     assert git["available"] is False
-    assert "revision" not in git
-    assert "different board" in git["reason"] or "does not parse" in git["reason"]
+    assert git["basis"] == op.BASIS_INLINE
+    assert git["reason"]
 
 
-def test_a_source_path_holding_this_very_board_does_carry_the_revision(tmp_path):
-    """The other half: binding the path is not a way of never reporting git.
-    The board's own file, in a repository, still yields a revision — and the
-    binding is the package's own projection, so a stamped file and the
-    unstamped board it was stamped from bind alike."""
+def test_a_caller_asserted_path_is_labelled_and_lends_no_revision(tmp_path):
+    """THE LAUNDERING CASE, on the witness that defeats a digest check: the
+    caller's own board, copied VERBATIM into a repository it has nothing to do
+    with and committed there. The file parses, and it projects to this very
+    board, so binding the path to the digest accepts it — and the manifest then
+    reported that repository's HEAD, clean, in the same shape as a measurement.
+
+    The distinction that survives a copy is not what the file contains but WHO
+    OPENED IT. This worker did not read the board from here, so the record
+    carries the path as the claim it is and no revision at all."""
+    import yaml
+
+    repo = tmp_path / "somebody-elses-repo"
+    _git_repo(repo)
+    board = _board()
+    copy = repo / "board.yaml"
+    copy.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@example.com",
+                    "-c", "user.name=t", "commit", "-qm", "not this design"],
+                   check=True)
+    package = op.build(board, _compiled(board), SERVICE,
+                       asserted_source_path=str(copy))
+    git = package.manifest["source"]["git"]
+    assert git["available"] is False
+    assert git["basis"] == op.BASIS_CALLER_ASSERTED
+    assert git["asserted_path"] == str(copy)
+    assert "revision" not in git and "dirty" not in git
+
+
+def test_the_file_the_worker_read_does_carry_the_revision(tmp_path):
+    """The other half: labelling assertions is not a way of never reporting git.
+    The board read out of a file in a repository still yields that repository's
+    revision, marked as the measurement it is."""
     import yaml
 
     repo = tmp_path / "this-boards-repo"
@@ -606,19 +625,86 @@ def test_a_source_path_holding_this_very_board_does_carry_the_revision(tmp_path)
     source = repo / "board.yaml"
     source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
     package = op.build(board, _compiled(board), SERVICE,
-                       source_path=str(source))
+                       source_file_path=str(source))
     git = package.manifest["source"]["git"]
     assert git["available"] is True, git
+    assert git["basis"] == op.BASIS_WORKER_READ
     assert len(git["revision"]) == 40
     assert git["dirty"] is True  # board.yaml is untracked in that repo
 
 
-def test_an_unreadable_source_path_says_so_rather_than_reaching_for_git(tmp_path):
-    """A path nobody can read is a reason, not a silent absence."""
-    package = _package(source_path=str(tmp_path / "no-such-file.yaml"))
+def test_the_path_the_worker_read_outranks_the_one_it_was_told(tmp_path):
+    """Both paths at once. The record names the file this worker opened; the
+    caller's path is not consulted and cannot displace it."""
+    import yaml
+
+    repo = tmp_path / "this-boards-repo"
+    _git_repo(repo)
+    board = _board()
+    source = repo / "board.yaml"
+    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
+    package = op.build(board, _compiled(board), SERVICE,
+                       source_file_path=str(source),
+                       asserted_source_path=str(tmp_path / "elsewhere.yaml"))
+    git = package.manifest["source"]["git"]
+    assert git["basis"] == op.BASIS_WORKER_READ
+    assert git["path"] == str(source)
+    assert "asserted_path" not in git
+
+
+def test_a_read_path_outside_a_repository_says_so_rather_than_going_quiet(tmp_path):
+    """A file the worker read that is in no repository is a reason, not a silent
+    absence — and it is still a worker-read record, so a reader can tell this
+    from a claim that was never measured."""
+    source = tmp_path / "board.yaml"
+    source.write_text("version: 1\n", encoding="utf-8")
+    package = _package(source_file_path=str(source))
     git = package.manifest["source"]["git"]
     assert git["available"] is False
-    assert "could not be read" in git["reason"]
+    assert git["basis"] == op.BASIS_WORKER_READ
+    assert "not inside a git repository" in git["reason"]
+
+
+def test_the_by_reference_arm_is_what_earns_a_revision(tmp_path):
+    """THE EVIDENCE LANE, end to end. ``board_path`` is the one arm that opens a
+    file — after checking its bytes against ``board_digest`` — so it is the one
+    arm that can hand the manifest a revision. Driven through the method, since
+    the wire is where the two kinds of path are told apart."""
+    import hashlib
+
+    import yaml
+
+    repo = tmp_path / "this-boards-repo"
+    _git_repo(repo)
+    source = repo / "board.yaml"
+    source.write_text(yaml.safe_dump(_board(), sort_keys=False), encoding="utf-8")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board_path": str(source), "board_digest": digest,
+                   "profile": SERVICE}})
+    assert reply["ok"] is True, reply
+    git = reply["result"]["source"]["git"]
+    assert git["basis"] == op.BASIS_WORKER_READ
+    assert git["available"] is True
+    assert len(git["revision"]) == 40
+    assert git["path"] == str(source)
+
+
+def test_the_worker_names_the_file_it_read_and_never_the_caller_s_path():
+    """THE WIRE, not just the helper. ``methods._order_package`` decides which
+    path is evidence, and it decides it from WHICH ARM of load_board served the
+    board — so this drives the method with both keys set and checks the manifest
+    took neither the caller's word nor a revision from it."""
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": _board(), "profile": SERVICE,
+                   # This very repository, which is a real one with a real HEAD.
+                   "source_path": str(pathlib.Path(__file__))}})
+    assert reply["ok"] is True, reply
+    git = reply["result"]["source"]["git"]
+    assert git["basis"] == op.BASIS_CALLER_ASSERTED
+    assert git["available"] is False
 
 
 # ---------------------------------------------------------------------------
