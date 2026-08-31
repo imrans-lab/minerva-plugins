@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker.assembly_outputs import build_bom, build_cpl
+from pcb_worker.assembly_outputs import build_package
 from pcb_worker.compile_board import compile_board
 from pcb_worker.drc_geometric import run_geometric_drc
 from pcb_worker.gerber import build_gerbers_ir
@@ -170,20 +170,24 @@ class TestSeedCoupon:
         assert witness, "the slot-edge witness run is missing"
 
     def test_bom_cpl_carry_exactly_the_two_real_parts(self):
-        board = _board()
-        bom = build_bom(board, "jlc")
-        cpl = build_cpl(board, "jlc")
-        assert {r.refs for r in bom.rows} == {("J1",), ("C1",)}
+        # THE ORDER PAIR COMES FROM ONE COMPILATION AND ONE WALK. The emitters
+        # read the compiled IR — the same object the gerber emitter reads — and
+        # ``build_package`` is the entry point that renders both files from a
+        # single emission, so the BOM and the CPL asserted below cannot be
+        # describing two different resolutions of this board.
+        emission = build_package(_compiled().board, "jlc").emission
+        assert {r.refs for r in emission.bom} == {("J1",), ("C1",)}
         # The promoted file's component order is the serializer's, not the
         # authoring order — compare membership, not sequence.
         # REV1 joined this set in CP2 S9: it is the bottom-side revision-text
         # fixture, silk-only and assembly:exclude. Its presence HERE rather than
-        # in bom.rows is the assembly-exclusion flag doing its job — a
+        # among the BOM rows is the assembly-exclusion flag doing its job — a
         # decorative part must be excluded from BOM/CPL without being refused
         # an identity, which is the contract CPN1-S3 established.
-        assert set(bom.excluded_refs) == {"LOGO1", "FID1", "FID2", "FID3",
-                                          "TP1", "TP2", "TP3", "DAM1", "REV1"}
-        assert sorted(r.ref for r in cpl.rows) == ["C1", "J1"]
+        assert set(emission.excluded_refs) == {"LOGO1", "FID1", "FID2", "FID3",
+                                               "TP1", "TP2", "TP3", "DAM1",
+                                               "REV1"}
+        assert sorted(r.ref for r in emission.cpl) == ["C1", "J1"]
 
     def test_featured_nets_carry_the_co_designed_copper(self):
         """INVERTED at S7 and that is the point: this test used to assert

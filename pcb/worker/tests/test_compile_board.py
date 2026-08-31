@@ -2802,8 +2802,27 @@ def _host_for_components(frag: dict) -> dict:
     }
 
 
+def _host_for_placements(frag: dict) -> dict:
+    """A board whose ONE component carries the fragment as its
+    ``assembly.placements``. An expansion has no geometry of its own — it is a
+    ref plus a transform composed against a drawn parent — so the fragment is
+    only compilable hung off a real component with a real footprint."""
+    return {
+        "version": 2, "id": "board:" + "b" * 32, "name": "placements-host",
+        "width_mm": 60, "height_mm": 80, "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "U1S",
+                        "footprint": "Package_DIP:DIP-6_W7.62mm_Socket",
+                        "x_mm": 20, "y_mm": 20, "rotation_deg": 0,
+                        "layer": "top",
+                        "assembly": {"placements": frag["placements"]}}],
+    }
+
+
 _DOC_SPLICERS = {"pins": _host_for_pins, "design_rules": _host_for_design_rules,
-                 "components": _host_for_components}
+                 "components": _host_for_components,
+                 "placements": _host_for_placements}
 
 
 @pytest.mark.parametrize("outputs", [V1_FAB_OUTPUTS, V1_ROUTING_OUTPUTS],

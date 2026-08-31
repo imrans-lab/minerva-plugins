@@ -44,7 +44,11 @@ components:
         - number: "2"
           x_mm: 0.400000005960464
           y_mm: 0
-      assembly: exclude
+      # Stencil apertures are KEPT on the dam witness: a solder-mask dam is
+      # only witnessed with solder present, so the pads are stencil-fed even
+      # though nothing is placed on them. `include` is what `auto` emitted
+      # before the paste gate existed, so the artwork is unchanged.
+      assembly: {populate: false, paste: include}
       properties: {}
     - ref: FID1
       footprint: Minerva_Fixture:FID_Circle_1mm

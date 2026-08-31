@@ -47,6 +47,12 @@ K18's "the golden certifies what a real fabricated board needs" and K21's
 - **DAM1** (`Minerva_Fixture:DAM_MinWeb_2P`) — two 0.6×0.8 pads at 0.2
   copper gap; with the 0.05/side mask allowance the solder-mask dam is
   exactly 0.10 [min dam 0.10]. Pads netless by design.
+  `assembly: {populate: false, paste: include}` — nothing is placed here, but a
+  mask dam is only witnessed with solder present, so the stencil keeps both
+  apertures. Stated rather than left on `auto` because a do-not-populate part
+  whose lands carry paste has no defensible default and the assembly gates
+  refuse one (`assembly_paste_undecided`); `include` is byte-identical to what
+  `auto` emitted, so the blessed paste golden is unchanged.
 - **FID1-3** (`Minerva_Fixture:FID_Circle_1mm`) — bare-copper fiducials
   (1.0 dot, 2.0 mask opening, no paste), assembly-alignment triangle.
 - **LOGO1** (`Minerva_Fixture:LOGO_Owl_TestCoupon`) — silk furniture: a
