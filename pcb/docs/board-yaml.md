@@ -566,6 +566,14 @@ dropping would fall through to the next home and order whatever was written
 there. So the author meets one rule — quote it — and never a refusal on a file
 whose authored text has already been overwritten.
 
+**The two lanes therefore answer differently on the same file, and that is the
+asymmetry to expect.** A board opened in the editor was loaded through the Go
+codec, which repaired the value to its authored text on the way in, so the board
+it hands an export carries the string `"0603"` and the export runs clean. Handing
+the same FILE's bytes to a Python-side surface — `yaml:` on any tool, or a path
+the worker reads itself — refuses by name, because nothing repaired it first.
+One file, two answers: quote the value and both lanes agree.
+
 **A blank value means absent** — `""`, spaces, a lone newline and a bare
 `mpn:` with nothing after it all read as "not authored here" and fall through to
 the next home, exactly as a missing key does. **There is deliberately no way to

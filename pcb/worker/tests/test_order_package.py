@@ -1,5 +1,5 @@
-"""The order package: one action, one compilation, six artifacts, and an honest
-statement of what was established.
+"""The order package: one action, one compilation, seven artifacts, and an
+honest statement of what was established.
 
 THE ORACLES, named, because each of these turns on a different one:
 
@@ -20,7 +20,13 @@ THE ORACLES, named, because each of these turns on a different one:
     has no writer, and a blocked board produces no files at all.
   * ALL-OR-NOTHING. A half-written package is worse than none, because its
     manifest describes files that are not there and somebody can still upload
-    it.
+    it. Including the bytes of a file a failed write would have replaced: a new
+    BOM beside yesterday's CPL is a mismatched pair that reads as fine.
+  * NOTHING VANISHES. Every WARNING-channel diagnostic the one compilation and
+    the one emission produced is in the manifest. The failure this catches is a
+    package reporting `pass` over fabrication files the emitter dropped a
+    feature from — the one artifact whose stated purpose is an honest account
+    being the only surface that hides it.
 
 A NOTE ON THE FIXTURES. Boards are built as dicts in-test, the way the other
 assembly suites do it: each shape below differs from the base in ONE fact, and a
@@ -38,12 +44,15 @@ from io import BytesIO
 import pytest
 
 from pcb_worker import compile_board as compile_board_module
+from pcb_worker import gerber
 from pcb_worker import methods
 from pcb_worker import order_package as op
 from pcb_worker import order_provenance as prov
 from pcb_worker import order_write
 from pcb_worker.compile_board import compile_board
-from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
+from pcb_worker.resolved_board import (
+    Diagnostic, DiagnosticSeverity, EntityKind, ResolutionSuccess, SourceRef,
+)
 
 SERVICE = "jlcpcb-economic"
 DIALECT_ONLY = "jlc"
@@ -279,6 +288,77 @@ def test_a_package_build_compiles_the_board_once(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Warnings — both channels, or the package is not an honest account.
+# ---------------------------------------------------------------------------
+
+EMITTER_CODE = "synthetic_emitter_warning"
+
+
+def _emitting_a_warning(monkeypatch):
+    """The REAL emission, plus one diagnostic on the channel GerberResult
+    carries for exactly this purpose.
+
+    No seed footprint reaches that channel through the strict IR path today
+    (test_methods_ir_fab records the same fact at the gerbers seam), so the
+    collaborator is WRAPPED rather than replaced: the archive is still the
+    emitter's own bytes and the only addition is the warning under test."""
+    real = gerber.build_gerbers_ir
+
+    def emitting(board, *args, **kwargs):
+        result = real(board, *args, **kwargs)
+        result.diagnostics.append(Diagnostic(
+            DiagnosticSeverity.WARNING, EMITTER_CODE,
+            "drill feature dropped: non-positive diameter",
+            SourceRef(EntityKind.HOLE, "mounting_holes[0]", "(2, 20)")))
+        return result
+
+    monkeypatch.setattr(gerber, "build_gerbers_ir", emitting)
+
+
+COMPILE_PROBE = {
+    "severity": "warning", "code": "compile_probe",
+    "message": "captured geometry was not emitted",
+    "source_ref": {"entity_kind": "component", "entity_id": "R1",
+                   "detail": None},
+}
+
+
+def test_the_manifest_records_both_warning_channels_in_the_bytes_it_ships(
+        monkeypatch):
+    """A FEATURE THE EMITTER DROPPED IS IN THE MANIFEST OR IT IS NOWHERE. The
+    package reads its gerbers off one emission and nothing else re-emits them,
+    so a silk primitive or drill feature that did not survive is recorded here
+    or is lost — while a plain gerbers call on the same board reports it.
+
+    Read out of the manifest FILE, because that is the byte string a person
+    keeps. Both channels, in the order the gerbers reply merges them: what the
+    emitter said, then what the compiler said."""
+    _emitting_a_warning(monkeypatch)
+    package = _package(compile_diagnostics=[COMPILE_PROBE])
+    shipped = json.loads(package.files[op.MANIFEST_FILE])["checks"]["warnings"]
+    assert [item["code"] for item in shipped] == [EMITTER_CODE, "compile_probe"]
+    assert shipped[0]["source_ref"]["entity_id"] == "mounting_holes[0]"
+    assert ([item["code"] for item in package.warnings]
+            == [item["code"] for item in shipped])
+
+
+def test_the_rpc_reply_says_what_the_manifest_says(monkeypatch, tmp_path):
+    """A reply carrying less than the file it just wrote would hide the drop
+    from the agent that asked for the package."""
+    _emitting_a_warning(monkeypatch)
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": _board(), "profile": SERVICE,
+                   "out_dir": str(tmp_path)}})
+    assert reply["ok"] is True, reply
+    written = json.loads(
+        (tmp_path / reply["result"]["directory"] / op.MANIFEST_FILE)
+        .read_text(encoding="utf-8"))
+    assert reply["result"]["warnings"] == written["checks"]["warnings"]
+    assert EMITTER_CODE in {item["code"] for item in reply["result"]["warnings"]}
+
+
+# ---------------------------------------------------------------------------
 # Readiness.
 # ---------------------------------------------------------------------------
 
@@ -508,6 +588,28 @@ def test_a_refused_artifact_name_touches_nothing(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_publish_that_fails_part_way_puts_the_previous_bytes_back(tmp_path):
+    """THE UNWIND, over CONTENT rather than names. The loose writer exists so a
+    re-export cannot leave a new BOM beside yesterday's CPL — and a rename that
+    fails part-way is exactly when that happens, because os.replace destroys the
+    file it lands on and no unwind can conjure those bytes back.
+
+    Provoked with a real filesystem condition, the way the package-overwrite
+    test is: the second destination name is held by a non-empty DIRECTORY, which
+    no rename of a file can replace."""
+    (tmp_path / "bom.csv").write_text("yesterday's bom", encoding="utf-8")
+    (tmp_path / "cpl.csv").mkdir()
+    (tmp_path / "cpl.csv" / "occupied").write_text("x", encoding="utf-8")
+
+    with pytest.raises(order_write.OrderWriteError):
+        order_write.write_files(tmp_path, {"bom.csv": "today's bom",
+                                           "cpl.csv": "today's cpl"})
+
+    assert (tmp_path / "bom.csv").read_text(encoding="utf-8") == "yesterday's bom"
+    assert (tmp_path / "cpl.csv").is_dir()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]
+
+
 def test_the_loose_writer_publishes_every_file_or_none(tmp_path):
     """The ordinary path still works: both files land, with their bytes."""
     written = order_write.write_files(tmp_path, {"bom.csv": "a", "cpl.csv": "bb"})
@@ -619,7 +721,7 @@ def test_the_rpc_writes_the_package_and_reports_a_digest_per_output(tmp_path):
     result = reply["result"]
     directory = tmp_path / result["directory"]
     assert {p.name for p in directory.iterdir()} == {
-        op.GERBER_ARCHIVE, op.BOM_FILE, op.CPL_FILE,
+        op.GERBER_ARCHIVE, op.BOM_FILE, op.CPL_FILE, op.PREVIEW_FILE,
         op.CHECKLIST_FILE, op.PREFLIGHT_FILE, op.MANIFEST_FILE}
     assert {item["file"] for item in result["outputs"]} == {p.name for p in directory.iterdir()}
     for item in result["outputs"]:
@@ -627,5 +729,5 @@ def test_the_rpc_writes_the_package_and_reports_a_digest_per_output(tmp_path):
             assert item["file"] == op.MANIFEST_FILE
             continue
         assert op.digest((directory / item["file"]).read_bytes()) == item["sha256"]
-    assert len(result["written"]) == 6
+    assert len(result["written"]) == 7
     assert result["readiness"]["order_page_verified"] is None

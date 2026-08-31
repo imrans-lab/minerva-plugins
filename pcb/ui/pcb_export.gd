@@ -450,16 +450,18 @@ static func report_lines(result: Dictionary) -> PackedStringArray:
 				else "• %s" % str(entry)))
 	lines.append_array(_section("ADVISORIES — shown, never refused",
 		_as_array(result.get("advisories", []))))
-	# COMPILE WARNINGS are rendered here deliberately. The worker has carried
-	# them on every assembly reply since the single-compilation cutover and no
-	# surface drew them, which made a warning about the very board in the
-	# envelope (captured geometry that was not emitted, say) invisible to the
-	# only person who could act on it. They do not move preflight_status —
-	# they are the compiler talking about the board, not the service talking
-	# about the order — so they get their own section rather than joining the
-	# advisories.
+	# WARNINGS are rendered here deliberately. The worker has carried them on
+	# every assembly reply since the single-compilation cutover and no surface
+	# drew them, which made a warning about the very board in the envelope
+	# (captured geometry that was not emitted, say) invisible to the only
+	# person who could act on it. The list is BOTH channels — the compilation's
+	# own diagnostics and the gerber emitter's — because a fab feature the
+	# emitter dropped is exactly the thing this section exists to show. They do
+	# not move preflight_status: they are the compiler and the emitter talking
+	# about the board, not the service talking about the order, so they get
+	# their own section rather than joining the advisories.
 	lines.append_array(_section(
-		"COMPILE WARNINGS — what the compiler said about this board",
+		"WARNINGS — what the compiler and the emitter said about this board",
 		_as_array(result.get("warnings", []))))
 	lines.append_array(_section(
 		"IP QUESTIONS — for a human to answer before ordering",

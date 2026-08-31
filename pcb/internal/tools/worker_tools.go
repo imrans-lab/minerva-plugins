@@ -965,9 +965,10 @@ var orderPackageDescription = "Emit the WHOLE order package for one manufacturin
 	"assembly_service_board_size_unsupported) and the provenance mismatches. ADVISORIES " +
 	"NEVER REFUSE and each names its component: an unmeasured assembly anchor, the tooling " +
 	"holes the house adds after upload, the component-to-edge suggestion, absent provenance " +
-	"silk. `warnings` carries the COMPILE diagnostics for this board — the compiler talking " +
-	"about the board rather than the service talking about the order, so they do not move " +
-	"preflight_status. `unchecked_rules` names every published rule nothing looked at, so a " +
+	"silk. `warnings` carries the COMPILE and GERBER-EMITTER diagnostics for this board — the " +
+	"compiler and the emitter talking about the board rather than the service talking about " +
+	"the order, so they do not move preflight_status; the same list is in the manifest. " +
+	"`unchecked_rules` names every published rule nothing looked at, so a " +
 	"clean package is never mistaken for a fully checked one. Two JLCPCB selectors read ONE " +
 	"pinned service-profile file: \"jlcpcb-economic\" selects the Economic assembly TIER and " +
 	"runs its compatibility checks; \"jlc\" selects the same CSV dialect with NO tier and " +

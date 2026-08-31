@@ -622,28 +622,44 @@ def _notes(drawings) -> list[str]:
 
 
 def _expansion_notes(board) -> list[str]:
-    """The statement for a drawing that carries SEVERAL parts and let every one
-    of them inherit ONE anchor measured off the whole drawing.
+    """The statement for a drawing that carries SEVERAL parts where a placement
+    inherited the ONE anchor measured off the whole drawing.
 
     Nothing refuses that shape and nothing advises on it: the anchors WERE
     measured, they are the right distance apart, and every gate passes — the
     DCR's own worked example shipped that way and would have centred both socket
     rows between themselves. This page is the first place it can be seen, so it
     says out loud which parts to look at, and it stays a SENTENCE rather than a
-    check because the boundary here is deliberately a person."""
+    check because the boundary here is deliberately a person.
+
+    A PARTIALLY authored expansion gets its OWN sentence naming the placements
+    that inherited. Writing the anchor for one strip of a two-strip socket and
+    forgetting the other is likelier than forgetting both, and it is quieter:
+    the remaining placement keeps the parent's whole-body centre, which usually
+    sits on the drawing and so draws no off-body ring either."""
     out: list[str] = []
     for component in board.components:
         places = component.physical_placements
         if len(places) < 2:
             continue
-        if any(item.anchor_basis == ANCHOR_BASIS_AUTHORED for item in places):
+        inherited = [item.ref for item in places
+                     if item.anchor_basis != ANCHOR_BASIS_AUTHORED]
+        if not inherited:
             continue
-        out.append(
-            f"{', '.join(item.ref for item in places)} — one drawing, "
-            f"{len(places)} parts, and every anchor was measured off the WHOLE "
-            f"drawing rather than stated per placement. Check each crosshair "
-            f"sits on the part it names and not between them; "
-            f"assembly.placements[].anchor_mm is how a placement states its own")
+        if len(inherited) == len(places):
+            out.append(
+                f"{', '.join(inherited)} — one drawing, "
+                f"{len(places)} parts, and every anchor was measured off the WHOLE "
+                f"drawing rather than stated per placement. Check each crosshair "
+                f"sits on the part it names and not between them; "
+                f"assembly.placements[].anchor_mm is how a placement states its own")
+        else:
+            out.append(
+                f"{', '.join(inherited)} — one drawing, {len(places)} parts, and "
+                f"a SIBLING placement on it states its own anchor_mm while "
+                f"{'this one' if len(inherited) == 1 else 'these'} did not: the "
+                f"anchor here is still the one measured off the WHOLE drawing. "
+                f"Check each crosshair sits on the part it names")
     return out
 
 

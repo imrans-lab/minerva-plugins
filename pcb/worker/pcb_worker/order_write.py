@@ -2,7 +2,7 @@
 
 A HALF-WRITTEN ORDER PACKAGE IS WORSE THAN NONE. The files in a package are
 cross-referenced — the manifest records a digest for every other file — so a
-directory holding four of six artifacts is not a partial success, it is a
+directory holding four of seven artifacts is not a partial success, it is a
 package whose manifest describes files that are not there. Somebody could still
 upload it.
 
@@ -18,10 +18,12 @@ TWO SHAPES, because two situations are genuinely different:
   a temporary neighbour first and nothing at the destination names is touched
   until all of them are on disk; the publishing step is then a sequence of
   renames, which are metadata operations that do not fail for the reasons the
-  writes do (a full disk, a bad encoding, a caller error). A rename that fails
-  anyway is unwound: names that did not exist before are removed again, so the
-  directory is returned to its previous CONTENT even though the operation as a
-  whole was not one instruction.
+  writes do (a full disk, a bad encoding, a caller error). A destination that
+  already holds bytes is MOVED ASIDE before it is replaced, the way the
+  directory publisher moves the previous package aside — ``os.replace`` destroys
+  the old content, so without that copy an earlier rename could not be taken
+  back. A rename that fails anyway is therefore unwound to the previous CONTENT:
+  names this call created are removed, and names it displaced are moved back.
 
 Neither helper creates a destination that a reader can observe half-built, and
 neither leaves a temporary behind on the failure path.
@@ -85,7 +87,8 @@ def _check_names(files: Mapping[str, object]) -> None:
 
 def write_files(directory, files: Mapping[str, object]) -> list[dict]:
     """Write every artifact into an EXISTING-OR-CREATED directory, or leave the
-    directory's contents as they were.
+    directory's contents as they were — including the bytes of a file this call
+    would have replaced.
 
     Returns ``[{path, bytes_written}]`` in the caller's key order — the same
     shape every other worker disk write reports.
@@ -94,33 +97,47 @@ def write_files(directory, files: Mapping[str, object]) -> list[dict]:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex[:12]
-    staged: list[tuple[Path, Path, int, bool]] = []
+    staged: list[tuple[Path, Path, int]] = []
     try:
         for name, content in files.items():
             final = directory / name
             temp = directory / f".{name}.{token}.part"
             written = _write_one(temp, content)
-            staged.append((temp, final, written, final.exists()))
+            staged.append((temp, final, written))
     except OSError as exc:
-        for temp, _, _, _ in staged:
+        for temp, _, _ in staged:
             temp.unlink(missing_ok=True)
         raise OrderWriteError(f"failed to write to {directory}: {exc}") from exc
 
-    published: list[tuple[Path, bool]] = []
+    created: list[Path] = []               # destination names this call made
+    displaced: list[tuple[Path, Path]] = []  # (destination, its previous bytes)
     try:
-        for temp, final, _, existed in staged:
+        for temp, final, _ in staged:
+            # Only a regular file is moved aside. A destination of any other
+            # kind is left for os.replace to refuse — renaming a DIRECTORY out
+            # of the way and dropping a file on its name would destroy it.
+            if final.is_file():
+                previous = directory / f".{final.name}.{token}.displaced"
+                os.rename(final, previous)
+                displaced.append((final, previous))
             os.replace(temp, final)
-            published.append((final, existed))
+            created.append(final)
     except OSError as exc:
-        for final, existed in published:
-            if not existed:
-                final.unlink(missing_ok=True)
-        for temp, _, _, _ in staged:
+        for final in created:
+            final.unlink(missing_ok=True)
+        for final, previous in displaced:
+            try:
+                os.replace(previous, final)
+            except OSError:
+                pass
+        for temp, _, _ in staged:
             temp.unlink(missing_ok=True)
         raise OrderWriteError(f"failed to write to {directory}: {exc}") from exc
+    for _, previous in displaced:
+        previous.unlink(missing_ok=True)
     _sync_dir(directory)
     return [{"path": str(final), "bytes_written": written}
-            for _, final, written, _ in staged]
+            for _, final, written in staged]
 
 
 def publish_directory(parent, name: str, files: Mapping[str, object], *,

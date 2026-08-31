@@ -496,7 +496,7 @@ func _run_named_per_component_report() -> void:  # coroutine: awaits a refusal
 		PcbExport.finding_line(passing["warnings"][0]).contains("U1"),
 		PcbExport.finding_line(passing["warnings"][0]))
 	check("6b: …and kept out of the advisories, which it is not",
-		report.contains("COMPILE WARNINGS"), report)
+		report.contains("WARNINGS — what the compiler and the emitter said"), report)
 	check("6c: what nothing looked at is stated",
 		report.contains("template_column_drift_resolution"), report)
 	check("6d: the IP question is stated",

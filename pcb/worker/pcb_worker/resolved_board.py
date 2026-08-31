@@ -254,6 +254,26 @@ class Diagnostic:
         _nonempty(self.message, "Diagnostic.message")
 
 
+def diagnostic_payload(d: Diagnostic) -> dict:
+    """Serialise a :class:`Diagnostic` to the reply/manifest dict shape.
+
+    ONE serializer for every surface that carries diagnostics — the worker's
+    replies and the order manifest — so a warning reads the same wherever it is
+    forwarded. The ``source_ref`` shape mirrors
+    ``footprint_def._unsupported_to_payload``.
+    """
+    return {
+        "severity": d.severity.value,
+        "code": d.code,
+        "message": d.message,
+        "source_ref": {
+            "entity_kind": d.source_ref.entity_kind.value,
+            "entity_id": d.source_ref.entity_id,
+            "detail": d.source_ref.detail,
+        },
+    }
+
+
 class CapabilityPolicy(Protocol):
     def is_blocking(
         self,

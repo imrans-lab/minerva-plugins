@@ -127,8 +127,11 @@ easy half. The harder half is a wrong anchor that lands INSIDE the drawing — t
 shape the `anchor_mm` key exists for, where several parts inherit one anchor
 measured off the whole drawing — which no ring should fire on because it is a
 legal shape. The lands are drawn so a crosshair sitting between two pin rows
-rather than on one can be seen, and every drawing that placed more than one part
-without stating an anchor per placement is listed by name on the page. Neither
+rather than on one can be seen, and every placement that inherited an anchor it
+did not state is listed by name on the page. That listing includes a placement
+whose SIBLING on the same drawing did state its own, which is the quieter half
+still: the forgotten strip keeps the parent's whole-body centre, and that
+usually sits on the ink, so no ring fires either. Neither the ring nor the note
 is a check with a code and neither raises an advisory: the DCR draws this
 boundary at a person, not at a rule.
 
@@ -164,7 +167,8 @@ profile, dialect parameters and pinned template artifacts; tool versions; the
 logical-component-to-physical-placement map with each placement's anchor, anchor
 basis, rotation and side; the not-populated list with its paste decisions;
 declared footprint licences; surfaced IP questions; the check results including
-what was explicitly not checked; and the export timestamp.
+what was explicitly not checked and every WARNING-channel diagnostic the one
+compilation and the one gerber emission produced; and the export timestamp.
 
 The manifest does NOT record its own digest — a file cannot contain its own
 hash — and says so in place of the value. Every other artifact is deterministic,
@@ -186,6 +190,10 @@ The same module's loose-file writer backs the two-CSV `assembly_package` path,
 which cannot use a directory rename: every byte is written to a temporary
 neighbour before any destination name is touched, so a caller error or a full
 disk leaves the directory holding neither CSV rather than a BOM with no CPL.
+A destination that already holds bytes is moved aside before it is replaced and
+removed only once every rename has landed, so a rename that fails part-way is
+unwound to the previous CONTENT — re-exporting over yesterday's CSVs cannot
+leave today's BOM beside yesterday's CPL.
 
 ## The two surfaces, and why they are one function
 

@@ -64,7 +64,7 @@ from io import BytesIO
 from pathlib import Path
 
 from . import (assembly_outputs, assembly_preview, gerber,
-               order_provenance, order_write)
+               order_provenance, order_write, resolved_board)
 
 #: The package layout, in build order. The checklist and the preflight report
 #: are digested by the manifest, so they are produced before it.
@@ -460,6 +460,9 @@ class OrderPackage:
     advisories: tuple
     unchecked: tuple
     ip_questions: tuple
+    #: Every WARNING-channel diagnostic this package's one compilation and one
+    #: emission produced, serialized. Both channels, because a caller reading
+    #: only one would be told less than the manifest records.
     warnings: tuple
 
     def write(self, out_dir, *, overwrite: bool = False) -> list:
@@ -475,13 +478,23 @@ def build(board_source: dict, board, profile_id: str, *,
 
     ``board_source`` is the raw board dict the compilation came from — the
     digest projection reads it, and nothing else does. ``board`` is the compiled
-    ``ResolvedBoard`` every artifact derives from."""
+    ``ResolvedBoard`` every artifact derives from. ``compile_diagnostics`` are
+    that compilation's own diagnostics, already serialized; the EMITTER's are
+    read here and both end up in one ``warnings`` list, the way the gerbers
+    reply merges the two channels."""
     provenance, provenance_advisories = order_provenance.check(board_source)
 
     assembly = assembly_outputs.build_package(board, profile_id)
     profile = assembly.emission.profile
     gerbers = gerber.build_gerbers_ir(board)
     archive = build_archive(gerbers)
+    # The emitter's OWN warning channel, read off the value it returned (a copy
+    # of a GerberResult is a plain dict and drops it). A silk primitive or drill
+    # feature the emitter captured but could not emit is recorded here or
+    # nowhere: this package is the account of what the fabrication files hold,
+    # and it is the one artifact a reader trusts to be complete.
+    emission_warnings = tuple(resolved_board.diagnostic_payload(d)
+                              for d in getattr(gerbers, "diagnostics", ()))
 
     advisories = tuple(assembly.emission.advisories) + tuple(provenance_advisories)
     unchecked = (tuple(assembly.emission.unchecked)
@@ -522,7 +535,7 @@ def build(board_source: dict, board, profile_id: str, *,
     files[PREFLIGHT_FILE] = _json(preflight)
     digests[PREFLIGHT_FILE] = digest(files[PREFLIGHT_FILE])
 
-    warnings = tuple(compile_diagnostics)
+    warnings = emission_warnings + tuple(compile_diagnostics)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(
@@ -549,7 +562,7 @@ def build(board_source: dict, board, profile_id: str, *,
         "checks": {"status": status,
                    "advisories": [dict(item) for item in advisories],
                    "unchecked": [dict(item) for item in unchecked],
-                   "compile_warnings": [dict(item) for item in warnings]},
+                   "warnings": [dict(item) for item in warnings]},
         "readiness": readiness(generated=True, status=status),
     }
     files[MANIFEST_FILE] = _json(manifest)

@@ -30,7 +30,8 @@ from typing import Any
 from . import (assembly_advisory, assembly_outputs, bless, board_model,
                compile_board, drc, footprints, gerber, ir_candidates,
                ir_connectivity, kicad, libcheck, net_class_policy,
-               order_package, order_provenance, order_write, resolve)
+               order_package, order_provenance, order_write, resolve,
+               resolved_board)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -241,19 +242,10 @@ def _generate(params: dict) -> dict:
 
 
 def _diagnostic_to_payload(d) -> dict:
-    """Serialise a resolved_board.Diagnostic to a reply dict. The source_ref shape
-    mirrors footprint_def._unsupported_to_payload (the one place that already turns
-    a SourceRef into JSON) so callers see one uniform diagnostic shape."""
-    return {
-        "severity": d.severity.value,
-        "code": d.code,
-        "message": d.message,
-        "source_ref": {
-            "entity_kind": d.source_ref.entity_kind.value,
-            "entity_id": d.source_ref.entity_id,
-            "detail": d.source_ref.detail,
-        },
-    }
+    """Serialise a resolved_board.Diagnostic to a reply dict. The body lives in
+    resolved_board beside the type it serialises, because order_package needs the
+    same shape for the manifest and two spellings of one payload would drift."""
+    return resolved_board.diagnostic_payload(d)
 
 
 def _compile_failure_reply(failure) -> dict:
@@ -1617,12 +1609,12 @@ def _order_package(params: dict) -> dict:
 
     profile_id = params.get("profile") or "jlc"
     source_path = params.get("source_path")
-    warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+    compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
     try:
         package = order_package.build(
             board, compiled.board, profile_id,
             source_path=source_path if isinstance(source_path, str) else None,
-            compile_diagnostics=warnings)
+            compile_diagnostics=compile_warnings)
     except Exception as exc:  # see _assembly_bom: the dispatcher's broad-catch
         # convention over caller-supplied board data, backstopping the named
         # order_package / assembly_outputs / provenance refusals.
@@ -1645,7 +1637,10 @@ def _order_package(params: dict) -> dict:
         "preflight": package.preflight,
         "source": package.manifest["source"],
         "written": written,
-        "warnings": warnings,
+        # The package's OWN list, not the compile-only one handed to it: it also
+        # carries the gerber emitter's channel, and a reply saying less than the
+        # manifest records would hide a dropped fab feature from the caller.
+        "warnings": [dict(item) for item in package.warnings],
     }
     if package.advisories:
         result["advisories"] = [dict(a) for a in package.advisories]

@@ -181,6 +181,24 @@ def test_two_disagreeing_provenance_strings_refuse():
         prov.check(board)
 
 
+def test_one_stamped_and_one_unstamped_slot_refuses_for_the_right_reason():
+    """Front silk stamped, back silk still on the sentinel, ONE revision on
+    both. Refusing is right — the two sides of the bare board would not carry
+    the same identity — but the message must name the DIGESTS, because a reader
+    sent to look for two different revisions finds two identical ones and stops
+    trusting the refusal."""
+    board = _board(_text(prov.provenance_text(BOARD_NAME, REV, "deadbeef")),
+                   _text(prov.provenance_text(BOARD_NAME, REV,
+                                              prov.DIGEST_SENTINEL),
+                         layer="B.SilkS"))
+    with pytest.raises(prov.ProvenanceError) as caught:
+        prov.check(board)
+    message = str(caught.value)
+    assert "different digest slots" in message
+    assert "different design revisions" not in message
+    assert REV in message
+
+
 def test_a_board_repeating_one_correct_stamp_is_accepted():
     """Front and back silk may both carry the revision. Two identical strings
     are one claim, not two, and both slots are normalized — so stamping the pair

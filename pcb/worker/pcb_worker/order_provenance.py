@@ -204,13 +204,28 @@ def check(board: dict) -> tuple[dict, tuple[dict, ...]]:
                 f"The source digest of this package is {digest[:DIGEST_CHARS]}"),
         },)
 
-    distinct = {(stamp.rev, stamp.digest) for stamp in found}
-    if len(distinct) > 1:
+    # TWO WAYS the stamps can disagree, and the message names the one that
+    # happened. Folding them into one "different design revisions" count made a
+    # board whose revisions AGREE and whose digest slots do not — one stamped,
+    # one still the sentinel — report a fault it does not have, sending a reader
+    # to compare two revision tokens that are identical.
+    revisions = {stamp.rev for stamp in found}
+    slots = {stamp.digest for stamp in found}
+    if len(revisions) > 1:
         printed = ", ".join(sorted(stamp.text for stamp in found))
         raise ProvenanceError(
-            f"board {_board_name(board)!r} prints {len(distinct)} different "
+            f"board {_board_name(board)!r} prints {len(revisions)} different "
             f"design revisions ({printed}) — the bare board would name more than "
             f"one design. Author one provenance string")
+    if len(slots) > 1:
+        printed = ", ".join(sorted(stamp.text for stamp in found))
+        raise ProvenanceError(
+            f"board {_board_name(board)!r} prints revision {found[0].rev!r} with "
+            f"{len(slots)} different digest slots ({printed}) — the revisions "
+            f"agree, the digests do not, so at least one stamp is stale or still "
+            f"unstamped. Write {digest[:DIGEST_CHARS]!r} into every slot and "
+            f"re-export: the slot is normalized before hashing, so stamping does "
+            f"not move the digest")
 
     stamp = found[0]
     record["design_revision"] = stamp.rev

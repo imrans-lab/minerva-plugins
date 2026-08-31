@@ -80,6 +80,21 @@ def _stripped(path: Path = OVERRIDE_FIXTURE):
     return result.board
 
 
+def _half_stripped(path: Path = OVERRIDE_FIXTURE):
+    """The override fixture with ONE placement's ``anchor_mm`` removed.
+
+    The likelier authoring mistake than forgetting all of them: a two-strip
+    socket whose first strip states its anchor and whose second was forgotten.
+    Same mutation-of-the-shared-fixture construction as :func:`_stripped`."""
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    component = next(c for c in document["components"] if c["ref"] == "U3S")
+    dropped = component["assembly"]["placements"][1].pop("anchor_mm", None)
+    assert dropped is not None, "the fixture stopped authoring U3S_B's anchor"
+    result = compile_board(document)
+    assert isinstance(result, ResolutionSuccess)
+    return result.board
+
+
 def _rendered(board):
     """The preview and the CPL from ONE emission — the pairing under test, built
     through the same public entry point the order package uses. Two calls would
@@ -227,6 +242,25 @@ def test_the_inherited_anchor_is_named_on_the_page():
     assert "U3S_A, U3S_B" not in repaired
     for group in _placement_groups(repaired).values():
         assert group.get("data-anchor-basis") == ANCHOR_BASIS_AUTHORED
+
+
+def test_a_half_authored_expansion_names_the_placement_that_inherited():
+    """The QUIET half of the trap. An author who states the anchor for one strip
+    of a two-strip socket and forgets the other leaves that second placement on
+    the parent's whole-body centre — a shape the all-inherited sentence used to
+    skip entirely, because a sibling had authored.
+
+    The oracle is the note text: the forgotten placement is named, its authored
+    sibling is not (it is not wrong), and the sentence says a sibling did state
+    one, which is what tells a reader this is a half-finished expansion rather
+    than an unstated one."""
+    svg = _rendered(_half_stripped())[0]
+    assert "U3S_B — one drawing, 2 parts, and a SIBLING placement" in svg
+    # NOT the all-inherited sentence, and nothing at all about the two
+    # components that authored every anchor.
+    assert "U3S_A, U3S_B" not in svg
+    assert "U4S_A, U4S_B" not in svg
+    assert "U5S_A, U5S_B" not in svg
 
 
 def test_an_expansion_draws_one_body_and_one_crosshair_per_part():
