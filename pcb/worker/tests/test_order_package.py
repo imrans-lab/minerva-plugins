@@ -880,6 +880,9 @@ def test_an_overwrite_that_cannot_start_leaves_the_previous_package_intact(tmp_p
     step, so a failure before that step cannot disturb what is already there.
     Provoked with a real filesystem condition — a parent nobody may write to —
     rather than by standing in for one."""
+    if not hasattr(os, "geteuid"):
+        pytest.skip("Windows does not enforce POSIX directory permissions, so the "
+                    "condition this test provokes cannot be created there")
     if os.geteuid() == 0:
         pytest.skip("root ignores directory permissions, so nothing can fail here")
     package = _package()
