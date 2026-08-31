@@ -743,16 +743,24 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 
 	// Tools that STAY in the sweep even though their correct answer to a
 	// yaml-only dispatch of the mpn-less spike board is a refusal: the sweep
-	// asserts the refusal is the NAMED one (docket 01a0561d8505). This is what
-	// keeps the schema binding covered — rename the declared "yaml" property
-	// and the constructed args carry no board at all, so the worker's _load
-	// fails before the identity gate and the refusal stops naming R1/mpn,
-	// which fails below. A plain carve-out (`continue`) would have hidden
-	// exactly that rename behind a dedicated test still sending "yaml".
-	expectedRefusalSubstrings := map[string][]string{
-		// jlc's identity gate: assembly_missing_identity naming component R1
-		// and its missing mpn field.
-		"minerva_pcb_order_package": {"R1", "mpn"},
+	// asserts the refusal is the NAMED one (docket 01a0561d8505),
+	// STRUCTURALLY — the error object's own code/component/field plus the
+	// blocked preflight, never substrings of the prose. A message match on
+	// "R1"/"mpn" would also pass a parse or dispatch error that merely
+	// MENTIONS them ("invalid field mpn on component R1") without the
+	// identity gate ever running. This is what keeps the schema binding
+	// covered — rename the declared "yaml" property and the constructed args
+	// carry no board at all, so the worker's _load fails before the identity
+	// gate with a parse-kind error carrying no code at all, which fails
+	// below. A plain carve-out (`continue`) would have hidden exactly that
+	// rename behind a dedicated test still sending "yaml".
+	type structuredRefusal struct{ code, component, field string }
+	expectedRefusals := map[string]structuredRefusal{
+		// jlc's identity gate, as the worker types it: AssemblyIdentityError's
+		// class-level code, the first mpn-less component, the missing field.
+		"minerva_pcb_order_package": {
+			code: "assembly_missing_identity", component: "R1",
+			field: "assembly.mpn"},
 	}
 
 	specs := agentFacingBrokerSpecs(t)
@@ -833,21 +841,30 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 		}
 
 		env := c.call(name, args)
-		if wants, refuses := expectedRefusalSubstrings[name]; refuses {
+		if want, refuses := expectedRefusals[name]; refuses {
 			if env["ok"] != false {
 				t.Errorf("%s: yaml-only dispatch of the mpn-less spike board must be a named refusal, got ok=%v: %v",
 					name, env["ok"], env)
 				continue
 			}
 			errMap, _ := env["error"].(map[string]any)
-			msg, _ := errMap["message"].(string)
-			for _, want := range wants {
-				if !strings.Contains(msg, want) {
-					t.Errorf("%s: refusal does not name %q — the declared schema may no longer carry the board content this sweep sends: %q",
-						name, want, msg)
-				}
+			if errMap["code"] != want.code || errMap["component"] != want.component ||
+				errMap["field"] != want.field {
+				t.Errorf("%s: refusal is not the structured identity gate "+
+					"(want code=%q component=%q field=%q, got code=%v component=%v field=%v) — "+
+					"the declared schema may no longer carry the board content this sweep sends: %v",
+					name, want.code, want.component, want.field,
+					errMap["code"], errMap["component"], errMap["field"], errMap)
+				continue
 			}
-			t.Logf("STDIO SMOKE PASS: %s refused by name using only its declared schema keys", name)
+			preflight, _ := errMap["preflight"].(map[string]any)
+			readiness, _ := preflight["readiness"].(map[string]any)
+			if readiness["preflight_status"] != "blocked" {
+				t.Errorf("%s: identity refusal does not carry a BLOCKED preflight (got %v)",
+					name, errMap["preflight"])
+				continue
+			}
+			t.Logf("STDIO SMOKE PASS: %s refused structurally (code/component/field + blocked preflight) using only its declared schema keys", name)
 			continue
 		}
 		if env["ok"] != true {
@@ -1127,7 +1144,13 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 		if file == "" || len(sha) != 64 {
 			t.Fatalf("minerva_pcb_order_package output entry missing file/sha256: %v", entry)
 		}
+		if _, dup := listedSha[file]; dup {
+			t.Fatalf("minerva_pcb_order_package outputs list %q twice", file)
+		}
 		listedSha[file] = sha
+	}
+	if len(listedSha) != 7 {
+		t.Fatalf("minerva_pcb_order_package outputs list %d distinct files, want 7 (six digested + the manifest): %v", len(listedSha), res["outputs"])
 	}
 	// Every reported digest is recomputed from the file's own bytes on disk —
 	// the reply claiming a hash is not the file having it.
@@ -1193,10 +1216,12 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 	if pkg["directory"] != "AssemblyResolved-jlc" {
 		t.Fatalf("order-manifest.json package.directory = %v", pkg["directory"])
 	}
+	// COMPLETE AND UNIQUE, not merely six-long: six duplicate entries for one
+	// valid output would satisfy a bare length check and a per-entry digest
+	// check, while five real outputs went unrecorded. The recorded FILE SET
+	// must be exactly every output but the manifest itself, each name once.
 	manifestOutputs, _ := pkg["outputs"].([]any)
-	if len(manifestOutputs) != 6 {
-		t.Fatalf("order-manifest.json records %d outputs, want 6 (everything but itself)", len(manifestOutputs))
-	}
+	recorded := map[string]bool{}
 	for _, item := range manifestOutputs {
 		entry := asMap(t, item, "manifest outputs entry")
 		file, _ := entry["file"].(string)
@@ -1204,19 +1229,44 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 		if !ok {
 			t.Fatalf("order-manifest.json records %q, which the package did not write", file)
 		}
+		if recorded[file] {
+			t.Fatalf("order-manifest.json records %q twice", file)
+		}
+		recorded[file] = true
 		if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != entry["sha256"] {
 			t.Fatalf("order-manifest.json %s: recorded sha256 %v but the bytes on disk hash to %s", file, entry["sha256"], got)
 		}
 	}
+	for _, want := range []string{"gerbers.zip", "bom.csv", "cpl.csv",
+		"assembly-preview.svg", "ORDER-CHECKLIST.md", "preflight.json"} {
+		if !recorded[want] {
+			t.Fatalf("order-manifest.json does not record %q; recorded set: %v", want, recorded)
+		}
+	}
+	if len(recorded) != 6 {
+		t.Fatalf("order-manifest.json records %d distinct outputs, want 6 (everything but itself): %v", len(recorded), recorded)
+	}
 	// The archive holds THIS board's fabrication set: nine gerber layers plus
-	// the job file, named for the board, and nothing else.
+	// the job file, named for the board, and nothing else — and each member's
+	// BYTES read as the file its name claims. Ten right names over ten empty
+	// members is a package a house pays to reject, and a name check alone
+	// passes it.
 	zr, err := zip.NewReader(bytes.NewReader(diskBytes["gerbers.zip"]), int64(len(diskBytes["gerbers.zip"])))
 	if err != nil {
 		t.Fatalf("gerbers.zip does not open as a zip: %v", err)
 	}
-	gotMembers := map[string]bool{}
+	memberBytes := map[string][]byte{}
 	for _, f := range zr.File {
-		gotMembers[f.Name] = true
+		rc, openErr := f.Open()
+		if openErr != nil {
+			t.Fatalf("gerbers.zip member %s does not open: %v", f.Name, openErr)
+		}
+		raw, readErr := io.ReadAll(rc)
+		rc.Close()
+		if readErr != nil {
+			t.Fatalf("gerbers.zip member %s does not read: %v", f.Name, readErr)
+		}
+		memberBytes[f.Name] = raw
 	}
 	wantMembers := []string{
 		"AssemblyResolved-F_Cu.gbr", "AssemblyResolved-B_Cu.gbr",
@@ -1225,13 +1275,31 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 		"AssemblyResolved-F_SilkS.gbr", "AssemblyResolved-B_SilkS.gbr",
 		"AssemblyResolved-Edge_Cuts.gbr", "AssemblyResolved-job.gbrjob",
 	}
-	if len(gotMembers) != len(wantMembers) {
-		t.Fatalf("gerbers.zip carries %d members, want %d: %v", len(gotMembers), len(wantMembers), zr.File)
+	if len(memberBytes) != len(wantMembers) {
+		t.Fatalf("gerbers.zip carries %d members, want %d: %v", len(memberBytes), len(wantMembers), zr.File)
 	}
 	for _, want := range wantMembers {
-		if !gotMembers[want] {
+		raw, ok := memberBytes[want]
+		if !ok {
 			t.Fatalf("gerbers.zip is missing %q", want)
 		}
+		if strings.HasSuffix(want, ".gbr") {
+			// A Gerber layer states its coordinate format and terminates —
+			// %FSLAX and M02* are mandatory in any RS-274X file this emitter
+			// writes, so an empty or truncated member fails here.
+			text := string(raw)
+			if !strings.Contains(text, "%FSLAX") || !strings.Contains(text, "M02*") {
+				t.Fatalf("gerbers.zip member %s does not read as a Gerber layer (no %%FSLAX / M02*): %d bytes", want, len(raw))
+			}
+		}
+	}
+	var jobDoc map[string]any
+	if err := json.Unmarshal(memberBytes["AssemblyResolved-job.gbrjob"], &jobDoc); err != nil {
+		t.Fatalf("job.gbrjob member is not JSON: %v", err)
+	}
+	jobProject := asMap(t, asMap(t, jobDoc["GeneralSpecs"], "gbrjob.GeneralSpecs")["ProjectId"], "gbrjob.ProjectId")
+	if jobProject["Name"] != "AssemblyResolved" {
+		t.Fatalf("job.gbrjob names project %v, want AssemblyResolved", jobProject["Name"])
 	}
 	t.Logf("STDIO SMOKE PASS: minerva_pcb_order_package happy path — %v written, digests verified against disk", res["directory"])
 
@@ -1248,10 +1316,14 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 		t.Fatalf("minerva_pcb_order_package (missing mpn) ok != false: %v", idEnv)
 	}
 	idErr := asMap(t, idEnv["error"], "order_package identity-refusal error")
-	idMsg, _ := idErr["message"].(string)
-	if !strings.Contains(idMsg, "R1") || !strings.Contains(idMsg, "mpn") {
-		t.Fatalf("minerva_pcb_order_package (missing mpn) message does not name the component/field verbatim: %q", idMsg)
+	// STRUCTURED, not prose: the error object's own code/component/field are
+	// the identity gate's contract; a substring match on the message would
+	// also pass any error that merely mentions "R1" and "mpn".
+	if idErr["code"] != "assembly_missing_identity" || idErr["component"] != "R1" ||
+		idErr["field"] != "assembly.mpn" {
+		t.Fatalf("minerva_pcb_order_package (missing mpn) is not the structured identity refusal (want code=assembly_missing_identity component=R1 field=assembly.mpn): %v", idErr)
 	}
+	idMsg, _ := idErr["message"].(string)
 	preflight := asMap(t, idErr["preflight"], "order_package refusal preflight")
 	refusedReady := asMap(t, preflight["readiness"], "order_package refusal readiness")
 	if refusedReady["package_generated"] != false {

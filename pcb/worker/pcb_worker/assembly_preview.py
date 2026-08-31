@@ -128,6 +128,20 @@ TABLE_LINE_PX = 15.0
 #: widest cell or heading needs more, so the grid is stable on ordinary boards
 #: and elastic on one with a forty-character designator.
 TABLE_COLUMN_PX = (120.0, 96.0, 96.0, 74.0, 78.0)
+#: Widest any table CELL (heading or value) may claim, in page pixels — about
+#: 48 mono characters. Text past it is cut with a visible "..." by
+#: :func:`_fit_text`, so a pathological designator widens its column to this
+#: and no further: the page's width is bounded by the column COUNT, which the
+#: profile fixes, never by cell content.
+TABLE_CELL_MAX_PX = 360.0
+#: Title lines kept before a visible "...". The board name is data and wraps
+#: like the prose, but must not be able to grow the page without limit either.
+TITLE_MAX_LINES = 3
+#: Widest a placement label may claim, in board mm. Label boxes feed the drawn
+#: extent — and through it the page width — so the designator half of a label
+#: is capped here; the cut is visible, and the untruncated ref still rides in
+#: the group's data-ref attribute.
+LABEL_MAX_MM = 24.0
 TABLE_GUTTER_PX = 34.0
 #: Above this many placements the emitted-row table splits into two columns
 #: rather than running the page metres long.
@@ -181,11 +195,18 @@ def _n(value: float) -> str:
 # units-per-em 2048 — the first face in the stylesheet's stack and the widest
 # of them), each value padded 2% and ceiled to 3 decimals, so the table is an
 # upper bound on the rendered advance rather than an estimate of it (the pad
-# also absorbs kerning, which in this face only ever tightens). A glyph
-# outside the tables gets :data:`_FALLBACK_EM`, wider than every glyph DejaVu
-# carries in either weight, so an exotic character in a board name over-wraps
-# instead of overflowing. Overestimating only wraps a line a word early;
-# underestimating is how a sentence walks off the page edge.
+# also absorbs kerning, which in this face only ever tightens).
+#
+# WHAT THE WIDTH GUARANTEE DOES AND DOES NOT COVER. For text made of TABLED
+# glyphs the estimate is a true upper bound, so wrapped prose and fitted cells
+# really render inside the page. A glyph OUTSIDE the tables renders in some
+# fallback face this page cannot know, and no constant bounds every font on
+# earth: :data:`_FALLBACK_EM` is not a render bound, it is a COUNT bound — it
+# charges each off-table glyph so much that only a few fit any budget, and the
+# caps below (title lines, table cells, placement labels) then bound the page
+# itself. So no input, in any script, can grow the page without limit; a
+# fallback face wider than the charge can still paint its short run past its
+# own line's end, where the viewBox clips it at the page edge.
 
 _ADVANCES_EM = {
     " ": 0.325, "!": 0.409, "\"": 0.470, "#": 0.855, "$": 0.649, "%": 0.970,
@@ -232,9 +253,11 @@ _ADVANCES_BOLD_EM = {
 #: the ``mono`` class, whose narrow letters are WIDER than their sans
 #: advances, so mono text must never be measured with the sans tables.
 _MONO_EM = 0.615
-#: Wider than every glyph DejaVu Sans carries in either weight (max 2.016 em,
-#: bold). What actually renders for an off-table glyph is some fallback face
-#: this page cannot know, so the bound errs past the widest face it names.
+#: Charged per glyph outside the tables. Wider than every glyph DejaVu Sans
+#: carries in either weight (max 2.016 em, bold) — but what actually renders
+#: is some fallback face this page cannot know, so this is NOT a bound on the
+#: rendered width. Its job is the count bound the block comment above
+#: describes: charge off-table glyphs enough that only a few fit any budget.
 _FALLBACK_EM = 2.05
 
 
@@ -277,6 +300,25 @@ def _wrap(body: str, budget: float, size: float, *, bold: bool = False
     if line:
         lines.append(line)
     return lines or [""]
+
+
+def _fit_text(body: str, budget: float, size: float, *, bold: bool = False,
+              mono: bool = False) -> str:
+    """*body* when its estimated width fits *budget*, else its head plus a
+    visible "..." — a cut a reader can SEE, never a silent one. The full value
+    always exists somewhere machine-readable (a data- attribute, the CSVs), so
+    what the cut costs is ink, not information."""
+    text = str(body)
+    if _est_text_width(text, size, bold=bold, mono=mono) <= budget:
+        return text
+    room = budget - _est_text_width("...", size, bold=bold, mono=mono)
+    run, keep = 0.0, 0
+    for ch in text:
+        run += _est_text_width(ch, size, bold=bold, mono=mono)
+        if run > room:
+            break
+        keep += 1
+    return text[:keep] + "..."
 
 
 def _text(x: float, y: float, body: str, *, cls: str, size_mm: float,
@@ -530,17 +572,38 @@ def _graphic_ink(geometry, cls: str):
     return "", []
 
 
+#: Deepest a sampled chord may sag inside the true curve, in mm. The bands in
+#: :func:`_ink_bands` reach ``half`` (0.12 mm) past their chord on every axis,
+#: and a curve point sits within its chord's sagitta of that chord — so with
+#: the sagitta capped WELL below ``half``, a band around each chord always
+#: CONTAINS the real curve rather than sitting inside it. Length-proportional
+#: sampling (~1 mm chords) had no such bound: a 0.64 mm-radius arc's 1 mm
+#: chord sags 0.185 mm, past the band edge, leaving a strip of real outline
+#: no band covered.
+_CURVE_SAG_MM = 0.02
+
+
+def _curve_steps(radius: float, span: float) -> int:
+    """Chords that sample *span* radians of a *radius* arc with sagitta
+    ``radius * (1 - cos(span / 2n))`` at most :data:`_CURVE_SAG_MM`."""
+    if radius <= _CURVE_SAG_MM:
+        return 4
+    half_angle = math.acos(1.0 - _CURVE_SAG_MM / radius)
+    return max(4, int(math.ceil(span / (2.0 * half_angle))))
+
+
 def _graphic_perimeter(geometry) -> list[list[tuple[float, float]]]:
     """The polylines one placed graphic's STROKE actually follows, in the
-    emitted frame — the curve itself, not its bounding extent. Circles and arcs
-    come back sampled finely enough that banding the pieces bands the curve."""
+    emitted frame — the curve itself, not its bounding extent. Circles and
+    arcs come back sampled with a bounded sagitta (:func:`_curve_steps`), so
+    banding the pieces is guaranteed to band the whole curve."""
     to_frame = assembly_outputs.cpl_frame_point
     if isinstance(geometry, LineGeometry):
         return [[to_frame(geometry.a), to_frame(geometry.b)]]
     if isinstance(geometry, CircleGeometry):
         cx, cy = to_frame(geometry.center)
         radius = float(geometry.radius_mm)
-        steps = max(12, int(math.ceil(2.0 * math.pi * radius)))
+        steps = _curve_steps(radius, 2.0 * math.pi)
         return [[(cx + radius * math.cos(2.0 * math.pi * i / steps),
                   cy + radius * math.sin(2.0 * math.pi * i / steps))
                  for i in range(steps + 1)]]
@@ -553,7 +616,7 @@ def _graphic_perimeter(geometry) -> list[list[tuple[float, float]]]:
             return [[start, mid, end]]
         (cx, cy), radius, start_angle, span, sweep = solved
         step = 1.0 if sweep else -1.0
-        steps = max(4, int(math.ceil(span * radius)))
+        steps = _curve_steps(radius, span)
         return [[(cx + radius * math.cos(start_angle + step * span * i / steps),
                   cy + radius * math.sin(start_angle + step * span * i / steps))
                  for i in range(steps + 1)]]
@@ -721,8 +784,11 @@ def _mark_boxes(x: float, y: float, rotation_deg: float
 
 
 def _label_body(cells) -> str:
-    """The label's text — the emitted designator, rotation and side cells."""
-    return f"{cells[0]}  {cells[4]}°  {cells[3]}"
+    """The label's text — the emitted designator, rotation and side cells,
+    fitted to :data:`LABEL_MAX_MM`: the designator is board data of unbounded
+    length, and every label box feeds the page's own extent."""
+    return _fit_text(f"{cells[0]}  {cells[4]}°  {cells[3]}",
+                     LABEL_MAX_MM, REF_TEXT_MM, bold=True)
 
 
 def _label_plan(x: float, y: float, body: str, obstacles
@@ -1007,7 +1073,9 @@ def _column_widths(rows, cells_by_ref, columns) -> list[float]:
     """Column widths: the layout minimums, grown to fit the widest heading or
     cell actually in the column. A long designator therefore widens its column
     — and through the returned table width, the page — instead of running
-    under its neighbour or off the page edge."""
+    under its neighbour or off the page edge. The growth is bounded because
+    :func:`_table` fits every heading and cell to :data:`TABLE_CELL_MAX_PX`
+    before handing them here."""
     count = max([len(columns)] + [len(cells_by_ref[row.ref]) for row in rows])
     widths = [TABLE_COLUMN_PX[i] if i < len(TABLE_COLUMN_PX) else 80.0
               for i in range(count)]
@@ -1035,6 +1103,14 @@ def _table(rows, cells_by_ref, off_body_refs, columns, x: float, y: float
                  f'every part on this board is marked not-populated</text>'],
                 y + TABLE_LINE_PX, 0.0)
     ink: list[str] = []
+    # Headings and cells are profile/board data of unbounded length; each is
+    # fitted to the cell cap FIRST, so the widths below can grow a column to
+    # the widest text that will actually be drawn, and no further.
+    columns = [_fit_text(heading, TABLE_CELL_MAX_PX, 12.0, bold=True)
+               for heading in columns]
+    cells_by_ref = {ref: [_fit_text(cell, TABLE_CELL_MAX_PX, 12.0, mono=True)
+                          for cell in cells]
+                    for ref, cells in cells_by_ref.items()}
     widths = _column_widths(rows, cells_by_ref, columns)
     per_column = len(rows) if len(rows) <= TABLE_SPLIT_ROWS else (len(rows) + 1) // 2
     block_width = sum(widths) + TABLE_GUTTER_PX
@@ -1148,9 +1224,16 @@ def render(board, emission) -> str:
     body: list[str] = []
     cursor = PAGE_PAD_PX + 18.0
     # The board NAME is board data, so the title wraps like the prose does —
-    # a long name becomes more title lines, never ink past the page edge.
-    for index, wrapped in enumerate(_wrap(f"{board.name} — assembly preview",
-                                          PROSE_BUDGET_PX, 17.0, bold=True)):
+    # a long name becomes more title lines, never ink past the page edge —
+    # and the LINES are capped with a visible "..." so no name, however long,
+    # grows the page without limit.
+    title_lines = _wrap(f"{board.name} — assembly preview",
+                        PROSE_BUDGET_PX, 17.0, bold=True)
+    if len(title_lines) > TITLE_MAX_LINES:
+        title_lines = title_lines[:TITLE_MAX_LINES]
+        title_lines[-1] = _fit_text(title_lines[-1] + "...",
+                                    PROSE_BUDGET_PX, 17.0, bold=True)
+    for index, wrapped in enumerate(title_lines):
         if index:
             cursor += 22.0
         body.append(f'<text class="title" x="{_n(PAGE_PAD_PX)}" '

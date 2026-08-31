@@ -651,7 +651,7 @@ def test_the_estimator_is_an_upper_bound_for_every_tabled_glyph():
     so the estimate must sit at or above the real advance for EVERY glyph in
     every face the page uses — checked glyph by glyph against the font tables,
     including the ~0.84 em run ('+ = < > ^ ~') the old buckets carried at
-    0.68 em. An off-table glyph must err wider than anything DejaVu has."""
+    0.68 em."""
     for ch, advance in _DEJAVU_EM.items():
         assert ap._est_text_width(ch, 1000.0) >= advance * 1000.0, repr(ch)
     for ch, advance in _DEJAVU_BOLD_EM.items():
@@ -660,8 +660,13 @@ def test_the_estimator_is_an_upper_bound_for_every_tabled_glyph():
     for ch in _DEJAVU_EM:
         assert (ap._est_text_width(ch, 1000.0, mono=True)
                 >= _DEJAVU_MONO_EM * 1000.0), repr(ch)
-    # Not in the tables, not in DejaVu's repertoire at any width DejaVu has.
-    assert ap._est_text_width("木", 1000.0) > 2016.0
+    # An off-table glyph (this CJK character is one — DejaVu does not carry
+    # it) is charged _FALLBACK_EM per glyph. That is deliberately NOT a claim
+    # about how wide it renders: whatever face the viewer falls back to is
+    # unknowable here, so the charge is a COUNT bound — few such glyphs fit
+    # any budget — and the page-level caps do the actual bounding. Asserting
+    # it against DejaVu's own max advance would prove nothing.
+    assert ap._est_text_width("木", 1000.0) == ap._FALLBACK_EM * 1000.0
 
 
 def test_wrap_never_yields_a_line_that_renders_past_the_budget():
@@ -842,3 +847,144 @@ def test_a_label_dodges_the_body_outline_not_the_drawings_bounds():
         band = (x1 - 0.07, y1 - 0.07, x2 + 0.07, y2 + 0.07)
         assert ap._overlap_area(box, band) == 0.0, (
             f"U1's label is drawn through its body outline at {band}")
+
+
+# ---------------------------------------------------------------------------
+# Curved bodies: the bands must contain the CURVE, not its chords.
+#
+# _body_outline_segments above rebuilds straight strokes only, so nothing in
+# the independent label checks can see a curved outline at all. This section
+# is that coverage: the truth is the arc's own equation, hand-stated from the
+# fixture (a circle of the authored radius about the component's position,
+# y negated into the emitted frame), sampled far more densely than any
+# sampling the module could get away with.
+# ---------------------------------------------------------------------------
+
+
+def _in_some_band(point, bands) -> bool:
+    return any(b[0] <= point[0] <= b[2] and b[1] <= point[1] <= b[3]
+               for b in bands)
+
+
+def test_the_bands_of_an_arc_body_contain_the_whole_true_arc():
+    """CONSERVATIVE SAMPLING. A chord between two arc samples sags INSIDE the
+    real curve, so bands hugging the chords leave an uncovered strip at the
+    arc's outermost reach: length-proportional sampling gave this 0.64 mm
+    radius, 6.24 rad arc four segments, whose first band ended 0.065 mm short
+    of the arc's own max-x — a label edge in that strip crossed the true
+    outline while overlapping no band. A band must never sit inside the
+    geometry it represents, whatever the radius, so every densely-sampled
+    point of the true arc must land inside some band."""
+    import math
+
+    radius, span, start_angle = 0.64, 6.24, -0.78
+    centre = (10.0, 10.0)  # the component's authored position
+
+    def authored(angle: float) -> dict:
+        # A point of the arc in the FOOTPRINT frame, as the board would
+        # author it.
+        return {"x": round(radius * math.cos(angle), 6),
+                "y": round(radius * math.sin(angle), 6)}
+
+    def pad(number: str, x: float) -> dict:
+        return {"number": number, "type": "smd", "shape": "rect",
+                "position": {"x": x, "y": 0.0},
+                "size": {"width": 0.9, "height": 0.9},
+                "layers": ["F.Cu", "F.Mask", "F.Paste"]}
+
+    board = _compiled_dict({
+        "version": 1, "name": "ArcBody", "width_mm": 30, "height_mm": 20,
+        "origin": {"x_mm": 0, "y_mm": 0}, "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "D9", "footprint": "Nowhere:RoundBody", "value": "",
+             "x_mm": centre[0], "y_mm": centre[1], "rotation_deg": 0,
+             "layer": "top", "assembly": {"mpn": "C11111"},
+             "pads": [pad("1", -1.6), pad("2", 1.6)],
+             "graphics": [{"kind": "arc", "layer": "F.Fab", "width": 0.1,
+                           "points": [authored(start_angle),
+                                      authored(start_angle + span / 2.0),
+                                      authored(start_angle + span)]}]},
+        ],
+    })
+    drawing = ap._drawing(board, board.components[0])
+    assert drawing.outline_basis == "fab_outline"
+    assert drawing.body_bands, "the arc body produced no bands at all"
+    for i in range(2001):
+        angle = start_angle + span * i / 2000.0
+        point = (centre[0] + radius * math.cos(angle),
+                 -(centre[1] + radius * math.sin(angle)))
+        assert _in_some_band(point, drawing.body_bands), (
+            f"true arc point {point} (angle {angle:.4f}) sits inside the "
+            f"outline's own band gap — the sampling is not conservative")
+    # The exact strip the chords used to miss: the arc's own max-x reach.
+    assert _in_some_band((centre[0] + radius, -centre[1]), drawing.body_bands)
+
+
+# ---------------------------------------------------------------------------
+# The page is BOUNDED: no input may grow it without limit.
+# ---------------------------------------------------------------------------
+
+
+def test_a_pathological_designator_cannot_grow_the_page_without_limit():
+    """Table columns grow to their widest cell and placement labels feed the
+    drawn extent, and both used to grow the PAGE with them: a long-enough
+    designator made the page arbitrarily wide. Both are now capped with a cut
+    a reader can SEE — the "..." — while the machine-readable data-ref keeps
+    the designator whole. The bound asserted is generous on purpose: the point
+    is that it EXISTS, not its exact value."""
+    monster = "R" + "X" * 4000
+    board = _compiled_dict({
+        "version": 1, "name": "Bounded", "width_mm": 30, "height_mm": 20,
+        "origin": {"x_mm": 0, "y_mm": 0}, "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": monster, "footprint": "Resistor_SMD:R_0805_2012Metric",
+             "value": "10k", "x_mm": 8.0, "y_mm": 8.0, "rotation_deg": 0,
+             "layer": "top", "assembly": {"mpn": "C25804"}},
+        ],
+    })
+    svg, cpl, _ = _rendered(board)
+    root = ET.fromstring(svg)
+    page_w = float(root.get("width"))
+    # 5 capped columns + gutter + padding stays well under this; a page whose
+    # width scaled with the 4001-char designator would be tens of thousands.
+    assert page_w < 3000.0, f"the page grew with the designator: {page_w}px"
+    assert _assert_page_texts_fit(svg) > 10
+    # The cut is visible, never silent: the table cell and the placement label
+    # both end in "...", and neither carries the whole designator.
+    texts = [el.text or "" for el in root.iter(f"{SVG_NS}text")]
+    assert any(t.startswith("RXXX") and t.endswith("...") for t in texts), (
+        "no visibly truncated designator text on the page")
+    assert not any(monster in t for t in texts)
+    # The truth is not lost: the emitted file and the machine-readable half of
+    # the page still carry the designator whole.
+    assert monster in cpl
+    assert set(_placement_groups(svg)) == {monster}
+
+
+def test_a_monster_board_name_gets_a_capped_visibly_cut_title():
+    """The title wraps like prose, and the LINES are capped: a name of any
+    length yields at most TITLE_MAX_LINES title lines, the last visibly cut
+    with "..." rather than silently dropped."""
+    board = _compiled_dict({
+        "version": 1, "name": "N" + "ame" * 700, "width_mm": 30,
+        "height_mm": 20, "origin": {"x_mm": 0, "y_mm": 0},
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "R1", "footprint": "Resistor_SMD:R_0805_2012Metric",
+             "value": "10k", "x_mm": 8.0, "y_mm": 8.0, "rotation_deg": 0,
+             "layer": "top", "assembly": {"mpn": "C25804"}},
+        ],
+    })
+    svg, _, _ = _rendered(board)
+    root = ET.fromstring(svg)
+    titles = [el.text or "" for el in root
+              if el.tag == f"{SVG_NS}text" and el.get("class") == "title"]
+    assert 0 < len(titles) <= ap.TITLE_MAX_LINES
+    assert titles[-1].endswith("...")
+    assert _assert_page_texts_fit(svg) > 10
