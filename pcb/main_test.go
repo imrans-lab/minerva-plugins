@@ -801,6 +801,18 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 			// TestPCBWorkerStdioSmoke_ExportAssembly instead.
 			continue
 		}
+		if name == "minerva_pcb_order_package" {
+			// Same carve-out as minerva_pcb_export_assembly directly above,
+			// for the same reason (docket 01a0561d8505): the package strict-
+			// compiles the same mpn-less spike board through the same identity
+			// gate, so a yaml-only dispatch is a NAMED refusal
+			// (assembly_missing_identity naming R1) every time — correct
+			// behaviour, not a schema mismatch. Exercised properly (happy path
+			// with every file read back off disk + identity refusal carrying
+			// the blocked preflight) by TestPCBWorkerStdioSmoke_OrderPackage
+			// instead.
+			continue
+		}
 		spec := specs[name]
 		var schema map[string]any
 		if err := json.Unmarshal(spec.InputSchema, &schema); err != nil {
@@ -1035,6 +1047,125 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 		t.Fatalf("minerva_pcb_export_assembly (uncompilable board) left stray file(s) on disk: %v — a refusal must leave zero artifacts", names)
 	}
 	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly refuses an uncompilable board by name, zero artifacts — %v", uncErr["message"])
+}
+
+// ---------------------------------------------------------------------------
+// minerva_pcb_order_package (docket 01a0561d8505 — the coverage half of the
+// sweep carve-out above)
+// ---------------------------------------------------------------------------
+
+// TestPCBWorkerStdioSmoke_OrderPackage is the dispatch-level test the
+// DeclaredSchemaArgsOnly carve-out owes: excusing the tool from the generic
+// sweep without this would leave it untested over stdio. Happy path (the whole
+// package directory written, every named file read back OFF DISK — the reply's
+// own list is exactly what a success-without-writing regression leaves
+// untouched) and the identity refusal (named component/field, blocked
+// preflight attached, zero artifacts), through the REAL plugin binary +
+// worker, like every other tool's coverage in this file.
+func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
+	c, cleanup := startPlugin(t, "pcb-plugin-order-package")
+	defer cleanup()
+
+	fixturePath := filepath.Join("worker", "tests", "testdata", "assembly_boards", "assembly_resolved.yaml")
+	fixture, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read assembly fixture: %v", err)
+	}
+
+	// --- happy path: one compilation, the whole directory, atomically -------
+	outDir := t.TempDir()
+	env := c.call("minerva_pcb_order_package", map[string]any{
+		"yaml": string(fixture), "out_dir": outDir,
+	})
+	if env["ok"] != true {
+		t.Fatalf("minerva_pcb_order_package (happy path) ok != true: %v", env)
+	}
+	res := asMap(t, env["result"], "order_package.result")
+	if res["directory"] != "AssemblyResolved-jlc" {
+		t.Fatalf("minerva_pcb_order_package directory = %v, want AssemblyResolved-jlc", res["directory"])
+	}
+	ready := asMap(t, res["readiness"], "order_package.readiness")
+	if ready["package_generated"] != true {
+		t.Fatalf("minerva_pcb_order_package readiness.package_generated = %v, want true", ready["package_generated"])
+	}
+	if ready["order_page_verified"] != nil {
+		t.Fatalf("minerva_pcb_order_package readiness.order_page_verified = %v, want null — no export can set it", ready["order_page_verified"])
+	}
+	outputs, isList := res["outputs"].([]any)
+	if !isList || len(outputs) == 0 {
+		t.Fatalf("minerva_pcb_order_package outputs is not a non-empty list: %v", res["outputs"])
+	}
+	listed := map[string]bool{}
+	for _, item := range outputs {
+		entry := asMap(t, item, "order_package outputs entry")
+		file, _ := entry["file"].(string)
+		sha, _ := entry["sha256"].(string)
+		if file == "" || len(sha) != 64 {
+			t.Fatalf("minerva_pcb_order_package output entry missing file/sha256: %v", entry)
+		}
+		listed[file] = true
+	}
+	pkgDir := filepath.Join(outDir, "AssemblyResolved-jlc")
+	for _, want := range []string{"gerbers.zip", "bom.csv", "cpl.csv",
+		"assembly-preview.svg", "ORDER-CHECKLIST.md", "preflight.json",
+		"order-manifest.json"} {
+		if !listed[want] {
+			t.Fatalf("minerva_pcb_order_package outputs does not list %q: %v", want, res["outputs"])
+		}
+		info, statErr := os.Stat(filepath.Join(pkgDir, want))
+		if statErr != nil {
+			t.Fatalf("minerva_pcb_order_package did not write %s: %v", want, statErr)
+		}
+		if info.Size() == 0 {
+			t.Fatalf("minerva_pcb_order_package wrote an empty %s", want)
+		}
+	}
+	bomBytes, err := os.ReadFile(filepath.Join(pkgDir, "bom.csv"))
+	if err != nil {
+		t.Fatalf("read written bom.csv: %v", err)
+	}
+	if !strings.Contains(string(bomBytes), "LCSC Part #") {
+		t.Fatalf("minerva_pcb_order_package bom.csv missing JLC header: %q", string(bomBytes))
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_order_package happy path — %v written to disk", res["directory"])
+
+	// --- identity refusal: named, blocked preflight attached, zero files ----
+	// Same replace-first-occurrence mutation as the export_assembly test —
+	// removes ONLY R1's mpn (the structured-block one at six-space indent), so
+	// a message naming "R1" is a real assertion.
+	noIdentity := mustMutateFixture(t, string(fixture), "      mpn: C25804\n", "")
+	refuseDir := t.TempDir()
+	idEnv := c.call("minerva_pcb_order_package", map[string]any{
+		"yaml": noIdentity, "out_dir": refuseDir,
+	})
+	if idEnv["ok"] != false {
+		t.Fatalf("minerva_pcb_order_package (missing mpn) ok != false: %v", idEnv)
+	}
+	idErr := asMap(t, idEnv["error"], "order_package identity-refusal error")
+	idMsg, _ := idErr["message"].(string)
+	if !strings.Contains(idMsg, "R1") || !strings.Contains(idMsg, "mpn") {
+		t.Fatalf("minerva_pcb_order_package (missing mpn) message does not name the component/field verbatim: %q", idMsg)
+	}
+	preflight := asMap(t, idErr["preflight"], "order_package refusal preflight")
+	refusedReady := asMap(t, preflight["readiness"], "order_package refusal readiness")
+	if refusedReady["package_generated"] != false {
+		t.Fatalf("minerva_pcb_order_package refusal readiness.package_generated = %v, want false", refusedReady["package_generated"])
+	}
+	if refusedReady["preflight_status"] != "blocked" {
+		t.Fatalf("minerva_pcb_order_package refusal readiness.preflight_status = %v, want \"blocked\"", refusedReady["preflight_status"])
+	}
+	entries, err := os.ReadDir(refuseDir)
+	if err != nil {
+		t.Fatalf("read refuseDir: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("minerva_pcb_order_package (missing mpn) left stray file(s) on disk: %v — a blocked board produces NO files", names)
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_order_package identity refusal — %q", idMsg)
 }
 
 // ---------------------------------------------------------------------------

@@ -500,3 +500,93 @@ def test_the_page_states_the_frame_it_is_drawn_in():
     assert "counter-clockwise-positive" in svg
     assert "the board's Y negated" in svg
     assert "cpl.csv" in svg
+
+
+# ---------------------------------------------------------------------------
+# The page must not clip its own words, and a label must be readable.
+# ---------------------------------------------------------------------------
+
+
+def _page_space_texts(svg: str):
+    """Every ``<text>`` drawn in PAGE pixels — title, header, legend, notes and
+    table — i.e. the direct children of the root. Text inside the drawing group
+    lives in board millimetres and is measured by the label test instead."""
+    root = ET.fromstring(svg)
+    for child in root:
+        if child.tag == f"{SVG_NS}text":
+            yield child
+
+
+@pytest.mark.parametrize("fixture", [ANCHOR_FIXTURE, OVERRIDE_FIXTURE])
+def test_no_page_text_runs_past_the_pages_own_edge(fixture):
+    """The header once carried a 207-character sentence whose tail rendered
+    past the page's declared width — cut off in a drawing whose entire purpose
+    is being looked at. Every page-space line must fit inside the page.
+
+    Width is taken from the module's own estimator, which is deliberately
+    WIDER than DejaVu Sans's real advances (the widest face in the
+    stylesheet's stack): the estimate fitting implies the render fits. An
+    unwrapped line of the old header length estimates far past the page edge,
+    so this fails on any return of the overflow."""
+    svg, _, _ = _rendered(_compiled(fixture))
+    root = ET.fromstring(svg)
+    page_w = float(root.get("width"))
+    checked = 0
+    for element in _page_space_texts(svg):
+        cls = element.get("class") or ""
+        size = 17.0 if "title" in cls else 12.0
+        bold = any(token in cls for token in ("title", "prose-strong", "cell-head"))
+        x = float(element.get("x"))
+        width = ap._est_text_width(element.text or "", size, bold=bold)
+        assert x + width <= page_w, (
+            f"page text runs off the page ({x + width:.0f}px > {page_w:.0f}px): "
+            f"{element.text!r}")
+        checked += 1
+    assert checked > 10, "the page stopped emitting its own prose"
+
+
+def test_placement_labels_cover_no_lands_no_marks_and_not_each_other():
+    """A label drawn across a pad row, a crosshair or its neighbour's label
+    cannot be read, and a label that cannot be read does not do its job. The
+    override fixture is the dense case that showed it: two bottom-side rows
+    whose labels used to sit directly across their own lands.
+
+    The label boxes are read back OFF THE PAGE (each ``<text>``'s own
+    translate() and anchor), sized with the module's deliberately-wide
+    estimator; the lands and crosshairs are rebuilt from the same board. The
+    oracle is plain geometry: no intersection."""
+    board = _compiled(OVERRIDE_FIXTURE)
+    package = ao.build_package(board, PROFILE)
+    svg = ap.render(board, package.emission)
+
+    obstacles = []
+    for component in board.components:
+        obstacles.extend(ap._drawing(board, component).pad_boxes)
+    for row in package.emission.cpl:
+        obstacles.extend(ap._mark_boxes(float(row.x_mm), float(row.y_mm),
+                                        float(row.rotation_deg)))
+
+    label_boxes = {}
+    for ref, group in _placement_groups(svg).items():
+        label = next(el for el in group.iter(f"{SVG_NS}text")
+                     if (el.get("class") or "").endswith("-label"))
+        transform = label.get("transform")
+        assert transform.startswith("translate(")
+        bx, by = (float(v) for v in
+                  transform[len("translate("):].split(")")[0].split(","))
+        anchor = label.get("text-anchor") or "start"
+        width = ap._est_text_width(label.text, ap.REF_TEXT_MM, bold=True)
+        left = (bx - width if anchor == "end"
+                else bx - width / 2.0 if anchor == "middle" else bx)
+        label_boxes[ref] = (left, by - ap.REF_TEXT_MM * ap.LABEL_DESCENT,
+                            left + width, by + ap.REF_TEXT_MM * ap.LABEL_ASCENT)
+
+    assert len(label_boxes) == 6, "the fixture stopped placing six parts"
+    for ref, box in label_boxes.items():
+        for obstacle in obstacles:
+            assert ap._overlap_area(box, obstacle) == 0.0, (
+                f"{ref}'s label covers board ink at {obstacle}")
+        for other, other_box in label_boxes.items():
+            if other != ref:
+                assert ap._overlap_area(box, other_box) == 0.0, (
+                    f"{ref}'s label covers {other}'s label")

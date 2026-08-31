@@ -117,6 +117,11 @@ NOTE_TEXT_MM = 0.95
 
 # --- page furniture, in screen pixels ---------------------------------------
 PAGE_PAD_PX = 24.0
+#: The narrowest content width any page has (the ``max(..., 760.0)`` floor in
+#: :func:`render`). Prose wrapped to THIS budget fits every page, whatever the
+#: drawing's own width turns out to be — which is what lets the wrap be a fixed
+#: constant instead of a per-board layout decision.
+PROSE_BUDGET_PX = 760.0
 HEADER_LINE_PX = 16.0
 TABLE_LINE_PX = 15.0
 TABLE_COLUMN_PX = (120.0, 96.0, 96.0, 74.0, 78.0)
@@ -164,6 +169,54 @@ def _n(value: float) -> str:
     the file's bytes (and therefore its digest in the manifest) reproduce."""
     text = f"{float(value):.4f}".rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
+
+
+# --- text metrics, estimated DELIBERATELY WIDE ------------------------------
+#
+# The page has no font engine, so a line's width is estimated from per-glyph
+# advance buckets chosen to sit AT OR ABOVE DejaVu Sans's real advances (the
+# first face in the stylesheet's stack, and the widest of them). Overestimating
+# only wraps a line a word early; underestimating is how a sentence walks off
+# the page edge, so every bucket errs wide.
+
+_WIDE_CHARS = set("mwMW—&%@#")        # ~0.82–1.0 em
+_NARROW_CHARS = set("iljtfrI.,:;'’()[]| ")  # <= ~0.41 em
+
+
+def _est_text_width(body: str, size: float, *, bold: bool = False) -> float:
+    """A width the rendered text will not exceed, in ``size``'s own unit."""
+    total = 0.0
+    for ch in str(body):
+        if ch in _WIDE_CHARS:
+            total += 1.05
+        elif ch in _NARROW_CHARS:
+            total += 0.45
+        elif ch.isupper() or ch.isdigit():
+            total += 0.82
+        else:
+            total += 0.68
+    # Weight 600 renders as the bold face where no semibold exists, and DejaVu
+    # Sans Bold runs up to ~10% wider than the regular advances above.
+    return total * size * (1.10 if bold else 1.0)
+
+
+def _wrap(body: str, budget: float, size: float, *, bold: bool = False
+          ) -> list[str]:
+    """Greedy word wrap against :func:`_est_text_width`. Words are never split,
+    so a phrase a test greps for survives intact when it fits one line."""
+    words = str(body).split(" ")
+    lines: list[str] = []
+    line = ""
+    for word in words:
+        candidate = word if not line else f"{line} {word}"
+        if line and _est_text_width(candidate, size, bold=bold) > budget:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    return lines or [""]
 
 
 def _text(x: float, y: float, body: str, *, cls: str, size_mm: float,
@@ -275,6 +328,10 @@ class _Drawing:
     outline_basis: str
     ink: list[str] = field(default_factory=list)
     points: list[tuple[float, float]] = field(default_factory=list)
+    #: One axis-aligned box per LAND, kept separate from ``points`` because the
+    #: label layout dodges lands specifically — a label across a body outline
+    #: is legible, a label across a pad row is not.
+    pad_boxes: list[tuple[float, float, float, float]] = field(default_factory=list)
     pin_one: tuple[float, float] | None = None
     pin_one_note: str = ""
 
@@ -436,11 +493,14 @@ def _drawing(board, component) -> _Drawing:
 
     pad_ink: list[str] = []
     pad_points: list[tuple[float, float]] = []
+    pad_boxes: list[tuple[float, float, float, float]] = []
     for pad in component.placed_pads:
         fragment, extent = _pad_ink(pad, pad_cls)
         if fragment:
             pad_ink.append(fragment)
             pad_points.extend(extent)
+            pad_boxes.append((min(p[0] for p in extent), min(p[1] for p in extent),
+                              max(p[0] for p in extent), max(p[1] for p in extent)))
 
     basis, body_ink, body_points = _outline_ink(component, body_cls)
     if basis == OUTLINE_LANDS:
@@ -453,7 +513,7 @@ def _drawing(board, component) -> _Drawing:
     mark, note = pin_one(board, component)
     drawing = _Drawing(ref=component.ref, populate=populate, side=side,
                        outline_basis=basis, ink=pad_ink + body_ink,
-                       points=pad_points + body_points,
+                       points=pad_points + body_points, pad_boxes=pad_boxes,
                        pin_one=mark, pin_one_note=note)
     if mark is not None:
         drawing.ink.append(
@@ -471,11 +531,114 @@ def _drawing(board, component) -> _Drawing:
 
 
 # ---------------------------------------------------------------------------
-# The claim: one CPL row's crosshair.
+# The claim: one CPL row's crosshair, and where its label can actually go.
+#
+# A label drawn at a fixed offset from the crosshair lands ON the lands of any
+# dense footprint and on its neighbour's label wherever parts sit close — and a
+# label that cannot be read does not do its job. So each label's spot is
+# SEARCHED: candidate positions ring the crosshair at growing distances, and
+# the first one that covers no land, no crosshair ink and no earlier label
+# wins. A label pushed past its own crosshair's immediate neighbourhood gets a
+# thin leader back, so it still says which cross it belongs to.
 # ---------------------------------------------------------------------------
 
+#: Em-fraction extents of a label above and below its baseline (DejaVu Sans:
+#: ascent 0.928, descent 0.236 — both padded up).
+LABEL_ASCENT = 0.95
+LABEL_DESCENT = 0.30
+#: Clearance a label keeps from the things it dodges, in board mm.
+LABEL_CLEAR_MM = 0.15
+#: Crosshair-to-label-edge distances tried, nearest first, in board mm.
+_LABEL_GAPS_MM = (1.2, 2.2, 3.6, 5.4, 8.0)
+#: Past this gap a label is visually detached from its cross and gets a leader.
+_LEADER_GAP_MM = 2.2
 
-def _mark(row, cells, drawing, basis: str
+
+def _overlap_area(a, b) -> float:
+    """Intersection area of two (min_x, min_y, max_x, max_y) boxes."""
+    width = min(a[2], b[2]) - max(a[0], b[0])
+    height = min(a[3], b[3]) - max(a[1], b[1])
+    return width * height if width > 0 and height > 0 else 0.0
+
+
+def _mark_boxes(x: float, y: float, rotation_deg: float
+                ) -> list[tuple[float, float, float, float]]:
+    """The boxes a crosshair's own ink occupies: the cross arms, and the tick
+    segment at its actual emitted angle. Labels must not cover either."""
+    radians = math.radians(rotation_deg)
+    tick_x = x + TICK_MM * math.cos(radians)
+    tick_y = y + TICK_MM * math.sin(radians)
+    pad = TICK_DOT_MM + 0.1
+    return [
+        (x - CROSS_ARM_MM, y - CROSS_ARM_MM, x + CROSS_ARM_MM, y + CROSS_ARM_MM),
+        (min(x, tick_x) - pad, min(y, tick_y) - pad,
+         max(x, tick_x) + pad, max(y, tick_y) + pad),
+    ]
+
+
+def _label_body(cells) -> str:
+    """The label's text — the emitted designator, rotation and side cells."""
+    return f"{cells[0]}  {cells[4]}°  {cells[3]}"
+
+
+def _edge_bands(box, half: float = 0.12
+                ) -> list[tuple[float, float, float, float]]:
+    """A drawn extent's perimeter as four thin bands. Labels dodge these so a
+    body outline is never stroked through the middle of a designator."""
+    min_x, min_y, max_x, max_y = box
+    return [(min_x - half, min_y - half, max_x + half, min_y + half),
+            (min_x - half, max_y - half, max_x + half, max_y + half),
+            (min_x - half, min_y - half, min_x + half, max_y + half),
+            (max_x - half, min_y - half, max_x + half, max_y + half)]
+
+
+def _label_plan(x: float, y: float, body: str, obstacles
+                ) -> tuple[float, float, str, tuple, bool]:
+    """Where one label goes: ``(baseline_x, baseline_y, anchor, box, leader)``.
+
+    Candidates ring the crosshair — east, west, above, below, then the four
+    diagonals — at each gap tier in turn, so the nearest readable spot wins.
+    When no candidate is clear of every obstacle, the least-covered one is
+    taken: a label overlapping a little is still better than a label always
+    drawn on top of the pad row it started this search to escape."""
+    width = _est_text_width(body, REF_TEXT_MM, bold=True)
+    ascent = REF_TEXT_MM * LABEL_ASCENT
+    descent = REF_TEXT_MM * LABEL_DESCENT
+
+    def box_for(bx: float, by: float, anchor: str):
+        left = (bx - width if anchor == "end"
+                else bx - width / 2.0 if anchor == "middle" else bx)
+        return (left, by - descent, left + width, by + ascent)
+
+    best = None
+    for gap in _LABEL_GAPS_MM:
+        centred_y = y - REF_TEXT_MM * 0.35
+        above_y = y + gap + descent
+        below_y = y - gap - ascent
+        candidates = (
+            (x + gap, centred_y, "start"),   # east
+            (x - gap, centred_y, "end"),     # west
+            (x, above_y, "middle"),          # above (this frame's +y is up)
+            (x, below_y, "middle"),          # below
+            (x + gap, above_y, "start"),     # north-east
+            (x - gap, above_y, "end"),       # north-west
+            (x + gap, below_y, "start"),     # south-east
+            (x - gap, below_y, "end"),       # south-west
+        )
+        for bx, by, anchor in candidates:
+            box = box_for(bx, by, anchor)
+            padded = (box[0] - LABEL_CLEAR_MM, box[1] - LABEL_CLEAR_MM,
+                      box[2] + LABEL_CLEAR_MM, box[3] + LABEL_CLEAR_MM)
+            score = sum(_overlap_area(padded, obstacle) for obstacle in obstacles)
+            if score == 0.0:
+                return bx, by, anchor, box, gap > _LEADER_GAP_MM
+            if best is None or score < best[0]:
+                best = (score, gap, bx, by, anchor, box)
+    _, gap, bx, by, anchor, box = best
+    return bx, by, anchor, box, gap > _LEADER_GAP_MM
+
+
+def _mark(row, cells, drawing, basis: str, label_plan
           ) -> tuple[list[str], list[tuple[float, float]], bool]:
     """One placement's crosshair, designator, rotation tick and — when it lands
     off its own drawing — the leader that says so.
@@ -509,9 +672,17 @@ def _mark(row, cells, drawing, basis: str
             ink.append(f'<path class="claim-leader" d="M {_n(x)},{_n(y)} '
                        f'L {_n((box[0] + box[2]) / 2.0)},'
                        f'{_n((box[1] + box[3]) / 2.0)}"/>')
-    label = f"{cells[0]}  {cells[4]}°  {cells[3]}"
-    ink.append(_text(x + CROSS_ARM_MM * 0.4, y + CROSS_ARM_MM * 0.9, label,
-                     cls=f"{cls}-label", size_mm=REF_TEXT_MM))
+    label_x, label_y, anchor, label_box, leader = label_plan
+    if leader:
+        # The nearest point of the label box, so the line is as short as the
+        # search left it.
+        near_x = min(max(x, label_box[0]), label_box[2])
+        near_y = min(max(y, label_box[1]), label_box[3])
+        ink.append(f'<path class="label-leader" d="M {_n(x)},{_n(y)} '
+                   f'L {_n(near_x)},{_n(near_y)}"/>')
+    ink.append(_text(label_x, label_y, _label_body(cells),
+                     cls=f"{cls}-label", size_mm=REF_TEXT_MM, anchor=anchor))
+    points.extend([(label_box[0], label_box[1]), (label_box[2], label_box[3])])
     # THE MACHINE-READABLE HALF, and it carries the EMITTED CELLS as text rather
     # than numbers of its own: what a test reads back off this drawing is
     # comparable to cpl.csv cell for cell, so a preview that ever stopped being
@@ -556,6 +727,7 @@ _STYLE = """
   .claim-off-ring { fill: none; stroke: #b00020; stroke-width: 0.14; }
   .claim-leader { fill: none; stroke: #b00020; stroke-width: 0.08;
                   stroke-dasharray: 0.5 0.4; }
+  .label-leader { fill: none; stroke: #d99b82; stroke-width: 0.07; }
   .dnp-label { fill: #78838e; font-weight: 600; }
   .cell { font-size: 12px; fill: #16202b; }
   .cell-head { font-size: 12px; fill: #43505e; font-weight: 700; }
@@ -771,13 +943,30 @@ def render(board, emission) -> str:
     basis_by_ref = {physical.ref: physical.anchor_basis
                     for component in board.components
                     for physical in component.physical_placements}
+    # What every label must dodge: every land on the page, every drawn body's
+    # perimeter, every crosshair's own ink (its neighbours' and its own), and
+    # each label already placed.
+    pad_obstacles = [box for drawing in drawings for box in drawing.pad_boxes]
+    for drawing in drawings:
+        box = drawing.bounds()
+        if box is not None:
+            pad_obstacles.extend(_edge_bands(box))
+    cross_obstacles = [box for row in emission.cpl
+                       for box in _mark_boxes(float(row.x_mm), float(row.y_mm),
+                                              float(row.rotation_deg))]
+    placed_labels: list[tuple[float, float, float, float]] = []
+
     claim_ink: list[str] = []
     points: list[tuple[float, float]] = []
     off_body_refs: set[str] = set()
     for row in emission.cpl:
+        plan = _label_plan(float(row.x_mm), float(row.y_mm),
+                           _label_body(cells_by_ref[row.ref]),
+                           pad_obstacles + cross_obstacles + placed_labels)
+        placed_labels.append(plan[3])
         ink, extent, off_body = _mark(row, cells_by_ref[row.ref],
                                       by_ref.get(row.ref),
-                                      basis_by_ref.get(row.ref, ""))
+                                      basis_by_ref.get(row.ref, ""), plan)
         claim_ink.extend(ink)
         points.extend(extent)
         if off_body:
@@ -806,10 +995,14 @@ def render(board, emission) -> str:
     body.append(f'<text class="title" x="{_n(PAGE_PAD_PX)}" y="{_n(cursor)}">'
                 f'{_esc(board.name)} — assembly preview</text>')
     cursor += HEADER_LINE_PX + 4.0
+    # Prose is wrapped to the page's guaranteed MINIMUM content width, so no
+    # header sentence can run past the right edge of any page this file emits.
     for cls, line in header:
-        body.append(f'<text class="{cls}" x="{_n(PAGE_PAD_PX)}" y="{_n(cursor)}">'
-                    f'{_esc(line)}</text>')
-        cursor += HEADER_LINE_PX
+        for wrapped in _wrap(line, PROSE_BUDGET_PX, 12.0,
+                             bold=cls == "prose-strong"):
+            body.append(f'<text class="{cls}" x="{_n(PAGE_PAD_PX)}" '
+                        f'y="{_n(cursor)}">{_esc(wrapped)}</text>')
+            cursor += HEADER_LINE_PX
     cursor += 8.0
     legend, cursor = _legend_ink(PAGE_PAD_PX, cursor)
     body.extend(legend)
@@ -841,10 +1034,13 @@ def render(board, emission) -> str:
         body.append(f'<text class="cell-head" x="{_n(PAGE_PAD_PX)}" '
                     f'y="{_n(cursor)}">What this drawing does not claim</text>')
         cursor += HEADER_LINE_PX
+        # Notes carry ref lists of unbounded length, so they wrap like the
+        # header does — to the width every page is guaranteed to have.
         for note in notes:
-            body.append(f'<text class="prose" x="{_n(PAGE_PAD_PX)}" '
-                        f'y="{_n(cursor)}">{_esc(note)}</text>')
-            cursor += HEADER_LINE_PX
+            for wrapped in _wrap(note, PROSE_BUDGET_PX, 12.0):
+                body.append(f'<text class="prose" x="{_n(PAGE_PAD_PX)}" '
+                            f'y="{_n(cursor)}">{_esc(wrapped)}</text>')
+                cursor += HEADER_LINE_PX
         cursor += 12.0
 
     body.append(f'<text class="cell-head" x="{_n(PAGE_PAD_PX)}" y="{_n(cursor)}">'
