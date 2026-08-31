@@ -1,0 +1,129 @@
+(footprint "L_Sunlord_AMWPH4018_4x4x1.8mm"
+	(version 20241229)
+	(generator "minerva-pcb-seed")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "Sunlord AMWPH4018 series shielded power inductor, AEC-Q200. Body 4.0 x 4.0 x 1.8mm, terminals 3.3 x 1.1 on the two ends. Recommended land from datasheet Fig.3-1 / Table 3-1: a=1.2 is the GAP BETWEEN THE PADS and b=1.8 is EACH PAD'S WIDTH - read the figure, not the letters, a and b are easy to swap and both orderings give the same +/-1.5 centres. Two pads 1.8 x 3.7 at +/-1.5, spanning x 0.6 to 2.4: 0.3 inboard of the 0.9 terminal inner edge and 0.4 outboard of the 2.0 body edge, which is where the solder fillet forms. Non-polar: no pin-1 marker, and nothing on F.Fab outside the body outline, so the fab-extent anchor stays at (0, 0). Courtyard is wider than the body because the pads are.")
+	(tags "inductor power shielded smd sunlord aec-q200")
+	(attr smd)
+	(property "Reference" "REF**"
+		(at 0 -3 0)
+		(layer "F.SilkS")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "L_Sunlord_AMWPH4018_4x4x1.8mm"
+		(at 0 3 0)
+		(layer "F.Fab")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -1.5 0)
+		(size 1.8 3.7)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "2" smd rect
+		(at 1.5 0)
+		(size 1.8 3.7)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(fp_line
+		(start -2.0 -2.0)
+		(end 2.0 -2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start 2.0 -2.0)
+		(end 2.0 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start 2.0 2.0)
+		(end -2.0 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start -2.0 2.0)
+		(end -2.0 -2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start -0.75 -2.1)
+		(end 0.75 -2.1)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start -0.75 2.1)
+		(end 0.75 2.1)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start -2.65 -2.25)
+		(end 2.65 -2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+	(fp_line
+		(start 2.65 -2.25)
+		(end 2.65 2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+	(fp_line
+		(start 2.65 2.25)
+		(end -2.65 2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+	(fp_line
+		(start -2.65 2.25)
+		(end -2.65 -2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+)

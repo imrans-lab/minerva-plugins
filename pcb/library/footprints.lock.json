@@ -116,7 +116,7 @@
 			"model3d_ref": null,
 			"original_source_path": null,
 			"path": "Capacitor_SMD.pretty/C_1206_3216Metric.kicad_mod",
-			"provenance_note": "smart-remote v2 rev B: C13, the mic's local decoupler, moves 0805 -> 1206 because JLC has no 0805 C0G at 100nF and the Syntiant mic datasheet forbids Class 2 dielectrics near the mic. NOT interchangeable with Fuse:Fuse_1206_3216Metric, which JP1-JP6/TP1 use: that land is 1.25x1.75 at +/-1.400, this one is 1.15x1.80 at +/-1.475.",
+			"provenance_note": "smart-remote v2 rev B: C13, the mic's local decoupler, moves 0805 -> 1206 because JLC has no 0805 C0G at 100nF and the Syntiant mic datasheet forbids Class 2 dielectrics near the mic. NOT interchangeable with Fuse:Fuse_1206_3216Metric, which JP1-JP6/TP1 use: that land is 1.25x1.75 at +/-1.400, this one is 1.15x1.80 at +/-1.475. VERIFIED against the Walsin MLCC datasheet 2026-08-31: Walsin gives no recommended land (normal for MLCC - they defer to IPC), so this was checked against their size table row '1206 (3216)': body 3.20 x 1.60, termination band 0.60+/-0.20. The KiCad land (1.15 x 1.8 at +/-1.475, spanning 0.90..2.05) covers the whole band (1.00..1.60) with +0.10 heel, +0.45 toe for the fillet and +0.10 side overhang - IPC-7351 nominal, and it stays correct across the band's full +/-0.20 tolerance.",
 			"retrieved_at": "2026-08-31",
 			"sha256": "0bbfd1e461a7affe3ccb4f4dfe2534925ca853c7537e23addb29066df8015135",
 			"size_bytes": 1768,
@@ -808,6 +808,29 @@
 			"source_kind": "official_kicad",
 			"source_ref": "kicad-footprints@9.0.9.1/Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod"
 		},
+		"Sunlord:L_Sunlord_AMWPH4018_4x4x1.8mm": {
+			"assembly": {
+				"dist_part_numbers": [
+					"C2846183"
+				],
+				"mpn": "AMWPH4018S2R2MT",
+				"orientation_convention": null,
+				"package": "SMD 4.0x4.0x1.8mm"
+			},
+			"bless": null,
+			"converter_version": null,
+			"layer": "seed",
+			"license": "LicenseRef-TurnRock-Proprietary",
+			"model3d_ref": null,
+			"original_source_path": null,
+			"path": "Sunlord.pretty/L_Sunlord_AMWPH4018_4x4x1.8mm.kicad_mod",
+			"provenance_note": "smart-remote v2 rev B: L1 buck inductor, replacing the Vishay-named land. Pads 1.8 x 3.7 at +/-1.5 span x 0.6 to 2.4 against a terminal at 0.9 to 2.0 - 0.3 inboard and 0.4 outboard, where the fillet forms. NOTE the old Inductor_SMD:L_Vishay_IFSC-1515AH land (1.15 wide at +/-1.475, spanning 0.9 to 2.05) covers the termination but gives far less fillet than Sunlord specifies; an earlier 'verified drop-in, no board change' assessment of it rested on the swapped a/b reading and was wrong. Non-polar, nothing on F.Fab past the body outline, anchor (0, 0).",
+			"retrieved_at": "2026-08-31",
+			"sha256": "ccd07b5b51dec4cdc26d511be44bd61f6968745432442bf554902ed0ea28acad",
+			"size_bytes": 2537,
+			"source_kind": "hand_authored",
+			"source_ref": "authored 2026-08-31 from the Sunlord AMWPH4018S series datasheet, Fig.3-1 and Table 3-1: A=B=4.0, C=1.8, D=3.3, E=1.1, a=1.2, b=1.8, c=3.7. READ THE FIGURE: 'a' is the GAP BETWEEN PADS and 'b' is EACH PAD'S WIDTH, not the other way round. Both orderings give the same +/-1.5 centres, so the arithmetic self-checks either way and a swap is invisible - it was caught only by zooming into Fig.3-1 and seeing which edges the extension lines drop from. Verified in KiCad 9.0.9 and 10.0.5."
+		},
 		"Syntiant:SPK0641HT4H-1_TopPort_LGA-8_4x3mm": {
 			"assembly": {
 				"dist_part_numbers": [
@@ -824,10 +847,10 @@
 			"model3d_ref": null,
 			"original_source_path": null,
 			"path": "Syntiant.pretty/SPK0641HT4H-1_TopPort_LGA-8_4x3mm.kicad_mod",
-			"provenance_note": "smart-remote v2 rev B: U3 microphone, replacing MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm. TOP PORT so no PCB acoustic hole. SAME body and footprint name shape as the MSM261 but a DIFFERENT pinout - pad 8 is GROUND here and was +3V3 on the MSM261 layout, so reusing the old net map shorts the mic rail. PDM output, not I2S: pad 1 DATA, pad 2 CLOCK. Pad 3 SELECT is internally pulled low (left channel); tie it to GND to make that explicit. Pads 5-8 are all GROUND. orientation_convention is null - the CPL rotation has not been verified against a fab yet.",
+			"provenance_note": "smart-remote v2 rev B: U3 microphone, replacing MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm. TOP PORT so no PCB acoustic hole. SAME body and footprint name shape as the MSM261 but a DIFFERENT pinout - pad 8 is GROUND here and was +3V3 on the MSM261 layout, so reusing the old net map shorts the mic rail. PDM output, not I2S: pad 1 DATA, pad 2 CLOCK. Pad 3 SELECT is internally pulled low (left channel); tie it to GND to make that explicit. Pads 5-8 are all GROUND. orientation_convention is null - the CPL rotation has not been verified against a fab yet. The F.Fab pin-1 marker sits INSIDE the body outline on purpose: the compiler takes its anchor from the fab extent first (assembly_anchor), so a marker poking past the outline would shift every placed part - it measured -0.0925mm in x before this was corrected.",
 			"retrieved_at": "2026-08-31",
-			"sha256": "52be6ca8874195dd169a3feff12a67c0a944d686b657a308525c53c9f70404aa",
-			"size_bytes": 3899,
+			"sha256": "1c032df0f80e277f26dfc85e1e7691b88618757e7333bb281a16344a57b1a64e",
+			"size_bytes": 3897,
 			"source_kind": "hand_authored",
 			"source_ref": "authored 2026-08-31 from the Syntiant SPK0641HT4H-1 datasheet Rev D-1, MECHANICAL SPECIFICATIONS 'Example Land Pattern': 2.750 x 3.750 overall, four inner pads 0.45x0.95 on 0.85 x 1.35 centres, ground bars 1.30x0.325 top/bottom and 0.325x2.30 left/right, every pad-to-pad gap 0.40. Cross-checked pad-for-pad against the SnapEDA vendor export for LCSC C5159510: all 8 pads agree to within 1e-6 mm. Datasheet chamfers (8X 0.1 x 45 deg) are omitted - they only widen the 0.40 corner gaps."
 		},

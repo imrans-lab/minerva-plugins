@@ -185,8 +185,8 @@
 		(layer "F.SilkS")
 	)
 	(fp_circle
-		(center -1.6 1.75)
-		(end -1.48 1.75)
+		(center -1.2 1.6)
+		(end -1.08 1.6)
 		(stroke
 			(width 0.05)
 			(type solid)
