@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // fullAssemblyBoard is a board whose one component states EVERY assembly field
@@ -567,5 +569,57 @@ components:
 	props, _ := c.Extra["properties"].(map[string]interface{})
 	if v, present := props["mpn"]; !present || v != nil {
 		t.Fatalf("a null properties identity value changed: %#v", props)
+	}
+}
+
+// WHEN THE REPAIR CANNOT RUN IT SAYS SO. preserveIdentityText needs the source
+// node tree and the decoded board to line up component-for-component; where
+// they do not it leaves every value exactly as the untyped decode left it,
+// which IS the renumbering above. Bailing quietly made that outcome
+// indistinguishable from a clean pass, so the pass now hands its caller a
+// warning per component it could not walk, and UnmarshalYAMLWithWarnings puts
+// it on the deserialize reply's warnings list.
+func TestIdentityRepairReportsWhenItCannotRun(t *testing.T) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(identityHomesYAML), &doc); err != nil {
+		t.Fatalf("unmarshal node tree: %v", err)
+	}
+	var b Board
+	if err := yaml.Unmarshal([]byte(identityHomesYAML), &b); err != nil {
+		t.Fatalf("unmarshal board: %v", err)
+	}
+
+	// The lined-up case is silent — a warning on every load would train a
+	// reader to ignore the one that matters.
+	if w := preserveIdentityText(&b, &doc); len(w) != 0 {
+		t.Fatalf("a document that lines up must warn about nothing: %v", w)
+	}
+
+	// One more decoded component than the document has nodes: the pass cannot
+	// tell which node describes which component, so it runs over none of them.
+	skewed := b
+	skewed.Components = append(append([]Component{}, b.Components...), Component{Ref: "R2"})
+	warnings := preserveIdentityText(&skewed, &doc)
+	if len(warnings) == 0 {
+		t.Fatal("a shape mismatch fell back to the renumbering silently")
+	}
+	if !strings.Contains(warnings[0], "identity text was not preserved") ||
+		!strings.Contains(warnings[0], "0603") {
+		t.Errorf("the warning must name what was lost and what it costs: %q", warnings[0])
+	}
+
+	// A component whose source node is not a mapping is named INDIVIDUALLY —
+	// the rest of the board is still repaired, so a whole-document warning
+	// would overstate the damage.
+	var scalarDoc yaml.Node
+	if err := yaml.Unmarshal([]byte(identityHomesYAML), &scalarDoc); err != nil {
+		t.Fatalf("unmarshal node tree: %v", err)
+	}
+	comps := nodeMapValue(scalarDoc.Content[0], "components")
+	comps.Content[0] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "R1"}
+	warnings = preserveIdentityText(&b, &scalarDoc)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "components[0]") ||
+		!strings.Contains(warnings[0], "R1") {
+		t.Errorf("a non-mapping component node must be named: %v", warnings)
 	}
 }

@@ -25,8 +25,14 @@ TWO SHAPES, because two situations are genuinely different:
   back. A rename that fails anyway is therefore unwound to the previous CONTENT:
   names this call created are removed, and names it displaced are moved back.
 
-Neither helper creates a destination that a reader can observe half-built, and
-neither leaves a temporary behind on the failure path.
+Neither helper creates a destination that a reader can observe half-built.
+
+ONE RESIDUE IS POSSIBLE, and it is deliberate. If a rename in
+:func:`write_files` fails AND the unwind's restore of a displaced original also
+fails, that original stays under its ``.<name>.<token>.displaced`` neighbour and
+the destination name is gone. Keeping the bytes under a findable name beats
+deleting them to leave a tidy directory, so the unwind does not try; the trade
+is stated because a claim that no temporary can be left would be false.
 """
 
 from __future__ import annotations
@@ -88,7 +94,9 @@ def _check_names(files: Mapping[str, object]) -> None:
 def write_files(directory, files: Mapping[str, object]) -> list[dict]:
     """Write every artifact into an EXISTING-OR-CREATED directory, or leave the
     directory's contents as they were — including the bytes of a file this call
-    would have replaced.
+    would have replaced, which are restored to their name unless that restore
+    ALSO fails, in which case they remain under the ``.displaced`` neighbour
+    (see the module docstring).
 
     Returns ``[{path, bytes_written}]`` in the caller's key order — the same
     shape every other worker disk write reports.

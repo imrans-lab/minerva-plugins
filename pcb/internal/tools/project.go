@@ -287,7 +287,7 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 	)
 	switch {
 	case a.YAML != "":
-		b, err = board.UnmarshalYAML([]byte(a.YAML))
+		b, warnings, err = board.UnmarshalYAMLWithWarnings([]byte(a.YAML))
 	case len(a.MinpcbJSON) > 0:
 		b, warnings, err = board.ImportMinpcb(unwrapJSON(a.MinpcbJSON))
 	case len(a.Board) > 0:

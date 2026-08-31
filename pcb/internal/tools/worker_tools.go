@@ -953,12 +953,16 @@ var orderPackageDescription = "Emit the WHOLE order package for one manufacturin
 	"and nothing else), bom.csv, cpl.csv, assembly-preview.svg, ORDER-CHECKLIST.md, " +
 	"preflight.json and order-manifest.json, under <board>-<profile>/. Args {yaml|board|" +
 	"board_path+board_digest, profile?:<service id, default \"jlc\">, out_dir?:<dir>, " +
-	"overwrite?:<bool>, source_path?:<a path you SAY the board came from>}. THE MANIFEST'S " +
-	"GIT RECORD IS EVIDENCE OR IT IS LABELLED: source.git.basis is \"worker-read\" only for " +
-	"the board_path arm, whose file this tool opened and digest-checked itself, and that is " +
-	"the only basis carrying a revision; a source_path beside an inline board is recorded as " +
-	"\"caller-asserted\" with no revision read from it, because an identical copy of a board " +
-	"in an unrelated repository is indistinguishable from the original. Because every " +
+	"overwrite?:<bool>, source_path?:<the path you declare this board's source of record>}. " +
+	"THE MANIFEST'S GIT RECORD IS EVIDENCE OR IT IS LABELLED, and source.git.basis says " +
+	"which. A revision is read for \"worker-read\" alone, and that takes TWO statements " +
+	"about ONE file: source_path names it as this board's source AND board_path loaded the " +
+	"board out of that same file, digest-checked. source_path by itself is " +
+	"\"caller-asserted\" — recorded as the claim it is, no revision read, because an " +
+	"identical copy of a board in an unrelated repository is indistinguishable from the " +
+	"original. board_path by itself is a TRANSPORT reference (the panel spills an oversized " +
+	"live board to a snapshot file and sends it this way) and is recorded as \"inline\", so " +
+	"how a board travelled can never change what its provenance claims. Because every " +
 	"artifact derives from one compilation, the archive and the CSVs cannot describe two " +
 	"different boards. Returns {directory, outputs:[{file, sha256, bytes}], readiness, " +
 	"preflight, source, written, warnings, advisories?, unchecked_rules?, ip_questions?}. " +
@@ -1000,12 +1004,12 @@ var orderPackageSchema = json.RawMessage(`{
 		"properties": {
 			"yaml": {"type": "string", "description": "Canonical board YAML source."},
 			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
-			"board_path": {"type": "string", "description": "Path to a board snapshot file, read only when yaml and board are both absent and only with board_digest. This is the ONE arm that yields a git revision in the manifest: the file was opened and digest-checked here, so the repository holding it is evidence about this board."},
+			"board_path": {"type": "string", "description": "Path to a board file, read only when yaml and board are both absent and only with board_digest. On its own this is a TRANSPORT reference — an oversized board spilled to a snapshot file — and the manifest records basis \"inline\"; it yields a git revision only when source_path names this same file."},
 			"board_digest": {"type": "string", "description": "sha256 hex of the board_path file's bytes. Mandatory with board_path — an unverified file read is refused, never trusted."},
 			"profile": {"type": "string", "description": "Service profile id (default \"jlc\" — JLCPCB's CSV dialect, no tier claimed; \"jlcpcb-economic\" selects the Economic tier and its compatibility checks)."},
 			"out_dir": {"type": "string", "description": "Optional directory to publish the package directory into, atomically. Omit to get the digests without writing anything."},
 			"overwrite": {"type": "boolean", "description": "Replace an existing package directory of the same name (default false — it may already have been uploaded)."},
-			"source_path": {"type": "string", "description": "A path you say this board came from. Recorded in the manifest as source.git.basis=\"caller-asserted\" beside the path — an assertion, never a measurement: NO git revision is read from it, because a copy of the board inside an unrelated repository would otherwise lend that repository's revision to this design. Ignored entirely when board_path was used; pass the board by reference to record a real revision."}
+			"source_path": {"type": "string", "description": "The path you DECLARE to be this board's source of record. On its own it is recorded as source.git.basis=\"caller-asserted\" beside the path — an assertion, never a measurement, and no git revision is read from it, because a copy of the board inside an unrelated repository would otherwise lend that repository's revision to this design. Pass board_path+board_digest naming this SAME file to have the worker load the board out of it: that pair of statements is the only thing recorded as \"worker-read\", and the only thing carrying a revision."}
 		}
 	}`)
 

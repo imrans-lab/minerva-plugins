@@ -159,9 +159,8 @@ that would otherwise have been written, with `package_generated: false`.
 
 ## What the manifest records
 
-Source digest and its projection, the git revision of the source file (or a
-named reason there is none — a board handed over inline has no repository, and
-a revision a caller could supply would be a claim rather than evidence); a
+Source digest and its projection, the git revision of the source file with the
+basis it rests on (or a named reason there is none); a
 SHA-256 for every other output; the selected profile with its fabrication rule
 profile, dialect parameters and pinned template artifacts; tool versions; the
 logical-component-to-physical-placement map with each placement's anchor, anchor
@@ -208,7 +207,7 @@ identically on every surface, and all of them run one function.
 | PCB panel toolbar | an **Export** menu, one row per exporter, the current one radio-checked | a person, at any width above narrow |
 | PCB panel View menu | one **Export: …** row per exporter | a person, at narrow widths where the toolbar button is hidden |
 | `minerva_pcb_board_export` | `{editor_name, exporter?, out_dir?, overwrite?}` | an agent, over the LIVE board |
-| `minerva_pcb_order_package` | `{yaml\|board, profile?, out_dir?, overwrite?, source_path?}` | an agent, over a document |
+| `minerva_pcb_order_package` | `{yaml\|board\|board_path+board_digest, profile?, out_dir?, overwrite?, source_path?}` | an agent, over a document |
 
 `ui/pcb_export.gd` owns the exporter list, the run and the report; the toolbar
 menu, the View-menu rows and the panel verb are three doorways onto its `run`.
@@ -242,26 +241,34 @@ was never loaded from one refuses `no_output_directory` rather than inventing a
 path; that refusal is reached identically from the button and from the verb, and
 neither reaches the worker.
 
-The live board is sent to the worker INLINE, with no `source_path`, on purpose.
-The manifest's git block is evidence about a FILE, and the board in an editor
-may hold edits that file does not: naming the canonical path would stamp a
-revision onto bytes it does not describe. Absent, the manifest records "the
-board source was supplied inline, not as a file in a repository", which is
-exactly true of a live editor board.
+The live board is sent to the worker with no `source_path`, on purpose. The
+manifest's git block is evidence about a FILE, and the board in an editor may
+hold edits that file does not: naming the canonical path would stamp a revision
+onto bytes it does not describe. Absent, the manifest records that no repository
+speaks for this board, which is exactly true of a live editor board.
 
 Every git record says which BASIS it has, so a reader can tell a measurement
 from a claim without knowing how the call was made:
 
-| basis | what it means | revision? |
+| basis | what it takes | revision? |
 | --- | --- | --- |
-| `worker-read` | the worker opened the board file itself, through `board_path` with its mandatory `board_digest` | yes, plus `dirty` |
-| `caller-asserted` | the board came inline and a caller named a path it says the board came from | no — the path is recorded as `asserted_path` and nothing is read from it |
-| `inline` | the board came inline and no path was named (the panel's shape) | no |
+| `worker-read` | `source_path` names a file as this board's source of record AND `board_path`+`board_digest` loaded the board out of that same file | yes, plus `dirty` |
+| `caller-asserted` | `source_path` names a file the worker did not load this board from | no — the path is recorded as `asserted_path` and nothing is read from it |
+| `inline` | no source of record was declared: the board arrived as content, inline or as a transport snapshot | no |
 
-Only the first is evidence. Parsing a caller's path and checking that it holds
-the same board does NOT promote it: an identical COPY of the design inside an
-unrelated clean repository passes that check, and accepting it would record that
-repository's revision as this board's provenance.
+The basis is decided once, where the board is loaded
+(`board_model.BoardOrigin`), and carried to the manifest; no consumer re-derives
+it. That is what makes the panel's shape safe: `worker_check` replaces an
+oversized board with `{board_path, board_digest}` pointing at an ephemeral
+snapshot, and because the basis needs the caller's own declaration as well as
+the read, a transport can change how a board travelled without changing what its
+provenance claims.
+
+Only `worker-read` is evidence, and even it takes two statements about one file
+because either alone is forgeable: parsing a caller's path and checking it holds
+the same board does NOT promote it (an identical COPY of the design inside an
+unrelated clean repository passes that check), and a path the worker merely read
+says nothing about which design that file is the source of record for.
 
 ### What the panel shows, and the warnings nobody used to render
 

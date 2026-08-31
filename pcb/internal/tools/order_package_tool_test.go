@@ -138,18 +138,21 @@ func TestOrderPackageIsOneEntryForBothSurfaces(t *testing.T) {
 		t.Fatalf("input schema is not valid JSON: %v", err)
 	}
 	// Every argument the panel path and the document path actually send. A
-	// missing property is a caller-visible gap, not a cosmetic one: the host
-	// validates against this schema before the handler ever runs.
+	// missing property is a caller-visible gap, not a cosmetic one — but this
+	// spec is not the copy the host validates against: it serves manifest.json,
+	// which TestManifestInputSchemaMatchesBroker (root package) pins to this
+	// one. A property added here and not mirrored there is refused at the host
+	// before the handler runs, so both tests are load-bearing.
 	for _, key := range []string{"yaml", "board", "board_path", "board_digest",
 		"profile", "out_dir", "overwrite", "source_path"} {
 		if _, ok := schema.Properties[key]; !ok {
 			t.Errorf("input schema declares no %q", key)
 		}
 	}
-	// The by-reference arm is the ONLY one that earns a git revision, so it has
-	// to be reachable: an undeclared board_path is refused by the host's schema
-	// validation before the handler runs, which would leave every package's
-	// provenance permanently unavailable.
+	// The evidence lane has to be reachable AND described: an undeclared
+	// board_path is refused by the host's schema validation before the handler
+	// runs, which would leave every package's provenance permanently
+	// unavailable.
 	for _, phrase := range []string{"worker-read", "caller-asserted"} {
 		if !strings.Contains(OrderPackage.Description, phrase) {
 			t.Errorf("description does not tell a caller about %q provenance", phrase)

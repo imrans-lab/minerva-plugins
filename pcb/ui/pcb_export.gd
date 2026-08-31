@@ -187,8 +187,10 @@ static func _run_yaml(panel, exporter: Dictionary) -> Dictionary:
 ## `source_path` is DELIBERATELY NOT SENT. The manifest's git block is evidence
 ## about a file, and the board in this panel may hold edits that file does not:
 ## naming the canonical path would stamp a revision onto bytes it does not
-## describe. Absent, the worker records "supplied inline, not as a file in a
-## repository", which is exactly true of a live editor board.
+## describe. Absent, the worker records no repository, which is exactly true of
+## a live editor board — and stays true even though worker_check may spill an
+## oversized payload to a snapshot file, because the worker reads the basis off
+## what the caller declared and not off the presence of a path.
 static func _run_package(panel, exporter: Dictionary, out_dir: String,
 		overwrite: bool) -> Dictionary:
 	var exporter_id := str(exporter["id"])

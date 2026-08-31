@@ -507,18 +507,43 @@ var identityFieldNames = []string{"manufacturer", "mpn", "package", "comment"}
 // A null identity value is left alone: null means "not authored in this home"
 // on both sides of the boundary, and turning it into the empty string would
 // stop the precedence fold falling through to the next home.
-func preserveIdentityText(b *Board, doc *yaml.Node) {
+//
+// It needs the node tree and the decoded board to line up, and returns a
+// warning for each component it therefore could not walk. THE WARNING IS THE
+// POINT: skipping quietly leaves the untouched values exactly as the typed
+// decode left them, which is the defect this pass exists to undo, and a save
+// then writes 387 over the author's `0603` with nothing on any surface saying
+// so.
+func preserveIdentityText(b *Board, doc *yaml.Node) []string {
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return
+		return nil
+	}
+	if len(b.Components) == 0 {
+		return nil // nothing decoded, so nothing to preserve and nothing at risk
 	}
 	comps := nodeMapValue(doc.Content[0], "components")
-	if comps == nil || comps.Kind != yaml.SequenceNode ||
-		len(comps.Content) != len(b.Components) {
-		return
+	if comps == nil || comps.Kind != yaml.SequenceNode {
+		return []string{"identity text was not preserved: the source document's " +
+			"`components` is not a sequence of component mappings, so an " +
+			"unquoted manufacturer/mpn/package/comment may have been resolved " +
+			"as a number (0603 reads as 387)"}
 	}
+	if len(comps.Content) != len(b.Components) {
+		return []string{fmt.Sprintf("identity text was not preserved: the source "+
+			"document has %d component node(s) and the decoded board has %d, so "+
+			"an unquoted manufacturer/mpn/package/comment may have been resolved "+
+			"as a number (0603 reads as 387)",
+			len(comps.Content), len(b.Components))}
+	}
+	var warnings []string
 	for i, node := range comps.Content {
 		node = resolveAlias(node)
 		if node == nil || node.Kind != yaml.MappingNode {
+			warnings = append(warnings, fmt.Sprintf(
+				"identity text was not preserved for components[%d] (%s): its "+
+					"source node is not a mapping, so an unquoted "+
+					"manufacturer/mpn/package/comment may have been resolved as "+
+					"a number (0603 reads as 387)", i, b.Components[i].Ref))
 			continue
 		}
 		restoreIdentityText(node, b.Components[i].Extra)
@@ -527,6 +552,7 @@ func preserveIdentityText(b *Board, doc *yaml.Node) {
 			restoreIdentityText(props, decoded)
 		}
 	}
+	return warnings
 }
 
 // restoreIdentityText overwrites each identity key in decoded with the authored

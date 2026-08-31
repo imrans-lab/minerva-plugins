@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import zipfile
@@ -58,6 +59,7 @@ from io import BytesIO
 
 import pytest
 
+from pcb_worker import board_model
 from pcb_worker import compile_board as compile_board_module
 from pcb_worker import gerber
 from pcb_worker import methods
@@ -573,6 +575,45 @@ def test_a_dialect_only_export_says_it_claims_no_tier():
     assert package.directory == f"{BOARD_NAME}-{DIALECT_ONLY}"
 
 
+def _origin(**params) -> "board_model.BoardOrigin":
+    """The origin the loader mints for a request — the only supported producer
+    of one, which is the whole point of the type."""
+    return board_model.load_board_with_origin(params)[1]
+
+
+def _panel_snapshot_limit() -> int:
+    """The panel's own by-reference threshold, read from the file that declares
+    it. A read that fails is a FAILURE, never a fallback constant: a literal
+    copied here would let this test model a transport the panel no longer has.
+    """
+    source = (pathlib.Path(__file__).resolve().parents[2]
+              / "ui" / "panel_tools.gd").read_text(encoding="utf-8")
+    match = re.search(r"const _SNAPSHOT_LIMIT\s*:=\s*(\d+)", source)
+    assert match, "ui/panel_tools.gd no longer declares _SNAPSHOT_LIMIT"
+    return int(match.group(1))
+
+
+def _board_the_panel_would_send_by_reference() -> tuple[dict, dict]:
+    """A board whose export payload exceeds the panel's inline cap, and that
+    payload. Grown with real silk lines along an empty strip of the board rather
+    than with filler, and grown until it is over the cap rather than to a
+    hard-coded count, so the size that selects the by-reference arm is measured
+    here instead of assumed."""
+    limit = _panel_snapshot_limit()
+    graphics: list = []
+    board = _board(board_graphics=graphics)
+    # The panel's four keys, in the shape pcb_export._run_package builds.
+    payload = {"board": board, "profile": SERVICE,
+               "out_dir": "/tmp/order-packages", "overwrite": False}
+    while len(json.dumps(payload)) <= limit:
+        n = len(graphics)
+        x = 1.0 + (n % 54) * 0.5
+        graphics.append({"layer": "F.SilkS", "kind": "line",
+                         "start": {"x_mm": x, "y_mm": 2.0 + (n % 3) * 0.5},
+                         "end": {"x_mm": x + 0.25, "y_mm": 2.25 + (n % 3) * 0.5}})
+    return board, payload
+
+
 def test_git_state_is_unavailable_rather_than_guessed_for_an_inline_board():
     """A board handed over inline has no repository. Saying so by name is the
     honest answer; a blank field reads as "clean"."""
@@ -590,9 +631,8 @@ def test_a_caller_asserted_path_is_labelled_and_lends_no_revision(tmp_path):
     board, so binding the path to the digest accepts it — and the manifest then
     reported that repository's HEAD, clean, in the same shape as a measurement.
 
-    The distinction that survives a copy is not what the file contains but WHO
-    OPENED IT. This worker did not read the board from here, so the record
-    carries the path as the claim it is and no revision at all."""
+    Naming a path is a claim. Only a claim the worker itself acted on — by
+    loading the board out of that same file — is more than one."""
     import yaml
 
     repo = tmp_path / "somebody-elses-repo"
@@ -605,7 +645,7 @@ def test_a_caller_asserted_path_is_labelled_and_lends_no_revision(tmp_path):
                     "-c", "user.name=t", "commit", "-qm", "not this design"],
                    check=True)
     package = op.build(board, _compiled(board), SERVICE,
-                       asserted_source_path=str(copy))
+                       origin=_origin(board=board, source_path=str(copy)))
     git = package.manifest["source"]["git"]
     assert git["available"] is False
     assert git["basis"] == op.BASIS_CALLER_ASSERTED
@@ -613,88 +653,143 @@ def test_a_caller_asserted_path_is_labelled_and_lends_no_revision(tmp_path):
     assert "revision" not in git and "dirty" not in git
 
 
-def test_the_file_the_worker_read_does_carry_the_revision(tmp_path):
+def test_the_declared_source_the_worker_actually_read_carries_the_revision(tmp_path):
     """The other half: labelling assertions is not a way of never reporting git.
-    The board read out of a file in a repository still yields that repository's
-    revision, marked as the measurement it is."""
-    import yaml
-
-    repo = tmp_path / "this-boards-repo"
-    _git_repo(repo)
-    board = _board()
-    source = repo / "board.yaml"
-    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
-    package = op.build(board, _compiled(board), SERVICE,
-                       source_file_path=str(source))
-    git = package.manifest["source"]["git"]
-    assert git["available"] is True, git
-    assert git["basis"] == op.BASIS_WORKER_READ
-    assert len(git["revision"]) == 40
-    assert git["dirty"] is True  # board.yaml is untracked in that repo
-
-
-def test_the_path_the_worker_read_outranks_the_one_it_was_told(tmp_path):
-    """Both paths at once. The record names the file this worker opened; the
-    caller's path is not consulted and cannot displace it."""
-    import yaml
-
-    repo = tmp_path / "this-boards-repo"
-    _git_repo(repo)
-    board = _board()
-    source = repo / "board.yaml"
-    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
-    package = op.build(board, _compiled(board), SERVICE,
-                       source_file_path=str(source),
-                       asserted_source_path=str(tmp_path / "elsewhere.yaml"))
-    git = package.manifest["source"]["git"]
-    assert git["basis"] == op.BASIS_WORKER_READ
-    assert git["path"] == str(source)
-    assert "asserted_path" not in git
-
-
-def test_a_read_path_outside_a_repository_says_so_rather_than_going_quiet(tmp_path):
-    """A file the worker read that is in no repository is a reason, not a silent
-    absence — and it is still a worker-read record, so a reader can tell this
-    from a claim that was never measured."""
-    source = tmp_path / "board.yaml"
-    source.write_text("version: 1\n", encoding="utf-8")
-    package = _package(source_file_path=str(source))
-    git = package.manifest["source"]["git"]
-    assert git["available"] is False
-    assert git["basis"] == op.BASIS_WORKER_READ
-    assert "not inside a git repository" in git["reason"]
-
-
-def test_the_by_reference_arm_is_what_earns_a_revision(tmp_path):
-    """THE EVIDENCE LANE, end to end. ``board_path`` is the one arm that opens a
-    file — after checking its bytes against ``board_digest`` — so it is the one
-    arm that can hand the manifest a revision. Driven through the method, since
-    the wire is where the two kinds of path are told apart."""
+    Two statements about one file — the caller declares it the board's source,
+    the worker loads the board out of it — and the revision is measured."""
     import hashlib
 
     import yaml
 
     repo = tmp_path / "this-boards-repo"
     _git_repo(repo)
+    board = _board()
     source = repo / "board.yaml"
-    source.write_text(yaml.safe_dump(_board(), sort_keys=False), encoding="utf-8")
+    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    reply = methods.handle_request({
-        "id": 1, "method": "order_package",
-        "params": {"board_path": str(source), "board_digest": digest,
-                   "profile": SERVICE}})
-    assert reply["ok"] is True, reply
-    git = reply["result"]["source"]["git"]
+    package = _package(board, origin=_origin(board=board))
+    git = package.manifest["source"]["git"]
+    assert git["basis"] == op.BASIS_INLINE, "an inline board declares nothing read"
+
+    package = op.build(board, _compiled(board), SERVICE,
+                       origin=_origin(board_path=str(source),
+                                      board_digest=digest,
+                                      source_path=str(source)))
+    git = package.manifest["source"]["git"]
+    assert git["available"] is True, git
     assert git["basis"] == op.BASIS_WORKER_READ
-    assert git["available"] is True
     assert len(git["revision"]) == 40
+    assert git["dirty"] is True  # board.yaml is untracked in that repo
     assert git["path"] == str(source)
 
 
+def test_a_file_the_worker_read_that_nobody_declared_earns_nothing(tmp_path):
+    """The read on its own is not the evidence — a file arriving over the wire
+    says nothing about which design it is the source of record for. Without the
+    caller's own declaration naming that same file, the repository holding it is
+    not consulted."""
+    import hashlib
+
+    import yaml
+
+    repo = tmp_path / "some-repo"
+    _git_repo(repo)
+    board = _board()
+    source = repo / "board.yaml"
+    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    origin = _origin(board_path=str(source), board_digest=digest)
+    assert origin.basis == op.BASIS_INLINE
+
+    # Declaring a DIFFERENT file is still only a claim, and the file that was
+    # read cannot be promoted into its place.
+    origin = _origin(board_path=str(source), board_digest=digest,
+                     source_path=str(tmp_path / "elsewhere.yaml"))
+    assert origin.basis == op.BASIS_CALLER_ASSERTED
+    assert origin.asserted_path == str(tmp_path / "elsewhere.yaml")
+
+
+def test_the_panels_oversized_transport_cannot_forge_a_revision(tmp_path):
+    """FINDING A, at the size it happens. The panel means to send the live board
+    INLINE and sends no source_path, but its worker-check helper routes any
+    payload over ui/panel_tools.gd's cap through a by-reference wrapper: the
+    board key is deleted and replaced by a path to an ephemeral snapshot under
+    the user data directory. If a path alone decided the basis, every real-sized
+    board would arrive claiming worker-read about a file no human authored — and
+    where the user data directory sits inside a repository, that repository's
+    HEAD would be recorded as this design's provenance.
+
+    The snapshot is written INSIDE a git repository here, which is the condition
+    that made the old record a lie. A one-resistor board cannot reach this: it
+    stays under the cap and never takes the arm."""
+    import hashlib
+
+    board, payload = _board_the_panel_would_send_by_reference()
+    limit = _panel_snapshot_limit()
+    assert len(json.dumps(payload)) > limit, "the payload must select the by-ref arm"
+
+    snapshot_repo = tmp_path / "user-data-dir-inside-a-repo"
+    _git_repo(snapshot_repo)
+    snapshots = snapshot_repo / "pcb_snapshots"
+    snapshots.mkdir()
+    snapshot = snapshots / "board-1234567-1.snap"
+    snapshot.write_text(json.dumps(board), encoding="utf-8")
+
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board_path": str(snapshot),
+                   "board_digest": hashlib.sha256(
+                       snapshot.read_bytes()).hexdigest(),
+                   "profile": SERVICE}})
+    assert reply["ok"] is True, reply
+    git = reply["result"]["source"]["git"]
+    assert git["basis"] == op.BASIS_INLINE, git
+    assert git["available"] is False
+    assert "revision" not in git and "dirty" not in git
+    assert str(snapshot) not in json.dumps(git)
+
+
+def test_a_declared_source_outside_a_repository_says_so_rather_than_going_quiet(tmp_path):
+    """A declared source the worker did read that is in no repository is a
+    reason, not a silent absence — and it is still a worker-read record, so a
+    reader can tell this from a claim that was never measured."""
+    import hashlib
+
+    import yaml
+
+    board = _board()
+    source = tmp_path / "board.yaml"
+    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    package = _package(board, origin=_origin(board_path=str(source),
+                                             board_digest=digest,
+                                             source_path=str(source)))
+    git = package.manifest["source"]["git"]
+    assert git["available"] is False
+    assert git["basis"] == op.BASIS_WORKER_READ
+    assert "not inside a git repository" in git["reason"]
+
+
+def test_the_builder_takes_a_minted_origin_and_never_a_path(tmp_path):
+    """FINDING B. The package builder used to accept the source path as an
+    ordinary string and call it worker-read on nobody's word. Its whole
+    provenance surface is now one BoardOrigin, which only the loader mints, so
+    there is no parameter left that turns a path into evidence."""
+    import inspect
+
+    parameters = inspect.signature(op.build).parameters
+    assert "origin" in parameters
+    assert not [name for name in parameters if "path" in name], sorted(parameters)
+    # Told nothing, the builder claims nothing.
+    assert op.build(_board(), _compiled(_board()), SERVICE) \
+        .manifest["source"]["git"]["basis"] == op.BASIS_INLINE
+
+
 def test_the_worker_names_the_file_it_read_and_never_the_caller_s_path():
-    """THE WIRE, not just the helper. ``methods._order_package`` decides which
-    path is evidence, and it decides it from WHICH ARM of load_board served the
-    board — so this drives the method with both keys set and checks the manifest
+    """THE WIRE, not just the helper. ``methods._order_package`` hands the
+    manifest the origin the loader minted, so this drives the method with a
+    board inline beside a path into a real repository and checks the manifest
     took neither the caller's word nor a revision from it."""
     reply = methods.handle_request({
         "id": 1, "method": "order_package",

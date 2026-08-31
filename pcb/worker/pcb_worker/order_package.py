@@ -43,11 +43,8 @@ READINESS IS THREE SEPARATE CLAIMS, and the package makes only two of them:
    loaded.
 
 PROVENANCE IS EVIDENCE OR IT IS LABELLED. The manifest's ``source.git`` block
-carries a ``basis``: ``worker-read`` when this worker opened the board file
-itself and can speak for the repository holding it, ``caller-asserted`` when a
-caller merely named a path (no revision is read then), and ``inline`` when no
-path exists at all. A revision only ever appears under the first. See
-:func:`git_state`.
+carries the ``basis`` minted at the load — see :class:`board_model.BoardOrigin`
+for what each one takes — and a revision appears under one of them only.
 
 DETERMINISM. Everything except the manifest is byte-identical across runs of the
 same input: the archive pins its member order and timestamps, the CSVs and the
@@ -72,8 +69,10 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-from . import (assembly_outputs, assembly_preview, gerber,
+from . import (assembly_outputs, assembly_preview, board_model, gerber,
                order_provenance, order_write, resolved_board)
+from .board_model import (BASIS_CALLER_ASSERTED, BASIS_INLINE,  # noqa: F401
+                          BASIS_WORKER_READ)
 
 #: The package layout, in build order. The checklist and the preflight report
 #: are digested by the manifest, so they are produced before it.
@@ -213,52 +212,33 @@ def package_directory_name(board_name: str, profile_id: str) -> str:
     return f"{_safe_name(board_name)}-{_safe_name(profile_id)}"
 
 
-#: How the manifest's git record came to name a path. Every record carries one,
-#: so a reader never has to infer whether a path was measured or claimed.
-BASIS_WORKER_READ = "worker-read"
-BASIS_CALLER_ASSERTED = "caller-asserted"
-BASIS_INLINE = "inline"
-
-
-def git_state(read_path, asserted_path=None) -> dict:
+def git_state(origin: board_model.BoardOrigin) -> dict:
     """The revision the board source sits at, or a NAMED reason there is none.
 
-    EVIDENCE AND ASSERTION ARE DIFFERENT SHAPES, and the ``basis`` key says
-    which one this record is:
+    THE BASIS IS READ OFF ``origin``, never re-derived here. Which standing a
+    record has is settled where the board was loaded (:class:`BoardOrigin`); a
+    consumer that decided it again from the presence of a path would be a second
+    opinion able to disagree with the first.
 
-    * ``worker-read`` — this worker opened ``read_path`` itself and parsed the
-      board out of those bytes (``load_board``'s by-reference arm, whose digest
-      check ran before the read was trusted). A file it opened is evidence about
-      that file, so its repository's revision is this design's revision, and
-      ``available`` can be true.
-    * ``caller-asserted`` — the board arrived inline and a caller named a path
-      it says the board came from. Nothing here opened that board from that
-      file, so no revision is read at all: the path is recorded as the claim it
-      is. Checking that the file parses to the same board does NOT promote it,
-      because an identical copy of one design sitting in an unrelated clean
-      repository passes that check and would hand this design that repository's
-      revision.
-    * ``inline`` — a board handed over inline with no path named, which is the
-      ordinary MCP shape. Said by name rather than left blank, because a blank
-      field reads as "clean".
-
-    ``asserted_path`` is ignored whenever ``read_path`` is present: a path this
-    worker read outranks one it was told about, and the record names the file
-    that was read.
+    A revision is read for exactly one basis. Every other record names its
+    reason rather than leaving the field blank, because a blank field reads as
+    "clean".
     """
-    if not read_path:
-        if asserted_path:
-            return {"available": False, "basis": BASIS_CALLER_ASSERTED,
-                    "asserted_path": str(asserted_path),
-                    "reason": "the board was supplied inline and this path is "
-                              "the caller's claim about where it came from, not "
-                              "a file this tool read, so no revision was taken "
-                              "from it. Load the board by reference "
-                              "(board_path) to record a measured revision"}
+    if origin.basis == BASIS_CALLER_ASSERTED:
+        return {"available": False, "basis": BASIS_CALLER_ASSERTED,
+                "asserted_path": str(origin.asserted_path),
+                "reason": "this path is the caller's claim about where the "
+                          "board came from, not the file this tool parsed it "
+                          "out of, so no revision was taken from it. Pass the "
+                          "board by reference (board_path) naming the same "
+                          "file to record a measured revision"}
+    if origin.basis != BASIS_WORKER_READ:
         return {"available": False, "basis": BASIS_INLINE,
-                "reason": "the board source was supplied inline, not as a file "
-                          "in a repository"}
-    path = Path(read_path)
+                "reason": "the board arrived as content rather than as a file "
+                          "named as its source (an inline document, or a "
+                          "transport snapshot of one), so no repository speaks "
+                          "for it"}
+    path = Path(origin.path)
     directory = path.parent if path.is_file() else path
     try:
         rev = subprocess.run(
@@ -519,7 +499,7 @@ class OrderPackage:
 
 
 def build(board_source: dict, board, profile_id: str, *,
-          source_file_path=None, asserted_source_path=None, generated_at=None,
+          origin: board_model.BoardOrigin | None = None, generated_at=None,
           compile_diagnostics=()) -> OrderPackage:
     """Assemble the whole order package from ONE compiled board.
 
@@ -530,9 +510,10 @@ def build(board_source: dict, board, profile_id: str, *,
     read here and both end up in one ``warnings`` list, the way the gerbers
     reply merges the two channels.
 
-    ``source_file_path`` is the file the worker itself read this board out of,
-    and ``asserted_source_path`` is a path a caller merely named; see
-    :func:`git_state` for why the manifest keeps them apart."""
+    ``origin`` is the :class:`board_model.BoardOrigin` the loader minted for
+    this request. Omitting it records the inline basis: a builder that was not
+    told how the board arrived has been told nothing that could earn a
+    revision."""
     provenance, provenance_advisories = order_provenance.check(board_source)
 
     assembly = assembly_outputs.build_package(board, profile_id)
@@ -617,7 +598,7 @@ def build(board_source: dict, board, profile_id: str, *,
                                      "finalized bytes, and hashing this file "
                                      "on disk reproduces that value"}},
         "source": {**provenance,
-                   "git": git_state(source_file_path, asserted_source_path)},
+                   "git": git_state(origin or board_model.BoardOrigin(BASIS_INLINE))},
         "board": {"name": board.name, "id": board.id,
                   "fab_rule_profile": board.design_rules.rule_profile.id},
         "profile": _profile_record(profile),

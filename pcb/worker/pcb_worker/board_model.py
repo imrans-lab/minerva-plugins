@@ -11,6 +11,8 @@ Everything here is a pure function: parse text / dict → structured result.
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from typing import Any
 
 # Required top-level fields per the canonical contract. traces / vias / grid_mm /
@@ -20,6 +22,39 @@ REQUIRED_TOP = ("version", "name", "width_mm", "height_mm", "components", "nets"
 
 class BoardParseError(Exception):
     """Raised when board source cannot be parsed into a mapping."""
+
+
+#: The three standings a git record can have, and the whole vocabulary of
+#: ``BoardOrigin.basis``. Defined here because this module is where a board's
+#: arrival is known; :mod:`order_package` imports them rather than restating a
+#: second list that could drift.
+BASIS_WORKER_READ = "worker-read"
+BASIS_CALLER_ASSERTED = "caller-asserted"
+BASIS_INLINE = "inline"
+
+
+@dataclass(frozen=True)
+class BoardOrigin:
+    """How one request's board reached this worker, decided beside the read.
+
+    ``basis`` is minted by :func:`load_board_with_origin` and CARRIED to the
+    manifest; nothing downstream re-derives it from the presence of a path.
+
+    ``worker-read`` takes TWO independent statements about ONE file: the caller
+    named it as this board's source of record (``source_path``) and this worker
+    parsed the board out of that same file (``board_path``). Only a caller can
+    make the first and only the loader the second. A size-capped transport that
+    spills an inline board to a snapshot file makes neither — it rewrites the
+    board key and nothing else — so no transport can move a record onto the
+    evidence lane.
+
+    ``path`` is the file that was read (``worker-read`` only); ``asserted_path``
+    is a path a caller named that nothing here opened.
+    """
+
+    basis: str
+    path: str | None = None
+    asserted_path: str | None = None
 
 
 def load_board(params: dict) -> dict:
@@ -38,10 +73,28 @@ def load_board(params: dict) -> dict:
     Raises BoardParseError on missing input, unreadable/mismatched snapshot,
     or non-mapping source.
     """
+    return load_board_with_origin(params)[0]
+
+
+def load_board_with_origin(params: dict) -> tuple[dict, BoardOrigin]:
+    """:func:`load_board`, plus the :class:`BoardOrigin` describing how it
+    arrived — the pair a caller recording provenance needs.
+
+    The origin is built from what THIS call did (which arm ran, and over which
+    file) and from the caller's own ``source_path`` declaration, so the two
+    statements ``worker-read`` requires are checked where both are known.
+    """
+    board, read_path = _read_board(params)
+    return board, _origin_of(read_path, params)
+
+
+def _read_board(params: dict) -> tuple[dict, str | None]:
+    """The board, and the file it was read out of (``None`` when it arrived as
+    content). One place decides which arm serves a request."""
     if isinstance(params.get("yaml"), str):
-        return _parse_board_text(params["yaml"])
+        return _parse_board_text(params["yaml"]), None
     if isinstance(params.get("board"), dict):
-        return params["board"]
+        return params["board"], None
     if isinstance(params.get("board_path"), str):
         import hashlib
 
@@ -65,28 +118,32 @@ def load_board(params: dict) -> dict:
         except UnicodeDecodeError as exc:
             raise BoardParseError(
                 f"board_path {path!r} is not UTF-8 text: {exc}") from exc
-        return _parse_board_text(text)
+        return _parse_board_text(text), path
     raise BoardParseError(
         "expected params.yaml (str), params.board (object), "
         "or params.board_path (str)")
 
 
-def source_file_path(params: dict) -> str | None:
-    """The path :func:`load_board` READ this board from, or ``None`` when it
-    arrived inline.
+def _origin_of(read_path: str | None, params: dict) -> BoardOrigin:
+    asserted = params.get("source_path")
+    if not isinstance(asserted, str) or not asserted:
+        asserted = None
+    if read_path is not None and asserted is not None \
+            and _same_file(read_path, asserted):
+        return BoardOrigin(BASIS_WORKER_READ, path=read_path)
+    if asserted is not None:
+        return BoardOrigin(BASIS_CALLER_ASSERTED, asserted_path=asserted)
+    return BoardOrigin(BASIS_INLINE)
 
-    Written beside ``load_board`` and in the same priority order, because a
-    caller recording provenance needs the file THIS worker opened rather than a
-    path it was told about: only the by-reference arm reads a file, and it reads
-    one whose bytes it verified against ``board_digest`` first.
-    """
-    if isinstance(params.get("yaml"), str):
-        return None
-    if isinstance(params.get("board"), dict):
-        return None
-    if isinstance(params.get("board_path"), str):
-        return params["board_path"]
-    return None
+
+def _same_file(a: str, b: str) -> bool:
+    """Whether two path spellings name one file. Compared through ``realpath``
+    so a relative and an absolute spelling of one file agree; a path that does
+    not exist still compares by its normalised name."""
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return False
 
 
 def _parse_board_text(source: str) -> dict:

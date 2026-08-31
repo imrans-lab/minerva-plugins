@@ -73,28 +73,40 @@ var designRuleNumKeys = []string{"zone_min_thickness_mm", "zone_min_island_area_
 // The same raw tree then restores the authored text of the pre-block identity
 // values (preserveIdentityText, assembly.go), which the untyped inline map
 // would otherwise resolve to a number.
+//
+// Callers with a warnings channel should use UnmarshalYAMLWithWarnings: this
+// form discards the notice that identity text could NOT be preserved, which is
+// a silent fall back to the very renumbering that pass exists to undo.
 func UnmarshalYAML(data []byte) (*Board, error) {
+	b, _, err := UnmarshalYAMLWithWarnings(data)
+	return b, err
+}
+
+// UnmarshalYAMLWithWarnings is UnmarshalYAML plus the notices no error channel
+// can carry: today, each component whose source node the identity-text pass
+// could not walk (see preserveIdentityText).
+func UnmarshalYAMLWithWarnings(data []byte) (*Board, []string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
+		return nil, nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
 	if err := probeNodeTree(&doc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var b Board
 	if err := yaml.Unmarshal(data, &b); err != nil {
-		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
+		return nil, nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
 	// Give the pre-block identity homes the same text-preserving decode the
 	// structured assembly block already has: without this, `package: 0603`
 	// riding Component.Extra's untyped inline map decodes as the int 387 and a
 	// save writes 387 back over the author's text (assembly.go).
-	preserveIdentityText(&b, &doc)
+	warnings := preserveIdentityText(&b, &doc)
 	// Fold the pth_holes / npth_holes aliases into canonical mounting_holes BEFORE
 	// any downstream migration / validation, so they cannot bypass id-minting or the
 	// structural gate (finding 019f8b7fb07e comment 689).
 	NormalizeHoles(&b)
-	return &b, nil
+	return &b, warnings, nil
 }
 
 // probeNodeTree inspects the raw document node for the structural / typed

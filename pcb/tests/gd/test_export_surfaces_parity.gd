@@ -175,6 +175,26 @@ func _tiny_board() -> Dictionary:
 		"nets": [{"name": "GND", "pins": ["R1.1"]}]}
 
 
+## A board whose export payload exceeds panel_tools' by-reference cap, so the
+## package exporter takes the arm a real board takes. Grown until it is over the
+## cap rather than to a hard-coded count: the threshold is read from the file
+## that declares it, so this cannot drift into testing the inline arm by
+## accident. The extra bulk is silk lines along an empty strip.
+func _over_cap_board() -> Dictionary:
+	var board := _tiny_board()
+	var graphics: Array = []
+	board["board_graphics"] = graphics
+	var payload := {"board": board, "profile": "jlcpcb-economic",
+		"out_dir": "/tmp/order-packages", "overwrite": false}
+	while JSON.stringify(payload).length() <= PanelTools._SNAPSHOT_LIMIT:
+		var n := graphics.size()
+		var x := 1.0 + float(n % 30) * 0.5
+		graphics.append({"layer": "F.SilkS", "kind": "line",
+			"start": {"x_mm": x, "y_mm": 2.0},
+			"end": {"x_mm": x + 0.25, "y_mm": 2.5}})
+	return board
+
+
 ## A panel with a board, an adopted canonical source (so the package exporters
 ## have an implicit destination) and a canned IPC bound.
 func _rig(reply: Dictionary) -> Dictionary:
@@ -232,6 +252,7 @@ func _init() -> void:
 	await _run_one_refusal_one_name()
 	await _run_one_success_one_package()
 	await _run_the_choice_reaches_the_worker()
+	await _run_an_oversized_board_still_asserts_nothing()
 	await _run_destination_refusal_parity()
 	await _run_named_per_component_report()
 	await _run_yaml_exporter_unchanged()
@@ -455,6 +476,40 @@ func _run_the_choice_reaches_the_worker() -> void:
 	var _yaml: Dictionary = await PcbExport.run(panel, "yaml")
 	check_eq("4c: the YAML exporter rides pcb.serialize",
 		str(ipc.last_request().get("channel", "")), "pcb.serialize")
+
+
+# ── 4b: an oversized board changes the TRANSPORT and nothing else ───────────
+#
+# The panel means to send the live board inline and sends no source_path, and
+# the manifest is supposed to record that no repository speaks for it. But
+# worker_check routes any payload over panel_tools' cap through the
+# by-reference wrapper, which deletes the board key and substitutes a path to an
+# ephemeral snapshot under the user data directory. A worker that read the basis
+# off the presence of a path would therefore stamp evidence on every real-sized
+# board — and if that directory sat inside any repository, lend its HEAD to this
+# design. This is the size at which that happens; sections 2-4 run under the cap
+# and cannot see it.
+
+func _run_an_oversized_board_still_asserts_nothing() -> void:
+	print("\n-- 4b: an oversized board changes the transport, not the claim --")
+	var rig := _rig(_passing_reply())
+	var panel = rig["panel"]
+	var ipc: FakeIPC = rig["ipc"]
+	panel.get_data().from_board_dict(_over_cap_board())
+
+	ipc.captured.clear()
+	var _out: Dictionary = await PcbExport.run(panel, "jlcpcb-economic")
+	var sent: Dictionary = ipc.last_request().get("payload", {})
+
+	check("4b-i: the board is big enough to take the by-reference arm",
+		not sent.has("board") and sent.has("board_path"), str(sent.keys()))
+	check("4b-ii: …the snapshot is digest-bound",
+		str(sent.get("board_digest", "")).length() == 64,
+		str(sent.get("board_digest", "")))
+	# THE ASSERTION THAT MATTERS. The exporter declares no source of record, and
+	# the transport is not a party that can declare one on its behalf.
+	check("4b-iii: …and no source of record is declared for it",
+		not sent.has("source_path"), str(sent.keys()))
 
 
 # ── 5: the destination refusal, identical on both paths ─────────────────────
