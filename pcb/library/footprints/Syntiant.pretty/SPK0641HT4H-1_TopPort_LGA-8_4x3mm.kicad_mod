@@ -1,0 +1,233 @@
+(footprint "SPK0641HT4H-1_TopPort_LGA-8_4x3mm"
+	(version 20241229)
+	(generator "minerva-pcb-seed")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "Syntiant SPK0641HT4H-1 PDM MEMS microphone, TOP PORT (acoustic port dia 0.25 on the package top face - NO PCB hole required). Body 3.0 x 4.0 x 1.0mm. Land pattern from the datasheet, 2.75 x 3.75 overall: four inner pads 0.45x0.95 on a 0.85 x 1.35 grid, and four ground bars around them - 1.30x0.325 top and bottom, 0.325x2.30 left and right. Every pad-to-pad gap is 0.40. Pins: 1 DATA and 2 CLOCK are the left inner column (bottom, top), 3 SELECT and 4 Vdd the right inner column (top, bottom); the four bars 5-8 are all GROUND.")
+	(tags "microphone mems pdm top-port syntiant")
+	(attr smd)
+	(property "Reference" "REF**"
+		(at 0 -2.9 0)
+		(layer "F.SilkS")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "SPK0641HT4H-1"
+		(at 0 2.9 0)
+		(layer "F.Fab")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -0.425 0.675)
+		(size 0.45 0.95)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "2" smd rect
+		(at -0.425 -0.675)
+		(size 0.45 0.95)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "3" smd rect
+		(at 0.425 -0.675)
+		(size 0.45 0.95)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "4" smd rect
+		(at 0.425 0.675)
+		(size 0.45 0.95)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "5" smd rect
+		(at 0 1.7125)
+		(size 1.3 0.325)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "6" smd rect
+		(at -1.2125 0)
+		(size 0.325 2.3)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "7" smd rect
+		(at 0 -1.7125)
+		(size 1.3 0.325)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(pad "8" smd rect
+		(at 1.2125 0)
+		(size 0.325 2.3)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+	)
+	(fp_line
+		(start -1.5 -2.0)
+		(end 1.5 -2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start 1.5 -2.0)
+		(end 1.5 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start 1.5 2.0)
+		(end -1.5 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start -1.5 2.0)
+		(end -1.5 -2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start -1.5 -2.0)
+		(end -1.0 -2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start -1.5 -2.0)
+		(end -1.5 -1.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start 1.0 -2.0)
+		(end 1.5 -2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start 1.5 -2.0)
+		(end 1.5 -1.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start -1.5 1.5)
+		(end -1.5 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start -1.5 2.0)
+		(end -1.0 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start 1.0 2.0)
+		(end 1.5 2.0)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_line
+		(start 1.5 2.0)
+		(end 1.5 1.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_circle
+		(center -1.6 1.75)
+		(end -1.48 1.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+	)
+	(fp_circle
+		(center -1.6 1.75)
+		(end -1.48 1.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.Fab")
+	)
+	(fp_line
+		(start -1.75 -2.25)
+		(end 1.75 -2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+	(fp_line
+		(start 1.75 -2.25)
+		(end 1.75 2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+	(fp_line
+		(start 1.75 2.25)
+		(end -1.75 2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+	(fp_line
+		(start -1.75 2.25)
+		(end -1.75 -2.25)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+	)
+)
