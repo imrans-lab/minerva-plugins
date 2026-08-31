@@ -826,8 +826,8 @@
 			"path": "Sunlord.pretty/L_Sunlord_AMWPH4018_4x4x1.8mm.kicad_mod",
 			"provenance_note": "smart-remote v2 rev B: L1 buck inductor, replacing the Vishay-named land. Pads 1.8 x 3.7 at +/-1.5 span x 0.6 to 2.4 against a terminal at 0.9 to 2.0 - 0.3 inboard and 0.4 outboard, where the fillet forms. NOTE the old Inductor_SMD:L_Vishay_IFSC-1515AH land (1.15 wide at +/-1.475, spanning 0.9 to 2.05) covers the termination but gives far less fillet than Sunlord specifies; an earlier 'verified drop-in, no board change' assessment of it rested on the swapped a/b reading and was wrong. Non-polar, nothing on F.Fab past the body outline, anchor (0, 0).",
 			"retrieved_at": "2026-08-31",
-			"sha256": "ccd07b5b51dec4cdc26d511be44bd61f6968745432442bf554902ed0ea28acad",
-			"size_bytes": 2537,
+			"sha256": "56975c0fbf8789718eeca64f2082daa03517f45766fe9de98e1248611edfeb74",
+			"size_bytes": 3086,
 			"source_kind": "hand_authored",
 			"source_ref": "authored 2026-08-31 from the Sunlord AMWPH4018S series datasheet, Fig.3-1 and Table 3-1: A=B=4.0, C=1.8, D=3.3, E=1.1, a=1.2, b=1.8, c=3.7. READ THE FIGURE: 'a' is the GAP BETWEEN PADS and 'b' is EACH PAD'S WIDTH, not the other way round. Both orderings give the same +/-1.5 centres, so the arithmetic self-checks either way and a swap is invisible - it was caught only by zooming into Fig.3-1 and seeing which edges the extension lines drop from. Verified in KiCad 9.0.9 and 10.0.5."
 		},

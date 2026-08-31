@@ -3,7 +3,7 @@
 	(generator "minerva-pcb-seed")
 	(generator_version "9.0")
 	(layer "F.Cu")
-	(descr "Sunlord AMWPH4018 series shielded power inductor, AEC-Q200. Body 4.0 x 4.0 x 1.8mm, terminals 3.3 x 1.1 on the two ends. Recommended land from datasheet Fig.3-1 / Table 3-1: a=1.2 is the GAP BETWEEN THE PADS and b=1.8 is EACH PAD'S WIDTH - read the figure, not the letters, a and b are easy to swap and both orderings give the same +/-1.5 centres. Two pads 1.8 x 3.7 at +/-1.5, spanning x 0.6 to 2.4: 0.3 inboard of the 0.9 terminal inner edge and 0.4 outboard of the 2.0 body edge, which is where the solder fillet forms. Non-polar: no pin-1 marker, and nothing on F.Fab outside the body outline, so the fab-extent anchor stays at (0, 0). Courtyard is wider than the body because the pads are.")
+	(descr "Sunlord AMWPH4018 series shielded power inductor, AEC-Q200. Body 4.0 x 4.0 x 1.8mm, terminals 3.3 x 1.1 on the two ends. Recommended land from datasheet Fig.3-1 / Table 3-1: a=1.2 is the GAP BETWEEN THE PADS and b=1.8 is EACH PAD'S WIDTH - read the figure, not the letters, a and b are easy to swap and both orderings give the same +/-1.5 centres. Two pads 1.8 x 3.7 at +/-1.5, spanning x 0.6 to 2.4: 0.3 inboard of the 0.9 terminal inner edge and 0.4 outboard of the 2.0 body edge, which is where the solder fillet forms. The datasheet marks a polarity point (section 7, laser-marked beside the inductance code): the part is electrically non-polar and works either way, but the dot indicates the winding start, so pad 1 is marked on F.Fab for anyone who wants to orient the winding (buck convention: switching node on the inner end). The marker sits in the inter-pad gap and INSIDE the body outline so nothing on F.Fab extends past it and the fab-extent anchor stays at (0, 0). F.Fab only, not silk - the gap is too narrow to clear the silk-to-pad floor. Courtyard is wider than the body because the pads are.")
 	(tags "inductor power shielded smd sunlord aec-q200")
 	(attr smd)
 	(property "Reference" "REF**"
@@ -70,6 +70,16 @@
 			(width 0.12)
 			(type solid)
 		)
+		(layer "F.Fab")
+	)
+	(fp_circle
+		(center -0.35 1.45)
+		(end -0.23 1.45)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill yes)
 		(layer "F.Fab")
 	)
 	(fp_line
