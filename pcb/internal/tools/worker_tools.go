@@ -656,9 +656,17 @@ var ExportAssembly = ToolSpec{
 	Description: "Generate a pre-assembly order package (BOM CSV + CPL/pick-and-place CSV) " +
 		"from a canonical PCB board for one assembly house profile — pure Python, no KiCad " +
 		"binary. Args {yaml|board, profile?:<house id, default \"jlc\">, name?:<basename>, " +
-		"out_dir?:<dir>}. \"jlc\" is the only house profile that currently offers assembly " +
-		"service; \"oshpark\" is a KNOWN house that refuses (bare-board only — no assembly " +
-		"service). Returns {profile, bom:{filename,rows,path}, cpl:{filename,rows,path}} — " +
+		"out_dir?:<dir>}. Two JLCPCB selectors read ONE pinned service-profile file: " +
+		"\"jlcpcb-economic\" selects the Economic assembly TIER, so the board is also " +
+		"checked against it (assembly_service_fab_profile_mismatch when the board was " +
+		"compiled against a fabrication rule profile the service does not pin, " +
+		"assembly_service_side_unsupported for a populated part on a side the tier does " +
+		"not place on, assembly_service_board_size_unsupported), and the reply carries " +
+		"unchecked_rules naming every published rule nothing looked at; \"jlc\" selects " +
+		"the same CSV dialect with NO tier and therefore claims nothing about a " +
+		"manufacturer — the honest shape for a mid-layout quote export. Both write " +
+		"identical bytes. \"oshpark\" is a KNOWN house that refuses (bare-board only — no " +
+		"assembly service). Returns {profile, bom:{filename,rows,path}, cpl:{filename,rows,path}} — " +
 		"rows counts data rows (header excluded); path is omitted unless out_dir was given, " +
 		"in which case both CSVs are also written to disk. Refusals are NAMED, never a " +
 		"silent best-guess format or a blank identity cell: a component the profile requires " +
@@ -705,7 +713,7 @@ var ExportAssembly = ToolSpec{
 		"properties": {
 			"yaml": {"type": "string", "description": "Canonical board YAML source."},
 			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
-			"profile": {"type": "string", "description": "Assembly house profile id (default \"jlc\" — the only assembly-capable profile shipped; \"oshpark\" is known but refuses — bare-board only)."},
+			"profile": {"type": "string", "description": "Assembly profile id (default \"jlc\" — JLCPCB's CSV dialect, no service tier claimed; \"jlcpcb-economic\" selects the Economic tier and its compatibility checks; \"oshpark\" is known but refuses — bare-board only)."},
 			"name": {"type": "string", "description": "Optional output file basename (defaults to \"board\")."},
 			"out_dir": {"type": "string", "description": "Optional directory to also write the files to."}
 		}

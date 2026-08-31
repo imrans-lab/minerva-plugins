@@ -72,14 +72,34 @@ def _minimal(**component) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _board_for(profile: ao.HouseProfile) -> dict:
+    """The fixture, adjusted to whatever the profile CLAIMS.
+
+    A profile that selects a service tier checks the board against that
+    manufacturer, and the shared fixture is deliberately not orderable from one:
+    it takes the compiler's default floor and populates its diode on the bottom
+    side. Both are properties this matrix is not about, so they are corrected
+    here rather than weakening the fixture the emitter seals depend on."""
+    board = _load()
+    service = profile.service
+    if service is None:
+        return board
+    board["design_rules"]["rule_profile"] = service.fab_profile
+    sides = set(service.constraints.assembly_sides)
+    for component in board["components"]:
+        if component.get("layer") not in sides:
+            component["layer"] = sorted(sides)[0]
+    return board
+
+
 @pytest.mark.parametrize("profile_id", sorted(ao.PROFILES))
 @pytest.mark.parametrize("emit", [ao.build_bom, ao.build_cpl])
 def test_profile_matrix_supports_or_refuses_by_capability(profile_id, emit):
     """Every KNOWN profile either emits (supports_assembly) or refuses BY
     NAME (not supports_assembly) — never a third outcome (a crash, a silent
     partial file, or a refusal that doesn't name the house)."""
-    board = _compiled(_load())
     profile = ao.PROFILES[profile_id]
+    board = _compiled(_board_for(profile))
     if profile.supports_assembly:
         result = emit(board, profile_id)
         assert len(result) == 1
@@ -89,16 +109,16 @@ def test_profile_matrix_supports_or_refuses_by_capability(profile_id, emit):
 
 
 def test_every_assembly_capable_profile_has_a_renderer_wired():
-    """A profile declared supports_assembly=True but with no renderer branch
-    in build_bom/build_cpl would hit the `pragma: no cover` else-raise —
-    catching that class of authoring mistake without needing a second live
-    house to actually stand up. Today PROFILES has exactly one
-    assembly-capable entry (jlc); this test is the tripwire for the day a
-    second one is added without its renderer."""
-    board = _compiled(_load())
+    """A profile declared supports_assembly=True whose DIALECT has no entry in
+    the renderer table refuses with "no renderer wired" — catching that class of
+    authoring mistake without needing a second live house to actually stand up.
+    The table keys on the dialect rather than the selector, so a new tier of a
+    house we already render needs no new entry and a genuinely new house does;
+    this is the tripwire for the second case."""
     for profile_id, profile in ao.PROFILES.items():
         if not profile.supports_assembly:
             continue
+        board = _compiled(_board_for(profile))
         ao.build_bom(board, profile_id)
         ao.build_cpl(board, profile_id)
 
@@ -144,10 +164,10 @@ def test_identity_refusal_names_every_missing_field_not_just_the_first():
 
 
 def test_identity_satisfied_when_all_required_fields_present():
-    # NOTE: id stays "jlc" (only identity_required is widened) — the renderer
-    # table keys off profile.id, and a truly new id needs its own entry (see
-    # test_every_assembly_capable_profile_has_a_renderer_wired above); that is a
-    # SEPARATE claim from the one this test makes.
+    # NOTE: the copy keeps jlc's renderer (only identity_required is widened),
+    # so it renders through the same dialect; a genuinely new house needs its
+    # own renderer entry (see test_every_assembly_capable_profile_has_a_
+    # renderer_wired above), which is a SEPARATE claim from this one.
     two_field_profile = replace(
         ao.PROFILES["jlc"], identity_required=("mpn", "manufacturer"))
     ao.PROFILES["synthetic-two-field"] = two_field_profile

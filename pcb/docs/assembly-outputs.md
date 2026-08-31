@@ -9,6 +9,12 @@ describing one board and Gerbers describing another. The emitter is
 `assembly_gates.py` and are tabulated in `board-yaml.md` under "Hard gates on
 assembly export".
 
+Which columns those files carry, which fabrication profile a board must have
+compiled against, and which of the house's published rules are checked, advised
+or explicitly not looked at, all come from the SELECTED SERVICE PROFILE —
+`service-profiles.md`. `jlc` selects the dialect and claims no tier;
+`jlcpcb-economic` selects the tier and turns on its compatibility checks.
+
 ## What each BOM column carries
 
 The schema gives three `assembly` fields a column of their own, and each is read
@@ -18,7 +24,7 @@ with exactly one fallback to the pre-block source it supersedes:
 |---|---|---|
 | Comment | `assembly.comment` | the component's `value` |
 | Footprint | `assembly.package` | the authored `footprint` ref |
-| part number ("LCSC Part #" for `jlc`) | `assembly.house_parts[<house>]` | `assembly.mpn` |
+| part number (`LCSC Part #` in JLCPCB's dialect) | `assembly.house_parts[<house>]` | `assembly.mpn` |
 
 `<house>` is the selected profile's own `house_part_id` — the id a board names
 that house's catalogue number under (`jlcpcb` for the `jlc` profile). Selecting

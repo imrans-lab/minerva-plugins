@@ -633,7 +633,21 @@ compiles and fabricates while carrying any of them.
 
 The per-row and per-placement thresholds are **profile parameters**, not
 constants: the figures a particular house publishes are dialect facts the service
-profile supplies.
+profile supplies (`service-profiles.md`).
+
+Selecting a profile that names a SERVICE TIER — `jlcpcb-economic` rather than
+the tier-less `jlc` — adds three more, which refuse before the per-component
+gates because none of them is fixable by editing an assembly block:
+
+| code | refuses when |
+|---|---|
+| `assembly_service_fab_profile_mismatch` | the board's `design_rules.rule_profile` is not the fabrication profile the service pins. |
+| `assembly_service_side_unsupported` | a POPULATED placement sits on a side the tier does not place on (JLCPCB Economic is single-sided). |
+| `assembly_service_board_size_unsupported` | the board's outer rectangle falls outside the tier's single-board size range. |
+
+A service tier also rides ADVISORIES back (`assembly_house_component_to_edge`,
+`assembly_house_tooling_holes`, `assembly_service_unmeasurable`) and names, in
+`unchecked_rules`, every published rule nothing looked at.
 
 #### Which surface refuses a duplicate designator
 

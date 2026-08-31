@@ -1,0 +1,173 @@
+{
+  "id": "jlcpcb-economic",
+  "version": "1",
+  "display_name": "JLCPCB Economic PCBA",
+  "source": "JLCPCB Economic PCBA assembly tier. Capability figures quoted from https://jlcpcb.com/capabilities/pcb-assembly-capabilities (fetched 2026-08-30), Economic column: 'Single sided placement (SMT/Thru-hole)'; '2,4,6-layers'; 'Thickness: 0.8mm - 1.6mm'; 'Single PCB Size: 10x10mm - 470x500mm'; 'Panel Size: 10x10mm - 250x250mm'; 'Order Volume: 2 - 50 pcs'; 'Minimum Package: 0402'; 'Minimum IC Pin Spacing: 0.4mm'; 'Minimum BGA Spacing: 0.5mm(center to center)'; 'Gold Fingers/Castellated Holes/Edge Plating: Not Support'; 'Standard stack-up only, special stack-up is not supported'. BOM/CPL dialect figures quoted from https://jlcpcb.com/help/article/advice-for-bom-and-cpl-files-preparation (fetched 2026-08-30): 'Each BOM line should contain no more than 200 reference designators'; 'Ensure that all coordinate values use a consistent unit (e.g., all in millimeters, mm)'; 'Ensure that the minimum distance between any two different reference designators is not less than 0.2 mm'; 'All reference designators listed in the BOM file exactly match those listed in the CPL file'. Component-to-edge figure quoted from https://jlcpcb.com/help/article/pcb-assembly-faqs-part-2 (fetched 2026-08-30) item 14, 'Reminder for economic assembly design': 'There will be a tolerance of about 0.2mm when routing the boards for depanelizing ... We suggest that the edges of the traces and components must be more than 0.3mm away from the edge of the board.' -- JLCPCB's own verb is 'suggest', which is why it is an ADVISORY and not a blocker. Tooling-hole figures quoted from https://jlcpcb.com/help/article/common-pcba-after-sales-issues-and-faq (fetched 2026-08-30): 'For economic PCBA orders, fiducial / tooling holes are essential for accurate component placement. Typically, two to three tooling holes are added, located near the PCB corners and spaced as far apart as possible'; 'The tooling holes are non-plated through holes (NPTH) with a diameter of 1.152 mm (45.4 mil) and a solder mask clearance of 0.148 mm.' NOT RECORDED, deliberately: no component-to-board-edge figure appears on https://jlcpcb.com/help/article/specifications-for-adding-process-edges-and-positioning-holes -- that page states only 5 mm process edges, 2 mm tooling holes and 1 mm fiducials for PANELS, and warns that a narrow process edge risks rail collision without publishing a number. Pricing is deliberately absent: it is volatile informational material, never acceptance-contract truth.",
+  "fab_profile": "jlcpcb-2layer",
+  "dialect": {
+    "renderer": "jlc",
+    "house_part_key": "jlcpcb",
+    "identity_required": [
+      "mpn"
+    ],
+    "coordinate_unit": "mm",
+    "coordinate_suffix": "",
+    "max_refs_per_row": 200,
+    "min_designator_separation_mm": 0.2,
+    "bom_columns": [
+      "Comment",
+      "Designator",
+      "Footprint",
+      "LCSC Part #"
+    ],
+    "cpl_columns": [
+      "Designator",
+      "Mid X",
+      "Mid Y",
+      "Layer",
+      "Rotation"
+    ],
+    "designator_separator": ",",
+    "layer_tokens": {
+      "top": "Top",
+      "bottom": "Bottom"
+    }
+  },
+  "service": {
+    "assembly_sides": [
+      "top"
+    ],
+    "board_min_edge_mm": 10.0,
+    "board_max_short_edge_mm": 470.0,
+    "board_max_long_edge_mm": 500.0,
+    "component_to_edge_mm": 0.3,
+    "tooling_holes_added": true,
+    "tooling_hole_count": "two to three",
+    "tooling_hole_diameter_mm": 1.152
+  },
+  "templates": [
+    {
+      "artifact": "bom",
+      "url": "https://s3.amazonaws.com/helpscout.net/docs/assets/59f1de7804286313cffbb22c/attachments/60ee4acd9e87cb3d0124d284/Sample-BOM_JLCSMT.xlsx",
+      "referenced_from": "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly",
+      "fetched": "2026-08-30",
+      "sha256": "f6fa6b2cb4f9b0d314337951088b925dbba3f95d110b64a6a46942a53d775a7a",
+      "columns": [
+        "Comment",
+        "Designator",
+        "Footprint",
+        "JLCPCB Part #（optional）"
+      ],
+      "observed_layer_tokens": {},
+      "observed_coordinate_suffix": "",
+      "drift": [
+        {
+          "position": 3,
+          "template": "JLCPCB Part #（optional）",
+          "emitted": "LCSC Part #",
+          "note": "The workbook JLCPCB currently serves spells the catalogue column with full-width parentheses, while JLCPCB's own BOM help page names the same column 'JLCPCB / LCSC Part #' and every KiCad-side exporter in circulation emits 'LCSC Part #'. Which spelling their uploader's parser prefers is only settled by a live quote-page upload, so the emitted header is NOT changed on the strength of the template alone; the drift is recorded here and carried in unchecked_rules as template_column_drift_resolution."
+        }
+      ]
+    },
+    {
+      "artifact": "cpl",
+      "url": "https://s3.amazonaws.com/helpscout.net/docs/assets/59f1de7804286313cffbb22c/attachments/5d83250e04286364bc8f4c5e/Sample-CPL_JLCSMT.xlsx",
+      "referenced_from": "https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly",
+      "fetched": "2026-08-30",
+      "sha256": "6cc4f67ee8687d7d748c65532796769877f5b6525949cfd3609633baca6a7703",
+      "columns": [
+        "Designator",
+        "Mid X",
+        "Mid Y",
+        "Layer",
+        "Rotation"
+      ],
+      "observed_layer_tokens": {
+        "top": "T",
+        "bottom": "B"
+      },
+      "observed_coordinate_suffix": "mm",
+      "drift": []
+    }
+  ],
+  "checked_rules": [
+    "assembly_service_fab_profile_mismatch",
+    "assembly_service_side_unsupported",
+    "assembly_service_board_size_unsupported",
+    "assembly_row_ref_limit",
+    "assembly_placements_too_close",
+    "assembly_non_metric_coordinates",
+    "assembly_reference_set_mismatch",
+    "assembly_duplicate_designator",
+    "assembly_empty_expansion",
+    "assembly_paste_undecided",
+    "assembly_missing_identity"
+  ],
+  "advisory_rules": [
+    "assembly_house_component_to_edge",
+    "assembly_house_tooling_holes",
+    "assembly_service_unmeasurable"
+  ],
+  "unchecked_rules": [
+    {
+      "id": "board_thickness_0p8_to_1p6mm",
+      "reason": "No board datum states a thickness. compile_board._build_layer_stack declares copper order and leaves every StackupEntry.thickness_mm None on purpose (it asserts no thickness the source did not supply), so there is nothing to compare against 0.8-1.6 mm. It is an order-page choice and is confirmed at the quote-page HITL."
+    },
+    {
+      "id": "order_quantity_2_to_50_pcs",
+      "reason": "Quantity is an order-form choice, not board data. Nothing in the canonical YAML states how many boards are being bought."
+    },
+    {
+      "id": "surface_finish_limited_options",
+      "reason": "Surface finish is an order-form choice; the canonical schema carries no finish field."
+    },
+    {
+      "id": "layer_counts_4_and_6",
+      "reason": "The Economic tier itself builds 2, 4 and 6 copper layers, but THIS profile pins the 2-layer fabrication rules (fab_profile jlcpcb-2layer), whose capability block caps a board at the two-copper baseline. A board with more layers therefore never reaches a layer-count check: it either fails to compile against this fab profile or, compiled against jlcpcb-4layer, refuses at assembly_service_fab_profile_mismatch. A 4- or 6-layer Economic order needs a sibling service profile pinning the matching fab profile, which is a data addition. No layer-count gate is shipped, because one that cannot refuse anything would overstate what is checked."
+    },
+    {
+      "id": "standard_stackup_only",
+      "reason": "The IR carries copper layer ORDER and no material or dielectric thickness, so 'standard stack-up' cannot be distinguished from a special one using board data."
+    },
+    {
+      "id": "min_component_package_0402",
+      "reason": "assembly.package is authored free text. Mapping a package name to physical dimensions needs a size table nothing in this repo owns, and inventing one would be inventing a rule."
+    },
+    {
+      "id": "min_ic_pin_spacing_0p4mm",
+      "reason": "Derivable in principle from resolved pad geometry, but pin PITCH is not the same measurement as land-to-land clearance and needs its own oracle. Not implemented, so not claimed."
+    },
+    {
+      "id": "min_bga_spacing_0p5mm_center_to_center",
+      "reason": "Same pad-geometry gap as the IC pin spacing rule, plus the IR carries no BGA classification, so the rule has no population to run over."
+    },
+    {
+      "id": "no_gold_fingers_castellated_holes_edge_plating",
+      "reason": "The canonical schema models none of these three features. Their ABSENCE therefore cannot be verified from board data — a board could carry an edge-plated slot the schema simply has no word for."
+    },
+    {
+      "id": "component_to_cutout_edge",
+      "reason": "The component-to-edge advisory measures the OUTER board rim only. Interior cutout openings (ir_projection.outline_cutouts) are board edges too and are not measured; a part beside a cutout is not reported."
+    },
+    {
+      "id": "panelisation_and_depanel_tolerance",
+      "reason": "JLCPCB panelises Economic boards and routes them apart with a stated tolerance of about 0.2 mm. Where the panel is cut, and how many boards share it, is JLCPCB's choice made after upload — not board data."
+    },
+    {
+      "id": "tooling_hole_placement",
+      "reason": "JLCPCB adds two to three NPTH tooling holes near the corners of an Economic board. WHERE they land is decided by JLCPCB after upload, so nothing in the board says whether they will collide with anything; the possibility is raised as an advisory and belongs on the order checklist."
+    },
+    {
+      "id": "part_stock_and_substitution",
+      "reason": "DCR owner decision 3: inventory drift is handled at order time by updating the design. There is no stock-watch subsystem, so a pinned house catalogue number is never checked against live availability."
+    },
+    {
+      "id": "template_column_drift_resolution",
+      "reason": "The emitted BOM catalogue column is 'LCSC Part #' while the pinned template spells it 'JLCPCB Part #（optional）'. Both spellings appear in JLCPCB's current guidance and only a live quote-page upload settles which their parser prefers, so the drift is recorded rather than resolved offline."
+    },
+    {
+      "id": "quote_page_acceptance",
+      "reason": "Whether JLCPCB's uploader parses these files at all is not an offline fact. Only a live upload settles it, and it proves uploader compatibility rather than assembly yield."
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+{
+  "_note": "SEMANTIC goldens parsed out of JLCPCB's own sample workbooks. The workbooks themselves are NOT vendored: what is checked in is what was READ from them, beside the digest of the bytes that were read, so a later fetch can prove it is looking at the same artifact. Regenerate with worker/tests/testdata/jlc_templates/regenerate.py.",
+  "templates": [
+    {
+      "artifact": "bom",
+      "url": "https://s3.amazonaws.com/helpscout.net/docs/assets/59f1de7804286313cffbb22c/attachments/60ee4acd9e87cb3d0124d284/Sample-BOM_JLCSMT.xlsx",
+      "referenced_from": "https://jlcpcb.com/help/article/bill-of-materials-for-pcb-assembly",
+      "fetched": "2026-08-30",
+      "sha256": "f6fa6b2cb4f9b0d314337951088b925dbba3f95d110b64a6a46942a53d775a7a",
+      "rows": [
+        [
+          "Comment",
+          "Designator",
+          "Footprint",
+          "JLCPCB Part #（optional）"
+        ],
+        [
+          "100uF",
+          "C1",
+          "CAP-SMD_L3.5-W2.8",
+          "C16133"
+        ],
+        [
+          "15K",
+          "R5,R6",
+          "R0603",
+          "C22809"
+        ],
+        [
+          "DC-005-20A_C136744",
+          "DC1",
+          "DC-IN-TH_DC-005-20A",
+          "C136744"
+        ],
+        [
+          "Header-Female-2.54_1x8",
+          "P2,P3",
+          "HDR-TH_8P-P2.54-V",
+          "C27438"
+        ],
+        [
+          "K2-1102DP-C4SW-04",
+          "SW1",
+          "KEY-TH_4P-L6.0-W6.0-P4.50-LS6.5",
+          "C110153"
+        ],
+        [
+          "ATMEGA328P-PU",
+          "U1",
+          "DIP-28_L34.6-W7.3-P2.54-LS10.2-BL",
+          "C33901"
+        ],
+        [
+          "670688000",
+          "USB1",
+          "USB-B-TH_67068-8000",
+          "C114097"
+        ]
+      ]
+    },
+    {
+      "artifact": "cpl",
+      "url": "https://s3.amazonaws.com/helpscout.net/docs/assets/59f1de7804286313cffbb22c/attachments/5d83250e04286364bc8f4c5e/Sample-CPL_JLCSMT.xlsx",
+      "referenced_from": "https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly",
+      "fetched": "2026-08-30",
+      "sha256": "6cc4f67ee8687d7d748c65532796769877f5b6525949cfd3609633baca6a7703",
+      "rows": [
+        [
+          "Designator",
+          "Mid X",
+          "Mid Y",
+          "Layer",
+          "Rotation"
+        ],
+        [
+          "C1",
+          "95.0518mm",
+          "22.6822mm",
+          "T",
+          "270"
+        ],
+        [
+          "C2",
+          "106.4056mm",
+          "23.0124mm",
+          "T",
+          "90"
+        ],
+        [
+          "C3",
+          "109.0726mm",
+          "22.8854mm",
+          "T",
+          "270"
+        ],
+        [
+          "R2",
+          "109.5996mm",
+          "16.6443mm",
+          "B",
+          "0"
+        ]
+      ]
+    }
+  ]
+}

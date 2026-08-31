@@ -22,9 +22,24 @@ self-consistent; nothing there compares one call to the other. A caller that
 wants both files must ask for both at once.
 
 A house-format-agnostic CORE (:func:`_walk`) plus exactly ONE house-specific
-renderer (JLCPCB-style CSV, ``PROFILES["jlc"]``). An unrecognized or
-assembly-incapable house id is a NAMED refusal (:class:`AssemblyProfileError`),
-never a silent best-guess format.
+renderer (JLCPCB-style CSV). An unrecognized or assembly-incapable house id is a
+NAMED refusal (:class:`AssemblyProfileError`), never a silent best-guess format.
+
+THE SELECTED PROFILE IS PINNED DATA, NOT PYTHON. Every dialect fact below — the
+emitted column headers, the house's catalogue key, the identity fields it
+requires, and the three thresholds :mod:`assembly_gates` compares against —
+comes from a service-profile FILE (:mod:`service_profile`,
+``pcb/library/service-profiles``), which also names the fabrication rule profile
+a board must have compiled against and pins the house's own template artifacts.
+One file, one definition of each fact.
+
+TWO SELECTORS, ONE FILE, and the difference is what is CLAIMED. ``jlcpcb-economic``
+selects the SERVICE: the tier's compatibility checks run, and a board that
+disagrees with it is refused by name. ``jlc`` selects the same file's DIALECT
+with NO tier — the legacy selector, kept because a mid-layout quote export
+against a board not yet compiled for any house is legitimate (the DCR's
+readiness states) and must not be dressed up as orderable. Both emit identical
+files; only ``jlcpcb-economic`` makes a claim about a manufacturer.
 
 PART-IDENTITY CONTRACT. A component the selected profile requires identity for
 (today: ``mpn``) and that lacks it is a NAMED refusal
@@ -86,7 +101,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import assembly_gates
+from . import assembly_gates, service_profile
 from .assembly_spec import IDENTITY_FIELDS
 
 CSV_EOL = "\r\n"  # JLC's own templates ship CRLF; keep it stable either way.
@@ -140,14 +155,40 @@ class HouseProfile:
     #: :attr:`house_part_id`, never directly.
     house_part_key: str = ""
     # DIALECT PARAMETERS, defaulted rather than hard-coded at the point of
-    # comparison. The real figures are facts a house publishes and the service-
-    # profile work pins; the gates read them off whatever profile is selected,
-    # so filling in a measured limit later is a data change, not a code change.
-    # Defaults and rationale live in assembly_gates.
+    # comparison. The real figures are facts a house publishes and the selected
+    # service profile pins; the gates read them off whatever profile is passed,
+    # so filling in a measured limit is a data change, not a code change. The
+    # defaults here are what a profile that pins nothing gets, and their
+    # rationale lives in assembly_gates.
     max_refs_per_row: int = assembly_gates.DEFAULT_MAX_REFS_PER_ROW
     min_designator_separation_mm: float = (
         assembly_gates.DEFAULT_MIN_DESIGNATOR_SEPARATION_MM)
     coordinate_unit: str = assembly_gates.METRIC_COORDINATE_UNIT
+    #: What each emitted coordinate carries AFTER its number. Empty is the bare
+    #: millimetre figure every KiCad-side exporter writes; JLCPCB's own CPL
+    #: sample writes ``95.0518mm``, and its uploader takes either. A dialect
+    #: fact, so it is pinned rather than decided at the point of formatting.
+    coordinate_suffix: str = ""
+    #: The CSV dialect this profile renders through, separate from ``id``
+    #: because the FORMAT and the SERVICE are different facts: several tiers of
+    #: one house emit one dialect. Empty means the two coincide; read through
+    #: :attr:`renderer_id`. This is also what keeps the emitted filenames
+    #: naming a format rather than a tier.
+    renderer: str = ""
+    #: The emitted header row of each file, pinned by the service profile. Kept
+    #: here rather than in the renderer so the columns a house publishes and the
+    #: columns we write are comparable — see ``service_profile._check_drift``.
+    bom_columns: tuple[str, ...] = ()
+    cpl_columns: tuple[str, ...] = ()
+    #: What separates designators inside one grouped BOM row's Designator cell.
+    designator_separator: str = ","
+    #: The token each board side prints in the CPL's Layer column, by
+    #: ``Side`` value.
+    layer_tokens: tuple[tuple[str, str], ...] = ()
+    #: The pinned service tier, or None when the selector claims no tier. Its
+    #: presence is what turns on the manufacturer-compatibility checks in
+    #: :func:`service_profile.check_board`.
+    service: "service_profile.ServiceProfile | None" = None
 
     def __post_init__(self) -> None:
         # A profile may only require identity the model can actually carry. A
@@ -169,26 +210,70 @@ class HouseProfile:
         read from."""
         return self.house_part_key or self.id
 
+    @property
+    def renderer_id(self) -> str:
+        """The CSV dialect this profile renders through."""
+        return self.renderer or self.id
 
-# The ONE JLC-style profile this unit ships (scope: "house-format-agnostic
-# core + ONE JLC-style profile"). JLCPCB's SMT assembly service requires an
-# LCSC part number per placed part — that is what ``identity_required``
-# encodes; a component missing it is a structured refusal, not a blank BOM
-# cell (see module docstring, PART-IDENTITY CONTRACT).
+    def layer_token(self, side: str) -> str:
+        """The Layer-column token for a board side. Falls back to the
+        capitalized side name for a profile that pins no tokens, which is what
+        every emitted CPL carried before the tokens were pinned."""
+        return dict(self.layer_tokens).get(side, side.capitalize())
+
+
+#: The service-profile file every JLCPCB selector below reads its dialect from.
+#: Loaded EAGERLY, the same way ``compile_board`` loads its default rule profile
+#: at import: shipped worker data that fails to load is a broken install, not a
+#: condition to discover halfway through an order.
+JLCPCB_ECONOMIC = service_profile.load_service_profile("jlcpcb-economic")
+
+
+def _house_profile(service, *, selector: str, select_service: bool) -> HouseProfile:
+    """One selectable house profile built from a pinned service profile.
+
+    ``select_service`` is the whole difference between the two JLCPCB selectors:
+    carrying the service turns on the manufacturer-compatibility checks, and
+    omitting it says "this export claims no tier" (module docstring, TWO
+    SELECTORS)."""
+    dialect = service.dialect
+    return HouseProfile(
+        id=selector,
+        display_name=service.display_name if select_service else "JLCPCB",
+        supports_assembly=True,
+        identity_required=tuple(dialect["identity_required"]),
+        house_part_key=dialect["house_part_key"],
+        max_refs_per_row=dialect["max_refs_per_row"],
+        min_designator_separation_mm=float(dialect["min_designator_separation_mm"]),
+        coordinate_unit=dialect["coordinate_unit"],
+        coordinate_suffix=dialect["coordinate_suffix"],
+        renderer=dialect["renderer"],
+        bom_columns=tuple(dialect["bom_columns"]),
+        cpl_columns=tuple(dialect["cpl_columns"]),
+        designator_separator=dialect["designator_separator"],
+        layer_tokens=tuple(sorted(dialect["layer_tokens"].items())),
+        service=service if select_service else None,
+    )
+
+
+# The selectable assembly profiles this unit ships.
+#
+# ``jlcpcb-economic`` is the SERVICE: selecting it pins the fabrication rule
+# profile, the dialect, the template artifacts and the rule lists at once, and a
+# board that disagrees with any of them refuses by name. ``jlc`` is the same
+# file's dialect with no tier claimed — see the module docstring. JLCPCB's SMT
+# assembly service requires a part number per placed part, which is what the
+# profile's ``identity_required`` encodes; a component missing it is a
+# structured refusal, not a blank BOM cell (PART-IDENTITY CONTRACT).
 #
 # ``oshpark`` is deliberately KNOWN-BUT-UNSUPPORTED (not merely absent from
 # the dict): the docket is explicit that "OSHPark is bare-board only", so a
 # caller asking for an OSHPark assembly package gets a refusal that SAYS that,
 # distinct from asking for a house this module has simply never heard of.
 PROFILES: dict[str, HouseProfile] = {
-    "jlc": HouseProfile(
-        id="jlc", display_name="JLCPCB", supports_assembly=True,
-        identity_required=("mpn",),
-        # Boards name JLC's catalogue by the house's full id, not the short
-        # profile selector — measured on the shipped fixtures, which all author
-        # ``house_parts: {jlcpcb: …}``.
-        house_part_key="jlcpcb",
-    ),
+    JLCPCB_ECONOMIC.id: _house_profile(
+        JLCPCB_ECONOMIC, selector=JLCPCB_ECONOMIC.id, select_service=True),
+    "jlc": _house_profile(JLCPCB_ECONOMIC, selector="jlc", select_service=False),
     "oshpark": HouseProfile(
         id="oshpark", display_name="OSH Park", supports_assembly=False,
     ),
@@ -408,6 +493,12 @@ class AssemblyEmission:
     cpl: tuple[CplRow, ...]
     excluded_refs: tuple[str, ...]
     advisories: tuple[dict, ...]
+    #: What the SELECTED SERVICE states it does not check, each with its reason.
+    #: Empty for a selector that claims no tier. Carried out of the emission
+    #: rather than left in the profile file because a rule nobody is told about
+    #: is indistinguishable from a rule nobody wrote: the caller that receives
+    #: the files is the one that has to know what was not looked at.
+    unchecked: tuple[dict, ...] = ()
 
 
 def emit(board, profile_id: str) -> AssemblyEmission:
@@ -415,6 +506,16 @@ def emit(board, profile_id: str) -> AssemblyEmission:
     advisories — or refuse by name. The single entry point behind both files."""
     profile = _resolve_profile(profile_id)
     assembly_gates.check_profile(profile)
+    # THE SERVICE FIRST, when one is selected. A tier incompatibility is not
+    # something an author fixes by editing an assembly block — the house will
+    # not build the board at all — so naming it before the per-component data
+    # gates avoids sending somebody to correct paste policy on a board the tier
+    # was never going to accept.
+    service_advisories: tuple[dict, ...] = ()
+    unchecked: tuple[dict, ...] = ()
+    if profile.service is not None:
+        service_advisories = service_profile.check_board(board, profile.service)
+        unchecked = profile.service.unchecked_rules
     assembly_gates.check_components(board)
     bom, cpl, excluded, placed = _walk(board, profile)
     assembly_gates.check_designators(placed)
@@ -423,7 +524,8 @@ def emit(board, profile_id: str) -> AssemblyEmission:
     assembly_gates.check_placement_spacing(cpl, profile, dict(placed))
     return AssemblyEmission(profile=profile, bom=tuple(bom), cpl=tuple(cpl),
                             excluded_refs=excluded,
-                            advisories=assembly_gates.advisories(board))
+                            advisories=assembly_gates.advisories(board) + service_advisories,
+                            unchecked=unchecked)
 
 
 def _csv_line(fields) -> str:
@@ -443,21 +545,28 @@ def _fmt_mm(value: float) -> str:
     return f"{value:.4f}"
 
 
-def _render_jlc_bom(rows: list[BomRow]) -> str:
-    lines = [_csv_line(["Comment", "Designator", "Footprint", "LCSC Part #"])]
+def _render_jlc_bom(rows: list[BomRow], profile: HouseProfile) -> str:
+    """The header row and the designator separator both come from the PROFILE,
+    so what this emits and what the pinned template contains are two lists a
+    reader can hold beside each other (``service_profile._check_drift`` does
+    exactly that at load)."""
+    lines = [_csv_line(profile.bom_columns)]
     for row in rows:
         lines.append(_csv_line([
-            row.comment, ",".join(row.refs), row.footprint, row.part_number or "",
+            row.comment, profile.designator_separator.join(row.refs),
+            row.footprint, row.part_number or "",
         ]))
     return CSV_EOL.join(lines) + CSV_EOL
 
 
-def _render_jlc_cpl(rows: list[CplRow]) -> str:
-    lines = [_csv_line(["Designator", "Mid X", "Mid Y", "Layer", "Rotation"])]
+def _render_jlc_cpl(rows: list[CplRow], profile: HouseProfile) -> str:
+    lines = [_csv_line(profile.cpl_columns)]
     for row in rows:
         lines.append(_csv_line([
-            row.ref, _fmt_mm(row.x_mm), _fmt_mm(row.y_mm),
-            "Top" if row.side == "top" else "Bottom",
+            row.ref,
+            _fmt_mm(row.x_mm) + profile.coordinate_suffix,
+            _fmt_mm(row.y_mm) + profile.coordinate_suffix,
+            profile.layer_token(row.side),
             _fmt_mm(row.rotation_deg),
         ]))
     return CSV_EOL.join(lines) + CSV_EOL
@@ -472,37 +581,49 @@ class AssemblyResult(dict):
     exclude``, in board order — always a tuple, empty when nothing was
     excluded, so a reply can surface the advisory absent-when-empty.
     ``advisories`` is the third and follows the same absent-when-empty idiom:
-    findings a surface should SHOW without refusing (assembly_gates)."""
+    findings a surface should SHOW without refusing (assembly_gates and the
+    selected service). ``unchecked`` is the fourth: what the selected service
+    states it did NOT look at, so a caller can tell an all-clear from an
+    unexamined one."""
 
     def __init__(self, files: dict[str, str], rows,
                  excluded_refs: tuple[str, ...] = (),
-                 advisories: tuple[dict, ...] = ()):
+                 advisories: tuple[dict, ...] = (),
+                 unchecked: tuple[dict, ...] = ()):
         super().__init__(files)
         self.rows = rows
         self.excluded_refs = excluded_refs
         self.advisories = advisories
+        self.unchecked = unchecked
 
 
-#: ``profile id -> (BOM renderer, CPL renderer)``. One table, so a profile
-#: declared assembly-capable with no renderer is one missing entry rather than
-#: two divergent dispatch branches.
+#: ``dialect id -> (BOM renderer, CPL renderer)``. Keyed on
+#: :attr:`HouseProfile.renderer_id` rather than on the selector, because the CSV
+#: FORMAT and the SERVICE TIER are different facts: every JLCPCB tier writes one
+#: dialect, and keying on the selector would have needed a new entry (or a new
+#: branch) for each tier that shares it.
 _RENDERERS = {"jlc": (_render_jlc_bom, _render_jlc_cpl)}
 
 
 def _renderers(profile: HouseProfile):
     try:
-        return _RENDERERS[profile.id]
-    except KeyError:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
+        return _RENDERERS[profile.renderer_id]
+    except KeyError:
         raise AssemblyProfileError(
-            f"no renderer wired for profile {profile.id!r}") from None
+            f"no renderer wired for dialect {profile.renderer_id!r} "
+            f"(profile {profile.id!r}); known dialects: "
+            f"{', '.join(sorted(_RENDERERS))}") from None
 
 
 def bom_filename(profile: HouseProfile, name: str | None = None) -> str:
-    return f"{name or 'board'}-bom-{profile.id}.csv"
+    """The emitted BOM's name. Tagged with the DIALECT, not the selector: the
+    tag says what format the file is in, and every tier of one house writes the
+    same format."""
+    return f"{name or 'board'}-bom-{profile.renderer_id}.csv"
 
 
 def cpl_filename(profile: HouseProfile, name: str | None = None) -> str:
-    return f"{name or 'board'}-cpl-{profile.id}.csv"
+    return f"{name or 'board'}-cpl-{profile.renderer_id}.csv"
 
 
 def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
@@ -513,9 +634,9 @@ def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyRes
     returns a partial or best-guess result."""
     emission = emit(board, profile_id)
     render_bom, _ = _renderers(emission.profile)
-    return AssemblyResult({bom_filename(emission.profile, name): render_bom(emission.bom)},
+    return AssemblyResult({bom_filename(emission.profile, name): render_bom(emission.bom, emission.profile)},
                           list(emission.bom), emission.excluded_refs,
-                          emission.advisories)
+                          emission.advisories, emission.unchecked)
 
 
 def build_cpl(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
@@ -524,9 +645,9 @@ def build_cpl(board, profile_id: str, *, name: str | None = None) -> AssemblyRes
     contract as :func:`build_bom`."""
     emission = emit(board, profile_id)
     _, render_cpl = _renderers(emission.profile)
-    return AssemblyResult({cpl_filename(emission.profile, name): render_cpl(emission.cpl)},
+    return AssemblyResult({cpl_filename(emission.profile, name): render_cpl(emission.cpl, emission.profile)},
                           list(emission.cpl), emission.excluded_refs,
-                          emission.advisories)
+                          emission.advisories, emission.unchecked)
 
 
 @dataclass(frozen=True)
@@ -557,8 +678,8 @@ def build_package(board, profile_id: str, *, name: str | None = None) -> Assembl
     cpl_file = cpl_filename(emission.profile, name)
     return AssemblyPackage(
         emission=emission, bom_file=bom_file, cpl_file=cpl_file,
-        files={bom_file: render_bom(emission.bom),
-               cpl_file: render_cpl(emission.cpl)})
+        files={bom_file: render_bom(emission.bom, emission.profile),
+               cpl_file: render_cpl(emission.cpl, emission.profile)})
 
 
 # ---------------------------------------------------------------------------

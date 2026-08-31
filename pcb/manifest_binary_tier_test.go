@@ -96,7 +96,8 @@ func TestServerVersionMatchesManifest(t *testing.T) {
 
 // The files the pack step ships beside the binary. Each is load-bearing:
 // library/ because compilation is hermetic and fails closed without the seed
-// lockfile; libraries.lock.json because minerva_pcb_fetch_libraries reads it
+// lockfile, and because assembly_outputs loads its service profile from
+// library/service-profiles at import — a bundle missing it cannot export at all; libraries.lock.json because minerva_pcb_fetch_libraries reads it
 // via DefaultLockPath(pluginRoot); NOTICE.md because shipping the tarball
 // redistributes KiCad-derived footprint definitions (DCR 019f761e item 7)
 // and the inventory must travel with them; ui/ because the manifest declares
@@ -105,6 +106,7 @@ func TestPackagedDataFilesExist(t *testing.T) {
 	for _, rel := range []string{
 		filepath.Join("library", "footprints.lock.json"),
 		filepath.Join("library", "profiles", "jlcpcb-4layer.json"),
+		filepath.Join("library", "service-profiles", "jlcpcb-economic.json"),
 		"libraries.lock.json",
 		"NOTICE.md",
 		filepath.Join("ui", "PCBPanel.gd"),

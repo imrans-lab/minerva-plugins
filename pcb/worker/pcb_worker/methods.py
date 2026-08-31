@@ -1438,13 +1438,18 @@ def _assembly_reply(files, compiled) -> dict:
     a component the board marks non-populated is REPORTED rather than silently
     missing from the CSVs, and an ADVISORY — something the pipeline could not
     measure, such as a part whose body it could not find — is SHOWN without
-    refusing. The caller fills in `written` afterwards."""
+    refusing. `unchecked_rules` is the third and completes the honesty: a
+    selected service states which of its published rules nothing looked at, so
+    a clean export is never mistaken for a fully checked one. The caller fills
+    in `written` afterwards."""
     result = {"files": files, "written": [],
               "warnings": [_diagnostic_to_payload(d) for d in compiled.diagnostics]}
     if files.excluded_refs:
         result["excluded_components"] = list(files.excluded_refs)
     if files.advisories:
         result["advisories"] = [dict(a) for a in files.advisories]
+    if getattr(files, "unchecked", ()):
+        result["unchecked_rules"] = [dict(u) for u in files.unchecked]
     return result
 
 
@@ -1541,7 +1546,8 @@ def _assembly_package(params: dict) -> dict:
 
     files = assembly_outputs.AssemblyResult(
         package.files, list(package.emission.bom),
-        package.emission.excluded_refs, package.emission.advisories)
+        package.emission.excluded_refs, package.emission.advisories,
+        package.emission.unchecked)
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
