@@ -16,6 +16,10 @@ import (
 // unchecked_rules (promised by the B1 description, never decoded) and to the
 // compile warnings.
 
+// The unchecked_rules entry is the SHAPE THE WORKER SENDS — {id, reason}, the
+// rows a service profile authors and service_profile.py forwards verbatim — not
+// the {code, message} every other finding carries. A fixture written in the
+// wrong shape is a fixture that passes over a consumer reading the wrong keys.
 func TestAssemblyReplyForwardsEveryPromisedList(t *testing.T) {
 	raw := json.RawMessage(`{
 		"files": {"b.csv": "h\r\nr\r\n", "c.csv": "h\r\nr\r\n"},
@@ -23,7 +27,8 @@ func TestAssemblyReplyForwardsEveryPromisedList(t *testing.T) {
 		"cpl_file": "c.csv",
 		"excluded_components": ["R9"],
 		"advisories": [{"code": "assembly_anchor_unmeasured", "component": "J2"}],
-		"unchecked_rules": [{"code": "template_column_drift_resolution"}],
+		"unchecked_rules": [{"id": "order_quantity_2_to_50_pcs",
+			"reason": "quantity is an order-form choice, not board data"}],
 		"warnings": [{"severity": "WARNING", "code": "captured_geometry_not_emitted",
 			"source_ref": {"entity_kind": "component", "entity_id": "U1"}}]
 	}`)
@@ -31,17 +36,77 @@ func TestAssemblyReplyForwardsEveryPromisedList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(reply.Advisories) != 1 {
-		t.Errorf("advisories dropped: %d", len(reply.Advisories))
+	// DECODING IS HALF. The name of this test is "forwards", so it drives the
+	// forwarding step too and reads the keys back out of the JSON the caller is
+	// handed — a struct field that never reaches the reply is the same silent
+	// drop as a field that was never declared.
+	out, err := assemblyReplyJSON(reply, "jlcpcb-economic",
+		assemblyOutputSummary{Filename: "b.csv", Rows: 1},
+		assemblyOutputSummary{Filename: "c.csv", Rows: 1})
+	if err != nil {
+		t.Fatalf("forward: %v", err)
 	}
-	if len(reply.UncheckedRules) != 1 {
-		t.Errorf("unchecked_rules dropped — the tool description promises them: %d", len(reply.UncheckedRules))
+	var forwarded struct {
+		Profile            string            `json:"profile"`
+		ExcludedComponents []string          `json:"excluded_components"`
+		Advisories         []json.RawMessage `json:"advisories"`
+		UncheckedRules     []json.RawMessage `json:"unchecked_rules"`
+		Warnings           []json.RawMessage `json:"warnings"`
 	}
-	if len(reply.Warnings) != 1 {
-		t.Errorf("compile warnings dropped: %d", len(reply.Warnings))
+	if err := json.Unmarshal(out, &forwarded); err != nil {
+		t.Fatalf("the forwarded reply is not valid JSON: %v", err)
 	}
-	if !strings.Contains(string(reply.Warnings[0]), "U1") {
-		t.Errorf("a warning must keep the component it is about: %s", reply.Warnings[0])
+	if forwarded.Profile != "jlcpcb-economic" {
+		t.Errorf("profile = %q", forwarded.Profile)
+	}
+	if len(forwarded.ExcludedComponents) != 1 {
+		t.Errorf("excluded_components dropped: %d", len(forwarded.ExcludedComponents))
+	}
+	if len(forwarded.Advisories) != 1 {
+		t.Errorf("advisories dropped: %d", len(forwarded.Advisories))
+	}
+	if len(forwarded.UncheckedRules) != 1 {
+		t.Fatalf("unchecked_rules dropped — the tool description promises them: %d", len(forwarded.UncheckedRules))
+	}
+	// Both halves of the entry, so a reshaping in transit fails here rather
+	// than reaching a consumer that renders blank bullets.
+	for _, want := range []string{"order_quantity_2_to_50_pcs", "order-form choice"} {
+		if !strings.Contains(string(forwarded.UncheckedRules[0]), want) {
+			t.Errorf("an unchecked rule must keep %q: %s", want, forwarded.UncheckedRules[0])
+		}
+	}
+	if len(forwarded.Warnings) != 1 {
+		t.Fatalf("compile warnings dropped: %d", len(forwarded.Warnings))
+	}
+	if !strings.Contains(string(forwarded.Warnings[0]), "U1") {
+		t.Errorf("a warning must keep the component it is about: %s", forwarded.Warnings[0])
+	}
+}
+
+// A list the worker did not send stays ABSENT rather than arriving empty: a
+// caller distinguishes "there were none" from "the tool forgot to ask" by the
+// key's presence, so forwarding an empty array would be a claim of its own.
+func TestAssemblyReplyOmitsListsTheWorkerDidNotSend(t *testing.T) {
+	reply, err := decodeAssemblyPackage(json.RawMessage(
+		`{"files": {"b.csv": "h", "c.csv": "h"}, "bom_file": "b.csv", "cpl_file": "c.csv"}`))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	out, err := assemblyReplyJSON(reply, "", assemblyOutputSummary{}, assemblyOutputSummary{})
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(out, &keys); err != nil {
+		t.Fatalf("the forwarded reply is not valid JSON: %v", err)
+	}
+	for _, absent := range []string{"advisories", "unchecked_rules", "warnings", "excluded_components"} {
+		if _, ok := keys[absent]; ok {
+			t.Errorf("%q was forwarded as an empty list", absent)
+		}
+	}
+	if string(keys["profile"]) != `"jlc"` {
+		t.Errorf("an omitted profile must default to the worker's own: %s", keys["profile"])
 	}
 }
 

@@ -9,6 +9,16 @@ THE ORACLES, named, because each of these tests turns on a different one:
     nothing asserts byte equality between an emitted CSV and an XLSX: the
     comparison is column names against column names and sample values against
     sample values.
+
+    WHAT THIS DOES NOT ESTABLISH, stated because the alternative is a reader
+    trusting it further than it goes: no test in this repo fetches anything, so
+    OFFLINE these tests prove that the shipped profile and the checked-in golden
+    AGREE WITH EACH OTHER — two transcriptions of one download — and not that
+    either matches what JLCPCB serves today. The recorded sha256 is what makes
+    the claim checkable, not what checks it: re-running
+    ``testdata/jlc_templates/regenerate.py`` is the only thing that compares
+    either against the manufacturer's bytes. A workbook JLCPCB changes without
+    changing its URL goes undetected here until someone runs it.
   * THE FAB-PROFILE GATE turns on a board compiled against a DIFFERENT rule
     profile than the service pins. The failure it exists to catch is an export
     that succeeds anyway and quietly relabels an OSH-Park-checked (or default-
@@ -115,7 +125,10 @@ def service() -> sp.ServiceProfile:
 def test_template_pins_match_the_downloaded_artifacts(service, golden):
     """Every pin names the artifact the golden was parsed out of: same URL, same
     fetch date, same digest of the same bytes. A pin that drifted from its
-    golden is a pin nobody could reproduce."""
+    golden is a pin nobody could reproduce.
+
+    Two transcriptions of ONE download agreeing, which is all an offline test
+    can be. Nothing here re-fetches the workbook — see the suite docstring."""
     assert {pin.artifact for pin in service.templates} == set(golden)
     for pin in service.templates:
         parsed = golden[pin.artifact]

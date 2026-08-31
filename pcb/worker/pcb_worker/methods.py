@@ -1630,8 +1630,14 @@ def _order_package(params: dict) -> dict:
 
     result = {
         "directory": package.directory,
+        # EVERY output carries a digest, the manifest included. The manifest
+        # cannot record its own hash, but this reply is built after the manifest
+        # bytes are final, so it hashes them here — the same bytes package.write
+        # puts on disk — rather than handing a caller a null to special-case.
         "outputs": package.manifest["package"]["outputs"] + [
-            {"file": order_package.MANIFEST_FILE, "sha256": None,
+            {"file": order_package.MANIFEST_FILE,
+             "sha256": order_package.digest(
+                 package.files[order_package.MANIFEST_FILE]),
              "bytes": len(package.files[order_package.MANIFEST_FILE].encode("utf-8"))}],
         "readiness": package.preflight["readiness"],
         "preflight": package.preflight,

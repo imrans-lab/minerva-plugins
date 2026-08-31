@@ -1,5 +1,5 @@
 {
-  "_note": "SEMANTIC goldens parsed out of JLCPCB's own sample workbooks. The workbooks themselves are NOT vendored: what is checked in is what was READ from them, beside the digest of the bytes that were read, so a later fetch can prove it is looking at the same artifact. Regenerate with worker/tests/testdata/jlc_templates/regenerate.py.",
+  "_note": "SEMANTIC goldens parsed out of JLCPCB's own sample workbooks. The workbooks themselves are NOT vendored: what is checked in is what was READ from them, beside the digest of the bytes that were read, so a later fetch can prove it is looking at the same artifact. NOTHING IN THE TEST SUITE RE-FETCHES: offline, a test comparing this file with the shipped service profile shows two transcriptions of one download agreeing, never that either still matches what JLCPCB serves. Only regenerate.py compares against the manufacturer's bytes. Regenerate with worker/tests/testdata/jlc_templates/regenerate.py.",
   "templates": [
     {
       "artifact": "bom",

@@ -31,8 +31,10 @@ READINESS IS THREE SEPARATE CLAIMS, and the package makes only two of them:
 1. ``package_generated`` — the files exist and agree with each other. This is
    what serialization proves, and it is ALL that serialization proves.
 2. ``preflight_status`` — ``pass``, ``advisories`` or ``blocked``, over the
-   checks the selected service actually ran. A blocked board yields no package;
-   its report is the refusal.
+   checks the selected service actually ran AND the WARNING channel of the one
+   compilation and the one emission. A blocked board yields no package; its
+   report is the refusal. ``pass`` never covers the ``unchecked`` list, which is
+   always non-empty: it is the statement of what nothing looked at.
 3. ``order_page_verified`` — a person uploaded these files and wrote down what
    the quote page said. There is no input to this module that can set it and no
    code path that computes it: it leaves here as ``None``, every time, and the
@@ -63,7 +65,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-from . import (assembly_outputs, assembly_preview, gerber,
+from . import (assembly_outputs, assembly_preview, board_model, gerber,
                order_provenance, order_write, resolved_board)
 
 #: The package layout, in build order. The checklist and the preflight report
@@ -103,8 +105,9 @@ CODE_ARCHIVE_INCOMPLETE = "order_package_archive_incomplete"
 UNCHECKED_UPLOADER = {
     "id": "gerber_archive_uploader_acceptance",
     "reason": ("whether a house's uploader parses this archive is only settled "
-               "by uploading it; the allowlist and the per-layer parse checks "
-               "are necessary, not sufficient"),
+               "by uploading it. The member allowlist is the ONLY check this "
+               "package runs over the archive — nothing here re-parses a layer "
+               "— and an allowlist is necessary, not sufficient"),
 }
 UNCHECKED_LICENCE = {
     "id": "ip_licence_compatibility",
@@ -203,18 +206,60 @@ def package_directory_name(board_name: str, profile_id: str) -> str:
     return f"{_safe_name(board_name)}-{_safe_name(profile_id)}"
 
 
-def git_state(source_path) -> dict:
+def _path_holds_source(path: Path, source_digest: str):
+    """``None`` when the file at ``path`` IS the source that digests to
+    ``source_digest``; otherwise the unavailable record saying why not.
+
+    The comparison is the package's own projection, so a stamped and an
+    unstamped copy of one design bind alike — the digest slot is normalized out
+    before either side is hashed."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"available": False, "path": str(path),
+                "reason": f"{path} could not be read, so nothing binds a "
+                          f"revision to this board: {exc}"}
+    try:
+        parsed = board_model.load_board({"yaml": text})
+        found = order_provenance.source_digest(parsed)
+    except Exception as exc:  # any parse fault: the file is not this board
+        return {"available": False, "path": str(path),
+                "reason": f"{path} does not parse as a canonical board, so "
+                          f"nothing binds a revision to this board: {exc}"}
+    if found != source_digest:
+        return {"available": False, "path": str(path),
+                "reason": f"{path} holds a different board than the one in this "
+                          f"package (that file projects to {found[:8]}, this "
+                          f"package to {source_digest[:8]}), so its repository's "
+                          f"revision is not this design's provenance"}
+    return None
+
+
+def git_state(source_path, source_digest: str) -> dict:
     """The revision the board source sits at, or a NAMED reason there is none.
 
     Read from the repository holding the source file, never from a caller
     parameter: a git revision a caller could supply is a claim, not evidence.
     Absent ``source_path`` — a board handed over inline, which is the ordinary
-    MCP shape — is reported as unavailable rather than guessed at."""
+    MCP shape — is reported as unavailable rather than guessed at.
+
+    THE PATH IS BOUND TO THE BOARD BEFORE ANY REVISION IS READ. ``source_path``
+    is caller input and the digest is evidence, so the file is loaded and
+    projected through :func:`order_provenance.source_digest` and must reproduce
+    ``source_digest`` — the digest of the board these artifacts were built from
+    — before git is consulted at all. Without that binding, a board passed with
+    a path into an unrelated clean repository would present that repository's
+    revision as this design's provenance: caller input laundered into evidence.
+    A path that cannot be read, cannot be parsed, or parses to a different board
+    is reported unavailable by reason, never silently."""
     if not source_path:
         return {"available": False,
                 "reason": "the board source was supplied inline, not as a file "
                           "in a repository"}
     path = Path(source_path)
+    bound = _path_holds_source(path, source_digest)
+    if bound is not None:
+        return bound
     directory = path.parent if path.is_file() else path
     try:
         rev = subprocess.run(
@@ -500,7 +545,17 @@ def build(board_source: dict, board, profile_id: str, *,
     unchecked = (tuple(assembly.emission.unchecked)
                  + (UNCHECKED_UPLOADER, UNCHECKED_LICENCE))
     questions = tuple(ip_questions(board))
-    status = PREFLIGHT_ADVISORIES if (advisories or questions) else PREFLIGHT_PASS
+    warnings = emission_warnings + tuple(compile_diagnostics)
+    # WARNINGS MOVE THE STATUS. A WARNING-channel diagnostic is the compiler or
+    # the emitter saying something about the board did not survive into these
+    # files — a dropped drill, a silk primitive that was captured and not
+    # emitted. The artifacts in the envelope are then not a complete rendering
+    # of the board, and `pass` over that is the exact claim this package exists
+    # to stop making. They are advisory, not blocking: the files are still
+    # emitted, and the WARNINGS section of the preflight report says which
+    # feature went missing.
+    status = (PREFLIGHT_ADVISORIES if (advisories or questions or warnings)
+              else PREFLIGHT_PASS)
 
     directory = package_directory_name(board.name, profile.id)
     files: dict = {
@@ -530,12 +585,15 @@ def build(board_source: dict, board, profile_id: str, *,
         "advisories": [dict(item) for item in advisories],
         "unchecked": [dict(item) for item in unchecked],
         "ip_questions": [dict(item) for item in questions],
+        # Carried here as well as in the manifest, because these are half of
+        # what moved the status above and a report that states a status it
+        # cannot account for sends a reader to the wrong file.
+        "warnings": [dict(item) for item in warnings],
         "readiness": readiness(generated=True, status=status),
     }
     files[PREFLIGHT_FILE] = _json(preflight)
     digests[PREFLIGHT_FILE] = digest(files[PREFLIGHT_FILE])
 
-    warnings = emission_warnings + tuple(compile_diagnostics)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(
@@ -549,8 +607,11 @@ def build(board_source: dict, board, profile_id: str, *,
                     "self": {"file": MANIFEST_FILE,
                              "sha256": None,
                              "note": "a file cannot record its own digest; "
-                                     "hash this file externally to pin it"}},
-        "source": {**provenance, "git": git_state(source_path)},
+                                     "the order_package reply hashes these "
+                                     "finalized bytes, and hashing this file "
+                                     "on disk reproduces that value"}},
+        "source": {**provenance,
+                   "git": git_state(source_path, provenance["source_digest"])},
         "board": {"name": board.name, "id": board.id,
                   "fab_rule_profile": board.design_rules.rule_profile.id},
         "profile": _profile_record(profile),

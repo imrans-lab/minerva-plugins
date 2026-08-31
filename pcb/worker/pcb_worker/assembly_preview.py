@@ -192,32 +192,67 @@ def _polyline(points, *, cls: str, closed: bool) -> str:
 _circumcenter = silk_source._circumcenter
 
 
-def _arc_path(start, mid, end, *, cls: str) -> str:
-    """A three-point arc as an SVG elliptical-arc path.
+def _arc_ink(start, mid, end, *, cls: str):
+    """A three-point arc as an SVG elliptical-arc path, PLUS the points its ink
+    actually occupies.
 
     The circumcentre solver is :mod:`silk_source`'s, aliased the way
     :mod:`gerber` aliases it, so the arc a person sees here and the arc a house
     receives on the fab layers are struck from one derivation. Collinear or
     absurd-radius triples fall back to a polyline, which is what such an arc
-    physically is."""
+    physically is.
+
+    THE EXTENT IS THE SWEPT ARC, NOT THE THREE CONTROL POINTS. An arc's
+    outermost ink sits where it crosses an axis through its centre, and only a
+    quarter-turn arc is guaranteed to reach such a crossing at one of its own
+    ends. A major arc between two nearby endpoints reaches a full radius away
+    from both. Those extents feed two consumers that both go wrong quietly if
+    they are short: :meth:`_Drawing.contains`, which decides whether a placement
+    sits off its own body and rings it in red if so, and the page's viewBox,
+    which would crop a non-rectangular board outline off the drawing. So the
+    path and its extent are returned from ONE solve and cannot disagree."""
     solved = _circumcenter(start, mid, end)
     if solved is None:
-        return _polyline((start, mid, end), cls=cls, closed=False)
+        return _polyline((start, mid, end), cls=cls, closed=False), [start, mid, end]
     (cx, cy), d = solved
     radius = math.hypot(start[0] - cx, start[1] - cy)
     if not math.isfinite(radius) or radius > silk_source._ARC_MAX_RADIUS_MM:
-        return _polyline((start, mid, end), cls=cls, closed=False)
+        return _polyline((start, mid, end), cls=cls, closed=False), [start, mid, end]
     # SWEEP is read off the frame the points are already in: `d > 0` is the
     # increasing-angle turn of THIS frame, and inside the drawing group SVG's
     # own positive sweep is the same direction. No sign correction anywhere.
     sweep = 1 if d > 0 else 0
-    theta = math.atan2(end[1] - cy, end[0] - cx) - math.atan2(start[1] - cy,
-                                                              start[0] - cx)
+    start_angle = math.atan2(start[1] - cy, start[0] - cx)
+    theta = math.atan2(end[1] - cy, end[0] - cx) - start_angle
     span = theta % (2.0 * math.pi) if sweep else (-theta) % (2.0 * math.pi)
     large = 1 if span > math.pi else 0
-    return (f'<path class="{cls}" d="M {_n(start[0])},{_n(start[1])} '
+    path = (f'<path class="{cls}" d="M {_n(start[0])},{_n(start[1])} '
             f'A {_n(radius)},{_n(radius)} 0 {large} {sweep} '
             f'{_n(end[0])},{_n(end[1])}"/>')
+    return path, _arc_extent_points((cx, cy), radius, start_angle, span, sweep,
+                                    start, end)
+
+
+def _arc_extent_points(center, radius: float, start_angle: float, span: float,
+                       sweep: int, start, end):
+    """The endpoints of an arc plus every axis crossing its sweep passes.
+
+    ``span`` is the unsigned turn and ``sweep`` its direction, exactly as
+    :func:`_arc_ink` emitted them, so the points below are the ones the drawn
+    path covers rather than the ones the source triple happened to name."""
+    cx, cy = center
+    points = [start, end]
+    step = 1.0 if sweep else -1.0
+    for quarter in range(4):
+        angle = quarter * math.pi / 2.0
+        # How far along the sweep this axis direction sits. Taken modulo a full
+        # turn in the sweep's own direction, so "is it on the arc" is one
+        # comparison against the span rather than four angle-wrapping cases.
+        travelled = (step * (angle - start_angle)) % (2.0 * math.pi)
+        if travelled <= span:
+            points.append((cx + radius * math.cos(angle),
+                           cy + radius * math.sin(angle)))
+    return points
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +386,7 @@ def _graphic_ink(geometry, cls: str):
         start = to_frame(geometry.start)
         mid = to_frame(geometry.mid)
         end = to_frame(geometry.end)
-        return _arc_path(start, mid, end, cls=cls), [start, mid, end]
+        return _arc_ink(start, mid, end, cls=cls)
     if isinstance(geometry, (PolygonGeometry, PolylineGeometry)):
         points = [to_frame(p) for p in geometry.points]
         closed = isinstance(geometry, PolygonGeometry)
@@ -788,8 +823,15 @@ def render(board, emission) -> str:
                 f'scale({_n(PX_PER_MM)},{_n(-PX_PER_MM)})">')
     if rim:
         body.append(rim)
+    # One group per DRAWING, the machine-readable half the placement groups
+    # already have. A drawing and a placement are not the same thing — an
+    # expansion is several placements over one drawing — so a reader (and a
+    # test) has to be able to count each without inferring one from the other.
     for drawing in drawings:
+        body.append(f'<g class="drawing" data-ref="{_esc(drawing.ref)}" '
+                    f'data-outline-basis="{_esc(drawing.outline_basis)}">')
         body.extend(drawing.ink)
+        body.append("</g>")
     body.extend(claim_ink)
     body.append("</g>")
     cursor += draw_h + 24.0

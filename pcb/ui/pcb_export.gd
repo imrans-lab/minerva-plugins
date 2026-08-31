@@ -352,26 +352,39 @@ static func status_line(result: Dictionary) -> String:
 ## Whether there is anything worth opening a dialog for: a refusal always is,
 ## and a package that generated with something to say about itself is too. A
 ## clean package needs no dialog — the status line already said where it went.
+##
+## unchecked_rules IS ONE OF THE KEYS. A package that found nothing still names
+## what nothing looked at — uploader acceptance and licence compatibility are on
+## every package, and the selected service adds its own — so leaving that list
+## out of this predicate let a "clean" export suppress the whole report, which is
+## the report's single most load-bearing section.
 static func has_report(result: Dictionary) -> bool:
 	if not bool(result.get("ok", false)):
 		return true
 	if str(result.get("kind", "")) != KIND_PACKAGE:
 		return false
-	for key in ["advisories", "warnings", "ip_questions", "blockers"]:
+	for key in ["advisories", "warnings", "ip_questions", "unchecked_rules", "blockers"]:
 		if not _as_array(result.get(key, [])).is_empty():
 			return true
 	return false
 
 
-## One finding as a line, NAMED and PER-COMPONENT. Three differently shaped
+## One finding as a line, NAMED and PER-COMPONENT. FOUR differently shaped
 ## records go through here — preflight blockers and advisories
-## ({code, component?, field?, refs?, message}) and compile diagnostics
-## ({severity, code, message, source_ref:{entity_kind, entity_id, detail}}) —
-## because a reader does not care which producer a finding came from, only what
-## it is about. A finding that names no entity says so rather than printing an
-## empty bullet that reads like a whole-board claim.
+## ({code, component?, field?, refs?, message}), compile diagnostics
+## ({severity, code, message, source_ref:{entity_kind, entity_id, detail}}) and
+## unchecked rules ({id, reason}, the shape a service profile authors and the
+## worker forwards verbatim) — because a reader does not care which producer a
+## finding came from, only what it is about. A finding that names no entity says
+## so rather than printing an empty bullet that reads like a whole-board claim.
+##
+## The unchecked shape is read here rather than reshaped at the wire, because
+## `id` and `reason` are what the profile file says and a rename in transit
+## would put two vocabularies on one list.
 static func finding_line(entry: Dictionary) -> String:
 	var code := str(entry.get("code", ""))
+	if code.is_empty():
+		code = str(entry.get("id", ""))
 	var severity := str(entry.get("severity", ""))
 	var subject := str(entry.get("component", ""))
 	var field := str(entry.get("field", ""))
@@ -390,7 +403,10 @@ static func finding_line(entry: Dictionary) -> String:
 	if not refs.is_empty():
 		about = "%s → %s" % [about, ", ".join(PackedStringArray(
 			Array(refs.map(func(r): return str(r)))))]
-	return "• %s — %s: %s" % [head, about, str(entry.get("message", ""))]
+	var message := str(entry.get("message", ""))
+	if message.is_empty():
+		message = str(entry.get("reason", ""))
+	return "• %s — %s: %s" % [head, about, message]
 
 
 ## One titled section, or nothing at all when there is nothing to say. Returns
@@ -456,10 +472,12 @@ static func report_lines(result: Dictionary) -> PackedStringArray:
 	# (captured geometry that was not emitted, say) invisible to the only
 	# person who could act on it. The list is BOTH channels — the compilation's
 	# own diagnostics and the gerber emitter's — because a fab feature the
-	# emitter dropped is exactly the thing this section exists to show. They do
-	# not move preflight_status: they are the compiler and the emitter talking
+	# emitter dropped is exactly the thing this section exists to show. They
+	# stay out of the advisories: they are the compiler and the emitter talking
 	# about the board, not the service talking about the order, so they get
-	# their own section rather than joining the advisories.
+	# their own section. They DO move preflight_status off `pass`, because a
+	# dropped feature means these files are not a complete rendering of the
+	# board.
 	lines.append_array(_section(
 		"WARNINGS — what the compiler and the emitter said about this board",
 		_as_array(result.get("warnings", []))))

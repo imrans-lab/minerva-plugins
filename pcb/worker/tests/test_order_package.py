@@ -11,13 +11,24 @@ THE ORACLES, named, because each of these turns on a different one:
   * INDEPENDENT PARSING. Every Gerber and drill member is re-read with
     gerbonara — a different library from the one that wrote it. An emitter that
     validates its own output proves nothing about whether a house can read it.
+    This gate does NOT skip when gerbonara is absent. It used to, and a skip
+    here deletes the only opinion in this suite that did not come from the code
+    under test: on a machine without the library, malformed fabrication files
+    left the run green.
   * REPLAY. The digests the manifest records must reproduce when the same inputs
     are built again. The failure this catches is a manifest that describes a run
     rather than a design: a clock, a set iteration order or a host path leaking
     into an artifact.
   * READINESS. The failure this catches is the tempting one — reporting a
     package as orderable because serialization succeeded. ``order_page_verified``
-    has no writer, and a blocked board produces no files at all.
+    has no writer, and a blocked board produces no files at all. ``pass`` is
+    also refused over a WARNING: a package whose own list records a dropped
+    drill is not a complete rendering of the board.
+  * PROVENANCE IS BOUND TO THE BOARD. ``source_path`` is caller input and the
+    git record is evidence, so the file has to parse to the very board being
+    packaged before a revision is read off its repository. The failure this
+    catches is a path into an unrelated clean repository lending that
+    repository's revision to this design.
   * ALL-OR-NOTHING. A half-written package is worse than none, because its
     manifest describes files that are not there and somebody can still upload
     it. Including the bytes of a file a failed write would have replaced: a new
@@ -38,6 +49,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import zipfile
 from io import BytesIO
 
@@ -106,6 +118,29 @@ def _package(board: dict | None = None, profile: str = SERVICE, **kwargs):
 
 def _members(package) -> tuple[str, ...]:
     return op.archive_members(package.files[op.GERBER_ARCHIVE])
+
+
+def _stamped_board(rev: str = "rev-a") -> dict:
+    """The base board with its provenance silk stamped, which is what clears
+    the absent-provenance advisory. Stamped in the two passes the projection
+    exists to make safe: write the sentinel, hash, write the result back."""
+    board = _board(board_graphics=[{
+        "layer": "F.SilkS", "kind": "text",
+        "text": prov.provenance_text(BOARD_NAME, rev, prov.DIGEST_SENTINEL),
+        "position": {"x_mm": 5.0, "y_mm": 5.0}, "size_mm": 1.0}])
+    board["board_graphics"][0]["text"] = prov.provenance_text(
+        BOARD_NAME, rev, prov.source_digest(board))
+    return board
+
+
+def _git_repo(path) -> None:
+    """A real repository with one commit and a clean tree."""
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / "unrelated.txt").write_text("not a board\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(path), "-c", "user.email=t@example.com",
+                    "-c", "user.name=t", "commit", "-qm", "one"], check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +232,23 @@ def test_the_archive_carries_every_emitted_fabrication_file():
     assert set(_members(_package(board))) == emitted
 
 
+def test_the_archive_claim_describes_only_the_check_production_runs():
+    """The package tells a reader what it did and did not establish about the
+    archive, so that text has to match the code. It used to cite "the per-layer
+    parse checks" beside the allowlist; ``check_archive_contents`` matches file
+    suffixes and stops, and nothing on the build path re-reads a layer. The
+    independent parse above is a TEST, and a package that credits itself with
+    its suite's checks overstates itself exactly the way one that hides a
+    finding understates itself."""
+    reason = op.UNCHECKED_UPLOADER["reason"]
+    assert "allowlist" in reason
+    assert "parse checks" not in reason
+    package = _package()
+    shipped = {item["id"]: item["reason"] for item in package.unchecked}
+    assert shipped[op.UNCHECKED_UPLOADER["id"]] == reason
+    assert reason in package.files[op.CHECKLIST_FILE]
+
+
 # ---------------------------------------------------------------------------
 # Independent parsing.
 # ---------------------------------------------------------------------------
@@ -205,8 +257,11 @@ def test_the_archive_carries_every_emitted_fabrication_file():
 def test_every_archived_layer_parses_with_an_independent_reader():
     """Each Gerber and each drill file is re-read with gerbonara — a different
     library from the gerber_writer that wrote them. An emitter that only its own
-    reader understands is not a fabrication file."""
-    pytest.importorskip("gerbonara")
+    reader understands is not a fabrication file.
+
+    The import is UNGUARDED on purpose. A missing gerbonara fails this test; it
+    does not quietly remove the only check here that the emitter did not write
+    itself."""
     from gerbonara import ExcellonFile, GerberFile
 
     package = _package()
@@ -243,12 +298,18 @@ def test_the_recorded_digests_reproduce_on_a_second_build():
 def test_only_the_manifest_differs_between_two_builds():
     """The manifest carries the export time, and it is the ONLY artifact that
     carries a clock. Everything a house is sent, and everything digested, is
-    byte-identical."""
+    byte-identical — AND the manifest is not, which is the half that says the
+    clock is really in there. Both builds pass an explicit ``generated_at`` so
+    the difference is the stamp rather than a race with the wall clock: two
+    builds inside one second used to produce identical manifests and this test
+    would have passed over a manifest that carried no clock at all."""
     board = _board()
-    first = _package(board)
-    second = _package(board)
+    first = _package(board, generated_at="2026-08-30T09:00:00Z")
+    second = _package(board, generated_at="2026-08-30T09:00:01Z")
     for name in set(first.files) - {op.MANIFEST_FILE}:
         assert first.files[name] == second.files[name], name
+    assert first.files[op.MANIFEST_FILE] != second.files[op.MANIFEST_FILE]
+    assert first.manifest["generated_at"] != second.manifest["generated_at"]
 
 
 def test_the_archive_is_byte_identical_across_builds():
@@ -517,6 +578,90 @@ def test_git_state_is_unavailable_rather_than_guessed_for_an_inline_board():
     assert package.manifest["source"]["git"]["reason"]
 
 
+def test_a_source_path_holding_another_board_lends_no_revision(tmp_path):
+    """THE LAUNDERING CASE. ``source_path`` is caller input; the manifest's git
+    block is evidence. Point one board at a file inside an unrelated, clean
+    repository and the old code reported that repository's HEAD as this
+    design's provenance — an unverifiable claim wearing the costume of a
+    measurement. The path has to parse to THIS board first."""
+    repo = tmp_path / "somebody-elses-repo"
+    _git_repo(repo)
+    package = _package(source_path=str(repo / "unrelated.txt"))
+    git = package.manifest["source"]["git"]
+    assert git["available"] is False
+    assert "revision" not in git
+    assert "different board" in git["reason"] or "does not parse" in git["reason"]
+
+
+def test_a_source_path_holding_this_very_board_does_carry_the_revision(tmp_path):
+    """The other half: binding the path is not a way of never reporting git.
+    The board's own file, in a repository, still yields a revision — and the
+    binding is the package's own projection, so a stamped file and the
+    unstamped board it was stamped from bind alike."""
+    import yaml
+
+    repo = tmp_path / "this-boards-repo"
+    _git_repo(repo)
+    board = _board()
+    source = repo / "board.yaml"
+    source.write_text(yaml.safe_dump(board, sort_keys=False), encoding="utf-8")
+    package = op.build(board, _compiled(board), SERVICE,
+                       source_path=str(source))
+    git = package.manifest["source"]["git"]
+    assert git["available"] is True, git
+    assert len(git["revision"]) == 40
+    assert git["dirty"] is True  # board.yaml is untracked in that repo
+
+
+def test_an_unreadable_source_path_says_so_rather_than_reaching_for_git(tmp_path):
+    """A path nobody can read is a reason, not a silent absence."""
+    package = _package(source_path=str(tmp_path / "no-such-file.yaml"))
+    git = package.manifest["source"]["git"]
+    assert git["available"] is False
+    assert "could not be read" in git["reason"]
+
+
+# ---------------------------------------------------------------------------
+# What `pass` covers.
+# ---------------------------------------------------------------------------
+
+
+def test_a_dropped_feature_stops_the_package_reporting_pass():
+    """A WARNING is the compiler or the emitter saying something about the board
+    did not reach these files. Reporting `pass` beside a list that records a
+    dropped drill is the one lie this whole package exists to stop telling, so
+    the warning channel moves the status even though it never refuses.
+
+    Driven off the DIALECT-ONLY profile with the provenance stamped, because
+    that is the only shape whose advisory list is empty — over the tiered
+    profile the house-tooling advisory already holds the status off `pass` and
+    this contrast would be invisible."""
+    board = _stamped_board()
+    compiled = _compiled(board)
+    clean = op.build(board, compiled, DIALECT_ONLY)
+    assert clean.advisories == () and clean.warnings == ()
+    assert clean.preflight["status"] == op.PREFLIGHT_PASS
+
+    warned = op.build(board, compiled, DIALECT_ONLY,
+                      compile_diagnostics=[COMPILE_PROBE])
+    assert warned.preflight["status"] == op.PREFLIGHT_ADVISORIES
+    assert warned.preflight["readiness"]["preflight_status"] == op.PREFLIGHT_ADVISORIES
+    # The report has to account for the status it states, or a reader is sent
+    # to look for an advisory that is not there.
+    assert warned.preflight["warnings"] == [dict(COMPILE_PROBE)]
+
+
+def test_pass_never_means_everything_was_checked():
+    """Even `pass` ships a non-empty unchecked list — uploader acceptance and
+    licence compatibility are on every package — so the status is a statement
+    about the checks that ran and never about the ones that did not."""
+    package = op.build(_stamped_board(), _compiled(_stamped_board()),
+                       DIALECT_ONLY)
+    assert package.preflight["status"] == op.PREFLIGHT_PASS
+    ids = {item["id"] for item in package.preflight["unchecked"]}
+    assert {op.UNCHECKED_UPLOADER["id"], op.UNCHECKED_LICENCE["id"]} <= ids
+
+
 # ---------------------------------------------------------------------------
 # All-or-nothing writes.
 # ---------------------------------------------------------------------------
@@ -712,7 +857,13 @@ def test_an_undeclared_licence_is_one_question_naming_the_footprints():
 
 def test_the_rpc_writes_the_package_and_reports_a_digest_per_output(tmp_path):
     """The single action, end to end: one call produces the directory on disk
-    and a reply naming every artifact with the digest that was written."""
+    and a reply naming every artifact with the digest that was written.
+
+    EVERY artifact, order-manifest.json included. The manifest cannot record its
+    own digest, but this reply is assembled after the manifest bytes are final,
+    so there is nothing stopping it from hashing them — and a null here is a
+    caller told to trust one file out of seven on the strength of the other
+    six."""
     reply = methods.handle_request({
         "id": 1, "method": "order_package",
         "params": {"board": _board(), "profile": SERVICE,
@@ -725,9 +876,11 @@ def test_the_rpc_writes_the_package_and_reports_a_digest_per_output(tmp_path):
         op.CHECKLIST_FILE, op.PREFLIGHT_FILE, op.MANIFEST_FILE}
     assert {item["file"] for item in result["outputs"]} == {p.name for p in directory.iterdir()}
     for item in result["outputs"]:
-        if item["sha256"] is None:
-            assert item["file"] == op.MANIFEST_FILE
-            continue
+        assert item["sha256"], f"{item['file']} carries no digest"
         assert op.digest((directory / item["file"]).read_bytes()) == item["sha256"]
+    manifest_entry = next(item for item in result["outputs"]
+                          if item["file"] == op.MANIFEST_FILE)
+    assert manifest_entry["sha256"] == op.digest(
+        (directory / op.MANIFEST_FILE).read_bytes())
     assert len(result["written"]) == 7
     assert result["readiness"]["order_page_verified"] is None

@@ -25,6 +25,15 @@ extends SceneTree
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_export_surfaces_parity.gd
 
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
+## The SHIPPED service profile. Its `unchecked_rules` block is the origin of the
+## entries a package reports: service_profile.py parses it verbatim into
+## ServiceProfile.unchecked_rules, assembly_outputs hands that straight to the
+## emission, and order_package concatenates it into the package's list without
+## reshaping a key. Reading the file here is what stops the canned reply below
+## from being a hand-written shape: a fixture spelled {code, message} passed the
+## GUI renderer that reads {code, message} while the worker sent {id, reason},
+## and every bullet under "NOTHING LOOKED AT THESE" rendered blank in the app.
+const PROFILE_PATH := "res://../../minerva-plugins/pcb/library/service-profiles/jlcpcb-economic.json"
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PcbExport := preload("res://../../minerva-plugins/pcb/ui/pcb_export.gd")
 
@@ -116,7 +125,7 @@ static func _refusing_reply() -> Dictionary:
 ## A package that generated, with the two honest-outcome lists populated and —
 ## the carried-forward half — the compile diagnostics the worker has always
 ## sent and no surface used to draw.
-static func _passing_reply() -> Dictionary:
+func _passing_reply() -> Dictionary:
 	return {"success": true, "result": {"ok": true, "result": {
 		"directory": "parity-board-jlcpcb-economic",
 		"outputs": [
@@ -133,8 +142,7 @@ static func _passing_reply() -> Dictionary:
 		"advisories": [{"code": "assembly_anchor_unmeasured", "component": "J2",
 			"field": "assembly anchor", "refs": ["J2"],
 			"message": "could not measure the body of component 'J2'"}],
-		"unchecked_rules": [{"code": "template_column_drift_resolution",
-			"message": "only a live quote-page upload settles the catalogue header"}],
+		"unchecked_rules": _profile_unchecked(),
 		"ip_questions": [{"code": "licence_undeclared", "component": "U1",
 			"message": "no library lock in the tree declares a licence"}],
 		"warnings": [{"severity": "WARNING", "code": "captured_geometry_not_emitted",
@@ -142,6 +150,20 @@ static func _passing_reply() -> Dictionary:
 			"source_ref": {"entity_kind": "component", "entity_id": "U1",
 				"detail": "silk"}}],
 	}}}
+
+
+## The shipped profile's own unchecked_rules, verbatim. A read that fails is a
+## FAILURE, never a skip: a fixture that quietly fell back to a literal would be
+## the exact defect this reads the file to prevent.
+func _profile_unchecked() -> Array:
+	var text := FileAccess.get_file_as_string(PROFILE_PATH)
+	if text.is_empty():
+		return []
+	var parsed = JSON.parse_string(text)
+	if not (parsed is Dictionary):
+		return []
+	var rules = (parsed as Dictionary).get("unchecked_rules", [])
+	return (rules as Array) if rules is Array else []
 
 
 func _tiny_board() -> Dictionary:
@@ -384,8 +406,11 @@ func _run_one_success_one_package() -> void:
 
 	# 3d: the honest-outcome lists reach the agent, not just the human.
 	check_eq("3d: advisories reach the verb", (verb.get("advisories", []) as Array).size(), 1)
+	var profile_unchecked := _profile_unchecked()
+	check("3d: the shipped profile publishes rules nothing looks at",
+		not profile_unchecked.is_empty(), PROFILE_PATH)
 	check_eq("3d: unchecked rules reach the verb",
-		(verb.get("unchecked_rules", []) as Array).size(), 1)
+		(verb.get("unchecked_rules", []) as Array).size(), profile_unchecked.size())
 	check_eq("3d: ip questions reach the verb",
 		(verb.get("ip_questions", []) as Array).size(), 1)
 
@@ -497,8 +522,16 @@ func _run_named_per_component_report() -> void:  # coroutine: awaits a refusal
 		PcbExport.finding_line(passing["warnings"][0]))
 	check("6b: …and kept out of the advisories, which it is not",
 		report.contains("WARNINGS — what the compiler and the emitter said"), report)
-	check("6c: what nothing looked at is stated",
-		report.contains("template_column_drift_resolution"), report)
+	# 6c: the unchecked section is where a shape mismatch hides. The entries are
+	# {id, reason} — NOT the {code, message} every other finding carries — so a
+	# renderer reading only code/message prints a bullet with both halves blank
+	# and the section still has the right heading and the right count. Both
+	# halves of the FIRST entry are asserted, off the shipped profile.
+	var first_unchecked: Dictionary = _profile_unchecked()[0]
+	check("6c: what nothing looked at is named",
+		report.contains(str(first_unchecked["id"])), report)
+	check("6c: …and says WHY nobody looked, not a blank bullet",
+		report.contains(str(first_unchecked["reason"]).substr(0, 40)), report)
 	check("6d: the IP question is stated",
 		report.contains("licence_undeclared"), report)
 	check("6e: order_page_verified is shown as unrecorded, not as a failed check",
@@ -517,6 +550,13 @@ func _run_named_per_component_report() -> void:  # coroutine: awaits a refusal
 		PcbExport.has_report({"ok": true, "kind": "package"}), false)
 	check_eq("6g: a package with advisories does",
 		PcbExport.has_report(result), true)
+	# 6g: and a package whose ONLY finding is the unchecked list does too. Every
+	# package carries one — uploader acceptance and licence compatibility are
+	# unconditional — so a predicate that ignored it suppressed the report on
+	# exactly the exports a person is most likely to over-trust.
+	check_eq("6g: unchecked rules alone raise a report",
+		PcbExport.has_report({"ok": true, "kind": "package",
+			"unchecked_rules": _profile_unchecked()}), true)
 	check_eq("6g: a refusal always does", PcbExport.has_report(refused), true)
 
 

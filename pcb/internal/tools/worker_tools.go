@@ -893,7 +893,16 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 		cplSummary.Path = filepath.Join(p.OutDir, cplFilename)
 	}
 
-	profile := p.Profile
+	return assemblyReplyJSON(reply, p.Profile, bomSummary, cplSummary)
+}
+
+// assemblyReplyJSON is the FORWARDING step: what the decoded worker reply turns
+// into for the caller. Split out of HandleExportAssembly so it can be driven
+// without a live worker — decoding a key into a struct field is not the same
+// thing as that key reaching the caller, and only this function decides which
+// of them do.
+func assemblyReplyJSON(reply assemblyPackageReply, profile string,
+	bomSummary, cplSummary assemblyOutputSummary) (json.RawMessage, error) {
 	if profile == "" {
 		profile = "jlc" // mirrors the worker's own default (methods.py _assembly_package)
 	}
@@ -953,7 +962,7 @@ var orderPackageDescription = "Emit the WHOLE order package for one manufacturin
 	"package or none, and an existing directory is not replaced unless overwrite is set. " +
 	"READINESS IS THREE CLAIMS AND THIS MAKES TWO: package_generated is what serialization " +
 	"proves and all it proves; preflight_status is pass|advisories|blocked over the checks " +
-	"that ran; order_page_verified is null every time — there is no parameter that sets it, " +
+	"that ran AND over the compile/emitter WARNING channel; order_page_verified is null every time — there is no parameter that sets it, " +
 	"because only a person who uploaded these files and read the quote page can record it. " +
 	"A BLOCKED board produces NO FILES and refuses by name, carrying the preflight report " +
 	"that would have been written: assembly_not_compilable (with blocked_by naming every " +
@@ -967,9 +976,14 @@ var orderPackageDescription = "Emit the WHOLE order package for one manufacturin
 	"holes the house adds after upload, the component-to-edge suggestion, absent provenance " +
 	"silk. `warnings` carries the COMPILE and GERBER-EMITTER diagnostics for this board — the " +
 	"compiler and the emitter talking about the board rather than the service talking about " +
-	"the order, so they do not move preflight_status; the same list is in the manifest. " +
-	"`unchecked_rules` names every published rule nothing looked at, so a " +
-	"clean package is never mistaken for a fully checked one. Two JLCPCB selectors read ONE " +
+	"the order. They never refuse, but they DO move preflight_status off pass: a captured " +
+	"feature the emitter dropped means these files are not a complete rendering of the board. " +
+	"The same list is in the manifest and in preflight.json. " +
+	"`unchecked_rules` names every published rule nothing looked at (each {id, reason}), so a " +
+	"clean package is never mistaken for a fully checked one — the list is never empty, so " +
+	"pass never means everything was checked. Every entry of `outputs` carries a sha256, " +
+	"order-manifest.json included: the manifest cannot hold its own digest, so this reply " +
+	"hashes its finalized bytes. Two JLCPCB selectors read ONE " +
 	"pinned service-profile file: \"jlcpcb-economic\" selects the Economic assembly TIER and " +
 	"runs its compatibility checks; \"jlc\" selects the same CSV dialect with NO tier and " +
 	"claims nothing about a manufacturer — the honest shape for a mid-layout quote export. " +
@@ -984,7 +998,7 @@ var orderPackageSchema = json.RawMessage(`{
 			"profile": {"type": "string", "description": "Service profile id (default \"jlc\" — JLCPCB's CSV dialect, no tier claimed; \"jlcpcb-economic\" selects the Economic tier and its compatibility checks)."},
 			"out_dir": {"type": "string", "description": "Optional directory to publish the package directory into, atomically. Omit to get the digests without writing anything."},
 			"overwrite": {"type": "boolean", "description": "Replace an existing package directory of the same name (default false — it may already have been uploaded)."},
-			"source_path": {"type": "string", "description": "The board file's own path. Read ONLY for the manifest's git revision/dirty state; a board supplied inline records that it was, rather than borrowing a file's revision."}
+			"source_path": {"type": "string", "description": "The board file's own path. Read ONLY for the manifest's git revision/dirty state, and only after the file is parsed and shown to be the very board being packaged — a path into some other repository records why no revision was available rather than lending that repository's revision to this design. A board supplied inline records that it was."}
 		}
 	}`)
 

@@ -9,6 +9,12 @@ trusting a transcription. A golden claimed for an artifact that was never
 downloaded would be a golden derived from prose, which is the one thing the
 template pin exists to rule out.
 
+RUNNING THIS SCRIPT IS THE ONLY THING THAT CHECKS THE GOLDEN AGAINST JLCPCB.
+The suite compares the golden with the shipped profile, which is two
+transcriptions of one download agreeing; the digest below is what makes a later
+comparison possible, not a comparison anybody is performing. A workbook that
+changes behind its URL stays undetected until this runs.
+
 NETWORK REQUIRED. This is a maintenance script, never a test: no test in this
 repo fetches anything. Run it when JLCPCB changes a template, then reconcile
 ``pcb/library/service-profiles/jlcpcb-economic.json`` — its ``templates`` block
@@ -95,6 +101,11 @@ def main() -> None:
             "workbooks themselves are NOT vendored: what is checked in is what "
             "was READ from them, beside the digest of the bytes that were read, "
             "so a later fetch can prove it is looking at the same artifact. "
+            "NOTHING IN THE TEST SUITE RE-FETCHES: offline, a test comparing "
+            "this file with the shipped service profile shows two "
+            "transcriptions of one download agreeing, never that either still "
+            "matches what JLCPCB serves. Only regenerate.py compares against "
+            "the manufacturer's bytes. "
             "Regenerate with worker/tests/testdata/jlc_templates/regenerate.py."),
         "templates": templates,
     }

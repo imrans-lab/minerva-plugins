@@ -26,6 +26,12 @@ THE ORACLES, named, because each test below turns on a different one:
     check somebody performs at the moment they are about to pay.
   * DETERMINISM. The manifest digests this file, so two renders of one board
     must be the same bytes.
+  * AN ARC'S INK IS THE SWEEP, NOT ITS THREE CONTROL POINTS. The extent an arc
+    contributes decides two things that both fail quietly when it is short: a
+    part sitting on the far reach of a curved body gets ringed as off its own
+    part, and a non-rectangular board outline gets cropped off the page. The
+    tests below drive ``_arc_ink`` directly, because a footprint whose body is
+    one major arc is not something the shared fixtures contain.
 
 The fixtures are the SHARED ones on purpose. A preview built on its own boards
 would be a second opinion about a second board.
@@ -112,6 +118,16 @@ def _placement_groups(svg: str) -> dict:
         if element.get("class") == "placement":
             groups[element.get("data-ref")] = element
     return groups
+
+
+def _drawing_groups(svg: str) -> dict:
+    """Every ``<g class="drawing">`` on the page, by component ref. A drawing is
+    per COMPONENT and a placement is per PART, which is the whole distinction an
+    expansion turns on, so the two are counted separately off the same page."""
+    root = ET.fromstring(svg)
+    return {element.get("data-ref"): element
+            for element in root.iter(f"{SVG_NS}g")
+            if element.get("class") == "drawing"}
 
 
 def _cpl_cells(cpl: str) -> dict:
@@ -263,17 +279,95 @@ def test_a_half_authored_expansion_names_the_placement_that_inherited():
     assert "U5S_A, U5S_B" not in svg
 
 
-def test_an_expansion_draws_one_body_and_one_crosshair_per_part():
+def test_an_expansion_draws_one_body_per_component_and_one_crosshair_per_part():
     """One drawn socket, two soldered strips: the shape that makes the trap
     possible in the first place. The drawing half is the PARENT's — an expansion
     child carries no geometry of its own — while the claim half is per part, so
     the page shows several crosshairs over one outline. That is the picture a
-    reader has to be given in order to ask "is each cross on a strip"."""
+    reader has to be given in order to ask "is each cross on a strip".
+
+    BOTH HALVES ARE COUNTED OFF THE PAGE. Counting the crosshairs and then
+    asserting the compiled board has three components proves the model, not the
+    drawing: a renderer that emitted a body per PART would have satisfied that
+    and produced exactly the picture this test exists to rule out."""
     board = _compiled(OVERRIDE_FIXTURE)
     svg, _, _ = _rendered(board)
     groups = _placement_groups(svg)
+    bodies = _drawing_groups(svg)
     assert {"U3S_A", "U3S_B", "U4S_A", "U4S_B", "U5S_A", "U5S_B"} == set(groups)
-    assert len(board.components) == 3
+    assert {"U3S", "U4S", "U5S"} == set(bodies)
+    assert len(bodies) == len(board.components) == 3
+    assert len(groups) == 2 * len(bodies)
+
+
+# ---------------------------------------------------------------------------
+# What an arc's ink occupies.
+# ---------------------------------------------------------------------------
+
+
+def _arc_box(start, mid, end):
+    """The extent ``_arc_ink`` reports for one three-point arc."""
+    _path, points = ap._arc_ink(start, mid, end, cls="body-top")
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def test_a_semicircle_reports_the_half_plane_it_actually_sweeps():
+    """The unit semicircle through (0,1): the sweep the emitted path selects is
+    the one the mid point names, so its ink is the upper half and its extent
+    stops at y = 0. Pinned because the mirror triple must NOT report the same
+    box — that is the check that says the sweep is being read at all."""
+    assert _arc_box((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)) == pytest.approx(
+        (-1.0, 0.0, 1.0, 1.0))
+    assert _arc_box((1.0, 0.0), (0.0, -1.0), (-1.0, 0.0)) == pytest.approx(
+        (-1.0, -1.0, 1.0, 0.0))
+
+
+def test_a_major_arc_reaches_a_full_radius_past_its_own_endpoints():
+    """THE CASE THE THREE CONTROL POINTS CANNOT SEE. Both ends sit at x = 1,
+    a tenth of a millimetre apart, and the sweep goes the long way round: the
+    ink reaches a full radius above, below and to the left of them. Reading the
+    extent off the triple reported a 0.2 mm-tall sliver for ink 2 mm tall."""
+    box = _arc_box((1.0, -0.1), (-1.0, 0.0), (1.0, 0.1))
+    assert box[0] == pytest.approx(-1.0025, abs=1e-3)
+    assert box[1] == pytest.approx(-1.0025, abs=1e-3)
+    assert box[3] == pytest.approx(1.0025, abs=1e-3)
+    # Both directions round the same circle cover the same ink.
+    assert _arc_box((1.0, 0.1), (-1.0, 0.0), (1.0, -0.1)) == pytest.approx(box)
+
+
+def test_a_quarter_arc_claims_no_more_than_it_draws():
+    """The other failure mode of a sweep-aware extent: claiming the whole
+    circle. A quarter turn crosses no axis between its ends, so its box is its
+    two endpoints and nothing more."""
+    assert _arc_box((1.0, 0.0), (0.7071, 0.7071), (0.0, 1.0)) == pytest.approx(
+        (0.0, 0.0, 1.0, 1.0))
+
+
+def test_a_collinear_triple_falls_back_to_its_points():
+    """An arc through three collinear points IS a line, and a line's extent is
+    its points. The fallback must still report an extent rather than nothing."""
+    path, points = ap._arc_ink((0.0, 0.0), (1.0, 1.0), (2.0, 2.0),
+                               cls="body-top")
+    assert path.startswith("<polyline")
+    assert points == [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+
+
+def test_a_part_on_the_far_reach_of_a_curved_body_is_not_ringed():
+    """THE CONSEQUENCE, at the surface that shows it. ``_Drawing.contains`` is
+    what decides whether a placement gets the red off-body ring and a leader
+    line, and it reads the same extent. With the extent taken off the control
+    points, a part legitimately sitting on the arc's far reach was reported as
+    off its own body — an alarm on a correct board, which is how a reader learns
+    to ignore the alarm."""
+    _path, points = ap._arc_ink((1.0, -0.1), (-1.0, 0.0), (1.0, 0.1),
+                                cls="body-top")
+    drawing = ap._Drawing(ref="U1", populate=True, side="top",
+                          outline_basis=ap.OUTLINE_FAB, points=list(points))
+    assert drawing.contains(-0.9, 0.0)
+    assert drawing.contains(0.0, 0.95)
+    assert not drawing.contains(0.0, 1.5)
 
 
 # ---------------------------------------------------------------------------
