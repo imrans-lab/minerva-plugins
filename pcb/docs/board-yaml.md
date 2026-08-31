@@ -574,8 +574,10 @@ physical parts — a socket strip drawn once and soldered twice. Each entry's
 `ref` is the designator that part is actually placed under, and it is
 **authored**: stable across exports, and unique board-wide. An exporter that
 invented these would rename a part between two orders of the same design, and
-`Validate` refuses a board where two physical parts would share one designator
-(`duplicate_assembly_designator`). `offset_mm` is measured in the parent
+the Go codec's `Validate` refuses a board where two physical parts would share
+one designator (`duplicate_assembly_designator`). That check guards the codec
+boundary, not the export lane — see "Which surface refuses a duplicate
+designator" for the three codes and where each one bites. `offset_mm` is measured in the parent
 component's own frame, before the parent's rotation and side are applied, and
 `anchor_mm` states that part's own body centre in its placement's frame (see
 "A placement may state its own anchor" under "The assembly anchor").
@@ -612,7 +614,7 @@ compiles and fabricates while carrying any of them.
 
 | code | refuses when |
 |---|---|
-| `assembly_duplicate_designator` | one designator names two physical parts. In practice this is the CASE-FOLD collision (`C1` and `c1`), which an uploader will not distinguish: an exact repeat is already refused upstream — two components sharing a ref by the compiler (`duplicate_component_ref`, naming the ref), two placements sharing one by `Validate` (`duplicate_assembly_designator`). |
+| `assembly_duplicate_designator` | one designator names two physical parts. Compared CASE-FOLDED, board-wide, over every physical placement — an assembly house's uploader does not distinguish `C1` from `c1`. It refuses exact repeats too: the upstream checks do not cover every pairing (see "Which surface refuses a duplicate designator" below), so a collision reaching here may be either kind, and the message says which. |
 | `assembly_reference_set_mismatch` | the BOM and the CPL name different designators after expansion. |
 | `assembly_row_ref_limit` | a grouped BOM row carries more designators than the profile's `max_refs_per_row`, where a house would silently truncate the tail. |
 | `assembly_placements_too_close` | two designators on one side sit closer than the profile's `min_designator_separation_mm` — usually a synthetic expansion whose `offset_mm` is missing or zero. |
@@ -624,6 +626,30 @@ compiles and fabricates while carrying any of them.
 The per-row and per-placement thresholds are **profile parameters**, not
 constants: the figures a particular house publishes are dialect facts the service
 profile supplies.
+
+#### Which surface refuses a duplicate designator
+
+Four codes, on four surfaces, and they do **not** partition into "exact
+upstream, case-fold at the gate". Only the first two sit in front of the
+assembly export lane; the third is a codec-boundary check the export lane never
+crosses, so the pairings it owns fall through to the fourth.
+
+| code | surface | refuses |
+|---|---|---|
+| `duplicate_component_ref` | the compiler, `compile_board` | two **components** authoring the same `ref`, compared exactly. Naming the ref, because every id in the compiled board is derived from it. |
+| `invalid_component_assembly` | the assembly-block reader, `assembly_spec` (recorded by the compiler) | one component repeating a designator inside its **own** `placements`. Shares the block's single malformed-block code rather than carrying one of its own. |
+| `duplicate_assembly_designator` | the Go validator, `internal/board/assembly.go`, reached through `board.Validate` | a **placement** ref colliding exactly with another placement's ref or with some other component's `ref`. Deliberately scoped to placement refs — component-vs-component uniqueness has never been checked here. |
+| `assembly_duplicate_designator` | the export gate, `assembly_gates.check_designators` | everything left, case-folded, board-wide. |
+
+`board.Validate` runs at the **Go codec boundary** — `pcb.serialize`'s write
+gate and `pcb.deserialize`'s load gate — and the assembly export lane does not
+go through it: `minerva_pcb_export_assembly` forwards the caller's board to the
+worker unchanged, and the worker reads it straight off `yaml` / `board` /
+`board_path`. So a board that reaches an export without having been through the
+codec carries no Go validation, and an exact expansion-ref collision — an
+authored `placements` ref that is already another component's designator —
+reaches `assembly_duplicate_designator` and refuses there on an **exact** match,
+not a case fold.
 
 **Advisories do not refuse.** An export also returns `advisories[]` — things the
 pipeline could not measure, which a caller should show and a human should judge.

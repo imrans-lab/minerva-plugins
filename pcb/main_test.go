@@ -424,8 +424,8 @@ func TestPCBWorkerStdioSmoke(t *testing.T) {
 	_, _ = io.Copy(io.Discard, br)
 }
 
-// TestPCBWorkerStdioSmoke_RemainingTools closes the round D0-expose gap flagged
-// by cold review: TestPCBWorkerStdioSmoke (above) only ever dispatched
+// TestPCBWorkerStdioSmoke_RemainingTools covers the tools the smoke above does
+// not: TestPCBWorkerStdioSmoke only ever dispatched
 // minerva_pcb_validate/gerbers/drc_geometric (+ pcb.route) over stdio — the
 // other six worker-backed tools (generate, drc, resolve, check_libraries,
 // check_bom, library_status) were only NAME-checked via registry.Specs(),

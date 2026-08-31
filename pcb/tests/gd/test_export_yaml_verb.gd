@@ -54,8 +54,9 @@ class FakeEditor extends RefCounted:
 
 ## Capture-and-canned IPC. `reply` is the FULL envelope handed back to
 ## await_reply, so a test can pose a broker failure, a worker refusal or a
-## success at the real nesting depth ({success, result:{ok, result:{…}}}) —
-## the depth two shipped bugs (F2, CPN1) were about.
+## success at the real nesting depth ({success, result:{ok, result:{…}}}). The
+## depth is the point: a reply posed one level shallow passes a test that the
+## real envelope would fail.
 class FakeIPC extends Node:
 	var captured: Array = []
 	var reply: Dictionary = {}
