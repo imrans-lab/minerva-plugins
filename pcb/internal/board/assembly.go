@@ -478,3 +478,72 @@ func validatePlacementRefUniqueness(b *Board) error {
 	}
 	return nil
 }
+
+// identityFieldNames mirrors IDENTITY_FIELDS in the worker's assembly_spec.py —
+// the four part-identity keys an author may write, in any of the three homes
+// (the structured block, a top-level component scalar, the `properties` map).
+// THE INVARIANT: this slice and that tuple must name the same keys, or a value
+// one language preserves is one the other renumbers.
+var identityFieldNames = []string{"manufacturer", "mpn", "package", "comment"}
+
+// preserveIdentityText restores the AUTHORED TEXT of the pre-block identity
+// values from the source node tree, over the values the typed decode produced.
+//
+// ComponentAssembly's identity fields are typed strings, so yaml.v3 hands them
+// the scalar's raw text and re-emits it quoted: `assembly: {package: 0603}`
+// round-trips as `package: "0603"`. The two PRE-BLOCK homes have no typed
+// fields — they ride Component.Extra's inline map[string]interface{}, where
+// yaml.v3 resolves each scalar by tag before anything sees it. `package: 0603`
+// becomes the int 387 (a leading zero is read as octal), and marshaling that
+// map writes 387 back over the author's text. This pass re-reads the same keys
+// from the nodes and stores node.Value, so all three homes preserve text
+// identically and the author meets ONE rule.
+//
+// It touches ONLY the four identity keys, and only where the source node is a
+// non-string scalar: every other key riding the same passthrough — nested
+// mappings, numbers the author meant as numbers, quoted strings already
+// correct — keeps exactly the value the typed decode gave it.
+//
+// A null identity value is left alone: null means "not authored in this home"
+// on both sides of the boundary, and turning it into the empty string would
+// stop the precedence fold falling through to the next home.
+func preserveIdentityText(b *Board, doc *yaml.Node) {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return
+	}
+	comps := nodeMapValue(doc.Content[0], "components")
+	if comps == nil || comps.Kind != yaml.SequenceNode ||
+		len(comps.Content) != len(b.Components) {
+		return
+	}
+	for i, node := range comps.Content {
+		node = resolveAlias(node)
+		if node == nil || node.Kind != yaml.MappingNode {
+			continue
+		}
+		restoreIdentityText(node, b.Components[i].Extra)
+		if props := nodeMapValue(node, "properties"); props != nil && props.Kind == yaml.MappingNode {
+			decoded, _ := b.Components[i].Extra["properties"].(map[string]interface{})
+			restoreIdentityText(props, decoded)
+		}
+	}
+}
+
+// restoreIdentityText overwrites each identity key in decoded with the authored
+// text of the matching scalar in src. A nil decoded map (the key was modeled, or
+// the value did not decode as a mapping) is a no-op.
+func restoreIdentityText(src *yaml.Node, decoded map[string]interface{}) {
+	if decoded == nil {
+		return
+	}
+	for _, key := range identityFieldNames {
+		n := nodeMapValue(src, key)
+		if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!str" || n.Tag == "!!null" {
+			continue
+		}
+		if _, present := decoded[key]; !present {
+			continue
+		}
+		decoded[key] = n.Value
+	}
+}

@@ -69,6 +69,10 @@ var designRuleNumKeys = []string{"zone_min_thickness_mm", "zone_min_island_area_
 // (invalid_pin_override). Wrapping these at unmarshal is what lets the vector
 // runner assert code parity on unmarshal-time rejections (finding 019f8b7fb07e,
 // parts 3 & 4).
+//
+// The same raw tree then restores the authored text of the pre-block identity
+// values (preserveIdentityText, assembly.go), which the untyped inline map
+// would otherwise resolve to a number.
 func UnmarshalYAML(data []byte) (*Board, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -81,6 +85,11 @@ func UnmarshalYAML(data []byte) (*Board, error) {
 	if err := yaml.Unmarshal(data, &b); err != nil {
 		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
+	// Give the pre-block identity homes the same text-preserving decode the
+	// structured assembly block already has: without this, `package: 0603`
+	// riding Component.Extra's untyped inline map decodes as the int 387 and a
+	// save writes 387 back over the author's text (assembly.go).
+	preserveIdentityText(&b, &doc)
 	// Fold the pth_holes / npth_holes aliases into canonical mounting_holes BEFORE
 	// any downstream migration / validation, so they cannot bypass id-minting or the
 	// structural gate (finding 019f8b7fb07e comment 689).

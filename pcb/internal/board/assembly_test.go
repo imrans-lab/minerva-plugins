@@ -373,3 +373,199 @@ components:
 		t.Fatalf("an absent expansion grew a placements key:\n%s", string(py))
 	}
 }
+
+// identityHomesYAML authors the SAME two identity fields in all three homes,
+// every value a digit string with a leading zero — the shape YAML-1.1 resolves
+// as octal (`0603` -> 387, `0402` -> 258, `0201` -> 129). Around them ride
+// passthrough keys of every other shape the inline Extra map can carry, so a
+// fix that reached past the identity keys shows up here as a changed neighbour.
+const identityHomesYAML = `version: 1
+name: identity-homes
+width_mm: 20
+height_mm: 20
+components:
+    - ref: R1
+      footprint: R_0603
+      x_mm: 1
+      y_mm: 1
+      rotation_deg: 0
+      assembly:
+        mpn: 0201
+        package: 0603
+      mpn: 0201
+      package: 0603
+      properties:
+        mpn: 0201
+        package: 0603
+        note: keep me
+        qty: 4
+        ratio: 1.25
+        flag: true
+        blank:
+        nested:
+            a: 1
+            b:
+                - 1
+                - 2
+      lot_code: 0777
+`
+
+// A Go SAVE must not rewrite an authored identity value. The oracle: a board
+// authoring `package: 0603` / `mpn: 0201` in each of the three homes comes back
+// from a round trip carrying the digits the author wrote — never 387 or 129,
+// the numbers YAML resolution produces from them. Before this, the two
+// pre-block homes came back renumbered and the file on disk was overwritten,
+// which is why the Python reader's refusal alone was only half a fix.
+func TestGoRoundTripKeepsAuthoredIdentityTextInAllThreeHomes(t *testing.T) {
+	b, err := UnmarshalYAML([]byte(identityHomesYAML))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, gone := range []string{"387", "129", "258"} {
+		if strings.Contains(string(out), gone) {
+			t.Fatalf("a resolved number (%s) reached the file — the authored "+
+				"text was rewritten:\n%s", gone, out)
+		}
+	}
+
+	back, err := UnmarshalYAML(out)
+	if err != nil {
+		t.Fatalf("re-unmarshal: %v", err)
+	}
+	c := back.Components[0]
+	if c.Assembly == nil || c.Assembly.Package != "0603" || c.Assembly.MPN != "0201" {
+		t.Fatalf("assembly block home lost the authored text: %+v", c.Assembly)
+	}
+	if c.Extra["package"] != "0603" || c.Extra["mpn"] != "0201" {
+		t.Fatalf("top-level scalar home lost the authored text: %#v", c.Extra)
+	}
+	props, ok := c.Extra["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("properties did not survive as a mapping: %#v", c.Extra["properties"])
+	}
+	if props["package"] != "0603" || props["mpn"] != "0201" {
+		t.Fatalf("properties home lost the authored text: %#v", props)
+	}
+}
+
+// The identity repair must not reach any OTHER key riding the same inline
+// passthrough — that map carries arbitrary author data, and silently changing
+// one of those would be a worse bug than the one being fixed. Every non-identity
+// value below keeps the type and value the untyped decode gives it, INCLUDING
+// `lot_code: 0777`, which still resolves to 511: only the four identity names
+// are treated as text, and the scope of the repair is exactly that fact.
+func TestIdentityTextRepairLeavesEveryOtherPassthroughKeyAlone(t *testing.T) {
+	b, err := UnmarshalYAML([]byte(identityHomesYAML))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	c := b.Components[0]
+	if c.Extra["lot_code"] != 511 {
+		t.Fatalf("a non-identity passthrough key changed meaning: %#v", c.Extra["lot_code"])
+	}
+	props, ok := c.Extra["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("properties did not survive as a mapping: %#v", c.Extra["properties"])
+	}
+	for key, want := range map[string]interface{}{
+		"note": "keep me", "qty": 4, "ratio": 1.25, "flag": true, "blank": nil,
+	} {
+		if got := props[key]; got != want {
+			t.Fatalf("passthrough %q changed: got %#v (%T), want %#v", key, got, got, want)
+		}
+	}
+	nested, ok := props["nested"].(map[string]interface{})
+	if !ok || nested["a"] != 1 {
+		t.Fatalf("a nested passthrough mapping was flattened or lost: %#v", props["nested"])
+	}
+	seq, ok := nested["b"].([]interface{})
+	if !ok || len(seq) != 2 || seq[0] != 1 || seq[1] != 2 {
+		t.Fatalf("a nested passthrough sequence was lost: %#v", nested["b"])
+	}
+	// The full key set is the real proof of "nothing dropped": name it.
+	for _, key := range []string{"mpn", "package", "properties", "lot_code"} {
+		if _, present := c.Extra[key]; !present {
+			t.Fatalf("passthrough key %q was dropped: %#v", key, c.Extra)
+		}
+	}
+	for _, key := range []string{"mpn", "package", "note", "qty", "ratio", "flag",
+		"blank", "nested"} {
+		if _, present := props[key]; !present {
+			t.Fatalf("properties key %q was dropped: %#v", key, props)
+		}
+	}
+}
+
+// A board whose identity values are already quoted — what the docs tell an
+// author to write — must survive a round trip BYTE for byte, or the codec would
+// churn a file every time it opened one.
+func TestQuotedIdentityBoardRoundTripsByteStable(t *testing.T) {
+	const quoted = `version: 1
+name: quoted-identity
+width_mm: 20
+height_mm: 20
+design_rules: {}
+components:
+    - ref: R1
+      footprint: R_0603
+      x_mm: 1
+      y_mm: 1
+      rotation_deg: 0
+      assembly:
+        mpn: "0201"
+        package: "0603"
+      mpn: "0201"
+      package: "0603"
+      properties:
+        mpn: "0201"
+        package: "0603"
+nets: []
+`
+	b, err := UnmarshalYAML([]byte(quoted))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(out) != quoted {
+		t.Fatalf("a quoted board did not round-trip byte-stable:\n--- got ---\n%s"+
+			"--- want ---\n%s", out, quoted)
+	}
+}
+
+// A null identity value means "not authored in this home" and must stay null:
+// turning it into the empty string would stop the precedence fold from falling
+// through to the next home, which is the behaviour docs/board-yaml.md promises.
+func TestNullIdentityValueStaysNull(t *testing.T) {
+	const src = `version: 1
+name: null-identity
+width_mm: 20
+height_mm: 20
+components:
+    - ref: R1
+      footprint: R_0603
+      x_mm: 1
+      y_mm: 1
+      package:
+      properties:
+        mpn:
+`
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	c := b.Components[0]
+	if v, present := c.Extra["package"]; !present || v != nil {
+		t.Fatalf("a null top-level identity value changed: %#v", c.Extra)
+	}
+	props, _ := c.Extra["properties"].(map[string]interface{})
+	if v, present := props["mpn"]; !present || v != nil {
+		t.Fatalf("a null properties identity value changed: %#v", props)
+	}
+}

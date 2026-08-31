@@ -548,15 +548,23 @@ then the component's `properties` map. The first home that has the key decides.
 before any of this is read — `0603` reaches the compiler as `387` (leading
 zero, read as octal), `0402` as `258`, `0201` as `129`, `1206` as `1206`;
 `0805` alone survives unquoted, by the accident that `8` is not an octal digit.
-Nor do the two codecs agree about it: the Go codec decodes the `assembly`
-block's fields into typed strings and keeps `0603` intact, but the top-level and
-`properties` homes ride the untyped Extra passthrough, so a save through Go
-**rewrites those to `387` in the file** and the authored text is gone.
+The Go codec keeps the authored text in **all three** homes. The `assembly`
+block's fields are typed strings, which yaml.v3 fills from the scalar's raw
+text; the top-level and `properties` homes have no typed fields and ride the
+untyped Extra passthrough, where a save used to write `387` back over the
+author's `0603`. `preserveIdentityText` (`internal/board/assembly.go`) re-reads
+those two homes from the source nodes, so every home now round-trips the text
+and re-emits it **quoted** — a Go save repairs an unquoted identity value
+instead of destroying it. Only these four keys are treated that way: any other
+unquoted `0603` riding the same passthrough still resolves as a number.
 
-A non-string identity value is therefore a **named refusal** carrying the
-component and the field (`invalid_component_assembly`), not a value to guess
-at: coercing would print `387` in the Footprint column, and dropping would fall
-through to the next home and order whatever was written there.
+Reading a file that has not been through a Go save, the Python compiler still
+sees the number, and a non-string identity value there is a **named refusal**
+carrying the component and the field (`invalid_component_assembly`), not a
+value to guess at: coercing would print `387` in the Footprint column, and
+dropping would fall through to the next home and order whatever was written
+there. So the author meets one rule — quote it — and never a refusal on a file
+whose authored text has already been overwritten.
 
 **A blank value means absent** — `""`, spaces, a lone newline and a bare
 `mpn:` with nothing after it all read as "not authored here" and fall through to
