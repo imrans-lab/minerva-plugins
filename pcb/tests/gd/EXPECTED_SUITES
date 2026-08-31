@@ -100,6 +100,13 @@ test_epoch6_fix_regressions.gd assertions=9
 # that executed it (34 checks, all outside loops): the button's four status
 # outcomes, the promote refusals, and the verb's own reply shape.
 test_export_yaml_verb.gd assertions=34
+# Task-cycle 12 B4 — the exporter chooser, the View menu's export rows and
+# minerva_pcb_board_export driven over ONE canned worker reply and compared to
+# each other. Authored under this cycle's static-gates-only rule and NEVER
+# EXECUTED, so it carries no assertion pin: measure it at the scoped run and
+# pin it there, the same way test_draft_check_seam.gd and test_mm_quantization
+# were handled.
+test_export_surfaces_parity.gd
 test_geometric_drc_surface.gd assertions=31
 # GA-1 grew this suite (stack_shape_error matrix, stack_for_count,
 # inner_index_any, the set_board_layers model/handler section) and retired the

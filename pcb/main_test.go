@@ -62,6 +62,13 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// 019fc2f8b903): exposes the worker's assembly_package method — both
 		// CSVs from one compilation.
 		"minerva_pcb_export_assembly",
+		// worker-backed — the WHOLE order package (task-cycle 12 B4, docket
+		// 01a0545d027a), forwarding to the worker's "order_package" method.
+		// ONE entry serving two surfaces: an agent holding a document, and the
+		// panel's exporter chooser, which declares this same name as a
+		// panel-IPC channel (manifest ui.ipc_channels/ipc_messages) exactly as
+		// it already does for minerva_pcb_drc.
+		"minerva_pcb_order_package",
 		// worker-backed — the rendered-bless surface (S3/B2, docket
 		// 019ff5687b99): the library TRUST BOUNDARY. Stage a .kicad_mod into
 		// the WIP layer, render the fact table + SVG a human blesses it

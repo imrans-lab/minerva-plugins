@@ -291,6 +291,13 @@ func initRegistry() {
 	// worker-stages split as acquire above, and the one difference that matters —
 	// it cannot auto-bless, so every imported part waits for a human verdict.
 	registry.Register(tools.ImportFootprint, tools.HandleImportFootprint)
+	// The ORDER PACKAGE, task-cycle 12 B4 (docket 01a0545d027a). ONE entry,
+	// two callers: an agent holding a document, and the panel's exporter
+	// chooser, which declares this tool's own name as a panel-IPC channel
+	// exactly as it already does for minerva_pcb_drc. The owner cannot call a
+	// tool and an agent cannot click, so a second entry here would be a
+	// second set of refusal names for one fault.
+	registry.Register(tools.OrderPackage, tools.HandleOrderPackage)
 	// pcb.promote_check — the K13 promotion gate: full connectivity +
 	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
 	// 11). See worker_tools.go.
@@ -367,6 +374,9 @@ var workerBackedTools = map[string]bool{
 	"minerva_pcb_check_libraries": true,
 	"minerva_pcb_check_bom":       true,
 	"minerva_pcb_export_assembly": true,
+	// minerva_pcb_order_package dispatches to the worker's "order_package"
+	// method; the panel reaches the same entry over IPC.
+	"minerva_pcb_order_package": true,
 	// Rendered-bless surface (S3/B2) — all three dispatch to the worker's
 	// footprint_stage/footprint_report/footprint_bless methods.
 	"minerva_pcb_footprint_stage":  true,

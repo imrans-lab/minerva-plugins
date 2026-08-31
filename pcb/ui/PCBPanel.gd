@@ -59,6 +59,10 @@ const _PcbNetMembershipScript: Script = preload("model/pcb_net_membership.gd")
 ## The Options menu — the control strip's second menu. Declared with `:=` so the
 ## parser keeps the GDScript class type and can resolve its static funcs.
 const PcbOptionsMenu := preload("pcb_options_menu.gd")
+## The export surface — the exporter list, the run and the report. Declared with
+## `:=` for the same reason PcbOptionsMenu is: the parser keeps the GDScript
+## class type and can resolve its static funcs.
+const PcbExport := preload("pcb_export.gd")
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 const _PcbLibraryPartScript: Script = preload("model/pcb_library_part.gd")
 const _PcbFabPreviewScript: Script = preload("model/pcb_fab_preview.gd")
@@ -312,7 +316,12 @@ var _bottom_dock_slot: VBoxContainer = null
 var _view_menu_button: MenuButton = null
 var _options_menu_button: MenuButton = null
 var _drawer_button: Button = null
-var _export_button: Button = null
+## The EXPORT control: a menu of exporters, not a fixed action. The selection
+## is held here rather than read off the popup so the View menu (which carries
+## the same rows, because this button hides at narrow) and the
+## minerva_pcb_board_export verb all agree on one current exporter.
+var _export_menu_button: MenuButton = null
+var _export_exporter_index: int = PcbExport.YAML_INDEX
 
 ## Toolbar toggle for the WC-1 pin inspector (INSPECT_PIN mode).
 var _inspect_pin_button: Button = null
@@ -384,10 +393,14 @@ const _VIEW_FLAGS := [
 	# emitted artwork, so it is on demand and off by default.
 	["Fab preview (exact)", "show_fab_preview"],
 ]
-const _VIEW_MENU_EXPORT_ID := 100
+## Base id for the View menu's EXPORT rows: one item per pcb_export.gd
+## exporter, at base + its index in that list. It is a base rather than the
+## single id it used to be because the menu now carries the whole exporter
+## list, not just YAML.
+const _VIEW_MENU_EXPORT_BASE := 100
 ## Base id for the View menu's dynamic per-layer visibility section (epoch
 ## GA-1): the separator takes the base itself, layer items take base+1+stack
-## index. Far above _VIEW_FLAGS' indices and _VIEW_MENU_EXPORT_ID so the three
+## index. Far above _VIEW_FLAGS' indices and the export rows so the three
 ## id families can never collide.
 const _VIEW_MENU_LAYER_ID_BASE := 500
 ## "Show all copper layers" — the escape hatch from a trace_layer_filter an agent
@@ -1219,8 +1232,8 @@ func _build_toolbar() -> HBoxContainer:
 	# CheckButton row overflowed the toolbar at every width in ~[880, 1250]
 	# because the WIDE threshold was calibrated when the flag list was five
 	# entries long and the list grew to seven. The menu carries every flag as
-	# a checkable item, synced from the canvas each time it opens, plus
-	# Export YAML (the inline Export button hides at narrow).
+	# a checkable item, synced from the canvas each time it opens, plus one row
+	# per EXPORTER (the toolbar's own Export menu hides at narrow).
 	_view_menu_button = MenuButton.new()
 	_view_menu_button.name = "ViewMenuButton"
 	_view_menu_button.text = "View"
@@ -1228,7 +1241,12 @@ func _build_toolbar() -> HBoxContainer:
 	for i in _VIEW_FLAGS.size():
 		popup.add_check_item(_VIEW_FLAGS[i][0], i)
 	popup.add_separator()
-	popup.add_item("Export YAML…", _VIEW_MENU_EXPORT_ID)
+	# EVERY exporter, not just YAML. This menu is the export surface at narrow
+	# widths, where the toolbar chooser and button are hidden; carrying one
+	# fixed exporter here would leave the order-package exporters reachable
+	# only from a control that is not on screen.
+	for i in PcbExport.EXPORTERS.size():
+		popup.add_item("Export: %s…" % PcbExport.label_at(i), _VIEW_MENU_EXPORT_BASE + i)
 	popup.about_to_popup.connect(_sync_view_menu_checks)
 	popup.id_pressed.connect(_on_view_menu_id_pressed)
 	tb.add_child(_view_menu_button)
@@ -1261,13 +1279,30 @@ func _build_toolbar() -> HBoxContainer:
 
 	tb.add_child(VSeparator.new())
 
-	# YAML export (routes through the Go pcb.serialize channel).
-	_export_button = Button.new()
-	_export_button.name = "ExportButton"
-	_export_button.text = "Export YAML"
-	_export_button.tooltip_text = _wrap_tooltip("Export YAML — serialize the board via the plugin backend")
-	_export_button.pressed.connect(_on_export_yaml_pressed)
-	tb.add_child(_export_button)
+	# EXPORT — a CHOICE of exporter, not a fixed action. The rows are
+	# pcb_export.gd's list, shared verbatim with the View menu and with
+	# minerva_pcb_board_export, so no doorway can offer an exporter the others
+	# cannot reach.
+	#
+	# ONE MenuButton rather than a chooser plus a button, and the width is the
+	# reason: the toolbar's fit at 600 px is a pinned oracle
+	# (test_pcb_panel_layout.gd), the strip's measured budget is tight enough
+	# that adding the Options menu once needed the caption rule to pay for it
+	# (see panel_layout.toolbar_captions_fit), and a chooser wide enough to
+	# read "Order package — JLCPCB Economic" beside a button is far more than
+	# the button it replaces. A menu costs one button of width whatever the
+	# list does — the same argument View and Options are unconditional on. The
+	# current exporter is a RADIO CHECK inside the popup and is named in the
+	# tooltip, so it is still readable without opening anything.
+	_export_menu_button = MenuButton.new()
+	_export_menu_button.name = "ExportMenuButton"
+	_export_menu_button.text = "Export"
+	var export_popup := _export_menu_button.get_popup()
+	for i in PcbExport.EXPORTERS.size():
+		export_popup.add_radio_check_item(PcbExport.label_at(i), i)
+	export_popup.id_pressed.connect(_on_export_menu_id_pressed)
+	tb.add_child(_export_menu_button)
+	_sync_export_menu()
 
 	# Spacer + board size label.
 	var spacer := Control.new()
@@ -3370,8 +3405,10 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 	# The View menu is unconditional at every mode (owner ruling, bug
 	# 019fbb6242) — no inline-toggle sibling exists to sync or swap with; the
 	# menu re-reads canvas flags on about_to_popup, so it can never go stale.
-	if _export_button != null:
-		_export_button.visible = not narrow
+	# The View menu's export rows are the narrow-width surface for every
+	# exporter, which is why they exist.
+	if _export_menu_button != null:
+		_export_menu_button.visible = not narrow
 	if _board_size_label != null:
 		_board_size_label.visible = wide
 	if _layer_caption != null:
@@ -3452,8 +3489,16 @@ func _rebuild_view_menu_layer_eyes(popup: PopupMenu) -> void:
 
 
 func _on_view_menu_id_pressed(id: int) -> void:
-	if id == _VIEW_MENU_EXPORT_ID:
-		_on_export_yaml_pressed()
+	# The export rows. Picking one MOVES the toolbar chooser too: the menu is
+	# the same surface under another width, and two controls disagreeing about
+	# what Export does is the divergence this section exists to prevent.
+	var export_index := id - _VIEW_MENU_EXPORT_BASE
+	if export_index >= 0 and export_index < PcbExport.EXPORTERS.size():
+		_select_exporter(export_index)
+		# Awaited for the same reason the flag branch below is: nobody consumes
+		# this return value, but an un-awaited coroutine finishes after the
+		# handler returns, which is invisible to anything driving the menu.
+		await _run_export(export_index)
 		return
 	if id == _VIEW_MENU_CLEAR_FILTER_ID:
 		set_trace_layer_filter("all")
@@ -3611,6 +3656,11 @@ func get_layout_state() -> Dictionary:
 		"drawer_open": _drawer_open,
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
 		"options_menu_visible": _options_menu_button != null and _options_menu_button.visible,
+		# Reported as DATA for the same reason the two menus above are: an
+		# agent must be able to verify the human's control without a
+		# screenshot. `selected_exporter` says WHICH exporter it would run.
+		"export_menu_visible": _export_menu_button != null and _export_menu_button.visible,
+		"selected_exporter": selected_exporter_id(),
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
 		"plugin_build": PLUGIN_BUILD,
 		# The board's DECLARED manufacturing intent. It decides whether the
@@ -4337,23 +4387,73 @@ func export_yaml_text() -> Dictionary:
 		"draft": true}
 
 
-## The Export YAML button: the same serialization, rendered to the status line.
+## Where the board file this panel adopted lives, for anything that needs a
+## destination beside it. Written only by load_board_from_yaml's adoption; see
+## promote()'s path-resolution comment for why _file_path is not a fallback.
+func canonical_source_path() -> String:
+	return _canonical_source_path
+
+
+## The one place the held selection moves. Called by the Export menu, by the
+## View menu's export rows, and by nothing else.
+func _select_exporter(index: int) -> void:
+	if index < 0 or index >= PcbExport.EXPORTERS.size():
+		return
+	_export_exporter_index = index
+	_sync_export_menu()
+
+
+## The radio check and the tooltip both name the current exporter, so what
+## Export would emit is readable without opening the menu.
+func _sync_export_menu() -> void:
+	if _export_menu_button == null:
+		return
+	var popup := _export_menu_button.get_popup()
+	for i in popup.item_count:
+		popup.set_item_checked(i, popup.get_item_id(i) == _export_exporter_index)
+	_export_menu_button.tooltip_text = _wrap_tooltip(
+		"Export — %s. %s Refusals are named and write nothing; advisories and compile warnings are shown per component." % [
+			PcbExport.label_at(_export_exporter_index),
+			PcbExport.summary_at(_export_exporter_index)])
+
+
+## The Export menu: picking a row selects that exporter AND runs it.
+func _on_export_menu_id_pressed(id: int) -> void:
+	_select_exporter(id)
+	await _run_export(id)
+
+
+## What Export would emit right now — what minerva_pcb_board_export runs when
+## the caller names no exporter.
+func selected_exporter_id() -> String:
+	return PcbExport.id_at(_export_exporter_index)
+
+
+## Kept under its old name because it IS the YAML exporter's doorway and the
+## SR2FAB S1 suite drives it by name; it now runs through the one export path
+## like every other doorway.
 func _on_export_yaml_pressed() -> void:
-	if get_node_or_null("_MinervaIPC") == null:
-		_set_status("YAML export unavailable — plugin IPC not ready.")
+	await _run_export(PcbExport.YAML_INDEX)
+
+
+## THE export run, for all three doorways. pcb_export.gd owns the exporters,
+## the refusal names and the report; this only says "working…", writes the
+## sentence back and pops the report when there is one. The IPC guard lives in
+## the module, not here, so an agent calling minerva_pcb_board_export with the
+## backend down is told worker_unavailable in the same words the status line
+## shows the human.
+func _run_export(index: int) -> void:
+	_set_status("Exporting — %s…" % PcbExport.label_at(index))
+	var result: Dictionary = await PcbExport.run(self, PcbExport.id_at(index))
+	_set_status(PcbExport.status_line(result))
+	if not PcbExport.has_report(result) or not is_inside_tree():
 		return
-	_set_status("Exporting YAML…")
-	var result: Dictionary = await export_yaml_text()
-	if not bool(result.get("success", false)):
-		var note := str(result.get("note", ""))
-		_set_status("YAML export failed: %s" % (note if note != ""
-			else str(result.get("error", ""))))
-		return
-	var bytes := int(result.get("bytes", 0))
-	if bytes > 0:
-		_set_status("YAML exported (%d bytes)." % bytes)
-	else:
-		_set_status("YAML export complete.")
+	var dialog := PcbExport.build_report_dialog(result)
+	add_child(dialog)
+	dialog.popup_centered()
+	dialog.visibility_changed.connect(func() -> void:
+		if not dialog.visible:
+			dialog.queue_free())
 
 
 # ── Epoch UX3 station 11 (K13): GATED PROMOTION to canonical YAML ─────────────

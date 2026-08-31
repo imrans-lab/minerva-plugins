@@ -1,0 +1,492 @@
+extends RefCounted
+## The PCB panel's EXPORT surface — the exporter list, the one run, and the
+## report a person reads before they pay for boards.
+##
+## ── WHY THIS IS A MODULE AND NOT PANEL CODE ─────────────────────────────────
+## Export reaches the human through TWO controls (the toolbar's Export menu, and
+## the View menu's export rows, which exist because that button hides at narrow
+## widths) and the agent through ONE verb (minerva_pcb_board_export). Three
+## doorways onto one behaviour is exactly the shape that drifts: the historical
+## Export YAML button and its View-menu twin already diverged into two call
+## sites for one action, and any exporter added to one would have been
+## unreachable from the other. Everything below is static and takes the panel,
+## so all three doorways run this file and cannot disagree by construction —
+## the same reason pcb_options_menu.gd owns read_state/apply.
+##
+## ── WHAT AN EXPORTER IS ─────────────────────────────────────────────────────
+## A row in EXPORTERS. Two kinds:
+##   yaml    — the canonical document, serialized through pcb.serialize and
+##             WRITTEN NOWHERE. minerva_pcb_promote stays the only verb in this
+##             plugin that puts bytes in a .yaml file.
+##   package — the whole order package for one service profile (gerbers.zip,
+##             bom.csv, cpl.csv, assembly-preview.svg, ORDER-CHECKLIST.md,
+##             preflight.json, order-manifest.json), built from ONE strict
+##             compilation by the worker's order_package method and published as
+##             a directory in a single move.
+## Adding a service profile adds a row here and nothing else: the worker's
+## profile loader is fail-closed, so an id it does not know refuses by name
+## rather than emitting a best-guess dialect.
+##
+## ── REFUSAL NAMES ARE THE CONTRACT ──────────────────────────────────────────
+## `run` returns ONE shape for every exporter and every outcome, and a refusal
+## always carries `error` — the STABLE code (assembly_duplicate_designator,
+## assembly_service_side_unsupported, assembly_not_compilable, …) that the
+## worker named, never a sentence this file invented. The panel renders that
+## dictionary and the MCP verb returns it, so the human and the agent are told
+## the same name for the same fault.
+##
+## Off-tree plugin: NO class_name; reached by relative preload.
+
+## The panel-IPC channel the package exporters ride. It is the SAME registry
+## entry minerva_pcb_order_package dispatches through (main.go registers one
+## handler under both names), so the GUI and an agent holding a document reach
+## one implementation rather than two that agree today.
+const CHANNEL_ORDER_PACKAGE := "minerva_pcb_order_package"
+
+const KIND_YAML := "yaml"
+const KIND_PACKAGE := "package"
+
+## THE exporter list. Index order is menu order on both surfaces: the Export
+## menu's item ids ARE these indices, and the View menu's are them offset by its
+## own base.
+const EXPORTERS := [
+	{
+		"id": "yaml",
+		"label": "Canonical YAML",
+		"kind": KIND_YAML,
+		"profile": "",
+		"summary": "the board as canonical YAML text — read out, never written",
+	},
+	{
+		"id": "jlc",
+		"label": "Order package — JLCPCB dialect",
+		"kind": KIND_PACKAGE,
+		"profile": "jlc",
+		"summary": "the whole order package in JLCPCB's CSV dialect, claiming no assembly tier — the honest shape for a mid-layout quote",
+	},
+	{
+		"id": "jlcpcb-economic",
+		"label": "Order package — JLCPCB Economic",
+		"kind": KIND_PACKAGE,
+		"profile": "jlcpcb-economic",
+		"summary": "the whole order package checked against JLCPCB's Economic assembly tier (single-sided placement, its size range, its fabrication rule profile)",
+	},
+]
+
+## The default row, and the exporter _on_export_yaml_pressed drives.
+const YAML_INDEX := 0
+
+## How many findings one report section prints before it stops and says how
+## many it did not. A dialog taller than the screen is a dialog nobody reads;
+## preflight.json in the package carries every one of them.
+const _REPORT_SECTION_CAP := 12
+
+
+# ── The list ────────────────────────────────────────────────────────────────
+
+static func ids() -> PackedStringArray:
+	var out := PackedStringArray()
+	for row in EXPORTERS:
+		out.append(str((row as Dictionary)["id"]))
+	return out
+
+
+static func labels() -> PackedStringArray:
+	var out := PackedStringArray()
+	for row in EXPORTERS:
+		out.append(str((row as Dictionary)["label"]))
+	return out
+
+
+static func id_at(index: int) -> String:
+	if index < 0 or index >= EXPORTERS.size():
+		return ""
+	return str((EXPORTERS[index] as Dictionary)["id"])
+
+
+static func label_at(index: int) -> String:
+	if index < 0 or index >= EXPORTERS.size():
+		return ""
+	return str((EXPORTERS[index] as Dictionary)["label"])
+
+
+## The one sentence saying what this exporter emits — the Export menu's tooltip,
+## so what the button would do is readable without opening it.
+static func summary_at(index: int) -> String:
+	if index < 0 or index >= EXPORTERS.size():
+		return ""
+	return str((EXPORTERS[index] as Dictionary)["summary"])
+
+
+static func index_of(exporter_id: String) -> int:
+	for i in EXPORTERS.size():
+		if str((EXPORTERS[i] as Dictionary)["id"]) == exporter_id:
+			return i
+	return -1
+
+
+static func find(exporter_id: String) -> Dictionary:
+	var i := index_of(exporter_id)
+	return {} if i < 0 else (EXPORTERS[i] as Dictionary).duplicate(true)
+
+
+# ── The run ─────────────────────────────────────────────────────────────────
+
+## Run one exporter over the panel's LIVE board. `out_dir` is the package
+## exporters' destination; empty means "beside the canonical source file the
+## board was adopted from", which is the same implicit-target rule promote()
+## uses, and no adopted file refuses by name rather than inventing a path.
+##
+## Returns, for every exporter and every outcome:
+##   {ok, exporter, exporter_label, kind, error?, message?, component?, field?,
+##    refs?, blocked_by?, blockers, advisories, warnings, unchecked_rules,
+##    ip_questions, readiness?, preflight?, directory?, out_dir?, outputs?,
+##    written?, source?, yaml?, bytes?}
+## `error` is the worker's own stable code wherever the worker had one.
+static func run(panel, exporter_id: String, out_dir: String = "",
+		overwrite: bool = false) -> Dictionary:
+	var exporter := find(exporter_id)
+	if exporter.is_empty():
+		return _refusal("unknown_exporter", exporter_id, "",
+			"no exporter is named '%s' — known exporters: %s"
+			% [exporter_id, ", ".join(ids())])
+	var label := str(exporter["label"])
+	if panel == null or not panel.has_method("get_data"):
+		return _refusal("no_panel", exporter_id, label,
+			"export reads the board open in an editor; no live panel is mounted")
+	if str(exporter["kind"]) == KIND_YAML:
+		return await _run_yaml(panel, exporter)
+	return await _run_package(panel, exporter, out_dir, overwrite)
+
+
+## The YAML exporter: PCBPanel.export_yaml_text owns the round trip (by-ref over
+## the broker cap, digest-verified read-back), and this only reshapes its reply
+## into the one export result shape.
+static func _run_yaml(panel, exporter: Dictionary) -> Dictionary:
+	if not panel.has_method("export_yaml_text"):
+		return _refusal("no_panel", str(exporter["id"]), str(exporter["label"]),
+			"this panel cannot serialize a board")
+	var reply: Dictionary = await panel.export_yaml_text()
+	if not bool(reply.get("success", false)):
+		return _refusal(str(reply.get("error", "serialize_failed")),
+			str(exporter["id"]), str(exporter["label"]),
+			str(reply.get("note", "")))
+	var out := _base(exporter, true)
+	out["yaml"] = str(reply.get("yaml", ""))
+	out["bytes"] = int(reply.get("bytes", 0))
+	out["draft"] = true
+	return out
+
+
+## The package exporters: one worker call, which compiles once and publishes the
+## whole directory in a single move, so a caller sees a complete package or
+## none. The board goes over as to_board_dict() — the same snapshot the DRC
+## verbs send, which is the form the compiler reads, and it carries
+## board_graphics so the provenance projection has the silk to hash.
+##
+## `source_path` is DELIBERATELY NOT SENT. The manifest's git block is evidence
+## about a file, and the board in this panel may hold edits that file does not:
+## naming the canonical path would stamp a revision onto bytes it does not
+## describe. Absent, the worker records "supplied inline, not as a file in a
+## repository", which is exactly true of a live editor board.
+static func _run_package(panel, exporter: Dictionary, out_dir: String,
+		overwrite: bool) -> Dictionary:
+	var exporter_id := str(exporter["id"])
+	var label := str(exporter["label"])
+	var data = panel.get_data()
+	if data == null:
+		return _refusal("no_board", exporter_id, label, "this panel holds no board")
+	if not panel.has_method("worker_check"):
+		return _refusal("no_panel", exporter_id, label,
+			"this panel cannot reach the pcb backend")
+	var target := out_dir.strip_edges()
+	if target.is_empty():
+		var source := ""
+		if panel.has_method("canonical_source_path"):
+			source = str(panel.canonical_source_path()).strip_edges()
+		if source.is_empty():
+			return _refusal("no_output_directory", exporter_id, label,
+				"no out_dir was given and this board was not loaded from a canonical YAML file (only minerva_pcb_load_board's path form adopts one) — promote the board first, or name a directory")
+		target = source.get_base_dir()
+	var payload := {
+		"board": data.to_board_dict(),
+		"profile": str(exporter["profile"]),
+		"out_dir": target,
+		"overwrite": overwrite,
+	}
+	var reply: Dictionary = await panel.worker_check(CHANNEL_ORDER_PACKAGE, payload)
+	if not bool(reply.get("success", false)):
+		return _package_refusal(reply, exporter)
+	var result: Dictionary = reply.get("result", {}) if reply.get("result", {}) is Dictionary else {}
+	var out := _base(exporter, true)
+	out["directory"] = str(result.get("directory", ""))
+	out["out_dir"] = target
+	out["outputs"] = _as_array(result.get("outputs", []))
+	out["written"] = _as_array(result.get("written", []))
+	out["readiness"] = _as_dict(result.get("readiness", {}))
+	out["preflight"] = _as_dict(result.get("preflight", {}))
+	out["source"] = _as_dict(result.get("source", {}))
+	out["advisories"] = _as_array(result.get("advisories", []))
+	out["unchecked_rules"] = _as_array(result.get("unchecked_rules", []))
+	out["ip_questions"] = _as_array(result.get("ip_questions", []))
+	out["warnings"] = _as_array(result.get("warnings", []))
+	return out
+
+
+## A package refusal, unwrapped to the name the worker gave it.
+##
+## worker_check hands a method-level refusal back as {error:<kind>, detail:<the
+## error payload>}. The payload's `code` is the STABLE gate name and its `kind`
+## is the family; the code wins where there is one, because a caller matching on
+## "assembly" cannot tell a duplicate designator from an unsupported side. The
+## BLOCKED preflight the worker built for exactly this moment rides through, so
+## the report a person would have read out of preflight.json is on screen even
+## though no package was written.
+static func _package_refusal(reply: Dictionary, exporter: Dictionary) -> Dictionary:
+	var detail := _as_dict(reply.get("detail", {}))
+	var code := str(detail.get("code", ""))
+	if code.is_empty():
+		code = str(detail.get("kind", ""))
+	if code.is_empty():
+		code = str(reply.get("error", "export_failed"))
+	var message := str(detail.get("message", ""))
+	if message.is_empty():
+		message = str(reply.get("note", ""))
+	var out := _refusal(code, str(exporter["id"]), str(exporter["label"]), message)
+	for key in ["component", "field"]:
+		if str(detail.get(key, "")) != "":
+			out[key] = str(detail[key])
+	if detail.has("refs"):
+		out["refs"] = _as_array(detail["refs"])
+	if detail.has("blocked_by"):
+		out["blocked_by"] = _as_array(detail["blocked_by"])
+	var preflight := _as_dict(detail.get("preflight", {}))
+	if not preflight.is_empty():
+		out["preflight"] = preflight
+		out["blockers"] = _as_array(preflight.get("blockers", []))
+		out["readiness"] = _as_dict(preflight.get("readiness", {}))
+	if out["blockers"].is_empty():
+		# No structured preflight came back (a broker-level fault, a panel
+		# guard). The refusal is still ONE blocker so the report has the same
+		# shape whatever refused.
+		var blocker := {"code": code, "message": message}
+		for key in ["component", "field", "refs"]:
+			if out.has(key):
+				blocker[key] = out[key]
+		out["blockers"] = [blocker]
+	return out
+
+
+static func _base(exporter: Dictionary, ok: bool) -> Dictionary:
+	return {
+		"ok": ok,
+		"exporter": str(exporter["id"]),
+		"exporter_label": str(exporter["label"]),
+		"kind": str(exporter["kind"]),
+		"blockers": [],
+		"advisories": [],
+		"warnings": [],
+		"unchecked_rules": [],
+		"ip_questions": [],
+	}
+
+
+static func _refusal(code: String, exporter_id: String, label: String,
+		message: String) -> Dictionary:
+	var out := {
+		"ok": false,
+		"exporter": exporter_id,
+		"exporter_label": label,
+		"kind": "",
+		"error": code,
+		"message": message,
+		"blockers": [],
+		"advisories": [],
+		"warnings": [],
+		"unchecked_rules": [],
+		"ip_questions": [],
+	}
+	var i := index_of(exporter_id)
+	if i >= 0:
+		out["kind"] = str((EXPORTERS[i] as Dictionary)["kind"])
+	return out
+
+
+static func _as_dict(value) -> Dictionary:
+	return value.duplicate(true) if value is Dictionary else {}
+
+
+static func _as_array(value) -> Array:
+	return (value as Array).duplicate(true) if value is Array else []
+
+
+# ── The report ──────────────────────────────────────────────────────────────
+
+## The status line for one export result. The YAML exporter's sentences are the
+## ones the Export YAML button has always written — the strings are pinned by
+## the SR2FAB S1 suite, and a person who has read this line for a year should
+## not have to learn a new one because the button grew a chooser beside it.
+static func status_line(result: Dictionary) -> String:
+	var yaml := str(result.get("kind", "")) == KIND_YAML
+	if not bool(result.get("ok", false)):
+		var code := str(result.get("error", ""))
+		var message := str(result.get("message", ""))
+		var why := message if message != "" else code
+		if yaml:
+			if code == "worker_unavailable":
+				return "YAML export unavailable — plugin IPC not ready."
+			return "YAML export failed: %s" % why
+		return "Export refused (%s): %s%s" % [code, why,
+			"  •  see the export report." if has_report(result) else ""]
+	if yaml:
+		var bytes := int(result.get("bytes", 0))
+		return ("YAML exported (%d bytes)." % bytes) if bytes > 0 else "YAML export complete."
+	var status := str(_as_dict(result.get("readiness", {})).get("preflight_status", "unknown"))
+	var counts := "%d advisory(ies), %d compile warning(s)" % [
+		_as_array(result.get("advisories", [])).size(),
+		_as_array(result.get("warnings", [])).size()]
+	return "Order package written → %s  •  preflight: %s  •  %s  •  see the export report." % [
+		str(result.get("directory", "")), status, counts]
+
+
+## Whether there is anything worth opening a dialog for: a refusal always is,
+## and a package that generated with something to say about itself is too. A
+## clean package needs no dialog — the status line already said where it went.
+static func has_report(result: Dictionary) -> bool:
+	if not bool(result.get("ok", false)):
+		return true
+	if str(result.get("kind", "")) != KIND_PACKAGE:
+		return false
+	for key in ["advisories", "warnings", "ip_questions", "blockers"]:
+		if not _as_array(result.get(key, [])).is_empty():
+			return true
+	return false
+
+
+## One finding as a line, NAMED and PER-COMPONENT. Three differently shaped
+## records go through here — preflight blockers and advisories
+## ({code, component?, field?, refs?, message}) and compile diagnostics
+## ({severity, code, message, source_ref:{entity_kind, entity_id, detail}}) —
+## because a reader does not care which producer a finding came from, only what
+## it is about. A finding that names no entity says so rather than printing an
+## empty bullet that reads like a whole-board claim.
+static func finding_line(entry: Dictionary) -> String:
+	var code := str(entry.get("code", ""))
+	var severity := str(entry.get("severity", ""))
+	var subject := str(entry.get("component", ""))
+	var field := str(entry.get("field", ""))
+	if subject.is_empty():
+		var ref := _as_dict(entry.get("source_ref", {}))
+		subject = str(ref.get("entity_id", ""))
+		if field.is_empty():
+			field = str(ref.get("entity_kind", ""))
+	var refs := _as_array(entry.get("refs", []))
+	var head := code if severity.is_empty() else "%s %s" % [severity, code]
+	var about := "board-wide"
+	if not subject.is_empty():
+		about = subject
+		if not field.is_empty():
+			about = "%s (%s)" % [subject, field]
+	if not refs.is_empty():
+		about = "%s → %s" % [about, ", ".join(PackedStringArray(
+			Array(refs.map(func(r): return str(r)))))]
+	return "• %s — %s: %s" % [head, about, str(entry.get("message", ""))]
+
+
+## One titled section, or nothing at all when there is nothing to say. Returns
+## its lines rather than appending into the caller's, so the section list stays
+## a value the caller composes.
+static func _section(title: String, entries: Array) -> PackedStringArray:
+	var lines := PackedStringArray()
+	if entries.is_empty():
+		return lines
+	lines.append("")
+	lines.append("%s (%d)" % [title, entries.size()])
+	for i in entries.size():
+		if i >= _REPORT_SECTION_CAP:
+			lines.append("  … and %d more — every one of them is in preflight.json"
+				% (entries.size() - _REPORT_SECTION_CAP))
+			break
+		lines.append("  %s" % finding_line(_as_dict(entries[i])))
+	return lines
+
+
+## The whole report as text: what ran, what it refused over, what it could not
+## measure, and what it never looked at. Every section is absent when empty.
+static func report_lines(result: Dictionary) -> PackedStringArray:
+	var lines := PackedStringArray()
+	lines.append("Exporter: %s" % str(result.get("exporter_label", result.get("exporter", ""))))
+	if bool(result.get("ok", false)):
+		var directory := str(result.get("directory", ""))
+		if directory != "":
+			lines.append("Package: %s" % directory)
+			lines.append("Written under: %s" % str(result.get("out_dir", "")))
+	else:
+		lines.append("REFUSED: %s" % str(result.get("error", "")))
+		var message := str(result.get("message", ""))
+		if message != "":
+			lines.append(message)
+
+	var readiness := _as_dict(result.get("readiness", {}))
+	if not readiness.is_empty():
+		lines.append("")
+		lines.append("Readiness")
+		lines.append("  package_generated: %s" % str(readiness.get("package_generated", false)))
+		lines.append("  preflight_status: %s" % str(readiness.get("preflight_status", "")))
+		# The third state is never set here and the note says why. Printing it
+		# as "null" alone would read as a check that failed rather than one
+		# only a person at a quote page can record.
+		lines.append("  order_page_verified: not recorded — %s"
+			% str(readiness.get("order_page_verified_note", "")))
+
+	lines.append_array(_section("BLOCKERS — nothing was written",
+		_as_array(result.get("blockers", []))))
+	var blocked_by := _as_array(result.get("blocked_by", []))
+	if not blocked_by.is_empty():
+		lines.append("")
+		lines.append("WHAT STOPPED THE COMPILE (%d)" % blocked_by.size())
+		for entry in blocked_by:
+			lines.append("  %s" % (finding_line(entry as Dictionary) if entry is Dictionary
+				else "• %s" % str(entry)))
+	lines.append_array(_section("ADVISORIES — shown, never refused",
+		_as_array(result.get("advisories", []))))
+	# COMPILE WARNINGS are rendered here deliberately. The worker has carried
+	# them on every assembly reply since the single-compilation cutover and no
+	# surface drew them, which made a warning about the very board in the
+	# envelope (captured geometry that was not emitted, say) invisible to the
+	# only person who could act on it. They do not move preflight_status —
+	# they are the compiler talking about the board, not the service talking
+	# about the order — so they get their own section rather than joining the
+	# advisories.
+	lines.append_array(_section(
+		"COMPILE WARNINGS — what the compiler said about this board",
+		_as_array(result.get("warnings", []))))
+	lines.append_array(_section(
+		"IP QUESTIONS — for a human to answer before ordering",
+		_as_array(result.get("ip_questions", []))))
+	lines.append_array(_section("NOTHING LOOKED AT THESE",
+		_as_array(result.get("unchecked_rules", []))))
+
+	var outputs := _as_array(result.get("outputs", []))
+	if not outputs.is_empty():
+		lines.append("")
+		lines.append("OUTPUTS (%d)" % outputs.size())
+		for entry in outputs:
+			var row := _as_dict(entry)
+			var sha := str(row.get("sha256", ""))
+			lines.append("  • %s  %d bytes  %s" % [str(row.get("file", "")),
+				int(row.get("bytes", 0)),
+				("sha256 %s" % sha.substr(0, 16)) if sha != "" else "(digest recorded externally)"])
+	return lines
+
+
+## The report as a dialog the panel pops. AcceptDialog is the panel's existing
+## convention for a verdict too long for the status line (PromotionGateDialog),
+## and the caller owns add_child/popup/free exactly as it does there.
+static func build_report_dialog(result: Dictionary) -> AcceptDialog:
+	var dialog := AcceptDialog.new()
+	dialog.name = "ExportReportDialog"
+	dialog.title = "Export refused" if not bool(result.get("ok", false)) else "Export report"
+	dialog.dialog_text = "\n".join(report_lines(result))
+	dialog.dialog_autowrap = true
+	return dialog

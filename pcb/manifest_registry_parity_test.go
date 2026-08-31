@@ -123,11 +123,16 @@ func TestManifestBrokerParity(t *testing.T) {
 	// registration-count pin (pcb/tests/gd/test_manifest_tool_registration.gd)
 	// documents; this count is a hard gate (not discretionary), so it moves in
 	// lockstep with the manifest/broker entry rather than trailing it.
-	if len(manifestTools) != 19 {
-		t.Errorf("manifest backend-executor tool count = %d, want 19 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint + K20's minerva_pcb_lock_libraries)", len(manifestTools))
+	// 19 -> 20: task-cycle 12 B4's minerva_pcb_order_package (docket
+	// 01a0545d027a) — the agent-facing half of the exporter chooser, and the
+	// entry the panel also sends on as an IPC channel. Its live-board twin
+	// minerva_pcb_board_export is executor:"panel", so it does not move this
+	// count.
+	if len(manifestTools) != 20 {
+		t.Errorf("manifest backend-executor tool count = %d, want 20 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint + K20's minerva_pcb_lock_libraries + B4's minerva_pcb_order_package)", len(manifestTools))
 	}
-	if len(brokerSpecs) != 19 {
-		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 19", len(brokerSpecs))
+	if len(brokerSpecs) != 20 {
+		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 20", len(brokerSpecs))
 	}
 }
 
@@ -251,6 +256,10 @@ var toolIdentityKeyword = map[string]string{
 	"minerva_pcb_fetch_libraries": "curated KiCAD symbol/footprint library subset",
 	"minerva_pcb_library_status":  "fetched and verified",
 	"minerva_pcb_export_assembly": "pre-assembly order package",
+	// B4. Names the one claim only this tool makes — that the third readiness
+	// state leaves here unset every time, because nothing offline can record
+	// it. Its two CSV-emitting neighbours have no reason to say it.
+	"minerva_pcb_order_package": "order_page_verified is null every time",
 	// LIB1 B2 (rendered bless): keywords verified unique across all 15
 	// descriptions at authoring time.
 	"minerva_pcb_footprint_stage":  "sha256-pinned and UNBLESSED",

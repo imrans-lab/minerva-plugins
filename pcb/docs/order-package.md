@@ -186,3 +186,74 @@ The same module's loose-file writer backs the two-CSV `assembly_package` path,
 which cannot use a directory rename: every byte is written to a temporary
 neighbour before any destination name is touched, so a caller error or a full
 disk leaves the directory holding neither CSV rather than a BOM with no CPL.
+
+## The two surfaces, and why they are one function
+
+A person can only click; an agent can only call. If either reaches an exporter
+the other cannot, the capability is invisible to half the people who need it —
+and if one fault comes back with two names, it is two bugs to chase instead of
+one to fix. So the export affordance is a CHOICE of exporter, offered
+identically on every surface, and all of them run one function.
+
+| surface | control | who uses it |
+| --- | --- | --- |
+| PCB panel toolbar | an **Export** menu, one row per exporter, the current one radio-checked | a person, at any width above narrow |
+| PCB panel View menu | one **Export: …** row per exporter | a person, at narrow widths where the toolbar button is hidden |
+| `minerva_pcb_board_export` | `{editor_name, exporter?, out_dir?, overwrite?}` | an agent, over the LIVE board |
+| `minerva_pcb_order_package` | `{yaml\|board, profile?, out_dir?, overwrite?, source_path?}` | an agent, over a document |
+
+`ui/pcb_export.gd` owns the exporter list, the run and the report; the toolbar
+menu, the View-menu rows and the panel verb are three doorways onto its `run`.
+Picking a row on either surface moves the selection on both, and
+`get_layout_state().selected_exporter` reports it, so an agent can read the
+human's control without a screenshot. The panel
+sends on `minerva_pcb_order_package` itself as a panel-IPC channel — the same
+arrangement `minerva_pcb_drc` already has — so there is ONE registry entry and
+one handler behind a human's click and an agent's call. Nothing can be told to
+name a refusal differently depending on who asked.
+
+The exporters today: `yaml` (the canonical document, read out and written
+nowhere — `minerva_pcb_promote` is still the only verb that writes the canonical
+file), `jlc` (the package in JLCPCB's CSV dialect, claiming no assembly tier)
+and `jlcpcb-economic` (the same package checked against the Economic tier).
+Adding a service profile adds a row to `EXPORTERS` and nothing else.
+
+The toolbar control is ONE menu rather than a chooser beside a button, and the
+width is the reason: the strip's fit at 600 px is a pinned oracle, its budget is
+tight enough that adding the Options menu once had to be paid for out of the
+caption rule, and a chooser wide enough to read "Order package — JLCPCB
+Economic" beside a button is far more than the button it replaces. A menu costs
+one button of width whatever the list does — the same argument View and Options
+are unconditional on.
+
+### Where a panel export writes, and what it claims about the source
+
+With no `out_dir` a package is written BESIDE the canonical YAML file the board
+was adopted from — the same implicit target `promote()` resolves. A board that
+was never loaded from one refuses `no_output_directory` rather than inventing a
+path; that refusal is reached identically from the button and from the verb, and
+neither reaches the worker.
+
+The live board is sent to the worker INLINE, with no `source_path`, on purpose.
+The manifest's git block is evidence about a FILE, and the board in an editor
+may hold edits that file does not: naming the canonical path would stamp a
+revision onto bytes it does not describe. Absent, the manifest records "the
+board source was supplied inline, not as a file in a repository", which is
+exactly true of a live editor board.
+
+### What the panel shows, and the warnings nobody used to render
+
+A refusal always opens a report; a package that generated opens one when it has
+something to say about itself. Every finding is printed with the component and
+field it is about — a blocker, a service advisory and a compile diagnostic all
+render through one function, because a reader does not care which producer a
+finding came from.
+
+Compile warnings get their own section. The worker has carried them on every
+assembly reply since the single-compilation cutover and no surface drew them, so
+a warning about the very board in the envelope — captured geometry that was not
+emitted, say — reached nobody who could act on it. They do NOT move
+`preflight_status`: that is the service talking about the order, and these are
+the compiler talking about the board. `minerva_pcb_export_assembly` forwards the
+same list, which its own reply decoder used to discard silently along with the
+`unchecked_rules` its description already promised.

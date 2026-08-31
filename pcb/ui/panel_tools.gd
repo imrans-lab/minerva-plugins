@@ -53,6 +53,10 @@ const _PcbPrefsScript := preload("model/pcb_prefs.gd")
 ## menu, so a click and this verb are the same operation.
 const _PcbOptionsMenuScript := preload("pcb_options_menu.gd")
 const _PcbBoardHistoryScript := preload("pcb_board_history.gd")
+## The export surface. The chooser, the View menu's export rows and the verb
+## below all call pcb_export.gd's `run`, so the GUI and an agent cannot reach
+## different exporters or be told different names for one refusal.
+const _PcbExportScript := preload("pcb_export.gd")
 ## B2 (MCP parity round): static-func + const access for the zone outline
 ## helpers (zone_outline_to_list/zone_outline_points, MIN_ZONE_OUTLINE_POINTS)
 ## without depending on GDScript's instance-forwarding for consts across a
@@ -198,6 +202,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_redo(host, args)
 		"minerva_pcb_board_drc":
 			return await _board_drc(host, args)
+		"minerva_pcb_board_export":
+			return await _board_export(host, args)
 		"minerva_pcb_undo":
 			return _board_history(host, "undo")
 		"minerva_pcb_redo":
@@ -8136,6 +8142,40 @@ static func _export_yaml(host, args: Dictionary) -> Dictionary:
 		"draft": true,
 		"note": "draft export — nothing was written and no gate ran; minerva_pcb_promote is the gated writer of the canonical file",
 	})
+
+
+## minerva_pcb_board_export — the exporter chooser's verb.
+##
+## PARITY, not convenience: the owner works only through the GUI and the agent
+## only through this surface, so an exporter one can reach and the other cannot
+## is invisible to half the people who need it. pcb_export.gd owns the exporter
+## list, the run and the refusal names; the Export button, the View menu's
+## export rows and this verb are three doorways onto that one function.
+##
+## `exporter` omitted runs whatever the chooser currently names — the same
+## thing the human would get by pressing Export right now. Every reply lists
+## the exporters, so a caller discovers them without a second verb.
+static func _board_export(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_data"):
+		return _err("no live panel — export reads the board open in an editor")
+	var exporter := str(args.get("exporter", "")).strip_edges()
+	if exporter.is_empty() and panel.has_method("selected_exporter_id"):
+		exporter = str(panel.selected_exporter_id())
+	var result: Dictionary = await _PcbExportScript.run(panel, exporter,
+		str(args.get("out_dir", "")), bool(args.get("overwrite", false)))
+	result["exporters"] = _PcbExportScript.ids()
+	result["status_line"] = _PcbExportScript.status_line(result)
+	result["report"] = _PcbExportScript.report_lines(result)
+	# One shape either way, minus the module's internal `ok` flag: this surface
+	# speaks `success`, like every other verb in this file.
+	var refused := not bool(result.get("ok", false))
+	result.erase("ok")
+	if refused:
+		result["success"] = false
+		result["error"] = str(result.get("error", "export_failed"))
+		return result
+	return _ok(result)
 
 
 ## Epoch UX3 station 11 (K13): gated promotion — a thin tool over

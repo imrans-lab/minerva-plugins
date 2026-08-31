@@ -707,7 +707,9 @@ var ExportAssembly = ToolSpec{
 		"assembly.mpn) — so a board carrying two houses' catalogue numbers ships the " +
 		"selected house's. Calls the worker's assembly_package method ONCE: both CSVs " +
 		"come from one compilation and one walk, which is what makes them describe the " +
-		"same board.",
+		"same board. `warnings` forwards that compilation's own diagnostics verbatim — " +
+		"what the compiler said about the board these CSVs describe, which is not the " +
+		"same thing as what a gate or a service said about the order.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -741,6 +743,16 @@ type assemblyPackageReply struct {
 	CplFile            string            `json:"cpl_file"`
 	ExcludedComponents []string          `json:"excluded_components"`
 	Advisories         []json.RawMessage `json:"advisories"`
+	UncheckedRules     []json.RawMessage `json:"unchecked_rules"`
+	// COMPILE DIAGNOSTICS. The worker has carried these on every assembly
+	// reply since the single-compilation cutover (methods.py _assembly_reply,
+	// same shape and same reason as the gerbers reply), and this decoder did
+	// not name the key — encoding/json drops unknown fields silently, so what
+	// the compiler said about the very board in the envelope reached no
+	// caller at all. Raw JSON for the same reason Advisories is: the shape
+	// belongs to _diagnostic_to_payload, and a second declaration here would
+	// be a shape to drift against.
+	Warnings []json.RawMessage `json:"warnings"`
 }
 
 // assemblyOutputSummary is this tool's per-file reply shape. The worker's own
@@ -899,11 +911,98 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 	if len(reply.Advisories) > 0 {
 		out["advisories"] = reply.Advisories
 	}
+	if len(reply.UncheckedRules) > 0 {
+		out["unchecked_rules"] = reply.UncheckedRules
+	}
+	if len(reply.Warnings) > 0 {
+		out["warnings"] = reply.Warnings
+	}
 	data, err := json.Marshal(out)
 	if err != nil {
 		return nil, err
 	}
 	return json.RawMessage(data), nil
+}
+
+// ---- minerva_pcb_order_package / pcb.order_package --------------------------
+//
+// Task-cycle 12 B4 (docket 01a0545d027a), DCR 01a0542d902f r2/r3 "Package
+// layout". B2 shipped the worker's order_package method with no tool verb in
+// front of it, deliberately, because this unit owns the tool surface.
+//
+// ONE registry entry, TWO callers. The panel's exporter chooser sends on this
+// tool's own name as a panel-IPC channel (manifest ui.ipc_channels /
+// ui.ipc_messages, the same arrangement minerva_pcb_drc already has), rather
+// than getting a dotted twin of its own. That is not tidiness — it is the
+// parity contract. The owner works only through the GUI and cannot call a
+// tool; an agent works only through tools and cannot click. Two entries would
+// agree today and drift tomorrow; one entry cannot be told to name a refusal
+// differently depending on who asked.
+
+var orderPackageDescription = "Emit the WHOLE order package for one manufacturing service profile, " +
+	"from ONE strict compilation of the board: gerbers.zip (an allowlist — .gbr/.drl/.gbrjob " +
+	"and nothing else), bom.csv, cpl.csv, assembly-preview.svg, ORDER-CHECKLIST.md, " +
+	"preflight.json and order-manifest.json, under <board>-<profile>/. Args {yaml|board, " +
+	"profile?:<service id, default \"jlc\">, out_dir?:<dir>, overwrite?:<bool>, " +
+	"source_path?:<the board file's own path, read for git state only>}. Because every " +
+	"artifact derives from one compilation, the archive and the CSVs cannot describe two " +
+	"different boards. Returns {directory, outputs:[{file, sha256, bytes}], readiness, " +
+	"preflight, source, written, warnings, advisories?, unchecked_rules?, ip_questions?}. " +
+	"WITHOUT out_dir nothing is written and the reply is the digests; WITH it the whole " +
+	"directory is staged and moved into place in ONE step, so a reader sees a complete " +
+	"package or none, and an existing directory is not replaced unless overwrite is set. " +
+	"READINESS IS THREE CLAIMS AND THIS MAKES TWO: package_generated is what serialization " +
+	"proves and all it proves; preflight_status is pass|advisories|blocked over the checks " +
+	"that ran; order_page_verified is null every time — there is no parameter that sets it, " +
+	"because only a person who uploaded these files and read the quote page can record it. " +
+	"A BLOCKED board produces NO FILES and refuses by name, carrying the preflight report " +
+	"that would have been written: assembly_not_compilable (with blocked_by naming every " +
+	"component/footprint that stopped the compile), the assembly hard gates " +
+	"(assembly_duplicate_designator, assembly_reference_set_mismatch, assembly_row_ref_limit, " +
+	"assembly_placements_too_close, assembly_empty_expansion, assembly_paste_undecided, " +
+	"assembly_missing_identity, assembly_non_metric_coordinates), the selected service's own " +
+	"blockers (assembly_service_fab_profile_mismatch, assembly_service_side_unsupported, " +
+	"assembly_service_board_size_unsupported) and the provenance mismatches. ADVISORIES " +
+	"NEVER REFUSE and each names its component: an unmeasured assembly anchor, the tooling " +
+	"holes the house adds after upload, the component-to-edge suggestion, absent provenance " +
+	"silk. `warnings` carries the COMPILE diagnostics for this board — the compiler talking " +
+	"about the board rather than the service talking about the order, so they do not move " +
+	"preflight_status. `unchecked_rules` names every published rule nothing looked at, so a " +
+	"clean package is never mistaken for a fully checked one. Two JLCPCB selectors read ONE " +
+	"pinned service-profile file: \"jlcpcb-economic\" selects the Economic assembly TIER and " +
+	"runs its compatibility checks; \"jlc\" selects the same CSV dialect with NO tier and " +
+	"claims nothing about a manufacturer — the honest shape for a mid-layout quote export. " +
+	"Holding an editor? minerva_pcb_board_export runs this over the LIVE board through the " +
+	"panel's own exporter chooser, which is the surface the human uses."
+
+var orderPackageSchema = json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+			"profile": {"type": "string", "description": "Service profile id (default \"jlc\" — JLCPCB's CSV dialect, no tier claimed; \"jlcpcb-economic\" selects the Economic tier and its compatibility checks)."},
+			"out_dir": {"type": "string", "description": "Optional directory to publish the package directory into, atomically. Omit to get the digests without writing anything."},
+			"overwrite": {"type": "boolean", "description": "Replace an existing package directory of the same name (default false — it may already have been uploaded)."},
+			"source_path": {"type": "string", "description": "The board file's own path. Read ONLY for the manifest's git revision/dirty state; a board supplied inline records that it was, rather than borrowing a file's revision."}
+		}
+	}`)
+
+var OrderPackage = ToolSpec{
+	Name:        "minerva_pcb_order_package",
+	Description: orderPackageDescription,
+	InputSchema: orderPackageSchema,
+}
+
+// HandleOrderPackage serves the agent call and the panel channel alike.
+// withLibraryChain is required, not
+// decorative: the package strict-compiles the board, so without the host's live
+// layer chain a board whose footprints come from the user or blessed-WIP layers
+// refuses with footprint_unresolved. Writing is the WORKER's job here, unlike
+// the two-CSV path where this side strips out_dir and writes the files itself —
+// a package is a DIRECTORY, and one staged directory moved into place is a
+// stronger all-or-nothing guarantee than any per-file sequence Go could run.
+func HandleOrderPackage(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "order_package", withLibraryChain(params))
 }
 
 // ---- rendered-bless surface (S3/B2, docket 019ff5687b99) -------------------

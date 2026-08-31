@@ -267,7 +267,10 @@ func _init() -> void:
 	# its designator, the verb the new gc9_silk_under_part / gc9_silk_over_silk
 	# advisories hand their suggestion to. executor:"panel", so the Go pin at 19
 	# backend tools still holds.
-	check("total registered tool count == 124", registered.size() == 124,
+	# (124 -> 126): task-cycle 12 B4's export surfaces — minerva_pcb_order_package
+	# (executor "backend", so the Go pin moves 19 -> 20) and its live-board twin
+	# minerva_pcb_board_export (executor "panel"), the exporter chooser's verb.
+	check("total registered tool count == 126", registered.size() == 126,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
