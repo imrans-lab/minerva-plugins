@@ -105,15 +105,66 @@ def test_blank_identity_falls_through_to_the_next_home(blank):
     assert _resolve(assembly={"mpn": blank}).mpn is None
 
 
+def test_an_explicitly_null_identity_is_absent_like_a_blank():
+    """``mpn:`` with nothing after it is YAML null. It is the absent case, not
+    the malformed one — the refusal below must not swallow it, or every board
+    that leaves an identity key parked and empty stops compiling."""
+    assert _resolve(assembly={"mpn": None}, mpn="SCALAR").mpn == "SCALAR"
+    assert _resolve(assembly={"mpn": None}).mpn is None
+
+
 def test_identity_values_are_stripped():
     assert _resolve(assembly={"mpn": "  C25804 "}).mpn == "C25804"
 
 
-def test_non_string_identity_is_treated_as_absent_not_coerced():
-    """An authored YAML int is NOT stringified into a part number: a coerced
-    identity is a plausible-looking wrong answer, and the identity gate would
-    then pass on a value nobody authored."""
-    assert _resolve(assembly={"mpn": 25804}).mpn is None
+@pytest.mark.parametrize("key", spec.IDENTITY_FIELDS)
+def test_non_string_identity_is_a_named_refusal(key):
+    """An authored YAML number is neither stringified nor dropped. Coercing
+    prints a plausible-looking wrong answer the identity gate would then pass;
+    dropping is not the safe half either, because dropping falls through — see
+    the shadowing test below. Every identity field refuses alike, and the
+    refusal names the component and the field."""
+    with pytest.raises(spec.AssemblySpecError, match=key) as caught:
+        _resolve(assembly={key: 387})
+    assert "R1" in str(caught.value)
+
+
+@pytest.mark.parametrize("bad", [387, 3.87, True, ["0603"], {"v": "0603"}])
+def test_every_non_string_identity_shape_refuses(bad):
+    """Not just ints: a bool or a mistyped list is equally not a part number,
+    and each must refuse rather than reach an emitter as an absent value."""
+    with pytest.raises(spec.AssemblySpecError, match="package"):
+        _resolve(assembly={"package": bad})
+
+
+@pytest.mark.parametrize("comp", [
+    {"assembly": {"package": 387}},   # the block
+    {"package": 387},                 # the top-level scalar
+    {"properties": {"package": 387}},  # the properties map
+])
+def test_every_authoring_home_refuses_a_non_string_identity(comp):
+    """All three homes are read by one fold, so all three refuse by one rule.
+    A home that quietly dropped instead would be the one an author reaches for
+    when the block refuses."""
+    with pytest.raises(spec.AssemblySpecError, match="package"):
+        _resolve(**comp)
+
+
+def test_a_dropped_identity_shadows_the_next_home_rather_than_vanishing():
+    """Why dropping was never the neutral choice. ``package: 0603`` reaches
+    this reader as 387, and stepping past it lands on the NEXT home, so a board
+    whose author wrote 0603 in the block used to emit the 0402 written a level
+    down — an order for a part nobody authored."""
+    with pytest.raises(spec.AssemblySpecError, match="package"):
+        _resolve(assembly={"package": 387}, properties={"package": "0402"})
+
+
+@pytest.mark.parametrize("quoted", ["0603", "0402", "0201", "1206", "0805"])
+def test_a_quoted_package_is_read_verbatim(quoted):
+    """The other half of the oracle: quoting is the fix the refusal asks for,
+    so quoted sizes — including the ones YAML would have eaten — must survive
+    unchanged."""
+    assert _resolve(assembly={"package": quoted}).package == quoted
 
 
 def test_every_identity_field_reads_through_the_same_fold():

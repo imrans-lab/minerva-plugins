@@ -22,6 +22,19 @@ and would otherwise lose their part identity to. Folding them here means the
 precedence rule is applied ONCE, at compile, rather than separately by every
 consumer that wants an MPN.
 
+A BLANK identity value is ABSENT and falls through to the next home, and there
+is deliberately no authored way to force an empty BOM cell: the Go codec tags
+all four fields ``omitempty``, so an authored blank dies on the first
+serialize, and a rule that only Python honoured would be a value that vanishes
+on promote.
+
+A NON-STRING identity value REFUSES, naming the component and the field.
+Dropping it is not neutral, because dropping falls through: YAML reads an
+unquoted ``package: 0603`` as the number 387, and a dropped 387 lets a
+lower-precedence ``0402`` be emitted in its place — an order for a part nobody
+authored. Coercing is worse still, since 387 is what a coercion would print.
+This matches ``_house_parts`` below, which has always refused a non-string.
+
 EXCLUSION — two authored forms, one answer, fail-closed on either. ``assembly:
 exclude`` (the pre-block scalar for board furniture: a fiducial, a silk logo)
 and ``assembly: {populate: false}`` both mean the part is on the board but is
@@ -135,14 +148,27 @@ class ResolvedAssembly:
         return tuple(p.ref for p in self.placements)
 
 
-def _identity(comp: dict, block: dict, key: str) -> str | None:
+def _identity(comp: dict, block: dict, key: str, ref: str) -> str | None:
     """The identity-precedence fold: block, then top-level scalar, then a
-    nested ``properties`` mapping; first non-blank string wins."""
+    nested ``properties`` mapping; the first non-blank string wins.
+
+    Absent, null and blank all mean "not authored here" and move on to the next
+    home. Anything else that is not a string REFUSES rather than moving on —
+    see the module docstring's IDENTITY PRECEDENCE section for why falling
+    through is the dangerous half."""
     for source in (block, comp, comp.get("properties")):
         if not isinstance(source, dict):
             continue
         value = source.get(key)
-        if isinstance(value, str) and value.strip():
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise AssemblySpecError(
+                f"component {ref!r} assembly {key} must be a quoted string, got "
+                f"{value!r} ({type(value).__name__}); an unquoted YAML value is "
+                f"parsed before it is read here and the parse is not reversible "
+                f"(package 0603 arrives as 387). Re-author the value in quotes.")
+        if value.strip():
             return value.strip()
     return None
 
@@ -263,7 +289,7 @@ def resolve_assembly(comp: dict, footprint_ref: str, ref: str) -> ResolvedAssemb
         raise AssemblySpecError(
             f"component {ref!r} assembly.paste must be one of "
             f"{'/'.join(PASTE_TOKENS)}, got {paste!r}")
-    identity = {key: _identity(comp, block, key) for key in IDENTITY_FIELDS}
+    identity = {key: _identity(comp, block, key, ref) for key in IDENTITY_FIELDS}
     raw_placements = block.get("placements")
     return ResolvedAssembly(
         footprint_ref=footprint_ref,

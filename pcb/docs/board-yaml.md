@@ -481,7 +481,7 @@ components:
       populate: true                     # false = DNP (see below)
       manufacturer: Yageo
       mpn: RC0805FR-0710KL
-      package: 0805                      # the BOM's Footprint/package column
+      package: "0805"                    # the BOM's Footprint/package column
       comment: 10k 1% 1/8W               # the BOM's Comment column
       house_parts: {jlcpcb: C84376}      # house id -> that house's catalogue number
       paste: auto                        # auto | include | exclude
@@ -534,6 +534,35 @@ C123` silently vanishing and resurfacing later as "missing mpn", or a mistyped
 wrong answer the order path exists to refuse. Both codecs enforce it at every
 level of the block, including **inside** `offset_mm`: `{xx: 22.86, y: 0}`
 refuses rather than defaulting x to 0 (`internal/board/assembly.go`).
+
+### Identity values are QUOTED strings, and a blank one means absent
+
+`manufacturer`, `mpn`, `package` and `comment` each have three authoring homes,
+read in this order: the `assembly` block, then a top-level key on the component,
+then the component's `properties` map. The first home that has the key decides.
+
+**Quote them.** A bare `0603` is not text in YAML. It resolves as a number
+before any of this is read — `0603` reaches the compiler as `387` (leading
+zero, read as octal), `0402` as `258`, `0201` as `129`, `1206` as `1206`;
+`0805` alone survives unquoted, by the accident that `8` is not an octal digit.
+Nor do the two codecs agree about it: the Go codec decodes the `assembly`
+block's fields into typed strings and keeps `0603` intact, but the top-level and
+`properties` homes ride the untyped Extra passthrough, so a save through Go
+**rewrites those to `387` in the file** and the authored text is gone.
+
+A non-string identity value is therefore a **named refusal** carrying the
+component and the field (`invalid_component_assembly`), not a value to guess
+at: coercing would print `387` in the Footprint column, and dropping would fall
+through to the next home and order whatever was written there.
+
+**A blank value means absent** — `""`, spaces, a lone newline and a bare
+`mpn:` with nothing after it all read as "not authored here" and fall through to
+the next home, exactly as a missing key does. **There is deliberately no way to
+force an empty cell.** All four fields are `omitempty` in the Go codec, so an
+authored blank is dropped from the file by the first serialize; a rule that
+honoured it in the Python reader alone would be a value that dies on promote.
+A part that genuinely has no identity is the export gate's business
+(`assembly_missing_identity`), not a blank cell's.
 
 ### Expansion refs are AUTHORED
 
