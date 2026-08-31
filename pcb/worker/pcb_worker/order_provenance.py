@@ -240,7 +240,7 @@ def check(board: dict) -> tuple[dict, tuple[dict, ...]]:
                 f"slot ({DIGEST_SENTINEL}). Write {digest[:DIGEST_CHARS]!r} into it "
                 f"and re-export: the slot is normalized before hashing, so "
                 f"stamping it does not move the digest"),
-        })
+        },)
 
     if stamp.digest != digest[:DIGEST_CHARS]:
         raise ProvenanceError(

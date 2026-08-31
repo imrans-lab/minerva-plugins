@@ -484,18 +484,21 @@ def test_the_socket_set_footprint_measures_what_the_override_fixture_claims():
     """THE PREMISE OF THE OVERRIDE TESTS, pinned like the fixture footprints
     above so a library edit breaks loudly rather than rewriting the answers.
 
-    The DevKit socket set draws ONE fab body box over BOTH strips —
-    (-12.93, -1.1)..(12.93, 62.797), centring at (0, 30.8485), which is the
-    module that plugs in rather than either soldered part. Its 44 pads sit in
-    two rows at x -11.43 and +11.43, each spanning y 0..53.34, so each STRIP
-    centres at (+/-11.43, 26.67). The fab centre lies BETWEEN the two strips and
-    on neither of them, and it is 4.1785 mm north of both.
+    The DevKit socket set draws ONE fab body box over BOTH strips — drawn
+    corner-to-corner at (-12.93, -1.1)..(12.93, 62.797) with a 0.1 mm stroke, so
+    the INK box every extent here measures is that grown by the half-stroke to
+    (-12.98, -1.15)..(12.98, 62.847). Growing both edges leaves the centre where
+    it was, at (0, 30.8485), which is the module that plugs in rather than
+    either soldered part. Its 44 pads sit in two rows at x -11.43 and +11.43,
+    each spanning y 0..53.34, so each STRIP centres at (+/-11.43, 26.67). The
+    fab centre lies BETWEEN the two strips and on neither of them, and it is
+    4.1785 mm north of both.
     """
     socket_set = _definition(
         "Espressif.pretty/ESP32-S3-DevKitC-1_SocketSet_2x22_THT.kicad_mod")
     fab = refdes_anchor.fab_extent_from_definition(socket_set)
     assert (fab.min_x, fab.min_y, fab.max_x, fab.max_y) == pytest.approx(
-        (-12.93, -1.1, 12.93, 62.797))
+        (-12.98, -1.15, 12.98, 62.847))
     assert (fab.center_x, fab.center_y) == pytest.approx(
         (0.0, SOCKET_SET_FAB_ANCHOR_Y))
 

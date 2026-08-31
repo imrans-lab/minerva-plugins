@@ -431,7 +431,9 @@ def test_a_one_terminal_part_says_why_it_carries_no_mark():
             {"ref": "R1", "footprint": "Resistor_SMD:R_0805_2012Metric",
              "value": "10k", "x_mm": 8.0, "y_mm": 8.0, "rotation_deg": 0,
              "layer": "top", "assembly": {"mpn": "C25804"}},
-            {"ref": "TP1", "footprint": "TestPoint:TH_TestPoint", "value": "",
+            # Bare, not "TestPoint:TH_TestPoint": this footprint is a SEED entry
+            # and the lock file keys the three seeds by bare name.
+            {"ref": "TP1", "footprint": "TH_TestPoint", "value": "",
              "x_mm": 20.0, "y_mm": 8.0, "rotation_deg": 0, "layer": "top",
              "assembly": {"populate": False}},
         ],

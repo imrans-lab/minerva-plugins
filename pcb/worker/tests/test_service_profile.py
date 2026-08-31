@@ -103,7 +103,9 @@ def _compiled(board: dict):
 
 
 def _codes(result) -> set[str]:
-    return {item["code"] for item in result.advisories}
+    """Every advisory code an :class:`AssemblyPackage` carries. The findings ride
+    on the EMISSION the package wraps, not on the package."""
+    return {item["code"] for item in result.emission.advisories}
 
 
 # ---------------------------------------------------------------------------

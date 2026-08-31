@@ -220,17 +220,33 @@ def test_ref_containing_a_comma_is_csv_quoted():
     assert '"R1,X"' in content
 
 
-def test_non_string_mpn_is_treated_as_missing_not_coerced():
-    """assembly_spec's identity fold requires a str; an authored non-string mpn
-    (e.g. a YAML int) is NOT stringified and accepted — it is treated as
-    ABSENT, so the identity-refusal path fires rather than emitting a
-    coerced/surprising value. Characterizes current behavior; a future unit
-    may decide int-like mpns should coerce instead — that is a scope decision
-    for whoever un-parks this, not an accident to preserve silently."""
+def test_non_string_mpn_refuses_by_name_rather_than_being_coerced():
+    """assembly_spec's identity fold requires a str, and an authored non-string
+    mpn (e.g. a YAML int) is neither stringified nor dropped: it REFUSES at
+    compile, naming the component and the key, so no emitter is reached.
+
+    The scope decision this pins was made deliberately — an unquoted YAML value
+    is parsed before the reader sees it and the parse is not reversible
+    (``package: 0603`` arrives as 387), so treating it as absent shipped an
+    identity nobody authored. The property the earlier "treated as missing"
+    characterization was protecting still holds and is what the last assertion
+    checks: the authored digits never come back as a plausible coerced string.
+    The ``package`` twin of this refusal, followed all the way to an order
+    surface's ``blocked_by``, is in test_assembly_gates.py."""
     board = _load()
     board["components"][1]["mpn"] = 25804  # R2, int rather than "C25804"
-    with pytest.raises(ao.AssemblyIdentityError, match="R2"):
-        ao.build_bom(_compiled(board), "jlc")
+    result = compile_board(board)
+    assert not isinstance(result, ResolutionSuccess)
+    named = [d for d in result.diagnostics
+             if d.severity is DiagnosticSeverity.ERROR
+             and d.code == "invalid_component_assembly"]
+    assert len(named) == 1
+    assert "R2" in named[0].message and "mpn" in named[0].message
+
+    # Nothing coerced the int into an identity: the value appears only as the
+    # int the author wrote, inside the refusal that names it.
+    assert "25804 (int)" in named[0].message
+    assert "'25804'" not in named[0].message
 
 
 def test_duplicate_component_refs_refuse_by_name_naming_the_designator():

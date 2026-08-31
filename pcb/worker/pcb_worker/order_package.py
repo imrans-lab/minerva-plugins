@@ -121,6 +121,13 @@ UNCHECKED_LICENCE = {
                "judged; no compatibility opinion is formed here"),
 }
 
+#: What a dialect-only profile says about itself, written once and read by both
+#: surfaces that say it — the manifest's ``profile.service_note`` and the
+#: checklist's header — so the two cannot drift into claiming different things.
+NO_SERVICE_NOTE = (
+    "This export claims NO manufacturing tier: the CSV dialect is JLCPCB's, "
+    "and nothing was checked against a service's capabilities.")
+
 
 class OrderPackageError(ValueError):
     """A package refused by name, before any byte reached disk."""
@@ -289,9 +296,7 @@ def _profile_record(profile) -> dict:
     }
     service = profile.service
     if service is None:
-        record["service_note"] = (
-            "this export claims NO manufacturing tier: the CSV dialect is "
-            "JLCPCB's, and nothing was checked against a service's capabilities")
+        record["service_note"] = NO_SERVICE_NOTE
         return record
     record["service"] = {
         "id": service.id,
@@ -655,8 +660,7 @@ def render_checklist(*, board, profile, provenance, digests, advisories,
         add(f"Fabrication rules: `{service.fab_profile}` · "
             f"assembly side(s): {', '.join(service.constraints.assembly_sides)}")
     else:
-        add("No manufacturing tier is claimed by this export: the CSV dialect is "
-            "JLCPCB's and nothing was checked against a service's capabilities.")
+        add(NO_SERVICE_NOTE)
     add("")
     add(f"Design revision printed on the board: "
         f"{provenance['design_revision'] or '— none —'} "

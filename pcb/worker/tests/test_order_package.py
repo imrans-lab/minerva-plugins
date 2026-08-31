@@ -571,7 +571,8 @@ def test_a_dialect_only_export_says_it_claims_no_tier():
     would be the lie the readiness states exist to prevent."""
     package = _package(profile=DIALECT_ONLY)
     assert package.manifest["profile"]["service"] is None
-    assert "no manufacturing tier" in package.manifest["profile"]["service_note"]
+    assert package.manifest["profile"]["service_note"] == op.NO_SERVICE_NOTE
+    assert "NO manufacturing tier" in op.NO_SERVICE_NOTE
     assert package.directory == f"{BOARD_NAME}-{DIALECT_ONLY}"
 
 
