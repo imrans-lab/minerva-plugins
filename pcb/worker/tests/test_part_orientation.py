@@ -23,8 +23,8 @@ computed, so the table is not the code grading its own homework; the rest were
 measured and then checked against the same convention.
 
 Those three are also what pins the SIGN. Offsets of 0 and 180 are unchanged by
-inverting the rotation sense, so a flipped sign is invisible on sixteen of the
-nineteen pairs and turns 270 into 90 on the other three —
+inverting the rotation sense, so a flipped sign is invisible on seventeen of
+the nineteen pairs and turns 270 into 90 on only the other TWO —
 :func:`test_the_rotation_sense_is_pinned_by_the_human_confirmed_pairs` is the
 test that would catch it.
 
