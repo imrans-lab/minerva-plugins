@@ -19,7 +19,7 @@ THE FOUR ORACLES, AND WHY THEY ARE FOUR
    committed vendor payloads produces. Catches a hand-edited offset, a library
    edit, a refreshed payload, a sign flip in the maths, a formatting drift.
 2. **The human-confirmed offset table** in ``test_part_orientation.py``, three
-   of whose eleven entries a person read off a board house's 3D preview of an
+   of whose nineteen entries a person read off a board house's 3D preview of an
    assembled board before any of this code existed. Independent of (1): the
    regeneration could be perfectly self-consistent and still be measuring the
    wrong thing. Cross-suite on purpose.
@@ -154,11 +154,11 @@ def test_the_ledger_carries_the_offsets_the_human_confirmed_table_states(ledger)
     """Every stored offset equals the sibling suite's ORACLE for that part.
 
     Deliberately imported from ``test_part_orientation`` rather than restated:
-    a second copy of eleven numbers is a second thing to update wrongly. Three
-    of those eleven were read off a board house's 3D preview by a person before
-    any of this code existed, so this is not the code grading its own homework
-    — and a ledger that faithfully persisted a WRONG measurement would pass
-    oracle 1 and fail here.
+    a second copy of nineteen numbers is a second thing to update wrongly.
+    Three of those nineteen were read off a board house's 3D preview by a
+    person before any of this code existed, so this is not the code grading its
+    own homework — and a ledger that faithfully persisted a WRONG measurement
+    would pass oracle 1 and fail here.
     """
     # ``tests`` is a package (tests/__init__.py), so the sibling suite is
     # imported by its package path. Imported here rather than at module scope

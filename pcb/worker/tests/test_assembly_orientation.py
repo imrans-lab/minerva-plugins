@@ -27,8 +27,8 @@ expansion child's rotation in ``geometry.PlacementTransform.angle`` and in
 
 THE TRAP THIS FILE IS BUILT AROUND. An inverted sign is INVISIBLE on every part
 whose offset is 0 or 180, because ``R + 180`` and ``R - 180`` are the same
-number modulo 360 — and nine of the eleven pairs the shipped ledger has
-measured are exactly 0 or 180. A suite assembled only out of those passes with
+number modulo 360 — and seventeen of the nineteen pairs the shipped ledger
+has measured are exactly 0 or 180. A suite assembled only out of those passes with
 the correction SUBTRACTING where it should add, or adding where it should
 subtract, and ships every quarter-turn part a quarter turn out.
 
@@ -308,9 +308,9 @@ def test_a_flat_offset_is_the_one_case_where_the_two_sides_agree():
     blind spot rather than as evidence.
 
     At an offset of 0 both sides emit the placed angle, and at 180 both emit
-    the same number because ``+180`` and ``-180`` are congruent mod 360. Nine
-    of the eleven measured pairs are exactly 0 or 180, so a corpus built only
-    out of them proves nothing about the side at all."""
+    the same number because ``+180`` and ``-180`` are congruent mod 360.
+    Seventeen of the nineteen measured pairs are exactly 0 or 180, so a corpus
+    built only out of them proves nothing about the side at all."""
     for offset in (0, 180):
         assert (aor.corrected_rotation(30, offset, aor.SIDE_TOP)
                 == pytest.approx(aor.corrected_rotation(30, offset,

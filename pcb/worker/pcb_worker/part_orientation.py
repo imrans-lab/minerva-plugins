@@ -99,7 +99,7 @@ VENDOR_UNIT_MM = 0.254
 CANDIDATE_ANGLES = (0, 90, 180, 270)
 
 #: How many times worse the runner-up must be for the best angle to be the
-#: ANSWER rather than a coin toss. Measured over the eleven committed pairs the
+#: ANSWER rather than a coin toss. Measured over the nineteen committed pairs the
 #: weakest true separation is 8.9x (SOT-23, 1.778 / 0.200); the tightest thing
 #: this must still reject is a genuine tie at 1.0x. 4.0 sits in that gap.
 SEPARATION_RATIO = 4.0

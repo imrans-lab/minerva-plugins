@@ -42,9 +42,9 @@ drawing, which is far worse than the gap.
 
 | state | footprints |
 | --- | --- |
-| measured | 11 |
+| measured | 14 |
 | declared no-reference | 10 |
-| **unknown** | **21** |
+| **unknown** | **18** |
 | total in the acquisition lock | 42 |
 
 ## UNKNOWN — nothing has ever measured this drawing
@@ -54,8 +54,6 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 - `Adafruit:MAX98357A_I2S_1x7_P2.54mm` — the lock names no catalogue part for it
 - `Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals` — the lock names no catalogue part for it
 - `Capacitor_SMD:C_0402_1005Metric` — the lock names no catalogue part for it
-- `Capacitor_SMD:C_1206_3216Metric` — the lock names no catalogue part for it
-- `Capacitor_SMD:C_1210_3225Metric` — the lock names no catalogue part for it
 - `Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal` — the lock names no catalogue part for it
 - `Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical` — the lock names no catalogue part for it
 - `Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical` — the lock names no catalogue part for it
@@ -71,14 +69,19 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 - `MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm` — the lock names no catalogue part for it
 - `Package_DIP:DIP-6_W7.62mm_Socket` — the lock names no catalogue part for it
 - `Resistor_SMD:R_0402_1005Metric` — the lock names no catalogue part for it
-- `Sunlord:L_Sunlord_AMWPH4018_4x4x1.8mm` — the lock names `AMWPH4018S2R2MT`, `C2846183`
 
 ## Measured — compared against a vendor's drawing
 
 One line per PAIR, because the pair is what the gate is keyed on. A footprint appears here as soon as one of its pairs has been measured; any OTHER catalogue part on the same drawing is still unknown and still refuses.
 
 - `Capacitor_SMD:C_0805_2012Metric`
+  - jlcpcb `C15850` — 0 deg
   - jlcpcb `C49678` — 0 deg
+  - jlcpcb `C98190` — 0 deg
+- `Capacitor_SMD:C_1206_3216Metric`
+  - jlcpcb `C170182` — 0 deg
+- `Capacitor_SMD:C_1210_3225Metric`
+  - jlcpcb `C6120014` — 0 deg
 - `Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal`
   - jlcpcb `C295747` — 0 deg
 - `Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal`
@@ -88,6 +91,7 @@ One line per PAIR, because the pair is what the gate is keyed on. A footprint ap
 - `Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal`
   - jlcpcb `C161861` — 0 deg
 - `Fuse:Fuse_1206_3216Metric`
+  - jlcpcb `C17888` — 0 deg
   - jlcpcb `C2803346` — 0 deg
 - `Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm`
   - jlcpcb `C910544` — 270 deg
@@ -97,6 +101,10 @@ One line per PAIR, because the pair is what the gate is keyed on. A footprint ap
   - jlcpcb `C780769` — 270 deg
 - `Resistor_SMD:R_0805_2012Metric`
   - jlcpcb `C149504` — 0 deg
+  - jlcpcb `C17414` — 0 deg
+  - jlcpcb `C17616` — 0 deg
+- `Sunlord:L_Sunlord_AMWPH4018_4x4x1.8mm`
+  - jlcpcb `C2846183` — 0 deg
 - `Syntiant:SPK0641HT4H-1_TopPort_LGA-8_4x3mm`
   - jlcpcb `C5159510` — 180 deg
 

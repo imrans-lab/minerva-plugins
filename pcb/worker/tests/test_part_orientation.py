@@ -10,21 +10,21 @@ footprint drawn 180 out ships a board with the connector facing backwards, and
 every other check in the pipeline passes while it happens.
 
 So this suite is not "does the function return a float". It is the record of
-eleven MEASURED (seed footprint, LCSC part) pairs, and it fails the moment a
+nineteen MEASURED (seed footprint, LCSC part) pairs, and it fails the moment a
 library edit, a re-fetched payload, or a sign flip in the maths moves one of
 them.
 
 THE ORACLE AND WHERE IT CAME FROM
 ---------------------------------
-:data:`ORACLE` below is the offset for each pair. Three of the eleven —
+:data:`ORACLE` below is the offset for each pair. Three of the nineteen —
 ``C265102``, ``C265104``, ``C780769`` — were read by a human off a board
 house's 3D preview of an assembled board BEFORE any of these numbers were
-computed, so the table is not the code grading its own homework; the remaining
-eight were measured and then checked against the same convention.
+computed, so the table is not the code grading its own homework; the rest were
+measured and then checked against the same convention.
 
 Those three are also what pins the SIGN. Offsets of 0 and 180 are unchanged by
-inverting the rotation sense, so a flipped sign is invisible on eight of the
-eleven pairs and turns 270 into 90 on the other three —
+inverting the rotation sense, so a flipped sign is invisible on sixteen of the
+nineteen pairs and turns 270 into 90 on the other three —
 :func:`test_the_rotation_sense_is_pinned_by_the_human_confirmed_pairs` is the
 test that would catch it.
 
@@ -62,8 +62,16 @@ INDEX = json.loads((VENDOR_DIR / "index.json").read_text(encoding="utf-8"))
 ORACLE = {
     # Chip and fuse lands — drawn the same way round by both.
     "C49678": 0,      # C_0805_2012Metric
+    "C15850": 0,      # C_0805_2012Metric
+    "C98190": 0,      # C_0805_2012Metric
+    "C170182": 0,     # C_1206_3216Metric
+    "C6120014": 0,    # C_1210_3225Metric
     "C149504": 0,     # R_0805_2012Metric
+    "C17414": 0,      # R_0805_2012Metric
+    "C17616": 0,      # R_0805_2012Metric
     "C2803346": 0,    # Fuse_1206_3216Metric
+    "C17888": 0,      # Fuse_1206_3216Metric — a 0R resistor on the fuse land
+    "C2846183": 0,    # L_Sunlord_AMWPH4018 4x4x1.8mm
     "C295747": 0,     # JST_PH_S2B-PH-SM4-TB 1x02
     "C161861": 0,     # JST_XH_S4B-XH-SM4-TB 1x04
     # Drawn half a turn from the vendor.
@@ -117,7 +125,7 @@ def test_the_vendor_unit_is_rederived_from_pitches_we_already_know():
     """``VENDOR_UNIT_MM`` is 10 mil. That was a BELIEF about EasyEDA's canvas
     when this module was written, and a wrong scale would not fail loudly — it
     would shrink or stretch every residual and quietly move the land verdict,
-    while leaving all eleven ANGLES correct (a rotation is scale-free). So the
+    while leaving all nineteen ANGLES correct (a rotation is scale-free). So the
     constant is checked against pitches the datasheets state: JST PH is 2.00 mm,
     JST XH is 2.50 mm, and the VQFN-16 is 0.50 mm.
     """
@@ -169,7 +177,7 @@ def test_every_seed_pair_reports_the_expected_verdict(lcsc):
 
 def test_the_rotation_sense_is_pinned_by_the_human_confirmed_pairs():
     """THE SIGN TEST. Inverting the rotation sense leaves 0 and 180 alone and
-    swaps 90 with 270, so it is invisible on eight of the eleven pairs. These
+    swaps 90 with 270, so it is invisible on sixteen of the nineteen pairs. These
     three are the ones a person checked against a board house's 3D preview
     before the code existed, and ``C780769`` is the one whose value is neither
     0 nor 180 — it is the only thing here that can tell a correct convention

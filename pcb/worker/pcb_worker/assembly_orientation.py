@@ -55,8 +55,8 @@ takes the side rather than defaulting to one.
 
 THE TRAP: A WRONG SIGN IS INVISIBLE ON MOST PARTS
 -------------------------------------------------
-``R + 180`` and ``R - 180`` are the same number modulo 360, and nine of the
-eleven pairs measured so far are 0 or 180. A suite assembled only out of those
+``R + 180`` and ``R - 180`` are the same number modulo 360, and seventeen of
+the nineteen pairs measured so far are 0 or 180. A suite assembled only out of those
 passes with EITHER sign on EITHER side, and ships every quarter-turn part a
 quarter turn out. Only a 90 or a 270 can falsify it, which is why
 ``tests/test_assembly_orientation.py`` builds its fixture board around
