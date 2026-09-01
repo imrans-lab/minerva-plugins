@@ -62,7 +62,10 @@ from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import (
     ANCHOR_BASIS_AUTHORED, DiagnosticSeverity, ResolutionSuccess,
 )
-from tests import orientation_corpus
+# The shared corpus orientation statement, autouse in this module: these
+# boards are drawn on this repository's own land patterns, and orientation
+# is measured by test_assembly_orientation.py, not here.
+from tests.orientation_corpus import corpus_orientation  # noqa: F401
 
 BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
 FIXTURE = BOARDS / "assembly_child_rotation.yaml"
@@ -115,15 +118,6 @@ ANCHORS = {
     "U7R_A": (85.0 - 11 * H, 24.0 + 5 * H),
     "U7R_B": (94.0, 59.0),
 }
-
-
-@pytest.fixture(autouse=True)
-def _corpus_orientation(monkeypatch):
-    """The shared corpus orientation statement, installed for the same reason
-    every assembly-emitting suite here installs it: these boards are drawn on
-    this repository's own seed patterns, and orientation is measured by
-    test_assembly_orientation.py, not here."""
-    orientation_corpus.install(monkeypatch)
 
 
 def _compiled():

@@ -2,11 +2,7 @@
 	"declared": [
 		{
 			"footprint": "C_0805",
-			"reason": "An in-repo synthesized fixture land, not a package anyone sells. The seed synthesizer draws it for suites that need real resolvable pads, and its ref is kept deliberately BARE (`C_0805`, never `Capacitor_SMD:C_0805`) precisely so no board buying a real 0805 part can resolve to it \u2014 see NOTICE.md, where the 2026-08-20 rename off the canonical filename records that decision. The purchasable 0805 land is `Capacitor_SMD:C_0805_2012Metric`, which is measured."
-		},
-		{
-			"footprint": "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT",
-			"reason": "A synthetic composite: one drawing standing for a PAIR of 22-position socket strips. A supplier draws a strip, never the pair, so no vendor drawing of this composite exists to measure it against. Should a board buy the strips under their own catalogue numbers, a measured (footprint, part) row for that pair overrides this footprint-wide statement."
+			"reason": "An in-repo synthesized fixture land, not a package anyone sells. The seed synthesizer draws it for suites that need real resolvable pads, and its ref is kept deliberately BARE (`C_0805`, never `Capacitor_SMD:C_0805`) precisely so no board buying a real 0805 part can resolve to it. The purchasable 0805 land is `Capacitor_SMD:C_0805_2012Metric`, which is measured."
 		},
 		{
 			"footprint": "Minerva_Fixture:DAM_MinWeb_2P",
@@ -38,7 +34,7 @@
 		},
 		{
 			"footprint": "R_0805",
-			"reason": "An in-repo synthesized fixture land, not a package anyone sells, and deliberately NOT the official KiCad `R_0805` drawing. Its ref is kept bare (`R_0805`, never `Resistor_SMD:R_0805`) so no board buying a real 0805 part can resolve to it \u2014 see NOTICE.md, where the 2026-08-20 rename off the canonical filename records that decision. The purchasable 0805 land is `Resistor_SMD:R_0805_2012Metric`, which is measured."
+			"reason": "An in-repo synthesized fixture land, not a package anyone sells, and deliberately NOT the official KiCad `R_0805` drawing. Its ref is kept bare (`R_0805`, never `Resistor_SMD:R_0805`) so no board buying a real 0805 part can resolve to it. The purchasable 0805 land is `Resistor_SMD:R_0805_2012Metric`, which is measured."
 		},
 		{
 			"footprint": "TH_TestPoint",

@@ -25,11 +25,13 @@ drawing onto OURS::
     our_drawing = rotate_ccw(vendor_drawing, offset_deg)
 
 CCW-positive is the same sense KiCad and the JLC/KiCad position file use for a
-component's rotation, so the correction a later consumer needs is an ADDITION:
-a part our library draws at ``offset_deg`` relative to vendor canonical, placed
-on the board at rotation ``rho``, must be told to the house as
-``rho + offset_deg``. Stating it any other way inverts the fix on the two
-packages that most need it, so the sense is pinned by
+component's rotation, so a part our library draws at ``offset_deg`` relative to
+vendor canonical, placed TOP-SIDE at rotation ``rho``, must be told to the house
+as ``rho + offset_deg``. This is a LOCAL-frame rotation, so a BOTTOM-side
+placement — which mirrors the local frame before rotating it — subtracts it
+instead; ``assembly_orientation.corrected_rotation`` owns both signs and derives
+them. Stating the sense any other way inverts the fix on the two
+packages that most need it, so it is pinned by
 ``tests/test_part_orientation.py`` against three pairs a human read off a board
 house's 3D preview before any of these numbers were computed.
 

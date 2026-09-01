@@ -3,8 +3,14 @@
 #
 # WHY THIS BOARD EXISTS AND WHY IT LOOKS LIKE THIS
 # ------------------------------------------------
-# The emitted CPL rotation is the placed rotation PLUS the part's measured
-# orientation offset. An inverted sign is INVISIBLE on any part whose offset is
+# Every part here is placed TOP-SIDE, where the emitted CPL rotation is the
+# placed rotation PLUS the part's measured orientation offset. (A bottom
+# placement mirrors the footprint's local frame before rotating it, so it
+# SUBTRACTS the offset instead; that half is proved on one-part boards built in
+# test_assembly_orientation.py rather than on this board, so the emitted bytes
+# below stay a single flat table a reader can check by hand.)
+#
+# An inverted sign is INVISIBLE on any part whose offset is
 # 0 or 180 — R+180 and R-180 are the same number modulo 360 — and nine of the
 # eleven measured pairs are exactly that. A fixture assembled only out of them
 # would pass with the correction subtracting instead of adding, and every

@@ -141,17 +141,26 @@ pair; `pcb/library/part_orientation.json` stores it, keyed on
 applies it to the emitted row:
 
 ```
-emitted rotation = (placed rotation + measured offset) mod 360
+top     emitted rotation = (placed rotation + measured offset) mod 360
+bottom  emitted rotation = (placed rotation - measured offset) mod 360
 ```
 
-**It is an ADDITION.** `offset_deg` is the rotation carrying the VENDOR's
-drawing onto OURS, so our copper on the board is the vendor's drawing turned by
-`placed + offset`, and the file has to say so for the machine to land the part
-on it. Watch this sign: it is INVISIBLE on any part whose offset is 0 or 180
-(`R + 180` and `R - 180` are the same number modulo 360), and nine of the eleven
-pairs measured so far are exactly that. Only a 90 or a 270 can falsify it, which
-is why `worker/tests/test_assembly_orientation.py` is built around the two
-measured 270s and refuses to go green if either is ever re-measured flat.
+**THE SIGN DEPENDS ON THE SIDE.** `offset_deg` is the rotation carrying the
+VENDOR's drawing onto OURS, stated in the footprint's LOCAL frame. On the top
+side our copper is the vendor's drawing turned by `placed + offset`, and the
+file has to say so for the machine to land the part on it. A bottom placement
+MIRRORS the local frame before rotating it, and a mirror conjugates a rotation
+into its inverse (`M·R(a) = R(-a)·M`), so the offset — but not the board-frame
+`placed` angle — flips: the bottom sum SUBTRACTS. That is the same rule
+`geometry.PlacementTransform.angle` and `assembly_anchor.py` already apply to an
+expansion child's rotation.
+
+Watch this sign: it is INVISIBLE on any part whose offset is 0 or 180 (`R + 180`
+and `R - 180` are the same number modulo 360), and nine of the eleven pairs
+measured so far are exactly that. Only a 90 or a 270 can falsify it, which is
+why `worker/tests/test_assembly_orientation.py` is built around the two measured
+270s, asserts them on BOTH sides as hand-derived literals, and refuses to go
+green if either is ever re-measured flat.
 
 The correction is a SEPARATE step from the frame map above, run by
 `assembly_outputs.emit` over the rows `_walk` finished. Two different facts, two
@@ -197,7 +206,11 @@ the count disarms the gate for every part placed on that drawing and ships the
 rotation unmeasured. Declarations are authored in
 `pcb/library/part_orientation_declared.json` — nothing generates them — and
 `worker/tests/test_orientation_coverage.py` requires each one to be a drawing
-this repo synthesized, or a named exception. To close a gap properly, add the
+this repo synthesized, or a named exception. Being synthesized is NECESSARY, not
+sufficient: a synthesized land that stands for parts somebody sells — a drawing
+covering a pair of socket strips, say — is measurable pair by pair, and
+declaring it footprint-wide emits every part bought on it unchecked. To close a
+gap properly, add the
 vendor's package payload for the part to
 `worker/tests/testdata/vendor_footprints/`, pair it in that directory's
 `index.json`, and regenerate.

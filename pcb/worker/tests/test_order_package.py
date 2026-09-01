@@ -69,7 +69,10 @@ from pcb_worker import order_package as op
 from pcb_worker import order_provenance as prov
 from pcb_worker import order_write
 from pcb_worker.compile_board import compile_board
-from tests import orientation_corpus
+# The shared corpus orientation statement, autouse in this module: these
+# boards are drawn on this repository's own land patterns, and orientation
+# is measured by test_assembly_orientation.py, not here.
+from tests.orientation_corpus import corpus_orientation  # noqa: F401
 from pcb_worker.resolved_board import (
     Diagnostic, DiagnosticSeverity, EntityKind, ResolutionSuccess, SourceRef,
 )
@@ -77,16 +80,6 @@ from pcb_worker.resolved_board import (
 SERVICE = "jlcpcb-economic"
 DIALECT_ONLY = "jlc"
 BOARD_NAME = "OrderPkg"
-
-
-@pytest.fixture(autouse=True)
-def _corpus_orientation(monkeypatch):
-    """This suite's boards are drawn on the corpus's own synthetic land
-    patterns, which no vendor draws — so the part-orientation gate would refuse
-    every emission here for pairs that could never have been measured. Declare
-    them, once, from the shared corpus statement; orientation itself is
-    measured by test_assembly_orientation.py."""
-    orientation_corpus.install(monkeypatch)
 
 
 def _board(**overrides) -> dict:

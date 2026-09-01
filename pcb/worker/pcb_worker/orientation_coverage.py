@@ -273,8 +273,10 @@ def _render(report: CoverageReport) -> str:
         "emitter passes such a part's placed rotation through untouched, so the "
         "bar for adding one is that the drawing is genuinely not a purchasable "
         "package — a mounting hole, a fiducial, a test point, silk artwork, a "
-        "DRC coupon fixture, an in-repo synthesized fixture land, or a synthetic "
-        "composite standing for several physical parts.\n")
+        "DRC coupon fixture, or an in-repo synthesized fixture land. A drawing "
+        "that stands for several physical parts is NOT one of them: the parts "
+        "are bought, so the land is measurable pair by pair, and a "
+        "footprint-wide declaration would emit every one of them unchecked.\n")
     if report.declared:
         for entry in report.declared:
             out.append(f"- `{entry.footprint}` — {entry.reason}")

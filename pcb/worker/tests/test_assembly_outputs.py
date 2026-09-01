@@ -54,20 +54,13 @@ import yaml
 from pcb_worker import assembly_outputs as ao
 from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
-from tests import orientation_corpus
+# The shared corpus orientation statement, autouse in this module: these
+# boards are drawn on this repository's own land patterns, and orientation
+# is measured by test_assembly_orientation.py, not here.
+from tests.orientation_corpus import corpus_orientation  # noqa: F401
 
 BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
 FIXTURE = BOARDS / "assembly_resolved.yaml"
-
-
-@pytest.fixture(autouse=True)
-def _corpus_orientation(monkeypatch):
-    """This suite's boards are drawn on the corpus's own synthetic land
-    patterns, which no vendor draws — so the part-orientation gate would refuse
-    every emission here for pairs that could never have been measured. Declare
-    them, once, from the shared corpus statement; orientation itself is
-    measured by test_assembly_orientation.py."""
-    orientation_corpus.install(monkeypatch)
 
 
 UNCOMPILABLE_FIXTURE = BOARDS / "assembly_fixture.yaml"

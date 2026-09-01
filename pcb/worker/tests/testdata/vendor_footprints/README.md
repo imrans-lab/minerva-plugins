@@ -42,10 +42,13 @@ diffs meaningless.
 
 ## Provenance and refresh
 
-Fetched 2026-09-01 from the LCSC/EasyEDA component API, cached, then trimmed
-into this directory. To refresh a part, re-fetch its component document and
-apply the same trim; then re-run `python3 pcb/scripts/gen_part_orientation.py`
-and **read the diff**, then re-run the orientation suites before committing.
+Each payload was fetched from the LCSC/EasyEDA component API, cached, then
+trimmed into this directory. WHEN is deliberately not written down here: a date
+in a checked-in artifact makes every refresh a diff about the date rather than
+about the drawing, and `git log` answers it better. To refresh a part, re-fetch
+its component document and apply the same trim; then re-run
+`python3 pcb/scripts/gen_part_orientation.py` and **read the diff**, then re-run
+the orientation suites before committing.
 A changed offset is not a fixture problem to be blessed away — it means either
 the supplier redrew the package or our footprint changed, and both need a human
 to look at the board before the next order goes out.

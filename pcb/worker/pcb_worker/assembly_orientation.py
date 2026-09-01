@@ -12,41 +12,57 @@ VENDOR's. Those are two different facts, so they get two different steps: the
 frame map stays untouched in ``assembly_outputs._walk``, and the per-part
 correction happens here, once, over the finished rows.
 
-THE SIGN. ADDITION, AND HERE IS THE DERIVATION
-----------------------------------------------
+THE SIGN. IT DEPENDS ON THE SIDE, AND HERE IS THE DERIVATION
+------------------------------------------------------------
 ``offset_deg`` from :mod:`orientation_ledger` is the rotation that carries the
 VENDOR's drawing onto OURS, in the sense :mod:`part_orientation` pins::
 
     our_drawing = rotate(vendor_drawing, offset_deg)
 
-Our footprint is then PLACED on the board at rotation ``rho``, in the same
-rotational sense (the board frame and the ``.kicad_mod`` frame are both Y-DOWN,
-and the emitted CPL rotation is that same angle read in the Y-UP emitted frame
--- which is why ``assembly_outputs`` can emit it verbatim). So the copper the
-part has to land on is::
+Write ``O`` for our drawing, ``V`` for the vendor's, ``R(a)`` for a rotation by
+``a``, ``M`` for the mirror a bottom-side placement applies to local Y (which is
+what ``geometry.PlacementTransform.point`` does before it rotates), and ``rho``
+for the placed rotation. Then ``O = R(theta)·V`` with ``theta = offset_deg``.
 
-    board_copper = rotate(our_drawing, rho)
-                 = rotate(rotate(vendor_drawing, offset_deg), rho)
-                 = rotate(vendor_drawing, rho + offset_deg)
+TOP. Our copper on the board, and what the machine puts there for the ``R`` the
+file states::
 
-The machine puts the part down as ``rotate(vendor_drawing, R)`` for the ``R``
-the file states. Equating the two gives ``R = rho + offset_deg``: an ADDITION.
-:func:`corrected_rotation` is the only place that sum is written.
+    copper  = R(rho)·O = R(rho)·R(theta)·V = R(rho + theta)·V
+    machine = R(R)·V
+    =>  R = rho + theta          an ADDITION
 
-Both sides of the board compose the same way. A bottom placement is the mirror
-of the same rotation, and the mirror is applied to the vendor's part and to our
-copper ALIKE, so it cancels out of the equality above and leaves the sum
-unchanged. That is why this step is indifferent to ``side``.
+BOTTOM. The placement mirrors before it rotates, and so does the machine::
+
+    copper  = R(rho)·M·O = R(rho)·M·R(theta)·V
+    machine = R(R)·M·V
+
+A planar mirror CONJUGATES a rotation into its inverse — ``M·R(theta) =
+R(-theta)·M`` — so the copper regroups as ``R(rho - theta)·M·V`` and::
+
+    =>  R = rho - theta          a SUBTRACTION
+
+The mirror does NOT cancel. It cancels for a rotation stated in the BOARD frame,
+which ``rho`` is; ``theta`` is stated in the footprint's LOCAL frame, inside the
+mirror, and a local rotation under a mirrored placement always contributes with
+the opposite sign. This is not a new convention: it is exactly the rule this
+repo already applies to an expansion child's ``rotation_deg`` in
+``geometry.PlacementTransform.angle`` and ``assembly_anchor`` — bottom
+subtracts, top adds — and a vendor offset is a local-frame rotation just as a
+child rotation is.
+
+:func:`corrected_rotation` is the only place either sign is written, and it
+takes the side rather than defaulting to one.
 
 THE TRAP: A WRONG SIGN IS INVISIBLE ON MOST PARTS
 -------------------------------------------------
 ``R + 180`` and ``R - 180`` are the same number modulo 360, and nine of the
 eleven pairs measured so far are 0 or 180. A suite assembled only out of those
-passes with the sign inverted and ships every quarter-turn part a quarter turn
-out. Only a 90 or a 270 can falsify it, which is why
+passes with EITHER sign on EITHER side, and ships every quarter-turn part a
+quarter turn out. Only a 90 or a 270 can falsify it, which is why
 ``tests/test_assembly_orientation.py`` builds its fixture board around
 ``TSOT-23-6``/``C780769`` and ``VQFN-16``/``C910544`` -- the two measured 270s
--- and asserts their emitted numbers rather than only the aligned parts'.
+-- and asserts their emitted numbers, on BOTH sides, as hand-derived literals
+rather than as the expression this module computes.
 
 THE JOIN, AND WHAT "BOUGHT AS A CATALOGUE PART" MEANS
 -----------------------------------------------------
@@ -74,7 +90,8 @@ there is nothing a measurement could ever have been made against.
 THE THREE STATES, AND WHAT EACH ONE EMITS
 -----------------------------------------
 ``measured``, offset stated
-    Add it. This is the whole point.
+    Apply it with the sign the placement's SIDE calls for. This is the whole
+    point.
 
 ``measured``, offset ``None``
     We looked and the drawings did not settle it (``ambiguous``,
@@ -158,14 +175,40 @@ def default_ledger() -> ol.OrientationLedger:
 # ---------------------------------------------------------------------------
 
 
-def corrected_rotation(placed_deg: float, offset_deg: int) -> float:
-    """THE ONE PLACE THE OFFSET IS APPLIED: ``(placed + offset) mod 360``.
+#: The two board sides, spelled the way ``CplRow.side`` carries them.
+SIDE_TOP = "top"
+SIDE_BOTTOM = "bottom"
 
-    An ADDITION -- the derivation is in the module docstring. Normalized into
-    ``[0, 360)`` to match what ``PhysicalPlacement.rotation_deg`` already
-    guarantees, so a corrected row is indistinguishable in shape from an
+
+def corrected_rotation(placed_deg: float, offset_deg: int, side: str) -> float:
+    """THE ONE PLACE THE OFFSET IS APPLIED, and it is SIDE-DEPENDENT::
+
+        top     (placed + offset) mod 360
+        bottom  (placed - offset) mod 360
+
+    The offset is a rotation of our drawing in the footprint's LOCAL frame, and
+    a bottom placement mirrors that frame before rotating it -- a mirror
+    conjugates a rotation into its inverse, so the same offset contributes the
+    other way round. The full derivation is in the module docstring; the same
+    rule governs an expansion child's rotation in
+    ``geometry.PlacementTransform.angle``.
+
+    ``side`` is REQUIRED and is checked rather than defaulted: a caller that
+    forgot which side it holds would otherwise silently get the top rule, which
+    is exactly the half-turn error this module exists to prevent.
+
+    Normalized into ``[0, 360)`` to match what ``PhysicalPlacement.rotation_deg``
+    already guarantees, so a corrected row is indistinguishable in shape from an
     uncorrected one."""
-    return (float(placed_deg) + float(offset_deg)) % 360.0
+    if side == SIDE_TOP:
+        signed = float(offset_deg)
+    elif side == SIDE_BOTTOM:
+        signed = -float(offset_deg)
+    else:
+        raise ValueError(
+            f"corrected_rotation needs the board side to know which way the "
+            f"offset composes; got {side!r}, not {SIDE_TOP!r} or {SIDE_BOTTOM!r}")
+    return (float(placed_deg) + signed) % 360.0
 
 
 # ---------------------------------------------------------------------------
@@ -236,5 +279,5 @@ def apply(rows: Sequence, profile,
             raise _refuse_undecided(row, house, record)
         out.append(replace(
             row, rotation_deg=corrected_rotation(row.rotation_deg,
-                                                 record.offset_deg)))
+                                                 record.offset_deg, row.side)))
     return tuple(out)

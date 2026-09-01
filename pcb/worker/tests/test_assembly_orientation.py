@@ -6,19 +6,37 @@ WHAT IS ACTUALLY BEING PROVED, and why it needs a particular fixture
 A pick-and-place machine reads the position file's rotation against the
 VENDOR's canonical drawing of the part. Our footprint may be drawn turned
 relative to that drawing, and the emitted rotation therefore has to carry the
-measured offset between the two. The sum is an ADDITION::
+measured offset between the two. The sum DEPENDS ON THE SIDE, because the
+offset is a rotation of our drawing in the footprint's LOCAL frame and a bottom
+placement mirrors that frame before rotating it::
 
-    our_drawing   = rotate(vendor_drawing, offset)
-    board_copper  = rotate(our_drawing, placed) = rotate(vendor_drawing, placed + offset)
-    machine puts  = rotate(vendor_drawing, emitted)
-    therefore       emitted = placed + offset
+    our_drawing = R(offset)·vendor              (part_orientation's convention)
+
+    TOP     copper = R(placed)·our = R(placed + offset)·vendor
+            machine puts R(emitted)·vendor   =>  emitted = placed + offset
+
+    BOTTOM  copper = R(placed)·M·our = R(placed)·M·R(offset)·vendor
+            and M·R(offset) = R(-offset)·M     (a mirror inverts a rotation)
+                           = R(placed - offset)·M·vendor
+            machine puts R(emitted)·M·vendor =>  emitted = placed - offset
+
+The mirror does not cancel: it cancels for ``placed``, which is a BOARD-frame
+angle, and inverts ``offset``, which is not. The same rule already governs an
+expansion child's rotation in ``geometry.PlacementTransform.angle`` and in
+``assembly_anchor`` — bottom subtracts.
 
 THE TRAP THIS FILE IS BUILT AROUND. An inverted sign is INVISIBLE on every part
 whose offset is 0 or 180, because ``R + 180`` and ``R - 180`` are the same
 number modulo 360 — and nine of the eleven pairs the shipped ledger has
 measured are exactly 0 or 180. A suite assembled only out of those passes with
-the correction SUBTRACTING and ships every quarter-turn part a quarter turn
-out.
+the correction SUBTRACTING where it should add, or adding where it should
+subtract, and ships every quarter-turn part a quarter turn out.
+
+AND AN ASSERTION SPELLED AS THE CODE'S OWN EXPRESSION CANNOT FALSIFY EITHER
+SIGN. ``assert emitted == (placed + offset) % 360`` re-runs the arithmetic
+under test; it agrees with whatever the module does. So every side-sensitive
+number below is a HAND-DERIVED LITERAL, with the numbers the mis-compositions
+would have produced written down beside it.
 
 So the fixture is built around the two measured 270s — ``TSOT-23-6``/``C780769``
 and ``VQFN-16-1EP_3x3mm``/``C910544`` — and two tests assert their emitted
@@ -216,28 +234,107 @@ def test_the_second_quarter_turn_part_confirms_the_sign_independently(
     assert row.rotation_deg != pytest.approx((placed - offset) % 360)
 
 
-def test_the_bottom_side_composes_the_same_sum(shipped):
-    """A bottom placement is the MIRROR of the same rotation, and the mirror is
-    applied to the vendor's part and to our copper alike — so it cancels and
-    the sum is unchanged. Asserted rather than assumed: a side-dependent sign
-    would be invisible on every top-only fixture."""
-    footprint, part = QUARTER_TURN_PAIRS[0]
-    offset = shipped.lookup(footprint, HOUSE, part).offset_deg
-    board = _compiled(_one_part_board(footprint, part, rotation_deg=30,
+#: The bottom-side oracle, DERIVED BY HAND from the composition in this file's
+#: header and written down as literals — never as the expression the module
+#: evaluates. Each row is ``(pair index, placed, expected, {name: what that
+#: mis-composition would have emitted})``.
+#:
+#: Both pairs measure 270, and both placed angles are chosen so that all four
+#: candidate compositions land on four DIFFERENT numbers. At a placed 0, 90 or
+#: 180 two of them collide and the case stops separating them.
+BOTTOM_CASES = (
+    # TSOT-23-6/C780769, offset 270, placed 30:  30 - 270 = -240 = 120
+    (0, 30.0, 120.0, {"placed + offset": 300.0,
+                      "offset - placed": 240.0,
+                      "-(placed + offset)": 60.0}),
+    # VQFN-16/C910544, offset 270, placed 45:    45 - 270 = -225 = 135
+    (1, 45.0, 135.0, {"placed + offset": 315.0,
+                      "offset - placed": 225.0,
+                      "-(placed + offset)": 45.0}),
+)
+
+
+@pytest.mark.parametrize("index,placed,expected,wrong", BOTTOM_CASES)
+def test_a_bottom_side_quarter_turn_is_the_placed_rotation_MINUS_the_offset(
+        shipped, index, placed, expected, wrong):
+    """A bottom placement mirrors the footprint's local frame before rotating
+    it, and a mirror conjugates a rotation into its inverse — so the LOCAL
+    rotation the vendor offset is contributes with the opposite sign. The
+    board-frame ``placed`` angle is unaffected; only the offset flips.
+
+    The expected number is hand-derived and written as a literal, and every
+    mis-composition's number is written beside it and asserted DIFFERENT. An
+    assertion spelled ``(placed + offset) % 360`` would have been the module's
+    own arithmetic and would have agreed with an inverted sign — which is how
+    the addition survived on this side to begin with."""
+    footprint, part = QUARTER_TURN_PAIRS[index]
+    board = _compiled(_one_part_board(footprint, part, rotation_deg=placed,
                                       layer="bottom"))
     row = _rows(board)["U1"]
     assert row.side == "bottom"
-    assert row.rotation_deg == pytest.approx((30.0 + offset) % 360)
+    assert row.rotation_deg == pytest.approx(expected), (
+        f"a bottom-side {footprint} placed at {placed} must be emitted at "
+        f"{expected}; got {row.rotation_deg}")
+    for name, number in wrong.items():
+        assert row.rotation_deg != pytest.approx(number), (
+            f"the emitted rotation is `{name}` — a part drawn a quarter turn "
+            f"off the vendor's drawing will be assembled turned")
+
+
+def test_the_two_sides_do_not_emit_the_same_number_for_the_same_placement(
+        shipped):
+    """THE PAIR THAT PROVES THE SIDE IS READ AT ALL.
+
+    Same footprint, same catalogue number, same placed 30 — only the side
+    differs. Top emits 300 and bottom emits 120, both hand-derived above. A
+    module that ignored ``side`` would emit one number twice, and no single
+    one-sided assertion can see that."""
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    emitted = {}
+    for layer in ("top", "bottom"):
+        board = _compiled(_one_part_board(footprint, part, rotation_deg=30,
+                                          layer=layer))
+        emitted[layer] = _rows(board)["U1"].rotation_deg
+    assert emitted["top"] == pytest.approx(300.0)
+    assert emitted["bottom"] == pytest.approx(120.0)
+
+
+def test_a_flat_offset_is_the_one_case_where_the_two_sides_agree():
+    """The reason the sign hid for so long, pinned so it reads as a KNOWN
+    blind spot rather than as evidence.
+
+    At an offset of 0 both sides emit the placed angle, and at 180 both emit
+    the same number because ``+180`` and ``-180`` are congruent mod 360. Nine
+    of the eleven measured pairs are exactly 0 or 180, so a corpus built only
+    out of them proves nothing about the side at all."""
+    for offset in (0, 180):
+        assert (aor.corrected_rotation(30, offset, aor.SIDE_TOP)
+                == pytest.approx(aor.corrected_rotation(30, offset,
+                                                        aor.SIDE_BOTTOM)))
+    assert aor.corrected_rotation(30, 90, aor.SIDE_TOP) == pytest.approx(120.0)
+    assert aor.corrected_rotation(30, 90, aor.SIDE_BOTTOM) == pytest.approx(300.0)
+
+
+def test_the_correction_refuses_a_side_it_does_not_recognise():
+    """``side`` is required and checked rather than defaulted. A caller that
+    lost track of which side it holds must stop, not silently take the top
+    rule — that default is the half-turn this module exists to prevent."""
+    with pytest.raises(ValueError) as excinfo:
+        aor.corrected_rotation(30, 270, "Bottom")
+    assert "side" in str(excinfo.value)
 
 
 def test_the_sum_wraps_rather_than_running_past_a_full_turn():
-    """``corrected_rotation`` is the ONE place the sum is written, and the
+    """``corrected_rotation`` is the ONE place either sign is written, and the
     emitted angle stays in [0, 360) the way ``PhysicalPlacement`` guarantees
     the placed one does — so a corrected row is indistinguishable in shape from
     an uncorrected one."""
-    assert aor.corrected_rotation(180, 270) == pytest.approx(90.0)
-    assert aor.corrected_rotation(0, 0) == pytest.approx(0.0)
-    assert 0.0 <= aor.corrected_rotation(359.5, 270) < 360.0
+    assert aor.corrected_rotation(180, 270, aor.SIDE_TOP) == pytest.approx(90.0)
+    assert aor.corrected_rotation(0, 0, aor.SIDE_TOP) == pytest.approx(0.0)
+    assert 0.0 <= aor.corrected_rotation(359.5, 270, aor.SIDE_TOP) < 360.0
+    # The bottom rule underflows instead of overflowing, and wraps the same way.
+    assert aor.corrected_rotation(30, 270, aor.SIDE_BOTTOM) == pytest.approx(120.0)
+    assert 0.0 <= aor.corrected_rotation(0.5, 270, aor.SIDE_BOTTOM) < 360.0
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,10 @@ import pytest
 import yaml
 
 from pcb_worker.methods import handle_request
-from tests import orientation_corpus
+# The shared corpus orientation statement, autouse in this module: these
+# boards are drawn on this repository's own land patterns, and orientation
+# is measured by test_assembly_orientation.py, not here.
+from tests.orientation_corpus import corpus_orientation  # noqa: F401
 
 SPIKE_BOARD = Path(__file__).resolve().parents[2] / "spikes" / "gerber" / "board.yaml"
 FIXTURE_LIB = str(Path(__file__).resolve().parent / "testdata" / "fixture_lib")
@@ -334,16 +337,6 @@ def test_check_bom_footprint_found_and_suggestions_with_lib_dir(board_yaml):
 
 ASSEMBLY_BOARD = (Path(__file__).resolve().parent / "testdata" / "assembly_boards"
                   / "assembly_resolved.yaml")
-
-
-@pytest.fixture(autouse=True)
-def _corpus_orientation(monkeypatch):
-    """This suite emits assembly outputs from boards drawn on the corpus's own
-    synthetic land patterns, which no vendor draws — so the part-orientation
-    gate would refuse every emission here for pairs that could never have been
-    measured. Declare them, once, from the shared corpus statement; orientation
-    itself is measured by test_assembly_orientation.py."""
-    orientation_corpus.install(monkeypatch)
 
 
 # Its uncompilable twin: pins offset from their library pads, a footprint in no

@@ -748,7 +748,7 @@ them:
 |---|---|---|
 | unknown | **no row** — `lookup()` returns `None` | refuse: nobody has ever measured this pair, and shipping 0 for it is the defect the ledger exists to stop |
 | measured | a row with `offset_deg` an int (**including `0`**) or `None` where the drawings did not settle the angle | apply the offset, or refuse on `offset_deg is None` |
-| no reference | a row with `verdict: no_reference` and `offset_deg: null` | pass: there is nothing to compare against — a mounting hole, a test point, a fiducial, a coupon fixture, a synthetic composite, or a part whose vendor ships no package drawing |
+| no reference | a row with `verdict: no_reference` and `offset_deg: null` | pass: there is nothing to compare against — a mounting hole, a test point, a fiducial, a coupon fixture, or a part whose vendor ships no package drawing |
 
 "Never measured" and "measured, and the answer was zero" are therefore
 different things at the file level, not just by convention.

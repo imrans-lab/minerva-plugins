@@ -197,10 +197,13 @@ class OrientationRecord:
     """What is known about one pair (or, declared-only, one footprint).
 
     ``offset_deg`` is the CCW rotation carrying the VENDOR's drawing onto OURS,
-    the sense ``part_orientation`` pins — so the correction a consumer applies
-    is an ADDITION to the placed rotation. It is an int only where the angle
-    was decided; ``None`` everywhere else, including for every ``no_reference``
-    row. Nothing in this module ever defaults it to 0.
+    the sense ``part_orientation`` pins. It is a rotation in the footprint's
+    LOCAL frame, so a consumer ADDS it to a top-side placed rotation and
+    SUBTRACTS it from a bottom-side one — see
+    ``assembly_orientation.corrected_rotation``, which is the only place either
+    sign is written. It is an int only where the angle was decided; ``None``
+    everywhere else, including for every ``no_reference`` row. Nothing in this
+    module ever defaults it to 0.
     """
 
     footprint: str

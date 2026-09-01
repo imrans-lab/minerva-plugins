@@ -27,8 +27,8 @@ drawing, which is far worse than the gap.
 | state | footprints |
 | --- | --- |
 | measured | 11 |
-| declared no-reference | 11 |
-| **unknown** | **20** |
+| declared no-reference | 10 |
+| **unknown** | **21** |
 | total in the acquisition lock | 42 |
 
 ## UNKNOWN — nothing has ever measured this drawing
@@ -49,6 +49,7 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 - `Diode_SMD:D_SMA` — the lock names no catalogue part for it
 - `EVP-ASAC1A:SW_EVP-ASAC1A` — the lock names no catalogue part for it
 - `Espressif:ESP32-S3-DevKitC` — the lock names no catalogue part for it
+- `Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT` — the lock names `C41376161`, `HC-PM254-8.5H-1x22P`
 - `INMP441:INMP441_I2S_2x3_P2.54mm` — the lock names no catalogue part for it
 - `Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm` — the lock names no catalogue part for it
 - `MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm` — the lock names no catalogue part for it
@@ -83,10 +84,9 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 
 ## Declared no-reference — nothing orderable is drawn like this
 
-A human statement that no vendor sells an oriented part drawn as this land pattern, for ANY catalogue number. These carry no offset and the emitter passes such a part's placed rotation through untouched, so the bar for adding one is that the drawing is genuinely not a purchasable package — a mounting hole, a fiducial, a test point, silk artwork, a DRC coupon fixture, an in-repo synthesized fixture land, or a synthetic composite standing for several physical parts.
+A human statement that no vendor sells an oriented part drawn as this land pattern, for ANY catalogue number. These carry no offset and the emitter passes such a part's placed rotation through untouched, so the bar for adding one is that the drawing is genuinely not a purchasable package — a mounting hole, a fiducial, a test point, silk artwork, a DRC coupon fixture, or an in-repo synthesized fixture land. A drawing that stands for several physical parts is NOT one of them: the parts are bought, so the land is measurable pair by pair, and a footprint-wide declaration would emit every one of them unchecked.
 
-- `C_0805` — An in-repo synthesized fixture land, not a package anyone sells. The seed synthesizer draws it for suites that need real resolvable pads, and its ref is kept deliberately BARE (`C_0805`, never `Capacitor_SMD:C_0805`) precisely so no board buying a real 0805 part can resolve to it — see NOTICE.md, where the 2026-08-20 rename off the canonical filename records that decision. The purchasable 0805 land is `Capacitor_SMD:C_0805_2012Metric`, which is measured.
-- `Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT` — A synthetic composite: one drawing standing for a PAIR of 22-position socket strips. A supplier draws a strip, never the pair, so no vendor drawing of this composite exists to measure it against. Should a board buy the strips under their own catalogue numbers, a measured (footprint, part) row for that pair overrides this footprint-wide statement.
+- `C_0805` — An in-repo synthesized fixture land, not a package anyone sells. The seed synthesizer draws it for suites that need real resolvable pads, and its ref is kept deliberately BARE (`C_0805`, never `Capacitor_SMD:C_0805`) precisely so no board buying a real 0805 part can resolve to it. The purchasable 0805 land is `Capacitor_SMD:C_0805_2012Metric`, which is measured.
 - `Minerva_Fixture:DAM_MinWeb_2P` — A DRC coupon fixture: a deliberate minimum-web solder-mask dam, drawn to be measured by the process check. Nothing orderable corresponds to it.
 - `Minerva_Fixture:FID_Circle_1mm` — A fiducial: bare copper the placement machine sights on. Board furniture, not a purchasable part, so there is nothing to compare our drawing with.
 - `Minerva_Fixture:LOGO_Owl_TestCoupon` — Silkscreen artwork on the fab coupon. It has lands only incidentally and is not bought from anyone.
@@ -94,7 +94,7 @@ A human statement that no vendor sells an oriented part drawn as this land patte
 - `Minerva_Fixture:TP_MinAnnular_0p6` — A DRC coupon fixture: a minimum-annular-ring test point drawn to be measured by the process check. Nothing orderable corresponds to it.
 - `Minerva_Fixture:TXT_CouponRev` — Silkscreen revision text on the fab coupon. Artwork, not a part.
 - `MountingHole:MountingHole_3.2mm_M3` — A plated M3 hole, not a part. Nothing is ever placed here, so there is no pick-and-place rotation to correct and no vendor drawing to correct it against.
-- `R_0805` — An in-repo synthesized fixture land, not a package anyone sells, and deliberately NOT the official KiCad `R_0805` drawing. Its ref is kept bare (`R_0805`, never `Resistor_SMD:R_0805`) so no board buying a real 0805 part can resolve to it — see NOTICE.md, where the 2026-08-20 rename off the canonical filename records that decision. The purchasable 0805 land is `Resistor_SMD:R_0805_2012Metric`, which is measured.
+- `R_0805` — An in-repo synthesized fixture land, not a package anyone sells, and deliberately NOT the official KiCad `R_0805` drawing. Its ref is kept bare (`R_0805`, never `Resistor_SMD:R_0805`) so no board buying a real 0805 part can resolve to it. The purchasable 0805 land is `Resistor_SMD:R_0805_2012Metric`, which is measured.
 - `TH_TestPoint` — A probe pad. It is etched and never populated, so no assembly house ever orients it and no supplier draws it.
 
 ## Measured but undecided — covered, and still refused
