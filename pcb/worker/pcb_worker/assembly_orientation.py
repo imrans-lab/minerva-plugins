@@ -93,24 +93,26 @@ THE THREE STATES, AND WHAT EACH ONE EMITS
     Apply it with the sign the placement's SIDE calls for. This is the whole
     point.
 
-``measured``, offset ``None``
-    We looked and the drawings did not settle it (``ambiguous``,
-    ``insufficient_overlap``). REFUSED (:data:`CODE_UNDECIDED`). A measurement
-    that could not choose is not a licence to emit zero.
-
-``measured``, offset stated, LANDS DISAGREE
-    A ``geometry_mismatch``: the angle came out, and the two drawings are not
-    the same land pattern. REFUSED (:data:`CODE_MISMATCH`). The angle is real —
-    that separation is why the two axes are reported apart — but it is the
-    angle between OUR drawing and a drawing of SOMETHING ELSE. The measurement
-    says in so many words "check the part number before trusting the pairing",
-    and the commonest way to get here is a BOM with the wrong catalogue number
-    in it: an accidentally paired part fits its own angle perfectly and is
-    still the wrong part. Applying that offset would turn a detected mispairing
-    into a TRUSTED production orientation, which is a worse outcome than the
-    unmeasured pair this module was written for — there, nobody claimed to
-    know. So the pair is measured, the row is kept for a reader, and the ORDER
+``measured``, LANDS DISAGREE (offset stated or not)
+    A ``geometry_mismatch``: the two drawings are not the same land pattern.
+    REFUSED (:data:`CODE_MISMATCH`), on the LAND axis, whether or not an angle
+    also came out. Where one did it is real — that separation is why the two
+    axes are reported apart — but it is the angle between OUR drawing and a
+    drawing of SOMETHING ELSE, and applying it would turn a detected
+    mispairing into a TRUSTED production orientation, a worse outcome than the
+    unmeasured pair this module was written for: there, nobody claimed to know.
+    Where no angle came out either, the pads still belong to a different part.
+    Both shapes send the reader to the same first check — the catalogue number,
+    which is the commonest way to reach this verdict — so both wear the same
+    code. So the pair is measured, the row is kept for a reader, and the ORDER
     stops.
+
+``measured``, offset ``None``, lands not disputed
+    We looked and the drawings did not settle the angle (``ambiguous``,
+    ``insufficient_overlap``). REFUSED (:data:`CODE_UNDECIDED`). A measurement
+    that could not choose is not a licence to emit zero. This is the ONLY state
+    whose refusal asks for a re-measurement of the pair as it stands, which is
+    why a mismatch never lands here however undecided its angle.
 
 ``no_reference``
     There is nothing to measure AGAINST -- a mounting hole, a fiducial, a test
@@ -129,21 +131,19 @@ THE THREE STATES, AND WHAT EACH ONE EMITS
 WHERE THE REFUSAL IS SPENT — AT THE SHIPPING ARTIFACT, NOT AT THE WALK
 ----------------------------------------------------------------------
 An unknown rotation is only dangerous once it is in something a manufacturer
-acts on. :func:`correct` therefore RETURNS its refusals beside the rows, and
-``assembly_outputs`` raises them at the artifacts that reach a board house —
-the position file, the BOM and the order package
-(``assembly_outputs.require_shippable``). ``assembly_outputs.emit`` itself, the
-one walk those artifacts are all built from, no longer raises: an emission is
-also what a local preview, an anchor check and a paste matrix are read from,
-and none of those is handed to anybody.
+acts on. NOTHING IN THIS MODULE RAISES: :func:`correct` RETURNS its refusals
+beside the rows, and ``assembly_outputs.require_shippable`` raises them at the
+artifacts that reach a board house. That is a single raising boundary on
+purpose — a second way to spend these refusals would be a second definition of
+"reaches a board house", and only one of the two would stay in step with the
+call graph. ``assembly_outputs.emit``, the one walk those artifacts are all
+built from, does not raise either: an emission is also what a local preview, an
+anchor check and a paste matrix are read from, and none of those is handed to
+anybody.
 
-THE ASYMMETRY DECIDES EVERY UNCLEAR CASE THE OTHER WAY. Over-refusing costs a
-loud stop somebody clears in a minute; under-refusing costs a part soldered
-down turned on a board that is already made, which no 3D render reveals. So
-the BOM refuses too even though it carries no rotation column: it is ordered
-alongside the position file, and a house told to buy parts nobody could place
-has been told something false. Anything that reaches a board house refuses;
-only what stays on this machine does not.
+Which artifacts are in that shipping set, and why the BOM is one of them
+despite carrying no rotation column, is stated once at
+``assembly_outputs.require_shippable``.
 """
 
 from __future__ import annotations
@@ -281,16 +281,32 @@ def _refuse_undecided(row, house: str, record) -> AssemblyOrientationError:
 
 
 def _refuse_mismatch(row, house: str, record) -> AssemblyOrientationError:
+    """The lands disagree — the refusal that points at the PART NUMBER.
+
+    The angle axis is free here: a mismatch may have settled an angle or may
+    have separated no angle at all, and the sentence says which, because "we
+    measured 90 and distrust it" and "no angle even came out" send a reader to
+    different second checks. What does NOT change is the first check, which is
+    the catalogue number.
+    """
+    found = ("settled the angle but found the two drawings are NOT THE SAME "
+             "LAND PATTERN"
+             if record.offset_deg is not None else
+             "found the two drawings are NOT THE SAME LAND PATTERN at any "
+             "angle, and separated no angle either")
+    number = ("The offset it states is the angle between our drawing and a "
+              "drawing of something else, so applying it would turn a detected "
+              "mispairing into a trusted production rotation. "
+              if record.offset_deg is not None else
+              "It states no offset, and the pads that would have decided one "
+              "belong to a different part. ")
     return AssemblyOrientationError(
         CODE_MISMATCH,
         f"component {row.ref!r} is bought as catalogue part {row.house_part!r} "
         f"from {house!r} on footprint {row.footprint_ref!r}, and the measurement "
-        f"of that pair settled the angle but found the two drawings are NOT THE "
-        f"SAME LAND PATTERN (verdict {record.verdict!r}"
+        f"of that pair {found} (verdict {record.verdict!r}"
         + (f": {record.detail}" if record.detail else "")
-        + f"). The offset it states is the angle between our drawing and a "
-        f"drawing of something else, so applying it would turn a detected "
-        f"mispairing into a trusted production rotation. Check the catalogue "
+        + f"). {number}Check the catalogue "
         f"number on this component first — a wrong part number is the "
         f"commonest way to reach this verdict — then either correct it or "
         f"correct whichever of the two drawings is wrong and re-measure; "
@@ -307,11 +323,10 @@ def correct(rows: Sequence, profile,
     to the SHIPPING ARTIFACT, not to the walk. A position file, a BOM and an
     order package all reach a manufacturer, and every one of them must stop; a
     preview drawn for a human, an anchor check, a paste matrix and a coupon
-    board are read on this machine and stop nothing. Raising here made the walk
-    the boundary, which put the refusal in front of every reader as well as
-    every buyer. :func:`apply` is the raising fold, and
-    ``assembly_outputs.require_shippable`` is where a file-producing caller
-    spends it.
+    board are read on this machine and stop nothing. Raising here would make
+    the walk the boundary, which puts the refusal in front of every reader as
+    well as every buyer. ``assembly_outputs.require_shippable`` is where a
+    file-producing caller spends them.
 
     A row whose pair could not be corrected comes back with its PLACED rotation
     untouched and its refusal in the second tuple. That is not a fallback to
@@ -352,34 +367,21 @@ def correct(rows: Sequence, profile,
         if state == ol.STATE_NO_REFERENCE:
             out.append(row)  # nothing to correct against, and never will be
             continue
-        if record.offset_deg is None:
-            out.append(row)
-            refusals.append(_refuse_undecided(row, house, record))
+        if ol.applies_offset(record.offset_deg is not None, record.lands_agree):
+            out.append(replace(
+                row, rotation_deg=corrected_rotation(row.rotation_deg,
+                                                     record.offset_deg,
+                                                     row.side)))
             continue
-        # THE OFFSET IS ONLY TRUSTWORTHY IF IT IS AN OFFSET BETWEEN THE SAME
-        # TWO PARTS. `lands_agree` is the second axis, and it is checked
-        # POSITIVELY: anything but a stated agreement stops here, so a row that
-        # simply omits the answer cannot pass by defaulting.
-        if record.lands_agree is not True:
-            out.append(row)
-            refusals.append(_refuse_mismatch(row, house, record))
-            continue
-        out.append(replace(
-            row, rotation_deg=corrected_rotation(row.rotation_deg,
-                                                 record.offset_deg, row.side)))
+        out.append(row)
+        # WHICH REFUSAL A READER GETS IS DECIDED BY WHICH AXIS FAILED, and the
+        # LAND axis is asked first. A row that says the two drawings are not
+        # the same land pattern is answering "is this even the right part?",
+        # and that is the message to print whether or not an angle also came
+        # out -- routing an undecided mismatch to the undecided text sends the
+        # reader to re-measure a pair whose catalogue number is wrong. Only a
+        # row that never disputed the parts is an undecided angle.
+        refusals.append(_refuse_mismatch(row, house, record)
+                        if record.lands_agree is False
+                        else _refuse_undecided(row, house, record))
     return tuple(out), tuple(refusals)
-
-
-def apply(rows: Sequence, profile,
-          *, ledger: Union[ol.OrientationLedger, None] = None) -> tuple:
-    """Every CPL row with its measured offset added, or the FIRST named refusal
-    raised.
-
-    :func:`correct` with the refusals spent immediately. Kept as the one-call
-    fold for a caller that is already at a boundary nothing may cross
-    uncorrected, and for a reader who wants the whole step in one expression.
-    """
-    corrected, refusals = correct(rows, profile, ledger=ledger)
-    if refusals:
-        raise refusals[0]
-    return corrected

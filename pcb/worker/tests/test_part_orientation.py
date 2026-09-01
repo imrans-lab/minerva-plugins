@@ -288,6 +288,40 @@ def test_a_land_size_difference_does_not_cost_us_the_rotation_verdict():
     assert measured.runner_up_mm > measured.residual_mm * po.SEPARATION_RATIO
 
 
+def test_the_separation_ratio_is_pinned_from_both_sides():
+    """``SEPARATION_RATIO`` has to sit in a gap, and BOTH edges are derived.
+
+    Below it lies a genuine tie at 1.0x — a symmetric pad field whose best and
+    runner-up angles fit equally well, which is the case the whole pad-number
+    anchor exists to catch. Above it lies the weakest separation any
+    CORRECTLY-PAIRED committed pair shows: raise the constant past that and a
+    true measurement starts reading as ambiguous.
+
+    The upper bound is computed from the corpus here rather than quoted in a
+    comment beside the constant, because the corpus keeps growing and a quoted
+    number does not. Adding a pair whose angle is only just decided fails this
+    test — which is the moment to look at the pair, NEVER to lower the
+    constant.
+    """
+    ratios = {}
+    for lcsc in ORACLE:
+        # From the per-angle residuals, NOT from `runner_up_mm`: that field is
+        # None once a pair stops deciding, which is precisely the failure this
+        # test has to be able to describe.
+        best, runner_up = sorted(
+            mm for _, mm in _measure(lcsc).residuals_by_angle)[:2]
+        ratios[lcsc] = math.inf if best == 0 else runner_up / best
+
+    weakest, weakest_ratio = min(ratios.items(), key=lambda kv: kv[1])
+    assert 1.0 < po.SEPARATION_RATIO < weakest_ratio, (
+        f"SEPARATION_RATIO is {po.SEPARATION_RATIO} and the weakest true "
+        f"separation over the {len(ratios)} committed pairs is now "
+        f"{weakest_ratio:.2f}x ({weakest}) — the constant no longer sits "
+        f"between a genuine tie at 1.0x and the pairs it must keep deciding")
+    # And the consequence, so the bound is not merely arithmetic about floats.
+    assert all(_measure(lcsc).angle_decided for lcsc in ORACLE)
+
+
 def test_a_pad_centre_difference_does_not_cost_us_the_rotation_verdict():
     """The smaller sibling of the SOT-23 trap: SPK0641HT4H-1/C5159510 fits 180
     with ~0.06 mm on the worst pad, from a pad-centre difference."""

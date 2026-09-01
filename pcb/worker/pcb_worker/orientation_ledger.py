@@ -183,6 +183,40 @@ _DECLARED_KEYS = ("footprint", "house", "part", "verdict", "reason")
 #: is stated by the array it sits in, and storing it twice would let the two
 #: disagree.
 
+
+class OrientationLedgerError(ValueError):
+    """The ledger, or a row in it, is not something this reader will trust.
+
+    Every path here fails CLOSED. A ledger that cannot be read is not an empty
+    ledger — an empty ledger reads as "everything is unknown", which a gate
+    refuses loudly, whereas a silently-dropped malformed row reads as
+    "unknown" for that one pair while every other pair passes. The first is a
+    stopped line; the second is a board at the assembly house.
+    """
+
+
+def applies_offset(offset_stated: bool, lands_agree: Union[bool, None]) -> bool:
+    """THE SHAPE THE ROTATION ARITHMETIC CONSUMES, and the only one.
+
+    ``assembly_orientation.correct`` reaches ``corrected_rotation`` for exactly
+    one shape of measured row: an offset is STATED, and the lands are stated to
+    AGREE. The first is the number the arithmetic adds; the second is the
+    assertion that it is the number for THIS part rather than for whatever the
+    vendor payload actually draws. ``lands_agree`` is compared to ``True``
+    positively, so a row that simply declines to answer cannot pass by
+    defaulting.
+
+    Stated here, once, because three places need the same answer and would
+    otherwise each re-derive it from the verdict string: the emitter that acts
+    on it, ``orientation_coverage.PairCoverage.emits`` that reports it, and
+    :func:`_check_consistency_table` that bounds which verdicts may ever
+    produce it. ``angle_decided`` is deliberately not an input -- it is
+    biconditional with "offset stated", checked in ``__post_init__``, so
+    reading it here would be a second derivation of the same fact.
+    """
+    return bool(offset_stated) and lands_agree is True
+
+
 #: WHAT EACH VERDICT MAY SAY ABOUT ITSELF. Maps a verdict to EVERY
 #: ``(angle_decided, states an offset, lands_agree)`` combination that verdict
 #: can truthfully carry.
@@ -193,10 +227,7 @@ _DECLARED_KEYS = ("footprint", "house", "part", "verdict", "reason")
 #: each other -- and each verdict reports ONE of them. Pinning a verdict to a
 #: single row states an answer for the axis it does not report, and one of
 #: those inventions is a real measurement: two drawings that are not the same
-#: land pattern AND whose angle nothing separated. Written as a single row,
-#: ``geometry_mismatch`` required a decided angle, so that finding could not be
-#: recorded at all -- the loader refused it, fail-closed, and the honest answer
-#: went missing rather than wrong.
+#: land pattern AND whose angle nothing separated.
 #:
 #: THE RULE THE SET IS BUILT FROM. A combination is admitted iff it agrees with
 #: what the verdict ASSERTS and leaves free what the verdict is silent about.
@@ -204,11 +235,9 @@ _DECLARED_KEYS = ("footprint", "house", "part", "verdict", "reason")
 #: that biconditional is the whole reason the table exists, it is checked
 #: separately above, and every row below honours it.
 #:
-#: The dangerous direction is unchanged. Only ``aligned``/``rotated`` -- both
-#: of which REQUIRE ``lands_agree`` True -- reach ``assembly_orientation``'s
-#: arithmetic; every other combination in this table states no offset or states
-#: disagreeing lands, and refuses. Widening the table cannot widen what is
-#: applied.
+#: WIDENING THIS TABLE CANNOT WIDEN WHAT IS APPLIED -- and that is ENFORCED, by
+#: :func:`_check_consistency_table` below, not merely true of what is written
+#: here today.
 _CONSISTENT = {
     # Same land pattern, angle settled. The offset VALUE is what separates the
     # two, and it is checked below: aligned is the 0 and rotated is not.
@@ -237,15 +266,51 @@ _CONSISTENT = {
 }
 
 
-class OrientationLedgerError(ValueError):
-    """The ledger, or a row in it, is not something this reader will trust.
+def _check_consistency_table(table: Mapping) -> None:
+    """A VERDICT ADMITS AN APPLYING SHAPE IFF IT IS A DECIDED VERDICT.
 
-    Every path here fails CLOSED. A ledger that cannot be read is not an empty
-    ledger — an empty ledger reads as "everything is unknown", which a gate
-    refuses loudly, whereas a silently-dropped malformed row reads as
-    "unknown" for that one pair while every other pair passes. The first is a
-    stopped line; the second is a board at the assembly house.
+    :data:`_CONSISTENT` decides which rows LOAD; :func:`applies_offset` decides
+    which loaded rows reach the rotation arithmetic. Nothing joins the two, so
+    a row added to the table that happens to satisfy ``applies_offset`` is
+    applied -- an ``insufficient_overlap`` row with an offset and agreeing
+    lands turns a placed 30 into a 120 with no refusal anywhere.
+
+    The bound is not a second list of verdicts: ``part_orientation`` already
+    names the verdicts whose ``offset_deg`` a consumer may act on
+    (:data:`part_orientation.DECIDED_VERDICTS`), which is the same claim from
+    the side that MAKES the measurement. So the rule is a biconditional
+    against that vocabulary, and it bites both ways:
+
+    * a verdict outside it admitting an applying shape hands the arithmetic an
+      offset the measurement never vouched for;
+    * one inside it admitting a non-applying shape contradicts what
+      ``DECIDED_VERDICTS`` promises a consumer, and would quietly stop
+      correcting the parts this whole step exists to correct.
+
+    Run at import over the shipped table, so a bad edit is an unimportable
+    module rather than a board at the assembly house. Takes the table as an
+    argument so a test can hand it a widened one.
     """
+    for verdict, allowed in table.items():
+        may_apply = verdict in po.DECIDED_VERDICTS
+        for combo in allowed:
+            _, offset_stated, lands_agree = combo
+            if applies_offset(offset_stated, lands_agree) == may_apply:
+                continue
+            raise OrientationLedgerError(
+                f"the verdict/number table admits (angle_decided, offset "
+                f"stated, lands_agree) = {combo!r} under verdict {verdict!r}, "
+                + (f"and that shape is what assembly_orientation applies to a "
+                   f"placed rotation. Only {'/'.join(po.DECIDED_VERDICTS)} may "
+                   f"reach the arithmetic -- they are the verdicts "
+                   f"part_orientation states an actionable offset for"
+                   if not may_apply else
+                   f"and {verdict!r} is a verdict part_orientation states an "
+                   f"actionable offset for, so every shape it admits must be "
+                   f"one assembly_orientation applies"))
+
+
+_check_consistency_table(_CONSISTENT)
 
 
 # ---------------------------------------------------------------------------
@@ -394,9 +459,9 @@ class OrientationRecord:
         truthfully carry, and nothing outside it loads. Read it as: the verdict
         is a FOLD of two axes, it reports ONE of them, and a row is corrupt
         when its numbers contradict the axis the verdict reports — not when
-        they answer the axis it left open. Over-constraining is not free:
-        pinning ``geometry_mismatch`` to a decided angle made a real finding
-        unrecordable, which is a fail-closed refusal of the truth.
+        they answer the axis it left open. Over-constraining is not free
+        either: a verdict pinned to an answer it does not report makes a real
+        finding unrecordable, which is a fail-closed refusal of the truth.
         """
         allowed = _CONSISTENT.get(self.verdict)
         if allowed is None:  # a verdict with no table entry would load unchecked

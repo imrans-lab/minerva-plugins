@@ -105,20 +105,26 @@ class PairCoverage:
     part: str
     offset_deg: Union[int, None]
     verdict: str
+    #: The second axis, carried because :attr:`emits` is decided on it. Without
+    #: it this report would have to re-derive "the lands agree" from the verdict
+    #: string while the emitter reads the field, which is two derivations of one
+    #: fact and the way a report drifts from the code it describes.
+    lands_agree: Union[bool, None] = None
 
     @property
     def emits(self) -> bool:
         """Does an order carrying this pair get a position file?
 
-        The same fold ``assembly_orientation.correct`` performs, stated once here
-        so the report cannot describe a different emitter than the one that
-        runs. Only two shapes emit: a decided offset whose lands agree, and a
-        pair with nothing to measure against.
+        Only two shapes emit: one the emitter APPLIES an offset to, and one it
+        has nothing to correct. The first is asked of
+        ``orientation_ledger.applies_offset`` — the same call
+        ``assembly_orientation.correct`` gates on — so the report cannot
+        describe a different emitter than the one that runs. The second is
+        ``no_reference``, which the emitter passes through untouched.
         """
         if self.verdict == po.VERDICT_NO_REFERENCE:
             return True
-        return (self.offset_deg is not None
-                and self.verdict != po.VERDICT_GEOMETRY_MISMATCH)
+        return ol.applies_offset(self.offset_deg is not None, self.lands_agree)
 
 
 @dataclass(frozen=True)
@@ -242,7 +248,7 @@ def coverage(ledger: ol.OrientationLedger,
     for row in ledger.measured:
         measured_by_ref.setdefault(row.footprint, []).append(PairCoverage(
             house=row.house, part=row.part, offset_deg=row.offset_deg,
-            verdict=row.verdict))
+            verdict=row.verdict, lands_agree=row.lands_agree))
     declared_by_ref = {row.footprint: row for row in ledger.declared}
 
     entries = []

@@ -99,9 +99,14 @@ VENDOR_UNIT_MM = 0.254
 CANDIDATE_ANGLES = (0, 90, 180, 270)
 
 #: How many times worse the runner-up must be for the best angle to be the
-#: ANSWER rather than a coin toss. Measured over the nineteen committed pairs the
-#: weakest true separation is 8.9x (SOT-23, 1.778 / 0.200); the tightest thing
-#: this must still reject is a genuine tie at 1.0x. 4.0 sits in that gap.
+#: ANSWER rather than a coin toss. It is pinned from BOTH sides and neither
+#: bound is written down here, because the corpus keeps growing and a number in
+#: a comment does not: the tightest thing this must still reject is a genuine
+#: tie at 1.0x, and the loosest it may be is the WEAKEST separation any
+#: correctly-paired committed pair shows.
+#: ``test_part_orientation.py::test_the_separation_ratio_is_pinned_from_both_sides``
+#: derives that upper bound from the corpus on every run and fails when a new
+#: pair closes the gap.
 SEPARATION_RATIO = 4.0
 
 #: ...AND the runner-up must be at least this many mm worse in absolute terms.

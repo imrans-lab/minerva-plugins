@@ -517,37 +517,65 @@ def _shape(verdict: str, decided: bool, offset_stated: bool, lands) -> dict:
         angle_decided=decided, lands_agree=lands)
 
 
+#: THE ORACLE, HAND-WRITTEN. ``verdict -> every (angle_decided, offset stated,
+#: lands_agree) that verdict may carry``, retyped here on purpose: reading
+#: ``ol._CONSISTENT`` as the oracle asks the table whether it agrees with
+#: itself, which it always does, and a widened table would then license
+#: whatever it had just been widened to.
+#:
+#: Each entry is derived from what the VERDICT asserts, not from the code:
+#:
+#: * ``aligned``/``rotated`` -- the drawings are the same land pattern at a
+#:   settled angle. Both axes answered, both positively.
+#: * ``geometry_mismatch`` -- asserts the LANDS only. The angle is free: the
+#:   pads may miss at a settled angle, or miss at every angle with nothing to
+#:   separate them (a symmetric part paired with the wrong catalogue number).
+#: * ``ambiguous`` -- asserts the ANGLE only: nothing separated it, so no
+#:   offset. The lands may be unanswered or may agree -- a symmetric pad field
+#:   fits at two angles, which is WHY the angle did not settle -- but may not
+#:   DISAGREE, because that row is a geometry_mismatch wearing a milder name.
+#: * ``insufficient_overlap``/``no_reference`` -- nothing was fitted at all, so
+#:   both axes are silent and ``lands_agree`` is not an answer anybody has.
+_EXPECTED_SHAPES = {
+    po.VERDICT_ALIGNED: {(True, True, True)},
+    po.VERDICT_ROTATED: {(True, True, True)},
+    po.VERDICT_GEOMETRY_MISMATCH: {(True, True, False), (False, False, False)},
+    po.VERDICT_AMBIGUOUS: {(False, False, None), (False, False, True)},
+    po.VERDICT_INSUFFICIENT_OVERLAP: {(False, False, None)},
+    po.VERDICT_NO_REFERENCE: {(False, False, None)},
+}
+
+
 def test_the_consistency_table_admits_exactly_the_combinations_it_states():
     """EVERY SHAPE A ROW CAN HAVE, SCANNED — 72 of them, both directions.
 
-    Six verdicts x decided/not x offset stated/absent x lands
-    True/False/None. The oracle is ``_CONSISTENT`` READ AS A SET, so this test
-    asserts the table IS the specification instead of retyping it: add a
-    combination there and this test starts requiring it to load; remove one and
-    this test starts requiring it to be refused.
+    Six verdicts x decided/not x offset stated/absent x lands True/False/None,
+    against :data:`_EXPECTED_SHAPES`. The scan is what the hand list alone
+    cannot do: the list says which shapes are legal, and only enumerating all
+    72 says that NOTHING ELSE loads.
 
-    BOTH DIRECTIONS ARE DEFECTS THAT HAPPENED.
+    BOTH DIRECTIONS MATTER.
 
-    * A shape the table admits that the loader REFUSES is the newer one. An
-      undecided ``geometry_mismatch`` — the two drawings are not the same land
-      pattern, and nothing separated the angle either — was unrepresentable
-      while the table pinned that verdict to a decided angle. Nothing wrong
-      shipped, because the loader failed closed; the finding simply could not
-      be written down.
-    * A shape the table forbids that LOADS is the older one: a row whose
+    * A shape the oracle admits that the loader REFUSES makes a real finding
+      unrecordable — an undecided ``geometry_mismatch`` is a measurement that
+      happens in the world, and a loader that will not hold it fails closed on
+      the truth.
+    * A shape the oracle forbids that LOADS is the dangerous one: a row whose
       verdict and numbers tell different stories reaches
       ``assembly_orientation`` as a measurement and its guess is applied.
-
-    The earlier coverage test only ever built a DECIDED mismatch, which is why
-    it saw neither.
     """
+    assert set(_EXPECTED_SHAPES) == set(po.VERDICTS), (
+        "the hand-written oracle has stopped covering every verdict; a verdict "
+        "missing from it would be scanned against nothing")
     seen = set()
     for verdict in po.VERDICTS:
-        allowed = ol._CONSISTENT[verdict]
+        allowed = _EXPECTED_SHAPES[verdict]
         for decided in (True, False):
             for offset_stated in (True, False):
                 for lands in (True, False, None):
                     shape = (decided, offset_stated, lands)
+                    # IDENTITY, not `in`: `1 == True` in Python, and the loader
+                    # checks identity too.
                     legal = any(shape[0] is a and shape[1] is b and shape[2] is c
                                 for a, b, c in allowed)
                     seen.add((verdict, shape))
@@ -563,6 +591,83 @@ def test_the_consistency_table_admits_exactly_the_combinations_it_states():
     # And the table itself is exhaustive over the verdicts: a verdict with no
     # entry would load unchecked, which is the hole the table was added to fill.
     assert set(ol._CONSISTENT) == set(po.VERDICTS)
+
+
+def test_no_verdict_but_a_decided_one_may_admit_a_shape_the_emitter_APPLIES():
+    """THE TABLE CANNOT BE WIDENED INTO THE ROTATION ARITHMETIC.
+
+    ``_CONSISTENT`` decides which rows LOAD and ``applies_offset`` decides
+    which loaded rows are ADDED to a placed rotation, and nothing but this
+    check joins them. Widening the table is a two-line edit that reads as
+    "record one more honest measurement"; a widening of the wrong SHAPE
+    silently promotes that verdict into production rotations instead.
+
+    Demonstrated rather than argued: an ``insufficient_overlap`` row with an
+    offset and agreeing lands passes every other rule in the loader, and
+    ``assembly_orientation`` turns a placed 30 into a 120 for it — no refusal
+    anywhere. The bound comes from ``part_orientation.DECIDED_VERDICTS``, the
+    measurement side's own statement of which verdicts carry an actionable
+    offset, so it is not a second list to keep in step by hand.
+    """
+    # The shipped table passes, and so does the module's import-time call.
+    ol._check_consistency_table(ol._CONSISTENT)
+
+    for verdict in po.VERDICTS:
+        if verdict in po.DECIDED_VERDICTS:
+            continue
+        widened = dict(ol._CONSISTENT)
+        widened[verdict] = tuple(widened[verdict]) + ((True, True, True),)
+        with pytest.raises(ol.OrientationLedgerError) as excinfo:
+            ol._check_consistency_table(widened)
+        assert verdict in str(excinfo.value)
+
+    # ...and the other way: a decided verdict narrowed to a shape the emitter
+    # does NOT apply stops correcting the parts this step exists to correct.
+    for verdict in po.DECIDED_VERDICTS:
+        narrowed = dict(ol._CONSISTENT)
+        narrowed[verdict] = ((False, False, None),)
+        with pytest.raises(ol.OrientationLedgerError):
+            ol._check_consistency_table(narrowed)
+
+
+def test_the_shape_the_guard_forbids_is_the_shape_that_would_be_applied():
+    """WHY THAT GUARD IS THE RIGHT ONE — the arithmetic, run on the shape.
+
+    :func:`orientation_ledger.applies_offset` is a claim about what
+    ``assembly_orientation.correct`` does, and a claim is only worth the check
+    that falsifies it. So this builds a record of the guarded shape under a
+    verdict that IS allowed to carry it (``rotated``), and shows the emitter
+    reaching ``corrected_rotation``: 30 + 90 = 120. That is the number an
+    ``insufficient_overlap`` row of the same shape would produce, which is what
+    the guard above stops from ever loading.
+    """
+    from dataclasses import dataclass
+
+    from pcb_worker import assembly_orientation as aor
+
+    @dataclass(frozen=True)
+    class _Row:
+        ref: str
+        footprint_ref: str
+        house_part: str
+        side: str
+        rotation_deg: float
+
+    class _Profile:
+        house_part_id = "jlcpcb"
+
+    applied = ol.OrientationRecord(
+        footprint="Shape:UnderTest", house="jlcpcb", part="C1",
+        verdict=po.VERDICT_ROTATED, angle_decided=True, offset_deg=90,
+        lands_agree=True)
+    assert ol.applies_offset(applied.offset_deg is not None,
+                             applied.lands_agree)
+
+    rows, refusals = aor.correct(
+        (_Row("U1", "Shape:UnderTest", "C1", "top", 30.0),), _Profile(),
+        ledger=ol.OrientationLedger(measured=(applied,), declared=()))
+    assert refusals == ()
+    assert rows[0].rotation_deg == 120.0
 
 
 def test_an_ambiguity_may_report_that_the_lands_do_agree(tmp_path):

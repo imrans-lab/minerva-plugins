@@ -495,21 +495,22 @@ def test_a_mismatched_quarter_turn_never_reaches_the_position_file():
     assert excinfo.value.code == aor.CODE_MISMATCH
 
 
-def test_an_undecided_geometry_mismatch_refuses_too(shipped):
-    """THE COMBINATION THAT USED TO BE UNRECORDABLE, AND IT STILL STOPS ORDERS.
+def test_an_undecided_geometry_mismatch_refuses_on_the_land_axis(shipped):
+    """A MISMATCH REFUSES AS A MISMATCH EVEN WHEN NO ANGLE CAME OUT.
 
     Two facts at once: the pads do not sit on top of each other at ANY angle,
     and no angle separated itself from its runner-up either. That is what a
-    symmetric part paired with the wrong catalogue number looks like, and the
-    ledger refused to hold it while ``geometry_mismatch`` was pinned to a
-    decided angle — fail-closed, so nothing wrong shipped, but the finding
-    could not be written down.
+    symmetric part paired with the wrong catalogue number looks like.
 
-    Now that it can be, this asserts the obvious consequence is still true: it
-    refuses. It refuses on the OFFSET axis (``undecided``) rather than the land
-    axis, because there is no number to distrust — and the message still names
-    ``geometry_mismatch`` and carries the measurement's own sentence, so the
-    reader is sent to the part number and not to a symmetry problem.
+    WHICH REFUSAL IS THE POINT, not merely that one happens. Routed on
+    ``offset_deg is None`` this lands on ``undecided``, whose sentence tells
+    the reader to re-measure the pair — sending them to a symmetry problem when
+    the pair is a wrong catalogue number. A refusal that misdirects its reader
+    is worse than a terse one, so the LAND axis is asked first and this refuses
+    as :data:`CODE_MISMATCH`, naming the part number as the first check.
+
+    Every builder is asserted inside the loop: an assertion after it only ever
+    sees the last builder's message.
     """
     footprint, part = QUARTER_TURN_PAIRS[0]
     detail = ("every candidate angle leaves the shared pads ~0.9 mm apart, and "
@@ -521,9 +522,14 @@ def test_an_undecided_geometry_mismatch_refuses_too(shipped):
     for build in (ao.build_bom, ao.build_cpl, ao.build_package):
         with pytest.raises(aor.AssemblyOrientationError) as excinfo:
             build(board, "jlc", orientation=ledger)
-        assert excinfo.value.code == aor.CODE_UNDECIDED
-    assert po.VERDICT_GEOMETRY_MISMATCH in str(excinfo.value)
-    assert detail in str(excinfo.value)
+        name = build.__name__
+        assert excinfo.value.code == aor.CODE_MISMATCH, name
+        message = str(excinfo.value)
+        assert po.VERDICT_GEOMETRY_MISMATCH in message, name
+        assert detail in message, name
+        # The sentence a mismatch exists to say, and the one it must NOT say.
+        assert "catalogue" in message, name
+        assert "Re-measure the pair" not in message, name
 
 
 def test_an_undecided_measurement_refuses_rather_than_emitting_the_placed_angle():
@@ -653,10 +659,9 @@ def test_every_artifact_a_board_house_can_act_on_refuses(shipped):
     from any single entry point and exactly that call stops raising while the
     others still do, so a hole cannot hide behind its neighbours.
 
-    The BOM is in this set on purpose even though it has no rotation column —
-    see the column assertion below. It is ordered alongside the position file,
-    and the asymmetry decides it: a needless stop costs a minute, a part
-    soldered down turned costs the boards.
+    The BOM is in this set on purpose even though it has no rotation column;
+    why it belongs there is stated at ``assembly_outputs.require_shippable``,
+    and the consequence is pinned by the column assertion below.
     """
     from pcb_worker import order_package as op
 

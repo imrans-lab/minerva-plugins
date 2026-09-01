@@ -184,11 +184,10 @@ emission whose `orientation_refusals` is non-empty means the rows still carry
 their PLACED rotation for the pairs named there — uncorrected and unverified —
 and no file may be written from it.
 
-The BOM is in that set even though it has no rotation column. It is ordered
-alongside the position file, and a house holding a buyable BOM whose CPL was
-refused has been told to buy parts nobody could place. The asymmetry decides
-every case that is not obvious: a needless stop costs a minute, and a part
-soldered down turned costs the boards and is invisible in every render.
+The BOM is in that set even though it has no rotation column. Why — the
+asymmetry between a needless stop and a part soldered down turned — is written
+out at `assembly_outputs.require_shippable`, which is the code that decides the
+set.
 
 **A pair whose lands DISAGREE refuses as well** (`assembly_orientation_geometry_mismatch`).
 `geometry_mismatch` means the two pad fields are not the same land pattern —
@@ -197,10 +196,12 @@ also came out the row states an offset, and applying it would promote a
 mispairing the measurement detected into a trusted production rotation, which
 is worse than the unmeasured pair this step was written for: there, nobody
 claimed to know. Where nothing separated the angle either, the row states no
-offset and refuses on that axis instead (`assembly_orientation_undecided`, with
-the mismatch verdict named in the message). Either way the commonest cause is a
-wrong catalogue number in the BOM, so the refusal points at
-`assembly.house_parts`.
+offset — and it still refuses under the SAME code, because the land axis is
+asked before the angle axis. The commonest cause of either shape is a wrong
+catalogue number in the BOM, so the refusal points at `assembly.house_parts`
+and says so; routing the no-angle shape to `assembly_orientation_undecided`
+instead would tell the reader to re-measure a pair whose part number is the
+thing that is wrong.
 
 A pair with `no_reference` — a mounting
 hole, a fiducial, a part whose vendor ships no usable drawing — does NOT refuse:
