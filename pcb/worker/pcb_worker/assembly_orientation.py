@@ -95,9 +95,22 @@ THE THREE STATES, AND WHAT EACH ONE EMITS
 
 ``measured``, offset ``None``
     We looked and the drawings did not settle it (``ambiguous``,
-    ``insufficient_overlap``, an undecided ``geometry_mismatch``). REFUSED
-    (:data:`CODE_UNDECIDED`). A measurement that could not choose is not a
-    licence to emit zero.
+    ``insufficient_overlap``). REFUSED (:data:`CODE_UNDECIDED`). A measurement
+    that could not choose is not a licence to emit zero.
+
+``measured``, offset stated, LANDS DISAGREE
+    A ``geometry_mismatch``: the angle came out, and the two drawings are not
+    the same land pattern. REFUSED (:data:`CODE_MISMATCH`). The angle is real —
+    that separation is why the two axes are reported apart — but it is the
+    angle between OUR drawing and a drawing of SOMETHING ELSE. The measurement
+    says in so many words "check the part number before trusting the pairing",
+    and the commonest way to get here is a BOM with the wrong catalogue number
+    in it: an accidentally paired part fits its own angle perfectly and is
+    still the wrong part. Applying that offset would turn a detected mispairing
+    into a TRUSTED production orientation, which is a worse outcome than the
+    unmeasured pair this module was written for — there, nobody claimed to
+    know. So the pair is measured, the row is kept for a reader, and the ORDER
+    stops.
 
 ``no_reference``
     There is nothing to measure AGAINST -- a mounting hole, a fiducial, a test
@@ -125,6 +138,7 @@ from . import orientation_ledger as ol
 #: matches on the code and SHOWS the sentence.
 CODE_UNKNOWN = "assembly_orientation_unknown"
 CODE_UNDECIDED = "assembly_orientation_undecided"
+CODE_MISMATCH = "assembly_orientation_geometry_mismatch"
 
 #: The authored key a refusal points a person at. Both refusals are about the
 #: pair, and the catalogue number is the half a board author writes.
@@ -247,6 +261,24 @@ def _refuse_undecided(row, house: str, record) -> AssemblyOrientationError:
         component=row.ref, field=FIELD_HOUSE_PARTS)
 
 
+def _refuse_mismatch(row, house: str, record) -> AssemblyOrientationError:
+    return AssemblyOrientationError(
+        CODE_MISMATCH,
+        f"component {row.ref!r} is bought as catalogue part {row.house_part!r} "
+        f"from {house!r} on footprint {row.footprint_ref!r}, and the measurement "
+        f"of that pair settled the angle but found the two drawings are NOT THE "
+        f"SAME LAND PATTERN (verdict {record.verdict!r}"
+        + (f": {record.detail}" if record.detail else "")
+        + f"). The offset it states is the angle between our drawing and a "
+        f"drawing of something else, so applying it would turn a detected "
+        f"mispairing into a trusted production rotation. Check the catalogue "
+        f"number on this component first — a wrong part number is the "
+        f"commonest way to reach this verdict — then either correct it or "
+        f"correct whichever of the two drawings is wrong and re-measure; "
+        f"refusing to place a part whose identity the drawings dispute",
+        component=row.ref, field=FIELD_HOUSE_PARTS)
+
+
 def apply(rows: Sequence, profile,
           *, ledger: Union[ol.OrientationLedger, None] = None) -> tuple:
     """Every CPL row with its measured offset added, or a NAMED refusal.
@@ -277,6 +309,12 @@ def apply(rows: Sequence, profile,
             continue
         if record.offset_deg is None:
             raise _refuse_undecided(row, house, record)
+        # THE OFFSET IS ONLY TRUSTWORTHY IF IT IS AN OFFSET BETWEEN THE SAME
+        # TWO PARTS. `lands_agree` is the second axis, and it is checked
+        # POSITIVELY: anything but a stated agreement stops here, so a row that
+        # simply omits the answer cannot pass by defaulting.
+        if record.lands_agree is not True:
+            raise _refuse_mismatch(row, house, record)
         out.append(replace(
             row, rotation_deg=corrected_rotation(row.rotation_deg,
                                                  record.offset_deg, row.side)))

@@ -467,6 +467,7 @@ def test_the_orientation_refusal_codes_match_their_module():
     dependency between the two modules runs one way."""
     assert sp.CODE_ORIENTATION_UNKNOWN == aor.CODE_UNKNOWN
     assert sp.CODE_ORIENTATION_UNDECIDED == aor.CODE_UNDECIDED
+    assert sp.CODE_ORIENTATION_MISMATCH == aor.CODE_MISMATCH
 
 
 def test_the_identity_refusal_code_matches_its_error_class():
@@ -489,7 +490,7 @@ def test_every_gate_that_runs_for_this_service_is_claimed_as_checked():
         ag.CODE_ROW_REF_LIMIT, ag.CODE_NON_METRIC_COORDINATES,
         ag.CODE_PLACEMENTS_TOO_CLOSE, ag.CODE_EMPTY_EXPANSION,
         ag.CODE_PASTE_UNDECIDED,
-        aor.CODE_UNKNOWN, aor.CODE_UNDECIDED,
+        aor.CODE_UNKNOWN, aor.CODE_UNDECIDED, aor.CODE_MISMATCH,
     }
     assert claimed == running
 

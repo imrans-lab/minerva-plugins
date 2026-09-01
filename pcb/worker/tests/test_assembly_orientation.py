@@ -68,6 +68,8 @@ appears here (``test_corpus_policy.py`` enforces that by content).
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 
 import pytest
@@ -75,12 +77,14 @@ import yaml
 
 from pcb_worker import assembly_orientation as aor
 from pcb_worker import assembly_outputs as ao
+from pcb_worker import footprints
 from pcb_worker import orientation_ledger as ol
 from pcb_worker import part_orientation as po
 from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
 
 BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
+VENDOR = Path(__file__).resolve().parent / "testdata" / "vendor_footprints"
 FIXTURE = BOARDS / "assembly_orientation.yaml"
 
 HOUSE = "jlcpcb"
@@ -408,6 +412,79 @@ def test_the_refusal_reaches_the_bom_and_the_whole_order_package_too(shipped):
         with pytest.raises(aor.AssemblyOrientationError) as excinfo:
             build(board, "jlc")
         assert excinfo.value.code == aor.CODE_UNKNOWN
+
+
+#: The MISPAIRING the corpus can reproduce: our 1206 fuse land against C49678,
+#: an 0805 capacitor. Both are two-pad chips drawn the same way up, so the
+#: ANGLE comes out decided — and the lands sit 0.4 mm apart per pad, because it
+#: is a different part. This is the shape of a BOM with the wrong catalogue
+#: number in it, and it is measured here rather than typed so the refusal is
+#: pinned to a real measurement and not to a fixture's opinion of one.
+MISPAIRED = ("Fuse:Fuse_1206_3216Metric", "C49678")
+
+
+def test_a_geometry_mismatch_refuses_instead_of_trusting_its_own_angle():
+    """A DECIDED angle between our drawing and a drawing of SOMETHING ELSE.
+
+    ``geometry_mismatch`` is the verdict that says "these are not the same land
+    pattern, so check the part number before trusting the pairing", and it
+    still carries an offset — deliberately, because the angle and the land test
+    are two axes and a wrong land tolerance must not destroy a correct angle.
+    That offset is nevertheless the angle to a part we are not buying. Applying
+    it would take a mispairing the measurement DETECTED and promote it into a
+    trusted production rotation, which is strictly worse than the unmeasured
+    pair this module was written for: there, nobody claimed to know.
+
+    So the row stays in the ledger for a reader, and the ORDER stops.
+    """
+    footprint, part = MISPAIRED
+    payload = json.loads((VENDOR / f"{part}.json").read_text(encoding="utf-8"))
+    measurement = po.measure_footprint_against_part(
+        footprints.resolve_footprint(footprint), payload, lcsc=part)
+    assert measurement.verdict == po.VERDICT_GEOMETRY_MISMATCH
+    assert measurement.lands_agree is False
+    assert measurement.offset_deg is not None, (
+        "the premise: this verdict CARRIES an offset, which is what makes it "
+        "reachable by the emitter at all")
+
+    ledger = ol.OrientationLedger(measured=(ol.record_from_measurement(
+        footprint, HOUSE, part, measurement,
+        footprint_sha256="ab" * 32, vendor_sha256="cd" * 32),))
+    record = ledger.lookup(footprint, HOUSE, part)
+    assert ol.state_of(record) == ol.STATE_MEASURED
+    assert record.offset_deg is not None
+
+    board = _compiled(_one_part_board(footprint, part))
+    for build in (ao.build_cpl, ao.build_bom, ao.build_package):
+        with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+            build(board, "jlc", orientation=ledger)
+        assert excinfo.value.code == aor.CODE_MISMATCH
+    error = excinfo.value
+    assert error.component == "U1"
+    assert error.field == aor.FIELD_HOUSE_PARTS
+    assert part in str(error) and footprint in str(error)
+
+
+def test_a_mismatched_quarter_turn_never_reaches_the_position_file():
+    """The same refusal where the number it would have written is VISIBLE.
+
+    The measured mispairing above happens to come out at 0, so letting it
+    through would have changed no digit — the defect there is the trust, not
+    the arithmetic. This row states 90 beside the same disagreeing lands, which
+    is what a mispairing between two differently-drawn packages looks like, and
+    it must not turn the part a quarter of the way round on the strength of a
+    comparison against the wrong drawing.
+    """
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    ledger = _ledger(footprint, part, verdict=po.VERDICT_GEOMETRY_MISMATCH,
+                     offset_deg=90, angle_decided=True, lands_agree=False,
+                     residual_mm=0.4, max_pad_error_mm=0.5,
+                     detail="the angle is settled at 90 deg, and the shared "
+                            "pads still sit 0.400 mm RMS apart")
+    board = _compiled(_one_part_board(footprint, part, rotation_deg=30))
+    with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+        ao.build_cpl(board, "jlc", orientation=ledger)
+    assert excinfo.value.code == aor.CODE_MISMATCH
 
 
 def test_an_undecided_measurement_refuses_rather_than_emitting_the_placed_angle():

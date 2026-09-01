@@ -103,7 +103,8 @@
     "assembly_paste_undecided",
     "assembly_missing_identity",
     "assembly_orientation_unknown",
-    "assembly_orientation_undecided"
+    "assembly_orientation_undecided",
+    "assembly_orientation_geometry_mismatch"
   ],
   "advisory_rules": [
     "assembly_house_component_to_edge",

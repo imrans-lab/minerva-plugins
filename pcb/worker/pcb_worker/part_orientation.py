@@ -297,8 +297,10 @@ class OrientationMeasurement:
     """What we can say about one (our footprint, vendor part) pair.
 
     ``offset_deg`` is the CCW rotation from the vendor's drawing to ours (see
-    the module docstring) and is ``None`` unless ``verdict`` is in
-    :data:`DECIDED_VERDICTS`. ``residual_mm`` is the RMS per-pad distance after
+    the module docstring) and is stated IF AND ONLY IF ``angle_decided`` — which
+    includes a ``geometry_mismatch`` and excludes everything else, so it is a
+    narrower claim than :data:`DECIDED_VERDICTS`. ``residual_mm`` is the RMS
+    per-pad distance after
     the best rigid fit; ``max_pad_error_mm`` is the worst single pad, which is
     the figure to quote when explaining a nonzero residual to a human.
     ``residuals_by_angle`` carries all four so a reader can see the separation
@@ -480,8 +482,15 @@ def measure_orientation(ours: PadField,
     datum = (round(ours_c[0] - vendor_c[0], _ROUND),
              round(ours_c[1] - vendor_c[1], _ROUND))
 
+    # OFFSET ONLY WHERE THE ANGLE WAS DECIDED. `best` is the best-FITTING
+    # angle whether or not anything separates it from its runner-up, so putting
+    # it in the common fields unconditionally would hand an undecided
+    # measurement a numeric offset beside `angle_decided=False` — a guess
+    # wearing a number, which is exactly what this dataclass promises not to
+    # carry. The diagnostics (`residuals_by_angle`, the runner-up, the
+    # residuals) still report `best` so a reader can see WHY it did not settle.
     common = dict(
-        offset_deg=best,
+        offset_deg=best if decided else None,
         residual_mm=round(best_rms, _ROUND),
         max_pad_error_mm=round(best_max, _ROUND),
         runner_up_deg=runner_up,

@@ -406,3 +406,72 @@ def test_the_ledger_round_trips_and_refuses_what_it_cannot_trust(ledger, tmp_pat
     # file order.
     with pytest.raises(ol.OrientationLedgerError):
         ol.OrientationLedger(measured=ledger.measured + (ledger.measured[0],))
+
+
+def test_a_row_whose_verdict_and_numbers_disagree_does_not_load(ledger, tmp_path):
+    """THE CONVERSE OF "an offset implies a decided angle", which is the half
+    that ships something.
+
+    ``verdict="ambiguous"`` beside ``angle_decided=true`` and ``offset_deg=90``
+    passes every rule stated in terms of the offset — there IS an offset and the
+    angle IS marked decided — and it is nonsense: the verdict says the drawings
+    could not be separated and the fields say one angle won.
+    ``assembly_orientation`` reads ``offset_deg`` and would ADD that 90 to a
+    real placement, so this is not a tidiness rule. The loader's fail-closed
+    claim only holds if a row that disagrees with itself never becomes a
+    record.
+
+    Each mutation below is ONE field away from the shipped row it starts from,
+    so nothing here can pass by accident, and every one of them must raise.
+    """
+    path = tmp_path / "part_orientation.json"
+    doc = json.loads(ledger.to_text())
+    row = doc["measured"][0]
+    assert row["angle_decided"] is True and row["offset_deg"] is not None, (
+        "this test starts from a DECIDED shipped row; pick another if the "
+        "ledger's first measured row stops being one")
+
+    def _mutate(**fields):
+        broken = json.loads(json.dumps(doc))
+        broken["measured"][0].update(fields)
+        return broken
+
+    for name, broken in (
+        # The reviewer's exact shape: a guessed offset wearing a decided flag
+        # under a verdict that says nothing was decided.
+        ("ambiguous, yet decided, with an offset",
+         _mutate(verdict=po.VERDICT_AMBIGUOUS, angle_decided=True,
+                 offset_deg=90, lands_agree=None)),
+        # ...and the same contradiction with the offset dropped: the verdict
+        # still claims a decision the flag denies.
+        ("ambiguous, yet decided",
+         _mutate(verdict=po.VERDICT_AMBIGUOUS, angle_decided=True,
+                 offset_deg=None, lands_agree=None)),
+        ("rotated, yet undecided",
+         _mutate(angle_decided=False, offset_deg=None,
+                 verdict=po.VERDICT_ROTATED, lands_agree=True)),
+        # The land axis is what the verdict REPORTS, so a row stating the other
+        # answer was not written by the measurement.
+        ("rotated, yet the lands disagree",
+         _mutate(verdict=po.VERDICT_ROTATED, angle_decided=True,
+                 offset_deg=90, lands_agree=False)),
+        ("a geometry mismatch whose lands agree",
+         _mutate(verdict=po.VERDICT_GEOMETRY_MISMATCH, angle_decided=True,
+                 offset_deg=90, lands_agree=True)),
+        # One drawing state, one verdict: "aligned" is the 0 and nothing else.
+        ("aligned at a quarter turn",
+         _mutate(verdict=po.VERDICT_ALIGNED, angle_decided=True,
+                 offset_deg=90, lands_agree=True)),
+        ("rotated by nothing",
+         _mutate(verdict=po.VERDICT_ROTATED, angle_decided=True,
+                 offset_deg=0, lands_agree=True)),
+    ):
+        path.write_text(json.dumps(broken), encoding="utf-8")
+        try:
+            loaded = ol.load_ledger(path)
+        except ol.OrientationLedgerError:
+            continue
+        raise AssertionError(
+            f"a row that is {name} LOADED: "
+            f"{loaded.measured[0]}. assembly_orientation reads offset_deg, so "
+            f"this row would be applied to a real placement as a measurement")

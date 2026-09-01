@@ -40,10 +40,17 @@ pair?", so no consumer can invent a fourth reading:
     a PRESENT row carrying ``offset_deg = 0``; it is distinguishable from
     unknown by the row existing at all, and from no-reference by
     ``offset_deg`` being an int rather than ``None``. The undecided verdicts
-    (``ambiguous``, ``insufficient_overlap``, and ``geometry_mismatch`` where
-    the angle did not separate) are also ``measured`` — we looked, and the
-    honest answer is "the drawings do not settle it". A gate refuses those on
-    ``offset_deg is None``, not on the state.
+    (``ambiguous``, ``insufficient_overlap``) are also ``measured`` — we
+    looked, and the honest answer is "the drawings do not settle it". A gate
+    refuses those on ``offset_deg is None``, not on the state.
+
+    ``measured`` DOES NOT MEAN "SAFE TO EMIT", and the reader is not the one
+    who gets to decide which. ``geometry_mismatch`` is a measured row that
+    carries an offset and must still stop an order: the angle came out, and it
+    came out against a drawing that is not the same land pattern as ours. So
+    a consumer reads BOTH numbers — ``offset_deg`` for the angle and
+    ``lands_agree`` for whether it is the angle to the right part —
+    and ``assembly_orientation.apply`` is the one place that fold is written.
 
 ``no_reference`` (:data:`STATE_NO_REFERENCE`)
     A row that says there is nothing to measure AGAINST. Two ways to earn it:
@@ -174,6 +181,27 @@ _DECLARED_KEYS = ("footprint", "house", "part", "verdict", "reason")
 #: ``declared`` is NOT among either key list: which population a row belongs to
 #: is stated by the array it sits in, and storing it twice would let the two
 #: disagree.
+
+#: WHAT EACH VERDICT MUST SAY ABOUT ITSELF:
+#: ``verdict -> (angle_decided, states an offset, lands_agree)``.
+#:
+#: This is the table ``part_orientation.measure_orientation`` can actually
+#: produce, written down where the LOADER can check it. It exists because
+#: "offset implies decided" leaves the converse open, and the converse is where
+#: a self-inconsistent row hides: an ``ambiguous`` verdict carrying
+#: ``angle_decided=true`` and an offset reads to ``assembly_orientation`` as a
+#: measurement and emits its guess. A row is loaded only if the verdict and the
+#: numbers beside it tell the same story.
+_CONSISTENT = {
+    po.VERDICT_ALIGNED: (True, True, True),
+    po.VERDICT_ROTATED: (True, True, True),
+    # The angle IS settled here; it is the LANDS that disagree. That is the
+    # whole reason the two axes are reported separately.
+    po.VERDICT_GEOMETRY_MISMATCH: (True, True, False),
+    po.VERDICT_AMBIGUOUS: (False, False, None),
+    po.VERDICT_INSUFFICIENT_OVERLAP: (False, False, None),
+    po.VERDICT_NO_REFERENCE: (False, False, None),
+}
 
 
 class OrientationLedgerError(ValueError):
@@ -314,6 +342,59 @@ class OrientationRecord:
                     f"{self.footprint}: a {po.VERDICT_NO_REFERENCE!r} row "
                     f"cannot carry an offset — there was no drawing to measure "
                     f"it against")
+
+        self._check_verdict_agrees_with_its_numbers()
+
+    def _check_verdict_agrees_with_its_numbers(self) -> None:
+        """THE VERDICT AND THE NUMBERS BESIDE IT MUST BE THE SAME STORY.
+
+        "offset implies decided" is only half the invariant, and the other half
+        is the dangerous one. A row saying ``verdict="ambiguous"`` with
+        ``angle_decided=true`` and ``offset_deg=90`` satisfies the first half
+        and is nonsense: the verdict says the drawings did not separate the
+        angles and the fields say one of them won. ``assembly_orientation``
+        reads ``offset_deg``, so such a row EMITS its guess — and the loader's
+        fail-closed claim would not hold for the one shape a hand edit most
+        easily produces.
+
+        So the whole table :mod:`part_orientation` can actually produce is
+        stated here and nothing outside it loads. Read it as: the verdict is a
+        FOLD of the two axes, and a fold that disagrees with its own inputs is
+        a corrupt row, not a row with an opinion.
+        """
+        want = _CONSISTENT.get(self.verdict)
+        if want is None:  # a verdict with no table entry would load unchecked
+            raise OrientationLedgerError(
+                f"{self.footprint}: verdict {self.verdict!r} has no consistency "
+                f"rule; every verdict states what its fields must say")
+        decided, offset, lands = want
+        if self.angle_decided is not decided:
+            raise OrientationLedgerError(
+                f"{self.footprint}: verdict {self.verdict!r} means the angle "
+                f"was {'' if decided else 'NOT '}decided, but angle_decided is "
+                f"{self.angle_decided!r}. The verdict is a fold of the two axes "
+                f"and cannot disagree with them")
+        stated = self.offset_deg is not None
+        if stated is not offset:
+            raise OrientationLedgerError(
+                f"{self.footprint}: verdict {self.verdict!r} "
+                f"{'requires' if offset else 'forbids'} an offset, but "
+                f"offset_deg is {self.offset_deg!r}")
+        if self.lands_agree is not lands:
+            raise OrientationLedgerError(
+                f"{self.footprint}: verdict {self.verdict!r} means lands_agree "
+                f"is {lands!r}, not {self.lands_agree!r}. The land test is the "
+                f"axis this verdict reports, so a row that states the other "
+                f"answer was not written by the measurement")
+        if self.verdict == po.VERDICT_ALIGNED and self.offset_deg != 0:
+            raise OrientationLedgerError(
+                f"{self.footprint}: {po.VERDICT_ALIGNED!r} means our drawing "
+                f"and the vendor's point the same way, so its offset is 0, not "
+                f"{self.offset_deg}")
+        if self.verdict == po.VERDICT_ROTATED and self.offset_deg == 0:
+            raise OrientationLedgerError(
+                f"{self.footprint}: {po.VERDICT_ROTATED!r} with an offset of 0 "
+                f"is {po.VERDICT_ALIGNED!r}; one drawing state, one verdict")
 
     # -- identity ----------------------------------------------------------
 
@@ -532,10 +613,16 @@ def record_from_measurement(footprint: str,
 
     ``offset_deg`` is carried ONLY where the measurement decided the angle —
     including under a ``geometry_mismatch`` verdict, where the rotation is
-    settled even though the land sizes disagree; the verdict rides along so a
-    gate can still refuse that pair on its own terms. Where the angle was not
-    decided the offset is dropped rather than stored with a caveat, because a
-    stored number is a number somebody will eventually add to a rotation.
+    settled even though the lands disagree. The verdict and ``lands_agree``
+    ride along with it, and they are not decoration: ``assembly_orientation``
+    REFUSES a mismatched pair rather than applying its offset, because that
+    offset is the angle to a different part. Storing the number keeps the
+    finding readable for whoever has to work out which of the two drawings is
+    wrong; the gate is what stops it shipping.
+
+    Where the angle was not decided the offset is dropped rather than stored
+    with a caveat, because a stored number is a number somebody will eventually
+    add to a rotation.
     """
     decided = bool(measurement.angle_decided)
     return OrientationRecord(

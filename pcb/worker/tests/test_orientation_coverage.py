@@ -64,6 +64,7 @@ from pcb_worker import assembly_orientation as aor
 from pcb_worker import assembly_outputs as ao
 from pcb_worker import orientation_coverage as oc
 from pcb_worker import orientation_ledger as ol
+from pcb_worker import part_orientation as po
 from pcb_worker.compile_board import compile_board
 from pcb_worker.footprints import load_lockfile
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
@@ -71,6 +72,7 @@ from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
 HERE = Path(__file__).resolve().parent
 PCB = HERE.parents[1]
 GEN_PATH = PCB / "scripts" / "gen_part_orientation.py"
+VENDOR_DIR = HERE / "testdata" / "vendor_footprints"
 
 HOUSE = "jlcpcb"
 
@@ -190,12 +192,13 @@ def test_the_folds_state_is_the_ledgers_own_state_for_every_shipped_footprint(
     NEVER_MEASURED_PART = "C0000000"
     for entry in report.entries:
         if entry.state == oc.STATE_MEASURED:
-            for house, part, offset in entry.pairs:
-                row = ledger.lookup(entry.footprint, house, part)
+            for pair in entry.pairs:
+                row = ledger.lookup(entry.footprint, pair.house, pair.part)
                 assert row is not None and not row.declared, (
-                    f"{entry.footprint} is reported measured for {part}, but "
-                    f"the ledger holds no measured row for that pair")
-                assert row.offset_deg == offset
+                    f"{entry.footprint} is reported measured for {pair.part}, "
+                    f"but the ledger holds no measured row for that pair")
+                assert row.offset_deg == pair.offset_deg
+                assert row.verdict == pair.verdict
         else:
             expected = (ol.STATE_NO_REFERENCE
                         if entry.state == oc.STATE_NO_REFERENCE
@@ -292,6 +295,116 @@ def test_a_footprint_the_report_calls_declared_emits_its_placed_rotation(report)
     assert rows["U1"].rotation_deg == pytest.approx(30.0), (
         "a declared footprint carries no offset, so the placed rotation is "
         "emitted unchanged")
+
+
+def test_a_measured_footprint_still_refuses_every_pair_nobody_measured(report):
+    """WHY THIS REPORT IS SAMPLING, AND WHY IT HAS TO SAY SO.
+
+    The gate is keyed on the PAIR. This fold is keyed on the FOOTPRINT, and a
+    footprint moves out of UNKNOWN as soon as ONE pair on it is measured — so a
+    drawing sitting in the Measured section can still stop an order, for every
+    other catalogue part bought against it. That is demonstrated here rather
+    than argued: a measured footprint, a catalogue number nothing has measured,
+    and the same `assembly_orientation_unknown` the UNKNOWN section advertises.
+
+    A reader who takes the UNKNOWN section for the complete set of drawings an
+    order can stop on is therefore wrong, and the earlier wording said exactly
+    that. The rendered header now states the bound, and the assertions below
+    fail if that sentence is ever dropped — a report that overstates what it
+    knows is worse than no report, because it gets believed.
+    """
+    measured = {e.footprint: e for e in report.measured}
+    footprint = "Package_TO_SOT_SMD:SOT-23"
+    assert footprint in measured, (
+        f"{footprint} is no longer measured — point this test at another "
+        f"entry of the report's Measured section")
+    unmeasured_part = "C0000001"
+    assert unmeasured_part not in {p.part for p in measured[footprint].pairs}
+
+    board = _compiled(_one_part_board(footprint, unmeasured_part))
+    with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+        ao.emit(board, "jlc")
+    assert excinfo.value.code == aor.CODE_UNKNOWN, (
+        "a MEASURED footprint still refuses an unmeasured pair on it, so the "
+        "report's unknown list cannot be the whole set of refusals")
+
+    rendered = report.to_markdown()
+    assert "sampling" in rendered.lower(), (
+        "the report must say it is footprint-level sampling; without that "
+        "sentence its counts read as exhaustive coverage of the gate")
+    assert "LOWER BOUND" in rendered
+
+
+def _synthetic(footprint: str, part: str, **row) -> tuple:
+    """A one-row ledger and the one-entry lock to fold it against.
+
+    Built rather than loaded: the shipped corpus holds no pair with either of
+    the two verdicts below, and waiting for one would leave the two states the
+    report most easily confuses untested until the day they arrive.
+    """
+    ledger = ol.OrientationLedger(measured=(
+        ol.OrientationRecord(footprint=footprint, house=HOUSE, part=part,
+                             footprint_sha256="ab" * 32,
+                             vendor_sha256="cd" * 32, **row),))
+    return ledger, oc.coverage(ledger, {footprint: {"assembly": {}}})
+
+
+def test_a_measured_pair_with_no_vendor_drawing_is_reported_as_passing():
+    """"No offset" IS NOT "refused", and the report used to say it was.
+
+    A pair whose vendor ships no usable package drawing states no offset — and
+    so does a pair whose drawings could not settle an angle. The two look
+    identical if you only read ``offset_deg``, and they are opposites at the
+    emitter: the first is emitted verbatim, the second stops the order. Folding
+    them together listed a passing pair under "covered, and still refused",
+    which sends somebody to re-measure a drawing that does not exist.
+
+    Both halves are asserted — where the report files it, and what the emitter
+    actually does with it — because the report is only worth reading if the two
+    agree.
+    """
+    footprint, part = "Diode_SMD:D_SMA", "C2480"
+    ledger, rep = _synthetic(footprint, part, verdict=po.VERDICT_NO_REFERENCE,
+                             detail="the vendor ships no package drawing")
+
+    assert rep.undecided == (), (
+        "a pair with nothing to measure against is not an undecided "
+        "measurement — it does not refuse")
+    assert rep.mismatched == ()
+    assert [(ref, p.part) for ref, p in rep.unmeasurable] == [(footprint, part)]
+    rendered = rep.to_markdown()
+    assert "PASSES" in rendered and f"`{part}`" in rendered
+
+    board = _compiled(_one_part_board(footprint, part))
+    rows = {r.ref: r for r in ao.emit(board, "jlc", orientation=ledger).cpl}
+    assert rows["U1"].rotation_deg == pytest.approx(30.0), (
+        "the emitter passes this pair through, which is the fact the report "
+        "must not contradict")
+
+
+def test_a_measured_pair_whose_lands_disagree_is_reported_as_refusing():
+    """The mirror image: a pair that states an offset AND still stops the order.
+
+    ``geometry_mismatch`` carries a number, so a report that read only
+    ``offset_deg`` would print it beside the pairs that pass. It is the angle
+    to a DIFFERENT part, the emitter refuses it, and a reader counting what can
+    stop an order needs it listed with the refusals.
+    """
+    footprint, part = "Diode_SMD:D_SMA", "C2480"
+    ledger, rep = _synthetic(
+        footprint, part, verdict=po.VERDICT_GEOMETRY_MISMATCH,
+        offset_deg=90, angle_decided=True, lands_agree=False,
+        residual_mm=0.4, max_pad_error_mm=0.5,
+        detail="the angle is settled at 90 deg and the lands are 0.400 mm apart")
+
+    assert [(ref, p.part) for ref, p in rep.mismatched] == [(footprint, part)]
+    assert rep.undecided == () and rep.unmeasurable == ()
+    assert "THE LANDS DISAGREE" in rep.to_markdown()
+
+    board = _compiled(_one_part_board(footprint, part))
+    with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+        ao.emit(board, "jlc", orientation=ledger)
+    assert excinfo.value.code == aor.CODE_MISMATCH
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +532,73 @@ def test_the_generator_refuses_a_declaration_it_cannot_stand_behind(
     with pytest.raises(generator.GenerationError) as excinfo:
         generator.generate(declared_path=path)
     assert expected in str(excinfo.value)
+
+
+def _payload_dir(tmp_path, part: str, footprint: str, source: str) -> Path:
+    """A one-pairing corpus: ``index.json`` files *source*'s bytes under *part*."""
+    directory = tmp_path / "payloads"
+    directory.mkdir(parents=True)
+    (directory / f"{part}.json").write_bytes(
+        (VENDOR_DIR / f"{source}.json").read_bytes())
+    (directory / "index.json").write_text(
+        json.dumps({part: {"footprint": footprint, "house": HOUSE}}),
+        encoding="utf-8")
+    return directory
+
+
+def test_the_generator_refuses_a_payload_that_is_not_the_part_it_is_filed_under(
+        generator, tmp_path):
+    """A ROW IS ONLY AS GOOD AS THE JOIN BETWEEN ITS KEY AND ITS BYTES.
+
+    A measured row's key comes from ``index.json`` and the filename; its
+    geometry comes from the file. Nothing else connects the two, so a payload
+    saved under the wrong name — a re-fetch that answered with a substitute, a
+    copy when the corpus was extended — produces a row confidently keyed on one
+    catalogue part and measured against another. The ledger, the coverage
+    report and the emitter all believe it, because all three read the key.
+
+    The measurement call cannot catch this by itself: passing ``lcsc=part``
+    OVERWRITES the payload's stated identity with the one we assumed, erasing
+    the mismatch in the same call that would have shown it. So the check is on
+    the bytes, before a row exists.
+
+    The positive control below is what stops this test from passing for the
+    wrong reason: the identical setup with the RIGHT payload must generate.
+    """
+    footprint, right, wrong = "Package_TO_SOT_SMD:TSOT-23-6", "C780769", "C15127"
+
+    honest = _payload_dir(tmp_path / "ok", right, footprint, right)
+    ledger = ol.OrientationLedger.from_json(
+        json.loads(generator.generate(payload_dir=honest)))
+    assert ledger.lookup(footprint, HOUSE, right) is not None, (
+        "the positive control must generate, or the refusal below proves "
+        "nothing about identity")
+
+    swapped = _payload_dir(tmp_path / "swapped", right, footprint, wrong)
+    with pytest.raises(generator.GenerationError) as excinfo:
+        generator.generate(payload_dir=swapped)
+    assert wrong in str(excinfo.value) and right in str(excinfo.value)
+
+
+def test_the_generator_refuses_a_payload_that_will_not_say_which_part_it_is(
+        generator, tmp_path):
+    """Unverifiable is not fine.
+
+    A payload with no ``result.lcsc.number`` cannot be checked against the key
+    it is filed under, and accepting it would leave exactly one row in the
+    ledger whose identity rests on a filename. Fail closed, the same way a
+    missing ledger and a missing declarations file do.
+    """
+    footprint, part = "Package_TO_SOT_SMD:TSOT-23-6", "C780769"
+    directory = _payload_dir(tmp_path / "anonymous", part, footprint, part)
+    payload_path = directory / f"{part}.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["result"].pop("lcsc")
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(generator.GenerationError) as excinfo:
+        generator.generate(payload_dir=directory)
+    assert "states no" in str(excinfo.value)
 
 
 def test_a_missing_declarations_file_is_an_error_not_an_empty_list(

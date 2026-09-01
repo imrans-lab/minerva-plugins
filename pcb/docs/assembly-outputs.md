@@ -171,7 +171,18 @@ different steps.
 "we do not know" as "no rotation needed" is exactly what shipped turned parts,
 and a measured zero and an absent row are deliberately different things. A pair
 whose measurement could not settle the angle refuses too
-(`assembly_orientation_undecided`). A pair with `no_reference` — a mounting
+(`assembly_orientation_undecided`).
+
+**A pair whose lands DISAGREE refuses as well** (`assembly_orientation_geometry_mismatch`),
+even though it states an offset. `geometry_mismatch` means the angle came out
+and the two pad fields are not the same land pattern — our drawing measured
+against a drawing of a different part. Applying that offset would promote a
+mispairing the measurement detected into a trusted production rotation, which
+is worse than the unmeasured pair this step was written for: there, nobody
+claimed to know. The commonest cause is a wrong catalogue number in the BOM, so
+the refusal points at `assembly.house_parts`.
+
+A pair with `no_reference` — a mounting
 hole, a fiducial, a part whose vendor ships no usable drawing — does NOT refuse:
 there is nothing to correct against, and the placed rotation is emitted
 verbatim.
@@ -192,8 +203,20 @@ what we have measured, and the difference is the gap.
 
 `pcb/library/part_orientation_coverage.md` is that difference, generated and
 committed. Every shipped footprint appears in exactly one of three sections —
-measured, declared no-reference, or **UNKNOWN** — and the UNKNOWN section is
-the list of drawings an order can still stop on. Because it is committed, a
+measured, declared no-reference, or **UNKNOWN**.
+
+**It is footprint-level sampling, not exhaustive refusal coverage.** The gate is
+keyed on the PAIR; the fold is keyed on the FOOTPRINT, and a footprint leaves
+UNKNOWN as soon as ONE pair on it is measured. A measured `SOT-23` still refuses
+for every other `SOT-23` catalogue part, and that refusal cannot be listed:
+nothing in the tree knows which catalogue parts a future board will buy, so the
+set of pairs an order could hit is not enumerable. Read UNKNOWN as a LOWER BOUND
+on the drawings an order can stop on, and the measured section — one line per
+PAIR — as the honest statement of what has been done. Two further sections list
+the measured pairs that still refuse: an undecided angle, and a settled angle
+whose lands disagree.
+
+Because it is committed, a
 footprint added to the lock and never measured shows up as a diff on the same
 commit that added it, and `gen_part_orientation.py --check` fails if the file
 and the library have drifted apart. `--coverage` prints the same report without

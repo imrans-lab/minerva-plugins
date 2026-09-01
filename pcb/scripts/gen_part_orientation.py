@@ -215,6 +215,59 @@ def _declared(declared_path: Path, lock: dict) -> tuple:
     return tuple(rows)
 
 
+def _payload_identity(payload: object) -> Union[str, None]:
+    """The catalogue number the PAYLOAD says it is, or ``None``.
+
+    Read from ``result.lcsc.number``, which is the vendor's own statement of
+    what it just sent back — the one field in the document that is not something
+    we chose when we filed it.
+    """
+    result = payload.get("result") if isinstance(payload, dict) else None
+    lcsc = result.get("lcsc") if isinstance(result, dict) else None
+    number = lcsc.get("number") if isinstance(lcsc, dict) else None
+    if isinstance(number, str) and number.strip():
+        return number.strip()
+    return None
+
+
+def _check_payload_identity(part: str, payload_path: Path, payload: object) -> None:
+    """THE PAYLOAD MUST BE THE PART IT IS FILED UNDER.
+
+    A measured row is keyed on the number from ``index.json`` and the filename,
+    and its geometry comes from the file's contents. Nothing else joins those
+    two: a payload saved under the wrong name, a re-fetch that answered with a
+    substitute, a copy-paste when the corpus was extended, all produce a row
+    that is CONFIDENTLY keyed on one part and measured against another — and
+    the ledger, the coverage report and the emitter all believe it, because
+    every one of them reads the key.
+
+    ``measure_footprint_against_part(..., lcsc=part)`` cannot catch this: that
+    argument OVERWRITES the payload's own identity with the one we assumed, so
+    the mismatch is erased by the very call that would have shown it. Hence the
+    check happens HERE, against the bytes, before a row is built — and the
+    override is not passed at all (see :func:`_measured`).
+
+    A payload that states no number is refused rather than trusted: a file that
+    cannot say which part it is cannot be checked against the key it is filed
+    under, and "unverifiable" is not "fine".
+    """
+    stated = _payload_identity(payload)
+    if stated is None:
+        raise GenerationError(
+            f"{payload_path} states no `result.lcsc.number`, so nothing "
+            f"confirms it is the drawing of {part}. A payload that cannot say "
+            f"which part it is cannot be filed under one: re-fetch it, or drop "
+            f"the pairing from index.json")
+    if stated != part:
+        raise GenerationError(
+            f"{payload_path} is the vendor's drawing of {stated}, not of "
+            f"{part} — the corpus pairs it under the wrong catalogue number. "
+            f"A row generated from it would be keyed on {part} and measured "
+            f"against {stated}, which every consumer would read as a "
+            f"measurement of {part}. Rename the payload to match what it "
+            f"contains, or correct index.json")
+
+
 def _measured(payload_dir: Path, lock: dict, lockfile) -> tuple:
     """Every pair in the corpus, measured from the drawings themselves."""
     rows = []
@@ -238,11 +291,17 @@ def _measured(payload_dir: Path, lock: dict, lockfile) -> tuple:
         except (UnicodeDecodeError, ValueError) as exc:
             raise GenerationError(f"{payload_path} is not valid JSON: {exc}") from exc
 
-        # resolve_footprint re-verifies the on-disk bytes against the lock pin,
-        # so the sha recorded beside the measurement is the sha of the drawing
-        # that was actually measured, not a claim copied out of the lock.
+        # BOTH SIDES OF THE PAIR ARE CHECKED AGAINST THE BYTES, not against
+        # what the index claims. resolve_footprint re-verifies the on-disk
+        # footprint against the lock pin, so the sha recorded beside the
+        # measurement is the sha of the drawing actually measured; and
+        # _check_payload_identity re-verifies the vendor file against the
+        # catalogue number it is filed under. No `lcsc=` override is passed:
+        # it would substitute the number we ASSUMED for the one the payload
+        # states, which is exactly the check that just ran.
+        _check_payload_identity(part, payload_path, payload)
         parsed = resolve_footprint(ref, lockfile=lockfile)
-        measurement = po.measure_footprint_against_part(parsed, payload, lcsc=part)
+        measurement = po.measure_footprint_against_part(parsed, payload)
         rows.append(ol.record_from_measurement(
             ref, pairing["house"], part, measurement,
             footprint_sha256=str(entry["sha256"]),

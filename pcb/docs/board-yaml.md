@@ -640,6 +640,7 @@ compiles and fabricates while carrying any of them.
 | `assembly_non_metric_coordinates` | the selected profile states a coordinate unit other than millimetres. |
 | `assembly_orientation_unknown` | a populated part names a catalogue number for the selected house (`assembly.house_parts`) and NOTHING has measured how our footprint is drawn against that vendor part. The emitted rotation is read by the machine against the VENDOR's drawing, so emitting the placed angle unchanged would be guessing zero. See `assembly-outputs.md`. |
 | `assembly_orientation_undecided` | the same pair WAS measured and the drawings did not settle the angle. A `no_reference` pair — a mounting hole, a fiducial, a part whose vendor ships no drawing — does NOT refuse: there is nothing to correct against and the placed rotation is emitted verbatim. |
+| `assembly_orientation_geometry_mismatch` | the pair was measured, the angle came out, and the two drawings are NOT the same land pattern. The offset it states is the angle to a DIFFERENT part, so it is refused rather than applied — check the catalogue number on the component first, since a wrong part number is the commonest way to reach this verdict. |
 
 The per-row and per-placement thresholds are **profile parameters**, not
 constants: the figures a particular house publishes are dialect facts the service

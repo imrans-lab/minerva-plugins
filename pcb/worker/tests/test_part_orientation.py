@@ -346,6 +346,15 @@ def test_an_undecidable_rotation_is_reported_as_ambiguous():
     assert measured.verdict == po.VERDICT_AMBIGUOUS
     assert measured.angle_decided is False
     assert measured.lands_agree is None
+    # THE CONTRACT, ASSERTED DIRECTLY. `offset_deg` is stated if and only if
+    # the angle was decided, so an undecided measurement carries NO number —
+    # not the best-fitting angle, which is what "best" means when nothing
+    # separates it from its runner-up. Asserted here rather than left to the
+    # ledger's habit of discarding it: a direct consumer (a report, an MCP
+    # result) reads this object, and a number beside `angle_decided=False` is
+    # a guess a reader will eventually add to a rotation.
+    assert measured.offset_deg is None
+    assert measured.as_dict()["offset_deg"] is None
     by_angle = dict(measured.residuals_by_angle)
     assert by_angle[0] == pytest.approx(by_angle[90])
 
@@ -368,6 +377,9 @@ def test_a_ratio_alone_would_decide_an_angle_that_rests_on_nothing():
     assert max(by_angle.values()) < po.SEPARATION_FLOOR_MM + 0.01
     assert measured.verdict == po.VERDICT_AMBIGUOUS
     assert measured.angle_decided is False
+    # The 90 fits EXACTLY here, so this is the case most likely to leak a
+    # number: it is still not an offset, because nothing separates it.
+    assert measured.offset_deg is None
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +448,49 @@ def test_the_measurement_is_deterministic_and_json_clean():
         second = _measure(lcsc).as_dict()
         assert first == second
         assert json.loads(json.dumps(first)) == first
+
+
+def test_an_offset_is_stated_if_and_only_if_the_angle_was_decided():
+    """THE DATACLASS CONTRACT, asserted on the object rather than on a
+    consumer's habit of ignoring the field.
+
+    ``OrientationMeasurement`` promises ``offset_deg`` is a number exactly when
+    ``angle_decided``. The ledger happens to discard the offset on an undecided
+    row, so a leak there ships nothing wrong today — but a report, an MCP
+    result, or the next consumer reads this object directly, and a number
+    sitting beside ``angle_decided=False`` is a guess anyone would add to a
+    rotation. Every branch the suite can reach is checked, so the invariant
+    cannot be broken in one branch and left true in the others.
+    """
+    diagonal = math.sqrt(0.5)
+    cases = [_measure(lcsc) for lcsc in sorted(ORACLE)]
+    cases.append(po.measure_footprint_against_part(
+        footprints.resolve_footprint("Fuse:Fuse_1206_3216Metric"),
+        _payload("C49678"), lcsc="C49678"))                   # geometry_mismatch
+    cases.append(po.measure_orientation(
+        po._collect("ours", [("1", 1.0, 0.0), ("2", -1.0, 0.0),
+                             ("3", 0.0, 1.0), ("4", 0.0, -1.0)]),
+        po._collect("vendor", [("1", diagonal, diagonal),
+                               ("2", -diagonal, -diagonal),
+                               ("3", -diagonal, diagonal),
+                               ("4", diagonal, -diagonal)])))  # ambiguous
+    cases.append(po.measure_footprint_against_part(
+        footprints.resolve_footprint("Minerva_Fixture:LOGO_Owl_TestCoupon"),
+        _payload("C49678"), lcsc="C49678"))                   # insufficient_overlap
+    cases.append(po.measure_footprint_against_part(
+        footprints.resolve_footprint("Capacitor_SMD:C_0805_2012Metric"),
+        None))                                                # no_reference
+
+    verdicts = {m.verdict for m in cases}
+    assert verdicts == set(po.VERDICTS), (
+        "this invariant is only worth asserting over every branch; "
+        f"unreached: {sorted(set(po.VERDICTS) - verdicts)}")
+    for measured in cases:
+        assert (measured.offset_deg is not None) is measured.angle_decided, (
+            f"{measured.verdict}: offset_deg={measured.offset_deg!r} beside "
+            f"angle_decided={measured.angle_decided!r} — an offset is stated "
+            f"if and only if the angle was decided")
+        assert (measured.as_dict()["offset_deg"] is None) is not measured.angle_decided
 
 
 def test_every_verdict_the_module_declares_is_reachable():

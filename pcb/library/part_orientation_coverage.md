@@ -11,10 +11,26 @@ folded against the part-orientation ledger (`pcb/library/part_orientation.json`)
 
 A pick-and-place machine reads a position file's rotation against the VENDOR's
 drawing of the part, not against our `.kicad_mod`. `pcb_worker.assembly_orientation`
-therefore REFUSES to emit a rotation for a part bought as a catalogue number
-whose pair nobody has measured. This file is that refusal's contents, listed
-ahead of time: the **UNKNOWN** section below is the set of drawings an order
-could still stop on.
+therefore REFUSES to emit a rotation for a PAIR — our drawing and one house
+catalogue number — that nobody has measured.
+
+## This report is footprint-level SAMPLING, not exhaustive refusal coverage
+
+Read this before quoting a number out of it. The gate is keyed on the PAIR;
+this fold is keyed on the FOOTPRINT, and a footprint counts as measured as soon
+as ONE pair on it has been. A measured `SOT-23` still refuses for every other
+`SOT-23` catalogue part, and that refusal cannot be listed here: nothing in the
+tree knows which catalogue parts a future board will buy, so the set of pairs an
+order could hit is not enumerable at all.
+
+So the **UNKNOWN** section is a LOWER BOUND on what an order can stop on —
+drawings where not even one pair has been done. It is not the whole set. The
+**Measured** section is the honest claim: it lists the PAIRS that have been
+measured, one line each, which is why they are printed rather than counted.
+
+"Measured" is also not "passes". A measured pair still refuses when the
+drawings could not settle an angle, and when they settled one against a land
+pattern that is not ours. Both have their own sections below.
 
 An unknown footprint is not a defect. It is a drawing nobody has yet paired
 with a real vendor drawing of a real catalogue part, and it stays unknown until
@@ -33,7 +49,7 @@ drawing, which is far worse than the gap.
 
 ## UNKNOWN — nothing has ever measured this drawing
 
-An order that buys a catalogue part on one of these refuses with `assembly_orientation_unknown`. To close one, add the vendor's package payload for the part it is bought as to `pcb/worker/tests/testdata/vendor_footprints/`, pair it in that directory's `index.json`, and regenerate. Where the lock already names a catalogue number it is repeated below as a LEAD — it is not a pairing and nothing has been measured against it.
+An order that buys a catalogue part on one of these refuses with `assembly_orientation_unknown`. So does a catalogue part nobody has measured on a drawing listed as MEASURED below — this section is the lower bound, not the whole set of refusals. To close one, add the vendor's package payload for the part it is bought as to `pcb/worker/tests/testdata/vendor_footprints/`, pair it in that directory's `index.json`, and regenerate. Where the lock already names a catalogue number it is repeated below as a LEAD — it is not a pairing and nothing has been measured against it.
 
 - `Adafruit:MAX98357A_I2S_1x7_P2.54mm` — the lock names no catalogue part for it
 - `Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals` — the lock names no catalogue part for it
@@ -58,6 +74,8 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 - `Sunlord:L_Sunlord_AMWPH4018_4x4x1.8mm` — the lock names `AMWPH4018S2R2MT`, `C2846183`
 
 ## Measured — compared against a vendor's drawing
+
+One line per PAIR, because the pair is what the gate is keyed on. A footprint appears here as soon as one of its pairs has been measured; any OTHER catalogue part on the same drawing is still unknown and still refuses.
 
 - `Capacitor_SMD:C_0805_2012Metric`
   - jlcpcb `C49678` — 0 deg
@@ -100,6 +118,18 @@ A human statement that no vendor sells an oriented part drawn as this land patte
 ## Measured but undecided — covered, and still refused
 
 A pair somebody measured where the drawings did not separate one angle from the next. It states no offset, so the emitter refuses it with `assembly_orientation_undecided`. Listed apart from the measured count because a reader looking for what can stop an order needs both.
+
+_None._
+
+## Measured, and the lands DISAGREE — covered, and still refused
+
+A pair whose angle came out and whose pads do not sit where the vendor's do. It carries an offset and the emitter still refuses it (`assembly_orientation_geometry_mismatch`): that offset is the angle between our drawing and a drawing of a DIFFERENT part, and applying it would turn a detected mispairing into a trusted production rotation. The commonest cause is a wrong catalogue number, so check the part before either drawing.
+
+_None._
+
+## Measured, and there was nothing to measure against — PASSES
+
+The vendor ships no usable package drawing for this particular part. That is a finding, not a failure to look: no correction exists, none is applied, and the placed rotation is emitted verbatim. Listed so that a pair with no offset is never read as a refusal — unlike the two sections above, these do not stop an order.
 
 _None._
 
