@@ -12,3 +12,13 @@
 # belt to this file's braces.
 *.yaml text eol=lf
 *.yml text eol=lf
+
+# Any file whose BYTES are hashed must check out identically on every platform.
+# Same failure as the *.yaml pin above, one layer along: the acquisition lock
+# stores sha256 of .kicad_mod bytes and the orientation ledger stores sha256 of
+# the vendor payload bytes, both via read_bytes(), which is byte-exact. Under
+# git's Windows default core.autocrlf those files arrive as CRLF and every
+# stored digest mismatches — pcb-v0.5.8 tag build, job "pcb test
+# (windows-latest)": 2 failed on vendor_sha256 while Linux and macOS passed.
+*.kicad_mod text eol=lf
+worker/tests/testdata/vendor_footprints/*.json text eol=lf
