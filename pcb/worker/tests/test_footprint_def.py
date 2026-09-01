@@ -319,6 +319,7 @@ def test_real_dip6_legacy_arc_normalizes_center_start_sweep():
 
 _EXPECTED_SEED_MARKERS = {
     "Capacitor_SMD:C_0805_2012Metric": (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Capacitor_SMD:C_1206_3216Metric": (("uncaptured_graphic", "F.Fab", "fab"),),
     "Resistor_SMD:R_0805_2012Metric": (("uncaptured_graphic", "F.Fab", "fab"),),
     "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT": (
         ("uncaptured_graphic", "F.SilkS", "silk"),

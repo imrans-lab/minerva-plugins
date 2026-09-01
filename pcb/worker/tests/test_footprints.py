@@ -86,6 +86,7 @@ EXPECTED_PAD_COUNTS = {
     # QFN's 17 copper pads + 4 paste-only nodes = 21).
     "Capacitor_SMD:C_0402_1005Metric": 2,
     "Capacitor_SMD:C_1210_3225Metric": 2,
+    "Capacitor_SMD:C_1206_3216Metric": 2,
     # 0805 R+C added to seed 2026-08-20. The seed shipped SYNTHETIC 0805 lands
     # under these very filenames, keyed bare ("C_0805"/"R_0805"); those moved to
     # *_SeedSynthetic.kicad_mod so the real parts could take the canonical path.
@@ -101,6 +102,11 @@ EXPECTED_PAD_COUNTS = {
     "Fuse:Fuse_1206_3216Metric": 2,
     "Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm": 2,
     "MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm": 8,
+    # Rev B replacements for the two above them: the Syntiant mic supersedes
+    # the MEMSensing part (same 8-pad LGA, different pinout), and the Sunlord
+    # inductor supersedes the Vishay-named land.
+    "Syntiant:SPK0641HT4H-1_TopPort_LGA-8_4x3mm": 8,
+    "Sunlord:L_Sunlord_AMWPH4018_4x4x1.8mm": 2,
     "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm": 21,
     "Package_TO_SOT_SMD:SOT-23": 3,
     "Package_TO_SOT_SMD:TSOT-23-6": 6,
