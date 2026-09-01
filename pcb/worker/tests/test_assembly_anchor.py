@@ -327,6 +327,12 @@ def test_expansion_composes_offset_rotation_and_side_together():
     socket's entire pin span, from where it is. (A 180-degree placement rotation
     would have hidden the error, since 90 + 180 and 90 - 180 are the same
     angle.)
+
+    WHAT THIS CASE CANNOT SEE, so nobody reads it as the whole rule: its two
+    operands are EQUAL, so ``p - c`` and a swapped ``c - p`` give the same 0
+    here, and the ADDING half — a child rotation on the TOP side — is not on
+    this board at all. Both are pinned with non-colliding operands in
+    tests/test_assembly_child_rotation.py.
     """
     places = _placements(_compiled())
 

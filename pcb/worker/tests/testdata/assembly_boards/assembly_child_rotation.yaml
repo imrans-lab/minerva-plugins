@@ -1,0 +1,95 @@
+# THE CHILD-ROTATION COMPOSITION fixture: what a placement's OWN rotation does
+# when it meets its parent's.
+#
+# WHY IT IS SEPARATE FROM assembly_anchor.yaml AND assembly_anchor_override.yaml
+# -----------------------------------------------------------------------------
+# Both of those own byte seals over their whole emitted table, so a component
+# added to either rewrites an oracle that is about something else. This board
+# owns exactly one claim and can be read without knowing theirs.
+#
+# THE GAP IT CLOSES. Across the whole corpus before this file, an expansion
+# child's rotation was exercised in ONE configuration: assembly_anchor.yaml's
+# U2S_B, rotation 90 under a parent at rotation 90 on the bottom. That pair
+# COLLIDES — 90 - 90 and 90 - 90 read the same however the two operands are
+# ordered — and on the TOP side, where the composition ADDS, no child anywhere
+# stated a rotation at all. assembly_anchor_override.yaml goes further and sets
+# `rotation_deg: 0` on every placement including U4S's, whose parent is at 90,
+# so the one worked example of the block teaches the exact shape that shipped
+# wrong: children silently wearing their parent's angle.
+#
+# HOW THE NUMBERS ARE CHOSEN. For each component the composed answer must not
+# coincide with any wrong composition of the same two operands. Taking p for the
+# parent's rotation and c for the child's, every one of p+c, p-c, c-p, p, c and
+# 0 is a distinct angle in both components below, so no single assertion can
+# pass on the wrong rule:
+#
+#   U6R_A  top     p 270, c 225  ->  p+c = 495 -> 135   (p-c 45, c-p 315)
+#   U7R_A  bottom  p  90, c 315  ->  p-c = -225 -> 135  (p+c 45, c-p 225)
+#
+# Both wrap: 495 past a full turn, -225 below zero, and an unnormalized answer
+# is refused outright by PhysicalPlacement's [0, 360) invariant rather than
+# emitted. The two reach the SAME 135 from opposite sides through opposite
+# operations, which is a property of the rule and not of either input.
+#
+# THE OFFSETS ARE DELIBERATELY LOPSIDED — no |x| equals its own |y|, and no
+# placement's offset is another's negation — so an offset composed in the wrong
+# frame, or through the child's angle instead of the parent's, cannot land back
+# on the right point by symmetry.
+#
+# EVERY PLACEMENT AUTHORS THE SAME ANCHOR (3, 8), lopsided for the same reason.
+# One anchor across four placements makes the anchor a pure witness of the
+# transform: the four emitted anchors differ ONLY by the composition, because
+# nothing else about them differs.
+#
+# THE SILENT HALF IS AUTHORED AS AN ABSENCE. U6R_B and U7R_B state no
+# `rotation_deg` key at all — not a zero. That is the shape the defect shipped
+# in, and the expectation it implies (the child wears its parent's angle,
+# exactly, on both sides) is named and asserted rather than left implicit.
+#
+# Deliberately NO nets: every claim here is geometry, and a net list would only
+# add a way for the fixture to stop compiling for an unrelated reason.
+version: 1
+name: AssemblyChildRotation
+width_mm: 140
+height_mm: 110
+origin: {x_mm: 0, y_mm: 0}
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+
+components:
+  # --- TOP: the ADDING half, which nothing exercised. A authors 225 under a
+  #     parent at 270 and must come out at 135; B authors nothing and must come
+  #     out at the parent's own 270. Two siblings, one parent, two angles.
+  - ref: U6R
+    footprint: Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical
+    value: DevKit socket set
+    x_mm: 45.0
+    y_mm: 35.0
+    rotation_deg: 270
+    layer: top
+    assembly:
+      mpn: C41376161
+      placements:
+        - {ref: U6R_A, offset_mm: {x: 18, y: -7}, anchor_mm: {x: 3, y: 8}, rotation_deg: 225}
+        - {ref: U6R_B, offset_mm: {x: -12, y: 21}, anchor_mm: {x: 3, y: 8}}
+
+  # --- BOTTOM: the SUBTRACTING half, with operands that do not collide. A
+  #     authors 315 under a parent at 90: subtracting gives 135, adding would
+  #     give 45, and reversing the operands would give 225. B again authors
+  #     nothing and must come out at the parent's own 90.
+  - ref: U7R
+    footprint: Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical
+    value: DevKit socket set
+    x_mm: 110.0
+    y_mm: 40.0
+    rotation_deg: 90
+    layer: bottom
+    assembly:
+      mpn: C41376161
+      placements:
+        - {ref: U7R_A, offset_mm: {x: 16, y: 25}, anchor_mm: {x: 3, y: 8}, rotation_deg: 315}
+        - {ref: U7R_B, offset_mm: {x: -22, y: 8}, anchor_mm: {x: 3, y: 8}}

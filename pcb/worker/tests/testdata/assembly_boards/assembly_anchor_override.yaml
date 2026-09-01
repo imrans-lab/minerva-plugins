@@ -35,6 +35,14 @@
 #        west strip is 11.43 west of it, and B's origin is 22.86 east of the
 #        datum while the east strip is only 11.43 east of it.
 #
+# EVERY PLACEMENT HERE SETS `rotation_deg: 0` — including U4S's two, whose
+# PARENT sits at 90. That is deliberate: this board is about the ANCHOR, and a
+# turned child would move the anchors it exists to pin. But it is also exactly
+# the shape a real board shipped wrong in — children silently wearing their
+# parent's angle — so do not read it as the worked example of how a placement
+# rotation composes. That claim lives in assembly_child_rotation.yaml and
+# tests/test_assembly_child_rotation.py.
+#
 # Deliberately NO nets: every claim here is geometry, and a net list would only
 # add a way for the fixture to stop compiling for an unrelated reason.
 version: 1

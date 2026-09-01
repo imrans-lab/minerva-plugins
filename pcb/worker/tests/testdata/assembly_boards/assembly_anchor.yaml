@@ -24,6 +24,12 @@
 # expansion put through a parent rotation, a bottom side AND a per-placement
 # rotation at once, which is the only case where all three compose.
 #
+# U2S's TWO ROTATION OPERANDS COLLIDE, on purpose and with a limit: parent 90
+# and child 90 refuse `p + c` (which would emit 180), but `p - c` and a swapped
+# `c - p` are the same answer when the operands are equal, and this board says
+# nothing at all about the TOP side, where the composition ADDS. Non-colliding
+# operands on both sides live in assembly_child_rotation.yaml.
+#
 # Deliberately NO nets: every claim here is about geometry, and a net list would
 # only add a way for the fixture to stop compiling for an unrelated reason.
 version: 1
