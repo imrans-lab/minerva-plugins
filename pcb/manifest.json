@@ -1,7 +1,7 @@
 {
   "id": "pcb",
   "name": "PCB Editor",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "host_api_version": "1",
   "release_targets": [
     "linux-x86_64",
