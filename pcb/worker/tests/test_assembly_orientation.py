@@ -1,0 +1,393 @@
+"""The part-orientation correction on the emitted CPL, and the refusal that
+stops an unmeasured part from shipping with a guessed rotation.
+
+WHAT IS ACTUALLY BEING PROVED, and why it needs a particular fixture
+--------------------------------------------------------------------
+A pick-and-place machine reads the position file's rotation against the
+VENDOR's canonical drawing of the part. Our footprint may be drawn turned
+relative to that drawing, and the emitted rotation therefore has to carry the
+measured offset between the two. The sum is an ADDITION::
+
+    our_drawing   = rotate(vendor_drawing, offset)
+    board_copper  = rotate(our_drawing, placed) = rotate(vendor_drawing, placed + offset)
+    machine puts  = rotate(vendor_drawing, emitted)
+    therefore       emitted = placed + offset
+
+THE TRAP THIS FILE IS BUILT AROUND. An inverted sign is INVISIBLE on every part
+whose offset is 0 or 180, because ``R + 180`` and ``R - 180`` are the same
+number modulo 360 — and nine of the eleven pairs the shipped ledger has
+measured are exactly 0 or 180. A suite assembled only out of those passes with
+the correction SUBTRACTING and ships every quarter-turn part a quarter turn
+out.
+
+So the fixture is built around the two measured 270s — ``TSOT-23-6``/``C780769``
+and ``VQFN-16-1EP_3x3mm``/``C910544`` — and two tests assert their emitted
+numbers against the arithmetic AND against the value the opposite sign would
+have produced. :func:`test_the_ledger_still_states_the_two_quarter_turns_this_suite_rests_on`
+guards that premise: if either pair is ever re-measured to 0 or 180, this file
+stops being able to falsify anything, and that must fail loudly rather than go
+green.
+
+THE ORACLES
+-----------
+* The SIGN — the composition above, worked through from
+  ``part_orientation``'s stated convention (``offset_deg`` is the rotation
+  carrying the vendor's drawing onto ours) and the emitted frame's own
+  counter-clockwise-positive reading. Each assertion states both the number the
+  addition gives and the number the subtraction would have given.
+* The OFFSETS — the shipped ledger ``pcb/library/part_orientation.json``, read,
+  not retyped. A hand-copied 270 here would drift the day the drawing changes.
+* The FRAME — ``assembly_outputs.cpl_frame_point``, so the test that the
+  correction did not disturb X/Y compares against the module's own map rather
+  than a second copy of it.
+* The REFUSALS — the three states ``orientation_ledger`` defines. UNKNOWN is an
+  ABSENT row, which is why the unknown-part board names a catalogue number
+  nothing has ever measured rather than writing a row that says "unknown".
+
+Boards are SYNTHETIC and built from seed-library footprints; no product board
+appears here (``test_corpus_policy.py`` enforces that by content).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from pcb_worker import assembly_orientation as aor
+from pcb_worker import assembly_outputs as ao
+from pcb_worker import orientation_ledger as ol
+from pcb_worker import part_orientation as po
+from pcb_worker.compile_board import compile_board
+from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
+
+BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
+FIXTURE = BOARDS / "assembly_orientation.yaml"
+
+HOUSE = "jlcpcb"
+
+#: The two measured quarter turns the sign rests on, as
+#: ``(footprint, catalogue number)``. Named here and checked against the
+#: shipped ledger below; the ANGLES are never written down in this file.
+QUARTER_TURN_PAIRS = (
+    ("Package_TO_SOT_SMD:TSOT-23-6", "C780769"),
+    ("Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm", "C910544"),
+)
+
+#: THE ONE PLACE the fixture's emitted position file is written down. Every
+#: number in it is the placed rotation plus the ledger's offset — the table in
+#: the fixture's own header derives each row.
+FIXTURE_CPL = (
+    "Designator,Mid X,Mid Y,Layer,Rotation\r\n"
+    "J1,12.6000,-22.0000,Top,270.0000\r\n"
+    "R1,30.0000,-20.0000,Top,45.0000\r\n"
+    "U1,8.0000,-8.0000,Top,300.0000\r\n"
+    "U2,20.0000,-8.0000,Top,270.0000\r\n"
+)
+
+
+def _compiled(board: dict):
+    """The board the emitters read. Fails LOUDLY rather than skipping: a
+    fixture that stopped compiling would silently stop testing anything."""
+    result = compile_board(board)
+    if not isinstance(result, ResolutionSuccess):
+        raise AssertionError(
+            "fixture did not compile: "
+            + ", ".join(d.code for d in result.diagnostics
+                        if d.severity is DiagnosticSeverity.ERROR))
+    return result.board
+
+
+@pytest.fixture(scope="module")
+def fixture_board():
+    return _compiled(yaml.safe_load(FIXTURE.read_text(encoding="utf-8")))
+
+
+@pytest.fixture(scope="module")
+def shipped() -> ol.OrientationLedger:
+    return ol.load_ledger()
+
+
+def _rows(board, *, orientation=None) -> dict:
+    """``{ref: CplRow}`` for one emission."""
+    emission = ao.emit(board, "jlc", orientation=orientation)
+    return {row.ref: row for row in emission.cpl}
+
+
+def _one_part_board(footprint: str, part: str | None, *,
+                    rotation_deg: float = 30, layer: str = "top",
+                    mpn: str = "C780769", populate: bool = True) -> dict:
+    """A one-component board that compiles, for the cases that vary ONE fact.
+
+    ``part`` is the house catalogue number — the half of the orientation key a
+    board author writes. ``None`` authors none at all, which is the ungated
+    shape."""
+    assembly: dict = {"mpn": mpn, "populate": populate}
+    if part is not None:
+        assembly["house_parts"] = {HOUSE: part}
+    return {
+        "version": 1, "name": "OneOrientationPart",
+        "width_mm": 20, "height_mm": 20, "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{
+            "ref": "U1", "footprint": footprint, "value": "part",
+            "x_mm": 10.0, "y_mm": 10.0, "rotation_deg": rotation_deg,
+            "layer": layer, "assembly": assembly,
+        }],
+    }
+
+
+def _ledger(footprint: str, part: str, **row) -> ol.OrientationLedger:
+    """A ledger holding exactly one MEASURED row for one pair.
+
+    Built rather than loaded because the shipped ledger cannot hold the states
+    these tests need to reach — an undecided measurement, and a pair-keyed
+    no-reference — without somebody first buying a part that has them."""
+    return ol.OrientationLedger(measured=(
+        ol.OrientationRecord(footprint=footprint, house=HOUSE, part=part, **row),))
+
+
+# ---------------------------------------------------------------------------
+# THE PREMISE. Without this, nothing below can falsify the sign.
+# ---------------------------------------------------------------------------
+
+
+def test_the_ledger_still_states_the_two_quarter_turns_this_suite_rests_on(shipped):
+    """The sign is only falsifiable by a 90 or a 270.
+
+    Every other assertion in this file about the SIGN reads its offset from the
+    ledger, so if these two pairs were ever re-measured to 0 or 180 the suite
+    would keep passing while proving nothing — the exact failure the whole file
+    is arranged against. Fail here instead, and say why."""
+    for footprint, part in QUARTER_TURN_PAIRS:
+        record = shipped.lookup(footprint, HOUSE, part)
+        assert record is not None, (
+            f"{footprint}/{part} has no ledger row; this suite needs it to "
+            f"falsify the correction's SIGN")
+        assert record.offset_deg in (90, 270), (
+            f"{footprint}/{part} now measures {record.offset_deg}. Only a 90 or "
+            f"a 270 can tell an added offset from a subtracted one — at 0 or "
+            f"180 both signs emit the same number. Re-point this suite at a "
+            f"pair that still turns a quarter, or it is no longer testing the "
+            f"sign at all")
+
+
+# ---------------------------------------------------------------------------
+# THE SIGN
+# ---------------------------------------------------------------------------
+
+
+def test_a_quarter_turn_part_is_emitted_at_the_placed_rotation_plus_the_offset(
+        fixture_board, shipped):
+    """U1: our TSOT-23-6 drawing is a quarter turn off the vendor's, and the
+    board places it at 30.
+
+    The two candidate answers are 30 + 270 = 300 and 30 - 270 = -240 = 120, and
+    they are different numbers — which is the whole reason this part is in the
+    fixture. The addition is what the composition in the module docstring
+    gives."""
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    offset = shipped.lookup(footprint, HOUSE, part).offset_deg
+    row = _rows(fixture_board)["U1"]
+    placed = 30.0
+    assert row.rotation_deg == pytest.approx((placed + offset) % 360)
+    assert row.rotation_deg == pytest.approx(300.0)
+    assert row.rotation_deg != pytest.approx((placed - offset) % 360), (
+        "the emitted rotation is the SUBTRACTION of the measured offset; a "
+        "part drawn a quarter turn off will be assembled a half turn from "
+        "where it belongs")
+
+
+def test_the_second_quarter_turn_part_confirms_the_sign_independently(
+        fixture_board, shipped):
+    """U2 is the same claim on a different package at a different placed angle.
+
+    Its pad field is rotationally symmetric, so a wrong answer here is
+    invisible in a 3D preview and there is no human check downstream — which is
+    precisely why it is asserted in the file rather than looked at."""
+    footprint, part = QUARTER_TURN_PAIRS[1]
+    offset = shipped.lookup(footprint, HOUSE, part).offset_deg
+    row = _rows(fixture_board)["U2"]
+    placed = 0.0
+    assert row.rotation_deg == pytest.approx((placed + offset) % 360)
+    assert row.rotation_deg == pytest.approx(270.0)
+    assert row.rotation_deg != pytest.approx((placed - offset) % 360)
+
+
+def test_the_bottom_side_composes_the_same_sum(shipped):
+    """A bottom placement is the MIRROR of the same rotation, and the mirror is
+    applied to the vendor's part and to our copper alike — so it cancels and
+    the sum is unchanged. Asserted rather than assumed: a side-dependent sign
+    would be invisible on every top-only fixture."""
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    offset = shipped.lookup(footprint, HOUSE, part).offset_deg
+    board = _compiled(_one_part_board(footprint, part, rotation_deg=30,
+                                      layer="bottom"))
+    row = _rows(board)["U1"]
+    assert row.side == "bottom"
+    assert row.rotation_deg == pytest.approx((30.0 + offset) % 360)
+
+
+def test_the_sum_wraps_rather_than_running_past_a_full_turn():
+    """``corrected_rotation`` is the ONE place the sum is written, and the
+    emitted angle stays in [0, 360) the way ``PhysicalPlacement`` guarantees
+    the placed one does — so a corrected row is indistinguishable in shape from
+    an uncorrected one."""
+    assert aor.corrected_rotation(180, 270) == pytest.approx(90.0)
+    assert aor.corrected_rotation(0, 0) == pytest.approx(0.0)
+    assert 0.0 <= aor.corrected_rotation(359.5, 270) < 360.0
+
+
+# ---------------------------------------------------------------------------
+# THE WHOLE FILE
+# ---------------------------------------------------------------------------
+
+
+def test_the_position_file_is_the_hand_derived_bytes(fixture_board):
+    """The seal. Every row is derived in the fixture's own header table, and
+    the bytes are asserted through the RENDERER — a correction that only
+    reached the row objects and not the CSV would be a correction nobody
+    ships."""
+    package = ao.build_package(fixture_board, "jlc")
+    assert package.files[package.cpl_file] == FIXTURE_CPL
+
+
+def test_the_correction_moves_the_rotation_and_nothing_else(fixture_board):
+    """The frame contract is untouched. X is the anchor's X verbatim and Y is
+    its Y negated, compared against ``assembly_outputs``' own map rather than a
+    second copy of it, for the part whose rotation moved the most."""
+    board = fixture_board
+    anchor = {c.ref: c.physical_placements[0].anchor for c in board.components}["U1"]
+    row = _rows(board)["U1"]
+    assert (row.x_mm, row.y_mm) == ao.cpl_frame_point(anchor)
+
+
+def test_a_measured_zero_is_applied_as_a_zero(fixture_board, shipped):
+    """R1's pair was measured and the answer was 0. A measured zero is a fact,
+    not an absence: the row must be found, and the emitted rotation must be the
+    placed one — which is also what an UNMEASURED part would have emitted, and
+    is why the two states can never be allowed to collapse into one."""
+    record = shipped.lookup("Resistor_SMD:R_0805_2012Metric", HOUSE, "C149504")
+    assert record.offset_deg == 0
+    assert ol.state_of(record) == ol.STATE_MEASURED
+    assert _rows(fixture_board)["R1"].rotation_deg == pytest.approx(45.0)
+
+
+# ---------------------------------------------------------------------------
+# THE REFUSAL
+# ---------------------------------------------------------------------------
+
+
+def test_an_unmeasured_catalogue_part_refuses_by_name(shipped):
+    """UNKNOWN is an ABSENT row, and it must stop the file.
+
+    The board buys a real seed footprint under a catalogue number nothing has
+    ever measured. Emitting the placed rotation here is the defect this unit
+    exists to close, so the refusal names the component, the pair and the
+    field, the way every other assembly refusal does."""
+    footprint = QUARTER_TURN_PAIRS[0][0]
+    unmeasured = "C000000"
+    assert shipped.lookup(footprint, HOUSE, unmeasured) is None
+    board = _compiled(_one_part_board(footprint, unmeasured))
+    with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+        ao.build_cpl(board, "jlc")
+    error = excinfo.value
+    assert error.code == aor.CODE_UNKNOWN
+    assert error.component == "U1"
+    assert error.field == aor.FIELD_HOUSE_PARTS
+    assert unmeasured in str(error) and footprint in str(error)
+
+
+def test_the_refusal_reaches_the_bom_and_the_whole_order_package_too(shipped):
+    """ONE EMISSION, so a caller asking for only the BOM refuses as well.
+
+    That is not pedantry: the BOM and the CPL are ordered together, and a house
+    that receives a buyable BOM whose CPL was refused has been told to buy
+    parts nobody could place correctly."""
+    board = _compiled(_one_part_board(QUARTER_TURN_PAIRS[0][0], "C000000"))
+    for build in (ao.build_bom, ao.build_cpl, ao.build_package):
+        with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+            build(board, "jlc")
+        assert excinfo.value.code == aor.CODE_UNKNOWN
+
+
+def test_an_undecided_measurement_refuses_rather_than_emitting_the_placed_angle():
+    """We looked, and the drawings did not separate the angles.
+
+    ``orientation_ledger`` stores that as a MEASURED row with no offset — a
+    state distinct from both "aligned" and "never looked at" — and a gate must
+    refuse it on ``offset_deg is None`` rather than on the state, because a
+    decided ``geometry_mismatch`` still carries a usable angle."""
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    board = _compiled(_one_part_board(footprint, part))
+    ledger = _ledger(footprint, part, verdict=po.VERDICT_AMBIGUOUS,
+                     offset_deg=None, angle_decided=False,
+                     detail="0 and 180 fit within the separation floor")
+    with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+        ao.build_cpl(board, "jlc", orientation=ledger)
+    assert excinfo.value.code == aor.CODE_UNDECIDED
+    assert excinfo.value.component == "U1"
+
+
+# ---------------------------------------------------------------------------
+# WHAT MUST NOT REFUSE
+# ---------------------------------------------------------------------------
+
+
+def test_a_part_with_no_vendor_drawing_is_emitted_verbatim(shipped):
+    """NO_REFERENCE is not a failure to measure — it is the finding that there
+    is nothing to measure AGAINST. There is no correction to apply and there
+    never will be, so the placed rotation is emitted exactly as it was before
+    this step existed."""
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    board = _compiled(_one_part_board(footprint, part, rotation_deg=30))
+    ledger = _ledger(footprint, part, verdict=po.VERDICT_NO_REFERENCE,
+                     detail="the vendor payload carries no package drawing")
+    row = _rows(board, orientation=ledger)["U1"]
+    assert ol.state_of(ledger.lookup(footprint, HOUSE, part)) == ol.STATE_NO_REFERENCE
+    assert row.rotation_deg == pytest.approx(30.0)
+
+
+def test_a_footprint_wide_declaration_answers_for_whatever_is_bought_against_it():
+    """A mounting hole has no vendor drawing for ANY part, so its declaration
+    is keyed on the footprint alone and the pair lookup falls back to it.
+
+    Safe in one direction only, and it is the safe one: a footprint-wide row is
+    validated to be a declared no-reference carrying no numbers, so the
+    fallback can never substitute an offset for a measurement."""
+    footprint = "MountingHole:MountingHole_3.2mm_M3"
+    board = _compiled(_one_part_board(footprint, "C000000", rotation_deg=30,
+                                      mpn="C000000"))
+    declared = ol.OrientationLedger(declared=(
+        ol.OrientationRecord(footprint=footprint, house=None, part=None,
+                             verdict=po.VERDICT_NO_REFERENCE, declared=True,
+                             reason="a plated hole, not a part"),))
+    assert _rows(board, orientation=declared)["U1"].rotation_deg == pytest.approx(30.0)
+
+
+def test_board_furniture_never_reaches_the_gate(fixture_board):
+    """FID1 is fabricated copper nobody buys: not populated, no catalogue
+    number, no CPL row. It must not be asked for an orientation it could never
+    have — a gate that refused it would refuse every board with a fiducial."""
+    assert "FID1" not in _rows(fixture_board)
+    assert "FID1" in ao.emit(fixture_board, "jlc").excluded_refs
+
+
+def test_a_part_identified_only_by_mpn_is_not_gated(shipped):
+    """A STATED GAP, asserted so it is a decision and not an oversight.
+
+    The orientation key's second half is a HOUSE catalogue number, because that
+    is what the ledger is keyed on and what the measurement corpus pairs. A
+    board that names only ``assembly.mpn`` — a MANUFACTURER's number — offers
+    nothing to join on, and inventing that join would be inventing exactly the
+    loose key the ledger refuses to have. Such a part is bought and placed and
+    is NOT corrected; closing that is a board-schema question, tracked
+    separately."""
+    footprint = QUARTER_TURN_PAIRS[0][0]
+    board = _compiled(_one_part_board(footprint, None, rotation_deg=30,
+                                      mpn="C000000"))
+    row = _rows(board)["U1"]
+    assert row.house_part is None
+    assert row.rotation_deg == pytest.approx(30.0)

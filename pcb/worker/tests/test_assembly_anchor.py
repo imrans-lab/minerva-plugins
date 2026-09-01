@@ -53,12 +53,25 @@ from pcb_worker.resolved_board import (
     ANCHOR_BASIS_ORIGIN, DiagnosticSeverity, ResolutionSuccess,
 )
 # The CPL byte seal for assembly_resolved.yaml has exactly one owner.
+from tests import orientation_corpus
 from tests.test_assembly_outputs import RESOLVED_FIXTURE_CPL
 
 BOARDS = Path(__file__).resolve().parent / "testdata" / "assembly_boards"
 ANCHOR_FIXTURE = BOARDS / "assembly_anchor.yaml"
 OVERRIDE_FIXTURE = BOARDS / "assembly_anchor_override.yaml"
 RESOLVED_FIXTURE = BOARDS / "assembly_resolved.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _corpus_orientation(monkeypatch):
+    """This suite emits assembly outputs from boards drawn on the corpus's own
+    synthetic land patterns, which no vendor draws — so the part-orientation
+    gate would refuse every emission here for pairs that could never have been
+    measured. Declare them, once, from the shared corpus statement; orientation
+    itself is measured by test_assembly_orientation.py."""
+    orientation_corpus.install(monkeypatch)
+
+
 LIBRARY = Path(__file__).resolve().parents[2] / "library" / "footprints"
 
 #: The measured body offset of the fixture's pin-1-origin footprint. Every J and

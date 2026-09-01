@@ -101,7 +101,9 @@
     "assembly_duplicate_designator",
     "assembly_empty_expansion",
     "assembly_paste_undecided",
-    "assembly_missing_identity"
+    "assembly_missing_identity",
+    "assembly_orientation_unknown",
+    "assembly_orientation_undecided"
   ],
   "advisory_rules": [
     "assembly_house_component_to_edge",

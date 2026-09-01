@@ -638,6 +638,8 @@ compiles and fabricates while carrying any of them.
 | `assembly_paste_undecided` | a not-populated part's lands take paste and `paste` is still `auto`. |
 | `assembly_missing_identity` | a populated part lacks an identity field the selected profile requires. |
 | `assembly_non_metric_coordinates` | the selected profile states a coordinate unit other than millimetres. |
+| `assembly_orientation_unknown` | a populated part names a catalogue number for the selected house (`assembly.house_parts`) and NOTHING has measured how our footprint is drawn against that vendor part. The emitted rotation is read by the machine against the VENDOR's drawing, so emitting the placed angle unchanged would be guessing zero. See `assembly-outputs.md`. |
+| `assembly_orientation_undecided` | the same pair WAS measured and the drawings did not settle the angle. A `no_reference` pair — a mounting hole, a fiducial, a part whose vendor ships no drawing — does NOT refuse: there is nothing to correct against and the placed rotation is emitted verbatim. |
 
 The per-row and per-placement thresholds are **profile parameters**, not
 constants: the figures a particular house publishes are dialect facts the service

@@ -123,15 +123,66 @@ Boards authored in the pcb-architect dialect use the OPPOSITE sign for their own
 `rotation` field; per `geometry.py` that is reconciled at IMPORT time, so
 `rotation_deg` is already KiCad-equivalent before an emitter sees it.
 
+## The part-orientation correction
+
+Everything above describes where the part GOES. It says nothing about which way
+the part is TURNED relative to the vendor's own drawing of it — and that is the
+number the machine actually interprets. A pick-and-place house reads the
+position file's rotation against the VENDOR's canonical orientation, so where
+our footprint is drawn turned relative to the vendor's, the part is assembled
+turned: a connector's signal leads onto its mounting-tab lands, an IC a quarter
+turn out with every pin function moved. Nothing upstream sees it — our copper is
+self-consistent, DRC is clean, the gerbers are right — and where the pad field
+is rotationally symmetric it is invisible in a 3D preview too.
+
+`part_orientation.py` measures that offset for one (our footprint, vendor part)
+pair; `pcb/library/part_orientation.json` stores it, keyed on
+`(footprint ref, house, catalogue number)`; and `assembly_orientation.py`
+applies it to the emitted row:
+
+```
+emitted rotation = (placed rotation + measured offset) mod 360
+```
+
+**It is an ADDITION.** `offset_deg` is the rotation carrying the VENDOR's
+drawing onto OURS, so our copper on the board is the vendor's drawing turned by
+`placed + offset`, and the file has to say so for the machine to land the part
+on it. Watch this sign: it is INVISIBLE on any part whose offset is 0 or 180
+(`R + 180` and `R - 180` are the same number modulo 360), and nine of the eleven
+pairs measured so far are exactly that. Only a 90 or a 270 can falsify it, which
+is why `worker/tests/test_assembly_orientation.py` is built around the two
+measured 270s and refuses to go green if either is ever re-measured flat.
+
+The correction is a SEPARATE step from the frame map above, run by
+`assembly_outputs.emit` over the rows `_walk` finished. Two different facts, two
+different steps.
+
+**A catalogue part nobody measured REFUSES the emission**, by name
+(`assembly_orientation_unknown`), naming the component and the pair. Treating
+"we do not know" as "no rotation needed" is exactly what shipped turned parts,
+and a measured zero and an absent row are deliberately different things. A pair
+whose measurement could not settle the angle refuses too
+(`assembly_orientation_undecided`). A pair with `no_reference` — a mounting
+hole, a fiducial, a part whose vendor ships no usable drawing — does NOT refuse:
+there is nothing to correct against, and the placed rotation is emitted
+verbatim.
+
+The join reads the HOUSE catalogue number the selected profile names
+(`assembly.house_parts[<house>]`), never `assembly.mpn`: the ledger is keyed on
+the pair, and a manufacturer's number is not a house's. A part identified only
+by `mpn` is therefore not corrected and not gated — a stated gap, not an
+oversight.
+
 ## Two non-claims
 
 **This is not a promise the part mounts right-side-up.** JLC's own internal
 component-library images sometimes disagree with a footprint's 0-degree
-reference — a per-part-type calibration problem, not a board-wide sign
-convention, and one caught in JLC's placement-review UI. Emitting the wrong
-global sign here would rotate EVERY part; not correcting a per-part calibration
-quirk rotates at most a few footprint families. Different bugs, different
-owners; this emitter claims only the first.
+reference. That per-part-type disagreement is what the part-orientation
+correction above now measures and applies — but only for a pair somebody has
+measured, and only against the drawing in the vendor payload we captured. A
+supplier that redraws the package, or a part we buy on a footprint whose pair
+was never measured, is still outside the claim; the second of those refuses the
+emission rather than guessing.
 
 **A BOM/CPL pair is not a stencil.** Neither file says anything about
 solder-paste coverage. Paste is emitted by `gerber.py` (`F_Paste`/`B_Paste`) and

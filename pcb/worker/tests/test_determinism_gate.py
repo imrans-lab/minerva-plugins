@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import orientation_corpus
 from tests.gerber_fab import (build_assembly_bom, build_assembly_cpl, build_fab,
                                build_raw_emitter)
 
@@ -44,6 +45,17 @@ ZONE_BOARD = HERE / "testdata" / "zone_fill.yaml"
 # has one. Its uncompilable twin (assembly_fixture.yaml) is the refusal
 # fixture in test_assembly_outputs.py.
 ASSEMBLY_BOARD = HERE / "testdata" / "assembly_boards" / "assembly_resolved.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _corpus_orientation(monkeypatch):
+    """This suite emits assembly outputs from boards drawn on the corpus's own
+    synthetic land patterns, which no vendor draws — so the part-orientation
+    gate would refuse every emission here for pairs that could never have been
+    measured. Declare them, once, from the shared corpus statement; orientation
+    itself is measured by test_assembly_orientation.py."""
+    orientation_corpus.install(monkeypatch)
+
 
 # (board path, base name, builder). Spike -> PRODUCTION fab path (compile -> IR);
 # drilltest -> raw loose-dict emitter (explicit drift fixture, not production).

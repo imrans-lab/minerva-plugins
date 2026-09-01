@@ -25,9 +25,20 @@ import yaml
 from pcb_worker import assembly_outputs as ao
 from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
+from tests import orientation_corpus
 
 FIXTURE = (Path(__file__).resolve().parent / "testdata" / "assembly_boards"
           / "assembly_resolved.yaml")
+
+
+@pytest.fixture(autouse=True)
+def _corpus_orientation(monkeypatch):
+    """This suite emits assembly outputs from boards drawn on the corpus's own
+    synthetic land patterns, which no vendor draws — so the part-orientation
+    gate would refuse every emission here for pairs that could never have been
+    measured. Declare them, once, from the shared corpus statement; orientation
+    itself is measured by test_assembly_orientation.py."""
+    orientation_corpus.install(monkeypatch)
 
 
 def _load() -> dict:

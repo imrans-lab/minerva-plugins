@@ -662,7 +662,7 @@ def _geometric_finding(row: dict, *, blocking: bool = False) -> dict:
 
 def build(board_source: dict, board, profile_id: str, *,
           origin: board_model.BoardOrigin | None = None, generated_at=None,
-          compile_diagnostics=()) -> OrderPackage:
+          compile_diagnostics=(), orientation=None) -> OrderPackage:
     """Assemble the whole order package from ONE compiled board.
 
     ``board_source`` is the raw board dict the compilation came from — the
@@ -675,9 +675,14 @@ def build(board_source: dict, board, profile_id: str, *,
     ``origin`` is the :class:`board_model.BoardOrigin` the loader minted for
     this request. Omitting it records the inline basis: a builder that was not
     told how the board arrived has been told nothing that could earn a
-    revision."""
+    revision.
+
+    ``orientation`` is the part-orientation ledger the CPL's rotation
+    correction is read from, passed straight through to the emitter; omitting
+    it reads the shipped one."""
     provenance, provenance_advisories = order_provenance.check(board_source)
-    assembly = assembly_outputs.build_package(board, profile_id)
+    assembly = assembly_outputs.build_package(board, profile_id,
+                                             orientation=orientation)
     profile = assembly.emission.profile
 
     # A rule profile selected at compile time supplies the geometric floors; it

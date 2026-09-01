@@ -92,6 +92,12 @@ ADVISORY_UNMEASURABLE = "assembly_service_unmeasurable"
 #: ``test_the_identity_refusal_code_matches_its_error_class``.
 CODE_MISSING_IDENTITY = "assembly_missing_identity"
 
+#: ``assembly_orientation``'s two refusal codes, spelled here for the same
+#: one-way-dependency reason ``CODE_MISSING_IDENTITY`` is. Sealed against drift
+#: by ``test_the_orientation_refusal_codes_match_their_module``.
+CODE_ORIENTATION_UNKNOWN = "assembly_orientation_unknown"
+CODE_ORIENTATION_UNDECIDED = "assembly_orientation_undecided"
+
 #: Every rule code a profile may claim in ``checked_rules`` or
 #: ``advisory_rules``, mapped to the module that runs it. The service and
 #: advisory codes above are this module's; the rest belong to :mod:`assembly_gates` and
@@ -106,6 +112,8 @@ IMPLEMENTED_CHECKS: dict[str, str] = {
     ADVISORY_TOOLING_HOLES: __name__,
     ADVISORY_UNMEASURABLE: __name__,
     CODE_MISSING_IDENTITY: "pcb_worker.assembly_outputs",
+    CODE_ORIENTATION_UNKNOWN: "pcb_worker.assembly_orientation",
+    CODE_ORIENTATION_UNDECIDED: "pcb_worker.assembly_orientation",
     assembly_gates.CODE_REFERENCE_SET_MISMATCH: assembly_gates.__name__,
     assembly_gates.CODE_DUPLICATE_DESIGNATOR: assembly_gates.__name__,
     assembly_gates.CODE_ROW_REF_LIMIT: assembly_gates.__name__,

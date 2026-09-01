@@ -43,12 +43,26 @@ from pathlib import Path
 import pytest
 
 from pcb_worker import assembly_gates as ag
+from pcb_worker import assembly_orientation as aor
 from pcb_worker import assembly_outputs as ao
 from pcb_worker import service_profile as sp
 from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
+from tests import orientation_corpus
 
 SERVICE_ID = "jlcpcb-economic"
+
+
+@pytest.fixture(autouse=True)
+def _corpus_orientation(monkeypatch):
+    """This suite's boards are drawn on the corpus's own synthetic land
+    patterns, which no vendor draws — so the part-orientation gate would refuse
+    every emission here for pairs that could never have been measured. Declare
+    them, once, from the shared corpus statement; orientation itself is
+    measured by test_assembly_orientation.py."""
+    orientation_corpus.install(monkeypatch)
+
+
 GOLDEN = (Path(__file__).resolve().parent / "testdata" / "jlc_templates"
           / "jlcpcb-economic-templates.json")
 SHIPPED = (Path(__file__).resolve().parents[2] / "library" / "service-profiles"
@@ -454,6 +468,14 @@ def test_every_published_figure_the_profile_records_is_either_checked_or_named()
     assert not (set(profile.checked_rules) & set(profile.advisory_rules))
 
 
+def test_the_orientation_refusal_codes_match_their_module():
+    """Same seal, same reason as the identity code below: ``service_profile``
+    spells the orientation refusals rather than importing them, because the
+    dependency between the two modules runs one way."""
+    assert sp.CODE_ORIENTATION_UNKNOWN == aor.CODE_UNKNOWN
+    assert sp.CODE_ORIENTATION_UNDECIDED == aor.CODE_UNDECIDED
+
+
 def test_the_identity_refusal_code_matches_its_error_class():
     """``service_profile`` spells the identity refusal's code rather than
     importing it, because ``assembly_outputs`` loads its profile at import and
@@ -474,6 +496,7 @@ def test_every_gate_that_runs_for_this_service_is_claimed_as_checked():
         ag.CODE_ROW_REF_LIMIT, ag.CODE_NON_METRIC_COORDINATES,
         ag.CODE_PLACEMENTS_TOO_CLOSE, ag.CODE_EMPTY_EXPANSION,
         ag.CODE_PASTE_UNDECIDED,
+        aor.CODE_UNKNOWN, aor.CODE_UNDECIDED,
     }
     assert claimed == running
 

@@ -88,13 +88,22 @@ rotation and side, once, by the compiler.
 FRAME AND ROTATION, both measured against a real position-file run by the
 dev/CI-only export tool this module may not name (STANDING GUARD 2,
 ``tests/test_kicad_cli_boundary.py``): CPL X is the anchor's X VERBATIM, CPL Y
-is its Y NEGATED, bottom-side X is UNMIRRORED, and ``Rotation`` is the authored
-``rotation_deg`` verbatim (modulo 360) — which reads as JLC's
+is its Y NEGATED, bottom-side X is UNMIRRORED, and the PLACED ``rotation_deg``
+is carried verbatim (modulo 360) — which reads as JLC's
 counter-clockwise-positive convention precisely because Y is negated. Do not
 touch the arithmetic in :func:`_walk` without reading
 ``docs/assembly-outputs.md``, which carries the oracle, the measured table and
 the two non-claims (this is not a promise a part mounts right-side-up, and a
 BOM/CPL pair is not a stencil).
+
+THE EMITTED ROTATION IS THAT ANGLE PLUS THE PART'S MEASURED ORIENTATION OFFSET,
+and the sum is a SEPARATE STEP (:mod:`assembly_orientation`), run by
+:func:`emit` over the rows :func:`_walk` finished. Two different facts, two
+different steps: the frame map above says where the part goes, and the offset
+says how our drawing of the part is turned relative to the VENDOR's drawing —
+which is what the machine reads the rotation against. A part bought as a
+catalogue part whose pair nobody has measured REFUSES there by name rather than
+riding out as an uncorrected number.
 
 TWO FUNCTIONS CARRY THAT CONVENTION OUT OF THIS MODULE, and they are the only
 way anything else may reproduce it. :func:`cpl_frame_point` is the board-to-CPL
@@ -108,7 +117,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import assembly_gates, service_profile
+from . import assembly_gates, assembly_orientation, service_profile
 from .assembly_spec import IDENTITY_FIELDS
 
 CSV_EOL = "\r\n"  # JLC's own templates ship CRLF; keep it stable either way.
@@ -329,12 +338,25 @@ class BomRow:
 
 @dataclass(frozen=True)
 class CplRow:
+    """One emitted placement. ``rotation_deg`` is the angle the FILE states.
+
+    The last two fields are IDENTITY, not geometry, and they are here because
+    they are the two halves of the key the part-orientation ledger is keyed on:
+    ``footprint_ref`` is our drawing of the part, and ``house_part`` is the
+    catalogue number the SELECTED profile reads out of ``assembly.house_parts``
+    (``None`` when the board names none for that house). Carrying them on the
+    row is what lets :mod:`assembly_orientation` correct the rotation without
+    re-walking the board and without a second opinion about which house number
+    applies."""
+
     ref: str
     x_mm: float
     y_mm: float
     rotation_deg: float
     side: str  # "top" | "bottom"
     mpn: str | None
+    footprint_ref: str = ""
+    house_part: str | None = None
 
 
 def cpl_frame_point(point) -> tuple[float, float]:
@@ -493,10 +515,11 @@ def _walk(board, profile: HouseProfile):
             # NOT mirrored on the bottom side (the reference exporter's default;
             # its opt-in bottom-X-negate flag is deliberately not matched).
             # Rotation arrives already normalized into [0, 360) and is otherwise
-            # the composed placement angle, verbatim. The measured oracle for all
-            # of it is in tests/test_assembly_outputs.py — it may not be cited
-            # from shipped worker code (STANDING GUARD 2) — and is written up in
-            # docs/assembly-outputs.md.
+            # the composed placement angle, verbatim — the part-orientation
+            # offset is added later, by `emit`, and never here. The measured
+            # oracle for all of it is in tests/test_assembly_outputs.py — it may
+            # not be cited from shipped worker code (STANDING GUARD 2) — and is
+            # written up in docs/assembly-outputs.md.
             x_mm, y_mm = cpl_frame_point(physical.anchor)
             cpl.append(CplRow(
                 ref=physical.ref,
@@ -505,6 +528,11 @@ def _walk(board, profile: HouseProfile):
                 rotation_deg=float(physical.rotation_deg),
                 side=physical.side.value,
                 mpn=assembly.mpn,
+                # The ORIENTATION KEY, carried, not applied: the correction is
+                # a separate step over the finished rows (see `emit`), so this
+                # walk keeps owning exactly one piece of arithmetic.
+                footprint_ref=assembly.footprint_ref,
+                house_part=house_number,
             ))
 
     bom = [
@@ -540,9 +568,13 @@ class AssemblyEmission:
     unchecked: tuple[dict, ...] = ()
 
 
-def emit(board, profile_id: str) -> AssemblyEmission:
+def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
     """Walk the compiled board once, run every hard gate, collect the
-    advisories — or refuse by name. The single entry point behind both files."""
+    advisories — or refuse by name. The single entry point behind both files.
+
+    ``orientation`` is the part-orientation ledger the rotation correction is
+    read from (default: the shipped one). A parameter rather than a constant so
+    a caller can state the facts its board rests on."""
     profile = _resolve_profile(profile_id)
     assembly_gates.check_profile(profile)
     # THE SERVICE FIRST, when one is selected. A tier incompatibility is not
@@ -557,6 +589,16 @@ def emit(board, profile_id: str) -> AssemblyEmission:
         unchecked = profile.service.unchecked_rules
     assembly_gates.check_components(board)
     bom, cpl, excluded, placed = _walk(board, profile)
+    # THE ORIENTATION CORRECTION, and it is deliberately its OWN step over the
+    # finished rows rather than a term inside _walk's arithmetic. _walk owns
+    # the FRAME contract (X verbatim, Y negated, rotation verbatim), which is
+    # correct and independently re-derived; this is a different fact — how our
+    # drawing of a part is turned relative to the vendor's, which is what the
+    # machine reads the rotation against. Folding the two together would make
+    # one number carry two derivations. It refuses BY NAME for a catalogue part
+    # nobody has measured, so an unknown can never reach a file as a silent
+    # zero (assembly_orientation).
+    cpl = list(assembly_orientation.apply(cpl, profile, ledger=orientation))
     assembly_gates.check_designators(placed)
     assembly_gates.check_reference_sets(bom, cpl)
     assembly_gates.check_row_limits(bom, profile)
@@ -659,24 +701,26 @@ def cpl_filename(profile: HouseProfile, name: str | None = None) -> str:
     return f"{name or 'board'}-cpl-{profile.renderer_id}.csv"
 
 
-def build_bom(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
+def build_bom(board, profile_id: str, *, name: str | None = None,
+              orientation=None) -> AssemblyResult:
     """House-agnostic BOM extraction rendered through ``profile_id``'s house
     format. ``board`` is a compiled ``resolved_board.ResolvedBoard`` — the same
     object the gerber emitter reads. Raises AssemblyProfileError /
     AssemblyIdentityError / AssemblyBoardError / AssemblyGateError — never
     returns a partial or best-guess result."""
-    emission = emit(board, profile_id)
+    emission = emit(board, profile_id, orientation=orientation)
     render_bom, _ = _renderers(emission.profile)
     return AssemblyResult({bom_filename(emission.profile, name): render_bom(emission.bom, emission.profile)},
                           list(emission.bom), emission.excluded_refs,
                           emission.advisories, emission.unchecked)
 
 
-def build_cpl(board, profile_id: str, *, name: str | None = None) -> AssemblyResult:
+def build_cpl(board, profile_id: str, *, name: str | None = None,
+              orientation=None) -> AssemblyResult:
     """House-agnostic CPL/pick-and-place extraction rendered through
     ``profile_id``'s house format. Same compiled-IR input and same fail-closed
     contract as :func:`build_bom`."""
-    emission = emit(board, profile_id)
+    emission = emit(board, profile_id, orientation=orientation)
     _, render_cpl = _renderers(emission.profile)
     return AssemblyResult({cpl_filename(emission.profile, name): render_cpl(emission.cpl, emission.profile)},
                           list(emission.cpl), emission.excluded_refs,
@@ -703,9 +747,10 @@ class AssemblyPackage:
     files: dict[str, str]
 
 
-def build_package(board, profile_id: str, *, name: str | None = None) -> AssemblyPackage:
+def build_package(board, profile_id: str, *, name: str | None = None,
+                  orientation=None) -> AssemblyPackage:
     """Both order CSVs from one compilation, one walk and one gate run."""
-    emission = emit(board, profile_id)
+    emission = emit(board, profile_id, orientation=orientation)
     render_bom, render_cpl = _renderers(emission.profile)
     bom_file = bom_filename(emission.profile, name)
     cpl_file = cpl_filename(emission.profile, name)
