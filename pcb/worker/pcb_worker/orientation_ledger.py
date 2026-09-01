@@ -28,6 +28,13 @@ pair?", so no consumer can invent a fourth reading:
     ``None`` and ``state_of(None)`` says ``unknown``. Nothing in this module
     converts that to a number.
 
+    Absence is invisible by construction, so a SECOND artifact makes the set of
+    unknowns readable: ``pcb/library/part_orientation_coverage.md`` folds this
+    ledger against the acquisition lock and lists every shipped footprint
+    nothing has measured. See :mod:`pcb_worker.orientation_coverage`. Nothing
+    on the order path reads it — a gap is a fact about how far the measuring
+    has got, not an error.
+
 ``measured`` (:data:`STATE_MEASURED`)
     A row derived mechanically from the two drawings. "Aligned, offset 0" is
     a PRESENT row carrying ``offset_deg = 0``; it is distinguishable from
@@ -83,9 +90,12 @@ The ledger's two populations have two writers that cannot overlap:
 * ``measured`` rows are machine-derived and are rewritten WHOLESALE by
   ``pcb/scripts/gen_part_orientation.py``. Hand-editing one is drift, and the
   regeneration test catches it.
-* ``declared`` rows are human-authored, carry no numbers, and the generator
-  passes them through verbatim. There is nothing in them for a machine to
-  converge on.
+* ``declared`` rows are human-authored in
+  ``pcb/library/part_orientation_declared.json`` and rendered into the ledger
+  from there. They carry no numbers — there is nothing in them for a machine to
+  converge on — and they are authored OUTSIDE the artifact so that deleting one
+  is drift the regeneration test can see, rather than a change the generator
+  quietly agrees with.
 
 DETERMINISM
 -----------

@@ -173,6 +173,35 @@ the pair, and a manufacturer's number is not a house's. A part identified only
 by `mpn` is therefore not corrected and not gated — a stated gap, not an
 oversight.
 
+### Seeing the gap before the refusal
+
+That refusal is correct and it is loud, but it arrives at the worst moment —
+you find out the ledger has a hole when the order package you were sending
+stops. The hole is knowable long before that, because it is a pure function of
+two committed files: the acquisition lock says what we ship, the ledger says
+what we have measured, and the difference is the gap.
+
+`pcb/library/part_orientation_coverage.md` is that difference, generated and
+committed. Every shipped footprint appears in exactly one of three sections —
+measured, declared no-reference, or **UNKNOWN** — and the UNKNOWN section is
+the list of drawings an order can still stop on. Because it is committed, a
+footprint added to the lock and never measured shows up as a diff on the same
+commit that added it, and `gen_part_orientation.py --check` fails if the file
+and the library have drifted apart. `--coverage` prints the same report without
+writing anything.
+
+**Closing a gap means MEASURING it, not declaring it.** A declared
+`no_reference` row is footprint-wide, so `lookup` falls back to it for whatever
+part is bought on that ref: declaring a genuine purchasable package to improve
+the count disarms the gate for every part placed on that drawing and ships the
+rotation unmeasured. Declarations are authored in
+`pcb/library/part_orientation_declared.json` — nothing generates them — and
+`worker/tests/test_orientation_coverage.py` requires each one to be a drawing
+this repo synthesized, or a named exception. To close a gap properly, add the
+vendor's package payload for the part to
+`worker/tests/testdata/vendor_footprints/`, pair it in that directory's
+`index.json`, and regenerate.
+
 ## Two non-claims
 
 **This is not a promise the part mounts right-side-up.** JLC's own internal
