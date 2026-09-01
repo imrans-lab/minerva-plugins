@@ -315,9 +315,11 @@ def test_fact_table_golden_for_seed_r_0805():
         # outline to report. None, never an invented box.
         "body_bbox": None,
         # Package/assembly identity from the lock entry — nulls today, but the
-        # ROW is part of the report contract (Codex 1160 P1).
-        "assembly": {"dist_part_numbers": [], "mpn": None,
-                     "orientation_convention": None, "package": None},
+        # ROW is part of the report contract (Codex 1160 P1). No orientation
+        # field: the retired `orientation_convention` was keyed on the
+        # footprint, and the rotation against a vendor's drawing is a fact
+        # about a (footprint, part) PAIR — see pcb_worker.orientation_ledger.
+        "assembly": {"dist_part_numbers": [], "mpn": None, "package": None},
         # The two F.SilkS lines sit at y=∓0.735 (half stroke 0.06mm), and both
         # pads' x-extent stops at ∓0.45 — a 0.223mm gap on each side, well
         # clear of the inflated stroke. MEASURED clear, not merely absent.

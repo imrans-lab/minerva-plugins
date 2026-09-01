@@ -14,8 +14,11 @@ cannot be bisected. So the payloads live here.
 ## What these files are
 
 One file per LCSC part number, plus `index.json` pairing each part with the
-seed footprint it is bought for. Each payload is the LCSC/EasyEDA component
-document for that part, **trimmed to the subtree the measurement reads**:
+seed footprint it is bought for and the **house** whose catalogue that number
+belongs to (`jlcpcb` — the same key a board's `assembly.house_parts` states, so
+the pairing names an orderable part and not just a string). Each payload is the
+LCSC/EasyEDA component document for that part, **trimmed to the subtree the
+measurement reads**:
 
     result.title, result.description
     result.lcsc.number
@@ -41,10 +44,26 @@ diffs meaningless.
 
 Fetched 2026-09-01 from the LCSC/EasyEDA component API, cached, then trimmed
 into this directory. To refresh a part, re-fetch its component document and
-apply the same trim; then **re-run the orientation suite before committing**.
+apply the same trim; then re-run `python3 pcb/scripts/gen_part_orientation.py`
+and **read the diff**, then re-run the orientation suites before committing.
 A changed offset is not a fixture problem to be blessed away — it means either
 the supplier redrew the package or our footprint changed, and both need a human
 to look at the board before the next order goes out.
+
+## What is derived from this directory
+
+`pcb/library/part_orientation.json` — the durable home for the measured offsets
+(`pcb_worker.orientation_ledger`). Its measured rows are regenerated wholesale
+from these payloads plus the seed library, and its byte-identity with a fresh
+derivation is pinned by `tests/test_orientation_ledger.py`.
+
+These payloads stay HERE rather than under `pcb/library/` on purpose: they are
+third-party vendor content, and `pcb/library/` is the shipped tree whose
+third-party obligations `gen_notice.py` certifies from the acquisition lock.
+Moving them there would put unattributed third-party data on the release path
+that the NOTICE gate does not walk. The consequence — a shipped install cannot
+re-measure — is why every measured row pins the footprint's sha256, so our own
+edits stay detectable without these files.
 
 ## Corpus policy
 

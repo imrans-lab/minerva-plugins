@@ -582,9 +582,17 @@ def cross_check_fetched_sha256(ref: str, kicad_mod_text: Any,
 def _blank_assembly() -> dict:
     """The reserved ``assembly`` slot, declared explicitly (never implied) --
     the same shape every shipped seed entry carries, so the census test's
-    "reserved slots exist" predicate holds for staged entries too."""
-    return {"mpn": None, "dist_part_numbers": [], "package": None,
-            "orientation_convention": None}
+    "reserved slots exist" predicate holds for staged entries too.
+
+    There is deliberately NO orientation field here. One lived in this dict as
+    ``orientation_convention``, written null on all 42 shipped entries and read
+    by nothing, and it was retired rather than filled in: a footprint is a LAND
+    PATTERN shared by many parts, so the rotation between our drawing and a
+    vendor's is a fact about a (footprint, PART) pair and cannot be keyed on
+    the footprint alone. That fact now lives in
+    ``pcb/library/part_orientation.json`` (``pcb_worker.orientation_ledger``),
+    which keys it correctly and can say "never measured" out loud."""
+    return {"mpn": None, "dist_part_numbers": [], "package": None}
 
 
 def stage_footprint(

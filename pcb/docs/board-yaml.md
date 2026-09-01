@@ -709,11 +709,10 @@ fabricated part number.
 ### Precedence: board YAML wins over the footprint lock
 
 The footprint lock (`pcb/library/footprints.lock.json`) carries its own
-`assembly` block per entry — `mpn`, `dist_part_numbers`, `package`,
-`orientation_convention`. **That block is PROVENANCE ABOUT THE FOOTPRINT, not an
-assertion about any board that places it**: it records which part the geometry
-was drawn and blessed for, and it rides the bless report so a reviewer sees the
-identity the lock will carry.
+`assembly` block per entry — `mpn`, `dist_part_numbers`, `package`. **That block
+is PROVENANCE ABOUT THE FOOTPRINT, not an assertion about any board that places
+it**: it records which part the geometry was drawn and blessed for, and it rides
+the bless report so a reviewer sees the identity the lock will carry.
 
 **The board YAML is the sole authority for a board's assembly data.** No
 compiler, exporter or validator reads a lock's assembly fields into a board, and
@@ -721,6 +720,36 @@ a lock value is never a fallback for a missing board value — a populated
 component with no identity is a **named refusal**, not a silent library lookup.
 Where the two disagree there is nothing to reconcile; the lock is a note about
 the drawing, the YAML is the order.
+
+### Part orientation is keyed on the (footprint, part) PAIR
+
+A pick-and-place rotation is interpreted by the assembly house against the
+**vendor's** canonical drawing of the part, not against our `.kicad_mod`. Where
+our footprint is drawn rotated relative to that, the emitted rotation is off by
+exactly that amount and the part is soldered down turned. That offset lives in
+`pcb/library/part_orientation.json` (`pcb_worker.orientation_ledger`), keyed by
+`(footprint ref, house, catalogue number)` — the same three values
+`assembly.house_parts` already states, so a board is the join and this store
+keeps no pairing index of its own.
+
+The lock's `assembly` block once carried an `orientation_convention` field. It
+was retired, not filled in: a footprint is a **land pattern** shared by many
+parts (`SOT-23` is bought as an AO3401A today and as anything else tomorrow),
+and even within one connector series the offset differs part by part —
+`S2B-PH-SM4-TB` measures 0 while `S4B`/`S5B` measure 180. No key coarser than
+the pair is safe.
+
+The ledger distinguishes **three** states, and a consumer must not collapse
+them:
+
+| state | how it looks | what a gate does |
+|---|---|---|
+| unknown | **no row** — `lookup()` returns `None` | refuse: nobody has ever measured this pair, and shipping 0 for it is the defect the ledger exists to stop |
+| measured | a row with `offset_deg` an int (**including `0`**) or `None` where the drawings did not settle the angle | apply the offset, or refuse on `offset_deg is None` |
+| no reference | a row with `verdict: no_reference` and `offset_deg: null` | pass: there is nothing to compare against — a mounting hole, a test point, a fiducial, a coupon fixture, a synthetic composite, or a part whose vendor ships no package drawing |
+
+"Never measured" and "measured, and the answer was zero" are therefore
+different things at the file level, not just by convention.
 
 ### Where `x_mm` / `y_mm` actually put a footprint
 

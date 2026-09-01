@@ -1,56 +1,67 @@
 {
  "C149504": {
   "footprint": "Resistor_SMD:R_0805_2012Metric",
+  "house": "jlcpcb",
   "package": "R0805",
   "title": "0805W8F1003T5E_C149504"
  },
  "C15127": {
   "footprint": "Package_TO_SOT_SMD:SOT-23",
+  "house": "jlcpcb",
   "package": "SOT-23_L2.9-W1.3-P1.90-LS2.4-BR",
   "title": "AO3401A"
  },
  "C161861": {
   "footprint": "Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal",
+  "house": "jlcpcb",
   "package": "CONN-SMD_S4B-XH-SM4-TB-LF-SN",
   "title": "S4B-XH-SM4-TB-(LF)(SN)"
  },
  "C265102": {
   "footprint": "Connector_JST:JST_PH_S4B-PH-SM4-TB_1x04-1MP_P2.00mm_Horizontal",
+  "house": "jlcpcb",
   "package": "CONN-SMD_S4B-PH-SM4-TB-LF-SN",
   "title": "S4B-PH-SM4-TB(LF)(SN)"
  },
  "C265104": {
   "footprint": "Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal",
+  "house": "jlcpcb",
   "package": "CONN-SMD_S5B-PH-SM4-TB-LF-SN",
   "title": "S5B-PH-SM4-TB(LF)(SN)"
  },
  "C2803346": {
   "footprint": "Fuse:Fuse_1206_3216Metric",
+  "house": "jlcpcb",
   "package": "F1206",
   "title": "BSMD1206-110-16V"
  },
  "C295747": {
   "footprint": "Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal",
+  "house": "jlcpcb",
   "package": "CONN-SMD_P2.00_S2B-PH-SM4-TB-LF-SN",
   "title": "S2B-PH-SM4-TB(LF)(SN)"
  },
  "C49678": {
   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+  "house": "jlcpcb",
   "package": "C0805",
   "title": "CC0805KRX7R9BB104"
  },
  "C5159510": {
   "footprint": "Syntiant:SPK0641HT4H-1_TopPort_LGA-8_4x3mm",
+  "house": "jlcpcb",
   "package": "LGA-8_L4.0-W3.0_SPK0641HT4H-1",
   "title": "SPK0641HT4H-1"
  },
  "C780769": {
   "footprint": "Package_TO_SOT_SMD:TSOT-23-6",
+  "house": "jlcpcb",
   "package": "TSOT-26_L2.9-W1.6-P0.95-LS2.8-BL",
   "title": "AP63203WU-7"
  },
  "C910544": {
   "footprint": "Package_DFN_QFN:VQFN-16-1EP_3x3mm_P0.5mm_EP1.68x1.68mm",
+  "house": "jlcpcb",
   "package": "TQFN-16_L3.0-W3.0-P0.50-BL-EP1.5",
   "title": "MAX98357AETE+T"
  }
