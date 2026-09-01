@@ -324,7 +324,10 @@ jobs:
     #
     # `if:` cannot reference the matrix (cad.yml carries the same note), but it
     # does not need to — this condition is matrix-independent.
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || github.event_name == 'workflow_dispatch'
     strategy:
       # Independent results. A macOS-only break must not hide whether Windows
       # is also broken — with two platforms, one cancelled run is half the
@@ -369,7 +372,10 @@ jobs:
     # main + manual dispatch ONLY. `event_name != 'pull_request'` would have
     # been wrong in one direction: it also fires on every dcr/** push, which
     # contradicts the main-only intent stated at the top of this file.
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -802,12 +808,26 @@ jobs:
           retention-days: 14
 
   release:
-    needs: package
+    # A SKIPPED JOB IS NOT A PASSED JOB. Listing these in `needs` alone would
+    # make GitHub skip `release` on any ref where one of them does not run —
+    # dcr/** branches, where the platform matrix is deliberately off — turning
+    # a missing gate into a silently missing prerelease. `always()` re-enables
+    # the job and the two `contains` checks then reject only the states that
+    # mean the build is bad, so `skipped` passes through and `failure` does not.
+    #
+    # Before this, `release` waited on `package` alone and `package` waited on
+    # nothing, so no test result could stop a publish: run 33571607977 shipped
+    # artifacts with a red windows-latest job in the same run.
+    needs: [test, fab-gate, panel, test-crossplatform, package]
     # Push only — PRs build but never release. Same tag scheme as cad.yml:
     # a version tag releases as-is; main releases pcb-v<manifest version>;
     # a dcr/** branch releases a -branch- prerelease that regen_registry.py
     # deliberately skips.
-    if: github.event_name == 'push'
+    if: >-
+      always()
+      && github.event_name == 'push'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-22.04
     permissions:
       contents: write
