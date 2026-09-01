@@ -271,7 +271,7 @@ def test_a_footprint_the_report_calls_unknown_really_does_stop_an_order(report):
 
     board = _compiled(_one_part_board(GAP_FOOTPRINT, GAP_PART))
     with pytest.raises(aor.AssemblyOrientationError) as excinfo:
-        ao.emit(board, "jlc")
+        ao.build_cpl(board, "jlc")
     assert excinfo.value.code == aor.CODE_UNKNOWN
     assert excinfo.value.component == "U1"
     assert excinfo.value.field == aor.FIELD_HOUSE_PARTS
@@ -291,7 +291,7 @@ def test_a_footprint_the_report_calls_declared_emits_its_placed_rotation(report)
     assert DECLARED_FOOTPRINT in {e.footprint for e in report.declared}
 
     board = _compiled(_one_part_board(DECLARED_FOOTPRINT, DECLARED_PART))
-    rows = {row.ref: row for row in ao.emit(board, "jlc").cpl}
+    rows = {row.ref: row for row in ao.build_cpl(board, "jlc").rows}
     assert rows["U1"].rotation_deg == pytest.approx(30.0), (
         "a declared footprint carries no offset, so the placed rotation is "
         "emitted unchanged")
@@ -323,7 +323,7 @@ def test_a_measured_footprint_still_refuses_every_pair_nobody_measured(report):
 
     board = _compiled(_one_part_board(footprint, unmeasured_part))
     with pytest.raises(aor.AssemblyOrientationError) as excinfo:
-        ao.emit(board, "jlc")
+        ao.build_cpl(board, "jlc")
     assert excinfo.value.code == aor.CODE_UNKNOWN, (
         "a MEASURED footprint still refuses an unmeasured pair on it, so the "
         "report's unknown list cannot be the whole set of refusals")
@@ -376,7 +376,8 @@ def test_a_measured_pair_with_no_vendor_drawing_is_reported_as_passing():
     assert "PASSES" in rendered and f"`{part}`" in rendered
 
     board = _compiled(_one_part_board(footprint, part))
-    rows = {r.ref: r for r in ao.emit(board, "jlc", orientation=ledger).cpl}
+    rows = {r.ref: r for r in ao.build_cpl(board, "jlc",
+                                           orientation=ledger).rows}
     assert rows["U1"].rotation_deg == pytest.approx(30.0), (
         "the emitter passes this pair through, which is the fact the report "
         "must not contradict")
@@ -403,7 +404,7 @@ def test_a_measured_pair_whose_lands_disagree_is_reported_as_refusing():
 
     board = _compiled(_one_part_board(footprint, part))
     with pytest.raises(aor.AssemblyOrientationError) as excinfo:
-        ao.emit(board, "jlc", orientation=ledger)
+        ao.build_cpl(board, "jlc", orientation=ledger)
     assert excinfo.value.code == aor.CODE_MISMATCH
 
 

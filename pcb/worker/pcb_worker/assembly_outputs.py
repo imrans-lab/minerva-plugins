@@ -566,6 +566,13 @@ class AssemblyEmission:
     #: is indistinguishable from a rule nobody wrote: the caller that receives
     #: the files is the one that has to know what was not looked at.
     unchecked: tuple[dict, ...] = ()
+    #: Placements whose emitted rotation is NOT KNOWN — see
+    #: :func:`require_shippable`. Non-empty means the rows below still carry
+    #: their PLACED rotation for the pairs named here, uncorrected and
+    #: unverified, and that NO artifact reaching a manufacturer may be built
+    #: from this emission. A reader that only draws the board locally may use
+    #: it; a caller that writes a file must spend these first.
+    orientation_refusals: tuple = ()
 
 
 def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
@@ -595,10 +602,19 @@ def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
     # correct and independently re-derived; this is a different fact — how our
     # drawing of a part is turned relative to the vendor's, which is what the
     # machine reads the rotation against. Folding the two together would make
-    # one number carry two derivations. It refuses BY NAME for a catalogue part
+    # one number carry two derivations. It names a refusal for a catalogue part
     # nobody has measured, so an unknown can never reach a file as a silent
     # zero (assembly_orientation).
-    cpl = list(assembly_orientation.apply(cpl, profile, ledger=orientation))
+    #
+    # THE REFUSALS ARE CARRIED, NOT RAISED HERE. An unmeasured rotation is only
+    # dangerous inside something a manufacturer acts on, and `emit` is not one:
+    # it is the single walk that the position file, the BOM, the order package,
+    # the local preview, the anchor check and the paste matrix are ALL read
+    # from. `require_shippable` spends them at each artifact that leaves this
+    # machine. See assembly_orientation's WHERE THE REFUSAL IS SPENT.
+    cpl, orientation_refusals = assembly_orientation.correct(
+        cpl, profile, ledger=orientation)
+    cpl = list(cpl)
     assembly_gates.check_designators(placed)
     assembly_gates.check_reference_sets(bom, cpl)
     assembly_gates.check_row_limits(bom, profile)
@@ -606,7 +622,35 @@ def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
     return AssemblyEmission(profile=profile, bom=tuple(bom), cpl=tuple(cpl),
                             excluded_refs=excluded,
                             advisories=assembly_gates.advisories(board) + service_advisories,
-                            unchecked=unchecked)
+                            unchecked=unchecked,
+                            orientation_refusals=orientation_refusals)
+
+
+def require_shippable(emission: AssemblyEmission) -> AssemblyEmission:
+    """THE SHIPPING BOUNDARY. Returns the emission, or raises its FIRST
+    orientation refusal.
+
+    Every artifact a board house can act on passes through here, and nothing
+    else does. The set is derived from the call graph rather than declared: the
+    only things this module hands out as ORDER DATA are the BOM CSV
+    (:func:`build_bom`), the position file (:func:`build_cpl`) and the pair
+    (:func:`build_package`, which is also what ``order_package.build`` puts in
+    the envelope). An :class:`AssemblyEmission` on its own is not one of them —
+    it is the walk they are built from, and the local assembly preview, the
+    anchor checks and the paste matrix read it without ordering anything.
+
+    THE BOM IS IN THE SET EVEN THOUGH IT CARRIES NO ROTATION COLUMN. It is
+    ordered alongside the position file, so a house holding a buyable BOM whose
+    CPL was refused has been told to buy parts nobody could place correctly.
+    The asymmetry settles every case that is not obvious: a needless stop costs
+    a minute, and a part soldered down turned costs a batch of boards and is
+    invisible in every render.
+
+    The FIRST refusal, in board-row order, so a board with several unmeasured
+    pairs names the same component every time it is asked."""
+    if emission.orientation_refusals:
+        raise emission.orientation_refusals[0]
+    return emission
 
 
 def _csv_line(fields) -> str:
@@ -708,7 +752,8 @@ def build_bom(board, profile_id: str, *, name: str | None = None,
     object the gerber emitter reads. Raises AssemblyProfileError /
     AssemblyIdentityError / AssemblyBoardError / AssemblyGateError — never
     returns a partial or best-guess result."""
-    emission = emit(board, profile_id, orientation=orientation)
+    emission = require_shippable(
+        emit(board, profile_id, orientation=orientation))
     render_bom, _ = _renderers(emission.profile)
     return AssemblyResult({bom_filename(emission.profile, name): render_bom(emission.bom, emission.profile)},
                           list(emission.bom), emission.excluded_refs,
@@ -720,7 +765,8 @@ def build_cpl(board, profile_id: str, *, name: str | None = None,
     """House-agnostic CPL/pick-and-place extraction rendered through
     ``profile_id``'s house format. Same compiled-IR input and same fail-closed
     contract as :func:`build_bom`."""
-    emission = emit(board, profile_id, orientation=orientation)
+    emission = require_shippable(
+        emit(board, profile_id, orientation=orientation))
     _, render_cpl = _renderers(emission.profile)
     return AssemblyResult({cpl_filename(emission.profile, name): render_cpl(emission.cpl, emission.profile)},
                           list(emission.cpl), emission.excluded_refs,
@@ -750,7 +796,8 @@ class AssemblyPackage:
 def build_package(board, profile_id: str, *, name: str | None = None,
                   orientation=None) -> AssemblyPackage:
     """Both order CSVs from one compilation, one walk and one gate run."""
-    emission = emit(board, profile_id, orientation=orientation)
+    emission = require_shippable(
+        emit(board, profile_id, orientation=orientation))
     render_bom, render_cpl = _renderers(emission.profile)
     bom_file = bom_filename(emission.profile, name)
     cpl_file = cpl_filename(emission.profile, name)

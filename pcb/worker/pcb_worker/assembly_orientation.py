@@ -125,6 +125,25 @@ THE THREE STATES, AND WHAT EACH ONE EMITS
     and that is precisely the silent default that soldered parts down turned:
     a rotationally symmetric pad field makes it invisible in a 3D preview, and
     there is no human check downstream of the file.
+
+WHERE THE REFUSAL IS SPENT — AT THE SHIPPING ARTIFACT, NOT AT THE WALK
+----------------------------------------------------------------------
+An unknown rotation is only dangerous once it is in something a manufacturer
+acts on. :func:`correct` therefore RETURNS its refusals beside the rows, and
+``assembly_outputs`` raises them at the artifacts that reach a board house —
+the position file, the BOM and the order package
+(``assembly_outputs.require_shippable``). ``assembly_outputs.emit`` itself, the
+one walk those artifacts are all built from, no longer raises: an emission is
+also what a local preview, an anchor check and a paste matrix are read from,
+and none of those is handed to anybody.
+
+THE ASYMMETRY DECIDES EVERY UNCLEAR CASE THE OTHER WAY. Over-refusing costs a
+loud stop somebody clears in a minute; under-refusing costs a part soldered
+down turned on a board that is already made, which no 3D render reveals. So
+the BOM refuses too even though it carries no rotation column: it is ordered
+alongside the position file, and a house told to buy parts nobody could place
+has been told something false. Anything that reaches a board house refuses;
+only what stays on this machine does not.
 """
 
 from __future__ import annotations
@@ -279,9 +298,32 @@ def _refuse_mismatch(row, house: str, record) -> AssemblyOrientationError:
         component=row.ref, field=FIELD_HOUSE_PARTS)
 
 
-def apply(rows: Sequence, profile,
-          *, ledger: Union[ol.OrientationLedger, None] = None) -> tuple:
-    """Every CPL row with its measured offset added, or a NAMED refusal.
+def correct(rows: Sequence, profile,
+            *, ledger: Union[ol.OrientationLedger, None] = None) -> tuple:
+    """``(rows, refusals)`` — the corrected placements, and every pair whose
+    rotation is NOT KNOWN.
+
+    WHY THIS RETURNS THE REFUSALS INSTEAD OF RAISING THEM. The refusals belong
+    to the SHIPPING ARTIFACT, not to the walk. A position file, a BOM and an
+    order package all reach a manufacturer, and every one of them must stop; a
+    preview drawn for a human, an anchor check, a paste matrix and a coupon
+    board are read on this machine and stop nothing. Raising here made the walk
+    the boundary, which put the refusal in front of every reader as well as
+    every buyer. :func:`apply` is the raising fold, and
+    ``assembly_outputs.require_shippable`` is where a file-producing caller
+    spends it.
+
+    A row whose pair could not be corrected comes back with its PLACED rotation
+    untouched and its refusal in the second tuple. That is not a fallback to
+    zero and it is not an answer: the row is only reachable through an emission
+    that carries the refusal beside it, and nothing may render a shipped file
+    from it without asking. There is no third option — dropping the row would
+    make the emission disagree with the board it was walked from, and the
+    reference-set gate would then report the wrong defect.
+
+    Refusals come back in ROW ORDER, so the first one is the first offending
+    component on the board rather than whichever the dictionary happened to
+    yield.
 
     Returns rows in the order given. A row that is not gated -- no catalogue
     number for this house -- and a row whose pair is ``no_reference`` both come
@@ -295,6 +337,7 @@ def apply(rows: Sequence, profile,
     book = default_ledger() if ledger is None else ledger
     house = profile.house_part_id
     out = []
+    refusals = []
     for row in rows:
         part = getattr(row, "house_part", None)
         if not part:
@@ -303,19 +346,40 @@ def apply(rows: Sequence, profile,
         record = book.lookup(row.footprint_ref, house, part)
         state = ol.state_of(record)
         if state == ol.STATE_UNKNOWN:
-            raise _refuse_unknown(row, house)
+            out.append(row)
+            refusals.append(_refuse_unknown(row, house))
+            continue
         if state == ol.STATE_NO_REFERENCE:
             out.append(row)  # nothing to correct against, and never will be
             continue
         if record.offset_deg is None:
-            raise _refuse_undecided(row, house, record)
+            out.append(row)
+            refusals.append(_refuse_undecided(row, house, record))
+            continue
         # THE OFFSET IS ONLY TRUSTWORTHY IF IT IS AN OFFSET BETWEEN THE SAME
         # TWO PARTS. `lands_agree` is the second axis, and it is checked
         # POSITIVELY: anything but a stated agreement stops here, so a row that
         # simply omits the answer cannot pass by defaulting.
         if record.lands_agree is not True:
-            raise _refuse_mismatch(row, house, record)
+            out.append(row)
+            refusals.append(_refuse_mismatch(row, house, record))
+            continue
         out.append(replace(
             row, rotation_deg=corrected_rotation(row.rotation_deg,
                                                  record.offset_deg, row.side)))
-    return tuple(out)
+    return tuple(out), tuple(refusals)
+
+
+def apply(rows: Sequence, profile,
+          *, ledger: Union[ol.OrientationLedger, None] = None) -> tuple:
+    """Every CPL row with its measured offset added, or the FIRST named refusal
+    raised.
+
+    :func:`correct` with the refusals spent immediately. Kept as the one-call
+    fold for a caller that is already at a boundary nothing may cross
+    uncorrected, and for a reader who wants the whole step in one expression.
+    """
+    corrected, refusals = correct(rows, profile, ledger=ledger)
+    if refusals:
+        raise refusals[0]
+    return corrected

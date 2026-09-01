@@ -110,7 +110,7 @@ class PairCoverage:
     def emits(self) -> bool:
         """Does an order carrying this pair get a position file?
 
-        The same fold ``assembly_orientation.apply`` performs, stated once here
+        The same fold ``assembly_orientation.correct`` performs, stated once here
         so the report cannot describe a different emitter than the one that
         runs. Only two shapes emit: a decided offset whose lands agree, and a
         pair with nothing to measure against.
@@ -455,6 +455,12 @@ def _pair_state(pair: PairCoverage) -> str:
         return ("no vendor drawing for this part — no correction exists, and "
                 "the placed rotation is emitted verbatim")
     if pair.verdict == po.VERDICT_GEOMETRY_MISMATCH:
+        # A mismatch states an offset only where the angle came out. Where it
+        # did not, the lands disagree at every candidate angle and there is no
+        # number to print — "None deg" would read as a measurement.
+        if pair.offset_deg is None:
+            return ("THE LANDS DISAGREE at every angle, and none of them "
+                    "settled — refused; these are not the same land pattern")
         return (f"{pair.offset_deg} deg, but THE LANDS DISAGREE — refused; "
                 f"this is the angle to a different part")
     if pair.offset_deg is None:

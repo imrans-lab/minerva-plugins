@@ -458,6 +458,26 @@ def test_a_row_whose_verdict_and_numbers_disagree_does_not_load(ledger, tmp_path
         ("a geometry mismatch whose lands agree",
          _mutate(verdict=po.VERDICT_GEOMETRY_MISMATCH, angle_decided=True,
                  offset_deg=90, lands_agree=True)),
+        # ...and one that declines to answer the axis it exists to report. A
+        # mismatch is a statement ABOUT the lands; a row that omits it is not
+        # a milder mismatch, it is a row nobody wrote.
+        ("a geometry mismatch that says nothing about the lands",
+         _mutate(verdict=po.VERDICT_GEOMETRY_MISMATCH, angle_decided=True,
+                 offset_deg=90, lands_agree=None)),
+        # THE ONE THAT WOULD HIDE A MISPAIRING UNDER A MILDER NAME. "the
+        # drawings did not separate the angle" AND "the lands disagree" is a
+        # geometry_mismatch; letting it wear `ambiguous` reports a wrong part
+        # as a symmetry problem.
+        ("an ambiguity that says the lands disagree",
+         _mutate(verdict=po.VERDICT_AMBIGUOUS, angle_decided=False,
+                 offset_deg=None, lands_agree=False)),
+        # Nothing was fitted, so there is no land comparison to report.
+        ("insufficient overlap that answers the land test anyway",
+         _mutate(verdict=po.VERDICT_INSUFFICIENT_OVERLAP, angle_decided=False,
+                 offset_deg=None, lands_agree=True)),
+        ("no reference that answers the land test anyway",
+         _mutate(verdict=po.VERDICT_NO_REFERENCE, angle_decided=False,
+                 offset_deg=None, lands_agree=False)),
         # One drawing state, one verdict: "aligned" is the 0 and nothing else.
         ("aligned at a quarter turn",
          _mutate(verdict=po.VERDICT_ALIGNED, angle_decided=True,
@@ -475,3 +495,137 @@ def test_a_row_whose_verdict_and_numbers_disagree_does_not_load(ledger, tmp_path
             f"a row that is {name} LOADED: "
             f"{loaded.measured[0]}. assembly_orientation reads offset_deg, so "
             f"this row would be applied to a real placement as a measurement")
+
+
+# ---------------------------------------------------------------------------
+# THE WHOLE TABLE, BOTH DIRECTIONS
+# ---------------------------------------------------------------------------
+
+
+def _shape(verdict: str, decided: bool, offset_stated: bool, lands) -> dict:
+    """One measured row of a given SHAPE, with every other field neutral.
+
+    The offset VALUE is chosen per verdict so that this scan tests the
+    verdict/number consistency table and not the separate "aligned is the 0"
+    rule: an ``aligned`` row states 0 and everything else states 90.
+    """
+    return dict(
+        footprint="Shape:UnderTest", house="jlcpcb", part="C1", verdict=verdict,
+        declared=False,
+        offset_deg=((0 if verdict == po.VERDICT_ALIGNED else 90)
+                    if offset_stated else None),
+        angle_decided=decided, lands_agree=lands)
+
+
+def test_the_consistency_table_admits_exactly_the_combinations_it_states():
+    """EVERY SHAPE A ROW CAN HAVE, SCANNED — 72 of them, both directions.
+
+    Six verdicts x decided/not x offset stated/absent x lands
+    True/False/None. The oracle is ``_CONSISTENT`` READ AS A SET, so this test
+    asserts the table IS the specification instead of retyping it: add a
+    combination there and this test starts requiring it to load; remove one and
+    this test starts requiring it to be refused.
+
+    BOTH DIRECTIONS ARE DEFECTS THAT HAPPENED.
+
+    * A shape the table admits that the loader REFUSES is the newer one. An
+      undecided ``geometry_mismatch`` — the two drawings are not the same land
+      pattern, and nothing separated the angle either — was unrepresentable
+      while the table pinned that verdict to a decided angle. Nothing wrong
+      shipped, because the loader failed closed; the finding simply could not
+      be written down.
+    * A shape the table forbids that LOADS is the older one: a row whose
+      verdict and numbers tell different stories reaches
+      ``assembly_orientation`` as a measurement and its guess is applied.
+
+    The earlier coverage test only ever built a DECIDED mismatch, which is why
+    it saw neither.
+    """
+    seen = set()
+    for verdict in po.VERDICTS:
+        allowed = ol._CONSISTENT[verdict]
+        for decided in (True, False):
+            for offset_stated in (True, False):
+                for lands in (True, False, None):
+                    shape = (decided, offset_stated, lands)
+                    legal = any(shape[0] is a and shape[1] is b and shape[2] is c
+                                for a, b, c in allowed)
+                    seen.add((verdict, shape))
+                    if legal:
+                        record = ol.OrientationRecord(**_shape(verdict, *shape))
+                        assert record.verdict == verdict
+                        assert (record.offset_deg is not None) is offset_stated
+                    else:
+                        with pytest.raises(ol.OrientationLedgerError):
+                            ol.OrientationRecord(**_shape(verdict, *shape))
+    assert len(seen) == 6 * 2 * 2 * 3, "the scan stopped covering every shape"
+
+    # And the table itself is exhaustive over the verdicts: a verdict with no
+    # entry would load unchecked, which is the hole the table was added to fill.
+    assert set(ol._CONSISTENT) == set(po.VERDICTS)
+
+
+def test_an_ambiguity_may_report_that_the_lands_do_agree(tmp_path):
+    """THE OTHER COMBINATION THE OLD TABLE FORBADE, and why it is a real one.
+
+    A two-pad chip drawn symmetrically fits its vendor's drawing at 0 AND at
+    180, to the same fraction of a millimetre. Nothing separates the angle —
+    that is the ``ambiguous`` verdict — and the very reason nothing separates
+    it is that the pads DO land on each other. "We cannot tell which way round"
+    and "these are the same land pattern" are both true, and the second is
+    worth recording: it tells whoever picks this up that the part number is
+    fine and only the orientation is open.
+
+    It states no offset, so it still refuses at the emitter. What it must not
+    be able to say is that the lands DISAGREE — that row is a
+    ``geometry_mismatch``, and the loader refuses it wearing this verdict (see
+    the disagreement list above).
+    """
+    row = ol.OrientationRecord(
+        footprint="Shape:UnderTest", house="jlcpcb", part="C1",
+        verdict=po.VERDICT_AMBIGUOUS, declared=False,
+        offset_deg=None, angle_decided=False, lands_agree=True,
+        residual_mm=0.01, max_pad_error_mm=0.02, runner_up_deg=180,
+        runner_up_mm=0.01, matched_pad_count=2,
+        footprint_sha256="ab" * 32, vendor_sha256="cd" * 32,
+        detail="0 deg and 180 deg both fit at 0.010 mm — a symmetric pad field")
+
+    path = tmp_path / "part_orientation.json"
+    path.write_text(ol.OrientationLedger(measured=(row,)).to_text(),
+                    encoding="utf-8")
+    loaded = ol.load_ledger(path).lookup("Shape:UnderTest", "jlcpcb", "C1")
+
+    assert loaded == row
+    assert loaded.lands_agree is True and loaded.offset_deg is None
+
+
+def test_an_undecided_geometry_mismatch_survives_a_file_round_trip(tmp_path):
+    """THE ROW THAT COULD NOT BE WRITTEN DOWN, written down and read back.
+
+    The dataclass scan above builds records directly. This one goes through the
+    bytes — serialize, write, ``load_ledger`` — because that is the path a
+    regenerated ledger actually takes, and it is the path that was refusing.
+
+    The finding it carries: at the best-fitting angle the shared pads are
+    nowhere near each other, and no angle separated itself from its runner-up
+    either. Both halves are true at once on a symmetric part paired with the
+    wrong catalogue number, and neither is a reason to place it.
+    """
+    row = ol.OrientationRecord(
+        footprint="Shape:UnderTest", house="jlcpcb", part="C1",
+        verdict=po.VERDICT_GEOMETRY_MISMATCH, declared=False,
+        offset_deg=None, angle_decided=False, lands_agree=False,
+        residual_mm=0.9, max_pad_error_mm=1.4, runner_up_deg=180,
+        runner_up_mm=0.91, matched_pad_count=2,
+        footprint_sha256="ab" * 32, vendor_sha256="cd" * 32,
+        detail="every candidate angle leaves the shared pads ~0.9 mm apart, "
+               "and none of them separates from its runner-up")
+
+    path = tmp_path / "part_orientation.json"
+    path.write_text(ol.OrientationLedger(measured=(row,)).to_text(),
+                    encoding="utf-8")
+    loaded = ol.load_ledger(path).lookup("Shape:UnderTest", "jlcpcb", "C1")
+
+    assert loaded == row
+    assert ol.state_of(loaded) == ol.STATE_MEASURED
+    assert loaded.offset_deg is None and loaded.lands_agree is False

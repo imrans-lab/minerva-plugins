@@ -166,21 +166,41 @@ The correction is a SEPARATE step from the frame map above, run by
 `assembly_outputs.emit` over the rows `_walk` finished. Two different facts, two
 different steps.
 
-**A catalogue part nobody measured REFUSES the emission**, by name
+**A catalogue part nobody measured REFUSES every order artifact**, by name
 (`assembly_orientation_unknown`), naming the component and the pair. Treating
 "we do not know" as "no rotation needed" is exactly what shipped turned parts,
 and a measured zero and an absent row are deliberately different things. A pair
 whose measurement could not settle the angle refuses too
 (`assembly_orientation_undecided`).
 
-**A pair whose lands DISAGREE refuses as well** (`assembly_orientation_geometry_mismatch`),
-even though it states an offset. `geometry_mismatch` means the angle came out
-and the two pad fields are not the same land pattern — our drawing measured
-against a drawing of a different part. Applying that offset would promote a
+**Where the refusal lands: at the artifact, not at the walk.** `emit` is the
+single walk every order artifact is built from — and so are the things nobody
+orders: the local assembly preview, the anchor checks, the paste matrix. It
+therefore CARRIES its orientation refusals (`AssemblyEmission.orientation_refusals`)
+instead of raising them, and `assembly_outputs.require_shippable` spends them at
+each entry point that hands out order data: `build_bom`, `build_cpl`,
+`build_package`, and `order_package.build` through the last of those. Reading an
+emission whose `orientation_refusals` is non-empty means the rows still carry
+their PLACED rotation for the pairs named there — uncorrected and unverified —
+and no file may be written from it.
+
+The BOM is in that set even though it has no rotation column. It is ordered
+alongside the position file, and a house holding a buyable BOM whose CPL was
+refused has been told to buy parts nobody could place. The asymmetry decides
+every case that is not obvious: a needless stop costs a minute, and a part
+soldered down turned costs the boards and is invisible in every render.
+
+**A pair whose lands DISAGREE refuses as well** (`assembly_orientation_geometry_mismatch`).
+`geometry_mismatch` means the two pad fields are not the same land pattern —
+our drawing measured against a drawing of a different part. Where the angle
+also came out the row states an offset, and applying it would promote a
 mispairing the measurement detected into a trusted production rotation, which
 is worse than the unmeasured pair this step was written for: there, nobody
-claimed to know. The commonest cause is a wrong catalogue number in the BOM, so
-the refusal points at `assembly.house_parts`.
+claimed to know. Where nothing separated the angle either, the row states no
+offset and refuses on that axis instead (`assembly_orientation_undecided`, with
+the mismatch verdict named in the message). Either way the commonest cause is a
+wrong catalogue number in the BOM, so the refusal points at
+`assembly.house_parts`.
 
 A pair with `no_reference` — a mounting
 hole, a fiducial, a part whose vendor ships no usable drawing — does NOT refuse:

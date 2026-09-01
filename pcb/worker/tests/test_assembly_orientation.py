@@ -132,8 +132,16 @@ def shipped() -> ol.OrientationLedger:
 
 
 def _rows(board, *, orientation=None) -> dict:
-    """``{ref: CplRow}`` for one emission."""
-    emission = ao.emit(board, "jlc", orientation=orientation)
+    """``{ref: CplRow}`` for one emission, through the SHIPPING BOUNDARY.
+
+    ``require_shippable`` rather than a bare ``emit`` on purpose: every caller
+    of this helper is asserting that a board is emitted WITHOUT a refusal, and
+    ``emit`` alone now carries its refusals instead of raising them. Reading
+    the rows off the walk would let an accidental refusal pass unnoticed while
+    the rotation assertion still held.
+    """
+    emission = ao.require_shippable(
+        ao.emit(board, "jlc", orientation=orientation))
     return {row.ref: row for row in emission.cpl}
 
 
@@ -487,6 +495,37 @@ def test_a_mismatched_quarter_turn_never_reaches_the_position_file():
     assert excinfo.value.code == aor.CODE_MISMATCH
 
 
+def test_an_undecided_geometry_mismatch_refuses_too(shipped):
+    """THE COMBINATION THAT USED TO BE UNRECORDABLE, AND IT STILL STOPS ORDERS.
+
+    Two facts at once: the pads do not sit on top of each other at ANY angle,
+    and no angle separated itself from its runner-up either. That is what a
+    symmetric part paired with the wrong catalogue number looks like, and the
+    ledger refused to hold it while ``geometry_mismatch`` was pinned to a
+    decided angle — fail-closed, so nothing wrong shipped, but the finding
+    could not be written down.
+
+    Now that it can be, this asserts the obvious consequence is still true: it
+    refuses. It refuses on the OFFSET axis (``undecided``) rather than the land
+    axis, because there is no number to distrust — and the message still names
+    ``geometry_mismatch`` and carries the measurement's own sentence, so the
+    reader is sent to the part number and not to a symmetry problem.
+    """
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    detail = ("every candidate angle leaves the shared pads ~0.9 mm apart, and "
+              "none of them separates from its runner-up")
+    ledger = _ledger(footprint, part, verdict=po.VERDICT_GEOMETRY_MISMATCH,
+                     offset_deg=None, angle_decided=False, lands_agree=False,
+                     residual_mm=0.9, max_pad_error_mm=1.4, detail=detail)
+    board = _compiled(_one_part_board(footprint, part, rotation_deg=30))
+    for build in (ao.build_bom, ao.build_cpl, ao.build_package):
+        with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+            build(board, "jlc", orientation=ledger)
+        assert excinfo.value.code == aor.CODE_UNDECIDED
+    assert po.VERDICT_GEOMETRY_MISMATCH in str(excinfo.value)
+    assert detail in str(excinfo.value)
+
+
 def test_an_undecided_measurement_refuses_rather_than_emitting_the_placed_angle():
     """We looked, and the drawings did not separate the angles.
 
@@ -565,3 +604,98 @@ def test_a_part_identified_only_by_mpn_is_not_gated(shipped):
     row = _rows(board)["U1"]
     assert row.house_part is None
     assert row.rotation_deg == pytest.approx(30.0)
+
+
+# ---------------------------------------------------------------------------
+# THE SHIPPING BOUNDARY — which artifacts the refusal is spent at
+# ---------------------------------------------------------------------------
+
+
+def test_the_walk_carries_the_refusal_instead_of_raising_it(shipped):
+    """``emit`` is the WALK, not an artifact, and it no longer refuses.
+
+    Every order artifact is built from one emission, and so are the things
+    nobody orders: the local assembly preview, the anchor checks, the paste
+    matrix. Refusing inside the walk put an order-time stop in front of all of
+    them. The refusal now rides on the emission and is spent by
+    ``require_shippable`` at each file-producing entry point.
+
+    THE ROW IS NOT A RESULT. Its rotation comes back as the PLACED angle, the
+    uncorrected number — which is exactly why the refusal must travel with it
+    and why every artifact that leaves this machine spends it. Both halves are
+    asserted here: an emission that came back quietly with a corrected-looking
+    number and no refusal would be the silent zero this whole unit exists to
+    stop.
+    """
+    footprint, part = QUARTER_TURN_PAIRS[0]
+    unmeasured = "C000000"
+    assert shipped.lookup(footprint, HOUSE, unmeasured) is None
+    board = _compiled(_one_part_board(footprint, unmeasured, rotation_deg=30))
+
+    emission = ao.emit(board, "jlc")
+    assert len(emission.orientation_refusals) == 1
+    refusal = emission.orientation_refusals[0]
+    assert refusal.code == aor.CODE_UNKNOWN and refusal.component == "U1"
+    assert {row.ref: row.rotation_deg for row in emission.cpl}["U1"] == pytest.approx(30.0)
+
+    with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+        ao.require_shippable(emission)
+    assert excinfo.value is refusal
+
+
+def test_every_artifact_a_board_house_can_act_on_refuses(shipped):
+    """THE SET, ENUMERATED. These four are everything this worker hands out as
+    order data — the BOM CSV, the position file, the pair, and the order
+    package envelope that carries all of them plus the gerbers.
+
+    Each is asserted separately rather than through the one they share, because
+    the claim under test is about the BOUNDARY: delete ``require_shippable``
+    from any single entry point and exactly that call stops raising while the
+    others still do, so a hole cannot hide behind its neighbours.
+
+    The BOM is in this set on purpose even though it has no rotation column —
+    see the column assertion below. It is ordered alongside the position file,
+    and the asymmetry decides it: a needless stop costs a minute, a part
+    soldered down turned costs the boards.
+    """
+    from pcb_worker import order_package as op
+
+    source = _one_part_board(QUARTER_TURN_PAIRS[0][0], "C000000")
+    board = _compiled(source)
+    builders = (
+        ("build_bom", lambda: ao.build_bom(board, "jlc")),
+        ("build_cpl", lambda: ao.build_cpl(board, "jlc")),
+        ("build_package", lambda: ao.build_package(board, "jlc")),
+        ("order_package.build", lambda: op.build(source, board, "jlc")),
+    )
+    for name, build in builders:
+        with pytest.raises(aor.AssemblyOrientationError) as excinfo:
+            build()
+        assert excinfo.value.code == aor.CODE_UNKNOWN, name
+        assert excinfo.value.component == "U1", name
+
+
+def test_the_bom_states_no_rotation_anywhere(fixture_board):
+    """WHY THE BOM'S PLACE IN THAT SET IS OVER-REFUSAL, PINNED SO IT STAYS SO.
+
+    The BOM is refused for an unmeasured rotation even though it cannot
+    express one: its row carries designators, comment, footprint and part
+    numbers, and its emitted columns carry no rotation, side or coordinate.
+    That is a deliberate over-refusal, and this is the assertion that keeps the
+    reasoning honest — the day a rotation column appears in the BOM the comment
+    justifying the refusal becomes wrong, and this test says so out loud rather
+    than letting the refusal quietly become load-bearing for a reason nobody
+    re-checked.
+    """
+    result = ao.build_bom(fixture_board, "jlc")
+    profile = ao.emit(fixture_board, "jlc").profile
+    fields = set(ao.BomRow.__dataclass_fields__)
+    assert "rotation_deg" not in fields and "side" not in fields
+    assert not (fields & {"x_mm", "y_mm"})
+    for column in profile.bom_columns:
+        assert "rotation" not in column.lower(), column
+    # And the emitted bytes: the CPL's rotations are hand-derived in
+    # FIXTURE_CPL, so a BOM that leaked one would show it here.
+    text = next(iter(result.values()))
+    for line in FIXTURE_CPL.splitlines()[1:]:
+        assert line.split(",")[-1] not in text
