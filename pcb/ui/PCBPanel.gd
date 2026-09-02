@@ -63,6 +63,11 @@ const PcbOptionsMenu := preload("pcb_options_menu.gd")
 ## `:=` for the same reason PcbOptionsMenu is: the parser keeps the GDScript
 ## class type and can resolve its static funcs.
 const PcbExport := preload("pcb_export.gd")
+## What one promotion changes in the design of record — the advisory the promote
+## reply and its status line carry. Declared with `:=` for the same reason
+## PcbExport is: the parser keeps the GDScript class type and can resolve its
+## static funcs.
+const PcbPromoteDelta := preload("pcb_promote_delta.gd")
 const _PcbPadRowScript: Script = preload("model/pcb_pad_row.gd")
 const _PcbLibraryPartScript: Script = preload("model/pcb_library_part.gd")
 const _PcbFabPreviewScript: Script = preload("model/pcb_fab_preview.gd")
@@ -4679,9 +4684,11 @@ func board_check() -> Dictionary:
 ## annotation sidecar already lives beside the adopted path.
 ##
 ## Reply on success: {success, path, digest_sha256, bytes, promote_check
-## summary, census_delta? (component/net/trace/via count deltas vs the prior
-## file, computed by deserializing it — absent when there was no prior file or
-## it did not parse: prior_state notes why)}.
+## summary, design_delta? (WHICH authored facts differ from the prior file —
+## per-component changed fields with old and new, components and nets added and
+## removed, per-net trace/via counts; see pcb_promote_delta.gd for the shape.
+## Absent when there was no prior file or it did not parse: prior_state notes
+## why. ADVISORY — it never gates)}.
 ## `allow_copper_regression` (UX4 station 9, DCR S6 — owner ruling 1): the
 ## explicit override for the panel-side regression guard below. Default false:
 ## a promotion that would REMOVE copper a prior design of record had (per-net
@@ -4729,8 +4736,10 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 	# nets) rides the reply and the status line; it never gates.
 	var advisory: Dictionary = _dict_or_empty(gate.get("advisory"))
 
-	# ── prior-file census, for the reply's what-changed ──────────────────────
-	var census_delta: Dictionary = {}
+	# ── prior-file diff, for the reply's what-changed ────────────────────────
+	# ONE deserialize of the file about to be overwritten serves both readers
+	# below: the ADVISORY field-level delta, and the regression guard.
+	var design_delta: Dictionary = {}
 	var prior_state := "absent"
 	if FileAccess.file_exists(target):
 		var prior_text := FileAccess.get_file_as_string(target)
@@ -4742,16 +4751,10 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 			prior_state = "unreadable"
 		else:
 			prior_state = "parsed"
-			census_delta = {
-				"components": (board.get("components", []) as Array).size()
-					- (prior_board.get("components", []) as Array).size(),
-				"nets": (board.get("nets", []) as Array).size()
-					- (prior_board.get("nets", []) as Array).size(),
-				"traces": (board.get("traces", []) as Array).size()
-					- (prior_board.get("traces", []) as Array).size(),
-				"vias": (board.get("vias", []) as Array).size()
-					- (prior_board.get("vias", []) as Array).size(),
-			}
+			# The prior board's `resolved` sidecar (this host's library read)
+			# is NOT part of the comparison — only the board dict is, so the
+			# delta names design changes and never library ones.
+			design_delta = PcbPromoteDelta.compute(prior_board, board)
 			# ── THE REGRESSION GUARD (UX4 station 9, DCR S6/A6) ──────────────
 			# Granular promotion cuts both ways: promoting a PARTIAL board is
 			# the owner's right, but silently WIPING copper the prior design
@@ -4787,7 +4790,8 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 				if c is Dictionary and not new_refs.has(str((c as Dictionary).get("ref", ""))):
 					removed_refs.append(str((c as Dictionary).get("ref", "")))
 			removed_refs.sort()
-			var comp_delta: int = int(census_delta.get("components", 0))
+			var comp_delta: int = (board.get("components", []) as Array).size() \
+				- (prior_board.get("components", []) as Array).size()
 			if (not regressed.is_empty() or not removed_refs.is_empty()) \
 					and not allow_copper_regression:
 				return {"success": false, "error": "copper_regression",
@@ -4842,8 +4846,10 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		# copper.
 		"complete_by_declaration": _complete_by_declaration(gate),
 	}
-	if not census_delta.is_empty():
-		reply["census_delta"] = census_delta
+	# ADVISORY, present whenever the prior file parsed — an EMPTY delta is the
+	# answer "this promotion changed nothing", which an absent key cannot say.
+	if prior_state == "parsed":
+		reply["design_delta"] = design_delta
 	# UX4 station 9: the advisory rides the success reply (absent when the
 	# board is complete) + a staged-draft count so a caller knows review work
 	# remains even though the promotion landed.
@@ -4924,10 +4930,13 @@ func _on_promote_button_pressed() -> void:
 	_set_status("Promotion gate: running full DRC + assembly…")
 	var result: Dictionary = await promote()
 	if bool(result.get("success", false)):
+		# The advisory clause: which authored facts this promotion changed
+		# against the file it overwrote, changed-component count first.
 		var delta_txt := ""
-		if result.get("census_delta", null) is Dictionary:
-			var d: Dictionary = _dict_or_empty(result.get("census_delta"))
-			delta_txt = "  •  Δ traces %+d, vias %+d" % [int(d.get("traces", 0)), int(d.get("vias", 0))]
+		if result.get("design_delta", null) is Dictionary:
+			var summary := PcbPromoteDelta.summary_text(
+				_dict_or_empty(result.get("design_delta")))
+			delta_txt = "" if summary.is_empty() else "  •  %s" % summary
 		# UX4 station 9: the completeness ADVISORY on the success line — the
 		# owner promoted a partial board on purpose; the status names what is
 		# still unrouted rather than pretending done.

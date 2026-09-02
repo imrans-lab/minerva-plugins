@@ -586,3 +586,12 @@ test_assembly_placements_memo.gd assertions=19
 # pads-authored or unresolved part alone — and adopt_resolved re-derives the pin
 # map from the lands, so a part written with no pins reopens with all of them.
 test_pin_override_only.gd assertions=13
+# The promote reply's `design_delta` — which AUTHORED facts differ from the file
+# being overwritten (per-component changed fields with old and new, components
+# and nets added/removed, per-net trace and via counts), against the count-only
+# census delta that read all zeros while a component's value flipped. Section 1
+# is the pure comparison; Section 2 drives the whole promote over a fake worker
+# that is a JSON codec, so the prior file on disk IS the prior design.
+# Authored under a static-gates-only rule and NEVER EXECUTED, so it carries no
+# assertion pin: measure it at the scoped run and pin it there.
+test_promote_delta.gd

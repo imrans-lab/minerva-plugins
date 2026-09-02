@@ -1216,7 +1216,7 @@ other lacks.
 | `minerva_pcb_workspace_reroute_route` | Try-again on the whole route; router runs before the prior is retired. A candidate whose source hints are GONE (deleted intent) or absent (worker attributed `[]`) no longer refuses (DCR `01a022ab356c` leg C): the run degrades to hint-less task/terminal scoping from the candidate's own endpoints, lands on the SAME task (superseding, never duplicating), and the reply says so (`hintless_fallback: true`); only a candidate with neither hints nor endpoints refuses (`unscopable_candidate`) |
 | `minerva_pcb_workspace_reroute_span` | **DEGRADED** to a whole-route reroute, named on every reply (below) |
 | `minerva_pcb_workspace_check` | set-scoped draft DRC; findings name candidate/segment/via ids; stale candidates refuse |
-| `minerva_pcb_promote` | K13's serialize-back, correctness-gated + completeness-ADVISORY (UX4 owner ruling: granular promotion): full gate → canonical YAML write; correctness refusals name findings with NO acknowledge-through; a clean-partial board promotes with unrouted nets as advisory; panel-side copper/component regression guard (allow_copper_regression overrides) |
+| `minerva_pcb_promote` | K13's serialize-back, correctness-gated + completeness-ADVISORY (UX4 owner ruling: granular promotion): full gate → canonical YAML write; correctness refusals name findings with NO acknowledge-through; a clean-partial board promotes with unrouted nets as advisory; panel-side copper/component regression guard (allow_copper_regression overrides); the success reply carries `design_delta` — WHICH authored facts differ from the file being overwritten (below) |
 | `minerva_pcb_export_yaml` | the live board as canonical YAML TEXT — UNGATED and writes nothing, so a board the promote gate refuses can still be read out and diffed. Refuses a `path` by name: `minerva_pcb_promote` is the only verb that writes the canonical file |
 | `minerva_pcb_list_mounting_holes` | mounting holes read back (position/diameter/plated, snapped), with a placement advisory for coincident or collinear holes — a pattern no geometric check covers |
 | `minerva_pcb_point` | the get_selection MIRROR — select an entity FOR the human (deixis both ways) |
@@ -1336,6 +1336,45 @@ nor ≥2 well-formed endpoint refs refuses (`unscopable_candidate`). Corridor
 steering stays hint-keyed, so `corridor`/`preserve_shape_as_corridor` on such
 a candidate refuse `steering_unavailable_hintless` (`clear_constraint` remains
 the stale-gate recovery).
+
+### `minerva_pcb_promote` — the reply's `design_delta`
+
+Promotion already deserializes the file it is about to overwrite (the copper
+regression guard needs the prior board), so the prior design and the live one
+are both in hand. `design_delta` is what differs between them, by NAME:
+
+```
+design_delta: {
+  components_added:   ["R9"],
+  components_removed: ["R4"],
+  components_changed: [{ref: "U3", fields: {
+      value: {from: "10k", to: "22k"},
+      x_mm:  {from: 12.0, to: 14.5},
+      "assembly.mpn": {from: "RC0805…", to: "CRCW0805…"}}}],
+  nets_added:   ["VBUS"],
+  nets_removed: ["NC1"],
+  nets_changed: [{net: "GND", traces: {from: 4, to: 6}, vias: {from: 1, to: 2}}]
+}
+```
+
+- The compared fields are the AUTHORED ones: `value`, `footprint`, `x_mm`,
+  `y_mm`, `rotation_deg`, `layer`, `symbol`, `group_id`, and the assembly
+  block key by key (`assembly.mpn`, `.manufacturer`, `.comment`,
+  `.house_parts`, `.populate`, `.paste`, `.placements`). **Known limit:**
+  `pins`, `pads`, `graphics` and `refdes_placement` are NOT compared — the
+  geometry half of a component, whose from/to arrays would swamp the report —
+  so a promotion that changes only pad geometry reports no changed field.
+- `nets_changed` lists only nets whose trace or via COUNT moved; a net that
+  kept its copper is not repeated. A removed net appears there too, counting
+  down to zero.
+- Every list is sorted, and the key is present with EMPTY lists when nothing
+  changed — "this promotion changed nothing" is an answer, not an absent key.
+  The key is absent only when there was no prior file or it did not parse,
+  which `prior_state` (`absent` / `unreadable` / `parsed`) says.
+- **ADVISORY, never gating.** Promotion stays gated on the worker's
+  correctness findings alone; nothing in the delta can refuse a write. The
+  Promote button renders the same answer on the status line, changed-component
+  count first.
 
 ## Bus tool (`minerva_pcb_route_bus_direct`, campaign 2 epoch C unit 5, DCR `019fb572b888` S3+S4)
 
