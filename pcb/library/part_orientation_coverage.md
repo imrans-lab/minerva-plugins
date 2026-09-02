@@ -44,8 +44,8 @@ drawing, which is far worse than the gap.
 | --- | --- |
 | measured | 14 |
 | declared no-reference | 10 |
-| **unknown** | **18** |
-| total in the acquisition lock | 42 |
+| **unknown** | **19** |
+| total in the acquisition lock | 43 |
 
 ## UNKNOWN — nothing has ever measured this drawing
 
@@ -60,6 +60,7 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 - `Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical` — the lock names no catalogue part for it
 - `Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical` — the lock names no catalogue part for it
 - `Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2` — the lock names no catalogue part for it
+- `Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H` — the lock names `C41376161`, `HC-PM254-8.5H-1x22PZ`
 - `Diode_SMD:D_SMA` — the lock names no catalogue part for it
 - `EVP-ASAC1A:SW_EVP-ASAC1A` — the lock names no catalogue part for it
 - `Espressif:ESP32-S3-DevKitC` — the lock names no catalogue part for it

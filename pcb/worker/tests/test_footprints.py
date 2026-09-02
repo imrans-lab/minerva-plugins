@@ -99,6 +99,9 @@ EXPECTED_PAD_COUNTS = {
     "Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal": 7,
     "Connector_JST:JST_XH_S4B-XH-SM4-TB_1x04-1MP_P2.50mm_Horizontal": 6,
     "Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2": 40,
+    # The single-row THT strip each row of the DevKit socket set expands
+    # into: 22 through-holes, no NPTH nodes.
+    "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H": 22,
     "Fuse:Fuse_1206_3216Metric": 2,
     "Inductor_SMD:L_Vishay_IFSC-1515AH_4x4x1.8mm": 2,
     "MEMSensing:MSM261S4030H0R_TopPort_LGA-8_4x3mm": 8,
@@ -197,6 +200,90 @@ def test_pad_shapes_and_drill_parsed():
     sw = resolve_footprint("EVP-ASAC1A:SW_EVP-ASAC1A")
     assert {p["number"] for p in sw["pads"]} == {"A", "B"}
     assert all(p["drill"] is None for p in sw["pads"])
+
+
+# ---------------------------------------------------------------------------
+# (a2) The 1x22 socket strip against the 2x22 DevKit socket set.
+# ---------------------------------------------------------------------------
+
+_STRIP_REF = (
+    "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H"
+)
+_SOCKET_SET_REF = "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT"
+
+
+def _row_profile(pads: list[dict]) -> dict:
+    """Measure one straight row of pads ALONG THE ROW: ordered pad numbers,
+    centre-to-centre gaps, end-to-end span, drill and annulus.
+
+    Axis-free on purpose. The row direction is taken from the two
+    furthest-apart pads and everything else is a separation along it, so two
+    drawings of the same strip compare equal without either of them being
+    asked which way it is laid out.
+    """
+    pts = [(pad["x_mm"], pad["y_mm"]) for pad in pads]
+    (ax, ay), (bx, by) = max(
+        ((u, v) for u in pts for v in pts), key=lambda uv: math.dist(*uv))
+    span = math.dist((ax, ay), (bx, by))
+    ux, uy = (bx - ax) / span, (by - ay) / span
+
+    along = [(x - ax) * ux + (y - ay) * uy for x, y in pts]
+    across = [(x - ax) * -uy + (y - ay) * ux for x, y in pts]
+    order = sorted(range(len(pts)), key=along.__getitem__)
+
+    return {
+        "numbers": [pads[i]["number"] for i in order],
+        "gaps": [round(along[b] - along[a], 4)
+                 for a, b in zip(order, order[1:])],
+        "span": round(span, 4),
+        "straightness": round(max(abs(v) for v in across), 4),
+        "drills": {pad["drill"] for pad in pads},
+        "annuli": {tuple(pad["size"]) for pad in pads},
+    }
+
+
+def test_socket_strip_and_devkit_socket_set_rows_are_the_same_strip():
+    """One physical part, two drawings authored independently.
+
+    ``ESP32-S3-DevKitC-1_SocketSet_2x22_THT`` is two of THESE strips side by
+    side — its lock entry names the same LCSC part — so its rows are an oracle
+    for this footprint that owes nothing to the datasheet reading that produced
+    it. Pitch, span, drill and annulus must agree exactly. A failure here means
+    one of the two is wrong; it does not say which, and the datasheet decides.
+
+    Nothing below compares absolute positions or axes: the socket set is a
+    carrier whose rows are placed to suit a module, and how either drawing is
+    laid out is a separate question this test must not answer.
+    """
+    strip = _row_profile(resolve_footprint(_STRIP_REF)["pads"])
+
+    # The strip's own reading of the drawing: 22 positions numbered the way the
+    # manufacturer numbers them, 21 pitches of 2.54, hole 1.02.
+    assert strip["numbers"] == [str(n) for n in range(1, 23)]
+    assert strip["straightness"] == 0.0
+    assert strip["gaps"] == [2.54] * 21
+    assert strip["span"] == 53.34
+    # Exact, not approx: both numbers are parsed straight off a literal in the
+    # .kicad_mod, so a tolerance here would only hide a real edit.
+    assert strip["drills"] == {1.02}
+    assert strip["annuli"] == {(1.7, 1.7)}
+
+    # The oracle. Split the 44 pads into the two rows by the coordinate each
+    # row shares, then measure each row the same way.
+    rows: dict[float, list[dict]] = {}
+    for pad in resolve_footprint(_SOCKET_SET_REF)["pads"]:
+        rows.setdefault(round(pad["x_mm"], 4), []).append(pad)
+    assert sorted(len(r) for r in rows.values()) == [22, 22], (
+        f"the socket set is no longer two rows of 22: "
+        f"{ {k: len(v) for k, v in rows.items()} }")
+
+    for key, row in sorted(rows.items()):
+        other = _row_profile(row)
+        for axis in ("gaps", "span", "drills", "annuli", "straightness"):
+            assert other[axis] == strip[axis], (
+                f"socket-set row at {key}: {axis} is {other[axis]!r}, the "
+                f"strip's is {strip[axis]!r} — the two drawings of this part "
+                f"disagree")
 
 
 # ---------------------------------------------------------------------------
