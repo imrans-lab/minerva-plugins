@@ -147,6 +147,12 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// places, resolved through the same chain a compile uses. Same channel
 		// idiom.
 		"pcb.footprint_geometry",
+		// worker-backed — the compiler's resolved physical placements for the
+		// live board, forwarding to the worker's "assembly_placements" method:
+		// what the component-reading verbs report as `physical_placements`,
+		// passed through rather than recomposed in the panel. Same channel
+		// idiom.
+		"pcb.assembly_placements",
 	}
 	for _, name := range want {
 		if !got[name] {
