@@ -808,12 +808,12 @@ func _run_the_designator_anchor_is_movable() -> void:
 # resolve or on a machine with a different library.
 #
 # THE ORACLE IS THE DOCUMENT AND THE REDRAWN INK. Every claim is made on the
-# dict `to_saved_board_dict` actually produces, or on the strokes a component
+# dict `to_board_dict` actually produces, or on the strokes a component
 # rebuilt from that dict draws — never on the field that was just assigned.
 
 ## What one component's saved board dict says, or {} when it is not there.
 func _saved_component(data, ref: String) -> Dictionary:
-	for entry in (data.to_saved_board_dict().get("components", []) as Array):
+	for entry in (data.to_board_dict().get("components", []) as Array):
 		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == ref:
 			return entry
 	return {}
@@ -848,7 +848,7 @@ func _run_the_placement_is_board_state() -> void:
 	# The label has to draw at the authored place from the board alone, or an
 	# agent's placement is lost every time the tab is rebuilt.
 	var reloaded := PCBData.new()
-	reloaded.from_board_dict(data.to_saved_board_dict())
+	reloaded.from_board_dict(data.to_board_dict())
 	var live = data.get_component(REFDES_REF)
 	var back = reloaded.get_component(REFDES_REF)
 	check("a fresh model loaded from that document redraws the same designator",
@@ -862,7 +862,7 @@ func _run_the_placement_is_board_state() -> void:
 	# through a board dict carrying BOTH the derived anchor a resolve attached
 	# and a one-field authored block.
 	var overlaid := PCBData.new()
-	var doc: Dictionary = data.to_saved_board_dict()
+	var doc: Dictionary = data.to_board_dict()
 	for entry in (doc["components"] as Array):
 		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == REFDES_REF:
 			(entry as Dictionary)["refdes_anchor"] = SWITCH_ANCHOR.duplicate()

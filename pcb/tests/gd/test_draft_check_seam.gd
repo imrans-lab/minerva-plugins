@@ -370,7 +370,7 @@ func _run_token_agreement() -> void:
 func _token_pair(panel) -> Array:
 	await panel.check_draft([])
 	PcbSidecar.save_workspace(PROBE_BOARD_PATH, panel.get_routing_workspace(),
-		panel.get_data().to_saved_board_dict(),
+		panel.get_data().to_board_dict(),
 		int(panel.get_data().board_revision), null)
 	var envelope: Dictionary = PcbSidecar.read_envelope(PROBE_BOARD_PATH)
 	return [str(panel.get_routing_workspace().board_token),

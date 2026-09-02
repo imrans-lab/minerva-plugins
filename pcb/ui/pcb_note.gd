@@ -4,10 +4,11 @@ extends RefCounted
 ##
 ## Three parts:
 ##
-##   payload    the SAVED board dict — PCBData.to_saved_board_dict, the shape
+##   payload    the canonical board dict — PCBData.to_board_dict, the shape
 ##              _on_panel_save_request writes and from_board_dict reads back, so
 ##              a fresh panel restores the same board and the note never carries
-##              this machine's library resolution (the saved form strips it).
+##              this machine's library resolution (that fact lives on the model,
+##              never in the dict).
 ##
 ##   preview    the canvas rendered FIT TO THE BOARD, off-screen, at a
 ##              resolution where designators survive — the same awaiting
@@ -54,7 +55,7 @@ static func build_note(ctx: Dictionary, data, canvas, source_path: String) -> Di
 		return {}
 	var payload: Dictionary = {
 		"version": PAYLOAD_VERSION,
-		"board": data.to_saved_board_dict(),
+		"board": data.to_board_dict(),
 	}
 	if not source_path.is_empty():
 		payload["source_path"] = source_path

@@ -3675,6 +3675,12 @@ func from_csv(csv_text: String) -> Dictionary:
 ## nets and traces are deterministically sorted (matching minpcb.go). Annotations
 ## / route_hints are deliberately NOT emitted here (owned by PcbAnnotationHost).
 ##
+## ONE SHAPE for wire and disk alike: the worker payload, the .pcbskel save,
+## the YAML export and the promote all serialize through here. Nothing
+## session-local is emitted — footprint_resolved lives on the model, the grid
+## pitch and the component locks in the panel's own state (pcb_session_state.gd)
+## — so there is no second, stripped form that could drift out of step.
+##
 ## There is NO `grid_mm`: the drawing-grid pitch is an authoring aid, not a fact
 ## about the copper. It lives in the panel's session state (pcb_session_state.gd),
 ## and a document that states one is REFUSED by name — here and in the Go codec
@@ -3754,14 +3760,6 @@ func to_board_dict() -> Dictionary:
 	return out
 
 
-## Per-component keys that describe THIS SESSION rather than the board, and so
-## must never be written into a document. `footprint_resolved` says a resolve
-## succeeded against this machine's library; a file carrying it asserts that
-## fact about every machine the file is ever opened on, and the wire's pad trim
-## believes it (see panel_tools.canonical_wire_board).
-const SESSION_ONLY_COMPONENT_KEYS: Array[String] = ["footprint_resolved"]
-
-
 ## The keys this model reads on each entity — a MIRROR of the Go schema
 ## (pcb/internal/board/board.go), which is the authority; the component list
 ## lives on PCBComponent. A key the codec grows and these lists have not is a
@@ -3811,38 +3809,6 @@ static func board_dict_refusals(data: Dictionary) -> PackedStringArray:
 			if not refusal.is_empty():
 				out.append(refusal)
 	return out
-
-
-## The board dict as it is WRITTEN — to_board_dict with the session-only keys
-## removed. Pure over its input so the rule is testable without a board.
-##
-## Two shapes, one source: everything headed for a WORKER goes as
-## to_board_dict() (the session facts are exactly what let the wire drop
-## geometry the worker can re-derive), everything headed for DISK goes through
-## here. Mutates a fresh copy of each component dict, never the caller's.
-static func strip_session_state(board: Dictionary) -> Dictionary:
-	var out := board.duplicate()
-	var comps_v: Variant = board.get("components", [])
-	if not (comps_v is Array):
-		return out
-	var comps_out: Array = []
-	for comp_v in (comps_v as Array):
-		if not (comp_v is Dictionary):
-			comps_out.append(comp_v)
-			continue
-		var comp: Dictionary = (comp_v as Dictionary).duplicate()
-		for key in SESSION_ONLY_COMPONENT_KEYS:
-			comp.erase(key)
-		comps_out.append(comp)
-	out["components"] = comps_out
-	return out
-
-
-## The canonical board dict as WRITTEN — the .pcbskel save, the YAML export
-## and the promote. It is to_board_dict itself: that dict carries no session
-## state, so there is nothing to strip; the name is kept for its callers.
-func to_saved_board_dict() -> Dictionary:
-	return to_board_dict()
 
 
 ## Restore board state from a canonical board-contract dict.

@@ -23,6 +23,10 @@ extends SceneTree
 ## of export_yaml_text() out of the button body. They are deliberately not
 ## red-first, and the section says so.
 ##
+## Section 5 pins the collapse onto ONE serializer: export and promote produce
+## the same bytes for the same board. It reds against any world where the two
+## doorways build their own board dict or read the reply at their own depth.
+##
 ## Run (via a Minerva scaffold as the Godot host):
 ##   godot --headless --path <minerva-scaffold>/src \
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_export_yaml_verb.gd
@@ -114,10 +118,13 @@ func _oversized_board() -> Dictionary:
 		"layers": ["top", "bottom"], "components": comps, "nets": []}
 
 
-func _rig(board: Dictionary) -> Dictionary:
+## `resolved` is THIS host's resolve of the board, keyed by ref — the map a
+## pcb.deserialize reply carries. Section 5 needs it to put a live session fact
+## on the model.
+func _rig(board: Dictionary, resolved: Dictionary = {}) -> Dictionary:
 	var panel: Variant = load(PANEL_PATH).new()
 	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
-	panel.get_data().from_board_dict(board)
+	panel.get_data().from_board_dict(board, resolved)
 	return {"panel": panel, "host": panel.get_annotation_host()}
 
 
@@ -137,6 +144,7 @@ func _init() -> void:
 	await _run_refusals()
 	await _run_by_ref()
 	await _run_unchanged_behaviour()
+	await _run_one_serializer()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -365,3 +373,123 @@ func _run_unchanged_behaviour() -> void:
 	var no_target: Dictionary = await panel.promote("")
 	check_eq("4d: …and still refuses with no adopted canonical path",
 		str(no_target.get("error", "")), "no_target_path")
+
+
+# ── Section 5: export and promote are ONE serializer ────────────────────────
+#
+# THE SHAPE THIS PINS: the Export YAML doorway and the promote write go through
+# the same serialize call over the same canonical dict, so an agent diffing the
+# export against the file on disk sees design differences only. Two doorways
+# that each built their own board dict, or read the reply at their own depth,
+# could drift — and drift reads as design change.
+#
+# TWO ORACLES, because byte equality alone is not one. The fake worker ECHOES
+# the board it was handed back as the document, so the two texts are equal only
+# if both doorways sent the same bytes AND read the reply the same way — R1
+# carries a live footprint_resolved (this session's resolve of it), the fact a
+# re-introduced second "saved shape" would strip from one side and not the
+# other. But equal bytes are also what two SEPARATE implementations sending the
+# same dict produce, so the second oracle is STRUCTURAL: each doorway makes
+# exactly one serialize request, and the panel source carries exactly one
+# `"pcb.serialize"` request literal. A doorway that regrew its own round-trip
+# and its own refusal handling moves that count, whatever bytes it emits.
+
+## An IPC that answers PER CHANNEL, and whose serialize reply is a function of
+## the request. FakeIPC's single canned reply cannot serve promote, which hops
+## the gate before the serializer.
+class EchoIPC extends Node:
+	var captured: Array = []
+	var _replies: Dictionary = {}
+
+	func bind(panel_node) -> void:
+		name = "_MinervaIPC"
+		panel_node.add_child(self)
+		panel_node.request.connect(_on_request)
+
+	func _on_request(channel: String, payload: Dictionary, reply_id: String) -> void:
+		captured.append({"channel": channel, "payload": payload})
+		_replies[reply_id] = _answer(channel, payload)
+
+	func await_reply(reply_id: String, _timeout_ms: int = 0) -> Dictionary:
+		if not _replies.has(reply_id):
+			return {"success": false, "error_code": "timeout",
+				"error_message": "no captured request"}
+		return (_replies[reply_id] as Dictionary).duplicate(true)
+
+	func last(channel: String) -> Dictionary:
+		for i in range(captured.size() - 1, -1, -1):
+			if str(captured[i]["channel"]) == channel:
+				return captured[i]["payload"]
+		return {}
+
+	func count(channel: String) -> int:
+		var n := 0
+		for entry in captured:
+			if str((entry as Dictionary)["channel"]) == channel:
+				n += 1
+		return n
+
+	func _answer(channel: String, payload: Dictionary) -> Dictionary:
+		match channel:
+			"pcb.promote_check":
+				return {"success": true, "result": {"ok": true, "result": {
+					"promotable": true, "refusals": [],
+					"connectivity": {}, "geometric": {}, "assembly": {}}}}
+			"pcb.serialize":
+				return {"success": true, "result": {"ok": true, "result": {
+					"yaml": "# echo\n%s\n" % JSON.stringify(payload.get("board", {}))}}}
+		return {"success": false, "error_code": "unexpected_channel",
+			"error_message": channel}
+
+
+func _run_one_serializer() -> void:
+	print("\n-- 5: export and promote are one serializer --")
+	var rig := _rig(_tiny_board(), {"R1": {"footprint_resolved": true}})
+	var panel = rig["panel"]
+	check("5: the rig's R1 really carries this session's resolve",
+		bool(panel.get_data().get_component("R1").footprint_resolved))
+	var ipc := EchoIPC.new()
+	ipc.bind(panel)
+
+	var exported: Dictionary = await PanelTools.handle(
+		rig["host"], "minerva_pcb_export_yaml", {})
+	check_eq("5: the export succeeds", bool(exported.get("success", false)), true)
+	check_eq("5: …making exactly one serialize request",
+		ipc.count("pcb.serialize"), 1)
+	var export_payload: Dictionary = ipc.last("pcb.serialize")
+
+	var target := _scratch_dir().path_join("promoted.yaml")
+	var promoted: Dictionary = await panel.promote(target)
+	check_eq("5: the promote succeeds (%s)" % str(promoted.get("error", "")),
+		bool(promoted.get("success", false)), true)
+	check_eq("5: …making exactly one more, not one of its own besides",
+		ipc.count("pcb.serialize"), 2)
+	var promote_payload: Dictionary = ipc.last("pcb.serialize")
+
+	check("5: both doorways hand the serializer the same board",
+		JSON.stringify(export_payload.get("board", {}))
+			== JSON.stringify(promote_payload.get("board", {})))
+	check_eq("5: …so the promoted file is the exported text, byte for byte",
+		FileAccess.get_file_as_string(target), str(exported.get("yaml", "")))
+	check("5: …and the promote digest is taken over those same bytes",
+		str(promoted.get("digest_sha256", ""))
+			== str(exported.get("yaml", "")).sha256_text())
+	check_eq("5: the panel asks the serialize channel in exactly one place",
+		_serialize_request_sites(), 1)
+
+
+## How many places in the panel SOURCE ask the serialize channel. Comment
+## mentions do not count: only a non-comment line carrying the quoted channel
+## literal is a request site. -1 when the source cannot be read at all.
+func _serialize_request_sites() -> int:
+	var f := FileAccess.open(PANEL_PATH, FileAccess.READ)
+	if f == null:
+		return -1
+	var text := f.get_as_text()
+	f.close()
+	var sites := 0
+	for line in text.split("\n"):
+		var trimmed := str(line).strip_edges()
+		if not trimmed.begins_with("#") and trimmed.contains("\"pcb.serialize\""):
+			sites += 1
+	return sites

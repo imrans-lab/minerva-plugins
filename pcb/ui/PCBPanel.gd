@@ -4355,11 +4355,67 @@ func _payload_by_ref(payload: Dictionary, key: String) -> Dictionary:
 		payload, key, "user://pcb_snapshots")
 
 
-## YAML export → pcb.serialize over the plugin IPC channel (carry-in 3a). The
-## legacy PCBEditor.export_yaml() called the dropped to_yaml(); the canonical
-## boundary + Go channel owns YAML now. Oversized boards go by-ref both ways
-## (work item 01a0223ec9e271269fd664fcf90dd20b): the request snapshots the
-## board, and an over-cap document comes back as {yaml_path, yaml_digest}.
+## THE serializer: one round-trip through the Go pcb.serialize channel, shared
+## by the Export YAML doorway and by promote()'s write. Both hand it the same
+## canonical dict (PCBData.to_board_dict), so the exported text and the
+## promoted file cannot disagree — an agent diffing one against the other sees
+## design differences only.
+##
+## Oversized boards go by reference BOTH ways (work item
+## 01a0223ec9e271269fd664fcf90dd20b): the request snapshots the board, and an
+## over-cap document comes back as {yaml_path, yaml_digest}, read verified
+## through the one serialize-result reader at the unwrap depth the live
+## envelope actually has ({success, result:{ok, result:{yaml|yaml_path}}} —
+## reading one level shallow made the by-path branch unreachable).
+##
+## Returns {ok:true, yaml} or {ok:false, reply:<the refusal its caller should
+## return>}. An empty document is a refusal, never a success: it would
+## otherwise reach promote's writer as a truncated design of record.
+func _serialize_board_yaml(board: Dictionary) -> Dictionary:
+	var raw: Dictionary = await _request_with_backend_ensure(
+		"pcb.serialize", _payload_by_ref({"board": board}, "board"), 30000)
+	if not bool(raw.get("success", false)):
+		var code := str(raw.get("error_code", ""))
+		var msg := str(raw.get("error_message", ""))
+		if code.findn("payload_too_large") != -1 or code.findn("too_large") != -1 \
+				or msg.findn("64") != -1:
+			return {"ok": false, "reply": {"success": false, "error": "payload_too_large",
+				"note": "board exceeds the 64KiB IPC cap"}}
+		return {"ok": false, "reply": {"success": false, "error": "serialize_failed",
+			"note": msg if msg != "" else code}}
+	var payload_dict: Dictionary = _unwrap_channel_reply(raw)
+	var read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
+	if bool(read.get("ok", false)):
+		var text := str(read.get("yaml", ""))
+		if not text.is_empty():
+			return {"ok": true, "yaml": text}
+		return {"ok": false, "reply": {"success": false, "error": "serialize_failed",
+			"note": "pcb.serialize returned an empty document"}}
+	if payload_dict.has("yaml_path"):
+		# A by-path reply that failed verification is its own named refusal
+		# (digest mismatch / missing file) — never "empty document".
+		return {"ok": false, "reply": {"success": false, "error": "serialize_read_failed",
+			"note": str(read.get("error", ""))}}
+	# The serialize channel's REFUSALS are success-shaped {error, …} — surface
+	# them by name rather than as an empty document.
+	if str(payload_dict.get("error", "")) != "":
+		return {"ok": false, "reply": {"success": false,
+			"error": str(payload_dict.get("error")),
+			"bytes": int(payload_dict.get("bytes", 0)),
+			"note": "pcb.serialize refused"}}
+	# Unwrap yielded nothing — surface whatever error the raw envelope carried.
+	var inner_err := ""
+	var raw_result: Variant = raw.get("result", null)
+	if raw_result is Dictionary:
+		var e: Variant = (raw_result as Dictionary).get("error", "")
+		inner_err = str((e as Dictionary).get("message", "")) if e is Dictionary else str(e)
+	return {"ok": false, "reply": {"success": false, "error": "serialize_failed",
+		"note": inner_err if not inner_err.is_empty() else str(read.get("error", ""))}}
+
+
+## YAML export → the shared serializer above (carry-in 3a). The legacy
+## PCBEditor.export_yaml() called the dropped to_yaml(); the canonical boundary
+## + Go channel owns YAML now.
 ##
 ## Returns {success:true, yaml, bytes, draft:true} or {success:false, error,
 ## note}. UNGATED, and it WRITES NOTHING: promote() stays the only verb in
@@ -4373,40 +4429,10 @@ func export_yaml_text() -> Dictionary:
 	if ipc == null:
 		return {"success": false, "error": "worker_unavailable",
 			"note": "YAML serialization runs in the pcb backend — plugin IPC not ready"}
-	var result: Dictionary = await _request_with_backend_ensure(
-			"pcb.serialize",
-			_payload_by_ref({"board": _data.to_saved_board_dict()}, "board"), 30000)
-
-	if not bool(result.get("success", false)):
-		var code := str(result.get("error_code", ""))
-		var msg := str(result.get("error_message", ""))
-		if code.findn("payload_too_large") != -1 or code.findn("too_large") != -1 or msg.findn("64") != -1:
-			return {"success": false, "error": "payload_too_large",
-				"note": "board exceeds the 64KiB IPC cap"}
-		return {"success": false, "error": "serialize_failed",
-			"note": msg if msg != "" else code}
-
-	# Success payload shape is owned by the Go side. An over-cap document
-	# arrives as {yaml_path, yaml_digest} — read it back verified through the
-	# one serialize-result reader, at the SAME unwrap level promote uses (fix
-	# cold review F2: the live reply is {success, result:{ok,
-	# result:{yaml|yaml_path}}}, and reading one level shallow made the
-	# by-path branch unreachable).
-	var payload_dict: Dictionary = _unwrap_channel_reply(result)
-	var read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
-	if not bool(read.get("ok", false)):
-		if payload_dict.has("yaml_path"):
-			return {"success": false, "error": "serialize_read_failed",
-				"note": str(read.get("error", ""))}
-		# The serialize channel's REFUSALS are success-shaped {error, …} —
-		# surface them by name rather than as an empty document.
-		if str(payload_dict.get("error", "")) != "":
-			return {"success": false, "error": str(payload_dict.get("error")),
-				"bytes": int(payload_dict.get("bytes", 0)),
-				"note": "pcb.serialize refused"}
-		return {"success": false, "error": "serialize_failed",
-			"note": str(read.get("error", ""))}
-	var yaml_text := str(read.get("yaml", ""))
+	var ser: Dictionary = await _serialize_board_yaml(_data.to_board_dict())
+	if not bool(ser.get("ok", false)):
+		return ser.get("reply", {"success": false, "error": "serialize_failed"})
+	var yaml_text := str(ser.get("yaml", ""))
 	return {"success": true, "yaml": yaml_text, "bytes": yaml_text.length(),
 		"draft": true}
 
@@ -4481,48 +4507,6 @@ func _run_export(index: int) -> void:
 
 
 # ── Epoch UX3 station 11 (K13): GATED PROMOTION to canonical YAML ─────────────
-
-## THE serialize-back verb — the standing loose end of every HITL: the live
-## board (committed copper, moves) becomes the canonical YAML file, and it is
-## IMPOSSIBLE without a passing full authoritative verdict (pcb.promote_check:
-## connectivity DRC + geometric DRC + assembly, composed fail-closed worker-
-## side). There is deliberately NO acknowledge-through here (S7): commit's
-## placement gate takes consent because a draft is cheap to revert; a promoted
-## file is the durable design of record, and the gate is the point.
-##
-## Path resolution (cold review F2 — the .pcbskel corruption BLOCKER):
-## explicit arg wins; otherwise the CANONICAL SOURCE path — recorded ONLY by
-## load_board_from_yaml's adoption (_canonical_source_path), NEVER the
-## editor-flow _file_path, which the ordinary .pcbskel document flow also
-## sets: falling back to it would truncate a JSON .pcbskel document with YAML
-## the next open cannot parse. No canonical source ⇒ refuse by name. And a
-## ".pcbskel" target is refused OUTRIGHT, explicit arg included — promotion
-## writes canonical YAML, and there is no legitimate ask that spells a YAML
-## write onto a .pcbskel.
-##
-## Post-promotion state, the station's recorded decisions: (c) the workspace
-## is NOT mutated — committed candidates already ARE the canonical copper this
-## file now carries, and their consumed-hint records stay consumed (audit);
-## (d) the sidecars need no rewrite — their coherence guard is the BOARD
-## fingerprint (compute_board_fingerprint_v2 of the live dict), and promotion
-## changes the file, not the dict, so every fingerprint remains valid; the
-## annotation sidecar already lives beside the adopted path.
-##
-## Reply on success: {success, path, digest_sha256, bytes, promote_check
-## summary, census_delta? (component/net/trace/via count deltas vs the prior
-## file, computed by deserializing it — absent when there was no prior file or
-## it did not parse: prior_state notes why)}.
-## `allow_copper_regression` (UX4 station 9, DCR S6 — owner ruling 1): the
-## explicit override for the panel-side regression guard below. Default false:
-## a promotion that would REMOVE copper a prior design of record had (per-net
-## copper presence = traces ∪ zones ∪ netted vias — pours count, mirroring the
-## census's own definition) or would drop components refuses by name until the
-## caller confirms.
-## The board the promote gate and the serializer see: the canonical dict, which
-## carries no render or session state (the codec refuses any key it does not
-## model, so nothing derived can reach the design of record).
-func _promote_stripped_board() -> Dictionary:
-	return _data.to_saved_board_dict()
 
 
 ## One worker CHECK over a board document, findings back: the seam behind the
@@ -4599,7 +4583,7 @@ func board_check() -> Dictionary:
 	# "LIVE-BOARD CENSUS" must never present that as current — nor repaint
 	# markers or feed caches from it.
 	var checked_revision: int = int(_data.board_revision)
-	var board: Dictionary = _promote_stripped_board()
+	var board: Dictionary = _data.to_board_dict()
 	var gate_run: Dictionary = await run_promote_gate(board)
 	if not bool(gate_run.get("ok", false)):
 		return gate_run.get("reply", {"success": false, "error": "promotion_check_unavailable"})
@@ -4668,6 +4652,42 @@ func board_check() -> Dictionary:
 	return reply
 
 
+## THE serialize-back verb — the standing loose end of every HITL: the live
+## board (committed copper, moves) becomes the canonical YAML file, and it is
+## IMPOSSIBLE without a passing full authoritative verdict (pcb.promote_check:
+## connectivity DRC + geometric DRC + assembly, composed fail-closed worker-
+## side). There is deliberately NO acknowledge-through here (S7): commit's
+## placement gate takes consent because a draft is cheap to revert; a promoted
+## file is the durable design of record, and the gate is the point.
+##
+## Path resolution (cold review F2 — the .pcbskel corruption BLOCKER):
+## explicit arg wins; otherwise the CANONICAL SOURCE path — recorded ONLY by
+## load_board_from_yaml's adoption (_canonical_source_path), NEVER the
+## editor-flow _file_path, which the ordinary .pcbskel document flow also
+## sets: falling back to it would truncate a JSON .pcbskel document with YAML
+## the next open cannot parse. No canonical source ⇒ refuse by name. And a
+## ".pcbskel" target is refused OUTRIGHT, explicit arg included — promotion
+## writes canonical YAML, and there is no legitimate ask that spells a YAML
+## write onto a .pcbskel.
+##
+## Post-promotion state, the station's recorded decisions: (c) the workspace
+## is NOT mutated — committed candidates already ARE the canonical copper this
+## file now carries, and their consumed-hint records stay consumed (audit);
+## (d) the sidecars need no rewrite — their coherence guard is the BOARD
+## fingerprint (compute_board_fingerprint_v2 of the live dict), and promotion
+## changes the file, not the dict, so every fingerprint remains valid; the
+## annotation sidecar already lives beside the adopted path.
+##
+## Reply on success: {success, path, digest_sha256, bytes, promote_check
+## summary, census_delta? (component/net/trace/via count deltas vs the prior
+## file, computed by deserializing it — absent when there was no prior file or
+## it did not parse: prior_state notes why)}.
+## `allow_copper_regression` (UX4 station 9, DCR S6 — owner ruling 1): the
+## explicit override for the panel-side regression guard below. Default false:
+## a promotion that would REMOVE copper a prior design of record had (per-net
+## copper presence = traces ∪ zones ∪ netted vias — pours count, mirroring the
+## census's own definition) or would drop components refuses by name until the
+## caller confirms.
 func promote(explicit_path: String = "", allow_copper_regression: bool = false) -> Dictionary:
 	if _data == null:
 		return {"success": false, "error": "no_board"}
@@ -4691,7 +4711,7 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 	# ONE snapshot serves the gate AND the serializer below — the board must
 	# not be re-derived across the gate's await (a user edit mid-gate would
 	# split what was checked from what gets written).
-	var board: Dictionary = _promote_stripped_board()
+	var board: Dictionary = _data.to_board_dict()
 
 	# ── THE GATE, fail closed ────────────────────────────────────────────────
 	var gate_run: Dictionary = await run_promote_gate(board)
@@ -4778,50 +4798,17 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 					"note": "the prior design of record has copper/components this promotion would remove — pass allow_copper_regression:true (or confirm the dialog) to proceed deliberately"}
 
 	# ── serialize + write ────────────────────────────────────────────────────
-	var ser: Dictionary = await _request_with_backend_ensure(
-		"pcb.serialize", _payload_by_ref({"board": board}, "board"), 30000)
-	if not bool(ser.get("success", false)):
-		return {"success": false, "error": "serialize_failed",
-			"note": str(ser.get("error_message", ser.get("error_code", "")))}
-	# UNWRAP the channel envelope exactly like the gate call above does
-	# (CPN1 live find: the Go server wraps the handler's {yaml} as
-	# {ok, result:{yaml}}, and the broker wraps THAT as {success, result:...} —
-	# reading ser.result.yaml directly skips a layer and reported the promote
-	# as "empty document" while 6KB of perfectly good YAML sat one level
-	# deeper).
-	var payload_dict: Dictionary = _unwrap_channel_reply(ser)
-	# Over-cap documents arrive as {yaml_path, yaml_digest} — promote is
-	# precisely the large-board case, so read through the one verified
-	# serialize-result reader instead of .get("yaml") (which reported the
-	# by-path shape as "empty document").
-	var ser_read: Dictionary = _PanelToolsScript.yaml_from_serialize_result(payload_dict)
-	var yaml_text := str(ser_read.get("yaml", ""))
-	if yaml_text.is_empty() and payload_dict.has("yaml_path"):
-		# A by-path reply that failed verification is its own named refusal
-		# (digest mismatch / missing file) — never "empty document".
-		return {"success": false, "error": "serialize_read_failed",
-			"note": str(ser_read.get("error", ""))}
-	if yaml_text.is_empty():
-		# The serialize channel's REFUSALS are success-shaped {error, …} —
-		# surface them by name instead of the misleading "empty document"
-		# this branch reported before CPN1. (payload_too_large itself is
-		# retired: over-cap documents now come back {yaml_path, yaml_digest}
-		# and are handled by the by-path read above.)
-		if str(payload_dict.get("error", "")) != "":
-			return {"success": false,
-				"error": str(payload_dict.get("error")),
-				"bytes": int(payload_dict.get("bytes", 0)),
-				"note": "pcb.serialize refused — nothing was written"}
-		# Unwrap yielded nothing — surface whatever error the raw envelope
-		# carried rather than a bare "empty document".
-		var raw_result: Variant = ser.get("result", null)
-		var inner_err := ""
-		if raw_result is Dictionary:
-			var e: Variant = (raw_result as Dictionary).get("error", "")
-			inner_err = str((e as Dictionary).get("message", "")) if e is Dictionary else str(e)
-		return {"success": false, "error": "serialize_failed",
-			"note": inner_err if not inner_err.is_empty()
-				else "pcb.serialize returned an empty document — nothing was written"}
+	# THE SAME serializer the Export YAML doorway runs, over the SAME dict, so
+	# the file this writes and the text an agent exported are the same bytes.
+	var ser: Dictionary = await _serialize_board_yaml(board)
+	if not bool(ser.get("ok", false)):
+		var refusal: Dictionary = ser.get("reply",
+			{"success": false, "error": "serialize_failed"})
+		var why := str(refusal.get("note", ""))
+		refusal["note"] = "nothing was written" if why.is_empty() \
+			else "%s — nothing was written" % why
+		return refusal
+	var yaml_text := str(ser.get("yaml", ""))
 	# ATOMIC tmp→rename (cold review F6): the design of record must never be
 	# left half-truncated by a crash or full disk mid-write — the same
 	# discipline the routing sidecar's writer already keeps.
@@ -5269,7 +5256,7 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 			# document switch drops the prior board's drafts). Inside the
 			# _restoring gate — load_from_dict emits `changed` unconditionally.
 			var sidecar_status: Dictionary = _PcbRoutingSidecarScript.load_into_workspace(
-				source_path, _routing_workspace, _data.to_saved_board_dict(), 0, _staged_entities)
+				source_path, _routing_workspace, _data.to_board_dict(), 0, _staged_entities)
 			# A sidecar ownership record this board cannot support is DROPPED
 			# rather than re-attached to whatever now carries that id. Say so on
 			# the reply — whoever called load_board is who a later
@@ -5444,7 +5431,7 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# sidecar loaded clean carried a token no draft reply could match, and a
 	# GD-only key the v1 whole-dict hash sees (and the round trip drops) moved
 	# one token without moving the other.
-	var board_dict: Dictionary = _data.to_saved_board_dict()
+	var board_dict: Dictionary = _data.to_board_dict()
 	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint_v2(board_dict)
 
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
@@ -6294,7 +6281,7 @@ func _flush_sidecars() -> void:
 		_annotation_host.save_sidecar(_file_path)
 	if _routing_workspace != null:
 		_PcbRoutingSidecarScript.save_workspace(
-			_file_path, _routing_workspace, _data.to_saved_board_dict(),
+			_file_path, _routing_workspace, _data.to_board_dict(),
 			int(_data.board_revision), _staged_entities)
 
 
@@ -6328,10 +6315,10 @@ func _exit_tree() -> void:
 ## Return the board's save state. Ctrl+S writes this Dict to the .pcbskel file as
 ## JSON (Editor.gd host_owned path), and the SAME Dict is what the host stores as
 ## this tab's `__panel_state` in the .minproj. Canonical from now on (port rule
-## 4): the board half is to_saved_board_dict() — to_board_dict with the
-## session-only keys removed. We ALSO flush annotations to the sidecar
-## here — the platform does not auto-persist plugin-panel annotation sidecars
-## (gap register C-15), so the panel owns that write.
+## 4): the board half is to_board_dict(), the one serializer. We ALSO flush
+## annotations to the sidecar here — the platform does not auto-persist
+## plugin-panel annotation sidecars (gap register C-15), so the panel owns
+## that write.
 ##
 ## The panel's own session state (grid pitch, component locks) rides BESIDE the
 ## board under pcb_session_state's reserved key, added to a COPY after the
@@ -6339,10 +6326,10 @@ func _exit_tree() -> void:
 ## fingerprint that moved when someone locked a part would stale every routing
 ## candidate for no reason at all.
 func _on_panel_save_request() -> Dictionary:
-	# to_SAVED_board_dict: the session-only keys (footprint_resolved) never
-	# reach the file, so reopening it elsewhere cannot inherit this machine's
+	# The canonical dict names no session facts (footprint_resolved lives on
+	# the model), so reopening the file elsewhere cannot inherit this machine's
 	# library. The routing fingerprint below is computed from the same dict.
-	var board_dict: Dictionary = _data.to_saved_board_dict()
+	var board_dict: Dictionary = _data.to_board_dict()
 	if _annotation_host != null and not _file_path.is_empty():
 		_annotation_host.save_sidecar(_file_path)
 	# T2a: flush the routing workspace to "<board_path>.routing.json" AFTER the
@@ -6490,7 +6477,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		# path-adoption site for the quarantine/reset rules). Same _restoring
 		# gate — the store's load emits `changed` unconditionally.
 		_PcbRoutingSidecarScript.load_into_workspace(
-			_file_path, _routing_workspace, _data.to_saved_board_dict(), int(_data.board_revision),
+			_file_path, _routing_workspace, _data.to_board_dict(), int(_data.board_revision),
 			_staged_entities)
 
 	# Codex 1047 fix round, verdict 6: deterministic load-time reconciliation

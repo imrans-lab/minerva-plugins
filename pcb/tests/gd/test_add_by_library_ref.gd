@@ -531,8 +531,6 @@ func _run_the_board_still_checks() -> void:
 		carried_pads == 0)
 	check("…and no session flag (%d) — the next machine resolves for itself" % flags_on_dict,
 		flags_on_dict == 0)
-	check("the saved form IS the canonical dict",
-		host.data.to_saved_board_dict() == full_board)
 	host.queue_free()
 
 

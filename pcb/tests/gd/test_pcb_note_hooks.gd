@@ -21,11 +21,12 @@ extends SceneTree
 ##      board and over a FRESH model restored from the note. Equal tokens mean
 ##      every component, net, trace, via, rule and stage came back.
 ##
-##      The token is taken over the SAVED form on both sides, because that is
-##      what the note carries and the difference is deliberate: footprint_
-##      resolved says a resolve succeeded against THIS machine's library, and a
-##      note travelling to another machine must not assert it. Section 1 reads
-##      that flag on both sides rather than leaving it to the token.
+##      The token is taken over the canonical dict on both sides, because that
+##      is what the note carries and it names no session fact: footprint_
+##      resolved says a resolve succeeded against THIS machine's library and
+##      lives on the model alone, so a note travelling to another machine
+##      cannot assert it. Section 1 reads that flag on both sides rather than
+##      leaving it to the token.
 ##
 ##   2. THE PREVIEW IS FIT TO THE BOARD. The capture pcb_note asks for is sized
 ##      to the board's own aspect at a long edge that leaves a 1 mm designator
@@ -183,10 +184,10 @@ func _loaded_fixture():
 	return data
 
 
-## The whole-board token over the SAVED form — the shape the note carries. See
-## §1 of the header for why the session-only key is excluded on both sides.
+## The whole-board token over the canonical dict — the shape the note carries.
+## See §1 of the header for why no session fact appears on either side.
 func _saved_token(data) -> String:
-	return PanelScript._whole_board_token(PCBData.strip_session_state(data.to_board_dict()))
+	return PanelScript._whole_board_token(data.to_board_dict())
 
 
 func _counts(data) -> Array:

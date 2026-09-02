@@ -208,17 +208,17 @@ func _init() -> void:
 		"…and the flag never reaches the dict, so no document can carry it forward")
 
 	# The save half: whatever the live board says, the document must not carry
-	# the machine-local fact forward to the next machine.
-	var saved_board: Dictionary = data_script.strip_session_state(
-		{"width_mm": 40.0, "components": [live.to_board_dict(), reopened_dict], "nets": []})
+	# the machine-local fact forward to the next machine. There is one board
+	# shape — the component dicts above ARE what a save writes.
+	var saved_board: Dictionary = {"width_mm": 40.0,
+		"components": [live.to_board_dict(), reopened_dict], "nets": []}
 	var saved_clean := true
 	for comp_v in (saved_board["components"] as Array):
 		if (comp_v as Dictionary).has("footprint_resolved"):
 			saved_clean = false
 	_check(saved_clean, "the SAVED board dict carries no footprint_resolved on any component")
-	_check(((saved_board["components"][0].get("pads", []) as Array).size() == 2)
-			and float(saved_board.get("width_mm", 0.0)) == 40.0,
-		"…and strips nothing else — pads, identity and board sections are untouched")
+	_check((saved_board["components"][0].get("pads", []) as Array).size() == 2,
+		"…while the lands the by-value part authored survive into it")
 
 	print("\n=== Results: %d passed, %d failed ===" % [_passed, _fail])
 	quit(1 if _fail > 0 else 0)
