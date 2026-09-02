@@ -1624,24 +1624,70 @@ const PIN_COINCIDENCE_TOL_MM := 0.01
 ##     OWNS its pads (pads_authored, the worker's FULL rule) is the authority
 ##     itself, and an UNRESOLVED part has no library reading to compare against —
 ##     dropping there would destroy the only copy;
-##   * the pin must name a land, and sit on it within PIN_COINCIDENCE_TOL_MM;
-##   * it must carry NOTHING beyond number/x_mm/y_mm. The extras (`override`, a
-##     symbolic `name`, `roles`, legacy inline fab geometry) are either the
-##     deviation itself or the part's own pin table, and a resolved land carries
-##     no name and no roles. Folding legacy inline geometry against the land is
-##     the WORKER's job (compile_board.normalize_board), not a second opinion here.
+##   * the pin must name a land, and (if it states a position at all) sit on it
+##     within PIN_COINCIDENCE_TOL_MM. A pin with no position states no deviation
+##     from where the land is, so it restates it;
+##   * every key beyond number/x_mm/y_mm must be EMPTY. A key holding something
+##     (`override`, a symbolic `name`, `roles`, legacy inline fab geometry) is
+##     either the deviation itself or the part's own pin table, and a resolved
+##     land carries no name and no roles. An EMPTY one (null, "", [], {}) states
+##     nothing, which is the same emptiness test the worker's
+##     compile_board._pin_restates_library applies — the two writers must agree
+##     on what "carries content" means or one keeps what the other drops.
+##     Folding legacy inline fab geometry against the land is the WORKER's job
+##     (compile_board.normalize_board), not a second opinion here, so any
+##     non-empty inline key keeps the pin.
 func _pin_restates_land(pin_dict: Dictionary) -> bool:
 	if pads_authored or not footprint_resolved:
 		return false
-	if pin_dict.size() != 3:
-		return false  # carries an extra key — real content, always written
-	for pad in pads:
-		if str(pad.get("number", "")) != str(pin_dict.get("number", "")):
+	for key in pin_dict:
+		if str(key) in ["number", "x_mm", "y_mm"]:
 			continue
-		var land: Vector2 = pad.get("position", Vector2.ZERO)
-		var here := Vector2(float(pin_dict["x_mm"]), float(pin_dict["y_mm"]))
-		return land.distance_to(here) <= PIN_COINCIDENCE_TOL_MM
-	return false  # names no land — the worker refuses it; never drop it silently
+		if not _is_empty_pin_value(pin_dict[key]):
+			return false  # real content — always written
+	var number := str(pin_dict.get("number", ""))
+	if not _names_a_land(number):
+		return false  # the worker refuses it; never drop it silently
+	if not pin_dict.has("x_mm"):
+		return true  # names its land, states no position of its own
+	return _position_restates_land(
+		number, Vector2(float(pin_dict["x_mm"]), float(pin_dict["y_mm"])))
+
+
+## The worker's "no content" test (compile_board._pin_restates_library): a key
+## present but holding nothing says nothing, so it cannot keep a pin alive.
+static func _is_empty_pin_value(value: Variant) -> bool:
+	if value == null:
+		return true
+	if value is String:
+		return (value as String).is_empty()
+	if value is Array:
+		return (value as Array).is_empty()
+	if value is Dictionary:
+		return (value as Dictionary).is_empty()
+	return false
+
+
+## Whether this host's resolve supplied a land with this pin number.
+func _names_a_land(number: String) -> bool:
+	for pad in pads:
+		if str(pad.get("number", "")) == number:
+			return true
+	return false
+
+
+## Whether `local` is the position of the land this pin names — i.e. the pin
+## states no positional deviation, so no coordinate is written for it.
+## False when there is no land to compare against (an unresolved or
+## pads-authored part), where the pin's own coordinate is all there is.
+func _position_restates_land(number: String, local: Vector2) -> bool:
+	if pads_authored or not footprint_resolved:
+		return false
+	for pad in pads:
+		if str(pad.get("number", "")) == number:
+			return (pad.get("position", Vector2.ZERO) as Vector2) \
+				.distance_to(local) <= PIN_COINCIDENCE_TOL_MM
+	return false
 
 
 ## Serialize to a canonical board-contract component dict.
@@ -1659,18 +1705,30 @@ func to_board_dict() -> Dictionary:
 	if not symbol.is_empty():
 		d["symbol"] = symbol
 
-	# pins: name→offset map → sorted list of {number, x_mm, y_mm} + each pin's
-	# preserved fab-geometry extras (drill_mm/annulus_diameter_mm/roles/...).
-	# A pin that merely RESTATES the resolved land is not written — see
-	# _pin_restates_land. Present-only, so a library part whose every pin equals
-	# its footprint carries no `pins` key at all.
-	var pin_keys := pins.keys()
+	# pins: every pin the DESIGN states — the pin map UNION the numbers whose
+	# extras were authored, because an override-only pin has no position of its
+	# own and must not be dropped just because the map is keyed by position.
+	# Each pin is written as an OVERRIDE of the land it names: coordinates only
+	# when they deviate from that land, extras verbatim, and nothing at all when
+	# the pin restates the land outright (_pin_restates_land). Present-only, so a
+	# library part whose every pin equals its footprint carries no `pins` key.
+	var pin_numbers := {}
+	for k in pins:
+		pin_numbers[str(k)] = true
+	for k in pin_extra:
+		pin_numbers[str(k)] = true
+	var pin_keys := pin_numbers.keys()
 	pin_keys.sort()
 	var pin_list := []
 	for k in pin_keys:
-		var p: Vector2 = pins[k]
-		var pin_dict := {"number": str(k), "x_mm": p.x, "y_mm": p.y}
-		var extras: Dictionary = pin_extra.get(str(k), {})
+		var number := str(k)
+		var pin_dict := {"number": number}
+		if pins.has(number):
+			var p: Vector2 = pins[number]
+			if not _position_restates_land(number, p):
+				pin_dict["x_mm"] = p.x
+				pin_dict["y_mm"] = p.y
+		var extras: Dictionary = pin_extra.get(number, {})
 		for ek in extras:
 			if not pin_dict.has(ek):
 				pin_dict[ek] = extras[ek]
@@ -1725,19 +1783,26 @@ func load_from_board_dict(data: Dictionary, resolved: Dictionary = {}) -> void:
 	assembly = _assembly_from_any(data.get("assembly"))
 	_group_id = str(data.get("group_id", ""))
 
-	# pins: canonical list of {number,x_mm,y_mm} → name→offset map. Every key
+	# pins: canonical list of {number, x_mm, y_mm} → name→offset map. Every key
 	# BEYOND number/x_mm/y_mm (drill_mm, annulus_diameter_mm, plated,
-	# pad_width_mm, pad_height_mm, name, roles) is AUTHORED FAB GEOMETRY the
-	# model does not represent — preserved per pin and re-emitted verbatim by
-	# to_board_dict.
+	# pad_width_mm, pad_height_mm, override, name, roles) is AUTHORED FAB
+	# GEOMETRY the model does not represent — preserved per pin and re-emitted
+	# verbatim by to_board_dict.
+	#
+	# A pin entry states a POSITION only to deviate from its land, so one that
+	# states none goes into the map WITHOUT a position: fill_pins_from_pads
+	# seeds it from this host's resolve. Defaulting it to (0, 0) here put an
+	# override-only pin on the component origin, drew it there, and wrote that
+	# fabricated coordinate back — a position the worker then refuses as the
+	# wrong pad.
 	pins.clear()
 	pin_extra.clear()
 	var pin_list: Array = data.get("pins", [])
 	for pd in pin_list:
 		if pd is Dictionary:
 			var pnum := str(pd.get("number", ""))
-			pins[pnum] = Vector2(
-				float(pd.get("x_mm", 0.0)), float(pd.get("y_mm", 0.0)))
+			if pd.has("x_mm") and pd.has("y_mm"):
+				pins[pnum] = Vector2(float(pd["x_mm"]), float(pd["y_mm"]))
 			var extras := {}
 			for k in (pd as Dictionary):
 				if k not in ["number", "x_mm", "y_mm"]:

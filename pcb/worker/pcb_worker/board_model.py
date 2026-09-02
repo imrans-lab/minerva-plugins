@@ -282,12 +282,20 @@ def validate_board(board: dict) -> dict:
         # Index this component's pin numbers for net-ref resolution.
         pins = _as_list(comp.get("pins"))
         own_pads = comp.get("pads")
-        comp_pads_known[ref] = (isinstance(own_pads, list)
-                                or (not comp.get("footprint") and len(pins) > 0))
+        has_own_pads = isinstance(own_pads, list)
+        comp_pads_known[ref] = has_own_pads or (not comp.get("footprint") and len(pins) > 0)
+        # THE ROSTER — the pad numbers the FILE itself states. A `pads` key is the
+        # full pad authority, so the roster is that list ALONE: a pin beside it
+        # overrides one of those pads, and a pin naming a number the list lacks is
+        # the defect this pass should catch, not a number it should admit. Without
+        # a `pads` key, pins can roster the pads only when nothing else could
+        # supply them — a component naming no footprint. The per-pin shape checks
+        # below run either way.
         numset: set[str] = set()
-        for pad in (own_pads if isinstance(own_pads, list) else []):
-            if isinstance(pad, dict) and str(pad.get("number", "")) != "":
-                numset.add(str(pad.get("number")))
+        if has_own_pads:
+            for pad in own_pads:
+                if isinstance(pad, dict) and str(pad.get("number", "")) != "":
+                    numset.add(str(pad.get("number")))
         for j, pin in enumerate(pins):
             if not isinstance(pin, dict):
                 err(f"{cpath}.pins[{j}]", "pin must be a mapping")
@@ -295,7 +303,7 @@ def validate_board(board: dict) -> dict:
             num = pin.get("number")
             if num is None or str(num) == "":
                 err(f"{cpath}.pins[{j}].number", "pin is missing 'number'")
-            else:
+            elif not has_own_pads:
                 numset.add(str(num))
         if isinstance(ref, str) and ref != "":
             comp_pins[ref] = numset

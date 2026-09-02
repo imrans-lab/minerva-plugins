@@ -131,11 +131,31 @@ def test_validate_duplicate_ref():
     assert any("duplicate" in e["message"] for e in r["errors"])
 
 
-def test_validate_bad_net_pin_ref():
-    bad = _BASE.replace('"C1.1"', '"C1.9"')  # C1 has no pad 9
+def test_validate_cannot_refute_a_pin_ref_a_library_part_owns():
+    # C1 takes its pads from its footprint and its `pins` are OVERRIDES of them,
+    # so the file states no roster this structural pass could measure "C1.9"
+    # against — it says so rather than guessing. The real adjudication is against
+    # the RESOLVED pads, in compile_board._finalize_nets.
+    bad = _BASE.replace('"C1.1"', '"C1.9"')
+    r = _call("validate", {"yaml": bad})["result"]
+    assert r["ok"] is True
+    assert any("cannot verify pad '9'" in w["message"] for w in r["warnings"])
+
+
+def test_validate_bad_net_pin_ref_on_a_pads_authored_component():
+    # A `pads` key IS the full pad roster, so here the file CAN refute the ref.
+    # The override pin "3" beside the two real pads does not enlarge that roster:
+    # a pin overrides a pad, it never declares one.
+    bad = _BASE.replace(
+        '- {ref: C1, footprint: C_0805, x_mm: 15, y_mm: 10, rotation_deg: 0,\n'
+        '     pins: [{number: "1", x_mm: 0, y_mm: 0}, {number: "2", x_mm: 1, y_mm: 0}]}',
+        '- {ref: C1, footprint: C_0805, x_mm: 15, y_mm: 10, rotation_deg: 0,\n'
+        '     pads: [{number: "1"}, {number: "2"}],\n'
+        '     pins: [{number: "3", override: {drill_mm: 0.8}}]}',
+    ).replace('"C1.1"', '"C1.3"')
     r = _call("validate", {"yaml": bad})["result"]
     assert r["ok"] is False
-    assert any("pad '9'" in e["message"] for e in r["errors"])
+    assert any("pad '3'" in e["message"] for e in r["errors"])
 
 
 def test_validate_net_ref_unknown_component():

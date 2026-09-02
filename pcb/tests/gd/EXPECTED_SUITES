@@ -580,12 +580,15 @@ test_assembly_placements_surface.gd assertions=27
 # placements; a load that lands during an in-flight round trip is not memoized
 # either.
 test_assembly_placements_memo.gd assertions=19
-# A `pins` entry is an OVERRIDE of the like-numbered land and nothing else
-# — to_board_dict drops a pin that restates the resolve, keeps
-# every deviation (moved pad, typed override, symbolic name), and leaves a
-# pads-authored or unresolved part alone — and adopt_resolved re-derives the pin
-# map from the lands, so a part written with no pins reopens with all of them.
-test_pin_override_only.gd assertions=13
+# A `pins` entry is an OVERRIDE of the like-numbered land and nothing else —
+# to_board_dict drops a pin that restates the resolve (an empty name/roles being
+# no content, the same emptiness test the worker applies), keeps every deviation
+# (moved pad, typed override, symbolic name), writes a coordinate only where the
+# pin leaves its land, and leaves a pads-authored or unresolved part alone.
+# adopt_resolved re-derives the pin map from the lands, so a part written with no
+# pins reopens with all of them and an override-only pin lands on its pad rather
+# than on the component origin.
+test_pin_override_only.gd assertions=20
 # The promote reply's `design_delta` — which AUTHORED facts differ from the file
 # being overwritten (per-component changed fields with old and new, components
 # and nets added/removed, per-net trace and via counts), against the count-only

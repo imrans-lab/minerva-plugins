@@ -23,6 +23,8 @@ func _init() -> void:
 	print("=== pins are overrides only ===\n")
 	_test_restating_pins_are_not_written()
 	_test_deviations_are_written()
+	_test_empty_extras_are_not_content()
+	_test_override_only_pin_takes_its_position_from_the_land()
 	_test_unresolved_and_authored_parts_keep_every_pin()
 	_test_document_round_trip_keeps_the_pin_map()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -87,6 +89,46 @@ func _test_deviations_are_written() -> void:
 	]).to_board_dict()
 	check_eq("a pin carrying a symbolic name is written (no land has one)",
 		(named.get("pins", []) as Array).size(), 1)
+
+
+func _test_empty_extras_are_not_content() -> void:
+	# A key holding nothing says nothing. The worker's own emptiness test
+	# (compile_board._pin_restates_library) drops such a pin, so this writer must
+	# too — otherwise the panel keeps a pin the worker would have removed.
+	var d: Dictionary = _library_part([
+		{"number": "1", "x_mm": -1.0, "y_mm": 0.0, "roles": []},
+		{"number": "2", "x_mm": 1.0, "y_mm": 0.0, "name": ""},
+	]).to_board_dict()
+	check("empty roles / empty name are not content, so nothing is written",
+		not d.has("pins"))
+
+
+func _test_override_only_pin_takes_its_position_from_the_land() -> void:
+	# The shape this rule PRODUCES: a pin that deviates only in geometry states
+	# no coordinates at all. Loading it must seed the position from the resolved
+	# land, not from (0, 0) — and writing it back must not invent a coordinate,
+	# which the worker would refuse as a position naming the wrong pad.
+	var land := Vector2(-1.0, 0.0)
+	check("the oracle is meaningful: the land is NOT at the component origin",
+		land.distance_to(Vector2.ZERO) > 0.5)
+
+	var comp := _library_part([{"number": "1", "override": {"pad_width_mm": 2.0}}])
+	check("the override-only pin sits on its land, not the origin",
+		(comp.pins.get("1", Vector2.ZERO) as Vector2).distance_to(land) < 1e-6)
+
+	var pins_out: Array = comp.to_board_dict().get("pins", [])
+	check_eq("it is still written (an override is real content)", pins_out.size(), 1)
+	var written: Dictionary = pins_out[0] if pins_out.size() == 1 else {}
+	check("no coordinate is fabricated for it",
+		not written.has("x_mm") and not written.has("y_mm"))
+	check("its override rides through verbatim",
+		written.get("override") == {"pad_width_mm": 2.0})
+
+	# And the shape is stable: reopening and rewriting yields the same entry.
+	var reopened: Object = PCBComponent.from_board_dict(
+		comp.to_board_dict(), _resolved_entry())
+	check("the round trip is byte-stable",
+		(reopened.to_board_dict().get("pins", []) as Array) == pins_out)
 
 
 func _test_unresolved_and_authored_parts_keep_every_pin() -> void:

@@ -3480,6 +3480,10 @@ def normalize_board(
       * AMBIGUOUS → a fail-closed ERROR diagnostic; the WHOLE normalize fails (no
         board returned) — a half-normalized source is worse than none.
 
+    A FULL component (one carrying a ``pads`` key) is skipped entirely: it is its
+    own geometry authority, the compiler never opens the library for it, and its
+    pins are left exactly as authored.
+
     THEN, on the folded pins: a pin entry is an OVERRIDE and nothing else, so one
     that says only what its library pad already says — position coincident, no
     ``override``, no ``name``/``roles`` (see :func:`_pin_restates_library`) — is
@@ -3537,13 +3541,17 @@ def normalize_board(
         pins = comp.get("pins")
         if not isinstance(pins, list):
             continue
+        # A FULL component (a `pads` key) IS its own geometry authority and the
+        # compiler never opens the library for it, so neither half of the pin
+        # normalization applies: classifying its inline geometry against the
+        # like-named LIBRARY footprint would judge it by pads its own compile
+        # never sees, and none of its pins can be a duplicate of a library pad.
+        # Its pins are left exactly as authored.
+        if inline_footprint.carries_full_geometry(comp):
+            continue
         ref = comp.get("ref") if isinstance(comp.get("ref"), str) else ""
         pad_by_number = _footprint_pad_map(comp.get("footprint"), chain=chain)
-        # Only a PARTIAL component (no `pads` key) takes its pads from the library,
-        # so only there can a pin be a duplicate of one. A FULL component IS the
-        # geometry authority — its pins are left exactly as authored.
-        if not inline_footprint.carries_full_geometry(comp):
-            resolved_comps.append((comp, ref, pad_by_number))
+        resolved_comps.append((comp, ref, pad_by_number))
         for pin in pins:
             if not isinstance(pin, dict):
                 continue
