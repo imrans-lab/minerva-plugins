@@ -4657,30 +4657,27 @@ func board_check() -> Dictionary:
 	return reply
 
 
-## THE serialize-back verb — the standing loose end of every HITL: the live
-## board (committed copper, moves) becomes the canonical YAML file, and it is
-## IMPOSSIBLE without a passing full authoritative verdict (pcb.promote_check:
-## connectivity DRC + geometric DRC + assembly, composed fail-closed worker-
-## side). There is deliberately NO acknowledge-through here (S7): commit's
-## placement gate takes consent because a draft is cheap to revert; a promoted
-## file is the durable design of record, and the gate is the point.
+## Write the live board to its canonical YAML file — the only verb in this
+## panel that puts bytes in a .yaml. It is impossible without a passing
+## authoritative verdict from pcb.promote_check (connectivity DRC + geometric
+## DRC + assembly, composed fail-closed worker-side). There is no
+## acknowledge-through: a draft is cheap to revert, so commit takes consent
+## instead, but a promoted file is the durable design of record and the gate
+## is the whole point of writing one.
 ##
-## Path resolution (cold review F2 — the .pcbskel corruption BLOCKER):
-## explicit arg wins; otherwise the CANONICAL SOURCE path — recorded ONLY by
-## load_board_from_yaml's adoption (_canonical_source_path), NEVER the
-## editor-flow _file_path, which the ordinary .pcbskel document flow also
-## sets: falling back to it would truncate a JSON .pcbskel document with YAML
-## the next open cannot parse. No canonical source ⇒ refuse by name. And a
-## ".pcbskel" target is refused OUTRIGHT, explicit arg included — promotion
-## writes canonical YAML, and there is no legitimate ask that spells a YAML
-## write onto a .pcbskel.
+## Path resolution: the explicit arg wins; otherwise the CANONICAL SOURCE path
+## (_canonical_source_path), recorded only by load_board_from_yaml's adoption.
+## NEVER the editor-flow _file_path, which the ordinary .pcbskel document flow
+## also sets: falling back to it would truncate a JSON .pcbskel document with
+## YAML the next open cannot parse. No canonical source refuses by name, and a
+## ".pcbskel" target is refused outright — the explicit arg included.
 ##
-## Post-promotion state, the station's recorded decisions: (c) the workspace
-## is NOT mutated — committed candidates already ARE the canonical copper this
-## file now carries, and their consumed-hint records stay consumed (audit);
-## (d) the sidecars need no rewrite — their coherence guard is the BOARD
-## fingerprint (compute_board_fingerprint_v2 of the live dict), and promotion
-## changes the file, not the dict, so every fingerprint remains valid; the
+## Nothing beside the file is rewritten. The routing workspace is not mutated:
+## committed candidates already ARE the canonical copper this file now
+## carries, and their consumed-hint records must stay consumed. The sidecars
+## need no rewrite either — their coherence guard is the board fingerprint
+## (compute_board_fingerprint_v2 over the live dict), and promotion changes
+## the file rather than the dict, so every fingerprint stays valid; the
 ## annotation sidecar already lives beside the adopted path.
 ##
 ## Reply on success: {success, path, digest_sha256, bytes, promote_check
@@ -4689,12 +4686,11 @@ func board_check() -> Dictionary:
 ## removed, per-net trace/via counts; see pcb_promote_delta.gd for the shape.
 ## Absent when there was no prior file or it did not parse: prior_state notes
 ## why. ADVISORY — it never gates)}.
-## `allow_copper_regression` (UX4 station 9, DCR S6 — owner ruling 1): the
-## explicit override for the panel-side regression guard below. Default false:
-## a promotion that would REMOVE copper a prior design of record had (per-net
-## copper presence = traces ∪ zones ∪ netted vias — pours count, mirroring the
-## census's own definition) or would drop components refuses by name until the
-## caller confirms.
+## `allow_copper_regression` is the explicit override for the regression guard
+## below. Default false: a promotion that would REMOVE copper the prior design
+## of record had (per-net copper presence = traces ∪ zones ∪ netted vias —
+## pours count, matching the census's definition) or would drop components
+## refuses by name until the caller confirms.
 func promote(explicit_path: String = "", allow_copper_regression: bool = false) -> Dictionary:
 	if _data == null:
 		return {"success": false, "error": "no_board"}
