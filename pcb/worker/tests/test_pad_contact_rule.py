@@ -259,8 +259,8 @@ def test_the_two_paths_place_one_board_identically_bottom_side_included():
     # Read through `occupies`, the ONE derivation — the pad's layer set lives on
     # its contact node and has no second copy on the _Pad to assert against.
     by_pin = {(p.ref, p.pin): p for p in harvested}
-    assert by_pin[("SW10", "A")].occupies("bottom")
-    assert not by_pin[("SW10", "A")].occupies("top")
+    assert by_pin[("SW10", "1")].occupies("bottom")
+    assert not by_pin[("SW10", "1")].occupies("top")
     # A through-hole land spans the stack whichever side its part is mounted on,
     # so it occupies BOTH sides rather than picking one.
     assert by_pin[("U2", "4")].occupies("top")

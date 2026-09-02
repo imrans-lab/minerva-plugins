@@ -138,13 +138,13 @@ components:
   rotation_deg: 90
   layer: top
   pins:
-  - number: A
+  - number: "1"
     name: SMD_A
     x_mm: -3.0
     y_mm: 0.0
     pad_width_mm: 2.4
     pad_height_mm: 1.2
-  - number: B
+  - number: "2"
     name: SMD_B
     x_mm: 3.0
     y_mm: 0.0
@@ -171,13 +171,13 @@ components:
   rotation_deg: 0
   layer: bottom
   pins:
-  - number: A
+  - number: "1"
     name: BSMD_A
     x_mm: -3.0
     y_mm: 0.0
     pad_width_mm: 2.4
     pad_height_mm: 1.2
-  - number: B
+  - number: "2"
     name: BSMD_B
     x_mm: 3.0
     y_mm: 0.0
@@ -238,11 +238,11 @@ nets:
 - name: N_OBL
   pins:
   - J1.1
-  - SW9.A
+  - SW9.1
 - name: N_BOT
   pins:
   - U2.1
-  - SW9.B
+  - SW9.2
 - name: N_HT
   pins:
   - U3.1

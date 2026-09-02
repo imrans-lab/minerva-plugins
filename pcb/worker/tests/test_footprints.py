@@ -198,7 +198,7 @@ def test_pad_shapes_and_drill_parsed():
     assert {p["shape"] for p in dip["pads"]} <= {"rect", "oval", "circle", "roundrect"}
 
     sw = resolve_footprint("EVP-ASAC1A:SW_EVP-ASAC1A")
-    assert {p["number"] for p in sw["pads"]} == {"A", "B"}
+    assert {p["number"] for p in sw["pads"]} == {"1", "2"}  # the vendor drawing's numbers, not the datasheet's A/B terminal labels
     assert all(p["drill"] is None for p in sw["pads"])
 
 

@@ -66,6 +66,7 @@ ORACLE = {
     "C98190": 0,      # C_0805_2012Metric
     "C170182": 0,     # C_1206_3216Metric
     "C6120014": 0,    # C_1210_3225Metric
+    "C394395": 0,     # C_1210_3225Metric — Taiyo Yuden 100u, the C6120014 stock substitute
     "C149504": 0,     # R_0805_2012Metric
     "C17414": 0,      # R_0805_2012Metric
     "C17616": 0,      # R_0805_2012Metric
@@ -86,6 +87,8 @@ ORACLE = {
     # same number is re-derived from those two directions, without this
     # module, in test_assembly_child_footprint.py.
     "C41376161": 270, # PinSocket_1x22 HC-PM254-8.5H
+    # 2-terminal tactile switch — datasheet land pattern, pads numbered 1/2 as the vendor drawing does.
+    "C4365033": 0,    # EVP-ASAC1A:SW_EVP-ASAC1A
 }
 
 #: The subset a person verified against a physical rendering of an assembled

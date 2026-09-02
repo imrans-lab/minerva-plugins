@@ -48,7 +48,7 @@ def _compiled_parity_corners():
 
 # A DELIBERATE short, built the same way bug 019f80b5124d looked in the wild: a
 # candidate trace on one net (N_OBL) running straight through a placed pad that
-# belongs to a DIFFERENT, real net (SW9 pad B, N_BOT). Unlike smart_remote's
+# belongs to a DIFFERENT, real net (SW9 pad 2, N_BOT). Unlike smart_remote's
 # MIC1/I2S short, this is not an accident the fixture happened to contain — it is
 # constructed here on purpose, because parity_corners is not otherwise dirty in
 # this specific spot (docket 019fbe68c5f8: repointing away from a withdrawn
@@ -64,14 +64,14 @@ def _shorting_candidate(candidate_id: str = "ghost-1", revision=7) -> dict:
             "segments": [dict(SHORTING_SEGMENT)]}
 
 
-def _sw9_padB_findings(findings: list) -> list:
-    """Findings that name SW9 pad B AND the trespassing net — the short itself."""
+def _sw9_pad2_findings(findings: list) -> list:
+    """Findings that name SW9 pad 2 AND the trespassing net — the short itself."""
     out = []
     for f in findings:
         participants = f.get("participants") or []
         names = {(p.get("ref"), p.get("pad")) for p in participants}
         nets = {p.get("net_name") for p in participants}
-        if ("SW9", "B") in names and nets == {"N_OBL", "N_BOT"}:
+        if ("SW9", "2") in names and nets == {"N_OBL", "N_BOT"}:
             out.append(f)
     return out
 
@@ -92,7 +92,7 @@ def test_shorting_proposal_is_caught_before_acceptance():
     assert union["verifies_geometry"] is True
     assert union["verdict"] == "violations"
 
-    shorts = _sw9_padB_findings(union["findings"])
+    shorts = _sw9_pad2_findings(union["findings"])
     assert len(shorts) == 1, union["findings"]
     short = shorts[0]
     assert short["type"] == "gc2_copper_clearance"
@@ -122,7 +122,7 @@ def test_connectivity_drc_names_the_short_but_cannot_measure_it():
 
     This used to assert connectivity reported the shorting proposal CLEAN, on the
     premise that "a centerline checker cannot represent this". Measured, that
-    premise was false for THIS geometry: SW9 pad B's centre is (10.0, 19.0) and
+    premise was false for THIS geometry: SW9 pad 2's centre is (10.0, 19.0) and
     the candidate centerline runs straight through it, so the fault was visible to
     a centerline kernel all along — only check A's endpoint-only scope hid it.
     With check A reading the whole run, connectivity NAMES the short.
@@ -143,7 +143,7 @@ def test_connectivity_drc_names_the_short_but_cannot_measure_it():
     assert route_drc["scope"] == "connectivity"
     shorts = [v for v in route_drc["violations"] if v.get("type") == "wrong_net_pad"]
     assert shorts == [{"type": "wrong_net_pad", "net": "N_OBL", "at": [10.0, 19.0],
-                       "pad": {"ref": "SW9", "pin": "B", "net": "N_BOT"}}]
+                       "pad": {"ref": "SW9", "pin": "2", "net": "N_BOT"}}]
     assert all("measured_mm" not in v for v in shorts)
 
 
@@ -191,8 +191,8 @@ def test_proposed_and_accepted_geometry_produce_the_identical_finding():
                                "params": {"yaml": yaml.safe_dump(accepted_src)}})["result"]
     assert accepted["ok"] is True and accepted["verdict"] == "violations"
 
-    proposed_short = _comparable(_sw9_padB_findings(proposed["findings"])[0])
-    accepted_short = _comparable(_sw9_padB_findings(accepted["findings"])[0])
+    proposed_short = _comparable(_sw9_pad2_findings(proposed["findings"])[0])
+    accepted_short = _comparable(_sw9_pad2_findings(accepted["findings"])[0])
     assert proposed_short == accepted_short
 
     # And the whole delta agrees, not just the headline finding: every violation

@@ -161,11 +161,11 @@ components:
   rotation_deg: 0
   layer: top
   pins:
-  - number: A
+  - number: "1"
     name: SW_A
     x_mm: -3.0
     y_mm: 0.0
-  - number: B
+  - number: "2"
     name: SW_B
     x_mm: 3.0
     y_mm: 0.0
@@ -227,7 +227,7 @@ nets:
   - J1.1
 - name: N_SW
   pins:
-  - SW1.A
+  - SW1.1
   - U1.2
 - name: N_MIC
   pins:
@@ -236,7 +236,7 @@ nets:
 - name: N_HDR
   pins:
   - J1.4
-  - SW1.B
+  - SW1.2
 
 traces:
 - net: N_PWR

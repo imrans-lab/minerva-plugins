@@ -10,7 +10,7 @@ Two layers of coverage:
     ``parity_corners.yaml`` was authored for the CROSS-SURFACE geometry parity
     gate, not for connectivity DRC, so it does not happen to reproduce that
     defect shape — measured, it reports one dangling endpoint (its routed N_OBL
-    trace's far end does not land on the SW9.A pad it is nominally headed for)
+    trace's far end does not land on the SW9.1 pad it is nominally headed for)
     plus the N_BOT run's shorts against U2's unnetted pins, and nothing else.
     That is still a real, exact, regression-worthy claim; it is just a smaller
     one than the withdrawn board made. NEVER repair this module by restoring the
@@ -86,7 +86,7 @@ def test_parity_corners_exact_findings():
     }
 
     # The one dangling endpoint: the routed N_OBL trace's far end (7.0, 22.0)
-    # does not land on the SW9.A pad (10.0, 25.0) it is nominally headed for —
+    # does not land on the SW9.1 pad (10.0, 25.0) it is nominally headed for —
     # incidental to how the fixture was authored for geometry parity, not
     # routing precision, but a real and stable connectivity finding.
     dangling = _of_type(r, "dangling_endpoint")

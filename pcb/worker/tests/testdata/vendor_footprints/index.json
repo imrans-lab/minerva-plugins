@@ -77,11 +77,23 @@
   "package": "CONN-SMD_P2.00_S2B-PH-SM4-TB-LF-SN",
   "title": "S2B-PH-SM4-TB(LF)(SN)"
  },
+ "C394395": {
+  "footprint": "Capacitor_SMD:C_1210_3225Metric",
+  "house": "jlcpcb",
+  "package": "C1210",
+  "title": "EMK325ABJ107MM-T"
+ },
  "C41376161": {
   "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H",
   "house": "jlcpcb",
   "package": "HDR-TH_22P-P2.54-V-F",
   "title": "HC-PM254-8.5H-1X22PZ"
+ },
+ "C4365033": {
+  "footprint": "EVP-ASAC1A:SW_EVP-ASAC1A",
+  "house": "jlcpcb",
+  "package": "SW-SMD_PANASONIC_EVPASXXX",
+  "title": "EVP-ASAC1A"
  },
  "C49678": {
   "footprint": "Capacitor_SMD:C_0805_2012Metric",

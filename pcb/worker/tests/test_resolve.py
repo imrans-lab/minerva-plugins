@@ -558,7 +558,7 @@ def test_resolved_pads_stay_footprint_local_so_the_compile_round_trip_is_stable(
     from_library = placed(cb.compile_board(board))
     from_resolved = placed(cb.compile_board(resolved))
     assert from_resolved == from_library
-    assert from_library["pad:A:0"] == ((17.0, 12.0), ("B.Cu", "B.Mask", "B.Paste"))
+    assert from_library["pad:1:0"] == ((17.0, 12.0), ("B.Cu", "B.Mask", "B.Paste"))
 
 
 def test_pad_fallback_box_measures_a_rotated_land_at_its_turned_extent():

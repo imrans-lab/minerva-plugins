@@ -42,9 +42,9 @@ drawing, which is far worse than the gap.
 
 | state | footprints |
 | --- | --- |
-| measured | 15 |
+| measured | 16 |
 | declared no-reference | 10 |
-| **unknown** | **18** |
+| **unknown** | **17** |
 | total in the acquisition lock | 43 |
 
 ## UNKNOWN — nothing has ever measured this drawing
@@ -61,7 +61,6 @@ An order that buys a catalogue part on one of these refuses with `assembly_orien
 - `Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical` — the lock names no catalogue part for it
 - `Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical_SMD_Wcon2171_TYPE2` — the lock names no catalogue part for it
 - `Diode_SMD:D_SMA` — the lock names no catalogue part for it
-- `EVP-ASAC1A:SW_EVP-ASAC1A` — the lock names no catalogue part for it
 - `Espressif:ESP32-S3-DevKitC` — the lock names no catalogue part for it
 - `Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT` — the lock names `C41376161`, `HC-PM254-8.5H-1x22P`
 - `INMP441:INMP441_I2S_2x3_P2.54mm` — the lock names no catalogue part for it
@@ -81,6 +80,7 @@ One line per PAIR, because the pair is what the gate is keyed on. A footprint ap
 - `Capacitor_SMD:C_1206_3216Metric`
   - jlcpcb `C170182` — 0 deg
 - `Capacitor_SMD:C_1210_3225Metric`
+  - jlcpcb `C394395` — 0 deg
   - jlcpcb `C6120014` — 0 deg
 - `Connector_JST:JST_PH_S2B-PH-SM4-TB_1x02-1MP_P2.00mm_Horizontal`
   - jlcpcb `C295747` — 0 deg
@@ -92,6 +92,8 @@ One line per PAIR, because the pair is what the gate is keyed on. A footprint ap
   - jlcpcb `C161861` — 0 deg
 - `Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H`
   - jlcpcb `C41376161` — 270 deg
+- `EVP-ASAC1A:SW_EVP-ASAC1A`
+  - jlcpcb `C4365033` — 0 deg
 - `Fuse:Fuse_1206_3216Metric`
   - jlcpcb `C17888` — 0 deg
   - jlcpcb `C2803346` — 0 deg

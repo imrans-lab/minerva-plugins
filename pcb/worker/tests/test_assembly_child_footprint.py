@@ -606,9 +606,10 @@ def test_the_emission_orients_the_children_on_the_strip_pair(bottom, ledger):
     for ref in ("U1S_A", "U1S_B"):
         assert rows[ref].footprint_ref == STRIP
         assert rows[ref].house_part == PART
-    assert {r.component for r in emission.orientation_refusals} == {
-        "SW1", "SW2", "SW3", "SW4"}
-    assert all(r.code == aor.CODE_UNKNOWN for r in emission.orientation_refusals)
+    # The tactile-switch pair (EVP-ASAC1A drawing, C4365033) is measured too,
+    # so nothing on this board is refused for an unknown orientation.
+    assert emission.orientation_refusals == ()
+    assert all(rows[f"SW{i}"].rotation_deg is not None for i in range(1, 5))
 
     # The row's direction in the emitted frame, from the child's own placed
     # pads -- the same points the gate just proved are the parent's copper.
