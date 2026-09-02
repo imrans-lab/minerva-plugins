@@ -490,6 +490,7 @@ def test_every_gate_that_runs_for_this_service_is_claimed_as_checked():
         ag.CODE_ROW_REF_LIMIT, ag.CODE_NON_METRIC_COORDINATES,
         ag.CODE_PLACEMENTS_TOO_CLOSE, ag.CODE_EMPTY_EXPANSION,
         ag.CODE_PASTE_UNDECIDED,
+        ag.CODE_ANCHOR_OFF_LANDS, ag.CODE_CHILD_LANDS_MISMATCH,
         aor.CODE_UNKNOWN, aor.CODE_UNDECIDED, aor.CODE_MISMATCH,
     }
     assert claimed == running
