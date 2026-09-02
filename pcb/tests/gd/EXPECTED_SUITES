@@ -562,3 +562,21 @@ test_pcb_note_hooks.gd assertions=22
 # assembly data arriving with no assembly key.
 # Counted by hand from the check() call sites: 6 + 14 + 3, none inside a loop.
 test_assembly_schema_roundtrip.gd assertions=23 real-worker
+
+# The component-reading verbs (get_components / describe_component) carry the
+# board's authored `assembly` block and the COMPILER's resolved physical
+# placements. What is proven here is that the panel REPORTS the channel's
+# numbers rather than deriving its own — no rounding, no re-composition — plus
+# the authored passthrough, the copy-not-alias rule, and the three ways the
+# placements can be absent (channel down, board uncompilable, no panel), each
+# with a stated reason and never an empty list. Whether the numbers are RIGHT
+# is the worker's oracle: worker/tests/test_assembly_placements_surface.py
+# compares them to the CPL writer's own rows.
+test_assembly_placements_surface.gd assertions=27
+# The panel's placement memo across a whole-board LOAD, on the real PCBPanel
+# with a stub _MinervaIPC node answering from the board it is sent: a load
+# leaves board_revision alone, so the memo's second key (the panel's
+# data_changed count) is what stops board B being answered with board A's
+# placements; a load that lands during an in-flight round trip is not memoized
+# either.
+test_assembly_placements_memo.gd assertions=19

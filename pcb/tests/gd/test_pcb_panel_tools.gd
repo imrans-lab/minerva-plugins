@@ -290,7 +290,13 @@ func _run_golden_parity() -> void:
 	# Legacy MCPPCBTools._pcb_get_components → {success, component_count, components}
 	# each component → {id, footprint, x, y, rotation, layer, pins} (+ value?).
 	var gc := await h("minerva_pcb_get_components", _args())
-	check_keys("get_components top-level", gc, ["success", "component_count", "components"])
+	# `physical_placements_unavailable` is part of this shape HERE and always
+	# will be: the suite runs with no pcb backend bound, so the resolved
+	# placements have no source and the reply says so rather than going
+	# silent. With a backend the key is absent and each component carries
+	# `physical_placements` instead.
+	check_keys("get_components top-level", gc,
+		["success", "component_count", "components", "physical_placements_unavailable"])
 	var comps: Array = gc.get("components", [])
 	check("components non-empty", comps.size() > 0)
 	if comps.size() > 0:
@@ -367,7 +373,7 @@ func _run_golden_parity() -> void:
 	# empty reference → falls back to get_components shape (legacy behaviour).
 	var gs_empty := await h("minerva_pcb_spatial_query", _args())
 	check_keys("spatial_query no-ref → get_components shape", gs_empty,
-		["success", "component_count", "components"])
+		["success", "component_count", "components", "physical_placements_unavailable"])
 
 	print("\n-- GOLDEN: describe_component shape --")
 	# Legacy → describe_component_context(id) + success. Base keys:

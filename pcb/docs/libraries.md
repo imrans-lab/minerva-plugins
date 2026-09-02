@@ -103,7 +103,8 @@ profile's digest — recording the layer moves no fabricated byte.
 ### The LIVE chain: what a real call actually resolves through (B7)
 
 Every compile-bearing MCP tool (`gerbers`, `generate`, `drc`, `drc_geometric`,
-`resolve`, `normalize`, `route`, `mask_view`, `assembly_check`, `board_health`,
+`resolve`, `normalize`, `route`, `mask_view`, `assembly_check`,
+`assembly_placements`, `board_health`,
 `promote_check`, and the panel's board-load `resolve_best_effort`) resolves
 through the chain the **Go broker** injects per call
 (`worker_tools.go::withLibraryChain`), never through caller-supplied paths:

@@ -173,6 +173,16 @@ class ResolvedAssembly:
         if self.paste not in PASTE_TOKENS:
             raise ValueError(f"ResolvedAssembly.paste must be one of {PASTE_TOKENS}")
 
+    def drawing_for(self, physical) -> str:
+        """The library ref of the drawing ONE placement is described by: the
+        one the placement named, else this component's own.
+
+        Every part-level question — the BOM's footprint cell, the orientation
+        ledger key, what a reader is told the part IS — answers off this, so
+        the rule has one spelling. ``physical`` is anything carrying a
+        ``footprint_ref`` (a resolved placement, or an authored spec)."""
+        return getattr(physical, "footprint_ref", None) or self.footprint_ref
+
     #: Refs the component actually contributes rows under: its own when no
     #: expansion is authored, else one per authored placement.
     def emitted_refs(self, component_ref: str) -> tuple[str, ...]:

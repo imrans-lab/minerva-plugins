@@ -623,6 +623,49 @@ def _assembly_check(params: dict) -> dict:
     return {"ok": True, "result": _assembly_tri_state(board, layers=_layer_params(params))}
 
 
+def _assembly_placements(params: dict) -> dict:
+    """LOGICAL COMPONENT -> PHYSICAL PLACEMENTS, off a strict compilation.
+
+    The read-only surface behind the panel's component tools: for every
+    component, the parts an assembly house actually picks up, each with the
+    origin, body-centre anchor, composed rotation, side and anchor basis the
+    CPL is written from. An author reading only the board's `assembly` block
+    sees offsets in the PARENT's local frame; those offsets ride the parent's
+    rotation and side, so they do not say where the nozzle goes.
+
+    The rows are :func:`order_package.placement_map` — the SAME serialization
+    the order manifest records — over the SAME strict compile the order path
+    runs. One derivation: a consumer of this reply is reading the compiler's
+    answer, not a second opinion about it.
+
+    params: {board|yaml|board_path+board_digest} (anything `_load` accepts).
+    Reply: {ok: True, result: {resolved: bool, components: [...],
+    reason?: str, diagnostics?: [...]}}.
+
+    A board that does NOT compile is a REPORT, not a channel failure: there
+    are no resolved placements to give, `resolved` is False and `reason` names
+    the first error — a mid-layout board must be able to ask this question and
+    be told why the answer is unavailable. Only an unparseable board param is
+    a structured {ok: False} parse error, the envelope every sibling uses."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_or_fail(board, _layer_params(params))
+    if _is_error_reply(compiled):
+        failure = compiled["error"]
+        return {"ok": True, "result": {
+            "resolved": False,
+            "components": [],
+            "reason": str(failure.get("message", "board could not be compiled")),
+            "diagnostics": failure.get("diagnostics", []),
+        }}
+    return {"ok": True, "result": {
+        "resolved": True,
+        "components": order_package.placement_map(compiled.board),
+    }}
+
+
 def _mask_view(params: dict) -> dict:
     """SOLDER-MASK VIEW for the panel (WYSIWYG goal 019ff4a5a75a, gap G4).
 
@@ -4309,6 +4352,9 @@ _HANDLERS = {
     # Tri-state assembly check (DCR 019fd5fd9084 / 019fd5fddc09) — the
     # standalone surface for board_health.assembly.
     "assembly_check": lambda req: _assembly_check(req.get("params") or {}),
+    # The resolved logical->physical placement map — where the house actually
+    # puts every part, for the panel's component-reading tools.
+    "assembly_placements": lambda req: _assembly_placements(req.get("params") or {}),
     # Whole-board health without a routing run (Epoch UX2 station 9) — the
     # load path's census+assembly surface.
     "board_health": lambda req: _board_health_method(req.get("params") or {}),

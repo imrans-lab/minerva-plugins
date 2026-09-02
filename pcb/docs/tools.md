@@ -28,7 +28,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | Tool | Notes |
 |---|---|
 | `minerva_pcb_set_board_size` | model `set_board_size` (journalled resize) |
-| `minerva_pcb_get_components` | golden-parity return shape |
+| `minerva_pcb_get_components` | golden-parity return shape, plus the two ASSEMBLY facts per component — see "Assembly identity and resolved placements" below |
 | `minerva_pcb_get_nets` | |
 | `minerva_pcb_get_pin_position` | includes `available_pins` self-correction |
 | `minerva_pcb_add_component` | golden-parity; `data.new_component()` factory + `set_footprint_by_name`; a `Lib:Part` footprint resolves through the `pcb.footprint_geometry` channel first and lands the library's real pads/silk (`pcb_library_part.gd`) |
@@ -44,7 +44,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_select` | SET the whole canvas selection, pads included (`"Component.Pin"`); the multi mirror of `minerva_pcb_get_selection`, where `minerva_pcb_point` is the single-entity form |
 | `minerva_pcb_spatial_query` | spatial index `get_components_near` + `describe_relative_position`; empty ref → `get_components` shape |
 | `minerva_pcb_describe_region` | read-only; ONE read of a board rectangle — components with pad rows, traces with `free_ends`, vias with `layers_touched`, pours with outlines + `fill_region_count`, keepouts, cutouts, anchored notes. Assembled in `model/pcb_region_describe.gd` out of the surfaces that already own each rule (below) |
-| `minerva_pcb_describe_component` | golden-parity; spatial `describe_component_context` |
+| `minerva_pcb_describe_component` | golden-parity; spatial `describe_component_context`, plus the same two ASSEMBLY facts `get_components` carries |
 | `minerva_pcb_get_change_journal` | model change journal |
 | `minerva_pcb_import_csv` | model `from_csv` |
 | `minerva_pcb_export_csv` | model `to_csv` |
@@ -96,6 +96,82 @@ Trace width is READABLE without a new tool: `minerva_pcb_export_trace_geometry`
 already stamps `width` on every emitted segment alongside its `trace_id`, so
 "how wide is this trace" was answerable before A7 and no describe-style tool was
 added for it.
+
+## Assembly identity and resolved placements (`minerva_pcb_get_components` / `minerva_pcb_describe_component`)
+
+Both component-reading verbs answer two questions an order needs and a
+coordinate list cannot: **what part is this**, and **where does the house
+actually put it**. Each is an additive key; the established keys are unchanged.
+
+### `assembly` — what the board authored
+
+The component's own `assembly` block, verbatim: `manufacturer`, `mpn`,
+`package`, `comment`, `house_parts`, `populate`, `paste` and the authored
+`placements` expansion, exactly the subset the board wrote (see
+`docs/board-yaml.md`). Absent when the board authors none. It rides the panel's
+canonical passthrough, so it needs no backend and is never reshaped here.
+
+### `physical_placements` — what the compiler resolved
+
+One entry per part an assembly house picks up: **one** for an ordinary
+component (its `ref` is the component ref), **n** for a synthetic expansion.
+Present on every component, so nothing has to branch on "is this synthetic" —
+the list length answers it.
+
+One drawn socket set standing for two soldered strips — the parent at
+(45, 62.797) turned 180, each child naming the 1x22 strip it is bought as, so
+its anchor is measured off that strip's own body:
+
+```json
+"physical_placements": [
+  {"ref": "U1S_A",
+   "origin": {"x_mm": 56.43, "y_mm": 62.797},
+   "anchor": {"x_mm": 56.43, "y_mm": 36.127},
+   "rotation_deg": 180.0,
+   "side": "top",
+   "anchor_basis": "fab_outline",
+   "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H"},
+  {"ref": "U1S_B",
+   "origin": {"x_mm": 33.57, "y_mm": 62.797},
+   "anchor": {"x_mm": 33.57, "y_mm": 36.127},
+   "rotation_deg": 180.0,
+   "side": "top",
+   "anchor_basis": "fab_outline",
+   "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H"}
+]
+```
+
+* `origin` is the footprint datum this part is drawn against; `anchor` is the
+  body centre a pick-and-place file states, both in BOARD millimetres in the
+  board's Y-DOWN frame (the CPL emitter negates Y at its own boundary).
+* `rotation_deg` is the COMPOSED angle — an expansion child's authored rotation
+  already turned by its parent's rotation and side — normalized to `[0, 360)`.
+  It is not the angle the position file states: the CPL row adds the
+  part-orientation ledger's vendor offset for the footprint/house-part pair at
+  emission (`docs/assembly-outputs.md`), so the strip above is emitted at 90
+  where this reports 180.
+* `anchor_basis` is how the anchor was arrived at: `fab_outline`, `lands`,
+  `footprint_origin` or `authored`.
+* `footprint` is the drawing this part IS: the placement's own when it named
+  one, else the component's.
+
+**These numbers are the compiler's, not the panel's.** They come over the
+`pcb.assembly_placements` channel as `order_package.placement_map` — the same
+serialization the order manifest records, off the same strict compile the order
+path runs — and are passed through untouched. The authored offsets alone cannot
+substitute: they are stated in the PARENT's local frame and ride its rotation
+and side, and the anchor is measured off a footprint the panel does not read.
+
+The reply is memoized per board — keyed on the model's revision and on every
+`data_changed` it emits, since a whole-board load replaces the components
+without bumping the revision — so a read costs a compile only after an edit or
+a load. A reply that comes back after the board moved under the request is
+never used — the placements would describe one board and the component list
+another — the live board is asked once more, and a second miss reports
+unavailable. When there is nothing to report — no backend bound, a board that
+does not compile, or that second miss — the per-component key is ABSENT and
+the reply carries `physical_placements_unavailable` naming the reason. Silence is never an empty
+placement list, which would read as "this component places nothing".
 
 ## Trace width + preferences (`minerva_pcb_set_trace_width`, `get_preference`, `set_preference`, A7)
 
@@ -1606,8 +1682,9 @@ verb, so they were left alone.
 
 ## Every board-carrying panel channel rides the same by-ref path
 
-`pcb.fab_preview`, `pcb.mask_view`, `pcb.zone_fill`, `pcb.board_health` and
-`pcb.assembly_check` all go through `PCBPanel._payload_by_ref` rather than
+`pcb.fab_preview`, `pcb.mask_view`, `pcb.zone_fill`, `pcb.board_health`,
+`pcb.assembly_check` and `pcb.assembly_placements` all go through
+`PCBPanel._payload_by_ref` rather than
 inlining the whole board, which fails `payload_too_large` once a board outgrows
 the 64 KiB pipe. `_payload_by_ref` is the ONE
 snapshot sender `pcb.route` / `pcb.serialize` / `pcb.draft_check` /

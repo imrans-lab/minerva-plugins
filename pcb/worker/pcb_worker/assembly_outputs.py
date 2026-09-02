@@ -497,7 +497,7 @@ def _walk(board, profile: HouseProfile):
             # component's. Both columns and the ledger key below read it, so
             # a child that is a 1x22 strip is bought, listed and oriented as
             # one — never as the two-row drawing its parent is.
-            drawing = physical.footprint_ref or assembly.footprint_ref
+            drawing = assembly.drawing_for(physical)
             footprint = drawing if assembly.package is None else assembly.package
 
             # BOM GROUPING KEY = EVERYTHING THE ROW ASSERTS ABOUT ALL OF ITS

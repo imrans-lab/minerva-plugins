@@ -45,7 +45,7 @@
     },
     {
       "name": "minerva_pcb_get_components",
-      "description": "Get all components from a PCB editor with their positions and connections.",
+      "description": "Get all components from a PCB editor with their positions and connections, plus two ASSEMBLY facts per component. `assembly` is the board's own block verbatim (manufacturer / mpn / package / comment / house_parts / populate / paste / the authored placements expansion), absent when the board authors none. `physical_placements` is what the COMPILER resolved: one entry per part an assembly house picks up — ONE for an ordinary component, under its own ref; N for a synthetic expansion — each {ref, origin:{x_mm,y_mm}, anchor:{x_mm,y_mm}, rotation_deg, side, anchor_basis, footprint}. `anchor` is the body centre a CPL states, `origin` the footprint datum the part is drawn against, both in BOARD mm in the board's Y-DOWN frame; `rotation_deg` is the COMPOSED angle (a child's authored rotation already turned by its parent's rotation and side) — the rotation the CPL row states differs from it by the part-orientation ledger's vendor offset for the footprint/house-part pair, added at emission; `footprint` is the drawing this part IS. Present on every component, so nothing has to branch on \"is this synthetic\" — the list length answers it. The authored offsets are NOT a substitute: they are stated in the parent's local frame and ride its rotation and side. When no placement resolved — no backend, or a board that does not compile — the per-component key is ABSENT and the reply carries physical_placements_unavailable naming the reason; an empty list would read as \"this component places nothing\".",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -334,7 +334,7 @@
     },
     {
       "name": "minerva_pcb_describe_component",
-      "description": "Get detailed spatial context for a component including nearby components, connections, and region.",
+      "description": "Get detailed spatial context for a component including nearby components, connections, and region — plus the same two ASSEMBLY facts minerva_pcb_get_components carries for it: `assembly` (the board's authored block, verbatim) and `physical_placements` (the compiler's resolved parts, each with ref/origin/anchor/rotation_deg/side/anchor_basis/footprint in board millimetres; rotation_deg is the composed angle, and the CPL row adds the orientation ledger's vendor offset to it), or physical_placements_unavailable naming why there are none.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -2148,6 +2148,7 @@
           "minerva_pcb_drc_geometric",
           "minerva_pcb_order_package",
           "pcb.assembly_check",
+          "pcb.assembly_placements",
           "pcb.board_health",
           "pcb.promote_check",
           "pcb.mask_view",
@@ -2171,6 +2172,7 @@
       "minerva_pcb_drc_geometric",
       "minerva_pcb_order_package",
       "pcb.assembly_check",
+      "pcb.assembly_placements",
       "pcb.board_health",
       "pcb.promote_check",
       "pcb.mask_view",

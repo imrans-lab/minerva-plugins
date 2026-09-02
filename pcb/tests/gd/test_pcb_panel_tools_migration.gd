@@ -273,7 +273,13 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 
 	print("\n-- get_components --")
 	var gc := await d("minerva_pcb_get_components", _args())
-	check_keys("get_components shape", gc, ["success", "component_count", "components"])
+	# `physical_placements_unavailable` is part of this shape HERE and always
+	# will be: the suite runs with no pcb backend bound, so the resolved
+	# placements have no source and the reply says so rather than going
+	# silent. With a backend the key is absent and each component carries
+	# `physical_placements` instead.
+	check_keys("get_components shape", gc,
+		["success", "component_count", "components", "physical_placements_unavailable"])
 	check("get_components sees U9", (gc.get("components", []) as Array).size() >= 1)
 	var c0: Dictionary = (gc.get("components", []) as Array)[0]
 	check_keys("get_components entry shape", c0, ["id", "footprint", "x", "y", "rotation", "layer", "pins"])
@@ -337,7 +343,7 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	# still true post-migration since both live in the same panel_tools.gd).
 	var sq_empty := await d("minerva_pcb_spatial_query", _args())
 	check_keys("spatial_query no-ref -> get_components shape", sq_empty,
-		["success", "component_count", "components"])
+		["success", "component_count", "components", "physical_placements_unavailable"])
 	var dc := await d("minerva_pcb_describe_component", _args({"component_id": "U9"}))
 	check("describe_component dispatched ok", dc.get("success", false), str(dc))
 	for k in ["id", "position", "rotation", "footprint", "layer", "nearby", "connected_to", "region", "pins"]:

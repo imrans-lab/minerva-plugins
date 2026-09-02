@@ -131,7 +131,7 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_pcb_set_board_layers":
 			return _set_board_layers(host, args)
 		"minerva_pcb_get_components":
-			return _get_components(host, args)
+			return await _get_components(host, args)
 		"minerva_pcb_get_nets":
 			return _get_nets(host, args)
 		"minerva_pcb_get_pin_position":
@@ -167,11 +167,11 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_pcb_select":
 			return _select(host, args)
 		"minerva_pcb_spatial_query":
-			return _spatial_query(host, args)
+			return await _spatial_query(host, args)
 		"minerva_pcb_describe_region":
 			return _describe_region(host, args)
 		"minerva_pcb_describe_component":
-			return _describe_component(host, args)
+			return await _describe_component(host, args)
 		"minerva_pcb_import_csv":
 			return _import_csv(host, args)
 		"minerva_pcb_export_csv":
@@ -425,10 +425,16 @@ static func _set_board_layers(host, args: Dictionary) -> Dictionary:
 	return _ok({"layers": data.layers.duplicate(), "changed": changed})
 
 
+## Coroutine: the assembly facts below are a worker round trip (memoized per
+## board revision), so every caller — the dispatcher and _spatial_query's
+## no-reference branch — must await this.
 static func _get_components(host, _args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
+	var resolved: Dictionary = await _resolved_placements(host, data)
+	var by_ref: Dictionary = _dict_or_empty(resolved.get("by_ref"))
+	var reason: String = str(resolved.get("reason", ""))
 	var components: Array = []
 	for comp_id in data.components:
 		var comp = data.components[comp_id]
@@ -458,8 +464,12 @@ static func _get_components(host, _args: Dictionary) -> Dictionary:
 			comp_info["group_offset"] = {
 				"x": _mm(data.member_offset(comp.id).x),
 				"y": _mm(data.member_offset(comp.id).y)}
+		_attach_assembly_facts(comp, comp_info, by_ref, reason)
 		components.append(comp_info)
-	return _ok({"component_count": components.size(), "components": components})
+	var reply := {"component_count": components.size(), "components": components}
+	if not reason.is_empty():
+		reply["physical_placements_unavailable"] = reason
+	return _ok(reply)
 
 
 static func _get_nets(host, _args: Dictionary) -> Dictionary:
@@ -1143,7 +1153,7 @@ static func _spatial_query(host, args: Dictionary) -> Dictionary:
 	var radius: float = float(args.get("radius_mm", 20.0))
 	if reference_component.is_empty():
 		# No reference → same shape as get_components (mirrors legacy).
-		return _get_components(host, args)
+		return await _get_components(host, args)
 
 	var spatial = _get_spatial(host)
 	if spatial == null:
@@ -1274,6 +1284,18 @@ static func _describe_component(host, args: Dictionary) -> Dictionary:
 	var context: Dictionary = spatial.describe_component_context(component_id)
 	if context.is_empty():
 		return _err("Component not found: %s" % component_id)
+	# The same two assembly facts get_components carries, on the one component
+	# this verb describes — a reader must not have to call the list verb to
+	# learn what part this is and where its instances actually get placed.
+	var data = _get_data(host)
+	var comp = data.get_component(component_id) if data != null else null
+	if comp != null:
+		var resolved: Dictionary = await _resolved_placements(host, data)
+		_attach_assembly_facts(comp, context,
+			_dict_or_empty(resolved.get("by_ref")), str(resolved.get("reason", "")))
+		var reason: String = str(resolved.get("reason", ""))
+		if not reason.is_empty():
+			context["physical_placements_unavailable"] = reason
 	context["success"] = true
 	return context
 
@@ -3989,6 +4011,75 @@ static func worker_envelope(result: Dictionary, what: String) -> Dictionary:
 		"kind": str(result.get("error_code", "worker_error")),
 		"message": str(result.get("error_message",
 			result.get("error", "%s failed" % what)))}}
+
+
+# ── What an assembly house buys and places, on the component-reading tools ───
+#
+# TWO FACTS, TWO SOURCES, and neither is derived here.
+#
+#   `assembly` — the board's own block, verbatim out of the component's
+#     canonical passthrough. It is what the AUTHOR wrote: the part identity
+#     (manufacturer / mpn / package / house_parts), the populate and paste
+#     decisions, and the authored expansion. Always available, because it is
+#     already in the panel's hands.
+#
+#   `physical_placements` — where the house actually puts each part. The
+#     authored offsets alone cannot answer that: they are stated in the PARENT
+#     component's local frame and ride its rotation and side, and the anchor a
+#     nozzle centres on is measured off a footprint the panel does not read.
+#     So the numbers come from the COMPILER, over pcb.assembly_placements, and
+#     are passed through untouched — not quantized, not re-composed. A second
+#     derivation here is a second chance to disagree with the CPL.
+
+## The compiler's resolved placements for the live board, keyed by component
+## ref. Returns {"by_ref": Dictionary, "reason": String}: an EMPTY `reason`
+## means the map is the compiler's answer, a non-empty one says why there is
+## none (no backend, or a board that does not compile). Coroutine — the answer
+## is a worker round trip, memoized per board by the panel, which is handed the
+## model itself so a memo hit never serializes the board.
+static func _resolved_placements(host, data) -> Dictionary:
+	if data == null:
+		return {"by_ref": {}, "reason": "no board is open"}
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("assembly_placements"):
+		return {"by_ref": {}, "reason": "resolved placements are compiled by the pcb backend — no live panel is bound (headless / before mount)"}
+	var reply: Dictionary = await panel.assembly_placements(data)
+	if not bool(reply.get("ok", false)):
+		var err: Variant = reply.get("error", {})
+		return {"by_ref": {}, "reason": str((err as Dictionary).get("message", "the placement compile did not run")) \
+			if err is Dictionary else str(err)}
+	var result: Dictionary = _dict_or_empty(reply.get("result"))
+	if not bool(result.get("resolved", false)):
+		return {"by_ref": {}, "reason": str(result.get("reason", "the board did not compile, so no placement resolved"))}
+	var by_ref: Dictionary = {}
+	var entries_v: Variant = result.get("components", [])
+	var entries: Array = entries_v if entries_v is Array else []
+	for entry_v in entries:
+		if not (entry_v is Dictionary):
+			continue
+		var entry: Dictionary = entry_v
+		var physical_v: Variant = entry.get("physical", [])
+		by_ref[str(entry.get("component", ""))] = \
+			(physical_v as Array).duplicate(true) if physical_v is Array else []
+	return {"by_ref": by_ref, "reason": ""}
+
+
+## Write the two assembly facts onto ONE component's reply dict (see the block
+## comment above). `by_ref`/`reason` come from _resolved_placements. Both keys
+## are ADDITIVE: a component whose board authors no assembly block grows no
+## `assembly` key, and the placement key is absent only with a reason stated —
+## on the component when the compile skipped just this one, on the reply when
+## nothing resolved at all.
+static func _attach_assembly_facts(comp, comp_info: Dictionary,
+		by_ref: Dictionary, reason: String) -> void:
+	var authored: Variant = comp.canonical_extra.get("assembly", null)
+	if authored != null:
+		comp_info["assembly"] = authored.duplicate(true) if authored is Dictionary else authored
+	if by_ref.has(comp.id):
+		comp_info["physical_placements"] = by_ref[comp.id]
+	elif reason.is_empty():
+		comp_info["physical_placements_unavailable"] = \
+			"the compile resolved the board but returned no placements for this component"
 
 
 ## Run the pcb.assembly_check channel over the LIVE board and return the

@@ -1,0 +1,67 @@
+# WHAT A COMPONENT-READING SURFACE MUST BE ABLE TO REPORT.
+#
+# Two components, one claim each, both copied from a real board rather than
+# invented — smart-remote-v2 rev B, whose U1S is the case the whole
+# logical-vs-physical distinction exists for:
+#
+#   U1S  ONE drawn socket set standing for TWO soldered 1x22 strips. Its
+#        placements' offsets are stated in U1S's OWN local frame and ride its
+#        180-degree rotation, and each strip's anchor is authored in that
+#        placement's frame and ridden by the placement's own 270. Nothing about
+#        where the two nozzle coordinates land is readable off the authored
+#        numbers; they are (83.1, 62.797) and (60.24, 62.797) in board mm, and
+#        both composed rotations are 90.
+#   C1   the ordinary case: one part, its own ref, and an anchor measured off
+#        the footprint's fab outline, which for an 0805 is the placement
+#        position exactly.
+#
+# THE PINS ARE OMITTED. U1S has 44 on the real board and every one of them is
+# irrelevant here: an anchor is composed from the placement transform, the
+# footprint's body and the authored anchor. A pin list would only add a way for
+# the fixture to stop compiling for a reason this file is not about.
+#
+# NO NETS, for the same reason (matching the sibling assembly_* fixtures).
+version: 1
+name: AssemblySurface
+width_mm: 100
+height_mm: 80
+origin: {x_mm: 0, y_mm: 0}
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+
+components:
+  - ref: U1S
+    footprint: Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT
+    value: ESP32-S3-DevKitC-1 socket set (expands to 2x C41376161)
+    x_mm: 45
+    y_mm: 62.7970008850098
+    rotation_deg: 180
+    layer: top
+    assembly:
+      mpn: HC-PM254-8.5H-1x22P
+      package: THT 2.54mm 1x22 socket
+      comment: ESP32-S3-DevKitC-1 socket row
+      house_parts:
+        jlcpcb: C41376161
+      placements:
+        - {ref: U1S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 270}
+        - {ref: U1S_B, offset_mm: {x: 11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 270}
+
+  - ref: C1
+    footprint: Capacitor_SMD:C_0805_2012Metric
+    value: 100n
+    x_mm: 68.5
+    y_mm: 31.0
+    rotation_deg: 0
+    layer: top
+    assembly:
+      manufacturer: YAGEO
+      mpn: CC0805KRX7R9BB104
+      package: "0805"
+      comment: 100nF 50V X7R
+      house_parts:
+        jlcpcb: C49678

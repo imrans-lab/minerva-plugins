@@ -207,6 +207,26 @@ var _last_rendered_board_revision: int = -1
 #    decision table.
 var _assembly_state: Dictionary = {}
 
+# 3. RESOLVED PLACEMENT MEMO: the last ok pcb.assembly_placements reply and the
+#    board it describes. Its coordinates are BOARD millimetres, so the whole
+#    reply is worthless the instant anything moves — hence the keys, compared on
+#    every read rather than invalidated on every edit. The memo exists because
+#    the answer costs a strict compile and the tools that read it
+#    (get_components / describe_component) are hot reads.
+#
+#    TWO KEYS, because board_revision alone cannot say "same board": the model
+#    deliberately does not bump it for a whole-board load (pcb_data.gd,
+#    LOAD-FAMILY EXCLUSIONS — a load resets the baseline candidates are judged
+#    against, it is not a delta on it), so loading another board that shares a
+#    ref would serve the previous board's placements under an equal revision.
+#    _board_generation counts every data_changed the model emits, and a load
+#    emits one; the revision still covers the record_change-only moves (a
+#    batched drag) that emit no data_changed.
+var _placements_reply: Dictionary = {}
+var _placements_revision: int = -1
+var _placements_generation: int = -1
+var _board_generation: int = 0
+
 
 ## Stamp a successful get_image capture (panel_tools._get_image calls this
 ## through the host→panel duck-typed path). Takes the revision rather than
@@ -479,6 +499,8 @@ func _init() -> void:
 	# Carry-in 3b: relay model data_changed → content_changed (dirty glyph),
 	# gated by _restoring so board load / seeding never dirties the tab.
 	_data.data_changed.connect(func() -> void:
+		# Every emission, loads included: the placement memo's second key.
+		_board_generation += 1
 		# OUTSIDE the _restoring gate, deliberately (Codex re-review finding 3).
 		# Both whole-board load paths set _restoring = true, and a load of a
 		# DIFFERENT board is PRECISELY when a live preview must be dropped: the
@@ -5612,6 +5634,51 @@ func board_health_check(board: Dictionary) -> Dictionary:
 			"message": "plugin IPC channel not ready"}}
 	return _PanelToolsScript.worker_envelope(await _request_with_backend_ensure(
 		"pcb.board_health", _payload_by_ref({"board": board}, "board"), 30000), "board_health")
+
+
+## The compiler's RESOLVED physical placements for the board model `data`
+## (pcb_data.gd) — the pcb.assembly_placements channel, same idiom as
+## board_health_check above. Takes the model rather than a board dict so the
+## memo is consulted BEFORE the board is serialized: a hit costs nothing.
+##
+## Memoized against `data.board_revision` AND `_board_generation` (see the memo
+## declaration for why one key is not enough): the reply's coordinates are
+## board millimetres, so a memo from another board or revision is never
+## returned.
+##
+## A reply is handed back ONLY when both keys still match the live board once
+## the round trip ends. The caller iterates the model's components AFTER this
+## returns, so a reply about a board that was replaced or edited under the
+## await would be paired with another board's component list — placements from
+## A under the metadata of B. Such a reply is dropped and the live board is
+## asked once more; if the board moves under that request too, the reply is an
+## error naming why, and no memo is filed.
+func assembly_placements(data) -> Dictionary:
+	if int(data.board_revision) == _placements_revision \
+			and _board_generation == _placements_generation \
+			and not _placements_reply.is_empty():
+		return _placements_reply
+	if get_node_or_null("_MinervaIPC") == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	for _attempt in 2:
+		var revision: int = int(data.board_revision)
+		var generation: int = _board_generation
+		var board: Dictionary = _PanelToolsScript.canonical_wire_board(data.to_board_dict())
+		var reply: Dictionary = _PanelToolsScript.worker_envelope(
+			await _request_with_backend_ensure("pcb.assembly_placements",
+				_payload_by_ref({"board": board}, "board"), 60000),
+			"assembly_placements")
+		if revision != int(data.board_revision) or generation != _board_generation:
+			continue
+		if bool(reply.get("ok", false)):
+			_placements_reply = reply
+			_placements_revision = revision
+			_placements_generation = generation
+		return reply
+	return {"ok": false, "error": {"kind": "board_changed",
+		"message": "the board changed while its placements were being compiled, "
+			+ "on two attempts in a row; read again once the board is settled"}}
 
 
 ## pcb.mask_view round-trip (WYSIWYG G4) — same channel idiom as

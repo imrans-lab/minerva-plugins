@@ -406,6 +406,38 @@ func HandleAssemblyCheckChannel(ctx context.Context, w *bridge.Worker, params js
 	return w.Call(ctx, "assembly_check", withLibraryChain(params))
 }
 
+// ---- pcb.assembly_placements (worker-backed broker CHANNEL) ----------------
+//
+// The RESOLVED logical->physical placement map behind the panel's component
+// reading tools (minerva_pcb_get_components / minerva_pcb_describe_component).
+// A board's authored `assembly.placements` states offsets in the PARENT
+// component's local frame; where the assembly house actually puts each part is
+// the compiler's answer, and this channel is how the panel receives it rather
+// than composing a second one in GDScript. Same dotted panel-IPC channel idiom
+// as pcb.assembly_check above; forwards verbatim to the Python worker.
+
+var AssemblyPlacementsChannel = ToolSpec{
+	Name: "pcb.assembly_placements",
+	Description: "Panel IPC channel for the RESOLVED logical-to-physical " +
+		"placement map. Forwards verbatim to the Python worker's " +
+		"'assembly_placements' method, which compiles the board strictly and " +
+		"returns order_package.placement_map — the same serialization the " +
+		"order manifest records, so the panel reports the compiler's " +
+		"placements instead of composing its own. Args: {board:<canonical " +
+		"Board dict>}. Returns {ok, result:{resolved:bool, components:[" +
+		"{component, footprint, footprint_id, populate, paste, placement:{...}, " +
+		"physical:[{ref, origin:{x_mm,y_mm}, anchor:{x_mm,y_mm}, " +
+		"anchor_basis, rotation_deg, side, footprint}]}], reason?, " +
+		"diagnostics?}}. A board that does not compile answers resolved:false " +
+		"with the blocking reason — a mid-layout board asks and is told why, " +
+		"never handed placements nothing resolved.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleAssemblyPlacementsChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "assembly_placements", withLibraryChain(params))
+}
+
 // ---- pcb.board_health (worker-backed broker CHANNEL) -----------------------
 //
 // Epoch UX2 station 9 (docket 019fde571300): the whole-board health ledger —

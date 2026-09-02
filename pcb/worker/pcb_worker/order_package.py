@@ -474,6 +474,10 @@ def placement_map(board) -> list[dict]:
                 "anchor_basis": physical.anchor_basis,
                 "rotation_deg": physical.rotation_deg,
                 "side": physical.side.value,
+                # THE DRAWING THIS PART IS — the placement's own when it named
+                # one, else the component's. Stated per placement so a reader
+                # never has to know the fallback rule to name the part.
+                "footprint": assembly.drawing_for(physical) if assembly else None,
             } for physical in component.physical_placements],
         }
         out.append(entry)
