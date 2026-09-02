@@ -688,8 +688,11 @@ func _test_canonical_field_names() -> void:
 	var a = _build_board()
 	var d: Dictionary = a.to_board_dict()
 
-	check("board dict uses width_mm/height_mm/grid_mm",
-			d.has("width_mm") and d.has("height_mm") and d.has("grid_mm"))
+	check("board dict uses width_mm/height_mm",
+			d.has("width_mm") and d.has("height_mm"))
+	# The drawing pitch is the panel's session state, not a design fact: it must
+	# not reach the dict the worker, the YAML and promote are written from.
+	check("board dict does NOT carry grid_mm", not d.has("grid_mm"))
 	check("board dict carries design_rules", d.has("design_rules")
 			and (d["design_rules"] as Dictionary).has("clearance_mm"))
 	check("components is a list (not id-map)", d.get("components", null) is Array)
@@ -898,7 +901,6 @@ func _test_mounting_holes_roundtrip() -> void:
 		"name": "MountingHoleBoard",
 		"width_mm": 80.0,
 		"height_mm": 110.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {},
 		"components": [],

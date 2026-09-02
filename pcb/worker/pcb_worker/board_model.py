@@ -17,8 +17,9 @@ from typing import Any
 
 from .board_schema import component_value_refusal
 
-# Required top-level fields per the canonical contract. traces / vias / grid_mm /
-# layers / origin / design_rules are optional (board.go marks them omitempty).
+# Required top-level fields per the canonical contract. traces / vias / layers /
+# origin / design_rules are optional (board.go marks them omitempty). There is no
+# grid pitch: the editor's drawing snap is panel session state, not a board field.
 REQUIRED_TOP = ("version", "name", "width_mm", "height_mm", "components", "nets")
 
 

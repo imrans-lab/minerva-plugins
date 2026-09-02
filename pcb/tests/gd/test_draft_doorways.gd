@@ -47,7 +47,7 @@ func check_eq(desc: String, actual, expected) -> void:
 func _board() -> Dictionary:
 	return {
 		"version": 1, "name": "doorways", "width_mm": 40.0, "height_mm": 40.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [], "nets": [{"name": "GND", "pins": []}],
 		"traces": [], "vias": [],

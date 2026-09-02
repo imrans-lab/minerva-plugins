@@ -304,11 +304,13 @@ one operation rather than two implementations that agree today.
 |---|---|---|
 | Trace angles (Manhattan / Octilinear / Free) | **board** | `design_rules.allowed_trace_angles_deg` |
 | Trace width, via diameter, via drill, clearance | **board** | `design_rules.*` |
-| Grid pitch | **board** | `grid_mm` |
+| Grid pitch | **panel session** | the tab's own state, `grid_mm` |
 | Snap to grid / to pads / to allowed angles | **per-user** | the plugin preference store |
 
 How eagerly a cursor is pulled is a habit of the person drawing; **what** it is
-pulled onto belongs to the board and travels with the YAML. The three snap keys
+pulled onto belongs to the board and travels with the YAML — with one exception:
+the drawing pitch is an authoring aid, not a fact about the copper, so it stays
+with the tab (the panel's session state) and is not written into the board. The three snap keys
 are readable and writable through `minerva_pcb_get_preference` /
 `minerva_pcb_set_preference` as well — they are ordinary registry keys, and the
 `value` argument accepts a boolean for them.

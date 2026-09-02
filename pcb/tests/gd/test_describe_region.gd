@@ -147,7 +147,6 @@ func _smd_pin(number: String, x: float, y: float) -> Dictionary:
 func _board() -> Dictionary:
 	return {
 		"version": 1, "name": "RegionBoard", "width_mm": 60.0, "height_mm": 60.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.2},
 		"components": [

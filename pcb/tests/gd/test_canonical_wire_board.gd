@@ -127,6 +127,10 @@ func _init() -> void:
 			if before.has(field) and (not after.has(field) or after[field] != before[field]):
 				identity_kept = false
 	_check(tail_clean, "no wire component carries any render or session field")
+	# The BOARD root has a session field of its own: the drawing pitch, which
+	# describes an editor rather than the copper and lives in the panel's
+	# session state (ui/model/pcb_session_state.gd).
+	_check(not wire.has("grid_mm"), "the wire board carries no grid_mm")
 	_check(no_resolved_pads, "library-resolved components ship no pads — the lands are the library's")
 	_check(identity_kept, "ref/footprint/position/rotation/value survive verbatim")
 

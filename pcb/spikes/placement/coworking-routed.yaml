@@ -2,7 +2,6 @@ version: 1
 name: Placement-Coworking-Routed
 width_mm: 40
 height_mm: 25
-grid_mm: 2.54
 layers:
     - top
     - bottom

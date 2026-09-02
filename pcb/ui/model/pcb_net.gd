@@ -4,8 +4,10 @@ extends RefCounted
 ## Off-tree port of Minerva src/Scripts/UI/Controls/PCBEditor/PCBNet.gd — NO
 ## class_name; self-preload by relative path. Boundary to_board_dict()/
 ## from_board_dict() flatten the {component_id,pin_name} pin list to canonical
-## "Ref.PadNumber" strings. color/properties/is_power_net are panel session
-## state: they ride the undo shape (to_dict) and never the canonical dict.
+## "Ref.PadNumber" strings. `color` is panel session state — DERIVED from the
+## net name (generate_color_for_name), so it rides the undo shape (to_dict) and
+## never the canonical dict. "Is this a power rail" is derived too: see
+## is_power().
 
 const _Self := preload("pcb_net.gd")
 
@@ -18,11 +20,30 @@ var pins: Array[Dictionary] = []
 ## Visual color for this net
 var color: Color = Color.WHITE
 
-## Net properties (voltage, current rating, etc.)
-var properties: Dictionary = {}
+## Names that read as a power or ground rail, anchored at the start of the net
+## name and matched case-insensitively. MIRRORS the worker's own rule
+## (agent_router/router.py _POWER_NET_PATTERNS) so the panel and the router
+## cannot disagree about which nets are rails.
+const POWER_NAME_PATTERN := "^(VCC|VDD|GND|VBUS|VSYS|3V3|5V|12V|PWR|AGND|DGND|V[0-9])"
 
-## Whether this is a power net (VCC, GND, etc.)
-var is_power_net: bool = false
+
+## Compiled once for the whole process — is_power_name runs per net on every
+## get_nets, and recompiling the pattern each time would be the only cost here.
+static var _power_re: RegEx = null
+
+
+## Whether `net_name` reads as a power or ground rail. DERIVED, never stored:
+## a board file that carried the answer would let a stale flag outlive the
+## rename that made it wrong, and a design file has no business asserting it.
+static func is_power_name(net_name: String) -> bool:
+	if _power_re == null:
+		_power_re = RegEx.create_from_string("(?i)" + POWER_NAME_PATTERN)
+	return _power_re != null and _power_re.search(net_name) != null
+
+
+## Whether THIS net is a power or ground rail (see is_power_name).
+func is_power() -> bool:
+	return is_power_name(name)
 
 
 ## Add a pin connection to this net
@@ -100,8 +121,6 @@ func duplicate_net():
 	var copy := _Self.new()
 	copy.name = name
 	copy.color = color
-	copy.properties = properties.duplicate(true)
-	copy.is_power_net = is_power_net
 
 	for pin in pins:
 		copy.pins.append(pin.duplicate())
@@ -121,9 +140,7 @@ func to_dict() -> Dictionary:
 	return {
 		"name": name,
 		"pins": pins_arr,
-		"color": {"r": color.r, "g": color.g, "b": color.b, "a": color.a},
-		"properties": properties.duplicate(),
-		"is_power_net": is_power_net
+		"color": {"r": color.r, "g": color.g, "b": color.b, "a": color.a}
 	}
 
 
@@ -148,9 +165,6 @@ func load_from_dict(data: Dictionary) -> void:
 			color_data.get("b", 1.0),
 			color_data.get("a", 1.0)
 		)
-
-	properties = data.get("properties", {}).duplicate()
-	is_power_net = data.get("is_power_net", false)
 
 
 ## Create from dictionary (static constructor, legacy shape)
@@ -199,7 +213,7 @@ static func from_board_dict(data: Dictionary):
 ## Get a human-readable description
 func get_description() -> String:
 	var comp_count := get_connected_components().size()
-	var power_str := " [POWER]" if is_power_net else ""
+	var power_str := " [POWER]" if is_power() else ""
 	return "%s%s: %d pins across %d components" % [name, power_str, pins.size(), comp_count]
 
 

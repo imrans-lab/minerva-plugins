@@ -99,7 +99,7 @@ def _comp(ref: str, footprint: str, geometry: dict, x: float, y: float) -> dict:
 
 def _compiled(components: list[dict]):
     board = {"version": 2, "id": "board:" + "0" * 32, "name": "silk-placement",
-             "width_mm": 60, "height_mm": 60, "grid_mm": 1.0,
+             "width_mm": 60, "height_mm": 60,
              "layers": ["top", "bottom"],
              "design_rules": {"clearance_mm": 0.15, "trace_width_mm": 0.25,
                               "via_diameter_mm": 0.6, "via_drill_mm": 0.3,

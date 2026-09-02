@@ -111,7 +111,7 @@ func _rect_outline(a: Vector2, b: Vector2) -> Array:
 func _board() -> Dictionary:
 	return {
 		"version": 1, "name": "PourBoard", "width_mm": 60.0, "height_mm": 40.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2,
+		"design_rules": {"clearance_mm": 0.2,
 			"trace_width_mm": 0.25},
 		"layers": ["top", "bottom"],
 		"components": [
@@ -293,7 +293,7 @@ func _test_an_unplated_hole_joins_nothing() -> void:
 	var data = PCBData.new()
 	data.from_board_dict({
 		"version": 1, "name": "NpthBoard", "width_mm": 40.0, "height_mm": 20.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "J1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,

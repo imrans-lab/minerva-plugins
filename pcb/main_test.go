@@ -1658,7 +1658,6 @@ version: 1
 name: e2e_capstone
 width_mm: 20
 height_mm: 20
-grid_mm: 1.0
 layers: [top, bottom]
 origin: {x_mm: 0, y_mm: 0}
 design_rules: {clearance_mm: 0.2, trace_width_mm: 0.25, via_diameter_mm: 0.8, via_drill_mm: 0.4}

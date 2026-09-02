@@ -72,7 +72,7 @@ func _rig() -> Dictionary:
 	var data = panel.get_data()
 	data.from_board_dict({
 		"version": 1, "name": "draft", "width_mm": 30.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [], "nets": [{"name": "GND", "pins": []}],
 		"traces": [], "vias": [],
@@ -170,7 +170,7 @@ func _placement_rig() -> Dictionary:
 	var data = panel.get_data()
 	data.from_board_dict({
 		"version": 1, "name": "draft", "width_mm": 30.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "U1", "footprint": "", "x_mm": 5.0, "y_mm": 5.0,

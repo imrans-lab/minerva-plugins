@@ -160,7 +160,7 @@ func _corner_probe_board(ratio):
 	var d = PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "corner-probe", "width_mm": 45.0, "height_mm": 45.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "P1", "footprint": "CUSTOM", "x_mm": 20.0, "y_mm": 20.0,
@@ -301,7 +301,7 @@ func _draw_order_board():
 	var d = PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "draw-order", "width_mm": 40.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "layers": ["top", "bottom"],
+		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "J1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
 			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,

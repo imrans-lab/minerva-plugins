@@ -191,7 +191,6 @@ func _wipe_scratch() -> void:
 func _board(rule_width: float) -> Dictionary:
 	var board: Dictionary = {
 		"version": 1, "name": "WidthPrefs", "width_mm": 60.0, "height_mm": 40.0,
-		"grid_mm": 2.54,
 		"components": [
 			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 20.0, "y_mm": 20.0,
 				"rotation_deg": 0.0,

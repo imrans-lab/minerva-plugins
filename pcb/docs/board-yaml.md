@@ -21,7 +21,6 @@ version: 1                     # int, contract/schema version
 name: Blinky                   # board name
 width_mm: 40                   # board outline width (mm)
 height_mm: 30                  # board outline height (mm)
-grid_mm: 2.54                  # optional snap grid (mm)
 layers: [top, bottom]          # optional copper stack; LIST ORDER IS STACK ORDER
                                # (see "Layer stack" below)
 origin: {x_mm: 0, y_mm: 0}     # optional board origin

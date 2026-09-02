@@ -19,6 +19,12 @@ const DRIVER_PATH := "res://test/helpers/plugin_panel_driver.gd"
 ## words, class and finding count out of. See _test_bus_refusal_is_held.
 const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
 const SnapPrefsFixture := preload("res://../../minerva-plugins/pcb/tests/gd/snap_prefs_fixture.gd")
+## The session-state contract under test — the key and the shape are read off
+## the real script so a rename cannot leave this suite asserting a dead spelling.
+const SessionState := preload("res://../../minerva-plugins/pcb/ui/model/pcb_session_state.gd")
+## The default pitch a board load resets to — read off the model, so the reused-
+## panel check cannot pass by restating a number that drifted.
+const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 
 var _pass_count: int = 0
 var _fail_count: int = 0
@@ -52,6 +58,7 @@ func _init() -> void:
 	_driver.free_panel(probe)
 
 	_test_canonical_load_and_save()
+	_test_session_state_round_trip()
 	_test_refused_document_is_visible_at_load()
 	_test_legacy_skeleton_migration()
 	_test_content_changed_dirty_relay()
@@ -91,7 +98,6 @@ func _canonical_board() -> Dictionary:
 		"name": "UITestBoard",
 		"width_mm": 50.0,
 		"height_mm": 40.0,
-		"grid_mm": 2.54,
 		"design_rules": {"clearance_mm": 0.2},
 		"components": [
 			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 20.0, "y_mm": 12.0, "rotation_deg": 90.0,
@@ -138,8 +144,10 @@ func _test_canonical_load_and_save() -> void:
 				and data.get_component("R1").value == "10k")
 
 	var saved: Dictionary = _driver.drive_save(panel)
-	check("save returns canonical board dict (width_mm/height_mm/grid_mm)",
-			saved.has("width_mm") and saved.has("height_mm") and saved.has("grid_mm"))
+	check("save returns canonical board dict (width_mm/height_mm)",
+			saved.has("width_mm") and saved.has("height_mm"))
+	check("save does NOT emit grid_mm (the pitch is session state)",
+			not saved.has("grid_mm"))
 	check("save components is a list (canonical), not id-map",
 			saved.get("components", null) is Array and (saved["components"] as Array).size() == 2)
 	check("save does NOT emit the legacy nested 'board' key", not saved.has("board"),
@@ -150,6 +158,75 @@ func _test_canonical_load_and_save() -> void:
 	_driver.cleanup_sidecar(board_path)
 	_driver.cleanup_board_file(board_path)
 	_driver.free_panel(panel)
+
+
+## THE PANEL'S SESSION STATE — drawing pitch and component locks — survives the
+## panel's own save → load round trip, and the board dict written in between
+## carries none of it.
+##
+## Oracle: a SECOND panel, which never saw the first one's model, loaded from the
+## payload the first returned — its grid pitch and its U1 lock are the
+## independent observation. A THIRD panel is the negative control: handed the
+## SAME payload with only the session block removed, it must come back on the
+## default pitch with U1 unlocked, so nothing but that block can be carrying the
+## state across.
+func _test_session_state_round_trip() -> void:
+	print("\n-- session state (grid pitch + component locks) rides beside the board --")
+	var board_dir: String = _driver.make_temp_board_dir("pcb_panel_ui")
+	var board_path := board_dir + "/session.pcbskel"
+	_driver.cleanup_sidecar(board_path)
+
+	var panel: Variant = _driver.load_panel(PANEL_PATH)
+	_driver.drive_load_merged(panel, board_path, _canonical_board())
+	var data: Variant = panel.get_data()
+	check("grid pitch is writable", data.set_grid_size(1.0) == "")
+	data.get_component("U1").locked = true
+
+	var saved: Dictionary = _driver.drive_save(panel)
+	check("the saved board half carries no grid_mm", not saved.has("grid_mm"),
+			"saved keys: %s" % str(saved.keys()))
+	check("the saved payload carries the session block", saved.has(SessionState.SESSION_KEY))
+
+	var reopened: Variant = _driver.load_panel(PANEL_PATH)
+	_driver.drive_load_merged(reopened, board_path, saved)
+	var rdata: Variant = reopened.get_data()
+	check("the grid pitch comes back", is_equal_approx(rdata.grid_size, 1.0),
+			"grid_size after reload: %s" % str(rdata.grid_size))
+	check("the component lock comes back",
+			rdata.get_component("U1") != null and rdata.get_component("U1").locked)
+	check("an unlocked part stays unlocked",
+			rdata.get_component("R1") != null and not rdata.get_component("R1").locked)
+
+	# Negative control: same payload, block removed.
+	var stripped: Dictionary = saved.duplicate()
+	stripped.erase(SessionState.SESSION_KEY)
+	var control: Variant = _driver.load_panel(PANEL_PATH)
+	_driver.drive_load_merged(control, board_path, stripped)
+	var cdata: Variant = control.get_data()
+	check("without the block the pitch is NOT restored",
+			not is_equal_approx(cdata.grid_size, 1.0))
+	check("without the block U1 is NOT locked",
+			cdata.get_component("U1") != null and not cdata.get_component("U1").locked)
+
+	# THE REUSED PANEL. One tab opens many boards, and the pitch is no longer in
+	# the document — so a board whose session block says nothing must come up on
+	# the DEFAULT pitch, not on the pitch the previous board left behind. Driven
+	# on `reopened`, which is already sitting on 1.0 mm from board A above.
+	var board_b: Dictionary = _canonical_board()
+	board_b["name"] = "BoardB"
+	_driver.drive_load_merged(reopened, board_path, board_b)
+	check("a second board with no session block resets the pitch to the default",
+			is_equal_approx(reopened.get_data().grid_size, PCBData.DEFAULT_GRID_MM),
+			"pitch after loading board B: %s" % str(reopened.get_data().grid_size))
+	check("…and the previous board's lock does not follow it either",
+			reopened.get_data().get_component("U1") != null
+			and not reopened.get_data().get_component("U1").locked)
+
+	_driver.cleanup_sidecar(board_path)
+	_driver.cleanup_board_file(board_path)
+	_driver.free_panel(panel)
+	_driver.free_panel(reopened)
+	_driver.free_panel(control)
 
 
 ## A document a component states its value twice in is REFUSED, and the owner can
@@ -951,7 +1028,6 @@ const BADGE_PATH_2 := Vector2(45.0, 25.0)
 func _bus_badge_board() -> Dictionary:
 	return {
 		"version": 1, "name": "BusBadgeBoard", "width_mm": 80.0, "height_mm": 40.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
 		"components": [

@@ -44,7 +44,7 @@ func _board():
 	var d = PcbDataScript.new()
 	d.from_board_dict({
 		"version": 1, "name": "staged", "width_mm": 30.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [], "nets": [{"name": "GND", "pins": []}],
 		"traces": [], "vias": [],

@@ -35,7 +35,7 @@ class FakeEditor extends RefCounted:
 
 func _board_with_part() -> Dictionary:
 	return {
-		"version": 1, "name": "Probe", "width_mm": 60.0, "height_mm": 40.0, "grid_mm": 2.54,
+		"version": 1, "name": "Probe", "width_mm": 60.0, "height_mm": 40.0,
 		"components": [
 			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 20.0, "rotation_deg": 0.0,
 				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}, {"number": "8", "x_mm": 7.62, "y_mm": 0.0}]},
@@ -1556,9 +1556,10 @@ func _probe_via_bearing_drag() -> void:
 			"%s -> %s" % [str(via_before), str(_serialized_via(data, "via_hold"))])
 	# The anchor snapping leg: the landing point is on the grid, which a
 	# zero-fallthrough anchor (via chosen as anchor, delta forced to zero) breaks.
-	# `grid_size` is the MODEL's property; `grid_mm` is only the SERIALIZATION
-	# key (pcb_data.to_board_dict). The first draft of this leg read `grid_mm`
-	# off the model, which is a runtime error — and a script error mid-`await`
+	# `grid_size` is the MODEL's property, and the only one: the pitch is panel
+	# session state and no longer a board key anywhere. The first draft of this
+	# leg read `grid_mm` off the model, which is a runtime error — and a script
+	# error mid-`await`
 	# aborts the WHOLE test function, so this leg silently never ran while the
 	# suite still reported a clean total (D1 oracle-integrity review, finding 1).
 	var grid: float = data.grid_size

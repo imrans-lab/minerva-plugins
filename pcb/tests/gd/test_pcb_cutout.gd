@@ -54,7 +54,6 @@ func check(desc: String, cond: bool, detail: String = "") -> void:
 func _board() -> Dictionary:
 	return {
 		"version": 1, "name": "CutoutBoard", "width_mm": 60.0, "height_mm": 40.0,
-		"grid_mm": 2.54,
 		"components": [
 			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 30.0, "y_mm": 20.0,
 				"rotation_deg": 0.0, "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
@@ -347,7 +346,6 @@ func _test_cross_language_handoff() -> void:
 	var data = PCBData.new()
 	data.from_board_dict({
 		"version": 1, "name": "GDHandoffCutout", "width_mm": 40.0, "height_mm": 30.0,
-		"grid_mm": 2.54,
 		"design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
 			"via_diameter_mm": 0.6, "via_drill_mm": 0.3},
 	})

@@ -102,6 +102,9 @@ var strayKeys = []struct {
 	old, new, label, key string
 }{
 	{"height_mm: 30\n", "height_mm: 30\ncolour: red\n", "board", "colour"},
+	// The drawing pitch used to be a board field. It is session state now, and a
+	// board that still carries one is refused rather than quietly tolerated.
+	{"height_mm: 30\n", "height_mm: 30\ngrid_mm: 2.54\n", "board", "grid_mm"},
 	{"    clearance_mm: 0.2\n", "    clearance_mm: 0.2\n    clearence_mm: 0.3\n", "board.design_rules", "clearence_mm"},
 	{"        sha256: abc\n", "        sha256: abc\n        shaa: def\n", "board.library_lock[R_0603]", "shaa"},
 	{"      rotation_deg: 0\n", "      rotation_deg: 0\n      properties: {}\n", "board.components[0] (R1)", "properties"},

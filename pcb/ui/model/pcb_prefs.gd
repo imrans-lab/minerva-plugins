@@ -53,8 +53,9 @@ const KEY_TRACE_WIDTH := "trace_width_mm"
 ## Per-USER snap toggles, reached from the panel's Options menu.
 ## They are preferences and not board state on purpose: how eagerly a cursor is
 ## pulled onto a grid or a land is a habit of the person drawing, while WHAT it
-## is pulled onto is the board's (the grid pitch is `grid_mm`, the angle set is
-## `design_rules.allowed_trace_angles_deg`, and both travel with the YAML).
+## is pulled onto is not: the angle set is the BOARD's
+## (`design_rules.allowed_trace_angles_deg`, travelling with the YAML), and the
+## grid pitch is the TAB's (panel session state, pcb_session_state.gd).
 const KEY_SNAP_GRID := "snap_grid"
 const KEY_SNAP_LAND := "snap_land"
 const KEY_SNAP_ANGLE := "snap_angle"

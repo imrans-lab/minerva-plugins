@@ -482,7 +482,7 @@ static func _get_nets(host, _args: Dictionary) -> Dictionary:
 		var pins_arr: Array = []
 		for pin in net.pins:
 			pins_arr.append("%s.%s" % [pin.get("component_id", ""), pin.get("pin_name", "")])
-		nets_arr.append({"name": net.name, "pins": pins_arr, "is_power": net.is_power_net})
+		nets_arr.append({"name": net.name, "pins": pins_arr, "is_power": net.is_power()})
 	return _ok({"net_count": nets_arr.size(), "nets": nets_arr})
 
 

@@ -740,7 +740,6 @@ const DRAG_PX := Vector2(40.0, 0.0)
 
 func _board_with_part() -> Dictionary:
 	var board := _tiny_board("camera")
-	board["grid_mm"] = 2.54
 	board["components"] = [{"ref": "R1", "footprint": "R_0805", "value": "1k",
 		"x_mm": PART_MM.x, "y_mm": PART_MM.y, "rotation_deg": 0.0, "layer": "top",
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,

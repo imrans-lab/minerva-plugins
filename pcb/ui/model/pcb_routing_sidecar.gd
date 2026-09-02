@@ -25,10 +25,11 @@ extends RefCounted
 ##   design_rules, components (+pads), nets, committed traces, committed vias,
 ##   and mounting_holes (physical routing KEEPOUTS — a hole moved into a
 ##   candidate's path must stale it, so hole geometry is a coherence input).
-## DELIBERATELY EXCLUDED: board name, grid_mm (a UI snap grid), the routing
-## workspace itself (routing is never a fingerprint input — it is the thing being
-## guarded), and any transient/selection state. The 2-layer model is all that
-## exists today (no speculative N-layer fields).
+## DELIBERATELY EXCLUDED: board name, the routing workspace itself (routing is
+## never a fingerprint input — it is the thing being guarded), and any
+## transient/selection state. The drawing grid is not listed because it is not
+## in the dict at all any more (panel session state, pcb_session_state.gd). The
+## 2-layer model is all that exists today (no speculative N-layer fields).
 ##
 ## Canonicalisation (see _canonical/_num) makes the hash INVARIANT to:
 ##   - dict key order (keys are string-sorted),
@@ -422,7 +423,7 @@ static func compute_board_fingerprint_v2(board_dict: Dictionary) -> String:
 	}
 	return _canonical(subset).sha256_text()
 	# DELIBERATELY EXCLUDED, so the next reader does not "complete" the list:
-	# name/id/version/grid_mm (identity + snap UI, not routing inputs) and the
+	# name/id/version (identity, not routing inputs) and the
 	# annotations/route_hints blobs (the sidecars' own content class — hashing
 	# them would make the fingerprint self-referential and unstable).
 

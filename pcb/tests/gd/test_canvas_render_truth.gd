@@ -237,7 +237,7 @@ func _two_sided_board():
 	var d := PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "layer-eye", "width_mm": 40.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "layers": ["top", "bottom"],
+		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "U1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
 			 "rotation_deg": 0.0, "layer": "top",
@@ -422,7 +422,7 @@ func _resolved_and_unresolved_board():
 	var d := PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "nominal", "width_mm": 40.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "layers": ["top", "bottom"],
+		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "U1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
 			 "rotation_deg": 0.0, "layer": "top",

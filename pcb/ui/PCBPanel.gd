@@ -122,6 +122,9 @@ const _PcbPrefsScript: Script = preload("model/pcb_prefs.gd")
 ## Trace-width bounds/default — the ONE contract, shared with the model setter
 ## and the preference registry (pcb_trace.gd).
 const _PcbTraceScript: Script = preload("model/pcb_trace.gd")
+## THIS TAB's view of the board — grid pitch and component locks — which rides
+## the save payload beside the board rather than inside it. See the script.
+const _PcbSessionStateScript: Script = preload("model/pcb_session_state.gd")
 
 ## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
 ## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
@@ -137,7 +140,6 @@ const _DEFAULT_BOARD := {
 	"name": "Untitled",
 	"width_mm": 60.0,
 	"height_mm": 40.0,
-	"grid_mm": 2.54,
 	"components": [],
 	# A NEW board declares its routing style, and Octilinear is the default:
 	# the loosest set that still keeps a hand-drawn run on a
@@ -6324,11 +6326,18 @@ func _exit_tree() -> void:
 		_flush_sidecars()
 
 ## Return the board's save state. Ctrl+S writes this Dict to the .pcbskel file as
-## JSON (Editor.gd host_owned path). Canonical from now on (port rule 4): the
-## returned shape is to_saved_board_dict() — to_board_dict with the session-only
-## keys removed. We ALSO flush annotations to the sidecar
+## JSON (Editor.gd host_owned path), and the SAME Dict is what the host stores as
+## this tab's `__panel_state` in the .minproj. Canonical from now on (port rule
+## 4): the board half is to_saved_board_dict() — to_board_dict with the
+## session-only keys removed. We ALSO flush annotations to the sidecar
 ## here — the platform does not auto-persist plugin-panel annotation sidecars
 ## (gap register C-15), so the panel owns that write.
+##
+## The panel's own session state (grid pitch, component locks) rides BESIDE the
+## board under pcb_session_state's reserved key, added to a COPY after the
+## sidecar writes: the routing sidecar fingerprints the board dict, and a
+## fingerprint that moved when someone locked a part would stale every routing
+## candidate for no reason at all.
 func _on_panel_save_request() -> Dictionary:
 	# to_SAVED_board_dict: the session-only keys (footprint_resolved) never
 	# reach the file, so reopening it elsewhere cannot inherit this machine's
@@ -6352,17 +6361,22 @@ func _on_panel_save_request() -> Dictionary:
 		_PcbRoutingSidecarScript.save_workspace(
 			_file_path, _routing_workspace, board_dict, int(_data.board_revision),
 			_staged_entities)
-	return board_dict
+	var payload: Dictionary = board_dict.duplicate()
+	payload[_PcbSessionStateScript.SESSION_KEY] = _PcbSessionStateScript.capture(_data)
+	return payload
 
 
 ## Restore board state previously returned by _on_panel_save_request.
 ##
 ## Accepts BOTH shapes (port rule 4):
 ##   1. Canonical board dict (to_board_dict): {version, name, width_mm, height_mm,
-##      grid_mm, components:[…canonical…], nets, traces, vias, design_rules}.
+##      components:[…canonical…], nets, traces, vias, design_rules}.
 ##   2. Legacy skeleton shape {version, kind:"pcbskel_board", board:{width_mm,
 ##      height_mm}, components:[{ref,x,y,w,h}]} — detected by the nested `board`
 ##      key and migrated to canonical before load.
+##
+## Either shape may carry the panel's session block beside it (see
+## pcb_session_state.gd); it is taken off before the model reads the document.
 ##
 ## The host ALWAYS includes `file_path` (Editor.gd:1117), in BOTH the JSON-merged
 ## and the raw-text document shapes; we capture it either way (W-15 — the JSON
@@ -6383,6 +6397,19 @@ func _on_panel_load_request(document: Dictionary) -> void:
 			doc = parsed as Dictionary
 		else:
 			doc = {}
+
+	# THE ENVELOPE COMES OFF BEFORE THE MODEL SEES THE DOCUMENT. Two things ride
+	# the same dict as the board and are not board keys: the HOST's own wrapper
+	# (Editor.gd merges a JSON body into {file_path: …}, and hands a non-JSON
+	# body over as `raw_text`) and this panel's session block, added on save.
+	# from_board_dict's schema is POSITIVE — an unknown root key is a refusal,
+	# which is exactly what keeps session state out of the design — so anything
+	# that is not the board has to be taken off here, where it is named.
+	var session: Dictionary = _PcbSessionStateScript.extract(doc)
+	doc = doc.duplicate()  # never mutate the host's dict
+	doc.erase(_PcbSessionStateScript.SESSION_KEY)
+	doc.erase("file_path")
+	doc.erase("raw_text")
 
 	# Restoring saved state — suppress the dirty relay for the whole load.
 	_restoring = true
@@ -6411,6 +6438,10 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	# gives the host when its own restore fails.
 	if refusals.is_empty():
 		_board_loaded = true
+		# AFTER the board, so the pitch and the locks the session recorded win
+		# over whatever an older document happened to state inline. A refused
+		# document is not a load, so its session block is not applied either.
+		_PcbSessionStateScript.apply(_data, session)
 	else:
 		_load_refusal_lead = "LOAD REFUSED: %s  •  " % "  •  ".join(refusals)
 

@@ -151,7 +151,6 @@ func check(desc: String, cond: bool, detail: String = "") -> void:
 func _board(rule_width: float = 0.0, angles: Array = []) -> Dictionary:
 	var b := {
 		"version": 1, "name": "TraceBoard", "width_mm": 60.0, "height_mm": 40.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "U1", "footprint": "IC_DIP", "x_mm": 10.0, "y_mm": 10.0,

@@ -42,7 +42,6 @@ const canonicalYAML = `version: 1
 name: Blinky
 width_mm: 40
 height_mm: 30
-grid_mm: 2.54
 layers:
     - top
     - bottom
@@ -142,7 +141,6 @@ func TestRoundTripFromModelDeepEqual(t *testing.T) {
 		Name:     "Model",
 		WidthMM:  50,
 		HeightMM: 25,
-		GridMM:   1.27,
 		Layers:   []string{"top", "bottom"},
 		Origin:   &Point{XMM: 0, YMM: 0},
 		DesignRules: DesignRules{
@@ -258,7 +256,6 @@ design_rules:
 layers:
     - top
     - bottom
-grid_mm: 2.54
 height_mm: 30
 width_mm: 40
 name: Blinky

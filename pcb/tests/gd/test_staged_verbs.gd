@@ -60,7 +60,7 @@ func _rig() -> Dictionary:
 	var data = panel.get_data()
 	data.from_board_dict({
 		"version": 1, "name": "verbs", "width_mm": 40.0, "height_mm": 40.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [], "nets": [{"name": "GND", "pins": []}],
 		"traces": [], "vias": [],

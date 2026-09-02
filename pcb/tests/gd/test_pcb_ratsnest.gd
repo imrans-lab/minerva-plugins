@@ -203,7 +203,7 @@ func _board(spec: Dictionary):
 	var d = PCBData.new()
 	var full := {
 		"version": 1, "name": "ratsnest-fixture", "width_mm": 45.0, "height_mm": 45.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [], "nets": [], "traces": [], "vias": [], "zones": [],
 	}

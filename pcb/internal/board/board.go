@@ -78,7 +78,11 @@ type Board struct {
 	Name     string  `json:"name" yaml:"name"`
 	WidthMM  float64 `json:"width_mm" yaml:"width_mm"`
 	HeightMM float64 `json:"height_mm" yaml:"height_mm"`
-	GridMM   float64 `json:"grid_mm,omitempty" yaml:"grid_mm,omitempty"`
+
+	// No grid pitch here, deliberately. The editor's drawing snap is not a fact
+	// about the copper: it is panel session state (ui/model/pcb_session_state.gd),
+	// and a document that states one is refused by name like any other unknown
+	// key. Do not re-add the field to make an old board load.
 
 	// Layers is the OPTIONAL copper stack, and its ORDER *IS* the physical
 	// stack order: "top" first, "bottom" last, inner layers "in1".."in30" in

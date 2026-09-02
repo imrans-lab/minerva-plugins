@@ -46,7 +46,9 @@ const _ID_VIEW_BASE := MENU_ID_BASE + 50     # + index into _VIEW_ROWS
 
 ## The numeric board rules this menu edits, in menu order:
 ## [label, key, min_mm, max_mm]. `key` is a DESIGN_RULE_KEYS entry, or
-## `grid_mm`, which is board state but not a design rule (see PCBData).
+## `grid_mm` — the drawing pitch, which is this panel's SESSION state and not a
+## design rule at all: it never reaches the canonical dict, and persists through
+## the panel's save payload (pcb_session_state.gd).
 const _RULE_ROWS := [
 	["Trace width", "trace_width_mm", PcbTrace.MIN_WIDTH_MM, PcbTrace.MAX_WIDTH_MM],
 	["Via diameter", "via_diameter_mm", 0.05, 5.0],

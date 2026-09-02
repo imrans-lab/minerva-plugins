@@ -334,6 +334,13 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	var nets := await d("minerva_pcb_get_nets", _args())
 	check_keys("get_nets shape", nets, ["success", "net_count", "nets"])
 	check_eq("net_count=1", int(nets.get("net_count", 0)), 1)
+	# `is_power` is DERIVED from the net name (PCBNet.is_power_name), never
+	# stored: connect_net minted VCC with no flag, and the canonical net dict
+	# has no home for one — so a true here can only have come from the name.
+	var vcc: Dictionary = (nets.get("nets", []) as Array)[0] \
+		if (nets.get("nets", []) as Array).size() == 1 else {}
+	check("get_nets reports VCC as a power rail, derived from its name",
+		bool(vcc.get("is_power", false)), str(vcc))
 
 	print("\n-- spatial_query + describe_component --")
 	var sq := await d("minerva_pcb_spatial_query", _args({"reference_component": "U9", "radius_mm": 100.0}))

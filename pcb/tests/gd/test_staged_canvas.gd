@@ -78,7 +78,7 @@ func _rig() -> Dictionary:
 	var d = PCBData.new()
 	d.from_board_dict({
 		"version": 1, "name": "staged-canvas", "width_mm": 40.0, "height_mm": 40.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [], "nets": [{"name": "GND", "pins": []}],
 		"traces": [], "vias": [],
@@ -330,7 +330,7 @@ func _run_panel_doorways() -> void:
 	var data = panel.get_data()
 	data.from_board_dict({
 		"version": 1, "name": "doorway", "width_mm": 40.0, "height_mm": 40.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top"], "components": [], "nets": [], "traces": [], "vias": [],
 	})
 	var store = panel.get_staged_store()
@@ -564,7 +564,7 @@ func _run_approximation_notice() -> void:
 	var bare = PCBData.new()
 	bare.from_board_dict({
 		"version": 1, "name": "bare", "width_mm": 20.0, "height_mm": 20.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"], "components": [], "nets": [],
 		"traces": [], "vias": [],
 	})
@@ -584,7 +584,7 @@ func _run_approximation_notice() -> void:
 	var rich = PCBData.new()
 	rich.from_board_dict({
 		"version": 1, "name": "rich", "width_mm": 20.0, "height_mm": 20.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"],
 		"components": [{"ref": "R1", "footprint": "R_0805", "value": "1k",
 			"x_mm": 5.0, "y_mm": 5.0, "rotation_deg": 0.0, "layer": "top",
@@ -632,7 +632,7 @@ func _run_library_lock_round_trip() -> void:
 	var lock := {"Lib:Part": {"sha256": "abc123", "layer": "seed"}}
 	d.from_board_dict({
 		"version": 1, "name": "locked", "width_mm": 20.0, "height_mm": 20.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"], "components": [], "nets": [],
 		"traces": [], "vias": [], "library_lock": lock,
 	})
@@ -647,7 +647,7 @@ func _run_library_lock_round_trip() -> void:
 	var d2 = PCBData.new()
 	d2.from_board_dict({
 		"version": 1, "name": "future", "width_mm": 20.0, "height_mm": 20.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"], "components": [], "nets": [],
 		"traces": [], "vias": [],
 		"library_lock": {"Lib:Part": {"sha256": "x", "some_future_field": 7}},
@@ -661,7 +661,7 @@ func _run_library_lock_round_trip() -> void:
 	var d3 = PCBData.new()
 	d3.from_board_dict({
 		"version": 1, "name": "plain", "width_mm": 20.0, "height_mm": 20.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"layers": ["top", "bottom"], "components": [], "nets": [],
 		"traces": [], "vias": [],
 	})

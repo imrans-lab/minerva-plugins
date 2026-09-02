@@ -3,7 +3,6 @@ id: board:120d8c447b29f99ac301bc7616a3b7a1
 name: jlc-coupon-1
 width_mm: 24
 height_mm: 18
-grid_mm: 2.54
 layers:
     - top
     - bottom

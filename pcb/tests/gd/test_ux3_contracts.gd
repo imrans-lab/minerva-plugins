@@ -68,7 +68,7 @@ func _board():
 	var data = PcbDataScript.new()
 	data.from_board_dict({
 		"version": 1, "name": "k5", "width_mm": 30.0, "height_mm": 30.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"design_rules": {"clearance_mm": 0.2},
 		"components": [], "nets": [{"name": "N1", "pins": []},
 			{"name": "N2", "pins": []}, {"name": "N3", "pins": []}],
 		"traces": [], "vias": [],
@@ -256,12 +256,14 @@ func _run_fingerprint_v2() -> void:
 	check("v2: a PTH board hole moves the fingerprint (missing from v1 AND Codex's list)",
 		PcbRoutingSidecar.compute_board_fingerprint_v2(with_locked)
 			!= PcbRoutingSidecar.compute_board_fingerprint_v2(with_pth))
-	# The deliberate EXCLUSIONS hold: grid_mm (snap UI) does not move it.
-	var with_grid: Dictionary = with_locked.duplicate(true)
-	with_grid["grid_mm"] = 1.27
-	check("v2: grid_mm (snap UI, not a routing input) does NOT move the fingerprint",
+	# The deliberate EXCLUSIONS hold: the board's NAME is not a routing input.
+	# (The snap grid used to be checked here too; it is no longer a board key at
+	# all — it is panel session state, and the codec refuses one by name.)
+	var renamed: Dictionary = with_locked.duplicate(true)
+	renamed["name"] = "Renamed"
+	check("v2: the board name (not a routing input) does NOT move the fingerprint",
 		PcbRoutingSidecar.compute_board_fingerprint_v2(with_locked)
-			== PcbRoutingSidecar.compute_board_fingerprint_v2(with_grid))
+			== PcbRoutingSidecar.compute_board_fingerprint_v2(renamed))
 
 	# ── writer stamps v2; loader compares v2 ─────────────────────────────────
 	var ws = PcbRoutingWorkspace.new()

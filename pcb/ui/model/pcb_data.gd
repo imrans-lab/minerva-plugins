@@ -75,7 +75,11 @@ var load_refusals: PackedStringArray = PackedStringArray()
 ## Board properties
 var board_width: float = 100.0   # mm
 var board_height: float = 100.0  # mm
-var grid_size: float = 2.54      # mm (0.1 inch default)
+## The drawing-snap pitch a board starts on, in mm (0.1 inch). Named because
+## THREE places have to agree on it: the field's own initial value, the reset a
+## board load performs, and the session block that may then override it.
+const DEFAULT_GRID_MM := 2.54
+var grid_size: float = DEFAULT_GRID_MM
 var board_name: String = "Untitled"
 
 ## Board layers
@@ -2858,7 +2862,8 @@ func set_board_size(new_width: float, new_height: float) -> void:
 	data_changed.emit()
 
 
-## Set the board's drawing-grid pitch, in mm (`grid_mm` in the YAML). Returns a
+## Set the board's drawing-grid pitch, in mm — session state, never the YAML
+## (see to_board_dict and pcb_session_state.gd). Returns a
 ## refusal sentence, or "" on success; re-setting the pitch already stored is a
 ## silent no-op.
 ##
@@ -3375,7 +3380,7 @@ func load_from_dict(data: Dictionary) -> void:
 	board_name = data.get("board_name", "Untitled")
 	board_width = data.get("board_width", 100.0)
 	board_height = data.get("board_height", 100.0)
-	grid_size = data.get("grid_size", 2.54)
+	grid_size = float(data.get("grid_size", DEFAULT_GRID_MM))
 
 	layers.clear()
 	var layers_arr: Array = data.get("layers", ["top", "bottom"])
@@ -3669,6 +3674,11 @@ func from_csv(csv_text: String) -> Dictionary:
 ## pcb.serialize expects, and what from_board_dict() round-trips. Components,
 ## nets and traces are deterministically sorted (matching minpcb.go). Annotations
 ## / route_hints are deliberately NOT emitted here (owned by PcbAnnotationHost).
+##
+## There is NO `grid_mm`: the drawing-grid pitch is an authoring aid, not a fact
+## about the copper. It lives in the panel's session state (pcb_session_state.gd),
+## and a document that states one is REFUSED by name — here and in the Go codec
+## alike (board.go has no such field). There is no compatibility path.
 func to_board_dict() -> Dictionary:
 	var comp_keys := components.keys()
 	comp_keys.sort()
@@ -3701,7 +3711,6 @@ func to_board_dict() -> Dictionary:
 		"name": board_name,
 		"width_mm": board_width,
 		"height_mm": board_height,
-		"grid_mm": grid_size,
 		"layers": layers.duplicate(),
 		"design_rules": design_rules.duplicate(),
 		"components": comp_list,
@@ -3760,7 +3769,7 @@ const SESSION_ONLY_COMPONENT_KEYS: Array[String] = ["footprint_resolved"]
 ## silently. Zones, cutouts and board graphics are carried verbatim and left
 ## to the codec, which refuses a stray key on them at the next save.
 const ROOT_KEYS: Array[String] = ["version", "id", "name", "width_mm", "height_mm",
-	"grid_mm", "layers", "fabrication_stage", "origin", "design_rules", "library_lock",
+	"layers", "fabrication_stage", "origin", "design_rules", "library_lock",
 	"components", "nets", "traces", "vias", "zones", "cutouts", "mounting_holes",
 	"pth_holes", "npth_holes", "board_graphics", "annotations", "route_hints"]
 const NET_KEYS: Array[String] = ["name", "pins"]
@@ -3859,7 +3868,12 @@ func from_board_dict(data: Dictionary, resolved: Dictionary = {}) -> void:
 	board_name = str(data.get("name", "Untitled"))
 	board_width = float(data.get("width_mm", 100.0))
 	board_height = float(data.get("height_mm", 100.0))
-	grid_size = float(data.get("grid_mm", 2.54))
+	# The pitch is NOT in the document (it is panel session state), so a load has
+	# to reset it: this model outlives the board in it — one tab opens many —
+	# and without the reset a board whose session block says nothing would come
+	# up on the PREVIOUS board's pitch. The session block, applied after this
+	# load, is what puts a remembered pitch back.
+	grid_size = DEFAULT_GRID_MM
 
 	layers.clear()
 	var layers_arr: Array = data.get("layers", ["top", "bottom"])
@@ -4422,7 +4436,8 @@ const AUTHOR_SNAP_FRACTION := 0.25
 ##
 ## The one snapper for entity authoring, shared by every drawing tool on the
 ## canvas — component drags keep snap_to_grid() above, deliberately. Guards a
-## non-positive grid_size (a malformed board's "grid_mm": 0 would otherwise divide
+## non-positive grid_size (which set_grid_size refuses, but a direct write to the
+## field could still produce, and zero would otherwise divide
 ## by zero and place the vertex at NaN, off the board and unserializable): with no
 ## usable grid the click stands as made.
 func snap_author_point(position: Vector2) -> Vector2:

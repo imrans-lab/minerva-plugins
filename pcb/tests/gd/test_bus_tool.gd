@@ -216,7 +216,6 @@ const V3_LAND_MM := Vector2(6.0, 0.6)
 func _board() -> Dictionary:
 	return {
 		"version": 1, "name": "BusBoard", "width_mm": 140.0, "height_mm": 60.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
 		"components": [
@@ -1530,7 +1529,6 @@ const FAN_PATH_2 := Vector2(110.0, 25.0)
 func _fanout_board() -> Dictionary:
 	return {
 		"version": 1, "name": "FanBoard", "width_mm": 140.0, "height_mm": 60.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
 		"components": [
@@ -1825,7 +1823,6 @@ const TIE_MID := Vector2(21.0, 20.0)
 func _tie_board() -> Dictionary:
 	return {
 		"version": 1, "name": "TieBoard", "width_mm": 60.0, "height_mm": 40.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": 0.3, "trace_width_mm": 0.2},
 		"components": [
@@ -2224,7 +2221,6 @@ func _lga_pin(number: String, x: float, y: float) -> Dictionary:
 func _lga_board() -> Dictionary:
 	return {
 		"version": 1, "name": "LgaBusBoard", "width_mm": 60.0, "height_mm": 60.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": LGA_CLEARANCE_MM, "trace_width_mm": 0.2},
 		"components": [
@@ -3954,7 +3950,6 @@ func _test_approach_sides_and_leave_one_open() -> void:
 func _three_net_mirrored_board() -> Dictionary:
 	return {
 		"version": 1, "name": "ThreeNetMirror", "width_mm": 60.0, "height_mm": 60.0,
-		"grid_mm": 2.54,
 		"layers": ["top", "bottom"],
 		"design_rules": {"clearance_mm": LGA_CLEARANCE_MM, "trace_width_mm": 0.2},
 		"components": [

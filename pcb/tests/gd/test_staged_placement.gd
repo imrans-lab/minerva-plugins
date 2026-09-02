@@ -64,7 +64,7 @@ func _rig() -> Dictionary:
 	var data = panel.get_data()
 	data.from_board_dict({
 		"version": 1, "name": "placement", "width_mm": 40.0, "height_mm": 25.0,
-		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25},
+		"design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25},
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "R1", "footprint": "R_0805", "value": "1k",
