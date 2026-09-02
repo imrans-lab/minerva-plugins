@@ -251,7 +251,15 @@ def validate_board(board: dict) -> dict:
     components = _as_list(board.get("components"))
     refs: dict[str, int] = {}
     comp_pins: dict[str, set[str]] = {}
-    comp_has_pins: dict[str, bool] = {}
+    # Whether this component's pad set is KNOWN from the file alone. A `pins`
+    # entry is an OVERRIDE of the like-numbered library pad, so a pins list no
+    # longer rosters the component's pads and cannot refute a net's pad ref. The
+    # file states the full set only for a `pads`-key component (full geometry
+    # authority) or a footprint-less one that does list pins — nothing else can
+    # supply its pads. Everything else is adjudicated against the RESOLVED pads
+    # by compile_board._finalize_nets, which reads the library this structural
+    # pass deliberately does not open.
+    comp_pads_known: dict[str, bool] = {}
     for i, comp in enumerate(components):
         cpath = f"components[{i}]"
         if not isinstance(comp, dict):
@@ -272,8 +280,13 @@ def validate_board(board: dict) -> dict:
 
         # Index this component's pin numbers for net-ref resolution.
         pins = _as_list(comp.get("pins"))
-        comp_has_pins[ref] = len(pins) > 0
+        own_pads = comp.get("pads")
+        comp_pads_known[ref] = (isinstance(own_pads, list)
+                                or (not comp.get("footprint") and len(pins) > 0))
         numset: set[str] = set()
+        for pad in (own_pads if isinstance(own_pads, list) else []):
+            if isinstance(pad, dict) and str(pad.get("number", "")) != "":
+                numset.add(str(pad.get("number")))
         for j, pin in enumerate(pins):
             if not isinstance(pin, dict):
                 err(f"{cpath}.pins[{j}]", "pin must be a mapping")
@@ -308,14 +321,15 @@ def validate_board(board: dict) -> dict:
             if ref not in refs:
                 err(ppath, f"pin ref '{pinref}' names unknown component '{ref}'")
                 continue
-            if comp_has_pins.get(ref):
+            if comp_pads_known.get(ref):
                 if pad not in comp_pins.get(ref, set()):
                     err(ppath, f"pin ref '{pinref}' names pad '{pad}' not declared "
                                f"on component '{ref}' (declared: "
                                f"{sorted(comp_pins.get(ref, set()))})")
             else:
-                warn(ppath, f"cannot verify pad '{pad}' — component '{ref}' "
-                            f"declares no pins")
+                warn(ppath, f"cannot verify pad '{pad}' — component '{ref}' states no "
+                            f"pad set this pass can read (its pads come from the library, "
+                            f"which is not opened here)")
 
     # --- Traces ---
     dr = board.get("design_rules") or {}

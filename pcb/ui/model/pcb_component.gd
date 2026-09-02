@@ -598,10 +598,21 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 ## number leaves the LAST one's position as the pin centre.
 func pins_from_pads() -> void:
 	pins.clear()
+	fill_pins_from_pads()
+
+
+## Add the electrical pins the pin map is MISSING from the current lands, leaving
+## every pin already there alone. A `pins` entry in a canonical board is an
+## OVERRIDE of the like-numbered land, so a library part's document states only
+## its deviations and the rest of the pin map has to be re-derived from this
+## host's resolve — which is why adopt_resolved calls this. Without it a reopened
+## board's library parts would have no pins at all to route to. A land that
+## repeats a number leaves the FIRST one's position as the pin centre.
+func fill_pins_from_pads() -> void:
 	for pad in pads:
 		var num := str(pad.get("number", ""))
 		var ptype := str(pad.get("type", "smd"))
-		if num.is_empty():
+		if num.is_empty() or pins.has(num):
 			continue
 		if ptype == "np_thru_hole":
 			continue  # Mechanical hole: not an electrical pin
@@ -1596,6 +1607,43 @@ static func from_dict(data: Dictionary):
 # colour, lock, label) is in it. The Go codec refuses any key it does not
 # model, so one dict serves the worker channels, the document and the promote.
 
+## How far a pin may sit from the land it names and still be the same point —
+## the worker's own coincidence tolerance (compile_board.COINCIDENCE_TOL_MM),
+## which is what adjudicates the pin this writer emits.
+const PIN_COINCIDENCE_TOL_MM := 0.01
+
+
+## Whether this pin says nothing its resolved land does not already say, and so
+## must NOT be written: a `pins` entry is an OVERRIDE of the like-numbered land
+## and nothing else — a pin per pad restating the locked footprint's coordinates
+## is a second copy of the library that the compiler would only have to police.
+##
+## Conservative on purpose — it drops a pin only when the library provably says
+## the same thing:
+##   * the lands must be THIS HOST's resolve of a library footprint. A part that
+##     OWNS its pads (pads_authored, the worker's FULL rule) is the authority
+##     itself, and an UNRESOLVED part has no library reading to compare against —
+##     dropping there would destroy the only copy;
+##   * the pin must name a land, and sit on it within PIN_COINCIDENCE_TOL_MM;
+##   * it must carry NOTHING beyond number/x_mm/y_mm. The extras (`override`, a
+##     symbolic `name`, `roles`, legacy inline fab geometry) are either the
+##     deviation itself or the part's own pin table, and a resolved land carries
+##     no name and no roles. Folding legacy inline geometry against the land is
+##     the WORKER's job (compile_board.normalize_board), not a second opinion here.
+func _pin_restates_land(pin_dict: Dictionary) -> bool:
+	if pads_authored or not footprint_resolved:
+		return false
+	if pin_dict.size() != 3:
+		return false  # carries an extra key — real content, always written
+	for pad in pads:
+		if str(pad.get("number", "")) != str(pin_dict.get("number", "")):
+			continue
+		var land: Vector2 = pad.get("position", Vector2.ZERO)
+		var here := Vector2(float(pin_dict["x_mm"]), float(pin_dict["y_mm"]))
+		return land.distance_to(here) <= PIN_COINCIDENCE_TOL_MM
+	return false  # names no land — the worker refuses it; never drop it silently
+
+
 ## Serialize to a canonical board-contract component dict.
 func to_board_dict() -> Dictionary:
 	var d := {
@@ -1613,6 +1661,9 @@ func to_board_dict() -> Dictionary:
 
 	# pins: name→offset map → sorted list of {number, x_mm, y_mm} + each pin's
 	# preserved fab-geometry extras (drill_mm/annulus_diameter_mm/roles/...).
+	# A pin that merely RESTATES the resolved land is not written — see
+	# _pin_restates_land. Present-only, so a library part whose every pin equals
+	# its footprint carries no `pins` key at all.
 	var pin_keys := pins.keys()
 	pin_keys.sort()
 	var pin_list := []
@@ -1623,8 +1674,10 @@ func to_board_dict() -> Dictionary:
 		for ek in extras:
 			if not pin_dict.has(ek):
 				pin_dict[ek] = extras[ek]
-		pin_list.append(pin_dict)
-	d["pins"] = pin_list
+		if not _pin_restates_land(pin_dict):
+			pin_list.append(pin_dict)
+	if not pin_list.is_empty():
+		d["pins"] = pin_list
 
 	if not assembly.is_empty():
 		d["assembly"] = assembly.duplicate(true)
@@ -1749,6 +1802,9 @@ func adopt_resolved(entry: Dictionary) -> bool:
 		if resolved_pads is Array:
 			_pads_from_list(resolved_pads)
 			has_pad_geometry = bool(entry.get("has_pad_geometry", false))
+			# The lands are the pin map for every pin the board did not override
+			# — see fill_pins_from_pads. The board's own pins are kept.
+			fill_pins_from_pads()
 			_fit_body_to_pads()
 			changed = true
 	if bool(entry.get("footprint_resolved", false)) and not footprint_resolved:

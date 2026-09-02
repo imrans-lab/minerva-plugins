@@ -1692,13 +1692,53 @@ def _apply_pin_override(
 #     fabrication meaning silently changed.
 _INLINE_FAB_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm", "plated")
 
+# What a pin may carry that the resolved library pad CANNOT supply, and which
+# therefore makes the pin real content rather than a duplicate of the library:
+#   * ``override`` — the sanctioned typed deviation;
+#   * ``name`` / ``roles`` — the part's own pin table. A resolved pad dict has
+#     neither (resolve._pads_from_parsed emits no name, PadDefinition models no
+#     roles), so dropping such a pin would destroy the only copy.
+# ``number``/``x_mm``/``y_mm`` are the correlation to the pad, not content.
+_PIN_CONTENT_KEYS = ("override", "name", "roles")
+
+
+def _pin_restates_library(pin: dict, pad: Union[PadDefinition, None]) -> bool:
+    """True when a pin says nothing its library pad does not already say: it
+    names a real pad, its position (if any) coincides, and it carries no
+    ``_PIN_CONTENT_KEYS``.  Such a pin is a duplicate the writers must not emit.
+
+    Runs on a FOLDED pin — legacy inline fab geometry has already been dropped
+    (redundant) or turned into an ``override`` (divergent), so this predicate
+    never has to re-decide what the fold decided."""
+    if pad is None:
+        return False  # names no library pad — the compiler refuses it; never drop
+    for key in _PIN_CONTENT_KEYS:
+        value = pin.get(key)
+        if value not in (None, "", [], {}):
+            return False
+    px, py = pin.get("x_mm"), pin.get("y_mm")
+    if not (_is_number(px) and _is_number(py)):
+        return not (_is_number(px) or _is_number(py))  # a partial position is malformed; keep it
+    dx, dy = pad.position[0] - float(px), pad.position[1] - float(py)
+    return (dx * dx + dy * dy) ** 0.5 <= COINCIDENCE_TOL_MM
+
 
 def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
                        diags: _Diagnostics) -> dict[str, dict]:
-    """Prove each declared pin's LOCAL position matches the footprint pad of the
-    same number (fail-closed — silk/copper desync), run the pin-geometry authority
-    fold (019f802ca3af), and RETURN the well-formed typed overrides keyed by pin
-    number so :func:`_place_component` can apply them to the resolved IR.
+    """Correlate every declared pin to the footprint pad it OVERRIDES, run the
+    pin-geometry authority fold (019f802ca3af), and RETURN the well-formed typed
+    overrides keyed by pin number so :func:`_place_component` can apply them to
+    the resolved IR.
+
+    A ``pins`` entry is an OVERRIDE of the like-numbered library pad and nothing
+    else — a pin that merely restates the library is not written at all (the
+    writers: :func:`normalize_board` here, ``pcb_component.gd::to_board_dict``
+    in the panel).  So the correlation is by NUMBER and applies to every pin:
+    one that names no library pad refuses (``pin_without_pad``).  An ``x_mm``/
+    ``y_mm`` a pin DOES restate is not a second copy of the pad position to
+    adjudicate — it is the pin naming where it believes its pad is, so a
+    disagreement means the pin names the wrong pad and still refuses
+    (``pin_pad_desync``; silk would desync from copper).
 
     Authority (per the hermetic-CAM keystone) is the LOCKED footprint for any pad
     field a pin does NOT override; a validated typed `override` is the sanctioned
@@ -1760,16 +1800,24 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
                                   validated_overrides, diags)
         px, py = pin.get("x_mm"), pin.get("y_mm")
         has_x, has_y = _is_number(px), _is_number(py)
-        if not has_x and not has_y:
-            continue  # no declared local position — nothing to coincidence-check
         if has_x != has_y:
             diags.error("pin_partial_position",
                         f"component {ref!r} pin {number!r} declares only one of x_mm/y_mm", pad_ref)
             continue
+        # A pin entry OVERRIDES the like-numbered library pad, so the NUMBER is
+        # the correlation and a pin must name a pad whether or not it also
+        # restates a position. A pin carrying an `override` or legacy inline
+        # geometry is already named by override_without_pad /
+        # inline_geometry_without_pad, so it is skipped here — one defect, one
+        # diagnostic.
         if pad is None:
-            diags.error("pin_without_pad",
-                        f"component {ref!r} pin {number!r} has no matching footprint pad", pad_ref)
+            if override is None and not inline_keys:
+                diags.error("pin_without_pad",
+                            f"component {ref!r} pin {number!r} has no matching footprint pad",
+                            pad_ref)
             continue
+        if not has_x:
+            continue  # names its pad and restates no position — nothing to check
         dx, dy = pad.position[0] - float(px), pad.position[1] - float(py)
         if (dx * dx + dy * dy) ** 0.5 > COINCIDENCE_TOL_MM:
             diags.error("pin_pad_desync",
@@ -3432,6 +3480,13 @@ def normalize_board(
       * AMBIGUOUS → a fail-closed ERROR diagnostic; the WHOLE normalize fails (no
         board returned) — a half-normalized source is worse than none.
 
+    THEN, on the folded pins: a pin entry is an OVERRIDE and nothing else, so one
+    that says only what its library pad already says — position coincident, no
+    ``override``, no ``name``/``roles`` (see :func:`_pin_restates_library`) — is
+    DROPPED (INFO ``restated_pin_dropped``), and a component left with no pins
+    loses the key.  A pin naming NO library pad is never dropped: the compiler
+    refuses it, and normalize must not hide that.
+
     A pin that already has an explicit ``override`` keeps it, but any legacy inline
     fab keys it ALSO carries are SUPERSEDED by the override (fold doctrine) and are
     dropped (INFO ``inline_pin_geometry_dropped``).  A pin with no inline geometry
@@ -3475,6 +3530,7 @@ def normalize_board(
     # Collect mutations first and apply them ONLY if no pin was ambiguous, so an
     # ambiguous board is returned un-normalized (fail-closed, all-or-nothing).
     pending: list[tuple[dict, list[str], Union[dict, None]]] = []
+    resolved_comps: list[tuple[dict, str, dict]] = []
     for comp in components:
         if not isinstance(comp, dict):
             continue
@@ -3483,6 +3539,11 @@ def normalize_board(
             continue
         ref = comp.get("ref") if isinstance(comp.get("ref"), str) else ""
         pad_by_number = _footprint_pad_map(comp.get("footprint"), chain=chain)
+        # Only a PARTIAL component (no `pads` key) takes its pads from the library,
+        # so only there can a pin be a duplicate of one. A FULL component IS the
+        # geometry authority — its pins are left exactly as authored.
+        if not inline_footprint.carries_full_geometry(comp):
+            resolved_comps.append((comp, ref, pad_by_number))
         for pin in pins:
             if not isinstance(pin, dict):
                 continue
@@ -3533,6 +3594,32 @@ def normalize_board(
             del pin[key]
         if override is not None:
             pin["override"] = override
+
+    # A pin entry is an OVERRIDE and nothing else, so a pin left saying only what
+    # the library pad already says is DROPPED — the duplicate the coincidence
+    # check existed to police stops being written at all. Runs after the fold, on
+    # the folded pin: one whose inline geometry became an override survives, one
+    # whose inline geometry was redundant is judged on what is left. A component
+    # left with no pins loses the key entirely (the Go codec's `omitempty` shape).
+    for comp, ref, pad_by_number in resolved_comps:
+        kept, dropped = [], []
+        for pin in comp["pins"]:
+            if (isinstance(pin, dict)
+                    and _pin_restates_library(pin, pad_by_number.get(str(pin.get("number"))))):
+                dropped.append(str(pin.get("number")))
+            else:
+                kept.append(pin)
+        if not dropped:
+            continue
+        diags.info("restated_pin_dropped",
+                   f"component {ref!r}: {len(dropped)} pin(s) restated the locked footprint "
+                   f"and were dropped from the source ({', '.join(dropped)}) — the library "
+                   f"pad is the authority and a pin is written only as an override",
+                   SourceRef(EntityKind.COMPONENT, ref))
+        if kept:
+            comp["pins"] = kept
+        else:
+            del comp["pins"]
     return board, diags.tuple()
 
 

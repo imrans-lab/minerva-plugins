@@ -1870,6 +1870,19 @@ def test_inline_geometry_without_matching_pad_fails_closed():
     assert "inline_pin_geometry_ignored" not in _codes(diags)
 
 
+def test_pin_naming_no_pad_refuses_even_with_no_position():
+    # A `pins` entry is an OVERRIDE of the like-numbered library pad, so the NUMBER
+    # is the correlation and it must name a pad whether or not the pin also restates
+    # a position. This pin carries no override and no inline geometry, so nothing
+    # else would name it — it would otherwise apply to nothing in silence.
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "9", "roles": ["uart_console"]}]}  # footprint has pad "1"
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert validated == {}
+    assert "pin_without_pad" in [d.code for d in diags.tuple()
+                                 if d.severity is DiagnosticSeverity.ERROR]
+
+
 def test_typed_override_is_honored_not_deprecated():
     # A typed override is the sanctioned deviation channel: no deprecation warning,
     # no error, and it is returned for the IR builder to apply (no stale

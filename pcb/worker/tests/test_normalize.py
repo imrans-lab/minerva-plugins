@@ -70,14 +70,17 @@ def test_divergent_inline_is_migrated_to_override_and_inline_dropped():
     assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags)
 
 
-def test_redundant_inline_is_dropped_without_override():
+def test_redundant_inline_leaves_a_restating_pin_that_is_dropped_whole():
     # annulus 1.2 == footprint pad size[0]; drill 0.8 == footprint drill → redundant.
+    # What is LEFT once the inline is folded away is a bare {number: "1"} — a pin
+    # that says nothing the library pad does not, so the whole ENTRY goes and the
+    # component loses the key: a `pins` entry is an override and nothing else.
     board = _norm_board([{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 1.2}])
     normalized, diags = normalize_board(board)
     assert normalized is not None
-    pin = _pins(normalized)[0]
-    assert "override" not in pin
-    assert "drill_mm" not in pin and "annulus_diameter_mm" not in pin
+    assert "pins" not in normalized["components"][0]
+    assert "inline_pin_geometry_dropped" in _codes(diags)
+    assert "restated_pin_dropped" in _codes(diags)
     assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags)
 
 
@@ -116,11 +119,24 @@ def test_existing_override_is_left_unchanged():
     assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags)
 
 
-def test_pin_without_inline_is_left_unchanged():
+def test_pin_that_disagrees_with_its_pad_is_left_for_the_compiler_to_refuse():
+    # Pad "1" sits at the footprint origin, so this pin's (1.0, 2.0) is not a
+    # restatement — normalize leaves it exactly as authored rather than hiding a
+    # position the compiler refuses as pin_pad_desync.
     board = _norm_board([{"number": "1", "x_mm": 1.0, "y_mm": 2.0}])
     before = copy.deepcopy(board)
     normalized, _ = normalize_board(board)
     assert normalized == before
+
+
+def test_pin_naming_no_pad_is_never_dropped():
+    # The compiler refuses it (pin_without_pad); normalize must not make it
+    # disappear instead — a pin that correlates to nothing is a defect to surface.
+    board = _norm_board([{"number": "999", "x_mm": 0.0, "y_mm": 0.0}])
+    before = copy.deepcopy(board)
+    normalized, diags = normalize_board(board)
+    assert normalized == before
+    assert "restated_pin_dropped" not in _codes(diags)
 
 
 def test_input_board_is_not_mutated():
@@ -323,6 +339,69 @@ def test_recompiling_normalized_board_preserves_placed_geometry():
     assert isinstance(base, ResolutionSuccess)
     assert isinstance(round_trip, ResolutionSuccess)
     assert _placed_pad_geometry(round_trip) == _placed_pad_geometry(base)
+
+
+# ---------------------------------------------------------------------------
+# A pins entry is an OVERRIDE of the like-numbered library pad and nothing else
+# ---------------------------------------------------------------------------
+
+
+def _ir_without_source_digest(result) -> tuple:
+    """Everything the CAM emitters read, minus the one field that legitimately
+    moves when the source file changes."""
+    board = result.board
+    return (board.components, board.nets, board.traces, board.vias,
+            board.zones, board.outline)
+
+
+def test_dropping_restated_pins_moves_no_copper():
+    """THE ORACLE for "the goldens do not move": coupon_jlc1 declares a pin per
+    pad, every one of them a restatement of the locked footprint. Dropping them
+    all must leave the compiled IR — placed pads, nets, copper — byte-identical,
+    because that geometry is derived from the LIBRARY and never from the pins
+    being removed. If a pin were load-bearing for copper, the two IRs differ here.
+
+    (Same claim the gerber goldens and the IR/placement parity suites make from
+    the far end; this asserts it directly against the compiler, on a board whose
+    pins the prune actually empties.)"""
+    original = yaml.safe_load((TESTDATA / "coupon_jlc1.yaml").read_text(encoding="utf-8"))
+    normalized, diags = normalize_board(copy.deepcopy(original))
+    assert normalized is not None
+    assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags)
+    assert "restated_pin_dropped" in _codes(diags)
+    assert not any(c.get("pins") for c in normalized["components"]), \
+        "every coupon pin restates its footprint, so none should survive"
+
+    base = compile_board(original)
+    round_trip = compile_board(normalized)
+    assert isinstance(base, ResolutionSuccess) and isinstance(round_trip, ResolutionSuccess)
+    assert _ir_without_source_digest(round_trip) == _ir_without_source_digest(base)
+    # The source digest is the ONE thing that may move: the file really did change.
+    assert round_trip.board.provenance.source_digest != base.board.provenance.source_digest
+
+
+def test_authored_thru_hole_override_survives_the_round_trip():
+    """A real deviation is not a restatement. parity_corners' U3 pin 3 authors an
+    unplated 1.2mm hole where its DIP footprint has a plated 0.8mm one; after
+    normalize it is a typed override, and recompiling still fabricates the
+    AUTHORED hole. Read back off the placed pad, not off the source — the source
+    could keep the key while the compiler ignored it."""
+    original = yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
+    normalized, diags = normalize_board(copy.deepcopy(original))
+    assert normalized is not None
+    # Every pin here carries a symbolic name or a real deviation, so none is a
+    # pure restatement and the prune must take nothing.
+    assert "restated_pin_dropped" not in _codes(diags)
+    u3 = next(c for c in normalized["components"] if c["ref"] == "U3")
+    pin3 = next(p for p in u3["pins"] if str(p["number"]) == "3")
+    assert pin3["override"] == {"drill_mm": 1.2, "plated": False}
+
+    result = compile_board(normalized)
+    assert isinstance(result, ResolutionSuccess)
+    comp = next(c for c in result.board.components if c.ref == "U3")
+    pad = next(p for p in comp.placed_pads if p.source_id.startswith("pad:3:"))
+    assert pad.pad_type == "np_thru_hole"
+    assert pad.drill.size == (1.2, 1.2)
 
 
 # ---------------------------------------------------------------------------

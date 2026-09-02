@@ -580,3 +580,9 @@ test_assembly_placements_surface.gd assertions=27
 # placements; a load that lands during an in-flight round trip is not memoized
 # either.
 test_assembly_placements_memo.gd assertions=19
+# A `pins` entry is an OVERRIDE of the like-numbered land and nothing else
+# — to_board_dict drops a pin that restates the resolve, keeps
+# every deviation (moved pad, typed override, symbolic name), and leaves a
+# pads-authored or unresolved part alone — and adopt_resolved re-derives the pin
+# map from the lands, so a part written with no pins reopens with all of them.
+test_pin_override_only.gd assertions=13
