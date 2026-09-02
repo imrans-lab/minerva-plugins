@@ -6027,6 +6027,16 @@ func _set_status(text: String) -> void:
 var _load_check_lead: String = ""
 
 
+## WHY THE LAST DOCUMENT RESTORE DID NOT LOAD, held until the next one answers.
+## Written ONLY by _on_panel_load_request, which is the one load path with no
+## reply an owner ever sees: the Go codec refuses a YAML open and that refusal is
+## returned to the caller, but a refused host_owned document leaves the model on
+## the board it already had, and without this the tab shows that board and reads
+## as a successful open. A refusal is not an indeterminate, so it is held apart
+## from _load_check_lead.
+var _load_refusal_lead: String = ""
+
+
 ## The held condition every status write is prefixed with, or "" when there is
 ## none.
 ##
@@ -6036,7 +6046,8 @@ var _load_check_lead: String = ""
 ## The parts a fab cannot build are read off the LIVE board here rather than
 ## cached, so no relay can leave the lead describing a board that has moved on.
 func _status_lead() -> String:
-	return _load_check_lead \
+	return _load_refusal_lead \
+		+ _load_check_lead \
 		+ _PcbLibraryPartScript.board_lead(_data) \
 		+ _PcbOverlayFetchScript.status_lead(_overlay_leads) \
 		+ bus_status_lead(bus_refusal_text(), bus_plan_lands(),
@@ -6375,15 +6386,33 @@ func _on_panel_load_request(document: Dictionary) -> void:
 
 	# Restoring saved state — suppress the dirty relay for the whole load.
 	_restoring = true
-	_board_loaded = true
+	_load_refusal_lead = ""
+	# Read off the model's OWN answer to each load, not a leftover: the
+	# else-branch below never calls from_board_dict, so _data.load_refusals could
+	# still be describing an earlier document.
+	var refusals := PackedStringArray()
 	if doc.has("board") and doc["board"] is Dictionary:
 		# Legacy skeleton shape → migrate to canonical, then load.
 		_data.from_board_dict(_migrate_skeleton_shape(doc))
+		refusals = _data.load_refusals
 	elif doc.has("width_mm") or doc.has("components") or doc.has("name"):
 		# Canonical board dict.
 		_data.from_board_dict(doc)
-		_adopt_worker_resolve()
+		refusals = _data.load_refusals
+		if refusals.is_empty():
+			_adopt_worker_resolve()
 	# else: unknown/empty body — keep whatever board is already loaded.
+
+	# A REFUSED DOCUMENT IS NOT A LOAD. from_board_dict left the model on the
+	# board it already had, so the tab must not go on to claim one opened: the
+	# refusal is held on the status lead (it describes the document, so it has to
+	# outlast the transient messages the rest of this function writes) and
+	# _board_loaded stays false — the same answer _on_panel_restore_from_note
+	# gives the host when its own restore fails.
+	if refusals.is_empty():
+		_board_loaded = true
+	else:
+		_load_refusal_lead = "LOAD REFUSED: %s  •  " % "  •  ".join(refusals)
 
 	# Annotation persistence for this board file (restored, not edited).
 	# Idempotency marker = sidecar presence (docket annotation child 019eb47e4e7e):

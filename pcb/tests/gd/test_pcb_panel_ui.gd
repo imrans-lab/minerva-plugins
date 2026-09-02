@@ -52,6 +52,7 @@ func _init() -> void:
 	_driver.free_panel(probe)
 
 	_test_canonical_load_and_save()
+	_test_refused_document_is_visible_at_load()
 	_test_legacy_skeleton_migration()
 	_test_content_changed_dirty_relay()
 	_test_annotation_host_registration()
@@ -145,6 +146,48 @@ func _test_canonical_load_and_save() -> void:
 			"saved keys: %s" % str(saved.keys()))
 	check("save does NOT emit annotations/route_hints (dock owns them)",
 			not saved.has("annotations") and not saved.has("route_hints"))
+
+	_driver.cleanup_sidecar(board_path)
+	_driver.cleanup_board_file(board_path)
+	_driver.free_panel(panel)
+
+
+## A document a component states its value twice in is REFUSED, and the owner can
+## SEE it. The model keeps the board it already had, so without a surfaced
+## refusal the tab shows that board and reads as a clean open.
+##
+## Oracle: the status label the panel actually paints — read after the load the
+## same way the export suites read it — which must name the component and the
+## key; plus the model, which must still hold the board it had, and `_board_loaded`,
+## which must not have been raised. A clean document loaded afterwards clears the
+## lead, so a label that says "refused" unconditionally cannot pass.
+func _test_refused_document_is_visible_at_load() -> void:
+	print("\n-- a refused document is visible on the status lead --")
+	var board_dir: String = _driver.make_temp_board_dir("pcb_panel_ui")
+	var board_path := board_dir + "/two_value_homes.pcbskel"
+	_driver.cleanup_sidecar(board_path)
+
+	var panel: Variant = _driver.load_panel(PANEL_PATH)
+	var before: int = panel.get_data().get_component_count()
+
+	var two_homes: Dictionary = _canonical_board()
+	for c in two_homes["components"]:
+		if str(c.get("ref", "")) == "R1":
+			c["properties"] = {"value": "470"}
+	_driver.drive_load_merged(panel, board_path, two_homes)
+
+	var status := str(panel._status_label.text)
+	check("status names the refused component", status.find("R1") != -1, status)
+	check("status names the offending key", status.find("properties.value") != -1, status)
+	check("refused document did not load", panel.get_data().get_component_count() == before)
+	check("refused document did not raise _board_loaded", panel._board_loaded == false)
+
+	# The SAME document with one home loads, and the lead clears.
+	_driver.drive_load_merged(panel, board_path, _canonical_board())
+	check("clean document loads", panel.get_data().get_component_count() == 2)
+	check("clean load clears the refusal lead",
+			str(panel._status_label.text).find("properties.value") == -1,
+			str(panel._status_label.text))
 
 	_driver.cleanup_sidecar(board_path)
 	_driver.cleanup_board_file(board_path)
