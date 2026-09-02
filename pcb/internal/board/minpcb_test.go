@@ -45,7 +45,7 @@ func TestImportLegacyBoardZeroWarnings(t *testing.T) {
 		t.Errorf("component[0].ref: want R1, got %q", r1.Ref)
 	}
 	if r1.Value != "330" {
-		t.Errorf("R1.value: want 330 (from properties.value), got %q", r1.Value)
+		t.Errorf("R1.value: want 330 (from the top-level value key), got %q", r1.Value)
 	}
 	if r1.XMM != 10 || r1.YMM != 5 {
 		t.Errorf("R1 position: want (10,5), got (%g,%g)", r1.XMM, r1.YMM)
@@ -224,6 +224,35 @@ func TestImportMinpcbRejectsNullHole(t *testing.T) {
 		if _, _, err := ImportMinpcb(src); err == nil {
 			t.Errorf("%s:[null] must be rejected, got nil error", key)
 		}
+	}
+}
+
+// ONE HOME FOR THE COMPONENT VALUE. The legacy shape parks `properties` in Extra
+// verbatim, so a value hiding there would be re-emitted into the canonical YAML
+// beside the `value` key — the two-homes ambiguity, reintroduced by import.
+//
+// Oracle: the returned error, which must name both the component and the key, and
+// the sibling case that must still import — so a test that passes because
+// ImportMinpcb stopped working entirely is not possible.
+func TestImportMinpcbRefusesPropertiesValue(t *testing.T) {
+	src := []byte(`{"version":1,"components":{"R1":{"id":"R1","value":"330",` +
+		`"properties":{"value":"470"}}}}`)
+	_, _, err := ImportMinpcb(src)
+	if err == nil {
+		t.Fatal("properties.value must be refused, got nil error")
+	}
+	for _, want := range []string{"R1", "properties.value"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not name %q", err.Error(), want)
+		}
+	}
+
+	b, _, err := ImportMinpcb([]byte(`{"version":1,"components":{"R1":{"id":"R1","value":"330"}}}`))
+	if err != nil {
+		t.Fatalf("the one-home shape must import: %v", err)
+	}
+	if len(b.Components) != 1 || b.Components[0].Value != "330" {
+		t.Errorf("top-level value not mapped: %#v", b.Components)
 	}
 }
 

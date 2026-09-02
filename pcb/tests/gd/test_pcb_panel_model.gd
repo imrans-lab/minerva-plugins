@@ -57,6 +57,7 @@ func _init() -> void:
 		return
 
 	_test_canonical_roundtrip()
+	_test_two_value_homes_are_refused()
 	_test_canonical_extras_survive_every_codec()
 	_test_csv_import_extras_follow_identity()
 	_test_canonical_field_names()
@@ -559,7 +560,7 @@ func _build_board():
 	u1.position = Vector2(20.0, 12.0)
 	u1.rotation = 90.0
 	u1.setup_standard_pins()
-	u1.properties["value"] = "NE555"
+	u1.value = "NE555"
 	data.add_component(u1)
 
 	var r1 = _PCBComponent.new()
@@ -567,7 +568,7 @@ func _build_board():
 	r1.set_footprint_by_name("RESISTOR")
 	r1.position = Vector2(34.0, 6.0)
 	r1.setup_standard_pins()
-	r1.properties["value"] = "10k"
+	r1.value = "10k"
 	data.add_component(r1)
 
 	# Net (auto-created by connect_pin_to_net) with two pins.
@@ -614,8 +615,51 @@ func _test_canonical_roundtrip() -> void:
 	check("reconstructed model keeps the net", b.has_net("VCC"))
 	check("reconstructed model keeps the trace", b.get_trace_count() == 1)
 	check("reconstructed component value survives (U1=NE555)",
-			b.get_component("U1") != null and b.get_component("U1").properties.get("value", "") == "NE555")
+			b.get_component("U1") != null and b.get_component("U1").value == "NE555")
 	check("reconstructed via count preserved", b.vias.size() == 1)
+
+
+## The component value has ONE home. A board dict that states it twice must not
+## load at all — picking a home is how a hand edit to `value` disappears on the
+## next save. The oracle is the model itself: after the refused load it still
+## holds the board it had, and the refusal names both the ref and the key.
+func _test_two_value_homes_are_refused() -> void:
+	print("\n-- properties.value is refused, whole document, by name --")
+	var a = _build_board()
+	var d: Dictionary = a.to_board_dict()
+	check("to_board_dict never writes properties.value",
+			not ((d["components"][0] as Dictionary).get("properties", {}) as Dictionary).has("value"))
+
+	# Author the second home by hand, with text that DISAGREES with `value` —
+	# the shape whose two readings are distinguishable.
+	for c in d["components"]:
+		if str(c.get("ref", "")) == "U1":
+			c["value"] = "NE555"
+			c["properties"] = {"value": "LM317"}
+
+	var b = _PCBData.new()
+	b.from_board_dict({"name": "Prior", "width_mm": 11.0, "height_mm": 12.0,
+			"components": [{"ref": "Z9", "footprint": "RESISTOR",
+				"x_mm": 1.0, "y_mm": 2.0, "value": "1k"}]})
+	check("prior board loaded", b.get_component("Z9") != null)
+
+	b.from_board_dict(d)
+	check("two-home load is refused", not b.load_refusals.is_empty())
+	var refusal: String = b.load_refusals[0] if not b.load_refusals.is_empty() else ""
+	check("refusal names the component ref", refusal.find("U1") != -1, refusal)
+	check("refusal names the offending key", refusal.find("properties.value") != -1, refusal)
+	check("refused load left the previous board untouched",
+			b.get_component("Z9") != null and b.get_component("U1") == null
+			and b.board_name == "Prior")
+
+	# The same document with ONE home loads, and round-trips the value.
+	for c in d["components"]:
+		if str(c.get("ref", "")) == "U1":
+			c.erase("properties")
+	b.from_board_dict(d)
+	check("one-home load succeeds", b.load_refusals.is_empty())
+	check("value reaches the typed field",
+			b.get_component("U1") != null and b.get_component("U1").value == "NE555")
 
 
 func _test_canonical_field_names() -> void:

@@ -24,7 +24,7 @@
       ],
       "has_pad_geometry": true,
       "bbox_center_offset": {"x": 1.27, "y": 0.0},
-      "properties": {"value": "330"},
+      "value": "330",
       "layer": "top",
       "color": {"r": 0.2, "g": 0.6, "b": 0.3, "a": 1.0},
       "label_visible": true,
@@ -39,7 +39,7 @@
         "1": {"x": 0.0, "y": 0.0},
         "8": {"x": 7.62, "y": 0.0}
       },
-      "properties": {"value": "NE555"},
+      "value": "NE555",
       "layer": "top",
       "locked": false
     }

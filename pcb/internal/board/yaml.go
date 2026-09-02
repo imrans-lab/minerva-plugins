@@ -185,6 +185,19 @@ func probeNodeTree(doc *yaml.Node) error {
 		return nil
 	}
 	for _, comp := range comps.Content {
+		// ONE HOME FOR THE COMPONENT VALUE. `properties.value` is a second
+		// spelling of the top-level `value` key, and a document carrying both
+		// loads as whichever home the reader happens to consult first — then the
+		// next save writes that choice over the other, losing a hand edit with
+		// no warning. Refuse the document by name rather than pick a winner.
+		if props := nodeMapValue(comp, "properties"); props != nil &&
+			props.Kind == yaml.MappingNode && nodeMapValue(props, "value") != nil {
+			return fmt.Errorf("board: unmarshal yaml: invalid_board_structure: "+
+				"component %q: properties.value is not a home for the component "+
+				"value; delete it and author the top-level \"value\" key",
+				componentRefOf(comp))
+		}
+
 		pins := nodeMapValue(comp, "pins")
 		if pins == nil || pins.Kind != yaml.SequenceNode {
 			continue
@@ -234,6 +247,16 @@ func resolveAlias(n *yaml.Node) *yaml.Node {
 		n = n.Alias
 	}
 	return n
+}
+
+// componentRefOf reports a component node's designator for an error message, or
+// "?" when the node carries none — the probe runs before the typed decode, so a
+// malformed component still has to be nameable.
+func componentRefOf(comp *yaml.Node) string {
+	if n := nodeMapValue(comp, "ref"); n != nil && n.Kind == yaml.ScalarNode {
+		return n.Value
+	}
+	return "?"
 }
 
 // nodeMapValue returns the alias-resolved value node for key in a mapping node,

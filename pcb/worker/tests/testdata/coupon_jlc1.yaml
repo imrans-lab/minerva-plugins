@@ -29,8 +29,6 @@ components:
           x_mm: 0.949999988079071
           y_mm: 0
       mpn: TEST-WEIRDPADS-2P
-      properties:
-        value: WEIRD-2P
     - ref: DAM1
       footprint: Minerva_Fixture:DAM_MinWeb_2P
       x_mm: 9
@@ -101,8 +99,6 @@ components:
           x_mm: 0
           y_mm: 2.53999996185303
       mpn: TEST-HDR-1X02
-      properties:
-        value: HDR-1x02
     - ref: LOGO1
       footprint: Minerva_Fixture:LOGO_Owl_TestCoupon
       x_mm: 17.5

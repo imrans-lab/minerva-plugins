@@ -16,6 +16,36 @@ from __future__ import annotations
 
 import math
 
+def component_value_refusal(board) -> "str | None":
+    """Why a board cannot be loaded because a component states its value twice,
+    or ``None`` when none does.
+
+    ONE HOME FOR THE COMPONENT VALUE: the top-level ``value`` key. A second
+    spelling under ``properties`` makes the loaded value depend on which home a
+    reader consults, and the next save writes that reader's choice over the
+    other home — losing a hand edit silently. Both Python boundaries refuse on
+    it: the file parse (:mod:`board_model`) raises this message, and
+    :func:`board_validate.validate_board_v2` returns the shared
+    ``invalid_board_structure`` code that Go's ``probeNodeTree`` returns for the
+    same document.
+    """
+    if not isinstance(board, dict):
+        return None
+    components = board.get("components")
+    if not isinstance(components, list):
+        return None
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        props = comp.get("properties")
+        if isinstance(props, dict) and "value" in props:
+            ref = comp.get("ref") or comp.get("id") or "?"
+            return (f"component {ref!r}: properties.value is not a home for the "
+                    f"component value; delete it and author the top-level "
+                    f"'value' key")
+    return None
+
+
 _MINTED_HEX_LEN = 32  # 128-bit mint → 32 lowercase hex chars
 
 

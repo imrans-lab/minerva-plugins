@@ -31,7 +31,8 @@ from __future__ import annotations
 # board_schema module so the two Python paths cannot drift (the minted-id
 # definition and the override field set have exactly one source of truth) — and
 # so this validator no longer depends on the compiler (finding 019f88bac172).
-from .board_schema import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
+from .board_schema import (_OVERRIDE_NUM_KEYS, _is_minted_id, _is_number,
+                           component_value_refusal)
 
 # The canonical inner-layer name parser is the SAME one the canon<->KiCad mapping
 # uses (agent_router.layers is the lower, standalone package pcb_worker is allowed
@@ -188,6 +189,12 @@ def validate_board_v2(board: dict) -> list[str]:
         # Appending rather than inserting is what keeps every existing board's
         # first-violation code where it was.
         _check_entity_ids("graphic", [lists["board_graphics"]], codes)
+
+    # ONE HOME FOR THE COMPONENT VALUE, before the per-pin checks — the same
+    # position Go's probeNodeTree rejects it from, so a board violating both
+    # reports the same first code on either side.
+    if component_value_refusal(board) is not None:
+        codes.append("invalid_board_structure")
 
     for comp in lists["components"]:
         if not isinstance(comp, dict):

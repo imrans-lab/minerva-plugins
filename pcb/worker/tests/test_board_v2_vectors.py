@@ -15,11 +15,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pcb_worker.board_model import BoardParseError, _parse_board_text
 from pcb_worker.board_validate import validate_board_v2
 
 # pcb/worker/tests/ -> parents[2] == pcb/, so pcb/spec/vectors.
 VECTORS = Path(__file__).resolve().parents[2] / "spec" / "vectors"
-_MIN_VECTORS = 45  # committed floor — keep in lockstep with vectors_test.go minVectors
+_MIN_VECTORS = 46  # committed floor — keep in lockstep with vectors_test.go minVectors
 
 
 def _vector_names() -> list[str]:
@@ -37,6 +38,28 @@ def test_shared_validation_vector(name):
     assert got_valid == expect["valid"], f"{name}: expected valid={expect['valid']}, codes={codes}"
     if not expect["valid"] and expect.get("code"):
         assert expect["code"] in codes, f"{name}: expected code {expect['code']!r} in {codes}"
+
+
+# The component value has ONE home. The shared code validator above reports the
+# vector's `invalid_board_structure`, but a code cannot tell an author WHICH
+# component and WHICH key to delete — the file boundary (board_model) does, and
+# that message is what an operator actually sees. Both halves are asserted off
+# the SAME committed vector, so they cannot drift apart from each other or from
+# the Go probe.
+def test_two_value_homes_refused_by_name_at_the_file_boundary():
+    source = (VECTORS / "460-v1-component-properties-value" / "input.yaml").read_text(
+        encoding="utf-8")
+    with pytest.raises(BoardParseError) as exc:
+        _parse_board_text(source)
+    message = str(exc.value)
+    assert "R1" in message, message
+    assert "properties.value" in message, message
+
+    # The same document with ONE home parses — so a pass caused by the parser
+    # refusing everything is not possible.
+    one_home = source.replace("    properties:\n      value: \"470\"\n", "")
+    assert "properties" not in one_home
+    assert _parse_board_text(one_home)["components"][0]["value"] == "330"
 
 
 def test_committed_vector_floor():

@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from .board_schema import component_value_refusal
+
 # Required top-level fields per the canonical contract. traces / vias / grid_mm /
 # layers / origin / design_rules are optional (board.go marks them omitempty).
 REQUIRED_TOP = ("version", "name", "width_mm", "height_mm", "components", "nets")
@@ -159,6 +161,13 @@ def _parse_board_text(source: str) -> dict:
         raise BoardParseError(
             f"board YAML must be a mapping at the top level, got {type(data).__name__}"
         )
+    # Refused BY NAME here, not merged or preferred: see
+    # board_schema.component_value_refusal. The shared code validator returns
+    # invalid_board_structure for the same document, but only this boundary can
+    # tell the author which component and which key to delete.
+    refusal = component_value_refusal(data)
+    if refusal is not None:
+        raise BoardParseError(refusal)
     return data
 
 

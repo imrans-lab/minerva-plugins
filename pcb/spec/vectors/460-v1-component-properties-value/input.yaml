@@ -1,0 +1,18 @@
+# The component value has exactly ONE home: the top-level `value` key. This
+# board authors it twice with DIFFERENT text, which is the shape that loses a
+# hand edit: whichever home the reader consults wins, and the next save writes
+# that winner over the other.
+version: 1
+name: TwoValueHomes
+width_mm: 20
+height_mm: 20
+components:
+  - ref: R1
+    footprint: R_0805
+    value: "330"
+    x_mm: 1
+    y_mm: 1
+    rotation_deg: 0
+    layer: top
+    properties:
+      value: "470"

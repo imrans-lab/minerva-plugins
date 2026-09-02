@@ -451,8 +451,8 @@ static func _get_components(host, _args: Dictionary) -> Dictionary:
 			"layer": comp.layer,
 			"pins": comp.pins.keys(),
 		}
-		if comp.properties.has("value"):
-			comp_info["value"] = comp.properties["value"]
+		if not comp.value.is_empty():
+			comp_info["value"] = comp.value
 		# Group membership (A4), ADDITIVE and emitted only for a grouped
 		# component — a group-free board's reply is unchanged key for key. An
 		# agent has no other way to discover that moving this part will move
@@ -7967,8 +7967,7 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 			entry["x"] = _mm(comp.position.x)
 			entry["y"] = _mm(comp.position.y)
 			entry["rotation"] = comp.rotation
-			entry["value"] = str(comp.properties.get("value", "")) \
-				if "properties" in comp else ""
+			entry["value"] = comp.value
 		entries.append(entry)
 
 	for trace_id in state.get("traces", []):

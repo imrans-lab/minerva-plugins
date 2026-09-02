@@ -159,7 +159,7 @@ func _board():
 	u1.position = U1_POS
 	u1.rotation = U1_ROTATION
 	u1.layer = U1_LAYER
-	u1.properties["value"] = U1_VALUE
+	u1.value = U1_VALUE
 	u1.pins = {"1": Vector2(-2.0, 0.0), "2": Vector2(2.0, 0.0)}
 	d.add_component(u1)
 

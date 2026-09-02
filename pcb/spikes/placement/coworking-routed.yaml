@@ -33,8 +33,6 @@ components:
           pad_width_mm: 1
           pad_height_mm: 1.45
       footprint_resolved: true
-      properties:
-        value: 100n
       refdes_graphics:
         - kind: poly
           layer: F.SilkS
@@ -115,8 +113,6 @@ components:
           pad_width_mm: 1
           pad_height_mm: 1.2
       footprint_resolved: true
-      properties:
-        value: 1N4148W
       refdes_graphics:
         - kind: poly
           layer: F.SilkS
@@ -191,8 +187,6 @@ components:
           pad_width_mm: 1
           pad_height_mm: 1.45
       footprint_resolved: true
-      properties:
-        value: 1k
       refdes_graphics:
         - kind: poly
           layer: F.SilkS
@@ -271,8 +265,6 @@ components:
           pad_width_mm: 1
           pad_height_mm: 1.45
       footprint_resolved: true
-      properties:
-        value: 10k
       refdes_graphics:
         - kind: poly
           layer: F.SilkS

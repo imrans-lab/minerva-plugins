@@ -134,7 +134,7 @@ static func build(host, data, args: Dictionary) -> Dictionary:
 	else:
 		_apply_sketch(comp, footprint, args)
 	if args.has("value"):
-		comp.properties["value"] = args.get("value")
+		comp.value = str(args.get("value"))
 
 	return {"ok": true, "component": comp, "by_ref": by_ref,
 		"geometry": geometry, "ignored": ignored}

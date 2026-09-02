@@ -193,7 +193,7 @@ func _run_queries_and_mutations() -> void:
 	print("\n-- add_component (RESISTOR with value) --")
 	var addr := await h("minerva_pcb_add_component", _args({"id": "R7", "footprint": "RESISTOR", "x": 40.0, "y": 30.0, "value": "10K"}))
 	check("add R7 ok", addr.get("success", false))
-	check_eq("R7 value stored", data.get_component("R7").properties.get("value", ""), "10K")
+	check_eq("R7 value stored", data.get_component("R7").value, "10K")
 
 	print("\n-- add_component invalid footprint --")
 	var bad := await h("minerva_pcb_add_component", _args({"footprint": "BOGUS", "x": 1.0, "y": 1.0}))

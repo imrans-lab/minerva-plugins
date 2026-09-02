@@ -42,7 +42,7 @@ var knownRootFields = map[string]bool{
 // outside this set are still preserved in Component.Extra but also warned.
 var knownComponentFields = map[string]bool{
 	"id": true, "footprint": true, "footprint_id": true, "position": true,
-	"rotation": true, "layer": true, "pins": true, "pads": true,
+	"rotation": true, "layer": true, "pins": true, "pads": true, "value": true,
 	"properties": true, "width": true, "height": true, "local_bounds": true,
 	"has_pad_geometry": true, "bbox_center_offset": true, "color": true,
 	"label_visible": true, "locked": true,
@@ -281,12 +281,19 @@ func importComponents(raw json.RawMessage) ([]Component, []string, error) {
 		getString(obj, "layer", &c.Layer)
 		getPoint(obj, "position", &c.XMM, &c.YMM)
 
-		// value lives under properties.value in the legacy shape
+		getString(obj, "value", &c.Value)
+
+		// ONE HOME FOR THE COMPONENT VALUE, the same rule the YAML boundary
+		// enforces. `properties` is parked in Extra verbatim, so a value hiding
+		// there would be re-emitted into the canonical document beside the
+		// `value` key and reintroduce the two-homes ambiguity by import.
 		if pv, ok := obj["properties"]; ok {
 			var props map[string]interface{}
 			if json.Unmarshal(pv, &props) == nil {
-				if val, ok := props["value"].(string); ok {
-					c.Value = val
+				if _, dup := props["value"]; dup {
+					return nil, nil, fmt.Errorf("board: component %q: properties.value "+
+						"is not a home for the component value; delete it and author "+
+						"the top-level \"value\" key", id)
 				}
 			}
 		}
@@ -303,7 +310,7 @@ func importComponents(raw json.RawMessage) ([]Component, []string, error) {
 		// preserve every other component field in Extra; warn on the unknown.
 		for k, v := range obj {
 			if k == "id" || k == "footprint" || k == "rotation" ||
-				k == "layer" || k == "position" || k == "pins" {
+				k == "layer" || k == "position" || k == "pins" || k == "value" {
 				continue // already mapped
 			}
 			if c.Extra == nil {

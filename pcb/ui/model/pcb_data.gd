@@ -68,6 +68,10 @@ signal net_changed(net_name: String)
 signal trace_changed(trace_id: String)
 signal structure_changed()
 
+## Why the most recent from_board_dict() call refused the document, empty when it
+## loaded. Non-empty means this model still holds the board it had before.
+var load_refusals: PackedStringArray = PackedStringArray()
+
 ## Board properties
 var board_width: float = 100.0   # mm
 var board_height: float = 100.0  # mm
@@ -3490,7 +3494,7 @@ func to_csv() -> String:
 
 	for id in components:
 		var comp = components[id]
-		var value: String = comp.properties.get("value", "")
+		var value: String = comp.value
 		lines.append("%s,%s,%.2f,%.2f,%.0f,%s,%s" % [
 			comp.id,
 			comp.get_canonical_footprint_name(),
@@ -3574,7 +3578,7 @@ func from_csv(csv_text: String) -> Dictionary:
 		var footprint_changed: bool = prior != null and has_authored_fp \
 				and authored_fp != prior.get_canonical_footprint_name()
 		var value_changed: bool = prior != null and has_authored_value \
-				and authored_value != str(prior.properties.get("value", ""))
+				and authored_value != prior.value
 
 		# Preserve the full component—not just its extra dictionaries—while the
 		# footprint is unchanged. setup_standard_pins() cannot reconstruct custom
@@ -3603,7 +3607,7 @@ func from_csv(csv_text: String) -> Dictionary:
 		if layer_idx >= 0 and fields.size() > layer_idx:
 			component.layer = fields[layer_idx]
 		if has_authored_value:
-			component.properties["value"] = authored_value
+			component.value = authored_value
 
 		# CSV IMPORT OVERWRITES BY ID, so a component the board already had
 		# loses anything outside the CSV's columns — including the canonical
@@ -3792,6 +3796,21 @@ func to_saved_board_dict() -> Dictionary:
 ## pcb_component.load_from_board_dict. Only a caller whose dict came straight
 ## out of a resolve against THIS machine's library may pass true.
 func from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
+	# REFUSE BEFORE MUTATING. Every component dict is checked first, so a
+	# document that states one component's value twice leaves this model holding
+	# the board it already had rather than a half-loaded one. See
+	# PCBComponent.board_dict_refusal.
+	load_refusals = PackedStringArray()
+	for cd in data.get("components", []):
+		if cd is Dictionary:
+			var refusal: String = PCBComponentScript.board_dict_refusal(cd)
+			if not refusal.is_empty():
+				load_refusals.append(refusal)
+	if not load_refusals.is_empty():
+		for message in load_refusals:
+			push_error("[PCBData] board refused: %s" % message)
+		return
+
 	board_name = str(data.get("name", "Untitled"))
 	board_width = float(data.get("width_mm", 100.0))
 	board_height = float(data.get("height_mm", 100.0))

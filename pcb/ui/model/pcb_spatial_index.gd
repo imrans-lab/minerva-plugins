@@ -266,7 +266,7 @@ func describe_component_context(component_id: String) -> Dictionary:
 
 	var result := {
 		"id": component_id,
-		"value": comp.properties.get("value", ""),
+		"value": comp.value,
 		"position": {"x": comp.position.x, "y": comp.position.y},
 		"rotation": comp.rotation,
 		# The authored identity, not the CUSTOM bucket the panel draws a
@@ -278,8 +278,6 @@ func describe_component_context(component_id: String) -> Dictionary:
 		"region": region,
 		"pins": comp.pins.keys()
 	}
-	if comp.properties.has("value"):
-		result["value"] = comp.properties["value"]
 	if not comp.properties.is_empty():
 		result["properties"] = comp.properties
 	return result

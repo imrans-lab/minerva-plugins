@@ -134,7 +134,7 @@ func _test_canonical_load_and_save() -> void:
 				and data.get_component("U1").rotation == 90.0)
 		check("R1 value survived (10k)",
 				data.get_component("R1") != null
-				and data.get_component("R1").properties.get("value", "") == "10k")
+				and data.get_component("R1").value == "10k")
 
 	var saved: Dictionary = _driver.drive_save(panel)
 	check("save returns canonical board dict (width_mm/height_mm/grid_mm)",

@@ -14,7 +14,7 @@
       "rotation": 0.0,
       "layer": "top",
       "pins": {"1": {"x": 0.0, "y": 0.0}, "2": {"x": 2.54, "y": 0.0}},
-      "properties": {"value": "100nF"},
+      "value": "100nF",
       "solder_paste_ratio": 0.9
     }
   },

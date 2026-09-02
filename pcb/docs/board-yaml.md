@@ -39,7 +39,8 @@ design_rules:                  # board-wide manufacturing constraints
 components:
   - ref: U1                    # reference designator
     footprint: Package_DIP:DIP-6_W7.62mm_Socket   # KiCAD footprint id, or a seed alias
-    value: NE555               # optional
+    value: NE555               # optional; the value's ONE home — see
+                               # "The component value has one home" below
     x_mm: 20                   # the FOOTPRINT'S OWN origin — see "Where x_mm /
     y_mm: 12                   # y_mm actually put a footprint" below. NOT the
                                # body centre, and not always pin 1.
@@ -94,6 +95,27 @@ annotations:                   # OPAQUE passthrough (see below)
   - {id: ann-1, kind: note, text: decoupling near U1}
 route_hints: []                # OPAQUE passthrough (see below)
 ```
+
+### The component value has one home
+
+A component's value — what the part IS (`10k`, `NE555`) — lives in the top-level
+`value` key and nowhere else. A document that also carries `properties.value` is
+**REFUSED at load**, naming the component and the key. It is not migrated, not
+merged, and not silently preferred.
+
+The refusal exists because the two homes are indistinguishable to an author and
+decisive to a reader: a board with `value: 330` and `properties: {value: 470}`
+loaded as `470`, and the next save wrote `470` back into `value`, so a hand edit
+disappeared with nothing printed. Every boundary now refuses instead — Go's
+`UnmarshalYAML` (`internal/board/yaml.go`) and `ImportMinpcb`, the worker's file
+parse (`board_model.load_board`) and shared code validator
+(`board_validate.validate_board_v2`, `invalid_board_structure`), and the panel
+model's `PCBData.from_board_dict`, which refuses the whole document and keeps the
+board it already had.
+
+This is NOT the rule the four identity fields follow. `manufacturer`, `mpn`,
+`package` and `comment` genuinely have three authoring homes with a defined
+precedence — see below.
 
 ### Fields the Go contract carries but the v1 compiler refuses
 
@@ -546,6 +568,7 @@ level of the block, including **inside** a placement's `offset_mm` and
 `manufacturer`, `mpn`, `package` and `comment` each have three authoring homes,
 read in this order: the `assembly` block, then a top-level key on the component,
 then the component's `properties` map. The first home that has the key decides.
+`value` does **not** follow this rule — see "The component value has one home".
 
 **Quote them.** A bare `0603` is not text in YAML. It resolves as a number
 before any of this is read — `0603` reaches the compiler as `387` (leading
@@ -1285,7 +1308,7 @@ importer (`board.ImportMinpcb`) applies this and returns a warnings list.
 | component `id`                              | `ref`                           | reference designator |
 | component `position.{x,y}`                  | `x_mm` / `y_mm`                 | the footprint's own origin — see "Where x_mm / y_mm actually put a footprint" |
 | component `rotation`                        | `rotation_deg`                  | |
-| component `properties.value`               | `value`                         | |
+| component `value`                           | `value`                         | a legacy document authoring it under `properties` instead is REFUSED — see "The component value has one home" |
 | component `pins` (`name`→`{x,y}` map)       | `pins` (list of `{number,x_mm,y_mm}`) | key → `number` |
 | component render fields (`pads`, `color`, `local_bounds`, `width`, `height`, `has_pad_geometry`, `bbox_center_offset`, `label_visible`, `locked`, `footprint_id`) | component `Extra` (inline) | carried losslessly into YAML, no warning. `pads` is **not** render-only to the compiler — see "Geometry authority: full vs partial" |
 | `nets` (`name`→object map)                  | `nets` (list, sorted by name)   | |

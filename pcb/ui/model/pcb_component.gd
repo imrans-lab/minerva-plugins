@@ -83,7 +83,13 @@ var canonical_extra: Dictionary = {}
 ## load_from_board_dict.
 var pin_extra: Dictionary = {}
 
-## Additional properties (value, package, manufacturer, etc.)
+## The component's value — what the part IS ("10k", "NE555"). ONE HOME: the
+## canonical `value` key. It is deliberately not a `properties` entry; two homes
+## made the loaded value depend on which one a reader consulted, and the next
+## save wrote that choice over the other.
+var value: String = ""
+
+## Additional properties (package, manufacturer, group_id, etc.)
 var properties: Dictionary = {}
 
 ## Layer: "top" or "bottom"
@@ -1199,6 +1205,7 @@ func duplicate_component():
 	copy.width = width
 	copy.height = height
 	copy.pins = pins.duplicate(true)
+	copy.value = value
 	copy.properties = properties.duplicate(true)
 	copy.layer = layer
 	copy.color = color
@@ -1464,6 +1471,7 @@ func to_dict() -> Dictionary:
 		# back to derived on the first undo.
 		"refdes_placement": refdes_placement.duplicate(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
+		"value": value,
 		"properties": properties.duplicate(),
 		"layer": layer,
 		"color": {"r": color.r, "g": color.g, "b": color.b, "a": color.a},
@@ -1542,6 +1550,7 @@ func load_from_dict(data: Dictionary) -> void:
 	if bounds_data.is_empty() and not data.has("width") and not data.has("height"):
 		_derive_bounds_from_graphics()
 
+	value = str(data.get("value", ""))
 	properties = data.get("properties", {}).duplicate()
 	layer = data.get("layer", "top")
 
@@ -1588,9 +1597,8 @@ static func from_dict(data: Dictionary):
 # Canonical fields: ref / footprint / value / x_mm / y_mm / rotation_deg / layer
 # / pins:[{number,x_mm,y_mm}]. Render detail is emitted as canonical "Extra"
 # (sibling keys) — the exact set minpcb.go parks in Component.Extra so YAML
-# round-trips it losslessly. Value is dual-written (canonical `value` + inside
-# `properties`) mirroring minpcb.go, which extracts properties.value → Value AND
-# still parks properties.
+# round-trips it losslessly. The value is written ONCE, to the canonical `value`
+# key; `properties` never carries one (see the `value` field).
 
 ## Serialize to a canonical board-contract component dict.
 func to_board_dict() -> Dictionary:
@@ -1602,9 +1610,8 @@ func to_board_dict() -> Dictionary:
 		"rotation_deg": rotation,
 		"layer": layer,
 	}
-	var val := str(properties.get("value", ""))
-	if not val.is_empty():
-		d["value"] = val
+	if not value.is_empty():
+		d["value"] = value
 
 	# Re-emit the preserved canonical extras (assembly, mpn, ...) — knowns win
 	# on any collision, so a stale extra can never clobber a modeled field.
@@ -1769,10 +1776,9 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 		_derive_bounds_from_graphics()
 
 	properties = (data.get("properties", {}) as Dictionary).duplicate()
-	# `value` is derivative of properties.value (minpcb dual-write). Only adopt the
-	# canonical scalar when properties itself did not carry it.
-	if not properties.has("value") and data.has("value"):
-		properties["value"] = str(data["value"])
+	# A `properties.value` never reaches here — board_dict_refusal() rejects the
+	# whole document at PCBData.from_board_dict before any component is built.
+	value = str(data.get("value", ""))
 
 	var color_data: Dictionary = data.get("color", {})
 	if color_data.size() > 0:
@@ -1810,6 +1816,21 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 	_refresh_refdes_graphics()
 
 
+## Why a canonical component dict cannot be loaded, or "" when it can.
+##
+## Checked BEFORE any component is built (PCBData.from_board_dict), because the
+## only answer that keeps the board honest is to refuse the whole document: a
+## component carrying `properties.value` states the value twice, and a load that
+## picked one home would write that pick over the other on the next save.
+static func board_dict_refusal(data: Dictionary) -> String:
+	var props: Dictionary = data.get("properties", {}) if data.get("properties") is Dictionary else {}
+	if props.has("value"):
+		return ("component \"%s\": properties.value is not a home for the component"
+			+ " value; delete it and author the top-level \"value\" key") \
+			% str(data.get("ref", data.get("id", "?")))
+	return ""
+
+
 ## Create from a canonical board-contract component dict (static constructor).
 static func from_board_dict(data: Dictionary, resolve_is_live: bool = false):
 	var component := _Self.new()
@@ -1820,6 +1841,6 @@ static func from_board_dict(data: Dictionary, resolve_is_live: bool = false):
 ## Get a human-readable description
 func get_description() -> String:
 	var value_str := ""
-	if properties.has("value"):
-		value_str = " (%s)" % properties["value"]
+	if not value.is_empty():
+		value_str = " (%s)" % value
 	return "%s%s - %s on %s layer" % [id, value_str, get_footprint_name(), layer]
