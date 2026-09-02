@@ -27,6 +27,14 @@ one:
   numbers, which a profile stating another coordinate unit would misread.
 * :data:`CODE_PLACEMENTS_TOO_CLOSE` — two designators in one place; the ordinary
   cause is a synthetic expansion whose authored ``offset_mm`` is missing or zero.
+* :data:`CODE_ANCHOR_OFF_LANDS` — a placement whose AUTHORED ``anchor_mm``
+  resolves clear of the copper the part is soldered to. The anchor is stated in
+  the placement's own local frame and rides the placement's transform, so a
+  child's ``rotation_deg`` turns it: an expansion child carries no copper of
+  its own — the parent draws all of it — so DRC, connectivity and board check
+  stay clean while the coordinate a nozzle drives to walks off the part. The
+  CPL is the only artifact that shows it, which means the assembly house is
+  the one who finds it.
 * :data:`CODE_EMPTY_EXPANSION` — a component that authored ``placements`` and
   named none, which resolves back to one implicit part under its own ref.
 * :data:`CODE_PASTE_UNDECIDED` — a NOT-populated part whose lands still take
@@ -72,8 +80,9 @@ from typing import Protocol
 
 from .assembly_spec import (PASTE_AUTO, PASTE_EXCLUDE, PASTE_INCLUDE,
                             ResolvedAssembly)
-from .resolved_board import (ANCHOR_BASIS_ORIGIN, LayerRole, ResolvedBoard,
-                             ResolvedComponent)
+from .refdes_anchor import LocalExtent, placed_land_extent
+from .resolved_board import (ANCHOR_BASIS_AUTHORED, ANCHOR_BASIS_ORIGIN,
+                             LayerRole, ResolvedBoard, ResolvedComponent)
 
 # --- refusal codes ---------------------------------------------------------
 
@@ -82,6 +91,7 @@ CODE_DUPLICATE_DESIGNATOR = "assembly_duplicate_designator"
 CODE_ROW_REF_LIMIT = "assembly_row_ref_limit"
 CODE_NON_METRIC_COORDINATES = "assembly_non_metric_coordinates"
 CODE_PLACEMENTS_TOO_CLOSE = "assembly_placements_too_close"
+CODE_ANCHOR_OFF_LANDS = "assembly_anchor_off_lands"
 CODE_EMPTY_EXPANSION = "assembly_empty_expansion"
 CODE_PASTE_UNDECIDED = "assembly_paste_undecided"
 
@@ -100,6 +110,12 @@ DEFAULT_MIN_DESIGNATOR_SEPARATION_MM = 0.2
 
 #: The only coordinate unit the CPL renderer writes.
 METRIC_COORDINATE_UNIT = "mm"
+
+#: Slack on the lands box before an anchor counts as OFF the part. One
+#: nanometre: far below any fabrication grid, and there only so an anchor
+#: authored exactly on a land's edge cannot be refused by the float noise of
+#: composing it through a rotation.
+ANCHOR_ON_LANDS_TOLERANCE_MM = 1e-6
 
 
 class AssemblyGateError(ValueError):
@@ -210,6 +226,87 @@ def check_components(board: ResolvedBoard) -> None:
                     + ", ".join(repr(name) for name in others))
     raise AssemblyGateError(order[0], message, component=ref, field=field,
                             refs=[name for name, _, _ in entries])
+
+
+def _distance_outside(point: tuple[float, float], box: LocalExtent) -> float:
+    """How far ``point`` lies outside ``box``, 0.0 when it is inside or on the
+    edge. The ordinary point-to-rectangle distance: the axes are independent, so
+    the overshoot on each is taken on its own and the two combine by Pythagoras
+    — which gives the true distance for a corner miss as well as an edge one."""
+    x, y = point
+    dx = max(box.min_x - x, 0.0, x - box.max_x)
+    dy = max(box.min_y - y, 0.0, y - box.max_y)
+    return math.hypot(dx, dy)
+
+
+def check_anchor_on_lands(board: ResolvedBoard) -> None:
+    """Every AUTHORED anchor must resolve onto copper the part is soldered to.
+
+    THE BOX IS THE OWNING COMPONENT'S PLACED LANDS, which for a synthetic
+    expansion is an APPROXIMATION: the parent draws all the copper and the IR
+    does not attribute a pad to a child, so each child is tested against the
+    box of every pad the parent placed. The child's own lands are a subset of
+    it, so the box is generous — it can miss a child anchored onto a SIBLING's
+    strip, and it cannot produce a miss for a child anchored onto its own.
+
+    TWO CONDITIONS, and both are about what the gate can honestly prove:
+
+    * the anchor is :data:`resolved_board.ANCHOR_BASIS_AUTHORED`. A MEASURED
+      anchor is the centre of a box taken off the same drawing the pads come
+      from, and a part's body legitimately overhangs its lands — a horizontal
+      JST housing sits clear past its surface-mount tabs — so a measured anchor
+      outside the lands is a fact about the footprint, not a mistake. An
+      authored one is a number somebody wrote in the placement's own frame,
+      which the placement's rotation then turns; nothing ties it to the copper.
+    * the placement's ORIGIN is inside the box. That is the approximation's own
+      validity test: the parent's lands only stand in for the child's while the
+      child actually sits on them. A child whose origin is off the parent's
+      copper entirely is a part the parent's drawing does not cover, and the
+      box says nothing about where ITS lands are — so there is no oracle and
+      the gate must not refuse.
+
+    Collected per component before raising, so an expansion whose children all
+    swung off together names every one of them in ``refs`` rather than sending
+    the author back for the next sibling."""
+    for component in board.components:
+        assembly = component.assembly
+        # Only a POPULATED part gets a CPL row, and the anchor is only dangerous
+        # as a coordinate a machine drives to.
+        if assembly is None or not assembly.populate:
+            continue
+        box = placed_land_extent(component.placed_pads)
+        if box is None:
+            continue
+        faults: list[tuple[object, float]] = []
+        for item in component.physical_placements:
+            if item.anchor_basis != ANCHOR_BASIS_AUTHORED:
+                continue
+            if _distance_outside(item.origin, box) > ANCHOR_ON_LANDS_TOLERANCE_MM:
+                continue
+            distance = _distance_outside(item.anchor, box)
+            if distance > ANCHOR_ON_LANDS_TOLERANCE_MM:
+                faults.append((item, distance))
+        if not faults:
+            continue
+        item, distance = faults[0]
+        others = [other.ref for other, _ in faults[1:]]
+        message = (
+            f"placement {item.ref!r} of component {component.ref!r} anchors at "
+            f"({item.anchor[0]:.4f}, {item.anchor[1]:.4f}) mm, {distance:.4f} mm "
+            f"outside the lands of the part it is placed on — the box "
+            f"({box.min_x:.4f}, {box.min_y:.4f}) to ({box.max_x:.4f}, {box.max_y:.4f}) mm. "
+            f"The authored anchor_mm is stated in the placement's own frame and is "
+            f"turned by the placement's rotation_deg, so the coordinate a nozzle drives "
+            f"to has walked off the copper while the copper itself never moved — no DRC, "
+            f"connectivity or board check can see it. Re-state anchor_mm in the frame the "
+            f"placement's rotation_deg leaves it in, or correct that rotation")
+        if others:
+            message += (f". The same component's other placement(s) are off too: "
+                        + ", ".join(repr(name) for name in others))
+        raise AssemblyGateError(
+            CODE_ANCHOR_OFF_LANDS, message, component=component.ref,
+            field="assembly.placements[].anchor_mm",
+            refs=[other.ref for other, _ in faults])
 
 
 def check_designators(placed) -> None:

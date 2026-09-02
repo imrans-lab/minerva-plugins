@@ -595,6 +595,10 @@ def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
         service_advisories = service_profile.check_board(board, profile.service)
         unchecked = profile.service.unchecked_rules
     assembly_gates.check_components(board)
+    # BEFORE the walk, like the per-component gates and for the same reason: an
+    # anchor off the part is a coordinate defect, and there is nothing to be
+    # gained from rendering rows around one.
+    assembly_gates.check_anchor_on_lands(board)
     bom, cpl, excluded, placed = _walk(board, profile)
     # THE ORIENTATION CORRECTION, and it is deliberately its OWN step over the
     # finished rows rather than a term inside _walk's arithmetic. _walk owns

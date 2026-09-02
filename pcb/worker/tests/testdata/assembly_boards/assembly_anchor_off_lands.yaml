@@ -1,0 +1,88 @@
+# THE ANCHOR-OFF-LANDS fixture: an expansion child whose authored anchor is
+# correct as drawn, and lands on bare board the moment the child is turned.
+#
+# U1S IS A SHIPPED BOARD'S SOCKET SET, REDUCED. Same footprint, same parent
+# position and rotation, same authored offsets and anchor as the board this
+# defect was found on; everything else there is dropped, because none of it
+# takes part. It is drawn on
+# Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT, measured before it was
+# chosen:
+#
+#   * 44 pads, two rows at x -11.43 and +11.43, each 22 pins of 2.54 pitch
+#     spanning y 0 .. 53.34, every land 1.7 mm square. So the LANDS box is
+#     (-12.28, -0.85) .. (12.28, 54.19) in footprint-local mm;
+#   * each STRIP's own centre is therefore (-11.43, 26.67) / (+11.43, 26.67),
+#     and 26.67 is half a 1x22 strip's pin span — the number the purchased
+#     part's own datasheet gives. That is what each placement's anchor_mm
+#     states, in its OWN frame, which is why both read (0, 26.67).
+#
+# THE CONTROL IS WHAT IS AUTHORED HERE: both children at rotation_deg 0, so the
+# composed angle is the parent's own 180 and each anchor resolves onto its own
+# strip. THE DEFECT is one key away — the suite sets both children to
+# rotation_deg 270 in memory and changes nothing else, which composes to 90 and
+# swings both anchors a quarter turn about their own origins, onto bare board
+# east of each strip's y=0 end pin. No copper moves: the parent draws all of it.
+#
+# THE TWO OTHER PARTS ARE THE BOARD AROUND IT, and each is a near miss the gate
+# must not touch:
+#
+#   SW4  EVP-ASAC1A:SW_EVP-ASAC1A — an ordinary part, anchor measured off its
+#        fab outline and comfortably on its lands. Its fab centre does sit
+#        0.05 mm outside the box its pad CENTRES span, which is the box this
+#        gate deliberately does not use.
+#   J5   Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal — the LEGITIMATE
+#        overhang. Its fab body box is (-2, -1.4) .. (4, 6.3) and its two lands
+#        span only (-0.6, -0.875) .. (2.6, 0.875), so the measured body centre
+#        (1, 2.45) is 1.575 mm clear of every piece of copper it solders to.
+#        That is a fact about a side-entry connector's housing, not a mistake,
+#        and it is why the gate reads only AUTHORED anchors.
+#
+# Deliberately NO nets: every claim here is geometry, and a net list would only
+# add a way for the fixture to stop compiling for an unrelated reason.
+version: 1
+name: AssemblyAnchorOffLands
+width_mm: 120
+height_mm: 90
+origin: {x_mm: 0, y_mm: 0}
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+
+components:
+  # --- the expansion, authored CORRECT. The suite turns its children.
+  - ref: U1S
+    footprint: Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT
+    value: ESP32-S3-DevKitC-1 socket set
+    x_mm: 45.0
+    y_mm: 62.797
+    rotation_deg: 180
+    layer: top
+    assembly:
+      mpn: HC-PM254-8.5H-1x22P
+      placements:
+        - {ref: U1S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 0}
+        - {ref: U1S_B, offset_mm: {x: 11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}, rotation_deg: 0}
+
+  # --- an ordinary measured part, well inside its own lands.
+  - ref: SW4
+    footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+    value: tactile
+    x_mm: 10.0
+    y_mm: 10.0
+    rotation_deg: 0
+    layer: top
+    assembly: {mpn: EVP-ASAC1A}
+
+  # --- the legitimate overhang: a measured anchor that is genuinely off its
+  #     own copper because the connector's housing is.
+  - ref: J5
+    footprint: Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal
+    value: BATT
+    x_mm: 100.0
+    y_mm: 20.0
+    rotation_deg: 0
+    layer: top
+    assembly: {mpn: S2B-PH-K-S(LF)(SN)}

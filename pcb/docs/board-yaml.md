@@ -634,6 +634,7 @@ compiles and fabricates while carrying any of them.
 | `assembly_reference_set_mismatch` | the BOM and the CPL name different designators after expansion. |
 | `assembly_row_ref_limit` | a grouped BOM row carries more designators than the profile's `max_refs_per_row`, where a house would silently truncate the tail. |
 | `assembly_placements_too_close` | two designators on one side sit closer than the profile's `min_designator_separation_mm` — usually a synthetic expansion whose `offset_mm` is missing or zero. |
+| `assembly_anchor_off_lands` | a placement's AUTHORED `anchor_mm` resolves clear of the copper its part is soldered to. `anchor_mm` is stated in the placement's own frame and is turned by the placement's `rotation_deg`, so a child that gains a rotation swings its anchor while every piece of copper stays put — invisible to DRC, connectivity and board check, and visible only in the CPL. Scoped to AUTHORED anchors, and only where the placement's origin is itself on the parent's lands: a MEASURED anchor is the centre of a box taken off the same drawing the pads come from, and a body legitimately overhangs its lands (a side-entry JST housing sits clear past its tabs). |
 | `assembly_empty_expansion` | `placements` is authored and names nothing, which resolves back to a single part under the component's own ref. |
 | `assembly_paste_undecided` | a not-populated part's lands take paste and `paste` is still `auto`. |
 | `assembly_missing_identity` | a populated part lacks an identity field the selected profile requires. |
@@ -865,6 +866,10 @@ placements:
   by opening the `.kicad_mod`.
 * A placement that authors one records the `authored` basis, so no consumer is
   told the number was measured.
+* **It rides the child's transform**, so a placement that also states a
+  `rotation_deg` turns its own anchor about its own origin. That is what makes
+  it composable, and it is also how an anchor walks off the part while the
+  copper never moves — which `assembly_anchor_off_lands` refuses.
 
 ## Trace angles (`design_rules.allowed_trace_angles_deg`)
 

@@ -100,6 +100,7 @@ __all__ = [
     "courtyard_extent_from_definition",
     "fab_extent_from_definition",
     "land_extent_from_definition",
+    "placed_land_extent",
     "default_anchor",
     "anchor_dict_from_parsed",
     "anchor_dict_from_component",
@@ -142,7 +143,12 @@ CLEARANCE_MM = 0.25
 
 @dataclass(frozen=True)
 class LocalExtent:
-    """A footprint's body box in footprint-LOCAL mm (board Y-DOWN)."""
+    """An axis-aligned box in millimetres, board Y-DOWN.
+
+    Footprint-LOCAL for every measurement taken off a footprint, which is all
+    of them but :func:`placed_land_extent` — the box carries no frame of its
+    own, only the frame its points were measured in.
+    """
 
     min_x: float
     min_y: float
@@ -472,6 +478,20 @@ def land_extent_from_definition(
     if footprint is None:
         return None
     return _extent_of(_definition_pad_points(footprint.pads))
+
+
+def placed_land_extent(pads: Sequence[Any]) -> Union[LocalExtent, None]:
+    """The LANDS' box for pads already PLACED on a board — same turned-corner
+    rule as :func:`land_extent_from_definition`, in BOARD millimetres.
+
+    The third shape this module measures (see the docstring's TWO SHAPES, ONE
+    RULE): ``resolved_board.PlacedPad`` carries the same three fields a
+    footprint pad does — a centre, a size and its own rotation — already put
+    through the component's placement transform, so the box comes out in the
+    board's frame without re-composing anything. None when the pads carry no
+    size, or collapse to a single spot.
+    """
+    return _extent_of(_definition_pad_points(pads))
 
 
 def _first_extent(*groups: Iterable[tuple[float, float]]) -> Union[LocalExtent, None]:
