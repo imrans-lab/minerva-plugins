@@ -105,7 +105,8 @@ components:
 - ref: R1
   footprint: R_0805
   value: "10k"
-  mpn: C25804
+  assembly:
+    mpn: C25804
   x_mm: 9.0
   y_mm: 8.0
   rotation_deg: 0
@@ -118,7 +119,8 @@ components:
 - ref: R2
   footprint: R_0805
   value: "10k"
-  mpn: C25804
+  assembly:
+    mpn: C25804
   x_mm: 21.0
   y_mm: 16.0
   rotation_deg: 90

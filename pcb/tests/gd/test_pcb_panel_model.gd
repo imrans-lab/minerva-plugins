@@ -652,10 +652,31 @@ func _test_two_value_homes_are_refused() -> void:
 			b.get_component("Z9") != null and b.get_component("U1") == null
 			and b.board_name == "Prior")
 
-	# The same document with ONE home loads, and round-trips the value.
+	# A malformed assembly scalar is refused, not folded away as "nothing
+	# authored" — that fold would populate a part its author excluded.
 	for c in d["components"]:
 		if str(c.get("ref", "")) == "U1":
 			c.erase("properties")
+			c["assembly"] = "exlude"
+	b.from_board_dict(d)
+	var typo: String = b.load_refusals[0] if not b.load_refusals.is_empty() else ""
+	check("a misspelt exclude scalar is refused naming the ref and the key",
+			typo.find("U1") != -1 and typo.find("assembly") != -1, typo)
+
+	# A removed identity home is refused the same way, by ref and key.
+	for c in d["components"]:
+		if str(c.get("ref", "")) == "U1":
+			c.erase("assembly")
+			c["mpn"] = "STRAY"
+	b.from_board_dict(d)
+	var stray: String = b.load_refusals[0] if not b.load_refusals.is_empty() else ""
+	check("a top-level mpn is refused naming the ref and the key",
+			stray.find("U1") != -1 and stray.find("\"mpn\"") != -1, stray)
+
+	# The same document with ONE home loads, and round-trips the value.
+	for c in d["components"]:
+		if str(c.get("ref", "")) == "U1":
+			c.erase("mpn")
 	b.from_board_dict(d)
 	check("one-home load succeeds", b.load_refusals.is_empty())
 	check("value reaches the typed field",
@@ -1203,8 +1224,7 @@ func _test_group_serialization_roundtrip() -> void:
 	var stamps := {}
 	for cid in ["A1", "A2", "A3"]:
 		var comp = reloaded.get_component(cid)
-		stamps[cid] = "" if comp == null else str(
-				comp.properties.get(_PCBComponent.GROUP_PROPERTY_KEY, ""))
+		stamps[cid] = "" if comp == null else str(comp.group_id())
 	check("all three members carry a group stamp after the round trip (%s)" % str(stamps),
 			not str(stamps["A1"]).is_empty()
 			and not str(stamps["A2"]).is_empty()
@@ -1690,7 +1710,8 @@ func _test_canonical_extras_survive_every_codec() -> void:
 	var authored := {
 		"ref": "TP1", "footprint": "Minerva_Fixture:TP_MinAnnular_0p6",
 		"x_mm": 6.5, "y_mm": 2.8, "rotation_deg": 0.0, "layer": "top",
-		"assembly": "exclude", "mpn": "TEST-MPN",
+		"assembly": {"populate": false, "mpn": "TEST-MPN"},
+		"symbol": "Device:TestPoint",
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
 				"drill_mm": 0.6, "annulus_diameter_mm": 0.96}],
 	}
@@ -1700,56 +1721,94 @@ func _test_canonical_extras_survive_every_codec() -> void:
 	# 1. the canonical pair (already covered elsewhere, asserted here as the
 	#    positive control so a failure below is unambiguous).
 	var direct: Dictionary = comp.to_board_dict()
-	check("canonical round trip keeps assembly",
-			str(direct.get("assembly", "")) == "exclude")
-	check("canonical round trip keeps mpn",
-			str(direct.get("mpn", "")) == "TEST-MPN")
+	check("canonical round trip keeps the assembly block",
+			(direct.get("assembly", {}) as Dictionary).get("mpn", "") == "TEST-MPN"
+			and (direct.get("assembly", {}) as Dictionary).get("populate", true) == false)
 	check("canonical round trip keeps the pin drill override",
 			float((direct["pins"] as Array)[0].get("drill_mm", 0.0)) == 0.6)
+	check("canonical round trip keeps the symbol",
+			str(direct.get("symbol", "")) == "Device:TestPoint")
 
 	# 2. THE UNDO DOORWAY: legacy to_dict -> load_from_dict -> canonical out.
 	var snapshot: Dictionary = comp.to_dict()
 	var restored = _PCBComponent.new()
 	restored.load_from_dict(snapshot)
 	var after_undo: Dictionary = restored.to_board_dict()
-	check("UNDO round trip keeps assembly (was silently erased)",
-			str(after_undo.get("assembly", "")) == "exclude")
-	check("UNDO round trip keeps mpn",
-			str(after_undo.get("mpn", "")) == "TEST-MPN")
+	check("UNDO round trip keeps the assembly block (was silently erased)",
+			(after_undo.get("assembly", {}) as Dictionary).get("mpn", "") == "TEST-MPN"
+			and (after_undo.get("assembly", {}) as Dictionary).get("populate", true) == false)
 	var undo_pin: Dictionary = (after_undo["pins"] as Array)[0]
 	check("UNDO round trip keeps the pin drill override",
 			float(undo_pin.get("drill_mm", 0.0)) == 0.6)
 	check("UNDO round trip keeps the pin annulus override",
 			float(undo_pin.get("annulus_diameter_mm", 0.0)) == 0.96)
+	check("UNDO round trip keeps the symbol",
+			str(after_undo.get("symbol", "")) == "Device:TestPoint")
 
 	# 3. THE DUPLICATE DOORWAY: a copy that lost these would be a different part.
 	var copied: Dictionary = comp.duplicate_component().to_board_dict()
-	check("DUPLICATE keeps assembly",
-			str(copied.get("assembly", "")) == "exclude")
+	check("DUPLICATE keeps the assembly block",
+			(copied.get("assembly", {}) as Dictionary).get("mpn", "") == "TEST-MPN")
 	check("DUPLICATE keeps the pin drill override",
 			float((copied["pins"] as Array)[0].get("drill_mm", 0.0)) == 0.6)
+	check("DUPLICATE keeps the symbol", str(copied.get("symbol", "")) == "Device:TestPoint")
 
-	# 4. A component with NO extras must stay clean — the passthrough must not
-	#    invent keys, or every legacy board would gain phantom fields.
+	# 4. The legacy scalar is folded ONCE, to the shape the codec emits.
+	var legacy = _PCBComponent.new()
+	legacy.load_from_board_dict({"ref": "FID1", "footprint": "CUSTOM",
+		"x_mm": 1.0, "y_mm": 1.0, "assembly": "exclude"})
+	check("the legacy exclude scalar loads as the structured non-populated block",
+			legacy.to_board_dict().get("assembly") == {"populate": false})
+
+	# 5. GRAPHICS-ONLY ARTWORK: a part that states `graphics` with no `pads` key
+	#    owns that artwork — it is emitted on the canonical dict, survives the
+	#    undo and duplicate doorways, and a resolve cannot overwrite it.
+	var art = _PCBComponent.new()
+	art.load_from_board_dict({"ref": "LOGO1", "footprint": "Lib:Owl",
+		"x_mm": 1.0, "y_mm": 1.0,
+		"graphics": [{"kind": "line", "layer": "F.SilkS", "width": 0.2,
+			"start": {"x": 0.0, "y": 0.0}, "end": {"x": 3.0, "y": 0.0}}]})
+	var art_out: Dictionary = art.to_board_dict()
+	check("authored artwork without a pads key is emitted",
+			(art_out.get("graphics", []) as Array).size() == 1 and not art_out.has("pads"))
+	art.adopt_resolved({"graphics": [{"kind": "circle", "layer": "F.SilkS",
+		"width": 0.1, "center": {"x": 0.0, "y": 0.0}, "radius": 5.0}],
+		"footprint_resolved": true})
+	check("a resolve does not overwrite authored artwork",
+			str((art.to_board_dict()["graphics"] as Array)[0].get("kind", "")) == "line"
+			and art.footprint_resolved)
+	var art_undo = _PCBComponent.new()
+	art_undo.load_from_dict(art.to_dict())
+	check("UNDO round trip keeps the artwork authored",
+			(art_undo.to_board_dict().get("graphics", []) as Array).size() == 1)
+	check("DUPLICATE keeps the artwork authored",
+			(art.duplicate_component().to_board_dict().get("graphics", []) as Array).size() == 1)
+
+	# 6. A component with NO block must stay clean — the model must not
+	#    invent keys, or every board would gain phantom fields.
 	var plain = _PCBComponent.new()
 	plain.load_from_board_dict({
 		"ref": "R1", "footprint": "R_0805", "x_mm": 1.0, "y_mm": 1.0,
 		"rotation_deg": 0.0, "layer": "top",
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]})
 	var plain_out: Dictionary = plain.to_board_dict()
-	check("a component with no extras gains no phantom keys",
-			not plain_out.has("assembly") and not plain_out.has("mpn"))
+	check("a component with no block gains no phantom keys",
+			not plain_out.has("assembly") and not plain_out.has("group_id")
+			and not plain_out.has("pads") and not plain_out.has("graphics"))
 	check("a plain pin gains no phantom geometry",
 			not (plain_out["pins"] as Array)[0].has("drill_mm"))
+	check("no session or render key ever reaches the canonical dict",
+			not plain_out.has("footprint_resolved") and not plain_out.has("color")
+			and not plain_out.has("local_bounds") and not plain_out.has("properties"))
 
 
 ## Codex review 1090 finding 2: the CSV importer must not carry
 ## identity-bearing extras onto a part whose identity the CSV just changed.
 ##
 ## from_csv overwrites by id, and this CSV carries FOOTPRINT and VALUE — both
-## identity. Carrying `mpn` / `assembly: exclude` / pin overrides across a
-## value or footprint change would emit a BOM naming the wrong orderable part,
-## or keep a now-assembly-worthy part excluded. Unchanged identity must still
+## identity. Carrying the assembly block / pin overrides across a value or
+## footprint change would emit a BOM naming the wrong orderable part, or keep
+## a now-assembly-worthy part excluded. Unchanged identity must still
 ## preserve them (that is the loss the codec sweep closed); changed identity
 ## must drop them AND say so.
 func _test_csv_import_extras_follow_identity() -> void:
@@ -1763,7 +1822,7 @@ func _test_csv_import_extras_follow_identity() -> void:
 		"ref": "J1", "footprint": "Minerva_Fixture:DAM_MinWeb_2P",
 		"x_mm": 1.0, "y_mm": 1.0,
 		"rotation_deg": 0.0, "layer": "top", "value": "10k",
-		"mpn": "TEN-K-PN", "assembly": "exclude",
+		"assembly": {"populate": false, "mpn": "TEN-K-PN"},
 		"pins": [
 			{"number": "1", "x_mm": 0.0, "y_mm": 0.0},
 			{"number": "2", "x_mm": 2.54, "y_mm": 0.0,
@@ -1775,10 +1834,9 @@ func _test_csv_import_extras_follow_identity() -> void:
 	data.from_csv(header + "J1,Minerva_Fixture:DAM_MinWeb_2P,10k,5,5,0,top\n")
 	var same_component = data.components["J1"]
 	var same: Dictionary = same_component.to_board_dict()
-	check("CSV with the SAME identity keeps mpn",
-			str(same.get("mpn", "")) == "TEN-K-PN")
-	check("CSV with the SAME identity keeps assembly",
-			str(same.get("assembly", "")) == "exclude")
+	check("CSV with the SAME identity keeps the assembly block",
+			(same.get("assembly", {}) as Dictionary).get("mpn", "") == "TEN-K-PN"
+			and (same.get("assembly", {}) as Dictionary).get("populate", true) == false)
 	check("CSV with the SAME library identity keeps both imported pins",
 			(same.get("pins", []) as Array).size() == 2)
 	check("CSV with the SAME library identity keeps pin 2 geometry",
@@ -1804,9 +1862,9 @@ func _test_csv_import_extras_follow_identity() -> void:
 	check("placement-only CSV retains the library footprint identity",
 			str(placement_only.get("footprint", "")) \
 					== "Minerva_Fixture:DAM_MinWeb_2P")
-	check("placement-only CSV retains pins and identity extras",
+	check("placement-only CSV retains pins and the assembly block",
 			(placement_only.get("pins", []) as Array).size() == 2 \
-					and str(placement_only.get("mpn", "")) == "TEN-K-PN")
+					and (placement_only.get("assembly", {}) as Dictionary).get("mpn", "") == "TEN-K-PN")
 
 	# --- identity CHANGED (value 10k -> 1k): extras must NOT migrate.
 	var data2 = _PCBData.new()
@@ -1814,14 +1872,14 @@ func _test_csv_import_extras_follow_identity() -> void:
 	changed.load_from_board_dict({
 		"ref": "R1", "footprint": "R_0805", "x_mm": 1.0, "y_mm": 1.0,
 		"rotation_deg": 0.0, "layer": "top", "value": "10k",
-		"mpn": "TEN-K-PN",
+		"assembly": {"mpn": "TEN-K-PN"},
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 0.6}]})
 	data2.components["R1"] = changed
 	var import_result: Dictionary = data2.from_csv(
 			header + "R1,R_0805,1k,5,5,0,top\n")
 	var after: Dictionary = data2.components["R1"].to_board_dict()
-	check("a CHANGED value does not carry the old mpn onto the new part",
-			not after.has("mpn"))
+	check("a CHANGED value does not carry the old assembly block onto the new part",
+			not after.has("assembly"))
 	check("a CHANGED value does not carry the old pin overrides",
 			not (after["pins"] as Array)[0].has("drill_mm"))
 	check("the CSV's new value is what landed",
@@ -1831,8 +1889,8 @@ func _test_csv_import_extras_follow_identity() -> void:
 	check("identity-extra report names the affected component and field",
 			str(drop.get("ref", "")) == "R1" \
 					and (drop.get("identity_fields", []) as Array).has("value"))
-	check("identity-extra report names discarded canonical keys",
-			(drop.get("canonical_extra_keys", []) as Array).has("mpn"))
+	check("identity-extra report names the discarded assembly keys",
+			(drop.get("assembly_keys", []) as Array).has("mpn"))
 	var reported_pin_keys: Dictionary = drop.get("pin_extra_keys", {})
 	check("identity-extra report names discarded per-pin keys",
 			(reported_pin_keys.get("1", []) as Array).has("drill_mm"))

@@ -8,9 +8,11 @@ extends RefCounted
 ##
 ##   FABRICABLE. Its footprint is a library ref ("Lib:Part") that RESOLVED
 ##   through the worker's seed/wip/user chain, so its lands and its silk are
-##   the library's own and the hermetic compiler will compile it. `pads` is the
-##   board's own geometry authority from that moment on (pads_authored — see
-##   pcb_component's own note on the FULL/PARTIAL rule).
+##   the library's own and the hermetic compiler will compile it. Its lands and
+##   silk are SESSION state adopted from that resolve (pcb_component's
+##   adopt_resolved): the design of record stays the ref plus the library lock,
+##   never a copy of the library's lands, so the file does not freeze one
+##   host's library and the compiler keeps resolving the ref itself.
 ##
 ##   SKETCH. Its footprint is one of the generic enums (HEADER, RESISTOR, …).
 ##   Its pads are ESTIMATED defaults with no library behind them, its footprint
@@ -186,39 +188,32 @@ static func _fetch_geometry(host, ref: String) -> Dictionary:
 
 
 ## Write a worker `footprint_geometry` reply onto a component, making it
-## FABRICABLE: real lands, real silk, the library's own body box, and the
-## anchor the fab strokes its printed designator at.
-##
-## `pads_authored` is set because the geometry came from a resolve THIS host
-## performed: the board now carries the lands outright (a `pads` key = the
-## board is the authority), which is what keeps the part compiling on a machine
-## whose library does not have the ref.
+## FABRICABLE: real lands, real silk, and the anchor the fab strokes its
+## printed designator at — adopted as SESSION state through the same path a
+## pcb.deserialize reply's `resolved` entry takes. `pads_authored` stays
+## false: the board's design of record for a by-ref part is the ref and the
+## library lock, and the worker resolves the ref itself on every surface.
 ##
 ## `footprint_resolved` is the WORKER's fact, relayed — `build` reaches this
 ## only after `_fetch_geometry` got real geometry back over the
 ## pcb.footprint_geometry channel, so the flag records a resolve success rather
-## than asserting one. It is the same fact a worker-deserialized board arrives
-## carrying, which is what lets the badge, the status lead and
-## panel_tools.canonical_wire_board read one flag whichever way the board got
-## here. Both ways are THIS session's resolve: the flag is never restored from
-## a document, and never written into one.
+## than asserting one. It is the same fact a deserialize reply carries beside
+## the board, which is what lets the badge and the status lead read one flag
+## whichever way the board got here. Both ways are THIS session's resolve: the
+## flag is never restored from a document, and never written into one.
 static func apply_geometry(comp, ref: String, geometry: Dictionary) -> void:
 	comp.set_footprint_by_name("CUSTOM")
 	comp.footprint_id = ref
-	# load_pad_geometry owns the pads/pins/body-box half through the ONE pad
-	# deserializer, so an added land keeps the same fab-affecting optionals a
-	# loaded one keeps (corner_rratio above all).
-	comp.load_pad_geometry({
-		"footprint_id": ref,
-		"has_pad_geometry": bool(geometry.get("has_pad_geometry", false)),
-		"bounding_box": geometry.get("bounding_box", {}),
-		"pads": geometry.get("pads", []),
-	})
-	comp.pads_authored = true
-	comp.footprint_resolved = true
 	var anchor: Variant = geometry.get("refdes_anchor")
-	comp.load_footprint_graphics(
-		geometry.get("graphics", []), anchor if anchor is Dictionary else {})
+	comp.adopt_resolved({
+		"pads": geometry.get("pads", []),
+		"has_pad_geometry": bool(geometry.get("has_pad_geometry", false)),
+		"graphics": geometry.get("graphics", []),
+		"refdes_anchor": anchor if anchor is Dictionary else {},
+		"footprint_resolved": true,
+	})
+	# A freshly added part has no pin table yet: the resolved lands are it.
+	comp.pins_from_pads()
 
 
 ## The add verb's reply body for a built component — its identity, where it

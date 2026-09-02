@@ -4,8 +4,8 @@ extends RefCounted
 ## Off-tree port of Minerva src/Scripts/UI/Controls/PCBEditor/PCBNet.gd — NO
 ## class_name; self-preload by relative path. Boundary to_board_dict()/
 ## from_board_dict() flatten the {component_id,pin_name} pin list to canonical
-## "Ref.PadNumber" strings (color/properties/is_power_net emitted as Extra),
-## mirroring pcb/internal/board/minpcb.go importNets.
+## "Ref.PadNumber" strings. color/properties/is_power_net are panel session
+## state: they ride the undo shape (to_dict) and never the canonical dict.
 
 const _Self := preload("pcb_net.gd")
 
@@ -162,20 +162,13 @@ static func from_dict(data: Dictionary):
 
 # ── Canonical boundary (pcb/internal/board Net) ───────────────────────────────
 
-## Serialize to a canonical board-contract net dict. Pins flatten to the flat
-## pcb-architect "Ref.PadNumber" string form; color/properties/is_power_net are
-## emitted as canonical Extra (mirrors minpcb.go importNets).
+## Serialize to a canonical board-contract net dict: the name and the pins,
+## flattened to the pcb-architect "Ref.PadNumber" string form.
 func to_board_dict() -> Dictionary:
 	var pin_refs: Array = []
 	for pin in pins:
 		pin_refs.append("%s.%s" % [pin.get("component_id", ""), pin.get("pin_name", "")])
-	return {
-		"name": name,
-		"pins": pin_refs,
-		"color": {"r": color.r, "g": color.g, "b": color.b, "a": color.a},
-		"properties": properties.duplicate(),
-		"is_power_net": is_power_net,
-	}
+	return {"name": name, "pins": pin_refs}
 
 
 ## Restore from a canonical board-contract net dict. "Ref.PadNumber" strings are
@@ -194,15 +187,6 @@ func load_from_board_dict(data: Dictionary) -> void:
 			# No separator: treat the whole token as a component with an empty pin.
 			pins.append({"component_id": s, "pin_name": ""})
 
-	var color_data: Dictionary = data.get("color", {})
-	if color_data.size() > 0:
-		color = Color(
-			color_data.get("r", 1.0),
-			color_data.get("g", 1.0),
-			color_data.get("b", 1.0),
-			color_data.get("a", 1.0))
-	properties = (data.get("properties", {}) as Dictionary).duplicate()
-	is_power_net = data.get("is_power_net", false)
 
 
 ## Create from a canonical board-contract net dict (static constructor).

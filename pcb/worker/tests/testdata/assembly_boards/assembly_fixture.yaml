@@ -28,7 +28,8 @@ components:
   - ref: R1
     footprint: R_0805
     value: "10k"
-    mpn: C25804
+    assembly:
+      mpn: C25804
     x_mm: 10.0
     y_mm: 5.0
     rotation_deg: 0
@@ -39,7 +40,8 @@ components:
   - ref: R2
     footprint: R_0805
     value: "10k"
-    mpn: C25804
+    assembly:
+      mpn: C25804
     x_mm: 15.0
     y_mm: 5.0
     rotation_deg: 90
@@ -50,7 +52,8 @@ components:
   - ref: D1
     footprint: D_SOD-123
     value: 1N4148
-    mpn: C2128
+    assembly:
+      mpn: C2128
     x_mm: 12.5
     y_mm: 14.0
     rotation_deg: 45

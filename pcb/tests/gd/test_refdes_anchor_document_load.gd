@@ -30,11 +30,12 @@ extends SceneTree
 ##   3. An AUTHORED placement field survives adoption: hidden stays hidden while
 ##      the unstated fields adopt the derived answer.
 ##
-## FAILS AGAINST OLD: PCBData had no adopt_derived_anchors; and the worker's
+## FAILS AGAINST OLD: PCBData had no adopt_resolved; and the worker's
 ## resolve answered (0.0, -1.48) for the wide part — the library 1206's body.
 
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbRefdesAnchor := preload("res://../../minerva-plugins/pcb/ui/model/pcb_refdes_anchor.gd")
+const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PLUGIN_ROOT := "res://../../minerva-plugins/pcb"
 const BOARD_ID := "board:00000000000000000000000000000000"
 const FP := "Resistor_SMD:R_0805_2012Metric"
@@ -60,6 +61,7 @@ func _init() -> void:
 	print("=== Document-loaded designators adopt the fab's anchor ===\n")
 	await _run_adoption_moves_each_label_to_its_own_body()
 	await _run_authored_field_survives_adoption()
+	_run_a_nested_stray_key_is_the_codecs_to_refuse()
 	print("\n=== Results: %d passed, %d failed (real_worker_used=%s) ===" % [
 		_pass, _fail, str(_used_real_worker)])
 	if _fail > 0:
@@ -117,15 +119,15 @@ func _worker_call(tool_name: String, request: Dictionary, fallback: Dictionary) 
 
 ## The document path's enrichment, as the panel drives it: the WHOLE live
 ## board through pcb.deserialize (a part that owns its geometry must reach the
-## worker with the graphics it owns), the reply's board handed to the model.
-## Returns the resolved board dict (empty on a failed call).
+## worker with the graphics it owns), the reply's `resolved` map handed to the
+## model. Returns that map (empty on a failed call).
 func _resolved_board(data) -> Dictionary:
 	var reply := _worker_call("pcb.deserialize", {"board": data.to_board_dict()}, {"ok": false})
 	if not bool(reply.get("ok", false)):
 		return {}
 	var result = reply.get("result", reply)
-	if result is Dictionary and (result as Dictionary).get("board") is Dictionary:
-		return (result as Dictionary)["board"]
+	if result is Dictionary and (result as Dictionary).get("resolved") is Dictionary:
+		return (result as Dictionary)["resolved"]
 	return {}
 
 
@@ -196,7 +198,7 @@ func _run_adoption_moves_each_label_to_its_own_body() -> void:
 
 	var resolved := _resolved_board(data)
 	check("the real worker answered the document's board", not resolved.is_empty())
-	var moved: int = data.adopt_derived_anchors(resolved)
+	var moved: int = data.adopt_resolved(resolved)
 	check("both designators moved (%d)" % moved, moved == 2)
 	check("the tight part's label is centred over its own lands, one clearance above its courtyard ink — got %s"
 			% str(_anchor_xy(r1)),
@@ -209,7 +211,7 @@ func _run_adoption_moves_each_label_to_its_own_body() -> void:
 			% [float(bounds.get("min_x_mm", 0.0)), float(bounds.get("max_x_mm", 0.0))],
 		float(bounds.get("min_x_mm", 0.0)) < 10.0 + WIDE_ANCHOR.x
 			and float(bounds.get("max_x_mm", 0.0)) > 10.0 + WIDE_ANCHOR.x)
-	check("adopting the same reply again moves nothing", data.adopt_derived_anchors(resolved) == 0)
+	check("adopting the same reply again moves nothing", data.adopt_resolved(resolved) == 0)
 	check("the board's own lands were not touched by adoption",
 		r2.pads.size() == 2 and data.to_board_dict()["components"][1].has("pads"))
 
@@ -223,9 +225,29 @@ func _run_authored_field_survives_adoption() -> void:
 	var r3 = data.get_component("R3")
 	var resolved := _resolved_board(data)
 	check("the real worker answered", not resolved.is_empty())
-	data.adopt_derived_anchors(resolved)
+	data.adopt_resolved(resolved)
 	var anchor: Dictionary = PcbRefdesAnchor.read_anchor(r3)
 	check("hidden stays authored-true after adoption", bool(anchor["hidden"]))
 	check("…while the unstated x adopts the derived centre (%s)" % str(anchor["x_mm"]),
 		absf(float(anchor["x_mm"]) - WIDE_ANCHOR.x) < EPS)
 	check("a hidden designator strokes nothing", r3.refdes_graphics.is_empty())
+
+
+func _run_a_nested_stray_key_is_the_codecs_to_refuse() -> void:
+	print("-- 4. a restored document with a stray NESTED key is refused by the codec, by name --")
+	# The panel's synchronous load checks outer keys only; this block's stray
+	# key is one level down, so the model loads it and the very resolve call
+	# the restore path makes is where the Go codec names it.
+	var data = PCBData.new()
+	data.from_board_dict(_board([
+		_component("R9", Vector2(10.0, 10.0), false,
+			{"assembly": {"mpn": "C25804", "package": "0805"}}),
+	]))
+	check("the panel's outer-key check let the document load", data.load_refusals.is_empty())
+	var reply := _worker_call("pcb.deserialize", {"board": data.to_board_dict()}, {"ok": false})
+	var refused: String = PanelTools.codec_refusal(reply)
+	check("the real worker's reply is the assembly block's own refusal naming the nested key (got: %s)" % refused.left(160),
+		refused.find("invalid_component_assembly") != -1 and refused.find("\"package\"") != -1)
+	check("…and a clean board's reply is not read as one",
+		PanelTools.codec_refusal(_worker_call("pcb.deserialize",
+			{"board": _board([_component("R1", Vector2(10.0, 10.0), false)])}, {"ok": true})).is_empty())

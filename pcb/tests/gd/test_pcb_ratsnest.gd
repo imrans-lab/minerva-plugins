@@ -1186,9 +1186,8 @@ func _explicit_pad(number: String, pad_type: String, shape: String,
 
 func _duplicate_part(ref: String, x: float, y: float, pads: Array) -> Dictionary:
 	return {"ref": ref, "footprint": "CUSTOM", "x_mm": x, "y_mm": y,
-		"rotation_deg": 0.0, "layer": "top", "width": 12.0, "height": 3.0,
-		"has_pad_geometry": true,
-		# load_pad_geometry deliberately rebuilds this logical map from every
+		"rotation_deg": 0.0, "layer": "top",
+		# pins_from_pads deliberately rebuilds this logical map from every
 		# physical pad, leaving the final duplicate's position as the pin centre.
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}], "pads": pads}
 

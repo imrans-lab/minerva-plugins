@@ -245,12 +245,6 @@ def _panel_pins_only_component() -> dict:
         "x_mm": 10.0, "y_mm": 10.0, "rotation_deg": 0.0, "layer": "top",
         "pins": [{"number": "1", "x_mm": -0.9125, "y_mm": 0.0},
                  {"number": "2", "x_mm": 0.9125, "y_mm": 0.0}],
-        "footprint_id": "", "width": 5.0, "height": 2.5,
-        "local_bounds": {"x": -2.5, "y": -1.25, "w": 5.0, "h": 2.5},
-        "has_pad_geometry": False, "graphics": [],
-        "bbox_center_offset": {"x": 0.0, "y": 0.0},
-        "properties": {}, "color": {"r": 0.2, "g": 0.6, "b": 0.3, "a": 1.0},
-        "label_visible": True, "locked": False,
     }
 
 

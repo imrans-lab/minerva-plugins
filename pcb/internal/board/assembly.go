@@ -27,13 +27,12 @@
 //     and reappearing later as "missing mpn" — or a mistyped `offset_mm` key
 //     quietly placing a part at (0, 0) — is precisely the class of quiet wrong
 //     answer the whole order path is built to refuse. The known-key set is
-//     derived reflectively from the struct tags (knownJSONKeys, json.go), so a
+//     derived reflectively from the struct tags (knownJSONKeys, schema.go), so a
 //     field added below is known to both codecs with no list to hand-maintain.
 //
-// There is deliberately no inline `Extra` here, and therefore no marshal/
-// unmarshal pair in json.go: an Extra map tagged `json:"-"` round-trips through
-// YAML but vanishes across the JSON IPC boundary (json.go's opening comment),
-// and a half-preserved order block is worse than a refused unknown key.
+// The block refuses unknown keys through its OWN unmarshalers rather than the
+// schema walk (schema.go), because it also has to migrate the legacy scalar;
+// the walk stops at any type that decodes itself.
 package board
 
 import (
@@ -79,7 +78,6 @@ type ComponentAssembly struct {
 	Populate     *bool  `json:"populate,omitempty" yaml:"populate,omitempty"`
 	Manufacturer string `json:"manufacturer,omitempty" yaml:"manufacturer,omitempty"`
 	MPN          string `json:"mpn,omitempty" yaml:"mpn,omitempty"`
-	Package      string `json:"package,omitempty" yaml:"package,omitempty"`
 	Comment      string `json:"comment,omitempty" yaml:"comment,omitempty"`
 
 	// HouseParts maps a house id ("jlcpcb") to that house's catalogue number.
@@ -515,99 +513,4 @@ func validatePlacementRefUniqueness(b *Board) error {
 		}
 	}
 	return nil
-}
-
-// identityFieldNames mirrors IDENTITY_FIELDS in the worker's assembly_spec.py —
-// the four part-identity keys an author may write, in any of the three homes
-// (the structured block, a top-level component scalar, the `properties` map).
-// THE INVARIANT: this slice and that tuple must name the same keys, or a value
-// one language preserves is one the other renumbers.
-var identityFieldNames = []string{"manufacturer", "mpn", "package", "comment"}
-
-// preserveIdentityText restores the AUTHORED TEXT of the pre-block identity
-// values from the source node tree, over the values the typed decode produced.
-//
-// ComponentAssembly's identity fields are typed strings, so yaml.v3 hands them
-// the scalar's raw text and re-emits it quoted: `assembly: {package: 0603}`
-// round-trips as `package: "0603"`. The two PRE-BLOCK homes have no typed
-// fields — they ride Component.Extra's inline map[string]interface{}, where
-// yaml.v3 resolves each scalar by tag before anything sees it. `package: 0603`
-// becomes the int 387 (a leading zero is read as octal), and marshaling that
-// map writes 387 back over the author's text. This pass re-reads the same keys
-// from the nodes and stores node.Value, so all three homes preserve text
-// identically and the author meets ONE rule.
-//
-// It touches ONLY the four identity keys, and only where the source node is a
-// non-string scalar: every other key riding the same passthrough — nested
-// mappings, numbers the author meant as numbers, quoted strings already
-// correct — keeps exactly the value the typed decode gave it.
-//
-// A null identity value is left alone: null means "not authored in this home"
-// on both sides of the boundary, and turning it into the empty string would
-// stop the precedence fold falling through to the next home.
-//
-// It needs the node tree and the decoded board to line up, and returns a
-// warning for each component it therefore could not walk. THE WARNING IS THE
-// POINT: skipping quietly leaves the untouched values exactly as the typed
-// decode left them, which is the defect this pass exists to undo, and a save
-// then writes 387 over the author's `0603` with nothing on any surface saying
-// so.
-func preserveIdentityText(b *Board, doc *yaml.Node) []string {
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		return nil
-	}
-	if len(b.Components) == 0 {
-		return nil // nothing decoded, so nothing to preserve and nothing at risk
-	}
-	comps := nodeMapValue(doc.Content[0], "components")
-	if comps == nil || comps.Kind != yaml.SequenceNode {
-		return []string{"identity text was not preserved: the source document's " +
-			"`components` is not a sequence of component mappings, so an " +
-			"unquoted manufacturer/mpn/package/comment may have been resolved " +
-			"as a number (0603 reads as 387)"}
-	}
-	if len(comps.Content) != len(b.Components) {
-		return []string{fmt.Sprintf("identity text was not preserved: the source "+
-			"document has %d component node(s) and the decoded board has %d, so "+
-			"an unquoted manufacturer/mpn/package/comment may have been resolved "+
-			"as a number (0603 reads as 387)",
-			len(comps.Content), len(b.Components))}
-	}
-	var warnings []string
-	for i, node := range comps.Content {
-		node = resolveAlias(node)
-		if node == nil || node.Kind != yaml.MappingNode {
-			warnings = append(warnings, fmt.Sprintf(
-				"identity text was not preserved for components[%d] (%s): its "+
-					"source node is not a mapping, so an unquoted "+
-					"manufacturer/mpn/package/comment may have been resolved as "+
-					"a number (0603 reads as 387)", i, b.Components[i].Ref))
-			continue
-		}
-		restoreIdentityText(node, b.Components[i].Extra)
-		if props := nodeMapValue(node, "properties"); props != nil && props.Kind == yaml.MappingNode {
-			decoded, _ := b.Components[i].Extra["properties"].(map[string]interface{})
-			restoreIdentityText(props, decoded)
-		}
-	}
-	return warnings
-}
-
-// restoreIdentityText overwrites each identity key in decoded with the authored
-// text of the matching scalar in src. A nil decoded map (the key was modeled, or
-// the value did not decode as a mapping) is a no-op.
-func restoreIdentityText(src *yaml.Node, decoded map[string]interface{}) {
-	if decoded == nil {
-		return
-	}
-	for _, key := range identityFieldNames {
-		n := nodeMapValue(src, key)
-		if n == nil || n.Kind != yaml.ScalarNode || n.Tag == "!!str" || n.Tag == "!!null" {
-			continue
-		}
-		if _, present := decoded[key]; !present {
-			continue
-		}
-		decoded[key] = n.Value
-	}
 }

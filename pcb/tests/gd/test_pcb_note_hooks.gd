@@ -174,11 +174,12 @@ func _fixture_board() -> Dictionary:
 	}
 
 
-## A board loaded the way the panel's YAML import loads one: resolve_is_live,
-## so the session-only footprint_resolved flag is genuinely live on R1.
+## A board loaded the way the panel's YAML import loads one: with this host's
+## resolve beside it, so the session-only footprint_resolved flag is genuinely
+## live on R1 (on the model — never on the dict).
 func _loaded_fixture():
 	var data = PCBData.new()
-	data.from_board_dict(_fixture_board(), true)
+	data.from_board_dict(_fixture_board(), {"R1": {"footprint_resolved": true}})
 	return data
 
 

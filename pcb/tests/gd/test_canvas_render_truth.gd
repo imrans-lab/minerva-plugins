@@ -240,7 +240,7 @@ func _two_sided_board():
 		"grid_mm": 2.54, "layers": ["top", "bottom"],
 		"components": [
 			{"ref": "U1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
-			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,
+			 "rotation_deg": 0.0, "layer": "top",
 			 "pins": [{"number": "1", "x_mm": -1.0, "y_mm": 0.0},
 					  {"number": "2", "x_mm": 1.0, "y_mm": 0.0}],
 			 "pads": [
@@ -425,7 +425,7 @@ func _resolved_and_unresolved_board():
 		"grid_mm": 2.54, "layers": ["top", "bottom"],
 		"components": [
 			{"ref": "U1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
-			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,
+			 "rotation_deg": 0.0, "layer": "top",
 			 "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
 			 "pads": [{"number": "1", "type": "smd", "shape": "rect",
 				"position": {"x": 0.0, "y": 0.0},

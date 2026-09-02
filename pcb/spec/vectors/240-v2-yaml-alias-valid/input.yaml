@@ -1,11 +1,10 @@
-_defaults:
-  version: &ver 2
-  drill: &drill 0.4
-version: *ver
+version: 2
 id: board:0123456789abcdef0123456789abcdef
 name: AliasOK
 width_mm: 20
 height_mm: 20
+design_rules:
+  via_drill_mm: &drill 0.4
 components:
   - ref: U1
     footprint: F

@@ -53,11 +53,9 @@ extends SceneTree
 ## FAILS AGAINST OLD: section 1's add is refused outright ("Invalid footprint
 ## type"), so every assertion in 1 and 2 fails; section 3's reply carries no
 ## `geometry` block.
-## Section 2's wire/save assertions fail on their own account against the codec
-## that round-tripped footprint_resolved: the live dict never carried the flag
-## for a part added this session (it only ever arrived through the canonical
-## Extra passthrough, so the wire trimmed nothing), and to_saved_board_dict did
-## not exist.
+## Section 2's dict assertions fail on their own account against a model that
+## let session state into the canonical dict: footprint_resolved is a fact
+## about THIS session's library and never reaches any surface the dict serves.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -504,51 +502,37 @@ func _run_the_board_still_checks() -> void:
 		PcbLibraryPart.unresolved_ids(host.data).is_empty())
 
 	var full_board: Dictionary = host.data.to_board_dict()
-	var verdict := _worker_geometric_drc(
-		PanelTools.canonical_wire_board(full_board))
+	var verdict := _worker_geometric_drc(full_board)
 	check("the check is DETERMINATE — the parts resolved (verdict '%s')"
 			% str(verdict.get("verdict", "<none>")),
 		bool(verdict.get("ok", false)) and str(verdict.get("verdict", "")) != "indeterminate")
 	check("…and clean", str(verdict.get("verdict", "")) == "clean")
 
-	# THE RESOLVE THAT JUST HAPPENED IS WHAT SHRINKS THE WIRE. Both headers came
-	# off THIS machine's library moments ago, so the worker on the other end of
-	# the channel can re-derive their lands and the wire form drops them. The
-	# fact is carried by footprint_resolved, which the add path sets from the
-	# real pcb.footprint_geometry reply — session state, never restored from a
-	# document, so this assertion is about the resolve and not about a flag some
-	# earlier save wrote.
-	var wire_board: Dictionary = PanelTools.canonical_wire_board(full_board)
+	# THE DICT IS THE DESIGN, on every surface. Both headers came off THIS
+	# machine's library moments ago, and their lands and silk are SESSION state
+	# adopted from that resolve — so the ONE canonical dict (the wire form and
+	# the saved form alike) carries the ref and NO pads key and NO session flag.
+	# The determinate, clean verdict above IS the oracle: the worker resolved
+	# the ref itself, from a dict that stated no lands. The flag lives on the
+	# model: set from the real pcb.footprint_geometry reply, never restored
+	# from a document, never written into one.
 	var carried_pads := 0
-	var wire_pads := 0
+	var flags_on_dict := 0
 	for comp in (full_board.get("components", []) as Array):
 		if (comp as Dictionary).has("pads"):
 			carried_pads += 1
-		check("%s reached the board dict marked resolved by this session's library read"
-				% str((comp as Dictionary).get("ref", "?")),
-			bool((comp as Dictionary).get("footprint_resolved", false)))
-	for comp in (wire_board.get("components", []) as Array):
-		if (comp as Dictionary).has("pads"):
-			wire_pads += 1
-	check("the live board dict carries both parts' lands (%d of 2)" % carried_pads,
-		carried_pads == 2)
-	check("…and the wire form carries none of them — resolved here, so the worker re-derives (%d)" % wire_pads,
-		wire_pads == 0)
-
-	# THE SAVE HALF, on the same board: what gets written must not tell the next
-	# machine that ITS library resolved these refs. Reopening a document that
-	# claimed so is what silently handed the worker a pad-less part.
-	var saved_board: Dictionary = host.data.to_saved_board_dict()
-	var saved_flags := 0
-	var saved_pads := 0
-	for comp in (saved_board.get("components", []) as Array):
 		if (comp as Dictionary).has("footprint_resolved"):
-			saved_flags += 1
-		if (comp as Dictionary).has("pads"):
-			saved_pads += 1
-	check("the saved board asserts no resolve (%d flags)" % saved_flags, saved_flags == 0)
-	check("…while keeping the lands it authored, so it opens fabricable anywhere (%d of 2)"
-			% saved_pads, saved_pads == 2)
+			flags_on_dict += 1
+	for cid in host.data.components:
+		check("%s is marked resolved on the MODEL by this session's library read" % str(cid),
+			bool(host.data.components[cid].footprint_resolved)
+				and not host.data.components[cid].pads.is_empty())
+	check("the canonical dict carries no pads for a by-ref part (%d) — the lands are the library's" % carried_pads,
+		carried_pads == 0)
+	check("…and no session flag (%d) — the next machine resolves for itself" % flags_on_dict,
+		flags_on_dict == 0)
+	check("the saved form IS the canonical dict",
+		host.data.to_saved_board_dict() == full_board)
 	host.queue_free()
 
 
@@ -580,8 +564,7 @@ func _run_a_sketch_part_is_named() -> void:
 	# THE WORKER'S OWN VERDICT. Section 2 ran this exact check over this exact
 	# board WITHOUT the sketch part and got a determinate clean, so the change
 	# here is attributable to TP2 and to nothing else.
-	var verdict := _worker_geometric_drc(
-		PanelTools.canonical_wire_board(host.data.to_board_dict()))
+	var verdict := _worker_geometric_drc(host.data.to_board_dict())
 	check("the geometric DRC now refuses the board (fail-closed, and correct)",
 		not bool(verdict.get("ok", true)) or str(verdict.get("verdict", "")) == "indeterminate")
 	var refusal := JSON.stringify(verdict.get("error", verdict))
@@ -598,8 +581,7 @@ func _run_a_sketch_part_is_named() -> void:
 	check("a copper pour is authored over both headers (got: %s)" % str(zoned.get("error", "")),
 		bool(zoned.get("success", false)))
 
-	var refused := _worker_zone_fill(
-		PanelTools.canonical_wire_board(host.data.to_board_dict()))
+	var refused := _worker_zone_fill(host.data.to_board_dict())
 	check("the FILL refuses the board too, not only the geometric DRC",
 		not bool(refused.get("ok", true)))
 	var fill_refusal := JSON.stringify(refused.get("error", refused))
@@ -613,8 +595,7 @@ func _run_a_sketch_part_is_named() -> void:
 		{"editor_name": "AddProbe", "component_id": "TP2"})
 	check("the sketch part is deleted", bool(removed.get("success", false))
 		and host.data.get_component("TP2") == null)
-	var refilled := _worker_zone_fill(
-		PanelTools.canonical_wire_board(host.data.to_board_dict()))
+	var refilled := _worker_zone_fill(host.data.to_board_dict())
 	check("the pour fills once the sketch part is gone", bool(refilled.get("ok", false)))
 	check("…with copper actually in it (regions=%d)" % _pour_regions(refilled),
 		_pour_regions(refilled) > 0)

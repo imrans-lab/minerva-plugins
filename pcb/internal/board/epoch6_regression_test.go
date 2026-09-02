@@ -9,9 +9,6 @@ package board
 //     85f90ed); a NAMED net on a keepout is still checked; a pour still
 //     requires a declared net. Python parity lives in
 //     worker/tests/test_epoch6_regressions.py — the two validators must agree.
-//   - TestImportMinpcbMalformedLayers — docket 019fb64f1052: a malformed
-//     `layers` value refuses the import (fixed at ea55ca3) instead of leaving
-//     a silently empty stack that disabled validateZones' layer check.
 
 import (
 	"strings"
@@ -61,22 +58,5 @@ func TestValidateZonesKeepoutNetless(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			}
 		})
-	}
-}
-
-func TestImportMinpcbMalformedLayers(t *testing.T) {
-	if _, _, err := ImportMinpcb([]byte(`{"layers": {"not": "an array"}}`)); err == nil ||
-		!strings.Contains(err.Error(), "parse minpcb layers") {
-		t.Fatalf("malformed layers must refuse the import, got err=%v", err)
-	}
-	b, _, err := ImportMinpcb([]byte(`{"layers": ["top", "bottom"]}`))
-	if err != nil {
-		t.Fatalf("well-formed layers must import, got %v", err)
-	}
-	if len(b.Layers) != 2 || b.Layers[0] != "top" || b.Layers[1] != "bottom" {
-		t.Fatalf("layers not carried: %v", b.Layers)
-	}
-	if b2, _, err2 := ImportMinpcb([]byte(`{}`)); err2 != nil || len(b2.Layers) != 0 {
-		t.Fatalf("absent layers is the legacy shape and must stay valid, got err=%v layers=%v", err2, b2.Layers)
 	}
 }

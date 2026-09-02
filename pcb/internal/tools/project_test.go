@@ -161,43 +161,6 @@ func TestDeserializeDoesNotReMigrateV2(t *testing.T) {
 	}
 }
 
-// End-to-end: importing a legacy .minpcb through pcb.deserialize must MINT
-// persistent ids — even for a legacy trace whose ordinal-shaped id ("trace_1")
-// the importer carried into the ID field, and even if the file lies about its
-// version. Proves the composed importer→migration path, not just the units.
-func TestDeserializeMinpcbMintsIdsAndClampsVersion(t *testing.T) {
-	// version:2 is a lie — a .minpcb is a pre-v2 legacy source; the importer must
-	// clamp to v1 so the mint still fires over its ordinal ids.
-	minpcb := `{"version":2,"board_name":"Leg","board_width":10,"board_height":10,` +
-		`"components":{"R1":{"id":"R1","footprint":"RESISTOR","position":{"x":1,"y":1},"rotation":0}},` +
-		`"nets":{"N":{"pins":[]}},` +
-		`"traces":{"trace_1":{"id":"trace_1","net_name":"N","waypoints":[{"x":1,"y":1},{"x":2,"y":2}],"width":0.25}}}`
-	args, _ := json.Marshal(map[string]json.RawMessage{"minpcb_json": json.RawMessage(minpcb)})
-	out, err := HandleDeserialize(context.Background(), args)
-	if err != nil {
-		t.Fatalf("deserialize minpcb: %v", err)
-	}
-	var r struct {
-		Board    map[string]interface{} `json:"board"`
-		Warnings []string               `json:"warnings"`
-	}
-	if err := json.Unmarshal(out, &r); err != nil {
-		t.Fatal(err)
-	}
-	if v, _ := r.Board["version"].(float64); v != 2 {
-		t.Fatalf("version: want 2 (migrated), got %v", r.Board["version"])
-	}
-	traces, _ := r.Board["traces"].([]interface{})
-	if len(traces) != 1 {
-		t.Fatalf("traces: want 1, got %#v", r.Board["traces"])
-	}
-	tr, _ := traces[0].(map[string]interface{})
-	id, _ := tr["id"].(string)
-	if id == "trace_1" || !strings.HasPrefix(id, "trace:") || len(id) != len("trace:")+32 {
-		t.Fatalf("legacy ordinal trace id not re-minted: %q", id)
-	}
-}
-
 // An unsupported schema version must fail closed at deserialize rather than be
 // silently migrated (version 0/missing) or accepted (version 3). Migration is
 // gated on version==1; everything else goes through Validate (Fable Round D, D3).
@@ -214,47 +177,7 @@ func TestDeserializeUnsupportedVersionFailsClosed(t *testing.T) {
 	}
 }
 
-func TestDeserializeMinpcbJSON(t *testing.T) {
-	minpcb := `{"version":1,"board_name":"Leg","board_width":10,"board_height":10,"components":{"R1":{"id":"R1","footprint":"RESISTOR","position":{"x":1,"y":1},"rotation":0}},"nets":{},"annotations":{"a1":{"id":"a1","type":"TEXT","text":"hi"}}}`
-	args, _ := json.Marshal(map[string]json.RawMessage{"minpcb_json": json.RawMessage(minpcb)})
-	out, err := HandleDeserialize(context.Background(), args)
-	if err != nil {
-		t.Fatalf("deserialize minpcb: %v", err)
-	}
-	var r struct {
-		Board    map[string]interface{} `json:"board"`
-		Warnings []string               `json:"warnings"`
-	}
-	if err := json.Unmarshal(out, &r); err != nil {
-		t.Fatal(err)
-	}
-	if r.Board["name"] != "Leg" {
-		t.Fatalf("imported board name: want Leg, got %v", r.Board["name"])
-	}
-	anns, ok := r.Board["annotations"].([]interface{})
-	if !ok || len(anns) != 1 {
-		t.Fatalf("annotation passthrough lost: %#v", r.Board["annotations"])
-	}
-}
-
-// A double-encoded minpcb_json (JSON string) must still parse.
-func TestDeserializeMinpcbJSONAsString(t *testing.T) {
-	minpcb := `{"version":1,"board_name":"Str","board_width":5,"board_height":5,"components":{},"nets":{}}`
-	args, _ := json.Marshal(map[string]string{"minpcb_json": minpcb})
-	out, err := HandleDeserialize(context.Background(), args)
-	if err != nil {
-		t.Fatalf("deserialize minpcb string: %v", err)
-	}
-	var r struct {
-		Board map[string]interface{} `json:"board"`
-	}
-	_ = json.Unmarshal(out, &r)
-	if r.Board["name"] != "Str" {
-		t.Fatalf("string-encoded minpcb not parsed: %#v", r.Board)
-	}
-}
-
-// No board/yaml/minpcb → project_file {state} echo fallback (compat).
+// No board/yaml → project_file {state} echo fallback (compat).
 func TestSerializeFallsBackToStateEcho(t *testing.T) {
 	args := json.RawMessage(`{"state":{"foo":"bar"}}`)
 	out, err := HandleSerialize(context.Background(), args)
@@ -287,70 +210,37 @@ func TestMalformedParamsReturnError(t *testing.T) {
 	}
 }
 
-// End-to-end IPC proof for finding 019f8b7fbbd7: unknown YAML fields at the root
-// AND nested inside a component must SURVIVE the real pcb.deserialize →
-// pcb.serialize round trip. The direct Go YAML→Board→YAML path already preserved
-// them via yaml:",inline"; the IPC path was broken because pcb.deserialize returns
-// {"board": b} via encoding/json, which stripped every Extra (json:"-") before the
-// host saw the board — so a later pcb.serialize could not restore them. The custom
-// JSON marshalers inline Extra, closing that gap. This test drives the ACTUAL
-// handlers, mirroring the wire shape: deserialize emits {board,...}; serialize
-// consumes {board:<that JSON>}.
-func TestIPCRoundTripPreservesUnknownYAMLFields(t *testing.T) {
-	// version 1 so it migrates to v2 (mints ids) and passes Validate on serialize.
-	// forward_compat_root (root) and forward_compat_pin (nested in a pin) are
-	// unmodeled — they exist only via Extra inline.
+// The IPC boundary is as strict as the file boundary: an unknown key nested
+// in a component is refused by pcb.deserialize naming the ref and the key, and
+// the same key on a board dict is refused by pcb.serialize before any YAML is
+// written — so nothing the panel could not load back is ever saved.
+func TestIPCRefusesUnknownKeysOnBothChannels(t *testing.T) {
 	yaml := "version: 1\n" +
 		"name: FC\nwidth_mm: 40\nheight_mm: 30\n" +
-		"forward_compat_root: {source: architect, rev: 9}\n" +
 		"components:\n" +
 		"  - ref: U1\n    footprint: IC_DIP\n    x_mm: 1\n    y_mm: 2\n    rotation_deg: 0\n" +
-		"    mpn: ATMEGA328P\n" +
 		"    pins:\n      - number: '1'\n        x_mm: 0\n        y_mm: 0\n        signal_class: analog\n" +
 		"nets: []\n"
-
-	// Step 1: pcb.deserialize (YAML in → {board, warnings}).
 	desArgs, _ := json.Marshal(map[string]string{"yaml": yaml})
-	desOut, err := HandleDeserialize(context.Background(), desArgs)
-	if err != nil {
-		t.Fatalf("deserialize: %v", err)
+	_, err := HandleDeserialize(context.Background(), desArgs)
+	if err == nil {
+		t.Fatal("deserialize accepted a pin key the schema does not model")
 	}
-	var des struct {
-		Board json.RawMessage `json:"board"`
-	}
-	if err := json.Unmarshal(desOut, &des); err != nil {
-		t.Fatal(err)
-	}
-	// The unknown keys must be present in the JSON the host receives (the
-	// previously-broken boundary): they were stripped before this fix.
-	boardJSON := string(des.Board)
-	if !strings.Contains(boardJSON, "forward_compat_root") {
-		t.Fatalf("root unknown field stripped from deserialize JSON:\n%s", boardJSON)
-	}
-	if !strings.Contains(boardJSON, "mpn") || !strings.Contains(boardJSON, "signal_class") {
-		t.Fatalf("nested unknown field stripped from deserialize JSON:\n%s", boardJSON)
+	for _, want := range []string{"U1", "pins[0] (1)", `"signal_class"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("deserialize refusal %q does not name %s", err.Error(), want)
+		}
 	}
 
-	// Step 2: pcb.serialize (the deserialized board back out → YAML).
-	serArgs, _ := json.Marshal(map[string]json.RawMessage{"board": des.Board})
-	serOut, err := HandleSerialize(context.Background(), serArgs)
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
+	serArgs := json.RawMessage(`{"board":{"version":1,"name":"T","width_mm":40,"height_mm":30,` +
+		`"components":[{"ref":"U1","footprint":"IC_DIP","x_mm":1,"y_mm":2,"rotation_deg":0,"colour":"red"}],"nets":[]}}`)
+	out, err := HandleSerialize(context.Background(), serArgs)
+	if err == nil {
+		t.Fatalf("serialize accepted an unknown component key: %s", out)
 	}
-	var ser struct {
-		YAML  string `json:"yaml"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(serOut, &ser); err != nil {
-		t.Fatal(err)
-	}
-	if ser.Error != "" {
-		t.Fatalf("serialize error: %s", ser.Error)
-	}
-	// The unknown fields survived the full IPC round trip into the re-emitted YAML.
-	for _, want := range []string{"forward_compat_root", "source: architect", "mpn: ATMEGA328P", "signal_class: analog"} {
-		if !strings.Contains(ser.YAML, want) {
-			t.Fatalf("unknown field %q lost across IPC round trip:\n%s", want, ser.YAML)
+	for _, want := range []string{"U1", `"colour"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("serialize refusal %q does not name %s", err.Error(), want)
 		}
 	}
 }

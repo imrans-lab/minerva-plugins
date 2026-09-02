@@ -1643,8 +1643,8 @@ the same turn the canvas R key makes.)
 **Roles come from the board, never from memory.** A pin's canonical dict may
 carry `roles: [strapping]`; every key beyond `number` / `x_mm` / `y_mm`
 round-trips verbatim through `pcb_component.pin_extra`, the Go board model's
-`Pin.Extra` and the canonical YAML, so a socket's pin table is authored once in
-the board document and read everywhere. A board that declares nothing answers
+typed `Pin.Roles` and the canonical YAML, so a socket's pin table is authored
+once in the board document and read everywhere. A board that declares nothing answers
 `roles: []` — the vocabulary the docs and the sidebar are written against is
 `strapping`, `uart_console`, `jtag`, `onboard_led`, `adc`, and a board may add
 its own.

@@ -6,12 +6,11 @@ extends RefCounted
 ## unresolvable and break the off-tree parser cache). Siblings are reached via
 ## relative preload(); cross-file values are duck-typed.
 ##
-## Boundary: to_board_dict()/from_board_dict() speak the canonical contract
-## (ref/x_mm/y_mm/rotation_deg/pins[{number,x_mm,y_mm}]). Render detail
-## (footprint_id/width/height/local_bounds/pads/color/…) is emitted as canonical
-## component "Extra" — sibling keys, exactly the set pcb/internal/board/minpcb.go
-## parks in Component.Extra. Internal to_dict()/from_dict() keep the legacy shape
-## (undo snapshots + Round-B friction).
+## Boundary: to_board_dict()/from_board_dict() speak the canonical contract —
+## the DESIGN keys the Go codec models (pcb/internal/board) and nothing else;
+## the codec refuses any key it does not model. Render and session state
+## (bounds/colour/lock/resolved lands/silk) live on the model and in the
+## undo-snapshot shape to_dict()/from_dict(), never in the canonical dict.
 
 const _Self := preload("pcb_component.gd")
 ## The panel's half of the board stroke font — the same glyph table the
@@ -70,17 +69,17 @@ var local_bounds: Rect2 = Rect2(-1.27, -1.27, 5.0, 2.5)
 ## Pin definitions: pin_name -> relative Vector2 offset from anchor (origin)
 var pins: Dictionary = {}
 
-## Canonical component keys this model does NOT represent (assembly, mpn, ...),
-## preserved verbatim from load_from_board_dict and re-emitted by
-## to_board_dict — the GDScript mirror of Go's Extra passthrough. Epoch CPN1
-## found the loss live: `assembly: exclude` and `mpn` vanished across the
-## first real promote.
-var canonical_extra: Dictionary = {}
+## The authored `assembly` block — what an assembly house buys and places for
+## this part (docs/board-yaml.md). Carried as the mapping the codec models;
+## the legacy `exclude` scalar is folded to `{populate: false}` on load, the
+## same fold the codec applies, so one shape reaches every reader. Empty means
+## nothing authored, and no key is emitted.
+var assembly: Dictionary = {}
 
-## Per-pin canonical extras keyed by pin number (drill_mm /
-## annulus_diameter_mm / plated / pad_width_mm / pad_height_mm / name, ...) —
-## same preservation contract as canonical_extra; see the pin-loading note in
-## load_from_board_dict.
+## Per-pin canonical fab geometry keyed by pin number (drill_mm /
+## annulus_diameter_mm / plated / pad_width_mm / pad_height_mm / name / roles)
+## the model does not represent, re-emitted verbatim; see the pin-loading note
+## in load_from_board_dict.
 var pin_extra: Dictionary = {}
 
 ## The component's value — what the part IS ("10k", "NE555"). ONE HOME: the
@@ -89,8 +88,12 @@ var pin_extra: Dictionary = {}
 ## save wrote that choice over the other.
 var value: String = ""
 
-## Additional properties (package, manufacturer, group_id, etc.)
-var properties: Dictionary = {}
+## The schematic symbol id ("Device:NE555P"), an informal hint check_libraries
+## verifies; it never affects geometry. Empty means none, and no key is emitted.
+var symbol: String = ""
+
+## Component-group membership — see group_id() / set_group_id().
+var _group_id: String = ""
 
 ## Layer: "top" or "bottom"
 var layer: String = "top"
@@ -140,6 +143,13 @@ var has_pad_geometry: bool = false
 ## footprint pad".
 var pads_authored: bool = false
 
+## Whether `graphics` is the BOARD's own artwork — the loaded dict carried a
+## `graphics` key, or artwork was imported with no library behind it — as
+## opposed to the silk this host's resolve attached. Authored artwork is
+## emitted on the canonical dict and never overwritten by a resolve; a part
+## that owns its lands (pads_authored) owns its artwork too.
+var graphics_authored: bool = false
+
 ## The COMPONENT-level resolved fact, distinct from the PAD-level
 ## has_pad_geometry above: a silk-only footprint resolves with zero pads, so
 ## the pad marker alone cannot say "this component is resolved". Set by the
@@ -149,12 +159,10 @@ var pads_authored: bool = false
 ## THIS machine's library, which is a fact about the machine, not about the
 ## board. load_from_board_dict therefore never restores it from a saved
 ## document: a board authored where the library HAD the ref, reopened where it
-## does not, would otherwise claim resolved — and canonical_wire_board would
-## trim the pads off a part the worker here cannot resolve either, handing it a
-## silently pad-less component. It is set only from a resolve performed in this
-## session (pcb_library_part.apply_geometry, or a board load whose caller says
-## the flags came from a live resolve), and to_saved_board_dict strips it back
-## out of everything written to disk.
+## does not, would otherwise claim resolved. It is set only through
+## adopt_resolved — from a resolve performed in this session
+## (pcb_library_part.apply_geometry, or the `resolved` map beside a
+## pcb.deserialize reply) — and to_board_dict never emits it.
 var footprint_resolved: bool = false
 
 ## Silk/courtyard graphics attached by the worker's footprint-RESOLVE step
@@ -248,24 +256,12 @@ var _loading_fields: bool = false
 var bbox_center_offset: Vector2 = Vector2.ZERO
 
 
-## ── Component groups (stage 1) ────────────────────────────────────────────────
-## The `properties` key group membership rides in.
-##
-## PROPERTIES, NOT A NEW TOP-LEVEL FIELD — measured, not stylistic. The legacy
-## .minpcb importer (pcb/internal/board/minpcb.go) walks every per-component key
-## against `knownComponentFields` and emits
-## `component %q: non-canonical field %q preserved as passthrough` for anything
-## outside it (minpcb.go:250). `properties` IS in that set and is already carried
-## whole, so a group id inside it rides every serialization path — to_dict,
-## to_board_dict, the two load halves, undo snapshots, host_owned save/load —
-## with no Go change and no per-component warning. A top-level `group_id` would
-## have needed the Go map extended, which is out of this round's fence.
-const GROUP_PROPERTY_KEY := "group_id"
+## ── Component groups ─────────────────────────────────────────────────────────
 
-
-## This component's group id, or "" when it belongs to no group.
+## This component's group id, or "" when it belongs to no group. A canonical
+## `group_id` key on the wire; absent means ungrouped.
 func group_id() -> String:
-	return str(properties.get(GROUP_PROPERTY_KEY, ""))
+	return _group_id
 
 
 ## Is this component a member of a group?
@@ -275,14 +271,10 @@ func is_grouped() -> bool:
 
 ## Join a group, or leave one when `gid` is empty.
 ##
-## Leaving ERASES the key rather than storing "": an ungrouped component must
-## serialize exactly as it did before groups existed, so a board that was grouped
-## and then ungrouped round-trips byte-identical to one that never was.
+## An empty id is "ungrouped" and emits no key, so a board that was grouped and
+## then ungrouped round-trips byte-identical to one that never was.
 func set_group_id(gid: String) -> void:
-	if gid.is_empty():
-		properties.erase(GROUP_PROPERTY_KEY)
-	else:
-		properties[GROUP_PROPERTY_KEY] = gid
+	_group_id = gid
 
 
 ## Get the string name of this component's footprint enum (within-file enum
@@ -558,14 +550,20 @@ func get_local_body_polygon() -> PackedVector2Array:
 	])
 
 
-## Load pad geometry from pcb-architect footprint-geometry output
+## Load AUTHORED pad geometry (the import_footprint_geometry path, or lands
+## stated with no library behind them): from here on the BOARD owns this
+## component's lands (pads_authored), so the canonical dict states a `pads`
+## key and the worker compiles it FULL without consulting the library. A
+## library part's resolved lands take adopt_resolved instead, which leaves the
+## board's authority where it was.
 ## geometry: Dictionary with keys: pads, bounding_box, footprint_id,
-##   has_pad_geometry (canonical resolved-vs-fallback marker; Stage 2 step 7).
+##   has_pad_geometry (canonical resolved-vs-fallback marker).
 ##   The legacy key ``footprint_found`` is still accepted for older
 ##   pcb-architect output that predates the rename.
 func load_pad_geometry(geometry: Dictionary) -> void:
 	footprint_id = geometry.get("footprint_id", "")
 	has_pad_geometry = geometry.get("has_pad_geometry", geometry.get("footprint_found", false))
+	pads_authored = true
 
 	# Update bounding box from footprint data
 	var bbox: Dictionary = geometry.get("bounding_box", {})
@@ -592,8 +590,13 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 	# the contact predicate then read every imported roundrect as the stadium
 	# inscribed in it — copper on a corner became a false open.
 	_pads_from_list(geometry.get("pads", []))
+	pins_from_pads()
 
-	# Also update pins dictionary for net connections (electrical pads only)
+
+## Rebuild the logical pin map (net connections) from the current lands —
+## electrical pads only; a mechanical hole is not a pin. A land that repeats a
+## number leaves the LAST one's position as the pin centre.
+func pins_from_pads() -> void:
 	pins.clear()
 	for pad in pads:
 		var num := str(pad.get("number", ""))
@@ -612,6 +615,7 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 ## `pads[].position`, and so is the designator anchor.
 func load_footprint_graphics(graphics_data: Array, refdes_anchor_data: Dictionary) -> void:
 	_graphics_from_list(graphics_data)
+	graphics_authored = true
 	_adopt_derived_anchor(refdes_anchor_data)
 
 
@@ -1206,7 +1210,9 @@ func duplicate_component():
 	copy.height = height
 	copy.pins = pins.duplicate(true)
 	copy.value = value
-	copy.properties = properties.duplicate(true)
+	copy.symbol = symbol
+	copy.assembly = assembly.duplicate(true)
+	copy._group_id = _group_id
 	copy.layer = layer
 	copy.color = color
 	copy.label_visible = label_visible
@@ -1215,6 +1221,7 @@ func duplicate_component():
 	copy.has_pad_geometry = has_pad_geometry
 	copy.pads_authored = pads_authored
 	copy.graphics = graphics.duplicate(true)
+	copy.graphics_authored = graphics_authored
 	# The anchor, not the strokes: copy.id is already this copy's own name, so
 	# assigning the anchor renders the designator the COPY carries. A copied
 	# blob of strokes is how a part came to draw its source's ref.
@@ -1223,10 +1230,8 @@ func duplicate_component():
 	copy.bbox_center_offset = bbox_center_offset
 	copy.local_bounds = local_bounds
 	copy.locked = locked
-	# Canonical passthrough rides every copy path too — a duplicated component
-	# that lost `assembly: exclude` or its pins' drill/annulus overrides would
-	# be a different PART, silently (Codex review 1086 finding 3's class).
-	copy.canonical_extra = canonical_extra.duplicate(true)
+	# A duplicated component that lost its pins' drill/annulus overrides would
+	# be a different PART, silently.
 	copy.pin_extra = pin_extra.duplicate(true)
 	return copy
 
@@ -1464,6 +1469,7 @@ func to_dict() -> Dictionary:
 		"has_pad_geometry": has_pad_geometry,
 		"footprint_resolved": footprint_resolved,
 		"graphics": _graphics_to_list(),
+		"graphics_authored": graphics_authored,
 		"refdes_anchor": refdes_anchor.duplicate(),
 		# The AUTHORED half rides the undo shape too: history round-trips
 		# reconstruct components from this dict, and a snapshot that carried
@@ -1472,20 +1478,18 @@ func to_dict() -> Dictionary:
 		"refdes_placement": refdes_placement.duplicate(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
 		"value": value,
-		"properties": properties.duplicate(),
+		"symbol": symbol,
+		"assembly": assembly.duplicate(true),
+		"group_id": _group_id,
 		"layer": layer,
 		"color": {"r": color.r, "g": color.g, "b": color.b, "a": color.a},
 		"label_visible": label_visible,
 		"locked": locked,
-		# CANONICAL PASSTHROUGH ON THE LEGACY CODEC (Codex review 1086 finding 3).
-		# This shape is not just the .minpcb file format — PCBData._serialize_
-		# components uses it for UNDO HISTORY, and history round-trips
-		# reconstruct components from it. Without these two keys an undo after
-		# a canonical load silently erased `assembly: exclude`, `mpn`, and pin
-		# drill/annulus overrides, and the next promote wrote that loss to the
-		# design of record. Nested under one key each so they cannot collide
-		# with a legacy field name.
-		"canonical_extra": canonical_extra.duplicate(true),
+		# This shape is the UNDO-HISTORY snapshot (PCBData._serialize_components):
+		# every typed field must ride it or an undo after a canonical load
+		# silently erases it, and the next promote writes that loss to the
+		# design of record. The per-pin fab overrides ride under one key so they
+		# cannot collide with a legacy field name.
 		"pin_extra": pin_extra.duplicate(true)
 	}
 	# A pins-only component states no `pads` key on EITHER codec (_emits_pads).
@@ -1538,6 +1542,7 @@ func load_from_dict(data: Dictionary) -> void:
 	pads_authored = raw_pads is Array
 	_pads_from_list(raw_pads if pads_authored else [])
 	_graphics_from_list(data.get("graphics", []))
+	graphics_authored = bool(data.get("graphics_authored", false))
 	# Authored FIRST: the overlay reads it.
 	refdes_placement = _anchor_from_any(data.get("refdes_placement")).duplicate()
 	_adopt_derived_anchor(_anchor_from_any(data.get("refdes_anchor")))
@@ -1551,7 +1556,9 @@ func load_from_dict(data: Dictionary) -> void:
 		_derive_bounds_from_graphics()
 
 	value = str(data.get("value", ""))
-	properties = data.get("properties", {}).duplicate()
+	symbol = str(data.get("symbol", ""))
+	assembly = _assembly_from_any(data.get("assembly"))
+	_group_id = str(data.get("group_id", ""))
 	layer = data.get("layer", "top")
 
 	var color_data: Dictionary = data.get("color", {})
@@ -1565,19 +1572,6 @@ func load_from_dict(data: Dictionary) -> void:
 
 	label_visible = data.get("label_visible", true)
 	locked = data.get("locked", false)
-	# Restore the canonical passthrough (Codex review 1086 finding 3) — the
-	# write half is in to_dict(). Absent keys leave EMPTY dicts rather than
-	# stale state: a legacy .minpcb that predates these fields genuinely has
-	# no extras, and inheriting the previous component's would be worse than
-	# having none.
-	var ce = data.get("canonical_extra", {})
-	canonical_extra = (ce as Dictionary).duplicate(true) if ce is Dictionary else {}
-	# Panel state saved before the designator became derived parked the
-	# rendered strokes in here, and to_board_dict re-emits the passthrough
-	# verbatim — which is how one component's designator reached another
-	# component's saved board. Nothing renders from them any more; drop them
-	# on the way in so no board written from this session can carry them.
-	canonical_extra.erase("refdes_graphics")
 	var pe = data.get("pin_extra", {})
 	pin_extra = (pe as Dictionary).duplicate(true) if pe is Dictionary else {}
 
@@ -1594,11 +1588,13 @@ static func from_dict(data: Dictionary):
 
 
 # ── Canonical boundary (pcb/internal/board Component) ─────────────────────────
-# Canonical fields: ref / footprint / value / x_mm / y_mm / rotation_deg / layer
-# / pins:[{number,x_mm,y_mm}]. Render detail is emitted as canonical "Extra"
-# (sibling keys) — the exact set minpcb.go parks in Component.Extra so YAML
-# round-trips it losslessly. The value is written ONCE, to the canonical `value`
-# key; `properties` never carries one (see the `value` field).
+# The dict IS the design: ref / footprint / value / x_mm / y_mm / rotation_deg /
+# layer / pins / assembly / group_id / refdes_placement, plus pads + graphics
+# only when this component OWNS its geometry (pads_authored). Nothing this
+# session derived (resolved lands, silk, the effective designator anchor,
+# footprint_resolved) and nothing about how the canvas draws it (bounds,
+# colour, lock, label) is in it. The Go codec refuses any key it does not
+# model, so one dict serves the worker channels, the document and the promote.
 
 ## Serialize to a canonical board-contract component dict.
 func to_board_dict() -> Dictionary:
@@ -1612,15 +1608,11 @@ func to_board_dict() -> Dictionary:
 	}
 	if not value.is_empty():
 		d["value"] = value
-
-	# Re-emit the preserved canonical extras (assembly, mpn, ...) — knowns win
-	# on any collision, so a stale extra can never clobber a modeled field.
-	for extra_key in canonical_extra:
-		if not d.has(extra_key):
-			d[extra_key] = canonical_extra[extra_key]
+	if not symbol.is_empty():
+		d["symbol"] = symbol
 
 	# pins: name→offset map → sorted list of {number, x_mm, y_mm} + each pin's
-	# preserved fab-geometry extras (drill_mm/annulus_diameter_mm/...).
+	# preserved fab-geometry extras (drill_mm/annulus_diameter_mm/roles/...).
 	var pin_keys := pins.keys()
 	pin_keys.sort()
 	var pin_list := []
@@ -1634,91 +1626,57 @@ func to_board_dict() -> Dictionary:
 		pin_list.append(pin_dict)
 	d["pins"] = pin_list
 
-	# Canonical Extra (render detail — mirrors minpcb.go knownComponentFields).
-	d["footprint_id"] = footprint_id
-	d["width"] = width
-	d["height"] = height
-	d["local_bounds"] = {
-		"x": local_bounds.position.x, "y": local_bounds.position.y,
-		"w": local_bounds.size.x, "h": local_bounds.size.y}
+	if not assembly.is_empty():
+		d["assembly"] = assembly.duplicate(true)
+	if not _group_id.is_empty():
+		d["group_id"] = _group_id
 	# Present-only: the `pads` KEY is what tells the worker the board owns this
-	# component's geometry outright (_emits_pads / pads_authored).
-	if _emits_pads():
+	# component's geometry outright (inline_footprint FULL vs PARTIAL), and the
+	# graphics beside it are the artwork that geometry draws. A library part's
+	# resolved lands and silk are this session's, never the design's.
+	if pads_authored:
 		d["pads"] = _pads_to_list()
-	d["has_pad_geometry"] = has_pad_geometry
-	# Present-only, and straight off the live field rather than out of the
-	# canonical_extra passthrough: the flag on the dict must be THIS session's
-	# resolve result, which is what canonical_wire_board reads to decide whether
-	# the worker can re-derive the lands it is about to drop. Emitting it
-	# unconditionally would put `false` on the wire for every unresolved part
-	# for no reader; emitting it from canonical_extra would replay whatever the
-	# document was saved with. to_saved_board_dict strips it from anything that
-	# gets written, so no file ever carries it.
-	if footprint_resolved:
-		d["footprint_resolved"] = true
-	d["graphics"] = _graphics_to_list()
+	if graphics_authored:
+		d["graphics"] = _graphics_to_list()
 	# AUTHORED BOARD STATE, present-only. Absent means nobody set this
-	# component's designator and the worker's derivation applies unchanged, so a
-	# board that has never used set_refdes serializes exactly as it did before
-	# the key existed. `refdes_anchor` is NOT emitted here — it is the effective
-	# value a resolve computes, and writing it would freeze one host's library
-	# into the document (the reason it is a derived key on the Go side).
+	# component's designator and the worker's derivation applies unchanged.
+	# `refdes_anchor` is NOT emitted — it is the effective value a resolve
+	# computes, and writing it would freeze one host's library into the document.
 	if not refdes_placement.is_empty():
 		d["refdes_placement"] = refdes_placement.duplicate()
-	d["bbox_center_offset"] = {"x": bbox_center_offset.x, "y": bbox_center_offset.y}
-	d["properties"] = properties.duplicate()
-	d["color"] = {"r": color.r, "g": color.g, "b": color.b, "a": color.a}
-	d["label_visible"] = label_visible
-	d["locked"] = locked
 	return d
 
 
 ## Restore from a canonical board-contract component dict.
 ##
-## `resolve_is_live` says whether `data`'s footprint_resolved flags were
-## produced by a resolve run on THIS machine moments ago (the pcb.deserialize
-## board-load path, which resolves against this host's library before replying)
-## rather than read back off a document. Only that caller may say true; a file
-## restore, an undo snapshot and a hand-built dict all leave it false, so a
-## stale flag saved elsewhere cannot survive the load. See footprint_resolved.
-func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
+## `resolved` is THIS host's resolve of the component (the `resolved[ref]`
+## entry a pcb.deserialize reply carries beside the board): silk graphics,
+## real pad geometry, the effective designator anchor and the resolved fact.
+## A document, an undo snapshot and a hand-built dict pass nothing, so a board
+## reopened on a machine whose library lacks a part never inherits another
+## machine's resolve. See adopt_resolved.
+func load_from_board_dict(data: Dictionary, resolved: Dictionary = {}) -> void:
 	_loading_fields = true
 	id = str(data.get("ref", data.get("id", "")))
 	var authored_fp := str(data.get("footprint", "CUSTOM"))
 	set_footprint_by_name(authored_fp)
-	footprint_id = str(data.get("footprint_id", ""))
-	# Read-side ref preservation (docket 019fcb32d81c / the 019fa9640ac1 hard
-	# prerequisite): a canonical library ref ("Lib:Name") is no enum name, so
-	# set_footprint_by_name maps it to CUSTOM — and without keeping the
-	# authored string, to_board_dict could only ever hand the worker "CUSTOM",
-	# which the hermetic compiler refuses. An explicit footprint_id from the
-	# Extra round-trip wins; otherwise the authored ref IS the identity.
-	if footprint_id.is_empty() and footprint == FootprintType.CUSTOM and authored_fp != "CUSTOM":
-		footprint_id = authored_fp
+	# A canonical library ref ("Lib:Name") is no enum name, so set_footprint_by_name
+	# maps it to CUSTOM — the authored string IS the identity, kept so
+	# to_board_dict hands the worker the ref rather than "CUSTOM".
+	footprint_id = authored_fp if (footprint == FootprintType.CUSTOM and authored_fp != "CUSTOM") else ""
 	position = Vector2(float(data.get("x_mm", 0.0)), float(data.get("y_mm", 0.0)))
 	rotation = float(data.get("rotation_deg", 0.0))
 	layer = str(data.get("layer", "top"))
-	width = float(data.get("width", 5.0))
-	height = float(data.get("height", 2.5))
-
-	var bounds_data: Dictionary = data.get("local_bounds", {})
-	if bounds_data.size() > 0:
-		local_bounds = Rect2(
-			bounds_data.get("x", -width / 2.0),
-			bounds_data.get("y", -height / 2.0),
-			bounds_data.get("w", width),
-			bounds_data.get("h", height))
-	else:
-		local_bounds = Rect2(-width / 2.0, -height / 2.0, width, height)
+	value = str(data.get("value", ""))
+	symbol = str(data.get("symbol", ""))
+	assembly = _assembly_from_any(data.get("assembly"))
+	_group_id = str(data.get("group_id", ""))
 
 	# pins: canonical list of {number,x_mm,y_mm} → name→offset map. Every key
 	# BEYOND number/x_mm/y_mm (drill_mm, annulus_diameter_mm, plated,
-	# pad_width_mm, pad_height_mm, name, ...) is AUTHORED FAB GEOMETRY the
+	# pad_width_mm, pad_height_mm, name, roles) is AUTHORED FAB GEOMETRY the
 	# model does not represent — preserved per pin and re-emitted verbatim by
-	# to_board_dict. Epoch CPN1 found the loss live: the coupon's TP1
-	# min-annular override (drill 0.6 / annulus 0.96) silently reverted to the
-	# library default across the first real promote, killing the witness the
-	# board exists to carry.
+	# to_board_dict.
 	pins.clear()
 	pin_extra.clear()
 	var pin_list: Array = data.get("pins", [])
@@ -1734,107 +1692,138 @@ func load_from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> vo
 			if not extras.is_empty():
 				pin_extra[pnum] = extras
 
-	has_pad_geometry = data.get("has_pad_geometry", false)
-	footprint_resolved = resolve_is_live and bool(data.get("footprint_resolved", false))
-	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
-	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
-	# Render pads: editor-authored boards carry an explicit `pads` array (render
-	# detail parked in canonical Extra). Worker-authored boards (the worker
-	# canonical YAML) instead carry pad geometry ON the pins themselves and have
-	# NO `pads` array — synthesize the render pads from that pin geometry so a
-	# whole-board load (minerva_pcb_load_board) renders real pads, not
-	# placeholders. Fit the body to the pads only when the dict gave no size.
-	# Branch on the KEY, matching the worker's own FULL-vs-PARTIAL rule: a
-	# stated `pads` list is the complete set of lands even when it is empty, so
-	# synthesizing pads from the pins there would invent copper the board says
-	# it does not have. A `pads` value that is not a list is unreadable as
-	# geometry and takes the pins path.
+	# Authored FIRST: the overlay reads it.
+	refdes_placement = _anchor_from_any(data.get("refdes_placement")).duplicate()
+
+	# SESSION STATE RESETS: this dict states nothing about this machine.
+	footprint_resolved = false
+	# Lands: the board's own when it states a `pads` KEY (an empty list is a real
+	# answer — zero pads — so the branch is on the key, matching the worker's
+	# FULL-vs-PARTIAL rule), else render pads synthesized from the pins until a
+	# resolve answers. The body box fits whatever lands there are, and the pad
+	# marker is derived from the lands the board itself states.
 	var raw_pads: Variant = data.get("pads")
 	pads_authored = raw_pads is Array
 	if pads_authored:
 		_pads_from_list(raw_pads)
+		_fit_body_to_pads()
 	else:
-		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
+		_pads_from_canonical_pins(pin_list, true)
+	has_pad_geometry = pads_authored and not pads.is_empty()
+	# Artwork: the board's own when it states a `graphics` KEY (present or
+	# absent beside a `pads` key, the worker's FULL rule), else this host's
+	# resolve supplies it.
+	graphics_authored = data.get("graphics") is Array
 	_graphics_from_list(data.get("graphics", []))
-	# Authored FIRST: the overlay reads it. A document's authored placement is
-	# what makes the label draw where it was SET even before this session's
-	# resolve has answered — and the resolve answers with the same overlay
-	# applied, so the two agree.
-	refdes_placement = _anchor_from_any(data.get("refdes_placement")).duplicate()
-	_adopt_derived_anchor(_anchor_from_any(data.get("refdes_anchor")))
-
-	# U1-render unit 2: when the board dict gave no explicit size (no
-	# local_bounds, no width/height Extra — the same "not (data.has(...))"
-	# check the pad-fit call above uses for `fit_body`), replace whatever got
-	# computed above — the default-centered rect OR the _fit_body_to_pads()
-	# pad-extent fit — with the real courtyard/silk extent. The courtyard is
-	# the module's true footprint; pads/defaults are only fallbacks for when
-	# nothing better is known, so this intentionally runs AFTER and can
-	# override the pad-fit result. Explicit local_bounds/width/height in
-	# `data` (checked identically) always wins and is never touched.
-	if bounds_data.is_empty() and not data.has("width") and not data.has("height"):
-		_derive_bounds_from_graphics()
-
-	properties = (data.get("properties", {}) as Dictionary).duplicate()
-	# A `properties.value` never reaches here — board_dict_refusal() rejects the
-	# whole document at PCBData.from_board_dict before any component is built.
-	value = str(data.get("value", ""))
-
-	var color_data: Dictionary = data.get("color", {})
-	if color_data.size() > 0:
-		color = Color(
-			color_data.get("r", 0.2),
-			color_data.get("g", 0.6),
-			color_data.get("b", 0.3),
-			color_data.get("a", 1.0))
-	label_visible = data.get("label_visible", true)
-	locked = data.get("locked", false)
-
-	# Preserve every canonical key this model has no field for (assembly, mpn,
-	# future schema growth) — see canonical_extra's declaration. The known set
-	# below is every key the reads above consumed; anything else is authored
-	# design intent that must survive the round trip verbatim.
-	canonical_extra.clear()
-	# footprint_resolved is listed here so the passthrough cannot re-emit it:
-	# it is session state (see its declaration), and canonical_extra is the one
-	# path by which a saved flag could otherwise reach to_board_dict again.
-	# refdes_graphics is listed for the same reason and read by nothing: older
-	# boards carry a RENDERING of some component's designator, and parking it
-	# in the passthrough is what re-emitted one part's name under another's.
-	var known := ["ref", "id", "footprint", "footprint_id", "x_mm", "y_mm",
-		"rotation_deg", "layer", "width", "height", "local_bounds", "pads",
-		"has_pad_geometry", "footprint_resolved", "graphics",
-		"refdes_anchor", "refdes_graphics", "refdes_placement",
-		"bbox_center_offset", "properties",
-		"color", "label_visible", "locked", "pins", "value"]
-	for k in data:
-		if k not in known:
-			canonical_extra[k] = data[k]
+	_adopt_derived_anchor({})
+	adopt_resolved(resolved)
+	# The courtyard is the module's true footprint; pads are only the fallback
+	# for when nothing better is drawn.
+	_derive_bounds_from_graphics()
 
 	# ONE render, from the ref and anchor this load finished with.
 	_loading_fields = false
 	_refresh_refdes_graphics()
 
 
+## Take THIS host's resolve of the component: silk graphics and real pad
+## geometry for a library part, the effective designator anchor through the
+## authored overlay, and the resolved fact. ONE RULE, shared with the Go
+## reply builder (internal/tools resolvedEnrichment): a part that states a
+## `pads` key owns its lands AND its artwork (the worker's FULL rule), so
+## neither resolved pads nor resolved graphics touch it; a part that authored
+## artwork alone keeps that too. The anchor and the fact are adopted regardless. Returns whether anything changed. The one
+## writer for every resolve source: the load path above, a by-ref add, and a
+## reply that arrives after a document restore.
+func adopt_resolved(entry: Dictionary) -> bool:
+	if entry.is_empty():
+		return false
+	var changed := false
+	if not pads_authored and not graphics_authored:
+		var resolved_graphics: Variant = entry.get("graphics")
+		if resolved_graphics is Array:
+			_graphics_from_list(resolved_graphics)
+			changed = true
+	if not pads_authored:
+		var resolved_pads: Variant = entry.get("pads")
+		if resolved_pads is Array:
+			_pads_from_list(resolved_pads)
+			has_pad_geometry = bool(entry.get("has_pad_geometry", false))
+			_fit_body_to_pads()
+			changed = true
+	if bool(entry.get("footprint_resolved", false)) and not footprint_resolved:
+		footprint_resolved = true
+		changed = true
+	var anchor: Dictionary = _anchor_from_any(entry.get("refdes_anchor"))
+	if not anchor.is_empty():
+		var before: Dictionary = refdes_anchor.duplicate()
+		_adopt_derived_anchor(anchor)
+		changed = changed or refdes_anchor != before
+	if changed:
+		_derive_bounds_from_graphics()
+	return changed
+
+
+## The authored assembly block as the ONE shape every reader sees: the mapping
+## verbatim, the legacy `exclude` scalar folded to `{populate: false}` — the
+## same fold the Go codec applies on load — and anything else (absent, null, a
+## typo scalar) as no block at all.
+static func _assembly_from_any(v: Variant) -> Dictionary:
+	if v is Dictionary:
+		return (v as Dictionary).duplicate(true)
+	if v is String and str(v) == "exclude":
+		return {"populate": false}
+	return {}
+
+
+## The component keys this model reads — a MIRROR of the Go schema's Component
+## (pcb/internal/board/board.go), which is the authority. A key the codec
+## grows and this list has not is a FALSE refusal here, loud and immediate;
+## a stale list can never let a key through silently.
+const CANONICAL_KEYS: Array[String] = ["ref", "footprint", "value", "x_mm",
+	"y_mm", "rotation_deg", "layer", "symbol", "pins", "assembly", "pads",
+	"graphics", "refdes_placement", "group_id"]
+
+
 ## Why a canonical component dict cannot be loaded, or "" when it can.
 ##
 ## Checked BEFORE any component is built (PCBData.from_board_dict), because the
 ## only answer that keeps the board honest is to refuse the whole document: a
-## component carrying `properties.value` states the value twice, and a load that
+## key this model does not read would be dropped by the next to_board_dict, and
+## `properties.value` in particular states the value twice, so a load that
 ## picked one home would write that pick over the other on the next save.
-static func board_dict_refusal(data: Dictionary) -> String:
+## `where` is the entity's path for the message, in the Go codec's shape.
+static func board_dict_refusal(data: Dictionary, where: String = "") -> String:
+	var label := where if not where.is_empty() \
+		else "board.components (%s)" % str(data.get("ref", data.get("id", "?")))
 	var props: Dictionary = data.get("properties", {}) if data.get("properties") is Dictionary else {}
 	if props.has("value"):
-		return ("component \"%s\": properties.value is not a home for the component"
-			+ " value; delete it and author the top-level \"value\" key") \
-			% str(data.get("ref", data.get("id", "?")))
+		return ("%s: properties.value is not a home for the component"
+			+ " value; delete it and author the top-level \"value\" key") % label
+	# The block is a mapping or exactly the legacy `exclude` scalar; anything
+	# else ("exlude") would fold away as "nothing authored" and turn furniture
+	# into a populated part — the codec refuses it, and so does this loader.
+	var block: Variant = data.get("assembly")
+	if data.has("assembly") and block != null and not (block is Dictionary) \
+			and not (block is String and str(block) == "exclude"):
+		return ("invalid_component_assembly: %s: assembly must be a mapping"
+			+ " or the legacy \"exclude\" scalar, got \"%s\"") % [label, str(block)]
+	return unknown_key_refusal(data, CANONICAL_KEYS, label)
+
+
+## The first key of `data` outside `known`, as the refusal the Go codec would
+## give for it, or "" when every key is known.
+static func unknown_key_refusal(data: Dictionary, known: Array[String], where: String) -> String:
+	for key in data:
+		if str(key) not in known:
+			return "invalid_board_structure: %s: unknown key \"%s\"" % [where, str(key)]
 	return ""
 
 
 ## Create from a canonical board-contract component dict (static constructor).
-static func from_board_dict(data: Dictionary, resolve_is_live: bool = false):
+static func from_board_dict(data: Dictionary, resolved: Dictionary = {}):
 	var component := _Self.new()
-	component.load_from_board_dict(data, resolve_is_live)
+	component.load_from_board_dict(data, resolved)
 	return component
 
 

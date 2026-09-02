@@ -10,9 +10,8 @@ import (
 
 // TestSMDPadDimsSurviveJSONMarshal guards the board-load gap: pad_width_mm /
 // pad_height_mm on an SMD pin must survive a YAML->Board->JSON round-trip. They
-// were previously parked in Pin.Extra (json:"-") and silently dropped on JSON
-// marshal, which lost SMD pad dimensions over the pcb.deserialize IPC reply that
-// minerva_pcb_load_board depends on.
+// they are typed fields, so the pcb.deserialize IPC reply that
+// minerva_pcb_load_board depends on carries them.
 func TestSMDPadDimsSurviveJSONMarshal(t *testing.T) {
 	yamlSrc := "version: 1\nname: SMD\nwidth_mm: 10\nheight_mm: 10\n" +
 		"components:\n  - ref: SW1\n    footprint: SWITCH\n    x_mm: 5\n    y_mm: 5\n    rotation_deg: 0\n" +
@@ -278,21 +277,15 @@ version: 1
 	}
 }
 
-func TestUnknownTopLevelKeySurvives(t *testing.T) {
+func TestUnknownTopLevelKeyIsRefusedByName(t *testing.T) {
 	src := canonicalYAML + "experimental_zone: {enabled: true}\n"
-	b, err := UnmarshalYAML([]byte(src))
-	if err != nil {
-		t.Fatal(err)
+	_, err := UnmarshalYAML([]byte(src))
+	if err == nil {
+		t.Fatal("an unknown top-level key was accepted")
 	}
-	if _, ok := b.Extra["experimental_zone"]; !ok {
-		t.Fatalf("unknown top-level key not captured in Extra: %#v", b.Extra)
-	}
-	out, err := MarshalYAML(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(out), "experimental_zone") {
-		t.Fatalf("unknown key dropped on re-marshal:\n%s", out)
+	if !strings.Contains(err.Error(), "invalid_board_structure") ||
+		!strings.Contains(err.Error(), `"experimental_zone"`) {
+		t.Fatalf("refusal does not carry the code and the key: %v", err)
 	}
 }
 
@@ -423,8 +416,7 @@ func TestZoneMinimaRoundTripAndUnsetDistinction(t *testing.T) {
 		t.Fatalf("YAML round trip lost the thickness: %+v", back.DesignRules)
 	}
 
-	// The IPC boundary keeps both, and keeps the untyped extras beside them.
-	b.DesignRules.Extra = map[string]interface{}{"copper_weight_oz": 2.0}
+	// The IPC boundary keeps both.
 	j, err := json.Marshal(b.DesignRules)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -436,9 +428,6 @@ func TestZoneMinimaRoundTripAndUnsetDistinction(t *testing.T) {
 	if d.ZoneMinIslandAreaMM2 == nil || *d.ZoneMinIslandAreaMM2 != 0 ||
 		d.ZoneMinThicknessMM == nil || *d.ZoneMinThicknessMM != 0.2 {
 		t.Fatalf("JSON dropped a zone minimum: %s", string(j))
-	}
-	if d.Extra["copper_weight_oz"] != 2.0 {
-		t.Fatalf("typing the minima broke DesignRules Extra: %#v", d.Extra)
 	}
 
 	// UNSET is a third state, distinct from either number: the key is absent

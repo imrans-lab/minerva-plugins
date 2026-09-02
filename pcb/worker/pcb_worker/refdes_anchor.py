@@ -129,8 +129,8 @@ OUTLINE_LAYERS = frozenset({"F.SilkS", "B.SilkS", "F.Fab", "B.Fab"})
 FAB_LAYERS = frozenset({"F.Fab", "B.Fab"})
 
 #: The per-component key a BOARD authors its designator placement under. Not a
-#: derived key: the Go codec carries it like any other component field and the
-#: deserialize boundary must never drop it (internal/board/minpcb.go). Named so
+#: derived key: the Go codec models it as a typed component field
+#: (``Component.RefdesPlacement``) and carries it verbatim. Named so
 #: it cannot be mistaken for the wire's ``refdes_anchor``, which is the
 #: EFFECTIVE placement a resolve computed and is session state on both sides.
 COMPONENT_REFDES_KEY = "refdes_placement"

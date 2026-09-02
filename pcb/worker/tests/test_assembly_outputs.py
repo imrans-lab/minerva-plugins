@@ -25,10 +25,10 @@ places (R_0805, D_SMA, and two excluded pieces of furniture) is already centred
 on its own origin, so its anchors compose back onto its positions exactly. That
 makes this file the "nothing moved that should not have" half of that unit's
 oracle; the half where things DO move is test_assembly_anchor.py.
-  * test_bom_groups_by_the_emitted_columns — BOM grouping seal. The fixture
-    authors ``package`` on BOTH resistors so this seal measures grouping rather
-    than an authoring asymmetry; the asymmetry gets its own board and its own
-    test (test_bom_asymmetric_package_authoring_splits_the_row).
+  * test_bom_groups_by_the_emitted_columns — BOM grouping seal. Both resistors
+    sit on the same unlabelled drawing, so this seal measures grouping rather
+    than a labelling asymmetry; the asymmetry gets its own board and its own
+    test (test_bom_asymmetric_labelling_splits_the_row).
   * test_*_identity_refusal* — the part-identity contract.
   * test_*_house_refusal* — the per-house capability refusal.
   * test_uncompilable_board_* — the deliberate capability regression, named.
@@ -53,6 +53,7 @@ import yaml
 
 from pcb_worker import assembly_outputs as ao
 from pcb_worker.compile_board import compile_board
+from pcb_worker.footprints import load_lockfile
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
 # The shared corpus orientation statement, autouse in this module: these
 # boards are drawn on this repository's own land patterns, and orientation
@@ -64,6 +65,17 @@ FIXTURE = BOARDS / "assembly_resolved.yaml"
 
 
 UNCOMPILABLE_FIXTURE = BOARDS / "assembly_fixture.yaml"
+
+#: A seed-library drawing whose lock entry states a package label, and the
+#: label itself, read off the lock rather than retyped so the test measures
+#: "the column prints what the lock says" and not a string two files agree on.
+LABELLED_FOOTPRINT = "EVP-ASAC1A:SW_EVP-ASAC1A"
+
+
+def _lock_label(footprint: str):
+    entry = load_lockfile().get(footprint) or {}
+    block = entry.get("assembly") or {}
+    return block.get("package")
 
 #: THE ONE PLACE these bytes are written down. Every other test that needs the
 #: CPL of ``assembly_resolved.yaml`` imports this rather than re-typing it, so
@@ -211,15 +223,10 @@ def test_rows_match_the_raw_dict_arithmetic_they_replaced():
     for bom_row in ao.build_bom(compiled, "jlc").rows:
         for ref in bom_row.refs:
             comp = authored[ref]
-            block = comp.get("assembly")
-            block = block if isinstance(block, dict) else {}
-            # The Footprint column is the authored `package` read through the
-            # identity fold's precedence — structured block, then the pre-block
-            # top-level scalar — and the footprint ref only where neither
-            # authors one. `comment` is authored nowhere here, so the Comment
+            # The Footprint column is the drawing's lock label, else the
+            # drawing ref. `comment` is authored nowhere here, so the Comment
             # column is the component's own value.
-            package = block.get("package") or comp.get("package")
-            assert bom_row.footprint == (package or comp["footprint"])
+            assert bom_row.footprint == (_lock_label(comp["footprint"]) or comp["footprint"])
             assert bom_row.comment == comp.get("value", "")
 
 
@@ -259,20 +266,18 @@ def test_unusable_layer_never_reaches_the_emitter(layer):
 
 
 def test_bom_groups_by_the_emitted_columns():
-    """R1 + R2 print identically ("0805", "10k", C25804) -> ONE grouped row with
-    both refs and qty=2 — even though R1 authors its package and its part
-    number inside the structured block (the latter as a ``house_parts`` entry)
-    and R2 authors both as pre-block top-level scalars. That is the point of
+    """R1 + R2 print identically ("R_0805", "10k", C25804) -> ONE grouped row
+    with both refs and qty=2 — even though R1 names its part number as a
+    ``house_parts`` entry and R2 as a bare ``mpn``. That is the point of
     grouping on the RESOLVED columns: what a house reads is one line, so the
-    file carries one line. The Footprint cell is ``0805``, the authored
-    package, not the ``R_0805`` footprint ref it falls back to. D1
-    (Diode_SMD:D_SMA, 1N4148, C2128, authored in a properties mapping) authors
-    no package, so its cell IS the footprint ref; it is its own row, qty=1."""
+    file carries one line. Neither drawing carries a lock label, so the
+    Footprint cell is the drawing ref; D1 (Diode_SMD:D_SMA, 1N4148, C2128) is
+    its own row, qty=1."""
     result = ao.build_bom(_compiled(_load()), "jlc")
     assert len(result.rows) == 2
 
     by_footprint = {row.footprint: row for row in result.rows}
-    r0805 = by_footprint["0805"]
+    r0805 = by_footprint["R_0805"]
     assert r0805.refs == ("R1", "R2")
     assert r0805.comment == "10k"
     assert r0805.part_number == "C25804"
@@ -291,27 +296,29 @@ def test_bom_groups_by_the_emitted_columns():
 
 
 def test_each_authored_assembly_field_reaches_its_own_bom_column():
-    """The schema (docs/board-yaml.md) gives ``package``, ``comment`` and
-    ``house_parts`` a BOM column each. A component authoring all three must
-    print all three — not its ``value``, its KiCad footprint string and its
-    ``mpn``, which are what those columns fall back to. Ordering the wrong part
-    is the failure this whole path exists to prevent, so the assertion is on
-    the rendered LINE, not only on the row object."""
-    board = _compiled(_minimal(value="10k", footprint="R_0805", assembly={
-        "mpn": "RC0805FR-0710KL",
-        "package": "0805",
-        "comment": "RES 10k 1% 0805",
-        "house_parts": {"jlcpcb": "C84376"},
+    """The schema (docs/board-yaml.md) gives ``comment`` and ``house_parts`` a
+    BOM column each, and the Footprint column reads the DRAWING's lock label.
+    A component authoring both fields on a labelled drawing must print all
+    three — not its ``value``, its footprint ref and its ``mpn``, which are
+    what those columns fall back to. Ordering the wrong part is the failure
+    this whole path exists to prevent, so the assertion is on the rendered
+    LINE, not only on the row object. The label is read off the lock, and the
+    test refuses to run against a lock that stopped labelling the drawing:
+    the fallback would then satisfy a weaker claim."""
+    label = _lock_label(LABELLED_FOOTPRINT)
+    assert label and label != LABELLED_FOOTPRINT, "the seed lock no longer labels the drawing"
+    board = _compiled(_minimal(value="switch", footprint=LABELLED_FOOTPRINT, assembly={
+        "mpn": "EVP-ASAC1A",
+        "comment": "SW TACT 6x6",
+        "house_parts": {"jlcpcb": "C4365033"},
     }))
     result = ao.build_bom(board, "jlc")
     row = result.rows[0]
-    assert row.comment == "RES 10k 1% 0805"     # not "10k"
-    assert row.footprint == "0805"              # not "R_0805"
-    assert row.part_number == "C84376"          # not the mpn
-    assert row.mpn == "RC0805FR-0710KL"         # still carried, beside it
-
-    line = next(iter(result.values())).splitlines()[1]
-    assert line == "RES 10k 1% 0805,R1,0805,C84376"
+    assert row.comment == "SW TACT 6x6"          # not "switch"
+    assert row.footprint == label                # not the drawing ref
+    assert row.part_number == "C4365033"         # not the mpn
+    assert next(iter(result.values())).splitlines()[1] == \
+        f"SW TACT 6x6,R1,{label},C4365033"
 
 
 def test_absent_assembly_fields_fall_back_to_their_pre_block_sources():
@@ -334,32 +341,29 @@ def test_a_present_but_empty_column_is_emitted_blank_not_filled_from_its_fallbac
     Measured at the emitter's own boundary on a real compiled IR, because the
     compile-time identity fold ahead of it maps an authored blank onto absent
     (see the test below) and would otherwise hide which rule this pins. The
-    oracle is the rendered LINE: two empty cells, not "10k" and "R_0805"."""
+    oracle is the rendered LINE: an empty Comment cell, not "10k"."""
     import dataclasses
 
     board = _compiled(_minimal(value="10k", footprint="R_0805", assembly={
         "mpn": "RC0805FR-0710KL", "house_parts": {"jlcpcb": "C84376"}}))
     component = board.components[0]
     board = dataclasses.replace(board, components=(dataclasses.replace(
-        component, assembly=dataclasses.replace(
-            component.assembly, comment="", package="")),))
+        component, assembly=dataclasses.replace(component.assembly, comment="")),))
 
     result = ao.build_bom(board, "jlc")
     assert result.rows[0].comment == ""
-    assert result.rows[0].footprint == ""
-    assert next(iter(result.values())).splitlines()[1] == ",R1,,C84376"
+    assert next(iter(result.values())).splitlines()[1] == ",R1,R_0805,C84376"
 
 
 def test_an_authored_blank_is_folded_to_absent_before_the_emitter_sees_it():
     """WHERE A YAML-LEVEL BLANK ACTUALLY GOES, stated so the emitter rule above
-    is not mistaken for an end-to-end promise. assembly_spec's identity
-    precedence takes the first NON-BLANK string across the block, the top-level
-    scalar and the properties mapping, so ``comment: ""`` reaches the IR as
-    ``None`` and the column falls back. The oracle is the rendered line."""
+    is not mistaken for an end-to-end promise. assembly_spec reads a blank
+    identity value as absent, so ``comment: ""`` reaches the IR as ``None`` and
+    the column falls back. The oracle is the rendered line."""
     board = _compiled(_minimal(value="10k", footprint="R_0805", assembly={
-        "comment": "", "package": "", "mpn": "M1"}))
+        "comment": "", "mpn": "M1"}))
     resolved = board.components[0].assembly
-    assert resolved.comment is None and resolved.package is None
+    assert resolved.comment is None
 
     result = ao.build_bom(board, "jlc")
     assert next(iter(result.values())).splitlines()[1] == "10k,R1,R_0805,M1"
@@ -463,7 +467,7 @@ def _pair(first_assembly: dict, second_assembly: dict) -> dict:
 
 def test_two_refs_with_different_mpn_never_share_a_row_that_reports_one_of_them():
     """A GROUPED ROW ASSERTS ITS mpn OF EVERY REF ON IT. R1 and R2 print the
-    same three cells — same comment, same package, same house catalogue number,
+    same three cells — same comment, same drawing, same house catalogue number,
     which is what actually gets ordered — but name DIFFERENT manufacturer
     parts. Merging them leaves one row carrying one component's mpn for both
     designators, and a caller reconciling the BOM against a distributor quote
@@ -475,9 +479,9 @@ def test_two_refs_with_different_mpn_never_share_a_row_that_reports_one_of_them(
     house number is identical on both lines, so a CSV-only assertion would pass
     on the merged row too."""
     result = ao.build_bom(_compiled(_pair(
-        {"mpn": "RC0805FR-0710KL", "package": "0805", "comment": "RES 10k",
+        {"mpn": "RC0805FR-0710KL", "comment": "RES 10k",
          "house_parts": {"jlcpcb": "C84376"}},
-        {"mpn": "ERJ6ENF1002V", "package": "0805", "comment": "RES 10k",
+        {"mpn": "ERJ6ENF1002V", "comment": "RES 10k",
          "house_parts": {"jlcpcb": "C84376"}})), "jlc")
 
     reported = {row.refs: row.mpn for row in result.rows}
@@ -490,44 +494,44 @@ def test_one_mpn_across_both_refs_still_groups_into_a_single_row():
     components disagree about it. Two parts that agree on everything the row
     asserts stay ONE line with both designators, so the wider key did not turn
     every board into one row per component."""
-    block = {"mpn": "RC0805FR-0710KL", "package": "0805", "comment": "RES 10k",
+    block = {"mpn": "RC0805FR-0710KL", "comment": "RES 10k",
              "house_parts": {"jlcpcb": "C84376"}}
     result = ao.build_bom(_compiled(_pair(dict(block), dict(block))), "jlc")
     assert [(row.refs, row.mpn, row.qty) for row in result.rows] == [
         (("R1", "R2"), "RC0805FR-0710KL", 2)]
-    assert next(iter(result.values())).splitlines()[1] == 'RES 10k,"R1,R2",0805,C84376'
+    assert next(iter(result.values())).splitlines()[1] == 'RES 10k,"R1,R2",R_0805,C84376'
 
 
-def test_bom_asymmetric_package_authoring_splits_the_row():
-    """AUTHORING ``package`` ON ONE PART AND NOT ITS TWIN SPLITS THE ROW, and
-    that is correct rather than a grouping bug. The Footprint column prints the
-    authored package when there is one and the footprint ref when there is not,
-    so two otherwise-identical parts print ``0805`` and ``R_0805`` — two
-    different cells, therefore two different grouping keys, therefore two lines
-    with qty=1 each.
+def test_bom_asymmetric_labelling_splits_the_row():
+    """A LABELLED DRAWING BESIDE AN UNLABELLED ONE SPLITS THE ROW, and that is
+    correct rather than a grouping bug. The Footprint column prints the lock
+    label when the drawing has one and the drawing ref when it has not, so two
+    parts with identical identity on different drawings print two different
+    cells — two grouping keys, two lines, qty=1 each.
 
     Pinned on its OWN board rather than inside a grouping seal. The seals exist
     to prove that parts a house reads as one part arrive as one line; a fixture
-    that authored the package asymmetrically would satisfy them by splitting on
-    this instead, and they would stop measuring grouping without ever going
-    red. Here the split IS the claim.
+    that labelled the drawings asymmetrically would satisfy them by splitting
+    on this instead. Here the split IS the claim.
 
-    The oracle is both cells: the row a purchaser reads carries the package the
-    author wrote, and the row whose author wrote none carries the footprint ref
-    it falls back to. Everything else about the two parts — value, footprint,
-    mpn, and therefore the LCSC cell that falls back to it — is identical."""
-    result = ao.build_bom(_compiled(_pair(
-        {"mpn": "C25804", "package": "0805"},
-        {"mpn": "C25804"})), "jlc")
+    The oracle is both cells: one row carries the label the lock states, the
+    other the drawing ref it falls back to. Everything else about the two parts
+    — value, mpn, and therefore the LCSC cell that falls back to it — is
+    identical."""
+    label = _lock_label(LABELLED_FOOTPRINT)
+    assert label and label != LABELLED_FOOTPRINT, "the seed lock no longer labels the drawing"
+    board = _pair({"mpn": "C25804"}, {"mpn": "C25804"})
+    board["components"][0]["footprint"] = LABELLED_FOOTPRINT
+    result = ao.build_bom(_compiled(board), "jlc")
 
     assert [(row.refs, row.footprint, row.qty) for row in result.rows] == [
-        (("R1",), "0805", 1),
+        (("R1",), label, 1),
         (("R2",), "R_0805", 1),
     ]
     assert all(row.comment == "10k" and row.part_number == "C25804"
                and row.mpn == "C25804" for row in result.rows)
     assert next(iter(result.values())).splitlines()[1:] == [
-        "10k,R1,0805,C25804",
+        f"10k,R1,{label},C25804",
         "10k,R2,R_0805,C25804",
     ]
 
@@ -560,7 +564,7 @@ def test_bom_missing_mpn_is_named_refusal_not_blank_cell():
 
 def test_cpl_missing_mpn_is_named_refusal_not_blank_cell():
     board = _load()
-    del board["components"][2]["properties"]  # D1
+    del board["components"][2]["assembly"]  # D1
     with pytest.raises(ao.AssemblyIdentityError) as exc_info:
         ao.build_cpl(_compiled(board), "jlc")
     assert "D1" in str(exc_info.value)

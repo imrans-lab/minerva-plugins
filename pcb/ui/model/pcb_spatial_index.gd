@@ -278,8 +278,6 @@ func describe_component_context(component_id: String) -> Dictionary:
 		"region": region,
 		"pins": comp.pins.keys()
 	}
-	if not comp.properties.is_empty():
-		result["properties"] = comp.properties
 	return result
 
 

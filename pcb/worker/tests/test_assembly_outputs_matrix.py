@@ -231,14 +231,14 @@ def test_non_string_mpn_refuses_by_name_rather_than_being_coerced():
 
     The scope decision this pins was made deliberately — an unquoted YAML value
     is parsed before the reader sees it and the parse is not reversible
-    (``package: 0603`` arrives as 387), so treating it as absent shipped an
+    (``mpn: 0201`` arrives as 129), so treating it as absent shipped an
     identity nobody authored. The property the earlier "treated as missing"
     characterization was protecting still holds and is what the last assertion
     checks: the authored digits never come back as a plausible coerced string.
-    The ``package`` twin of this refusal, followed all the way to an order
-    surface's ``blocked_by``, is in test_assembly_gates.py."""
+    The same refusal followed all the way to an order surface's ``blocked_by``
+    is in test_assembly_gates.py."""
     board = _load()
-    board["components"][1]["mpn"] = 25804  # R2, int rather than "C25804"
+    board["components"][1]["assembly"]["mpn"] = 25804  # R2, int rather than "C25804"
     result = compile_board(board)
     assert not isinstance(result, ResolutionSuccess)
     named = [d for d in result.diagnostics

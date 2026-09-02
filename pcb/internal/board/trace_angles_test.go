@@ -44,12 +44,6 @@ components: []
 	if !reflect.DeepEqual(*b.DesignRules.AllowedTraceAnglesDeg, want) {
 		t.Fatalf("typed angles = %v, want %v", *b.DesignRules.AllowedTraceAnglesDeg, want)
 	}
-	// The typed field OWNS the key: it must not ALSO ride in the inline Extra
-	// map, or the next marshal would have two sources for one rule.
-	if _, dup := b.DesignRules.Extra["allowed_trace_angles_deg"]; dup {
-		t.Fatalf("angles also parked in Extra: %v", b.DesignRules.Extra)
-	}
-
 	first, err := MarshalYAML(b)
 	if err != nil {
 		t.Fatalf("marshal yaml: %v", err)

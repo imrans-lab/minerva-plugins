@@ -6,11 +6,11 @@ extends SceneTree
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_assembly_schema_roundtrip.gd
 ##
 ## WHAT IS AT STAKE. `assembly` is the ONLY place a board says which part to buy
-## and which designator each physical instance is placed under. The panel does
-## not model it: it rides `PcbComponent.canonical_extra`, the verbatim
-## passthrough for canonical keys the model has no field for. A passthrough that
-## drops one key is invisible until an order goes out with the wrong part in it —
-## which is exactly how `assembly: exclude` and `mpn` were lost once already.
+## and which designator each physical instance is placed under. The panel
+## carries it as one typed Dictionary (`PcbComponent.assembly`) and re-emits it
+## verbatim. A model that drops one key is invisible until an order goes out
+## with the wrong part in it — which is exactly how `assembly: exclude` and
+## `mpn` were lost once already.
 ##
 ## THE ORACLE, in one sentence: a promote → deserialize → load round trip that
 ## drops any assembly field or any placement ref fails this suite.
@@ -42,7 +42,6 @@ const FULL_ASSEMBLY := {
 	"populate": true,
 	"manufacturer": "Sullins",
 	"mpn": "PPTC071LFBN-RC",
-	"package": "PinSocket_1x07_P2.54mm",
 	"comment": "1x7 2.54mm socket strip",
 	"house_parts": {"jlcpcb": "C41376161"},
 	"paste": "exclude",
@@ -201,11 +200,11 @@ func _run_panel_passthrough() -> void:
 			and str((placements[1] as Dictionary).get("ref", "")) == "J1S_B",
 		str(placements))
 
-	# The panel does NOT migrate: the codec owns that, and a panel that rewrote
-	# the value would be a second, competing authority over the same key.
+	# The panel folds the legacy scalar to the SAME structured shape the codec
+	# emits for it, so one shape reaches every reader on both sides.
 	var legacy: Variant = PcbComponent.from_board_dict(_component("FID1", 15.0, "exclude"))
-	check("1c. the legacy scalar rides through the panel untouched",
-		legacy.to_board_dict().get("assembly") == "exclude",
+	check("1c. the legacy scalar loads as the structured non-populated block",
+		legacy.to_board_dict().get("assembly") == {"populate": false},
 		str(legacy.to_board_dict().get("assembly")))
 
 	var copy: Variant = comp.duplicate_component()
@@ -250,10 +249,9 @@ func _run_real_worker_round_trip() -> void:
 	check("2d. the block came back at all", not a.is_empty(), str(j1s))
 	check("2e. populate survived as an authored true (not omitted away)",
 		a.get("populate") == true, str(a.get("populate")))
-	check("2f. manufacturer / mpn / package / comment all survived",
+	check("2f. manufacturer / mpn / comment all survived",
 		str(a.get("manufacturer", "")) == "Sullins"
 			and str(a.get("mpn", "")) == "PPTC071LFBN-RC"
-			and str(a.get("package", "")) == "PinSocket_1x07_P2.54mm"
 			and str(a.get("comment", "")) == "1x7 2.54mm socket strip",
 		str(a))
 	check("2g. house_parts survived, keyed by house",

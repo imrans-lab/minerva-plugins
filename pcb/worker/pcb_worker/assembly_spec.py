@@ -4,9 +4,8 @@ An order package (BOM, CPL, gerbers, manifest) must describe ONE board. That
 holds only if every artifact derives from the same compilation, so the compiler
 has to know what an assembly house buys and places, not just what the fab
 etches. This module is that knowledge: it reads a component's authored
-``assembly`` block (docs/board-yaml.md) plus the pre-block authoring forms it
-supersedes, and produces the immutable :class:`ResolvedAssembly` that
-``ResolvedComponent.assembly`` carries.
+``assembly`` block (docs/board-yaml.md) and produces the immutable
+:class:`ResolvedAssembly` that ``ResolvedComponent.assembly`` carries.
 
 It is a separate module from ``resolved_board`` for the same reason
 ``footprint_def`` is: the IR module declares the geometry contract and stays
@@ -14,26 +13,28 @@ free of readers that parse loose board dicts. ``ResolvedComponent`` annotates
 the field by forward reference and duck-types it, exactly as it does
 ``refdes``.
 
-IDENTITY PRECEDENCE — three authored homes, one answer. A field is read from
-the structured block first, then a top-level scalar, then a nested
-``properties`` mapping; the first non-blank string wins. The block is the
-canonical home; the other two are the shapes boards in the field already use
-and would otherwise lose their part identity to. Folding them here means the
-precedence rule is applied ONCE, at compile, rather than separately by every
-consumer that wants an MPN.
+IDENTITY HAS ONE HOME: the ``assembly`` block. A part number written as a
+top-level component key or inside a ``properties`` mapping is not a second
+home with a precedence rule; it is an unknown key the codec refuses at the file
+boundary, so nothing here has to fold homes and no consumer can read a value
+the block did not state.
 
-A BLANK identity value is ABSENT and falls through to the next home, and there
-is deliberately no authored way to force an empty BOM cell: the Go codec tags
-all four fields ``omitempty``, so an authored blank dies on the first
-serialize, and a rule that only Python honoured would be a value that vanishes
-on promote.
+A BLANK identity value is ABSENT, and there is deliberately no authored way to
+force an empty BOM cell: the Go codec tags the fields ``omitempty``, so an
+authored blank dies on the first serialize, and a rule that only Python
+honoured would be a value that vanishes on promote.
 
-A NON-STRING identity value REFUSES, naming the component and the field.
-Dropping it is not neutral, because dropping falls through: YAML reads an
-unquoted ``package: 0603`` as the number 387, and a dropped 387 lets a
-lower-precedence ``0402`` be emitted in its place — an order for a part nobody
-authored. Coercing is worse still, since 387 is what a coercion would print.
-This matches ``_house_parts`` below, which has always refused a non-string.
+THE FOOTPRINT COLUMN IS NOT AUTHORED PER COMPONENT. What a purchaser reads as
+the part's package is a fact about the DRAWING, stated once on the footprint's
+acquisition-lock entry (``footprints.lock.json`` ``assembly.package``) and
+carried here as ``package_labels``, keyed by drawing ref, for the component's
+own drawing and each placement child that names one. A drawing with no label
+prints its ref verbatim — an honest fallback, never a guess.
+
+A NON-STRING identity value REFUSES, naming the component and the field:
+YAML reads an unquoted ``mpn: 0201`` as the number 129, and coercing would
+print 129 into an order. This matches ``_house_parts`` below, which has always
+refused a non-string.
 
 EXCLUSION — two authored forms, one answer, fail-closed on either. ``assembly:
 exclude`` (the pre-block scalar for board furniture: a fiducial, a silk logo)
@@ -97,8 +98,8 @@ PASTE_INCLUDE = "include"
 PASTE_EXCLUDE = "exclude"
 PASTE_TOKENS = (PASTE_AUTO, PASTE_INCLUDE, PASTE_EXCLUDE)
 
-#: The string fields read through the identity-precedence fold above.
-IDENTITY_FIELDS = ("manufacturer", "mpn", "package", "comment")
+#: The block's part-identity string fields.
+IDENTITY_FIELDS = ("manufacturer", "mpn", "comment")
 
 #: Sub-keys the block admits. An unknown key REFUSES rather than being dropped,
 #: matching the Go codec (internal/board/assembly.go): a mistyped ``mpm`` that
@@ -146,7 +147,7 @@ class ResolvedAssembly:
 
     ``footprint_ref`` is the component's AUTHORED ``footprint`` string. It rides
     here because it is what the BOM's Footprint column falls back to when no
-    ``package`` is authored, and the IR otherwise keeps only ``footprint_id`` —
+    label is stated for it, and the IR otherwise keeps only ``footprint_id`` —
     a content hash that names the geometry, not the part a purchaser
     recognizes.
 
@@ -158,7 +159,6 @@ class ResolvedAssembly:
     populate: bool
     manufacturer: str | None
     mpn: str | None
-    package: str | None
     comment: str | None
     house_parts: tuple[tuple[str, str], ...]
     paste: str
@@ -166,12 +166,26 @@ class ResolvedAssembly:
     #: Whether a ``placements`` LIST was authored, regardless of its length —
     #: see the module docstring's AUTHORED-EMPTY section.
     expansion_authored: bool = False
+    #: ``(drawing ref, package label)`` pairs from the footprint lock, for the
+    #: drawings this component's parts are — see THE FOOTPRINT COLUMN above.
+    #: Filled by the compiler, which holds the library chain; absent for a
+    #: drawing whose lock entry carries no label.
+    package_labels: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.footprint_ref:
             raise ValueError("ResolvedAssembly.footprint_ref must be non-empty")
         if self.paste not in PASTE_TOKENS:
             raise ValueError(f"ResolvedAssembly.paste must be one of {PASTE_TOKENS}")
+
+    def label_for(self, drawing: str) -> str | None:
+        """The package label the footprint lock states for *drawing*, or
+        ``None`` when the drawing carries none — the BOM Footprint column then
+        prints the drawing ref itself."""
+        for ref, label in self.package_labels:
+            if ref == drawing:
+                return label
+        return None
 
     def drawing_for(self, physical) -> str:
         """The library ref of the drawing ONE placement is described by: the
@@ -191,29 +205,19 @@ class ResolvedAssembly:
         return tuple(p.ref for p in self.placements)
 
 
-def _identity(comp: dict, block: dict, key: str, ref: str) -> str | None:
-    """The identity-precedence fold: block, then top-level scalar, then a
-    nested ``properties`` mapping; the first non-blank string wins.
-
-    Absent, null and blank all mean "not authored here" and move on to the next
-    home. Anything else that is not a string REFUSES rather than moving on —
-    see the module docstring's IDENTITY PRECEDENCE section for why falling
-    through is the dangerous half."""
-    for source in (block, comp, comp.get("properties")):
-        if not isinstance(source, dict):
-            continue
-        value = source.get(key)
-        if value is None:
-            continue
-        if not isinstance(value, str):
-            raise AssemblySpecError(
-                f"component {ref!r} assembly {key} must be a quoted string, got "
-                f"{value!r} ({type(value).__name__}); an unquoted YAML value is "
-                f"parsed before it is read here and the parse is not reversible "
-                f"(package 0603 arrives as 387). Re-author the value in quotes.")
-        if value.strip():
-            return value.strip()
-    return None
+def _identity(block: dict, key: str, ref: str) -> str | None:
+    """One identity field off the block: absent, null and blank all mean "not
+    authored"; a non-string REFUSES rather than being coerced or dropped."""
+    value = block.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AssemblySpecError(
+            f"component {ref!r} assembly {key} must be a quoted string, got "
+            f"{value!r} ({type(value).__name__}); an unquoted YAML value is "
+            f"parsed before it is read here and the parse is not reversible "
+            f"(mpn 0201 arrives as 129). Re-author the value in quotes.")
+    return value.strip() or None
 
 
 def _finite(value, field: str, ref: str) -> float:
@@ -354,7 +358,7 @@ def resolve_assembly(comp: dict, footprint_ref: str, ref: str) -> ResolvedAssemb
         raise AssemblySpecError(
             f"component {ref!r} assembly.paste must be one of "
             f"{'/'.join(PASTE_TOKENS)}, got {paste!r}")
-    identity = {key: _identity(comp, block, key, ref) for key in IDENTITY_FIELDS}
+    identity = {key: _identity(block, key, ref) for key in IDENTITY_FIELDS}
     raw_placements = block.get("placements")
     return ResolvedAssembly(
         footprint_ref=footprint_ref,

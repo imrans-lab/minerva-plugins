@@ -82,26 +82,24 @@ def test_unknown_block_key_refuses_rather_than_being_dropped():
 
 
 # ---------------------------------------------------------------------------
-# Identity precedence — three authored homes, one answer
+# Identity — one authored home, the block
 # ---------------------------------------------------------------------------
 
 
-def test_block_wins_over_top_level_scalar_wins_over_properties():
-    """The precedence rule, applied ONCE here at compile so no consumer has to
-    re-derive it."""
-    assert _resolve(assembly={"mpn": "BLOCK"}, mpn="SCALAR",
-                    properties={"mpn": "PROPS"}).mpn == "BLOCK"
-    assert _resolve(mpn="SCALAR", properties={"mpn": "PROPS"}).mpn == "SCALAR"
-    assert _resolve(properties={"mpn": "PROPS"}).mpn == "PROPS"
+def test_identity_is_read_from_the_block_alone():
+    """The block is the ONLY home. A top-level ``mpn`` or a ``properties``
+    mapping is not a lower-precedence spelling to fall through to: the codec
+    refuses either as an unknown key before this reader runs, and this reader
+    does not consult them even when handed a dict that carries one."""
+    assert _resolve(assembly={"mpn": "BLOCK"}).mpn == "BLOCK"
+    assert _resolve(mpn="SCALAR", properties={"mpn": "PROPS"}).mpn is None
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\r", "\r\n", "\t"])
-def test_blank_identity_falls_through_to_the_next_home(blank):
-    """A present-but-empty value is not an answer. It must not shadow a real
-    one authored a level down, and on its own it reads as absent — a house
-    receiving a BOM line whose part column is a lone carriage return is the
-    failure this guards."""
-    assert _resolve(assembly={"mpn": blank}, mpn="SCALAR").mpn == "SCALAR"
+def test_blank_identity_is_absent(blank):
+    """A present-but-empty value is not an answer — a house receiving a BOM
+    line whose part column is a lone carriage return is the failure this
+    guards."""
     assert _resolve(assembly={"mpn": blank}).mpn is None
 
 
@@ -109,7 +107,6 @@ def test_an_explicitly_null_identity_is_absent_like_a_blank():
     """``mpn:`` with nothing after it is YAML null. It is the absent case, not
     the malformed one — the refusal below must not swallow it, or every board
     that leaves an identity key parked and empty stops compiling."""
-    assert _resolve(assembly={"mpn": None}, mpn="SCALAR").mpn == "SCALAR"
     assert _resolve(assembly={"mpn": None}).mpn is None
 
 
@@ -121,57 +118,35 @@ def test_identity_values_are_stripped():
 def test_non_string_identity_is_a_named_refusal(key):
     """An authored YAML number is neither stringified nor dropped. Coercing
     prints a plausible-looking wrong answer the identity gate would then pass;
-    dropping is not the safe half either, because dropping falls through — see
-    the shadowing test below. Every identity field refuses alike, and the
-    refusal names the component and the field."""
+    dropping is not the safe half either, because an absent identity is what
+    the order gate refuses later, by a different name. Every identity field
+    refuses alike, and the refusal names the component and the field."""
     with pytest.raises(spec.AssemblySpecError, match=key) as caught:
         _resolve(assembly={key: 387})
     assert "R1" in str(caught.value)
 
 
-@pytest.mark.parametrize("bad", [387, 3.87, True, ["0603"], {"v": "0603"}])
+@pytest.mark.parametrize("bad", [129, 1.29, True, ["0201"], {"v": "0201"}])
 def test_every_non_string_identity_shape_refuses(bad):
     """Not just ints: a bool or a mistyped list is equally not a part number,
     and each must refuse rather than reach an emitter as an absent value."""
+    with pytest.raises(spec.AssemblySpecError, match="mpn"):
+        _resolve(assembly={"mpn": bad})
+
+
+def test_package_is_not_a_block_key():
+    """The Footprint column is a fact about the DRAWING, stated once on the
+    footprint's lock entry; a per-component ``package`` was a second home for
+    it and is refused like any other unknown block key."""
     with pytest.raises(spec.AssemblySpecError, match="package"):
-        _resolve(assembly={"package": bad})
-
-
-@pytest.mark.parametrize("comp", [
-    {"assembly": {"package": 387}},   # the block
-    {"package": 387},                 # the top-level scalar
-    {"properties": {"package": 387}},  # the properties map
-])
-def test_every_authoring_home_refuses_a_non_string_identity(comp):
-    """All three homes are read by one fold, so all three refuse by one rule.
-    A home that quietly dropped instead would be the one an author reaches for
-    when the block refuses."""
-    with pytest.raises(spec.AssemblySpecError, match="package"):
-        _resolve(**comp)
-
-
-def test_a_dropped_identity_shadows_the_next_home_rather_than_vanishing():
-    """Why dropping was never the neutral choice. ``package: 0603`` reaches
-    this reader as 387, and stepping past it lands on the NEXT home, so a board
-    whose author wrote 0603 in the block used to emit the 0402 written a level
-    down — an order for a part nobody authored."""
-    with pytest.raises(spec.AssemblySpecError, match="package"):
-        _resolve(assembly={"package": 387}, properties={"package": "0402"})
-
-
-@pytest.mark.parametrize("quoted", ["0603", "0402", "0201", "1206", "0805"])
-def test_a_quoted_package_is_read_verbatim(quoted):
-    """The other half of the oracle: quoting is the fix the refusal asks for,
-    so quoted sizes — including the ones YAML would have eaten — must survive
-    unchanged."""
-    assert _resolve(assembly={"package": quoted}).package == quoted
+        _resolve(assembly={"package": "0805"})
 
 
 def test_every_identity_field_reads_through_the_same_fold():
     resolved = _resolve(assembly={"manufacturer": "Yageo", "mpn": "C25804",
-                                  "package": "0805", "comment": "10k 1%"})
-    assert (resolved.manufacturer, resolved.mpn, resolved.package,
-            resolved.comment) == ("Yageo", "C25804", "0805", "10k 1%")
+                                  "comment": "10k 1%"})
+    assert (resolved.manufacturer, resolved.mpn,
+            resolved.comment) == ("Yageo", "C25804", "10k 1%")
 
 
 # ---------------------------------------------------------------------------

@@ -3928,73 +3928,24 @@ static func _feed_assembly_cache(host, assembly: Dictionary, board_revision: int
 		panel.set_assembly_state(assembly, board_revision)
 
 
-## Per-component fields canonical_wire_board strips — the panel's RENDER
-## enrichment (worker-attached or panel-derived draw detail; refdes_graphics
-## now only ever reaches here on a payload authored before the designator
-## became derived). Every entry is
-## poison-proven unread by the worker's assembly/board_health kernels
-## (worker/tests/test_board_health_resolve_first.py): both resolve tolerantly
-## from the library chain themselves, so shipping these is pure wire weight.
-## `pads` is deliberately NOT here — see canonical_wire_board.
-const _WIRE_DROP_COMPONENT_FIELDS: Array[String] = [
-	"graphics", "refdes_graphics", "local_bounds", "width", "height",
-	"bbox_center_offset", "properties", "color", "has_pad_geometry",
-	"footprint_id", "label_visible", "locked", "footprint_resolved",
-]
-
-
-## The CANONICAL WIRE form of a board dict — what the worker channels
-## (pcb.assembly_check / pcb.board_health) are actually owed (bug
-## 01a007f1dd02). The full panel dict ships ~9x the canonical size in render
-## enrichment (pads/graphics/refdes_graphics dominate) and blew the host
-## broker's 64 KiB payload cap on an ordinary 36-component board, silently
-## disabling the assembly advisory on exactly the boards big enough to need
-## it. The worker resolves tolerantly from the library chain on BOTH channels
-## (resolve-first census: bug 01a01b6bc649), so enrichment for
-## library-resolvable components is recomputed server-side and never read off
-## the wire.
-##
-## DROP-LIST philosophy, not keep-list: unknown board sections and component
-## extras (origin, zones, mpn, assembly, ...) PASS THROUGH — an allowlist
-## silently sheds the next canonical field someone adds, which is how the
-## first draft of this helper lost quadlayer's `origin`.
-##
-## `pads` is conditional, and the condition is a MEASURED fact, not a shape:
-## dropped only for a component marked `footprint_resolved`, the flag the
-## worker writes on its own resolve success path — precisely when it re-derives
-## the same lands server-side and the wire copy is dead weight. KEPT for
-## everything else, a library-SHAPED ref included: the `pads` KEY declares that
-## the BOARD owns this component's geometry, so dropping it does not shed
-## weight, it demotes a FULL part to a PARTIAL one and hands the worker a ref
-## this host may be unable to resolve. `pins` always travel: they are canonical
-## fab geometry and the pad_extent fallback.
-##
-## Idempotent: applying it to its own output is the identity.
-static func canonical_wire_board(board: Dictionary) -> Dictionary:
-	var out := {}
-	for key in board:
-		if key == "components":
-			continue
-		out[key] = board[key]
-	var comps_out: Array = []
-	var comps_in_v: Variant = board.get("components", [])
-	var comps_in: Array = comps_in_v if comps_in_v is Array else []
-	for comp_v in comps_in:
-		if not (comp_v is Dictionary):
-			comps_out.append(comp_v)
-			continue
-		var comp: Dictionary = comp_v
-		var lean := {}
-		var worker_can_rederive_pads: bool = bool(comp.get("footprint_resolved", false))
-		for key in comp:
-			if key in _WIRE_DROP_COMPONENT_FIELDS:
-				continue
-			if key == "pads" and worker_can_rederive_pads:
-				continue
-			lean[key] = comp[key]
-		comps_out.append(lean)
-	out["components"] = comps_out
-	return out
+## The codec's refusal text out of a pcb.deserialize reply, or "" when the
+## reply is not one. A refusal is the Go codec naming a key it does not model
+## (invalid_board_structure) or a malformed assembly block
+## (invalid_component_assembly); any other failure (no backend, a timeout) is
+## not the document's fault and is not reported as one. Reads both envelope
+## shapes: the worker's own {ok:false, error} and the broker's
+## {success:false, error_code, error_message}.
+static func codec_refusal(reply: Dictionary) -> String:
+	if bool(reply.get("ok", false)) or bool(reply.get("success", false)):
+		return ""
+	var message := str(reply.get("error_message", ""))
+	if message.is_empty():
+		var err: Variant = reply.get("error", "")
+		message = str((err as Dictionary).get("message", "")) if err is Dictionary else str(err)
+	for code in ["invalid_board_structure", "invalid_component_assembly", "unknown key"]:
+		if message.find(code) != -1:
+			return message
+	return ""
 
 
 ## ONE worker reply, normalised: the channel may hand back the worker's own
@@ -4072,9 +4023,8 @@ static func _resolved_placements(host, data) -> Dictionary:
 ## nothing resolved at all.
 static func _attach_assembly_facts(comp, comp_info: Dictionary,
 		by_ref: Dictionary, reason: String) -> void:
-	var authored: Variant = comp.canonical_extra.get("assembly", null)
-	if authored != null:
-		comp_info["assembly"] = authored.duplicate(true) if authored is Dictionary else authored
+	if not comp.assembly.is_empty():
+		comp_info["assembly"] = comp.assembly.duplicate(true)
 	if by_ref.has(comp.id):
 		comp_info["physical_placements"] = by_ref[comp.id]
 	elif reason.is_empty():
@@ -4086,15 +4036,13 @@ static func _attach_assembly_facts(comp, comp_info: Dictionary,
 ## tri-state verdict, feeding the cache as a side effect (work item
 ## 019fd5fe2724 — the placement verbs' refresh half). A host without the
 ## bridge (headless model-only fixtures) or a failed channel degrades to
-## {status:"indeterminate", ...} — advisory, NEVER a gate here. The board
-## crosses the broker as its canonical wire form (canonical_wire_board) —
-## the full dict blew the 64 KiB payload cap on real boards (01a007f1dd02).
+## {status:"indeterminate", ...} — advisory, NEVER a gate here. The canonical
+## dict is the wire form; an oversized one goes by reference in the panel.
 static func _run_assembly_check(host, data) -> Dictionary:
 	if data == null or host == null or not host.has_method("assembly_check"):
 		return {"status": "indeterminate",
 			"reason": "assembly check unavailable — no channel bridge (headless / before mount)"}
-	var reply: Dictionary = await host.assembly_check(
-		canonical_wire_board(data.to_board_dict()))
+	var reply: Dictionary = await host.assembly_check(data.to_board_dict())
 	var tri: Dictionary = _assembly_tri_state(reply)
 	_feed_assembly_cache(host, tri, int(data.board_revision))
 	return tri

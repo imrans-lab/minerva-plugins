@@ -734,10 +734,9 @@ for the worker's dev-mode `.venv` lookup.
   own definition), never the nested per-unit sub-symbols KiCad emits inside
   each part (`"R_0_1"`, `"R_1_1"`, ...) for multi-unit/de-morgan graphics. No
   real s-expression parser. **Optional** — the canonical board-yaml schema has
-  no first-class `symbol` field (components reference footprints, not
-  symbols); a component may carry one via the schema's `Extra` passthrough,
-  and a miss there lands in `check_libraries`'s `missing_symbols[]` as a soft
-  signal that never affects `ok`.
+  `symbol` field only as an informal hint (components reference footprints,
+  not symbols); a miss there lands in `check_libraries`'s `missing_symbols[]`
+  as a soft signal that never affects `ok`.
 - **`check_bom` suggestions** — `difflib.get_close_matches` against every
   present footprint's bare name, surfaced as `suggestions[]` on BOM items
   whose footprint doesn't resolve.

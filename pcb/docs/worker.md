@@ -117,9 +117,8 @@ A footprint resolves if a `.kicad_mod` exists — `"Lib:Name"` →
 field — every component that declares one gates `ok`, and a miss carries
 nearest-name `suggestions[]` (via `difflib`).
 
-A component may optionally carry a `symbol` field via the schema's `Extra`
-passthrough (board-yaml has no first-class symbol field — components
-reference footprints, not symbols). When present, it's checked against the
+A component may optionally carry a `symbol` field (typed on the schema, but
+informal: components reference footprints, not symbols). When present, it's checked against the
 `.kicad_sym` files' top-level symbol names (see `docs/libraries.md`'s "Worker-
 side reading" for the paren-depth scan). **Symbol match is optional/informal**
 — a miss lands in `missing_symbols[]` and never affects `ok`.
@@ -187,7 +186,7 @@ only if a future child wants its netlister/ERC **with** real KiCad libraries.
 
 - `.kicad_pcb` SMD pads use a nominal `1×0.6 mm` rect; exact pad geometry per
   footprint is next-child scope. Through-hole pads honor `drill_mm` (and
-  `annulus_diameter_mm` from `Extra` when present).
+  `annulus_diameter_mm` when present).
 - `.kicad_sch` is a structural skeleton (header + a text block enumerating
   components and nets) — a fully symbol-placed schematic needs symbol-library
   data. `.kicad_pro` is a minimal valid JSON project.

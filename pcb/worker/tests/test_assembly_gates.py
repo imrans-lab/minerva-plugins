@@ -387,16 +387,14 @@ def test_a_non_finite_transform_is_refused_before_an_emitter_sees_it(bad_offset)
     assert [b["entity_id"] for b in error["blocked_by"]] == ["U1S"]
 
 
-def test_an_unquoted_package_refuses_at_compile_rather_than_emitting_a_row():
-    """The order-path oracle for the identity fold: a board whose author wrote
-    ``package: 0603`` must EMIT NOTHING for that component.
-
-    YAML hands the reader 387 for that text. The drop this replaces was not
-    inert — the BOM's Footprint column simply fell back to the footprint ref,
-    so an order shipped a package nobody authored, with no diagnostic anywhere.
-    The refusal is the compile-time one, so it reaches an order surface as the
-    named uncompilable-board refusal with the component in ``blocked_by``."""
-    board = _board(_component("R1", 10, 10, package=387))
+def test_a_per_component_package_refuses_at_compile_rather_than_emitting_a_row():
+    """The order-path oracle for the one-home rule: the Footprint column is a
+    fact about the DRAWING (its lock label), so a component that restates it as
+    ``assembly.package`` is refused at compile under the block's own code, and
+    an order surface sees the named uncompilable-board refusal with the
+    component in ``blocked_by``. Reading it instead was a second home for one
+    fact, and two parts on one drawing could then disagree about it."""
+    board = _board(_component("R1", 10, 10, package="0805"))
     result = compile_board(board)
     assert not isinstance(result, ResolutionSuccess)
     errors = [d for d in result.diagnostics if d.severity is DiagnosticSeverity.ERROR]
@@ -408,13 +406,3 @@ def test_an_unquoted_package_refuses_at_compile_rather_than_emitting_a_row():
     error = reply["error"]
     assert error["kind"] == ao.NOT_COMPILABLE_KIND
     assert [b["entity_id"] for b in error["blocked_by"]] == ["R1"]
-
-
-def test_a_quoted_package_emits_the_authored_size():
-    """The same board with the value quoted compiles and emits, so the refusal
-    above is about the TYPE and not about the board. The Footprint cell is the
-    oracle: it carries the authored size rather than falling back to the
-    footprint ref, which is exactly what the dropped value used to leave."""
-    compiled = _compiled(_board(_component("R1", 10, 10, package="0603")))
-    assert [row.footprint for row in ao.build_bom(compiled, "jlc").rows] == ["0603"]
-    assert [row.ref for row in ao.build_cpl(compiled, "jlc").rows] == ["R1"]

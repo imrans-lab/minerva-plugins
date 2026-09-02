@@ -9,8 +9,8 @@
 //
 // pcb.serialize / pcb.deserialize are the REAL board-source codec (this round):
 //   - pcb.serialize   args {board:<canonical Board JSON>} → {yaml:"<source>"}
-//   - pcb.deserialize args {yaml:"..."} OR {minpcb_json:<legacy JSON>}
-//     → {board:<canonical Board JSON dict>, warnings:[...]}
+//   - pcb.deserialize args {yaml:"..."} OR {board:<canonical Board JSON>}
+//     → {board:<canonical Board JSON dict>, warnings:[...], resolved:{ref:{...}}}
 //
 // pcb.collect_export / pcb.apply_export remain thin echo passthroughs for the
 // project_export capability (untouched this round).
@@ -18,7 +18,7 @@
 // Backward-compat note: the manifest binds pcb.serialize/deserialize to the
 // project_file capability, whose original walking-skeleton contract echoed a
 // {state} blob. To avoid regressing that path, the handlers fall back to the
-// {state} echo when no board/yaml/minpcb_json argument is supplied. See
+// {state} echo when no board/yaml argument is supplied. See
 // docs/board-yaml.md and the round findings for this dual contract.
 package tools
 
@@ -97,8 +97,8 @@ var Serialize = ToolSpec{
 
 var Deserialize = ToolSpec{
 	Name:        "pcb.deserialize",
-	Description: "Parse board-source into the canonical Board model. Args {yaml} OR {minpcb_json:<legacy .minpcb JSON>}; returns {board, warnings}. Warnings flag non-canonical fields (still preserved losslessly). Falls back to {state} echo when neither is supplied (project_file compat).",
-	InputSchema: json.RawMessage(`{"type":"object","properties":{"yaml":{"type":"string","description":"Canonical board YAML source."},"minpcb_json":{"description":"Legacy .minpcb JSON (object or JSON string)."},"state":{"type":"object","description":"Legacy project_file state (echo fallback)."}}}`),
+	Description: "Parse board-source into the canonical Board model. Args {yaml} OR {board:<Board JSON>}; returns {board, warnings, resolved}. An unknown key anywhere in the document is refused naming the entity and the key. `resolved` carries per-component footprint geometry this host's library resolved (graphics, pads, refdes_anchor, footprint_resolved) beside the board, never inside it. Falls back to {state} echo when neither is supplied (project_file compat).",
+	InputSchema: json.RawMessage(`{"type":"object","properties":{"yaml":{"type":"string","description":"Canonical board YAML source."},"board":{"type":"object","description":"A canonical Board dict to validate and resolve in place."},"state":{"type":"object","description":"Legacy project_file state (echo fallback)."}}}`),
 }
 
 // Collect/Apply back the project_export capability.
@@ -209,8 +209,8 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 }
 
 // HandleDeserialize parses board-source into the canonical Board dict. Accepts
-// {yaml} or {minpcb_json} (the latter an object or a JSON-encoded string).
-// Returns {board, warnings}. With neither it falls back to the {state} echo.
+// {yaml} or {board}. Returns {board, warnings, resolved}. With neither it falls
+// back to the {state} echo.
 //
 // This is the PURE CODEC entry point (no worker, no enrichment) and is kept at
 // this arity deliberately: it is the parse contract other Go code and the codec
@@ -250,7 +250,6 @@ func HandleDeserializeResolved(ctx context.Context, w *bridge.Worker, params jso
 func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	var a struct {
 		YAML        string          `json:"yaml"`
-		MinpcbJSON  json.RawMessage `json:"minpcb_json"`
 		Board       json.RawMessage `json:"board"`
 		BoardPath   string          `json:"board_path"`
 		BoardDigest string          `json:"board_digest"`
@@ -262,8 +261,8 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 			return nil, fmt.Errorf("pcb.deserialize: parse params: %w", err)
 		}
 	}
-	if a.YAML == "" && len(a.MinpcbJSON) == 0 && len(a.Board) == 0 && a.BoardPath != "" {
-		// Board-by-reference arm — see HandleSerialize. Inline yaml/minpcb
+	if a.YAML == "" && len(a.Board) == 0 && a.BoardPath != "" {
+		// Board-by-reference arm — see HandleSerialize. Inline yaml/board
 		// take precedence; the snapshot file is board source (YAML) verified
 		// against its sha256 before a byte of it is parsed.
 		raw, err := readVerifiedSnapshot(a.BoardPath, a.BoardDigest)
@@ -287,9 +286,7 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 	)
 	switch {
 	case a.YAML != "":
-		b, warnings, err = board.UnmarshalYAMLWithWarnings([]byte(a.YAML))
-	case len(a.MinpcbJSON) > 0:
-		b, warnings, err = board.ImportMinpcb(unwrapJSON(a.MinpcbJSON))
+		b, err = board.UnmarshalYAML([]byte(a.YAML))
 	case len(a.Board) > 0:
 		// The live board dict, read exactly as pcb.serialize reads it — so a
 		// panel that holds a board (not a document) can have it resolved in
@@ -332,27 +329,25 @@ func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMes
 		// validator which calls it unsupported_schema_version. Fail closed.
 		return nil, fmt.Errorf("pcb.deserialize: invalid board: %w", vErr)
 	}
-	// footprint_resolved is DERIVED, never board source: it says a resolve
-	// succeeded against the library of the machine doing the resolving. A
-	// document that carries one (older boards were saved with it) would
-	// survive adoptResolvedGeometry's absent-only rule and come back out of
-	// this channel asserting a resolve THIS host never performed — and the
-	// panel's wire trim believes the flag and drops the component's pads.
-	// Clearing it here makes the reply's flags mean exactly "resolved here,
-	// just now", on both the enriched and the pure-codec arm.
-	dropDerivedComponentKeys(b)
-	// Board-LOAD enrichment: attach each component's footprint silk/courtyard
-	// graphics, best-effort. No-op when w == nil (the pure codec path). Runs
-	// AFTER validation so we never resolve a board we are about to reject, and
-	// BEFORE the marshal so the graphics ride the normal reply.
-	warnings = attachFootprintGraphics(ctx, w, b, warnings)
+	// Board-LOAD enrichment: this host's resolve of each component's footprint
+	// (silk/courtyard graphics, real pad geometry, the designator anchor),
+	// best-effort, carried BESIDE the board under `resolved`. It never enters
+	// the board: the board is the design, the resolve is a fact about this
+	// machine's library. No-op when w == nil (the pure codec path). Runs AFTER
+	// validation so we never resolve a board we are about to reject.
+	var resolved map[string]map[string]interface{}
+	resolved, warnings = attachFootprintGraphics(ctx, w, b, warnings)
 
 	if warnings == nil {
 		warnings = []string{}
 	}
+	if resolved == nil {
+		resolved = map[string]map[string]interface{}{}
+	}
 	return json.Marshal(map[string]interface{}{
 		"board":    b,
 		"warnings": warnings,
+		"resolved": resolved,
 	})
 }
 
@@ -380,149 +375,86 @@ func graphicsSkipped(reason string) string {
 	return "footprint graphics not attached (components render without silk body outlines): " + reason
 }
 
-// attachFootprintGraphics enriches b's components IN PLACE with their
-// footprint's F.SilkS/F.CrtYd graphics AND its real pad geometry ("pads" +
-// "has_pad_geometry"), returning warnings extended with one entry if the
-// enrichment degraded. It never returns an error: every failure mode is a
+// attachFootprintGraphics resolves b's components against this host's library
+// and returns, per component ref, the enrichment the panel renders from —
+// F.SilkS/F.CrtYd graphics, the real pad geometry ("pads" + the
+// "has_pad_geometry" marker), the designator anchor, and the component-level
+// "footprint_resolved" fact — plus warnings extended with one entry if the
+// resolve degraded. It never returns an error: every failure mode is a
 // degrade, because a board must load even when its bodies cannot be drawn.
 //
-// PAD ADOPTION (WYSIWYG goal 019ff4a5a75a, closing gap G1). This unit
-// originally took ONLY "graphics" and deliberately dropped the resolve's pad
-// geometry, deferring "would change pad rendering and retire the unresolved
-// badge" as a separate change. The measured consequence of that deferral:
-// every library-footprint board rendered fallback pad DISCS — no drill
-// barrels, no real pad shapes — with a permanent amber unresolved badge on
-// every component, while the fab path compiled the true geometry from the
-// same footprints. The panel side was already built and waiting: the model's
-// _pads_from_list parses exactly the resolve's pad dict shape, and the canvas
-// gates its drill-hole render on the pad "type" only the resolve can supply.
-// Adopting the two keys here is what connects them.
-//
-// The attach is strictly ADDITIVE: a component whose source already carries
-// graphics (or pads) keeps what the source gave it — authored data wins over
-// derived, per key, so a board with authored pads but no graphics still gains
-// the body outlines and vice versa. "has_pad_geometry" rides ONLY with pads
-// this unit itself attaches: it is the resolved-vs-fallback marker the badge
-// and the accurate-pad renderer key on, so stamping it while keeping authored
-// pads would launder an unresolved component into a resolved-looking one.
-func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Board, warnings []string) []string {
+// The result is SEPARATE from the board. A component that AUTHORS its own
+// pads or graphics (board-owned geometry) gets no resolved copy of that key:
+// the board's answer stands, and "has_pad_geometry" — the resolved-vs-fallback
+// marker the badge keys on — is never stamped over authored lands.
+func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Board, warnings []string) (map[string]map[string]interface{}, []string) {
 	if w == nil || b == nil || len(b.Components) == 0 {
-		return warnings // codec-only path, or nothing to enrich
+		return nil, warnings // codec-only path, or nothing to enrich
 	}
 
-	// Send the board as the host will see it — the same JSON encoding the reply
-	// uses (Extra inlined, see json.go), so the worker resolves the exact board
-	// the panel is about to render, not a different projection of it.
+	// Send the board exactly as the host will see it, so the worker resolves
+	// the board the panel is about to render, not a different projection.
 	boardJSON, err := json.Marshal(b)
 	if err != nil {
-		return append(warnings, graphicsSkipped(fmt.Sprintf("board could not be encoded for resolve: %v", err)))
+		return nil, append(warnings, graphicsSkipped(fmt.Sprintf("board could not be encoded for resolve: %v", err)))
 	}
 	reqParams, err := json.Marshal(map[string]json.RawMessage{"board": boardJSON})
 	if err != nil {
-		return append(warnings, graphicsSkipped(fmt.Sprintf("resolve request could not be encoded: %v", err)))
+		return nil, append(warnings, graphicsSkipped(fmt.Sprintf("resolve request could not be encoded: %v", err)))
 	}
 
 	result, err := callResolveBestEffort(ctx, w, reqParams)
 	if err != nil {
-		return append(warnings, graphicsSkipped(err.Error()))
+		return nil, append(warnings, graphicsSkipped(err.Error()))
 	}
 
 	byRef := resolvedByRef(result)
 	if len(byRef) == 0 {
-		return append(warnings, graphicsSkipped("the resolve returned no footprint geometry"))
+		return nil, append(warnings, graphicsSkipped("the resolve returned no footprint geometry"))
 	}
 
-	if adoptResolvedGeometry(b, byRef) == 0 {
-		return append(warnings, graphicsSkipped("no component matched a resolved footprint"))
+	resolved := resolvedEnrichment(b, byRef)
+	if len(resolved) == 0 {
+		return nil, append(warnings, graphicsSkipped("no component matched a resolved footprint"))
 	}
-	return warnings
+	return resolved, warnings
 }
 
-// derivedComponentKeys are per-component Extra keys that state something a
-// resolve DERIVES, never something a board authors — so a document carrying
-// one is stating a fact about the machine that wrote it. The list is the
-// board package's (it is the same set the minpcb importer must NOT warn
-// about), read here as the drop-list.
-var derivedComponentKeys = board.DerivedComponentKeys
-
-// dropDerivedComponentKeys removes every derivedComponentKeys entry from every
-// component's Extra. Called once at the deserialize boundary so the only such
-// keys a reply can carry are the ones adoptResolvedGeometry stamped from this
-// host's own resolve. Nil-safe and cheap on a board that carries none.
-func dropDerivedComponentKeys(b *board.Board) {
-	if b == nil {
-		return
-	}
+// resolvedEnrichment is the per-ref enrichment map for the reply: every
+// component the resolve answered for, minus the geometry the board authors
+// itself. ONE RULE, shared with the panel's adopt_resolved: a component that
+// states a `pads` key is the sole authority for its lands AND its artwork
+// (the worker's FULL rule, inline_footprint.py), so neither resolved pads nor
+// resolved graphics reach it; a component that authors graphics alone keeps
+// those. The designator anchor and the resolved fact are adopted regardless.
+// Pure over its inputs so the policy is testable without a live worker.
+func resolvedEnrichment(b *board.Board, byRef map[string]resolvedComponent) map[string]map[string]interface{} {
+	out := make(map[string]map[string]interface{})
 	for i := range b.Components {
-		if b.Components[i].Extra == nil {
-			continue
-		}
-		for _, k := range derivedComponentKeys {
-			delete(b.Components[i].Extra, k)
-		}
-	}
-}
-
-// adoptResolvedGeometry applies the per-key adoption policy (see
-// attachFootprintGraphics's doc comment) and returns how many components took
-// at least one key. Pure over its inputs so the policy is testable without a
-// live worker — the bridge call and this decision are separate concerns.
-func adoptResolvedGeometry(b *board.Board, byRef map[string]resolvedComponent) int {
-	attached := 0
-	for i := range b.Components {
-		r, ok := byRef[b.Components[i].Ref]
+		c := &b.Components[i]
+		r, ok := byRef[c.Ref]
 		if !ok {
-			continue // footprint unresolvable (best-effort left it inline) — badge stays
+			continue // footprint unresolvable — the badge stays, which is honest
 		}
-		if b.Components[i].Extra == nil {
-			b.Components[i].Extra = map[string]interface{}{}
+		entry := map[string]interface{}{}
+		if len(r.graphics) > 0 && c.Pads == nil && len(c.Graphics) == 0 {
+			entry["graphics"] = r.graphics
 		}
-		took := false
-		if len(r.graphics) > 0 {
-			if _, exists := b.Components[i].Extra["graphics"]; !exists {
-				b.Components[i].Extra["graphics"] = r.graphics
-				took = true
-			}
-		}
-		// WHERE the fab prints this component's designator (WYSIWYG G2) —
-		// the footprint's own reference-text anchor, adopted like graphics.
-		// The strokes themselves are NOT carried: the renderer owns the same
-		// glyph table and strokes the component's live ref, so a renamed or
-		// copied part cannot keep drawing the designator it was rendered from.
-		// dropDerivedComponentKeys has already cleared any strokes an older
-		// document carried, so this pass is the only writer here.
 		if len(r.refdesAnchor) > 0 {
-			if _, exists := b.Components[i].Extra["refdes_anchor"]; !exists {
-				b.Components[i].Extra["refdes_anchor"] = r.refdesAnchor
-				took = true
-			}
+			entry["refdes_anchor"] = r.refdesAnchor
 		}
-		// The component-level resolved fact. Boolean and worker-owned:
-		// absence means the best-effort resolve left the component pristine,
-		// so absent stays absent. dropDerivedComponentKeys has already cleared
-		// any flag the document carried, so the absent-only guard below can
-		// only ever see a key this pass itself wrote.
 		if r.footprintResolved {
-			if _, exists := b.Components[i].Extra["footprint_resolved"]; !exists {
-				b.Components[i].Extra["footprint_resolved"] = true
-				took = true
-			}
+			entry["footprint_resolved"] = true
 		}
-		// Pads + the resolved marker travel TOGETHER (see the doc comment):
-		// has_pad_geometry asserts "these pads are the footprint's real
-		// geometry", so it must never be stamped over authored pads.
-		if r.hasPadGeometry && len(r.pads) > 0 {
-			if _, exists := b.Components[i].Extra["pads"]; !exists {
-				b.Components[i].Extra["pads"] = r.pads
-				b.Components[i].Extra["has_pad_geometry"] = true
-				took = true
-			}
+		if r.hasPadGeometry && len(r.pads) > 0 && c.Pads == nil {
+			entry["pads"] = r.pads
+			entry["has_pad_geometry"] = true
 		}
-		if took {
-			attached++
+		if len(entry) > 0 {
+			out[c.Ref] = entry
 		}
 	}
-	return attached
+	return out
 }
 
 // callResolveBestEffort runs the worker's tolerant resolve under a wall-clock
@@ -624,19 +556,6 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 		out[c.Ref] = rc
 	}
 	return out
-}
-
-// unwrapJSON tolerates minpcb_json arriving as a JSON-encoded string (a common
-// shape when a host double-encodes) by unquoting it once; otherwise returns the
-// raw bytes unchanged.
-func unwrapJSON(raw json.RawMessage) []byte {
-	if len(raw) > 0 && raw[0] == '"' {
-		var s string
-		if json.Unmarshal(raw, &s) == nil {
-			return []byte(s)
-		}
-	}
-	return raw
 }
 
 // HandleCollectExport / HandleApplyExport remain project_export echo

@@ -409,7 +409,7 @@ func _run_roundtrips() -> void:
 	changing.load_from_board_dict({
 		"ref": "R_WARN", "footprint": "R_0805", "value": "10k",
 		"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0, "layer": "top",
-		"mpn": "OLD-PART",
+		"assembly": {"mpn": "OLD-PART"},
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
 			"drill_mm": 0.6}],
 	})
@@ -425,7 +425,7 @@ func _run_roundtrips() -> void:
 			not surfaced_drops.is_empty() \
 					and str((surfaced_drops[0] as Dictionary).get("ref", "")) == "R_WARN" \
 					and ((surfaced_drops[0] as Dictionary).get(
-							"canonical_extra_keys", []) as Array).has("mpn"))
+							"assembly_keys", []) as Array).has("mpn"))
 
 	print("\n-- footprint geometry import --")
 	var geom := {

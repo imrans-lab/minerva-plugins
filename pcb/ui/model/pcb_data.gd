@@ -279,22 +279,21 @@ func get_component(component_id: String):
 	return components.get(component_id, null)
 
 
-## Take the DERIVED designator anchors a worker resolve put on `board`'s
-## components, by ref, onto the live components. Anchors only: the board's
-## own pads, graphics and placements are not touched, so a reply that arrives
-## after the user has started editing cannot roll anything back. Returns how
-## many designators moved; emits data_changed once when any did.
-func adopt_derived_anchors(board: Dictionary) -> int:
-	var moved := 0
-	for entry in (board.get("components", []) as Array):
-		if not (entry is Dictionary):
-			continue
-		var comp = components.get(str((entry as Dictionary).get("ref", "")), null)
-		if comp != null and comp.adopt_derived_anchor((entry as Dictionary).get("refdes_anchor")):
-			moved += 1
-	if moved > 0:
+## Take THIS host's resolve of the board — a pcb.deserialize reply's `resolved`
+## map, keyed by component ref — onto the live components: silk, lands, the
+## effective designator anchor, the resolved fact (pcb_component.adopt_resolved).
+## For a reply that arrives AFTER the load (a document restore, which carries no
+## resolve of its own). Returns how many components changed.
+func adopt_resolved(resolved: Dictionary) -> int:
+	var changed := 0
+	for ref in resolved:
+		var comp = components.get(str(ref), null)
+		var entry: Variant = resolved[ref]
+		if comp != null and entry is Dictionary and comp.adopt_resolved(entry):
+			changed += 1
+	if changed > 0:
 		data_changed.emit()
-	return moved
+	return changed
 
 
 ## Check if a component exists
@@ -431,9 +430,8 @@ func get_components_in_region(region: Rect2) -> Array[String]:
 ## and the MCP tools are both consumers, which is what keeps a drag and a
 ## minerva_pcb_move_component call meaning the same thing.
 ##
-## STORAGE is the member's own `properties[group_id]` (see pcb_component.gd's
-## GROUP_PROPERTY_KEY for the measured reason it is not a top-level field). There
-## is no group registry object: a group IS the set of components sharing an id,
+## STORAGE is the member's own `group_id` field — a canonical component key,
+## absent when ungrouped. There is no group registry object: a group IS the set of components sharing an id,
 ## so a group cannot go stale, cannot outlive its members, and needs no separate
 ## serialization path — deleting the last member deletes the group.
 ##
@@ -3512,8 +3510,8 @@ func to_csv() -> String:
 ## Values may contain vendor or sourcing data and are not needed to make the
 ## loss actionable at the tool boundary.
 func _csv_extra_drop_report(component, identity_fields: Array) -> Dictionary:
-	var canonical_keys: Array = component.canonical_extra.keys()
-	canonical_keys.sort()
+	var assembly_keys: Array = component.assembly.keys()
+	assembly_keys.sort()
 	var pin_keys := {}
 	var pin_numbers: Array = component.pin_extra.keys()
 	pin_numbers.sort()
@@ -3525,7 +3523,7 @@ func _csv_extra_drop_report(component, identity_fields: Array) -> Dictionary:
 	return {
 		"ref": component.id,
 		"identity_fields": identity_fields,
-		"canonical_extra_keys": canonical_keys,
+		"assembly_keys": assembly_keys,
 		"pin_extra_keys": pin_keys,
 	}
 
@@ -3620,8 +3618,8 @@ func from_csv(csv_text: String) -> Dictionary:
 		# on its own terms (Codex review 1090 finding 2): this CSV carries
 		# FOOTPRINT and VALUE, both identity. Importing a row that changes R1
 		# from 10k to 1k would have kept the 10k `mpn`, and promotion would
-		# emit a BOM naming the wrong orderable part — or keep `assembly:
-		# exclude` on a part that is now assembly-worthy. Pin overrides could
+		# emit a BOM naming the wrong orderable part — or keep a non-populated
+		# block on a part that is now assembly-worthy. Pin overrides could
 		# likewise migrate onto a different footprint's same-numbered pin.
 		#
 		# So: identity UNCHANGED -> preserve. Identity CHANGED -> the old
@@ -3632,7 +3630,7 @@ func from_csv(csv_text: String) -> Dictionary:
 		# not reject a bulk placement import.
 		if prior != null:
 			var identity_changed: bool = footprint_changed or value_changed
-			var had_extras: bool = not prior.canonical_extra.is_empty() \
+			var had_extras: bool = not prior.assembly.is_empty() \
 					or not prior.pin_extra.is_empty()
 			if identity_changed:
 				if had_extras:
@@ -3643,7 +3641,7 @@ func from_csv(csv_text: String) -> Dictionary:
 						changed_fields.append("value")
 					dropped_extras.append(
 							_csv_extra_drop_report(prior, changed_fields))
-				component.canonical_extra.clear()
+				component.assembly = {}
 				component.pin_extra.clear()
 		components[component.id] = component
 		imported += 1
@@ -3755,6 +3753,57 @@ func to_board_dict() -> Dictionary:
 const SESSION_ONLY_COMPONENT_KEYS: Array[String] = ["footprint_resolved"]
 
 
+## The keys this model reads on each entity — a MIRROR of the Go schema
+## (pcb/internal/board/board.go), which is the authority; the component list
+## lives on PCBComponent. A key the codec grows and these lists have not is a
+## FALSE refusal, loud and immediate; a stale list never lets a key through
+## silently. Zones, cutouts and board graphics are carried verbatim and left
+## to the codec, which refuses a stray key on them at the next save.
+const ROOT_KEYS: Array[String] = ["version", "id", "name", "width_mm", "height_mm",
+	"grid_mm", "layers", "fabrication_stage", "origin", "design_rules", "library_lock",
+	"components", "nets", "traces", "vias", "zones", "cutouts", "mounting_holes",
+	"pth_holes", "npth_holes", "board_graphics", "annotations", "route_hints"]
+const NET_KEYS: Array[String] = ["name", "pins"]
+const TRACE_KEYS: Array[String] = ["id", "net", "layer", "width_mm", "points"]
+const VIA_KEYS: Array[String] = ["id", "x_mm", "y_mm", "drill_mm", "diameter_mm",
+	"net", "from_layer", "to_layer", "tented"]
+const HOLE_KEYS: Array[String] = ["id", "x_mm", "y_mm", "diameter_mm", "drill_mm",
+	"plated", "annulus_mm"]
+
+
+## Every reason a canonical board dict cannot be loaded: the root and each
+## component / net / trace / via / mounting hole checked against the keys this
+## model reads, in the Go codec's message shape. Empty when it loads. Pure over
+## its input so the rule is testable without a board.
+static func board_dict_refusals(data: Dictionary) -> PackedStringArray:
+	var out := PackedStringArray()
+	var root: String = PCBComponentScript.unknown_key_refusal(data, ROOT_KEYS, "board")
+	if not root.is_empty():
+		out.append(root)
+	var lists := [["components", null], ["nets", NET_KEYS], ["traces", TRACE_KEYS],
+		["vias", VIA_KEYS], ["mounting_holes", HOLE_KEYS], ["pth_holes", HOLE_KEYS],
+		["npth_holes", HOLE_KEYS]]
+	for pair in lists:
+		var key: String = pair[0]
+		var entries: Variant = data.get(key, [])
+		if not (entries is Array):
+			continue
+		for i in (entries as Array).size():
+			var entry: Variant = entries[i]
+			if not (entry is Dictionary):
+				continue
+			var designator := str(entry.get("ref", entry.get("name", entry.get("id", ""))))
+			var where := "board.%s[%d]" % [key, i]
+			if not designator.is_empty():
+				where += " (%s)" % designator
+			var refusal: String = PCBComponentScript.board_dict_refusal(entry, where) \
+				if pair[1] == null \
+				else PCBComponentScript.unknown_key_refusal(entry, pair[1], where)
+			if not refusal.is_empty():
+				out.append(refusal)
+	return out
+
+
 ## The board dict as it is WRITTEN — to_board_dict with the session-only keys
 ## removed. Pure over its input so the rule is testable without a board.
 ##
@@ -3780,10 +3829,11 @@ static func strip_session_state(board: Dictionary) -> Dictionary:
 	return out
 
 
-## The canonical board dict for PERSISTENCE — the .pcbskel save, the YAML
-## export and the promote all write this rather than to_board_dict().
+## The canonical board dict as WRITTEN — the .pcbskel save, the YAML export
+## and the promote. It is to_board_dict itself: that dict carries no session
+## state, so there is nothing to strip; the name is kept for its callers.
 func to_saved_board_dict() -> Dictionary:
-	return strip_session_state(to_board_dict())
+	return to_board_dict()
 
 
 ## Restore board state from a canonical board-contract dict.
@@ -3792,20 +3842,15 @@ func to_saved_board_dict() -> Dictionary:
 ## passes those through opaquely, but this model does not own annotation state —
 ## the platform annotation substrate (PcbAnnotationHost, a panel sibling) does.
 ##
-## `resolve_is_live` is forwarded verbatim to every component — see
-## pcb_component.load_from_board_dict. Only a caller whose dict came straight
-## out of a resolve against THIS machine's library may pass true.
-func from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
-	# REFUSE BEFORE MUTATING. Every component dict is checked first, so a
-	# document that states one component's value twice leaves this model holding
-	# the board it already had rather than a half-loaded one. See
-	# PCBComponent.board_dict_refusal.
-	load_refusals = PackedStringArray()
-	for cd in data.get("components", []):
-		if cd is Dictionary:
-			var refusal: String = PCBComponentScript.board_dict_refusal(cd)
-			if not refusal.is_empty():
-				load_refusals.append(refusal)
+## `resolved` is THIS host's resolve of the board (a pcb.deserialize reply's
+## `resolved` map, keyed by ref) — see pcb_component.load_from_board_dict. A
+## document restore passes nothing and asks for the resolve afterwards.
+func from_board_dict(data: Dictionary, resolved: Dictionary = {}) -> void:
+	# REFUSE BEFORE MUTATING. Every entity is checked against the keys this
+	# model reads first, so a document carrying a key that would be dropped by
+	# the next save leaves this model holding the board it already had rather
+	# than a half-loaded one. See board_dict_refusals.
+	load_refusals = board_dict_refusals(data)
 	if not load_refusals.is_empty():
 		for message in load_refusals:
 			push_error("[PCBData] board refused: %s" % message)
@@ -3858,7 +3903,9 @@ func from_board_dict(data: Dictionary, resolve_is_live: bool = false) -> void:
 	var comp_list: Array = data.get("components", [])
 	for cd in comp_list:
 		if cd is Dictionary:
-			var component = PCBComponentScript.from_board_dict(cd, resolve_is_live)
+			var entry: Variant = resolved.get(str((cd as Dictionary).get("ref", "")))
+			var component = PCBComponentScript.from_board_dict(
+				cd, entry if entry is Dictionary else {})
 			components[component.id] = component
 
 	# Nets (canonical list → name→object map)
@@ -3965,10 +4012,11 @@ func _via_to_board_dict(via: Dictionary) -> Dictionary:
 	d["from_layer"] = from_layer
 	d["to_layer"] = to_layer
 
-	for k in via:
-		if k in ["position", "drill", "size", "net_name", "layers", "from_layer", "to_layer"]:
-			continue
-		d[k] = via[k]
+	# The remaining canonical via keys the internal dict may carry; nothing else
+	# crosses, because the codec refuses a key it does not model.
+	for k in ["id", "tented"]:
+		if via.has(k):
+			d[k] = via[k]
 	return d
 
 
@@ -4004,10 +4052,9 @@ func _vias_from_board_list(via_list: Array) -> Array:
 		entry["from_layer"] = from_layer
 		entry["to_layer"] = to_layer
 
-		for k in vd:
-			if k in ["x_mm", "y_mm", "drill_mm", "diameter_mm", "net", "from_layer", "to_layer", "layers"]:
-				continue
-			entry[k] = vd[k]
+		for k in ["id", "tented"]:
+			if vd.has(k):
+				entry[k] = vd[k]
 		result.append(entry)
 	return result
 
@@ -4026,10 +4073,9 @@ func _mounting_hole_to_board_dict(hole: Dictionary) -> Dictionary:
 		d["y_mm"] = float(pos.get("y", 0.0))
 	d["diameter_mm"] = float(hole.get("diameter", 0.0))
 	d["plated"] = bool(hole.get("plated", false))
-	for k in hole:
-		if k in ["position", "diameter", "plated"]:
-			continue
-		d[k] = hole[k]
+	for k in ["id", "drill_mm", "annulus_mm"]:
+		if hole.has(k):
+			d[k] = hole[k]
 	return d
 
 
@@ -4286,10 +4332,9 @@ func _mounting_holes_from_board_list(hole_list: Array) -> Array:
 			"diameter": float(hd.get("diameter_mm", 0.0)),
 			"plated": bool(hd.get("plated", false))
 		}
-		for k in hd:
-			if k in ["x_mm", "y_mm", "diameter_mm", "plated"]:
-				continue
-			entry[k] = hd[k]
+		for k in ["id", "drill_mm", "annulus_mm"]:
+			if hd.has(k):
+				entry[k] = hd[k]
 		result.append(entry)
 	return result
 

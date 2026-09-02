@@ -4516,35 +4516,11 @@ func _run_export(index: int) -> void:
 ## copper presence = traces ∪ zones ∪ netted vias — pours count, mirroring the
 ## census's own definition) or would drop components refuses by name until the
 ## caller confirms.
-## CANONICAL-SOURCE HYGIENE (K2, epoch CPN1): the live board dict with
-## DERIVED presentation state stripped, exactly as the gate + serializer must
-## see it. Captured footprint graphics are attached at LOAD by the worker's
-## footprint resolution (pcb.deserialize's graphics attach) — re-derivable
-## library projections, never design intent — and through Go's Extra
-## passthrough they would land VERBATIM in the canonical YAML. Found live in
-## the coupon round: LOGO1's baked stroke text pushed the serialized source
-## past the 60KiB payload cap, so the size ceiling accidentally caught the
-## exact residue class K2 exists to forbid. The render-detail key set below
-## is the full set to_board_dict emits for the HANDOFF path (see
-## pcb_component.gd's "Canonical Extra (render detail)" block) — every one
-## re-derivable from the locked footprint at load, none design intent; the
-## first real promote shipped all of them into the corpus file via Go's
-## Extra passthrough (K2 residue, found by inspection). The base is
-## to_saved_board_dict, so the session-only keys are already gone before this
-## strip runs — the list below is render detail only.
+## The board the promote gate and the serializer see: the canonical dict, which
+## carries no render or session state (the codec refuses any key it does not
+## model, so nothing derived can reach the design of record).
 func _promote_stripped_board() -> Dictionary:
-	var board: Dictionary = _data.to_saved_board_dict()
-	var render_detail_keys: Array = ["graphics", "pads", "local_bounds",
-		"has_pad_geometry", "bbox_center_offset", "color", "label_visible",
-		"locked", "width", "height", "footprint_id"]
-	for comp in (board.get("components", []) as Array):
-		if comp is Dictionary:
-			for render_key in render_detail_keys:
-				(comp as Dictionary).erase(render_key)
-	for trace in (board.get("traces", []) as Array):
-		if trace is Dictionary:
-			(trace as Dictionary).erase("locked")
-	return board
+	return _data.to_saved_board_dict()
 
 
 ## One worker CHECK over a board document, findings back: the seam behind the
@@ -5217,13 +5193,12 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 
 	# Rebuild the live board (from_board_dict emits data_changed; suppress the
 	# dirty relay for the whole load like the project-file restore path).
-	# resolve_is_live: this dict came back from pcb.deserialize, which resolves
-	# the board against THIS host's library and drops any footprint_resolved the
-	# source carried before stamping its own — so the flags describe this
-	# machine. The file-restore path below deliberately does not say true.
+	# `resolved` came back beside the board from pcb.deserialize, which resolves
+	# the board against THIS host's library — so the lands, silk and flags the
+	# model adopts describe this machine. A file restore passes none.
 	_restoring = true
 	_board_loaded = true
-	_data.from_board_dict(board, true)
+	_data.from_board_dict(board, _dict_or_empty(payload.get("resolved")))
 
 	# SIDECAR ADOPTION (Epoch UX2 station 8, docket 019fde57027c — the HITL-4
 	# loss: annotations authored against a file-loaded canonical YAML lived
@@ -5368,19 +5343,20 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	return {"ok": true, "result": load_result}
 
 
-## Derived designator anchors for a board that arrived as a DOCUMENT: the
-## anchor is a derived key and a document carries none, so the worker is asked
-## for the same enrichment the YAML import gets and ONLY the anchors are
-## adopted. Asynchronous, so the load never waits on a cold worker. Guarded the
-## way _refresh_zone_fill is: an answer is adopted only by the board that asked
-## — any change to the board while the worker ran (another load, an edit) makes
-## the answer stale, and the question is asked again for the board that is
-## here now, a bounded number of times. Adopted inside the restore gate,
-## because a derived value arriving is not an edit. The board goes over whole,
-## as zone fill sends it, not in the wire-trimmed form: a part that owns its
-## geometry is measured against the graphics it carries, and the wire trim
-## drops them.
-func _adopt_worker_anchors() -> void:
+## Ask the worker for THIS host's resolve of the board just restored from a
+## document (which carries none of its own) and adopt it — silk, lands, the
+## designator anchors, the resolved facts — the same way _refresh_zone_fill
+## works: an answer is adopted only by the board that asked. Any change to the
+## board while the worker ran makes the answer stale, and the question is asked
+## again for the board that is here now, a bounded number of times. Adopted
+## inside the restore gate, because a derived value arriving is not an edit.
+##
+## THE CODEC'S VERDICT ON THE DOCUMENT arrives here too. The synchronous load
+## checks only the keys the panel models; a stray key nested deeper (an old
+## `assembly.package`) is the Go codec's to refuse, and it does so on this very
+## call. That refusal is held on the load-refusal lead exactly as a refused
+## open is — the document is not adopted, and the next clean load clears it.
+func _adopt_worker_resolve() -> void:
 	for _attempt in 3:
 		if get_node_or_null("_MinervaIPC") == null or _data == null:
 			return
@@ -5392,15 +5368,21 @@ func _adopt_worker_anchors() -> void:
 			return
 		if _whole_board_token(_data.to_board_dict()) != requested_token:
 			continue
+		var refused: String = _PanelToolsScript.codec_refusal(result)
+		if not refused.is_empty():
+			_load_refusal_lead = "LOAD REFUSED by the codec: %s  •  " % refused
+			_board_loaded = false
+			_set_status("the codec refused this document")
+			return
 		var payload = _unwrap_to_board(result)
 		if payload == null:
 			return
 		var was_restoring := _restoring
 		_restoring = true
-		_data.adopt_derived_anchors(_dict_or_empty(payload.get("board")))
+		_data.adopt_resolved(_dict_or_empty(payload.get("resolved")))
 		_restoring = was_restoring
 		return
-	push_warning("pcb: designator anchors not adopted — the board kept changing while the worker answered")
+	push_warning("pcb: footprint resolve not adopted — the board kept changing while the worker answered")
 
 
 ## Recursively unwrap broker/worker envelopes ({ok|success, result:{…}}) down to
@@ -5622,13 +5604,8 @@ func get_selection_state() -> Dictionary:
 ## differ only in channel, timeout and wire form; panel_tools.worker_envelope
 ## normalises the broker's double-wrap for all four, so no two can differ.
 func board_health_check(board: Dictionary) -> Dictionary:
-	# Canonical wire form at the seam (01a007f1dd02): the enriched dict blew
-	# the broker's 64 KiB cap on real boards; the worker resolves for itself.
-	# Applied here so EVERY caller — the load path included — is covered.
-	# The wire form is smaller, NOT small — a real board can sit a few KB under
-	# the cap — so the by-ref send below is what actually keeps this channel
-	# alive as boards grow.
-	board = _PanelToolsScript.canonical_wire_board(board)
+	# The canonical dict is the wire form; the by-ref send below is what keeps
+	# this channel alive as boards grow past the broker's 64 KiB cap.
 	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
@@ -5664,7 +5641,7 @@ func assembly_placements(data) -> Dictionary:
 	for _attempt in 2:
 		var revision: int = int(data.board_revision)
 		var generation: int = _board_generation
-		var board: Dictionary = _PanelToolsScript.canonical_wire_board(data.to_board_dict())
+		var board: Dictionary = data.to_board_dict()
 		var reply: Dictionary = _PanelToolsScript.worker_envelope(
 			await _request_with_backend_ensure("pcb.assembly_placements",
 				_payload_by_ref({"board": board}, "board"), 60000),
@@ -5889,11 +5866,8 @@ func _schedule_mask_view_refresh() -> void:
 		_refresh_mask_view())
 
 
-## pcb.zone_fill round-trip — same channel idiom as mask_view_check above. The
-## board crosses the broker as its canonical wire form, like assembly_check: the
-## full dict of a real board exceeds the broker's payload cap.
+## pcb.zone_fill round-trip — same channel idiom as mask_view_check above.
 func zone_fill_check(board: Dictionary) -> Dictionary:
-	board = _PanelToolsScript.canonical_wire_board(board)
 	if get_node_or_null("_MinervaIPC") == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
@@ -5976,8 +5950,6 @@ func _schedule_zone_fill_refresh() -> void:
 
 
 func assembly_check(board: Dictionary) -> Dictionary:
-	# Same canonical-wire seam as board_health_check above (01a007f1dd02).
-	board = _PanelToolsScript.canonical_wire_board(board)
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
@@ -6410,7 +6382,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	elif doc.has("width_mm") or doc.has("components") or doc.has("name"):
 		# Canonical board dict.
 		_data.from_board_dict(doc)
-		_adopt_worker_anchors()
+		_adopt_worker_resolve()
 	# else: unknown/empty body — keep whatever board is already loaded.
 
 	# Annotation persistence for this board file (restored, not edited).
@@ -6516,7 +6488,7 @@ func _on_panel_restore_from_note(payload: Dictionary) -> bool:
 	_board_loaded = true
 	_refresh_board_ui()
 	_zoom_to_fit_deferred()
-	_adopt_worker_anchors()
+	_adopt_worker_resolve()
 	return true
 
 
@@ -6647,8 +6619,6 @@ func _migrate_skeleton_shape(doc: Dictionary) -> Dictionary:
 			"x_mm": float(c.get("x", 0.0)),
 			"y_mm": float(c.get("y", 0.0)),
 			"rotation_deg": 0.0,
-			"width": float(c.get("w", 4.0)),
-			"height": float(c.get("h", 4.0)),
 			"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
 		})
 	return canonical

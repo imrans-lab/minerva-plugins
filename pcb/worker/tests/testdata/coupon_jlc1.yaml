@@ -28,7 +28,8 @@ components:
         - number: "2"
           x_mm: 0.949999988079071
           y_mm: 0
-      mpn: TEST-WEIRDPADS-2P
+      assembly:
+        mpn: TEST-WEIRDPADS-2P
     - ref: DAM1
       footprint: Minerva_Fixture:DAM_MinWeb_2P
       x_mm: 9
@@ -47,7 +48,6 @@ components:
       # though nothing is placed on them. `include` is what `auto` emitted
       # before the paste gate existed, so the artwork is unchanged.
       assembly: {populate: false, paste: include}
-      properties: {}
     - ref: FID1
       footprint: Minerva_Fixture:FID_Circle_1mm
       x_mm: 2
@@ -59,7 +59,6 @@ components:
           x_mm: 0
           y_mm: 0
       assembly: exclude
-      properties: {}
     - ref: FID2
       footprint: Minerva_Fixture:FID_Circle_1mm
       x_mm: 22
@@ -71,7 +70,6 @@ components:
           x_mm: 0
           y_mm: 0
       assembly: exclude
-      properties: {}
     - ref: FID3
       footprint: Minerva_Fixture:FID_Circle_1mm
       x_mm: 2
@@ -83,7 +81,6 @@ components:
           x_mm: 0
           y_mm: 0
       assembly: exclude
-      properties: {}
     - ref: J1
       footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical
       value: HDR-1x02
@@ -98,7 +95,8 @@ components:
         - number: "2"
           x_mm: 0
           y_mm: 2.53999996185303
-      mpn: TEST-HDR-1X02
+      assembly:
+        mpn: TEST-HDR-1X02
     - ref: LOGO1
       footprint: Minerva_Fixture:LOGO_Owl_TestCoupon
       x_mm: 17.5
@@ -106,7 +104,6 @@ components:
       rotation_deg: 0
       layer: top
       assembly: exclude
-      properties: {}
     # rotation_deg 180 is REQUIRED, not cosmetic, and is the finding of S9's
     # independent-renderer walkthrough. A bottom-side placement mirrors LOCAL Y
     # (oracle-pinned to pcbnew's FOOTPRINT.Flip, geometry.py PlacementTransform),
@@ -124,7 +121,6 @@ components:
       rotation_deg: 180
       layer: bottom
       assembly: exclude
-      properties: {}
     - ref: TP1
       footprint: Minerva_Fixture:TP_MinAnnular_0p6
       x_mm: 6.5
@@ -136,7 +132,6 @@ components:
           x_mm: 0
           y_mm: 0
       assembly: exclude
-      properties: {}
     - ref: TP2
       footprint: TH_TestPoint
       x_mm: 15.5
@@ -148,7 +143,6 @@ components:
           x_mm: 0
           y_mm: 0
       assembly: exclude
-      properties: {}
     - ref: TP3
       footprint: TH_TestPoint
       x_mm: 20.7999992370605
@@ -160,60 +154,24 @@ components:
           x_mm: 0
           y_mm: 0
       assembly: exclude
-      properties: {}
 nets:
     - name: NET_A
       pins:
         - J1.1
         - C1.1
-      color:
-        a: 1
-        b: 1
-        g: 1
-        r: 1
-      is_power_net: false
-      properties: {}
     - name: NET_B
       pins:
         - J1.2
         - C1.2
-      color:
-        a: 1
-        b: 1
-        g: 1
-        r: 1
-      is_power_net: false
-      properties: {}
     - name: NET_CHAIN
       pins:
         - TP1.1
-      color:
-        a: 1
-        b: 1
-        g: 1
-        r: 1
-      is_power_net: false
-      properties: {}
     - name: NET_LAD1
       pins:
         - TP2.1
-      color:
-        a: 1
-        b: 1
-        g: 1
-        r: 1
-      is_power_net: false
-      properties: {}
     - name: NET_LAD2
       pins:
         - TP3.1
-      color:
-        a: 1
-        b: 1
-        g: 1
-        r: 1
-      is_power_net: false
-      properties: {}
 traces:
     - id: trace:1afe85dfe66d9d3b14cb89d77e08bffc
       net: NET_A

@@ -84,11 +84,11 @@ def _service_board(**overrides) -> dict:
         "components": [
             {"ref": "R1", "footprint": "R_0805", "value": "10k",
              "x_mm": 10.0, "y_mm": 10.0, "rotation_deg": 0, "layer": "top",
-             "assembly": {"mpn": "C25804", "package": "0805",
+             "assembly": {"mpn": "C25804",
                           "house_parts": {"jlcpcb": "C25804"}}},
             {"ref": "R2", "footprint": "R_0805", "value": "10k",
              "x_mm": 20.0, "y_mm": 10.0, "rotation_deg": 90, "layer": "top",
-             "assembly": {"mpn": "C25804", "package": "0805",
+             "assembly": {"mpn": "C25804",
                           "house_parts": {"jlcpcb": "C25804"}}},
         ],
     }

@@ -1,7 +1,6 @@
 package board
 
 import (
-	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -98,76 +97,6 @@ func TestV2IdentityAndOverrideRoundTrip(t *testing.T) {
 	}
 }
 
-// The legacy .minpcb importer must route the source trace/via `id` into the
-// modeled ID field, NOT the inline Extra map — a modeled field whose yaml name
-// also sits in an inline map makes yaml.v3 panic on marshal (the collision this
-// migration surfaced). Non-id passthrough (e.g. `locked`) still lands in Extra.
-func TestLegacyTraceIdMapsToModeledField(t *testing.T) {
-	b, warnings, err := ImportMinpcb(readFixture(t, "legacy_board.minpcb"))
-	if err != nil {
-		t.Fatalf("import: %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
-	}
-	if len(b.Traces) != 1 {
-		t.Fatalf("traces: want 1, got %d", len(b.Traces))
-	}
-	tr := b.Traces[0]
-	if tr.ID != "trace_1" {
-		t.Errorf("legacy trace id not mapped to ID field: got %q", tr.ID)
-	}
-	if _, ok := tr.Extra["id"]; ok {
-		t.Errorf("legacy trace id must not remain in Extra (yaml.v3 marshal collision): %#v", tr.Extra)
-	}
-	if tr.Extra["locked"] != false {
-		t.Errorf("non-id trace passthrough (locked) lost from Extra: %#v", tr.Extra)
-	}
-	// The imported board must now marshal without the id/Extra collision panic.
-	if _, err := MarshalYAML(b); err != nil {
-		t.Fatalf("imported board failed to marshal: %v", err)
-	}
-}
-
-// The via importer must route a legacy via `id` into the modeled ID field
-// (the .minpcb fixture has no via id, so this drives importVias directly), and
-// a NON-string legacy id must be preserved (stringified), never silently
-// dropped — it cannot fall through to Extra without re-creating the yaml.v3
-// inline-map collision. Non-id passthrough (e.g. `layers`) still lands in Extra.
-func TestLegacyViaIdMapsToModeledFieldNotDropped(t *testing.T) {
-	raw := json.RawMessage(`[
-		{"position":{"x":1,"y":2},"size":0.8,"drill":0.4,"net_name":"VCC","id":"via_7","layers":["top","bottom"]},
-		{"position":{"x":3,"y":4},"size":0.8,"drill":0.4,"id":5}
-	]`)
-	vias, err := importVias(raw)
-	if err != nil {
-		t.Fatalf("importVias: %v", err)
-	}
-	if len(vias) != 2 {
-		t.Fatalf("vias: want 2, got %d", len(vias))
-	}
-	if vias[0].ID != "via_7" {
-		t.Errorf("string via id not mapped to ID field: %q", vias[0].ID)
-	}
-	if _, ok := vias[0].Extra["id"]; ok {
-		t.Errorf("via id must not remain in Extra (yaml.v3 collision): %#v", vias[0].Extra)
-	}
-	if vias[0].Extra["layers"] == nil {
-		t.Errorf("non-id via passthrough (layers) lost from Extra: %#v", vias[0].Extra)
-	}
-	if vias[1].ID != "5" {
-		t.Errorf("non-string via id dropped or not stringified: %q", vias[1].ID)
-	}
-	if _, ok := vias[1].Extra["id"]; ok {
-		t.Errorf("stringified via id must not also sit in Extra: %#v", vias[1].Extra)
-	}
-	// A board carrying both must marshal without the collision panic.
-	b := &Board{Version: 2, Name: "x", Components: []Component{}, Nets: []Net{}, Vias: vias}
-	if _, err := MarshalYAML(b); err != nil {
-		t.Fatalf("marshal board with imported vias: %v", err)
-	}
-}
-
 // D2 (finding 019f8b7fb07e comment 689): the pth_holes / npth_holes producer
 // aliases are FOLDED into canonical mounting_holes at parse (NormalizeHoles) with
 // the plating set from the alias key, so they can no longer bypass id-minting or
@@ -213,7 +142,7 @@ func TestNormalizeHolesFoldsAliasesIntoMountingHoles(t *testing.T) {
 }
 
 // A v1 board authored with pth_holes gets its folded holes MINTED by the migration
-// (previously they rode through Extra id-less).
+// (previously they rode through an untyped passthrough id-less).
 func TestV1AliasHolesGetMintedIds(t *testing.T) {
 	src := "version: 1\nname: A\nwidth_mm: 20\nheight_mm: 20\n" +
 		"components: []\nnets: []\n" +
@@ -293,39 +222,5 @@ func TestViaTentedRoundTrips(t *testing.T) {
 	out, _ := MarshalYAML(b)
 	if !strings.Contains(string(out), "tented: false") {
 		t.Fatalf("explicit tented:false not serialized:\n%s", out)
-	}
-}
-
-// E1 (finding 019f8b7fb07e): a .minpcb import must map board holes into the TYPED
-// collections (folded to mounting_holes), not park them in Extra — since the hole
-// keys are now modeled, mergeExtra would drop the Extra copy and the holes would
-// vanish on the next JSON marshal.
-func TestImportMinpcbHolesSurviveJSONMarshal(t *testing.T) {
-	src := `{"board_name":"H","board_width":20,"board_height":20,
-	  "mounting_holes":[{"x_mm":1,"y_mm":1,"diameter_mm":3.2}],
-	  "pth_holes":[{"x_mm":2,"y_mm":2,"diameter_mm":2.0}],
-	  "npth_holes":[{"x_mm":3,"y_mm":3,"diameter_mm":3.0}]}`
-	b, _, err := ImportMinpcb([]byte(src))
-	if err != nil {
-		t.Fatalf("import: %v", err)
-	}
-	if len(b.MountingHoles) != 3 {
-		t.Fatalf("want 3 folded holes, got %d (extra=%v)", len(b.MountingHoles), b.Extra)
-	}
-	if b.Extra["mounting_holes"] != nil || b.Extra["pth_holes"] != nil || b.Extra["npth_holes"] != nil {
-		t.Fatalf("holes leaked into Extra: %v", b.Extra)
-	}
-	// The load-bearing assertion: the holes SURVIVE a JSON round-trip (mergeExtra no
-	// longer drops them, because they are in the modeled field, not Extra).
-	data, err := json.Marshal(b)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var back Board
-	if err := json.Unmarshal(data, &back); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(back.MountingHoles) != 3 {
-		t.Fatalf("holes lost through JSON marshal: got %d", len(back.MountingHoles))
 	}
 }

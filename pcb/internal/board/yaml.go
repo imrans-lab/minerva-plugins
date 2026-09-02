@@ -8,6 +8,7 @@ package board
 
 import (
 	"fmt"
+	"reflect"
 
 	"gopkg.in/yaml.v3"
 )
@@ -56,57 +57,35 @@ var overrideNumKeys = []string{"drill_mm", "annulus_diameter_mm", "pad_width_mm"
 // so a mistyped one is a Go-codec superset rejection, not a shared code.
 var designRuleNumKeys = []string{"zone_min_thickness_mm", "zone_min_island_area_mm2"}
 
-// UnmarshalYAML parses YAML source into a Board. Unknown top-level and
-// per-component keys are preserved via the structs' inline Extra maps rather
-// than dropped.
+// UnmarshalYAML parses YAML source into a Board. The schema is positive: a key
+// that names no modeled field anywhere in the document is refused with the
+// entity and key named (schema.go), never parked.
 //
 // Before the typed decode it walks the raw yaml.Node tree (probeNodeTree) to
 // reject, WITH the shared code string, cases the typed decode would either
 // mishandle or report with a native, code-less error: a non-integer version
-// (unsupported_schema_version), a non-sequence or null-item entity collection
-// (invalid_board_structure), a mistyped zone-fill minimum (invalid_design_rule),
-// or a mistyped pin-override field
+// (unsupported_schema_version), an unknown key, a non-sequence or null-item
+// entity collection (invalid_board_structure), a mistyped zone-fill minimum
+// (invalid_design_rule), or a mistyped pin-override field
 // (invalid_pin_override). Wrapping these at unmarshal is what lets the vector
-// runner assert code parity on unmarshal-time rejections (finding 019f8b7fb07e,
-// parts 3 & 4).
-//
-// The same raw tree then restores the authored text of the pre-block identity
-// values (preserveIdentityText, assembly.go), which the untyped inline map
-// would otherwise resolve to a number.
-//
-// Callers with a warnings channel should use UnmarshalYAMLWithWarnings: this
-// form discards the notice that identity text could NOT be preserved, which is
-// a silent fall back to the very renumbering that pass exists to undo.
+// runner assert code parity on unmarshal-time rejections.
 func UnmarshalYAML(data []byte) (*Board, error) {
-	b, _, err := UnmarshalYAMLWithWarnings(data)
-	return b, err
-}
-
-// UnmarshalYAMLWithWarnings is UnmarshalYAML plus the notices no error channel
-// can carry: today, each component whose source node the identity-text pass
-// could not walk (see preserveIdentityText).
-func UnmarshalYAMLWithWarnings(data []byte) (*Board, []string, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, nil, fmt.Errorf("board: unmarshal yaml: %w", err)
+		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
 	if err := probeNodeTree(&doc); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var b Board
 	if err := yaml.Unmarshal(data, &b); err != nil {
-		return nil, nil, fmt.Errorf("board: unmarshal yaml: %w", err)
+		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
-	// Give the pre-block identity homes the same text-preserving decode the
-	// structured assembly block already has: without this, `package: 0603`
-	// riding Component.Extra's untyped inline map decodes as the int 387 and a
-	// save writes 387 back over the author's text (assembly.go).
-	warnings := preserveIdentityText(&b, &doc)
 	// Fold the pth_holes / npth_holes aliases into canonical mounting_holes BEFORE
 	// any downstream migration / validation, so they cannot bypass id-minting or the
-	// structural gate (finding 019f8b7fb07e comment 689).
+	// structural gate.
 	NormalizeHoles(&b)
-	return &b, warnings, nil
+	return &b, nil
 }
 
 // probeNodeTree inspects the raw document node for the structural / typed
@@ -132,6 +111,12 @@ func probeNodeTree(doc *yaml.Node) error {
 		!(v.Kind == yaml.ScalarNode && v.Tag == "!!int") {
 		return fmt.Errorf("board: unmarshal yaml: unsupported_schema_version: "+
 			"version %q is not an integer", v.Value)
+	}
+
+	// The positive schema: every key on the root and on every entity beneath
+	// it names a modeled field, or the document is refused by entity and key.
+	if err := refuseUnknownYAML(root, reflect.TypeOf(Board{}), "board"); err != nil {
+		return fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
 
 	// Entity-collection shape + null-item rejection (parts 3 & 4). A present
@@ -185,19 +170,6 @@ func probeNodeTree(doc *yaml.Node) error {
 		return nil
 	}
 	for _, comp := range comps.Content {
-		// ONE HOME FOR THE COMPONENT VALUE. `properties.value` is a second
-		// spelling of the top-level `value` key, and a document carrying both
-		// loads as whichever home the reader happens to consult first — then the
-		// next save writes that choice over the other, losing a hand edit with
-		// no warning. Refuse the document by name rather than pick a winner.
-		if props := nodeMapValue(comp, "properties"); props != nil &&
-			props.Kind == yaml.MappingNode && nodeMapValue(props, "value") != nil {
-			return fmt.Errorf("board: unmarshal yaml: invalid_board_structure: "+
-				"component %q: properties.value is not a home for the component "+
-				"value; delete it and author the top-level \"value\" key",
-				componentRefOf(comp))
-		}
-
 		pins := nodeMapValue(comp, "pins")
 		if pins == nil || pins.Kind != yaml.SequenceNode {
 			continue
@@ -247,16 +219,6 @@ func resolveAlias(n *yaml.Node) *yaml.Node {
 		n = n.Alias
 	}
 	return n
-}
-
-// componentRefOf reports a component node's designator for an error message, or
-// "?" when the node carries none — the probe runs before the typed decode, so a
-// malformed component still has to be nameable.
-func componentRefOf(comp *yaml.Node) string {
-	if n := nodeMapValue(comp, "ref"); n != nil && n.Kind == yaml.ScalarNode {
-		return n.Value
-	}
-	return "?"
 }
 
 // nodeMapValue returns the alias-resolved value node for key in a mapping node,

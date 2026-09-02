@@ -21,13 +21,12 @@ readiness states and the atomic write.
 
 ## What each BOM column carries
 
-The schema gives three `assembly` fields a column of their own, and each is read
-with exactly one fallback to the pre-block source it supersedes:
+Each column is read with exactly one fallback:
 
-| column | authored field | fallback when absent |
+| column | source | fallback when absent |
 |---|---|---|
 | Comment | `assembly.comment` | the component's `value` |
-| Footprint | `assembly.package` | the authored `footprint` ref |
+| Footprint | the drawing's package label (`assembly.package` on its `footprints.lock.json` entry, carried as `ResolvedAssembly.package_labels`) | the drawing ref verbatim |
 | part number (`LCSC Part #` in JLCPCB's dialect) | `assembly.house_parts[<house>]` | `assembly.mpn` |
 
 `<house>` is the selected profile's own `house_part_id` — the id a board names

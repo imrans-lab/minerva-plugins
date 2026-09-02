@@ -6,7 +6,9 @@ defined in Go at `pcb/internal/board/` and serialized as deterministic YAML.
 
 Design priority: **durability of the contract over feature breadth.** Field
 names are explicit and unit-suffixed (`_mm`, `_deg`) so no consumer guesses
-units; unknown fields survive round-trips rather than being silently dropped.
+units. The schema is **positive**: every key a document may carry is a typed
+field, and an unknown key anywhere is **refused naming the entity and the key**
+— never parked, never carried (see "Positive schema" below).
 
 ## Schema
 
@@ -46,8 +48,8 @@ components:
                                # body centre, and not always pin 1.
     rotation_deg: 90
     layer: top
-    symbol: Device:NE555P      # OPTIONAL, unmodeled — carried in Extra (see below);
-                                # checked informally by minerva_pcb_check_libraries when present
+    symbol: Device:NE555P      # OPTIONAL; checked informally by
+                                # minerva_pcb_check_libraries when present
     pins:
       # Component-relative offsets. Inline pin geometry must AGREE with the
       # footprint's own pad positions (see "Pin-geometry authority" below) —
@@ -106,16 +108,15 @@ merged, and not silently preferred.
 The refusal exists because the two homes are indistinguishable to an author and
 decisive to a reader: a board with `value: 330` and `properties: {value: 470}`
 loaded as `470`, and the next save wrote `470` back into `value`, so a hand edit
-disappeared with nothing printed. Every boundary now refuses instead — Go's
-`UnmarshalYAML` (`internal/board/yaml.go`) and `ImportMinpcb`, the worker's file
-parse (`board_model.load_board`) and shared code validator
-(`board_validate.validate_board_v2`, `invalid_board_structure`), and the panel
-model's `PCBData.from_board_dict`, which refuses the whole document and keeps the
-board it already had.
+disappeared with nothing printed. Every boundary now refuses instead — the Go
+codec refuses `properties` itself as an unknown component key (see "Positive
+schema"), the worker's file parse (`board_model.load_board`) and shared code
+validator (`board_validate.validate_board_v2`, `invalid_board_structure`) name
+the key, and the panel model's `PCBData.from_board_dict` refuses the whole
+document and keeps the board it already had.
 
-This is NOT the rule the four identity fields follow. `manufacturer`, `mpn`,
-`package` and `comment` genuinely have three authoring homes with a defined
-precedence — see below.
+The same rule covers part identity: `manufacturer`, `mpn` and `comment` live in
+the `assembly` block and nowhere else — see "Identity values are QUOTED strings".
 
 ### Fields the Go contract carries but the v1 compiler refuses
 
@@ -461,9 +462,8 @@ are properties of the library, not defects in the example.
 
 `Pin.drill_mm` / `Pin.annulus_diameter_mm` / `Pin.plated` and the board-level
 `mounting_holes` list (`[]Hole`: `x_mm`, `y_mm`, `diameter_mm`, `drill_mm`,
-`plated`, `annulus_mm`) are first-class as of docket `019eb47ddebc` — they
-formalize the through-hole pad geometry and non-plated mounting holes the gerber
-spike carried through `Extra`. A **plated** board hole MUST author `annulus_mm`
+`plated`, `annulus_mm`) are first-class — they formalize the through-hole pad
+geometry and non-plated mounting holes. A **plated** board hole MUST author `annulus_mm`
 (its copper-ring diameter, `> diameter_mm`): the copper ring is never invented, so
 both the gerber and KiCad exporters emit exactly the authored ring and cannot
 diverge (finding `019f8dbb7104`); the compiler fail-closes a plated hole without
@@ -503,7 +503,6 @@ components:
       populate: true                     # false = DNP (see below)
       manufacturer: Yageo
       mpn: RC0805FR-0710KL
-      package: "0805"                    # the BOM's Footprint/package column
       comment: 10k 1% 1/8W               # the BOM's Comment column
       house_parts: {jlcpcb: C84376}      # house id -> that house's catalogue number
       paste: auto                        # auto | include | exclude
@@ -526,20 +525,27 @@ components:
 |---|---|
 | `populate` | `false` marks the part **do-not-populate**: it stays in the gerbers (its lands are still etched) and leaves **both** assembly CSVs, logged by ref. Absent means populated. |
 | `manufacturer` / `mpn` | the orderable part's identity. |
-| `package` | the package name the BOM's Footprint column prints, independent of the footprint id the board routes against. Absent, that column falls back to the authored `footprint`. |
 | `comment` | the BOM's Comment column. Absent, it falls back to the component's `value`. |
 | `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. The BOM's part-number column prints the entry for the **selected** house; absent, it falls back to `mpn`. |
 | `paste` | `auto` (the default) leaves the footprint's own layer list to decide; `exclude` drops this part's stencil apertures; `include` declines to drop them. See "Solder paste is authored, never invented" below. |
 | `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. Each entry takes `ref`, `footprint`, `offset_mm`, `rotation_deg` and `anchor_mm`. |
 
-The three column fields resolve to the BOM's cells with exactly one fallback
-each, applied once at emit time so no consumer re-decides what a column means:
+The BOM's cells resolve with exactly one fallback each, applied once at emit
+time so no consumer re-decides what a column means:
 
-| BOM column | authored field | fallback when absent |
+| BOM column | source | fallback when absent |
 |---|---|---|
 | Comment | `assembly.comment` | the component's `value` |
-| Footprint | `assembly.package` | the authored `footprint` ref |
+| Footprint | the drawing's package label — `assembly.package` on its `footprints.lock.json` entry | the drawing ref verbatim |
 | part number (e.g. "LCSC Part #") | `assembly.house_parts[<selected house>]` | `assembly.mpn` |
+
+**The Footprint column is a fact about the DRAWING, not the component.** What a
+purchaser reads as the part's package is stated once, on the footprint's
+acquisition-lock entry, and every component on that drawing prints it; a
+per-component `package` was a second home for the same fact and is refused
+like any other unknown block key. A drawing whose lock entry carries no label
+prints its ref — an honest fallback, never a guess. An expansion child that
+names its own `footprint` prints that drawing's label.
 
 Which key names the selected house is a **dialect** fact carried on the house
 profile, not a guess: the `jlc` profile reads `house_parts.jlcpcb`. A board
@@ -553,9 +559,9 @@ empty list rather than dropping the key, so a board that has been through a load
 and a save still carries the fault for the gate to find; an absent key stays
 absent.
 
-**Unknown keys inside `assembly` are REFUSED**, not preserved — the opposite of
-the board's general Extra-passthrough rule (see "Losslessness & the warnings
-list"). This block is the only source of part identity for an order, so `mpm:
+**Unknown keys inside `assembly` are REFUSED**, like every other unknown key
+(see "Positive schema"), but under the block's own code
+(`invalid_component_assembly`). This block is the only source of part identity for an order, so `mpm:
 C123` silently vanishing and resurfacing later as "missing mpn", or a mistyped
 `offset_mm` quietly placing a part at its parent's origin, is exactly the quiet
 wrong answer the order path exists to refuse. Both codecs enforce it at every
@@ -565,32 +571,19 @@ level of the block, including **inside** a placement's `offset_mm` and
 
 ### Identity values are QUOTED strings, and a blank one means absent
 
-`manufacturer`, `mpn`, `package` and `comment` each have three authoring homes,
-read in this order: the `assembly` block, then a top-level key on the component,
-then the component's `properties` map. The first home that has the key decides.
-`value` does **not** follow this rule — see "The component value has one home".
+`manufacturer`, `mpn` and `comment` have ONE authoring home: the `assembly`
+block. A top-level `mpn:` on the component, or a `properties:` mapping, is an
+unknown key and the document is refused naming the ref and the key — there is
+no precedence fold, so nothing can shadow the block.
 
-**Quote them.** A bare `0603` is not text in YAML. It resolves as a number
-before any of this is read — `0603` reaches the compiler as `387` (leading
-zero, read as octal), `0402` as `258`, `0201` as `129`, `1206` as `1206`;
-`0805` alone survives unquoted, by the accident that `8` is not an octal digit.
-The Go codec keeps the authored text in **all three** homes. The `assembly`
-block's fields are typed strings, which yaml.v3 fills from the scalar's raw
-text; the top-level and `properties` homes have no typed fields and ride the
-untyped Extra passthrough, where a save used to write `387` back over the
-author's `0603`. `preserveIdentityText` (`internal/board/assembly.go`) re-reads
-those two homes from the source nodes, so every home now round-trips the text
-and re-emits it **quoted** — a Go save repairs an unquoted identity value
-instead of destroying it. Only these four keys are treated that way: any other
-unquoted `0603` riding the same passthrough still resolves as a number.
-
-Reading a file that has not been through a Go save, the Python compiler still
-sees the number, and a non-string identity value there is a **named refusal**
-carrying the component and the field (`invalid_component_assembly`), not a
-value to guess at: coercing would print `387` in the Footprint column, and
-dropping would fall through to the next home and order whatever was written
-there. So the author meets one rule — quote it — and never a refusal on a file
-whose authored text has already been overwritten.
+**Quote them.** A bare `0201` is not text in YAML. It resolves as a number
+before any of this is read — `0201` reaches a reader as `129` (leading zero,
+read as octal). The block's fields are typed strings, so the Go codec keeps and
+re-emits the authored text **quoted**; the Python compiler, reading a file that
+has not been through a Go save, sees the number, and a non-string identity
+value there is a **named refusal** carrying the component and the field
+(`invalid_component_assembly`), not a value to guess at: coercing would print
+`129` into an order. So the author meets one rule — quote it.
 
 **The two lanes therefore answer differently on the same file, and that is the
 asymmetry to expect.** A board opened in the editor was loaded through the Go
@@ -891,7 +884,8 @@ that is about the part rather than the copper:
   catalogue number)** — a pair that can be measured, and for the strip and
   `C41376161` has been. The vendor's convention is then applied by the ledger
   on export, once, and `rotation_deg` stays what it is: design;
-* its BOM Footprint column falls back to that drawing, not the parent's;
+* its BOM Footprint column prints that drawing's lock label (else its ref),
+  not the parent's;
 * the parent still draws every land. The child's drawing is resolved through
   the same library chain but is never fabricated, adjudicated or lock-pinned —
   those protect copper it does not draw. Naming a drawing the library does not
@@ -1161,8 +1155,8 @@ random token. An id that is not minted in the contract shape therefore changes o
 every load: an id held across `export_yaml` → `load_board` comes back as
 `missing_via_ids`, and a routing sidecar's `committed_via_ids` go dangling.
 Minting UI-side is what makes an id survive the round trip unchanged. Ordinal ids
-are still **accepted** everywhere (old boards, `.minpcb` imports,
-`import_trace_geometry` payloads); nothing mints one.
+are still **accepted** everywhere (old boards, `import_trace_geometry`
+payloads); nothing mints one.
 
 ### Geometry authority: full vs partial
 
@@ -1293,36 +1287,7 @@ drift test.
 > the committed cross-language vectors (`pcb/spec/vectors/`, run by both languages)
 > are all now in place.
 
-## `.minpcb` (legacy JSON) → canonical mapping
-
-The in-tree Godot editor's `PCBData.to_dict()` shape maps as follows. The
-importer (`board.ImportMinpcb`) applies this and returns a warnings list.
-
-| Legacy `.minpcb` (JSON)                     | Canonical (`_mm` YAML)          | Notes |
-|---------------------------------------------|---------------------------------|-------|
-| `board_name`                                | `name`                          | |
-| `board_width` / `board_height`              | `width_mm` / `height_mm`        | |
-| `grid_size`                                 | `grid_mm`                       | |
-| `layers`                                    | `layers`                        | copied as-is; must satisfy the stack rules in "Layer stack" |
-| `components` (`id`→object **map**)          | `components` (**list**, sorted by id) | deterministic order |
-| component `id`                              | `ref`                           | reference designator |
-| component `position.{x,y}`                  | `x_mm` / `y_mm`                 | the footprint's own origin — see "Where x_mm / y_mm actually put a footprint" |
-| component `rotation`                        | `rotation_deg`                  | |
-| component `value`                           | `value`                         | a legacy document authoring it under `properties` instead is REFUSED — see "The component value has one home" |
-| component `pins` (`name`→`{x,y}` map)       | `pins` (list of `{number,x_mm,y_mm}`) | key → `number` |
-| component render fields (`pads`, `color`, `local_bounds`, `width`, `height`, `has_pad_geometry`, `bbox_center_offset`, `label_visible`, `locked`, `footprint_id`) | component `Extra` (inline) | carried losslessly into YAML, no warning. `pads` is **not** render-only to the compiler — see "Geometry authority: full vs partial" |
-| `nets` (`name`→object map)                  | `nets` (list, sorted by name)   | |
-| net `pins` (`[{component_id, pin_name}]`)   | `pins` (`["U1.8", ...]`)        | flattened to `Ref.Pad` |
-| net `color` / `properties` / `is_power_net` | net `Extra` (inline)            | carried losslessly |
-| `traces` (`id`→object map)                  | `traces` (list, sorted by id)   | |
-| trace `net_name` / `waypoints` / `width`    | `net` / `points` / `width_mm`   | |
-| trace `id`                                  | trace `id` (modeled, v2)        | maps to the persistent `id` field, not `Extra` — see "Persistent identity" |
-| trace `locked`                              | trace `Extra`                   | carried losslessly |
-| `vias` (array; `position`, `size`, `drill`, `net_name`) | `vias` (`x_mm`,`y_mm`,`diameter_mm`,`drill_mm`,`net`) | rest → `Extra` |
-| `annotations` (`id`→object map)             | `annotations` (list of opaque blobs) | **not interpreted** |
-| `route_hints` (`id`→object map)             | `route_hints` (list of opaque blobs) | **not interpreted** |
-
-### Component groups (`properties.group_id`)
+### Component groups (`group_id`)
 
 Two board components that are really **one physical part** (an amplifier module
 whose connector is drawn as its own footprint, say) can be stamped into a
@@ -1330,33 +1295,25 @@ whose connector is drawn as its own footprint, say) can be stamped into a
 member's offset from the group anchor is numerically editable once the real part
 is measured.
 
-**Membership lives in the component's `properties` map, under `group_id`** —
-never as a top-level component key. That is a measured constraint, not a style
-choice: `board.ImportMinpcb` walks every per-component key against
-`knownComponentFields` (`pcb/internal/board/minpcb.go`) and emits
-`component "X": non-canonical field "Y" preserved as passthrough` for anything
-outside it. `properties` **is** in that set and is carried whole, so a group id
-inside it rides every serialization path — `to_dict`, `to_board_dict`, both load
-halves, undo snapshots, and the panel's `host_owned` save/load — with **no Go
-change and no warning**. A top-level `group_id` would have needed that Go map
-extended.
+Membership is the component's `group_id` key — a typed field on the Go model
+and on the panel's component. Absent means ungrouped, and an ungrouped board
+carries no key, so a board that was grouped and then ungrouped round-trips
+byte-identical to one that never was.
 
 Nothing outside the panel interprets the value. To Go, to the worker and to the
-fab outputs it is one more opaque `properties` entry, so grouping changes no
-netlist, no copper and no CAM.
+fab outputs it is an opaque token, so grouping changes no netlist, no copper
+and no CAM.
 
 ```yaml
 components:
   - ref: AMP1
     x_mm: 40.0
     y_mm: 25.0
-    properties:
-      group_id: "group:6f1c…"     # 32 lowercase hex, minted by the panel
+    group_id: "group:6f1c…"     # 32 lowercase hex, minted by the panel
   - ref: OUT
     x_mm: 47.62
     y_mm: 25.0
-    properties:
-      group_id: "group:6f1c…"     # same id ⇒ same physical part
+    group_id: "group:6f1c…"     # same id ⇒ same physical part
 ```
 
 **A group *is* the set of components sharing an id** — there is no group registry
@@ -1513,27 +1470,48 @@ legacy `id`→object map is flattened to a list; each blob keeps its `id` inside
 The annotation-migration child owns their semantics — do not add typed structs
 for them here.
 
-## Losslessness & the warnings list
+## Positive schema
 
-`ImportMinpcb` never silently drops a field. Every source field is either
-(a) mapped to a canonical field, (b) parked in a struct's inline `Extra` map so
-it round-trips into the emitted YAML, or (c) reported in the returned
-`warnings` slice. Fields that are known-legacy-but-non-canonical (render detail)
-are parked in `Extra` quietly; genuinely unrecognized fields are parked in
-`Extra` **and** flagged in `warnings` so the surprise is visible.
+Every key a document may carry names a typed field on one of the Go structs in
+`pcb/internal/board/board.go`, and both parse boundaries — `UnmarshalYAML` for a
+file and `ProbeJSONBoard` for the board dict the panel hands `pcb.serialize` /
+`pcb.deserialize` — walk the whole document against those structs
+(`schema.go`) and refuse the **first** key that names no field:
 
-Note: `Extra` is `yaml:",inline"` and tagged `json:"-"`, but the nine Extra-bearing
-structs carry **custom `MarshalJSON`/`UnmarshalJSON`** (`internal/board/json.go`)
-that inline the unknown keys into the JSON object too — so `Extra` survives both
-YAML↔YAML **and** the `pcb.deserialize` JSON boundary losslessly (modeled fields
-always win a key collision). The canonical fields are the contract; `Extra` is the
-forward-compat affordance, preserved on both wire formats.
+```
+invalid_board_structure: board.components[3] (U3): unknown key "colour"
+```
+
+The entity is named by its path and its own designator (`ref`, `name`, `id` or
+pin `number`); nested mappings, lists of entities and keyed maps (a
+`library_lock` entry) are walked the same way. The `assembly` block refuses its
+own unknown keys through its own decoder (`invalid_component_assembly`) and the
+walk stops at it. There is **no** forward-compat bag: a format that parks what
+it does not recognise defines itself negatively, and that is how one fact came
+to live under two keys. One fact, one key.
+
+Two keys carry values whose **shape** belongs to the worker rather than to
+this codec: a component's inline `pads` / `graphics` (its own land pattern and
+artwork, read by `inline_footprint.py` — see "Geometry authority"). The key is
+known here; the contents are the consumer's contract. `refdes_placement` (the
+authored designator overlay `refdes_anchor.py` reads) is typed field by field,
+every field optional, so a misspelt one is refused by name. `annotations` /
+`route_hints` stay opaque blobs as before.
+
+What a session **derives** is not in the document at all — the panel's render
+state (bounds, colour, lock, label) and this host's resolve of each footprint
+(silk graphics, real pad geometry, the effective designator anchor,
+`footprint_resolved`). `pcb.deserialize` returns the resolve **beside** the
+board, under `resolved`, keyed by component ref, and the panel model adopts it
+without ever writing it back.
 
 ## Channels (`pcb.serialize` / `pcb.deserialize`)
 
 - `pcb.serialize` — args `{board: <canonical Board JSON>}` → `{yaml: "<source>"}`.
-- `pcb.deserialize` — args `{yaml: "..."}` **or** `{minpcb_json: <legacy JSON>}`
-  → `{board: <canonical Board dict>, warnings: [...]}`.
+- `pcb.deserialize` — args `{yaml: "..."}` **or** `{board: <canonical Board dict>}`
+  → `{board: <canonical Board dict>, warnings: [...], resolved: {<ref>: {graphics,
+  pads, has_pad_geometry, refdes_anchor, footprint_resolved}}}`. A component that
+  authors its own `pads` / `graphics` gets no resolved copy of that key.
 - Both fall back to the legacy project_file `{state}` echo when given neither, so
   the manifest's `project_file` host_owned save path is not regressed. The echo
   fallback applies only to genuinely absent args: non-empty but unparseable

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 )
 
 // isJSONNull reports whether a raw JSON value is the literal null. An absent
@@ -23,6 +24,8 @@ func isJSONNull(raw json.RawMessage) bool {
 // SAME invalid_board_structure code the YAML path and the Python validator use
 // (finding 019f8b7fb07e). A whole-collection null (`"traces":null`) is an empty
 // list (valid); a present non-array collection, or any null element, is rejected.
+// The positive-schema walk (schema.go) then refuses an unknown key on any
+// entity, so a board dict the panel could not LOAD back is never written.
 func ProbeJSONBoard(raw json.RawMessage) error {
 	if len(bytes.TrimSpace(raw)) == 0 || isJSONNull(raw) {
 		return nil
@@ -47,45 +50,10 @@ func ProbeJSONBoard(raw json.RawMessage) error {
 			}
 		}
 	}
-	if err := probeJSONComponentValueHome(top["components"]); err != nil {
+	if err := refuseUnknownJSON(raw, reflect.TypeOf(Board{}), "board"); err != nil {
 		return err
 	}
 	return probeJSONDesignRules(top["design_rules"])
-}
-
-// probeJSONComponentValueHome is the JSON-side sibling of the same check in
-// probeNodeTree. It runs on the SERIALIZE direction, so a caller cannot write a
-// document it would then be unable to load: the component value has one home,
-// the top-level `value` key, and a `properties.value` beside it is refused by
-// name rather than serialized into canonical source.
-func probeJSONComponentValueHome(raw json.RawMessage) error {
-	if raw == nil || isJSONNull(raw) {
-		return nil
-	}
-	var comps []struct {
-		Ref        string                     `json:"ref"`
-		ID         string                     `json:"id"`
-		Properties map[string]json.RawMessage `json:"properties"`
-	}
-	if err := json.Unmarshal(raw, &comps); err != nil {
-		return nil // shape is the entity-list probe's / typed decode's business
-	}
-	for _, c := range comps {
-		if _, dup := c.Properties["value"]; !dup {
-			continue
-		}
-		ref := c.Ref
-		if ref == "" {
-			ref = c.ID
-		}
-		if ref == "" {
-			ref = "?"
-		}
-		return fmt.Errorf("invalid_board_structure: component %q: properties.value "+
-			"is not a home for the component value; delete it and author the "+
-			"top-level \"value\" key", ref)
-	}
-	return nil
 }
 
 // probeJSONDesignRules is the JSON-side sibling of the design-rule type probe

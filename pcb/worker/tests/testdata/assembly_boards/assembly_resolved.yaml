@@ -17,20 +17,17 @@
 # requires.
 #
 # Deliberately exercises:
-#   * two components sharing every EMITTED BOM column (package, value, part
-#     number) -> one grouped BOM line with two refs (R1, R2). `package` is
-#     authored on BOTH, because the Footprint column prints the authored
-#     package when there is one and the footprint ref when there is not: a
-#     board that authored it on only one of the pair would print `0805` beside
-#     `R_0805` and split the row on the asymmetry rather than on anything the
-#     grouping seals are about. The asymmetry itself is measured on its own
-#     board (test_bom_asymmetric_package_authoring_splits_the_row);
+#   * two components sharing every EMITTED BOM column (drawing, value, part
+#     number) -> one grouped BOM line with two refs (R1, R2). Both sit on the
+#     same drawing, because the Footprint column prints the drawing's lock
+#     label when there is one and the drawing ref when there is not: a pair on
+#     differently-labelled drawings would split the row on the asymmetry rather
+#     than on anything the grouping seals are about. The asymmetry itself is
+#     measured on its own board (test_bom_asymmetric_labelling_splits_the_row);
 #   * a non-zero rotation (R2 @ 90) and a BOTTOM-side off-axis one (D1 @ 45);
-#   * all THREE authored homes for part identity — the structured assembly
-#     block (R1), the pre-block top-level scalars (R2, which carries both its
-#     `mpn` and its `package` there), and a nested properties mapping (D1) — so
-#     the compile-time precedence fold is covered by the board every emitter
-#     test already loads;
+#   * part identity stated two ways inside its ONE home, the assembly block —
+#     as a house catalogue number (R1) and as a bare `mpn` (R2, D1) — so the
+#     grouping seal reads the resolved columns and not the authored spelling;
 #   * BOTH non-populated forms — the legacy `assembly: exclude` scalar (FID1)
 #     and the structured `populate: false` (TXT1) — which must contribute no
 #     BOM row, no CPL row, and no identity requirement.
@@ -58,23 +55,19 @@ components:
     assembly:
       mpn: C25804
       manufacturer: Yageo
-      # QUOTED: the identity fold takes strings only, and an unquoted package
-      # whose digits happen to parse as a number (0402, 0603) would reach the
-      # IR as None and silently fall back to the footprint ref.
-      package: "0805"
       house_parts: {jlcpcb: C25804}
-  # Identity as pre-block top-level scalars — mpn AND package, so R1 and R2
-  # print the same Footprint cell from two different authored homes.
+  # Identity as a bare mpn in the block, so R1 and R2 print the same house
+  # catalogue cell from two spellings of one home.
   - ref: R2
     footprint: R_0805
     value: "10k"
-    mpn: C25804
-    package: "0805"
+    assembly:
+      mpn: C25804
     x_mm: 15.0
     y_mm: 5.0
     rotation_deg: 90
     layer: top
-  # Identity in a nested properties mapping, on the bottom side at 45 degrees.
+  # Bottom side at 45 degrees.
   - ref: D1
     footprint: Diode_SMD:D_SMA
     value: 1N4148
@@ -82,7 +75,7 @@ components:
     y_mm: 14.0
     rotation_deg: 45
     layer: bottom
-    properties:
+    assembly:
       mpn: C2128
   # Board furniture, legacy scalar form: fabricated copper, never purchased.
   - ref: FID1

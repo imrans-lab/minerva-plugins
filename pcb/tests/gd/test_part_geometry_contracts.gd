@@ -28,7 +28,7 @@ extends SceneTree
 ##      header proves the structural rule does not swallow the row case.
 ##
 ##   3. THE `pads` KEY IS THE BOARD'S GEOMETRY AUTHORITY, not a payload
-##      optimisation. Covered where the drop lives:
+##      optimisation. Covered where the wire lives:
 ##      test_canonical_wire_board.gd section C. This suite states the model
 ##      half — a component that carries pads emits the key, a pins-only one does
 ##      not, and a dict stating lands under no has_pad_geometry flag still reads
@@ -344,22 +344,20 @@ func _run_the_pads_key_is_an_authority_claim() -> void:
 	check("…and its authored ref, not the CUSTOM rendering bucket",
 		str(carried.get("footprint", "")) == "NoSuchLib:P9_Custom")
 
-	# The wire projection must not strip THAT part's lands: its ref is
-	# library-SHAPED but nothing resolved it, so the board is the only place
-	# its geometry exists. (The full rule table lives in
-	# test_canonical_wire_board.gd section C; this is the end-to-end statement
-	# over a real component rather than a hand-built dict.)
-	var wired: Dictionary = PanelTools.canonical_wire_board(
-		{"components": [carried]})
-	check("canonical_wire_board keeps the lands of an unresolved colon-ref part",
-		((wired["components"][0] as Dictionary).get("pads", []) as Array).size() == 1)
-
-	var resolved: Dictionary = carried.duplicate(true)
-	resolved["footprint_resolved"] = true
-	var wired_resolved: Dictionary = PanelTools.canonical_wire_board(
-		{"components": [resolved]})
-	check("…and still drops them for a part the library provably resolved (the payload relief)",
-		not (wired_resolved["components"][0] as Dictionary).has("pads"))
+	# The dict IS the wire: that part's lands travel on every surface, and a
+	# resolve this host performs cannot take them away — the board is the
+	# authority for a part that states a `pads` key. (The full rule table lives
+	# in test_canonical_wire_board.gd section C; this is the end-to-end
+	# statement over a real component rather than a hand-built dict.)
+	carrying.adopt_resolved({"footprint_resolved": true,
+		"pads": [{"number": "9", "position": {"x": 3.0, "y": 3.0},
+			"size": {"width": 1.0, "height": 1.0}}], "has_pad_geometry": true})
+	var after_resolve: Dictionary = carrying.to_board_dict()
+	check("a part that owns its lands keeps them on the wire after a resolve",
+		(after_resolve.get("pads", []) as Array).size() == 1
+			and str((after_resolve["pads"][0] as Dictionary).get("number", "")) == "1")
+	check("…and the resolved fact still lands on the model",
+		carrying.footprint_resolved)
 
 	# THE KEY IS THE AUTHORITY; `has_pad_geometry` is only an extra marker of it.
 	# The worker compiles a component FULL on the `pads` KEY alone
@@ -877,15 +875,14 @@ func _run_the_placement_is_board_state() -> void:
 		absf(float(mixed.refdes_anchor["size_mm"]) - float(SWITCH_ANCHOR["size_mm"])) < EPS_MM
 			and absf(float(mixed.refdes_anchor["x_mm"]) - float(SWITCH_ANCHOR["x_mm"])) < EPS_MM)
 
-	# THE WIRE. The worker cannot honour what it is not sent, and the wire trim
-	# drops render enrichment aggressively — the authored placement must not be
-	# among the casualties.
-	var wire: Dictionary = PanelTools.canonical_wire_board(data.to_board_dict())
+	# THE WIRE. The worker cannot honour what it is not sent — the authored
+	# placement must be on the canonical dict beside the design it belongs to.
+	var wire: Dictionary = data.to_board_dict()
 	var wired: Dictionary = {}
 	for entry in (wire.get("components", []) as Array):
 		if entry is Dictionary and str((entry as Dictionary).get("ref", "")) == REFDES_REF:
 			wired = entry
-	check("the authored placement survives the canonical wire trim",
+	check("the authored placement rides the canonical dict",
 		(wired.get("refdes_placement", {}) as Dictionary) == authored)
 
 	# THE PARTIAL WRITE, on its own board so nothing earlier can have authored a

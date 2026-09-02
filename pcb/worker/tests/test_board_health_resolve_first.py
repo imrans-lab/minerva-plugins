@@ -24,10 +24,9 @@ WHAT THESE TESTS PIN:
   2. canonical and enriched input produce the IDENTICAL ledger, across every
      board in the repo corpus — the property the panel's canonical-wire
      payload fix (01a007f1dd02) depends on;
-  3. the render-enrichment tail (graphics/refdes_graphics/local_bounds/
-     properties/color/...) is provably UNREAD by both halves — poisoning it
-     changes nothing — which is what licenses the panel to stop shipping it
-     over the 64 KiB broker pipe.
+  3. the resolve-attached `graphics` on a library part is provably UNREAD
+     by both halves — poisoning it changes nothing — so the panel never has
+     to ship it over the 64 KiB broker pipe.
 """
 
 from __future__ import annotations
@@ -126,15 +125,12 @@ def test_canonical_and_enriched_agree(path: Path):
 # 3. The render tail is unread: poison it, nothing may change.
 # ---------------------------------------------------------------------------
 
-# Every component field the panel's canonical-wire projection drops. `pads`
-# is deliberately NOT here: the census legitimately reads pads when a board
-# carries no inline pins (that is test 1's whole subject) — pads travel for
-# non-library parts and are re-derived for library parts.
-RENDER_TAIL = [
-    "graphics", "refdes_graphics", "local_bounds", "width", "height",
-    "bbox_center_offset", "properties", "color", "has_pad_geometry",
-    "footprint_id", "label_visible", "locked",
-]
+# The one resolve-attached field a library part's enriched dict carries that
+# the design does not: its footprint's silk graphics. `pads` is deliberately
+# NOT here: the census legitimately reads pads when a board carries no inline
+# pins (that is test 1's whole subject) — pads travel for non-library parts
+# and are re-derived for library parts.
+RENDER_TAIL = ["graphics"]
 
 
 def _poison(value):

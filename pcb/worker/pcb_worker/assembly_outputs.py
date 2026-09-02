@@ -51,18 +51,24 @@ carries (``assembly_spec.IDENTITY_FIELDS``); one that names anything else
 refuses when the PROFILE is built, because a requirement nothing can satisfy
 would otherwise refuse every board that ever selected it.
 
-WHAT EACH BOM COLUMN CARRIES, and what it falls back to. The schema
-(docs/board-yaml.md) gives three of the assembly block's fields a column of
-their own, and each is read here with ONE defined fallback to the pre-block
-source it supersedes:
+WHAT EACH BOM COLUMN CARRIES, and what it falls back to. Each column is read
+here with ONE defined fallback:
 
-===================== ============================ ========================
-column                authored field               fallback when absent
-===================== ============================ ========================
-Comment               ``assembly.comment``         the component's ``value``
-Footprint             ``assembly.package``         the authored footprint ref
-house catalogue no.   ``assembly.house_parts[h]``  ``assembly.mpn``
-===================== ============================ ========================
+===================== ================================== ========================
+column                source                             fallback when absent
+===================== ================================== ========================
+Comment               ``assembly.comment``               the component's ``value``
+Footprint             the drawing's lock label           the drawing ref verbatim
+                      (``footprints.lock.json``
+                      ``assembly.package``, carried as
+                      ``ResolvedAssembly.package_labels``)
+house catalogue no.   ``assembly.house_parts[h]``        ``assembly.mpn``
+===================== ================================== ========================
+
+The Footprint column is a fact about the DRAWING, authored once on the
+footprint rather than once per component: two parts on one drawing are the
+same package, and a label that could be restated per component was a second
+home for one fact.
 
 ``h`` is the profile's own :attr:`HouseProfile.house_part_id` — the id a board
 names THAT house's number under. Selecting by profile rather than by position
@@ -477,10 +483,9 @@ def _walk(board, profile: HouseProfile):
             continue
         _check_identity(profile, component.ref, assembly)
 
-        # THE DOCUMENTED COLUMNS, each with its ONE fallback (module docstring).
-        # The fallbacks are what a board authored before the block existed: the
-        # component's value, the footprint string it routes against, and the
-        # manufacturer's part number. The AUTHORED footprint string is used,
+        # THE DOCUMENTED COLUMNS, each with its ONE fallback (module docstring):
+        # the component's value, the drawing ref it routes against, and the
+        # manufacturer's part number. The AUTHORED drawing ref is the fallback,
         # never the IR's content-hash footprint_id, because this column names a
         # part a purchaser recognizes.
         #
@@ -498,7 +503,7 @@ def _walk(board, profile: HouseProfile):
             # a child that is a 1x22 strip is bought, listed and oriented as
             # one — never as the two-row drawing its parent is.
             drawing = assembly.drawing_for(physical)
-            footprint = drawing if assembly.package is None else assembly.package
+            footprint = assembly.label_for(drawing) or drawing
 
             # BOM GROUPING KEY = EVERYTHING THE ROW ASSERTS ABOUT ALL OF ITS
             # REFS: every cell of the rendered row except the Designator list,

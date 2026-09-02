@@ -43,7 +43,6 @@ components:
     layer: top
     assembly:
       mpn: HC-PM254-8.5H-1x22P
-      package: THT 2.54mm 1x22 socket
       comment: ESP32-S3-DevKitC-1 socket row
       house_parts:
         jlcpcb: C41376161
@@ -61,7 +60,6 @@ components:
     assembly:
       manufacturer: YAGEO
       mpn: CC0805KRX7R9BB104
-      package: "0805"
       comment: 100nF 50V X7R
       house_parts:
         jlcpcb: C49678

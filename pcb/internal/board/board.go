@@ -2,38 +2,23 @@
 // plugin migration. This is the schema every downstream child consumes — the
 // Python geometry worker, the gerber exporter, and the panel port. Durability
 // of this contract matters more than feature breadth: field names are explicit
-// and unit-suffixed (_mm / _deg) so no consumer has to guess units, and unknown
-// fields survive round-trips instead of being silently dropped.
+// and unit-suffixed (_mm / _deg) so no consumer has to guess units.
 //
-// # Three source dialects
+// # The schema is POSITIVE
 //
-// This model reconciles three pre-existing dialects (see docs/board-yaml.md for
-// the full mapping table):
+// Every key a document may carry is a typed field on one of the structs below,
+// and a key that names no field is REFUSED at the parse boundary with the
+// entity and the key named (schema.go). There is no forward-compat bag: a
+// format that parks what it does not recognise defines itself negatively, and
+// that is how one fact came to live under two keys (a value under `value` and
+// again under `properties.value`, pin geometry inline and again in the
+// library) with nothing able to say which was true. One fact, one key.
 //
-//   - Legacy .minpcb JSON — the in-tree Godot editor's PCBData.to_dict() shape
-//     (board_name, board_width, components as an id→object map, nets with
-//     {component_id, pin_name} pins, traces with waypoints, inline annotations
-//     and route_hints maps). Imported via minpcb.go.
-//   - PCBData.to_yaml() — the in-tree one-way YAML emitter (board:{name,width},
-//     components:[{id,position:[x,y]}]). Field naming aligned where sane.
-//   - pcb-architect YAML — the external toolchain format documented in the
-//     pcb-maker skill (name, outline:{width,height}, components with
-//     footprint/position/rotation, nets with "U1.VCC" pin refs, constraints).
-//
-// Where the dialects conflict, this contract prefers explicit, unit-tagged
-// names (a superset choice, documented in board-yaml.md): e.g. canonical
-// `width_mm` unifies legacy `board_width` and pcb-architect `outline.width`;
-// canonical `ref` unifies the reference designator that both dialects call
-// `id`. Net pins use the pcb-architect "U1.1" string form (flat, gerber- and
-// diff-friendly) rather than the legacy {component_id, pin_name} object form.
-//
-// # Opaque passthrough
-//
-// Annotations and RouteHints are carried as opaque blobs ([]Blob). This
-// contract transports them losslessly but does NOT interpret their semantics —
-// the annotation-migration child owns that. Any struct in this package also
-// carries an `Extra` inline map that captures unmodeled fields so a newer
-// producer can add fields an older consumer preserves rather than drops.
+// Two component keys carry values whose SHAPE is owned by the worker rather
+// than by this codec: the inline `pads` / `graphics` (its own land pattern and
+// artwork, read by inline_footprint.py). They are typed as Blob so the key is
+// known here while the contents stay the consumer's contract; the opaque
+// Annotations / RouteHints blobs are the same idea at board level.
 package board
 
 // Blob is an opaque, uninterpreted map. Used for Annotations and RouteHints,
@@ -194,13 +179,13 @@ type Board struct {
 	// MountingHoles are board-level drilled holes not attached to a pad — the
 	// mechanical mounting / non-plated holes the gerber exporter routes into
 	// PTH.drl or NPTH.drl by their Plated flag. Formalises the field the gerber
-	// spike carried through Extra (docket 019eb47ddebc, comment 508).
+	// spike once carried untyped.
 	MountingHoles []Hole `json:"mounting_holes,omitempty" yaml:"mounting_holes,omitempty"`
 
 	// PTHHoles / NPTHHoles are producer INPUT aliases that pre-split plating. They
 	// are NORMALIZED into MountingHoles (Plated true / false) at every parse
 	// boundary (NormalizeHoles) — modeled first-class ONLY so a v2 source can't ship
-	// id-less / null holes through Extra that bypass id-minting + structural
+	// id-less / null holes past id-minting + structural
 	// validation (finding 019f8b7fb07e comment 689). After normalization they are
 	// empty, so a board always round-trips as canonical `mounting_holes`.
 	PTHHoles  []Hole `json:"pth_holes,omitempty" yaml:"pth_holes,omitempty"`
@@ -211,7 +196,7 @@ type Board struct {
 	// courtyard documentation.
 	//
 	// WHY IT HAD TO BE TYPED. Before this field, a top-level `board_graphics:`
-	// key rode Board.Extra — it survived a round trip, but it was invisible to
+	// key rode an untyped passthrough — it survived a round trip, but it was invisible to
 	// id minting, to the entity-list probe, and to Validate. The consequence was
 	// not theoretical: smart-remote-v2's back-side copyright line is 65 B.SilkS
 	// polylines hung off TP1, a test point, in absolute board coordinates,
@@ -230,12 +215,6 @@ type Board struct {
 	// never interpreted here.
 	Annotations []Blob `json:"annotations,omitempty" yaml:"annotations,omitempty"`
 	RouteHints  []Blob `json:"route_hints,omitempty" yaml:"route_hints,omitempty"`
-
-	// Extra captures unmodeled top-level keys for lossless YAML round-trips
-	// (forward compatibility). json:"-" keeps it out of the JSON board dict —
-	// encoding/json has no inline support, so extras are a YAML-side durability
-	// affordance only (documented in board-yaml.md).
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Point is a 2D coordinate in board millimetres.
@@ -255,9 +234,12 @@ type DesignRules struct {
 	DiffPairGapMM   float64 `json:"diff_pair_gap_mm,omitempty" yaml:"diff_pair_gap_mm,omitempty"`
 	DiffPairWidthMM float64 `json:"diff_pair_width_mm,omitempty" yaml:"diff_pair_width_mm,omitempty"`
 
+	// RuleProfile names the manufacturer rule profile the board is compiled
+	// against ("jlcpcb-2layer"); the worker's manufacturer_profile resolves it.
+	RuleProfile string `json:"rule_profile,omitempty" yaml:"rule_profile,omitempty"`
+
 	// Zone-fill minima — the two rules that decide what a pour fill may keep
-	// (see "Zone minima" in docs/board-yaml.md). Typed rather than left to
-	// Extra because Validate judges them.
+	// (see "Zone minima" in docs/board-yaml.md). Validate judges them.
 	//
 	// POINTERS, unlike the plain float64s above, because "unset" and an
 	// authored value are different states here. Nil means the compiler derives
@@ -281,11 +263,7 @@ type DesignRules struct {
 	// (a direction and its reverse are one constraint) and the geometric DRC
 	// checks every trace segment against the result.
 	//
-	// Typed rather than left riding in Extra: a SEMANTIC field a consumer
-	// branches on deserves a home in the struct, the same reason the zone-fill
-	// minima above were promoted.
-	//
-	// A POINTER, for the same reason those minima are pointers: "unset" and an
+	// A POINTER, for the same reason the zone-fill minima are pointers: "unset" and an
 	// authored value are DIFFERENT STATES here, and the difference is
 	// load-bearing. Free routing is spelled by the key's ABSENCE, while an
 	// authored EMPTY LIST is malformed and the worker's compiler refuses the
@@ -297,8 +275,6 @@ type DesignRules struct {
 	// prevent. Nil omits the key; a non-nil empty slice round-trips as `[]` and
 	// stays refusable downstream.
 	AllowedTraceAnglesDeg *[]float64 `json:"allowed_trace_angles_deg,omitempty" yaml:"allowed_trace_angles_deg,omitempty"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Component is a placed part. Ref is the reference designator (legacy/
@@ -316,7 +292,11 @@ type Component struct {
 	YMM         float64 `json:"y_mm" yaml:"y_mm"`
 	RotationDeg float64 `json:"rotation_deg" yaml:"rotation_deg"`
 	Layer       string  `json:"layer,omitempty" yaml:"layer,omitempty"`
-	Pins        []Pin   `json:"pins,omitempty" yaml:"pins,omitempty"`
+	// Symbol is the schematic symbol id ("Device:NE555P") the worker's
+	// check_libraries verifies informally; components reference footprints,
+	// so it never affects geometry.
+	Symbol string `json:"symbol,omitempty" yaml:"symbol,omitempty"`
+	Pins   []Pin  `json:"pins,omitempty" yaml:"pins,omitempty"`
 
 	// Assembly is what an assembly house has to buy and place for this
 	// component: populate/DNP, part identity, house catalogue numbers, paste
@@ -330,26 +310,52 @@ type Component struct {
 	// so only one shape reaches any reader. See assembly.go.
 	Assembly *ComponentAssembly `json:"assembly,omitempty" yaml:"assembly,omitempty"`
 
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
+	// Pads is the component's OWN land pattern, and its PRESENCE is the
+	// declaration that the board — not the library — is this component's
+	// geometry authority (worker inline_footprint.py, FULL vs PARTIAL). A
+	// pointer because an authored empty list is a real answer (zero lands, a
+	// silk-only pseudo-part) while an absent key means "resolve the footprint
+	// ref"; a plain slice with omitempty would collapse the two. Graphics is
+	// the artwork drawn beside those lands. Each entry's shape is the worker's
+	// pad / graphic dict, carried verbatim.
+	Pads     *[]Blob `json:"pads,omitempty" yaml:"pads,omitempty"`
+	Graphics []Blob  `json:"graphics,omitempty" yaml:"graphics,omitempty"`
+
+	// RefdesPlacement is WHERE a person placed this component's designator,
+	// a partial overlay on the footprint's own reference text; the worker's
+	// refdes_anchor.py reads it. Board source, never derived, so it
+	// round-trips verbatim. A pointer so an absent block stays absent.
+	RefdesPlacement *RefdesPlacement `json:"refdes_placement,omitempty" yaml:"refdes_placement,omitempty"`
+
+	// GroupID names the component group this part moves with; empty means
+	// ungrouped and is omitted so an ungrouped board carries no key.
+	GroupID string `json:"group_id,omitempty" yaml:"group_id,omitempty"`
+}
+
+// RefdesPlacement is the authored designator overlay: any subset of the five
+// fields, each a pointer because it is PARTIAL — an authored 0 differs from
+// "not stated, keep the derived answer" — and omitempty so a block stating one
+// field round-trips as that one field.
+type RefdesPlacement struct {
+	XMM         *float64 `json:"x_mm,omitempty" yaml:"x_mm,omitempty"`
+	YMM         *float64 `json:"y_mm,omitempty" yaml:"y_mm,omitempty"`
+	RotationDeg *float64 `json:"rotation_deg,omitempty" yaml:"rotation_deg,omitempty"`
+	SizeMM      *float64 `json:"size_mm,omitempty" yaml:"size_mm,omitempty"`
+	Hidden      *bool    `json:"hidden,omitempty" yaml:"hidden,omitempty"`
 }
 
 // Pin is a component-relative pad location. Number is the pad identifier
 // ("1", "A3"); Name is the optional symbolic name ("VCC", "GPIO8"). X/Y are
 // offsets from the component origin.
 //
-// DrillMM / AnnulusDiameterMM / Plated formalise through-hole pad geometry the
-// gerber spike carried through Extra (docket 019eb47ddebc, comment 508). A pin
+// DrillMM / AnnulusDiameterMM / Plated formalise through-hole pad geometry. A pin
 // with DrillMM > 0 is a through-hole pad: it gets a copper annulus on every
 // copper layer, a mask opening, and a drilled hole (plated unless Plated is
 // explicitly false — Plated is a pointer so "unspecified" means plated).
 //
-// PadWidthMM / PadHeightMM formalise SMD pad geometry the same way (docket
-// PLG board-load gap): an SMD pad (DrillMM == 0) carries an explicit rectangular
-// copper size. These were previously parked in Extra (yaml inline) and so
-// survived YAML round-trips but were dropped on JSON marshal (Extra is json:"-"),
-// which silently lost SMD pad dimensions over the pcb.deserialize IPC reply.
-// First-classing them keeps the JSON boundary lossless. A pad with neither drill
-// nor pad_width/height is a bare positional pin.
+// PadWidthMM / PadHeightMM formalise SMD pad geometry the same way: an SMD pad
+// (DrillMM == 0) carries an explicit rectangular copper size. A pad with neither
+// drill nor pad_width/height is a bare positional pin.
 //
 // # Pin-geometry authority (schema v2, item 019f802ca3af / K2 review 627.1)
 //
@@ -394,7 +400,9 @@ type Pin struct {
 	PadHeightMM       float64 `json:"pad_height_mm,omitempty" yaml:"pad_height_mm,omitempty"`
 	Plated            *bool   `json:"plated,omitempty" yaml:"plated,omitempty"`
 
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
+	// Roles is what the part's own pin table says this pin is for
+	// ("strapping", "uart_console"); the panel's pin selection filters on it.
+	Roles []string `json:"roles,omitempty" yaml:"roles,omitempty"`
 }
 
 // PinOverride is an intentional, typed per-pad deviation from the locked
@@ -410,8 +418,6 @@ type PinOverride struct {
 	PadWidthMM        *float64 `json:"pad_width_mm,omitempty" yaml:"pad_width_mm,omitempty"`
 	PadHeightMM       *float64 `json:"pad_height_mm,omitempty" yaml:"pad_height_mm,omitempty"`
 	Plated            *bool    `json:"plated,omitempty" yaml:"plated,omitempty"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Hole is a board-level drilled hole not attached to a component pad (mounting
@@ -429,9 +435,7 @@ type PinOverride struct {
 // comment 689). Idempotent: a board with no aliases is unchanged. Order preserves
 // the historical mounting → npth → pth fabrication sequence. Called at the canonical
 // ingest boundaries (UnmarshalYAML, the serialize board decode) so a board is
-// canonical before migration / validation. (ImportMinpcb maps only its known
-// fields; a legacy .minpcb's holes ride through Extra as v1 and fold on the next
-// canonical re-ingest.) The alias key is AUTHORITATIVE for plating — an explicit
+// canonical before migration / validation. The alias key is AUTHORITATIVE for plating — an explicit
 // `plated` on an alias hole is overridden by the key (Fable D2), matching the
 // worker's compile_board / gerber so the two paths cannot diverge on the flag.
 func NormalizeHoles(b *Board) {
@@ -464,11 +468,8 @@ type Hole struct {
 	// AnnulusMM is the AUTHORED copper-ring diameter for a PLATED board hole
 	// (finding 019f8dbb7104). The Python compiler fail-closes a plated hole without
 	// it and both fab emitters emit exactly this ring — no invented copper. Absent
-	// on an unplated hole. Modeled first-class (not Extra) so it is a documented,
-	// known source key on both sides of the codec.
+	// on an unplated hole.
 	AnnulusMM float64 `json:"annulus_mm,omitempty" yaml:"annulus_mm,omitempty"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Net is an electrical connection. Pins are "Ref.PadNumber" strings
@@ -476,8 +477,6 @@ type Hole struct {
 type Net struct {
 	Name string   `json:"name" yaml:"name"`
 	Pins []string `json:"pins" yaml:"pins"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Trace is a routed copper polyline. Points are the ordered waypoints; a trace
@@ -495,8 +494,6 @@ type Trace struct {
 	Layer   string  `json:"layer,omitempty" yaml:"layer,omitempty"`
 	WidthMM float64 `json:"width_mm,omitempty" yaml:"width_mm,omitempty"`
 	Points  []Point `json:"points" yaml:"points"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Via is a layer-transition plated hole.
@@ -517,8 +514,6 @@ type Via struct {
 	// an explicit `tented: false` (untented — the via annulus is exposed). The Python
 	// compiler reads it (default true) into ResolvedVia.tented_front/back.
 	Tented *bool `json:"tented,omitempty" yaml:"tented,omitempty"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Zone is an authored region on a single layer: either a copper fill tied to one
@@ -556,15 +551,8 @@ type Zone struct {
 	// stray "Keepout" in hand-written source is a typo worth reporting rather
 	// than a spelling to silently accept.
 	//
-	// FIRST-CLASS, not Extra (owner ruling 2026-07-30, docket 019fb5ad6d20).
-	// Kind now DECIDES the net requirement below, and a rule that branches on a
-	// value cannot read it out of the forward-compat junk drawer: Extra is
-	// json:"-" and only reaches JSON through the inline marshalers in json.go,
-	// which by design let a modeled key win — so a validator reading
-	// Extra["kind"] would be reading a key the codec is entitled to drop. A
-	// modeled field also means knownJSONKeys() claims "kind", so splitExtra
-	// never parks it in Extra and mergeExtra never re-emits it: exactly one
-	// `kind` key on the wire, in YAML and JSON alike.
+	// Kind DECIDES the net requirement below, so it is a typed field a rule
+	// can branch on.
 	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	// Layer is NOT omitempty: a zone with no stated layer is underspecified, not
 	// merely terse, so Validate requires it non-empty and (when the board
@@ -600,8 +588,6 @@ type Zone struct {
 	// fewer. Not omitempty, matching Trace.Points — a zone's geometry is core
 	// content, not an optional extra.
 	Outline []Point `json:"outline" yaml:"outline"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 // Cutout is an opening through the ENTIRE board — an internal slot or window
@@ -694,8 +680,6 @@ type Graphic struct {
 	Center *Point  `json:"center,omitempty" yaml:"center,omitempty"`
 	Radius float64 `json:"radius,omitempty" yaml:"radius,omitempty"`
 	Points []Point `json:"points,omitempty" yaml:"points,omitempty"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
 type Cutout struct {
@@ -712,6 +696,4 @@ type Cutout struct {
 	// entity here, not an optional extra, and a cutout with no outline is the
 	// one shape that must never serialize as if it were merely terse.
 	Outline []Point `json:"outline" yaml:"outline"`
-
-	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }

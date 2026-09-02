@@ -2702,6 +2702,26 @@ def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_part
     return derive_id(entity, board_id, *(str(part) for part in ordinal_parts))
 
 
+def _package_labels(assembly, fp_ref: str, chain) -> tuple[tuple[str, str], ...]:
+    """``(drawing ref, label)`` for every drawing this component's parts are —
+    its own and each named child's — whose lock entry states an
+    ``assembly.package`` label. The label is a fact about the drawing, read off
+    the layer that supplies it; a drawing the chain does not supply (an inline
+    footprint) or whose entry carries no label contributes nothing, and the BOM
+    then prints the ref itself."""
+    labels = []
+    drawings = [fp_ref] + [spec.footprint for spec in assembly.placements
+                           if spec.footprint is not None]
+    for drawing in dict.fromkeys(drawings):
+        layer = lookup_footprint_layer(drawing, chain)
+        entry = layer.lock.get(drawing) if layer is not None else None
+        block = entry.get("assembly") if isinstance(entry, dict) else None
+        label = block.get("package") if isinstance(block, dict) else None
+        if isinstance(label, str) and label.strip():
+            labels.append((drawing, label.strip()))
+    return tuple(labels)
+
+
 def _child_footprints(assembly, chain, ref: str, comp_ref: SourceRef, diags):
     """The built definition of every drawing this component's expansion
     children NAMED (``assembly.placements[].footprint``), keyed by placement
@@ -3162,6 +3182,7 @@ def compile_board(
         child_footprints = _child_footprints(assembly, chain, ref, comp_ref, diags)
         if child_footprints is None:
             continue
+        assembly = replace(assembly, package_labels=_package_labels(assembly, fp_ref, chain))
 
         placement = Placement(
             position=(float(comp["x_mm"]), float(comp["y_mm"])),

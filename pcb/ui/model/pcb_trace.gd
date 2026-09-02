@@ -3,8 +3,9 @@ extends RefCounted
 ##
 ## Off-tree port of Minerva src/Scripts/UI/Controls/PCBEditor/PCBTrace.gd — NO
 ## class_name; self-preload by relative path. Boundary to_board_dict()/
-## from_board_dict() map net_name/waypoints/width → net/points/width_mm; id and
-## locked ride in canonical Extra (mirrors pcb/internal/board/minpcb.go).
+## from_board_dict() map net_name/waypoints/width → net/points/width_mm. `locked`
+## is panel session state: it rides the undo shape (to_dict), never the
+## canonical dict.
 
 const _Self := preload("pcb_trace.gd")
 const PcbTraceGeometry := preload("pcb_trace_geometry.gd")
@@ -184,7 +185,7 @@ static func from_dict(data: Dictionary):
 # ── Canonical boundary (pcb/internal/board Trace) ─────────────────────────────
 
 ## Serialize to a canonical board-contract trace dict. waypoints → points
-## [{x_mm,y_mm}]; id/locked ride in canonical Extra (mirrors minpcb.go).
+## [{x_mm,y_mm}].
 func to_board_dict() -> Dictionary:
 	var points: Array = []
 	for wp in waypoints:
@@ -195,7 +196,6 @@ func to_board_dict() -> Dictionary:
 		"width_mm": width,
 		"points": points,
 		"id": id,
-		"locked": locked,
 	}
 
 
@@ -205,7 +205,6 @@ func load_from_board_dict(data: Dictionary) -> void:
 	net_name = str(data.get("net", data.get("net_name", "")))
 	width = float(data.get("width_mm", DEFAULT_WIDTH_MM))
 	layer = str(data.get("layer", "top"))
-	locked = data.get("locked", false)
 
 	waypoints.clear()
 	var points: Array = data.get("points", [])

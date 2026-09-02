@@ -1,7 +1,6 @@
 package board
 
 import (
-	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -9,10 +8,9 @@ import (
 
 // Board-level graphics — the codec half.
 //
-// WHY THE FIELD IS TYPED RATHER THAN LEFT IN Board.Extra. An unmodelled
-// top-level `board_graphics:` key already round-tripped through Extra before
-// this change, so "it survives a save" was never the gap. What it did NOT get
-// was id minting, the entity-list probe, or Validate — which is exactly how
+// WHY THE FIELD IS TYPED. An unmodelled top-level `board_graphics:` key once
+// rode an untyped passthrough, so "it survives a save" was never the gap. What
+// it did NOT get was id minting, the entity-list probe, or Validate — which is exactly how
 // smart-remote-v2 ended up with 65 B.SilkS polylines hung off TP1, a test
 // point, in absolute board coordinates: the board had no legal owner for
 // artwork and a component did.
@@ -102,30 +100,18 @@ func TestBoardGraphicsRoundTripYAML(t *testing.T) {
 	}
 }
 
-// json.go's stated rule: "every NEW Extra-bearing struct needs a pair here ... a
-// new struct without a pair fails SILENTLY and only across IPC". Graphic is
-// Extra-bearing, so this is the test that would catch a missing pair — the
-// failure mode that went unnoticed for nine structs.
-func TestBoardGraphicsSurviveJSONIPC(t *testing.T) {
-	b := graphicsBoard(t, textAndPolylineYAML)
-	b.BoardGraphics[0].Extra = map[string]interface{}{"note": "from the future"}
-
-	raw, err := json.Marshal(b)
-	if err != nil {
-		t.Fatalf("marshal json: %v", err)
+// A graphic key the schema does not model is refused on the JSON boundary the
+// panel writes through, naming the entity — so a board dict the codec could
+// not load back is never serialized.
+func TestUnknownGraphicKeyRefusedOverJSON(t *testing.T) {
+	raw := []byte(`{"version":1,"name":"g","width_mm":10,"height_mm":10,"components":[],"nets":[],` +
+		`"board_graphics":[{"id":"graphic:` + strings.Repeat("a", 32) + `","layer":"F.SilkS","kind":"text","text":"x","note":"from the future"}]}`)
+	err := ProbeJSONBoard(raw)
+	if err == nil {
+		t.Fatal("an unknown graphic key was accepted")
 	}
-	var back Board
-	if err := json.Unmarshal(raw, &back); err != nil {
-		t.Fatalf("unmarshal json: %v", err)
-	}
-	if len(back.BoardGraphics) != 2 {
-		t.Fatalf("got %d board graphics over JSON, want 2", len(back.BoardGraphics))
-	}
-	if back.BoardGraphics[0].Text != "Minerva v2" {
-		t.Fatalf("text lost over JSON: %+v", back.BoardGraphics[0])
-	}
-	if got := back.BoardGraphics[0].Extra["note"]; got != "from the future" {
-		t.Fatalf("Graphic.Extra lost over JSON (missing MarshalJSON pair?): %v", got)
+	if !strings.Contains(err.Error(), "board_graphics[0]") || !strings.Contains(err.Error(), `"note"`) {
+		t.Fatalf("refusal does not name the graphic and the key: %v", err)
 	}
 }
 
@@ -297,8 +283,7 @@ func assertArtworkRoundTrip(t *testing.T, path, representation string) {
 	if tp1 == nil {
 		t.Fatal("TP1 is missing from the board")
 	}
-	legacyGraphics, ok := tp1.Extra["graphics"].([]interface{})
-	if !ok || len(legacyGraphics) == 0 {
+	if len(tp1.Graphics) == 0 {
 		t.Fatal("legacy TP1.graphics disappeared")
 	}
 	if representation == "legacy" && len(b.BoardGraphics) != 0 {
