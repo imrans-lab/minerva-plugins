@@ -434,7 +434,11 @@ static func _get_components(host, _args: Dictionary) -> Dictionary:
 		var comp = data.components[comp_id]
 		var comp_info := {
 			"id": comp.id,
-			"footprint": comp.get_footprint_name(),
+			# The AUTHORED identity, not the rendering enum: a library-qualified
+			# ref ("Lib:Name") matches no FootprintType name, so the panel
+			# buckets such a part as CUSTOM for DRAWING. That bucket is the same
+			# word for every library part and names no land pattern.
+			"footprint": comp.get_canonical_footprint_name(),
 			"x": _mm(comp.position.x),
 			"y": _mm(comp.position.y),
 			"rotation": comp.rotation,

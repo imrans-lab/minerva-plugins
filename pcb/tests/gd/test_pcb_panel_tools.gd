@@ -89,6 +89,9 @@ func _init() -> void:
 	# Campaign-2 boundary block (BT-19…22, 53, 71…76). Runs LAST so it can set
 	# up its own board state without disturbing the golden-parity fixtures above.
 	await _run_boundary_mcp_parity()
+	# Replaces the board wholesale (a canonical board-dict load), so it runs
+	# after every section that reads the fixtures built above.
+	await _run_authored_footprint_identity()
 	# LAST: this one steps the board BACKWARD (it drives a real undo), so it
 	# must not run ahead of anything that reads the board it rewinds.
 	await _run_board_size_undo()
@@ -1374,3 +1377,78 @@ func _boundary_build_stamp_tracks_schema() -> void:
 			doc_block.contains("SCHEMA_VERSION")
 			and doc_block.contains("pcb_prefs.gd")
 			and doc_block.contains("pcb_routing_sidecar.gd"))
+
+
+# ── authored footprint identity on the reporting verbs ────────────────────────
+
+## The two component-reporting verbs must name the LAND PATTERN, not the panel's
+## rendering bucket.
+##
+## A board states `footprint: Lib:Name` per part. That string is no FootprintType
+## enum name, so the model buckets the part as CUSTOM for DRAWING and parks the
+## authored ref in footprint_id. Both verbs reported the bucket, so every
+## library part on a real board answered the single word "CUSTOM" — a constant
+## carrying no information, and the only channel an MCP-only agent has for
+## learning which land pattern a part uses.
+##
+## The board arrives through from_board_dict — the canonical contract dict a
+## board load hands the model — so the refs travel the same read path a real
+## YAML does, including the one that reconstructs footprint_id from the
+## authored string.
+func _run_authored_footprint_identity() -> void:
+	print("\n-- authored footprint identity reaches the reporting verbs --")
+	# One part per authoring style the contract allows: two DIFFERENT library
+	# refs (so a fix that reports some other single constant still reds), a
+	# generic enum part, and a part with inline pads and no ref — the only kind
+	# for which "CUSTOM" is the honest answer.
+	var expected := {
+		"U1": "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT",
+		"U2": "Package_TO_SOT_SMD:TSOT-23-6",
+		"R1": "RESISTOR",
+		"X1": "CUSTOM",
+	}
+	data.from_board_dict({
+		"name": "footprint-identity",
+		"width_mm": 60.0,
+		"height_mm": 40.0,
+		"components": [
+			{"ref": "U1", "footprint": expected["U1"],
+				"x_mm": 10.0, "y_mm": 10.0, "layer": "top",
+				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
+			{"ref": "U2", "footprint": expected["U2"],
+				"x_mm": 25.0, "y_mm": 10.0, "layer": "top",
+				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
+			{"ref": "R1", "footprint": expected["R1"],
+				"x_mm": 35.0, "y_mm": 10.0, "layer": "top",
+				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
+			{"ref": "X1", "footprint": expected["X1"],
+				"x_mm": 45.0, "y_mm": 10.0, "layer": "top",
+				"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
+				"pads": [{"position": {"x": 0.0, "y": 0.0},
+					"size": {"width": 1.0, "height": 1.0}}]},
+		],
+	})
+
+	var reported := {}
+	var gc := await h("minerva_pcb_get_components", _args())
+	for entry in (gc.get("components", []) as Array):
+		var e: Dictionary = entry
+		reported[str(e.get("id", ""))] = str(e.get("footprint", ""))
+	check_eq("get_components reports every part on the board",
+		reported.size(), expected.size())
+
+	for ref in expected:
+		check_eq("get_components: %s names its authored footprint" % ref,
+			str(reported.get(ref, "")), str(expected[ref]))
+		var dc := await h("minerva_pcb_describe_component",
+			_args({"component_id": ref}))
+		check_eq("describe_component: %s names its authored footprint" % ref,
+			str(dc.get("footprint", "")), str(expected[ref]))
+
+	# The shape of the original defect, asserted directly: the surface answered
+	# one word for every part. "CUSTOM" is now a statement about X1 alone.
+	var distinct := {}
+	for ref in reported:
+		distinct[reported[ref]] = true
+	check("the reported footprints are not one constant (%d distinct across %d parts)"
+		% [distinct.size(), reported.size()], distinct.size() == expected.size())

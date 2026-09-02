@@ -269,7 +269,9 @@ func describe_component_context(component_id: String) -> Dictionary:
 		"value": comp.properties.get("value", ""),
 		"position": {"x": comp.position.x, "y": comp.position.y},
 		"rotation": comp.rotation,
-		"footprint": comp.get_footprint_name(),
+		# The authored identity, not the CUSTOM bucket the panel draws a
+		# library-ref part from — see pcb_component.get_canonical_footprint_name.
+		"footprint": comp.get_canonical_footprint_name(),
 		"layer": comp.layer,
 		"nearby": nearby,
 		"connected_to": connected,
