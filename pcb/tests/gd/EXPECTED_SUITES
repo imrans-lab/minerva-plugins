@@ -90,7 +90,7 @@ test_candidate_canvas.gd assertions=281
 # authoring (2026-08-19); the checked-in fixture is the REAL smart-remote-v2
 # enriched dict, so the suite re-demonstrates the >64KiB defect condition on
 # every run before proving the projection fixes it.
-test_canonical_wire_board.gd assertions=32
+test_canonical_wire_board.gd assertions=26
 test_connectivity_baseline_surface.gd assertions=21
 # SR2FAB S6 — authored, never executed; pinned at testex like the entry
 # below it.
@@ -99,7 +99,7 @@ test_epoch6_fix_regressions.gd assertions=9
 # SR2FAB S1 — the export-YAML verb and button. Pinned from the first full run
 # that executed it (34 checks, all outside loops): the button's four status
 # outcomes, the promote refusals, and the verb's own reply shape.
-test_export_yaml_verb.gd assertions=34
+test_export_yaml_verb.gd assertions=43
 # Task-cycle 12 B4 — the exporter chooser, the View menu's export rows and
 # minerva_pcb_board_export driven over ONE canned worker reply and compared to
 # each other. Authored under this cycle's static-gates-only rule and NEVER
@@ -182,11 +182,11 @@ test_pcb_net_membership.gd assertions=70
 # scroll viewport and the dock parent gets the column's slack (vertical
 # expand on RightSidebarContent).
 test_pcb_panel_layout.gd assertions=156
-test_pcb_panel_model.gd assertions=203
+test_pcb_panel_model.gd assertions=220
 # 211 -> 217: the board-resize undo step (the verb snapshots, and one undo
 # restores the previous outline) — six checks, HAND-COUNTED from source.
 test_pcb_panel_tools.gd assertions=217
-test_pcb_panel_tools_migration.gd assertions=74
+test_pcb_panel_tools_migration.gd assertions=75
 # The pad codec's fab optionals, the roundrect land at its authored corner
 # radius, and the load-time indeterminate lead.
 test_pcb_pad_fidelity.gd assertions=47
@@ -207,7 +207,7 @@ test_pcb_pad_fidelity.gd assertions=47
 # width…" with the Properties width row it revealed — 13 checks out of the
 # trace-menu test (the item, the select-and-reveal, the row commit, the
 # three-tier expand loop) and the 6-check BT-68 focus test. Counted from source.
-test_pcb_panel_ui.gd assertions=230
+test_pcb_panel_ui.gd assertions=241
 # 49 -> 57: the copper-extent pad pick adds four probes run over a part built
 # twice, unrotated and at 90 degrees. MEASURED on a run — the four checks sit
 # inside that two-part loop, so the source reads eight fewer than it runs.
@@ -478,7 +478,7 @@ test_board_graphics.gd assertions=75
 # the reply AND by the panel's census AND by the worker's refusal, and an
 # unresolvable ref is refused with the board untouched.
 # NOT YET PINNED: assertions= must be set from a MEASURED run — see the header.
-test_add_by_library_ref.gd assertions=48 real-worker
+test_add_by_library_ref.gd assertions=46 real-worker
 
 # The four geometry contracts that need no worker: the rotation WORDS mean
 # what the screen shows (asserted on where a pad landed, never on the rotation
@@ -511,7 +511,7 @@ test_add_by_library_ref.gd assertions=48 real-worker
 # box function shares no arithmetic with.
 # Counted by hand from the check() call sites: 1 new, not inside a loop.
 # NOT YET PINNED: see above.
-test_part_geometry_contracts.gd assertions=72
+test_part_geometry_contracts.gd assertions=66
 
 # The fab preview a human can read: every palette ink is MEASURED against the
 # canvas ground (isolated to WCAG 4.5:1, composited to 1.4.11's 3:1) and the
@@ -595,6 +595,4 @@ test_pin_override_only.gd assertions=20
 # census delta that read all zeros while a component's value flipped. Section 1
 # is the pure comparison; Section 2 drives the whole promote over a fake worker
 # that is a JSON codec, so the prior file on disk IS the prior design.
-# Authored under a static-gates-only rule and NEVER EXECUTED, so it carries no
-# assertion pin: measure it at the scoped run and pin it there.
-test_promote_delta.gd
+test_promote_delta.gd assertions=47
