@@ -1021,6 +1021,7 @@ func _test_bottom_side_placement_is_one_transform() -> void:
 		"position": Vector2(1.0, 2.0), "size": Vector2(1.6, 1.0),
 		"rotation": 0.0, "drill": Vector2.ZERO, "layers": ["F.Cu"],
 	}]
+	comp.pads_authored = true  # the test authors the land, as load_pad_geometry does
 
 	var mirrored := Vector2(8.0, 9.0)
 	var unmirrored := Vector2(12.0, 9.0)

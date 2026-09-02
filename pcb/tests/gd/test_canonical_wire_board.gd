@@ -95,10 +95,12 @@ func _init() -> void:
 		"every fixture component loaded")
 	var adopted := 0
 	for cid in data.components:
-		if data.components[cid].footprint_resolved and not data.components[cid].pads.is_empty():
+		var comp = data.components[cid]
+		# A silk-only part (the owl logo) resolves to graphics and zero lands.
+		if comp.footprint_resolved and (not comp.pads.is_empty() or not comp.graphics.is_empty()):
 			adopted += 1
 	_check(adopted == (board["components"] as Array).size(),
-		"…and every one adopted its resolved lands and flag onto the MODEL (%d)" % adopted)
+		"…and every one adopted its resolved geometry and flag onto the MODEL (%d)" % adopted)
 
 	var wire: Dictionary = data.to_board_dict()
 	var wire_size := JSON.stringify({"board": wire}).length()
@@ -109,6 +111,7 @@ func _init() -> void:
 	var tail_clean := true
 	var no_resolved_pads := true
 	var identity_kept := true
+	var identity_mismatch := ""
 	var comps_in: Array = board["components"]
 	var by_ref := {}
 	for c in (wire["components"] as Array):
@@ -123,16 +126,25 @@ func _init() -> void:
 		# host's, so no dict may carry them.
 		if after.has("pads"):
 			no_resolved_pads = false
+		# Positions round-trip through the model's float32 Vector2, so numbers
+		# compare within that precision; identity strings compare exactly.
 		for field in ["ref", "footprint", "x_mm", "y_mm", "rotation_deg", "value"]:
-			if before.has(field) and (not after.has(field) or after[field] != before[field]):
+			if not before.has(field):
+				continue
+			var same: bool = after.has(field) and (
+				is_equal_approx(float(before[field]), float(after[field]))
+				if before[field] is float or before[field] is int else after[field] == before[field])
+			if not same:
 				identity_kept = false
+				identity_mismatch = "%s.%s: %s -> %s" % [str(before.get("ref", "")), field,
+					str(before.get(field)), str(after.get(field, "<absent>"))]
 	_check(tail_clean, "no wire component carries any render or session field")
 	# The BOARD root has a session field of its own: the drawing pitch, which
 	# describes an editor rather than the copper and lives in the panel's
 	# session state (ui/model/pcb_session_state.gd).
 	_check(not wire.has("grid_mm"), "the wire board carries no grid_mm")
 	_check(no_resolved_pads, "library-resolved components ship no pads — the lands are the library's")
-	_check(identity_kept, "ref/footprint/position/rotation/value survive verbatim")
+	_check(identity_kept, "ref/footprint/position/rotation/value survive verbatim %s" % identity_mismatch)
 
 	# ── C. The pads rule: the KEY is the board's geometry authority ────────
 	var custom_pads := [{"number": "1", "position": {"x": 0.0, "y": 0.0},

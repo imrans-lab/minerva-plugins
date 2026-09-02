@@ -479,18 +479,24 @@ func _run_the_drawn_designator_is_the_live_ref() -> void:
 	check("a copy renamed JP6 draws JP6 — not the strokes it was copied from",
 		copied.refdes_graphics == jp6.refdes_graphics)
 
-	# LOAD. The exact shape of the owner's board: JP6's entry carrying JP5's
-	# rendering, byte-for-byte, because the two were copies.
+	# LOAD. The exact shape of the owner's old board: JP6's entry carrying JP5's
+	# rendering, byte-for-byte, because the two were copies. A derived key on
+	# a document is refused BY NAME — the positive schema is what keeps a stale
+	# rendering out of the model, so no saved board or promote YAML can carry
+	# one forward.
 	var stale: Dictionary = jp6.to_board_dict()
 	stale["refdes_graphics"] = [{"layer": "F.SilkS", "kind": "poly", "width": 0.15,
 		"points": [{"x": 0.0, "y": -1.5}, {"x": 0.5, "y": -1.5}]}]
+	var refusal: String = PCBComponent.board_dict_refusal(stale)
+	check("a board dict carrying a stale rendering is refused naming the component and the key",
+		refusal.find("JP6") != -1 and refusal.find("\"refdes_graphics\"") != -1)
+	stale.erase("refdes_graphics")
 	stale["refdes_anchor"] = AUTHORED_ANCHOR
-	var loaded := PCBComponent.new()
-	loaded.load_from_board_dict(stale)
-	check("a board dict carrying a stale rendering loads showing the component's OWN ref",
-		loaded.refdes_graphics == jp6.refdes_graphics)
-	check("…and the stale rendering does not come back out — no saved board or promote YAML can carry one",
-		not loaded.to_board_dict().has("refdes_graphics"))
+	check("…and so is a stale derived anchor",
+		PCBComponent.board_dict_refusal(stale).find("\"refdes_anchor\"") != -1)
+	stale.erase("refdes_anchor")
+	check("the same dict without the derived keys loads",
+		PCBComponent.board_dict_refusal(stale).is_empty())
 
 	# HIDDEN. A hidden reference prints nothing, so it must draw nothing —
 	# the same ruling the emitter applies at its one glyph owner.

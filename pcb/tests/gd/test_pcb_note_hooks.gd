@@ -138,7 +138,6 @@ func _fixture_board() -> Dictionary:
 			{
 				"ref": "R1", "footprint": FP, "value": "1k",
 				"x_mm": 12.0, "y_mm": 10.0, "rotation_deg": 0.0, "layer": "top",
-				"footprint_resolved": true,
 				"pins": [{"number": "1", "x_mm": -0.9125, "y_mm": 0.0},
 					{"number": "2", "x_mm": 0.9125, "y_mm": 0.0}],
 				"pads": [

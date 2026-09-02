@@ -96,6 +96,14 @@ STRIP = "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5
 NO_PAD_DRAWING = "Minerva_Fixture:LOGO_Owl_TestCoupon"
 SHORTER_STRIP = "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical"
 PARENT = "Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT"
+
+
+def _bom_cell(drawing: str) -> str:
+    """The BOM Footprint cell for *drawing*: the package label its seed lock
+    entry states, else the drawing ref verbatim — read off the lock so the
+    expectation follows the rule rather than a pasted string."""
+    block = (footprints.load_lockfile().get(drawing) or {}).get("assembly") or {}
+    return block.get("package") or drawing
 HOUSE, PART = "jlcpcb", "C41376161"
 
 PITCH = 2.54
@@ -629,10 +637,11 @@ def test_the_emission_orients_the_children_on_the_strip_pair(bottom, ledger):
         if ledger.lookup(STRIP, HOUSE, PART).offset_deg % 360:
             assert rows[ref].rotation_deg != pytest.approx(placements[ref].rotation_deg)
 
-    # The BOM buys two STRIPS, listed under the strip's own drawing.
+    # The BOM buys two STRIPS, listed under the strip's own drawing (its lock
+    # label, which the strip carries).
     strips = [row for row in emission.bom if row.refs == ("U1S_A", "U1S_B")]
     assert len(strips) == 1
-    assert strips[0].footprint == STRIP
+    assert strips[0].footprint == _bom_cell(STRIP) != STRIP
     assert strips[0].part_number == PART and strips[0].qty == 2
 
 
@@ -645,7 +654,7 @@ def test_a_child_that_names_no_drawing_behaves_exactly_as_before(ledger):
     """The sibling fixture -- the same socket set with hand anchors and no
     child footprints -- is unchanged by this feature: authored anchors, no
     own drawing, no lands, the parent's footprint on the rows and one grouped
-    BOM line under the parent's drawing."""
+    BOM line under the parent's drawing (its lock label)."""
     board = _compiled(yaml.safe_load(SIBLING_FIXTURE.read_text(encoding="utf-8")))
     placements = _placements(board)
     for ref in ("U1S_A", "U1S_B"):
@@ -657,7 +666,7 @@ def test_a_child_that_names_no_drawing_behaves_exactly_as_before(ledger):
     rows = {row.ref: row for row in emission.cpl}
     assert rows["U1S_A"].footprint_ref == PARENT
     assert [row.footprint for row in emission.bom
-            if row.refs == ("U1S_A", "U1S_B")] == [PARENT]
+            if row.refs == ("U1S_A", "U1S_B")] == [_bom_cell(PARENT)]
 
 
 def test_a_drawing_the_library_does_not_ship_refuses_at_compile_by_placement():

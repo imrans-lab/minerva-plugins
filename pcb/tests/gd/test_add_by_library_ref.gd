@@ -22,17 +22,14 @@ extends SceneTree
 ##      wrong on both sides would pass. Silk and courtyard arrive with it,
 ##      which is what makes the part fabricable rather than merely pad-bearing.
 ##
-##   2. THE BOARD STILL CHECKS, AND THE RESOLVE IS WHAT SHRINKS THE WIRE. The
-##      real worker's geometric DRC over the board with the added part is
-##      DETERMINATE and clean. This is the whole point: a part added this way
-##      costs the board nothing. The same board then pins both halves of the
-##      resolved-fact contract: because the parts resolved against THIS
-##      machine's library moments ago, the wire form drops their lands (the
-##      worker re-derives them) — and because that fact is about this machine
-##      and not about the board, the SAVED document carries the lands but not
-##      the claim. A document that carried the claim is what reopened on a
-##      machine whose library lacked the ref, trimmed the pads anyway, and
-##      handed the worker a part with no geometry and no way to get any.
+##   2. THE BOARD STILL CHECKS, AND THE DICT IS THE DESIGN. The real worker's
+##      geometric DRC over the board with the added part is DETERMINATE and
+##      clean. This is the whole point: a part added this way costs the board
+##      nothing. The same board then pins the resolved-fact contract: the
+##      parts resolved against THIS machine's library moments ago, and that
+##      fact lives on the model — the canonical dict carries the ref, no
+##      lands (the library's, re-derived by every worker) and no claim, so a
+##      document reopened where the library lacks the ref cannot inherit one.
 ##
 ##   3. A SKETCH PART IS NAMED, AT ADD TIME, AND THE BOARD STOPS CHECKING. The
 ##      same board, the same check, one HEADER added: the verdict goes
@@ -379,10 +376,11 @@ func _run_library_ref_lands_real_geometry() -> void:
 		comp != null and comp.refdes_graphics.size() > 0
 			and twin_renamed and twin.refdes_graphics == comp.refdes_graphics)
 
-	# The board owns the geometry outright now (the FULL rule), so the part
-	# still compiles on a machine whose library lacks the ref.
-	check("the serialized component carries the pads KEY — the board is the authority",
-		comp != null and comp.to_board_dict().has("pads"))
+	# The design of record for a by-ref part is the ref and the library lock:
+	# its lands are the library's, adopted as session state, never the board's.
+	check("the serialized component carries NO pads key — the library is the authority",
+		comp != null and not comp.to_board_dict().has("pads")
+			and comp.footprint_resolved and not comp.pads.is_empty())
 
 	# ARGUMENTS THE FOOTPRINT ANSWERS ARE NAMED BACK, not silently dropped.
 	var host2 := _host()

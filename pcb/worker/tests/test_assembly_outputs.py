@@ -404,24 +404,30 @@ def test_two_parts_differing_only_in_comment_are_separate_rows():
 def test_bom_csv_hand_derived_bytes():
     """assembly_resolved.yaml, by inspection, through the column table in
     assembly_outputs' docstring — Comment = ``assembly.comment`` else ``value``,
-    Footprint = ``assembly.package`` else the footprint ref, LCSC = the jlcpcb
-    ``house_parts`` entry else ``mpn``:
+    Footprint = the drawing's lock label else the drawing ref, LCSC = the
+    jlcpcb ``house_parts`` entry else ``mpn``:
 
-      R1 -> ("10k", "0805", "C25804")   package + house number from the block
-      R2 -> ("10k", "0805", "C25804")   package + mpn as top-level scalars
-      D1 -> ("1N4148", "Diode_SMD:D_SMA", "C2128")   no package, no house entry
+      R1 -> ("10k", R_0805's cell, "C25804")   house number from the block
+      R2 -> ("10k", R_0805's cell, "C25804")   mpn from the block
+      D1 -> ("1N4148", D_SMA's cell, "C2128")  no house entry
 
-    R1 and R2 agree on all four grouping-key fields (those three plus mpn
-    "C25804"), so they are ONE line whose Designator cell is CSV-quoted for the
-    comma it contains. Rows sort by (Footprint, Comment, first ref), and "0805"
-    sorts before "Diode_SMD:D_SMA" — '0' precedes 'D' — so the resistor line is
-    first. FID1/TXT1 are furniture and contribute nothing."""
+    Neither seed drawing carries a lock label, so each cell is the ref itself
+    — read off the lock here rather than retyped, so a label added to the seed
+    later moves this expectation with it. R1 and R2 agree on all four
+    grouping-key fields (those three plus mpn "C25804"), so they are ONE line
+    whose Designator cell is CSV-quoted for the comma it contains. Rows sort
+    by (Footprint, Comment, first ref): "Diode_SMD:D_SMA" sorts before
+    "R_0805" — 'D' precedes 'R' — so the diode line is first. FID1/TXT1 are
+    furniture and contribute nothing."""
+    r_cell = _lock_label("R_0805") or "R_0805"
+    d_cell = _lock_label("Diode_SMD:D_SMA") or "Diode_SMD:D_SMA"
+    assert d_cell < r_cell, "the hand-derived row order below assumes the diode sorts first"
     result = ao.build_bom(_compiled(_load()), "jlc", name="afix")
     assert list(result.keys()) == ["afix-bom-jlc.csv"]
     expected = (
         "Comment,Designator,Footprint,LCSC Part #\r\n"
-        '10k,"R1,R2",0805,C25804\r\n'
-        "1N4148,D1,Diode_SMD:D_SMA,C2128\r\n"
+        f"1N4148,D1,{d_cell},C2128\r\n"
+        f'10k,"R1,R2",{r_cell},C25804\r\n'
     )
     assert result["afix-bom-jlc.csv"] == expected
 
@@ -439,8 +445,8 @@ def test_bom_different_mpn_same_footprint_value_are_separate_rows():
     R1's house number holds all four emitted columns identical, so mpn is the
     single field the two disagree about and the single reason they split."""
     board = _load()
-    board["components"][1]["assembly"] = {"house_parts": {"jlcpcb": "C25804"}}
-    board["components"][1]["mpn"] = "C99999"  # R2 diverges from R1, in mpn only
+    # R2 diverges from R1 in mpn only.
+    board["components"][1]["assembly"] = {"mpn": "C99999", "house_parts": {"jlcpcb": "C25804"}}
     result = ao.build_bom(_compiled(board), "jlc")
     assert len(result.rows) == 3
 
@@ -448,8 +454,8 @@ def test_bom_different_mpn_same_footprint_value_are_separate_rows():
     assert ("R1",) in rows and ("R2",) in rows
     r1, r2 = rows[("R1",)], rows[("R2",)]
     # Every emitted cell agrees; only the mpn riding beside them differs.
-    assert (r1.comment, r1.footprint, r1.part_number) == ("10k", "0805", "C25804")
-    assert (r2.comment, r2.footprint, r2.part_number) == ("10k", "0805", "C25804")
+    assert (r1.comment, r1.footprint, r1.part_number) == ("10k", "R_0805", "C25804")
+    assert (r2.comment, r2.footprint, r2.part_number) == ("10k", "R_0805", "C25804")
     assert (r1.mpn, r2.mpn) == ("C25804", "C99999")
 
 
@@ -517,22 +523,24 @@ def test_bom_asymmetric_labelling_splits_the_row():
     The oracle is both cells: one row carries the label the lock states, the
     other the drawing ref it falls back to. Everything else about the two parts
     — value, mpn, and therefore the LCSC cell that falls back to it — is
-    identical."""
+    identical. Rows sort by the Footprint cell, and "R_0805" sorts before the
+    label ('R' precedes 'S'), so R2's line comes first."""
     label = _lock_label(LABELLED_FOOTPRINT)
     assert label and label != LABELLED_FOOTPRINT, "the seed lock no longer labels the drawing"
     board = _pair({"mpn": "C25804"}, {"mpn": "C25804"})
     board["components"][0]["footprint"] = LABELLED_FOOTPRINT
     result = ao.build_bom(_compiled(board), "jlc")
 
+    assert "R_0805" < label, "the row order below assumes the ref sorts before the label"
     assert [(row.refs, row.footprint, row.qty) for row in result.rows] == [
-        (("R1",), label, 1),
         (("R2",), "R_0805", 1),
+        (("R1",), label, 1),
     ]
     assert all(row.comment == "10k" and row.part_number == "C25804"
                and row.mpn == "C25804" for row in result.rows)
     assert next(iter(result.values())).splitlines()[1:] == [
-        f"10k,R1,{label},C25804",
         "10k,R2,R_0805,C25804",
+        f"10k,R1,{label},C25804",
     ]
 
 

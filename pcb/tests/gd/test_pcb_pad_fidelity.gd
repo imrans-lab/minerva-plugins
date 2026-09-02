@@ -94,7 +94,6 @@ func _authored_pad() -> Dictionary:
 func _component_with_pads(pads: Array) -> Dictionary:
 	return {"ref": "JP1", "footprint": "Fuse:Fuse_1206_3216Metric",
 		"x_mm": 20.0, "y_mm": 20.0, "rotation_deg": 0.0, "layer": "top",
-		"width": 4.6, "height": 2.3, "has_pad_geometry": true,
 		"pins": [{"number": "1", "x_mm": -1.4, "y_mm": 0.0}],
 		"pads": pads}
 
@@ -164,8 +163,7 @@ func _corner_probe_board(ratio):
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "P1", "footprint": "CUSTOM", "x_mm": 20.0, "y_mm": 20.0,
-			 "rotation_deg": 0.0, "layer": "top", "width": 9.0, "height": 3.0,
-			 "has_pad_geometry": true,
+			 "rotation_deg": 0.0, "layer": "top",
 			 "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
 			 "pads": [_roundrect_pad(ratio)]},
 			{"ref": "P2", "footprint": "CUSTOM", "x_mm": 30.0, "y_mm": 20.8,
@@ -304,14 +302,14 @@ func _draw_order_board():
 		"layers": ["top", "bottom"],
 		"components": [
 			{"ref": "J1", "footprint": "CUSTOM", "x_mm": 10.0, "y_mm": 10.0,
-			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,
+			 "rotation_deg": 0.0, "layer": "top",
 			 "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
 			 "pads": [{"number": "1", "type": "thru_hole", "shape": "circle",
 				"position": {"x": 0.0, "y": 0.0},
 				"size": {"width": 1.6, "height": 1.6},
 				"drill": 0.8, "layers": ["*.Cu"]}]},
 			{"ref": "R1", "footprint": "CUSTOM", "x_mm": 20.0, "y_mm": 10.0,
-			 "rotation_deg": 0.0, "layer": "top", "has_pad_geometry": true,
+			 "rotation_deg": 0.0, "layer": "top",
 			 "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}],
 			 "pads": [{"number": "1", "type": "smd", "shape": "rect",
 				"position": {"x": 0.0, "y": 0.0},

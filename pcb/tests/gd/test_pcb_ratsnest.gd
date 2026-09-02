@@ -978,7 +978,6 @@ func _shaped_part(ref: String, x: float, y: float, pad: Dictionary,
 		rotation_deg: float = 0.0) -> Dictionary:
 	return {"ref": ref, "footprint": "CUSTOM", "x_mm": x, "y_mm": y,
 		"rotation_deg": rotation_deg, "layer": "top",
-		"width": 3.0, "height": 3.0, "has_pad_geometry": true,
 		"pins": [{"number": "1",
 			"x_mm": float((pad.get("position", {}) as Dictionary).get("x", 0.0)),
 			"y_mm": float((pad.get("position", {}) as Dictionary).get("y", 0.0))}],

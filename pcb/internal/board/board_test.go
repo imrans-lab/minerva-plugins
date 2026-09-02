@@ -100,7 +100,6 @@ annotations:
       type: ARROW
       text: route this first
       author: human
-annotations_note: kept opaque
 route_hints:
     - id: rhint_000007
       hint_type: SINGLE_TRACE
@@ -197,7 +196,6 @@ func TestDeterministicOutput(t *testing.T) {
         - U1.8
       hint_type: SINGLE_TRACE
       id: rhint_000007
-annotations_note: kept opaque
 annotations:
     - author: human
       text: route this first

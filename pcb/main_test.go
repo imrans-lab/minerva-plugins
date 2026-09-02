@@ -1180,9 +1180,10 @@ func TestPCBWorkerStdioSmoke_OrderPackage(t *testing.T) {
 	}
 
 	// Fixture-specific content, not just headers: the grouped R1/R2 BOM line
-	// with its LCSC part, and D1's own part number.
+	// with its LCSC part (its Footprint cell is the drawing ref, since the seed
+	// lock states no package label for R_0805), and D1's own part number.
 	bom := string(diskBytes["bom.csv"])
-	for _, want := range []string{"LCSC Part #", `10k,"R1,R2",0805,C25804`, "C2128"} {
+	for _, want := range []string{"LCSC Part #", `10k,"R1,R2",R_0805,C25804`, "C2128"} {
 		if !strings.Contains(bom, want) {
 			t.Fatalf("minerva_pcb_order_package bom.csv missing %q: %q", want, bom)
 		}
