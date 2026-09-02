@@ -56,11 +56,11 @@ takes the side rather than defaulting to one.
 THE TRAP: A WRONG SIGN IS INVISIBLE ON MOST PARTS
 -------------------------------------------------
 ``R + 180`` and ``R - 180`` are the same number modulo 360, and seventeen of
-the nineteen pairs measured so far are 0 or 180. A suite assembled only out of those
+the twenty pairs measured so far are 0 or 180. A suite assembled only out of those
 passes with EITHER sign on EITHER side, and ships every quarter-turn part a
 quarter turn out. Only a 90 or a 270 can falsify it, which is why
 ``tests/test_assembly_orientation.py`` builds its fixture board around
-``TSOT-23-6``/``C780769`` and ``VQFN-16``/``C910544`` -- the two measured 270s
+``TSOT-23-6``/``C780769`` and ``VQFN-16``/``C910544`` -- two of the three measured 270s
 -- and asserts their emitted numbers, on BOTH sides, as hand-derived literals
 rather than as the expression this module computes.
 

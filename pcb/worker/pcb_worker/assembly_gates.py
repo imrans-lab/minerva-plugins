@@ -35,6 +35,13 @@ one:
   stay clean while the coordinate a nozzle drives to walks off the part. The
   CPL is the only artifact that shows it, which means the assembly house is
   the one who finds it.
+* :data:`CODE_CHILD_LANDS_MISMATCH` — an expansion child NAMED the drawing it
+  is (``assembly.placements[].footprint``) and that drawing, placed at the
+  child's composed offset and rotation, does not lie on the parent's pads.
+  The child draws no copper, so the only thing that ties its identity and its
+  transform to the board is this comparison: it is the oracle that the child
+  names the right drawing AND that its offset and rotation are right, on
+  either side of the board.
 * :data:`CODE_EMPTY_EXPANSION` — a component that authored ``placements`` and
   named none, which resolves back to one implicit part under its own ref.
 * :data:`CODE_PASTE_UNDECIDED` — a NOT-populated part whose lands still take
@@ -80,6 +87,7 @@ from typing import Protocol
 
 from .assembly_spec import (PASTE_AUTO, PASTE_EXCLUDE, PASTE_INCLUDE,
                             ResolvedAssembly)
+from .part_orientation import LAND_TOL_MM
 from .refdes_anchor import LocalExtent, placed_land_extent
 from .resolved_board import (ANCHOR_BASIS_AUTHORED, ANCHOR_BASIS_ORIGIN,
                              LayerRole, ResolvedBoard, ResolvedComponent)
@@ -92,6 +100,7 @@ CODE_ROW_REF_LIMIT = "assembly_row_ref_limit"
 CODE_NON_METRIC_COORDINATES = "assembly_non_metric_coordinates"
 CODE_PLACEMENTS_TOO_CLOSE = "assembly_placements_too_close"
 CODE_ANCHOR_OFF_LANDS = "assembly_anchor_off_lands"
+CODE_CHILD_LANDS_MISMATCH = "assembly_child_lands_mismatch"
 CODE_EMPTY_EXPANSION = "assembly_empty_expansion"
 CODE_PASTE_UNDECIDED = "assembly_paste_undecided"
 
@@ -116,6 +125,14 @@ METRIC_COORDINATE_UNIT = "mm"
 #: authored exactly on a land's edge cannot be refused by the float noise of
 #: composing it through a rotation.
 ANCHOR_ON_LANDS_TOLERANCE_MM = 1e-6
+
+#: How far a child's own land may sit from the parent pad it claims and still
+#: be THE SAME LAND. Not a new number: it is the distance below which
+#: ``part_orientation`` already calls two drawings the same land pattern, and
+#: the question here is the same one asked of our own drawings — measured
+#: from both sides there, so it is neither loosened nor tightened here. A wrong
+#: pitch, a wrong row or a quarter turn miss it by millimetres.
+CHILD_LAND_TOLERANCE_MM = LAND_TOL_MM
 
 
 class AssemblyGateError(ValueError):
@@ -239,15 +256,38 @@ def _distance_outside(point: tuple[float, float], box: LocalExtent) -> float:
     return math.hypot(dx, dy)
 
 
+def _own_land_extent(item, component: ResolvedComponent) -> LocalExtent | None:
+    """The box of the parent pads a NAMED child's own lands fall on, or None
+    when the child names no drawing or one of its lands is on no parent pad
+    (which :func:`check_child_lands` refuses in its own words).
+
+    The child's ``lands`` are pad CENTRES, so their own extent would be a pad
+    radius short on every side; the parent's pads carry the size, so the box
+    is taken off those — the same nearest-pad rule ``check_child_lands`` reads
+    the lands by, at the same tolerance."""
+    if not item.lands:
+        return None
+    centres = [pad.position for pad in component.placed_pads]
+    claimed = []
+    for land in item.lands:
+        index, distance = _nearest(land, centres)
+        if distance > CHILD_LAND_TOLERANCE_MM:
+            return None
+        claimed.append(component.placed_pads[index])
+    return placed_land_extent(claimed)
+
+
 def check_anchor_on_lands(board: ResolvedBoard) -> None:
     """Every AUTHORED anchor must resolve onto copper the part is soldered to.
 
-    THE BOX IS THE OWNING COMPONENT'S PLACED LANDS, which for a synthetic
-    expansion is an APPROXIMATION: the parent draws all the copper and the IR
-    does not attribute a pad to a child, so each child is tested against the
-    box of every pad the parent placed. The child's own lands are a subset of
-    it, so the box is generous — it can miss a child anchored onto a SIBLING's
-    strip, and it cannot produce a miss for a child anchored onto its own.
+    THE BOX IS THE PART'S OWN PLACED LANDS. A child that NAMES its drawing has
+    them exactly: its lands pick out the parent pads that are its (see
+    :func:`_own_land_extent`), so an anchor on a SIBLING's strip is off this
+    box and refused. A child that names no drawing has no lands of its own, and
+    the IR does not attribute a parent pad to it, so it falls back to the box
+    of every pad the parent placed — an APPROXIMATION that is generous: it can
+    miss such a child anchored onto a sibling's strip, and it cannot produce a
+    miss for one anchored onto its own.
 
     TWO CONDITIONS, and both are about what the gate can honestly prove:
 
@@ -258,12 +298,13 @@ def check_anchor_on_lands(board: ResolvedBoard) -> None:
       outside the lands is a fact about the footprint, not a mistake. An
       authored one is a number somebody wrote in the placement's own frame,
       which the placement's rotation then turns; nothing ties it to the copper.
-    * the placement's ORIGIN is inside the box. That is the approximation's own
-      validity test: the parent's lands only stand in for the child's while the
-      child actually sits on them. A child whose origin is off the parent's
-      copper entirely is a part the parent's drawing does not cover, and the
-      box says nothing about where ITS lands are — so there is no oracle and
-      the gate must not refuse.
+    * under the parent-box approximation only, the placement's ORIGIN is inside
+      the box. That is the approximation's own validity test: the parent's
+      lands only stand in for the child's while the child actually sits on
+      them. A child whose origin is off the parent's copper entirely is a part
+      the parent's drawing does not cover, and the box says nothing about where
+      ITS lands are — so there is no oracle and the gate must not refuse. An
+      exact box needs no such test.
 
     Collected per component before raising, so an expansion whose children all
     swung off together names every one of them in ``refs`` rather than sending
@@ -274,22 +315,25 @@ def check_anchor_on_lands(board: ResolvedBoard) -> None:
         # as a coordinate a machine drives to.
         if assembly is None or not assembly.populate:
             continue
-        box = placed_land_extent(component.placed_pads)
-        if box is None:
+        parent_box = placed_land_extent(component.placed_pads)
+        if parent_box is None:
             continue
-        faults: list[tuple[object, float]] = []
+        faults: list[tuple[object, float, LocalExtent]] = []
         for item in component.physical_placements:
             if item.anchor_basis != ANCHOR_BASIS_AUTHORED:
                 continue
-            if _distance_outside(item.origin, box) > ANCHOR_ON_LANDS_TOLERANCE_MM:
-                continue
+            box = _own_land_extent(item, component)
+            if box is None:
+                box = parent_box
+                if _distance_outside(item.origin, box) > ANCHOR_ON_LANDS_TOLERANCE_MM:
+                    continue
             distance = _distance_outside(item.anchor, box)
             if distance > ANCHOR_ON_LANDS_TOLERANCE_MM:
-                faults.append((item, distance))
+                faults.append((item, distance, box))
         if not faults:
             continue
-        item, distance = faults[0]
-        others = [other.ref for other, _ in faults[1:]]
+        item, distance, box = faults[0]
+        others = [other.ref for other, _, _ in faults[1:]]
         message = (
             f"placement {item.ref!r} of component {component.ref!r} anchors at "
             f"({item.anchor[0]:.4f}, {item.anchor[1]:.4f}) mm, {distance:.4f} mm "
@@ -301,12 +345,118 @@ def check_anchor_on_lands(board: ResolvedBoard) -> None:
             f"connectivity or board check can see it. Re-state anchor_mm in the frame the "
             f"placement's rotation_deg leaves it in, or correct that rotation")
         if others:
-            message += (f". The same component's other placement(s) are off too: "
+            message += (". The same component's other placement(s) are off too: "
                         + ", ".join(repr(name) for name in others))
         raise AssemblyGateError(
             CODE_ANCHOR_OFF_LANDS, message, component=component.ref,
             field="assembly.placements[].anchor_mm",
-            refs=[other.ref for other, _ in faults])
+            refs=[other.ref for other, _, _ in faults])
+
+
+def _nearest(point: tuple[float, float], candidates) -> tuple[int, float]:
+    """``(index, distance)`` of the candidate nearest ``point``."""
+    best, best_distance = -1, math.inf
+    for index, (x, y) in enumerate(candidates):
+        distance = math.hypot(x - point[0], y - point[1])
+        if distance < best_distance:
+            best, best_distance = index, distance
+    return best, best_distance
+
+
+def check_child_lands(board: ResolvedBoard) -> None:
+    """A child that NAMES its drawing must lie on the parent's pads.
+
+    The parent's placed pads are the copper; a named child's ``lands`` are
+    where its own drawing's pads fall once put through the child's composed
+    transform. The two must be the same lands, and "same" is one rule read
+    three ways:
+
+    * every land of a named child sits on some parent pad, within
+      :data:`CHILD_LAND_TOLERANCE_MM` — a wrong drawing, a wrong offset or a
+      wrong rotation all put at least one land on bare board;
+    * no parent pad is claimed by two children — two children on one strip;
+    * when EVERY child names a drawing, every parent pad is claimed — a
+      drawing that is too SHORT sits entirely on the parent's pads and leaves
+      the rest unaccounted for, which is the one wrong drawing the first rule
+      cannot see. With a child left unnamed nothing is known about which pads
+      are its, so the cover half is not asked.
+
+    A child is NAMED when it carries a ``footprint_ref`` — not when it has
+    lands. A drawing the library resolves with no pads at all names a part
+    that puts no land anywhere, which is refused here in its own words: read
+    off its lands it would look unnamed, and the gate would skip it or leave
+    the cover half unasked for its siblings.
+
+    Nearest-pad matching is unambiguous here because the tolerance is far
+    below any land pitch. The refusal names the placement, the first land
+    that missed and how far, in board millimetres, so a person can see which
+    of the three facts is wrong. Checked for populated parts only: the lands
+    are a CPL coordinate's evidence, and a part nobody places has no row.
+    """
+    for component in board.components:
+        assembly = component.assembly
+        if assembly is None or not assembly.populate:
+            continue
+        named = [item for item in component.physical_placements
+                 if item.footprint_ref is not None]
+        if not named:
+            continue
+        pads = [pad.position for pad in component.placed_pads]
+        claimed: dict[int, str] = {}
+        for item in named:
+            if not item.lands:
+                raise AssemblyGateError(
+                    CODE_CHILD_LANDS_MISMATCH,
+                    f"placement {item.ref!r} of component {component.ref!r} names "
+                    f"footprint {item.footprint_ref!r}, which draws no pads: a part "
+                    f"placed as that drawing has no land to hold against the parent's "
+                    f"copper, so nothing can show it sits on the parent's pads. Name "
+                    f"the drawing the part is bought as, or omit the key to describe "
+                    f"it by the parent's",
+                    component=component.ref,
+                    field="assembly.placements[].footprint", refs=(item.ref,))
+            for land in item.lands:
+                index, distance = _nearest(land, pads)
+                if distance > CHILD_LAND_TOLERANCE_MM:
+                    raise AssemblyGateError(
+                        CODE_CHILD_LANDS_MISMATCH,
+                        f"placement {item.ref!r} of component {component.ref!r} names "
+                        f"footprint {item.footprint_ref!r}, but at its composed offset "
+                        f"and rotation ({item.rotation_deg:.4f} deg, {item.side.value}) "
+                        f"that drawing's land at ({land[0]:.4f}, {land[1]:.4f}) mm sits "
+                        f"{distance:.4f} mm from the nearest pad the parent draws, over "
+                        f"the {CHILD_LAND_TOLERANCE_MM} mm at which two lands are the "
+                        f"same land. Either the placement names the wrong drawing, or "
+                        f"its offset_mm / rotation_deg do not put that drawing on the "
+                        f"parent's copper",
+                        component=component.ref,
+                        field="assembly.placements[].footprint", refs=(item.ref,))
+                if index in claimed:
+                    raise AssemblyGateError(
+                        CODE_CHILD_LANDS_MISMATCH,
+                        f"placements {claimed[index]!r} and {item.ref!r} of component "
+                        f"{component.ref!r} both put a land on the parent's pad at "
+                        f"({pads[index][0]:.4f}, {pads[index][1]:.4f}) mm; two parts "
+                        f"cannot share one land, so at least one offset_mm is wrong",
+                        component=component.ref,
+                        field="assembly.placements[].offset_mm",
+                        refs=(claimed[index], item.ref))
+                claimed[index] = item.ref
+        if len(named) < len(component.physical_placements):
+            continue
+        unclaimed = [pads[index] for index in range(len(pads)) if index not in claimed]
+        if unclaimed:
+            x, y = unclaimed[0]
+            raise AssemblyGateError(
+                CODE_CHILD_LANDS_MISMATCH,
+                f"component {component.ref!r} draws {len(pads)} pads but the drawings "
+                f"its {len(named)} placement(s) name account for only {len(claimed)} of "
+                f"them (first unclaimed pad at ({x:.4f}, {y:.4f}) mm). Every child "
+                f"names its drawing, so together they must cover the parent's copper; "
+                f"a drawing that leaves pads over is the wrong drawing — a shorter "
+                f"strip than the one the parent draws",
+                component=component.ref, field="assembly.placements[].footprint",
+                refs=tuple(item.ref for item in named))
 
 
 def check_designators(placed) -> None:

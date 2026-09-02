@@ -97,6 +97,7 @@
     "assembly_row_ref_limit",
     "assembly_placements_too_close",
     "assembly_anchor_off_lands",
+    "assembly_child_lands_mismatch",
     "assembly_non_metric_coordinates",
     "assembly_reference_set_mismatch",
     "assembly_duplicate_designator",

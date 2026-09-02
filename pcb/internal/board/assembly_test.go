@@ -33,8 +33,11 @@ func fullAssemblyBoard() *Board {
 						{Ref: "J1S_A", OffsetMM: &AssemblyOffset{X: 0, Y: 0},
 							AnchorMM: &AssemblyOffset{X: 0, Y: 7.62}, RotationDeg: 0},
 						// B authors no anchor at all: absent must stay absent,
-						// or every board would start carrying one.
-						{Ref: "J1S_B", OffsetMM: &AssemblyOffset{X: 22.86, Y: 0}, RotationDeg: 180},
+						// or every board would start carrying one. It names the
+						// drawing it IS instead; A names none, so an absent
+						// footprint must stay absent too.
+						{Ref: "J1S_B", Footprint: "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical",
+							OffsetMM: &AssemblyOffset{X: 22.86, Y: 0}, RotationDeg: 180},
 					},
 				},
 			},
@@ -98,6 +101,15 @@ func assertFullAssembly(t *testing.T, where string, b *Board) {
 	// zero pair the author never wrote.
 	if placements[1].AnchorMM != nil {
 		t.Fatalf("%s: a placement with no authored anchor grew one: %+v", where, placements[1])
+	}
+	// THE PLACEMENT'S OWN DRAWING is an assembly field under the same gate: lose
+	// it and the part is silently described — and oriented — by its parent's
+	// drawing again.
+	if placements[1].Footprint != "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical" {
+		t.Fatalf("%s: the placement's own footprint did not survive: %+v", where, placements[1])
+	}
+	if placements[0].Footprint != "" {
+		t.Fatalf("%s: a placement that named no footprint gained one: %+v", where, placements[0])
 	}
 }
 
@@ -284,6 +296,93 @@ func TestNestedOffsetTypoRefusesOnBothCodecs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "xx") {
 		t.Fatalf("JSON: the refusal must NAME the key that was not understood, got %v", err)
+	}
+}
+
+// TestBlankPlacementFootprintRefusesOnBothCodecs: a placement's `footprint` is
+// a plain omitempty string, so once decoded a blank is the same as an absent
+// key — and absent is accepted, meaning "the parent's drawing". The worker
+// refuses a blank; both codecs must too, or a round trip through the editor
+// would quietly convert that refusal into a different part identity.
+func TestBlankPlacementFootprintRefusesOnBothCodecs(t *testing.T) {
+	const jsonSrc = `{"ref":"J1S","footprint":"PinSocket_2x22","assembly":{"placements":[{"ref":"J1S_A","footprint":""}]}}`
+	var c Component
+	err := json.Unmarshal([]byte(jsonSrc), &c)
+	if err == nil || !strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("JSON: want invalid_component_assembly for a blank footprint, got %v (decoded %+v)", err, c.Assembly)
+	}
+	if !strings.Contains(err.Error(), "footprint") {
+		t.Fatalf("JSON: the refusal must NAME the blank key, got %v", err)
+	}
+	const yamlSrc = `version: 1
+name: blank-footprint
+width_mm: 20
+height_mm: 15
+components:
+  - {ref: J1S, footprint: PinSocket_2x22, x_mm: 5, y_mm: 5, assembly: {placements: [{ref: J1S_A, footprint: ""}]}}
+`
+	if _, err := UnmarshalYAML([]byte(yamlSrc)); err == nil || !strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("YAML: want invalid_component_assembly for a blank footprint, got %v", err)
+	}
+	// An ABSENT key stays accepted: that is the ordinary unnamed child.
+	const absent = `{"ref":"J1S","footprint":"PinSocket_2x22","assembly":{"placements":[{"ref":"J1S_A"}]}}`
+	if err := json.Unmarshal([]byte(absent), &c); err != nil {
+		t.Fatalf("JSON: an absent footprint key must still decode, got %v", err)
+	}
+
+	// Whitespace-only is blank by the worker's rule (it strips before it
+	// judges), so both codecs refuse it the same way they refuse "".
+	const wsJSON = `{"ref":"J1S","footprint":"PinSocket_2x22","assembly":{"placements":[{"ref":"J1S_A","footprint":"   "}]}}`
+	if err := json.Unmarshal([]byte(wsJSON), &c); err == nil || !strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("JSON: want invalid_component_assembly for a whitespace-only footprint, got %v", err)
+	}
+	const wsYAML = `version: 1
+name: blank-footprint
+width_mm: 20
+height_mm: 15
+components:
+  - {ref: J1S, footprint: PinSocket_2x22, x_mm: 5, y_mm: 5, assembly: {placements: [{ref: J1S_A, footprint: "   "}]}}
+`
+	if _, err := UnmarshalYAML([]byte(wsYAML)); err == nil || !strings.Contains(err.Error(), "invalid_component_assembly") {
+		t.Fatalf("YAML: want invalid_component_assembly for a whitespace-only footprint, got %v", err)
+	}
+
+	// A padded name is accepted (it is not blank once stripped) and STORED
+	// VERBATIM on both codecs: the codec reports what was authored and never
+	// rewrites it. The worker strips at parse, so both sides accept the same
+	// documents; only the worker's in-memory name is trimmed.
+	const paddedJSON = `{"ref":"J1S","footprint":"PinSocket_2x22","assembly":{"placements":[{"ref":"J1S_A","footprint":" Lib:Name "}]}}`
+	var padded Component
+	if err := json.Unmarshal([]byte(paddedJSON), &padded); err != nil {
+		t.Fatalf("JSON: a padded footprint must decode, got %v", err)
+	}
+	if got := padded.Assembly.PlacementList()[0].Footprint; got != " Lib:Name " {
+		t.Fatalf("JSON: want the padded footprint stored verbatim as %q, got %q", " Lib:Name ", got)
+	}
+	const paddedYAML = `version: 1
+name: padded-footprint
+width_mm: 20
+height_mm: 15
+components:
+  - {ref: J1S, footprint: PinSocket_2x22, x_mm: 5, y_mm: 5, assembly: {placements: [{ref: J1S_A, footprint: " Lib:Name "}]}}
+`
+	b, err := UnmarshalYAML([]byte(paddedYAML))
+	if err != nil {
+		t.Fatalf("YAML: a padded footprint must decode, got %v", err)
+	}
+	if got := b.Components[0].Assembly.PlacementList()[0].Footprint; got != " Lib:Name " {
+		t.Fatalf("YAML: want the padded footprint stored verbatim as %q, got %q", " Lib:Name ", got)
+	}
+	y, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	back, err := UnmarshalYAML(y)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML of the canonical document: %v", err)
+	}
+	if got := back.Components[0].Assembly.PlacementList()[0].Footprint; got != " Lib:Name " {
+		t.Fatalf("round trip: want the authored value back verbatim, %q, got %q", " Lib:Name ", got)
 	}
 }
 

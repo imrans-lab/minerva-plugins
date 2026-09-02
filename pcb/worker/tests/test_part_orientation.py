@@ -10,13 +10,13 @@ footprint drawn 180 out ships a board with the connector facing backwards, and
 every other check in the pipeline passes while it happens.
 
 So this suite is not "does the function return a float". It is the record of
-nineteen MEASURED (seed footprint, LCSC part) pairs, and it fails the moment a
+twenty MEASURED (seed footprint, LCSC part) pairs, and it fails the moment a
 library edit, a re-fetched payload, or a sign flip in the maths moves one of
 them.
 
 THE ORACLE AND WHERE IT CAME FROM
 ---------------------------------
-:data:`ORACLE` below is the offset for each pair. Three of the nineteen —
+:data:`ORACLE` below is the offset for each pair. Three of the twenty —
 ``C265102``, ``C265104``, ``C780769`` — were read by a human off a board
 house's 3D preview of an assembled board BEFORE any of these numbers were
 computed, so the table is not the code grading its own homework; the rest were
@@ -24,7 +24,7 @@ measured and then checked against the same convention.
 
 Those three are also what pins the SIGN. Offsets of 0 and 180 are unchanged by
 inverting the rotation sense, so a flipped sign is invisible on seventeen of
-the nineteen pairs and turns 270 into 90 on only the other TWO —
+the twenty pairs and turns 270 into 90 on only the other THREE —
 :func:`test_the_rotation_sense_is_pinned_by_the_human_confirmed_pairs` is the
 test that would catch it.
 
@@ -82,6 +82,10 @@ ORACLE = {
     # Drawn a quarter turn from the vendor.
     "C780769": 270,   # TSOT-23-6                  <- human-confirmed
     "C910544": 270,   # VQFN-16-1EP 3x3mm
+    # The vendor draws the socket strip's row along +X; ours runs +Y. The
+    # same number is re-derived from those two directions, without this
+    # module, in test_assembly_child_footprint.py.
+    "C41376161": 270, # PinSocket_1x22 HC-PM254-8.5H
 }
 
 #: The subset a person verified against a physical rendering of an assembled
@@ -125,7 +129,7 @@ def test_the_vendor_unit_is_rederived_from_pitches_we_already_know():
     """``VENDOR_UNIT_MM`` is 10 mil. That was a BELIEF about EasyEDA's canvas
     when this module was written, and a wrong scale would not fail loudly — it
     would shrink or stretch every residual and quietly move the land verdict,
-    while leaving all nineteen ANGLES correct (a rotation is scale-free). So the
+    while leaving all twenty ANGLES correct (a rotation is scale-free). So the
     constant is checked against pitches the datasheets state: JST PH is 2.00 mm,
     JST XH is 2.50 mm, and the VQFN-16 is 0.50 mm.
     """
@@ -177,7 +181,7 @@ def test_every_seed_pair_reports_the_expected_verdict(lcsc):
 
 def test_the_rotation_sense_is_pinned_by_the_human_confirmed_pairs():
     """THE SIGN TEST. Inverting the rotation sense leaves 0 and 180 alone and
-    swaps 90 with 270, so it is invisible on sixteen of the nineteen pairs. These
+    swaps 90 with 270, so it is invisible on seventeen of the twenty pairs. These
     three are the ones a person checked against a board house's 3D preview
     before the code existed, and ``C780769`` is the one whose value is neither
     0 nor 180 — it is the only thing here that can tell a correct convention

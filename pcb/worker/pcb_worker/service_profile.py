@@ -122,6 +122,7 @@ IMPLEMENTED_CHECKS: dict[str, str] = {
     assembly_gates.CODE_NON_METRIC_COORDINATES: assembly_gates.__name__,
     assembly_gates.CODE_PLACEMENTS_TOO_CLOSE: assembly_gates.__name__,
     assembly_gates.CODE_ANCHOR_OFF_LANDS: assembly_gates.__name__,
+    assembly_gates.CODE_CHILD_LANDS_MISMATCH: assembly_gates.__name__,
     assembly_gates.CODE_EMPTY_EXPANSION: assembly_gates.__name__,
     assembly_gates.CODE_PASTE_UNDECIDED: assembly_gates.__name__,
 }

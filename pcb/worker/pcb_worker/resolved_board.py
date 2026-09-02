@@ -859,6 +859,15 @@ class PhysicalPlacement:
 
     ``rotation_deg`` is already normalized into ``[0, 360)`` and ``side`` is the
     parent's — an expansion places copies of one part on one side of one board.
+
+    ``footprint_ref`` is the library ref of THIS PART's own drawing when the
+    placement named one (``assembly.placements[].footprint``), else ``None``:
+    the part is described by the component's drawing. ``lands`` are that own
+    drawing's pad centres put through this placement's transform, in BOARD
+    millimetres — empty when there is no own drawing. They are not copper (the
+    component draws all of that); they are where this part's lands WOULD be,
+    which is what lets an order gate ask whether the drawing named really
+    lies on the component's pads at this offset and angle.
     """
 
     ref: str
@@ -867,6 +876,8 @@ class PhysicalPlacement:
     rotation_deg: float
     side: Side
     anchor_basis: str
+    footprint_ref: str | None = None
+    lands: tuple[Point, ...] = ()
 
     def __post_init__(self) -> None:
         _nonempty(self.ref, "PhysicalPlacement.ref")
@@ -879,6 +890,14 @@ class PhysicalPlacement:
         if self.anchor_basis not in ANCHOR_BASES:
             raise ValueError(
                 f"PhysicalPlacement.anchor_basis must be one of {ANCHOR_BASES}")
+        if self.footprint_ref is not None:
+            _nonempty(self.footprint_ref, "PhysicalPlacement.footprint_ref")
+        _tuple(self.lands, "PhysicalPlacement.lands")
+        for land in self.lands:
+            _point(land, "PhysicalPlacement.lands[]")
+        if self.lands and self.footprint_ref is None:
+            raise ValueError(
+                "PhysicalPlacement.lands belong to an own footprint_ref")
 
 
 @dataclass(frozen=True)

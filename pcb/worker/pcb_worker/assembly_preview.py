@@ -1050,27 +1050,34 @@ def _expansion_notes(board) -> list[str]:
     that inherited. Writing the anchor for one strip of a two-strip socket and
     forgetting the other is likelier than forgetting both, and it is quieter:
     the remaining placement keeps the parent's whole-body centre, which usually
-    sits on the drawing and so draws no off-body ring either."""
+    sits on the drawing and so draws no off-body ring either.
+
+    A placement that names its OWN drawing did not inherit: its anchor was
+    measured off that drawing, and the child-lands gate has already held that
+    drawing to the parent's copper. It is left out of both sentences."""
     out: list[str] = []
     for component in board.components:
         places = component.physical_placements
         if len(places) < 2:
             continue
         inherited = [item.ref for item in places
-                     if item.anchor_basis != ANCHOR_BASIS_AUTHORED]
+                     if item.anchor_basis != ANCHOR_BASIS_AUTHORED
+                     and item.footprint_ref is None]
         if not inherited:
             continue
         if len(inherited) == len(places):
             out.append(
                 f"{', '.join(inherited)} — one drawing, "
                 f"{len(places)} parts, and every anchor was measured off the WHOLE "
-                f"drawing rather than stated per placement. Check each crosshair "
-                f"sits on the part it names and not between them; "
-                f"assembly.placements[].anchor_mm is how a placement states its own")
+                f"drawing rather than measured or stated per placement. Check each "
+                f"crosshair sits on the part it names and not between them; "
+                f"assembly.placements[].footprint names the drawing a placement is, "
+                f"and anchor_mm states its centre by hand")
         else:
             out.append(
                 f"{', '.join(inherited)} — one drawing, {len(places)} parts, and "
-                f"a SIBLING placement on it states its own anchor_mm while "
+                f"a SIBLING placement on it names its own drawing or states its "
+                f"own anchor_mm while "
                 f"{'this one' if len(inherited) == 1 else 'these'} did not: the "
                 f"anchor here is still the one measured off the WHOLE drawing. "
                 f"Check each crosshair sits on the part it names")

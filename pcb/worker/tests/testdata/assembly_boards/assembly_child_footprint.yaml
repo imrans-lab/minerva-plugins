@@ -1,0 +1,98 @@
+# THE CHILD-FOOTPRINT fixture: an expansion whose children NAME the drawing
+# they are, and author nothing else by hand.
+#
+# U1S IS A SOCKET SET, REDUCED: the same parent footprint, position and
+# rotation, and the same two authored offsets, as the board this shape was
+# found on; everything else there is dropped. It is drawn on
+# Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT — 44 pads in two rows at
+# x -11.43 and +11.43, each 22 pins of 2.54 pitch spanning y 0 .. 53.34 — and
+# each child names Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_
+# HC-PM254-8.5H, the 1x22 strip it is bought as: pin 1 at its origin, row along
+# +Y, fab body box (-1.2, -1.47) .. (1.2, 54.81), so its own body centre is
+# (0, 26.67) — the number the previous shape of this board had to write down
+# as anchor_mm on both children. Here NEITHER child authors an anchor and both
+# author rotation_deg 0: the anchor is measured off the strip, and the vendor's
+# orientation of the strip is the ledger's business, not a rotation smuggled
+# into a design field.
+#
+# The children are bought as jlcpcb C41376161, which is the PAIR the ledger
+# has measured against the strip (and could never measure against the two-row
+# parent). The suite turns the children, shifts them a pitch, hands them a
+# shorter strip, and flips the parent to the bottom side — all in memory.
+#
+# SW1..SW4 ARE THE BOARD AROUND IT, at synthetic positions: four tactile
+# switches on the in-repo EVP-ASAC1A:SW_EVP-ASAC1A drawing, bought as jlcpcb
+# C4365033, a pair NOTHING has measured. They are here so the emission carries
+# a refusal that is NOT about U1S, and the suite can show the socket rows
+# stopped being the reason an order refuses while the switches still are.
+#
+# Deliberately NO nets: every claim here is geometry and identity, and a net
+# list would only add a way for the fixture to stop compiling for an
+# unrelated reason.
+version: 1
+name: AssemblyChildFootprint
+width_mm: 120
+height_mm: 90
+origin: {x_mm: 0, y_mm: 0}
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+
+components:
+  # --- the expansion. Each child IS a 1x22 strip and says so.
+  - ref: U1S
+    footprint: Espressif:ESP32-S3-DevKitC-1_SocketSet_2x22_THT
+    value: ESP32-S3-DevKitC-1 socket set
+    x_mm: 45.0
+    y_mm: 62.797
+    rotation_deg: 180
+    layer: top
+    assembly:
+      mpn: HC-PM254-8.5H-1x22PZ
+      house_parts: {jlcpcb: C41376161}
+      placements:
+        - ref: U1S_A
+          footprint: Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H
+          offset_mm: {x: -11.43, y: 0}
+          rotation_deg: 0
+        - ref: U1S_B
+          footprint: Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H
+          offset_mm: {x: 11.43, y: 0}
+          rotation_deg: 0
+
+  # --- ordinary parts on an unmeasured pair: the refusal that is not U1S's.
+  - ref: SW1
+    footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+    value: BTN1
+    x_mm: 10.0
+    y_mm: 10.0
+    rotation_deg: 0
+    layer: top
+    assembly: {mpn: EVP-ASAC1A, house_parts: {jlcpcb: C4365033}}
+  - ref: SW2
+    footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+    value: BTN2
+    x_mm: 10.0
+    y_mm: 30.0
+    rotation_deg: 0
+    layer: top
+    assembly: {mpn: EVP-ASAC1A, house_parts: {jlcpcb: C4365033}}
+  - ref: SW3
+    footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+    value: BTN3
+    x_mm: 10.0
+    y_mm: 50.0
+    rotation_deg: 0
+    layer: top
+    assembly: {mpn: EVP-ASAC1A, house_parts: {jlcpcb: C4365033}}
+  - ref: SW4
+    footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+    value: BTN4
+    x_mm: 10.0
+    y_mm: 70.0
+    rotation_deg: 0
+    layer: top
+    assembly: {mpn: EVP-ASAC1A, house_parts: {jlcpcb: C4365033}}

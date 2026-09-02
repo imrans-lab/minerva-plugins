@@ -124,8 +124,9 @@ an absent mark must never read as a part somebody checked and found symmetric.
 **Two ways a wrong anchor becomes visible.** A crosshair that lands outside its
 own drawing's ink is ringed with a leader back to the part it names. That is the
 easy half. The harder half is a wrong anchor that lands INSIDE the drawing — the
-shape the `anchor_mm` key exists for, where several parts inherit one anchor
-measured off the whole drawing — which no ring should fire on because it is a
+shape a placement's `footprint` (or, by hand, `anchor_mm`) exists for, where
+several parts inherit one anchor measured off the whole drawing — which no ring
+should fire on because it is a
 legal shape. The lands are drawn so a crosshair sitting between two pin rows
 rather than on one can be seen, and every placement that inherited an anchor it
 did not state is listed by name on the page. That listing includes a placement

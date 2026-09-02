@@ -54,7 +54,8 @@ A CPL row carries the **assembly anchor** — the part's body-box centre, compos
 through its rotation and side — not the `x_mm`/`y_mm` that place the footprint
 origin. See "The assembly anchor" in `board-yaml.md` for the basis ladder, why
 silk and the courtyard are not bases, and how an expansion whose parts do not
-share the drawing's centre states one anchor per placement (`anchor_mm`).
+share the drawing's centre names the drawing each part is (`footprint`) — or,
+failing that, states one anchor per placement (`anchor_mm`).
 
 ## Coordinate frame — measured, not assumed
 
@@ -137,8 +138,10 @@ is rotationally symmetric it is invisible in a 3D preview too.
 
 `part_orientation.py` measures that offset for one (our footprint, vendor part)
 pair; `pcb/library/part_orientation.json` stores it, keyed on
-`(footprint ref, house, catalogue number)`; and `assembly_orientation.py`
-applies it to the emitted row:
+`(footprint ref, house, catalogue number)` — where the footprint ref is the
+PART's drawing: an expansion child that names its own `footprint` is keyed on
+that, not on the parent drawing that carries the copper; and
+`assembly_orientation.py` applies it to the emitted row:
 
 ```
 top     emitted rotation = (placed rotation + measured offset) mod 360

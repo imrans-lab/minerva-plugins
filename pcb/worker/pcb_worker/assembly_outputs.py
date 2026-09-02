@@ -83,7 +83,10 @@ resolve an anchor somewhere other than their origin. Every row therefore reads
 The same list is what makes a SYNTHETIC EXPANSION real: one drawn component
 carrying ``assembly.placements`` contributes one CPL row and one BOM quantity
 per authored placement, the offset already composed against the parent's
-rotation and side, once, by the compiler.
+rotation and side, once, by the compiler. A placement that NAMED its own
+drawing (``PhysicalPlacement.footprint_ref``) is a part with that drawing
+wherever a column or a key is about the part: its BOM Footprint fallback and
+its orientation-ledger key both read the child's drawing, not the parent's.
 
 FRAME AND ROTATION, both measured against a real position-file run by the
 dev/CI-only export tool this module may not name (STANDING GUARD 2,
@@ -342,7 +345,8 @@ class CplRow:
 
     The last two fields are IDENTITY, not geometry, and they are here because
     they are the two halves of the key the part-orientation ledger is keyed on:
-    ``footprint_ref`` is our drawing of the part, and ``house_part`` is the
+    ``footprint_ref`` is our drawing of the PART — the placement's own when it
+    named one, else the component's — and ``house_part`` is the
     catalogue number the SELECTED profile reads out of ``assembly.house_parts``
     (``None`` when the board names none for that house). Carrying them on the
     row is what lets :mod:`assembly_orientation` correct the rotation without
@@ -485,32 +489,38 @@ def _walk(board, profile: HouseProfile):
         # and ``or`` cannot tell it from an absent one — it would print the
         # fallback into a column the author deliberately blanked.
         comment = component.value if assembly.comment is None else assembly.comment
-        footprint = (assembly.footprint_ref if assembly.package is None
-                     else assembly.package)
         house_number = dict(assembly.house_parts).get(profile.house_part_id)
         part_number = assembly.mpn if house_number is None else house_number
 
-        # BOM GROUPING KEY = EVERYTHING THE ROW ASSERTS ABOUT ALL OF ITS REFS:
-        # every cell of the rendered row except the Designator list, PLUS the
-        # ``mpn`` the row carries beside those cells. Grouping on a narrower key
-        # (the part number alone) would merge two rows a house reads as
-        # different parts; grouping on a key narrower than what the ROW reports
-        # lets one line report one component's mpn for refs it does not
-        # describe. The emitted cells come from the RESOLVED columns above, not
-        # the authored fields behind them, so two components that print
-        # identically are one line whichever field each authored it in.
-        key = (footprint, comment, part_number or "", assembly.mpn or "")
-        grp = groups.setdefault(key, {
-            "refs": [], "comment": comment, "footprint": footprint,
-            "part_number": part_number, "mpn": assembly.mpn,
-        })
-        # ONE REF PER PART, not per drawing: a component carrying a synthetic
-        # expansion contributes each authored physical designator, so a grouped
-        # row's qty is the number of parts a house buys rather than the number
-        # of symbols the board draws.
-        grp["refs"].extend(item.ref for item in placements)
-
         for physical in placements:
+            # THE PART'S DRAWING: the one the placement named, else the
+            # component's. Both columns and the ledger key below read it, so
+            # a child that is a 1x22 strip is bought, listed and oriented as
+            # one — never as the two-row drawing its parent is.
+            drawing = physical.footprint_ref or assembly.footprint_ref
+            footprint = drawing if assembly.package is None else assembly.package
+
+            # BOM GROUPING KEY = EVERYTHING THE ROW ASSERTS ABOUT ALL OF ITS
+            # REFS: every cell of the rendered row except the Designator list,
+            # PLUS the ``mpn`` the row carries beside those cells. Grouping on
+            # a narrower key (the part number alone) would merge two rows a
+            # house reads as different parts; grouping on a key narrower than
+            # what the ROW reports lets one line report one component's mpn
+            # for refs it does not describe. The emitted cells come from the
+            # RESOLVED columns above, not the authored fields behind them, so
+            # two components that print identically are one line whichever
+            # field each authored it in. Keyed PER PART, not per drawing: a
+            # component carrying a synthetic expansion contributes each
+            # authored physical designator, so a grouped row's qty is the
+            # number of parts a house buys rather than the number of symbols
+            # the board draws.
+            key = (footprint, comment, part_number or "", assembly.mpn or "")
+            grp = groups.setdefault(key, {
+                "refs": [], "comment": comment, "footprint": footprint,
+                "part_number": part_number, "mpn": assembly.mpn,
+            })
+            grp["refs"].append(physical.ref)
+
             # THE ANCHOR, NOT THE POSITION. Then Y NEGATED, X VERBATIM, and X
             # NOT mirrored on the bottom side (the reference exporter's default;
             # its opt-in bottom-X-negate flag is deliberately not matched).
@@ -531,7 +541,7 @@ def _walk(board, profile: HouseProfile):
                 # The ORIENTATION KEY, carried, not applied: the correction is
                 # a separate step over the finished rows (see `emit`), so this
                 # walk keeps owning exactly one piece of arithmetic.
-                footprint_ref=assembly.footprint_ref,
+                footprint_ref=drawing,
                 house_part=house_number,
             ))
 
@@ -599,6 +609,7 @@ def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
     # anchor off the part is a coordinate defect, and there is nothing to be
     # gained from rendering rows around one.
     assembly_gates.check_anchor_on_lands(board)
+    assembly_gates.check_child_lands(board)
     bom, cpl, excluded, placed = _walk(board, profile)
     # THE ORIENTATION CORRECTION, and it is deliberately its OWN step over the
     # finished rows rather than a term inside _walk's arithmetic. _walk owns

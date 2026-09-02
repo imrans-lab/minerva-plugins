@@ -14,18 +14,28 @@ bounding box of the part's body, in footprint-local millimetres, put through the
 component's own placement transform. Deliberately NOT an area centroid — a
 nozzle centres on the extent of what it picks up, and every basis is a box.
 
-AN EXPANSION CHILD MAY STATE ITS OWN ANCHOR, and needs to whenever the drawing
-spreads several parts across itself. A child carries NO geometry — the parent's
-footprint draws all of it — so with nothing authored every child inherits the
-one anchor measured off the parent's whole body. Right when the drawing is the
-part; wrong for the DevKit socket set, whose two 1x22 rows have their own
-centres at (-11.43, 26.67) and (+11.43, 26.67) while the parent's fab box
-centres at (0, 30.8485), between the rows and on neither — and wrong QUIETLY,
-because two anchors the correct distance apart clear the spacing gate.
-``assembly.placements[].anchor_mm`` is that answer, stated in the placement's
-own local frame and composed through the same child transform a measured anchor
-is. It records the basis :data:`resolved_board.ANCHOR_BASIS_AUTHORED`, so a
-reader is never told a figure a person wrote down was measured off a drawing.
+AN EXPANSION CHILD IS MEASURED OFF ITS OWN DRAWING WHEN IT NAMES ONE. A child
+carries NO copper — the parent's footprint draws all of it — so with nothing
+else said every child inherits the one anchor measured off the parent's whole
+body. Right when the drawing is the part; wrong for the DevKit socket set,
+whose two 1x22 rows have their own centres at (-11.43, 26.67) and
+(+11.43, 26.67) while the parent's fab box centres at (0, 30.8485), between the
+rows and on neither — and wrong QUIETLY, because two anchors the correct
+distance apart clear the spacing gate. A child that names the footprint it IS
+(``assembly.placements[].footprint``, the 1x22 strip) has its anchor measured
+off THAT drawing through the same basis ladder an ordinary component uses, in
+the child's own local frame, and composed through the child's transform: the
+strip's fab body centres at (0, 26.67), and the two children resolve onto
+their own strips with nothing written by hand. The child's own pad centres are
+composed through the same transform and carried as ``lands``, so the order
+gate can ask whether the named drawing really lies on the parent's copper.
+
+AN AUTHORED ``anchor_mm`` IS AN OVERRIDE ONLY: stated in the placement's own
+local frame, composed through the same child transform a measured anchor is,
+and taken ahead of any measurement — off the child's own drawing or the
+parent's. It records the basis :data:`resolved_board.ANCHOR_BASIS_AUTHORED`,
+so a reader is never told a figure a person wrote down was measured off a
+drawing.
 
 THE BASIS LADDER (:data:`resolved_board.ANCHOR_BASES` names the three MEASURED
 outcomes):
@@ -73,6 +83,8 @@ equivalence is a property of the pair and is proven where the pair meets, in
 
 from __future__ import annotations
 
+from typing import Mapping, Union
+
 from .assembly_spec import AssemblyPlacementSpec
 from .geometry import PlacementTransform
 from .refdes_anchor import fab_extent_from_definition, land_extent_from_definition
@@ -118,7 +130,8 @@ def footprint_anchor(footprint) -> tuple[tuple[float, float], str]:
 
 
 def physical_placements(component_ref: str, placement: Placement, assembly,
-                        footprint) -> tuple[PhysicalPlacement, ...]:
+                        footprint, child_footprints: Union[Mapping, None] = None,
+                        ) -> tuple[PhysicalPlacement, ...]:
     """Every part this component resolves to, anchored and composed.
 
     One entry under the component's own ref for an ordinary component; one per
@@ -126,10 +139,16 @@ def physical_placements(component_ref: str, placement: Placement, assembly,
     carrying the authored ref and the offset composed against this component's
     rotation and side.
 
-    The footprint is measured ONCE, outside the loop, because it is the parent's
-    drawing and every child that did not author an ``anchor_mm`` shares it.
+    ``child_footprints`` maps a placement ref to the built
+    ``FootprintDefinition`` of the drawing that placement named, for every
+    placement that named one — the compiler resolves them; this module never
+    reads the library. A child in that mapping is measured off its own drawing
+    and carries its own lands; every other placement is measured off the
+    parent's, which is measured ONCE, outside the loop, because they all share
+    it.
     """
     measured_local, measured_basis = footprint_anchor(footprint)
+    own = child_footprints or {}
     parent = PlacementTransform(position=placement.position,
                                 rotation_deg=placement.rotation_deg,
                                 side=placement.side)
@@ -139,11 +158,21 @@ def physical_placements(component_ref: str, placement: Placement, assembly,
         rotation = parent.angle(spec.rotation_deg)
         child = PlacementTransform(position=origin, rotation_deg=rotation,
                                    side=placement.side)
+        own_footprint = own.get(spec.ref)
+        if own_footprint is not None:
+            anchor_local, basis = footprint_anchor(own_footprint)
+            # The child's lands ride the SAME transform its anchor does, so the
+            # two cannot disagree about where the part is.
+            lands = tuple(child.point(pad.position) for pad in own_footprint.pads)
+        else:
+            anchor_local, basis = measured_local, measured_basis
+            lands = ()
         # AUTHORED WINS, tested against None rather than truthiness: an anchor
         # of (0, 0) says "this part's centre IS its own origin", which is a
         # different statement from not having answered.
         authored = spec.anchor_mm is not None
-        anchor_local = spec.anchor_mm if authored else measured_local
+        if authored:
+            anchor_local, basis = spec.anchor_mm, ANCHOR_BASIS_AUTHORED
         placements.append(PhysicalPlacement(
             ref=spec.ref,
             origin=origin,
@@ -154,6 +183,8 @@ def physical_placements(component_ref: str, placement: Placement, assembly,
             anchor=child.point(anchor_local),
             rotation_deg=rotation,
             side=placement.side,
-            anchor_basis=ANCHOR_BASIS_AUTHORED if authored else measured_basis,
+            anchor_basis=basis,
+            footprint_ref=spec.footprint if own_footprint is not None else None,
+            lands=lands,
         ))
     return tuple(placements)

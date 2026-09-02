@@ -4,8 +4,8 @@
 // component: whether it is populated at all, what part it is, which house
 // catalogue number stands for it, whether its lands get paste, and — for a
 // synthetic component that stands for several identical physical parts — the
-// designators those parts are actually placed under and, where the drawing's
-// own body centre is not each part's, where each part's centre sits.
+// designators those parts are actually placed under, the drawing each part
+// itself is, and, where nothing measures it, where each part's centre sits.
 //
 // # Two authored forms, one model
 //
@@ -110,6 +110,13 @@ type ComponentAssembly struct {
 // AssemblyPlacement is one physically placed instance of a component.
 type AssemblyPlacement struct {
 	Ref string `json:"ref" yaml:"ref"`
+	// Footprint is the library ref of the drawing THIS part is — its own land
+	// pattern (the 1x22 strip a socket-set row is bought as), as opposed to
+	// the parent drawing that carries all of the copper. Absent, the part is
+	// described by the parent's drawing. Carried as a string: resolving it is
+	// the compiler's job, and every part-level fact (orientation pair, body
+	// centre, BOM footprint) is read off it there.
+	Footprint string `json:"footprint,omitempty" yaml:"footprint,omitempty"`
 	// OffsetMM is measured in the PARENT COMPONENT's local frame, before the
 	// parent's own rotation and side are applied. A pointer so an absent key
 	// stays absent through both codecs rather than emitting a zero offset.
@@ -319,6 +326,9 @@ func (p *AssemblyPlacement) UnmarshalYAML(node *yaml.Node) error {
 	if err := n.Decode(&q); err != nil {
 		return wrapAssemblyErr(err)
 	}
+	if err := refuseBlankFootprint(yamlMappingKeys(n), q.Footprint); err != nil {
+		return err
+	}
 	*p = AssemblyPlacement(q)
 	return nil
 }
@@ -341,7 +351,35 @@ func (p *AssemblyPlacement) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(trimmed, &q); err != nil {
 		return wrapAssemblyErr(err)
 	}
+	if err := refuseBlankFootprint(jsonObjectKeys(raw), q.Footprint); err != nil {
+		return err
+	}
 	*p = AssemblyPlacement(q)
+	return nil
+}
+
+// refuseBlankFootprint keeps a placement's `footprint` from vanishing between
+// the two surfaces. The worker strips the value and refuses one that is blank
+// once stripped; this side refuses the same input but STORES the authored
+// string verbatim, because a codec that rewrites a field on load breaks the
+// round-trip fidelity every other field here has. Footprint is a plain string
+// with omitempty, so a blank value is indistinguishable from an absent key
+// once decoded — and absent means "described by the parent's drawing", which
+// the compiler accepts. If this codec quietly re-serialized a blank away, a
+// round trip through the editor would turn the worker's refusal into a silent
+// change of which drawing the part is. The raw key list is the only place the
+// two cases can still be told apart, so the check lives here rather than in
+// Validate.
+func refuseBlankFootprint(keys []string, footprint string) error {
+	if strings.TrimSpace(footprint) != "" {
+		return nil
+	}
+	for _, k := range keys {
+		if k == "footprint" {
+			return fmt.Errorf(assemblyErrCode + ": assembly placement footprint is blank — " +
+				"name the drawing the part is, or omit the key to describe it by the parent's")
+		}
+	}
 	return nil
 }
 

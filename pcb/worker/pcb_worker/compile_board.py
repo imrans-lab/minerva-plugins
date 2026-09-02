@@ -2702,6 +2702,40 @@ def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_part
     return derive_id(entity, board_id, *(str(part) for part in ordinal_parts))
 
 
+def _child_footprints(assembly, chain, ref: str, comp_ref: SourceRef, diags):
+    """The built definition of every drawing this component's expansion
+    children NAMED (``assembly.placements[].footprint``), keyed by placement
+    ref — or ``None`` once a refusal has been recorded.
+
+    A child's drawing is about the PART, not the copper: it is measured for the
+    part's body centre and lands, keyed into the orientation ledger, and never
+    fabricated. So it is resolved through the same layer chain the parent is,
+    with the same ``footprint_unresolved`` refusal, but is neither adjudicated
+    against the fab policy nor pinned by the board's library lock — both of
+    those protect copper this drawing does not draw. The library IS consulted
+    even when the parent carried inline pads, because a child has no inline
+    geometry to consult instead.
+    """
+    out = {}
+    for spec in getattr(assembly, "placements", ()):
+        if spec.footprint is None:
+            continue
+        try:
+            supplied = resolve_footprint_layered(spec.footprint, chain=chain)
+        except FootprintLookupError as exc:
+            diags.error("footprint_unresolved",
+                        f"component {ref!r} placement {spec.ref!r}: {exc}", comp_ref)
+            return None
+        entry = supplied.entry if isinstance(supplied.entry, dict) else {}
+        out[spec.ref] = FootprintDefinition.from_kicad_parsed(
+            supplied.parsed,
+            provenance=Provenance(source_id=spec.footprint,
+                                  sha256=entry.get("sha256"),
+                                  license=entry.get("license"),
+                                  library_layer=supplied.layer))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Top-level compile.
 # ---------------------------------------------------------------------------
@@ -3122,6 +3156,12 @@ def compile_board(
         except assembly_spec.AssemblySpecError as exc:
             diags.error("invalid_component_assembly", str(exc), comp_ref)
             continue
+        # The drawings the expansion children say they ARE, resolved beside
+        # the parent's so a child that names a drawing we do not ship refuses
+        # here, by name, rather than as a part the order path cannot place.
+        child_footprints = _child_footprints(assembly, chain, ref, comp_ref, diags)
+        if child_footprints is None:
+            continue
 
         placement = Placement(
             position=(float(comp["x_mm"]), float(comp["y_mm"])),
@@ -3155,7 +3195,7 @@ def compile_board(
             # the CPL, the BOM's quantities and a preview cannot each compose
             # that transform and disagree (assembly_anchor).
             physical_placements=assembly_anchor.physical_placements(
-                ref, placement, assembly, clean),
+                ref, placement, assembly, clean, child_footprints),
         ))
         for pad in clean.pads:
             resolved_pins.add((ref, pad.number))

@@ -55,6 +55,15 @@ in the placement's own local frame and read here verbatim, is that answer;
 absent, the parent-measured anchor still applies and nothing changes. It is
 carried, not composed, for the same reason the offsets are.
 
+A PLACEMENT MAY NAME THE FOOTPRINT IT IS. A child draws no copper, so on its
+own it is a ref and a transform with no identity; ``footprint`` gives it one:
+the library ref of the child's OWN land pattern (the 1x22 strip a socket-set
+row is bought as). It is read here as a string and nothing more — resolving it
+against the library is the compiler's job — and every consumer that asks a
+PART question (its orientation pair, its body centre, its BOM footprint) reads
+this drawing for a child that names one, while the copper stays the parent's.
+Absent, the child is described by the parent's drawing exactly as before.
+
 PLACEMENTS are carried, not composed. ``placements`` expands one authored
 component into the several identical physical parts it stands for, each under
 an authored, stable ref. This module validates the shape and hands the offsets
@@ -97,7 +106,8 @@ IDENTITY_FIELDS = ("manufacturer", "mpn", "package", "comment")
 _BLOCK_KEYS = frozenset(("populate", "paste", "house_parts", "placements")
                         + IDENTITY_FIELDS)
 
-_PLACEMENT_KEYS = frozenset(("ref", "offset_mm", "rotation_deg", "anchor_mm"))
+_PLACEMENT_KEYS = frozenset(("ref", "footprint", "offset_mm", "rotation_deg",
+                             "anchor_mm"))
 
 
 class AssemblySpecError(ValueError):
@@ -116,13 +126,18 @@ class AssemblyPlacementSpec:
 
     ``anchor_mm`` is this part's own body centre, measured from THIS placement's
     origin, and ``None`` means "not authored" — the anchor pass then measures
-    one off the parent footprint. See the module docstring's PER-PLACEMENT
-    ANCHOR section."""
+    one off the child's own footprint when it names one, else off the parent's.
+    See the module docstring's PER-PLACEMENT ANCHOR section.
+
+    ``footprint`` is the library ref of this part's OWN drawing, or ``None``
+    when the placement is described by the parent's (the module docstring's A
+    PLACEMENT MAY NAME THE FOOTPRINT IT IS)."""
 
     ref: str
     offset_mm: tuple[float, float] | None
     rotation_deg: float
     anchor_mm: tuple[float, float] | None = None
+    footprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -254,8 +269,19 @@ def _placements(raw, ref: str) -> tuple[AssemblyPlacementSpec, ...]:
         raw_rotation = item.get("rotation_deg")
         rotation = 0.0 if raw_rotation is None else _finite(
             raw_rotation, f"{where}.rotation_deg", ref)
-        out.append(AssemblyPlacementSpec(ref=placement_ref, offset_mm=offset,
-                                         rotation_deg=rotation, anchor_mm=anchor))
+        # Present-and-blank is refused rather than read as absent: a blank ref
+        # names no drawing, and falling through to the parent's would quietly
+        # gate this part's orientation on a drawing the author tried to leave.
+        footprint = item.get("footprint")
+        if footprint is not None and (not isinstance(footprint, str)
+                                      or not footprint.strip()):
+            raise AssemblySpecError(
+                f"component {ref!r} assembly.{where}.footprint must be a non-empty "
+                f"library footprint ref when present, got {footprint!r}")
+        out.append(AssemblyPlacementSpec(
+            ref=placement_ref, offset_mm=offset, rotation_deg=rotation,
+            anchor_mm=anchor,
+            footprint=footprint.strip() if footprint is not None else None))
     return tuple(out)
 
 

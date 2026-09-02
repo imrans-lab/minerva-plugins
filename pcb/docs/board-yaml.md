@@ -493,7 +493,10 @@ components:
       placements:                        # one drawn part, two soldered parts
         - {ref: J1S_A, offset_mm: {x: 0, y: 0}, rotation_deg: 0}
         - {ref: J1S_B, offset_mm: {x: 22.86, y: 0}, rotation_deg: 0}
-        # ...and, where the drawing's own centre is not each part's centre:
+        # ...and, where each part is its own library drawing, say which:
+        #   {ref: J1S_A, footprint: "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical",
+        #    offset_mm: {x: 0, y: 0}}
+        # ...or, where nothing measures it, state the part's centre by hand:
         #   {ref: J1S_A, offset_mm: {x: -11.43, y: 0}, anchor_mm: {x: 0, y: 26.67}}
 ```
 
@@ -505,7 +508,7 @@ components:
 | `comment` | the BOM's Comment column. Absent, it falls back to the component's `value`. |
 | `house_parts` | a mapping of house id to that house's own catalogue number (`{jlcpcb: C84376}`). Keyed, not a bare `lcsc` scalar, so a second house is a new entry rather than a new field and a board always states **whose** number it is carrying. The BOM's part-number column prints the entry for the **selected** house; absent, it falls back to `mpn`. |
 | `paste` | `auto` (the default) leaves the footprint's own layer list to decide; `exclude` drops this part's stencil apertures; `include` declines to drop them. See "Solder paste is authored, never invented" below. |
-| `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. Each entry takes `ref`, `offset_mm`, `rotation_deg` and `anchor_mm`. |
+| `placements` | the synthetic expansion — see below. Absent is the ordinary case: one placement, at the component's own position, under its own ref. Each entry takes `ref`, `footprint`, `offset_mm`, `rotation_deg` and `anchor_mm`. |
 
 The three column fields resolve to the BOM's cells with exactly one fallback
 each, applied once at emit time so no consumer re-decides what a column means:
@@ -594,9 +597,12 @@ the Go codec's `Validate` refuses a board where two physical parts would share
 one designator (`duplicate_assembly_designator`). That check guards the codec
 boundary, not the export lane — see "Which surface refuses a duplicate
 designator" for the three codes and where each one bites. `offset_mm` is measured in the parent
-component's own frame, before the parent's rotation and side are applied, and
-`anchor_mm` states that part's own body centre in its placement's frame (see
-"A placement may state its own anchor" under "The assembly anchor").
+component's own frame, before the parent's rotation and side are applied;
+`footprint` names the library drawing that part **is** — its own land pattern,
+as opposed to the parent drawing that carries the copper — and `anchor_mm`
+states that part's own body centre in its placement's frame (see "A placement
+may name the drawing it is" and "A placement may state its own anchor" under
+"The assembly anchor").
 
 ### Solder paste is authored, never invented
 
@@ -634,6 +640,7 @@ compiles and fabricates while carrying any of them.
 | `assembly_reference_set_mismatch` | the BOM and the CPL name different designators after expansion. |
 | `assembly_row_ref_limit` | a grouped BOM row carries more designators than the profile's `max_refs_per_row`, where a house would silently truncate the tail. |
 | `assembly_placements_too_close` | two designators on one side sit closer than the profile's `min_designator_separation_mm` — usually a synthetic expansion whose `offset_mm` is missing or zero. |
+| `assembly_child_lands_mismatch` | an expansion child names its `footprint` and that drawing, placed at the child's composed `offset_mm` and `rotation_deg`, does not lie on the parent's pads: a land of it sits more than the land tolerance (0.30 mm, the same distance at which the orientation ledger calls two drawings the same land pattern) from every pad the parent draws; two children claim one pad; or — when every child names a drawing — pads of the parent are left over, which is what a strip **shorter** than the parent's row looks like. The child draws no copper, so this comparison is the only thing that ties its identity and its transform to the board; it is checked on both sides and it is exact, not the box approximation the anchor gate uses. There is no way yet to mark a parent pad as belonging to no child (a shield or mechanical land): a parent that draws one cannot have every child name a drawing. |
 | `assembly_anchor_off_lands` | a placement's AUTHORED `anchor_mm` resolves clear of the copper its part is soldered to. `anchor_mm` is stated in the placement's own frame and is turned by the placement's `rotation_deg`, so a child that gains a rotation swings its anchor while every piece of copper stays put — invisible to DRC, connectivity and board check, and visible only in the CPL. Scoped to AUTHORED anchors, and only where the placement's origin is itself on the parent's lands: a MEASURED anchor is the centre of a box taken off the same drawing the pads come from, and a body legitimately overhangs its lands (a side-entry JST housing sits clear past its tabs). |
 | `assembly_empty_expansion` | `placements` is authored and names nothing, which resolves back to a single part under the component's own ref. |
 | `assembly_paste_undecided` | a not-populated part's lands take paste and `paste` is still `auto`. |
@@ -821,29 +828,69 @@ composed rotation and its own CPL row. On the bottom side a per-placement
 `rotation_deg` **subtracts** from the parent's rather than adding, because the
 side mirror turns a rotation into its inverse.
 
-#### A placement may state its own anchor (`anchor_mm`)
+#### A placement may name the drawing it is (`footprint`)
 
-An expansion child has **no geometry of its own** — the parent's footprint draws
-all of it, and the child is a ref plus a transform. So with nothing authored,
-the one anchor measured off the parent's whole body is handed to every child.
-That is right when the drawing **is** the part, and wrong the moment one drawing
-spreads several parts across itself.
+An expansion child draws **no copper of its own** — the parent's footprint draws
+all of it, and the child is a ref plus a transform. So with nothing else said, a
+child has no identity: its anchor is the one measured off the parent's whole
+body, and its orientation is gated on the **parent's** footprint. That is right
+when the drawing **is** the part, and wrong the moment one drawing spreads
+several parts across itself.
 
 The DevKit socket set is the worked case. It draws one `F.Fab` body box over
 both strips — `(-12.93, -1.1)..(12.93, 62.797)`, centring at `(0, 30.8485)` —
 which is the module that plugs in, not either soldered part. Its two 22-pad rows
 sit at x `-11.43` and `+11.43`, each spanning y `0..53.34`, so each **strip**
 centres at `(±11.43, 26.67)`. The inherited anchor lies between the two strips
-and on neither, 4.1785 mm north of both.
+and on neither, 4.1785 mm north of both. And the orientation pair the CPL row
+asks the ledger for is (the 44-pad two-row drawing, jlcpcb, a 22-pad strip),
+which is not a measurable comparison: the ledger can never learn it, and the
+order refuses forever — or the vendor's convention gets smuggled into a child's
+`rotation_deg`, a design field, where it rotates a hand-written anchor off the
+part and double-applies the day the ledger does learn the pair.
 
-**Nothing in the order path catches that.** The only gate that looks at where
-parts are asks whether two designators are too *close*
-(`assembly_placements_too_close`); two anchors a correct 22.86 mm apart clear it
-whatever point they are both measured from. Both files build, and no advisory
-fires — the anchors *were* measured, off the wrong body. The first thing that
-notices is a person reading a placement preview.
+`footprint` is the answer. It names the library drawing the child **is**:
 
-`anchor_mm` is the answer:
+```yaml
+placements:
+  - {ref: U1S_A, footprint: "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H", offset_mm: {x: -11.43, y: 0}}
+  - {ref: U1S_B, footprint: "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H", offset_mm: {x: 11.43, y: 0}}
+```
+
+A child that names its drawing is a **part with that drawing** for everything
+that is about the part rather than the copper:
+
+* its **anchor is measured** off that drawing through the same basis ladder an
+  ordinary component uses, in the child's own frame, and composed through the
+  child's transform. The strip's fab body centres at `(0, 26.67)`, so both
+  children above resolve onto their own strips with nothing written by hand;
+* its CPL row is keyed into the orientation ledger on **(that drawing, house,
+  catalogue number)** — a pair that can be measured, and for the strip and
+  `C41376161` has been. The vendor's convention is then applied by the ledger
+  on export, once, and `rotation_deg` stays what it is: design;
+* its BOM Footprint column falls back to that drawing, not the parent's;
+* the parent still draws every land. The child's drawing is resolved through
+  the same library chain but is never fabricated, adjudicated or lock-pinned —
+  those protect copper it does not draw. Naming a drawing the library does not
+  ship refuses at compile (`footprint_unresolved`, naming the placement); a
+  blank name refuses in the reader rather than falling through to the parent's.
+
+**Naming a drawing is checked, not trusted.** The child's own pads, placed at
+its composed offset and rotation, must lie on the parent's pads within the land
+tolerance, on either side of the board (`assembly_child_lands_mismatch`). That
+one comparison is the oracle that the child names the right drawing *and* that
+its offset and rotation are right: a quarter turn, a one-pitch shift, a strip of
+the wrong length, or two children on one strip all put a land on bare board or
+leave a pad unaccounted for.
+
+Absent, the child is described by the parent's drawing exactly as before.
+
+#### A placement may state its own anchor (`anchor_mm`)
+
+`anchor_mm` is an **override**, taken ahead of any measurement — off the
+child's own drawing or the parent's. It exists for the child that names no
+drawing but still is not centred where the parent's body is, and for the rare
+part whose drawing measures wrong:
 
 ```yaml
 placements:
@@ -855,15 +902,14 @@ placements:
   rotation and side — the same frame `offset_mm`'s result is in — and it is then
   composed through the same transform that places the copper. It is not a board
   coordinate.
-* **Absent means absent**: the parent-measured anchor still applies and a board
-  that does not author one is unchanged. An authored `{x: 0, y: 0}` is a real
-  answer ("this part's centre is its own origin"), not an absence, and both
-  codecs round-trip it rather than dropping the key.
+* **Absent means absent**: the measured anchor still applies and a board that
+  does not author one is unchanged. An authored `{x: 0, y: 0}` is a real answer
+  ("this part's centre is its own origin"), not an absence, and both codecs
+  round-trip it rather than dropping the key.
 * Both numbers above come off the **purchased part**: `11.43` is half the
   22.86 mm row spacing the footprint states in its own `descr`, and `26.67` is
-  half a 1x22 strip's pin span (21 × 2.54 / 2). That is the point of the key —
-  a compensating offset that folded in the `4.1785` gap would be derivable only
-  by opening the `.kicad_mod`.
+  half a 1x22 strip's pin span (21 × 2.54 / 2) — the very number a child that
+  names the strip gets measured for free.
 * A placement that authors one records the `authored` basis, so no consumer is
   told the number was measured.
 * **It rides the child's transform**, so a placement that also states a

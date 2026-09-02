@@ -227,6 +227,23 @@
 		},
 		{
 			"angle_decided": true,
+			"detail": "our drawing is the vendor's rotated 270 deg counter-clockwise; 22 shared pads agree to 0.000 mm RMS (worst 0.000 mm) at that angle, next-best 0 deg at 22.789 mm",
+			"footprint": "Connector_PinSocket_2.54mm:PinSocket_1x22_P2.54mm_Vertical_HC-PM254-8.5H",
+			"footprint_sha256": "c0a1bfcfe24f4a30f6c9dad27ef8a0dadbe20dd5e6a5e32caf9b0e8c61f5be4b",
+			"house": "jlcpcb",
+			"lands_agree": true,
+			"matched_pad_count": 22,
+			"max_pad_error_mm": 0.0,
+			"offset_deg": 270,
+			"part": "C41376161",
+			"residual_mm": 0.0,
+			"runner_up_deg": 0,
+			"runner_up_mm": 22.789335,
+			"vendor_sha256": "c11a22e5b0a554540357437b565772d896f714ad088257c6cf230153aafd7d0b",
+			"verdict": "rotated"
+		},
+		{
+			"angle_decided": true,
 			"detail": "our drawing matches the vendor's orientation; 2 shared pads agree to 0.079 mm RMS (worst 0.079 mm)",
 			"footprint": "Fuse:Fuse_1206_3216Metric",
 			"footprint_sha256": "04cc22c125b2ba35ad77430d27889a64d84a493743f03f6cf463c44bf27e0174",

@@ -27,7 +27,7 @@ expansion child's rotation in ``geometry.PlacementTransform.angle`` and in
 
 THE TRAP THIS FILE IS BUILT AROUND. An inverted sign is INVISIBLE on every part
 whose offset is 0 or 180, because ``R + 180`` and ``R - 180`` are the same
-number modulo 360 — and seventeen of the nineteen pairs the shipped ledger
+number modulo 360 — and seventeen of the twenty pairs the shipped ledger
 has measured are exactly 0 or 180. A suite assembled only out of those passes with
 the correction SUBTRACTING where it should add, or adding where it should
 subtract, and ships every quarter-turn part a quarter turn out.
@@ -38,7 +38,7 @@ under test; it agrees with whatever the module does. So every side-sensitive
 number below is a HAND-DERIVED LITERAL, with the numbers the mis-compositions
 would have produced written down beside it.
 
-So the fixture is built around the two measured 270s — ``TSOT-23-6``/``C780769``
+So the fixture is built around two of the measured 270s — ``TSOT-23-6``/``C780769``
 and ``VQFN-16-1EP_3x3mm``/``C910544`` — and two tests assert their emitted
 numbers against the arithmetic AND against the value the opposite sign would
 have produced. :func:`test_the_ledger_still_states_the_two_quarter_turns_this_suite_rests_on`
@@ -317,7 +317,7 @@ def test_a_flat_offset_is_the_one_case_where_the_two_sides_agree():
 
     At an offset of 0 both sides emit the placed angle, and at 180 both emit
     the same number because ``+180`` and ``-180`` are congruent mod 360.
-    Seventeen of the nineteen measured pairs are exactly 0 or 180, so a corpus
+    Seventeen of the twenty measured pairs are exactly 0 or 180, so a corpus
     built only out of them proves nothing about the side at all."""
     for offset in (0, 180):
         assert (aor.corrected_rotation(30, offset, aor.SIDE_TOP)
