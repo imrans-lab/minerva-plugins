@@ -187,6 +187,20 @@ func initWorker() {
 	// KNOWS the plugin root, so it states it; the worker's path constants
 	// honor this env override before falling back to the source-tree layout.
 	w.ExtraEnv = []string{"MINERVA_PCB_ROOT=" + pluginRoot}
+	// Same one-resolver rule for the regenerable-data cache: Go resolves it
+	// (sharedruntime.CacheDir hangs it off the SAME per-user data dir the
+	// extracted Python runtime already lives in) and states it. Python has no
+	// stdlib equivalent, so an "independent" Python resolution would mean
+	// platformdirs or hand-rolled per-OS logic — two resolvers that eventually
+	// disagree on somebody's machine. The worker reads this variable or caches
+	// nothing; it never guesses. Absent variable == no cache available, which
+	// is why an EnsureCacheDir failure omits it rather than passing a path
+	// nothing can be written to.
+	if cacheDir, cerr := sharedruntime.EnsureCacheDir(serverName); cerr != nil {
+		log.Printf("pcb-plugin: cache dir unavailable (%v) — the worker will run without caching", cerr)
+	} else {
+		w.ExtraEnv = append(w.ExtraEnv, "MINERVA_PCB_CACHE_DIR="+cacheDir)
+	}
 	w.StderrCallback = func(line string) {
 		if isCriticalStderrLine(line) {
 			emitHostNotify("error", "PCB worker: "+line, nil)
