@@ -1046,6 +1046,35 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
         return None
 
 
+#: The default for each ordered-appearance field, applied to the IR only.
+_APPEARANCE_DEFAULTS: dict = {
+    "mask_colour": DEFAULT_MASK_COLOUR,
+    "finish": DEFAULT_FINISH,
+    "thickness_mm": DEFAULT_THICKNESS_MM,
+}
+
+
+def _stated_appearance(block: dict, field: str):
+    """One ordered-appearance value: what the board said, or the default when
+    the board said NOTHING.
+
+    ABSENCE IS THE ONLY THING THAT TAKES A DEFAULT, and the test is ``is None``
+    rather than falsiness. ``value or default`` reads the same on the happy path
+    and is a different rule: ``0`` and ``""`` are falsy, so a stated
+    zero thickness or a blank finish would be silently replaced by 1.6 mm and
+    HASL — an author's stated value swapped for one they never chose, with
+    nothing downstream able to tell a substitution happened.
+
+    Those two values are refused at the shared schema boundary
+    (:func:`board_schema.fabrication_refusal`, and Go's ``validateFabrication``),
+    and that refusal stays. This derivation still does not depend on it: a rule
+    that is only safe because of a check somewhere else stops being safe the day
+    that check moves, and this one is now correct on its own.
+    """
+    value = block.get(field)
+    return _APPEARANCE_DEFAULTS[field] if value is None else value
+
+
 def _build_fabrication(board: dict, profile: LoadedRuleProfile,
                        diags: _Diagnostics) -> Union[ResolvedFabrication, None]:
     """Resolve the board's ORDERED APPEARANCE and check it against the menu the
@@ -1066,14 +1095,12 @@ def _build_fabrication(board: dict, profile: LoadedRuleProfile,
     The block's SHAPE is already settled: the shared-boundary gate at the top of
     ``compile_board`` runs ``fabrication_refusal`` through ``validate_board_v2``
     and returns on any violation, so everything reached here is a mapping whose
-    keys and value types are known good.
+    keys and value types are known good. That gate is kept AND this derivation
+    does not lean on it — see :func:`_stated_appearance`.
     """
     block = board.get("fabrication") or {}
-    chosen = {
-        "mask_colour": block.get("mask_colour") or DEFAULT_MASK_COLOUR,
-        "finish": block.get("finish") or DEFAULT_FINISH,
-        "thickness_mm": block.get("thickness_mm") or DEFAULT_THICKNESS_MM,
-    }
+    chosen = {field: _stated_appearance(block, field)
+              for field in FABRICATION_KEYS}
     bad = False
     for field in FABRICATION_KEYS:
         refusal = profile.appearance_refusal(field, chosen[field])

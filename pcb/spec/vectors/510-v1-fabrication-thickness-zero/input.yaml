@@ -1,0 +1,11 @@
+# A zero-thickness board is not a board. This is also the vector that pins the
+# SERIALIZATION half of the rule: with a value-typed omitempty field a stated 0
+# is indistinguishable from an absent key and vanishes on the way back out, so a
+# boundary that only checked at read time would turn a value it must refuse into
+# an absence it must accept.
+version: 1
+name: NoThickness
+width_mm: 20
+height_mm: 20
+fabrication:
+  thickness_mm: 0

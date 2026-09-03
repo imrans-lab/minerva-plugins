@@ -34,7 +34,10 @@ import hashlib
 import json
 import math
 import re
+import threading
+import time
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -97,7 +100,13 @@ def test_every_committed_payload_parses_into_the_facts_the_index_states():
     for part in PARTS:
         facts = _facts(part)
         assert not facts.absent, f"{part}: {facts}"
-        assert facts.part == part
+        # THE PAYLOAD'S OWN WORD FOR WHAT IT IS. Parsed with no requested key,
+        # so the catalogue number can only have come from the document. Asked
+        # of `_facts(part)` this assertion is worth nothing: the value it
+        # compares against is the one the caller injected, and it would hold
+        # over a response for an entirely different component.
+        own = pm.parse_component_payload(json.loads(_payload_bytes(part)))
+        assert own.part == part, f"{part}: the payload calls itself {own.part!r}"
         assert facts.package == INDEX[part]["package"], part
         assert facts.title == INDEX[part]["title"], part
         assert facts.pads, f"{part}: no pads"
@@ -190,6 +199,36 @@ def test_a_part_the_supplier_does_not_have_is_an_absence_not_an_error():
         assert answer.reason in pm.REASONS, payload
 
 
+def test_a_payload_that_names_another_part_is_refused_not_relabelled():
+    """MUTATION THIS CATCHES — and the one the corpus test above cannot: the
+    parser stamping the REQUESTED catalogue number onto whatever came back. A
+    substituted, misrouted or mis-cached upstream response then enters the cache
+    and every consumer under the name of the part that was asked for, carrying
+    another component's land pattern and another component's 3D model. Both are
+    authoritative-looking and both are wrong.
+
+    ORACLE: two REAL payloads from the corpus, each of which states its own
+    ``result.lcsc.number``. Asking for one and being handed the other must be an
+    absence naming both, and a payload that names ITSELF must still parse — the
+    rule is about disagreement, not about the field being present.
+    """
+    payload = json.loads(_payload_bytes("C910544"))
+
+    answer = pm.parse_component_payload(payload, "C15127")
+    assert answer.absent and answer.reason == pm.REASON_MISMATCH
+    assert "C910544" in answer.detail and "C15127" in answer.detail
+
+    assert not pm.parse_component_payload(payload, "C910544").absent
+    # Case is not a disagreement: it is the same catalogue number.
+    assert not pm.parse_component_payload(payload, "c910544").absent
+
+    # A payload that states no number of its own says nothing to disagree with,
+    # so the requested key still names the facts.
+    quiet = json.loads(_payload_bytes("C910544"))
+    quiet["result"].pop("lcsc", None)
+    assert pm.parse_component_payload(quiet, "C15127").part == "C15127"
+
+
 # ---------------------------------------------------------------------------
 # The client: caching, and absence with no network
 # ---------------------------------------------------------------------------
@@ -261,6 +300,72 @@ def test_a_cached_part_resolves_with_the_network_refused(offline, tmp_path):
     _seed_components_cache(tmp_path, offline, part,
                            url=f"{DEAD}{part}/components?version=0.0.0.0")
     assert _fresh().facts(part).absent
+
+
+def test_a_corrupt_sidecar_is_a_miss_and_never_an_exception(offline, tmp_path):
+    """MUTATION THIS CATCHES: reaching for a key on a sidecar that parsed into
+    something that is not a mapping. ``[]`` and ``null`` are both VALID JSON and
+    both are what an interrupted write can leave on disk, and either one turns
+    "never raises" — the promise this whole module is built on, because one bad
+    part must not stop an export of forty — into an AttributeError inside a
+    thread pool.
+
+    ORACLE: behaviour, not the exception type. Every shape below must come back
+    as a stated absence with the network refused, which is the same answer an
+    empty cache gives; a raise would end the test rather than fail it.
+    """
+    part = "C910544"
+    home = _seed_components_cache(tmp_path, offline, part)
+    sidecar = home / f"{part}.json.meta.json"
+
+    for corrupt in ("[]", "null", '"a string"', "3", "{", ""):
+        sidecar.write_text(corrupt, encoding="utf-8")
+        client = pm.VendorPartClient(api_base=DEAD, model_base=DEAD, timeout=2.0)
+        answer = client.facts(part)
+        assert answer.absent, (corrupt, answer)
+        assert answer.reason == pm.REASON_NO_NETWORK, corrupt
+
+
+def test_one_part_asked_for_at_once_by_many_threads_is_fetched_once(tmp_path,
+                                                                    monkeypatch):
+    """MUTATION THIS CATCHES: a memo consulted before the fetch and written
+    after it. That is "at most once" in sequence and no bound at all under
+    concurrency — every thread finds the memo empty and issues its own request,
+    which is exactly what ``facts_for`` does on a board whose placements share a
+    catalogue number.
+
+    ORACLE: a counted transport. The fetch is replaced with one that records
+    every call and sleeps long enough for the other threads to arrive, so a
+    client without single-flight is caught by the COUNT rather than by luck.
+    """
+    _unreachable(monkeypatch)
+    monkeypatch.setenv(cache_dir.ENV_VAR, str(tmp_path / "cache"))
+    calls: list[str] = []
+    lock = threading.Lock()
+
+    def counted(url, *, user_agent, timeout):
+        with lock:
+            calls.append(url)
+        time.sleep(0.05)               # long enough for the others to pile up
+        return _payload_bytes("C910544")
+
+    monkeypatch.setattr(pm, "_http_get", counted)
+    client = pm.VendorPartClient(max_workers=8)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(lambda _: client.facts("C910544"), range(8)))
+
+    assert len(calls) == 1, f"{len(calls)} threads fetched the same part"
+    assert all(a is answers[0] for a in answers)
+    assert not answers[0].absent
+
+    # And the entry it wrote is complete: body, sidecar, and no leftover
+    # temporary file from the write-then-rename.
+    home = tmp_path / "cache" / pm.CACHE_TENANT / "components"
+    assert sorted(p.name for p in home.iterdir()) == [
+        "C910544.json", "C910544.json.meta.json"]
+    assert hashlib.sha256((home / "C910544.json").read_bytes()).hexdigest() == \
+        json.loads((home / "C910544.json.meta.json").read_text())["sha256"]
 
 
 def test_with_no_network_every_part_reports_absent_and_nothing_raises(offline):

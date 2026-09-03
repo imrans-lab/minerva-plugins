@@ -1,0 +1,12 @@
+# A finish key with nothing in it. NOT the same document as one that omits the
+# key: an absent field takes the worker's default, while a blank one is an
+# author who believes they chose a finish and named none. Both boundaries must
+# refuse it, which is why the Go struct holds these by POINTER — a plain string
+# cannot tell the two documents apart.
+version: 1
+name: BlankFinish
+width_mm: 20
+height_mm: 20
+fabrication:
+  mask_colour: black
+  finish: ""

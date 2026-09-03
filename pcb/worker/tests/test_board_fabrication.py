@@ -230,3 +230,45 @@ def test_a_malformed_thickness_is_refused_rather_than_defaulted():
     assert isinstance(result, ResolutionFailure)
     assert [d.code for d in result.diagnostics
             if d.severity.value == "error"] == ["invalid_board_structure"]
+
+
+def test_a_stated_value_is_used_as_stated_and_only_absence_takes_a_default():
+    """MUTATION THIS CATCHES: `block.get(field) or DEFAULT`. It reads correctly
+    on every board anyone has written and is a different rule from the one the
+    docs state: `0` and `""` are falsy, so a stated zero thickness would compile
+    as 1.6 mm and a blank finish as HASL — the author's value replaced by one
+    they never chose, with nothing downstream able to see that it happened.
+
+    Both of those documents ARE refused at the shared schema boundary, and that
+    refusal stays. This test deliberately goes AROUND it, calling the derivation
+    directly, because the point is that the derivation is correct on its own: a
+    rule that is only safe because of a check somewhere else stops being safe
+    the day that check moves.
+
+    ORACLE: the defaults the module publishes. A field the board did not mention
+    takes its default; a field it did mention keeps what it said, whatever the
+    value's truthiness.
+    """
+    from pcb_worker.board_schema import (DEFAULT_FINISH, DEFAULT_MASK_COLOUR,
+                                         DEFAULT_THICKNESS_MM)
+    from pcb_worker.compile_board import _stated_appearance
+
+    # Absent, and explicitly null — the two ways a board says nothing.
+    for block in ({}, {"mask_colour": None, "finish": None, "thickness_mm": None}):
+        assert _stated_appearance(block, "mask_colour") == DEFAULT_MASK_COLOUR
+        assert _stated_appearance(block, "finish") == DEFAULT_FINISH
+        assert _stated_appearance(block, "thickness_mm") == DEFAULT_THICKNESS_MM
+
+    # Stated, and falsy. Each of these must come back as it was written.
+    stated = {"mask_colour": "", "finish": "", "thickness_mm": 0}
+    for field, value in stated.items():
+        assert _stated_appearance(stated, field) == value, field
+    assert _stated_appearance(stated, "thickness_mm") != DEFAULT_THICKNESS_MM
+
+    # And the boundary that refuses those documents is still there, on the
+    # compile path a board actually travels.
+    for block in ({"finish": ""}, {"thickness_mm": 0}, {"mask_colour": "  "}):
+        result = compile_board(_board(**block))
+        assert isinstance(result, ResolutionFailure), block
+        assert [d.code for d in result.diagnostics
+                if d.severity.value == "error"] == ["invalid_board_structure"], block

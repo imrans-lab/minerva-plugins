@@ -23,6 +23,8 @@ this.
 
 from __future__ import annotations
 
+import math
+
 from pcb_worker.wavefront_obj import parse_obj
 
 #: A 2.0 x 1.3 x 0.6 box in the vendor's dialect. Six quad faces, so the fan
@@ -117,3 +119,60 @@ def test_relative_vertex_indices_resolve_against_the_running_count():
     move geometry rather than fail."""
     mesh = parse_obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3// -2// -1//\n")
     assert mesh.triangles == ((0, 1, 2),)
+
+
+def test_a_non_finite_coordinate_never_reaches_the_mesh_or_its_bounds():
+    """MUTATION THIS CATCHES: ``float("nan")`` and ``float("inf")`` parse, so a
+    reader that only guards against ``ValueError`` lets them straight through.
+    One of them poisons every bounding box computed from the mesh — a NaN makes
+    min/max return whichever value it was compared against first, an inf makes
+    the part the size of the scene — and any file written from it, and it does
+    that while the mesh looks entirely well formed.
+
+    ORACLE: the box's own arithmetic. A model with a poisoned vertex must
+    measure exactly what the CLEAN corners measure, and the poisoned corner's
+    faces must be gone rather than drawn to a substituted position.
+    """
+    clean = parse_obj("v 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\nf 1// 2// 3// 4//\n")
+    assert clean.bounds_mm() == ((0.0, 0.0, 0.0), (2.0, 1.0, 0.0))
+
+    for bad in ("nan nan nan", "inf 0 0", "0 -inf 0", "NaN 1 0"):
+        # The poisoned vertex is the FIRST one, so its slot has to be held: the
+        # faces below index by position in the `v` stream, and dropping the line
+        # would renumber them onto other points instead of removing them.
+        mesh = parse_obj(
+            f"v {bad}\nv 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\n"
+            "f 1// 2// 3//\n"          # touches the poisoned vertex: dropped
+            "f 2// 3// 4// 5//\n")     # the clean square: kept
+        assert all(all(math.isfinite(c) for c in p) for p in mesh.vertices), bad
+        assert mesh.bounds_mm() == ((0.0, 0.0, 0.0), (2.0, 1.0, 0.0)), bad
+        assert len(mesh.triangles) == 2, bad
+
+    # The same rule on a material: a colour channel that is not a number leaves
+    # the field unset rather than carrying an inf into a renderer.
+    material = parse_obj("newmtl m\nKd 1.0 inf 0.5\nd nan\nendmtl\n").materials["m"]
+    assert material.diffuse is None and material.dissolve is None
+
+
+def test_a_degenerate_face_is_dropped_rather_than_counted_as_geometry():
+    """MUTATION THIS CATCHES: a triangle with a repeated corner, or three
+    collinear ones, kept as if it were a surface. It has zero area and no
+    normal, so it draws nothing and cannot be lit — but it inflates a triangle
+    count, and it makes any closure or area check downstream read as a defect in
+    the mesh rather than in the file it came from.
+
+    ORACLE: the same square, written three ways. Only the well-formed corners
+    survive, and a body made only of degenerate faces is EMPTY — which is the
+    signal the client turns into a reported absence.
+    """
+    square = "v 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\n"
+    assert len(parse_obj(square + "f 1// 2// 3// 4//\n").triangles) == 2
+
+    # A repeated corner, and a quad that repeats one — the fan then produces
+    # one zero-area ear and one real triangle, and only the real one is kept.
+    assert parse_obj(square + "f 1// 1// 3//\n").triangles == ()
+    assert parse_obj(square + "f 1// 2// 2// 3//\n").triangles == ((0, 1, 2),)
+
+    # Three collinear points: a legal face, no area.
+    assert parse_obj("v 0 0 0\nv 1 0 0\nv 2 0 0\nf 1// 2// 3//\n").triangles == ()
+    assert parse_obj("v 0 0 0\nv 1 0 0\nv 2 0 0\nf 1// 2// 3//\n").empty

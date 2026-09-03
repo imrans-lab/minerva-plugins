@@ -18,6 +18,7 @@ package board
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 // Validate enforces the shared boundary on a parsed Board:
@@ -95,6 +96,14 @@ func Validate(b *Board) error {
 		return err
 	}
 	if err := validateFabricationStage(b); err != nil {
+		return err
+	}
+	// The ORDERED APPEARANCE's values, after the stage check and before the v2
+	// identity rules — the position board_validate.py's fabrication_refusal
+	// occupies, and appended rather than inserted so no existing board's
+	// first-violation code moves. Version-independent: a blank finish is wrong
+	// in either identity era.
+	if err := validateFabrication(b); err != nil {
 		return err
 	}
 	if b.Version < 2 {
@@ -462,6 +471,55 @@ func validateCopperEntityLayers(b *Board) error {
 		}
 		if v.ToLayer != "" && !knownLayers[v.ToLayer] {
 			return fmt.Errorf("via_unknown_layer: vias[%d] to_layer %q is not in the declared layer stack", i, v.ToLayer)
+		}
+	}
+	return nil
+}
+
+// validateFabrication enforces the VALUES of the ordered-appearance block.
+//
+// Its SHAPE — the block is a mapping, every key is one the struct declares — is
+// already settled by the positive schema walk (schema.go), which reads the
+// known keys off the struct tags. What is left to judge is what a stated field
+// says, and until this existed the Go boundary judged none of it while Python's
+// board_schema.fabrication_refusal judged all of it: a blank finish or a zero
+// thickness crossed here unchallenged and was refused there, which is the drift
+// the shared vectors exist to make impossible.
+//
+//   - mask_colour / finish, when stated, must be a NON-BLANK string. The value
+//     is free text (the closed set is the vendor's, published per profile), but
+//     a blank one names no choice at all, and it is not the same as saying
+//     nothing: an absent field takes the default, a blank field is an author
+//     who believes they chose something.
+//   - thickness_mm, when stated, must be POSITIVE and finite. Zero and negative
+//     millimetres are not boards.
+//
+// A nil pointer is "unset" and stays legal, exactly as it does for the design
+// rules. Mirrored value-for-value and message-for-message by
+// board_schema.fabrication_refusal, which returns the same shared
+// invalid_board_structure code through board_validate.validate_board_v2.
+func validateFabrication(b *Board) error {
+	f := b.Fabrication
+	if f == nil {
+		return nil
+	}
+	for _, named := range []struct {
+		key   string
+		value *string
+	}{{"mask_colour", f.MaskColour}, {"finish", f.Finish}} {
+		if named.value == nil {
+			continue
+		}
+		if strings.TrimSpace(*named.value) == "" {
+			return fmt.Errorf("%s: board fabrication.%s must be a non-empty "+
+				"string naming the choice as the vendor spells it; got %q",
+				unknownKeyCode, named.key, *named.value)
+		}
+	}
+	if v := f.ThicknessMM; v != nil {
+		if math.IsNaN(*v) || math.IsInf(*v, 0) || *v <= 0 {
+			return fmt.Errorf("%s: board fabrication.thickness_mm must be a "+
+				"positive number of millimetres; got %v", unknownKeyCode, *v)
 		}
 	}
 	return nil

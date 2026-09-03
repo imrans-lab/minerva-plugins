@@ -1027,16 +1027,49 @@ that chose nothing at all. Strings are compared **casefolded**, so an author
 writing `green` matches a page that prints `Green`; thickness is compared as a
 number.
 
+**A stated value must MEAN something, on both boundaries.** Before the profile
+menu is ever consulted, the shape of each field is checked where the document is
+parsed — `board_schema.fabrication_refusal` in Python, `validateFabrication` in
+Go — and the two are mirrors, with the shared `invalid_board_structure` code and
+the committed vectors `spec/vectors/490-*` through `520-*` holding them
+together:
+
+| stated | result |
+|---|---|
+| `mask_colour` / `finish` blank or whitespace | refused — a blank names no choice, and it is not the same document as one that omits the key |
+| `thickness_mm` zero or negative | refused — not a board |
+| the key absent | accepted; the default is derived at compile |
+
+On the Go side all three fields are **pointers** for exactly this reason: a
+plain `string` cannot tell an omitted `finish` from `finish: ""`, and with
+`omitempty` a stated `thickness_mm: 0` would not survive re-serialization at
+all — a value that must be refused would launder itself into an absence that
+must be accepted.
+
+**The assembly tier has its own thickness band, and it refuses.** The profile
+menu above is the BARE-BOARD service's (JLCPCB's FR4 set runs 0.4–2.0 mm); a
+selected assembly tier publishes a narrower one it will place parts on
+(`service.board_min_thickness_mm` / `board_max_thickness_mm` — Economic is
+0.8–1.6 mm). A 2.0 mm board therefore passes every compile gate and is still
+unbuildable by that tier, so `order_package.check_service_thickness` refuses the
+whole package before a byte is written (`order_package_service_thickness`),
+naming the thickness, the service and the band. The checklist still prints the
+band beside the choice, now as a fact rather than a warning: a package that
+named a service and left the band does not exist.
+
 **These three menus are NOT in the profile digest**, unlike
 `capabilities.max_copper_layers`. The digest pins the rules that decide what
 gets *fabricated*, and no Gerber, drill file or placement row carries a mask
 colour — so recording a menu the vendor has always offered must not repin every
 board already compiled against that profile.
 
-**Nothing renders them yet.** The consumers today are the IR (for a later
-renderer that draws the board as it will actually look) and `ORDER-CHECKLIST.md`,
-which prints the three values so the person ordering matches them against the
-vendor's form instead of remembering them.
+**What reads them.** Three consumers, through the IR
+(`ResolvedFabrication`): the per-side texture bake paints the board in the mask
+colour and finish it was ordered in (`texture_bake.py`); the substrate mesh
+extrudes it to the ordered thickness (`substrate_mesh.py`), so the solid a person
+checks against an enclosure is the board they bought; and `ORDER-CHECKLIST.md`
+prints all three so the person ordering matches them against the vendor's form
+instead of remembering them.
 
 **Not modeled here:** a stackup beyond the one overall thickness, inner-layer
 appearance, and per-region mask colour.

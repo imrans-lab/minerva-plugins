@@ -245,19 +245,33 @@ type Board struct {
 // profile does not offer, naming both the field and what is on offer; a profile
 // that publishes no such list has said nothing, and the choice stands.
 //
-// Every field is omitempty: a partially-stated block is legal and the worker
+// Every field is optional: a partially-stated block is legal and the worker
 // fills each absent field from the default. The values are free text on
 // purpose — the closed set is the VENDOR's, published per profile.
+//
+// EVERY FIELD IS A POINTER, and that is load-bearing rather than stylistic. A
+// plain string cannot tell "no finish was stated" from `finish: ""`, and a
+// plain float64 cannot tell "no thickness was stated" from `thickness_mm: 0`.
+// Both distinctions matter twice over: the first is legal and the second is
+// not, so a value type would either accept a blank choice or refuse a
+// partially-stated block; and with `omitempty` a stated ZERO would not survive
+// re-serialization at all, turning a value we must refuse into an absence we
+// must accept. Nil is "the board said nothing" and marshals to no key, which is
+// what keeps a silent board byte-identical. Same reason DesignRules holds its
+// numeric rules by pointer.
 type Fabrication struct {
 	// MaskColour is the solder-mask colour, in the vendor's own spelling
-	// ("green", "black", "purple"). Default: green.
-	MaskColour string `json:"mask_colour,omitempty" yaml:"mask_colour,omitempty"`
-	// Finish is the surface finish ("HASL", "ENIG"). Default: HASL.
-	Finish string `json:"finish,omitempty" yaml:"finish,omitempty"`
+	// ("green", "black", "purple"). Default: green. Stated, it must be
+	// non-blank.
+	MaskColour *string `json:"mask_colour,omitempty" yaml:"mask_colour,omitempty"`
+	// Finish is the surface finish ("HASL", "ENIG"). Default: HASL. Stated, it
+	// must be non-blank.
+	Finish *string `json:"finish,omitempty" yaml:"finish,omitempty"`
 	// ThicknessMM is the OVERALL finished board thickness. Default: 1.6.
-	// Deliberately one number and not a stackup: the layer-by-layer build is a
-	// different fact with a different owner, and this contract does not model it.
-	ThicknessMM float64 `json:"thickness_mm,omitempty" yaml:"thickness_mm,omitempty"`
+	// Stated, it must be positive and finite. Deliberately one number and not a
+	// stackup: the layer-by-layer build is a different fact with a different
+	// owner, and this contract does not model it.
+	ThicknessMM *float64 `json:"thickness_mm,omitempty" yaml:"thickness_mm,omitempty"`
 }
 
 // Point is a 2D coordinate in board millimetres.

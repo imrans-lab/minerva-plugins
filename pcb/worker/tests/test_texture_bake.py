@@ -48,6 +48,23 @@ CUTOUT_Y_MM = (5.0, 11.0)
 POUR_PROBE_MM = (2.0, 16.0)   # inside the bottom-side pour (x 1..9.5, y 8.6..17.5)
 
 
+#: A keepout dropped INSIDE the bottom pour, clear of every trace, pad and bore
+#: on that face, so the copper around it is uniform on both axes. It is what
+#: gives the pour an internal VOID — the shape the fill emits as a self-touching
+#: keyhole contour rather than as a simple ring.
+VOID_X_MM = (2.0, 4.0)
+VOID_Y_MM = (12.5, 14.5)
+VOID_ZONE = {
+    "id": "zone:0f0e0d0c0b0a09080706050403020100",
+    "kind": "keepout",
+    "layer": "bottom",
+    "outline": [{"x_mm": VOID_X_MM[0], "y_mm": VOID_Y_MM[0]},
+                {"x_mm": VOID_X_MM[1], "y_mm": VOID_Y_MM[0]},
+                {"x_mm": VOID_X_MM[1], "y_mm": VOID_Y_MM[1]},
+                {"x_mm": VOID_X_MM[0], "y_mm": VOID_Y_MM[1]}],
+}
+
+
 def _board(**fabrication) -> dict:
     board = yaml.safe_load(COUPON.read_text(encoding="utf-8"))
     if fabrication:
@@ -281,3 +298,68 @@ def test_the_resolution_cap_clamps_the_scale_and_admits_it():
                                       scale_px_per_mm=50.0)
     assert not uncapped.clamped
     assert (uncapped.width_px, uncapped.height_px) == (1200, 900)
+
+
+def test_a_pour_with_an_internal_void_is_painted_with_the_void_open():
+    """MUTATION THIS CATCHES: a rasteriser that fills a pour contour with the
+    NON-ZERO winding rule instead of even-odd. Copper zone fill emits a region
+    with a hole in it as ONE self-touching keyhole ring — an outer boundary, a
+    bridge in to the void, the void walked the other way, and the bridge back —
+    because the Gerber region primitive cannot express a hole. Filled by
+    winding, that ring comes out SOLID: the void disappears and the picture
+    shows copper where the board has none. Every pour on the coupon is simple,
+    so nothing else here would ever see it.
+
+    ORACLE: the keepout is 2.0 x 2.0 mm at board x 2..4, y 12.5..14.5, and a
+    keepout subtracts from a pour with no clearance inflation, so the void is
+    exactly the rectangle authored. At 20 px/mm that is 40 px, measured on a row
+    and a column through its middle, with pour copper on both sides of each —
+    and the SAME pixel is copper on the board without the keepout, which is what
+    proves the run is the void and not the probe having wandered off the pour.
+    """
+    scale = 20
+    solid = _compiled(_board())
+    board = _board()
+    board["zones"] = board["zones"] + [copy.deepcopy(VOID_ZONE)]
+    voided = _compiled(board)
+
+    def face(compiled):
+        return texture_bake.bake_side(compiled, "bottom", scale_px_per_mm=scale)
+
+    def at(image, x_mm: float, y_mm: float):
+        # The bottom face is mirrored on X, which is why every probe here is
+        # written in BOARD millimetres and mapped through the same reflection.
+        return image.load()[int((BOARD_W_MM - x_mm) * scale), int(y_mm * scale)][:3]
+
+    with_void, without_void = face(voided).image, face(solid).image
+    centre = ((VOID_X_MM[0] + VOID_X_MM[1]) / 2.0,
+              (VOID_Y_MM[0] + VOID_Y_MM[1]) / 2.0)
+
+    copper = at(without_void, *centre)
+    assert at(with_void, *centre) != copper, (
+        "the void was painted as copper — a keyhole contour filled solid")
+    assert at(with_void, *centre) == at(with_void, 18.0, centre[1]), (
+        "the void is not the bare-laminate colour the rest of the board shows")
+
+    # The void's WIDTH and HEIGHT, measured through its middle. A window inside
+    # the pour on both axes, so anything not copper is the void itself.
+    row = int(centre[1] * scale)
+    columns = range(int((BOARD_W_MM - 9.5) * scale), int((BOARD_W_MM - 1.0) * scale))
+    open_columns = [x for x in columns
+                    if with_void.load()[x, row][:3] != copper]
+    column = int((BOARD_W_MM - centre[0]) * scale)
+    rows = range(int(10.5 * scale), int(17.4 * scale))   # clear of the pad bore
+    open_rows = [y for y in rows if with_void.load()[column, y][:3] != copper]
+
+    for measured, span, axis in ((open_columns, VOID_X_MM, "wide"),
+                                 (open_rows, VOID_Y_MM, "tall")):
+        expected = (span[1] - span[0]) * scale
+        assert abs(len(measured) - expected) <= 2, (
+            f"the void measures {len(measured)} px {axis}; the keepout is "
+            f"{expected:g} px")
+        assert measured[-1] - measured[0] == len(measured) - 1, (
+            f"the void is not one contiguous run {axis}")
+
+    # And the pour it sits in is still copper right up to it.
+    assert at(with_void, VOID_X_MM[0] - 0.5, centre[1]) == copper
+    assert at(with_void, VOID_X_MM[1] + 0.5, centre[1]) == copper

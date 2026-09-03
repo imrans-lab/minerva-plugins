@@ -77,6 +77,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import urllib.error
@@ -133,9 +134,14 @@ REASON_NOT_FOUND = "not_found"
 REASON_NO_NETWORK = "no_network"
 REASON_MALFORMED = "malformed"
 REASON_NO_MODEL = "no_model"
+#: The payload states a catalogue number that is not the one we asked for. A
+#: SUBSTITUTION, not a malformation: the document is well formed and describes
+#: some other part, which is the one outcome a consumer must never be handed
+#: under the name it requested.
+REASON_MISMATCH = "identity_mismatch"
 
 REASONS = (REASON_NO_PART_NUMBER, REASON_NOT_FOUND, REASON_NO_NETWORK,
-           REASON_MALFORMED, REASON_NO_MODEL)
+           REASON_MALFORMED, REASON_NO_MODEL, REASON_MISMATCH)
 
 #: A catalogue number becomes a FILENAME in the cache, so it is validated
 #: rather than escaped: anything outside this alphabet is a reported absence,
@@ -395,8 +401,20 @@ def parse_component_payload(payload: Any, part: str = "",
         # reporting it as facts would hand every consumer an empty drawing.
         return Absence(part, REASON_MALFORMED,
                        "the package drawing carries neither pads nor a model")
+    # THE PAYLOAD'S OWN IDENTITY DECIDES. `part` is what the CALLER asked for,
+    # and stamping it onto whatever came back would cache a substituted or
+    # misrouted document under the name of the part we wanted — a wrong land
+    # pattern and a wrong 3D model, both looking authoritative. When the
+    # document names itself and disagrees, that is an absence, not facts.
+    # Case-insensitively, because the disagreement worth refusing is a
+    # DIFFERENT part, not a differently-cased spelling of the same one.
     lcsc = result.get("lcsc")
-    stated = str(lcsc.get("number") or "") if isinstance(lcsc, Mapping) else ""
+    stated = str(lcsc.get("number") or "").strip() if isinstance(lcsc, Mapping) else ""
+    if part and stated and stated.casefold() != part.casefold():
+        return Absence(part, REASON_MISMATCH,
+                       f"the response identifies itself as {stated!r}, not the "
+                       f"{part!r} that was requested; refusing to serve one "
+                       f"part's drawing under another's name")
     return PartFacts(
         part=part or stated,
         title=str(result.get("title") or ""),
@@ -436,6 +454,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Replace ``path`` with ``data`` in one step, or leave it as it was.
+
+    The temporary file is created in the SAME directory, because a rename is
+    only atomic within one filesystem, and carries the writer's pid and thread
+    id so two processes racing on the same entry cannot collide on it.
+    """
+    scratch = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        scratch.write_bytes(data)
+        os.replace(scratch, path)
+    except OSError:
+        scratch.unlink(missing_ok=True)
+        raise
+
+
 # ---------------------------------------------------------------------------
 # The client
 # ---------------------------------------------------------------------------
@@ -453,6 +487,13 @@ class VendorPartClient:
     * the on-disk per-user cache, holding only SUCCESSFUL bodies — so the next
       export, in the next process, costs no network either.
 
+    THE MEMO IS SINGLE-FLIGHT. A memo consulted before the fetch and written
+    after it still lets N threads that ask at the same moment issue N requests
+    for one part — which is what ``facts_for`` does on a board where several
+    placements share a catalogue number. Each key therefore has a gate: the
+    first caller fetches while the rest wait on it and then read the memo, so
+    "at most once" holds under concurrency and not merely in sequence.
+
     Failures are deliberately not written to disk. A part absent today because
     a supplier added it yesterday must not stay absent forever, and a network
     outage must not be preserved across reboots.
@@ -467,8 +508,35 @@ class VendorPartClient:
 
     _facts: dict = field(default_factory=dict, init=False, repr=False)
     _models: dict = field(default_factory=dict, init=False, repr=False)
+    #: One gate per key currently being fetched. Held only while the fetch
+    #: runs, and dropped as soon as the answer is memoized.
+    _gates: dict = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False,
                                   repr=False)
+
+    def _once(self, memo: dict, key: str, load):
+        """``memo[key]``, computing it AT MOST ONCE across every thread.
+
+        ``self._lock`` guards the two dictionaries and is never held across
+        ``load`` — that call reaches the network. The per-key gate is what
+        serializes the fetch itself; a waiter wakes to find the answer already
+        memoized and never issues a request of its own.
+        """
+        with self._lock:
+            if key in memo:
+                return memo[key]
+            gate = self._gates.get(key)
+            if gate is None:
+                gate = self._gates[key] = threading.Lock()
+        with gate:
+            with self._lock:
+                if key in memo:
+                    return memo[key]
+            answer = load()
+            with self._lock:
+                memo.setdefault(key, answer)
+                self._gates.pop(key, None)
+                return memo[key]
 
     # -- cache plumbing ----------------------------------------------------
 
@@ -510,6 +578,12 @@ class VendorPartClient:
             recorded = json.loads(meta.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        if not isinstance(recorded, Mapping):
+            # Valid JSON that is not an object — `[]` or `null` is exactly what
+            # a half-written sidecar leaves behind. Reaching for a key here
+            # would raise, and this module's contract is that nothing does.
+            log.warning("cache sidecar %s is not a JSON object; ignoring", meta)
+            return None
         if str(recorded.get("url") or "") != url:
             return None
         digest = hashlib.sha256(data).hexdigest()
@@ -526,17 +600,28 @@ class VendorPartClient:
 
     def _cache_write(self, sub: str, name: str, data: bytes,
                      provenance: Provenance) -> None:
+        """Write a body and its sidecar, each one atomically.
+
+        WRITE-THEN-RENAME rather than write-in-place. Another process — a
+        second export, the same board open twice — can be reading this entry
+        while we write it, and a reader that catches a half-written body sees a
+        hash mismatch and refetches, which costs a request; a reader that
+        catches a half-written SIDECAR sees a truncated JSON document. Neither
+        is possible across a rename, which is atomic on every filesystem this
+        runs on. The BODY lands first, so a sidecar is never the only file
+        present.
+        """
         directory = self._dir(sub)
         if directory is None:
             return
         try:
-            (directory / name).write_bytes(data)
-            (directory / f"{name}.meta.json").write_text(json.dumps({
+            _atomic_write(directory / name, data)
+            _atomic_write(directory / f"{name}.meta.json", json.dumps({
                 "url": provenance.url,
                 "sha256": provenance.sha256,
                 "fetched_at": provenance.fetched_at,
                 "size_bytes": provenance.size_bytes,
-            }, indent=1, sort_keys=True), encoding="utf-8")
+            }, indent=1, sort_keys=True).encode("utf-8"))
         except OSError as exc:
             # An unwritable cache costs speed, never correctness.
             log.warning("could not cache %s/%s (%s)", sub, name, exc)
@@ -566,14 +651,7 @@ class VendorPartClient:
         if not _PART_RE.match(key):
             return Absence(key, REASON_NO_PART_NUMBER,
                            f"{key!r} is not a usable catalogue number")
-        with self._lock:
-            memo = self._facts.get(key)
-        if memo is not None:
-            return memo
-        answer = self._load_facts(key)
-        with self._lock:
-            self._facts.setdefault(key, answer)
-            return self._facts[key]
+        return self._once(self._facts, key, lambda: self._load_facts(key))
 
     def _load_facts(self, part: str) -> Union[PartFacts, Absence]:
         url = f"{self.api_base}{part}/components?version={self.api_version}"
@@ -624,14 +702,8 @@ class VendorPartClient:
             return Absence(facts.part, REASON_NO_MODEL,
                            "the package drawing references no 3D model")
         uuid = facts.model.uuid
-        with self._lock:
-            memo = self._models.get(uuid)
-        if memo is not None:
-            return memo
-        answer = self._load_model(facts.part, uuid)
-        with self._lock:
-            self._models.setdefault(uuid, answer)
-            return self._models[uuid]
+        return self._once(self._models, uuid,
+                          lambda: self._load_model(facts.part, uuid))
 
     def _load_model(self, part: str, uuid: str) -> Union[PartModel, Absence]:
         got = self._get("models", f"{uuid}.obj", f"{self.model_base}{uuid}")

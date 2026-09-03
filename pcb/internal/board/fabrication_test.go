@@ -38,8 +38,9 @@ func TestFabricationBlockRoundTrips(t *testing.T) {
 	if b.Fabrication == nil {
 		t.Fatal("fabrication block was dropped")
 	}
-	if b.Fabrication.MaskColour != "black" || b.Fabrication.Finish != "ENIG" ||
-		b.Fabrication.ThicknessMM != 1 {
+	if b.Fabrication.MaskColour == nil || *b.Fabrication.MaskColour != "black" ||
+		b.Fabrication.Finish == nil || *b.Fabrication.Finish != "ENIG" ||
+		b.Fabrication.ThicknessMM == nil || *b.Fabrication.ThicknessMM != 1 {
 		t.Fatalf("fabrication not carried: %+v", b.Fabrication)
 	}
 	out, err := MarshalYAML(b)
@@ -90,5 +91,88 @@ func TestAnUnknownFabricationKeyIsRefusedByName(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("refusal does not name %q: %s", want, msg)
 		}
+	}
+}
+
+// A PARTIALLY-STATED BLOCK IS LEGAL, and the pointer fields are what let the
+// boundary say so while still refusing a blank one. With value-typed fields an
+// omitted `finish` and `finish: ""` decode identically, so the validator would
+// have to accept both or refuse both; here the first is nil and the second is a
+// pointer to "".
+func TestAPartiallyStatedFabricationBlockIsLegal(t *testing.T) {
+	source := strings.Replace(fabricationBoardYAML,
+		"    finish: ENIG\n    thickness_mm: 1\n", "", 1)
+	b, err := UnmarshalYAML([]byte(source))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := Validate(b); err != nil {
+		t.Fatalf("a board that stated only its colour was refused: %v", err)
+	}
+	if b.Fabrication.Finish != nil || b.Fabrication.ThicknessMM != nil {
+		t.Fatalf("absent fields were invented: %+v", b.Fabrication)
+	}
+}
+
+// THE VALUE RULES, on the side that had none. Python's board_schema refused a
+// blank choice and a non-positive thickness from the day the block existed;
+// this side declared the fields and judged nothing, so the two boundaries
+// disagreed about the same document. Each case here has a committed
+// cross-language vector too (pcb/spec/vectors/490..520); this suite is what
+// says the refusal NAMES the field, which a vector's code alone does not.
+func TestFabricationValuesAreRefusedByName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stated  string
+		wantKey string
+	}{
+		{"blank finish", "    finish: \"\"\n", "fabrication.finish"},
+		{"blank colour", "    mask_colour: \"   \"\n", "fabrication.mask_colour"},
+		{"zero thickness", "    thickness_mm: 0\n", "fabrication.thickness_mm"},
+		{"negative thickness", "    thickness_mm: -1.6\n", "fabrication.thickness_mm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := strings.Replace(fabricationBoardYAML,
+				"fabrication:\n    mask_colour: black\n    finish: ENIG\n    thickness_mm: 1\n",
+				"fabrication:\n"+tc.stated, 1)
+			b, err := UnmarshalYAML([]byte(source))
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err = Validate(b)
+			if err == nil {
+				t.Fatal("the value was accepted")
+			}
+			for _, want := range []string{unknownKeyCode, tc.wantKey} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal does not name %q: %s", want, err)
+				}
+			}
+		})
+	}
+}
+
+// A STATED ZERO MUST SURVIVE THE ROUND TRIP, which is the half of the rule a
+// read-time check cannot make. With a value-typed omitempty field the 0 is
+// indistinguishable from an absent key and is dropped on the way back out, so a
+// document that must be refused re-serializes into one that must be accepted —
+// a bad value laundered into a silent absence.
+func TestAStatedZeroThicknessSurvivesReserialization(t *testing.T) {
+	zero := 0.0
+	b := &Board{Version: 1, Name: "Zero", WidthMM: 20, HeightMM: 20,
+		Fabrication: &Fabrication{ThicknessMM: &zero}}
+	out, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "thickness_mm: 0") {
+		t.Fatalf("a stated zero thickness vanished:\n%s", out)
+	}
+	again, err := UnmarshalYAML(out)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := Validate(again); err == nil {
+		t.Fatal("the re-read board no longer states the value it must be refused for")
 	}
 }

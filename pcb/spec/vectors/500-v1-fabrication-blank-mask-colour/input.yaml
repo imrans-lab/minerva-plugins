@@ -1,0 +1,9 @@
+# Whitespace is not a colour. Trimmed on both sides before the emptiness test,
+# so a value that LOOKS stated and names nothing is refused rather than carried
+# to a vendor's order form as a blank.
+version: 1
+name: BlankColour
+width_mm: 20
+height_mm: 20
+fabrication:
+  mask_colour: "   "

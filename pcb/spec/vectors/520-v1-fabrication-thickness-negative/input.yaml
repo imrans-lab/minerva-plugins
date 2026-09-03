@@ -1,0 +1,9 @@
+# Negative millimetres. The sign is the whole test: an absolute value taken
+# somewhere downstream would build a plausible 1.6 mm board from a document
+# nobody meant.
+version: 1
+name: NegativeThickness
+width_mm: 20
+height_mm: 20
+fabrication:
+  thickness_mm: -1.6

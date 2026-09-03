@@ -43,9 +43,28 @@ A truncated download, an HTML error page, an OSS ``NoSuchKey`` XML body: all of
 them parse to a :class:`Mesh` with no triangles. Callers test
 ``mesh.triangles`` and report an absence. Nothing here is exceptional enough to
 stop an export of forty other parts.
+
+NOT RAISING IS NOT THE SAME AS ACCEPTING
+----------------------------------------
+A value that cannot describe a part is DROPPED, and dropping is not silence:
+what a malformed model must never do is come back as a smaller-but-plausible
+one. Two classes are refused rather than carried:
+
+* NON-FINITE NUMBERS. ``v nan nan nan``, ``inf`` in a ``Kd``: a single one
+  poisons every bounding box computed from the mesh and every file written from
+  it, and it does so without ever looking wrong in the data structure. A
+  non-finite vertex keeps its SLOT — OBJ indices are positions in the ``v``
+  stream, so removing the line would silently renumber every face after it —
+  but the slot is marked unusable and any face that references it is dropped.
+* DEGENERATE TRIANGLES. A face whose three corners are not three distinct
+  points, or whose corners are collinear, has zero area and no normal. It
+  contributes nothing to a render and makes closure and area checks downstream
+  read as failures of the mesh rather than of the file.
 """
 
 from __future__ import annotations
+
+import math
 
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -115,12 +134,20 @@ class Mesh:
 
 
 def _floats(parts: list[str], count: int) -> tuple[float, ...] | None:
+    """``count`` FINITE floats off the front of a directive, or None.
+
+    ``float()`` happily parses ``nan`` and ``inf``; neither is a coordinate, a
+    colour or a dissolve, so a directive carrying one is unusable rather than
+    partially usable."""
     if len(parts) < count:
         return None
     try:
-        return tuple(float(p) for p in parts[:count])
+        values = tuple(float(p) for p in parts[:count])
     except ValueError:
         return None
+    if not all(math.isfinite(v) for v in values):
+        return None
+    return values
 
 
 def _vertex_index(token: str, total: int) -> int | None:
@@ -142,19 +169,36 @@ def _vertex_index(token: str, total: int) -> int | None:
     return idx if 0 <= idx < total else None
 
 
+def _degenerate(vertices: list[_Vec3], tri: tuple[int, int, int]) -> bool:
+    """Whether a triangle has no area — repeated corners or collinear ones.
+
+    Exact zero rather than a tolerance: a sliver is a legitimate triangle that
+    renders, and inventing an epsilon here would start deleting real geometry
+    off a part whose features are a few microns across.
+    """
+    a, b, c = (vertices[i] for i in tri)
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    return (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) == (0.0, 0.0, 0.0)
+
+
 def parse_obj(text: str) -> Mesh:
     """Parse OBJ source into a :class:`Mesh`. Never raises.
 
     Faces with more than three vertices are fan-triangulated, which is correct
     for the convex planar polygons OBJ faces are defined to be. Unparseable
     lines are dropped rather than defended against: a half-downloaded model
-    should come out as a smaller mesh or an empty one, not as an exception.
+    should come out as a smaller mesh or an empty one, not as an exception. So
+    are lines that parse but cannot mean anything — a non-finite coordinate or
+    colour, a face on such a vertex, a zero-area triangle (see the module
+    header).
     """
     vertices: list[_Vec3] = []
     triangles: list[tuple[int, int, int]] = []
     tri_materials: list[str | None] = []
     materials: dict[str, Material] = {}
     ignored: set[str] = set()
+    unusable: set[int] = set()          # vertex slots that hold no usable point
 
     current: str | None = None          # active usemtl
     building: str | None = None         # name inside an open newmtl block
@@ -181,15 +225,26 @@ def parse_obj(text: str) -> Mesh:
 
         if key == "v":
             xyz = _floats(rest, 3)
-            if xyz is not None:
+            # An unusable vertex still OCCUPIES ITS INDEX: `f 3//` means "the
+            # third v line", so dropping the line outright would renumber every
+            # face that follows it and quietly re-shape the model.
+            if xyz is None:
+                unusable.add(len(vertices))
+                vertices.append((0.0, 0.0, 0.0))
+            else:
                 vertices.append(xyz)  # type: ignore[arg-type]
         elif key == "f":
             idx = [_vertex_index(t, len(vertices)) for t in rest]
             good = [i for i in idx if i is not None]
             if len(good) != len(idx) or len(good) < 3:
                 continue
+            if any(i in unusable for i in good):
+                continue
             for k in range(1, len(good) - 1):
-                triangles.append((good[0], good[k], good[k + 1]))
+                tri = (good[0], good[k], good[k + 1])
+                if _degenerate(vertices, tri):
+                    continue
+                triangles.append(tri)
                 tri_materials.append(current)
         elif key == "usemtl":
             current = rest[0] if rest else None

@@ -68,6 +68,7 @@ from pcb_worker import methods
 from pcb_worker import order_package as op
 from pcb_worker import order_provenance as prov
 from pcb_worker import order_write
+from pcb_worker import service_profile
 from pcb_worker.compile_board import compile_board
 # The shared corpus orientation statement, autouse in this module: these
 # boards are drawn on this repository's own land patterns, and orientation
@@ -669,6 +670,50 @@ def test_a_service_blocker_produces_no_files_at_all(tmp_path):
     assert reply["ok"] is False
     assert reply["error"]["preflight"]["status"] == op.PREFLIGHT_BLOCKED
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_board_the_tier_cannot_assemble_is_refused_before_any_file(tmp_path):
+    """MUTATION THIS CATCHES: the package that is produced anyway, with the
+    problem written down in prose inside it. The 2.0 mm board is on the FAB
+    profile's published thickness menu, so it compiles and every geometric gate
+    passes; the Economic ASSEMBLY tier publishes 0.8-1.6 mm and will not place
+    parts on it. Two published facts, both true, and only the first one gates
+    a compile — which is exactly how an unbuildable order reaches an uploader.
+
+    ORACLE: the service profile's own file. Its band is quoted from JLCPCB's
+    Economic column and read here off the loaded profile, so the number this
+    asserts against cannot drift from the number the refusal quotes.
+
+    The refusal names the thickness, the service and the band, no directory is
+    left behind, and a 1.6 mm board — the top of the same band — still builds,
+    which is what stops this from being a rule that refuses everything.
+    """
+    service = service_profile.load_service_profile(SERVICE)
+    over = service.constraints.board_max_thickness_mm + 0.4      # 2.0 mm, on the menu
+    board = _board(fabrication={"thickness_mm": over})
+
+    with pytest.raises(op.OrderPackageError) as caught:
+        _package(board)
+    assert caught.value.code == op.CODE_SERVICE_THICKNESS
+    assert caught.value.field == "fabrication.thickness_mm"
+    message = str(caught.value)
+    assert f"{over:g} mm" in message
+    assert service.display_name in message
+    assert f"{service.constraints.board_max_thickness_mm:g}" in message
+
+    reply = methods.handle_request({
+        "id": 1, "method": "order_package",
+        "params": {"board": board, "profile": SERVICE,
+                   "out_dir": str(tmp_path)}})
+    assert reply["ok"] is False
+    assert list(tmp_path.iterdir()) == []
+
+    # The band's own edge still ships, and a dialect-only export claims no
+    # service and therefore no band to be outside of.
+    at_the_limit = _board(fabrication={
+        "thickness_mm": service.constraints.board_max_thickness_mm})
+    assert _package(at_the_limit).files
+    assert _package(board, profile=DIALECT_ONLY).files
 
 
 def test_an_uncompilable_board_blocks_before_anything_is_emitted(tmp_path):

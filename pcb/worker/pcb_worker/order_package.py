@@ -33,9 +33,11 @@ READINESS IS THREE SEPARATE CLAIMS, and the package makes only two of them:
 2. ``preflight_status`` — ``pass``, ``advisories`` or ``blocked``, over the
    checks the selected service actually ran AND the WARNING channel of the one
    compilation and the one emission. A selected manufacturing service refuses
-   when its geometric floors are violated. The dialect-only selector may emit
-   a mid-layout quote/reference package with ``package_generated=true`` and a
-   blocked preflight; its checklist names every blocker and says not to submit
+   when its geometric floors are violated, and refuses outright — before any
+   file exists — when the board is ordered outside the THICKNESS BAND that
+   service publishes (``check_service_thickness``). The dialect-only selector
+   may emit a mid-layout quote/reference package with ``package_generated=true``
+   and a blocked preflight; its checklist names every blocker and says not to submit
    it for manufacture. ``pass`` never covers the ``unchecked`` list, which is
    always non-empty: it is the statement of what nothing looked at.
 3. ``order_page_verified`` — a person uploaded these files and wrote down what
@@ -110,6 +112,7 @@ CODE_ARCHIVE_SEMANTICS = "order_package_archive_semantics"
 CODE_GEOMETRIC_VIOLATIONS = "order_package_geometric_violations"
 CODE_GEOMETRIC_INDETERMINATE = "order_package_geometric_indeterminate"
 CODE_JSON_INVALID = "order_package_json_invalid"
+CODE_SERVICE_THICKNESS = "order_package_service_thickness"
 
 #: Rules this package deliberately does not claim to have checked. Same
 #: ``{id, reason}`` shape the service profile's own unchecked list uses, so the
@@ -636,6 +639,43 @@ class OrderPackage:
                                              overwrite=overwrite)
 
 
+def check_service_thickness(board, profile) -> None:
+    """Refuse a board thicker or thinner than the SELECTED ASSEMBLY TIER builds.
+
+    TWO PUBLISHED FACTS, BOTH TRUE, AND ONLY ONE OF THEM GATES THE COMPILE. The
+    fabrication profile publishes the bare-board thickness MENU (JLCPCB's FR4
+    set runs 0.4-2.0 mm) and the compiler checks the board's choice against it.
+    The assembly tier publishes a NARROWER band it will place parts on
+    (Economic: 0.8-1.6 mm). A 2.0 mm board therefore passes every compile gate
+    and is still unbuildable by the service this package names.
+
+    The checklist prints the band beside the choice, which is the right thing
+    for a person to read and the wrong thing to rely on: a package is a set of
+    files somebody uploads, and prose inside it does not stop the upload. This
+    module's rule is that the boundary handing work to a vendor REFUSES rather
+    than warns, so a package that names a service it cannot be built by is not
+    produced at all.
+
+    A dialect-only profile claims no service and therefore no band; nothing is
+    checked, exactly as nothing else is checked for it.
+    """
+    service = profile.service
+    if service is None:
+        return
+    thickness = float(board.fabrication.thickness_mm)
+    if service.constraints.accepts_thickness(thickness):
+        return
+    raise OrderPackageError(
+        CODE_SERVICE_THICKNESS,
+        f"the board is ordered {thickness:g} mm thick, which "
+        f"{profile.display_name} ({service.id}) does not assemble: its "
+        f"published band is "
+        f"{service.constraints.board_min_thickness_mm:g}-"
+        f"{service.constraints.board_max_thickness_mm:g} mm. Refusing to "
+        f"package an order for a service that cannot build it",
+        field="fabrication.thickness_mm")
+
+
 def _geometric_finding(row: dict, *, blocking: bool = False) -> dict:
     """Adapt a geometric row to the package's named report shape.
 
@@ -688,6 +728,7 @@ def build(board_source: dict, board, profile_id: str, *,
     assembly = assembly_outputs.build_package(board, profile_id,
                                              orientation=orientation)
     profile = assembly.emission.profile
+    check_service_thickness(board, profile)
 
     # A rule profile selected at compile time supplies the geometric floors; it
     # does not itself compare the finished copper against them.  Run the
@@ -940,9 +981,11 @@ def render_checklist(*, board, profile, provenance, digests, blockers, advisorie
     # attempt to fill the vendor's form in.
     appearance = board.fabrication
     thickness = f"{appearance.thickness_mm:g} mm"
-    if service is not None and not service.constraints.accepts_thickness(
-            appearance.thickness_mm):
-        thickness += (f" — OUTSIDE the {profile.display_name} band "
+    if service is not None:
+        # The band is stated as a fact rather than as a warning: a package that
+        # named a service and left the band is refused before it exists
+        # (`check_service_thickness`), so anything printed here is inside it.
+        thickness += (f" — inside the {profile.display_name} band "
                       f"({service.constraints.board_min_thickness_mm:g}"
                       f"–{service.constraints.board_max_thickness_mm:g} mm)")
     recorded = {"Board thickness": thickness,

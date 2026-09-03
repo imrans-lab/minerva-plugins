@@ -14,9 +14,12 @@ source would ask them:
     board it must hit exactly two surfaces, one going in and one coming out.
     Painting a hole onto the texture passes every colour test ever written and
     fails this one immediately.
-  * WELD BY POSITION AND COUNT EDGES. A closed solid has every directed edge
-    exactly once and every edge's reverse present. A missing bore wall, a face
-    triangulated over a hole, a wall wound inside out: all of them break it.
+  * WELD BY POSITION AND COUNT EDGES. A closed solid traverses every directed
+    edge as often as its reverse — exactly once each on a board like this one,
+    and twice where the material is legitimately pinched to zero width (a bore
+    tangent to the outline). A missing bore wall, a face triangulated over a
+    hole, a wall wound inside out, a rim split on one side of a seam and not the
+    other: all of them break it.
   * MEASURE THE AREA against the board DOCUMENT — 24 x 18 mm, one 3 x 6 mm
     cutout — minus the analytic area of the circles that were drilled.
   * MEASURE A SLOT'S OPENING. It has to come out 7 x 2 mm, not round.
@@ -37,11 +40,13 @@ import math
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import yaml
 
 from pcb_worker import texture_bake
 from pcb_worker.board_drills import DrillOrigin, drill_openings
-from pcb_worker.board_region import cutout_rings, drill_rings, outline_ring
+from pcb_worker.board_region import (board_regions, cutout_rings, drill_rings,
+                                     outline_ring)
 from pcb_worker.compile_board import compile_board
 from pcb_worker.earcut import signed_area
 from pcb_worker.resolved_board import (
@@ -51,7 +56,7 @@ from pcb_worker.resolved_board import (
     ResolvedHole,
     SlotHole,
 )
-from pcb_worker.substrate_mesh import build_substrate_mesh
+from pcb_worker.substrate_mesh import SubstrateMeshError, build_substrate_mesh
 
 COUPON = Path(__file__).resolve().parent / "testdata" / "coupon_jlc1.yaml"
 
@@ -370,3 +375,110 @@ def test_the_two_faces_are_registered_where_the_bake_paints_them():
             assert alpha_at(side, cx, cy) == 0, (side, opening.id)
         for (x, y) in SOLID_MM:
             assert alpha_at(side, x, y) == 255, (side, x, y)
+
+
+# ---------------------------------------------------------------------------
+# The shapes that are LEAST like the coupon. Every case below is a board whose
+# openings interact with each other or with the outline, which is where a
+# region stops being "a rectangle with discs punched out of it" and where the
+# builder's postconditions have to earn their place.
+# ---------------------------------------------------------------------------
+
+
+def _with_mounting_holes(*holes) -> object:
+    """The coupon plus arbitrary mounting holes, compiled."""
+    board = yaml.safe_load(COUPON.read_text(encoding="utf-8"))
+    board["mounting_holes"] = [
+        {"id": f"hole:{index:032x}", "x_mm": x, "y_mm": y,
+         "diameter_mm": diameter, "plated": False}
+        for index, (x, y, diameter) in enumerate(holes, start=1)]
+    return _compiled(board)
+
+
+def _closed_and_solid(mesh, board) -> float:
+    """Assert the mesh bounds the material the boolean says is left, and return
+    that area. The oracle is :mod:`board_region`, which is a different
+    computation on the same document — an exact integer boolean, not a
+    triangulation — so agreement is evidence rather than a tautology."""
+    edges = _directed_edges(mesh)
+    assert [e for e, n in edges.items() if edges.get((e[1], e[0]), 0) != n] == [], \
+        "the surface does not bound a solid"
+
+    expected = sum(region.area_mm2() for region in board_regions(board))
+    face = _area(mesh, mesh.top_triangles)
+    assert abs(face - expected) <= 1e-9 * expected, \
+        f"the faces cover {face} mm^2 of the {expected} mm^2 the board kept"
+    volume = _signed_volume(mesh)
+    assert volume > 0.0
+    assert abs(volume - expected * ORDERED_THICKNESS_MM) <= 1e-9 * volume
+    return expected
+
+
+def test_a_bore_tangent_to_the_outline_still_closes_the_skin():
+    """THE DEFECT THIS CAUGHT, and the reason it is worth its own case: a bore
+    that touches the board edge at EXACTLY one point puts a vertex in the middle
+    of an outline edge. The face is then triangulated to two half-edges there
+    while the outline RING still describes one long one, so a wall raised on the
+    ring spanned a seam the face had already split — a hairline crack down the
+    side of the board, in a mesh that renders perfectly and holds no volume.
+    Walls are read off the triangulation now, which cannot make that mistake.
+
+    ORACLE: 1.59963 mm is where the INSCRIBED bore polygon of a 3.2 mm hole puts
+    its leftmost vertex exactly on x = 0 (the offset is exact integer nanometres,
+    so this is a construction, not a coincidence). The board is pinched to zero
+    width there — a real, legal shape — so the surface is checked for BALANCE
+    rather than for every edge appearing once, and its volume must still be the
+    kept area times the ordered thickness.
+
+    The 0.4 um sliver case is the same geometry one nanometre either side of the
+    pinch, and it must come out just as solid.
+    """
+    for centre_x in (1.59963, 1.6):
+        board = _with_mounting_holes((centre_x, 9.0, MOUNT_DIAMETER_MM))
+        mesh = build_substrate_mesh(board)
+        _closed_and_solid(mesh, board)
+
+        # It is a HOLE, not a bite out of the rim: the board is still there on
+        # the far side of the bore, and gone at its centre. (5, 9) is clear of
+        # every other drill on the coupon.
+        assert _hits_along_the_bore_axis(mesh, centre_x, 9.0) == 0
+        assert _hits_along_the_bore_axis(mesh, 5.0, 9.0) == 2
+
+
+def test_two_overlapping_bores_are_cut_as_the_one_opening_they_make():
+    """MUTATION THIS CATCHES: rings fed to the triangulator without the boolean
+    — two overlapping hole rings are undefined input to ear clipping, and the
+    plausible-looking output is a web of material across the middle of an
+    opening that is not there on the real board.
+
+    ORACLE: two 3.2 mm bores 1.5 mm apart overlap, so what is left is ONE
+    opening 4.7 mm wide, and the material between the two centres is gone. The
+    region count says the boolean merged them; the ray says the merge reached
+    the geometry.
+    """
+    board = _with_mounting_holes((6.0, 9.0, MOUNT_DIAMETER_MM),
+                                 (7.5, 9.0, MOUNT_DIAMETER_MM))
+    mesh = build_substrate_mesh(board)
+    _closed_and_solid(mesh, board)
+
+    merged = [hole for region in board_regions(board) for hole in region.holes
+              if min(p[0] for p in hole) < 5.0 < max(p[0] for p in hole)]
+    assert len(merged) == 1, "the two bores were not merged into one opening"
+    span = max(p[0] for p in merged[0]) - min(p[0] for p in merged[0])
+    assert abs(span - (1.5 + MOUNT_DIAMETER_MM)) < 0.02, f"the opening is {span} mm wide"
+
+    for x in (6.0, 6.75, 7.5):                 # both centres AND the waist
+        assert _hits_along_the_bore_axis(mesh, x, 9.0) == 0, x
+    assert _hits_along_the_bore_axis(mesh, 7.5 + 1.7, 9.0) == 2
+
+
+def test_an_opening_that_consumes_the_whole_board_is_refused_not_exported():
+    """MUTATION THIS CATCHES: the empty mesh. Subtracting an opening larger than
+    the outline leaves NO region, and a builder that loops over regions and
+    returns what it has produces a mesh with no triangles — which a writer
+    happily turns into a valid, empty model file that a person opens and sees
+    nothing in. "There is no board" is a refusal, not an export.
+    """
+    with pytest.raises(SubstrateMeshError) as refusal:
+        build_substrate_mesh(_with_mounting_holes((12.0, 9.0, 60.0)))
+    assert "no material left" in str(refusal.value)
