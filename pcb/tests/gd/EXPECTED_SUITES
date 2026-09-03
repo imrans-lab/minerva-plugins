@@ -291,7 +291,7 @@ test_staged_entities.gd assertions=72
 # number and this line is corrected. That loud failure is the pin
 # working, not the pin being wrong to keep.
 test_draft_composer.gd assertions=95
-test_staged_canvas.gd assertions=88
+test_staged_canvas.gd assertions=92
 # Pinned at OFC testex 2026-08-13 (first post-await-repair full run).
 test_staged_verbs.gd assertions=73
 test_draft_doorways.gd assertions=31
