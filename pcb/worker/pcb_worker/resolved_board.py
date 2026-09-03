@@ -19,6 +19,13 @@ import math
 from types import MappingProxyType
 from typing import Mapping, Protocol, TYPE_CHECKING, TypeAlias
 
+# ONE HOME for the ordered-appearance defaults. board_schema is the neutral,
+# dependency-free boundary module both Python paths already share, and it is
+# where the `fabrication` block's key set is declared; importing the numbers
+# from there keeps the IR's default and the validator's from drifting.
+from .board_schema import (DEFAULT_FINISH, DEFAULT_MASK_COLOUR,
+                           DEFAULT_THICKNESS_MM)
+
 if TYPE_CHECKING:  # pragma: no cover - annotation-only cycle breaker
     from .assembly_spec import ResolvedAssembly
     from .footprint_def import (
@@ -542,6 +549,38 @@ class RuleProfileRef:
         _nonempty(self.id, "RuleProfileRef.id")
         _nonempty(self.version, "RuleProfileRef.version")
         _nonempty(self.digest, "RuleProfileRef.digest")
+
+
+@dataclass(frozen=True)
+class ResolvedFabrication:
+    """The appearance this board was ORDERED in — mask colour, surface finish and
+    overall finished thickness, resolved to three effective values.
+
+    EVERY compiled board carries one, even a board that stated nothing: the
+    compiler substitutes the defaults we order today
+    (:mod:`board_schema` ``DEFAULT_*``) so no consumer re-derives them and no
+    reader has to handle "unset". The substitution happens HERE, in the IR —
+    never written back into the board document, so a board with no
+    ``fabrication`` block keeps its bytes and its source digest.
+
+    NOT IN ANY FABRICATION OUTPUT, and that is the point: no Gerber, drill file
+    or placement row carries a mask colour. The consumer is a renderer that
+    draws the board as it will actually look, plus the human-facing order
+    checklist, where a person matches these three against the vendor's form.
+
+    The strings are the vendor's own vocabulary, not an enum: the closed set
+    lives on the selected manufacturer profile, which is where a board house's
+    published menu belongs (``manufacturer_profile.LoadedRuleProfile.offers``).
+    """
+
+    mask_colour: str
+    finish: str
+    thickness_mm: float
+
+    def __post_init__(self) -> None:
+        _nonempty(self.mask_colour, "ResolvedFabrication.mask_colour")
+        _nonempty(self.finish, "ResolvedFabrication.finish")
+        _positive(self.thickness_mm, "ResolvedFabrication.thickness_mm")
 
 
 @dataclass(frozen=True)
@@ -1408,6 +1447,13 @@ class ResolvedBoard:
     zones: tuple[ResolvedZone, ...]
     board_graphics: tuple[BoardGraphic, ...]
     provenance: BoardProvenance
+    # The ORDERED APPEARANCE (T1). Defaulted rather than required so the field
+    # could be added without touching the single construction site's other
+    # arguments; the compiler always passes an explicit one, resolved from the
+    # board's own `fabrication` block against the selected profile's menu.
+    fabrication: ResolvedFabrication = ResolvedFabrication(
+        mask_colour=DEFAULT_MASK_COLOUR, finish=DEFAULT_FINISH,
+        thickness_mm=DEFAULT_THICKNESS_MM)
 
     def __post_init__(self) -> None:
         _nonempty(self.id, "ResolvedBoard.id")

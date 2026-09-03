@@ -874,7 +874,13 @@ def render_checklist(*, board, profile, provenance, digests, blockers, advisorie
     are chosen on a web form, and if nobody writes them down the order is not
     reproducible. The last section is the ONLY place ``order_page_verified`` can
     be recorded, which is why it is a form a person fills in rather than a field
-    this code sets."""
+    this code sets.
+
+    THREE of those choices are no longer blanks: mask colour, surface finish and
+    board thickness are recorded on the board itself (``fabrication``) and are
+    printed here, so the person ordering matches them against the vendor's form
+    rather than remembering them. Still no file in the envelope encodes them —
+    that is why they remain in this section rather than moving to the manifest."""
     service = profile.service
     lines: list[str] = []
     add = lines.append
@@ -926,12 +932,28 @@ def render_checklist(*, board, profile, provenance, digests, blockers, advisorie
     add("")
     add("Fill each in as you set it, so the order can be repeated:")
     add("")
+    # THREE OF THESE PROMPTS ALREADY HAVE AN ANSWER. The board records the
+    # appearance it was ordered in (`fabrication`), so the checklist prints the
+    # recorded value instead of a blank and the box becomes a MATCH — set the
+    # vendor's form to this, then tick. The remaining prompts stay blanks
+    # because nothing anywhere records them. This is a check line, not an
+    # attempt to fill the vendor's form in.
+    appearance = board.fabrication
+    thickness = f"{appearance.thickness_mm:g} mm"
+    if service is not None and not service.constraints.accepts_thickness(
+            appearance.thickness_mm):
+        thickness += (f" — OUTSIDE the {profile.display_name} band "
+                      f"({service.constraints.board_min_thickness_mm:g}"
+                      f"–{service.constraints.board_max_thickness_mm:g} mm)")
+    recorded = {"Board thickness": thickness,
+                "Surface finish": appearance.finish,
+                "Solder-mask colour": appearance.mask_colour}
     for prompt in ("Quantity", "Base material", "Board thickness",
                    "Outer copper weight", "Surface finish", "Solder-mask colour",
                    "Silkscreen colour", "PCBA tier and side",
                    "Panelization / delivery format",
                    "Serial-number or barcode service (opt-in, changes the artwork)"):
-        add(f"- [ ] {prompt}: ______")
+        add(f"- [ ] {prompt}: {recorded.get(prompt, '______')}")
     add("- [ ] \"Confirm production file\" selected, so any house modification "
         "is shown before manufacture")
     if service is not None and service.constraints.tooling_holes_added:

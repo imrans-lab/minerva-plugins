@@ -185,6 +185,21 @@ class ServiceConstraints:
     tooling_holes_added: bool
     tooling_hole_count: str
     tooling_hole_diameter_mm: float
+    #: The finished board THICKNESS this assembly tier accepts, as published.
+    #: A DIFFERENT FACT from the fab profile's ``capabilities.board_thickness_mm``
+    #: menu, and both are true at once: the bare-board service offers the whole
+    #: FR4 set, while an assembly tier accepts a narrower band of it (JLCPCB's
+    #: Economic column publishes "Thickness: 0.8mm - 1.6mm"). The fab profile's
+    #: menu is what a board's chosen thickness is VALIDATED against at compile
+    #: time; this pair is what the order checklist quotes beside the choice, so
+    #: the person ordering sees the tier's band before they pick the tier.
+    board_min_thickness_mm: float
+    board_max_thickness_mm: float
+
+    def accepts_thickness(self, thickness_mm: float) -> bool:
+        """Whether this tier's published band covers a finished thickness."""
+        return (self.board_min_thickness_mm <= float(thickness_mm)
+                <= self.board_max_thickness_mm)
 
 
 @dataclass(frozen=True)
@@ -232,7 +247,8 @@ _DIALECT_FIELDS = frozenset({
 _SERVICE_FIELDS = frozenset({
     "assembly_sides", "board_min_edge_mm",
     "board_max_short_edge_mm", "board_max_long_edge_mm", "component_to_edge_mm",
-    "tooling_holes_added", "tooling_hole_count", "tooling_hole_diameter_mm"})
+    "tooling_holes_added", "tooling_hole_count", "tooling_hole_diameter_mm",
+    "board_min_thickness_mm", "board_max_thickness_mm"})
 
 _TEMPLATE_FIELDS = frozenset({
     "artifact", "url", "referenced_from", "fetched", "sha256", "columns",
@@ -292,6 +308,15 @@ def _load_constraints(profile_id: str, data) -> ServiceConstraints:
         raise ServiceProfileError(
             f"service profile {profile_id!r} service.tooling_holes_added must be "
             f"a boolean; got {data['tooling_holes_added']!r}")
+    min_thickness = _number(
+        profile_id, "service.board_min_thickness_mm", data["board_min_thickness_mm"])
+    max_thickness = _number(
+        profile_id, "service.board_max_thickness_mm", data["board_max_thickness_mm"])
+    if not 0 < min_thickness <= max_thickness:
+        raise ServiceProfileError(
+            f"service profile {profile_id!r} service.board_min_thickness_mm "
+            f"({min_thickness}) must be positive and no greater than "
+            f"service.board_max_thickness_mm ({max_thickness})")
     if not isinstance(data["tooling_hole_count"], str):
         raise ServiceProfileError(
             f"service profile {profile_id!r} service.tooling_hole_count must be a "
@@ -306,6 +331,8 @@ def _load_constraints(profile_id: str, data) -> ServiceConstraints:
             profile_id, "service.board_max_long_edge_mm", data["board_max_long_edge_mm"]),
         component_to_edge_mm=_number(
             profile_id, "service.component_to_edge_mm", data["component_to_edge_mm"]),
+        board_min_thickness_mm=min_thickness,
+        board_max_thickness_mm=max_thickness,
         tooling_holes_added=data["tooling_holes_added"],
         tooling_hole_count=data["tooling_hole_count"],
         tooling_hole_diameter_mm=_number(

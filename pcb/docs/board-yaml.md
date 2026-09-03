@@ -983,6 +983,64 @@ Three surfaces read this one key and must never disagree about it:
   Options menu, folding identically and on the same tolerance, so a run the
   tool draws is a run the check passes.
 
+## Ordered appearance (`fabrication`)
+
+A board records the appearance it was **ordered** in. Three fields, all
+optional, all order-form choices no fabrication file encodes:
+
+```yaml
+fabrication:
+  mask_colour: black      # default: green
+  finish: ENIG            # default: HASL
+  thickness_mm: 1.0       # default: 1.6 — the OVERALL finished thickness
+```
+
+**The block is optional and so is every field in it.** A board that says nothing
+compiles exactly as it always did: the compiler substitutes the defaults we
+order today into the IR (`ResolvedFabrication`) and never writes them back into
+the document, so the board's bytes and its `source_digest` do not move. That is
+the whole compatibility claim, and it is what
+`test_board_fabrication.py::test_a_board_with_no_fabrication_block_compiles_as_before`
+exists to hold.
+
+**The profile says what the vendor OFFERS; the board says what WE CHOSE.** These
+are two different kinds of fact. What a board house offers is a property of the
+vendor, changes rarely, and is shipped data — so it lives on the manufacturer
+profile, as `capabilities.mask_colours`, `capabilities.surface_finishes` and
+`capabilities.board_thickness_mm`. What was chosen is a property of *this board
+and this order*, so it lives here. Putting the choice on the profile would force
+a profile fork per colour, or an edit of shipped vendor data every time an order
+changed.
+
+**Validation, and what silence means.** `compile_board._build_fabrication`
+checks each chosen value against the selected profile's published list:
+
+| profile says | result |
+|---|---|
+| no `capabilities` block, or no list for that field | the profile **said nothing** — the choice is accepted |
+| a list that contains the choice | accepted |
+| a list that does not | refused: `unoffered_fabrication_choice`, naming the field, the choice and the whole menu |
+
+Silence accepts, deliberately. Refusing on silence would reject every board
+compiled against a profile that never published its colours — including boards
+that chose nothing at all. Strings are compared **casefolded**, so an author
+writing `green` matches a page that prints `Green`; thickness is compared as a
+number.
+
+**These three menus are NOT in the profile digest**, unlike
+`capabilities.max_copper_layers`. The digest pins the rules that decide what
+gets *fabricated*, and no Gerber, drill file or placement row carries a mask
+colour — so recording a menu the vendor has always offered must not repin every
+board already compiled against that profile.
+
+**Nothing renders them yet.** The consumers today are the IR (for a later
+renderer that draws the board as it will actually look) and `ORDER-CHECKLIST.md`,
+which prints the three values so the person ordering matches them against the
+vendor's form instead of remembering them.
+
+**Not modeled here:** a stackup beyond the one overall thickness, inner-layer
+appearance, and per-region mask colour.
+
 ## Board graphics
 
 `board_graphics` is artwork the **board** owns rather than a component: a

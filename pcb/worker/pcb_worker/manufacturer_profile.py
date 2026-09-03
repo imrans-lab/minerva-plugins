@@ -82,7 +82,32 @@ ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
 # only what every profile has always fabricated" -- the v1 two-copper-layer
 # baseline. A profile must DECLARE a capability to unlock it; silence never
 # widens what a board house is claimed to build.
-ALLOWED_CAPABILITY_FIELDS: tuple[str, ...] = ("max_copper_layers",)
+ALLOWED_CAPABILITY_FIELDS: tuple[str, ...] = (
+    "max_copper_layers",
+    # THE APPEARANCE MENU (T1). What the board house OFFERS for the three
+    # order-form choices a board now records under its own `fabrication` block:
+    # solder-mask colour, surface finish and overall board thickness. These are
+    # OFFER LISTS, not floors and not ceilings, so the fail-closed direction is
+    # a third one again: a profile that publishes no list has SAID NOTHING and
+    # every choice stands, exactly as an absent floor field means "no such rule".
+    # Refusing on silence would reject every board including the defaults we
+    # order today, which is plainly the wrong answer for a profile whose vendor
+    # simply never published a menu.
+    "mask_colours",
+    "surface_finishes",
+    "board_thickness_mm",
+)
+
+#: The `fabrication` field each offer list answers, and how a choice is compared
+#: against it. Strings are compared CASEFOLDED — a vendor writes "Green" on its
+#: capabilities page and an author writes "green" in the board, and refusing
+#: that pair would be a spelling check masquerading as a capability check.
+#: Thickness is compared as a number, so 1.60 and 1.6 are one choice.
+APPEARANCE_CAPABILITIES: dict[str, str] = {
+    "mask_colour": "mask_colours",
+    "finish": "surface_finishes",
+    "thickness_mm": "board_thickness_mm",
+}
 
 # The capability every profile has when it declares none: the v1 stack. Two
 # copper layers is not a guess -- it is the only stack any profile-selected
@@ -187,6 +212,39 @@ class LoadedRuleProfile:
     floor: ManufacturingConstraints
     layer: str = SEED_LAYER
     max_copper_layers: int = DEFAULT_MAX_COPPER_LAYERS
+    #: The APPEARANCE MENU this board house publishes, or ``None`` for "this
+    #: profile said nothing" — which is not the same as an empty list and must
+    #: never collapse into one. ``None`` accepts every choice; a populated tuple
+    #: is the complete set of choices the vendor offers.
+    mask_colours: Union[tuple[str, ...], None] = None
+    surface_finishes: Union[tuple[str, ...], None] = None
+    board_thickness_mm: Union[tuple[float, ...], None] = None
+
+    def offers(self, field: str) -> Union[tuple, None]:
+        """What this profile offers for one ``fabrication`` field, or ``None``
+        when it publishes no list for it."""
+        return getattr(self, APPEARANCE_CAPABILITIES[field])
+
+    def appearance_refusal(self, field: str, value) -> Union[str, None]:
+        """Why this profile does not offer ``value`` for ``field``, or ``None``.
+
+        ``None`` on TWO different grounds, deliberately: the profile publishes
+        no list for the field (it said nothing, so the choice stands), or it
+        publishes one and the choice is in it. The refusal names the field, the
+        choice, and the whole menu, because "black is not offered" without the
+        list leaves the author guessing what is.
+        """
+        offered = self.offers(field)
+        if offered is None:
+            return None
+        if isinstance(value, str):
+            if any(value.casefold() == item.casefold() for item in offered):
+                return None
+        elif any(float(value) == float(item) for item in offered):
+            return None
+        return (f"fabrication.{field} {value!r} is not offered by rule profile "
+                f"{self.ref.id!r}; it offers "
+                f"{', '.join(str(item) for item in offered)}")
 
 
 def _profile_path(profile_id: str, root: Path) -> Path:
@@ -249,6 +307,40 @@ def load_rule_profile(
         f"unknown rule profile {profile_id!r}: no such file in any of the "
         f"{len(searched)} library layers "
         f"({'; '.join(str(path) for path in searched)})")
+
+
+def _offer_list(profile_id: str, capabilities: dict, key: str, kind):
+    """One APPEARANCE MENU off a profile's capabilities, or ``None`` when the
+    profile declares no such list.
+
+    Validated exactly as strictly as a floor when PRESENT (module docstring):
+    a list, non-empty, every item of the right kind. An EMPTY list is refused
+    rather than read as "offers nothing" -- a board house that fabricates
+    nothing is not a fact any profile means to state, and the honest spelling of
+    "no menu published" is to omit the key.
+    """
+    if key not in capabilities:
+        return None
+    value = capabilities[key]
+    if not isinstance(value, list) or not value:
+        raise RuleProfileError(
+            f"rule profile {profile_id!r} capabilities.{key} must be a non-empty "
+            f"list of the choices the board house offers; got {value!r}")
+    items = []
+    for item in value:
+        if kind is str:
+            if not isinstance(item, str) or not item.strip():
+                raise RuleProfileError(
+                    f"rule profile {profile_id!r} capabilities.{key} entries must be "
+                    f"non-empty strings; got {item!r}")
+            items.append(item)
+        else:
+            if isinstance(item, bool) or not isinstance(item, (int, float)) or item <= 0:
+                raise RuleProfileError(
+                    f"rule profile {profile_id!r} capabilities.{key} entries must be "
+                    f"positive numbers; got {item!r}")
+            items.append(float(item))
+    return tuple(items)
 
 
 def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRuleProfile:
@@ -357,6 +449,9 @@ def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRu
     # is not a fabrication option, and accepting 4.0 here would put a float
     # into a count comparison and into the digest.
     max_copper_layers = DEFAULT_MAX_COPPER_LAYERS
+    mask_colours: Union[tuple[str, ...], None] = None
+    surface_finishes: Union[tuple[str, ...], None] = None
+    board_thickness_mm: Union[tuple[float, ...], None] = None
     capabilities = data.get("capabilities")
     declared_capabilities: dict[str, int] = {}
     if capabilities is not None:
@@ -385,12 +480,27 @@ def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRu
                     f"between 2 and {ceiling}; got {value!r}")
             max_copper_layers = value
             declared_capabilities["max_copper_layers"] = value
+        mask_colours = _offer_list(profile_id, capabilities, "mask_colours", str)
+        surface_finishes = _offer_list(profile_id, capabilities, "surface_finishes", str)
+        board_thickness_mm = _offer_list(
+            profile_id, capabilities, "board_thickness_mm", float)
 
     # The digest payload gains a "capabilities" key ONLY when the file declares
     # one -- the same shape-preserving rule the optional floor tier uses: a
     # profile that says nothing digests exactly as it did before the tier
     # existed, and a profile that DOES declare a capability digests
     # differently, which is correct -- its fabrication claim really changed.
+    #
+    # THE THREE APPEARANCE MENUS ARE DELIBERATELY NOT IN THE DIGEST, and this is
+    # the one place the "every declared capability repins the profile" rule is
+    # broken on purpose. The digest exists so a REBUILD of a board either
+    # reproduces the same fabrication artifacts or refuses. max_copper_layers
+    # belongs in it because it decides how many copper layers get plotted -- it
+    # is visible in the emitted files. A mask colour is not: no Gerber, drill
+    # file or CPL row carries it, and no emitted byte moves when the menu grows
+    # a colour. Digesting the menu would repin every board compiled against
+    # jlcpcb-2layer the moment we recorded what JLCPCB has always offered, which
+    # is a false claim that those boards' RULES changed.
     digest_payload: dict = {"floor": numeric_floor, "profile": profile_id}
     if declared_capabilities:
         digest_payload["capabilities"] = declared_capabilities
@@ -405,4 +515,7 @@ def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRu
         floor=constraints,
         layer=layer_name,
         max_copper_layers=max_copper_layers,
+        mask_colours=mask_colours,
+        surface_finishes=surface_finishes,
+        board_thickness_mm=board_thickness_mm,
     )

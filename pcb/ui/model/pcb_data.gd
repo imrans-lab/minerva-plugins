@@ -154,6 +154,16 @@ var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 ## DCR 019ffc52c358). Opaque to this model — carried, never adjudicated.
 var library_lock: Dictionary = {}
 
+## The board's ORDERED APPEARANCE: {mask_colour?, finish?, thickness_mm?} — the
+## three order-form choices that decide what the finished board LOOKS like
+## (pcb/internal/board's Fabrication struct). CARRIED, NEVER ADJUDICATED, for
+## the same reason the library lock is: this model is not the authority on what
+## a board house offers — the manufacturer profile is — and its whole job here
+## is to not lose the choice. Empty means the board stated nothing, and the
+## worker then compiles it with the defaults we order today; the block is NOT
+## written back, so such a board's YAML stays byte-identical.
+var fabrication: Dictionary = {}
+
 var zones: Array[Dictionary] = []
 
 ## Authored cutouts — openings through the ENTIRE board (campaign 2 epoch B, U2
@@ -3757,6 +3767,14 @@ func to_board_dict() -> Dictionary:
 	# end-to-end (DCR 01a0033a12a9 change 3).
 	if not fabrication_stage.is_empty() and fabrication_stage != FAB_STAGE_ROUTED:
 		out["fabrication_stage"] = fabrication_stage
+	# Same conditional-emit idiom, same reason, and the same silent-drop point
+	# the library lock's comment describes: a board that names no appearance
+	# must serialize byte-identically to before this block existed, and one that
+	# DOES name an appearance must not lose it the first time someone opens the
+	# board in the panel and saves. Go's Fabrication field is a pointer with
+	# `omitempty`.
+	if not fabrication.is_empty():
+		out["fabrication"] = fabrication.duplicate(true)
 	return out
 
 
@@ -3767,7 +3785,8 @@ func to_board_dict() -> Dictionary:
 ## silently. Zones, cutouts and board graphics are carried verbatim and left
 ## to the codec, which refuses a stray key on them at the next save.
 const ROOT_KEYS: Array[String] = ["version", "id", "name", "width_mm", "height_mm",
-	"layers", "fabrication_stage", "origin", "design_rules", "library_lock",
+	"layers", "fabrication_stage", "fabrication", "origin", "design_rules",
+	"library_lock",
 	"components", "nets", "traces", "vias", "zones", "cutouts", "mounting_holes",
 	"pth_holes", "npth_holes", "board_graphics", "annotations", "route_hints"]
 const NET_KEYS: Array[String] = ["name", "pins"]
@@ -3877,6 +3896,13 @@ func from_board_dict(data: Dictionary, resolved: Dictionary = {}) -> void:
 	# from the board never having been locked.
 	library_lock = (data.get("library_lock", {}) as Dictionary).duplicate(true) \
 		if data.get("library_lock", null) is Dictionary else {}
+
+	# THE ORDERED APPEARANCE, carried on the same terms and for the same reason
+	# as the lock above: a non-Dictionary is replaced with {} rather than
+	# preserved, because this model cannot hand a malformed value to a consumer
+	# that indexes it, and the Go codec would refuse it at the next save anyway.
+	fabrication = (data.get("fabrication", {}) as Dictionary).duplicate(true) \
+		if data.get("fabrication", null) is Dictionary else {}
 
 	# Components (canonical list → id→object map)
 	components.clear()

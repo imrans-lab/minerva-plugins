@@ -90,3 +90,67 @@ _BOUNDARY_MESSAGES = {
                             "(zone_min_thickness_mm must be positive; "
                             "zone_min_island_area_mm2 must be non-negative)"),
 }
+
+
+# ---------------------------------------------------------------------------
+# The ordered appearance (`fabrication`)
+# ---------------------------------------------------------------------------
+
+#: The complete sub-key set the `fabrication` block admits — an ALLOW-LIST, and
+#: the Python HALF of the boundary the Go codec reads reflectively off the
+#: `board.Fabrication` struct tags (schema.go). Go needs no list because a field
+#: IS the declaration; Python has no such mechanism, so this is hand-written and
+#: has to be kept in step with the struct. An authored key with no reader is a
+#: choice that lies about having been made.
+FABRICATION_KEYS: tuple[str, ...] = ("mask_colour", "finish", "thickness_mm")
+
+#: What we order today. A board that states nothing gets these, and they are
+#: applied at COMPILE time only — never written back into the document, so a
+#: board with no `fabrication` block stays byte-identical on disk and its source
+#: digest does not move.
+DEFAULT_MASK_COLOUR = "green"
+DEFAULT_FINISH = "HASL"
+DEFAULT_THICKNESS_MM = 1.6
+
+
+def fabrication_refusal(board) -> "str | None":
+    """Why a board's ``fabrication`` block cannot be loaded, or ``None``.
+
+    Shape only — WHICH colours and finishes are legal is the selected
+    manufacturer profile's business, not the schema's (a board house publishes a
+    menu; a schema cannot). What this refuses is a malformed block: a
+    non-mapping, an unknown sub-key, or a value of the wrong type. The message
+    names the entity and the key, the way every other block's refusal does.
+
+    Both Python boundaries use it: the file parse (:mod:`board_model`) raises
+    this message, and :func:`board_validate.validate_board_v2` returns the
+    shared ``invalid_board_structure`` code Go's positive-schema walk returns
+    for the same document.
+    """
+    if not isinstance(board, dict):
+        return None
+    if "fabrication" not in board:
+        return None
+    block = board.get("fabrication")
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        return (f"board fabrication must be a mapping of "
+                f"{'/'.join(FABRICATION_KEYS)}; got {type(block).__name__}")
+    unknown = sorted(set(block) - set(FABRICATION_KEYS))
+    if unknown:
+        return (f"board fabrication declares unknown key(s) "
+                f"{'/'.join(unknown)}; the block accepts only "
+                f"{'/'.join(FABRICATION_KEYS)}")
+    for key in ("mask_colour", "finish"):
+        value = block.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            return (f"board fabrication.{key} must be a non-empty string naming "
+                    f"the choice as the vendor spells it; got {value!r}")
+    thickness = block.get("thickness_mm")
+    if thickness is not None and not (_is_number(thickness) and thickness > 0):
+        return (f"board fabrication.thickness_mm must be a positive number of "
+                f"millimetres; got {thickness!r}")
+    return None

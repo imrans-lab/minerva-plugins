@@ -1,0 +1,12 @@
+# `mask_color` — the American spelling of the key the schema actually has. This
+# is the realistic typo, and accepting it would leave the board green while its
+# author believed it black: the choice is silently substituted, and nothing
+# downstream can tell that a choice was ever made. Refused by entity and key on
+# both sides (Go's positive-schema walk reads its known keys off the struct
+# tags; the Python half is hand-written in board_schema.fabrication_refusal).
+version: 1
+name: MisspelledColour
+width_mm: 20
+height_mm: 20
+fabrication:
+  mask_color: black

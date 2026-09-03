@@ -45,6 +45,7 @@ func _init() -> void:
 	_run_fab_preview_accounting()
 	_run_approximation_notice()
 	_run_library_lock_round_trip()
+	_run_fabrication_round_trip()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -667,3 +668,43 @@ func _run_library_lock_round_trip() -> void:
 	})
 	check("an unlocked board emits NO library_lock key",
 		not d3.to_board_dict().has("library_lock"))
+
+
+# ── 12. the panel does not destroy a board's ORDERED APPEARANCE (T1) ──────────
+#
+# MUTATION THIS SECTION CATCHES: the same silent-drop as the lock above, one
+# key over. `fabrication` records what the board was ORDERED to look like — mask
+# colour, surface finish, overall thickness — and nothing in the panel edits it,
+# which is exactly why it is easy to lose: to_board_dict rebuilds the canonical
+# dict from typed fields, so a key this model does not carry is destroyed the
+# first time someone opens the board and saves. The board would then quietly
+# revert to green/HASL/1.6 with nobody told.
+
+func _run_fabrication_round_trip() -> void:
+	print("-- 12. fabrication survives open → save --")
+	var d = PCBData.new()
+	d.from_board_dict({
+		"version": 1, "name": "black", "width_mm": 20.0, "height_mm": 20.0,
+		"design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"], "components": [], "nets": [],
+		"traces": [], "vias": [],
+		"fabrication": {"mask_colour": "black", "finish": "ENIG", "thickness_mm": 1.0},
+	})
+	var out: Dictionary = d.to_board_dict()
+	check("the appearance survives the round trip", out.has("fabrication"))
+	var carried: Dictionary = out.get("fabrication", {})
+	check_eq("…the chosen colour", str(carried.get("mask_colour", "")), "black")
+	check_eq("…the chosen finish", str(carried.get("finish", "")), "ENIG")
+
+	# A board that names no appearance must stay byte-identical to before the
+	# block existed — an emitted empty block would churn every board's YAML on
+	# first open, and the worker already reads silence as the defaults.
+	var d2 = PCBData.new()
+	d2.from_board_dict({
+		"version": 1, "name": "plain", "width_mm": 20.0, "height_mm": 20.0,
+		"design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"], "components": [], "nets": [],
+		"traces": [], "vias": [],
+	})
+	check("a board naming no appearance emits NO fabrication key",
+		not d2.to_board_dict().has("fabrication"))

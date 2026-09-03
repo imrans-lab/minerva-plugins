@@ -54,8 +54,13 @@ from . import refdes_anchor
 from .board_schema import (
     _BOUNDARY_MESSAGES,
     _OVERRIDE_NUM_KEYS,
+    DEFAULT_FINISH,
+    DEFAULT_MASK_COLOUR,
+    DEFAULT_THICKNESS_MM,
+    FABRICATION_KEYS,
     _is_minted_id,
     _is_number,
+    fabrication_refusal,
 )
 from .board_validate import validate_board_v2
 from .canonical_id import CanonicalizationError, content_id, derive_id
@@ -132,6 +137,7 @@ from .resolved_board import (
     ResolvedComponent,
     ResolvedCutout,
     ResolvedDesignRules,
+    ResolvedFabrication,
     ResolvedHole,
     ResolvedLayer,
     ResolvedNet,
@@ -1041,6 +1047,60 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
         return None
 
 
+def _build_fabrication(board: dict, profile: LoadedRuleProfile,
+                       diags: _Diagnostics) -> Union[ResolvedFabrication, None]:
+    """Resolve the board's ORDERED APPEARANCE and check it against the menu the
+    SELECTED profile publishes.
+
+    THE SPLIT THIS FUNCTION IMPLEMENTS. What a board house OFFERS is a property
+    of the vendor and lives on the profile (shipped data, changes rarely). What
+    WE CHOSE is a property of this board and this order, and lives in the
+    board's own ``fabrication`` block. So this reads the choice from one and the
+    menu from the other, and never the two from one place.
+
+    AN ABSENT BLOCK, OR AN ABSENT FIELD, IS NOT AN ERROR: the defaults we order
+    today (green / HASL / 1.6 mm) fill it, so every board written before this
+    block existed compiles exactly as it did. The defaults are applied to the IR
+    only — the board document is not rewritten, so its bytes and its source
+    digest do not move.
+
+    SILENCE ON THE PROFILE SIDE ACCEPTS. A profile that publishes no menu for a
+    field has said nothing about it (the same reading an absent optional floor
+    field gets), so the choice stands. Refusing on silence would reject every
+    board compiled against a profile that has never listed its colours —
+    including boards that chose nothing at all. A menu that IS published and
+    does not contain the choice is refused BY NAME, with the whole menu quoted
+    (LoadedRuleProfile.appearance_refusal).
+    """
+    # Shape first, by the SAME rule the two other Python boundaries use. The
+    # shared-boundary gate at the top of `compile_board` normally catches a
+    # malformed block before this runs (it returns `invalid_board_structure`,
+    # the code Go's positive-schema walk returns for the same document); the
+    # check is repeated here so this function is TOTAL over any dict, and so
+    # the named refusal reaches a caller that reached the compiler another way.
+    refusal = fabrication_refusal(board)
+    if refusal is not None:
+        diags.error("invalid_fabrication", refusal, _board_ref())
+        return None
+    block = board.get("fabrication") or {}
+    chosen = {
+        "mask_colour": block.get("mask_colour") or DEFAULT_MASK_COLOUR,
+        "finish": block.get("finish") or DEFAULT_FINISH,
+        "thickness_mm": block.get("thickness_mm") or DEFAULT_THICKNESS_MM,
+    }
+    bad = False
+    for field in FABRICATION_KEYS:
+        refusal = profile.appearance_refusal(field, chosen[field])
+        if refusal is not None:
+            diags.error("unoffered_fabrication_choice", refusal, _board_ref())
+            bad = True
+    if bad:
+        return None
+    return ResolvedFabrication(
+        mask_colour=chosen["mask_colour"], finish=chosen["finish"],
+        thickness_mm=float(chosen["thickness_mm"]))
+
+
 def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str, ...],
                         profile_root: Union[str, Path, None],
                         library_layers: Union[Iterable, None],
@@ -1054,7 +1114,12 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
     SELECTED profile must declare a ``max_copper_layers`` capability at least
     that deep or the compile fails closed (epoch GA-1) -- a board house that
     has not published an N-layer service must not be handed an N-layer board.
-    """
+
+    Returns the board's :class:`ResolvedFabrication` as a third member, because
+    this is the ONE place the resolved profile exists and the ordered appearance
+    is checked against that profile's published menu. Re-resolving the profile
+    at a second site to get at its capabilities would re-read and re-digest the
+    file, and could disagree with the one the rules were built from."""
     rules = board.get("design_rules")
     if not isinstance(rules, dict):
         diags.error("missing_design_rules",
@@ -1113,6 +1178,9 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
     if minima is None:
         return None
     zone_min_thickness, zone_min_island_area = minima
+    fabrication = _build_fabrication(board, profile, diags)
+    if fabrication is None:
+        return None
     return ResolvedDesignRules(
         allowed_trace_angles_deg=angles,
         zone_min_thickness_mm=zone_min_thickness,
@@ -1126,7 +1194,7 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
         allowed_via_kinds=(ViaKind.THROUGH,),
         net_classes=net_classes,
         rule_profile=profile.ref,
-    ), class_id_by_net
+    ), class_id_by_net, fabrication
 
 
 def _allowed_trace_angles(rules: dict, diags: _Diagnostics):
@@ -2971,7 +3039,8 @@ def compile_board(
     built_rules = _build_design_rules(board, board_id, requested_outputs, profile_root,
                                      library_layers, diags,
                                      copper_layer_count=len(declared_layers))
-    design_rules, class_id_by_net = built_rules if built_rules is not None else (None, {})
+    design_rules, class_id_by_net, fabrication = (
+        built_rules if built_rules is not None else (None, {}, None))
 
     net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
 
@@ -3351,6 +3420,7 @@ def compile_board(
             zones=zones,
             board_graphics=board_graphics,
             provenance=provenance,
+            fabrication=fabrication,
         )
     except (ValueError, TypeError) as exc:
         diags.error("board_invariant", f"resolved board rejected: {exc}", _board_ref())

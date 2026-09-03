@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from .board_schema import component_value_refusal
+from .board_schema import component_value_refusal, fabrication_refusal
 
 # Required top-level fields per the canonical contract. traces / vias / layers /
 # origin / design_rules are optional (board.go marks them omitempty). There is no
@@ -167,6 +167,13 @@ def _parse_board_text(source: str) -> dict:
     # invalid_board_structure for the same document, but only this boundary can
     # tell the author which component and which key to delete.
     refusal = component_value_refusal(data)
+    if refusal is not None:
+        raise BoardParseError(refusal)
+    # Same boundary, same reason (board_schema.fabrication_refusal): the shared
+    # code validator returns invalid_board_structure for a malformed
+    # `fabrication` block, but only this boundary can tell the author which key
+    # inside it to delete or retype.
+    refusal = fabrication_refusal(data)
     if refusal is not None:
         raise BoardParseError(refusal)
     return data

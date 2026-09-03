@@ -1,0 +1,13 @@
+# The ordered appearance. All three keys are optional and a board may state any
+# subset; this one states all three so a codec that admits the block but not one
+# of its fields is caught. WHICH colours and finishes are legal is the selected
+# manufacturer profile's business, not the schema's — a board house publishes a
+# menu, a schema cannot — so no value here is checked against a list.
+version: 1
+name: OrderedInBlack
+width_mm: 20
+height_mm: 20
+fabrication:
+  mask_colour: black
+  finish: ENIG
+  thickness_mm: 1.0

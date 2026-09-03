@@ -114,6 +114,18 @@ Sources, all fetched 2026-08-30 and quoted in the file's own `source` field:
 
 Two things worth knowing before reading the file:
 
+- **The tier's thickness band is structured, and it is not the fab menu.**
+  `service.board_min_thickness_mm` / `service.board_max_thickness_mm` (0.8 /
+  1.6) are the Economic column's published `Thickness: 0.8mm - 1.6mm`, which
+  used to sit only in the profile's prose. Its reader is `ORDER-CHECKLIST.md`,
+  which quotes the band beside the thickness the board recorded in its own
+  `fabrication` block and names a choice that falls outside it. This is the
+  **assembly tier's** band and is deliberately narrower than the bare-board menu
+  on the fab profile (`jlcpcb-2layer` `capabilities.board_thickness_mm`, the
+  published FR4 set 0.4–2.0 mm): two published facts about two services, not one
+  fact recorded twice. Only the fab profile's menu gates a compile; the band is
+  a check line a person reads.
+
 - **Header drift is real and is not resolved offline.** The workbook JLCPCB
   currently serves spells its catalogue column `JLCPCB Part #（optional）` — with
   full-width parentheses — while every exporter in circulation, including this
