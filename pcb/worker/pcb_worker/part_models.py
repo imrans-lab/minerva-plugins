@@ -218,6 +218,16 @@ class ModelReference:
     ``z_mm`` is the vendor's own z (observed negative on a through-hole header,
     whose body hangs below the board). What any of that means once the part is
     placed on OUR board is not decided here.
+
+    ``outline_bbox_mm`` is the box of the ``outline3D`` polylines the SVGNODE
+    carries as children — the vendor's OWN 2D projection of the sited model
+    onto its footprint canvas — as ``(min_x, min_y, max_x, max_y)``, relative
+    to the datum like everything else, or ``None`` when the node draws none.
+    Reported beside ``c_origin`` rather than instead of it because the two are
+    observed to DISAGREE (:mod:`pcb_worker.part_seat` measured six of
+    twenty-five live parts with a stale or nonsensical ``c_origin`` while the
+    outline sat on the pads every time); which one a consumer trusts is that
+    consumer's decision, made with both numbers in hand.
     """
 
     uuid: str
@@ -228,6 +238,7 @@ class ModelReference:
     z_mm: float
     width_mm: float
     height_mm: float
+    outline_bbox_mm: Union[tuple[float, float, float, float], None] = None
 
 
 @dataclass(frozen=True)
@@ -315,6 +326,7 @@ def _model_reference(shapes: Sequence[Any], origin_x: float,
         rot = [_f(v, 0.0) or 0.0
                for v in str(attrs.get("c_rotation") or "0,0,0").split(",")]
         rot = (rot + [0.0, 0.0, 0.0])[:3]
+        outline = _outline_bbox(node.get("childNodes"), origin_x, origin_y)
         return ModelReference(
             uuid=uuid,
             title=str(attrs.get("title") or ""),
@@ -324,8 +336,38 @@ def _model_reference(shapes: Sequence[Any], origin_x: float,
             z_mm=(_f(attrs.get("z"), 0.0) or 0.0) * VENDOR_UNIT_MM,
             width_mm=(_f(attrs.get("c_width"), 0.0) or 0.0) * VENDOR_UNIT_MM,
             height_mm=(_f(attrs.get("c_height"), 0.0) or 0.0) * VENDOR_UNIT_MM,
+            outline_bbox_mm=outline,
         )
     return None
+
+
+def _outline_bbox(children: Any, origin_x: float, origin_y: float,
+                  ) -> Union[tuple[float, float, float, float], None]:
+    """The box of every ``points`` polyline under an SVGNODE, in millimetres
+    relative to the datum — or None when there is nothing usable.
+
+    A point list is ``"x y x y ..."`` in canvas units. An odd trailing token or
+    an unreadable number drops that pair and nothing else: the box is a
+    summary, and a summary of the readable points is still the vendor's
+    statement, whereas refusing the whole outline over one bad token would
+    push a consumer back onto ``c_origin``, the number this exists to check.
+    """
+    if not isinstance(children, (list, tuple)):
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+    for child in children:
+        attrs = child.get("attrs") if isinstance(child, Mapping) else None
+        tokens = str(attrs.get("points") or "").split() if isinstance(attrs, Mapping) else ()
+        for i in range(0, len(tokens) - 1, 2):
+            x, y = _f(tokens[i]), _f(tokens[i + 1])
+            if x is None or y is None:
+                continue
+            xs.append((x - origin_x) * VENDOR_UNIT_MM)
+            ys.append((y - origin_y) * VENDOR_UNIT_MM)
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def _pads(shapes: Sequence[Any], origin_x: float,

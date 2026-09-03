@@ -210,6 +210,53 @@ def our_pad_field(parsed: Mapping[str, Any],
                            for p in parsed.get("pads") or ()))
 
 
+def pad_field_from_definition(footprint) -> PadField:
+    """The pad field of a BUILT footprint (``footprint_def.FootprintDefinition``),
+    for a consumer holding a compiled board rather than a parsed file.
+
+    Same collection rule as :func:`our_pad_field` — duplicates dropped, numbers
+    as written — so the two readings of one drawing cannot disagree.
+    """
+    return _collect(footprint.name, ((pad.number, pad.position[0], pad.position[1])
+                                     for pad in footprint.pads))
+
+
+def pad_field_from_vendor_pads(source: str, pads: Iterable[Any]) -> PadField:
+    """The pad field of a vendor drawing already normalized by
+    ``part_models.parse_component_payload`` (its ``VendorPad`` records), for a
+    consumer that fetched the payload through that client instead of reading a
+    corpus file through :func:`parse_vendor_payload`."""
+    return _collect(source, ((pad.number, pad.x_mm, pad.y_mm) for pad in pads))
+
+
+def datum_offset(ours: PadField, vendor: PadField, offset_deg: int,
+                 ) -> Union[tuple[float, float], None]:
+    """Where the VENDOR's drawing origin lands in OUR footprint-local frame once
+    the vendor's drawing is turned by ``offset_deg`` and the two pad fields are
+    laid on top of each other::
+
+        datum = centroid(ours[shared]) - rotate_ccw(centroid(vendor[shared]), offset_deg)
+        a vendor point v maps to ours as  rotate_ccw(v, offset_deg) + datum
+
+    Centroids are over the pads whose NUMBERS both drawings share — the same
+    population the angle was decided on — so a pad one drawing has and the
+    other lacks cannot drag the datum. None when fewer than one pad is shared.
+
+    This is the translation half of the vendor-to-ours map; the ledger stores
+    only the rotation half, so a consumer siting a vendor model recomputes this
+    from the two drawings it is holding. :func:`measure_orientation` reports
+    the same value as ``datum_offset_mm`` and calls THIS to do it, so the
+    measurement and the consumer cannot drift apart on the rule.
+    """
+    shared = sorted(set(ours.centres) & set(vendor.centres))
+    if not shared:
+        return None
+    ours_c = _centroid([ours.centres[n] for n in shared])
+    vendor_c = _centroid([rotate_ccw(vendor.centres[n], offset_deg) for n in shared])
+    return (round(ours_c[0] - vendor_c[0], _ROUND),
+            round(ours_c[1] - vendor_c[1], _ROUND))
+
+
 # ---------------------------------------------------------------------------
 # The vendor side — EasyEDA/LCSC package payloads
 # ---------------------------------------------------------------------------
@@ -364,18 +411,23 @@ class OrientationMeasurement:
         }
 
 
-def _rotate_ccw(point: tuple[float, float], degrees: int) -> tuple[float, float]:
+def rotate_ccw(point: tuple[float, float], degrees: float) -> tuple[float, float]:
     """Rotate counter-clockwise ON SCREEN in a Y-DOWN frame.
 
     Both container formats put +Y downward, so the familiar
     ``(x cos - y sin, x sin + y cos)`` turns clockwise there. Getting this
     backwards is invisible at 0 and 180 and inverts the answer at 90 and 270 —
     which is why the sense is pinned by the human-confirmed pairs in the tests.
+
+    Public because it IS the sense ``offset_deg`` is stated in: a consumer that
+    applies a ledger offset to a vendor point must turn it with this function
+    and no other spelling of a rotation.
     """
     radians = math.radians(degrees)
     cos, sin = math.cos(radians), math.sin(radians)
     x, y = point
     return (x * cos + y * sin, -x * sin + y * cos)
+
 
 
 def _centroid(points: Sequence[tuple[float, float]]) -> tuple[float, float]:
@@ -394,7 +446,7 @@ def _fit(ours: Sequence[tuple[float, float]],
     drawings never masquerades as a rotation.
     """
     ours_c = _centroid(ours)
-    vendor_rotated = [_rotate_ccw(p, degrees) for p in vendor]
+    vendor_rotated = [rotate_ccw(p, degrees) for p in vendor]
     vendor_c = _centroid(vendor_rotated)
     total = 0.0
     worst = 0.0
@@ -481,11 +533,9 @@ def measure_orientation(ours: PadField,
     # once the two pad fields are laid on top of each other. Free to compute
     # and worth reporting: it is the datum difference, which is a separate
     # defect from a rotation and would otherwise be invisible (the fit removes
-    # it by construction).
-    vendor_rotated = [_rotate_ccw(p, best) for p in vendor_points]
-    vendor_c = _centroid(vendor_rotated)
-    datum = (round(ours_c[0] - vendor_c[0], _ROUND),
-             round(ours_c[1] - vendor_c[1], _ROUND))
+    # it by construction). Computed by the one public rule so a consumer that
+    # sites a model by it gets exactly this number.
+    datum = datum_offset(ours, vendor_field, best)
 
     # OFFSET ONLY WHERE THE ANGLE WAS DECIDED. `best` is the best-FITTING
     # angle whether or not anything separates it from its runner-up, so putting
