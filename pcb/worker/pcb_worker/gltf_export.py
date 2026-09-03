@@ -352,6 +352,8 @@ def _part_extras(part: pp.PlacedPart) -> dict:
         extras["reason"] = part.reason
     if part.prism_basis:
         extras["prism_basis"] = part.prism_basis
+    if part.provenance:
+        extras["provenance"] = dict(part.provenance)
     if part.anchor_delta_mm is not None:
         extras["anchor_delta_mm"] = round(part.anchor_delta_mm, 4)
     if part.notes:

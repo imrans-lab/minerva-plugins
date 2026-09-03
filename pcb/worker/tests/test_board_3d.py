@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+from datetime import datetime
 import struct
 from pathlib import Path
 
@@ -258,6 +259,29 @@ def test_warming_then_exporting_seats_the_parts_the_cold_run_could_not(
 
     assert set(kinds(cold).values()) == {pp.KIND_PLACEHOLDER}
     assert set(kinds(warmed).values()) == {pp.KIND_MODEL}
+
+    # AND THE FILE NAMES ITS SOURCES. Provenance is a pair oracle too: the
+    # export must cite, per part, the very document the warm reported fetching
+    # — same url, same digest, same timestamp — so a reader handed the .glb
+    # can answer "where did this mesh come from and when" without the cache.
+    fetched = {row["part"]: row for row in result["ready"]}
+    for row in fetched.values():
+        assert row["url"].startswith("http"), row
+        datetime.fromisoformat(row["fetched_at"])
+    for part_row in warmed["report"]["placement"]["parts"]:
+        cited = part_row["provenance"]
+        assert cited is not None, f"{part_row['ref']} was drawn from nowhere"
+        source = fetched[part_row["house_part"]]
+        assert cited == {"model_uuid": source["model_uuid"], "url": source["url"],
+                         "sha256": source["sha256"],
+                         "fetched_at": source["fetched_at"]}, part_row["ref"]
+    doc = _glb_json(Path(warmed["path"]))
+    on_nodes = {n["name"]: n["extras"]["provenance"]
+                for n in doc["nodes"] if "extras" in n and "provenance" in n["extras"]}
+    assert set(on_nodes) == {row["ref"] for row in warmed["report"]["placement"]["parts"]}
+    assert all(row["provenance"] is None
+               for row in cold["report"]["placement"]["parts"]), \
+        "a placeholder has no source to cite"
 
 
 def _forbidden(url, **_kwargs):

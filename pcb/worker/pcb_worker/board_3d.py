@@ -203,6 +203,8 @@ def warm_cache(board, params: dict, *, client=None) -> dict:
             "from_cache": bool(provenance.from_cache),
             "bytes": int(provenance.size_bytes),
             "sha256": provenance.sha256,
+            "url": provenance.url,
+            "fetched_at": provenance.fetched_at,
         })
 
     from_cache = sum(1 for row in ready if row["from_cache"])

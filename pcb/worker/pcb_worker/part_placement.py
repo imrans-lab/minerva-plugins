@@ -202,6 +202,10 @@ class PlacedPart:
     marker: Union[SceneMesh, None] = None
     prism_basis: Union[str, None] = None
     notes: tuple[str, ...] = ()
+    #: Where the vendor mesh came from — ``{"model_uuid", "url", "sha256",
+    #: "fetched_at"}`` off the cache sidecar — so a reader handed the file can
+    #: name the document a part was drawn from. None for a placeholder.
+    provenance: Union[dict, None] = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +236,7 @@ class PartPlacementReport:
                               "y": round(p.anchor_mm[1], 4)},
                 "prism_basis": p.prism_basis, "marked": p.marker is not None,
                 "notes": list(p.notes),
+                "provenance": p.provenance,
             } for p in self.parts],
             "excluded": list(self.excluded),
             "fallbacks": list(self.fallbacks),
@@ -476,6 +481,15 @@ def _orientation(row, house: str, ledger: ol.OrientationLedger,
     return None, f"measured but undecided or mismatched (verdict {record.verdict!r})"
 
 
+def _provenance(model) -> Union[dict, None]:
+    """The fetch record of a vendor mesh, as the report and the file state it."""
+    record = model.provenance
+    if record is None:
+        return None
+    return {"model_uuid": model.uuid, "url": record.url,
+            "sha256": record.sha256, "fetched_at": record.fetched_at}
+
+
 def _vendor(client, house_part: Union[str, None]):
     """Facts and model for one catalogue number, both possibly an Absence."""
     if not house_part:
@@ -633,7 +647,7 @@ def place_parts(board, emission, *, client,
             reason=why, house_part=row.house_part, footprint_ref=row.footprint_ref,
             mesh=mesh, height_mm=seated.height_mm, height_basis=HEIGHT_BASIS_MODEL,
             anchor_delta_mm=anchor_delta, anchor_mm=tuple(physical.anchor),
-            marker=marker, notes=tuple(notes)))
+            marker=marker, notes=tuple(notes), provenance=_provenance(model)))
 
     return PartPlacementReport(
         parts=tuple(parts),
