@@ -219,8 +219,14 @@ def test_a_key_the_block_does_not_have_is_refused_naming_it():
 def test_a_malformed_thickness_is_refused_rather_than_defaulted():
     """A value of the wrong type is a defect, not a silent fall back to 1.6:
     a board asking for a thickness this pipeline cannot read must say so.
+
+    The code is pinned rather than accepted from a set. A malformed block is
+    caught by the shared boundary, the same authority Go's positive-schema walk
+    answers with, so ``invalid_board_structure`` is the ONLY code a compile can
+    produce for it — accepting a second one would hide a refusal that had
+    quietly moved somewhere else.
     """
     result = compile_board(_board(thickness_mm="thick"))
     assert isinstance(result, ResolutionFailure)
-    assert any(d.code in ("invalid_fabrication", "invalid_board_structure")
-               for d in result.diagnostics)
+    assert [d.code for d in result.diagnostics
+            if d.severity.value == "error"] == ["invalid_board_structure"]

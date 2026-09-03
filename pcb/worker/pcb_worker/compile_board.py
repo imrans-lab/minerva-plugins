@@ -60,7 +60,6 @@ from .board_schema import (
     FABRICATION_KEYS,
     _is_minted_id,
     _is_number,
-    fabrication_refusal,
 )
 from .board_validate import validate_board_v2
 from .canonical_id import CanonicalizationError, content_id, derive_id
@@ -1050,38 +1049,25 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
 def _build_fabrication(board: dict, profile: LoadedRuleProfile,
                        diags: _Diagnostics) -> Union[ResolvedFabrication, None]:
     """Resolve the board's ORDERED APPEARANCE and check it against the menu the
-    SELECTED profile publishes.
-
-    THE SPLIT THIS FUNCTION IMPLEMENTS. What a board house OFFERS is a property
-    of the vendor and lives on the profile (shipped data, changes rarely). What
-    WE CHOSE is a property of this board and this order, and lives in the
-    board's own ``fabrication`` block. So this reads the choice from one and the
-    menu from the other, and never the two from one place.
+    SELECTED profile publishes. See ``docs/board-yaml.md``, "Ordered appearance",
+    for why the choice and the menu live on different objects.
 
     AN ABSENT BLOCK, OR AN ABSENT FIELD, IS NOT AN ERROR: the defaults we order
-    today (green / HASL / 1.6 mm) fill it, so every board written before this
-    block existed compiles exactly as it did. The defaults are applied to the IR
-    only — the board document is not rewritten, so its bytes and its source
-    digest do not move.
+    today fill it, so every board written before this block existed compiles
+    exactly as it did. The defaults are applied to the IR only — the board
+    document is not rewritten, so its bytes and its source digest do not move.
 
     SILENCE ON THE PROFILE SIDE ACCEPTS. A profile that publishes no menu for a
     field has said nothing about it (the same reading an absent optional floor
-    field gets), so the choice stands. Refusing on silence would reject every
-    board compiled against a profile that has never listed its colours —
-    including boards that chose nothing at all. A menu that IS published and
-    does not contain the choice is refused BY NAME, with the whole menu quoted
+    field gets), so the choice stands. A menu that IS published and does not
+    contain the choice is refused BY NAME, with the whole menu quoted
     (LoadedRuleProfile.appearance_refusal).
+
+    The block's SHAPE is already settled: the shared-boundary gate at the top of
+    ``compile_board`` runs ``fabrication_refusal`` through ``validate_board_v2``
+    and returns on any violation, so everything reached here is a mapping whose
+    keys and value types are known good.
     """
-    # Shape first, by the SAME rule the two other Python boundaries use. The
-    # shared-boundary gate at the top of `compile_board` normally catches a
-    # malformed block before this runs (it returns `invalid_board_structure`,
-    # the code Go's positive-schema walk returns for the same document); the
-    # check is repeated here so this function is TOTAL over any dict, and so
-    # the named refusal reaches a caller that reached the compiler another way.
-    refusal = fabrication_refusal(board)
-    if refusal is not None:
-        diags.error("invalid_fabrication", refusal, _board_ref())
-        return None
     block = board.get("fabrication") or {}
     chosen = {
         "mask_colour": block.get("mask_colour") or DEFAULT_MASK_COLOUR,

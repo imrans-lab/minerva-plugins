@@ -670,7 +670,7 @@ func _run_library_lock_round_trip() -> void:
 		not d3.to_board_dict().has("library_lock"))
 
 
-# ── 12. the panel does not destroy a board's ORDERED APPEARANCE (T1) ──────────
+# ── 12. the panel does not destroy a board's ORDERED APPEARANCE ───────────────
 #
 # MUTATION THIS SECTION CATCHES: the same silent-drop as the lock above, one
 # key over. `fabrication` records what the board was ORDERED to look like — mask

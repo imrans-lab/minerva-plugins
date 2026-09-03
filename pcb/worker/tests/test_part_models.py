@@ -195,27 +195,48 @@ def test_a_part_the_supplier_does_not_have_is_an_absence_not_an_error():
 # ---------------------------------------------------------------------------
 
 
+def _seed_components_cache(tmp_path, client, part: str, *, url=None) -> Path:
+    """Seed the on-disk cache the way a previous run leaves it: payload bytes
+    plus a provenance sidecar. Returns the tenant directory.
+
+    The recorded url defaults to the one ``client`` will actually request — a
+    sidecar carrying any OTHER url is a deliberate miss, which is what the
+    stale-entry case below feeds it.
+    """
+    data = _payload_bytes(part)
+    home = tmp_path / "cache" / pm.CACHE_TENANT / "components"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / f"{part}.json").write_bytes(data)
+    (home / f"{part}.json.meta.json").write_text(json.dumps({
+        "url": url if url is not None
+        else f"{client.api_base}{part}/components?version={client.api_version}",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "fetched_at": "2026-09-02T00:00:00+00:00",
+        "size_bytes": len(data),
+    }), encoding="utf-8")
+    return home
+
+
 def test_a_cached_part_resolves_with_the_network_refused(offline, tmp_path):
     """The no-second-fetch oracle, proved rather than counted.
 
-    The cache is seeded the way a previous run leaves it — payload bytes plus a
-    provenance sidecar — and the client is pointed at a dead address. Facts
-    coming back at all is proof no request was made, because a request would
-    have been refused. Provenance survives the round trip, and a second call
-    through the in-process memo answers identically.
+    The cache is seeded the way a previous run leaves it, and the client is
+    pointed at a dead address. Facts coming back at all is proof no request was
+    made, because a request would have been refused. Provenance survives the
+    round trip, and a second call through the in-process memo answers
+    identically.
+
+    Then the two ways an entry stops being trustworthy, each of which must fall
+    back to the network rather than serve what is on disk: bytes that no longer
+    match the recorded hash, and an entry FETCHED FROM A DIFFERENT URL. The
+    second is the API-version case — an entry is named for the catalogue number
+    alone, so bumping the pinned version after an upstream shape change would
+    otherwise serve the old shape forever.
     """
     part = "C910544"
     data = _payload_bytes(part)
     digest = hashlib.sha256(data).hexdigest()
-    home = tmp_path / "cache" / pm.CACHE_TENANT / "components"
-    home.mkdir(parents=True)
-    (home / f"{part}.json").write_bytes(data)
-    (home / f"{part}.json.meta.json").write_text(json.dumps({
-        "url": "https://easyeda.com/api/products/C910544/components",
-        "sha256": digest,
-        "fetched_at": "2026-09-02T00:00:00+00:00",
-        "size_bytes": len(data),
-    }), encoding="utf-8")
+    home = _seed_components_cache(tmp_path, offline, part)
 
     facts = offline.facts(part)
     assert not facts.absent, facts
@@ -225,11 +246,21 @@ def test_a_cached_part_resolves_with_the_network_refused(offline, tmp_path):
     assert facts.provenance.fetched_at == "2026-09-02T00:00:00+00:00"
     assert offline.facts(part) is facts
 
+    def _fresh() -> pm.VendorPartClient:
+        """A client with the same configuration and an empty in-process memo,
+        so the answer can only have come from disk or from the network."""
+        return pm.VendorPartClient(api_base=DEAD, model_base=DEAD, timeout=2.0)
+
     # A cache entry whose bytes no longer match its recorded hash is not
     # trusted: it falls back to the network, which here is refused.
     (home / f"{part}.json").write_bytes(data + b" ")
-    fresh = pm.VendorPartClient(api_base=DEAD, model_base=DEAD, timeout=2.0)
-    assert fresh.facts(part).absent
+    assert _fresh().facts(part).absent
+
+    # Neither is an entry recorded against a different url — here the same
+    # endpoint at an older pinned API version.
+    _seed_components_cache(tmp_path, offline, part,
+                           url=f"{DEAD}{part}/components?version=0.0.0.0")
+    assert _fresh().facts(part).absent
 
 
 def test_with_no_network_every_part_reports_absent_and_nothing_raises(offline):

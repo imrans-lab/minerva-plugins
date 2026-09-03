@@ -156,12 +156,13 @@ var library_lock: Dictionary = {}
 
 ## The board's ORDERED APPEARANCE: {mask_colour?, finish?, thickness_mm?} — the
 ## three order-form choices that decide what the finished board LOOKS like
-## (pcb/internal/board's Fabrication struct). CARRIED, NEVER ADJUDICATED, for
-## the same reason the library lock is: this model is not the authority on what
-## a board house offers — the manufacturer profile is — and its whole job here
-## is to not lose the choice. Empty means the board stated nothing, and the
-## worker then compiles it with the defaults we order today; the block is NOT
-## written back, so such a board's YAML stays byte-identical.
+## (pcb/internal/board's Fabrication struct; docs/board-yaml.md, "Ordered
+## appearance"). CARRIED, NEVER ADJUDICATED, for the same reason the library
+## lock is: the manufacturer profile is the authority on what a board house
+## offers, and this model's whole job here is to not lose the choice. Empty
+## means the board stated nothing, and the worker then compiles it with the
+## defaults; the block is NOT written back, so such a board's YAML stays
+## byte-identical.
 var fabrication: Dictionary = {}
 
 var zones: Array[Dictionary] = []
@@ -196,7 +197,7 @@ var history: Array[Dictionary] = []
 var history_index: int = -1
 const MAX_HISTORY_SIZE := 50
 
-## Monotonic-forward board revision (T1 — PcbRoutingWorkspace foundation).
+## Monotonic-forward board revision, the PcbRoutingWorkspace foundation.
 ## Increments on EVERY state-changing op — every forward mutation (via
 ## record_change, the shared mutation hook) AND every undo/redo restore. It is
 ## FORWARD-ONLY: undo produces a NEW board state, so it BUMPS the counter forward,
@@ -3041,15 +3042,14 @@ func save_to_history(action_name: String = "Change") -> void:
 		"components": _serialize_components(),
 		"nets": _serialize_nets(),
 		"traces": _serialize_traces(),
-		# F1 (Codex 019f70ec149b): the undo codec previously omitted vias +
-		# mounting_holes (only the full-board serialize carried them), so
-		# undoing an accepted via route removed its traces but ORPHANED its
-		# vias. Deep-duplicate both into the snapshot so _restore_state can
-		# rebuild them faithfully. Interim fix; the DCR (T1) unifies undo onto
-		# one complete board codec.
+		# The undo snapshot must carry vias + mounting_holes as well as traces:
+		# a snapshot without them restores an accepted via route's traces and
+		# ORPHANS its vias. Deep-duplicate both so _restore_state can rebuild
+		# them faithfully. This duplicates the full-board serialize; the two
+		# codecs are meant to converge onto one.
 		"vias": vias.duplicate(true),
 		"mounting_holes": mounting_holes.duplicate(true),
-		# Zones ride the snapshot for the SAME reason F1 put vias here. Nothing
+		# Zones ride the snapshot for the SAME reason vias do, above. Nothing
 		# edits a zone yet, so no undo step can currently change one — but the
 		# snapshot is applied WHOLESALE by _restore_state, so a zone absent from
 		# it is a zone DELETED by the next undo of an unrelated edit. Carrying it

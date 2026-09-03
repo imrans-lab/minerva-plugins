@@ -1,31 +1,57 @@
-"""POLYGON TRIANGULATION THAT ACCEPTS HOLES — ear clipping with hole bridging.
+"""POLYGON TRIANGULATION THAT ACCEPTS HOLES — a Python PORT of mapbox/earcut.
 
-WHY THIS EXISTS AT ALL. Nothing in this worker could triangulate a polygon
-before it. ``pyclipper`` does exact integer BOOLEANS and offsets and has no
-triangulator; ``gerbonara`` reads Gerbers; ``wavefront_obj`` reads triangles
-somebody else already made. A board that is a solid with real holes in it needs
-a triangle list, and an extrusion cannot invent one — an extruded ring is a
-tube, not a slab with a bore through it.
+THIRD-PARTY ORIGIN, STATED PLAINLY. This is not an independent implementation
+of ear clipping: it is a function-for-function port of the JavaScript
+``earcut`` library (mapbox/earcut v2.2.4), down to the hole-bridge search, the
+two robustness fallbacks and the point-in-triangle predicate. Names were
+snake_cased and the z-order spatial index was dropped (see COST below);
+everything else is upstream's algorithm and upstream's edge-case handling.
 
-THE ALGORITHM, NAMED: **ear clipping with hole bridging** — the classic
-O(n^2)-worst-case ear clip (Meisters), with interior holes removed first by the
-bridge construction Eberly describes and Mapbox's ``earcut`` popularised: each
-hole is joined to the outer ring by a doubly-traversed cut, turning a polygon
-with holes into one simple polygon that ear clipping can eat. Chosen because it
-is a few hundred dependency-free lines and needs no floating-point predicates
-beyond a cross product; the alternatives (constrained Delaunay, or a dependency
-such as ``mapbox_earcut``/``triangle``/``shapely``) buy triangle QUALITY, and
-nothing here cares about triangle quality — the output is drawn, not simulated,
-and a sliver renders exactly like a fat triangle.
+    earcut — https://github.com/mapbox/earcut (v2.2.4)
+
+    ISC License
+
+    Copyright (c) 2016, Mapbox
+
+    Permission to use, copy, modify, and/or distribute this software for any
+    purpose with or without fee is hereby granted, provided that the above
+    copyright notice and this permission notice appear in all copies.
+
+    THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+    WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+    MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+    ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+    ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+    IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+WHY IT EXISTS HERE. Nothing else in this worker triangulates. ``pyclipper``
+does exact integer booleans and offsets and has no triangulator; ``gerbonara``
+reads Gerbers; ``wavefront_obj`` reads triangles somebody else already made. A
+board that is a solid with real holes in it needs a triangle list, and an
+extrusion cannot invent one — an extruded ring is a tube, not a slab with a
+bore through it. Ported rather than taken as a dependency because it is a few
+hundred lines with no runtime deps, and the alternatives (constrained Delaunay,
+``mapbox_earcut``/``triangle``/``shapely``) buy triangle QUALITY, which nothing
+here needs: the output is drawn, not simulated, and a sliver renders exactly
+like a fat triangle.
+
+COST. The port omits upstream's optional z-order (Morton) hash, so ear
+candidacy is a linear scan of the ring and the whole clip is quadratic in
+vertex count. Measured on a rectangle with 16-gon holes: 40 holes (644 ring
+vertices) 11 ms, 80 holes 39 ms, 160 holes (2,564 vertices) 154 ms — doubling
+the hole count roughly quadruples the time. Fine at board scale, where a
+via-heavy face is ~1,500 vertices; a caller with tens of thousands wants the
+index back.
 
 THE INPUT THIS IS DESIGNED FOR is a cleaned Clipper region: rings that are
-simple, closed, correctly nested and consistently oriented. That is what
-:mod:`board_region` hands it, and it matters — ear clipping on rings that cross
-each other has no defined answer. The two robustness passes the standard
-implementation carries (splice out a local self-intersection; otherwise split
-the polygon at a valid diagonal and recurse) are kept anyway, because a
-degenerate-but-simple ring — three collinear points, a pinch where a bridge
-touches the ring it bridges to — is entirely reachable from real board data.
+simple, closed, correctly nested and consistently oriented, which is what
+:mod:`board_region` hands it. Ear clipping on rings that cross each other has
+no defined answer. Upstream's two robustness passes (splice out a local
+self-intersection; otherwise split at a valid diagonal and recurse) are kept
+anyway, because a degenerate-but-simple ring — three collinear points, a pinch
+where a bridge touches the ring it bridges to — is reachable from real board
+data.
 
 ORIENTATION IS A CONTRACT, not an observation. :func:`triangulate` normalises
 its input (outer ring positive signed area, holes negative) and every emitted

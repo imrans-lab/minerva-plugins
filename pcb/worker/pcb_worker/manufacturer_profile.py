@@ -84,7 +84,7 @@ ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
 # widens what a board house is claimed to build.
 ALLOWED_CAPABILITY_FIELDS: tuple[str, ...] = (
     "max_copper_layers",
-    # THE APPEARANCE MENU (T1). What the board house OFFERS for the three
+    # THE APPEARANCE MENU. What the board house OFFERS for the three
     # order-form choices a board now records under its own `fabrication` block:
     # solder-mask colour, surface finish and overall board thickness. These are
     # OFFER LISTS, not floors and not ceilings, so the fail-closed direction is

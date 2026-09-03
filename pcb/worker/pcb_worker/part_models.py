@@ -28,17 +28,21 @@ consumer's arithmetic and is deliberately absent from this file. A shared
 "compare two drawings" framework here would be the wrong shape: each consumer's
 check is a subtraction it writes itself, against facts it did not have to fetch.
 
-NOTHING FETCHED IS EVER COMMITTED
----------------------------------
+NOTHING FETCHED AT RUN TIME IS COMMITTED
+----------------------------------------
 Payloads and models are third-party vendor content served from a well-known
-public channel, keyed by a catalogue number the board already stores. They land
-in the PER-USER cache (:mod:`pcb_worker.cache_dir`) and nowhere else: not the
-repository, not the installed bundle. A fresh clone rebuilds every render and
-carries no vendor binary, which is precisely what keeps redistributing nothing
-defensible — these endpoints grant no redistribution terms.
+public channel, keyed by a catalogue number the board already stores. Whatever
+this client fetches lands in the PER-USER cache
+(:mod:`pcb_worker.cache_dir`) and nowhere else: not the repository, not the
+installed bundle. A fresh clone rebuilds every render and carries no vendor
+binary — these endpoints grant no redistribution terms.
 
-WHAT WAS MEASURED, 2026-09-02, RATHER THAN BELIEVED
----------------------------------------------------
+The one deliberate exception is the TEST CORPUS: a small set of package-drawing
+payloads is committed under ``tests/testdata/vendor_footprints/`` so the suite
+can parse real vendor documents with no network. No 3D MODEL is committed.
+
+WHAT WAS MEASURED RATHER THAN BELIEVED
+--------------------------------------
 * SCALE. Non-model shape coordinates are in units of 10 mil
   (:data:`VENDOR_UNIT_MM`). Re-derived from pitches the datasheets state, not
   taken on trust — see ``tests/test_part_models.py``.
@@ -486,8 +490,17 @@ class VendorPartClient:
             return None
         return path
 
-    def _cache_read(self, sub: str, name: str,
+    def _cache_read(self, sub: str, name: str, url: str,
                     ) -> Union[tuple[bytes, Provenance], None]:
+        """A cached body fetched from exactly ``url``, or None.
+
+        THE URL IS PART OF THE KEY even though the filename is not. An entry is
+        named for the catalogue number alone, so bumping :data:`API_VERSION` —
+        the one lever there is when the payload shape changes upstream — would
+        otherwise keep serving the old shape from a cache that never expires. A
+        recorded url that differs from the one being requested is a MISS, and
+        the refetch overwrites the entry.
+        """
         directory = self._dir(sub)
         if directory is None:
             return None
@@ -497,13 +510,15 @@ class VendorPartClient:
             recorded = json.loads(meta.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        if str(recorded.get("url") or "") != url:
+            return None
         digest = hashlib.sha256(data).hexdigest()
         if digest != recorded.get("sha256"):
             # A torn write or an edited cache entry. Refetch rather than trust
             # it: provenance that does not match its bytes is worse than none.
             log.warning("cache entry %s does not match its recorded hash", body)
             return None
-        return data, Provenance(url=str(recorded.get("url") or ""),
+        return data, Provenance(url=url,
                                 sha256=digest,
                                 fetched_at=str(recorded.get("fetched_at") or ""),
                                 size_bytes=len(data),
@@ -528,7 +543,7 @@ class VendorPartClient:
 
     def _get(self, sub: str, name: str, url: str,
              ) -> Union[tuple[bytes, Provenance], _Unreachable]:
-        hit = self._cache_read(sub, name)
+        hit = self._cache_read(sub, name, url)
         if hit is not None:
             return hit
         try:

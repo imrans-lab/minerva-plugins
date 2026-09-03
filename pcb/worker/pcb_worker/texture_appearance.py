@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .resolved_board import ResolvedFabrication
+
 RGB = tuple[int, int, int]
 
 #: Bare laminate, where the mask is absent and there is no copper. Not an
@@ -99,27 +101,32 @@ class Appearance:
     notes: tuple[str, ...] = ()
 
 
-def appearance_for(fabrication) -> Appearance:
-    """Swatches for one board's :class:`~resolved_board.ResolvedFabrication`.
+def appearance_for(fabrication: ResolvedFabrication) -> Appearance:
+    """Swatches for one board's ordered appearance.
+
+    Takes the IR dataclass, not anything shaped like it: ``ResolvedFabrication``
+    already guarantees a non-empty colour and finish in its ``__post_init__``, so
+    the fields are read directly and the only thing left to handle is a name
+    with no swatch.
 
     Thickness is deliberately unread: it is an ordered fact about the board, but
     it is not visible in a picture of one face. The 3D slab is where it matters.
     """
     notes: list[str] = []
 
-    mask_name = str(getattr(fabrication, "mask_colour", "") or "").strip().casefold()
+    mask_name = fabrication.mask_colour.strip().casefold()
     mask = MASK_SWATCHES.get(mask_name)
     if mask is None:
         notes.append(
-            f"solder-mask colour {getattr(fabrication, 'mask_colour', None)!r} has no swatch; "
+            f"solder-mask colour {fabrication.mask_colour!r} has no swatch; "
             f"rendered neutral. Known: {', '.join(sorted(MASK_SWATCHES))}")
         mask = NEUTRAL
 
-    finish_name = str(getattr(fabrication, "finish", "") or "").strip().casefold()
+    finish_name = fabrication.finish.strip().casefold()
     finish = FINISH_SWATCHES.get(finish_name)
     if finish is None:
         notes.append(
-            f"surface finish {getattr(fabrication, 'finish', None)!r} has no swatch; "
+            f"surface finish {fabrication.finish!r} has no swatch; "
             f"rendered neutral. Known: {', '.join(sorted(FINISH_SWATCHES))}")
         finish = NEUTRAL
 

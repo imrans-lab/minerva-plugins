@@ -2833,9 +2833,32 @@ def _host_for_placements(frag: dict) -> dict:
     }
 
 
+def _host_for_fabrication(frag: dict) -> dict:
+    """A board carrying the fragment's ordered appearance verbatim, PINNED to a
+    profile that publishes an appearance menu.
+
+    The pin is the point. A profile that publishes no menu accepts every choice,
+    so hosting this on the default (v1-fab-conservative, which declares no
+    capabilities) would compile the example without ever consulting a menu — and
+    would keep passing if the documented colour stopped being one a real board
+    house offers. jlcpcb-2layer publishes all three lists, so the example is
+    checked against a shipped vendor's actual offering."""
+    return {
+        "version": 1, "name": "fabrication-host", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4,
+                         "rule_profile": "jlcpcb-2layer"},
+        "components": [{"ref": "R1", "footprint": "R_0805", "x_mm": 5,
+                        "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
+        "fabrication": frag["fabrication"],
+    }
+
+
 _DOC_SPLICERS = {"pins": _host_for_pins, "design_rules": _host_for_design_rules,
                  "components": _host_for_components,
-                 "placements": _host_for_placements}
+                 "placements": _host_for_placements,
+                 "fabrication": _host_for_fabrication}
 
 
 @pytest.mark.parametrize("outputs", [V1_FAB_OUTPUTS, V1_ROUTING_OUTPUTS],

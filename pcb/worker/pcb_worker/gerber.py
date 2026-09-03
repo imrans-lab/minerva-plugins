@@ -1907,8 +1907,8 @@ def harvest_geometry(board: ResolvedBoard) -> _Geometry:
     show copper the board does not have.)
 
     The mask clearance is resolved here, once, by the module that owns the rule
-    (``mask_source``, station S4) rather than by each caller, so a preview and
-    an emission can never size the same opening differently.
+    (``mask_source``) rather than by each caller, so a preview and an emission
+    can never size the same opening differently.
     """
     return _harvest_ir(board, mask_source.resolve_ir_mask_clearance(board))
 

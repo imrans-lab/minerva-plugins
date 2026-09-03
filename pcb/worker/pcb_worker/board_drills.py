@@ -22,22 +22,16 @@ radius). One primitive covers all three hole features and both pad-drill shapes,
 and it is the shape ``pyclipper``'s round-joined offset produces exactly — no
 hand-rolled circle tessellation anywhere in the path.
 
-WHAT IS INCLUDED, AND THE EVIDENCE FOR IT
------------------------------------------
+WHAT IS INCLUDED
+----------------
 Board holes (mounting / NPTH / PTH), through-hole PAD drills, and VIAS: all of
-them, cut for real. Vias were expected to be PAINTED instead, on the argument
-that forty tiny cylinders buy nothing at a sane viewing distance. Measured, that
-argument does not survive: :mod:`texture_bake` already punches every via out of
-the texture's ALPHA (it iterates the whole ``g.holes`` bucket), so a via that the
-mesh does not cut is a fully transparent pinprick in a solid slab — a hole you
-can see through with no barrel wall behind it, which is worse than either
-honest answer. Painting vias properly would mean changing what the BAKE draws,
-which belongs to that module and that task. The cost of cutting them IS real
-and was measured rather than guessed: on smart-remote-v2 rev B, cutting its 42
-vias (0.4 and 0.6 mm drills) takes the substrate from 5,272 to 7,816 triangles —
-a third of the mesh for 2,544 triangles, which is a large proportion of a very
-small number. If the owner would rather have them painted, the change is in two
-places at once (here, and the bake's alpha punch), never in this one alone.
+them, cut for real. Vias are not free — on a via-dense board they are around a
+third of the substrate's triangles — but they cannot be left out of THIS module
+alone, because :mod:`texture_bake` punches every via out of the texture's ALPHA
+(it iterates the whole ``g.holes`` bucket). A via the mesh does not cut is
+therefore a fully transparent pinprick in a solid slab: a hole you can see
+through with no barrel wall behind it. Painting vias instead is a change to both
+sides at once, here and in the bake's alpha punch, never in one of them.
 
 ROTATION IS NOT RE-DERIVED HERE. An oval hole's major axis goes through
 ``geometry.rotate_local_offset``, the worker's ONE rotation, for the reason

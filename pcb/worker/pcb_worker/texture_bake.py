@@ -26,6 +26,16 @@ Not drawn, deliberately:
     (``drc_silk_placement``), in vector, once. A second opinion here could only
     disagree with the first.
 
+ROUND HOLES ONLY, AND THE MESH DISAGREES. The harvest's ``holes`` bucket is
+``(x, y, DIAMETER, plated)`` — round, always — and the harvest RAISES on a board
+hole whose feature is not round ("the round-only fabrication path cannot drill").
+The 3D substrate does not: :mod:`board_drills` models every opening as a capsule
+and :mod:`substrate_mesh` cuts slots and ovals faithfully. Nothing compiled today
+can produce one (``compile_board._check_pad_capabilities`` refuses a non-round
+drill), so the two agree in practice — but the FIRST board that gets a slot will
+mesh correctly and raise HERE. Punching a real slot needs the true drill shape,
+which means reading ``board_drills`` rather than the harvest's round bucket.
+
 COMPOSITE ORDER (fab order, bottom to top)
 ------------------------------------------
 1. bare substrate, clipped to the board outline minus its cutouts

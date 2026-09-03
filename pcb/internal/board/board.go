@@ -215,23 +215,12 @@ type Board struct {
 	// omitempty so a board without artwork round-trips byte-identically.
 	BoardGraphics []Graphic `json:"board_graphics,omitempty" yaml:"board_graphics,omitempty"`
 
-	// Fabrication is the board's ORDERED APPEARANCE: the three order-form
-	// choices that decide what the finished board LOOKS like and that no
-	// fabrication file encodes.
+	// Fabrication is the board's ORDERED APPEARANCE (see the Fabrication type).
 	//
 	// A POINTER, and omitempty, so a board that states nothing round-trips
 	// byte-identically and every existing board keeps compiling untouched. Nil
 	// means "this board named no appearance"; the worker then applies the
-	// defaults we order today (green / HASL / 1.6 mm) without writing them back
-	// into the document.
-	//
-	// WHY IT IS ON THE BOARD AND NOT ON THE RULE PROFILE. A profile records what
-	// a board HOUSE offers — a property of the vendor that changes rarely and is
-	// shipped data. These are what WE CHOSE for THIS order. Putting a per-order
-	// choice on the profile would force a profile fork per colour, or an edit of
-	// shipped vendor data every time an order changes. The profile describes the
-	// menu; the board records the selection, and the worker checks the selection
-	// against the menu (manufacturer_profile.py capabilities).
+	// defaults without writing them back into the document.
 	Fabrication *Fabrication `json:"fabrication,omitempty" yaml:"fabrication,omitempty"`
 
 	// Annotations and RouteHints are opaque passthrough — carried losslessly,
@@ -243,15 +232,22 @@ type Board struct {
 // Fabrication is the appearance a board was ORDERED in — the three fields a
 // person picks on the vendor's order form and that no Gerber, drill file or
 // pick-and-place row carries. Nothing in the fabrication OUTPUT changes with
-// them; a renderer that draws the board as it will actually look is the
-// consumer, and until this block existed it could only guess.
+// them; the consumer is a renderer that draws the board as it will actually
+// look, plus the human-facing order checklist.
+//
+// THE PROFILE PUBLISHES THE MENU, THE BOARD RECORDS THE SELECTION. What a board
+// HOUSE offers is a property of the vendor — shipped data that changes rarely —
+// so it lives on the manufacturer profile. These are what WE CHOSE for THIS
+// order, so they live on the board. Putting a per-order choice on the profile
+// would force a profile fork per colour, or an edit of shipped vendor data
+// every time an order changes. The worker checks the selection against the menu
+// (manufacturer_profile.py capabilities) and refuses a choice the selected
+// profile does not offer, naming both the field and what is on offer; a profile
+// that publishes no such list has said nothing, and the choice stands.
 //
 // Every field is omitempty: a partially-stated block is legal and the worker
-// fills each absent field from the default we order today. The values are free
-// text on purpose — the closed set is the VENDOR's, published per profile, and
-// the worker refuses a choice the selected profile does not offer, naming both
-// the field and what is on offer. A profile that publishes no such list has
-// said nothing, and the choice stands.
+// fills each absent field from the default. The values are free text on
+// purpose — the closed set is the VENDOR's, published per profile.
 type Fabrication struct {
 	// MaskColour is the solder-mask colour, in the vendor's own spelling
 	// ("green", "black", "purple"). Default: green.

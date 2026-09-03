@@ -6,9 +6,9 @@ belongs to the vendor-data client rather than to any renderer: a consumer that
 wants a part's geometry asks the client and gets a :class:`Mesh`, so no
 downstream editor ever grows its own copy of this.
 
-WHAT THE VENDOR ACTUALLY SENDS — MEASURED 2026-09-02, NOT ASSUMED
------------------------------------------------------------------
-Five models were fetched from ``modules.easyeda.com/3dmodel/<uuid>`` and read
+WHAT THE VENDOR ACTUALLY SENDS — MEASURED, NOT ASSUMED
+------------------------------------------------------
+Five models fetched from ``modules.easyeda.com/3dmodel/<uuid>`` were read
 byte-for-byte. Every one of them:
 
 * is in MILLIMETRES. ``R0805`` (``c7acac53...``) measures 2.00 x 1.30 x 0.61,
@@ -47,7 +47,7 @@ stop an export of forty other parts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 # Directives this parser understands are handled below by name. Anything else
@@ -88,12 +88,8 @@ class Mesh:
     vertices: tuple[_Vec3, ...] = ()
     triangles: tuple[tuple[int, int, int], ...] = ()
     triangle_materials: tuple[str | None, ...] = ()
-    materials: Mapping[str, Material] = None  # type: ignore[assignment]
+    materials: Mapping[str, Material] = field(default_factory=dict)
     ignored_directives: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.materials is None:
-            object.__setattr__(self, "materials", {})
 
     @property
     def empty(self) -> bool:

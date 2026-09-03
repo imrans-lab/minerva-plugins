@@ -568,9 +568,10 @@ class ResolvedFabrication:
     draws the board as it will actually look, plus the human-facing order
     checklist, where a person matches these three against the vendor's form.
 
-    The strings are the vendor's own vocabulary, not an enum: the closed set
-    lives on the selected manufacturer profile, which is where a board house's
-    published menu belongs (``manufacturer_profile.LoadedRuleProfile.offers``).
+    The strings are the vendor's own vocabulary, not an enum — the closed set
+    lives on the selected manufacturer profile
+    (``manufacturer_profile.LoadedRuleProfile.offers``). See
+    ``docs/board-yaml.md``, "Ordered appearance", for why.
     """
 
     mask_colour: str
@@ -1447,10 +1448,10 @@ class ResolvedBoard:
     zones: tuple[ResolvedZone, ...]
     board_graphics: tuple[BoardGraphic, ...]
     provenance: BoardProvenance
-    # The ORDERED APPEARANCE (T1). Defaulted rather than required so the field
-    # could be added without touching the single construction site's other
-    # arguments; the compiler always passes an explicit one, resolved from the
-    # board's own `fabrication` block against the selected profile's menu.
+    # The ORDERED APPEARANCE. Defaulted rather than required so a caller
+    # building an IR by hand need not name it; the compiler always passes an
+    # explicit one, resolved from the board's own `fabrication` block against
+    # the selected profile's menu.
     fabrication: ResolvedFabrication = ResolvedFabrication(
         mask_colour=DEFAULT_MASK_COLOUR, finish=DEFAULT_FINISH,
         thickness_mm=DEFAULT_THICKNESS_MM)

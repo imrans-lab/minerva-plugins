@@ -57,7 +57,10 @@ COUPON = Path(__file__).resolve().parent / "testdata" / "coupon_jlc1.yaml"
 
 BOARD_W_MM, BOARD_H_MM = 24.0, 18.0        # the coupon's own outline
 CUTOUT_AREA_MM2 = 3.0 * 6.0                # x 10.8..13.8 by y 5..11
-ORDERED_THICKNESS_MM = 1.6                 # the coupon's fabrication block
+# The coupon states NO fabrication block, so this is the compiler's default
+# finished thickness — written as a literal rather than imported, so a
+# changed default shows up here as a failure instead of following along.
+ORDERED_THICKNESS_MM = 1.6
 
 #: The mounting hole this suite adds — 3.2 mm, in the clear corner at (21, 15).
 MOUNT_MM = (21.0, 15.0)
@@ -187,8 +190,10 @@ def test_the_slab_is_closed_and_holds_the_volume_it_kept_at_the_ordered_thicknes
 
     ORACLE: a closed orientable solid has every directed edge exactly once with
     its reverse present, and its divergence-theorem volume is positive and equal
-    to the area of one face times the distance between the faces — which the
-    board DOCUMENT fixes at 1.6 mm.
+    to the area of one face times the distance between the faces — 1.6 mm here,
+    the default the compiler resolves for a board that ordered no thickness.
+    The second half of the test orders a different one and checks the slab
+    followed, which is what proves the value is read rather than assumed.
     """
     mesh = build_substrate_mesh(_coupon_with_mounting_hole())
     assert mesh.thickness_mm == ORDERED_THICKNESS_MM
