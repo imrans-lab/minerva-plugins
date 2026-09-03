@@ -1895,6 +1895,24 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
     return g.to_gerber_frame()
 
 
+def harvest_geometry(board: ResolvedBoard) -> _Geometry:
+    """THE GEOMETRY THE FABRICATION FILES ARE MADE OF, in the gerber frame.
+
+    The one supported way for a non-emitter consumer to obtain it.
+    :func:`build_gerbers_ir` calls this and then writes the buckets out, so a
+    caller that draws what this returns is drawing THE INK THE FAB RECEIVES —
+    not a re-derivation that could disagree with the shipped artifacts about the
+    same board. (``drc_geometric`` builds copper too, but it builds it for
+    CHECKING, superset-biased on purpose; a picture drawn from that one would
+    show copper the board does not have.)
+
+    The mask clearance is resolved here, once, by the module that owns the rule
+    (``mask_source``, station S4) rather than by each caller, so a preview and
+    an emission can never size the same opening differently.
+    """
+    return _harvest_ir(board, mask_source.resolve_ir_mask_clearance(board))
+
+
 def _ir_trace_bucket(g: _Geometry, layer_id: str) -> list:
     """The copper trace bucket for an IR segment's CANONICAL layer id.
 
@@ -1962,11 +1980,7 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
     date = creation_date or PINNED_CREATION_DATE
     set_generation_software("Minerva", "pcb_worker/gerber.py", WORKER_VERSION)
 
-    # The clearance rule is mask_source's (station S4), not this function's: DRC
-    # sizes the same openings and must not re-derive the fallback.
-    mask_clearance = mask_source.resolve_ir_mask_clearance(board)
-
-    g = _harvest_ir(board, mask_clearance)
+    g = harvest_geometry(board)
 
     ox, oy, width_mm, height_mm = outline_frame(board.outline)
     outline_dict = {"width_mm": width_mm, "height_mm": height_mm,

@@ -570,9 +570,9 @@ jobs:
   # internal/pcbruntime/bundle/ — see that dir's README), compiles the Go
   # binary with the bundle embedded, smoke-tests it over MCP stdio, and packs
   # the release tarball. Unlike cad, pcb ships the FULL matrix including
-  # linux-arm64: its one native wheel (pyclipper 1.4.0) publishes
-  # manylinux_2_28_aarch64 for cp312 (verified in worker/pyproject.toml's
-  # wheel-availability note), so there is no cad-style blocker.
+  # linux-arm64: both of its native wheels (pyclipper 1.4.0 and pillow 12.3.0)
+  # publish manylinux_2_28_aarch64 for cp312 (verified in worker/pyproject.toml's
+  # wheel-availability notes), so there is no cad-style blocker.
   # ---------------------------------------------------------------------------
   package:
     name: package (${{ matrix.target }})

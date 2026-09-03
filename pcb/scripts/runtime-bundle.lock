@@ -16,11 +16,17 @@ CPYTHON="3.12.13"
 # reproducibility. dev extras (pytest, pygerber) must NEVER enter the bundle:
 # pygerber is the CAM oracle the test suite grades the emitter with, and
 # shipping the oracle beside the emitter would let a packaging mistake grade
-# its own homework. pyclipper is the one native wheel; cp312 coverage verified
+# its own homework. pyclipper is the FIRST of two native wheels; cp312 coverage verified
 # in worker/pyproject.toml's wheel-availability note (manylinux x86_64 +
 # 2_28_aarch64 + macosx universal2 + win_amd64) — so unlike cad, pcb ships
 # the FULL platform matrix including linux-arm64.
-PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0"
+# pillow is the SECOND native wheel (see the note in worker/pyproject.toml for
+# why the texture bake needs a rasteriser and why compositing the existing
+# per-layer SVGs was rejected). Its cp312 wheel coverage was checked against
+# the PyPI release files for 12.3.0 and matches WHEEL_PLATS on all five build
+# targets: macosx_10_13_x86_64, macosx_11_0_arm64, the
+# manylinux_2_27/_2_28 x86_64 + aarch64 pair, and win_amd64.
+PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0 pillow==12.3.0"
 
 # gerbonara is a RUNTIME dependency: pcb.fab_preview re-parses the emitted
 # Gerber/Excellon bytes with it — a reader independent of the writer is the
@@ -69,6 +75,8 @@ PIP_NO_DEPS_PKGS="gerbonara==1.6.3"
 #     Apache-2.0 (License-Expression in its wheel METADATA); gerber-writer NOT
 #     CONFIRMED (Ucamco — possibly Apache-2.0, recorded as MIT without a
 #     source).
+#     pillow MIT-CMU (License-Expression read from the installed 12.3.0
+#     distribution metadata, not from recollection).
 #
 # UNRESOLVED LICENSES, using this repo's own convention for them (see
 # scripts/gen_notice.py, which fails the release gate on any entry whose
@@ -97,7 +105,7 @@ PIP_REQUIRE_HASHES_FILE=""
 # Layer-1 import self-test (native builds only; cross targets skip). Imports
 # every runtime dep plus both first-party worker packages, so an empty or
 # mis-copied site-packages fails the bundle build, not the first user.
-LAYER1_IMPORTS="import yaml; import gerber_writer; import pyclipper; import gerbonara; import pcb_worker; import agent_router"
+LAYER1_IMPORTS="import yaml; import gerber_writer; import pyclipper; import gerbonara; import PIL.Image; import pcb_worker; import agent_router"
 
 # First-party worker code copied into site-packages. Both packages from
 # worker/pyproject.toml's wheel target: pcb_worker (the JSON-RPC worker) and

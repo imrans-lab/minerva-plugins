@@ -59,6 +59,28 @@ dependencies = [
     # it --no-deps (scripts/runtime-bundle.lock): its declared click/rtree/
     # quart serve only its CLI and web viewer, which nothing here imports.
     "gerbonara==1.6.3",
+    # Pillow: the rasteriser behind pcb_worker.texture_bake, which composites one
+    # image per board side (substrate, copper, mask, plating, silk) for the 3D
+    # export and for anyone who wants to see the board rather than its layers.
+    # PINNED to 12.3.0.
+    #
+    # WHY A NEW DEPENDENCY AT ALL. Nothing shipped rasterises anything: the fab
+    # preview emits per-layer VECTOR svg (gerbonara's to_svg) and the assembly
+    # preview deliberately omits copper, mask and silk. The alternative — pin an
+    # SVG rasteriser and composite the existing per-layer SVGs — was rejected: it
+    # adds a native rasteriser AND a second notion of what a layer looks like,
+    # where this draws straight from the geometry the Gerbers are emitted from.
+    #
+    # WHEELS for every platform the bundle builds, verified against the PyPI
+    # release files for 12.3.0 / cp312 (not recalled): macosx_10_13_x86_64,
+    # macosx_11_0_arm64, manylinux_2_27_x86_64.manylinux_2_28_x86_64,
+    # manylinux_2_27_aarch64.manylinux_2_28_aarch64 and win_amd64 — one for each
+    # tag set in build-python-runtime-bundle.sh's WHEEL_PLATS. No sdist fallback
+    # is needed on any target, which is the condition --only-binary=:all: imposes.
+    #
+    # LICENSE: MIT-CMU, read from the installed distribution's
+    # License-Expression metadata. Permissive.
+    "pillow==12.3.0",
 ]
 
 [project.optional-dependencies]
