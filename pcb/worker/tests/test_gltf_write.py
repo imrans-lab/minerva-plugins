@@ -194,3 +194,47 @@ def test_the_scene_lists_roots_only_and_a_node_cannot_have_two_parents():
         builder.add_group("ghost", [len(doc["nodes"]) + 5])
     with pytest.raises(ValueError, match="needs children"):
         builder.add_group("empty", [])
+
+
+def test_a_refused_group_leaves_its_valid_children_in_the_scene():
+    """A PARTIAL FAILURE MUST NOT ORPHAN A NODE.
+
+    ``add_group`` refuses a child that does not exist and a child listed twice.
+    If it recorded children as parented WHILE validating, a list like
+    ``[valid, invalid]`` would mark the valid child as somebody's child and then
+    raise with no group made — so the child is neither a root nor anyone's
+    child, and a file written afterwards loads perfectly with that part gone.
+    The writer raised, so a caller that catches and continues has no way to see
+    it. This is asserted from the FILE, not the builder's bookkeeping.
+
+    MUTATION THIS CATCHES: ``add_group`` adding to ``_children`` inside its
+    validation loop rather than after the whole list has passed.
+    """
+    builder = GlbBuilder("test")
+    attributes = builder.add_vertices(TRIANGLE)
+    mesh = builder.add_mesh("m", [Primitive(attributes=attributes,
+                                            triangles=[(0, 1, 2)], material=0)])
+    builder.add_material("m", (1.0, 1.0, 1.0, 1.0))
+    first = builder.add_node("a", mesh)
+    second = builder.add_node("b", mesh)
+
+    # A valid child ahead of a missing one, and a valid child listed twice:
+    # both refused, and in both the valid child was seen BEFORE the refusal.
+    with pytest.raises(ValueError, match="does not exist"):
+        builder.add_group("half", [first, 99])
+    with pytest.raises(ValueError, match="listed twice"):
+        builder.add_group("twice", [second, second])
+
+    # Written afterwards, the scene still draws both nodes as roots — nothing
+    # was half-made, so nothing has vanished.
+    doc, _binary = _chunks(builder.to_glb())
+    assert doc["scenes"][0]["nodes"] == [first, second], \
+        "a node from a refused add_group call must still be a scene root"
+    assert len(doc["nodes"]) == 2, "a refused call must not leave a group behind"
+
+    # And the failed calls recorded nothing: the same children can still be
+    # adopted by a correct call, after which they are the group's, not roots.
+    group = builder.add_group("under", [first, second])
+    doc, _binary = _chunks(builder.to_glb())
+    assert doc["scenes"][0]["nodes"] == [group]
+    assert doc["nodes"][group]["children"] == [first, second]

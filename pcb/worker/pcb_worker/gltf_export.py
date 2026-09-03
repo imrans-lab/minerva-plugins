@@ -111,8 +111,12 @@ multiplication applied to each vertex and each translation on the way out:
   translations) and stays correct only while every future writer remembers it;
   a factor missed on one of them is a part a thousand times out of position,
   which — again — nobody would see.
-* IT IS EXACT AND UNIFORM. 0.001 is one uniform scale, so normals and winding
-  are untouched and no rounding is introduced anywhere in the geometry.
+* IT IS UNIFORM AND TOUCHES NO VERTEX. The same positive factor on all three
+  axes leaves winding and normal direction as they were, and the geometry is
+  written exactly as computed — the millimetre values are never rewritten. The
+  only conversion the file carries is the one factor on the root (1/1000, which
+  binary floating point represents as closely as it can, not exactly), applied
+  once by the viewer rather than baked into thousands of positions.
 
 The cost is that a consumer reading raw ACCESSOR values without walking the
 scene graph sees millimetres. That is why the root exists as a named node, why

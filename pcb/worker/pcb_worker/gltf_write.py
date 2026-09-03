@@ -265,22 +265,33 @@ class GlbBuilder:
 
         The children stop being roots of the scene, which is the point: a
         transform on this node applies to all of them exactly once. A node
-        cannot be adopted twice or adopt itself, and both refuse rather than
-        produce a file whose scene graph is a lie a viewer will resolve
-        arbitrarily.
+        cannot be adopted twice — across calls or within one list — or adopt
+        itself, and all refuse rather than produce a file whose scene graph is
+        a lie a viewer will resolve arbitrarily.
+
+        A refusal records NOTHING: the whole list is checked before any child
+        is marked as parented. Otherwise ``[valid, invalid]`` would leave the
+        valid node neither a root nor anyone's child, and a caller that caught
+        the error and wrote the file anyway would get one that loads cleanly
+        with that node missing.
         """
         if not children:
             raise ValueError(f"add_group({name!r}): a group needs children")
-        node: dict[str, Any] = {"name": name}
-        for child in children:
+        adopted = [int(c) for c in children]
+        seen: set[int] = set()
+        for child in adopted:
             if not 0 <= child < len(self._nodes):
                 raise ValueError(
                     f"add_group({name!r}): node {child} does not exist")
             if child in self._children:
                 raise ValueError(
                     f"add_group({name!r}): node {child} already has a parent")
-            self._children.add(int(child))
-        node["children"] = [int(c) for c in children]
+            if child in seen:
+                raise ValueError(
+                    f"add_group({name!r}): node {child} is listed twice")
+            seen.add(child)
+        self._children.update(seen)
+        node: dict[str, Any] = {"name": name, "children": adopted}
         if scale is not None:
             node["scale"] = [float(v) for v in scale]
         if extras:
