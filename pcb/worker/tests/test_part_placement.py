@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pcb_worker import assembly_orientation as aor
 from pcb_worker import assembly_outputs as ao
 from pcb_worker import orientation_ledger as ol
 from pcb_worker import part_models as pm
@@ -151,6 +152,28 @@ def _parts(report) -> dict:
     return {p.ref: p for p in report.parts}
 
 
+def _winding_volume(positions, triangles) -> float:
+    """The signed volume of the fixture BOX, about its own centre.
+
+    Its SIGN is the mesh's winding and its magnitude is the box's volume, so
+    one number pins both. The landmark triangle is left out: it is a loose flap
+    rather than part of the closed surface, and including it would make the sum
+    depend on where the part happens to sit. Centred first for the same
+    reason."""
+    box = [positions[i] for i in range(LANDMARK)]
+    cx, cy, cz = (sum(p[i] for p in box) / len(box) for i in range(3))
+    total = 0.0
+    for tri in triangles:
+        if LANDMARK in tri:
+            continue
+        p, q, r = ((positions[i][0] - cx, positions[i][1] - cy,
+                    positions[i][2] - cz) for i in tri)
+        total += (p[0] * (q[1] * r[2] - q[2] * r[1])
+                  - p[1] * (q[0] * r[2] - q[2] * r[0])
+                  + p[2] * (q[0] * r[1] - q[1] * r[0]))
+    return total / 6.0
+
+
 # ---------------------------------------------------------------------------
 # THE ONE-DERIVATION ORACLE
 # ---------------------------------------------------------------------------
@@ -203,38 +226,92 @@ def test_a_perturbed_placement_moves_the_cpl_row_and_the_seated_model_together()
     assert min(p[1] for p in parts0["R1"].mesh.positions) >= report0.board_thickness_mm
 
 
+def _drawn_angle(row, part, client) -> float:
+    """How far the DRAWN part has been turned from the VENDOR's own drawing,
+    read off the produced mesh.
+
+    The reference is the landmark's direction from the model's centre in the
+    vendor canvas frame — the frame a pick-and-place machine reads the position
+    file's rotation against. The answer is the same direction read back out of
+    the scene, through the axis convention (scene x, *, z) = board (x, y). A
+    BOTTOM placement mirrors the drawing before turning it, and so does the
+    machine (which is why the file subtracts the ledger offset there), so the
+    reference is mirrored on that side too.
+
+    The box's eight corners are symmetric about its centre and the landmark
+    lies inside them, so the bounding-box centre is the image of the model's
+    centre under every link of the chain and the two directions are comparable
+    without re-deriving any of them.
+    """
+    facts = client.facts(row.house_part)
+    canvas, _notes, _remap = part_seat.model_to_canvas(facts.model,
+                                                      client.model(facts).mesh)
+    cx = (min(p[0] for p in canvas) + max(p[0] for p in canvas)) / 2.0
+    cy = (min(p[1] for p in canvas) + max(p[1] for p in canvas)) / 2.0
+    rx, ry = canvas[LANDMARK][0] - cx, canvas[LANDMARK][1] - cy
+    if row.side == "bottom":
+        ry = -ry
+    bx, by = _centre_board_xy(part)
+    sx = part.mesh.positions[LANDMARK][0] - bx
+    sy = part.mesh.positions[LANDMARK][2] - by
+    # Counter-clockwise on a Y-down screen: the angle of (dx, -dy).
+    return math.degrees(math.atan2(-sy, sx) - math.atan2(-ry, rx)) % 360.0
+
+
 def test_the_seated_direction_is_the_cpl_rotation_on_both_sides():
     """The CPL states the rotation as a NUMBER; the scene applies it as POINTS
-    (ledger offset in the local frame, then the placement transform). Turning
-    the vendor's +X axis through the point chain must land on the number the
-    file states — for the fixture's four top rows against their header
-    literals, and for a bottom-side quarter-turn part against the literal the
-    CPL suite derived by hand (TSOT-23-6 at 30 on the bottom -> 120)."""
-    board = _compiled(_board_dict())
-    emission = ao.emit(board, "jlc")
-    ledger = ol.load_ledger()
-    physicals = {p.ref: p for c in board.components for p in c.physical_placements}
+    (ledger offset in the local frame, then the placement transform). The part
+    the EXPORT ACTUALLY DREW must be turned from the vendor's drawing by the
+    number the file states — for the fixture's four top rows against their
+    header literals, and for a bottom-side quarter-turn part against the
+    literal the CPL suite derived by hand (TSOT-23-6 at 30 on the bottom ->
+    120). Read off the produced mesh rather than recomputed, so a broken
+    orientation decision fails here instead of agreeing with itself."""
+    client = CorpusClient()
+    rows, report = _place(_board_dict(), client=client)
+    parts = _parts(report)
 
-    def seated_angle(row) -> float:
-        offset = ledger.lookup(row.footprint_ref, HOUSE, row.house_part).offset_deg
-        t = pp._transform_of(physicals[row.ref])
-        o = t.point(po.rotate_ccw((0.0, 0.0), offset))
-        x = t.point(po.rotate_ccw((1.0, 0.0), offset))
-        # Counter-clockwise on a Y-down screen: the angle of (dx, -dy).
-        return math.degrees(math.atan2(-(x[1] - o[1]), x[0] - o[0])) % 360.0
-
-    for row in emission.cpl:
-        assert row.rotation_deg == pytest.approx(FIXTURE_ROTATION[row.ref])
-        assert seated_angle(row) == pytest.approx(row.rotation_deg, abs=1e-6), row.ref
+    for ref, row in rows.items():
+        assert row.rotation_deg == pytest.approx(FIXTURE_ROTATION[ref])
+        assert _drawn_angle(row, parts[ref], client) == \
+            pytest.approx(row.rotation_deg, abs=2e-3), ref
 
     bottom = _board_dict()
     bottom["components"] = [c for c in bottom["components"] if c["ref"] == "U1"]
     bottom["components"][0]["layer"] = "bottom"
-    board_b = _compiled(bottom)
-    row = ao.emit(board_b, "jlc").cpl[0]
-    assert row.rotation_deg == pytest.approx(120.0)
-    physicals = {p.ref: p for c in board_b.components for p in c.physical_placements}
-    assert seated_angle(row) == pytest.approx(120.0, abs=1e-6)
+    rows_b, report_b = _place(bottom, client=client)
+    assert rows_b["U1"].rotation_deg == pytest.approx(120.0)
+    assert _drawn_angle(rows_b["U1"], _parts(report_b)["U1"], client) == \
+        pytest.approx(120.0, abs=2e-3)
+
+
+def test_a_rotation_that_is_not_the_cpls_is_refused():
+    """The rotation's half of the same guard. Turn the emitted row a quarter
+    without touching the board or the ledger: the number in the file and the
+    points in the scene no longer describe one orientation, so the draw stops
+    by name instead of producing a picture the position file contradicts."""
+    board = _compiled(_board_dict())
+    emission = ao.emit(board, "jlc")
+    forged = replace(emission, cpl=tuple(
+        replace(row, rotation_deg=(row.rotation_deg + 90.0) % 360.0)
+        if row.ref == "U2" else row
+        for row in emission.cpl))
+    with pytest.raises(pp.PartPlacementError, match="U2"):
+        pp.place_parts(board, forged, client=CorpusClient())
+
+
+def test_a_row_the_position_file_refused_is_not_drawn_at_the_ledgers_angle():
+    """The CPL's OWN decision has to reach the picture. U2's pair is measured
+    at 270 and its row carries it; declare the row refused on the emission and
+    the scene must stop rather than turn the model by an offset the file — on
+    this emission — is no longer standing behind."""
+    board = _compiled(_board_dict())
+    emission = ao.emit(board, "jlc")
+    forged = replace(emission, orientation_refusals=(
+        aor.AssemblyOrientationError(aor.CODE_UNKNOWN, "forged by the test",
+                                     component="U2"),))
+    with pytest.raises(pp.PartPlacementError, match="U2"):
+        pp.place_parts(board, forged, client=CorpusClient())
 
 
 def test_a_transform_that_is_not_the_cpls_is_refused():
@@ -437,13 +514,19 @@ def test_a_swapped_vendor_extent_is_an_advisory_and_a_square_one_cannot_be():
     assert part_seat.crosswise((6.0, 2.0), (6.0, 2.0)) is None
 
 
-def test_the_datum_the_seat_uses_is_the_measurements_own():
-    """``datum_offset`` at the ledger's angle reproduces the ``datum_offset_mm``
-    the measurement reports for the same pair, for every corpus pair the
-    fixture places — one rule, read twice."""
+def test_the_datum_the_seat_uses_lays_the_two_drawings_on_each_other():
+    """The datum is the TRANSLATION half of the vendor-to-ours map, and the
+    only thing that makes it right is that the map lands the vendor's pads on
+    ours. So it is checked against the PADS, not against the measurement that
+    computes it the same way: for every corpus pair the fixture places, every
+    pad number the two drawings share must land within the measurement's own
+    worst residual once the vendor's centre is turned by the ledger angle and
+    shifted by the datum. The ledger's angle is separately held to the
+    measurement's, which is the independent fact the ledger rests on."""
     board = _compiled(_board_dict())
     ledger = ol.load_ledger()
     client = CorpusClient()
+    checked = 0
     for component in board.components:
         parts = dict(component.assembly.house_parts)
         if HOUSE not in parts:
@@ -455,7 +538,19 @@ def test_the_datum_the_seat_uses_is_the_measurements_own():
         vendor = po.pad_field_from_vendor_pads(part, facts.pads)
         measured = po.measure_orientation(ours, vendor)
         assert measured.offset_deg == record.offset_deg, component.ref
-        assert po.datum_offset(ours, vendor, record.offset_deg) == measured.datum_offset_mm
+        datum = po.datum_offset(ours, vendor, record.offset_deg)
+        shared = set(ours.centres) & set(vendor.centres)
+        assert shared, component.ref
+        # A rounded datum on a rounded centre, so a micron of headroom over the
+        # measurement's own worst pad error.
+        tolerance = measured.max_pad_error_mm + 1e-3
+        for number in shared:
+            vx, vy = po.rotate_ccw(vendor.centres[number], record.offset_deg)
+            landed = (vx + datum[0], vy + datum[1])
+            assert math.dist(landed, ours.centres[number]) <= tolerance, \
+                (component.ref, number)
+            checked += 1
+    assert checked >= 4, "the fixture stopped covering the corpus pairs"
 
 
 def test_a_socket_set_child_is_placed_on_its_own_strip_and_its_pins_go_through():
@@ -500,20 +595,41 @@ def test_the_landmark_lands_where_the_hand_derived_chain_says_on_both_sides():
                         (0.755, -0.755) -> (20.755, 7.245); scene y = -0.375.
     Applying the offset with the wrong sign puts the landmark at local
     (-0.755, -0.755) -> board (19.245, 7.245) top; dropping the bottom mirror
-    leaves it at (20.755, 8.755) on the bottom. Both are 1.5 mm off and fail."""
+    leaves it at (20.755, 8.755) on the bottom. Both are 1.5 mm off and fail.
+
+    The mesh's WINDING is pinned here too, on the same part and the same two
+    sides: where the landmark says the chain turned the model correctly, the
+    signed volume says it did not turn it inside out."""
+    client = CorpusClient()
+    model = client.model(client.facts("C910544")).mesh
+    # WINDING, on the same part and the same two sides. The chain reflects an
+    # EVEN number of times on either side — the model's Y negation and the
+    # scene's axis map on top, plus the local mirror and the downward height on
+    # the bottom — so it is a proper motion and the vendor's own winding must
+    # come out unchanged, sign and volume alike. Reversing the seated triangles
+    # anywhere in the chain negates this number, and a part wound inside out is
+    # one a back-face-culling viewer draws as a hole in the world.
+    vendor_winding = _winding_volume(model.vertices, model.triangles)
+
     _, top = _place(_board_dict())
     t = top.board_thickness_mm
-    x, y, z = _parts(top)["U2"].mesh.positions[LANDMARK]
+    part = _parts(top)["U2"]
+    x, y, z = part.mesh.positions[LANDMARK]
     assert (x, z) == pytest.approx((20.755, 8.755), abs=2e-3)
     assert y == pytest.approx(t + 0.375)
+    assert _winding_volume(part.mesh.positions, part.mesh.triangles) == \
+        pytest.approx(vendor_winding, abs=1e-6)
 
     board = _board_dict()
     next(c for c in board["components"] if c["ref"] == "U2")["layer"] = "bottom"
     rows, bottom = _place(board)
     assert rows["U2"].rotation_deg == pytest.approx(90.0)     # 0 - 270, hand-derived
-    x, y, z = _parts(bottom)["U2"].mesh.positions[LANDMARK]
+    part = _parts(bottom)["U2"]
+    x, y, z = part.mesh.positions[LANDMARK]
     assert (x, z) == pytest.approx((20.755, 7.245), abs=2e-3)
     assert y == pytest.approx(-0.375)
+    assert _winding_volume(part.mesh.positions, part.mesh.triangles) == \
+        pytest.approx(vendor_winding, abs=1e-6)
 
 
 def test_every_seated_model_sits_within_a_millimetre_of_the_cpl_anchor():
@@ -528,22 +644,58 @@ def test_every_seated_model_sits_within_a_millimetre_of_the_cpl_anchor():
         assert part.anchor_delta_mm < 1.0, (part.ref, part.anchor_delta_mm)
 
 
-def test_a_verified_pair_whose_pads_no_longer_match_is_downgraded_and_marked():
-    """Renumber the vendor's pads for R1 so no number is shared: the ledger
-    still says 'aligned, 0' and the CPL row is still emitted, but the drawing
-    is demonstrably not the one that was measured. The part must not be laid on
-    the origin and still called verified: it is downgraded, marked, and named
-    in the report with an advisory."""
-    rows, report = _place(_board_dict(), client=CorpusClient(renumber={"C149504"}))
-    r1 = _parts(report)["R1"]
-    assert rows["R1"].rotation_deg == pytest.approx(45.0)     # the CPL is unaffected
-    assert r1.kind == pp.KIND_MODEL
-    assert r1.orientation == pp.ORIENTATION_UNVERIFIED
-    assert r1.marker is not None
-    assert [u["ref"] for u in report.unverified] == ["R1"]
-    assert [a["ref"] for a in report.advisories if a["code"] == pp.ADVISORY_NO_SHARED_PADS] == ["R1"]
-    for ref in ("U1", "U2", "J1"):
+def test_a_verified_pair_whose_pads_no_longer_match_keeps_its_angle_and_loses_its_datum():
+    """Renumber the vendor's pads for U2 so no number is shared: the ledger
+    still says 'aligned, 270' and the CPL row still carries that offset, but
+    the drawing is demonstrably not the one that was measured.
+
+    U2 AND NOT R1, because the two candidate behaviours have to be a quarter
+    turn apart to be told apart at all. R1's ledger offset is 0, so drawing it
+    raw and drawing it corrected are the same picture — which is exactly why
+    this hid.
+
+    THE ANGLE IS KNOWN AND STAYS APPLIED. The position file states 270 and a
+    machine will read it; a render at the raw angle would contradict the file,
+    and no marker makes that acceptable — "orientation unverified" would be the
+    wrong sentence anyway, since we know the orientation.
+
+    THE DATUM IS WHAT IS LOST. Nothing pins the vendor's frame to ours, so the
+    model is centred on our footprint origin (20, 8) instead of laid on its
+    pads, and the report says THAT."""
+    client = CorpusClient(renumber={"C910544"})
+    rows, report = _place(_board_dict(), client=client)
+    u2 = _parts(report)["U2"]
+
+    assert rows["U2"].rotation_deg == pytest.approx(270.0)    # the CPL is unaffected
+    assert _drawn_angle(rows["U2"], u2, client) == pytest.approx(270.0, abs=2e-3), \
+        "the picture must be turned by the angle the position file states"
+    assert u2.kind == pp.KIND_MODEL
+    assert u2.orientation == pp.ORIENTATION_VERIFIED
+    assert u2.marker is None
+    assert [u["ref"] for u in report.unverified] == []
+
+    assert _centre_board_xy(u2) == pytest.approx((20.0, 8.0), abs=1e-6), \
+        "with no datum the model sits centred on our footprint origin"
+    said = [a for a in report.advisories if a["code"] == pp.ADVISORY_NO_SHARED_PADS]
+    assert [a["ref"] for a in said] == ["U2"]
+    assert "centred on our footprint origin" in said[0]["detail"]
+    assert "IS applied" in said[0]["detail"]
+    assert any(part_seat.NOTE_NO_DATUM in note for note in u2.notes), u2.notes
+    for ref in ("U1", "J1", "R1"):
         assert _parts(report)[ref].orientation == pp.ORIENTATION_VERIFIED
+
+    # AND THE ROTATION GUARD GOVERNS THIS PATH rather than being bypassed by it.
+    # While the offset was dropped here, the guard validated a number the
+    # seating then threw away, so nothing downstream depended on it. Forge the
+    # row and the draw must still stop.
+    board = _compiled(_board_dict())
+    emission = ao.emit(board, "jlc")
+    forged = replace(emission, cpl=tuple(
+        replace(row, rotation_deg=(row.rotation_deg + 90.0) % 360.0)
+        if row.ref == "U2" else row
+        for row in emission.cpl))
+    with pytest.raises(pp.PartPlacementError, match="U2"):
+        pp.place_parts(board, forged, client=client)
 
 
 def test_the_report_serializes_without_geometry():

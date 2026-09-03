@@ -2915,9 +2915,8 @@ def _authored_hint_nets(hints) -> set:
 #
 # The bodies live in pcb_worker/board_3d.py; this file holds only the prologue
 # both share, which is the same parse-then-strict-compile every assembly
-# surface runs. Splitting the network work off the file write is the owner's
-# ruling of 2026-09-02 (docket 01a0653468a9) and board_3d's module docstring
-# carries the reasoning.
+# surface runs. Why the network work is split off the file write is in
+# board_3d's module docstring.
 # ---------------------------------------------------------------------------
 
 

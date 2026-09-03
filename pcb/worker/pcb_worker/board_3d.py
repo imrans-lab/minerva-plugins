@@ -78,10 +78,9 @@ def drawing_profile(params: dict) -> ao.HouseProfile:
     ``assembly_missing_identity``, and its own message says why: "refusing to
     emit a BOM/CPL row with a blank identity cell (part-identity contract)".
     That contract is about a document a house reads. Nothing here emits one —
-    this module draws a picture on this machine — and the plan of record
-    (docket 01a06532faa0) states the opposite behaviour for exactly this case:
-    "missing model, missing LCSC number ... degrades to a courtyard prism and a
-    report. Never fatal."
+    this module draws a picture on this machine — and the opposite behaviour is
+    the rule for exactly this case: a missing model or a missing catalogue
+    number degrades to a courtyard prism and a report, never to a refusal.
 
     Refusing would also deny the render to the boards that most need it: a
     mid-layout board where nobody has filled in catalogue numbers yet is
@@ -300,6 +299,16 @@ def export(board, params: dict, *, client=None) -> dict:
     """
     out_dir = str(params.get("out_dir") or "").strip()
     scale, max_px = _scale(params), _max_px(params)
+    name = output_name(board, params)
+    # BOTH CHEAP REFUSALS BEFORE THE EXPENSIVE WORK. A destination that is
+    # already occupied is knowable from the parameters alone, and finding out
+    # after the bake and the whole placement chain have run costs a caller a
+    # minute to be told something this line could say at once.
+    path = os.path.join(out_dir, name) if out_dir else ""
+    if path and os.path.exists(path) and not bool(params.get("overwrite")):
+        raise Board3DError(
+            "board_3d_exists",
+            "%s already exists — pass overwrite to replace it" % path)
     emission = emission_for(board, params)
     reader = pm.VendorPartClient(offline=True) if client is None else client
     try:
@@ -308,14 +317,8 @@ def export(board, params: dict, *, client=None) -> dict:
     except pp.PartPlacementError as exc:
         raise Board3DError("board_3d_placement_mismatch", str(exc)) from exc
 
-    name = output_name(board, params)
     written_path, written_bytes = "", len(built.glb)
     if out_dir:
-        path = os.path.join(out_dir, name)
-        if os.path.exists(path) and not bool(params.get("overwrite")):
-            raise Board3DError(
-                "board_3d_exists",
-                "%s already exists — pass overwrite to replace it" % path)
         try:
             written = order_write.write_files(out_dir, {name: built.glb})
         except OSError as exc:

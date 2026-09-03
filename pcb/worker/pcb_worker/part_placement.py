@@ -21,9 +21,12 @@ therefore moves here by construction, not by agreement.
 The rotation reaches the CPL as a NUMBER (``assembly_orientation``: placed
 angle plus or minus the ledger offset, by side) and reaches the scene as POINTS
 (the ledger offset turns the vendor model in the local frame, then the same
-transform turns and mirrors it as it does the copper). The two are one algebra
-spelled twice, and ``tests/test_part_placement.py`` holds them equal on the
-same fixture the CPL's own suite uses.
+transform turns and mirrors it as it does the copper). Those two spellings get
+the same treatment as the translation: before a model is turned,
+:func:`_check_rotation` asks the EMITTED ROW what offset it applied — its
+rotation less the placement's, signed by side — and REFUSES unless it is the
+offset about to be used. So the file's own rotation decision governs the
+picture, rather than a second decision that happens to match today.
 
 THE CHAIN, link by link, and who owns each:
 
@@ -64,7 +67,8 @@ every unverified orientation with its reason, the tallest MEASURED part per
 side (enclosure clearance), the parts whose height is unknown, and the
 advisories — a vendor package extent that disagrees with our fab body, a model
 lying crosswise to our pads, a vendor ``c_origin`` that disagrees with the
-vendor's own outline. Each advisory that is blind on a square part says so where
+vendor's own outline, and a measured pair whose drawing no longer shares a pad
+number with the vendor's, which costs the SEATING DATUM and not the angle. Each advisory that is blind on a square part says so where
 it is produced; see :mod:`part_seat`.
 
 NOT HERE: writing any file, collision, enclosure fit. :mod:`part_seat` owns the
@@ -83,7 +87,7 @@ from . import mesh_frame
 from . import orientation_ledger as ol
 from . import part_orientation as po
 from . import part_seat
-from .assembly_orientation import default_ledger
+from .assembly_orientation import SIDE_TOP, default_ledger
 from .footprint_def import FootprintDefinition
 from .footprints import FootprintLookupError, resolve_footprint_layered
 from .geometry import PlacementTransform
@@ -128,6 +132,10 @@ MARKER_CLEARANCE_MM = 2.0
 #: Tolerance for the anchor re-derivation. Same float arithmetic on the same
 #: inputs, so this is round-off headroom, not a licence.
 ANCHOR_TOL_MM = 1e-6
+
+#: Tolerance for the rotation re-derivation, in degrees. Same reasoning as
+#: :data:`ANCHOR_TOL_MM`.
+ROTATION_TOL_DEG = 1e-6
 
 ADVISORY_EXTENT = "vendor_extent_disagrees_with_fab_body"
 ADVISORY_CROSSWISE = "model_crosswise_to_pads"
@@ -257,6 +265,42 @@ def _check_anchor(physical, footprint: Union[FootprintDefinition, None],
             f"{derived}, the CPL row carries {physical.anchor}; refusing to place "
             f"a part by a transform that is not the position file's")
     return None
+
+
+def _check_rotation(row, physical, offset: Union[int, None]) -> None:
+    """Make the OFFSET this module is about to turn the model by be the one the
+    emitted row actually applied, or refuse.
+
+    The anchor check does this for the translation; without this the rotation
+    is TWO DERIVATIONS. ``assembly_orientation`` decides an offset and folds it
+    into the row's number; :func:`_orientation` re-reads the ledger and decides
+    again in points. They agree only because both ask the same functions the
+    same way, so a change to either — closing the mpn gap, a second refusal
+    state — diverges silently, and a render that disagrees with the position
+    file is the whole failure this module exists to prevent.
+
+    So the row is asked what it applied: its rotation less the placement's,
+    signed the way ``corrected_rotation`` composed it (top ADDS a local-frame
+    offset, bottom SUBTRACTS it). That number is a fact about the emitted file,
+    not a re-run of the decision, so it catches a divergence whichever side
+    caused it — including an emission corrected with a different ledger than
+    the one this module was handed.
+
+    Run BEFORE the shared-pad downgrade below, which knowingly draws a verified
+    pair at its raw angle and says so with a marker, an advisory and a report
+    line. That divergence is announced; this one would not be.
+    """
+    delta = float(row.rotation_deg) - float(physical.rotation_deg)
+    applied = (delta if row.side == SIDE_TOP else -delta) % 360.0
+    ours = float(offset or 0) % 360.0
+    gap = abs(applied - ours) % 360.0
+    if min(gap, 360.0 - gap) > ROTATION_TOL_DEG:
+        raise PartPlacementError(
+            f"{row.ref}: the CPL row states rotation {row.rotation_deg} over a "
+            f"placement of {physical.rotation_deg} on the {row.side} side, which "
+            f"is an applied offset of {applied}, but this module is about to turn "
+            f"the vendor model by {ours}; refusing to draw a part at an "
+            f"orientation the position file does not state")
 
 
 def _face_height(side: Side, thickness_mm: float, h: float) -> float:
@@ -435,6 +479,7 @@ def place_parts(board, emission, *, client,
             notes.append(skipped)
 
         offset, why = _orientation(row, house, book, refused)
+        _check_rotation(row, physical, offset)
         orientation = ORIENTATION_VERIFIED if why is None else ORIENTATION_UNVERIFIED
         if why is not None:
             unverified.append({"ref": row.ref, "reason": why})
@@ -468,23 +513,31 @@ def place_parts(board, emission, *, client,
                 offset or 0)
         if datum is None and offset is not None:
             # A VERIFIED pair had at least two shared pad numbers when it was
-            # measured, so none now means this drawing is not the one the
-            # ledger measured (renumbered pads leave the fab box, and so the
-            # anchor check, untouched). The offset belongs to a different
-            # drawing; laying the model on the origin and calling it verified
-            # would be a silent misplacement. Downgrade, mark, and say so.
-            why = ("verified in the ledger, but this drawing shares no pad number "
-                   "with the vendor's — it is not the drawing that was measured")
-            offset = None
-            orientation = ORIENTATION_UNVERIFIED
-            unverified.append({"ref": row.ref, "reason": why})
+            # measured, so none now means this drawing is not the one the ledger
+            # measured (renumbered pads leave the fab box, and so the anchor
+            # check, untouched).
+            #
+            # THE TWO UNKNOWNS ARE NOT THE SAME UNKNOWN, and only one of them is
+            # real here. The DATUM is lost, so part_seat centres the model on
+            # our footprint origin. The ANGLE is not: the ledger states it and
+            # THE POSITION FILE APPLIED IT, so dropping it would draw the part
+            # at an angle the file does not state — the one failure this module
+            # exists to prevent, and marking it does not make it acceptable. So
+            # the offset is applied, _check_rotation above holds it equal to the
+            # row's, and the report says THE SEATING is approximate rather than
+            # calling a known orientation a guess.
+            detail = ("verified in the ledger, but this drawing shares no pad "
+                      "number with the vendor's — it is not the drawing that was "
+                      "measured. The ledger offset IS applied (it is the angle "
+                      "the position file states), but no datum could be computed, "
+                      "so the model is centred on our footprint origin rather "
+                      "than laid on its pads — re-measure the pair")
+            notes.append(detail)
             advisories.append({"code": ADVISORY_NO_SHARED_PADS, "ref": row.ref,
-                               "detail": f"{why}; the ledger offset was NOT applied and "
-                                         f"the vendor datum was laid on the footprint "
-                                         f"origin — re-measure the pair"})
+                               "detail": detail})
         elif datum is None:
-            notes.append("no pad number shared with the vendor drawing; the vendor "
-                         "datum was laid on the footprint origin")
+            notes.append("no pad number shared with the vendor drawing; the "
+                         "model was centred on our footprint origin")
         seated = part_seat.seat_model(facts.model, model.mesh, facts.part,
                                       offset_deg=offset or 0, datum=datum)
         notes.extend(seated.notes)

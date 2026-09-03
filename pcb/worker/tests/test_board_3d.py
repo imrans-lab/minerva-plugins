@@ -188,16 +188,6 @@ def test_a_cold_export_writes_the_file_names_the_gap_and_touches_no_network(
     assert "Blender" in result["viewer_note"]
 
 
-def test_the_offline_reason_is_distinct_from_being_offline():
-    """The two absences a person acts on differently are two names.
-
-    Driven through the client rather than asserted about the constants: a
-    reason that exists only in the REASONS tuple is a reason nothing produces.
-    """
-    assert pm.REASON_NOT_CACHED in pm.REASONS
-    assert pm.REASON_NOT_CACHED != pm.REASON_NO_NETWORK
-
-
 def test_an_offline_client_misses_where_an_online_one_would_fetch(
         cache, corpus_network):
     """The gate is BELOW the cache read: an offline client still serves a
@@ -342,14 +332,27 @@ def test_an_export_with_no_destination_reports_without_writing(
 
 
 def test_an_occupied_destination_is_not_replaced_unless_asked(
-        board, cache, no_network, tmp_path):
+        board, cache, no_network, tmp_path, monkeypatch):
     first = _export(board, tmp_path)
     original = Path(first["path"]).read_bytes()
+
+    # AND IT REFUSES BEFORE THE BAKE. A destination that is already occupied is
+    # knowable from the parameters, so the caller must not pay for a whole
+    # placement chain and two textures to be told so: the builder is made to
+    # explode, and the refusal that comes back is still the named one.
+    def exploded(*_args, **_kwargs):
+        raise AssertionError("the export built the file before checking the path")
+    builder = board_3d.gltf_export.export_board
+    monkeypatch.setattr(board_3d.gltf_export, "export_board", exploded)
 
     with pytest.raises(board_3d.Board3DError) as caught:
         board_3d.export(board, {"out_dir": str(tmp_path / "out")})
     assert caught.value.code == "board_3d_exists"
     assert Path(first["path"]).read_bytes() == original, "the refusal wrote anyway"
+    # Put the builder back BY HAND, not with monkeypatch.undo(): one monkeypatch
+    # object serves the whole test, so undoing here would also unset the cache
+    # root and the no-network guard the fixtures installed.
+    monkeypatch.setattr(board_3d.gltf_export, "export_board", builder)
 
     again = _export(board, tmp_path, overwrite=True)
     assert again["path"] == first["path"]
@@ -418,9 +421,9 @@ def test_the_file_is_named_for_the_board_and_never_doubles_its_suffix(
 # The purchasing identity contract (assembly_missing_identity) exists so a BOM
 # row never carries a blank identity cell. It is a promise about a document a
 # factory reads. Neither of these verbs emits one — the warm downloads models
-# and the export draws a picture on this machine — and the plan of record says
-# the opposite behaviour for exactly this case: "missing model, missing LCSC
-# number ... degrades to a courtyard prism and a report. Never fatal."
+# and the export draws a picture on this machine — and the rule for exactly
+# this case is the opposite: a missing model or a missing catalogue number
+# degrades to a courtyard prism and a report, never to a refusal.
 #
 # The oracle is the SAME BOARD refused by the artifact path and drawn by these:
 # a test that only checked these two succeed would pass just as well if the

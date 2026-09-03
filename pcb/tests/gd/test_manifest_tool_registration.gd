@@ -51,7 +51,7 @@ const EXPECTED_WORKER_TOOLS := [
 	# K20 (DCR 019ffc52c358): the board's library pin. Added to this by-name
 	# list, not just the aggregate count, so a rename reds here too.
 	"minerva_pcb_lock_libraries",
-	# T7 (docket 01a0653468a9): the 3D export's two backend verbs. By name and
+	# The 3D export's two backend verbs. By name and
 	# not merely in the count, so a rename reds here rather than passing on
 	# arithmetic that happens to still add up.
 	"minerva_pcb_fetch_part_models",
@@ -275,7 +275,7 @@ func _init() -> void:
 	# (124 -> 126): task-cycle 12 B4's export surfaces — minerva_pcb_order_package
 	# (executor "backend", so the Go pin moves 19 -> 20) and its live-board twin
 	# minerva_pcb_board_export (executor "panel"), the exporter chooser's verb.
-	# (126 -> 128): task-cycle 16 T7's 3D export — minerva_pcb_fetch_part_models
+	# (126 -> 128): the 3D export — minerva_pcb_fetch_part_models
 	# and minerva_pcb_export_3d. BOTH executor "backend" (each is also a
 	# panel-IPC channel, like minerva_pcb_order_package), so the Go pin moves
 	# 20 -> 22. Two verbs and not one because the export runs synchronously with

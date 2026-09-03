@@ -1444,8 +1444,8 @@ func _run_removal_manifest_tools_absent() -> void:
 	# 123 -> 124: minerva_pcb_set_refdes, the designator-anchor verb.
 	# executor:"panel", so the Go pin at 19 backend tools is unaffected.
 	# 124 -> 126: B4's minerva_pcb_order_package + minerva_pcb_board_export.
-	# 126 -> 128: T7's minerva_pcb_fetch_part_models + minerva_pcb_export_3d,
-	# the 3D export's two verbs. Both executor "backend".
+	# 126 -> 128: minerva_pcb_fetch_part_models + minerva_pcb_export_3d, the 3D
+	# export's two verbs. Both executor "backend".
 	check_eq("manifest tool count == 128 (ALL manifest.json tools[] entries)",
 		names.size(), 128)
 	check("the C4 view-state tool is one of the additions THIS count accounts for",

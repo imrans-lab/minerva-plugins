@@ -1,8 +1,5 @@
 // board_3d_tools.go — the 3D export's TWO agent-facing verbs.
 //
-// Task-cycle 16 T7 (docket 01a0653468a9), under the plan 01a06532faa0 and the
-// owner's ruling of 2026-09-02.
-//
 // WHY TWO ENTRIES AND NOT ONE. Every exporter in this plugin runs
 // synchronously and there is no progress channel, so a single verb that both
 // fetched vendor models and wrote the file would hold the caller — the panel's

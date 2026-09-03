@@ -128,13 +128,13 @@ func TestManifestBrokerParity(t *testing.T) {
 	// entry the panel also sends on as an IPC channel. Its live-board twin
 	// minerva_pcb_board_export is executor:"panel", so it does not move this
 	// count.
-	// 20 -> 22: task-cycle 16 T7's 3D-export pair (docket 01a0653468a9) —
+	// 20 -> 22: the 3D-export pair —
 	// minerva_pcb_fetch_part_models (the network half) and
 	// minerva_pcb_export_3d (the offline file write). Both are executor
 	// "backend" and both are also panel-IPC channels, exactly like
 	// minerva_pcb_order_package above, so they move this count together.
 	if len(manifestTools) != 22 {
-		t.Errorf("manifest backend-executor tool count = %d, want 22 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint + K20's minerva_pcb_lock_libraries + B4's minerva_pcb_order_package + T7's fetch_part_models/export_3d)", len(manifestTools))
+		t.Errorf("manifest backend-executor tool count = %d, want 22 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint + K20's minerva_pcb_lock_libraries + B4's minerva_pcb_order_package + the 3D export's fetch_part_models/export_3d)", len(manifestTools))
 	}
 	if len(brokerSpecs) != 22 {
 		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 22", len(brokerSpecs))

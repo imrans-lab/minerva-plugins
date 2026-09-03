@@ -71,6 +71,13 @@ fields the caller is holding, by the measurement's own rule
 
     local = rotate_ccw(canvas, offset_deg) + datum
 
+Where the two drawings share no pad number there is no datum to compute, and
+the model is centred on our footprint origin instead (:data:`NOTE_NO_DATUM`) —
+the outline centre link 1 already sited it on, never the vendor canvas origin,
+which is the value known to be stale. That fallback is a TRANSLATION fallback
+and touches nothing else: the caller's rotation is applied unchanged, because
+it is the rotation the position file states.
+
 Nothing here decides WHICH offset applies, or whether one applies at all: the
 caller reads the ledger and the CPL's own refusals and passes the angle it has
 settled on. This module turns points.
@@ -128,6 +135,10 @@ EXTENT_TOL_MM = 0.75
 NOTE_ORIGIN_DISAGREES = "vendor_origin_disagrees_with_outline"
 NOTE_NO_OUTLINE = "vendor_outline_absent_used_c_origin"
 NOTE_MODEL_NOT_AT_ZERO = "model_minimum_not_at_zero"
+#: The two drawings shared no pad number, so link 2 had no datum and the model
+#: was centred on our footprint origin instead. A missing TRANSLATION only —
+#: the rotation the caller passed is applied exactly as it always is.
+NOTE_NO_DATUM = "no_shared_pad_number_seated_on_outline_centre"
 
 
 @dataclass(frozen=True)
@@ -223,14 +234,38 @@ def seat_model(reference: ModelReference, mesh: Mesh, part: str, *,
     ``offset_deg`` is the rotation the caller has settled on (the ledger's, or
     0 for a pair it is knowingly guessing), ``datum`` the translation from
     :func:`part_orientation.datum_offset` — None when the two drawings share no
-    pad number, in which case the vendor datum is laid on our origin and the
-    caller has already decided to say so.
+    pad number, in which case the model is centred on our footprint origin and
+    :data:`NOTE_NO_DATUM` says so.
+
+    A MISSING DATUM IS A MISSING TRANSLATION, NOT A MISSING ANGLE. ``datum``
+    None never changes what ``offset_deg`` does; a caller holding a measured
+    rotation keeps drawing at it, because that is the rotation the position
+    file states and a picture that disagrees with the file is worse than one
+    sited approximately.
     """
     canvas, notes, remap = model_to_canvas(reference, mesh)
     if not canvas:
         raise ValueError(f"{part}: the model carries no triangles; the client "
                          f"should have reported an absence")
-    dx, dy = datum if datum is not None else (0.0, 0.0)
+    if datum is not None:
+        dx, dy = datum
+    else:
+        # NOTHING PINS THE VENDOR'S FRAME TO OURS, so fall back to the siting
+        # the model has ALREADY been given rather than inventing a second rule:
+        # its own bounding-box centre, which link 1 put on the vendor's OUTLINE
+        # centre — the datum that held on every payload measured — or, on a
+        # payload that draws no outline, wherever link 1 could site it, having
+        # said so. What is NOT used is the canvas ORIGIN, the value that did not
+        # hold: stale on six of twenty-five, once by 861 mm, so laying THAT on
+        # our footprint origin could throw a part clean off the board. The
+        # rotation below is untouched.
+        x0, y0, x1, y1 = _bbox(canvas)
+        mx, my = po.rotate_ccw(((x0 + x1) / 2.0, (y0 + y1) / 2.0), offset_deg)
+        dx, dy = -mx, -my
+        notes = notes + (
+            f"{NOTE_NO_DATUM}: the two drawings share no pad number, so the "
+            f"vendor frame could not be pinned to ours; the model was centred "
+            f"on our footprint origin and its ROTATION is unaffected",)
     points = []
     for cx, cy, h in canvas:
         lx, ly = po.rotate_ccw((cx, cy), offset_deg)

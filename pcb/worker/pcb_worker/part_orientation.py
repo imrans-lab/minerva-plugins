@@ -429,7 +429,6 @@ def rotate_ccw(point: tuple[float, float], degrees: float) -> tuple[float, float
     return (x * cos + y * sin, -x * sin + y * cos)
 
 
-
 def _centroid(points: Sequence[tuple[float, float]]) -> tuple[float, float]:
     n = len(points)
     return (sum(p[0] for p in points) / n, sum(p[1] for p in points) / n)

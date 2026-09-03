@@ -220,7 +220,7 @@ def test_a_symmetric_pad_field_cannot_be_oriented_by_positions_alone():
                      for x, y in points)
     turned = sorted(
         tuple(round(v, 6) for v in po.rotate_ccw((x - origin[0],
-                                                   y - origin[1]), 180))
+                                                  y - origin[1]), 180))
         for x, y in points)
     assert turned == centred
 

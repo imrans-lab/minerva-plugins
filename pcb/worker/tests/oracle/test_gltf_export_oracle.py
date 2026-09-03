@@ -21,9 +21,17 @@ Nothing in this file can catch a wrong ruling on the vendor's ``d 0.0`` — a
 board whose every part is fully transparent has exactly the mesh count, the
 transforms and the images asserted below. That decision is tested for what it
 IS, a decision, in ``tests/test_gltf_export.py``, and confirmed by eye. What a
-foreign parser catches is the class of defect our own writer cannot see: a
-buffer view off by the padding, an accessor count that disagrees with the bytes
-behind it, an image chunk that is not where the JSON says it is.
+foreign parser catches is the class of defect our own writer cannot see: an
+accessor count that disagrees with the bytes behind it, an image chunk that is
+not where the JSON says it is, a buffer view that does not hold what it claims.
+
+AND THE READER IS NOT A VALIDATOR — SO THIS ORACLE IS NOT TOTAL. ``pygltflib``
+resolves offsets and lengths, but it does NOT enforce the spec's ALIGNMENT
+rules: drop ``gltf_write``'s four-byte buffer-view alignment or its chunk
+padding and every assertion below still passes, while a viewer that maps the
+buffer instead of copying it rejects the file. Nothing here or anywhere else in
+this worker's suites covers those rules today. Read this file as "a foreign
+reader agrees with our bytes", never as "the file is valid glTF".
 
 THE POSITION FILE IS THE OTHER ORACLE. Every part node's translation is read
 from the file and compared against the CPL row for that part — the actual
@@ -40,6 +48,7 @@ import pytest
 
 from pcb_worker import assembly_outputs as ao
 from pcb_worker import gltf_export
+from pcb_worker import orientation_ledger as ol
 from pcb_worker import part_models as pm
 from pcb_worker import part_placement as pp
 from pcb_worker import texture_bake
@@ -53,7 +62,8 @@ from PIL import Image  # noqa: E402
 
 #: The refs the fixture board orders, and what this suite arranges each to be.
 PLACEHOLDER_REF = "J1"          # its model is withheld -> a prism
-UNVERIFIED_REF = "U1"           # its vendor pads are renumbered -> a marked guess
+UNVERIFIED_REF = "U1"           # its pair is unmeasured -> a marked guess
+NO_DATUM_REF = "U2"             # its vendor pads are renumbered -> no seating datum
 BOTTOM_REF = "R1"               # moved to the underside
 
 
@@ -76,25 +86,48 @@ class DialectClient(CorpusClient):
                             mesh=parse_obj(BOX))
 
 
+def _ledger_without(part: str) -> ol.OrientationLedger:
+    """The shipped ledger with one pair's row taken out — an UNMEASURED pair.
+
+    That is the state a marked guess actually arrives in on a real board:
+    ``emit`` refuses the row, carries the refusal, and the export draws the
+    part at its raw angle under a post. Manufacturing it here rather than
+    renumbering pads keeps the two defects this fixture carries distinct — an
+    unknown ANGLE on one part, a missing seating DATUM on another.
+    """
+    full = ol.load_ledger()
+
+    def keep(rows):
+        return tuple(row for row in rows if row.part != part)
+
+    return ol.OrientationLedger(declared=keep(full.declared),
+                                measured=keep(full.measured))
+
+
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
     """One board, exported to a real file on disk, and everything to check it
     against: the compiled board, the emitted position file, the placement the
-    export drew, and the reader's view of the bytes."""
+    export drew, and the reader's view of the bytes.
+
+    ONE LEDGER FOR BOTH the emission and the placement, because they must be
+    the same ledger — ``place_parts`` refuses a row whose emitted rotation is
+    not the offset it is about to draw with."""
     board_dict = _board_dict()
     {c["ref"]: c for c in board_dict["components"]}[BOTTOM_REF]["layer"] = "bottom"
     board = _compiled(board_dict)
-    emission = ao.emit(board, "jlc")
-    client = DialectClient(withhold=["C265102"], renumber=["C780769"])
+    ledger = _ledger_without("C780769")
+    emission = ao.emit(board, "jlc", orientation=ledger)
+    client = DialectClient(withhold=["C265102"], renumber=["C910544"])
 
-    export = gltf_export.export_board(board, emission, client=client)
+    export = gltf_export.export_board(board, emission, client=client, ledger=ledger)
     path = tmp_path_factory.mktemp("gltf") / "board.glb"
     path.write_bytes(export.glb)
 
     return {
         "board": board,
         "cpl": {row.ref: row for row in emission.cpl},
-        "placement": pp.place_parts(board, emission, client=client),
+        "placement": pp.place_parts(board, emission, client=client, ledger=ledger),
         "gltf": GLTF2().load_binary(str(path)),
         "path": path,
     }
@@ -264,8 +297,9 @@ def test_every_material_is_opaque_and_the_synthetic_ones_are_unmistakable(export
         [pp.UNVERIFIED_MARKER_MATERIAL]
 
     # A real part wears the vendor's own colours, both of them, and neither is
-    # a synthetic one.
-    part = gltf.meshes[_node(gltf, "U2").mesh]
+    # a synthetic one. NO_DATUM_REF is one: a lost seating datum costs it a
+    # marker and a report line, never its materials.
+    part = gltf.meshes[_node(gltf, NO_DATUM_REF).mesh]
     worn = {gltf.materials[p.material].name for p in part.primitives}
     assert len(worn) == 2 and not worn & {pp.PLACEHOLDER_MATERIAL,
                                           pp.UNVERIFIED_MARKER_MATERIAL}
@@ -285,6 +319,14 @@ def test_the_reports_travel_inside_the_file(exported):
     assert {t["side"] for t in report["tallest"]} == {"top", "bottom"}
     assert {a["code"] for a in report["advisories"]} >= {
         pp.ADVISORY_UNVERIFIED_MODEL, pp.ADVISORY_NO_SHARED_PADS}
+    # THE TWO DEFECTS ARE REPORTED APART. An unknown ANGLE is a marked guess;
+    # a missing seating DATUM is a part drawn at the angle the position file
+    # states and merely centred on our origin, so it is NOT called unverified
+    # and wears no post.
+    assert [a["ref"] for a in report["advisories"]
+            if a["code"] == pp.ADVISORY_NO_SHARED_PADS] == [NO_DATUM_REF]
+    assert NO_DATUM_REF not in [u["ref"] for u in report["unverified"]]
+    assert _node(gltf, NO_DATUM_REF).extras["orientation"] == pp.ORIENTATION_VERIFIED
     assert report["board_thickness_mm"] == exported["board"].fabrication.thickness_mm
 
     # The frames the UVs were built in, and the ruling that explains why every

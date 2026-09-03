@@ -33,8 +33,8 @@ extends RefCounted
 ##             prisms finds the fix without leaving the menu. It writes no
 ##             artifact; its whole output is the report.
 ##
-## THE 3D EXPORT IS TWO ROWS BECAUSE IT IS TWO VERBS (T7, docket
-## 01a0653468a9). Everything here runs synchronously and there is no progress
+## THE 3D EXPORT IS TWO ROWS BECAUSE IT IS TWO VERBS. Everything here runs
+## synchronously and there is no progress
 ## channel, so a single row that fetched ~86 vendor documents and then wrote a
 ## file would freeze the window for minutes with nothing on screen. The network
 ## half is its own row, its own verb and its own report; the file write reads
@@ -364,11 +364,13 @@ static func _run_model(panel, exporter: Dictionary, out_dir: String,
 	out["filename"] = str(result.get("filename", ""))
 	# The worker will build the model and write NOTHING when it is given no
 	# destination (the same optional-out_dir rule the order package has). This
-	# panel always names one, so `written` is always true here — it is carried
-	# because written_file() is what decides whether to offer the desktop
-	# handler, and that decision must rest on the worker's own statement rather
-	# than on this surface's belief about what it asked for.
-	out["written"] = bool(result.get("written", true))
+	# panel always names one, so `written` should always be true here — but it
+	# is carried, and DEFAULTS TO FALSE, because written_file() is what decides
+	# whether to offer the desktop handler. That decision must rest on the
+	# worker's own statement; a reply that has lost the key is a reply that
+	# said nothing, and offering to open a file on a silence is how a handler
+	# gets pointed at a path nobody wrote.
+	out["written"] = bool(result.get("written", false))
 	out["out_dir"] = str(result.get("out_dir", payload["out_dir"]))
 	out["bytes"] = int(result.get("bytes", 0))
 	out["sha256"] = str(result.get("sha256", ""))
@@ -855,8 +857,8 @@ static func written_file(result: Dictionary) -> String:
 static func build_report_dialog(result: Dictionary) -> AcceptDialog:
 	var path := written_file(result)
 	# A run that WROTE A FILE gets a confirm, not an acknowledge. The
-	# application's own CAD surface has no mesh loader (in-app viewing is DCR
-	# 01a0656b0494), so a .glb that only exists at a path the owner has to
+	# application's own CAD surface has no mesh loader — in-app viewing is
+	# tracked separately — so a .glb that only exists at a path the owner has to
 	# retype is a deliverable they cannot open. The desktop handler can — .glb
 	# is on the host's os-open allowlist — and this is the one click that gets
 	# them there. ConfirmationDialog IS an AcceptDialog, so every caller that
