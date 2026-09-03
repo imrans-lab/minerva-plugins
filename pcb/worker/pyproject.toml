@@ -105,6 +105,16 @@ dev = [
     # gerber test suite for round-trip parsing of every emitted layer (not a
     # runtime dependency). Pinned to the spike's validated version.
     "pygerber==2.4.3",
+    # pygltflib: independent glTF 2.0 READER, used ONLY by
+    # tests/oracle/test_gltf_export_oracle.py to load the .glb that
+    # pcb_worker.gltf_write produces. Same justification as pygerber and
+    # gerbonara above: a file parsed by the library that wrote it proves only
+    # that the writer agrees with itself, and the defects that matter in a
+    # binary container — a buffer view off by its padding, an accessor whose
+    # count outruns its bytes — are exactly the ones a second implementation
+    # sees and the first cannot. Pure Python, dev-only, so it is absent from
+    # the runtime bundle and the suite skips where it is not installed.
+    "pygltflib==1.16.5",
 ]
 
 [tool.pytest.ini_options]

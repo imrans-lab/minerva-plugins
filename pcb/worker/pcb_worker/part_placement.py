@@ -169,6 +169,11 @@ class PlacedPart:
     #: says the vendor's model does not sit where our fab drawing says the body
     #: is, which is worth a look on either side. None for a placeholder.
     anchor_delta_mm: Union[float, None]
+    #: The CPL row's own anchor, in board millimetres. Carried so a file writer
+    #: can seat this part's node ON the position file's number instead of
+    #: baking the location into vertices and leaving a reader nothing to
+    #: compare against the CPL.
+    anchor_mm: tuple[float, float]
     marker: Union[SceneMesh, None] = None
     prism_basis: Union[str, None] = None
     notes: tuple[str, ...] = ()
@@ -198,6 +203,8 @@ class PartPlacementReport:
                 "height_mm": round(p.height_mm, 4), "height_basis": p.height_basis,
                 "anchor_delta_mm": (None if p.anchor_delta_mm is None
                                     else round(p.anchor_delta_mm, 4)),
+                "anchor_mm": {"x": round(p.anchor_mm[0], 4),
+                              "y": round(p.anchor_mm[1], 4)},
                 "prism_basis": p.prism_basis, "marked": p.marker is not None,
                 "notes": list(p.notes),
             } for p in self.parts],
@@ -445,7 +452,8 @@ def place_parts(board, emission, *, client,
                 mesh=_box(extent, 0.0, PLACEHOLDER_HEIGHT_MM, transform, physical.side,
                           thickness, PLACEHOLDER_MATERIAL, PLACEHOLDER_RGB),
                 height_mm=PLACEHOLDER_HEIGHT_MM, height_basis=HEIGHT_BASIS_NOMINAL,
-                anchor_delta_mm=None, prism_basis=basis, notes=tuple(notes)))
+                anchor_delta_mm=None, anchor_mm=tuple(physical.anchor),
+                prism_basis=basis, notes=tuple(notes)))
             continue
 
         # The translation half of the vendor-to-ours map, from the two pad
@@ -508,7 +516,8 @@ def place_parts(board, emission, *, client,
             ref=row.ref, side=row.side, kind=KIND_MODEL, orientation=orientation,
             reason=why, house_part=row.house_part, footprint_ref=row.footprint_ref,
             mesh=mesh, height_mm=seated.height_mm, height_basis=HEIGHT_BASIS_MODEL,
-            anchor_delta_mm=anchor_delta, marker=marker, notes=tuple(notes)))
+            anchor_delta_mm=anchor_delta, anchor_mm=tuple(physical.anchor),
+            marker=marker, notes=tuple(notes)))
 
     return PartPlacementReport(
         parts=tuple(parts),
