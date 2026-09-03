@@ -69,7 +69,13 @@ class FakeEditor extends RefCounted:
 class FakeIPC extends Node:
 	var captured: Array = []
 	var reply: Dictionary = {}
+	## Per-CHANNEL replies, consulted before `reply`. The 3D export rides two
+	## channels of its own, and a rig that could only pose one answer would have
+	## had to pose the warm and the write as the same shape — which is exactly
+	## the collapse the two-verb split exists to prevent.
+	var replies: Dictionary = {}
 	var _reply_id := ""
+	var _channel := ""
 
 	func bind(panel_node) -> void:
 		name = "_MinervaIPC"
@@ -79,6 +85,7 @@ class FakeIPC extends Node:
 	func _on_request(channel: String, payload: Dictionary, reply_id: String) -> void:
 		captured.append({"channel": channel, "payload": payload})
 		_reply_id = reply_id
+		_channel = channel
 
 	func last_request() -> Dictionary:
 		return captured[captured.size() - 1] if not captured.is_empty() else {}
@@ -87,6 +94,8 @@ class FakeIPC extends Node:
 		if reply_id != _reply_id:
 			return {"success": false, "error_code": "timeout",
 				"error_message": "no captured request"}
+		if replies.has(_channel):
+			return (replies[_channel] as Dictionary).duplicate(true)
 		return reply.duplicate(true)
 
 
@@ -256,6 +265,7 @@ func _init() -> void:
 	await _run_destination_refusal_parity()
 	await _run_named_per_component_report()
 	await _run_yaml_exporter_unchanged()
+	await _run_3d_export_pair()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -691,3 +701,207 @@ func _run_yaml_exporter_unchanged() -> void:
 		str(panel.selected_exporter_id()), "yaml")
 	check_eq("7c: …visibly, on the toolbar's own radio check",
 		_export_menu_checked(panel), PcbExport.label_at(PcbExport.YAML_INDEX))
+
+
+# ── 8: the 3D export — TWO verbs, both reachable both ways ──────────────────
+#
+# T7 (docket 01a0653468a9). The owner works only through the GUI, so an export
+# that only an agent can reach is not shipped; and the reports it produces are
+# only useful where a person can see them. This section drives the pair from
+# BOTH doorways over channel-keyed canned replies and compares the two, never
+# to a hand-written expectation.
+#
+# THE SPLIT IS THE THING UNDER TEST. One verb reaches the network and one does
+# not, and they ride two different channels: a rig that let them collapse into
+# one would pass a build where the "offline" export quietly fetched.
+
+const CHANNEL_FETCH := "minerva_pcb_fetch_part_models"
+const CHANNEL_GLB := "minerva_pcb_export_3d"
+
+
+## A written .glb whose cache was COLD: the file is real, four parts are prisms,
+## and the reply names the verb that fixes it. The shape board_3d.export builds.
+static func _glb_reply(path: String) -> Dictionary:
+	return {"success": true, "result": {"ok": true, "result": {
+		"path": path,
+		"filename": path.get_file(),
+		"written": true,
+		"out_dir": path.get_base_dir(),
+		"bytes": 28_692,
+		"sha256": "c".repeat(64),
+		"profile": "jlc",
+		"scale_px_per_mm": 20.0,
+		"missing_models": [
+			{"ref": "U1", "reason": "not_cached", "detail": "not in the cache and this client does not fetch", "prism_basis": "courtyard"},
+			{"ref": "J1", "reason": "not_cached", "detail": "not in the cache and this client does not fetch", "prism_basis": "courtyard"},
+		],
+		"cache_cold": [
+			{"ref": "U1", "reason": "not_cached", "detail": "not in the cache and this client does not fetch", "prism_basis": "courtyard"},
+			{"ref": "J1", "reason": "not_cached", "detail": "not in the cache and this client does not fetch", "prism_basis": "courtyard"},
+		],
+		"cache_cold_hint": "2 part(s) had no cached model and this export does not fetch — run minerva_pcb_fetch_part_models, then export again.",
+		"unverified": [{"ref": "U2", "reason": "no ledger entry for this package"}],
+		"tallest": [{"side": "top", "ref": "J1", "height_mm": 5.5}],
+		"unknown_height_refs": ["U1", "J1"],
+		"advisories": [],
+		"excluded": ["FID1"],
+		"notes": ["top texture: baked at 20 px/mm"],
+		"viewer_note": "opens in Blender or any glTF 2.0 viewer — Minerva's own CAD panel cannot load a mesh file",
+		"summary": "3D model written → %s (28692 bytes); 2 part(s) drawn as placeholder prisms; 1 part(s) with an UNVERIFIED orientation; cache cold for 2 of them — run minerva_pcb_fetch_part_models." % path,
+	}}}
+
+
+## A warm that got most of what it asked for and says which part it did not.
+static func _fetch_reply() -> Dictionary:
+	return {"success": true, "result": {"ok": true, "result": {
+		"profile": "jlc",
+		"cache_dir": "/home/somebody/.local/share/Minerva/pcb-cache/vendor_parts",
+		"requested": ["C149504", "C265102", "C780769", "C910544"],
+		"ready": [{"part": "C149504", "refs": ["R1"], "model_uuid": "abc",
+			"from_cache": false, "bytes": 4096, "sha256": "d".repeat(64)}],
+		"missing": [{"part": "C265102", "refs": ["J1"], "reason": "no_model",
+			"detail": "the package drawing references no 3D model"}],
+		"refs_without_part": [],
+		"counts": {"requested": 4, "ready": 3, "fetched": 3,
+			"already_cached": 0, "missing": 1},
+		"summary": "3 part(s) ready (3 fetched, 0 already cached); 1 without a usable model.",
+	}}}
+
+
+func _run_3d_export_pair() -> void:
+	print("\n-- 8: the 3D export pair --")
+	var rig := _rig({})
+	var panel = rig["panel"]
+	var ipc: FakeIPC = rig["ipc"]
+	var glb_path := _scratch_dir().path_join("parity-board.glb")
+	ipc.replies = {CHANNEL_GLB: _glb_reply(glb_path),
+		CHANNEL_FETCH: _fetch_reply()}
+
+	var model_index := PcbExport.index_of("glb")
+	var fetch_index := PcbExport.index_of("fetch-part-models")
+	check("8a: the exporter list carries a 3D model row", model_index >= 0)
+	check("8a: …and the row that warms its cache", fetch_index >= 0)
+
+	# 8b: THE PARITY ORACLE. The button and the verb send the SAME payload on
+	# the SAME channel and get back the SAME result. Not "both succeed" — the
+	# two paths agreeing about every field, which is what "the same file from
+	# the same board" reduces to once the worker is the one writing it.
+	ipc.captured.clear()
+	await panel._on_export_menu_id_pressed(
+		int(_export_menu_rows(panel)[PcbExport.label_at(model_index)]))
+	var button_status := str(panel._status_label.text)
+	var button_request: Dictionary = ipc.last_request()
+
+	ipc.captured.clear()
+	var verb: Dictionary = await PanelTools.handle(
+		rig["host"], "minerva_pcb_board_export", {"exporter": "glb"})
+	var verb_request: Dictionary = ipc.last_request()
+
+	check_eq("8b: the button rides the 3D export channel",
+		str(button_request.get("channel", "")), CHANNEL_GLB)
+	check_eq("8b: …and so does the verb",
+		str(verb_request.get("channel", "")), CHANNEL_GLB)
+	check_eq("8b: the two doorways send byte-identical payloads",
+		JSON.stringify(button_request.get("payload", {})),
+		JSON.stringify(verb_request.get("payload", {})))
+	check_eq("8b: the verb succeeded", bool(verb.get("success", false)), true)
+	check_eq("8b: …naming the file the worker wrote",
+		str(verb.get("path", "")), glb_path)
+
+	# 8c: the panel's own destination rule applies — no out_dir named, so it
+	# goes beside the canonical source file, the same place promote() writes.
+	check_eq("8c: the export is aimed at the adopted board's directory",
+		str((button_request.get("payload", {}) as Dictionary).get("out_dir", "")),
+		_scratch_dir())
+
+	# 8d: THE REPORTS REACH THE SCREEN. This is the finding that makes the
+	# feature usable: a person looking at the panel must see that parts are
+	# missing, not have to read an MCP reply they cannot make.
+	var result: Dictionary = await PcbExport.run(panel, "glb")
+	check_eq("8d: a written model always raises a report",
+		PcbExport.has_report(result), true)
+	var report := "\n".join(PcbExport.report_lines(result))
+	check("8d: the report names the file, first", report.contains("FILE: %s" % glb_path),
+		report)
+	check("8d: …says the application cannot open it",
+		report.contains("Blender"), report)
+	check("8d: …names EVERY part that came out a placeholder",
+		report.contains("U1") and report.contains("J1"), report)
+	check("8d: …calls them placeholders in so many words",
+		report.contains("placeholder prism"), report)
+	check("8d: …names the part whose orientation is a guess",
+		report.contains("ORIENTATION UNVERIFIED") and report.contains("U2"), report)
+	check("8d: …reports the tallest part per side",
+		report.contains("TALLEST MEASURED PART PER SIDE"), report)
+	check("8d: …and tells the reader the cache is cold and what to run",
+		report.contains("THE CACHE IS COLD")
+			and report.contains("minerva_pcb_fetch_part_models"), report)
+	check("8e: the status line says where the file went without opening anything",
+		button_status.contains(glb_path), button_status)
+
+	# 8f: the report OFFERS THE DESKTOP HANDLER. The application's CAD surface
+	# has no mesh loader, so a report that only printed a path would leave a
+	# GUI-only owner with a file they cannot open.
+	check_eq("8f: the written file is offered", PcbExport.written_file(result), glb_path)
+	var dialog := PcbExport.build_report_dialog(result)
+	check("8f: …as a confirm, not a bare acknowledgement",
+		dialog is ConfirmationDialog, str(dialog.get_class()))
+	check("8f: …whose accept button says what it will do",
+		str(dialog.ok_button_text).to_lower().contains("open"),
+		str(dialog.ok_button_text))
+	dialog.free()
+
+	# 8f: and a model the worker BUILT BUT DID NOT WRITE offers nothing either.
+	# The panel always names a destination, so this cannot happen through this
+	# surface — but the offer must rest on the worker's own statement, not on
+	# what this surface believes it asked for.
+	var unwritten := result.duplicate(true)
+	unwritten["written"] = false
+	check_eq("8f: a built-but-unwritten model offers no file",
+		PcbExport.written_file(unwritten), "")
+
+	# 8g: a REFUSAL offers nothing to open — a path on a failed run is not a file.
+	var refused: Dictionary = {"ok": false, "kind": "model", "path": glb_path,
+		"error": "board_3d_exists"}
+	check_eq("8g: a refused export offers no file",
+		PcbExport.written_file(refused), "")
+	var refused_dialog := PcbExport.build_report_dialog(refused)
+	check("8g: …and its dialog is a plain acknowledgement",
+		not (refused_dialog is ConfirmationDialog), str(refused_dialog.get_class()))
+	refused_dialog.free()
+
+	# 8h: THE OTHER VERB IS A DIFFERENT CHANNEL. The whole point of the split is
+	# that the network work is not inside the file write; a build where the two
+	# rows sent on one channel would have lost that and passed everything above.
+	ipc.captured.clear()
+	var warm: Dictionary = await PcbExport.run(panel, "fetch-part-models")
+	check_eq("8h: the warm rides its own channel",
+		str((ipc.last_request() as Dictionary).get("channel", "")), CHANNEL_FETCH)
+	check("8h: …and it is not the export's channel", CHANNEL_FETCH != CHANNEL_GLB)
+	check_eq("8h: the warm carries no out_dir — it writes no artifact",
+		(ipc.last_request().get("payload", {}) as Dictionary).has("out_dir"), false)
+	check_eq("8h: the warm succeeded", bool(warm.get("ok", false)), true)
+
+	# 8i: and the warm's own report reaches the screen, naming the part the
+	# supplier had nothing for and the ref that will be a prism because of it.
+	check_eq("8i: a warm always raises a report", PcbExport.has_report(warm), true)
+	var warm_report := "\n".join(PcbExport.report_lines(warm))
+	check("8i: the warm report counts what it got",
+		warm_report.contains("Vendor models") and warm_report.contains("ready: 3"),
+		warm_report)
+	check("8i: …names the part it could not get, BY REF",
+		warm_report.contains("C265102") and warm_report.contains("J1"), warm_report)
+	check("8i: …and says where the cache is",
+		warm_report.contains("vendor_parts"), warm_report)
+	check_eq("8i: the warm offers no file to open",
+		PcbExport.written_file(warm), "")
+
+	# 8j: the verb reaches the warm too, so an agent can close the gap the
+	# export just reported without a doorway of its own.
+	var warm_verb: Dictionary = await PanelTools.handle(
+		rig["host"], "minerva_pcb_board_export", {"exporter": "fetch-part-models"})
+	check_eq("8j: the verb reaches the warming row",
+		bool(warm_verb.get("success", false)), true)
+	check_eq("8j: …and is told the same counts the panel drew",
+		JSON.stringify(warm_verb.get("counts", {})),
+		JSON.stringify(warm.get("counts", {})))

@@ -72,6 +72,16 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// panel-IPC channel (manifest ui.ipc_channels/ipc_messages) exactly as
 		// it already does for minerva_pcb_drc.
 		"minerva_pcb_order_package",
+		// worker-backed — the 3D export's TWO verbs (task-cycle 16 T7, docket
+		// 01a0653468a9), forwarding to the worker's "fetch_part_models" and
+		// "board_3d_export" methods. Two entries and not one because exporters
+		// here run synchronously with no progress channel: the ~86-request
+		// vendor fetch is its own verb, and the file write reads the cache and
+		// never fetches. Each serves an agent and the panel's exporter chooser
+		// alike, declaring its own name as a panel-IPC channel exactly as
+		// minerva_pcb_order_package above does.
+		"minerva_pcb_fetch_part_models",
+		"minerva_pcb_export_3d",
 		// worker-backed — the rendered-bless surface (S3/B2, docket
 		// 019ff5687b99): the library TRUST BOUNDARY. Stage a .kicad_mod into
 		// the WIP layer, render the fact table + SVG a human blesses it

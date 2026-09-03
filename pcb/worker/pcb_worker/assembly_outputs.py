@@ -306,6 +306,19 @@ PROFILES: dict[str, HouseProfile] = {
 
 
 def _resolve_profile(profile_id) -> HouseProfile:
+    """The profile a caller selected, by id or already resolved.
+
+    AN ALREADY-RESOLVED PROFILE PASSES THROUGH. The profile IS the policy
+    object — ``identity_required``, the row limits, the coordinate unit and the
+    dialect columns are all profile DATA, and every gate below reads them off
+    whatever profile it is handed. A caller that derived one (see
+    :mod:`board_3d`, which lifts the purchasing identity requirement to DRAW a
+    board it is not ordering) therefore weakens nothing that a shipped profile
+    would not equally have declared; ``check_profile`` still runs over it, and
+    every artifact path still selects by id.
+    """
+    if isinstance(profile_id, HouseProfile):
+        return profile_id
     if not isinstance(profile_id, str) or not profile_id.strip():
         raise AssemblyProfileError(
             f"assembly house profile id must be a non-empty string; got {profile_id!r}")
@@ -590,7 +603,8 @@ class AssemblyEmission:
     orientation_refusals: tuple = ()
 
 
-def emit(board, profile_id: str, *, orientation=None) -> AssemblyEmission:
+def emit(board, profile_id: str | HouseProfile, *,
+         orientation=None) -> AssemblyEmission:
     """Walk the compiled board once, run every hard gate, collect the
     advisories — or refuse by name. The single entry point behind both files.
 

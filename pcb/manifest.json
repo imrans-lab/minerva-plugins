@@ -1736,17 +1736,97 @@
     },
     {
       "name": "minerva_pcb_board_export",
-      "description": "The EXPORTER CHOOSER's verb: run one exporter over the board open in the named PCB editor, in place. This is the panel's own Export control — the toolbar's Export menu, and the View menu's export rows at narrow widths where that button is hidden — reached as a tool, so the owner (GUI only) and an agent (tools only) run the SAME function and are told the same name for the same fault. Args {editor_name, exporter?, out_dir?, overwrite?}. `exporter` omitted runs whatever the chooser currently names, which is what pressing Export would do right now; every reply lists `exporters` so a caller discovers them without a second verb. The exporters are \"yaml\" (the canonical document, read out and WRITTEN NOWHERE — minerva_pcb_promote stays the only verb that puts bytes in a .yaml file), \"jlc\" (the whole order package in JLCPCB's CSV dialect, claiming no assembly tier — the honest shape for a mid-layout quote) and \"jlcpcb-economic\" (the same package checked against JLCPCB's Economic assembly tier). A package exporter with no out_dir writes BESIDE the canonical YAML file this board was adopted from, the same implicit target minerva_pcb_promote uses; a board that was never loaded from one refuses no_output_directory rather than inventing a path. The live board goes to the worker INLINE, so the order manifest records that its git state is unavailable rather than stamping the revision of a file the edits in this editor may have moved past. Package refusals carry the worker's own stable code (assembly_not_compilable, assembly_duplicate_designator, assembly_service_side_unsupported, …) and NOTHING is written; advisories and compile warnings never refuse and each names its component. The reply carries {exporter, exporter_label, kind, blockers, advisories, warnings, unchecked_rules, ip_questions, readiness, preflight, directory, outputs, written, status_line, report} — `report` is the same per-component rendering the panel puts on screen, and `status_line` the same sentence its status bar shows. Use minerva_pcb_order_package when you hold yaml/board and no editor.",
+      "description": "The EXPORTER CHOOSER's verb: run one exporter over the board open in the named PCB editor, in place. This is the panel's own Export control — the toolbar's Export menu, and the View menu's export rows at narrow widths where that button is hidden — reached as a tool, so the owner (GUI only) and an agent (tools only) run the SAME function and are told the same name for the same fault. Args {editor_name, exporter?, out_dir?, overwrite?}. `exporter` omitted runs whatever the chooser currently names, which is what pressing Export would do right now; every reply lists `exporters` so a caller discovers them without a second verb. The exporters are \"yaml\" (the canonical document, read out and WRITTEN NOWHERE — minerva_pcb_promote stays the only verb that puts bytes in a .yaml file), \"jlc\" (the whole order package in JLCPCB's CSV dialect, claiming no assembly tier — the honest shape for a mid-layout quote), \"jlcpcb-economic\" (the same package checked against JLCPCB's Economic assembly tier), \"fetch-part-models\" (WARMS the vendor 3D-model cache — the only row that reaches the network, and it writes no file) and \"glb\" (the board as one .glb: textured slab, holes cut, parts seated at the position file's own transform; it reads the cache and NEVER fetches, so warm it first or parts arrive as placeholder prisms). The 3D pair is two rows because everything here runs synchronously with no progress channel: a single row that fetched dozens of vendor documents and then wrote a file would freeze the window with nothing on screen. The glb reply carries {path, bytes, sha256, missing_models, unverified, tallest, unknown_height_refs, cache_cold, cache_cold_hint?, viewer_note}; the panel puts the same report on screen and offers to open the file in the desktop handler, because Minerva's own CAD surface cannot load a mesh. A package exporter with no out_dir writes BESIDE the canonical YAML file this board was adopted from, the same implicit target minerva_pcb_promote uses; a board that was never loaded from one refuses no_output_directory rather than inventing a path. The live board goes to the worker INLINE, so the order manifest records that its git state is unavailable rather than stamping the revision of a file the edits in this editor may have moved past. Package refusals carry the worker's own stable code (assembly_not_compilable, assembly_duplicate_designator, assembly_service_side_unsupported, …) and NOTHING is written; advisories and compile warnings never refuse and each names its component. The reply carries {exporter, exporter_label, kind, blockers, advisories, warnings, unchecked_rules, ip_questions, readiness, preflight, directory, outputs, written, status_line, report} — `report` is the same per-component rendering the panel puts on screen, and `status_line` the same sentence its status bar shows. Use minerva_pcb_order_package when you hold yaml/board and no editor.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab whose live board is exported"},
-          "exporter": {"type": "string", "description": "Exporter id: \"yaml\", \"jlc\" or \"jlcpcb-economic\". Omitted runs the panel Export menu's current selection; an unknown id refuses by name and lists the known ones."},
-          "out_dir": {"type": "string", "description": "Package exporters only: where the package directory is published. Omitted writes beside the canonical YAML file this board was adopted from."},
+          "exporter": {"type": "string", "description": "Exporter id: \"yaml\", \"jlc\", \"jlcpcb-economic\", \"fetch-part-models\" or \"glb\". Omitted runs the panel Export menu's current selection; an unknown id refuses by name and lists the known ones."},
+          "out_dir": {"type": "string", "description": "Writing exporters only (the packages and \"glb\"): where the artifact is published. Omitted writes beside the canonical YAML file this board was adopted from."},
           "overwrite": {"type": "boolean", "description": "Replace an existing package directory of the same name (default false — it may already have been uploaded)."}
         },
         "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_fetch_part_models",
+      "description": "WARM the vendor 3D-model cache for one board — the SLOW HALF of the 3D export, split off deliberately. This is the only verb here that reaches the network: it walks the board for every catalogue number its populated parts name, and fetches BOTH documents each part needs (the component payload and the mesh it points at) into the per-user cache, at most once per part and concurrently. IT REFUSES ALMOST NOTHING: only a board that will not compile, and a profile nobody publishes, stop it. It deliberately does NOT walk the position file — designator uniqueness, row limits, placement spacing and the part-identity contract are all promises about a document a manufacturer reads, and none of them bear on whether a model can be downloaded; a verb whose job is \"fetch what you can, report what you cannot\" must not refuse forty-six parts because of the forty-seventh. minerva_pcb_export_3d then reads that cache and never fetches, so the file write stays fast and deterministic and a supplier outage cannot be mistaken for a geometry fault. Args {yaml|board|board_path+board_digest, profile?}. Returns {profile, cache_dir, requested, ready:[{part, refs, model_uuid, from_cache, bytes, sha256}], missing:[{part, refs, reason, detail}], refs_without_part, counts:{requested, ready, fetched, already_cached, missing}, summary}. `missing` NEVER refuses — a part the supplier has no model for is a placeholder prism at export time, not a failure — and its `reason` is the stable name (no_part_number, not_found, no_network, malformed, no_model, identity_mismatch). `refs_without_part` names placements the board gave no catalogue number for, which is a board fact and not a fetch failure. An EMPTY cache_dir means this host stated no cache directory: everything fetched was discarded, and an export will still find the cache cold. Nothing but the cache is written. Holding an editor? The panel's Export menu runs this over the LIVE board through the same entry.",
+      "executor": "backend",
+      "input_schema": {
+        "properties": {
+          "board": {
+            "description": "Canonical board object (alternative to yaml).",
+            "type": "object"
+          },
+          "board_digest": {
+            "description": "sha256 hex of the board_path file's bytes. Mandatory with board_path — an unverified file read is refused, never trusted.",
+            "type": "string"
+          },
+          "board_path": {
+            "description": "Path to a board file, read only when yaml and board are both absent and only with board_digest.",
+            "type": "string"
+          },
+          "profile": {
+            "description": "Service profile id whose position-file walk names the catalogue numbers (default \"jlc\").",
+            "type": "string"
+          },
+          "yaml": {
+            "description": "Canonical board YAML source.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "minerva_pcb_export_3d",
+      "description": "Write the board as ONE .glb file: the textured slab with its holes cut, and every ordered part seated at the position file's own transform in the vendor's colours. SYNCHRONOUS AND OFFLINE — it reads only vendor models already cached and NEVER fetches, so it cannot stall behind a supplier. Run minerva_pcb_fetch_part_models first to warm the cache. Args {yaml|board|board_path+board_digest, out_dir?, name?, profile?, overwrite?, scale_px_per_mm?, max_px?}. WITHOUT out_dir nothing is written and the reply is the size, the digest and the whole report — the same optional-destination rule minerva_pcb_order_package uses, and useful for the same reason: \"which parts have no model, how tall is the board, is the cache cold\" is worth answering without picking a directory and cleaning up a file afterwards. WITH out_dir the .glb is published there. The BYTES are never returned either way; the sha256 is what a caller can check. Returns {path, filename, out_dir, written, bytes, sha256, profile, scale_px_per_mm, missing_models, unverified, tallest, unknown_height_refs, advisories, excluded, cache_cold, cache_cold_hint?, notes, report, viewer_note, summary}. THE REPORTS ARE THE POINT: `missing_models` names every part drawn as a magenta placeholder prism and why, `unverified` every part whose ORIENTATION was never measured (each carries an orange post in the file), `tallest` the tallest measured part per side and `unknown_height_refs` the parts whose height nothing knows — so a render is never mistaken for a measurement. `cache_cold` is the subset of missing_models that are missing ONLY because nobody warmed the cache, and cache_cold_hint names the verb that fixes it. A part the board gives no catalogue number for is a placeholder prism and a report line, NOT a refusal: the purchasing identity contract (assembly_missing_identity) governs a document a house reads, and this draws a picture on your own machine — a mid-layout board nobody has entered part numbers for is exactly when somebody wants to look at it. The same report travels INSIDE the file, in asset.extras, plus per-part facts on each node, so a person handed the .glb and nothing else can read all of it. IT OPENS IN BLENDER or any glTF 2.0 viewer — Minerva's own CAD panel has no file loader and cannot show it. Refusals are named and write nothing: board_3d_exists (the destination is occupied and overwrite was not set — it may already have been sent to somebody), board_3d_bad_parameter, board_3d_write_failed, board_3d_placement_mismatch (the emission and the board are not the same board), and assembly_not_compilable for a board that does not compile. Holding an editor? The panel's Export menu runs this over the LIVE board through the same entry, and offers to open the written file in the desktop handler.",
+      "executor": "backend",
+      "input_schema": {
+        "properties": {
+          "board": {
+            "description": "Canonical board object (alternative to yaml).",
+            "type": "object"
+          },
+          "board_digest": {
+            "description": "sha256 hex of the board_path file's bytes. Mandatory with board_path — an unverified file read is refused, never trusted.",
+            "type": "string"
+          },
+          "board_path": {
+            "description": "Path to a board file, read only when yaml and board are both absent and only with board_digest.",
+            "type": "string"
+          },
+          "max_px": {
+            "description": "Cap on the baked texture's long side in pixels. The scale is reduced to fit rather than the board being cropped.",
+            "type": "integer"
+          },
+          "name": {
+            "description": "File name stem; defaults to the board's own name. A .glb suffix is added and never doubled.",
+            "type": "string"
+          },
+          "out_dir": {
+            "description": "Directory to publish the .glb into. Omit to build the model and get its size, digest and full report without writing anything — the same optional-destination rule minerva_pcb_order_package uses. The bytes are never returned either way.",
+            "type": "string"
+          },
+          "overwrite": {
+            "description": "Replace an existing file of the same name (default false — it may already have been sent to somebody).",
+            "type": "boolean"
+          },
+          "profile": {
+            "description": "Service profile id whose position-file walk names the catalogue numbers (default \"jlc\").",
+            "type": "string"
+          },
+          "scale_px_per_mm": {
+            "description": "Texture resolution for the two baked board pictures (default 20). Higher is sharper and larger; the long side is capped by max_px.",
+            "type": "number"
+          },
+          "yaml": {
+            "description": "Canonical board YAML source.",
+            "type": "string"
+          }
+        },
+        "type": "object"
       }
     },
     {
@@ -2147,6 +2227,8 @@
           "minerva_pcb_drc",
           "minerva_pcb_drc_geometric",
           "minerva_pcb_order_package",
+          "minerva_pcb_fetch_part_models",
+          "minerva_pcb_export_3d",
           "pcb.assembly_check",
           "pcb.assembly_placements",
           "pcb.board_health",
@@ -2171,6 +2253,8 @@
       "minerva_pcb_drc",
       "minerva_pcb_drc_geometric",
       "minerva_pcb_order_package",
+      "minerva_pcb_fetch_part_models",
+      "minerva_pcb_export_3d",
       "pcb.assembly_check",
       "pcb.assembly_placements",
       "pcb.board_health",

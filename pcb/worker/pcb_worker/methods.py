@@ -27,11 +27,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import (assembly_advisory, assembly_outputs, bless, board_model,
-               compile_board, drc, footprints, gerber, ir_candidates,
-               ir_connectivity, kicad, libcheck, net_class_policy,
-               order_package, order_provenance, order_write, resolve,
-               resolved_board)
+from . import (assembly_advisory, assembly_outputs, bless, board_3d,
+               board_model, compile_board, drc, footprints, gerber,
+               ir_candidates, ir_connectivity, kicad, libcheck,
+               net_class_policy, order_package, order_provenance, order_write,
+               resolve, resolved_board)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -2910,6 +2910,47 @@ def _authored_hint_nets(hints) -> set:
     return nets
 
 
+# ---------------------------------------------------------------------------
+# The 3D export — TWO verbs, because one of them reaches the network.
+#
+# The bodies live in pcb_worker/board_3d.py; this file holds only the prologue
+# both share, which is the same parse-then-strict-compile every assembly
+# surface runs. Splitting the network work off the file write is the owner's
+# ruling of 2026-09-02 (docket 01a0653468a9) and board_3d's module docstring
+# carries the reasoning.
+# ---------------------------------------------------------------------------
+
+
+def _board_3d(params: dict, run) -> dict:
+    """The shared body: compile once, then hand the compiled board to `run`.
+
+    A Board3DError is a NAMED refusal with a stable `code`, reported in the same
+    error shape the assembly surfaces use so one reader handles both.
+    """
+    compiled = _compile_for_assembly(params)
+    if _is_error_reply(compiled):
+        return compiled
+    try:
+        return run(compiled.board, params)
+    except board_3d.Board3DError as exc:
+        return {"ok": False, "error": {"kind": "board_3d", "code": exc.code,
+                                       "message": str(exc)}}
+    except Exception as exc:  # see _assembly_bom: the dispatcher's broad-catch
+        # convention over caller-supplied board data, backstopping the named
+        # refusals above so nothing escapes as a bare python traceback reply.
+        return {"ok": False, "error": _assembly_refusal(exc)}
+
+
+def _fetch_part_models(params: dict) -> dict:
+    """Warm the vendor model cache for this board. Reaches the network."""
+    return _board_3d(params, board_3d.warm_cache)
+
+
+def _board_3d_export(params: dict) -> dict:
+    """Write the board as one .glb from the cache alone. Never fetches."""
+    return _board_3d(params, board_3d.export)
+
+
 def _route(params: dict) -> dict:
     """Autoroute a board with the vendored agent_router engine.
 
@@ -4396,6 +4437,10 @@ _HANDLERS = {
     # The WHOLE order package (gerber archive + both CSVs + checklist +
     # preflight + manifest) from ONE compilation, written atomically.
     "order_package": lambda req: _order_package(req.get("params") or {}),
+    # The 3D export's two verbs. fetch_part_models is the ONLY one that reaches
+    # the network; board_3d_export reads the cache and writes the file.
+    "fetch_part_models": lambda req: _fetch_part_models(req.get("params") or {}),
+    "board_3d_export": lambda req: _board_3d_export(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),
     "draft_check": lambda req: _draft_check(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),

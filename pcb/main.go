@@ -315,6 +315,15 @@ func initRegistry() {
 	// tool and an agent cannot click, so a second entry here would be a
 	// second set of refusal names for one fault.
 	registry.Register(tools.OrderPackage, tools.HandleOrderPackage)
+	// The 3D export, task-cycle 16 T7 (docket 01a0653468a9). TWO entries, and
+	// the split is the owner's ruling, not a factoring preference: exporters
+	// here run synchronously with no progress channel, so the ~86-request
+	// vendor fetch is its own verb and the file write reads the cache and
+	// never fetches. Each is ONE entry with two callers, exactly like the
+	// order package above — the panel declares these tools' own names as
+	// panel-IPC channels rather than getting dotted twins.
+	registry.Register(tools.FetchPartModels, tools.HandleFetchPartModels)
+	registry.Register(tools.Export3D, tools.HandleExport3D)
 	// pcb.promote_check — the K13 promotion gate: full connectivity +
 	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
 	// 11). See worker_tools.go.
@@ -394,6 +403,11 @@ var workerBackedTools = map[string]bool{
 	// minerva_pcb_order_package dispatches to the worker's "order_package"
 	// method; the panel reaches the same entry over IPC.
 	"minerva_pcb_order_package": true,
+	// The 3D export's two verbs (T7) dispatch to the worker's
+	// "fetch_part_models" and "board_3d_export" methods; the panel reaches the
+	// same two entries over IPC.
+	"minerva_pcb_fetch_part_models": true,
+	"minerva_pcb_export_3d":         true,
 	// Rendered-bless surface (S3/B2) — all three dispatch to the worker's
 	// footprint_stage/footprint_report/footprint_bless methods.
 	"minerva_pcb_footprint_stage":  true,

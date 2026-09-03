@@ -4497,8 +4497,14 @@ func _on_export_yaml_pressed() -> void:
 ## the module, not here, so an agent calling minerva_pcb_board_export with the
 ## backend down is told worker_unavailable in the same words the status line
 ## shows the human.
+##
+## The dialog may be a ConfirmationDialog rather than an AcceptDialog — the 3D
+## export writes a file this application cannot open, so its report offers the
+## desktop handler. That offer lives in pcb_export.gd with the rest of the
+## report; nothing here needs to know which kind came back, because
+## ConfirmationDialog IS an AcceptDialog.
 func _run_export(index: int) -> void:
-	_set_status("Exporting — %s…" % PcbExport.label_at(index))
+	_set_status(PcbExport.running_line(index))
 	var result: Dictionary = await PcbExport.run(self, PcbExport.id_at(index))
 	_set_status(PcbExport.status_line(result))
 	if not PcbExport.has_report(result) or not is_inside_tree():

@@ -140,9 +140,16 @@ REASON_NO_MODEL = "no_model"
 #: SUBSTITUTION, not a malformation: the document is well formed and describes
 #: some part, just not demonstrably the one whose name it would be filed under.
 REASON_MISMATCH = "identity_mismatch"
+#: The document is not in the cache and this client was told not to fetch. The
+#: ONLY absence that says nothing about the part itself: it is a statement
+#: about this machine's cache, curable by warming it, which is why it is not
+#: folded into REASON_NO_NETWORK. A caller that cannot tell them apart cannot
+#: tell "run the warming verb" from "you are offline".
+REASON_NOT_CACHED = "not_cached"
 
 REASONS = (REASON_NO_PART_NUMBER, REASON_NOT_FOUND, REASON_NO_NETWORK,
-           REASON_MALFORMED, REASON_NO_MODEL, REASON_MISMATCH)
+           REASON_MALFORMED, REASON_NO_MODEL, REASON_MISMATCH,
+           REASON_NOT_CACHED)
 
 #: A catalogue number becomes a FILENAME in the cache, so it is validated
 #: rather than escaped: anything outside this alphabet is a reported absence,
@@ -497,6 +504,15 @@ class _Unreachable(Exception):
     and never allowed out of this module."""
 
 
+class _NotCached(_Unreachable):
+    """Internal: an OFFLINE client missed the cache, so there is nothing to
+    read and nothing was asked of the network.
+
+    A subclass rather than a flag because every existing `except _Unreachable`
+    already treats it correctly — as "no bytes" — and only the one boundary
+    that names the reason needs to tell them apart."""
+
+
 def _http_get(url: str, *, user_agent: str, timeout: float) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": user_agent})
     try:
@@ -568,6 +584,12 @@ class VendorPartClient:
     THE ASYMMETRY IS DELIBERATE. A response off the NETWORK that cannot be read
     as the thing it was asked for is still a refusal: there is nothing stale
     about it, and the identity check exists precisely to refuse it.
+
+    AND THERE IS AN OFFLINE MODE (``offline=True``): cache reads only, a miss
+    answered :data:`REASON_NOT_CACHED`, no socket opened at all. It exists
+    because the 3D export runs synchronously with no way to say "still
+    working", and eighty-odd requests behind a frozen window is not a thing to
+    ship. Warming the cache is its own call.
     """
 
     api_base: str = API_BASE
@@ -576,6 +598,12 @@ class VendorPartClient:
     user_agent: str = USER_AGENT
     timeout: float = TIMEOUT_S
     max_workers: int = MAX_WORKERS
+    #: NEVER REACH THE NETWORK. A cache miss is answered
+    #: :data:`REASON_NOT_CACHED` instead of a request. Set by callers that run
+    #: on a thread nobody can watch — a synchronous export with no progress
+    #: channel — so a cold cache costs a report rather than a minutes-long
+    #: stall. Warming is a separate call, deliberately, and the reason names it.
+    offline: bool = False
 
     _facts: dict = field(default_factory=dict, init=False, repr=False)
     _models: dict = field(default_factory=dict, init=False, repr=False)
@@ -741,6 +769,12 @@ class VendorPartClient:
         hit = self._cache_read(sub, name, url)
         if hit is not None:
             return hit
+        if self.offline:
+            # The single gate. It sits BELOW the cache read and ABOVE the only
+            # call in this module that opens a socket, so "offline" cannot mean
+            # "cached parts are unavailable too" and cannot be bypassed by a
+            # future second fetch path added anywhere above it.
+            return _NotCached(f"not in the cache and this client does not fetch ({url})")
         try:
             data = _http_get(url, user_agent=self.user_agent,
                              timeout=self.timeout)
@@ -868,7 +902,9 @@ class VendorPartClient:
         were no bytes at all."""
         got = self._get(sub, name, url)
         if isinstance(got, _Unreachable):
-            return Absence(part, REASON_NO_NETWORK, str(got)), None
+            reason = (REASON_NOT_CACHED if isinstance(got, _NotCached)
+                      else REASON_NO_NETWORK)
+            return Absence(part, reason, str(got)), None
         data, provenance = got
         parsed = read(data, provenance)
         # Only a real document is worth keeping. Caching a "component not

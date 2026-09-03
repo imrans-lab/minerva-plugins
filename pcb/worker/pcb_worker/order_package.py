@@ -337,14 +337,20 @@ def digest(content) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _safe_name(value: str) -> str:
-    """A directory-name-safe rendering of a board or profile id."""
+def safe_name(value: str) -> str:
+    """A file- or directory-name-safe rendering of a board or profile id.
+
+    PUBLIC because it is the ONE rendering: a board called "Smart Remote v2"
+    must not become one name in a package directory and a different one in the
+    3D export's file name (:mod:`board_3d`). It also flattens a name that would
+    climb out of the directory it is written into, which is why the callers do
+    not each strip separators of their own."""
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value or "").strip("-.")
     return cleaned or "board"
 
 
 def package_directory_name(board_name: str, profile_id: str) -> str:
-    return f"{_safe_name(board_name)}-{_safe_name(profile_id)}"
+    return f"{safe_name(board_name)}-{safe_name(profile_id)}"
 
 
 def git_state(origin: board_model.BoardOrigin) -> dict:
