@@ -363,3 +363,38 @@ def test_a_pour_with_an_internal_void_is_painted_with_the_void_open():
     # And the pour it sits in is still copper right up to it.
     assert at(with_void, VOID_X_MM[0] - 0.5, centre[1]) == copper
     assert at(with_void, VOID_X_MM[1] + 0.5, centre[1]) == copper
+
+
+def test_copper_under_the_film_can_be_read_on_every_published_mask_colour():
+    """MUTATION THIS CATCHES: a copper swatch that merely looks like copper. The
+    first shipped one composited through a green film at 1.07x the laminate
+    tone — technically lighter, invisible at a glance — and the probe test
+    above, which only asks for LIGHTER, passed it.
+
+    TWO ORACLES: the swatch arithmetic alone, for every mask colour the vendor
+    publishes, must clear a contrast a person can see; and on the real bake the
+    probed pixels must be the tones that arithmetic predicts, so the number in
+    the report is the number on the picture.
+    """
+    from pcb_worker.texture_appearance import (MASK_SWATCHES, contrast_under_film,
+                                               under_film)
+    for name in MASK_SWATCHES:
+        ap = appearance_for(ResolvedFabrication(mask_colour=name, finish="hasl",
+                                                thickness_mm=1.6))
+        assert contrast_under_film(ap) >= 1.15, \
+            f"{name}: copper reads at {contrast_under_film(ap):.2f}x laminate"
+    green = appearance_for(ResolvedFabrication(mask_colour="green", finish="hasl",
+                                               thickness_mm=1.6))
+    assert contrast_under_film(green) >= 1.3, "the default colour must be the easy case"
+
+    scale = 20
+    bottom = texture_bake.bake_board(_compiled(_board()), scale_px_per_mm=scale)["bottom"]
+    pixels = bottom.image.load()
+    probe_row = int(POUR_PROBE_MM[1] * scale)
+    over_pour = pixels[int((BOARD_W_MM - POUR_PROBE_MM[0]) * scale), probe_row][:3]
+    over_laminate = pixels[int(POUR_PROBE_MM[0] * scale), probe_row][:3]
+    ap = appearance_for(_compiled(_board()).fabrication)
+    for got, want, what in ((over_pour, under_film(ap, ap.copper), "copper"),
+                            (over_laminate, under_film(ap, ap.substrate), "laminate")):
+        assert all(abs(g - w) <= 1 for g, w in zip(got, want)), \
+            f"{what} under the film paints {got}, the arithmetic says {want}"

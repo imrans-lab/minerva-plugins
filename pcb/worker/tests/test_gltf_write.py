@@ -238,3 +238,48 @@ def test_a_refused_group_leaves_its_valid_children_in_the_scene():
     doc, _binary = _chunks(builder.to_glb())
     assert doc["scenes"][0]["nodes"] == [group]
     assert doc["nodes"][group]["children"] == [first, second]
+
+
+def test_a_directional_light_points_where_it_says_and_is_declared_once():
+    """MUTATION THIS CATCHES: the wrong quaternion (a light that points along
+    the board instead of onto it renders both faces equally dark and no
+    structural check sees it), or the extension declared on a file with no
+    light, which a strict validator refuses.
+
+    ORACLE: the spec's rule that a directional light shines along its node's
+    local -Z, applied BY HAND — the quaternion from the file rotates (0, 0, -1)
+    and the result must be the axis the light was asked for.
+    """
+    def rotate(q, v):
+        x, y, z, w = q
+        # q * v * q^-1 for a unit quaternion, expanded.
+        vx, vy, vz = v
+        t = (2 * (y * vz - z * vy), 2 * (z * vx - x * vz), 2 * (x * vy - y * vx))
+        return (vx + w * t[0] + (y * t[2] - z * t[1]),
+                vy + w * t[1] + (z * t[0] - x * t[2]),
+                vz + w * t[2] + (x * t[1] - y * t[0]))
+
+    builder = GlbBuilder("test")
+    attributes = builder.add_vertices([(0, 0, 0), (1, 0, 0), (0, 0, 1)])
+    mesh = builder.add_mesh("tri", [Primitive(attributes, [(0, 1, 2)],
+                                              builder.add_material("m", (1, 1, 1, 1)))])
+    builder.add_node("tri", mesh)
+    plain = builder.document()
+    assert "extensionsUsed" not in plain and "extensions" not in plain, \
+        "no light, so nothing to declare"
+
+    above = builder.add_directional_light("above", pointing="down", intensity_lux=10.0)
+    below = builder.add_directional_light("below", pointing="up", intensity_lux=20.0)
+    doc = builder.document()
+    assert doc["extensionsUsed"] == [gltf_write.LIGHTS_EXTENSION]
+    lights = doc["extensions"][gltf_write.LIGHTS_EXTENSION]["lights"]
+    assert [(l["type"], l["intensity"]) for l in lights] == [("directional", 10.0),
+                                                              ("directional", 20.0)]
+    for node, axis in ((above, (0.0, -1.0, 0.0)), (below, (0.0, 1.0, 0.0))):
+        assert doc["nodes"][node]["extensions"][gltf_write.LIGHTS_EXTENSION]["light"] == node - 1
+        got = rotate(doc["nodes"][node]["rotation"], (0.0, 0.0, -1.0))
+        assert all(abs(g - a) < 1e-9 for g, a in zip(got, axis)), \
+            f"light {node} shines along {got}, asked for {axis}"
+
+    with pytest.raises(ValueError):
+        builder.add_directional_light("side", pointing="left", intensity_lux=1.0)

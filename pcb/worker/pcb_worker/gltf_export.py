@@ -153,7 +153,7 @@ from . import part_placement as pp
 from . import substrate_mesh as sm
 from . import texture_bake
 from .gltf_write import Attributes, GlbBuilder, Primitive
-from .texture_appearance import RGB, appearance_for
+from .texture_appearance import RGB, appearance_for, contrast_under_film, under_film
 from .texture_frame import DEFAULT_SCALE_PX_PER_MM, MAX_TEXTURE_PX
 from .wavefront_obj import Material
 
@@ -197,6 +197,12 @@ MARKER_SUFFIX = "__unverified_orientation"
 #: METRE format; this worker computes board millimetres. See THE FILE IS IN
 #: METRES in the module docstring before changing either.
 ROOT_NODE_NAME = "board_mm"
+
+#: The light rig every file carries: (node name, which way it points). glTF
+#: directional intensity is lux; Blender's importer divides by 683 to make a Sun
+#: of about 2.3 W/m², a little stronger than its own default lamp.
+LIGHT_RIG = (("light_above", "down"), ("light_below", "up"))
+LIGHT_LUX = 1600.0
 MM_PER_METRE = 1000.0
 MM_TO_METRE = 1.0 / MM_PER_METRE
 
@@ -427,6 +433,14 @@ def export_board(board, emission, *, client,
                 extras={"ref": part.ref, "marks": "unverified orientation",
                         "reason": part.reason}))
 
+    # Two suns, one on each face, so a viewer's Rendered mode shows the board
+    # lit head-on the way a board house's viewer does — rather than by whatever
+    # lamp the host scene happens to have, which lit only the top of the first
+    # export and left the underside black.
+    for name, pointing in LIGHT_RIG:
+        drawn.append(builder.add_directional_light(
+            name, pointing=pointing, intensity_lux=LIGHT_LUX))
+
     builder.add_group(ROOT_NODE_NAME, drawn,
                       scale=(MM_TO_METRE, MM_TO_METRE, MM_TO_METRE),
                       extras={"units": UNITS_NOTE,
@@ -458,6 +472,19 @@ def export_board(board, emission, *, client,
             "mask_srgb": list(appearance.mask),
             "finish_srgb": list(appearance.finish),
             "silk_srgb": list(appearance.silk),
+            # The two tones most of a face is painted in, and their ratio —
+            # below about 1.15 the copper cannot be read at a glance.
+            "laminate_under_mask_srgb": list(under_film(appearance, appearance.substrate)),
+            "copper_under_mask_srgb": list(under_film(appearance, appearance.copper)),
+            "copper_contrast": round(contrast_under_film(appearance), 2),
+        },
+        "lights": {
+            "extension": gltf_write.LIGHTS_EXTENSION,
+            "nodes": [name for name, _ in LIGHT_RIG],
+            "intensity_lux": LIGHT_LUX,
+            "note": "two directional lights, one onto each face, carried in the "
+                    "file so Rendered views need no host lamp; a viewer without "
+                    "the extension ignores them",
         },
         "placement": placement.as_dict(),
         "rulings": {"vendor_material_dissolve": DISSOLVE_RULING},

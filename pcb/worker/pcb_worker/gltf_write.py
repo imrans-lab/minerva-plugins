@@ -100,6 +100,16 @@ Vec3 = tuple[float, float, float]
 Vec2 = tuple[float, float]
 
 
+#: KHR_lights_punctual: a directional light shines along its node's local -Z.
+#: These quaternions (x, y, z, w) are a quarter turn about X, which carries -Z
+#: onto -Y ("down", onto the top face) and onto +Y ("up", onto the underside).
+LIGHTS_EXTENSION = "KHR_lights_punctual"
+_POINTING: dict[str, tuple[float, float, float, float]] = {
+    "down": (-0.7071067811865476, 0.0, 0.0, 0.7071067811865476),
+    "up": (0.7071067811865476, 0.0, 0.0, 0.7071067811865476),
+}
+
+
 @dataclass(frozen=True)
 class Attributes:
     """Accessor indices for ONE shared vertex array.
@@ -146,6 +156,7 @@ class GlbBuilder:
         #: Node indices some group has adopted, so they are not scene roots.
         self._children: set[int] = set()
         self._sampler: Union[int, None] = None
+        self._lights: list[dict] = []
         self._generator = generator
 
     # -- buffer plumbing ----------------------------------------------------
@@ -255,6 +266,33 @@ class GlbBuilder:
             node["translation"] = [float(v) for v in translation]
         if extras:
             node["extras"] = dict(extras)
+        self._nodes.append(node)
+        return len(self._nodes) - 1
+
+    def add_directional_light(self, name: str, *, pointing: str,
+                              intensity_lux: float,
+                              color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+                              ) -> int:
+        """A sun-like light as a scene node, pointing ``"down"`` or ``"up"``.
+
+        A viewer that honours KHR_lights_punctual (Blender imports one as a Sun
+        light) lights the scene with it; one that does not simply ignores the
+        extension, which is why it is listed as USED and never as required.
+        The light is a node like any other, so a group can adopt it and a
+        parent's transform turns it with everything else.
+        """
+        if pointing not in _POINTING:
+            raise ValueError(
+                f"add_directional_light({name!r}): pointing must be one of "
+                f"{sorted(_POINTING)}, not {pointing!r}")
+        self._lights.append({"type": "directional", "name": name,
+                             "intensity": float(intensity_lux),
+                             "color": [float(c) for c in color]})
+        node: dict[str, Any] = {
+            "name": name,
+            "rotation": list(_POINTING[pointing]),
+            "extensions": {LIGHTS_EXTENSION: {"light": len(self._lights) - 1}},
+        }
         self._nodes.append(node)
         return len(self._nodes) - 1
 
@@ -371,6 +409,9 @@ class GlbBuilder:
             "bufferViews": self._views,
             "buffers": [{"byteLength": self._padded_bin_length()}],
         }
+        if self._lights:
+            doc["extensionsUsed"] = [LIGHTS_EXTENSION]
+            doc["extensions"] = {LIGHTS_EXTENSION: {"lights": self._lights}}
         if self._materials:
             doc["materials"] = self._materials
         if self._images:

@@ -36,11 +36,19 @@ RGB = tuple[int, int, int]
 #: ordered choice — it is what FR4 looks like.
 FR4_SUBSTRATE: RGB = (0x8C, 0x70, 0x47)
 
-#: Copper as it sits UNDER the mask film. Deliberately lighter than the laminate:
-#: on a real board the poured and routed copper reads as the brighter regions
-#: through the mask, and that contrast is the whole reason a composite picture
-#: tells you more than the layers separately.
-UNDER_MASK_COPPER: RGB = (0xD9, 0x8C, 0x47)
+#: Bare copper, as it shows where nothing covers it: an OSP finish is a clear
+#: organic coat, so its mask openings show this.
+BARE_COPPER: RGB = (0xD9, 0x8C, 0x47)
+
+#: Copper as it sits UNDER the mask film. Much PALER than bare copper on
+#: purpose: the film above it keeps ``MASK_ALPHA`` of its own colour and lets
+#: only the remainder of this through, and on a real board the poured and
+#: routed copper reads as the plainly brighter regions through the lacquer.
+#: The value is chosen so that copper under the film clears
+#: :func:`contrast_under_film` on every published mask colour — a tone that
+#: merely looked like copper (the bare swatch above) came through a green film
+#: at 7 % luminance contrast, which is invisible at a glance.
+UNDER_MASK_COPPER: RGB = (0xFA, 0xE6, 0xC0)
 
 #: Opacity of the solder-mask film over whatever is beneath it. Mask is a
 #: translucent lacquer, not paint: at 1.0 the copper vanishes and the picture
@@ -68,7 +76,7 @@ MASK_SWATCHES: dict[str, RGB] = {
 FINISH_SWATCHES: dict[str, RGB] = {
     "hasl": (0xC2, 0xC6, 0xCA),          # tin/lead or lead-free solder: dull silver
     "enig": (0xD8, 0xB4, 0x54),          # immersion gold over nickel
-    "osp": UNDER_MASK_COPPER,            # a clear organic coat: bare copper shows
+    "osp": BARE_COPPER,                  # a clear organic coat: bare copper shows
 }
 
 #: What an unrecognised mask colour or finish renders as. Neutral on purpose —
@@ -139,3 +147,29 @@ def appearance_for(fabrication: ResolvedFabrication) -> Appearance:
         silk=SILK_ON_LIGHT if mask_name in _LIGHT_MASKS else SILK_ON_DARK,
         notes=tuple(notes),
     )
+
+
+def under_film(appearance: Appearance, base: RGB) -> RGB:
+    """The colour ``base`` shows as through the mask film — the same alpha
+    composite the rasteriser paints, as arithmetic, so a report can state the
+    two tones a face is mostly made of without reading pixels back."""
+    a = appearance.mask_alpha
+    return tuple(int(round(a * m + (1.0 - a) * b))
+                 for m, b in zip(appearance.mask, base))  # type: ignore[return-value]
+
+
+def luminance(rgb: RGB) -> float:
+    """Rec. 601 luma of an sRGB triple: what a person reads as brightness."""
+    r, g, b = rgb
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def contrast_under_film(appearance: Appearance) -> float:
+    """Luminance of copper under the film over luminance of laminate under it.
+
+    This is the number that decides whether traces can be read at a glance:
+    1.0 means copper and laminate paint the same tone and the picture shows no
+    copper at all.
+    """
+    return (luminance(under_film(appearance, appearance.copper))
+            / luminance(under_film(appearance, appearance.substrate)))

@@ -643,3 +643,37 @@ def test_only_the_purchasing_requirement_is_lifted_for_a_local_draw(mpnless_boar
     # And the house key the catalogue number is read under is untouched, so the
     # warm and the position file cannot disagree about what a part is called.
     assert drawing.house_part_id == shipped.house_part_id
+
+
+def test_the_file_lights_both_faces_and_the_report_says_how_readable_the_copper_is(
+        cache, no_network, tmp_path):
+    """OWNER HITL ON THE FIRST REV B EXPORT: the underside was black and the top
+    lit weakly from one side, because a glTF carries no light unless it says
+    so and Blender then used its own single lamp; and the copper was there but
+    at 1.07x the laminate tone, unreadable.
+
+    ORACLES: the file's own scene graph — both lights exist, are the extension
+    the spec names, and hang under the millimetre root so a viewer that
+    resolves the graph finds them; and the report's contrast number, which is
+    arithmetic on the swatches rather than a pixel read-back.
+    """
+    empty = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    empty["components"] = []
+    result = _export(_compiled_dict(empty), tmp_path, name="lit")
+    doc = _glb_json(Path(result["path"]))
+
+    assert doc["extensionsUsed"] == ["KHR_lights_punctual"]
+    lights = doc["extensions"]["KHR_lights_punctual"]["lights"]
+    assert [light["type"] for light in lights] == ["directional", "directional"]
+    lit = {n["name"]: n for n in doc["nodes"] if "extensions" in n}
+    assert set(lit) == {"light_above", "light_below"}
+    root = next(n for n in doc["nodes"] if n["name"] == "board_mm")
+    names = [doc["nodes"][i]["name"] for i in root["children"]]
+    assert "light_above" in names and "light_below" in names, \
+        "the lights must hang under the root, not float as extra scene roots"
+    assert len(doc["scenes"][0]["nodes"]) == 1
+
+    appearance = result["report"]["appearance"]
+    assert appearance["copper_contrast"] >= 1.15
+    assert appearance["copper_under_mask_srgb"] != appearance["laminate_under_mask_srgb"]
+    assert result["report"]["lights"]["nodes"] == ["light_above", "light_below"]

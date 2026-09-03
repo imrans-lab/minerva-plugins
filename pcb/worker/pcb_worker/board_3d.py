@@ -377,7 +377,10 @@ def export(board, params: dict, *, client=None) -> dict:
 #: application's own CAD surface has no file loader; this opens in Blender and
 #: any other glTF viewer.
 VIEWER_NOTE = ("opens in Blender or any glTF 2.0 viewer — Minerva's own CAD "
-               "panel cannot load a mesh file")
+               "panel cannot load a mesh file. The file carries its own two "
+               "lights (one onto each face), so a Rendered view needs no lamp "
+               "from the host scene; Solid shading shows no texture, use "
+               "Material Preview or Rendered")
 
 
 def _baked_scale(built, requested: float) -> float:
