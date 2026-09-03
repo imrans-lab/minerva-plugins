@@ -121,32 +121,57 @@ def test_relative_vertex_indices_resolve_against_the_running_count():
     assert mesh.triangles == ((0, 1, 2),)
 
 
-def test_a_non_finite_coordinate_never_reaches_the_mesh_or_its_bounds():
-    """MUTATION THIS CATCHES: ``float("nan")`` and ``float("inf")`` parse, so a
-    reader that only guards against ``ValueError`` lets them straight through.
-    One of them poisons every bounding box computed from the mesh — a NaN makes
-    min/max return whichever value it was compared against first, an inf makes
-    the part the size of the scene — and any file written from it, and it does
-    that while the mesh looks entirely well formed.
+#: The unit square, written cleanly. Every case below is this file with one
+#: unreadable ``v`` line spliced in front of it, so "same as clean" is the
+#: whole assertion.
+SQUARE = "v 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\n"
+SQUARE_BOUNDS = ((0.0, 0.0, 0.0), (2.0, 1.0, 0.0))
 
-    ORACLE: the box's own arithmetic. A model with a poisoned vertex must
-    measure exactly what the CLEAN corners measure, and the poisoned corner's
-    faces must be gone rather than drawn to a substituted position.
+#: Every way a ``v`` line can fail to state a point. The non-finite ones parse
+#: as floats and are the reason ``ValueError`` alone is not enough; the rest are
+#: short, empty or non-numeric. All are ONE vertex as far as face numbering is
+#: concerned — see the module header's policy.
+UNREADABLE_VERTEX_LINES = ("v nan nan nan", "v inf 0 0", "v 0 -inf 0",
+                           "v NaN 1 0", "v 0 0", "v", "v a b c", "v 0 0 zero")
+
+
+def test_a_vertex_that_cannot_be_read_holds_its_index_and_leaves_no_point_behind():
+    """MUTATION THIS CATCHES, in two directions at once.
+
+    DROPPING THE LINE renumbers every face after it, so faces land on the wrong
+    points and the model is quietly re-shaped into a plausible wrong one.
+    KEEPING A PLACEHOLDER puts a point at the origin that the file never stated,
+    and a consumer measuring ``vertices`` — which this module cannot stop it
+    doing — gets a bounding box stretched to reach it EVEN WHEN NO FACE
+    REFERENCES IT. ``float("nan")`` and ``float("inf")`` parse, so a reader that
+    guards only against ``ValueError`` never even gets that far.
+
+    ORACLE: the clean square. Splice an unreadable ``v`` line in front of it and
+    the mesh must measure, count and index exactly as the clean file does — that
+    is the same statement whether or not a face touches the bad slot.
     """
-    clean = parse_obj("v 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\nf 1// 2// 3// 4//\n")
-    assert clean.bounds_mm() == ((0.0, 0.0, 0.0), (2.0, 1.0, 0.0))
+    clean = parse_obj(SQUARE + "f 1// 2// 3// 4//\n")
+    assert clean.bounds_mm() == SQUARE_BOUNDS
+    assert len(clean.vertices) == 4
 
-    for bad in ("nan nan nan", "inf 0 0", "0 -inf 0", "NaN 1 0"):
-        # The poisoned vertex is the FIRST one, so its slot has to be held: the
-        # faces below index by position in the `v` stream, and dropping the line
-        # would renumber them onto other points instead of removing them.
-        mesh = parse_obj(
-            f"v {bad}\nv 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\n"
-            "f 1// 2// 3//\n"          # touches the poisoned vertex: dropped
-            "f 2// 3// 4// 5//\n")     # the clean square: kept
-        assert all(all(math.isfinite(c) for c in p) for p in mesh.vertices), bad
-        assert mesh.bounds_mm() == ((0.0, 0.0, 0.0), (2.0, 1.0, 0.0)), bad
-        assert len(mesh.triangles) == 2, bad
+    for bad in UNREADABLE_VERTEX_LINES:
+        # (a) A face DOES touch the bad slot. It is dropped rather than drawn to
+        # a substituted position, and the square that follows keeps its corners.
+        touched = parse_obj(f"{bad}\n" + SQUARE
+                            + "f 1// 2// 3//\n"       # touches it: dropped
+                            + "f 2// 3// 4// 5//\n")  # the clean square: kept
+        assert all(all(math.isfinite(c) for c in p) for p in touched.vertices), bad
+        assert touched.bounds_mm() == SQUARE_BOUNDS, bad
+        assert len(touched.triangles) == 2, bad
+
+        # (b) NOTHING references the bad slot. This is the case a retained
+        # placeholder passes silently: the file describes the same square, so
+        # the mesh must be indistinguishable from the clean one, vertex list
+        # included.
+        stray = parse_obj(f"{bad}\n" + SQUARE + "f 2// 3// 4// 5//\n")
+        assert stray.vertices == clean.vertices, bad
+        assert stray.triangles == clean.triangles, bad
+        assert stray.bounds_mm() == clean.bounds_mm(), bad
 
     # The same rule on a material: a colour channel that is not a number leaves
     # the field unset rather than carrying an inf into a renderer.

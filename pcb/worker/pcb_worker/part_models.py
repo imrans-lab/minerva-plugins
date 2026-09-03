@@ -134,10 +134,10 @@ REASON_NOT_FOUND = "not_found"
 REASON_NO_NETWORK = "no_network"
 REASON_MALFORMED = "malformed"
 REASON_NO_MODEL = "no_model"
-#: The payload states a catalogue number that is not the one we asked for. A
+#: The payload cannot be shown to be the part that was asked for — either it
+#: states a DIFFERENT catalogue number, or it states none at all. A
 #: SUBSTITUTION, not a malformation: the document is well formed and describes
-#: some other part, which is the one outcome a consumer must never be handed
-#: under the name it requested.
+#: some part, just not demonstrably the one whose name it would be filed under.
 REASON_MISMATCH = "identity_mismatch"
 
 REASONS = (REASON_NO_PART_NUMBER, REASON_NOT_FOUND, REASON_NO_NETWORK,
@@ -401,16 +401,32 @@ def parse_component_payload(payload: Any, part: str = "",
         # reporting it as facts would hand every consumer an empty drawing.
         return Absence(part, REASON_MALFORMED,
                        "the package drawing carries neither pads nor a model")
-    # THE PAYLOAD'S OWN IDENTITY DECIDES. `part` is what the CALLER asked for,
-    # and stamping it onto whatever came back would cache a substituted or
+    # THE PAYLOAD MUST PROVE ITS OWN IDENTITY. `part` is what the CALLER asked
+    # for, and stamping it onto whatever came back would cache a substituted or
     # misrouted document under the name of the part we wanted — a wrong land
-    # pattern and a wrong 3D model, both looking authoritative. When the
-    # document names itself and disagrees, that is an absence, not facts.
-    # Case-insensitively, because the disagreement worth refusing is a
-    # DIFFERENT part, not a differently-cased spelling of the same one.
+    # pattern and a wrong 3D model, both looking authoritative.
+    #
+    # SILENCE IS NOT AGREEMENT. Comparing only when the document happens to name
+    # itself makes the check trivially evadable: a substituted response that
+    # says nothing about what it is would sail through, and saying nothing is
+    # the EASIER thing for a wrong response to do than naming the wrong part.
+    # So when a key was requested, the document must state a non-blank
+    # catalogue number and that number must be the requested one. Comparison is
+    # case-insensitive, because the disagreement worth refusing is a DIFFERENT
+    # part, not a differently-cased spelling of the same one.
+    #
+    # Requesting NO key (`part=""`) is a different question — "parse this
+    # document and tell me what it says it is" — and is answered from the
+    # payload's own `stated` below. Nothing is being claimed about it.
     lcsc = result.get("lcsc")
     stated = str(lcsc.get("number") or "").strip() if isinstance(lcsc, Mapping) else ""
-    if part and stated and stated.casefold() != part.casefold():
+    if part and not stated:
+        return Absence(part, REASON_MISMATCH,
+                       f"the response states no catalogue number of its own, so "
+                       f"nothing in it shows it is the {part!r} that was "
+                       f"requested; refusing to file an unidentified drawing "
+                       f"under a part number")
+    if part and stated.casefold() != part.casefold():
         return Absence(part, REASON_MISMATCH,
                        f"the response identifies itself as {stated!r}, not the "
                        f"{part!r} that was requested; refusing to serve one "

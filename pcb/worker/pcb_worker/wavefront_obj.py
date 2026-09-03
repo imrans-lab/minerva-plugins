@@ -52,14 +52,35 @@ one. Two classes are refused rather than carried:
 
 * NON-FINITE NUMBERS. ``v nan nan nan``, ``inf`` in a ``Kd``: a single one
   poisons every bounding box computed from the mesh and every file written from
-  it, and it does so without ever looking wrong in the data structure. A
-  non-finite vertex keeps its SLOT — OBJ indices are positions in the ``v``
-  stream, so removing the line would silently renumber every face after it —
-  but the slot is marked unusable and any face that references it is dropped.
+  it, and it does so without ever looking wrong in the data structure. A colour
+  that carries one is left unset; a vertex that carries one is handled by the
+  index policy below, along with every other unreadable ``v`` line.
 * DEGENERATE TRIANGLES. A face whose three corners are not three distinct
   points, or whose corners are collinear, has zero area and no normal. It
   contributes nothing to a render and makes closure and area checks downstream
   read as failures of the mesh rather than of the file.
+
+EVERY ``v`` LINE CONSUMES AN INDEX, AND NO UNUSABLE ONE SURVIVES THE PARSE
+-------------------------------------------------------------------------
+These are two halves of one policy, and getting either half alone is a defect.
+
+An OBJ face index is a POSITION IN THE ``v`` STREAM, so a ``v`` line the parser
+cannot read still has to hold its slot while the file is being read: skipping it
+would renumber every face after it and quietly re-shape the model into a
+plausible wrong one. The policy is deliberately about the DIRECTIVE and not
+about the failure — ``v nan nan nan``, ``v 1 2``, ``v a b c`` and ``v`` alone
+all count as one vertex, because a writer that emitted a broken line still
+counted it, and a rule that held a slot only for the failures we happened to
+enumerate would renumber on the ones we did not.
+
+But the slot is scaffolding for the PARSE, not a vertex. Handing it out — as
+the origin, or as anything else — puts a point in the model that the file does
+not contain, and a consumer measuring the mesh gets a bounding box stretched to
+reach it even when no face refers to it. So faces that touch an unusable slot
+are dropped, and the surviving vertices are then COMPACTED and the triangles
+REMAPPED: what comes out contains only points the file really stated. A model
+carrying one unreferenced bad vertex therefore measures exactly like the same
+model without the line.
 """
 
 from __future__ import annotations
@@ -120,7 +141,10 @@ class Mesh:
 
         Referenced, not all: an OBJ may carry stray vertices no face uses, and
         a bounding box that counts them describes the file rather than the
-        part.
+        part. That is a choice made HERE and cannot be relied on elsewhere —
+        which is why the parser also refuses to put an unusable point in
+        ``vertices`` at all, so a consumer that measures the whole list gets
+        the same answer this does.
         """
         used = {i for tri in self.triangles for i in tri}
         if not used:
@@ -182,6 +206,31 @@ def _degenerate(vertices: list[_Vec3], tri: tuple[int, int, int]) -> bool:
     return (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) == (0.0, 0.0, 0.0)
 
 
+def _compact(vertices: list[_Vec3], triangles: list[tuple[int, int, int]],
+             unusable: set[int]) -> tuple[list[_Vec3], list[tuple[int, int, int]]]:
+    """Drop the placeholder slots and renumber the triangles onto what is left.
+
+    The slots existed so that face indices — positions in the ``v`` stream —
+    resolved against the file's own numbering while it was being read. Once
+    every face is resolved they are no longer indices, they are POINTS, and a
+    point the file never stated has no business in the mesh: it stretches any
+    bounding box taken over ``vertices`` to reach the origin, whether or not a
+    face refers to it. No surviving triangle can reference one — faces that
+    touched an unusable slot were dropped as they were read — so the remap is
+    total.
+    """
+    if not unusable:
+        return vertices, triangles
+    remap: dict[int, int] = {}
+    kept: list[_Vec3] = []
+    for index, point in enumerate(vertices):
+        if index in unusable:
+            continue
+        remap[index] = len(kept)
+        kept.append(point)
+    return kept, [(remap[a], remap[b], remap[c]) for (a, b, c) in triangles]
+
+
 def parse_obj(text: str) -> Mesh:
     """Parse OBJ source into a :class:`Mesh`. Never raises.
 
@@ -189,9 +238,11 @@ def parse_obj(text: str) -> Mesh:
     for the convex planar polygons OBJ faces are defined to be. Unparseable
     lines are dropped rather than defended against: a half-downloaded model
     should come out as a smaller mesh or an empty one, not as an exception. So
-    are lines that parse but cannot mean anything — a non-finite coordinate or
+    are lines that parse but cannot mean anything — an unreadable coordinate or
     colour, a face on such a vertex, a zero-area triangle (see the module
-    header).
+    header). A ``v`` line that cannot be read holds its index while the file is
+    parsed and is COMPACTED OUT before the mesh is returned, so no point the
+    file did not state ever leaves here.
     """
     vertices: list[_Vec3] = []
     triangles: list[tuple[int, int, int]] = []
@@ -225,9 +276,11 @@ def parse_obj(text: str) -> Mesh:
 
         if key == "v":
             xyz = _floats(rest, 3)
-            # An unusable vertex still OCCUPIES ITS INDEX: `f 3//` means "the
-            # third v line", so dropping the line outright would renumber every
-            # face that follows it and quietly re-shape the model.
+            # EVERY `v` line occupies an index, readable or not: `f 3//` means
+            # "the third v line", so dropping one outright would renumber every
+            # face that follows it and quietly re-shape the model. The
+            # placeholder is scaffolding for the indices below and is compacted
+            # away before the mesh is returned.
             if xyz is None:
                 unusable.add(len(vertices))
                 vertices.append((0.0, 0.0, 0.0))
@@ -265,6 +318,7 @@ def parse_obj(text: str) -> Mesh:
             ignored.add(key)
 
     close_material()   # a file that ends mid-block still yields its material
+    vertices, triangles = _compact(vertices, triangles, unusable)
     return Mesh(vertices=tuple(vertices),
                 triangles=tuple(triangles),
                 triangle_materials=tuple(tri_materials),

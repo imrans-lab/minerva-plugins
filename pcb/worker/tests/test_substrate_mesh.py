@@ -14,12 +14,16 @@ source would ask them:
     board it must hit exactly two surfaces, one going in and one coming out.
     Painting a hole onto the texture passes every colour test ever written and
     fails this one immediately.
-  * WELD BY POSITION AND COUNT EDGES. A closed solid traverses every directed
-    edge as often as its reverse — exactly once each on a board like this one,
-    and twice where the material is legitimately pinched to zero width (a bore
-    tangent to the outline). A missing bore wall, a face triangulated over a
-    hole, a wall wound inside out, a rim split on one side of a seam and not the
-    other: all of them break it.
+  * WELD BY POSITION AND LOOK AT THE EDGES. A closed solid traverses every
+    directed edge as often as its reverse, and — the part that balance alone
+    does not say — joins exactly two triangles along each undirected edge. A
+    missing bore wall, a face triangulated over a hole, a wall wound inside out,
+    a rim split on one side of a seam and not the other break the first; a
+    doubled skin, a coincident pair of opposite-facing triangles and two solids
+    welded along one line all satisfy the first and break the second. The one
+    licensed exception is a PINCH COLUMN: where a bore is exactly tangent to the
+    outline the material closes to zero width, and the wall standing on that
+    point really does carry four skins.
   * MEASURE THE AREA against the board DOCUMENT — 24 x 18 mm, one 3 x 6 mm
     cutout — minus the analytic area of the circles that were drilled.
   * MEASURE A SLOT'S OPENING. It has to come out 7 x 2 mm, not round.
@@ -56,7 +60,8 @@ from pcb_worker.resolved_board import (
     ResolvedHole,
     SlotHole,
 )
-from pcb_worker.substrate_mesh import SubstrateMeshError, build_substrate_mesh
+from pcb_worker.substrate_mesh import (SubstrateMeshError, _check_closed,
+                                       build_substrate_mesh)
 
 COUPON = Path(__file__).resolve().parent / "testdata" / "coupon_jlc1.yaml"
 
@@ -125,6 +130,24 @@ def _directed_edges(mesh) -> dict[tuple, int]:
         for edge in ((a, b), (b, c), (c, a)):
             counts[edge] = counts.get(edge, 0) + 1
     return counts
+
+
+def _pinch_columns(mesh) -> list[tuple]:
+    """Undirected edges carrying MORE than two triangles, welded by position.
+
+    On a legitimate board every one of these is a wall column standing where the
+    material closes to zero width, so the oracle also insists on the shape: both
+    ends over the same board point, and spanning the whole thickness.
+    """
+    counts: dict[tuple, int] = {}
+    for edge, n in _directed_edges(mesh).items():
+        key = tuple(sorted(edge))
+        counts[key] = counts.get(key, 0) + n
+    crowded = [edge for edge, n in counts.items() if n > 2]
+    for (ax, ay, az), (bx, by, bz) in crowded:
+        assert (ax, az) == (bx, bz), "a crowded edge that is not a column"
+        assert {ay, by} == {0.0, ORDERED_THICKNESS_MM}, "not the full thickness"
+    return crowded
 
 
 def _signed_volume(mesh) -> float:
@@ -206,6 +229,7 @@ def test_the_slab_is_closed_and_holds_the_volume_it_kept_at_the_ordered_thicknes
     edges = _directed_edges(mesh)
     assert [edge for edge, count in edges.items() if count != 1] == []
     assert [edge for edge in edges if (edge[1], edge[0]) not in edges] == []
+    assert _pinch_columns(mesh) == []     # nothing on this board touches itself
 
     face_area = _area(mesh, mesh.top_triangles)
     assert abs(_area(mesh, mesh.bottom_triangles) - face_area) < 1e-9 * face_area
@@ -395,14 +419,22 @@ def _with_mounting_holes(*holes) -> object:
     return _compiled(board)
 
 
-def _closed_and_solid(mesh, board) -> float:
+def _closed_and_solid(mesh, board, *, pinch_columns: int = 0) -> float:
     """Assert the mesh bounds the material the boolean says is left, and return
     that area. The oracle is :mod:`board_region`, which is a different
     computation on the same document — an exact integer boolean, not a
-    triangulation — so agreement is evidence rather than a tautology."""
+    triangulation — so agreement is evidence rather than a tautology.
+
+    ``pinch_columns`` is how many places the board is expected to close to zero
+    width. Stating the number rather than tolerating any is the point: those are
+    the only edges allowed to carry more than two triangles, so an unexpected one
+    is a doubled wall wearing a legitimate board's clothes.
+    """
     edges = _directed_edges(mesh)
     assert [e for e, n in edges.items() if edges.get((e[1], e[0]), 0) != n] == [], \
         "the surface does not bound a solid"
+    assert len(_pinch_columns(mesh)) == pinch_columns, \
+        "the surface meets itself somewhere the material does not pinch"
 
     expected = sum(region.area_mm2() for region in board_regions(board))
     face = _area(mesh, mesh.top_triangles)
@@ -426,17 +458,18 @@ def test_a_bore_tangent_to_the_outline_still_closes_the_skin():
     ORACLE: 1.59963 mm is where the INSCRIBED bore polygon of a 3.2 mm hole puts
     its leftmost vertex exactly on x = 0 (the offset is exact integer nanometres,
     so this is a construction, not a coincidence). The board is pinched to zero
-    width there — a real, legal shape — so the surface is checked for BALANCE
-    rather than for every edge appearing once, and its volume must still be the
-    kept area times the ordered thickness.
+    width there — a real, legal shape — so ONE wall column carries four skins
+    instead of two, and its volume must still be the kept area times the ordered
+    thickness. Exactly one: the licence is for the place the rim closes on
+    itself, not a general relaxation, and the sliver case 0.4 um away has none.
 
     The 0.4 um sliver case is the same geometry one nanometre either side of the
     pinch, and it must come out just as solid.
     """
-    for centre_x in (1.59963, 1.6):
+    for centre_x, pinches in ((1.59963, 1), (1.6, 0)):
         board = _with_mounting_holes((centre_x, 9.0, MOUNT_DIAMETER_MM))
         mesh = build_substrate_mesh(board)
-        _closed_and_solid(mesh, board)
+        _closed_and_solid(mesh, board, pinch_columns=pinches)
 
         # It is a HOLE, not a bite out of the rim: the board is still there on
         # the far side of the bore, and gone at its centre. (5, 9) is clear of
@@ -470,6 +503,82 @@ def test_two_overlapping_bores_are_cut_as_the_one_opening_they_make():
     for x in (6.0, 6.75, 7.5):                 # both centres AND the waist
         assert _hits_along_the_bore_axis(mesh, x, 9.0) == 0, x
     assert _hits_along_the_bore_axis(mesh, 7.5 + 1.7, 9.0) == 2
+
+
+#: A tetrahedron's four outward faces, as indices into ``(v0, v1, v2, v3)``.
+#: Every undirected edge appears exactly twice, once each way — so a tetra on
+#: its own is closed, balanced AND a proper skin, and any misbehaviour below
+#: comes from how two of them are put together rather than from the shape.
+TETRAHEDRON = ((0, 1, 2), (0, 2, 3), (0, 3, 1), (1, 3, 2))
+
+
+def _surface(mesh, positions, triangles):
+    """``mesh`` re-skinned with a hand-built surface, parallel arrays intact."""
+    return replace(mesh,
+                   positions=tuple(positions),
+                   normals=tuple((0.0, 1.0, 0.0) for _ in positions),
+                   uvs=tuple((0.0, 0.0) for _ in positions),
+                   top_triangles=(), bottom_triangles=(),
+                   edge_triangles=tuple(triangles))
+
+
+def test_a_surface_that_balances_but_is_not_a_skin_is_refused():
+    """THE FINDING THIS CLOSES, and the reason it is the important one: "every
+    directed edge is traversed as often as its reverse" was accepted as the
+    closure rule, and it is necessary but NOT sufficient. It is a count, and a
+    broken mesh can make counts agree.
+
+    ORACLE: two surfaces that pass balance and are not solids anybody can make.
+
+      * A DOUBLED SKIN — the real coupon slab with every triangle drawn twice.
+        Every count doubles, reverses included, so balance is perfect. The
+        material is described twice; a volume computed from it is twice the
+        board.
+      * TWO SOLIDS WELDED ALONG ONE LINE — two tetrahedra sharing one edge and
+        nothing else. Each is closed and correctly wound, so every directed edge
+        still matches its reverse; the shared edge carries four triangles, which
+        is a non-manifold join and not a board.
+
+    Both are asserted to PASS the old balance rule first, so the test cannot
+    quietly stop demonstrating what it was written for. The tangent-bore case
+    above is the other half of the statement: the licensed pinch still passes.
+    """
+    slab = build_substrate_mesh(_coupon_with_mounting_hole())
+
+    doubled = replace(slab,
+                      top_triangles=slab.top_triangles * 2,
+                      bottom_triangles=slab.bottom_triangles * 2,
+                      edge_triangles=slab.edge_triangles * 2)
+    edges = _directed_edges(doubled)
+    assert [e for e, n in edges.items() if edges.get((e[1], e[0]), 0) != n] == [], \
+        "the doubled skin was supposed to BALANCE — otherwise it proves nothing"
+    assert abs(_signed_volume(doubled) - 2.0 * _signed_volume(slab)) < 1e-9
+    with pytest.raises(SubstrateMeshError) as refusal:
+        _check_closed(doubled)
+    assert "same skin more than once" in str(refusal.value)
+
+    # (0,0,0)-(1,0,0) is the shared edge; the two apex pairs sit on opposite
+    # sides of the y = z = 0 line, so the tetrahedra meet along it and nowhere
+    # else. The edge is horizontal, so it is not a wall column under any
+    # pinch licence.
+    points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+              (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),        # tetra A apexes
+              (0.0, -1.0, 0.0), (0.0, 0.0, -1.0)]      # tetra B apexes
+    welded = _surface(slab, points, [
+        tuple((0, 1, 2, 3)[i] for i in face) for face in TETRAHEDRON
+    ] + [
+        tuple((0, 1, 4, 5)[i] for i in face) for face in TETRAHEDRON
+    ])
+    edges = _directed_edges(welded)
+    assert [e for e, n in edges.items() if edges.get((e[1], e[0]), 0) != n] == [], \
+        "the welded pair was supposed to BALANCE — otherwise it proves nothing"
+    assert edges[(points[0], points[1])] == 2      # four skins on one edge
+    with pytest.raises(SubstrateMeshError) as refusal:
+        _check_closed(welded)
+    assert "join more than two triangles" in str(refusal.value)
+
+    # And the rule is not vacuous: one tetrahedron alone is a fine little solid.
+    _check_closed(_surface(slab, points[:4], TETRAHEDRON))
 
 
 def test_an_opening_that_consumes_the_whole_board_is_refused_not_exported():

@@ -40,8 +40,9 @@ with a piece of its material simply absent — and an incomplete slab is the one
 defect class this export cannot show you, because it looks exactly like a board
 with a differently-shaped outline. So every region is measured against the area
 :mod:`board_region` computed for it (:data:`AREA_TOLERANCE`), the finished
-surface is checked closed, and either failure raises
-:class:`SubstrateMeshError` naming what did not come out.
+surface is checked to be a closed SKIN rather than merely a balanced one
+(:func:`_check_closed`), and either failure raises :class:`SubstrateMeshError`
+naming what did not come out.
 
 THREE GROUPS OF TRIANGLES, not one. ``top`` and ``bottom`` carry the baked
 per-side textures. ``edge`` is the rim and every bore wall: raw laminate, which
@@ -168,6 +169,7 @@ def build_substrate_mesh(board: ResolvedBoard, *,
     top_tris: list[tuple[int, int, int]] = []
     bottom_tris: list[tuple[int, int, int]] = []
     edge_tris: list[tuple[int, int, int]] = []
+    pinches: set[Point2] = set()
 
     for index, region in enumerate(regions):
         points, triangles = triangulate(list(region.outer),
@@ -192,15 +194,16 @@ def build_substrate_mesh(board: ResolvedBoard, *,
             top_tris.append((top_base + c, top_base + b, top_base + a))
             bottom_tris.append((bottom_base + a, bottom_base + b, bottom_base + c))
 
-        _add_walls(_face_boundary(points, triangles), top_y, bottom_y,
-                   positions, normals, uvs, edge_tris)
+        boundary = _face_boundary(points, triangles)
+        pinches |= _pinch_points(boundary)
+        _add_walls(boundary, top_y, bottom_y, positions, normals, uvs, edge_tris)
 
     mesh = SubstrateMesh(
         positions=tuple(positions), normals=tuple(normals), uvs=tuple(uvs),
         top_triangles=tuple(top_tris), bottom_triangles=tuple(bottom_tris),
         edge_triangles=tuple(edge_tris), thickness_mm=thickness,
         top_frame=top_frame, bottom_frame=bottom_frame, openings=openings)
-    _check_closed(mesh)
+    _check_closed(mesh, frozenset(pinches))
     return mesh
 
 
@@ -226,39 +229,121 @@ def _check_region_filled(index: int, region, points, triangles) -> None:
             f"hole(s)); refusing to export a board with material missing")
 
 
-def _check_closed(mesh: SubstrateMesh) -> None:
+def _pinch_points(boundary: list[tuple[Point2, Point2]]) -> set[Point2]:
+    """The board-frame points where a region closes to ZERO WIDTH.
+
+    Read off the triangulated face's own rim, which is a set of closed loops
+    walked in one direction: an ordinary rim point has exactly one edge leaving
+    it, and a point where the material pinches — a bore exactly tangent to the
+    outline or to another bore — has two, because the rim arrives, turns around
+    the far side, and comes back through the same place.
+
+    This is what makes the closure rule below GEOMETRIC rather than a licence
+    handed out on the strength of a count. The wall column raised at such a
+    point is the one place a legitimate board has four pieces of skin along one
+    edge, and the 2D rim says where those places are before any wall exists.
+    """
+    leaving: dict[Point2, int] = {}
+    for (start, _end) in boundary:
+        leaving[start] = leaving.get(start, 0) + 1
+    return {point for point, count in leaving.items() if count > 1}
+
+
+def _check_closed(mesh: SubstrateMesh,
+                  pinch_points: frozenset[Point2] = frozenset()) -> None:
     """Refuse a surface that does not bound a solid.
 
     Vertices are WELDED BY POSITION first: faces and walls deliberately keep
     their own copies so their normals stay flat, so the index topology is open
-    by construction while the solid is not. The rule over the welded surface is
-    that every directed edge is traversed as often as its reverse — a missing
-    bore wall, a face triangulated over a hole, a wall wound inside out and a
-    rim split on one side of a seam but not the other each break it.
+    by construction while the solid is not. Over the welded surface, three
+    things must hold, and each catches a class the others let past.
 
-    BALANCE, NOT "EXACTLY ONCE". A board can legitimately touch itself: a bore
-    exactly tangent to the outline, or to another bore, pinches the material to
-    zero width along one line, and the edge on that line belongs to two pieces
-    of skin at once. That surface still encloses its volume — it is the shape
-    the board really has — so it is not a defect to refuse; a wall that is
-    simply drawn twice is, and it fails the balance the same way a missing one
-    does.
+    1. NO PIECE OF SKIN IS DRAWN TWICE. Two triangles on the same three points
+       are the same piece of material described twice, whichever way round they
+       are wound.
+    2. EVERY DIRECTED EDGE IS MATCHED BY ITS REVERSE. A missing bore wall, a
+       face triangulated over a hole, a wall wound inside out, a rim split on
+       one side of a seam and not the other: each leaves a directed edge with
+       nothing coming back the other way.
+    3. EVERY UNDIRECTED EDGE JOINS EXACTLY TWO TRIANGLES — except on a pinch
+       column, below.
+
+    WHY BALANCE ALONE IS NOT ENOUGH, which is the mistake this replaces. Rule 2
+    is necessary and nowhere near sufficient: it is a COUNT, and counts can be
+    made to agree by broken meshes. A skin drawn twice doubles every count and
+    balances perfectly. A pair of coincident triangles facing opposite ways
+    balances perfectly and encloses nothing. Two solids joined along a single
+    shared edge balance perfectly and are not a manufacturable board. All three
+    are surfaces that "bound a solid" by arithmetic and by nothing else.
+
+    WHY "EXACTLY TWO" IS NOT ENOUGH EITHER, which is why rule 3 has an
+    exception. A board can legitimately touch itself: a bore exactly tangent to
+    the outline pinches the material to zero width at one point, and the wall
+    column standing at that point genuinely carries FOUR pieces of skin — the
+    rim arriving, the bore going round, and the two coming back. That is the
+    shape the fabricator will really make.
+
+    THE DISCRIMINATOR IS WHERE, NOT HOW MANY. ``pinch_points`` names the
+    board-frame points where the face's own rim closes on itself
+    (:func:`_pinch_points`) — computed from the 2D triangulation, before any
+    wall exists, so it cannot be inferred from the very multiplicity it is
+    licensing. A column standing on one of those points may carry any balanced
+    number of skins. Anywhere else, more than two is a doubled wall or a
+    non-manifold join, and is refused.
     """
-    edges: dict[tuple[Vec3, Vec3], int] = {}
+    directed: dict[tuple[Vec3, Vec3], int] = {}
+    faces: dict[tuple[Vec3, ...], int] = {}
     for tri in mesh.triangles:
         a, b, c = (mesh.positions[i] for i in tri)
+        key = tuple(sorted((a, b, c)))
+        faces[key] = faces.get(key, 0) + 1
         for edge in ((a, b), (b, c), (c, a)):
-            edges[edge] = edges.get(edge, 0) + 1
-    unbalanced = [edge for edge, count in edges.items()
-                  if edges.get((edge[1], edge[0]), 0) != count]
+            directed[edge] = directed.get(edge, 0) + 1
+
+    repeated = [points for points, count in faces.items() if count > 1]
+    if repeated:
+        (ax, ay, az) = repeated[0][0]
+        raise SubstrateMeshError(
+            f"the finished surface draws the same skin more than once: "
+            f"{len(repeated)} triangle(s) are described by another triangle on "
+            f"the same three points, the first cornered at "
+            f"({ax:g}, {ay:g}, {az:g}); refusing to export a solid whose "
+            f"material is counted twice")
+
+    unbalanced = [edge for edge, count in directed.items()
+                  if directed.get((edge[1], edge[0]), 0) != count]
     if unbalanced:
-        (ax, ay, az), (bx, by, bz) = unbalanced[0]
         raise SubstrateMeshError(
             f"the finished surface does not bound a solid: {len(unbalanced)} "
             f"directed edge(s) are not matched by the same number of opposite "
-            f"faces, the first from ({ax:g}, {ay:g}, {az:g}) to "
-            f"({bx:g}, {by:g}, {bz:g}); refusing to export a solid with holes "
-            f"in its skin")
+            f"faces, the first {_edge_text(unbalanced[0])}; refusing to export "
+            f"a solid with holes in its skin")
+
+    crowded = [edge for edge, count in directed.items()
+               if count > 1 and not _on_pinch_column(edge, pinch_points)]
+    if crowded:
+        raise SubstrateMeshError(
+            f"the finished surface is not a skin: {len(crowded)} directed "
+            f"edge(s) join more than two triangles away from any point where "
+            f"the board pinches to zero width, the first "
+            f"{_edge_text(crowded[0])}; refusing to export a solid whose "
+            f"surface meets itself where the material does not")
+
+
+def _on_pinch_column(edge: tuple[Vec3, Vec3], pinch_points: frozenset[Point2]) -> bool:
+    """Whether ``edge`` is the vertical wall column standing on a pinch point.
+
+    Both ends must project to the SAME board point, and that point must be one
+    the face's rim declared pinched. A merely horizontal edge that happens to
+    end at a pinch point is ordinary skin and gets no licence.
+    """
+    (ax, _ay, az), (bx, _by, bz) = edge
+    return (ax, az) == (bx, bz) and (ax, az) in pinch_points
+
+
+def _edge_text(edge: tuple[Vec3, Vec3]) -> str:
+    (ax, ay, az), (bx, by, bz) = edge
+    return f"from ({ax:g}, {ay:g}, {az:g}) to ({bx:g}, {by:g}, {bz:g})"
 
 
 def _face_boundary(points, triangles) -> list[tuple[Point2, Point2]]:

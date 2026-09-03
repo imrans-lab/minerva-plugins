@@ -199,7 +199,7 @@ def test_a_part_the_supplier_does_not_have_is_an_absence_not_an_error():
         assert answer.reason in pm.REASONS, payload
 
 
-def test_a_payload_that_names_another_part_is_refused_not_relabelled():
+def test_a_payload_that_cannot_prove_its_identity_is_refused_not_relabelled():
     """MUTATION THIS CATCHES — and the one the corpus test above cannot: the
     parser stamping the REQUESTED catalogue number onto whatever came back. A
     substituted, misrouted or mis-cached upstream response then enters the cache
@@ -207,10 +207,16 @@ def test_a_payload_that_names_another_part_is_refused_not_relabelled():
     another component's land pattern and another component's 3D model. Both are
     authoritative-looking and both are wrong.
 
+    AND THE EVASION OF IT: comparing only when the document happens to name
+    itself makes the check bypassable by SILENCE. A wrong response saying
+    nothing about what it is is easier to produce than one naming the wrong
+    part, so an omitted or blank ``result.lcsc.number`` must be a refusal too —
+    proof of identity, not merely absence of contradiction.
+
     ORACLE: two REAL payloads from the corpus, each of which states its own
     ``result.lcsc.number``. Asking for one and being handed the other must be an
-    absence naming both, and a payload that names ITSELF must still parse — the
-    rule is about disagreement, not about the field being present.
+    absence naming both; a payload that names ITSELF must still parse; and the
+    three ways of saying nothing must all refuse.
     """
     payload = json.loads(_payload_bytes("C910544"))
 
@@ -222,11 +228,27 @@ def test_a_payload_that_names_another_part_is_refused_not_relabelled():
     # Case is not a disagreement: it is the same catalogue number.
     assert not pm.parse_component_payload(payload, "c910544").absent
 
-    # A payload that states no number of its own says nothing to disagree with,
-    # so the requested key still names the facts.
+    # SILENCE IS NOT AGREEMENT. No `lcsc`, no `number`, and a blank one are the
+    # same claim — "this document does not say what it is" — and none of them
+    # earns the requested key.
+    for mutate in (lambda r: r.pop("lcsc", None),
+                   lambda r: r["lcsc"].pop("number", None),
+                   lambda r: r["lcsc"].__setitem__("number", "   "),
+                   lambda r: r.__setitem__("lcsc", "C910544")):
+        quiet = json.loads(_payload_bytes("C910544"))
+        mutate(quiet["result"])
+        refused = pm.parse_component_payload(quiet, "C15127")
+        assert refused.absent and refused.reason == pm.REASON_MISMATCH
+        assert "C15127" in refused.detail
+        # Not even under its OWN name: the document is what fails to identify
+        # itself, so no requested key can be attached to it.
+        assert pm.parse_component_payload(quiet, "C910544").absent
+
+    # Asking with NO key at all is a different question — "parse this and tell
+    # me what it says" — and stays answerable.
     quiet = json.loads(_payload_bytes("C910544"))
     quiet["result"].pop("lcsc", None)
-    assert pm.parse_component_payload(quiet, "C15127").part == "C15127"
+    assert not pm.parse_component_payload(quiet).absent
 
 
 # ---------------------------------------------------------------------------
