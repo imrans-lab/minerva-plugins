@@ -40,8 +40,9 @@ with a piece of its material simply absent — and an incomplete slab is the one
 defect class this export cannot show you, because it looks exactly like a board
 with a differently-shaped outline. So every region is measured against the area
 :mod:`board_region` computed for it (:data:`AREA_TOLERANCE`), the finished
-surface is checked to be a closed SKIN rather than merely a balanced one
-(:func:`_check_closed`), and either failure raises :class:`SubstrateMeshError`
+surface is checked to be ONE closed skin rather than merely a balanced one —
+touching itself only where the board's own rim says it does, and only as often
+(:func:`_check_closed`) — and either failure raises :class:`SubstrateMeshError`
 naming what did not come out.
 
 THREE GROUPS OF TRIANGLES, not one. ``top`` and ``bottom`` carry the baked
@@ -56,6 +57,7 @@ triangles a texture belongs on.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Mapping
 
 from . import mesh_frame
@@ -86,6 +88,10 @@ EDGE_UV: tuple[float, float] = (0.0, 0.0)
 #: smallest thing that can go missing is a triangle, and no triangle a clipper
 #: region contains is anywhere near a billionth of it.
 AREA_TOLERANCE: float = 1e-9
+
+#: No rim census at all — every column unlicensed. The default for
+#: :func:`_check_closed` when a caller checks a surface it did not build.
+_NO_COLUMNS: Mapping[Point2, int] = MappingProxyType({})
 
 
 class SubstrateMeshError(ValueError):
@@ -169,7 +175,7 @@ def build_substrate_mesh(board: ResolvedBoard, *,
     top_tris: list[tuple[int, int, int]] = []
     bottom_tris: list[tuple[int, int, int]] = []
     edge_tris: list[tuple[int, int, int]] = []
-    pinches: set[Point2] = set()
+    columns: dict[Point2, int] = {}
 
     for index, region in enumerate(regions):
         points, triangles = triangulate(list(region.outer),
@@ -195,7 +201,8 @@ def build_substrate_mesh(board: ResolvedBoard, *,
             bottom_tris.append((bottom_base + a, bottom_base + b, bottom_base + c))
 
         boundary = _face_boundary(points, triangles)
-        pinches |= _pinch_points(boundary)
+        for point, leaving in _rim_multiplicity(boundary).items():
+            columns[point] = columns.get(point, 0) + leaving
         _add_walls(boundary, top_y, bottom_y, positions, normals, uvs, edge_tris)
 
     mesh = SubstrateMesh(
@@ -203,7 +210,7 @@ def build_substrate_mesh(board: ResolvedBoard, *,
         top_triangles=tuple(top_tris), bottom_triangles=tuple(bottom_tris),
         edge_triangles=tuple(edge_tris), thickness_mm=thickness,
         top_frame=top_frame, bottom_frame=bottom_frame, openings=openings)
-    _check_closed(mesh, frozenset(pinches))
+    _check_closed(mesh, columns)
     return mesh
 
 
@@ -229,28 +236,38 @@ def _check_region_filled(index: int, region, points, triangles) -> None:
             f"hole(s)); refusing to export a board with material missing")
 
 
-def _pinch_points(boundary: list[tuple[Point2, Point2]]) -> set[Point2]:
-    """The board-frame points where a region closes to ZERO WIDTH.
+def _rim_multiplicity(boundary: list[tuple[Point2, Point2]]) -> dict[Point2, int]:
+    """HOW MANY walls stand on each board-frame point, read off the face's rim.
 
-    Read off the triangulated face's own rim, which is a set of closed loops
-    walked in one direction: an ordinary rim point has exactly one edge leaving
-    it, and a point where the material pinches — a bore exactly tangent to the
-    outline or to another bore — has two, because the rim arrives, turns around
+    The rim is a set of closed loops walked in one direction, and every one of
+    its edges becomes exactly one wall (:func:`_add_walls`), so the number of
+    edges LEAVING a point is the number of wall quads whose left-hand column
+    rises from it — which is exactly how many times the finished surface may
+    traverse that column upwards. An ordinary rim point has one. A point where
+    the material closes to ZERO WIDTH — a bore exactly tangent to the outline
+    or to another bore — has two or more, because the rim arrives, turns around
     the far side, and comes back through the same place.
 
     This is what makes the closure rule below GEOMETRIC rather than a licence
-    handed out on the strength of a count. The wall column raised at such a
-    point is the one place a legitimate board has four pieces of skin along one
-    edge, and the 2D rim says where those places are before any wall exists.
+    handed out on the strength of a count. It is not merely WHERE the surface
+    may meet itself but HOW OFTEN, both settled by the 2D rim before a single
+    wall vertex exists. A licence that said only "here" would wave through any
+    number of extra skins stacked on the licensed column — a whole second solid
+    welded on at the one place the board is allowed to touch itself.
+
+    Every rim edge raises a wall, with no exception to account for here: a
+    zero-length edge is its own reverse, so :func:`_face_boundary` never
+    reports one as open, and the guard :func:`_add_walls` carries against them
+    never fires on a rim.
     """
     leaving: dict[Point2, int] = {}
     for (start, _end) in boundary:
         leaving[start] = leaving.get(start, 0) + 1
-    return {point for point, count in leaving.items() if count > 1}
+    return leaving
 
 
 def _check_closed(mesh: SubstrateMesh,
-                  pinch_points: frozenset[Point2] = frozenset()) -> None:
+                  columns: Mapping[Point2, int] = _NO_COLUMNS) -> None:
     """Refuse a surface that does not bound a solid.
 
     Vertices are WELDED BY POSITION first: faces and walls deliberately keep
@@ -266,7 +283,11 @@ def _check_closed(mesh: SubstrateMesh,
        one side of a seam and not the other: each leaves a directed edge with
        nothing coming back the other way.
     3. EVERY UNDIRECTED EDGE JOINS EXACTLY TWO TRIANGLES — except on a pinch
-       column, below.
+       column, and there only as often as the rim says, below.
+    4. IT IS ALL ONE PIECE. The first three rules are LOCAL — they are
+       satisfied independently by each of two closed shells that never touch —
+       so two separate solids handed over as one board pass all of them. The
+       welded surface must therefore be connected.
 
     WHY BALANCE ALONE IS NOT ENOUGH, which is the mistake this replaces. Rule 2
     is necessary and nowhere near sufficient: it is a COUNT, and counts can be
@@ -283,13 +304,32 @@ def _check_closed(mesh: SubstrateMesh,
     rim arriving, the bore going round, and the two coming back. That is the
     shape the fabricator will really make.
 
-    THE DISCRIMINATOR IS WHERE, NOT HOW MANY. ``pinch_points`` names the
-    board-frame points where the face's own rim closes on itself
-    (:func:`_pinch_points`) — computed from the 2D triangulation, before any
-    wall exists, so it cannot be inferred from the very multiplicity it is
-    licensing. A column standing on one of those points may carry any balanced
-    number of skins. Anywhere else, more than two is a doubled wall or a
-    non-manifold join, and is refused.
+    THE DISCRIMINATOR IS WHERE AND HOW MANY, BOTH READ OFF THE RIM.
+    ``columns`` maps each board-frame point to the number of walls the face's
+    own rim raises from it (:func:`_rim_multiplicity`) — computed from the 2D
+    triangulation, before any wall exists, so it cannot be inferred from the
+    very multiplicity it is licensing. A vertical column standing on such a
+    point may be traversed exactly that many times; anywhere else, and at any
+    other count, more than one traversal is a doubled wall or a non-manifold
+    join, and is refused.
+
+    WHY THE COUNT AND NOT JUST THE PLACE. A licence that named only the point
+    would be open-ended: it would admit ANY balanced number of skins along the
+    one column the board is allowed to touch itself on, so a separately
+    triangulated closed shell welded to a legitimate tangent board along that
+    column would satisfy every rule here — unique triangles, balanced edges,
+    two triangles everywhere else — and pass as one solid. Pinning the count to
+    what the rim independently predicts closes that: "two skins meet here" does
+    not also license three.
+
+    WHAT THIS STILL DOES NOT PROVE, stated so the guarantee is no larger than
+    the code. Two closed shells meeting at exactly ONE VERTEX and sharing no
+    edge pass all four rules: every edge is ordinary, and rule 4 sees them as
+    connected because they genuinely share that point. Refusing it needs a
+    different check — the link of every vertex being a single cycle — and that
+    check cannot be applied flatly here, because the endpoints of a legitimate
+    pinch column have exactly the same broken link. So "closed, one piece, and
+    a skin everywhere its rim allows" is the claim; "a manifold solid" is not.
     """
     directed: dict[tuple[Vec3, Vec3], int] = {}
     faces: dict[tuple[Vec3, ...], int] = {}
@@ -319,26 +359,80 @@ def _check_closed(mesh: SubstrateMesh,
             f"faces, the first {_edge_text(unbalanced[0])}; refusing to export "
             f"a solid with holes in its skin")
 
-    crowded = [edge for edge, count in directed.items()
-               if count > 1 and not _on_pinch_column(edge, pinch_points)]
+    crowded = [(edge, count) for edge, count in directed.items()
+               if count > 1 and count != _column_licence(edge, columns)]
     if crowded:
+        edge, count = crowded[0]
         raise SubstrateMeshError(
             f"the finished surface is not a skin: {len(crowded)} directed "
-            f"edge(s) join more than two triangles away from any point where "
-            f"the board pinches to zero width, the first "
-            f"{_edge_text(crowded[0])}; refusing to export a solid whose "
-            f"surface meets itself where the material does not")
+            f"edge(s) join more than two triangles without the board's rim "
+            f"accounting for them, the first {_edge_text(edge)} traversed "
+            f"{count} time(s) where the rim raises "
+            f"{_column_licence(edge, columns)} wall(s) there; refusing to "
+            f"export a solid whose surface meets itself where the material "
+            f"does not")
+
+    pieces, stray = _pieces(mesh)
+    if pieces > 1:
+        (ax, ay, az) = stray
+        raise SubstrateMeshError(
+            f"the finished surface is not one solid: it falls into {pieces} "
+            f"separate closed pieces that share no edge, the smallest of them "
+            f"reaching ({ax:g}, {ay:g}, {az:g}); a board whose material is in "
+            f"islands does not come off the router in one piece, and refusing "
+            f"it here is the only place that is visible")
 
 
-def _on_pinch_column(edge: tuple[Vec3, Vec3], pinch_points: frozenset[Point2]) -> bool:
-    """Whether ``edge`` is the vertical wall column standing on a pinch point.
+def _pieces(mesh: SubstrateMesh) -> tuple[int, Vec3]:
+    """How many connected pieces the WELDED surface falls into, and a corner of
+    the smallest of them.
 
-    Both ends must project to the SAME board point, and that point must be one
-    the face's rim declared pinched. A merely horizontal edge that happens to
-    end at a pinch point is ordinary skin and gets no licence.
+    Union-find over positions rather than indices, for the same reason the
+    edge rules weld: faces and walls keep their own vertices, so index
+    connectivity is broken by construction at every seam of a perfectly good
+    board.
+    """
+    parent: dict[Vec3, Vec3] = {}
+
+    def root(vertex: Vec3) -> Vec3:
+        parent.setdefault(vertex, vertex)
+        while parent[vertex] != vertex:
+            parent[vertex] = parent[parent[vertex]]
+            vertex = parent[vertex]
+        return vertex
+
+    def join(one: Vec3, other: Vec3) -> None:
+        a, b = root(one), root(other)
+        if a != b:
+            parent[a] = b
+
+    for tri in mesh.triangles:
+        a, b, c = (mesh.positions[i] for i in tri)
+        join(a, b)
+        join(b, c)
+
+    groups: dict[Vec3, list[Vec3]] = {}
+    for vertex in parent:
+        groups.setdefault(root(vertex), []).append(vertex)
+    if not groups:
+        return 0, (0.0, 0.0, 0.0)
+    smallest = min(groups.values(), key=lambda group: (len(group), min(group)))
+    return len(groups), min(smallest)
+
+
+def _column_licence(edge: tuple[Vec3, Vec3], columns: Mapping[Point2, int]) -> int:
+    """How many times the rim says this edge may be traversed: the wall count
+    at the board point a VERTICAL column stands on, and zero for anything else.
+
+    Both ends must project to the same board point. A merely horizontal edge
+    that happens to end at a pinched point is ordinary skin and gets no
+    licence, and a column over a point the rim never raised a wall from gets
+    none either.
     """
     (ax, _ay, az), (bx, _by, bz) = edge
-    return (ax, az) == (bx, bz) and (ax, az) in pinch_points
+    if (ax, az) != (bx, bz):
+        return 0
+    return columns.get((ax, az), 0)
 
 
 def _edge_text(edge: tuple[Vec3, Vec3]) -> str:

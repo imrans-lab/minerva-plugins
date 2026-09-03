@@ -23,7 +23,11 @@ source would ask them:
     welded along one line all satisfy the first and break the second. The one
     licensed exception is a PINCH COLUMN: where a bore is exactly tangent to the
     outline the material closes to zero width, and the wall standing on that
-    point really does carry four skins.
+    point really does carry four skins — EXACTLY four, as many as the rim
+    raises walls there, because a licence that only named the place would let a
+    whole second solid be welded on at it.
+  * AND COUNT THE PIECES. Every edge rule is local, so two closed shells that
+    touch nowhere satisfy all of them and are still two boards.
   * MEASURE THE AREA against the board DOCUMENT — 24 x 18 mm, one 3 x 6 mm
     cutout — minus the analytic area of the circles that were drilled.
   * MEASURE A SLOT'S OPENING. It has to come out 7 x 2 mm, not round.
@@ -579,6 +583,98 @@ def test_a_surface_that_balances_but_is_not_a_skin_is_refused():
 
     # And the rule is not vacuous: one tetrahedron alone is a fine little solid.
     _check_closed(_surface(slab, points[:4], TETRAHEDRON))
+
+
+def test_a_second_solid_welded_to_the_licensed_pinch_column_is_refused():
+    """THE FINDING THIS CLOSES: the pinch licence, unbounded. Naming the point
+    where a board may touch itself and then allowing ANY balanced number of
+    skins there is a hole big enough to drive a second solid through — and the
+    licensed column is the one place in the whole mesh where an attacker knows
+    the extra skins will be waved past.
+
+    ORACLE: the legitimate tangent board of the case above, with a separately
+    built CLOSED SHELL welded along the one column it is licensed on. The shell
+    is a tetrahedron whose base edge IS that column, so the two share the column
+    and nothing else. It clears every other rule by construction — its triangles
+    are its own, it is correctly wound so every directed edge still matches its
+    reverse, every edge but the shared one joins two triangles, and it is
+    connected to the board — and the licence at that column is what it rides in
+    on. Only the COUNT tells the two apart: the rim raises two walls there and
+    the surface now traverses the column three times.
+
+    The licence handed to :func:`_check_closed` is measured off the LEGITIMATE
+    slab's own edges rather than recomputed by the code under test, and the
+    same licence is used for both meshes: one passes with it, the other does
+    not.
+    """
+    slab = build_substrate_mesh(_with_mounting_holes(
+        (1.59963, 9.0, MOUNT_DIAMETER_MM)))
+
+    (column,) = _pinch_columns(slab)
+    low, high = sorted(column, key=lambda point: point[1])
+    edges = _directed_edges(slab)
+    licence = edges[(low, high)]
+    assert licence == edges[(high, low)] == 2, "the pinch carries four skins"
+    columns = {(low[0], low[2]): licence}
+    _check_closed(slab, columns)              # the plain tangent board passes
+
+    # The shell: a tetrahedron standing on the column, apexes well clear of the
+    # board so it shares that one edge and no other position.
+    apexes = ((low[0] + 5.0, 0.5, low[2] + 5.0),
+              (low[0] + 5.0, 0.5, low[2] - 5.0))
+    # The shell is itself a perfectly good little solid: it contributes no
+    # defect of its own, only the extra skins it stacks on the licensed column.
+    _check_closed(_surface(slab, (low, high) + apexes, TETRAHEDRON))
+
+    base = len(slab.positions)
+    welded = replace(slab,
+                     positions=slab.positions + (low, high) + apexes,
+                     normals=slab.normals + ((0.0, 1.0, 0.0),) * 4,
+                     uvs=slab.uvs + ((0.0, 0.0),) * 4,
+                     edge_triangles=slab.edge_triangles + tuple(
+                         tuple(base + i for i in face) for face in TETRAHEDRON))
+
+    # Everything the OLD rule looked at still holds, which is the whole point.
+    grown = _directed_edges(welded)
+    assert [e for e, n in grown.items() if grown.get((e[1], e[0]), 0) != n] == [], \
+        "the welded shell was supposed to BALANCE — otherwise it proves nothing"
+    faces = [tuple(sorted(_triangle(welded, tri))) for tri in welded.triangles]
+    assert len(set(faces)) == len(faces), "no skin is drawn twice either"
+    assert _pinch_columns(welded) == [column], \
+        "the only crowded edge is still the licensed column"
+
+    with pytest.raises(SubstrateMeshError) as refusal:
+        _check_closed(welded, columns)
+    assert "traversed 3 time(s) where the rim raises 2" in str(refusal.value)
+
+
+def test_two_closed_shells_handed_over_as_one_board_are_refused():
+    """THE GAP THE EDGE RULES LEAVE, and why connectedness is checked at all:
+    the first three rules are LOCAL. Two closed shells that touch nowhere each
+    satisfy every one of them separately, so the pair satisfies all three and is
+    two boards wearing one mesh's clothes.
+
+    ORACLE: two tetrahedra with nothing in common. Each is closed, wound
+    outward and a proper skin; together they are not a board.
+    """
+    slab = build_substrate_mesh(_coupon_with_mounting_hole())
+    here = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+    there = [(x + 50.0, y, z) for (x, y, z) in here]
+
+    _check_closed(_surface(slab, here, TETRAHEDRON))       # one alone is fine
+    apart = _surface(slab, here + there, [
+        tuple((0, 1, 2, 3)[i] for i in face) for face in TETRAHEDRON
+    ] + [
+        tuple((4, 5, 6, 7)[i] for i in face) for face in TETRAHEDRON
+    ])
+    edges = _directed_edges(apart)
+    assert [e for e, n in edges.items() if edges.get((e[1], e[0]), 0) != n] == [], \
+        "the disjoint pair was supposed to BALANCE — otherwise it proves nothing"
+    assert _pinch_columns(apart) == [], "and to be a proper skin everywhere"
+
+    with pytest.raises(SubstrateMeshError) as refusal:
+        _check_closed(apart)
+    assert "falls into 2 separate closed pieces" in str(refusal.value)
 
 
 def test_an_opening_that_consumes_the_whole_board_is_refused_not_exported():

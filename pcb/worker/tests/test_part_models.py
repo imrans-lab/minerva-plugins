@@ -18,11 +18,18 @@ was measured or authored INDEPENDENTLY of the code under test:
   where it arrives with **HTTP 200**. Nothing here would catch a client that
   trusted the status code, so the body is the oracle.
 
-NO NETWORK, AND NOT BY MOCKING ONE. The two cache/absence tests point the
-client at ``127.0.0.1:1``, where a connection is REFUSED immediately by the
-kernel. That is a real network failure rather than a simulated one, and it also
-makes the cache assertion airtight: a cached part that still resolves against a
-dead address cannot have made a request.
+NO NETWORK, AND NOT BY MOCKING ONE. The cache/absence tests point the client at
+``127.0.0.1:1``, where a connection is REFUSED immediately by the kernel. That
+is a real network failure rather than a simulated one, and it also makes the
+cache assertion airtight: a cached part that still resolves against a dead
+address cannot have made a request.
+
+The one test that needs a SUCCESSFUL fetch — the stale-entry case, whose whole
+claim is that the client goes back to the supplier and heals itself — serves a
+real payload over real HTTP from a loopback server it starts itself. That is
+still no supplier and no mock: the client's own transport runs unmodified, and
+the body it receives is a file from the corpus. Nothing in this file patches
+:mod:`pcb_worker.part_models`.
 
 Live fetching is verified by its own acceptance station. CI must never depend
 on the supplier being up.
@@ -38,6 +45,7 @@ import threading
 import time
 
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -346,6 +354,145 @@ def test_a_corrupt_sidecar_is_a_miss_and_never_an_exception(offline, tmp_path):
         answer = client.facts(part)
         assert answer.absent, (corrupt, answer)
         assert answer.reason == pm.REASON_NO_NETWORK, corrupt
+
+
+class _Supplier:
+    """A real HTTP endpoint on loopback, serving whatever body is set on it.
+
+    Deliberately not a mock: the client's urllib transport, its timeout, its
+    headers and its caching all run exactly as they do against the supplier.
+    ``requests`` counts what actually left the process, which is how "it
+    retried ONCE" is asserted rather than assumed.
+    """
+
+    def __init__(self, body: bytes):
+        self.body = body
+        self.requests = 0
+        supplier = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):                       # noqa: N802 (stdlib name)
+                supplier.requests += 1
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(supplier.body)))
+                self.end_headers()
+                self.wfile.write(supplier.body)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self._server.server_address[1]}/"
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _legacy_bytes(part: str) -> bytes:
+    """The payload as an OLDER build would have cached it: a real body with no
+    catalogue number of its own. Nothing was wrong with it under the rule of
+    the day; under today's rule it cannot prove it is the part it is filed as.
+    """
+    payload = json.loads(_payload_bytes(part))
+    payload["result"].pop("lcsc", None)
+    return json.dumps(payload).encode("utf-8")
+
+
+def _seed_bytes(tmp_path, url: str, part: str, data: bytes) -> Path:
+    """Seed the components cache with arbitrary bytes and a sidecar that agrees
+    with them — a torn or edited entry is a different case, already covered."""
+    home = tmp_path / "cache" / pm.CACHE_TENANT / "components"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / f"{part}.json").write_bytes(data)
+    (home / f"{part}.json.meta.json").write_text(json.dumps({
+        "url": url,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "fetched_at": "2026-09-02T00:00:00+00:00",
+        "size_bytes": len(data),
+    }), encoding="utf-8")
+    return home
+
+
+def test_a_cache_entry_from_before_a_rule_tightened_heals_itself(tmp_path,
+                                                                 monkeypatch):
+    """THE FINDING THIS CLOSES: requiring a payload to prove its identity is
+    right, but an entry cached BEFORE that rule existed cannot prove it — and
+    the entry never expires and is never invalidated. Every read of it was a
+    refusal, for the life of the cache, for a part the supplier would serve on
+    request, curable only by deleting files by hand. Silent and permanent, which
+    is worse than the defect it came from.
+
+    ORACLE: behaviour visible from outside the client, in three parts.
+
+      * WITH A SUPPLIER REACHABLE the part resolves — from the network, not from
+        disk — after exactly ONE request, and the healed entry is on disk in
+        place of the poisoned one, so the next process is fast again.
+      * WITH THE NETWORK REFUSED the answer changes from "identity mismatch" to
+        "no network", which is the proof that normal retrieval was ATTEMPTED
+        rather than short-circuited, and the poisoned entry is gone.
+      * A FRESH RESPONSE THAT CANNOT PROVE ITSELF IS STILL REFUSED, and is not
+        cached. That asymmetry is the point: stale bytes are healed, a
+        substituted response is not excused.
+    """
+    part = "C910544"
+    monkeypatch.setenv(cache_dir.ENV_VAR, str(tmp_path / "cache"))
+    supplier = _Supplier(_payload_bytes(part))
+    try:
+        client = pm.VendorPartClient(api_base=supplier.base, model_base=DEAD,
+                                     timeout=5.0)
+        url = f"{supplier.base}{part}/components?version={client.api_version}"
+        home = _seed_bytes(tmp_path, url, part, _legacy_bytes(part))
+
+        facts = client.facts(part)
+        assert not facts.absent, facts
+        assert facts.package == INDEX[part]["package"]
+        assert not facts.provenance.from_cache, "the poisoned entry was served"
+        assert supplier.requests == 1, "healed with one refetch, not a retry loop"
+
+        # The cache is now the GOOD body: the next process pays no network.
+        assert (home / f"{part}.json").read_bytes() == _payload_bytes(part)
+        again = pm.VendorPartClient(api_base=supplier.base, model_base=DEAD,
+                                    timeout=5.0)          # empty memo
+        assert not again.facts(part).absent
+        assert supplier.requests == 1, "the healed entry was read from disk"
+
+        # AND THE ASYMMETRY. A live response that cannot prove what it is stays
+        # a refusal, and nothing about it is written to disk.
+        supplier.body = _legacy_bytes(part)
+        fresh = tmp_path / "elsewhere"
+        monkeypatch.setenv(cache_dir.ENV_VAR, str(fresh))
+        refused = pm.VendorPartClient(api_base=supplier.base, model_base=DEAD,
+                                      timeout=5.0).facts(part)
+        assert refused.absent and refused.reason == pm.REASON_MISMATCH
+        assert not (fresh / pm.CACHE_TENANT / "components"
+                    / f"{part}.json").exists(), "a refused response was cached"
+    finally:
+        supplier.close()
+
+
+def test_a_poisoned_entry_is_discarded_even_when_the_refetch_fails(offline,
+                                                                   tmp_path):
+    """The other half, with no supplier at all: the client must still go PAST
+    the unreadable entry to normal retrieval rather than serve the refusal.
+
+    ORACLE: the reason changes from ``identity_mismatch`` to ``no_network`` —
+    only an attempted fetch can produce that — and the entry is off the disk,
+    so the next run with a working network heals rather than refusing again.
+    """
+    part = "C910544"
+    url = f"{DEAD}{part}/components?version={offline.api_version}"
+    home = _seed_bytes(tmp_path, url, part, _legacy_bytes(part))
+
+    answer = offline.facts(part)
+    assert answer.absent
+    assert answer.reason == pm.REASON_NO_NETWORK, answer.detail
+    assert not (home / f"{part}.json").exists()
+    assert not (home / f"{part}.json.meta.json").exists()
 
 
 def test_one_part_asked_for_at_once_by_many_threads_is_fetched_once(tmp_path,

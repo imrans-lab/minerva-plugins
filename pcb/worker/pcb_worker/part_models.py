@@ -87,7 +87,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Mapping, Sequence, Union
+from typing import (Any, Callable, ClassVar, Iterable, Mapping, Sequence,
+                    Union)
 
 from . import cache_dir
 from .wavefront_obj import Mesh, parse_obj
@@ -513,6 +514,18 @@ class VendorPartClient:
     Failures are deliberately not written to disk. A part absent today because
     a supplier added it yesterday must not stay absent forever, and a network
     outage must not be preserved across reboots.
+
+    AND A CACHED BODY THAT NO LONGER READS IS STALE, NOT HOSTILE. Only a
+    successful parse is ever written, so an entry that comes back off disk and
+    then parses to an absence is one this build would not have written — an
+    entry from before a rule tightened. Serving the refusal would make the
+    user's own cache a machine for permanently refusing a part it could fetch
+    perfectly well, curable only by deleting files by hand. Such an entry is
+    discarded and the fetch retried once (:meth:`_fetch_and_parse`).
+
+    THE ASYMMETRY IS DELIBERATE. A response off the NETWORK that cannot be read
+    as the thing it was asked for is still a refusal: there is nothing stale
+    about it, and the identity check exists precisely to refuse it.
     """
 
     api_base: str = API_BASE
@@ -642,6 +655,24 @@ class VendorPartClient:
             # An unwritable cache costs speed, never correctness.
             log.warning("could not cache %s/%s (%s)", sub, name, exc)
 
+    def _cache_discard(self, sub: str, name: str) -> None:
+        """Remove an entry that can no longer be read as what it was filed as.
+
+        Body AND sidecar, because a sidecar with no body is a miss the reader
+        already tolerates while a body with no sidecar is one it would have to
+        keep re-hashing. Failure to delete costs one wasted read on the next
+        call and nothing else, so it is logged rather than raised — this
+        module's contract is that nothing here raises.
+        """
+        directory = self._dir(sub)
+        if directory is None:
+            return
+        for path in (directory / name, directory / f"{name}.meta.json"):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("could not discard cache entry %s (%s)", path, exc)
+
     def _get(self, sub: str, name: str, url: str,
              ) -> Union[tuple[bytes, Provenance], _Unreachable]:
         hit = self._cache_read(sub, name, url)
@@ -671,22 +702,17 @@ class VendorPartClient:
 
     def _load_facts(self, part: str) -> Union[PartFacts, Absence]:
         url = f"{self.api_base}{part}/components?version={self.api_version}"
-        got = self._get("components", f"{part}.json", url)
-        if isinstance(got, _Unreachable):
-            return Absence(part, REASON_NO_NETWORK, str(got))
-        data, provenance = got
-        try:
-            payload = json.loads(data.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError) as exc:
-            return Absence(part, REASON_MALFORMED,
-                           f"response is not JSON ({exc})")
-        parsed = parse_component_payload(payload, part, provenance)
-        # Only a real drawing is worth keeping. Caching a "component not
-        # found" body — which arrives with HTTP 200 — would make a part the
-        # supplier adds next week permanently invisible.
-        if not parsed.absent and not provenance.from_cache:
-            self._cache_write("components", f"{part}.json", data, provenance)
-        return parsed
+
+        def read(data: bytes, provenance: Provenance):
+            try:
+                payload = json.loads(data.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                return Absence(part, REASON_MALFORMED,
+                               f"response is not JSON ({exc})")
+            return parse_component_payload(payload, part, provenance)
+
+        return self._fetch_and_parse("components", f"{part}.json", url, part,
+                                     read)
 
     def facts_for(self, parts: Iterable[str],
                   ) -> dict[str, Union[PartFacts, Absence]]:
@@ -722,17 +748,62 @@ class VendorPartClient:
                           lambda: self._load_model(facts.part, uuid))
 
     def _load_model(self, part: str, uuid: str) -> Union[PartModel, Absence]:
-        got = self._get("models", f"{uuid}.obj", f"{self.model_base}{uuid}")
+        def read(data: bytes, provenance: Provenance):
+            mesh = parse_obj(data.decode("utf-8", errors="replace"))
+            if mesh.empty:
+                # A retired uuid answers with an object-store XML error, not a
+                # 404 body we could recognise by status. An empty mesh IS the
+                # signal.
+                return Absence(part, REASON_NO_MODEL,
+                               f"model {uuid} carries no geometry")
+            return PartModel(part=part, uuid=uuid, mesh=mesh,
+                             provenance=provenance)
+
+        return self._fetch_and_parse("models", f"{uuid}.obj",
+                                     f"{self.model_base}{uuid}", part, read)
+
+    # -- fetch, parse, and heal a stale entry -------------------------------
+
+    def _fetch_and_parse(self, sub: str, name: str, url: str, part: str,
+                         read: Callable[[bytes, Provenance], Any]) -> Any:
+        """One document, from the cache or the network, read by ``read``.
+
+        ``read`` turns bytes into facts, a model, or an :class:`Absence` saying
+        why it could not. Whatever it returns is what the caller gets, with one
+        exception, which is the whole reason this is not two lines inline:
+
+        A CACHED BODY THAT PARSES TO AN ABSENCE HEALS ITSELF. Only successful
+        parses are cached (below), so a cached body that no longer reads as
+        what it was filed under is an entry written by an older build under an
+        older rule — stale data, not a hostile response. Left alone it would be
+        re-read and re-refused on every call for the life of the cache, with no
+        expiry and no invalidation: the user's cache silently becomes a machine
+        for refusing a part the supplier would serve on request. So it is
+        discarded and fetched again, ONCE. The second read is judged on its
+        merits — a network response that cannot prove what it is stays a
+        refusal, because nothing about it is stale.
+        """
+        parsed, from_cache = self._attempt(sub, name, url, part, read)
+        if parsed.absent and from_cache:
+            log.warning("discarding stale cache entry %s/%s: %s",
+                        sub, name, parsed.detail)
+            self._cache_discard(sub, name)
+            parsed, _ = self._attempt(sub, name, url, part, read)
+        return parsed
+
+    def _attempt(self, sub: str, name: str, url: str, part: str,
+                 read: Callable[[bytes, Provenance], Any]) -> tuple[Any, bool]:
+        """One pass: get the bytes, read them, cache a fresh success. Reports
+        whether the bytes came off disk, which is what decides whether an
+        absence is stale or final."""
+        got = self._get(sub, name, url)
         if isinstance(got, _Unreachable):
-            return Absence(part, REASON_NO_NETWORK, str(got))
+            return Absence(part, REASON_NO_NETWORK, str(got)), False
         data, provenance = got
-        mesh = parse_obj(data.decode("utf-8", errors="replace"))
-        if mesh.empty:
-            # A retired uuid answers with an object-store XML error, not a 404
-            # body we could recognise by status. An empty mesh IS the signal.
-            return Absence(part, REASON_NO_MODEL,
-                           f"model {uuid} carries no geometry")
-        if not provenance.from_cache:
-            self._cache_write("models", f"{uuid}.obj", data, provenance)
-        return PartModel(part=part, uuid=uuid, mesh=mesh,
-                         provenance=provenance)
+        parsed = read(data, provenance)
+        # Only a real document is worth keeping. Caching a "component not
+        # found" body — which arrives with HTTP 200 — would make a part the
+        # supplier adds next week permanently invisible.
+        if not parsed.absent and not provenance.from_cache:
+            self._cache_write(sub, name, data, provenance)
+        return parsed, provenance.from_cache
