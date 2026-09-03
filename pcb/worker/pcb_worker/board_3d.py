@@ -37,6 +37,7 @@ either of them is reached.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from dataclasses import replace
 from typing import Union
@@ -417,13 +418,38 @@ def _scale(params: dict) -> float:
 
 
 def _max_px(params: dict) -> int:
-    return int(_positive(params.get("max_px"), MAX_TEXTURE_PX, "max_px"))
+    """The pixel ceiling, VALIDATED AFTER THE INTEGER CONVERSION.
+
+    A pixel count is a whole number, so the caller's value is truncated — and
+    the truncation is what has to be checked, not the value that went into it.
+    Any positive fraction below one passes ``_positive`` and becomes ZERO
+    pixels, which is not a smaller texture but an image with no rows in it: a
+    bake that divides by a dimension, or a PNG nothing can register a board
+    against. Checking the number before the conversion checks a number nobody
+    uses.
+    """
+    stated = params.get("max_px")
+    pixels = int(_positive(stated, MAX_TEXTURE_PX, "max_px"))
+    if pixels < 1:
+        raise Board3DError(
+            "board_3d_bad_parameter",
+            "max_px is a whole number of pixels and %r truncates to %d; the "
+            "texture's long side must be at least one pixel" % (stated, pixels))
+    return pixels
 
 
 def _positive(value, default: Union[int, float], field: str):
-    """A caller's number, or the default. Zero and negatives refuse by name
-    rather than reaching the bake, where they become a division or an image of
-    no pixels."""
+    """A caller's number, or the default. Zero, negatives and the non-finite
+    refuse by name rather than reaching the bake.
+
+    NOT-A-NUMBER AND INFINITY ARE NOT LARGE NUMBERS, and neither is caught by a
+    comparison: ``nan <= 0`` is False, so nan sails through a range check and
+    then poisons every arithmetic it touches without ever raising, while
+    ``inf`` asks for a texture of unbounded size and ``int(nan)`` raises a bare
+    ValueError somewhere downstream with none of this verb's named codes on it.
+    Both are what ``float("nan")`` and ``float("inf")`` make of a JSON string a
+    caller sent, so both are reachable from a tool call.
+    """
     if value is None or value == "":
         return default
     try:
@@ -431,6 +457,9 @@ def _positive(value, default: Union[int, float], field: str):
     except (TypeError, ValueError):
         raise Board3DError("board_3d_bad_parameter",
                            "%s must be a number, got %r" % (field, value)) from None
+    if not math.isfinite(number):
+        raise Board3DError("board_3d_bad_parameter",
+                           "%s must be a finite number, got %r" % (field, value))
     if number <= 0:
         raise Board3DError("board_3d_bad_parameter",
                            "%s must be greater than zero, got %r" % (field, value))

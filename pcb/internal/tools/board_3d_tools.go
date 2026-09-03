@@ -99,7 +99,9 @@ var export3DDescription = "Write the board as ONE .glb file: the textured slab w
 	"look at it. The same report travels INSIDE the file, in " +
 	"asset.extras, plus per-part facts on each node, so a person handed the .glb and nothing else can read " +
 	"all of it. IT OPENS IN BLENDER or any glTF 2.0 viewer — Minerva's own CAD panel has no file loader and " +
-	"cannot show it. Refusals are named and write nothing: board_3d_exists (the " +
+	"cannot show it. " +
+	"THE FILE IS IN METRES, the unit glTF defines: the whole scene hangs under one root node that scales board millimetres by 0.001, so the board imports at its real size instead of a thousand times too big. Node coordinates and every *_mm field are still board millimetres, and report.units names which frame is which. " +
+	"Refusals are named and write nothing: board_3d_exists (the " +
 	"destination is occupied and overwrite was not set — it may already have been sent to somebody), " +
 	"board_3d_bad_parameter, board_3d_write_failed, board_3d_placement_mismatch (the emission and the board " +
 	"are not the same board), and assembly_not_compilable for a board that does not compile. " +

@@ -277,6 +277,102 @@ def test_a_second_warm_is_answered_from_disk(board, cache, corpus_network):
     assert counts["already_cached"] == 4 and counts["fetched"] == 0
 
 
+#: One part's cached component payload: the body and the sidecar beside it.
+CACHED_PART = "C780769"
+
+
+def _entry(cache: Path) -> tuple[Path, Path]:
+    body = cache / pm.CACHE_TENANT / "components" / ("%s.json" % CACHED_PART)
+    return body, body.with_name(body.name + ".meta.json")
+
+
+def test_a_damaged_cache_entry_fails_closed_and_the_next_fetch_heals_it(
+        board, cache, corpus_network):
+    """A CACHE IS NOT A SOURCE OF TRUTH, and the failure it must never have is
+    serving something that is not what it says it is.
+
+    Three damaged states, all of them what a real interruption leaves behind: a
+    body torn or edited under a sidecar that still records the old digest, a
+    sidecar half-written as valid JSON that is not an object, and a sidecar
+    truncated mid-write. Each has to be a MISS — an offline reader is told the
+    cache is cold, which is curable and true, rather than handed bytes whose
+    provenance is a lie — and an online reader has to refetch and leave the
+    entry good again.
+
+    ``test_a_second_warm_is_answered_from_disk`` proves the cache is used;
+    without this one it would also pass on a cache that is used blindly.
+
+    MUTATION THIS CATCHES: dropping the digest comparison or the sidecar's
+    object check in ``part_models._cache_read`` — either one turns a damaged
+    entry into a served one, permanently, with no expiry to clear it.
+    """
+    board_3d.warm_cache(board, {})
+    body, meta = _entry(cache)
+    assert body.is_file() and meta.is_file(), "the warm wrote no entry to damage"
+    good_body, good_meta = body.read_bytes(), meta.read_bytes()
+
+    damage = {
+        "a torn body under an intact sidecar": (good_body + b"\n\n", good_meta),
+        "a sidecar half-written as a bare array": (good_body, b"[]"),
+        "a sidecar truncated mid-write": (good_body, good_meta[:len(good_meta) // 2]),
+    }
+    for description, (body_bytes, meta_bytes) in damage.items():
+        body.write_bytes(body_bytes)
+        meta.write_bytes(meta_bytes)
+
+        # FAILS CLOSED. A fresh client, so nothing in a memo can answer, and
+        # offline, so nothing but the cache can.
+        absent = pm.VendorPartClient(offline=True).facts(CACHED_PART)
+        assert absent.absent, "a damaged entry was served as a good one (%s)" % description
+        assert absent.reason == pm.REASON_NOT_CACHED, description
+
+        # AND IT HEALS. The online client refetches and rewrites the pair, so a
+        # damaged entry is a slow call once, not a permanently poisoned cache.
+        before = len(corpus_network)
+        assert not pm.VendorPartClient().facts(CACHED_PART).absent, description
+        assert len(corpus_network) > before, "the damaged entry was reused (%s)" % description
+        assert pm.VendorPartClient(offline=True).facts(CACHED_PART).absent is False, \
+            "the refetch did not repair the entry (%s)" % description
+
+
+def test_a_cache_entry_fetched_from_another_url_is_not_presented_as_fresh(
+        board, cache, corpus_network):
+    """STALE VENDOR DATA IS NOT FRESH VENDOR DATA.
+
+    The entry is named for the catalogue number alone, so the only lever there
+    is when the vendor's payload shape changes upstream is
+    :data:`part_models.API_VERSION` — and it works only if the URL an entry was
+    fetched FROM is part of what makes it a hit. It is recorded in the sidecar;
+    a recorded url that is not the one being asked for has to be a miss, or
+    every user's cache keeps answering with the old shape forever, with no
+    expiry and nothing to invalidate it.
+
+    MUTATION THIS CATCHES: dropping the recorded-url comparison in
+    ``part_models._cache_read``, which makes :data:`part_models.API_VERSION`
+    a lever attached to nothing.
+    """
+    board_3d.warm_cache(board, {})
+    body, meta = _entry(cache)
+    recorded = json.loads(meta.read_text(encoding="utf-8"))
+    assert pm.API_VERSION in recorded["url"], "the url is not the version-bearing key"
+
+    # The same bytes, the same digest, fetched from a version nobody asks for.
+    recorded["url"] = recorded["url"].replace(pm.API_VERSION, "0.0.0.0")
+    meta.write_text(json.dumps(recorded), encoding="utf-8")
+
+    absent = pm.VendorPartClient(offline=True).facts(CACHED_PART)
+    assert absent.absent and absent.reason == pm.REASON_NOT_CACHED, \
+        "an entry fetched from another url was served as this one's"
+
+    # An online reader refetches it under the url it actually wants, and the
+    # entry on disk is now keyed to that.
+    before = len(corpus_network)
+    assert not pm.VendorPartClient().facts(CACHED_PART).absent
+    assert len(corpus_network) > before
+    assert json.loads(meta.read_text(encoding="utf-8"))["url"] == \
+        "%s%s/components?version=%s" % (pm.API_BASE, CACHED_PART, pm.API_VERSION)
+
+
 def test_a_part_the_supplier_has_no_model_for_is_reported_not_refused(
         board, cache, monkeypatch):
     """A missing model is data. The verb still succeeds and names the refs."""
@@ -360,12 +456,68 @@ def test_an_occupied_destination_is_not_replaced_unless_asked(
 
 def test_a_texture_scale_that_cannot_bake_refuses_before_the_bake(
         board, cache, no_network, tmp_path):
-    for value in (0, -4, "wide"):
+    """Every number that cannot become a picture, refused BY NAME.
+
+    THE THREE THAT A RANGE CHECK DOES NOT CATCH are the point of the last
+    entries. ``nan`` fails every comparison, so ``nan <= 0`` is False and a
+    plain "must be greater than zero" waves it through, after which it poisons
+    the bake's arithmetic silently; ``inf`` asks for a texture of unbounded
+    size; and a positive fraction is a real, greater-than-zero number that
+    TRUNCATES to zero pixels, which is not a small image but an image with no
+    rows in it. All three arrive as ordinary JSON a caller can send.
+    """
+    cases = [
+        ("scale_px_per_mm", 0), ("scale_px_per_mm", -4),
+        ("scale_px_per_mm", "wide"), ("scale_px_per_mm", float("nan")),
+        ("scale_px_per_mm", float("inf")), ("scale_px_per_mm", "nan"),
+        ("max_px", 0), ("max_px", -1), ("max_px", float("nan")),
+        ("max_px", float("inf")), ("max_px", 0.5), ("max_px", 0.999),
+    ]
+    for field, value in cases:
         with pytest.raises(board_3d.Board3DError) as caught:
             board_3d.export(board, {"out_dir": str(tmp_path / "out"),
-                                    "scale_px_per_mm": value})
-        assert caught.value.code == "board_3d_bad_parameter", value
+                                    field: value})
+        assert caught.value.code == "board_3d_bad_parameter", (field, value)
+        assert field in str(caught.value), (field, value)
     assert not (tmp_path / "out").exists(), "a refused export created its directory"
+
+    # And a legitimate ceiling still bakes: the guard rejects what cannot be a
+    # picture, not everything unusual.
+    assert board_3d._max_px({"max_px": 1}) == 1
+    assert board_3d._max_px({"max_px": 4096.7}) == 4096
+    assert board_3d._max_px({}) > 1
+
+
+def test_a_board_with_no_components_still_exports_a_board(
+        cache, no_network, tmp_path):
+    """AN EMPTY BOARD IS A BOARD. Nothing here may require a part to exist:
+    the slab, its two baked pictures and the whole report are exactly what
+    somebody wants to look at before the first component goes down, and the
+    placement walk over zero rows must produce an empty report rather than an
+    empty file or a refusal about a scene with no nodes."""
+    empty = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    empty["components"] = []
+    result = _export(_compiled_dict(empty), tmp_path, name="bare")
+
+    assert Path(result["path"]).is_file()
+    assert Path(result["path"]).read_bytes()[:4] == b"glTF"
+    for key in ("missing_models", "unverified", "tallest",
+                "unknown_height_refs", "advisories", "excluded"):
+        assert result[key] == [], key
+    assert result["report"]["placement"]["parts"] == []
+    # The slab is still there, textured: the file is a board, not an empty scene.
+    doc = _glb_json(Path(result["path"]))
+    assert [n["name"] for n in doc["nodes"] if "mesh" in n] == ["board"]
+    assert len(doc["images"]) == 2
+
+
+def _compiled_dict(board: dict):
+    result = compile_board(board)
+    if not isinstance(result, ResolutionSuccess):
+        raise AssertionError("fixture did not compile: " + ", ".join(
+            d.code for d in result.diagnostics
+            if d.severity is DiagnosticSeverity.ERROR))
+    return result.board
 
 
 # ---------------------------------------------------------------------------

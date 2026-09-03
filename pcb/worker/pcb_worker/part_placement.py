@@ -8,14 +8,30 @@ by re-reading its authored ``x_mm``/``y_mm``/``rotation_deg``: it is placed by
 the :class:`resolved_board.PhysicalPlacement` the CPL row was built from,
 through a :class:`geometry.PlacementTransform` rebuilt from that placement's
 ``origin``/``rotation_deg``/``side`` — the same three numbers
-``assembly_anchor`` composed the CPL's anchor with. Before anything is placed,
-that transform is made to RE-DERIVE the anchor and the result is compared with
-the anchor the row carries (:func:`_check_anchor`). The two sides of that check
-are the SAME expression, so it cannot catch an error in the transform algebra
-itself — that is what the suite's landmark literals are for. What it catches is
-this module holding the WRONG INPUTS: a drawing that is not the one the row was
-measured on, or an emission walked from a different board than the one passed
-in. Either way it REFUSES rather than draw. A placement that moves in the file
+``assembly_anchor`` composed the CPL's anchor with.
+
+Two checks stand in front of every placement, and they are NOT the same check.
+
+:func:`_check_row` is the one that compares the FILE with the BOARD. It takes
+the coordinates and the side the emitted row actually carries and holds them
+against the physical placement this module is about to draw with, through
+``assembly_outputs.cpl_frame_point`` — the one place the board's y-down frame
+becomes the position file's y-up one. Nothing on either side of that comparison
+is derived from the other, so it catches the whole class the anchor check
+cannot: an emission held beside a board that has MOVED underneath it (origin
+and anchor travel together, so a re-derivation agrees with itself perfectly
+while the row disagrees with both), and a row whose SIDE is not the side its
+part is mounted on — which, at a zero ledger offset and an origin-centred
+anchor, moves nothing at all and simply renders a top-side part on the bottom.
+
+:func:`_check_anchor` is the one that compares the DRAWING with the ROW. It
+makes the rebuilt transform re-derive the anchor from the footprint's own
+geometry. Its two sides ARE the same expression where the transform algebra is
+concerned — that is what the suite's landmark literals are for — but its inputs
+are not: the local anchor comes from the resolved footprint, so a drawing that
+is not the one the CPL row was measured on is caught here and nowhere else.
+
+Either check REFUSES rather than draw. A placement that moves in the file
 therefore moves here by construction, not by agreement.
 
 The rotation reaches the CPL as a NUMBER (``assembly_orientation``: placed
@@ -88,6 +104,7 @@ from . import orientation_ledger as ol
 from . import part_orientation as po
 from . import part_seat
 from .assembly_orientation import SIDE_TOP, default_ledger
+from .assembly_outputs import cpl_frame_point
 from .footprint_def import FootprintDefinition
 from .footprints import FootprintLookupError, resolve_footprint_layered
 from .geometry import PlacementTransform
@@ -236,6 +253,48 @@ def _transform_of(physical) -> PlacementTransform:
     return PlacementTransform(position=physical.origin,
                               rotation_deg=physical.rotation_deg,
                               side=physical.side)
+
+
+def _check_row(row, physical) -> None:
+    """Hold the EMITTED ROW against the placement about to draw it, or refuse.
+
+    THE ONLY CHECK HERE WHOSE TWO SIDES ARE INDEPENDENT. ``_check_anchor``
+    re-derives the anchor from the placement and compares it with that same
+    placement's anchor, so moving a board's ``origin`` and ``anchor`` together
+    — which is exactly what happens when a component is dragged and the board
+    recompiled — leaves it agreeing with itself while the emission in hand
+    still describes where the part USED to be. The row's own coordinates are
+    the outside fact that catches it.
+
+    THE FRAME IS THE POSITION FILE'S, not the board's. The emitted CPL is
+    Y-UP and the board frame is Y-DOWN, so the comparison is made through
+    ``assembly_outputs.cpl_frame_point`` — the one place that negation is
+    spelled — rather than by negating a coordinate here. A second spelling is a
+    sign error waiting to pass this check on a board mirrored about its own
+    middle.
+
+    THE SIDE IS CHECKED FIRST, and it is checked because NOTHING ELSE LOOKS AT
+    IT. The geometry is built on ``physical.side`` (which face it grows from,
+    whether the local frame mirrors) while the report, the node extras and the
+    tallest-per-side tally all say ``row.side``. Where the ledger offset is
+    zero and the anchor sits on the footprint origin, a disagreement moves no
+    coordinate and turns no model: the part simply comes out on the wrong face
+    of the board, labelled with the right one.
+    """
+    if str(row.side) != str(getattr(physical.side, "value", physical.side)):
+        raise PartPlacementError(
+            f"{row.ref}: the CPL row is on the {row.side!r} side and the part it "
+            f"names is placed on the "
+            f"{getattr(physical.side, 'value', physical.side)!r} side; refusing "
+            f"to draw a part on a face the position file does not state")
+    stated = (float(row.x_mm), float(row.y_mm))
+    expected = cpl_frame_point(physical.anchor)
+    if math.dist(stated, expected) > ANCHOR_TOL_MM:
+        raise PartPlacementError(
+            f"{row.ref}: the CPL row places the part at {stated} in the position "
+            f"file's frame, but the placement this module holds anchors it at "
+            f"{expected}; the emission and the board are not describing the same "
+            f"placement, and refusing beats drawing a board the file contradicts")
 
 
 def _check_anchor(physical, footprint: Union[FootprintDefinition, None],
@@ -471,6 +530,10 @@ def place_parts(board, emission, *, client,
             raise PartPlacementError(
                 f"CPL row {row.ref!r} names a part the compiled board does not "
                 f"place; the emission and the board are not the same board")
+        # THE ROW AGAINST THE BOARD FIRST: it needs nothing but the two, so a
+        # stale emission or a mismatched side stops before a drawing is even
+        # resolved, let alone a model fetched.
+        _check_row(row, physical)
         footprint = _resolve_drawing(board, component, physical)
         transform = _transform_of(physical)
         notes: list[str] = []

@@ -152,3 +152,45 @@ def test_a_file_with_no_nodes_is_refused_rather_than_written():
     """The one shape of empty container that would load and show nothing."""
     with pytest.raises(ValueError, match="no nodes"):
         GlbBuilder("test").to_glb()
+
+
+def test_the_scene_lists_roots_only_and_a_node_cannot_have_two_parents():
+    """A CHILD IS NOT A ROOT, and listing it as one draws it twice.
+
+    The duplicate is invisible in a render whenever the parent transform is
+    near identity — the two copies land on top of each other — and it is the
+    board export's whole unit fix that hangs on this: everything drawn sits
+    under one scaled root, so a child still listed in the scene would also be
+    drawn UNSCALED, a thousand times too big, beside the correct one.
+
+    MUTATION THIS CATCHES: ``document`` listing ``range(len(nodes))``, which is
+    what it did before groups existed.
+    """
+    builder = GlbBuilder("test")
+    attributes = builder.add_vertices(TRIANGLE)
+    mesh = builder.add_mesh("m", [Primitive(attributes=attributes,
+                                            triangles=[(0, 1, 2)], material=0)])
+    builder.add_material("m", (1.0, 1.0, 1.0, 1.0))
+    first = builder.add_node("a", mesh)
+    second = builder.add_node("b", mesh, translation=(1.0, 0.0, 0.0))
+    loose = builder.add_node("c", mesh)
+    group = builder.add_group("under", [first, second], scale=(0.001,) * 3)
+
+    # Read out of the FILE, so this is the scene a reader gets, not the
+    # builder's in-memory bookkeeping.
+    doc, _binary = _chunks(builder.to_glb())
+    assert doc["scenes"][0]["nodes"] == [loose, group], \
+        "the scene must list the group and the unparented node, and nothing else"
+    assert doc["nodes"][group]["children"] == [first, second]
+    assert doc["nodes"][group]["scale"] == [0.001] * 3
+    assert "mesh" not in doc["nodes"][group]
+
+    # A second parent for an already-adopted node, and a node that does not
+    # exist, are both refused rather than written as a graph a viewer resolves
+    # however it likes.
+    with pytest.raises(ValueError, match="already has a parent"):
+        builder.add_group("again", [first])
+    with pytest.raises(ValueError, match="does not exist"):
+        builder.add_group("ghost", [len(doc["nodes"]) + 5])
+    with pytest.raises(ValueError, match="needs children"):
+        builder.add_group("empty", [])

@@ -87,6 +87,39 @@ scene at all. That is why the per-part facts are duplicated onto the nodes
 rather than left to the one report — the report is for the reader with a
 parser, the node extras are for the reader with a mouse.
 
+THE FILE IS IN METRES; THE GRAPH IS IN MILLIMETRES
+--------------------------------------------------
+glTF's linear unit is the METRE — "the units for all linear distances are
+meters" — and everything this worker computes is board MILLIMETRES. Emitting
+millimetres as scene coordinates therefore makes a 90 mm board a 90 METRE board
+in any conforming viewer, and NOTHING LOOKS WRONG: a board with no reference
+object beside it is identical at any scale, so neither a render, nor a reader,
+nor a structural check can catch it. Only a measurement can.
+
+The conversion is ONE ``scale`` of 0.001 on a single root node
+(:data:`ROOT_NODE_NAME`) that parents every other node, rather than a
+multiplication applied to each vertex and each translation on the way out:
+
+* THE NUMBERS INSIDE THE GRAPH STAY MILLIMETRES, which is the whole reason a
+  part node is translated to its anchor in the first place — a reader compares
+  a node's translation with the position file's own row BY EYE, and against a
+  ``report`` whose every field is ``*_mm``. Scaling the vertices would leave
+  0.0234 where the CPL says 23.4 and make every one of those comparisons an
+  arithmetic exercise.
+* IT IS ONE PLACE. A per-vertex conversion is a factor that has to be applied
+  in five places (slab positions, part positions, marker positions, both node
+  translations) and stays correct only while every future writer remembers it;
+  a factor missed on one of them is a part a thousand times out of position,
+  which — again — nobody would see.
+* IT IS EXACT AND UNIFORM. 0.001 is one uniform scale, so normals and winding
+  are untouched and no rounding is introduced anywhere in the geometry.
+
+The cost is that a consumer reading raw ACCESSOR values without walking the
+scene graph sees millimetres. That is why the root exists as a named node, why
+:data:`AXIS_CONVENTION` states both frames, and why the report carries
+``units`` naming which is which — a caller that skips the transform can at
+least be told, in the file, that it did.
+
 NODE LAYOUT
 -----------
 One node per part, NAMED FOR ITS REFDES and TRANSLATED to the position file's own
@@ -97,6 +130,9 @@ vertices rather than carried as a node rotation, because the vendor-to-ours map
 is not one rotation: it composes a measured ledger offset, a pad-datum
 translation and, on the bottom side, a mirror. A node quaternion could only
 express part of that, and a partly-honest transform is worse than none.
+
+Every one of those nodes is a CHILD of the millimetre root above, so the scene
+has exactly one root and the scale reaches all of them.
 
 NOT HERE: any MCP verb, any user interface, any viewer. The intermediate
 exchange format some CAD tools prefer (STEP) is out of scope, and so is any
@@ -153,9 +189,29 @@ _SYNTHETIC = frozenset({pp.PLACEHOLDER_MATERIAL, pp.UNVERIFIED_MARKER_MATERIAL})
 #: here is a guess?" and then how they get the marks out of the way again.
 MARKER_SUFFIX = "__unverified_orientation"
 
-AXIS_CONVENTION = ("millimetres; glTF +Y up; scene (x, y, z) = "
-                   "(board_x, height above the board underside, board_y); "
-                   "the board underside rests on y = 0")
+#: The root every other node hangs under, and the scale it carries. glTF is a
+#: METRE format; this worker computes board millimetres. See THE FILE IS IN
+#: METRES in the module docstring before changing either.
+ROOT_NODE_NAME = "board_mm"
+MM_PER_METRE = 1000.0
+MM_TO_METRE = 1.0 / MM_PER_METRE
+
+AXIS_CONVENTION = (
+    "node coordinates are MILLIMETRES; the single root node '" + ROOT_NODE_NAME
+    + "' scales them by " + repr(MM_TO_METRE) + " so WORLD space is METRES, as "
+    "glTF requires. glTF +Y up; scene (x, y, z) = (board_x, height above the "
+    "board underside, board_y); the board underside rests on y = 0")
+
+#: What ``report["units"]`` says, spelled out, because a reader who finds
+#: "millimetre" in a glTF file's metadata has every right to assume the file is
+#: wrong until told which frame that millimetre belongs to.
+UNITS_NOTE = (
+    "Vertex positions and node translations are BOARD MILLIMETRES, and so is "
+    "every *_mm field in this report. The root node '" + ROOT_NODE_NAME
+    + "' scales the whole scene by " + repr(MM_TO_METRE) + ", so a viewer that "
+    "walks the scene graph — every conforming one does — measures the board in "
+    "METRES, which is the unit glTF defines. Read an accessor without its "
+    "parent transform and you are reading millimetres.")
 
 
 @dataclass(frozen=True)
@@ -340,27 +396,37 @@ def export_board(board, emission, *, client,
                   builder.add_material("board_laminate",
                                        _linear_rgba_255(appearance.substrate))),
     ]
-    builder.add_node("board", builder.add_mesh("board", slab_primitives),
-                     extras={"thickness_mm": slab.thickness_mm,
-                             "axis_convention": AXIS_CONVENTION})
+    # Every node built below is collected rather than left to stand on its own:
+    # they all become children of the one millimetre-to-metre root, which is
+    # what puts the file in the unit glTF defines. See THE FILE IS IN METRES.
+    drawn = [builder.add_node("board", builder.add_mesh("board", slab_primitives),
+                              extras={"thickness_mm": slab.thickness_mm,
+                                      "axis_convention": AXIS_CONVENTION})]
 
     for part in placement.parts:
         anchor = part.anchor_mm
         attributes = builder.add_vertices(_relative(part.mesh.positions, anchor))
         mesh = builder.add_mesh(
             part.ref, _primitives(part.mesh, attributes, palette))
-        builder.add_node(part.ref, mesh, translation=(anchor[0], 0.0, anchor[1]),
-                         extras=_part_extras(part))
+        drawn.append(builder.add_node(
+            part.ref, mesh, translation=(anchor[0], 0.0, anchor[1]),
+            extras=_part_extras(part)))
         if part.marker is not None:
             marker_attributes = builder.add_vertices(
                 _relative(part.marker.positions, anchor))
             marker_mesh = builder.add_mesh(
                 part.ref + MARKER_SUFFIX,
                 _primitives(part.marker, marker_attributes, palette))
-            builder.add_node(part.ref + MARKER_SUFFIX, marker_mesh,
-                             translation=(anchor[0], 0.0, anchor[1]),
-                             extras={"ref": part.ref, "marks": "unverified orientation",
-                                     "reason": part.reason})
+            drawn.append(builder.add_node(
+                part.ref + MARKER_SUFFIX, marker_mesh,
+                translation=(anchor[0], 0.0, anchor[1]),
+                extras={"ref": part.ref, "marks": "unverified orientation",
+                        "reason": part.reason}))
+
+    builder.add_group(ROOT_NODE_NAME, drawn,
+                      scale=(MM_TO_METRE, MM_TO_METRE, MM_TO_METRE),
+                      extras={"units": UNITS_NOTE,
+                              "axis_convention": AXIS_CONVENTION})
 
     notes = list(palette.notes)
     for side in ("top", "bottom"):
@@ -369,7 +435,13 @@ def export_board(board, emission, *, client,
 
     report = {
         "generator": GENERATOR,
-        "units": "millimetre",
+        "units": {
+            "world": "metre",
+            "node_graph": "millimetre",
+            "root_node": ROOT_NODE_NAME,
+            "root_scale": MM_TO_METRE,
+            "note": UNITS_NOTE,
+        },
         "axis_convention": AXIS_CONVENTION,
         "board": {
             "thickness_mm": slab.thickness_mm,

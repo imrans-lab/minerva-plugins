@@ -43,6 +43,19 @@ INDICES ARE ALWAYS 32-BIT. A board's substrate can exceed 65 535 vertices and a
 part never comes close, and choosing per-primitive would mean two code paths
 through the one function whose output nobody can eyeball. The cost is four bytes
 per index on the small meshes; the benefit is that there is a single path.
+
+THE SCENE LISTS ROOTS, NOT EVERY NODE
+-------------------------------------
+:meth:`GlbBuilder.add_group` makes a node that DRAWS NOTHING and parents the
+nodes it is given, which is how a whole scene is put under one transform (the
+board export puts everything under a millimetre-to-metre scale — see
+:mod:`gltf_export`). A node that has been claimed as somebody's child is no
+longer a root, and the spec's scene list holds roots only: listing a child there
+too draws it twice, once with its parent's transform and once without, and the
+duplicate is invisible in a render because the two copies coincide when the
+parent transform happens to be identity. So parentage is tracked as it is
+declared and :meth:`document` derives the root list from it rather than
+assuming every node is a root.
 """
 
 from __future__ import annotations
@@ -130,6 +143,8 @@ class GlbBuilder:
         self._materials: list[dict] = []
         self._meshes: list[dict] = []
         self._nodes: list[dict] = []
+        #: Node indices some group has adopted, so they are not scene roots.
+        self._children: set[int] = set()
         self._sampler: Union[int, None] = None
         self._generator = generator
 
@@ -243,6 +258,36 @@ class GlbBuilder:
         self._nodes.append(node)
         return len(self._nodes) - 1
 
+    def add_group(self, name: str, children: Sequence[int], *,
+                  scale: Union[Vec3, None] = None,
+                  extras: Union[Mapping[str, Any], None] = None) -> int:
+        """One node that draws nothing and carries ``children`` under it.
+
+        The children stop being roots of the scene, which is the point: a
+        transform on this node applies to all of them exactly once. A node
+        cannot be adopted twice or adopt itself, and both refuse rather than
+        produce a file whose scene graph is a lie a viewer will resolve
+        arbitrarily.
+        """
+        if not children:
+            raise ValueError(f"add_group({name!r}): a group needs children")
+        node: dict[str, Any] = {"name": name}
+        for child in children:
+            if not 0 <= child < len(self._nodes):
+                raise ValueError(
+                    f"add_group({name!r}): node {child} does not exist")
+            if child in self._children:
+                raise ValueError(
+                    f"add_group({name!r}): node {child} already has a parent")
+            self._children.add(int(child))
+        node["children"] = [int(c) for c in children]
+        if scale is not None:
+            node["scale"] = [float(v) for v in scale]
+        if extras:
+            node["extras"] = dict(extras)
+        self._nodes.append(node)
+        return len(self._nodes) - 1
+
     # -- appearance ---------------------------------------------------------
 
     def add_png(self, data: bytes, name: str) -> int:
@@ -307,7 +352,8 @@ class GlbBuilder:
         doc: dict[str, Any] = {
             "asset": asset,
             "scene": 0,
-            "scenes": [{"nodes": list(range(len(self._nodes)))}],
+            "scenes": [{"nodes": [i for i in range(len(self._nodes))
+                                  if i not in self._children]}],
             "nodes": self._nodes,
             "meshes": self._meshes,
             "accessors": self._accessors,

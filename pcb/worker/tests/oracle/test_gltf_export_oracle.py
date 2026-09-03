@@ -37,6 +37,18 @@ THE POSITION FILE IS THE OTHER ORACLE. Every part node's translation is read
 from the file and compared against the CPL row for that part — the actual
 emitted position file, not a re-derivation. A part that drifts in the export
 without drifting in the file it is built for fails here.
+
+AND THE RULER IS THE THIRD. glTF's linear unit is the METRE, so "the node's
+translation equals the CPL's millimetre number" is a comparison that passes
+just as happily on a file a thousand times too big — which is what this export
+used to write, and what neither a render nor a reader nor a mesh count can see,
+because a board with no reference object beside it looks identical at any
+scale. So every geometric assertion here is made in WORLD SPACE, reached by
+walking the scene graph's own transforms, and the board's world extent is held
+against the fixture's REAL SIZE IN METRES (:data:`BOARD_WIDTH_MM` and its
+siblings, which are the numbers written in the fixture's own YAML). That is a
+measurement a viewer would agree with, and it is the one assertion in this file
+that no self-consistent-but-wrong file can satisfy.
 """
 
 from __future__ import annotations
@@ -59,6 +71,19 @@ from tests.test_wavefront_obj import BOX
 pygltflib = pytest.importorskip("pygltflib")
 from pygltflib import GLTF2  # noqa: E402
 from PIL import Image  # noqa: E402
+
+#: THE FIXTURE BOARD'S REAL SIZE, copied from the literal ``width_mm: 40`` /
+#: ``height_mm: 30`` at the top of ``assembly_orientation.yaml`` and the
+#: shipped 1.6 mm laminate its fabrication block defaults to. These are the
+#: ruler: they are stated here as numbers so that the world-space measurement
+#: below is held against a KNOWN BOARD, not against anything the exporter, the
+#: mesh builder or the compiled board says about itself. The fixture is checked
+#: to still state them, so a board that is resized fails loudly here rather
+#: than quietly turning this suite self-referential.
+BOARD_WIDTH_MM = 40.0
+BOARD_DEPTH_MM = 30.0
+BOARD_THICKNESS_MM = 1.6
+MM_PER_METRE = 1000.0
 
 #: The refs the fixture board orders, and what this suite arranges each to be.
 PLACEHOLDER_REF = "J1"          # its model is withheld -> a prism
@@ -164,6 +189,61 @@ def _node(gltf, name: str):
     raise AssertionError(f"no node named {name!r} in {[n.name for n in gltf.nodes]}")
 
 
+def _world(gltf) -> dict[int, tuple[tuple[float, float, float],
+                                    tuple[float, float, float]]]:
+    """``{node index: (scale, translation)}`` in WORLD space, by walking the
+    scene from its own roots.
+
+    The graph is walked rather than assumed because the graph is the only thing
+    that knows what unit the file is in: the numbers on a node are the
+    exporter's, and comparing them with the exporter's other numbers is exactly
+    the self-comparison this oracle exists to avoid. A composed transform is
+    what a VIEWER computes, so it is what the assertions are made against.
+
+    Scale composes multiplicatively and a child's translation is expressed in
+    its parent's units, which is what makes the millimetre-to-metre root work
+    at all.
+    """
+    scene = gltf.scenes[gltf.scene]
+    out: dict[int, tuple] = {}
+
+    def walk(index: int, scale, offset):
+        node = gltf.nodes[index]
+        local = tuple(node.scale or (1.0, 1.0, 1.0))
+        shift = tuple(node.translation or (0.0, 0.0, 0.0))
+        assert not node.rotation or list(node.rotation) == [0.0, 0.0, 0.0, 1.0], \
+            f"{node.name} carries a rotation this walker does not compose"
+        assert not node.matrix, f"{node.name} carries a matrix, not a TRS"
+        world_scale = tuple(scale[i] * local[i] for i in range(3))
+        world_offset = tuple(offset[i] + scale[i] * shift[i] for i in range(3))
+        out[index] = (world_scale, world_offset)
+        for child in node.children or ():
+            assert child not in out, f"node {child} is reached twice in the graph"
+            walk(child, world_scale, world_offset)
+
+    for root in scene.nodes:
+        walk(root, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
+    assert len(out) == len(gltf.nodes), \
+        "some node is not reachable from the scene, so nothing draws it"
+    return out
+
+
+def _world_extent(gltf, node_index: int) -> tuple[tuple[float, float, float],
+                                                  tuple[float, float, float]]:
+    """``(low, high)`` corners of one node's mesh in WORLD space, from the
+    accessor bounds a viewer frames its camera on."""
+    scale, offset = _world(gltf)[node_index]
+    node = gltf.nodes[node_index]
+    lows, highs = [], []
+    for prim in gltf.meshes[node.mesh].primitives:
+        accessor = gltf.accessors[prim.attributes.POSITION]
+        lows.append(accessor.min)
+        highs.append(accessor.max)
+    low = tuple(min(v[i] for v in lows) * scale[i] + offset[i] for i in range(3))
+    high = tuple(max(v[i] for v in highs) * scale[i] + offset[i] for i in range(3))
+    return low, high
+
+
 def _image(gltf, texture_index: int) -> Image.Image:
     source = gltf.textures[texture_index].source
     image = gltf.images[source]
@@ -174,38 +254,131 @@ def _image(gltf, texture_index: int) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 
+def test_the_board_is_its_real_size_in_metres(exported):
+    """THE RULER. A 40 x 30 mm board is 0.040 x 0.030 in the world glTF defines.
+
+    This is the assertion that a self-consistent file cannot fake. Every other
+    geometric check in this suite compares one number the exporter wrote with
+    another number the exporter wrote, and all of them pass unchanged on a file
+    whose every distance is a thousand times too large — which is what emitting
+    millimetres as scene coordinates produces, and which renders as a perfectly
+    ordinary board because nothing in the frame gives its size away.
+
+    So the board's extent is composed through the scene graph the way a viewer
+    composes it, and held against the fixture's OWN stated size in metres.
+
+    MUTATION THIS CATCHES: the export as it was written — millimetres emitted
+    straight as scene coordinates. Set ``gltf_export.MM_TO_METRE`` to 1.0 and
+    every other assertion in this suite still passes.
+    """
+    gltf, board = exported["gltf"], exported["board"]
+
+    # The ruler is a ruler: the fixture still is the board these literals name.
+    assert (board.outline.width_mm, board.outline.height_mm) == \
+        (BOARD_WIDTH_MM, BOARD_DEPTH_MM), "the fixture board was resized"
+    assert board.fabrication.thickness_mm == BOARD_THICKNESS_MM
+
+    board_index = gltf.nodes.index(_node(gltf, "board"))
+    low, high = _world_extent(gltf, board_index)
+    size = tuple(high[i] - low[i] for i in range(3))
+
+    # (x, y, z) = (board width, thickness, board depth) — mesh_frame's mapping.
+    assert size == pytest.approx((BOARD_WIDTH_MM / MM_PER_METRE,
+                                  BOARD_THICKNESS_MM / MM_PER_METRE,
+                                  BOARD_DEPTH_MM / MM_PER_METRE), abs=1e-9), (
+        "the board does not measure %g x %g mm in metres; it measures %r m"
+        % (BOARD_WIDTH_MM, BOARD_DEPTH_MM, size))
+
+    # AND IT SITS ON THE GROUND at its authored origin, in metres. A board that
+    # is the right size in the wrong place is still a board an enclosure cannot
+    # be measured against.
+    assert low == pytest.approx((board.outline.origin[0] / MM_PER_METRE, 0.0,
+                                 board.outline.origin[1] / MM_PER_METRE), abs=1e-9)
+
+    # A sanity floor a person can hold in their head: a board this size is
+    # centimetres across, not tens of metres and not microns.
+    assert 0.01 < max(size) < 1.0, "this is not a board-sized object"
+
+    # The tallest part rises above the board and stays within a hand's span of
+    # it — the same measurement, on the thing seated ON the board.
+    tallest = max(_world_extent(gltf, gltf.nodes.index(_node(gltf, ref)))[1][1]
+                  for ref in exported["cpl"])
+    assert BOARD_THICKNESS_MM / MM_PER_METRE < tallest < 0.1
+
+
+def test_the_whole_scene_hangs_under_one_root_that_states_the_unit(exported):
+    """The conversion is ONE scale in ONE place, and the file says so.
+
+    Two roots, or a node left out from under the root, is a scene where half
+    the geometry is in metres and half is in millimetres — which a viewer
+    renders as a board with one part a kilometre away, and which a bounding-box
+    check on any single mesh would still pass.
+    """
+    gltf = exported["gltf"]
+    scene = gltf.scenes[gltf.scene]
+
+    assert len(scene.nodes) == 1, "the scene has more than one root"
+    root = gltf.nodes[scene.nodes[0]]
+    assert root.name == gltf_export.ROOT_NODE_NAME
+    assert root.mesh is None, "the unit root must not also draw something"
+    assert root.scale == pytest.approx([gltf_export.MM_TO_METRE] * 3)
+
+    # Every other node is its child, and nothing is drawn outside it.
+    assert sorted(root.children) == [i for i in range(len(gltf.nodes))
+                                     if gltf.nodes[i] is not root]
+
+    # And the file SAYS which frame is which, to the reader who has only the
+    # file: the millimetre in this document's metadata is a node coordinate,
+    # and a reader must not take it for the file's unit.
+    units = gltf.asset.extras["units"]
+    assert units["world"] == "metre" and units["node_graph"] == "millimetre"
+    assert units["root_node"] == gltf_export.ROOT_NODE_NAME
+    assert units["root_scale"] == pytest.approx(gltf_export.MM_TO_METRE)
+    assert "METRES" in gltf.asset.extras["axis_convention"]
+    assert root.extras["units"] == units["note"]
+
+
 def test_the_reader_finds_the_scene_the_position_file_describes(exported):
-    """Node for node, and every part where the CPL says it is."""
+    """Node for node, and every part where the CPL says it is — in metres."""
     gltf, cpl = exported["gltf"], exported["cpl"]
     marker_node = UNVERIFIED_REF + gltf_export.MARKER_SUFFIX
+    world = _world(gltf)
 
-    assert {n.name for n in gltf.nodes} == set(cpl) | {"board", marker_node}
-    assert _node(gltf, "board").translation in (None, [0.0, 0.0, 0.0])
+    assert {n.name for n in gltf.nodes} == \
+        set(cpl) | {"board", marker_node, gltf_export.ROOT_NODE_NAME}
+    assert world[gltf.nodes.index(_node(gltf, "board"))][1] == \
+        pytest.approx((0.0, 0.0, 0.0))
 
     for ref, row in cpl.items():
-        # THE POSITION FILE, read back out of the scene graph. The CPL is
+        # THE POSITION FILE, read back out of the scene graph — and CONVERTED,
+        # because the row is millimetres and the world is metres. The CPL is
         # emitted Y-up (X verbatim, board Y negated) and the scene is
-        # (board_x, height, board_y), so the row's own numbers ARE the node's
-        # horizontal translation with Y negated back.
-        assert _node(gltf, ref).translation == pytest.approx(
-            [row.x_mm, 0.0, -row.y_mm], abs=1e-6), f"{ref} is not where the CPL says"
+        # (board_x, height, board_y), so the row's own numbers are the node's
+        # horizontal world position with Y negated back and scaled to metres.
+        index = gltf.nodes.index(_node(gltf, ref))
+        assert world[index][1] == pytest.approx(
+            [row.x_mm / MM_PER_METRE, 0.0, -row.y_mm / MM_PER_METRE], abs=1e-9), \
+            f"{ref} is not where the CPL says"
     # The mark travels with the part it marks.
-    assert _node(gltf, marker_node).translation == \
-        _node(gltf, UNVERIFIED_REF).translation
+    assert world[gltf.nodes.index(_node(gltf, marker_node))] == \
+        world[gltf.nodes.index(_node(gltf, UNVERIFIED_REF))]
 
     # And the vertices behind those nodes are the placement's own, restated
     # relative to the translation. (The placement is the second of the two
     # things not read from the file: it is what the export was asked to write.)
+    # Composed the viewer's way and compared in METRES, so a scale that reached
+    # the nodes but not the vertices — or the reverse — fails here too.
     for part in exported["placement"].parts:
         node = _node(gltf, part.ref)
+        scale, offset = world[gltf.nodes.index(node)]
         drawn = [p for prim in gltf.meshes[node.mesh].primitives
                  for p in _positions(gltf, prim.attributes.POSITION)]
-        placed = set(part.mesh.positions)
-        for (x, y, z) in drawn:
-            world = (x + node.translation[0], y + node.translation[1],
-                     z + node.translation[2])
-            assert min(max(abs(a - b) for a, b in zip(world, p))
-                       for p in placed) < 1e-3, f"{part.ref} vertex {world} is not placed"
+        placed = [tuple(v / MM_PER_METRE for v in p) for p in part.mesh.positions]
+        for point in drawn:
+            here = tuple(point[i] * scale[i] + offset[i] for i in range(3))
+            assert min(max(abs(a - b) for a, b in zip(here, p))
+                       for p in placed) < 1e-6, \
+                f"{part.ref} vertex {here} is not placed"
 
 
 def test_the_reader_finds_every_triangle_the_export_was_asked_to_write(exported):

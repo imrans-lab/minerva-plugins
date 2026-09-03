@@ -315,19 +315,107 @@ def test_a_row_the_position_file_refused_is_not_drawn_at_the_ledgers_angle():
 
 
 def test_a_transform_that_is_not_the_cpls_is_refused():
-    """The anchor re-derivation is the runtime guard for the whole property. A
-    placement whose anchor the rebuilt transform cannot reproduce is refused by
-    name, not drawn."""
+    """The anchor re-derivation is A runtime guard for the property — the one
+    that catches a drawing which is not the row's. A placement whose anchor the
+    rebuilt transform cannot reproduce is refused by name, not drawn.
+
+    THIS IS THE EASY CASE, and it is only half the property: the placement it
+    forges is internally INCONSISTENT, so the re-derivation catches it without
+    ever consulting the emission. The two tests below are the other half."""
     board = _compiled(_board_dict())
     emission = ao.emit(board, "jlc")
-    component = next(c for c in board.components if c.ref == "U1")
-    physical = component.physical_placements[0]
-    forged = replace(physical, anchor=(physical.anchor[0] + 0.5, physical.anchor[1]))
-    forged_component = replace(component, physical_placements=(forged,))
-    forged_board = replace(board, components=tuple(
-        forged_component if c.ref == "U1" else c for c in board.components))
+    forged_board = _moved(board, "U1", anchor=(0.5, 0.0))
     with pytest.raises(pp.PartPlacementError, match="U1"):
         pp.place_parts(forged_board, emission, client=CorpusClient())
+
+
+def _moved(board, ref: str, *, origin=(0.0, 0.0), anchor=(0.0, 0.0)):
+    """``board`` with one component's placement displaced by the given deltas."""
+    component = next(c for c in board.components if c.ref == ref)
+    physical = component.physical_placements[0]
+    forged = replace(physical,
+                     origin=(physical.origin[0] + origin[0],
+                             physical.origin[1] + origin[1]),
+                     anchor=(physical.anchor[0] + anchor[0],
+                             physical.anchor[1] + anchor[1]))
+    return replace(board, components=tuple(
+        replace(component, physical_placements=(forged,)) if c.ref == ref else c
+        for c in board.components))
+
+
+def test_a_stale_emission_beside_a_board_that_moved_underneath_it_is_refused():
+    """THE CASE A SELF-CONSISTENT PLACEMENT PASSES.
+
+    Somebody drags a part and recompiles; the emission in hand still describes
+    where it used to be. Moving a placement moves its ORIGIN and its ANCHOR
+    TOGETHER — that is what a recompile does — so the rebuilt transform
+    re-derives the new anchor perfectly and the anchor check has nothing to
+    say. Only the row's own emitted coordinates disagree, and the file is the
+    thing the picture must not contradict.
+
+    The test asserts the trap first: without the row check this board and this
+    emission place happily, and the render would show U1 three millimetres from
+    where the position file sends the nozzle.
+
+    MUTATION THIS CATCHES: deleting the coordinate half of ``_check_row`` (run,
+    and it does not raise), or comparing the row against anything derived from
+    the same placement.
+    """
+    board = _compiled(_board_dict())
+    emission = ao.emit(board, "jlc")
+    moved = _moved(board, "U1", origin=(3.0, 0.0), anchor=(3.0, 0.0))
+
+    # THE TRAP IS REAL: the placement is internally consistent, so the anchor
+    # re-derivation — the only guard there used to be — agrees with itself.
+    physical = next(c for c in moved.components
+                    if c.ref == "U1").physical_placements[0]
+    assert pp._check_anchor(physical, moved.footprint_for(
+        next(c for c in moved.components if c.ref == "U1")),
+        pp._transform_of(physical)) is None, \
+        "the fixture no longer exercises a self-consistent move"
+
+    with pytest.raises(pp.PartPlacementError, match="U1") as caught:
+        pp.place_parts(moved, emission, client=CorpusClient())
+    assert "position file" in str(caught.value)
+
+    # And the same board with the emission REBUILT on it places without
+    # complaint — the refusal is about the pairing, not about the board.
+    assert pp.place_parts(moved, ao.emit(moved, "jlc"), client=CorpusClient())
+
+
+def test_a_row_whose_side_is_not_the_parts_side_is_refused():
+    """NOTHING ELSE LOOKS AT THE SIDE.
+
+    R1's ledger offset is 0 and its emitted rotation equals its placed one, so
+    flipping the ROW's side alone moves no coordinate and turns no model: the
+    rotation check computes a zero offset either way, and the anchor check
+    never sees ``row`` at all. What comes out is a top-side part drawn on the
+    bottom face of the board and labelled "bottom" in the report — the render
+    disagreeing with the file, silently, which is the one failure this module
+    exists to prevent.
+
+    MUTATION THIS CATCHES: deleting the side half of ``_check_row``. Run it and
+    nothing raises — no coordinate moves and no model turns — which is exactly
+    why nothing else in this module can stand in for it.
+    """
+    board = _compiled(_board_dict())
+    emission = ao.emit(board, "jlc")
+    row = {r.ref: r for r in emission.cpl}["R1"]
+    assert row.side == "top" and row.rotation_deg == FIXTURE_ROTATION["R1"]
+
+    forged = replace(emission, cpl=tuple(
+        replace(r, side="bottom") if r.ref == "R1" else r for r in emission.cpl))
+
+    with pytest.raises(pp.PartPlacementError, match="R1") as caught:
+        pp.place_parts(board, forged, client=CorpusClient())
+    assert "side" in str(caught.value)
+
+    # THE ZERO-OFFSET TRAP, named: the rotation guard passes this emission, so
+    # it is genuinely the side check that refuses and not a coincidence.
+    physical = next(c for c in board.components
+                    if c.ref == "R1").physical_placements[0]
+    assert pp._check_rotation(
+        {r.ref: r for r in forged.cpl}["R1"], physical, 0) is None
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +784,67 @@ def test_a_verified_pair_whose_pads_no_longer_match_keeps_its_angle_and_loses_it
         for row in emission.cpl))
     with pytest.raises(pp.PartPlacementError, match="U2"):
         pp.place_parts(board, forged, client=client)
+
+
+def test_a_child_whose_own_drawing_cannot_be_resolved_is_drawn_not_refused():
+    """THE FALLBACK IS THE POINT OF ALLOWING A NULL DRAWING.
+
+    ``_resolve_drawing`` returns None for a placement that names a footprint
+    the library cannot resolve, and everything downstream is supposed to
+    degrade: the anchor cross-check says it did not run, no seating datum can
+    be computed, and the two extent advisories simply have no fab box and no
+    land box to compare against. What must NOT happen is an unhandled
+    AttributeError somewhere in that chain surfacing as a generic export
+    failure on a board that is merely missing one drawing.
+
+    R1 is the ref for it deliberately: its vendor package is ELONGATED, so
+    ``_advisories`` runs past the square-part early return and really does hand
+    the null drawing to both ``fab_extent_from_definition`` and
+    ``land_extent_from_definition``. On a square part those two are never
+    reached and this test would prove nothing.
+    """
+    board = _compiled(_board_dict())
+    emission = ao.emit(board, "jlc")
+    component = next(c for c in board.components if c.ref == "R1")
+    physical = component.physical_placements[0]
+    unresolvable = replace(component, physical_placements=(
+        replace(physical, footprint_ref="NoSuchLibrary:NoSuchPart"),))
+    forged = replace(board, components=tuple(
+        unresolvable if c.ref == "R1" else c for c in board.components))
+    assert pp._resolve_drawing(forged, unresolvable,
+                               unresolvable.physical_placements[0]) is None, \
+        "the fixture no longer produces an unresolved drawing"
+
+    report = pp.place_parts(forged, emission, client=CorpusClient())
+    part = _parts(report)["R1"]
+
+    # It is drawn, and the reader is TOLD which cross-check did not run.
+    assert part.kind == pp.KIND_MODEL
+    assert any("not resolved" in note for note in part.notes)
+    # And the advisories that had nothing to compare against simply did not
+    # fire, rather than firing on a box they invented.
+    assert pp.ADVISORY_EXTENT not in {a["code"] for a in report.advisories
+                                      if a["ref"] == "R1"}
+
+
+def test_a_footprint_with_neither_courtyard_nor_land_stands_on_its_origin():
+    """The last prism basis, which no fixture board reaches.
+
+    Silk-only furniture that somehow carries an order row has no courtyard to
+    keep out of and no pad to be soldered to, so there is no measured box to
+    stand a placeholder on. It gets a nominal square on the origin — RECORDED
+    as such, because a reader must be able to tell a measured prism from a
+    stand-in for one.
+    """
+    from pcb_worker.footprint_def import FootprintDefinition
+
+    bare = FootprintDefinition(name="Silk_Only", pads=(), graphics=())
+    extent, basis = pp._prism_extent(bare)
+
+    assert basis == pp.PRISM_BASIS_ORIGIN
+    assert (extent.width, extent.height) == (2 * pp.ORIGIN_PRISM_HALF_MM,) * 2
+    # A footprint that resolved to nothing at all lands in the same place.
+    assert pp._prism_extent(None) == (extent, pp.PRISM_BASIS_ORIGIN)
 
 
 def test_the_report_serializes_without_geometry():
