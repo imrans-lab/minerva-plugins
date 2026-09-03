@@ -211,8 +211,13 @@ def _world(gltf) -> dict[int, tuple[tuple[float, float, float],
         node = gltf.nodes[index]
         local = tuple(node.scale or (1.0, 1.0, 1.0))
         shift = tuple(node.translation or (0.0, 0.0, 0.0))
-        assert not node.rotation or list(node.rotation) == [0.0, 0.0, 0.0, 1.0], \
-            f"{node.name} carries a rotation this walker does not compose"
+        if node.rotation and list(node.rotation) != [0.0, 0.0, 0.0, 1.0]:
+            # A rotation would turn everything beneath the node, which this
+            # walker does not compose. It is tolerable only on a node that
+            # draws nothing and parents nothing — a light — where there is
+            # nothing beneath it to turn.
+            assert node.mesh is None and not node.children, \
+                f"{node.name} carries a rotation this walker does not compose"
         assert not node.matrix, f"{node.name} carries a matrix, not a TRS"
         world_scale = tuple(scale[i] * local[i] for i in range(3))
         world_offset = tuple(offset[i] + scale[i] * shift[i] for i in range(3))
@@ -344,7 +349,15 @@ def test_the_reader_finds_the_scene_the_position_file_describes(exported):
     marker_node = UNVERIFIED_REF + gltf_export.MARKER_SUFFIX
     world = _world(gltf)
 
-    assert {n.name for n in gltf.nodes} == \
+    # The lights are told apart by what the FILE says they are — the punctual
+    # lights extension on the node — not by their names, so a mesh named like
+    # a light would still be counted as an unexplained node.
+    lights = {n.name for n in gltf.nodes
+              if n.extensions and "KHR_lights_punctual" in n.extensions}
+    assert len(lights) == 2 and all(
+        n.mesh is None for n in gltf.nodes if n.name in lights), \
+        "two lights, drawing nothing"
+    assert {n.name for n in gltf.nodes} - lights == \
         set(cpl) | {"board", marker_node, gltf_export.ROOT_NODE_NAME}
     assert world[gltf.nodes.index(_node(gltf, "board"))][1] == \
         pytest.approx((0.0, 0.0, 0.0))
