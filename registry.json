@@ -83,15 +83,15 @@
     {
       "id": "pcb",
       "name": "PCB Editor",
-      "version": "0.7.0",
-      "manifest_version": "0.7.0",
-      "release_tag": "pcb-v0.7.0",
+      "version": "0.8.0",
+      "manifest_version": "0.8.0",
+      "release_tag": "pcb-v0.8.0",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/pcb/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.7.0/pcb-0.7.0-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.7.0/pcb-0.7.0-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.7.0/pcb-0.7.0-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.7.0/pcb-0.7.0-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.0/pcb-0.8.0-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.0/pcb-0.8.0-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.0/pcb-0.8.0-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/pcb-v0.8.0/pcb-0.8.0-windows-x86_64.tar.gz"
       }
     },
     {
