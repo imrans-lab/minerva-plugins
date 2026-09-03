@@ -148,6 +148,62 @@ def subtract(outer: tuple[Point, ...],
     return tuple(regions)
 
 
+def partition(region: Region, cell_mm: float, clearance_mm: float) -> tuple[Region, ...]:
+    """``region`` cut into grid cells of about ``cell_mm``, each a region of
+    its own (an outer ring and the holes wholly inside it).
+
+    A grid line is nudged off any ring's extreme x or y by ``clearance_mm``:
+    a line grazing a bore's rim would shave off a lens a fraction of a
+    millimetre wide, and that lens is exactly the needle the partition exists
+    to prevent. Cells are exact integer booleans, so two neighbours share
+    identical vertices along their common line and weld without a seam.
+    """
+    pc = _pyclipper()
+    xs = [p[0] for p in region.outer]
+    ys = [p[1] for p in region.outer]
+    avoid_x: set[float] = set()
+    avoid_y: set[float] = set()
+    for ring in (region.outer,) + region.holes:
+        rx = [p[0] for p in ring]
+        ry = [p[1] for p in ring]
+        avoid_x.update((min(rx), max(rx)))
+        avoid_y.update((min(ry), max(ry)))
+    grid_x = [min(xs)] + _grid_lines(min(xs), max(xs), cell_mm, avoid_x, clearance_mm) + [max(xs)]
+    grid_y = [min(ys)] + _grid_lines(min(ys), max(ys), cell_mm, avoid_y, clearance_mm) + [max(ys)]
+
+    subject = [_to_nm_path(region.outer)] + [_to_nm_path(h) for h in region.holes]
+    cells: list[Region] = []
+    for x0, x1 in zip(grid_x, grid_x[1:]):
+        for y0, y1 in zip(grid_y, grid_y[1:]):
+            clipper = pc.Pyclipper()
+            clipper.AddPaths(subject, pc.PT_SUBJECT, True)
+            clipper.AddPath(_to_nm_path(((x0, y0), (x1, y0), (x1, y1), (x0, y1))),
+                            pc.PT_CLIP, True)
+            tree = clipper.Execute2(pc.CT_INTERSECTION, pc.PFT_NONZERO, pc.PFT_NONZERO)
+            _collect(tree, cells)
+    return tuple(cells)
+
+
+def _grid_lines(lo: float, hi: float, pitch: float, avoid: set[float],
+                clearance: float) -> list[float]:
+    """Interior grid coordinates at about ``pitch``, each pushed clear of
+    every value in ``avoid``."""
+    lines: list[float] = []
+    x = lo + pitch
+    while x < hi - clearance:
+        line = x
+        for _ in range(16):
+            near = [a for a in avoid if abs(a - line) < clearance]
+            if not near:
+                break
+            a = min(near, key=lambda v: abs(v - line))
+            line = a + clearance if line >= a else a - clearance
+        if lo + clearance < line < hi - clearance:
+            lines.append(line)
+        x += pitch
+    return lines
+
+
 def _collect(node, regions: list[Region]) -> None:
     """Walk a PolyTree: every solid node is a region, its children are its holes,
     and an island nested inside a hole is a region in its own right."""

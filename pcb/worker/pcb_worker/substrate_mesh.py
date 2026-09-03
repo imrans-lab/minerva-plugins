@@ -18,7 +18,8 @@ WHAT IT IS MADE OF, and where each decision lives:
                  prints. Never a default invented here.
   area           :mod:`board_region` — outline, less cutouts, less every drill,
                  as an exact integer polygon boolean.
-  triangles      :mod:`earcut` — ear clipping with hole bridging. The two faces
+  triangles      :mod:`face_triangulation` — ear clipping per grid cell, then
+                 Delaunay flips, so no needle spans the board. The two faces
                  AND the walls are all read off this one triangulation, so a
                  wall cannot describe a rim the face disagrees with.
   axes, winding  :mod:`mesh_frame`.
@@ -64,7 +65,7 @@ from typing import Mapping
 from . import mesh_frame
 from .board_drills import DrillOpening, DrillOrigin, drill_openings
 from .board_region import cutout_rings, drill_rings, outline_ring, subtract
-from .earcut import triangulate
+from .face_triangulation import triangulate_region
 from .ir_projection import outline_frame
 from .mesh_frame import Vec3
 from .resolved_board import ResolvedBoard, Side
@@ -179,8 +180,7 @@ def build_substrate_mesh(board: ResolvedBoard, *,
     columns: dict[Point2, int] = {}
 
     for index, region in enumerate(regions):
-        points, triangles = triangulate(list(region.outer),
-                                        [list(hole) for hole in region.holes])
+        points, triangles = triangulate_region(region)
         _check_region_filled(index, region, points, triangles)
 
         # The two faces share a 2D vertex list and differ in height, normal, UV
