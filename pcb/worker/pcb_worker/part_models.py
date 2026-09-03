@@ -655,19 +655,40 @@ class VendorPartClient:
             # An unwritable cache costs speed, never correctness.
             log.warning("could not cache %s/%s (%s)", sub, name, exc)
 
-    def _cache_discard(self, sub: str, name: str) -> None:
-        """Remove an entry that can no longer be read as what it was filed as.
+    def _cache_discard(self, sub: str, name: str, expect_sha256: str) -> None:
+        """Remove an entry that can no longer be read as what it was filed as —
+        but only while it is still the bytes that were judged.
 
         Body AND sidecar, because a sidecar with no body is a miss the reader
         already tolerates while a body with no sidecar is one it would have to
         keep re-hashing. Failure to delete costs one wasted read on the next
         call and nothing else, so it is logged rather than raised — this
         module's contract is that nothing here raises.
+
+        ``expect_sha256`` GUARDS AGAINST ANOTHER PROCESS. The per-key gate
+        serializes fetches inside this one; a second export running beside us is
+        under no such discipline and can replace this entry with a perfectly
+        good body between the read that found it stale and this call. Deleting
+        then would destroy a healthy entry on the strength of bytes that are no
+        longer there — and if our own refetch fails, destroy it for nothing.
+        So the body on disk is re-hashed: anything but the bytes we were served
+        means somebody has already healed this entry, and it is left alone.
         """
         directory = self._dir(sub)
         if directory is None:
             return
-        for path in (directory / name, directory / f"{name}.meta.json"):
+        body = directory / name
+        try:
+            current = hashlib.sha256(body.read_bytes()).hexdigest()
+        except OSError:
+            # Already gone, or unreadable. Nothing here is worth removing, and
+            # a sidecar with no body is a miss the reader already tolerates.
+            return
+        if current != expect_sha256:
+            log.info("cache entry %s/%s was replaced underneath us; keeping it",
+                     sub, name)
+            return
+        for path in (body, directory / f"{name}.meta.json"):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
@@ -782,23 +803,30 @@ class VendorPartClient:
         discarded and fetched again, ONCE. The second read is judged on its
         merits — a network response that cannot prove what it is stays a
         refusal, because nothing about it is stale.
+
+        The discard is conditional on the entry still being the bytes that were
+        read: a second process can heal it while we are deciding
+        (:meth:`_cache_discard`).
         """
-        parsed, from_cache = self._attempt(sub, name, url, part, read)
-        if parsed.absent and from_cache:
+        parsed, provenance = self._attempt(sub, name, url, part, read)
+        if parsed.absent and provenance is not None and provenance.from_cache:
             log.warning("discarding stale cache entry %s/%s: %s",
                         sub, name, parsed.detail)
-            self._cache_discard(sub, name)
+            self._cache_discard(sub, name, provenance.sha256)
             parsed, _ = self._attempt(sub, name, url, part, read)
         return parsed
 
     def _attempt(self, sub: str, name: str, url: str, part: str,
-                 read: Callable[[bytes, Provenance], Any]) -> tuple[Any, bool]:
+                 read: Callable[[bytes, Provenance], Any],
+                 ) -> tuple[Any, Union[Provenance, None]]:
         """One pass: get the bytes, read them, cache a fresh success. Reports
-        whether the bytes came off disk, which is what decides whether an
-        absence is stale or final."""
+        the provenance of the bytes it read, which says whether they came off
+        disk — deciding whether an absence is stale or final — and which bytes
+        exactly, so a discard can tell them from a replacement. None when there
+        were no bytes at all."""
         got = self._get(sub, name, url)
         if isinstance(got, _Unreachable):
-            return Absence(part, REASON_NO_NETWORK, str(got)), False
+            return Absence(part, REASON_NO_NETWORK, str(got)), None
         data, provenance = got
         parsed = read(data, provenance)
         # Only a real document is worth keeping. Caching a "component not
@@ -806,4 +834,4 @@ class VendorPartClient:
         # supplier adds next week permanently invisible.
         if not parsed.absent and not provenance.from_cache:
             self._cache_write(sub, name, data, provenance)
-        return parsed, provenance.from_cache
+        return parsed, provenance

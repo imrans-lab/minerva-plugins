@@ -29,7 +29,9 @@ claim is that the client goes back to the supplier and heals itself — serves a
 real payload over real HTTP from a loopback server it starts itself. That is
 still no supplier and no mock: the client's own transport runs unmodified, and
 the body it receives is a file from the corpus. Nothing in this file patches
-:mod:`pcb_worker.part_models`.
+:mod:`pcb_worker.part_models`; the cross-process race test subclasses the client
+to pick the MOMENT the other process writes, and the discard it then asserts
+about runs exactly as it ships.
 
 Live fetching is verified by its own acceptance station. CI must never depend
 on the supplier being up.
@@ -493,6 +495,74 @@ def test_a_poisoned_entry_is_discarded_even_when_the_refetch_fails(offline,
     assert answer.reason == pm.REASON_NO_NETWORK, answer.detail
     assert not (home / f"{part}.json").exists()
     assert not (home / f"{part}.json.meta.json").exists()
+
+
+class _HealedUnderneathUs(pm.VendorPartClient):
+    """The client, with a second process wedged into the one moment that
+    matters.
+
+    ``on_read`` fires ONCE, immediately after a successful cache read and so
+    strictly before the caller has judged that entry stale — which is the whole
+    window the guard exists for. Nothing else is altered: the discard, its hash
+    check and the refetch all run as they ship. A genuinely racing thread would
+    land inside this window only sometimes and would prove nothing on the runs
+    it missed, so the moment is chosen rather than waited for.
+    """
+
+    on_read = None
+
+    def _cache_read(self, sub, name, url):
+        hit = super()._cache_read(sub, name, url)
+        if hit is not None and self.on_read is not None:
+            hook, self.on_read = self.on_read, None
+            hook()
+        return hit
+
+
+def test_an_entry_another_process_healed_first_is_not_deleted(offline,
+                                                              tmp_path):
+    """THE FINDING THIS CLOSES: the heal reads, judges, then deletes, and those
+    are three separate moments on a directory other processes share. The
+    per-key gate serializes fetches inside ONE process; a second export is
+    under no such discipline, and the path itself cannot loop. So the other
+    process can replace the poisoned entry with a perfectly good one in
+    between, and the first then deletes THAT — on the strength of bytes no
+    longer on disk. With its own refetch refused, as here, a usable entry has
+    been destroyed for nothing and a part that was about to resolve goes
+    absent.
+
+    THE INTERLEAVING. The cache is seeded poisoned. Between the read that finds
+    it stale and the discard that would remove it, the other process finishes
+    its heal — the good body and an agreeing sidecar, which is exactly what a
+    completed fetch leaves behind. The network stays refused throughout, so
+    nothing in this test can reach a supplier.
+
+    ORACLE: the part RESOLVES, off disk. That is only possible if the good
+    entry survived, because no request could be made and the poisoned body does
+    not parse. The counterfactual is the test above — with nobody else writing,
+    the same setup does discard the entry — so this is not a guard that has
+    stopped healing. Comparing bytes rather than merely checking the file
+    exists is what separates the two.
+    """
+    part = "C910544"
+    url = f"{DEAD}{part}/components?version={offline.api_version}"
+    home = _seed_bytes(tmp_path, url, part, _legacy_bytes(part))
+
+    client = _HealedUnderneathUs(api_base=DEAD, model_base=DEAD, timeout=2.0)
+    client.on_read = lambda: _seed_bytes(tmp_path, url, part,
+                                         _payload_bytes(part))
+
+    answer = client.facts(part)
+    assert not answer.absent, answer
+    assert answer.package == INDEX[part]["package"]
+    assert answer.provenance.from_cache, "the survivor was read off disk"
+
+    # Intact for the NEXT process too, sidecar included — not merely served
+    # once out of bytes this call happened to be holding.
+    assert (home / f"{part}.json").read_bytes() == _payload_bytes(part)
+    assert (home / f"{part}.json.meta.json").exists()
+    fresh = pm.VendorPartClient(api_base=DEAD, model_base=DEAD, timeout=2.0)
+    assert not fresh.facts(part).absent
 
 
 def test_one_part_asked_for_at_once_by_many_threads_is_fetched_once(tmp_path,

@@ -41,9 +41,10 @@ defect class this export cannot show you, because it looks exactly like a board
 with a differently-shaped outline. So every region is measured against the area
 :mod:`board_region` computed for it (:data:`AREA_TOLERANCE`), the finished
 surface is checked to be ONE closed skin rather than merely a balanced one —
-touching itself only where the board's own rim says it does, and only as often
-(:func:`_check_closed`) — and either failure raises :class:`SubstrateMeshError`
-naming what did not come out.
+its EDGES touching only where the board's own rim says they do, and only as
+often (:func:`_check_closed`, whose licence is edge-wise: two shells that meet
+at a lone vertex and share no edge still pass) — and either failure raises
+:class:`SubstrateMeshError` naming what did not come out.
 
 THREE GROUPS OF TRIANGLES, not one. ``top`` and ``bottom`` carry the baked
 per-side textures. ``edge`` is the rim and every bore wall: raw laminate, which
