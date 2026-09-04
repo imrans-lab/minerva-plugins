@@ -51,6 +51,20 @@ const MAX_HITS: int = 8
 ## Centring and radius searches use this many bisection steps. 14 steps take
 ## any bounded interval to under a ten-thousandth of it.
 const BISECTION_STEPS: int = 14
+## Samples marched outward before a centring bisection starts. Bisection alone
+## assumes free space is contiguous, and it is not: past the outline of the
+## part the gauge is free again, so a probe that fits at the far end of the
+## bound may have crossed a wall to get there. Marching first bounds the
+## bisection by the FIRST blocked sample instead of trusting the far end.
+const CONTINUITY_SAMPLES: int = 8
+## Radius of the point query used to name the body a contact point lies on.
+## Large enough to catch the surface the contact was generated from, small
+## enough that it cannot reach a different body.
+const CONTACT_ATTRIBUTION_MM: float = 0.05
+## A submitted job that has not run within this long is abandoned. Physics can
+## stop stepping entirely — the panel closes, the host pauses — and an MCP call
+## must fail with a reason rather than await forever.
+const JOB_TIMEOUT_MS: int = 5000
 ## How far past a candidate's own extent a centring search may wander, as a
 ## multiple of the candidate radius. This is constraint 3 in one number.
 const SEARCH_BOUND_FACTOR: float = 2.0
@@ -98,6 +112,10 @@ func _ready() -> void:
 	_body.name = "ReferenceColliders"
 	_viewport.add_child(_body)
 	set_physics_process(true)
+	# A measurement is a question the host asked, not part of the simulation:
+	# it must still be answered while the tree is paused, or a paused host
+	# leaves an MCP call waiting for a physics step that never runs.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 
 
 # ---------------------------------------------------------------------------
@@ -164,13 +182,29 @@ func get_shape_count() -> int:
 
 ## Ask a question and await the answer. The job body runs inside the next
 ## physics step, where the space's direct state is legal to touch.
+##
+## The wait is on the tree's idle frame rather than on job_finished, because
+## job_finished is emitted by the physics step and the whole point of the
+## timeout is to survive a physics step that never comes: a panel closed
+## mid-call, or a host that stopped stepping. An MCP call must always return.
 func submit(kind: String, args: Dictionary) -> Dictionary:
 	if _viewport == null or not is_inside_tree():
 		return {"error": "gauge is not in the scene tree; no physics step to run in"}
+	var tree := get_tree()
+	if tree == null:
+		return {"error": "gauge has no scene tree; no physics step to run in"}
 	var ticket := {"kind": kind, "args": args, "done": false, "result": {}}
 	_queue.append(ticket)
+	var deadline := Time.get_ticks_msec() + JOB_TIMEOUT_MS
 	while not bool(ticket["done"]):
-		await job_finished
+		if Time.get_ticks_msec() > deadline:
+			_queue.erase(ticket)
+			return {"error": "gauge job '%s' did not run within %d ms; the physics "
+				% [kind, JOB_TIMEOUT_MS] + "step is not running"}
+		await tree.process_frame
+		if _viewport == null or not is_inside_tree():
+			_queue.erase(ticket)
+			return {"error": "the gauge left the scene tree while '%s' was pending" % kind}
 	return ticket["result"]
 
 
@@ -261,18 +295,18 @@ func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionar
 			clearance = maxf(0.0, grown - size.x * 0.5)
 		return {"fits": true, "contacts": [], "clearance_mm": clearance}
 
+	# Each contact is attributed by its own point query. collide_shape's pairs
+	# and intersect_shape's bodies are different lists in unrelated orders, so
+	# zipping them by index would name the wrong node; a contact whose point
+	# query finds nothing is reported with an empty node rather than a guess.
 	var contacts: Array = []
-	var points := _contact_points(state, shape, xform)
-	var index := 0
-	for point in points:
-		var attributed := ""
-		if index < hits.size():
-			attributed = _node_for(hits[index])
-		contacts.append({"point_mm": point, "node": attributed})
-		index += 1
+	for point in _contact_points(state, shape, xform):
+		contacts.append({"point_mm": point, "node": _node_at(state, point)})
 	if contacts.is_empty():
+		# No contact geometry came back, only the bodies. Then the only honest
+		# position is the query's own, and it is the gauge's, not a touch point.
 		for hit in hits:
-			contacts.append({"point_mm": at, "node": _node_for(hit)})
+			contacts.append({"point_mm": at, "node": _node_for(hit), "at_gauge_centre": true})
 	return {"fits": false, "contacts": contacts, "clearance_mm": 0.0}
 
 
@@ -481,17 +515,32 @@ func _free_run(
 	bound: float
 ) -> float:
 	var shape := _prism(probe_radius, length)
-	if not _fits(state, shape, centre + direction * bound, axis):
-		var lo := 0.0
-		var hi := bound
-		for _i in range(BISECTION_STEPS):
-			var mid := (lo + hi) * 0.5
-			if _fits(state, shape, centre + direction * mid, axis):
-				lo = mid
-			else:
-				hi = mid
-		return lo
-	return bound
+	if not _fits(state, shape, centre, axis):
+		return 0.0
+	# March outward first (constraint 3 again, in its subtler form): the far
+	# end of the bound can be free because it is OUTSIDE the part, and a plain
+	# bisection would then report the whole bound as free space. The run
+	# returned here is continuous with the starting point down to the marching
+	# pitch, and the bisection only refines the wall between two samples.
+	var lo := 0.0
+	var hi := -1.0
+	var step := bound / float(CONTINUITY_SAMPLES)
+	for i in range(1, CONTINUITY_SAMPLES + 1):
+		var sample := step * float(i)
+		if _fits(state, shape, centre + direction * sample, axis):
+			lo = sample
+		else:
+			hi = sample
+			break
+	if hi < 0.0:
+		return bound
+	for _i in range(BISECTION_STEPS):
+		var mid := (lo + hi) * 0.5
+		if _fits(state, shape, centre + direction * mid, axis):
+			lo = mid
+		else:
+			hi = mid
+	return lo
 
 
 ## Largest gauge radius that still fits at `centre`, by bisection. Monotonic:
@@ -643,6 +692,18 @@ func _ray(state: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> Dicti
 	params.hit_from_inside = true
 	params.hit_back_faces = true
 	return state.intersect_ray(params)
+
+
+## The node whose surface a single point lies on, found by a small sphere query
+## at that point. Empty when nothing is within CONTACT_ATTRIBUTION_MM, which is
+## a truthful "unattributed" and not a wrong name.
+func _node_at(state: PhysicsDirectSpaceState3D, point: Vector3) -> String:
+	var probe := SphereShape3D.new()
+	probe.radius = CONTACT_ATTRIBUTION_MM
+	var near := _overlaps(state, probe, Transform3D(Basis.IDENTITY, point))
+	if near.is_empty():
+		return ""
+	return _node_for(near[0])
 
 
 func _node_for(hit: Dictionary) -> String:

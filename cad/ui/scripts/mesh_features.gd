@@ -106,9 +106,10 @@ func features_for(
 ## Cost is linear in the triangle count: one dictionary insert per triangle
 ## corner to weld, one per triangle edge to pair, one union-find step per
 ## shared edge, then a pass over each region's vertices to fit. There is no
-## nested loop over faces anywhere, and no per-face allocation. The constant is
-## a GDScript dictionary operation — a few hundred nanoseconds — so a 130k
-## triangle board is roughly a million dictionary operations.
+## nested loop over faces anywhere: every pass, grouping included, is linear in
+## the triangle count, and the only per-face allocation is one Array slot. The
+## constant is a GDScript dictionary operation — a few hundred nanoseconds — so
+## a 130k triangle board is roughly a million dictionary operations.
 static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -> Dictionary:
 	var started := Time.get_ticks_msec()
 	var candidates: Array = []
@@ -355,15 +356,26 @@ static func _union(parent: PackedInt32Array, a: int, b: int) -> void:
 		parent[rb] = ra
 
 
+## Bucket the faces by their region label. Accumulation is into untyped Arrays
+## because a Packed array read out of a dictionary is copy-on-write: appending
+## to it would copy the whole bucket on every face and make this pass O(n^2) in
+## the largest region. With reference-semantics Arrays the pass is O(n) and the
+## single conversion per region at the end is O(n) in total.
 static func _group_faces(labels: PackedInt32Array, face_count: int) -> Dictionary:
-	var groups := {}
+	var buckets := {}
 	for f in range(face_count):
 		var root := labels[f]
-		if not groups.has(root):
-			groups[root] = PackedInt32Array()
-		var bucket: PackedInt32Array = groups[root]
-		bucket.append(f)
-		groups[root] = bucket
+		if not buckets.has(root):
+			buckets[root] = []
+		(buckets[root] as Array).append(f)
+	var groups := {}
+	for root in buckets.keys():
+		var faces := PackedInt32Array()
+		var bucket: Array = buckets[root]
+		faces.resize(bucket.size())
+		for i in range(bucket.size()):
+			faces[i] = int(bucket[i])
+		groups[root] = faces
 	return groups
 
 

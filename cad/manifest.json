@@ -63,7 +63,7 @@
     },
     {
       "name": "minerva_cad_gauge",
-      "description": "Put a gauge of a given size at a given place in the posed CAD world and ask whether it fits. shape='cylinder' is a pin (dia_mm + length_mm, pointing along axis), 'box' is a block (size_mm [x,y,z]), 'sphere' is a ball (dia_mm). Returns {fits, contacts[{point_mm {world, local}, node}], clearance_mm}. A gauge that does not fit reports where it touched, so 'why will this screw not go in' has an answer with coordinates. Positions are millimetres in the posed world frame; at_mm is world.",
+      "description": "Put a gauge of a given size at a given place in the posed CAD world and ask whether it fits. shape='cylinder' is a pin (dia_mm + length_mm, pointing along axis), 'box' is a block (size_mm [x,y,z]), 'sphere' is a ball (dia_mm). Returns {fits, contacts[{point_mm {world, local}, node, reference}], clearance_mm}. A gauge that does not fit reports where it touched, so 'why will this screw not go in' has an answer with coordinates. Positions are millimetres in the posed world frame; at_mm is world.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -75,7 +75,7 @@
           "size_mm": {"type": "array", "items": {"type": "number"}, "description": "Box gauge size [x, y, z] in millimetres."},
           "at_mm": {"type": "array", "items": {"type": "number"}, "description": "Gauge centre [x, y, z] in posed world millimetres."},
           "axis": {"type": "array", "items": {"type": "number"}, "description": "Gauge axis [x, y, z]. Default [0, 0, 1]."},
-          "reference": {"type": "string", "description": "Report contact points in this reference's local frame as well. Default: the first mounted reference."}
+          "reference": {"type": "string", "description": "Report contact points in this reference's local frame as well. Default: the reference each contact itself lies on. A contact that cannot be attributed to a reference is reported in world only, with local null and local_unavailable saying why \u2014 no reference is guessed."}
         },
         "required": ["editor_name"]
       }

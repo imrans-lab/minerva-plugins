@@ -139,7 +139,7 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 	var max_dia := float(args.get("max_dia_mm", DEFAULT_MAX_DIA_MM))
 	var gauge: Node = panel.get_mesh_gauge()
 	var features: RefCounted = panel.get_mesh_features()
-	if gauge == null or features == null:
+	if not _gauge_ready(gauge) or features == null:
 		return _err("the measurement modules are not available on this panel")
 	panel.ensure_gauge_built()
 
@@ -208,7 +208,7 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 	var max_dia := float(args.get("max_dia_mm", 1.0e6))
 	var min_coverage := float(args.get("min_coverage", 0.0))
 	var gauge: Node = panel.get_mesh_gauge()
-	if gauge == null:
+	if not _gauge_ready(gauge):
 		return _err("measurement gauge is not available on this panel")
 	panel.ensure_gauge_built()
 
@@ -260,7 +260,7 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 
 static func _gauge(panel, args: Dictionary) -> Dictionary:
 	var gauge: Node = panel.get_mesh_gauge()
-	if gauge == null:
+	if not _gauge_ready(gauge):
 		return _err("measurement gauge is not available on this panel")
 	if panel.ensure_gauge_built() <= 0:
 		return _err("no reference mesh is mounted; nothing to gauge against")
@@ -287,14 +287,26 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 	if result.has("error"):
 		return _err(str(result["error"]))
 
-	var pose: Transform3D = _pose_for(panel, str(args.get("reference", "")))
+	# A contact is un-posed by the pose of the reference it actually lies on —
+	# named by the contact's own node, or by the caller's `reference` when it
+	# gave one. There is no sensible default: taking the first mounted
+	# reference would silently report a local position in another part's frame,
+	# so an unattributed contact is reported in world only, with the reason.
+	var asked := str(args.get("reference", ""))
 	var contacts: Array = []
 	for contact_entry in result.get("contacts", []):
 		var contact: Dictionary = contact_entry
-		contacts.append({
-			"point_mm": _points(contact.get("point_mm", Vector3.ZERO), pose),
-			"node": str(contact.get("node", "")),
-		})
+		var node_name := str(contact.get("node", ""))
+		var reference_name := asked if not asked.is_empty() else node_name.get_slice("/", 0)
+		var entry := {
+			"point_mm": _frames(panel, contact.get("point_mm", Vector3.ZERO), reference_name),
+			"node": node_name,
+			"reference": reference_name,
+		}
+		if bool(contact.get("at_gauge_centre", false)):
+			entry["note"] = "the collider reported no contact geometry; " \
+				+ "this is the gauge's own position, not the touch point"
+		contacts.append(entry)
 	return _ok({
 		"units": "mm",
 		"fits": bool(result.get("fits", false)),
@@ -305,7 +317,7 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 
 static func _probe(panel, args: Dictionary) -> Dictionary:
 	var gauge: Node = panel.get_mesh_gauge()
-	if gauge == null:
+	if not _gauge_ready(gauge):
 		return _err("measurement gauge is not available on this panel")
 	if panel.ensure_gauge_built() <= 0:
 		return _err("no reference mesh is mounted; nothing to probe")
@@ -334,12 +346,11 @@ static func _probe(panel, args: Dictionary) -> Dictionary:
 
 	var node_name := str(hit.get("node", ""))
 	var reference_name := node_name.get_slice("/", 0)
-	var pose := _pose_for(panel, reference_name)
 	return _ok({
 		"units": "mm",
 		"hit": true,
 		"view": view,
-		"position_mm": _points(hit.get("position", Vector3.ZERO), pose),
+		"position_mm": _frames(panel, hit.get("position", Vector3.ZERO), reference_name),
 		"normal": _vec(hit.get("normal", Vector3.UP)),
 		"reference": reference_name,
 		"node": node_name,
@@ -509,12 +520,41 @@ static func _report_cylinder(
 	}
 
 
+## The gauge must be a live node inside the tree before anything is awaited on
+## it: a submit to a gauge that cannot step physics would never return.
+static func _gauge_ready(gauge: Node) -> bool:
+	return gauge != null and is_instance_valid(gauge) and gauge.is_inside_tree()
+
+
+## The pose of one NAMED reference. There is deliberately no "first reference"
+## fallback: an unnamed or unknown reference has no local frame, and a caller
+## that guessed one would report a local position measured off another part.
 static func _pose_for(panel, reference_name: String) -> Transform3D:
 	for entry in _records(panel):
 		var record: Dictionary = entry
-		if reference_name.is_empty() or str(record.get("name", "")) == reference_name:
+		if not reference_name.is_empty() and str(record.get("name", "")) == reference_name:
 			return record.get("pose", Transform3D.IDENTITY)
 	return Transform3D.IDENTITY
+
+
+static func _has_reference(panel, reference_name: String) -> bool:
+	if reference_name.is_empty():
+		return false
+	for entry in _records(panel):
+		if str((entry as Dictionary).get("name", "")) == reference_name:
+			return true
+	return false
+
+
+## A world point in both frames when the reference is known, and in world only
+## — with the reason — when it is not.
+static func _frames(panel, world: Vector3, reference_name: String) -> Dictionary:
+	if _has_reference(panel, reference_name):
+		return _points(world, _pose_for(panel, reference_name))
+	var reason := "no reference named the point, so it is reported in world only"
+	if not reference_name.is_empty():
+		reason = "no mounted reference is named '%s'; world only" % reference_name
+	return {"world": _vec(world), "local": null, "local_unavailable": reason}
 
 
 static func _points(world: Vector3, pose: Transform3D) -> Dictionary:

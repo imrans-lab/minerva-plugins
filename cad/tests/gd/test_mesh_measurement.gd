@@ -46,9 +46,11 @@ const PLATE_NORMAL := Vector3.UP
 const FACETS := 64
 
 ## Every hole: local centre (the midpoint of its wall), axis, the diameter of
-## the circle its 64 vertices lie on, whether it goes through, and how deep it
-## is. These are the numbers the fixture was built from, written out rather
-## than derived, so a wrong answer cannot agree with them by construction.
+## the circle its 64 vertices lie on and whether it goes through. These are the
+## numbers the fixture was built from, written out rather than derived, so a
+## wrong answer cannot agree with them by construction — and the cutter that
+## makes each hole is placed FROM these numbers, so the fixture and the
+## expectation cannot drift apart.
 const HOLES := [
 	{
 		"name": "H1 through",
@@ -56,7 +58,6 @@ const HOLES := [
 		"axis": Vector3(0.0, 1.0, 0.0),
 		"dia": 3.2,
 		"through": true,
-		"depth": 4.0,
 	},
 	{
 		"name": "H2 through",
@@ -64,7 +65,6 @@ const HOLES := [
 		"axis": Vector3(0.0, 1.0, 0.0),
 		"dia": 3.2,
 		"through": true,
-		"depth": 4.0,
 	},
 	{
 		"name": "H3 near the outline",
@@ -72,17 +72,22 @@ const HOLES := [
 		"axis": Vector3(0.0, 1.0, 0.0),
 		"dia": 3.2,
 		"through": true,
-		"depth": 4.0,
 	},
 	{
+		# A rotation of +30 degrees about Z takes the cutter's own +Y to
+		# (-sin 30, cos 30, 0): the sign is part of the geometry, and the
+		# fixture derives its rotation from THIS vector so the two agree by
+		# construction. The centre is unchanged by the tilt because the cutter
+		# turns about its own origin, which sits on the plate's mid-plane.
 		"name": "H4 tilted 30 degrees",
 		"center": Vector3(0.0, 0.0, 10.0),
-		"axis": Vector3(0.5, 0.8660254, 0.0),
+		"axis": Vector3(-0.5, 0.8660254, 0.0),
 		"dia": 4.0,
 		"through": true,
-		"depth": 4.618,
 	},
 	{
+		# 4 mm of cutter dropped onto the top face of a 4 mm plate: the floor
+		# is left at y = 0, so the centre of the 2 mm wall is at y = +1.
 		"name": "H5 blind pocket",
 		"center": Vector3(-20.0, 1.0, 12.0),
 		"axis": Vector3(0.0, 1.0, 0.0),
@@ -299,8 +304,9 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 	check("gauge: four holes go through and the blind pocket does not",
 			through_count == 4 and not bool((holes[4] as Dictionary).get("through", true)),
 			"through count = %d" % through_count)
+	var pocket_depth := float(HOLES[4]["depth"])
 	check("gauge: the blind pocket's depth is measured, not assumed",
-			absf(float((holes[4] as Dictionary).get("depth_mm", 0.0)) - 2.0) < 0.1,
+			absf(float((holes[4] as Dictionary).get("depth_mm", 0.0)) - pocket_depth) < 0.1,
 			"depth = %f" % float((holes[4] as Dictionary).get("depth_mm", 0.0)))
 
 	# The hole 1.9 mm from the outline: an unbounded search escapes through the
@@ -443,10 +449,14 @@ func _bake_fixture() -> ArrayMesh:
 				float((hole["center"] as Vector3).x),
 				0.0,
 				float((hole["center"] as Vector3).z))
-			var axis: Vector3 = hole["axis"]
+			var axis: Vector3 = (hole["axis"] as Vector3).normalized()
 			if axis.dot(PLATE_NORMAL) < 0.9999:
-				# The tilted hole: rotate the cutter's own +Y onto the axis.
-				cutter.rotation_degrees = Vector3(0.0, 0.0, 30.0)
+				# The tilted hole. A CSG cylinder runs along its own +Y, and a
+				# rotation of theta about Z takes +Y to (-sin theta, cos theta,
+				# 0); solving that for the declared axis is the only place the
+				# tilt is decided, so the cutter cannot disagree with the
+				# constant the assertions are written against.
+				cutter.rotation = Vector3(0.0, 0.0, atan2(-axis.x, axis.y))
 		else:
 			# The blind pocket: 4 tall, sitting on the top face, so it removes
 			# the upper 2 mm of the plate and leaves a floor at y = 0.
