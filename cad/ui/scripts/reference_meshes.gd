@@ -46,11 +46,66 @@ const FEATURE_EDGE_QUANTIZE_SCALE: float = 1000.0
 ## lighter than the evaluated solid's edges so a foreign body reads as foreign.
 const REFERENCE_EDGE_COLOR: Color = Color(0.20, 0.36, 0.55, 1.0)
 
+## Colour of the placeholder drawn where a reference could not be loaded.
+## Warm, saturated and nothing like the reference outline, because the whole
+## point of the marker is that it is not mistaken for geometry.
+const MISSING_REFERENCE_COLOR: Color = Color(0.90, 0.45, 0.10, 1.0)
+## Edge length of that placeholder, in millimetres. A fixed size rather than a
+## proportional one: the body it stands in for has no size, and 20 mm is
+## visible at the zoom a board is looked at without swamping it.
+const MARKER_SIZE_MM: float = 20.0
+
+## What happened to one reference. Reported per reference, so the LLM asking
+## about the scene gets a reason rather than a shorter list than it expected.
+const STATUS_OK: String = "ok"
+const STATUS_UNRESOLVED: String = "unresolved"
+const STATUS_MISSING: String = "missing"
+const STATUS_UNSUPPORTED: String = "unsupported"
+const STATUS_UNREADABLE: String = "unreadable"
+const STATUS_EMPTY: String = "empty"
+const STATUS_OVERSIZE: String = "oversize"
+
+## SIZE CEILINGS.
+##
+## The only per-triangle work this module does in GDScript is the feature-edge
+## pass; the glTF parse and the draw are native. So the ceilings sit where the
+## cost actually is, and there are three of them because the three costs are
+## paid at different moments:
+##
+##   MAX_FILE_BYTES          refused BEFORE the file is opened, so a mesh()
+##                           pointed at a video or a disk image never reaches
+##                           the importer at all. A .gltf is measured together
+##                           with the external buffers its JSON names, since
+##                           the geometry lives there, not in the .gltf.
+##   OUTLINE_TRIANGLE_BUDGET the mesh still loads, still renders shaded and is
+##                           still measurable — only the ortho x-ray outline is
+##                           skipped, with a warning naming the count. This is
+##                           the one that keeps a huge file from freezing the
+##                           panel, because it is the only unbounded GDScript
+##                           loop in the load.
+##   MAX_TRIANGLES           refused after the native parse and before any
+##                           CAD-side work (conversion, outlines, colliders),
+##                           stating the numbers. The parse itself is bounded
+##                           by MAX_FILE_BYTES, not by this.
+##
+## The numbers: the case this feature exists for is a fabricated-board export
+## of ~130k triangles, whose edge pass is ~1M dictionary operations — a few
+## hundred milliseconds, once, then cached against the file's content. The
+## outline budget is set just above that so the intended case keeps its x-ray
+## and an order-of-magnitude-larger import degrades instead of hanging. The
+## hard triangle ceiling is where the shaded body alone costs hundreds of
+## megabytes of vertex data for geometry nobody can edit.
+const OUTLINE_TRIANGLE_BUDGET: int = 250000
+const MAX_TRIANGLES: int = 5000000
+const MAX_FILE_BYTES: int = 268435456  # 256 MiB
+
 ## Child of a MeshRoot that holds every mounted reference.
 const LAYER_NODE_NAME: String = "ReferenceRoot"
 ## Per-reference containers inside a reference node.
 const SHADED_NODE_NAME: String = "Shaded"
 const OUTLINE_NODE_NAME: String = "Outline"
+## Container for the placeholder of a reference that failed to load.
+const MARKER_NODE_NAME: String = "Missing"
 
 
 ## One file, read and converted into the CAD frame. Shared by every viewport
@@ -75,6 +130,24 @@ class LoadedFile extends RefCounted:
 	var local_aabb: AABB = AABB()
 	## Non-empty when the file could not be read; the panel surfaces it.
 	var error: String = ""
+	## One of the STATUS_* names — why `error` is set, in a form a caller can
+	## branch on instead of matching prose. Spelled out rather than written as
+	## STATUS_OK: an inner class does not see the outer script's constants.
+	var status: String = "ok"
+	## Set when the file loaded but something about it should be said out loud:
+	## the outline budget, so far.
+	var warning: String = ""
+	## Measured size of what was read. Reported whether or not a ceiling was
+	## hit, because "it is big" is only useful next to the number.
+	var triangle_count: int = 0
+	var byte_size: int = 0
+	## Wall time the read took, milliseconds. The load is a single bounded
+	## hitch by design (see the ceilings); this is how anyone checks that claim
+	## rather than believing it.
+	var load_ms: int = 0
+	## True when the triangle count was over the outline budget, so the ortho
+	## panes show this body shaded-only.
+	var outlines_skipped: bool = false
 
 	func is_ok() -> bool:
 		return error.is_empty() and not parts.is_empty()
@@ -100,6 +173,13 @@ class LoadedFile extends RefCounted:
 			out.append({"name": node_name, "aabb": merged[node_name]})
 		return out
 
+
+## The ceilings, held as instance values rather than read straight from the
+## constants, so the size logic can be exercised against a fixture a test is
+## able to build. Nothing in the panel writes them.
+var outline_triangle_budget: int = OUTLINE_TRIANGLE_BUDGET
+var max_triangles: int = MAX_TRIANGLES
+var max_file_bytes: int = MAX_FILE_BYTES
 
 var _cache: Dictionary = {}
 ## How many times a file has actually been read off disk. The pose changing
@@ -128,11 +208,26 @@ func clear_cache() -> void:
 	_stamp_memo.clear()
 
 
-## Records for the references the last mount put on screen: {name, path,
-## resolved_path, stamp, pose, local_aabb, world_aabb, parts, node_bounds}.
-## `parts` is the cached, converted geometry — shared, not copied — so a caller
-## that wants colliders or a segmentation reads it straight from here.
+## Records for the references the last mount actually put geometry on screen
+## for: {name, path, resolved_path, status, reason, warning, stamp, pose,
+## local_aabb, world_aabb, triangle_count, bytes, load_ms, outlines_skipped,
+## parts, node_bounds}. `parts` is the cached, converted geometry — shared, not
+## copied — so a caller that wants colliders or a segmentation reads it
+## straight from here.
 func mounted_references() -> Array:
+	var out: Array = []
+	for entry in _mounted:
+		if str((entry as Dictionary).get("status", STATUS_OK)) == STATUS_OK:
+			out.append(entry)
+	return out
+
+
+## The same records for EVERY reference the last evaluation named, in that
+## order, whether or not its file could be read. A reference that failed is
+## still a fact about the document — it has a name, a path, a pose and a
+## marker in the world — and a caller that only ever sees the ones that
+## worked gets a shorter list with no explanation for it.
+func reference_records() -> Array:
 	return _mounted
 
 
@@ -174,44 +269,139 @@ func resolve(raw_path: String, document_path: String) -> Dictionary:
 ## cached too, so a missing file is not re-stat-ed on every keystroke.
 func load_file(absolute_path: String, units: String = "", up: String = "") -> LoadedFile:
 	var stamp := file_stamp(absolute_path)
-	var key := "%s|%s|%s" % [absolute_path, units.to_lower(), up.to_lower()]
+	# The ceilings are part of the key because they decide the result: a
+	# refusal cached under a lower limit must not answer for a higher one.
+	var key := "%s|%s|%s|%d|%d|%d" % [
+		absolute_path,
+		units.to_lower(),
+		up.to_lower(),
+		outline_triangle_budget,
+		max_triangles,
+		max_file_bytes,
+	]
 	var cached: LoadedFile = _cache.get(key, null)
 	if cached != null and cached.stamp == stamp:
 		return cached
 
+	var started := Time.get_ticks_msec()
 	var loaded := LoadedFile.new()
 	loaded.path = absolute_path
 	loaded.stamp = stamp
 	_load_count += 1
 
 	if not FileAccess.file_exists(absolute_path):
-		loaded.error = "reference file not found: %s" % absolute_path
-		_cache[key] = loaded
-		return loaded
+		return _fail(key, loaded, started, STATUS_MISSING,
+				"reference file not found: %s" % absolute_path)
 
 	var extension := absolute_path.get_extension().to_lower()
 	if extension != "glb" and extension != "gltf":
-		loaded.error = "unsupported reference format '.%s' (glTF/GLB only): %s" % [
-			extension, absolute_path,
-		]
-		_cache[key] = loaded
-		return loaded
+		return _fail(key, loaded, started, STATUS_UNSUPPORTED,
+				"unsupported reference format '.%s' (glTF/GLB only): %s" % [
+					extension, absolute_path,
+				])
+
+	loaded.byte_size = _byte_size(absolute_path)
+	# Checked before the importer is handed the path: this is the ceiling that
+	# stops a wrong path costing minutes rather than milliseconds.
+	if loaded.byte_size > max_file_bytes:
+		return _fail(key, loaded, started, STATUS_OVERSIZE,
+				"reference file is %d bytes (%.1f MB), over the %d byte limit: %s" % [
+					loaded.byte_size,
+					loaded.byte_size / 1048576.0,
+					max_file_bytes,
+					absolute_path,
+				])
 
 	var file_parts := _read_parts_from_file(absolute_path, loaded, units, up)
 	if not loaded.error.is_empty():
-		_cache[key] = loaded
-		return loaded
+		return _fail(key, loaded, started, loaded.status, loaded.error)
 	if file_parts.is_empty():
-		loaded.error = "reference file holds no mesh geometry: %s" % absolute_path
-		_cache[key] = loaded
-		return loaded
+		return _fail(key, loaded, started, STATUS_EMPTY,
+				"reference file holds no mesh geometry: %s" % absolute_path)
 
+	loaded.load_ms = Time.get_ticks_msec() - started
 	_cache[key] = loaded
 	return loaded
 
 
+## Record a failure on `loaded`, cache it and hand it back. Failures are cached
+## like successes so a missing file is not re-stat-ed on every keystroke.
+func _fail(
+	key: String,
+	loaded: LoadedFile,
+	started: int,
+	status: String,
+	reason: String
+) -> LoadedFile:
+	loaded.status = status
+	loaded.error = reason
+	loaded.parts = []
+	loaded.outlines = []
+	loaded.load_ms = Time.get_ticks_msec() - started
+	_cache[key] = loaded
+	return loaded
+
+
+## Length of a file in bytes, or 0 when it cannot be opened.
+static func _byte_size(absolute_path: String) -> int:
+	var handle := FileAccess.open(absolute_path, FileAccess.READ)
+	if handle == null:
+		return 0
+	var length := int(handle.get_length())
+	handle.close()
+	if absolute_path.get_extension().to_lower() == "gltf":
+		length += _external_buffer_bytes(absolute_path)
+	return length
+
+
+## Bytes of the external buffers a .gltf names in its `buffers[].uri` entries,
+## resolved beside the file. A data: URI is already counted by the file's own
+## length; a buffer that cannot be opened counts as zero and fails later, by
+## name, in the importer.
+static func _external_buffer_bytes(gltf_path: String) -> int:
+	var text := FileAccess.get_file_as_string(gltf_path)
+	var parsed: Variant = JSON.parse_string(text)
+	if not (parsed is Dictionary):
+		return 0
+	var total := 0
+	for entry in (parsed as Dictionary).get("buffers", []):
+		if not (entry is Dictionary):
+			continue
+		var uri := str((entry as Dictionary).get("uri", ""))
+		if uri.is_empty() or uri.begins_with("data:"):
+			continue
+		var handle := FileAccess.open(gltf_path.get_base_dir().path_join(uri), FileAccess.READ)
+		if handle != null:
+			total += int(handle.get_length())
+			handle.close()
+	return total
+
+
+## Triangles in a mesh, counted over its triangle surfaces only. This is the
+## number every size decision and every size message is made of.
+static func triangle_count_of(mesh: Mesh) -> int:
+	if mesh == null:
+		return 0
+	var total := 0
+	for surface in range(mesh.get_surface_count()):
+		if mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+			continue
+		var arrays: Array = mesh.surface_get_arrays(surface)
+		if arrays.size() <= Mesh.ARRAY_VERTEX:
+			continue
+		var indices: Variant = arrays[Mesh.ARRAY_INDEX]
+		if indices is PackedInt32Array:
+			total += (indices as PackedInt32Array).size() / 3
+			continue
+		var verts: Variant = arrays[Mesh.ARRAY_VERTEX]
+		if verts is PackedVector3Array:
+			total += (verts as PackedVector3Array).size() / 3
+	return total
+
+
 ## Build (or rebuild) the reference layer under `parent` from an evaluation's
-## `references` array. Returns {world_aabb, warnings, errors, mounted}.
+## `references` array. Returns {world_aabb, warnings, errors, mounted, marked,
+## statuses, status_lines}.
 ##
 ## Rebuilding the nodes is cheap: the meshes are shared resources handed over
 ## from the cache, so a pose edit re-parents pointers, it does not re-read
@@ -246,7 +436,10 @@ func _mount_under(
 ) -> Dictionary:
 	var warnings := PackedStringArray()
 	var errors := PackedStringArray()
+	var lines := PackedStringArray()
+	var statuses: Array = []
 	var mounted := 0
+	var marked := 0
 	var bounds := AABB()
 	var have_bounds := false
 
@@ -260,51 +453,164 @@ func _mount_under(
 			if not (entry is Dictionary):
 				continue
 			var reference: Dictionary = entry
+			var reference_name := str(reference.get("name", ""))
+			var pose := transform_from_matrix(reference.get("matrix", []))
+			var state := {
+				"name": reference_name,
+				"path": str(reference.get("path", "")),
+				"resolved_path": "",
+				"status": STATUS_OK,
+				"reason": "",
+				"warning": "",
+				"stamp": "",
+				"pose": pose,
+				"local_aabb": AABB(),
+				"world_aabb": AABB(),
+				"triangle_count": 0,
+				"bytes": 0,
+				"load_ms": 0,
+				"outlines_skipped": false,
+				"parts": [],
+				"node_bounds": [],
+			}
+
 			var resolved := resolve(str(reference.get("path", "")), document_path)
 			if not str(resolved["warning"]).is_empty():
 				warnings.append(str(resolved["warning"]))
-			if not str(resolved["error"]).is_empty():
-				errors.append(str(resolved["error"]))
-				continue
+				state["warning"] = str(resolved["warning"])
+			var loaded: LoadedFile = null
+			if str(resolved["error"]).is_empty():
+				state["resolved_path"] = str(resolved["path"])
+				# The unit and up-axis conversion is baked into the cached
+				# parts, so what is left to apply per evaluation is the pose,
+				# nothing else.
+				loaded = load_file(
+					str(resolved["path"]),
+					str(reference.get("units", "")),
+					str(reference.get("up", ""))
+				)
+				state["stamp"] = loaded.stamp
+				state["triangle_count"] = loaded.triangle_count
+				state["bytes"] = loaded.byte_size
+				state["load_ms"] = loaded.load_ms
+				state["outlines_skipped"] = loaded.outlines_skipped
+			else:
+				state["status"] = STATUS_UNRESOLVED
+				state["reason"] = str(resolved["error"])
 
-			# The unit and up-axis conversion is baked into the cached parts,
-			# so what is left to apply per evaluation is the pose, nothing else.
-			var loaded := load_file(
-				str(resolved["path"]),
-				str(reference.get("units", "")),
-				str(reference.get("up", ""))
-			)
-			if not loaded.is_ok():
-				errors.append(loaded.error)
-				continue
+			if loaded != null and not loaded.is_ok():
+				state["status"] = loaded.status
+				state["reason"] = loaded.error
 
-			var pose := transform_from_matrix(reference.get("matrix", []))
-			layer.add_child(
-				_build_reference_node(loaded, pose, str(reference.get("name", ""))))
-			mounted += 1
+			var world := AABB()
+			if str(state["status"]) == STATUS_OK:
+				layer.add_child(_build_reference_node(loaded, pose, reference_name))
+				world = transform_aabb(pose, loaded.local_aabb)
+				state["local_aabb"] = loaded.local_aabb
+				state["parts"] = loaded.parts
+				state["node_bounds"] = loaded.node_bounds()
+				if not loaded.warning.is_empty():
+					# A resolution warning (absolute path) and a size warning
+					# can both apply; keep both.
+					var prior := str(state.get("warning", ""))
+					state["warning"] = loaded.warning if prior.is_empty() else prior + " " + loaded.warning
+					warnings.append(loaded.warning)
+					lines.append("%s — %s" % [_label(reference_name), loaded.warning])
+				mounted += 1
+			else:
+				# A failed reference is still drawn: a placeholder at the pose
+				# the document asked for. Without it the body is simply absent
+				# and the only evidence is a line of text somewhere else.
+				layer.add_child(_build_marker_node(pose, reference_name))
+				world = transform_aabb(pose, _marker_bounds())
+				errors.append(str(state["reason"]))
+				lines.append("%s — %s" % [_label(reference_name), str(state["reason"])])
+				marked += 1
 
-			var world := transform_aabb(pose, loaded.local_aabb)
-			if record:
-				_mounted.append({
-					"name": str(reference.get("name", "")),
-					"path": str(reference.get("path", "")),
-					"resolved_path": loaded.path,
-					"stamp": loaded.stamp,
-					"pose": pose,
-					"local_aabb": loaded.local_aabb,
-					"world_aabb": world,
-					"parts": loaded.parts,
-					"node_bounds": loaded.node_bounds(),
-				})
+			state["world_aabb"] = world
 			bounds = world if not have_bounds else bounds.merge(world)
 			have_bounds = true
+
+			statuses.append({
+				"name": state["name"],
+				"path": state["path"],
+				"resolved_path": state["resolved_path"],
+				"status": state["status"],
+				"reason": state["reason"],
+				"warning": state["warning"],
+				"triangle_count": state["triangle_count"],
+				"bytes": state["bytes"],
+				"load_ms": state["load_ms"],
+				"outlines_skipped": state["outlines_skipped"],
+			})
+			if record:
+				_mounted.append(state)
 
 	return {
 		"world_aabb": bounds,
 		"warnings": warnings,
 		"errors": errors,
 		"mounted": mounted,
+		"marked": marked,
+		"statuses": statuses,
+		"status_lines": lines,
 	}
+
+
+## How a reference is named in a message: its own name when the document gave
+## it one, and the word otherwise — never an empty string, which reads as a
+## broken message rather than as an unnamed reference.
+static func _label(reference_name: String) -> String:
+	return reference_name if not reference_name.is_empty() else "reference"
+
+
+## Bounds of the placeholder, centred on the pose origin.
+static func _marker_bounds() -> AABB:
+	var half := MARKER_SIZE_MM * 0.5
+	return AABB(Vector3(-half, -half, -half), Vector3.ONE * MARKER_SIZE_MM)
+
+
+## The placeholder for a reference that could not be loaded: a wireframe cube
+## with an axis cross through it, at the pose the document asked for. Lines
+## rather than a solid, so it reads as a marker in the ortho x-ray panes and in
+## the shaded one alike, and so it cannot be mistaken for the missing body.
+func _build_marker_node(pose: Transform3D, reference_name: String) -> Node3D:
+	var node := Node3D.new()
+	node.name = "Reference_%s" % _label(reference_name)
+	node.transform = pose
+
+	var marker := Node3D.new()
+	marker.name = MARKER_NODE_NAME
+	node.add_child(marker)
+
+	var half := MARKER_SIZE_MM * 0.5
+	var segments := PackedVector3Array()
+	for axis in range(3):
+		for corner in range(4):
+			var a := Vector3.ZERO
+			var b := Vector3.ZERO
+			var u := (axis + 1) % 3
+			var v := (axis + 2) % 3
+			a[axis] = -half
+			b[axis] = half
+			a[u] = half if (corner & 1) != 0 else -half
+			b[u] = a[u]
+			a[v] = half if (corner & 2) != 0 else -half
+			b[v] = a[v]
+			segments.append(a)
+			segments.append(b)
+	for axis in range(3):
+		var a := Vector3.ZERO
+		var b := Vector3.ZERO
+		a[axis] = -half
+		b[axis] = half
+		segments.append(a)
+		segments.append(b)
+
+	var lines := MeshInstance3D.new()
+	lines.mesh = line_mesh_from_segments(segments, MISSING_REFERENCE_COLOR)
+	marker.add_child(lines)
+	return node
 
 
 ## Show or hide the shaded reference geometry under `parent`. The ortho panes
@@ -540,19 +846,45 @@ func _read_parts_from_file(
 ) -> Array:
 	var document := GLTFDocument.new()
 	var state := GLTFState.new()
+	# Two distinct failure shapes, and a file that is not what its extension
+	# claims lands on either one depending on how far the importer gets: a
+	# truncated GLB fails the header check and returns an error code, while
+	# some malformed-but-parseable documents come back OK with no scene at all.
+	# Both are reported; neither is allowed to reach the caller as an empty
+	# success.
 	var err := document.append_from_file(absolute_path, state, 0, absolute_path.get_base_dir())
 	if err != OK:
+		loaded.status = STATUS_UNREADABLE
 		loaded.error = "could not read glTF '%s' (error %d)" % [absolute_path, err]
 		return []
 
 	var scene := document.generate_scene(state)
 	if scene == null:
+		loaded.status = STATUS_UNREADABLE
 		loaded.error = "glTF '%s' produced no scene" % absolute_path
 		return []
 
 	var raw_parts: Array = []
 	_collect_meshes(scene, Transform3D.IDENTITY, raw_parts)
 	scene.free()
+
+	for raw in raw_parts:
+		loaded.triangle_count += triangle_count_of(raw["mesh"] as Mesh)
+	if loaded.triangle_count > max_triangles:
+		loaded.status = STATUS_OVERSIZE
+		loaded.error = "reference has %d triangles, over the %d limit: %s" % [
+			loaded.triangle_count, max_triangles, absolute_path,
+		]
+		return []
+	# Past the budget the shaded body still loads; only the feature-edge pass —
+	# the one unbounded GDScript loop in this file — is skipped, so the cost of
+	# a very large import stays native and the panel keeps its frame.
+	loaded.outlines_skipped = loaded.triangle_count > outline_triangle_budget
+	if loaded.outlines_skipped:
+		loaded.warning = (
+			"reference has %d triangles, over the %d outline budget: "
+			+ "showing it shaded without ortho outlines (%s)"
+		) % [loaded.triangle_count, outline_triangle_budget, absolute_path]
 
 	# The file's own frame -> CAD frame, applied once, here, so that outlines
 	# and bounds are computed in millimetres and everything downstream can
@@ -573,9 +905,10 @@ func _read_parts_from_file(
 		loaded.local_aabb = box if not have_bounds else loaded.local_aabb.merge(box)
 		have_bounds = true
 
-		var outline := _outline_for(mesh, to_cad)
-		if outline != null:
-			loaded.outlines.append(outline)
+		if not loaded.outlines_skipped:
+			var outline := _outline_for(mesh, to_cad)
+			if outline != null:
+				loaded.outlines.append(outline)
 
 	return loaded.parts
 
@@ -646,7 +979,7 @@ func _outline_for(mesh: Mesh, to_cad: Transform3D) -> ArrayMesh:
 ## One reference: a posed node holding the shaded bodies and the outline.
 func _build_reference_node(loaded: LoadedFile, pose: Transform3D, reference_name: String) -> Node3D:
 	var node := Node3D.new()
-	node.name = "Reference_%s" % (reference_name if not reference_name.is_empty() else "unnamed")
+	node.name = "Reference_%s" % _label(reference_name)
 	node.transform = pose
 
 	var shaded := Node3D.new()

@@ -50,3 +50,15 @@ test_mesh_import.gd assertions=36
 # the pin that actually fits, through vs blind, a too-large gauge reporting
 # contacts, the boss, a pixel-less probe, and the ray-grid fallback's limits).
 test_mesh_measurement.gd assertions=56
+
+# Failure and size handling for references: a truncated GLB, a text file
+# wearing a .glb extension, a missing file, an unreadable format and an
+# unresolvable relative path all mounted in ONE evaluation next to a good
+# reference. Pins the status taxonomy and the reason naming the file, the
+# wireframe marker drawn at the failed reference's own pose, the good
+# reference and the rest of the scene surviving all four, the marker clearing
+# on the next good evaluation, the three size ceilings (bytes refused before
+# the parse, triangles refused after it, the outline budget degrading to
+# shaded-only) with the measured numbers in the messages, and
+# minerva_cad_references carrying references[i].status and its reason.
+test_reference_failures.gd assertions=30

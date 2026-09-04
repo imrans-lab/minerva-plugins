@@ -443,6 +443,15 @@ func get_reference_state() -> Array:
 	return _reference_library.mounted_references()
 
 
+## Every reference the last evaluation named, loaded or not, with its status
+## and the reason for it. get_reference_state() is the geometry surface and
+## holds only the ones that loaded; this is the reporting surface.
+func get_reference_status() -> Array:
+	if _reference_library == null:
+		return []
+	return _reference_library.reference_records()
+
+
 func get_mesh_features() -> RefCounted:
 	return _mesh_features
 
@@ -1129,17 +1138,20 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		"vertex_count": int(float((mesh_data.get("vertices", []) as Array).size()) / 3.0),
 		"edge_count": edges.size(),
 		"reference_count": int(_reference_report.get("mounted", 0)),
+		"references": _reference_report.get("statuses", []),
 		"request_id": request_id,
 		"ts": Time.get_unix_time_from_system(),
 	}
 	# Render succeeded — clear any error banner left by a prior failed evaluate.
 	_hide_eval_error()
-	# A reference that could not be loaded is not an evaluation failure: the
-	# solid is on screen and correct. It still has to be said out loud, or the
-	# board the user expected is simply missing with no explanation.
-	var reference_errors: PackedStringArray = _reference_report.get("errors", PackedStringArray())
-	if not reference_errors.is_empty():
-		_show_eval_error("Reference mesh: %s" % "\n".join(reference_errors))
+	# A reference that could not be loaded — or that was too big to outline —
+	# is not an evaluation failure: the solid is on screen and correct. It
+	# still has to be said out loud, or the board the user expected is simply
+	# missing with no explanation. The lines name the reference and the reason.
+	var reference_lines: PackedStringArray = _reference_report.get(
+		"status_lines", PackedStringArray())
+	if not reference_lines.is_empty():
+		_show_eval_error("Reference mesh: %s" % "\n".join(reference_lines))
 
 
 ## Show the evaluation-error banner with a human-readable message. Called from

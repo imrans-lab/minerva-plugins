@@ -34,6 +34,7 @@ extends RefCounted
 ## Off-tree note: no class_name — preloaded by relative path from CADPanel.gd.
 
 const _MeshFeatures: Script = preload("scripts/mesh_features.gd")
+const _ReferenceMeshes: Script = preload("scripts/reference_meshes.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -76,9 +77,14 @@ static func _view_state(panel, _args: Dictionary) -> Dictionary:
 # References and node bounds
 # ---------------------------------------------------------------------------
 
+## Every reference the document named, whether or not its file could be read.
+## A failed one is reported with a status and a reason rather than left out:
+## the list has to match the mesh() calls in the source, or the answer to
+## "where is my board" is a shorter list with nothing to explain it.
 static func _references(panel, _args: Dictionary) -> Dictionary:
-	var records := _records(panel)
+	var records := _status_records(panel)
 	var out: Array = []
+	var failed := 0
 	for entry in records:
 		var record: Dictionary = entry
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
@@ -90,10 +96,20 @@ static func _references(panel, _args: Dictionary) -> Dictionary:
 				"name": str(node.get("name", "")),
 				"bbox_mm": _boxes(box, pose),
 			})
+		var status := str(record.get("status", _ReferenceMeshes.STATUS_OK))
+		if status != _ReferenceMeshes.STATUS_OK:
+			failed += 1
 		out.append({
 			"name": str(record.get("name", "")),
 			"path": str(record.get("path", "")),
 			"resolved_path": str(record.get("resolved_path", "")),
+			"status": status,
+			"reason": str(record.get("reason", "")),
+			"warning": str(record.get("warning", "")),
+			"triangle_count": int(record.get("triangle_count", 0)),
+			"bytes": int(record.get("bytes", 0)),
+			"load_ms": int(record.get("load_ms", 0)),
+			"outlines_skipped": bool(record.get("outlines_skipped", false)),
 			"pose": _matrix(pose),
 			"bbox_mm": _boxes(record.get("local_aabb", AABB()), pose),
 			"nodes": nodes,
@@ -102,8 +118,12 @@ static func _references(panel, _args: Dictionary) -> Dictionary:
 		"units": "mm",
 		"references": out,
 		"count": out.size(),
+		"failed": failed,
 		"note": "The evaluated solid is described by minerva_cad_get_mesh_info; "
-			+ "this verb describes the foreign meshes named by mesh().",
+			+ "this verb describes the foreign meshes named by mesh(). A "
+			+ "reference whose status is not 'ok' is drawn as a wireframe "
+			+ "marker at its pose and has loaded no geometry; `reason` says "
+			+ "why and names the file.",
 	})
 
 
@@ -358,6 +378,14 @@ static func _records(panel) -> Array:
 	if panel == null or not panel.has_method("get_reference_state"):
 		return []
 	return panel.get_reference_state()
+
+
+## Every reference the document named, loaded or not. Only the reporting verb
+## wants these; a measurement runs on _records(), which holds geometry.
+static func _status_records(panel) -> Array:
+	if panel == null or not panel.has_method("get_reference_status"):
+		return _records(panel)
+	return panel.get_reference_status()
 
 
 ## Records in scope, filtered by the optional `reference` name. A named
