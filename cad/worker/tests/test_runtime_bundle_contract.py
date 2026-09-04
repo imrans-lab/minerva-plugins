@@ -179,6 +179,38 @@ def test_windows_repaired_packages_are_also_no_deps_pins():
             "WHEEL_REPAIR_TOOL must be pinned when wheels are repaired"
 
 
+def test_repair_args_are_declared_and_actually_passed():
+    """The flags a wheel needs to be repairable are lock data, not folklore.
+
+    MEASURED: python-fcl keeps ccd.dll, octomap.dll and octomath.dll inside
+    its package directory, and delvewheel only consults the wheel's own files
+    when --ignore-existing is given — without it the repair dies with "Unable
+    to find library: ccd.dll" before it can vendor anything. --analyze-existing
+    is the second half: octomap.dll imports MSVCP140.dll as well as the .pyd
+    does, and only that flag follows an in-wheel DLL's own dependencies.
+    """
+    if not LOCK.get("WHEEL_REPAIR_PKGS", "").strip():
+        return
+    args = LOCK.get("WHEEL_REPAIR_ARGS", "")
+    assert "--ignore-existing" in args
+    assert "--analyze-existing" in args
+    assert "$WHEEL_REPAIR_ARGS" in BUILD_TEXT, \
+        "the build script must pass the declared repair arguments"
+
+
+def test_repair_is_proven_by_content_not_by_exit_code():
+    """delvewheel writes an output wheel even when it vendored nothing.
+
+    The post-condition reads the repaired wheel with python's zipfile rather
+    than `unzip`, which Git for Windows does not reliably ship — a missing
+    tool must not read as a failed repair, nor a successful one.
+    """
+    assert "msvcp140" in BUILD_TEXT
+    assert "exit 74" in BUILD_TEXT
+    assert "import sys, zipfile, re" in BUILD_TEXT
+    assert "unzip -l" not in BUILD_TEXT
+
+
 def test_build_script_refuses_to_cross_build_a_repaired_target():
     """A cross-built Windows bundle cannot be repaired — it must not pretend.
 

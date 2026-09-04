@@ -84,6 +84,11 @@ done
 # PIP_NO_DEPS_PKGS. Ignored on every other target.
 : "${WHEEL_REPAIR_PKGS:=}"
 : "${WHEEL_REPAIR_TOOL:=}"
+# Extra arguments passed to the repair tool. Which ones a wheel needs is a
+# property OF THAT WHEEL (where it keeps its own DLLs, whether their
+# dependencies must be analysed), so the plugin declares them rather than this
+# script guessing.
+: "${WHEEL_REPAIR_ARGS:=}"
 # Directory (relative to the plugin dir) copied into the bundle as licenses/:
 # the licence texts a binary redistribution has to carry.
 : "${BUNDLE_LICENSE_DIR:=}"
@@ -362,8 +367,10 @@ if [ ${#REPAIR[@]} -gt 0 ] && [ "$TRIPLE" = "windows-x86_64" ]; then
 
   for whl in "$REPAIR_DL"/*.whl; do
     echo "[$TRIPLE] delvewheel repair: $(basename "$whl")"
+    # shellcheck disable=SC2086 — WHEEL_REPAIR_ARGS is a word list by design.
     PYTHONNOUSERSITE=1 PYTHONPATH="$REPAIR_TOOLING" \
       "$STAGE_DIR/$PYTHON_BIN" -m delvewheel repair \
+      $WHEEL_REPAIR_ARGS \
       -w "$REPAIRED_WHEEL_DIR" "$whl"
   done
   echo "[$TRIPLE] repaired wheels:"
@@ -372,8 +379,14 @@ if [ ${#REPAIR[@]} -gt 0 ] && [ "$TRIPLE" = "windows-x86_64" ]; then
   # repair is proven by content: every repaired wheel must carry a vendored
   # C++ runtime DLL, or the bundle would import only on machines that
   # already have the redistributable installed.
+  # Listed with python's zipfile rather than `unzip`: Git for Windows does not
+  # reliably ship unzip, and a missing tool must not read as a failed repair.
   for whl in "$REPAIRED_WHEEL_DIR"/*.whl; do
-    if ! unzip -l "$whl" | grep -qi 'msvcp140.*\.dll'; then
+    if ! "$STAGE_DIR/$PYTHON_BIN" -c "
+import sys, zipfile, re
+names = zipfile.ZipFile(sys.argv[1]).namelist()
+sys.exit(0 if any(re.search(r'msvcp140.*\.dll$', n, re.I) for n in names) else 1)
+" "$whl"; then
       echo "[$TRIPLE] wheel repair vendored no msvcp140 DLL into $(basename "$whl")" >&2
       exit 74
     fi

@@ -67,6 +67,18 @@ PIP_NO_DEPS_PKGS="python-fcl==0.7.0.11"
 WHEEL_REPAIR_PKGS="python-fcl==0.7.0.11"
 WHEEL_REPAIR_TOOL="delvewheel==1.13.1"
 
+# --ignore-existing (a.k.a. --ignore-in-wheel) is REQUIRED here, and its name
+# undersells what it does: delvewheel only builds its map of the wheel's own
+# files when this flag is given. python-fcl keeps ccd.dll, octomap.dll and
+# octomath.dll next to the .pyd inside fcl/, so without the flag the repair
+# looks for ccd.dll on PATH alone and dies with "Unable to find library:
+# ccd.dll". With it, those three resolve to the copies already in the wheel and
+# are left exactly where they are.
+# --analyze-existing then covers the second dependent: octomap.dll imports
+# MSVCP140.dll too, and without this flag only the .pyd's own imports would be
+# vendored.
+WHEEL_REPAIR_ARGS="--ignore-existing --analyze-existing"
+
 # --- Layer 1 import probe -------------------------------------------------
 # Semicolon-separated python statements run inside the freshly-built bundle
 # (env-isolated, PYTHONHOME=<stage>) to confirm the wheels resolve at import
