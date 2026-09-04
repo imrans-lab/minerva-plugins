@@ -313,6 +313,23 @@ func _test_an_unsaved_document_gets_an_absolute_path_and_a_warning() -> void:
 				panel._error_banner_label.text if panel._error_banner_label != null else "",
 			])
 
+	# A successful evaluation hides the error banner; the import notice must
+	# outlive that, or the owner sees it for under a second.
+	panel._hide_eval_error()
+	check("unsaved: the warning survives the next successful evaluation",
+			panel._error_banner != null and panel._error_banner.visible
+				and panel._error_banner_label.text.contains("Import mesh"),
+			"banner hidden by _hide_eval_error")
+
+	# Save-As rebinds the buffer in place (it gains a path, nothing re-attaches);
+	# the notice must let go then, or the banner is pinned forever.
+	buffer.file_path = _saved_later_path
+	panel._hide_eval_error()
+	check("unsaved: once the buffer has a path the notice lets the banner hide",
+			panel._error_banner == null or not panel._error_banner.visible,
+			"banner still visible after the buffer gained a path")
+	buffer.file_path = ""
+
 	var line_after_import: String = buffer.text
 
 	# Save-As: the buffer gets a path and the substrate re-attaches. The line

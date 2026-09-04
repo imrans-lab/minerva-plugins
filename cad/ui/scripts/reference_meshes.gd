@@ -57,9 +57,8 @@ const OUTLINE_NODE_NAME: String = "Outline"
 ## and every pose that names it.
 class LoadedFile extends RefCounted:
 	var path: String = ""
-	## Cheap identity of the bytes on disk: modification time and size. mtime
-	## alone has one-second resolution, which misses a rewrite inside the same
-	## second; the size catches the overwhelming majority of those.
+	## Identity of the bytes on disk: a content digest, so a rewrite within the
+	## same second at the same length still reads as a change.
 	var stamp: String = ""
 	## [{mesh: Mesh, transform: Transform3D, node: String, aabb: AABB}] —
 	## transforms are file-frame to CAD-local (millimetres, Z-up), parent
@@ -108,6 +107,7 @@ var _cache: Dictionary = {}
 var _load_count: int = 0
 ## Stamps computed during the current mount_all call, keyed by absolute path.
 var _stamp_memo: Dictionary = {}
+var _in_mount: bool = false
 ## What the last mount actually put on screen: one record per reference that
 ## loaded, in the order the evaluation named them. This is what the
 ## measurement surface reads — it is the only place that knows which file each
@@ -125,6 +125,7 @@ func get_load_count() -> int:
 
 func clear_cache() -> void:
 	_cache.clear()
+	_stamp_memo.clear()
 
 
 ## Records for the references the last mount put on screen: {name, path,
@@ -225,12 +226,15 @@ func mount(references: Array, document_path: String, parent: Node3D) -> Dictiona
 ## parent's, identical for all of them.
 func mount_all(references: Array, document_path: String, parents: Array) -> Dictionary:
 	_stamp_memo.clear()
+	_in_mount = true
 	_mounted = []
 	var report := {}
 	var first := true
 	for parent in parents:
 		report = _mount_under(references, document_path, parent as Node3D, first)
 		first = false
+	_in_mount = false
+	_stamp_memo.clear()
 	return report
 
 
@@ -507,22 +511,20 @@ static func _is_feature_edge(normals: Array, cosine_threshold: float) -> bool:
 # Internals
 # ---------------------------------------------------------------------------
 
-## Cheap identity of the bytes on disk. Public because a test has to be able
-## to see that the modification time is part of it: a cache keyed on the path
-## alone shows a stale board forever.
+## Identity of the bytes on disk. Public so a test can see that the cache is
+## keyed on content: a cache keyed on the path alone shows a stale board
+## forever. Memoised only while mount_all is running; a direct call always
+## hashes the file as it is now.
 func file_stamp(absolute_path: String) -> String:
 	if _stamp_memo.has(absolute_path):
 		return str(_stamp_memo[absolute_path])
 	var stamp := "missing"
 	if FileAccess.file_exists(absolute_path):
-		# A content digest, not mtime+size: an in-place rewrite within the same
-		# second at the same length is otherwise served stale.
 		var digest := FileAccess.get_sha256(absolute_path)
 		stamp = digest if not digest.is_empty() else "unreadable"
-	_stamp_memo[absolute_path] = stamp
+	if _in_mount:
+		_stamp_memo[absolute_path] = stamp
 	return stamp
-
-
 
 
 ## Read every mesh in a glTF/GLB and record it with its transform composed all

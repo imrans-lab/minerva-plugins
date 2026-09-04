@@ -149,6 +149,8 @@ var _last_mesh_data: Dictionary = {}
 var _reference_library: RefCounted = null
 ## Outcome of the last mount: {world_aabb, warnings, errors, mounted}.
 var _reference_report: Dictionary = {}
+## Warning from the last GUI mesh import that must survive evaluations.
+var _import_notice: String = ""
 ## Segmentation and primitive fitting over the loaded references (RefCounted),
 ## and the physics gauge that verifies what it proposes (a child Node).
 var _mesh_features: RefCounted = null
@@ -628,6 +630,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 			_buffer_path = str(payload.get("path", ""))
 			if not _buffer_path.is_empty():
 				_document_path = _buffer_path
+				_import_notice = ""
 			_buffer_version = int(payload.get("version", 0))
 			var text: String = str(payload.get("text", ""))
 			_pending_dsl_text = text
@@ -773,7 +776,8 @@ func import_mesh_file(absolute_path: String) -> Dictionary:
 		# Same banner as an evaluation error: it is the panel's one visible
 		# message surface, and the next evaluation clears it.
 		push_warning("[CADPanel] import mesh: %s" % warning)
-		_show_eval_error("Import mesh — %s" % warning)
+		_import_notice = "Import mesh — %s" % warning
+		_show_eval_error(_import_notice)
 	return plan
 
 
@@ -796,7 +800,11 @@ func _current_source() -> String:
 func _apply_source_edit(new_source: String) -> void:
 	var buffer: Object = _shared_buffer()
 	if buffer != null and buffer.has_method("apply_edit"):
+		# The buffer's text_changed push comes back through receive(), which
+		# records the text and starts the debounce; doing it here too would
+		# evaluate twice.
 		buffer.apply_edit(new_source)
+		return
 	_pending_dsl_text = new_source
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
 		_annotation_host.set_document_source(_buffer_path, new_source)
@@ -941,6 +949,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	var dsl_text: String = fa.get_as_text()
 	fa.close()
 	_document_path = file_path
+	_import_notice = ""
 
 	# Push document source into host so MCP can read it without IPC.
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
@@ -1144,7 +1153,17 @@ func _show_eval_error(message: String) -> void:
 
 
 ## Hide the evaluation-error banner — a fresh evaluate started, or one succeeded.
+## An import notice outlives evaluations: it stays until the buffer has a path.
+## Save-As rebinds the attached buffer in place rather than re-attaching it, so
+## the path is read from the buffer here, not from an attach event.
 func _hide_eval_error() -> void:
+	if not _import_notice.is_empty():
+		var buffer: Object = _shared_buffer()
+		if buffer != null and not str(buffer.get("file_path")).is_empty():
+			_import_notice = ""
+		else:
+			_show_eval_error(_import_notice)
+			return
 	if _error_banner != null:
 		_error_banner.visible = false
 

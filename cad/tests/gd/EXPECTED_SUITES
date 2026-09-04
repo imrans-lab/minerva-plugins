@@ -39,7 +39,7 @@ test_reference_meshes.gd assertions=33
 # evaluation follows on its own, a second import becomes ref2, and an unsaved
 # document gets an absolute path plus an on-screen warning that survives
 # Save-As and still resolves.
-test_mesh_import.gd assertions=33
+test_mesh_import.gd assertions=36
 
 # Measuring a foreign mesh: a CSG plate with two plain through holes, one hole
 # 1.9 mm from the outline, one drilled 30 degrees off the plate normal, a blind
