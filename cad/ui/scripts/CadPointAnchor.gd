@@ -108,7 +108,10 @@ static func resolve(anchor: Variant, records: Array) -> Variant:
 			"stale": true,
 		}
 	var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-	var world_normal := pose.basis * normal
+	# A normal follows the inverse transpose of the pose, not the pose: a
+	# reference posed with a non-uniform scale would otherwise report a
+	# normal that is no longer perpendicular to the surface it came from.
+	var world_normal := pose.basis.inverse().transposed() * normal
 	return {
 		"position": pose * local,
 		"local": local,

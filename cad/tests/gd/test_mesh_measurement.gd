@@ -150,6 +150,7 @@ func _run() -> void:
 	]
 	var candidates := _check_proposal(local_parts)
 	await _check_gauge(baked, candidates)
+	await _check_coincident_faces()
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +238,30 @@ func _check_proposal(local_parts: Array) -> Array:
 	check("fit: the fit alone says nothing about whether a hole goes through",
 			not blind.has("through"),
 			"the fitter volunteered a through flag: %s" % str(blind))
+
+	# The same plate, mirrored. A negative-determinant transform reverses the
+	# handedness of every triangle it moves, and the fitter reads the sense of
+	# a cylinder off the winding: without a compensating flip the five holes
+	# come back as bosses and the boss comes back as a hole.
+	var mirrored_parts: Array = [{
+		"mesh": (local_parts[0] as Dictionary)["mesh"],
+		"transform": Transform3D(Basis.from_scale(Vector3(-1.0, 1.0, 1.0)), Vector3.ZERO),
+		"node": "plate",
+	}]
+	var mirrored: Dictionary = MeshFeatures.analyze(mirrored_parts)
+	var mirrored_concave: Array = MeshFeatures.concave_cylinders(
+			mirrored.get("candidates", []), 1.0, 7.0, 0.6)
+	var mirrored_convex := 0
+	for entry in mirrored.get("candidates", []):
+		if str((entry as Dictionary).get("form", "")) == "convex":
+			mirrored_convex += 1
+	check("mirror: a mirrored copy still reports its five holes as CONCAVE",
+			mirrored_concave.size() == HOLES.size(),
+			"mirrored gave %d concave cylinders, expected %d"
+				% [mirrored_concave.size(), HOLES.size()])
+	check("mirror: and its boss as CONVEX — the sense is not inverted with the winding",
+			mirrored_convex == 1,
+			"mirrored gave %d convex cylinders, expected 1" % mirrored_convex)
 
 	return matched
 
@@ -418,6 +443,42 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 			str(probe.get("node", "")) == "plate",
 			"attributed to '%s'" % str(probe.get("node", "")))
 
+	# A gauge buried in solid material. The colliders are a SURFACE, not a
+	# volume: a pin inside the plate crosses no triangle and overlaps nothing,
+	# which is exactly what open air looks like to intersect_shape. A point
+	# 16 mm along -Z from the plate centre is solid — every hole and the boss
+	# are elsewhere — so a fit reported here is the failure this asserts on.
+	var solid_local := Vector3(0.0, 0.0, -16.0)
+	var buried: Dictionary = await gauge.submit("gauge", {
+		"shape": "sphere",
+		"size": Vector3(1.0, 0.0, 0.0),
+		"at": _pose * solid_local,
+		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
+	})
+	check("gauge: a pin wholly INSIDE the material does not fit, and says why",
+			not bool(buried.get("fits", true))
+				and str(buried.get("reason", "")) == "inside_solid",
+			"buried gauge reported %s" % str(buried))
+
+	# Clearance is bounded by the part, not by the pin. A 1 mm pin standing in
+	# the 5 mm blind pocket has nearly 2 mm of radial room; a search capped at
+	# twice the pin's own diameter can only ever report 1.5.
+	var pocket_world: Vector3 = _pose * (HOLES[4]["center"] as Vector3)
+	var roomy: Dictionary = await gauge.submit("gauge", {
+		"shape": "cylinder",
+		"size": Vector3(1.0, 1.0, 0.0),
+		"at": pocket_world,
+		"axis": (_pose.basis * (HOLES[4]["axis"] as Vector3)).normalized(),
+	})
+	var pocket_clearance := 5.0 * cos(PI / float(FACETS)) * 0.5 - 0.5
+	check("gauge: clearance is searched to the part's own extent, not to a multiple of the pin",
+			bool(roomy.get("fits", false))
+				and absf(float(roomy.get("clearance_mm", 0.0)) - pocket_clearance) < 0.05
+				and float(roomy.get("clearance_bound_mm", 0.0)) > 10.0,
+			"clearance %f (expected %f), bound %f" % [
+				float(roomy.get("clearance_mm", 0.0)), pocket_clearance,
+				float(roomy.get("clearance_bound_mm", 0.0))])
+
 	# The fallback path, exercised on its own: a ray grid finds holes with no
 	# fit at all — and finds FEWER of them, which is exactly why it is the
 	# fallback and not the proposal. Of the five holes it can seed at most
@@ -451,6 +512,78 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 			all_near = false
 	check("fallback: every seed lands on a hole, not on the outline",
 			all_near, "a seed was more than 1 mm from every through-hole centre")
+
+	gauge.queue_free()
+
+
+# ---------------------------------------------------------------------------
+# COINCIDENT FACES — two plates resting on each other
+# ---------------------------------------------------------------------------
+
+## Two plates that share a face put two triangles at the same point, and
+## material continues through both: the parity of a ray crossing them is
+## unchanged, so a point beyond them is still outside. A crossing counter that
+## steps past both with one nudge counts one, and every point beyond the stack
+## reads as INSIDE — which makes the gauge refuse to fit in open air.
+##
+## The fixture is two such stacks, one shared face perpendicular to X and one
+## perpendicular to Z, placed so that the X ray and the Z ray from the test
+## point each cross one of them. Parity votes two axes against a third, so a
+## fixture with only one stack is rescued by the tiebreaker and proves nothing.
+func _check_coincident_faces() -> void:
+	var gauge := MeshGauge.new()
+	gauge.name = "CoincidentGauge"
+	root.add_child(gauge)
+	await process_frame
+
+	# A 4 mm plate, 20 x 20 in the other two axes. Two of them face to face
+	# make one stack; the second stack is the same mesh turned a quarter turn.
+	var plate := BoxMesh.new()
+	plate.size = Vector3(4.0, 20.0, 20.0)
+	var quarter := Basis(Vector3.UP, PI * 0.5)
+	var bodies: Array = [
+		# Stack across X, at z = -20: faces at x = 0, 4 (shared) and 8.
+		{"mesh": plate, "transform": Transform3D(Basis.IDENTITY, Vector3(2.0, 0.0, -20.0)),
+			"node": "XLower", "reference": "stack"},
+		{"mesh": plate, "transform": Transform3D(Basis.IDENTITY, Vector3(6.0, 0.0, -20.0)),
+			"node": "XUpper", "reference": "stack"},
+		# Stack across Z, at x = -20: faces at z = 0, 4 (shared) and 8.
+		{"mesh": plate, "transform": Transform3D(quarter, Vector3(-20.0, 0.0, 2.0)),
+			"node": "ZLower", "reference": "stack"},
+		{"mesh": plate, "transform": Transform3D(quarter, Vector3(-20.0, 0.0, 6.0)),
+			"node": "ZUpper", "reference": "stack"},
+	]
+	var built: int = gauge.build(bodies, "coincident|v1")
+	check("coincident: the four plates became four colliders",
+			built == 4, "built %d colliders" % built)
+
+	# Inside the lower plate of the X stack. Solid either way the crossings are
+	# counted, so this is the control that says the fixture is closed material.
+	var inside: Dictionary = await gauge.submit("gauge", {
+		"shape": "sphere",
+		"size": Vector3(1.0, 0.0, 0.0),
+		"at": Vector3(2.0, 0.0, -20.0),
+		"axis": Vector3.UP,
+	})
+	check("coincident: a pin inside one plate of the stack is refused as inside_solid",
+			not bool(inside.get("fits", true))
+				and str(inside.get("reason", "")) == "inside_solid",
+			"reply=%s" % str(inside))
+
+	# Open air. Its +X ray crosses the X stack (two faces, the shared pair,
+	# two faces) and its +Z ray crosses the Z stack the same way: four
+	# crossings each, even, outside. Counting the shared pair once makes both
+	# three — odd — and the pin is refused in empty space.
+	var air: Dictionary = await gauge.submit("gauge", {
+		"shape": "sphere",
+		"size": Vector3(1.0, 0.0, 0.0),
+		"at": Vector3(-20.0, 0.0, -20.0),
+		"axis": Vector3.UP,
+	})
+	check("coincident: a pin in AIR beyond two shared faces still fits — the "
+			+ "coincident triangles were counted twice",
+			bool(air.get("fits", false)) and not air.has("reason"),
+			"reply=%s" % str(air))
 
 	gauge.queue_free()
 

@@ -98,7 +98,70 @@ func _run() -> void:
 	_test_feature_edges()
 	_test_frame_conversion_arithmetic()
 	_test_a_units_change_is_a_different_geometry_and_says_so()
+	_test_a_gltf_is_stamped_with_the_files_it_names()
 	_test_auto_framing_covers_the_reference()
+
+
+# ---------------------------------------------------------------------------
+# A .gltf is a manifest plus the files it names
+# ---------------------------------------------------------------------------
+
+## Unlike a GLB, a .gltf keeps its geometry in a separate .bin. Rewriting that
+## .bin changes the mesh and leaves the JSON byte-for-byte identical, so a
+## stamp taken over the .gltf alone serves the old geometry forever.
+func _test_a_gltf_is_stamped_with_the_files_it_names() -> void:
+	var scratch := OS.get_user_data_dir()
+	var gltf_path := scratch.path_join("cad_reference_fixture.gltf")
+	var written := _write_fixture_gltf(gltf_path, Vector3(2.0, 4.0, 6.0))
+	check("gltf: the fixture wrote a .gltf with an external buffer", written,
+			"GLTFDocument could not write %s" % gltf_path)
+	if not written:
+		return
+
+	var buffers := _external_files_of(gltf_path)
+	check("gltf: the manifest names at least one file beside itself",
+			buffers.size() >= 1, "buffers: %s" % str(buffers))
+	if buffers.is_empty():
+		_remove_all([gltf_path])
+		return
+
+	var library = ReferenceMeshes.new()
+	var parent := Node3D.new()
+	root.add_child(parent)
+	library.mount([_reference("board", gltf_path, POSE_TRANSLATE_ONLY)], _document_path, parent)
+	var before: String = library.file_stamp(gltf_path)
+	var json_before := FileAccess.get_sha256(gltf_path)
+
+	# Rewrite ONLY the .bin, keeping its length so even the cheap identity is
+	# unchanged apart from the content.
+	var bin_path: String = str(buffers[0])
+	var bytes := FileAccess.get_file_as_bytes(bin_path)
+	for i in range(bytes.size()):
+		bytes[i] = (int(bytes[i]) + 1) & 0xFF
+	var handle := FileAccess.open(bin_path, FileAccess.WRITE)
+	if handle != null:
+		handle.store_buffer(bytes)
+		handle.close()
+
+	# Deliberately NOT clear_cache(): the point is that the SAME library, with
+	# its stamp cache warm and the .gltf's own mtime and length untouched,
+	# notices the side file.
+	var after: String = library.file_stamp(gltf_path)
+	check("gltf: the manifest itself did not change",
+			FileAccess.get_sha256(gltf_path) == json_before,
+			"the .gltf was rewritten too, so this proves nothing")
+	check("gltf: rewriting the external buffer changes the stamp",
+			after != before and not after.is_empty(),
+			"stamp stayed '%s'" % before)
+
+	var reads_before: int = library.get_load_count()
+	library.mount([_reference("board", gltf_path, POSE_TRANSLATE_ONLY)], _document_path, parent)
+	check("gltf: and the file is read again, so the panel does not serve stale geometry",
+			library.get_load_count() > reads_before,
+			"load count stayed at %d" % library.get_load_count())
+
+	parent.free()
+	_remove_all([gltf_path] + buffers)
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +555,36 @@ func _test_auto_framing_covers_the_reference() -> void:
 ## The 0.001 scale on "Assembly" is not decoration — it is what a glTF exported
 ## from millimetre CAD data looks like, and it is the reason parent transforms
 ## have to be composed rather than read.
+## The same fixture written as .gltf, which puts the geometry in a sibling
+## .bin and the materials in sibling image files.
+func _write_fixture_gltf(path: String, box_a_size: Vector3) -> bool:
+	return _write_fixture_glb(path, box_a_size)
+
+
+## The files a .gltf's JSON names outside itself, resolved beside it.
+func _external_files_of(gltf_path: String) -> Array:
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(gltf_path))
+	if not (parsed is Dictionary):
+		return []
+	var base := gltf_path.get_base_dir()
+	var out: Array = []
+	for key in ["buffers", "images"]:
+		for entry in (parsed as Dictionary).get(key, []):
+			var uri := str((entry as Dictionary).get("uri", ""))
+			if uri.is_empty() or uri.begins_with("data:"):
+				continue
+			var resolved := base.path_join(uri.uri_decode()).simplify_path()
+			if not (resolved in out):
+				out.append(resolved)
+	return out
+
+
+func _remove_all(paths: Array) -> void:
+	for path in paths:
+		if FileAccess.file_exists(str(path)):
+			DirAccess.remove_absolute(str(path))
+
+
 func _write_fixture_glb(path: String, box_a_size: Vector3) -> bool:
 	var scene_root := Node3D.new()
 	scene_root.name = "Scene"

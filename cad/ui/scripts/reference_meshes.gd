@@ -152,25 +152,35 @@ class LoadedFile extends RefCounted:
 	func is_ok() -> bool:
 		return error.is_empty() and not parts.is_empty()
 
-	## Bounds per named node, in CAD-local millimetres. A node split across
-	## several glTF primitives (one per material) is merged back into one
-	## entry, because the split is an artefact of the exporter, not a fact
-	## about the part.
+	## Bounds per node, in CAD-local millimetres, keyed by the node's PATH from
+	## the file root. A node split across several glTF primitives (one per
+	## material) is merged back into one entry, because the split is an
+	## artefact of the exporter, not a fact about the part — but two nodes that
+	## merely share a leaf name in different branches are two parts and are
+	## never merged. Each row carries both `path` (the identity) and `name`
+	## (the leaf, which several rows may share).
 	func node_bounds() -> Array:
 		var order: Array = []
 		var merged := {}
+		var names := {}
 		for entry in parts:
 			var part: Dictionary = entry
 			var node_name := str(part.get("node", ""))
+			var node_path := str(part.get("node_path", node_name))
 			var box: AABB = part.get("aabb", AABB())
-			if merged.has(node_name):
-				merged[node_name] = (merged[node_name] as AABB).merge(box)
+			if merged.has(node_path):
+				merged[node_path] = (merged[node_path] as AABB).merge(box)
 			else:
-				merged[node_name] = box
-				order.append(node_name)
+				merged[node_path] = box
+				names[node_path] = node_name
+				order.append(node_path)
 		var out: Array = []
-		for node_name in order:
-			out.append({"name": node_name, "aabb": merged[node_name]})
+		for node_path in order:
+			out.append({
+				"name": str(names[node_path]),
+				"path": node_path,
+				"aabb": merged[node_path],
+			})
 		return out
 
 
@@ -364,23 +374,13 @@ static func _byte_size(absolute_path: String) -> int:
 	return length
 
 
-## Bytes of the external buffers a .gltf names in its `buffers[].uri` entries,
-## resolved beside the file. A data: URI is already counted by the file's own
-## length; a buffer that cannot be opened counts as zero and fails later, by
-## name, in the importer.
+## Bytes of the files a .gltf names outside itself. A data: URI is already
+## counted by the file's own length; a side file that cannot be opened counts
+## as zero and fails later, by name, in the importer.
 static func _external_buffer_bytes(gltf_path: String) -> int:
-	var text := FileAccess.get_file_as_string(gltf_path)
-	var parsed: Variant = JSON.parse_string(text)
-	if not (parsed is Dictionary):
-		return 0
 	var total := 0
-	for entry in (parsed as Dictionary).get("buffers", []):
-		if not (entry is Dictionary):
-			continue
-		var uri := str((entry as Dictionary).get("uri", ""))
-		if uri.is_empty() or uri.begins_with("data:"):
-			continue
-		var handle := FileAccess.open(gltf_path.get_base_dir().path_join(uri), FileAccess.READ)
+	for side in _external_file_paths(gltf_path):
+		var handle := FileAccess.open(str(side), FileAccess.READ)
 		if handle != null:
 			total += int(handle.get_length())
 			handle.close()
@@ -852,7 +852,50 @@ func file_stamp(absolute_path: String) -> String:
 	return stamp
 
 
+## A .gltf is a JSON manifest plus the files it names: the geometry lives in
+## `buffers[].uri` and the materials in `images[].uri`. Rewriting the .bin
+## beside an unchanged .gltf changes the mesh and nothing else, so a stamp over
+## the JSON alone serves that geometry forever. The stamp of a .gltf is
+## therefore the digest of the manifest combined with the digest of every
+## external file it names, each one taken through the same two-level
+## mtime+size -> sha scheme so an unchanged side file still costs no hashing.
 func _stamp_uncached(absolute_path: String) -> String:
+	var own := _file_digest(absolute_path)
+	if absolute_path.get_extension().to_lower() != "gltf":
+		return own
+	if own == "missing" or own == "unreadable":
+		return own
+	var combined := own
+	for side in _external_file_paths(absolute_path):
+		combined += "|" + str(side) + ":" + _file_digest(str(side))
+	return combined.sha256_text()
+
+
+## Files a .gltf names outside itself, resolved beside it and de-duplicated:
+## the buffers hold the geometry, the images the materials. A data: URI is
+## inside the JSON already and is not listed.
+static func _external_file_paths(gltf_path: String) -> Array:
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(gltf_path))
+	if not (parsed is Dictionary):
+		return []
+	var base := gltf_path.get_base_dir()
+	var out: Array = []
+	for key in ["buffers", "images"]:
+		for entry in (parsed as Dictionary).get(key, []):
+			if not (entry is Dictionary):
+				continue
+			var uri := str((entry as Dictionary).get("uri", ""))
+			if uri.is_empty() or uri.begins_with("data:"):
+				continue
+			var resolved := base.path_join(uri.uri_decode()).simplify_path()
+			if not (resolved in out):
+				out.append(resolved)
+	out.sort()
+	return out
+
+
+## Content digest of one file, with the cheap-identity cache in front of it.
+func _file_digest(absolute_path: String) -> String:
 	if not FileAccess.file_exists(absolute_path):
 		_stamp_cache.erase(absolute_path)
 		return "missing"
@@ -947,6 +990,7 @@ func _read_parts_from_file(
 			"mesh": mesh,
 			"transform": to_cad,
 			"node": str(raw.get("node", "")),
+			"node_path": str(raw.get("node_path", raw.get("node", ""))),
 			"aabb": box,
 		})
 
@@ -964,17 +1008,40 @@ func _read_parts_from_file(
 ## Depth-first walk composing parent transforms. Only mesh nodes are taken:
 ## a glTF's lights and cameras are the file's own staging and have nothing to
 ## say about the CAD document that references it.
-func _collect_meshes(node: Node, parent_transform: Transform3D, out: Array) -> void:
+##
+## Every part carries its PATH from the file root as well as its leaf name.
+## Foreign assemblies reuse leaf names freely — two branches each holding a
+## node called "Body" is ordinary — and a leaf name alone cannot tell them
+## apart, so bounds get merged, a filter selects both and a contact is
+## attributed to whichever came first. The path is the identity; the leaf name
+## stays as the convenient handle. The root itself contributes no segment, so a
+## flat file's path is just the node's name.
+func _collect_meshes(
+	node: Node,
+	parent_transform: Transform3D,
+	out: Array,
+	parent_path: String = "",
+	depth: int = 0
+) -> void:
 	var here := parent_transform
 	if node is Node3D:
 		here = parent_transform * (node as Node3D).transform
+	# Depth 0 is the file root and contributes no segment.
+	var path := ""
+	if depth > 0:
+		path = str(node.name) if parent_path.is_empty() else parent_path + "/" + str(node.name)
 
 	var mesh := _mesh_of(node)
 	if mesh != null and mesh.get_surface_count() > 0:
-		out.append({"mesh": mesh, "transform": here, "node": str(node.name)})
+		out.append({
+			"mesh": mesh,
+			"transform": here,
+			"node": str(node.name),
+			"node_path": path if not path.is_empty() else str(node.name),
+		})
 
 	for child in node.get_children():
-		_collect_meshes(child, here, out)
+		_collect_meshes(child, here, out, path, depth + 1)
 
 
 ## MeshInstance3D and the importer's ImporterMeshInstance3D both answer

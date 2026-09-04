@@ -536,7 +536,12 @@ func ensure_gauge_built() -> int:
 			bodies.append({
 				"mesh": part.get("mesh", null),
 				"transform": pose * (part.get("transform", Transform3D.IDENTITY) as Transform3D),
-				"node": "%s/%s" % [reference_name, str(part.get("node", ""))],
+				# The node PATH, not the leaf name: two branches of a foreign
+				# assembly may both hold a node called "Body", and a contact
+				# attributed to the wrong one of them is a wrong answer.
+				"node": "%s/%s" % [reference_name,
+					str(part.get("node_path", part.get("node", "")))],
+				"reference": reference_name,
 			})
 	return int(_mesh_gauge.call("build", bodies, _reference_digest))
 

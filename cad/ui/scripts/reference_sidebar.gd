@@ -65,7 +65,10 @@ func set_entries(entries: Array) -> void:
 			parent_item.set_text(0, reference if not reference.is_empty() else "(unnamed)")
 			parent_item.set_selectable(0, false)
 			parents[reference] = parent_item
-		var node_name := str(row.get("node", ""))
+		# The node PATH from the file root, not the leaf: two branches of a
+		# foreign assembly may both hold a node called "Body", and a row the
+		# user cannot tell apart is a row they cannot click.
+		var node_name := str(row.get("node_path", row.get("node", "")))
 		var world_box: AABB = row.get("world_aabb", AABB())
 		var item := _tree.create_item(parents[reference])
 		item.set_text(0, node_name)

@@ -115,10 +115,22 @@ static func bound_names(source: String) -> PackedStringArray:
 	return names
 
 
+## True when the path can live inside a one-line DSL statement. POSIX allows a
+## newline or a carriage return in a filename; the statement `refN = mesh("…")`
+## has no way to carry one, so such a path is refused rather than written out
+## as a broken — or injected — pair of lines.
+static func path_is_one_line(path: String) -> bool:
+	return not (path.contains("\n") or path.contains("\r"))
+
+
 ## The source line an import adds. The path is embedded as a double-quoted
 ## string, so a backslash or a quote inside it is escaped rather than ending
-## the literal early.
+## the literal early. A path that is not one line has no representation here
+## and yields an empty string; plan_import refuses it by name before this runs.
 static func mesh_line(name: String, path: String) -> String:
+	if not path_is_one_line(path):
+		push_error("mesh() path contains a line break and cannot be written: %s" % path)
+		return ""
 	var quoted := path.replace("\\", "\\\\").replace("\"", "\\\"")
 	return "%s = mesh(\"%s\")" % [name, quoted]
 
@@ -156,6 +168,11 @@ static func plan_import(
 	var picked := mesh_path.strip_edges()
 	if picked.is_empty():
 		plan["error"] = "no file was chosen"
+		return plan
+	if not path_is_one_line(picked):
+		plan["error"] = ("'%s' contains a line break; a mesh() statement is one "
+			+ "line and cannot name it. Rename the file and import it again.") \
+			% picked.replace("\n", "\\n").replace("\r", "\\r")
 		return plan
 	if not is_supported(picked):
 		plan["error"] = "'%s' is not a mesh format this panel can load (%s)" % [

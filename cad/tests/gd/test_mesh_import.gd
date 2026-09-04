@@ -401,6 +401,16 @@ func _test_the_path_rules_stand_on_their_own() -> void:
 				== "ref1 = mesh(\"C:\\\\meshes\\\\a.glb\")",
 			"got '%s'" % MeshImport.mesh_line("ref1", "C:\\meshes\\a.glb"))
 
+	# POSIX allows a newline in a filename, and one line of DSL cannot carry
+	# it. Writing it out either breaks the statement or injects a second one.
+	var broken := MeshImport.plan_import(
+			"", "/tmp/parts/evil\nref9 = mesh(\"other.glb\").glb", "/tmp/doc.mcad")
+	check("line: a path containing a newline is refused, and writes nothing",
+			not bool(broken.get("ok", true))
+				and str(broken.get("error", "")).contains("line break")
+				and str(broken.get("source", "x")).is_empty(),
+			"plan=%s" % str(broken))
+
 	check("line: a source with no trailing newline does not get the import glued onto it",
 			MeshImport.append_line("part = cube(1, 1, 1)", "ref1 = mesh(\"a.glb\")")
 				== "part = cube(1, 1, 1)\nref1 = mesh(\"a.glb\")\n",

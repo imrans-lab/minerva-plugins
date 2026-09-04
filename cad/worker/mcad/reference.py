@@ -25,6 +25,8 @@ frame: millimetres, Z-up, the same frame the B-Rep solids live in.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
@@ -175,7 +177,33 @@ class MeshReference:
         Right-multiplying keeps a reference and a solid in step; left-
         multiplying would move a scaled-then-translated reference to a
         different place than the equivalent solid.
+
+        The scale must be UNIFORM and non-zero. A reference is measured, not
+        rendered: a non-uniform scale turns every hole in the file into an
+        ellipse, which has no diameter for a measurement to report and no pin
+        that fits it, and a zero factor collapses the pose so that no point in
+        the world maps back to a point in the file.
         """
+        sx, sy, sz = (float(v) for v in factors)
+        if not all(math.isfinite(v) for v in (sx, sy, sz)):
+            raise MeshReferenceError(
+                f"scale({[sx, sy, sz]}, {self.label}) has a non-finite factor"
+            )
+        if any(abs(v) < 1e-12 for v in (sx, sy, sz)):
+            raise MeshReferenceError(
+                f"scale({[sx, sy, sz]}, {self.label}) has a zero factor; a "
+                "reference scaled to nothing cannot be posed or measured"
+            )
+        # Compared with a tolerance: factors like 0.1+0.2 vs 0.3 are the same
+        # scale to a user even though they differ in the last bit.
+        if not (math.isclose(sx, sy, rel_tol=1e-9, abs_tol=1e-12)
+                and math.isclose(sx, sz, rel_tol=1e-9, abs_tol=1e-12)):
+            raise MeshReferenceError(
+                f"scale({[sx, sy, sz]}, {self.label}) is not uniform; a mesh "
+                "reference is measured geometry and a "
+                "non-uniform scale turns its holes into ellipses. Scale it "
+                "equally on all three axes, or edit the mesh."
+            )
         return replace(self, matrix=multiply(self.matrix, scaling(factors)))
 
     def renamed(self, name: str) -> "MeshReference":

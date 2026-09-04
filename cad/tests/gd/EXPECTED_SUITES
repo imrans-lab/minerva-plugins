@@ -30,8 +30,9 @@ test_orbit_camera_stuck.gd assertions=3
 # against a pose change and re-read against a file change; plus path
 # resolution, the missing-file report, a units= change being different
 # geometry that the record reports (so a cache can key on it), the shared
-# feature-edge extractor and reference-aware auto-framing.
-test_reference_meshes.gd assertions=37
+# feature-edge extractor, reference-aware auto-framing, and a .gltf whose
+# external buffer is rewritten under an untouched manifest being re-read.
+test_reference_meshes.gd assertions=42
 
 # The GUI "Import mesh…" action: the button and the scene-declared picker
 # exist in both layouts, a pick appends exactly one refN = mesh("...") line
@@ -39,8 +40,9 @@ test_reference_meshes.gd assertions=37
 # DocumentBuffer the paired text editor reads (real broker, real buffer), an
 # evaluation follows on its own, a second import becomes ref2, and an unsaved
 # document gets an absolute path plus an on-screen warning that survives
-# Save-As and still resolves.
-test_mesh_import.gd assertions=36
+# Save-As and still resolves. A path containing a line break is refused
+# rather than written into a one-line statement.
+test_mesh_import.gd assertions=37
 
 # Measuring a foreign mesh: a CSG plate with two plain through holes, one hole
 # 1.9 mm from the outline, one drilled 30 degrees off the plate normal, a blind
@@ -50,8 +52,13 @@ test_mesh_import.gd assertions=36
 # tilted hole) and the verify half (colliders, refined centres in both frames,
 # the pin that actually fits, through vs blind, a too-large gauge reporting
 # contacts, the boss verifying while an oversize and an in-mid-air boss
-# candidate do not, a pixel-less probe, and the ray-grid fallback's limits).
-test_mesh_measurement.gd assertions=59
+# candidate do not, a gauge buried in solid material refusing to fit, a
+# clearance searched to the part's own extent rather than to a multiple of
+# the pin, a mirrored copy keeping the sense of every feature, a pixel-less
+# probe, and the ray-grid fallback's limits). Plus two plate stacks sharing a
+# face: the coincident triangles are two crossings, so a pin in open air
+# beyond them still fits.
+test_mesh_measurement.gd assertions=66
 
 # The measurement VERBS through PanelTools.handle, on a two-plate stack with
 # one pair of drills through both plates and a boss on top, posed by a
@@ -61,9 +68,14 @@ test_mesh_measurement.gd assertions=59
 # the fit residual carried through, the boss found as convex, the gauge verb's
 # fits/contacts, a probe hit attributed to its node, per-pane scales from
 # view_overlay, and a named error — never an empty result — for an unmounted
-# reference, an unsupported gauge shape, a pixel-less probe and an unknown
-# overlay mode.
-test_measurement_verbs.gd assertions=23
+# reference, an unsupported gauge shape, a pixel-less probe, an unknown
+# overlay mode and a node= filter that matches nothing. Also that a second
+# reference running down the drill cannot change a measurement scoped to
+# this one while an UNSCOPED call does see it, that a node= filter is a match
+# when any one mounted reference carries it, that a diameter limit is a world
+# millimetre under a scaled pose, and that a pose scaled by 2 reports twice
+# the diameter in world and the file's own in local.
+test_measurement_verbs.gd assertions=33
 
 # Failure and size handling for references: a truncated GLB, a text file
 # wearing a .glb extension, a missing file, an unreadable format and an
@@ -79,15 +91,18 @@ test_reference_failures.gd assertions=30
 
 # Pointing at a reference: a two-box GLB built in-test, declared mm/Z-up so the
 # frame conversion is the identity and the suite is about WHICH node was hit.
-# Pins the node inventory and the scene-declared sidebar rows, a click in the
+# Pins the node inventory keyed by PATH (two branches each hold a node
+# called "Body") and the scene-declared sidebar rows, a click in the
 # top pane picking the nearer of two bodies and reporting its surface point in
 # both frames, the MCP readback (get_selected_reference / select_reference,
 # including a miss being an error and a flat face reporting no hole), the
 # cad/point anchor validating, resolving, moving with a re-posed reference by
-# the projected pixel displacement and going stale — not crashing — when the
+# the projected pixel displacement, the click normal being stored in the
+# reference's own frame and turning only when the pose turns it, and going
+# stale — not crashing — when the
 # reference leaves the document, and the two selections coexisting: the picker
 # is a plain Node that only ever sees input the edge overlay did not take.
-test_reference_selection.gd assertions=40
+test_reference_selection.gd assertions=46
 
 # Save-to-note and back: the real panel scene is set up, saved as a
 # plugin_data note, freed the way closing a tab frees it, and a second,

@@ -120,8 +120,158 @@ func _run() -> void:
 	await _test_the_gauge_verb_answers_fits_and_says_where_it_touched()
 	await _test_probe_turns_a_ray_into_a_position_in_both_frames()
 	await _test_view_overlay_reports_a_scale_per_pane()
+	await _test_a_node_filter_that_matches_nothing_is_an_error()
+	await _test_a_second_reference_cannot_change_this_one_s_measurement()
+	await _test_a_scaled_pose_reports_world_and_local_diameters()
 
 	_panel.queue_free()
+
+
+# ---------------------------------------------------------------------------
+# A node filter is a claim about the file
+# ---------------------------------------------------------------------------
+
+## `node="PlateZ"` filters the parts to nothing. Returning a successful "no
+## holes" makes a typo indistinguishable from a plate with no holes in it, and
+## the typo is by far the likelier of the two.
+func _test_a_node_filter_that_matches_nothing_is_an_error() -> void:
+	var reply: Dictionary = await PanelTools.handle(
+			_panel, "minerva_cad_find_holes", {"node": "PlateZ"})
+	check("find_holes: a node filter matching nothing is a named error listing the nodes",
+			not bool(reply.get("success", true))
+				and str(reply.get("error", "")).contains("PlateZ")
+				and str(reply.get("error", "")).contains("PlateA")
+				and not reply.has("holes"),
+			"reply=%s" % str(reply))
+
+	var real: Dictionary = await PanelTools.handle(
+			_panel, "minerva_cad_find_holes", {"node": "PlateA", "min_dia_mm": 1.0})
+	check("find_holes: a node filter that DOES match still measures that node",
+			bool(real.get("success", false)) and (real.get("holes", []) as Array).size() == 2,
+			"reply=%s" % str(real))
+
+
+# ---------------------------------------------------------------------------
+# Verification is physics, and physics sees everything in the space
+# ---------------------------------------------------------------------------
+
+## A second reference posed so that a bar runs down the middle of the board's
+## first drill. Scoped to "board", the measurement must be exactly what it was
+## before the bar existed; unscoped, the bar must actually be in the way — that
+## control is what stops this test passing because the bar missed.
+func _test_a_second_reference_cannot_change_this_one_s_measurement() -> void:
+	var bar: ArrayMesh = await _bake_plug()
+	var drill_local := Vector3(
+			float((HOLE_XZ[0] as Vector2).x), 2.0, float((HOLE_XZ[0] as Vector2).y))
+	_panel.extra = {
+		"name": "plug",
+		"path": "plug.glb",
+		"resolved_path": "/virtual/plug.glb",
+		"stamp": "content-digest-2",
+		"units": "mm",
+		"up": "z",
+		"status": "ok",
+		"reason": "",
+		"pose": _pose,
+		"local_aabb": AABB(drill_local - Vector3(1.0, 10.0, 1.0), Vector3(2.0, 20.0, 2.0)),
+		"parts": [{
+			"mesh": bar,
+			"transform": Transform3D(Basis.IDENTITY, drill_local),
+			"node": "Bar",
+			"node_path": "Bar",
+		}],
+		"node_bounds": [],
+	}
+	_panel.digest = "verbs|v2-with-plug"
+
+	var scoped: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"reference": "board", "min_dia_mm": 1.0, "max_dia_mm": 8.0})
+	var scoped_holes: Array = scoped.get("holes", [])
+	var inscribed := HOLE_DIA * cos(PI / float(FACETS))
+	var unchanged := scoped_holes.size() == HOLE_XZ.size()
+	for entry in scoped_holes:
+		var hole: Dictionary = entry
+		if not bool(hole.get("verified", false)) \
+				or absf(float(hole.get("gauge_dia_mm", 0.0)) - inscribed) > 0.05:
+			unchanged = false
+	check("find_holes reference=board: a bar through the drill belongs to another "
+			+ "reference and does not touch the measurement",
+			unchanged, "reply=%s" % str(scoped))
+
+	var unscoped: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"min_dia_mm": 1.0, "max_dia_mm": 8.0})
+	var obstructed := false
+	for entry in unscoped.get("holes", []):
+		var hole: Dictionary = entry
+		if str(hole.get("reference", "")) != "board":
+			continue
+		if float(hole.get("gauge_dia_mm", 0.0)) < inscribed - 0.05:
+			obstructed = true
+	check("control: with every reference in scope the bar IS in the way — the "
+			+ "isolation above is doing work",
+			obstructed, "reply=%s" % str(unscoped))
+
+	# "PlateA" is a node of the board and of nothing else. With the plug also
+	# mounted, a filter evaluated per reference and refused on the first miss
+	# turns a perfectly good question into an error.
+	var per_reference: Dictionary = await PanelTools.handle(_panel,
+			"minerva_cad_find_holes", {"node": "PlateA", "min_dia_mm": 1.0})
+	check("find_holes: a node in ONE of two mounted references is a match, not a typo",
+			bool(per_reference.get("success", false))
+				and (per_reference.get("holes", []) as Array).size() == 2,
+			"reply=%s" % str(per_reference))
+
+	_panel.extra = {}
+	_panel.digest = "verbs|v1"
+
+
+# ---------------------------------------------------------------------------
+# A scaled pose
+# ---------------------------------------------------------------------------
+
+## scale([2,2,2], mesh(...)) makes the board twice the size in the world. The
+## drill is then 2x its file diameter in world millimetres and 1x in local, and
+## a report that scales positions but not lengths gets one of the two wrong.
+func _test_a_scaled_pose_reports_world_and_local_diameters() -> void:
+	var scaled_pose := Transform3D(_pose.basis.scaled(Vector3(2.0, 2.0, 2.0)), POSE_ORIGIN)
+	_panel.record["pose"] = scaled_pose
+	_panel.digest = "verbs|v3-scaled"
+
+	var reply: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"min_dia_mm": 1.0, "max_dia_mm": 16.0})
+	var holes: Array = reply.get("holes", [])
+	var hole: Dictionary = holes[0] if holes.size() > 0 else {}
+	var local_lengths: Dictionary = hole.get("local", {})
+	var inscribed := HOLE_DIA * cos(PI / float(FACETS))
+	check("find_holes scale 2: the world gauge diameter is TWICE the file's",
+			holes.size() == HOLE_XZ.size()
+				and absf(float(hole.get("gauge_dia_mm", 0.0)) - inscribed * 2.0) < 0.1
+				and absf(float(hole.get("scale", 0.0)) - 2.0) < 0.001,
+			"reply=%s" % str(reply))
+	check("find_holes scale 2: and the local one is the file's own, unscaled",
+			absf(float(local_lengths.get("gauge_dia_mm", 0.0)) - inscribed) < 0.05,
+			"local lengths: %s" % str(local_lengths))
+
+	# min/max_dia_mm are world millimetres, like every reported length. At
+	# scale 2 the 3.2 mm drill is a 6.4 mm hole in the world, so a ceiling of
+	# 5 mm must exclude it and a ceiling of 8 mm must admit it. A filter
+	# applied to the file's own diameters admits the drill under BOTH, which
+	# is the same defect that lets max_dia_mm=8 admit a 16 mm world hole.
+	var too_small: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"min_dia_mm": 1.0, "max_dia_mm": 5.0})
+	check("find_holes scale 2: a 5 mm ceiling excludes a hole that is 6.4 mm in the world",
+			bool(too_small.get("success", false))
+				and (too_small.get("holes", []) as Array).is_empty(),
+			"reply=%s" % str(too_small))
+	var admitted: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"min_dia_mm": 1.0, "max_dia_mm": 8.0})
+	check("find_holes scale 2: an 8 mm ceiling still admits it — the filter moved, "
+			+ "it did not just tighten",
+			(admitted.get("holes", []) as Array).size() == HOLE_XZ.size(),
+			"reply=%s" % str(admitted))
+
+	_panel.record["pose"] = _pose
+	_panel.digest = "verbs|v1"
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +442,19 @@ func _test_the_gauge_verb_answers_fits_and_says_where_it_touched() -> void:
 				and str(contact.get("reference", "")) == "board",
 			"reply=%s" % str(fouls))
 
+	# One identity string: the node a contact names is the bare path, the same
+	# string find_holes puts in `nodes` and a node= filter takes. The reference
+	# is a field of its own, never a prefix spliced onto the path.
+	var named_bare := false
+	for contact_entry in contacts:
+		var touched: Dictionary = contact_entry
+		if str(touched.get("node", "")) in ["PlateA", "PlateB"] \
+				and str(touched.get("reference", "")) == "board":
+			named_bare = true
+	check("gauge verb: a contact names its node by the SAME string a node= filter "
+			+ "takes, with the reference beside it rather than spliced into it",
+			named_bare, "contacts: %s" % str(contacts))
+
 	var bad_shape: Dictionary = await PanelTools.handle(
 			_panel, "minerva_cad_gauge", {"shape": "cone", "dia_mm": 2.0})
 	check("gauge verb: an unsupported shape is a named error, not a silent default",
@@ -322,7 +485,7 @@ func _test_probe_turns_a_ray_into_a_position_in_both_frames() -> void:
 			"local hit: %s" % str(local))
 	check("probe: the hit names the reference and the node it landed on",
 			str(hit.get("reference", "")) == "board"
-				and str(hit.get("node", "")).contains("PlateB"),
+				and str(hit.get("node", "")) == "PlateB",
 			"reference='%s' node='%s'" % [
 				str(hit.get("reference", "")), str(hit.get("node", ""))])
 
@@ -367,6 +530,11 @@ func _test_view_overlay_reports_a_scale_per_pane() -> void:
 ## would own is stood in for.
 class PanelStandIn extends Node:
 	var record: Dictionary = {}
+	## A second mounted reference, when the test needs one. Kept separate from
+	## `record` so every existing assertion still runs against one reference.
+	var extra: Dictionary = {}
+	## Bumped whenever a test changes the geometry the colliders stand for.
+	var digest: String = "verbs|v1"
 	var features: RefCounted = null
 	var gauge: Node = null
 	var pose: Transform3D = Transform3D.IDENTITY
@@ -375,10 +543,10 @@ class PanelStandIn extends Node:
 	var overlay_mode: String = "none"
 
 	func get_reference_state() -> Array:
-		return [record]
+		return [record] if extra.is_empty() else [record, extra]
 
 	func get_reference_status() -> Array:
-		return [record]
+		return get_reference_state()
 
 	func get_mesh_features() -> RefCounted:
 		return features
@@ -390,16 +558,21 @@ class PanelStandIn extends Node:
 	## part transform, so the gauge works entirely in world millimetres.
 	func ensure_gauge_built() -> int:
 		var bodies: Array = []
-		var record_pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-		for entry in record.get("parts", []):
-			var part: Dictionary = entry
-			bodies.append({
-				"mesh": part.get("mesh", null),
-				"transform": record_pose
-					* (part.get("transform", Transform3D.IDENTITY) as Transform3D),
-				"node": "%s/%s" % [str(record.get("name", "")), str(part.get("node", ""))],
-			})
-		return int(gauge.call("build", bodies, "verbs|v1"))
+		for record_entry in get_reference_state():
+			var mounted: Dictionary = record_entry
+			var record_pose: Transform3D = mounted.get("pose", Transform3D.IDENTITY)
+			var reference_name := str(mounted.get("name", ""))
+			for entry in mounted.get("parts", []):
+				var part: Dictionary = entry
+				bodies.append({
+					"mesh": part.get("mesh", null),
+					"transform": record_pose
+						* (part.get("transform", Transform3D.IDENTITY) as Transform3D),
+					"node": "%s/%s" % [reference_name,
+						str(part.get("node_path", part.get("node", "")))],
+					"reference": reference_name,
+				})
+		return int(gauge.call("build", bodies, digest))
 
 	func view_unavailable_reason(_view: String) -> String:
 		return ""
@@ -467,6 +640,18 @@ func _bake_boss() -> ArrayMesh:
 	post.sides = FACETS
 	post.smooth_faces = false
 	combiner.add_child(post)
+	return await _bake(combiner)
+
+
+## A 2 mm square bar, long enough to run right through the stack. Narrower
+## than the 3.2 mm drill, so it never touches the board — it only fills the
+## middle of the hole, which is exactly where a gauge searches.
+func _bake_plug() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Plug"
+	var bar := CSGBox3D.new()
+	bar.size = Vector3(2.0, 20.0, 2.0)
+	combiner.add_child(bar)
 	return await _bake(combiner)
 
 

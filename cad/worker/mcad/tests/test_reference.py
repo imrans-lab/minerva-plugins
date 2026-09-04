@@ -99,8 +99,11 @@ class TestPoseComposition:
         "rotate([0, 0, 90], translate([10, 0, 0], {inner}))",
         "rotate([90, 0, 0], {inner})",
         "rotate([0, 45, 30], translate([1, 2, 3], {inner}))",
-        "translate([5, -5, 2], scale([2, 3, 4], {inner}))",
-        "scale([2, 3, 4], translate([5, -5, 2], {inner}))",
+        # Uniform, because a reference refuses anything else (see
+        # TestReferenceScaleMustBeUniform). The two orders still separate
+        # right- from left-multiplication.
+        "translate([5, -5, 2], scale([2, 2, 2], {inner}))",
+        "scale([2, 2, 2], translate([5, -5, 2], {inner}))",
         "mirror([1, 0, 0], translate([7, 1, 2], {inner}))",
         "translate([0, 0, 9], mirror([0, 1, 0], rotate([0, 0, 30], {inner})))",
     ]
@@ -145,6 +148,52 @@ class TestPoseComposition:
         assert list(t.env["a"].matrix[0]) == [1.0, 0.0, 0.0, 0.0]
         assert list(t.env["b"].matrix[0]) == [1.0, 0.0, 0.0, 5.0]
         assert [ref["name"] for ref in t.get_references()] == ["a", "b"]
+
+
+class TestReferenceScaleMustBeUniform:
+    """A reference is measured, not rendered.
+
+    The panel reports a hole's diameter in world millimetres by scaling the
+    fitted radius with the pose, which only has an answer when the pose scales
+    every axis alike: scale([1, 2, 1], board) turns every hole in the file into
+    an ellipse that has no diameter and takes no pin. A zero factor is worse —
+    the pose stops being invertible, so no measured world point maps back to a
+    point in the file.
+    """
+
+    def test_a_uniform_scale_is_accepted_and_composes(self):
+        matrix = _matrix('r = scale([2, 2, 2], mesh("a.glb"))')
+        _assert_close(matrix, [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+
+    @pytest.mark.parametrize("factors", ["[1, 2, 1]", "[2, 2, 3]", "[-1, 1, 1]"])
+    def test_a_non_uniform_scale_is_refused_by_name(self, factors):
+        with pytest.raises(TranslatorError) as excinfo:
+            _translate(f'board = scale({factors}, mesh("boards/main.glb"))\n')
+        message = str(excinfo.value)
+        assert "uniform" in message
+        assert "boards/main.glb" in message
+
+    @pytest.mark.parametrize("factors", ["[0, 0, 0]", "[1, 0, 1]"])
+    def test_a_zero_scale_is_refused_by_name(self, factors):
+        with pytest.raises(TranslatorError) as excinfo:
+            _translate(f'board = scale({factors}, mesh("boards/main.glb"))\n')
+        message = str(excinfo.value)
+        assert "zero" in message
+        assert "boards/main.glb" in message
+
+    def test_a_non_uniform_scale_on_a_SOLID_is_still_fine(self):
+        # The refusal is about references, not about scale(): a B-Rep solid
+        # scaled unevenly is ordinary modelling and must keep working.
+        solid = _translate("s = scale([1, 2, 3], cube(10, 10, 10))").env["s"]
+        bbox = solid.bounding_box()
+        _assert_close(
+            [bbox.max.X, bbox.max.Y, bbox.max.Z], [10.0, 20.0, 30.0], tol=1e-6
+        )
 
 
 # ---------------------------------------------------------------------------

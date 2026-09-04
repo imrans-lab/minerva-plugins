@@ -126,7 +126,13 @@ static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -
 		var positions: PackedVector3Array = soup["positions"]
 		var indices: PackedInt32Array = soup["indices"]
 		triangles += int(indices.size() / 3)
-		var found := analyze_soup(positions, indices, str(part.get("node", "")), angle_deg)
+		# Candidates are labelled by the node's PATH from the file root: the
+		# leaf name is not unique in a foreign assembly.
+		var found := analyze_soup(
+			positions,
+			indices,
+			str(part.get("node_path", part.get("node", ""))),
+			angle_deg)
 		regions += int(found["regions"])
 		candidates.append_array(found["candidates"] as Array)
 	return {
@@ -140,9 +146,17 @@ static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -
 ## Flatten every triangle surface of a mesh into one indexed soup, transformed
 ## by `to_local`. Surfaces that are not triangles (the outline line meshes, for
 ## one) are skipped.
+##
+## A transform with a NEGATIVE determinant — a mirrored assembly, `scale` with
+## one axis inverted — reverses the handedness of every triangle it moves. The
+## normals here are derived from corner order, so without the flip the outward
+## normal of every face points inward and the sense of every fitted cylinder
+## inverts: holes come back as bosses. Reversing two corners of each triangle
+## after the vertices are transformed restores the winding the file meant.
 static func soup_from_mesh(mesh: Mesh, to_local: Transform3D) -> Dictionary:
 	var positions := PackedVector3Array()
 	var indices := PackedInt32Array()
+	var mirrored := to_local.basis.determinant() < 0.0
 	for surface in range(mesh.get_surface_count()):
 		if mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
 			continue
@@ -155,13 +169,22 @@ static func soup_from_mesh(mesh: Mesh, to_local: Transform3D) -> Dictionary:
 		var base := positions.size()
 		for v in verts:
 			positions.append(to_local * v)
+		var corners := PackedInt32Array()
 		var raw_index: Variant = arrays[Mesh.ARRAY_INDEX]
 		if raw_index is PackedInt32Array and (raw_index as PackedInt32Array).size() >= 3:
 			for i in (raw_index as PackedInt32Array):
-				indices.append(base + i)
+				corners.append(base + i)
 		else:
 			for i in range(verts.size()):
-				indices.append(base + i)
+				corners.append(base + i)
+		if mirrored:
+			var triangle := 0
+			while triangle * 3 + 2 < corners.size():
+				var swap := corners[triangle * 3 + 1]
+				corners[triangle * 3 + 1] = corners[triangle * 3 + 2]
+				corners[triangle * 3 + 2] = swap
+				triangle += 1
+		indices.append_array(corners)
 	return {"positions": positions, "indices": indices}
 
 

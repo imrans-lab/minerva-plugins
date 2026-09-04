@@ -1073,7 +1073,10 @@ class Translator:
         """Scale a 3D solid using OpenSCAD-style scale([sx, sy, sz], shape)."""
         scale_values, shape = self._coerce_transform_args(node, "scale")
         if isinstance(shape, MeshReference):
-            return shape.resized(scale_values)
+            try:
+                return shape.resized(scale_values)
+            except MeshReferenceError as exc:
+                raise TranslatorError(str(exc)) from exc
         if not self._is_solid(shape):
             raise TranslatorError("scale() second argument must be a 3D solid")
         result = bd_scale(shape, by=tuple(scale_values))

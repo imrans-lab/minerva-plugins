@@ -70,6 +70,27 @@ const POSE_TRANSLATE_ONLY := [
 ]
 const POST_TOP_WORLD_REPOSED := Vector3(17.0, 8.0, 22.0)
 
+## A pose that ROTATES THE NORMAL: 90 degrees about X, so the reference frame's
+## +Z becomes the world's +Y. The suite's other poses turn about Z or only
+## translate, under which the Post's top-face normal is invariant — and a
+## normal stored in the wrong frame is invisible under an invariant.
+## (x, y, z) -> (x, z, -y).
+const POSE_ROTATE_X := [
+	[1.0, 0.0, 0.0, 0.0],
+	[0.0, 0.0, 1.0, 0.0],
+	[0.0, -1.0, 0.0, 0.0],
+	[0.0, 0.0, 0.0, 1.0],
+]
+
+## Two branches of the fixture, each with a node named "Body". Placed well
+## clear of the Plate and the Post so no click can land on them by accident,
+## and given DIFFERENT sizes so merged bounds are visibly merged.
+const TWIN_LEAF := "Body"
+const TWIN_BRANCHES := [
+	{"branch": "Left", "at": Vector3(-50.0, 0.0, 0.0), "size": Vector3(4.0, 4.0, 4.0)},
+	{"branch": "Right", "at": Vector3(50.0, 0.0, 0.0), "size": Vector3(10.0, 10.0, 10.0)},
+]
+
 var _pass: int = 0
 var _fail: int = 0
 var _glb_path: String = ""
@@ -108,10 +129,84 @@ func _run() -> void:
 	_prepare_top_camera()
 
 	_test_the_nodes_are_listed()
+	await _test_two_branches_can_share_a_leaf_name()
 	_test_a_click_selects_the_node_under_it()
 	await _test_the_mcp_path_reads_the_click_back()
+	await _test_the_click_normal_is_stored_in_the_reference_frame()
 	await _test_a_point_anchor_follows_its_reference()
 	_test_edge_selection_and_node_selection_do_not_fight()
+
+
+# ---------------------------------------------------------------------------
+# Two nodes, one leaf name
+# ---------------------------------------------------------------------------
+
+## "Left/Body" and "Right/Body" are two parts. Merging their bounds, or letting
+## a filter that says "Body" mean both, is the difference between measuring the
+## bracket the user meant and measuring a box that spans the whole assembly.
+func _test_two_branches_can_share_a_leaf_name() -> void:
+	var entries := ReferenceSelection.node_entries(_panel.get_reference_state())
+	var left := _entry_by_path(entries, "Left/Body")
+	var right := _entry_by_path(entries, "Right/Body")
+	var left_box: AABB = left.get("local_aabb", AABB())
+	var right_box: AABB = right.get("local_aabb", AABB())
+	check("two nodes sharing a leaf name keep separate bounds",
+			not left.is_empty() and not right.is_empty()
+				and absf(left_box.size.x - 4.0) < TOLERANCE_MM
+				and absf(right_box.size.x - 10.0) < TOLERANCE_MM,
+			"left %s right %s" % [str(left_box), str(right_box)])
+	check("and both still report the leaf name they share",
+			str(left.get("node", "")) == TWIN_LEAF and str(right.get("node", "")) == TWIN_LEAF,
+			"left '%s' right '%s'" % [str(left.get("node", "")), str(right.get("node", ""))])
+
+	# The path selects exactly one of them; nothing else in the reply could.
+	var chosen: Dictionary = await _panel.handle_tool(
+		"minerva_cad_select_reference", {"reference": "ref1", "node": "Right/Body"})
+	check("selecting by path picks the branch it names, not the first match",
+			bool(chosen.get("success", false))
+				and str(chosen.get("node", "")) == "Right/Body"
+				and absf(float((chosen.get("size_mm", []) as Array)[0]) - 10.0) < TOLERANCE_MM,
+			"got %s" % str(chosen))
+
+
+# ---------------------------------------------------------------------------
+# The frame the normal is stored in
+# ---------------------------------------------------------------------------
+
+## CadPointAnchor.build declares `normal` in the REFERENCE's frame. A normal
+## stored in world coordinates instead is either transformed twice on resolve
+## or left pointing where the mesh used to face; either way it looks right
+## until the pose turns, so the re-pose here is one that actually turns it.
+func _test_the_click_normal_is_stored_in_the_reference_frame() -> void:
+	_click("top", _camera.unproject_position(POST_TOP_WORLD))
+	var selection: Dictionary = _panel.get_reference_selection()
+	check("the click's normal is stored in the reference's own frame",
+			_near(selection.get("normal", Vector3.ZERO), Vector3(0.0, 0.0, 1.0))
+				and _near(selection.get("normal_world", Vector3.ZERO), Vector3(0.0, 0.0, 1.0)),
+			"local %s world %s" % [str(selection.get("normal", Vector3.ZERO)),
+				str(selection.get("normal_world", Vector3.ZERO))])
+
+	var anchor: Dictionary = _panel.get_annotation_host().get_current_selection_anchor("cad/point")
+
+	# Turn the reference 90 degrees about X: the top face now looks along +Y.
+	_mount(POSE_ROTATE_X)
+	var reported: Dictionary = await _panel.handle_tool(
+		"minerva_cad_get_selected_reference", {})
+	var normal: Dictionary = reported.get("normal", {})
+	check("re-posing the reference turns the normal in the world and leaves it "
+			+ "alone in the file's frame",
+			_near(_vec3(normal.get("local", [])), Vector3(0.0, 0.0, 1.0))
+				and _near(_vec3(normal.get("world", [])), Vector3(0.0, 1.0, 0.0)),
+			"got %s" % str(normal))
+
+	var resolved: Variant = _panel.get_annotation_host().resolve_point_anchor(anchor)
+	check("an anchor made before the re-pose resolves to the turned normal too",
+			resolved is Dictionary
+				and _near((resolved as Dictionary).get("normal", Vector3.ZERO),
+					Vector3(0.0, 1.0, 0.0)),
+			"got %s" % str(resolved))
+
+	_mount(POSE_ROTATE_TRANSLATE)
 
 
 # ---------------------------------------------------------------------------
@@ -126,14 +221,17 @@ func _test_the_nodes_are_listed() -> void:
 		return
 
 	var entries := ReferenceSelection.node_entries(records)
-	var names := PackedStringArray()
+	var paths := PackedStringArray()
 	for entry in entries:
-		names.append(str((entry as Dictionary)["node"]))
-	names.sort()
+		paths.append(str((entry as Dictionary)["node_path"]))
+	paths.sort()
 	# The node names are the vocabulary the user and the LLM share; if the glTF
 	# round trip renamed them, every other verb's `node` argument is a guess.
-	check("the file's node names survive the round trip",
-			Array(names) == ["Plate", "Post"], "got %s" % str(Array(names)))
+	# The identity is the PATH from the file root — two of these nodes are both
+	# called "Body" and only the path separates them.
+	check("the file's node paths survive the round trip",
+			Array(paths) == ["Left/Body", "Plate", "Post", "Right/Body"],
+			"got %s" % str(Array(paths)))
 
 	var post := _entry_for(entries, "Post")
 	var plate := _entry_for(entries, "Plate")
@@ -152,8 +250,9 @@ func _test_the_nodes_are_listed() -> void:
 	check("the wide sidebar declares a reference panel", sidebar != null)
 	var tree: Tree = (sidebar.get_node_or_null("ReferenceTree") as Tree) if sidebar != null else null
 	var rows := _tree_rows(tree)
-	check("the sidebar lists one row per node under the reference",
-			rows.size() == 2, "got %d rows: %s" % [rows.size(), str(rows)])
+	check("the sidebar lists one row per node under the reference, by path",
+			rows.size() == 4 and rows.has("Left/Body") and rows.has("Right/Body"),
+			"got %d rows: %s" % [rows.size(), str(rows)])
 	check("the sidebar shows the Plate's size in world millimetres",
 			rows.get("Plate", "") == "30.0 x 40.0 x 4.0",
 			"got '%s'" % str(rows.get("Plate", "")))
@@ -514,6 +613,20 @@ func _write_fixture_glb(path: String) -> bool:
 	post.position = (POST_LOCAL_MIN + POST_LOCAL_MAX) * 0.5
 	scene_root.add_child(post)
 
+	# Two branches, each holding a node called "Body". Foreign assemblies do
+	# this constantly, and a leaf name alone cannot tell the two apart.
+	for side in TWIN_BRANCHES:
+		var branch := Node3D.new()
+		branch.name = str((side as Dictionary)["branch"])
+		branch.position = (side as Dictionary)["at"]
+		scene_root.add_child(branch)
+		var body_mesh := BoxMesh.new()
+		body_mesh.size = (side as Dictionary)["size"]
+		var body := MeshInstance3D.new()
+		body.name = TWIN_LEAF
+		body.mesh = body_mesh
+		branch.add_child(body)
+
 	root.add_child(scene_root)
 	var document := GLTFDocument.new()
 	var state := GLTFState.new()
@@ -532,6 +645,14 @@ func _cleanup() -> void:
 		_panel.free()
 	if not _glb_path.is_empty() and FileAccess.file_exists(_glb_path):
 		DirAccess.remove_absolute(_glb_path)
+
+
+## The node_entries row with this path, or {}.
+func _entry_by_path(entries: Array, path: String) -> Dictionary:
+	for entry in entries:
+		if str((entry as Dictionary).get("node_path", "")) == path:
+			return entry
+	return {}
 
 
 func _vec3(raw: Variant) -> Vector3:

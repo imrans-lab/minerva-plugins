@@ -113,11 +113,12 @@ func handle_click(view_id: String, pixel: Vector2) -> bool:
 	if hit.is_empty():
 		clear_selection()
 		return false
+	var pose: Transform3D = (hit["record"] as Dictionary).get("pose", Transform3D.IDENTITY)
 	_selection = _make_selection(
 		hit["record"],
 		str(hit["node"]),
 		hit["local"],
-		hit["normal"],
+		to_local_normal(pose, hit["normal"]),
 		"surface",
 		"click",
 		view_id,
@@ -233,7 +234,8 @@ func pick(records: Array, from: Vector3, to: Vector3) -> Dictionary:
 				world_normal = -world_normal
 			best = {
 				"record": record,
-				"node": str(part.get("node", "")),
+				"node": str(part.get("node_path", part.get("node", ""))),
+				"node_name": str(part.get("node", "")),
 				"world": world_point,
 				"local": pose.affine_inverse() * world_point,
 				"normal": world_normal,
@@ -332,6 +334,7 @@ static func node_entries(records: Array) -> Array:
 			out.append({
 				"reference": reference,
 				"node": str(node.get("name", "")),
+				"node_path": str(node.get("path", node.get("name", ""))),
 				"local_aabb": local_box,
 				"world_aabb": _ReferenceMeshes.transform_aabb(pose, local_box),
 			})
@@ -341,24 +344,35 @@ static func node_entries(records: Array) -> Array:
 ## The selection record every consumer reads. Both frames, always: `local` is
 ## what goes into the .mcad, `world` is what compares against everything else
 ## in the scene.
+##
+## THE NORMAL IS STORED IN THE REFERENCE FRAME, like the point beside it. That
+## is the frame CadPointAnchor.build declares, and it is the only frame that
+## survives a re-pose: a stored world normal is either transformed a second
+## time on resolve or left pointing where the mesh used to face.
+##
+## `node` is the node's PATH from the file root, which is unique; `node_name`
+## is the leaf, which several nodes may share.
 func _make_selection(
 	record: Dictionary,
 	node_name: String,
 	local: Vector3,
-	normal_world: Vector3,
+	normal_local: Vector3,
 	point_source: String,
 	source: String,
 	view_id: String,
 	pixel: Vector2
 ) -> Dictionary:
 	var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-	var local_box := _node_bounds(record, node_name)
+	var row := node_row(record, node_name)
+	var local_box: AABB = row.get("aabb", AABB())
 	return {
 		"reference": str(record.get("name", "")),
-		"node": node_name,
+		"node": str(row.get("path", node_name)) if not row.is_empty() else node_name,
+		"node_name": str(row.get("name", node_name)) if not row.is_empty() else node_name,
 		"local": local,
 		"world": pose * local,
-		"normal": normal_world,
+		"normal": normal_local,
+		"normal_world": to_world_normal(pose, normal_local),
 		"point_source": point_source,
 		"source": source,
 		"view": view_id,
@@ -367,6 +381,19 @@ func _make_selection(
 		"world_aabb": _ReferenceMeshes.transform_aabb(pose, local_box),
 		"stale": false,
 	}
+
+
+## A normal from the posed world into the reference's own frame, and back.
+## Normals follow the inverse transpose, so a reference posed with a
+## non-uniform node scale is not skewed; the pair is exactly inverse.
+static func to_local_normal(pose: Transform3D, normal: Vector3) -> Vector3:
+	var value := pose.basis.transposed() * normal
+	return value.normalized() if value.length_squared() > 0.0 else Vector3.ZERO
+
+
+static func to_world_normal(pose: Transform3D, normal: Vector3) -> Vector3:
+	var value := pose.basis.inverse().transposed() * normal
+	return value.normalized() if value.length_squared() > 0.0 else Vector3.ZERO
 
 
 ## Re-derive the world half of the selection against the poses of the mount
@@ -414,23 +441,34 @@ func _host() -> Object:
 	return _panel.call("get_annotation_host")
 
 
-func _node_bounds(record: Dictionary, node_name: String) -> AABB:
+## The node_bounds row a name picks out. A full PATH names exactly one row; a
+## leaf name names the first row that carries it, which is the only sensible
+## answer when the caller had no way to know the branch. {} when neither
+## matches.
+static func node_row(record: Dictionary, node_name: String) -> Dictionary:
+	if node_name.is_empty():
+		return {}
+	var by_leaf: Dictionary = {}
 	for node_entry in record.get("node_bounds", []):
 		var node: Dictionary = node_entry
-		if str(node.get("name", "")) == node_name:
-			return node.get("aabb", AABB())
-	return AABB()
+		if str(node.get("path", node.get("name", ""))) == node_name:
+			return node
+		if by_leaf.is_empty() and str(node.get("name", "")) == node_name:
+			by_leaf = node
+	return by_leaf
+
+
+func _node_bounds(record: Dictionary, node_name: String) -> AABB:
+	return node_row(record, node_name).get("aabb", AABB())
 
 
 func _has_node(record: Dictionary, node_name: String) -> bool:
-	for node_entry in record.get("node_bounds", []):
-		if str((node_entry as Dictionary).get("name", "")) == node_name:
-			return true
-	return false
+	return not node_row(record, node_name).is_empty()
 
 
 func _node_names(record: Dictionary) -> Array:
 	var out: Array = []
 	for node_entry in record.get("node_bounds", []):
-		out.append(str((node_entry as Dictionary).get("name", "")))
+		var node: Dictionary = node_entry
+		out.append(str(node.get("path", node.get("name", ""))))
 	return out
