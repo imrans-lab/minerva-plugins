@@ -133,7 +133,7 @@ def _occt():
         from OCP.BRepTools import BRepTools
         from OCP.GCPnts import GCPnts_QuasiUniformDeflection
         from OCP.GProp import GProp_GProps
-        from OCP.GeomAbs import GeomAbs_Cylinder
+        from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Sphere
         from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopoDS import TopoDS
@@ -150,6 +150,7 @@ def _occt():
         "GCPnts_QuasiUniformDeflection": GCPnts_QuasiUniformDeflection,
         "GProp_GProps": GProp_GProps,
         "GeomAbs_Cylinder": GeomAbs_Cylinder,
+        "GeomAbs_Sphere": GeomAbs_Sphere,
         "TopAbs_EDGE": TopAbs_EDGE,
         "TopAbs_FACE": TopAbs_FACE,
         "TopAbs_REVERSED": TopAbs_REVERSED,
@@ -825,6 +826,41 @@ def _reported(group: dict) -> dict:
         # its parametric box was used instead, which can overstate the length.
         "extent_exact": bool(group["exact"]),
     }
+
+
+def smallest_curved_radius(source: str) -> Optional[float]:
+    """The tightest curvature in the shape, as a radius in millimetres.
+
+    The smallest radius among its cylindrical and spherical faces, which is
+    the surface a tessellation deviates from fastest: hold the chord error on
+    that one and every flatter surface is inside it too. None when the shape
+    has no curved face at all — every chord is then exact and no angular
+    deflection binds anything.
+
+    Raises FeatureError for the same reasons every other reader here does: a
+    DSL that will not evaluate, or a runtime with no OCCT.
+    """
+    occt = _occt()
+    _shape_name, wrapped = _shape_for(source)
+    smallest = None
+    explorer = occt["TopExp_Explorer"](wrapped, occt["TopAbs_FACE"])
+    while explorer.More():
+        face = occt["TopoDS"].Face_s(explorer.Current())
+        explorer.Next()
+        try:
+            adaptor = occt["BRepAdaptor_Surface"](face)
+            kind = adaptor.GetType()
+            if kind == occt["GeomAbs_Cylinder"]:
+                radius = float(adaptor.Cylinder().Radius())
+            elif kind == occt["GeomAbs_Sphere"]:
+                radius = float(adaptor.Sphere().Radius())
+            else:
+                continue
+        except BaseException:  # noqa: BLE001 — a face it cannot adapt
+            continue
+        if radius > 0.0 and (smallest is None or radius < smallest):
+            smallest = radius
+    return smallest
 
 
 def cylindrical_features(params: dict) -> dict:

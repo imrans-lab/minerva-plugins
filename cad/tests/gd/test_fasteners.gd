@@ -409,18 +409,23 @@ func _check_screw_a(report: Dictionary) -> void:
 			"engagement=%s required=%s" % [str(row.get("engagement_mm")),
 				str(row.get("engagement_required_mm"))])
 
-	# The bore's wall runs WALL_OVERRUN_MM deeper than the stretch of it that
-	# goes all the way round. Engagement is measured on the full-circumference
-	# extent — 0.8 to 9.0 axial — and grading it on the wall instead would add
-	# that millimetre to every bite the check reports.
+	# Both extents are axial distances from the seat, measured down the screw.
+	# The fixture's bore is anchored at its far end, so the WALL_OVERRUN_MM of
+	# wall that is not there at every azimuth sits at the MOUTH: the wall
+	# starts WALL_OVERRUN_MM nearer the seat than the full-turn extent does,
+	# and both end together at the bore's bottom. Engagement is measured on
+	# the full-circumference extent — 0.8 to 9.0 axial — and grading it on the
+	# wall instead would add that millimetre to every bite the check reports.
 	var engaged: Dictionary = row.get("bore_extent_mm", {}) as Dictionary
 	var walled: Dictionary = row.get("bore_wall_extent_mm", {}) as Dictionary
 	check("A: engagement is measured on the extent that goes ALL THE WAY "
-			+ "ROUND, with the wall's own deeper reach reported beside it",
+			+ "ROUND, with the wall's own further reach reported beside it",
 			absf(float(engaged.get("exit", 0.0))
 					- (BORE_LENGTH + BOARD_HALF_THICKNESS)) < NUMERIC_TOLERANCE_MM
 				and absf(float(walled.get("exit", 0.0))
-					- (BORE_LENGTH + BOARD_HALF_THICKNESS + WALL_OVERRUN_MM))
+					- float(engaged.get("exit", 99.0))) < NUMERIC_TOLERANCE_MM
+				and absf(float(engaged.get("entry", 0.0))
+					- float(walled.get("entry", 99.0)) - WALL_OVERRUN_MM)
 					< NUMERIC_TOLERANCE_MM,
 			"engaged=%s wall=%s" % [str(engaged), str(walled)])
 
@@ -851,7 +856,7 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 	var expected := Vector3(HOLE_XY[0].x, HOLE_XY[0].y, BOARD_HALF_THICKNESS)
 	# The second check, if it ran at all, is in the MOVED frame: same world
 	# point, a local that differs by the shift taken back through the basis.
-	var second_row := _row_at(second, HOLE_XY[0])
+	var second_row := _row_at_world(second, _pose * expected)
 	var second_local := _local_of(second_row.get("seat_mm", {}))
 	var moved_expected: Vector3 = moved.affine_inverse() 		* (_pose * expected)
 	var second_ok := bool(second.get("busy", false)) 		or (not bool(second.get("checked", false))) 		or second_local.distance_to(moved_expected) < NUMERIC_TOLERANCE_MM
@@ -885,8 +890,12 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 	panel.checks_records = original
 
 	var after: Dictionary = later[0] if not later.is_empty() else {}
-	var after_row := _row_at(after, HOLE_XY[0])
+	var after_row := _row_at_world(after, _pose * expected)
 	var after_local := _local_of(after_row.get("seat_mm", {}))
+	# Going again on the new state does NOT move the seat's world point — the
+	# hole records the caller passed in are world millimetres and were never
+	# re-stated — so the observable is the local one: the same world point
+	# taken back through the poses the rebuild installed.
 	var rebuilt_expected: Vector3 = rebuilt.affine_inverse() \
 		* (_pose * expected)
 	check("poses: a check whose reference COLLIDERS were rebuilt under it "
@@ -894,8 +903,9 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 			+ "mixes new geometry with old poses",
 			not after.is_empty()
 				and (bool(after.get("stale", false))
-					or after_local.distance_to(rebuilt_expected)
-						< NUMERIC_TOLERANCE_MM)
+					or (not after_row.is_empty()
+						and after_local.distance_to(rebuilt_expected)
+							< NUMERIC_TOLERANCE_MM))
 				and after_local.distance_to(expected) > NUMERIC_TOLERANCE_MM,
 			"after=%s local=%s rebuilt_expected=%s" % [
 				str(after.get("stale", after.get("checked", "?"))),
@@ -1305,6 +1315,18 @@ func _row_at(report: Dictionary, xy: Vector2) -> Dictionary:
 		var row: Dictionary = entry
 		var seat := _local_of(row.get("seat_mm", {}))
 		if absf(seat.x - xy.x) < 0.05 and absf(seat.y - xy.y) < 0.05:
+			return row
+	return {}
+
+
+## The same row, found by the seat's WORLD point. The local frame is whatever
+## poses the reply was converted through, so it cannot identify a row in a
+## check that was re-posed under: only the world point stays put, because the
+## hole records the caller passed in are in world millimetres and unchanged.
+func _row_at_world(report: Dictionary, world: Vector3) -> Dictionary:
+	for entry in report.get("screws", []):
+		var row: Dictionary = entry
+		if _world_of(row.get("seat_mm", {})).distance_to(world) < 0.05:
 			return row
 	return {}
 

@@ -135,13 +135,17 @@ const NEIGHBOUR_PIN_HEIGHT := 6.0
 const RING_NODE := "Assembly/Ring"
 const PIN_NODE := "Assembly/Pin"
 
-## The layered stack: 40 plates two faces each is 80 crossings on one ray,
-## which is more than mesh_gauge's own crossing budget (64), so a parity
-## question asked from inside the stack cannot be answered at all.
-const STACK_PLATES := 40
+## The layered stack. A parity ray leaves the cube from INSIDE the stack, so
+## it only ever crosses the plates on ONE side of it — half the stack, two
+## faces each. With the cube in the middle gap of 80 plates that is 39 plates
+## above it and 78 crossings, more than mesh_gauge's own crossing budget (64),
+## so the parity question cannot be answered at all. The span is wide enough
+## that a ray tilted by the fixture's pose reaches the top of the stack
+## instead of leaving through its side and finishing early.
+const STACK_PLATES := 80
 const STACK_PLATE_MM := 0.2
 const STACK_PITCH_MM := 0.4
-const STACK_SPAN := 30.0
+const STACK_SPAN := 60.0
 ## The two identical blocks a buried cube is inside at the same time.
 const BLOCK_A := "block_a"
 const BLOCK_B := "block_b"
@@ -154,8 +158,8 @@ const STACK_NODE := "Assembly/Plates"
 ## 0.2 mm tall and the cube is half of that, so it clears each plate by
 ## 0.05 mm — a thousand times the module's touch epsilon.
 const GAP_CUBE_MM := 0.1
-## Plate 20 is centred on z = 0 (its top face at +0.1) and plate 21's underside
-## is at +0.3; the middle of that gap is +0.2.
+## Plate STACK_PLATES / 2 is centred on z = 0 (its top face at +0.1) and the
+## next plate's underside is at +0.3; the middle of that gap is +0.2.
 const GAP_CENTRE_Z := 0.2
 
 const POINT_TOLERANCE_MM := 0.05

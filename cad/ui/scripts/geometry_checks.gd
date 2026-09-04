@@ -82,6 +82,14 @@ const TOUCH_EPSILON_MM: float = 0.0001
 ## How far past a crossing the next cast starts. Large enough to clear the
 ## triangle just hit, small enough that it cannot step over a thin wall.
 const CROSSING_ADVANCE_MM: float = 0.0002
+## How far along the edge a crossing is probed to prove it PENETRATED rather
+## than grazed. Two coplanar faces meet along shared boundary edges, and an
+## edge of one body running in the other's surface crosses that boundary
+## squarely — a knife-edge contact with no volume behind it. The probe steps
+## off the crossing and asks whether there is material there. It must clear
+## the 0.002 mm sphere the parity gauge places, which is what sets the
+## smallest overlap this check can call interference.
+const PENETRATION_PROBE_MM: float = 0.005
 ## Crossings counted along one edge. An edge threading more walls than this is
 ## pathological; the crossings found still count as interference, and only the
 ## penetration measurement is given up.
@@ -249,10 +257,23 @@ func build_solid(mesh_data: Dictionary, ticket: int = 0) -> int:
 	for point in vertices:
 		_solid_bounds = _solid_bounds.expand(point)
 
-	# Edges are de-duplicated by their vertex pair so a shared edge is cast
-	# once rather than twice. The key packs the pair into one integer, which
-	# only works while the mesh has fewer vertices than the packing base.
-	var packable := vertices.size() < 1000000
+	# Edges are de-duplicated by the POSITIONS they join, not by the indices:
+	# a baked or worker-supplied mesh is usually a triangle soup in which two
+	# triangles sharing an edge each carry their own copies of its two
+	# vertices, so an index-keyed pair never collides and every edge would be
+	# cast twice. Positions are welded exactly — a pair that misses only
+	# duplicates a ray, never changes an answer.
+	var welded := {}
+	var weld_of := PackedInt32Array()
+	weld_of.resize(vertices.size())
+	for i in range(vertices.size()):
+		var point := vertices[i]
+		if not welded.has(point):
+			welded[point] = welded.size()
+		weld_of[i] = int(welded[point])
+	# The key packs the welded pair into one integer, which only works while
+	# the mesh has fewer distinct positions than the packing base.
+	var packable := welded.size() < 1000000
 	var seen := {}
 	var triangles := 0
 	for entry in raw_faces:
@@ -270,15 +291,15 @@ func build_solid(mesh_data: Dictionary, ticket: int = 0) -> int:
 		_solid_faces.append(vertices[c])
 		triangles += 1
 		for pair in [[a, b], [b, c], [c, a]]:
-			var lo: int = mini(int(pair[0]), int(pair[1]))
-			var hi: int = maxi(int(pair[0]), int(pair[1]))
+			var lo: int = mini(weld_of[int(pair[0])], weld_of[int(pair[1])])
+			var hi: int = maxi(weld_of[int(pair[0])], weld_of[int(pair[1])])
 			if packable:
 				var key := lo * 1000000 + hi
 				if seen.has(key):
 					continue
 				seen[key] = true
-			_solid_edges.append(vertices[lo])
-			_solid_edges.append(vertices[hi])
+			_solid_edges.append(vertices[int(pair[0])])
+			_solid_edges.append(vertices[int(pair[1])])
 	if triangles == 0:
 		return 0
 
@@ -575,6 +596,64 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 # Direction 1 — the solid's edges against the references
 # ---------------------------------------------------------------------------
 
+## Does the edge a→b actually pass THROUGH the surface this hit landed on?
+##
+## A face resting on a face is the case this exists for. Two coplanar faces
+## share a plane, so every edge of either one lies in the other's surface and
+## hits it all along its length, at points that are float luck rather than
+## geometry — and so does an edge that merely starts on that shared plane and
+## climbs away from it, which is what every side face of a seated part does.
+## None of those is a penetration. A real crossing straddles the plane of the
+## surface it crossed: one end of the edge is clear of it on one side, the
+## other end clear of it on the other. Sides are compared by sign only, so a
+## back-face hit — whose reported normal points the other way — reads the
+## same as a front-face one.
+func _straddles(a: Vector3, b: Vector3, point: Vector3, hit: Dictionary) -> bool:
+	var normal: Vector3 = hit.get("normal", Vector3.ZERO)
+	if normal.length_squared() <= 0.0:
+		# No usable plane. An unanswerable question must not quietly become
+		# "clean", so the hit stands.
+		return true
+	var unit := normal.normalized()
+	var from_a := (a - point).dot(unit)
+	var from_b := (b - point).dot(unit)
+	return from_a * from_b < 0.0 \
+		and absf(from_a) > TOUCH_EPSILON_MM \
+		and absf(from_b) > TOUCH_EPSILON_MM
+
+
+## Is there material of `node_path` a short step off this crossing, along the
+## edge that made it? A crossing where neither step lands in material is the
+## edge passing through the BOUNDARY of a face it is lying in — the shared rim
+## of a designed flush fit — and there is no overlap behind it to measure.
+func _penetrates_reference(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	direction: Vector3,
+	reference_name: String,
+	node_path: String
+) -> bool:
+	for step in [PENETRATION_PROBE_MM, -PENETRATION_PROBE_MM]:
+		if _inside_reference(gauge, state, point + direction * step,
+				reference_name, node_path):
+			return true
+	return false
+
+
+## The same question the other way round. An undecidable parity keeps the
+## crossing: a probe that could not be read must not quietly clear a part.
+func _penetrates_solid(
+	solid_state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	direction: Vector3
+) -> bool:
+	for step in [PENETRATION_PROBE_MM, -PENETRATION_PROBE_MM]:
+		if _parity_inside_solid(solid_state, point + direction * step) != 0:
+			return true
+	return false
+
+
 ## Every surface the segment a→b crosses, in order, as
 ## {point, node, reference, distance}. The walk re-casts from just past each
 ## hit, so an edge that goes in one face and out another reports both — which
@@ -606,8 +685,13 @@ func _cross_into_references(
 		var point: Vector3 = hit.get("position", Vector3.ZERO)
 		var travelled := a.distance_to(point)
 		# A crossing at either end of the edge is a touch, not a penetration:
-		# a face resting on a face meets exactly there.
-		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM:
+		# a face resting on a face meets exactly there. Neither is a hit the
+		# edge does not straddle — it lies in that surface, or climbs off it,
+		# rather than passing through.
+		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
+				and _straddles(a, b, point, hit) \
+				and _penetrates_reference(gauge, state, point, direction,
+					str(hit.get("reference", "")), str(hit.get("node", ""))):
 			out.append({
 				"point": point,
 				"node": str(hit.get("node", "")),
@@ -721,7 +805,9 @@ func _cross_into_solid(
 			return out
 		var point: Vector3 = hit.get("position", Vector3.ZERO)
 		var travelled := a.distance_to(point)
-		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM:
+		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
+				and _straddles(a, b, point, hit) \
+				and _penetrates_solid(solid_state, point, direction):
 			out.append(point)
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:
@@ -1264,22 +1350,19 @@ func _nothing(reason: String) -> Dictionary:
 
 ## One line for the panel's status banner, or "" when there is nothing to say.
 ## It names the FIRST offender rather than summarising: an enclosure is fixed
-## one collision at a time.
+## one collision at a time. A node whose containment could not be decided is
+## named too, WHETHER OR NOT anything else was found: an evaluation that
+## reports a pin and stays silent about the washer beside it reads on screen
+## as "the washer is fine", which is the one thing it does not know.
 func status_line(report: Dictionary) -> String:
+	var undecided: Array = report.get("undecidable", []) as Array
 	var pairs: Array = report.get("pairs", []) as Array
 	if int(report.get("count", 0)) <= 0 or pairs.is_empty():
-		# Nothing ran into anything, but a node whose containment could not be
-		# decided must not read on screen as a clean answer.
-		var undecided: Array = report.get("undecidable", []) as Array
 		if not undecided.is_empty():
 			var one: Dictionary = undecided[0]
-			var name := str(one.get("node", ""))
-			if name.is_empty():
-				name = str(one.get("reference", "the reference"))
 			return "Interference: undecided for %s%s — %s." % [
-				name,
-				" (and %d other)" % (undecided.size() - 1) \
-					if undecided.size() > 1 else "",
+				_undecided_name(one),
+				_undecided_others(undecided),
 				str(one.get("reason", "")),
 			]
 		return ""
@@ -1294,13 +1377,31 @@ func status_line(report: Dictionary) -> String:
 	var suffix := ""
 	if int(report.get("count", 0)) > 1:
 		suffix = " (and %d other node(s))" % (int(report.get("count", 0)) - 1)
-	return "Interference: the solid runs into %s/%s%s — %d point(s)%s." % [
+	var open_tail := ""
+	if not undecided.is_empty():
+		open_tail = " %s%s undecided." % [
+			_undecided_name(undecided[0]), _undecided_others(undecided)]
+	return "Interference: the solid runs into %s/%s%s — %d point(s)%s.%s" % [
 		str(first.get("reference", "")),
 		str(first.get("node", "")),
 		where,
 		int(report.get("point_count", 0)),
 		suffix,
+		open_tail,
 	]
+
+
+## What to call an undecided entry on the banner: its node, or the reference
+## when the record carried no node path.
+func _undecided_name(one: Dictionary) -> String:
+	var name := str(one.get("node", ""))
+	return name if not name.is_empty() \
+		else str(one.get("reference", "the reference"))
+
+
+func _undecided_others(undecided: Array) -> String:
+	return " (and %d other)" % (undecided.size() - 1) \
+		if undecided.size() > 1 else ""
 
 
 # ---------------------------------------------------------------------------

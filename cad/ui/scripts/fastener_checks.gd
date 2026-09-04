@@ -621,7 +621,7 @@ func _one_screw(
 		row["head_seat_rule"] = ("circumference coverage at one radius, not "
 			+ "bearing area: the fraction of a single ring of rays at "
 			+ "%.3f mm from the axis that met reference material within "
-			+ "%g mm of the seat plane, so an annular void inside that ring "
+			+ "%s mm of the seat plane, so an annular void inside that ring "
 			+ "is not seen") % [float(seat["radius_mm"]), RING_SPACING_MM]
 		if not head_seat_clear:
 			row["head_obstructions"] = head["obstructions"]
@@ -738,11 +738,11 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 			return {
 				"radial_mm": (hole_dia - screw_dia) * 0.5,
 				"hole_dia_mm": hole_dia,
-				"source": "ISO 273:1979 medium series, M%g -> %g mm"
+				"source": "ISO 273:1979 medium series, M%s -> %s mm"
 					% [screw_dia, hole_dia],
 			}
 	return {
-		"reason": "no ISO 273 medium clearance is tabulated for a %g mm screw, "
+		"reason": "no ISO 273 medium clearance is tabulated for a %s mm screw, "
 			% screw_dia + "and the series is not interpolated between; state "
 			+ "clearance_hole_dia_mm to grade the coaxiality",
 	}
@@ -1228,7 +1228,7 @@ func _agreement(bore: Dictionary, fitted: Array, direction: Vector3) -> Dictiona
 		"axis_angle_deg": angle,
 		"radius_delta_mm": (float(best["dia_mm"]) - float(bore["dia_mm"])) * 0.5,
 		"within_gate": offset <= AGREEMENT_CENTRE_MM and angle <= AGREEMENT_ANGLE_DEG,
-		"gate": "the fitted axis must sit within %g mm and %g degrees of the "
+		"gate": "the fitted axis must sit within %s mm and %s degrees of the "
 			% [AGREEMENT_CENTRE_MM, AGREEMENT_ANGLE_DEG]
 			+ "B-Rep axis; radius_delta_mm is the tessellation's chordal bias "
 			+ "and is reported, not graded",
@@ -1335,8 +1335,8 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 			"solid_features": loose_bores,
 			"reference_holes": loose_holes,
 			"rule": ("a bore is paired with the reference hole whose axis it "
-				+ "passes closest to, one to one; anything more than %g mm "
-				+ "off or %g degrees out is left unpaired rather than "
+				+ "passes closest to, one to one; anything more than %s mm "
+				+ "off or %s degrees out is left unpaired rather than "
 				+ "mispaired") % [PAIR_MAX_OFFSET_MM, PAIR_MAX_ANGLE_DEG],
 		},
 	}

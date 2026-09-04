@@ -252,9 +252,48 @@ SOLID_SOURCE = "part = translate([%f, %f, %f], cube(%f, %f, %f))" % (
 #: chord of a straight edge is the edge — so a cube can never show that the
 #: tolerance reached the mesher at all. A cylinder's facet count is a direct
 #: function of the deviation allowed.
+CURVED_RADIUS = BAR_HALF_WIDTH
 CURVED_SOLID_SOURCE = "part = translate([0, 0, %f], cylinder(r=%f, h=%f))" % (
-    GAP_MM, BAR_HALF_WIDTH, BAR_THICKNESS,
+    GAP_MM, CURVED_RADIUS, BAR_THICKNESS,
 )
+
+
+def _max_chord_deviation(source: str, tolerance_mm: float,
+                         radius_mm: float) -> float:
+    """The worst distance from a tessellated chord to the true cylinder.
+
+    The module's own tessellation, measured the way the error bar is defined:
+    for every chord of the LATERAL surface — a triangle whose plane is not
+    perpendicular to the axis, so the flat end caps (which are exact) are left
+    out — the midpoint of that chord lies inside the circle by
+    radius - hypot(x, y), and that is the sagitta the tolerance must bound.
+    """
+    import math as _math
+
+    import numpy as np
+
+    vertices, faces, _angular, _how = clr._prepare_solid(source, tolerance_mm)
+    points = np.asarray(vertices, dtype=float)
+    worst = 0.0
+    for triangle in faces:
+        corners = [points[int(index)] for index in triangle[:3]]
+        normal = np.cross(corners[1] - corners[0], corners[2] - corners[0])
+        length = float(np.linalg.norm(normal))
+        if length == 0.0:
+            continue
+        if abs(float(normal[2]) / length) > 0.9:
+            continue  # an end cap: planar, and tessellated exactly
+        for first, second in ((0, 1), (1, 2), (2, 0)):
+            start = points[int(triangle[first])]
+            end = points[int(triangle[second])]
+            if abs(_math.hypot(start[0], start[1]) - radius_mm) > 1.0e-6:
+                continue
+            if abs(_math.hypot(end[0], end[1]) - radius_mm) > 1.0e-6:
+                continue
+            middle = (start + end) * 0.5
+            worst = max(worst,
+                        radius_mm - _math.hypot(middle[0], middle[1]))
+    return worst
 
 
 class TestClearanceVerb:
@@ -295,15 +334,24 @@ class TestClearanceVerb:
         assert tight["pairs"][0]["node"] == "Assembly/Bar"
 
     def test_every_reply_states_the_tolerance_it_measured_at(self, tmp_path):
-        """The tolerance is what the mesher was GIVEN, not a label copied out.
+        """The tolerance is a BOUND the mesh keeps, not a label copied out.
 
-        ORACLE: the triangle count of a CURVED solid. Two tolerances an order
-        of magnitude apart cannot produce the same tessellation of a cylinder;
-        a reply whose counts match either ignored the parameter or reported a
-        number it did not measure at. The fixture solid is a box everywhere
-        else in this file, and a box is 12 triangles at every tolerance there
-        is — which would let this assertion pass on a reply that never reached
-        the mesher.
+        OCCT applies a linear deflection and an angular one together and the
+        finer of the two wins, so a fixed angular value quietly becomes the
+        real tolerance on a small curved face: this r = 2 cylinder came back
+        with the same 500 triangles at 0.05 and at 0.005 mm, and the stated
+        millimetres bounded nothing. The module therefore derives the angular
+        deflection from the linear one and the solid's own tightest curvature
+        — theta = 2*acos(1 - tol/r), the angle whose sagitta is the tolerance.
+
+        ORACLE, and it is the geometry itself: every chord of the tessellated
+        cylinder is measured against the true surface — the radius less the
+        distance of that chord's midpoint from the axis, which IS the sagitta
+        — and the largest of them must come in under the tolerance the reply
+        states. That is the promise T13 makes to a caller subtracting the
+        error bar from min_mm. The triangle counts must also differ, which is
+        what says the parameter reached the mesher at all; a box would pass
+        that half on 12 triangles at every tolerance there is.
         """
         pytest.importorskip("fcl")
         pytest.importorskip("build123d")
@@ -326,6 +374,16 @@ class TestClearanceVerb:
         assert fine["tessellation_tolerance_mm"] == 0.005
         assert "0.05" in coarse["bound"] and "0.005" in fine["bound"]
         assert fine["solid_triangles"] > coarse["solid_triangles"]
+        # The angular deflection is derived, and the reply says from what.
+        assert coarse["angular_deflection_deg"] > fine["angular_deflection_deg"]
+        assert "curved face" in coarse["angular_deflection_source"]
+
+        # And the mesh keeps the promise, measured against the true cylinder.
+        for tolerance in (0.05, 0.005):
+            deviation = _max_chord_deviation(CURVED_SOLID_SOURCE, tolerance,
+                                             CURVED_RADIUS)
+            assert deviation <= tolerance, (tolerance, deviation)
+            assert deviation > 0.0
 
     def test_pairs_come_back_closest_first(self, tmp_path):
         pytest.importorskip("fcl")

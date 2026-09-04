@@ -698,7 +698,7 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		"pass": pairs.all(func(p): return bool(p["pass"])),
 		"required_mm": required,
 		"tessellation_tolerance_mm": tolerance,
-		"bound": "the true clearance is at least min_mm - %g mm" % tolerance,
+		"bound": "the true clearance is at least min_mm - %s mm" % tolerance,
 		"solid_triangles": 12,
 		"engine": "stand-in for python-fcl",
 		"cache": {"hits": pairs.size(), "misses": 0, "entries": pairs.size()},

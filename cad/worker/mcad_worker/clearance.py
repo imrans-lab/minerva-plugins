@@ -52,6 +52,7 @@ clearance check must not have.
 from __future__ import annotations
 
 import hashlib
+import math
 import struct
 from collections import OrderedDict
 from typing import Any, Optional
@@ -76,6 +77,22 @@ MAX_CACHED_SOLIDS = 4
 #: below the tolerances an enclosure is designed to and still tessellates a
 #: shell in well under a second.
 DEFAULT_TOLERANCE_MM = 0.01
+
+#: Angular deflection used when nothing curved binds it, radians. OCCT applies
+#: BOTH deflections and the finer one wins, so a fixed angular value silently
+#: becomes the real tolerance on a small curved face: a cylinder of radius 2
+#: tessellated at 0.1 rad has a chord error of 2*(1-cos(0.05)) = 0.0025 mm
+#: whatever linear tolerance was asked for, and 0.05 and 0.005 produce the
+#: SAME mesh. The linear number would then be a promise the mesh does not
+#: keep, which is the one thing this module may not do.
+DEFAULT_ANGULAR_RAD = 0.1
+
+#: The finest angular deflection this module will ask for, radians — about a
+#: fifth of a degree, 1256 segments on a full turn. A huge radius with a tight
+#: tolerance would otherwise ask for a mesh nobody can hold in memory; when
+#: this floor binds, the reply says the chord error is bounded by the floor's
+#: own sagitta instead of by the tolerance.
+MIN_ANGULAR_RAD = 0.005
 
 
 class ClearanceError(Exception):
@@ -229,6 +246,95 @@ def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
 # The solid
 # ---------------------------------------------------------------------------
 
+def _angular_for(tolerance_mm: float, radius_mm: float) -> float:
+    """The angular deflection that holds a chord within `tolerance_mm`.
+
+    A chord subtending theta on a circle of radius r sits r*(1 - cos(theta/2))
+    inside it, so theta = 2*acos(1 - tol/r) is the largest step that keeps the
+    sagitta inside the tolerance. Below MIN_ANGULAR_RAD the answer is the
+    floor, and the caller is told what that costs.
+    """
+    if radius_mm <= 0.0:
+        return DEFAULT_ANGULAR_RAD
+    ratio = 1.0 - (tolerance_mm / radius_mm)
+    if ratio <= -1.0:
+        # A tolerance wider than the diameter: no angular limit is needed.
+        return DEFAULT_ANGULAR_RAD
+    angle = 2.0 * math.acos(min(1.0, ratio))
+    return max(MIN_ANGULAR_RAD, angle)
+
+
+def _curvature_radius(source: str) -> Optional[float]:
+    """The tightest radius in the solid, or None when nothing is curved.
+
+    Read straight off the B-Rep by the module that already reads B-Rep
+    surfaces. A runtime that cannot read it says so by returning None, and the
+    caller falls back to the mesh's own bounding box.
+    """
+    try:
+        from .features import FeatureError, smallest_curved_radius
+    except ImportError:
+        return None
+    try:
+        return smallest_curved_radius(source)
+    except FeatureError:
+        return None
+    except BaseException:  # noqa: BLE001 — a broken OCCT raises anything
+        return None
+
+
+def _bbox_radius(vertices) -> float:
+    """A radius from the mesh's own bounding box: half its smallest extent.
+
+    The fallback when the B-Rep cannot be read at all. It is a guess about
+    curvature nobody could measure, and the reply says so rather than claiming
+    the tolerance is bounded.
+    """
+    if len(vertices) == 0:
+        return 0.0
+    extents = vertices.max(axis=0) - vertices.min(axis=0)
+    smallest = float(min(float(value) for value in extents))
+    return smallest * 0.5
+
+
+def _prepare_solid(source: str, tolerance_mm: float,
+                   angular_param: Optional[float] = None):
+    """Tessellate the solid so the CHORD error really is within the tolerance.
+
+    Returns (vertices, faces, angular_rad, how). OCCT applies the linear and
+    the angular deflection together and the finer one wins, so the angular one
+    is derived from the linear one and the curvature it has to hold — which is
+    what makes `tessellation_tolerance_mm` a bound rather than a label. A
+    caller that states its own angular_tolerance is obeyed and told so.
+    """
+    if angular_param is not None:
+        vertices, faces = _solid_arrays(source, tolerance_mm, angular_param)
+        return vertices, faces, angular_param, "stated by the caller"
+
+    radius = _curvature_radius(source)
+    if radius is not None:
+        angular = _angular_for(tolerance_mm, radius)
+        vertices, faces = _solid_arrays(source, tolerance_mm, angular)
+        return (vertices, faces, angular,
+                "derived from the tightest curved face (radius %.4f mm)"
+                % radius)
+
+    # No curved face, or no B-Rep to read. Tessellate once at the default and
+    # look at what came out: a shape with no curvature is already exact, and
+    # one whose curvature could not be read gets a bounding-box radius, which
+    # is a guess — so the mesh is only rebuilt when that guess asks for a
+    # finer angle than the default.
+    vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
+    guess = _angular_for(tolerance_mm, _bbox_radius(vertices))
+    if guess < DEFAULT_ANGULAR_RAD:
+        vertices, faces = _solid_arrays(source, tolerance_mm, guess)
+        return (vertices, faces, guess,
+                "derived from the mesh's own bounding box, because the "
+                "B-Rep's curvature could not be read")
+    return (vertices, faces, DEFAULT_ANGULAR_RAD,
+            "the default: no curved face was found to bind it")
+
+
 def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
     """Tessellate the DSL source at `tolerance` and return (vertices, faces).
 
@@ -314,7 +420,11 @@ def clearance(params: dict) -> dict:
       source                   .mcad DSL text; the solid is tessellated here.
       required_mm              the clearance being asked for.
       tolerance_mm             tessellation deviation for the measurement.
-      angular_tolerance        tessellation angular deviation.
+      angular_tolerance        radians; optional. Omit it and the module
+                               derives the angular deflection from
+                               tolerance_mm and the solid's own tightest
+                               curvature, which is what makes the linear
+                               number a real bound.
       targets                  [{reference, node, key, path?}] — one entry per
                                reference node, already scoped by the panel.
 
@@ -333,7 +443,8 @@ def clearance(params: dict) -> dict:
     try:
         required_mm = float(params.get("required_mm", 0.0))
         tolerance_mm = float(params.get("tolerance_mm", DEFAULT_TOLERANCE_MM))
-        angular = float(params.get("angular_tolerance", 0.1))
+        stated_angular = params.get("angular_tolerance")
+        angular = None if stated_angular is None else float(stated_angular)
     except (TypeError, ValueError) as exc:
         return _error(f"clearance received a non-numeric parameter: {exc}")
     if tolerance_mm <= 0.0:
@@ -374,7 +485,8 @@ def clearance(params: dict) -> dict:
                 },
             }
 
-        solid_vertices, solid_faces = _solid_arrays(source, tolerance_mm, angular)
+        solid_vertices, solid_faces, angular_rad, angular_how = _prepare_solid(
+            source, tolerance_mm, angular)
         solid_tree = _build_tree(solid_vertices, solid_faces)
 
         pairs = []
@@ -413,9 +525,16 @@ def clearance(params: dict) -> dict:
             "pass": all(p["pass"] for p in pairs),
             "required_mm": required_mm,
             "tessellation_tolerance_mm": tolerance_mm,
+            # OCCT applies both deflections and the finer one wins, so the
+            # angular one is part of the promise the linear one makes.
+            "angular_deflection_deg": math.degrees(angular_rad),
+            "angular_deflection_source": angular_how,
             "bound": ("the solid is measured as a mesh tessellated to within "
-                      "%g mm of its true surface, so the true clearance is at "
-                      "least min_mm - %g mm" % (tolerance_mm, tolerance_mm)),
+                      "%g mm of its true surface (chords stepped by at most "
+                      "%.3f degrees, %s), so the true clearance is at least "
+                      "min_mm - %g mm"
+                      % (tolerance_mm, math.degrees(angular_rad), angular_how,
+                         tolerance_mm)),
             "solid_triangles": int(len(solid_faces)),
             "cache": {
                 "hits": hits,
