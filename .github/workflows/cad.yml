@@ -169,6 +169,23 @@ jobs:
             exit 1
           fi
 
+      # Run the cadruntime tests against the REAL bundle, on EVERY package leg
+      # (mirrors pcb.yml's "Go test pcbruntime (real bundle)"). This is the
+      # only place those tests can mean anything: cad tracks no placeholder
+      # bundle files, so the package leg is where a real bundle exists at all,
+      # and the bytes under test are the bytes that ship for the HOST arch of
+      # the runner. On macos-universal that is the arm64 bundle only: go test
+      # compiles one embed_darwin_* tag, so the amd64 half of the lipo build is
+      # not covered here. A corrupt, truncated, or sidecar-mispaired bundle
+      # fails THIS job instead of a user machine — where it surfaces as an
+      # opaque sha-mismatch or zstd decode error on first launch.
+      #
+      # Deliberately not folded into the linux-only `go test ./...` below: the
+      # macOS and Windows legs build their own bundles, and those are exactly
+      # the ones no other step ever verifies.
+      - name: Go test cadruntime (real bundle)
+        run: go test -count=1 ./internal/cadruntime/
+
       - name: Go test (linux-x86_64 only — Linux is the source of truth)
         if: matrix.target == 'linux-x86_64'
         env:
@@ -223,6 +240,81 @@ jobs:
           path: cad/dist/cad-*-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+  panel:
+    name: cad panel (GD suite-registry compatibility ONLY — nothing executes)
+    # ============================================================
+    # THIS JOB IS NOT A BUILD CHECK AND NOT A TEST. READ THIS BEFORE
+    # TREATING IT AS EITHER.
+    # ============================================================
+    # Same shape, and the same narrow claim, as pcb.yml's `panel` job — see
+    # its header for the long version of why CI does not RUN the GDScript
+    # suites. Short version: the suites need a Minerva `src/` host with its
+    # NATIVE GDEXTENSIONS BUILT, a plain actions/checkout has no src/bin/ at
+    # all, and building three toolchains for another repo on every push to run
+    # a suite CI is not supposed to be running was measured (pcb, commit
+    # 014b6d7) to produce five consecutive red runs that told nobody anything.
+    #
+    # What this job certifies is SUITE-REGISTRY AND HOST-CONTRACT
+    # COMPATIBILITY: the pinned host exists and carries every file
+    # cad/tests/gd/REQUIRED_HOST_FILES names, the sibling layout the suites'
+    # res:// preloads hardcode is correct, and the suite set on disk matches
+    # cad/tests/gd/EXPECTED_SUITES in BOTH directions — a suite deleted or
+    # renamed while still listed, and a suite added to disk without being
+    # registered. That last pair is the point: the runner's suite list is a
+    # bare `test_*.gd` glob, so without the manifest a deleted suite is a
+    # smaller GREEN run rather than a failure.
+    #
+    # A .gd file can be syntactically invalid, fail to preload, or regress
+    # behaviourally while its filename sits in EXPECTED_SUITES and this job
+    # stays green. Execution is a LOCAL gate: cad/scripts/run-gd-tests.sh
+    # without --preflight-only.
+    #
+    # It reaches the check through the runner's own --preflight-only flag
+    # rather than reimplementing it, so local and CI cannot drift: one
+    # implementation, and since T0 one implementation shared with pcb.
+    # No Godot is downloaded — everything checked is filesystem state.
+    runs-on: ubuntu-22.04
+    env:
+      # Pinned to a commit, not a moving branch: a third-party repo changing
+      # underneath us must not turn cad red without someone choosing that.
+      # THIS IS `development`, NOT `main` — Minerva's default branch is ~a year
+      # stale and the plugin system does not exist there. Same SHA pcb.yml
+      # pins; if you bump it, bump both and re-check the files listed in each
+      # plugin's tests/gd/REQUIRED_HOST_FILES still exist at the new SHA.
+      MINERVA_SHA: "8cc7ace5d916f79ebfe987b22cfd36a69979572d"
+    steps:
+      - name: Checkout minerva-plugins
+        uses: actions/checkout@v4
+
+      # Minerva must end up as a SIBLING of the minerva-plugins checkout: the
+      # suites preload `res://../../minerva-plugins/cad/...` resolved from
+      # <minerva>/src, so <minerva>/../minerva-plugins has to exist. On a
+      # runner the workspace is /home/runner/work/minerva-plugins/minerva-plugins,
+      # so the sibling slot is $GITHUB_WORKSPACE/../Minerva. It CANNOT be
+      # checked out there directly — actions/checkout rejects any `path`
+      # outside $GITHUB_WORKSPACE — so clone inside and relocate.
+      - name: Checkout Minerva (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: turnrocklabs/Minerva
+          ref: ${{ env.MINERVA_SHA }}
+          path: _minerva_host
+
+      - name: Place Minerva beside minerva-plugins
+        working-directory: ${{ github.workspace }}
+        run: mv _minerva_host "$GITHUB_WORKSPACE/../Minerva"
+
+      # WHAT THIS FAILS ON, i.e. what "not in a testable state" means:
+      #   - the pinned Minerva host is missing or lacks src/project.godot
+      #   - a host file cad/tests/gd/REQUIRED_HOST_FILES names is absent at the
+      #     pinned SHA (the suites preload them by res:// path, so a bumped SHA
+      #     that drops one breaks the harness rather than the code)
+      #   - the sibling layout res://../../minerva-plugins/... hardcodes is wrong
+      #   - a suite was deleted or renamed and is still in EXPECTED_SUITES
+      #   - a suite was added to disk and NOT registered in EXPECTED_SUITES
+      - name: Pre-flight the GD suite registry and host wiring
+        run: bash cad/scripts/run-gd-tests.sh --preflight-only ../Minerva
 
   release:
     name: Publish release

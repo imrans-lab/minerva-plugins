@@ -7,6 +7,19 @@ runner script and no CI job invoking `godot` anywhere in this repo. This
 document + `pcb/scripts/run-gd-tests.sh` + the `panel` job in
 `.github/workflows/pcb.yml` fix that.
 
+**The runner is shared.** `pcb/scripts/run-gd-tests.sh` is a one-line wrapper
+over `scripts/run-gd-tests.sh` at the repo root, which cad (and any later
+plugin with a `tests/gd/`) uses through its own wrapper. The whole pass/fail
+contract described below therefore has exactly one implementation. Everything
+plugin-specific is data beside the suites:
+
+| file | role |
+| --- | --- |
+| `pcb/tests/gd/EXPECTED_SUITES` | the pinned suite manifest |
+| `pcb/tests/gd/KNOWN_HARNESS_DIAGNOSTICS` | the fatal-diagnostic allowlist |
+| `pcb/tests/gd/REQUIRED_HOST_FILES` | host paths beyond `src/project.godot` that the suites preload |
+| `pcb/scripts/probe-worker-methods.py` | the stale-bundle probe, run only for `real-worker` suites |
+
 ## Why a Minerva checkout is required
 
 Every test is `extends SceneTree` and is invoked as `godot --headless

@@ -1,0 +1,10 @@
+# Host files cad's suites cannot load without, as paths relative to the
+# Minerva checkout root, checked by scripts/run-gd-tests.sh before Godot
+# starts. src/project.godot is required for every plugin and is checked
+# unconditionally by the runner, so it is not repeated here.
+#
+# cad's suites currently need NOTHING beyond it: orbit_camera.gd is a
+# self-contained Camera3D and the suite drives it directly, without the
+# host's plugin-panel driver helpers. This file exists to say that on
+# purpose — a suite that starts preloading res://test/helpers/... adds its
+# line here so a Minerva SHA bump that drops the helper fails by name.

@@ -1,0 +1,16 @@
+# Host files these suites cannot load without, as paths relative to the
+# Minerva checkout root. scripts/run-gd-tests.sh checks every one of them
+# before it starts Godot (and under --preflight-only, which is what CI runs),
+# so a bumped Minerva SHA that drops a helper fails by NAME instead of as an
+# opaque "Cannot open file res://..." twenty lines into the first suite.
+#
+# src/project.godot is required for every plugin and is checked
+# unconditionally by the runner; it is not repeated here.
+#
+# Both driver helpers are generic Minerva test scaffolding, not pcb's: 9
+# relocated suites preload plugin_panel_driver.gd and 7 preload
+# panel_tool_registry_driver.gd (round 019f70a26607). They live in the host
+# because they drive host-side plugin panels; this file only records that pcb
+# depends on them.
+src/test/helpers/plugin_panel_driver.gd
+src/test/helpers/panel_tool_registry_driver.gd

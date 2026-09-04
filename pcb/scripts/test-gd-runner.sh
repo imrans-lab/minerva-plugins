@@ -8,6 +8,10 @@
 # Usage:
 #   pcb/scripts/test-gd-runner.sh <path-to-minerva-checkout>
 #
+# It drives pcb's wrapper, so what it certifies is the SHARED runner at
+# scripts/run-gd-tests.sh — the same implementation cad and every later plugin
+# run. A change to that script is not done until this script exits 0.
+#
 # Each case plants a defective (or healthy) suite into a sandbox dir and
 # points run-gd-tests.sh at it via RUN_GD_TESTS_SUITE_DIR (the runner's
 # documented self-test seam). The sandbox lives INSIDE the minerva-plugins
@@ -210,6 +214,19 @@ cat > "${d}/EXPECTED_SUITES" <<'EOF_M'
 test_selftest_ok4.gd assertions=1 assertions=2
 EOF_M
 _case "dup-attr" nonzero "repeats the assertions= attribute"
+
+# ── case 9: every registered suite deleted — the empty glob must still name
+# the missing suite, not the directory. The runner used to short-circuit an
+# empty glob with "no test_*.gd files found in <dir>": true, but it named the
+# wrong thing, and for a plugin with a single suite (cad) deleting that suite
+# produced exactly that message instead of the suite's name.
+d="${SANDBOX_ROOT}/all-deleted"; mkdir -p "${d}"
+cat > "${d}/EXPECTED_SUITES" <<'EOF_M'
+test_selftest_deleted.gd assertions=1
+EOF_M
+# The suite name appears in the output ONLY in the by-name "missing on disk"
+# listing, so matching it is matching the acceptance.
+_case "all-deleted" nonzero "test_selftest_deleted\.gd"
 
 echo
 if [ "${fails}" -gt 0 ]; then

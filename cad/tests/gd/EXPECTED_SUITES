@@ -1,0 +1,25 @@
+# Manifest of the gd test suites scripts/run-gd-tests.sh MUST find under
+# cad/tests/gd/. Line format (v2, shared with pcb/tests/gd/EXPECTED_SUITES):
+#
+#     <filename> [assertions=N] [real-worker]
+#
+# - <filename>: exactly as it appears on disk. A suite going missing
+#   (deleted, renamed, moved off the glob) or appearing unregistered is a
+#   loud, named pre-flight failure in both directions.
+# - assertions=N: the suite must report exactly N total assertions
+#   (passed+failed). This is what makes `check(true); quit(0)` planted above
+#   the real assertions FAIL instead of passing a bare `n_pass > 0` floor.
+#   When a suite legitimately grows or shrinks, re-pin here in a deliberate,
+#   reviewed own-commit — the same act as registering the suite.
+# - real-worker: the suite's Results line must prove real_worker_used=true.
+#   No cad suite uses it yet; the runner refuses the attribute until
+#   cad/scripts/probe-worker-methods.py exists, because the attribute is a
+#   claim about a live worker and an unprobed worker cannot back it.
+#
+# This file is deliberately NOT named test_*.gd (it must not match the
+# runner's own `test_*.gd` glob) and NOT executable GDScript.
+
+# Two controls (a normal middle-drag orbits; a received release stops the
+# orbit) plus the repro (a LOST middle-button release must not strand the
+# camera in orbit).
+test_orbit_camera_stuck.gd assertions=3

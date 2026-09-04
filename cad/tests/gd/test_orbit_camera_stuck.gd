@@ -5,20 +5,20 @@ extends SceneTree
 ## Tracks docket: RCA 019e4ca28aaf (CAD camera stuck in orbit) / W1 019e4ca3494f.
 ##
 ## Run:
-##   godot --headless --path ~/github/Minerva/src \
-##     --script ~/github/plugins/cad/test/test_orbit_camera_stuck.gd
+##   cad/scripts/run-gd-tests.sh <path-to-minerva-checkout>
 ##
 ## FAIL-FIRST: the "lost release" scenario FAILS on the current orbit_camera.gd
 ## — handle_pointer_input keeps _dragging_orbit latched and orbits on every
 ## later motion — and PASSES once the W2 fix reconciles the latch against
 ## InputEventMouseMotion.button_mask.
 ##
-## orbit_camera.gd is a self-contained Camera3D (no Minerva deps); loaded by
-## absolute path so the test can run under Minerva's project, mirroring the
-## presentation plugin's test convention.
+## orbit_camera.gd is a self-contained Camera3D (no Minerva deps). It is
+## reached through the same `res://../../minerva-plugins/...` path every pcb
+## suite uses: the host runs with `--path <minerva>/src`, so ../.. climbs out
+## of the Minerva checkout and back down into this plugin repo beside it. The
+## runner refuses to start unless that sibling layout actually holds.
 
-var OrbitCameraScript: Script = load(
-	OS.get_environment("HOME").path_join("github/plugins/cad/ui/scripts/orbit_camera.gd"))
+const OrbitCameraScript := preload("res://../../minerva-plugins/cad/ui/scripts/orbit_camera.gd")
 
 var _pass: int = 0
 var _fail: int = 0
@@ -26,10 +26,6 @@ var _fail: int = 0
 
 func _init() -> void:
 	print("=== CAD Orbit Camera Stuck-Latch Regression Test (RCA 019e4ca28aaf) ===\n")
-	if OrbitCameraScript == null:
-		printerr("FAIL: could not load orbit_camera.gd")
-		quit(1)
-		return
 	_run()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:

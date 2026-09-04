@@ -1,0 +1,55 @@
+# Known-harness fatal-diagnostic allowlist for scripts/run-gd-tests.sh
+# running cad's suites. One extended-regex pattern per line, matched against
+# composite records of the form
+#
+#     <diagnostic line> @@ <its `at:` location line>
+#
+# built from each suite's captured output. Every `SCRIPT ERROR:` and
+# `ERROR: Failed to load script` record that matches NO pattern here FAILS
+# the suite that printed it, even when its Results line is green. So each
+# entry is a claim: "this diagnostic is the HOST HARNESS's, not the suite's"
+# — and each needs its proof written next to it. A pattern added to silence a
+# red run is the same act as deleting the assertion that failed.
+#
+# The file must contain at least one pattern. An allowlist of only comments
+# is refused by the runner rather than treated as "nothing allowlisted":
+# GNU grep reads an EMPTY -f pattern file as matching every line, so a
+# pattern-less allowlist would filter out all diagnostics and silently
+# disarm the entire check — the exact fail-open the layer exists to prevent.
+#
+# THE DOUBLE-LOAD QUIRK the compile-noise entries stem from: godot
+# --headless --script <suite.gd> loads the script TWICE. The first load
+# happens before the host project's autoloads register, so any script in the
+# preload chain that names SingletonObject fails to compile, cascading
+# "Failed to compile depended scripts." records up through the suite file,
+# ending in one "Failed to load script ... with error 'Compilation failed'".
+# The second load, after autoloads register, succeeds. A suite that is
+# GENUINELY broken fails both loads and never prints a Results line, which
+# the runner's Results floor already fails — so these patterns can never
+# bless a suite that did not actually run.
+
+# -- double-load pass-1 compile noise -----------------------------------------
+# Pinned to the autoload name AND to host-side scripts (res://Scripts/) — an
+# "Identifier not found" for anything else, or at a plugin/test path, is a
+# real defect and must fail.
+^SCRIPT ERROR: Compile Error: Identifier not found: SingletonObject @@ at: GDScript::reload \(res://Scripts/
+
+# The cascade ("this script failed because a dependency did"). Location is
+# deliberately unpinned: the cascade legitimately walks through the suite
+# file itself. Safe because a cascade NEVER appears without its root-cause
+# record, and only the SingletonObject root above is blessed — any other root
+# (a Parse Error in a suite, an unknown identifier in a panel script) still
+# fails on its own record.
+^SCRIPT ERROR: Compile Error: Failed to compile depended scripts\. @@ at: GDScript::reload \(
+
+# The pass-1 terminal record. Only the "Compilation failed" flavor is
+# blessed — 'with error "Parse error"' (what a genuinely unparseable suite
+# prints) is NOT.
+^ERROR: Failed to load script ".*" with error "Compilation failed"\. @@ at: load \(modules/gdscript/gdscript\.cpp:
+
+# -- headless-host startup noise ----------------------------------------------
+# SingletonObject.initialize_plugins tries to .new() plugin scripts that do
+# not compile in the headless host (other installed plugins' UI scripts) —
+# host startup noise present in every suite's log regardless of what the
+# suite does. Pinned to the exact function+file.
+^SCRIPT ERROR: Invalid call\. Nonexistent function 'new' in base 'GDScript'\. @@ at: initialize_plugins \(res://Scripts/Models/singleton_object\.gd:
