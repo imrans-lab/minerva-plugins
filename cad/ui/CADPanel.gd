@@ -568,6 +568,20 @@ func get_reference_selection() -> Dictionary:
 	return _reference_selection.get_selection()
 
 
+## Duck-typed hook used by Minerva's annotation-tool bridge. An armed overlay
+## owns pointer input, so a user who has not selected the foreign surface yet
+## needs an actionable warning in the annotation dock (visible in every CAD
+## layout), not only instructions in the wide reference sidebar.
+func get_annotation_tool_status(tool: Object) -> String:
+	if tool == null or get_reference_state().is_empty():
+		return ""
+	var selection := get_reference_selection()
+	if not selection.is_empty() and not bool(selection.get("stale", false)):
+		return ""
+	return "Reference clicks are unavailable while an annotation tool is armed. " \
+		+ "Turn the tool off, click the reference point, then arm it again."
+
+
 ## Select a reference node by name (and optionally a point in its own frame),
 ## the MCP half of clicking one. Returns {} when it is not mounted.
 func select_reference_node(reference: String, node_name: String, local_point: Variant = null) -> Dictionary:

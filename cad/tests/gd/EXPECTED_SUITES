@@ -59,7 +59,7 @@ test_mesh_import.gd assertions=37
 # sense of every feature, a pixel-less probe, and the ray-grid fallback's
 # limits). Plus two plate stacks sharing a face: the coincident triangles are
 # two crossings, so a pin in open air beyond them still fits.
-test_mesh_measurement.gd assertions=69
+test_mesh_measurement.gd assertions=70
 
 # The measurement VERBS through PanelTools.handle, on a two-plate stack with
 # one pair of drills through both plates and a boss on top, posed by a
@@ -103,7 +103,7 @@ test_reference_failures.gd assertions=30
 # stale — not crashing — when the
 # reference leaves the document, and the two selections coexisting: the picker
 # is a plain Node that only ever sees input the edge overlay did not take.
-test_reference_selection.gd assertions=46
+test_reference_selection.gd assertions=48
 
 # Save-to-note and back: the real panel scene is set up, saved as a
 # plugin_data note, freed the way closing a tab frees it, and a second,

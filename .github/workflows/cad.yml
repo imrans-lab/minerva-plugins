@@ -171,9 +171,9 @@ jobs:
 
       # Run the cadruntime tests against the REAL bundle, on EVERY package leg
       # (mirrors pcb.yml's "Go test pcbruntime (real bundle)"). This is the
-      # only place those tests can mean anything: cad tracks no placeholder
-      # bundle files, so the package leg is where a real bundle exists at all,
-      # and the bytes under test are the bytes that ship for the HOST arch of
+      # only place those tests validate release bytes: a source checkout has
+      # empty placeholders, while the package leg replaces them with a real
+      # bundle. The bytes under test are the bytes that ship for the HOST arch of
       # the runner. On macos-universal that is the arm64 bundle only: go test
       # compiles one embed_darwin_* tag, so the amd64 half of the lipo build is
       # not covered here. A corrupt, truncated, or sidecar-mispaired bundle

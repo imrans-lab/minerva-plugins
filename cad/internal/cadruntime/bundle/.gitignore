@@ -2,8 +2,9 @@
 # scripts/build-python-runtime-bundle.sh and consumed by go:embed in
 # embed_<triple>.go. The bundles are large (~150-250MB) and per-platform;
 # CI rebuilds them per matrix leg.  Empty placeholders for every target are
-# tracked so go:embed can compile in a fresh clone; real bundle output is
-# ignored by the size-aware rules below.
+# tracked so go:embed can compile in a fresh clone. Bundle builds overwrite
+# these tracked files locally; README.md explains why that output must not be
+# committed.
 
 *.tar.zst
 *.sha256

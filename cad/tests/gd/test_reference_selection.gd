@@ -129,12 +129,27 @@ func _run() -> void:
 	_prepare_top_camera()
 
 	_test_the_nodes_are_listed()
+	_test_annotation_tool_explains_reference_click_constraint()
 	await _test_two_branches_can_share_a_leaf_name()
 	_test_a_click_selects_the_node_under_it()
 	await _test_the_mcp_path_reads_the_click_back()
 	await _test_the_click_normal_is_stored_in_the_reference_frame()
 	await _test_a_point_anchor_follows_its_reference()
 	_test_edge_selection_and_node_selection_do_not_fight()
+
+
+# ---------------------------------------------------------------------------
+# Annotation-tool input ownership
+# ---------------------------------------------------------------------------
+
+func _test_annotation_tool_explains_reference_click_constraint() -> void:
+	var armed_tool := RefCounted.new()
+	check("an armed annotation tool explains why reference clicks are unavailable",
+			not _panel.get_annotation_tool_status(armed_tool).is_empty())
+	_panel.select_reference_node("ref1", "Plate")
+	check("the annotation warning disappears once a reference point is selected",
+			_panel.get_annotation_tool_status(armed_tool).is_empty())
+	_panel._reference_selection.clear_selection()
 
 
 # ---------------------------------------------------------------------------

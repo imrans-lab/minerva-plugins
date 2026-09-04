@@ -398,6 +398,45 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 	check("gauge: four holes go through and the blind pocket does not",
 			through_count == 4 and not bool((holes[4] as Dictionary).get("through", true)),
 			"through count = %d" % through_count)
+
+	# Godot exposes only 32 collision-layer bits. The target deliberately lands
+	# after 32 other references and a blocker occupies the old saturated layer;
+	# reference scoping must still exclude that blocker by RID.
+	var many_bodies: Array = []
+	var blocker := BoxMesh.new()
+	blocker.size = Vector3(2.0, 20.0, 2.0)
+	for i in range(31):
+		many_bodies.append({
+			"mesh": blocker,
+			"transform": Transform3D(Basis.IDENTITY, Vector3(10000.0 + i * 100.0, 0.0, 0.0)),
+			"node": "far-%d" % i,
+			"reference": "far-%d" % i,
+		})
+	var first_hole_world: Vector3 = _pose * (HOLES[0]["center"] as Vector3)
+	many_bodies.append({
+		"mesh": blocker,
+		"transform": Transform3D(_pose.basis, first_hole_world),
+		"node": "blocker",
+		"reference": "overflow-blocker",
+	})
+	many_bodies.append({
+		"mesh": baked,
+		"transform": _pose,
+		"node": "plate",
+		"reference": "target",
+	})
+	gauge.build(many_bodies, "fixture|over-32-references")
+	var isolated: Dictionary = await gauge.submit("measure_holes", {
+		"candidates": [posed[0]],
+		"reference": "target",
+	})
+	var isolated_holes: Array = isolated.get("holes", [])
+	check("gauge: reference scoping stays isolated beyond 32 mounted references",
+			isolated_holes.size() == 1
+				and bool((isolated_holes[0] as Dictionary).get("verified", false))
+				and float((isolated_holes[0] as Dictionary).get("gauge_dia_mm", 0.0)) > 3.0,
+			"scoped result = %s" % str(isolated))
+	gauge.build(bodies, "fixture|v1")
 	var pocket_depth := float(HOLES[4]["depth"])
 	check("gauge: the blind pocket's depth is measured, not assumed",
 			absf(float((holes[4] as Dictionary).get("depth_mm", 0.0)) - pocket_depth) < 0.1,

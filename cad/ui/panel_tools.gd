@@ -225,7 +225,7 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 		var measured: Dictionary = await gauge.call("submit", "measure_holes", {
 			"candidates": posed,
 			"mask": _scope_mask(gauge, args, record),
-			"reference": str(args.get("reference", "")),
+			"reference": str(record.get("name", "")),
 		})
 		if measured.has("error"):
 			return _err(str(measured["error"]))
@@ -303,7 +303,7 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 			var mask := _scope_mask(gauge, args, record)
 			var holes: Dictionary = await gauge.call(
 				"submit", "measure_holes", {"candidates": concave, "mask": mask,
-				"reference": str(args.get("reference", ""))})
+				"reference": str(record.get("name", ""))})
 			if holes.has("error"):
 				return _err(str(holes["error"]))
 			for hole in holes.get("holes", []):
@@ -312,7 +312,7 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 			var convex_mask := _scope_mask(gauge, args, record)
 			var bosses: Dictionary = await gauge.call(
 				"submit", "measure_convex", {"candidates": convex, "mask": convex_mask,
-				"reference": str(args.get("reference", ""))})
+				"reference": str(record.get("name", ""))})
 			if bosses.has("error"):
 				return _err(str(bosses["error"]))
 			for boss in bosses.get("cylinders", []):
@@ -779,7 +779,7 @@ static func _seed_candidates(gauge: Node, record: Dictionary, args: Dictionary) 
 		"axis": axis,
 		"pitch_mm": float(args.get("pitch_mm", FALLBACK_PITCH_MM)),
 		"mask": _scope_mask(gauge, args, record),
-		"reference": str(args.get("reference", "")),
+		"reference": str(record.get("name", "")),
 	})
 	var out: Array = []
 	var half_extent := _extent_along(bounds, axis) * 0.5
@@ -940,9 +940,9 @@ static func _scope_mask(gauge: Node, args: Dictionary, record: Dictionary) -> in
 	return _mask_for(gauge, str(record.get("name", "")))
 
 
-## Compatibility mask for the gauge. The actual scope travels as `reference`
-## in each submitted job, which lets the gauge exclude other references without
-## spending a finite collision layer per mesh.
+## Collision mask for the common one-layer-per-reference path. The reference
+## name also travels in each job so the gauge can exclude peers if the final
+## Godot collision layer is shared by more than one reference.
 static func _mask_for(gauge: Node, reference_name: String) -> int:
 	if gauge == null or not gauge.has_method("mask_for"):
 		# Every layer. A zero mask would report a fit everywhere.
