@@ -933,7 +933,13 @@ func _node_matches(node_path: String, filter: String) -> bool:
 
 
 func _pose_for(reference_name: String) -> Transform3D:
-	for entry in _records:
+	return _pose_in(_records, reference_name)
+
+
+## The pose a named reference carries in `records`. Split out so the clearance
+## path can work from its own snapshot rather than the module's.
+func _pose_in(records: Array, reference_name: String) -> Transform3D:
+	for entry in records:
 		var record: Dictionary = entry
 		if str(record.get("name", "")) == reference_name:
 			return record.get("pose", Transform3D.IDENTITY)
@@ -1039,6 +1045,15 @@ const BLOB_MAGIC: String = "MCADMESH"
 const BLOB_VERSION: int = 1
 const BLOB_DIR_NAME: String = "minerva-cad-clearance"
 
+## The host caps a panel-to-plugin payload at 64 KiB
+## (PluginScenePanelBroker.MAX_PAYLOAD_BYTES), measured as the JSON length of
+## the payload it receives. The margin covers the difference between the
+## caller's stringification and the broker's — float formatting need not agree
+## byte for byte — and a request over the cap is refused by the host as
+## payload_too_large, which says nothing about clearances.
+const IPC_PAYLOAD_LIMIT_BYTES: int = 65536
+const IPC_PAYLOAD_MARGIN_BYTES: int = 2048
+
 ## What this panel has extracted, keyed by reference/node. Each entry holds the
 ## digest, the pose it was extracted under and the mesh it came from, so an
 ## unchanged reference is not walked again on the next evaluation.
@@ -1055,13 +1070,35 @@ func set_blob_dir(path: String) -> void:
 	_blob_dir = path
 
 
+## Each panel gets its OWN subdirectory. Blobs are content-addressed, so two
+## panels showing the same board write identical bytes to identical names —
+## but the sweep below knows only about THIS module's references, so a shared
+## directory means one document's check deletes another document's blobs, and
+## a sweep landing between a peer's write and the worker's read turns into a
+## "cannot read mesh blob" on a check that was about to succeed.
 func get_blob_dir() -> String:
 	if _blob_dir.is_empty():
 		var base := OS.get_cache_dir()
 		if base.is_empty():
 			base = OS.get_user_data_dir()
-		_blob_dir = base.path_join(BLOB_DIR_NAME)
+		_blob_dir = base.path_join(BLOB_DIR_NAME) \
+			.path_join("panel-%d" % get_instance_id())
 	return _blob_dir
+
+
+## Delete this panel's blob directory. Called when the panel goes away: the
+## sweep only ever runs during an upload, so without this a closed document's
+## blobs would sit in the cache until some later document happened to write
+## over the same directory — which, now that each panel owns its own, would
+## never happen.
+func release() -> void:
+	var directory := get_blob_dir()
+	_blobs.clear()
+	if not DirAccess.dir_exists_absolute(directory):
+		return
+	for name in DirAccess.get_files_at(directory):
+		DirAccess.remove_absolute(directory.path_join(name))
+	DirAccess.remove_absolute(directory)
 
 
 ## minerva_cad_check_clearance — the minimum distance between the solid and
@@ -1098,11 +1135,17 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if source.strip_edges().is_empty():
 		return _no_clearance("there is no DSL source to evaluate a solid from")
 
+	# The records are a LOCAL, never the module's _records: an interference
+	# check that has been submitted to mesh_gauge but has not yet had its
+	# physics step reads _records when it runs, and a clearance call landing in
+	# that window would replace the geometry underneath it. The two entry
+	# points share this module; they must not share its state.
+	var records: Array = []
 	if panel.has_method("get_reference_state"):
-		set_records(panel.get_reference_state())
+		records = panel.get_reference_state()
 	var reference_scope := str(args.get("reference", ""))
 	var node_scope := str(args.get("node", ""))
-	var parts := _scoped_parts(reference_scope, node_scope)
+	var parts := _scoped_parts(records, reference_scope, node_scope)
 	if parts.is_empty():
 		return _no_clearance("no reference mesh is in scope; there is "
 			+ "nothing to measure a clearance against")
@@ -1121,49 +1164,125 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if targets.is_empty():
 		return _no_clearance("the references in scope carry no triangles")
 
-	var payload := {
+	var head := {
 		"source": source,
 		"required_mm": required_mm,
 		"tolerance_mm": tolerance_mm,
-		"targets": targets,
 	}
-	var reply := await _ask_worker(panel, payload)
-	if reply.has("error"):
-		return _no_clearance(str(reply["error"]))
+	var plan := _batch_targets(head, targets)
+	if plan.has("error"):
+		return _no_clearance(str(plan["error"]))
 
-	# A key the worker has not seen (first call, or its cache turned over) is
-	# answered with the list rather than an error: write those blobs and ask
-	# once more. Only once — a second miss on freshly written files is a fault,
-	# not a race, and retrying forever would hide it.
-	var missing: Array = reply.get("missing_keys", []) as Array
-	if not missing.is_empty():
-		if not _upload(missing):
-			return _no_clearance("could not write the reference geometry to "
-				+ get_blob_dir() + " for the worker to read")
-		for target in targets:
-			var t: Dictionary = target
-			if str(t["key"]) in missing:
-				t["path"] = get_blob_dir().path_join(str(t["key"]) + ".mcadmesh")
-		payload["targets"] = targets
-		reply = await _ask_worker(panel, payload)
+	var envelope: Dictionary = {}
+	var raw_pairs: Array = []
+	for batch_entry in (plan["batches"] as Array):
+		var batch: Array = batch_entry
+		var reply := await _ask_batch(panel, head, batch)
 		if reply.has("error"):
 			return _no_clearance(str(reply["error"]))
-		if not (reply.get("missing_keys", []) as Array).is_empty():
-			return _no_clearance("the worker could not read the reference "
-				+ "geometry this panel wrote to " + get_blob_dir())
-
-	if not bool(reply.get("checked", false)):
-		return _no_clearance(str(reply.get("reason", "the clearance check "
-			+ "did not run and gave no reason")))
-	return _clearance_report(reply)
+		if not bool(reply.get("checked", false)):
+			return _no_clearance(str(reply.get("reason", "the clearance check "
+				+ "did not run and gave no reason")))
+		envelope = reply
+		raw_pairs.append_array(reply.get("pairs", []) as Array)
+	return _clearance_report(envelope, raw_pairs, records)
 
 
-## Re-frame the worker's reply: every reported point gains the coordinates of
-## the reference's OWN frame beside the world ones, because those are the
-## numbers that get written back into the DSL.
-func _clearance_report(reply: Dictionary) -> Dictionary:
+## One batch of targets, uploading the geometry the worker turns out not to
+## have. A key the worker has not seen (first call, or its cache turned over)
+## is answered with the list rather than an error: write those blobs and ask
+## once more. Only once — a second miss on freshly written files is a fault,
+## not a race, and retrying forever would hide it.
+func _ask_batch(panel: Object, head: Dictionary, batch: Array) -> Dictionary:
+	var reply := await _ask_worker(panel, _request(head, batch))
+	if reply.has("error"):
+		return reply
+	var missing: Array = reply.get("missing_keys", []) as Array
+	if missing.is_empty():
+		return reply
+	if not _upload(missing):
+		return {"error": "could not write the reference geometry to "
+			+ get_blob_dir() + " for the worker to read"}
+	# The batches were sized as if every target carried its path, so stamping
+	# them on cannot push this request past the cap.
+	for entry in batch:
+		var target: Dictionary = entry
+		if str(target["key"]) in missing:
+			target["path"] = _blob_path(str(target["key"]))
+	reply = await _ask_worker(panel, _request(head, batch))
+	if reply.has("error"):
+		return reply
+	if not (reply.get("missing_keys", []) as Array).is_empty():
+		return {"error": "the worker could not read the reference geometry "
+			+ "this panel wrote to " + get_blob_dir()}
+	return reply
+
+
+func _request(head: Dictionary, targets: Array) -> Dictionary:
+	var payload := head.duplicate()
+	payload["targets"] = targets
+	return payload
+
+
+## Split `targets` into requests that each fit the host's channel cap.
+##
+## Nothing bounds how many nodes a reference has, and each target costs a
+## 64-character hash plus an absolute path — a few hundred nodes is a request
+## the host refuses as payload_too_large, which tells the reader nothing about
+## clearance. Sizing uses the WITH-PATH form of every target, which is the
+## largest a request ever gets, so the retry inside `_ask_batch` is safe by
+## construction rather than by luck.
+##
+## Returns {batches: [[target, ...], ...]} or {error: reason}. The only way to
+## fail is a single target that does not fit alone, which a target cannot
+## cause — it is the DSL source sharing the payload.
+func _batch_targets(head: Dictionary, targets: Array) -> Dictionary:
+	var limit := IPC_PAYLOAD_LIMIT_BYTES - IPC_PAYLOAD_MARGIN_BYTES
+	var head_size := JSON.stringify(_request(head, [])).length()
+	var batches: Array = []
+	var current: Array = []
+	var size := head_size
+	for entry in targets:
+		var target: Dictionary = entry
+		# +1 for the comma the array separator costs.
+		var cost := JSON.stringify(_sized(target)).length() + 1
+		if head_size + cost > limit:
+			return {"error": ("the clearance request for node '%s' does not "
+				+ "fit the host's %d byte channel limit on its own — the DSL "
+				+ "source is too long to measure against a reference")
+				% [str(target.get("node", "")), IPC_PAYLOAD_LIMIT_BYTES]}
+		if size + cost > limit:
+			batches.append(current)
+			current = []
+			size = head_size
+		current.append(target)
+		size += cost
+	if not current.is_empty():
+		batches.append(current)
+	return {"batches": batches}
+
+
+## A target at its largest: the form the retry sends, carrying the blob path.
+func _sized(target: Dictionary) -> Dictionary:
+	var out := target.duplicate()
+	out["path"] = _blob_path(str(target.get("key", "")))
+	return out
+
+
+func _blob_path(digest: String) -> String:
+	return get_blob_dir().path_join(digest + ".mcadmesh")
+
+
+## Re-frame the worker's replies into one report: every reported point gains
+## the coordinates of the reference's OWN frame beside the world ones, because
+## those are the numbers that get written back into the DSL. `envelope` is the
+## last batch's scalar fields (they are the request's own parameters, so every
+## batch agrees on them); `raw_pairs` is every batch's pairs together, which
+## have to be re-sorted because each batch only sorted its own.
+func _clearance_report(envelope: Dictionary, raw_pairs: Array,
+		records: Array) -> Dictionary:
 	var pairs: Array = []
-	for entry in (reply.get("pairs", []) as Array):
+	for entry in raw_pairs:
 		var raw: Dictionary = entry
 		var pair := {
 			"reference": str(raw.get("reference", "")),
@@ -1172,7 +1291,7 @@ func _clearance_report(reply: Dictionary) -> Dictionary:
 			"pass": bool(raw.get("pass", false)),
 		}
 		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
-			var pose := _pose_for(pair["reference"])
+			var pose := _pose_in(records, pair["reference"])
 			var reference_point := _vector(raw["reference_point_mm"])
 			pair["solid_point_mm"] = _vec(_vector(raw["solid_point_mm"]))
 			pair["reference_point_mm"] = {
@@ -1184,16 +1303,23 @@ func _clearance_report(reply: Dictionary) -> Dictionary:
 		if not str(raw.get("note", "")).is_empty():
 			pair["note"] = str(raw["note"])
 		pairs.append(pair)
+	pairs.sort_custom(func(a, b): return float((a as Dictionary)["min_mm"]) \
+		< float((b as Dictionary)["min_mm"]))
+	var verdict := true
+	for entry in pairs:
+		if not bool((entry as Dictionary)["pass"]):
+			verdict = false
 	return {
 		"checked": true,
 		"units": "mm",
-		"pass": bool(reply.get("pass", false)),
-		"required_mm": float(reply.get("required_mm", 0.0)),
-		"tessellation_tolerance_mm": float(reply.get("tessellation_tolerance_mm", 0.0)),
-		"bound": str(reply.get("bound", "")),
-		"solid_triangles": int(reply.get("solid_triangles", 0)),
-		"engine": str(reply.get("engine", "")),
-		"cache": reply.get("cache", {}),
+		"pass": verdict,
+		"required_mm": float(envelope.get("required_mm", 0.0)),
+		"tessellation_tolerance_mm":
+			float(envelope.get("tessellation_tolerance_mm", 0.0)),
+		"bound": str(envelope.get("bound", "")),
+		"solid_triangles": int(envelope.get("solid_triangles", 0)),
+		"engine": str(envelope.get("engine", "")),
+		"cache": envelope.get("cache", {}),
 		"pairs": pairs,
 	}
 
@@ -1257,9 +1383,10 @@ func _ask_worker(panel: Object, payload: Dictionary) -> Dictionary:
 
 ## The reference parts a scoped clearance question covers, as
 ## {reference, node, mesh, xform, pose}. Same node= rule as every other verb.
-func _scoped_parts(reference_scope: String, node_scope: String) -> Array:
+func _scoped_parts(records: Array, reference_scope: String,
+		node_scope: String) -> Array:
 	var out: Array = []
-	for record_entry in _records:
+	for record_entry in records:
 		var record: Dictionary = record_entry
 		var reference_name := str(record.get("name", ""))
 		if not reference_scope.is_empty() and reference_name != reference_scope:
@@ -1368,7 +1495,7 @@ func _upload(keys: Array) -> bool:
 		var blob := _blob_with_digest(digest)
 		if blob.is_empty():
 			return false
-		var path := directory.path_join(digest + ".mcadmesh")
+		var path := _blob_path(digest)
 		var file := FileAccess.open(path, FileAccess.WRITE)
 		if file == null:
 			return false

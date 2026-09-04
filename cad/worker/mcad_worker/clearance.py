@@ -239,7 +239,14 @@ def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
     """
     import numpy as np
 
-    cache_key = "%d\n%r\n%r" % (hash(source), tolerance, angular_tolerance)
+    # A digest, not hash(): two sources that collide in a 64-bit hash would
+    # hand back each other's tessellation with no signal at all, and a wrong
+    # number from a measurement verb is the one failure this module must not
+    # have. SHA-256 of a few kilobytes of DSL is free beside OCCT.
+    cache_key = hashlib.sha256(
+        ("%r\n%r\n" % (tolerance, angular_tolerance)).encode("utf-8")
+        + source.encode("utf-8")
+    ).hexdigest()
     cached = _solid_meshes.take(cache_key)
     if cached is not None:
         return cached

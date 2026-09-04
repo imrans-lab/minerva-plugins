@@ -131,7 +131,9 @@ func _run() -> void:
 
 	await _check_upload(panel, checks)
 	await _check_answer(panel, checks)
+	await _check_batching(panel, checks)
 	await _check_refusals(panel, checks)
+	_check_isolation(checks)
 	_clear_blob_dir()
 
 
@@ -226,8 +228,8 @@ func _check_answer(panel: Node, checks: RefCounted) -> void:
 			"report = %s" % str(report))
 
 	var near_pair: Dictionary = pairs[0] if pairs.size() > 0 else {}
-	check("answer: the gap measured on the shipped bytes is the fixture's "
-			+ "0.8 mm, found between two triangle interiors",
+	check("answer: the gap the panel's own shipped bytes describe is the "
+			+ "fixture's 0.8 mm, face to face and nowhere near a vertex",
 			absf(float(near_pair.get("min_mm", -1.0)) - GAP_MM) < GAP_TOLERANCE_MM,
 			"min_mm = %s" % str(near_pair.get("min_mm", null)))
 	check("answer: the tightest pair comes first and names its node",
@@ -303,6 +305,65 @@ func _check_answer(panel: Node, checks: RefCounted) -> void:
 
 
 # ---------------------------------------------------------------------------
+# The channel cap — the boundary the whole design exists for
+# ---------------------------------------------------------------------------
+
+## Nothing bounds how many nodes a reference has, and every target costs a
+## 64-character hash plus an absolute path. A reference with a few hundred
+## nodes therefore pushes ONE request past the host's cap, and the host
+## refuses it as payload_too_large — a message that says nothing about
+## clearance. The sizes here are derived from the module's own constants and
+## from a target built the way the module builds it, so the boundary is
+## measured rather than guessed.
+func _check_batching(panel: Node, checks: RefCounted) -> void:
+	var target_cost := _target_cost()
+	var limit: int = GeometryChecks.IPC_PAYLOAD_LIMIT_BYTES \
+		- GeometryChecks.IPC_PAYLOAD_MARGIN_BYTES
+	var base := _head_size("")
+
+	# A source long enough that ONE target fits beside it and two do not.
+	panel.source = _padded_source(limit - base - target_cost - 5)
+	_payloads.clear()
+	var split: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("cap: a request that would exceed the host's channel limit is "
+			+ "split, one target per request",
+			_payloads.size() == 2
+				and _targets_of(0).size() == 1 and _targets_of(1).size() == 1,
+			"payloads = %d, sizes = %s" % [_payloads.size(),
+				str([_targets_of(0).size(), _targets_of(1).size()])])
+	var over := false
+	for payload in _payloads:
+		if JSON.stringify(payload).length() > GeometryChecks.IPC_PAYLOAD_LIMIT_BYTES:
+			over = true
+	check("cap: every request the split produced is under the limit",
+			not over, "a split request still exceeds %d bytes"
+				% GeometryChecks.IPC_PAYLOAD_LIMIT_BYTES)
+	var split_pairs: Array = split.get("pairs", []) as Array
+	check("cap: the split answers are merged into one report, still "
+			+ "closest-first",
+			bool(split.get("checked", false)) and split_pairs.size() == 2
+				and str((split_pairs[0] as Dictionary).get("node", "")) == NEAR_NODE
+				and float((split_pairs[1] as Dictionary).get("min_mm", 0.0))
+					> float((split_pairs[0] as Dictionary).get("min_mm", 0.0)),
+			"split = %s" % str(split))
+
+	# A source so long that no target fits beside it at all: there is nothing
+	# to split, so the check has to say so rather than let the host refuse it.
+	panel.source = _padded_source(limit - base - target_cost + 10)
+	_payloads.clear()
+	var refused: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("cap: a request that cannot be split at all is refused with a "
+			+ "reason, and nothing is sent",
+			not bool(refused.get("checked", true))
+				and str(refused.get("reason", "")).contains("channel limit")
+				and _payloads.is_empty(),
+			"report = %s" % str(refused))
+	panel.source = SOURCE
+
+
+# ---------------------------------------------------------------------------
 # Refusals — a question that could not be asked is not a clean bill of health
 # ---------------------------------------------------------------------------
 
@@ -340,13 +401,46 @@ func _check_refusals(panel: Node, checks: RefCounted) -> void:
 
 
 # ---------------------------------------------------------------------------
+# What one panel's check must not do to another's
+# ---------------------------------------------------------------------------
+
+func _check_isolation(checks: RefCounted) -> void:
+	# The blob directory is content-addressed and the sweep knows only about
+	# ONE module's references, so two panels sharing a directory would delete
+	# each other's freshly written blobs.
+	var first: RefCounted = GeometryChecks.new()
+	var second: RefCounted = GeometryChecks.new()
+	check("isolation: each panel writes its blobs to its own directory",
+			first.get_blob_dir() != second.get_blob_dir()
+				and first.get_blob_dir().get_base_dir()
+					== second.get_blob_dir().get_base_dir(),
+			"%s vs %s" % [first.get_blob_dir(), second.get_blob_dir()])
+
+	# The interference check reads _records when its physics step comes, which
+	# may be after a clearance call has landed. The clearance path must work
+	# from its own snapshot.
+	check("isolation: a clearance check leaves the interference check's "
+			+ "records alone",
+			checks._records.is_empty(),
+			"records = %s" % str(checks._records))
+
+	var directory := _blob_dir
+	checks.release()
+	check("isolation: a panel releases its blob directory when it goes away",
+			not DirAccess.dir_exists_absolute(directory),
+			"%s survived release()" % directory)
+
+
+# ---------------------------------------------------------------------------
 # The stand-in backend
 # ---------------------------------------------------------------------------
 
-## Answer one cad.clearance request the way the worker would, deriving every
-## number from the blob the module actually wrote. The stand-in exists because
-## the worker is a Python process this harness cannot start; it computes
-## nothing the module also computes.
+## Answer one cad.clearance request the way the worker would. The stand-in
+## exists because the worker is a Python process this harness cannot start.
+## It DOES recompute the gap — from the blob the module actually wrote, by an
+## independent decode — so what the assertions below pin is the panel's
+## posing, packing and re-framing, not a triangle-pair distance. The exact
+## distance is pinned in worker/tests/test_clearance.py, where FCL runs.
 func _worker_answer(args: Dictionary) -> Dictionary:
 	_payloads.append(args.duplicate(true))
 	if _mode == "error":
@@ -521,6 +615,36 @@ func _decode_blob(path: String) -> Dictionary:
 		"vertices": vertex_count,
 		"triangles": triangle_count,
 	}
+
+
+## The JSON cost of ONE target at its largest — the with-path form the retry
+## sends — built the way the module builds it, from a key it actually wrote.
+func _target_cost() -> int:
+	var key := str((_targets_of(0)[0] as Dictionary).get("key", "")) \
+		if not _targets_of(0).is_empty() else "0".repeat(64)
+	return JSON.stringify({
+		"reference": REFERENCE_NAME,
+		"node": NEAR_NODE,
+		"key": key,
+		"path": _blob_dir.path_join(key + ".mcadmesh"),
+	}).length() + 1
+
+
+## The JSON size of a request carrying `source` and no targets at all.
+func _head_size(source: String) -> int:
+	return JSON.stringify({
+		"source": source,
+		"required_mm": 0.5,
+		"tolerance_mm": GeometryChecks.CLEARANCE_TOLERANCE_MM,
+		"targets": [],
+	}).length()
+
+
+## A DSL source of exactly `length` characters. Comment lines, so the text is
+## something the worker would accept even though this suite never evaluates it.
+func _padded_source(length: int) -> String:
+	var padding: int = maxi(length - SOURCE.length() - 3, 0)
+	return SOURCE + "\n# " + "x".repeat(padding)
 
 
 func _targets_of(index: int) -> Array:

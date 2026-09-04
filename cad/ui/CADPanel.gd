@@ -477,9 +477,16 @@ func adopt_restored_document(document_path: String, source: String, references: 
 ## never fired — the tab closed first, or no frame was ever drawn — would leave
 ## a Callable bound to a dead host on its signal, which kills the process in the
 ## servers' own shutdown long afterwards.
+##
+## It also releases the clearance check's blob directory: those files are
+## derived data in the user's cache, swept only while a check is running, so
+## the panel that wrote them is the only thing that knows when they stop
+## mattering.
 func _exit_tree() -> void:
 	if _annotation_host != null and _annotation_host.has_method("drop_pending_captures"):
 		_annotation_host.drop_pending_captures()
+	if _geometry_checks != null and _geometry_checks.has_method("release"):
+		_geometry_checks.release()
 
 
 func get_mesh_features() -> RefCounted:

@@ -163,6 +163,15 @@ test_interference.gd assertions=30
 # fail at 1.0 naming the node, node= scoping the question before it is asked,
 # a zero-gap pair carrying the interference flag and no points, and four
 # refusals (no required_mm, a node filter matching nothing, a worker error
-# quoted verbatim, and a refused check reporting no pairs).
-# 24 assertions = 2 fixture + 8 upload + 10 answer + 4 refusal.
-test_clearance.gd assertions=24
+# quoted verbatim, and a refused check reporting no pairs). Also the channel
+# cap itself: with a source long enough that only one target fits beside it,
+# the request is SPLIT one target per message, every split message is under
+# the limit and the answers merge back into one closest-first report; a source
+# that leaves room for no target at all is refused with a reason instead of
+# being handed to the host to refuse as payload_too_large. And the isolation
+# two panels need: each module writes to its own blob directory, a clearance
+# check leaves the interference check's records alone, and a panel releases
+# its directory when it goes away.
+# 31 assertions = 2 fixture + 8 upload + 10 answer + 4 cap + 4 refusal
+# + 3 isolation.
+test_clearance.gd assertions=31
