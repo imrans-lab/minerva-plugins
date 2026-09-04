@@ -31,3 +31,12 @@ test_orbit_camera_stuck.gd assertions=3
 # resolution, the missing-file report, the shared feature-edge extractor and
 # reference-aware auto-framing.
 test_reference_meshes.gd assertions=33
+
+# The GUI "Import mesh…" action: the button and the scene-declared picker
+# exist in both layouts, a pick appends exactly one refN = mesh("...") line
+# with a path relative to the saved .mcad, the write lands on the SAME
+# DocumentBuffer the paired text editor reads (real broker, real buffer), an
+# evaluation follows on its own, a second import becomes ref2, and an unsaved
+# document gets an absolute path plus an on-screen warning that survives
+# Save-As and still resolves.
+test_mesh_import.gd assertions=33

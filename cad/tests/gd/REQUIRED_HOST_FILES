@@ -3,8 +3,14 @@
 # starts. src/project.godot is required for every plugin and is checked
 # unconditionally by the runner, so it is not repeated here.
 #
-# cad's suites currently need NOTHING beyond it: orbit_camera.gd is a
-# self-contained Camera3D and the suite drives it directly, without the
-# host's plugin-panel driver helpers. This file exists to say that on
-# purpose — a suite that starts preloading res://test/helpers/... adds its
-# line here so a Minerva SHA bump that drops the helper fails by name.
+# A suite that preloads a host script by path adds its line here, so a
+# Minerva SHA bump that moves or drops the script fails by name instead of
+# as a parse error inside the suite.
+#
+# test_mesh_import.gd drives the real paired_dsl substrate: the buffer the
+# text editor and the panel share, and the broker that attaches it.
+src/Scripts/Services/Documents/DocumentBuffer.gd
+src/Scripts/Services/Plugins/PluginScenePanelBroker.gd
+#
+# The CAD panel scene itself pulls one host script in directly.
+src/Scripts/UI/Controls/responsive_container.gd

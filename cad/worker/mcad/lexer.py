@@ -240,7 +240,10 @@ def tokenize(source: str) -> list[Token]:
                 m = _RE_STRING.match(line, col)
                 if not m:
                     raise LexError("Unterminated string literal", lineno, col)
-                tokens.append(Token(TT.STRING, m.group(1), lineno, col))
+                # Source text `\"` and `\\` mean a quote and a backslash; the
+                # regex admits them but captures them raw.
+                literal = m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+                tokens.append(Token(TT.STRING, literal, lineno, col))
                 col = m.end()
                 continue
 

@@ -173,6 +173,11 @@ custom_minimum_size = Vector2(220, 0)
 size_flags_horizontal = 0
 size_flags_vertical = 3
 
+[node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/WideLayout/WideSidebar"]
+layout_mode = 2
+text = "Import mesh…"
+tooltip_text = "Pick a mesh file and add a mesh() reference line to the document."
+
 [node name="NarrowLayout" type="VBoxContainer" parent="ResponsiveContainer"]
 visible = false
 layout_mode = 2
@@ -190,6 +195,11 @@ text = "View:"
 [node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/NarrowLayout/ProjectionRow"]
 layout_mode = 2
 size_flags_horizontal = 3
+
+[node name="ImportMeshButton" type="Button" parent="ResponsiveContainer/NarrowLayout/ProjectionRow"]
+layout_mode = 2
+text = "Import mesh…"
+tooltip_text = "Pick a mesh file and add a mesh() reference line to the document."
 
 [node name="SingleView" type="SubViewportContainer" parent="ResponsiveContainer/NarrowLayout"]
 layout_mode = 2
@@ -219,3 +229,9 @@ script = ExtResource("4_geomoverlay")
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]
 environment = SubResource("Environment_cad")
 
+[node name="MeshImportDialog" type="FileDialog" parent="."]
+title = "Import mesh"
+ok_button_text = "Import"
+file_mode = 0
+access = 2
+size = Vector2i(760, 520)

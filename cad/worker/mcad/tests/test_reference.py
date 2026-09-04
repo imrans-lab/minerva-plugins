@@ -201,6 +201,14 @@ class TestReferenceRefusesGeometry:
         assert result.references == []
         assert result.shape_name == "board"
 
+    def test_escaped_path_round_trips_through_the_lexer(self):
+        # The GUI import escapes backslashes and quotes when it writes the
+        # line; the value the worker reports must be the original path.
+        result = evaluate_source(
+            'ref = mesh("C:\\\\meshes\\\\a \\"b\\".glb")\n'
+        )
+        assert result.references[0]["path"] == 'C:\\meshes\\a "b".glb'
+
     def test_unary_minus_names_the_reference(self):
         with pytest.raises(TranslatorError, match="a.glb"):
             _translate('ref = mesh("a.glb")\npart = -ref\n')

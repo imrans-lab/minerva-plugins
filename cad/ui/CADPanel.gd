@@ -38,6 +38,9 @@ const _PanelToolsScript: Script = preload("panel_tools.gd")
 ## Foreign mesh files named by mesh() in the source: loading, unit/up-axis
 ## conversion, pose and mounting all live here. The panel only wires it up.
 const _ReferenceMeshesScript: Script = preload("scripts/reference_meshes.gd")
+## Name, path and line text for the GUI "Import mesh…" action. Text authoring
+## only — the import writes DSL, it never holds geometry of its own.
+const _MeshImportScript: Script = preload("scripts/mesh_import.gd")
 
 ## Every MeshRoot an evaluation has to reach — the four wide-layout panes and
 ## the narrow layout's single pane. One list, because the mesh push, the
@@ -142,6 +145,15 @@ var _reference_library: RefCounted = null
 ## Outcome of the last mount: {world_aabb, warnings, errors, mounted}.
 var _reference_report: Dictionary = {}
 
+## Scene nodes behind the GUI import action: the file picker and the button in
+## each layout. Both buttons run the same handler.
+var _mesh_import_dialog: FileDialog = null
+var _import_buttons: Array[Button] = []
+
+## What the last import decided, for the panel's own reporting:
+## {ok, line, name, path, absolute, warning, error}. Empty until one runs.
+var _last_import: Dictionary = {}
+
 ## Last-known evaluation result, surfaced via _on_panel_save_request so
 ## minerva_doc_read after a write exposes whether the worker actually
 ## accepted the DSL. Shape:
@@ -225,6 +237,9 @@ func _ready() -> void:
 		_projection_dropdown.add_item(opt["label"], opt["id"])
 	_projection_dropdown.select(0)  # Perspective by default
 	_projection_dropdown.item_selected.connect(_on_projection_selected)
+
+	# ── "Import mesh…" — the GUI half of mesh() authoring ──────────────────
+	_wire_mesh_import()
 
 	# Mesh is intentionally empty until a .mcad source is evaluated by the
 	# worker and pushed in via the future DSL→mesh bridge. Showing a stub
@@ -502,6 +517,121 @@ func _on_eval_debounce_timeout() -> void:
 		_cancel_inflight_eval_if_any()
 		return
 	_evaluate_with_request_id(_pending_dsl_text)
+
+
+# ── GUI mesh import ─────────────────────────────────────────────────────────
+# The owner picks a mesh file and the panel appends `refN = mesh("path")` to
+# the document's own source. Everything the action produces is DSL text, so the
+# pose verbs, undo, save and an LLM reading the file all keep working on it —
+# and the MCP parity for this action is minerva_doc_write, not a new verb.
+#
+# The write goes to the DocumentBuffer the substrate attached, which is the one
+# the paired text editor is showing. Writing anywhere else — _pending_dsl_text
+# alone, a fresh buffer, the file on disk — forks the document in two.
+
+## Resolve the scene's import controls and connect them. Called from _ready.
+func _wire_mesh_import() -> void:
+	_mesh_import_dialog = $MeshImportDialog as FileDialog
+	if _mesh_import_dialog != null:
+		# Filters come from the loader's own format list, so nothing can be
+		# loadable without being pickable (or the other way round).
+		_mesh_import_dialog.filters = _MeshImportScript.dialog_filters()
+		if not _mesh_import_dialog.file_selected.is_connected(_on_mesh_file_selected):
+			_mesh_import_dialog.file_selected.connect(_on_mesh_file_selected)
+
+	_import_buttons.clear()
+	for button_path in [
+		"ResponsiveContainer/WideLayout/WideSidebar/ImportMeshButton",
+		"ResponsiveContainer/NarrowLayout/ProjectionRow/ImportMeshButton",
+	]:
+		var button := get_node_or_null(button_path) as Button
+		if button == null:
+			continue
+		if not button.pressed.is_connected(_on_import_mesh_pressed):
+			button.pressed.connect(_on_import_mesh_pressed)
+		_import_buttons.append(button)
+
+
+func _on_import_mesh_pressed() -> void:
+	if _mesh_import_dialog == null:
+		return
+	# Open beside the document, which is where a portable relative path can be
+	# written; an unsaved document has nowhere to start from.
+	if not _document_path.is_empty():
+		_mesh_import_dialog.current_dir = _document_path.get_base_dir()
+	_mesh_import_dialog.popup_centered_ratio(0.7)
+
+
+func _on_mesh_file_selected(path: String) -> void:
+	import_mesh_file(path)
+
+
+## Append one `refN = mesh("path")` line for `absolute_path` to the document
+## and re-evaluate. Public because the file dialog is not the only caller worth
+## having: this is the whole action, and it takes a path.
+##
+## Returns the import plan — {ok, line, name, path, absolute, warning, error}.
+func import_mesh_file(absolute_path: String) -> Dictionary:
+	var plan: Dictionary = _MeshImportScript.plan_import(
+		_current_source(), absolute_path, _document_path)
+	_last_import = plan
+
+	if not bool(plan.get("ok", false)):
+		var problem: String = str(plan.get("error", ""))
+		push_warning("[CADPanel] import mesh: %s" % problem)
+		_show_eval_error("Import mesh — %s" % problem)
+		return plan
+
+	_apply_source_edit(str(plan["source"]))
+
+	var warning: String = str(plan.get("warning", ""))
+	if not warning.is_empty():
+		# Same banner as an evaluation error: it is the panel's one visible
+		# message surface, and the next evaluation clears it.
+		push_warning("[CADPanel] import mesh: %s" % warning)
+		_show_eval_error("Import mesh — %s" % warning)
+	return plan
+
+
+## The source as the document currently holds it. The attached buffer wins over
+## the panel's mirror: an edit made in the text editor a moment ago is in the
+## buffer before the panel's debounce has run.
+func _current_source() -> String:
+	var buffer: Object = _shared_buffer()
+	if buffer != null and "text" in buffer:
+		return str(buffer.text)
+	return _pending_dsl_text
+
+
+## Write `new_source` back to the document and start an evaluation.
+##
+## The buffer's apply_edit bumps its version and fires text_changed, which the
+## paired text editor and this panel both receive — one document, two views.
+## When no buffer is attached (a panel driven by _on_panel_load_request's
+## `source` shape) the panel's own mirror is all there is.
+func _apply_source_edit(new_source: String) -> void:
+	var buffer: Object = _shared_buffer()
+	if buffer != null and buffer.has_method("apply_edit"):
+		buffer.apply_edit(new_source)
+	_pending_dsl_text = new_source
+	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
+		_annotation_host.set_document_source(_buffer_path, new_source)
+	# The ordinary typing path: one debounce, one evaluate, whether the text
+	# came from the keyboard, from MCP or from here.
+	_start_eval_debounce()
+
+
+## The DocumentBuffer the substrate attached to this panel, or null. Typed
+## Object because DocumentBuffer is a host class_name and this script lives
+## outside Minerva's res:// tree.
+func _shared_buffer() -> Object:
+	var broker: Object = _ctx.get("broker", null) as Object
+	if broker == null or not broker.has_method("get_attached_buffer"):
+		return null
+	var panel_name: String = str(_ctx.get("panel_name", ""))
+	if panel_name.is_empty():
+		return null
+	return broker.get_attached_buffer(plugin_id, panel_name)
 
 
 # ── Save/load contract (overrides MinervaPluginPanel virtuals) ──────────────
