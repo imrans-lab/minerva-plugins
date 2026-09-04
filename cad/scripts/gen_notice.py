@@ -95,10 +95,10 @@ PERMISSIVE_LICENCES = frozenset({
 #: still ship with the distribution, declared so the tree check below can
 #: demand them by name.
 #:
-#: This list exists because of a measured hole: with only the licence texts
-#: declared, moving ``cad/licenses/README.md`` away left the gate reporting
-#: "up to date". The inventory — not a directory listing — decides what must
-#: be present, so anything the directory ships has to be named somewhere.
+#: With only the licence texts declared, moving ``cad/licenses/README.md``
+#: away leaves the gate reporting "up to date". The inventory — not a
+#: directory listing — decides what must be present, so anything the directory
+#: ships has to be named somewhere.
 DECLARED_SUPPORT_FILES = {
     "README.md": "explains what the directory is, how it reaches the "
                  "distribution, and what to do when adding a dependency",
@@ -228,16 +228,16 @@ RUNTIME_COMPONENTS: tuple = (
 #: the reason. They render in the NOTICE as an explicit gap.
 #:
 #: A pending entry is a claim a reader can check; silence is not. These two
-#: predate the inventory and carry large trees of their own (OCCT above all) —
-#: inventorying them is tracked work, and this list is what keeps that work
-#: visible instead of letting a green gate imply the inventory is complete.
+#: predate the inventory and carry large trees of their own (OCCT above all),
+#: and this list is what keeps that gap visible instead of letting a green
+#: gate imply the inventory is complete.
 PENDING_INVENTORY = {
     "build123d": "pre-existing pin; its own licence and its transitive tree "
                  "(cadquery-ocp, OCCT, and the IPython/jedi chain) are not "
-                 "yet inventoried — tracked work item.",
+                 "yet inventoried.",
     "cadquery-ocp": "pulled in transitively by build123d and repeated here "
                     "only if pinned directly; OCCT's licence tree is not yet "
-                    "inventoried — tracked work item.",
+                    "inventoried.",
 }
 
 
@@ -262,9 +262,11 @@ def read_lock_vars(lock_path: Union[str, Path]) -> dict:
 
     Deliberately NOT ``bash -c 'source ...'``: this runs in CI over a file that
     a branch can change, and sourcing it would execute whatever it contains.
-    The lock's format is one ``KEY="value"`` per line (comments and blanks
-    ignored), and a line that does not match that shape is simply not a pin —
-    the build script would not get a usable value out of it either.
+    The build and probe scripts do source it — they are the build's own shell,
+    reading the lock they were invoked with — and this is the one reader that
+    is not. The lock's format is one ``KEY="value"`` per line (comments and
+    blanks ignored), and a line that does not match that shape is simply not a
+    pin — the build script would not get a usable value out of it either.
     """
     values: dict = {}
     text = Path(lock_path).read_text(encoding="utf-8")

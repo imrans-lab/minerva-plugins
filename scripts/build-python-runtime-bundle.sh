@@ -89,6 +89,7 @@ done
 # dependencies must be analysed), so the plugin declares them rather than this
 # script guessing.
 : "${WHEEL_REPAIR_ARGS:=}"
+: "${WHEEL_REPAIR_PROOF:=}"
 # Directory (relative to the plugin dir) copied into the bundle as licenses/:
 # the licence texts a binary redistribution has to carry.
 : "${BUNDLE_LICENSE_DIR:=}"
@@ -376,18 +377,23 @@ if [ ${#REPAIR[@]} -gt 0 ] && [ "$TRIPLE" = "windows-x86_64" ]; then
   echo "[$TRIPLE] repaired wheels:"
   ls -la "$REPAIRED_WHEEL_DIR"
   # delvewheel writes an output wheel even when it vendored nothing, so the
-  # repair is proven by content: every repaired wheel must carry a vendored
-  # C++ runtime DLL, or the bundle would import only on machines that
-  # already have the redistributable installed.
+  # repair is proven by content: every repaired wheel must carry a member
+  # matching WHEEL_REPAIR_PROOF, or the bundle would import only on machines
+  # that already have the runtime installed. The pattern is lock data because
+  # which runtime is missing belongs to the wheel, not to this mechanism.
   # Listed with python's zipfile rather than `unzip`: Git for Windows does not
   # reliably ship unzip, and a missing tool must not read as a failed repair.
+  if [ -z "$WHEEL_REPAIR_PROOF" ]; then
+    echo "[$TRIPLE] FATAL: WHEEL_REPAIR_PKGS is set but WHEEL_REPAIR_PROOF is empty" >&2
+    exit 65
+  fi
   for whl in "$REPAIRED_WHEEL_DIR"/*.whl; do
     if ! "$STAGE_DIR/$PYTHON_BIN" -c "
 import sys, zipfile, re
 names = zipfile.ZipFile(sys.argv[1]).namelist()
-sys.exit(0 if any(re.search(r'msvcp140.*\.dll$', n, re.I) for n in names) else 1)
-" "$whl"; then
-      echo "[$TRIPLE] wheel repair vendored no msvcp140 DLL into $(basename "$whl")" >&2
+sys.exit(0 if any(re.search(sys.argv[2], n, re.I) for n in names) else 1)
+" "$whl" "$WHEEL_REPAIR_PROOF"; then
+      echo "[$TRIPLE] wheel repair vendored nothing matching $WHEEL_REPAIR_PROOF into $(basename "$whl")" >&2
       exit 74
     fi
   done

@@ -27,6 +27,24 @@ extends SceneTree
 ##             the premise numerically before it asserts the answer.
 ##   BURIED    a small cube wholly inside the board's material. It crosses no
 ##             face at all in either direction, and only ray parity sees it.
+##   FLUSH     an open-topped cavity whose floor IS the board's underside, so
+##             the board rests on it. Nothing overlaps, and the parity probe
+##             that decides containment starts on the contact plane the two
+##             bodies share unless the check moves it off.
+##   PIN       a washer floating inside that cavity with a locating pin
+##             standing through its hole. Every vertex the washer has is on a
+##             rim of that hole and the probe inset is twice the rim's width,
+##             so EVERY candidate lands in the hole — inside the pin, in no
+##             material of the washer at all. A probe that is not verified to
+##             be inside its own body reports the washer as buried in the
+##             shell, which is the phantom the flush fixture's sibling exists
+##             to catch.
+##
+## The board is posed by a TURNED transform — a yaw about the CAD world's up
+## axis and a lean about x, plus a translation — so nothing here can pass by
+## treating the pose as a translation or the hole axis as world z. Every
+## expectation below is written in the board's own frame or as a length, both
+## of which the pose leaves alone.
 ##
 ## Run:
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
@@ -40,10 +58,13 @@ const BOARD := Vector3(80.0, 60.0, 1.6)
 const BOARD_NODE := "board"
 const BOARD_REFERENCE := "board"
 
-## Where the board is posed in the world. Translation only: the arithmetic in
-## every expectation below stays readable, and world-vs-local is still a real
-## distinction that a wrong answer cannot pass by accident.
+## Where the board is posed in the world, and how far it is turned: a yaw
+## about +z (the CAD world's up) and a lean about +x. Every expectation is
+## either in the board's own frame or a length, so the turn costs no
+## arithmetic and a check that drops the basis fails all of them.
 const POSE_ORIGIN := Vector3(100.0, 200.0, 300.0)
+const POSE_YAW_DEG := 30.0
+const POSE_LEAN_DEG := 20.0
 
 ## The shell: a lid at z = 3..8 standing over the board on one boss.
 const BOSS_CENTRE_XY := Vector2(10.0, 10.0)
@@ -71,6 +92,35 @@ const BURIED_EDGE := 0.5
 ## round, which no edge crossing can see either.
 const ENCLOSING := Vector3(120.0, 100.0, 12.0)
 
+## The cavity: an open-topped shell whose floor's TOP face is the board's
+## underside, so the board rests on it with no overlap at all. Walls 5 mm
+## thick leave the board 5 mm of air on every side; the inner box runs past
+## the outer one's top face, which is what leaves the shell open.
+const CAVITY_OUTER := Vector3(100.0, 80.0, 20.0)
+const CAVITY_INNER := Vector3(90.0, 70.0, 21.0)
+const CAVITY_FLOOR_MM := 2.0
+## The floor's top face, in the board's own frame: the board's underside.
+const CAVITY_FLOOR_TOP_Z := -BOARD.z * 0.5
+
+## The washer: a disc with a mounting hole big enough that its 2 mm rim is the
+## ONLY place a vertex can be. It floats clear of the cavity floor, so nothing
+## in this fixture touches anything and the answer rests on the probe alone.
+const WASHER_OUTER_R := 22.0
+const WASHER_INNER_R := 20.0
+const WASHER_THICKNESS := 1.6
+const WASHER_LIFT_MM := 0.2
+const WASHER_REFERENCE := "washer"
+const WASHER_NODE := "washer"
+## The locating pin, standing on the cavity floor through the washer's hole
+## with half a millimetre of air all round it.
+const PIN_CLEARANCE_MM := 0.5
+const PIN_R := WASHER_INNER_R - PIN_CLEARANCE_MM
+const PIN_TOP_Z := 5.0
+## Facets on every turned surface here. Fine enough that the polygon a cutter
+## leaves and the polygon a pin presents still clear each other: at 64 sides a
+## chord lies 0.12 percent inside its circle, two orders below the clearance.
+const ROUND_FACETS := 64
+
 ## The pane the stand-in panel builds so the markers have somewhere to land.
 ## It is the first of panel_measurement.gd's MESH_ROOT_PATHS verbatim: the
 ## module looks for exactly these names and a typo here would silently pass.
@@ -96,12 +146,20 @@ func _init() -> void:
 
 
 func _run() -> void:
-	_pose = Transform3D(Basis.IDENTITY, POSE_ORIGIN)
+	_pose = Transform3D(
+		Basis(Vector3.BACK, deg_to_rad(POSE_YAW_DEG))
+			* Basis(Vector3.RIGHT, deg_to_rad(POSE_LEAN_DEG)),
+		POSE_ORIGIN)
 
 	var board: ArrayMesh = await _bake_board()
 	check("fixture: the board baked to a mesh",
 			board != null and board.get_surface_count() > 0,
 			"bake_static_mesh returned nothing")
+	check("fixture: the pose TURNS the board as well as moving it, so a "
+			+ "check that keeps only the translation cannot pass",
+			not _pose.basis.is_equal_approx(Basis.IDENTITY)
+				and absf(_pose.basis.determinant() - 1.0) < 1e-6,
+			"basis = %s" % str(_pose.basis))
 
 	var gauge := MeshGauge.new()
 	gauge.name = "MeshGauge"
@@ -137,8 +195,11 @@ func _run() -> void:
 	await _check_sliver(gauge, checks)
 	await _check_buried(gauge, checks)
 	await _check_enclosed(gauge, checks)
+	await _check_flush(gauge, checks)
 	await _check_scoping(gauge, checks)
 	await _check_supersession(gauge, checks)
+	# Last: it rebuilds the gauge and the records around its own reference.
+	await _check_pin_through_hole(gauge, checks)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +382,95 @@ func _check_enclosed(gauge: Node, checks: RefCounted) -> void:
 				and str((pairs[0] as Dictionary).get("note", ""))
 					.contains("inside the solid"),
 			"pairs = %s" % str(pairs))
+
+
+# ---------------------------------------------------------------------------
+# FLUSH — the designed contact, which must not read as containment
+# ---------------------------------------------------------------------------
+
+## A board sitting on the floor of its enclosure touches over a whole face.
+## No edge crosses anything, so the check falls through to parity — and every
+## vertex of the board's underside lies ON the floor, where a ray cast along
+## that plane hits or misses by float luck. The answer this fixture must give
+## is the one an agent can act on: nothing is wrong.
+func _check_flush(gauge: Node, checks: RefCounted) -> void:
+	var cavity: Dictionary = await _cavity_mesh()
+	checks.build_solid(cavity)
+	check("flush: the fixture really does ask the containment question — the "
+			+ "board is inside the shell's bounds and its underside is the "
+			+ "floor's top face",
+			(checks.get_solid_bounds() as AABB).encloses(_board_world_box())
+				and absf(CAVITY_FLOOR_TOP_Z + BOARD.z * 0.5) < 1e-9,
+			"solid bounds = %s, board = %s" % [
+				str(checks.get_solid_bounds()), str(_board_world_box())])
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	check("flush: a board resting on the cavity floor is a designed contact, "
+			+ "not interference",
+			bool(report.get("checked", false))
+				and int(report.get("count", 0)) == 0
+				and int(report.get("point_count", 0)) == 0,
+			"report = %s" % str(report))
+
+
+# ---------------------------------------------------------------------------
+# PIN — the probe that must not answer for a body it is not inside
+# ---------------------------------------------------------------------------
+
+## A washer inside a shell, with a locating pin standing through its mounting
+## hole: nothing touches, nothing crosses, so the verdict is the parity
+## probe's alone. The fixture is built so that EVERY candidate probe is wrong:
+## every vertex of a washer is on one of the two rims of its hole, and the
+## module insets a candidate towards the body's centre by a quarter of the
+## body's smallest world extent — here twice the rim's width — so every one of
+## them lands in the hole, which is where the pin is. A probe that is not
+## verified to lie inside its OWN body therefore reads "this node lies
+## entirely inside the solid" about a washer that is merely threaded onto a
+## pin, and the assertion below is 0.
+func _check_pin_through_hole(gauge: Node, checks: RefCounted) -> void:
+	var washer: ArrayMesh = await _bake_washer()
+	var built: int = gauge.build([{
+		"mesh": washer,
+		"transform": _pose,
+		"node": WASHER_NODE,
+		"reference": WASHER_REFERENCE,
+	}], "pin-fixture|v1")
+	var box := _posed_box(washer.get_aabb())
+	_records = [{
+		"name": WASHER_REFERENCE,
+		"pose": _pose,
+		"world_aabb": box,
+		"parts": [{
+			"mesh": washer,
+			"transform": Transform3D.IDENTITY,
+			"node_path": WASHER_NODE,
+			"node": WASHER_NODE,
+		}],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(await _cavity_mesh(true))
+
+	# The premise, in the module's own numbers: the inset step is wider than
+	# the rim, and the washer is inside the shell's bounds — so the question
+	# really is asked, and every vertex-derived probe really does land in the
+	# hole rather than in the washer.
+	var step: float = minf(box.size.x, minf(box.size.y, box.size.z)) \
+		* GeometryChecks.PROBE_INSET_FRACTION
+	check("pin: the fixture offers no probe that is inside the washer — its "
+			+ "rim is 2.0 mm wide and the module insets by %.2f mm" % step,
+			built == 1
+				and step > WASHER_OUTER_R - WASHER_INNER_R
+				and (checks.get_solid_bounds() as AABB).encloses(box),
+			"built=%d step=%.3f solid bounds=%s washer=%s" % [
+				built, step, str(checks.get_solid_bounds()), str(box)])
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	check("pin: a washer threaded onto a locating pin with 0.5 mm of air all "
+			+ "round it is not interference, and does not lie inside the shell",
+			bool(report.get("checked", false))
+				and int(report.get("count", 0)) == 0
+				and (report.get("pairs", []) as Array).is_empty(),
+			"report = %s" % str(report))
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +709,73 @@ func _enclosing_mesh() -> Dictionary:
 	return _mesh_data(baked, _pose)
 
 
+## The cavity shell: an open-topped box with the board's underside for a
+## floor. The inner box runs past the outer one's top face, so the subtraction
+## leaves the top open rather than a lid the board would be sealed under.
+func _cavity_mesh(with_pin: bool = false) -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Cavity"
+	var outer := CSGBox3D.new()
+	outer.size = CAVITY_OUTER
+	outer.position = Vector3(0.0, 0.0,
+		CAVITY_FLOOR_TOP_Z - CAVITY_FLOOR_MM + CAVITY_OUTER.z * 0.5)
+	combiner.add_child(outer)
+	var inner := CSGBox3D.new()
+	inner.size = CAVITY_INNER
+	inner.operation = CSGShape3D.OPERATION_SUBTRACTION
+	inner.position = Vector3(0.0, 0.0, CAVITY_FLOOR_TOP_Z + CAVITY_INNER.z * 0.5)
+	combiner.add_child(inner)
+	if with_pin:
+		# Added after the cutter, so the cavity cannot remove it: the pin is
+		# the shell's own material standing on its floor.
+		var pin := CSGCylinder3D.new()
+		pin.radius = PIN_R
+		pin.sides = ROUND_FACETS
+		pin.smooth_faces = false
+		pin.height = PIN_TOP_Z - CAVITY_FLOOR_TOP_Z
+		# A CSG cylinder runs along its own +Y; a quarter turn about X takes
+		# that to +Z, the axis a locating pin stands on.
+		pin.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+		pin.position = Vector3(0.0, 0.0, (PIN_TOP_Z + CAVITY_FLOOR_TOP_Z) * 0.5)
+		combiner.add_child(pin)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
+
+
+## The washer: a disc with a hole so large that its every vertex sits on one of
+## the two rims. That is the whole point of the shape — there is no face
+## vertex to fall back on, so the probe has to be right rather than lucky.
+func _bake_washer() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Washer"
+	var disc := CSGCylinder3D.new()
+	disc.radius = WASHER_OUTER_R
+	disc.sides = ROUND_FACETS
+	disc.smooth_faces = false
+	disc.height = WASHER_THICKNESS
+	disc.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	disc.position = Vector3(0.0, 0.0,
+		CAVITY_FLOOR_TOP_Z + WASHER_LIFT_MM + WASHER_THICKNESS * 0.5)
+	combiner.add_child(disc)
+	var bore := CSGCylinder3D.new()
+	bore.radius = WASHER_INNER_R
+	bore.sides = ROUND_FACETS
+	bore.smooth_faces = false
+	bore.height = WASHER_THICKNESS * 4.0
+	bore.operation = CSGShape3D.OPERATION_SUBTRACTION
+	bore.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	bore.position = disc.position
+	combiner.add_child(bore)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
 ## A cube small enough to sit inside the board's 1.6 mm of material.
 func _buried_mesh() -> Dictionary:
 	var combiner := CSGCombiner3D.new()
@@ -606,7 +823,22 @@ func _mesh_data(mesh: ArrayMesh, xform: Transform3D) -> Dictionary:
 
 ## The board's world bounds, as the panel reports them on a reference record.
 func _board_world_box() -> AABB:
-	return AABB(_pose * (-BOARD * 0.5), BOARD)
+	return _posed_box(AABB(-BOARD * 0.5, BOARD))
+
+
+## A local box in world millimetres. The pose TURNS its body, so the answer is
+## the box around the eight posed corners and not the local box with its
+## origin moved.
+func _posed_box(local: AABB) -> AABB:
+	var box := AABB()
+	var seen := false
+	for x in [local.position.x, local.position.x + local.size.x]:
+		for y in [local.position.y, local.position.y + local.size.y]:
+			for z in [local.position.z, local.position.z + local.size.z]:
+				var corner: Vector3 = _pose * Vector3(x, y, z)
+				box = AABB(corner, Vector3.ZERO) if not seen else box.expand(corner)
+				seen = true
+	return box
 
 
 func _as_vector(raw: Variant) -> Vector3:

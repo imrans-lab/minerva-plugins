@@ -392,8 +392,8 @@ def clearance(params: dict) -> dict:
                 "cached": bool(cached),
             }
             if min_mm <= 0.0:
-                # T12's check is what names the crossings; this one only says
-                # there is no air here at all.
+                # A distance says only that there is no air here at all;
+                # minerva_cad_check_interference is what names the crossings.
                 pair["interference"] = True
                 pair["note"] = ("the meshes touch or overlap — "
                                 "minerva_cad_check_interference names where")

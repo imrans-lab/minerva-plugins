@@ -83,7 +83,7 @@ Files under `cad/licenses/` that are not a component's licence text but travel w
 
 Lock pins whose licence trees this inventory does not yet cover. They are listed rather than omitted so the gap is visible; the gate refuses any OTHER pin that is neither inventoried nor listed here.
 
-- `build123d` — pre-existing pin; its own licence and its transitive tree (cadquery-ocp, OCCT, and the IPython/jedi chain) are not yet inventoried — tracked work item.
-- `cadquery-ocp` — pulled in transitively by build123d and repeated here only if pinned directly; OCCT's licence tree is not yet inventoried — tracked work item.
+- `build123d` — pre-existing pin; its own licence and its transitive tree (cadquery-ocp, OCCT, and the IPython/jedi chain) are not yet inventoried.
+- `cadquery-ocp` — pulled in transitively by build123d and repeated here only if pinned directly; OCCT's licence tree is not yet inventoried.
 
 Total: 6 inventoried components, 2 pending.

@@ -13,7 +13,7 @@ orientation wrong reports every bore as a boss and every boss as a bore and
 still returns plausible-looking geometry. Each fixture therefore contains one
 of each, at radii that cannot be confused, and asserts which is which.
 
-22 tests. The ones that translate DSL need build123d/OCP, which ships in the
+23 tests. The ones that translate DSL need build123d/OCP, which ships in the
 plugin's embedded runtime bundle and is not on a plain CI runner, so they skip
 there. The refusals and every `_merge` test run unconditionally — the merge is
 pure arithmetic over face records — so a skipped suite can never mean "the
@@ -64,8 +64,13 @@ TOL_MM = 1.0e-6
 
 def _features(**params):
     """Run the method on SOURCE and return its result, failing loudly on error."""
+    return _features_of(SOURCE, **params)
+
+
+def _features_of(source, **params):
+    """The same, over a source the caller supplies."""
     pytest.importorskip("build123d")
-    reply = feat.cylindrical_features(dict(params, source=SOURCE))
+    reply = feat.cylindrical_features(dict(params, source=source))
     assert reply["ok"], reply.get("error")
     return reply["result"]
 
@@ -99,6 +104,26 @@ class TestGeometry:
         bore = _find(result["cylinders"], THROUGH_R, THROUGH_XY)
         boss = _find(result["cylinders"], BOSS_R, BOSS_XY)
         assert bore is not None and boss is not None, result["cylinders"]
+        assert bore["sense"] == "concave"
+        assert boss["sense"] == "convex"
+
+    def test_a_mirrored_part_keeps_a_bore_a_bore(self):
+        """The sense survives an INDIRECT axis system, where it flips twice.
+
+        A mirror leaves every cylindrical surface with a left-handed
+        coordinate system, and the kernel compensates by reversing the faces
+        that use it. A reader that consults only the surface's handedness, or
+        only the face's orientation, reports every bore in a mirrored part as
+        a boss and every boss as a bore — plausible geometry, inverted. Both
+        flips have to be applied, and here they cancel.
+        """
+        mirrored = SOURCE.replace(
+            "part = plate - through - blind + boss",
+            "part = mirror([1, 0, 0], plate - through - blind + boss)")
+        cylinders = _features_of(mirrored)["cylinders"]
+        bore = _find(cylinders, THROUGH_R, (-THROUGH_XY[0], THROUGH_XY[1]))
+        boss = _find(cylinders, BOSS_R, (-BOSS_XY[0], BOSS_XY[1]))
+        assert bore is not None and boss is not None, cylinders
         assert bore["sense"] == "concave"
         assert boss["sense"] == "convex"
 

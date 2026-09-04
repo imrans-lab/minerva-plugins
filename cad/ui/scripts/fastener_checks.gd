@@ -87,9 +87,9 @@ const FEATURES_TIMEOUT_MS: int = 60000
 const DISPLAY_TOLERANCE_MM: float = 0.1
 
 ## ISO 273:1979 medium series clearance holes, millimetres: screw diameter to
-## hole diameter. Medium is the series the fastener item names; fine and coarse
-## exist and are NOT interpolated between, because a wrong allowance silently
-## passes a joint that will not go together.
+## hole diameter. Medium is the series graded against; fine and coarse exist
+## and are NOT interpolated between, because a wrong allowance silently passes
+## a joint that will not go together.
 const ISO_273_MEDIUM: Dictionary = {
 	1.6: 1.8, 2.0: 2.4, 2.5: 2.9, 3.0: 3.4, 3.5: 3.9, 4.0: 4.5, 5.0: 5.5,
 	6.0: 6.6, 8.0: 9.0, 10.0: 11.0, 12.0: 13.5, 14.0: 15.5, 16.0: 17.5,
@@ -222,7 +222,7 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 		return _superseded(_nothing("a newer check started before this one could run"))
 
 	var report := await _run(panel, gauge, checks, mesh_data, features, holes, screw, args)
-	checks.call("release_reservation")
+	checks.call("release_reservation", ticket)
 	return report
 
 
@@ -993,9 +993,9 @@ func _agreement(bore: Dictionary, fitted: Array, direction: Vector3) -> Dictiona
 ## Greedy by distance: every admissible (bore, hole) combination is scored by
 ## how far the bore's axis passes from the hole's centre, the list is sorted,
 ## and pairs are taken in order, skipping any whose bore or hole is already
-## spoken for. That is the one-to-one constraint, and it is the trap the item
-## names: two bosses near one hole must not both claim it. Anything left over
-## is reported by name under `unpaired` rather than quietly dropped.
+## spoken for. That is the one-to-one constraint: two bosses near one hole
+## must not both claim it. Anything left over is reported by name under
+## `unpaired` rather than quietly dropped.
 func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 	var prepared_holes: Array = []
 	for entry in holes:

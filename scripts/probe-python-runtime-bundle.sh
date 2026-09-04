@@ -46,6 +46,10 @@ if [ ! -f "$LOCK" ]; then
   echo "missing lock file: $LOCK" >&2
   exit 65
 fi
+# Sourced, not parsed: this script is the build's own shell, run over the lock
+# it just built from, and the lock is shell by design. gen_notice.py parses the
+# same file instead because it runs in CI over whatever a branch put there, and
+# sourcing that would execute it.
 # shellcheck disable=SC1090
 . "$LOCK"
 : "${LAYER1_IMPORTS:=}"

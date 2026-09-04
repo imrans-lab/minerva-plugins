@@ -87,6 +87,22 @@ const CROSSING_ADVANCE_MM: float = 0.0002
 const MAX_CROSSINGS_PER_EDGE: int = 16
 ## Casts allowed for one parity ray before it gives up and answers "unknown".
 const MAX_PARITY_CASTS: int = 64
+## Points tried as a parity probe before a direction gives up. Two things
+## reject a candidate — a surface of the other body within TOUCH_EPSILON_MM of
+## it, and a point that is not inside its own body — and a plate that is mostly
+## mounting hole can reject a long run of them, so the list is longer than the
+## handful one convex body would need.
+const MAX_PROBE_POINTS: int = 16
+## How far a probe is moved off its vertex, towards the centre of its own
+## body's box, as a fraction of that box's smallest extent. Far enough to
+## leave a contact plane, near enough to stay inside a 1.6 mm board.
+const PROBE_INSET_FRACTION: float = 0.25
+## The six axis directions a probe is tested along for a surface it is resting
+## on. Both senses of each axis: a contact plane is only reached from one side.
+const _PROBE_DIRECTIONS: Array[Vector3] = [
+	Vector3.RIGHT, Vector3.LEFT, Vector3.BACK, Vector3.FORWARD,
+	Vector3.UP, Vector3.DOWN,
+]
 ## Points listed per interfering pair. The pair's own point_count is the whole
 ## number; this bounds what travels in the reply.
 const MAX_POINTS_PER_PAIR: int = 8
@@ -99,6 +115,13 @@ const MAX_REFERENCE_TRIANGLES: int = 400000
 
 ## Every collision layer at once — the unscoped mask, matching mesh_gauge.
 const ALL_LAYERS: int = 0xFFFFFFFF
+
+## How long a reservation is honoured: mesh_gauge's JOB_TIMEOUT_MS (5 s, after
+## which a queued job gives up) plus a margin for the walk that FOLLOWS the
+## step — a hundred thousand reference triangles inside one physics frame. A
+## holder that has not released by then has died holding the flag, and the
+## flag is module state nothing else will ever clear.
+const RESERVATION_TIMEOUT_MS: int = 8000
 
 
 ## The solid's own physics world. Its collider is rebuilt per evaluation, so it
@@ -135,6 +158,16 @@ var _started_us: int = 0
 ## if a newer one arrived while it waited. Only the newest ticket may draw.
 var _ticket: int = 0
 var _in_flight: bool = false
+## When the running reservation stops being believed, in engine milliseconds.
+## A holder that never releases — a runtime error inside the fastener run
+## aborts its coroutine before release_reservation is reached — would
+## otherwise park every later check on a signal nobody emits.
+var _reserved_until: int = 0
+## The ticket the running reservation was taken with. A holder whose deadline
+## passed has been usurped: its eventual release names a ticket that is no
+## longer the holder's and does nothing, so it cannot free the module out from
+## under the request that took over.
+var _holder: int = 0
 
 ## Emitted when a check releases the module. Waited on by a request that found
 ## one already running.
@@ -282,7 +315,7 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 			"a newer check started before this one could run"))
 	_marker_points = PackedVector3Array()
 	var report := await _run(panel, args)
-	release_reservation()
+	release_reservation(ticket)
 	# Only the newest request may paint. A superseded reply still goes back to
 	# its own caller — it is a true answer about the geometry it was asked
 	# about — but repainting from it would leave the previous evaluation's red
@@ -304,22 +337,49 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## Public because the fastener check borrows the same solid collider and the
 ## same world: it is a second question about the one body this module owns, and
 ## a second owner of that body is exactly what the ticket exists to prevent.
-## Every reservation that returns non-zero must be released.
+## Every reservation that returns non-zero must be released BY ITS OWN TICKET —
+## and a reservation older than RESERVATION_TIMEOUT_MS is taken back whether it
+## was released or not, because the flag is module state and a coroutine that
+## died holding it will never clear it. The wait is on idle frames rather than
+## on check_finished for the same reason: the signal may never be emitted.
 func reserve() -> int:
 	_ticket += 1
 	var ticket := _ticket
+	var tree := _tree()
 	while _in_flight:
-		await check_finished
+		if Time.get_ticks_msec() >= _reserved_until:
+			break
+		if tree != null:
+			await tree.process_frame
+		else:
+			await check_finished
 		if ticket != _ticket:
 			return 0
 	_in_flight = true
+	_holder = ticket
+	_reserved_until = Time.get_ticks_msec() + RESERVATION_TIMEOUT_MS
 	return ticket
 
 
-## Release a reservation and wake whoever is queued behind it.
-func release_reservation() -> void:
+## Release the reservation `ticket` took, and wake whoever is queued behind it.
+## A ticket that is no longer the holder was usurped when its deadline passed:
+## its release belongs to a reservation that is over, and clearing the flag
+## would hand the module's collider to a third caller while the second is
+## still using it.
+func release_reservation(ticket: int) -> void:
+	if not _in_flight or ticket != _holder:
+		return
 	_in_flight = false
+	_holder = 0
+	_reserved_until = 0
 	check_finished.emit()
+
+
+## The tree the module's own viewport lives in, or null before attach().
+func _tree() -> SceneTree:
+	if _viewport != null and _viewport.is_inside_tree():
+		return _viewport.get_tree()
+	return null
 
 
 ## Mark a reply as describing a question that has been overtaken. The caller
@@ -363,7 +423,7 @@ func _run(panel: Object, args: Dictionary) -> Dictionary:
 		mask = int(gauge.call("mask_for", reference_scope))
 	# The reply is the module's own report, or the gauge's {error: ...} when the
 	# physics step it needs never came.
-	return await gauge.call("submit", "interference", {
+	var reply: Dictionary = await gauge.call("submit", "interference", {
 		# mesh_gauge dispatches the job back here rather than knowing what an
 		# interference check is: it owns the physics step, this module owns
 		# the question.
@@ -372,6 +432,12 @@ func _run(panel: Object, args: Dictionary) -> Dictionary:
 		"reference": reference_scope,
 		"node": str(args.get("node", "")),
 	})
+	# Which solid the report describes. The clearance verb joins this report
+	# only when the digest matches the source it is about to measure against,
+	# so a report about an older document can never mark a node as buried.
+	if bool(reply.get("checked", false)):
+		reply["source_digest"] = _source_digest(str(document.get("source", "")))
+	return reply
 
 
 ## The job body, run by mesh_gauge inside its physics step with the reference
@@ -587,9 +653,23 @@ func _cross_into_solid(
 # ---------------------------------------------------------------------------
 
 ## One body wholly inside the other crosses nothing. Both directions are asked
-## once: a vertex of the solid inside a reference's material, and a vertex of
-## each reference part inside the solid's. With no crossings anywhere, one
-## vertex settles it — the bodies are either wholly in or wholly out.
+## once: a point inside the solid's material against the references, and a
+## point inside each reference part against the solid. With no crossings
+## anywhere, one interior point settles it — the bodies are either wholly in
+## or wholly out.
+##
+## THREE THINGS DECIDE WHICH POINT. A direction is only asked at all when the
+## containing body's world box actually holds the other one, so a lid resting
+## on a board is never asked whether the shell is inside the board. The point
+## is then moved off a vertex towards its own body's centre and dropped while
+## a surface of the OTHER body is still within TOUCH_EPSILON_MM of it, so a
+## designed flush contact is never settled by a ray cast along the plane the
+## two bodies share. And it is dropped again unless it is verifiably inside
+## its OWN body: the step is a fraction of a world box and a body is not
+## convex, so a vertex on the rim of a mounting hole insets INTO the hole —
+## where a locating pin standing through that hole would read as a body the
+## reference lies entirely inside. Every rejection tries the next point; only
+## a verified point may answer.
 func _containment(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -599,20 +679,31 @@ func _containment(
 	reference_scope: String,
 	node_scope: String
 ) -> void:
-	if _solid_edges.size() >= 2:
-		var probe: Vector3 = _solid_edges[0]
-		# The gauge's own parity test, reached through the smallest gauge it
-		# will accept: a pin that touches nothing and still does not fit is a
-		# pin buried in material.
-		var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
-			"shape": "sphere",
-			"size": Vector3(0.002, 0.0, 0.0),
-			"at": probe,
-			"mask": mask,
-			"reference": reference_scope,
-		})
-		_casts += 1
-		if str(verdict.get("reason", "")) == "inside_solid":
+	if _solid_edges.size() >= 2 and solid_state != null \
+			and _reference_encloses_solid(reference_scope):
+		for probe in _probe_points(_solid_edges, _solid_bounds):
+			# Inside the SOLID's own material, or it says nothing about where
+			# the solid is: an edge endpoint of a shell insets into the cavity
+			# the shell encloses as readily as into its wall.
+			if _parity_inside_solid(solid_state, probe) != 1:
+				continue
+			if _touches_references(gauge, state, mask, reference_scope, probe):
+				continue
+			# The gauge's own parity test, reached through the smallest gauge
+			# it will accept: a pin that touches nothing and still does not
+			# fit is a pin buried in material.
+			var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
+				"shape": "sphere",
+				"size": Vector3(0.002, 0.0, 0.0),
+				"at": probe,
+				"mask": mask,
+				"reference": reference_scope,
+			})
+			_casts += 1
+			# A verified probe that is in nobody's material settles direction
+			# one; direction two is a different question and still runs.
+			if str(verdict.get("reason", "")) != "inside_solid":
+				break
 			# Parity says "inside something" without saying inside WHAT, so the
 			# nearest surface from the probe names the offender.
 			#
@@ -659,16 +750,161 @@ func _containment(
 			var box: AABB = _ReferenceMeshes.transform_aabb(xform, mesh.get_aabb())
 			if not _solid_bounds.encloses(box):
 				continue
-			var vertex := _first_vertex(mesh, xform)
-			if _parity_inside_solid(solid_state, vertex) != 1:
-				continue
-			_absorb(pairs, {
-				"point": vertex,
-				"node": node_path,
-				"reference": reference_name,
-				"distance": 0.0,
-				"containment": "this node lies entirely inside the solid",
-			}, node_scope)
+			for probe in _probe_points(_mesh_vertices(mesh, xform), box):
+				if _touches_solid(solid_state, probe):
+					continue
+				# Inside the PART's own material, or it says nothing about
+				# where the part is. A vertex on a mounting hole's rim insets
+				# into the hole, and a pin standing through that hole would
+				# then read as a body this node lies entirely inside.
+				if not _inside_reference(gauge, state, probe, reference_name):
+					continue
+				if _parity_inside_solid(solid_state, probe) != 1:
+					break
+				_absorb(pairs, {
+					"point": probe,
+					"node": node_path,
+					"reference": reference_name,
+					"distance": 0.0,
+					"containment": "this node lies entirely inside the solid",
+				}, node_scope)
+				break
+
+
+## Could the solid be inside a reference at all? Only a reference whose world
+## box holds the whole solid can contain it. Without this gate a shell over a
+## board — whose box holds neither — is asked a parity question about a probe
+## sitting on the contact plane, and answers it by float luck.
+func _reference_encloses_solid(reference_scope: String) -> bool:
+	for entry in _records:
+		var record: Dictionary = entry
+		if not reference_scope.is_empty() \
+				and str(record.get("name", "")) != reference_scope:
+			continue
+		if _record_world_box(record).encloses(_solid_bounds):
+			return true
+	return false
+
+
+## A reference's world bounds: the box the record carries, or the union of its
+## parts' transformed mesh boxes when it carries none.
+func _record_world_box(record: Dictionary) -> AABB:
+	var world: AABB = record.get("world_aabb", AABB())
+	if world.size.length_squared() > 0.0:
+		return world
+	var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+	var box := AABB()
+	var have := false
+	for part_entry in record.get("parts", []):
+		var part: Dictionary = part_entry
+		var mesh: Mesh = part.get("mesh", null)
+		if mesh == null:
+			continue
+		var xform: Transform3D = pose \
+			* (part.get("transform", Transform3D.IDENTITY) as Transform3D)
+		var part_box: AABB = _ReferenceMeshes.transform_aabb(xform, mesh.get_aabb())
+		box = part_box if not have else box.merge(part_box)
+		have = true
+	return box
+
+
+## Probe points for a body, world millimetres: up to MAX_PROBE_POINTS of its
+## own points, spread across the list rather than taken from one corner, each
+## moved towards the centre of `box` so it is off any face it rests on.
+func _probe_points(points: PackedVector3Array, box: AABB) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	if points.is_empty():
+		return out
+	var step: int = maxi(1, points.size() / MAX_PROBE_POINTS)
+	var index := 0
+	while index < points.size() and out.size() < MAX_PROBE_POINTS:
+		out.append(_inset(points[index], box))
+		index += step
+	return out
+
+
+## `point` moved towards the centre of `box`, into the material of the body
+## the box describes. The step is a quarter of the box's smallest extent, so a
+## thin part keeps its probe inside itself; a point already nearer the centre
+## than that becomes the centre.
+func _inset(point: Vector3, box: AABB) -> Vector3:
+	var centre := box.get_center()
+	var step: float = minf(box.size.x, minf(box.size.y, box.size.z)) \
+		* PROBE_INSET_FRACTION
+	var toward := centre - point
+	if step <= 0.0 or toward.length() <= step:
+		return centre
+	return point + toward.normalized() * step
+
+
+## Every vertex of `mesh` in world millimetres.
+func _mesh_vertices(mesh: Mesh, xform: Transform3D) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	for surface in range(mesh.get_surface_count()):
+		var arrays: Array = mesh.surface_get_arrays(surface)
+		if arrays.size() <= Mesh.ARRAY_VERTEX or arrays[Mesh.ARRAY_VERTEX] == null:
+			continue
+		for vertex in (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+			out.append(xform * vertex)
+	return out
+
+
+## Is a surface of the solid within TOUCH_EPSILON_MM of `point`? Six rays, one
+## along each axis: a contact plane is reached from one side only, so a probe
+## resting on a floor is seen by the ray that goes down into it.
+func _touches_solid(solid_state: PhysicsDirectSpaceState3D, point: Vector3) -> bool:
+	var reach := _solid_bounds.size.length() + 10.0
+	for direction in _PROBE_DIRECTIONS:
+		var hit := _solid_ray(solid_state, point, point + direction * reach)
+		if hit.is_empty():
+			continue
+		if point.distance_to(hit.get("position", Vector3.ZERO)) <= TOUCH_EPSILON_MM:
+			return true
+	return false
+
+
+## Is `point` inside the material of `reference_name`? The gauge's own parity
+## test through the smallest gauge it will accept — a pin that touches nothing
+## and still does not fit is a pin buried in material — scoped to that one
+## reference, so a neighbour cannot vouch for a probe.
+func _inside_reference(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	reference_name: String
+) -> bool:
+	_casts += 1
+	var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
+		"shape": "sphere",
+		"size": Vector3(0.002, 0.0, 0.0),
+		"at": point,
+		"mask": int(gauge.call("mask_for", reference_name)),
+		"reference": reference_name,
+	})
+	return str(verdict.get("reason", "")) == "inside_solid"
+
+
+## The same question against the references, through the gauge's own space.
+func _touches_references(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	mask: int,
+	reference_scope: String,
+	point: Vector3
+) -> bool:
+	var reach := _scene_reach()
+	for direction in _PROBE_DIRECTIONS:
+		_casts += 1
+		var hit: Dictionary = gauge.call("run_now", state, "raycast", {
+			"from": point,
+			"to": point + direction * reach,
+			"mask": mask,
+			"reference": reference_scope,
+		})
+		if bool(hit.get("hit", false)) \
+				and float(hit.get("distance", reach)) <= TOUCH_EPSILON_MM:
+			return true
+	return false
 
 
 ## Is `point` inside the solid's material? 1 yes, 0 no, -1 undecidable.
@@ -753,7 +989,7 @@ func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String) -> vo
 		var node_path := str(crossing.get("node", ""))
 		if not _node_matches(node_path, node_scope):
 			continue
-		var key := "%s\n%s" % [str(crossing.get("reference", "")), node_path]
+		var key := _pair_key(str(crossing.get("reference", "")), node_path)
 		if not by_node.has(key):
 			by_node[key] = []
 		(by_node[key] as Array).append(float(crossing.get("distance", 0.0)))
@@ -769,8 +1005,15 @@ func _absorb_runs(pairs: Dictionary, crossings: Array, node_scope: String) -> vo
 			index += 2
 
 
+## The key a (reference, node) pair is folded under. Shared with the clearance
+## join, which has to look a pair up by the same name the interference report
+## filed it under.
+func _pair_key(reference_name: String, node_path: String) -> String:
+	return "%s\n%s" % [reference_name, node_path]
+
+
 func _pair_for(pairs: Dictionary, reference_name: String, node_path: String) -> Dictionary:
-	var key := "%s\n%s" % [reference_name, node_path]
+	var key := _pair_key(reference_name, node_path)
 	if not pairs.has(key):
 		pairs[key] = {
 			"reference": reference_name,
@@ -1012,19 +1255,6 @@ func _scene_reach() -> float:
 	return box.size.length() + 10.0
 
 
-## The first vertex of a mesh, in world millimetres. Any vertex will do: with
-## no edge crossing anywhere, every vertex of the part is on the same side.
-func _first_vertex(mesh: Mesh, xform: Transform3D) -> Vector3:
-	for surface in range(mesh.get_surface_count()):
-		var arrays: Array = mesh.surface_get_arrays(surface)
-		if arrays.size() <= Mesh.ARRAY_VERTEX or arrays[Mesh.ARRAY_VERTEX] == null:
-			continue
-		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-		if vertices.size() > 0:
-			return xform * vertices[0]
-	return xform.origin
-
-
 func _vector(raw: Variant) -> Vector3:
 	if raw is Vector3:
 		return raw
@@ -1095,6 +1325,9 @@ var _blobs: Dictionary = {}
 ## Directory the blobs are written to. Overridable so a suite can keep its
 ## files out of the user's cache.
 var _blob_dir: String = ""
+## Digests a clearance call now in flight has named, by how many calls name
+## them. The sweep keeps these whatever the current document hashes to.
+var _pinned_digests: Dictionary = {}
 
 
 ## Where the mesh blobs are written. The user's cache directory by default:
@@ -1126,6 +1359,9 @@ func get_blob_dir() -> String:
 ## over the same directory — which, now that each panel owns its own, would
 ## never happen.
 func release() -> void:
+	# The pins outlive their call only when a measurement's coroutine died
+	# holding them; the panel going away is the last chance to drop them.
+	_pinned_digests.clear()
 	var directory := get_blob_dir()
 	_blobs.clear()
 	if not DirAccess.dir_exists_absolute(directory):
@@ -1145,12 +1381,18 @@ func release() -> void:
 ##   {checked, units, pass, required_mm, tessellation_tolerance_mm, bound,
 ##    pairs: [{reference, node, min_mm, pass, solid_point_mm,
 ##             reference_point_mm: {world, local}, interference?, note?}],
-##    solid_triangles, cache, engine}
+##    solid_triangles, cache, engine, interference_join}
 ##
 ## sorted by min_mm, closest first. `solid_point_mm` is a bare world triple
 ## because the evaluated solid is never posed — its own frame IS the world.
 ## `checked: false` with a `reason` is not the same answer as "everything
 ## clears"; a reader that cannot tell them apart trusts a check that never ran.
+##
+## A mesh-to-mesh distance is UNSIGNED, so a node buried in the solid's
+## material comes back from the worker as a positive surface-to-surface gap.
+## The latest interference report for this same source is joined in for exactly
+## that case: a node it names is reported at 0 with the interference flag and
+## does not pass. `interference_join` says whether that report was available.
 func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _no_clearance("the CAD panel is gone")
@@ -1207,9 +1449,24 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if plan.has("error"):
 		return _no_clearance(str(plan["error"]))
 
+	# The keys this call names are pinned for as long as it runs. Two calls
+	# share _blobs and the blob directory, so a reference re-posed between one
+	# call's two attempts would otherwise let the other's sweep delete the file
+	# the retry names — a single-shot "could not read" with nothing wrong.
+	var pinned := _pin(plan["batches"] as Array)
+	var report := await _measure(panel, head, plan["batches"] as Array, records,
+		_buried_pairs(document, source))
+	_unpin(pinned)
+	return report
+
+
+## Ask every batch and fold the replies into one report. Split out so the pin
+## its caller takes is dropped on every path out of the measurement.
+func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
+		buried: Dictionary) -> Dictionary:
 	var envelope: Dictionary = {}
 	var raw_pairs: Array = []
-	for batch_entry in (plan["batches"] as Array):
+	for batch_entry in batches:
 		var batch: Array = batch_entry
 		var reply := await _ask_batch(panel, head, batch)
 		if reply.has("error"):
@@ -1219,7 +1476,28 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 				+ "did not run and gave no reason")))
 		envelope = reply
 		raw_pairs.append_array(reply.get("pairs", []) as Array)
-	return _clearance_report(envelope, raw_pairs, records)
+	return _clearance_report(envelope, raw_pairs, records, buried)
+
+
+## Hold the digests of every target in `batches` against the sweep, and hand
+## back the list to drop again.
+func _pin(batches: Array) -> PackedStringArray:
+	var held := PackedStringArray()
+	for batch_entry in batches:
+		for target_entry in (batch_entry as Array):
+			var digest := str((target_entry as Dictionary).get("key", ""))
+			_pinned_digests[digest] = int(_pinned_digests.get(digest, 0)) + 1
+			held.append(digest)
+	return held
+
+
+func _unpin(held: PackedStringArray) -> void:
+	for digest in held:
+		var remaining := int(_pinned_digests.get(digest, 0)) - 1
+		if remaining > 0:
+			_pinned_digests[digest] = remaining
+		else:
+			_pinned_digests.erase(digest)
 
 
 ## One batch of targets, uploading the geometry the worker turns out not to
@@ -1314,7 +1592,8 @@ func _blob_path(digest: String) -> String:
 ## batch agrees on them); `raw_pairs` is every batch's pairs together, which
 ## have to be re-sorted because each batch only sorted its own.
 func _clearance_report(envelope: Dictionary, raw_pairs: Array,
-		records: Array) -> Dictionary:
+		records: Array, buried: Dictionary) -> Dictionary:
+	var overlapping: Dictionary = buried.get("nodes", {})
 	var pairs: Array = []
 	for entry in raw_pairs:
 		var raw: Dictionary = entry
@@ -1324,6 +1603,19 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			"min_mm": float(raw.get("min_mm", 0.0)),
 			"pass": bool(raw.get("pass", false)),
 		}
+		if overlapping.has(_pair_key(pair["reference"], pair["node"])):
+			# The worker measured surface to surface and found air between two
+			# faces; the interference check found this node crossing the solid
+			# or buried in it. There is no gap to quote, and the realising
+			# points describe a distance that is not the answer.
+			pair["min_mm"] = 0.0
+			pair["pass"] = false
+			pair["interference"] = true
+			pair["note"] = "the interference check found this node crossing " \
+				+ "the solid or lying inside it; a mesh-to-mesh distance is " \
+				+ "unsigned and cannot see material a node is already inside"
+			pairs.append(pair)
+			continue
 		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
 			var pose := _pose_in(records, pair["reference"])
 			var reference_point := _vector(raw["reference_point_mm"])
@@ -1354,8 +1646,67 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"solid_triangles": int(envelope.get("solid_triangles", 0)),
 		"engine": str(envelope.get("engine", "")),
 		"cache": envelope.get("cache", {}),
+		"interference_join": _join_note(buried),
 		"pairs": pairs,
 	}
+
+
+## The (reference, node) pairs the panel's latest interference report names as
+## crossing the solid or lying inside it, keyed the way a clearance pair is.
+##
+## The interference check runs on every evaluation and rides in the panel's
+## last eval result, so the answer is already there; asking again would rebuild
+## the solid's collider for a question that has been answered.
+##
+## Returns {fresh: bool, nodes: {key: true}}. `fresh` is false when no report
+## describes the source about to be measured — the reply then says the join was
+## unavailable rather than implying the distances are signed.
+func _buried_pairs(document: Dictionary, source: String) -> Dictionary:
+	var out := {"fresh": false, "nodes": {}}
+	var last_eval: Variant = document.get("last_eval", {})
+	if not (last_eval is Dictionary):
+		return out
+	var report: Variant = (last_eval as Dictionary).get("interference", {})
+	if not (report is Dictionary):
+		return out
+	var interference: Dictionary = report
+	if not bool(interference.get("checked", false)):
+		return out
+	if str(interference.get("source_digest", "")) != _source_digest(source):
+		return out
+	out["fresh"] = true
+	var nodes: Dictionary = out["nodes"]
+	for entry in (interference.get("pairs", []) as Array):
+		var pair: Dictionary = entry
+		nodes[_pair_key(str(pair.get("reference", "")), str(pair.get("node", "")))] = true
+	return out
+
+
+## What the join contributed, in one sentence, so the reply is readable
+## without the reader knowing the interference check exists.
+func _join_note(buried: Dictionary) -> String:
+	if not bool(buried.get("fresh", false)):
+		return "no interference report describes this source, so none was " \
+			+ "joined: a mesh-to-mesh distance is unsigned, and a node buried " \
+			+ "in the solid's material reads as a positive gap"
+	var count: int = (buried.get("nodes", {}) as Dictionary).size()
+	if count == 0:
+		return "the latest interference report for this source found no " \
+			+ "overlap, so every distance below is between two surfaces " \
+			+ "with air in between"
+	return "%d node(s) the latest interference report for this source found " \
+		% count + "overlapping the solid are reported at 0 rather than at " \
+		+ "their unsigned surface-to-surface distance"
+
+
+## SHA-256 of the DSL source, hex. Carried on the interference report so a
+## clearance check can tell whether that report describes the solid it is
+## about to measure against.
+func _source_digest(source: String) -> String:
+	var hasher := HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(source.to_utf8_buffer())
+	return hasher.finish().hex_encode()
 
 
 ## One line for the status banner, naming the tightest gap. A clearance is
@@ -1524,6 +1875,8 @@ func _upload(keys: Array) -> bool:
 	var wanted := {}
 	for entry in _blobs.values():
 		wanted[str((entry as Dictionary).get("digest", ""))] = true
+	for digest in _pinned_digests.keys():
+		wanted[str(digest)] = true
 	for key in keys:
 		var digest := str(key)
 		var blob := _blob_with_digest(digest)
@@ -1543,9 +1896,10 @@ func _upload(keys: Array) -> bool:
 	return true
 
 
-## Delete blobs in `directory` that no live reference hashes to. Content-
-## addressed files never go stale, they only pile up; this keeps the directory
-## the size of the document rather than the size of the session.
+## Delete blobs in `directory` that no live reference hashes to and no call in
+## flight has pinned. Content-addressed files never go stale, they only pile
+## up; this keeps the directory the size of the document rather than the size
+## of the session.
 func _sweep(directory: String, wanted: Dictionary) -> void:
 	var names := DirAccess.get_files_at(directory)
 	for name in names:

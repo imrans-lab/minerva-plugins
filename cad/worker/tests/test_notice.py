@@ -121,8 +121,24 @@ def test_rendered_notice_names_every_component_and_its_text_file(lock_vars):
             assert name in body
 
 
-def test_generation_is_deterministic(lock_vars):
-    assert gn.render_notice(lock_vars) == gn.render_notice(lock_vars)
+def test_generation_depends_only_on_the_lock_and_the_licence_texts(lock_vars,
+                                                                  licence_copy):
+    """Two renders agree only because the same inputs produced them.
+
+    The gate compares a stored NOTICE.md against a fresh render, so anything
+    in the output that comes from the run rather than from the inputs — a
+    timestamp, a path, a dict order — makes every release refuse. Changing an
+    input has to change the output, or the comparison proves nothing.
+    """
+    first = gn.render_notice(lock_vars, licence_dir=licence_copy)
+    assert gn.render_notice(lock_vars, licence_dir=licence_copy) == first
+
+    # And the output really does follow its inputs: the NOTICE records the
+    # hash of every licence text it attributes, so a changed text is a
+    # changed NOTICE and the gate makes someone look at it.
+    text = licence_copy / "fcl-0.7.0.LICENSE.txt"
+    text.write_text(text.read_text() + "\n(amended upstream)\n")
+    assert gn.render_notice(lock_vars, licence_dir=licence_copy) != first
 
 
 # ---------------------------------------------------------------------------
@@ -155,12 +171,11 @@ def test_gate_refuses_a_licence_text_nothing_references(lock_vars, licence_copy)
 
 def test_gate_refuses_when_a_declared_support_file_is_removed(lock_vars,
                                                               licence_copy):
-    """The measured hole: the directory ships more than licence texts.
+    """The directory ships more than licence texts, and all of it is declared.
 
-    With only runtime/ inventoried, moving cad/licenses/README.md away left
-    `--check` reporting "up to date" — the gate was reading a directory
-    listing where it should have been reading the declared inventory. Every
-    file that ships is now declared, and a missing one is named.
+    With only runtime/ inventoried, removing cad/licenses/README.md leaves
+    `--check` reporting "up to date": a directory listing cannot notice a file
+    that is gone. The declared inventory can, and names it.
     """
     (licence_copy.parent / "README.md").unlink()
     with pytest.raises(gn.NoticeGateError) as exc:

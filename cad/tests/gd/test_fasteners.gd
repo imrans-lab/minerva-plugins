@@ -26,9 +26,9 @@ extends SceneTree
 ##
 ## THE FIXTURE, AND WHY EACH SCREW IS THERE
 ##
-## A 60 x 60 x 1.6 board, posed away from the origin, with four 3.4 mm through
-## holes, and a small blocker part standing over the third one. Under it, five
-## bosses, each with a 2.4 mm pilot bore 8.2 mm deep:
+## A 60 x 60 x 1.6 board, posed away from the origin AND TURNED, with five
+## 3.4 mm through holes, and a small blocker part standing over the third one.
+## Under it, six bosses, each with a 2.4 mm pilot bore 8.2 mm deep:
 ##
 ##   A  coaxial with hole 1                     -> passes, on every count
 ##   B  0.5 mm off and tilted 2 degrees         -> fails coaxiality, and only that
@@ -38,6 +38,16 @@ extends SceneTree
 ##      of the shell bridging that gap across part of its bore and 1.4 mm off
 ##      the axis                                -> fails the path on the SOLID,
 ##      which the axis ray alone could never see
+##   F  coaxial with hole 5, whose seat plane is milled away on one side of
+##      the axis                                -> passes, with HALF its seat
+##      ring unsupported: the one number that grades how the head lands
+##
+## THE POSE IS TURNED, and that is load-bearing. The board is yawed about the
+## CAD world's up axis and leaned about x, so the screw axis is nowhere near
+## world z and every seat, obstruction and offset has to come from the hole's
+## OWN axis and the pose's basis. A check that reads world z, or that adds
+## pose.origin without applying pose.basis, fails here and passes on an
+## identity pose.
 ##
 ## The screw is an M3 x 8 with a 6 mm head. ISO 273 medium gives an M3 a 3.4 mm
 ## clearance hole, so its whole radial allowance is 0.2 mm — which is why B's
@@ -59,9 +69,9 @@ const BOARD_SIZE := Vector3(60.0, 60.0, 1.6)
 const BOARD_HALF_THICKNESS := 0.8
 const HOLE_DIA := 3.4
 const HOLE_RADIUS := 1.7
-## The four holes in the board's own frame (z = 0 is mid-thickness).
+## The five holes in the board's own frame (z = 0 is mid-thickness).
 const HOLE_XY := [Vector2(-20.0, 0.0), Vector2(0.0, 0.0), Vector2(20.0, 0.0),
-	Vector2(0.0, -20.0)]
+	Vector2(0.0, -20.0), Vector2(0.0, 20.0)]
 ## The blocker: a 4 x 4 x 3 box standing over hole 3, its underside 2.2 mm
 ## clear of the board's top face, so it is unmistakably in the screw's way and
 ## unmistakably not touching the board.
@@ -70,6 +80,9 @@ const BLOCKER_BOTTOM_Z := 3.0
 const BLOCKER_TOP_Z := 6.0
 
 const POSE_ORIGIN := Vector3(100.0, 200.0, 300.0)
+## How far the board is turned: a yaw about +z and a lean about +x.
+const POSE_YAW_DEG := 30.0
+const POSE_LEAN_DEG := 20.0
 const BOARD_REFERENCE := "board"
 const BOARD_NODE := "Assembly/Board"
 const BLOCKER_NODE := "Assembly/Blocker"
@@ -98,6 +111,13 @@ const E_GAP_MM := 1.2
 const E_BORE_TOP_Z := BORE_TOP_Z - E_GAP_MM
 const E_BORE_BOTTOM_Z := BORE_BOTTOM_Z - E_GAP_MM
 const E_BOSS_BOTTOM_Z := BOSS_BOTTOM_Z - E_GAP_MM
+## Hole 5's seat plane is milled away on one side: a pocket whose straight
+## edge passes through the hole's own axis, 1.0 mm deep, so a seat ray landing
+## in it is 1.0 mm below the seat plane — twice the RING_SPACING_MM band that
+## counts as landed. The seat ring is sampled at (head + shank) / 2 = 2.25 mm,
+## so the pocket covers exactly the half of that ring on its own side.
+const POCKET_DEPTH_MM := 1.0
+const POCKET_SIZE := Vector3(12.0, 12.0, 4.0)
 ## The rib: 1.5 wide in x, centred 1.4 mm off the bore axis, so it covers
 ## x in [0.65, 2.15] — across part of the 2.4 mm bore and clear of its centre.
 const RIB_SIZE := Vector3(1.5, 8.0, E_GAP_MM)
@@ -123,6 +143,14 @@ const EXPECTED_REQUIRED_MM := 6.0
 const B_OFFSET_AT_ENTRY_MM := 0.44414
 const B_OFFSET_AT_EXIT_MM := 0.22063
 const NUMERIC_TOLERANCE_MM := 0.005
+## The seat ring's own ray count, from the module's spacing rule:
+## ceil(TAU * 2.25 / 0.5) = 29 rays, none of which is the axis ray.
+const EXPECTED_SEAT_RAYS := 29
+## Half of that ring lies over the pocket. Which side each ray falls on
+## depends on where the ring's first ray happens to start, so 14 or 15 of the
+## 29 land — and a ray landing on the pocket's own edge can go either way.
+const HALF_SEAT_MIN := 0.40
+const HALF_SEAT_MAX := 0.60
 const ANGLE_TOLERANCE_DEG := 0.02
 
 ## The gate the tessellation fallback is licensed by.
@@ -148,7 +176,16 @@ func _init() -> void:
 
 
 func _run() -> void:
-	_pose = Transform3D(Basis.IDENTITY, POSE_ORIGIN)
+	_pose = Transform3D(
+		Basis(Vector3.BACK, deg_to_rad(POSE_YAW_DEG))
+			* Basis(Vector3.RIGHT, deg_to_rad(POSE_LEAN_DEG)),
+		POSE_ORIGIN)
+	check("fixture: the pose TURNS the board as well as moving it, so the "
+			+ "screw axis is nowhere near world z",
+			absf((_pose.basis * Vector3(0.0, 0.0, 1.0)).normalized()
+				.angle_to(Vector3(0.0, 0.0, 1.0)) - deg_to_rad(POSE_LEAN_DEG))
+					< deg_to_rad(0.01),
+			"axis = %s" % str(_pose.basis * Vector3(0.0, 0.0, 1.0)))
 
 	var board: ArrayMesh = await _bake_board()
 	var blocker: ArrayMesh = await _bake_blocker()
@@ -187,9 +224,9 @@ func _run() -> void:
 	_bores = _brep_bores()
 
 	var shell: Dictionary = await _shell_mesh()
-	check("fixture: the shell arrived as worker mesh data with five bores",
+	check("fixture: the shell arrived as worker mesh data with six bores",
 			(shell.get("vertices", []) as Array).size() > 0
-				and _bores.size() == 5,
+				and _bores.size() == 6,
 			"vertices=%d bores=%d" % [(shell.get("vertices", []) as Array).size(),
 				_bores.size()])
 
@@ -207,6 +244,7 @@ func _run() -> void:
 	_check_screw_b(report)
 	_check_screw_c(report)
 	_check_screw_e(report)
+	_check_screw_f(report)
 	_check_fit_agreement(report)
 	_check_status_line(module, report)
 	await _check_iso_273(module, panel)
@@ -219,11 +257,11 @@ func _run() -> void:
 # ---------------------------------------------------------------------------
 
 func _check_envelope(report: Dictionary) -> void:
-	check("envelope: the check ran and answered for four screws",
-			bool(report.get("checked", false)) and int(report.get("count", 0)) == 4,
+	check("envelope: the check ran and answered for five screws",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 5,
 			"report = %s" % str(report.get("reason", report.get("count", "?"))))
-	check("envelope: the whole check fails while any screw does — A passes, "
-			+ "B, C and E do not",
+	check("envelope: the whole check fails while any screw does — A and F "
+			+ "pass, B, C and E do not",
 			not bool(report.get("pass", true)) and int(report.get("failed", 0)) == 3,
 			"pass=%s failed=%s" % [str(report.get("pass")), str(report.get("failed"))])
 	check("envelope: the reply states the ray spacing its path check is worth, "
@@ -242,15 +280,15 @@ func _check_pairing(report: Dictionary) -> void:
 			nodes.size() == 1 and nodes.has(BOARD_NODE),
 			"nodes = %s" % str(nodes.keys()))
 
-	# The trap the item names: two bosses must never claim one hole. Three
-	# pairs over three holes with no repetition is the observable.
+	# Two bosses must never claim one hole: five pairs over five holes with no
+	# repetition is the observable that says they did not.
 	var seats := {}
 	for entry in report.get("screws", []):
 		var seat: Array = ((entry as Dictionary).get("seat_mm", {}) as Dictionary).get("world", [])
 		seats[str(seat)] = true
-	check("pairing: four screws sit at four DIFFERENT holes — no hole is "
+	check("pairing: five screws sit at five DIFFERENT holes — no hole is "
 			+ "claimed twice",
-			seats.size() == 4, "distinct seats = %d" % seats.size())
+			seats.size() == 5, "distinct seats = %d" % seats.size())
 
 	var unpaired: Dictionary = report.get("unpaired", {}) as Dictionary
 	var loose: Array = unpaired.get("solid_features", []) as Array
@@ -299,8 +337,13 @@ func _check_screw_a(report: Dictionary) -> void:
 			"axis_source=%s tolerance=%s" % [str(row.get("axis_source")),
 				str(row.get("tessellation_tolerance_mm"))])
 
+	# The seat is the hole's centre lifted half the plate's thickness along the
+	# hole's own axis. Under a turned pose that is the posed point
+	# (x, y, +0.8), which the pose gives directly and the module has to reach
+	# by transforming an axis.
 	check("A: the seat is the board's TOP face, reported in both frames",
-			absf(_world_of(row["seat_mm"]).z - (POSE_ORIGIN.z + BOARD_HALF_THICKNESS))
+			_world_of(row["seat_mm"]).distance_to(_pose * Vector3(
+					HOLE_XY[0].x, HOLE_XY[0].y, BOARD_HALF_THICKNESS))
 					< NUMERIC_TOLERANCE_MM
 				and absf(_local_of(row["seat_mm"]).z - BOARD_HALF_THICKNESS)
 					< NUMERIC_TOLERANCE_MM,
@@ -432,11 +475,40 @@ func _check_screw_e(report: Dictionary) -> void:
 
 
 # ---------------------------------------------------------------------------
+# Screw F — a head hanging half over a milled-away seat
+# ---------------------------------------------------------------------------
+
+## Nothing is in this screw's way and nothing is out of line: what is wrong is
+## that half the ring its head bears on has no material under it. That is the
+## one thing head_seat_supported grades, and it is graded over the SEAT ring's
+## own rays — a denominator borrowed from any other fan would put the number
+## somewhere other than a half.
+func _check_screw_f(report: Dictionary) -> void:
+	var row := _row_at(report, HOLE_XY[4])
+	var supported := float(row.get("head_seat_supported", -1.0))
+	check("F: the seat ring is sampled at the module's own spacing — 29 rays "
+			+ "round a 2.25 mm ring, and the axis ray is not one of them",
+			int(row.get("head_seat_rays", 0)) == EXPECTED_SEAT_RAYS,
+			"rays = %s" % str(row.get("head_seat_rays")))
+	check("F: with the seat plane milled away on one side of the axis, half "
+			+ "the ring lands and half does not",
+			supported > HALF_SEAT_MIN and supported < HALF_SEAT_MAX,
+			"supported = %s" % str(row.get("head_seat_supported")))
+	check("F: a half-seated head is REPORTED, not graded — nothing is in its "
+			+ "way, so the screw still passes and `why` stays silent",
+			bool(row.get("pass", false))
+				and bool(row.get("head_seat_clear", false))
+				and bool(row.get("path_clear", false))
+				and str(row.get("why", "")) == "",
+			"pass=%s why='%s'" % [str(row.get("pass")), str(row.get("why"))])
+
+
+# ---------------------------------------------------------------------------
 # The measurement that licenses the fallback
 # ---------------------------------------------------------------------------
 
-## The gate from the item: a bore the B-Rep knows and the panel's fitter also
-## finds must agree on the AXIS to 0.01 mm and 0.05 degrees. The fit here is
+## The gate: a bore the B-Rep knows and the panel's fitter also finds must
+## agree on the AXIS to 0.01 mm and 0.05 degrees. The fit here is
 ## real — it runs over the shell's actual tessellation, through the same
 ## mesh_features fitter the reference meshes go through — so this is a
 ## measurement and not a restatement.
@@ -625,8 +697,9 @@ func _stand_in_panel(gauge: Node, checks: RefCounted, shell: Dictionary) -> Node
 # Fixtures
 # ---------------------------------------------------------------------------
 
-## The board in its own frame: a plate centred on the origin with three
-## through holes. Built with CSG and baked — no mesh binary in the repository.
+## The board in its own frame: a plate centred on the origin with five through
+## holes, the last of which has half its seat plane milled away. Built with CSG
+## and baked — no mesh binary in the repository.
 func _bake_board() -> ArrayMesh:
 	var combiner := CSGCombiner3D.new()
 	combiner.name = "Board"
@@ -643,6 +716,17 @@ func _bake_board() -> ArrayMesh:
 		drill.rotation = Vector3(PI * 0.5, 0.0, 0.0)
 		drill.position = Vector3((xy as Vector2).x, (xy as Vector2).y, 0.0)
 		combiner.add_child(drill)
+	# The pocket over hole 5: its straight edge runs through that hole's axis,
+	# so the half of the seat ring on the +x side of the axis has no material
+	# at the seat plane while the other half is untouched.
+	var pocket := CSGBox3D.new()
+	pocket.size = POCKET_SIZE
+	pocket.operation = CSGShape3D.OPERATION_SUBTRACTION
+	pocket.position = Vector3(
+		HOLE_XY[4].x + POCKET_SIZE.x * 0.5,
+		HOLE_XY[4].y,
+		BOARD_HALF_THICKNESS - POCKET_DEPTH_MM + POCKET_SIZE.z * 0.5)
+	combiner.add_child(pocket)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()
@@ -667,7 +751,7 @@ func _bake_blocker() -> ArrayMesh:
 	return baked
 
 
-## The shell: four bosses with pilot bores, already in WORLD millimetres —
+## The shell: six bosses with pilot bores, already in WORLD millimetres —
 ## which is where an evaluated solid always lives, since it is never posed.
 func _shell_mesh() -> Dictionary:
 	var combiner := CSGCombiner3D.new()
@@ -677,6 +761,7 @@ func _shell_mesh() -> Dictionary:
 	_add_boss(combiner, _boss_transform(HOLE_XY[2], 0.0, 0.0), 0.0)
 	_add_boss(combiner, _boss_transform(D_XY, 0.0, 0.0), 0.0)
 	_add_boss(combiner, _boss_transform(HOLE_XY[3], 0.0, 0.0), E_GAP_MM)
+	_add_boss(combiner, _boss_transform(HOLE_XY[4], 0.0, 0.0), 0.0)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()
@@ -741,7 +826,7 @@ func _brep_bores() -> Array:
 	for entry in [
 		[HOLE_XY[0], 0.0, 0.0, 0.0], [HOLE_XY[1], B_OFFSET_MM, B_TILT_DEG, 0.0],
 		[HOLE_XY[2], 0.0, 0.0, 0.0], [D_XY, 0.0, 0.0, 0.0],
-		[HOLE_XY[3], 0.0, 0.0, E_GAP_MM],
+		[HOLE_XY[3], 0.0, 0.0, E_GAP_MM], [HOLE_XY[4], 0.0, 0.0, 0.0],
 	]:
 		var spec: Array = entry
 		var xform: Transform3D = _boss_transform(
@@ -773,7 +858,7 @@ func _screw() -> Dictionary:
 	return {"dia_mm": SCREW_DIA, "length_mm": SCREW_LENGTH, "head_dia_mm": HEAD_DIA}
 
 
-## The three holes in the shape minerva_cad_find_holes reports them.
+## The five holes in the shape minerva_cad_find_holes reports them.
 func _holes() -> Array:
 	var out: Array = []
 	for xy in HOLE_XY:
@@ -799,10 +884,18 @@ func _hole_record(xy: Vector2) -> Dictionary:
 	}
 
 
+## The board's world bounds with the blocker's top corner in them. The pose
+## turns the board, so the box is the one around the POSED corners.
 func _reference_world_box() -> AABB:
-	var box := AABB(POSE_ORIGIN - Vector3(BOARD_SIZE.x, BOARD_SIZE.y, BOARD_SIZE.z) * 0.5,
-		BOARD_SIZE)
-	return box.expand(POSE_ORIGIN + Vector3(HOLE_XY[2].x, HOLE_XY[2].y, BLOCKER_TOP_Z))
+	var box := AABB()
+	var seen := false
+	for x in [-BOARD_SIZE.x * 0.5, BOARD_SIZE.x * 0.5]:
+		for y in [-BOARD_SIZE.y * 0.5, BOARD_SIZE.y * 0.5]:
+			for z in [-BOARD_SIZE.z * 0.5, BOARD_SIZE.z * 0.5]:
+				var corner: Vector3 = _pose * Vector3(x, y, z)
+				box = AABB(corner, Vector3.ZERO) if not seen else box.expand(corner)
+				seen = true
+	return box.expand(_pose * Vector3(HOLE_XY[2].x, HOLE_XY[2].y, BLOCKER_TOP_Z))
 
 
 ## The worker's mesh shape: vertex triples and index triples, posed into world.

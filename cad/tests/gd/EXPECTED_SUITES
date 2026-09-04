@@ -129,69 +129,84 @@ test_reference_selection.gd assertions=49
 test_cad_note.gd assertions=40
 
 # Interference between the evaluated solid and a reference: a CSG board posed
-# by a non-identity transform, and four solids built in-test and handed over as
-# worker mesh data. Pins the solid's collider being rebuilt on every
-# evaluation and never cached, a boss driven clean through the board reporting
-# the right node with a crossing on the boss circle at a board face to 0.05 mm,
-# both frames agreeing under the pose, the penetration coming back as the
-# board's own thickness, the same boss lifted 0.1 mm reporting a clean zero
-# (with the previous points gone), a 0.2 mm sliver overlap with NO vertex of
-# either body inside the other still being reported, a cube buried in the
-# board being caught by parity alone, the status line naming the first
+# by a transform that TURNS it as well as moving it, and five solids built
+# in-test and handed over as worker mesh data. Pins the solid's collider being
+# rebuilt on every evaluation and never cached, a boss driven clean through the
+# board reporting the right node with a crossing on the boss circle at a board
+# face to 0.05 mm, both frames agreeing under the pose, the penetration coming
+# back as the board's own thickness, the same boss lifted 0.1 mm reporting a
+# clean zero (with the previous points gone), a 0.2 mm sliver overlap with NO
+# vertex of either body inside the other still being reported, a cube buried in
+# the board being caught by parity alone, the status line naming the first
 # offender, and the reference=/node= scoping (a filter matching nothing
 # reports nothing). Plus containment the other way round (a board wholly
-# inside the solid, caught by parity alone) and supersession: two overlapping
+# inside the solid, caught by parity alone); the DESIGNED contact — a board
+# resting on an open cavity's floor, inside the shell's own bounds, which must
+# read as clean and not as containment; and supersession: two overlapping
 # requests through a stand-in panel, where the overtaken reply is marked and —
 # sampled at the instant it returns, which an end-state assertion could not
 # distinguish — never painted, while the pane ends up showing the newest
-# answer. 30 assertions = 2 fixture + 5 collider + 8 through + 3 clear +
-# 2 sliver + 2 buried + 2 enclosed + 2 scope + 4 supersession.
-test_interference.gd assertions=30
+# answer. And the probe that decides containment: a washer floating inside a
+# shell with a locating pin standing through its mounting hole, whose every
+# vertex is on a rim of that hole and whose rim is narrower than the module's
+# own inset step — so every candidate probe lands in the hole, inside the pin,
+# and a probe that is not verified to be inside its OWN body reports the
+# washer as buried in the shell. 35 assertions = 3 fixture + 5 collider +
+# 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
+# 4 supersession + 2 pin.
+test_interference.gd assertions=35
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
-# right angles with 0.8 mm of air between them, where every vertex of either
-# bar is more than 60 mm from the other, so the gap is face-to-face and a
-# vertex-sampling check cannot find it. The exact distance runs in the worker
-# (pinned by worker/tests/test_clearance.py); this suite pins everything the
-# PANEL owns, against a stand-in backend that derives its answer from the blob
-# the module actually wrote: the request naming geometry by hash and fitting
-# the host's 64 KiB IPC cap, the upload-on-miss retry, content-addressed blob
-# files that decode to the POSED world geometry, the sweep of blobs nothing
-# references, an unchanged reference being named rather than re-sent, the
-# answer's both-frame points and closest-first order, the mandatory
-# tessellation tolerance and the status line quoting it, pass at 0.5 and a
-# fail at 1.0 naming the node, node= scoping the question before it is asked,
-# a zero-gap pair carrying the interference flag and no points, and four
-# refusals (no required_mm, a node filter matching nothing, a worker error
-# quoted verbatim, and a refused check reporting no pairs). Also the channel
-# cap itself: with a source long enough that only one target fits beside it,
-# the request is SPLIT one target per message, every split message is under
-# the limit and the answers merge back into one closest-first report; a source
-# that leaves room for no target at all is refused with a reason instead of
-# being handed to the host to refuse as payload_too_large. And the isolation
-# two panels need: each module writes to its own blob directory, a clearance
-# check leaves the interference check's records alone, and a panel releases
-# its directory when it goes away.
-# 31 assertions = 2 fixture + 8 upload + 10 answer + 4 cap + 4 refusal
-# + 3 isolation.
-test_clearance.gd assertions=31
+# right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
+# by its pose, where every vertex of either bar is more than 40 mm from the
+# other, so the gap is face-to-face and a vertex-sampling check cannot find it.
+# The exact distance runs in the worker (pinned by
+# worker/tests/test_clearance.py); this suite pins everything the PANEL owns,
+# against a stand-in backend that derives its answer from the blob the module
+# actually wrote: the request naming geometry by hash and fitting the host's
+# 64 KiB IPC cap, the upload-on-miss retry, content-addressed blob files that
+# decode to the POSED world geometry, the sweep of blobs nothing references, an
+# unchanged reference being named rather than re-sent, the answer's both-frame
+# points and closest-first order, the mandatory tessellation tolerance and the
+# status line quoting it, pass at 0.5 and a fail at 1.0 naming the node, node=
+# scoping the question before it is asked, and four refusals (no required_mm, a
+# node filter matching nothing, a worker error quoted verbatim, and a refused
+# check reporting no pairs). Also the node a DISTANCE cannot see: a
+# mesh-to-mesh distance is unsigned, so a node the latest interference report
+# names comes back at 0 and fails while the node it does not name keeps its
+# measured gap, the reply says whether the join happened, and a report about a
+# different source is not joined. Also the channel cap itself: with a source
+# long enough that only one target fits beside it, the request is SPLIT one
+# target per message, every split message is under the limit and the answers
+# merge back into one closest-first report; a source that leaves room for no
+# target at all is refused with a reason instead of being handed to the host to
+# refuse as payload_too_large. And the isolation two panels need: each module
+# writes to its own blob directory, a clearance check leaves the interference
+# check's own records exactly as it found them, and a panel releases its
+# directory when it goes away.
+# 35 assertions = 3 fixture + 8 upload + 9 answer + 4 cap + 4 refusal
+# + 4 buried + 3 isolation.
+test_clearance.gd assertions=35
 
-# Fasteners: a 60 x 60 x 1.6 board posed away from the origin with four 3.4 mm
-# through holes and a blocker part standing over the third, and a shell of five
+# Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
+# yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
+# through holes and a blocker part standing over the third, and a shell of six
 # bosses with 2.4 mm pilot bores — one coaxial, one 0.5 mm off and 2 degrees
-# tilted, one under the blocker, one parked away from every hole, and one
-# standing 1.2 mm clear of the board with a rib of the SHELL bridging that gap
-# across part of its own bore, off-centre, where only the shank ring can see
-# it. The exact
-# B-Rep read is pinned by worker/tests/test_features.py (the cad GD harness has
-# no worker) and the hole measurement by test_mesh_measurement.gd; everything
-# between them is real here. Pins the one-to-one pairing (three holes, three
-# seats, nothing claimed twice, the loose bore listed), an M3 passing on all
-# four counts with its 6.4 mm engagement and its seat on the board's top face
-# in both frames, the tilted boss failing on the ISO 1101 zone alone with the
-# offset measured at BOTH ends of the engaged length and the ISO 273 medium
-# allowance behind it, the blocked screw naming the node and the point in the
-# blocker's own height while its coaxiality stays clean, the fitted axis
+# tilted, one under the blocker, one parked away from every hole, one standing
+# 1.2 mm clear of the board with a rib of the SHELL bridging that gap across
+# part of its own bore, off-centre, where only the shank ring can see it, and
+# one under a hole whose seat plane is milled away on one side of its axis.
+# The exact B-Rep read is pinned by worker/tests/test_features.py (the cad GD
+# harness has no worker) and the hole measurement by test_mesh_measurement.gd;
+# everything between them is real here. Pins the one-to-one pairing (five
+# holes, five seats, nothing claimed twice, the loose bore listed), an M3
+# passing on all four counts with its 6.4 mm engagement and its seat on the
+# board's top face in both frames, the tilted boss failing on the ISO 1101 zone
+# alone with the offset measured at BOTH ends of the engaged length and the ISO
+# 273 medium allowance behind it, the blocked screw naming the node and the
+# point in the blocker's own height while its coaxiality stays clean, the
+# milled seat reporting half its own 29-ray ring unsupported while the screw
+# still passes (the seat fraction is advisory, not graded), the fitted axis
 # agreeing with the B-Rep one inside 0.01 mm / 0.05 degrees (the measurement
 # that licenses the fallback) with the radius difference reported and not
 # graded, the status line naming the first failure, a size ISO 273 does not
@@ -199,6 +214,6 @@ test_clearance.gd assertions=31
 # clearance hole, a hole record with no thickness being a named row rather than
 # a silent seat at the plate's centre, and three refusals that report pass
 # FALSE rather than an empty success.
-# 40 assertions = 3 fixture + 3 envelope + 3 pairing + 6 A + 5 B + 5 C + 4 E
-# + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 3 refusal.
-test_fasteners.gd assertions=40
+# 44 assertions = 4 fixture + 3 envelope + 3 pairing + 6 A + 5 B + 5 C + 4 E
+# + 3 F + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 3 refusal.
+test_fasteners.gd assertions=44

@@ -35,6 +35,19 @@ extends SceneTree
 ## dropped pose, a wrong unit, a mis-packed index or a byte-order slip changes
 ## the decoded geometry and the assertion fails.
 ##
+## The pose TURNS the reference as well as moving it — a yaw about the CAD
+## world's up axis — so a check that adds pose.origin without applying
+## pose.basis ships the wrong triangles and misses the gap by tens of
+## millimetres. The yaw is about z, which is the axis the gap is measured
+## along, so every distance in the fixture is unchanged by it.
+##
+## WHAT A DISTANCE CANNOT SEE
+##
+## A mesh-to-mesh distance is unsigned: a node buried in the solid's material
+## is a positive surface-to-surface number, and on its own reads as clearance.
+## The verb therefore joins the panel's latest interference report, and the
+## suite drives both halves of that — a joined report and a stale one.
+##
 ## Run:
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
 
@@ -47,13 +60,24 @@ const BAR_THICKNESS := 2.0
 ## The air between the two bars, and the tolerance the assertion allows.
 const GAP_MM := 0.8
 const GAP_TOLERANCE_MM := 0.005
-## Every vertex of one bar is at least this far from the other bar.
-const VERTEX_SEPARATION_FLOOR_MM := 60.0
 ## The second node, ten millimetres further down, so the reply has something
 ## to sort.
 const FAR_DROP_MM := 10.0
 
 const POSE_ORIGIN := Vector3(100.0, 200.0, 300.0)
+## The yaw the reference is posed with, about +z. The bars approach each other
+## face to face along z, so the gap is the same at any yaw — but the triangles
+## that have to be shipped to find it are not.
+const POSE_YAW_DEG := 30.0
+## The bar's half extents after the yaw, hand-derived: a bar 100 long and 4
+## wide turned 30 degrees spans 50 cos30 + 2 sin30 = 44.301 in x and
+## 50 sin30 + 2 cos30 = 26.732 in y.
+const YAWED_HALF_X := 44.3013
+const YAWED_HALF_Y := 26.7321
+## Every vertex of one bar is at least this far from the other bar. At this
+## yaw the closest pair is the reference bar's end corner and the solid bar's,
+## about 46.5 mm apart — still sixty times the gap being measured.
+const VERTEX_SEPARATION_FLOOR_MM := 40.0
 const REFERENCE_NAME := "board"
 const NEAR_NODE := "Assembly/Near"
 const FAR_NODE := "Assembly/Far"
@@ -77,7 +101,7 @@ var _blob_dir: String = ""
 var _known_blobs: Dictionary = {}
 ## Every payload the module sent, in order.
 var _payloads: Array = []
-## What the next call should answer with: "missing", "measure" or "error".
+## What the next call should answer with: "measure" or "error".
 var _mode: String = "measure"
 
 
@@ -92,7 +116,7 @@ func _init() -> void:
 
 
 func _run() -> void:
-	_pose = Transform3D(Basis.IDENTITY, POSE_ORIGIN)
+	_pose = Transform3D(Basis(Vector3.BACK, deg_to_rad(POSE_YAW_DEG)), POSE_ORIGIN)
 	_blob_dir = OS.get_user_data_dir().path_join("cad-clearance-test")
 	_clear_blob_dir()
 
@@ -106,6 +130,12 @@ func _run() -> void:
 			+ "vertex-sampling check cannot find this gap",
 			_closest_vertex_pair(near) > VERTEX_SEPARATION_FLOOR_MM,
 			"closest vertex pair is %.3f mm apart" % _closest_vertex_pair(near))
+	var yawed := _world_box(0.0)
+	check("fixture: the pose TURNS the bar — its world box is the hand-derived "
+			+ "44.301 x 26.732, not the 50 x 2 of its own frame",
+			absf(yawed.size.x * 0.5 - YAWED_HALF_X) < 0.001
+				and absf(yawed.size.y * 0.5 - YAWED_HALF_Y) < 0.001,
+			"world box = %s" % str(yawed))
 
 	var panel := _StubPanel.new()
 	panel.name = "StubPanel"
@@ -127,12 +157,17 @@ func _run() -> void:
 	var checks: RefCounted = GeometryChecks.new()
 	checks.attach(root)
 	checks.set_blob_dir(_blob_dir)
+	# What an interference check submitted just before these clearance calls
+	# landed. Nothing below may disturb it.
+	checks.set_records([{"name": "submitted-by-the-interference-check",
+		"pose": _pose, "parts": []}])
 	await process_frame
 
 	await _check_upload(panel, checks)
 	await _check_answer(panel, checks)
 	await _check_batching(panel, checks)
 	await _check_refusals(panel, checks)
+	await _check_buried(panel, checks)
 	_check_isolation(checks)
 	_clear_blob_dir()
 
@@ -290,18 +325,6 @@ func _check_answer(panel: Node, checks: RefCounted) -> void:
 				and _targets_of(0).size() == 1,
 			"scoped = %s" % str(scoped))
 
-	_mode = "interference"
-	var touching: Dictionary = await checks.check_clearance(panel,
-		{"required_mm": 0.5})
-	var first: Dictionary = (touching.get("pairs", []) as Array)[0] \
-		if not (touching.get("pairs", []) as Array).is_empty() else {}
-	check("answer: bodies with no air between them report zero with the "
-			+ "interference flag and no points to quote",
-			is_equal_approx(float(first.get("min_mm", -1.0)), 0.0)
-				and bool(first.get("interference", false))
-				and not first.has("solid_point_mm"),
-			"pair = %s" % str(first))
-	_mode = "measure"
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +424,88 @@ func _check_refusals(panel: Node, checks: RefCounted) -> void:
 
 
 # ---------------------------------------------------------------------------
+# The node the distance cannot see
+# ---------------------------------------------------------------------------
+
+## FCL measures surface to surface and never signs the result, so a node buried
+## in the solid's material comes back as a positive gap — the same number a
+## node sitting in clear air would give. The interference check is the half of
+## the pair that can tell those apart, and it has already run: it rides in the
+## panel's last eval result, stamped with a digest of the source it describes.
+##
+## The stand-in worker here answers with the fixture's real 0.8 mm of air while
+## the interference report names the near node, which is exactly the shape of
+## the failure: a positive distance about a body that is already inside.
+func _check_buried(panel: Node, checks: RefCounted) -> void:
+	panel.last_eval = _interference_over(SOURCE, [NEAR_NODE])
+	var report: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var near := _pair_for(report, NEAR_NODE)
+	var far := _pair_for(report, FAR_NODE)
+	check("buried: a node the interference check found inside the solid is "
+			+ "reported at zero and fails, whatever the unsigned distance says",
+			is_equal_approx(float(near.get("min_mm", -1.0)), 0.0)
+				and not bool(near.get("pass", true))
+				and bool(near.get("interference", false))
+				and not near.has("solid_point_mm")
+				and not bool(report.get("pass", true)),
+			"near = %s, pass = %s" % [str(near), str(report.get("pass"))])
+	check("buried: the node the report did NOT name keeps its measured gap",
+			absf(float(far.get("min_mm", -1.0)) - (GAP_MM + FAR_DROP_MM))
+					< GAP_TOLERANCE_MM
+				and bool(far.get("pass", false)),
+			"far = %s" % str(far))
+	check("buried: the reply says the join happened and over how many nodes, "
+			+ "so a reader is never left guessing which half answered",
+			str(report.get("interference_join", "")).contains("1"),
+			"join = '%s'" % str(report.get("interference_join", "")))
+
+	# A report about another document describes another solid. Joining it would
+	# fail a node for an overlap that no longer exists.
+	panel.last_eval = _interference_over(SOURCE + "\n# something else",
+		[NEAR_NODE])
+	var stale: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var unjoined := _pair_for(stale, NEAR_NODE)
+	check("buried: an interference report about a DIFFERENT source is not "
+			+ "joined, and the reply says the distances are unsigned",
+			absf(float(unjoined.get("min_mm", -1.0)) - GAP_MM) < GAP_TOLERANCE_MM
+				and bool(unjoined.get("pass", false))
+				and bool(stale.get("pass", false))
+				and str(stale.get("interference_join", "")).contains("unsigned"),
+			"pair = %s, join = '%s'" % [str(unjoined),
+				str(stale.get("interference_join", ""))])
+	panel.last_eval = {}
+
+
+## An eval result carrying an interference report over `nodes`, stamped with
+## the digest of `source` — the same SHA-256 of the DSL text the check writes
+## on its own report, which is how a clearance call tells a report about this
+## document from one about the last.
+func _interference_over(source: String, nodes: Array) -> Dictionary:
+	var hasher := HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(source.to_utf8_buffer())
+	var pairs: Array = []
+	for node in nodes:
+		pairs.append({"reference": REFERENCE_NAME, "node": str(node)})
+	return {"interference": {
+		"checked": true,
+		"count": pairs.size(),
+		"pairs": pairs,
+		"source_digest": hasher.finish().hex_encode(),
+	}}
+
+
+func _pair_for(report: Dictionary, node: String) -> Dictionary:
+	for entry in (report.get("pairs", []) as Array):
+		var pair: Dictionary = entry
+		if str(pair.get("node", "")) == node:
+			return pair
+	return {}
+
+
+# ---------------------------------------------------------------------------
 # What one panel's check must not do to another's
 # ---------------------------------------------------------------------------
 
@@ -418,10 +523,14 @@ func _check_isolation(checks: RefCounted) -> void:
 
 	# The interference check reads _records when its physics step comes, which
 	# may be after a clearance call has landed. The clearance path must work
-	# from its own snapshot.
-	check("isolation: a clearance check leaves the interference check's "
-			+ "records alone",
-			checks._records.is_empty(),
+	# from its own snapshot, so a check running now finds the records the
+	# interference path was submitted with — not the ones the clearance call
+	# read off the panel.
+	check("isolation: a clearance check leaves the interference check's own "
+			+ "records exactly as it found them",
+			(checks._records as Array).size() == 1
+				and str((checks._records[0] as Dictionary).get("name", ""))
+					== "submitted-by-the-interference-check",
 			"records = %s" % str(checks._records))
 
 	var directory := _blob_dir
@@ -476,8 +585,6 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		var box: AABB = blob["box"]
 		var top_z: float = box.position.z + box.size.z
 		var min_mm: float = maxf(solid_bottom_z - top_z, 0.0)
-		if _mode == "interference":
-			min_mm = 0.0
 		var pair := {
 			"reference": str(target.get("reference", "")),
 			"node": str(target.get("node", "")),
@@ -513,13 +620,17 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 
 
 class _StubPanel extends Node:
-	## The three things geometry_checks.check_clearance asks a panel for.
+	## The four things geometry_checks.check_clearance asks a panel for. The
+	## last eval result is where the interference report the clearance verb
+	## joins against arrives from.
 	var source: String = ""
 	var records: Array = []
+	var last_eval: Dictionary = {}
 	var answer: Callable
 
 	func get_document_state() -> Dictionary:
-		return {"source": source, "path": "", "mesh": {}, "references": []}
+		return {"source": source, "path": "", "mesh": {},
+			"references": [], "last_eval": last_eval}
 
 	func get_reference_state() -> Array:
 		return records
@@ -551,12 +662,18 @@ func _bake_bar(top_z: float) -> ArrayMesh:
 	return baked
 
 
-## Where a bar with its top face at `top_z` ends up in the world.
+## Where a bar with its top face at `top_z` ends up in the world: the box
+## around its eight POSED corners, since the pose turns it.
 func _world_box(top_z: float) -> AABB:
-	return AABB(
-		POSE_ORIGIN + Vector3(-BAR_HALF_LENGTH, -BAR_HALF_WIDTH,
-			top_z - BAR_THICKNESS),
-		Vector3(BAR_HALF_LENGTH * 2.0, BAR_HALF_WIDTH * 2.0, BAR_THICKNESS))
+	var box := AABB()
+	var seen := false
+	for x in [-BAR_HALF_LENGTH, BAR_HALF_LENGTH]:
+		for y in [-BAR_HALF_WIDTH, BAR_HALF_WIDTH]:
+			for z in [top_z - BAR_THICKNESS, top_z]:
+				var corner: Vector3 = _pose * Vector3(x, y, z)
+				box = AABB(corner, Vector3.ZERO) if not seen else box.expand(corner)
+				seen = true
+	return box
 
 
 ## The closest any vertex of the reference bar comes to any vertex of the

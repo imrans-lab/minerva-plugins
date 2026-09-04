@@ -79,6 +79,15 @@ WHEEL_REPAIR_TOOL="delvewheel==1.13.1"
 # vendored.
 WHEEL_REPAIR_ARGS="--ignore-existing --analyze-existing"
 
+# What a repaired wheel must CONTAIN for the repair to count, as a python
+# regular expression matched case-insensitively against the wheel's member
+# names. delvewheel writes an output wheel even when it vendored nothing, so
+# the build proves the repair by content — and which runtime is missing is a
+# property of the wheel being repaired, not of the mechanism: a wheel whose
+# extension links vcomp140 or libgomp is repaired the same way and proven
+# against a different name.
+WHEEL_REPAIR_PROOF="msvcp140.*\.dll$"
+
 # --- Layer 1 import probe -------------------------------------------------
 # Semicolon-separated python statements run inside the freshly-built bundle
 # (env-isolated, PYTHONHOME=<stage>) to confirm the wheels resolve at import

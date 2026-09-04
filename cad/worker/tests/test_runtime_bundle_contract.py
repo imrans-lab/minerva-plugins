@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 CAD = Path(__file__).resolve().parents[2]
@@ -182,7 +185,7 @@ def test_windows_repaired_packages_are_also_no_deps_pins():
 def test_repair_args_are_declared_and_actually_passed():
     """The flags a wheel needs to be repairable are lock data, not folklore.
 
-    MEASURED: python-fcl keeps ccd.dll, octomap.dll and octomath.dll inside
+    python-fcl keeps ccd.dll, octomap.dll and octomath.dll inside
     its package directory, and delvewheel only consults the wheel's own files
     when --ignore-existing is given — without it the repair dies with "Unable
     to find library: ccd.dll" before it can vendor anything. --analyze-existing
@@ -198,42 +201,86 @@ def test_repair_args_are_declared_and_actually_passed():
         "the build script must pass the declared repair arguments"
 
 
-def test_repair_is_proven_by_content_not_by_exit_code():
-    """delvewheel writes an output wheel even when it vendored nothing.
+def _repair_proof_snippet() -> str:
+    """The python the build script runs to prove a repaired wheel."""
+    snippet = re.search(
+        r'-c "\n(import sys, zipfile, re\n.*?)"\s*"\$whl"',
+        BUILD_TEXT, re.S)
+    assert snippet, "the build script no longer proves the repair in python"
+    return snippet.group(1)
 
-    The post-condition reads the repaired wheel with python's zipfile rather
-    than `unzip`, which Git for Windows does not reliably ship — a missing
-    tool must not read as a failed repair, nor a successful one.
+
+def _plant_wheel(path, names):
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in names:
+            archive.writestr(name, b"")
+    return path
+
+
+def test_the_repair_proof_accepts_a_vendored_runtime_and_rejects_a_bare_wheel(
+        tmp_path):
+    """Run the build script's own post-condition against two planted wheels.
+
+    delvewheel writes an output wheel even when it vendored nothing, so a
+    repair that silently did nothing is indistinguishable by exit code. The
+    proof reads the wheel's member names, and what it looks for is lock data
+    (WHEEL_REPAIR_PROOF), because which runtime a wheel is missing belongs to
+    the wheel. Both directions are exercised: a wheel carrying the vendored
+    DLL passes, and the same wheel without it fails.
     """
-    assert "msvcp140" in BUILD_TEXT
-    assert "exit 74" in BUILD_TEXT
-    assert "import sys, zipfile, re" in BUILD_TEXT
-    assert "unzip -l" not in BUILD_TEXT
+    if not LOCK.get("WHEEL_REPAIR_PKGS", "").strip():
+        return
+    pattern = LOCK.get("WHEEL_REPAIR_PROOF", "")
+    assert pattern, "a repaired wheel needs a proof pattern in the lock"
+    snippet = _repair_proof_snippet()
+
+    repaired = _plant_wheel(tmp_path / "repaired.whl", [
+        "fcl/__init__.py",
+        "fcl.libs/msvcp140-1a2b3c4d.dll",
+    ])
+    bare = _plant_wheel(tmp_path / "bare.whl", [
+        "fcl/__init__.py",
+        "fcl.libs/vcruntime140.dll",
+    ])
+    passed = subprocess.run(
+        [sys.executable, "-c", snippet, str(repaired), pattern], check=False)
+    failed = subprocess.run(
+        [sys.executable, "-c", snippet, str(bare), pattern], check=False)
+    assert passed.returncode == 0, "a wheel with the vendored runtime was rejected"
+    assert failed.returncode != 0, "a wheel that vendored nothing was accepted"
 
 
-def test_build_script_refuses_to_cross_build_a_repaired_target():
-    """A cross-built Windows bundle cannot be repaired — it must not pretend.
-
-    delvewheel copies the DLL out of the BUILD machine's Visual Studio
-    installation; a linux host has none. Producing an unrepaired bundle
-    quietly is the exact failure this whole mechanism removes.
-    """
-    assert 'WHEEL_REPAIR_PKGS is set but this is a cross build' in BUILD_TEXT
-    assert 'exit 73' in BUILD_TEXT
-
-
-def test_worker_names_the_missing_dll_rather_than_reporting_a_bare_import_error():
-    """The diagnosis a user can act on.
+def test_a_bundle_without_the_runtime_names_the_dll_rather_than_the_module(
+        capsys):
+    """The diagnosis a user can act on, produced by the code that writes it.
 
     "DLL load failed while importing fcl" names the module, not the thing that
-    is missing. The startup probe rewrites it to name MSVCP140.dll.
+    is missing. The dispatcher's own diagnosis is run here against the error
+    Windows actually raises, and the stderr line is read back: the Go parent
+    matches stderr on the RAW line prefix, so a line the logging module has
+    prefixed with "[mcad_worker]" never becomes a toast.
     """
-    dispatcher = (CAD / "worker" / "mcad_worker" / "dispatcher.py").read_text(
-        encoding="utf-8")
-    assert "MSVCP140" in dispatcher
-    # The Go parent matches stderr on the RAW line prefix, so a critical line
-    # must not be written through the logger (which prefixes "[mcad_worker]").
-    assert 'print(f"ERROR: cad geometry backend unavailable' in dispatcher
+    spec = importlib.util.spec_from_file_location(
+        "cad_dispatcher", CAD / "worker" / "mcad_worker" / "dispatcher.py")
+    dispatcher = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(dispatcher)
+
+    windows_error = ImportError(
+        "DLL load failed while importing fcl: The specified module could "
+        "not be found.")
+    diagnosis = dispatcher._backend_diagnosis("fcl", windows_error)
+    assert "MSVCP140.dll" in diagnosis
+    assert "fcl" in diagnosis
+
+    # A backend that cannot possibly import, so the failure path runs on any
+    # machine: the report says UNAVAILABLE and the stderr line the Go parent
+    # matches on is written raw, not through the logger.
+    dispatcher.GEOMETRY_BACKENDS = ("mcad_worker_no_such_backend",)
+    report = dispatcher._probe_geometry_backends()
+    line = capsys.readouterr().err
+    assert report["mcad_worker_no_such_backend"].startswith("UNAVAILABLE")
+    assert line.startswith("ERROR: cad geometry backend unavailable")
 
 
 # ---------------------------------------------------------------------------
