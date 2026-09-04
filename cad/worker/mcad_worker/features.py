@@ -82,12 +82,15 @@ SWEEP_EPSILON_DEG = 0.01
 
 #: THE CLOSED RULE, and it is stated in exactly one place. A cylindrical
 #: surface is closed — a hole or a full boss rather than a fillet, a slot end
-#: or a rounded corner — when its measured sweep is within ONE BIN of a full
-#: turn. The sweep is a count of occupied bins, so a seam that leaves a single
-#: bin empty reports 360 - BIN_DEG and is still a bore; anything shorter is
-#: not. A consumer applying this rule for itself must derive it from the
-#: reported bin_deg, which is why bin_deg travels on every row.
-CLOSED_SWEEP_MIN_DEG = 360.0 - BIN_DEG - SWEEP_EPSILON_DEG
+#: or a rounded corner — when EVERY bin of the turn is occupied. Nothing less
+#: will do: a C-shaped groove sweeping 355 degrees leaves one bin empty and is
+#: not a hole, and a screw put down its axis is held on one side and open on
+#: the other. The boundary is rasterised by SEGMENT, so a real bore fills every
+#: bin its chords cross however sparsely the kernel sampled it — an empty bin
+#: means missing material, not missing samples. The epsilon is float
+#: formatting and nothing else. Consumers apply this threshold as reported
+#: (`closed_min_sweep_deg`) rather than deriving one of their own.
+CLOSED_SWEEP_MIN_DEG = 360.0 - SWEEP_EPSILON_DEG
 
 #: How far the sampled polyline of a boundary edge may sit from the edge
 #: itself, millimetres. The kernel's own deflection sampler puts the points
@@ -376,7 +379,7 @@ def _steepest(edges: list, origin, direction) -> float:
 
 
 def _project(points: list, origin, direction, edges: list = None) -> tuple:
-    """(axial min, axial max, per-bin axial spans, steepest slope) of `points`.
+    """(axial min, axial max, per-bin spans, steepest slope, covered arcs).
 
     The angular frame is derived from the DIRECTION alone — a reference vector
     chosen the same way for every caller — so two faces of one surface land in
@@ -407,6 +410,7 @@ def _project(points: list, origin, direction, edges: list = None) -> tuple:
         axial = _dot(_sub(point, origin), direction)
         low = axial if low is None else min(low, axial)
         high = axial if high is None else max(high, axial)
+    arcs: list = []
     if edges:
         # SEGMENTS, not points. The kernel's sampler places points where the
         # CURVATURE needs them, which on a small bore is every dozen degrees —
@@ -421,11 +425,12 @@ def _project(points: list, origin, direction, edges: list = None) -> tuple:
                 current = _measure(point, origin, direction, reference, other)
                 if previous is not None:
                     _bin_segment(bins, previous, current)
+                    _cover_segment(arcs, previous[1], current[1])
                 previous = current
     else:
         for point in points:
             _bin_at(bins, *_measure(point, origin, direction, reference, other))
-    return low, high, bins, slope
+    return low, high, bins, slope, arcs
 
 
 def _measure(point, origin, direction, reference, other) -> tuple:
@@ -446,6 +451,49 @@ def _bin_at(bins: dict, axial: float, angle: float) -> None:
     else:
         span[0] = min(span[0], axial)
         span[1] = max(span[1], axial)
+
+
+def _cover_segment(arcs: list, angle_from: float, angle_to: float) -> None:
+    """Record the arc one segment covers, as intervals of the turn.
+
+    The sweep is a COVERAGE — two patches over the same arc cover it once —
+    and bins alone cannot express it exactly: an arc of 355 degrees that
+    starts on a bin boundary touches all 72 of them, and a groove five degrees
+    short of a turn then reads as a hole. Intervals are exact, and the union
+    of them at reporting time is what a screw is graded against.
+    """
+    turn = 2.0 * math.pi
+    start = angle_from % turn
+    delta = (angle_to - angle_from + math.pi) % turn - math.pi
+    if delta == 0.0:
+        return
+    low, high = (start, start + delta) if delta > 0.0 else (start + delta, start)
+    if low < 0.0:
+        # Split at the seam rather than storing a negative interval.
+        arcs.append([low + turn, turn])
+        arcs.append([0.0, high])
+    elif high > turn:
+        arcs.append([low, turn])
+        arcs.append([0.0, high - turn])
+    else:
+        arcs.append([low, high])
+
+
+def _covered_angle(arcs: list) -> float:
+    """How much of the turn a set of intervals covers, counted once."""
+    if not arcs:
+        return 0.0
+    ordered = sorted(arcs, key=lambda span: span[0])
+    covered = 0.0
+    low, high = ordered[0][0], ordered[0][1]
+    for span in ordered[1:]:
+        if span[0] > high:
+            covered += high - low
+            low, high = span[0], span[1]
+        else:
+            high = max(high, span[1])
+    covered += high - low
+    return min(covered, 2.0 * math.pi)
 
 
 def _bin_segment(bins: dict, start: tuple, end: tuple) -> None:
@@ -617,7 +665,7 @@ def _extent_in(group_origin, group_direction, face: dict) -> tuple:
     rather than hiding it.
     """
     if face["points"]:
-        low, high, bins, slope = _project(
+        low, high, bins, slope, arcs = _project(
             face["points"], group_origin, group_direction, face.get("edges"))
         if low is not None:
             complete = bool(face.get("boundary_complete", True))
@@ -625,7 +673,7 @@ def _extent_in(group_origin, group_direction, face: dict) -> tuple:
                 if face.get("deflection_bounded", True) and complete else None
             # `exact` is a claim about the whole trim, so a face missing one
             # of its rims cannot make it.
-            return low, high, bins, complete, slope, deflection
+            return low, high, bins, complete, slope, deflection, arcs
     offset = _sub(face["origin"], group_origin)
     base = _dot(offset, group_direction)
     sign = 1.0 if _dot(face["direction"], group_direction) > 0.0 else -1.0
@@ -640,9 +688,10 @@ def _extent_in(group_origin, group_direction, face: dict) -> tuple:
     # bin it covers gets the whole span — which is the assumption that
     # overstates the length, and is exactly what `exact` false warns about.
     # No boundary, so no slope to measure either; `exact` false is what warns
-    # the reader that this face's extent is a bounding box.
+    # the reader that this face's extent is a bounding box. The covered arc is
+    # the face's own parametric sweep, which is all there is to go on.
     return (low, high, {index: [low, high] for index in range(covered)},
-            False, 0.0, None)
+            False, 0.0, None, [[0.0, min(face["sweep"], 2.0 * math.pi)]])
 
 
 def _merge(faces: list) -> list:
@@ -681,12 +730,13 @@ def _merge(faces: list) -> list:
         anchor = line[0]
         measured = []
         for face in line:
-            low, high, bins, exact, slope, deflection = _extent_in(
+            low, high, bins, exact, slope, deflection, arcs = _extent_in(
                 anchor["origin"], anchor["direction"], face)
-            measured.append((low, high, bins, exact, slope, deflection, face))
+            measured.append(
+                (low, high, bins, exact, slope, deflection, arcs, face))
         measured.sort(key=lambda item: item[0])
         current = None
-        for low, high, bins, exact, slope, deflection, face in measured:
+        for low, high, bins, exact, slope, deflection, arcs, face in measured:
             if current is not None and low <= current["end"] + MERGE_AXIAL_SLACK_MM:
                 current["end"] = max(current["end"], high)
                 _union_bins(current["bins"], bins)
@@ -696,6 +746,7 @@ def _merge(faces: list) -> list:
                 current["slope"] = max(current["slope"], slope)
                 current["deflection"] = _widest_deflection(
                     current["deflection"], deflection)
+                current["arcs"] = current["arcs"] + arcs
                 continue
             current = {
                 "origin": anchor["origin"],
@@ -710,6 +761,7 @@ def _merge(faces: list) -> list:
                 "exact": exact,
                 "slope": slope,
                 "deflection": deflection,
+                "arcs": arcs,
             }
             groups.append(current)
     return groups
@@ -747,9 +799,11 @@ def _reported(group: dict) -> dict:
         # own start would place it at an arbitrary one.
         full_start = 0.0
         full_end = 0.0
-    # The fraction of the turn the boundary actually occupies, not the sum of
-    # the faces' parametric spans: see the header.
-    sweep = len(group["bins"]) / float(ANGULAR_BINS) * 2.0 * math.pi
+    # The fraction of the turn the boundary actually occupies, counted ONCE
+    # over the intervals its segments cover — not the sum of the faces'
+    # parametric spans (which double-counts two patches over one arc) and not
+    # a count of occupied bins (which rounds a 355-degree groove up to a hole).
+    sweep = _covered_angle(group["arcs"])
     return {
         "source": "b_rep",
         "sense": group["sense"],

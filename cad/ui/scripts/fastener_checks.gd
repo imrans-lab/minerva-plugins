@@ -110,12 +110,6 @@ const DEFAULT_ENGAGEMENT_D: float = 2.0
 ## narrower than this can pass between two rays unseen. At an M3 shank radius
 ## of 1.5 mm it works out at 19 rays.
 const RING_SPACING_MM: float = 0.5
-## Slack on the closed rule, degrees: smaller than any real gap, large enough
-## to absorb float formatting. The rule itself is ONE BIN, and the bin width
-## comes from the worker on every row (`bin_deg`) — a hard-coded tolerance
-## here would disagree with the worker's own verdict the moment either side
-## changed its resolution.
-const SWEEP_EPSILON_DEG: float = 0.01
 const MIN_RING_RAYS: int = 8
 const MAX_RING_RAYS: int = 128
 
@@ -1074,15 +1068,16 @@ func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dicti
 		if direction.length_squared() < 0.5:
 			continue
 		# ONE RULE, and it is the worker's: a surface is closed when its
-		# measured sweep is within one BIN of a full turn. The bin width is
-		# reported per row, so the same threshold is derived here rather than
-		# assumed — and a row that does not carry one leaves the verdict to
-		# the worker's own `closed` flag.
+		# measured sweep covers the WHOLE turn. The worker states the
+		# threshold it applied on every row, so this check applies that number
+		# rather than a constant of its own — a threshold invented here would
+		# disagree with the flag beside it the moment either side changed. A
+		# row carrying no threshold leaves the verdict to the worker's flag.
 		var sweep := float(cylinder.get("sweep_deg", 0.0))
-		var bin_deg := float(cylinder.get("bin_deg", 0.0))
+		var threshold := float(cylinder.get("closed_min_sweep_deg", 0.0))
 		var closed := bool(cylinder.get("closed", false))
-		if bin_deg > 0.0:
-			closed = sweep >= 360.0 - bin_deg - SWEEP_EPSILON_DEG
+		if threshold > 0.0:
+			closed = sweep >= threshold
 		if not closed:
 			partial.append({
 				"dia_mm": float(cylinder.get("dia_mm", 0.0)),

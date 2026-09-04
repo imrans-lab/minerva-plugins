@@ -330,6 +330,43 @@ def test_a_delay_loaded_runtime_is_a_dependency_too():
     assert "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT" in source
 
 
+def test_the_vendored_runtime_dlls_are_inspected_too():
+    """The repair rebinds a TREE, and a copy it missed hides in that tree.
+
+    delvewheel vendors more than one DLL and rebinds each one's imports.
+    A mangled `msvcp140_1-abc.dll` that still imports the machine's bare
+    MSVCP140.dll leaves the wheel machine-dependent while the extension
+    itself looks perfectly repaired — and it is invisible to a proof that
+    skips the vendored files because their names match the pattern it looked
+    for.
+
+    ORACLE: the member list. Every PE in the wheel is inspected, the vendored
+    runtime copies included, and the planted offender is caught by the same
+    rule the extension is held to.
+    """
+    if not LOCK.get("WHEEL_REPAIR_PKGS", "").strip():
+        return
+    forbidden = LOCK.get("WHEEL_REPAIR_FORBIDDEN_IMPORTS", "").split()
+    prover = _load_module("prove_wheel_repair", PROVE_SCRIPT)
+
+    members = [
+        "fcl/__init__.py",
+        "fcl/fcl.cp312-win_amd64.pyd",
+        "fcl.libs/msvcp140-1a2b3c.dll",
+        "fcl.libs/msvcp140_1-1a2b3c.dll",
+    ]
+    inspected = prover.pe_members(members)
+    assert "fcl.libs/msvcp140-1a2b3c.dll" in inspected
+    assert "fcl.libs/msvcp140_1-1a2b3c.dll" in inspected
+    assert "fcl/__init__.py" not in inspected
+
+    # The planted offender: the mangled _1 copy still delay-loading the
+    # machine's own runtime.
+    planted = _Image(normal=[b"KERNEL32.dll"], delayed=[b"MSVCP140.dll"])
+    assert prover.offending(prover.names_from(planted), forbidden) \
+        == ["MSVCP140.dll"]
+
+
 def test_a_bundle_without_the_runtime_names_the_dll_rather_than_the_module(
         capsys):
     """The diagnosis a user can act on, produced by the code that writes it.

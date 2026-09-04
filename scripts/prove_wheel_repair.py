@@ -7,9 +7,10 @@ conditions, both required:
 
   VENDORED   some member of the wheel matches the pattern the lock states
              (delvewheel copies the DLL in under a name-mangled path).
-  REBOUND    no compiled extension in the wheel still imports one of the
-             forbidden DLLs by its BARE name, in EITHER import directory —
-             the normal one or the delay-load one. delvewheel mangles the name of
+  REBOUND    no PE in the wheel — the extension AND every runtime DLL
+             vendored beside it — still imports one of the forbidden DLLs by
+             its BARE name, in EITHER import directory (the normal one or the
+             delay-load one). delvewheel mangles the name of
              every DLL it vendors and patches the import table to match, so a
              bare `MSVCP140.dll` in an import table means that extension is
              still resolving the runtime from the machine — which succeeds on
@@ -37,6 +38,19 @@ import zipfile
 
 #: Members whose import tables are read. Anything else in a wheel is data.
 PE_SUFFIXES = (".pyd", ".dll")
+
+
+def pe_members(names) -> list:
+    """Every PE in the wheel, the vendored runtime copies INCLUDED.
+
+    A vendored DLL is a dependency of the extension and has dependencies of
+    its own: delvewheel mangles and rebinds a whole tree, and a copy it
+    missed — a mangled msvcp140_1 still importing the machine's bare
+    MSVCP140.dll — leaves the wheel machine-dependent while every name in it
+    looks repaired. Skipping the vendored files because their NAMES match the
+    proof pattern is exactly the hole that hides.
+    """
+    return [name for name in names if name.lower().endswith(PE_SUFFIXES)]
 
 
 def vendored(names, pattern: str) -> bool:
@@ -110,8 +124,7 @@ def main(argv=None) -> int:
     if not args.forbid:
         return 0
 
-    images = [n for n in names if n.lower().endswith(PE_SUFFIXES)
-              and not vendored([n], args.pattern)]
+    images = pe_members(names)
     if not images:
         return 0
 

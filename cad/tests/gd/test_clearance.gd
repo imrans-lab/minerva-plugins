@@ -79,6 +79,10 @@ const YAWED_HALF_Y := 26.7321
 ## about 46.5 mm apart — still sixty times the gap being measured.
 const VERTEX_SEPARATION_FLOOR_MM := 40.0
 const REFERENCE_NAME := "board"
+## How far the reference moves under a call that is already in flight. Any
+## shift changes the node's world triangles and so its digest, which is the
+## whole point: the call that is waiting pinned the OLD one.
+const REPOSE_SHIFT := Vector3(7.0, -5.0, 3.0)
 const NEAR_NODE := "Assembly/Near"
 const FAR_NODE := "Assembly/Far"
 
@@ -168,6 +172,7 @@ func _run() -> void:
 	await _check_batching(panel, checks)
 	await _check_refusals(panel, checks)
 	await _check_buried(panel, checks)
+	await _check_pin_across_a_repose(panel, checks)
 	_check_isolation(checks)
 	_clear_blob_dir()
 
@@ -625,6 +630,77 @@ func _check_isolation(checks: RefCounted) -> void:
 	check("isolation: a panel releases its blob directory when it goes away",
 			not DirAccess.dir_exists_absolute(directory),
 			"%s survived release()" % directory)
+
+
+# ---------------------------------------------------------------------------
+# A PIN HAS TO SURVIVE A RE-POSE
+# ---------------------------------------------------------------------------
+
+## Two calls, one blob store, and a re-pose in between.
+##
+## The panel names geometry by hash and uploads it only when the worker says
+## it has never seen it — so between a call's first request and its retry, the
+## body it is about to upload has to still exist. Call A extracts the near
+## bar, is told the digest is missing, and waits; while it waits the reference
+## is re-posed and call B extracts the SAME NODE at its new place. Storing
+## bodies under the node's name means B's body evicts A's, and A's retry then
+## has nothing to upload for a digest it holds a pin on: the answer comes back
+## `checked: false` for a reason that is entirely the panel's own bookkeeping.
+## Bodies are therefore stored under their DIGEST, which is what the files are
+## addressed by and what the pin names.
+func _check_pin_across_a_repose(panel: Node, checks: RefCounted) -> void:
+	var original: Array = panel.records
+	_payloads.clear()
+	_known_blobs.clear()
+	_mode = "measure"
+
+	# A goes first and is NOT awaited: it is still waiting for the worker's
+	# "I have never seen this" when the re-pose lands.
+	var replies: Array = []
+	_collect_clearance(checks, panel, replies)
+
+	panel.records = _records_moved(original, REPOSE_SHIFT)
+	var moved: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	panel.records = original
+
+	for _frame in range(600):
+		if not replies.is_empty():
+			break
+		await process_frame
+	var first: Dictionary = replies[0] if not replies.is_empty() else {}
+
+	check("pin: a call whose reference is re-posed while it waits still "
+			+ "uploads the geometry it pinned — both calls measure, and "
+			+ "neither is refused for want of a body it had already hashed",
+			bool(first.get("checked", false))
+				and (first.get("pairs", []) as Array).size() == 2
+				and bool(moved.get("checked", false))
+				and (moved.get("pairs", []) as Array).size() == 2,
+			"first = %s, moved = %s" % [
+				str(first.get("reason", first.get("checked"))),
+				str(moved.get("reason", moved.get("checked")))])
+
+	_payloads.clear()
+	_known_blobs.clear()
+
+
+## Start a clearance call without awaiting it and park its reply in `into`.
+func _collect_clearance(checks: RefCounted, panel: Node, into: Array) -> void:
+	var reply: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	into.append(reply)
+
+
+## The suite's records under a shifted pose — the same nodes, somewhere else.
+func _records_moved(records: Array, shift: Vector3) -> Array:
+	var out: Array = []
+	for entry in records:
+		var record: Dictionary = (entry as Dictionary).duplicate()
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		record["pose"] = Transform3D(pose.basis, pose.origin + shift)
+		out.append(record)
+	return out
 
 
 # ---------------------------------------------------------------------------

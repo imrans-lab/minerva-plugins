@@ -168,11 +168,16 @@ const ANGLE_TOLERANCE_DEG := 0.02
 ## groove to B and grades a screw against a surface that is open on one side;
 ## a check that asks whether the surface closed never considers it.
 const GROOVE_DIA := 2.8
-const GROOVE_SWEEP_DEG := 180.0
+## A groove that is nearly a hole and is not one: 355 degrees leaves five
+## degrees of its wall missing, so a screw down its axis is open on one side.
+## It is the case a "within one bin of a full turn" rule waves through.
+const GROOVE_SWEEP_DEG := 355.0
+## The threshold the worker states on every row: every bin of the turn, with
+## an epsilon for float formatting and nothing else.
+const CLOSED_MIN_SWEEP_DEG := 359.99
 ## The worker's angular resolution, reported on every cylinder row (72 bins of
-## 5 degrees). The panel derives its closed rule from THIS number, so hole 5's
-## bore is given a sweep exactly one bin short of a full turn — the seam a
-## real bore leaves — and must still be graded as a bore.
+## 5 degrees). It is what the extent's error bar is measured in; the closed
+## rule is the whole turn, not a bin of slack.
 const BIN_DEG := 5.0
 ## How far the panel is re-posed under a check that is already in flight. Big
 ## enough that a reply framed in the wrong pose is off by tens of millimetres
@@ -360,10 +365,11 @@ func _check_pairing(report: Dictionary, panel: Node) -> void:
 		if str(feature.get("reason", "")).contains("partial cylinder"):
 			named_partial[float(feature.get("dia_mm", 0.0))] = \
 				str(feature.get("reason", ""))
-	check("pairing: a half-turn groove nearer the hole than the boss is NOT "
-			+ "paired — it is listed as a partial cylinder, with its sweep",
+	check("pairing: a 355-degree groove nearer the hole than the boss is NOT "
+			+ "paired — five degrees of missing wall is not a hole, and it is "
+			+ "listed as a partial cylinder with its sweep",
 			named_partial.has(GROOVE_DIA)
-				and str(named_partial[GROOVE_DIA]).contains("180"),
+				and str(named_partial[GROOVE_DIA]).contains("355"),
 			"partial = %s" % str(named_partial))
 
 	# Two halves of the same rule. The request must ASK for the partial
@@ -375,7 +381,7 @@ func _check_pairing(report: Dictionary, panel: Node) -> void:
 	for entry in _payloads_of(panel):
 		asked = (entry as Dictionary).get("args", {}) as Dictionary
 	check("pairing: the request asks the worker for partial surfaces too, and "
-			+ "a bore one bin short of a full turn is still a bore",
+			+ "the bores that DO sweep a full turn are graded as bores",
 			asked.has("closed_only") and not bool(asked["closed_only"])
 				and not named_partial.has(BORE_R * 2.0)
 				and _row_at(report, HOLE_XY[4]).has("engagement_mm"),
@@ -1181,11 +1187,10 @@ func _brep_bores() -> Array:
 			"extent_full_mm": BORE_LENGTH,
 			"full_start_mm": 0.0,
 			"full_end_mm": BORE_LENGTH,
-			"sweep_deg": 360.0 - (BIN_DEG if spec[0] == HOLE_XY[4] else 0.0),
-			# The worker's rule: closed is "within one bin of a full turn", so
-			# the bore whose seam leaves a single bin empty is still closed.
+			"sweep_deg": 360.0,
 			"closed": true,
 			"bin_deg": BIN_DEG,
+			"closed_min_sweep_deg": CLOSED_MIN_SWEEP_DEG,
 			"faces": 2,
 			"area_mm2": TAU * BORE_R * BORE_LENGTH,
 			"extent_full_exact": false,
@@ -1221,6 +1226,7 @@ func _brep_groove() -> Dictionary:
 		"sweep_deg": GROOVE_SWEEP_DEG,
 		"closed": false,
 		"bin_deg": BIN_DEG,
+		"closed_min_sweep_deg": CLOSED_MIN_SWEEP_DEG,
 		"faces": 1,
 		"area_mm2": PI * GROOVE_DIA * 0.5 * BORE_LENGTH,
 	}

@@ -113,9 +113,15 @@ const BLOB_DIR_NAME: String = "minerva-cad-clearance"
 const IPC_PAYLOAD_LIMIT_BYTES: int = 65536
 const IPC_PAYLOAD_MARGIN_BYTES: int = 2048
 
-## What this panel has extracted, keyed by reference/node. Each entry holds the
-## digest, the pose it was extracted under and the mesh it came from, so an
-## unchanged reference is not walked again on the next evaluation.
+## The blob BODIES, keyed by their own digest — content-addressed, exactly as
+## the files are. Keying them by reference/node instead loses a body the
+## moment that node is re-posed, and a call still in flight that pinned the
+## old digest can then be asked to upload a body nobody has any more: its
+## retry fails with "no cached geometry" for a digest it holds a pin on.
+var _bodies: Dictionary = {}
+## Which digest each reference/node currently hashes to, with the pose and
+## mesh it was extracted from, so an unchanged reference is not walked again
+## on the next evaluation. A slot points AT a body; it does not own one.
 var _blobs: Dictionary = {}
 ## Directory the blobs are written to. Overridable so a suite can keep its
 ## files out of the user's cache.
@@ -157,6 +163,7 @@ func release() -> void:
 	# The pins outlive their call only when a measurement's coroutine died
 	# holding them; the panel going away is the last chance to drop them.
 	_pinned_digests.clear()
+	_bodies.clear()
 	var directory := get_blob_dir()
 	_blobs.clear()
 	if not DirAccess.dir_exists_absolute(directory):
@@ -640,15 +647,22 @@ func _blob_for(part: Dictionary) -> Dictionary:
 	if not cached.is_empty() \
 			and int(cached.get("mesh_id", 0)) == int(mesh.get_instance_id()) \
 			and (cached.get("xform", Transform3D.IDENTITY) as Transform3D) \
-				.is_equal_approx(xform):
-		return cached
+				.is_equal_approx(xform) \
+			and _bodies.has(str(cached.get("digest", ""))):
+		return _bodies[str(cached["digest"])] as Dictionary
 	var blob := _extract_blob(mesh, xform)
 	if blob.is_empty():
 		_blobs.erase(slot)
 		return {}
-	blob["mesh_id"] = int(mesh.get_instance_id())
-	blob["xform"] = xform
-	_blobs[slot] = blob
+	# The body lives under its digest; the slot only says which digest this
+	# node currently hashes to. Re-posing the node moves the slot and leaves
+	# the old body exactly where a pin can still find it.
+	_bodies[str(blob["digest"])] = blob
+	_blobs[slot] = {
+		"digest": str(blob["digest"]),
+		"mesh_id": int(mesh.get_instance_id()),
+		"xform": xform,
+	}
 	return blob
 
 
@@ -735,6 +749,11 @@ func _upload(keys: Array) -> bool:
 ## up; this keeps the directory the size of the document rather than the size
 ## of the session.
 func _sweep(directory: String, wanted: Dictionary) -> void:
+	# The bodies go the same way as the files: a body no live node hashes to
+	# and no call in flight has pinned is one nobody can ask for again.
+	for digest in _bodies.keys():
+		if not wanted.has(str(digest)):
+			_bodies.erase(digest)
 	var names := DirAccess.get_files_at(directory)
 	for name in names:
 		if not name.ends_with(".mcadmesh"):
@@ -745,8 +764,4 @@ func _sweep(directory: String, wanted: Dictionary) -> void:
 
 
 func _blob_with_digest(digest: String) -> Dictionary:
-	for entry in _blobs.values():
-		var blob: Dictionary = entry
-		if str(blob.get("digest", "")) == digest:
-			return blob
-	return {}
+	return _bodies.get(digest, {}) as Dictionary

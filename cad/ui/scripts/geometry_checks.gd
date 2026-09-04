@@ -648,9 +648,39 @@ func _penetrates_reference(
 	reference_name: String,
 	node_path: String
 ) -> bool:
-	# How much material is actually there, along this edge. A plate four
-	# microns thick is crossed by an edge that never gets a step inside it at
-	# the ceiling above, and the crossing would read as a graze.
+	# How much material is actually there, along this edge, on BOTH sides of
+	# the hit. Forward alone is not enough: an edge that only LEAVES material
+	# — a tetrahedron with one vertex inside a four-micron plate and the rest
+	# above it — sees no exit ahead, keeps the ceiling, and the backward probe
+	# jumps clean through the plate.
+	var forward := _run_along(gauge, state, point, direction, mask,
+		reference_name)
+	var backward := _run_along(gauge, state, point, -direction, mask,
+		reference_name)
+	var step := _probe_step(forward, backward)
+	if step <= 0.0:
+		# Too thin to place the parity sphere in on one side or the other.
+		# The crossing stands: a body this check cannot probe is not a body it
+		# may clear.
+		return true
+	for offset in [step, -step]:
+		if _inside_reference(gauge, state, point + direction * offset,
+				reference_name, node_path):
+			return true
+	return false
+
+
+## How far the material runs from `point` along `direction`, up to the probe
+## ceiling. The ceiling itself when nothing ends inside it — the run is at
+## least that far, and the exact figure past it changes no decision.
+func _run_along(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	direction: Vector3,
+	mask: int,
+	reference_name: String
+) -> float:
 	_casts += 1
 	var exit: Dictionary = gauge.call("run_now", state, "raycast", {
 		"from": point + direction * TOUCH_EPSILON_MM,
@@ -658,23 +688,24 @@ func _penetrates_reference(
 		"mask": mask,
 		"reference": reference_name,
 	})
-	# No exit inside the ceiling means the material runs at least that far,
-	# and the ceiling is the step. An exit means a thin wall, and the step is
-	# half of it — the middle of the wall rather than its far face.
-	var step := PENETRATION_PROBE_MM
-	if bool(exit.get("hit", false)):
-		var run := float(exit.get("distance", PENETRATION_PROBE_MM)) \
-			+ TOUCH_EPSILON_MM
-		if run <= PARITY_SPHERE_MM:
-			# Too thin to place the parity sphere in. The crossing stands: a
-			# body this check cannot probe is not a body it may clear.
-			return true
-		step = run * 0.5
-	for offset in [step, -step]:
-		if _inside_reference(gauge, state, point + direction * offset,
-				reference_name, node_path):
-			return true
-	return false
+	if not bool(exit.get("hit", false)):
+		return PENETRATION_PROBE_MM
+	return float(exit.get("distance", PENETRATION_PROBE_MM)) + TOUCH_EPSILON_MM
+
+
+## The step to probe with, given the material either side of the hit: half the
+## SHORTER run, so the probe lands inside whichever side is thinner rather
+## than through it. Zero when either side is too thin to place the parity
+## sphere in, which is the caller's signal to keep the crossing.
+func _probe_step(forward_mm: float, backward_mm: float) -> float:
+	var shorter := minf(forward_mm, backward_mm)
+	if shorter <= PARITY_SPHERE_MM:
+		return 0.0
+	if shorter >= PENETRATION_PROBE_MM:
+		# Material runs at least the ceiling both ways: the ceiling is the
+		# step, as it always was for a body thick enough to take it.
+		return PENETRATION_PROBE_MM
+	return shorter * 0.5
 
 
 ## The same question the other way round. An undecidable parity keeps the
@@ -684,19 +715,28 @@ func _penetrates_solid(
 	point: Vector3,
 	direction: Vector3
 ) -> bool:
-	var exit := _solid_ray(solid_state, point + direction * TOUCH_EPSILON_MM,
-		point + direction * PENETRATION_PROBE_MM)
-	var step := PENETRATION_PROBE_MM
-	if not exit.is_empty():
-		var run: float = point.distance_to(exit.get("position", point)) \
-			+ TOUCH_EPSILON_MM
-		if run <= PARITY_SPHERE_MM:
-			return true
-		step = run * 0.5
+	var step := _probe_step(
+		_solid_run_along(solid_state, point, direction),
+		_solid_run_along(solid_state, point, -direction))
+	if step <= 0.0:
+		return true
 	for offset in [step, -step]:
 		if _parity_inside_solid(solid_state, point + direction * offset) != 0:
 			return true
 	return false
+
+
+## _run_along, in the solid's own space.
+func _solid_run_along(
+	solid_state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	direction: Vector3
+) -> float:
+	var exit := _solid_ray(solid_state, point + direction * TOUCH_EPSILON_MM,
+		point + direction * PENETRATION_PROBE_MM)
+	if exit.is_empty():
+		return PENETRATION_PROBE_MM
+	return point.distance_to(exit.get("position", point)) + TOUCH_EPSILON_MM
 
 
 ## Every surface the segment a→b crosses, in order, as

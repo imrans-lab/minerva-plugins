@@ -182,12 +182,16 @@ test_cad_note.gd assertions=40
 # than the module's 0.005 mm probe ceiling, thicker than the 0.002 mm sphere
 # its parity probe places — with a 4 mm column driven through it must be
 # reported as a crossing, which is only possible when the step is measured
-# from the material that is actually there.
-# 52 assertions = 3 fixture + 5 collider +
+# from the material that is actually there — and so must a tall, narrow
+# tetrahedron whose single buried vertex sits inside that plate, on ALL THREE
+# of its edges: an edge that only LEAVES material has nothing ahead of the
+# crossing, so the run has to be measured on both sides of it.
+# 53 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
 # 4 supersession + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
-# + 2 layered stack + 2 two-enclosing-blocks + 2 thin plate.
-test_interference.gd assertions=52
+# + 2 layered stack + 2 two-enclosing-blocks + 3 thin plate (+1: the
+# tetrahedron that only leaves the plate).
+test_interference.gd assertions=53
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -225,10 +229,15 @@ test_interference.gd assertions=52
 # The doubt travels in both directions: a report that could not decide whether
 # the SOLID is inside a reference names no node, and doubts every node of that
 # reference rather than being discarded.
-# 39 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
+# And a pin has to survive a re-pose: a call waiting for the worker's "never
+# seen it" while the reference moves under it must still be able to upload the
+# geometry it pinned, which it can only do while bodies are stored under their
+# DIGEST rather than under the node that hashed to it.
+# 40 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
 # fixture and the byte-measured refusal) + 4 refusal + 6 buried (+2: the
-# undecidable node and the undecidable reference) + 3 isolation.
-test_clearance.gd assertions=39
+# undecidable node and the undecidable reference) + 1 pin across a re-pose
+# + 3 isolation.
+test_clearance.gd assertions=40
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -257,18 +266,19 @@ test_clearance.gd assertions=39
 # clearance hole, a hole record with no thickness being a named row rather than
 # a silent seat at the plate's centre, and three refusals that report pass
 # FALSE rather than an empty success.
-# The fixture also carries a 180-degree GROOVE of a supported diameter sitting
+# The fixture also carries a 355-degree GROOVE of a supported diameter sitting
 # exactly on hole 2's axis — nearer it than boss B, which is half a millimetre
 # off — so a check that pairs on geometry alone hands hole 2 to a surface that
-# is open on one side and loses B's row entirely. Only a closed cylinder is a
-# bore; the groove is listed as a partial cylinder with its sweep. And the
-# worker's full-turn extent is read in angular bins, so every bore carries an
+# is open on one side and loses B's row entirely. Only a cylinder that sweeps
+# the whole turn is a bore; the groove is listed as a partial cylinder with
+# its sweep. And the worker's full-turn extent is read in angular bins, so every bore carries an
 # error bar and engagement is graded on the bite MINUS it.
 # The request asks the worker for the partial surfaces TOO (a worker-side
 # filter would make the reply's own "partial cylinder" listing unreachable),
 # the stand-in honours closed_only so that path is proven, and the closed rule
-# is derived from the bin width the worker reports rather than hard-coded: the
-# bore whose seam leaves one bin empty (sweep 355) is still a bore.
+# is the WHOLE turn, applied from the threshold the worker states on every row
+# rather than from a constant of the panel's own: the 355-degree groove on
+# hole 2's axis — nearer it than boss B — is not a bore.
 # A check answers in the poses it was CALLED with: the panel is re-posed while
 # one check waits for the worker and a second is started on the new pose, and
 # neither answers in the other's frame. And when the reference COLLIDERS are

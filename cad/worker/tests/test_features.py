@@ -13,7 +13,7 @@ orientation wrong reports every bore as a boss and every boss as a bore and
 still returns plausible-looking geometry. Each fixture therefore contains one
 of each, at radii that cannot be confused, and asserts which is which.
 
-31 tests. The ones that translate DSL need build123d/OCP, which ships in the
+32 tests. The ones that translate DSL need build123d/OCP, which ships in the
 plugin's embedded runtime bundle and is not on a plain CI runner, so they skip
 there. The refusals and every `_merge` test run unconditionally — the merge is
 pure arithmetic over face records — so a skipped suite can never mean "the
@@ -524,6 +524,33 @@ class TestMerging:
         # And the slack that only a rate can see is really in there: these
         # rims turn, so the hidden-in-bin term is not zero.
         assert entry["extent_full_bound_parts"]["hidden_in_bin_mm"] > 0.0
+
+    def test_a_groove_five_degrees_short_of_a_turn_is_not_a_hole(self):
+        """The discriminator for the closed rule, at the size that matters.
+
+        A C-shaped groove sweeping 355 degrees has five degrees of its wall
+        missing: a screw down its axis is held on one side and open on the
+        other. A rule that allows "within one bin of a full turn" waves it
+        through, and the fastener check then pairs it with a hole and grades
+        it as a bore. The segment rasterisation is what makes the strict rule
+        safe — a real bore fills every bin its chords cross, however sparsely
+        the kernel sampled it — so an empty bin is missing MATERIAL.
+
+        ORACLE: the two fixtures either side of the line. 355 degrees of arc
+        is not a hole; a full turn is.
+        """
+        short = feat._reported(feat._merge([_arc_face(
+            1.2, 0.0, 5.0, 0.0, 2 * math.pi * 355.0 / 360.0)])[0])
+        assert short["sweep_deg"] < 360.0
+        assert short["closed"] is False
+        whole = feat._reported(feat._merge(
+            [_arc_face(1.2, 0.0, 5.0, 0.0, 2 * math.pi)])[0])
+        assert whole["closed"] is True
+        # The threshold travels with the row, so a consumer applies the rule
+        # rather than inventing one.
+        assert whole["closed_min_sweep_deg"] == pytest.approx(
+            360.0, abs=feat.SWEEP_EPSILON_DEG)
+        assert short["sweep_deg"] < whole["closed_min_sweep_deg"]
 
     def test_a_rim_sampled_every_fifteen_degrees_still_sweeps_a_full_turn(self):
         """Coverage comes from the SEGMENTS, not from the sample points.

@@ -156,6 +156,27 @@ const THIN_NODE := "Assembly/Shim"
 ## enough that both its ends are outside the plate.
 const COLUMN_MM := 4.0
 const COLUMN_HEIGHT_MM := 6.0
+## The tetrahedron over the same plate: its apex sits INSIDE the plate's four
+## microns (the plate spans -0.002 to +0.002 in its own frame) and its base is
+## well above, so every edge crossing the plate is leaving it.
+##
+## The base is NARROW on purpose. The probe steps along the EDGE, so a squat
+## tetrahedron's oblique edges travel only a fraction of their length in z and
+## a step of the full ceiling would still land inside the plate — the fixture
+## would pass whether or not the run was measured backwards. At 0.5 mm across
+## and 5 mm tall each edge is within half a degree of the plate's normal, so a
+## ceiling-sized step lands 5 microns below a 4 micron plate: only a step
+## measured from the material BEHIND the crossing stays inside it.
+## Well off the plate's own triangulation: a baked box splits each face into
+## two triangles across a diagonal through its centre, and a tetrahedron
+## sitting on that diagonal is reported by the OTHER direction of the check —
+## the plate's own edge cast into the solid — whether or not the probe here
+## works at all. Placed here, the only thing that can report it is a kept
+## crossing of its own edges.
+const TETRA_CENTRE_XY := Vector2(13.0, 4.0)
+const TETRA_APEX_Z := 0.0
+const TETRA_TOP_Z := 5.0
+const TETRA_SPAN_MM := 0.5
 
 ## The two identical blocks a buried cube is inside at the same time.
 const BLOCK_A := "block_a"
@@ -249,6 +270,7 @@ func _run() -> void:
 	# From here on each check rebuilds the gauge and the records around its
 	# own reference.
 	await _check_thin_plate(gauge, checks)
+	await _check_tetrahedron_in_thin_plate(gauge, checks)
 	await _check_pin_through_hole(gauge, checks)
 	await _check_undecidable_and_the_neighbouring_node(gauge, checks)
 	await _check_layered_stack(gauge, checks)
@@ -527,6 +549,62 @@ func _check_thin_plate(gauge: Node, checks: RefCounted) -> void:
 				and int(first.get("point_count", 0)) >= 2
 				and not str(first.get("note", "")).contains("inside"),
 			"report = %s" % str(report))
+
+
+## The other way an edge can meet a thin plate: only LEAVING it.
+##
+## A tetrahedron with one vertex inside the plate and the other three above it
+## has edges that start in material and climb out. At the crossing, there is
+## nothing ahead along the edge — it is leaving — so a run measured FORWARD
+## alone finds no end to the material, keeps the full ceiling, and the
+## backward probe lands under the plate rather than in it: a genuine
+## penetration read as a graze. The run has to be measured on BOTH sides of
+## the hit, and the step taken from the shorter one.
+func _check_tetrahedron_in_thin_plate(gauge: Node, checks: RefCounted) -> void:
+	checks.build_solid(await _tetrahedron_mesh())
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var pairs: Array = report.get("pairs", []) as Array
+	var first: Dictionary = pairs[0] if not pairs.is_empty() else {}
+	# ALL THREE edges of the apex, and the count is the discriminator. Which
+	# way round an edge is cast is the mesh's business, not the check's: an
+	# edge cast DOWNWARD into the plate finds its far face ahead and is kept
+	# even by a run measured forward only, while the same edge cast upward
+	# finds nothing ahead, keeps the ceiling, and steps clean through a four
+	# micron plate. Measuring both sides makes the answer the same either way
+	# — three edges leave the apex, three crossings are kept — so a count of
+	# three is the thing a forward-only measurement cannot produce.
+	check("thin plate: a tetrahedron whose one buried vertex sits inside the "
+			+ "plate is interference too, on ALL THREE of its edges — the run "
+			+ "is measured on both sides of a crossing, not only ahead of it",
+			bool(report.get("checked", false))
+				and int(report.get("count", 0)) == 1
+				and str(first.get("node", "")) == THIN_NODE
+				and int(first.get("point_count", 0)) == 3
+				and not str(first.get("note", "")).contains("inside"),
+			"report = %s" % str(report))
+
+
+## The tetrahedron: a wide base ABOVE the plate and a single apex poking down
+## into its material, so every edge that meets the plate is on its way out.
+func _tetrahedron_mesh() -> Dictionary:
+	var here := TETRA_CENTRE_XY
+	var apex := Vector3(here.x, here.y, TETRA_APEX_Z)
+	var reach := TETRA_SPAN_MM
+	var top := TETRA_TOP_Z
+	var corners: Array = [
+		apex,
+		Vector3(here.x - reach, here.y - reach * 0.5, top),
+		Vector3(here.x + reach, here.y - reach * 0.5, top),
+		Vector3(here.x, here.y + reach, top),
+	]
+	var vertices: Array = []
+	var faces: Array = []
+	for corner in corners:
+		var world: Vector3 = _pose * (corner as Vector3)
+		vertices.append([world.x, world.y, world.z])
+	for face in [[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]]:
+		faces.append(face)
+	return {"vertices": vertices, "faces": faces}
 
 
 ## The plate: as wide as the board and THIN_PLATE_MM thick.
