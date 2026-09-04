@@ -5,6 +5,8 @@
 [ext_resource type="Script" path="scripts/mesh_display.gd" id="3_meshdisplay"]
 [ext_resource type="Script" path="scripts/Cad_GeometryOverlay.gd" id="4_geomoverlay"]
 [ext_resource type="Script" path="res://Scripts/UI/Controls/responsive_container.gd" id="5_responsive"]
+[ext_resource type="Script" path="scripts/reference_sidebar.gd" id="6_refsidebar"]
+[ext_resource type="Script" path="scripts/reference_click.gd" id="7_refclick"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_cad"]
 sky_top_color = Color(0.42, 0.46, 0.54, 1)
@@ -80,6 +82,10 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("4_geomoverlay")
 
+[node name="ReferenceClickRoot" type="Node" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport"]
+script = ExtResource("7_refclick")
+view_id = "top"
+
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport"]
 environment = SubResource("Environment_cad")
 
@@ -107,6 +113,10 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("4_geomoverlay")
+
+[node name="ReferenceClickRoot" type="Node" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport"]
+script = ExtResource("7_refclick")
+view_id = "front"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport"]
 environment = SubResource("Environment_cad")
@@ -136,6 +146,10 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("4_geomoverlay")
 
+[node name="ReferenceClickRoot" type="Node" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport"]
+script = ExtResource("7_refclick")
+view_id = "right"
+
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport"]
 environment = SubResource("Environment_cad")
 
@@ -164,6 +178,10 @@ grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("4_geomoverlay")
 
+[node name="ReferenceClickRoot" type="Node" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport"]
+script = ExtResource("7_refclick")
+view_id = "iso"
+
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport"]
 environment = SubResource("Environment_cad")
 
@@ -177,6 +195,31 @@ size_flags_vertical = 3
 layout_mode = 2
 text = "Import mesh…"
 tooltip_text = "Pick a mesh file and add a mesh() reference line to the document."
+
+[node name="ReferencePanel" type="VBoxContainer" parent="ResponsiveContainer/WideLayout/WideSidebar"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+script = ExtResource("6_refsidebar")
+
+[node name="ReferenceHeader" type="Label" parent="ResponsiveContainer/WideLayout/WideSidebar/ReferencePanel"]
+layout_mode = 2
+text = "References"
+horizontal_alignment = 1
+
+[node name="ReferenceTree" type="Tree" parent="ResponsiveContainer/WideLayout/WideSidebar/ReferencePanel"]
+layout_mode = 2
+custom_minimum_size = Vector2(0, 150)
+size_flags_horizontal = 3
+size_flags_vertical = 3
+focus_mode = 0
+columns = 2
+hide_root = true
+
+[node name="ReferenceDetail" type="Label" parent="ResponsiveContainer/WideLayout/WideSidebar/ReferencePanel"]
+layout_mode = 2
+autowrap_mode = 3
+text = "No reference node selected. Click one in a view, or a row above."
 
 [node name="NarrowLayout" type="VBoxContainer" parent="ResponsiveContainer"]
 visible = false
@@ -225,6 +268,10 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("4_geomoverlay")
+
+[node name="ReferenceClickRoot" type="Node" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]
+script = ExtResource("7_refclick")
+view_id = "single"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]
 environment = SubResource("Environment_cad")

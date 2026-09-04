@@ -2,6 +2,7 @@ class_name Cad_AnnotationHost
 extends AnnotationHost
 
 const _CadAnchorTypesScript = preload("scripts/CadAnchorTypes.gd")
+const _CadPointAnchorScript = preload("scripts/CadPointAnchor.gd")
 const _SchemaScript = preload("res://Scripts/Services/Annotations/AnnotationV2Schema.gd")
 const _CadEdgeNumberKindScript = preload("kinds/cad_edge_number_kind.gd")
 ## AnnotationHost for the CAD plugin panel (Round 1 scaffold).
@@ -91,7 +92,7 @@ func get_capabilities() -> Dictionary:
 	return {
 		"kinds": ["callout", "2d_arrow", "2d_text", "cad_edge_number"],
 		"tools": ["select"],
-		"anchor_types": ["cad/edge", "core/canvas.point"],
+		"anchor_types": ["cad/edge", "cad/point", "core/canvas.point"],
 		"lifecycle": {
 			"resolve": true,
 			"reopen": true,
@@ -283,12 +284,15 @@ func _normalize_anchor(raw: Variant) -> Dictionary:
 ## empty (headless / pre-evaluate) this returns [0, 0], which still satisfies the
 ## schema's "position present" requirement.
 func _snapshot_position_for_anchor(anchor: Dictionary) -> Array:
+	var resolved: Variant = null
 	if str(anchor.get("plugin", "")) == "cad" and str(anchor.get("type", "")) == "edge" and anchor.has("id"):
-		var resolved: Variant = _resolve_edge_anchor(anchor)
-		if resolved is Dictionary:
-			var p: Variant = (resolved as Dictionary).get("position", null)
-			if p is Vector3:
-				return [(p as Vector3).x, (p as Vector3).y]
+		resolved = _resolve_edge_anchor(anchor)
+	elif _CadPointAnchorScript.is_point_anchor(anchor):
+		resolved = resolve_point_anchor(anchor)
+	if resolved is Dictionary:
+		var p: Variant = (resolved as Dictionary).get("position", null)
+		if p is Vector3:
+			return [(p as Vector3).x, (p as Vector3).y]
 	return [0.0, 0.0]
 
 
@@ -567,6 +571,40 @@ func get_selected_edge_id() -> int:
 	return _selected_edge_id
 
 
+# ── Reference-node selection and cad/point anchors ─────────────────────────
+## References the last evaluation mounted, pushed by CADPanel through
+## scripts/reference_selection.gd. The point-anchor resolver reads their poses,
+## which is how an annotation follows a reference that has been re-posed.
+var _reference_records: Array = []
+
+## The user's last click on a reference node (reference_selection's record), or
+## {}. Read by get_current_selection_anchor() so a tool can anchor to it.
+var _selected_reference: Dictionary = {}
+
+
+func set_reference_records(records: Array) -> void:
+	_reference_records = records
+
+
+func get_reference_records() -> Array:
+	return _reference_records
+
+
+func set_selected_reference(selection: Dictionary) -> void:
+	_selected_reference = selection
+
+
+func get_selected_reference() -> Dictionary:
+	return _selected_reference
+
+
+## Resolve a cad/point anchor to its current world position. Kinds call this
+## directly (as they do _resolve_edge_anchor) to keep the Vector3; the
+## substrate's resolve_anchor() flattens to Vector2.
+func resolve_point_anchor(anchor: Dictionary) -> Variant:
+	return _CadPointAnchorScript.resolve(anchor, _reference_records)
+
+
 # ── MCP introspection state (task 019dd2049ff6) ────────────────────────────
 ## Mesh data last pushed by CADPanel after a successful cad.evaluate reply.
 ## Shape: {vertices: [[x,y,z],...], faces: [[i,j,k],...]} — same dict the
@@ -635,6 +673,13 @@ func _init() -> void:
 		_CadAnchorTypesScript.EDGE_ANCHOR_KEY,
 		_resolve_edge_anchor
 	)
+	# A point on a reference mesh. The resolution itself lives in
+	# CadPointAnchor beside the anchor constants; this host only supplies the
+	# references the last evaluation mounted.
+	register_anchor_resolver(
+		_CadAnchorTypesScript.POINT_ANCHOR_KEY,
+		resolve_point_anchor
+	)
 	# Build a self-sufficient kind registry (built-in kinds + cad_edge_number) so
 	# add_annotation validates envelopes via validate_with_registry even when no
 	# CADPanel has injected one (headless tests, off-tree loads). CADPanel still
@@ -653,15 +698,23 @@ func _init() -> void:
 ## match cad/edge. The "kind" filter is the substrate's mechanism for tools
 ## that only want one anchor type.
 func get_current_selection_anchor(kind: String = "") -> Dictionary:
-	if _selected_edge_id < 0:
+	if _selected_edge_id >= 0 and (kind == "" or kind == _CadAnchorTypesScript.EDGE_ANCHOR_KEY):
+		return {
+			"plugin": _CadAnchorTypesScript.PLUGIN,
+			"type":   _CadAnchorTypesScript.EDGE_TYPE,
+			"id":     _selected_edge_id,
+		}
+	if kind != "" and kind != _CadAnchorTypesScript.POINT_ANCHOR_KEY:
 		return {}
-	if kind != "" and kind != _CadAnchorTypesScript.EDGE_ANCHOR_KEY:
+	if _selected_reference.is_empty() or bool(_selected_reference.get("stale", false)):
 		return {}
-	return {
-		"plugin": _CadAnchorTypesScript.PLUGIN,
-		"type":   _CadAnchorTypesScript.EDGE_TYPE,
-		"id":     _selected_edge_id,
-	}
+	return _CadPointAnchorScript.build(
+		str(_selected_reference.get("reference", "")),
+		str(_selected_reference.get("node", "")),
+		_selected_reference.get("local", Vector3.ZERO),
+		_selected_reference.get("normal", Vector3.ZERO),
+		_selected_reference.get("world", Vector3.ZERO)
+	)
 
 
 # ── Phase B2 follow-up: camera-tracking → AnnotationOverlay redraw ────────────

@@ -44,6 +44,9 @@ const _MeshImportScript: Script = preload("scripts/mesh_import.gd")
 ## Measurement: propose candidates by fitting primitives to a reference mesh,
 ## then verify and measure them against physics colliders. Both are pure
 ## modules; the panel only holds them and hands them the mounted references.
+## Which reference node the user is pointing at: the per-pane click nodes, the
+## sidebar list, the selection itself and the point anchors made from it.
+const _ReferenceSelectionScript: Script = preload("scripts/reference_selection.gd")
 const _MeshFeaturesScript: Script = preload("scripts/mesh_features.gd")
 const _MeshGaugeScript: Script = preload("scripts/mesh_gauge.gd")
 
@@ -157,6 +160,10 @@ var _mesh_features: RefCounted = null
 var _mesh_gauge: Node = null
 ## Identity of the reference set the gauge's colliders were last built from.
 var _reference_digest: String = ""
+
+## Reference-node selection (scripts/reference_selection.gd). Owns the click
+## picking, the sidebar list and the selection the MCP verbs read back.
+var _reference_selection: RefCounted = null
 
 ## Scene nodes behind the GUI import action: the file picker and the button in
 ## each layout. Both buttons run the same handler.
@@ -346,6 +353,10 @@ func _ready() -> void:
 	_geometry_overlays["single"] = get_node_or_null(
 		"ResponsiveContainer/NarrowLayout/SingleView/SubViewport/EdgeOverlayRoot")
 
+	# ── Reference-node selection: click picking + sidebar + point anchors ──
+	_reference_selection = _ReferenceSelectionScript.new()
+	_reference_selection.attach(self)
+
 	# ── Wide-mode sidebar: edge Tree + Prev/Next/Clear buttons ─────────────
 	_build_edge_sidebar()
 	_render_edge_tree(_edge_registry)
@@ -487,6 +498,22 @@ func ensure_gauge_built() -> int:
 
 func get_reference_digest() -> String:
 	return _reference_digest
+
+
+## The user's last click on a reference node, or {} — read by
+## minerva_cad_get_selected_reference.
+func get_reference_selection() -> Dictionary:
+	if _reference_selection == null:
+		return {}
+	return _reference_selection.get_selection()
+
+
+## Select a reference node by name (and optionally a point in its own frame),
+## the MCP half of clicking one. Returns {} when it is not mounted.
+func select_reference_node(reference: String, node_name: String, local_point: Variant = null) -> Dictionary:
+	if _reference_selection == null:
+		return {}
+	return _reference_selection.select(reference, node_name, local_point, "mcp")
 
 
 ## Draw the measurement overlay in every pane and report the scale of each one.
@@ -1530,6 +1557,8 @@ func _mount_references(references: Array) -> void:
 	# a second. The digest below is what decides whether that rebuild is real
 	# work or a no-op.
 	_reference_digest = _compute_reference_digest()
+	if _reference_selection != null:
+		_reference_selection.set_records(get_reference_state())
 	var world_aabb: AABB = _reference_report.get("world_aabb", AABB())
 	for mesh_root in mesh_roots:
 		if mesh_root.has_method("set_reference_aabb"):

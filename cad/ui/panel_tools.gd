@@ -13,6 +13,12 @@ extends RefCounted
 ##   minerva_cad_gauge           put a pin or a block somewhere and ask whether
 ##                               it fits, and if not, where it touched.
 ##   minerva_cad_probe           what is under this pixel of this pane.
+##   minerva_cad_get_selected_reference
+##                               which reference node the user last clicked,
+##                               and where on it — the sibling of
+##                               minerva_cad_get_selected_edge for foreign meshes.
+##   minerva_cad_select_reference
+##                               the same selection, made from here.
 ##   minerva_cad_view_overlay    draw a millimetre grid and the world axes in
 ##                               the panes, and report each pane's scale.
 ##
@@ -61,6 +67,10 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _gauge(panel, args)
 		"minerva_cad_probe":
 			return await _probe(panel, args)
+		"minerva_cad_get_selected_reference":
+			return _selected_reference(panel, args)
+		"minerva_cad_select_reference":
+			return _select_reference(panel, args)
 		"minerva_cad_view_overlay":
 			return _view_overlay(panel, args)
 	return {}
@@ -357,6 +367,150 @@ static func _probe(panel, args: Dictionary) -> Dictionary:
 		"width_px": ray.get("width_px", 0),
 		"height_px": ray.get("height_px", 0),
 	})
+
+
+# ---------------------------------------------------------------------------
+# The user's click as the LLM's seed
+# ---------------------------------------------------------------------------
+
+## minerva_cad_get_selected_reference — the last reference node the user
+## pointed at, in both frames, with the node's bounds and the hole the click
+## landed in if it landed in one. This is the handoff: the human knows which
+## bracket they mean and cannot say it in numbers; the click says it exactly.
+static func _selected_reference(panel, args: Dictionary) -> Dictionary:
+	if panel == null or not panel.has_method("get_reference_selection"):
+		return _err("reference selection is not available on this panel")
+	var selection: Dictionary = panel.get_reference_selection()
+	if selection.is_empty():
+		return _ok({
+			"units": "mm",
+			"selected": false,
+			"references": _reference_names(panel),
+			"note": "Nothing is selected. Ask the user to click a reference in "
+				+ "a view, or select one yourself with minerva_cad_select_reference.",
+		})
+	return _ok(_selection_payload(panel, selection, args))
+
+
+## minerva_cad_select_reference — the same selection, made from the agent side,
+## so an LLM can point at a node it found by name and have the user see the
+## same highlight the user's own click would have made.
+static func _select_reference(panel, args: Dictionary) -> Dictionary:
+	if panel == null or not panel.has_method("select_reference_node"):
+		return _err("reference selection is not available on this panel")
+	var reference := str(args.get("reference", ""))
+	if reference.is_empty():
+		return _err("select_reference needs a reference name; "
+			+ "minerva_cad_references lists them")
+	var point: Variant = args.get("point_mm", null)
+	var selection: Dictionary = panel.select_reference_node(
+		reference, str(args.get("node", "")), point)
+	if selection.is_empty():
+		return _err("no mounted reference named '%s' has a node '%s'"
+			% [reference, str(args.get("node", ""))])
+	return _ok(_selection_payload(panel, selection, args))
+
+
+## One selection, reported the way every other measurement is: both frames,
+## millimetres, and nothing computed twice.
+static func _selection_payload(panel, selection: Dictionary, args: Dictionary) -> Dictionary:
+	var local_box: AABB = selection.get("local_aabb", AABB())
+	var world_box: AABB = selection.get("world_aabb", AABB())
+	var pixel: Vector2 = selection.get("pixel", Vector2.ZERO)
+	return {
+		"units": "mm",
+		"selected": true,
+		"reference": str(selection.get("reference", "")),
+		"node": str(selection.get("node", "")),
+		"stale": bool(selection.get("stale", false)),
+		"point_mm": {
+			"world": _vec(selection.get("world", Vector3.ZERO)),
+			"local": _vec(selection.get("local", Vector3.ZERO)),
+		},
+		"point_source": str(selection.get("point_source", "")),
+		"normal": _vec(selection.get("normal", Vector3.ZERO)),
+		"bounds_mm": {
+			"local": {"min": _vec(local_box.position), "max": _vec(local_box.end)},
+			"world": {"min": _vec(world_box.position), "max": _vec(world_box.end)},
+		},
+		"size_mm": _vec(world_box.size),
+		"selected_by": str(selection.get("source", "")),
+		"view": str(selection.get("view", "")),
+		"px": [pixel.x, pixel.y],
+		"nearest_hole": _nearest_hole(panel, selection, args),
+		"note": "point_mm.local is the reference file's own frame — the frame "
+			+ "the mesh() pose is applied to — and point_mm.world is the posed "
+			+ "scene. A stale selection means the document no longer mounts "
+			+ "that reference.",
+	}
+
+
+## The fitted hole the selected point lies inside, or null. Fitting only: this
+## is the cheap answer to "what did I click in", and it says so. The measured
+## answer is minerva_cad_find_holes, which gauges the same candidate.
+static func _nearest_hole(panel, selection: Dictionary, args: Dictionary) -> Variant:
+	if not bool(args.get("include_hole", true)):
+		return null
+	var node_name := str(selection.get("node", ""))
+	var record: Dictionary = {}
+	for entry in _records(panel):
+		if str((entry as Dictionary).get("name", "")) == str(selection.get("reference", "")):
+			record = entry
+			break
+	if record.is_empty():
+		return null
+	var analysis := _analysis(panel, record, {"node": node_name})
+	var candidates: Array = _MeshFeatures.concave_cylinders(
+		analysis.get("candidates", []),
+		float(args.get("min_dia_mm", DEFAULT_MIN_DIA_MM)),
+		float(args.get("max_dia_mm", DEFAULT_MAX_DIA_MM)),
+		float(args.get("min_coverage", DEFAULT_MIN_COVERAGE))
+	)
+	var point: Vector3 = selection.get("local", Vector3.ZERO)
+	var best: Dictionary = {}
+	var best_radial := INF
+	for candidate_entry in candidates:
+		var candidate: Dictionary = candidate_entry
+		var centre: Vector3 = candidate.get("center", Vector3.ZERO)
+		var axis: Vector3 = (candidate.get("axis", Vector3.UP) as Vector3).normalized()
+		var offset := point - centre
+		var along := offset.dot(axis)
+		var radial := (offset - axis * along).length()
+		var radius := float(candidate.get("radius_mm", 0.0))
+		# Inside the wall, and between the two ends of it: a click on the far
+		# side of the part is not a click in this hole.
+		if radial > radius or absf(along) > float(candidate.get("half_extent_mm", 0.0)):
+			continue
+		if radial >= best_radial:
+			continue
+		best_radial = radial
+		best = candidate
+	if best.is_empty():
+		return null
+	var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+	return {
+		"node": str(best.get("node", node_name)),
+		"center_mm": _points(pose * (best.get("center", Vector3.ZERO) as Vector3), pose),
+		"axis": _axes(pose.basis * (best.get("axis", Vector3.UP) as Vector3), pose),
+		"dia_mm": float(best.get("dia_mm", 0.0)),
+		"inscribed_dia_mm": float(best.get("inscribed_dia_mm", 0.0)),
+		"facets": int(best.get("facets", 0)),
+		"coverage": float(best.get("coverage", 0.0)),
+		"residual_mm": best.get("residual_mm", null),
+		"radial_distance_mm": best_radial,
+		"source": "fit",
+		"note": "Proposed by fitting, NOT gauged: dia_mm is the circumscribed "
+			+ "circle of the tessellation. Call minerva_cad_find_holes for the "
+			+ "measured diameter and the through test.",
+	}
+
+
+## Names of the references that are mounted, for an empty selection's message.
+static func _reference_names(panel) -> Array:
+	var names: Array = []
+	for entry in _records(panel):
+		names.append(str((entry as Dictionary).get("name", "")))
+	return names
 
 
 static func _view_overlay(panel, args: Dictionary) -> Dictionary:

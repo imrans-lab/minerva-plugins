@@ -62,3 +62,15 @@ test_mesh_measurement.gd assertions=56
 # shaded-only) with the measured numbers in the messages, and
 # minerva_cad_references carrying references[i].status and its reason.
 test_reference_failures.gd assertions=30
+
+# Pointing at a reference: a two-box GLB built in-test, declared mm/Z-up so the
+# frame conversion is the identity and the suite is about WHICH node was hit.
+# Pins the node inventory and the scene-declared sidebar rows, a click in the
+# top pane picking the nearer of two bodies and reporting its surface point in
+# both frames, the MCP readback (get_selected_reference / select_reference,
+# including a miss being an error and a flat face reporting no hole), the
+# cad/point anchor validating, resolving, moving with a re-posed reference by
+# the projected pixel displacement and going stale — not crashing — when the
+# reference leaves the document, and the two selections coexisting: the picker
+# is a plain Node that only ever sees input the edge overlay did not take.
+test_reference_selection.gd assertions=41
