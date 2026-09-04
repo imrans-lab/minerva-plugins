@@ -84,9 +84,9 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_cad_probe":
 			return await _probe(panel, args)
 		"minerva_cad_get_selected_reference":
-			return _selected_reference(panel, args)
+			return await _selected_reference(panel, args)
 		"minerva_cad_select_reference":
-			return _select_reference(panel, args)
+			return await _select_reference(panel, args)
 		"minerva_cad_view_overlay":
 			return _view_overlay(panel, args)
 	return {}
@@ -187,7 +187,7 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 		var record: Dictionary = entry
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
 		var before := int(features.call("get_analysis_count"))
-		var analysis := _analysis(panel, record, args)
+		var analysis := await _analysis(panel, record, args)
 		if analysis.has("error"):
 			if bool(analysis.get("node_missing", false)):
 				node_missing.append(str(analysis["error"]))
@@ -267,7 +267,7 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 	for entry in scope["records"]:
 		var record: Dictionary = entry
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-		var analysis := _analysis(panel, record, args)
+		var analysis := await _analysis(panel, record, args)
 		if analysis.has("error"):
 			if bool(analysis.get("node_missing", false)):
 				node_missing.append(str(analysis["error"]))
@@ -474,7 +474,7 @@ static func _selected_reference(panel, args: Dictionary) -> Dictionary:
 			"note": "Nothing is selected. Ask the user to click a reference in "
 				+ "a view, or select one yourself with minerva_cad_select_reference.",
 		})
-	return _ok(_selection_payload(panel, selection, args))
+	return _ok(await _selection_payload(panel, selection, args))
 
 
 ## minerva_cad_select_reference — the same selection, made from the agent side,
@@ -493,7 +493,7 @@ static func _select_reference(panel, args: Dictionary) -> Dictionary:
 	if selection.is_empty():
 		return _err("no mounted reference named '%s' has a node '%s'"
 			% [reference, str(args.get("node", ""))])
-	return _ok(_selection_payload(panel, selection, args))
+	return _ok(await _selection_payload(panel, selection, args))
 
 
 ## One selection, reported the way every other measurement is: both frames,
@@ -502,6 +502,7 @@ static func _selection_payload(panel, selection: Dictionary, args: Dictionary) -
 	var local_box: AABB = selection.get("local_aabb", AABB())
 	var world_box: AABB = selection.get("world_aabb", AABB())
 	var pixel: Vector2 = selection.get("pixel", Vector2.ZERO)
+	var nearest_hole: Variant = await _nearest_hole(panel, selection, args)
 	return {
 		"units": "mm",
 		"selected": true,
@@ -526,7 +527,7 @@ static func _selection_payload(panel, selection: Dictionary, args: Dictionary) -
 		"selected_by": str(selection.get("source", "")),
 		"view": str(selection.get("view", "")),
 		"px": [pixel.x, pixel.y],
-		"nearest_hole": _nearest_hole(panel, selection, args),
+		"nearest_hole": nearest_hole,
 		"note": "point_mm.local is the reference file's own frame — the frame "
 			+ "the mesh() pose is applied to — and point_mm.world is the posed "
 			+ "scene; the normal is given in both. `node` is the node's path from "
@@ -549,7 +550,7 @@ static func _nearest_hole(panel, selection: Dictionary, args: Dictionary) -> Var
 			break
 	if record.is_empty():
 		return null
-	var analysis := _analysis(panel, record, {"node": node_name})
+	var analysis := await _analysis(panel, record, {"node": node_name})
 	if analysis.has("error"):
 		return null
 	var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
@@ -736,11 +737,12 @@ static func _analysis(panel, record: Dictionary, args: Dictionary) -> Dictionary
 		str(record.get("up", "")),
 		node_filter,
 	]
-	return features.call(
-		"features_for",
+	return await features.call(
+		"features_for_async",
 		key,
 		parts,
-		float(args.get("region_angle_deg", _MeshFeatures.DEFAULT_REGION_ANGLE_DEG))
+		float(args.get("region_angle_deg", _MeshFeatures.DEFAULT_REGION_ANGLE_DEG)),
+		panel.get_tree()
 	)
 
 

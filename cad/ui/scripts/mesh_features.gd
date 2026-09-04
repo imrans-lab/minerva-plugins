@@ -105,6 +105,45 @@ func features_for(
 	return result
 
 
+## Production counterpart to features_for(). Mesh resources are flattened on
+## the main thread (RenderingServer-backed resources are not a worker-thread
+## API), then the expensive weld/segment/fit pass runs in Godot's shared worker
+## pool. Polling completion once per frame keeps the editor responsive while an
+## MCP measurement waits for its answer. The synchronous entry point remains
+## for deterministic unit fixtures and callers that are already off-thread.
+func features_for_async(
+	key: String,
+	parts: Array,
+	angle_deg: float,
+	tree: SceneTree
+) -> Dictionary:
+	var cache_key := "%s|%.2f" % [key, angle_deg]
+	if _cache.has(cache_key):
+		return _cache[cache_key]
+	if tree == null:
+		return features_for(key, parts, angle_deg)
+
+	_analysis_count += 1
+	var started := Time.get_ticks_msec()
+	var soups := _soups_from_parts(parts)
+	var output := {}
+	var task_id := WorkerThreadPool.add_task(
+		Callable(self, "_analyze_soups_into").bind(soups, angle_deg, output),
+		false,
+		"CAD reference mesh segmentation")
+	while not WorkerThreadPool.is_task_completed(task_id):
+		await tree.process_frame
+	var wait_error := WorkerThreadPool.wait_for_task_completion(task_id)
+	if wait_error != OK or not output.has("result"):
+		# Completion errors are infrastructure failures, not evidence that the
+		# mesh has no features. Return an explicit error for the panel verb.
+		return {"error": "reference mesh segmentation worker failed (%d)" % wait_error}
+	var result: Dictionary = output["result"]
+	result["elapsed_ms"] = Time.get_ticks_msec() - started
+	_cache[cache_key] = result
+	return result
+
+
 ## Segment and fit every part. Returns
 ## {candidates: Array, triangles: int, regions: int, elapsed_ms: int}.
 ##
@@ -117,9 +156,15 @@ func features_for(
 ## a 130k triangle board is roughly a million dictionary operations.
 static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -> Dictionary:
 	var started := Time.get_ticks_msec()
-	var candidates: Array = []
-	var triangles := 0
-	var regions := 0
+	var result := _analyze_soups(_soups_from_parts(parts), angle_deg)
+	result["elapsed_ms"] = Time.get_ticks_msec() - started
+	return result
+
+
+## Main-thread boundary: copy everything needed from Mesh resources into value
+## arrays before a worker sees it.
+static func _soups_from_parts(parts: Array) -> Array:
+	var soups: Array = []
 	for entry in parts:
 		if not (entry is Dictionary):
 			continue
@@ -128,6 +173,23 @@ static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -
 		if mesh == null:
 			continue
 		var soup := soup_from_mesh(mesh, part.get("transform", Transform3D.IDENTITY))
+		soup["node"] = str(part.get("node_path", part.get("node", "")))
+		soups.append(soup)
+	return soups
+
+
+## Worker entry point. `output` is read only after the pool reports completion,
+## so the main and worker threads never access it concurrently.
+func _analyze_soups_into(soups: Array, angle_deg: float, output: Dictionary) -> void:
+	output["result"] = _analyze_soups(soups, angle_deg)
+
+
+static func _analyze_soups(soups: Array, angle_deg: float) -> Dictionary:
+	var candidates: Array = []
+	var triangles := 0
+	var regions := 0
+	for soup_entry in soups:
+		var soup: Dictionary = soup_entry
 		var positions: PackedVector3Array = soup["positions"]
 		var indices: PackedInt32Array = soup["indices"]
 		triangles += int(indices.size() / 3)
@@ -136,7 +198,7 @@ static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -
 		var found := analyze_soup(
 			positions,
 			indices,
-			str(part.get("node_path", part.get("node", ""))),
+			str(soup.get("node", "")),
 			angle_deg)
 		regions += int(found["regions"])
 		candidates.append_array(found["candidates"] as Array)
@@ -144,7 +206,7 @@ static func analyze(parts: Array, angle_deg: float = DEFAULT_REGION_ANGLE_DEG) -
 		"candidates": candidates,
 		"triangles": triangles,
 		"regions": regions,
-		"elapsed_ms": Time.get_ticks_msec() - started,
+		"elapsed_ms": 0,
 	}
 
 
