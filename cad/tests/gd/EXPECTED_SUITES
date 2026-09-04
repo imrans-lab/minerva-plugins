@@ -139,9 +139,14 @@ test_cad_note.gd assertions=40
 # either body inside the other still being reported, a cube buried in the
 # board being caught by parity alone, the status line naming the first
 # offender, and the reference=/node= scoping (a filter matching nothing
-# reports nothing). 24 assertions = 2 fixture + 5 collider + 8 through +
-# 3 clear + 2 sliver + 2 buried + 2 scope.
-test_interference.gd assertions=24
+# reports nothing). Plus containment the other way round (a board wholly
+# inside the solid, caught by parity alone) and supersession: two overlapping
+# requests through a stand-in panel, where the overtaken reply is marked and —
+# sampled at the instant it returns, which an end-state assertion could not
+# distinguish — never painted, while the pane ends up showing the newest
+# answer. 30 assertions = 2 fixture + 5 collider + 8 through + 3 clear +
+# 2 sliver + 2 buried + 2 enclosed + 2 scope + 4 supersession.
+test_interference.gd assertions=30
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, where every vertex of either

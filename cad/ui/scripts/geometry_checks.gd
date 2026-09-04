@@ -40,6 +40,15 @@ extends RefCounted
 ##    on every keystroke and has no path to key a cache on; the references are
 ##    the only side that caches (mesh_gauge, on its digest).
 ##
+## WHAT IT COSTS. The whole job runs inside ONE physics step, so its cost is a
+## stall and not a slowdown, and the reply carries `casts` and `elapsed_ms` so
+## nobody has to guess at it. The bound is: one ray per solid edge whose own box
+## reaches a reference (up to MAX_CROSSINGS_PER_EDGE casts for an edge that
+## keeps crossing), plus three per reference triangle whose box overlaps the
+## solid's, plus two or three parity rays when nothing crossed. Everything else
+## — the reference triangles that fail the box test, the solid edges parked away
+## from every reference — costs an AABB test and no ray at all.
+##
 ## WHERE IT RUNS. Inside mesh_gauge's physics step, through its job queue: a
 ## space's direct state may only be dereferenced there. The gauge dispatches
 ## the "interference" job straight back to this module (`run_check`), so both
@@ -117,6 +126,19 @@ var _marker_points: PackedVector3Array = PackedVector3Array()
 var _casts: int = 0
 ## Ceilings the running check hit, in prose.
 var _limits: PackedStringArray = PackedStringArray()
+## Wall clock of the running check, microseconds.
+var _started_us: int = 0
+
+## Requests made, ever. The module holds ONE solid collider and one set of
+## counters, so two checks in flight would answer each other's geometry: a
+## request takes the next ticket, waits for any running check, and is abandoned
+## if a newer one arrived while it waited. Only the newest ticket may draw.
+var _ticket: int = 0
+var _in_flight: bool = false
+
+## Emitted when a check releases the module. Waited on by a request that found
+## one already running.
+signal check_finished
 
 
 ## The reference records this check runs against — {name, pose, parts} as the
@@ -254,27 +276,67 @@ func get_solid_edge_count() -> int:
 ## `args` may carry reference= and node= to narrow the question; the mask is
 ## derived from the reference here, so no caller has to know about layers.
 func check(panel: Object, args: Dictionary = {}) -> Dictionary:
+	_ticket += 1
+	var ticket := _ticket
+	# ONE check at a time. build_solid and the counters are module state, so a
+	# second request arriving while the first waits for a physics step would
+	# hand the queued job the other request's geometry.
+	while _in_flight:
+		await check_finished
+		if ticket != _ticket:
+			# A third request came in while this one queued. The newest
+			# question is the only one worth asking, so this one stands down
+			# without touching the module at all.
+			return _superseded(_nothing(
+				"a newer check started before this one could run"))
+	_in_flight = true
 	_marker_points = PackedVector3Array()
 	var report := await _run(panel, args)
+	_in_flight = false
+	check_finished.emit()
+	# Only the newest request may paint. A superseded reply still goes back to
+	# its own caller — it is a true answer about the geometry it was asked
+	# about — but repainting from it would leave the previous evaluation's red
+	# crosses on screen after a newer clean one cleared them.
+	if ticket != _ticket:
+		return _superseded(report)
 	_draw_markers(panel)
 	return report
+
+
+## Mark a reply as describing a question that has been overtaken. The caller
+## gets its answer; nothing on screen comes from it.
+func _superseded(report: Dictionary) -> Dictionary:
+	report["superseded"] = true
+	report["superseded_reason"] = "a newer evaluation or verb call started " \
+		+ "before this check finished; the panel shows that one"
+	return report
+
+
+## The ticket of the most recent request. Only a check holding it may draw.
+func get_ticket() -> int:
+	return _ticket
 
 
 func _run(panel: Object, args: Dictionary) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _nothing("the CAD panel is gone")
+	# The cheap refusals first. Building the solid's collider costs a
+	# ConcavePolygonShape3D over every triangle the worker returned, and a
+	# document with no mesh() in it would pay that on every keystroke for a
+	# question that has no second body to ask about.
+	var gauge: Node = panel.get_mesh_gauge() if panel.has_method("get_mesh_gauge") else null
+	if gauge == null or not is_instance_valid(gauge) or not gauge.is_inside_tree():
+		return _nothing("the measurement gauge is not available on this panel")
+	if int(panel.ensure_gauge_built()) <= 0:
+		return _nothing("no reference mesh is mounted; there is nothing to run into")
+
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		document = panel.get_document_state()
 	var triangles := build_solid(document.get("mesh", {}) as Dictionary)
 	if triangles <= 0:
 		return _nothing("the evaluation produced no solid geometry to check")
-
-	var gauge: Node = panel.get_mesh_gauge() if panel.has_method("get_mesh_gauge") else null
-	if gauge == null or not is_instance_valid(gauge) or not gauge.is_inside_tree():
-		return _nothing("the measurement gauge is not available on this panel")
-	if int(panel.ensure_gauge_built()) <= 0:
-		return _nothing("no reference mesh is mounted; there is nothing to run into")
 
 	set_records(panel.get_reference_state())
 	var reference_scope := str(args.get("reference", ""))
@@ -298,6 +360,7 @@ func _run(panel: Object, args: Dictionary) -> Dictionary:
 ## space's direct state in hand. `state` is the references' space; the solid's
 ## own space is this module's.
 func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
+	_started_us = Time.get_ticks_usec()
 	_casts = 0
 	_limits = PackedStringArray()
 	var mask := int(args.get("mask", ALL_LAYERS))
@@ -534,6 +597,13 @@ func _containment(
 		if str(verdict.get("reason", "")) == "inside_solid":
 			# Parity says "inside something" without saying inside WHAT, so the
 			# nearest surface from the probe names the offender.
+			#
+			# This is the ONE cast in the module that starts inside material,
+			# against constraint 2 above. It is safe precisely because it is
+			# not a crossing test: every reference collider carries
+			# backface_collision, so a ray leaving buried material reports the
+			# wall it exits through, and that wall's body is the node the
+			# solid is buried in — which is all this ray is asked for.
 			var reach := _scene_reach()
 			var named: Dictionary = gauge.call("run_now", state, "raycast", {
 				"from": probe,
@@ -733,6 +803,12 @@ func _report(pairs: Dictionary) -> Dictionary:
 		"pairs": out,
 		"sampling": sampling,
 		"casts": _casts,
+		"elapsed_ms": float(Time.get_ticks_usec() - _started_us) / 1000.0,
+		# The cost of a per-evaluation check is part of its answer: a reader
+		# deciding whether to keep it on can only do that with the bound.
+		"cost": "one ray per solid edge whose box reaches a reference, three "
+			+ "per overlapping reference triangle, and two or three parity "
+			+ "rays when nothing crossed; everything else is an AABB test",
 	}
 
 
@@ -748,6 +824,7 @@ func _nothing(reason: String) -> Dictionary:
 		"pairs": [],
 		"reason": reason,
 		"casts": 0,
+		"elapsed_ms": 0.0,
 	}
 
 

@@ -67,11 +67,22 @@ const SLIVER_OVERLAP_MM := 0.2
 ## material.
 const BURIED_EDGE := 0.5
 
+## A box big enough to swallow the whole board: containment the other way
+## round, which no edge crossing can see either.
+const ENCLOSING := Vector3(120.0, 100.0, 12.0)
+
+## The pane the stand-in panel builds so the markers have somewhere to land.
+## It is the first of panel_measurement.gd's MESH_ROOT_PATHS verbatim: the
+## module looks for exactly these names and a typo here would silently pass.
+const MESH_ROOT_PATH := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport/MeshRoot"
+
 const POINT_TOLERANCE_MM := 0.05
 
 var _pass: int = 0
 var _fail: int = 0
 var _pose: Transform3D = Transform3D.IDENTITY
+## The reference records the panel would report for the board.
+var _records: Array = []
 
 
 func _init() -> void:
@@ -107,7 +118,7 @@ func _run() -> void:
 	}], "interference-fixture|v1")
 	check("fixture: the posed board became one reference collider",
 			built == 1, "built %d colliders" % built)
-	checks.set_records([{
+	_records = [{
 		"name": BOARD_REFERENCE,
 		"pose": _pose,
 		"world_aabb": _board_world_box(),
@@ -117,14 +128,17 @@ func _run() -> void:
 			"node_path": BOARD_NODE,
 			"node": BOARD_NODE,
 		}],
-	}])
+	}]
+	checks.set_records(_records)
 
 	await _check_solid_build(checks)
 	await _check_through(gauge, checks)
 	await _check_clear(gauge, checks)
 	await _check_sliver(gauge, checks)
 	await _check_buried(gauge, checks)
+	await _check_enclosed(gauge, checks)
 	await _check_scoping(gauge, checks)
+	await _check_supersession(gauge, checks)
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +305,136 @@ func _check_buried(gauge: Node, checks: RefCounted) -> void:
 
 
 # ---------------------------------------------------------------------------
+# ENCLOSED — containment the other way round
+# ---------------------------------------------------------------------------
+
+func _check_enclosed(gauge: Node, checks: RefCounted) -> void:
+	var box: Dictionary = await _enclosing_mesh()
+	checks.build_solid(box)
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var pairs: Array = report.get("pairs", []) as Array
+	check("enclosed: a reference wholly inside the solid is reported by parity",
+			int(report.get("count", 0)) > 0,
+			"report = %s" % str(report))
+	check("enclosed: and the note says which way round the containment is",
+			not pairs.is_empty()
+				and str((pairs[0] as Dictionary).get("note", ""))
+					.contains("inside the solid"),
+			"pairs = %s" % str(pairs))
+
+
+# ---------------------------------------------------------------------------
+# SUPERSESSION — two overlapping requests, one painter
+# ---------------------------------------------------------------------------
+
+## The module holds ONE solid collider and one marker set, so two checks in
+## flight would answer each other's geometry — and, worse, a superseded check
+## finishing late would repaint the crosses a newer clean evaluation had just
+## cleared. Both requests still get a true answer about the solid they asked
+## about; only the newest may paint.
+##
+## The stand-in panel is the smallest thing the module's panel contract
+## accepts: the four accessors it reads and one pane for the markers. A real
+## CADPanel would drag the whole scene, the worker IPC and the annotation host
+## in for a question none of them take part in.
+func _check_supersession(gauge: Node, checks: RefCounted) -> void:
+	var through: Dictionary = await _shell_mesh(BOSS_THROUGH_BOTTOM_Z)
+	var clear: Dictionary = await _shell_mesh(BOSS_CLEAR_BOTTOM_Z)
+	var panel := _stand_in_panel(gauge)
+	var mesh_root: Node = panel.get_node_or_null(MESH_ROOT_PATH)
+	var replies: Array = []
+
+	# The interfering solid goes first and is NOT awaited: it is still waiting
+	# for a physics step when the second request arrives.
+	panel.mesh_data = through
+	_collect(checks, panel, replies)
+	panel.mesh_data = clear
+	_collect(checks, panel, replies)
+
+	# Sample the markers at the moment the FIRST reply lands. If the superseded
+	# check painted, its crosses are on screen right here — a later assertion
+	# on the end state could not tell that apart from the newer check having
+	# cleared them again.
+	var painted_when_superseded_returned := false
+	var sampled := false
+	for _frame in range(600):
+		if replies.size() >= 1 and not sampled:
+			sampled = true
+			painted_when_superseded_returned = mesh_root != null \
+				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null
+		if replies.size() >= 2:
+			break
+		await process_frame
+
+	var older := {}
+	var newer := {}
+	for entry in replies:
+		var reply: Dictionary = entry
+		if int(reply.get("count", 0)) > 0:
+			older = reply
+		else:
+			newer = reply
+	check("supersession: both requests were answered about their own geometry",
+			replies.size() == 2 and not older.is_empty() and not newer.is_empty(),
+			"replies = %s" % str(replies))
+	check("supersession: the overtaken reply says so and the newest does not",
+			bool(older.get("superseded", false))
+				and not bool(newer.get("superseded", false)),
+			"older = %s, newer = %s" % [
+				str(older.get("superseded", null)), str(newer.get("superseded", null))])
+	check("supersession: the overtaken check never painted",
+			sampled and not painted_when_superseded_returned,
+			"sampled = %s, painted = %s" % [
+				str(sampled), str(painted_when_superseded_returned)])
+	check("supersession: the pane ends up showing the NEWEST answer — no marker",
+			mesh_root != null
+				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) == null,
+			"a marker node survived the clean check")
+
+	panel.queue_free()
+
+
+## Start a check without awaiting it and park its reply in `into`.
+func _collect(checks: RefCounted, panel: Node, into: Array) -> void:
+	var reply: Dictionary = await checks.check(panel, {})
+	into.append(reply)
+
+
+## The four accessors geometry_checks.gd reads off a panel, and one pane.
+class StandInPanel extends Node3D:
+	var gauge: Node = null
+	var records: Array = []
+	var mesh_data: Dictionary = {}
+
+	func get_mesh_gauge() -> Node:
+		return gauge
+
+	func ensure_gauge_built() -> int:
+		return int(gauge.get_shape_count()) if gauge != null else 0
+
+	func get_reference_state() -> Array:
+		return records
+
+	func get_document_state() -> Dictionary:
+		return {"mesh": mesh_data}
+
+
+func _stand_in_panel(gauge: Node) -> Node:
+	var panel := StandInPanel.new()
+	panel.name = "StandInPanel"
+	panel.gauge = gauge
+	panel.records = _records
+	root.add_child(panel)
+	var parent: Node = panel
+	for segment in MESH_ROOT_PATH.split("/"):
+		var node := Node3D.new()
+		node.name = segment
+		parent.add_child(node)
+		parent = node
+	return panel
+
+
+# ---------------------------------------------------------------------------
 # Scoping
 # ---------------------------------------------------------------------------
 
@@ -394,6 +538,20 @@ func _bar_mesh() -> Dictionary:
 	bar.size = BAR
 	bar.position = Vector3(0.0, 0.0, BAR_CENTRE_Z)
 	combiner.add_child(bar)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
+
+
+## A box big enough to swallow the whole board.
+func _enclosing_mesh() -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Enclosing"
+	var box := CSGBox3D.new()
+	box.size = ENCLOSING
+	combiner.add_child(box)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()
