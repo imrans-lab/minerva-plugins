@@ -229,8 +229,17 @@ jobs:
               | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
           fi
           tar -czf "dist/cad-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
-          echo "Packed contents (first 30):"
-          tar -tzf "dist/cad-${VERSION}-${PLATFORM}.tar.gz" | head -30
+          # The listing is diagnostic only, so it must never fail the step.
+          # Piping tar into `head` lets head close the pipe at line 30 while tar
+          # is still streaming a large archive; tar then dies on EPIPE and
+          # `set -o pipefail` fails the pack. Write the whole listing to a file
+          # and head the file instead: tar always runs to completion, so a
+          # truncated or corrupt archive still fails here, but a listing longer
+          # than 30 entries never does.
+          LISTING="dist/cad-${VERSION}-${PLATFORM}.contents.txt"
+          tar -tzf "dist/cad-${VERSION}-${PLATFORM}.tar.gz" > "$LISTING"
+          echo "Packed contents ($(wc -l < "$LISTING") entries, first 30):"
+          head -30 "$LISTING"
           ls -la "dist/cad-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
