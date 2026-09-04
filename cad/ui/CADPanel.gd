@@ -25,8 +25,6 @@ var plugin_id: String = "cad"
 ##   preload(...).new(). Property access and signal subscription works via
 ##   duck typing.
 
-const _DEBUG_EDGE_PICK: bool = false
-
 const _CadAnnotationHostScript: Script = preload("CadAnnotationHost.gd")
 const _ResponsiveContainerScript: Script = preload("res://Scripts/UI/Controls/responsive_container.gd")
 const _BuiltinKindsScript: Script = preload("res://Scripts/Services/Annotations/BuiltinKinds.gd")
@@ -41,9 +39,9 @@ const _ReferenceMeshesScript: Script = preload("scripts/reference_meshes.gd")
 ## The three host note hooks — plugin_data payload, restore and the
 ## LLM rendering — live here; the panel below is wiring only.
 const _CadNoteScript: Script = preload("scripts/cad_note.gd")
-## Name, path and line text for the GUI "Import mesh…" action. Text authoring
-## only — the import writes DSL, it never holds geometry of its own.
-const _MeshImportScript: Script = preload("scripts/mesh_import.gd")
+## The GUI "Import mesh…" action — the file picker, the button in each layout,
+## and the `refN = mesh("path")` line the picked file becomes.
+const _MeshImportUiScript: Script = preload("scripts/mesh_import_ui.gd")
 ## Measurement: propose candidates by fitting primitives to a reference mesh,
 ## then verify and measure them against physics colliders. Both are pure
 ## modules; the panel only holds them and hands them the mounted references.
@@ -52,18 +50,22 @@ const _MeshImportScript: Script = preload("scripts/mesh_import.gd")
 const _ReferenceSelectionScript: Script = preload("scripts/reference_selection.gd")
 const _MeshFeaturesScript: Script = preload("scripts/mesh_features.gd")
 const _MeshGaugeScript: Script = preload("scripts/mesh_gauge.gd")
+## The wide sidebar's edge tree, its buttons, and the fan-out of an edge
+## selection to the annotation host and the per-pane geometry overlays.
+const _EdgeSidebarScript: Script = preload("scripts/edge_sidebar.gd")
+## Reference mounting and every measurement the panel is asked to bookkeep:
+## the collider digest, the overlay, the per-pane scale and the pick ray.
+const _PanelMeasurementScript: Script = preload("scripts/panel_measurement.gd")
+
+## Verbose tracing of the edge pick path. Owned by the sidebar module, which
+## prints the other half of it.
+const _DEBUG_EDGE_PICK: bool = _EdgeSidebarScript.DEBUG_EDGE_PICK
 
 ## Every MeshRoot an evaluation has to reach — the four wide-layout panes and
-## the narrow layout's single pane. One list, because the mesh push, the
-## reference mount and the ortho x-ray toggle must never disagree about which
-## panes exist.
-const _MESH_ROOT_PATHS: Array = [
-	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport/MeshRoot",
-	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport/MeshRoot",
-	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport/MeshRoot",
-	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport/MeshRoot",
-	"ResponsiveContainer/NarrowLayout/SingleView/SubViewport/MeshRoot",
-]
+## the narrow layout's single pane. Owned by the measurement module, because
+## the mesh push here, the reference mount and the ortho x-ray toggle must
+## never disagree about which panes exist.
+const _MESH_ROOT_PATHS: Array = _PanelMeasurementScript.MESH_ROOT_PATHS
 
 # ── Node references (set in _ready) ────────────────────────────────────────
 
@@ -172,14 +174,9 @@ var _reference_digest: String = ""
 ## picking, the sidebar list and the selection the MCP verbs read back.
 var _reference_selection: RefCounted = null
 
-## Scene nodes behind the GUI import action: the file picker and the button in
-## each layout. Both buttons run the same handler.
-var _mesh_import_dialog: FileDialog = null
-var _import_buttons: Array[Button] = []
-
-## What the last import decided, for the panel's own reporting:
-## {ok, line, name, path, absolute, warning, error}. Empty until one runs.
-var _last_import: Dictionary = {}
+## The GUI "Import mesh…" action: the picker, the buttons and the one line it
+## appends to the document (scripts/mesh_import_ui.gd).
+var _mesh_import_ui: RefCounted = null
 
 ## Last-known evaluation result, surfaced via _on_panel_save_request so
 ## minerva_doc_read after a write exposes whether the worker actually
@@ -201,14 +198,13 @@ var _last_eval_result: Dictionary = {"status": "empty"}
 var _error_banner: PanelContainer = null
 var _error_banner_label: Label = null
 
-## Tree node in the wide sidebar listing all edges. Built in _ready().
-var _edge_tree: Tree = null
+## The wide sidebar's edge inspector and the edge selection it drives
+## (scripts/edge_sidebar.gd).
+var _edge_sidebar: RefCounted = null
 
-## Map edge_id → TreeItem so we can sync selection both directions.
-var _edge_tree_items: Dictionary = {}
-
-## Re-entrancy guard for tree → panel selection routing.
-var _suppress_tree_selection: bool = false
+## Reference mounting, the collider digest, the measurement overlay and the
+## per-pane mesh visibility (scripts/panel_measurement.gd).
+var _measurement: RefCounted = null
 
 ## Projection dropdown options (id → preset string accepted by orbit_camera).
 const _PROJECTION_OPTIONS: Array = [
@@ -266,13 +262,15 @@ func _ready() -> void:
 	_projection_dropdown.item_selected.connect(_on_projection_selected)
 
 	# ── "Import mesh…" — the GUI half of mesh() authoring ──────────────────
-	_wire_mesh_import()
+	_mesh_import_ui = _MeshImportUiScript.new()
+	_mesh_import_ui.attach(self)
 
 	# Mesh is intentionally empty until a .mcad source is evaluated by the
 	# worker and pushed in via the future DSL→mesh bridge. Showing a stub
 	# cube here was misleading because it implied the panel had geometry
 	# without DSL backing it; the empty state is the honest state.
 
+	_measurement = _PanelMeasurementScript.new(self)
 	_reference_library = _ReferenceMeshesScript.new()
 	_mesh_features = _MeshFeaturesScript.new()
 	# The gauge is a Node: it owns a physics step, because Minerva runs physics
@@ -365,8 +363,9 @@ func _ready() -> void:
 	_reference_selection.attach(self)
 
 	# ── Wide-mode sidebar: edge Tree + Prev/Next/Clear buttons ─────────────
-	_build_edge_sidebar()
-	_render_edge_tree(_edge_registry)
+	_edge_sidebar = _EdgeSidebarScript.new()
+	_edge_sidebar.attach(self, _wide_sidebar)
+	_edge_sidebar.render(_edge_registry)
 
 	# ── Connect ResponsiveContainer width-class signal & apply initial mode
 	_responsive.width_class_changed.connect(_on_width_class_changed)
@@ -392,57 +391,11 @@ func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	return result if result is Dictionary else {}
 
 
-## Public introspection surface backing minerva_cad_view_state (panel_tools.gd).
-## Surfaces layout/camera state the panel already tracks — width_class (which
-## ResponsiveContainer breakpoint is active), active_viewport_id (which pane
-## an agent's minerva_cad_snapshot view="active" would capture), the
-## narrow-mode projection dropdown selection, and the active pane's camera
-## orientation/zoom (OrbitCamera's own get_target/get_distance/get_yaw/
-## get_pitch/get_debug_state — no new camera state was added for this tool).
+## Public introspection surface backing minerva_cad_view_state (panel_tools.gd),
+## and the note preview's choice of pane. Layout and camera state the panel
+## already tracks; the module that owns the panes assembles it.
 func get_view_state() -> Dictionary:
-	var cam: Camera3D = _camera_for_active_viewport()
-	var camera_state: Variant = null
-	if cam != null:
-		camera_state = {
-			"view_preset": String(cam.get_debug_state().get("view_preset", "")) if cam.has_method("get_debug_state") else "",
-			"target": _vec3_to_array(cam.get_target()) if cam.has_method("get_target") else null,
-			"distance": cam.get_distance() if cam.has_method("get_distance") else null,
-			"yaw": cam.get_yaw() if cam.has_method("get_yaw") else null,
-			"pitch": cam.get_pitch() if cam.has_method("get_pitch") else null,
-		}
-	return {
-		"width_class": String(_responsive.width_class) if _responsive != null else "",
-		"is_narrow_layout": _narrow_layout.visible if _narrow_layout != null else false,
-		"active_viewport_id": _active_viewport_id,
-		"projection_preset": _current_projection_preset(),
-		"camera": camera_state,
-	}
-
-
-## Resolve the Camera3D backing the currently-active pane: the single
-## narrow-mode camera when narrow layout is visible, otherwise the wide-mode
-## camera matching _active_viewport_id (falls back to the iso camera for any
-## id that isn't top/front/right — mirrors _projection_preset_to_viewport_id's
-## lower-cased ids and _register_host_viewports' wide-mode camera map).
-func _camera_for_active_viewport() -> Camera3D:
-	if _narrow_layout != null and _narrow_layout.visible:
-		return _single_view_camera
-	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
-	match _active_viewport_id:
-		"top":
-			return get_node_or_null(grid + "/TopView/SubViewport/OrbitCamera") as Camera3D
-		"front":
-			return get_node_or_null(grid + "/FrontView/SubViewport/OrbitCamera") as Camera3D
-		"right":
-			return get_node_or_null(grid + "/RightView/SubViewport/OrbitCamera") as Camera3D
-		_:
-			return get_node_or_null(grid + "/IsoView/SubViewport/OrbitCamera") as Camera3D
-
-
-## Vector3 -> [x, y, z] (JSON-safe; MCP results are JSON-encoded downstream).
-func _vec3_to_array(v: Vector3) -> Array:
-	return [v.x, v.y, v.z]
-
+	return _measurement.view_state()
 
 # ── Measurement surface (backs the minerva_cad_* measurement verbs) ─────────
 #
@@ -487,7 +440,7 @@ func get_document_state() -> Dictionary:
 ## The camera behind a named pane ("iso"/"top"/"front"/"right"/"active"). Its
 ## viewport is that pane's SubViewport, which is where a capture comes from.
 func get_view_camera(view: String) -> Camera3D:
-	return _camera_for_view(view)
+	return _measurement.camera_for_view(view)
 
 
 ## Take on a document, its path and its reference set from a note restore.
@@ -525,36 +478,10 @@ func get_mesh_features() -> RefCounted:
 func get_mesh_gauge() -> Node:
 	return _mesh_gauge
 
-
 ## Build the gauge's colliders for the currently mounted references, if the set
 ## has changed since they were last built. Returns the collider count.
-##
-## Every part is handed over in WORLD millimetres — the pose composed onto the
-## already-converted part transform — so every number the gauge returns is a
-## world coordinate and nothing downstream has to know about the CAD frame
-## conversion at all.
 func ensure_gauge_built() -> int:
-	if _mesh_gauge == null:
-		return 0
-	var bodies: Array = []
-	for entry in get_reference_state():
-		var record: Dictionary = entry
-		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-		var reference_name := str(record.get("name", ""))
-		for part_entry in record.get("parts", []):
-			var part: Dictionary = part_entry
-			bodies.append({
-				"mesh": part.get("mesh", null),
-				"transform": pose * (part.get("transform", Transform3D.IDENTITY) as Transform3D),
-				# The node PATH, not the leaf name: two branches of a foreign
-				# assembly may both hold a node called "Body", and a contact
-				# attributed to the wrong one of them is a wrong answer.
-				"node": "%s/%s" % [reference_name,
-					str(part.get("node_path", part.get("node", "")))],
-				"reference": reference_name,
-			})
-	return int(_mesh_gauge.call("build", bodies, _reference_digest))
-
+	return _measurement.ensure_gauge_built()
 
 func get_reference_digest() -> String:
 	return _reference_digest
@@ -596,134 +523,28 @@ func select_reference_node(reference: String, node_name: String, local_point: Va
 		return {}
 	return _reference_selection.select(reference, node_name, local_point, "mcp")
 
-
 ## Draw the measurement overlay in every pane and report the scale of each one.
 ## The overlay is scene geometry, so the host's own snapshot verb picks it up
 ## with no changes: the LLM turns the grid on, then takes the picture it was
 ## going to take anyway, and now the picture has a ruler in it.
 func set_measurement_overlay(mode: String, grid_mm: float) -> Dictionary:
-	var bounds := AABB()
-	var have_bounds := false
-	for path in _MESH_ROOT_PATHS:
-		var mesh_root := get_node_or_null(path)
-		if mesh_root == null or not mesh_root.has_method("set_measurement_overlay"):
-			continue
-		if not have_bounds:
-			bounds = _overlay_bounds(mesh_root)
-			have_bounds = true
-	var drawn := {}
-	for path in _MESH_ROOT_PATHS:
-		var mesh_root := get_node_or_null(path)
-		if mesh_root != null and mesh_root.has_method("set_measurement_overlay"):
-			drawn = mesh_root.call("set_measurement_overlay", mode, grid_mm, bounds)
-	return drawn
-
-
-## Bounds to spread the overlay over: the references plus whatever the solid
-## occupies, falling back to the reference bounds alone.
-func _overlay_bounds(mesh_root: Object) -> AABB:
-	var bounds := AABB()
-	if mesh_root.has_method("get_reference_aabb"):
-		bounds = mesh_root.call("get_reference_aabb")
-	var world_aabb: AABB = _reference_report.get("world_aabb", AABB())
-	if world_aabb.size.length() > 0.0:
-		bounds = world_aabb if bounds.size.length() <= 0.0 else bounds.merge(world_aabb)
-	return bounds
+	return _measurement.set_measurement_overlay(mode, grid_mm)
 
 
 ## Millimetres-to-pixels for one pane, so a snapshot can be read as a drawing.
-## Orthographic panes have one constant scale; the iso pane is a perspective
-## projection and has none, which is reported as a null rather than as a lie.
 func get_view_metrics(view: String) -> Dictionary:
-	var refusal := view_unavailable_reason(view)
-	if not refusal.is_empty():
-		return {"error": refusal, "view": view}
-	var camera := _camera_for_view(view)
-	if camera == null:
-		return {"error": "no camera for view '%s'" % view}
-	var viewport := camera.get_viewport()
-	var size: Vector2i = viewport.size if viewport != null else Vector2i.ZERO
-	var metrics := {
-		"view": view,
-		"width_px": size.x,
-		"height_px": size.y,
-		"projection": "orthographic" if camera.projection == Camera3D.PROJECTION_ORTHOGONAL \
-			else "perspective",
-		"px_per_mm": null,
-		"origin_px": null,
-	}
-	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL and size.y > 0 and camera.size > 0.0:
-		# One CAD world unit is one millimetre, so the camera's own ortho
-		# height in world units is the height of the pane in millimetres.
-		metrics["px_per_mm"] = float(size.y) / camera.size
-	if size.y > 0:
-		var origin := camera.unproject_position(Vector3.ZERO)
-		metrics["origin_px"] = [origin.x, origin.y]
-	return metrics
+	return _measurement.get_view_metrics(view)
 
 
 ## The world-space ray under a pixel of one pane, for turning a click or a
-## snapshot coordinate into a question about the geometry. Pixels are in the
-## pane's own viewport, top-left origin — the same coordinates a snapshot of
-## that pane has, before any max_edge downscale the host applies.
+## snapshot coordinate into a question about the geometry.
 func get_pick_ray(view: String, pixel: Vector2) -> Dictionary:
-	var refusal := view_unavailable_reason(view)
-	if not refusal.is_empty():
-		return {"error": refusal}
-	var camera := _camera_for_view(view)
-	if camera == null:
-		return {"error": "no camera for view '%s'" % view}
-	var viewport := camera.get_viewport()
-	var size: Vector2i = viewport.size if viewport != null else Vector2i.ZERO
-	if size.x <= 0 or size.y <= 0:
-		return {"error": "pane '%s' has no rendered size" % view}
-	if pixel.x < 0.0 or pixel.y < 0.0 or pixel.x >= float(size.x) or pixel.y >= float(size.y):
-		return {"error": "pixel %s is outside the %dx%d pane" % [str(pixel), size.x, size.y]}
-	var origin := camera.project_ray_origin(pixel)
-	var direction := camera.project_ray_normal(pixel)
-	# Far enough to cross any part a CAD document holds, and bounded so the
-	# ray is a segment the physics server can answer about.
-	var reach := maxf(camera.far, 10000.0)
-	return {
-		"from": origin,
-		"to": origin + direction * reach,
-		"width_px": size.x,
-		"height_px": size.y,
-	}
+	return _measurement.get_pick_ray(view, pixel)
 
 
-## Why a named pane cannot be addressed, or "" when it can. Narrow layout has
-## a single pane showing whichever preset the dropdown is on, so handing back
-## that camera for "top" would answer a question about one pane with another
-## pane's geometry — the right label over the wrong numbers. Snapshot already
-## refuses here; measurement refuses for the same reason.
+## Why a named pane cannot be addressed, or "" when it can.
 func view_unavailable_reason(view: String) -> String:
-	if view.is_empty() or view == "active" or view == "single":
-		return ""
-	if _narrow_layout != null and _narrow_layout.visible:
-		return ("the panel is in narrow layout and renders one pane only "
-			+ "(currently '%s'); ask for view \"active\", or widen the panel "
-			+ "to address '%s' separately") % [_current_projection_preset(), view]
-	return ""
-
-
-## Camera for a named pane. "active" means whatever the user is looking at,
-## which in narrow layout is the only pane that renders at all.
-func _camera_for_view(view: String) -> Camera3D:
-	if view.is_empty() or view == "active" or view == "single":
-		return _camera_for_active_viewport()
-	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
-	match view:
-		"top":
-			return get_node_or_null(grid + "/TopView/SubViewport/OrbitCamera") as Camera3D
-		"front":
-			return get_node_or_null(grid + "/FrontView/SubViewport/OrbitCamera") as Camera3D
-		"right":
-			return get_node_or_null(grid + "/RightView/SubViewport/OrbitCamera") as Camera3D
-		"iso":
-			return get_node_or_null(grid + "/IsoView/SubViewport/OrbitCamera") as Camera3D
-	return null
-
+	return _measurement.view_unavailable_reason(view)
 
 # ── Plugin platform lifecycle hooks (override MinervaPluginPanel virtuals) ──
 
@@ -843,46 +664,12 @@ func _on_eval_debounce_timeout() -> void:
 
 
 # ── GUI mesh import ─────────────────────────────────────────────────────────
-# The owner picks a mesh file and the panel appends `refN = mesh("path")` to
-# the document's own source. Everything the action produces is DSL text, so the
-# pose verbs, undo, save and an LLM reading the file all keep working on it —
-# and the MCP parity for this action is minerva_doc_write, not a new verb.
 #
-# The write goes to the DocumentBuffer the substrate attached, which is the one
-# the paired text editor is showing. Writing anywhere else — _pending_dsl_text
-# alone, a fresh buffer, the file on disk — forks the document in two.
-
-## Resolve the scene's import controls and connect them. Called from _ready.
-func _wire_mesh_import() -> void:
-	_mesh_import_dialog = $MeshImportDialog as FileDialog
-	if _mesh_import_dialog != null:
-		# Filters come from the loader's own format list, so nothing can be
-		# loadable without being pickable (or the other way round).
-		_mesh_import_dialog.filters = _MeshImportScript.dialog_filters()
-		if not _mesh_import_dialog.file_selected.is_connected(_on_mesh_file_selected):
-			_mesh_import_dialog.file_selected.connect(_on_mesh_file_selected)
-
-	_import_buttons.clear()
-	for button_path in [
-		"ResponsiveContainer/WideLayout/WideSidebar/ImportMeshButton",
-		"ResponsiveContainer/NarrowLayout/ProjectionRow/ImportMeshButton",
-	]:
-		var button := get_node_or_null(button_path) as Button
-		if button == null:
-			continue
-		if not button.pressed.is_connected(_on_import_mesh_pressed):
-			button.pressed.connect(_on_import_mesh_pressed)
-		_import_buttons.append(button)
-
+# The picker and the buttons are scene nodes, so their signals stay connected to
+# the panel's own handlers; the action itself lives in scripts/mesh_import_ui.gd.
 
 func _on_import_mesh_pressed() -> void:
-	if _mesh_import_dialog == null:
-		return
-	# Open beside the document, which is where a portable relative path can be
-	# written; an unsaved document has nowhere to start from.
-	if not _document_path.is_empty():
-		_mesh_import_dialog.current_dir = _document_path.get_base_dir()
-	_mesh_import_dialog.popup_centered_ratio(0.7)
+	_mesh_import_ui.on_import_pressed()
 
 
 func _on_mesh_file_selected(path: String) -> void:
@@ -890,31 +677,13 @@ func _on_mesh_file_selected(path: String) -> void:
 
 
 ## Append one `refN = mesh("path")` line for `absolute_path` to the document
-## and re-evaluate. Public because the file dialog is not the only caller worth
-## having: this is the whole action, and it takes a path.
+## and re-evaluate. The action itself — the picker, the buttons and the edit —
+## lives in scripts/mesh_import_ui.gd; this is the name its other callers reach
+## it by.
 ##
 ## Returns the import plan — {ok, line, name, path, absolute, warning, error}.
 func import_mesh_file(absolute_path: String) -> Dictionary:
-	var plan: Dictionary = _MeshImportScript.plan_import(
-		_current_source(), absolute_path, _document_path)
-	_last_import = plan
-
-	if not bool(plan.get("ok", false)):
-		var problem: String = str(plan.get("error", ""))
-		push_warning("[CADPanel] import mesh: %s" % problem)
-		_show_eval_error("Import mesh — %s" % problem)
-		return plan
-
-	_apply_source_edit(str(plan["source"]))
-
-	var warning: String = str(plan.get("warning", ""))
-	if not warning.is_empty():
-		# Same banner as an evaluation error: it is the panel's one visible
-		# message surface, and the next evaluation clears it.
-		push_warning("[CADPanel] import mesh: %s" % warning)
-		_import_notice = "Import mesh — %s" % warning
-		_show_eval_error(_import_notice)
-	return plan
+	return _mesh_import_ui.import_file(absolute_path)
 
 
 ## The source as the document currently holds it. The attached buffer wins over
@@ -1251,7 +1020,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		if _annotation_host.has_method("set_edge_registry"):
 			_annotation_host.set_edge_registry(edges)
 	_push_mesh_to_geometry_overlays()
-	_render_edge_tree(_edge_registry)
+	_edge_sidebar.render(_edge_registry)
 	# Re-apply mesh visibility (ortho panes hide the shaded mesh; iso shows it).
 	_apply_mesh_visibility()
 	# update_mesh auto-framed every pane just now. A note restore's saved view
@@ -1463,313 +1232,34 @@ func _current_projection_preset() -> String:
 func _projection_preset_to_viewport_id(preset: String) -> String:
 	return preset.to_lower()
 
+## Hide the shaded mesh in ortho-only panes (Top/Front/Right; narrow non-
+## perspective) so the edge overlay is the only visualisation. Iso /
+## Perspective keeps the mesh visible for shaded 3-D context.
+func _apply_mesh_visibility() -> void:
+	_measurement.apply_mesh_visibility()
 
-# ── Edge overlay / sidebar wiring ───────────────────────────────────────────
-
-## Build the wide-mode edge Tree under WideSidebar.
-## Three buttons (Prev / Next / Clear) sit beneath the tree.
-func _build_edge_sidebar() -> void:
-	if _wide_sidebar == null:
-		return
-
-	var hr := HSeparator.new()
-	hr.name = "EdgeSidebarSeparator"
-	_wide_sidebar.add_child(hr)
-
-	var label := Label.new()
-	label.name = "EdgeSidebarHeader"
-	label.text = "Edge Markers"
-	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_wide_sidebar.add_child(label)
-
-	_edge_tree = Tree.new()
-	_edge_tree.name = "EdgeTree"
-	_edge_tree.focus_mode = Control.FOCUS_NONE
-	_edge_tree.hide_root = true
-	_edge_tree.columns = 3
-	_edge_tree.set_column_title(0, "id")
-	_edge_tree.set_column_title(1, "len/r")
-	_edge_tree.set_column_title(2, "kind")
-	_edge_tree.set_column_titles_visible(true)
-	_edge_tree.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_edge_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_edge_tree.custom_minimum_size = Vector2(0, 180)
-	_edge_tree.item_selected.connect(_on_edge_tree_item_selected)
-	_wide_sidebar.add_child(_edge_tree)
-
-	var btn_row := HBoxContainer.new()
-	btn_row.name = "EdgeButtons"
-	btn_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_wide_sidebar.add_child(btn_row)
-
-	var prev_btn := Button.new()
-	prev_btn.text = "Prev"
-	prev_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	prev_btn.pressed.connect(_on_prev_edge_pressed)
-	btn_row.add_child(prev_btn)
-
-	var next_btn := Button.new()
-	next_btn.text = "Next"
-	next_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	next_btn.pressed.connect(_on_next_edge_pressed)
-	btn_row.add_child(next_btn)
-
-	var clear_btn := Button.new()
-	clear_btn.text = "Clear"
-	clear_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	clear_btn.pressed.connect(_on_clear_edge_pressed)
-	btn_row.add_child(clear_btn)
-
-
-## Populate the edge Tree from the current edge_registry.
-func _render_edge_tree(edges: Array) -> void:
-	if _edge_tree == null:
-		return
-	_edge_tree.clear()
-	_edge_tree_items.clear()
-	var root := _edge_tree.create_item()
-	if edges.is_empty():
-		var empty_item := _edge_tree.create_item(root)
-		empty_item.set_text(0, "")
-		empty_item.set_text(1, "(no edges)")
-		empty_item.set_text(2, "")
-		return
-	# Sort by edge id ascending.
-	var sorted: Array = edges.duplicate()
-	sorted.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return int(a.get("id", 0)) < int(b.get("id", 0))
-	)
-	for edge_info in sorted:
-		if not (edge_info is Dictionary):
-			continue
-		var edge_id := int(edge_info.get("id", 0))
-		var kind := str(edge_info.get("kind", "straight"))
-		var measure_text := ""
-		if kind == "circle":
-			measure_text = "%.1f" % float(edge_info.get("radius", 0.0))
-		else:
-			measure_text = "%.1f" % float(edge_info.get("length", 0.0))
-		var item := _edge_tree.create_item(root)
-		item.set_text(0, str(edge_id))
-		item.set_metadata(0, edge_id)
-		item.set_text(1, measure_text)
-		item.set_text(2, kind)
-		_edge_tree_items[edge_id] = item
+## Mount the evaluation's reference meshes under every MeshRoot and hand each
+## MeshDisplay the world bounds so auto-framing covers them.
+func _mount_references(references: Array) -> void:
+	_measurement.mount_references(references)
 
 
 ## Push the current mesh data + per-pane cameras to every Cad_GeometryOverlay.
 ## Called whenever a new mesh arrives from the DSL→mesh bridge.
 func _push_mesh_to_geometry_overlays() -> void:
-	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
-	var view_cameras := {
-		"top":   get_node_or_null(grid + "/TopView/SubViewport/OrbitCamera") as Camera3D,
-		"front": get_node_or_null(grid + "/FrontView/SubViewport/OrbitCamera") as Camera3D,
-		"right": get_node_or_null(grid + "/RightView/SubViewport/OrbitCamera") as Camera3D,
-		"iso":   get_node_or_null(grid + "/IsoView/SubViewport/OrbitCamera") as Camera3D,
-		"single": _single_view_camera,
-	}
-	for ov_id in _geometry_overlays.keys():
-		var ov: Control = _geometry_overlays[ov_id] as Control
-		if _DEBUG_EDGE_PICK:
-			print("[edge-pick] connect ov_id=%s ov=%s script=%s" % [
-				ov_id,
-				str(ov),
-				str(ov.get_script()) if ov != null else "<null-node>",
-			])
-		if ov == null:
-			continue
-		if ov.has_method("set_mesh_data"):
-			ov.call("set_mesh_data", _last_mesh_data)
-		var cam: Camera3D = view_cameras.get(ov_id, null)
-		if ov.has_method("set_camera"):
-			ov.call("set_camera", cam)
-		if ov.has_method("set_edge_registry"):
-			ov.call("set_edge_registry", _edge_registry)
-		# Connect the overlay's pick signal to the panel's selection handler.
-		# Idempotent — repeated _push_mesh_to_geometry_overlays() calls
-		# (re-evaluate, layout swap) MUST NOT stack callbacks.
-		var has_sig: bool = ov.has_signal("edge_selected")
-		var already: bool = has_sig and ov.edge_selected.is_connected(_on_edge_selected)
-		if has_sig and not already:
-			ov.edge_selected.connect(_on_edge_selected)
-		if _DEBUG_EDGE_PICK:
-			print("[edge-pick]   has_signal=%s already_connected=%s mouse_filter=%s" % [
-				str(has_sig),
-				str(already),
-				str(ov.mouse_filter),
-			])
-	_apply_mesh_visibility()
-
-
-## Hide the shaded mesh in ortho-only panes (Top/Front/Right; narrow non-
-## perspective) so the edge overlay is the only visualisation. Iso /
-## Perspective keeps the mesh visible for shaded 3-D context.
-func _apply_mesh_visibility() -> void:
-	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
-	# Wide-layout panes: Top/Front/Right hide mesh; Iso shows it.
-	_set_pane_mesh_visible(grid + "/TopView/SubViewport/MeshRoot", false)
-	_set_pane_mesh_visible(grid + "/FrontView/SubViewport/MeshRoot", false)
-	_set_pane_mesh_visible(grid + "/RightView/SubViewport/MeshRoot", false)
-	_set_pane_mesh_visible(grid + "/IsoView/SubViewport/MeshRoot", true)
-	# Narrow single view: hide mesh unless the projection is Perspective.
-	var single_path := "ResponsiveContainer/NarrowLayout/SingleView/SubViewport/MeshRoot"
-	var preset := _current_projection_preset()
-	_set_pane_mesh_visible(single_path, preset == "Perspective")
-
-
-## Toggle the MeshInstance3D inside a MeshRoot. Found by the well-known child
-## name "MeshInstance" set in mesh_display.gd._ready(). Reference meshes follow
-## the same rule: shaded in the perspective pane, outline-only in the orthos.
-func _set_pane_mesh_visible(mesh_root_path: String, visible_flag: bool) -> void:
-	var mesh_root := get_node_or_null(mesh_root_path)
-	if mesh_root == null:
-		return
-	var mi := mesh_root.get_node_or_null("MeshInstance")
-	if mi != null and "visible" in mi:
-		mi.visible = visible_flag
-	if _reference_library != null and mesh_root is Node3D:
-		_reference_library.set_shaded_visible(mesh_root as Node3D, visible_flag)
-
-
-## Identity of the mounted reference set: which files, at which content stamp,
-## in which pose. Colliders and segmentation are keyed on it.
-func _compute_reference_digest() -> String:
-	var parts := PackedStringArray()
-	for entry in get_reference_state():
-		var record: Dictionary = entry
-		# units and up are baked into the converted part transforms, so a
-		# digest without them lets a units= edit keep stale colliders.
-		parts.append("%s@%s@%s@%s@%s" % [
-			str(record.get("resolved_path", "")),
-			str(record.get("stamp", "")),
-			str(record.get("units", "")),
-			str(record.get("up", "")),
-			str(record.get("pose", Transform3D.IDENTITY)),
-		])
-	return "|".join(parts)
-
-
-## Mount the evaluation's reference meshes under every MeshRoot and hand each
-## MeshDisplay the world bounds so auto-framing covers them.
-func _mount_references(references: Array) -> void:
-	_reference_report = {}
-	_last_references = references
-	if _reference_library == null:
-		return
-	var mesh_roots: Array = []
-	for path in _MESH_ROOT_PATHS:
-		var mesh_root := get_node_or_null(path) as Node3D
-		if mesh_root != null:
-			mesh_roots.append(mesh_root)
-	_reference_report = _reference_library.mount_all(references, _document_path, mesh_roots)
-	# The colliders are rebuilt lazily, on the next measurement: a pose edit
-	# arrives on every keystroke and building 45 trimeshes costs a quarter of
-	# a second. The digest below is what decides whether that rebuild is real
-	# work or a no-op.
-	_reference_digest = _compute_reference_digest()
-	if _reference_selection != null:
-		_reference_selection.set_records(get_reference_state())
-	var world_aabb: AABB = _reference_report.get("world_aabb", AABB())
-	for mesh_root in mesh_roots:
-		if mesh_root.has_method("set_reference_aabb"):
-			mesh_root.call("set_reference_aabb", world_aabb)
-	for warning in _reference_report.get("warnings", PackedStringArray()):
-		push_warning("[CADPanel] reference mesh: %s" % warning)
-	for problem in _reference_report.get("errors", PackedStringArray()):
-		push_warning("[CADPanel] reference mesh: %s" % problem)
-
-
-## Push a new edge selection to the host and geometry overlays, then sync the tree.
-## Single entry point for all callers (overlay clicks, Prev/Next, Clear).
-func _select_edge(edge_id: int) -> void:
-	if _annotation_host != null:
-		_annotation_host.set_selected_edge_id(edge_id)
-	for ov_id in _geometry_overlays.keys():
-		var ov: Control = _geometry_overlays[ov_id] as Control
-		if ov != null and ov.has_method("set_selected_edge"):
-			ov.call("set_selected_edge", edge_id)
-	_update_tree_selection()
+	_edge_sidebar.push_to_overlays()
 
 
 func _on_edge_selected(edge_id: int) -> void:
 	if _DEBUG_EDGE_PICK:
 		print("[edge-pick] CADPanel._on_edge_selected edge_id=%d" % edge_id)
-	_select_edge(edge_id)
-
-
-func _on_edge_tree_item_selected() -> void:
-	if _suppress_tree_selection or _edge_tree == null:
-		return
-	var item: TreeItem = _edge_tree.get_selected()
-	if item == null:
-		return
-	var meta: Variant = item.get_metadata(0)
-	if meta == null:
-		return
-	var edge_id := int(meta)
-	if _annotation_host != null:
-		_annotation_host.set_selected_edge_id(edge_id)
-	for ov_id in _geometry_overlays.keys():
-		var ov: Control = _geometry_overlays[ov_id] as Control
-		if ov != null and ov.has_method("set_selected_edge"):
-			ov.call("set_selected_edge", edge_id)
+	_edge_sidebar.select_edge(edge_id)
 
 
 ## Called when the host emits selection_changed (annotation selection). Also
 ## called directly after edge selection changes so the tree row stays current.
 func _on_host_selection_changed(_annotation_id: String = "") -> void:
-	_update_tree_selection()
-
-
-## Update the tree's highlighted row to match the host's current edge selection.
-## Reads from host; writes no panel-local state.
-func _update_tree_selection() -> void:
-	if _edge_tree == null or _annotation_host == null:
-		return
-	var edge_id: int = _annotation_host.get_selected_edge_id()
-	_suppress_tree_selection = true
-	if edge_id != -1 and _edge_tree_items.has(edge_id):
-		var item: TreeItem = _edge_tree_items[edge_id]
-		_edge_tree.set_selected(item, 0)
-		_edge_tree.scroll_to_item(item, true)
-	else:
-		_edge_tree.deselect_all()
-	_suppress_tree_selection = false
-
-
-func _on_prev_edge_pressed() -> void:
-	_step_selected_edge(-1)
-
-
-func _on_next_edge_pressed() -> void:
-	_step_selected_edge(1)
-
-
-func _on_clear_edge_pressed() -> void:
-	_select_edge(-1)
-
-
-func _step_selected_edge(delta: int) -> void:
-	var ids: Array = []
-	for edge_info in _edge_registry:
-		if edge_info is Dictionary:
-			ids.append(int(edge_info.get("id", 0)))
-	ids.sort()
-	var current_id: int = -1
-	if _annotation_host != null:
-		current_id = _annotation_host.get_selected_edge_id()
-	if ids.is_empty():
-		_select_edge(-1)
-		return
-	if current_id == -1:
-		_select_edge(ids[0] if delta >= 0 else ids[ids.size() - 1])
-		return
-	var idx := ids.find(current_id)
-	if idx == -1:
-		_select_edge(ids[0])
-		return
-	var next_idx := posmod(idx + delta, ids.size())
-	_select_edge(ids[next_idx])
+	_edge_sidebar.update_tree_selection()
 
 
 # ── Host note hooks ─────────────────────────────────────────────────────────
