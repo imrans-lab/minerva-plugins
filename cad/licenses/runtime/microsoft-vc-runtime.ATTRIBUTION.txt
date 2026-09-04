@@ -1,0 +1,26 @@
+Microsoft Visual C++ runtime (MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll)
+=================================================================================
+
+This is NOT a Microsoft licence text — Microsoft does not publish one to
+redistribute alongside the DLLs. It is this project's attribution note for the
+runtime files that appear inside the Windows runtime bundle.
+
+WHAT SHIPS AND WHY
+  The compiled extension fcl.cp312-win_amd64.pyd imports MSVCP140.dll,
+  VCRUNTIME140.dll and VCRUNTIME140_1.dll. python-build-standalone ships only
+  vcruntime140.dll and vcruntime140_1.dll, so MSVCP140.dll would be resolved
+  from the user's machine — present on a CI runner, absent on a machine with no
+  Visual C++ redistributable installed. The Windows leg of the bundle build
+  therefore runs `delvewheel repair` over the wheel, which copies the missing
+  runtime DLL out of the build machine's Visual Studio redistributable
+  directory and into the wheel under a name-mangled path (the same mechanism
+  that already puts a copy inside the cadquery-ocp wheel we ship).
+
+  Nothing is checked into this repository: the DLL is produced during the CI
+  build from the runner's own Visual Studio installation.
+
+TERMS
+  Redistribution of the unmodified files listed in the "Distributable Code"
+  (VC\redist) section of the Visual Studio 2022 redistribution terms is
+  permitted with a program that uses them:
+  https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution

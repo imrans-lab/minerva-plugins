@@ -38,6 +38,8 @@ EOF
   exit 64
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 PLUGIN_DIR_INPUT="$1"
 TRIPLE="$2"
 
@@ -74,6 +76,17 @@ done
 # must then be covered by LAYER1_IMPORTS, which is what proves the omission
 # was safe.
 : "${PIP_NO_DEPS_PKGS:=}"
+# Wheels whose compiled extension resolves a C++ runtime DLL from the machine
+# instead of carrying its own. On the windows target these are downloaded and
+# repaired (delvewheel) before installation so the bundle does not depend on
+# the USER having a Visual C++ redistributable — a dependency that is
+# invisible on CI, where every runner has one. Entries must appear verbatim in
+# PIP_NO_DEPS_PKGS. Ignored on every other target.
+: "${WHEEL_REPAIR_PKGS:=}"
+: "${WHEEL_REPAIR_TOOL:=}"
+# Directory (relative to the plugin dir) copied into the bundle as licenses/:
+# the licence texts a binary redistribution has to carry.
+: "${BUNDLE_LICENSE_DIR:=}"
 : "${LAYER1_IMPORTS:=}"
 
 # --------------------------------------------------------------------------
@@ -232,6 +245,40 @@ else
 fi
 mkdir -p "$SITE_PACKAGES"
 
+# Hoisted above the install section because the wheel-repair step below
+# also drives the bundled python.exe and needs the same home-dir env.
+if [ "$TRIPLE" = "windows-x86_64" ] && [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
+  # Bundled PBS python on Windows is a native .exe invoked from Git Bash.
+  # Env propagation across that boundary is unreliable for the home-dir
+  # variables (USERPROFILE / HOMEDRIVE / HOMEPATH / LOCALAPPDATA). When
+  # parso (transitive via build123d → IPython → jedi → parso) imports at
+  # ANY time and calls Path('~/...').expanduser(), python's gethomedir
+  # raises "Could not determine home directory." We:
+  #   1. Resolve sensible defaults from whatever vars Git Bash exposes.
+  #   2. Print what the bundled python ACTUALLY sees (debug).
+  #   3. Explicitly pass the full set on the pip command line so the
+  #      child .exe gets them regardless of bash export propagation quirks.
+  if [ -z "${USERPROFILE:-}" ] && [ -n "${HOME:-}" ] && command -v cygpath >/dev/null 2>&1; then
+    export USERPROFILE="$(cygpath -w "$HOME")"
+  fi
+  if [ -z "${USERPROFILE:-}" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+    export USERPROFILE="$(dirname "$(dirname "$LOCALAPPDATA")")"
+  fi
+  # Fallback to the known Windows runner default if nothing else worked.
+  : "${USERPROFILE:=C:\\Users\\runneradmin}"
+  : "${LOCALAPPDATA:=${USERPROFILE}\\AppData\\Local}"
+  : "${HOMEDRIVE:=${USERPROFILE%%:*}:}"
+  : "${HOMEPATH:=${USERPROFILE#${HOMEDRIVE}}}"
+  export USERPROFILE LOCALAPPDATA HOMEDRIVE HOMEPATH
+
+  echo "  bash sees: USERPROFILE=${USERPROFILE} HOMEDRIVE=${HOMEDRIVE} HOMEPATH=${HOMEPATH} LOCALAPPDATA=${LOCALAPPDATA}"
+  echo "  python sees:"
+  "$STAGE_DIR/$PYTHON_BIN" -c "import os
+for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','TEMP','TMP']:
+  print('    %s=%r' % (v, os.environ.get(v)))
+"
+fi
+
 # --------------------------------------------------------------------------
 # build dep list from lock var (plugin-agnostic: PIP_PKGS is the only source)
 # --------------------------------------------------------------------------
@@ -240,10 +287,111 @@ mkdir -p "$SITE_PACKAGES"
 DEPS=( $PIP_PKGS )
 # shellcheck disable=SC2206
 NODEPS=( $PIP_NO_DEPS_PKGS )
+# shellcheck disable=SC2206
+REPAIR=( $WHEEL_REPAIR_PKGS )
 
 if [ ${#DEPS[@]} -eq 0 ]; then
   echo "[$TRIPLE] WARNING: PIP_PKGS empty in lock file (only worker source will be bundled)" >&2
 fi
+
+# --------------------------------------------------------------------------
+# windows wheel repair — bundle the C++ runtime the extension expects
+# --------------------------------------------------------------------------
+#
+# A wheel that was never delvewheel-repaired upstream links against a runtime
+# DLL it does not ship (MSVCP140.dll for an MSVC-built extension), and
+# python-build-standalone's windows distribution ships only the VCRUNTIME140
+# pair. The import then succeeds on any machine with a Visual C++
+# redistributable installed — every CI runner — and fails on a bare user
+# machine. delvewheel copies the missing DLL into the wheel under a
+# name-mangled path (it deliberately skips vcruntime140, which Python already
+# ships), which is the same shape the cadquery-ocp wheel already arrives in.
+#
+# REPAIRED_WHEEL_DIR is consumed by the install section below: repaired
+# packages install from there instead of from PyPI.
+REPAIRED_WHEEL_DIR=""
+if [ ${#REPAIR[@]} -gt 0 ] && [ "$TRIPLE" = "windows-x86_64" ]; then
+  # A cross-built windows bundle CANNOT be repaired: delvewheel resolves the
+  # DLL from the build machine's own Visual Studio installation, and a linux
+  # or macOS host has none. Failing here is the point — silently packing
+  # unrepaired wheels is exactly the "works on CI, fails for the user" defect
+  # this block exists to remove.
+  if [ "$TRIPLE" != "$HOST_TRIPLE" ]; then
+    echo "[$TRIPLE] FATAL: WHEEL_REPAIR_PKGS is set but this is a cross build" >&2
+    echo "  the repair needs the windows host's VC++ runtime; build this target natively" >&2
+    exit 73
+  fi
+  if [ -z "$WHEEL_REPAIR_TOOL" ]; then
+    echo "[$TRIPLE] FATAL: WHEEL_REPAIR_PKGS is set but WHEEL_REPAIR_TOOL is empty" >&2
+    exit 65
+  fi
+  # Every repaired package must also be declared --no-deps, so the repaired
+  # local wheel is the ONLY way it can enter the bundle. Without this check a
+  # spec present in PIP_PKGS but repaired here would be installed twice, the
+  # PyPI copy last, quietly undoing the repair.
+  for spec in "${REPAIR[@]}"; do
+    found=false
+    # `if` rather than `test && found=true`: under `set -e` a failing test as
+    # the last command of a loop body aborts the script.
+    for nd in ${NODEPS[@]+"${NODEPS[@]}"}; do
+      if [ "$spec" = "$nd" ]; then found=true; fi
+    done
+    if [ "$found" != "true" ]; then
+      echo "[$TRIPLE] FATAL: WHEEL_REPAIR_PKGS entry '$spec' is not listed verbatim in PIP_NO_DEPS_PKGS" >&2
+      exit 65
+    fi
+  done
+
+  REPAIR_TOOLING="$BUILD_DIR/wheel-repair-tooling"
+  REPAIR_DL="$BUILD_DIR/wheel-repair-$TRIPLE"
+  REPAIRED_WHEEL_DIR="$REPAIR_DL/repaired"
+  rm -rf "$REPAIR_TOOLING" "$REPAIR_DL"
+  mkdir -p "$REPAIR_TOOLING" "$REPAIR_DL" "$REPAIRED_WHEEL_DIR"
+
+  echo "[$TRIPLE] installing wheel-repair tool: $WHEEL_REPAIR_TOOL"
+  # Into its own --target, never into the stage: the repair tool is build
+  # machinery and must not end up inside the shipped bundle.
+  PYTHONNOUSERSITE=1 "$STAGE_DIR/$PYTHON_BIN" -m pip install \
+    --no-cache-dir --no-input --no-compile --only-binary=:all: \
+    --target "$REPAIR_TOOLING" $WHEEL_REPAIR_TOOL
+
+  echo "[$TRIPLE] downloading wheels to repair: ${REPAIR[*]}"
+  PYTHONNOUSERSITE=1 "$STAGE_DIR/$PYTHON_BIN" -m pip download \
+    --no-cache-dir --no-input --only-binary=:all: --no-deps \
+    -d "$REPAIR_DL" "${REPAIR[@]}"
+
+  for whl in "$REPAIR_DL"/*.whl; do
+    echo "[$TRIPLE] delvewheel repair: $(basename "$whl")"
+    PYTHONNOUSERSITE=1 PYTHONPATH="$REPAIR_TOOLING" \
+      "$STAGE_DIR/$PYTHON_BIN" -m delvewheel repair \
+      -w "$REPAIRED_WHEEL_DIR" "$whl"
+  done
+  echo "[$TRIPLE] repaired wheels:"
+  ls -la "$REPAIRED_WHEEL_DIR"
+  # delvewheel writes an output wheel even when it vendored nothing, so the
+  # repair is proven by content: every repaired wheel must carry a vendored
+  # C++ runtime DLL, or the bundle would import only on machines that
+  # already have the redistributable installed.
+  for whl in "$REPAIRED_WHEEL_DIR"/*.whl; do
+    if ! unzip -l "$whl" | grep -qi 'msvcp140.*\.dll'; then
+      echo "[$TRIPLE] wheel repair vendored no msvcp140 DLL into $(basename "$whl")" >&2
+      exit 74
+    fi
+  done
+fi
+
+# Repaired packages are removed from the PyPI --no-deps list and installed
+# from REPAIRED_WHEEL_DIR instead.
+NODEPS_PYPI=()
+for spec in ${NODEPS[@]+"${NODEPS[@]}"}; do
+  repaired=false
+  if [ -n "$REPAIRED_WHEEL_DIR" ]; then
+    for r in "${REPAIR[@]}"; do
+      if [ "$spec" = "$r" ]; then repaired=true; fi
+    done
+  fi
+  [ "$repaired" = "true" ] || NODEPS_PYPI+=( "$spec" )
+done
 
 # --------------------------------------------------------------------------
 # pip install — native uses bundle's python; cross uses host python + --platform
@@ -251,37 +399,6 @@ fi
 
 if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   echo "[$TRIPLE] native build: pip install via bundled python"
-  if [ "$TRIPLE" = "windows-x86_64" ]; then
-    # Bundled PBS python on Windows is a native .exe invoked from Git Bash.
-    # Env propagation across that boundary is unreliable for the home-dir
-    # variables (USERPROFILE / HOMEDRIVE / HOMEPATH / LOCALAPPDATA). When
-    # parso (transitive via build123d → IPython → jedi → parso) imports at
-    # ANY time and calls Path('~/...').expanduser(), python's gethomedir
-    # raises "Could not determine home directory." We:
-    #   1. Resolve sensible defaults from whatever vars Git Bash exposes.
-    #   2. Print what the bundled python ACTUALLY sees (debug).
-    #   3. Explicitly pass the full set on the pip command line so the
-    #      child .exe gets them regardless of bash export propagation quirks.
-    if [ -z "${USERPROFILE:-}" ] && [ -n "${HOME:-}" ] && command -v cygpath >/dev/null 2>&1; then
-      export USERPROFILE="$(cygpath -w "$HOME")"
-    fi
-    if [ -z "${USERPROFILE:-}" ] && [ -n "${LOCALAPPDATA:-}" ]; then
-      export USERPROFILE="$(dirname "$(dirname "$LOCALAPPDATA")")"
-    fi
-    # Fallback to the known Windows runner default if nothing else worked.
-    : "${USERPROFILE:=C:\\Users\\runneradmin}"
-    : "${LOCALAPPDATA:=${USERPROFILE}\\AppData\\Local}"
-    : "${HOMEDRIVE:=${USERPROFILE%%:*}:}"
-    : "${HOMEPATH:=${USERPROFILE#${HOMEDRIVE}}}"
-    export USERPROFILE LOCALAPPDATA HOMEDRIVE HOMEPATH
-
-    echo "  bash sees: USERPROFILE=${USERPROFILE} HOMEDRIVE=${HOMEDRIVE} HOMEPATH=${HOMEPATH} LOCALAPPDATA=${LOCALAPPDATA}"
-    echo "  python sees:"
-    "$STAGE_DIR/$PYTHON_BIN" -c "import os
-for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','TEMP','TMP']:
-    print('    %s=%r' % (v, os.environ.get(v)))
-"
-  fi
   if [ ${#DEPS[@]} -gt 0 ]; then
     # --no-compile sidesteps the byte-compile pass.
     # PYTHONNOUSERSITE=1 is REQUIRED: without it pip on dev boxes will see deps
@@ -302,9 +419,19 @@ for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','
         "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: "${DEPS[@]}"
     fi
   fi
-  if [ ${#NODEPS[@]} -gt 0 ]; then
+  if [ ${#NODEPS_PYPI[@]} -gt 0 ]; then
     PYTHONNOUSERSITE=1 \
-      "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: --no-deps "${NODEPS[@]}"
+      "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile --only-binary=:all: --no-deps "${NODEPS_PYPI[@]}"
+  fi
+  if [ -n "$REPAIRED_WHEEL_DIR" ]; then
+    # --no-index: the repaired local wheel is the only acceptable source. A
+    # fall-through to PyPI here would install the UNREPAIRED wheel and the
+    # bundle would once again depend on the user's machine having the C++
+    # runtime, with nothing in the build output saying so.
+    echo "[$TRIPLE] installing repaired wheels: ${REPAIR[*]}"
+    PYTHONNOUSERSITE=1 \
+      "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile \
+        --no-deps --no-index --find-links "$REPAIRED_WHEEL_DIR" "${REPAIR[@]}"
   fi
 else
   echo "[$TRIPLE] cross build: pip install via host python with --platform=$WHEEL_PLATS"
@@ -336,14 +463,14 @@ else
       --only-binary=:all: \
       "${DEPS[@]}"
   fi
-  if [ ${#NODEPS[@]} -gt 0 ]; then
+  if [ ${#NODEPS_PYPI[@]} -gt 0 ]; then
     "$HOST_PY" -m pip install --no-cache-dir --no-input \
       --target "$SITE_PACKAGES" \
       "${PLAT_ARGS[@]}" \
       --python-version "$PY_MAJOR_MINOR" \
       --abi "$ABI" \
       --only-binary=:all: --no-deps \
-      "${NODEPS[@]}"
+      "${NODEPS_PYPI[@]}"
   fi
 fi
 
@@ -491,6 +618,28 @@ if [ -n "${RG_ASSET:-}" ]; then
 fi
 
 # --------------------------------------------------------------------------
+# licence texts — carried INSIDE the bundle
+# --------------------------------------------------------------------------
+#
+# BSD/MIT binary redistribution requires the copyright notice, the conditions
+# and the disclaimer to be provided "in the documentation and/or other
+# materials provided with the distribution", and a wheel routinely ships only
+# its own text while vendoring compiled copies of other projects. The plugin
+# curates the full set; this copy is what makes the set travel with the bytes
+# it covers, wherever the bundle is extracted. Hashed by manifest.sha256 below
+# like everything else, so a stripped licence text is a tamper detection.
+if [ -n "$BUNDLE_LICENSE_DIR" ]; then
+  LICENSE_SRC="$PLUGIN_DIR/$BUNDLE_LICENSE_DIR"
+  if [ ! -d "$LICENSE_SRC" ]; then
+    echo "[$TRIPLE] FATAL: BUNDLE_LICENSE_DIR set but not a directory: $LICENSE_SRC" >&2
+    exit 74
+  fi
+  echo "[$TRIPLE] copying licence texts from $LICENSE_SRC"
+  rm -rf "${STAGE_DIR:?}/licenses"
+  cp -r "$LICENSE_SRC" "$STAGE_DIR/licenses"
+fi
+
+# --------------------------------------------------------------------------
 # strip __pycache__ (regenerates on first import; saves space + cleans paths)
 # --------------------------------------------------------------------------
 
@@ -503,57 +652,14 @@ find "$STAGE_DIR" -type f -name '*.pyc' -delete
 
 if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   echo "[$TRIPLE] Layer 1 self-test: bundle imports under isolated env"
-  # Plugin-agnostic: lock file declares LAYER1_IMPORTS (semicolon-separated
-  # python statements). Each WORKER_PACKAGES entry is also import-probed so
-  # missing worker source is caught here, not at first MCP call.
-  # Start from LAYER1_IMPORTS only if the lock declared any — a stdlib-only
-  # worker (empty LAYER1_IMPORTS) must NOT produce a leading ';' which is a
-  # Python SyntaxError. The worker-package probe below is the real check there.
-  IMPORTS=""
-  if [ -n "${LAYER1_IMPORTS:-}" ]; then
-    IMPORTS="${LAYER1_IMPORTS};"
-  fi
-  # shellcheck disable=SC2086
-  for pkg in $WORKER_PACKAGES; do
-    IMPORTS="${IMPORTS} import $pkg;"
-  done
-  IMPORTS="${IMPORTS} print('Layer 1 OK')"
-  # Trim any leading whitespace: when LAYER1_IMPORTS is empty the first loop
-  # append leaves a leading space, which Python rejects as an IndentationError.
-  IMPORTS="$(printf '%s' "$IMPORTS" | sed 's/^[[:space:]]*//')"
-
-  # env -i wipes the host env so the bundle's python only sees what we hand
-  # it. On Windows, parso (transitive via build123d → IPython → jedi) reads
-  # LOCALAPPDATA + USERPROFILE at module-import time to construct its cache
-  # path; if either is missing, parso falls back to `Path('~')` and
-  # pathlib.expanduser raises "Could not determine home directory." So
-  # Windows needs the full Windows home-dir env set passed through.
-  if [ "$TRIPLE" = "windows-x86_64" ]; then
-    env -i \
-      HOME="${HOME:-}" \
-      PATH="${PATH:-/usr/bin:/bin}" \
-      USERPROFILE="${USERPROFILE:-}" \
-      LOCALAPPDATA="${LOCALAPPDATA:-}" \
-      HOMEDRIVE="${HOMEDRIVE:-}" \
-      HOMEPATH="${HOMEPATH:-}" \
-      APPDATA="${APPDATA:-}" \
-      TEMP="${TEMP:-}" \
-      TMP="${TMP:-}" \
-      PYTHONHOME="$STAGE_DIR" \
-      PYTHONDONTWRITEBYTECODE=1 \
-      PYTHONUNBUFFERED=1 \
-      "$STAGE_DIR/$PYTHON_BIN" -c "$IMPORTS"
-  else
-    env -i \
-      HOME="$HOME" \
-      PATH="/usr/bin:/bin" \
-      PYTHONHOME="$STAGE_DIR" \
-      PYTHONDONTWRITEBYTECODE=1 \
-      PYTHONUNBUFFERED=1 \
-      "$STAGE_DIR/$PYTHON_BIN" -c "$IMPORTS"
-  fi
+  # The probe lives in its own script so CI can aim the SAME import list at a
+  # CROSS-built stage through a translator (RUNTIME_PROBE_PREFIX="arch -x86_64"
+  # for the macos-amd64 slice of the universal build), which is the one stage
+  # nothing here can execute.
+  bash "$SCRIPT_DIR/probe-python-runtime-bundle.sh" "$PLUGIN_DIR" "$TRIPLE"
 else
-  echo "[$TRIPLE] cross-target: Layer 1 self-test skipped (verified at CI on native runner)"
+  echo "[$TRIPLE] cross-target: Layer 1 self-test skipped here — CI probes this"
+  echo "[$TRIPLE] stage with scripts/probe-python-runtime-bundle.sh under a translator"
 fi
 
 # --------------------------------------------------------------------------

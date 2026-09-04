@@ -25,12 +25,63 @@ CPYTHON="3.12.13"
 # verified at bundle-build-time via Layer 1 self-test below).
 PIP_PKGS="build123d==0.10.0"
 
+# Wheels installed WITHOUT their declared dependencies. python-fcl's
+# Requires-Dist names Cython, which only its BUILD needs — `import fcl` works
+# with Cython absent, and LAYER1_IMPORTS below is what proves that on every
+# native leg. Installing with deps would drag a compiler front-end into a
+# runtime bundle for nothing.
+#
+# python-fcl 0.7.0.11 wheel filenames, all four release targets, each one
+# downloaded and confirmed to exist on PyPI (sizes as downloaded):
+#   python_fcl-0.7.0.11-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl  4.7 MB
+#   python_fcl-0.7.0.11-cp312-cp312-macosx_11_0_arm64.whl                            1.6 MB
+#   python_fcl-0.7.0.11-cp312-cp312-macosx_10_13_x86_64.whl                          2.0 MB
+#   python_fcl-0.7.0.11-cp312-cp312-win_amd64.whl                                    1.1 MB
+# Every one of those platform tags is in the build script's WHEEL_PLATS list
+# for its triple, which is what lets the macos-amd64 CROSS install resolve a
+# wheel instead of silently shipping an arm64-only slice.
+#
+# Expected cost, to be checked against the "Record runtime bundle sizes" step
+# of a CI run: roughly +4.7 MB compressed on linux (+28 MB extracted), +3.6 MB
+# across both macos slices, +1.1 MB on windows — about 3% of a bundle whose
+# linux site-packages is already ~975 MB, nearly all of it cadquery-ocp.
+#
+# The wheel wraps FCL 0.7.0 built from the ambi-robotics/fcl fork, which
+# upstream archived in 2026 — the code is frozen, not maintained. If a future
+# CPython bump finds no matching wheel, the fallback is an in-house NumPy BVH
+# distance query rather than a newer release of this package.
+PIP_NO_DEPS_PKGS="python-fcl==0.7.0.11"
+
+# --- windows wheel repair -------------------------------------------------
+# Wheels whose compiled extension resolves a C++ runtime DLL from the machine
+# rather than carrying its own, repaired on the windows leg so the bundle is
+# self-contained on a user box with no Visual C++ redistributable installed.
+# Entries must appear verbatim in PIP_NO_DEPS_PKGS.
+#
+# fcl.cp312-win_amd64.pyd imports MSVCP140.dll, VCRUNTIME140.dll and
+# VCRUNTIME140_1.dll; python-build-standalone ships only the two VCRUNTIME
+# ones. cadquery-ocp's wheel survives because upstream already delvewheel'd a
+# private copy of msvcp140 into it; python-fcl's is unrepaired, so without
+# this a CI runner (which has the redistributable) passes while a bare user
+# machine fails `import fcl` at worker startup.
+WHEEL_REPAIR_PKGS="python-fcl==0.7.0.11"
+WHEEL_REPAIR_TOOL="delvewheel==1.13.1"
+
 # --- Layer 1 import probe -------------------------------------------------
 # Semicolon-separated python statements run inside the freshly-built bundle
 # (env-isolated, PYTHONHOME=<stage>) to confirm the wheels resolve at import
-# time. Cross-target builds skip this (can't run a foreign binary); native
-# builds fail the script if any import raises.
-LAYER1_IMPORTS="import build123d; import cadquery_ocp"
+# time. Native builds fail the script if any import raises; a cross build
+# cannot run its own interpreter, so CI runs the same probe over the cross
+# stage through a translator (scripts/probe-python-runtime-bundle.sh with
+# RUNTIME_PROBE_PREFIX="arch -x86_64" for the macos-amd64 slice).
+LAYER1_IMPORTS="import build123d; import cadquery_ocp; import fcl"
+
+# --- licence texts --------------------------------------------------------
+# Directory (relative to the plugin dir) copied into the bundle as licenses/.
+# BSD and MIT binary redistribution requires the notice, conditions and
+# disclaimer to travel with the distribution, and the wheels ship only some of
+# the texts their contents need. Inventory + drift gate: cad/scripts/gen_notice.py.
+BUNDLE_LICENSE_DIR="licenses"
 
 # --- worker package layout ------------------------------------------------
 # Where to find the plugin's python worker source (relative to plugin dir),

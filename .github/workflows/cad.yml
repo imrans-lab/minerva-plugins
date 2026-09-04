@@ -129,6 +129,44 @@ jobs:
           bash ../scripts/build-python-runtime-bundle.sh . macos-amd64
           ls -la internal/cadruntime/bundle/
 
+      # Every compiled wheel in the bundle is imported by the interpreter that
+      # will ship with it, on the platform it will ship for. The build script
+      # already probes a NATIVE stage, so this step is a no-op restatement for
+      # linux and windows — and the whole point on macOS, where the amd64 half
+      # of the universal build is a CROSS install nothing has ever executed. A
+      # missing or wrong-architecture wheel there packs, lipo's and ships
+      # exactly like a good one; the embed test cannot see it either, because
+      # `go test` compiles only the runner's own embed_darwin_* tag.
+      #
+      # The import list comes from the lock file, not from this workflow, so
+      # adding a dependency cannot leave the probe behind.
+      - name: Runtime bundle import probe (single arch)
+        if: matrix.target != 'macos-universal'
+        run: bash ../scripts/probe-python-runtime-bundle.sh . ${{ matrix.target }}
+
+      - name: Runtime bundle import probe (macos arm64 native + amd64 under Rosetta)
+        if: matrix.target == 'macos-universal'
+        run: |
+          bash ../scripts/probe-python-runtime-bundle.sh . macos-arm64
+          RUNTIME_PROBE_PREFIX="arch -x86_64" \
+            bash ../scripts/probe-python-runtime-bundle.sh . macos-amd64
+
+      # Recorded, not asserted: a dependency's cost to the download is a fact
+      # a release decision needs, and it is invisible once the tarball is
+      # inside the binary. The binary-size assertion below is the gate.
+      - name: Record runtime bundle sizes
+        run: |
+          {
+            echo "### cad runtime bundle sizes (${{ matrix.target }})"
+            echo ""
+            echo "| bundle | bytes | MB |"
+            echo "| --- | ---: | ---: |"
+            for f in internal/cadruntime/bundle/*.tar.zst; do
+              SZ=$(wc -c < "$f")
+              echo "| $(basename "$f") | $SZ | $((SZ / 1024 / 1024)) |"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Build (native)
         if: matrix.target != 'macos-universal'
         env:
@@ -220,6 +258,13 @@ jobs:
           # open its panel ("Whitelisted script not found"). Side-load works
           # because ui/ exists in the plugin source dir.
           cp -r ui "$PACKDIR/"
+          # Licence texts and the generated inventory ship BESIDE the binary
+          # as well as inside the runtime bundle: the bundle is embedded in
+          # the executable and only unpacks on first run, so a recipient
+          # inspecting the tarball would otherwise find no notice at all for
+          # the BSD-licensed libraries it contains.
+          cp -r licenses "$PACKDIR/"
+          cp NOTICE.md "$PACKDIR/"
           # SHA256SUMS covers binary + manifest + every shipped ui/ file.
           if command -v sha256sum >/dev/null 2>&1; then
             (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
@@ -325,9 +370,47 @@ jobs:
       - name: Pre-flight the GD suite registry and host wiring
         run: bash cad/scripts/run-gd-tests.sh --preflight-only ../Minerva
 
+  notice:
+    name: cad NOTICE gate (runtime licence inventory)
+    # Platform-independent and needs no toolchain: it reads the lock file, the
+    # inventory in gen_notice.py and the licence texts on disk. Its own job so
+    # a licence problem is legible as one, rather than as a red package leg.
+    #
+    # WHAT IT FAILS ON: a lock pin with no inventory entry and no pending
+    # declaration (adding a dependency without attributing it), an entry whose
+    # licence text is missing or empty, a licence text nothing references, a
+    # licence outside the permissive set, an MPL-2.0 entry with no source URL,
+    # and drift between the committed cad/NOTICE.md and a fresh generation.
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: NOTICE gate (licence inventory drift check)
+        run: python3 cad/scripts/gen_notice.py --check
+
+      # The suites that prove the gate can FAIL (and that the lock, the build
+      # script and the workflow still agree about the pins). They import
+      # nothing from the worker's compiled dependency tree, which is why they
+      # can run here rather than on a package leg.
+      - name: Install pytest
+        run: python3 -m pip install --disable-pip-version-check pytest
+
+      - name: Runtime dependency + NOTICE suites
+        run: python3 -m pytest cad/worker/tests/test_notice.py cad/worker/tests/test_runtime_bundle_contract.py -q
+
   release:
     name: Publish release
-    needs: build
+    # The licence inventory is a release gate: a tarball never ships while
+    # NOTICE.md and the shipped licence texts disagree.
+    needs: [build, notice]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
