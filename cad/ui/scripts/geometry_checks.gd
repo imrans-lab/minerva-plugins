@@ -91,10 +91,18 @@ const CROSSING_ADVANCE_MM: float = 0.0002
 ## than grazed. Two coplanar faces meet along shared boundary edges, and an
 ## edge of one body running in the other's surface crosses that boundary
 ## squarely — a knife-edge contact with no volume behind it. The probe steps
-## off the crossing and asks whether there is material there. It must clear
-## the 0.002 mm sphere the parity gauge places, which is what sets the
-## smallest overlap this check can call interference.
+## off the crossing and asks whether there is material there.
+##
+## This is a CEILING, not the step. A body thinner than it — a 0.004 mm plate
+## — would be stepped clean over, and a genuine crossing would read as a
+## graze; so the run of material past the hit is measured first and the probe
+## goes half of whatever is there. See _probe_step_mm.
 const PENETRATION_PROBE_MM: float = 0.005
+## The gauge sphere the parity probe places, millimetres. Material thinner
+## than this cannot be probed at all — the sphere touches both walls and the
+## gauge reports contacts rather than "inside" — so a crossing through it is
+## KEPT rather than cleared: unprovable is not clean.
+const PARITY_SPHERE_MM: float = 0.002
 ## Crossings counted along one edge. An edge threading more walls than this is
 ## pathological; the crossings found still count as interference, and only the
 ## penetration measurement is given up.
@@ -636,11 +644,34 @@ func _penetrates_reference(
 	state: PhysicsDirectSpaceState3D,
 	point: Vector3,
 	direction: Vector3,
+	mask: int,
 	reference_name: String,
 	node_path: String
 ) -> bool:
-	for step in [PENETRATION_PROBE_MM, -PENETRATION_PROBE_MM]:
-		if _inside_reference(gauge, state, point + direction * step,
+	# How much material is actually there, along this edge. A plate four
+	# microns thick is crossed by an edge that never gets a step inside it at
+	# the ceiling above, and the crossing would read as a graze.
+	_casts += 1
+	var exit: Dictionary = gauge.call("run_now", state, "raycast", {
+		"from": point + direction * TOUCH_EPSILON_MM,
+		"to": point + direction * PENETRATION_PROBE_MM,
+		"mask": mask,
+		"reference": reference_name,
+	})
+	# No exit inside the ceiling means the material runs at least that far,
+	# and the ceiling is the step. An exit means a thin wall, and the step is
+	# half of it — the middle of the wall rather than its far face.
+	var step := PENETRATION_PROBE_MM
+	if bool(exit.get("hit", false)):
+		var run := float(exit.get("distance", PENETRATION_PROBE_MM)) \
+			+ TOUCH_EPSILON_MM
+		if run <= PARITY_SPHERE_MM:
+			# Too thin to place the parity sphere in. The crossing stands: a
+			# body this check cannot probe is not a body it may clear.
+			return true
+		step = run * 0.5
+	for offset in [step, -step]:
+		if _inside_reference(gauge, state, point + direction * offset,
 				reference_name, node_path):
 			return true
 	return false
@@ -653,8 +684,17 @@ func _penetrates_solid(
 	point: Vector3,
 	direction: Vector3
 ) -> bool:
-	for step in [PENETRATION_PROBE_MM, -PENETRATION_PROBE_MM]:
-		if _parity_inside_solid(solid_state, point + direction * step) != 0:
+	var exit := _solid_ray(solid_state, point + direction * TOUCH_EPSILON_MM,
+		point + direction * PENETRATION_PROBE_MM)
+	var step := PENETRATION_PROBE_MM
+	if not exit.is_empty():
+		var run: float = point.distance_to(exit.get("position", point)) \
+			+ TOUCH_EPSILON_MM
+		if run <= PARITY_SPHERE_MM:
+			return true
+		step = run * 0.5
+	for offset in [step, -step]:
+		if _parity_inside_solid(solid_state, point + direction * offset) != 0:
 			return true
 	return false
 
@@ -695,7 +735,7 @@ func _cross_into_references(
 		# rather than passing through.
 		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
 				and _straddles(a, b, point, hit) \
-				and _penetrates_reference(gauge, state, point, direction,
+				and _penetrates_reference(gauge, state, point, direction, mask,
 					str(hit.get("reference", "")), str(hit.get("node", ""))):
 			out.append({
 				"point": point,

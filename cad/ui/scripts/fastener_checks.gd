@@ -249,23 +249,20 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# evaluation for its duration.
 	var features := await _solid_cylinders(panel, str(document.get("source", "")), screw)
 
-	# The references were rebuilt while this check waited for the worker. Take
-	# the current state and go again, ONCE: a re-pose during a round trip is a
-	# normal thing for a user to do, and the second pass is cheap because the
-	# B-Rep answer is already in hand. A second rebuild while THAT pass waited
-	# is a document changing faster than it can be measured, and the reply
-	# says so rather than mixing two epochs.
+	# The references were rebuilt while this check waited for the worker, so
+	# the geometry the rays would meet is no longer the geometry the question
+	# was asked about. GOING AGAIN IS NOT AN OPTION HERE: the reference HOLES
+	# arrived in `args`, measured by minerva_cad_find_holes at the world
+	# positions of the old pose, and this module never segments a reference
+	# itself. Adopting the new colliders while pairing and seating against
+	# those old holes is the mixed epoch in its worst form — every number
+	# self-consistent, every one about a document that no longer exists. The
+	# caller re-runs find_holes and asks again.
 	if int(gauge.call("get_generation")) != epoch:
-		epoch = int(gauge.call("get_generation"))
-		records = panel.get_reference_state() \
-			if panel.has_method("get_reference_state") else []
-		if int(panel.ensure_gauge_built()) <= 0:
-			return _nothing("no reference mesh is mounted; there is nothing "
-				+ "to screw into")
-		if int(gauge.call("get_generation")) != epoch:
-			return _stale("the reference meshes were rebuilt twice while this "
-				+ "check waited for the worker, so nothing it measured would "
-				+ "describe one state of the document")
+		return _stale("the reference meshes were rebuilt while this check "
+			+ "waited for the worker, so the holes it was given no longer "
+			+ "describe where those references are; run "
+			+ "minerva_cad_find_holes again and re-ask")
 
 	var reservation: Dictionary = await checks.call("reserve")
 	var ticket := int(reservation.get("ticket", 0))

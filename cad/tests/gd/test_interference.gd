@@ -146,6 +146,17 @@ const STACK_PLATES := 80
 const STACK_PLATE_MM := 0.2
 const STACK_PITCH_MM := 0.4
 const STACK_SPAN := 60.0
+## The plate no fixed probe step can be taken inside: four microns thick,
+## which is less than the module's 0.005 mm ceiling and more than the 0.002 mm
+## sphere its parity probe places.
+const THIN_PLATE_MM := 0.004
+const THIN_REFERENCE := "shim"
+const THIN_NODE := "Assembly/Shim"
+## The column through it: square, well clear of the plate's edges, and long
+## enough that both its ends are outside the plate.
+const COLUMN_MM := 4.0
+const COLUMN_HEIGHT_MM := 6.0
+
 ## The two identical blocks a buried cube is inside at the same time.
 const BLOCK_A := "block_a"
 const BLOCK_B := "block_b"
@@ -235,8 +246,9 @@ func _run() -> void:
 	await _check_scoping(gauge, checks)
 	await _check_supersession(gauge, checks)
 	await _check_busy_refusal(gauge, checks)
-	# Last two: they rebuild the gauge and the records around their own
-	# reference.
+	# From here on each check rebuilds the gauge and the records around its
+	# own reference.
+	await _check_thin_plate(gauge, checks)
 	await _check_pin_through_hole(gauge, checks)
 	await _check_undecidable_and_the_neighbouring_node(gauge, checks)
 	await _check_layered_stack(gauge, checks)
@@ -452,6 +464,98 @@ func _check_flush(gauge: Node, checks: RefCounted) -> void:
 				and int(report.get("count", 0)) == 0
 				and int(report.get("point_count", 0)) == 0,
 			"report = %s" % str(report))
+
+
+# ---------------------------------------------------------------------------
+# A PLATE THINNER THAN THE PROBE STEP
+# ---------------------------------------------------------------------------
+
+## The crossing a fixed probe step steps clean over.
+##
+## Proving a crossing is a penetration and not a graze means finding material a
+## short step off it — and a step taken at a FIXED distance walks straight
+## through anything thinner than itself. A 0.004 mm plate is thinner than the
+## module's own 0.005 mm ceiling, so both probes from a genuine crossing land
+## in open air on either side of it, and a column driven clean through the
+## plate reads as clean: no crossing kept, and neither body's box holds the
+## other, so containment never runs either.
+##
+## THE FIXTURE IS THE SAME ONE-BOX-THROUGH-A-PLATE the through-boss case uses,
+## at a thickness the probe cannot assume: the plate is 0.004 mm and the
+## column is 4 mm square, so every side of the column crosses the plate's top
+## and bottom faces squarely. The step has to be measured from the material
+## that is actually there.
+func _check_thin_plate(gauge: Node, checks: RefCounted) -> void:
+	var plate: ArrayMesh = await _bake_thin_plate()
+	var built: int = gauge.build([{
+		"mesh": plate, "transform": _pose, "node": THIN_NODE,
+		"reference": THIN_REFERENCE,
+	}], "thin-plate-fixture|v1")
+	var box := _posed_box(plate.get_aabb())
+	_records = [{
+		"name": THIN_REFERENCE,
+		"pose": _pose,
+		"world_aabb": box,
+		"parts": [{"mesh": plate, "transform": Transform3D.IDENTITY,
+			"node_path": THIN_NODE, "node": THIN_NODE}],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(await _column_mesh())
+
+	check("thin plate: the fixture sits in the gap the fixed step left — "
+			+ "thinner than the module's own probe ceiling and thicker than "
+			+ "the sphere its parity probe places",
+			built == 1
+				and THIN_PLATE_MM < GeometryChecks.PENETRATION_PROBE_MM
+				and THIN_PLATE_MM > GeometryChecks.PARITY_SPHERE_MM,
+			"built=%d thickness=%f ceiling=%f sphere=%f" % [built,
+				THIN_PLATE_MM, GeometryChecks.PENETRATION_PROBE_MM,
+				GeometryChecks.PARITY_SPHERE_MM])
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var pairs: Array = report.get("pairs", []) as Array
+	var first: Dictionary = pairs[0] if not pairs.is_empty() else {}
+	# A CROSSING, not containment: the column's edges go in one face of the
+	# plate and out the other, which is the answer a stepped-over probe threw
+	# away. Containment would have said so in its note.
+	check("thin plate: a column driven through a 0.004 mm plate is reported "
+			+ "as a crossing — the probe step is measured from the material "
+			+ "that is there, not assumed",
+			bool(report.get("checked", false))
+				and int(report.get("count", 0)) == 1
+				and str(first.get("node", "")) == THIN_NODE
+				and int(first.get("point_count", 0)) >= 2
+				and not str(first.get("note", "")).contains("inside"),
+			"report = %s" % str(report))
+
+
+## The plate: as wide as the board and THIN_PLATE_MM thick.
+func _bake_thin_plate() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "ThinPlate"
+	var plate := CSGBox3D.new()
+	plate.size = Vector3(BOARD.x, BOARD.y, THIN_PLATE_MM)
+	combiner.add_child(plate)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+## The column: a square post driven clean through the plate, well clear of its
+## edges, so every crossing it makes is through the plate's faces.
+func _column_mesh() -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Column"
+	var post := CSGBox3D.new()
+	post.size = Vector3(COLUMN_MM, COLUMN_MM, COLUMN_HEIGHT_MM)
+	combiner.add_child(post)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
 
 
 # ---------------------------------------------------------------------------

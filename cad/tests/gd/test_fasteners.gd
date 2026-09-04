@@ -890,26 +890,22 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 	panel.checks_records = original
 
 	var after: Dictionary = later[0] if not later.is_empty() else {}
-	var after_row := _row_at_world(after, _pose * expected)
-	var after_local := _local_of(after_row.get("seat_mm", {}))
-	# Going again on the new state does NOT move the seat's world point — the
-	# hole records the caller passed in are world millimetres and were never
-	# re-stated — so the observable is the local one: the same world point
-	# taken back through the poses the rebuild installed.
-	var rebuilt_expected: Vector3 = rebuilt.affine_inverse() \
-		* (_pose * expected)
+	# STALE, and nothing else. The HOLES this check was handed were measured
+	# at the old pose by a verb this module does not run — it never segments a
+	# reference itself — so there is no fresh set to pair against. Going again
+	# on the new colliders with the old holes would seat every screw at a
+	# world position the reference has left, with every number in the reply
+	# self-consistent and every one of them wrong. So no row is measured at
+	# all, and the reply names the verb to re-run.
 	check("poses: a check whose reference COLLIDERS were rebuilt under it "
-			+ "either measures the new state or comes back stale — it never "
-			+ "mixes new geometry with old poses",
+			+ "comes back STALE — it neither mixes new geometry with the "
+			+ "holes it was given nor reports a single measured row",
 			not after.is_empty()
-				and (bool(after.get("stale", false))
-					or (not after_row.is_empty()
-						and after_local.distance_to(rebuilt_expected)
-							< NUMERIC_TOLERANCE_MM))
-				and after_local.distance_to(expected) > NUMERIC_TOLERANCE_MM,
-			"after=%s local=%s rebuilt_expected=%s" % [
-				str(after.get("stale", after.get("checked", "?"))),
-				str(after_local), str(rebuilt_expected)])
+				and bool(after.get("stale", false))
+				and not bool(after.get("checked", true))
+				and int(after.get("count", -1)) == 0
+				and str(after.get("reason", "")).contains("find_holes"),
+			"after = %s" % str(after))
 
 
 ## Start a check without awaiting it and park its reply in `into`.

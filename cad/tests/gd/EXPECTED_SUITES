@@ -178,13 +178,16 @@ test_cad_note.gd assertions=40
 # And a cube buried inside TWO identical blocks mounted under two names: being
 # inside one body is not an answer about the other, so both are reported, each
 # under its own node, and nothing is left undecided.
-# 50 assertions = 3 fixture + 5 collider +
+# And the crossing a FIXED probe step steps over: a 0.004 mm plate — thinner
+# than the module's 0.005 mm probe ceiling, thicker than the 0.002 mm sphere
+# its parity probe places — with a 4 mm column driven through it must be
+# reported as a crossing, which is only possible when the step is measured
+# from the material that is actually there.
+# 52 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
-# 4 supersession + 2 pin + 6 busy/reclaim (+1: the resumed holder's writes are
-# all no-ops, +1: an aged holder is still no licence for a wrong ticket)
-# + 5 neighbour/undecidable + 2 layered stack (a budget error is undecidable;
-# every enclosing reference is listed) + 2 two-enclosing-blocks.
-test_interference.gd assertions=50
+# 4 supersession + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
+# + 2 layered stack + 2 two-enclosing-blocks + 2 thin plate.
+test_interference.gd assertions=52
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -269,8 +272,10 @@ test_clearance.gd assertions=39
 # A check answers in the poses it was CALLED with: the panel is re-posed while
 # one check waits for the worker and a second is started on the new pose, and
 # neither answers in the other's frame. And when the reference COLLIDERS are
-# rebuilt in that same gap, the check either measures the new state or comes
-# back stale — never new geometry converted through old poses. An extent the kernel could not read
+# rebuilt in that same gap the check comes back STALE with no rows at all —
+# the holes it was handed were measured at the old pose by a verb this module
+# does not run, so there is nothing fresh to pair against and new geometry may
+# not be measured against old holes. An extent the kernel could not read
 # exactly is reported as ungraded rather than passed. And a check that returns
 # before casting a ray reports its own zero cost, not the last check's.
 # 54 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
@@ -282,6 +287,6 @@ test_clearance.gd assertions=39
 # rim) + 4 F (+1: the seat number states that it is coverage of one ring at a
 # stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 5 refusal (+1: an
 # empty check reports its own counters, +1: an inexact extent is not graded)
-# + 2 poses (+1: a mid-flight collider rebuild is measured afresh or reported
-# stale).
+# + 2 poses (+1: a mid-flight collider rebuild comes back stale, with no rows
+# measured against holes that describe where the references used to be).
 test_fasteners.gd assertions=55
