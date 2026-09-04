@@ -35,6 +35,21 @@ const _CadEdgeNumberKindScript: Script = preload("kinds/cad_edge_number_kind.gd"
 ## Panel-executed MCP tool surface (executor: "panel", DCR 019f6c3d0e3d C6 —
 ## see handle_tool() below and panel_tools.gd's doc comment for the contract).
 const _PanelToolsScript: Script = preload("panel_tools.gd")
+## Foreign mesh files named by mesh() in the source: loading, unit/up-axis
+## conversion, pose and mounting all live here. The panel only wires it up.
+const _ReferenceMeshesScript: Script = preload("scripts/reference_meshes.gd")
+
+## Every MeshRoot an evaluation has to reach — the four wide-layout panes and
+## the narrow layout's single pane. One list, because the mesh push, the
+## reference mount and the ortho x-ray toggle must never disagree about which
+## panes exist.
+const _MESH_ROOT_PATHS: Array = [
+	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport/MeshRoot",
+	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport/MeshRoot",
+	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport/MeshRoot",
+	"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport/MeshRoot",
+	"ResponsiveContainer/NarrowLayout/SingleView/SubViewport/MeshRoot",
+]
 
 # ── Node references (set in _ready) ────────────────────────────────────────
 
@@ -95,6 +110,9 @@ var _ctx: Dictionary = {}
 # and re-issues evaluate with a fresh request_id.
 
 var _buffer_path: String = ""
+## Where the .mcad being edited lives on disk, or "" for an editor that has
+## never been saved. mesh() paths are resolved against it.
+var _document_path: String = ""
 var _buffer_version: int = -1
 var _pending_dsl_text: String = ""
 var _inflight_request_id: String = ""
@@ -117,6 +135,12 @@ var _edge_registry: Array = []
 ## Last-known mesh data (passed to EdgeOverlay so it can rebuild silhouettes
 ## on camera moves).
 var _last_mesh_data: Dictionary = {}
+
+## Loads, converts and caches the mesh files the source references. One library
+## per panel: the cache is keyed by path, so all five panes share every read.
+var _reference_library: RefCounted = null
+## Outcome of the last mount: {world_aabb, warnings, errors, mounted}.
+var _reference_report: Dictionary = {}
 
 ## Last-known evaluation result, surfaced via _on_panel_save_request so
 ## minerva_doc_read after a write exposes whether the worker actually
@@ -206,6 +230,8 @@ func _ready() -> void:
 	# worker and pushed in via the future DSL→mesh bridge. Showing a stub
 	# cube here was misleading because it implied the panel had geometry
 	# without DSL backing it; the empty state is the honest state.
+
+	_reference_library = _ReferenceMeshesScript.new()
 
 	# ── Annotation substrate ───────────────────────────────────────────────
 	_annotation_registry = AnnotationRegistry.new()
@@ -401,6 +427,8 @@ func receive(channel: String, payload: Dictionary) -> void:
 	match channel:
 		"attach_buffer":
 			_buffer_path = str(payload.get("path", ""))
+			if not _buffer_path.is_empty():
+				_document_path = _buffer_path
 			_buffer_version = int(payload.get("version", 0))
 			var text: String = str(payload.get("text", ""))
 			_pending_dsl_text = text
@@ -598,6 +626,7 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		return
 	var dsl_text: String = fa.get_as_text()
 	fa.close()
+	_document_path = file_path
 
 	# Push document source into host so MCP can read it without IPC.
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
@@ -741,16 +770,14 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			str(mesh_data.keys()),
 		])
 
+	# Mount the referenced mesh files first: update_mesh auto-frames, and the
+	# frame has to cover the references as well as the solid.
+	var references_var: Variant = eval_result.get("references", [])
+	_mount_references(references_var if references_var is Array else [])
+
 	# Push mesh into all 5 MeshDisplay instances. The MeshRoot Node3D in each
 	# SubViewport has scripts/mesh_display.gd attached, exposing update_mesh().
-	var mesh_root_paths := [
-		"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport/MeshRoot",
-		"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport/MeshRoot",
-		"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport/MeshRoot",
-		"ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport/MeshRoot",
-		"ResponsiveContainer/NarrowLayout/SingleView/SubViewport/MeshRoot",
-	]
-	for path in mesh_root_paths:
+	for path in _MESH_ROOT_PATHS:
 		var mr := get_node_or_null(path)
 		if mr != null and mr.has_method("update_mesh"):
 			mr.call("update_mesh", mesh_data, edges)
@@ -778,11 +805,18 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		# Vertices arrive as a flat float array; 3 entries per vertex.
 		"vertex_count": int(float((mesh_data.get("vertices", []) as Array).size()) / 3.0),
 		"edge_count": edges.size(),
+		"reference_count": int(_reference_report.get("mounted", 0)),
 		"request_id": request_id,
 		"ts": Time.get_unix_time_from_system(),
 	}
 	# Render succeeded — clear any error banner left by a prior failed evaluate.
 	_hide_eval_error()
+	# A reference that could not be loaded is not an evaluation failure: the
+	# solid is on screen and correct. It still has to be said out loud, or the
+	# board the user expected is simply missing with no explanation.
+	var reference_errors: PackedStringArray = _reference_report.get("errors", PackedStringArray())
+	if not reference_errors.is_empty():
+		_show_eval_error("Reference mesh: %s" % "\n".join(reference_errors))
 
 
 ## Show the evaluation-error banner with a human-readable message. Called from
@@ -1107,7 +1141,8 @@ func _apply_mesh_visibility() -> void:
 
 
 ## Toggle the MeshInstance3D inside a MeshRoot. Found by the well-known child
-## name "MeshInstance" set in mesh_display.gd._ready().
+## name "MeshInstance" set in mesh_display.gd._ready(). Reference meshes follow
+## the same rule: shaded in the perspective pane, outline-only in the orthos.
 func _set_pane_mesh_visible(mesh_root_path: String, visible_flag: bool) -> void:
 	var mesh_root := get_node_or_null(mesh_root_path)
 	if mesh_root == null:
@@ -1115,6 +1150,30 @@ func _set_pane_mesh_visible(mesh_root_path: String, visible_flag: bool) -> void:
 	var mi := mesh_root.get_node_or_null("MeshInstance")
 	if mi != null and "visible" in mi:
 		mi.visible = visible_flag
+	if _reference_library != null and mesh_root is Node3D:
+		_reference_library.set_shaded_visible(mesh_root as Node3D, visible_flag)
+
+
+## Mount the evaluation's reference meshes under every MeshRoot and hand each
+## MeshDisplay the world bounds so auto-framing covers them.
+func _mount_references(references: Array) -> void:
+	_reference_report = {}
+	if _reference_library == null:
+		return
+	var mesh_roots: Array = []
+	for path in _MESH_ROOT_PATHS:
+		var mesh_root := get_node_or_null(path) as Node3D
+		if mesh_root != null:
+			mesh_roots.append(mesh_root)
+	_reference_report = _reference_library.mount_all(references, _document_path, mesh_roots)
+	var world_aabb: AABB = _reference_report.get("world_aabb", AABB())
+	for mesh_root in mesh_roots:
+		if mesh_root.has_method("set_reference_aabb"):
+			mesh_root.call("set_reference_aabb", world_aabb)
+	for warning in _reference_report.get("warnings", PackedStringArray()):
+		push_warning("[CADPanel] reference mesh: %s" % warning)
+	for problem in _reference_report.get("errors", PackedStringArray()):
+		push_warning("[CADPanel] reference mesh: %s" % problem)
 
 
 ## Push a new edge selection to the host and geometry overlays, then sync the tree.

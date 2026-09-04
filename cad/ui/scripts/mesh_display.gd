@@ -9,12 +9,15 @@
 extends Node3D
 class_name MeshDisplay
 
+## Feature-edge extraction and line-mesh building are shared with the reference
+## library, so the evaluated solid and a foreign reference are outlined by one
+## piece of code and cannot drift apart.
+const _ReferenceMeshes: Script = preload("reference_meshes.gd")
+
 const DEFAULT_MESH_COLOR := Color(0.78, 0.62, 0.12)
 const DEFAULT_EDGE_COLOR := Color(0.16, 0.11, 0.02, 0.95)
 const DEFAULT_EDGE_LABEL_COLOR := Color(0.97, 0.97, 0.99, 0.98)
 const ORTHO_EDGE_COLOR := Color(0.08, 0.09, 0.11, 1.0)
-const FEATURE_EDGE_ANGLE_DEGREES := 28.0
-const FEATURE_EDGE_QUANTIZE_SCALE := 1000.0
 const EDGE_LABEL_OUTWARD_OFFSET := 16.0
 const EDGE_LABEL_VERTICAL_OFFSET := 10.0
 const EDGE_LABEL_DEPTH_STAGGER := 10.0
@@ -28,6 +31,10 @@ var _edge_label_root: Node3D
 var _wireframe_only: bool = false
 var _model_center: Vector3 = Vector3.ZERO
 var _feature_edge_count: int = 0
+## World bounds (CAD millimetres) of the reference meshes mounted under this
+## node. Auto-framing has to cover them: a document whose only geometry is a
+## referenced board would otherwise frame on an empty solid.
+var _reference_aabb: AABB = AABB()
 
 
 func _ready() -> void:
@@ -95,6 +102,10 @@ func update_mesh(mesh_data: Dictionary, _edge_registry: Variant = []) -> void:
 		_edge_leader_instance.mesh = null
 		_render_edge_labels([], aabb.get_center())
 		_auto_frame(raw_verts, aabb)
+	else:
+		# References-only document: there is no solid to frame on, but there
+		# may well be something to look at.
+		_auto_frame([])
 
 
 func clear_mesh() -> void:
@@ -106,6 +117,16 @@ func clear_mesh() -> void:
 	_feature_edge_count = 0
 	for child in _edge_label_root.get_children():
 		child.queue_free()
+
+
+## Bounds of the reference meshes mounted under this node, in CAD millimetres.
+## The panel sets it before pushing a new evaluation; framing merges it in.
+func set_reference_aabb(aabb: AABB) -> void:
+	_reference_aabb = aabb
+
+
+func get_reference_aabb() -> AABB:
+	return _reference_aabb
 
 
 func set_wireframe_only(value: bool) -> void:
@@ -199,82 +220,25 @@ func _build_array_mesh(
 	return arr_mesh
 
 
-func _build_feature_edge_mesh(raw_verts: Array, raw_faces: Array) -> ImmediateMesh:
-	var edge_map := {}
+func _build_feature_edge_mesh(raw_verts: Array, raw_faces: Array) -> Mesh:
+	var positions := PackedVector3Array()
+	for v in raw_verts:
+		positions.append(_vector3_from_raw(v))
 
+	var indices := PackedInt32Array()
 	for face in raw_faces:
 		if not (face is Array and face.size() >= 3):
 			continue
+		indices.append(int(face[0]))
+		indices.append(int(face[1]))
+		indices.append(int(face[2]))
 
-		var a := _vector3_from_raw(raw_verts[int(face[0])])
-		var b := _vector3_from_raw(raw_verts[int(face[1])])
-		var c := _vector3_from_raw(raw_verts[int(face[2])])
-		var normal := (b - a).cross(c - a)
-		if normal.length_squared() <= 0.000001:
-			continue
-		normal = normal.normalized()
-
-		_accumulate_edge(edge_map, a, b, normal)
-		_accumulate_edge(edge_map, b, c, normal)
-		_accumulate_edge(edge_map, c, a, normal)
-
-	var line_mesh := ImmediateMesh.new()
-	var line_count := 0
-	line_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
-	for edge_info in edge_map.values():
-		if _is_feature_edge(edge_info["normals"]):
-			line_mesh.surface_add_vertex(edge_info["a"])
-			line_mesh.surface_add_vertex(edge_info["b"])
-			line_count += 1
-	line_mesh.surface_end()
-
-	if line_count == 0:
-		_feature_edge_count = 0
-		return null
-	_feature_edge_count = line_count
-
-	var line_material := StandardMaterial3D.new()
-	line_material.albedo_color = ORTHO_EDGE_COLOR if _wireframe_only else DEFAULT_EDGE_COLOR
-	line_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	line_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	line_material.no_depth_test = false
-	line_mesh.surface_set_material(0, line_material)
-	return line_mesh
-
-
-func _accumulate_edge(edge_map: Dictionary, a: Vector3, b: Vector3, normal: Vector3) -> void:
-	var key_a := _point_key(a)
-	var key_b := _point_key(b)
-	var edge_key := _edge_key(key_a, key_b)
-
-	if not edge_map.has(edge_key):
-		var first := a
-		var second := b
-		if key_b < key_a:
-			first = b
-			second = a
-		edge_map[edge_key] = {
-			"a": first,
-			"b": second,
-			"normals": [normal],
-		}
-		return
-
-	var normals: Array = edge_map[edge_key]["normals"]
-	normals.append(normal)
-
-
-func _is_feature_edge(normals: Array) -> bool:
-	if normals.size() <= 1:
-		return true
-
-	var cosine_threshold := cos(deg_to_rad(FEATURE_EDGE_ANGLE_DEGREES))
-	var minimum_dot := 1.0
-	for i in range(normals.size()):
-		for j in range(i + 1, normals.size()):
-			var dot_value := (normals[i] as Vector3).dot(normals[j] as Vector3)
-			minimum_dot = min(minimum_dot, dot_value)
-	return minimum_dot < cosine_threshold
+	var segments: PackedVector3Array = _ReferenceMeshes.feature_edge_segments(positions, indices)
+	_feature_edge_count = int(segments.size() / 2)
+	return _ReferenceMeshes.line_mesh_from_segments(
+		segments,
+		ORTHO_EDGE_COLOR if _wireframe_only else DEFAULT_EDGE_COLOR
+	)
 
 
 func _parse_color(raw_color: Variant) -> Color:
@@ -394,20 +358,6 @@ func _vector3_from_raw(raw_vertex: Variant) -> Vector3:
 	return Vector3.ZERO
 
 
-func _point_key(point: Vector3) -> String:
-	return "%d,%d,%d" % [
-		roundi(point.x * FEATURE_EDGE_QUANTIZE_SCALE),
-		roundi(point.y * FEATURE_EDGE_QUANTIZE_SCALE),
-		roundi(point.z * FEATURE_EDGE_QUANTIZE_SCALE),
-	]
-
-
-func _edge_key(point_a: String, point_b: String) -> String:
-	if point_a < point_b:
-		return point_a + "|" + point_b
-	return point_b + "|" + point_a
-
-
 func _compute_flat_normals(
 	positions: PackedVector3Array,
 	indices: PackedInt32Array
@@ -438,6 +388,8 @@ func _compute_flat_normals(
 func _auto_frame(raw_verts: Array, aabb: AABB = AABB()) -> void:
 	if aabb == AABB():
 		aabb = _compute_aabb(raw_verts)
+	if _reference_aabb.size != Vector3.ZERO:
+		aabb = _reference_aabb if aabb.size == Vector3.ZERO else aabb.merge(_reference_aabb)
 	if aabb.size == Vector3.ZERO:
 		return
 
