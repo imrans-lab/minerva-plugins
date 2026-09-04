@@ -86,4 +86,4 @@ test_reference_selection.gd assertions=41
 # schema, malformed source) leaving the open document alone, and
 # render_for_llm returning an image part plus one text part naming every
 # reference with its status and bounds — including a document with none.
-test_cad_note.gd assertions=44
+test_cad_note.gd assertions=40

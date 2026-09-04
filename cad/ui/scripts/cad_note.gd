@@ -97,7 +97,6 @@ static func build_payload(panel: Node) -> Dictionary:
 		"source": _source_of(panel),
 		"document_path": _document_path_of(panel),
 		"cameras": cameras_of(panel),
-		"active_view": _active_view_of(panel),
 		# The mesh() specs the last evaluation named, verbatim: name, path,
 		# pose matrix, units and up. Carried so the reopened tab can mount its
 		# references before the worker has answered, and so the note still

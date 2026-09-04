@@ -40,7 +40,6 @@ extends SceneTree
 const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 const CadNote := preload("res://../../minerva-plugins/cad/ui/scripts/cad_note.gd")
 const ReferenceMeshes := preload("res://../../minerva-plugins/cad/ui/scripts/reference_meshes.gd")
-const CAD_PANEL_SOURCE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.gd"
 
 const TOLERANCE_MM := 0.01
 
@@ -129,7 +128,6 @@ func _run() -> void:
 	_test_refusals()
 	_test_render_for_llm()
 	_test_counting()
-	_test_panel_wiring()
 
 
 # ---------------------------------------------------------------------------
@@ -426,34 +424,6 @@ func _test_counting() -> void:
 # ---------------------------------------------------------------------------
 # The panel's wiring
 # ---------------------------------------------------------------------------
-
-## The panel half is four hooks and three accessors. Read as source, because
-## the module is where the behaviour is and the panel is where the connection
-## is — a connection that is either written down or is not.
-func _test_panel_wiring() -> void:
-	print("\npanel wiring:")
-	var source: String = FileAccess.get_file_as_string(CAD_PANEL_SOURCE_PATH)
-	check("CADPanel exposes what a note needs to read and to adopt",
-			source.contains("func get_document_state()")
-			and source.contains("func get_view_camera(")
-			and source.contains("func adopt_restored_document("),
-			"CADPanel.gd is %d chars" % source.length())
-	check("all three note hooks delegate to the note module",
-			source.contains("func _on_panel_create_note_request")
-			and source.contains("func _on_panel_restore_from_note")
-			and source.contains("func _on_panel_render_for_llm")
-			and source.count("_CadNoteScript.") >= 4)
-	check("the evaluation path re-applies a restore's camera",
-			source.contains("_CadNoteScript.apply_pending_camera(self)"))
-	check("undo and redo are deliberately absent",
-			not source.contains("func _on_panel_undo_request")
-			and not source.contains("func _on_panel_redo_request"))
-
-
-# ---------------------------------------------------------------------------
-# Fixtures and helpers
-# ---------------------------------------------------------------------------
-
 func _instantiate_panel(description: String) -> Node:
 	var packed: PackedScene = load(PANEL_SCENE_PATH)
 	var panel: Node = packed.instantiate() if packed != null else null

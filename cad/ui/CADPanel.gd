@@ -495,8 +495,10 @@ func get_view_camera(view: String) -> Camera3D:
 ## reopened note shows its foreign geometry immediately — and correctly, since
 ## the path is set first and relative mesh() paths resolve against it.
 func adopt_restored_document(document_path: String, source: String, references: Array) -> void:
+	# No DocumentBuffer is attached to a restored tab: the note is a snapshot,
+	# and _buffer_path stays empty so nothing pretends one is. If the owner
+	# later opens the same .mcad in the text editor, that attach wins.
 	_document_path = document_path
-	_buffer_path = document_path
 	_import_notice = ""
 	_pending_dsl_text = source
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
