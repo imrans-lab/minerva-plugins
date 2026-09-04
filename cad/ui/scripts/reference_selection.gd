@@ -422,13 +422,18 @@ func _revalidate_selection() -> void:
 
 
 ## Push the current selection to the annotation host (so a point anchor can be
-## authored from it) and to the sidebar (so the user sees what they hit).
+## authored from it), to the sidebar (so the user sees what they hit), and to
+## the panel's annotation-tool status signal (so an armed tool's warning
+## follows the selection rather than the tool).
 func _publish() -> void:
 	var host: Object = _host()
 	if host != null and host.has_method("set_selected_reference"):
 		host.call("set_selected_reference", _selection)
 	if _sidebar != null and _sidebar.has_method("set_selection"):
 		_sidebar.call("set_selection", _selection)
+	if _panel != null and is_instance_valid(_panel) \
+			and _panel.has_signal("annotation_tool_status_changed"):
+		_panel.emit_signal("annotation_tool_status_changed")
 
 
 func _on_sidebar_activated(reference: String, node_name: String) -> void:

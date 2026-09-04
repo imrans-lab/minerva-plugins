@@ -352,6 +352,13 @@ func space_state() -> PhysicsDirectSpaceState3D:
 ## Run one job with a space state already in hand. Every measurement lives
 ## here, so a headless caller with its own physics frame can use the whole
 ## surface without the queue.
+##
+## ONE SCOPING RULE: `mask` is the scope. ALL_LAYERS means the whole assembly,
+## and then every body is fair game — a mating part obstructing a hole is
+## exactly what an unscoped question is asking about. A narrower mask names
+## one reference; `reference` then only disambiguates the bodies that share
+## that mask's layer beyond the 32-layer ceiling. A reference name on an
+## unscoped job is ignored, so a caller cannot half-scope a job by accident.
 func run_now(state: PhysicsDirectSpaceState3D, kind: String, args: Dictionary) -> Dictionary:
 	_query_mask = int(args.get("mask", ALL_LAYERS))
 	_scope_exclude = _excluded_bodies(
@@ -973,12 +980,14 @@ func _ray(
 	return state.intersect_ray(params)
 
 
-## A scoped measurement must never be affected by a different reference that
-## overlaps it. Excluding bodies scales beyond the 32 collision-layer limit and
-## preserves the existing per-body re-cast behaviour for coincident faces.
+## The bodies a scoped job must not see: every body of ANOTHER reference that
+## sits on a layer inside the mask. Empty for an unscoped job (ALL_LAYERS is
+## the assembly, by the rule above) and for a reference with a layer of its
+## own; non-empty only where overflow references share the final layer, which
+## is what carries the isolation past the 32 collision-layer limit.
 func _excluded_bodies(reference: String, mask: int) -> Array[RID]:
 	var excluded: Array[RID] = []
-	if reference.is_empty():
+	if reference.is_empty() or mask == ALL_LAYERS:
 		return excluded
 	for entry in _bodies:
 		var body := entry as StaticBody3D

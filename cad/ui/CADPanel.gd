@@ -568,6 +568,13 @@ func get_reference_selection() -> Dictionary:
 	return _reference_selection.get_selection()
 
 
+## Fired whenever the answer get_annotation_tool_status() would give may have
+## changed — the reference selection was made, cleared or went stale, by a
+## click, the sidebar or the MCP verb. The host reads the status only when
+## the armed tool changes; this is the panel's side of asking it to read
+## again, so a selection made while a tool stays armed clears the warning.
+signal annotation_tool_status_changed
+
 ## Duck-typed hook used by Minerva's annotation-tool bridge. An armed overlay
 ## owns pointer input, so a user who has not selected the foreign surface yet
 ## needs an actionable warning in the annotation dock (visible in every CAD

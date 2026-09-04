@@ -58,8 +58,13 @@ test_mesh_import.gd assertions=37
 # as a clearance, a mirrored copy and an inward-wound copy each keeping the
 # sense of every feature, a pixel-less probe, and the ray-grid fallback's
 # limits). Plus two plate stacks sharing a face: the coincident triangles are
-# two crossings, so a pin in open air beyond them still fits.
-test_mesh_measurement.gd assertions=70
+# two crossings, so a pin in open air beyond them still fits. Also that two
+# concurrent requests for one file segment it once and both get the answer,
+# and that reference scoping holds past Godot's 32 collision layers: a
+# blocker sharing the target's final layer is excluded under the target's
+# mask, and the SAME job under every layer (name still attached) is shrunk
+# by that blocker, so the mask is the scope and the name alone scopes nothing.
+test_mesh_measurement.gd assertions=72
 
 # The measurement VERBS through PanelTools.handle, on a two-plate stack with
 # one pair of drills through both plates and a boss on top, posed by a
@@ -75,8 +80,10 @@ test_mesh_measurement.gd assertions=70
 # this one while an UNSCOPED call does see it, that a node= filter is a match
 # when any one mounted reference carries it, that a diameter limit is a world
 # millimetre under a scaled pose, and that a pose scaled by 2 reports twice
-# the diameter in world and the file's own in local.
-test_measurement_verbs.gd assertions=33
+# the diameter in world and the file's own in local. Also that a reference
+# set which keeps changing while a verb waits comes back marked stale with a
+# reason, and a settled one does not.
+test_measurement_verbs.gd assertions=35
 
 # Failure and size handling for references: a truncated GLB, a text file
 # wearing a .glb extension, a missing file, an unreadable format and an
@@ -103,7 +110,10 @@ test_reference_failures.gd assertions=30
 # stale — not crashing — when the
 # reference leaves the document, and the two selections coexisting: the picker
 # is a plain Node that only ever sees input the edge overlay did not take.
-test_reference_selection.gd assertions=48
+# Also the annotation-tool status hook: an armed tool with nothing selected
+# gets an actionable warning, a selection clears it, and an MCP selection
+# fires annotation_tool_status_changed so the host re-reads the hook.
+test_reference_selection.gd assertions=49
 
 # Save-to-note and back: the real panel scene is set up, saved as a
 # plugin_data note, freed the way closing a tab frees it, and a second,

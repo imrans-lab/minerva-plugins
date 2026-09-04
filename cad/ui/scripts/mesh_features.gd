@@ -74,6 +74,10 @@ var _cache: Dictionary = {}
 ## How many times a mesh has actually been segmented. A pose change must not
 ## move this number.
 var _analysis_count: int = 0
+## Cache key -> {done: bool, result: Dictionary} for a segmentation that is
+## still in the worker pool. A second request for the same key while the first
+## is in flight waits on this entry instead of segmenting again.
+var _inflight: Dictionary = {}
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +115,12 @@ func features_for(
 ## pool. Polling completion once per frame keeps the editor responsive while an
 ## MCP measurement waits for its answer. The synchronous entry point remains
 ## for deterministic unit fixtures and callers that are already off-thread.
+##
+## Concurrent requests for one key coalesce on one task: only the first caller
+## owns the pool task, later ones await its `_inflight` entry. Every wait
+## re-checks that the tree is still alive before touching it, so a panel
+## closed mid-measurement ends the coroutine with an error instead of
+## resuming against a freed object.
 func features_for_async(
 	key: String,
 	parts: Array,
@@ -122,25 +132,47 @@ func features_for_async(
 		return _cache[cache_key]
 	if tree == null:
 		return features_for(key, parts, angle_deg)
+	if _inflight.has(cache_key):
+		var shared: Dictionary = _inflight[cache_key]
+		while not bool(shared["done"]):
+			if not is_instance_valid(tree):
+				return {"error": "the panel closed while its reference mesh was being segmented"}
+			await tree.process_frame
+		return shared["result"]
 
 	_analysis_count += 1
 	var started := Time.get_ticks_msec()
 	var soups := _soups_from_parts(parts)
 	var output := {}
+	var pending := {"done": false, "result": {}}
+	_inflight[cache_key] = pending
 	var task_id := WorkerThreadPool.add_task(
 		Callable(self, "_analyze_soups_into").bind(soups, angle_deg, output),
 		false,
 		"CAD reference mesh segmentation")
+	var tree_lost := false
 	while not WorkerThreadPool.is_task_completed(task_id):
+		if not is_instance_valid(tree):
+			tree_lost = true
+			break
 		await tree.process_frame
+	# The pool keeps the task until this call collects it, so a lost tree still
+	# joins the worker (it cannot be cancelled) before the entry is settled.
 	var wait_error := WorkerThreadPool.wait_for_task_completion(task_id)
-	if wait_error != OK or not output.has("result"):
+	var result: Dictionary
+	if tree_lost:
+		result = {"error": "the panel closed while its reference mesh was being segmented"}
+	elif wait_error != OK or not output.has("result"):
 		# Completion errors are infrastructure failures, not evidence that the
 		# mesh has no features. Return an explicit error for the panel verb.
-		return {"error": "reference mesh segmentation worker failed (%d)" % wait_error}
-	var result: Dictionary = output["result"]
-	result["elapsed_ms"] = Time.get_ticks_msec() - started
-	_cache[cache_key] = result
+		result = {"error": "reference mesh segmentation worker failed (%d)" % wait_error}
+	else:
+		result = output["result"]
+		result["elapsed_ms"] = Time.get_ticks_msec() - started
+		_cache[cache_key] = result
+	pending["result"] = result
+	pending["done"] = true
+	_inflight.erase(cache_key)
 	return result
 
 

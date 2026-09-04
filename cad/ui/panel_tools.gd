@@ -76,20 +76,53 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_cad_references":
 			return _references(panel, args)
 		"minerva_cad_find_holes":
-			return await _find_holes(panel, args)
+			return await _fresh(panel, args, _find_holes)
 		"minerva_cad_find_cylinders":
-			return await _find_cylinders(panel, args)
+			return await _fresh(panel, args, _find_cylinders)
 		"minerva_cad_gauge":
-			return await _gauge(panel, args)
+			return await _fresh(panel, args, _gauge)
 		"minerva_cad_probe":
-			return await _probe(panel, args)
+			return await _fresh(panel, args, _probe)
 		"minerva_cad_get_selected_reference":
-			return await _selected_reference(panel, args)
+			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
-			return await _select_reference(panel, args)
+			return await _fresh(panel, args, _select_reference)
 		"minerva_cad_view_overlay":
 			return _view_overlay(panel, args)
 	return {}
+
+
+## Every awaiting verb snapshots the panel's poses, records and colliders
+## before it waits — on the segmentation worker, on a physics step — and the
+## document can change under it while it waits. The reference digest is the
+## panel's own word for "the reference set changed": it is read before and
+## after the verb, and a change means the reply describes a pose the
+## document no longer has. The verb is then run once more; a document that
+## is still changing gets its reply back marked `stale`, with the reason,
+## rather than being chased. A panel freed during the wait is an error.
+static func _fresh(panel, args: Dictionary, verb: Callable) -> Dictionary:
+	var reply: Dictionary = {}
+	for attempt in range(2):
+		var before := _reference_digest(panel)
+		reply = await verb.call(panel, args)
+		if not is_instance_valid(panel):
+			return _err("the CAD panel closed while the measurement was running")
+		if _reference_digest(panel) == before:
+			return reply
+	reply["stale"] = true
+	reply["stale_reason"] = "the reference set changed while this measurement " \
+		+ "was running, twice; the numbers describe a pose the document no " \
+		+ "longer has — call again once the document is settled"
+	return reply
+
+
+## The panel's digest of its mounted references, or "" for a panel that has
+## none to report (a freed one included).
+static func _reference_digest(panel) -> String:
+	if panel == null or not is_instance_valid(panel) \
+			or not panel.has_method("get_reference_digest"):
+		return ""
+	return str(panel.get_reference_digest())
 
 
 ## minerva_cad_view_state — delegates to CADPanel.get_view_state().
@@ -188,6 +221,8 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
 		var before := int(features.call("get_analysis_count"))
 		var analysis := await _analysis(panel, record, args)
+		if not is_instance_valid(panel) or not _gauge_ready(gauge):
+			return _err("the CAD panel closed while its reference mesh was being segmented")
 		if analysis.has("error"):
 			if bool(analysis.get("node_missing", false)):
 				node_missing.append(str(analysis["error"]))
@@ -268,6 +303,8 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 		var record: Dictionary = entry
 		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
 		var analysis := await _analysis(panel, record, args)
+		if not is_instance_valid(panel) or not _gauge_ready(gauge):
+			return _err("the CAD panel closed while its reference mesh was being segmented")
 		if analysis.has("error"):
 			if bool(analysis.get("node_missing", false)):
 				node_missing.append(str(analysis["error"]))
@@ -942,9 +979,10 @@ static func _scope_mask(gauge: Node, args: Dictionary, record: Dictionary) -> in
 	return _mask_for(gauge, str(record.get("name", "")))
 
 
-## Collision mask for the common one-layer-per-reference path. The reference
-## name also travels in each job so the gauge can exclude peers if the final
-## Godot collision layer is shared by more than one reference.
+## Collision mask for one reference, or every layer for an empty name. The
+## mask IS the scope: the gauge reads the reference name that travels with
+## each job only under a narrowed mask, to tell overflow references sharing
+## Godot's final collision layer apart; under every layer it is ignored.
 static func _mask_for(gauge: Node, reference_name: String) -> int:
 	if gauge == null or not gauge.has_method("mask_for"):
 		# Every layer. A zero mask would report a fit everywhere.

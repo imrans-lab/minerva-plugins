@@ -123,6 +123,7 @@ func _run() -> void:
 	await _test_a_node_filter_that_matches_nothing_is_an_error()
 	await _test_a_second_reference_cannot_change_this_one_s_measurement()
 	await _test_a_scaled_pose_reports_world_and_local_diameters()
+	await _test_a_document_changing_under_a_measurement_is_marked_stale()
 
 	_panel.queue_free()
 
@@ -272,6 +273,33 @@ func _test_a_scaled_pose_reports_world_and_local_diameters() -> void:
 
 	_panel.record["pose"] = _pose
 	_panel.digest = "verbs|v1"
+
+
+# ---------------------------------------------------------------------------
+# The document moves while a verb waits
+# ---------------------------------------------------------------------------
+
+## A verb waits on the segmentation worker and on a physics step, and a DSL
+## edit can land in between. The stand-in re-digests itself every frame while
+## `churn` is on, which is a document that never settles: the verb must say
+## so rather than hand back numbers for a pose the document no longer has.
+## With the churn off the same call carries no such mark.
+func _test_a_document_changing_under_a_measurement_is_marked_stale() -> void:
+	_panel.churn = true
+	var churned: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"min_dia_mm": 1.0, "max_dia_mm": 8.0})
+	check("find_holes: a reference set that changes under the verb comes back marked stale, with a reason",
+			bool(churned.get("success", false))
+				and bool(churned.get("stale", false))
+				and not str(churned.get("stale_reason", "")).is_empty(),
+			"reply=%s" % str(churned))
+	_panel.churn = false
+	_panel.digest = "verbs|v1"
+	var settled: Dictionary = await PanelTools.handle(_panel, "minerva_cad_find_holes",
+			{"min_dia_mm": 1.0, "max_dia_mm": 8.0})
+	check("find_holes: a settled document is not marked stale",
+			bool(settled.get("success", false)) and not settled.has("stale"),
+			"reply=%s" % str(settled))
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +563,9 @@ class PanelStandIn extends Node:
 	var extra: Dictionary = {}
 	## Bumped whenever a test changes the geometry the colliders stand for.
 	var digest: String = "verbs|v1"
+	## While on, the digest changes every frame: a document being edited
+	## faster than any verb can finish.
+	var churn: bool = false
 	var features: RefCounted = null
 	var gauge: Node = null
 	var pose: Transform3D = Transform3D.IDENTITY
@@ -547,6 +578,13 @@ class PanelStandIn extends Node:
 
 	func get_reference_status() -> Array:
 		return get_reference_state()
+
+	func get_reference_digest() -> String:
+		return digest
+
+	func _process(_delta: float) -> void:
+		if churn:
+			digest = "verbs|churn-%d" % Engine.get_process_frames()
 
 	func get_mesh_features() -> RefCounted:
 		return features

@@ -149,6 +149,7 @@ func _run() -> void:
 		{"mesh": baked, "transform": Transform3D.IDENTITY, "node": "plate"},
 	]
 	var candidates := _check_proposal(local_parts)
+	await _check_concurrent_segmentation(local_parts)
 	await _check_gauge(baked, candidates)
 	await _check_coincident_faces()
 
@@ -323,6 +324,33 @@ func _reversed_winding(mesh: ArrayMesh) -> ArrayMesh:
 	return out
 
 
+## Two verbs asking about the same file before either has an answer must
+## share one worker task: the second awaits the first's result instead of
+## segmenting again. Both calls are started without being awaited, so they
+## are in flight together; the collector below gathers their replies.
+func _check_concurrent_segmentation(local_parts: Array) -> void:
+	var features := MeshFeatures.new()
+	var replies: Array = []
+	_collect_async(features, "fixture|concurrent", local_parts, replies)
+	_collect_async(features, "fixture|concurrent", local_parts, replies)
+	var deadline := Time.get_ticks_msec() + 30000
+	while replies.size() < 2 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	var same := replies.size() == 2 \
+			and int((replies[0] as Dictionary).get("triangles", 0)) > 100 \
+			and int((replies[0] as Dictionary).get("triangles", 0)) \
+				== int((replies[1] as Dictionary).get("triangles", -1))
+	check("segmentation: two concurrent requests for one file segment it ONCE and both get the answer",
+			same and int(features.get_analysis_count()) == 1,
+			"replies = %d, analysis count = %d" % [replies.size(), int(features.get_analysis_count())])
+
+
+func _collect_async(features: RefCounted, key: String, parts: Array, into: Array) -> void:
+	var reply: Dictionary = await features.features_for_async(
+		key, parts, MeshFeatures.DEFAULT_REGION_ANGLE_DEG, self)
+	into.append(reply)
+
+
 # ---------------------------------------------------------------------------
 # VERIFY — the physics gauge
 # ---------------------------------------------------------------------------
@@ -426,8 +454,11 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 		"reference": "target",
 	})
 	gauge.build(many_bodies, "fixture|over-32-references")
+	# The mask is the scope; the name only tells the two references sharing
+	# the final layer apart. Both travel, exactly as panel_tools sends them.
 	var isolated: Dictionary = await gauge.submit("measure_holes", {
 		"candidates": [posed[0]],
+		"mask": gauge.mask_for("target"),
 		"reference": "target",
 	})
 	var isolated_holes: Array = isolated.get("holes", [])
@@ -436,6 +467,17 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 				and bool((isolated_holes[0] as Dictionary).get("verified", false))
 				and float((isolated_holes[0] as Dictionary).get("gauge_dia_mm", 0.0)) > 3.0,
 			"scoped result = %s" % str(isolated))
+	# Control: the same job unscoped (every layer, name still attached) must
+	# be shrunk by the blocker — otherwise the isolation above proved nothing.
+	var assembly: Dictionary = await gauge.submit("measure_holes", {
+		"candidates": [posed[0]],
+		"reference": "target",
+	})
+	var assembly_holes: Array = assembly.get("holes", [])
+	check("gauge: unscoped, the overflow blocker IS in the way — the name alone scopes nothing",
+			assembly_holes.size() == 1
+				and float((assembly_holes[0] as Dictionary).get("gauge_dia_mm", 0.0)) < 3.0,
+			"unscoped result = %s" % str(assembly))
 	gauge.build(bodies, "fixture|v1")
 	var pocket_depth := float(HOLES[4]["depth"])
 	check("gauge: the blind pocket's depth is measured, not assumed",
