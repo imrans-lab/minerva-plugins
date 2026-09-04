@@ -1144,11 +1144,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# evaluation is still the one being shown.
 	var stamp: float = float(_last_eval_result.get("ts", 0.0))
 	var interference: Dictionary = await check_interference()
-	if is_instance_valid(self) and float(_last_eval_result.get("ts", -1.0)) == stamp:
-		_last_eval_result["interference"] = interference
-		var interference_line: String = _geometry_checks.status_line(interference)
-		if not interference_line.is_empty():
-			lines.append(interference_line)
+	if not is_instance_valid(self) or float(_last_eval_result.get("ts", -1.0)) != stamp:
+		# A newer evaluation owns the banner now; this one paints nothing.
+		return
+	_last_eval_result["interference"] = interference
+	var interference_line: String = _geometry_checks.status_line(interference)
+	if not interference_line.is_empty():
+		lines.append(interference_line)
 
 	if not lines.is_empty():
 		_show_eval_error("\n".join(lines))

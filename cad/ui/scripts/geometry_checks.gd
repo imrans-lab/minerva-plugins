@@ -1107,9 +1107,9 @@ func set_blob_dir(path: String) -> void:
 ## Each panel gets its OWN subdirectory. Blobs are content-addressed, so two
 ## panels showing the same board write identical bytes to identical names —
 ## but the sweep below knows only about THIS module's references, so a shared
-## directory means one document's check deletes another document's blobs, and
-## a sweep landing between a peer's write and the worker's read turns into a
-## "cannot read mesh blob" on a check that was about to succeed.
+## directory would let one document's check delete another's blobs mid-read.
+## The cost of isolation: a directory left behind by a crashed session is not
+## reclaimed by any peer; only its own panel ever deletes it.
 func get_blob_dir() -> String:
 	if _blob_dir.is_empty():
 		var base := OS.get_cache_dir()
