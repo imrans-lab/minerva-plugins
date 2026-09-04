@@ -195,6 +195,7 @@
           "ui/CADPanel.gd",
           "ui/CadAnnotationHost.gd",
           "ui/scripts/reference_meshes.gd",
+          "ui/scripts/cad_note.gd",
     "ui/scripts/CadAnchorTypes.gd",
     "ui/scripts/CadPointAnchor.gd",
     "ui/scripts/reference_selection.gd",

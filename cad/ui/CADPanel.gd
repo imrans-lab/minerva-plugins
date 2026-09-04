@@ -38,6 +38,9 @@ const _PanelToolsScript: Script = preload("panel_tools.gd")
 ## Foreign mesh files named by mesh() in the source: loading, unit/up-axis
 ## conversion, pose and mounting all live here. The panel only wires it up.
 const _ReferenceMeshesScript: Script = preload("scripts/reference_meshes.gd")
+## The three host note hooks — plugin_data payload, restore and the
+## LLM rendering — live here; the panel below is wiring only.
+const _CadNoteScript: Script = preload("scripts/cad_note.gd")
 ## Name, path and line text for the GUI "Import mesh…" action. Text authoring
 ## only — the import writes DSL, it never holds geometry of its own.
 const _MeshImportScript: Script = preload("scripts/mesh_import.gd")
@@ -152,6 +155,10 @@ var _last_mesh_data: Dictionary = {}
 var _reference_library: RefCounted = null
 ## Outcome of the last mount: {world_aabb, warnings, errors, mounted}.
 var _reference_report: Dictionary = {}
+## The mesh() specs the last mount was given ({name, path, matrix, units, up}),
+## verbatim. A note carries these so a reopened tab shows its references before
+## the worker has answered.
+var _last_references: Array = []
 ## Warning from the last GUI mesh import that must survive evaluations.
 var _import_notice: String = ""
 ## Segmentation and primitive fitting over the loaded references (RefCounted),
@@ -461,6 +468,42 @@ func get_reference_status() -> Array:
 	if _reference_library == null:
 		return []
 	return _reference_library.reference_records()
+
+
+## Everything a note needs to know about the document this tab is showing:
+## the DSL source, the file it came from, the last evaluation's verdict, the
+## mesh the worker returned and the mesh() specs it named. One accessor because
+## cad_note.gd is the only reader and it wants them together.
+func get_document_state() -> Dictionary:
+	return {
+		"source": _current_source(),
+		"path": _document_path,
+		"last_eval": _last_eval_result,
+		"mesh": _last_mesh_data,
+		"references": _last_references,
+	}
+
+
+## The camera behind a named pane ("iso"/"top"/"front"/"right"/"active"). Its
+## viewport is that pane's SubViewport, which is where a capture comes from.
+func get_view_camera(view: String) -> Camera3D:
+	return _camera_for_view(view)
+
+
+## Take on a document, its path and its reference set from a note restore.
+## Mounting the references here rather than waiting for the evaluation means a
+## reopened note shows its foreign geometry immediately — and correctly, since
+## the path is set first and relative mesh() paths resolve against it.
+func adopt_restored_document(document_path: String, source: String, references: Array) -> void:
+	_document_path = document_path
+	_buffer_path = document_path
+	_import_notice = ""
+	_pending_dsl_text = source
+	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
+		_annotation_host.set_document_source(document_path, source)
+	_mount_references(references)
+	if not source.strip_edges().is_empty():
+		_evaluate_with_request_id(source)
 
 
 func get_mesh_features() -> RefCounted:
@@ -1154,6 +1197,9 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_render_edge_tree(_edge_registry)
 	# Re-apply mesh visibility (ortho panes hide the shaded mesh; iso shows it).
 	_apply_mesh_visibility()
+	# update_mesh auto-framed every pane just now. A note restore's saved view
+	# outranks that framing, and is applied here exactly once.
+	_CadNoteScript.apply_pending_camera(self)
 
 	# Mark the eval as ok so minerva_doc_read can verify success after a write.
 	# shape_name comes straight from the worker (the named output the DSL
@@ -1545,6 +1591,7 @@ func _compute_reference_digest() -> String:
 ## MeshDisplay the world bounds so auto-framing covers them.
 func _mount_references(references: Array) -> void:
 	_reference_report = {}
+	_last_references = references
 	if _reference_library == null:
 		return
 	var mesh_roots: Array = []
@@ -1663,69 +1710,43 @@ func _step_selected_edge(delta: int) -> void:
 	_select_edge(ids[next_idx])
 
 
-# ── Chat-injection hooks ────────────────────────────────────────────────────
-# Editor.gd's "inject to chat" CheckButton fires two independent paths for
-# PLUGIN_SCENE editors:
-#   1. _on_panel_inject_toggle_changed(enabled) — fire-and-forget notification
-#      so the panel can ack the toggle (status text, internal state).
-#   2. _on_panel_create_note_request(ctx) — return a payload Dictionary that
-#      becomes a Note attached to the chat. Without this hook, the platform
-#      falls back to a generic main-viewport screenshot crop. Override it so
-#      the LLM gets a CAD-specific image (Cad_AnnotationHost render of the
-#      currently active view) plus a one-line geometry summary in the title.
-# Architecture reference: hint minerva/plugins/plugin_scene_inject_hooks.
+# ── Host note hooks ─────────────────────────────────────────────────────────
+#
+# Four duck-typed hooks the host calls on this scene (Minerva's
+# PluginScenePanelHost holds the contract):
+#
+#   _on_panel_inject_toggle_changed(enabled) — fire-and-forget acknowledgement.
+#   _on_panel_create_note_request(ctx)       — AWAITED; returns the note. A
+#       plugin_data note, so opening it reopens a live CAD tab rather than
+#       showing a dead screenshot. Returning null would fall back to exactly
+#       that screenshot.
+#   _on_panel_restore_from_note(payload)     — NOT awaited; returns a bool.
+#   _on_panel_render_for_llm(ctx)            — NOT awaited; returns the
+#       canonical MultimodalPayload. It must not be a coroutine: the host does
+#       not await it and would receive a coroutine state instead of an Array.
+#
+# Undo and redo are deliberately absent. The panel keeps no history of its own
+# — the DSL text is the document and the paired text editor owns its undo — so
+# implementing the hooks would put two undo stacks on one document.
+#
+# All four payloads live in scripts/cad_note.gd; what follows is wiring.
 
-## Tracks whether the user has the inject toggle on. Currently unused beyond
-## logging — the visible behavior comes from _on_panel_create_note_request,
-## which is invoked separately by Editor.gd in the same toggle-on path.
+## Tracks whether the user has the inject toggle on. The note itself does not
+## depend on it: Save-to-Note and chat injection both want the same document.
 var _inject_enabled: bool = false
 
 
 func _on_panel_inject_toggle_changed(enabled: bool) -> void:
 	_inject_enabled = enabled
-	push_warning("[CADPanel] inject toggle %s" % ("on" if enabled else "off"))
 
 
-## Build a richer Note payload than the platform fallback. Returns a Dictionary
-## whose shape matches Editor.gd:_build_note_from_plugin_payload — "image" kind
-## because vision models can consume it directly, with the geometry summary
-## embedded in the title so non-vision models still get useful context.
 func _on_panel_create_note_request(ctx: Dictionary) -> Variant:
-	# Defensive: only emit a CAD-specific note while the inject toggle is on.
-	# Editor.gd currently fires create_note only on toggle-ON, but if that ever
-	# changes (e.g. periodic re-injection) we'd otherwise leak stale snapshots.
-	if not _inject_enabled:
-		return null
-	if _annotation_host == null or not _annotation_host.has_method("render_view_to_image"):
-		return null  # Let platform fall back to its generic screenshot.
-	var view_id: String = _active_viewport_id
-	var img: Image = _annotation_host.call("render_view_to_image", view_id, Rect2()) as Image
-	if img == null:
-		return null  # Cold-start; platform fallback will try its own capture.
-	var title: String = str(ctx.get("tab_title", "CAD"))
-	var verts: int = 0
-	var faces: int = 0
-	if _annotation_host.has_method("get_mesh_data"):
-		var mesh_v: Variant = _annotation_host.call("get_mesh_data")
-		if mesh_v is Dictionary:
-			var mesh: Dictionary = mesh_v
-			# Tolerate Array | PackedVector3Array | PackedInt32Array — the
-			# evaluator builds plain Arrays today but worker bridges have
-			# returned packed arrays in the past. .size() works on all three;
-			# the unsafe `as Array` cast would null on packed types and crash.
-			var vs: Variant = mesh.get("vertices", [])
-			var fs: Variant = mesh.get("faces", [])
-			if vs != null and vs.has_method("size"):
-				verts = vs.size()
-			if fs != null and fs.has_method("size"):
-				faces = fs.size()
-	var edges: int = _edge_registry.size() if _edge_registry != null else 0
-	var summary: String = " · %s · %d V / %d F / %d E" % [view_id, verts, faces, edges]
-	return {
-		"kind": "image",
-		"title": title + summary,
-		"image": img,
-	}
+	return await _CadNoteScript.build_note(ctx, self)
 
 
+func _on_panel_restore_from_note(payload: Dictionary) -> bool:
+	return _CadNoteScript.restore(payload, self)
 
+
+func _on_panel_render_for_llm(render_ctx: Dictionary) -> Array:
+	return _CadNoteScript.render_parts(self, render_ctx)

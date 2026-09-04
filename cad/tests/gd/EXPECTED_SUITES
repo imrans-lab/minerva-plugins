@@ -74,3 +74,16 @@ test_reference_failures.gd assertions=30
 # reference leaves the document, and the two selections coexisting: the picker
 # is a plain Node that only ever sees input the edge overlay did not take.
 test_reference_selection.gd assertions=41
+
+# Save-to-note and back: the real panel scene is set up, saved as a
+# plugin_data note, freed the way closing a tab frees it, and a second,
+# untouched panel is restored from the note through the JSON wrapper the host
+# actually writes. Pins the payload (schema, version, source, path, per-pane
+# cameras, the mesh() specs) and that every value in it is JSON-native, the
+# reopened tab's source, path, per-pane camera preset and mounted reference
+# geometry read off the live scene graph, the second camera application that
+# survives an evaluation's auto-frame, the refusals (wrong version, foreign
+# schema, malformed source) leaving the open document alone, and
+# render_for_llm returning an image part plus one text part naming every
+# reference with its status and bounds — including a document with none.
+test_cad_note.gd assertions=44
