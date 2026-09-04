@@ -18,9 +18,24 @@ reply that uses it says so.
 WHAT A CYLINDER IS HERE
 One cylindrical surface, not one face. OCCT routinely splits a full bore into
 two half-faces at the seam, and a boss cut by a pocket into several patches, so
-faces that share an axis line and a radius are merged into one feature and
-their angular sweeps summed. `closed` is then the honest word for "this goes
+faces that share an axis line, a radius and an overlapping stretch of that line
+are merged into one feature. `closed` is then the honest word for "this goes
 all the way round"; a 180-degree sweep is a fillet or a slot end, not a hole.
+
+THE EXTENT COMES FROM THE FACE'S OWN BOUNDARY, NOT ITS UV BOX
+`BRepTools.UVBounds_s` is a parametric BOUNDING BOX. For a bore cut off by a
+tilted plane the trim curve sweeps between two different heights, and the box
+reports the deeper one all the way round: the length comes out longer than any
+part of the bore actually is, and a fastener graded on it engages a boss that
+is not there. So the boundary edges are sampled in 3D and each sample is
+projected onto the axis (its axial coordinate) and around it (its angle). The
+extent is the range of those axial coordinates, which is the real trim.
+
+The sweep is measured the same way and for the same reason: as the fraction of
+angular BINS the boundary samples actually occupy, unioned across the faces of
+one surface. Summing per-face parametric spans would call two half-turn fillet
+patches that happen to share an axis line a closed hole; a union of occupied
+bins cannot, because it counts each part of the turn once.
 
 CONCAVE OR CONVEX, FROM THE ORIENTATION AND NOTHING ELSE
 A cylindrical surface's natural normal points AWAY from its axis when the
@@ -52,7 +67,25 @@ MERGE_PARALLEL_DOT = 1.0 - 1.0e-8
 
 #: A merged sweep at least this much of a full turn is a closed cylinder — a
 #: hole or a full boss rather than a fillet, a slot end or a rounded corner.
+#: With the sweep measured in bins, this threshold means EVERY bin: one empty
+#: bin out of ANGULAR_BINS is 355 degrees and does not reach it.
 CLOSED_SWEEP_RAD = math.radians(359.5)
+
+#: Angular bins the turn is divided into when measuring how much of it a face's
+#: boundary covers. 72 bins is 5 degrees, fine enough that a quarter-turn
+#: fillet and a full bore cannot be confused and coarse enough that a sampled
+#: boundary fills every bin it crosses.
+ANGULAR_BINS = 72
+
+#: Samples taken along each boundary edge. It has to be at least twice
+#: ANGULAR_BINS so that a full circle leaves no bin empty between two samples;
+#: 145 puts a sample every 2.5 degrees of a full turn.
+EDGE_SAMPLES = 145
+
+#: Two faces of one surface must also overlap along the axis to be the same
+#: feature — adjacent patches touch, and this lets them. Two bores on one
+#: infinite line with a gap between them are two features.
+MERGE_AXIAL_SLACK_MM = 1.0e-6
 
 
 class FeatureError(Exception):
@@ -67,12 +100,12 @@ def _occt():
     is broken instead of raising a bare ImportError from three frames down.
     """
     try:
-        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
         from OCP.BRepGProp import BRepGProp
         from OCP.BRepTools import BRepTools
         from OCP.GProp import GProp_GProps
         from OCP.GeomAbs import GeomAbs_Cylinder
-        from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
+        from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopoDS import TopoDS
     except BaseException as exc:  # noqa: BLE001 — a broken .so raises anything
@@ -81,11 +114,13 @@ def _occt():
             "runtime bundle could not load: %s" % exc
         ) from exc
     return {
+        "BRepAdaptor_Curve": BRepAdaptor_Curve,
         "BRepAdaptor_Surface": BRepAdaptor_Surface,
         "BRepGProp": BRepGProp,
         "BRepTools": BRepTools,
         "GProp_GProps": GProp_GProps,
         "GeomAbs_Cylinder": GeomAbs_Cylinder,
+        "TopAbs_EDGE": TopAbs_EDGE,
         "TopAbs_FACE": TopAbs_FACE,
         "TopAbs_REVERSED": TopAbs_REVERSED,
         "TopExp_Explorer": TopExp_Explorer,
@@ -137,10 +172,10 @@ def _face_cylinder(occt: dict, face) -> Optional[dict]:
     origin = (location.X(), location.Y(), location.Z())
     axis_dir = (direction.X(), direction.Y(), direction.Z())
 
-    # The face's own trimmed parameter box. For a cylinder, v IS the signed
-    # distance along the axis from `origin`, and u is the angle round it, so
-    # the extent needs no projection of vertices.
+    # The parametric box, kept ONLY as the fallback for a face whose boundary
+    # cannot be sampled. It is a bounding box, not the trim: see the header.
     u_min, u_max, v_min, v_max = occt["BRepTools"].UVBounds_s(face)
+    boundary = _boundary_points(occt, face)
 
     # Direct surface: natural normal away from the axis. Indirect: toward it.
     direct = True
@@ -162,9 +197,83 @@ def _face_cylinder(occt: dict, face) -> Optional[dict]:
         "v_min": float(v_min),
         "v_max": float(v_max),
         "sweep": abs(float(u_max) - float(u_min)),
+        "points": boundary,
         "sense": sense,
         "area": float(props.Mass()),
     }
+
+
+def _boundary_points(occt: dict, face) -> list:
+    """Sample every boundary edge of `face` in 3D.
+
+    These points ARE the trim: where they reach along the axis is how long the
+    face is, and which way round they go is how far it sweeps. A face whose
+    edges cannot be adapted (a degenerate seam, a curve with no 3D
+    representation) contributes none, and the caller falls back to the
+    parametric box for that face and says so.
+    """
+    points: list = []
+    explorer = occt["TopExp_Explorer"](face, occt["TopAbs_EDGE"])
+    while explorer.More():
+        edge = occt["TopoDS"].Edge_s(explorer.Current())
+        explorer.Next()
+        try:
+            curve = occt["BRepAdaptor_Curve"](edge)
+            first = float(curve.FirstParameter())
+            last = float(curve.LastParameter())
+        except BaseException:  # noqa: BLE001 — a degenerate edge raises anything
+            continue
+        if not (last > first):
+            continue
+        span = last - first
+        for i in range(EDGE_SAMPLES):
+            parameter = first + span * (i / float(EDGE_SAMPLES - 1))
+            try:
+                point = curve.Value(parameter)
+            except BaseException:  # noqa: BLE001
+                break
+            points.append((point.X(), point.Y(), point.Z()))
+    return points
+
+
+def _project(points: list, origin, direction) -> tuple:
+    """(axial min, axial max, occupied angular bins) of `points` about an axis.
+
+    The angular frame is derived from the DIRECTION alone — a reference vector
+    chosen the same way for every caller — so two faces of one surface land in
+    one frame and their bins can be unioned rather than added.
+    """
+    reference = _perpendicular(direction)
+    other = _cross(direction, reference)
+    low = None
+    high = None
+    bins: set = set()
+    for point in points:
+        offset = _sub(point, origin)
+        axial = _dot(offset, direction)
+        low = axial if low is None else min(low, axial)
+        high = axial if high is None else max(high, axial)
+        radial = _sub(offset, tuple(c * axial for c in direction))
+        angle = math.atan2(_dot(radial, other), _dot(radial, reference))
+        bins.add(int((angle % (2.0 * math.pi)) / (2.0 * math.pi) * ANGULAR_BINS)
+                 % ANGULAR_BINS)
+    return low, high, bins
+
+
+def _perpendicular(direction):
+    """Any unit vector perpendicular to `direction`, chosen deterministically."""
+    axis = (1.0, 0.0, 0.0) if abs(direction[0]) < 0.9 else (0.0, 1.0, 0.0)
+    vector = _cross(direction, axis)
+    length = math.sqrt(_dot(vector, vector))
+    return tuple(c / length for c in vector)
+
+
+def _cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
 
 
 def _dot(a, b) -> float:
@@ -179,11 +288,14 @@ def _add_scaled(a, b, k: float):
     return (a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k)
 
 
-def _same_axis(group: dict, face: dict) -> bool:
+def _on_same_line(group: dict, face: dict) -> bool:
     """Do this face and this group lie on the same infinite cylinder?
 
-    Radius, axis DIRECTION (either sense — a seam half can carry the opposite
-    one) and the perpendicular distance between the two axis lines.
+    Radius, sense, axis DIRECTION (either way round — a seam half can carry the
+    opposite one) and the perpendicular distance between the two axis lines.
+    Says nothing about WHERE along that line either of them is; `_merge` adds
+    that, because two bores on one line with a gap between them are two
+    features and not one long one.
     """
     if abs(group["radius"] - face["radius"]) > MERGE_TOLERANCE_MM:
         return False
@@ -197,41 +309,75 @@ def _same_axis(group: dict, face: dict) -> bool:
     return math.sqrt(_dot(perpendicular, perpendicular)) <= MERGE_TOLERANCE_MM
 
 
+def _extent_in(group_origin, group_direction, face: dict) -> tuple:
+    """(low, high, bins, exact) of one face in the GROUP's axis frame.
+
+    Exact when the face's own boundary could be sampled. Otherwise this falls
+    back to the parametric box, which is a bounding box and can overstate the
+    length, and says so through `exact` so the reply can carry the caveat
+    rather than hiding it.
+    """
+    if face["points"]:
+        low, high, bins = _project(face["points"], group_origin, group_direction)
+        if low is not None:
+            return low, high, bins, True
+    offset = _sub(face["origin"], group_origin)
+    base = _dot(offset, group_direction)
+    sign = 1.0 if _dot(face["direction"], group_direction) > 0.0 else -1.0
+    lo = base + sign * face["v_min"]
+    hi = base + sign * face["v_max"]
+    # Without a boundary there is nowhere to put the sweep except the
+    # parametric span; bin it so the union arithmetic stays uniform.
+    covered = min(int(round(face["sweep"] / (2.0 * math.pi) * ANGULAR_BINS)),
+                  ANGULAR_BINS)
+    return min(lo, hi), max(lo, hi), set(range(covered)), False
+
+
 def _merge(faces: list) -> list:
     """Group faces of one cylindrical surface into one feature each.
 
     Every group keeps the FIRST face's axis frame and expresses the others'
-    axial extents in it, so a seam half whose own axis points the other way
-    still lands on the same interval rather than beside it.
+    extents and angular bins in it, so a seam half whose own axis points the
+    other way still lands on the same interval rather than beside it, and the
+    bins can be UNIONED instead of added.
     """
     groups: list = []
     for face in faces:
+        placed = False
         for group in groups:
-            if not _same_axis(group, face):
+            if not _on_same_line(group, face):
                 continue
-            offset = _sub(face["origin"], group["origin"])
-            base = _dot(offset, group["direction"])
-            sign = 1.0 if _dot(face["direction"], group["direction"]) > 0.0 else -1.0
-            lo = base + sign * face["v_min"]
-            hi = base + sign * face["v_max"]
-            group["start"] = min(group["start"], lo, hi)
-            group["end"] = max(group["end"], lo, hi)
-            group["sweep"] += face["sweep"]
+            low, high, bins, exact = _extent_in(
+                group["origin"], group["direction"], face)
+            # Same line AND overlapping stretch of it, or they are two
+            # features that happen to be collinear.
+            if low > group["end"] + MERGE_AXIAL_SLACK_MM \
+                    or high < group["start"] - MERGE_AXIAL_SLACK_MM:
+                continue
+            group["start"] = min(group["start"], low)
+            group["end"] = max(group["end"], high)
+            group["bins"] |= bins
             group["area"] += face["area"]
             group["faces"] += 1
+            group["exact"] = group["exact"] and exact
+            placed = True
             break
-        else:
-            groups.append({
-                "origin": face["origin"],
-                "direction": face["direction"],
-                "radius": face["radius"],
-                "sense": face["sense"],
-                "start": min(face["v_min"], face["v_max"]),
-                "end": max(face["v_min"], face["v_max"]),
-                "sweep": face["sweep"],
-                "area": face["area"],
-                "faces": 1,
-            })
+        if placed:
+            continue
+        low, high, bins, exact = _extent_in(
+            face["origin"], face["direction"], face)
+        groups.append({
+            "origin": face["origin"],
+            "direction": face["direction"],
+            "radius": face["radius"],
+            "sense": face["sense"],
+            "start": low,
+            "end": high,
+            "bins": bins,
+            "area": face["area"],
+            "faces": 1,
+            "exact": exact,
+        })
     return groups
 
 
@@ -247,7 +393,9 @@ def _reported(group: dict) -> dict:
     origin = _add_scaled(group["origin"], direction, group["start"])
     length = group["end"] - group["start"]
     centre = _add_scaled(origin, direction, length * 0.5)
-    sweep = min(group["sweep"], 2.0 * math.pi)
+    # The fraction of the turn the boundary actually occupies, not the sum of
+    # the faces' parametric spans: see the header.
+    sweep = len(group["bins"]) / float(ANGULAR_BINS) * 2.0 * math.pi
     return {
         "source": "b_rep",
         "sense": group["sense"],
@@ -265,6 +413,9 @@ def _reported(group: dict) -> dict:
         "closed": sweep >= CLOSED_SWEEP_RAD,
         "faces": group["faces"],
         "area_mm2": group["area"],
+        # False when some face of this surface had no samplable boundary and
+        # its parametric box was used instead, which can overstate the length.
+        "extent_exact": bool(group["exact"]),
     }
 
 
@@ -330,9 +481,16 @@ def cylindrical_features(params: dict) -> dict:
             "shape_name": shape_name,
             "faces_examined": len(raw),
             "count": len(cylinders),
-            "exact": True,
-            "bound": ("axes, radii and axial extents are read from the OCCT "
-                      "surfaces themselves and carry no tessellation error"),
+            # True only while every reported extent came from a sampled
+            # boundary. A face whose edges could not be adapted falls back to
+            # the parametric box, which can overstate a length, and the reply
+            # must not claim exactness it does not have.
+            "exact": all(c["extent_exact"] for c in cylinders),
+            "bound": ("axes and radii are read from the OCCT surfaces "
+                      "themselves and carry no tessellation error; each axial "
+                      "extent is the range of the face's own sampled boundary, "
+                      "so a bore cut by a tilted face reports the length it "
+                      "really has"),
             "cylinders": cylinders,
         },
     }

@@ -176,10 +176,13 @@ test_interference.gd assertions=30
 # + 3 isolation.
 test_clearance.gd assertions=31
 
-# Fasteners: a 60 x 60 x 1.6 board posed away from the origin with three 3.4 mm
-# through holes and a blocker part standing over the third, and a shell of four
+# Fasteners: a 60 x 60 x 1.6 board posed away from the origin with four 3.4 mm
+# through holes and a blocker part standing over the third, and a shell of five
 # bosses with 2.4 mm pilot bores — one coaxial, one 0.5 mm off and 2 degrees
-# tilted, one under the blocker, one parked away from every hole. The exact
+# tilted, one under the blocker, one parked away from every hole, and one
+# standing 1.2 mm clear of the board with a rib of the SHELL bridging that gap
+# across part of its own bore, off-centre, where only the shank ring can see
+# it. The exact
 # B-Rep read is pinned by worker/tests/test_features.py (the cad GD harness has
 # no worker) and the hole measurement by test_mesh_measurement.gd; everything
 # between them is real here. Pins the one-to-one pairing (three holes, three
@@ -192,8 +195,10 @@ test_clearance.gd assertions=31
 # agreeing with the B-Rep one inside 0.01 mm / 0.05 degrees (the measurement
 # that licenses the fallback) with the radius difference reported and not
 # graded, the status line naming the first failure, a size ISO 273 does not
-# tabulate coming back ungraded until the caller states the clearance hole, and
-# three refusals that report pass FALSE rather than an empty success.
-# 34 assertions = 3 fixture + 3 envelope + 3 pairing + 6 A + 5 B + 5 C
-# + 3 fit + 1 banner + 2 ISO 273 + 3 refusal.
-test_fasteners.gd assertions=34
+# tabulate coming back ungraded — not failed — until the caller states the
+# clearance hole, a hole record with no thickness being a named row rather than
+# a silent seat at the plate's centre, and three refusals that report pass
+# FALSE rather than an empty success.
+# 40 assertions = 3 fixture + 3 envelope + 3 pairing + 6 A + 5 B + 5 C + 4 E
+# + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 3 refusal.
+test_fasteners.gd assertions=40

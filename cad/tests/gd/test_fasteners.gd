@@ -26,14 +26,18 @@ extends SceneTree
 ##
 ## THE FIXTURE, AND WHY EACH SCREW IS THERE
 ##
-## A 60 x 60 x 1.6 board, posed away from the origin, with three 3.4 mm through
-## holes on a line, and a small blocker part standing over the third one. Under
-## it, three bosses, each with a 2.4 mm pilot bore 8.2 mm deep:
+## A 60 x 60 x 1.6 board, posed away from the origin, with four 3.4 mm through
+## holes, and a small blocker part standing over the third one. Under it, five
+## bosses, each with a 2.4 mm pilot bore 8.2 mm deep:
 ##
 ##   A  coaxial with hole 1                     -> passes, on every count
 ##   B  0.5 mm off and tilted 2 degrees         -> fails coaxiality, and only that
 ##   C  coaxial with hole 3, blocker overhead   -> fails the path, naming the node
-##   D  a fourth bore parked away from every hole -> unpaired, and said so
+##   D  parked 24 mm from every hole            -> unpaired, and said so
+##   E  coaxial with hole 4 but standing 1.2 mm clear of the board, with a RIB
+##      of the shell bridging that gap across part of its bore and 1.4 mm off
+##      the axis                                -> fails the path on the SOLID,
+##      which the axis ray alone could never see
 ##
 ## The screw is an M3 x 8 with a 6 mm head. ISO 273 medium gives an M3 a 3.4 mm
 ## clearance hole, so its whole radial allowance is 0.2 mm — which is why B's
@@ -55,8 +59,9 @@ const BOARD_SIZE := Vector3(60.0, 60.0, 1.6)
 const BOARD_HALF_THICKNESS := 0.8
 const HOLE_DIA := 3.4
 const HOLE_RADIUS := 1.7
-## The three holes, on a line in the board's own frame (z = 0 is mid-thickness).
-const HOLE_XY := [Vector2(-20.0, 0.0), Vector2(0.0, 0.0), Vector2(20.0, 0.0)]
+## The four holes in the board's own frame (z = 0 is mid-thickness).
+const HOLE_XY := [Vector2(-20.0, 0.0), Vector2(0.0, 0.0), Vector2(20.0, 0.0),
+	Vector2(0.0, -20.0)]
 ## The blocker: a 4 x 4 x 3 box standing over hole 3, its underside 2.2 mm
 ## clear of the board's top face, so it is unmistakably in the screw's way and
 ## unmistakably not touching the board.
@@ -84,6 +89,19 @@ const B_OFFSET_MM := 0.5
 const B_TILT_DEG := 2.0
 ## Boss D is parked here, far from every hole, so it can find no partner.
 const D_XY := Vector2(-20.0, 24.0)
+## Boss E stands 1.2 mm clear of the board so a RIB of the shell can bridge the
+## gap across its bore, off-centre: the axis ray misses the rib entirely and
+## only the shank ring can see it. Its bore therefore starts 1.2 mm deeper,
+## which also puts its engagement short — E is a deliberate double failure and
+## the suite asserts the PATH, which is the one `why` reports first.
+const E_GAP_MM := 1.2
+const E_BORE_TOP_Z := BORE_TOP_Z - E_GAP_MM
+const E_BORE_BOTTOM_Z := BORE_BOTTOM_Z - E_GAP_MM
+const E_BOSS_BOTTOM_Z := BOSS_BOTTOM_Z - E_GAP_MM
+## The rib: 1.5 wide in x, centred 1.4 mm off the bore axis, so it covers
+## x in [0.65, 2.15] — across part of the 2.4 mm bore and clear of its centre.
+const RIB_SIZE := Vector3(1.5, 8.0, E_GAP_MM)
+const RIB_OFFSET_X := 1.4
 
 # --- the screw ---------------------------------------------------------------
 const SCREW_DIA := 3.0
@@ -169,9 +187,9 @@ func _run() -> void:
 	_bores = _brep_bores()
 
 	var shell: Dictionary = await _shell_mesh()
-	check("fixture: the shell arrived as worker mesh data with four bores",
+	check("fixture: the shell arrived as worker mesh data with five bores",
 			(shell.get("vertices", []) as Array).size() > 0
-				and _bores.size() == 4,
+				and _bores.size() == 5,
 			"vertices=%d bores=%d" % [(shell.get("vertices", []) as Array).size(),
 				_bores.size()])
 
@@ -188,9 +206,11 @@ func _run() -> void:
 	_check_screw_a(report)
 	_check_screw_b(report)
 	_check_screw_c(report)
+	_check_screw_e(report)
 	_check_fit_agreement(report)
 	_check_status_line(module, report)
 	await _check_iso_273(module, panel)
+	await _check_seatless_hole(module, panel)
 	await _check_refusals(module, panel)
 
 
@@ -199,11 +219,12 @@ func _run() -> void:
 # ---------------------------------------------------------------------------
 
 func _check_envelope(report: Dictionary) -> void:
-	check("envelope: the check ran and answered for three screws",
-			bool(report.get("checked", false)) and int(report.get("count", 0)) == 3,
+	check("envelope: the check ran and answered for four screws",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 4,
 			"report = %s" % str(report.get("reason", report.get("count", "?"))))
-	check("envelope: the whole check fails while any screw does",
-			not bool(report.get("pass", true)) and int(report.get("failed", 0)) == 2,
+	check("envelope: the whole check fails while any screw does — A passes, "
+			+ "B, C and E do not",
+			not bool(report.get("pass", true)) and int(report.get("failed", 0)) == 3,
 			"pass=%s failed=%s" % [str(report.get("pass")), str(report.get("failed"))])
 	check("envelope: the reply states the ray spacing its path check is worth, "
 			+ "and says out loud that it is sampled",
@@ -227,9 +248,9 @@ func _check_pairing(report: Dictionary) -> void:
 	for entry in report.get("screws", []):
 		var seat: Array = ((entry as Dictionary).get("seat_mm", {}) as Dictionary).get("world", [])
 		seats[str(seat)] = true
-	check("pairing: three screws sit at three DIFFERENT holes — no hole is "
+	check("pairing: four screws sit at four DIFFERENT holes — no hole is "
 			+ "claimed twice",
-			seats.size() == 3, "distinct seats = %d" % seats.size())
+			seats.size() == 4, "distinct seats = %d" % seats.size())
 
 	var unpaired: Dictionary = report.get("unpaired", {}) as Dictionary
 	var loose: Array = unpaired.get("solid_features", []) as Array
@@ -367,6 +388,50 @@ func _check_screw_c(report: Dictionary) -> void:
 
 
 # ---------------------------------------------------------------------------
+# Screw E — the shell is in its own screw's way
+# ---------------------------------------------------------------------------
+
+## The case a references-only ring fan cannot see. Boss E stands 1.2 mm clear
+## of the board and a rib of the SHELL bridges that gap across part of its
+## bore, 1.4 mm off the axis — so the axis ray goes straight past it and only
+## the shank ring meets it. It is the shell's own geometry, and it is not the
+## boss the screw is heading into, which is exactly the distinction the fan's
+## `expected` filter has to make.
+func _check_screw_e(report: Dictionary) -> void:
+	var row := _row_at(report, HOLE_XY[3])
+	check("E: a rib of the shell across its own bore blocks the path, even "
+			+ "though the axis ray misses it entirely",
+			not bool(row.get("path_clear", true)) and not bool(row.get("pass", true)),
+			"path_clear=%s pass=%s" % [str(row.get("path_clear")), str(row.get("pass"))])
+
+	var obstructions: Array = row.get("obstructions", []) as Array
+	var first: Dictionary = obstructions[0] if not obstructions.is_empty() else {}
+	check("E: the obstruction is attributed to the SOLID, not to a reference",
+			str(first.get("node", "")) == "<solid>"
+				and str(first.get("reference", "")) == "",
+			"first obstruction = %s" % str(first))
+
+	# The rib occupies the gap: its top is the board's underside (axial 0.8)
+	# and its underside is the boss's top face (axial 0.8 + the gap), which is
+	# the mouth of E's bore. A hit anywhere in that band is neither the bore
+	# wall nor the boss's end face, which is the only reason it is reported.
+	check("E: and it is found in the gap ABOVE the bore's mouth, which is the "
+			+ "only place a hit can be neither the bore wall nor the boss face",
+			not first.is_empty()
+				and float(first.get("axial_mm", -99.0))
+					>= BOARD_HALF_THICKNESS - NUMERIC_TOLERANCE_MM
+				and float(first.get("axial_mm", 99.0))
+					<= BOARD_HALF_THICKNESS + E_GAP_MM + NUMERIC_TOLERANCE_MM,
+			"axial = %s" % str(first.get("axial_mm")))
+
+	check("E: its coaxiality is clean, so the boss's own mouth and bore wall "
+			+ "were NOT mistaken for obstructions",
+			bool((row.get("coaxiality", {}) as Dictionary).get("pass", false))
+				and str(row.get("why", "")).contains("blocked"),
+			"why = %s" % str(row.get("why")))
+
+
+# ---------------------------------------------------------------------------
 # The measurement that licenses the fallback
 # ---------------------------------------------------------------------------
 
@@ -409,7 +474,11 @@ func _check_status_line(module: RefCounted, report: Dictionary) -> void:
 # ---------------------------------------------------------------------------
 
 func _check_iso_273(module: RefCounted, panel: Node) -> void:
-	var odd_screw := {"dia_mm": 3.2, "length_mm": SCREW_LENGTH, "head_dia_mm": HEAD_DIA}
+	# 9 mm rather than 8, so this screw's engagement (7.4 mm) clears its own
+	# 2 x 3.2 = 6.4 mm requirement outright. At 8 mm the two numbers are equal
+	# to the last bit and the assertion below would rest on a float compare
+	# rather than on the grading it is about.
+	var odd_screw := {"dia_mm": 3.2, "length_mm": 9.0, "head_dia_mm": HEAD_DIA}
 	var ungraded: Dictionary = await module.check(panel, {
 		"screw": odd_screw, "holes": _holes(),
 	})
@@ -417,10 +486,15 @@ func _check_iso_273(module: RefCounted, panel: Node) -> void:
 	var zone: Dictionary = row.get("coaxiality", {}) as Dictionary
 	check("ISO 273: a size the medium series does not tabulate is NOT "
 			+ "interpolated — it comes back ungraded, saying so",
-			zone.get("allowed_mm", 0.0) == null
-				and not bool(zone.get("pass", true))
+			not bool(zone.get("graded", true))
+				and zone.get("allowed_mm", 0.0) == null
+				and zone.get("pass", false) == null
 				and str(zone.get("clearance_source", "")).contains("ISO 273"),
 			"zone = %s" % str(zone))
+	check("ISO 273: an UNGRADED coaxiality does not fail the screw — nobody "
+			+ "stating the clearance is not the same as the joint being wrong",
+			bool(row.get("pass", false)) and str(row.get("why", "")) == "",
+			"pass=%s why='%s'" % [str(row.get("pass")), str(row.get("why"))])
 
 	var stated: Dictionary = await module.check(panel, {
 		"screw": odd_screw, "holes": _holes(), "clearance_hole_dia_mm": 3.6,
@@ -428,9 +502,35 @@ func _check_iso_273(module: RefCounted, panel: Node) -> void:
 	var stated_zone: Dictionary = (_row_at(stated, HOLE_XY[0])
 		.get("coaxiality", {}) as Dictionary)
 	check("ISO 273: stating the clearance hole grades it again — (3.6 - 3.2) / 2",
-			absf(float(stated_zone.get("allowed_mm", 0.0)) - 0.2) < 0.0001
+			bool(stated_zone.get("graded", false))
+				and absf(float(stated_zone.get("allowed_mm", 0.0)) - 0.2) < 0.0001
 				and bool(stated_zone.get("pass", false)),
 			"zone = %s" % str(stated_zone))
+
+
+# ---------------------------------------------------------------------------
+# A hole record that cannot be measured from
+# ---------------------------------------------------------------------------
+
+## The seat plane is half the plate's thickness above the hole's centre. With
+## no thickness in the record there is no seat, and defaulting it to zero would
+## put the seat at the CENTRE of the plate — shifting every axial number by
+## half its thickness, silently, in a reply that still says `checked: true`.
+func _check_seatless_hole(module: RefCounted, panel: Node) -> void:
+	var thin := _hole_record(HOLE_XY[0])
+	thin.erase("depth_mm")
+	thin.erase("extent_mm")
+	var reply: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": [thin],
+	})
+	var rows: Array = reply.get("screws", []) as Array
+	var row: Dictionary = rows[0] if not rows.is_empty() else {}
+	check("seat: a hole record with neither depth_mm nor extent_mm is a NAMED "
+			+ "row that fails, not a silent seat at the hole's centre",
+			rows.size() == 1 and not bool(row.get("pass", true))
+				and not bool(row.get("measured", true))
+				and str(row.get("error", "")).contains("depth_mm"),
+			"row = %s" % str(row))
 
 
 # ---------------------------------------------------------------------------
@@ -572,10 +672,11 @@ func _bake_blocker() -> ArrayMesh:
 func _shell_mesh() -> Dictionary:
 	var combiner := CSGCombiner3D.new()
 	combiner.name = "Shell"
-	_add_boss(combiner, _boss_transform(HOLE_XY[0], 0.0, 0.0))
-	_add_boss(combiner, _boss_transform(HOLE_XY[1], B_OFFSET_MM, B_TILT_DEG))
-	_add_boss(combiner, _boss_transform(HOLE_XY[2], 0.0, 0.0))
-	_add_boss(combiner, _boss_transform(D_XY, 0.0, 0.0))
+	_add_boss(combiner, _boss_transform(HOLE_XY[0], 0.0, 0.0), 0.0)
+	_add_boss(combiner, _boss_transform(HOLE_XY[1], B_OFFSET_MM, B_TILT_DEG), 0.0)
+	_add_boss(combiner, _boss_transform(HOLE_XY[2], 0.0, 0.0), 0.0)
+	_add_boss(combiner, _boss_transform(D_XY, 0.0, 0.0), 0.0)
+	_add_boss(combiner, _boss_transform(HOLE_XY[3], 0.0, 0.0), E_GAP_MM)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()
@@ -584,13 +685,15 @@ func _shell_mesh() -> Dictionary:
 
 
 ## One boss and its bore, in the board's own frame, under `xform`.
-func _add_boss(combiner: CSGCombiner3D, xform: Transform3D) -> void:
+## `drop` lowers the boss (and its bore) away from the board, leaving a gap the
+## rib then bridges. A boss with no drop sits against the board's underside.
+func _add_boss(combiner: CSGCombiner3D, xform: Transform3D, drop: float) -> void:
 	var boss := CSGCylinder3D.new()
 	boss.radius = BOSS_OUTER_R
 	boss.height = BORE_TOP_Z - BOSS_BOTTOM_Z
 	boss.sides = 64
 	boss.rotation = Vector3(PI * 0.5, 0.0, 0.0)
-	boss.position = Vector3(0.0, 0.0, (BORE_TOP_Z + BOSS_BOTTOM_Z) * 0.5)
+	boss.position = Vector3(0.0, 0.0, (BORE_TOP_Z + BOSS_BOTTOM_Z) * 0.5 - drop)
 	# The cutter runs 2 mm PAST the boss's top face. A cutter whose end plane
 	# is coplanar with the face it cuts is the degenerate case every CSG
 	# implementation gets to choose its own answer to; the surviving bore
@@ -602,11 +705,20 @@ func _add_boss(combiner: CSGCombiner3D, xform: Transform3D) -> void:
 	bore.sides = 64
 	bore.operation = CSGShape3D.OPERATION_SUBTRACTION
 	bore.rotation = Vector3(PI * 0.5, 0.0, 0.0)
-	bore.position = Vector3(0.0, 0.0, (BORE_TOP_Z + 2.0 + BORE_BOTTOM_Z) * 0.5)
+	bore.position = Vector3(0.0, 0.0,
+		(BORE_TOP_Z + 2.0 + BORE_BOTTOM_Z) * 0.5 - drop)
 	var holder := CSGCombiner3D.new()
 	holder.transform = xform
 	holder.add_child(boss)
 	holder.add_child(bore)
+	if drop > 0.0:
+		# The rib, bridging the gap the drop opened, ACROSS part of the bore
+		# and clear of its centre. It is added after the bore cutter, so the
+		# cutter cannot remove it.
+		var rib := CSGBox3D.new()
+		rib.size = RIB_SIZE
+		rib.position = Vector3(RIB_OFFSET_X, 0.0, BORE_TOP_Z - drop * 0.5)
+		holder.add_child(rib)
 	combiner.add_child(holder)
 
 
@@ -627,14 +739,16 @@ func _boss_transform(xy: Vector2, offset: float, tilt_deg: float) -> Transform3D
 func _brep_bores() -> Array:
 	var out: Array = []
 	for entry in [
-		[HOLE_XY[0], 0.0, 0.0], [HOLE_XY[1], B_OFFSET_MM, B_TILT_DEG],
-		[HOLE_XY[2], 0.0, 0.0], [D_XY, 0.0, 0.0],
+		[HOLE_XY[0], 0.0, 0.0, 0.0], [HOLE_XY[1], B_OFFSET_MM, B_TILT_DEG, 0.0],
+		[HOLE_XY[2], 0.0, 0.0, 0.0], [D_XY, 0.0, 0.0, 0.0],
+		[HOLE_XY[3], 0.0, 0.0, E_GAP_MM],
 	]:
 		var spec: Array = entry
 		var xform: Transform3D = _boss_transform(
 			spec[0] as Vector2, float(spec[1]), float(spec[2]))
 		var world := _pose * xform
-		var origin: Vector3 = world * Vector3(0.0, 0.0, BORE_BOTTOM_Z)
+		var origin: Vector3 = world * Vector3(
+			0.0, 0.0, BORE_BOTTOM_Z - float(spec[3]))
 		var direction: Vector3 = (world.basis * Vector3(0.0, 0.0, 1.0)).normalized()
 		out.append({
 			"source": "b_rep",

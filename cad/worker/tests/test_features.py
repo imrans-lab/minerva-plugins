@@ -13,10 +13,11 @@ orientation wrong reports every bore as a boss and every boss as a bore and
 still returns plausible-looking geometry. Each fixture therefore contains one
 of each, at radii that cannot be confused, and asserts which is which.
 
-These tests need build123d/OCP, which ships in the plugin's embedded runtime
-bundle and is not on a plain CI runner, so they skip there. Two tests run
-unconditionally — the parameter refusals — so a skipped suite can never mean
-"the method quietly stopped existing".
+22 tests. The ones that translate DSL need build123d/OCP, which ships in the
+plugin's embedded runtime bundle and is not on a plain CI runner, so they skip
+there. The refusals and every `_merge` test run unconditionally — the merge is
+pure arithmetic over face records — so a skipped suite can never mean "the
+method quietly stopped existing" or "the sweep stopped being a coverage".
 """
 
 from __future__ import annotations
@@ -178,9 +179,18 @@ class TestFilters:
         assert len(concave) + len(convex) == _features()["count"]
 
     def test_the_diameter_window_is_inclusive_of_its_bounds(self):
-        only_blind = _features(min_dia_mm=3.9, max_dia_mm=4.1)["cylinders"]
-        assert len(only_blind) == 1
-        assert only_blind[0]["radius_mm"] == pytest.approx(BLIND_R, abs=TOL_MM)
+        """min == max == the diameter itself must still match.
+
+        A window written with `<` instead of `<=` passes any test whose bounds
+        straddle the value, and fails only when they touch it — so the bounds
+        are set ON the blind bore's 4.0 mm diameter, exactly.
+        """
+        exact = _features(min_dia_mm=BLIND_R * 2.0, max_dia_mm=BLIND_R * 2.0)
+        assert exact["count"] == 1, exact["cylinders"]
+        assert exact["cylinders"][0]["radius_mm"] == pytest.approx(BLIND_R, abs=TOL_MM)
+        # And the neighbours really are outside it, so the window did the work.
+        assert _features(min_dia_mm=THROUGH_R * 2.0,
+                         max_dia_mm=THROUGH_R * 2.0)["count"] == 1
 
     def test_every_reply_says_the_numbers_are_exact(self):
         result = _features()
@@ -220,47 +230,158 @@ class TestRefusals:
         assert "unknown method" not in reply["error"]["message"]
 
 
+class TestTrimmedExtent:
+    """A cut that is not perpendicular to the axis shortens the bore."""
+
+    def test_a_bore_cut_by_a_tilted_face_reports_the_length_it_really_has(self):
+        """The extent is the range of the face's OWN boundary.
+
+        A 40 x 40 x 10 plate, its top lopped off by a plane tilted 20 degrees,
+        with a through bore of radius 3 ON the tilt axis — so the trim curve is
+        symmetric about it and the answer needs no sign convention to predict.
+        The bore then runs from the plate's underside at z = -10 up to the
+        HIGHEST point of that trim, which is 3 * tan(20 deg) above the plane's
+        own height of -2.
+
+            length = (-2 + 3 * tan 20) - (-10) = 8 + 1.09191 = 9.09191 mm
+
+        ORACLE: the arithmetic in that line, done by hand from the DSL. A bore
+        measured from anything other than its real trim reports the full 10 mm
+        of plate, and a fastener graded on it engages a boss that is not there.
+
+        HONEST NOTE: for a SINGLE face, BRepTools.UVBounds_s would give the
+        same answer here, because v IS the axial coordinate and the box of the
+        boundary's v-values is the boundary's own range. What the boundary
+        sampling actually buys is the SWEEP — see TestMerging below, where two
+        patches covering the same arc no longer add up to a hole.
+        """
+        pytest.importorskip("build123d")
+        source = "\n".join([
+            "plate = translate([-20, -20, -10], cube(40, 40, 10))",
+            "bore = translate([0, 0, -12], cylinder(r=3, h=14))",
+            # A half-space whose boundary plane passes through the origin, so
+            # rotating it about Y leaves that plane through the origin, and
+            # the translate then puts it at z = -2.
+            "slab = translate([0, 0, -2], "
+            "rotate([0, -20, 0], translate([-100, -100, 0], cube(200, 200, 50))))",
+            "part = plate - bore - slab",
+        ])
+        reply = feat.cylindrical_features({"source": source, "sense": "concave"})
+        assert reply["ok"], reply.get("error")
+        bores = reply["result"]["cylinders"]
+        assert len(bores) == 1, bores
+        expected = 8.0 + 3.0 * math.tan(math.radians(20.0))
+        assert bores[0]["length_mm"] == pytest.approx(expected, abs=1.0e-3)
+        assert bores[0]["length_mm"] < 10.0
+        assert bores[0]["extent_exact"] is True
+
+
+def _arc_face(radius, z_low, z_high, angle_from, angle_to, sense="concave",
+              samples=400):
+    """A stand-in face record whose boundary really covers that arc.
+
+    The points are what `_merge` measures, so a face built here is indexed into
+    angular bins exactly as a sampled OCCT boundary would be.
+    """
+    points = []
+    for i in range(samples):
+        angle = angle_from + (angle_to - angle_from) * (i / float(samples - 1))
+        for z in (z_low, z_high):
+            points.append((radius * math.cos(angle), radius * math.sin(angle), z))
+    return {
+        "origin": (0.0, 0.0, 0.0),
+        "direction": (0.0, 0.0, 1.0),
+        "radius": radius,
+        "v_min": z_low,
+        "v_max": z_high,
+        "sweep": abs(angle_to - angle_from),
+        "points": points,
+        "sense": sense,
+        "area": 1.0,
+    }
+
+
 class TestMerging:
     """The seam split, driven directly — it is the one step with no fixture."""
 
     def test_two_halves_of_one_surface_become_one_feature(self):
-        halves = [
-            {"origin": (0.0, 0.0, 0.0), "direction": (0.0, 0.0, 1.0),
-             "radius": 1.5, "v_min": 0.0, "v_max": 4.0,
-             "sweep": math.pi, "sense": "concave", "area": 1.0},
-            # The other half carries the OPPOSITE axis sense and an origin
-            # further up the line — both of which OCCT does in practice.
-            {"origin": (0.0, 0.0, 4.0), "direction": (0.0, 0.0, -1.0),
-             "radius": 1.5, "v_min": 0.0, "v_max": 4.0,
-             "sweep": math.pi, "sense": "concave", "area": 1.0},
-        ]
-        merged = feat._merge(halves)
+        """The seam split OCCT actually produces, both halves sampled.
+
+        The second half carries the OPPOSITE axis sense and an origin further
+        up the line — both of which OCCT does in practice — so this also pins
+        that the group's frame, not each face's, is what the extents land in.
+        """
+        lower = _arc_face(1.5, 0.0, 4.0, 0.0, math.pi)
+        upper = _arc_face(1.5, 0.0, 4.0, math.pi, 2 * math.pi)
+        upper["origin"] = (0.0, 0.0, 4.0)
+        upper["direction"] = (0.0, 0.0, -1.0)
+        merged = feat._merge([lower, upper])
         assert len(merged) == 1
         entry = feat._reported(merged[0])
-        assert entry["length_mm"] == pytest.approx(4.0, abs=TOL_MM)
+        assert entry["length_mm"] == pytest.approx(4.0, abs=1.0e-6)
         assert entry["sweep_deg"] == pytest.approx(360.0, abs=1.0e-6)
         assert entry["closed"] is True
         assert entry["faces"] == 2
 
+    def test_two_patches_covering_the_SAME_arc_do_not_add_up_to_a_hole(self):
+        """The discriminator for measuring sweep as coverage.
+
+        Two half-turn patches on one cylinder line covering the same 180
+        degrees — two fillets on the two edges of one rounded pocket. Summing
+        their parametric spans gives 360 and calls it a closed hole, which is
+        how a fastener check ends up trying to put a screw in a fillet.
+        A union of occupied bins counts each part of the turn once.
+
+        ORACLE: the geometry itself — half a cylinder is half a cylinder no
+        matter how many faces it was cut into.
+        """
+        merged = feat._merge([
+            _arc_face(1.5, 0.0, 4.0, 0.0, math.pi),
+            _arc_face(1.5, 1.0, 3.0, 0.0, math.pi),
+        ])
+        assert len(merged) == 1
+        entry = feat._reported(merged[0])
+        assert entry["sweep_deg"] == pytest.approx(180.0, abs=6.0)
+        assert entry["closed"] is False
+        assert entry["faces"] == 2
+
+    def test_two_bores_on_one_line_with_a_gap_are_two_features(self):
+        """Collinear is not the same as continuous.
+
+        Two 4 mm bores 10 mm apart on one axis — a hole through two plates of
+        a stack, drilled to different depths. Merging them reports one 18 mm
+        bore, and a screw graded against that engages air.
+        """
+        merged = feat._merge([
+            _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi),
+            _arc_face(1.5, 14.0, 18.0, 0.0, 2 * math.pi),
+        ])
+        assert len(merged) == 2
+        assert sorted(round(feat._reported(g)["length_mm"], 6) for g in merged) \
+            == [4.0, 4.0]
+
     def test_a_parallel_bore_beside_it_is_a_separate_feature(self):
-        pair = [
-            {"origin": (0.0, 0.0, 0.0), "direction": (0.0, 0.0, 1.0),
-             "radius": 1.5, "v_min": 0.0, "v_max": 4.0,
-             "sweep": 2 * math.pi, "sense": "concave", "area": 1.0},
-            {"origin": (5.0, 0.0, 0.0), "direction": (0.0, 0.0, 1.0),
-             "radius": 1.5, "v_min": 0.0, "v_max": 4.0,
-             "sweep": 2 * math.pi, "sense": "concave", "area": 1.0},
-        ]
+        pair = [_arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi),
+                _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi)]
+        pair[1]["origin"] = (5.0, 0.0, 0.0)
+        pair[1]["points"] = [(x + 5.0, y, z) for (x, y, z) in pair[1]["points"]]
         assert len(feat._merge(pair)) == 2
 
     def test_a_bore_and_a_boss_on_one_axis_do_not_merge(self):
         """A pin standing in a bore shares the axis and not the material."""
-        pair = [
-            {"origin": (0.0, 0.0, 0.0), "direction": (0.0, 0.0, 1.0),
-             "radius": 1.5, "v_min": 0.0, "v_max": 4.0,
-             "sweep": 2 * math.pi, "sense": "concave", "area": 1.0},
-            {"origin": (0.0, 0.0, 0.0), "direction": (0.0, 0.0, 1.0),
-             "radius": 1.5, "v_min": 0.0, "v_max": 4.0,
-             "sweep": 2 * math.pi, "sense": "convex", "area": 1.0},
-        ]
+        pair = [_arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi),
+                _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi, sense="convex")]
         assert len(feat._merge(pair)) == 2
+
+    def test_a_face_with_no_samplable_boundary_says_its_extent_is_not_exact(self):
+        """The fallback exists, and it is labelled.
+
+        A degenerate face contributes no boundary points, so the parametric
+        box is used — and `extent_exact` false is how a reader knows the length
+        may be the box's and not the trim's.
+        """
+        blind = _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi)
+        blind["points"] = []
+        entry = feat._reported(feat._merge([blind])[0])
+        assert entry["extent_exact"] is False
+        assert entry["length_mm"] == pytest.approx(4.0, abs=TOL_MM)

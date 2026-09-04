@@ -27,8 +27,10 @@ extends RefCounted
 ## dominates. The allowance comes from the clearance the screw actually has:
 ## ISO 273 medium series, so an M3 through a 3.4 mm hole may wander (3.4-3)/2 =
 ## 0.2 mm radially, i.e. a 0.4 mm zone. A diameter with no ISO 273 medium entry
-## is NOT interpolated — the reply says there is no entry and carries the
-## numbers ungraded unless the caller states clearance_hole_dia_mm.
+## is NOT interpolated: the row comes back with graded=false, allowed_mm null
+## and pass null, the offsets still measured, and it does NOT fail the screw —
+## nobody said what clearance that screw gets, which is not the same as the
+## joint being wrong. State clearance_hole_dia_mm to have it graded.
 ##
 ## PATH — a fan of rays along the screw axis: one on the axis, a ring at the
 ## shank radius, and a ring at the head radius. The rings are spaced so no gap
@@ -40,11 +42,13 @@ extends RefCounted
 ## bore's mouth, the head from outside to the seat. Anything hit inside that
 ## span is an obstruction and is reported with its node and its point — which
 ## includes the reference's own hole wall when the hole is too small for the
-## screw, and that is the correct answer, not a false positive. Each span stops
-## just SHORT of its own end plane, because a head ray meets the board AT the
-## seat and that is the screw arriving; and a RING ray sees only the
-## references, because the solid it would meet on that span is the boss it is
-## heading into. The axis ray sees both.
+## screw, and that is the correct answer, not a false positive. The SHANK fan
+## also sees the solid, so a rib the shell grew across the bore is caught; the
+## two hits that are the screw ARRIVING — the bore wall inside its own radius
+## and span, and the boss's end face within a band of the mouth derived from
+## the boss's own measured tilt — are filtered out by name. The HEAD ring sees
+## the references only: it never has to reach the bore, and the solid on its
+## span is the top of the boss it is sitting on.
 ##
 ## ENGAGEMENT — the overlap of the screw's length, measured from the seat, with
 ## the bore's axial extent. Graded against a material default: thread-forming
@@ -126,6 +130,9 @@ const OUTSIDE_MARGIN_MM: float = 5.0
 
 ## How far past a hit the next cast starts when walking a ray through a stack.
 const CROSSING_ADVANCE_MM: float = 0.0002
+## A solid surface this close to the bore's own radius IS the bore wall. It
+## absorbs the chordal error of a tessellated wall, nothing more.
+const BORE_WALL_TOLERANCE_MM: float = 0.05
 ## How far short of its end plane a path span stops. A shank ring ray at the
 ## thread radius meets the boss's own face AT the mouth of the bore, and a head
 ## ring ray meets the board AT the seat: both are the screw ARRIVING, and a
@@ -362,10 +369,19 @@ func _one_screw(
 	# Axial coordinates are distances along `direction` from the hole centre.
 	# One frame for the whole screw, so seat, bore and screw length are
 	# comparable numbers rather than three sets of points.
-	var half_depth := float(hole.get("depth_mm", 0.0)) * 0.5
-	if half_depth <= 0.0:
-		half_depth = float(hole.get("extent_mm", 0.0)) * 0.5
-	var seat_t := -half_depth
+	# The seat plane is half the plate's thickness above the hole's centre, so
+	# a hole record with no thickness in it has NO seat — and defaulting to
+	# zero would put the seat at the centre of the plate and shift every axial
+	# number by half of it, silently. Refuse instead.
+	var thickness := float(hole.get("depth_mm", 0.0))
+	if thickness <= 0.0:
+		thickness = float(hole.get("extent_mm", 0.0))
+	if thickness <= 0.0:
+		return _unmeasurable(hole, bore,
+			"the hole record carries neither depth_mm nor extent_mm, so there "
+			+ "is no seat plane to measure the screw from; "
+			+ "minerva_cad_find_holes reports depth_mm on a verified hole")
+	var seat_t := -thickness * 0.5
 	var bore_entry_t := (bore_start - hole_centre).dot(direction)
 	var bore_exit_t := (bore_end - hole_centre).dot(direction)
 	if bore_exit_t < bore_entry_t:
@@ -394,19 +410,43 @@ func _one_screw(
 	# The shank has to be clear from outside down to the mouth of the bore.
 	# Past that it is expected to meet material: a thread-forming screw bites,
 	# and a check that called that an obstruction would fail every good joint.
+	#
+	# The MOUTH BAND is derived, not guessed. The only solid the shank fan can
+	# legitimately meet on this span is the boss's own end face, and the one
+	# thing that lifts part of that face above the mouth of its bore is the
+	# boss's own tilt. The rise is the tilt's tangent times how far from the
+	# BORE's axis the ray is — and the fan is centred on the HOLE's axis, so
+	# that reach is the fan radius plus the offset between the two. Both
+	# numbers have already been measured by the lines above; nothing here is a
+	# tolerance somebody chose.
+	var mouth_reach := dia * 0.5 + float(coaxiality["centre_offset_mm"])
+	var mouth_band := mouth_reach \
+		* tan(deg_to_rad(float(coaxiality["axis_angle_deg"]))) \
+		+ PATH_END_EPSILON_MM
+	var expected := {
+		"point": bore_start,
+		"axis": bore_axis,
+		"radius": float(bore.get("dia_mm", 0.0)) * 0.5,
+		"from_t": bore_entry_t,
+		"to_t": bore_exit_t,
+		"band": mouth_band,
+		"datum": hole_centre,
+		"direction": direction,
+	}
 	var shank := _fan_clear(
 		gauge, state, solid_state, checks, origin, direction,
 		dia * 0.5, start_t, bore_entry_t - PATH_END_EPSILON_MM,
-		hole_centre, mask, reference_scope
+		hole_centre, mask, reference_scope, expected
 	)
-	var head := {"clear": true, "obstructions": [], "rays": 0, "landed": 0}
+	var head := {"clear": true, "obstructions": [], "rays": 0}
+	var seat := {"landed": 0, "rays": 0}
 	if head_dia > 0.0:
 		head = _fan_clear(
 			gauge, state, solid_state, checks, origin, direction,
 			head_dia * 0.5, start_t, seat_t - PATH_END_EPSILON_MM,
-			hole_centre, mask, reference_scope
+			hole_centre, mask, reference_scope, {}
 		)
-		head["landed"] = _seat_support(
+		seat = _seat_support(
 			gauge, state, origin, direction, head_dia * 0.5, dia * 0.5,
 			seat_t, hole_centre, mask, reference_scope
 		)
@@ -436,14 +476,26 @@ func _one_screw(
 	if not bool(shank["clear"]):
 		row["obstructions"] = shank["obstructions"]
 	if head_dia > 0.0:
-		row["head_seat_supported"] = float(head["landed"]) / maxf(1.0, float(head["rays"]))
+		# The fraction of the SEAT RING that landed, over that ring's own ray
+		# count. The head fan is a different ring at a different radius, and
+		# dividing by it could never reach 1.0 on a perfectly seated screw.
+		row["head_seat_supported"] = float(seat["landed"]) \
+			/ maxf(1.0, float(seat["rays"]))
+		row["head_seat_rays"] = int(seat["rays"])
 		if not head_seat_clear:
 			row["head_obstructions"] = head["obstructions"]
 	if bore.get("source", "b_rep") == "b_rep":
 		var agreement := _agreement(bore, fitted, direction)
 		if not agreement.is_empty():
 			row["fit_agreement"] = agreement
-	row["pass"] = bool(coaxiality["zone"].get("pass", false)) \
+	# An UNGRADED coaxiality does not fail the screw. There is no allowance to
+	# judge it against, the numbers are still reported, and failing on the
+	# absence of a table entry would read as "this joint is wrong" when what
+	# happened is "nobody said what clearance this screw gets".
+	var zone: Dictionary = coaxiality["zone"]
+	var coaxiality_ok := (not bool(zone.get("graded", false))) \
+		or bool(zone.get("pass", false))
+	row["pass"] = coaxiality_ok \
 		and bool(shank["clear"]) and engagement_ok and head_seat_clear
 	row["why"] = _why(row)
 	return row
@@ -487,14 +539,18 @@ func _coaxiality(
 			+ "the engaged length",
 	}
 	if allowance.has("radial_mm"):
+		zone["graded"] = true
 		zone["allowed_mm"] = float(allowance["radial_mm"])
 		zone["allowed_zone_dia_mm"] = float(allowance["radial_mm"]) * 2.0
 		zone["clearance_hole_dia_mm"] = float(allowance["hole_dia_mm"])
 		zone["clearance_source"] = str(allowance["source"])
 		zone["pass"] = zone_dia <= float(allowance["radial_mm"]) * 2.0
 	else:
+		# UNGRADED, which is not the same as failed: the offsets and the zone
+		# are measured and reported, and only the verdict is withheld.
+		zone["graded"] = false
 		zone["allowed_mm"] = null
-		zone["pass"] = false
+		zone["pass"] = null
 		zone["clearance_source"] = str(allowance["reason"])
 	return {
 		"zone": zone,
@@ -562,14 +618,20 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 ## an obstruction narrower than it can pass between two rays unseen. Every ray
 ## starts at `origin`, which the caller has already put outside every body.
 ##
-## WHICH BODIES COUNT, AND WHY THEY DIFFER BY RAY. A ring ray sees REFERENCE
-## geometry only. The solid it would otherwise meet on this span is the boss
-## the screw is heading into — its own top face, which a tilted or chamfered
-## boss lifts above the mouth of its bore across the width of the ring — and
-## calling that an obstruction fails every real joint. The AXIS ray sees both,
-## because at the centre it travels down the open bore and cannot meet the
-## boss: the only solid it can hit before the mouth is something genuinely in
-## the way, a lid or a rib modelled over the hole.
+## WHICH BODIES COUNT. Every ray sees the references. Whether it also sees the
+## SOLID depends on `expected`: pass the bore's geometry and the fan sees the
+## solid too, with the hits that are the screw ARRIVING filtered out —
+##
+##   a hit inside the bore's own radius and inside its axial span is the bore
+##   wall or its mouth;
+##   a hit within `band` of the mouth is the boss's own end face, which its
+##   tilt lifts above the mouth across the width of the fan.
+##
+## Anything else on the solid is a genuine obstruction: a rib modelled across
+## the bore, a lid over the hole, a wall the shell grew into the gap. Pass an
+## empty `expected` and the fan sees the references only — which is what the
+## HEAD ring does, because the head never has to reach the bore and the solid
+## it would meet on its own span is the top of the boss it is sitting on.
 func _fan_clear(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -582,21 +644,25 @@ func _fan_clear(
 	to_t: float,
 	datum: Vector3,
 	mask: int,
-	reference_scope: String
+	reference_scope: String,
+	expected: Dictionary
 ) -> Dictionary:
 	var obstructions: Array = []
 	var rays := _ring_points(direction, radius)
 	var travel := (to_t - from_t) + OUTSIDE_MARGIN_MM * 2.0 + (datum - origin).length()
+	var see_solid := not expected.is_empty()
 	for index in range(rays.size()):
 		var offset: Vector3 = rays[index]
 		var start: Vector3 = origin + offset
 		var finish: Vector3 = start + direction * travel
-		# rays[0] is the axis — see the note above on which bodies count.
 		for hit in _crossings(gauge, state, solid_state, checks, start, finish,
-				mask, reference_scope, index == 0):
+				mask, reference_scope, see_solid):
 			var crossing: Dictionary = hit
 			var t: float = (crossing["point"] as Vector3 - datum).dot(direction)
 			if t < from_t or t > to_t:
+				continue
+			if bool(crossing.get("solid", false)) \
+					and _is_the_screw_arriving(crossing["point"], t, expected):
 				continue
 			if obstructions.size() < MAX_OBSTRUCTIONS:
 				obstructions.append({
@@ -614,13 +680,49 @@ func _fan_clear(
 	}
 
 
-## How much of the head ring actually lands on material at the seat plane. A
-## head hanging half over the edge of its boss is "clear" — nothing is in its
-## way — and still badly seated, and only this number says so.
+## Is this hit on the solid the screw arriving at its own boss rather than
+## something in its way? See _fan_clear's note for the two cases and why they
+## are the only two.
+func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> bool:
+	if expected.is_empty():
+		return true
+	if t >= float(expected["from_t"]) - float(expected["band"]):
+		# The boss's own end face, or anything at or past the mouth.
+		return true
+	var axis: Vector3 = expected["axis"]
+	var offset: Vector3 = point - (expected["point"] as Vector3)
+	var radial := (offset - axis * offset.dot(axis)).length()
+	if radial > float(expected["radius"]) + BORE_WALL_TOLERANCE_MM:
+		return false
+	return t >= float(expected["from_t"]) and t <= float(expected["to_t"])
+
+
+## A screw that cannot be measured at all, reported as a row rather than left
+## out. A missing row reads as "there was no screw there"; this reads as "the
+## hole record was not good enough to measure from", which is what happened.
+func _unmeasurable(hole: Dictionary, bore: Dictionary, reason: String) -> Dictionary:
+	return {
+		"reference": str(hole.get("reference", "")),
+		"node": str(hole.get("node", "")),
+		"axis_source": str(bore.get("source", "b_rep")),
+		"measured": false,
+		"pass": false,
+		"error": reason,
+		"why": reason,
+	}
+
+
+## How much of the seat ring actually lands on material at the seat plane, as
+## {landed, rays}. A head hanging half over the edge of its boss is "clear" —
+## nothing is in its way — and still badly seated, and only this number says so.
 ##
 ## The ring is sampled between the shank radius and the head radius so a ray
 ## does not simply fall down the clearance hole and report an unsupported head
-## on a perfectly good joint.
+## on a perfectly good joint. It reports its OWN ray count rather than leaving
+## the caller to divide by some other fan's: the axis point is dropped here (it
+## goes straight down the clearance hole and can never land), so a ring whose
+## every ray lands reads as exactly 1.0 and not as some fraction of a ring it
+## was never part of.
 func _seat_support(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -632,11 +734,15 @@ func _seat_support(
 	datum: Vector3,
 	mask: int,
 	reference_scope: String
-) -> int:
+) -> Dictionary:
 	var radius := (head_radius + shank_radius) * 0.5
+	var ring := _ring_points(direction, radius)
 	var landed := 0
-	for offset in _ring_points(direction, radius):
-		var start: Vector3 = origin + offset
+	var rays := 0
+	# From 1: rays[0] is the axis, which travels down the clearance hole.
+	for index in range(1, ring.size()):
+		rays += 1
+		var start: Vector3 = origin + (ring[index] as Vector3)
 		var finish: Vector3 = start + direction * ((datum - origin).length() * 2.0 + head_radius)
 		var hit := _reference_ray(gauge, state, start, finish, mask, reference_scope)
 		if hit.is_empty():
@@ -644,7 +750,7 @@ func _seat_support(
 		var t: float = (hit["position"] as Vector3 - datum).dot(direction)
 		if absf(t - seat_t) <= RING_SPACING_MM:
 			landed += 1
-	return landed
+	return {"landed": landed, "rays": rays}
 
 
 ## The offsets of one fan: the axis, then a ring at `radius` with enough rays
@@ -706,7 +812,8 @@ func _crossings(
 			var point: Vector3 = solid_hit["position"]
 			if chosen.is_empty() or cursor.distance_to(point) < cursor.distance_to(next):
 				next = point
-				chosen = {"point": point, "node": "<solid>", "reference": ""}
+				chosen = {"point": point, "node": "<solid>", "reference": "",
+					"solid": true}
 		if chosen.is_empty():
 			break
 		out.append(chosen)
@@ -1038,9 +1145,7 @@ func _report(
 ## eight numbers does not tell a reader which one to act on.
 func _why(row: Dictionary) -> String:
 	var zone: Dictionary = row.get("coaxiality", {}) as Dictionary
-	if not bool(zone.get("pass", false)):
-		if zone.get("allowed_mm", null) == null:
-			return "coaxiality is not graded: " + str(zone.get("clearance_source", ""))
+	if bool(zone.get("graded", false)) and not bool(zone.get("pass", false)):
 		return "the bore axis is %.3f mm out of a %.3f mm coaxiality zone (%.2f degrees of tilt)" \
 			% [float(zone.get("zone_dia_mm", 0.0)) * 0.5,
 			   float(zone.get("allowed_zone_dia_mm", 0.0)),
