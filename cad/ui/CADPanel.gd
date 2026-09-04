@@ -1198,7 +1198,8 @@ func _show_eval_error(message: String) -> void:
 func _hide_eval_error() -> void:
 	if not _import_notice.is_empty():
 		var buffer: Object = _shared_buffer()
-		if buffer != null and not str(buffer.get("file_path")).is_empty():
+		var buffer_path: Variant = buffer.get("file_path") if buffer != null else null
+		if buffer_path is String and not (buffer_path as String).is_empty():
 			_import_notice = ""
 		else:
 			_show_eval_error(_import_notice)
