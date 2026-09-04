@@ -51,7 +51,8 @@ except Exception:
 def _evaluate(params: dict) -> dict:
     """Run the full mcad pipeline (lex → parse → translate → tessellate).
 
-    Returns {ok: True, result: {shape_name, mesh: {vertices, faces}, edges}}
+    Returns {ok: True, result: {shape_name, mesh: {vertices, faces}, edges,
+    references}}
     or {ok: False, error: {kind, message, ...}}.
 
     Maintains the module-level ``_last_program`` cache (design §5): if the
@@ -161,6 +162,7 @@ def _evaluate(params: dict) -> dict:
         "shape_name": result.shape_name,
         "mesh": result.mesh,
         "edges": result.edges,
+        "references": result.references,
     }
     _last_program = (h, result_dict)
     return {"ok": True, "result": result_dict}

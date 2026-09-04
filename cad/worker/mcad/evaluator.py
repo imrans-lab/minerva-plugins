@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,9 @@ class EvaluationResult:
     mesh: dict[str, list]
     edges: list[dict[str, Any]]
     shape_name: str
+    # Foreign mesh files the source referenced, each with its composed pose.
+    # The worker never opens them; the panel resolves and loads them.
+    references: list[dict[str, Any]] = field(default_factory=list)
 
 
 class EvaluationError(Exception):
@@ -56,8 +59,19 @@ def evaluate_source(
     except (ParseError, TranslatorError) as exc:
         raise EvaluationError(str(exc)) from exc
 
+    references = translator.get_references()
+
     shape_name, shape = translator.last_part()
     if shape_name is None or shape is None:
+        # A document made only of references is legitimate: the panel has
+        # something to show even though the B-Rep side is empty.
+        if references:
+            return EvaluationResult(
+                mesh={"vertices": [], "faces": []},
+                edges=[],
+                shape_name="",
+                references=references,
+            )
         raise EvaluationError(
             "No 3D part produced. Define a shape with extrude(...) before evaluating."
         )
@@ -97,6 +111,7 @@ def evaluate_source(
         mesh=mesh,
         edges=edge_registry,
         shape_name=shape_name,
+        references=references,
     )
 
 

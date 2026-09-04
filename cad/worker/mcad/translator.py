@@ -86,6 +86,14 @@ from .ast_nodes import (
     While,
 )
 from .edge_numbering import number_edges_2d, number_edges_extruded
+from .reference import (
+    MeshReference,
+    MeshReferenceError,
+    make_reference,
+    reflection,
+    rotation,
+    translation,
+)
 
 
 class TranslatorError(Exception):
@@ -139,6 +147,10 @@ class Translator:
         self._module_defs: dict[str, ModuleDef] = {}
         # Active call stack for recursion detection (module names).
         self._call_stack: list[str] = []
+        # Foreign mesh references, keyed by the top-level name they were bound
+        # to. A reference only reaches the eval result once it has a name, so
+        # the panel always has something to address it by.
+        self._references: dict[str, MeshReference] = {}
 
     @property
     def env(self) -> dict[str, Any]:
@@ -194,6 +206,23 @@ class Translator:
         """Return the stored logical edge registry for an extruded profile."""
         return list(self._logical_edge_registry.get(shape_name, []))
 
+    def get_references(self) -> list[dict[str, Any]]:
+        """Return the posed mesh references, in the order they were bound."""
+        return [ref.to_dict() for ref in self._references.values()]
+
+    @staticmethod
+    def _reject_reference(value: Any, operation: str) -> None:
+        """Refuse any geometry operation that involves a mesh reference.
+
+        A reference has no B-Rep to cut, fillet or shell, so silently ignoring
+        it would leave the user with a document that looks like it worked.
+        """
+        if isinstance(value, MeshReference):
+            raise TranslatorError(
+                f"{operation} cannot be applied to mesh reference {value.label}"
+                " — a reference is posed, never altered"
+            )
+
     # ------------------------------------------------------------------
     # Statement dispatch
     # ------------------------------------------------------------------
@@ -242,6 +271,21 @@ class Translator:
     def _eval_assignment(self, node: Assignment) -> None:
         value = self._eval_expr(node.value)
         self._bind_value(node.name, value)
+        # Rebinding a name that held a reference retires that reference; the
+        # report mirrors the final environment, not every binding ever made.
+        self._references.pop(node.name, None)
+
+        if isinstance(value, MeshReference):
+            # Only top-level bindings are reported: a reference passed through
+            # a module body would otherwise appear twice, once under its
+            # module-local name and once under the caller's.
+            if len(self._env_stack) == 1:
+                named = value.renamed(node.name)
+                self.env[node.name] = named
+                self._references[node.name] = named
+            # A reference carries no profile vertices and no edges, so none of
+            # the solid bookkeeping below applies to it.
+            return
 
         # Track vertices from rect() or at-clause for edge numbering
         if self._last_shape_vertices:
@@ -370,6 +414,9 @@ class Translator:
         left = self._eval_expr(node.left)
         right = self._eval_expr(node.right)
 
+        self._reject_reference(left, f"operator '{node.op}'")
+        self._reject_reference(right, f"operator '{node.op}'")
+
         # Comparison ops — both sides must be numeric (bools allowed as ints).
         if node.op in ("<", ">", "<=", ">=", "==", "!="):
             if isinstance(left, bool) or isinstance(right, bool):
@@ -434,6 +481,8 @@ class Translator:
                 raise TranslatorError("Unary '-' not supported on bool")
             if isinstance(operand, (int, float)):
                 return -operand
+            if isinstance(operand, MeshReference):
+                self._reject_reference(operand, "unary '-'")
             raise TranslatorError(
                 f"Unary '-' not supported on {type(operand).__name__}"
             )
@@ -454,6 +503,9 @@ class Translator:
             return value != 0
         if isinstance(value, list):
             return len(value) > 0
+        if isinstance(value, MeshReference):
+            # A reference always exists; it just isn't geometry.
+            return True
         if hasattr(value, "tessellate") and hasattr(value, "volume"):
             return True
         raise TranslatorError(
@@ -610,6 +662,8 @@ class Translator:
             return self._make_cylinder(node)
         if node.name == "polyhedron":
             return self._make_polyhedron(node)
+        if node.name == "mesh":
+            return self._make_mesh(node)
         if node.name == "translate":
             return self._apply_translate(node)
         if node.name == "rotate":
@@ -969,9 +1023,35 @@ class Translator:
             raise TranslatorError("cylinder() radii must be numeric")
         return (float(height), None, float(radius1), float(radius2))
 
+    def _make_mesh(self, node: FuncCall) -> Any:
+        """``mesh("path", units=, up=)`` — a foreign mesh file, never opened.
+
+        Evaluates to an immutable reference carrying the identity pose; the
+        transform functions compose onto it in statement order.
+        """
+        if len(node.args) != 1:
+            raise TranslatorError(
+                'mesh() requires exactly 1 positional argument: mesh("path")'
+            )
+        unexpected = set(node.kwargs) - {"units", "up"}
+        if unexpected:
+            raise TranslatorError(
+                "mesh() got unexpected keyword argument(s): "
+                + ", ".join(sorted(unexpected))
+            )
+        path = self._eval_expr(node.args[0])
+        units = self._eval_expr(node.kwargs["units"]) if "units" in node.kwargs else None
+        up = self._eval_expr(node.kwargs["up"]) if "up" in node.kwargs else None
+        try:
+            return make_reference(path, units=units, up=up)
+        except MeshReferenceError as exc:
+            raise TranslatorError(str(exc)) from exc
+
     def _apply_translate(self, node: FuncCall) -> Any:
         """Translate a shape using OpenSCAD-style translate([x, y, z], shape)."""
         offset_values, shape = self._coerce_transform_args(node, "translate")
+        if isinstance(shape, MeshReference):
+            return shape.posed(translation(offset_values))
         result = shape.moved(Location(tuple(offset_values), (0.0, 0.0, 0.0)))
         self._pending_edge_registry = self._enumerate_edges(result)
         return result
@@ -979,6 +1059,8 @@ class Translator:
     def _apply_rotate(self, node: FuncCall) -> Any:
         """Rotate a shape using OpenSCAD-style rotate([rx, ry, rz], shape)."""
         rotation_values, shape = self._coerce_transform_args(node, "rotate")
+        if isinstance(shape, MeshReference):
+            return shape.posed(rotation(rotation_values))
         result = shape.moved(Location((0.0, 0.0, 0.0), tuple(rotation_values)))
         self._pending_edge_registry = self._enumerate_edges(result)
         return result
@@ -986,6 +1068,8 @@ class Translator:
     def _apply_scale(self, node: FuncCall) -> Any:
         """Scale a 3D solid using OpenSCAD-style scale([sx, sy, sz], shape)."""
         scale_values, shape = self._coerce_transform_args(node, "scale")
+        if isinstance(shape, MeshReference):
+            return shape.resized(scale_values)
         if not self._is_solid(shape):
             raise TranslatorError("scale() second argument must be a 3D solid")
         result = bd_scale(shape, by=tuple(scale_values))
@@ -995,6 +1079,11 @@ class Translator:
     def _apply_mirror(self, node: FuncCall) -> Any:
         """Mirror a 3D solid about an origin-centered plane normal."""
         normal_values, shape = self._coerce_transform_args(node, "mirror")
+        if isinstance(shape, MeshReference):
+            try:
+                return shape.posed(reflection(normal_values))
+            except MeshReferenceError as exc:
+                raise TranslatorError(str(exc)) from exc
         if not self._is_solid(shape):
             raise TranslatorError("mirror() second argument must be a 3D solid")
 
@@ -1024,7 +1113,7 @@ class Translator:
             raise TranslatorError(f"{name}() vector values must be numeric")
 
         shape = self._eval_expr(node.args[1])
-        if not hasattr(shape, "moved"):
+        if not isinstance(shape, MeshReference) and not hasattr(shape, "moved"):
             raise TranslatorError(f"{name}() second argument must be a shape")
         return ([float(value) for value in raw_values], shape)
 
@@ -1035,6 +1124,7 @@ class Translator:
     def _eval_at_clause(self, node: AtClause) -> Any:
         """Position a shape at (x, y) using Build123d Location."""
         shape = self._eval_expr(node.target)
+        self._reject_reference(shape, "the 'at' placement clause")
 
         if node.anchor != "center":
             raise TranslatorError(f"Unsupported placement anchor: {node.anchor}")
@@ -1074,6 +1164,7 @@ class Translator:
             profile_name = node.profile.name
 
         profile = self._eval_expr(node.profile)
+        self._reject_reference(profile, "extrude()")
         length = self._eval_expr(node.length)
 
         if not isinstance(length, (int, float)):
@@ -1131,6 +1222,7 @@ class Translator:
                 raise TranslatorError("loft section positions must be numeric")
 
             profile = self._eval_expr(section.profile)
+            self._reject_reference(profile, "loft")
             if self._is_solid(profile):
                 raise TranslatorError("loft sections must be closed 2D profiles, not solids")
             if not hasattr(profile, "moved"):
@@ -1194,6 +1286,7 @@ class Translator:
         shape = self.env.get(shape_name)
         if shape is None:
             raise TranslatorError(f"Undefined variable: {shape_name}")
+        self._reject_reference(shape, "fillet")
 
         targets = self._resolve_edge_targets(
             shape, shape_name, edge_num_node, "fillet"
@@ -1234,6 +1327,7 @@ class Translator:
         shape = self.env.get(shape_name)
         if shape is None:
             raise TranslatorError(f"Undefined variable: {shape_name}")
+        self._reject_reference(shape, "chamfer")
 
         targets = self._resolve_edge_targets(
             shape, shape_name, edge_num_node, "chamfer"
@@ -1299,6 +1393,7 @@ class Translator:
         shape = self.env.get(shape_name)
         if shape is None:
             raise TranslatorError(f"Undefined variable: {shape_name}")
+        self._reject_reference(shape, "shell")
         if not self._is_solid(shape):
             raise TranslatorError("shell target must be a 3D solid")
 
@@ -2037,6 +2132,7 @@ class Translator:
         shape = self._lookup(node.name)
         if shape is None:
             raise TranslatorError(f"Undefined variable: {node.name}")
+        self._reject_reference(shape, "export")
         if isinstance(shape, (int, float, bool, str, list, tuple)):
             raise TranslatorError(
                 f"export target '{node.name}' must be a 3D shape, got "

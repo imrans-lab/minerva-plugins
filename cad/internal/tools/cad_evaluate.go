@@ -1,7 +1,8 @@
 // Package tools — cad.evaluate tool registration and handler.
 //
 // Evaluate .mcad source: full pipeline (lex → parse → translate → tessellate).
-// Returns {shape_name, mesh: {vertices, faces}, edges} for the panel to render.
+// Returns {shape_name, mesh: {vertices, faces}, edges, references} for the panel
+// to render. References are posed mesh() files the worker never opens.
 // Uses the worker's last_program cache when the source matches a recently-
 // evaluated program.
 //
@@ -21,7 +22,7 @@ import (
 // Evaluate is the MCP tool spec for cad.evaluate.
 var Evaluate = ToolSpec{
 	Name:        "cad.evaluate",
-	Description: "Evaluate .mcad DSL source and return the resulting mesh + edges. Returns {shape_name, mesh:{vertices,faces}, edges:[...]}. Uses the worker's last_program cache to skip re-tessellation when the source matches a recently-evaluated program.",
+	Description: "Evaluate .mcad DSL source and return the resulting mesh + edges. Returns {shape_name, mesh:{vertices,faces}, edges:[...], references:[{name,path,units,up,matrix}]}. Uses the worker's last_program cache to skip re-tessellation when the source matches a recently-evaluated program.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
