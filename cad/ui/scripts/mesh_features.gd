@@ -49,6 +49,11 @@ const DEFAULT_REGION_ANGLE_DEG: float = 25.0
 ## primitive perfectly and means nothing.
 const MIN_REGION_FACES: int = 3
 
+## A part whose signed volume is under this fraction of its own bounding cube
+## is treated as an open sheet with no inside, and its winding is not read from
+## the volume.
+const OPEN_SHELL_FRACTION: float = 0.00001
+
 ## Bins used to measure how much of a full turn a cylindrical region covers.
 ## A hole wall covers all of it; a filleted corner covers a quarter.
 const ANGULAR_BINS: int = 36
@@ -210,11 +215,22 @@ static func analyze_soup(
 	normals.resize(face_count)
 	var areas := PackedFloat32Array()
 	areas.resize(face_count)
+	# Which corner order points OUTWARD is a property of the file, not a
+	# constant. Godot's own sources — a CSG bake, and a glTF whose importer
+	# rewinds the file on the way in — wind a front face CLOCKWISE seen from
+	# outside, so their outward normal is (c-a) x (b-a); a file wound the other
+	# way needs (b-a) x (c-a), and taking the wrong one turns every hole into a
+	# boss. The signed volume sum a . (b x c) / 6 decides it, measured PER
+	# CLOSED PART so that one inward-wound body in a soup cannot be cancelled
+	# out by an outward-wound neighbour: negative means clockwise. A part whose
+	# volume is ~0 is an open sheet with no inside to be outward from, and falls
+	# back to the clockwise reading the two known sources use.
+	var clockwise := _clockwise_by_part(points, corners, face_count)
 	for f in range(face_count):
 		var a := points[corners[f * 3]]
 		var b := points[corners[f * 3 + 1]]
 		var c := points[corners[f * 3 + 2]]
-		var cross := (b - a).cross(c - a)
+		var cross := (c - a).cross(b - a) if clockwise[f] else (b - a).cross(c - a)
 		var length := cross.length()
 		areas[f] = length * 0.5
 		normals[f] = (cross / length) if length > 0.000001 else Vector3.ZERO
@@ -260,6 +276,68 @@ static func concave_cylinders(
 # ---------------------------------------------------------------------------
 # Weld and segment
 # ---------------------------------------------------------------------------
+
+## Winding sense per face: true where the face's own closed part is wound
+## clockwise seen from outside, which is the sense Godot's own sources use.
+##
+## Faces are grouped into parts by SHARED WELDED VERTICES — two triangles that
+## touch belong to the same shell — and each part's signed volume,
+## sum a . (b x c) / 6, is accumulated on its own. Its sign is the winding
+## (negative = clockwise), and doing it per part means a soup holding one
+## inward-wound body and one outward-wound body gets one answer each instead of
+## a single sum in which the larger body decides for the smaller.
+##
+## The volume is taken about the part's OWN centre. That changes nothing for a
+## closed shell, and it is what makes an open sheet — which has no volume to
+## measure — sum to nearly nothing instead of to whatever its distance from the
+## world origin implies. A part whose volume is negligible beside its own size
+## therefore falls back to the clockwise reading both known mesh sources use.
+static func _clockwise_by_part(
+	points: PackedVector3Array,
+	corners: PackedInt32Array,
+	face_count: int
+) -> Array:
+	# The same union-find the region pass uses, over VERTEX ids instead of face
+	# ids: two triangles sharing a welded corner are in the same shell.
+	var parent := PackedInt32Array()
+	parent.resize(points.size())
+	for i in range(points.size()):
+		parent[i] = i
+	for f in range(face_count):
+		_union(parent, corners[f * 3], corners[f * 3 + 1])
+		_union(parent, corners[f * 3 + 1], corners[f * 3 + 2])
+
+	var roots := PackedInt32Array()
+	roots.resize(face_count)
+	var boxes := {}
+	for f in range(face_count):
+		var root := _find_root(parent, corners[f * 3])
+		roots[f] = root
+		for corner in range(3):
+			var point := points[corners[f * 3 + corner]]
+			if boxes.has(root):
+				boxes[root] = (boxes[root] as AABB).expand(point)
+			else:
+				boxes[root] = AABB(point, Vector3.ZERO)
+
+	var volumes := {}
+	for f in range(face_count):
+		var root := roots[f]
+		var centre: Vector3 = (boxes[root] as AABB).get_center()
+		var a := points[corners[f * 3]] - centre
+		var b := points[corners[f * 3 + 1]] - centre
+		var c := points[corners[f * 3 + 2]] - centre
+		volumes[root] = float(volumes.get(root, 0.0)) + a.dot(b.cross(c)) / 6.0
+
+	var out: Array = []
+	out.resize(face_count)
+	for f in range(face_count):
+		var root := roots[f]
+		var span: float = (boxes[root] as AABB).size.length()
+		var volume := float(volumes.get(root, 0.0))
+		out[f] = volume < 0.0 or absf(volume) <= span * span * span * OPEN_SHELL_FRACTION
+	return out
+
 
 ## Merge positions onto a quantised grid. Returns {points, corners}: the welded
 ## point list and three welded ids per triangle, with degenerate triangles

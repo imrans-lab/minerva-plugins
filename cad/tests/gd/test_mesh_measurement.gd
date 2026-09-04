@@ -263,7 +263,64 @@ func _check_proposal(local_parts: Array) -> Array:
 			mirrored_convex == 1,
 			"mirrored gave %d convex cylinders, expected 1" % mirrored_convex)
 
+	# The same plate with every triangle wound the OTHER way, moved by an
+	# ordinary transform that reverses nothing. Godot's own sources all wind
+	# clockwise seen from outside, so a fitter that assumes that order reads
+	# every normal backwards here and reports the five holes as bosses. Only a
+	# fitter that measures the winding — the sign of the part's own signed
+	# volume — still calls them holes.
+	var reversed_parts: Array = [{
+		"mesh": _reversed_winding((local_parts[0] as Dictionary)["mesh"] as ArrayMesh),
+		"transform": Transform3D.IDENTITY,
+		"node": "plate",
+	}]
+	var reversed: Dictionary = MeshFeatures.analyze(reversed_parts)
+	var reversed_concave: Array = MeshFeatures.concave_cylinders(
+			reversed.get("candidates", []), 1.0, 7.0, 0.6)
+	var reversed_convex := 0
+	for entry in reversed.get("candidates", []):
+		if str((entry as Dictionary).get("form", "")) == "convex":
+			reversed_convex += 1
+	check("winding: an inward-wound file still reports its five holes as CONCAVE",
+			reversed_concave.size() == HOLES.size(),
+			"reversed winding gave %d concave cylinders, expected %d"
+				% [reversed_concave.size(), HOLES.size()])
+	check("winding: and its boss as CONVEX",
+			reversed_convex == 1,
+			"reversed winding gave %d convex cylinders, expected 1" % reversed_convex)
+
 	return matched
+
+
+## The same geometry with the corner order of every triangle reversed. Only
+## vertices and indices are carried over: the normals of the original would
+## contradict the new winding, and nothing under test reads them.
+func _reversed_winding(mesh: ArrayMesh) -> ArrayMesh:
+	var out := ArrayMesh.new()
+	for surface in range(mesh.get_surface_count()):
+		var arrays: Array = mesh.surface_get_arrays(surface)
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		if verts.is_empty():
+			continue
+		var indices := PackedInt32Array()
+		var raw_index: Variant = arrays[Mesh.ARRAY_INDEX]
+		if raw_index is PackedInt32Array and (raw_index as PackedInt32Array).size() >= 3:
+			indices = (raw_index as PackedInt32Array).duplicate()
+		else:
+			for i in range(verts.size()):
+				indices.append(i)
+		var triangle := 0
+		while triangle * 3 + 2 < indices.size():
+			var swap := indices[triangle * 3 + 1]
+			indices[triangle * 3 + 1] = indices[triangle * 3 + 2]
+			indices[triangle * 3 + 2] = swap
+			triangle += 1
+		var built: Array = []
+		built.resize(Mesh.ARRAY_MAX)
+		built[Mesh.ARRAY_VERTEX] = verts
+		built[Mesh.ARRAY_INDEX] = indices
+		out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, built)
+	return out
 
 
 # ---------------------------------------------------------------------------
@@ -479,26 +536,51 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 				float(roomy.get("clearance_mm", 0.0)), pocket_clearance,
 				float(roomy.get("clearance_bound_mm", 0.0))])
 
+	# The same pin in OPEN SPACE, 200 mm off the plate along its normal. No
+	# ray meets anything, so the only number available is the search bound
+	# itself — which is a floor on the room there is, not a measurement of it.
+	# Reporting it as clearance_mm would say "there is exactly this much room"
+	# about a place where nothing was found at all.
+	var open_air: Vector3 = _pose * (Vector3(0.0, 200.0, 0.0))
+	var unbounded: Dictionary = await gauge.submit("gauge", {
+		"shape": "cylinder",
+		"size": Vector3(1.0, 1.0, 0.0),
+		"at": open_air,
+		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
+	})
+	var floor_mm := float(unbounded.get("clearance_bound_mm", 0.0)) - 0.5
+	check("gauge: in open space the search bound is reported as a FLOOR, not as a radius",
+			bool(unbounded.get("fits", false))
+				and not bool(unbounded.get("clearance_bounded", true))
+				and not unbounded.has("clearance_mm")
+				and absf(float(unbounded.get("clearance_at_least_mm", 0.0)) - floor_mm) < 0.01
+				and floor_mm > 0.0,
+			"open-space gauge reported %s" % str(unbounded))
+
 	# The fallback path, exercised on its own: a ray grid finds holes with no
 	# fit at all — and finds FEWER of them, which is exactly why it is the
-	# fallback and not the proposal. Of the five holes it can seed at most
-	# three, and the reasons are worth pinning:
-	#   H5 is blind, so its cells are not misses at all;
-	#   H3 is 1.9 mm from the outline, so the neighbour test 4 mm away looks
-	#      off the edge of the plate and refuses to call the cell enclosed;
+	# fallback and not the proposal. Of the five holes it can seed at most four:
+	#   H5 is blind, so its cells are not misses at all and it is never seeded;
+	#   H3 is 1.9 mm from the outline, which puts its CENTRE 3.5 mm in — so the
+	#      neighbour test 4 mm away refuses the outer cells of its cluster (they
+	#      look off the edge) and keeps the inner ones, and the seed comes back
+	#      pulled towards the middle of the plate rather than not at all;
 	#   H4 is tilted, so its clear vertical channel is only 1.7 mm wide and
 	#      whether a 1 mm grid samples it at all is a matter of alignment.
-	# H1 and H2 are always seeded. A run that seeds MORE than three has started
-	# calling the outside world a hole.
+	# H1 and H2 are always seeded. A run that seeds MORE than four has started
+	# calling the outside world a hole, which the next check tests directly.
 	var seeded: Dictionary = await gauge.submit("seed_grid", {
 		"bounds": _world_bounds(),
 		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
 		"pitch_mm": 1.0,
 	})
 	var seeds: Array = seeded.get("seeds", [])
+	var seed_locals: Array = []
+	for entry in seeds:
+		seed_locals.append(inverse * ((entry as Dictionary).get("center", Vector3.ZERO) as Vector3))
 	check("fallback: the ray grid seeds the plain through holes and nothing spurious",
-			seeds.size() >= 2 and seeds.size() <= 3,
-			"seeded %d clusters" % seeds.size())
+			seeds.size() >= 2 and seeds.size() <= 4,
+			"seeded %d clusters at %s" % [seeds.size(), str(seed_locals)])
 	var all_near := seeds.size() > 0
 	for entry in seeds:
 		var seed: Dictionary = entry

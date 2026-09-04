@@ -636,7 +636,58 @@ func _write_fixture_glb(path: String) -> bool:
 		written = document.write_to_filesystem(state, path)
 	root.remove_child(scene_root)
 	scene_root.free()
-	return appended == OK and written == OK
+	if appended != OK or written != OK:
+		return false
+	return _restore_duplicate_leaf_name(path)
+
+
+## Put the file's OWN duplicate name back.
+##
+## The fixture wants a glTF with a node called "Body" in each of two branches,
+## which is ordinary in foreign assemblies. GLTFDocument will not write one:
+## its exporter makes every node name unique across the document, so the second
+## branch's node is written as "Body2" and the case the suite exists to pin
+## never reaches the file. Renaming it inside the written JSON is the only way
+## to build the fixture in-test; the replacement is the same length as what it
+## replaces (the digit becomes a space, which JSON ignores between a value and
+## the comma after it) so every chunk length and offset in the GLB stays valid.
+func _restore_duplicate_leaf_name(path: String) -> bool:
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return false
+	var bytes := file.get_buffer(file.get_length())
+	file.close()
+	var needle := ("\"%s2\"" % TWIN_LEAF).to_utf8_buffer()
+	var replacement := ("\"%s\" " % TWIN_LEAF).to_utf8_buffer()
+	var at := _find_bytes(bytes, needle, 0)
+	if at < 0:
+		return false
+	while at >= 0:
+		for i in range(replacement.size()):
+			bytes[at + i] = replacement[i]
+		at = _find_bytes(bytes, needle, at + replacement.size())
+	var out := FileAccess.open(path, FileAccess.WRITE)
+	if out == null:
+		return false
+	out.store_buffer(bytes)
+	out.close()
+	return true
+
+
+## First index at or after `from` where `needle` appears in `haystack`, or -1.
+func _find_bytes(haystack: PackedByteArray, needle: PackedByteArray, from: int) -> int:
+	var last := haystack.size() - needle.size()
+	var index := from
+	while index <= last:
+		var matched := true
+		for i in range(needle.size()):
+			if haystack[index + i] != needle[i]:
+				matched = false
+				break
+		if matched:
+			return index
+		index += 1
+	return -1
 
 
 func _cleanup() -> void:

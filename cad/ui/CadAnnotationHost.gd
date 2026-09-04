@@ -81,6 +81,9 @@ const WIDE_PANE_IDS: PackedStringArray = ["iso", "top", "front", "right"]
 var _capture_cache: Dictionary = {}     # view_id -> Image
 var _capture_cache_frame: Dictionary = {}  # view_id -> int (Engine.get_frames_drawn() at capture)
 var _capture_pending: Dictionary = {}   # view_id -> bool (one-shot in flight)
+## view_id -> the Callable that one-shot is connected with, so it can be
+## disconnected again when this host leaves the tree.
+var _capture_connections: Dictionary = {}
 
 # ── AnnotationHost overrides ───────────────────────────────────────────────
 
@@ -370,19 +373,41 @@ func _maybe_crop(img: Image, viewport_rect: Rect2) -> Image:
 
 
 ## One-shot frame_post_draw scheduling. De-dup'd per-view via _capture_pending.
+##
+## The connection is KEPT so it can be taken back off RenderingServer when this
+## host goes away. RenderingServer is an engine singleton that outlives every
+## panel: a scheduled capture that never fires — the tab was closed first, or
+## the frame was never drawn at all, which is every headless run — otherwise
+## leaves a Callable bound to a freed host on a singleton's signal, and the
+## engine dies clearing that signal long after the panel is gone.
 func _schedule_capture(view_id: String) -> void:
 	if bool(_capture_pending.get(view_id, false)):
 		return
 	if not _viewport_for.has(view_id):
 		return
+	var pending := Callable(self, "_do_capture_now").bind(view_id)
 	_capture_pending[view_id] = true
-	RenderingServer.frame_post_draw.connect(
-		func() -> void: _do_capture_now(view_id),
-		CONNECT_ONE_SHOT)
+	_capture_connections[view_id] = pending
+	RenderingServer.frame_post_draw.connect(pending, CONNECT_ONE_SHOT)
+
+
+## Take every capture still waiting on RenderingServer back off it.
+##
+## The host is a RefCounted with no place in the tree, so it has no teardown
+## notification of its own that can still touch its members — the panel that
+## owns it calls this from _exit_tree instead.
+func drop_pending_captures() -> void:
+	for view_id in _capture_connections.keys():
+		var pending: Callable = _capture_connections[view_id]
+		if RenderingServer.frame_post_draw.is_connected(pending):
+			RenderingServer.frame_post_draw.disconnect(pending)
+	_capture_connections.clear()
+	_capture_pending.clear()
 
 
 func _do_capture_now(view_id: String) -> void:
 	_capture_pending[view_id] = false
+	_capture_connections.erase(view_id)
 	var vp_variant: Variant = _viewport_for.get(view_id, null)
 	if vp_variant == null or not is_instance_valid(vp_variant):
 		return

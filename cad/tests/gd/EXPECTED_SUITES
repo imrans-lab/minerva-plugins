@@ -54,11 +54,12 @@ test_mesh_import.gd assertions=37
 # contacts, the boss verifying while an oversize and an in-mid-air boss
 # candidate do not, a gauge buried in solid material refusing to fit, a
 # clearance searched to the part's own extent rather than to a multiple of
-# the pin, a mirrored copy keeping the sense of every feature, a pixel-less
-# probe, and the ray-grid fallback's limits). Plus two plate stacks sharing a
-# face: the coincident triangles are two crossings, so a pin in open air
-# beyond them still fits.
-test_mesh_measurement.gd assertions=66
+# the pin, a gauge in open space reporting the search bound as a FLOOR and not
+# as a clearance, a mirrored copy and an inward-wound copy each keeping the
+# sense of every feature, a pixel-less probe, and the ray-grid fallback's
+# limits). Plus two plate stacks sharing a face: the coincident triangles are
+# two crossings, so a pin in open air beyond them still fits.
+test_mesh_measurement.gd assertions=69
 
 # The measurement VERBS through PanelTools.handle, on a two-plate stack with
 # one pair of drills through both plates and a boss on top, posed by a

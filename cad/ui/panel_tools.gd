@@ -64,6 +64,7 @@ const RADIUS_TOLERANCE_FRACTION: float = 0.05
 ## Candidate and report keys that are LENGTHS, and so scale with the pose.
 const SCALED_LENGTH_KEYS: Array = [
 	"radius_mm", "dia_mm", "inscribed_dia_mm", "gauge_dia_mm",
+	"gauge_dia_at_least_mm",
 	"half_extent_mm", "extent_mm", "depth_mm", "residual_mm",
 ]
 
@@ -359,7 +360,7 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		# it runs to the reference's own extent, which is the only bound that
 		# is a fact about the part rather than about the pin.
 		"max_radius_mm": float(args.get("max_dia_mm", 0.0)) * 0.5,
-		"mask": _mask_for(gauge, asked),
+		"mask": _scope_mask(gauge, args, {"name": asked}),
 	})
 	if result.has("error"):
 		return _err(str(result["error"]))
@@ -370,8 +371,7 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 	# — and the caller's own `reference` stands in when the contact could not be
 	# attributed. There is no sensible default beyond those two: taking the
 	# first mounted reference would silently report a local position in another
-	# part's frame, so an unattributed contact is reported in world only, with
-	# the reason.
+	# part's frame, so an unattributed contact is reported in world only.
 	var contacts: Array = []
 	for contact_entry in result.get("contacts", []):
 		var contact: Dictionary = contact_entry
@@ -384,19 +384,23 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 			"node": node_name,
 			"reference": reference_name,
 		}
-		if bool(contact.get("at_gauge_centre", false)):
-			entry["note"] = "the collider reported no contact geometry; " \
-				+ "this is the gauge's own position, not the touch point"
 		contacts.append(entry)
 	var payload := {
 		"units": "mm",
 		"fits": bool(result.get("fits", false)),
 		"contacts": contacts,
-		"clearance_mm": float(result.get("clearance_mm", 0.0)),
 		"clearance_bound_mm": float(result.get("clearance_bound_mm", 0.0)),
 	}
+	# Clearance is only a measurement when a wall stopped it. In open space the
+	# gauge reports the search bound instead, under a key that says so, so the
+	# two can never be confused by a reader of the payload.
+	if result.has("clearance_at_least_mm"):
+		payload["clearance_at_least_mm"] = float(result["clearance_at_least_mm"])
+	else:
+		payload["clearance_mm"] = float(result.get("clearance_mm", 0.0))
 	if result.has("reason"):
 		payload["reason"] = str(result["reason"])
+	if str(result.get("reason", "")) == "inside_solid":
 		payload["note"] = "A gauge buried in solid material crosses no "\
 			+ "triangle and so touches nothing; it does not fit, and has no contacts."
 	return _ok(payload)
@@ -901,6 +905,10 @@ static func _report_cylinder(
 		"dia_mm": float(measured.get("dia_mm", 0.0)),
 		"inscribed_dia_mm": float(measured.get("inscribed_dia_mm", 0.0)),
 		"gauge_dia_mm": float(measured.get("gauge_dia_mm", 0.0)),
+		# False when no wall was met inside the search bound: gauge_dia_mm is
+		# then 0 and gauge_dia_at_least_mm carries the floor the bound implies.
+		"gauge_bounded": bool(measured.get("gauge_bounded", true)),
+		"gauge_dia_at_least_mm": float(measured.get("gauge_dia_at_least_mm", 0.0)),
 		"facets": int(measured.get("facets", 0)),
 		"coverage": float(measured.get("coverage", 0.0)),
 		"residual_mm": measured.get("residual_mm", null),

@@ -956,7 +956,7 @@ func _read_parts_from_file(
 		return []
 
 	var raw_parts: Array = []
-	_collect_meshes(scene, Transform3D.IDENTITY, raw_parts)
+	_collect_meshes(scene, Transform3D.IDENTITY, raw_parts, _file_names(state))
 	scene.free()
 
 	for raw in raw_parts:
@@ -1020,28 +1020,65 @@ func _collect_meshes(
 	node: Node,
 	parent_transform: Transform3D,
 	out: Array,
+	file_names: Dictionary = {},
 	parent_path: String = "",
-	depth: int = 0
+	depth: int = 0,
+	taken: Dictionary = {}
 ) -> void:
 	var here := parent_transform
 	if node is Node3D:
 		here = parent_transform * (node as Node3D).transform
+	var segment := str(file_names.get(str(node.name), str(node.name)))
 	# Depth 0 is the file root and contributes no segment.
 	var path := ""
 	if depth > 0:
-		path = str(node.name) if parent_path.is_empty() else parent_path + "/" + str(node.name)
+		path = segment if parent_path.is_empty() else parent_path + "/" + segment
+		path = _unique_path(taken, path)
 
 	var mesh := _mesh_of(node)
 	if mesh != null and mesh.get_surface_count() > 0:
 		out.append({
 			"mesh": mesh,
 			"transform": here,
-			"node": str(node.name),
-			"node_path": path if not path.is_empty() else str(node.name),
+			"node": segment,
+			"node_path": path if not path.is_empty() else segment,
 		})
 
 	for child in node.get_children():
-		_collect_meshes(child, here, out, path, depth + 1)
+		_collect_meshes(child, here, out, file_names, path, depth + 1, taken)
+
+
+## Keep node_path unique. Putting the file's own names back can make two
+## SIBLINGS share a path — a branch holding two nodes the file both calls
+## "Body" — and a path that names two nodes is not an identity: bounds merge
+## and a filter picks whichever came first. The second and later claimants get
+## a "#n" suffix in walk order, so the first one keeps the plain path the file
+## shows and the numbering is stable for a given file.
+func _unique_path(taken: Dictionary, path: String) -> String:
+	if not taken.has(path):
+		taken[path] = 1
+		return path
+	var count := int(taken[path]) + 1
+	taken[path] = count
+	return "%s#%d" % [path, count]
+
+
+## Generated node name -> the name the FILE gave that node.
+##
+## The glTF importer makes every node name unique across the whole document,
+## so a file with a "Body" in two branches produces "Body" and "Body2" in the
+## scene and a caller that types the path the file shows it gets no match. The
+## uniquified name is what generate_scene() puts on the node, so it is the key;
+## GLTFNode.original_name is the name the file actually carries.
+func _file_names(state: GLTFState) -> Dictionary:
+	var names := {}
+	for entry in state.get_nodes():
+		var gltf_node: GLTFNode = entry
+		var original := str(gltf_node.original_name)
+		if original.is_empty():
+			continue
+		names[str(gltf_node.get_name())] = original
+	return names
 
 
 ## MeshInstance3D and the importer's ImporterMeshInstance3D both answer

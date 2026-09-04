@@ -508,6 +508,16 @@ func adopt_restored_document(document_path: String, source: String, references: 
 		_evaluate_with_request_id(source)
 
 
+## Closing the tab has to take the annotation host's pending frame captures off
+## RenderingServer. That singleton outlives every panel, and a one-shot that
+## never fired — the tab closed first, or no frame was ever drawn — would leave
+## a Callable bound to a dead host on its signal, which kills the process in the
+## servers' own shutdown long afterwards.
+func _exit_tree() -> void:
+	if _annotation_host != null and _annotation_host.has_method("drop_pending_captures"):
+		_annotation_host.drop_pending_captures()
+
+
 func get_mesh_features() -> RefCounted:
 	return _mesh_features
 

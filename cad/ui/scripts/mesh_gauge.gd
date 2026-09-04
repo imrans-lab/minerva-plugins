@@ -16,11 +16,9 @@
 ##    of a find_holes pass inside a single step, because thousands of round
 ##    trips at one query per frame would take minutes.
 ##
-## 2. backface_collision IS ON for every trimesh. With it off, Jolt lets a
-##    gauge grow straight through the wall of the hole it is sitting in and
-##    reports an unbounded radius. Minerva runs Godot Physics today, where the
-##    default happens to be harmless — the flag is set so that a switch to Jolt
-##    cannot silently corrupt measurement.
+## 2. backface_collision IS ON for every trimesh. A ray leaving a point inside
+##    the material must report the wall it leaves through, or the parity that
+##    tells inside from outside counts only half the surfaces.
 ##
 ## 3. EVERY SEARCH IS BOUNDED. Free space outside the part reads exactly like
 ##    free space inside a hole. An unbounded centring search on a hole near the
@@ -28,26 +26,32 @@
 ##    centre in mid-air with an unbounded radius. Every search here is confined
 ##    to a multiple of the candidate's own radius.
 ##
-## 4. THE GAUGE IS A CONVEX PRISM, NOT A CYLINDER. Under Godot Physics a
-##    CylinderShape3D sitting in solid material can report no overlap at all;
-##    it only behaves where the wall's own vertices fall inside it, i.e. inside
-##    a hole. A prism is 10-15x the cost and always right. The prism is built
-##    around the gauge circle (its inradius is the gauge radius), so the prism
-##    contains the pin it stands for: a prism that fits proves the pin fits.
+## 4. EVERY QUERY IS A RAY. intersect_shape against a trimesh is not usable as
+##    a volume test here: measured against a plate with a drilled hole, it
+##    answers only for a query shape whose ORIGIN is within the query margin of
+##    a triangle. A 1 mm box penetrating a face by 0.2 mm reports nothing, a
+##    20 mm one reports nothing, a sphere sitting in the hole never finds the
+##    wall it encloses whatever its radius, and a margin of exactly 0 reports
+##    nothing at all. Rays are exact, so a gauge is tested by casting from its
+##    axis out to its own surface: a ray that hits is a place the pin fouls,
+##    and the shortest hit IS the largest pin that goes in — no bisection.
 ##
 ## 5. A COLLIDER IS A SURFACE, NOT A VOLUME. A gauge wholly inside solid
-##    material crosses no triangle, so intersect_shape reports nothing and the
-##    answer is indistinguishable from open air. Inside and outside are told
-##    apart by the parity of the surfaces a ray from the point crosses, and
-##    only then may an empty overlap be read as a fit.
+##    material reaches no wall, and that is indistinguishable from open air.
+##    Inside and outside are told apart by the parity of the surfaces a ray
+##    from the point crosses, and only then may a clear gauge be read as a fit.
 ##
-## 6. ONE BODY PER REFERENCE, ON ITS OWN COLLISION LAYER. Physics sees every
-##    body in the space, so a measurement asked about one part would otherwise
-##    be shrunk by a second part that happens to pass through the hole. The
-##    layer is the only place that scope can be enforced.
+## 6. ONE BODY PER COLLIDER, ONE LAYER PER REFERENCE. Physics sees every body
+##    in the space, so a measurement asked about one part would otherwise be
+##    shrunk by a second part that happens to pass through the hole; the layer
+##    is the only place that scope can be enforced, and every body of one
+##    reference shares that reference's layer. Each MESH is nevertheless its own
+##    body, because a ray query can only exclude whole bodies: two plates
+##    resting face to face put two triangles at one point, and finding the
+##    second one means re-casting with the first one's body excluded.
 ##
-## The shapes a gauge is made of live in gauge_shapes.gd and the ray-grid
-## fallback's arithmetic in gauge_seed.gd; what is left here is the queries.
+## The gauge frame lives in gauge_shapes.gd and the ray-grid fallback's
+## arithmetic in gauge_seed.gd; what is left here is the queries.
 ##
 ## The module is a Node so that it can own a physics step, and it holds its
 ## colliders in a SubViewport with its own World3D — the panel's four panes
@@ -59,22 +63,18 @@ extends Node
 const _Shapes: Script = preload("gauge_shapes.gd")
 const _Seed: Script = preload("gauge_seed.gd")
 
-## Most overlaps reported for one query. Contacts are for telling the caller
-## where it fouled, not for a complete census.
-const MAX_HITS: int = 8
-## Centring and radius searches use this many bisection steps. 14 steps take
-## any bounded interval to under a ten-thousandth of it.
-const BISECTION_STEPS: int = 14
-## Samples marched outward before a centring bisection starts. Bisection alone
-## assumes free space is contiguous, and it is not: past the outline of the
-## part the gauge is free again, so a probe that fits at the far end of the
-## bound may have crossed a wall to get there. Marching first bounds the
-## bisection by the FIRST blocked sample instead of trusting the far end.
-const CONTINUITY_SAMPLES: int = 8
-## Radius of the point query used to name the body a contact point lies on.
-## Large enough to catch the surface the contact was generated from, small
-## enough that it cannot reach a different body.
-const CONTACT_ATTRIBUTION_MM: float = 0.05
+## Contacts reported for one gauge. Contacts are for telling the caller where
+## it fouled, not for a complete census.
+const MAX_CONTACTS: int = 8
+## Rays cast around a gauge's axis, and stations along it. A ray leaving the
+## axis stops at the gauge's own surface, so 24 x 5 rays sample the wall of a
+## pin. The radius they measure is the hole's INRADIUS to within the sagitta of
+## one facet — 0.003 mm on a 5 mm bore cut in 64 facets.
+const GAUGE_AZIMUTHS: int = 24
+const GAUGE_STATIONS: int = 5
+## Rings of cap rays: a gauge also fouls on what its ENDS run into, so each end
+## is sampled from the axis and from two rings inside the gauge radius.
+const CAP_RING_FRACTIONS: Array = [0.0, 0.55, 0.95]
 ## A submitted job that has not run within this long is abandoned. Physics can
 ## stop stepping entirely — the panel closes, the host pauses — and an MCP call
 ## must fail with a reason rather than await forever.
@@ -94,9 +94,9 @@ const VERIFY_TOLERANCE_FRACTION: float = 0.05
 ## Half-width of the band a convex candidate's wall is looked for in, as a
 ## fraction of the candidate radius. Wide enough to swallow the tessellation
 ## of a faceted cylinder, narrow enough that a wall at the wrong radius misses.
-## The straddle spans r·(1−f)..r·(1+f). A faceted wall sits at r·cos(π/n)..r, so
-## the wall is inside the straddle only for n ≥ 10 facets at f = 0.05; coarser
-## bosses may verify or not depending on where the four samples land.
+## An inward ray must stop between r·(1−f) and r·(1+f). A faceted wall sits at
+## r·cos(π/n)..r, so it is inside the band only for n ≥ 10 facets at f = 0.05;
+## coarser bosses may verify or not depending on where the four rays land.
 const WALL_PROBE_FRACTION: float = 0.05
 
 ## Ray-grid fallback pitch, used only when the fitter proposed nothing at all.
@@ -109,15 +109,11 @@ const ALL_LAYERS: int = 0xFFFFFFFF
 ## the last bit between the overflow, which loses the isolation for those
 ## references but never mis-measures a reference that has a bit of its own.
 const MAX_REFERENCE_LAYERS: int = 32
-## How far a crossing ray is nudged past the face it just hit before the next
-## cast. It is deliberately SMALLER than COINCIDENT_EPSILON_MM: two plates
-## stacked face to face put two triangles at the same point and both are real
-## crossings, so the nudge must not step over the second one.
+## How far a crossing ray is nudged past a band of coincident faces before the
+## next cast. Small enough that it cannot step over a wall, large enough that
+## the ray makes progress.
 const CROSSING_ADVANCE_MM: float = 0.0002
-## Two hits this close together are at the same point. Within one such band a
-## crossing is counted once per distinct triangle (body plus shape index), so
-## coincident faces count twice and a face found again by the short nudge
-## counts once.
+## Two hits this close together are at the same point and belong to one band.
 const COINCIDENT_EPSILON_MM: float = 0.001
 ## Crossings counted before an inside/outside test gives up. A closed part with
 ## more than this many walls along one line is pathological; the test then says
@@ -132,19 +128,18 @@ signal job_finished
 
 
 var _viewport: SubViewport = null
-## Reference name -> the StaticBody3D holding that reference's colliders. One
-## body per reference, because a collision LAYER is a property of a body: it is
-## what lets a measurement scoped to one reference ignore a second part that
-## happens to pass through the hole being measured.
-var _bodies: Dictionary = {}
-## Reference name -> the single layer bit its body sits on.
+## Every collider body, in the order they were built. One per mesh.
+var _bodies: Array = []
+## Reference name -> the single collision layer bit every body of that
+## reference sits on. A LAYER is what lets a measurement scoped to one
+## reference ignore a second part that happens to pass through the hole.
 var _layers: Dictionary = {}
-## Body instance id -> {shape owner id: node path}, for attributing contacts.
-## The path is the BARE node path — the same string find_holes reports in
-## `nodes`, the selection verbs report as `node` and a node= filter matches.
-## Which reference it belongs to is a separate field, kept per body below.
-var _owner_names: Dictionary = {}
-## Body instance id -> the reference name that body holds.
+## Body instance id -> the BARE node path that body's mesh came from — the same
+## string find_holes reports in `nodes`, the selection verbs report as `node`
+## and a node= filter matches. Which reference it belongs to is a separate
+## field, kept per body below.
+var _body_nodes: Dictionary = {}
+## Body instance id -> the reference name that body belongs to.
 var _body_references: Dictionary = {}
 ## Bounds of every collider, in world millimetres. This is the reach an
 ## unbounded search is allowed and the length of an inside/outside ray.
@@ -191,9 +186,10 @@ func _ready() -> void:
 ## no-op, which is what keeps a keystroke that only moves a pose from
 ## rebuilding 45 trimeshes.
 ##
-## Each reference gets its own StaticBody3D on its own collision layer. A
-## measurement asked about one reference then queries with that reference's
-## mask, and a second part crossing the hole cannot shrink the answer.
+## Each MESH gets its own StaticBody3D, and every body of one reference shares
+## that reference's collision layer. A measurement asked about one reference
+## queries with that reference's mask, and a second part crossing the hole
+## cannot shrink the answer.
 func build(bodies: Array, digest: String) -> int:
 	if digest == _digest and _shape_count > 0:
 		return _shape_count
@@ -221,13 +217,11 @@ func build(bodies: Array, digest: String) -> int:
 		# reference; only the bare path is an identity a caller can also type.
 		if not reference.is_empty() and node_name.begins_with(reference + "/"):
 			node_name = node_name.substr(reference.length() + 1)
-		var collider := _body_for(reference)
 		var xform: Transform3D = body.get("transform", Transform3D.IDENTITY)
+		var collider := _new_body(reference, node_name)
 		var owner_id := collider.create_shape_owner(collider)
 		collider.shape_owner_add_shape(owner_id, shape)
 		collider.shape_owner_set_transform(owner_id, xform)
-		var names: Dictionary = _owner_names[collider.get_instance_id()]
-		names[owner_id] = node_name
 		var box := xform * mesh.get_aabb()
 		_bounds = box if not have_bounds else _bounds.merge(box)
 		have_bounds = true
@@ -236,22 +230,21 @@ func build(bodies: Array, digest: String) -> int:
 	return _shape_count
 
 
-## The body holding one reference's colliders, created on its own layer the
-## first time that reference is seen.
-func _body_for(reference: String) -> StaticBody3D:
-	if _bodies.has(reference):
-		return _bodies[reference]
+## A new body for one mesh, on its reference's layer — allocated the first time
+## that reference is seen and shared by every later body of the same reference.
+func _new_body(reference: String, node_name: String) -> StaticBody3D:
+	if not _layers.has(reference):
+		# Bit per reference, saturating on the last one.
+		var index: int = mini(_layers.size(), MAX_REFERENCE_LAYERS - 1)
+		_layers[reference] = 1 << index
 	var collider := StaticBody3D.new()
-	collider.name = "Colliders_%d" % _bodies.size()
-	# Bit per reference, saturating on the last one; the body collides with
-	# nothing itself — it is only ever the target of a query.
-	var index: int = mini(_bodies.size(), MAX_REFERENCE_LAYERS - 1)
-	collider.collision_layer = 1 << index
+	collider.name = "Collider_%d" % _bodies.size()
+	# The body collides with nothing itself — it is only ever a query target.
+	collider.collision_layer = int(_layers[reference])
 	collider.collision_mask = 0
 	_viewport.add_child(collider)
-	_bodies[reference] = collider
-	_layers[reference] = collider.collision_layer
-	_owner_names[collider.get_instance_id()] = {}
+	_bodies.append(collider)
+	_body_nodes[collider.get_instance_id()] = node_name
 	_body_references[collider.get_instance_id()] = reference
 	return collider
 
@@ -267,14 +260,14 @@ func mask_for(reference: String) -> int:
 
 
 func clear() -> void:
-	for key in _bodies.keys():
-		var collider: StaticBody3D = _bodies[key]
+	for entry in _bodies:
+		var collider: StaticBody3D = entry
 		if is_instance_valid(collider):
 			collider.get_parent().remove_child(collider)
 			collider.queue_free()
 	_bodies.clear()
 	_layers.clear()
-	_owner_names.clear()
+	_body_nodes.clear()
 	_body_references.clear()
 	_bounds = AABB()
 	_shape_count = 0
@@ -350,10 +343,14 @@ func _physics_process(_delta: float) -> void:
 ## physics step when physics runs on its own thread — which is why everything
 ## goes through submit(). Public so a headless script can drive the module
 ## directly from its own physics frame.
+##
+## find_world_3d(), not world_3d: `world_3d` is the explicitly ASSIGNED override
+## and stays null for a viewport that made its own world through own_world_3d.
+## Reading it there returns null and every measurement fails as "no space".
 func space_state() -> PhysicsDirectSpaceState3D:
-	if _viewport == null:
+	if _viewport == null or not _viewport.is_inside_tree():
 		return null
-	var world := _viewport.world_3d
+	var world := _viewport.find_world_3d()
 	return world.direct_space_state if world != null else null
 
 
@@ -406,17 +403,19 @@ func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionar
 	var axis: Vector3 = _Shapes.unit(args.get("axis", Vector3.UP))
 	var kind := str(args.get("shape", "cylinder"))
 	var size: Vector3 = args.get("size", Vector3.ONE)
-	var shape: Shape3D = _Shapes.shape_for(kind, size)
-	if shape == null:
+	if not _Shapes.is_supported(kind):
 		return {"error": "unsupported gauge shape '%s'" % kind}
-	var xform := Transform3D(_Shapes.basis_for_axis(axis) as Basis, at)
 
-	var hits := _overlaps(state, shape, xform)
-	if hits.is_empty():
+	var contacts := _gauge_fouls(state, kind, size, at, axis)
+	if contacts.is_empty():
 		# A trimesh collider is a SURFACE, not a volume: a gauge buried in solid
-		# material crosses no triangle and overlaps nothing, which is exactly
-		# what open air looks like. Parity along a ray separates the two.
-		if _inside_solid(state, at):
+		# material reaches no wall, which is exactly what open air looks like.
+		# Parity along a ray separates the two.
+		var inside := _inside_solid(state, at)
+		if inside < 0:
+			return {"error": "cannot tell solid from air at %s: a ray from it "
+				% str(at) + "crossed more surfaces than the crossing budget allows"}
+		if inside > 0:
 			return {
 				"fits": false,
 				"contacts": [],
@@ -431,39 +430,33 @@ func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionar
 		var bound := float(args.get("max_radius_mm", 0.0))
 		if bound <= 0.0:
 			bound = maxf(size.x * 0.5, _bounds.size.length() * 0.5)
+		# A pin in open space reaches no wall, so the search bound is all the
+		# radial run there is evidence for. That is a FLOOR, not a clearance:
+		# it is reported under its own key so no caller can read the bound as
+		# a measured distance to something.
+		var bounded := true
 		if kind == "cylinder":
 			var grown := _largest_radius(
 				state, at, axis, size.y, size.x * 0.5, bound)
-			clearance = maxf(0.0, grown - size.x * 0.5)
-		return {
+			bounded = bool(grown["bounded"])
+			clearance = maxf(0.0, float(grown["radius_mm"]) - size.x * 0.5)
+		var fitted_report := {
 			"fits": true,
 			"contacts": [],
-			"clearance_mm": clearance,
 			"clearance_bound_mm": bound,
+			"clearance_bounded": bounded,
 		}
+		if bounded:
+			fitted_report["clearance_mm"] = clearance
+		else:
+			fitted_report["clearance_at_least_mm"] = clearance
+			fitted_report["reason"] = "no surface within the search bound: the "\
+				+ "clearance is at least this much, not exactly this much"
+		return fitted_report
 
-	# Each contact is attributed by its own point query. collide_shape's pairs
-	# and intersect_shape's bodies are different lists in unrelated orders, so
-	# zipping them by index would name the wrong node; a contact whose point
-	# query finds nothing is reported with an empty node rather than a guess.
-	var contacts: Array = []
-	for point in _contact_points(state, shape, xform):
-		var named := _names_at(state, point)
-		contacts.append({
-			"point_mm": point,
-			"node": str(named.get("node", "")),
-			"reference": str(named.get("reference", "")),
-		})
-	if contacts.is_empty():
-		# No contact geometry came back, only the bodies. Then the only honest
-		# position is the query's own, and it is the gauge's, not a touch point.
-		for hit in hits:
-			contacts.append({
-				"point_mm": at,
-				"node": _node_for(hit),
-				"reference": _reference_for(hit),
-				"at_gauge_centre": true,
-			})
+	# Every contact came from a ray that ended on the geometry, so the point,
+	# the node and the reference are the ray's own answer — nothing has to be
+	# zipped or guessed.
 	return {"fits": false, "contacts": contacts, "clearance_mm": 0.0}
 
 
@@ -517,24 +510,35 @@ func _verify_hole(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> Di
 
 	var basis: Basis = _Shapes.basis_for_axis(axis)
 	for _round in range(2):
-		centre = _recentre(state, centre, basis.x, axis, probe, length, bound)
-		centre = _recentre(state, centre, basis.y, axis, probe, length, bound)
+		centre = _recentre(state, centre, basis.x, probe, bound)
+		centre = _recentre(state, centre, basis.y, probe, bound)
 
 	var fitted := _largest_radius(state, centre, axis, length, probe, radius * 1.5)
 	var through_report := _through(state, centre, axis, half_extent)
 
 	var predicted := float(candidate.get("inscribed_dia_mm", radius * 2.0))
-	var gauge_dia := fitted * 2.0
-	var verified: bool = fitted > 0.0 and absf(gauge_dia - predicted) \
+	var fitted_radius := float(fitted["radius_mm"])
+	var bounded := bool(fitted["bounded"])
+	var gauge_dia := fitted_radius * 2.0
+	var verified: bool = bounded and fitted_radius > 0.0 \
+		and absf(gauge_dia - predicted) \
 		<= maxf(0.02, predicted * VERIFY_TOLERANCE_FRACTION)
 
 	var out := candidate.duplicate(true)
 	out["center"] = centre
 	out["axis"] = axis
-	out["gauge_dia_mm"] = gauge_dia
 	out["through"] = bool(through_report["through"])
 	out["depth_mm"] = float(through_report["depth_mm"])
 	out["verified"] = verified
+	out["gauge_bounded"] = bounded
+	if bounded:
+		out["gauge_dia_mm"] = gauge_dia
+	else:
+		# No wall anywhere within the search bound: the pin is standing in open
+		# air, so the bound is a floor on the diameter and not a diameter.
+		out["gauge_dia_mm"] = 0.0
+		out["gauge_dia_at_least_mm"] = gauge_dia
+		out["reason"] = "no wall within the search bound; this is not a hole"
 	out["source"] = str(candidate.get("source", "fit"))
 	return out
 
@@ -558,24 +562,26 @@ func _verify_convex(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> 
 
 	var basis: Basis = _Shapes.basis_for_axis(axis)
 	var epsilon := maxf(0.05, radius * WALL_PROBE_FRACTION)
-	# Straddling probe: centred ON the fitted radius, so it reaches from
-	# radius-epsilon to radius+epsilon and cannot miss a wall that is there.
-	var straddle := SphereShape3D.new()
-	straddle.radius = epsilon
-	# Standoff probe: the same size, moved out by two epsilon, so its nearest
-	# point is a clear epsilon outside the fitted radius.
-	var standoff := SphereShape3D.new()
-	standoff.radius = epsilon
+	# One ray per angle, cast INWARD from clear air outside the claimed radius
+	# towards the axis. Where it stops answers both questions at once: the wall
+	# is at the claimed radius when the first surface it meets is there, and the
+	# air outside is clear when there was no surface before it.
 	var wall_contacts := 0
 	var free_outside := 0
 	for i in range(4):
 		var angle := float(i) * PI * 0.5
 		var radial: Vector3 = (basis.x * cos(angle) + basis.y * sin(angle)).normalized()
-		var on_wall: Vector3 = centre + radial * radius
 		var outside: Vector3 = centre + radial * (radius + epsilon * 3.0)
-		if not _overlaps(state, straddle, Transform3D(Basis.IDENTITY, on_wall)).is_empty():
+		var hit := _ray(state, outside, centre)
+		if hit.is_empty():
+			# Nothing at all along this radius: clear outside, but no wall.
+			free_outside += 1
+			continue
+		var offset: Vector3 = (hit["position"] as Vector3) - centre
+		var wall_at := (offset - axis * offset.dot(axis)).length()
+		if absf(wall_at - radius) <= epsilon:
 			wall_contacts += 1
-		if _overlaps(state, standoff, Transform3D(Basis.IDENTITY, outside)).is_empty():
+		if wall_at <= radius + epsilon:
 			free_outside += 1
 	out["wall_contacts"] = wall_contacts
 	out["free_outside"] = free_outside
@@ -587,72 +593,133 @@ func _verify_convex(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> 
 	return out
 
 
-## Is this point inside the material rather than in air? A closed surface is
-## crossed an odd number of times by any ray from an interior point and an even
-## number from an exterior one, and backface_collision means both faces of a
-## wall are hit, so the parity holds in both directions.
+## Is this point inside the material rather than in air? 1 for inside, 0 for
+## air, -1 when the ray ran out of budget before it left the part and the
+## question has no answer — a caller must refuse out loud rather than pick one.
+##
+## A closed surface is crossed an odd number of times by any ray from an
+## interior point and an even number from an exterior one, and
+## backface_collision means both faces of a wall are hit, so the parity holds in
+## both directions.
+##
+## PARITY IS PER BODY. Two parts that overlap put four surfaces on one ray
+## between a point inside their intersection and open air: even, and a single
+## count calls that point air. Each reference is its own body, so each body's
+## crossings are counted on their own and a point inside ANY of them is inside
+## solid material.
 ##
 ## Two axes are cast because one ray can graze an edge and count a crossing
 ## twice or not at all; a third breaks the tie when they disagree. A part with
 ## no colliders, or an unbounded one, is never called inside.
-func _inside_solid(state: PhysicsDirectSpaceState3D, point: Vector3) -> bool:
+func _inside_solid(state: PhysicsDirectSpaceState3D, point: Vector3) -> int:
 	if _bounds.size.length_squared() <= 0.0:
-		return false
+		return 0
 	var reach := _bounds.size.length() + THROUGH_PAD_MM
-	var first := _crossings(state, point, Vector3.RIGHT, reach) % 2 == 1
-	var second := _crossings(state, point, Vector3.BACK, reach) % 2 == 1
+	var first := _parity_inside(state, point, Vector3.RIGHT, reach)
+	var second := _parity_inside(state, point, Vector3.BACK, reach)
+	if first < 0 or second < 0:
+		return -1
 	if first == second:
 		return first
-	return _crossings(state, point, Vector3.UP, reach) % 2 == 1
+	return _parity_inside(state, point, Vector3.UP, reach)
+
+
+## One ray's verdict: 1 when any body's crossings are odd, 0 when none are,
+## -1 when the crossing count did not complete.
+func _parity_inside(
+	state: PhysicsDirectSpaceState3D,
+	point: Vector3,
+	direction: Vector3,
+	reach: float
+) -> int:
+	var counted := _crossings(state, point, direction, reach)
+	if not bool(counted.get("complete", false)):
+		return -1
+	for body_id in (counted["by_body"] as Dictionary).keys():
+		if int((counted["by_body"] as Dictionary)[body_id]) % 2 == 1:
+			return 1
+	return 0
 
 
 ## Surfaces crossed by a ray leaving `from` along `direction` for `reach`
-## millimetres.
+## millimetres, counted PER BODY: {"complete": bool, "by_body": {id: count}}.
+## `complete` is false when the ray hit a budget before it left the geometry —
+## the counts are then a truncated prefix and their parity means nothing.
 ##
 ## COINCIDENT FACES ARE TWO CROSSINGS. Two plates resting on each other put
-## their shared face at one point, and material continues through it: skipping
-## past both with one nudge counts one crossing and flips the parity of
-## everything beyond. So the ray advances by less than the coincidence
-## epsilon and the hits inside one such band are deduplicated by triangle —
-## body instance plus shape index — which counts two stacked plates twice and
-## the same triangle, re-found by the short nudge, once.
+## their shared face at one point, and material continues through it: counting
+## it once flips the parity of everything beyond, and every point past the
+## stack then reads as inside solid material.
+##
+## A nearest-hit ray cannot report both faces, and no nudge can reach the second
+## one: any step forward from the hit point is already past a face at the very
+## same coordinate. So a band is walked by EXCLUSION instead — each body found
+## at the band's point is excluded and the ray re-cast from the same origin
+## until nothing more lies there. That is why every mesh is its own body.
+##
+## The origin then moves to the band's point plus a fixed step — not by a
+## running sum of distances, which at world coordinates in the hundreds of
+## millimetres stops changing once the step is a fifth of a micrometre.
 func _crossings(
 	state: PhysicsDirectSpaceState3D,
 	from: Vector3,
 	direction: Vector3,
 	reach: float
-) -> int:
-	var count := 0
+) -> Dictionary:
+	var by_body := {}
+	var total := 0
 	var casts := 0
 	var origin := from
-	var remaining := reach
-	# The triangles already counted at `band_point`, cleared as soon as a hit
-	# lands outside that point's epsilon band.
 	var band_point := from
+	var in_band := false
+	var exclude: Array[RID] = []
+	# Triangles already counted in this band, so a face found twice — by the
+	# exclusion walk and by a re-cast — is still one crossing.
 	var counted: Array = []
-	while remaining > 0.0 and count < MAX_CROSSINGS and casts < MAX_CROSSING_CASTS:
+	while total < MAX_CROSSINGS and casts < MAX_CROSSING_CASTS:
+		if from.distance_to(origin) >= reach:
+			return {"complete": true, "by_body": by_body}
 		casts += 1
-		var hit := _ray(state, origin, origin + direction * remaining)
-		if hit.is_empty():
-			break
-		var point: Vector3 = hit["position"]
-		if point.distance_to(band_point) > COINCIDENT_EPSILON_MM:
+		var hit := _ray(state, origin, from + direction * reach, exclude)
+		var beyond_band := hit.is_empty() \
+			or (hit["position"] as Vector3).distance_to(band_point) > COINCIDENT_EPSILON_MM
+		if in_band and beyond_band:
+			# The band is exhausted. Step past it and start again with every
+			# body back in play, so a body crossed here can be crossed again.
+			origin = band_point + direction * CROSSING_ADVANCE_MM
+			exclude.clear()
 			counted.clear()
+			in_band = false
+			continue
+		if hit.is_empty():
+			return {"complete": true, "by_body": by_body}
+		var point: Vector3 = hit["position"]
+		if not in_band:
 			band_point = point
+			in_band = true
 		# face_index is the triangle within a concave shape; it is absent for
 		# shapes that have no faces, and then body-plus-shape is the identity.
+		var body_id := int(hit.get("collider_id", 0))
 		var identity := "%d:%d:%d" % [
-			int(hit.get("collider_id", 0)),
+			body_id,
 			int(hit.get("shape", -1)),
 			int(hit.get("face_index", -1)),
 		]
 		if not (identity in counted):
 			counted.append(identity)
-			count += 1
-		var step := point.distance_to(origin) + CROSSING_ADVANCE_MM
-		origin += direction * step
-		remaining -= step
-	return count
+			by_body[body_id] = int(by_body.get(body_id, 0)) + 1
+			total += 1
+		var rid: RID = hit.get("rid", RID())
+		if rid.is_valid() and not (rid in exclude):
+			exclude.append(rid)
+		else:
+			# Nothing left to exclude at this point; stepping past the band is
+			# the only way to make progress.
+			origin = band_point + direction * CROSSING_ADVANCE_MM
+			exclude.clear()
+			counted.clear()
+			in_band = false
+	return {"complete": false, "by_body": by_body}
 
 
 func _unverified(candidate: Dictionary, reason: String) -> Dictionary:
@@ -671,58 +738,45 @@ func _recentre(
 	state: PhysicsDirectSpaceState3D,
 	centre: Vector3,
 	direction: Vector3,
-	axis: Vector3,
 	probe_radius: float,
-	length: float,
 	bound: float
 ) -> Vector3:
-	var forward := _free_run(state, centre, direction, axis, probe_radius, length, bound)
-	var backward := _free_run(state, centre, -direction, axis, probe_radius, length, bound)
+	var forward := _free_run(state, centre, direction, probe_radius, bound)
+	var backward := _free_run(state, centre, -direction, probe_radius, bound)
 	return centre + direction * ((forward - backward) * 0.5)
 
 
-## Largest distance the probe can be pushed along `direction` and still fit,
-## searched by bisection inside [0, bound].
+## Largest distance the probe can be pushed along `direction` and still fit.
+##
+## One ray does it: the FIRST surface along that direction is where the probe's
+## leading edge stops, so the run is that distance less the probe's own radius.
+## Constraint 3 comes free — the run cannot jump the wall of the part and read
+## the open air beyond as more room — and it is bounded by `bound` besides.
 func _free_run(
 	state: PhysicsDirectSpaceState3D,
 	centre: Vector3,
 	direction: Vector3,
-	axis: Vector3,
 	probe_radius: float,
-	length: float,
 	bound: float
 ) -> float:
-	var shape: ConvexPolygonShape3D = _Shapes.prism(probe_radius, length)
-	if not _fits(state, shape, centre, axis):
-		return 0.0
-	# March outward first (constraint 3 again, in its subtler form): the far
-	# end of the bound can be free because it is OUTSIDE the part, and a plain
-	# bisection would then report the whole bound as free space. The run
-	# returned here is continuous with the starting point down to the marching
-	# pitch, and the bisection only refines the wall between two samples.
-	var lo := 0.0
-	var hi := -1.0
-	var step := bound / float(CONTINUITY_SAMPLES)
-	for i in range(1, CONTINUITY_SAMPLES + 1):
-		var sample := step * float(i)
-		if _fits(state, shape, centre + direction * sample, axis):
-			lo = sample
-		else:
-			hi = sample
-			break
-	if hi < 0.0:
+	var reach := bound + probe_radius
+	var hit := _ray(state, centre, centre + direction * reach)
+	if hit.is_empty():
 		return bound
-	for _i in range(BISECTION_STEPS):
-		var mid := (lo + hi) * 0.5
-		if _fits(state, shape, centre + direction * mid, axis):
-			lo = mid
-		else:
-			hi = mid
-	return lo
+	var distance := centre.distance_to(hit["position"] as Vector3)
+	return clampf(distance - probe_radius, 0.0, bound)
 
 
-## Largest gauge radius that still fits at `centre`, by bisection. Monotonic:
-## a bigger pin never fits where a smaller one did not.
+## Largest gauge radius that still fits at `centre`, measured rather than
+## searched: the shortest of the rays leaving the axis IS the radius, because a
+## pin of that radius touches there and nothing smaller touches anywhere.
+##
+## Returns {"radius_mm", "bounded"}. `bounded` is false when NO ray met a
+## surface within `upper`: the gauge stands in open space, `upper` is the search
+## bound rather than a wall, and the radius is only a FLOOR — the caller must
+## report it as "at least this much" and never as a measurement. `radius_mm` is
+## 0.0 (bounded) when a pin of `lower` would already foul, which is the caller's
+## signal that the candidate is not a hole at all.
 func _largest_radius(
 	state: PhysicsDirectSpaceState3D,
 	centre: Vector3,
@@ -730,18 +784,19 @@ func _largest_radius(
 	length: float,
 	lower: float,
 	upper: float
-) -> float:
-	if not _fits(state, _Shapes.prism(lower, length) as Shape3D, centre, axis):
-		return 0.0
-	var lo := lower
-	var hi := upper
-	for _i in range(BISECTION_STEPS):
-		var mid := (lo + hi) * 0.5
-		if _fits(state, _Shapes.prism(mid, length) as Shape3D, centre, axis):
-			lo = mid
-		else:
-			hi = mid
-	return lo
+) -> Dictionary:
+	var nearest := upper
+	var bounded := false
+	for from in _stations(centre, axis, length):
+		for direction in _radials(axis):
+			var hit := _ray(state, from, from + direction * upper)
+			if hit.is_empty():
+				continue
+			bounded = true
+			nearest = minf(nearest, from.distance_to(hit["position"] as Vector3))
+	if bounded and nearest < lower:
+		return {"radius_mm": 0.0, "bounded": true}
+	return {"radius_mm": nearest, "bounded": bounded}
 
 
 ## Does the hole go all the way through? A ray along the axis from clear air on
@@ -778,85 +833,151 @@ func _through(
 # Shapes and queries
 # ---------------------------------------------------------------------------
 
-func _fits(
+## Everywhere a gauge of this shape, standing at `centre` along `axis`, runs
+## into mounted geometry. Empty means it fits.
+##
+## Every ray starts inside the gauge and ends on its surface, so a hit is a
+## point the gauge's own volume covers — and the hit names the node and the
+## reference it landed on, which is what a contact has to report.
+func _gauge_fouls(
 	state: PhysicsDirectSpaceState3D,
-	shape: Shape3D,
+	kind: String,
+	size: Vector3,
 	centre: Vector3,
 	axis: Vector3
-) -> bool:
-	return _overlaps(
-		state, shape, Transform3D(_Shapes.basis_for_axis(axis) as Basis, centre)).is_empty()
+) -> Array:
+	var contacts: Array = []
+	match kind:
+		"cylinder":
+			var radius := maxf(0.001, size.x * 0.5)
+			var half := maxf(0.0005, size.y * 0.5)
+			for from in _stations(centre, axis, size.y):
+				_collect(state, from, _radials(axis), radius, contacts)
+			# The ends. A pin also fouls on the floor of a pocket, and the axis
+			# alone would miss a floor that only reaches part of the way in.
+			for direction in [axis, -axis]:
+				for start in _cap_origins(centre, axis, radius):
+					_collect(state, start, [direction], half, contacts)
+		"sphere":
+			_collect(state, centre, _sphere_directions(), maxf(0.001, size.x * 0.5), contacts)
+		"box":
+			var basis: Basis = _Shapes.basis_for_axis(axis)
+			for direction in _sphere_directions():
+				var local: Vector3 = basis.inverse() * direction
+				# The box's own surface along this direction: the shortest of
+				# the three face distances, so the ray ends on the box.
+				var reach := INF
+				for component in [
+					[local.x, size.x * 0.5], [local.y, size.y * 0.5], [local.z, size.z * 0.5]
+				]:
+					if absf(component[0]) > 0.0001:
+						reach = minf(reach, absf(component[1] / component[0]))
+				if reach < INF:
+					_collect(state, centre, [direction], reach, contacts)
+	return contacts
 
 
-func _overlaps(state: PhysicsDirectSpaceState3D, shape: Shape3D, xform: Transform3D) -> Array:
-	var params := PhysicsShapeQueryParameters3D.new()
-	params.shape = shape
-	params.transform = xform
-	params.margin = 0.0
-	params.collide_with_bodies = true
-	params.collide_with_areas = false
-	params.collision_mask = _query_mask
-	return state.intersect_shape(params, MAX_HITS)
-
-
-func _contact_points(
+## Cast one ray per direction and record every one that lands on geometry.
+func _collect(
 	state: PhysicsDirectSpaceState3D,
-	shape: Shape3D,
-	xform: Transform3D
-) -> PackedVector3Array:
-	var params := PhysicsShapeQueryParameters3D.new()
-	params.shape = shape
-	params.transform = xform
-	params.margin = 0.0
-	params.collide_with_bodies = true
-	params.collide_with_areas = false
-	params.collision_mask = _query_mask
-	var raw := state.collide_shape(params, MAX_HITS)
-	# collide_shape reports pairs: the point on the query shape, then the point
-	# on the collider. The second of each pair is the one on the geometry.
-	var points := PackedVector3Array()
-	var index := 1
-	while index < raw.size():
-		points.append(raw[index])
-		index += 2
-	return points
+	from: Vector3,
+	directions: Array,
+	reach: float,
+	contacts: Array
+) -> void:
+	for direction in directions:
+		if contacts.size() >= MAX_CONTACTS:
+			return
+		var hit := _ray(state, from, from + (direction as Vector3) * reach)
+		if hit.is_empty():
+			continue
+		contacts.append({
+			"point_mm": hit["position"],
+			"node": _node_for(hit),
+			"reference": _reference_for(hit),
+		})
 
 
-func _ray(state: PhysicsDirectSpaceState3D, from: Vector3, to: Vector3) -> Dictionary:
+## Points along the gauge axis the wall rays are cast from.
+func _stations(centre: Vector3, axis: Vector3, length: float) -> Array:
+	if length <= 0.0:
+		return [centre]
+	var half := length * 0.5
+	var out: Array = []
+	for k in range(GAUGE_STATIONS):
+		var t := -half + length * float(k) / float(GAUGE_STATIONS - 1)
+		out.append(centre + axis * t)
+	return out
+
+
+## Unit directions around the axis, in the gauge's own frame.
+func _radials(axis: Vector3) -> Array:
+	var basis: Basis = _Shapes.basis_for_axis(axis)
+	var out: Array = []
+	for i in range(GAUGE_AZIMUTHS):
+		var angle := TAU * float(i) / float(GAUGE_AZIMUTHS)
+		out.append((basis.x * cos(angle) + basis.y * sin(angle)).normalized())
+	return out
+
+
+
+## Where the cap rays start: on the axis and on two rings inside the gauge
+## radius, so a floor that only covers part of the pin is still found.
+func _cap_origins(centre: Vector3, axis: Vector3, radius: float) -> Array:
+	var out: Array = [centre]
+	var radials := _radials(axis)
+	for fraction in CAP_RING_FRACTIONS:
+		if float(fraction) <= 0.0:
+			continue
+		var index := 0
+		while index < radials.size():
+			out.append(centre + (radials[index] as Vector3) * radius * float(fraction))
+			# Every third azimuth: a ring is about catching a partial floor,
+			# not about measuring it.
+			index += 3
+	return out
+
+
+## A fixed 26-direction star: the six axes, the twelve edges and the eight
+## corners of a cube. Enough to find any wall a compact gauge touches.
+func _sphere_directions() -> Array:
+	var out: Array = []
+	for x in [-1.0, 0.0, 1.0]:
+		for y in [-1.0, 0.0, 1.0]:
+			for z in [-1.0, 0.0, 1.0]:
+				var direction := Vector3(x, y, z)
+				if direction.length_squared() > 0.0:
+					out.append(direction.normalized())
+	return out
+
+
+## One ray. `exclude` holds the collision-object RIDs this cast must not see —
+## the crossing walk uses it to reach the second of two coincident faces.
+func _ray(
+	state: PhysicsDirectSpaceState3D,
+	from: Vector3,
+	to: Vector3,
+	exclude: Array[RID] = []
+) -> Dictionary:
 	var params := PhysicsRayQueryParameters3D.create(from, to)
 	params.collide_with_bodies = true
 	params.collide_with_areas = false
 	params.collision_mask = _query_mask
 	params.hit_from_inside = true
 	params.hit_back_faces = true
+	params.exclude = exclude
 	return state.intersect_ray(params)
 
 
-## The node and reference whose surface a single point lies on, found by a small
-## sphere query at that point. Both are empty when nothing is within
-## CONTACT_ATTRIBUTION_MM, which is a truthful "unattributed" and not a wrong
-## name.
-func _names_at(state: PhysicsDirectSpaceState3D, point: Vector3) -> Dictionary:
-	var probe := SphereShape3D.new()
-	probe.radius = CONTACT_ATTRIBUTION_MM
-	var near := _overlaps(state, probe, Transform3D(Basis.IDENTITY, point))
-	if near.is_empty():
-		return {"node": "", "reference": ""}
-	return {"node": _node_for(near[0]), "reference": _reference_for(near[0])}
-
-
-## The node a query hit came from. The hit names both the body and the shape
-## index within it, and the owner map is kept per body, so the same shape index
-## on two references cannot be confused.
+## The node a query hit came from. One body holds one mesh, so the body IS the
+## node and no shape index has to be resolved.
 func _node_for(hit: Dictionary) -> String:
-	if not hit.has("shape") or not hit.has("collider"):
+	if not hit.has("collider"):
 		return ""
 	var collider: Variant = hit["collider"]
 	if not (collider is CollisionObject3D):
 		return ""
-	var names: Dictionary = _owner_names.get((collider as Object).get_instance_id(), {})
-	var owner_id := (collider as CollisionObject3D).shape_find_owner(int(hit["shape"]))
-	return str(names.get(owner_id, ""))
+	return str(_body_nodes.get((collider as Object).get_instance_id(), ""))
 
 
 ## The reference a query hit belongs to. It is a property of the BODY — one

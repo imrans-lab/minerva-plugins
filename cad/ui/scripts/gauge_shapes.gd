@@ -1,50 +1,24 @@
 extends RefCounted
-## gauge_shapes.gd — the shapes a measurement is made with, and the frame they
-## are built in. Split out of mesh_gauge.gd so that file stays about physics
-## queries; nothing here touches the physics server or holds any state.
+## gauge_shapes.gd — the gauge frame and the shapes a measurement may ask for.
+## Split out of mesh_gauge.gd so that file stays about physics queries; nothing
+## here touches the physics server or holds any state.
+##
+## There are no Shape3D objects here any more. A gauge is tested by rays cast
+## from its axis to its own surface, not by a shape query, so a gauge is only
+## ever a kind and a size — see constraint 4 in mesh_gauge.gd for the
+## measurement that forced that.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: preload("scripts/gauge_shapes.gd")
 
-## Sides of the gauge prism. Higher is a better circle and a slower query; at
-## 48 the prism is within 0.2% of the cylinder it stands for.
-const PRISM_SIDES: int = 48
+## The gauge shapes a verb may name. For "cylinder", size.x is the diameter and
+## size.y the length; for "sphere", size.x is the diameter; a "box" is its own
+## size in the gauge frame.
+const KINDS: Array = ["cylinder", "box", "sphere"]
 
 
-## The gauge prism for a pin of `radius`. The polygon's INRADIUS is the gauge
-## radius, so the prism contains the cylinder it stands for and a prism that
-## fits proves the pin fits — the error is one-sided and under 0.2% at 48
-## sides. A prism built the other way round would over-report every hole.
-static func prism(radius: float, length: float) -> ConvexPolygonShape3D:
-	var circumradius := radius / cos(PI / float(PRISM_SIDES))
-	var points := PackedVector3Array()
-	var half := length * 0.5
-	for i in range(PRISM_SIDES):
-		var angle := TAU * float(i) / float(PRISM_SIDES)
-		var x := cos(angle) * circumradius
-		var y := sin(angle) * circumradius
-		points.append(Vector3(x, y, -half))
-		points.append(Vector3(x, y, half))
-	var shape := ConvexPolygonShape3D.new()
-	shape.points = points
-	return shape
-
-
-## The shape a gauge verb asked for, or null when the name is not one of them.
-## For "cylinder", size.x is the diameter and size.y the length.
-static func shape_for(kind: String, size: Vector3) -> Shape3D:
-	match kind:
-		"cylinder":
-			return prism(maxf(0.001, size.x * 0.5), maxf(0.001, size.y))
-		"box":
-			var box := BoxShape3D.new()
-			box.size = size
-			return box
-		"sphere":
-			var sphere := SphereShape3D.new()
-			sphere.radius = maxf(0.001, size.x * 0.5)
-			return sphere
-	return null
+static func is_supported(kind: String) -> bool:
+	return kind in KINDS
 
 
 ## Basis whose Z is `axis`: the frame every gauge shape is built in.
