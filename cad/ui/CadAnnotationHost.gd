@@ -565,6 +565,8 @@ func _compute_viewport_rect(pane_id: String) -> Rect2:
 ## EdgeOverlay → CADPanel pushes this; MCP queries can read it via get.
 func set_selected_edge_id(edge_id: int) -> void:
 	_selected_edge_id = edge_id
+	if edge_id >= 0:
+		_last_selection_kind = _CadAnchorTypesScript.EDGE_ANCHOR_KEY
 
 
 func get_selected_edge_id() -> int:
@@ -580,6 +582,11 @@ var _reference_records: Array = []
 ## The user's last click on a reference node (reference_selection's record), or
 ## {}. Read by get_current_selection_anchor() so a tool can anchor to it.
 var _selected_reference: Dictionary = {}
+## Which selection the user made last: an edge or a reference point. The
+## default anchor for a new annotation follows the most recent click, not a
+## fixed precedence, so selecting a node after an edge does not keep
+## authoring against the edge.
+var _last_selection_kind: String = ""
 
 
 func set_reference_records(records: Array) -> void:
@@ -592,6 +599,8 @@ func get_reference_records() -> Array:
 
 func set_selected_reference(selection: Dictionary) -> void:
 	_selected_reference = selection
+	if not selection.is_empty():
+		_last_selection_kind = _CadAnchorTypesScript.POINT_ANCHOR_KEY
 
 
 func get_selected_reference() -> Dictionary:
@@ -698,7 +707,9 @@ func _init() -> void:
 ## match cad/edge. The "kind" filter is the substrate's mechanism for tools
 ## that only want one anchor type.
 func get_current_selection_anchor(kind: String = "") -> Dictionary:
-	if _selected_edge_id >= 0 and (kind == "" or kind == _CadAnchorTypesScript.EDGE_ANCHOR_KEY):
+	var want_edge := kind == _CadAnchorTypesScript.EDGE_ANCHOR_KEY \
+		or (kind == "" and _last_selection_kind != _CadAnchorTypesScript.POINT_ANCHOR_KEY)
+	if _selected_edge_id >= 0 and want_edge:
 		return {
 			"plugin": _CadAnchorTypesScript.PLUGIN,
 			"type":   _CadAnchorTypesScript.EDGE_TYPE,

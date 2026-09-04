@@ -19,8 +19,9 @@ extends Node
 @export var view_id: String = "iso"
 
 ## Called with (view_id, pixel); returns true when the click selected
-## something, in which case the event is marked handled so it does not also
-## reach the camera.
+## something, in which case the event is marked handled so nothing later in
+## unhandled-input order sees it. The orbit camera reads _input and only the
+## middle button and wheel, so it is unaffected either way.
 var _handler: Callable = Callable()
 
 

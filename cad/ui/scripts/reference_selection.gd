@@ -224,7 +224,9 @@ func pick(records: Array, from: Vector3, to: Vector3) -> Dictionary:
 				continue
 			best_t = t
 			var world_point: Vector3 = to_world * (hit["point"] as Vector3)
-			var world_normal: Vector3 = (to_world.basis * (hit["normal"] as Vector3)).normalized()
+			# Normals transform by the inverse transpose so a non-uniform node
+			# scale does not skew them.
+			var world_normal: Vector3 = (to_world.basis.inverse().transposed() * (hit["normal"] as Vector3)).normalized()
 			if world_normal.dot(segment) > 0.0:
 				# Face the way the user is looking from, whichever way the
 				# triangle happened to be wound.
@@ -280,7 +282,9 @@ func _hit_mesh(mesh: Mesh, from: Vector3, to: Vector3) -> Dictionary:
 ## Unpacked triangle arrays for one mesh, cached. Only triangle surfaces are
 ## taken: a line surface (the ortho outlines) has no inside to hit.
 func _triangles_for(mesh: Mesh) -> Array:
-	var key := str(mesh.get_rid().get_id())
+	# Instance ids are never reused within a session; RIDs are recycled once a
+	# Mesh is freed, which would pick against a re-imported file's stale triangles.
+	var key := str(mesh.get_instance_id())
 	if _triangles.has(key):
 		return _triangles[key]
 	var surfaces: Array = []
