@@ -341,6 +341,7 @@
           "ui/scripts/edge_sidebar.gd",
           "ui/scripts/panel_measurement.gd",
           "ui/scripts/geometry_checks.gd",
+          "ui/scripts/clearance_client.gd",
           "ui/scripts/fastener_checks.gd",
           "ui/scripts/worker_reply.gd",
           "ui/scripts/mesh_features.gd",
