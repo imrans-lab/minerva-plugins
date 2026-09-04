@@ -90,6 +90,11 @@ done
 # script guessing.
 : "${WHEEL_REPAIR_ARGS:=}"
 : "${WHEEL_REPAIR_PROOF:=}"
+# DLLs no compiled extension may still import by its BARE name after the
+# repair. delvewheel mangles the name of every DLL it vendors and patches the
+# import table, so a bare name here is an extension still resolving the
+# runtime from the machine — invisible on a CI runner, fatal for a user.
+: "${WHEEL_REPAIR_FORBIDDEN_IMPORTS:=}"
 # Directory (relative to the plugin dir) copied into the bundle as licenses/:
 # the licence texts a binary redistribution has to carry.
 : "${BUNDLE_LICENSE_DIR:=}"
@@ -376,24 +381,29 @@ if [ ${#REPAIR[@]} -gt 0 ] && [ "$TRIPLE" = "windows-x86_64" ]; then
   done
   echo "[$TRIPLE] repaired wheels:"
   ls -la "$REPAIRED_WHEEL_DIR"
-  # delvewheel writes an output wheel even when it vendored nothing, so the
-  # repair is proven by content: every repaired wheel must carry a member
-  # matching WHEEL_REPAIR_PROOF, or the bundle would import only on machines
-  # that already have the runtime installed. The pattern is lock data because
-  # which runtime is missing belongs to the wheel, not to this mechanism.
-  # Listed with python's zipfile rather than `unzip`: Git for Windows does not
-  # reliably ship unzip, and a missing tool must not read as a failed repair.
+  # delvewheel writes an output wheel even when it vendored nothing, and a
+  # wheel can carry a vendored copy while its extension is still bound to the
+  # machine's. Both are proven by prove_wheel_repair.py: a member matching
+  # WHEEL_REPAIR_PROOF, and no import table still naming a
+  # WHEEL_REPAIR_FORBIDDEN_IMPORTS entry by its bare name. Both are lock data,
+  # because which runtime a wheel is missing belongs to the wheel and not to
+  # this mechanism. Read with python (zipfile + pefile, the latter a
+  # delvewheel dependency already in the tooling directory) rather than with
+  # `unzip`: Git for Windows does not reliably ship unzip, and a missing tool
+  # must not read as a failed repair.
   if [ -z "$WHEEL_REPAIR_PROOF" ]; then
     echo "[$TRIPLE] FATAL: WHEEL_REPAIR_PKGS is set but WHEEL_REPAIR_PROOF is empty" >&2
     exit 65
   fi
+  FORBID_ARGS=()
+  for dll in ${WHEEL_REPAIR_FORBIDDEN_IMPORTS:-}; do
+    FORBID_ARGS+=( --forbid "$dll" )
+  done
   for whl in "$REPAIRED_WHEEL_DIR"/*.whl; do
-    if ! "$STAGE_DIR/$PYTHON_BIN" -c "
-import sys, zipfile, re
-names = zipfile.ZipFile(sys.argv[1]).namelist()
-sys.exit(0 if any(re.search(sys.argv[2], n, re.I) for n in names) else 1)
-" "$whl" "$WHEEL_REPAIR_PROOF"; then
-      echo "[$TRIPLE] wheel repair vendored nothing matching $WHEEL_REPAIR_PROOF into $(basename "$whl")" >&2
+    if ! "$STAGE_DIR/$PYTHON_BIN" "$SCRIPT_DIR/prove_wheel_repair.py" \
+        "$whl" "$WHEEL_REPAIR_PROOF" --tooling "$REPAIR_TOOLING" \
+        ${FORBID_ARGS[@]+"${FORBID_ARGS[@]}"}; then
+      echo "[$TRIPLE] wheel repair not proven for $(basename "$whl")" >&2
       exit 74
     fi
   done

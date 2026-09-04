@@ -60,6 +60,7 @@ extends RefCounted
 
 const _Measurement: Script = preload("panel_measurement.gd")
 const _ReferenceMeshes: Script = preload("reference_meshes.gd")
+const _WorkerReply: Script = preload("worker_reply.gd")
 
 ## Child of a MeshRoot holding the red crosses. Freed and rebuilt on every
 ## check, so a clean evaluation clears the previous one's markers.
@@ -116,11 +117,11 @@ const MAX_REFERENCE_TRIANGLES: int = 400000
 ## Every collision layer at once — the unscoped mask, matching mesh_gauge.
 const ALL_LAYERS: int = 0xFFFFFFFF
 
-## How long a reservation is honoured: mesh_gauge's JOB_TIMEOUT_MS (5 s, after
-## which a queued job gives up) plus a margin for the walk that FOLLOWS the
-## step — a hundred thousand reference triangles inside one physics frame. A
-## holder that has not released by then has died holding the flag, and the
-## flag is module state nothing else will ever clear.
+## How long a request will queue behind a running check: mesh_gauge's
+## JOB_TIMEOUT_MS (5 s, after which a queued job gives up) plus a margin for
+## the walk that FOLLOWS the step — a hundred thousand reference triangles
+## inside one physics frame. Past it the new request is REFUSED as busy; the
+## module is never taken away from a holder that may still be casting.
 const RESERVATION_TIMEOUT_MS: int = 8000
 
 
@@ -149,6 +150,9 @@ var _marker_points: PackedVector3Array = PackedVector3Array()
 var _casts: int = 0
 ## Ceilings the running check hit, in prose.
 var _limits: PackedStringArray = PackedStringArray()
+## Nodes whose containment question could not be answered, as
+## {reference, node, reason}. A rejected probe is not a clean node.
+var _undecided: Array = []
 ## Wall clock of the running check, microseconds.
 var _started_us: int = 0
 
@@ -158,15 +162,17 @@ var _started_us: int = 0
 ## if a newer one arrived while it waited. Only the newest ticket may draw.
 var _ticket: int = 0
 var _in_flight: bool = false
-## When the running reservation stops being believed, in engine milliseconds.
-## A holder that never releases — a runtime error inside the fastener run
-## aborts its coroutine before release_reservation is reached — would
-## otherwise park every later check on a signal nobody emits.
-var _reserved_until: int = 0
-## The ticket the running reservation was taken with. A holder whose deadline
-## passed has been usurped: its eventual release names a ticket that is no
-## longer the holder's and does nothing, so it cannot free the module out from
-## under the request that took over.
+## How long a queued request waits before refusing, in milliseconds. Read from
+## the variable rather than the constant so a suite can drive the refusal
+## without spending the whole window waiting for it; nothing in the panel ever
+## writes it.
+var reservation_timeout_ms: int = RESERVATION_TIMEOUT_MS
+## When the running reservation was granted, in engine milliseconds. The
+## holder's AGE is what a queued request refuses on, and what the refusal
+## reports.
+var _holder_since: int = 0
+## The ticket the running reservation was taken with. Only that ticket's
+## release frees the module.
 var _holder: int = 0
 
 ## Emitted when a check releases the module. Waited on by a request that found
@@ -207,7 +213,19 @@ func attach(host: Node) -> void:
 ## ALWAYS rebuilds. The mesh changes on every evaluation and there is no path
 ## or stamp to key a cache on, so a cache here would answer this evaluation's
 ## question with the last one's geometry.
-func build_solid(mesh_data: Dictionary) -> int:
+##
+## `ticket` is the reservation the caller holds. Rebuilding FREES the current
+## collider, so while ANY reservation is out the caller must be its holder —
+## refused (-1) otherwise, with no exception for a holder that has aged past
+## its window. Age decides one thing only, and it is decided in one place:
+## reserve() reclaims a stale reservation and hands the module to a new
+## ticket. Until that transfer happens the old holder may still be inside a
+## physics query, and a freed RID under a running query is a crash, not a
+## wrong number. With no reservation out (a suite driving the module directly)
+## ticket 0 is the caller and the rebuild goes ahead.
+func build_solid(mesh_data: Dictionary, ticket: int = 0) -> int:
+	if _in_flight and ticket != _holder:
+		return -1
 	_solid_faces = PackedVector3Array()
 	_solid_edges = PackedVector3Array()
 	_solid_bounds = AABB()
@@ -309,12 +327,17 @@ func get_solid_edge_count() -> int:
 ## `args` may carry reference= and node= to narrow the question; the mask is
 ## derived from the reference here, so no caller has to know about layers.
 func check(panel: Object, args: Dictionary = {}) -> Dictionary:
-	var ticket := await reserve()
+	var reservation := await reserve()
+	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
-		return _superseded(_nothing(
-			"a newer check started before this one could run"))
+		return refused(reservation)
 	_marker_points = PackedVector3Array()
-	var report := await _run(panel, args)
+	var report := await _run(panel, args, ticket)
+	if not holds(ticket):
+		# Reclaimed while this check was awaiting a physics step: the module's
+		# collider, records and counters belong to another check now. The
+		# answer still goes back to this caller, and nothing else happens.
+		return _superseded(report)
 	release_reservation(ticket)
 	# Only the newest request may paint. A superseded reply still goes back to
 	# its own caller — it is a true answer about the geometry it was asked
@@ -337,41 +360,69 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## Public because the fastener check borrows the same solid collider and the
 ## same world: it is a second question about the one body this module owns, and
 ## a second owner of that body is exactly what the ticket exists to prevent.
-## Every reservation that returns non-zero must be released BY ITS OWN TICKET —
-## and a reservation older than RESERVATION_TIMEOUT_MS is taken back whether it
-## was released or not, because the flag is module state and a coroutine that
-## died holding it will never clear it. The wait is on idle frames rather than
-## on check_finished for the same reason: the signal may never be emitted.
-func reserve() -> int:
+## Every granted reservation must be released BY ITS OWN TICKET.
+##
+## Returns {ticket: <non-zero>} when the module is taken, and {ticket: 0,
+## busy: true, holder_ticket, holder_age_ms, reason} when it is not.
+##
+## A LIVE HOLDER IS REFUSED, NOT OVERTAKEN. The records, the cast counters and
+## the solid's collider are module state: a second job mutating them frees the
+## body the running one is casting against, which is a freed collider under a
+## live physics query and not merely a wrong number. So a request arriving
+## while the holder is inside its window comes straight back as busy, naming
+## the holder and its age, and the caller retries.
+##
+## A HOLDER PAST THE DEADLINE IS RECLAIMED. reservation_timeout_ms is
+## mesh_gauge's own job timeout plus the margin for the walk that follows it,
+## so a holder older than that has either returned or died: its physics job
+## has timed out inside the gauge, and the walk that follows is synchronous
+## GDScript, which cannot be parked mid-way across an await. The reservation is
+## taken back rather than left to strand the panel forever on a coroutine that
+## will never release it.
+##
+## THE RECLAIMED TICKET GOES INERT. release_reservation and every path that
+## mutates module state on a reservation's behalf check that the caller is
+## still the holder, so a dead holder that resumes late releases nothing,
+## paints nothing and writes nothing.
+func reserve() -> Dictionary:
 	_ticket += 1
 	var ticket := _ticket
-	var tree := _tree()
-	while _in_flight:
-		if Time.get_ticks_msec() >= _reserved_until:
-			break
-		if tree != null:
-			await tree.process_frame
-		else:
-			await check_finished
-		if ticket != _ticket:
-			return 0
+	if _in_flight:
+		var age := Time.get_ticks_msec() - _holder_since
+		if age < reservation_timeout_ms:
+			return {
+				"ticket": 0,
+				"busy": true,
+				"holder_ticket": _holder,
+				"holder_age_ms": age,
+				"reason": ("check %d has held this panel's geometry for %d ms "
+					+ "and has not finished; running a second check now would "
+					+ "hand it the other one's collider. Retry in a moment.")
+					% [_holder, age],
+			}
 	_in_flight = true
 	_holder = ticket
-	_reserved_until = Time.get_ticks_msec() + RESERVATION_TIMEOUT_MS
-	return ticket
+	_holder_since = Time.get_ticks_msec()
+	return {"ticket": ticket}
+
+
+## Is `ticket` still the reservation this module is running? False for a
+## holder that was reclaimed after its deadline — which is the one thing a
+## coroutine resuming from an await has to ask before it touches anything.
+func holds(ticket: int) -> bool:
+	return _in_flight and ticket == _holder
 
 
 ## Release the reservation `ticket` took, and wake whoever is queued behind it.
-## A ticket that is no longer the holder was usurped when its deadline passed:
-## its release belongs to a reservation that is over, and clearing the flag
-## would hand the module's collider to a third caller while the second is
-## still using it.
+## A ticket that is not the holder's — a reservation that was reclaimed after
+## its deadline — has nothing to release: clearing the flag would hand the
+## module's collider away from the check that owns it now.
 func release_reservation(ticket: int) -> void:
 	if not _in_flight or ticket != _holder:
 		return
 	_in_flight = false
 	_holder = 0
-	_reserved_until = 0
+	_holder_since = 0
 	check_finished.emit()
 
 
@@ -380,6 +431,21 @@ func _tree() -> SceneTree:
 	if _viewport != null and _viewport.is_inside_tree():
 		return _viewport.get_tree()
 	return null
+
+
+## The report for a reservation that was not granted: a `checked: false`
+## answer carrying the holder it lost to, so the caller can retry rather than
+## read an empty report as a clean one. Public because the fastener check
+## reserves the same module and owes its caller the same answer.
+func refused(reservation: Dictionary) -> Dictionary:
+	var report := _nothing(str(reservation.get("reason", "the check could "
+		+ "not take the panel's geometry")))
+	if bool(reservation.get("busy", false)):
+		report["busy"] = true
+		report["holder_ticket"] = int(reservation.get("holder_ticket", 0))
+		report["holder_age_ms"] = int(reservation.get("holder_age_ms", 0))
+		return report
+	return _superseded(report)
 
 
 ## Mark a reply as describing a question that has been overtaken. The caller
@@ -396,7 +462,7 @@ func get_ticket() -> int:
 	return _ticket
 
 
-func _run(panel: Object, args: Dictionary) -> Dictionary:
+func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _nothing("the CAD panel is gone")
 	# The cheap refusals first. Building the solid's collider costs a
@@ -412,8 +478,11 @@ func _run(panel: Object, args: Dictionary) -> Dictionary:
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		document = panel.get_document_state()
-	var triangles := build_solid(document.get("mesh", {}) as Dictionary)
-	if triangles <= 0:
+	var triangles := build_solid(document.get("mesh", {}) as Dictionary, ticket)
+	if triangles < 0:
+		return _nothing("another check holds this panel's geometry; nothing "
+			+ "was measured")
+	if triangles == 0:
 		return _nothing("the evaluation produced no solid geometry to check")
 
 	set_records(panel.get_reference_state())
@@ -428,6 +497,10 @@ func _run(panel: Object, args: Dictionary) -> Dictionary:
 		# interference check is: it owns the physics step, this module owns
 		# the question.
 		"module": self,
+		# The job runs AFTER an await, which is where a reclaimed holder wakes
+		# up. run_check refuses to write anything on a ticket that is no
+		# longer the holder's.
+		"ticket": ticket,
 		"mask": mask,
 		"reference": reference_scope,
 		"node": str(args.get("node", "")),
@@ -444,9 +517,18 @@ func _run(panel: Object, args: Dictionary) -> Dictionary:
 ## space's direct state in hand. `state` is the references' space; the solid's
 ## own space is this module's.
 func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
+	# Everything below writes module state. A job whose reservation was
+	# reclaimed while it queued for this physics step is answering about
+	# another check's collider, so it writes nothing and says so. Ticket 0 is
+	# a caller driving the module directly, which owns it by definition.
+	var ticket := int(args.get("ticket", 0))
+	if ticket != 0 and not holds(ticket):
+		return _nothing("this check's reservation was reclaimed before its "
+			+ "physics step came; another check owns the panel's geometry")
 	_started_us = Time.get_ticks_usec()
 	_casts = 0
 	_limits = PackedStringArray()
+	_undecided = []
 	var mask := int(args.get("mask", ALL_LAYERS))
 	var reference_scope := str(args.get("reference", ""))
 	var node_scope := str(args.get("node", ""))
@@ -668,8 +750,14 @@ func _cross_into_solid(
 ## its OWN body: the step is a fraction of a world box and a body is not
 ## convex, so a vertex on the rim of a mounting hole insets INTO the hole —
 ## where a locating pin standing through that hole would read as a body the
-## reference lies entirely inside. Every rejection tries the next point; only
-## a verified point may answer.
+## reference lies entirely inside — and the probe therefore has to be inside
+## that node, not merely inside SOME node of the same reference. Every
+## rejection tries the next point; only a verified point may answer.
+##
+## AND WHEN NO POINT ANSWERS. A body whose every candidate was rejected has
+## not been cleared: the question was asked and nothing could answer it. It is
+## recorded in `_undecided` and reported as undecidable, because a node that
+## really is buried would otherwise be indistinguishable from one that is not.
 func _containment(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -681,7 +769,18 @@ func _containment(
 ) -> void:
 	if _solid_edges.size() >= 2 and solid_state != null \
 			and _reference_encloses_solid(reference_scope):
+		# ONE QUESTION PER ENCLOSING REFERENCE. Two bodies can both hold the
+		# solid, and "is the solid inside this one" is a different question
+		# for each of them: answering it for the first and returning leaves
+		# the second's clearance rows to pass on an unsigned distance. Every
+		# candidate rejected is not a clean answer either — the question was
+		# asked and nothing could answer it — so a reference nobody could
+		# settle is reported undecidable rather than left silent.
+		var enclosing_names := _enclosing_references(reference_scope)
+		var answered := {}
+		var tried := 0
 		for probe in _probe_points(_solid_edges, _solid_bounds):
+			tried += 1
 			# Inside the SOLID's own material, or it says nothing about where
 			# the solid is: an edge endpoint of a shell insets into the cavity
 			# the shell encloses as readily as into its wall.
@@ -689,45 +788,72 @@ func _containment(
 				continue
 			if _touches_references(gauge, state, mask, reference_scope, probe):
 				continue
-			# The gauge's own parity test, reached through the smallest gauge
-			# it will accept: a pin that touches nothing and still does not
-			# fit is a pin buried in material.
-			var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
-				"shape": "sphere",
-				"size": Vector3(0.002, 0.0, 0.0),
-				"at": probe,
-				"mask": mask,
-				"reference": reference_scope,
-			})
-			_casts += 1
-			# A verified probe that is in nobody's material settles direction
-			# one; direction two is a different question and still runs.
-			if str(verdict.get("reason", "")) != "inside_solid":
+			for enclosing in enclosing_names:
+				if answered.has(enclosing):
+					continue
+				var ref_mask := mask
+				if not enclosing.is_empty():
+					ref_mask = int(gauge.call("mask_for", enclosing))
+				# The gauge's own parity test, reached through the smallest
+				# gauge it will accept — a pin that touches nothing and still
+				# does not fit is a pin buried in material — asked of ONE
+				# reference at a time.
+				var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
+					"shape": "sphere",
+					"size": Vector3(0.002, 0.0, 0.0),
+					"at": probe,
+					"mask": ref_mask,
+					"reference": enclosing,
+				})
+				_casts += 1
+				# An ERROR is not an answer. The gauge says so when a ray
+				# crossed more surfaces than its budget allows — a deeply
+				# layered reference — and treating that as "not inside"
+				# reports a buried solid as clean. Leave this reference open
+				# and try the next probe.
+				if verdict.has("error"):
+					continue
+				answered[enclosing] = true
+				if str(verdict.get("reason", "")) != "inside_solid":
+					continue
+				# Parity says "inside something" without saying inside WHAT,
+				# so the nearest surface from the probe names the offender.
+				#
+				# This is the ONE cast in the module that starts inside
+				# material, against constraint 2 above. It is safe precisely
+				# because it is not a crossing test: every reference collider
+				# carries backface_collision, so a ray leaving buried material
+				# reports the wall it exits through, and that wall's body is
+				# the node the solid is buried in — which is all this ray is
+				# asked for.
+				var reach := _scene_reach()
+				var named: Dictionary = gauge.call("run_now", state, "raycast", {
+					"from": probe,
+					"to": probe + Vector3.RIGHT * reach,
+					"mask": ref_mask,
+					"reference": enclosing,
+				})
+				_absorb(pairs, {
+					"point": probe,
+					"node": str(named.get("node", "")),
+					"reference": str(named.get("reference", enclosing)),
+					"distance": 0.0,
+					"containment": "the solid lies entirely inside this node",
+				}, node_scope)
+			if answered.size() == enclosing_names.size():
 				break
-			# Parity says "inside something" without saying inside WHAT, so the
-			# nearest surface from the probe names the offender.
-			#
-			# This is the ONE cast in the module that starts inside material,
-			# against constraint 2 above. It is safe precisely because it is
-			# not a crossing test: every reference collider carries
-			# backface_collision, so a ray leaving buried material reports the
-			# wall it exits through, and that wall's body is the node the
-			# solid is buried in — which is all this ray is asked for.
-			var reach := _scene_reach()
-			var named: Dictionary = gauge.call("run_now", state, "raycast", {
-				"from": probe,
-				"to": probe + Vector3.RIGHT * reach,
-				"mask": mask,
-				"reference": reference_scope,
+		for enclosing in enclosing_names:
+			if answered.has(enclosing):
+				continue
+			_undecided.append({
+				"reference": enclosing,
+				"node": "",
+				"reason": ("this reference's bounds hold the whole solid, but "
+					+ "none of the %d probe points taken from the solid's own "
+					+ "edges could be verified inside its own material, so "
+					+ "whether the solid is buried in it was not decided")
+					% tried,
 			})
-			_absorb(pairs, {
-				"point": probe,
-				"node": str(named.get("node", "")),
-				"reference": str(named.get("reference", reference_scope)),
-				"distance": 0.0,
-				"containment": "the solid lies entirely inside this node",
-			}, node_scope)
-			return
 
 	if solid_state == null:
 		return
@@ -750,15 +876,20 @@ func _containment(
 			var box: AABB = _ReferenceMeshes.transform_aabb(xform, mesh.get_aabb())
 			if not _solid_bounds.encloses(box):
 				continue
-			for probe in _probe_points(_mesh_vertices(mesh, xform), box):
+			var candidates := _probe_points(_mesh_vertices(mesh, xform), box)
+			var decided_node := false
+			for probe in candidates:
 				if _touches_solid(solid_state, probe):
 					continue
-				# Inside the PART's own material, or it says nothing about
-				# where the part is. A vertex on a mounting hole's rim insets
-				# into the hole, and a pin standing through that hole would
-				# then read as a body this node lies entirely inside.
-				if not _inside_reference(gauge, state, probe, reference_name):
+				# Inside THIS NODE's own material, or it says nothing about
+				# where the node is. A vertex on a mounting hole's rim insets
+				# into the hole, and a pin standing through that hole — a
+				# different node of the same reference — would otherwise vouch
+				# for the probe and report this node as buried.
+				if not _inside_reference(
+						gauge, state, probe, reference_name, node_path):
 					continue
+				decided_node = true
 				if _parity_inside_solid(solid_state, probe) != 1:
 					break
 				_absorb(pairs, {
@@ -769,6 +900,37 @@ func _containment(
 					"containment": "this node lies entirely inside the solid",
 				}, node_scope)
 				break
+			if not decided_node:
+				_undecided.append({
+					"reference": reference_name,
+					"node": node_path,
+					"reason": ("the solid's bounds hold this node, but none "
+						+ "of its %d probe points could be verified inside "
+						+ "its own material (every one landed in a hole, a "
+						+ "cavity or on a face it shares with the solid), so "
+						+ "whether it is buried in the solid was not decided")
+						% candidates.size(),
+				})
+
+
+## EVERY reference whose world box holds the whole solid — the records a
+## containment question about the solid is ABOUT. Two nested boxes both hold
+## it and the question is open for both; answering it for the first one only
+## leaves the other's rows to pass on a distance nobody could sign. Falls back
+## to the scope the caller asked with, so a question that was asked always
+## names something.
+func _enclosing_references(reference_scope: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	for entry in _records:
+		var record: Dictionary = entry
+		var name := str(record.get("name", ""))
+		if not reference_scope.is_empty() and name != reference_scope:
+			continue
+		if _record_world_box(record).encloses(_solid_bounds):
+			out.append(name)
+	if out.is_empty():
+		out.append(reference_scope)
+	return out
 
 
 ## Could the solid be inside a reference at all? Only a reference whose world
@@ -863,15 +1025,17 @@ func _touches_solid(solid_state: PhysicsDirectSpaceState3D, point: Vector3) -> b
 	return false
 
 
-## Is `point` inside the material of `reference_name`? The gauge's own parity
-## test through the smallest gauge it will accept — a pin that touches nothing
-## and still does not fit is a pin buried in material — scoped to that one
-## reference, so a neighbour cannot vouch for a probe.
+## Is `point` inside the material of ONE node of `reference_name`? The gauge's
+## own parity test through the smallest gauge it will accept — a pin that
+## touches nothing and still does not fit is a pin buried in material — scoped
+## to that reference by mask and to that node by name, so neither a neighbouring
+## reference nor a neighbouring node of the same one can vouch for a probe.
 func _inside_reference(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
 	point: Vector3,
-	reference_name: String
+	reference_name: String,
+	node_path: String
 ) -> bool:
 	_casts += 1
 	var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
@@ -880,6 +1044,7 @@ func _inside_reference(
 		"at": point,
 		"mask": int(gauge.call("mask_for", reference_name)),
 		"reference": reference_name,
+		"node": node_path,
 	})
 	return str(verdict.get("reason", "")) == "inside_solid"
 
@@ -1062,6 +1227,13 @@ func _report(pairs: Dictionary) -> Dictionary:
 		"count": out.size(),
 		"point_count": total,
 		"pairs": out,
+		# A node here was NOT cleared: its containment could not be decided.
+		# Reporting it beside the pairs is what keeps "no interference" an
+		# answer about geometry rather than about the probes that failed.
+		"undecidable": _undecided,
+		"undecidable_note": ("containment is decided from a probe verified "
+			+ "inside its own body; a node listed here offered none, so it is "
+			+ "neither clean nor reported as interfering"),
 		"sampling": sampling,
 		"casts": _casts,
 		"elapsed_ms": float(Time.get_ticks_usec() - _started_us) / 1000.0,
@@ -1083,6 +1255,7 @@ func _nothing(reason: String) -> Dictionary:
 		"count": 0,
 		"point_count": 0,
 		"pairs": [],
+		"undecidable": [],
 		"reason": reason,
 		"casts": 0,
 		"elapsed_ms": 0.0,
@@ -1095,6 +1268,20 @@ func _nothing(reason: String) -> Dictionary:
 func status_line(report: Dictionary) -> String:
 	var pairs: Array = report.get("pairs", []) as Array
 	if int(report.get("count", 0)) <= 0 or pairs.is_empty():
+		# Nothing ran into anything, but a node whose containment could not be
+		# decided must not read on screen as a clean answer.
+		var undecided: Array = report.get("undecidable", []) as Array
+		if not undecided.is_empty():
+			var one: Dictionary = undecided[0]
+			var name := str(one.get("node", ""))
+			if name.is_empty():
+				name = str(one.get("reference", "the reference"))
+			return "Interference: undecided for %s%s — %s." % [
+				name,
+				" (and %d other)" % (undecided.size() - 1) \
+					if undecided.size() > 1 else "",
+				str(one.get("reason", "")),
+			]
 		return ""
 	var first: Dictionary = pairs[0]
 	var where := ""
@@ -1550,14 +1737,17 @@ func _request(head: Dictionary, targets: Array) -> Dictionary:
 ## cause — it is the DSL source sharing the payload.
 func _batch_targets(head: Dictionary, targets: Array) -> Dictionary:
 	var limit := IPC_PAYLOAD_LIMIT_BYTES - IPC_PAYLOAD_MARGIN_BYTES
-	var head_size := JSON.stringify(_request(head, [])).length()
+	# BYTES, not characters: the host's cap is on the encoded message, and a
+	# DSL with multibyte identifiers or comments in it measures shorter than
+	# it travels.
+	var head_size := _byte_size(_request(head, []))
 	var batches: Array = []
 	var current: Array = []
 	var size := head_size
 	for entry in targets:
 		var target: Dictionary = entry
 		# +1 for the comma the array separator costs.
-		var cost := JSON.stringify(_sized(target)).length() + 1
+		var cost := _byte_size(_sized(target)) + 1
 		if head_size + cost > limit:
 			return {"error": ("the clearance request for node '%s' does not "
 				+ "fit the host's %d byte channel limit on its own — the DSL "
@@ -1572,6 +1762,11 @@ func _batch_targets(head: Dictionary, targets: Array) -> Dictionary:
 	if not current.is_empty():
 		batches.append(current)
 	return {"batches": batches}
+
+
+## What one JSON value costs on the wire, in UTF-8 bytes.
+func _byte_size(value: Variant) -> int:
+	return JSON.stringify(value).to_utf8_buffer().size()
 
 
 ## A target at its largest: the form the retry sends, carrying the blob path.
@@ -1594,6 +1789,8 @@ func _blob_path(digest: String) -> String:
 func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		records: Array, buried: Dictionary) -> Dictionary:
 	var overlapping: Dictionary = buried.get("nodes", {})
+	var undecided: Dictionary = buried.get("undecided", {})
+	var undecided_references: Dictionary = buried.get("undecided_references", {})
 	var pairs: Array = []
 	for entry in raw_pairs:
 		var raw: Dictionary = entry
@@ -1616,6 +1813,18 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 				+ "unsigned and cannot see material a node is already inside"
 			pairs.append(pair)
 			continue
+		var doubt := ""
+		if undecided.has(_pair_key(pair["reference"], pair["node"])):
+			doubt = str(undecided[_pair_key(pair["reference"], pair["node"])])
+		elif undecided_references.has(pair["reference"]):
+			doubt = str(undecided_references[pair["reference"]])
+		if not doubt.is_empty():
+			# The distance is real and is reported; what is not known is which
+			# SIDE of the surface it was measured from. A pass here would be a
+			# guess, so the row states the doubt and fails.
+			pair["pass"] = false
+			pair["containment_undecidable"] = true
+			pair["note"] = "containment undecidable: %s" % doubt
 		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
 			var pose := _pose_in(records, pair["reference"])
 			var reference_point := _vector(raw["reference_point_mm"])
@@ -1626,7 +1835,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			}
 		if bool(raw.get("interference", false)):
 			pair["interference"] = true
-		if not str(raw.get("note", "")).is_empty():
+		if not str(raw.get("note", "")).is_empty() and not pair.has("note"):
 			pair["note"] = str(raw["note"])
 		pairs.append(pair)
 	pairs.sort_custom(func(a, b): return float((a as Dictionary)["min_mm"]) \
@@ -1658,11 +1867,21 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 ## last eval result, so the answer is already there; asking again would rebuild
 ## the solid's collider for a question that has been answered.
 ##
-## Returns {fresh: bool, nodes: {key: true}}. `fresh` is false when no report
-## describes the source about to be measured — the reply then says the join was
-## unavailable rather than implying the distances are signed.
+## Returns {fresh, nodes: {key: true}, undecided: {key: reason},
+## undecided_references: {reference: reason}}.
+## `fresh` is false when no report describes the source about to be measured —
+## the reply then says the join was unavailable rather than implying the
+## distances are signed.
+##
+## UNDECIDED NODES TRAVEL TOO. A node whose containment the interference check
+## could not settle is exactly the node whose unsigned distance cannot be
+## trusted: if it IS buried, the gap the worker measured is the distance to the
+## wall it is inside. Passing such a node on its measured number is the same
+## blind spot the join exists to close, so it is carried through and the pair
+## says so.
 func _buried_pairs(document: Dictionary, source: String) -> Dictionary:
-	var out := {"fresh": false, "nodes": {}}
+	var out := {"fresh": false, "nodes": {}, "undecided": {},
+		"undecided_references": {}}
 	var last_eval: Variant = document.get("last_eval", {})
 	if not (last_eval is Dictionary):
 		return out
@@ -1679,6 +1898,21 @@ func _buried_pairs(document: Dictionary, source: String) -> Dictionary:
 	for entry in (interference.get("pairs", []) as Array):
 		var pair: Dictionary = entry
 		nodes[_pair_key(str(pair.get("reference", "")), str(pair.get("node", "")))] = true
+	var undecided: Dictionary = out["undecided"]
+	var references: Dictionary = out["undecided_references"]
+	for entry in (interference.get("undecidable", []) as Array):
+		var row: Dictionary = entry
+		var reason := str(row.get("reason",
+			"the interference check could not decide it"))
+		var node_path := str(row.get("node", ""))
+		if node_path.is_empty():
+			# The other direction: the SOLID may be inside this reference and
+			# no probe could settle it. It names no node, so it doubts every
+			# node of that reference — a hollow shell buried in one body would
+			# otherwise collect a full set of positive, passing distances.
+			references[str(row.get("reference", ""))] = reason
+			continue
+		undecided[_pair_key(str(row.get("reference", "")), node_path)] = reason
 	return out
 
 
@@ -1690,13 +1924,21 @@ func _join_note(buried: Dictionary) -> String:
 			+ "joined: a mesh-to-mesh distance is unsigned, and a node buried " \
 			+ "in the solid's material reads as a positive gap"
 	var count: int = (buried.get("nodes", {}) as Dictionary).size()
+	var undecided: int = (buried.get("undecided", {}) as Dictionary).size() \
+		+ (buried.get("undecided_references", {}) as Dictionary).size()
+	var doubt := ""
+	if undecided > 0:
+		doubt = ("; %d node(s) whose containment that report could not decide "
+			+ "keep their measured distance but do NOT pass, because an "
+			+ "unsigned distance cannot say which side of the surface it was "
+			+ "measured from") % undecided
 	if count == 0:
 		return "the latest interference report for this source found no " \
 			+ "overlap, so every distance below is between two surfaces " \
-			+ "with air in between"
-	return "%d node(s) the latest interference report for this source found " \
-		% count + "overlapping the solid are reported at 0 rather than at " \
-		+ "their unsigned surface-to-surface distance"
+			+ "with air in between" + doubt
+	return ("%d node(s) the latest interference report for this source found "
+		% count + "overlapping the solid are reported at 0 rather than at "
+		+ "their unsigned surface-to-surface distance") + doubt
 
 
 ## SHA-256 of the DSL source, hex. Carried on the interference report so a
@@ -1736,30 +1978,14 @@ func _no_clearance(reason: String) -> Dictionary:
 
 
 ## Send one clearance request through the panel's IPC helper and unwrap the
-## host's envelope down to the worker's own result. Returns {error: ...} for
-## every layer that can fail, so the caller has one shape to read.
+## host's two envelopes down to the worker's own result. Returns {error: ...}
+## for every layer that can fail, so the caller has one shape to read.
 func _ask_worker(panel: Object, payload: Dictionary) -> Dictionary:
 	if not panel.has_method("call_backend"):
 		return {"error": "this panel cannot reach the CAD worker"}
 	var envelope: Dictionary = await panel.call_backend(
 		"cad.clearance", payload, CLEARANCE_TIMEOUT_MS)
-	if not bool(envelope.get("success", false)):
-		return {"error": "the clearance request did not reach the worker: %s %s"
-			% [str(envelope.get("error_code", "unknown")),
-				str(envelope.get("error_message", ""))]}
-	var worker_payload: Variant = envelope.get("result", {})
-	if not (worker_payload is Dictionary):
-		return {"error": "the worker's clearance reply was malformed"}
-	var body: Dictionary = worker_payload
-	if not bool(body.get("ok", false)):
-		var err: Variant = body.get("error", {})
-		var message: String = str((err as Dictionary).get("message", "")) \
-			if err is Dictionary else str(err)
-		return {"error": message if not message.is_empty() \
-			else "the worker refused the clearance request"}
-	var result: Variant = body.get("result", {})
-	return result if result is Dictionary else {"error": "the worker's "
-		+ "clearance reply carried no result"}
+	return _WorkerReply.unwrap(envelope, "clearance")
 
 
 # ---------------------------------------------------------------------------

@@ -126,6 +126,38 @@ const ROUND_FACETS := 64
 ## module looks for exactly these names and a typo here would silently pass.
 const MESH_ROOT_PATH := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport/MeshRoot"
 
+## The neighbour: a solid pin FILLING the washer's hole as a second node of the
+## SAME reference, with the same half-millimetre of air round it. Its material
+## is where every probe the washer offers lands, so it is exactly the body that
+## must not be allowed to vouch for the washer.
+const NEIGHBOUR_PIN_R := WASHER_INNER_R - PIN_CLEARANCE_MM
+const NEIGHBOUR_PIN_HEIGHT := 6.0
+const RING_NODE := "Assembly/Ring"
+const PIN_NODE := "Assembly/Pin"
+
+## The layered stack: 40 plates two faces each is 80 crossings on one ray,
+## which is more than mesh_gauge's own crossing budget (64), so a parity
+## question asked from inside the stack cannot be answered at all.
+const STACK_PLATES := 40
+const STACK_PLATE_MM := 0.2
+const STACK_PITCH_MM := 0.4
+const STACK_SPAN := 30.0
+## The two identical blocks a buried cube is inside at the same time.
+const BLOCK_A := "block_a"
+const BLOCK_B := "block_b"
+const BLOCK_NODE := "Assembly/Block"
+
+const STACK_A := "stack_a"
+const STACK_B := "stack_b"
+const STACK_NODE := "Assembly/Plates"
+## The cube parked in one gap: the gap is STACK_PITCH_MM - STACK_PLATE_MM =
+## 0.2 mm tall and the cube is half of that, so it clears each plate by
+## 0.05 mm — a thousand times the module's touch epsilon.
+const GAP_CUBE_MM := 0.1
+## Plate 20 is centred on z = 0 (its top face at +0.1) and plate 21's underside
+## is at +0.3; the middle of that gap is +0.2.
+const GAP_CENTRE_Z := 0.2
+
 const POINT_TOLERANCE_MM := 0.05
 
 var _pass: int = 0
@@ -198,8 +230,13 @@ func _run() -> void:
 	await _check_flush(gauge, checks)
 	await _check_scoping(gauge, checks)
 	await _check_supersession(gauge, checks)
-	# Last: it rebuilds the gauge and the records around its own reference.
+	await _check_busy_refusal(gauge, checks)
+	# Last two: they rebuild the gauge and the records around their own
+	# reference.
 	await _check_pin_through_hole(gauge, checks)
+	await _check_undecidable_and_the_neighbouring_node(gauge, checks)
+	await _check_layered_stack(gauge, checks)
+	await _check_two_enclosing_references(gauge, checks)
 
 
 # ---------------------------------------------------------------------------
@@ -465,11 +502,15 @@ func _check_pin_through_hole(gauge: Node, checks: RefCounted) -> void:
 				built, step, str(checks.get_solid_bounds()), str(box)])
 
 	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var undecided: Array = report.get("undecidable", []) as Array
 	check("pin: a washer threaded onto a locating pin with 0.5 mm of air all "
-			+ "round it is not interference, and does not lie inside the shell",
+			+ "round it is not reported as interference — and, having offered "
+			+ "no probe of its own, comes back UNDECIDED rather than clean",
 			bool(report.get("checked", false))
 				and int(report.get("count", 0)) == 0
-				and (report.get("pairs", []) as Array).is_empty(),
+				and (report.get("pairs", []) as Array).is_empty()
+				and undecided.size() == 1
+				and str((undecided[0] as Dictionary).get("node", "")) == WASHER_NODE,
 			"report = %s" % str(report))
 
 
@@ -480,8 +521,8 @@ func _check_pin_through_hole(gauge: Node, checks: RefCounted) -> void:
 ## The module holds ONE solid collider and one marker set, so two checks in
 ## flight would answer each other's geometry — and, worse, a superseded check
 ## finishing late would repaint the crosses a newer clean evaluation had just
-## cleared. Both requests still get a true answer about the solid they asked
-## about; only the newest may paint.
+## cleared. The second request is therefore REFUSED while the first still
+## holds the geometry, and the first, having been overtaken, may not paint.
 ##
 ## The stand-in panel is the smallest thing the module's panel contract
 ## accepts: the four accessors it reads and one pane for the markers. A real
@@ -524,8 +565,12 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 			older = reply
 		else:
 			newer = reply
-	check("supersession: both requests were answered about their own geometry",
-			replies.size() == 2 and not older.is_empty() and not newer.is_empty(),
+	check("supersession: the first request answers about its own geometry and "
+			+ "the second, arriving while it still holds the module, is "
+			+ "refused as busy rather than run beside it",
+			replies.size() == 2 and not older.is_empty() and not newer.is_empty()
+				and bool(newer.get("busy", false))
+				and int(newer.get("holder_ticket", 0)) != 0,
 			"replies = %s" % str(replies))
 	check("supersession: the overtaken reply says so and the newest does not",
 			bool(older.get("superseded", false))
@@ -536,12 +581,386 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 			sampled and not painted_when_superseded_returned,
 			"sampled = %s, painted = %s" % [
 				str(sampled), str(painted_when_superseded_returned)])
-	check("supersession: the pane ends up showing the NEWEST answer — no marker",
+	check("supersession: nothing was painted at all — the overtaken check may "
+			+ "not paint and the refused one measured nothing",
 			mesh_root != null
 				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) == null,
-			"a marker node survived the clean check")
+			"a marker node survived a check that was never allowed to paint")
 
 	panel.queue_free()
+
+
+
+# ---------------------------------------------------------------------------
+# UNDECIDABLE — and the neighbour that must not answer for a node
+# ---------------------------------------------------------------------------
+
+## One fixture, two defects it is the only witness to.
+##
+## A washer and a locating pin, TWO NODES OF ONE REFERENCE, both swallowed by a
+## solid block. The washer's rim is narrower than the module's own inset step,
+## so every probe it offers lands in its hole — which is the PIN's material.
+##
+##   The neighbour must not vouch. A containment test scoped to the reference
+##   and not to the node finds pin material under the probe and reports the
+##   WASHER as buried in the solid, which is a claim about a body no probe
+##   ever got inside.
+##
+##   A rejected probe is not a clean answer. With no probe of its own, the
+##   washer's containment is UNDECIDED, and the report has to say so: the
+##   washer really is inside the block here, so reporting nothing would be
+##   reporting the wrong answer.
+##
+## The pin, which does offer probes inside itself, is still reported — the
+## module answers what it can prove.
+func _check_undecidable_and_the_neighbouring_node(gauge: Node, checks: RefCounted) -> void:
+	var ring: ArrayMesh = await _bake_washer()
+	var pin: ArrayMesh = await _bake_neighbour_pin()
+	var built: int = gauge.build([
+		{"mesh": ring, "transform": _pose, "node": RING_NODE,
+			"reference": WASHER_REFERENCE},
+		{"mesh": pin, "transform": _pose, "node": PIN_NODE,
+			"reference": WASHER_REFERENCE},
+	], "neighbour-fixture|v1")
+	var ring_box := _posed_box(ring.get_aabb())
+	_records = [{
+		"name": WASHER_REFERENCE,
+		"pose": _pose,
+		"world_aabb": _posed_box(ring.get_aabb().merge(pin.get_aabb())),
+		"parts": [
+			{"mesh": ring, "transform": Transform3D.IDENTITY,
+				"node_path": RING_NODE, "node": RING_NODE},
+			{"mesh": pin, "transform": Transform3D.IDENTITY,
+				"node_path": PIN_NODE, "node": PIN_NODE},
+		],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(await _enclosing_mesh())
+
+	var step: float = minf(ring_box.size.x, minf(ring_box.size.y, ring_box.size.z)) \
+		* GeometryChecks.PROBE_INSET_FRACTION
+	check(("neighbour: the fixture is two nodes of ONE reference, the washer "
+			+ "wholly inside the block, and its %.2f mm inset step is wider "
+			+ "than its 2.0 mm rim") % step,
+			built == 2 and step > WASHER_OUTER_R - WASHER_INNER_R
+				and (checks.get_solid_bounds() as AABB).encloses(ring_box),
+			"built=%d step=%.3f bounds=%s ring=%s" % [built, step,
+				str(checks.get_solid_bounds()), str(ring_box)])
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var named := {}
+	for entry in report.get("pairs", []):
+		named[str((entry as Dictionary).get("node", ""))] = true
+	check("neighbour: the pin's material does not vouch for the washer — no "
+			+ "pair claims the washer lies inside the solid",
+			bool(report.get("checked", false)) and not named.has(RING_NODE),
+			"pairs = %s" % str(named.keys()))
+
+	var undecided: Array = report.get("undecidable", []) as Array
+	var about_ring := {}
+	for entry in undecided:
+		if str((entry as Dictionary).get("node", "")) == RING_NODE:
+			about_ring = entry
+	check("undecidable: the washer is reported as UNDECIDED with a reason, "
+			+ "not left to read as clean",
+			not about_ring.is_empty()
+				and str(about_ring.get("reason", "")).length() > 20
+				and str(about_ring.get("reference", "")) == WASHER_REFERENCE,
+			"undecidable = %s" % str(undecided))
+
+	check("undecidable: the banner says the answer is undecided rather than "
+			+ "showing nothing at all",
+			str(checks.status_line(report)).contains("undecided"),
+			"status = '%s'" % str(checks.status_line(report)))
+
+	# The node is the bare path the record carries — not the reference spliced
+	# on to the front of it. Every filter, pair and hole record is keyed on
+	# this string, so a prefix here would be a different node to all of them.
+	check("neighbour: the pin, which does offer a probe inside itself, IS "
+			+ "reported, under the record's own node path exactly",
+			named.has(PIN_NODE),
+			"pairs = %s" % str(named.keys()))
+
+
+# ---------------------------------------------------------------------------
+# BURIED IN TWO BODIES AT ONCE
+# ---------------------------------------------------------------------------
+
+## A solid inside two references is inside BOTH of them.
+##
+## Two identical blocks, mounted under two names, with a small cube buried in
+## the material of each. "Is the solid inside this body" is a separate question
+## per reference: answering it for the first one and returning leaves the
+## second unreported, and the clearance join then passes its rows on an
+## unsigned distance that is really a distance to a wall the cube is inside.
+func _check_two_enclosing_references(gauge: Node, checks: RefCounted) -> void:
+	var block: ArrayMesh = await _bake_solid_block()
+	var built: int = gauge.build([
+		{"mesh": block, "transform": _pose, "node": BLOCK_NODE,
+			"reference": BLOCK_A},
+		{"mesh": block, "transform": _pose, "node": BLOCK_NODE,
+			"reference": BLOCK_B},
+	], "two-blocks-fixture|v1")
+	var box := _posed_box(block.get_aabb())
+	_records = []
+	for name in [BLOCK_A, BLOCK_B]:
+		_records.append({
+			"name": name,
+			"pose": _pose,
+			"world_aabb": box,
+			"parts": [{"mesh": block, "transform": Transform3D.IDENTITY,
+				"node_path": BLOCK_NODE, "node": BLOCK_NODE}],
+		})
+	checks.set_records(_records)
+	checks.build_solid(await _buried_mesh())
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var named := {}
+	for entry in report.get("pairs", []):
+		named[str((entry as Dictionary).get("reference", ""))] = \
+			str((entry as Dictionary).get("node", ""))
+	check("two blocks: the cube is reported as buried in BOTH references, "
+			+ "each under its own node — not only in whichever was found first",
+			built == 2 and bool(report.get("checked", false))
+				and named.size() == 2
+				and str(named.get(BLOCK_A, "")) == BLOCK_NODE
+				and str(named.get(BLOCK_B, "")) == BLOCK_NODE,
+			"pairs = %s" % str(report.get("pairs", [])))
+
+	check("two blocks: nothing is left undecided — every enclosing reference "
+			+ "was answered, so the doubt list is empty",
+			(report.get("undecidable", []) as Array).is_empty(),
+			"undecidable = %s" % str(report.get("undecidable", [])))
+
+
+## A solid block big enough to swallow the buried cube whole.
+func _bake_solid_block() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Block"
+	var box := CSGBox3D.new()
+	box.size = ENCLOSING
+	combiner.add_child(box)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+# ---------------------------------------------------------------------------
+# A PROBE THE GAUGE CANNOT DECIDE — and every reference it leaves open
+# ---------------------------------------------------------------------------
+
+## The parity test has a budget, and running out of it is not an answer.
+##
+## A stack of STACK_PLATES thin plates with a 0.1 mm cube parked in one of its
+## gaps, touching nothing. Every ray leaving that cube crosses two faces per
+## plate, which is more surfaces than mesh_gauge's crossing budget allows, so
+## the gauge cannot tell solid from air there and says so. Treating that error
+## as "not inside material" reports a cube that may well be buried as clean —
+## the one answer the reader must never be given.
+##
+## The same stack is mounted TWICE, under two names, and both boxes hold the
+## cube. The question "is the solid inside this body" was open for both, so
+## both have to be listed: a reference left off, on the strength of another
+## one having been checked, has its clearance rows passed on a distance
+## nobody could sign.
+func _check_layered_stack(gauge: Node, checks: RefCounted) -> void:
+	var stack: ArrayMesh = await _bake_stack()
+	var built: int = gauge.build([
+		{"mesh": stack, "transform": _pose, "node": STACK_NODE,
+			"reference": STACK_A},
+		{"mesh": stack, "transform": _pose, "node": STACK_NODE,
+			"reference": STACK_B},
+	], "stack-fixture|v1")
+	var box := _posed_box(stack.get_aabb())
+	_records = []
+	for name in [STACK_A, STACK_B]:
+		_records.append({
+			"name": name,
+			"pose": _pose,
+			"world_aabb": box,
+			"parts": [{"mesh": stack, "transform": Transform3D.IDENTITY,
+				"node_path": STACK_NODE, "node": STACK_NODE}],
+		})
+	checks.set_records(_records)
+	checks.build_solid(await _gap_cube_mesh())
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var undecided: Array = report.get("undecidable", []) as Array
+	check("layers: a probe the gauge cannot decide — a ray that crosses more "
+			+ "surfaces than its budget allows — leaves the answer UNDECIDED, "
+			+ "never clean",
+			built == 2 and bool(report.get("checked", false))
+				and int(report.get("count", 0)) == 0
+				and not undecided.is_empty()
+				and str((undecided[0] as Dictionary).get("reason", ""))
+					.contains("not decided"),
+			"report = %s" % str(report))
+
+	var named := {}
+	for entry in undecided:
+		named[str((entry as Dictionary).get("reference", ""))] = true
+	check("layers: BOTH references whose bounds hold the solid are left "
+			+ "open, not just the first one found",
+			named.has(STACK_A) and named.has(STACK_B),
+			"undecidable = %s" % str(undecided))
+
+
+## The stack: STACK_PLATES plates of STACK_PLATE_MM, STACK_PITCH_MM apart, so
+## the gaps between them are wider than the cube and every ray through the
+## stack crosses more faces than the gauge will count.
+func _bake_stack() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Stack"
+	for index in range(STACK_PLATES):
+		var plate := CSGBox3D.new()
+		plate.size = Vector3(STACK_SPAN, STACK_SPAN, STACK_PLATE_MM)
+		# Centred on the middle plate, so plate STACK_PLATES / 2 sits on z = 0
+		# and the gap above it is the one the cube parks in.
+		plate.position = Vector3(0.0, 0.0,
+			STACK_PITCH_MM * float(index - STACK_PLATES / 2))
+		combiner.add_child(plate)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+## The cube in the gap: small enough to clear both plates around it, so it
+## touches nothing and the question is settled by parity alone — if parity can
+## be read at all.
+func _gap_cube_mesh() -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "GapCube"
+	var cube := CSGBox3D.new()
+	cube.size = Vector3(GAP_CUBE_MM, GAP_CUBE_MM, GAP_CUBE_MM)
+	# The middle plate's top face plus half the gap: dead centre of the gap.
+	cube.position = Vector3(0.0, 0.0, GAP_CENTRE_Z)
+	combiner.add_child(cube)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
+
+
+## The pin that fills the washer's hole: a disc of its own, radially clear of
+## the washer by PIN_CLEARANCE_MM and taller than it.
+func _bake_neighbour_pin() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Pin"
+	var body := CSGCylinder3D.new()
+	body.radius = NEIGHBOUR_PIN_R
+	body.sides = ROUND_FACETS
+	body.smooth_faces = false
+	body.height = NEIGHBOUR_PIN_HEIGHT
+	body.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	body.position = Vector3(0.0, 0.0,
+		CAVITY_FLOOR_TOP_Z + WASHER_LIFT_MM + WASHER_THICKNESS * 0.5)
+	combiner.add_child(body)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+# ---------------------------------------------------------------------------
+# BUSY — the module is never taken away from a running check
+# ---------------------------------------------------------------------------
+
+## The interference check and the fastener check share ONE solid collider, one
+## set of records and one cast counter, and they take them one at a time. A
+## request that finds the holder still running past its window must be
+## REFUSED: usurping the reservation lets the newcomer rebuild the collider the
+## running job is casting against, which is a freed body under a live query and
+## not merely a wrong number.
+##
+## The window is driven from the module's own variable rather than waited out,
+## so the suite pins the REFUSAL and not the clock.
+func _check_busy_refusal(gauge: Node, checks: RefCounted) -> void:
+	var first: Dictionary = await checks.reserve()
+	var held := int(first.get("ticket", 0))
+
+	var second: Dictionary = await checks.reserve()
+	check("busy: a request arriving while a check still holds the geometry is "
+			+ "refused, and the refusal names the holder and its age",
+			held != 0 and int(second.get("ticket", 0)) == 0
+				and bool(second.get("busy", false))
+				and int(second.get("holder_ticket", 0)) == held
+				and int(second.get("holder_age_ms", -1)) >= 0,
+			"first=%s second=%s" % [str(first), str(second)])
+
+	var report: Dictionary = checks.refused(second)
+	check("busy: the caller gets a `checked: false` answer that says busy — "
+			+ "never a clean report",
+			not bool(report.get("checked", true))
+				and bool(report.get("busy", false))
+				and str(report.get("reason", "")).contains("Retry"),
+			"report = %s" % str(report))
+
+	# Past the deadline the holder is not merely late, it is gone: mesh_gauge's
+	# own job timeout has expired, and the walk that follows a job is
+	# synchronous GDScript, which cannot be parked mid-way. The module is taken
+	# back rather than stranded on a coroutine that will never release it —
+	# and the dead holder's ticket goes inert, so its late release does not
+	# hand the collider away from the check that owns it now.
+	checks.reservation_timeout_ms = 0
+	var reclaimer: Dictionary = await checks.reserve()
+	var taken := int(reclaimer.get("ticket", 0))
+	checks.release_reservation(held)
+	check("reclaim: a holder that never releases is taken over after its "
+			+ "deadline, and its own late release does nothing",
+			taken != 0 and taken != held
+				and not bool(checks.holds(held))
+				and bool(checks.holds(taken)),
+			"held=%d reclaimer=%s holds(held)=%s holds(taken)=%s" % [held,
+				str(reclaimer), str(checks.holds(held)), str(checks.holds(taken))])
+
+	# The dangerous moment: the reclaimed holder wakes up from the physics
+	# await it was suspended in and tries to work. Every write it can make is
+	# refused — rebuilding the collider would FREE a body the live check is
+	# casting against, and running its job would answer with that check's
+	# geometry and overwrite its counters.
+	checks.reservation_timeout_ms = GeometryChecks.RESERVATION_TIMEOUT_MS
+	var generation := int(checks.get_solid_generation())
+	var refused_build := int(checks.build_solid(
+		await _shell_mesh(BOSS_THROUGH_BOTTOM_Z), held))
+	var stale: Dictionary = checks.run_check(gauge, null, {"ticket": held})
+	check("reclaim: a holder that resumes after being reclaimed writes "
+			+ "nothing — its rebuild is refused, the collider it would have "
+			+ "freed is untouched, and its job answers without measuring",
+			refused_build < 0
+				and int(checks.get_solid_generation()) == generation
+				and not bool(stale.get("checked", true))
+				and str(stale.get("reason", "")).contains("reclaimed"),
+			"build=%d generation %d -> %d stale=%s" % [refused_build,
+				generation, int(checks.get_solid_generation()), str(stale)])
+
+	# And the same refusal while the LIVE holder has merely aged: age decides
+	# who owns the module only inside reserve(), so a stale age is never a
+	# licence for a wrong ticket to free the collider before the transfer.
+	checks.reservation_timeout_ms = 0
+	var aged_generation := int(checks.get_solid_generation())
+	var aged_build := int(checks.build_solid(
+		await _shell_mesh(BOSS_THROUGH_BOTTOM_Z), 0))
+	check("reclaim: a caller with the wrong ticket cannot free the collider "
+			+ "just because the holder has aged past its window — only "
+			+ "reserve() may hand the module over",
+			aged_build < 0
+				and int(checks.get_solid_generation()) == aged_generation,
+			"build=%d generation %d -> %d" % [aged_build, aged_generation,
+				int(checks.get_solid_generation())])
+	checks.reservation_timeout_ms = GeometryChecks.RESERVATION_TIMEOUT_MS
+
+	checks.release_reservation(taken)
+	var after: Dictionary = await checks.reserve()
+	check("reclaim: the reclaimer's own release frees the module for the next "
+			+ "request",
+			int(after.get("ticket", 0)) != 0, "after = %s" % str(after))
+	checks.release_reservation(int(after.get("ticket", 0)))
 
 
 ## Start a check without awaiting it and park its reply in `into`.

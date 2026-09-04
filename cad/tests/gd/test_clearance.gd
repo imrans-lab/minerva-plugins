@@ -383,6 +383,32 @@ func _check_batching(panel: Node, checks: RefCounted) -> void:
 				and str(refused.get("reason", "")).contains("channel limit")
 				and _payloads.is_empty(),
 			"report = %s" % str(refused))
+
+	# The cap is on BYTES. A source of multibyte characters that fits by
+	# CHARACTER count travels twice its measured size, and a sizer
+	# counting characters hands the host a message it will refuse as
+	# payload_too_large — the exact error this whole split exists to avoid.
+	var multibyte := _multibyte_source(limit - base - target_cost - 5)
+	check("cap: the fixture is a source that FITS by character count and does "
+			+ "not fit in bytes",
+			multibyte.length() < limit
+				and multibyte.to_utf8_buffer().size() > limit,
+			"chars=%d bytes=%d limit=%d" % [multibyte.length(),
+				multibyte.to_utf8_buffer().size(), limit])
+	panel.source = multibyte
+	_payloads.clear()
+	var wide: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var wide_over := false
+	for payload in _payloads:
+		if JSON.stringify(payload).to_utf8_buffer().size() \
+				> GeometryChecks.IPC_PAYLOAD_LIMIT_BYTES:
+			wide_over = true
+	check("cap: it is measured in UTF-8 bytes — the request is refused with a "
+			+ "reason rather than sent over the host's byte limit",
+			not wide_over and not bool(wide.get("checked", true))
+				and str(wide.get("reason", "")).contains("channel limit"),
+			"report = %s sent = %d" % [str(wide), _payloads.size()])
 	panel.source = SOURCE
 
 
@@ -467,6 +493,49 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 	var stale: Dictionary = await checks.check_clearance(panel,
 		{"required_mm": 0.5})
 	var unjoined := _pair_for(stale, NEAR_NODE)
+	# The other half of the same blind spot. A node whose containment the
+	# interference check could not DECIDE — every probe it offered landed in a
+	# hole or a cavity — is exactly the node whose unsigned distance cannot be
+	# trusted: if it is in fact buried, the "gap" is the distance to the wall
+	# it is inside. It keeps its measured number and must not pass.
+	panel.last_eval = _interference_over(SOURCE, [], [NEAR_NODE])
+	var doubtful: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var undecided := _pair_for(doubtful, NEAR_NODE)
+	var decided := _pair_for(doubtful, FAR_NODE)
+	check("undecidable: a node the interference check could not DECIDE keeps "
+			+ "its measured distance, says why, and does not pass",
+			not bool(undecided.get("pass", true))
+				and bool(undecided.get("containment_undecidable", false))
+				and str(undecided.get("note", "")).begins_with(
+					"containment undecidable: ")
+				and absf(float(undecided.get("min_mm", -1.0)) - GAP_MM)
+					< GAP_TOLERANCE_MM
+				and not bool(doubtful.get("pass", true))
+				and bool(decided.get("pass", false)),
+			"undecided = %s far = %s" % [str(undecided), str(decided)])
+
+	# The OTHER direction of the same doubt. An interference report can also
+	# fail to decide whether the SOLID is inside a reference; that row names no
+	# node, because it is about the whole body. Discarding it lets a hollow
+	# shell buried in one reference collect a full set of positive, passing
+	# distances — so it doubts every node of that reference.
+	panel.last_eval = _interference_over(SOURCE, [], [], REFERENCE_NAME)
+	var whole: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var every_row := true
+	for entry in (whole.get("pairs", []) as Array):
+		var pair: Dictionary = entry
+		if bool(pair.get("pass", true)) \
+				or not bool(pair.get("containment_undecidable", false)):
+			every_row = false
+	check("undecidable: a report that could not decide whether the SOLID is "
+			+ "inside a reference doubts every node of it — the rows carry "
+			+ "the note and none of them passes",
+			(whole.get("pairs", []) as Array).size() == 2 and every_row
+				and not bool(whole.get("pass", true)),
+			"report = %s" % str(whole))
+
 	check("buried: an interference report about a DIFFERENT source is not "
 			+ "joined, and the reply says the distances are unsigned",
 			absf(float(unjoined.get("min_mm", -1.0)) - GAP_MM) < GAP_TOLERANCE_MM
@@ -482,17 +551,35 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 ## the digest of `source` — the same SHA-256 of the DSL text the check writes
 ## on its own report, which is how a clearance call tells a report about this
 ## document from one about the last.
-func _interference_over(source: String, nodes: Array) -> Dictionary:
+func _interference_over(source: String, nodes: Array,
+		undecided: Array = [], whole_reference: String = "") -> Dictionary:
 	var hasher := HashingContext.new()
 	hasher.start(HashingContext.HASH_SHA256)
 	hasher.update(source.to_utf8_buffer())
 	var pairs: Array = []
 	for node in nodes:
 		pairs.append({"reference": REFERENCE_NAME, "node": str(node)})
+	var open_questions: Array = []
+	for node in undecided:
+		open_questions.append({
+			"reference": REFERENCE_NAME,
+			"node": str(node),
+			"reason": "every probe this node offered landed in its own hole",
+		})
+	if not whole_reference.is_empty():
+		# The direction-1 shape: no node, because the question was whether the
+		# whole solid is inside this reference.
+		open_questions.append({
+			"reference": whole_reference,
+			"node": "",
+			"reason": "no probe taken from the solid's own edges could be "
+				+ "verified inside its material",
+		})
 	return {"interference": {
 		"checked": true,
 		"count": pairs.size(),
 		"pairs": pairs,
+		"undecidable": open_questions,
 		"source_digest": hasher.finish().hex_encode(),
 	}}
 
@@ -762,6 +849,15 @@ func _head_size(source: String) -> int:
 func _padded_source(length: int) -> String:
 	var padding: int = maxi(length - SOURCE.length() - 3, 0)
 	return SOURCE + "\n# " + "x".repeat(padding)
+
+
+## A DSL source of about `length` CHARACTERS whose padding unit is three
+## characters and six UTF-8 bytes (a 2-byte micro sign, a 1-byte letter and a
+## 3-byte em dash), so its byte length is twice its character length — enough
+## to carry a source that fits by characters past a limit measured in bytes.
+func _multibyte_source(length: int) -> String:
+	var padding: int = maxi(length - SOURCE.length() - 3, 0)
+	return SOURCE + "\n# " + "\u00b5m\u2014".repeat(int(padding / 3.0))
 
 
 func _targets_of(index: int) -> Array:

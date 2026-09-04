@@ -453,6 +453,20 @@ def render_notice(lock_vars: dict,
         "",
         f"Runtime pins in the lock: {', '.join(pins) if pins else '(none)'}",
         "",
+        "HOW COMPLETE THIS IS. The inventory is complete for the python-fcl "
+        "tree — python-fcl itself and the four components compiled into its "
+        "wheel (FCL, libccd, OctoMap, Eigen) — plus the Microsoft C++ runtime "
+        "the Windows build vendors. It is NOT complete for the whole bundle: "
+        + (", ".join(f"`{name}`" for name in sorted(PENDING_INVENTORY))
+           + " and their transitive trees (OCCT above all) are listed under "
+             "\"Not yet inventoried\" below and have not been inventoried."
+           if PENDING_INVENTORY else
+           "every lock pin is inventoried below.")
+        + " The `--check` gate passes with those named as pending, so a green "
+          "gate means \"nothing has drifted and nothing new arrived "
+          "unannounced\", not \"every licence in the bundle has been "
+          "reviewed\".",
+        "",
     ]
 
     for comp in components:

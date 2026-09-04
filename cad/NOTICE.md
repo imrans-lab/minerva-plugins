@@ -12,6 +12,8 @@ A wheel's own metadata cannot see what it vendors: python-fcl's wheel contains c
 
 Runtime pins in the lock: build123d, python-fcl
 
+HOW COMPLETE THIS IS. The inventory is complete for the python-fcl tree — python-fcl itself and the four components compiled into its wheel (FCL, libccd, OctoMap, Eigen) — plus the Microsoft C++ runtime the Windows build vendors. It is NOT complete for the whole bundle: `build123d`, `cadquery-ocp` and their transitive trees (OCCT above all) are listed under "Not yet inventoried" below and have not been inventoried. The `--check` gate passes with those named as pending, so a green gate means "nothing has drifted and nothing new arrived unannounced", not "every licence in the bundle has been reviewed".
+
 ## python-fcl 0.7.0.11
 
 - Licence: BSD-3-Clause

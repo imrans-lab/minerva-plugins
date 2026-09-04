@@ -428,7 +428,10 @@ func _job_gauge(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionar
 		# A trimesh collider is a SURFACE, not a volume: a gauge buried in solid
 		# material reaches no wall, which is exactly what open air looks like.
 		# Parity along a ray separates the two.
-		var inside := _inside_solid(state, at)
+		# A caller asking about ONE node's material passes node=; the parity
+		# then counts only the crossings that body accounts for, so a
+		# neighbour cannot vouch for a point inside itself.
+		var inside := _inside_solid(state, at, str(args.get("node", "")))
 		if inside < 0:
 			return {"error": "cannot tell solid from air at %s: a ray from it "
 				% str(at) + "crossed more surfaces than the crossing budget allows"}
@@ -628,31 +631,38 @@ func _verify_convex(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> 
 ## Two axes are cast because one ray can graze an edge and count a crossing
 ## twice or not at all; a third breaks the tie when they disagree. A part with
 ## no colliders, or an unbounded one, is never called inside.
-func _inside_solid(state: PhysicsDirectSpaceState3D, point: Vector3) -> int:
+func _inside_solid(state: PhysicsDirectSpaceState3D, point: Vector3,
+		node_filter: String = "") -> int:
 	if _bounds.size.length_squared() <= 0.0:
 		return 0
 	var reach := _bounds.size.length() + THROUGH_PAD_MM
-	var first := _parity_inside(state, point, Vector3.RIGHT, reach)
-	var second := _parity_inside(state, point, Vector3.BACK, reach)
+	var first := _parity_inside(state, point, Vector3.RIGHT, reach, node_filter)
+	var second := _parity_inside(state, point, Vector3.BACK, reach, node_filter)
 	if first < 0 or second < 0:
 		return -1
 	if first == second:
 		return first
-	return _parity_inside(state, point, Vector3.UP, reach)
+	return _parity_inside(state, point, Vector3.UP, reach, node_filter)
 
 
 ## One ray's verdict: 1 when any body's crossings are odd, 0 when none are,
-## -1 when the crossing count did not complete.
+## -1 when the crossing count did not complete. `node_filter`, when given,
+## narrows the count to the bodies carrying that node path — the question then
+## is "inside THIS node", which is not the same as "inside something".
 func _parity_inside(
 	state: PhysicsDirectSpaceState3D,
 	point: Vector3,
 	direction: Vector3,
-	reach: float
+	reach: float,
+	node_filter: String = ""
 ) -> int:
 	var counted := _crossings(state, point, direction, reach)
 	if not bool(counted.get("complete", false)):
 		return -1
 	for body_id in (counted["by_body"] as Dictionary).keys():
+		if not node_filter.is_empty() \
+				and str(_body_nodes.get(int(body_id), "")) != node_filter:
+			continue
 		if int((counted["by_body"] as Dictionary)[body_id]) % 2 == 1:
 			return 1
 	return 0

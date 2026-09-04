@@ -88,6 +88,13 @@ WHEEL_REPAIR_ARGS="--ignore-existing --analyze-existing"
 # against a different name.
 WHEEL_REPAIR_PROOF="msvcp140.*\.dll$"
 
+# The other half of the same proof: after the repair, no compiled extension in
+# the wheel may still import these by their bare names. delvewheel mangles the
+# name of what it vendors, so a bare import is an extension that was left
+# bound to the machine's copy — which every CI runner has and the user does
+# not.
+WHEEL_REPAIR_FORBIDDEN_IMPORTS="MSVCP140.dll MSVCP140_1.dll"
+
 # --- Layer 1 import probe -------------------------------------------------
 # Semicolon-separated python statements run inside the freshly-built bundle
 # (env-isolated, PYTHONHOME=<stage>) to confirm the wheels resolve at import

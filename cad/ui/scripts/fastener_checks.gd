@@ -72,6 +72,7 @@ extends RefCounted
 ## Consumers: preload("scripts/fastener_checks.gd") from CADPanel.gd.
 
 const _MeshFeatures: Script = preload("mesh_features.gd")
+const _WorkerReply: Script = preload("worker_reply.gd")
 
 ## The IPC channel that answers with the solid's B-Rep cylinders. Channel name
 ## = MCP tool name; the worker method behind it is "cylindrical_features".
@@ -109,6 +110,12 @@ const DEFAULT_ENGAGEMENT_D: float = 2.0
 ## narrower than this can pass between two rays unseen. At an M3 shank radius
 ## of 1.5 mm it works out at 19 rays.
 const RING_SPACING_MM: float = 0.5
+## Slack on the closed rule, degrees: smaller than any real gap, large enough
+## to absorb float formatting. The rule itself is ONE BIN, and the bin width
+## comes from the worker on every row (`bin_deg`) — a hard-coded tolerance
+## here would disagree with the worker's own verdict the moment either side
+## changed its resolution.
+const SWEEP_EPSILON_DEG: float = 0.01
 const MIN_RING_RAYS: int = 8
 const MAX_RING_RAYS: int = 128
 
@@ -153,6 +160,15 @@ const ALL_LAYERS: int = 0xFFFFFFFF
 var _records: Array = []
 ## Ray casts spent by the running check.
 var _casts: int = 0
+## Rays the running check's path fans placed, summed over every screw. Reported
+## beside the spacing so a reader can see how densely the disc was covered.
+var _path_rays: int = 0
+## The widest gap the running check actually left between two adjacent rays
+## along a ring, millimetres. It is RING_SPACING_MM or less everywhere except
+## on a ring wide enough to hit MAX_RING_RAYS, and the reply reports the
+## measured number rather than the nominal one so the miss bound is never a
+## claim the fan did not keep.
+var _widest_arc_mm: float = 0.0
 ## Wall clock of the running check, microseconds.
 var _started_us: int = 0
 
@@ -212,31 +228,100 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 		document = panel.get_document_state()
 	var mesh_data: Dictionary = document.get("mesh", {}) as Dictionary
 
+	# The references AS THEY ARE NOW, before anything is awaited. Every local
+	# coordinate in the reply is a world point taken back through one of these
+	# poses, and the panel's own state can be re-posed — or replaced by
+	# another call's evaluation — while this one waits for the worker. A check
+	# that read the poses afterwards would report this screw's geometry in
+	# another document's frame.
+	var records: Array = panel.get_reference_state() \
+		if panel.has_method("get_reference_state") else []
+	# The COLLIDERS those poses describe, by the generation mesh_gauge counts
+	# its rebuilds with. The snapshot above fixes the frame every local
+	# coordinate is converted through; this fixes the geometry the rays are
+	# cast against. Casting against one epoch and converting through the other
+	# is a reply whose world numbers are all right and whose local ones are
+	# all wrong — the worst shape a wrong answer can take.
+	var epoch := int(gauge.call("get_generation"))
+
 	# The B-Rep first, and OUTSIDE the reservation: it is an IPC round trip to
 	# the worker, and holding the solid's collider across it would stall every
 	# evaluation for its duration.
 	var features := await _solid_cylinders(panel, str(document.get("source", "")), screw)
 
-	var ticket: int = await checks.call("reserve")
-	if ticket == 0:
-		return _superseded(_nothing("a newer check started before this one could run"))
+	# The references were rebuilt while this check waited for the worker. Take
+	# the current state and go again, ONCE: a re-pose during a round trip is a
+	# normal thing for a user to do, and the second pass is cheap because the
+	# B-Rep answer is already in hand. A second rebuild while THAT pass waited
+	# is a document changing faster than it can be measured, and the reply
+	# says so rather than mixing two epochs.
+	if int(gauge.call("get_generation")) != epoch:
+		epoch = int(gauge.call("get_generation"))
+		records = panel.get_reference_state() \
+			if panel.has_method("get_reference_state") else []
+		if int(panel.ensure_gauge_built()) <= 0:
+			return _nothing("no reference mesh is mounted; there is nothing "
+				+ "to screw into")
+		if int(gauge.call("get_generation")) != epoch:
+			return _stale("the reference meshes were rebuilt twice while this "
+				+ "check waited for the worker, so nothing it measured would "
+				+ "describe one state of the document")
 
-	var report := await _run(panel, gauge, checks, mesh_data, features, holes, screw, args)
+	var reservation: Dictionary = await checks.call("reserve")
+	var ticket := int(reservation.get("ticket", 0))
+	if ticket == 0:
+		# The interference module owns the solid's collider and hands out one
+		# reservation at a time; a refusal is its answer, not this module's.
+		return checks.call("refused", reservation)
+
+	var report := await _run(gauge, checks, mesh_data, features, holes,
+		screw, args, ticket, records)
+	# The colliders the rays were cast against are the ones the poses above
+	# describe, or the answer is two epochs stitched together.
+	if int(gauge.call("get_generation")) != epoch:
+		checks.call("release_reservation", ticket)
+		return _stale("the reference meshes were rebuilt while this check was "
+			+ "measuring, so its rays and its poses would not describe one "
+			+ "state of the document")
+	# Reclaimed while this check was awaiting a physics step: the solid's
+	# collider belongs to another check now, so this one releases nothing.
+	if not bool(checks.call("holds", ticket)):
+		report["superseded"] = true
+		report["superseded_reason"] = "this check was reclaimed after its " \
+			+ "deadline and another check owns the panel's geometry now"
+		return report
 	checks.call("release_reservation", ticket)
 	return report
 
 
 func _run(
-	panel: Object,
 	gauge: Node,
 	checks: Object,
 	mesh_data: Dictionary,
 	features: Dictionary,
 	holes: Array,
 	screw: Dictionary,
-	args: Dictionary
+	args: Dictionary,
+	ticket: int,
+	records: Array
 ) -> Dictionary:
-	if int(checks.call("build_solid", mesh_data)) <= 0:
+	# Counters first, so a check that returns early — no bore, no pair — never
+	# reports the PREVIOUS check's ray counts, spacing or elapsed time in its
+	# envelope.
+	_started_us = Time.get_ticks_usec()
+	_casts = 0
+	_path_rays = 0
+	_widest_arc_mm = 0.0
+	_records = records
+	# The solid's collider belongs to the interference module and is freed on
+	# every rebuild, so the ticket travels with the request: a caller that is
+	# not the holder is refused rather than allowed to free a body another
+	# check is casting against.
+	var triangles := int(checks.call("build_solid", mesh_data, ticket))
+	if triangles < 0:
+		return _nothing("another check holds this panel's geometry; nothing "
+			+ "was measured")
+	if triangles == 0:
 		return _nothing("the evaluation produced no solid geometry to check")
 
 	# The fallback, and the measurement that licenses it. The fit runs whenever
@@ -262,13 +347,21 @@ func _run(
 			reason += " (%s)" % fit_reason
 		return _nothing(reason)
 
-	_records = panel.get_reference_state()
 	var reference_scope := str(args.get("reference", ""))
 	var mask := ALL_LAYERS
 	if not reference_scope.is_empty():
 		mask = int(gauge.call("mask_for", reference_scope))
 
 	var pairing := _pair(bores, holes, args)
+	# The surfaces that were never candidates, named rather than dropped: a
+	# reader looking for a bore the check did not grade has to be able to see
+	# why it was not one.
+	var partial: Array = features.get("partial", []) as Array
+	if not partial.is_empty():
+		var unpaired: Dictionary = pairing["unpaired"]
+		var loose: Array = unpaired.get("solid_features", []) as Array
+		loose.append_array(partial)
+		unpaired["solid_features"] = loose
 	if pairing["pairs"].is_empty():
 		var empty := _report([], pairing, screw, args, axis_source)
 		empty["note"] = "no solid bore lines up with any of the reference " \
@@ -281,6 +374,10 @@ func _run(
 	# one state of the world rather than two.
 	var answer: Dictionary = await gauge.call("submit", "fasteners", {
 		"module": self,
+		# Read back in run_check: the job runs after an await, which is where
+		# a reclaimed reservation wakes up, and nothing may be written on a
+		# ticket that is no longer the holder's.
+		"ticket": ticket,
 		"mask": mask,
 		"reference": reference_scope,
 		"node": str(args.get("node", "")),
@@ -303,9 +400,15 @@ func _run(
 ## space's direct state in hand. `state` is the references' space; the solid's
 ## own space belongs to the geometry_checks module travelling in the job.
 func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
-	_started_us = Time.get_ticks_usec()
-	_casts = 0
+	# Everything below reads the solid's collider and writes this module's
+	# counters. A reservation reclaimed while the job queued for its physics
+	# step owns neither, so it writes nothing and says so.
+	var ticket := int(args.get("ticket", 0))
 	var checks: Object = args.get("checks", null)
+	if ticket != 0 and checks != null and is_instance_valid(checks) \
+			and not bool(checks.call("holds", ticket)):
+		return _nothing("this check's reservation was reclaimed before its "
+			+ "physics step came; another check owns the panel's geometry")
 	var solid_state: PhysicsDirectSpaceState3D = checks.call("solid_space") \
 		if checks != null and is_instance_valid(checks) else null
 	if solid_state == null:
@@ -388,6 +491,18 @@ func _one_screw(
 		var swap := bore_entry_t
 		bore_entry_t = bore_exit_t
 		bore_exit_t = swap
+	# The bore's WALL, which reaches past the engaged span wherever a tilted
+	# trim leaves material on one side only. The fan reads this one: a hit on
+	# the wall above the engaged span is still the screw arriving.
+	var wall_entry_t := bore_entry_t
+	var wall_exit_t := bore_exit_t
+	if bore.has("wall_start") and bore.has("wall_end"):
+		wall_entry_t = ((bore["wall_start"] as Vector3) - hole_centre).dot(direction)
+		wall_exit_t = ((bore["wall_end"] as Vector3) - hole_centre).dot(direction)
+		if wall_exit_t < wall_entry_t:
+			var wall_swap := wall_entry_t
+			wall_entry_t = wall_exit_t
+			wall_exit_t = wall_swap
 
 	# ISO 1101: the zone is measured over the length the screw is actually in
 	# the bore for, not over the whole feature.
@@ -427,15 +542,15 @@ func _one_screw(
 		"point": bore_start,
 		"axis": bore_axis,
 		"radius": float(bore.get("dia_mm", 0.0)) * 0.5,
-		"from_t": bore_entry_t,
-		"to_t": bore_exit_t,
+		"from_t": wall_entry_t,
+		"to_t": wall_exit_t,
 		"band": mouth_band,
 		"datum": hole_centre,
 		"direction": direction,
 	}
 	var shank := _fan_clear(
 		gauge, state, solid_state, checks, origin, direction,
-		dia * 0.5, start_t, bore_entry_t - PATH_END_EPSILON_MM,
+		dia * 0.5, start_t, wall_entry_t - PATH_END_EPSILON_MM,
 		hole_centre, mask, reference_scope, expected
 	)
 	var head := {"clear": true, "obstructions": [], "rays": 0}
@@ -451,7 +566,17 @@ func _one_screw(
 			seat_t, hole_centre, mask, reference_scope
 		)
 
-	var engagement_ok := engagement >= engagement_required
+	_path_rays += int(shank["rays"]) + int(head["rays"])
+	# Conservative: the bore's own extent carries a measurement bound, and the
+	# grade is taken on the short end of it. An extent that is not exact, or
+	# whose bound is only a floor, cannot be graded at all — the screw is not
+	# failed for a modelling detail, it is reported as UNKNOWN, which is not a
+	# pass either.
+	var engagement_bound := float(bore.get("extent_bound_mm", 0.0))
+	var extent_certain := bool(bore.get("extent_exact", true)) \
+		and bool(bore.get("extent_bounded", true))
+	var engagement_ok := extent_certain \
+		and engagement - engagement_bound >= engagement_required
 	var head_seat_clear := bool(head["clear"])
 	var row := {
 		"reference": str(hole.get("reference", "")),
@@ -467,11 +592,21 @@ func _one_screw(
 		"axis_angle_deg": coaxiality["axis_angle_deg"],
 		"centre_offset_mm": coaxiality["centre_offset_mm"],
 		"path_clear": bool(shank["clear"]),
+		"path_rays": int(shank["rays"]),
 		"engagement_mm": engagement,
+		# What the number is worth. engagement_ok is graded on
+		# engagement_mm - engagement_bound_mm, so a bite inside the bound of
+		# the threshold is not credited with clearing it.
+		"engagement_bound_mm": engagement_bound,
+		"engagement_certain": extent_certain,
 		"engagement_required_mm": engagement_required,
 		"engagement_ok": engagement_ok,
 		"head_seat_clear": head_seat_clear,
+		# The span the screw can engage over (full circumference) and the span
+		# the bore's wall occupies. They differ by whatever a tilted trim cut
+		# off one side of the mouth.
 		"bore_extent_mm": {"entry": bore_entry_t, "exit": bore_exit_t},
+		"bore_wall_extent_mm": {"entry": wall_entry_t, "exit": wall_exit_t},
 	}
 	if not bool(shank["clear"]):
 		row["obstructions"] = shank["obstructions"]
@@ -482,6 +617,12 @@ func _one_screw(
 		row["head_seat_supported"] = float(seat["landed"]) \
 			/ maxf(1.0, float(seat["rays"]))
 		row["head_seat_rays"] = int(seat["rays"])
+		row["head_seat_radius_mm"] = float(seat["radius_mm"])
+		row["head_seat_rule"] = ("circumference coverage at one radius, not "
+			+ "bearing area: the fraction of a single ring of rays at "
+			+ "%.3f mm from the axis that met reference material within "
+			+ "%g mm of the seat plane, so an annular void inside that ring "
+			+ "is not seen") % [float(seat["radius_mm"]), RING_SPACING_MM]
 		if not head_seat_clear:
 			row["head_obstructions"] = head["obstructions"]
 	if bore.get("source", "b_rep") == "b_rep":
@@ -613,10 +754,14 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 
 ## Is the span [from_t, to_t] along the axis clear for a cylinder of `radius`?
 ##
-## One ray on the axis and one ring at `radius`, spaced so no two adjacent rays
-## are further apart than RING_SPACING_MM: that spacing IS the guarantee, and
-## an obstruction narrower than it can pass between two rays unseen. Every ray
-## starts at `origin`, which the caller has already put outside every body.
+## The whole DISC is sampled, not its rim: concentric rings out to `radius`
+## with the axis in the middle, no two adjacent rays further apart than
+## RING_SPACING_MM either radially or around a ring. A rim-only fan cannot see
+## a rib at half the shank radius no matter how finely it is spaced around,
+## and that is exactly where a rib bridging a bore sits. The spacing IS the
+## guarantee: an obstruction narrower than it can pass between two rays
+## unseen. Every ray starts at `origin`, which the caller has already put
+## outside every body.
 ##
 ## WHICH BODIES COUNT. Every ray sees the references. Whether it also sees the
 ## SOLID depends on `expected`: pass the bore's geometry and the fan sees the
@@ -648,7 +793,7 @@ func _fan_clear(
 	expected: Dictionary
 ) -> Dictionary:
 	var obstructions: Array = []
-	var rays := _ring_points(direction, radius)
+	var rays := _disc_points(direction, radius)
 	var travel := (to_t - from_t) + OUTSIDE_MARGIN_MM * 2.0 + (datum - origin).length()
 	var see_solid := not expected.is_empty()
 	for index in range(rays.size()):
@@ -670,7 +815,11 @@ func _fan_clear(
 					"reference": str(crossing.get("reference", "")),
 					"point_mm": _frames(crossing["point"], str(crossing.get("reference", ""))),
 					"axial_mm": t,
-					"ray_radius_mm": radius,
+					# Which ring of the disc saw it, and how wide the disc was.
+					# An obstruction reported at a ray radius between the two
+					# is one no rim-only fan could have found.
+					"ray_radius_mm": offset.length(),
+					"fan_radius_mm": radius,
 				})
 			break
 	return {
@@ -678,6 +827,21 @@ func _fan_clear(
 		"obstructions": obstructions,
 		"rays": rays.size(),
 	}
+
+
+## The offsets of one fan: the axis, then concentric rings out to `radius`.
+## Ring radii are spaced by at most RING_SPACING_MM, and each ring carries
+## enough rays that adjacent ones on it are no further apart than that either,
+## so the whole disc is covered to one stated pitch.
+func _disc_points(direction: Vector3, radius: float) -> Array:
+	var points: Array = [Vector3.ZERO]
+	if radius <= 0.0:
+		return points
+	var rings := maxi(1, int(ceil(radius / RING_SPACING_MM)))
+	for ring in range(1, rings + 1):
+		var r := radius * float(ring) / float(rings)
+		points.append_array(_ring_offsets(direction, r))
+	return points
 
 
 ## Is this hit on the solid the screw arriving at its own boss rather than
@@ -695,6 +859,15 @@ func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> b
 	if radial > float(expected["radius"]) + BORE_WALL_TOLERANCE_MM:
 		return false
 	return t >= float(expected["from_t"]) and t <= float(expected["to_t"])
+
+
+## A reply about a document that moved under it. `checked` false with a reason
+## is not a clean bill of health, and this one is not an error either: the
+## caller asks again, against whatever the document is now.
+func _stale(reason: String) -> Dictionary:
+	var report := _nothing(reason)
+	report["stale"] = true
+	return report
 
 
 ## A screw that cannot be measured at all, reported as a row rather than left
@@ -737,6 +910,8 @@ func _seat_support(
 ) -> Dictionary:
 	var radius := (head_radius + shank_radius) * 0.5
 	var ring := _ring_points(direction, radius)
+	# The window a hit may be off the seat plane by is the fan's own spacing:
+	# anything further is a different surface, not this seat measured coarsely.
 	var landed := 0
 	var rays := 0
 	# From 1: rays[0] is the axis, which travels down the clearance hole.
@@ -750,17 +925,31 @@ func _seat_support(
 		var t: float = (hit["position"] as Vector3 - datum).dot(direction)
 		if absf(t - seat_t) <= RING_SPACING_MM:
 			landed += 1
-	return {"landed": landed, "rays": rays}
+	return {"landed": landed, "rays": rays, "radius_mm": radius}
 
 
-## The offsets of one fan: the axis, then a ring at `radius` with enough rays
-## that adjacent ones are no more than RING_SPACING_MM apart.
+## The offsets of ONE ring: the axis point, then `radius` all the way round
+## with enough rays that adjacent ones are no more than RING_SPACING_MM apart.
+## The seat measurement is a circumference coverage and wants exactly this.
 func _ring_points(direction: Vector3, radius: float) -> Array:
 	var points: Array = [Vector3.ZERO]
 	if radius <= 0.0:
 		return points
+	points.append_array(_ring_offsets(direction, radius))
+	return points
+
+
+## One ring's offsets, without the axis point. Records the arc the ring
+## actually left between adjacent rays: past MAX_RING_RAYS rays the ring is
+## coarser than RING_SPACING_MM, and a reply quoting the nominal spacing there
+## would state a miss bound the fan does not keep.
+func _ring_offsets(direction: Vector3, radius: float) -> Array:
+	var points: Array = []
+	if radius <= 0.0:
+		return points
 	var count := int(ceil(TAU * radius / RING_SPACING_MM))
 	count = clampi(count, MIN_RING_RAYS, MAX_RING_RAYS)
+	_widest_arc_mm = maxf(_widest_arc_mm, TAU * radius / float(count))
 	var u := direction.cross(Vector3.UP)
 	if u.length_squared() < 0.001:
 		u = direction.cross(Vector3.RIGHT)
@@ -846,8 +1035,17 @@ func _reference_ray(
 # ---------------------------------------------------------------------------
 
 ## The solid's cylindrical features, from the B-Rep, through the worker.
-## Returns {cylinders: [...]} or {cylinders: [], reason: "..."} — a worker that
-## cannot answer is a reason to fall back to the fitter, not an error.
+## Returns {cylinders: [...], partial: [...]} or {cylinders: [], reason: "..."}
+## — a worker that cannot answer is a reason to fall back to the fitter, not an
+## error.
+##
+## ONLY A CLOSED CYLINDER IS A BORE. A cylindrical surface that does not sweep
+## a full turn is a groove, a fillet or the end of a slot: a screw put down its
+## axis is held on one side and open on the other. The worker reports the sweep
+## and whether it closed, and both are checked HERE rather than trusted from
+## the request's closed_only flag, because a partial surface that reaches the
+## pairing is graded exactly like a drilled hole. They are listed as partial so
+## the reply can name them instead of dropping them.
 func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dictionary:
 	if source.strip_edges().is_empty():
 		return {"cylinders": [], "reason": "the document is empty"}
@@ -856,17 +1054,21 @@ func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dicti
 	var envelope: Dictionary = await panel.call_backend(FEATURES_CHANNEL, {
 		"source": source,
 		"sense": "concave",
-		"closed_only": true,
+		# Ask for the partial surfaces TOO. The reply promises to name every
+		# cylindrical surface that is not a bore, and a worker-side filter
+		# would drop them before this module ever saw them — the reply would
+		# then quietly omit the groove a reader is looking for.
+		"closed_only": false,
 		# A bore far smaller than the screw is a vent or a texture, and one far
 		# larger is a pocket. Both are noise in a fastener question.
 		"min_dia_mm": float(screw["dia_mm"]) * 0.4,
 		"max_dia_mm": float(screw["dia_mm"]) * 3.0,
 	}, FEATURES_TIMEOUT_MS)
-	if not bool(envelope.get("success", false)):
-		return {"cylinders": [], "reason": "the worker could not read the "
-			+ "solid's B-Rep features: %s" % str(envelope.get("error_message", ""))}
-	var result: Dictionary = envelope.get("result", {}) as Dictionary
+	var result: Dictionary = _WorkerReply.unwrap(envelope, "the solid's B-Rep features")
+	if result.has("error"):
+		return {"cylinders": [], "reason": str(result["error"])}
 	var out: Array = []
+	var partial: Array = []
 	for entry in result.get("cylinders", []):
 		var cylinder: Dictionary = entry
 		var axis: Dictionary = cylinder.get("axis", {}) as Dictionary
@@ -874,16 +1076,65 @@ func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dicti
 		var direction := _vector(axis.get("direction", [])).normalized()
 		if direction.length_squared() < 0.5:
 			continue
+		# ONE RULE, and it is the worker's: a surface is closed when its
+		# measured sweep is within one BIN of a full turn. The bin width is
+		# reported per row, so the same threshold is derived here rather than
+		# assumed — and a row that does not carry one leaves the verdict to
+		# the worker's own `closed` flag.
+		var sweep := float(cylinder.get("sweep_deg", 0.0))
+		var bin_deg := float(cylinder.get("bin_deg", 0.0))
+		var closed := bool(cylinder.get("closed", false))
+		if bin_deg > 0.0:
+			closed = sweep >= 360.0 - bin_deg - SWEEP_EPSILON_DEG
+		if not closed:
+			partial.append({
+				"dia_mm": float(cylinder.get("dia_mm", 0.0)),
+				"centre_mm": _frames(_vector(cylinder.get("centre_mm", [])), ""),
+				"source": "b_rep",
+				"sweep_deg": sweep,
+				"reason": "partial cylinder (sweep %.1f degrees): a screw down "
+					% sweep + "its axis is open on one side, so it is not a "
+					+ "bore and is never paired with a hole",
+			})
+			continue
+		# TWO extents, and they are different questions. The WALL runs the
+		# whole length of the surface — that is where the bore's material is,
+		# and a hit inside it is the screw arriving rather than an
+		# obstruction. The ENGAGED span is the part of it that goes all the way
+		# round: a bore whose mouth is cut by a tilted face has thread on one
+		# side and air on the other above the low point of that trim, and a
+		# screw only engages where the whole circumference is there.
+		var wall_length := float(cylinder.get("extent_max_mm",
+			cylinder.get("length_mm", 0.0)))
+		var full_start := float(cylinder.get("full_start_mm", 0.0))
+		var full_end := float(cylinder.get("full_end_mm", wall_length))
 		out.append({
 			"source": "b_rep",
 			"dia_mm": float(cylinder.get("dia_mm", 0.0)),
 			"axis": direction,
-			"start": origin,
-			"end": origin + direction * float(cylinder.get("length_mm", 0.0)),
+			"start": origin + direction * full_start,
+			"end": origin + direction * full_end,
+			"wall_start": origin,
+			"wall_end": origin + direction * wall_length,
 			"centre": _vector(cylinder.get("centre_mm", [])),
-			"length_mm": float(cylinder.get("length_mm", 0.0)),
+			"length_mm": full_end - full_start,
+			"extent_max_mm": wall_length,
+			# The full-turn extent is read in angular bins, so it carries the
+			# bin's resolution as an error bar. Engagement is graded with it
+			# subtracted: a screw must clear the threshold on the SHORTEST
+			# bite the measurement allows, not on the nominal one.
+			"extent_bound_mm": float(cylinder.get("extent_full_bound_mm", 0.0)),
+			# TWO ways the extent can be a number nobody can grade against.
+			# extent_exact false means the face's own boundary could not be
+			# adapted and a parametric BOX was used, which can overstate the
+			# length by any amount; extent_full_bounded false means an edge was
+			# walked at a fixed pitch, so the error bar above is a floor and
+			# not a bound. Either one makes engagement unknown rather than
+			# measured, and unknown is not a pass.
+			"extent_exact": bool(cylinder.get("extent_exact", true)),
+			"extent_bounded": bool(cylinder.get("extent_full_bounded", true)),
 		})
-	return {"cylinders": out}
+	return {"cylinders": out, "partial": partial}
 
 
 ## The named fallback: fit the solid's own tessellation. Uses the same fitter
@@ -1131,9 +1382,25 @@ func _report(
 		"axis_source": axis_source,
 		"tessellation_tolerance_mm": DISPLAY_TOLERANCE_MM,
 		"ray_spacing_mm": RING_SPACING_MM,
-		"sampling": "the screw path is a ray fan, not a swept solid: an "
-			+ "obstruction narrower than ray_spacing_mm can pass between two "
-			+ "rays unseen",
+		"ray_spacing": {
+			"radial_mm": RING_SPACING_MM,
+			# MEASURED, not nominal: the widest gap any ring of this check
+			# actually left between two adjacent rays. It exceeds radial_mm
+			# only on a ring wide enough to hit the ray ceiling.
+			"angular_mm": _widest_arc_mm,
+			"angular_bound_mm": RING_SPACING_MM,
+			"angular_note": ("the widest arc between adjacent rays on a ring; "
+				+ "a ring needing more than %d rays to hold the radial "
+				+ "spacing is capped there and is reported coarser")
+				% MAX_RING_RAYS,
+		},
+		"rays_total": _path_rays,
+		"sampling": "the screw path is sampled over the whole DISC of the "
+			+ "shank and of the head — concentric rings out from the axis, "
+			+ "spaced by ray_spacing.radial_mm, each ring's rays no more than "
+			+ "ray_spacing.angular_mm apart along it — and not swept: an "
+			+ "obstruction narrower than that spacing can pass between two "
+			+ "rays unseen, at any radius",
 		"screws": rows,
 		"unpaired": pairing.get("unpaired", {}),
 		"casts": _casts,
@@ -1157,6 +1424,16 @@ func _why(row: Dictionary) -> String:
 				% str((first[0] as Dictionary).get("node", "something"))
 		return "the screw path is blocked"
 	if not bool(row.get("engagement_ok", true)):
+		if not bool(row.get("engagement_certain", true)):
+			return ("the bore's extent is not exact, so the %.2f mm of bite "
+				+ "measured here cannot be graded: the kernel could not read "
+				+ "this face's own boundary, or could not sample it to a "
+				+ "stated deflection") % float(row.get("engagement_mm", 0.0))
+		var bound := float(row.get("engagement_bound_mm", 0.0))
+		if bound > 0.0:
+			return ("the screw engages %.2f mm of bore (+/- %.2f mm) and "
+				+ "needs %.2f mm") % [float(row.get("engagement_mm", 0.0)),
+					bound, float(row.get("engagement_required_mm", 0.0))]
 		return "the screw engages %.2f mm of bore and needs %.2f mm" \
 			% [float(row.get("engagement_mm", 0.0)),
 			   float(row.get("engagement_required_mm", 0.0))]
@@ -1193,12 +1470,6 @@ func _nothing(reason: String) -> Dictionary:
 		"screws": [],
 	}
 
-
-func _superseded(report: Dictionary) -> Dictionary:
-	report["superseded"] = true
-	report["superseded_reason"] = "a newer evaluation or verb call started " \
-		+ "before this check finished; the panel shows that one"
-	return report
 
 
 # ---------------------------------------------------------------------------

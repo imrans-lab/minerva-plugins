@@ -137,7 +137,7 @@ def test_generation_depends_only_on_the_lock_and_the_licence_texts(lock_vars,
     # hash of every licence text it attributes, so a changed text is a
     # changed NOTICE and the gate makes someone look at it.
     text = licence_copy / "fcl-0.7.0.LICENSE.txt"
-    text.write_text(text.read_text() + "\n(amended upstream)\n")
+    text.write_text(text.read_text(encoding="utf-8") + "\n(amended upstream)\n", encoding="utf-8")
     assert gn.render_notice(lock_vars, licence_dir=licence_copy) != first
 
 

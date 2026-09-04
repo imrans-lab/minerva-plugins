@@ -13,7 +13,7 @@ orientation wrong reports every bore as a boss and every boss as a bore and
 still returns plausible-looking geometry. Each fixture therefore contains one
 of each, at radii that cannot be confused, and asserts which is which.
 
-23 tests. The ones that translate DSL need build123d/OCP, which ships in the
+31 tests. The ones that translate DSL need build123d/OCP, which ships in the
 plugin's embedded runtime bundle and is not on a plain CI runner, so they skip
 there. The refusals and every `_merge` test run unconditionally — the merge is
 pure arithmetic over face records — so a skipped suite can never mean "the
@@ -274,11 +274,25 @@ class TestTrimmedExtent:
         measured from anything other than its real trim reports the full 10 mm
         of plate, and a fastener graded on it engages a boss that is not there.
 
+        The bore therefore has TWO lengths, and the reply carries both:
+
+            extent_max_mm  = 8 + 3 tan 20 = 9.09191 mm, to the highest rim
+                             point — how far the WALL reaches.
+            extent_full_mm = 8 - 3 tan 20 = 6.90809 mm, the stretch that is
+                             there at EVERY azimuth — how far a screw can
+                             engage, since above it the thread exists on one
+                             side of the axis only.
+
+        ORACLE: both lines of arithmetic, done by hand from the DSL. Grading
+        engagement on the max reports a screw as held by a boss that is only
+        half there.
+
         HONEST NOTE: for a SINGLE face, BRepTools.UVBounds_s would give the
-        same answer here, because v IS the axial coordinate and the box of the
+        same MAX here, because v IS the axial coordinate and the box of the
         boundary's v-values is the boundary's own range. What the boundary
-        sampling actually buys is the SWEEP — see TestMerging below, where two
-        patches covering the same arc no longer add up to a hole.
+        sampling buys is the SWEEP — see TestMerging below, where two patches
+        covering the same arc no longer add up to a hole — and the
+        per-azimuth extent this test's second number rests on.
         """
         pytest.importorskip("build123d")
         source = "\n".join([
@@ -295,24 +309,99 @@ class TestTrimmedExtent:
         assert reply["ok"], reply.get("error")
         bores = reply["result"]["cylinders"]
         assert len(bores) == 1, bores
-        expected = 8.0 + 3.0 * math.tan(math.radians(20.0))
-        assert bores[0]["length_mm"] == pytest.approx(expected, abs=1.0e-3)
+        reach = 3.0 * math.tan(math.radians(20.0))
+        assert bores[0]["length_mm"] == pytest.approx(8.0 + reach, abs=1.0e-3)
+        assert bores[0]["extent_max_mm"] == pytest.approx(8.0 + reach, abs=1.0e-3)
+        # The full-turn extent is measured per angular bin, so it carries the
+        # bin width's worth of quantisation and nothing more.
+        assert bores[0]["extent_full_mm"] == pytest.approx(8.0 - reach, abs=0.02)
+        assert bores[0]["extent_full_mm"] < bores[0]["extent_max_mm"]
         assert bores[0]["length_mm"] < 10.0
         assert bores[0]["extent_exact"] is True
+        # The full-turn number is read in angular bins, so it is never exact
+        # and carries the bin's own resolution as an error bar. The reported
+        # value must sit inside that bar of the hand-computed one, and the bar
+        # must be a small fraction of the extent rather than a token.
+        assert bores[0]["extent_full_exact"] is False
+        bound = bores[0]["extent_full_bound_mm"]
+        assert 0.0 < bound < 0.5, bound
+        assert abs(bores[0]["extent_full_mm"] - (8.0 - reach)) <= bound
+        assert bores[0]["bin_deg"] == pytest.approx(360.0 / feat.ANGULAR_BINS)
+        # The bound is a sum of named parts, not a number from nowhere.
+        parts = bores[0]["extent_full_bound_parts"]
+        assert bores[0]["extent_full_bound_mm"] == pytest.approx(
+            2.0 * (parts["bin_step_mm"] + parts["hidden_in_bin_mm"]
+                   + parts["sampling_deflection_mm"]))
+        # The boundary was sampled by deflection, so the bound is a bound and
+        # not a floor: a spike between two samples is inside it by
+        # construction.
+        assert bores[0]["extent_full_bounded"] is True
+        assert bores[0]["boundary_deflection_mm"] == pytest.approx(
+            feat.EDGE_DEFLECTION_MM)
+
+
+class TestSmallBore:
+    """The bore a fastener check actually meets, at the size it meets it."""
+
+    def test_a_real_m2_bore_reads_as_closed_with_its_own_length(self):
+        """A 2.4 mm hole, translated through the kernel and read back.
+
+        THE REGRESSION THIS EXISTS FOR. The boundary is sampled by DEFLECTION,
+        which places points where the curvature asks for them: a 1.2 mm rim at
+        0.01 mm of deflection needs only about two dozen points on a full
+        turn, one every fifteen degrees. Binning those POINTS leaves two bins
+        in three empty, the sweep reads about 120 degrees, and a drilled hole
+        is reported as a partial cylinder that no screw may be paired with.
+        Binning the SEGMENTS between them is what makes the coverage a
+        coverage.
+
+        ORACLE: the DSL's own literals. A 10 mm plate with a radius-1.2
+        cylinder cut through it has one concave cylindrical surface, radius
+        1.2, sweeping a full turn, 10 mm long — and the arithmetic is the
+        plate's own thickness, not anything this code derived.
+        """
+        source = "\n".join([
+            "plate = cube(20, 20, 10)",
+            "bore = translate([10, 10, -2], cylinder(r=1.2, h=14))",
+            "part = plate - bore",
+        ])
+        result = _features_of(source, sense="concave")
+        bores = [c for c in result["cylinders"]
+                 if abs(c["radius_mm"] - 1.2) < 1.0e-4]
+        assert len(bores) == 1, result["cylinders"]
+        bore = bores[0]
+        assert bore["sweep_deg"] == pytest.approx(360.0, abs=feat.BIN_DEG)
+        assert bore["closed"] is True
+        assert bore["length_mm"] == pytest.approx(10.0, abs=1.0e-3)
+        # Square-cut at both ends, so the stretch that goes all the way round
+        # is the whole bore, less only what the measurement owes.
+        assert bore["extent_full_mm"] == pytest.approx(
+            10.0, abs=bore["extent_full_bound_mm"] + 1.0e-3)
+        assert bore["extent_full_bounded"] is True
 
 
 def _arc_face(radius, z_low, z_high, angle_from, angle_to, sense="concave",
-              samples=400):
+              samples=400, low_of=None, high_of=None):
     """A stand-in face record whose boundary really covers that arc.
 
     The points are what `_merge` measures, so a face built here is indexed into
-    angular bins exactly as a sampled OCCT boundary would be.
+    angular bins exactly as a sampled OCCT boundary would be. They are also
+    kept as TWO EDGES — the lower rim and the upper one — which is the shape
+    OCCT hands over and the only shape a rate along the boundary can be read
+    from: two samples at one azimuth on different rims are a seam, not a
+    slope.
+
+    `low_of` / `high_of` take the azimuth and return that rim's height, for a
+    trim that is not perpendicular to the axis.
     """
-    points = []
+    low_rim = []
+    high_rim = []
     for i in range(samples):
         angle = angle_from + (angle_to - angle_from) * (i / float(samples - 1))
-        for z in (z_low, z_high):
-            points.append((radius * math.cos(angle), radius * math.sin(angle), z))
+        x = radius * math.cos(angle)
+        y = radius * math.sin(angle)
+        low_rim.append((x, y, low_of(angle) if low_of else z_low))
+        high_rim.append((x, y, high_of(angle) if high_of else z_high))
     return {
         "origin": (0.0, 0.0, 0.0),
         "direction": (0.0, 0.0, 1.0),
@@ -320,7 +409,12 @@ def _arc_face(radius, z_low, z_high, angle_from, angle_to, sense="concave",
         "v_min": z_low,
         "v_max": z_high,
         "sweep": abs(angle_to - angle_from),
-        "points": points,
+        "points": low_rim + high_rim,
+        "edges": [low_rim, high_rim],
+        # Sampled the way the kernel's deflection sampler samples, which is
+        # what the reported bound rests on.
+        "deflection_bounded": True,
+        "deflection_mm": feat.EDGE_DEFLECTION_MM,
         "sense": sense,
         "area": 1.0,
     }
@@ -398,6 +492,169 @@ class TestMerging:
                 _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi, sense="convex")]
         assert len(feat._merge(pair)) == 2
 
+    def test_the_extent_bound_covers_a_bore_trimmed_BOTH_ways(self):
+        """The bound has to be conservative at BOTH ends at once.
+
+        A bore whose entrance rises where its exit falls: the lower rim runs
+        at +a cos(theta) and the upper at H - a cos(theta), so the two trims
+        tilt in opposite directions and their extremes are half a turn apart.
+        The full-turn extent is then max(low rim) .. min(high rim) = a .. H - a,
+        and binning can UNDER-state the start and OVER-state the end in the
+        same reply — the extent comes out too long by up to both errors
+        together, which is why the reported bound is twice their sum.
+
+        ORACLE: the fixture's own rims. The true engageable stretch is
+        H - 2a = 4.0 mm, computed by hand; whatever the reply says must not
+        exceed it by more than the bound it reports. A bound counting one end
+        only can fail this on a steeper pair of trims, and no smooth or square
+        fixture can show it.
+        """
+        amplitude = 1.0
+        height = 6.0
+        face = _arc_face(
+            2.0, 0.0, height, 0.0, 2 * math.pi,
+            low_of=lambda a: amplitude * math.cos(a),
+            high_of=lambda a: height - amplitude * math.cos(a))
+        entry = feat._reported(feat._merge([face])[0])
+        true_extent = height - 2.0 * amplitude
+        bound = entry["extent_full_bound_mm"]
+        assert bound > 0.0
+        assert entry["extent_full_mm"] - true_extent <= bound
+        assert entry["extent_full_mm"] >= true_extent - bound
+        # And the slack that only a rate can see is really in there: these
+        # rims turn, so the hidden-in-bin term is not zero.
+        assert entry["extent_full_bound_parts"]["hidden_in_bin_mm"] > 0.0
+
+    def test_a_rim_sampled_every_fifteen_degrees_still_sweeps_a_full_turn(self):
+        """Coverage comes from the SEGMENTS, not from the sample points.
+
+        Twenty-four samples on a full turn is what a 1.2 mm rim gets from a
+        0.01 mm deflection sampler, and 24 points cannot fill 72 bins. A
+        reader that bins points alone calls this a 120-degree partial surface;
+        one that walks the chord between two samples fills every bin the chord
+        crosses.
+
+        ORACLE: the circle itself. A closed rim sweeps a full turn however
+        many points were taken along it.
+        """
+        entry = feat._reported(feat._merge(
+            [_arc_face(1.2, 0.0, 5.0, 0.0, 2 * math.pi, samples=25)])[0])
+        assert entry["sweep_deg"] == pytest.approx(360.0, abs=1.0e-6)
+        assert entry["closed"] is True
+        assert entry["extent_full_mm"] == pytest.approx(5.0, abs=1.0e-6)
+
+    def test_an_unreadable_rim_makes_the_whole_feature_inexact(self):
+        """One rim missing is a boundary that cannot be trusted.
+
+        An edge the kernel cannot adapt is skipped — there is nothing else to
+        do with it — but what remains is only PART of the trim, and an extent
+        measured from part of a trim is understated by however much the
+        missing rim would have added. Reporting it as exact, with a finite
+        error bar, is a bound the reply cannot honour.
+
+        ORACLE: the flags. The face here carries the same points as an honest
+        one and is marked incomplete; the feature must come back inexact and
+        unbounded, so the panel grades its engagement as unknown.
+        """
+        face = _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi)
+        face["boundary_complete"] = False
+        entry = feat._reported(feat._merge([face])[0])
+        assert entry["extent_exact"] is False
+        assert entry["extent_full_bounded"] is False
+        assert entry["boundary_deflection_mm"] is None
+
+    def test_a_square_cut_bore_owes_only_the_sampling_deflection(self):
+        """The bound is MEASURED, not a constant.
+
+        A bore trimmed square to its axis reaches the same height at every
+        azimuth, so binning loses nothing and the trim has no slope: both
+        measured terms are zero and all that is left is the deflection the
+        boundary was sampled at, once for each end. A fixed bound would fail
+        an honest joint by a tenth of a millimetre it does not owe.
+
+        ORACLE: the fixture's own rim — a flat one at z = 4 for a full turn —
+        and EDGE_DEFLECTION_MM, the sampler's stated guarantee.
+        """
+        entry = feat._reported(
+            feat._merge([_arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi)])[0])
+        parts = entry["extent_full_bound_parts"]
+        assert parts["bin_step_mm"] == pytest.approx(0.0, abs=1.0e-9)
+        assert parts["hidden_in_bin_mm"] == pytest.approx(0.0, abs=1.0e-9)
+        assert entry["extent_full_bound_mm"] == pytest.approx(
+            2.0 * feat.EDGE_DEFLECTION_MM)
+        assert entry["extent_full_bounded"] is True
+        assert entry["extent_full_mm"] == pytest.approx(4.0, abs=1.0e-6)
+        assert entry["extent_full_exact"] is False
+
+    def test_a_boundary_walked_at_a_fixed_pitch_is_not_bounded_at_all(self):
+        """The honest label on the fallback.
+
+        The deflection sampler is what makes the bound a BOUND: it promises
+        the polyline stays within a stated distance of the real curve
+        everywhere, so a spike between two samples is still inside the number.
+        A face the sampler refused is walked at a fixed pitch instead, and
+        nothing at all limits what the trim does between two of those points —
+        the reply has to say so, and a consumer must not grade a threshold
+        against it.
+
+        ORACLE: the flag itself, against a face built without the sampler's
+        guarantee. A reply that reports the same number in both cases without
+        distinguishing them is claiming a guarantee it does not have.
+        """
+        face = _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi)
+        face["deflection_bounded"] = False
+        face["deflection_mm"] = None
+        entry = feat._reported(feat._merge([face])[0])
+        assert entry["extent_full_bounded"] is False
+        assert entry["boundary_deflection_mm"] is None
+        assert "FLOOR" in entry["extent_full_bound"]
+
+    def test_a_patch_that_bridges_two_others_coalesces_them(self):
+        """The seam order OCCT does not promise.
+
+        Three patches of one bore: [0,1], [2,3], and then the one that spans
+        [1,2] and joins them. A merge that only asks "does this face touch a
+        group I already have" leaves the bridge in whichever group it met
+        first and reports TWO bores where the part has one continuous 3 mm
+        one — and a screw is then graded against a third of the thread it
+        really has.
+
+        ORACLE: the intervals themselves. [0,1] u [1,2] u [2,3] = [0,3],
+        whatever order the three arrive in.
+        """
+        patches = [_arc_face(1.5, 0.0, 1.0, 0.0, 2 * math.pi),
+                   _arc_face(1.5, 2.0, 3.0, 0.0, 2 * math.pi),
+                   _arc_face(1.5, 1.0, 2.0, 0.0, 2 * math.pi)]
+        merged = feat._merge(patches)
+        assert len(merged) == 1, [feat._reported(g)["length_mm"] for g in merged]
+        assert feat._reported(merged[0])["length_mm"] == pytest.approx(3.0, abs=1.0e-6)
+        assert feat._reported(merged[0])["faces"] == 3
+        # And the same three in the order that already worked.
+        assert len(feat._merge([patches[0], patches[2], patches[1]])) == 1
+
+    def test_a_tilted_trim_reports_the_length_that_goes_all_the_way_round(self):
+        """The two extents, driven through `_merge` alone.
+
+        One patch whose upper rim rises and falls by 1 mm around the turn: the
+        wall reaches 5 mm at its highest azimuth and 3 mm at its lowest, and
+        the stretch present at every azimuth is the lower one.
+
+        ORACLE: the rim the fixture was written with. A single reported length
+        cannot be both, and reporting only the max credits a screw with
+        engagement that exists on one side of the bore only.
+        """
+        face = _arc_face(1.5, 0.0, 5.0, 0.0, 2 * math.pi,
+                         high_of=lambda a: 4.0 + math.cos(a))
+        entry = feat._reported(feat._merge([face])[0])
+        # A trim that rises and falls is exactly where the bin resolution
+        # costs something, and the bound has to be big enough to cover the
+        # step between neighbouring bins.
+        assert entry["extent_full_bound_mm"] > 0.0
+        assert entry["extent_max_mm"] == pytest.approx(5.0, abs=0.01)
+        assert entry["extent_full_mm"] == pytest.approx(3.0, abs=0.05)
+        assert entry["full_start_mm"] == pytest.approx(0.0, abs=0.01)
+        assert entry["full_end_mm"] == pytest.approx(3.0, abs=0.05)
+
     def test_a_face_with_no_samplable_boundary_says_its_extent_is_not_exact(self):
         """The fallback exists, and it is labelled.
 
@@ -407,6 +664,7 @@ class TestMerging:
         """
         blind = _arc_face(1.5, 0.0, 4.0, 0.0, 2 * math.pi)
         blind["points"] = []
+        blind["edges"] = []
         entry = feat._reported(feat._merge([blind])[0])
         assert entry["extent_exact"] is False
         assert entry["length_mm"] == pytest.approx(4.0, abs=TOL_MM)

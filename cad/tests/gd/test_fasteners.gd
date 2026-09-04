@@ -35,9 +35,10 @@ extends SceneTree
 ##   C  coaxial with hole 3, blocker overhead   -> fails the path, naming the node
 ##   D  parked 24 mm from every hole            -> unpaired, and said so
 ##   E  coaxial with hole 4 but standing 1.2 mm clear of the board, with a RIB
-##      of the shell bridging that gap across part of its bore and 1.4 mm off
-##      the axis                                -> fails the path on the SOLID,
-##      which the axis ray alone could never see
+##      of the shell bridging that gap at MID-RADIUS of the shank — clear of
+##      the axis and clear of the shank's outer ring
+##                                              -> fails the path on the SOLID,
+##      which neither the axis ray nor a rim-only fan could ever see
 ##   F  coaxial with hole 5, whose seat plane is milled away on one side of
 ##      the axis                                -> passes, with HALF its seat
 ##      ring unsupported: the one number that grades how the head lands
@@ -103,8 +104,9 @@ const B_TILT_DEG := 2.0
 ## Boss D is parked here, far from every hole, so it can find no partner.
 const D_XY := Vector2(-20.0, 24.0)
 ## Boss E stands 1.2 mm clear of the board so a RIB of the shell can bridge the
-## gap across its bore, off-centre: the axis ray misses the rib entirely and
-## only the shank ring can see it. Its bore therefore starts 1.2 mm deeper,
+## gap across its bore at mid-radius: the axis ray misses it and so does the
+## shank's outer ring, so only a fan that samples the whole disc sees it. Its
+## bore therefore starts 1.2 mm deeper,
 ## which also puts its engagement short — E is a deliberate double failure and
 ## the suite asserts the PATH, which is the one `why` reports first.
 const E_GAP_MM := 1.2
@@ -118,10 +120,17 @@ const E_BOSS_BOTTOM_Z := BOSS_BOTTOM_Z - E_GAP_MM
 ## so the pocket covers exactly the half of that ring on its own side.
 const POCKET_DEPTH_MM := 1.0
 const POCKET_SIZE := Vector3(12.0, 12.0, 4.0)
-## The rib: 1.5 wide in x, centred 1.4 mm off the bore axis, so it covers
-## x in [0.65, 2.15] — across part of the 2.4 mm bore and clear of its centre.
-const RIB_SIZE := Vector3(1.5, 8.0, E_GAP_MM)
-const RIB_OFFSET_X := 1.4
+## The rib: 0.5 wide in x, centred 0.65 mm off the bore axis, so it covers
+## x in [0.4, 0.9] — at MID-RADIUS of the M3 shank. It misses the axis ray
+## (x = 0) and it misses the shank's outer ring (x = 1.5) and the head's
+## (x = 3.0), so a fan that samples only the axis and the rim cannot see it at
+## any angular spacing; only rings across the whole disc can.
+const RIB_SIZE := Vector3(0.5, 8.0, E_GAP_MM)
+const RIB_OFFSET_X := 0.65
+## How much further the bore's WALL reaches than the stretch of it that goes
+## all the way round — the shape a tilted trim leaves. The engaged length must
+## be measured on the full-circumference extent and not on this one.
+const WALL_OVERRUN_MM := 1.0
 
 # --- the screw ---------------------------------------------------------------
 const SCREW_DIA := 3.0
@@ -152,6 +161,27 @@ const EXPECTED_SEAT_RAYS := 29
 const HALF_SEAT_MIN := 0.40
 const HALF_SEAT_MAX := 0.60
 const ANGLE_TOLERANCE_DEG := 0.02
+
+## A 180-degree cylindrical groove of a diameter the screw window accepts,
+## sitting EXACTLY on hole 2's axis — nearer it than boss B, which is half a
+## millimetre off. A check that pairs on geometry alone therefore prefers the
+## groove to B and grades a screw against a surface that is open on one side;
+## a check that asks whether the surface closed never considers it.
+const GROOVE_DIA := 2.8
+const GROOVE_SWEEP_DEG := 180.0
+## The worker's angular resolution, reported on every cylinder row (72 bins of
+## 5 degrees). The panel derives its closed rule from THIS number, so hole 5's
+## bore is given a sweep exactly one bin short of a full turn — the seam a
+## real bore leaves — and must still be graded as a bore.
+const BIN_DEG := 5.0
+## How far the panel is re-posed under a check that is already in flight. Big
+## enough that a reply framed in the wrong pose is off by tens of millimetres
+## and cannot be mistaken for a rounding difference.
+const POSE_SHIFT := Vector3(50.0, -30.0, 20.0)
+## The error bar the worker puts on a full-turn extent (it is read in angular
+## bins). Engagement is graded on the extent MINUS this, so it has to be small
+## enough that screw A still clears its 6.0 mm requirement on 6.4 mm of bite.
+const EXTENT_BOUND_MM := 0.3
 
 ## The gate the tessellation fallback is licensed by.
 const AGREEMENT_CENTRE_MM := 0.01
@@ -224,9 +254,10 @@ func _run() -> void:
 	_bores = _brep_bores()
 
 	var shell: Dictionary = await _shell_mesh()
-	check("fixture: the shell arrived as worker mesh data with six bores",
+	check("fixture: the shell arrived as worker mesh data with six bores and "
+			+ "one half-turn groove",
 			(shell.get("vertices", []) as Array).size() > 0
-				and _bores.size() == 6,
+				and _bores.size() == 7,
 			"vertices=%d bores=%d" % [(shell.get("vertices", []) as Array).size(),
 				_bores.size()])
 
@@ -239,7 +270,7 @@ func _run() -> void:
 		"compare_fit": true,
 	})
 	_check_envelope(report)
-	_check_pairing(report)
+	_check_pairing(report, panel)
 	_check_screw_a(report)
 	_check_screw_b(report)
 	_check_screw_c(report)
@@ -250,6 +281,7 @@ func _run() -> void:
 	await _check_iso_273(module, panel)
 	await _check_seatless_hole(module, panel)
 	await _check_refusals(module, panel)
+	await _check_pose_snapshot(module, panel)
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +303,29 @@ func _check_envelope(report: Dictionary) -> void:
 				and str(report.get("sampling", "")).contains("between two rays"),
 			"ray_spacing_mm=%s" % str(report.get("ray_spacing_mm")))
 
+	# The disc, stated as two spacings and counted. A rim-only fan over these
+	# five screws could place at most (1 + 19) + (1 + 38) = 59 rays each; the
+	# disc places three rings on the shank and six on the head, so the total
+	# cannot be mistaken for the old fan's.
+	var spacing: Dictionary = report.get("ray_spacing", {}) as Dictionary
+	# The angular number is MEASURED — the widest arc any ring of this check
+	# left between two rays — so a ring capped at the module's ray ceiling
+	# cannot report a bound it did not keep. Every ring here is well inside
+	# the cap, so the realised arc must come in at or under the nominal one.
+	check("envelope: the spacing is stated in BOTH directions the disc is "
+			+ "sampled in, the angular one measured rather than assumed, and "
+			+ "the rays it placed are counted",
+			absf(float(spacing.get("radial_mm", 0.0))
+					- FastenerChecks.RING_SPACING_MM) < 0.0001
+				and float(spacing.get("angular_mm", 0.0)) > 0.0
+				and float(spacing.get("angular_mm", 99.0))
+					<= FastenerChecks.RING_SPACING_MM + 0.0001
+				and int(report.get("rays_total", 0)) > 5 * 59,
+			"ray_spacing=%s rays_total=%s"
+				% [str(spacing), str(report.get("rays_total"))])
 
-func _check_pairing(report: Dictionary) -> void:
+
+func _check_pairing(report: Dictionary, panel: Node) -> void:
 	var nodes := {}
 	for entry in report.get("screws", []):
 		nodes[str((entry as Dictionary).get("node", ""))] = true
@@ -292,9 +345,41 @@ func _check_pairing(report: Dictionary) -> void:
 
 	var unpaired: Dictionary = report.get("unpaired", {}) as Dictionary
 	var loose: Array = unpaired.get("solid_features", []) as Array
-	check("pairing: the bore that matched no hole is listed rather than "
-			+ "quietly dropped",
-			loose.size() == 1, "unpaired solid features = %d" % loose.size())
+	check("pairing: the bore that matched no hole and the surface that was "
+			+ "never a bore are both listed rather than quietly dropped",
+			loose.size() == 2, "unpaired solid features = %d" % loose.size())
+
+	# The groove sits exactly on hole 2's axis and boss B sits half a
+	# millimetre off it, so a check that pairs on geometry alone hands hole 2
+	# to the groove and B's own row disappears. Both halves are asserted: the
+	# groove is named as a partial surface, and B is still the screw at that
+	# hole (its row is checked in full further down).
+	var named_partial := {}
+	for entry in loose:
+		var feature: Dictionary = entry
+		if str(feature.get("reason", "")).contains("partial cylinder"):
+			named_partial[float(feature.get("dia_mm", 0.0))] = \
+				str(feature.get("reason", ""))
+	check("pairing: a half-turn groove nearer the hole than the boss is NOT "
+			+ "paired — it is listed as a partial cylinder, with its sweep",
+			named_partial.has(GROOVE_DIA)
+				and str(named_partial[GROOVE_DIA]).contains("180"),
+			"partial = %s" % str(named_partial))
+
+	# Two halves of the same rule. The request must ASK for the partial
+	# surfaces — a worker-side filter would drop the groove before this module
+	# saw it, and the reply would promise a listing it could never make — and
+	# the panel's own threshold must come from the worker's reported bin
+	# width, so hole 5's bore, one bin short of a full turn, is still a bore.
+	var asked: Dictionary = {}
+	for entry in _payloads_of(panel):
+		asked = (entry as Dictionary).get("args", {}) as Dictionary
+	check("pairing: the request asks the worker for partial surfaces too, and "
+			+ "a bore one bin short of a full turn is still a bore",
+			asked.has("closed_only") and not bool(asked["closed_only"])
+				and not named_partial.has(BORE_R * 2.0)
+				and _row_at(report, HOLE_XY[4]).has("engagement_mm"),
+			"asked=%s partial=%s" % [str(asked), str(named_partial.keys())])
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +407,33 @@ func _check_screw_a(report: Dictionary) -> void:
 					- EXPECTED_REQUIRED_MM) < 0.0001
 				and bool(row.get("engagement_ok", false)),
 			"engagement=%s required=%s" % [str(row.get("engagement_mm")),
+				str(row.get("engagement_required_mm"))])
+
+	# The bore's wall runs WALL_OVERRUN_MM deeper than the stretch of it that
+	# goes all the way round. Engagement is measured on the full-circumference
+	# extent — 0.8 to 9.0 axial — and grading it on the wall instead would add
+	# that millimetre to every bite the check reports.
+	var engaged: Dictionary = row.get("bore_extent_mm", {}) as Dictionary
+	var walled: Dictionary = row.get("bore_wall_extent_mm", {}) as Dictionary
+	check("A: engagement is measured on the extent that goes ALL THE WAY "
+			+ "ROUND, with the wall's own deeper reach reported beside it",
+			absf(float(engaged.get("exit", 0.0))
+					- (BORE_LENGTH + BOARD_HALF_THICKNESS)) < NUMERIC_TOLERANCE_MM
+				and absf(float(walled.get("exit", 0.0))
+					- (BORE_LENGTH + BOARD_HALF_THICKNESS + WALL_OVERRUN_MM))
+					< NUMERIC_TOLERANCE_MM,
+			"engaged=%s wall=%s" % [str(engaged), str(walled)])
+
+	check("A: the engagement it is graded on is the measured bite MINUS the "
+			+ "extent's own error bar, so a bore measured in bins cannot pass "
+			+ "on the bin boundary",
+			absf(float(row.get("engagement_bound_mm", -1.0)) - EXTENT_BOUND_MM)
+					< NUMERIC_TOLERANCE_MM
+				and float(row.get("engagement_mm", 0.0)) - EXTENT_BOUND_MM
+					>= float(row.get("engagement_required_mm", 0.0))
+				and bool(row.get("engagement_ok", false)),
+			"engagement=%s bound=%s required=%s" % [
+				str(row.get("engagement_mm")), str(row.get("engagement_bound_mm")),
 				str(row.get("engagement_required_mm"))])
 
 	check("A: the path is clear and the head sits fully on the board",
@@ -467,6 +579,18 @@ func _check_screw_e(report: Dictionary) -> void:
 					<= BOARD_HALF_THICKNESS + E_GAP_MM + NUMERIC_TOLERANCE_MM,
 			"axial = %s" % str(first.get("axial_mm")))
 
+	# The whole point of the disc: this rib is at 0.4-0.9 mm from the axis,
+	# and the fan's own ring radii are 0.5, 1.0 and 1.5. A hit reported at a
+	# ray radius that is neither 0 (the axis) nor the fan's own radius (the
+	# rim) is a hit no rim-only fan could have made.
+	check("E: the rib is caught by a ray between the axis and the rim — the "
+			+ "radius a fan of axis-plus-rim never samples",
+			float(first.get("ray_radius_mm", -1.0)) > 0.01
+				and float(first.get("ray_radius_mm", 99.0))
+					< float(first.get("fan_radius_mm", 0.0)) - 0.01,
+			"ray_radius=%s fan_radius=%s"
+				% [str(first.get("ray_radius_mm")), str(first.get("fan_radius_mm"))])
+
 	check("E: its coaxiality is clean, so the boss's own mouth and bore wall "
 			+ "were NOT mistaken for obstructions",
 			bool((row.get("coaxiality", {}) as Dictionary).get("pass", false))
@@ -494,6 +618,18 @@ func _check_screw_f(report: Dictionary) -> void:
 			+ "the ring lands and half does not",
 			supported > HALF_SEAT_MIN and supported < HALF_SEAT_MAX,
 			"supported = %s" % str(row.get("head_seat_supported")))
+	# The number is a coverage of ONE ring, and the row has to say so: a
+	# reader who takes it for bearing area credits an annular void inside the
+	# ring with holding the head.
+	check("F: the row says what the seat number actually is — coverage of one "
+			+ "ring at a stated radius, not bearing area",
+			absf(float(row.get("head_seat_radius_mm", 0.0))
+					- (HEAD_DIA + SCREW_DIA) * 0.25) < NUMERIC_TOLERANCE_MM
+				and str(row.get("head_seat_rule", "")).contains("one radius")
+				and str(row.get("head_seat_rule", "")).contains("not bearing area"),
+			"radius=%s rule='%s'" % [str(row.get("head_seat_radius_mm")),
+				str(row.get("head_seat_rule"))])
+
 	check("F: a half-seated head is REPORTED, not graded — nothing is in its "
 			+ "way, so the screw still passes and `why` stays silent",
 			bool(row.get("pass", false))
@@ -636,6 +772,170 @@ func _check_refusals(module: RefCounted, panel: Node) -> void:
 					.get("reference_holes", []) as Array).size() == 1,
 			"reply = %s" % str(nowhere))
 
+	# This check follows a successful one, and it returns before any ray is
+	# cast. Its envelope must therefore say ZERO rays — the counters belong to
+	# the check that is reporting them, and inheriting the previous check's
+	# numbers is a report about work this one never did.
+	check("refusal: an empty check reports its OWN cost — no rays, no casts — "
+			+ "rather than inheriting the last check's counters",
+			int(nowhere.get("rays_total", -1)) == 0
+				and int(nowhere.get("casts", -1)) == 0
+				and float(nowhere.get("elapsed_ms", -1.0)) >= 0.0,
+			"rays_total=%s casts=%s" % [str(nowhere.get("rays_total")),
+				str(nowhere.get("casts"))])
+
+	# An extent the kernel could not read exactly is not a bite anyone can
+	# grade: the boundary fell back to a parametric BOX, which can overstate
+	# the length by any amount. The screw is not failed for a modelling
+	# detail — it is reported as ungraded, which is not a pass either.
+	var honest: Array = panel.bores
+	var uncertain: Array = []
+	for entry in honest:
+		var cylinder: Dictionary = (entry as Dictionary).duplicate(true)
+		if absf(float(cylinder.get("dia_mm", 0.0)) - BORE_R * 2.0) < 0.001:
+			cylinder["extent_exact"] = false
+		uncertain.append(cylinder)
+	panel.bores = uncertain
+	var unsure: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": _holes(),
+	})
+	panel.bores = honest
+	var unsure_row := _row_at(unsure, HOLE_XY[0])
+	check("uncertain extent: a bore whose extent is not exact cannot be "
+			+ "graded — engagement is not ok, says it is not certain, and the "
+			+ "row explains that the boundary was not read",
+			not bool(unsure_row.get("engagement_ok", true))
+				and not bool(unsure_row.get("engagement_certain", true))
+				and str(unsure_row.get("why", "")).contains("not exact")
+				and not bool(unsure_row.get("pass", true)),
+			"row = %s" % str(unsure_row))
+
+
+# ---------------------------------------------------------------------------
+# The poses a check answers in
+# ---------------------------------------------------------------------------
+
+## Every local coordinate in the reply is a world point taken back through a
+## reference's pose, and the check reaches the worker before it measures
+## anything — an IPC round trip it deliberately does not hold the geometry
+## across. The panel's own state can change in that window: a re-pose, a new
+## evaluation, or a second check's document. A check that read the poses
+## afterwards would report this screw in another document's frame, silently,
+## because every world number would still be right.
+##
+## Here the panel is re-posed WHILE the first check is in flight and a second
+## check is started on the new pose. The first must answer in the pose it was
+## called with. The second either answers in the new one or is refused as busy
+## — the two checks share one collider and take it one at a time — but it must
+## never answer in the first's frame.
+func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
+	var original: Array = panel.checks_records
+	var moved := Transform3D(_pose.basis, _pose.origin + POSE_SHIFT)
+	var replies: Array = []
+	_collect_check(module, panel, replies)
+	# Between the first check's entry and its measurement: the panel is
+	# re-posed and a second check is asked for.
+	panel.checks_records = _records_at(moved)
+	var second: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": _holes(),
+	})
+	for _frame in range(600):
+		if not replies.is_empty():
+			break
+		await process_frame
+	panel.checks_records = original
+
+	var first: Dictionary = replies[0] if not replies.is_empty() else {}
+	var first_row := _row_at(first, HOLE_XY[0])
+	var first_local := _local_of(first_row.get("seat_mm", {}))
+	var expected := Vector3(HOLE_XY[0].x, HOLE_XY[0].y, BOARD_HALF_THICKNESS)
+	# The second check, if it ran at all, is in the MOVED frame: same world
+	# point, a local that differs by the shift taken back through the basis.
+	var second_row := _row_at(second, HOLE_XY[0])
+	var second_local := _local_of(second_row.get("seat_mm", {}))
+	var moved_expected: Vector3 = moved.affine_inverse() 		* (_pose * expected)
+	var second_ok := bool(second.get("busy", false)) 		or (not bool(second.get("checked", false))) 		or second_local.distance_to(moved_expected) < NUMERIC_TOLERANCE_MM
+	check("poses: a check answers in the poses it was CALLED with, even "
+			+ "though the panel was re-posed while it waited for the worker; "
+			+ "a check started after the move never answers in the old frame",
+			not first.is_empty()
+				and first_local.distance_to(expected) < NUMERIC_TOLERANCE_MM
+				and second_ok,
+			"first_local=%s expected=%s second=%s moved_expected=%s" % [
+				str(first_local), str(expected), str(second_local),
+				str(moved_expected)])
+
+	# The other half of the same window. A snapshot of the POSES is not enough
+	# on its own: the colliders those poses describe can be rebuilt in the
+	# same gap, and a check that cast its rays against the new geometry while
+	# converting the hits through the old poses would report world numbers
+	# that are all right and local ones that are all wrong. Here the panel is
+	# re-posed AND the gauge rebuilt while a check waits, so the check must
+	# either go again on the new state or say it is stale — never answer in
+	# the frame it started in.
+	var rebuilt := Transform3D(_pose.basis, _pose.origin - POSE_SHIFT)
+	var later: Array = []
+	_collect_check(module, panel, later)
+	panel.checks_records = _records_at(rebuilt)
+	_rebuild_gauge(panel, rebuilt)
+	for _frame in range(600):
+		if not later.is_empty():
+			break
+		await process_frame
+	panel.checks_records = original
+
+	var after: Dictionary = later[0] if not later.is_empty() else {}
+	var after_row := _row_at(after, HOLE_XY[0])
+	var after_local := _local_of(after_row.get("seat_mm", {}))
+	var rebuilt_expected: Vector3 = rebuilt.affine_inverse() \
+		* (_pose * expected)
+	check("poses: a check whose reference COLLIDERS were rebuilt under it "
+			+ "either measures the new state or comes back stale — it never "
+			+ "mixes new geometry with old poses",
+			not after.is_empty()
+				and (bool(after.get("stale", false))
+					or after_local.distance_to(rebuilt_expected)
+						< NUMERIC_TOLERANCE_MM)
+				and after_local.distance_to(expected) > NUMERIC_TOLERANCE_MM,
+			"after=%s local=%s rebuilt_expected=%s" % [
+				str(after.get("stale", after.get("checked", "?"))),
+				str(after_local), str(rebuilt_expected)])
+
+
+## Start a check without awaiting it and park its reply in `into`.
+func _collect_check(module: RefCounted, panel: Node, into: Array) -> void:
+	var reply: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": _holes(),
+	})
+	into.append(reply)
+
+
+## Rebuild the gauge's colliders at a new pose, the way a re-evaluated
+## document does — which is what makes the generation move.
+func _rebuild_gauge(panel: Node, pose: Transform3D) -> void:
+	var bodies: Array = []
+	for entry in _records:
+		var record: Dictionary = entry
+		for part_entry in record.get("parts", []):
+			var part: Dictionary = part_entry
+			bodies.append({
+				"mesh": part.get("mesh", null),
+				"transform": pose,
+				"node": str(part.get("node_path", "")),
+				"reference": str(record.get("name", "")),
+			})
+	panel.gauge.call("build", bodies, "fastener-fixture|reposed")
+
+
+## The suite's reference records under a different pose.
+func _records_at(pose: Transform3D) -> Array:
+	var out: Array = []
+	for entry in _records:
+		var record: Dictionary = (entry as Dictionary).duplicate()
+		record["pose"] = pose
+		out.append(record)
+	return out
+
 
 # ---------------------------------------------------------------------------
 # The stand-in panel and the stand-in backend
@@ -669,16 +969,37 @@ class StandInPanel extends Node3D:
 	func get_geometry_checks() -> RefCounted:
 		return checks
 
-	## The worker's cylindrical_features reply. The suite constructed these
-	## axes from the fixture's literals; the exact B-Rep read is pinned in
-	## worker/tests/test_features.py, which is where it runs.
+	## The worker's cylindrical_features reply, in the shape the HOST actually
+	## delivers: the broker's envelope wrapping the worker's own
+	## {ok, result} — two levels, not one. A stand-in that flattens them lets
+	## a module reading one level pass here and find nothing in production.
+	## The suite constructed these axes from the fixture's literals; the exact
+	## B-Rep read is pinned in worker/tests/test_features.py, which is where
+	## it runs.
 	func call_backend(channel: String, args: Dictionary,
 			_timeout_ms: int = 30000) -> Dictionary:
 		payloads.append({"channel": channel, "args": args})
 		await (Engine.get_main_loop() as SceneTree).process_frame
-		return {"success": true, "result": {
-			"units": "mm", "count": bores.size(), "cylinders": bores,
-		}}
+		# The worker's own closed_only filter, honoured here: a module that
+		# asks for closed features only never receives a partial one, and its
+		# own partial-surface reporting would be dead code in production
+		# while the reply promised it.
+		var answered: Array = []
+		for entry in bores:
+			var cylinder: Dictionary = entry
+			if bool(args.get("closed_only", false)) \
+					and not bool(cylinder.get("closed", false)):
+				continue
+			answered.append(cylinder)
+		return {"success": true, "result": {"ok": true, "result": {
+			"units": "mm", "count": answered.size(), "cylinders": answered,
+			"exact": true,
+		}}}
+
+
+## Every payload the stand-in backend was sent, in order.
+func _payloads_of(panel: Node) -> Array:
+	return panel.payloads
 
 
 func _stand_in_panel(gauge: Node, checks: RefCounted, shell: Dictionary) -> Node:
@@ -844,14 +1165,59 @@ func _brep_bores() -> Array:
 				"direction": [direction.x, direction.y, direction.z]},
 			"centre_mm": _as_array(origin + direction * (BORE_LENGTH * 0.5)),
 			"start_mm": 0.0,
-			"end_mm": BORE_LENGTH,
-			"length_mm": BORE_LENGTH,
-			"sweep_deg": 360.0,
+			"end_mm": BORE_LENGTH + WALL_OVERRUN_MM,
+			"length_mm": BORE_LENGTH + WALL_OVERRUN_MM,
+			# The two extents the worker reports for a bore whose mouth is cut
+			# by a tilted face: the wall reaches WALL_OVERRUN_MM further than
+			# the stretch that is there at every azimuth, and only the latter
+			# is thread a screw can engage.
+			"extent_max_mm": BORE_LENGTH + WALL_OVERRUN_MM,
+			"extent_full_mm": BORE_LENGTH,
+			"full_start_mm": 0.0,
+			"full_end_mm": BORE_LENGTH,
+			"sweep_deg": 360.0 - (BIN_DEG if spec[0] == HOLE_XY[4] else 0.0),
+			# The worker's rule: closed is "within one bin of a full turn", so
+			# the bore whose seam leaves a single bin empty is still closed.
 			"closed": true,
+			"bin_deg": BIN_DEG,
 			"faces": 2,
 			"area_mm2": TAU * BORE_R * BORE_LENGTH,
+			"extent_full_exact": false,
+			"extent_full_bound_mm": EXTENT_BOUND_MM,
 		})
+	out.append(_brep_groove())
 	return out
+
+
+## The groove the check must refuse to treat as a bore: a half-turn surface on
+## hole 2's own axis, closed false, reported by the worker exactly as it
+## reports a bore.
+func _brep_groove() -> Dictionary:
+	var xform: Transform3D = _boss_transform(HOLE_XY[1] as Vector2, 0.0, 0.0)
+	var world := _pose * xform
+	var origin: Vector3 = world * Vector3(0.0, 0.0, BORE_BOTTOM_Z)
+	var direction: Vector3 = (world.basis * Vector3(0.0, 0.0, 1.0)).normalized()
+	return {
+		"source": "b_rep",
+		"sense": "concave",
+		"radius_mm": GROOVE_DIA * 0.5,
+		"dia_mm": GROOVE_DIA,
+		"axis": {"origin_mm": [origin.x, origin.y, origin.z],
+			"direction": [direction.x, direction.y, direction.z]},
+		"centre_mm": _as_array(origin + direction * (BORE_LENGTH * 0.5)),
+		"start_mm": 0.0,
+		"end_mm": BORE_LENGTH,
+		"length_mm": BORE_LENGTH,
+		"extent_max_mm": BORE_LENGTH,
+		"extent_full_mm": BORE_LENGTH,
+		"full_start_mm": 0.0,
+		"full_end_mm": BORE_LENGTH,
+		"sweep_deg": GROOVE_SWEEP_DEG,
+		"closed": false,
+		"bin_deg": BIN_DEG,
+		"faces": 1,
+		"area_mm2": PI * GROOVE_DIA * 0.5 * BORE_LENGTH,
+	}
 
 
 func _screw() -> Dictionary:

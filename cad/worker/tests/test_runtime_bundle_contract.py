@@ -35,13 +35,17 @@ WORKFLOW = REPO / ".github" / "workflows" / "cad.yml"
 DIST_IMPORT_NAME = {"python-fcl": "fcl"}
 
 
-def _load_gen_notice():
-    path = CAD / "scripts" / "gen_notice.py"
-    spec = importlib.util.spec_from_file_location("cad_gen_notice", path)
+def _load_module(name: str, path):
+    """Import one build-machinery file by path, without installing anything."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _load_gen_notice():
+    return _load_module("cad_gen_notice", CAD / "scripts" / "gen_notice.py")
 
 
 gn = _load_gen_notice()
@@ -201,13 +205,8 @@ def test_repair_args_are_declared_and_actually_passed():
         "the build script must pass the declared repair arguments"
 
 
-def _repair_proof_snippet() -> str:
-    """The python the build script runs to prove a repaired wheel."""
-    snippet = re.search(
-        r'-c "\n(import sys, zipfile, re\n.*?)"\s*"\$whl"',
-        BUILD_TEXT, re.S)
-    assert snippet, "the build script no longer proves the repair in python"
-    return snippet.group(1)
+#: The prover the build script runs over every repaired wheel.
+PROVE_SCRIPT = REPO / "scripts" / "prove_wheel_repair.py"
 
 
 def _plant_wheel(path, names):
@@ -232,7 +231,6 @@ def test_the_repair_proof_accepts_a_vendored_runtime_and_rejects_a_bare_wheel(
         return
     pattern = LOCK.get("WHEEL_REPAIR_PROOF", "")
     assert pattern, "a repaired wheel needs a proof pattern in the lock"
-    snippet = _repair_proof_snippet()
 
     repaired = _plant_wheel(tmp_path / "repaired.whl", [
         "fcl/__init__.py",
@@ -243,11 +241,93 @@ def test_the_repair_proof_accepts_a_vendored_runtime_and_rejects_a_bare_wheel(
         "fcl.libs/vcruntime140.dll",
     ])
     passed = subprocess.run(
-        [sys.executable, "-c", snippet, str(repaired), pattern], check=False)
+        [sys.executable, str(PROVE_SCRIPT), str(repaired), pattern],
+        check=False)
     failed = subprocess.run(
-        [sys.executable, "-c", snippet, str(bare), pattern], check=False)
+        [sys.executable, str(PROVE_SCRIPT), str(bare), pattern], check=False)
     assert passed.returncode == 0, "a wheel with the vendored runtime was rejected"
     assert failed.returncode != 0, "a wheel that vendored nothing was accepted"
+
+
+def test_a_wheel_still_bound_to_the_machines_runtime_fails_the_proof():
+    """The half a filename cannot see, and the lock entry that states it.
+
+    delvewheel patches every import table it rebinds, so an extension that
+    still names MSVCP140.dll by its bare name is resolving the runtime from
+    the machine — which passes on a CI runner and fails for the user. The
+    wheel can carry a vendored copy at the same time, so the member check
+    cannot catch it; only the import table can.
+
+    ORACLE: the import list itself, taken as read. `msvcp140-1a2b3c.dll` is
+    what a rebound extension names and must pass; `MSVCP140.dll` is what an
+    untouched one names and must not — case included, since PE import names
+    are not case-normalised.
+    """
+    if not LOCK.get("WHEEL_REPAIR_PKGS", "").strip():
+        return
+    forbidden = LOCK.get("WHEEL_REPAIR_FORBIDDEN_IMPORTS", "").split()
+    assert forbidden, ("a repaired wheel needs the imports it may no longer "
+                       "name in the lock")
+    assert "$SCRIPT_DIR/prove_wheel_repair.py" in BUILD_TEXT, \
+        "the build script must run the prover"
+    assert "WHEEL_REPAIR_FORBIDDEN_IMPORTS" in BUILD_TEXT, \
+        "the build script must pass the forbidden import list"
+    assert PROVE_SCRIPT.exists()
+
+    prover = _load_module("prove_wheel_repair", PROVE_SCRIPT)
+    rebound = ["KERNEL32.dll", "python312.dll", "msvcp140-1a2b3c.dll"]
+    untouched = ["KERNEL32.dll", "python312.dll", "MSVCP140.dll"]
+    assert prover.offending(rebound, forbidden) == []
+    assert prover.offending(untouched, forbidden) == ["MSVCP140.dll"]
+
+
+class _Import:
+    """One import-directory entry, in the shape pefile hands one over."""
+
+    def __init__(self, dll):
+        self.dll = dll
+
+
+class _Image:
+    """A parsed PE with whichever import directories the test gives it."""
+
+    def __init__(self, normal=(), delayed=()):
+        self.DIRECTORY_ENTRY_IMPORT = [_Import(name) for name in normal]
+        self.DIRECTORY_ENTRY_DELAY_IMPORT = [_Import(name) for name in delayed]
+
+
+def test_a_delay_loaded_runtime_is_a_dependency_too():
+    """The second import table, which is a real dependency and not a hint.
+
+    A .pyd can DELAY-load MSVCP140.dll: the loader resolves it on the first
+    call into the runtime instead of at load time. The extension still needs
+    the machine's copy — it simply fails later, on the first clearance query,
+    on the user's machine and never on a CI runner. A proof that reads only
+    the normal import directory passes that wheel.
+
+    ORACLE: the two directories themselves, read off an image that carries a
+    vendored name in one and a bare one in the other. The names are the same
+    strings pefile yields (bytes), so the extraction is the code under test
+    and nothing is stubbed but the parse that needs a real Windows binary.
+    """
+    if not LOCK.get("WHEEL_REPAIR_PKGS", "").strip():
+        return
+    forbidden = LOCK.get("WHEEL_REPAIR_FORBIDDEN_IMPORTS", "").split()
+    prover = _load_module("prove_wheel_repair", PROVE_SCRIPT)
+
+    delayed = _Image(normal=[b"KERNEL32.dll", b"msvcp140-1a2b3c.dll"],
+                     delayed=[b"MSVCP140.dll"])
+    honest = _Image(normal=[b"KERNEL32.dll", b"msvcp140-1a2b3c.dll"],
+                    delayed=[b"msvcp140-1a2b3c.dll"])
+    assert prover.names_from(delayed) == [
+        "KERNEL32.dll", "msvcp140-1a2b3c.dll", "MSVCP140.dll"]
+    assert prover.offending(prover.names_from(delayed), forbidden) \
+        == ["MSVCP140.dll"]
+    assert prover.offending(prover.names_from(honest), forbidden) == []
+    # And the parse asks for both directories, or the entries above never
+    # arrive in the first place.
+    source = PROVE_SCRIPT.read_text(encoding="utf-8")
+    assert "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT" in source
 
 
 def test_a_bundle_without_the_runtime_names_the_dll_rather_than_the_module(

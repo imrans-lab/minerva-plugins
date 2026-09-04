@@ -247,6 +247,15 @@ SOLID_SOURCE = "part = translate([%f, %f, %f], cube(%f, %f, %f))" % (
     2 * BAR_HALF_WIDTH, 2 * BAR_HALF_LENGTH, BAR_THICKNESS,
 )
 
+#: A CURVED solid in the same place, for the one question a box cannot answer.
+#: A planar face tessellates to the same two triangles at any tolerance — the
+#: chord of a straight edge is the edge — so a cube can never show that the
+#: tolerance reached the mesher at all. A cylinder's facet count is a direct
+#: function of the deviation allowed.
+CURVED_SOLID_SOURCE = "part = translate([0, 0, %f], cylinder(r=%f, h=%f))" % (
+    GAP_MM, BAR_HALF_WIDTH, BAR_THICKNESS,
+)
+
 
 class TestClearanceVerb:
     def _reply(self, tmp_path, required_mm, tolerance_mm=None):
@@ -286,19 +295,37 @@ class TestClearanceVerb:
         assert tight["pairs"][0]["node"] == "Assembly/Bar"
 
     def test_every_reply_states_the_tolerance_it_measured_at(self, tmp_path):
+        """The tolerance is what the mesher was GIVEN, not a label copied out.
+
+        ORACLE: the triangle count of a CURVED solid. Two tolerances an order
+        of magnitude apart cannot produce the same tessellation of a cylinder;
+        a reply whose counts match either ignored the parameter or reported a
+        number it did not measure at. The fixture solid is a box everywhere
+        else in this file, and a box is 12 triangles at every tolerance there
+        is — which would let this assertion pass on a reply that never reached
+        the mesher.
+        """
         pytest.importorskip("fcl")
         pytest.importorskip("build123d")
-        coarse = self._reply(tmp_path, 0.5, tolerance_mm=0.05)["result"]
-        fine = self._reply(tmp_path, 0.5, tolerance_mm=0.005)["result"]
+        verts, faces = _bar_a()
+        path, key = write_blob(tmp_path, verts, faces)
+
+        def _curved(tolerance_mm):
+            return clr.clearance({
+                "source": CURVED_SOLID_SOURCE,
+                "required_mm": 0.5,
+                "tolerance_mm": tolerance_mm,
+                "targets": [{"reference": "board", "node": "Assembly/Bar",
+                             "key": key, "path": path}],
+            })["result"]
+
+        coarse = _curved(0.05)
+        fine = _curved(0.005)
 
         assert coarse["tessellation_tolerance_mm"] == 0.05
         assert fine["tessellation_tolerance_mm"] == 0.005
         assert "0.05" in coarse["bound"] and "0.005" in fine["bound"]
-
-        # The tolerance is what the measurement was MADE at, not a label:
-        # a coarser tessellation of the same solid is a different set of
-        # triangles, and the reply has to carry the one it used.
-        assert coarse["solid_triangles"] != fine["solid_triangles"]
+        assert fine["solid_triangles"] > coarse["solid_triangles"]
 
     def test_pairs_come_back_closest_first(self, tmp_path):
         pytest.importorskip("fcl")
@@ -337,7 +364,7 @@ class TestBackendIsMandatory:
     def test_backend_is_a_declared_runtime_pin(self):
         """Runs everywhere, so a skipped suite cannot hide a dropped backend."""
         lock = (Path(__file__).resolve().parents[2]
-                / "scripts" / "runtime-bundle.lock").read_text()
+                / "scripts" / "runtime-bundle.lock").read_text(encoding="utf-8")
         assert "python-fcl==" in lock
         assert "import fcl" in lock
 

@@ -143,7 +143,8 @@ test_cad_note.gd assertions=40
 # inside the solid, caught by parity alone); the DESIGNED contact — a board
 # resting on an open cavity's floor, inside the shell's own bounds, which must
 # read as clean and not as containment; and supersession: two overlapping
-# requests through a stand-in panel, where the overtaken reply is marked and —
+# requests through a stand-in panel, where the second is refused as busy, the
+# overtaken reply is marked and —
 # sampled at the instant it returns, which an end-state assertion could not
 # distinguish — never painted, while the pane ends up showing the newest
 # answer. And the probe that decides containment: a washer floating inside a
@@ -151,10 +152,39 @@ test_cad_note.gd assertions=40
 # vertex is on a rim of that hole and whose rim is narrower than the module's
 # own inset step — so every candidate probe lands in the hole, inside the pin,
 # and a probe that is not verified to be inside its OWN body reports the
-# washer as buried in the shell. 35 assertions = 3 fixture + 5 collider +
+# washer as buried in the shell; having offered no probe at all, that washer
+# comes back UNDECIDED rather than clean. Also the same washer and a locating
+# pin as TWO NODES OF ONE REFERENCE inside a solid block: the pin's material must not
+# vouch for the washer (no pair may claim it), the washer's containment is
+# reported as UNDECIDED with a reason and said so on the banner, and the pin —
+# which does offer a probe inside itself — is reported under the record's own
+# bare node path. And the reservation: a request arriving while a check is
+# INSIDE its window is refused as busy, naming the holder's ticket and age,
+# while a holder PAST its deadline is reclaimed — its ticket going inert, so
+# its own late release cannot hand the collider away from the check that owns
+# it now, and the reclaimer's release frees the module normally.
+# A reclaimed holder that wakes up writes NOTHING: its rebuild is refused
+# (freeing the collider under the live check would be a freed body, not a wrong
+# number), the generation is unmoved, and its job answers without measuring.
+# A reclaimed holder's writes are all no-ops, and a wrong ticket cannot free
+# the collider even when the holder has AGED past its window: only reserve()
+# hands the module over.
+# And a stack of 40 thin plates with a 0.1 mm cube parked in one of its gaps,
+# mounted TWICE under two names: every ray out of that cube crosses more
+# surfaces than the gauge's crossing budget allows, so the parity question
+# cannot be answered — which must read as UNDECIDED and not as clean — and
+# both references whose bounds hold the cube are left open, not just the
+# first one found.
+# And a cube buried inside TWO identical blocks mounted under two names: being
+# inside one body is not an answer about the other, so both are reported, each
+# under its own node, and nothing is left undecided.
+# 50 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
-# 4 supersession + 2 pin.
-test_interference.gd assertions=35
+# 4 supersession + 2 pin + 6 busy/reclaim (+1: the resumed holder's writes are
+# all no-ops, +1: an aged holder is still no licence for a wrong ticket)
+# + 5 neighbour/undecidable + 2 layered stack (a budget error is undecidable;
+# every enclosing reference is listed) + 2 two-enclosing-blocks.
+test_interference.gd assertions=50
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -184,17 +214,27 @@ test_interference.gd assertions=35
 # writes to its own blob directory, a clearance check leaves the interference
 # check's own records exactly as it found them, and a panel releases its
 # directory when it goes away.
-# 35 assertions = 3 fixture + 8 upload + 9 answer + 4 cap + 4 refusal
-# + 4 buried + 3 isolation.
-test_clearance.gd assertions=35
+# The cap is measured in UTF-8 BYTES, so a source of multibyte characters that
+# fits by character count is refused rather than handed to the host over its
+# byte limit. And the join carries DOUBT as well as overlap: a node the
+# interference report lists as undecidable keeps its measured distance, says
+# "containment undecidable: <reason>" and does not pass.
+# The doubt travels in both directions: a report that could not decide whether
+# the SOLID is inside a reference names no node, and doubts every node of that
+# reference rather than being discarded.
+# 39 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
+# fixture and the byte-measured refusal) + 4 refusal + 6 buried (+2: the
+# undecidable node and the undecidable reference) + 3 isolation.
+test_clearance.gd assertions=39
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
 # through holes and a blocker part standing over the third, and a shell of six
 # bosses with 2.4 mm pilot bores — one coaxial, one 0.5 mm off and 2 degrees
 # tilted, one under the blocker, one parked away from every hole, one standing
-# 1.2 mm clear of the board with a rib of the SHELL bridging that gap across
-# part of its own bore, off-centre, where only the shank ring can see it, and
+# 1.2 mm clear of the board with a rib of the SHELL bridging that gap at
+# MID-RADIUS of the shank, where neither the axis ray nor the outer ring can
+# see it and only a fan over the whole disc can, and
 # one under a hole whose seat plane is milled away on one side of its axis.
 # The exact B-Rep read is pinned by worker/tests/test_features.py (the cad GD
 # harness has no worker) and the hole measurement by test_mesh_measurement.gd;
@@ -214,6 +254,34 @@ test_clearance.gd assertions=35
 # clearance hole, a hole record with no thickness being a named row rather than
 # a silent seat at the plate's centre, and three refusals that report pass
 # FALSE rather than an empty success.
-# 44 assertions = 4 fixture + 3 envelope + 3 pairing + 6 A + 5 B + 5 C + 4 E
-# + 3 F + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 3 refusal.
-test_fasteners.gd assertions=44
+# The fixture also carries a 180-degree GROOVE of a supported diameter sitting
+# exactly on hole 2's axis — nearer it than boss B, which is half a millimetre
+# off — so a check that pairs on geometry alone hands hole 2 to a surface that
+# is open on one side and loses B's row entirely. Only a closed cylinder is a
+# bore; the groove is listed as a partial cylinder with its sweep. And the
+# worker's full-turn extent is read in angular bins, so every bore carries an
+# error bar and engagement is graded on the bite MINUS it.
+# The request asks the worker for the partial surfaces TOO (a worker-side
+# filter would make the reply's own "partial cylinder" listing unreachable),
+# the stand-in honours closed_only so that path is proven, and the closed rule
+# is derived from the bin width the worker reports rather than hard-coded: the
+# bore whose seam leaves one bin empty (sweep 355) is still a bore.
+# A check answers in the poses it was CALLED with: the panel is re-posed while
+# one check waits for the worker and a second is started on the new pose, and
+# neither answers in the other's frame. And when the reference COLLIDERS are
+# rebuilt in that same gap, the check either measures the new state or comes
+# back stale — never new geometry converted through old poses. An extent the kernel could not read
+# exactly is reported as ungraded rather than passed. And a check that returns
+# before casting a ray reports its own zero cost, not the last check's.
+# 54 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
+# spacing, with the rays it placed counted) + 5 pairing (+1: the groove is not
+# paired and is named, +1: partial surfaces are asked for and a one-bin-short
+# bore is still a bore) + 8 A (+1: engagement measured on the
+# full-circumference extent, +1: graded on that extent minus its error bar)
+# + 5 B + 5 C + 5 E (+1: the rib is caught by a ray between the axis and the
+# rim) + 4 F (+1: the seat number states that it is coverage of one ring at a
+# stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 5 refusal (+1: an
+# empty check reports its own counters, +1: an inexact extent is not graded)
+# + 2 poses (+1: a mid-flight collider rebuild is measured afresh or reported
+# stale).
+test_fasteners.gd assertions=55
