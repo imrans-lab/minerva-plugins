@@ -398,15 +398,16 @@ jobs:
 
       # The suites that prove the gate can FAIL (and that the lock, the build
       # script and the workflow still agree about the pins), plus the
-      # clearance suite. None of them needs the worker's compiled dependency
-      # tree to run here: the clearance tests that do need python-fcl or
-      # build123d skip on this runner (they run against the bundle), and the
-      # blob, cache and pin-guard tests need only numpy.
+      # clearance and cylindrical-feature suites. None of them needs the
+      # worker's compiled dependency tree to run here: the tests that do need
+      # python-fcl or build123d skip on this runner (they run against the
+      # bundle), and the blob, cache, merge and pin-guard tests need only
+      # numpy or nothing at all.
       - name: Install pytest
         run: python3 -m pip install --disable-pip-version-check pytest numpy
 
       - name: Runtime dependency + NOTICE suites
-        run: python3 -m pytest cad/worker/tests/test_notice.py cad/worker/tests/test_runtime_bundle_contract.py cad/worker/tests/test_clearance.py -q
+        run: python3 -m pytest cad/worker/tests/test_notice.py cad/worker/tests/test_runtime_bundle_contract.py cad/worker/tests/test_clearance.py cad/worker/tests/test_features.py -q
 
   release:
     name: Publish release

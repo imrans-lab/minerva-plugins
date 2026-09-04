@@ -17,6 +17,10 @@ extends RefCounted
 ##                               where the evaluated solid runs INTO a
 ##                               reference — the same report every evaluation
 ##                               already carries, on demand and scopeable.
+##   minerva_cad_check_clearance
+##                               how much air is between them, exactly.
+##   minerva_cad_check_fasteners will these screws go in — coaxiality, a clear
+##                               path, engagement and head seating, per screw.
 ##   minerva_cad_get_selected_reference
 ##                               which reference node the user last clicked,
 ##                               and where on it — the sibling of
@@ -46,6 +50,7 @@ extends RefCounted
 const _MeshFeatures: Script = preload("scripts/mesh_features.gd")
 const _ReferenceMeshes: Script = preload("scripts/reference_meshes.gd")
 const _GeometryChecks: Script = preload("scripts/geometry_checks.gd")
+const _FastenerChecks: Script = preload("scripts/fastener_checks.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -92,6 +97,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _check_interference)
 		"minerva_cad_check_clearance":
 			return await _fresh(panel, args, _check_clearance)
+		"minerva_cad_check_fasteners":
+			return await _fresh(panel, args, _check_fasteners)
 		"minerva_cad_get_selected_reference":
 			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
@@ -496,6 +503,48 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))
+	return _ok(report)
+
+
+## minerva_cad_check_fasteners — will these screws actually go in?
+##
+## The holes come from _find_holes rather than from a second implementation:
+## the fastener module never segments a reference, and a hole this verb pairs
+## against is the same measured hole minerva_cad_find_holes would report, with
+## the same gauge behind it. The diameter window defaults to a band around the
+## screw so a board full of vias does not become a hundred pairing candidates.
+static func _check_fasteners(panel, args: Dictionary) -> Dictionary:
+	if panel == null or not panel.has_method("check_fasteners"):
+		return _err("fastener checking is not available on this panel")
+	var asked := str(args.get("reference", ""))
+	if not asked.is_empty() and not _has_reference(panel, asked):
+		return _err("no reference named '%s' is mounted" % asked)
+	var screw: Dictionary = args.get("screw", {}) as Dictionary
+	var dia := float(screw.get("dia_mm", 0.0))
+	if dia <= 0.0:
+		return _err("check_fasteners needs screw: {dia_mm, length_mm} in millimetres")
+
+	var hole_args := args.duplicate(true)
+	hole_args["min_dia_mm"] = float(args.get("min_dia_mm", dia * 0.8))
+	hole_args["max_dia_mm"] = float(args.get("max_dia_mm", dia * 2.5))
+	var holes: Dictionary = await _find_holes(panel, hole_args)
+	if holes.has("error"):
+		return holes
+
+	var report: Dictionary = await panel.check_fasteners({
+		"screw": screw,
+		"holes": holes.get("holes", []),
+		"pairs": args.get("pairs", []),
+		"engagement_min_d": float(args.get("engagement_min_d",
+			_FastenerChecks.DEFAULT_ENGAGEMENT_D)),
+		"clearance_hole_dia_mm": args.get("clearance_hole_dia_mm", 0.0),
+		"compare_fit": bool(args.get("compare_fit", false)),
+		"reference": asked,
+		"node": str(args.get("node", "")),
+	})
+	if report.has("error"):
+		return _err(str(report["error"]))
+	report["holes_considered"] = int(holes.get("count", 0))
 	return _ok(report)
 
 

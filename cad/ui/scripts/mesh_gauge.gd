@@ -374,7 +374,7 @@ func run_now(state: PhysicsDirectSpaceState3D, kind: String, args: Dictionary) -
 			return _job_measure_convex(state, args)
 		"seed_grid":
 			return _job_seed_grid(state, args)
-		"interference":
+		"interference", "fasteners":
 			return _job_module(state, args)
 	return {"error": "unknown gauge job '%s'" % kind}
 
@@ -383,7 +383,8 @@ func run_now(state: PhysicsDirectSpaceState3D, kind: String, args: Dictionary) -
 ## belongs here. The module travels in the job and answers it with this
 ## space's state in hand — geometry_checks.gd queries the references here and
 ## the evaluated solid in a world of its own, and both are only legal to touch
-## inside the step this queue owns.
+## inside the step this queue owns. fastener_checks.gd asks the same way, and
+## its job kind is separate only so a queued job says which question it is.
 func _job_module(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
 	var module: Object = args.get("module", null)
 	if module == null or not is_instance_valid(module) \

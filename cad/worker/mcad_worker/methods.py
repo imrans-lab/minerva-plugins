@@ -496,6 +496,12 @@ def handle_request(req: dict) -> dict | None:
         result["id"] = req_id
         return result
 
+    if method == "cylindrical_features":
+        from .features import cylindrical_features
+        result = cylindrical_features(req.get("params") or {})
+        result["id"] = req_id
+        return result
+
     # Remaining geometry stub — filled in by per-tool grandchildren.
     if method == "deviation":
         return _stub_not_implemented(req)

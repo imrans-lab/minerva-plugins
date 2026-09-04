@@ -59,6 +59,10 @@ const _PanelMeasurementScript: Script = preload("scripts/panel_measurement.gd")
 ## Where the evaluated solid runs into a mounted reference. Asked on every
 ## evaluation, not only when a verb asks (scripts/geometry_checks.gd).
 const _GeometryChecksScript: Script = preload("scripts/geometry_checks.gd")
+## Whether a screw will actually go in: coaxiality, a clear path, engagement
+## and head seating, per screw (scripts/fastener_checks.gd). Asked for, not
+## carried by every evaluation — it costs a B-Rep read in the worker.
+const _FastenerChecksScript: Script = preload("scripts/fastener_checks.gd")
 
 ## Verbose tracing of the edge pick path. Owned by the sidebar module, which
 ## prints the other half of it.
@@ -177,6 +181,10 @@ var _reference_digest: String = ""
 ## (scripts/geometry_checks.gd). It owns the solid's own collider world.
 var _geometry_checks: RefCounted = null
 
+## Fastener checking (scripts/fastener_checks.gd). It borrows the solid
+## collider _geometry_checks owns rather than building a second one.
+var _fastener_checks: RefCounted = null
+
 ## Reference-node selection (scripts/reference_selection.gd). Owns the click
 ## picking, the sidebar list and the selection the MCP verbs read back.
 var _reference_selection: RefCounted = null
@@ -289,6 +297,7 @@ func _ready() -> void:
 	# mesh rebuilt on every keystroke never reaches the measurement space.
 	_geometry_checks = _GeometryChecksScript.new()
 	_geometry_checks.attach(self)
+	_fastener_checks = _FastenerChecksScript.new()
 
 	# ── Annotation substrate ───────────────────────────────────────────────
 	_annotation_registry = AnnotationRegistry.new()
@@ -525,8 +534,23 @@ func check_clearance(args: Dictionary = {}) -> Dictionary:
 	return await _geometry_checks.check_clearance(self, args)
 
 
+## Will these screws go in? `args` carries screw={dia_mm,length_mm,head_dia_mm}
+## and the reference holes to pair against, which is what
+## minerva_cad_check_fasteners passes through after running find_holes. Like
+## the clearance check this one is asked for, not run on every evaluation: it
+## reads the solid's B-Rep in the worker.
+func check_fasteners(args: Dictionary = {}) -> Dictionary:
+	if _fastener_checks == null:
+		return {"error": "fastener checking is not available on this panel"}
+	return await _fastener_checks.check(self, args)
+
+
 func get_geometry_checks() -> RefCounted:
 	return _geometry_checks
+
+
+func get_fastener_checks() -> RefCounted:
+	return _fastener_checks
 
 
 ## Send one request to the plugin backend over a declared IPC channel and

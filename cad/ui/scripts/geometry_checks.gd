@@ -276,24 +276,13 @@ func get_solid_edge_count() -> int:
 ## `args` may carry reference= and node= to narrow the question; the mask is
 ## derived from the reference here, so no caller has to know about layers.
 func check(panel: Object, args: Dictionary = {}) -> Dictionary:
-	_ticket += 1
-	var ticket := _ticket
-	# ONE check at a time. build_solid and the counters are module state, so a
-	# second request arriving while the first waits for a physics step would
-	# hand the queued job the other request's geometry.
-	while _in_flight:
-		await check_finished
-		if ticket != _ticket:
-			# A third request came in while this one queued. The newest
-			# question is the only one worth asking, so this one stands down
-			# without touching the module at all.
-			return _superseded(_nothing(
-				"a newer check started before this one could run"))
-	_in_flight = true
+	var ticket := await reserve()
+	if ticket == 0:
+		return _superseded(_nothing(
+			"a newer check started before this one could run"))
 	_marker_points = PackedVector3Array()
 	var report := await _run(panel, args)
-	_in_flight = false
-	check_finished.emit()
+	release_reservation()
 	# Only the newest request may paint. A superseded reply still goes back to
 	# its own caller — it is a true answer about the geometry it was asked
 	# about — but repainting from it would leave the previous evaluation's red
@@ -302,6 +291,35 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 		return _superseded(report)
 	_draw_markers(panel)
 	return report
+
+
+## Take the module for one check and hand back the ticket it holds.
+##
+## ONE check at a time. build_solid, the collider and the counters are module
+## state, so a second request arriving while the first waits for a physics step
+## would hand the queued job the other request's geometry. A request that was
+## itself overtaken while it queued gets ticket 0 and must stand down without
+## touching anything.
+##
+## Public because the fastener check borrows the same solid collider and the
+## same world: it is a second question about the one body this module owns, and
+## a second owner of that body is exactly what the ticket exists to prevent.
+## Every reservation that returns non-zero must be released.
+func reserve() -> int:
+	_ticket += 1
+	var ticket := _ticket
+	while _in_flight:
+		await check_finished
+		if ticket != _ticket:
+			return 0
+	_in_flight = true
+	return ticket
+
+
+## Release a reservation and wake whoever is queued behind it.
+func release_reservation() -> void:
+	_in_flight = false
+	check_finished.emit()
 
 
 ## Mark a reply as describing a question that has been overtaken. The caller
@@ -905,6 +923,22 @@ func _solid_space() -> PhysicsDirectSpaceState3D:
 		return null
 	var world := _viewport.find_world_3d()
 	return world.direct_space_state if world != null else null
+
+
+## The solid's space, for a module borrowing this one's collider. Same rule as
+## every query here: only legal to dereference inside the physics step.
+func solid_space() -> PhysicsDirectSpaceState3D:
+	return _solid_space()
+
+
+## One ray against the solid's collider, counted into this check's cast total.
+## Public for the same reason solid_space() is.
+func solid_ray(
+	solid_state: PhysicsDirectSpaceState3D,
+	from: Vector3,
+	to: Vector3
+) -> Dictionary:
+	return _solid_ray(solid_state, from, to)
 
 
 func _solid_ray(
