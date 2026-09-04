@@ -225,6 +225,7 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 		var measured: Dictionary = await gauge.call("submit", "measure_holes", {
 			"candidates": posed,
 			"mask": _scope_mask(gauge, args, record),
+			"reference": str(args.get("reference", "")),
 		})
 		if measured.has("error"):
 			return _err(str(measured["error"]))
@@ -301,7 +302,8 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 		if not concave.is_empty():
 			var mask := _scope_mask(gauge, args, record)
 			var holes: Dictionary = await gauge.call(
-				"submit", "measure_holes", {"candidates": concave, "mask": mask})
+				"submit", "measure_holes", {"candidates": concave, "mask": mask,
+				"reference": str(args.get("reference", ""))})
 			if holes.has("error"):
 				return _err(str(holes["error"]))
 			for hole in holes.get("holes", []):
@@ -309,7 +311,8 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 		if not convex.is_empty():
 			var convex_mask := _scope_mask(gauge, args, record)
 			var bosses: Dictionary = await gauge.call(
-				"submit", "measure_convex", {"candidates": convex, "mask": convex_mask})
+				"submit", "measure_convex", {"candidates": convex, "mask": convex_mask,
+				"reference": str(args.get("reference", ""))})
 			if bosses.has("error"):
 				return _err(str(bosses["error"]))
 			for boss in bosses.get("cylinders", []):
@@ -361,6 +364,7 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		# is a fact about the part rather than about the pin.
 		"max_radius_mm": float(args.get("max_dia_mm", 0.0)) * 0.5,
 		"mask": _scope_mask(gauge, args, {"name": asked}),
+		"reference": asked,
 	})
 	if result.has("error"):
 		return _err(str(result["error"]))
@@ -775,6 +779,7 @@ static func _seed_candidates(gauge: Node, record: Dictionary, args: Dictionary) 
 		"axis": axis,
 		"pitch_mm": float(args.get("pitch_mm", FALLBACK_PITCH_MM)),
 		"mask": _scope_mask(gauge, args, record),
+		"reference": str(args.get("reference", "")),
 	})
 	var out: Array = []
 	var half_extent := _extent_along(bounds, axis) * 0.5
@@ -935,8 +940,9 @@ static func _scope_mask(gauge: Node, args: Dictionary, record: Dictionary) -> in
 	return _mask_for(gauge, str(record.get("name", "")))
 
 
-## The collision mask that confines a measurement to ONE reference's colliders.
-## An empty name is every layer: physics then sees every body in the space.
+## Compatibility mask for the gauge. The actual scope travels as `reference`
+## in each submitted job, which lets the gauge exclude other references without
+## spending a finite collision layer per mesh.
 static func _mask_for(gauge: Node, reference_name: String) -> int:
 	if gauge == null or not gauge.has_method("mask_for"):
 		# Every layer. A zero mask would report a fit everywhere.

@@ -14,7 +14,7 @@ extends VBoxContainer
 ## module selects it, exactly as a click in a viewport would.
 signal node_activated(reference: String, node_name: String)
 
-const NOTHING_SELECTED: String = "No reference node selected. Click one in a view, or a row above."
+const NOTHING_SELECTED: String = "No reference node selected. Click one in a view, or a row above. To anchor an annotation, pick the reference point before arming the annotation tool."
 
 @onready var _tree: Tree = $ReferenceTree as Tree
 @onready var _detail: Label = $ReferenceDetail as Label

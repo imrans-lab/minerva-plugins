@@ -25,7 +25,7 @@ var plugin_id: String = "cad"
 ##   preload(...).new(). Property access and signal subscription works via
 ##   duck typing.
 
-const _DEBUG_EDGE_PICK: bool = true
+const _DEBUG_EDGE_PICK: bool = false
 
 const _CadAnnotationHostScript: Script = preload("CadAnnotationHost.gd")
 const _ResponsiveContainerScript: Script = preload("res://Scripts/UI/Controls/responsive_container.gd")
@@ -1243,8 +1243,9 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_last_eval_result = {
 		"status": "ok",
 		"shape_name": str(eval_result.get("shape_name", "")),
-		# Vertices arrive as a flat float array; 3 entries per vertex.
-		"vertex_count": int(float((mesh_data.get("vertices", []) as Array).size()) / 3.0),
+		# The worker emits one [x, y, z] triple per vertex.  Count records, not
+		# scalar coordinates, so this agrees with minerva_cad_get_mesh_info.
+		"vertex_count": (mesh_data.get("vertices", []) as Array).size(),
 		"edge_count": edges.size(),
 		"reference_count": int(_reference_report.get("mounted", 0)),
 		"references": _reference_report.get("statuses", []),

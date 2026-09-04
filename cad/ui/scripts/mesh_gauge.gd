@@ -41,12 +41,10 @@
 ##    Inside and outside are told apart by the parity of the surfaces a ray
 ##    from the point crosses, and only then may a clear gauge be read as a fit.
 ##
-## 6. ONE BODY PER COLLIDER, ONE LAYER PER REFERENCE. Physics sees every body
-##    in the space, so a measurement asked about one part would otherwise be
-##    shrunk by a second part that happens to pass through the hole; the layer
-##    is the only place that scope can be enforced, and every body of one
-##    reference shares that reference's layer. Each MESH is nevertheless its own
-##    body, because a ray query can only exclude whole bodies: two plates
+## 6. ONE BODY PER COLLIDER. Physics sees every body in the space, so a
+##    measurement asked about one part excludes all bodies owned by the other
+##    references. This avoids Godot's 32-layer ceiling. Each MESH is
+##    nevertheless its own body, because a ray query can only exclude whole bodies: two plates
 ##    resting face to face put two triangles at one point, and finding the
 ##    second one means re-casting with the first one's body excluded.
 ##
@@ -102,13 +100,9 @@ const WALL_PROBE_FRACTION: float = 0.05
 ## Ray-grid fallback pitch, used only when the fitter proposed nothing at all.
 const SEED_PITCH_MM: float = 1.0
 
-## Every collision layer at once: the mask a query uses when the caller named
-## no reference and every mounted body is fair game.
+## Every collision layer at once. Scope is expressed with the query's exclude
+## list instead of consuming one of Godot's 32 collision-layer bits per file.
 const ALL_LAYERS: int = 0xFFFFFFFF
-## Physics gives 32 layers. A document with more references than that shares
-## the last bit between the overflow, which loses the isolation for those
-## references but never mis-measures a reference that has a bit of its own.
-const MAX_REFERENCE_LAYERS: int = 32
 ## How far a crossing ray is nudged past a band of coincident faces before the
 ## next cast. Small enough that it cannot step over a wall, large enough that
 ## the ray makes progress.
@@ -130,10 +124,6 @@ signal job_finished
 var _viewport: SubViewport = null
 ## Every collider body, in the order they were built. One per mesh.
 var _bodies: Array = []
-## Reference name -> the single collision layer bit every body of that
-## reference sits on. A LAYER is what lets a measurement scoped to one
-## reference ignore a second part that happens to pass through the hole.
-var _layers: Dictionary = {}
 ## Body instance id -> the BARE node path that body's mesh came from — the same
 ## string find_holes reports in `nodes`, the selection verbs report as `node`
 ## and a node= filter matches. Which reference it belongs to is a separate
@@ -144,10 +134,13 @@ var _body_references: Dictionary = {}
 ## Bounds of every collider, in world millimetres. This is the reach an
 ## unbounded search is allowed and the length of an inside/outside ray.
 var _bounds: AABB = AABB()
-## The layer mask the job currently running may see. Jobs run one at a time
-## inside one physics step, so a field is enough and every query reads it
-## instead of carrying a mask through eight levels of bisection.
+## The collision mask is intentionally universal; the scoped query exclusion
+## below is how a named reference is isolated without a 32-reference limit.
 var _query_mask: int = ALL_LAYERS
+## Body RIDs hidden from every ray in the job currently running. Jobs are
+## serialised in one physics step, so one field keeps the deeply nested gauge
+## queries honest without threading an exclude list through every helper.
+var _scope_exclude: Array[RID] = []
 ## Identity of the reference set the current colliders were built from.
 var _digest: String = ""
 var _shape_count: int = 0
@@ -186,10 +179,9 @@ func _ready() -> void:
 ## no-op, which is what keeps a keystroke that only moves a pose from
 ## rebuilding 45 trimeshes.
 ##
-## Each MESH gets its own StaticBody3D, and every body of one reference shares
-## that reference's collision layer. A measurement asked about one reference
-## queries with that reference's mask, and a second part crossing the hole
-## cannot shrink the answer.
+## Each MESH gets its own StaticBody3D. A measurement scoped to one reference
+## excludes bodies belonging to every other reference, so an overlapping part
+## cannot shrink the answer and the document is not limited to 32 references.
 func build(bodies: Array, digest: String) -> int:
 	if digest == _digest and _shape_count > 0:
 		return _shape_count
@@ -230,17 +222,13 @@ func build(bodies: Array, digest: String) -> int:
 	return _shape_count
 
 
-## A new body for one mesh, on its reference's layer — allocated the first time
-## that reference is seen and shared by every later body of the same reference.
+## A new body for one mesh. All bodies use the same collision layer; a scoped
+## measurement excludes bodies from every other reference at query time.
 func _new_body(reference: String, node_name: String) -> StaticBody3D:
-	if not _layers.has(reference):
-		# Bit per reference, saturating on the last one.
-		var index: int = mini(_layers.size(), MAX_REFERENCE_LAYERS - 1)
-		_layers[reference] = 1 << index
 	var collider := StaticBody3D.new()
 	collider.name = "Collider_%d" % _bodies.size()
 	# The body collides with nothing itself — it is only ever a query target.
-	collider.collision_layer = int(_layers[reference])
+	collider.collision_layer = 1
 	collider.collision_mask = 0
 	_viewport.add_child(collider)
 	_bodies.append(collider)
@@ -249,14 +237,11 @@ func _new_body(reference: String, node_name: String) -> StaticBody3D:
 	return collider
 
 
-## The query mask that isolates one reference's colliders. A name that is empty
-## or not mounted gets every layer: the caller that cares whether the name is
-## real refuses it before it asks a question, and a mask that matched nothing
-## would answer "it fits" about an empty space.
+## Kept as a compatibility shim for direct callers. Named-reference isolation
+## uses reference= in submit(), not a collision mask, so documents can contain
+## more than 32 independently measurable references.
 func mask_for(reference: String) -> int:
-	if reference.is_empty() or not _layers.has(reference):
-		return ALL_LAYERS
-	return int(_layers[reference])
+	return ALL_LAYERS
 
 
 func clear() -> void:
@@ -266,7 +251,6 @@ func clear() -> void:
 			collider.get_parent().remove_child(collider)
 			collider.queue_free()
 	_bodies.clear()
-	_layers.clear()
 	_body_nodes.clear()
 	_body_references.clear()
 	_bounds = AABB()
@@ -358,10 +342,8 @@ func space_state() -> PhysicsDirectSpaceState3D:
 ## here, so a headless caller with its own physics frame can use the whole
 ## surface without the queue.
 func run_now(state: PhysicsDirectSpaceState3D, kind: String, args: Dictionary) -> Dictionary:
-	# `mask` scopes the whole job to one reference's colliders. It is a field
-	# rather than an argument because every query below it — eight levels of
-	# bisection deep — would otherwise have to carry it.
-	_query_mask = int(args.get("mask", ALL_LAYERS))
+	_query_mask = ALL_LAYERS
+	_scope_exclude = _excluded_bodies(str(args.get("reference", "")))
 	match kind:
 		"raycast":
 			return _job_raycast(state, args)
@@ -965,8 +947,29 @@ func _ray(
 	params.collision_mask = _query_mask
 	params.hit_from_inside = true
 	params.hit_back_faces = true
-	params.exclude = exclude
+	var ignored: Array[RID] = _scope_exclude.duplicate()
+	for rid in exclude:
+		if rid.is_valid() and not (rid in ignored):
+			ignored.append(rid)
+	params.exclude = ignored
 	return state.intersect_ray(params)
+
+
+## A scoped measurement must never be affected by a different reference that
+## overlaps it. Excluding bodies scales beyond the 32 collision-layer limit and
+## preserves the existing per-body re-cast behaviour for coincident faces.
+func _excluded_bodies(reference: String) -> Array[RID]:
+	var excluded: Array[RID] = []
+	if reference.is_empty():
+		return excluded
+	for entry in _bodies:
+		var body := entry as StaticBody3D
+		if body == null or not is_instance_valid(body):
+			continue
+		var body_reference := str(_body_references.get(body.get_instance_id(), ""))
+		if body_reference != reference:
+			excluded.append(body.get_rid())
+	return excluded
 
 
 ## The node a query hit came from. One body holds one mesh, so the body IS the

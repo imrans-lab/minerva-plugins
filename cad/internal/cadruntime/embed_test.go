@@ -8,13 +8,9 @@ import (
 	"testing"
 )
 
-// These tests only compile once a real bundle exists on disk: cad tracks NO
-// placeholder bundle files (bundle/.gitignore keeps *.tar.zst and *.sha256 out
-// of git), so go:embed fails outright in a fresh clone and this package builds
-// only after scripts/build-python-runtime-bundle.sh has run. That is why the
-// package-leg CI step runs them — there, the bytes under test are the bytes
-// that ship, and a mispaired or truncated bundle fails the build instead of a
-// user's first launch.
+// Cad tracks empty bundle placeholders so go:embed can compile in a fresh
+// clone.  The package-leg CI step replaces them with the real target bundle;
+// there, these tests prove that the bytes which ship are complete and paired.
 //
 // Everything here is about the pair (EmbeddedBundle, EmbeddedSHA256) that
 // main.go hands to sharedruntime.PythonPath. The extraction path in
