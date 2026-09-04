@@ -41,6 +41,11 @@ const _ReferenceMeshesScript: Script = preload("scripts/reference_meshes.gd")
 ## Name, path and line text for the GUI "Import mesh…" action. Text authoring
 ## only — the import writes DSL, it never holds geometry of its own.
 const _MeshImportScript: Script = preload("scripts/mesh_import.gd")
+## Measurement: propose candidates by fitting primitives to a reference mesh,
+## then verify and measure them against physics colliders. Both are pure
+## modules; the panel only holds them and hands them the mounted references.
+const _MeshFeaturesScript: Script = preload("scripts/mesh_features.gd")
+const _MeshGaugeScript: Script = preload("scripts/mesh_gauge.gd")
 
 ## Every MeshRoot an evaluation has to reach — the four wide-layout panes and
 ## the narrow layout's single pane. One list, because the mesh push, the
@@ -144,6 +149,12 @@ var _last_mesh_data: Dictionary = {}
 var _reference_library: RefCounted = null
 ## Outcome of the last mount: {world_aabb, warnings, errors, mounted}.
 var _reference_report: Dictionary = {}
+## Segmentation and primitive fitting over the loaded references (RefCounted),
+## and the physics gauge that verifies what it proposes (a child Node).
+var _mesh_features: RefCounted = null
+var _mesh_gauge: Node = null
+## Identity of the reference set the gauge's colliders were last built from.
+var _reference_digest: String = ""
 
 ## Scene nodes behind the GUI import action: the file picker and the button in
 ## each layout. Both buttons run the same handler.
@@ -247,6 +258,12 @@ func _ready() -> void:
 	# without DSL backing it; the empty state is the honest state.
 
 	_reference_library = _ReferenceMeshesScript.new()
+	_mesh_features = _MeshFeaturesScript.new()
+	# The gauge is a Node: it owns a physics step, because Minerva runs physics
+	# on its own thread and a space is only reachable from inside one.
+	_mesh_gauge = _MeshGaugeScript.new()
+	_mesh_gauge.name = "MeshGauge"
+	add_child(_mesh_gauge)
 
 	# ── Annotation substrate ───────────────────────────────────────────────
 	_annotation_registry = AnnotationRegistry.new()
@@ -347,8 +364,12 @@ func get_annotation_host() -> RefCounted:
 ## PluginToolRegistry dispatcher resolves args.editor_name to this live
 ## panel and calls this method directly — no subprocess involved. All tool
 ## bodies live in panel_tools.gd (mirrors pcb/ui/PCBPanel.gd's forward).
+## Measurement verbs ask the physics server questions and physics runs on its
+## own thread, so the answer arrives a step later: the dispatcher awaits this
+## method, and this method awaits the tool body.
 func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
-	return _PanelToolsScript.handle(self, tool_name, args)
+	var result: Variant = await _PanelToolsScript.handle(self, tool_name, args)
+	return result if result is Dictionary else {}
 
 
 ## Public introspection surface backing minerva_cad_view_state (panel_tools.gd).
@@ -401,6 +422,169 @@ func _camera_for_active_viewport() -> Camera3D:
 ## Vector3 -> [x, y, z] (JSON-safe; MCP results are JSON-encoded downstream).
 func _vec3_to_array(v: Vector3) -> Array:
 	return [v.x, v.y, v.z]
+
+
+# ── Measurement surface (backs the minerva_cad_* measurement verbs) ─────────
+#
+# The panel's part in measuring a foreign mesh is only ever bookkeeping: it
+# knows which references are mounted, where they are posed and which modules
+# hold the geometry. The fitting lives in mesh_features.gd and every physical
+# question is answered by mesh_gauge.gd from inside a physics step.
+
+
+## The references the last evaluation mounted, with their poses, their cached
+## converted parts and their per-node bounds. Empty before the first
+## evaluation, or when the document names no mesh().
+func get_reference_state() -> Array:
+	if _reference_library == null:
+		return []
+	return _reference_library.mounted_references()
+
+
+func get_mesh_features() -> RefCounted:
+	return _mesh_features
+
+
+func get_mesh_gauge() -> Node:
+	return _mesh_gauge
+
+
+## Build the gauge's colliders for the currently mounted references, if the set
+## has changed since they were last built. Returns the collider count.
+##
+## Every part is handed over in WORLD millimetres — the pose composed onto the
+## already-converted part transform — so every number the gauge returns is a
+## world coordinate and nothing downstream has to know about the CAD frame
+## conversion at all.
+func ensure_gauge_built() -> int:
+	if _mesh_gauge == null:
+		return 0
+	var bodies: Array = []
+	for entry in get_reference_state():
+		var record: Dictionary = entry
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		var reference_name := str(record.get("name", ""))
+		for part_entry in record.get("parts", []):
+			var part: Dictionary = part_entry
+			bodies.append({
+				"mesh": part.get("mesh", null),
+				"transform": pose * (part.get("transform", Transform3D.IDENTITY) as Transform3D),
+				"node": "%s/%s" % [reference_name, str(part.get("node", ""))],
+			})
+	return int(_mesh_gauge.call("build", bodies, _reference_digest))
+
+
+func get_reference_digest() -> String:
+	return _reference_digest
+
+
+## Draw the measurement overlay in every pane and report the scale of each one.
+## The overlay is scene geometry, so the host's own snapshot verb picks it up
+## with no changes: the LLM turns the grid on, then takes the picture it was
+## going to take anyway, and now the picture has a ruler in it.
+func set_measurement_overlay(mode: String, grid_mm: float) -> Dictionary:
+	var bounds := AABB()
+	var have_bounds := false
+	for path in _MESH_ROOT_PATHS:
+		var mesh_root := get_node_or_null(path)
+		if mesh_root == null or not mesh_root.has_method("set_measurement_overlay"):
+			continue
+		if not have_bounds:
+			bounds = _overlay_bounds(mesh_root)
+			have_bounds = true
+	var drawn := {}
+	for path in _MESH_ROOT_PATHS:
+		var mesh_root := get_node_or_null(path)
+		if mesh_root != null and mesh_root.has_method("set_measurement_overlay"):
+			drawn = mesh_root.call("set_measurement_overlay", mode, grid_mm, bounds)
+	return drawn
+
+
+## Bounds to spread the overlay over: the references plus whatever the solid
+## occupies, falling back to the reference bounds alone.
+func _overlay_bounds(mesh_root: Object) -> AABB:
+	var bounds := AABB()
+	if mesh_root.has_method("get_reference_aabb"):
+		bounds = mesh_root.call("get_reference_aabb")
+	var world_aabb: AABB = _reference_report.get("world_aabb", AABB())
+	if world_aabb.size.length() > 0.0:
+		bounds = world_aabb if bounds.size.length() <= 0.0 else bounds.merge(world_aabb)
+	return bounds
+
+
+## Millimetres-to-pixels for one pane, so a snapshot can be read as a drawing.
+## Orthographic panes have one constant scale; the iso pane is a perspective
+## projection and has none, which is reported as a null rather than as a lie.
+func get_view_metrics(view: String) -> Dictionary:
+	var camera := _camera_for_view(view)
+	if camera == null:
+		return {"error": "no camera for view '%s'" % view}
+	var viewport := camera.get_viewport()
+	var size: Vector2i = viewport.size if viewport != null else Vector2i.ZERO
+	var metrics := {
+		"view": view,
+		"width_px": size.x,
+		"height_px": size.y,
+		"projection": "orthographic" if camera.projection == Camera3D.PROJECTION_ORTHOGONAL \
+			else "perspective",
+		"px_per_mm": null,
+		"origin_px": null,
+	}
+	if camera.projection == Camera3D.PROJECTION_ORTHOGONAL and size.y > 0 and camera.size > 0.0:
+		# One CAD world unit is one millimetre, so the camera's own ortho
+		# height in world units is the height of the pane in millimetres.
+		metrics["px_per_mm"] = float(size.y) / camera.size
+	if size.y > 0:
+		var origin := camera.unproject_position(Vector3.ZERO)
+		metrics["origin_px"] = [origin.x, origin.y]
+	return metrics
+
+
+## The world-space ray under a pixel of one pane, for turning a click or a
+## snapshot coordinate into a question about the geometry. Pixels are in the
+## pane's own viewport, top-left origin — the same coordinates a snapshot of
+## that pane has, before any max_edge downscale the host applies.
+func get_pick_ray(view: String, pixel: Vector2) -> Dictionary:
+	var camera := _camera_for_view(view)
+	if camera == null:
+		return {"error": "no camera for view '%s'" % view}
+	var viewport := camera.get_viewport()
+	var size: Vector2i = viewport.size if viewport != null else Vector2i.ZERO
+	if size.x <= 0 or size.y <= 0:
+		return {"error": "pane '%s' has no rendered size" % view}
+	if pixel.x < 0.0 or pixel.y < 0.0 or pixel.x >= float(size.x) or pixel.y >= float(size.y):
+		return {"error": "pixel %s is outside the %dx%d pane" % [str(pixel), size.x, size.y]}
+	var origin := camera.project_ray_origin(pixel)
+	var direction := camera.project_ray_normal(pixel)
+	# Far enough to cross any part a CAD document holds, and bounded so the
+	# ray is a segment the physics server can answer about.
+	var reach := maxf(camera.far, 10000.0)
+	return {
+		"from": origin,
+		"to": origin + direction * reach,
+		"width_px": size.x,
+		"height_px": size.y,
+	}
+
+
+## Camera for a named pane. "active" means whatever the user is looking at,
+## which in narrow layout is the only pane that renders at all.
+func _camera_for_view(view: String) -> Camera3D:
+	if view.is_empty() or view == "active":
+		return _camera_for_active_viewport()
+	if _narrow_layout != null and _narrow_layout.visible:
+		return _single_view_camera
+	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
+	match view:
+		"top":
+			return get_node_or_null(grid + "/TopView/SubViewport/OrbitCamera") as Camera3D
+		"front":
+			return get_node_or_null(grid + "/FrontView/SubViewport/OrbitCamera") as Camera3D
+		"right":
+			return get_node_or_null(grid + "/RightView/SubViewport/OrbitCamera") as Camera3D
+		"iso":
+			return get_node_or_null(grid + "/IsoView/SubViewport/OrbitCamera") as Camera3D
+	return null
 
 
 # ── Plugin platform lifecycle hooks (override MinervaPluginPanel virtuals) ──
@@ -1284,6 +1468,20 @@ func _set_pane_mesh_visible(mesh_root_path: String, visible_flag: bool) -> void:
 		_reference_library.set_shaded_visible(mesh_root as Node3D, visible_flag)
 
 
+## Identity of the mounted reference set: which files, at which content stamp,
+## in which pose. Colliders and segmentation are keyed on it.
+func _compute_reference_digest() -> String:
+	var parts := PackedStringArray()
+	for entry in get_reference_state():
+		var record: Dictionary = entry
+		parts.append("%s@%s@%s" % [
+			str(record.get("resolved_path", "")),
+			str(record.get("stamp", "")),
+			str(record.get("pose", Transform3D.IDENTITY)),
+		])
+	return "|".join(parts)
+
+
 ## Mount the evaluation's reference meshes under every MeshRoot and hand each
 ## MeshDisplay the world bounds so auto-framing covers them.
 func _mount_references(references: Array) -> void:
@@ -1296,6 +1494,11 @@ func _mount_references(references: Array) -> void:
 		if mesh_root != null:
 			mesh_roots.append(mesh_root)
 	_reference_report = _reference_library.mount_all(references, _document_path, mesh_roots)
+	# The colliders are rebuilt lazily, on the next measurement: a pose edit
+	# arrives on every keystroke and building 45 trimeshes costs a quarter of
+	# a second. The digest below is what decides whether that rebuild is real
+	# work or a no-op.
+	_reference_digest = _compute_reference_digest()
 	var world_aabb: AABB = _reference_report.get("world_aabb", AABB())
 	for mesh_root in mesh_roots:
 		if mesh_root.has_method("set_reference_aabb"):

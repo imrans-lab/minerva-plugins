@@ -1,0 +1,511 @@
+extends SceneTree
+## Measuring a foreign mesh: propose by fitting, verify by gauging.
+##
+## WHY THIS SUITE LOOKS THE WAY IT DOES
+##
+## The fixture is a plate built here with runtime CSG and baked to a mesh — no
+## mesh binary in the repository, and every expected number is one the test
+## wrote rather than one recomputed with the code under test.
+##
+## The plate is deliberately NOT lying in the CAD floor plane: its normal is
+## +Y, the axis Godot's CSG cylinders default to, while the CAD world is Z-up.
+## A detector with any preferred axis fails the whole suite on the first hole,
+## not just on the tilted one.
+##
+## It carries five holes and a boss, each of which breaks a different shortcut:
+##
+##   H1, H2   plain through holes, 64-gon walls. The circumscribed circle
+##            through their vertices is 3.2 mm and the pin that actually goes
+##            in is 3.2*cos(pi/64) = 3.1985. An implementation that reports one
+##            number for "the diameter" is wrong about one of them.
+##   H3       1.9 mm from the outline. An unbounded centring search slides the
+##            gauge out through the edge of the plate — free space outside the
+##            part reads exactly like free space inside a hole — and reports a
+##            centre in mid-air.
+##   H4       drilled 30 degrees off the plate normal. An axis-aligned detector
+##            misses it; a detector that finds it but reports the plate normal
+##            as its axis fails the gauge test on the fitted axis.
+##   H5       a blind pocket, 2 mm deep in a 4 mm plate. Its wall is the same
+##            cylinder as a through hole's: NOTHING in the fit distinguishes
+##            them, and only the ray test does.
+##   B1       a convex boss, so "find cylinders" cannot mean "find holes".
+##
+## The whole fixture is then posed by a non-identity transform before it is
+## gauged, so every reported position has to survive the round trip from the
+## reference's own frame to the posed world and back.
+##
+## Run:
+##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
+
+const MeshFeatures := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_features.gd")
+const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
+
+## Plate: 60 x 40 in X and Z, 4 thick in Y. Its faces are at y = -2 and y = +2.
+const PLATE := Vector3(60.0, 4.0, 40.0)
+const PLATE_NORMAL := Vector3.UP
+const FACETS := 64
+
+## Every hole: local centre (the midpoint of its wall), axis, the diameter of
+## the circle its 64 vertices lie on, whether it goes through, and how deep it
+## is. These are the numbers the fixture was built from, written out rather
+## than derived, so a wrong answer cannot agree with them by construction.
+const HOLES := [
+	{
+		"name": "H1 through",
+		"center": Vector3(-20.0, 0.0, -10.0),
+		"axis": Vector3(0.0, 1.0, 0.0),
+		"dia": 3.2,
+		"through": true,
+		"depth": 4.0,
+	},
+	{
+		"name": "H2 through",
+		"center": Vector3(20.0, 0.0, 10.0),
+		"axis": Vector3(0.0, 1.0, 0.0),
+		"dia": 3.2,
+		"through": true,
+		"depth": 4.0,
+	},
+	{
+		"name": "H3 near the outline",
+		"center": Vector3(26.5, 0.0, 0.0),
+		"axis": Vector3(0.0, 1.0, 0.0),
+		"dia": 3.2,
+		"through": true,
+		"depth": 4.0,
+	},
+	{
+		"name": "H4 tilted 30 degrees",
+		"center": Vector3(0.0, 0.0, 10.0),
+		"axis": Vector3(0.5, 0.8660254, 0.0),
+		"dia": 4.0,
+		"through": true,
+		"depth": 4.618,
+	},
+	{
+		"name": "H5 blind pocket",
+		"center": Vector3(-20.0, 1.0, 12.0),
+		"axis": Vector3(0.0, 1.0, 0.0),
+		"dia": 5.0,
+		"through": false,
+		"depth": 2.0,
+	},
+]
+
+## The boss: a 6 mm cylinder standing 5 mm proud of the top face.
+const BOSS_CENTER := Vector3(10.0, 4.5, -12.0)
+const BOSS_DIA := 6.0
+
+## Pose applied to the whole fixture before it is gauged: rotate 90 degrees
+## about Z, then translate. Row-major, as the worker reports it.
+const POSE_BASIS_ROWS := [
+	[0.0, -1.0, 0.0],
+	[1.0, 0.0, 0.0],
+	[0.0, 0.0, 1.0],
+]
+const POSE_ORIGIN := Vector3(100.0, 200.0, 300.0)
+
+const CENTRE_TOLERANCE_MM := 0.01
+const GAUGE_TOLERANCE_MM := 0.03
+
+var _pass: int = 0
+var _fail: int = 0
+var _pose: Transform3D = Transform3D.IDENTITY
+
+
+func _init() -> void:
+	print("=== CAD Mesh Measurement Test (propose -> verify) ===\n")
+	await process_frame
+	await _run()
+	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
+	if _fail > 0:
+		printerr("FAILURES: %d" % _fail)
+	quit(1 if _fail > 0 else 0)
+
+
+func _run() -> void:
+	_pose = Transform3D(
+		Basis(
+			Vector3(POSE_BASIS_ROWS[0][0], POSE_BASIS_ROWS[1][0], POSE_BASIS_ROWS[2][0]),
+			Vector3(POSE_BASIS_ROWS[0][1], POSE_BASIS_ROWS[1][1], POSE_BASIS_ROWS[2][1]),
+			Vector3(POSE_BASIS_ROWS[0][2], POSE_BASIS_ROWS[1][2], POSE_BASIS_ROWS[2][2])
+		),
+		POSE_ORIGIN
+	)
+
+	var baked: ArrayMesh = await _bake_fixture()
+	check("fixture: the CSG plate baked to a mesh",
+			baked != null and baked.get_surface_count() > 0,
+			"bake_static_mesh returned nothing")
+	if baked == null or baked.get_surface_count() == 0:
+		return
+
+	var local_parts: Array = [
+		{"mesh": baked, "transform": Transform3D.IDENTITY, "node": "plate"},
+	]
+	var candidates := _check_proposal(local_parts)
+	await _check_gauge(baked, candidates)
+
+
+# ---------------------------------------------------------------------------
+# PROPOSE — segmentation and fitting, no physics
+# ---------------------------------------------------------------------------
+
+## Returns the concave cylinder candidates, matched to the fixture's holes in
+## the fixture's own order, so the gauge half can reuse the pairing.
+func _check_proposal(local_parts: Array) -> Array:
+	var features := MeshFeatures.new()
+	var analysis: Dictionary = features.features_for("fixture|v1", local_parts)
+	var all: Array = analysis.get("candidates", [])
+
+	check("segmentation: the plate produced triangles",
+			int(analysis.get("triangles", 0)) > 100,
+			"triangles = %d" % int(analysis.get("triangles", 0)))
+
+	# Asking twice must not segment twice: the cost is paid per file, not per
+	# question, and the counter increments only where the work happens.
+	features.features_for("fixture|v1", local_parts)
+	check("segmentation: a second request is served from the cache",
+			int(features.get_analysis_count()) == 1,
+			"analysis count = %d" % int(features.get_analysis_count()))
+
+	var concave: Array = MeshFeatures.concave_cylinders(all, 1.0, 7.0, 0.6)
+	check("fit: exactly the five holes are proposed as concave cylinders",
+			concave.size() == HOLES.size(),
+			"proposed %d concave cylinders, expected %d" % [concave.size(), HOLES.size()])
+
+	var convex: Array = []
+	var planes := 0
+	for entry in all:
+		var candidate: Dictionary = entry
+		if str(candidate.get("kind", "")) == "plane":
+			planes += 1
+		elif str(candidate.get("form", "")) == "convex":
+			convex.append(candidate)
+	check("fit: the plate's flat faces are proposed as planes",
+			planes >= 2, "found %d planes" % planes)
+	check("fit: the boss is proposed as a convex cylinder of the right size",
+			convex.size() == 1 and absf(float((convex[0] as Dictionary)
+				.get("dia_mm", 0.0)) - BOSS_DIA) < CENTRE_TOLERANCE_MM,
+			"convex candidates: %s" % str(convex))
+
+	var matched: Array = []
+	for hole_entry in HOLES:
+		var hole: Dictionary = hole_entry
+		var expected_center: Vector3 = hole["center"]
+		var best: Dictionary = _nearest(concave, expected_center)
+		matched.append(best)
+		var found_center: Vector3 = best.get("center", Vector3(1e6, 1e6, 1e6))
+		check("fit %s: centre in the reference's own frame" % str(hole["name"]),
+				found_center.distance_to(expected_center) < CENTRE_TOLERANCE_MM,
+				"got %s, expected %s" % [str(found_center), str(expected_center)])
+		check("fit %s: fitted (circumscribed) diameter" % str(hole["name"]),
+				absf(float(best.get("dia_mm", 0.0)) - float(hole["dia"])) < CENTRE_TOLERANCE_MM,
+				"got %f, expected %f" % [float(best.get("dia_mm", 0.0)), float(hole["dia"])])
+		check("fit %s: axis, to within a degree" % str(hole["name"]),
+				absf((best.get("axis", Vector3.ZERO) as Vector3)
+					.normalized().dot((hole["axis"] as Vector3).normalized())) > 0.99985,
+				"got %s, expected %s" % [str(best.get("axis", Vector3.ZERO)), str(hole["axis"])])
+
+	var h1: Dictionary = matched[0]
+	check("fit: the wall's facet count is reported, not smoothed away",
+			int(h1.get("facets", 0)) == FACETS,
+			"facets = %d, expected %d" % [int(h1.get("facets", 0)), FACETS])
+	var inscribed_expected := 3.2 * cos(PI / float(FACETS))
+	check("fit: the inscribed diameter is smaller than the fitted one and is reported",
+			float(h1.get("inscribed_dia_mm", 0.0)) < float(h1.get("dia_mm", 0.0))
+				and absf(float(h1.get("inscribed_dia_mm", 0.0)) - inscribed_expected) < 0.002,
+			"inscribed = %f, expected %f" % [
+				float(h1.get("inscribed_dia_mm", 0.0)), inscribed_expected])
+	check("fit: the residual is small enough to justify calling the wall a cylinder",
+			float(h1.get("residual_mm", 1.0)) < 0.01,
+			"residual = %f" % float(h1.get("residual_mm", 1.0)))
+
+	var tilted: Dictionary = matched[3]
+	var tilt := rad_to_deg(acos(clampf(absf(
+		(tilted.get("axis", Vector3.UP) as Vector3).normalized().dot(PLATE_NORMAL)), 0.0, 1.0)))
+	check("fit: the tilted hole is NOT axis-aligned — an axis-aligned detector misses it",
+			absf(tilt - 30.0) < 1.0,
+			"tilt from the plate normal = %f degrees" % tilt)
+
+	var blind: Dictionary = matched[4]
+	check("fit: the fit alone says nothing about whether a hole goes through",
+			not blind.has("through"),
+			"the fitter volunteered a through flag: %s" % str(blind))
+
+	return matched
+
+
+# ---------------------------------------------------------------------------
+# VERIFY — the physics gauge
+# ---------------------------------------------------------------------------
+
+func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
+	var gauge := MeshGauge.new()
+	gauge.name = "MeshGauge"
+	root.add_child(gauge)
+	await process_frame
+
+	var bodies: Array = [{"mesh": baked, "transform": _pose, "node": "plate"}]
+	var built: int = gauge.build(bodies, "fixture|v1")
+	check("gauge: the posed reference became one collider",
+			built == 1, "built %d colliders" % built)
+	var rebuilt: int = gauge.build(bodies, "fixture|v1")
+	check("gauge: the same reference set is not rebuilt",
+			rebuilt == 1 and str(gauge.get_digest()) == "fixture|v1",
+			"rebuild returned %d with digest '%s'" % [rebuilt, str(gauge.get_digest())])
+
+	# Pose the candidates the way the panel does before handing them over: the
+	# gauge works entirely in the posed world.
+	var posed: Array = []
+	for entry in matched:
+		var candidate: Dictionary = (entry as Dictionary).duplicate(true)
+		candidate["center"] = _pose * (candidate.get("center", Vector3.ZERO) as Vector3)
+		candidate["axis"] = (_pose.basis
+			* (candidate.get("axis", Vector3.UP) as Vector3)).normalized()
+		posed.append(candidate)
+
+	var measured: Dictionary = await gauge.submit("measure_holes", {"candidates": posed})
+	var holes: Array = measured.get("holes", [])
+	check("gauge: every proposed hole came back measured",
+			holes.size() == HOLES.size(),
+			"measured %d of %d" % [holes.size(), HOLES.size()])
+	if holes.size() != HOLES.size():
+		return
+
+	var through_count := 0
+	var inverse := _pose.affine_inverse()
+	for i in range(HOLES.size()):
+		var hole: Dictionary = HOLES[i]
+		var report: Dictionary = holes[i]
+		var world_center: Vector3 = report.get("center", Vector3.ZERO)
+		var expected_world: Vector3 = _pose * (hole["center"] as Vector3)
+		check("gauge %s: refined centre in the posed world" % str(hole["name"]),
+				world_center.distance_to(expected_world) < CENTRE_TOLERANCE_MM,
+				"got %s, expected %s" % [str(world_center), str(expected_world)])
+		check("gauge %s: the same point un-posed is the local centre" % str(hole["name"]),
+				(inverse * world_center).distance_to(hole["center"] as Vector3)
+					< CENTRE_TOLERANCE_MM,
+				"un-posed to %s" % str(inverse * world_center))
+		var expected_gauge := float(hole["dia"]) * cos(PI / float(FACETS))
+		check("gauge %s: the pin that fits is the inscribed diameter" % str(hole["name"]),
+				absf(float(report.get("gauge_dia_mm", 0.0)) - expected_gauge)
+					< GAUGE_TOLERANCE_MM,
+				"gauged %f, expected %f" % [
+					float(report.get("gauge_dia_mm", 0.0)), expected_gauge])
+		if bool(report.get("through", false)):
+			through_count += 1
+
+	check("gauge: four holes go through and the blind pocket does not",
+			through_count == 4 and not bool((holes[4] as Dictionary).get("through", true)),
+			"through count = %d" % through_count)
+	check("gauge: the blind pocket's depth is measured, not assumed",
+			absf(float((holes[4] as Dictionary).get("depth_mm", 0.0)) - 2.0) < 0.1,
+			"depth = %f" % float((holes[4] as Dictionary).get("depth_mm", 0.0)))
+
+	# The hole 1.9 mm from the outline: an unbounded search escapes through the
+	# edge of the plate and lands outside it entirely.
+	var near_edge: Vector3 = inverse * ((holes[2] as Dictionary).get("center", Vector3.ZERO))
+	check("gauge: the hole near the outline stayed inside the plate",
+			absf(near_edge.x) < PLATE.x * 0.5 and absf(near_edge.z) < PLATE.z * 0.5,
+			"centre escaped to %s" % str(near_edge))
+
+	# A gauge one size too large fouls the wall and says where.
+	var h1_world: Vector3 = _pose * (HOLES[0]["center"] as Vector3)
+	var h1_axis: Vector3 = (_pose.basis * (HOLES[0]["axis"] as Vector3)).normalized()
+	var oversize: Dictionary = await gauge.submit("gauge", {
+		"shape": "cylinder",
+		"size": Vector3(3.2 * cos(PI / float(FACETS)) + 0.3, 2.0, 0.0),
+		"at": h1_world,
+		"axis": h1_axis,
+	})
+	check("gauge: a pin one size too large does not fit",
+			not bool(oversize.get("fits", true)), "oversize gauge reported a fit")
+	check("gauge: it reports where it touched, on the plate",
+			(oversize.get("contacts", []) as Array).size() > 0,
+			"no contacts reported for the oversize gauge")
+
+	# The tilted hole: right size, right axis fits; right size, plate normal
+	# does not. This is the assertion an axis-aligned implementation fails.
+	var tilted_world: Vector3 = _pose * (HOLES[3]["center"] as Vector3)
+	var tilted_axis: Vector3 = (_pose.basis * (HOLES[3]["axis"] as Vector3)).normalized()
+	var tilted_dia := 4.0 * cos(PI / float(FACETS)) - 0.05
+	var on_axis: Dictionary = await gauge.submit("gauge", {
+		"shape": "cylinder",
+		"size": Vector3(tilted_dia, 2.0, 0.0),
+		"at": tilted_world,
+		"axis": tilted_axis,
+	})
+	check("gauge: the tilted hole takes its pin on the fitted axis",
+			bool(on_axis.get("fits", false)), "the pin did not fit on the fitted axis")
+	var off_axis: Dictionary = await gauge.submit("gauge", {
+		"shape": "cylinder",
+		"size": Vector3(tilted_dia, 2.0, 0.0),
+		"at": tilted_world,
+		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
+	})
+	check("gauge: the same pin does NOT fit along the plate normal",
+			not bool(off_axis.get("fits", true)),
+			"the pin fitted along the wrong axis, so the axis is not being used")
+
+	# The boss, verified the other way round: solid inside, free outside.
+	var boss_candidate := {
+		"kind": "cylinder",
+		"form": "convex",
+		"center": _pose * BOSS_CENTER,
+		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
+		"radius_mm": BOSS_DIA * 0.5,
+		"dia_mm": BOSS_DIA,
+	}
+	var bosses: Dictionary = await gauge.submit(
+		"measure_convex", {"candidates": [boss_candidate]})
+	var boss_reports: Array = bosses.get("cylinders", [])
+	check("gauge: the boss is solid inside its radius and clear outside it",
+			boss_reports.size() == 1
+				and bool((boss_reports[0] as Dictionary).get("verified", false)),
+			"boss verification: %s" % str(bosses))
+
+	# A ray at a known place hits the top face at a known height.
+	var probe_local := Vector3(5.0, 0.0, 5.0)
+	var probe_from: Vector3 = _pose * (probe_local + PLATE_NORMAL * 20.0)
+	var probe_to: Vector3 = _pose * (probe_local - PLATE_NORMAL * 20.0)
+	var probe: Dictionary = await gauge.submit(
+		"raycast", {"from": probe_from, "to": probe_to})
+	var probe_local_hit: Vector3 = inverse * (probe.get("position", Vector3.ZERO) as Vector3)
+	check("probe: a ray onto solid plate hits the top face at y = +2",
+			bool(probe.get("hit", false)) and absf(probe_local_hit.y - 2.0) < 0.05,
+			"hit %s -> local %s" % [str(probe.get("hit", false)), str(probe_local_hit)])
+	check("probe: the hit is attributed to the node it came from",
+			str(probe.get("node", "")) == "plate",
+			"attributed to '%s'" % str(probe.get("node", "")))
+
+	# The fallback path, exercised on its own: a ray grid finds holes with no
+	# fit at all — and finds FEWER of them, which is exactly why it is the
+	# fallback and not the proposal. Of the five holes it can seed at most
+	# three, and the reasons are worth pinning:
+	#   H5 is blind, so its cells are not misses at all;
+	#   H3 is 1.9 mm from the outline, so the neighbour test 4 mm away looks
+	#      off the edge of the plate and refuses to call the cell enclosed;
+	#   H4 is tilted, so its clear vertical channel is only 1.7 mm wide and
+	#      whether a 1 mm grid samples it at all is a matter of alignment.
+	# H1 and H2 are always seeded. A run that seeds MORE than three has started
+	# calling the outside world a hole.
+	var seeded: Dictionary = await gauge.submit("seed_grid", {
+		"bounds": _world_bounds(),
+		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
+		"pitch_mm": 1.0,
+	})
+	var seeds: Array = seeded.get("seeds", [])
+	check("fallback: the ray grid seeds the plain through holes and nothing spurious",
+			seeds.size() >= 2 and seeds.size() <= 3,
+			"seeded %d clusters" % seeds.size())
+	var all_near := seeds.size() > 0
+	for entry in seeds:
+		var seed: Dictionary = entry
+		var seed_local: Vector3 = inverse * (seed.get("center", Vector3.ZERO) as Vector3)
+		var nearest := 1.0e6
+		for i in range(4):
+			var expected: Vector3 = HOLES[i]["center"]
+			nearest = minf(nearest, Vector2(seed_local.x - expected.x,
+				seed_local.z - expected.z).length())
+		if nearest > 1.0:
+			all_near = false
+	check("fallback: every seed lands on a hole, not on the outline",
+			all_near, "a seed was more than 1 mm from every through-hole centre")
+
+	gauge.queue_free()
+
+
+# ---------------------------------------------------------------------------
+# Fixture
+# ---------------------------------------------------------------------------
+
+## Build the plate with runtime CSG and bake it to a mesh. CSG needs to be in
+## the tree and processed once before it has any geometry to bake.
+func _bake_fixture() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Fixture"
+
+	var plate := CSGBox3D.new()
+	plate.size = PLATE
+	combiner.add_child(plate)
+
+	for entry in HOLES:
+		var hole: Dictionary = entry
+		var cutter := CSGCylinder3D.new()
+		cutter.operation = CSGShape3D.OPERATION_SUBTRACTION
+		cutter.radius = float(hole["dia"]) * 0.5
+		cutter.sides = FACETS
+		cutter.smooth_faces = false
+		if bool(hole["through"]):
+			cutter.height = 20.0
+			cutter.position = Vector3(
+				float((hole["center"] as Vector3).x),
+				0.0,
+				float((hole["center"] as Vector3).z))
+			var axis: Vector3 = hole["axis"]
+			if axis.dot(PLATE_NORMAL) < 0.9999:
+				# The tilted hole: rotate the cutter's own +Y onto the axis.
+				cutter.rotation_degrees = Vector3(0.0, 0.0, 30.0)
+		else:
+			# The blind pocket: 4 tall, sitting on the top face, so it removes
+			# the upper 2 mm of the plate and leaves a floor at y = 0.
+			cutter.height = 4.0
+			cutter.position = Vector3(
+				float((hole["center"] as Vector3).x),
+				PLATE.y * 0.5,
+				float((hole["center"] as Vector3).z))
+		combiner.add_child(cutter)
+
+	var boss := CSGCylinder3D.new()
+	boss.operation = CSGShape3D.OPERATION_UNION
+	boss.radius = BOSS_DIA * 0.5
+	boss.height = 5.0
+	boss.sides = FACETS
+	boss.smooth_faces = false
+	boss.position = BOSS_CENTER
+	combiner.add_child(boss)
+
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+func _world_bounds() -> AABB:
+	var half := PLATE * 0.5
+	var box := AABB(_pose * Vector3(-half.x, -half.y, -half.z), Vector3.ZERO)
+	for i in range(8):
+		var corner := Vector3(
+			half.x if (i & 1) != 0 else -half.x,
+			half.y if (i & 2) != 0 else -half.y,
+			half.z if (i & 4) != 0 else -half.z
+		)
+		box = box.expand(_pose * corner)
+	return box
+
+
+func _nearest(candidates: Array, target: Vector3) -> Dictionary:
+	var best: Dictionary = {}
+	var best_distance := 1.0e9
+	for entry in candidates:
+		var candidate: Dictionary = entry
+		var distance: float = (candidate.get("center", Vector3.ZERO) as Vector3) \
+			.distance_to(target)
+		if distance < best_distance:
+			best_distance = distance
+			best = candidate
+	return best
+
+
+func check(desc: String, ok: bool, detail: String = "") -> void:
+	if ok:
+		_pass += 1
+		print("  PASS: %s" % desc)
+	else:
+		_fail += 1
+		if detail != "":
+			printerr("  FAIL: %s — %s" % [desc, detail])
+		else:
+			printerr("  FAIL: %s" % desc)

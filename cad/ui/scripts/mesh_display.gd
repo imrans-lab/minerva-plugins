@@ -23,6 +23,12 @@ const EDGE_LABEL_VERTICAL_OFFSET := 10.0
 const EDGE_LABEL_DEPTH_STAGGER := 10.0
 const EDGE_LABEL_PIXEL_SIZE := 0.0026
 const EDGE_LABEL_FONT_SIZE := 24
+## Measurement overlay (grid + axes) drawn under this node on request.
+const OVERLAY_NODE_NAME := "MeasurementOverlay"
+const OVERLAY_GRID_COLOR := Color(0.42, 0.47, 0.55, 0.55)
+## Beyond this many grid lines across the view the spacing is doubled until it
+## fits; a grid that dense reads as a solid fill in a snapshot.
+const OVERLAY_MAX_LINES := 60
 
 var _mesh_instance: MeshInstance3D
 var _edge_instance: MeshInstance3D
@@ -127,6 +133,80 @@ func set_reference_aabb(aabb: AABB) -> void:
 
 func get_reference_aabb() -> AABB:
 	return _reference_aabb
+
+
+## Draw (or clear) the measurement overlay: a millimetre grid on the CAD floor
+## and/or the three world axes through the origin. The overlay is scene
+## geometry, not a post-process, so it is in every snapshot the host takes of
+## this pane without the snapshot verb having to know about it.
+##
+## `mode` is "none", "grid", "axes" or "grid+axes"; `bounds` is the world
+## extent to cover. Returns what was drawn, so the caller can report the grid
+## spacing it actually got rather than the one it asked for.
+func set_measurement_overlay(mode: String, grid_mm: float, bounds: AABB) -> Dictionary:
+	var root := get_node_or_null(OVERLAY_NODE_NAME) as Node3D
+	if root != null:
+		root.free()
+	if mode == "none" or mode.is_empty():
+		return {"mode": "none", "grid_mm": 0.0, "lines": 0}
+
+	root = Node3D.new()
+	root.name = OVERLAY_NODE_NAME
+	add_child(root)
+
+	var extent := maxf(bounds.size.x, bounds.size.y)
+	if extent <= 0.0:
+		extent = 100.0
+	var centre := bounds.get_center()
+	var spacing := grid_mm if grid_mm > 0.0 else 10.0
+	# Coarsen rather than draw a solid block of lines: an overlay nobody can
+	# read through is worse than no overlay.
+	while extent / spacing > float(OVERLAY_MAX_LINES):
+		spacing *= 2.0
+
+	var lines := 0
+	if mode.contains("grid"):
+		var half: float = ceil(extent * 0.6 / spacing) * spacing
+		var origin_x: float = floor(centre.x / spacing) * spacing
+		var origin_y: float = floor(centre.y / spacing) * spacing
+		var segments := PackedVector3Array()
+		var offset: float = -half
+		while offset <= half:
+			segments.append(Vector3(origin_x + offset, origin_y - half, 0.0))
+			segments.append(Vector3(origin_x + offset, origin_y + half, 0.0))
+			segments.append(Vector3(origin_x - half, origin_y + offset, 0.0))
+			segments.append(Vector3(origin_x + half, origin_y + offset, 0.0))
+			lines += 2
+			offset += spacing
+		var grid_mesh: ArrayMesh = _ReferenceMeshes.line_mesh_from_segments(
+			segments, OVERLAY_GRID_COLOR)
+		if grid_mesh != null:
+			var grid_instance := MeshInstance3D.new()
+			grid_instance.name = "Grid"
+			grid_instance.mesh = grid_mesh
+			root.add_child(grid_instance)
+
+	if mode.contains("axes"):
+		var reach := maxf(extent * 0.6, spacing * 3.0)
+		var axes := [
+			[Vector3.RIGHT, Color(0.85, 0.24, 0.24, 1.0), "AxisX"],
+			[Vector3.UP, Color(0.24, 0.72, 0.32, 1.0), "AxisY"],
+			[Vector3.BACK, Color(0.28, 0.46, 0.9, 1.0), "AxisZ"],
+		]
+		for entry in axes:
+			var direction: Vector3 = entry[0]
+			var segment := PackedVector3Array([Vector3.ZERO, direction * reach])
+			var axis_mesh: ArrayMesh = _ReferenceMeshes.line_mesh_from_segments(
+				segment, entry[1] as Color)
+			if axis_mesh == null:
+				continue
+			var axis_instance := MeshInstance3D.new()
+			axis_instance.name = str(entry[2])
+			axis_instance.mesh = axis_mesh
+			root.add_child(axis_instance)
+			lines += 1
+
+	return {"mode": mode, "grid_mm": spacing, "lines": lines}
 
 
 func set_wireframe_only(value: bool) -> void:

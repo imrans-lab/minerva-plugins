@@ -61,8 +61,12 @@ class LoadedFile extends RefCounted:
 	## alone has one-second resolution, which misses a rewrite inside the same
 	## second; the size catches the overwhelming majority of those.
 	var stamp: String = ""
-	## [{mesh: Mesh, transform: Transform3D}] — transforms are file-frame to
-	## CAD-local (millimetres, Z-up), parent transforms already composed.
+	## [{mesh: Mesh, transform: Transform3D, node: String, aabb: AABB}] —
+	## transforms are file-frame to CAD-local (millimetres, Z-up), parent
+	## transforms already composed; `aabb` is that part's bounds in the same
+	## frame and `node` the name it had in the file, so a measurement can be
+	## reported against the node the author named rather than against "the
+	## file".
 	var parts: Array = []
 	## Feature-edge line meshes, already in CAD-local millimetres, so they
 	## mount with an identity transform. Parallel to nothing — one per part
@@ -76,6 +80,27 @@ class LoadedFile extends RefCounted:
 	func is_ok() -> bool:
 		return error.is_empty() and not parts.is_empty()
 
+	## Bounds per named node, in CAD-local millimetres. A node split across
+	## several glTF primitives (one per material) is merged back into one
+	## entry, because the split is an artefact of the exporter, not a fact
+	## about the part.
+	func node_bounds() -> Array:
+		var order: Array = []
+		var merged := {}
+		for entry in parts:
+			var part: Dictionary = entry
+			var node_name := str(part.get("node", ""))
+			var box: AABB = part.get("aabb", AABB())
+			if merged.has(node_name):
+				merged[node_name] = (merged[node_name] as AABB).merge(box)
+			else:
+				merged[node_name] = box
+				order.append(node_name)
+		var out: Array = []
+		for node_name in order:
+			out.append({"name": node_name, "aabb": merged[node_name]})
+		return out
+
 
 var _cache: Dictionary = {}
 ## How many times a file has actually been read off disk. The pose changing
@@ -83,6 +108,11 @@ var _cache: Dictionary = {}
 var _load_count: int = 0
 ## Stamps computed during the current mount_all call, keyed by absolute path.
 var _stamp_memo: Dictionary = {}
+## What the last mount actually put on screen: one record per reference that
+## loaded, in the order the evaluation named them. This is what the
+## measurement surface reads — it is the only place that knows which file each
+## posed body came from and where it ended up.
+var _mounted: Array = []
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +125,14 @@ func get_load_count() -> int:
 
 func clear_cache() -> void:
 	_cache.clear()
+
+
+## Records for the references the last mount put on screen: {name, path,
+## resolved_path, stamp, pose, local_aabb, world_aabb, parts, node_bounds}.
+## `parts` is the cached, converted geometry — shared, not copied — so a caller
+## that wants colliders or a segmentation reads it straight from here.
+func mounted_references() -> Array:
+	return _mounted
 
 
 ## Resolve the path a `mesh()` call wrote against the document that wrote it.
@@ -187,13 +225,21 @@ func mount(references: Array, document_path: String, parent: Node3D) -> Dictiona
 ## parent's, identical for all of them.
 func mount_all(references: Array, document_path: String, parents: Array) -> Dictionary:
 	_stamp_memo.clear()
+	_mounted = []
 	var report := {}
+	var first := true
 	for parent in parents:
-		report = _mount_under(references, document_path, parent as Node3D)
+		report = _mount_under(references, document_path, parent as Node3D, first)
+		first = false
 	return report
 
 
-func _mount_under(references: Array, document_path: String, parent: Node3D) -> Dictionary:
+func _mount_under(
+	references: Array,
+	document_path: String,
+	parent: Node3D,
+	record: bool
+) -> Dictionary:
 	var warnings := PackedStringArray()
 	var errors := PackedStringArray()
 	var mounted := 0
@@ -234,6 +280,18 @@ func _mount_under(references: Array, document_path: String, parent: Node3D) -> D
 			mounted += 1
 
 			var world := transform_aabb(pose, loaded.local_aabb)
+			if record:
+				_mounted.append({
+					"name": str(reference.get("name", "")),
+					"path": str(reference.get("path", "")),
+					"resolved_path": loaded.path,
+					"stamp": loaded.stamp,
+					"pose": pose,
+					"local_aabb": loaded.local_aabb,
+					"world_aabb": world,
+					"parts": loaded.parts,
+					"node_bounds": loaded.node_bounds(),
+				})
 			bounds = world if not have_bounds else bounds.merge(world)
 			have_bounds = true
 
@@ -502,9 +560,14 @@ func _read_parts_from_file(
 	for raw in raw_parts:
 		var mesh: Mesh = raw["mesh"]
 		var to_cad: Transform3D = frame * (raw["transform"] as Transform3D)
-		loaded.parts.append({"mesh": mesh, "transform": to_cad})
-
 		var box := transform_aabb(to_cad, mesh.get_aabb())
+		loaded.parts.append({
+			"mesh": mesh,
+			"transform": to_cad,
+			"node": str(raw.get("node", "")),
+			"aabb": box,
+		})
+
 		loaded.local_aabb = box if not have_bounds else loaded.local_aabb.merge(box)
 		have_bounds = true
 
@@ -525,7 +588,7 @@ func _collect_meshes(node: Node, parent_transform: Transform3D, out: Array) -> v
 
 	var mesh := _mesh_of(node)
 	if mesh != null and mesh.get_surface_count() > 0:
-		out.append({"mesh": mesh, "transform": here})
+		out.append({"mesh": mesh, "transform": here, "node": str(node.name)})
 
 	for child in node.get_children():
 		_collect_meshes(child, here, out)

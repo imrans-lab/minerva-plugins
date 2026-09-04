@@ -40,3 +40,13 @@ test_reference_meshes.gd assertions=33
 # document gets an absolute path plus an on-screen warning that survives
 # Save-As and still resolves.
 test_mesh_import.gd assertions=33
+
+# Measuring a foreign mesh: a CSG plate with two plain through holes, one hole
+# 1.9 mm from the outline, one drilled 30 degrees off the plate normal, a blind
+# pocket and a convex boss, baked in-test and posed by a non-identity
+# transform. Pins the propose half (segmentation, plane and cylinder fits,
+# facet count, the inscribed-vs-circumscribed distinction, the axis of the
+# tilted hole) and the verify half (colliders, refined centres in both frames,
+# the pin that actually fits, through vs blind, a too-large gauge reporting
+# contacts, the boss, a pixel-less probe, and the ray-grid fallback's limits).
+test_mesh_measurement.gd assertions=56
