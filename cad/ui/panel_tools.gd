@@ -13,6 +13,10 @@ extends RefCounted
 ##   minerva_cad_gauge           put a pin or a block somewhere and ask whether
 ##                               it fits, and if not, where it touched.
 ##   minerva_cad_probe           what is under this pixel of this pane.
+##   minerva_cad_check_interference
+##                               where the evaluated solid runs INTO a
+##                               reference — the same report every evaluation
+##                               already carries, on demand and scopeable.
 ##   minerva_cad_get_selected_reference
 ##                               which reference node the user last clicked,
 ##                               and where on it — the sibling of
@@ -83,6 +87,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _gauge)
 		"minerva_cad_probe":
 			return await _fresh(panel, args, _probe)
+		"minerva_cad_check_interference":
+			return await _fresh(panel, args, _check_interference)
 		"minerva_cad_get_selected_reference":
 			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
@@ -445,6 +451,26 @@ static func _gauge(panel, args: Dictionary) -> Dictionary:
 		payload["note"] = "A gauge buried in solid material crosses no "\
 			+ "triangle and so touches nothing; it does not fit, and has no contacts."
 	return _ok(payload)
+
+
+## minerva_cad_check_interference — where the solid and the references overlap.
+##
+## The panel runs this check on every evaluation anyway; the verb exists so an
+## agent can ask about ONE reference or ONE node, and so it can ask again after
+## an edit without having to find the last eval result.
+static func _check_interference(panel, args: Dictionary) -> Dictionary:
+	if panel == null or not panel.has_method("check_interference"):
+		return _err("interference checking is not available on this panel")
+	var asked := str(args.get("reference", ""))
+	if not asked.is_empty() and not _has_reference(panel, asked):
+		return _err("no reference named '%s' is mounted" % asked)
+	var report: Dictionary = await panel.check_interference({
+		"reference": asked,
+		"node": str(args.get("node", "")),
+	})
+	if report.has("error"):
+		return _err(str(report["error"]))
+	return _ok(report)
 
 
 static func _probe(panel, args: Dictionary) -> Dictionary:

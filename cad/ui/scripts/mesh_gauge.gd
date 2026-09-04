@@ -374,7 +374,22 @@ func run_now(state: PhysicsDirectSpaceState3D, kind: String, args: Dictionary) -
 			return _job_measure_convex(state, args)
 		"seed_grid":
 			return _job_seed_grid(state, args)
+		"interference":
+			return _job_module(state, args)
 	return {"error": "unknown gauge job '%s'" % kind}
+
+
+## A job whose QUESTION belongs to another module and whose PHYSICS STEP
+## belongs here. The module travels in the job and answers it with this
+## space's state in hand — geometry_checks.gd queries the references here and
+## the evaluated solid in a world of its own, and both are only legal to touch
+## inside the step this queue owns.
+func _job_module(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
+	var module: Object = args.get("module", null)
+	if module == null or not is_instance_valid(module) \
+			or not module.has_method("run_check"):
+		return {"error": "the job carried no module able to run it"}
+	return module.call("run_check", self, state, args)
 
 
 # ---------------------------------------------------------------------------

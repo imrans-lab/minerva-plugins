@@ -56,6 +56,9 @@ const _EdgeSidebarScript: Script = preload("scripts/edge_sidebar.gd")
 ## Reference mounting and every measurement the panel is asked to bookkeep:
 ## the collider digest, the overlay, the per-pane scale and the pick ray.
 const _PanelMeasurementScript: Script = preload("scripts/panel_measurement.gd")
+## Where the evaluated solid runs into a mounted reference. Asked on every
+## evaluation, not only when a verb asks (scripts/geometry_checks.gd).
+const _GeometryChecksScript: Script = preload("scripts/geometry_checks.gd")
 
 ## Verbose tracing of the edge pick path. Owned by the sidebar module, which
 ## prints the other half of it.
@@ -170,6 +173,10 @@ var _mesh_gauge: Node = null
 ## Identity of the reference set the gauge's colliders were last built from.
 var _reference_digest: String = ""
 
+## Interference between the evaluated solid and the references
+## (scripts/geometry_checks.gd). It owns the solid's own collider world.
+var _geometry_checks: RefCounted = null
+
 ## Reference-node selection (scripts/reference_selection.gd). Owns the click
 ## picking, the sidebar list and the selection the MCP verbs read back.
 var _reference_selection: RefCounted = null
@@ -278,6 +285,10 @@ func _ready() -> void:
 	_mesh_gauge = _MeshGaugeScript.new()
 	_mesh_gauge.name = "MeshGauge"
 	add_child(_mesh_gauge)
+	# The solid's colliders hang off the panel in a world of their own, so a
+	# mesh rebuilt on every keystroke never reaches the measurement space.
+	_geometry_checks = _GeometryChecksScript.new()
+	_geometry_checks.attach(self)
 
 	# ── Annotation substrate ───────────────────────────────────────────────
 	_annotation_registry = AnnotationRegistry.new()
@@ -485,6 +496,19 @@ func ensure_gauge_built() -> int:
 
 func get_reference_digest() -> String:
 	return _reference_digest
+
+
+## Where the evaluated solid meets a mounted reference. Every evaluation asks
+## this without being told to; `args` may carry reference= and node= to narrow
+## it, which is what minerva_cad_check_interference passes through.
+func check_interference(args: Dictionary = {}) -> Dictionary:
+	if _geometry_checks == null:
+		return {"error": "interference checking is not available on this panel"}
+	return await _geometry_checks.check(self, args)
+
+
+func get_geometry_checks() -> RefCounted:
+	return _geometry_checks
 
 
 ## The user's last click on a reference node, or {} — read by
@@ -1048,10 +1072,25 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	# is not an evaluation failure: the solid is on screen and correct. It
 	# still has to be said out loud, or the board the user expected is simply
 	# missing with no explanation. The lines name the reference and the reason.
-	var reference_lines: PackedStringArray = _reference_report.get(
-		"status_lines", PackedStringArray())
-	if not reference_lines.is_empty():
-		_show_eval_error("Reference mesh: %s" % "\n".join(reference_lines))
+	var lines := PackedStringArray()
+	for reference_line in _reference_report.get("status_lines", PackedStringArray()):
+		lines.append("Reference mesh: %s" % str(reference_line))
+
+	# Does the solid run into any of them? Asked here rather than left to a
+	# verb, because an agent iterating on an enclosure has no reason to ask
+	# and every reason to know. The check waits on a physics step, so the
+	# document may have moved on: the result is attached only if this
+	# evaluation is still the one being shown.
+	var stamp: float = float(_last_eval_result.get("ts", 0.0))
+	var interference: Dictionary = await check_interference()
+	if is_instance_valid(self) and float(_last_eval_result.get("ts", -1.0)) == stamp:
+		_last_eval_result["interference"] = interference
+		var interference_line: String = _geometry_checks.status_line(interference)
+		if not interference_line.is_empty():
+			lines.append(interference_line)
+
+	if not lines.is_empty():
+		_show_eval_error("\n".join(lines))
 
 
 ## Show the evaluation-error banner with a human-readable message. Called from

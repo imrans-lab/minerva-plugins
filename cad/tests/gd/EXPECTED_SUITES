@@ -127,3 +127,18 @@ test_reference_selection.gd assertions=49
 # render_for_llm returning an image part plus one text part naming every
 # reference with its status and bounds — including a document with none.
 test_cad_note.gd assertions=40
+
+# Interference between the evaluated solid and a reference: a CSG board posed
+# by a non-identity transform, and four solids built in-test and handed over as
+# worker mesh data. Pins the solid's collider being rebuilt on every
+# evaluation and never cached, a boss driven clean through the board reporting
+# the right node with a crossing on the boss circle at a board face to 0.05 mm,
+# both frames agreeing under the pose, the penetration coming back as the
+# board's own thickness, the same boss lifted 0.1 mm reporting a clean zero
+# (with the previous points gone), a 0.2 mm sliver overlap with NO vertex of
+# either body inside the other still being reported, a cube buried in the
+# board being caught by parity alone, the status line naming the first
+# offender, and the reference=/node= scoping (a filter matching nothing
+# reports nothing). 24 assertions = 2 fixture + 5 collider + 8 through +
+# 3 clear + 2 sliver + 2 buried + 2 scope.
+test_interference.gd assertions=24
