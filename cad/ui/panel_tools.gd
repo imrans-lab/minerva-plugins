@@ -45,6 +45,7 @@ extends RefCounted
 
 const _MeshFeatures: Script = preload("scripts/mesh_features.gd")
 const _ReferenceMeshes: Script = preload("scripts/reference_meshes.gd")
+const _GeometryChecks: Script = preload("scripts/geometry_checks.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -89,6 +90,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _fresh(panel, args, _probe)
 		"minerva_cad_check_interference":
 			return await _fresh(panel, args, _check_interference)
+		"minerva_cad_check_clearance":
+			return await _fresh(panel, args, _check_clearance)
 		"minerva_cad_get_selected_reference":
 			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
@@ -465,6 +468,29 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
 	var report: Dictionary = await panel.check_interference({
+		"reference": asked,
+		"node": str(args.get("node", "")),
+	})
+	if report.has("error"):
+		return _err(str(report["error"]))
+	return _ok(report)
+
+
+## minerva_cad_check_clearance — how much air is there, and where is it
+## tightest? The distance is computed in the worker over a swept-sphere BVH,
+## so the number is exact for the two meshes; the reply states the tolerance
+## the solid was tessellated at, which is the error bar against the true
+## B-Rep surface.
+static func _check_clearance(panel, args: Dictionary) -> Dictionary:
+	if panel == null or not panel.has_method("check_clearance"):
+		return _err("clearance checking is not available on this panel")
+	var asked := str(args.get("reference", ""))
+	if not asked.is_empty() and not _has_reference(panel, asked):
+		return _err("no reference named '%s' is mounted" % asked)
+	var report: Dictionary = await panel.check_clearance({
+		"required_mm": float(args.get("required_mm", 0.0)),
+		"tolerance_mm": float(args.get("tolerance_mm",
+			_GeometryChecks.CLEARANCE_TOLERANCE_MM)),
 		"reference": asked,
 		"node": str(args.get("node", "")),
 	})

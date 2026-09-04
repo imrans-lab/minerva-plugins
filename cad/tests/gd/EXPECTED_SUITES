@@ -142,3 +142,22 @@ test_cad_note.gd assertions=40
 # reports nothing). 24 assertions = 2 fixture + 5 collider + 8 through +
 # 3 clear + 2 sliver + 2 buried + 2 scope.
 test_interference.gd assertions=24
+
+# Clearance between the evaluated solid and a reference: two bars crossing at
+# right angles with 0.8 mm of air between them, where every vertex of either
+# bar is more than 60 mm from the other, so the gap is face-to-face and a
+# vertex-sampling check cannot find it. The exact distance runs in the worker
+# (pinned by worker/tests/test_clearance.py); this suite pins everything the
+# PANEL owns, against a stand-in backend that derives its answer from the blob
+# the module actually wrote: the request naming geometry by hash and fitting
+# the host's 64 KiB IPC cap, the upload-on-miss retry, content-addressed blob
+# files that decode to the POSED world geometry, the sweep of blobs nothing
+# references, an unchanged reference being named rather than re-sent, the
+# answer's both-frame points and closest-first order, the mandatory
+# tessellation tolerance and the status line quoting it, pass at 0.5 and a
+# fail at 1.0 naming the node, node= scoping the question before it is asked,
+# a zero-gap pair carrying the interference flag and no points, and four
+# refusals (no required_mm, a node filter matching nothing, a worker error
+# quoted verbatim, and a refused check reporting no pairs).
+# 24 assertions = 2 fixture + 8 upload + 10 answer + 4 refusal.
+test_clearance.gd assertions=24

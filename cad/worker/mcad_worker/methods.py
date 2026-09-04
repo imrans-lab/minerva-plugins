@@ -9,6 +9,10 @@ Round 2 Unit A adds a real `validate` implementation.
 Round 3 Unit A adds real `evaluate` and `list_edges` implementations.
 Round 4 adds `export` (STL binary / 3MF / STEP AP214) atop the existing
 ``mcad.evaluator.export_source`` helper. The remaining stub is `deviation`.
+
+`clearance` lives in its own module (``mcad_worker.clearance``) and is
+imported at call time: it pulls in numpy and python-fcl, and a worker that
+never measures a clearance should not pay for them.
 """
 
 from __future__ import annotations
@@ -483,6 +487,12 @@ def handle_request(req: dict) -> dict | None:
 
     if method == "export":
         result = _export(req.get("params") or {})
+        result["id"] = req_id
+        return result
+
+    if method == "clearance":
+        from .clearance import clearance
+        result = clearance(req.get("params") or {})
         result["id"] = req_id
         return result
 

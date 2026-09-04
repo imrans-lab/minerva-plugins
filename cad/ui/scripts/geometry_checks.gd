@@ -919,3 +919,408 @@ func _vector(raw: Variant) -> Vector3:
 
 func _vec(v: Vector3) -> Array:
 	return [v.x, v.y, v.z]
+
+
+# ---------------------------------------------------------------------------
+# Clearance — how much air is there?
+# ---------------------------------------------------------------------------
+#
+# Interference answers "do these touch"; clearance answers "by how much do
+# they miss", which is the number a wall thickness is edited against. It is a
+# different computation and it does not belong in the ray walk above: the
+# minimum distance between two meshes is a minimum over TRIANGLE PAIRS, and no
+# number of rays finds the gap between two triangle interiors. The worker owns
+# it, over a swept-sphere BVH (python-fcl), and answers exactly.
+#
+# WHAT THIS SIDE OWNS. The panel is the only thing that knows what a reference
+# is: which file, in which units, posed by which matrix. So it hands the worker
+# triangles already in world millimetres and gets back numbers it re-frames
+# into each reference's own coordinates. The worker never opens a mesh file.
+#
+# WHY A FILE AND NOT THE MESSAGE. A panel→plugin IPC payload is capped at
+# 64 KiB by the host broker (PluginScenePanelBroker.MAX_PAYLOAD_BYTES); a
+# 130k-triangle board's arrays are megabytes. The arrays therefore travel as a
+# small binary blob written next to the user's cache, named by the SHA-256 of
+# its own array bytes, and the message carries only hashes. A reference the
+# worker has already seen is named and not re-sent — which is what makes the
+# per-evaluation cost a hash lookup rather than a megabyte.
+
+## Tessellation deviation the measurement asks for, in millimetres. The
+## display mesh is tessellated for looking at; a clearance is quoted with this
+## number as its error bar, so the check asks for its own, tighter one.
+const CLEARANCE_TOLERANCE_MM: float = 0.01
+## The worker tessellates the solid and may build a 130k-triangle tree on the
+## first call. Later calls are milliseconds.
+const CLEARANCE_TIMEOUT_MS: int = 60000
+
+## Mesh blob format, read by worker/mcad_worker/clearance.py. Little-endian:
+## magic, uint32 version, uint32 vertex count, uint32 triangle count, then
+## float32[3V] world millimetres and uint32[3F] indices. Godot's
+## `to_byte_array()` is native order, which is little-endian on every target
+## the plugin ships to.
+const BLOB_MAGIC: String = "MCADMESH"
+const BLOB_VERSION: int = 1
+const BLOB_DIR_NAME: String = "minerva-cad-clearance"
+
+## What this panel has extracted, keyed by reference/node. Each entry holds the
+## digest, the pose it was extracted under and the mesh it came from, so an
+## unchanged reference is not walked again on the next evaluation.
+var _blobs: Dictionary = {}
+## Directory the blobs are written to. Overridable so a suite can keep its
+## files out of the user's cache.
+var _blob_dir: String = ""
+
+
+## Where the mesh blobs are written. The user's cache directory by default:
+## the files are derived data, addressed by content hash, and a lost cache
+## costs one re-upload.
+func set_blob_dir(path: String) -> void:
+	_blob_dir = path
+
+
+func get_blob_dir() -> String:
+	if _blob_dir.is_empty():
+		var base := OS.get_cache_dir()
+		if base.is_empty():
+			base = OS.get_user_data_dir()
+		_blob_dir = base.path_join(BLOB_DIR_NAME)
+	return _blob_dir
+
+
+## minerva_cad_check_clearance — the minimum distance between the solid and
+## every reference node in scope, against `required_mm`.
+##
+## `args`: required_mm (mandatory), reference=, node=, tolerance_mm=.
+##
+## The reply is the worker's, re-framed:
+##
+##   {checked, units, pass, required_mm, tessellation_tolerance_mm, bound,
+##    pairs: [{reference, node, min_mm, pass, solid_point_mm,
+##             reference_point_mm: {world, local}, interference?, note?}],
+##    solid_triangles, cache, engine}
+##
+## sorted by min_mm, closest first. `solid_point_mm` is a bare world triple
+## because the evaluated solid is never posed — its own frame IS the world.
+## `checked: false` with a `reason` is not the same answer as "everything
+## clears"; a reader that cannot tell them apart trusts a check that never ran.
+func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
+	if panel == null or not is_instance_valid(panel):
+		return _no_clearance("the CAD panel is gone")
+	var required_mm := float(args.get("required_mm", 0.0))
+	if required_mm <= 0.0:
+		return _no_clearance("a clearance check needs required_mm: the "
+			+ "distance you want between the solid and everything else")
+	var tolerance_mm := float(args.get("tolerance_mm", CLEARANCE_TOLERANCE_MM))
+	if tolerance_mm <= 0.0:
+		return _no_clearance("tolerance_mm must be greater than zero")
+
+	var document: Dictionary = {}
+	if panel.has_method("get_document_state"):
+		document = panel.get_document_state()
+	var source := str(document.get("source", ""))
+	if source.strip_edges().is_empty():
+		return _no_clearance("there is no DSL source to evaluate a solid from")
+
+	if panel.has_method("get_reference_state"):
+		set_records(panel.get_reference_state())
+	var reference_scope := str(args.get("reference", ""))
+	var node_scope := str(args.get("node", ""))
+	var parts := _scoped_parts(reference_scope, node_scope)
+	if parts.is_empty():
+		return _no_clearance("no reference mesh is in scope; there is "
+			+ "nothing to measure a clearance against")
+
+	var targets: Array = []
+	for entry in parts:
+		var part: Dictionary = entry
+		var blob := _blob_for(part)
+		if blob.is_empty():
+			continue
+		targets.append({
+			"reference": part["reference"],
+			"node": part["node"],
+			"key": blob["digest"],
+		})
+	if targets.is_empty():
+		return _no_clearance("the references in scope carry no triangles")
+
+	var payload := {
+		"source": source,
+		"required_mm": required_mm,
+		"tolerance_mm": tolerance_mm,
+		"targets": targets,
+	}
+	var reply := await _ask_worker(panel, payload)
+	if reply.has("error"):
+		return _no_clearance(str(reply["error"]))
+
+	# A key the worker has not seen (first call, or its cache turned over) is
+	# answered with the list rather than an error: write those blobs and ask
+	# once more. Only once — a second miss on freshly written files is a fault,
+	# not a race, and retrying forever would hide it.
+	var missing: Array = reply.get("missing_keys", []) as Array
+	if not missing.is_empty():
+		if not _upload(missing):
+			return _no_clearance("could not write the reference geometry to "
+				+ get_blob_dir() + " for the worker to read")
+		for target in targets:
+			var t: Dictionary = target
+			if str(t["key"]) in missing:
+				t["path"] = get_blob_dir().path_join(str(t["key"]) + ".mcadmesh")
+		payload["targets"] = targets
+		reply = await _ask_worker(panel, payload)
+		if reply.has("error"):
+			return _no_clearance(str(reply["error"]))
+		if not (reply.get("missing_keys", []) as Array).is_empty():
+			return _no_clearance("the worker could not read the reference "
+				+ "geometry this panel wrote to " + get_blob_dir())
+
+	if not bool(reply.get("checked", false)):
+		return _no_clearance(str(reply.get("reason", "the clearance check "
+			+ "did not run and gave no reason")))
+	return _clearance_report(reply)
+
+
+## Re-frame the worker's reply: every reported point gains the coordinates of
+## the reference's OWN frame beside the world ones, because those are the
+## numbers that get written back into the DSL.
+func _clearance_report(reply: Dictionary) -> Dictionary:
+	var pairs: Array = []
+	for entry in (reply.get("pairs", []) as Array):
+		var raw: Dictionary = entry
+		var pair := {
+			"reference": str(raw.get("reference", "")),
+			"node": str(raw.get("node", "")),
+			"min_mm": float(raw.get("min_mm", 0.0)),
+			"pass": bool(raw.get("pass", false)),
+		}
+		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
+			var pose := _pose_for(pair["reference"])
+			var reference_point := _vector(raw["reference_point_mm"])
+			pair["solid_point_mm"] = _vec(_vector(raw["solid_point_mm"]))
+			pair["reference_point_mm"] = {
+				"world": _vec(reference_point),
+				"local": _vec(pose.affine_inverse() * reference_point),
+			}
+		if bool(raw.get("interference", false)):
+			pair["interference"] = true
+		if not str(raw.get("note", "")).is_empty():
+			pair["note"] = str(raw["note"])
+		pairs.append(pair)
+	return {
+		"checked": true,
+		"units": "mm",
+		"pass": bool(reply.get("pass", false)),
+		"required_mm": float(reply.get("required_mm", 0.0)),
+		"tessellation_tolerance_mm": float(reply.get("tessellation_tolerance_mm", 0.0)),
+		"bound": str(reply.get("bound", "")),
+		"solid_triangles": int(reply.get("solid_triangles", 0)),
+		"engine": str(reply.get("engine", "")),
+		"cache": reply.get("cache", {}),
+		"pairs": pairs,
+	}
+
+
+## One line for the status banner, naming the tightest gap. A clearance is
+## quoted with its error bar or not at all.
+func clearance_status_line(report: Dictionary) -> String:
+	if not bool(report.get("checked", false)):
+		return ""
+	var pairs: Array = report.get("pairs", []) as Array
+	if pairs.is_empty():
+		return ""
+	var first: Dictionary = pairs[0]
+	var verdict := "clears" if bool(report.get("pass", false)) else "TOO CLOSE"
+	return "Clearance %s: %s/%s is %.3f mm from the solid (need %.3f, " \
+		% [verdict, str(first.get("reference", "")), str(first.get("node", "")),
+			float(first.get("min_mm", 0.0)), float(report.get("required_mm", 0.0))] \
+		+ "tessellated to %.3f mm)." % float(report.get("tessellation_tolerance_mm", 0.0))
+
+
+func _no_clearance(reason: String) -> Dictionary:
+	return {
+		"checked": false,
+		"units": "mm",
+		"pass": false,
+		"reason": reason,
+		"pairs": [],
+	}
+
+
+## Send one clearance request through the panel's IPC helper and unwrap the
+## host's envelope down to the worker's own result. Returns {error: ...} for
+## every layer that can fail, so the caller has one shape to read.
+func _ask_worker(panel: Object, payload: Dictionary) -> Dictionary:
+	if not panel.has_method("call_backend"):
+		return {"error": "this panel cannot reach the CAD worker"}
+	var envelope: Dictionary = await panel.call_backend(
+		"cad.clearance", payload, CLEARANCE_TIMEOUT_MS)
+	if not bool(envelope.get("success", false)):
+		return {"error": "the clearance request did not reach the worker: %s %s"
+			% [str(envelope.get("error_code", "unknown")),
+				str(envelope.get("error_message", ""))]}
+	var worker_payload: Variant = envelope.get("result", {})
+	if not (worker_payload is Dictionary):
+		return {"error": "the worker's clearance reply was malformed"}
+	var body: Dictionary = worker_payload
+	if not bool(body.get("ok", false)):
+		var err: Variant = body.get("error", {})
+		var message: String = str((err as Dictionary).get("message", "")) \
+			if err is Dictionary else str(err)
+		return {"error": message if not message.is_empty() \
+			else "the worker refused the clearance request"}
+	var result: Variant = body.get("result", {})
+	return result if result is Dictionary else {"error": "the worker's "
+		+ "clearance reply carried no result"}
+
+
+# ---------------------------------------------------------------------------
+# Mesh blobs
+# ---------------------------------------------------------------------------
+
+## The reference parts a scoped clearance question covers, as
+## {reference, node, mesh, xform, pose}. Same node= rule as every other verb.
+func _scoped_parts(reference_scope: String, node_scope: String) -> Array:
+	var out: Array = []
+	for record_entry in _records:
+		var record: Dictionary = record_entry
+		var reference_name := str(record.get("name", ""))
+		if not reference_scope.is_empty() and reference_name != reference_scope:
+			continue
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		for part_entry in record.get("parts", []):
+			var part: Dictionary = part_entry
+			var mesh: Mesh = part.get("mesh", null)
+			if mesh == null:
+				continue
+			var node_path := str(part.get("node_path", part.get("node", "")))
+			if not _node_matches(node_path, node_scope):
+				continue
+			out.append({
+				"reference": reference_name,
+				"node": node_path,
+				"mesh": mesh,
+				"xform": pose * (part.get("transform", Transform3D.IDENTITY) as Transform3D),
+			})
+	return out
+
+
+## The blob for one part — {digest, body, vertices, triangles} — extracting it
+## only when the mesh or its pose has changed since the last check. A board is
+## a hundred thousand triangles and re-walking it on every keystroke would cost
+## more than the measurement it feeds.
+func _blob_for(part: Dictionary) -> Dictionary:
+	var mesh: Mesh = part["mesh"]
+	var xform: Transform3D = part["xform"]
+	var slot := "%s\n%s" % [str(part["reference"]), str(part["node"])]
+	var cached: Dictionary = _blobs.get(slot, {}) as Dictionary
+	if not cached.is_empty() \
+			and int(cached.get("mesh_id", 0)) == int(mesh.get_instance_id()) \
+			and (cached.get("xform", Transform3D.IDENTITY) as Transform3D) \
+				.is_equal_approx(xform):
+		return cached
+	var blob := _extract_blob(mesh, xform)
+	if blob.is_empty():
+		_blobs.erase(slot)
+		return {}
+	blob["mesh_id"] = int(mesh.get_instance_id())
+	blob["xform"] = xform
+	_blobs[slot] = blob
+	return blob
+
+
+## Every triangle of `mesh`, transformed into world millimetres, packed into
+## the blob body and hashed. Returns {} for a mesh with no triangles.
+func _extract_blob(mesh: Mesh, xform: Transform3D) -> Dictionary:
+	var points := PackedFloat32Array()
+	var indices := PackedInt32Array()
+	var vertex_count := 0
+	for surface in range(mesh.get_surface_count()):
+		if mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+			continue
+		var arrays: Array = mesh.surface_get_arrays(surface)
+		if arrays.size() <= Mesh.ARRAY_VERTEX or arrays[Mesh.ARRAY_VERTEX] == null:
+			continue
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var base := vertex_count
+		for vertex in vertices:
+			var world: Vector3 = xform * vertex
+			points.append(world.x)
+			points.append(world.y)
+			points.append(world.z)
+		vertex_count += vertices.size()
+		if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] != null:
+			var source: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+			for index in source:
+				indices.append(base + index)
+		else:
+			# An unindexed surface is a triangle soup: the vertices are the
+			# corners, in order.
+			for i in range(vertices.size()):
+				indices.append(base + i)
+	var triangles := int(indices.size() / 3)
+	if triangles <= 0 or vertex_count <= 0:
+		return {}
+	indices.resize(triangles * 3)
+
+	var body := points.to_byte_array()
+	body.append_array(indices.to_byte_array())
+	var hasher := HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(body)
+	return {
+		"digest": hasher.finish().hex_encode(),
+		"body": body,
+		"vertices": vertex_count,
+		"triangles": triangles,
+	}
+
+
+## Write the blobs for `keys` where the worker can read them, and sweep away
+## the ones nothing points at any more. Returns false if any write failed.
+func _upload(keys: Array) -> bool:
+	var directory := get_blob_dir()
+	if DirAccess.make_dir_recursive_absolute(directory) != OK \
+			and not DirAccess.dir_exists_absolute(directory):
+		return false
+	var wanted := {}
+	for entry in _blobs.values():
+		wanted[str((entry as Dictionary).get("digest", ""))] = true
+	for key in keys:
+		var digest := str(key)
+		var blob := _blob_with_digest(digest)
+		if blob.is_empty():
+			return false
+		var path := directory.path_join(digest + ".mcadmesh")
+		var file := FileAccess.open(path, FileAccess.WRITE)
+		if file == null:
+			return false
+		file.store_buffer(BLOB_MAGIC.to_utf8_buffer())
+		file.store_32(BLOB_VERSION)
+		file.store_32(int(blob["vertices"]))
+		file.store_32(int(blob["triangles"]))
+		file.store_buffer(blob["body"] as PackedByteArray)
+		file.close()
+	_sweep(directory, wanted)
+	return true
+
+
+## Delete blobs in `directory` that no live reference hashes to. Content-
+## addressed files never go stale, they only pile up; this keeps the directory
+## the size of the document rather than the size of the session.
+func _sweep(directory: String, wanted: Dictionary) -> void:
+	var names := DirAccess.get_files_at(directory)
+	for name in names:
+		if not name.ends_with(".mcadmesh"):
+			continue
+		if wanted.has(name.get_basename()):
+			continue
+		DirAccess.remove_absolute(directory.path_join(name))
+
+
+func _blob_with_digest(digest: String) -> Dictionary:
+	for entry in _blobs.values():
+		var blob: Dictionary = entry
+		if str(blob.get("digest", "")) == digest:
+			return blob
+	return {}

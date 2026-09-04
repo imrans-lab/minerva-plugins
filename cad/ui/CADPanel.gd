@@ -507,8 +507,38 @@ func check_interference(args: Dictionary = {}) -> Dictionary:
 	return await _geometry_checks.check(self, args)
 
 
+## How much air is there between the evaluated solid and each reference node?
+## `args` carries required_mm (mandatory) plus reference=/node=/tolerance_mm=,
+## which is what minerva_cad_check_clearance passes through. Unlike the
+## interference check this one is asked for, not run on every evaluation: it
+## re-tessellates the solid at a measurement tolerance in the worker.
+func check_clearance(args: Dictionary = {}) -> Dictionary:
+	if _geometry_checks == null:
+		return {"error": "clearance checking is not available on this panel"}
+	return await _geometry_checks.check_clearance(self, args)
+
+
 func get_geometry_checks() -> RefCounted:
 	return _geometry_checks
+
+
+## Send one request to the plugin backend over a declared IPC channel and
+## return the host's reply envelope {success, result|error_code/error_message}.
+## The evaluation path predates this and keeps its own copy, because it also
+## owns cancellation and supersession; everything else asks through here.
+func call_backend(channel: String, args: Dictionary,
+		timeout_ms: int = 30000) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {
+			"success": false,
+			"error_code": "ipc_unavailable",
+			"error_message": "MinervaIPC helper not attached; cannot reach "
+				+ "the CAD plugin backend",
+		}
+	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
+	request.emit(channel, args, reply_id)
+	return await ipc.await_reply(reply_id, timeout_ms)
 
 
 ## The user's last click on a reference node, or {} — read by

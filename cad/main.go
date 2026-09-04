@@ -218,6 +218,7 @@ func initRegistry() {
 	registry.Register(tools.ListEdges, tools.HandleListEdges)
 	registry.Register(tools.Evaluate, tools.HandleEvaluate)
 	registry.Register(tools.Export, tools.HandleExport)
+	registry.Register(tools.Clearance, tools.HandleClearance)
 	// cad.cancel_eval is registered here so it appears in tools/list, but its
 	// handler is intercepted in handleToolsCall before registry dispatch (it
 	// needs access to the server-level inflight map). The registry handler
