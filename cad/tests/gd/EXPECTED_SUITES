@@ -28,9 +28,10 @@ test_orbit_camera_stuck.gd assertions=3
 # converted from metres/Y-up to millimetres/Z-up with its 0.001 root scale
 # composed, posed by the evaluation's 4x4, mounted shaded + outlined, cached
 # against a pose change and re-read against a file change; plus path
-# resolution, the missing-file report, the shared feature-edge extractor and
-# reference-aware auto-framing.
-test_reference_meshes.gd assertions=33
+# resolution, the missing-file report, a units= change being different
+# geometry that the record reports (so a cache can key on it), the shared
+# feature-edge extractor and reference-aware auto-framing.
+test_reference_meshes.gd assertions=37
 
 # The GUI "Import mesh…" action: the button and the scene-declared picker
 # exist in both layouts, a pick appends exactly one refN = mesh("...") line
@@ -48,8 +49,21 @@ test_mesh_import.gd assertions=36
 # facet count, the inscribed-vs-circumscribed distinction, the axis of the
 # tilted hole) and the verify half (colliders, refined centres in both frames,
 # the pin that actually fits, through vs blind, a too-large gauge reporting
-# contacts, the boss, a pixel-less probe, and the ray-grid fallback's limits).
-test_mesh_measurement.gd assertions=56
+# contacts, the boss verifying while an oversize and an in-mid-air boss
+# candidate do not, a pixel-less probe, and the ray-grid fallback's limits).
+test_mesh_measurement.gd assertions=59
+
+# The measurement VERBS through PanelTools.handle, on a two-plate stack with
+# one pair of drills through both plates and a boss on top, posed by a
+# non-identity transform. Pins the envelope an agent depends on rather than
+# the physics: success/units on every reply, one row per drill naming every
+# node it crosses, every position and axis in world AND local millimetres with
+# the fit residual carried through, the boss found as convex, the gauge verb's
+# fits/contacts, a probe hit attributed to its node, per-pane scales from
+# view_overlay, and a named error — never an empty result — for an unmounted
+# reference, an unsupported gauge shape, a pixel-less probe and an unknown
+# overlay mode.
+test_measurement_verbs.gd assertions=23
 
 # Failure and size handling for references: a truncated GLB, a text file
 # wearing a .glb extension, a missing file, an unreadable format and an
@@ -73,7 +87,7 @@ test_reference_failures.gd assertions=30
 # the projected pixel displacement and going stale — not crashing — when the
 # reference leaves the document, and the two selections coexisting: the picker
 # is a plain Node that only ever sees input the edge overlay did not take.
-test_reference_selection.gd assertions=41
+test_reference_selection.gd assertions=40
 
 # Save-to-note and back: the real panel scene is set up, saved as a
 # plugin_data note, freed the way closing a tab frees it, and a second,

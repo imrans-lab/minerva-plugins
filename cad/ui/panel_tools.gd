@@ -1,5 +1,5 @@
 extends RefCounted
-## CAD panel-executed MCP tool surface (DCR 019f6c3d0e3d, round C6).
+## CAD panel-executed MCP tool surface.
 ##
 ## Two families live here:
 ##
@@ -51,6 +51,15 @@ const DEFAULT_MAX_DIA_MM: float = 30.0
 const DEFAULT_MIN_COVERAGE: float = 0.6
 ## Ray-grid fallback pitch, used only when the fitter proposes nothing at all.
 const FALLBACK_PITCH_MM: float = 1.0
+## When two fitted cylinders are the same physical hole seen in two nodes:
+## axes parallel to within this dot product, centres concentric and radii equal
+## to within the tolerances below. The floors matter for small drills, the
+## fractions for large bores.
+const COAXIAL_DOT: float = 0.999
+const CENTRE_TOLERANCE_MM: float = 0.05
+const CENTRE_TOLERANCE_FRACTION: float = 0.1
+const RADIUS_TOLERANCE_MM: float = 0.02
+const RADIUS_TOLERANCE_FRACTION: float = 0.05
 
 
 static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
@@ -184,6 +193,7 @@ static func _find_holes(panel, args: Dictionary) -> Dictionary:
 			# gauge, only the proposal changed.
 			fell_back = true
 			posed = await _seed_candidates(gauge, record, args)
+		posed = _merge_coaxial(posed)
 		if posed.is_empty():
 			continue
 
@@ -246,14 +256,20 @@ static func _find_cylinders(panel, args: Dictionary) -> Dictionary:
 			else:
 				convex.append(_pose_candidate(candidate, pose))
 
+		# A gauge that could not run reports an error, not an empty list; a
+		# swallowed error would answer "no cylinders" for a part full of them.
 		if not concave.is_empty():
 			var holes: Dictionary = await gauge.call(
 				"submit", "measure_holes", {"candidates": concave})
+			if holes.has("error"):
+				return _err(str(holes["error"]))
 			for hole in holes.get("holes", []):
 				found.append(_report_cylinder(hole as Dictionary, record, pose))
 		if not convex.is_empty():
 			var bosses: Dictionary = await gauge.call(
 				"submit", "measure_convex", {"candidates": convex})
+			if bosses.has("error"):
+				return _err(str(bosses["error"]))
 			for boss in bosses.get("cylinders", []):
 				found.append(_report_cylinder(boss as Dictionary, record, pose))
 
@@ -519,12 +535,23 @@ static func _view_overlay(panel, args: Dictionary) -> Dictionary:
 		return _err("overlay must be none, grid, axes or grid+axes")
 	var drawn: Dictionary = panel.set_measurement_overlay(
 		mode, float(args.get("grid_mm", 10.0)))
+	# In narrow layout the four named panes do not exist; reporting the single
+	# pane four times under four names would be four lies. Ask the panel and
+	# say which pane there actually is.
 	var views: Array = []
-	for view in ["top", "front", "right", "iso"]:
-		var metrics: Dictionary = panel.get_view_metrics(view)
-		if not metrics.has("error"):
-			views.append(metrics)
-	return _ok({
+	var refusal := ""
+	if panel.has_method("view_unavailable_reason"):
+		refusal = str(panel.view_unavailable_reason("top"))
+	if refusal.is_empty():
+		for view in ["top", "front", "right", "iso"]:
+			var metrics: Dictionary = panel.get_view_metrics(view)
+			if not metrics.has("error"):
+				views.append(metrics)
+	else:
+		var single: Dictionary = panel.get_view_metrics("active")
+		if not single.has("error"):
+			views.append(single)
+	var payload := {
 		"units": "mm",
 		"overlay": str(drawn.get("mode", mode)),
 		"grid_mm": float(drawn.get("grid_mm", 0.0)),
@@ -532,7 +559,10 @@ static func _view_overlay(panel, args: Dictionary) -> Dictionary:
 		"views": views,
 		"note": "Take the picture with minerva_cad_snapshot; the overlay is "
 			+ "scene geometry and is captured with everything else.",
-	})
+	}
+	if not refusal.is_empty():
+		payload["views_unavailable"] = refusal
+	return _ok(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -587,9 +617,13 @@ static func _analysis(panel, record: Dictionary, args: Dictionary) -> Dictionary
 			if str((entry as Dictionary).get("node", "")) == node_filter:
 				kept.append(entry)
 		parts = kept
-	var key := "%s|%s|%s" % [
+	# The segmentation runs on the CONVERTED parts, so units and up belong in
+	# the key: without them a units= edit reuses candidates in the old frame.
+	var key := "%s|%s|%s|%s|%s" % [
 		str(record.get("resolved_path", "")),
 		str(record.get("stamp", "")),
+		str(record.get("units", "")),
+		str(record.get("up", "")),
 		node_filter,
 	]
 	return features.call(
@@ -643,6 +677,79 @@ static func _seed_candidates(gauge: Node, record: Dictionary, args: Dictionary) 
 	return out
 
 
+## A hole through a stack of nodes is fitted once per node whose wall it
+## crosses — a board GLB has substrate, copper and mask, and a 3.2 mm drill
+## comes back three times. Two candidates are the same hole when they are
+## coaxial, concentric and the same size; merging them before the gauge runs
+## also saves the duplicate measurements. The merged row keeps every node the
+## hole passes through, because "which layers does this drill cross" is a real
+## question and the node names are the only answer to it.
+static func _merge_coaxial(candidates: Array) -> Array:
+	# One pass merges each candidate into the first entry it matches, so with an
+	# unlucky node order a drill can end as two entries that would merge with
+	# each other. Repeat until a pass changes nothing.
+	var merged: Array = _merge_coaxial_pass(candidates)
+	while merged.size() < candidates.size():
+		candidates = merged
+		merged = _merge_coaxial_pass(candidates)
+	return merged
+
+
+static func _merge_coaxial_pass(candidates: Array) -> Array:
+	var merged: Array = []
+	for entry in candidates:
+		var candidate: Dictionary = entry
+		var axis: Vector3 = (candidate.get("axis", Vector3.UP) as Vector3).normalized()
+		var centre: Vector3 = candidate.get("center", Vector3.ZERO)
+		var radius := float(candidate.get("radius_mm", 0.0))
+		var half := float(candidate.get("half_extent_mm", 0.0))
+		var target: Dictionary = {}
+		for existing_entry in merged:
+			var existing: Dictionary = existing_entry
+			var other_axis: Vector3 = (existing.get("axis", Vector3.UP) as Vector3).normalized()
+			if absf(other_axis.dot(axis)) < COAXIAL_DOT:
+				continue
+			if absf(float(existing.get("radius_mm", 0.0)) - radius) \
+					> maxf(RADIUS_TOLERANCE_MM, radius * RADIUS_TOLERANCE_FRACTION):
+				continue
+			var offset: Vector3 = centre - (existing.get("center", Vector3.ZERO) as Vector3)
+			var perpendicular := (offset - other_axis * offset.dot(other_axis)).length()
+			if perpendicular > maxf(CENTRE_TOLERANCE_MM, radius * CENTRE_TOLERANCE_FRACTION):
+				continue
+			# Coaxial and same radius is not enough: two holes in plates that
+			# do not touch are two holes. Their axial runs must overlap or meet.
+			var axial_gap := absf(offset.dot(other_axis)) \
+				- float(existing.get("half_extent_mm", 0.0)) - half
+			if axial_gap > maxf(CENTRE_TOLERANCE_MM, radius * CENTRE_TOLERANCE_FRACTION):
+				continue
+			target = existing
+			break
+		if target.is_empty():
+			var fresh := candidate.duplicate(true)
+			fresh["axis"] = axis
+			fresh["nodes"] = _nodes_of(candidate)
+			merged.append(fresh)
+			continue
+		var nodes: Array = target["nodes"]
+		for node_name in _nodes_of(candidate):
+			if not nodes.has(node_name):
+				nodes.append(node_name)
+		# The merged hole spans the union of the axial runs: a drill through
+		# three plates is as deep as all three, not as deep as the thickest.
+		var target_axis: Vector3 = target["axis"]
+		var target_centre: Vector3 = target.get("center", Vector3.ZERO)
+		var base := target_centre.dot(target_axis)
+		var target_half := float(target.get("half_extent_mm", 0.0))
+		var here := centre.dot(target_axis)
+		var low := minf(base - target_half, here - half)
+		var high := maxf(base + target_half, here + half)
+		var new_half := (high - low) * 0.5
+		target["center"] = target_centre + target_axis * ((low + high) * 0.5 - base)
+		target["half_extent_mm"] = new_half
+		target["extent_mm"] = new_half * 2.0
+	return merged
+
+
 ## One measured cylinder, in both frames, with the numbers that make it
 ## falsifiable: the fitted (circumscribed) diameter the tessellation implies,
 ## the gauge diameter that actually went in, the facet count that separates
@@ -657,6 +764,7 @@ static func _report_cylinder(
 	return {
 		"reference": str(record.get("name", "")),
 		"node": str(measured.get("node", "")),
+		"nodes": measured.get("nodes", [str(measured.get("node", ""))]),
 		"form": str(measured.get("form", "")),
 		"center_mm": _points(centre, pose),
 		"axis": _axes(axis, pose),
@@ -689,6 +797,13 @@ static func _pose_for(panel, reference_name: String) -> Transform3D:
 		if not reference_name.is_empty() and str(record.get("name", "")) == reference_name:
 			return record.get("pose", Transform3D.IDENTITY)
 	return Transform3D.IDENTITY
+
+
+## A raw candidate names one node; a merged entry carries the list.
+static func _nodes_of(candidate: Dictionary) -> Array:
+	if candidate.has("nodes"):
+		return (candidate["nodes"] as Array).duplicate()
+	return [str(candidate.get("node", ""))]
 
 
 static func _has_reference(panel, reference_name: String) -> bool:

@@ -599,6 +599,9 @@ func _overlay_bounds(mesh_root: Object) -> AABB:
 ## Orthographic panes have one constant scale; the iso pane is a perspective
 ## projection and has none, which is reported as a null rather than as a lie.
 func get_view_metrics(view: String) -> Dictionary:
+	var refusal := view_unavailable_reason(view)
+	if not refusal.is_empty():
+		return {"error": refusal, "view": view}
 	var camera := _camera_for_view(view)
 	if camera == null:
 		return {"error": "no camera for view '%s'" % view}
@@ -628,6 +631,9 @@ func get_view_metrics(view: String) -> Dictionary:
 ## pane's own viewport, top-left origin — the same coordinates a snapshot of
 ## that pane has, before any max_edge downscale the host applies.
 func get_pick_ray(view: String, pixel: Vector2) -> Dictionary:
+	var refusal := view_unavailable_reason(view)
+	if not refusal.is_empty():
+		return {"error": refusal}
 	var camera := _camera_for_view(view)
 	if camera == null:
 		return {"error": "no camera for view '%s'" % view}
@@ -650,13 +656,26 @@ func get_pick_ray(view: String, pixel: Vector2) -> Dictionary:
 	}
 
 
+## Why a named pane cannot be addressed, or "" when it can. Narrow layout has
+## a single pane showing whichever preset the dropdown is on, so handing back
+## that camera for "top" would answer a question about one pane with another
+## pane's geometry — the right label over the wrong numbers. Snapshot already
+## refuses here; measurement refuses for the same reason.
+func view_unavailable_reason(view: String) -> String:
+	if view.is_empty() or view == "active" or view == "single":
+		return ""
+	if _narrow_layout != null and _narrow_layout.visible:
+		return ("the panel is in narrow layout and renders one pane only "
+			+ "(currently '%s'); ask for view \"active\", or widen the panel "
+			+ "to address '%s' separately") % [_current_projection_preset(), view]
+	return ""
+
+
 ## Camera for a named pane. "active" means whatever the user is looking at,
 ## which in narrow layout is the only pane that renders at all.
 func _camera_for_view(view: String) -> Camera3D:
-	if view.is_empty() or view == "active":
+	if view.is_empty() or view == "active" or view == "single":
 		return _camera_for_active_viewport()
-	if _narrow_layout != null and _narrow_layout.visible:
-		return _single_view_camera
 	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
 	match view:
 		"top":
@@ -1581,9 +1600,13 @@ func _compute_reference_digest() -> String:
 	var parts := PackedStringArray()
 	for entry in get_reference_state():
 		var record: Dictionary = entry
-		parts.append("%s@%s@%s" % [
+		# units and up are baked into the converted part transforms, so a
+		# digest without them lets a units= edit keep stale colliders.
+		parts.append("%s@%s@%s@%s@%s" % [
 			str(record.get("resolved_path", "")),
 			str(record.get("stamp", "")),
+			str(record.get("units", "")),
+			str(record.get("up", "")),
 			str(record.get("pose", Transform3D.IDENTITY)),
 		])
 	return "|".join(parts)

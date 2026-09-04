@@ -111,7 +111,7 @@ jobs:
           path: cad/runtime-build/cache/pbs
           key: pbs-${{ matrix.target }}-${{ hashFiles('cad/scripts/runtime-bundle.lock') }}
 
-      # ----- Build runtime bundle (per W1a) -----
+      # ----- Build runtime bundle -----
       # Native + cross targets each produce one bundle. macos-universal
       # produces TWO (one per arch) — the lipo'd Go binary embeds both via
       # the per-platform build tags in cad/internal/cadruntime/embed_darwin_*.go.
@@ -252,8 +252,8 @@ jobs:
     # suites. Short version: the suites need a Minerva `src/` host with its
     # NATIVE GDEXTENSIONS BUILT, a plain actions/checkout has no src/bin/ at
     # all, and building three toolchains for another repo on every push to run
-    # a suite CI is not supposed to be running was measured (pcb, commit
-    # 014b6d7) to produce five consecutive red runs that told nobody anything.
+    # a suite CI is not supposed to be running was measured on pcb: five
+    # consecutive red runs that told nobody anything.
     #
     # What this job certifies is SUITE-REGISTRY AND HOST-CONTRACT
     # COMPATIBILITY: the pinned host exists and carries every file
@@ -272,7 +272,7 @@ jobs:
     #
     # It reaches the check through the runner's own --preflight-only flag
     # rather than reimplementing it, so local and CI cannot drift: one
-    # implementation, and since T0 one implementation shared with pcb.
+    # implementation, shared with pcb.
     # No Godot is downloaded — everything checked is filesystem state.
     runs-on: ubuntu-22.04
     env:

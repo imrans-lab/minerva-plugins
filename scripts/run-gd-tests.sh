@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs ONE plugin's GDScript test suite (<plugin>/tests/gd/*.gd) using a
-# Minerva checkout as the Godot host. NOTHING else ran these tests before
-# this script existed — see round A1a.
+# Minerva checkout as the Godot host. It is the only thing that runs these
+# suites: no CI job and no editor action executes them.
 #
 # Usage:
 #   scripts/run-gd-tests.sh --plugin <id> [--preflight-only] <path-to-minerva-checkout>
@@ -36,9 +36,9 @@
 # suite that returns/quits early — an accidental early `return`, an aborted
 # fixture, a `quit(0)` planted above the first assertion — exits 0 without
 # running a single check() and would read as a pass on exit code alone.
-# Measured directly (round 019fa603827b): inserting `quit(0); return` at the
-# top of test_pcb_panel_ui.gd::_init() made the exit code lie — 0 passed,
-# 22 real assertions skipped — while the process itself exited clean.
+# A `quit(0); return` at the top of a suite's _init() makes the exit code
+# lie: zero assertions run, every one of them skipped, and the process still
+# exits clean.
 #
 # To close that hole the runner captures each suite's stdout+stderr and, in
 # addition to checking $?, parses the Results line and enforces a floor: a
@@ -53,9 +53,9 @@
 # to drive a real PCBPanel instead of a stand-in. A stock Minerva checkout has
 # both; this script does not vendor or fake them.
 #
-# SETUP STEP (chore 019fb6632a4e / round B5u1): any suite that exercises a
-# REAL plugin subprocess start (PluginManager.start_plugin -> MCP STDIO
-# transport — e.g. test_pcb_backend_lifecycle.gd, test_pcb_plugin_smoke.gd)
+# SETUP STEP: any suite that exercises a REAL plugin subprocess start
+# (PluginManager.start_plugin -> MCP STDIO transport — e.g.
+# test_pcb_backend_lifecycle.gd, test_pcb_plugin_smoke.gd)
 # needs the Minerva checkout's `terminal` GDExtension BUILT, i.e.
 # <minerva-checkout>/src/bin/libterminal.<platform>.*.so/.dylib/.dll must
 # exist (see CLAUDE.md "Building C++ Extensions" / scripts/build-extensions.sh
@@ -84,10 +84,9 @@
 # by lowering it, which is the same failure as deleting a suite, performed by
 # a different hand.
 #
-# FALSE-GREEN HARDENING (bug 019ff2b1fccb — this runner is the ONLY execution
-# gate for this layer since CI went --preflight-only in 38f1090, so what it
-# certifies has to be true). Three enforcement layers beyond the Results-line
-# floor, all fail-closed:
+# FALSE-GREEN HARDENING. This runner is the ONLY execution gate for this
+# layer — CI stops at --preflight-only — so what it certifies has to be true.
+# Three enforcement layers beyond the Results-line floor, all fail-closed:
 #
 #   1. FATAL DIAGNOSTICS. Every `SCRIPT ERROR:` / `ERROR: Failed to load
 #      script` line in a suite's output fails that suite UNLESS the
@@ -98,14 +97,14 @@
 #      preload chain reaches SingletonObject prints a compile-noise cascade
 #      and then runs fine on the second pass. That noise is the harness's,
 #      not the suite's; anything NOT on the list is treated as the suite's
-#      and fails it — even when the Results line is green, which is exactly
-#      the case the old runner certified as passing.
+#      and fails it — even when the Results line is green, which is the case
+#      an exit-code-only runner certifies as passing.
 #
-#   2. PINNED ASSERTION COUNTS (closes the remaining half of 019fa83e8310).
-#      A manifest entry may carry `assertions=N`; the suite then fails unless
-#      it reports exactly N total (passed+failed). The per-suite floor used
-#      to be `n_pass > 0`, which `check(true); quit(0)` at the top of _init()
-#      satisfies while every real assertion silently skips. Growing a suite
+#   2. PINNED ASSERTION COUNTS. A manifest entry may carry `assertions=N`;
+#      the suite then fails unless it reports exactly N total (passed+failed).
+#      The per-suite floor used to be `n_pass > 0`, which a
+#      `check(true); quit(0)` at the top of _init() satisfies while every
+#      real assertion silently skips. Growing a suite
 #      means re-pinning — a deliberate, reviewed manifest edit, same
 #      philosophy as adding the suite itself.
 #
@@ -196,18 +195,16 @@ if [ -z "${MINERVA_DIR}" ] || [ ! -d "${MINERVA_DIR}/src" ]; then
   exit 2
 fi
 
-# HOST CONTRACT — the paths the suites cannot load without. Checked HERE,
-# in the script, and not only in the CI workflow (Codex review 019ff34dd1cf,
-# blocking finding 2): the workflow asserted these in its relocation step, so CI
-# happened to be covered, but a direct `--preflight-only` invocation could pass
-# a host that cannot load a single suite — while this script's own comments
-# claimed local and CI run "one implementation" that cannot drift. They did
-# drift, in the direction that made the claim false.
+# HOST CONTRACT — the paths the suites cannot load without. Checked HERE, in
+# the script, and not only in the CI workflow. A workflow-side assertion covers
+# CI and nothing else: a direct `--preflight-only` invocation would then pass a
+# host that cannot load a single suite, and the two paths drift apart in the
+# direction that makes the gate useless.
 #
 # `src/project.godot` is the only universal requirement. Anything further is
 # per-plugin data: pcb's 9 relocated suites preload plugin_panel_driver.gd and
-# 7 preload panel_tool_registry_driver.gd (round 019f70a26607), both by res://
-# path against Minerva's res:// root, so pcb lists them in its own
+# 7 preload panel_tool_registry_driver.gd, both by res:// path against
+# Minerva's res:// root, so pcb lists them in its own
 # tests/gd/REQUIRED_HOST_FILES (one host-relative path per line, # comments and
 # blanks ignored). A pinned SHA that drops one of those breaks the harness
 # rather than the code, which is a failure worth naming precisely rather than
@@ -304,10 +301,10 @@ fi
 declare -a manifest_names=()
 declare -A manifest_assertions=()
 declare -A manifest_real_worker=()
-# F6 (Codex 1188): a DUPLICATE row inflates EXPECTED_SUITE_COUNT while the
-# suite runs once — every suite can pass, the summary prints 50/51, and the
-# runner still exits 0. Duplicate attributes would make conflicting pins
-# "last one wins". Both are manifest corruption: refuse by name, exit 2.
+# A DUPLICATE row inflates EXPECTED_SUITE_COUNT while the suite runs once:
+# every suite can pass, the summary prints 50/51, and the runner still exits
+# 0. Duplicate attributes would make conflicting pins "last one wins". Both
+# are manifest corruption: refuse by name, exit 2.
 declare -A manifest_seen=()
 while IFS= read -r line; do
   case "${line}" in
@@ -413,8 +410,7 @@ EXPECTED_SUITE_COUNT="${#manifest_names[@]}"
 
 # --preflight-only stops HERE, and this is the boundary CI runs to.
 #
-# WHAT IT PROVES, stated narrowly because the first version of this comment
-# overclaimed and a cold review caught it (019ff34dd1cf, blocking finding 1):
+# WHAT IT PROVES, stated narrowly because the obvious wider reading is false:
 # SUITE-REGISTRY AND HOST-CONTRACT COMPATIBILITY. The host exists and carries
 # both driver helpers, the sibling layout the res:// preloads hardcode is
 # correct, and the suite set on disk matches the checked-in manifest in both
@@ -428,8 +424,8 @@ EXPECTED_SUITE_COUNT="${#manifest_names[@]}"
 #
 # Everything BELOW needs a Godot host with Minerva's native GDExtensions
 # BUILT, which a plain `actions/checkout` of Minerva does not have and which
-# CI has no business building — see the SETUP STEP note in this header
-# (chore 019fb6632a4e). Without src/bin/ every suite that starts a real
+# CI has no business building — see the SETUP STEP note in this header.
+# Without src/bin/ every suite that starts a real
 # plugin subprocess fails, and scripts that reach the FFmpeg-backed
 # VideoRecorder fail to COMPILE, cascading into SingletonObject and taking
 # unrelated suites down with them. That is a host-scaffold gap, not a signal
@@ -510,7 +506,7 @@ if [ ! -s "${ALLOWLIST_CLEAN}" ]; then
   rm -f "${ALLOWLIST_CLEAN}"
   exit 2
 fi
-# F2 (Codex OFC review 1188): COMPILE-CHECK the patterns before anything runs.
+# COMPILE-CHECK the patterns before anything runs.
 # An invalid ERE makes the residue grep exit 2, and an unguarded scan would
 # read that as "no residue" — the gate silently disarming itself on a typo is
 # the exact fail-open this runner exists to prevent. grep against /dev/null:
@@ -640,6 +636,11 @@ for test_path in "${tests[@]}"; do
   elif [ "${n_pass}" -eq 0 ]; then
     suite_ok=0
     fail_reason="Results line reports 0 passed assertions"
+  elif [ "${n_fail}" -ne 0 ]; then
+    # The Results line is the documented truth, not the exit code: a suite
+    # that reports failures and still exits 0 has failed.
+    suite_ok=0
+    fail_reason="Results line reports ${n_fail} failed assertions despite exit 0"
   fi
 
   # Pinned assertion count (manifest `assertions=N`): reported total must
@@ -669,14 +670,13 @@ for test_path in "${tests[@]}"; do
   fi
 
   # Fatal diagnostics not on the known-harness allowlist fail the suite even
-  # when everything above was green — the exact false-green 019ff2b1fccb
-  # documented: SCRIPT ERROR / failed script loads in the log while the
-  # runner printed 47/47.
+  # when everything above was green: SCRIPT ERROR lines and failed script
+  # loads can fill the log while the assertion tally still reads 47/47.
   if [ "${suite_ok}" -eq 1 ]; then
-    # F2 (Codex 1188): grep's rc is consulted, never discarded — 0 = residue
-    # survived the filter, 1 = every diagnostic matched the allowlist, >=2 =
-    # the scan itself failed, which is a harness error and FAILS the suite
-    # (fail closed) rather than reading as an empty residue.
+    # grep's rc is consulted, never discarded — 0 = residue survived the
+    # filter, 1 = every diagnostic matched the allowlist, >=2 = the scan
+    # itself failed, which is a harness error and FAILS the suite (fail
+    # closed) rather than reading as an empty residue.
     diag_residue="$(_fatal_diagnostics "${RESULTS_TMP}" | grep -Ev -f "${ALLOWLIST_CLEAN}")"
     diag_rc=$?
     if [ "${diag_rc}" -ge 2 ]; then

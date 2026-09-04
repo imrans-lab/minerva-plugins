@@ -9,7 +9,7 @@
 #
 # Both driver helpers are generic Minerva test scaffolding, not pcb's: 9
 # relocated suites preload plugin_panel_driver.gd and 7 preload
-# panel_tool_registry_driver.gd (round 019f70a26607). They live in the host
+# panel_tool_registry_driver.gd. They live in the host
 # because they drive host-side plugin panels; this file only records that pcb
 # depends on them.
 src/test/helpers/plugin_panel_driver.gd

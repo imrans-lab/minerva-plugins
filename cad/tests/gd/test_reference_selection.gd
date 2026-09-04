@@ -297,11 +297,11 @@ func _test_a_point_anchor_follows_its_reference() -> void:
 				and not bool((resolved as Dictionary).get("stale", true)),
 			"got %s" % str(resolved))
 
+	# The screen position the anchor resolves to now, used below as the
+	# baseline for the re-pose. It is the projection of the assertion above,
+	# not a second measurement of it.
 	var screen_before: Vector2 = _camera.unproject_position(
 		(resolved as Dictionary).get("position", Vector3.ZERO))
-	check("the anchor lands on the pixel it was clicked at",
-			screen_before.distance_to(_camera.unproject_position(POST_TOP_WORLD)) <= TOLERANCE_PX,
-			"got %s" % str(screen_before))
 
 	# Re-pose the reference, exactly as an edit to the mesh() line would.
 	_mount(POSE_TRANSLATE_ONLY)

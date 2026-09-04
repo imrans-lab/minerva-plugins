@@ -77,6 +77,13 @@ const GAUGE_LENGTH_FRACTION: float = 0.6
 ## A gauge diameter within this fraction of the fit's inscribed prediction
 ## counts as confirming the fit.
 const VERIFY_TOLERANCE_FRACTION: float = 0.05
+## Half-width of the band a convex candidate's wall is looked for in, as a
+## fraction of the candidate radius. Wide enough to swallow the tessellation
+## of a faceted cylinder, narrow enough that a wall at the wrong radius misses.
+## The straddle spans r·(1−f)..r·(1+f). A faceted wall sits at r·cos(π/n)..r, so
+## the wall is inside the straddle only for n ≥ 10 facets at f = 0.05; coarser
+## bosses may verify or not depending on where the four samples land.
+const WALL_PROBE_FRACTION: float = 0.05
 
 ## Ray-grid fallback, used only when the fitter proposed nothing at all.
 const SEED_PITCH_MM: float = 1.0
@@ -94,6 +101,10 @@ var _owner_names: Dictionary = {}
 ## Identity of the reference set the current colliders were built from.
 var _digest: String = ""
 var _shape_count: int = 0
+## Increments once per ACTUAL rebuild. A caller cannot tell a cache hit from a
+## rebuild by the returned shape count — both return the same number — so the
+## generation is the only observable that distinguishes them.
+var _generation: int = 0
 var _queue: Array = []
 
 
@@ -130,6 +141,7 @@ func build(bodies: Array, digest: String) -> int:
 	if digest == _digest and _shape_count > 0:
 		return _shape_count
 	clear()
+	_generation += 1
 	if _body == null:
 		return 0
 	for entry in bodies:
@@ -142,7 +154,8 @@ func build(bodies: Array, digest: String) -> int:
 		var shape := mesh.create_trimesh_shape()
 		if shape == null:
 			continue
-		# Constraint 2. Without this the gauge grows through the wall.
+		# Without backface collision a gauge grows straight through the wall of
+		# the hole it sits in and reports an unbounded radius.
 		shape.backface_collision = true
 		var owner_id := _body.create_shape_owner(_body)
 		_body.shape_owner_add_shape(owner_id, shape)
@@ -174,6 +187,11 @@ func get_digest() -> String:
 
 func get_shape_count() -> int:
 	return _shape_count
+
+
+## How many times the collider set has actually been rebuilt.
+func get_generation() -> int:
+	return _generation
 
 
 # ---------------------------------------------------------------------------
@@ -442,9 +460,13 @@ func _verify_hole(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> Di
 	return out
 
 
-## A boss is verified the other way round: solid just inside the fitted radius,
-## free just outside it. Sampled at four angles so a partial cylinder — a
-## fillet, say — cannot pass as a full boss.
+## A boss is verified by CONTACT with its wall, not by solid material inside
+## it. A trimesh collider is a surface, not a volume: a probe sitting inside a
+## boss touches nothing at all, so "is there material at r-e" always answers
+## no. The physical question that does discriminate is where the wall is — a
+## probe straddling the fitted radius must touch it, and a probe standing off
+## the radius by a clear margin must touch nothing. Sampled at four angles so
+## a partial cylinder — a fillet, say — cannot pass as a full boss.
 func _verify_convex(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> Dictionary:
 	var axis := _unit(candidate.get("axis", Vector3.UP))
 	var centre: Vector3 = candidate.get("center", Vector3.ZERO)
@@ -456,23 +478,32 @@ func _verify_convex(state: PhysicsDirectSpaceState3D, candidate: Dictionary) -> 
 		return out
 
 	var basis := _basis_for_axis(axis)
-	var epsilon := maxf(0.05, radius * 0.05)
-	var probe := SphereShape3D.new()
-	probe.radius = maxf(0.02, epsilon * 0.5)
-	var solid_inside := 0
+	var epsilon := maxf(0.05, radius * WALL_PROBE_FRACTION)
+	# Straddling probe: centred ON the fitted radius, so it reaches from
+	# radius-epsilon to radius+epsilon and cannot miss a wall that is there.
+	var straddle := SphereShape3D.new()
+	straddle.radius = epsilon
+	# Standoff probe: the same size, moved out by two epsilon, so its nearest
+	# point is a clear epsilon outside the fitted radius.
+	var standoff := SphereShape3D.new()
+	standoff.radius = epsilon
+	var wall_contacts := 0
 	var free_outside := 0
 	for i in range(4):
 		var angle := float(i) * PI * 0.5
 		var radial := (basis.x * cos(angle) + basis.y * sin(angle)).normalized()
-		var inner := centre + radial * maxf(0.0, radius - epsilon)
-		var outer: Vector3 = centre + radial * (radius + epsilon)
-		if not _overlaps(state, probe, Transform3D(Basis.IDENTITY, inner)).is_empty():
-			solid_inside += 1
-		if _overlaps(state, probe, Transform3D(Basis.IDENTITY, outer)).is_empty():
+		var on_wall := centre + radial * radius
+		var outside: Vector3 = centre + radial * (radius + epsilon * 3.0)
+		if not _overlaps(state, straddle, Transform3D(Basis.IDENTITY, on_wall)).is_empty():
+			wall_contacts += 1
+		if _overlaps(state, standoff, Transform3D(Basis.IDENTITY, outside)).is_empty():
 			free_outside += 1
-	out["solid_inside"] = solid_inside
+	out["wall_contacts"] = wall_contacts
 	out["free_outside"] = free_outside
-	out["verified"] = solid_inside >= 3 and free_outside >= 3
+	out["verified"] = wall_contacts >= 3 and free_outside >= 3
+	if not bool(out["verified"]):
+		out["reason"] = "wall contact at %d of 4 angles, clear outside at %d of 4" \
+			% [wall_contacts, free_outside]
 	out["source"] = str(candidate.get("source", "fit"))
 	return out
 

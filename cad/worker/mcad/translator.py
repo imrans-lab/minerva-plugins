@@ -273,7 +273,11 @@ class Translator:
         self._bind_value(node.name, value)
         # Rebinding a name that held a reference retires that reference; the
         # report mirrors the final environment, not every binding ever made.
-        self._references.pop(node.name, None)
+        # Only a top-level rebinding can do that: a module-local name that
+        # happens to match a top-level reference shadows it inside the body
+        # and must not retire the outer binding.
+        if len(self._env_stack) == 1:
+            self._references.pop(node.name, None)
 
         if isinstance(value, MeshReference):
             # Only top-level bindings are reported: a reference passed through

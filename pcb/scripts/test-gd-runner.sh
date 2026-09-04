@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Negative self-tests for run-gd-tests.sh (bug 019ff2b1fccb acceptance:
-# "Add negative self-tests for planted compile errors and forced worker
-# failure; the runner exits nonzero in both cases" — plus the two
-# enforcement layers added alongside: pinned assertion counts and the
-# fatal-diagnostics allowlist).
+# Negative self-tests for run-gd-tests.sh: a planted compile error, a forced
+# worker failure, the pinned assertion counts, the fatal-diagnostics allowlist
+# and the Results-line floor must each make the runner exit nonzero AND say
+# why.
 #
 # Usage:
 #   pcb/scripts/test-gd-runner.sh <path-to-minerva-checkout>
@@ -107,7 +106,7 @@ d="${SANDBOX_ROOT}/compile-error"; mkdir -p "${d}"
 cat > "${d}/test_selftest_compile_error.gd" <<'EOF'
 extends SceneTree
 func _init() -> void:
-	this line is deliberately not GDScript (planted compile error, 019ff2b1fccb)
+	this line is deliberately not GDScript (a planted compile error)
 EOF
 cat > "${d}/EXPECTED_SUITES" <<'EOF'
 test_selftest_compile_error.gd
@@ -227,6 +226,26 @@ EOF_M
 # The suite name appears in the output ONLY in the by-name "missing on disk"
 # listing, so matching it is matching the acceptance.
 _case "all-deleted" nonzero "test_selftest_deleted\.gd"
+
+# ── case 10: a suite that REPORTS failures but exits 0. The Results line is
+# the documented truth about a suite; an exit code is only what the suite
+# chose to return. A harness that trusts the exit code alone certifies a red
+# suite as green.
+d="${SANDBOX_ROOT}/green-exit-red-results"; mkdir -p "${d}"
+cat > "${d}/test_selftest_green_exit.gd" <<'EOF'
+extends SceneTree
+func _init() -> void:
+	print("=== selftest: reports a failure, exits 0 ===")
+	print("  PASS: a")
+	print("  PASS: b")
+	print("  FAIL: c")
+	print("\n=== Results: 2 passed, 1 failed ===")
+	quit(0)
+EOF
+cat > "${d}/EXPECTED_SUITES" <<'EOF_M'
+test_selftest_green_exit.gd assertions=3
+EOF_M
+_case "green-exit-red-results" nonzero "reports 1 failed assertions despite exit 0"
 
 echo
 if [ "${fails}" -gt 0 ]; then

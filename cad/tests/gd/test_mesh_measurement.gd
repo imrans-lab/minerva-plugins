@@ -255,10 +255,22 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 	var built: int = gauge.build(bodies, "fixture|v1")
 	check("gauge: the posed reference became one collider",
 			built == 1, "built %d colliders" % built)
+	# build() returns the same shape count whether it rebuilt or answered from
+	# the digest, so the count cannot tell the two apart. The generation can:
+	# it moves only when colliders are actually created.
+	var generation_after_build: int = int(gauge.get_generation())
 	var rebuilt: int = gauge.build(bodies, "fixture|v1")
 	check("gauge: the same reference set is not rebuilt",
-			rebuilt == 1 and str(gauge.get_digest()) == "fixture|v1",
-			"rebuild returned %d with digest '%s'" % [rebuilt, str(gauge.get_digest())])
+			rebuilt == 1 and str(gauge.get_digest()) == "fixture|v1"
+				and int(gauge.get_generation()) == generation_after_build,
+			"rebuild returned %d with digest '%s', generation %d -> %d" % [
+				rebuilt, str(gauge.get_digest()), generation_after_build,
+				int(gauge.get_generation())])
+	check("gauge: a DIFFERENT reference set does rebuild",
+			gauge.build(bodies, "fixture|v2") == 1
+				and int(gauge.get_generation()) == generation_after_build + 1,
+			"generation stayed at %d after a new digest" % int(gauge.get_generation()))
+	gauge.build(bodies, "fixture|v1")
 
 	# Pose the candidates the way the panel does before handing them over: the
 	# gauge works entirely in the posed world.
@@ -293,7 +305,7 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 					< CENTRE_TOLERANCE_MM,
 				"un-posed to %s" % str(inverse * world_center))
 		var expected_gauge := float(hole["dia"]) * cos(PI / float(FACETS))
-		check("gauge %s: the pin that fits is the inscribed diameter" % str(hole["name"]),
+		check("gauge %s: the pin that fits is within a facet chord of the drill" % str(hole["name"]),
 				absf(float(report.get("gauge_dia_mm", 0.0)) - expected_gauge)
 					< GAUGE_TOLERANCE_MM,
 				"gauged %f, expected %f" % [
@@ -354,22 +366,43 @@ func _check_gauge(baked: ArrayMesh, matched: Array) -> void:
 			not bool(off_axis.get("fits", true)),
 			"the pin fitted along the wrong axis, so the axis is not being used")
 
-	# The boss, verified the other way round: solid inside, free outside.
-	var boss_candidate := {
+	# The boss, verified the other way round: the wall is where the candidate
+	# says it is, and there is nothing just outside it. Three candidates go in
+	# together so the check discriminates in BOTH directions — a verifier that
+	# always says true fails on the second and third as surely as a verifier
+	# that always says false fails on the first.
+	var boss_axis: Vector3 = (_pose.basis * PLATE_NORMAL).normalized()
+	var real_boss := {
 		"kind": "cylinder",
 		"form": "convex",
 		"center": _pose * BOSS_CENTER,
-		"axis": (_pose.basis * PLATE_NORMAL).normalized(),
+		"axis": boss_axis,
 		"radius_mm": BOSS_DIA * 0.5,
 		"dia_mm": BOSS_DIA,
 	}
+	# Same place, radius 1.5 mm too large: the wall is not there, and the
+	# probe straddling the claimed radius touches nothing.
+	var wrong_radius := (real_boss as Dictionary).duplicate(true)
+	wrong_radius["radius_mm"] = BOSS_DIA * 0.5 + 1.5
+	wrong_radius["dia_mm"] = BOSS_DIA + 3.0
+	# The right size, standing in clear air 20 mm off the end of the plate.
+	var empty_air := (real_boss as Dictionary).duplicate(true)
+	empty_air["center"] = _pose * (BOSS_CENTER + Vector3(0.0, 0.0, 40.0))
 	var bosses: Dictionary = await gauge.submit(
-		"measure_convex", {"candidates": [boss_candidate]})
+		"measure_convex", {"candidates": [real_boss, wrong_radius, empty_air]})
 	var boss_reports: Array = bosses.get("cylinders", [])
-	check("gauge: the boss is solid inside its radius and clear outside it",
-			boss_reports.size() == 1
+	check("gauge: the boss's wall is found at the fitted radius, with clear air outside it",
+			boss_reports.size() == 3
 				and bool((boss_reports[0] as Dictionary).get("verified", false)),
 			"boss verification: %s" % str(bosses))
+	check("gauge: a boss candidate 1.5 mm too fat does NOT verify",
+			boss_reports.size() == 3
+				and not bool((boss_reports[1] as Dictionary).get("verified", true)),
+			"an oversize boss candidate verified: %s" % str(boss_reports))
+	check("gauge: a boss candidate standing in empty air does NOT verify",
+			boss_reports.size() == 3
+				and not bool((boss_reports[2] as Dictionary).get("verified", true)),
+			"a boss candidate in empty air verified: %s" % str(boss_reports))
 
 	# A ray at a known place hits the top face at a known height.
 	var probe_local := Vector3(5.0, 0.0, 5.0)

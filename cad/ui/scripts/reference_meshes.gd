@@ -185,9 +185,18 @@ var _cache: Dictionary = {}
 ## How many times a file has actually been read off disk. The pose changing
 ## must not move this number; the file changing must.
 var _load_count: int = 0
+## A file modified this recently is re-hashed regardless of its cheap
+## identity: modification times have one-second resolution, so a rewrite in the
+## same second that keeps the length would otherwise read as unchanged.
+const STAMP_SETTLE_SECONDS: float = 2.0
+
 ## Stamps computed during the current mount_all call, keyed by absolute path.
 var _stamp_memo: Dictionary = {}
 var _in_mount: bool = false
+## Absolute path -> {mtime, size, stamp}: the digest that was computed when the
+## file last had that modification time and length. This is what keeps a
+## keystroke from re-hashing a quarter of a gigabyte.
+var _stamp_cache: Dictionary = {}
 ## What the last mount actually put on screen: one record per reference that
 ## loaded, in the order the evaluation named them. This is what the
 ## measurement surface reads — it is the only place that knows which file each
@@ -206,10 +215,11 @@ func get_load_count() -> int:
 func clear_cache() -> void:
 	_cache.clear()
 	_stamp_memo.clear()
+	_stamp_cache.clear()
 
 
 ## Records for the references the last mount actually put geometry on screen
-## for: {name, path, resolved_path, status, reason, warning, stamp, pose,
+## for: {name, path, resolved_path, units, up, status, reason, warning, stamp, pose,
 ## local_aabb, world_aabb, triangle_count, bytes, load_ms, outlines_skipped,
 ## parts, node_bounds}. `parts` is the cached, converted geometry — shared, not
 ## copied — so a caller that wants colliders or a segmentation reads it
@@ -459,6 +469,10 @@ func _mount_under(
 				"name": reference_name,
 				"path": str(reference.get("path", "")),
 				"resolved_path": "",
+				# units and up are baked into parts[].transform, so anything
+				# keyed on the geometry has to key on them as well.
+				"units": str(reference.get("units", "")).to_lower(),
+				"up": str(reference.get("up", "")).to_lower(),
 				"status": STATUS_OK,
 				"reason": "",
 				"warning": "",
@@ -819,17 +833,51 @@ static func _is_feature_edge(normals: Array, cosine_threshold: float) -> bool:
 
 ## Identity of the bytes on disk. Public so a test can see that the cache is
 ## keyed on content: a cache keyed on the path alone shows a stale board
-## forever. Memoised only while mount_all is running; a direct call always
-## hashes the file as it is now.
+## forever.
+##
+## The digest is the contract, but hashing is not free — the document is
+## re-evaluated on a debounced keystroke and the ceiling on a reference file is
+## a quarter of a gigabyte. So the hash is computed only when the cheap
+## identity (modification time and length) has changed, or when the file was
+## touched within the last couple of seconds: a rewrite inside the same
+## second-resolution timestamp that happens to preserve the length would
+## otherwise be invisible. An unchanged, settled file costs an open and two
+## queries.
 func file_stamp(absolute_path: String) -> String:
 	if _stamp_memo.has(absolute_path):
 		return str(_stamp_memo[absolute_path])
-	var stamp := "missing"
-	if FileAccess.file_exists(absolute_path):
-		var digest := FileAccess.get_sha256(absolute_path)
-		stamp = digest if not digest.is_empty() else "unreadable"
+	var stamp := _stamp_uncached(absolute_path)
 	if _in_mount:
 		_stamp_memo[absolute_path] = stamp
+	return stamp
+
+
+func _stamp_uncached(absolute_path: String) -> String:
+	if not FileAccess.file_exists(absolute_path):
+		_stamp_cache.erase(absolute_path)
+		return "missing"
+	var handle := FileAccess.open(absolute_path, FileAccess.READ)
+	if handle == null:
+		_stamp_cache.erase(absolute_path)
+		return "unreadable"
+	var size := int(handle.get_length())
+	handle = null
+	var mtime := int(FileAccess.get_modified_time(absolute_path))
+	var settled: bool = Time.get_unix_time_from_system() - float(mtime) > STAMP_SETTLE_SECONDS
+	var cached: Dictionary = _stamp_cache.get(absolute_path, {})
+	if settled and not cached.is_empty() \
+			and int(cached.get("mtime", -1)) == mtime \
+			and int(cached.get("size", -1)) == size:
+		return str(cached.get("stamp", ""))
+	var digest := FileAccess.get_sha256(absolute_path)
+	var stamp: String = digest if not digest.is_empty() else "unreadable"
+	# A digest taken while the file is still being written may already be
+	# stale by the time the same mtime and size are seen again; only a settled
+	# file earns a cache entry.
+	if settled:
+		_stamp_cache[absolute_path] = {"mtime": mtime, "size": size, "stamp": stamp}
+	else:
+		_stamp_cache.erase(absolute_path)
 	return stamp
 
 

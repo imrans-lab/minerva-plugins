@@ -2,15 +2,13 @@ extends SceneTree
 ## Regression test — the CAD orbit camera must not stay latched in orbit after
 ## a lost middle-button release.
 ##
-## Tracks docket: RCA 019e4ca28aaf (CAD camera stuck in orbit) / W1 019e4ca3494f.
-##
 ## Run:
 ##   cad/scripts/run-gd-tests.sh <path-to-minerva-checkout>
 ##
-## FAIL-FIRST: the "lost release" scenario FAILS on the current orbit_camera.gd
-## — handle_pointer_input keeps _dragging_orbit latched and orbits on every
-## later motion — and PASSES once the W2 fix reconciles the latch against
-## InputEventMouseMotion.button_mask.
+## The "lost release" scenario fails while handle_pointer_input keeps
+## _dragging_orbit latched and orbits on every later motion; it passes once the
+## latch is reconciled against InputEventMouseMotion.button_mask, which is the
+## only evidence in the event stream that the button is no longer down.
 ##
 ## orbit_camera.gd is a self-contained Camera3D (no Minerva deps). It is
 ## reached through the same `res://../../minerva-plugins/...` path every pcb
@@ -25,11 +23,11 @@ var _fail: int = 0
 
 
 func _init() -> void:
-	print("=== CAD Orbit Camera Stuck-Latch Regression Test (RCA 019e4ca28aaf) ===\n")
+	print("=== CAD Orbit Camera Stuck-Latch Regression Test ===\n")
 	_run()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
-		printerr("FAILURES: %d — orbit-camera stale-latch repro is RED (expected pre-W2-fix)" % _fail)
+		printerr("FAILURES: %d — the orbit camera stays latched after a lost release" % _fail)
 	quit(1 if _fail > 0 else 0)
 
 

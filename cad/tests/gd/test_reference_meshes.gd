@@ -82,7 +82,7 @@ func _init() -> void:
 func _run() -> void:
 	var scratch := OS.get_user_data_dir()
 	_glb_path = scratch.path_join("cad_reference_fixture.glb")
-	_document_path = scratch.path_join("fixture.mcad")
+	_document_path = scratch.path_join("cad_reference_fixture.mcad")
 
 	var written := _write_fixture_glb(_glb_path, Vector3(2.0, 4.0, 6.0))
 	check("fixture: the built scene wrote a GLB", written,
@@ -97,6 +97,7 @@ func _run() -> void:
 	_test_a_missing_reference_is_reported_not_crashed()
 	_test_feature_edges()
 	_test_frame_conversion_arithmetic()
+	_test_a_units_change_is_a_different_geometry_and_says_so()
 	_test_auto_framing_covers_the_reference()
 
 
@@ -143,7 +144,7 @@ func _test_geometry_lands_where_the_pose_says() -> void:
 	var parent := Node3D.new()
 	root.add_child(parent)
 	var report: Dictionary = library.mount(
-		[_reference("board", "fixture.glb", POSE_ROTATE_TRANSLATE)],
+		[_reference("board", "cad_reference_fixture.glb", POSE_ROTATE_TRANSLATE)],
 		_document_path,
 		parent
 	)
@@ -219,13 +220,13 @@ func _test_the_file_is_read_once_and_only_re_read_when_it_changes() -> void:
 	root.add_child(parent)
 
 	var first: Dictionary = library.mount(
-		[_reference("board", "fixture.glb", POSE_ROTATE_TRANSLATE)], _document_path, parent)
+		[_reference("board", "cad_reference_fixture.glb", POSE_ROTATE_TRANSLATE)], _document_path, parent)
 	check("cache: the first evaluation reads the file",
 			library.get_load_count() == 1,
 			"load count %d" % library.get_load_count())
 
 	var second: Dictionary = library.mount(
-		[_reference("board", "fixture.glb", POSE_TRANSLATE_ONLY)], _document_path, parent)
+		[_reference("board", "cad_reference_fixture.glb", POSE_TRANSLATE_ONLY)], _document_path, parent)
 	check("cache: a new pose does NOT re-read the file",
 			library.get_load_count() == 1,
 			"load count rose to %d on a pose change" % library.get_load_count())
@@ -259,13 +260,13 @@ func _test_the_file_is_read_once_and_only_re_read_when_it_changes() -> void:
 	var rewritten := _write_fixture_glb(_glb_path, Vector3(20.0, 40.0, 60.0))
 	check("fixture: the GLB was rewritten with different geometry", rewritten,
 			"could not rewrite %s" % _glb_path)
-	library.mount([_reference("board", "fixture.glb", POSE_TRANSLATE_ONLY)], _document_path, parent)
+	library.mount([_reference("board", "cad_reference_fixture.glb", POSE_TRANSLATE_ONLY)], _document_path, parent)
 	check("cache: a changed file IS re-read",
 			library.get_load_count() == 2,
 			"load count %d — the panel would keep showing the old board"
 				% library.get_load_count())
 
-	library.mount([_reference("board", "fixture.glb", POSE_TRANSLATE_ONLY)], _document_path, parent)
+	library.mount([_reference("board", "cad_reference_fixture.glb", POSE_TRANSLATE_ONLY)], _document_path, parent)
 	check("cache: an unchanged file is not re-read after a reload",
 			library.get_load_count() == 2,
 			"load count %d" % library.get_load_count())
@@ -273,6 +274,77 @@ func _test_the_file_is_read_once_and_only_re_read_when_it_changes() -> void:
 	parent.free()
 	# Put the original fixture back for anything that runs after this.
 	_write_fixture_glb(_glb_path, Vector3(2.0, 4.0, 6.0))
+
+
+# ---------------------------------------------------------------------------
+# units= / up= are geometry, not decoration
+# ---------------------------------------------------------------------------
+
+## The unit and up-axis conversion is BAKED into the cached part transforms, so
+## it is part of the identity of the geometry — not a display setting applied
+## afterwards. Anything that caches on a reference (the panel's collider
+## digest, the segmentation key) therefore has to key on units and up as well,
+## or a units= edit shows the new geometry on screen while every measurement
+## still answers about the old one. The record carries both so that a caller
+## CAN key on them, and the same file under two unit declarations is two
+## different loads with two different sizes.
+func _test_a_units_change_is_a_different_geometry_and_says_so() -> void:
+	var library = ReferenceMeshes.new()
+	var parent := Node3D.new()
+	root.add_child(parent)
+
+	library.mount([_reference("board", "cad_reference_fixture.glb", POSE_TRANSLATE_ONLY)],
+			_document_path, parent)
+	var as_metres: Dictionary = _first_record(library)
+
+	var millimetre_spec := _reference("board", "cad_reference_fixture.glb", POSE_TRANSLATE_ONLY)
+	millimetre_spec["units"] = "mm"
+	library.mount([millimetre_spec], _document_path, parent)
+	var as_millimetres: Dictionary = _first_record(library)
+
+	check("units: the record says which units and up-axis the geometry was converted from",
+			str(as_metres.get("units", "")) == "m" and str(as_metres.get("up", "")) == "y"
+				and str(as_millimetres.get("units", "")) == "mm",
+			"metres record units='%s' up='%s', millimetre record units='%s'" % [
+				str(as_metres.get("units", "")), str(as_metres.get("up", "")),
+				str(as_millimetres.get("units", "")),
+			])
+
+	# The fixture is authored in metres, so reading it as millimetres shrinks
+	# it by a thousand: the two mounts are not the same geometry, and a cache
+	# key that ignores units would hand one of them the other's answer.
+	var metre_box: AABB = as_metres.get("local_aabb", AABB())
+	var millimetre_box: AABB = as_millimetres.get("local_aabb", AABB())
+	check("units: reading the same file as mm instead of m is different geometry",
+			metre_box.size.length() > 0.0
+				and absf(metre_box.size.length() - millimetre_box.size.length() * 1000.0)
+					< metre_box.size.length() * 0.001,
+			"m bounds %s vs mm bounds %s" % [str(metre_box), str(millimetre_box)])
+
+	check("units: a units= change is a real re-read, not a cache hit",
+			library.get_load_count() == 2,
+			"load count %d after mounting the same path under two unit declarations"
+				% library.get_load_count())
+
+	# The part transforms are what the colliders and the segmentation are built
+	# from, so this is the value the panel's digest has to cover.
+	var metre_parts: Array = as_metres.get("parts", [])
+	var millimetre_parts: Array = as_millimetres.get("parts", [])
+	var metre_first: Transform3D = (metre_parts[0] as Dictionary).get(
+			"transform", Transform3D.IDENTITY) if metre_parts.size() > 0 else Transform3D.IDENTITY
+	var millimetre_first: Transform3D = (millimetre_parts[0] as Dictionary).get(
+			"transform", Transform3D.IDENTITY) if millimetre_parts.size() > 0 else Transform3D.IDENTITY
+	check("units: the conversion is baked into the part transforms the gauge uses",
+			metre_parts.size() == millimetre_parts.size() and metre_parts.size() > 0
+				and not metre_first.is_equal_approx(millimetre_first),
+			"m transform %s vs mm transform %s" % [str(metre_first), str(millimetre_first)])
+
+	parent.free()
+
+
+func _first_record(library) -> Dictionary:
+	var records: Array = library.mounted_references()
+	return records[0] if records.size() > 0 else {}
 
 
 # ---------------------------------------------------------------------------

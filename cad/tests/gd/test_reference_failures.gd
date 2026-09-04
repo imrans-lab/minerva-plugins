@@ -467,8 +467,9 @@ func _write_box_glb(path: String) -> bool:
 	return _write_scene(scene_root, path)
 
 
-## A denser body, so the cost of the feature-edge pass is measurable against
-## the cost of skipping it.
+## A body dense enough to sit well over the outline-triangle budget, so the
+## budget's effect — the mesh loads, the ortho outline is skipped, the warning
+## carries the count — has something to be observed on.
 func _write_sphere_glb(path: String) -> bool:
 	var scene_root := Node3D.new()
 	scene_root.name = "Scene"
