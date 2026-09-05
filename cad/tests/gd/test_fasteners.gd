@@ -139,6 +139,11 @@ const COUNTERBORE_DEPTH_MM := 0.3
 ## any angular spacing; only rings across the whole disc can.
 const RIB_SIZE := Vector3(0.5, 8.0, E_GAP_MM)
 const RIB_OFFSET_X := 0.65
+## The web INSIDE a bore, for the check that is asked separately: a bar
+## across the whole bore diameter, 2 mm below the mouth, 0.3 mm thick, wider
+## than the fan's pitch so the axis ray and its neighbours all meet it.
+const WEB_DROP_MM := 2.0
+const WEB_SIZE := Vector3(BORE_R * 2.0 + 0.4, 0.6, 0.3)
 ## How much further the bore's WALL reaches than the stretch of it that goes
 ## all the way round — the shape a tilted trim leaves. The engaged length must
 ## be measured on the full-circumference extent and not on this one.
@@ -298,6 +303,7 @@ func _run() -> void:
 	await _check_iso_273(module, panel)
 	await _check_seatless_hole(module, panel)
 	await _check_refusals(module, panel)
+	await _check_web_in_bore(module, panel)
 	await _check_pose_snapshot(module, panel)
 
 
@@ -1076,6 +1082,66 @@ func _records_at(pose: Transform3D) -> Array:
 
 
 # ---------------------------------------------------------------------------
+# A web INSIDE the bore
+# ---------------------------------------------------------------------------
+
+## The shank fan used to stop at the mouth of the bore, so a web left across
+## the bore — a modelling slip that leaves a floor where thread should be —
+## was reported path-clear as long as the approach was open. The same rays
+## carry on down the ENGAGED bore now, where the only solid they may meet is
+## the bore's own wall. A separate check on a one-boss shell, so the main
+## report's five screws are left exactly as they are.
+func _check_web_in_bore(module: RefCounted, panel: Node) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+	panel.mesh_data = await _webbed_shell_mesh()
+	panel.bores = [_bores[0]]
+	var report: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": _holes(),
+	})
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+
+	var row := _row_at(report, HOLE_XY[0])
+	var obstructions: Array = row.get("obstructions", []) as Array
+	var first: Dictionary = obstructions[0] if not obstructions.is_empty() else {}
+	# The web's faces, as axial distances from the hole centre: the mouth is
+	# BOARD_HALF_THICKNESS down, the web WEB_DROP_MM below that.
+	var web_top := BOARD_HALF_THICKNESS + WEB_DROP_MM
+	var web_bottom := web_top + WEB_SIZE.z
+	check("web: a web across the bore 2 mm below its mouth blocks the screw "
+			+ "— the path is not clear, the obstruction is the SOLID inside "
+			+ "the engaged bore at the web's own depth, `why` says so, and "
+			+ "the coaxial boss is not blamed for anything else",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 1
+				and not bool(row.get("path_clear", true))
+				and not bool(row.get("pass", true))
+				and str(first.get("node", "")) == "<solid>"
+				and str(first.get("span", "")) == "bore"
+				and float(first.get("axial_mm", -99.0))
+					>= web_top - NUMERIC_TOLERANCE_MM
+				and float(first.get("axial_mm", 99.0))
+					<= web_bottom + NUMERIC_TOLERANCE_MM
+				and str(row.get("why", "")).contains("inside the engaged bore")
+				and bool((row.get("coaxiality", {}) as Dictionary).get("pass", false))
+				and bool(row.get("engagement_ok", false))
+				and bool(row.get("head_seat_clear", false)),
+			"row = %s" % str(row))
+
+
+## One coaxial boss at hole 1 with a web across its bore, as worker mesh data.
+func _webbed_shell_mesh() -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "WebbedShell"
+	_add_boss(combiner, _boss_transform(HOLE_XY[0], 0.0, 0.0), 0.0, WEB_DROP_MM)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
+
+
+# ---------------------------------------------------------------------------
 # The stand-in panel and the stand-in backend
 # ---------------------------------------------------------------------------
 
@@ -1243,7 +1309,10 @@ func _shell_mesh() -> Dictionary:
 ## One boss and its bore, in the board's own frame, under `xform`.
 ## `drop` lowers the boss (and its bore) away from the board, leaving a gap the
 ## rib then bridges. A boss with no drop sits against the board's underside.
-func _add_boss(combiner: CSGCombiner3D, xform: Transform3D, drop: float) -> void:
+## `web_drop`, when positive, leaves a web across the bore that far below its
+## mouth.
+func _add_boss(combiner: CSGCombiner3D, xform: Transform3D, drop: float,
+		web_drop: float = 0.0) -> void:
 	var boss := CSGCylinder3D.new()
 	boss.radius = BOSS_OUTER_R
 	boss.height = BORE_TOP_Z - BOSS_BOTTOM_Z
@@ -1275,6 +1344,14 @@ func _add_boss(combiner: CSGCombiner3D, xform: Transform3D, drop: float) -> void
 		rib.size = RIB_SIZE
 		rib.position = Vector3(RIB_OFFSET_X, 0.0, BORE_TOP_Z - drop * 0.5)
 		holder.add_child(rib)
+	if web_drop > 0.0:
+		# The web, across the whole bore and into its wall on both sides,
+		# added after the cutter so the cutter cannot remove it.
+		var web := CSGBox3D.new()
+		web.size = WEB_SIZE
+		web.position = Vector3(0.0, 0.0,
+			BORE_TOP_Z - drop - web_drop - WEB_SIZE.z * 0.5)
+		holder.add_child(web)
 	combiner.add_child(holder)
 
 

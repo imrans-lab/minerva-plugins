@@ -504,6 +504,8 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 			_GeometryChecks.CLEARANCE_TOLERANCE_MM)),
 		"reference": asked,
 		"node": str(args.get("node", "")),
+		"accept_unbounded_tolerance":
+			bool(args.get("accept_unbounded_tolerance", false)),
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))

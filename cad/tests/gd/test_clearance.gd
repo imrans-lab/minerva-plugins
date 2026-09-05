@@ -52,6 +52,7 @@ extends SceneTree
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
 
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
+const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 
 ## The reference bar, in its own frame: long in X, its top face at z = 0.
 const BAR_HALF_LENGTH := 50.0
@@ -107,6 +108,12 @@ var _known_blobs: Dictionary = {}
 var _payloads: Array = []
 ## What the next call should answer with: "measure", "unbounded" or "error".
 var _mode: String = "measure"
+## The air the stand-in measures between the bars. The fixture's GAP_MM unless
+## a check narrows it to sit just inside a requirement.
+var _gap_mm: float = GAP_MM
+## The stub panel, so an interference report can be stamped with the poses and
+## collider generation it describes.
+var _stub: Node = null
 
 
 func _init() -> void:
@@ -145,6 +152,12 @@ func _run() -> void:
 	panel.name = "StubPanel"
 	panel.answer = _worker_answer
 	panel.source = SOURCE
+	# The gauge a real panel carries, unbuilt: its rebuild generation is what
+	# an interference report is stamped with, and what the join compares.
+	panel.gauge = MeshGauge.new()
+	panel.gauge.name = "MeshGauge"
+	panel.add_child(panel.gauge)
+	_stub = panel
 	panel.records = [{
 		"name": REFERENCE_NAME,
 		"pose": _pose,
@@ -553,13 +566,69 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 				and str(stale.get("interference_join", "")).contains("unsigned"),
 			"pair = %s, join = '%s'" % [str(unjoined),
 				str(stale.get("interference_join", ""))])
+
+	# THE JOIN IS ONLY AS FRESH AS THE POSES AND COLLIDERS IT WAS MEASURED
+	# AT. The DSL is unchanged, so the source digest still matches — but the
+	# reference has been moved since the report ran (here: a pose rewritten
+	# in place, the way the panel re-poses), or the colliders rebuilt. A
+	# reference that moved INTO the solid after the report was written reads
+	# as a positive, unsigned gap, and the old clean report would vouch for
+	# it. So the report is stale, nothing is joined, and the check cannot
+	# pass: whether any node is buried is unknown. A report stamped at the
+	# current state passes again.
+	panel.last_eval = _interference_over(SOURCE, [])
+	var settled: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var record: Dictionary = panel.records[0]
+	record["pose"] = Transform3D(_pose.basis, _pose.origin + REPOSE_SHIFT)
+	var after_move: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	record["pose"] = _pose
+	# The stand-in's memory of uploaded keys points at files the module's
+	# sweep has since replaced; a real worker keeps its own cache. Forget them
+	# so the next calls upload afresh rather than decode a swept path.
+	_known_blobs.clear()
+	var generation_before := int(panel.gauge.get_generation())
+	panel.gauge.build([{"mesh": (record["parts"] as Array)[0]["mesh"],
+		"transform": _pose, "node": NEAR_NODE, "reference": REFERENCE_NAME}],
+		"clearance-fixture|rebuilt")
+	var after_rebuild: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	panel.last_eval = _interference_over(SOURCE, [])
+	var restamped: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("stale: a clean interference report about THIS source but about "
+			+ "reference poses that have since moved, or colliders since "
+			+ "rebuilt, is not fresh — the check does not pass, says why, "
+			+ "and the join note says STALE; a report stamped at the current "
+			+ "state passes again",
+			bool(settled.get("pass", false))
+				and bool(after_move.get("checked", false))
+				and not bool(after_move.get("pass", true))
+				and str(after_move.get("pass_reason", "")).contains("since changed")
+				and str(after_move.get("interference_join", "")).begins_with("STALE")
+				and (after_move.get("pairs", []) as Array).size() == 2
+				and int(panel.gauge.get_generation()) == generation_before + 1
+				and bool(after_rebuild.get("checked", false))
+				and not bool(after_rebuild.get("pass", true))
+				and str(after_rebuild.get("pass_reason", "")).contains("rebuilt")
+				and bool(restamped.get("pass", false))
+				and not restamped.has("pass_reason"),
+			"settled=%s move=%s rebuild=%s restamped=%s" % [
+				str(settled.get("pass")), str(after_move.get("pass_reason",
+					after_move.get("pass"))), str(after_rebuild.get("pass_reason",
+					after_rebuild.get("pass"))), str(restamped.get("pass_reason",
+					restamped.get("pass")))])
 	panel.last_eval = {}
 
 
 ## An eval result carrying an interference report over `nodes`, stamped with
 ## the digest of `source` — the same SHA-256 of the DSL text the check writes
 ## on its own report, which is how a clearance call tells a report about this
-## document from one about the last.
+## document from one about the last — and with the stub panel's CURRENT
+## reference poses (through the gauge's own records-to-bodies digest) and
+## collider generation, which is how it tells a report about these poses from
+## one about where the references used to stand.
 func _interference_over(source: String, nodes: Array,
 		undecided: Array = [], whole_reference: String = "") -> Dictionary:
 	var hasher := HashingContext.new()
@@ -590,6 +659,9 @@ func _interference_over(source: String, nodes: Array,
 		"pairs": pairs,
 		"undecidable": open_questions,
 		"source_digest": hasher.finish().hex_encode(),
+		"records_digest": MeshGauge.bodies_digest(
+			MeshGauge.bodies_from_records(_stub.records)),
+		"gauge_generation": int(_stub.gauge.get_generation()),
 	}}
 
 
@@ -840,6 +912,47 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 			"doubted = %s, accepted = %s, line = %s" % [str(doubted),
 				str(accepted.get("pass")), line])
 
+	# WAIVING THE BAR MEANS GRADING ON THE DISTANCE. The worker's own verdict
+	# subtracts its estimate whether or not that estimate is a bound, so a
+	# 0.505 mm gap against a 0.5 mm requirement with a 0.01 mm estimate FAILS
+	# in the worker's reply (0.495 < 0.5). The caller who accepts an unbounded
+	# tolerance has asked for the distances alone, so the panel regrades every
+	# pair on min_mm against required_mm — 0.505 >= 0.5 passes — and the reply
+	# says the bar was waived and what each pair was graded on. Without the
+	# opt-in the same reply fails with the reason.
+	_mode = "unbounded"
+	_gap_mm = 0.505
+	var refused: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "tolerance_mm": 0.0025})
+	var waived: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "tolerance_mm": 0.0025,
+			"accept_unbounded_tolerance": true})
+	_gap_mm = GAP_MM
+	_mode = "measure"
+	var refused_near := _pair_for(refused, NEAR_NODE)
+	var waived_near := _pair_for(waived, NEAR_NODE)
+	check("tolerance: with the bar waived the grade IS the distance — a "
+			+ "0.505 mm gap, 0.5 mm required, 0.01 mm estimated fails on the "
+			+ "worker's subtraction, passes on min_mm alone under the "
+			+ "opt-in with the reply saying the bar was waived, and fails "
+			+ "with the reason without it",
+			absf(float(refused.get("tessellation_tolerance_mm", 0.0)) - 0.01) < 1.0e-9
+				and absf(float(refused_near.get("min_mm", 0.0)) - 0.505) < 1.0e-6
+				and absf(float(refused_near.get("bound_mm", 0.0)) - 0.495) < 1.0e-6
+				and not bool(refused_near.get("pass", true))
+				and not bool(refused.get("pass", true))
+				and str(refused.get("pass_reason", "")).contains("not guaranteed")
+				and not refused.has("tolerance_waived")
+				and bool(waived_near.get("pass", false))
+				and absf(float(waived_near.get("bound_mm", 0.0)) - 0.505) < 1.0e-6
+				and str(waived_near.get("graded_on", "")).contains("waived")
+				and bool(waived.get("pass", false))
+				and bool(waived.get("tolerance_waived", false))
+				and str(waived.get("waiver", "")).contains("WAIVED")
+				and not waived.has("pass_reason")
+				and not bool(waived.get("tolerance_bounded", true)),
+			"refused = %s, waived = %s" % [str(refused_near), str(waived)])
+
 
 ## Start a clearance call without awaiting it and park its reply in `into`.
 func _collect_clearance(checks: RefCounted, panel: Node, into: Array) -> void:
@@ -895,8 +1008,16 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 	# The solid's world position is the fixture's, and the reference's comes
 	# out of the bytes the module shipped — so the gap is measured across the
 	# panel's own product.
-	var solid_bottom_z := POSE_ORIGIN.z + GAP_MM
+	var solid_bottom_z := POSE_ORIGIN.z + _gap_mm
 	var required := float(args.get("required_mm", 0.0))
+	var tolerance := float(args.get("tolerance_mm", 0.0))
+	# "unbounded" is the worker's answer for a solid with a curved face it
+	# could not measure: the tolerance is a bounding-box guess, and it says so.
+	var bounded := _mode != "unbounded"
+	# The worker's verdict arithmetic, verbatim: the bar is the EFFECTIVE
+	# tolerance, subtracted whether it is a bound or a guess, and a pair
+	# passes only when what is left meets the requirement.
+	var effective := tolerance * (1.0 if bounded else 4.0)
 	var pairs: Array = []
 	for entry in targets:
 		var target: Dictionary = entry
@@ -904,12 +1025,14 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		var box: AABB = blob["box"]
 		var top_z: float = box.position.z + box.size.z
 		var min_mm: float = maxf(solid_bottom_z - top_z, 0.0)
+		var bound_mm := maxf(min_mm - effective, 0.0)
 		var pair := {
 			"reference": str(target.get("reference", "")),
 			"node": str(target.get("node", "")),
 			"key": str(target.get("key", "")),
 			"min_mm": min_mm,
-			"pass": min_mm >= required,
+			"bound_mm": bound_mm,
+			"pass": min_mm > 0.0 and bound_mm >= required,
 			"triangles": int(blob["triangles"]),
 			"cached": true,
 		}
@@ -923,16 +1046,12 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 			pair["reference_point_mm"] = [POSE_ORIGIN.x, POSE_ORIGIN.y, top_z]
 		pairs.append(pair)
 	pairs.sort_custom(func(a, b): return float(a["min_mm"]) < float(b["min_mm"]))
-	var tolerance := float(args.get("tolerance_mm", 0.0))
-	# "unbounded" is the worker's answer for a solid with a curved face it
-	# could not measure: the tolerance is a bounding-box guess, and it says so.
-	var bounded := _mode != "unbounded"
 	return {"ok": true, "result": {
 		"checked": true,
 		"units": "mm",
 		"pass": pairs.all(func(p): return bool(p["pass"])),
 		"required_mm": required,
-		"tessellation_tolerance_mm": tolerance * (1.0 if bounded else 4.0),
+		"tessellation_tolerance_mm": effective,
 		"requested_tolerance_mm": tolerance,
 		"tolerance_bounded": bounded,
 		"bound": ("the true clearance is at least min_mm - %s mm" % tolerance)
@@ -946,17 +1065,21 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 
 
 class _StubPanel extends Node:
-	## The four things geometry_checks.check_clearance asks a panel for. The
+	## The five things geometry_checks.check_clearance asks a panel for. The
 	## last eval result is where the interference report the clearance verb
 	## joins against arrives from.
 	var source: String = ""
 	var records: Array = []
 	var last_eval: Dictionary = {}
 	var answer: Callable
+	var gauge: Node = null
 
 	func get_document_state() -> Dictionary:
 		return {"source": source, "path": "", "mesh": {},
 			"references": [], "last_eval": last_eval}
+
+	func get_mesh_gauge() -> Node:
+		return gauge
 
 	func get_reference_state() -> Array:
 		return records

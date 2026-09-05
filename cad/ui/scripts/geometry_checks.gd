@@ -201,7 +201,10 @@ var _holder_since: int = 0
 ## checked, not every document checked in turn.
 var _pending: int = 0
 ## Arrivals at the queue, ever. It orders waiters against each other and has
-## nothing to do with the ticket, which only a granted reservation gets.
+## nothing to do with the ticket, which only a granted reservation gets. It
+## is also the "newest arrival" marker check() reads at paint time: a running
+## check whose grant predates the latest arrival has been overtaken by a
+## newer document and paints nothing.
 var _arrivals: int = 0
 ## The ticket the running reservation was taken with. Only that ticket's
 ## release frees the module.
@@ -363,7 +366,11 @@ func get_solid_edge_count() -> int:
 ## Run the whole check for `panel` and return the report:
 ##
 ##   {count, pairs: [{reference, node, points_mm: [{world, local}], point_count,
-##    penetration_mm?}], point_count, sampling, casts, checked}
+##    penetration_mm?}], point_count, sampling, casts, checked, painted}
+##
+## `painted` says whether this reply's crossings are the ones on screen; it is
+## false, with `paint_withheld`, when a newer evaluation queued while this
+## check ran — that evaluation's check paints the pane instead.
 ##
 ## `count` is the number of interfering (reference, node) PAIRS; point_count is
 ## how many crossings were found. `checked` is false — with a `reason` — when
@@ -378,6 +385,15 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
 		return refused(reservation)
+	# The queue as it stood when this check was granted. An evaluation that
+	# QUEUES behind this one from here on is the newer document, and the
+	# moment it arrives this check's paint is revoked: it keeps its ticket
+	# and finishes measuring — its answer is true about its own document —
+	# but its crossings must not reach the screen, or an interfering old
+	# document would stay painted until the queued clean one runs. Distinct
+	# from the ticket on purpose: the ticket says who owns the collider, this
+	# says whose answer the pane is waiting for.
+	var arrivals_at_grant := _arrivals
 	_marker_points = PackedVector3Array()
 	var report := await _run(panel, args, ticket)
 	if not holds(ticket):
@@ -392,7 +408,13 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# crosses on screen after a newer clean one cleared them.
 	if ticket != _ticket:
 		return _superseded(report)
+	if _arrivals != arrivals_at_grant:
+		report["painted"] = false
+		report["paint_withheld"] = "a newer evaluation queued while this " \
+			+ "check ran; its check paints the pane when it runs"
+		return report
 	_draw_markers(panel)
+	report["painted"] = true
 	return report
 
 
@@ -588,6 +610,14 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 		return _nothing("the evaluation produced no solid geometry to check")
 
 	set_records(panel.get_reference_state())
+	# What this report is ABOUT, fixed before anything is awaited: the
+	# reference poses (as the gauge digests them) and the collider generation
+	# the rays are cast against. The clearance join compares both with the
+	# state it finds later, because a report about references that have since
+	# moved or been rebuilt cannot say which nodes are buried now.
+	var records_digest := str(_MeshGauge.bodies_digest(
+		_MeshGauge.bodies_from_records(_records)))
+	var gauge_generation := int(gauge.call("get_generation"))
 	var reference_scope := str(args.get("reference", ""))
 	var mask := ALL_LAYERS
 	if not reference_scope.is_empty():
@@ -612,11 +642,15 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 		"reference": reference_scope,
 		"node": str(args.get("node", "")),
 	})
-	# Which solid the report describes. The clearance verb joins this report
-	# only when the digest matches the source it is about to measure against,
-	# so a report about an older document can never mark a node as buried.
+	# Which solid, which reference poses and which colliders the report
+	# describes. The clearance verb joins this report only when all three
+	# match the state it is about to measure against, so a report about an
+	# older document — or about references that have moved under the same
+	# document — can neither mark a node as buried nor clear one.
 	if bool(reply.get("checked", false)):
 		reply["source_digest"] = _source_digest(str(document.get("source", "")))
+		reply["records_digest"] = records_digest
+		reply["gauge_generation"] = gauge_generation
 	return reply
 
 
@@ -737,8 +771,12 @@ func _penetrates_reference(
 		# may clear.
 		return true
 	for offset in [step, -step]:
+		# 1 inside, 0 outside, -1 undecidable — and undecidable keeps the
+		# crossing, exactly as the solid side does: a probe the gauge could
+		# not read (a ray out of crossing budget in a layered node) is not
+		# evidence that the edge merely grazed a rim.
 		if _inside_reference(gauge, state, point + direction * offset,
-				reference_name, node_path):
+				reference_name, node_path) != 0:
 			return true
 	return false
 
@@ -1140,9 +1178,12 @@ func _containment(
 				# where the node is. A vertex on a mounting hole's rim insets
 				# into the hole, and a pin standing through that hole — a
 				# different node of the same reference — would otherwise vouch
-				# for the probe and report this node as buried.
-				if not _inside_reference(
-						gauge, state, probe, reference_name, node_path):
+				# for the probe and report this node as buried. An
+				# undecidable probe is skipped the same way: it settles
+				# nothing, and a node none of its probes can settle is
+				# reported undecided below.
+				if _inside_reference(
+						gauge, state, probe, reference_name, node_path) != 1:
 					continue
 				# Is that verified point inside the SOLID? An error here — a
 				# ray crossing more surfaces than the parity budget allows —
@@ -1307,18 +1348,23 @@ func _touches_solid(solid_state: PhysicsDirectSpaceState3D, point: Vector3) -> b
 	return false
 
 
-## Is `point` inside the material of ONE node of `reference_name`? The gauge's
-## own parity test through the smallest gauge it will accept — a pin that
-## touches nothing and still does not fit is a pin buried in material — scoped
-## to that reference by mask and to that node by name, so neither a neighbouring
-## reference nor a neighbouring node of the same one can vouch for a probe.
+## Is `point` inside the material of ONE node of `reference_name`? 1 yes,
+## 0 no, -1 undecidable — the same tri-state _parity_inside_solid gives for
+## the solid, because the gauge answers with an error rather than a verdict
+## when a parity ray crosses more surfaces than its budget allows, and an
+## error collapsed to "outside" would clear a body nobody could read. The
+## gauge's own parity test through the smallest gauge it will accept — a pin
+## that touches nothing and still does not fit is a pin buried in material —
+## scoped to that reference by mask and to that node by name, so neither a
+## neighbouring reference nor a neighbouring node of the same one can vouch
+## for a probe.
 func _inside_reference(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
 	point: Vector3,
 	reference_name: String,
 	node_path: String
-) -> bool:
+) -> int:
 	_casts += 1
 	var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
 		"shape": "sphere",
@@ -1328,7 +1374,9 @@ func _inside_reference(
 		"reference": reference_name,
 		"node": node_path,
 	})
-	return str(verdict.get("reason", "")) == "inside_solid"
+	if verdict.has("error"):
+		return -1
+	return 1 if str(verdict.get("reason", "")) == "inside_solid" else 0
 
 
 ## The same question against the references, through the gauge's own space.

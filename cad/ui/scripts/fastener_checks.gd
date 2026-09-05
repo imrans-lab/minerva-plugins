@@ -46,9 +46,12 @@ extends RefCounted
 ## also sees the solid, so a rib the shell grew across the bore is caught; the
 ## two hits that are the screw ARRIVING — the bore wall inside its own radius
 ## and span, and the boss's end face within a band of the mouth derived from
-## the boss's own measured tilt — are filtered out by name. The HEAD ring sees
-## the references only: it never has to reach the bore, and the solid on its
-## span is the top of the boss it is sitting on.
+## the boss's own measured tilt — are filtered out by name. The same shank
+## rays then carry on down the ENGAGED bore, where the only solid they may
+## meet is the bore's wall at its own radius: a web or an inward rib below the
+## mouth is an obstruction there. The HEAD ring sees the references only: it
+## never has to reach the bore, and the solid on its span is the top of the
+## boss it is sitting on.
 ##
 ## ENGAGEMENT — the overlap of the screw's length, measured from the seat, with
 ## the bore's axial extent. Graded against a material default: thread-forming
@@ -570,6 +573,15 @@ func _one_screw(
 	var mouth_band := mouth_reach \
 		* tan(deg_to_rad(float(coaxiality["axis_angle_deg"]))) \
 		+ PATH_END_EPSILON_MM
+	# And past the mouth, the ENGAGED BORE. The same rays carry on down the
+	# bore for the length the screw occupies, where the only solid they may
+	# meet is the bore's own wall: a web left across the bore, an inward rib,
+	# a floor the modeller put above the stated depth are all in the screw's
+	# way just as surely as a lid over the hole, and a fan that stopped at the
+	# mouth called every one of them clear. The span starts past the mouth
+	# band (the boss's end face is the screw arriving) and ends just short of
+	# the engaged depth, so the bore's floor under a screw that bottoms out is
+	# not an obstruction either.
 	var expected := {
 		"point": bore_start,
 		"axis": bore_axis,
@@ -577,6 +589,11 @@ func _one_screw(
 		"from_t": wall_entry_t,
 		"to_t": wall_exit_t,
 		"band": mouth_band,
+		# From the FULL-TURN mouth: between the wall's furthest reach and
+		# the mouth at every azimuth the thread is on one side only, and the
+		# boss's trimmed end face is the screw arriving there too.
+		"bore_from_t": bore_entry_t + mouth_band,
+		"bore_to_t": engaged_to - PATH_END_EPSILON_MM,
 		"datum": hole_centre,
 		"direction": direction,
 	}
@@ -815,6 +832,12 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 ## empty `expected` and the fan sees the references only — which is what the
 ## HEAD ring does, because the head never has to reach the bore and the solid
 ## it would meet on its own span is the top of the boss it is sitting on.
+##
+## THE ENGAGED BORE IS INSPECTED TOO. When `expected` carries bore_from_t and
+## bore_to_t, hits between them — past the mouth, down to the engaged depth —
+## are judged by one rule: a hit at the bore's own radius about its axis is
+## the wall (the screw's thread is meant to meet it), and anything else there
+## is an obstruction, reported with span "bore".
 func _fan_clear(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -832,7 +855,10 @@ func _fan_clear(
 ) -> Dictionary:
 	var obstructions: Array = []
 	var rays := _disc_points(direction, radius)
-	var travel := (to_t - from_t) + OUTSIDE_MARGIN_MM * 2.0 + (datum - origin).length()
+	var bore_from_t := float(expected.get("bore_from_t", INF))
+	var bore_to_t := float(expected.get("bore_to_t", -INF))
+	var far_end := maxf(to_t, bore_to_t)
+	var travel := (far_end - from_t) + OUTSIDE_MARGIN_MM * 2.0 + (datum - origin).length()
 	var see_solid := not expected.is_empty()
 	for index in range(rays.size()):
 		var offset: Vector3 = rays[index]
@@ -842,10 +868,17 @@ func _fan_clear(
 				mask, reference_scope, see_solid):
 			var crossing: Dictionary = hit
 			var t: float = (crossing["point"] as Vector3 - datum).dot(direction)
-			if t < from_t or t > to_t:
-				continue
-			if bool(crossing.get("solid", false)) \
-					and _is_the_screw_arriving(crossing["point"], t, expected):
+			var span := ""
+			if t >= from_t and t <= to_t:
+				span = "approach"
+				if bool(crossing.get("solid", false)) \
+						and _is_the_screw_arriving(crossing["point"], t, expected):
+					continue
+			elif t >= bore_from_t and t <= bore_to_t:
+				span = "bore"
+				if _is_the_bore_wall(crossing["point"], expected):
+					continue
+			else:
 				continue
 			if obstructions.size() < MAX_OBSTRUCTIONS:
 				obstructions.append({
@@ -853,6 +886,9 @@ func _fan_clear(
 					"reference": str(crossing.get("reference", "")),
 					"point_mm": _frames(crossing["point"], str(crossing.get("reference", ""))),
 					"axial_mm": t,
+					# Where on the screw's travel it was met: on the approach
+					# to the mouth, or inside the engaged bore.
+					"span": span,
 					# Which ring of the disc saw it, and how wide the disc was.
 					# An obstruction reported at a ray radius between the two
 					# is one no rim-only fan could have found.
@@ -897,6 +933,17 @@ func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> b
 	if radial > float(expected["radius"]) + BORE_WALL_TOLERANCE_MM:
 		return false
 	return t >= float(expected["from_t"]) and t <= float(expected["to_t"])
+
+
+## Is this hit, inside the engaged bore, the bore's own wall? A wall hit lies
+## at the bore's radius about the bore's axis, to the tessellation slack a
+## chorded cylinder has; a hit nearer the axis is something across the bore,
+## and a hit further out is a surface in the material the thread would bite.
+func _is_the_bore_wall(point: Vector3, expected: Dictionary) -> bool:
+	var axis: Vector3 = expected["axis"]
+	var offset: Vector3 = point - (expected["point"] as Vector3)
+	var radial := (offset - axis * offset.dot(axis)).length()
+	return absf(radial - float(expected["radius"])) <= BORE_WALL_TOLERANCE_MM
 
 
 ## Do the panel's references still stand where this check's snapshot says?
@@ -1496,8 +1543,10 @@ func _why(row: Dictionary) -> String:
 	if not bool(row.get("path_clear", true)):
 		var first: Array = row.get("obstructions", []) as Array
 		if not first.is_empty():
-			return "the screw path is blocked by %s" \
-				% str((first[0] as Dictionary).get("node", "something"))
+			var where := " inside the engaged bore" \
+				if str((first[0] as Dictionary).get("span", "")) == "bore" else ""
+			return "the screw path is blocked by %s%s" \
+				% [str((first[0] as Dictionary).get("node", "something")), where]
 		return "the screw path is blocked"
 	if not bool(row.get("engagement_ok", true)):
 		if not bool(row.get("engagement_certain", true)):

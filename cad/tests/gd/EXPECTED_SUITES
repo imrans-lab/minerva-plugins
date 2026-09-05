@@ -194,16 +194,29 @@ test_cad_note.gd assertions=40
 # tetrahedron whose single buried vertex sits inside that plate, on ALL THREE
 # of its edges: an edge that only LEAVES material has nothing ahead of the
 # crossing, so the run has to be measured on both sides of it.
-# 57 assertions = 3 fixture + 5 collider +
+# And the paint belongs to the NEWEST evaluation from the moment it queues: a
+# check that is running when a newer evaluation arrives keeps its ticket,
+# finishes measuring and answers, but paints nothing — an interfering
+# document's crosses must not stand on screen until the queued clean one
+# runs — and the queued check paints the pane when its turn comes.
+# And a crossing the reference side cannot READ is still a crossing: a
+# narrow solid column through the plates of the layered stack, whose parity
+# probes on both sides of every crossing run out of budget, is reported on
+# the plate faces with the plate's thickness — the tri-state that keeps an
+# unreadable probe from clearing a body holds on the reference side as it
+# does on the solid side.
+# 59 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
-# 5 queue/supersession + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
-# + 3 layered stack (+1: the same budget failure with the stack as the SOLID
-# and a small node inside it — undecided, never dropped) + 3
+# 6 queue/supersession (+1: a queued newer evaluation revokes the running
+# check's paint) + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
+# + 4 layered stack (+1: the same budget failure with the stack as the SOLID
+# and a small node inside it — undecided, never dropped; +1: a solid edge
+# through a plate with both probes out of budget is kept as a crossing) + 3
 # two-enclosing-blocks (+1: two OVERLAPPING nodes of one reference are two
 # answers, which a reference-scoped question cannot give) + 3 thin plate
 # (+1: the tetrahedron that only leaves the plate) + 1 per-node parity
 # budget.
-test_interference.gd assertions=57
+test_interference.gd assertions=59
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -255,13 +268,24 @@ test_interference.gd assertions=57
 # moved. And a tolerance the worker could only GUESS (a curved face it cannot
 # read) is not a bound: the check fails with a reason and a status line that
 # says so, and passes on the distances alone only when the caller accepts an
-# unbounded tolerance.
-# 43 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
-# fixture and the byte-measured refusal) + 4 refusal + 6 buried (+2: the
-# undecidable node and the undecidable reference) + 2 pin/blob across a
+# unbounded tolerance — and then it really is the distances alone: the
+# stand-in grades like the worker (min_mm less the effective tolerance
+# against required_mm), so a 0.505 mm gap under a 0.5 mm requirement with a
+# 0.01 mm estimate fails in the worker's reply, and the opt-in regrades it on
+# min_mm with the reply saying the bar was waived.
+# And the join is only as fresh as the poses and colliders it was measured
+# at: a clean report about THIS source whose reference has since been moved
+# (pose rewritten in place) or whose colliders have since been rebuilt is
+# stale — nothing is joined, the check does not pass, and the reason says so —
+# while a report stamped at the current state passes again.
+# 45 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
+# fixture and the byte-measured refusal) + 4 refusal + 7 buried (+2: the
+# undecidable node and the undecidable reference; +1: a stale report — moved
+# poses or rebuilt colliders — is not a pass) + 2 pin/blob across a
 # re-pose (+1: the corrupted same-length file) + 1 pose rewritten in place
-# + 1 unbounded tolerance + 3 isolation.
-test_clearance.gd assertions=43
+# + 2 unbounded tolerance (+1: the waiver grades on the distance alone)
+# + 3 isolation.
+test_clearance.gd assertions=45
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -322,7 +346,11 @@ test_clearance.gd assertions=43
 # Seating is a DEPTH question with a depth tolerance: hole 2 is counterbored
 # 0.3 mm — a complete annular floor inside the ring's 0.5 mm lateral pitch —
 # and must read as unsupported with the gap measured, not as a seat.
-# 58 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
+# And the shank fan does not stop at the mouth: the same rays carry on down
+# the ENGAGED bore, where only the bore's own wall may be met — a separate
+# check on a one-boss shell with a web across its bore 2 mm below the mouth
+# reports the path blocked by the solid inside the bore, at the web's depth.
+# 59 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
 # spacing, with the rays it placed counted) + 5 pairing (+1: the groove is not
 # paired and is named, +1: partial surfaces are asked for and a one-bin-short
 # bore is still a bore) + 8 A (+1: engagement measured on the
@@ -332,9 +360,10 @@ test_clearance.gd assertions=43
 # axis and the rim) + 4 F (+1: the seat number states that it is coverage of
 # one ring at a stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat
 # + 5 refusal (+1: an empty check reports its own counters, +1: an inexact
-# extent is not graded) + 4 poses (+1: a mid-flight collider rebuild comes
+# extent is not graded) + 1 web in the bore + 4 poses (+1: a mid-flight
+# collider rebuild comes
 # back stale, with no rows measured against holes that describe where the
 # references used to be, +1: a pose rewritten in place under a waiting check
 # is stale as well, +1: a check that starts with the colliders already
 # behind the poses is stale or rebuilds, never a mixed epoch).
-test_fasteners.gd assertions=58
+test_fasteners.gd assertions=59

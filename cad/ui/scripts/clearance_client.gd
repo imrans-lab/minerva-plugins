@@ -18,6 +18,7 @@ extends RefCounted
 
 
 const _WorkerReply: Script = preload("worker_reply.gd")
+const _MeshGauge: Script = preload("mesh_gauge.gd")
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +198,15 @@ func release() -> void:
 ## every face and its tessellation tolerance is a guess, not a promise. A gap
 ## measured on such a mesh has no error bar, so the verdict is `pass` false
 ## with `pass_reason` saying why — unless the caller states
-## accept_unbounded_tolerance, in which case the pairs are judged on their
-## distances alone and the flag still travels.
+## accept_unbounded_tolerance, in which case every pair is REGRADED on min_mm
+## against required_mm (the worker's own verdict had subtracted the guess),
+## `bound_mm` becomes min_mm, and the reply carries `tolerance_waived` with a
+## `waiver` saying the bar was set aside; the flag still travels.
+##
+## The join is only made from a report about THIS source measured against
+## the reference poses and colliders standing NOW; a report whose references
+## have moved or been rebuilt since is stale, joins nothing and fails the
+## check with a `pass_reason`, because whether a node is buried is unknown.
 ##
 ## THE POSES ARE THE ONES THE CHECK WAS CALLED WITH. The geometry is extracted
 ## and hashed at the poses of entry, so the worker's world answer is about
@@ -281,7 +289,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# the retry names — a single-shot "could not read" with nothing wrong.
 	var pinned := _pin(plan["batches"] as Array)
 	var report := await _measure(panel, head, plan["batches"] as Array, records,
-		_buried_pairs(document, source),
+		_buried_pairs(document, source, records, panel),
 		bool(args.get("accept_unbounded_tolerance", false)))
 	_unpin(pinned)
 	if bool(report.get("checked", false)):
@@ -523,15 +531,31 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		pairs.append(pair)
 	pairs.sort_custom(func(a, b): return float((a as Dictionary)["min_mm"]) \
 		< float((b as Dictionary)["min_mm"]))
+	# A worker that does not say whether its tolerance is a bound is one that
+	# always derived it from a measured radius; only an explicit false is a
+	# guess. A guess has no error bar to subtract, so the distances cannot be
+	# judged against required_mm unless the caller has said that will do —
+	# and when the caller has, the grade IS the distance: the worker's own
+	# pass already subtracted the guess, so it is regraded here on min_mm
+	# against required_mm, and each pair says that is what it was graded on.
+	var bounded := bool(envelope.get("tolerance_bounded", true))
+	var required := float(envelope.get("required_mm", 0.0))
+	var waived := not bounded and accept_unbounded
+	if waived:
+		for entry in pairs:
+			var pair: Dictionary = entry
+			if bool(pair.get("interference", false)) \
+					or bool(pair.get("containment_undecidable", false)):
+				continue
+			pair["bound_mm"] = float(pair["min_mm"])
+			pair["pass"] = float(pair["min_mm"]) > 0.0 \
+				and float(pair["min_mm"]) >= required
+			pair["graded_on"] = "min_mm alone: the tolerance bar was waived " \
+				+ "by accept_unbounded_tolerance"
 	var verdict := true
 	for entry in pairs:
 		if not bool((entry as Dictionary)["pass"]):
 			verdict = false
-	# A worker that does not say whether its tolerance is a bound is one that
-	# always derived it from a measured radius; only an explicit false is a
-	# guess. A guess has no error bar to subtract, so the distances cannot be
-	# judged against required_mm unless the caller has said that will do.
-	var bounded := bool(envelope.get("tolerance_bounded", true))
 	var pass_reason := ""
 	if not bounded and not accept_unbounded:
 		verdict = false
@@ -539,6 +563,12 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			+ "unrecognised curved faces in the solid, so the measured " \
 			+ "distances carry no error bar; pass accept_unbounded_tolerance " \
 			+ "to judge them on the distances alone"
+	# A report that could not decide the containment question — measured
+	# against reference poses or colliders that have since changed — leaves
+	# "is any node buried" unknown, and unknown is not a pass.
+	if bool(buried.get("stale", false)):
+		verdict = false
+		pass_reason = str(buried.get("reason", "the interference report is stale"))
 	var report := {
 		"checked": true,
 		"units": "mm",
@@ -558,6 +588,12 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	}
 	if not pass_reason.is_empty():
 		report["pass_reason"] = pass_reason
+	if waived:
+		report["tolerance_waived"] = true
+		report["waiver"] = "the tessellation tolerance is a guess here and " \
+			+ "its error bar was WAIVED at the caller's request: every pair " \
+			+ "is graded on min_mm against required_mm alone, with no " \
+			+ "deduction for chord error"
 	return report
 
 
@@ -568,11 +604,20 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 ## last eval result, so the answer is already there; asking again would rebuild
 ## the solid's collider for a question that has been answered.
 ##
-## Returns {fresh, nodes: {key: true}, undecided: {key: reason},
+## Returns {fresh, stale?, reason?, nodes: {key: true}, undecided: {key: reason},
 ## undecided_references: {reference: reason}}.
 ## `fresh` is false when no report describes the source about to be measured —
 ## the reply then says the join was unavailable rather than implying the
 ## distances are signed.
+##
+## FRESH MEANS THE SAME SOURCE, THE SAME POSES AND THE SAME COLLIDERS. A
+## report about this source but about references that have since moved, or
+## colliders rebuilt since, is `stale`: it cannot say which nodes are buried
+## NOW — a reference moved into the solid after it ran reads as a positive,
+## unsigned gap — so nothing is joined, and the caller refuses to pass on
+## it. The poses are compared through the gauge's own records-to-bodies
+## digest, the colliders by its rebuild generation; `records` is the caller's
+## snapshot of the panel's records and `panel` supplies the gauge.
 ##
 ## UNDECIDED NODES TRAVEL TOO. A node whose containment the interference check
 ## could not settle is exactly the node whose unsigned distance cannot be
@@ -580,7 +625,8 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 ## wall it is inside. Passing such a node on its measured number is the same
 ## blind spot the join exists to close, so it is carried through and the pair
 ## says so.
-func _buried_pairs(document: Dictionary, source: String) -> Dictionary:
+func _buried_pairs(document: Dictionary, source: String, records: Array,
+		panel: Object) -> Dictionary:
 	var out := {"fresh": false, "nodes": {}, "undecided": {},
 		"undecided_references": {}}
 	var last_eval: Variant = document.get("last_eval", {})
@@ -593,6 +639,22 @@ func _buried_pairs(document: Dictionary, source: String) -> Dictionary:
 	if not bool(interference.get("checked", false)):
 		return out
 	if str(interference.get("source_digest", "")) != _source_digest(source):
+		return out
+	var moved := str(interference.get("records_digest", "")) \
+		!= str(_MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(records)))
+	var gauge: Object = panel.get_mesh_gauge() \
+		if panel != null and panel.has_method("get_mesh_gauge") else null
+	var generation := int(gauge.call("get_generation")) \
+		if gauge != null and is_instance_valid(gauge) else -1
+	var rebuilt := int(interference.get("gauge_generation", -2)) != generation
+	if moved or rebuilt:
+		out["stale"] = true
+		out["reason"] = ("the latest interference report for this source was "
+			+ "measured against %s, so whether any node is buried in the "
+			+ "solid NOW is unknown; a mesh-to-mesh distance is unsigned and "
+			+ "cannot tell, so this check cannot pass — re-evaluate and ask "
+			+ "again") % ("reference poses that have since changed"
+				if moved else "reference colliders that have since been rebuilt")
 		return out
 	out["fresh"] = true
 	var nodes: Dictionary = out["nodes"]
@@ -620,6 +682,8 @@ func _buried_pairs(document: Dictionary, source: String) -> Dictionary:
 ## What the join contributed, in one sentence, so the reply is readable
 ## without the reader knowing the interference check exists.
 func _join_note(buried: Dictionary) -> String:
+	if bool(buried.get("stale", false)):
+		return "STALE: " + str(buried.get("reason", ""))
 	if not bool(buried.get("fresh", false)):
 		return "no interference report describes this source, so none was " \
 			+ "joined: a mesh-to-mesh distance is unsigned, and a node buried " \

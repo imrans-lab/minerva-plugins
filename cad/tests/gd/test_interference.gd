@@ -198,6 +198,13 @@ const GAP_CUBE_MM := 0.1
 const GAP_CENTRE_Z := 0.2
 const GAP_REFERENCE := "gap_cube"
 const GAP_NODE := "Assembly/GapCube"
+## The solid column driven through the stack: centred on the middle plate
+## (z = 0), 1.2 mm tall so it spans three plates and ends in the gaps at
+## +/-0.6, and well off the x = +/-y diagonals a baked square plate is
+## triangulated along.
+const STACK_COLUMN_MM := 1.0
+const STACK_COLUMN_HEIGHT_MM := 1.2
+const STACK_COLUMN_XY := Vector2(13.0, 4.0)
 
 const POINT_TOLERANCE_MM := 0.05
 
@@ -779,9 +786,10 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 			"replies = %s" % str(replies))
 	# A ticket belongs to a GRANTED reservation, and the queued evaluation is
 	# granted only after the running one releases — so the one that was
-	# running is not overtaken while it runs: it answers, paints its own
-	# clean result, and the newest paints over it a moment later. The one
-	# displaced in the queue is the only superseded reply here.
+	# running is not overtaken while it runs: it answers in its own right.
+	# It does not PAINT (a newer evaluation queued behind it, see below), but
+	# that is not supersession: the one displaced in the queue is the only
+	# superseded reply here.
 	check("queue: the one displaced in the queue stands down as superseded "
 			+ "and measures nothing, while the check that ran and the one "
 			+ "that queued behind it are both answers in their own right",
@@ -829,6 +837,61 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 					GeometryChecks.MARKER_NODE_NAME) != null,
 			"refused = %s, measured = %s" % [
 				str(refused.get("busy", refused)), str(measured)])
+
+	# THE RUNNING CHECK'S PAINT IS REVOKED THE MOMENT A NEWER EVALUATION
+	# QUEUES. A interferes and is not awaited; B, clean, queues behind it. A
+	# keeps its ticket and finishes measuring — its reply is a true answer
+	# about its own document — but it must not paint: its red crosses would
+	# stand on screen until B ran, about a document that is already gone. The
+	# pane is cleared first, so a marker sampled at A's reply can only be
+	# A's; at the end B has painted the pane empty.
+	panel.mesh_data = clear
+	var cleared: Dictionary = await checks.check(panel, {})
+	var clear_before := mesh_root != null \
+		and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) == null
+	panel.mesh_data = through
+	var revoked: Array = []
+	_collect(checks, panel, revoked)
+	panel.mesh_data = clear
+	_collect(checks, panel, revoked)
+	var sampled_at_a := false
+	var painted_at_a := false
+	for _frame in range(900):
+		if revoked.size() >= 1 and not sampled_at_a:
+			sampled_at_a = true
+			painted_at_a = mesh_root != null \
+				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null
+		if revoked.size() >= 2:
+			break
+		await process_frame
+	var a := {}
+	var b := {}
+	for entry in revoked:
+		var reply: Dictionary = entry
+		if int(reply.get("count", 0)) > 0:
+			a = reply
+		else:
+			b = reply
+	check("queue: a newer evaluation queued while an INTERFERING check runs "
+			+ "revokes that check's paint — it keeps its ticket, measures and "
+			+ "answers, says its paint was withheld, and the clean check that "
+			+ "queued behind it is the one that paints the pane (empty)",
+			bool(cleared.get("painted", false)) and clear_before
+				and revoked.size() == 2
+				and bool(a.get("checked", false))
+				and not bool(a.get("superseded", false))
+				and a.has("painted") and not bool(a.get("painted", true))
+				and str(a.get("paint_withheld", "")).contains("newer evaluation")
+				and bool(b.get("checked", false))
+				and int(b.get("count", -1)) == 0
+				and bool(b.get("painted", false))
+				and sampled_at_a and not painted_at_a
+				and mesh_root != null
+				and mesh_root.get_node_or_null(
+					GeometryChecks.MARKER_NODE_NAME) == null,
+			"cleared=%s a=%s b=%s sampled=%s painted_at_a=%s" % [
+				str(cleared.get("painted")), str(a), str(b), str(sampled_at_a),
+				str(painted_at_a)])
 
 	panel.queue_free()
 
@@ -1189,6 +1252,61 @@ func _check_layered_stack(gauge: Node, checks: RefCounted) -> void:
 				and str(about_cube.get("reference", "")) == GAP_REFERENCE,
 			"report = %s" % str(reversed_report))
 
+	# A CONFIRMED CROSSING IS NOT DISCARDED BECAUSE ITS PROBES CANNOT BE
+	# READ. A narrow column of the SOLID is driven through the middle plates
+	# of the stack: every vertical edge straddles six plate faces, and the
+	# probe placed a step either side of each crossing asks the gauge for
+	# parity through the same eighty surfaces — so BOTH probes come back out
+	# of budget. On the solid side that tri-state keeps the crossing; the
+	# reference side used to read the error as "outside" for both probes and
+	# throw the crossing away, leaving a column through eight plates reported
+	# as nothing at all. Off the plates' own diagonals, so no plate edge can
+	# report it from the other direction: only a kept crossing can.
+	var stack_only: int = gauge.build([{
+		"mesh": stack, "transform": _pose, "node": STACK_NODE,
+		"reference": STACK_A,
+	}], "stack-column-fixture|v1")
+	_records = [{
+		"name": STACK_A,
+		"pose": _pose,
+		"world_aabb": box,
+		"parts": [{"mesh": stack, "transform": Transform3D.IDENTITY,
+			"node_path": STACK_NODE, "node": STACK_NODE}],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(await _stack_column_mesh())
+	var pierced: Dictionary = await _submit(gauge, checks, "", "")
+	var plate_pair := {}
+	for entry in pierced.get("pairs", []):
+		if str((entry as Dictionary).get("node", "")) == STACK_NODE:
+			plate_pair = entry
+	# Every reported point lies on a plate face: in the stack's own frame its
+	# z is an odd multiple of half the plate thickness, half a pitch apart.
+	var on_faces := not plate_pair.is_empty()
+	for entry in plate_pair.get("points_mm", []):
+		var local := _as_vector((entry as Dictionary).get("local", []))
+		var nearest := INF
+		for face_z in [-0.5, -0.3, -0.1, 0.1, 0.3, 0.5]:
+			nearest = minf(nearest, absf(local.z - float(face_z)))
+		if nearest > POINT_TOLERANCE_MM:
+			on_faces = false
+	# The penetration is the longest run of one edge inside a plate: the
+	# plate's thickness on a vertical edge, a little more on a baked face
+	# diagonal that crosses it at a slant — never less than the plate.
+	var penetration := float(plate_pair.get("penetration_mm", 0.0))
+	var slant := STACK_PLATE_MM / cos(atan(STACK_COLUMN_MM / STACK_COLUMN_HEIGHT_MM))
+	check("layers: a solid edge through a plate whose parity probes BOTH run "
+			+ "out of budget is still a crossing — kept, on the plate's face, "
+			+ "with at least the plate's own thickness as its penetration — "
+			+ "never discarded because the reference side could not be read",
+			stack_only == 1 and bool(pierced.get("checked", false))
+				and int(pierced.get("count", 0)) == 1
+				and int(plate_pair.get("point_count", 0)) >= 4
+				and on_faces
+				and penetration >= STACK_PLATE_MM - POINT_TOLERANCE_MM
+				and penetration <= slant + POINT_TOLERANCE_MM,
+			"report = %s" % str(pierced))
+
 
 ## The stack: STACK_PLATES plates of STACK_PLATE_MM, STACK_PITCH_MM apart, so
 ## the gaps between them are wider than the cube and every ray through the
@@ -1209,6 +1327,23 @@ func _bake_stack() -> ArrayMesh:
 	var baked: ArrayMesh = combiner.bake_static_mesh()
 	combiner.queue_free()
 	return baked
+
+
+## The column through the middle plates: a millimetre square, tall enough to
+## cross three plates (six faces) with both ends in a gap, and parked off the
+## plates' face diagonals so only its own edges can report it.
+func _stack_column_mesh() -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "StackColumn"
+	var post := CSGBox3D.new()
+	post.size = Vector3(STACK_COLUMN_MM, STACK_COLUMN_MM, STACK_COLUMN_HEIGHT_MM)
+	post.position = Vector3(STACK_COLUMN_XY.x, STACK_COLUMN_XY.y, 0.0)
+	combiner.add_child(post)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
 
 
 ## The same cube as a REFERENCE mesh, for the direction where the stack is the
