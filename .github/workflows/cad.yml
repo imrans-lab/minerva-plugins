@@ -142,17 +142,26 @@ jobs:
       # anything transitive turns this red. That is the intent: a new version
       # is a licence text to re-check.
       - name: Verify the licence census still describes the built bundle
-        # Both counters are load-bearing. `sp=$(...)` runs in a subshell, so a
-        # glob that matches nothing does not trip `set -e`: it yields an empty
-        # path, and a verification of nothing is a green step. Same for the
-        # outer loop — `for stage in <glob>/` with no stage directory iterates
-        # zero times and the step passes without checking any bundle at all.
+        # Both counters are load-bearing. A layout glob that matches nothing
+        # expands to its own literal, so the candidate loop tests each path
+        # with `[ -d ]` rather than asking `ls` — under `set -euo pipefail` a
+        # non-zero `ls` inside a command substitution aborts the whole step,
+        # and its diagnostic would be the one thing not printed. An empty `sp`
+        # therefore means a real missing site-packages, and the outer counter
+        # catches the case of no stage directory at all, where the loop body
+        # never runs and nothing would be verified.
         run: |
           set -euo pipefail
           verified=0
           for stage in runtime-build/runtime-stage/*/; do
             [ -d "$stage" ] || continue
-            sp=$(ls -d "$stage"lib/python*/site-packages "$stage"Lib/site-packages 2>/dev/null | head -1)
+            sp=""
+            for cand in "$stage"lib/python*/site-packages "$stage"Lib/site-packages; do
+              if [ -d "$cand" ]; then
+                sp="$cand"
+                break
+              fi
+            done
             if [ -z "$sp" ]; then
               echo "no site-packages under $stage — nothing to verify against" >&2
               exit 1
