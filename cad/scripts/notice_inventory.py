@@ -715,11 +715,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='svgpathtools',
         component='svgpathtools',
-        version='1.7.4',
+        version='1.7.5',
         license='MIT',
         copyright='Copyright (c) 2015 Andrew Allan Port',
         source_url='https://github.com/mathandy/svgpathtools',
-        license_files=('svgpathtools-1.7.4.LICENSE.txt',),
+        license_files=('svgpathtools-1.7.5.LICENSE.txt',),
         note='SVG path maths; a build123d dependency.',
     ),
     RuntimeComponent(
