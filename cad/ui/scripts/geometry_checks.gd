@@ -192,6 +192,10 @@ var reservation_timeout_ms: int = RESERVATION_TIMEOUT_MS
 ## holder's AGE is what a queued request refuses on, and what the refusal
 ## reports.
 var _holder_since: int = 0
+## The one queued evaluation, or 0. A newer arrival takes this slot and the
+## ticket it displaced stands down: the panel wants the NEWEST document
+## checked, not every document checked in turn.
+var _pending: int = 0
 ## The ticket the running reservation was taken with. Only that ticket's
 ## release frees the module.
 var _holder: int = 0
@@ -361,7 +365,9 @@ func get_solid_edge_count() -> int:
 ## `args` may carry reference= and node= to narrow the question; the mask is
 ## derived from the reference here, so no caller has to know about layers.
 func check(panel: Object, args: Dictionary = {}) -> Dictionary:
-	var reservation := await reserve()
+	# An agent's verb call says so and is refused while a check runs; the
+	# panel's own per-evaluation check says nothing and queues.
+	var reservation := await reserve(not bool(args.get("on_demand", false)))
 	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
 		return refused(reservation)
@@ -396,8 +402,19 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## a second owner of that body is exactly what the ticket exists to prevent.
 ## Every granted reservation must be released BY ITS OWN TICKET.
 ##
-## Returns {ticket: <non-zero>} when the module is taken, and {ticket: 0,
-## busy: true, holder_ticket, holder_age_ms, reason} when it is not.
+## Returns {ticket: <non-zero>} when the module is taken, and a ticket of 0
+## with a reason when it is not.
+##
+## TWO KINDS OF CALLER, and they want opposite things. An EVALUATION must not
+## be refused: the panel checks every evaluation and paints the result, so a
+## check dropped because an older one was still running leaves the newest
+## document unchecked and the last evaluation's crosses on screen. It QUEUES
+## (`queued`), and there is one place in that queue: a newer evaluation
+## arriving takes it and the one it displaced stands down as superseded, which
+## is correct — nobody wants a report about the document before last. A VERB
+## asked for by an agent is the opposite: it is a question about now, it has a
+## caller who can ask again, and a wait it cannot see is worse than an answer
+## that says retry. It gets `busy`.
 ##
 ## A LIVE HOLDER IS REFUSED, NOT OVERTAKEN. The records, the cast counters and
 ## the solid's collider are module state: a second job mutating them frees the
@@ -418,12 +435,16 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## mutates module state on a reservation's behalf check that the caller is
 ## still the holder, so a dead holder that resumes late releases nothing,
 ## paints nothing and writes nothing.
-func reserve() -> Dictionary:
+func reserve(queued: bool = false) -> Dictionary:
 	_ticket += 1
 	var ticket := _ticket
-	if _in_flight:
+	var tree := _tree()
+	while _in_flight:
 		var age := Time.get_ticks_msec() - _holder_since
-		if age < reservation_timeout_ms:
+		if age >= reservation_timeout_ms:
+			# The holder is past its window: reclaimed here, and nowhere else.
+			break
+		if not queued:
 			return {
 				"ticket": 0,
 				"busy": true,
@@ -434,6 +455,22 @@ func reserve() -> Dictionary:
 					+ "hand it the other one's collider. Retry in a moment.")
 					% [_holder, age],
 			}
+		# One place in the queue. A newer evaluation takes it, and this one
+		# stands down rather than measuring a document that has moved on.
+		_pending = ticket
+		if tree != null:
+			await tree.process_frame
+		else:
+			await check_finished
+		if _pending != ticket:
+			return {
+				"ticket": 0,
+				"superseded": true,
+				"reason": "a newer evaluation arrived while this check waited "
+					+ "for the panel's geometry; that one is being checked",
+			}
+	if _pending == ticket:
+		_pending = 0
 	_in_flight = true
 	_holder = ticket
 	_holder_since = Time.get_ticks_msec()
@@ -457,6 +494,7 @@ func release_reservation(ticket: int) -> void:
 	_in_flight = false
 	_holder = 0
 	_holder_since = 0
+	# Whoever is queued wakes on the next idle frame and takes it.
 	check_finished.emit()
 
 
@@ -479,6 +517,8 @@ func refused(reservation: Dictionary) -> Dictionary:
 		report["holder_ticket"] = int(reservation.get("holder_ticket", 0))
 		report["holder_age_ms"] = int(reservation.get("holder_age_ms", 0))
 		return report
+	# Displaced in the queue by a newer evaluation: its answer is the one the
+	# panel wants, and this reply says why there is nothing here.
 	return _superseded(report)
 
 
@@ -1060,8 +1100,16 @@ func _containment(
 				if not _inside_reference(
 						gauge, state, probe, reference_name, node_path):
 					continue
+				# Is that verified point inside the SOLID? An error here — a
+				# ray crossing more surfaces than the parity budget allows —
+				# is not "outside": treating it as one reports a node that may
+				# be buried in the solid as clean. Try the next probe; if none
+				# of them can be read, the node is undecidable.
+				var verdict := _parity_inside_solid(solid_state, probe)
+				if verdict < 0:
+					continue
 				decided_node = true
-				if _parity_inside_solid(solid_state, probe) != 1:
+				if verdict != 1:
 					break
 				_absorb(pairs, {
 					"point": probe,

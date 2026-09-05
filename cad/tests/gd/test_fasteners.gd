@@ -865,7 +865,17 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 	var second_row := _row_at_world(second, _pose * expected)
 	var second_local := _local_of(second_row.get("seat_mm", {}))
 	var moved_expected: Vector3 = moved.affine_inverse() 		* (_pose * expected)
-	var second_ok := bool(second.get("busy", false)) 		or (not bool(second.get("checked", false))) 		or second_local.distance_to(moved_expected) < NUMERIC_TOLERANCE_MM
+	# Only TWO outcomes are acceptable, and "checked: false" on its own is not
+	# one of them: a malformed reply or an unrelated refusal would sail past a
+	# test that took any failure for a well-behaved one. Either the check ran
+	# and answered in the MOVED frame, or it stood down for one of the two
+	# documented reasons — busy (the geometry is held by the check still in
+	# flight) or stale (the colliders were rebuilt under it).
+	var second_stood_down := bool(second.get("busy", false)) \
+		or bool(second.get("stale", false))
+	var second_ok := second_stood_down \
+		or (bool(second.get("checked", false))
+			and second_local.distance_to(moved_expected) < NUMERIC_TOLERANCE_MM)
 	check("poses: a check answers in the poses it was CALLED with, even "
 			+ "though the panel was re-posed while it waited for the worker; "
 			+ "a check started after the move never answers in the old frame",

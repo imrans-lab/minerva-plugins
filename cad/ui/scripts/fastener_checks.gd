@@ -258,7 +258,9 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 			+ "describe where those references are; run "
 			+ "minerva_cad_find_holes again and re-ask")
 
-	var reservation: Dictionary = await checks.call("reserve")
+	# Un-queued: this check only ever runs because an agent asked for it, and
+	# an agent is better served by "retry" than by an invisible wait.
+	var reservation: Dictionary = await checks.call("reserve", false)
 	var ticket := int(reservation.get("ticket", 0))
 	if ticket == 0:
 		# The interference module owns the solid's collider and hands out one

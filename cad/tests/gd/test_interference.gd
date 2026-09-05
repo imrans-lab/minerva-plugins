@@ -193,6 +193,8 @@ const GAP_CUBE_MM := 0.1
 ## Plate STACK_PLATES / 2 is centred on z = 0 (its top face at +0.1) and the
 ## next plate's underside is at +0.3; the middle of that gap is +0.2.
 const GAP_CENTRE_Z := 0.2
+const GAP_REFERENCE := "gap_cube"
+const GAP_NODE := "Assembly/GapCube"
 
 const POINT_TOLERANCE_MM := 0.05
 
@@ -721,60 +723,77 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 	var mesh_root: Node = panel.get_node_or_null(MESH_ROOT_PATH)
 	var replies: Array = []
 
-	# The interfering solid goes first and is NOT awaited: it is still waiting
-	# for a physics step when the second request arrives.
-	panel.mesh_data = through
+	# A goes first and is NOT awaited: it is still waiting for its physics
+	# step when B and then C arrive. B is displaced by C — one place in the
+	# queue, and the newest document is the one worth checking — and C is the
+	# evaluation that must end up measured and painted. Its solid INTERFERES,
+	# so "painted" is a marker on screen and not the absence of one.
+	panel.mesh_data = clear
 	_collect(checks, panel, replies)
 	panel.mesh_data = clear
 	_collect(checks, panel, replies)
+	panel.mesh_data = through
+	_collect(checks, panel, replies)
 
-	# Sample the markers at the moment the FIRST reply lands. If the superseded
-	# check painted, its crosses are on screen right here — a later assertion
-	# on the end state could not tell that apart from the newer check having
-	# cleared them again.
-	var painted_when_superseded_returned := false
+	# Sample the markers when the first two replies have landed: if the
+	# check that was running painted, or the displaced one did, the crosses
+	# are on screen right here — an end-state assertion could not tell that
+	# apart from C having painted them afterwards.
+	var painted_before_the_newest := false
 	var sampled := false
-	for _frame in range(600):
-		if replies.size() >= 1 and not sampled:
+	for _frame in range(900):
+		if replies.size() >= 2 and not sampled:
 			sampled = true
-			painted_when_superseded_returned = mesh_root != null \
+			painted_before_the_newest = mesh_root != null \
 				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null
-		if replies.size() >= 2:
+		if replies.size() >= 3:
 			break
 		await process_frame
 
-	var older := {}
-	var newer := {}
+	var running := {}
+	var displaced := {}
+	var newest := {}
 	for entry in replies:
 		var reply: Dictionary = entry
 		if int(reply.get("count", 0)) > 0:
-			older = reply
+			newest = reply
+		elif bool(reply.get("checked", false)):
+			running = reply
 		else:
-			newer = reply
-	check("supersession: the first request answers about its own geometry and "
-			+ "the second, arriving while it still holds the module, is "
-			+ "refused as busy rather than run beside it",
-			replies.size() == 2 and not older.is_empty() and not newer.is_empty()
-				and bool(newer.get("busy", false))
-				and int(newer.get("holder_ticket", 0)) != 0,
+			displaced = reply
+
+	check("queue: an evaluation arriving while a check runs is QUEUED, never "
+			+ "refused — all three replies land, the one that was running "
+			+ "measures its own document, and the NEWEST measures too",
+			replies.size() == 3
+				and bool(running.get("checked", false))
+				and int(running.get("count", 0)) == 0
+				and bool(newest.get("checked", false))
+				and int(newest.get("count", 0)) > 0
+				and not bool(newest.get("busy", false))
+				and not bool(displaced.get("busy", false)),
 			"replies = %s" % str(replies))
-	check("supersession: the overtaken reply says so and the newest does not",
-			bool(older.get("superseded", false))
-				and not bool(newer.get("superseded", false)),
-			"older = %s, newer = %s" % [
-				str(older.get("superseded", null)), str(newer.get("superseded", null))])
-	check("supersession: the overtaken check never painted",
-			sampled and not painted_when_superseded_returned,
+	check("queue: the one displaced in the queue stands down as superseded "
+			+ "and measures nothing, and the newest is not superseded",
+			bool(displaced.get("superseded", false))
+				and not bool(displaced.get("checked", true))
+				and int(displaced.get("count", -1)) == 0
+				and bool(running.get("superseded", false))
+				and not bool(newest.get("superseded", false)),
+			"displaced = %s, running = %s, newest = %s" % [
+				str(displaced), str(running.get("superseded", null)),
+				str(newest.get("superseded", null))])
+	check("queue: neither the overtaken check nor the displaced one painted",
+			sampled and not painted_before_the_newest,
 			"sampled = %s, painted = %s" % [
-				str(sampled), str(painted_when_superseded_returned)])
-	check("supersession: nothing was painted at all — the overtaken check may "
-			+ "not paint and the refused one measured nothing",
+				str(sampled), str(painted_before_the_newest)])
+	check("queue: the pane ends up showing the NEWEST evaluation's answer — "
+			+ "its crossings, painted by the check that queued for them",
 			mesh_root != null
-				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) == null,
-			"a marker node survived a check that was never allowed to paint")
+				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null,
+			"no marker survived the newest evaluation's own check")
 
 	panel.queue_free()
-
 
 
 # ---------------------------------------------------------------------------
@@ -992,6 +1011,43 @@ func _check_layered_stack(gauge: Node, checks: RefCounted) -> void:
 			named.has(STACK_A) and named.has(STACK_B),
 			"undecidable = %s" % str(undecided))
 
+	# THE SAME QUESTION THE OTHER WAY ROUND. Now the stack is the SOLID and
+	# the cube is the reference node: the probe is verified inside the cube's
+	# own material, and the parity ray asking whether that point is inside the
+	# solid runs out of budget among the layers. Reading that as "outside"
+	# drops the node entirely — no pair, no doubt, nothing for the clearance
+	# join to fail on — which is the one answer a node that may be buried
+	# must never get.
+	var cube: ArrayMesh = await _bake_gap_cube()
+	var rebuilt: int = gauge.build([{
+		"mesh": cube, "transform": _pose, "node": GAP_NODE,
+		"reference": GAP_REFERENCE,
+	}], "gap-cube-fixture|v1")
+	_records = [{
+		"name": GAP_REFERENCE,
+		"pose": _pose,
+		"world_aabb": _posed_box(cube.get_aabb()),
+		"parts": [{"mesh": cube, "transform": Transform3D.IDENTITY,
+			"node_path": GAP_NODE, "node": GAP_NODE}],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(_mesh_data(stack, _pose))
+
+	var reversed_report: Dictionary = await _submit(gauge, checks, "", "")
+	var reversed_doubt: Array = reversed_report.get("undecidable", []) as Array
+	var about_cube := {}
+	for entry in reversed_doubt:
+		if str((entry as Dictionary).get("node", "")) == GAP_NODE:
+			about_cube = entry
+	check("layers: and the other direction — a reference node whose probe is "
+			+ "inside its own material, with the parity ray into the solid "
+			+ "out of budget, is UNDECIDED rather than quietly dropped",
+			rebuilt == 1 and bool(reversed_report.get("checked", false))
+				and int(reversed_report.get("count", 0)) == 0
+				and not about_cube.is_empty()
+				and str(about_cube.get("reference", "")) == GAP_REFERENCE,
+			"report = %s" % str(reversed_report))
+
 
 ## The stack: STACK_PLATES plates of STACK_PLATE_MM, STACK_PITCH_MM apart, so
 ## the gaps between them are wider than the cube and every ray through the
@@ -1007,6 +1063,22 @@ func _bake_stack() -> ArrayMesh:
 		plate.position = Vector3(0.0, 0.0,
 			STACK_PITCH_MM * float(index - STACK_PLATES / 2))
 		combiner.add_child(plate)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+## The same cube as a REFERENCE mesh, for the direction where the stack is the
+## solid and the cube is the node whose containment is asked about.
+func _bake_gap_cube() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "GapCubeReference"
+	var cube := CSGBox3D.new()
+	cube.size = Vector3(GAP_CUBE_MM, GAP_CUBE_MM, GAP_CUBE_MM)
+	cube.position = Vector3(0.0, 0.0, GAP_CENTRE_Z)
+	combiner.add_child(cube)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()

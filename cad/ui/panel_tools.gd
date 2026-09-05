@@ -477,6 +477,10 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 	var report: Dictionary = await panel.check_interference({
 		"reference": asked,
 		"node": str(args.get("node", "")),
+		# An agent asking now: refused with `busy` while an evaluation's own
+		# check holds the geometry, rather than queued behind it. The caller
+		# can ask again; a wait it cannot see would just look like a hang.
+		"on_demand": true,
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))

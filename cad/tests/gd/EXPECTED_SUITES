@@ -143,8 +143,10 @@ test_cad_note.gd assertions=40
 # inside the solid, caught by parity alone); the DESIGNED contact — a board
 # resting on an open cavity's floor, inside the shell's own bounds, which must
 # read as clean and not as containment; and supersession: two overlapping
-# requests through a stand-in panel, where the second is refused as busy, the
-# overtaken reply is marked and —
+# requests through a stand-in panel — now THREE, because an evaluation is
+# QUEUED and never refused: the one running answers its own document, the one
+# displaced in the single queue slot stands down as superseded, the newest
+# measures and is the only one that paints. The overtaken reply is marked and —
 # sampled at the instant it returns, which an end-state assertion could not
 # distinguish — never painted, while the pane ends up showing the newest
 # answer. And the probe that decides containment: a washer floating inside a
@@ -186,12 +188,14 @@ test_cad_note.gd assertions=40
 # tetrahedron whose single buried vertex sits inside that plate, on ALL THREE
 # of its edges: an edge that only LEAVES material has nothing ahead of the
 # crossing, so the run has to be measured on both sides of it.
-# 53 assertions = 3 fixture + 5 collider +
+# 54 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
-# 4 supersession + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
-# + 2 layered stack + 2 two-enclosing-blocks + 3 thin plate (+1: the
-# tetrahedron that only leaves the plate).
-test_interference.gd assertions=53
+# 4 queue/supersession + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
+# + 3 layered stack (+1: the same budget failure with the stack as the SOLID
+# and a small node inside it — undecided, never dropped) + 2
+# two-enclosing-blocks + 3 thin plate (+1: the tetrahedron that only leaves
+# the plate).
+test_interference.gd assertions=54
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees

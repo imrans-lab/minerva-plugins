@@ -74,11 +74,15 @@ def _blob_bytes(verts, faces):
 
 
 def write_blob(directory: Path, verts, faces) -> tuple[str, str]:
-    """Write one blob and return (path, key). Mirrors the panel's writer."""
+    """Write one blob and return (path, key). Mirrors the panel's writer.
+
+    The key covers the HEADER as well as the body — the counts decide how the
+    same bytes are read back, so they are part of what the digest identifies.
+    """
     body = _blob_bytes(verts, faces)
-    key = hashlib.sha256(body).hexdigest()
-    path = directory / (key + ".mcadmesh")
     header = struct.pack("<8sIII", b"MCADMESH", 1, len(verts), len(faces))
+    key = hashlib.sha256(header + body).hexdigest()
+    path = directory / (key + ".mcadmesh")
     path.write_bytes(header + body)
     return str(path), key
 
@@ -138,11 +142,10 @@ class TestBlob:
         broken = list(faces)
         broken[0] = (0, 1, 99)
         body = _blob_bytes(verts, broken)
-        key = hashlib.sha256(body).hexdigest()
+        header = struct.pack("<8sIII", b"MCADMESH", 1, len(verts), len(broken))
+        key = hashlib.sha256(header + body).hexdigest()
         path = tmp_path / (key + ".mcadmesh")
-        path.write_bytes(
-            struct.pack("<8sIII", b"MCADMESH", 1, len(verts), len(broken)) + body
-        )
+        path.write_bytes(header + body)
         with pytest.raises(clr.ClearanceError) as caught:
             clr.read_blob(str(path), key)
         assert "indexes vertex 99" in str(caught.value)
@@ -294,6 +297,42 @@ def _max_chord_deviation(source: str, tolerance_mm: float,
             worst = max(worst,
                         radius_mm - _math.hypot(middle[0], middle[1]))
     return worst
+
+
+def test_two_meshes_with_the_same_body_bytes_cannot_share_a_key(tmp_path):
+    """The counts are part of what a digest identifies.
+
+    One buffer, two readings: N vertices with M triangles and a different
+    (N', M') split of the SAME bytes are different geometry — the index words
+    of one decode as coordinates of the other. A digest over the body alone
+    gives them one key, and the panel's body store and this worker's cache
+    then hand back whichever arrived first, with no hash failure anywhere and
+    a wrong distance at the end of it.
+
+    ORACLE: the two files. Same bytes after the header, different counts in
+    it, and the keys must differ — and each must read back as the geometry it
+    was written as.
+    """
+    verts = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+             (1.0, 1.0, 0.0)]
+    wide = write_blob(tmp_path, verts, [(0, 1, 2), (1, 3, 2)])
+    # The same 4 vertices and 2 triangles, re-declared as 3 vertices and 3
+    # triangles over the identical buffer: the fourth vertex's twelve bytes
+    # become the first index triple.
+    body = _blob_bytes(verts, [(0, 1, 2), (1, 3, 2)])
+    header = struct.pack("<8sIII", b"MCADMESH", 1, 3, 3)
+    key = hashlib.sha256(header + body).hexdigest()
+    narrow = tmp_path / (key + ".mcadmesh")
+    narrow.write_bytes(header + body)
+
+    assert wide[1] != key, "two readings of one buffer share a key"
+    vertices, triangles = clr.read_blob(wide[0], wide[1])
+    assert vertices.shape == (4, 3) and triangles.shape == (2, 3)
+    # And the other reading is not silently accepted either: under its own
+    # counts the buffer's float words are indices into three vertices, which
+    # is refused rather than decoded into geometry nobody wrote.
+    with pytest.raises(clr.ClearanceError):
+        clr.read_blob(str(narrow), key)
 
 
 class TestClearanceVerb:

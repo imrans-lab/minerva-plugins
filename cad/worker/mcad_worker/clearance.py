@@ -171,7 +171,12 @@ def read_blob(path: str, key: str):
         )
 
     body = raw[_HEADER.size:]
-    digest = hashlib.sha256(body).hexdigest()
+    # The header is hashed WITH the body, exactly as the panel hashes it: the
+    # same bytes mean different geometry under different counts (three
+    # vertices and six indices decode the same buffer as four vertices and
+    # three, the index words becoming coordinates), so a digest over the body
+    # alone would let two different meshes share one cache entry.
+    digest = hashlib.sha256(raw[:_HEADER.size] + body).hexdigest()
     if key and digest != key:
         raise ClearanceError(
             f"mesh blob '{path}' hashes to {digest[:16]}… but was sent as "

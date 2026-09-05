@@ -234,7 +234,9 @@ func _check_upload(panel: Node, checks: RefCounted) -> void:
 		if box.position.distance_to(expected.position) > 1e-3 \
 				or box.size.distance_to(expected.size) > 1e-3:
 			decoded_ok = false
-	check("upload: each blob is named by the SHA-256 of its own array bytes",
+	check("upload: each blob is named by the SHA-256 of its header AND its "
+			+ "array bytes — the counts are part of what the key identifies, "
+			+ "or two readings of one buffer would share it",
 			addressed, "a blob's filename is not its content hash")
 	check("upload: the blob decodes to the reference's POSED world geometry",
 			decoded_ok, "a decoded blob is not the posed bar")
@@ -886,8 +888,12 @@ func _decode_blob(path: String) -> Dictionary:
 			body.decode_float(i * 12 + 8))
 		box = AABB(point, Vector3.ZERO) if not seen else box.expand(point)
 		seen = true
+	# The digest covers the HEADER as well as the body, exactly as the panel
+	# and the worker compute it: the counts decide how the same bytes are read
+	# back, so two readings of one buffer must not share a key.
 	var hasher := HashingContext.new()
 	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(raw.slice(0, 20))
 	hasher.update(body)
 	return {
 		"digest": hasher.finish().hex_encode(),

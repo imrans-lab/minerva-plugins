@@ -391,6 +391,15 @@ func _sized(target: Dictionary) -> Dictionary:
 	return out
 
 
+## The blob header, exactly as the file carries it and as the digest covers
+## it: the magic, the version and the two counts, little-endian.
+func _blob_header(vertices: int, triangles: int) -> PackedByteArray:
+	var header := BLOB_MAGIC.to_utf8_buffer()
+	var numbers := PackedInt32Array([BLOB_VERSION, vertices, triangles])
+	header.append_array(numbers.to_byte_array())
+	return header
+
+
 func _blob_path(digest: String) -> String:
 	return get_blob_dir().path_join(digest + ".mcadmesh")
 
@@ -702,8 +711,17 @@ func _extract_blob(mesh: Mesh, xform: Transform3D) -> Dictionary:
 
 	var body := points.to_byte_array()
 	body.append_array(indices.to_byte_array())
+	# THE HEADER IS PART OF THE HASH. The same bytes mean different geometry
+	# under different counts — three vertices with six indices and four
+	# vertices with three read the same buffer as different triangles, the
+	# index words decoding as coordinates — so a digest over the body alone
+	# lets two different meshes share one key, in this panel's own store and
+	# in the worker's cache. The header is written ahead of the body in the
+	# file and hashed ahead of it here, in the same order and the same
+	# little-endian encoding the worker reads back.
 	var hasher := HashingContext.new()
 	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(_blob_header(vertex_count, triangles))
 	hasher.update(body)
 	return {
 		"digest": hasher.finish().hex_encode(),
@@ -734,10 +752,8 @@ func _upload(keys: Array) -> bool:
 		var file := FileAccess.open(path, FileAccess.WRITE)
 		if file == null:
 			return false
-		file.store_buffer(BLOB_MAGIC.to_utf8_buffer())
-		file.store_32(BLOB_VERSION)
-		file.store_32(int(blob["vertices"]))
-		file.store_32(int(blob["triangles"]))
+		file.store_buffer(_blob_header(
+			int(blob["vertices"]), int(blob["triangles"])))
 		file.store_buffer(blob["body"] as PackedByteArray)
 		file.close()
 	_sweep(directory, wanted)
