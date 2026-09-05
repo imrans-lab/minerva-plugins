@@ -89,6 +89,24 @@ view_id = "top"
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/SubViewport"]
 environment = SubResource("Environment_cad")
 
+[node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView"]
+layout_mode = 1
+anchors_preset = -1
+offset_left = 4.0
+offset_top = 4.0
+offset_right = 196.0
+offset_bottom = 32.0
+mouse_filter = 2
+
+[node name="ProjectionLabel" type="Label" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/ProjectionRow"]
+layout_mode = 2
+text = "View:"
+
+[node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/TopView/ProjectionRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "Which way this pane looks at the part."
+
 [node name="FrontView" type="SubViewportContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
@@ -120,6 +138,24 @@ view_id = "front"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/SubViewport"]
 environment = SubResource("Environment_cad")
+
+[node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView"]
+layout_mode = 1
+anchors_preset = -1
+offset_left = 4.0
+offset_top = 4.0
+offset_right = 196.0
+offset_bottom = 32.0
+mouse_filter = 2
+
+[node name="ProjectionLabel" type="Label" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/ProjectionRow"]
+layout_mode = 2
+text = "View:"
+
+[node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/FrontView/ProjectionRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "Which way this pane looks at the part."
 
 [node name="RightView" type="SubViewportContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"]
 layout_mode = 2
@@ -153,6 +189,24 @@ view_id = "right"
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/SubViewport"]
 environment = SubResource("Environment_cad")
 
+[node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView"]
+layout_mode = 1
+anchors_preset = -1
+offset_left = 4.0
+offset_top = 4.0
+offset_right = 196.0
+offset_bottom = 32.0
+mouse_filter = 2
+
+[node name="ProjectionLabel" type="Label" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/ProjectionRow"]
+layout_mode = 2
+text = "View:"
+
+[node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/RightView/ProjectionRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "Which way this pane looks at the part."
+
 [node name="IsoView" type="SubViewportContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
@@ -184,6 +238,24 @@ view_id = "iso"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/SubViewport"]
 environment = SubResource("Environment_cad")
+
+[node name="ProjectionRow" type="HBoxContainer" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView"]
+layout_mode = 1
+anchors_preset = -1
+offset_left = 4.0
+offset_top = 4.0
+offset_right = 196.0
+offset_bottom = 32.0
+mouse_filter = 2
+
+[node name="ProjectionLabel" type="Label" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/ProjectionRow"]
+layout_mode = 2
+text = "View:"
+
+[node name="ProjectionDropdown" type="OptionButton" parent="ResponsiveContainer/WideLayout/VBoxContainer/GridContainer/IsoView/ProjectionRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "Which way this pane looks at the part."
 
 [node name="WideSidebar" type="VBoxContainer" parent="ResponsiveContainer/WideLayout"]
 layout_mode = 2

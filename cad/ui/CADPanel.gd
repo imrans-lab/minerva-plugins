@@ -56,6 +56,10 @@ const _MeshGaugeScript: Script = preload("scripts/mesh_gauge.gd")
 ## The wide sidebar's edge tree, its buttons, and the fan-out of an edge
 ## selection to the annotation host and the per-pane geometry overlays.
 const _EdgeSidebarScript: Script = preload("scripts/edge_sidebar.gd")
+## Which direction each pane looks from: the preset list, the per-pane
+## dropdowns and the store that keeps a pane where it was put
+## (scripts/pane_projection.gd).
+const _PaneProjectionScript: Script = preload("scripts/pane_projection.gd")
 ## Reference mounting and every measurement the panel is asked to bookkeep:
 ## the collider digest, the overlay, the per-pane scale and the pick ray.
 const _PanelMeasurementScript: Script = preload("scripts/panel_measurement.gd")
@@ -224,16 +228,9 @@ var _edge_sidebar: RefCounted = null
 ## per-pane mesh visibility (scripts/panel_measurement.gd).
 var _measurement: RefCounted = null
 
-## Projection dropdown options (id → preset string accepted by orbit_camera).
-const _PROJECTION_OPTIONS: Array = [
-	{"id": 0, "label": "Perspective", "preset": "Perspective"},
-	{"id": 1, "label": "Top",         "preset": "Top"},
-	{"id": 2, "label": "Bottom",      "preset": "Bottom"},
-	{"id": 3, "label": "Front",       "preset": "Front"},
-	{"id": 4, "label": "Back",        "preset": "Back"},
-	{"id": 5, "label": "Left",        "preset": "Left"},
-	{"id": 6, "label": "Right",       "preset": "Right"},
-]
+## Per-pane projection: the preset list, the dropdowns and the choices
+## (scripts/pane_projection.gd). Both layouts read the same list from it.
+var _pane_projection: RefCounted = null
 
 
 # ── Godot lifecycle ─────────────────────────────────────────────────────────
@@ -272,12 +269,13 @@ func _ready() -> void:
 	_single_view_camera = $ResponsiveContainer/NarrowLayout/SingleView/SubViewport/OrbitCamera as Camera3D
 
 	# ── Projection dropdown ────────────────────────────────────────────────
+	_pane_projection = _PaneProjectionScript.new(self)
 	_projection_dropdown = $ResponsiveContainer/NarrowLayout/ProjectionRow/ProjectionDropdown as OptionButton
-	_projection_dropdown.clear()
-	for opt in _PROJECTION_OPTIONS:
-		_projection_dropdown.add_item(opt["label"], opt["id"])
+	_PaneProjectionScript.fill(_projection_dropdown)
 	_projection_dropdown.select(0)  # Perspective by default
 	_projection_dropdown.item_selected.connect(_on_projection_selected)
+	# The same dropdown, once per wide pane, driving that pane's camera.
+	_pane_projection.attach_wide_panes()
 
 	# ── "Import mesh…" — the GUI half of mesh() authoring ──────────────────
 	_mesh_import_ui = _MeshImportUiScript.new()
@@ -469,6 +467,41 @@ func get_document_state() -> Dictionary:
 ## viewport is that pane's SubViewport, which is where a capture comes from.
 func get_view_camera(view: String) -> Camera3D:
 	return _measurement.camera_for_view(view)
+
+
+## Defects the outline pass counted in the solid it just drew, or {} when it
+## found none. Open edges are holes in the surface, non-manifold edges are
+## faces meeting three deep, degenerate faces have no area and duplicates are
+## the same triangle twice — each of them makes a mesh render or measure in a
+## way the B-Rep does not predict.
+func _mesh_defects() -> Dictionary:
+	var mesh_root: Node = get_node_or_null(_MESH_ROOT_PATHS[0])
+	if mesh_root == null or not mesh_root.has_method("get_mesh_stats"):
+		return {}
+	var stats: Dictionary = mesh_root.call("get_mesh_stats")
+	var reported := {}
+	for field in ["open_edges", "non_manifold_edges", "degenerate_faces", "duplicate_faces"]:
+		var count: int = int(stats.get(field, 0))
+		if count > 0:
+			reported[field] = count
+	return reported
+
+
+## The direction a pane is currently looking from ("Top", "Bottom", …) as its
+## own dropdown shows it. A slot id ("iso"/"top"/"front"/"right") is a place on
+## screen and does not change when the owner points that pane elsewhere, so the
+## verbs that address slots report this alongside.
+func get_pane_preset(slot: String) -> String:
+	if _narrow_layout != null and _narrow_layout.visible:
+		return _current_projection_preset()
+	if _pane_projection == null:
+		return ""
+	return _pane_projection.preset_for(slot)
+
+
+## Every wide pane's current preset, keyed by slot.
+func get_pane_presets() -> Dictionary:
+	return _pane_projection.presets() if _pane_projection != null else {}
 
 
 ## Take on a document, its path and its reference set from a note restore.
@@ -1139,6 +1172,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		"request_id": request_id,
 		"ts": Time.get_unix_time_from_system(),
 	}
+	# Holes, slivers and doubled faces in the tessellated solid, counted by the
+	# outline pass that just walked it. Reported only when there are any: a
+	# clean mesh has nothing to say, and a solid that renders as porous should
+	# say so in numbers rather than leave the panes to be doubted.
+	var defects: Dictionary = _mesh_defects()
+	if not defects.is_empty():
+		_last_eval_result["mesh_defects"] = defects
 	# Render succeeded — clear any error banner left by a prior failed evaluate.
 	_hide_eval_error()
 	# A reference that could not be loaded — or that was too big to outline —
@@ -1315,9 +1355,7 @@ func _reparent_canvas(narrow: bool) -> void:
 func _on_projection_selected(index: int) -> void:
 	if _single_view_camera == null:
 		return
-	var preset: String = "Perspective"
-	if index >= 0 and index < _PROJECTION_OPTIONS.size():
-		preset = String(_PROJECTION_OPTIONS[index]["preset"])
+	var preset: String = _PaneProjectionScript.preset_at(index)
 	_single_view_camera.set_view_preset(preset)
 	# Update the host's active viewport id so MCP queries get the right context.
 	_active_viewport_id = _projection_preset_to_viewport_id(preset)
@@ -1335,10 +1373,7 @@ func _on_projection_selected(index: int) -> void:
 func _current_projection_preset() -> String:
 	if _projection_dropdown == null:
 		return "Perspective"
-	var idx: int = _projection_dropdown.selected
-	if idx < 0 or idx >= _PROJECTION_OPTIONS.size():
-		return "Perspective"
-	return String(_PROJECTION_OPTIONS[idx]["preset"])
+	return _PaneProjectionScript.preset_at(_projection_dropdown.selected)
 
 
 ## Map an orbit-camera preset string to the lower-case viewport-id used by

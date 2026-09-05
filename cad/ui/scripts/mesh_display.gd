@@ -37,6 +37,10 @@ var _edge_label_root: Node3D
 var _wireframe_only: bool = false
 var _model_center: Vector3 = Vector3.ZERO
 var _feature_edge_count: int = 0
+## What the outline pass saw in the mesh it just walked: face count and the
+## defects (degenerate faces, open or non-manifold edges, duplicate faces).
+## Free — the outline pass welds and walks every triangle anyway.
+var _mesh_stats: Dictionary = {}
 ## World bounds (CAD millimetres) of the reference meshes mounted under this
 ## node. Auto-framing has to cover them: a document whose only geometry is a
 ## referenced board would otherwise frame on an empty solid.
@@ -121,6 +125,7 @@ func clear_mesh() -> void:
 	_edge_leader_instance.mesh = null
 	_model_center = Vector3.ZERO
 	_feature_edge_count = 0
+	_mesh_stats = {}
 	for child in _edge_label_root.get_children():
 		child.queue_free()
 
@@ -313,8 +318,11 @@ func _build_feature_edge_mesh(raw_verts: Array, raw_faces: Array) -> Mesh:
 		indices.append(int(face[1]))
 		indices.append(int(face[2]))
 
-	var segments: PackedVector3Array = _ReferenceMeshes.feature_edge_segments(positions, indices)
+	var stats := {}
+	var segments: PackedVector3Array = _ReferenceMeshes.feature_edge_segments(
+		positions, indices, _ReferenceMeshes.FEATURE_EDGE_ANGLE_DEGREES, stats)
 	_feature_edge_count = int(segments.size() / 2)
+	_mesh_stats = stats
 	return _ReferenceMeshes.line_mesh_from_segments(
 		segments,
 		ORTHO_EDGE_COLOR if _wireframe_only else DEFAULT_EDGE_COLOR
@@ -531,6 +539,11 @@ func is_mesh_visible() -> bool:
 
 func get_feature_edge_count() -> int:
 	return _feature_edge_count
+
+
+## Defect counts for the mesh currently displayed, or {} before one is.
+func get_mesh_stats() -> Dictionary:
+	return _mesh_stats
 
 
 func get_debug_state() -> Dictionary:

@@ -327,10 +327,9 @@ func describe_point(_doc_pos: Vector2) -> String:
 ## Capture the active SubViewport's texture so MCP overlay-rendering composites
 ## the 3-D scene + 2-D annotations together.
 ##
-## Pattern mirrors Helloscene_AnnotationHost: schedule a one-shot
-## RenderingServer.frame_post_draw lambda to do the GPU→CPU pull, return the
-## last cached image (may be null on the very first call before the frame has
-## been drawn). Cached per-view, keyed by Engine.get_frames_drawn(), so
+## The GPU→CPU pull happens on the call itself, and a one-shot
+## RenderingServer.frame_post_draw lambda refreshes the cache on the next
+## drawn frame. Cached per-view, keyed by Engine.get_frames_drawn(), so
 ## repeated calls within the same frame don't re-capture.
 ##
 ## viewport_rect: if non-zero, crop the image to that region (matching the
@@ -341,9 +340,9 @@ func render_content_to_image(viewport_rect: Rect2) -> Image:
 
 ## Per-view variant of render_content_to_image. Lets the snapshot MCP tool
 ## request a specific view ("iso"/"top"/"front"/"right") without mutating
-## _active_viewport_id. Same caching rules: returns cached image when fresh
-## for this frame, otherwise schedules a refresh and returns the previous
-## capture (or null on cold start).
+## _active_viewport_id. Same caching rules: returns the cached image when it
+## is fresh for this frame, otherwise reads the render target now and falls
+## back to the previous capture (null only when the view has never rendered).
 ##
 ## Caveat: in NARROW layout only the visible SubViewport is actually rendering.
 ## Capturing a non-visible view returns the last cached image (possibly stale
@@ -355,6 +354,17 @@ func render_view_to_image(view_id: String, viewport_rect: Rect2 = Rect2()) -> Im
 
 	if cached_image != null and cached_frame == current_frame:
 		return _maybe_crop(cached_image, viewport_rect)
+
+	# Pull the texture NOW rather than only booking a frame_post_draw slot.
+	# A caller that gets null has no way to wait for the booking except to
+	# await frame_post_draw itself, and that signal does not fire while the
+	# engine is not drawing — an occluded or minimised window, a paused main
+	# loop, a headless run — so the caller waits for a frame that never comes
+	# instead of getting the last frame that WAS drawn. The direct read gives
+	# the most recently rendered contents of the target, which is what is on
+	# screen. The scheduled capture stays as the refresh for the next frame.
+	if _pull_capture(view_id):
+		return _maybe_crop(_capture_cache.get(view_id, null) as Image, viewport_rect)
 
 	_schedule_capture(view_id)
 	return _maybe_crop(cached_image, viewport_rect) if cached_image != null else null
@@ -406,24 +416,33 @@ func drop_pending_captures() -> void:
 
 
 func _do_capture_now(view_id: String) -> void:
+	# The one-shot has fired, so the booking is spent whatever the pull does.
 	_capture_pending[view_id] = false
 	_capture_connections.erase(view_id)
+	_pull_capture(view_id)
+
+
+## Read the view's render target into the cache. Returns whether the cache now
+## holds an image for this view. Touches no scheduling state: it is called both
+## from the frame_post_draw one-shot and directly by render_view_to_image.
+func _pull_capture(view_id: String) -> bool:
 	var vp_variant: Variant = _viewport_for.get(view_id, null)
 	if vp_variant == null or not is_instance_valid(vp_variant):
-		return
+		return false
 	# Duck-typed access — avoid typed `as SubViewport` for symmetry with the
 	# rest of the off-tree contract; SubViewport.get_texture() / get_image()
 	# are stable platform APIs.
 	if not vp_variant.has_method("get_texture"):
-		return
-	var tex: ViewportTexture = vp_variant.get_texture()
-	if tex == null:
-		return
-	var img: Image = tex.get_image()
-	if img == null:
-		return
+		return false
+	var tex: Object = vp_variant.get_texture()
+	if tex == null or not tex.has_method("get_image"):
+		return false
+	var img: Image = tex.get_image() as Image
+	if img == null or img.is_empty():
+		return false
 	_capture_cache[view_id] = img
 	_capture_cache_frame[view_id] = Engine.get_frames_drawn()
+	return true
 
 
 # ── Per-viewport helpers (future grandchild stubs) ─────────────────────────

@@ -416,10 +416,22 @@ static func transform_aabb(xform: Transform3D, box: AABB) -> AABB:
 ## used by one face (a boundary) or joining two faces that disagree by more
 ## than `angle_degrees`. Positions are welded on a quantised grid first, so the
 ## result depends on geometry rather than on how the tessellator numbered it.
+##
+## A triangle with no area contributes no normal — it has no plane to disagree
+## with — but it is still counted as a USE of each of its edges. Skipping it
+## outright leaves the neighbours of a sliver holding one normal each, which
+## reads as a boundary, and a boolean cut that leaves a few slivers then
+## speckles the middle of a flat face with short segments that only show in the
+## panes drawing edges alone.
+##
+## `stats`, when passed, is filled with what the walk already knows about the
+## mesh: {faces, degenerate_faces, open_edges, non_manifold_edges,
+## duplicate_faces}. Free here; a second pass over the same triangles is not.
 static func feature_edge_segments(
 	positions: PackedVector3Array,
 	indices: PackedInt32Array,
-	angle_degrees: float = FEATURE_EDGE_ANGLE_DEGREES
+	angle_degrees: float = FEATURE_EDGE_ANGLE_DEGREES,
+	stats: Dictionary = {}
 ) -> PackedVector3Array:
 	var segments := PackedVector3Array()
 	if positions.is_empty() or indices.size() < 3:
@@ -428,6 +440,9 @@ static func feature_edge_segments(
 	var welded_id := {}          # Vector3i -> int
 	var welded_point := PackedVector3Array()
 	var edge_normals := {}       # Vector2i(lo, hi) -> Array[Vector3]
+	var edge_uses := {}          # Vector2i(lo, hi) -> int
+	var face_uses := {}          # Vector3i(sorted welded corners) -> int
+	var degenerate := 0
 
 	var triangle_count := indices.size() / 3
 	for t in range(triangle_count):
@@ -439,26 +454,50 @@ static func feature_edge_segments(
 		var a := positions[i0]
 		var b := positions[i1]
 		var c := positions[i2]
-		var normal := (b - a).cross(c - a)
-		if normal.length_squared() <= 0.000001:
-			continue
-		normal = normal.normalized()
-
 		var ka := _weld(welded_id, welded_point, a)
 		var kb := _weld(welded_id, welded_point, b)
 		var kc := _weld(welded_id, welded_point, c)
+		_count_edge(edge_uses, ka, kb)
+		_count_edge(edge_uses, kb, kc)
+		_count_edge(edge_uses, kc, ka)
+		var corners := [ka, kb, kc]
+		corners.sort()
+		var face_key := Vector3i(corners[0], corners[1], corners[2])
+		face_uses[face_key] = int(face_uses.get(face_key, 0)) + 1
+
+		var normal := (b - a).cross(c - a)
+		if normal.length_squared() <= 0.000001:
+			degenerate += 1
+			continue
+		normal = normal.normalized()
 		_accumulate_edge(edge_normals, ka, kb, normal)
 		_accumulate_edge(edge_normals, kb, kc, normal)
 		_accumulate_edge(edge_normals, kc, ka, normal)
 
 	var cosine_threshold := cos(deg_to_rad(angle_degrees))
-	for key in edge_normals.keys():
-		var normals: Array = edge_normals[key]
-		if not _is_feature_edge(normals, cosine_threshold):
+	var open_edges := 0
+	var non_manifold := 0
+	for key in edge_uses.keys():
+		var uses: int = int(edge_uses[key])
+		if uses < 2:
+			open_edges += 1
+		elif uses > 2:
+			non_manifold += 1
+		var normals: Array = edge_normals.get(key, [])
+		if not _is_feature_edge(normals, cosine_threshold, uses):
 			continue
 		var pair: Vector2i = key
 		segments.append(welded_point[pair.x])
 		segments.append(welded_point[pair.y])
+
+	var duplicate_faces := 0
+	for count in face_uses.values():
+		duplicate_faces += int(count) - 1
+	stats["faces"] = triangle_count
+	stats["degenerate_faces"] = degenerate
+	stats["open_edges"] = open_edges
+	stats["non_manifold_edges"] = non_manifold
+	stats["duplicate_faces"] = duplicate_faces
 	return segments
 
 
@@ -500,6 +539,15 @@ static func _weld(
 	return id
 
 
+## Count a triangle against one of its edges, degenerate or not. This is what
+## decides whether an edge is a boundary; the normals decide only the angle.
+static func _count_edge(edge_uses: Dictionary, a: int, b: int) -> void:
+	if a == b:
+		return
+	var key := Vector2i(min(a, b), max(a, b))
+	edge_uses[key] = int(edge_uses.get(key, 0)) + 1
+
+
 static func _accumulate_edge(edge_normals: Dictionary, a: int, b: int, normal: Vector3) -> void:
 	if a == b:
 		return
@@ -511,9 +559,15 @@ static func _accumulate_edge(edge_normals: Dictionary, a: int, b: int, normal: V
 	(normals as Array).append(normal)
 
 
-static func _is_feature_edge(normals: Array, cosine_threshold: float) -> bool:
-	if normals.size() <= 1:
+## An edge is drawn when it bounds the surface (fewer than two triangles use
+## it) or when the faces meeting there disagree by more than the threshold. An
+## edge whose only other user had no area is neither: it is in the middle of a
+## face, and drawing it puts a speck on a flat surface.
+static func _is_feature_edge(normals: Array, cosine_threshold: float, uses: int = 0) -> bool:
+	if uses > 0 and uses < 2:
 		return true
+	if normals.size() <= 1:
+		return uses == 0
 	var minimum_dot := 1.0
 	for i in range(normals.size()):
 		for j in range(i + 1, normals.size()):

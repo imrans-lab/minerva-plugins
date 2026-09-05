@@ -159,6 +159,10 @@ func get_view_metrics(view: String) -> Dictionary:
 		"view": view,
 		"width_px": size.x,
 		"height_px": size.y,
+		# Which SLOT was asked for, and which direction that slot is currently
+		# looking from — a pane can be pointed anywhere, so the id alone no
+		# longer says what is in the picture.
+		"view_preset": _panel.get_pane_preset(view).to_lower(),
 		"projection": "orthographic" if camera.projection == Camera3D.PROJECTION_ORTHOGONAL \
 			else "perspective",
 		"px_per_mm": null,
@@ -237,16 +241,23 @@ func camera_for_view(view: String) -> Camera3D:
 	return null
 
 
-## Hide the shaded mesh in ortho-only panes (Top/Front/Right; narrow non-
-## perspective) so the edge overlay is the only visualisation. Iso /
-## Perspective keeps the mesh visible for shaded 3-D context.
+## Hide the shaded mesh in any pane showing a direction (a wide pane pointed at
+## Top/Bottom/Front/…, or the narrow pane on a non-Perspective preset) so the
+## edge overlay is the only visualisation there. A pane on Perspective keeps the
+## mesh visible for shaded 3-D context.
 func apply_mesh_visibility() -> void:
 	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
-	# Wide-layout panes: Top/Front/Right hide mesh; Iso shows it.
-	_set_pane_mesh_visible(grid + "/TopView/SubViewport/MeshRoot", false)
-	_set_pane_mesh_visible(grid + "/FrontView/SubViewport/MeshRoot", false)
-	_set_pane_mesh_visible(grid + "/RightView/SubViewport/MeshRoot", false)
-	_set_pane_mesh_visible(grid + "/IsoView/SubViewport/MeshRoot", true)
+	# Wide-layout panes: whichever ones are showing a direction are drawings and
+	# hide the shaded mesh; a pane left on Perspective keeps it.
+	var pane_roots := {
+		"top": grid + "/TopView/SubViewport/MeshRoot",
+		"front": grid + "/FrontView/SubViewport/MeshRoot",
+		"right": grid + "/RightView/SubViewport/MeshRoot",
+		"iso": grid + "/IsoView/SubViewport/MeshRoot",
+	}
+	for slot in pane_roots.keys():
+		var pane_preset: String = _panel.get_pane_presets().get(slot, "Perspective")
+		_set_pane_mesh_visible(String(pane_roots[slot]), pane_preset == "Perspective")
 	# Narrow single view: hide mesh unless the projection is Perspective.
 	var single_path := "ResponsiveContainer/NarrowLayout/SingleView/SubViewport/MeshRoot"
 	var preset: String = _panel._current_projection_preset()
@@ -291,6 +302,7 @@ func view_state() -> Dictionary:
 		"is_narrow_layout": _panel._narrow_layout.visible if _panel._narrow_layout != null else false,
 		"active_viewport_id": _panel._active_viewport_id,
 		"projection_preset": _panel._current_projection_preset(),
+		"pane_projections": _panel.get_pane_presets(),
 		"camera": camera_state,
 	}
 

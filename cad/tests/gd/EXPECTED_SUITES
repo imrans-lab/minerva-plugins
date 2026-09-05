@@ -461,3 +461,42 @@ test_flush_contact.gd assertions=7
 # 16 hex; that hash still tells two reference sets apart; and the panel still
 # holds the whole digest for the clearance join).
 test_mcp_boundary.gd assertions=9
+
+# Each wide pane carries the SAME projection dropdown the one-pane layout has,
+# driving that pane's own camera. A SLOT ("top") is a place on screen and keeps
+# its id; the direction it looks from is what changes, and what the pane
+# metrics a snapshot caller reads now report.
+# 13 assertions = 3 fixture (wide layout showing; four dropdowns exist; the row
+# rides in the pane's corner without resizing the pane's viewport) + 2 the
+# control (same seven presets as the narrow dropdown; each pane starts on its
+# slot's direction) + 4 the repro (Bottom applies to that pane's camera; the
+# camera really moves under the part, still orthographic; the slot id and its
+# metrics report "top" looking from "bottom"; no other pane moved) + 1 narrow
+# layout still refuses named panes and reports the pane it does render + 1 the
+# choice survives a trip through the one-pane layout + 2 mesh visibility
+# follows the projection, not the pane's name.
+test_pane_projection.gd assertions=13
+
+# A snapshot of a big scene comes back, or says why. Run where no frame is ever
+# drawn — the dummy renderer, which is the same condition as an occluded window
+# — with a 12k-vertex solid and a 132k-triangle reference in the pane.
+# 10 assertions = 2 premises (no frames drawn; the scene really is that size) +
+# 4 the capture (the first call answers with no drawn frame; inside the budget;
+# it read the target rather than replaying an older capture; a second call in
+# the same frame is cached) + 2 the file (a PNG lands on disk in budget; it is
+# the pane's size, not empty) + 2 the refusals (an unknown pane and a real pane
+# that has drawn nothing both answer null instead of hanging).
+test_snapshot_capture.gd assertions=10
+
+# A zero-area triangle carries connectivity, not a plane. Counting normals to
+# decide "this edge bounds the surface" made both neighbours of a sliver look
+# like boundaries, and the panes that draw the outline alone — the ortho ones —
+# grew specks in the middle of flat faces.
+# 11 assertions = 4 the sliver (it really has no area; the same sheet torn open
+# draws seven boundary edges; with the sliver the outline is the four rim edges
+# alone; the walk counts the sliver and still calls the surface sound) + 5 what
+# must still be drawn (a punched hole is drawn and counted; a closed box draws
+# its twelve edges with no defect; a doubled face is one duplicate) + 2 the
+# panel's own report (a sound solid reports nothing; a holed one reports its
+# open edges in the evaluation reply).
+test_ortho_speckles.gd assertions=11

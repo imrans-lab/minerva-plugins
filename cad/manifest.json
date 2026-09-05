@@ -230,7 +230,7 @@
     },
     {
       "name": "minerva_cad_view_overlay",
-      "description": "Draw a millimetre grid on the CAD floor and/or the three world axes through the origin, in every pane, and report each pane's scale: {px_per_mm, origin_px, width_px, height_px, projection}. px_per_mm is a real number for the orthographic panes (top/front/right) and null for the iso pane, which is a perspective projection and has no single scale. The overlay is scene geometry, so the picture is still taken with minerva_cad_snapshot — call this first and the snapshot comes back with a ruler in it. overlay='none' clears it. In narrow layout the four named panes do not exist, so 'views' holds the one pane that renders and 'views_unavailable' says why the others are missing.",
+      "description": "Draw a millimetre grid on the CAD floor and/or the three world axes through the origin, in every pane, and report each pane's scale: {px_per_mm, origin_px, width_px, height_px, projection, view_preset}. px_per_mm is a real number for a pane under an orthographic projection and null for one under perspective, which has no single scale. view_preset is the direction the pane is currently looking from (perspective/top/bottom/front/back/left/right): the pane ids are SLOTS on screen and keep their names, but the owner can point any pane anywhere from its own dropdown, so read view_preset rather than assuming 'top' looks down. The overlay is scene geometry, so the picture is still taken with minerva_cad_snapshot — call this first and the snapshot comes back with a ruler in it. overlay='none' clears it. In narrow layout the four named panes do not exist, so 'views' holds the one pane that renders and 'views_unavailable' says why the others are missing.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -354,7 +354,8 @@
           "ui/scripts/gauge_seed.gd",
           "ui/scripts/mesh_display.gd",
           "ui/scripts/Cad_GeometryOverlay.gd",
-          "ui/scripts/orbit_camera.gd"
+          "ui/scripts/orbit_camera.gd",
+          "ui/scripts/pane_projection.gd"
         ],
         "file_extensions": [
           ".mcad"
