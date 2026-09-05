@@ -248,11 +248,20 @@ test_interference.gd assertions=57
 # A cache file is only the file its NAME claims: a blob of the right length
 # and the wrong bytes is rewritten rather than reused, or every retry hands
 # the worker the same hash failure.
-# 41 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
+# The panel's records are live objects, so a re-pose rewrites a record's pose
+# IN PLACE: a call whose pose is rewritten under it while it waits for the
+# worker answers in the pose it was called with — local points converted
+# through the copy it took, never the live record — and says the references
+# moved. And a tolerance the worker could only GUESS (a curved face it cannot
+# read) is not a bound: the check fails with a reason and a status line that
+# says so, and passes on the distances alone only when the caller accepts an
+# unbounded tolerance.
+# 43 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
 # fixture and the byte-measured refusal) + 4 refusal + 6 buried (+2: the
 # undecidable node and the undecidable reference) + 2 pin/blob across a
-# re-pose (+1: the corrupted same-length file) + 3 isolation.
-test_clearance.gd assertions=41
+# re-pose (+1: the corrupted same-length file) + 1 pose rewritten in place
+# + 1 unbounded tolerance + 3 isolation.
+test_clearance.gd assertions=43
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -302,8 +311,11 @@ test_clearance.gd assertions=41
 # does not run, so there is nothing fresh to pair against and new geometry may
 # not be measured against old holes. An extent the kernel could not read
 # exactly is reported as ungraded rather than passed. And a check that returns
-# before casting a ray reports its own zero cost, not the last check's.
-# 54 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
+# before casting a ray reports its own zero cost, not the last check's. And
+# the re-pose the panel actually performs — the same record with its pose
+# rewritten IN PLACE, no collider rebuilt — comes back stale too, which only a
+# snapshot that is a COPY of the records can notice.
+# 56 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
 # spacing, with the rays it placed counted) + 5 pairing (+1: the groove is not
 # paired and is named, +1: partial surfaces are asked for and a one-bin-short
 # bore is still a bore) + 8 A (+1: engagement measured on the
@@ -312,6 +324,7 @@ test_clearance.gd assertions=41
 # rim) + 4 F (+1: the seat number states that it is coverage of one ring at a
 # stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 5 refusal (+1: an
 # empty check reports its own counters, +1: an inexact extent is not graded)
-# + 2 poses (+1: a mid-flight collider rebuild comes back stale, with no rows
-# measured against holes that describe where the references used to be).
-test_fasteners.gd assertions=55
+# + 3 poses (+1: a mid-flight collider rebuild comes back stale, with no rows
+# measured against holes that describe where the references used to be,
+# +1: a pose rewritten in place under a waiting check is stale as well).
+test_fasteners.gd assertions=56

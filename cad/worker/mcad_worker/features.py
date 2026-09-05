@@ -900,14 +900,38 @@ def largest_curved_radius(source: str) -> Optional[float]:
     off. An angular deflection chosen for the tightest radius therefore fails
     the widest one by two orders of magnitude, so the widest is what the
     angle has to hold. None when the shape has no curved face at all — every
-    chord is then exact and no angular deflection binds anything.
+    chord is then exact and no angular deflection binds anything — and None
+    again when a curved face is of a kind this reader cannot measure; a
+    caller that needs to tell those apart reads `curvature_report`.
 
     Raises FeatureError for the same reasons every other reader here does: a
     DSL that will not evaluate, or a runtime with no OCCT.
     """
+    report = curvature_report(source)
+    if report["unrecognised_faces"] > 0:
+        return None
+    return report["largest_radius_mm"]
+
+
+def curvature_report(source: str) -> dict:
+    """Every curved face of the shape, sorted into measured and not.
+
+    Returns {largest_radius_mm: float|None, unrecognised_faces: int}. The
+    radius is the widest one among the faces this reader can measure —
+    cylinders, spheres, cones (at the wider end of their trim) and tori (the
+    outer circle) — or None when there is none. `unrecognised_faces` counts
+    the curved faces it cannot: a B-spline, a Bezier, a surface of revolution
+    or extrusion, an offset. Those are curved and their radius is UNKNOWN,
+    which is not the same answer as "no curvature": a tessellation bound
+    derived from the measured faces alone says nothing about them, and the
+    caller has to say so.
+
+    Raises FeatureError for the same reasons every other reader here does.
+    """
     occt = _occt()
     _shape_name, wrapped = _shape_for(source)
     largest = None
+    unrecognised = 0
     explorer = occt["TopExp_Explorer"](wrapped, occt["TopAbs_FACE"])
     while explorer.More():
         face = occt["TopoDS"].Face_s(explorer.Current())
@@ -929,16 +953,14 @@ def largest_curved_radius(source: str) -> Optional[float]:
                 # The widest circle on a torus is the outer one.
                 radius = float(torus.MajorRadius()) + float(torus.MinorRadius())
             else:
-                # A B-spline, a Bezier, a surface of revolution or extrusion,
-                # an offset: curved, and this reader cannot say how tightly.
-                # UNKNOWN, not "no curvature" — the caller falls back to a
-                # bound it can defend rather than to a radius it invented.
-                return None
+                unrecognised += 1
+                continue
         except BaseException:  # noqa: BLE001 — a face it cannot adapt
-            return None
+            unrecognised += 1
+            continue
         if radius > 0.0 and (largest is None or radius > largest):
             largest = radius
-    return largest
+    return {"largest_radius_mm": largest, "unrecognised_faces": unrecognised}
 
 
 def _cone_radius(adaptor) -> float:

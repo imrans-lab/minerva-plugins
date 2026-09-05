@@ -176,11 +176,14 @@ func release() -> void:
 ## minerva_cad_check_clearance — the minimum distance between the solid and
 ## every reference node in scope, against `required_mm`.
 ##
-## `args`: required_mm (mandatory), reference=, node=, tolerance_mm=.
+## `args`: required_mm (mandatory), reference=, node=, tolerance_mm=,
+## accept_unbounded_tolerance= (default false).
 ##
 ## The reply is the worker's, re-framed:
 ##
-##   {checked, units, pass, required_mm, tessellation_tolerance_mm, bound,
+##   {checked, units, pass, pass_reason?, required_mm,
+##    tessellation_tolerance_mm, requested_tolerance_mm, tolerance_bounded,
+##    bound, references_moved,
 ##    pairs: [{reference, node, min_mm, pass, solid_point_mm,
 ##             reference_point_mm: {world, local}, interference?, note?}],
 ##    solid_triangles, cache, engine, interference_join}
@@ -189,6 +192,21 @@ func release() -> void:
 ## because the evaluated solid is never posed — its own frame IS the world.
 ## `checked: false` with a `reason` is not the same answer as "everything
 ## clears"; a reader that cannot tell them apart trusts a check that never ran.
+##
+## `tolerance_bounded` false means the worker could not read the curvature of
+## every face and its tessellation tolerance is a guess, not a promise. A gap
+## measured on such a mesh has no error bar, so the verdict is `pass` false
+## with `pass_reason` saying why — unless the caller states
+## accept_unbounded_tolerance, in which case the pairs are judged on their
+## distances alone and the flag still travels.
+##
+## THE POSES ARE THE ONES THE CHECK WAS CALLED WITH. The geometry is extracted
+## and hashed at the poses of entry, so the worker's world answer is about
+## those poses, and every local coordinate is converted back through the same
+## ones — from a copy taken before the first await, because the panel's
+## records are live objects that a re-pose changes in place. A reference that
+## moved while the check waited is reported by `references_moved`: the answer
+## is self-consistent and describes where the references WERE.
 ##
 ## A mesh-to-mesh distance is UNSIGNED, so a node buried in the solid's
 ## material comes back from the worker as a positive surface-to-surface gap.
@@ -218,9 +236,15 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# physics step reads _records when it runs, and a clearance call landing in
 	# that window would replace the geometry underneath it. The two entry
 	# points share this module; they must not share its state.
+	#
+	# And a COPY, never the panel's own array: the panel re-poses a reference
+	# by writing its record's pose in place, and a check that held the live
+	# record would convert old-world geometry through a new pose after the
+	# await. A deep duplicate copies the dictionaries and their value types
+	# (the poses) while sharing the meshes, which are never rewritten.
 	var records: Array = []
 	if panel.has_method("get_reference_state"):
-		records = panel.get_reference_state()
+		records = (panel.get_reference_state() as Array).duplicate(true)
 	var reference_scope := str(args.get("reference", ""))
 	var node_scope := str(args.get("node", ""))
 	var parts := _scoped_parts(records, reference_scope, node_scope)
@@ -257,15 +281,20 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# the retry names — a single-shot "could not read" with nothing wrong.
 	var pinned := _pin(plan["batches"] as Array)
 	var report := await _measure(panel, head, plan["batches"] as Array, records,
-		_buried_pairs(document, source))
+		_buried_pairs(document, source),
+		bool(args.get("accept_unbounded_tolerance", false)))
 	_unpin(pinned)
+	if bool(report.get("checked", false)):
+		report["references_moved"] = is_instance_valid(panel) \
+			and panel.has_method("get_reference_state") \
+			and not _same_poses(records, panel.get_reference_state() as Array)
 	return report
 
 
 ## Ask every batch and fold the replies into one report. Split out so the pin
 ## its caller takes is dropped on every path out of the measurement.
 func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
-		buried: Dictionary) -> Dictionary:
+		buried: Dictionary, accept_unbounded: bool) -> Dictionary:
 	var envelope: Dictionary = {}
 	var raw_pairs: Array = []
 	for batch_entry in batches:
@@ -278,7 +307,24 @@ func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
 				+ "did not run and gave no reason")))
 		envelope = reply
 		raw_pairs.append_array(reply.get("pairs", []) as Array)
-	return _clearance_report(envelope, raw_pairs, records, buried)
+	return _clearance_report(envelope, raw_pairs, records, buried, accept_unbounded)
+
+
+## Do `live` records still carry the names and poses `snapshot` copied? Names,
+## count and pose are compared; the meshes are shared and never rewritten.
+func _same_poses(snapshot: Array, live: Array) -> bool:
+	if live.size() != snapshot.size():
+		return false
+	for index in range(snapshot.size()):
+		var was: Dictionary = snapshot[index]
+		var now: Dictionary = live[index]
+		if str(was.get("name", "")) != str(now.get("name", "")):
+			return false
+		var before: Transform3D = was.get("pose", Transform3D.IDENTITY)
+		var after: Transform3D = now.get("pose", Transform3D.IDENTITY)
+		if not before.is_equal_approx(after):
+			return false
+	return true
 
 
 ## Hold the digests of every target in `batches` against the sweep, and hand
@@ -419,7 +465,7 @@ func _blob_path(digest: String) -> String:
 ## batch agrees on them); `raw_pairs` is every batch's pairs together, which
 ## have to be re-sorted because each batch only sorted its own.
 func _clearance_report(envelope: Dictionary, raw_pairs: Array,
-		records: Array, buried: Dictionary) -> Dictionary:
+		records: Array, buried: Dictionary, accept_unbounded: bool) -> Dictionary:
 	var overlapping: Dictionary = buried.get("nodes", {})
 	var undecided: Dictionary = buried.get("undecided", {})
 	var undecided_references: Dictionary = buried.get("undecided_references", {})
@@ -476,13 +522,28 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	for entry in pairs:
 		if not bool((entry as Dictionary)["pass"]):
 			verdict = false
-	return {
+	# A worker that does not say whether its tolerance is a bound is one that
+	# always derived it from a measured radius; only an explicit false is a
+	# guess. A guess has no error bar to subtract, so the distances cannot be
+	# judged against required_mm unless the caller has said that will do.
+	var bounded := bool(envelope.get("tolerance_bounded", true))
+	var pass_reason := ""
+	if not bounded and not accept_unbounded:
+		verdict = false
+		pass_reason = "the tessellation tolerance is not guaranteed for " \
+			+ "unrecognised curved faces in the solid, so the measured " \
+			+ "distances carry no error bar; pass accept_unbounded_tolerance " \
+			+ "to judge them on the distances alone"
+	var report := {
 		"checked": true,
 		"units": "mm",
 		"pass": verdict,
 		"required_mm": float(envelope.get("required_mm", 0.0)),
 		"tessellation_tolerance_mm":
 			float(envelope.get("tessellation_tolerance_mm", 0.0)),
+		"requested_tolerance_mm": float(envelope.get("requested_tolerance_mm",
+			envelope.get("tessellation_tolerance_mm", 0.0))),
+		"tolerance_bounded": bounded,
 		"bound": str(envelope.get("bound", "")),
 		"solid_triangles": int(envelope.get("solid_triangles", 0)),
 		"engine": str(envelope.get("engine", "")),
@@ -490,6 +551,9 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"interference_join": _join_note(buried),
 		"pairs": pairs,
 	}
+	if not pass_reason.is_empty():
+		report["pass_reason"] = pass_reason
+	return report
 
 
 ## The (reference, node) pairs the panel's latest interference report names as
@@ -593,10 +657,15 @@ func clearance_status_line(report: Dictionary) -> String:
 		return ""
 	var first: Dictionary = pairs[0]
 	var verdict := "clears" if bool(report.get("pass", false)) else "TOO CLOSE"
-	return "Clearance %s: %s/%s is %.3f mm from the solid (need %.3f, " \
+	var tolerance := "tessellated to %.3f mm" \
+		% float(report.get("tessellation_tolerance_mm", 0.0))
+	if not bool(report.get("tolerance_bounded", true)):
+		tolerance = "tolerance ~%.3f mm, NOT guaranteed" \
+			% float(report.get("tessellation_tolerance_mm", 0.0))
+	return "Clearance %s: %s/%s is %.3f mm from the solid (need %.3f, %s)." \
 		% [verdict, str(first.get("reference", "")), str(first.get("node", "")),
-			float(first.get("min_mm", 0.0)), float(report.get("required_mm", 0.0))] \
-		+ "tessellated to %.3f mm)." % float(report.get("tessellation_tolerance_mm", 0.0))
+			float(first.get("min_mm", 0.0)), float(report.get("required_mm", 0.0)),
+			tolerance]
 
 
 func _no_clearance(reason: String) -> Dictionary:

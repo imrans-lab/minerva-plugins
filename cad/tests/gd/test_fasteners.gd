@@ -935,6 +935,32 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 				and str(after.get("reason", "")).contains("find_holes"),
 			"after = %s" % str(after))
 
+	# The re-pose the panel actually performs: not a new array of records but
+	# the SAME record with its pose rewritten where it stands, and no collider
+	# rebuilt yet. A check holding the live record as its snapshot compares
+	# the moved pose with itself, sees the generation unmoved, and answers —
+	# old holes, old colliders, new pose — as if nothing had happened. The
+	# snapshot has to be a copy for the comparison to mean anything.
+	var record: Dictionary = panel.checks_records[0]
+	var in_place: Array = []
+	_collect_check(module, panel, in_place)
+	record["pose"] = Transform3D(_pose.basis, _pose.origin + POSE_SHIFT)
+	for _frame in range(600):
+		if not in_place.is_empty():
+			break
+		await process_frame
+	record["pose"] = _pose
+	var rewritten: Dictionary = in_place[0] if not in_place.is_empty() else {}
+	check("poses: a record whose pose is rewritten IN PLACE while a check "
+			+ "waits for the worker — same array, same dictionary, no "
+			+ "collider rebuilt — still comes back STALE with no rows",
+			not rewritten.is_empty()
+				and bool(rewritten.get("stale", false))
+				and not bool(rewritten.get("checked", true))
+				and int(rewritten.get("count", -1)) == 0
+				and str(rewritten.get("reason", "")).contains("find_holes"),
+			"rewritten = %s" % str(rewritten))
+
 
 ## Start a check without awaiting it and park its reply in `into`.
 func _collect_check(module: RefCounted, panel: Node, into: Array) -> void:

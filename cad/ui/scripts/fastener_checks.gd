@@ -228,7 +228,13 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# another call's evaluation — while this one waits for the worker. A check
 	# that read the poses afterwards would report this screw's geometry in
 	# another document's frame.
-	var records: Array = panel.get_reference_state() \
+	#
+	# A COPY, not the panel's array: a re-pose writes the record's pose in
+	# place, and a snapshot that held the live record would compare the moved
+	# pose with itself and find nothing changed. The deep duplicate copies the
+	# dictionaries and their poses and shares the meshes, which never change
+	# under a record.
+	var records: Array = (panel.get_reference_state() as Array).duplicate(true) \
 		if panel.has_method("get_reference_state") else []
 	# The COLLIDERS those poses describe, by the generation mesh_gauge counts
 	# its rebuilds with. The snapshot above fixes the frame every local
@@ -866,7 +872,8 @@ func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> b
 ## local coordinate is converted through, and a panel that re-poses without
 ## rebuilding — or rebuilds a moment later — would otherwise let a reply mix
 ## the frames of two documents. Names, count and pose are compared; the meshes
-## themselves are the generation's business.
+## themselves are the generation's business. `snapshot` is the copy `check`
+## took, so a pose rewritten in place shows up as a difference here.
 func _same_poses(snapshot: Array, panel: Object) -> bool:
 	if not panel.has_method("get_reference_state"):
 		return true

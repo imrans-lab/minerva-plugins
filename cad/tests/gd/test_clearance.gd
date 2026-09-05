@@ -105,7 +105,7 @@ var _blob_dir: String = ""
 var _known_blobs: Dictionary = {}
 ## Every payload the module sent, in order.
 var _payloads: Array = []
-## What the next call should answer with: "measure" or "error".
+## What the next call should answer with: "measure", "unbounded" or "error".
 var _mode: String = "measure"
 
 
@@ -173,6 +173,8 @@ func _run() -> void:
 	await _check_refusals(panel, checks)
 	await _check_buried(panel, checks)
 	await _check_pin_across_a_repose(panel, checks)
+	await _check_pose_rewritten_in_place(panel, checks)
+	await _check_unbounded_tolerance(panel, checks)
 	_check_isolation(checks)
 	_clear_blob_dir()
 
@@ -736,6 +738,109 @@ func _check_pin_across_a_repose(panel: Node, checks: RefCounted) -> void:
 	_known_blobs.clear()
 
 
+# ---------------------------------------------------------------------------
+# A POSE REWRITTEN IN PLACE, UNDER A CALL IN FLIGHT
+# ---------------------------------------------------------------------------
+
+## The panel's records are live objects: a re-pose does not hand out a new
+## array, it writes the record's pose where it stands. A call that kept the
+## array it was given as its "snapshot" would, after the worker's round trip,
+## convert the world geometry it hashed at the OLD pose through the NEW one —
+## every world number right, every local one wrong, and the pose comparison
+## finding nothing changed because it compares the record with itself.
+##
+## The geometry was extracted at the poses of entry, so the honest answer is
+## the one in THOSE poses: local coordinates converted through the copy, and
+## the reply saying the references moved while it waited.
+func _check_pose_rewritten_in_place(panel: Node, checks: RefCounted) -> void:
+	_payloads.clear()
+	_known_blobs.clear()
+	_mode = "measure"
+	var record: Dictionary = panel.records[0]
+	var moved := Transform3D(_pose.basis, _pose.origin + REPOSE_SHIFT)
+
+	var replies: Array = []
+	_collect_clearance(checks, panel, replies)
+	# The call is waiting for the worker's "never seen it"; the record it
+	# was handed is now rewritten in place — same array, same dictionary.
+	record["pose"] = moved
+	for _frame in range(600):
+		if not replies.is_empty():
+			break
+		await process_frame
+	record["pose"] = _pose
+	var first: Dictionary = replies[0] if not replies.is_empty() else {}
+
+	var pair := _pair_for(first, NEAR_NODE)
+	var world := _as_vector((pair.get("reference_point_mm", {}) as Dictionary)
+		.get("world", []))
+	var local := _as_vector((pair.get("reference_point_mm", {}) as Dictionary)
+		.get("local", []))
+	var through_old: Vector3 = _pose.affine_inverse() * world
+	var through_new: Vector3 = moved.affine_inverse() * world
+	# And a call that nothing moves under says so.
+	var settled: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("poses: a record whose pose is rewritten IN PLACE while a call "
+			+ "waits for the worker is answered in the pose the call was "
+			+ "made with — local points converted through the copied pose, "
+			+ "never the live one — and the reply says the references moved",
+			bool(first.get("checked", false))
+				and bool(first.get("references_moved", false))
+				and local.distance_to(through_old) < 0.001
+				and local.distance_to(through_new) > 1.0
+				and bool(settled.get("checked", false))
+				and not bool(settled.get("references_moved", true)),
+			"first = %s, local = %s, old = %s, new = %s, settled moved = %s" % [
+				str(first.get("reason", first.get("checked"))), str(local),
+				str(through_old), str(through_new),
+				str(settled.get("references_moved"))])
+	_payloads.clear()
+	_known_blobs.clear()
+
+
+# ---------------------------------------------------------------------------
+# A TOLERANCE THAT IS A GUESS IS NOT A BOUND
+# ---------------------------------------------------------------------------
+
+## The worker derives its chord step from the widest curved face it can read.
+## A face it cannot read — a spline, a revolution — leaves it guessing from
+## the bounding box, and it says so with tolerance_bounded false. A distance
+## with no error bar cannot be judged against required_mm, so the panel's
+## verdict is FALSE with a reason, unless the caller has opted in to judging
+## the distances alone — and then the flag still travels.
+func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
+	_mode = "unbounded"
+	var doubted: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var accepted: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5, "accept_unbounded_tolerance": true})
+	_mode = "measure"
+	var line: String = checks.clearance_status_line(doubted)
+	check("tolerance: a worker reply whose tolerance is not a bound fails "
+			+ "the check with a reason and a status line that says so, "
+			+ "passes only when the caller accepts an unbounded tolerance, "
+			+ "and carries the flag and the requested tolerance either way",
+			bool(doubted.get("checked", false))
+				and not bool(doubted.get("pass", true))
+				and not bool(doubted.get("tolerance_bounded", true))
+				and str(doubted.get("pass_reason", "")).contains("not guaranteed")
+				and str(doubted.get("bound", "")).contains(
+					"not guaranteed for unrecognised curved faces")
+				and absf(float(doubted.get("requested_tolerance_mm", 0.0))
+					- GeometryChecks.CLEARANCE_TOLERANCE_MM) < 1.0e-9
+				and line.contains("NOT guaranteed")
+				and bool(accepted.get("checked", false))
+				and bool(accepted.get("pass", false))
+				and not accepted.has("pass_reason")
+				and not bool(accepted.get("tolerance_bounded", true))
+				and (doubted.get("pairs", []) as Array).size() == 2
+				and bool(((doubted.get("pairs", []) as Array)[0] as Dictionary)
+					.get("pass", false)),
+			"doubted = %s, accepted = %s, line = %s" % [str(doubted),
+				str(accepted.get("pass")), line])
+
+
 ## Start a clearance call without awaiting it and park its reply in `into`.
 func _collect_clearance(checks: RefCounted, panel: Node, into: Array) -> void:
 	var reply: Dictionary = await checks.check_clearance(panel,
@@ -819,13 +924,20 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		pairs.append(pair)
 	pairs.sort_custom(func(a, b): return float(a["min_mm"]) < float(b["min_mm"]))
 	var tolerance := float(args.get("tolerance_mm", 0.0))
+	# "unbounded" is the worker's answer for a solid with a curved face it
+	# could not measure: the tolerance is a bounding-box guess, and it says so.
+	var bounded := _mode != "unbounded"
 	return {"ok": true, "result": {
 		"checked": true,
 		"units": "mm",
 		"pass": pairs.all(func(p): return bool(p["pass"])),
 		"required_mm": required,
-		"tessellation_tolerance_mm": tolerance,
-		"bound": "the true clearance is at least min_mm - %s mm" % tolerance,
+		"tessellation_tolerance_mm": tolerance * (1.0 if bounded else 4.0),
+		"requested_tolerance_mm": tolerance,
+		"tolerance_bounded": bounded,
+		"bound": ("the true clearance is at least min_mm - %s mm" % tolerance)
+			if bounded else ("chord error ESTIMATED at %s mm; the estimate is "
+				% (tolerance * 4.0)) + "not guaranteed for unrecognised curved faces",
 		"solid_triangles": 12,
 		"engine": "stand-in for python-fcl",
 		"cache": {"hits": pairs.size(), "misses": 0, "entries": pairs.size()},

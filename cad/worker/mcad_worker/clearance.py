@@ -276,8 +276,8 @@ def _angular_for(tolerance_mm: float, radius_mm: float) -> float:
     return max(MIN_ANGULAR_RAD, angle)
 
 
-def _curvature_radius(source: str) -> Optional[float]:
-    """The WIDEST radius in the solid, or None when nothing is curved.
+def _curvature(source: str) -> tuple:
+    """(widest measured radius or None, whether every curved face was measured).
 
     The widest, because the sagitta of a fixed angle grows with the radius:
     an angle chosen for a 2 mm bore leaves a 200 mm barrel a millimetre from
@@ -285,27 +285,31 @@ def _curvature_radius(source: str) -> Optional[float]:
     tighter one is inside it.
 
     Read straight off the B-Rep by the module that already reads B-Rep
-    surfaces. A runtime that cannot read it says so by returning None, and the
-    caller falls back to the mesh's own bounding box.
+    surfaces. The second value is False when a curved face is of a kind that
+    reader cannot measure — a spline, a revolution, an offset — or when the
+    B-Rep could not be read at all: the radius is then at best a partial
+    answer, and no bound derived from it covers the faces it did not see.
     """
     try:
-        from .features import FeatureError, largest_curved_radius
+        from .features import FeatureError, curvature_report
     except ImportError:
-        return None
+        return None, False
     try:
-        return largest_curved_radius(source)
+        report = curvature_report(source)
     except FeatureError:
-        return None
+        return None, False
     except BaseException:  # noqa: BLE001 — a broken OCCT raises anything
-        return None
+        return None, False
+    return report["largest_radius_mm"], int(report["unrecognised_faces"]) == 0
 
 
 def _bbox_radius(vertices) -> float:
     """A radius from the mesh's own bounding box: half its LARGEST extent.
 
-    The fallback when the B-Rep cannot be read at all. It is a guess about
-    curvature nobody could measure, and the reply says so rather than claiming
-    the tolerance is bounded.
+    The stand-in when a curved face's radius could not be read. It is a GUESS
+    about curvature nobody measured — a shallow spline patch can be far
+    flatter than its box is wide — so a tolerance derived from it is reported
+    as unbounded rather than as a promise.
     """
     if len(vertices) == 0:
         return 0.0
@@ -314,16 +318,21 @@ def _bbox_radius(vertices) -> float:
     return widest * 0.5
 
 
+UNRECOGNISED_CURVATURE = ("a curved face of a kind this reader cannot measure "
+                          "(a spline, a revolution, an offset), or a B-Rep "
+                          "that could not be read at all")
+
+
 def _prepare_solid(source: str, tolerance_mm: float,
                    angular_param: Optional[float] = None):
     """Tessellate the solid so the CHORD error really is within the tolerance.
 
-    Returns (vertices, faces, angular_rad, how, effective_mm). OCCT applies
-    the linear and the angular deflection together and the finer one wins, so
-    the angular one is derived from the linear one and the curvature it has to
-    hold — which is what makes `tessellation_tolerance_mm` a bound rather than
-    a label. A caller that states its own angular_tolerance is obeyed and told
-    so.
+    Returns (vertices, faces, angular_rad, how, effective_mm, bounded). OCCT
+    applies the linear and the angular deflection together and the finer one
+    wins, so the angular one is derived from the linear one and the curvature
+    it has to hold — which is what makes `tessellation_tolerance_mm` a bound
+    rather than a label. A caller that states its own angular_tolerance is
+    obeyed and told so.
 
     `effective_mm` is the tolerance the mesh ACTUALLY keeps. It is the
     requested one except where MIN_ANGULAR_RAD binds: a very wide face with a
@@ -332,45 +341,56 @@ def _prepare_solid(source: str, tolerance_mm: float,
     asked. The reply then states what it really got rather than what it was
     asked for — an error bar the mesh does not keep is worse than a coarse
     one, because a caller subtracts it and believes the result.
+
+    `bounded` is False when a curved face's radius could not be read: the
+    angle is then chosen from the bounding box, which is a guess about the
+    curvature, and `effective_mm` is what that guess implies rather than
+    what the mesh is known to keep.
     """
+    measured, known = _curvature(source)
+
     if angular_param is not None:
         vertices, faces = _solid_arrays(source, tolerance_mm, angular_param)
-        radius = _curvature_radius(source) or _bbox_radius(vertices)
+        radius = measured if known else max(measured or 0.0,
+                                            _bbox_radius(vertices))
+        effective = max(tolerance_mm, _sagitta_mm(angular_param, radius or 0.0))
         return (vertices, faces, angular_param, "stated by the caller",
-                max(tolerance_mm, _sagitta_mm(angular_param, radius)))
+                effective, known)
 
-    radius = _curvature_radius(source)
-    if radius is not None:
-        angular = _angular_for(tolerance_mm, radius)
+    if known and measured is not None:
+        angular = _angular_for(tolerance_mm, measured)
         vertices, faces = _solid_arrays(source, tolerance_mm, angular)
-        effective = max(tolerance_mm, _sagitta_mm(angular, radius))
-        how = "derived from the widest curved face (radius %.4f mm)" % radius
+        effective = max(tolerance_mm, _sagitta_mm(angular, measured))
+        how = "derived from the widest curved face (radius %.4f mm)" % measured
         if effective > tolerance_mm:
             how += (" and held at this module's finest angular step (%.4f "
                     "rad), which on that radius is %.6f mm of chord error — "
                     "more than the %.6f mm asked for"
                     % (MIN_ANGULAR_RAD, effective, tolerance_mm))
-        return vertices, faces, angular, how, effective
+        return vertices, faces, angular, how, effective, True
 
-    # No curved face, or no B-Rep to read. Tessellate once at the default and
-    # look at what came out: a shape with no curvature is already exact, and
-    # one whose curvature could not be read gets a bounding-box radius, which
-    # is a guess — so the mesh is only rebuilt when that guess asks for a
-    # finer angle than the default.
+    if known:
+        # No curved face at all: every chord is the surface, at any angle.
+        vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
+        return (vertices, faces, DEFAULT_ANGULAR_RAD,
+                "the default: no curved face was found to bind it",
+                tolerance_mm, True)
+
+    # A curved face whose radius could not be read. Tessellate once at the
+    # default and take the bounding box as the radius — wider than any face
+    # this reader measured, but only a guess about the one it could not — and
+    # rebuild only when that guess asks for a finer angle than the default.
     vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
-    box_radius = _bbox_radius(vertices)
-    guess = _angular_for(tolerance_mm, box_radius)
+    radius = max(measured or 0.0, _bbox_radius(vertices))
+    guess = _angular_for(tolerance_mm, radius)
     if guess < DEFAULT_ANGULAR_RAD:
         vertices, faces = _solid_arrays(source, tolerance_mm, guess)
-        return (vertices, faces, guess,
-                "derived from the mesh's own bounding box, because the "
-                "B-Rep carries a curved surface this reader cannot measure "
-                "(a spline, a revolution, an offset) or could not be read at "
-                "all",
-                max(tolerance_mm, _sagitta_mm(guess, box_radius)))
-    return (vertices, faces, DEFAULT_ANGULAR_RAD,
-            "the default: no curved face was found to bind it",
-            tolerance_mm)
+    else:
+        guess = DEFAULT_ANGULAR_RAD
+    return (vertices, faces, guess,
+            "guessed from the mesh's own bounding box (radius %.4f mm), "
+            "because the B-Rep carries %s" % (radius, UNRECOGNISED_CURVATURE),
+            max(tolerance_mm, _sagitta_mm(guess, radius)), False)
 
 
 def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
@@ -524,7 +544,7 @@ def clearance(params: dict) -> dict:
             }
 
         (solid_vertices, solid_faces, angular_rad, angular_how,
-            effective_mm) = _prepare_solid(source, tolerance_mm, angular)
+            effective_mm, bounded) = _prepare_solid(source, tolerance_mm, angular)
         solid_tree = _build_tree(solid_vertices, solid_faces)
 
         pairs = []
@@ -572,12 +592,23 @@ def clearance(params: dict) -> dict:
             # angular one is part of the promise the linear one makes.
             "angular_deflection_deg": math.degrees(angular_rad),
             "angular_deflection_source": angular_how,
-            "bound": ("the solid is measured as a mesh tessellated to within "
-                      "%g mm of its true surface (chords stepped by at most "
-                      "%.3f degrees, %s), so the true clearance is at least "
-                      "min_mm - %g mm"
-                      % (effective_mm, math.degrees(angular_rad), angular_how,
-                         effective_mm)),
+            # A bound is a promise; where the curvature is unknown the number
+            # is what a guess implies, and the text says so in the same words
+            # the panel looks for before it trusts the row.
+            "tolerance_bounded": bounded,
+            "bound": (("the solid is measured as a mesh tessellated to within "
+                       "%g mm of its true surface (chords stepped by at most "
+                       "%.3f degrees, %s), so the true clearance is at least "
+                       "min_mm - %g mm"
+                       % (effective_mm, math.degrees(angular_rad), angular_how,
+                          effective_mm)) if bounded else
+                      ("the solid is measured as a mesh tessellated at a "
+                       "requested %g mm; its chord error is ESTIMATED at %g mm "
+                       "(chords stepped by at most %.3f degrees, %s) and that "
+                       "estimate is not guaranteed for unrecognised curved "
+                       "faces, so no error bar bounds min_mm here"
+                       % (tolerance_mm, effective_mm,
+                          math.degrees(angular_rad), angular_how))),
             "solid_triangles": int(len(solid_faces)),
             "cache": {
                 "hits": hits,

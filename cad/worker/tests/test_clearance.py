@@ -292,7 +292,7 @@ def _max_chord_deviation(source: str, tolerance_mm: float,
 
     import numpy as np
 
-    vertices, faces, _angular, _how, _effective = clr._prepare_solid(
+    vertices, faces, _angular, _how, _effective, _bounded = clr._prepare_solid(
         source, tolerance_mm)
     points = np.asarray(vertices, dtype=float)
     worst = 0.0
@@ -508,8 +508,8 @@ class TestClearanceVerb:
                                          MIXED_WIDE_R)
         assert deviation <= tolerance, deviation
         assert deviation > 0.0
-        assert clr._curvature_radius(MIXED_SOLID_SOURCE) == pytest.approx(
-            MIXED_WIDE_R, abs=1.0e-6)
+        assert clr._curvature(MIXED_SOLID_SOURCE) == (
+            pytest.approx(MIXED_WIDE_R, abs=1.0e-6), True)
 
     def test_a_cone_is_a_curved_face_too(self):
         """Cylinders and spheres are not the whole of curvature.
@@ -536,6 +536,63 @@ class TestClearanceVerb:
             MIXED_WIDE_R, abs=1.0e-6)
         # A part with no curved face at all has no radius to report either.
         assert feat.largest_curved_radius("part = cube(10, 10, 10)") is None
+
+    def test_an_unrecognised_curved_face_is_not_promised_a_bound(self, tmp_path):
+        """A guess about curvature is reported as a guess, not as a bound.
+
+        An oblate spheroid — a 50 mm sphere squashed to a tenth of its height
+        — is one B-spline face to OCCT, which this module's curvature reader
+        cannot measure. Its bounding box is 100 x 100 x 10 mm, so the fallback
+        radius is 50 mm; the surface at the pole has a radius of curvature of
+        a^2/c = 500 mm, ten times that. The angle chosen for 50 mm leaves the
+        pole's chords ten times further out than the number a reply derived
+        from it would state, so that number is not a bound the mesh keeps.
+
+        ORACLE: `curvature_report` itself says the face is unrecognised, and
+        the reply must then carry tolerance_bounded False, keep the request,
+        label the effective value as an estimate and say in `bound` that it
+        is not guaranteed for unrecognised curved faces — while a part whose
+        every curved face IS measured, and a part with no curved face at all,
+        both come back bounded. The pass verdict is not this module's to
+        withhold: the panel joins tolerance_bounded to its own verdict.
+        """
+        pytest.importorskip("fcl")
+        pytest.importorskip("build123d")
+        verts, faces = _bar_a()
+        path, key = write_blob(tmp_path, verts, faces)
+        requested = 0.01
+
+        def _reply(source):
+            return clr.clearance({
+                "source": source,
+                "required_mm": 0.5,
+                "tolerance_mm": requested,
+                "targets": [{"reference": "board", "node": "Assembly/Bar",
+                             "key": key, "path": path}],
+            })["result"]
+
+        spheroid = ("part = translate([0, 0, %f], scale([1, 1, 0.1], "
+                    "sphere(50)))" % (GAP_MM + 5.0))
+        report = feat.curvature_report(spheroid)
+        assert report["unrecognised_faces"] >= 1
+        assert report["largest_radius_mm"] is None
+
+        guessed = _reply(spheroid)
+        assert guessed["checked"] is True
+        assert guessed["tolerance_bounded"] is False
+        assert guessed["requested_tolerance_mm"] == requested
+        assert guessed["tessellation_tolerance_mm"] >= requested
+        assert "not guaranteed for unrecognised curved faces" in guessed["bound"]
+        assert "ESTIMATED" in guessed["bound"]
+        assert "guessed from the mesh's own bounding box" \
+            in guessed["angular_deflection_source"]
+
+        measured = _reply(CURVED_SOLID_SOURCE)
+        assert measured["tolerance_bounded"] is True
+        assert "not guaranteed" not in measured["bound"]
+        flat = _reply(SOLID_SOURCE)
+        assert flat["tolerance_bounded"] is True
+        assert "no curved face" in flat["angular_deflection_source"]
 
     def test_pairs_come_back_closest_first(self, tmp_path):
         pytest.importorskip("fcl")
