@@ -20,6 +20,10 @@ extends RefCounted
 const _WorkerReply: Script = preload("worker_reply.gd")
 const _MeshGauge: Script = preload("mesh_gauge.gd")
 
+## The phrase every unbounded-tolerance pass_reason is built from, and the one
+## the status line reads back to tell that cause from a join failure.
+const UNBOUNDED_TOLERANCE_REASON := "tessellation tolerance is not guaranteed"
+
 
 # ---------------------------------------------------------------------------
 # Frame helpers — read by both halves
@@ -596,7 +600,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	var pass_reason := ""
 	if not bounded and not accept_unbounded:
 		verdict = false
-		pass_reason = "the tessellation tolerance is not guaranteed for " \
+		pass_reason = "the " + UNBOUNDED_TOLERANCE_REASON + " for " \
 			+ "unrecognised curved faces in the solid, so the measured " \
 			+ "distances carry no error bar; pass accept_unbounded_tolerance " \
 			+ "to request advisory grades on the distances alone; pass remains false"
@@ -637,7 +641,8 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	if not bounded:
 		verdict = false
 		if pass_reason.is_empty():
-			pass_reason = "tessellation tolerance is not guaranteed; distances are advisory only"
+			pass_reason = UNBOUNDED_TOLERANCE_REASON \
+				+ "; distances are advisory only"
 		for entry in pairs:
 			var pair: Dictionary = entry
 			pair["advisory_pass"] = bool(pair["pass"]) and waived \
@@ -808,7 +813,12 @@ func clearance_status_line(report: Dictionary) -> String:
 		return ""
 	var first: Dictionary = pairs[0]
 	var verdict := "clears" if bool(report.get("pass", false)) else "TOO CLOSE"
-	if bool(report.get("advisory", false)):
+	# ADVISORY names ONE cause: the tolerance is a guess, so the distances can
+	# only inform. A stale or missing interference join is a different failure
+	# — the containment question is unanswered — and it overwrites pass_reason,
+	# so the reason the report carries is the one that decided the verdict.
+	if bool(report.get("advisory", false)) and str(report.get("pass_reason", "")) \
+			.contains(UNBOUNDED_TOLERANCE_REASON):
 		verdict = "ADVISORY"
 	var tolerance := "tessellated to %.3f mm" \
 		% float(report.get("tessellation_tolerance_mm", 0.0))

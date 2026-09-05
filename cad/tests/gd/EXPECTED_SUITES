@@ -411,4 +411,10 @@ test_fasteners.gd assertions=72
 
 # Missing/malformed bounds, exact cache and pose identity, mesh replacement,
 # and a material-run ray that must exclude a nearer sibling node.
-test_geometry_contract.gd assertions=8
+# 9 assertions = 2 malformed bound (the missing field and the non-bool, each
+# unable to pass even under the opt-in) + 1 the worker-field refusal (a reply
+# whose tolerance_bounded is not a bool is refused by name before any pair is
+# graded, while the same reply with a real bool is answered) + 1 one-micron
+# move + 1 distinct scales + 3 pose/mesh/local-transform guards + 1 material
+# run past a sibling.
+test_geometry_contract.gd assertions=9

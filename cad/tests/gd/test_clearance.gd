@@ -910,16 +910,11 @@ func _check_pose_rewritten_in_place(panel: Node, checks: RefCounted) -> void:
 	_known_blobs.clear()
 
 
-# ---------------------------------------------------------------------------
-# A TOLERANCE THAT IS A GUESS IS NOT A BOUND
-# ---------------------------------------------------------------------------
-
-## The worker derives its chord step from the widest curved face it can read.
-## A face it cannot read — a spline, a revolution — leaves it guessing from
-## the bounding box, and it says so with tolerance_bounded false. A distance
-## with no error bar cannot be judged against required_mm, so the panel's
-## verdict is FALSE with a reason, unless the caller has opted in to judging
-## the distances alone — and then the flag still travels.
+## The geometry the worker measured was extracted from the part records; a
+## part whose transform or mesh is swapped while the call waits describes
+## geometry the answer was not measured on. The reply must say the references
+## moved and must not pass — a pass here would be a distance reported for
+## parts that are no longer in that arrangement.
 func _check_parts_changed_during_await(panel: Node, checks: RefCounted) -> void:
 	for kind in ["transform", "mesh"]:
 		_payloads.clear()
@@ -946,6 +941,18 @@ func _check_parts_changed_during_await(panel: Node, checks: RefCounted) -> void:
 	_known_blobs.clear()
 
 
+# ---------------------------------------------------------------------------
+# A TOLERANCE THAT IS A GUESS IS NOT A BOUND
+# ---------------------------------------------------------------------------
+
+## The worker derives its chord step from the widest curved face it can read.
+## A face it cannot read — a spline, a revolution — leaves it guessing from
+## the bounding box, and it says so with tolerance_bounded false. A distance
+## with no error bar cannot be judged against required_mm, so the panel's
+## verdict is FALSE with a reason. The opt-in does not lift that: accepting an
+## unbounded tolerance asks for the distances to be graded on min_mm alone,
+## which yields an ADVISORY grade — advisory true, pass still false, per pair
+## and overall — never a pass. The flag travels either way.
 func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 	_mode = "unbounded"
 	var doubted: Dictionary = await checks.check_clearance(panel,

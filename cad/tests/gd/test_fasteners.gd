@@ -1399,16 +1399,11 @@ func _check_shelf_in_bore(module: RefCounted, panel: Node) -> void:
 			"row = %s" % str(row))
 
 
-# ---------------------------------------------------------------------------
-# BOTTOMING — a screw longer than its blind bore is deep
-# ---------------------------------------------------------------------------
-
-## Boss A's bore is blind, 8.2 mm deep from a mouth 0.8 mm under the seat, so
-## its floor is 9.0 mm down the axis. A 10 mm screw's tip ends 9.2 mm down: it
-## meets the floor before the head meets the board, with engagement (8.2 mm)
-## reading as ample and the path otherwise clear. The row must say bottoming,
-## with the tip, the floor and the 0.2 mm excess — and the main report's 8 mm
-## screw in the same bore must not.
+## Engagement is measured from the bore's full-turn extent, so every field the
+## measurement rests on has to be present and of the stated type. Erasing one
+## field at a time must make the check REFUSE and name the missing field; a
+## report that comes back checked with a graded engagement would show the
+## module filling a gap in the worker's reply with a default of its own.
 func _check_missing_extent_metadata(module: RefCounted, panel: Node) -> void:
 	var original: Array = panel.bores
 	for field in ["extent_max_mm", "full_start_mm", "full_end_mm", "extent_full_bound_mm", "extent_exact", "extent_full_bounded"]:
@@ -1420,6 +1415,12 @@ func _check_missing_extent_metadata(module: RefCounted, panel: Node) -> void:
 	panel.bores = original
 
 
+## The gauge's colliders are built from the part records; a part whose
+## transform or mesh is swapped while a check waits leaves the rays it is
+## about to cast describing geometry that is no longer there. The check must
+## come back stale and unchecked, and must not rebuild the colliders itself —
+## a report with rows, or a bumped gauge generation, would show it measuring
+## across two epochs.
 func _check_parts_changed_during_await(module: RefCounted, panel: Node) -> void:
 	for kind in ["transform", "mesh"]:
 		var part: Dictionary = panel.checks_records[0]["parts"][0]
@@ -1444,6 +1445,11 @@ func _check_parts_changed_during_await(module: RefCounted, panel: Node) -> void:
 			and panel.gauge.get_generation() == epoch, str(report))
 
 
+## Bottoming is a floor question, so a bore with no floor cannot bottom. The
+## same 10 mm screw that bottoms in boss A's blind bore is run down a bore
+## drilled clean through its boss: the fan reaches the far mouth and meets
+## nothing, so the row must pass with bottoming false. A row that bottoms here
+## would show the far mouth, or the extent end, being read as material.
 func _check_through_bore(module: RefCounted, panel: Node) -> void:
 	var original_mesh: Dictionary = panel.mesh_data
 	var original_bores: Array = panel.bores
@@ -1481,6 +1487,16 @@ func _check_through_bore(module: RefCounted, panel: Node) -> void:
 	panel.bores = original_bores
 
 
+# ---------------------------------------------------------------------------
+# BOTTOMING — a screw longer than its blind bore is deep
+# ---------------------------------------------------------------------------
+
+## Boss A's bore is blind, 8.2 mm deep from a mouth 0.8 mm under the seat, so
+## its floor is 9.0 mm down the axis. A 10 mm screw's tip ends 9.2 mm down: it
+## meets the floor before the head meets the board, with engagement (8.2 mm)
+## reading as ample and the path otherwise clear. The row must say bottoming,
+## with the tip, the floor and the 0.2 mm excess — and the main report's 8 mm
+## screw in the same bore must not.
 func _check_bottoming(module: RefCounted, panel: Node, main: Dictionary) -> void:
 	var original_mesh: Dictionary = panel.mesh_data
 	var original_bores: Array = panel.bores
