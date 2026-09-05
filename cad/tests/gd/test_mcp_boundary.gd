@@ -26,7 +26,13 @@ extends SceneTree
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
 
 const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
-const ToolRegistryScript := preload("res://Scripts/Services/Plugins/PluginToolRegistry.gd")
+## The dispatcher is loaded at RUN time, not preloaded. `godot --script` loads
+## a suite twice, the first time before the host's autoloads register, and a
+## const preload of a host script that names SingletonObject compiles — and
+## fails — in that first pass. The failure is cached, so the host's own
+## PluginManager.new() then fails as it starts up, which is host state this
+## suite has no business breaking.
+const TOOL_REGISTRY_PATH := "res://Scripts/Services/Plugins/PluginToolRegistry.gd"
 const EvalReply := preload("res://../../minerva-plugins/cad/ui/scripts/eval_reply.gd")
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
@@ -41,6 +47,10 @@ const BOARD_NODES := 45
 ## What a doc_write reply may cost, in bytes. Roughly the DSL source it is
 ## answering about; anything larger is the reply talking about itself.
 const REPLY_BUDGET_BYTES := 2048
+
+## Stands in for the document the report is about. Its digest is a fixed
+## sixty-four characters, so the reply's size is the reference set's cost.
+const SOURCE := "box(40, 30, 10)"
 
 var _pass: int = 0
 var _fail: int = 0
@@ -107,7 +117,7 @@ func _check_addressing() -> void:
 
 	# The dispatcher itself, not a stand-in for it: the same call the MCP verb
 	# makes, addressed by the name minerva_create_plugin_editor returned.
-	var registry = ToolRegistryScript.new()
+	var registry = (load(TOOL_REGISTRY_PATH) as GDScript).new()
 	var reply: Dictionary = await registry._handle_panel_tool_call(
 		"cad", "minerva_cad_references", {"editor_name": FIRST_TITLE})
 	check("the panel-tool dispatcher answers a cad verb addressed by the tab "
@@ -200,7 +210,11 @@ func _board_digest() -> String:
 func _clean_eval(digest: String) -> Dictionary:
 	var checks: RefCounted = GeometryChecks.new()
 	var report: Dictionary = checks._report({})
-	report["source_digest"] = digest
+	# WHICH SOLID, not which references: the panel stamps this one with the
+	# SHA-256 of the DSL source, sixty-four characters whatever the board is.
+	# The per-node list is the records digest below, and it is the only field
+	# whose size grows with the assembly.
+	report["source_digest"] = _source_digest(SOURCE)
 	report["records_digest"] = digest
 	report["gauge_generation"] = 3
 	return {
@@ -215,3 +229,11 @@ func _clean_eval(digest: String) -> Dictionary:
 		"ts": 1757000000.0,
 		"interference": report,
 	}
+
+
+## The panel's own source stamp: the SHA-256 of the DSL text, hex.
+func _source_digest(source: String) -> String:
+	var hasher := HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(source.to_utf8_buffer())
+	return hasher.finish().hex_encode()

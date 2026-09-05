@@ -34,6 +34,12 @@ extends SceneTree
 ## flush boss is still reported, and wrong in the other if the bitten one is
 ## not — the two differ by a tenth of a millimetre and nothing else.
 ##
+## THE DEPTH IS A THIRD CASE, not a property of the bitten one. A penetration
+## depth is a RUN — one edge in and out again — and nothing runs through a
+## tenth-of-a-millimetre disc, so the bite is reported WITHOUT a depth. The
+## boss driven clean through the board is the control that says so honestly:
+## there the run exists, and the depth is the board's thickness.
+##
 ## Run:
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
 
@@ -141,10 +147,33 @@ func _run() -> void:
 				and str(((bitten.get("pairs", []) as Array)[0] as Dictionary)
 					.get("node", "")) == NODE_PATH,
 			"report = %s" % str(bitten))
-	check("and the overlap is measured: a depth is reported for that pair, "
-			+ "which a designed contact never carries",
-			_penetration_of(bitten) > 0.0,
-			"penetration = %s" % str(_penetration_of(bitten)))
+	# A depth is a RUN: two crossings of one edge, one in and one out. Nothing
+	# spans a tenth-of-a-millimetre disc — the board's underside edges enter
+	# the boss's rim and stop inside it, and the boss's own side edges enter
+	# the board and stop inside it — so the overlap is reported without a
+	# depth rather than with the lateral chord, which is millimetres long and
+	# would read as the depth of a bite a tenth as deep.
+	check("the tenth-of-a-millimetre overlap is reported without a depth: no "
+			+ "single edge spans it, and the check quotes no run it did not "
+			+ "measure",
+			_penetration_of(bitten) == 0.0,
+			"penetration = %s, report = %s"
+				% [str(_penetration_of(bitten)), str(bitten)])
+
+	# --- the depth control ---------------------------------------------------
+	# Which is only honest if a depth still arrives when a run really is
+	# there. The same boss driven clean through the board: its side edges go
+	# in at the underside and out at the top face, and the run between those
+	# two crossings is the board's own thickness.
+	checks.build_solid(_boss_mesh(PLATE_THICKNESS + 1.0))
+	var through: Dictionary = await _submit(gauge, checks)
+	check("a boss driven clean through the board reports the depth it went "
+			+ "in — the board's thickness, bounded by one edge's two crossings",
+			bool(through.get("checked", false))
+				and int(through.get("count", 0)) == 1
+				and absf(_penetration_of(through) - PLATE_THICKNESS) < 0.05,
+			"penetration = %s, report = %s"
+				% [str(_penetration_of(through)), str(through)])
 
 
 func _submit(gauge: Node, checks: RefCounted) -> Dictionary:

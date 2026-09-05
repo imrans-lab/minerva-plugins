@@ -1210,15 +1210,23 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 			"clearance needs the python-fcl geometry backend, which this "
 			+ "runtime bundle could not load"}}
 
+	# Resolve every target's blob BEFORE answering and hold the resolved path
+	# here, exactly as the worker holds the built tree in a local list: the
+	# cache may evict an entry later in the same request — a batch larger than
+	# the bound always does — and that must not lose a target the request has
+	# already read.
 	var targets: Array = args.get("targets", []) as Array
 	var missing: Array = []
+	var prepared: Array = []
 	for entry in targets:
 		var target: Dictionary = entry
 		var key := str(target.get("key", ""))
 		var path := str(target.get("path", ""))
 		if not path.is_empty():
 			_remember_blob(key, path)
-		if not _known_blobs.has(key):
+		if _known_blobs.has(key):
+			prepared.append([target, str(_known_blobs[key])])
+		else:
 			missing.append(key)
 	if not missing.is_empty():
 		return {"ok": true, "result": {
@@ -1240,9 +1248,9 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 	# passes only when what is left meets the requirement.
 	var effective := tolerance * (1.0 if bounded else 4.0)
 	var pairs: Array = []
-	for entry in targets:
-		var target: Dictionary = entry
-		var blob := _decode_blob(str(_known_blobs[str(target["key"])]))
+	for held in prepared:
+		var target: Dictionary = (held as Array)[0]
+		var blob := _decode_blob(str((held as Array)[1]))
 		var box: AABB = blob["box"]
 		var top_z: float = box.position.z + box.size.z
 		var min_mm: float = maxf(solid_bottom_z - top_z, 0.0)

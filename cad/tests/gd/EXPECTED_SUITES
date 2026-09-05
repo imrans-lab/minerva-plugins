@@ -442,11 +442,13 @@ test_stl_reference.gd assertions=17
 # cylinder rim — the box-on-a-floor flush fixture has two triangles a face and
 # no edge running over the rim, which is why it never caught this — and the
 # control is the same boss driven 0.1 mm into the plate.
-# 6 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# 7 assertions = 2 fixture premises (the plate really is grid-triangulated;
 # its underside edges really do cross the rim) + 1 collider built + 1 the
-# flush boss reports nothing + 2 the bitten boss reports the board's node and
-# a depth with it.
-test_flush_contact.gd assertions=6
+# flush boss reports nothing + 2 the bitten boss reports the board's node and,
+# because no single edge spans a tenth-of-a-millimetre disc, no depth with it
+# + 1 the depth control (the same boss driven clean through the board reports
+# the board's thickness).
+test_flush_contact.gd assertions=7
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool
