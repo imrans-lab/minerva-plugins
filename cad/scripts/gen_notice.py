@@ -2,43 +2,66 @@
 """Generate cad/NOTICE.md — the licence/attribution inventory for everything
 third-party that ships inside the cad plugin's embedded Python runtime bundle.
 
-WHAT THIS INVENTORIES AND WHY IT IS NOT AUTOMATIC
---------------------------------------------------
-The bundle is built by ``scripts/build-python-runtime-bundle.sh`` from the pins
-in ``cad/scripts/runtime-bundle.lock``. A pin names a PyPI distribution; what
-lands in the tarball is that distribution's wheel, and a wheel routinely
-carries compiled copies of other projects (``python-fcl``'s wheel contains
-FCL, libccd, OctoMap and Eigen — but ships only python-fcl's own LICENSE).
-Nothing in the pin, the wheel metadata or the dist-info can tell us about those
-four, so :data:`RUNTIME_COMPONENTS` is maintained BY HAND, from the wheel
-contents and the upstream build recipe, and this script is what stops the hand
-list and the lock from drifting apart.
+THE THREE INPUTS AND WHY THERE ARE THREE
+-----------------------------------------
+``cad/scripts/runtime-bundle.lock``
+    What the build is TOLD to install (``build123d``, ``python-fcl``).
 
-The licence texts themselves live in ``cad/licenses/runtime/`` and are copied
-into the bundle and the release tarball, because binary redistribution under
-BSD/MIT requires the notice, the conditions and the disclaimer to travel "in
-the documentation and/or other materials provided with the distribution" — a
-NOTICE that only names a licence does not satisfy that.
+``cad/scripts/runtime-bundle.manifest``
+    What actually LANDS in the built bundle's site-packages — the census. pip
+    resolves the transitive tree, so the lock names two distributions and the
+    bundle contains forty-seven. Generating the inventory from the lock would
+    attribute two of them.
+
+``cad/scripts/notice_inventory.py``
+    One entry per thing that ships, with its licence text. A wheel vendors
+    projects its metadata never mentions (python-fcl's contains FCL, libccd,
+    OctoMap and Eigen; cadquery-ocp's contains the whole of OCCT and ships no
+    licence text at all), so this is maintained by hand and this script is
+    what stops it and the bundle from drifting apart.
+
+WHY THE CENSUS IS A COMMITTED FILE RATHER THAN A LIVE READ
+-----------------------------------------------------------
+The NOTICE gate runs in CI on a runner that builds no bundle — that is what
+makes it a cheap, platform-independent, always-run gate rather than something
+that only happens on a release leg. So the gate reads the committed census,
+and the build legs, which DO have a bundle, run ``--verify-bundle`` against
+the real site-packages. Drift therefore surfaces on the build leg (a
+transitive dependency appeared, disappeared or changed version) and is fixed
+by re-running ``--census`` and inventorying whatever is new.
+
+The census is produced by reading ``*.dist-info/METADATA`` out of one
+directory, NOT by running ``pip list`` inside the staged interpreter: that
+interpreter's sys.path picks up the developer's ``~/.local`` site-packages, so
+pip reports distributions the bundle does not contain and the developer's
+version where both are installed.
 
 GATE SEMANTICS (fail-closed)
 -----------------------------
 Generation REFUSES, naming every violation at once, when:
 
-* a lock pin (``PIP_PKGS`` / ``PIP_NO_DEPS_PKGS``) has neither an inventory
-  entry nor a :data:`PENDING_INVENTORY` declaration — so adding a dependency
-  without inventorying it fails here rather than shipping unattributed;
+* a census distribution has neither an inventory entry nor a
+  ``DISTRIBUTION_EXCLUSIONS`` reason — the load-bearing rule: a wheel that
+  reaches site-packages without being attributed fails here rather than
+  shipping;
+* an inventory entry names a distribution the census does not contain, or
+  gives a version the census disagrees with — a stale entry attributes
+  something that no longer ships, or the wrong version of what does;
+* an exclusion names a distribution that is not in the census;
+* a lock pin is missing from the census — the census would then be describing
+  a different bundle from the one the build produces;
 * an inventory entry is missing any field, or names a licence text file that
-  does not exist or is empty — the load-bearing case: deleting a licence text
-  must fail the build, not silently ship a NOTICE pointing at nothing;
+  does not exist or is empty — deleting a licence text must fail the build,
+  not silently ship a NOTICE pointing at nothing;
 * a licence text file exists in ``cad/licenses/runtime/`` that no entry
   references (the other direction: a stale text left behind by a removed
   dependency claims an attribution we no longer make);
-* an entry's licence is outside :data:`PERMISSIVE_LICENCES` — GPL or LGPL
-  anywhere in the tree is a stop, and an unrecognised licence is refused
-  rather than guessed at;
-* an ``MPL-2.0`` entry carries no ``source_url``: MPL §3.2(a) obliges us to
-  tell recipients where the covered source is, so an MPL entry without that
-  URL renders a NOTICE that does not discharge the obligation.
+* an entry's licence is outside ``ALLOWED_LICENCES`` — an unrecognised
+  licence is refused rather than guessed at, and plain GPL is a stop;
+* an entry whose licence is in ``SOURCE_OBLIGATION_LICENCES`` carries no
+  ``obligation`` statement. MPL-2.0 must say where the covered source is;
+  OCCT's LGPL-2.1-with-exception must additionally say how a recipient
+  relinks. Shipping the text alone discharges neither.
 
 MODES
 -----
@@ -50,8 +73,15 @@ MODES
     Writes nothing; exits 1 on a gate violation or on any drift between the
     committed ``cad/NOTICE.md`` and a fresh generation. This is what CI runs.
 
-The output is a pure function of the lock file, the inventory and the licence
-files' existence — nothing here reads the clock or the environment, so two runs
+``python3 cad/scripts/gen_notice.py --census <site-packages>``
+    Rewrites the census from a built bundle's site-packages directory.
+
+``python3 cad/scripts/gen_notice.py --verify-bundle <site-packages>``
+    Writes nothing; exits 1 if the committed census and that directory
+    disagree. This is what the build legs run.
+
+The output is a pure function of the lock, the census, the inventory and the
+licence files — nothing here reads the clock or the environment, so two runs
 over an unchanged tree are byte-identical.
 """
 
@@ -59,15 +89,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import re
 import sys
 from pathlib import Path
-from typing import NamedTuple, Optional, Union
+from typing import Union
 
 # cad/scripts/this.py -> cad/
 CAD = Path(__file__).resolve().parents[1]
 
 DEFAULT_LOCK_PATH = CAD / "scripts" / "runtime-bundle.lock"
+DEFAULT_MANIFEST_PATH = CAD / "scripts" / "runtime-bundle.manifest"
 DEFAULT_NOTICE_PATH = CAD / "NOTICE.md"
 #: The whole directory that ships (into the bundle and beside the binary).
 #: Everything under it is inventoried — see DECLARED_SUPPORT_FILES.
@@ -75,174 +107,35 @@ LICENCE_ROOT = CAD / "licenses"
 LICENCE_DIR = LICENCE_ROOT / "runtime"
 REGEN_COMMAND = "python3 cad/scripts/gen_notice.py"
 
-#: Licences we are willing to ship inside a binary distribution. MPL-2.0 is
-#: file-level copyleft and is allowed only because the covered files are
-#: unmodified headers compiled into someone else's library (see the Eigen
-#: entry); it drags in the extra source-availability obligation the gate
-#: enforces below. Anything not listed here — GPL and LGPL above all — is a
-#: refusal, not a warning.
-PERMISSIVE_LICENCES = frozenset({
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "MIT",
-    "Apache-2.0",
-    "MPL-2.0",
-    "LicenseRef-Microsoft-VC-Redistributable",
-})
 
+def _load_inventory():
+    """Load the sibling inventory module by path.
 
-#: Files under ``cad/licenses/`` that are NOT a component's licence text but
-#: still ship with the distribution, declared so the tree check below can
-#: demand them by name.
-#:
-#: With only the licence texts declared, moving ``cad/licenses/README.md``
-#: away leaves the gate reporting "up to date". The inventory — not a
-#: directory listing — decides what must be present, so anything the directory
-#: ships has to be named somewhere.
-DECLARED_SUPPORT_FILES = {
-    "README.md": "explains what the directory is, how it reaches the "
-                 "distribution, and what to do when adding a dependency",
-}
-
-
-class RuntimeComponent(NamedTuple):
-    """One third-party component that ships inside the runtime bundle.
-
-    ``distribution`` is the PyPI pin it arrives through (the join back to the
-    lock file), or ``None`` for something that enters the bundle by another
-    route — the C++ runtime DLLs the Windows wheel repair copies in are not a
-    PyPI package at all. ``component`` is what the thing actually is:
-    python-fcl's wheel yields five entries sharing one distribution.
-
-    ``license_files`` are names inside ``cad/licenses/runtime/``. More than one
-    is normal (Eigen's MPL2 text plus the upstream COPYING.README that records
-    which of its files are under which licence).
+    Imported by path rather than by name because this file is run as a script
+    from any cwd and is also loaded by path from the test suite; neither route
+    puts cad/scripts on sys.path.
     """
-
-    distribution: Optional[str]
-    component: str
-    version: str
-    license: str
-    copyright: str
-    source_url: str
-    license_files: tuple
-    note: str
+    path = Path(__file__).resolve().parent / "notice_inventory.py"
+    spec = importlib.util.spec_from_file_location("cad_notice_inventory", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
-#: Every third-party component inside the bundle, in render order.
-#:
-#: The four components under the ``python-fcl`` distribution are what its wheel
-#: vendors, verified by unzipping the wheels for all four release targets: the
-#: linux wheel carries ``python_fcl.libs/`` (libfcl, libccd, liboctomap,
-#: liboctomath), the macOS wheels carry the same set under ``fcl/.dylibs/``,
-#: and the Windows wheel links FCL into the .pyd and ships ccd.dll, octomap.dll
-#: and octomath.dll beside it. Eigen is header-only and leaves no file behind —
-#: it is compiled INTO libfcl, which is exactly why a file-based inventory
-#: cannot find it and this list is maintained by hand.
-RUNTIME_COMPONENTS: tuple = (
-    RuntimeComponent(
-        distribution="python-fcl",
-        component="python-fcl",
-        version="0.7.0.11",
-        license="BSD-3-Clause",
-        copyright="Copyright (c) 2017, Matthew Matl",
-        source_url="https://github.com/BerkeleyAutomation/python-fcl",
-        license_files=("python-fcl-0.7.0.11.LICENSE.txt",),
-        note="Cython bindings to FCL. The only licence the wheel itself "
-             "ships; the four components below are compiled into it.",
-    ),
-    RuntimeComponent(
-        distribution="python-fcl",
-        component="FCL (Flexible Collision Library)",
-        version="0.7.0",
-        license="BSD-3-Clause",
-        copyright="Copyright (c) 2008-2014, Willow Garage, Inc.; "
-                  "Copyright (c) 2014-2016, Open Source Robotics Foundation",
-        source_url="https://github.com/flexible-collision-library/fcl/tree/0.7.0",
-        license_files=("fcl-0.7.0.LICENSE.txt",),
-        note="Built by python-fcl from the ambi-robotics/fcl fork pinned at "
-             "FCL 0.7.0. Ships as libfcl (linux/macOS) or linked into "
-             "fcl.cp312-win_amd64.pyd (Windows).",
-    ),
-    RuntimeComponent(
-        distribution="python-fcl",
-        component="libccd",
-        version="2.1",
-        license="BSD-3-Clause",
-        copyright="Copyright (c) 2010-2012 Daniel Fiser <danfis@danfis.cz>, "
-                  "Intelligent and Mobile Robotics Group, Czech Technical "
-                  "University in Prague",
-        source_url="https://github.com/danfis/libccd/tree/v2.1",
-        license_files=("libccd-2.1.BSD-LICENSE.txt",),
-        note="FCL's convex-collision backend. Ships as libccd / ccd.dll.",
-    ),
-    RuntimeComponent(
-        distribution="python-fcl",
-        component="OctoMap (octomap + octomath)",
-        version="1.9.8",
-        license="BSD-3-Clause",
-        copyright="Copyright (c) 2009-2013, K.M. Wurm and A. Hornung, "
-                  "University of Freiburg",
-        source_url="https://github.com/OctoMap/octomap/tree/v1.9.8",
-        license_files=("octomap-1.9.8.LICENSE.txt",),
-        note="FCL's octree collision geometry. Only the New-BSD octomap and "
-             "octomath libraries are in the wheel — octovis, the GPL viewer "
-             "in the same upstream repository, is not.",
-    ),
-    RuntimeComponent(
-        distribution="python-fcl",
-        component="Eigen",
-        version="3.3.9",
-        license="MPL-2.0",
-        copyright="Copyright (c) the Eigen authors "
-                  "(see the upstream source for per-file notices)",
-        source_url="https://gitlab.com/libeigen/eigen/-/archive/3.3.9/eigen-3.3.9.tar.gz",
-        license_files=("eigen-3.3.9.COPYING.MPL2.txt",
-                       "eigen-3.3.9.COPYING.README.txt"),
-        note="Header-only, compiled unmodified into libfcl, so no Eigen file "
-             "appears in the bundle. FCL 0.7.0 includes only <Eigen/Core>, "
-             "<Eigen/Dense> and <Eigen/StdVector>; Eigen's two LGPL-2.1 files "
-             "(IterativeLinearSolvers/IncompleteLUT.h, "
-             "SparseCholesky/SimplicialCholesky_impl.h) are sparse-solver "
-             "headers FCL never includes, so no LGPL code is compiled in. "
-             "Re-check this on any Eigen or FCL version bump.",
-    ),
-    RuntimeComponent(
-        distribution=None,
-        component="Microsoft Visual C++ runtime (MSVCP140.dll and the "
-                  "VCRUNTIME140 pair)",
-        version="Visual Studio 2022 redistributable",
-        license="LicenseRef-Microsoft-VC-Redistributable",
-        copyright="Copyright (c) Microsoft Corporation",
-        source_url="https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution",
-        license_files=("microsoft-vc-runtime.ATTRIBUTION.txt",),
-        note="Windows bundle only. The python-fcl extension imports "
-             "MSVCP140.dll, which python-build-standalone does not ship, so "
-             "the Windows build repairs the wheel with delvewheel and the DLL "
-             "travels inside the bundle instead of being resolved from the "
-             "user's machine. Nothing is checked into this repository.",
-    ),
-)
+_inv = _load_inventory()
 
-#: Lock pins whose licence tree has NOT been inventoried yet, each mapped to
-#: the reason. They render in the NOTICE as an explicit gap.
-#:
-#: A pending entry is a claim a reader can check; silence is not. These two
-#: predate the inventory and carry large trees of their own (OCCT above all),
-#: and this list is what keeps that gap visible instead of letting a green
-#: gate imply the inventory is complete.
-PENDING_INVENTORY = {
-    "build123d": "pre-existing pin; its own licence and its transitive tree "
-                 "(cadquery-ocp, OCCT, and the IPython/jedi chain) are not "
-                 "yet inventoried.",
-    "cadquery-ocp": "pulled in transitively by build123d and repeated here "
-                    "only if pinned directly; OCCT's licence tree is not yet "
-                    "inventoried.",
-}
+RuntimeComponent = _inv.RuntimeComponent
+RUNTIME_COMPONENTS = _inv.RUNTIME_COMPONENTS
+DISTRIBUTION_EXCLUSIONS = _inv.DISTRIBUTION_EXCLUSIONS
+DECLARED_SUPPORT_FILES = _inv.DECLARED_SUPPORT_FILES
+PERMISSIVE_LICENCES = _inv.PERMISSIVE_LICENCES
+SOURCE_OBLIGATION_LICENCES = _inv.SOURCE_OBLIGATION_LICENCES
+ALLOWED_LICENCES = _inv.ALLOWED_LICENCES
 
 
 class NoticeGateError(Exception):
-    """Raised when the inventory or the lock fails the gate (fail-closed).
+    """Raised when the inventory, the lock or the census fails the gate.
 
     The message names EVERY violation, never just the first: a release
     engineer fixing one and re-running should not discover the second only on
@@ -279,6 +172,11 @@ def read_lock_vars(lock_path: Union[str, Path]) -> dict:
     return values
 
 
+def canonical_name(name: str) -> str:
+    """PEP 503 normalisation, so ``python_fcl`` and ``Python-FCL`` are one key."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def lock_pins(lock_vars: dict) -> list:
     """Every pinned distribution name in the lock, sorted, de-duplicated.
 
@@ -289,9 +187,114 @@ def lock_pins(lock_vars: dict) -> list:
     specs = f"{lock_vars.get('PIP_PKGS', '')} {lock_vars.get('PIP_NO_DEPS_PKGS', '')}"
     names = set()
     for spec in specs.split():
-        names.add(re.split(r"[<>=!~\[]", spec, 1)[0].strip())
+        names.add(canonical_name(re.split(r"[<>=!~\[]", spec, 1)[0].strip()))
     names.discard("")
     return sorted(names)
+
+
+# ---------------------------------------------------------------------------
+# census
+# ---------------------------------------------------------------------------
+
+
+def read_manifest(manifest_path: Union[str, Path, None] = None) -> dict:
+    """The committed census as ``{canonical name: version}``.
+
+    One ``name version`` per line; ``#`` comments and blanks ignored.
+    """
+    path = Path(manifest_path or DEFAULT_MANIFEST_PATH)
+    census: dict = {}
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise ValueError(f"{path}:{lineno}: expected `name version`, got {line!r}")
+        census[canonical_name(parts[0])] = parts[1]
+    return census
+
+
+_METADATA_NAME = re.compile(r"^Name: (.+)$", re.M)
+_METADATA_VERSION = re.compile(r"^Version: (.+)$", re.M)
+
+
+def census_site_packages(site_packages: Union[str, Path]) -> dict:
+    """Census a built bundle's site-packages: ``{canonical name: version}``.
+
+    Reads ``*.dist-info/METADATA`` directly. No interpreter is executed and
+    nothing is imported, which is the whole point: running ``pip list`` inside
+    the staged interpreter reports the developer's ``~/.local`` packages too,
+    and a directory scan cannot.
+    """
+    root = Path(site_packages)
+    if not root.is_dir():
+        raise NotADirectoryError(f"{root} is not a directory")
+    found: dict = {}
+    for dist_info in sorted(root.glob("*.dist-info")):
+        metadata = dist_info / "METADATA"
+        if not metadata.is_file():
+            continue
+        text = metadata.read_text(encoding="utf-8", errors="replace")
+        name = _METADATA_NAME.search(text)
+        version = _METADATA_VERSION.search(text)
+        if name and version:
+            found[canonical_name(name.group(1).strip())] = version.group(1).strip()
+    return found
+
+
+def census_differences(committed: dict, actual: dict) -> list:
+    """``(severity, message)`` for every disagreement with a real bundle.
+
+    The two directions are NOT symmetric, and the asymmetry is what lets one
+    census cover three platforms:
+
+    * a distribution in the bundle that the census does not name is an
+      ERROR — it ships with no attribution, which is the whole defect this
+      gate exists to prevent;
+    * a census entry absent from this platform's bundle is a WARNING —
+      pexpect and ptyprocess are POSIX-only, so the linux census legitimately
+      names things a Windows bundle does not contain. The licence text still
+      ships on every platform, which attributes something absent rather than
+      failing to attribute something present;
+    * a version disagreement is an ERROR: the inventoried licence text may be
+      for a different release.
+    """
+    messages: list = []
+    for name in sorted(set(committed) | set(actual)):
+        if name not in actual:
+            messages.append(("warning",
+                             f"{name}: in the census but NOT in this "
+                             f"platform's bundle (census says "
+                             f"{committed[name]}) — platform-specific, or a "
+                             f"dependency that has gone away"))
+        elif name not in committed:
+            messages.append(("error",
+                             f"{name} {actual[name]}: in the bundle but NOT "
+                             f"in the census — it ships unattributed"))
+        elif committed[name] != actual[name]:
+            messages.append(("error",
+                             f"{name}: census says {committed[name]}, bundle "
+                             f"has {actual[name]}"))
+    return messages
+
+
+def render_manifest(census: dict,
+                    manifest_path: Union[str, Path, None] = None) -> str:
+    """The census file body for a freshly measured site-packages.
+
+    The header is carried over from the file being rewritten so ``--census``
+    keeps the explanation of what the file is; only the entries change.
+    """
+    header_lines = []
+    path = Path(manifest_path or DEFAULT_MANIFEST_PATH)
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or not line.strip():
+            header_lines.append(line)
+        else:
+            break
+    entries = [f"{name} {census[name]}" for name in sorted(census)]
+    return "\n".join(header_lines + entries) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -309,15 +312,20 @@ def _component_violations(components: tuple, licence_dir: Path) -> list:
                 violations.append(f"{who}: missing/empty {field}")
         if not comp.license_files:
             violations.append(f"{who}: declares no licence text file")
-        if comp.license and comp.license not in PERMISSIVE_LICENCES:
+        if comp.license and comp.license not in ALLOWED_LICENCES:
             violations.append(
-                f"{who}: licence {comp.license!r} is not in PERMISSIVE_LICENCES "
-                f"({sorted(PERMISSIVE_LICENCES)}) — copyleft is a stop, and an "
-                f"unrecognised licence is refused rather than guessed")
-        if comp.license == "MPL-2.0" and not comp.source_url:
+                f"{who}: licence {comp.license!r} is not in ALLOWED_LICENCES "
+                f"({sorted(ALLOWED_LICENCES)}) — copyleft without a discharged "
+                f"obligation is a stop, and an unrecognised licence is refused "
+                f"rather than guessed")
+        if comp.license in SOURCE_OBLIGATION_LICENCES and not comp.obligation:
             violations.append(
-                f"{who}: MPL-2.0 requires a source_url (MPL 2.0 §3.2(a): "
-                f"recipients must be told where the covered source is)")
+                f"{who}: licence {comp.license!r} needs an obligation "
+                f"statement — {SOURCE_OBLIGATION_LICENCES[comp.license]} "
+                f"Shipping the text alone does not discharge it")
+        if comp.license in SOURCE_OBLIGATION_LICENCES and not comp.source_url:
+            violations.append(
+                f"{who}: licence {comp.license!r} requires a source_url")
         for name in comp.license_files:
             path = licence_dir / name
             if Path(name).name != name:
@@ -390,14 +398,71 @@ def _tree_violations(components: tuple, licence_dir: Path,
     return violations
 
 
-def _pin_violations(pins: list, components: tuple) -> list:
-    inventoried = {c.distribution for c in components if c.distribution}
+def _census_violations(census: dict, components: tuple, exclusions: dict) -> list:
+    """Both directions between the census and the inventory.
+
+    The census is the list of distributions that reach the built bundle's
+    site-packages. Every one of them must be attributed or dismissed with a
+    reason; and every attribution must be of something that actually ships,
+    at the version that ships.
+    """
+    violations: list = []
+    by_distribution: dict = {}
+    for comp in components:
+        if comp.distribution:
+            by_distribution.setdefault(canonical_name(comp.distribution),
+                                       []).append(comp)
+
+    for name in sorted(census):
+        if name not in by_distribution and name not in exclusions:
+            violations.append(
+                f"{name}: distribution in the bundle's site-packages with no "
+                f"inventory entry and no DISTRIBUTION_EXCLUSIONS reason — it "
+                f"would ship unattributed")
+
+    for name in sorted(exclusions):
+        if name not in census:
+            violations.append(
+                f"{name}: excluded but not in the census — a stale exclusion "
+                f"hides the next distribution that takes the same name")
+        if name in by_distribution:
+            violations.append(
+                f"{name}: both inventoried and excluded — one of the two is "
+                f"wrong")
+
+    for name in sorted(by_distribution):
+        if name not in census:
+            violations.append(
+                f"{name}: inventoried but not in the census — the entry "
+                f"attributes something the bundle no longer contains")
+            continue
+        # An entry whose component IS the distribution must agree with the
+        # census version. Entries for things vendored INSIDE a wheel (OCCT
+        # inside cadquery-ocp, FCL inside python-fcl) carry their own version
+        # and are exempt: the wheel's version says nothing about them.
+        for comp in by_distribution[name]:
+            if canonical_name(comp.component) != name:
+                continue
+            if comp.version != census[name]:
+                violations.append(
+                    f"{name}: inventoried at version {comp.version}, census "
+                    f"says {census[name]} — the licence text may be for the "
+                    f"wrong release")
+    return violations
+
+
+def _pin_violations(pins: list, census: dict) -> list:
+    """A lock pin that the census does not know about.
+
+    The census describes what a build produces; if something the build is told
+    to install is not in it, the census was taken from a different bundle and
+    every completeness claim below it is void.
+    """
     return [
-        f"{pin}: lock pin with no RUNTIME_COMPONENTS entry and no "
-        f"PENDING_INVENTORY declaration — a new dependency must be "
-        f"inventoried (or explicitly declared pending) before it ships"
-        for pin in pins
-        if pin not in inventoried and pin not in PENDING_INVENTORY
+        f"{pin}: lock pin missing from the census — re-run "
+        f"`{REGEN_COMMAND} --census <site-packages>` against a bundle built "
+        f"from this lock"
+        for pin in pins if pin not in census
     ]
 
 
@@ -409,7 +474,9 @@ def _pin_violations(pins: list, components: tuple) -> list:
 def render_notice(lock_vars: dict,
                   components: tuple = RUNTIME_COMPONENTS,
                   licence_dir: Path = LICENCE_DIR,
-                  licence_root: Union[Path, None] = None) -> str:
+                  licence_root: Union[Path, None] = None,
+                  census: Union[dict, None] = None,
+                  exclusions: Union[dict, None] = None) -> str:
     """Render the NOTICE body, or raise :class:`NoticeGateError`.
 
     The gate runs before any output is built, so a refused run never
@@ -418,8 +485,11 @@ def render_notice(lock_vars: dict,
     # The root defaults to the licence directory's parent so a test (or a
     # future second licence subdirectory) can point the whole check at a copy.
     licence_root = licence_root if licence_root is not None else licence_dir.parent
+    census = read_manifest() if census is None else census
+    exclusions = DISTRIBUTION_EXCLUSIONS if exclusions is None else exclusions
     pins = lock_pins(lock_vars)
-    violations = (_pin_violations(pins, components)
+    violations = (_pin_violations(pins, census)
+                  + _census_violations(census, components, exclusions)
                   + _component_violations(components, licence_dir)
                   + _tree_violations(components, licence_dir, licence_root))
     if violations:
@@ -437,35 +507,31 @@ def render_notice(lock_vars: dict,
         f"    {REGEN_COMMAND}",
         "",
         "Licence and attribution inventory for the third-party content that "
-        "ships inside the cad plugin's embedded Python runtime bundle, whose "
-        "pins live in `cad/scripts/runtime-bundle.lock`. The full text of "
-        "every licence below is in `cad/licenses/runtime/`, which is copied "
-        "into the bundle (as `licenses/`) and into the release tarball beside "
-        "the plugin binary — BSD and MIT terms require the notice, conditions "
-        "and disclaimer to be provided with a binary distribution, so naming "
-        "the licence here is not on its own enough.",
+        "ships inside the cad plugin's embedded Python runtime bundle. The "
+        "full text of every licence below is in `cad/licenses/runtime/`, "
+        "which is copied into the bundle (as `licenses/`) and into the "
+        "release tarball beside the plugin binary — BSD and MIT terms require "
+        "the notice, conditions and disclaimer to be provided with a binary "
+        "distribution, so naming the licence here is not on its own enough.",
         "",
-        "A wheel's own metadata cannot see what it vendors: python-fcl's "
-        "wheel contains compiled FCL, libccd, OctoMap and Eigen while "
-        "shipping only python-fcl's LICENSE. The inventory below is therefore "
-        "maintained by hand in `cad/scripts/gen_notice.py`, and its `--check` "
-        "mode is the gate that keeps it honest against the lock.",
+        "The inventory is checked against a census of the built bundle's "
+        "site-packages (`cad/scripts/runtime-bundle.manifest`), not against "
+        "the two pins in `cad/scripts/runtime-bundle.lock`: pip resolves the "
+        f"transitive tree, so the lock names {len(pins)} distributions and "
+        f"the bundle contains {len(census)}. Wheel metadata cannot see what a "
+        "wheel vendors either — python-fcl's contains compiled FCL, libccd, "
+        "OctoMap and Eigen while shipping only python-fcl's LICENSE, and "
+        "cadquery-ocp's contains the whole of OCCT while shipping no licence "
+        "text at all — so the inventory is maintained by hand in "
+        "`cad/scripts/notice_inventory.py` and `gen_notice.py --check` is the "
+        "gate that keeps it honest.",
         "",
-        f"Runtime pins in the lock: {', '.join(pins) if pins else '(none)'}",
+        f"Lock pins: {', '.join(pins) if pins else '(none)'}",
         "",
-        "HOW COMPLETE THIS IS. The inventory is complete for the python-fcl "
-        "tree — python-fcl itself and the four components compiled into its "
-        "wheel (FCL, libccd, OctoMap, Eigen) — plus the Microsoft C++ runtime "
-        "the Windows build vendors. It is NOT complete for the whole bundle: "
-        + (", ".join(f"`{name}`" for name in sorted(PENDING_INVENTORY))
-           + " and their transitive trees (OCCT above all) are listed under "
-             "\"Not yet inventoried\" below and have not been inventoried."
-           if PENDING_INVENTORY else
-           "every lock pin is inventoried below.")
-        + " The `--check` gate passes with those named as pending, so a green "
-          "gate means \"nothing has drifted and nothing new arrived "
-          "unannounced\", not \"every licence in the bundle has been "
-          "reviewed\".",
+        f"Census: {len(census)} distributions in the built bundle's "
+        f"site-packages, {len(components)} inventoried components "
+        f"(a distribution yields more than one entry when its wheel vendors "
+        f"other projects), {len(exclusions)} excluded.",
         "",
     ]
 
@@ -486,6 +552,10 @@ def render_notice(lock_vars: dict,
                          f"(sha256 {digest})")
         lines.append("")
         lines.append(comp.note)
+        if comp.obligation:
+            lines.append("")
+            lines.append(f"**Source availability and relinking.** "
+                         f"{comp.obligation}")
         lines.append("")
 
     lines.append("## Shipped alongside the licence texts")
@@ -501,21 +571,19 @@ def render_notice(lock_vars: dict,
                      f"{DECLARED_SUPPORT_FILES[name]}")
     lines.append("")
 
-    lines.append("## Not yet inventoried")
+    lines.append("## Excluded from the inventory")
     lines.append("")
     lines.append(
-        "Lock pins whose licence trees this inventory does not yet cover. "
-        "They are listed rather than omitted so the gap is visible; the gate "
-        "refuses any OTHER pin that is neither inventoried nor listed here.")
+        "Census distributions deliberately not attributed, each with the "
+        "reason. The gate refuses any OTHER census distribution that is "
+        "neither inventoried above nor listed here.")
     lines.append("")
-    if PENDING_INVENTORY:
-        for name in sorted(PENDING_INVENTORY):
-            lines.append(f"- `{name}` — {PENDING_INVENTORY[name]}")
+    if exclusions:
+        for name in sorted(exclusions):
+            lines.append(f"- `{name}` — {exclusions[name]}")
     else:
-        lines.append("**None.** Every lock pin is inventoried above.")
-    lines.append("")
-    lines.append(f"Total: {len(components)} inventoried components, "
-                 f"{len(PENDING_INVENTORY)} pending.")
+        lines.append("**None.** Every distribution in the census is "
+                     "inventoried above.")
     lines.append("")
     return "\n".join(lines)
 
@@ -551,10 +619,13 @@ def hash_differences(committed: str, fresh: str) -> list:
     return messages
 
 
-def generate(lock_path: Union[str, Path, None] = None) -> str:
-    """Read the lock and render its NOTICE body — the one function both the
-    CLI and the tests call, so neither can read the lock a different way."""
-    return render_notice(read_lock_vars(lock_path or DEFAULT_LOCK_PATH))
+def generate(lock_path: Union[str, Path, None] = None,
+             manifest_path: Union[str, Path, None] = None) -> str:
+    """Read the lock and the census and render the NOTICE body — the one
+    function both the CLI and the tests call, so neither can read the inputs a
+    different way."""
+    return render_notice(read_lock_vars(lock_path or DEFAULT_LOCK_PATH),
+                         census=read_manifest(manifest_path))
 
 
 def main(argv: Union[list, None] = None) -> int:
@@ -563,23 +634,69 @@ def main(argv: Union[list, None] = None) -> int:
                     help="Write nothing; exit 1 on a gate violation or on "
                          "drift between the committed NOTICE.md and a fresh "
                          "generation.")
+    ap.add_argument("--census", metavar="SITE_PACKAGES", default=None,
+                    help="Rewrite the census from a built bundle's "
+                         "site-packages directory.")
+    ap.add_argument("--verify-bundle", metavar="SITE_PACKAGES", default=None,
+                    help="Write nothing; exit 1 if the committed census and "
+                         "that site-packages disagree.")
     ap.add_argument("--lock", default=None,
                     help="Override the lock path (default: "
                          "cad/scripts/runtime-bundle.lock).")
+    ap.add_argument("--manifest", default=None,
+                    help="Override the census path (default: "
+                         "cad/scripts/runtime-bundle.manifest).")
     ap.add_argument("--out", default=None,
                     help="Override the output path (default: cad/NOTICE.md).")
     args = ap.parse_args(argv)
 
     lock_path = Path(args.lock) if args.lock else DEFAULT_LOCK_PATH
+    manifest_path = Path(args.manifest) if args.manifest else DEFAULT_MANIFEST_PATH
     out_path = Path(args.out) if args.out else DEFAULT_NOTICE_PATH
 
+    if args.verify_bundle:
+        try:
+            actual = census_site_packages(args.verify_bundle)
+        except OSError as exc:
+            print(f"gen_notice --verify-bundle: {exc}", file=sys.stderr)
+            return 1
+        differences = census_differences(read_manifest(manifest_path), actual)
+        errors = [m for severity, m in differences if severity == "error"]
+        for severity, message in differences:
+            print(f"  {severity}: {message}", file=sys.stderr)
+        if errors:
+            print(f"gen_notice --verify-bundle: {manifest_path} does not "
+                  f"describe {args.verify_bundle} — {len(errors)} error(s). "
+                  f"Re-census with `{REGEN_COMMAND} --census "
+                  f"{args.verify_bundle}` and inventory whatever is new",
+                  file=sys.stderr)
+            return 1
+        print(f"gen_notice --verify-bundle: census covers "
+              f"{len(actual)} distributions with no unattributed ones.")
+        return 0
+
+    if args.census:
+        try:
+            found = census_site_packages(args.census)
+        except OSError as exc:
+            print(f"gen_notice --census: {exc}", file=sys.stderr)
+            return 1
+        # Rendered BEFORE the file is opened: `open(..., "w")` truncates, and
+        # render_manifest reads the existing header back out of that same file.
+        body = render_manifest(found, manifest_path)
+        with open(manifest_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        print(f"gen_notice --census: wrote {manifest_path} "
+              f"({len(found)} distributions).")
+        return 0
+
     try:
-        body = generate(lock_path)
+        body = generate(lock_path, manifest_path)
     except NoticeGateError as exc:
         print(f"gen_notice: GATE REFUSED\n{exc}", file=sys.stderr)
         return 1
-    except Exception as exc:  # lock missing/unreadable
-        print(f"gen_notice: cannot read lock {lock_path}: {exc}",
+    except Exception as exc:  # lock or census missing/unreadable
+        print(f"gen_notice: cannot read {lock_path} / {manifest_path}: {exc}",
               file=sys.stderr)
         return 1
 

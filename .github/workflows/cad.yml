@@ -129,6 +129,26 @@ jobs:
           bash ../scripts/build-python-runtime-bundle.sh . macos-amd64
           ls -la internal/cadruntime/bundle/
 
+      # The licence census is a COMMITTED file (cad/scripts/runtime-bundle.manifest)
+      # because the NOTICE gate below runs on a runner that builds no bundle.
+      # This is the other half: the only legs that have a real bundle check
+      # that the census still describes it. It FAILS on a distribution in
+      # site-packages that the census does not name (it would ship
+      # unattributed) or on a version the census disagrees with; a census
+      # entry this platform lacks is a warning, since pexpect and ptyprocess
+      # are POSIX-only and one census covers all three platforms.
+      #
+      # Only build123d and python-fcl are pinned, so an upstream release of
+      # anything transitive turns this red. That is the intent: a new version
+      # is a licence text to re-check.
+      - name: Verify the licence census still describes the built bundle
+        run: |
+          for stage in runtime-build/runtime-stage/*/; do
+            sp=$(ls -d "$stage"lib/python*/site-packages "$stage"Lib/site-packages 2>/dev/null | head -1)
+            echo "== $sp"
+            python3 scripts/gen_notice.py --verify-bundle "$sp"
+          done
+
       # Every compiled wheel in the bundle is imported by the interpreter that
       # will ship with it, on the platform it will ship for. The build script
       # already probes a NATIVE stage, so this step is a no-op restatement for
@@ -376,11 +396,18 @@ jobs:
     # inventory in gen_notice.py and the licence texts on disk. Its own job so
     # a licence problem is legible as one, rather than as a red package leg.
     #
-    # WHAT IT FAILS ON: a lock pin with no inventory entry and no pending
-    # declaration (adding a dependency without attributing it), an entry whose
-    # licence text is missing or empty, a licence text nothing references, a
-    # licence outside the permissive set, an MPL-2.0 entry with no source URL,
-    # and drift between the committed cad/NOTICE.md and a fresh generation.
+    # WHAT IT FAILS ON: a distribution in the committed census with no
+    # inventory entry and no exclusion reason (adding a dependency without
+    # attributing it), an entry for something no longer in the census or at a
+    # version the census disagrees with, a lock pin missing from the census,
+    # an entry whose licence text is missing or empty, a licence text nothing
+    # references, an unrecognised or copyleft licence, an entry whose licence
+    # carries a source-availability obligation (MPL-2.0, OCCT's
+    # LGPL-2.1-with-exception) and no statement discharging it, and drift
+    # between the committed cad/NOTICE.md and a fresh generation.
+    #
+    # The census itself is checked against a real bundle on the build legs
+    # (--verify-bundle), which is why this job needs no toolchain.
     runs-on: ubuntu-22.04
     defaults:
       run:

@@ -101,15 +101,50 @@ def test_the_wheel_and_its_vendored_libraries_are_all_inventoried():
         assert expected in components, f"{expected} is not inventoried"
 
 
-def test_eigen_is_the_only_copyleft_and_carries_its_source_url():
-    """MPL-2.0 §3.2(a) is discharged by naming where the source is."""
-    eigen = [c for c in gn.RUNTIME_COMPONENTS if c.component == "Eigen"]
-    assert len(eigen) == 1
-    assert eigen[0].license == "MPL-2.0"
-    assert eigen[0].source_url.startswith("https://")
+def test_every_copyleft_component_discharges_its_extra_obligation():
+    """Carrying the text is not enough for either copyleft licence we ship.
+
+    Two components are not plain-permissive: Eigen (MPL-2.0, whose §3.2(a)
+    obliges us to say where the covered source is) and OCCT (LGPL-2.1 with the
+    Open CASCADE exception, whose §6 obliges us to make relinking possible).
+    Both are allowed only because the NOTICE says how; an entry that lost its
+    statement would still render a plausible-looking NOTICE, and that is the
+    failure this test names.
+
+    Any OTHER component whose licence mentions GPL is a stop — the allowed
+    set is a list, not a pattern, so a new LGPL dependency cannot slip in by
+    resembling this one.
+    """
+    obliged = {c.component: c for c in gn.RUNTIME_COMPONENTS
+               if c.license in gn.SOURCE_OBLIGATION_LICENCES}
+    assert set(obliged) == {"Eigen", "Open CASCADE Technology (OCCT)"}
+    for comp in obliged.values():
+        assert comp.source_url.startswith("https://"), comp.component
+        assert comp.obligation.strip(), comp.component
+
     for comp in gn.RUNTIME_COMPONENTS:
-        assert "GPL" not in comp.license.upper(), \
-            f"{comp.component}: GPL/LGPL in the shipped tree is a stop"
+        if "GPL" in comp.license.upper():
+            assert comp.license in gn.SOURCE_OBLIGATION_LICENCES, \
+                f"{comp.component}: {comp.license} is not a reviewed exception"
+
+
+def test_occt_says_it_is_dynamically_linked_and_how_to_relink():
+    """The LGPL §6 statement, checked for the facts it has to contain.
+
+    A statement that omits where the source is, or that it is the shared
+    libraries in the wheel that are replaceable, does not put a recipient in a
+    position to exercise the right the licence grants — and no amount of
+    licence text makes up for it.
+    """
+    occt = [c for c in gn.RUNTIME_COMPONENTS
+            if c.component == "Open CASCADE Technology (OCCT)"]
+    assert len(occt) == 1
+    statement = occt[0].obligation
+    for fact in ("DYNAMICALLY LINKED", "cadquery_ocp.libs",
+                 "Open-Cascade-SAS/OCCT/tree/V7_8_1", "relink"):
+        assert fact in statement, f"the relinking statement omits {fact!r}"
+    rendered = gn.render_notice(gn.read_lock_vars(gn.DEFAULT_LOCK_PATH))
+    assert statement in rendered, "the statement never reaches the NOTICE"
 
 
 def test_rendered_notice_names_every_component_and_its_text_file(lock_vars):
@@ -226,8 +261,9 @@ def test_notice_records_a_hash_for_every_shipped_file(lock_vars):
         assert len(digest) == 64, f"{path} has no usable sha256"
 
 
-def test_gate_refuses_a_lock_pin_nobody_inventoried(lock_vars):
-    """Adding a dependency without attributing it fails before it ships."""
+def test_gate_refuses_a_lock_pin_the_census_does_not_know(lock_vars):
+    """A pin the census has never seen means the census describes another
+    bundle, and every completeness claim under it is void."""
     mutated = dict(lock_vars)
     mutated["PIP_PKGS"] = lock_vars.get("PIP_PKGS", "") + " some-new-dep==1.0.0"
     with pytest.raises(gn.NoticeGateError) as exc:
@@ -282,3 +318,189 @@ def test_lock_is_parsed_without_executing_it(tmp_path: Path):
     assert not sentinel.exists()
     assert values["PIP_PKGS"] == "build123d==0.10.0"
     assert gn.lock_pins(values) == ["build123d", "python-fcl"]
+
+
+# ---------------------------------------------------------------------------
+# The census: what actually lands in the built bundle's site-packages
+# ---------------------------------------------------------------------------
+
+
+def _fake_site_packages(root: Path, distributions: dict) -> Path:
+    """A directory shaped like a built bundle's site-packages.
+
+    Only the parts the census reads exist: one ``<name>-<version>.dist-info``
+    per distribution, each holding a METADATA file with Name and Version.
+    That is deliberate — the census must work off files, because the one thing
+    it may not do is run the staged interpreter.
+    """
+    site_packages = root / "site-packages"
+    site_packages.mkdir(parents=True, exist_ok=True)
+    for name, version in distributions.items():
+        info = site_packages / f"{name.replace('-', '_')}-{version}.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+            encoding="utf-8")
+    return site_packages
+
+
+def test_the_committed_census_is_what_a_site_packages_scan_produces(tmp_path):
+    """The census reader and the census file agree on shape and content.
+
+    Round-tripping the committed census through a directory that contains
+    exactly those distributions proves the reader is the same function that
+    produced the file — otherwise a census generated on one machine and
+    verified on another can disagree for reasons nobody can see.
+    """
+    census = gn.read_manifest()
+    assert census, "the committed census is empty"
+    site_packages = _fake_site_packages(tmp_path, census)
+    assert gn.census_site_packages(site_packages) == census
+
+
+def test_gate_refuses_a_site_packages_distribution_with_no_inventory_entry(
+        tmp_path, lock_vars):
+    """THE mutation this whole census exists for.
+
+    A wheel arrives in the bundle — pulled in transitively, or added to the
+    lock — and nobody attributes it. Planting a dist-info in a copy of the
+    census input and feeding the resulting census to the gate is the closest
+    thing to that happening for real, and it must refuse.
+
+    Oracle: unzip a release tarball's site-packages and diff its dist-info
+    names against the `## ` headings in NOTICE.md. Anything in the first list
+    and not the second is a library shipping unattributed, which is what this
+    test claims cannot happen.
+    """
+    census = dict(gn.read_manifest())
+    census["totally-unattributed"] = "1.0.0"
+    site_packages = _fake_site_packages(tmp_path, census)
+    measured = gn.census_site_packages(site_packages)
+    assert "totally-unattributed" in measured
+
+    with pytest.raises(gn.NoticeGateError) as exc:
+        gn.render_notice(lock_vars, census=measured)
+    message = str(exc.value)
+    assert "totally-unattributed" in message
+    assert "unattributed" in message
+
+
+def test_gate_accepts_a_census_distribution_that_is_excluded_with_a_reason(
+        tmp_path, lock_vars):
+    """The escape hatch, and its limit.
+
+    An exclusion is a claim a reader can argue with, so it makes the gate
+    pass; a stale exclusion — one naming something no longer in the census —
+    hides the next distribution to take that name, so it does not.
+    """
+    census = dict(gn.read_manifest())
+    census["something-first-party"] = "0.1.0"
+    excused = {"something-first-party": "our own worker package, not third-party"}
+    gn.render_notice(lock_vars, census=census, exclusions=excused)
+
+    with pytest.raises(gn.NoticeGateError) as exc:
+        gn.render_notice(lock_vars, exclusions={"long-gone": "removed"})
+    assert "long-gone" in str(exc.value)
+
+
+def test_gate_refuses_an_inventory_version_the_census_disagrees_with(lock_vars):
+    """A transitive upgrade leaves the shipped text describing the old release.
+
+    numpy 2.5.2's text is not automatically numpy 2.6's, so an entry whose
+    version has drifted away from the census is refused rather than rendered.
+    """
+    census = dict(gn.read_manifest())
+    census["numpy"] = "99.0.0"
+    with pytest.raises(gn.NoticeGateError) as exc:
+        gn.render_notice(lock_vars, census=census)
+    assert "numpy" in str(exc.value)
+
+
+def test_gate_refuses_an_entry_for_something_the_census_no_longer_has(lock_vars):
+    """The other direction: attributing a library that stopped shipping."""
+    census = {k: v for k, v in gn.read_manifest().items() if k != "sympy"}
+    with pytest.raises(gn.NoticeGateError) as exc:
+        gn.render_notice(lock_vars, census=census)
+    assert "sympy" in str(exc.value)
+
+
+def test_gate_refuses_a_copyleft_entry_whose_obligation_statement_is_gone():
+    """Deleting the relinking statement must fail, not render a shorter NOTICE.
+
+    The statement is prose, so nothing but this check stands between "OCCT
+    ships with its LGPL text" and "OCCT ships with the text AND the terms that
+    make dynamic linking lawful".
+    """
+    stripped = tuple(
+        c._replace(obligation="")
+        if c.component == "Open CASCADE Technology (OCCT)" else c
+        for c in gn.RUNTIME_COMPONENTS)
+    with pytest.raises(gn.NoticeGateError) as exc:
+        gn.render_notice(gn.read_lock_vars(gn.DEFAULT_LOCK_PATH),
+                         components=stripped)
+    assert "obligation" in str(exc.value)
+
+
+def test_verify_bundle_errors_on_an_extra_and_only_warns_on_a_missing_one():
+    """One census covers three platforms because the directions differ.
+
+    pexpect is POSIX-only, so a Windows bundle legitimately lacks a census
+    entry; a bundle that CONTAINS something the census does not name is the
+    unattributed-shipping defect and has to be an error. Collapsing the two
+    into one severity makes the gate either useless on Windows or useless
+    everywhere.
+
+    Oracle: run `--verify-bundle` against a real Windows bundle's
+    Lib/site-packages. It must exit 0 while reporting pexpect and ptyprocess
+    as warnings.
+    """
+    census = gn.read_manifest()
+
+    missing = {k: v for k, v in census.items() if k != "pexpect"}
+    severities = {s for s, _ in gn.census_differences(census, missing)}
+    assert severities == {"warning"}
+
+    extra = dict(census)
+    extra["stowaway"] = "1.0"
+    errors = [m for s, m in gn.census_differences(census, extra) if s == "error"]
+    assert any("stowaway" in m for m in errors)
+
+    bumped = dict(census)
+    bumped["numpy"] = "99.0.0"
+    errors = [m for s, m in gn.census_differences(census, bumped) if s == "error"]
+    assert any("numpy" in m for m in errors)
+
+
+def test_every_census_distribution_reaches_the_rendered_notice():
+    """The completeness claim itself, checked against the rendered document.
+
+    The gate reasons over the inventory; this reasons over the OUTPUT, so a
+    render that silently dropped a section — or an entry whose distribution
+    key and heading disagree — is caught by the thing a reader would actually
+    look at.
+    """
+    body = gn.render_notice(gn.read_lock_vars(gn.DEFAULT_LOCK_PATH))
+    for name in gn.read_manifest():
+        assert f"`{name}` wheel" in body or f"- `{name}` —" in body, \
+            f"{name} is in the census but nothing in NOTICE.md accounts for it"
+
+
+def test_census_rewrite_keeps_the_header_and_lists_what_it_measured(tmp_path):
+    """`--census` rewrites the entries and keeps the explanation above them.
+
+    The bug this catches is not hypothetical: rendering the new body INSIDE
+    the `open(..., "w")` that truncates the file reads the header back out of
+    an already-empty file and silently drops it, and the result is still a
+    valid census that the gate accepts. Only re-reading the written file
+    notices.
+    """
+    manifest = tmp_path / "runtime-bundle.manifest"
+    shutil.copyfile(gn.DEFAULT_MANIFEST_PATH, manifest)
+    site_packages = _fake_site_packages(tmp_path, {"alpha": "1.0", "beta": "2.0"})
+
+    assert gn.main(["--census", str(site_packages),
+                    "--manifest", str(manifest)]) == 0
+
+    written = manifest.read_text(encoding="utf-8")
+    assert written.startswith("# cad/scripts/runtime-bundle.manifest")
+    assert gn.read_manifest(manifest) == {"alpha": "1.0", "beta": "2.0"}
