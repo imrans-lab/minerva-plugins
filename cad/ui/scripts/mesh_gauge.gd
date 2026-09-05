@@ -656,13 +656,15 @@ func _parity_inside(
 	reach: float,
 	node_filter: String = ""
 ) -> int:
-	var counted := _crossings(state, point, direction, reach)
+	# The filter goes INTO the walk. Applied afterwards, an unrelated node in
+	# the same reference — forty plates, eighty surfaces — exhausts the
+	# crossing budget and the walk reports "could not count", so a target with
+	# one clean crossing of its own comes back undecidable because of a body
+	# nobody asked about.
+	var counted := _crossings(state, point, direction, reach, node_filter)
 	if not bool(counted.get("complete", false)):
 		return -1
 	for body_id in (counted["by_body"] as Dictionary).keys():
-		if not node_filter.is_empty() \
-				and str(_body_nodes.get(int(body_id), "")) != node_filter:
-			continue
 		if int((counted["by_body"] as Dictionary)[body_id]) % 2 == 1:
 			return 1
 	return 0
@@ -687,11 +689,16 @@ func _parity_inside(
 ## The origin then moves to the band's point plus a fixed step — not by a
 ## running sum of distances, which at world coordinates in the hundreds of
 ## millimetres stops changing once the step is a fifth of a micrometre.
+## `node_filter`, when given, narrows the count to the bodies carrying that
+## node path: a hit on any other body is stepped past without counting toward
+## the parity OR toward the crossing budget, because it is not part of the
+## question being asked.
 func _crossings(
 	state: PhysicsDirectSpaceState3D,
 	from: Vector3,
 	direction: Vector3,
-	reach: float
+	reach: float,
+	node_filter: String = ""
 ) -> Dictionary:
 	var by_body := {}
 	var total := 0
@@ -732,7 +739,9 @@ func _crossings(
 			int(hit.get("shape", -1)),
 			int(hit.get("face_index", -1)),
 		]
-		if not (identity in counted):
+		var mine := node_filter.is_empty() \
+			or str(_body_nodes.get(body_id, "")) == node_filter
+		if mine and not (identity in counted):
 			counted.append(identity)
 			by_body[body_id] = int(by_body.get(body_id, 0)) + 1
 			total += 1

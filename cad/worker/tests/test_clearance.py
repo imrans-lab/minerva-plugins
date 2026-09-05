@@ -250,6 +250,21 @@ SOLID_SOURCE = "part = translate([%f, %f, %f], cube(%f, %f, %f))" % (
     2 * BAR_HALF_WIDTH, 2 * BAR_HALF_LENGTH, BAR_THICKNESS,
 )
 
+#: A solid with TWO curvatures, tight and wide, in one shape. The angular
+#: deflection has to hold the chord error on the WIDEST of them: an angle
+#: chosen for the 2 mm bore leaves the 200 mm barrel a millimetre off its own
+#: surface, and the reply's stated tolerance would be a fiction for most of
+#: the part's area.
+MIXED_TIGHT_R = 2.0
+MIXED_WIDE_R = 200.0
+MIXED_SOLID_SOURCE = "\n".join([
+    "barrel = translate([0, 0, %f], cylinder(r=%f, h=%f))" % (
+        GAP_MM, MIXED_WIDE_R, BAR_THICKNESS),
+    "pin = translate([300, 0, %f], cylinder(r=%f, h=%f))" % (
+        GAP_MM, MIXED_TIGHT_R, BAR_THICKNESS),
+    "part = barrel + pin",
+])
+
 #: A CURVED solid in the same place, for the one question a box cannot answer.
 #: A planar face tessellates to the same two triangles at any tolerance — the
 #: chord of a straight edge is the edge — so a cube can never show that the
@@ -423,6 +438,29 @@ class TestClearanceVerb:
                                              CURVED_RADIUS)
             assert deviation <= tolerance, (tolerance, deviation)
             assert deviation > 0.0
+
+    def test_the_widest_curve_is_the_one_the_angle_has_to_hold(self):
+        """Two radii in one solid, and only one of them can set the angle.
+
+        A 2 mm pin beside a 200 mm barrel. The sagitta of a fixed angle grows
+        with the radius, so an angle derived from the TIGHTEST face — 0.2 rad
+        at a 0.01 mm tolerance — leaves the barrel's chords a millimetre from
+        its surface: a hundred times the error bar the reply states, over the
+        largest area in the part.
+
+        ORACLE: the barrel's own radius, measured on the mesh the module
+        produces. Every lateral chord of the 200 mm face must sit within the
+        stated tolerance of the true circle, and the angle must be the one
+        that radius asks for rather than the pin's.
+        """
+        pytest.importorskip("build123d")
+        tolerance = 0.01
+        deviation = _max_chord_deviation(MIXED_SOLID_SOURCE, tolerance,
+                                         MIXED_WIDE_R)
+        assert deviation <= tolerance, deviation
+        assert deviation > 0.0
+        assert clr._curvature_radius(MIXED_SOLID_SOURCE) == pytest.approx(
+            MIXED_WIDE_R, abs=1.0e-6)
 
     def test_pairs_come_back_closest_first(self, tmp_path):
         pytest.importorskip("fcl")

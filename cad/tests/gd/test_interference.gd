@@ -277,6 +277,7 @@ func _run() -> void:
 	await _check_undecidable_and_the_neighbouring_node(gauge, checks)
 	await _check_layered_stack(gauge, checks)
 	await _check_two_enclosing_references(gauge, checks)
+	await _check_parity_budget_is_per_node(gauge, checks)
 
 
 # ---------------------------------------------------------------------------
@@ -773,17 +774,24 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 				and not bool(newest.get("busy", false))
 				and not bool(displaced.get("busy", false)),
 			"replies = %s" % str(replies))
+	# A ticket belongs to a GRANTED reservation, and the queued evaluation is
+	# granted only after the running one releases — so the one that was
+	# running is not overtaken while it runs: it answers, paints its own
+	# clean result, and the newest paints over it a moment later. The one
+	# displaced in the queue is the only superseded reply here.
 	check("queue: the one displaced in the queue stands down as superseded "
-			+ "and measures nothing, and the newest is not superseded",
+			+ "and measures nothing, while the check that ran and the one "
+			+ "that queued behind it are both answers in their own right",
 			bool(displaced.get("superseded", false))
 				and not bool(displaced.get("checked", true))
 				and int(displaced.get("count", -1)) == 0
-				and bool(running.get("superseded", false))
+				and not bool(running.get("superseded", false))
 				and not bool(newest.get("superseded", false)),
 			"displaced = %s, running = %s, newest = %s" % [
 				str(displaced), str(running.get("superseded", null)),
 				str(newest.get("superseded", null))])
-	check("queue: neither the overtaken check nor the displaced one painted",
+	check("queue: nothing is on screen from the clean check or the displaced "
+			+ "one — the crossings that end up there are the newest's",
 			sampled and not painted_before_the_newest,
 			"sampled = %s, painted = %s" % [
 				str(sampled), str(painted_before_the_newest)])
@@ -792,6 +800,32 @@ func _check_supersession(gauge: Node, checks: RefCounted) -> void:
 			mesh_root != null
 				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null,
 			"no marker survived the newest evaluation's own check")
+
+	# A REFUSAL COSTS THE RUNNING CHECK NOTHING. An agent asking for the verb
+	# while an evaluation is in flight is told to retry — and if that refusal
+	# took a ticket, the evaluation would finish, find a newer ticket than its
+	# own, decide it had been overtaken and paint nothing: the pane would go
+	# stale because somebody ASKED A QUESTION.
+	panel.mesh_data = through
+	var alone: Array = []
+	_collect(checks, panel, alone)
+	var refused: Dictionary = await checks.check(panel, {"on_demand": true})
+	for _frame in range(900):
+		if not alone.is_empty():
+			break
+		await process_frame
+	var measured: Dictionary = alone[0] if not alone.is_empty() else {}
+	check("queue: an on-demand refusal takes no ticket — the evaluation it "
+			+ "was refused for still owns the newest answer and still paints",
+			bool(refused.get("busy", false))
+				and bool(measured.get("checked", false))
+				and int(measured.get("count", 0)) > 0
+				and not bool(measured.get("superseded", false))
+				and mesh_root != null
+				and mesh_root.get_node_or_null(
+					GeometryChecks.MARKER_NODE_NAME) != null,
+			"refused = %s, measured = %s" % [
+				str(refused.get("busy", refused)), str(measured)])
 
 	panel.queue_free()
 
@@ -885,6 +919,71 @@ func _check_undecidable_and_the_neighbouring_node(gauge: Node, checks: RefCounte
 			+ "reported, under the record's own node path exactly",
 			named.has(PIN_NODE),
 			"pairs = %s" % str(named.keys()))
+
+
+# ---------------------------------------------------------------------------
+# PARITY IS PER NODE, INCLUDING ITS BUDGET
+# ---------------------------------------------------------------------------
+
+## A node the check CAN answer, beside one it cannot.
+##
+## The gauge counts a ray's crossings under a budget, and a scoped parity
+## question — "is this point inside THIS node" — has to spend that budget on
+## that node. Sharing a reference with a forty-plate stack, whose eighty
+## surfaces exhaust the count on their own, would otherwise make a plain cube
+## undecidable for a reason that has nothing to do with the cube: the filter
+## has to be applied while the ray is walked, not after it gives up.
+func _check_parity_budget_is_per_node(gauge: Node, checks: RefCounted) -> void:
+	var stack: ArrayMesh = await _bake_stack()
+	var cube: ArrayMesh = await _bake_gap_cube()
+	var built: int = gauge.build([
+		{"mesh": cube, "transform": _pose, "node": GAP_NODE,
+			"reference": GAP_REFERENCE},
+		{"mesh": stack, "transform": _pose, "node": STACK_NODE,
+			"reference": GAP_REFERENCE},
+	], "cube-beside-stack|v1")
+	_records = [{
+		"name": GAP_REFERENCE,
+		"pose": _pose,
+		"world_aabb": _posed_box(cube.get_aabb().merge(stack.get_aabb())),
+		"parts": [
+			{"mesh": cube, "transform": Transform3D.IDENTITY,
+				"node_path": GAP_NODE, "node": GAP_NODE},
+			{"mesh": stack, "transform": Transform3D.IDENTITY,
+				"node_path": STACK_NODE, "node": STACK_NODE},
+		],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(await _swallowing_block_mesh())
+
+	var report: Dictionary = await _submit(gauge, checks, "", "")
+	var named := {}
+	for entry in report.get("pairs", []):
+		named[str((entry as Dictionary).get("node", ""))] = true
+	var doubted := {}
+	for entry in report.get("undecidable", []):
+		doubted[str((entry as Dictionary).get("node", ""))] = true
+	check("per-node parity: a cube sharing its reference with a forty-plate "
+			+ "stack is still decidable — the unrelated node's crossings "
+			+ "neither count for it nor spend its budget",
+			built == 2 and bool(report.get("checked", false))
+				and named.has(GAP_NODE) and not doubted.has(GAP_NODE),
+			"pairs = %s, undecidable = %s" % [str(named.keys()),
+				str(report.get("undecidable", []))])
+
+
+## A block big enough to swallow the stack and the cube together.
+func _swallowing_block_mesh() -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Swallower"
+	var box := CSGBox3D.new()
+	box.size = Vector3(STACK_SPAN * 3.0, STACK_SPAN * 3.0, STACK_SPAN * 3.0)
+	combiner.add_child(box)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
 
 
 # ---------------------------------------------------------------------------

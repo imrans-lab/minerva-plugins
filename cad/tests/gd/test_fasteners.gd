@@ -845,8 +845,10 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 	var replies: Array = []
 	_collect_check(module, panel, replies)
 	# Between the first check's entry and its measurement: the panel is
-	# re-posed and a second check is asked for.
+	# re-posed — colliders and all, the way a re-evaluated document moves
+	# them — and a second check is asked for on that new state.
 	panel.checks_records = _records_at(moved)
+	_rebuild_gauge(panel, moved)
 	var second: Dictionary = await module.check(panel, {
 		"screw": _screw(), "holes": _holes(),
 	})
@@ -857,33 +859,43 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 	panel.checks_records = original
 
 	var first: Dictionary = replies[0] if not replies.is_empty() else {}
-	var first_row := _row_at(first, HOLE_XY[0])
-	var first_local := _local_of(first_row.get("seat_mm", {}))
+	# STALE, BOTH OF THEM, and for the same reason. A pose is what every local
+	# coordinate is converted through and every ray is cast against: a panel
+	# that re-poses under a check in flight has changed the document the check
+	# was asked about, whether or not the colliders have caught up yet. The
+	# reply that would otherwise come back — old-world holes and colliders
+	# converted through the new pose — is the mixed epoch this guard exists to
+	# refuse, and it is the most dangerous shape a wrong answer can take,
+	# because every number in it is self-consistent. The second check is in
+	# the same position: it snapshots the new poses while the colliders still
+	# stand at the old ones, and it either stands down (busy, because the
+	# first still holds the geometry, or stale) or it must answer in a frame
+	# that matches what it measured.
+	# The check started AFTER the move is in a consistent world of its own —
+	# new poses, new colliders — so it either stands down for a documented
+	# reason or answers in the frame it snapshotted, never in the one the
+	# first check was called with.
 	var expected := Vector3(HOLE_XY[0].x, HOLE_XY[0].y, BOARD_HALF_THICKNESS)
-	# The second check, if it ran at all, is in the MOVED frame: same world
-	# point, a local that differs by the shift taken back through the basis.
+	var moved_expected: Vector3 = moved.affine_inverse() * (_pose * expected)
 	var second_row := _row_at_world(second, _pose * expected)
 	var second_local := _local_of(second_row.get("seat_mm", {}))
-	var moved_expected: Vector3 = moved.affine_inverse() 		* (_pose * expected)
-	# Only TWO outcomes are acceptable, and "checked: false" on its own is not
-	# one of them: a malformed reply or an unrelated refusal would sail past a
-	# test that took any failure for a well-behaved one. Either the check ran
-	# and answered in the MOVED frame, or it stood down for one of the two
-	# documented reasons — busy (the geometry is held by the check still in
-	# flight) or stale (the colliders were rebuilt under it).
-	var second_stood_down := bool(second.get("busy", false)) \
-		or bool(second.get("stale", false))
-	var second_ok := second_stood_down \
+	var second_ok := bool(second.get("busy", false)) \
+		or bool(second.get("stale", false)) \
 		or (bool(second.get("checked", false))
 			and second_local.distance_to(moved_expected) < NUMERIC_TOLERANCE_MM)
-	check("poses: a check answers in the poses it was CALLED with, even "
-			+ "though the panel was re-posed while it waited for the worker; "
-			+ "a check started after the move never answers in the old frame",
+	check("poses: a check whose references are re-posed while it waits for "
+			+ "the worker comes back STALE — a pose change is a document "
+			+ "change — while the check started after the move answers in "
+			+ "the frame it was called with",
 			not first.is_empty()
-				and first_local.distance_to(expected) < NUMERIC_TOLERANCE_MM
-				and second_ok,
-			"first_local=%s expected=%s second=%s moved_expected=%s" % [
-				str(first_local), str(expected), str(second_local),
+				and bool(first.get("stale", false))
+				and not bool(first.get("checked", true))
+				and int(first.get("count", -1)) == 0
+				and str(first.get("reason", "")).contains("find_holes")
+				and second_ok
+				and second_local.distance_to(expected) > NUMERIC_TOLERANCE_MM,
+			"first = %s, second_local = %s, moved_expected = %s" % [
+				str(first.get("reason", first)), str(second_local),
 				str(moved_expected)])
 
 	# The other half of the same window. A snapshot of the POSES is not enough

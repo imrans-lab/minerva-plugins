@@ -748,15 +748,49 @@ func _upload(keys: Array) -> bool:
 		var blob := _blob_with_digest(digest)
 		if blob.is_empty():
 			return false
-		var path := _blob_path(digest)
-		var file := FileAccess.open(path, FileAccess.WRITE)
-		if file == null:
+		if not _write_blob_once(digest, blob):
 			return false
-		file.store_buffer(_blob_header(
-			int(blob["vertices"]), int(blob["triangles"])))
-		file.store_buffer(blob["body"] as PackedByteArray)
-		file.close()
 	_sweep(directory, wanted)
+	return true
+
+
+## Write one blob, ONCE. A content-addressed file never changes: a name is a
+## hash of the bytes, so a file already there under that name is already the
+## right file and re-writing it can only make it briefly wrong. Two calls
+## uploading the same digest at the same time would otherwise have one of them
+## truncate the file the other has just handed the worker, and the worker
+## would refuse a hash that was correct a moment earlier.
+##
+## When the file is missing it is written under a temporary name and RENAMED,
+## which is atomic on every filesystem this runs on: a reader either sees no
+## file or sees the whole one, never a prefix of it.
+func _write_blob_once(digest: String, blob: Dictionary) -> bool:
+	var path := _blob_path(digest)
+	var header := _blob_header(int(blob["vertices"]), int(blob["triangles"]))
+	var body: PackedByteArray = blob["body"]
+	var expected := header.size() + body.size()
+	if FileAccess.file_exists(path):
+		var existing := FileAccess.open(path, FileAccess.READ)
+		if existing != null:
+			var length := int(existing.get_length())
+			existing.close()
+			if length == expected:
+				return true
+		# A file of the wrong length under a content hash is a leftover from
+		# an interrupted write, not somebody else's geometry: replace it.
+		DirAccess.remove_absolute(path)
+	var temporary := "%s.%d.part" % [path, Time.get_ticks_usec()]
+	var file := FileAccess.open(temporary, FileAccess.WRITE)
+	if file == null:
+		return false
+	file.store_buffer(header)
+	file.store_buffer(body)
+	file.close()
+	if DirAccess.rename_absolute(temporary, path) != OK:
+		# Somebody else finished first: their file is the same bytes under the
+		# same hash, so the upload has still happened.
+		DirAccess.remove_absolute(temporary)
+		return FileAccess.file_exists(path)
 	return true
 
 
@@ -772,6 +806,10 @@ func _sweep(directory: String, wanted: Dictionary) -> void:
 			_bodies.erase(digest)
 	var names := DirAccess.get_files_at(directory)
 	for name in names:
+		if name.ends_with(".part"):
+			# A write in flight, or one that died: neither is this sweep's
+			# business, and deleting it would race the writer.
+			continue
 		if not name.ends_with(".mcadmesh"):
 			continue
 		if wanted.has(name.get_basename()):

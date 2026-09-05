@@ -188,14 +188,21 @@ var _in_flight: bool = false
 ## without spending the whole window waiting for it; nothing in the panel ever
 ## writes it.
 var reservation_timeout_ms: int = RESERVATION_TIMEOUT_MS
-## When the running reservation was granted, in engine milliseconds. The
-## holder's AGE is what a queued request refuses on, and what the refusal
-## reports.
+## When the running reservation's CURRENT PHASE started, in engine
+## milliseconds. The holder's age is measured from here, and a check has two
+## phases with different clocks: the synchronous one (build the solid, fit,
+## pair — no awaits, so no other coroutine can be running) and the physics
+## one, which mesh_gauge times out on its own. refresh_reservation() restarts
+## the clock at the boundary, so a big solid that takes its time building
+## cannot be reclaimed out from under a job that is only about to start.
 var _holder_since: int = 0
 ## The one queued evaluation, or 0. A newer arrival takes this slot and the
 ## ticket it displaced stands down: the panel wants the NEWEST document
 ## checked, not every document checked in turn.
 var _pending: int = 0
+## Arrivals at the queue, ever. It orders waiters against each other and has
+## nothing to do with the ticket, which only a granted reservation gets.
+var _arrivals: int = 0
 ## The ticket the running reservation was taken with. Only that ticket's
 ## release frees the module.
 var _holder: int = 0
@@ -436,8 +443,13 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## still the holder, so a dead holder that resumes late releases nothing,
 ## paints nothing and writes nothing.
 func reserve(queued: bool = false) -> Dictionary:
-	_ticket += 1
-	var ticket := _ticket
+	# NO TICKET UNTIL THE RESERVATION IS GRANTED. The ticket is what says
+	# which check may paint, so handing one to a request that is about to be
+	# refused makes the check still running look overtaken: it finishes with
+	# valid geometry and paints nothing, and the panel keeps the last
+	# evaluation's crosses. Waiting in the queue takes an ARRIVAL number
+	# instead, which orders the queue and nothing else.
+	var arrival := 0
 	var tree := _tree()
 	while _in_flight:
 		var age := Time.get_ticks_msec() - _holder_since
@@ -457,24 +469,40 @@ func reserve(queued: bool = false) -> Dictionary:
 			}
 		# One place in the queue. A newer evaluation takes it, and this one
 		# stands down rather than measuring a document that has moved on.
-		_pending = ticket
+		if arrival == 0:
+			_arrivals += 1
+			arrival = _arrivals
+		_pending = arrival
 		if tree != null:
 			await tree.process_frame
 		else:
 			await check_finished
-		if _pending != ticket:
+		if _pending != arrival:
 			return {
 				"ticket": 0,
 				"superseded": true,
 				"reason": "a newer evaluation arrived while this check waited "
 					+ "for the panel's geometry; that one is being checked",
 			}
-	if _pending == ticket:
+	if arrival != 0 and _pending == arrival:
 		_pending = 0
+	_ticket += 1
+	var ticket := _ticket
 	_in_flight = true
 	_holder = ticket
 	_holder_since = Time.get_ticks_msec()
 	return {"ticket": ticket}
+
+
+## Restart the holder's clock. Called at the boundary between a check's
+## synchronous phase and the physics job it is about to submit: past this
+## point mesh_gauge's own JOB_TIMEOUT_MS bounds the wait, and the reclaim
+## deadline should be measured against THAT rather than against however long
+## the solid took to build. Ignored for anyone but the holder.
+func refresh_reservation(ticket: int) -> void:
+	if not holds(ticket):
+		return
+	_holder_since = Time.get_ticks_msec()
 
 
 ## Is `ticket` still the reservation this module is running? False for a
@@ -564,6 +592,11 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	var mask := ALL_LAYERS
 	if not reference_scope.is_empty():
 		mask = int(gauge.call("mask_for", reference_scope))
+	# The synchronous phase ends here: everything above is straight-line
+	# GDScript, and everything below waits on a physics step that mesh_gauge
+	# times out on its own. The reclaim clock restarts so the two are not
+	# added together.
+	refresh_reservation(ticket)
 	# The reply is the module's own report, or the gauge's {error: ...} when the
 	# physics step it needs never came.
 	var reply: Dictionary = await gauge.call("submit", "interference", {

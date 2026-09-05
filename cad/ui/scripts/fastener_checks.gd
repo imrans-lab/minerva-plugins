@@ -252,10 +252,11 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# those old holes is the mixed epoch in its worst form — every number
 	# self-consistent, every one about a document that no longer exists. The
 	# caller re-runs find_holes and asks again.
-	if int(gauge.call("get_generation")) != epoch:
-		return _stale("the reference meshes were rebuilt while this check "
-			+ "waited for the worker, so the holes it was given no longer "
-			+ "describe where those references are; run "
+	if int(gauge.call("get_generation")) != epoch \
+			or not _same_poses(records, panel):
+		return _stale("the references moved while this check waited for the "
+			+ "worker — re-posed, re-evaluated, or both — so the holes it was "
+			+ "given no longer describe where they are; run "
 			+ "minerva_cad_find_holes again and re-ask")
 
 	# Un-queued: this check only ever runs because an agent asked for it, and
@@ -271,11 +272,12 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 		screw, args, ticket, records)
 	# The colliders the rays were cast against are the ones the poses above
 	# describe, or the answer is two epochs stitched together.
-	if int(gauge.call("get_generation")) != epoch:
+	if int(gauge.call("get_generation")) != epoch \
+			or not _same_poses(records, panel):
 		checks.call("release_reservation", ticket)
-		return _stale("the reference meshes were rebuilt while this check was "
-			+ "measuring, so its rays and its poses would not describe one "
-			+ "state of the document")
+		return _stale("the references moved while this check was measuring, "
+			+ "so its rays and its poses would not describe one state of the "
+			+ "document")
 	# Reclaimed while this check was awaiting a physics step: the solid's
 	# collider belongs to another check now, so this one releases nothing.
 	if not bool(checks.call("holds", ticket)):
@@ -365,6 +367,10 @@ func _run(
 	# only legal to dereference there, and the solid's own space has the same
 	# rule. Both are queried in ONE step, so a screw's path is measured against
 	# one state of the world rather than two.
+	# The synchronous phase — the fit, the pairing — ends here; past this
+	# point mesh_gauge times the job out itself, so the reclaim clock is
+	# restarted rather than charged for both.
+	checks.call("refresh_reservation", ticket)
 	var answer: Dictionary = await gauge.call("submit", "fasteners", {
 		"module": self,
 		# Read back in run_check: the job runs after an await, which is where
@@ -852,6 +858,31 @@ func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> b
 	if radial > float(expected["radius"]) + BORE_WALL_TOLERANCE_MM:
 		return false
 	return t >= float(expected["from_t"]) and t <= float(expected["to_t"])
+
+
+## Do the panel's references still stand where this check's snapshot says?
+##
+## The collider generation is not enough on its own: poses are what every
+## local coordinate is converted through, and a panel that re-poses without
+## rebuilding — or rebuilds a moment later — would otherwise let a reply mix
+## the frames of two documents. Names, count and pose are compared; the meshes
+## themselves are the generation's business.
+func _same_poses(snapshot: Array, panel: Object) -> bool:
+	if not panel.has_method("get_reference_state"):
+		return true
+	var current: Array = panel.get_reference_state()
+	if current.size() != snapshot.size():
+		return false
+	for index in range(snapshot.size()):
+		var was: Dictionary = snapshot[index]
+		var now: Dictionary = current[index]
+		if str(was.get("name", "")) != str(now.get("name", "")):
+			return false
+		var before: Transform3D = was.get("pose", Transform3D.IDENTITY)
+		var after: Transform3D = now.get("pose", Transform3D.IDENTITY)
+		if not before.is_equal_approx(after):
+			return false
+	return true
 
 
 ## A reply about a document that moved under it. `checked` false with a reason

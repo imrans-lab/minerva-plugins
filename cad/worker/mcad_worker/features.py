@@ -882,21 +882,23 @@ def _reported(group: dict) -> dict:
     }
 
 
-def smallest_curved_radius(source: str) -> Optional[float]:
-    """The tightest curvature in the shape, as a radius in millimetres.
+def largest_curved_radius(source: str) -> Optional[float]:
+    """The widest curvature in the shape, as a radius in millimetres.
 
-    The smallest radius among its cylindrical and spherical faces, which is
-    the surface a tessellation deviates from fastest: hold the chord error on
-    that one and every flatter surface is inside it too. None when the shape
-    has no curved face at all — every chord is then exact and no angular
-    deflection binds anything.
+    THE LARGEST, not the smallest. A chord subtending a fixed angle sits
+    r*(1 - cos(theta/2)) inside the circle, and that grows with r: at 0.2 rad
+    a radius-2 face is 0.01 mm off its surface and a radius-200 face is 1 mm
+    off. An angular deflection chosen for the tightest radius therefore fails
+    the widest one by two orders of magnitude, so the widest is what the
+    angle has to hold. None when the shape has no curved face at all — every
+    chord is then exact and no angular deflection binds anything.
 
     Raises FeatureError for the same reasons every other reader here does: a
     DSL that will not evaluate, or a runtime with no OCCT.
     """
     occt = _occt()
     _shape_name, wrapped = _shape_for(source)
-    smallest = None
+    largest = None
     explorer = occt["TopExp_Explorer"](wrapped, occt["TopAbs_FACE"])
     while explorer.More():
         face = occt["TopoDS"].Face_s(explorer.Current())
@@ -912,9 +914,9 @@ def smallest_curved_radius(source: str) -> Optional[float]:
                 continue
         except BaseException:  # noqa: BLE001 — a face it cannot adapt
             continue
-        if radius > 0.0 and (smallest is None or radius < smallest):
-            smallest = radius
-    return smallest
+        if radius > 0.0 and (largest is None or radius > largest):
+            largest = radius
+    return largest
 
 
 def cylindrical_features(params: dict) -> dict:

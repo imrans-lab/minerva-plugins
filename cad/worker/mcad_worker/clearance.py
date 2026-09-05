@@ -270,18 +270,23 @@ def _angular_for(tolerance_mm: float, radius_mm: float) -> float:
 
 
 def _curvature_radius(source: str) -> Optional[float]:
-    """The tightest radius in the solid, or None when nothing is curved.
+    """The WIDEST radius in the solid, or None when nothing is curved.
+
+    The widest, because the sagitta of a fixed angle grows with the radius:
+    an angle chosen for a 2 mm bore leaves a 200 mm barrel a millimetre from
+    its own surface. Hold the chord error on the widest face and every
+    tighter one is inside it.
 
     Read straight off the B-Rep by the module that already reads B-Rep
     surfaces. A runtime that cannot read it says so by returning None, and the
     caller falls back to the mesh's own bounding box.
     """
     try:
-        from .features import FeatureError, smallest_curved_radius
+        from .features import FeatureError, largest_curved_radius
     except ImportError:
         return None
     try:
-        return smallest_curved_radius(source)
+        return largest_curved_radius(source)
     except FeatureError:
         return None
     except BaseException:  # noqa: BLE001 — a broken OCCT raises anything
@@ -289,7 +294,7 @@ def _curvature_radius(source: str) -> Optional[float]:
 
 
 def _bbox_radius(vertices) -> float:
-    """A radius from the mesh's own bounding box: half its smallest extent.
+    """A radius from the mesh's own bounding box: half its LARGEST extent.
 
     The fallback when the B-Rep cannot be read at all. It is a guess about
     curvature nobody could measure, and the reply says so rather than claiming
@@ -298,8 +303,8 @@ def _bbox_radius(vertices) -> float:
     if len(vertices) == 0:
         return 0.0
     extents = vertices.max(axis=0) - vertices.min(axis=0)
-    smallest = float(min(float(value) for value in extents))
-    return smallest * 0.5
+    widest = float(max(float(value) for value in extents))
+    return widest * 0.5
 
 
 def _prepare_solid(source: str, tolerance_mm: float,
@@ -321,7 +326,7 @@ def _prepare_solid(source: str, tolerance_mm: float,
         angular = _angular_for(tolerance_mm, radius)
         vertices, faces = _solid_arrays(source, tolerance_mm, angular)
         return (vertices, faces, angular,
-                "derived from the tightest curved face (radius %.4f mm)"
+                "derived from the widest curved face (radius %.4f mm)"
                 % radius)
 
     # No curved face, or no B-Rep to read. Tessellate once at the default and
