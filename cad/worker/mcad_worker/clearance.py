@@ -557,7 +557,14 @@ def clearance(params: dict) -> dict:
                 "node": str(entry.get("node", "")),
                 "key": str(entry.get("key", "")),
                 "min_mm": min_mm,
-                "pass": min_mm >= required_mm,
+                # Graded on the bound, not on the chord distance: the true
+                # surface can sit effective_mm outside the chords, so a gap
+                # that only meets the requirement before that is subtracted
+                # is one the geometry does not promise. The same number the
+                # reply publishes as tessellation_tolerance_mm is the one
+                # taken off here, so the verdict and the bar agree.
+                "bound_mm": max(0.0, min_mm - effective_mm),
+                "pass": min_mm > 0.0 and min_mm - effective_mm >= required_mm,
                 "triangles": int(triangles),
                 "cached": bool(cached),
             }
@@ -599,14 +606,17 @@ def clearance(params: dict) -> dict:
             "bound": (("the solid is measured as a mesh tessellated to within "
                        "%g mm of its true surface (chords stepped by at most "
                        "%.3f degrees, %s), so the true clearance is at least "
-                       "min_mm - %g mm"
+                       "min_mm - %g mm, reported as bound_mm; a pair passes "
+                       "only when that bound meets required_mm"
                        % (effective_mm, math.degrees(angular_rad), angular_how,
                           effective_mm)) if bounded else
                       ("the solid is measured as a mesh tessellated at a "
                        "requested %g mm; its chord error is ESTIMATED at %g mm "
                        "(chords stepped by at most %.3f degrees, %s) and that "
                        "estimate is not guaranteed for unrecognised curved "
-                       "faces, so no error bar bounds min_mm here"
+                       "faces, so no error bar bounds min_mm here; each pair "
+                       "is graded on min_mm minus the estimate, which is the "
+                       "best available and still not a promise"
                        % (tolerance_mm, effective_mm,
                           math.degrees(angular_rad), angular_how))),
             "solid_triangles": int(len(solid_faces)),

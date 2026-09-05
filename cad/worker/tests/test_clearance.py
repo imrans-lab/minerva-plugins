@@ -488,6 +488,61 @@ class TestClearanceVerb:
             math.degrees(clr.MIN_ANGULAR_RAD))
         assert "%g" % floor_sagitta in result["bound"]
 
+    def test_a_pair_is_graded_on_the_error_bar_the_reply_publishes(
+            self, tmp_path):
+        """A verdict and its error bar have to be the same arithmetic.
+
+        Same 200 mm barrel at a micron: the floor binds, the reply says the
+        chords keep 0.000625 mm, and a caller subtracts THAT. The barrel is
+        put 0.0001 mm further from the bar than the 0.5 mm required, so the
+        gap clears the requirement by the REQUESTED bar (0.5001 - 0.000001)
+        and misses it by the effective one (0.5001 - 0.000625 = 0.499475). A
+        pass here would be a row whose own published bound fails it.
+
+        ORACLE: the barrel's bottom face is planar, tessellated exactly, and
+        the bar's top face is the reference's own triangles, so min_mm is the
+        translate distance to float precision; the two thresholds are
+        0.000624 mm apart, well outside that. Lift the barrel by the full
+        effective bar and the same pair must pass, which is what shows the
+        verdict moved to the bound rather than simply tightening.
+        """
+        pytest.importorskip("fcl")
+        pytest.importorskip("build123d")
+        verts, faces = _bar_a()
+        path, key = write_blob(tmp_path, verts, faces)
+        required = 0.5
+        requested = 0.000001
+        effective = MIXED_WIDE_R * (1.0 - math.cos(clr.MIN_ANGULAR_RAD / 2))
+        assert requested < 0.0001 < effective  # the gap sits between the bars
+
+        def measure(lift_mm: float) -> dict:
+            reply = clr.clearance({
+                "source": "part = translate([0, 0, %.9f], cylinder(r=%f, h=%f))"
+                          % (required + lift_mm, MIXED_WIDE_R, BAR_THICKNESS),
+                "required_mm": required,
+                "tolerance_mm": requested,
+                "targets": [{"reference": "board", "node": "Assembly/Bar",
+                             "key": key, "path": path}],
+            })["result"]
+            assert reply["tessellation_tolerance_mm"] == pytest.approx(
+                effective, rel=1.0e-6)
+            return reply
+
+        short = measure(0.0001)
+        pair = short["pairs"][0]
+        assert pair["min_mm"] == pytest.approx(required + 0.0001, abs=1.0e-6)
+        assert pair["min_mm"] - requested >= required  # the requested bar says yes
+        assert pair["min_mm"] - effective < required   # the published one says no
+        assert pair["pass"] is False
+        assert short["pass"] is False
+        assert pair["bound_mm"] == pytest.approx(pair["min_mm"] - effective,
+                                                 abs=1.0e-9)
+        assert "bound_mm" in short["bound"] and "required_mm" in short["bound"]
+
+        clear = measure(effective + 0.0001)
+        assert clear["pairs"][0]["pass"] is True
+        assert clear["pass"] is True
+
     def test_the_widest_curve_is_the_one_the_angle_has_to_hold(self):
         """Two radii in one solid, and only one of them can set the angle.
 

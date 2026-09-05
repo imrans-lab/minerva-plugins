@@ -73,6 +73,7 @@ extends RefCounted
 
 const _MeshFeatures: Script = preload("mesh_features.gd")
 const _WorkerReply: Script = preload("worker_reply.gd")
+const _MeshGauge: Script = preload("mesh_gauge.gd")
 
 ## The IPC channel that answers with the solid's B-Rep cylinders. Channel name
 ## = MCP tool name; the worker method behind it is "cylindrical_features".
@@ -111,6 +112,15 @@ const DEFAULT_ENGAGEMENT_D: float = 2.0
 ## of 1.5 mm it works out at 19 rays.
 const RING_SPACING_MM: float = 0.5
 const MIN_RING_RAYS: int = 8
+## How far off the seat plane a surface may sit and still be the seat, along
+## the screw axis. Independent of the ring's LATERAL pitch, which says how
+## finely the circumference is sampled and nothing about depth: a floor half
+## a millimetre below the seat is a head floating half a millimetre, not a
+## seat measured coarsely. The seat plane is placed from the hole record's
+## centre and thickness, which the hole verb fits to a hundredth, and a
+## reference facet meets the ray exactly, so this absorbs that fit and a
+## chamfer's rounding and nothing wider.
+const SEAT_TOLERANCE_MM: float = 0.05
 const MAX_RING_RAYS: int = 128
 
 ## Pairing limits. A boss more than this far from a hole's axis, or tilted more
@@ -243,6 +253,23 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# is a reply whose world numbers are all right and whose local ones are
 	# all wrong — the worst shape a wrong answer can take.
 	var epoch := int(gauge.call("get_generation"))
+	# And the two have to describe ONE state before anything is awaited. The
+	# guards below catch the references moving after this point; they cannot
+	# tell that the records were already ahead of the colliders when the
+	# check began — a pose rewritten, no rebuild yet, none coming during the
+	# wait — and a snapshot taken then holds the new pose beside the old
+	# geometry with nothing left to change. So the colliders are asked what
+	# they were built from and compared with what these records describe,
+	# through the gauge's own derivation. A mismatch is stale: the holes in
+	# `args` were measured against whichever of the two was current at the
+	# time, and this module cannot measure them again.
+	if str(gauge.call("get_bodies_digest")) \
+			!= _MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(records)):
+		return _stale("the reference colliders are behind the reference poses "
+			+ "(colliders behind poses): a re-pose has not been rebuilt into "
+			+ "the measurement gauge yet, so rays would meet the old geometry "
+			+ "and be reported in the new frame; run minerva_cad_find_holes "
+			+ "again and re-ask")
 
 	# The B-Rep first, and OUTSIDE the reservation: it is an IPC round trip to
 	# the worker, and holding the solid's collider across it would stall every
@@ -623,11 +650,17 @@ func _one_screw(
 			/ maxf(1.0, float(seat["rays"]))
 		row["head_seat_rays"] = int(seat["rays"])
 		row["head_seat_radius_mm"] = float(seat["radius_mm"])
+		# The measured number behind the fraction: how far below the seat
+		# plane the surface the ring met actually sits, at its worst.
+		row["head_seat_gap_mm"] = seat["gap_mm"]
+		row["head_seat_tolerance_mm"] = SEAT_TOLERANCE_MM
 		row["head_seat_rule"] = ("circumference coverage at one radius, not "
 			+ "bearing area: the fraction of a single ring of rays at "
 			+ "%.3f mm from the axis that met reference material within "
-			+ "%s mm of the seat plane, so an annular void inside that ring "
-			+ "is not seen") % [float(seat["radius_mm"]), RING_SPACING_MM]
+			+ "%s mm of the seat plane along the axis, so an annular void "
+			+ "inside that ring is not seen; head_seat_gap_mm is the furthest "
+			+ "below the seat any of them found a surface") \
+			% [float(seat["radius_mm"]), SEAT_TOLERANCE_MM]
 		if not head_seat_clear:
 			row["head_obstructions"] = head["obstructions"]
 	if bore.get("source", "b_rep") == "b_rep":
@@ -917,8 +950,13 @@ func _unmeasurable(hole: Dictionary, bore: Dictionary, reason: String) -> Dictio
 
 
 ## How much of the seat ring actually lands on material at the seat plane, as
-## {landed, rays}. A head hanging half over the edge of its boss is "clear" —
-## nothing is in its way — and still badly seated, and only this number says so.
+## {landed, rays, radius_mm, gap_mm}. A head hanging half over the edge of its
+## boss is "clear" — nothing is in its way — and still badly seated, and only
+## this number says so. `gap_mm` is the signed axial distance from the seat
+## plane to the first surface a ring ray met, at its worst over the ring:
+## positive is a surface BELOW the seat (the head floats by that much),
+## negative is one above it (the head fan's obstruction), null when no ray met
+## anything at all.
 ##
 ## The ring is sampled between the shank radius and the head radius so a ray
 ## does not simply fall down the clearance hole and report an unsupported head
@@ -941,10 +979,13 @@ func _seat_support(
 ) -> Dictionary:
 	var radius := (head_radius + shank_radius) * 0.5
 	var ring := _ring_points(direction, radius)
-	# The window a hit may be off the seat plane by is the fan's own spacing:
-	# anything further is a different surface, not this seat measured coarsely.
+	# A hit counts as the seat only within SEAT_TOLERANCE_MM of the plane
+	# along the axis — a depth question, answered with a depth tolerance.
+	# Anything further is a different surface, and how far it sits is
+	# reported rather than absorbed.
 	var landed := 0
 	var rays := 0
+	var worst_gap: Variant = null
 	# From 1: rays[0] is the axis, which travels down the clearance hole.
 	for index in range(1, ring.size()):
 		rays += 1
@@ -954,9 +995,12 @@ func _seat_support(
 		if hit.is_empty():
 			continue
 		var t: float = (hit["position"] as Vector3 - datum).dot(direction)
-		if absf(t - seat_t) <= RING_SPACING_MM:
+		var gap := t - seat_t
+		if worst_gap == null or gap > float(worst_gap):
+			worst_gap = gap
+		if absf(gap) <= SEAT_TOLERANCE_MM:
 			landed += 1
-	return {"landed": landed, "rays": rays, "radius_mm": radius}
+	return {"landed": landed, "rays": rays, "radius_mm": radius, "gap_mm": worst_gap}
 
 
 ## The offsets of ONE ring: the axis point, then `radius` all the way round

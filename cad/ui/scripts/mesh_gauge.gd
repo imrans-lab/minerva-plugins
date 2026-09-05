@@ -148,8 +148,14 @@ var _query_mask: int = ALL_LAYERS
 ## serialised in one physics step, so one field keeps the deeply nested gauge
 ## queries honest without threading an exclude list through every helper.
 var _scope_exclude: Array[RID] = []
-## Identity of the reference set the current colliders were built from.
+## Identity of the reference set the current colliders were built from, as
+## the CALLER names it (the panel's file/stamp/pose digest).
 var _digest: String = ""
+## Identity of the BODIES the colliders were actually built from — mesh,
+## transform, node and reference of each — computed here from the build's own
+## input, so a check can ask whether the colliders describe the records it is
+## holding without knowing how the caller labels a build.
+var _bodies_digest: String = ""
 var _shape_count: int = 0
 ## Increments once per ACTUAL rebuild. A caller cannot tell a cache hit from a
 ## rebuild by the returned shape count — both return the same number — so the
@@ -193,6 +199,7 @@ func build(bodies: Array, digest: String) -> int:
 		return _shape_count
 	clear()
 	_generation += 1
+	_bodies_digest = bodies_digest(bodies)
 	if _viewport == null:
 		return 0
 	var have_bounds := false
@@ -267,6 +274,7 @@ func clear() -> void:
 	_bounds = AABB()
 	_shape_count = 0
 	_digest = ""
+	_bodies_digest = ""
 
 
 func is_built() -> bool:
@@ -275,6 +283,64 @@ func is_built() -> bool:
 
 func get_digest() -> String:
 	return _digest
+
+
+## Digest of the bodies the current colliders were built from; compare with
+## bodies_digest(bodies_from_records(records)) to know whether the colliders
+## and a set of records describe the same geometry at the same poses.
+func get_bodies_digest() -> String:
+	return _bodies_digest
+
+
+## The collider bodies a panel's reference records describe: every part of
+## every record, its transform composed with the record's pose into WORLD
+## millimetres, its node named by PATH under the reference (two branches of a
+## foreign assembly may both hold a node called "Body"). The ONE derivation
+## from records to bodies — the panel builds from it and a check digests from
+## it, so the two cannot disagree about what a record's colliders are.
+static func bodies_from_records(records: Array) -> Array:
+	var bodies: Array = []
+	for entry in records:
+		if not (entry is Dictionary):
+			continue
+		var record: Dictionary = entry
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		var reference_name := str(record.get("name", ""))
+		for part_entry in record.get("parts", []):
+			var part: Dictionary = part_entry
+			bodies.append({
+				"mesh": part.get("mesh", null),
+				"transform": pose * (part.get("transform", Transform3D.IDENTITY) as Transform3D),
+				"node": "%s/%s" % [reference_name,
+					str(part.get("node_path", part.get("node", "")))],
+				"reference": reference_name,
+			})
+	return bodies
+
+
+## Identity of a body list as build() reads it: the mesh OBJECT (a record's
+## mesh is never rewritten, so the same mesh is the same geometry), its world
+## transform, and the node under its reference, with the reference prefix
+## stripped exactly as build() strips it, so a caller naming nodes bare and
+## one naming them by path digest alike. Bodies build() would skip (no mesh)
+## are skipped here too.
+static func bodies_digest(bodies: Array) -> String:
+	var parts := PackedStringArray()
+	for entry in bodies:
+		if not (entry is Dictionary):
+			continue
+		var body: Dictionary = entry
+		var mesh: Mesh = body.get("mesh", null)
+		if mesh == null:
+			continue
+		var node_name := str(body.get("node", ""))
+		var reference := str(body.get("reference", node_name.get_slice("/", 0)))
+		if not reference.is_empty() and node_name.begins_with(reference + "/"):
+			node_name = node_name.substr(reference.length() + 1)
+		var xform: Transform3D = body.get("transform", Transform3D.IDENTITY)
+		parts.append("%s@%s@%d@%s" % [reference, node_name,
+			mesh.get_instance_id(), str(xform)])
+	return "|".join(parts)
 
 
 func get_shape_count() -> int:

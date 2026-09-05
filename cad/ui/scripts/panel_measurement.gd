@@ -18,6 +18,10 @@ extends RefCounted
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: preload("scripts/panel_measurement.gd")
 
+## The gauge's own records-to-bodies derivation, so the colliders this module
+## builds are exactly the bodies a check digests from the same records.
+const _MeshGauge: Script = preload("mesh_gauge.gd")
+
 ## Every MeshRoot an evaluation has to reach — the four wide-layout panes and
 ## the narrow layout's single pane. One list, because the mesh push, the
 ## reference mount and the ortho x-ray toggle must never disagree about which
@@ -50,23 +54,9 @@ func _init(panel: Object) -> void:
 func ensure_gauge_built() -> int:
 	if _panel._mesh_gauge == null:
 		return 0
-	var bodies: Array = []
-	for entry in _panel.get_reference_state():
-		var record: Dictionary = entry
-		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
-		var reference_name := str(record.get("name", ""))
-		for part_entry in record.get("parts", []):
-			var part: Dictionary = part_entry
-			bodies.append({
-				"mesh": part.get("mesh", null),
-				"transform": pose * (part.get("transform", Transform3D.IDENTITY) as Transform3D),
-				# The node PATH, not the leaf name: two branches of a foreign
-				# assembly may both hold a node called "Body", and a contact
-				# attributed to the wrong one of them is a wrong answer.
-				"node": "%s/%s" % [reference_name,
-					str(part.get("node_path", part.get("node", "")))],
-				"reference": reference_name,
-			})
+	# The records-to-bodies derivation is the gauge's own, so a check that
+	# digests the records it holds gets the same bodies this build used.
+	var bodies: Array = _MeshGauge.bodies_from_records(_panel.get_reference_state())
 	return int(_panel._mesh_gauge.call("build", bodies, _panel._reference_digest))
 
 

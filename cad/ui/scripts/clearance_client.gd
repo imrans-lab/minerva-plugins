@@ -184,7 +184,7 @@ func release() -> void:
 ##   {checked, units, pass, pass_reason?, required_mm,
 ##    tessellation_tolerance_mm, requested_tolerance_mm, tolerance_bounded,
 ##    bound, references_moved,
-##    pairs: [{reference, node, min_mm, pass, solid_point_mm,
+##    pairs: [{reference, node, min_mm, bound_mm, pass, solid_point_mm,
 ##             reference_point_mm: {world, local}, interference?, note?}],
 ##    solid_triangles, cache, engine, interference_join}
 ##
@@ -476,6 +476,10 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			"reference": str(raw.get("reference", "")),
 			"node": str(raw.get("node", "")),
 			"min_mm": float(raw.get("min_mm", 0.0)),
+			# The worker's verdict is on this: min_mm less the tolerance the
+			# mesh keeps. It travels so a reader sees the same number the
+			# pass was graded on.
+			"bound_mm": float(raw.get("bound_mm", raw.get("min_mm", 0.0))),
 			"pass": bool(raw.get("pass", false)),
 		}
 		if overlapping.has(_pair_key(pair["reference"], pair["node"])):
@@ -484,6 +488,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			# or buried in it. There is no gap to quote, and the realising
 			# points describe a distance that is not the answer.
 			pair["min_mm"] = 0.0
+			pair["bound_mm"] = 0.0
 			pair["pass"] = false
 			pair["interference"] = true
 			pair["note"] = "the interference check found this node crossing " \

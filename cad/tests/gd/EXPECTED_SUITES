@@ -314,17 +314,27 @@ test_clearance.gd assertions=43
 # before casting a ray reports its own zero cost, not the last check's. And
 # the re-pose the panel actually performs — the same record with its pose
 # rewritten IN PLACE, no collider rebuilt — comes back stale too, which only a
-# snapshot that is a COPY of the records can notice.
-# 56 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
+# snapshot that is a COPY of the records can notice. And the window BEFORE a
+# check starts: a pose rewritten and the colliders not yet rebuilt, with
+# nothing changing during the wait — the check compares what the gauge was
+# built from with the records it holds and comes back stale (colliders behind
+# poses) rather than casting old rays and reporting them in the new frame.
+# Seating is a DEPTH question with a depth tolerance: hole 2 is counterbored
+# 0.3 mm — a complete annular floor inside the ring's 0.5 mm lateral pitch —
+# and must read as unsupported with the gap measured, not as a seat.
+# 58 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
 # spacing, with the rays it placed counted) + 5 pairing (+1: the groove is not
 # paired and is named, +1: partial surfaces are asked for and a one-bin-short
 # bore is still a bore) + 8 A (+1: engagement measured on the
 # full-circumference extent, +1: graded on that extent minus its error bar)
-# + 5 B + 5 C + 5 E (+1: the rib is caught by a ray between the axis and the
-# rim) + 4 F (+1: the seat number states that it is coverage of one ring at a
-# stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat + 5 refusal (+1: an
-# empty check reports its own counters, +1: an inexact extent is not graded)
-# + 3 poses (+1: a mid-flight collider rebuild comes back stale, with no rows
-# measured against holes that describe where the references used to be,
-# +1: a pose rewritten in place under a waiting check is stale as well).
-test_fasteners.gd assertions=56
+# + 6 B (+1: a complete floor 0.3 mm below the seat is not a seat, and the
+# gap is reported) + 5 C + 5 E (+1: the rib is caught by a ray between the
+# axis and the rim) + 4 F (+1: the seat number states that it is coverage of
+# one ring at a stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat
+# + 5 refusal (+1: an empty check reports its own counters, +1: an inexact
+# extent is not graded) + 4 poses (+1: a mid-flight collider rebuild comes
+# back stale, with no rows measured against holes that describe where the
+# references used to be, +1: a pose rewritten in place under a waiting check
+# is stale as well, +1: a check that starts with the colliders already
+# behind the poses is stale or rebuilds, never a mixed epoch).
+test_fasteners.gd assertions=58

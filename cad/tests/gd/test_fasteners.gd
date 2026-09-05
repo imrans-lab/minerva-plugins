@@ -115,11 +115,23 @@ const E_BORE_BOTTOM_Z := BORE_BOTTOM_Z - E_GAP_MM
 const E_BOSS_BOTTOM_Z := BOSS_BOTTOM_Z - E_GAP_MM
 ## Hole 5's seat plane is milled away on one side: a pocket whose straight
 ## edge passes through the hole's own axis, 1.0 mm deep, so a seat ray landing
-## in it is 1.0 mm below the seat plane — twice the RING_SPACING_MM band that
-## counts as landed. The seat ring is sampled at (head + shank) / 2 = 2.25 mm,
-## so the pocket covers exactly the half of that ring on its own side.
+## in it is 1.0 mm below the seat plane — twenty times the SEAT_TOLERANCE_MM
+## band that counts as landed. The seat ring is sampled at (head + shank) / 2
+## = 2.25 mm, so the pocket covers exactly the half of that ring on its own
+## side.
 const POCKET_DEPTH_MM := 1.0
 const POCKET_SIZE := Vector3(12.0, 12.0, 4.0)
+## Hole 2 is COUNTERBORED: a 7 mm recess, 0.3 mm deep, all the way round, so
+## the whole seat ring (2.25 mm from the axis, inside the 3.5 mm recess) finds
+## a complete annular floor 0.3 mm BELOW the seat plane. That is a head
+## floating 0.3 mm — six times the seat tolerance and well inside the ring's
+## 0.5 mm lateral pitch, so a seating window borrowed from that pitch reads
+## it as fully supported. It touches nothing else about B: the hole record
+## still places the seat at the board's top face, the shank rays pass down
+## the 3.4 mm hole clear of the recess wall, and the head ring's span ends
+## at the seat plane above the floor.
+const COUNTERBORE_RADIUS := 3.5
+const COUNTERBORE_DEPTH_MM := 0.3
 ## The rib: 0.5 wide in x, centred 0.65 mm off the bore axis, so it covers
 ## x in [0.4, 0.9] — at MID-RADIUS of the M3 shank. It misses the axis ray
 ## (x = 0) and it misses the shank's outer ring (x = 1.5) and the head's
@@ -515,6 +527,24 @@ func _check_screw_b(report: Dictionary) -> void:
 				and str(row.get("why", "")).contains("coaxiality"),
 			"why = %s" % str(row.get("why")))
 
+	# The counterbore: a complete floor 0.3 mm below the seat plane. Nothing
+	# is in the head's way, so the seat is CLEAR — and NOT supported, because
+	# a surface 0.3 mm down is a head floating 0.3 mm, whatever the ring's
+	# lateral pitch is. The reply says how far by. The gap is measured to the
+	# baked floor, which lies within a hundredth of the CSG literal.
+	check("B: a complete annular floor 0.3 mm below the seat is not a seat — "
+			+ "the ring reads unsupported, the head is still clear, and the "
+			+ "measured seat gap is the counterbore's depth",
+			bool(row.get("head_seat_clear", false))
+				and float(row.get("head_seat_supported", 1.0)) < 0.001
+				and int(row.get("head_seat_rays", 0)) == EXPECTED_SEAT_RAYS
+				and absf(float(row.get("head_seat_gap_mm", 0.0))
+					- COUNTERBORE_DEPTH_MM) < 0.01
+				and float(row.get("head_seat_tolerance_mm", 1.0)) < COUNTERBORE_DEPTH_MM,
+			"supported=%s gap=%s tolerance=%s rays=%s" % [
+				str(row.get("head_seat_supported")), str(row.get("head_seat_gap_mm")),
+				str(row.get("head_seat_tolerance_mm")), str(row.get("head_seat_rays"))])
+
 
 # ---------------------------------------------------------------------------
 # Screw C — something is in the way
@@ -857,6 +887,7 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 			break
 		await process_frame
 	panel.checks_records = original
+	_rebuild_gauge(panel, _pose)
 
 	var first: Dictionary = replies[0] if not replies.is_empty() else {}
 	# STALE, BOTH OF THEM, and for the same reason. A pose is what every local
@@ -916,6 +947,7 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 			break
 		await process_frame
 	panel.checks_records = original
+	_rebuild_gauge(panel, _pose)
 
 	var after: Dictionary = later[0] if not later.is_empty() else {}
 	# STALE, and nothing else. The HOLES this check was handed were measured
@@ -961,6 +993,49 @@ func _check_pose_snapshot(module: RefCounted, panel: Node) -> void:
 				and str(rewritten.get("reason", "")).contains("find_holes"),
 			"rewritten = %s" % str(rewritten))
 
+	# The window BEFORE a check starts. The panel rewrites a pose in place and
+	# the colliders are rebuilt lazily, on the next measurement — so a check
+	# can begin with records already ahead of the gauge, and if nothing
+	# rebuilds during its wait, every guard that watches for a change sees
+	# none: the snapshot holds the new pose, the generation never moves, and
+	# the rays are cast against the OLD geometry and reported in the NEW
+	# frame. The check has to notice at entry that the colliders were not
+	# built from the records it holds. Either answer is honest: stale with a
+	# reason, or a rebuild that puts the colliders at the new pose and a reply
+	# framed in it — what it must never do is answer from the mixed epoch.
+	var skew_pose := Transform3D(_pose.basis, _pose.origin + POSE_SHIFT)
+	var generation_before := int(panel.gauge.get_generation())
+	record["pose"] = skew_pose
+	var skewed: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": _holes(),
+	})
+	var generation_after := int(panel.gauge.get_generation())
+	record["pose"] = _pose
+	var skew_row := _row_at_world(skewed, _pose * expected)
+	var skew_local := _local_of(skew_row.get("seat_mm", {}))
+	var skew_expected: Vector3 = skew_pose.affine_inverse() * (_pose * expected)
+	var honest_stale := bool(skewed.get("stale", false)) \
+		and not bool(skewed.get("checked", true)) \
+		and int(skewed.get("count", -1)) == 0 \
+		and str(skewed.get("reason", "")).contains("colliders behind poses")
+	var honest_rebuild := bool(skewed.get("checked", false)) \
+		and generation_after > generation_before \
+		and skew_local.distance_to(skew_expected) < NUMERIC_TOLERANCE_MM
+	check("poses: a check that STARTS with a pose already rewritten and the "
+			+ "colliders not yet rebuilt — nothing changing during its wait — "
+			+ "is stale (colliders behind poses) or rebuilds consistently, "
+			+ "never old rays reframed through the new pose",
+			(honest_stale or honest_rebuild)
+				and not (bool(skewed.get("checked", false))
+					and generation_after == generation_before),
+			"skewed = %s, generation %d -> %d, local = %s, expected = %s" % [
+				str(skewed.get("reason", skewed.get("count"))),
+				generation_before, generation_after, str(skew_local),
+				str(skew_expected)])
+	# Restored: the gauge is untouched by a stale answer, and if the module
+	# rebuilt, the poses now say the original again.
+	_rebuild_gauge(panel, _pose)
+
 
 ## Start a check without awaiting it and park its reply in `into`.
 func _collect_check(module: RefCounted, panel: Node, into: Array) -> void:
@@ -984,7 +1059,10 @@ func _rebuild_gauge(panel: Node, pose: Transform3D) -> void:
 				"node": str(part.get("node_path", "")),
 				"reference": str(record.get("name", "")),
 			})
-	panel.gauge.call("build", bodies, "fastener-fixture|reposed")
+	# Labelled by the pose: build() treats an identical label as a no-op, so
+	# a label that did not change with the pose would leave the colliders
+	# where the previous rebuild put them.
+	panel.gauge.call("build", bodies, "fastener-fixture|%s" % str(pose))
 
 
 ## The suite's reference records under a different pose.
@@ -1108,6 +1186,18 @@ func _bake_board() -> ArrayMesh:
 		HOLE_XY[4].y,
 		BOARD_HALF_THICKNESS - POCKET_DEPTH_MM + POCKET_SIZE.z * 0.5)
 	combiner.add_child(pocket)
+	# The counterbore around hole 2: its floor is a complete ring 0.3 mm under
+	# the seat plane, which must read as a floating head and not as a seat.
+	var counterbore := CSGCylinder3D.new()
+	counterbore.radius = COUNTERBORE_RADIUS
+	counterbore.height = COUNTERBORE_DEPTH_MM * 2.0
+	counterbore.sides = 64
+	counterbore.operation = CSGShape3D.OPERATION_SUBTRACTION
+	counterbore.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	# Centred ON the top face, so exactly COUNTERBORE_DEPTH_MM of it is in
+	# the board.
+	counterbore.position = Vector3(HOLE_XY[1].x, HOLE_XY[1].y, BOARD_HALF_THICKNESS)
+	combiner.add_child(counterbore)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()
