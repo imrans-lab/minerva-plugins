@@ -251,6 +251,13 @@ def _tree_for(key: str, path: Optional[str]) -> tuple[Any, int, bool]:
 # The solid
 # ---------------------------------------------------------------------------
 
+def _sagitta_mm(angle_rad: float, radius_mm: float) -> float:
+    """How far a chord subtending `angle_rad` sits inside a circle of `r`."""
+    if radius_mm <= 0.0 or angle_rad <= 0.0:
+        return 0.0
+    return radius_mm * (1.0 - math.cos(angle_rad * 0.5))
+
+
 def _angular_for(tolerance_mm: float, radius_mm: float) -> float:
     """The angular deflection that holds a chord within `tolerance_mm`.
 
@@ -311,23 +318,39 @@ def _prepare_solid(source: str, tolerance_mm: float,
                    angular_param: Optional[float] = None):
     """Tessellate the solid so the CHORD error really is within the tolerance.
 
-    Returns (vertices, faces, angular_rad, how). OCCT applies the linear and
-    the angular deflection together and the finer one wins, so the angular one
-    is derived from the linear one and the curvature it has to hold — which is
-    what makes `tessellation_tolerance_mm` a bound rather than a label. A
-    caller that states its own angular_tolerance is obeyed and told so.
+    Returns (vertices, faces, angular_rad, how, effective_mm). OCCT applies
+    the linear and the angular deflection together and the finer one wins, so
+    the angular one is derived from the linear one and the curvature it has to
+    hold — which is what makes `tessellation_tolerance_mm` a bound rather than
+    a label. A caller that states its own angular_tolerance is obeyed and told
+    so.
+
+    `effective_mm` is the tolerance the mesh ACTUALLY keeps. It is the
+    requested one except where MIN_ANGULAR_RAD binds: a very wide face with a
+    very tight tolerance would ask for a mesh nobody can hold, and the floor
+    that prevents it also means the chords sit further out than the caller
+    asked. The reply then states what it really got rather than what it was
+    asked for — an error bar the mesh does not keep is worse than a coarse
+    one, because a caller subtracts it and believes the result.
     """
     if angular_param is not None:
         vertices, faces = _solid_arrays(source, tolerance_mm, angular_param)
-        return vertices, faces, angular_param, "stated by the caller"
+        radius = _curvature_radius(source) or _bbox_radius(vertices)
+        return (vertices, faces, angular_param, "stated by the caller",
+                max(tolerance_mm, _sagitta_mm(angular_param, radius)))
 
     radius = _curvature_radius(source)
     if radius is not None:
         angular = _angular_for(tolerance_mm, radius)
         vertices, faces = _solid_arrays(source, tolerance_mm, angular)
-        return (vertices, faces, angular,
-                "derived from the widest curved face (radius %.4f mm)"
-                % radius)
+        effective = max(tolerance_mm, _sagitta_mm(angular, radius))
+        how = "derived from the widest curved face (radius %.4f mm)" % radius
+        if effective > tolerance_mm:
+            how += (" and held at this module's finest angular step (%.4f "
+                    "rad), which on that radius is %.6f mm of chord error — "
+                    "more than the %.6f mm asked for"
+                    % (MIN_ANGULAR_RAD, effective, tolerance_mm))
+        return vertices, faces, angular, how, effective
 
     # No curved face, or no B-Rep to read. Tessellate once at the default and
     # look at what came out: a shape with no curvature is already exact, and
@@ -335,14 +358,19 @@ def _prepare_solid(source: str, tolerance_mm: float,
     # is a guess — so the mesh is only rebuilt when that guess asks for a
     # finer angle than the default.
     vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
-    guess = _angular_for(tolerance_mm, _bbox_radius(vertices))
+    box_radius = _bbox_radius(vertices)
+    guess = _angular_for(tolerance_mm, box_radius)
     if guess < DEFAULT_ANGULAR_RAD:
         vertices, faces = _solid_arrays(source, tolerance_mm, guess)
         return (vertices, faces, guess,
                 "derived from the mesh's own bounding box, because the "
-                "B-Rep's curvature could not be read")
+                "B-Rep carries a curved surface this reader cannot measure "
+                "(a spline, a revolution, an offset) or could not be read at "
+                "all",
+                max(tolerance_mm, _sagitta_mm(guess, box_radius)))
     return (vertices, faces, DEFAULT_ANGULAR_RAD,
-            "the default: no curved face was found to bind it")
+            "the default: no curved face was found to bind it",
+            tolerance_mm)
 
 
 def _solid_arrays(source: str, tolerance: float, angular_tolerance: float):
@@ -495,8 +523,8 @@ def clearance(params: dict) -> dict:
                 },
             }
 
-        solid_vertices, solid_faces, angular_rad, angular_how = _prepare_solid(
-            source, tolerance_mm, angular)
+        (solid_vertices, solid_faces, angular_rad, angular_how,
+            effective_mm) = _prepare_solid(source, tolerance_mm, angular)
         solid_tree = _build_tree(solid_vertices, solid_faces)
 
         pairs = []
@@ -534,7 +562,12 @@ def clearance(params: dict) -> dict:
             "units": "mm",
             "pass": all(p["pass"] for p in pairs),
             "required_mm": required_mm,
-            "tessellation_tolerance_mm": tolerance_mm,
+            # WHAT THE MESH KEEPS, not what was asked for: where the
+            # angular floor binds, the chords sit further out than the
+            # request and a caller subtracting the request would believe a
+            # number the geometry does not support.
+            "tessellation_tolerance_mm": effective_mm,
+            "requested_tolerance_mm": tolerance_mm,
             # OCCT applies both deflections and the finer one wins, so the
             # angular one is part of the promise the linear one makes.
             "angular_deflection_deg": math.degrees(angular_rad),
@@ -543,8 +576,8 @@ def clearance(params: dict) -> dict:
                       "%g mm of its true surface (chords stepped by at most "
                       "%.3f degrees, %s), so the true clearance is at least "
                       "min_mm - %g mm"
-                      % (tolerance_mm, math.degrees(angular_rad), angular_how,
-                         tolerance_mm)),
+                      % (effective_mm, math.degrees(angular_rad), angular_how,
+                         effective_mm)),
             "solid_triangles": int(len(solid_faces)),
             "cache": {
                 "hits": hits,

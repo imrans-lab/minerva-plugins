@@ -18,6 +18,7 @@ shipping the geometry backend".
 from __future__ import annotations
 
 import hashlib
+import math
 import struct
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from mcad_worker import clearance as clr
+from mcad_worker import features as feat
 
 # --- the fixture, in millimetres -------------------------------------------
 # Bar A (the reference): long in X, narrow in Y, its top face at z = 0.
@@ -290,7 +292,8 @@ def _max_chord_deviation(source: str, tolerance_mm: float,
 
     import numpy as np
 
-    vertices, faces, _angular, _how = clr._prepare_solid(source, tolerance_mm)
+    vertices, faces, _angular, _how, _effective = clr._prepare_solid(
+        source, tolerance_mm)
     points = np.asarray(vertices, dtype=float)
     worst = 0.0
     for triangle in faces:
@@ -424,8 +427,14 @@ class TestClearanceVerb:
         coarse = _curved(0.05)
         fine = _curved(0.005)
 
-        assert coarse["tessellation_tolerance_mm"] == 0.05
-        assert fine["tessellation_tolerance_mm"] == 0.005
+        # The tolerance the mesh keeps: the request itself here, since the
+        # angular floor is nowhere near binding on a 2 mm radius. (It is
+        # compared approximately because it is the max of the request and a
+        # sagitta computed from it, which agrees to float noise.)
+        assert coarse["tessellation_tolerance_mm"] == pytest.approx(0.05)
+        assert fine["tessellation_tolerance_mm"] == pytest.approx(0.005)
+        assert coarse["requested_tolerance_mm"] == 0.05
+        assert fine["requested_tolerance_mm"] == 0.005
         assert "0.05" in coarse["bound"] and "0.005" in fine["bound"]
         assert fine["solid_triangles"] > coarse["solid_triangles"]
         # The angular deflection is derived, and the reply says from what.
@@ -438,6 +447,46 @@ class TestClearanceVerb:
                                              CURVED_RADIUS)
             assert deviation <= tolerance, (tolerance, deviation)
             assert deviation > 0.0
+
+    def test_a_tolerance_finer_than_the_mesher_will_go_is_reported_honestly(
+            self, tmp_path):
+        """The one number a caller subtracts, and it has to be true.
+
+        A 200 mm barrel at a micron of tolerance asks for an angular step
+        finer than this module will take: past MIN_ANGULAR_RAD the mesh would
+        be one nobody can hold in memory, so the floor binds and the chords
+        sit further out than the request. What the reply must NOT do is echo
+        the request — a caller subtracts tessellation_tolerance_mm from
+        min_mm and believes the result, so an error bar the mesh does not
+        keep is worse than a coarse one.
+
+        ORACLE: the sagitta at the floor, by hand — 200 * (1 - cos(0.005/2))
+        = 0.000625 mm — against a requested 0.000001 mm. The reply states the
+        first, keeps the request beside it, and says in `bound` that the floor
+        is why.
+        """
+        pytest.importorskip("fcl")
+        pytest.importorskip("build123d")
+        verts, faces = _bar_a()
+        path, key = write_blob(tmp_path, verts, faces)
+        requested = 0.000001
+        result = clr.clearance({
+            "source": "part = translate([0, 0, %f], cylinder(r=%f, h=%f))" % (
+                GAP_MM, MIXED_WIDE_R, BAR_THICKNESS),
+            "required_mm": 0.5,
+            "tolerance_mm": requested,
+            "targets": [{"reference": "board", "node": "Assembly/Bar",
+                         "key": key, "path": path}],
+        })["result"]
+
+        floor_sagitta = MIXED_WIDE_R * (1.0 - math.cos(clr.MIN_ANGULAR_RAD / 2))
+        assert floor_sagitta == pytest.approx(0.000625, abs=1.0e-6)
+        assert result["tessellation_tolerance_mm"] == pytest.approx(
+            floor_sagitta, rel=1.0e-6)
+        assert result["requested_tolerance_mm"] == requested
+        assert result["angular_deflection_deg"] == pytest.approx(
+            math.degrees(clr.MIN_ANGULAR_RAD))
+        assert "%g" % floor_sagitta in result["bound"]
 
     def test_the_widest_curve_is_the_one_the_angle_has_to_hold(self):
         """Two radii in one solid, and only one of them can set the angle.
@@ -461,6 +510,32 @@ class TestClearanceVerb:
         assert deviation > 0.0
         assert clr._curvature_radius(MIXED_SOLID_SOURCE) == pytest.approx(
             MIXED_WIDE_R, abs=1.0e-6)
+
+    def test_a_cone_is_a_curved_face_too(self):
+        """Cylinders and spheres are not the whole of curvature.
+
+        A reader that recognises only those two returns the 2 mm pin's radius
+        for a part whose widest curved face is a 200 mm CONE, and the angle it
+        then chooses leaves that cone a millimetre from its own surface. The
+        cone's radius runs with its parameter, so the answer is the wider end
+        of the face's own trim rather than anything the surface says on its
+        own.
+
+        ORACLE: the DSL's own r1. And a surface kind this reader cannot
+        measure at all must come back as UNKNOWN — None, so the caller falls
+        back to a bound it can defend — rather than as "no curvature".
+        """
+        pytest.importorskip("build123d")
+        source = "\n".join([
+            "barrel = cylinder(r1=%f, r2=%f, h=20)" % (MIXED_WIDE_R, 100.0),
+            "pin = translate([400, 0, 0], cylinder(r=%f, h=20))"
+            % MIXED_TIGHT_R,
+            "part = barrel + pin",
+        ])
+        assert feat.largest_curved_radius(source) == pytest.approx(
+            MIXED_WIDE_R, abs=1.0e-6)
+        # A part with no curved face at all has no radius to report either.
+        assert feat.largest_curved_radius("part = cube(10, 10, 10)") is None
 
     def test_pairs_come_back_closest_first(self, tmp_path):
         pytest.importorskip("fcl")

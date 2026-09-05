@@ -136,7 +136,13 @@ def _occt():
         from OCP.BRepTools import BRepTools
         from OCP.GCPnts import GCPnts_QuasiUniformDeflection
         from OCP.GProp import GProp_GProps
-        from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Sphere
+        from OCP.GeomAbs import (
+            GeomAbs_Cone,
+            GeomAbs_Cylinder,
+            GeomAbs_Plane,
+            GeomAbs_Sphere,
+            GeomAbs_Torus,
+        )
         from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopoDS import TopoDS
@@ -152,8 +158,11 @@ def _occt():
         "BRepTools": BRepTools,
         "GCPnts_QuasiUniformDeflection": GCPnts_QuasiUniformDeflection,
         "GProp_GProps": GProp_GProps,
+        "GeomAbs_Cone": GeomAbs_Cone,
         "GeomAbs_Cylinder": GeomAbs_Cylinder,
+        "GeomAbs_Plane": GeomAbs_Plane,
         "GeomAbs_Sphere": GeomAbs_Sphere,
+        "GeomAbs_Torus": GeomAbs_Torus,
         "TopAbs_EDGE": TopAbs_EDGE,
         "TopAbs_FACE": TopAbs_FACE,
         "TopAbs_REVERSED": TopAbs_REVERSED,
@@ -906,17 +915,46 @@ def largest_curved_radius(source: str) -> Optional[float]:
         try:
             adaptor = occt["BRepAdaptor_Surface"](face)
             kind = adaptor.GetType()
+            if kind == occt["GeomAbs_Plane"]:
+                # Flat: its chords are the surface, at any angle.
+                continue
             if kind == occt["GeomAbs_Cylinder"]:
                 radius = float(adaptor.Cylinder().Radius())
             elif kind == occt["GeomAbs_Sphere"]:
                 radius = float(adaptor.Sphere().Radius())
+            elif kind == occt["GeomAbs_Cone"]:
+                radius = _cone_radius(adaptor)
+            elif kind == occt["GeomAbs_Torus"]:
+                torus = adaptor.Torus()
+                # The widest circle on a torus is the outer one.
+                radius = float(torus.MajorRadius()) + float(torus.MinorRadius())
             else:
-                continue
+                # A B-spline, a Bezier, a surface of revolution or extrusion,
+                # an offset: curved, and this reader cannot say how tightly.
+                # UNKNOWN, not "no curvature" — the caller falls back to a
+                # bound it can defend rather than to a radius it invented.
+                return None
         except BaseException:  # noqa: BLE001 — a face it cannot adapt
-            continue
+            return None
         if radius > 0.0 and (largest is None or radius > largest):
             largest = radius
     return largest
+
+
+def _cone_radius(adaptor) -> float:
+    """The widest radius a conical FACE actually reaches, millimetres.
+
+    A cone's radius runs with its parameter, so the surface alone says
+    nothing: the answer is the wider end of the face's own trim. r(v) =
+    reference radius + v * sin(half angle), read at the face's v bounds.
+    """
+    cone = adaptor.Cone()
+    reference = float(cone.RefRadius())
+    half_angle = float(cone.SemiAngle())
+    low = float(adaptor.FirstVParameter())
+    high = float(adaptor.LastVParameter())
+    ends = [abs(reference + v * math.sin(half_angle)) for v in (low, high)]
+    return max(ends)
 
 
 def cylindrical_features(params: dict) -> dict:

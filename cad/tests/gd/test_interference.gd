@@ -182,6 +182,9 @@ const TETRA_SPAN_MM := 0.5
 const BLOCK_A := "block_a"
 const BLOCK_B := "block_b"
 const BLOCK_NODE := "Assembly/Block"
+## The second body of the SAME reference, in the same place: two nodes that
+## overlap exactly, which only a per-node question can tell apart.
+const BLOCK_TWIN_NODE := "Assembly/BlockTwin"
 
 const STACK_A := "stack_a"
 const STACK_B := "stack_b"
@@ -1035,6 +1038,45 @@ func _check_two_enclosing_references(gauge: Node, checks: RefCounted) -> void:
 			+ "was answered, so the doubt list is empty",
 			(report.get("undecidable", []) as Array).is_empty(),
 			"undecidable = %s" % str(report.get("undecidable", [])))
+
+	# THE SAME TWO BODIES UNDER ONE NAME. Overlapping nodes of a single
+	# reference are the case a per-REFERENCE question cannot answer: parity
+	# scoped to the name says "inside something of this reference" and the
+	# first node found takes the answer, leaving the second's clearance rows
+	# to pass on an unsigned distance. The question has to be asked of each
+	# node.
+	var twinned: int = gauge.build([
+		{"mesh": block, "transform": _pose, "node": BLOCK_NODE,
+			"reference": BLOCK_A},
+		{"mesh": block, "transform": _pose, "node": BLOCK_TWIN_NODE,
+			"reference": BLOCK_A},
+	], "twin-nodes-fixture|v1")
+	_records = [{
+		"name": BLOCK_A,
+		"pose": _pose,
+		"world_aabb": box,
+		"parts": [
+			{"mesh": block, "transform": Transform3D.IDENTITY,
+				"node_path": BLOCK_NODE, "node": BLOCK_NODE},
+			{"mesh": block, "transform": Transform3D.IDENTITY,
+				"node_path": BLOCK_TWIN_NODE, "node": BLOCK_TWIN_NODE},
+		],
+	}]
+	checks.set_records(_records)
+	checks.build_solid(await _buried_mesh())
+
+	var twins: Dictionary = await _submit(gauge, checks, "", "")
+	var twin_nodes := {}
+	for entry in twins.get("pairs", []):
+		twin_nodes[str((entry as Dictionary).get("node", ""))] = true
+	check("twin nodes: two overlapping bodies of ONE reference are two "
+			+ "answers — the cube is reported inside both, not inside "
+			+ "whichever the reference-wide question happened to name",
+			twinned == 2 and bool(twins.get("checked", false))
+				and twin_nodes.has(BLOCK_NODE)
+				and twin_nodes.has(BLOCK_TWIN_NODE)
+				and (twins.get("undecidable", []) as Array).is_empty(),
+			"report = %s" % str(twins))
 
 
 ## A solid block big enough to swallow the buried cube whole.

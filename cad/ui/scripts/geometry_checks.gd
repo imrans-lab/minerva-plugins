@@ -1013,14 +1013,15 @@ func _containment(
 ) -> void:
 	if _solid_edges.size() >= 2 and solid_state != null \
 			and _reference_encloses_solid(reference_scope):
-		# ONE QUESTION PER ENCLOSING REFERENCE. Two bodies can both hold the
-		# solid, and "is the solid inside this one" is a different question
-		# for each of them: answering it for the first and returning leaves
-		# the second's clearance rows to pass on an unsigned distance. Every
-		# candidate rejected is not a clean answer either — the question was
-		# asked and nothing could answer it — so a reference nobody could
-		# settle is reported undecidable rather than left silent.
-		var enclosing_names := _enclosing_references(reference_scope)
+		# ONE QUESTION PER ENCLOSING NODE. Two bodies can both hold the solid —
+		# two nodes of one reference, overlapping — and "is the solid inside
+		# this one" is a different question for each: answering it for the
+		# first and moving on leaves the second's clearance rows to pass on an
+		# unsigned distance. Every candidate rejected is not a clean answer
+		# either — the question was asked and nothing could answer it — so a
+		# node nobody could settle is reported undecidable rather than left
+		# silent.
+		var enclosing_nodes := _enclosing_nodes(reference_scope)
 		var answered := {}
 		var tried := 0
 		for probe in _probe_points(_solid_edges, _solid_bounds):
@@ -1032,67 +1033,77 @@ func _containment(
 				continue
 			if _touches_references(gauge, state, mask, reference_scope, probe):
 				continue
-			for enclosing in enclosing_names:
-				if answered.has(enclosing):
+			for entry in enclosing_nodes:
+				var candidate: Dictionary = entry
+				var enclosing := str(candidate["reference"])
+				var node_path := str(candidate["node"])
+				var key := _pair_key(enclosing, node_path)
+				if answered.has(key):
 					continue
 				var ref_mask := mask
 				if not enclosing.is_empty():
 					ref_mask = int(gauge.call("mask_for", enclosing))
 				# The gauge's own parity test, reached through the smallest
 				# gauge it will accept — a pin that touches nothing and still
-				# does not fit is a pin buried in material — asked of ONE
-				# reference at a time.
+				# does not fit is a pin buried in material — asked of ONE NODE
+				# at a time, which is the only scope that can tell two
+				# overlapping bodies of one reference apart.
 				var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
 					"shape": "sphere",
 					"size": Vector3(0.002, 0.0, 0.0),
 					"at": probe,
 					"mask": ref_mask,
 					"reference": enclosing,
+					"node": node_path,
 				})
 				_casts += 1
 				# An ERROR is not an answer. The gauge says so when a ray
 				# crossed more surfaces than its budget allows — a deeply
-				# layered reference — and treating that as "not inside"
-				# reports a buried solid as clean. Leave this reference open
-				# and try the next probe.
+				# layered node — and treating that as "not inside" reports a
+				# buried solid as clean. Leave this node open and try the next
+				# probe.
 				if verdict.has("error"):
 					continue
-				answered[enclosing] = true
+				answered[key] = true
 				if str(verdict.get("reason", "")) != "inside_solid":
 					continue
-				# Parity says "inside something" without saying inside WHAT,
-				# so the nearest surface from the probe names the offender.
-				#
-				# This is the ONE cast in the module that starts inside
-				# material, against constraint 2 above. It is safe precisely
-				# because it is not a crossing test: every reference collider
-				# carries backface_collision, so a ray leaving buried material
-				# reports the wall it exits through, and that wall's body is
-				# the node the solid is buried in — which is all this ray is
-				# asked for.
-				var reach := _scene_reach()
-				var named: Dictionary = gauge.call("run_now", state, "raycast", {
-					"from": probe,
-					"to": probe + Vector3.RIGHT * reach,
-					"mask": ref_mask,
-					"reference": enclosing,
-				})
+				var named_node := node_path
+				var named_reference := enclosing
+				if named_node.is_empty():
+					# A record with no parts to enumerate: the nearest surface
+					# from the probe names what it is inside. This is the ONE
+					# cast in the module that starts inside material, against
+					# constraint 2 above, and it is safe precisely because it
+					# is not a crossing test — every reference collider
+					# carries backface_collision, so a ray leaving buried
+					# material reports the wall it exits through.
+					var reach := _scene_reach()
+					var found: Dictionary = gauge.call("run_now", state, "raycast", {
+						"from": probe,
+						"to": probe + Vector3.RIGHT * reach,
+						"mask": ref_mask,
+						"reference": enclosing,
+					})
+					named_node = str(found.get("node", ""))
+					named_reference = str(found.get("reference", enclosing))
 				_absorb(pairs, {
 					"point": probe,
-					"node": str(named.get("node", "")),
-					"reference": str(named.get("reference", enclosing)),
+					"node": named_node,
+					"reference": named_reference,
 					"distance": 0.0,
 					"containment": "the solid lies entirely inside this node",
 				}, node_scope)
-			if answered.size() == enclosing_names.size():
+			if answered.size() == enclosing_nodes.size():
 				break
-		for enclosing in enclosing_names:
-			if answered.has(enclosing):
+		for entry in enclosing_nodes:
+			var candidate: Dictionary = entry
+			if answered.has(_pair_key(str(candidate["reference"]),
+					str(candidate["node"]))):
 				continue
 			_undecided.append({
-				"reference": enclosing,
-				"node": "",
-				"reason": ("this reference's bounds hold the whole solid, but "
+				"reference": str(candidate["reference"]),
+				"node": str(candidate["node"]),
+				"reason": ("this body's bounds hold the whole solid, but "
 					+ "none of the %d probe points taken from the solid's own "
 					+ "edges could be verified inside its own material, so "
 					+ "whether the solid is buried in it was not decided")
@@ -1165,23 +1176,42 @@ func _containment(
 				})
 
 
-## EVERY reference whose world box holds the whole solid — the records a
-## containment question about the solid is ABOUT. Two nested boxes both hold
-## it and the question is open for both; answering it for the first one only
-## leaves the other's rows to pass on a distance nobody could sign. Falls back
-## to the scope the caller asked with, so a question that was asked always
-## names something.
-func _enclosing_references(reference_scope: String) -> PackedStringArray:
-	var out := PackedStringArray()
+## EVERY body whose world box holds the whole solid, as {reference, node} —
+## the bodies a containment question about the solid is ABOUT.
+##
+## PER NODE, not per reference. Two overlapping nodes of one reference both
+## hold it and the question is open for both: parity scoped to the reference
+## answers "inside something of this reference" and says nothing about which,
+## so the second node's clearance rows would pass on a distance nobody could
+## sign. A record whose parts carry no usable box falls back to one row for
+## the reference itself, and an empty result falls back to the scope the
+## caller asked with — a question that was asked always names something.
+func _enclosing_nodes(reference_scope: String) -> Array:
+	var out: Array = []
 	for entry in _records:
 		var record: Dictionary = entry
 		var name := str(record.get("name", ""))
 		if not reference_scope.is_empty() and name != reference_scope:
 			continue
-		if _record_world_box(record).encloses(_solid_bounds):
-			out.append(name)
+		var found := false
+		var pose: Transform3D = record.get("pose", Transform3D.IDENTITY)
+		for part_entry in record.get("parts", []):
+			var part: Dictionary = part_entry
+			var mesh: Mesh = part.get("mesh", null)
+			if mesh == null:
+				continue
+			var xform: Transform3D = pose \
+				* (part.get("transform", Transform3D.IDENTITY) as Transform3D)
+			if not _ReferenceMeshes.transform_aabb(xform, mesh.get_aabb()) \
+					.encloses(_solid_bounds):
+				continue
+			out.append({"reference": name,
+				"node": str(part.get("node_path", part.get("node", "")))})
+			found = true
+		if not found and _record_world_box(record).encloses(_solid_bounds):
+			out.append({"reference": name, "node": ""})
 	if out.is_empty():
-		out.append(reference_scope)
+		out.append({"reference": reference_scope, "node": ""})
 	return out
 
 

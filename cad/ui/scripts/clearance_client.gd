@@ -391,6 +391,14 @@ func _sized(target: Dictionary) -> Dictionary:
 	return out
 
 
+## SHA-256 of a whole blob file, hex — the same hash its name is.
+func _digest_of(raw: PackedByteArray) -> String:
+	var hasher := HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	hasher.update(raw)
+	return hasher.finish().hex_encode()
+
+
 ## The blob header, exactly as the file carries it and as the digest covers
 ## it: the magic, the version and the two counts, little-endian.
 func _blob_header(vertices: int, triangles: int) -> PackedByteArray:
@@ -770,14 +778,19 @@ func _write_blob_once(digest: String, blob: Dictionary) -> bool:
 	var body: PackedByteArray = blob["body"]
 	var expected := header.size() + body.size()
 	if FileAccess.file_exists(path):
+		# The name is a hash, so the bytes are the only thing that can prove
+		# the file under it is the file. A corrupted or half-written blob of
+		# the RIGHT LENGTH would otherwise be reused for the rest of the
+		# session: the worker refuses its hash, the caller retries, the same
+		# bytes are reused again, and the check never recovers.
 		var existing := FileAccess.open(path, FileAccess.READ)
 		if existing != null:
-			var length := int(existing.get_length())
+			var raw := existing.get_buffer(int(existing.get_length()))
 			existing.close()
-			if length == expected:
+			if raw.size() == expected and _digest_of(raw) == digest:
 				return true
-		# A file of the wrong length under a content hash is a leftover from
-		# an interrupted write, not somebody else's geometry: replace it.
+		# Not the file its name claims: a leftover from an interrupted write
+		# or a damaged cache, never somebody else's geometry. Replace it.
 		DirAccess.remove_absolute(path)
 	var temporary := "%s.%d.part" % [path, Time.get_ticks_usec()]
 	var file := FileAccess.open(temporary, FileAccess.WRITE)

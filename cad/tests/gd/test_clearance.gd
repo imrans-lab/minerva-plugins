@@ -683,6 +683,55 @@ func _check_pin_across_a_repose(panel: Node, checks: RefCounted) -> void:
 				str(first.get("reason", first.get("checked"))),
 				str(moved.get("reason", moved.get("checked")))])
 
+	# A CACHE FILE IS ONLY THE FILE ITS NAME CLAIMS. The name is a hash, so a
+	# blob of the right LENGTH and the wrong bytes — a half-written file from
+	# a crash, a damaged cache — is not the geometry it is addressed as. Reused
+	# on its length alone it poisons every retry: the worker refuses the hash,
+	# the caller uploads "again", the same bytes are handed over again, and the
+	# check never recovers.
+	_payloads.clear()
+	_known_blobs.clear()
+	var report: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var written := PackedStringArray()
+	for entry in _targets_of(1):
+		written.append(str((entry as Dictionary)["path"]))
+	var corrupted := ""
+	if written.size() > 0:
+		corrupted = written[0]
+		var file := FileAccess.open(corrupted, FileAccess.READ)
+		var raw := file.get_buffer(int(file.get_length()))
+		file.close()
+		# The same number of bytes, one of them different: only a hash can
+		# tell this apart from the real thing.
+		raw[raw.size() - 1] = (int(raw[raw.size() - 1]) + 1) % 256
+		var damaged := FileAccess.open(corrupted, FileAccess.WRITE)
+		damaged.store_buffer(raw)
+		damaged.close()
+
+	_payloads.clear()
+	_known_blobs.clear()
+	var again: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var repaired := false
+	if not corrupted.is_empty():
+		var file := FileAccess.open(corrupted, FileAccess.READ)
+		if file != null:
+			var raw := file.get_buffer(int(file.get_length()))
+			file.close()
+			var hasher := HashingContext.new()
+			hasher.start(HashingContext.HASH_SHA256)
+			hasher.update(raw)
+			repaired = hasher.finish().hex_encode() \
+				== corrupted.get_file().get_basename()
+	check("blob: a cache file of the right length and the wrong bytes is "
+			+ "rewritten, not reused — the name is a hash, and only the bytes "
+			+ "can prove the file is the one it is named for",
+			bool(report.get("checked", false)) and not corrupted.is_empty()
+				and repaired and bool(again.get("checked", false)),
+			"corrupted = %s, repaired = %s, again = %s" % [corrupted,
+				str(repaired), str(again.get("reason", again.get("checked")))])
+
 	_payloads.clear()
 	_known_blobs.clear()
 
