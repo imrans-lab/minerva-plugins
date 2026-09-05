@@ -505,6 +505,31 @@ func set_panel_root(root: Control) -> void:
 	_panel_root = root
 
 
+## The CADPanel this host belongs to. Set by the panel itself on _ready.
+var _panel: Node = null
+
+
+## Adopt the panel this host was built for.
+func set_panel(panel: Node) -> void:
+	_panel = panel
+
+
+## The live panel behind this host, for the panel-executed tool dispatcher.
+##
+## THE ONLY WAY A CAD VERB REACHES A RENAMED TAB. The scene-panel broker keys
+## its registry on the manifest's panel name ("cad_panel"), one entry for the
+## whole plugin, so an editor opened with its own tab_title is unreachable
+## through it — and a second CAD editor would answer for the first. The
+## dispatcher's other resolution path is AnnotationHostRegistry, which IS keyed
+## on the tab title and holds one host per panel; it hands the tool this
+## method's return. Without it the dispatcher lists the tab title as known and
+## then refuses it.
+func get_panel() -> Node:
+	if _panel == null or not is_instance_valid(_panel):
+		return null
+	return _panel
+
+
 ## Return a list of active pane descriptors for multi-pane annotation rendering.
 ##
 ## Each element is a Dictionary:

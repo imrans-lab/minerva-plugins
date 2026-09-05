@@ -51,6 +51,9 @@ const _MeshFeatures: Script = preload("scripts/mesh_features.gd")
 const _ReferenceMeshes: Script = preload("scripts/reference_meshes.gd")
 const _GeometryChecks: Script = preload("scripts/geometry_checks.gd")
 const _FastenerChecks: Script = preload("scripts/fastener_checks.gd")
+## The MCP rendering of an interference report: the panel keeps the full
+## records digest for its joins, the wire carries a hash of it.
+const _EvalReplyScript: Script = preload("scripts/eval_reply.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -484,7 +487,7 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 	})
 	if report.has("error"):
 		return _err(str(report["error"]))
-	return _ok(report)
+	return _ok(_EvalReplyScript.interference_for_mcp(report))
 
 
 ## minerva_cad_check_clearance — how much air is there, and where is it

@@ -39,6 +39,9 @@ const _ReferenceMeshesScript: Script = preload("scripts/reference_meshes.gd")
 ## The three host note hooks — plugin_data payload, restore and the
 ## LLM rendering — live here; the panel below is wiring only.
 const _CadNoteScript: Script = preload("scripts/cad_note.gd")
+## What an evaluation reply looks like on the MCP wire: the reports the panel
+## keeps whole for its own joins, rendered for a reader.
+const _EvalReplyScript: Script = preload("scripts/eval_reply.gd")
 ## The GUI "Import mesh…" action — the file picker, the button in each layout,
 ## and the `refN = mesh("path")` line the picked file becomes.
 const _MeshImportUiScript: Script = preload("scripts/mesh_import_ui.gd")
@@ -366,6 +369,11 @@ func _ready() -> void:
 
 	if _annotation_host.has_method("set_panel_root"):
 		_annotation_host.set_panel_root(_canvas_overlay)
+	# The host is registered under this editor's TAB TITLE, so it is what the
+	# panel-tool dispatcher resolves a per-editor editor_name through; the
+	# scene-panel broker only knows the one manifest panel name.
+	if _annotation_host.has_method("set_panel"):
+		_annotation_host.set_panel(self)
 	_annotation_host.set_active_viewport(_active_viewport_id)
 
 	# ── Geometry overlay wiring (one Cad_GeometryOverlay per SubViewport) ────
@@ -833,7 +841,7 @@ func _on_panel_save_request() -> Dictionary:
 	return {
 		"version": 1,
 		"source": _pending_dsl_text,
-		"last_eval": _last_eval_result.duplicate(true),
+		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
 	}
 
 
@@ -857,7 +865,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 			"status": "empty",
 			"ts": Time.get_unix_time_from_system(),
 		}
-		return {"ok": true, "last_eval": _last_eval_result.duplicate(true)}
+		return {"ok": true, "last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result)}
 
 	# Race guard: when minerva_create_plugin_editor mounts a fresh paired_dsl
 	# panel and the agent's first minerva_doc_write fires immediately after,
@@ -880,7 +888,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 			"status": "pending",
 			"ts": Time.get_unix_time_from_system(),
 		}
-		return {"ok": true, "last_eval": _last_eval_result.duplicate(true)}
+		return {"ok": true, "last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result)}
 
 	# Helper is ready — synchronous eval as originally intended. Cancel any
 	# in-flight + skip the debounce so the MCP caller gets a tight request →
@@ -894,7 +902,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 	var status: String = str(_last_eval_result.get("status", ""))
 	return {
 		"ok": status == "ok",
-		"last_eval": _last_eval_result.duplicate(true),
+		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
 	}
 
 

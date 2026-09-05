@@ -227,6 +227,101 @@ class TestTreeCache:
         with pytest.raises(KeyError):
             clr._tree_for("0" * 64, None)
 
+    def test_an_evicted_tree_is_rebuilt_when_the_request_carries_its_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Residency is not a promise the panel may rely on.
+
+        The cache is an LRU, so an assembly with more nodes than it holds
+        turns over on every call: the keys the panel believes are uploaded
+        are exactly the ones the next call's uploads evict. A key that has
+        been evicted must come straight back from the file the request names,
+        and must say it paid for a build rather than claim a hit.
+
+        ORACLE: `cached` on the answer. If eviction did not really happen the
+        first re-request would come back cached=True, and the test would be
+        measuring nothing.
+        """
+        pytest.importorskip("fcl")
+        monkeypatch.setattr(clr, "_reference_trees", clr._LRU(2))
+
+        uploaded = []
+        for shift in (0.0, 10.0, 20.0):
+            verts, faces = _bar_a()
+            moved = [(x + shift, y, z) for (x, y, z) in verts]
+            uploaded.append(write_blob(tmp_path, moved, faces) + (faces,))
+        for path, key, _faces in uploaded:
+            _tree, _triangles, cached = clr._tree_for(key, path)
+            assert cached is False
+
+        first_path, first_key, first_faces = uploaded[0]
+        with pytest.raises(KeyError):
+            clr._tree_for(first_key, None)
+
+        _tree, triangles, cached = clr._tree_for(first_key, first_path)
+        assert cached is False and triangles == len(first_faces)
+
+    def test_the_cache_holds_a_whole_assembly_not_a_handful_of_nodes(self):
+        """One entry is one reference NODE: a populated board is dozens.
+
+        At 16 the cache could not hold one real board (the smart-remote-v2
+        reference is 45 nodes), so every call after the first evicted part of
+        the set it was about to be asked for again.
+        """
+        assert clr.MAX_CACHED_REFERENCES >= 128
+
+    def test_a_target_the_cache_dropped_is_answered_when_it_is_re_sent_with_a_path(
+        self, tmp_path, monkeypatch
+    ):
+        """The whole verb, over a set larger than the cache, asked twice.
+
+        This is the panel's iteration loop: check, edit, check. The second
+        call carries a path for every target — which is what the panel now
+        sends once anything comes back missing — and must be answered rather
+        than reported missing again.
+        """
+        pytest.importorskip("fcl")
+        pytest.importorskip("build123d")
+        monkeypatch.setattr(clr, "_reference_trees", clr._LRU(2))
+
+        targets = []
+        for index, shift in enumerate((0.0, 10.0, 20.0)):
+            verts, faces = _bar_a()
+            moved = [(x + shift, y, z) for (x, y, z) in verts]
+            path, key = write_blob(tmp_path, moved, faces)
+            targets.append({
+                "reference": "board",
+                "node": "Assembly/Bar%d" % index,
+                "key": key,
+                "path": path,
+            })
+        params = {"source": SOLID_SOURCE, "required_mm": 0.5, "targets": targets}
+
+        first = clr.clearance(params)["result"]
+        assert first["checked"] is True
+        assert len(first["pairs"]) == len(targets)
+
+        second = clr.clearance(params)["result"]
+        assert second["checked"] is True
+        assert "missing_keys" not in second
+        assert len(second["pairs"]) == len(targets)
+
+    def test_a_missing_key_reply_says_cache_and_not_unreadable(self):
+        """The reason text is the only thing a reader has to go on.
+
+        A cache miss and a file the worker could not read send a reader to
+        opposite places; the panel renders this text, so it must not describe
+        a filesystem fault that has not happened.
+        """
+        pytest.importorskip("fcl")
+        reply = clr.clearance({
+            "source": "part = cube(1, 1, 1)",
+            "required_mm": 1.0,
+            "targets": [{"reference": "board", "node": "Body", "key": "b" * 64}],
+        })
+        reason = reply["result"]["reason"]
+        assert "cache" in reason and "unreadable" in reason
+
     def test_an_unknown_key_comes_back_as_an_upload_request(self):
         pytest.importorskip("fcl")
         reply = clr.clearance({

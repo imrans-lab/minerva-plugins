@@ -66,6 +66,9 @@ extends "clearance_client.gd"
 
 const _Measurement: Script = preload("panel_measurement.gd")
 const _ReferenceMeshes: Script = preload("reference_meshes.gd")
+## The rule that tells a designed contact from a penetration when an edge runs
+## ALONG a face instead of through it.
+const _ContactRuns: Script = preload("contact_runs.gd")
 
 ## Child of a MeshRoot holding the red crosses. Freed and rebuilt on every
 ## check, so a clean evaluation clears the previous one's markers.
@@ -869,6 +872,60 @@ func _probe_step(forward_mm: float, backward_mm: float) -> float:
 	return shorter * 0.5
 
 
+## Does the solid's edge a→b lie IN a face of `node_path`, rather than pass
+## through it? Cached per node in `lying`, which the caller keeps for one edge.
+func _runs_in_reference_face(
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	a: Vector3,
+	b: Vector3,
+	reference_name: String,
+	node_path: String,
+	lying: Dictionary
+) -> bool:
+	var key := reference_name + "\n" + node_path
+	if not lying.has(key):
+		lying[key] = _ContactRuns.runs_in_surface(a, b, TOUCH_EPSILON_MM,
+			_reference_hit.bind(gauge, state, reference_name, node_path))
+	return bool(lying[key])
+
+
+## One ray against ONE node of one reference, for the contact-run rule. The
+## first hit's position, or null. Scoped to that node so a neighbouring body
+## cannot vouch for a run.
+func _reference_hit(
+	from: Vector3,
+	to: Vector3,
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	reference_name: String,
+	node_path: String
+) -> Variant:
+	_casts += 1
+	var hit: Dictionary = gauge.call("run_now", state, "raycast", {
+		"from": from,
+		"to": to,
+		"mask": int(gauge.call("mask_for", reference_name)),
+		"reference": reference_name,
+		"node": node_path,
+	})
+	if not bool(hit.get("hit", false)):
+		return null
+	return hit.get("position", null)
+
+
+## The same, against the solid's own collider.
+func _solid_hit(
+	from: Vector3,
+	to: Vector3,
+	solid_state: PhysicsDirectSpaceState3D
+) -> Variant:
+	var hit := _solid_ray(solid_state, from, to)
+	if hit.is_empty():
+		return null
+	return hit.get("position", null)
+
+
 ## The same question the other way round. An undecidable parity keeps the
 ## crossing: a probe that could not be read must not quietly clear a part.
 func _penetrates_solid(
@@ -918,6 +975,10 @@ func _cross_into_references(
 		return out
 	var direction := (b - a) / length
 	var cursor := a
+	# Whether this edge lies IN a face of each node it crossed, asked once per
+	# node: the same edge can cross one node several times, and the answer is
+	# about the edge.
+	var lying: Dictionary = {}
 	for _step in range(MAX_CROSSINGS_PER_EDGE):
 		_casts += 1
 		var hit: Dictionary = gauge.call("run_now", state, "raycast", {
@@ -937,7 +998,9 @@ func _cross_into_references(
 		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
 				and _straddles(a, b, point, hit) \
 				and _penetrates_reference(gauge, state, point, direction, mask,
-					str(hit.get("reference", "")), str(hit.get("node", ""))):
+					str(hit.get("reference", "")), str(hit.get("node", ""))) \
+				and not _runs_in_reference_face(gauge, state, a, b,
+					str(hit.get("reference", "")), str(hit.get("node", "")), lying):
 			out.append({
 				"point": point,
 				"node": str(hit.get("node", "")),
@@ -1045,6 +1108,10 @@ func _cross_into_solid(
 		return out
 	var direction := (b - a) / length
 	var cursor := a
+	# Asked at most once per edge, and only when everything else has already
+	# called this a penetration: the rays it costs are wasted on an edge that
+	# was never going to be reported.
+	var lies_in_surface := -1
 	for _step in range(MAX_CROSSINGS_PER_EDGE):
 		var hit := _solid_ray(solid_state, cursor, b)
 		if hit.is_empty():
@@ -1054,6 +1121,13 @@ func _cross_into_solid(
 		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
 				and _straddles(a, b, point, hit) \
 				and _penetrates_solid(solid_state, point, direction):
+			if lies_in_surface < 0:
+				lies_in_surface = 1 if _ContactRuns.runs_in_surface(a, b,
+					TOUCH_EPSILON_MM, _solid_hit.bind(solid_state)) else 0
+			if lies_in_surface == 1:
+				# The whole edge is on the solid's surface: this is the rim of
+				# a designed flush fit, and nothing behind it is overlap.
+				return []
 			out.append(point)
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:

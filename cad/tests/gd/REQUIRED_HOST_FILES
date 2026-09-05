@@ -14,3 +14,9 @@ src/Scripts/Services/Plugins/PluginScenePanelBroker.gd
 #
 # The CAD panel scene itself pulls one host script in directly.
 src/Scripts/UI/Controls/responsive_container.gd
+#
+# test_mcp_boundary.gd drives the host's OWN panel-tool dispatcher, which is
+# what resolves an editor_name to a cad panel, plus the tab-title-keyed host
+# registry it falls back to.
+src/Scripts/Services/Plugins/PluginToolRegistry.gd
+src/Scripts/Services/Annotations/AnnotationHostRegistry.gd

@@ -312,7 +312,11 @@ test_interference.gd assertions=66
 # the waiver grades on the distance alone, advisory only) + 2 part changes
 # during await (mesh identity and local transform) + 2 quantization (the fixture's
 # 2^-15 mm step reported and subtracted; the far pose refused) + 3 isolation.
-test_clearance.gd assertions=50
+# + 4 eviction (the fixture is bigger than the stand-in worker's cache; the
+# first call in a session, which always passed; the SECOND call, which is
+# where a panel that assumes residency across calls fails; and the retry
+# carrying a path for every target rather than only the reported misses).
+test_clearance.gd assertions=54
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -432,3 +436,26 @@ test_geometry_contract.gd assertions=9
 # local bounds, part name, mounted, world bounds) + 4 ascii + 2 undeclared
 # units (the warning, and that it still mounts) + 1 declared units.
 test_stl_reference.gd assertions=17
+
+# A boss whose flat top is coplanar with the board's underside is a designed
+# contact, not interference. The fixture is a GRID-TRIANGULATED plate over a
+# cylinder rim — the box-on-a-floor flush fixture has two triangles a face and
+# no edge running over the rim, which is why it never caught this — and the
+# control is the same boss driven 0.1 mm into the plate.
+# 6 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# its underside edges really do cross the rim) + 1 collider built + 1 the
+# flush boss reports nothing + 2 the bitten boss reports the board's node and
+# a depth with it.
+test_flush_contact.gd assertions=6
+
+# Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
+# scenes under two tab titles, addressed through the host's own panel-tool
+# dispatcher; and a doc_write reply about a 45-node reference measured in
+# bytes.
+# 9 assertions = 4 addressing (two panels load; each registers its own host
+# under its own title; each host answers with its own panel; the dispatcher
+# answers a verb addressed by the tab title) + 5 size (the fixture's digest
+# really is thousands of characters; the reply fits 2 KB; what it carries is
+# 16 hex; that hash still tells two reference sets apart; and the panel still
+# holds the whole digest for the clearance join).
+test_mcp_boundary.gd assertions=9

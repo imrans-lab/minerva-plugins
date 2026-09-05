@@ -67,7 +67,15 @@ _HEADER = struct.Struct("<8sIII")
 #: build and does not change while the document is edited, so the cache is
 #: what makes the warm path milliseconds. Bounded: a document that re-poses
 #: its references repeatedly must not grow the worker without limit.
-MAX_CACHED_REFERENCES = 16
+#:
+#: THE BOUND HAS TO HOLD A WHOLE ASSEMBLY. One entry is one reference NODE,
+#: not one reference file, and a populated board is one node per component:
+#: at 16 the cache could not hold a single real board, so every call after
+#: the first evicted part of the set it was about to be asked for again. A
+#: node's tree is a few hundred triangles, so a few hundred of them is tens
+#: of megabytes at worst — the size of the board mesh the panel already
+#: holds — while a bound below the assembly costs the warm path entirely.
+MAX_CACHED_REFERENCES = 512
 
 #: Tessellations of the solid kept between calls, keyed by (source, tolerance,
 #: angular tolerance). Small, because the source changes on every keystroke.
@@ -535,9 +543,11 @@ def clearance(params: dict) -> dict:
                 "result": {
                     "checked": False,
                     "units": "mm",
-                    "reason": "the worker has no cached geometry for %d of the "
-                              "targets; upload the blobs and ask again"
-                              % len(missing),
+                    "reason": "the worker's blob cache holds no geometry for "
+                              "%d of the targets (a first sighting, or an "
+                              "eviction); send those targets again with their "
+                              "path and it will read them. Nothing has been "
+                              "found unreadable." % len(missing),
                     "missing_keys": missing,
                     "pairs": [],
                 },

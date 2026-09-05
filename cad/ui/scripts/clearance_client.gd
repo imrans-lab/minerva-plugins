@@ -405,29 +405,63 @@ func _unpin(held: PackedStringArray) -> void:
 ## is answered with the list rather than an error: write those blobs and ask
 ## once more. Only once — a second miss on freshly written files is a fault,
 ## not a race, and retrying forever would hide it.
+##
+## THE RETRY CARRIES EVERY TARGET'S PATH, not only the reported misses. The
+## worker's blob cache is bounded, so on a board with more nodes than that
+## bound a first call is answered with SOME of its keys missing while the
+## worker still holds the rest — and the uploads the retry sends evict exactly
+## those. A retry naming only the reported misses is then answered with a
+## fresh set of them, and the panel, having already spent its one retry, calls
+## that an unreadable file. Residency is never assumed across a call; the
+## batches were sized as if every target carried its path, so this cannot push
+## the request past the channel cap.
 func _ask_batch(panel: Object, head: Dictionary, batch: Array) -> Dictionary:
 	var reply := await _ask_worker(panel, _request(head, batch))
 	if reply.has("error"):
 		return reply
-	var missing: Array = reply.get("missing_keys", []) as Array
-	if missing.is_empty():
+	if (reply.get("missing_keys", []) as Array).is_empty():
 		return reply
-	if not _upload(missing):
+	var keys: Array = []
+	for entry in batch:
+		keys.append(str((entry as Dictionary)["key"]))
+	if not _upload(keys):
 		return {"error": "could not write the reference geometry to "
 			+ get_blob_dir() + " for the worker to read"}
-	# The batches were sized as if every target carried its path, so stamping
-	# them on cannot push this request past the cap.
 	for entry in batch:
 		var target: Dictionary = entry
-		if str(target["key"]) in missing:
-			target["path"] = _blob_path(str(target["key"]))
+		target["path"] = _blob_path(str(target["key"]))
 	reply = await _ask_worker(panel, _request(head, batch))
 	if reply.has("error"):
 		return reply
-	if not (reply.get("missing_keys", []) as Array).is_empty():
-		return {"error": "the worker could not read the reference geometry "
-			+ "this panel wrote to " + get_blob_dir()}
+	var still: Array = reply.get("missing_keys", []) as Array
+	if not still.is_empty():
+		return {"error": _second_miss_reason(still)}
 	return reply
+
+
+## Why a retry that carried a path for every target still came back missing
+## keys. The two causes send a reader to opposite places: a blob this panel
+## could not keep on disk is a filesystem fault HERE, while a blob that is
+## present and readable under exactly the name the request carried is the
+## worker declining geometry it was handed. Naming the wrong one costs an
+## afternoon looking for a file that is sitting right there.
+func _second_miss_reason(keys: Array) -> String:
+	var unreadable := 0
+	for key in keys:
+		var handle := FileAccess.open(_blob_path(str(key)), FileAccess.READ)
+		if handle == null:
+			unreadable += 1
+		else:
+			handle.close()
+	if unreadable > 0:
+		return ("%d of the %d reference blobs the worker asked for cannot be "
+			+ "read back from %s, so it was sent the path of a file that is "
+			+ "not there") % [unreadable, keys.size(), get_blob_dir()]
+	return ("the worker reports no geometry for %d reference nodes even "
+		+ "though the request carried the path of each one, and every one of "
+		+ "those files is present and readable in %s — its own blob cache "
+		+ "dropped them, rather than a file being unreadable") \
+		% [keys.size(), get_blob_dir()]
 
 
 func _request(head: Dictionary, targets: Array) -> Dictionary:

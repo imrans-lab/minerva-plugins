@@ -86,6 +86,11 @@ const REFERENCE_NAME := "board"
 ## shift changes the node's world triangles and so its digest, which is the
 ## whole point: the call that is waiting pinned the OLD one.
 const REPOSE_SHIFT := Vector3(7.0, -5.0, 3.0)
+## The reference the eviction check mounts, and what the stand-in worker will
+## hold of it. More nodes than entries is the whole fixture: 45 nodes into 16
+## is what the real board did.
+const EVICTION_NODES := 20
+const EVICTION_CACHE_BOUND := 16
 const NEAR_NODE := "Assembly/Near"
 const FAR_NODE := "Assembly/Far"
 
@@ -123,6 +128,12 @@ var _known_blobs: Dictionary = {}
 var _payloads: Array = []
 ## What the next call should answer with: "measure", "unbounded" or "error".
 var _mode: String = "measure"
+## How many blobs the stand-in worker keeps, 0 for all of them. The real
+## worker's cache is an LRU with a bound, and a bound is the whole reason a
+## key the panel believes uploaded can go missing again.
+var _cache_bound: int = 0
+## Upload order, oldest first — the eviction order when the bound binds.
+var _cache_order: Array = []
 ## The air the stand-in measures between the bars. The fixture's GAP_MM unless
 ## a check narrows it to sit just inside a requirement.
 var _gap_mm: float = GAP_MM
@@ -208,6 +219,7 @@ func _run() -> void:
 	await _check_parts_changed_during_await(panel, checks)
 	await _check_unbounded_tolerance(panel, checks)
 	await _check_quantization(panel, checks)
+	await _check_more_nodes_than_the_worker_caches(panel, checks)
 	_check_isolation(checks)
 	_clear_blob_dir()
 
@@ -704,6 +716,84 @@ func _interference_over(source: String, nodes: Array,
 	}}
 
 
+# ---------------------------------------------------------------------------
+# MORE NODES THAN THE WORKER CACHES — the iteration loop, twice
+# ---------------------------------------------------------------------------
+
+## A board is one cache entry per NODE, and the worker's cache is bounded. The
+## first call in a session always passes, whatever the bound: nothing is
+## cached, everything is uploaded, everything is answered. It is the SECOND
+## call that finds the worker holding some of the set and not the rest — and a
+## retry that names only the keys the worker reported missing uploads exactly
+## the blobs that evict the ones it kept, so the retry is answered with a
+## fresh set of misses and the panel, its one retry spent, calls that an
+## unreadable file.
+##
+## ORACLE: run the same check twice against a reference with more nodes than
+## the stand-in caches. A panel that assumes residency across calls fails the
+## second one — and only the second one, which is why a one-shot smoke test
+## never saw this.
+func _check_more_nodes_than_the_worker_caches(panel: Node, checks: RefCounted) -> void:
+	var bar: ArrayMesh = await _bake_bar(0.0)
+	var parts: Array = []
+	for index in range(EVICTION_NODES):
+		# One mesh, one local transform each: distinct world triangles, so
+		# distinct blobs and distinct cache entries, without baking twenty
+		# meshes. The drop keeps every node clear of the solid.
+		parts.append({
+			"mesh": bar,
+			"transform": Transform3D(Basis.IDENTITY,
+				Vector3(0.0, 0.0, -float(index))),
+			"node_path": "Assembly/Node%d" % index,
+			"node": "Assembly/Node%d" % index,
+		})
+	var box := _world_box(0.0).merge(_world_box(-float(EVICTION_NODES)))
+	panel.records = [{
+		"name": REFERENCE_NAME,
+		"pose": _pose,
+		"world_aabb": box,
+		"parts": parts,
+	}]
+	panel.source = SOURCE
+	panel.last_eval = _interference_over(SOURCE, [])
+
+	_mode = "measure"
+	_known_blobs.clear()
+	_cache_order.clear()
+	_cache_bound = EVICTION_CACHE_BOUND
+	_payloads.clear()
+	var first: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("eviction: the fixture really is bigger than the worker's cache — "
+			+ "%d nodes into %d entries" % [EVICTION_NODES, EVICTION_CACHE_BOUND],
+			_targets_of(0).size() == EVICTION_NODES
+				and EVICTION_NODES > EVICTION_CACHE_BOUND
+				and _known_blobs.size() == EVICTION_CACHE_BOUND,
+			"targets = %d, cached = %d" % [_targets_of(0).size(), _known_blobs.size()])
+	check("eviction: the first call in a session is answered, as it always was",
+			bool(first.get("checked", false)) and bool(first.get("pass", false)),
+			"report = %s" % str(first))
+
+	_payloads.clear()
+	var second: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("eviction: and so is the second, on a reference with more nodes "
+			+ "than the worker keeps",
+			bool(second.get("checked", false)) and bool(second.get("pass", false))
+				and (second.get("pairs", []) as Array).size() == EVICTION_NODES,
+			"report = %s" % str(second))
+	check("eviction: the retry carried a path for EVERY target, not only the "
+			+ "keys the worker named — the uploads evict the rest",
+			_payloads.size() >= 2
+				and _targets_of(1).size() == EVICTION_NODES
+				and _targets_of(1).all(func(t): return not str(
+					(t as Dictionary).get("path", "")).is_empty()),
+			"retry targets = %s" % str(_targets_of(1)))
+
+	_cache_bound = 0
+	_cache_order.clear()
+
+
 func _pair_for(report: Dictionary, node: String) -> Dictionary:
 	for entry in (report.get("pairs", []) as Array):
 		var pair: Dictionary = entry
@@ -1127,7 +1217,7 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		var key := str(target.get("key", ""))
 		var path := str(target.get("path", ""))
 		if not path.is_empty():
-			_known_blobs[key] = path
+			_remember_blob(key, path)
 		if not _known_blobs.has(key):
 			missing.append(key)
 	if not missing.is_empty():
@@ -1193,6 +1283,22 @@ func _worker_answer(args: Dictionary) -> Dictionary:
 		"cache": {"hits": pairs.size(), "misses": 0, "entries": pairs.size()},
 		"pairs": pairs,
 	}}
+
+
+## Take a blob into the stand-in's cache, evicting the oldest when the bound
+## binds. THE EVICTION HAPPENS AS THE UPLOADS ARRIVE, exactly as the real
+## worker's LRU does: a retry that carries only the keys the last reply named
+## missing evicts the ones it did not, and is answered with a fresh set.
+func _remember_blob(key: String, path: String) -> void:
+	if _known_blobs.has(key):
+		_cache_order.erase(key)
+	_known_blobs[key] = path
+	_cache_order.append(key)
+	if _cache_bound <= 0:
+		return
+	while _cache_order.size() > _cache_bound:
+		var evicted: String = str(_cache_order.pop_front())
+		_known_blobs.erase(evicted)
 
 
 class _StubPanel extends Node:
