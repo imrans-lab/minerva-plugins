@@ -55,8 +55,8 @@ except Exception:
 def _evaluate(params: dict) -> dict:
     """Run the full mcad pipeline (lex → parse → translate → tessellate).
 
-    Returns {ok: True, result: {shape_name, mesh: {vertices, faces}, edges,
-    references}}
+    Returns {ok: True, result: {shape_name, body_count, mesh: {vertices,
+    faces}, edges, references}}
     or {ok: False, error: {kind, message, ...}}.
 
     Maintains the module-level ``_last_program`` cache (design §5): if the
@@ -164,6 +164,7 @@ def _evaluate(params: dict) -> dict:
 
     result_dict: dict = {
         "shape_name": result.shape_name,
+        "body_count": result.body_count,
         "mesh": result.mesh,
         "edges": result.edges,
         "references": result.references,
@@ -202,7 +203,9 @@ def _list_edges(params: dict) -> dict:
     return {"ok": True, "result": response["result"]["edges"]}
 
 
-_SUPPORTED_EXPORT_FORMATS: frozenset[str] = frozenset({"stl", "step", "stp", "3mf"})
+_SUPPORTED_EXPORT_FORMATS: frozenset[str] = frozenset(
+    {"stl", "step", "stp", "3mf", "glb"}
+)
 
 
 def _export(params: dict) -> dict:
@@ -210,7 +213,9 @@ def _export(params: dict) -> dict:
 
     Params:
         source: str — full .mcad source text.
-        format: str — "stl" | "step" | "stp" | "3mf" (case-insensitive).
+        format: str — "stl" | "step" | "stp" | "3mf" | "glb" (case-insensitive).
+                A .glb is written in the glTF frame (metres, Y-up) so
+                mesh("that.glb") mounts it back at the same size and pose.
         path:   str — absolute or ~-prefixed path; relative paths resolve
                 against the user's home directory (delegated to evaluator).
 
@@ -369,10 +374,13 @@ def _validate(params: dict) -> dict:
     bridge layer. Only catastrophic Python failures (unhandled exceptions)
     propagate to the bridge as {ok: false, error: {kind: ...}}.
 
-    Per design §8.3 and the constraint that translator.py imports build123d
-    at module level (which requires OCCT), validate deliberately stops after
-    the parse phase.  Lex + parse catches all syntax errors and is OCCT-free,
-    which is exactly what makes validate cheap for the LLM inner loop.
+    Three phases, all OCCT-free so validate stays cheap enough for the LLM's
+    inner loop: lex, parse, then resolve every call against the builtin name
+    table (``mcad.builtins``). The third phase is what stops a clean bill of
+    health for source the translator will refuse — an OpenSCAD ``difference()``
+    or a diameter keyword parses perfectly well. Nothing is evaluated and no
+    geometry is built; translator.py, which imports build123d at module level,
+    is never imported.
     """
     source = params.get("source", "")
     if not isinstance(source, str):
@@ -404,7 +412,7 @@ def _validate(params: dict) -> dict:
         # Phase 2: parse
         try:
             parser = Parser(tokens)
-            parser.parse()
+            program = parser.parse()
         except ParseError as exc:
             tok = exc.token
             if tok is not None:
@@ -415,6 +423,13 @@ def _validate(params: dict) -> dict:
                 "ok": True,
                 "result": {"ok": False, "errors": errors, "warnings": warnings},
             }
+
+        # Phase 3: resolve names and keyword arguments against the builtin
+        # table. Parsing accepts any call shape, so this is the only phase that
+        # can say a name does not exist.
+        from mcad.builtins import resolve_names
+
+        errors.extend(resolve_names(program))
 
     except Exception as exc:
         return {

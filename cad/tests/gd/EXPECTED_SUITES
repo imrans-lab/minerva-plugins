@@ -418,3 +418,17 @@ test_fasteners.gd assertions=72
 # move + 1 distinct scales + 3 pose/mesh/local-transform guards + 1 material
 # run past a sibling.
 test_geometry_contract.gd assertions=9
+
+# STL as a reference format: a box written by the suite itself, twice — a
+# binary STL whose 80-byte header deliberately begins with "solid" (so a reader
+# that sniffs for that word instead of measuring the file's length finds no
+# triangles) and an ASCII STL of the same box. Pins the 12 triangles, the
+# millimetre/Z-up frame an STL gets (a loader applying the glTF frame is 1000x
+# small and Y-up), the part name (file stem for binary, the declared solid name
+# for ASCII), the pose, units="in" scaling the same file by 25.4, and the
+# warning an STL mounted without units= must carry — the file states no scale,
+# so the default is said out loud rather than guessed silently.
+# 17 assertions = 2 fixture + 2 format registration + 6 binary (load, count,
+# local bounds, part name, mounted, world bounds) + 4 ascii + 2 undeclared
+# units (the warning, and that it still mounts) + 1 declared units.
+test_stl_reference.gd assertions=17

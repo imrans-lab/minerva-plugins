@@ -69,10 +69,17 @@ class UnaryOp:
 
 @dataclass
 class FuncCall:
-    """Function / constructor call, e.g. ``rect(width, thickness)``."""
+    """Function / constructor call, e.g. ``rect(width, thickness)``.
+
+    ``line``/``col`` are the call name's position, carried so a diagnostic
+    about the call (an unknown name, a wrong keyword) can point at it without
+    re-lexing. They default to 0 for nodes a test builds by hand.
+    """
     name: str
     args: list = field(default_factory=list)
     kwargs: dict = field(default_factory=dict)
+    line: int = 0
+    col: int = 0
 
 
 @dataclass
@@ -124,10 +131,15 @@ class SketchBlock:
 
 @dataclass
 class Command:
-    """Single-line command: ``fillet beam, 2, r=4``."""
+    """Single-line command: ``fillet beam, 2, r=4``.
+
+    ``line``/``col`` are the command word's position; see FuncCall.
+    """
     name: str
     args: list = field(default_factory=list)
     kwargs: dict = field(default_factory=dict)
+    line: int = 0
+    col: int = 0
 
 
 @dataclass

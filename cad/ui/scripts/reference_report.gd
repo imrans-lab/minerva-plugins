@@ -145,9 +145,17 @@ func mount_under(
 				# The unit and up-axis conversion is baked into the cached
 				# parts, so what is left to apply per evaluation is the pose,
 				# nothing else.
+				# The worker always resolves units to a concrete value, so
+				# `units_declared` is the only thing that says whether the
+				# author chose it. Passing "" through when they did not lets the
+				# library apply — and, for a format that carries no units,
+				# report — its own default.
+				var declared_units := ""
+				if bool(reference.get("units_declared", true)):
+					declared_units = str(reference.get("units", ""))
 				loaded = _library.load_file(
 					str(resolved["path"]),
-					str(reference.get("units", "")),
+					declared_units,
 					str(reference.get("up", ""))
 				)
 				state["stamp"] = loaded.stamp

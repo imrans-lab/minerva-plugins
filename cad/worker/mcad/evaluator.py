@@ -32,9 +32,26 @@ class EvaluationResult:
     mesh: dict[str, list]
     edges: list[dict[str, Any]]
     shape_name: str
+    # Number of solid bodies in the rendered shape. 1 for an ordinary part;
+    # >1 when the last binding is a compound of separated bodies (two halves
+    # of an enclosure, say), which is otherwise invisible in the reply.
+    body_count: int = 0
     # Foreign mesh files the source referenced, each with its composed pose.
     # The worker never opens them; the panel resolves and loads them.
     references: list[dict[str, Any]] = field(default_factory=list)
+
+
+def body_count_of(shape: Any) -> int:
+    """Number of separate solid bodies in *shape*.
+
+    A shape that reports no solids (a bare sketch never reaches here) still
+    counts as one body so the reply never claims an empty part.
+    """
+    try:
+        count = len(shape.solids())
+    except Exception:
+        return 1
+    return count if count > 0 else 1
 
 
 class EvaluationError(Exception):
@@ -70,6 +87,7 @@ def evaluate_source(
                 mesh={"vertices": [], "faces": []},
                 edges=[],
                 shape_name="",
+                body_count=0,
                 references=references,
             )
         raise EvaluationError(
@@ -111,6 +129,7 @@ def evaluate_source(
         mesh=mesh,
         edges=edge_registry,
         shape_name=shape_name,
+        body_count=body_count_of(shape),
         references=references,
     )
 
@@ -131,7 +150,7 @@ def export_source(source: str, *, format: str, path: str) -> str:
         )
 
     export_format = format.strip().lower()
-    if export_format not in {"step", "stp", "stl", "3mf"}:
+    if export_format not in {"step", "stp", "stl", "3mf", "glb"}:
         raise ExportError(f"Unsupported export format: {format}")
 
     if path.strip() == "":
@@ -150,6 +169,6 @@ def export_source(source: str, *, format: str, path: str) -> str:
         requested_path = requested_path.with_suffix("." + export_format)
 
     try:
-        return export_shape(shape, str(requested_path))
+        return export_shape(shape, str(requested_path), node_name=shape_name or "part")
     except TranslatorError as exc:
         raise ExportError(str(exc)) from exc

@@ -151,6 +151,11 @@ class MeshReference:
     up: str
     matrix: Matrix = IDENTITY
     name: str | None = None
+    # Whether the source actually wrote units=. ``units`` is always resolved,
+    # so without this the panel cannot tell a declared "mm" from a format
+    # default — and a format that carries no units (STL) needs to say out loud
+    # that it guessed.
+    units_declared: bool = False
 
     @property
     def label(self) -> str:
@@ -214,6 +219,7 @@ class MeshReference:
             "name": self.name,
             "path": self.path,
             "units": self.units,
+            "units_declared": self.units_declared,
             "up": self.up,
             "matrix": [list(row) for row in self.matrix],
         }
@@ -277,4 +283,9 @@ def make_reference(
                 f"got '{up}'"
             )
 
-    return MeshReference(path=path, units=resolved_units, up=resolved_up)
+    return MeshReference(
+        path=path,
+        units=resolved_units,
+        up=resolved_up,
+        units_declared=units is not None,
+    )

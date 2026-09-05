@@ -418,7 +418,7 @@ class Parser:
             self._parse_bare_args(args, kwargs)
 
         self._expect(TT.NEWLINE, f"end of {cmd_name} command")
-        return Command(cmd_name, args, kwargs)
+        return Command(cmd_name, args, kwargs, cmd_tok.line, cmd_tok.col)
 
     def _parse_bare_args(self, args: list, kwargs: dict) -> None:
         """Parse a comma-separated bare argument list (no parens)."""
@@ -598,7 +598,7 @@ class Parser:
             args, kwargs = self._arg_list_inner()
             self._expect(TT.RPAREN, f"closing ')' for {name_tok.value}()")
 
-            node = FuncCall(name_tok.value, args, kwargs)
+            node = FuncCall(name_tok.value, args, kwargs, name_tok.line, name_tok.col)
 
             # Check for placement clause immediately after
             if self._at(TT.KW_CENTER):

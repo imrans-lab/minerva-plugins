@@ -198,7 +198,7 @@ var _mesh_import_ui: RefCounted = null
 ## accepted the DSL. Shape:
 ##   {status: "empty"|"pending"|"ok"|"error"|"cancelled"|"timeout",
 ##    error_kind?: String, error_message?: String, shape_name?: String,
-##    request_id?: String, ts?: int}
+##    body_count?: int, request_id?: String, ts?: int}
 ##
 ## "empty" = panel just opened, no DSL evaluated yet.
 ## "pending" = evaluate dispatched, awaiting worker reply.
@@ -1118,6 +1118,10 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_last_eval_result = {
 		"status": "ok",
 		"shape_name": str(eval_result.get("shape_name", "")),
+		# Separate solid bodies in that shape. A part written as two halves
+		# unions into a compound, which renders and measures as ONE shape but
+		# is two bodies — invisible from the vertex count alone.
+		"body_count": int(eval_result.get("body_count", 1)),
 		# The worker emits one [x, y, z] triple per vertex.  Count records, not
 		# scalar coordinates, so this agrees with minerva_cad_get_mesh_info.
 		"vertex_count": (mesh_data.get("vertices", []) as Array).size(),

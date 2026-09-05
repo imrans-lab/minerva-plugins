@@ -1,7 +1,7 @@
 // Package tools — cad.export tool registration and handler.
 //
 // Export the last 3D part produced by .mcad source to a file.
-// Format is one of: "stl" (binary), "step"/"stp" (AP214), "3mf".
+// Format is one of: "stl" (binary), "step"/"stp" (AP214), "3mf", "glb".
 //
 // Like cad.evaluate, the MCP tool name is the dotted "cad.export" (which is
 // also the IPC channel name). The worker method is the bare verb "export"
@@ -22,7 +22,10 @@ var Export = ToolSpec{
 		"Returns {path, bytes_written, format}. " +
 		"Supported formats: \"stl\" (binary STL — build123d default), " +
 		"\"step\" or \"stp\" (STEP AP214 — OCCT default schema), " +
-		"\"3mf\" (build123d Mesher). " +
+		"\"3mf\" (build123d Mesher), " +
+		"\"glb\" (minimal binary glTF, one node named after the part, written " +
+		"in the glTF frame of metres and Y-up so mesh(\"that.glb\") mounts it back " +
+		"at the same size and pose). " +
 		"Path is absolute as-is; ~-prefixed paths are expanded; bare relative " +
 		"paths resolve against the user's home directory. " +
 		"Errors are returned as data: kind=parse|translate (bad DSL), " +
@@ -31,7 +34,7 @@ var Export = ToolSpec{
 		"type": "object",
 		"properties": {
 			"source": {"type": "string", "description": ".mcad DSL source code"},
-			"format": {"type": "string", "enum": ["stl", "step", "stp", "3mf"], "description": "Output format. STL is binary."},
+			"format": {"type": "string", "enum": ["stl", "step", "stp", "3mf", "glb"], "description": "Output format. STL is binary. GLB is the only one mesh() can read back."},
 			"path": {"type": "string", "description": "Absolute, ~-prefixed, or bare relative path. Bare relative resolves against the user's home directory."}
 		},
 		"required": ["source", "format", "path"]

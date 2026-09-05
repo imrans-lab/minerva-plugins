@@ -13,9 +13,9 @@
 extends RefCounted
 
 ## Extensions the panel can actually load today (reference_meshes.gd reads
-## glTF). OBJ and STL join this list when their parsers land — the file dialog,
+## glTF and STL). OBJ joins this list when its parser lands — the file dialog,
 ## the import guard and the skill text all read it from here.
-const SUPPORTED_EXTENSIONS: Array = ["glb", "gltf"]
+const SUPPORTED_EXTENSIONS: Array = ["glb", "gltf", "stl"]
 
 ## Prefix for generated binding names. `ref1`, `ref2`, … — numbered from the
 ## first, because an unnumbered `ref` followed by `ref2` reads as if the second

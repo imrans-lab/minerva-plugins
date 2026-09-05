@@ -8,14 +8,18 @@
 ##              with a cheap mtime+size gate in front of it, so an unchanged
 ##              file costs an open and two queries rather than a hash of a
 ##              quarter of a gigabyte.
-##   READ       `read_parts_from_file` turns a glTF/GLB into the list of
-##              {mesh, transform} the rest of the library works in. It is the
-##              seam an OBJ or STL parser plugs into.
+##   READ       `read_parts_from_file` turns a glTF/GLB or an STL into the list
+##              of {mesh, transform} the rest of the library works in. The
+##              per-format half is all that differs; the ceilings, the frame
+##              conversion and the outlines are shared in `_convert_parts`, and
+##              that is the seam an OBJ parser plugs into.
 ##
 ## The frame maths, the ceilings and the status vocabulary belong to the
 ## library that owns this reader; it is held untyped because typing it would
 ## mean preloading reference_meshes.gd, which preloads this file.
 extends RefCounted
+
+const _StlReader := preload("stl_reader.gd")
 
 ## One file, read and converted into the CAD frame. Shared by every viewport
 ## and every pose that names it.
@@ -262,6 +266,21 @@ func read_parts_from_file(
 	units: String,
 	up: String
 ) -> Array:
+	var raw_parts: Array = []
+	if absolute_path.get_extension().to_lower() == "stl":
+		raw_parts = _StlReader.read_parts(absolute_path, loaded, _library)
+		if not loaded.error.is_empty():
+			return []
+	else:
+		raw_parts = _read_gltf_parts(absolute_path, loaded)
+		if not loaded.error.is_empty():
+			return []
+	return _convert_parts(absolute_path, loaded, units, up, raw_parts)
+
+
+## The glTF half of the read: append the document, walk its scene, and hand
+## back the parts in the FILE's frame.
+func _read_gltf_parts(absolute_path: String, loaded: LoadedFile) -> Array:
 	var document := GLTFDocument.new()
 	var state := GLTFState.new()
 	# Two distinct failure shapes, and a file that is not what its extension
@@ -282,10 +301,21 @@ func read_parts_from_file(
 		loaded.error = "glTF '%s' produced no scene" % absolute_path
 		return []
 
-	var raw_parts: Array = []
-	_collect_meshes(scene, Transform3D.IDENTITY, raw_parts, _file_names(state))
+	var gltf_parts: Array = []
+	_collect_meshes(scene, Transform3D.IDENTITY, gltf_parts, _file_names(state))
 	scene.free()
+	return gltf_parts
 
+
+## Size ceilings, frame conversion, bounds and outlines — the same for every
+## format, so both readers end here.
+func _convert_parts(
+	absolute_path: String,
+	loaded: LoadedFile,
+	units: String,
+	up: String,
+	raw_parts: Array
+) -> Array:
 	for raw in raw_parts:
 		loaded.triangle_count += _library.triangle_count_of(raw["mesh"] as Mesh)
 	if loaded.triangle_count > _library.max_triangles:

@@ -1,6 +1,7 @@
 // Package tools — mcad_validate tool registration and handler.
 //
-// Validate .mcad source: parse + translate without tessellation.
+// Validate .mcad source: lex, parse, and resolve every call against the
+// builtin name table. No geometry is built and OCCT is never loaded.
 // Returns structured errors with line/col suitable for the LLM inner loop.
 // See Go-python-bridge-design.md §8.3 for the bridge method spec.
 package tools
@@ -15,7 +16,7 @@ import (
 // Validate is the MCP tool spec for mcad_validate.
 var Validate = ToolSpec{
 	Name:        "mcad_validate",
-	Description: "Validate .mcad source: parse + translate, no tessellation. Returns structured errors with line/col for the LLM inner loop.",
+	Description: "Validate .mcad source: lex + parse + name resolution, no geometry and no tessellation. Catches syntax errors, unknown function names (an OpenSCAD difference()/union() habit) and keyword arguments the primitive does not take (cylinder(d=)); it does NOT catch errors that only appear when the geometry is built, such as an impossible fillet. Returns structured errors with line/col for the LLM inner loop.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {

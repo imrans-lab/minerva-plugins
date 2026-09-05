@@ -33,6 +33,7 @@ from build123d import (
     BuildPart,
     BuildSketch,
     Circle,
+    Compound,
     Cone,
     Cylinder,
     Ellipse,
@@ -151,6 +152,13 @@ class Translator:
         # to. A reference only reaches the eval result once it has a name, so
         # the panel always has something to address it by.
         self._references: dict[str, MeshReference] = {}
+        # Loft provenance: name -> (result shape, [(z, profile in the XY
+        # plane)]). Kept so ``shell`` can rebuild an inset inner loft when
+        # OCCT refuses to offset the ruled side faces. The shape is held so a
+        # name that has since been rebound cannot claim its predecessor's
+        # sections.
+        self._loft_sections: dict[str, tuple[Any, list[tuple[float, Any]]]] = {}
+        self._pending_loft: tuple[Any, list[tuple[float, Any]]] | None = None
 
     @property
     def env(self) -> dict[str, Any]:
@@ -290,6 +298,13 @@ class Translator:
             # A reference carries no profile vertices and no edges, so none of
             # the solid bookkeeping below applies to it.
             return
+
+        pending_loft = self._pending_loft
+        self._pending_loft = None
+        if pending_loft is not None and pending_loft[0] is value:
+            self._loft_sections[node.name] = pending_loft
+        else:
+            self._loft_sections.pop(node.name, None)
 
         # Track vertices from rect() or at-clause for edge numbering
         if self._last_shape_vertices:
@@ -516,9 +531,27 @@ class Translator:
             f"Cannot evaluate truthiness of {type(value).__name__}"
         )
 
+    @staticmethod
+    def _single_shape(result: Any) -> Any:
+        """Collapse a boolean result into one addressable shape.
+
+        OCCT hands a boolean on two Solids back as a ShapeList whenever the
+        operands stay disjoint (a union of separated bodies, a cut that splits
+        a body in two). A list is not a shape: it has no ``tessellate`` and no
+        ``volume``, so it would never become the render target and the panel
+        would keep showing whatever was bound before it. A Compound of the same
+        solids is one shape and keeps every body.
+        """
+        if not isinstance(result, (list, tuple)):
+            return result
+        shapes = list(result)
+        if len(shapes) == 1:
+            return shapes[0]
+        return Compound(shapes)
+
     def _csg_fuse(self, left: Any, right: Any) -> Any:
         """Boolean fuse (union) of two shapes."""
-        result = left.fuse(right)
+        result = self._single_shape(left.fuse(right))
         self._merge_profile_vertices(left, right)
         # Skip for 2D sketches: they have edges() but volume == 0, and the
         # extrude path will populate the proper registry once they go 3D.
@@ -530,7 +563,7 @@ class Translator:
 
     def _csg_cut(self, left: Any, right: Any) -> Any:
         """Boolean cut (difference) of two shapes."""
-        result = left.cut(right)
+        result = self._single_shape(left.cut(right))
         if self._is_solid(result):
             self._pending_edge_registry = self._rebuild_registry_preserving_ids(
                 left, result
@@ -1213,6 +1246,7 @@ class Translator:
 
         axis_name: str | None = None
         sections: list[tuple[float, Any]] = []
+        flat_sections: list[tuple[float, Any]] = []
         for section in node.sections:
             if not isinstance(section, LoftSection):
                 raise TranslatorError("invalid loft section")
@@ -1239,8 +1273,10 @@ class Translator:
                 Location((0.0, 0.0, float(position)), (0.0, 0.0, 0.0))
             )
             sections.append((float(position), moved_profile))
+            flat_sections.append((float(position), profile))
 
         sections.sort(key=lambda item: item[0])
+        flat_sections.sort(key=lambda item: item[0])
         ordered_profiles = [profile for _, profile in sections]
 
         try:
@@ -1249,6 +1285,9 @@ class Translator:
             raise TranslatorError(f"loft failed: {exc}") from exc
 
         self._pending_edge_registry = self._enumerate_edges(result)
+        # The unmoved profiles are what ``shell`` insets when OCCT cannot
+        # offset the lofted faces; offsetting is done in the XY plane.
+        self._pending_loft = (result, flat_sections)
         return result
 
     # ------------------------------------------------------------------
@@ -1422,10 +1461,92 @@ class Translator:
         try:
             result = bd_offset(shape, amount=-float(thickness))
         except Exception as exc:
-            raise TranslatorError(f"shell failed: {exc}") from exc
+            result = self._shell_by_inset(shape_name, shape, float(thickness), exc)
 
+        result = self._single_shape(result)
         self._bind_value(shape_name, result)
         self._logical_edge_registry[shape_name] = self._enumerate_edges(result)
+
+    def _shell_by_inset(
+        self, shape_name: str, shape: Any, thickness: float, cause: Exception
+    ) -> Any:
+        """Hollow *shape* by cutting an inset copy out of it.
+
+        OCCT's thick-solid offset fails routinely on a loft: the side faces are
+        ruled, and their inward offsets do not intersect cleanly at the sharp
+        section corners. For a solid we lofted ourselves the intent is
+        recoverable without OCCT offsetting anything — inset each 2D section by
+        the wall thickness, loft those, trim that inner body to leave a floor
+        and a ceiling of the same thickness, and subtract it. The walls are then
+        exactly *thickness* measured horizontally.
+
+        Anything else re-raises, naming the intent and the fallback the author
+        can write by hand.
+        """
+        provenance = self._loft_sections.get(shape_name)
+        if provenance is None or provenance[0] is not shape:
+            raise TranslatorError(
+                f"shell {shape_name}, {thickness}: OCCT could not offset the "
+                f"faces of {shape_name} inward by {thickness} mm ({cause}). "
+                "Ruled or sharply cornered faces defeat the offset. Fallback: "
+                "build a second body inset by the wall thickness and subtract "
+                "it — for a lofted body, repeat the loft with every section "
+                "inset and write "
+                f"{shape_name} = {shape_name} - inner."
+            ) from cause
+
+        sections = provenance[1]
+        z_low = sections[0][0]
+        z_high = sections[-1][0]
+        if z_high - z_low <= 2.0 * thickness:
+            raise TranslatorError(
+                f"shell {shape_name}, {thickness}: the body is only "
+                f"{z_high - z_low} mm tall, which leaves no cavity between a "
+                f"{thickness} mm floor and ceiling"
+            )
+
+        inner_profiles: list[Any] = []
+        for position, profile in sections:
+            try:
+                inset = bd_offset(profile, -thickness)
+            except Exception as exc:
+                raise TranslatorError(
+                    f"shell {shape_name}, {thickness}: the section at z="
+                    f"{position} cannot be inset by {thickness} mm ({exc}) — "
+                    "it is narrower than two wall thicknesses"
+                ) from exc
+            inner_profiles.append(
+                inset.moved(Location((0.0, 0.0, float(position)), (0.0, 0.0, 0.0)))
+            )
+
+        try:
+            cavity = bd_loft(inner_profiles)
+        except Exception as exc:
+            raise TranslatorError(
+                f"shell {shape_name}, {thickness}: the inset sections could "
+                f"not be lofted into a cavity ({exc})"
+            ) from exc
+
+        # Trim the cavity in Z so the shell keeps a floor and a ceiling; the
+        # inset loft otherwise runs the full height and opens both ends.
+        box = shape.bounding_box()
+        span = max(box.max.X - box.min.X, box.max.Y - box.min.Y) + 4.0 * thickness
+        keep = Box(
+            span,
+            span,
+            (z_high - thickness) - (z_low + thickness),
+            align=(Align.CENTER, Align.CENTER, Align.MIN),
+        ).moved(
+            Location(
+                (
+                    (box.min.X + box.max.X) / 2.0,
+                    (box.min.Y + box.max.Y) / 2.0,
+                    z_low + thickness,
+                ),
+                (0.0, 0.0, 0.0),
+            )
+        )
+        return shape.cut(self._single_shape(cavity.intersect(keep)))
 
     def _refresh_registry_after_topology_change(
         self, shape_name: str, result: Any
@@ -2220,12 +2341,20 @@ def _resolve_export_path(raw: str) -> Path:
     return Path.home() / p
 
 
-def export_shape(shape: Any, filename: str) -> str:
-    """Export a Build123d shape to the path indicated by *filename*."""
+def export_shape(shape: Any, filename: str, node_name: str = "part") -> str:
+    """Export a Build123d shape to the path indicated by *filename*.
+
+    ``node_name`` names the single node in a .glb; the other formats have no
+    place to put it.
+    """
     output_path = Path(filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     ext = output_path.suffix.lower()
+    if ext == ".glb":
+        from .glb_export import write_glb
+
+        return write_glb(shape, str(output_path), node_name=node_name)
     if ext in (".step", ".stp"):
         export_step(shape, str(output_path))
     elif ext == ".stl":

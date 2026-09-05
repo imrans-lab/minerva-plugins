@@ -21,7 +21,7 @@
 ## byte (five characters for a GLB). Nothing here takes text: the only input is
 ## a path.
 ##
-## glTF/GLB only for now. The seam an OBJ or STL parser plugs into is
+## glTF/GLB and STL. The seam another format plugs into is
 ## reference_reader.gd's `read_parts_from_file`, which owes the rest of the
 ## library a list of {mesh, transform} in the FILE's own frame.
 ##
@@ -50,6 +50,10 @@ const LAYER_NODE_NAME: String = _Report.LAYER_NODE_NAME
 const SHADED_NODE_NAME: String = _Report.SHADED_NODE_NAME
 const OUTLINE_NODE_NAME: String = _Report.OUTLINE_NODE_NAME
 const MARKER_NODE_NAME: String = _Report.MARKER_NODE_NAME
+
+## Reference formats the panel can read. glTF states its own frame; STL states
+## nothing, which is why an STL without units= is loaded AND warned about.
+const SUPPORTED_EXTENSIONS: Array = ["glb", "gltf", "stl"]
 
 ## Millimetres per unit, for the `units` a reference may declare.
 const UNIT_SCALE_MM: Dictionary = {
@@ -223,10 +227,12 @@ func load_file(absolute_path: String, units: String = "", up: String = "") -> Lo
 				"reference file not found: %s" % absolute_path)
 
 	var extension := absolute_path.get_extension().to_lower()
-	if extension != "glb" and extension != "gltf":
+	if not SUPPORTED_EXTENSIONS.has(extension):
 		return _fail(key, loaded, started, STATUS_UNSUPPORTED,
-				"unsupported reference format '.%s' (glTF/GLB only): %s" % [
-					extension, absolute_path,
+				"unsupported reference format '.%s' (%s only): %s" % [
+					extension,
+					"/".join(PackedStringArray(SUPPORTED_EXTENSIONS)),
+					absolute_path,
 				])
 
 	loaded.byte_size = _Reader._byte_size(absolute_path)
@@ -240,6 +246,15 @@ func load_file(absolute_path: String, units: String = "", up: String = "") -> Lo
 					max_file_bytes,
 					absolute_path,
 				])
+
+	# STL carries no units and no up-axis, so a source that says nothing is
+	# taking the default rather than reading the file. That guess is a silent
+	# 25.4x when the file was authored in inches, so it is said out loud.
+	if extension == "stl" and units.strip_edges().is_empty():
+		loaded.warning = (
+			"STL carries no units: '%s' was read as millimetres. "
+			+ "Pass units= on the mesh() line to say otherwise."
+		) % absolute_path
 
 	var file_parts := _reader.read_parts_from_file(absolute_path, loaded, units, up)
 	if not loaded.error.is_empty():
