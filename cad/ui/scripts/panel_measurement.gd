@@ -73,7 +73,7 @@ func _compute_digest() -> String:
 			str(record.get("stamp", "")),
 			str(record.get("units", "")),
 			str(record.get("up", "")),
-			str(record.get("pose", Transform3D.IDENTITY)),
+			_MeshGauge.transform_identity(record.get("pose", Transform3D.IDENTITY)),
 		])
 	return "|".join(parts)
 

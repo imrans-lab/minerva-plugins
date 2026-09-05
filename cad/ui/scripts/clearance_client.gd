@@ -197,9 +197,8 @@ func release() -> void:
 ## `tolerance_bounded` false means the worker could not read the curvature of
 ## every face and its tessellation tolerance is a guess, not a promise. A gap
 ## measured on such a mesh has no error bar, so the verdict is `pass` false
-## with `pass_reason` saying why — unless the caller states
-## accept_unbounded_tolerance, in which case every pair is REGRADED on min_mm
-## against required_mm (the worker's own verdict had subtracted the guess),
+## with `pass_reason` saying why. With accept_unbounded_tolerance, every pair
+## gets an advisory_pass on min_mm against required_mm; pass stays false.
 ## `bound_mm` becomes min_mm, and the reply carries `tolerance_waived` with a
 ## `waiver` saying the bar was set aside; the flag still travels.
 ##
@@ -330,6 +329,9 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 		report["references_moved"] = is_instance_valid(panel) \
 			and panel.has_method("get_reference_state") \
 			and not _same_poses(records, panel.get_reference_state() as Array)
+		if report["references_moved"]:
+			report["pass"] = false
+			report["pass_reason"] = "reference geometry changed while clearance was measured; ask again"
 	return report
 
 
@@ -347,14 +349,16 @@ func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
 		if not bool(reply.get("checked", false)):
 			return _no_clearance(str(reply.get("reason", "the clearance check "
 				+ "did not run and gave no reason")))
+		if not reply.get("tolerance_bounded") is bool:
+			return _no_clearance("worker clearance reply has missing or invalid tolerance_bounded metadata")
 		envelope = reply
 		raw_pairs.append_array(reply.get("pairs", []) as Array)
 	envelope.merge(bar, true)
 	return _clearance_report(envelope, raw_pairs, records, buried, accept_unbounded)
 
 
-## Do `live` records still carry the names and poses `snapshot` copied? Names,
-## count and pose are compared; the meshes are shared and never rewritten.
+## Compare names, exact poses, mesh identities and each part's local transform.
+## Imported meshes are immutable resources; reloading replaces their identities.
 func _same_poses(snapshot: Array, live: Array) -> bool:
 	if live.size() != snapshot.size():
 		return false
@@ -365,9 +369,10 @@ func _same_poses(snapshot: Array, live: Array) -> bool:
 			return false
 		var before: Transform3D = was.get("pose", Transform3D.IDENTITY)
 		var after: Transform3D = now.get("pose", Transform3D.IDENTITY)
-		if not before.is_equal_approx(after):
+		if before != after:
 			return false
-	return true
+	return _MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(snapshot)) \
+		== _MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(live))
 
 
 ## Hold the digests of every target in `batches` against the sweep, and hand
@@ -566,14 +571,10 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		pairs.append(pair)
 	pairs.sort_custom(func(a, b): return float((a as Dictionary)["min_mm"]) \
 		< float((b as Dictionary)["min_mm"]))
-	# A worker that does not say whether its tolerance is a bound is one that
-	# always derived it from a measured radius; only an explicit false is a
-	# guess. A guess has no error bar to subtract, so the distances cannot be
-	# judged against required_mm unless the caller has said that will do —
-	# and when the caller has, the grade IS the distance: the worker's own
-	# pass already subtracted the guess, so it is regraded here on min_mm
-	# against required_mm, and each pair says that is what it was graded on.
-	var bounded := bool(envelope.get("tolerance_bounded", true))
+	# Only an explicit boolean true establishes a bound. An opt-in can expose
+	# a distance-only advisory grade, but cannot make an unknown bound certain.
+	var bounded: bool = envelope.get("tolerance_bounded") is bool \
+		and envelope.get("tolerance_bounded", false) == true
 	var required := float(envelope.get("required_mm", 0.0))
 	var waived := not bounded and accept_unbounded
 	if waived:
@@ -598,7 +599,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		pass_reason = "the tessellation tolerance is not guaranteed for " \
 			+ "unrecognised curved faces in the solid, so the measured " \
 			+ "distances carry no error bar; pass accept_unbounded_tolerance " \
-			+ "to judge them on the distances alone"
+			+ "to request advisory grades on the distances alone; pass remains false"
 	# THE JOIN IS EVIDENCE THE VERDICT NEEDS. A report that could not decide
 	# the containment question — measured against reference poses or
 	# colliders that have since changed — leaves "is any node buried"
@@ -632,10 +633,21 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 					+ "float32 quantization of the reference vertices (%s mm)") \
 					% quantization
 				verdict = false
+	# An estimate can inform a decision but cannot certify the requested gap.
+	if not bounded:
+		verdict = false
+		if pass_reason.is_empty():
+			pass_reason = "tessellation tolerance is not guaranteed; distances are advisory only"
+		for entry in pairs:
+			var pair: Dictionary = entry
+			pair["advisory_pass"] = bool(pair["pass"]) and waived \
+				and bool(buried.get("fresh", false)) and not bool(buried.get("stale", false))
+			pair["pass"] = false
 	var report := {
 		"checked": true,
 		"units": "mm",
 		"pass": verdict,
+		"advisory": not bounded,
 		"required_mm": float(envelope.get("required_mm", 0.0)),
 		"tessellation_tolerance_mm":
 			float(envelope.get("tessellation_tolerance_mm", 0.0)),
@@ -796,6 +808,8 @@ func clearance_status_line(report: Dictionary) -> String:
 		return ""
 	var first: Dictionary = pairs[0]
 	var verdict := "clears" if bool(report.get("pass", false)) else "TOO CLOSE"
+	if bool(report.get("advisory", false)):
+		verdict = "ADVISORY"
 	var tolerance := "tessellated to %.3f mm" \
 		% float(report.get("tessellation_tolerance_mm", 0.0))
 	if not bool(report.get("tolerance_bounded", true)):
@@ -871,8 +885,7 @@ func _blob_for(part: Dictionary) -> Dictionary:
 	var cached: Dictionary = _blobs.get(slot, {}) as Dictionary
 	if not cached.is_empty() \
 			and int(cached.get("mesh_id", 0)) == int(mesh.get_instance_id()) \
-			and (cached.get("xform", Transform3D.IDENTITY) as Transform3D) \
-				.is_equal_approx(xform) \
+			and (cached.get("xform", Transform3D.IDENTITY) as Transform3D) == xform \
 			and _bodies.has(str(cached.get("digest", ""))):
 		return _bodies[str(cached["digest"])] as Dictionary
 	var blob := _extract_blob(mesh, xform)

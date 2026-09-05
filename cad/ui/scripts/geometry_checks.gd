@@ -808,9 +808,9 @@ func _penetrates_reference(
 	# above it — sees no exit ahead, keeps the ceiling, and the backward probe
 	# jumps clean through the plate.
 	var forward := _run_along(gauge, state, point, direction, mask,
-		reference_name)
+		reference_name, node_path)
 	var backward := _run_along(gauge, state, point, -direction, mask,
-		reference_name)
+		reference_name, node_path)
 	var step := _probe_step(forward, backward)
 	if step <= 0.0:
 		# Too thin to place the parity sphere in on one side or the other.
@@ -837,7 +837,8 @@ func _run_along(
 	point: Vector3,
 	direction: Vector3,
 	mask: int,
-	reference_name: String
+	reference_name: String,
+	node_path: String
 ) -> float:
 	_casts += 1
 	var exit: Dictionary = gauge.call("run_now", state, "raycast", {
@@ -845,6 +846,7 @@ func _run_along(
 		"to": point + direction * PENETRATION_PROBE_MM,
 		"mask": mask,
 		"reference": reference_name,
+		"node": node_path,
 	})
 	if not bool(exit.get("hit", false)):
 		return PENETRATION_PROBE_MM

@@ -324,6 +324,11 @@ static func bodies_from_records(records: Array) -> Array:
 ## stripped exactly as build() strips it, so a caller naming nodes bare and
 ## one naming them by path digest alike. Bodies build() would skip (no mesh)
 ## are skipped here too.
+static func transform_identity(xform: Transform3D) -> String:
+	# Variant encoding preserves every numeric component; display strings round.
+	return var_to_bytes(xform).hex_encode()
+
+
 static func bodies_digest(bodies: Array) -> String:
 	var parts := PackedStringArray()
 	for entry in bodies:
@@ -339,7 +344,7 @@ static func bodies_digest(bodies: Array) -> String:
 			node_name = node_name.substr(reference.length() + 1)
 		var xform: Transform3D = body.get("transform", Transform3D.IDENTITY)
 		parts.append("%s@%s@%d@%s" % [reference, node_name,
-			mesh.get_instance_id(), str(xform)])
+			mesh.get_instance_id(), transform_identity(xform)])
 	return "|".join(parts)
 
 
@@ -466,7 +471,16 @@ func _job_module(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictiona
 func _job_raycast(state: PhysicsDirectSpaceState3D, args: Dictionary) -> Dictionary:
 	var from: Vector3 = args.get("from", Vector3.ZERO)
 	var to: Vector3 = args.get("to", Vector3.ZERO)
-	var hit := _ray(state, from, to)
+	var excluded: Array[RID] = []
+	var node_filter := str(args.get("node", ""))
+	var reference_filter := str(args.get("reference", ""))
+	if not node_filter.is_empty():
+		for body in _bodies:
+			if str(_body_nodes.get(body.get_instance_id(), "")) != node_filter \
+					or (not reference_filter.is_empty() \
+						and str(_body_references.get(body.get_instance_id(), "")) != reference_filter):
+				excluded.append(body.get_rid())
+	var hit := _ray(state, from, to, excluded)
 	if hit.is_empty():
 		return {"hit": false}
 	return {

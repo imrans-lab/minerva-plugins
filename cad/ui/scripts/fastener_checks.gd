@@ -291,6 +291,8 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# the worker, and holding the solid's collider across it would stall every
 	# evaluation for its duration.
 	var features := await _solid_cylinders(panel, str(document.get("source", "")), screw)
+	if features.has("error"):
+		return _nothing(str(features["error"]))
 
 	# The references were rebuilt while this check waited for the worker, so
 	# the geometry the rays would meet is no longer the geometry the question
@@ -933,9 +935,20 @@ func _fan_clear(
 							crossing.get("normal", Vector3.ZERO), expected):
 						continue
 					if t >= floor_from_t:
-						if floor_t == null or t < float(floor_t):
-							floor_t = t
-						continue
+						var offset_from_axis: Vector3 = crossing["point"] - expected["point"]
+						var axis: Vector3 = expected["axis"]
+						var radial := (offset_from_axis - axis * offset_from_axis.dot(axis)).length()
+						var normal: Vector3 = crossing.get("normal", Vector3.ZERO)
+						# The far mouth outside the pilot radius is thread leaving
+						# the boss, not a floor across the bore's interior.
+						if radial >= float(expected["radius"]) - BORE_WALL_TOLERANCE_MM:
+							if absf(t - float(expected["bore_exit_t"])) <= BORE_WALL_TOLERANCE_MM \
+									and absf(normal.dot(direction)) > 0.5:
+								continue
+						elif normal.dot(direction) < -0.5:
+							if floor_t == null or t < float(floor_t):
+								floor_t = t
+							continue
 			else:
 				continue
 			if obstructions.size() < MAX_OBSTRUCTIONS:
@@ -1023,9 +1036,9 @@ func _is_the_bore_wall(point: Vector3, normal: Vector3, expected: Dictionary) ->
 ## The collider generation is not enough on its own: poses are what every
 ## local coordinate is converted through, and a panel that re-poses without
 ## rebuilding — or rebuilds a moment later — would otherwise let a reply mix
-## the frames of two documents. Names, count and pose are compared; the meshes
-## themselves are the generation's business. `snapshot` is the copy `check`
-## took, so a pose rewritten in place shows up as a difference here.
+## the frames of two documents. Names, exact poses, mesh identities and local
+## transforms are compared even before the lazy collider rebuild. `snapshot`
+## is the copy `check` took; imported meshes are immutable resources.
 func _same_poses(snapshot: Array, panel: Object) -> bool:
 	if not panel.has_method("get_reference_state"):
 		return true
@@ -1039,9 +1052,10 @@ func _same_poses(snapshot: Array, panel: Object) -> bool:
 			return false
 		var before: Transform3D = was.get("pose", Transform3D.IDENTITY)
 		var after: Transform3D = now.get("pose", Transform3D.IDENTITY)
-		if not before.is_equal_approx(after):
+		if before != after:
 			return false
-	return true
+	return _MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(snapshot)) \
+		== _MeshGauge.bodies_digest(_MeshGauge.bodies_from_records(current))
 
 
 ## A reply about a document that moved under it. `checked` false with a reason
@@ -1300,10 +1314,19 @@ func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dicti
 		# round: a bore whose mouth is cut by a tilted face has thread on one
 		# side and air on the other above the low point of that trim, and a
 		# screw only engages where the whole circumference is there.
-		var wall_length := float(cylinder.get("extent_max_mm",
-			cylinder.get("length_mm", 0.0)))
-		var full_start := float(cylinder.get("full_start_mm", 0.0))
-		var full_end := float(cylinder.get("full_end_mm", wall_length))
+		for field in ["extent_max_mm", "full_start_mm", "full_end_mm", "extent_full_bound_mm"]:
+			var value: Variant = cylinder.get(field)
+			if not (value is float or value is int) or not is_finite(float(value)):
+				return {"cylinders": [], "error": "B-Rep extent metadata missing or invalid: %s" % field}
+		for field in ["extent_exact", "extent_full_bounded"]:
+			if not cylinder.get(field) is bool:
+				return {"cylinders": [], "error": "B-Rep extent metadata missing or invalid: %s" % field}
+		var wall_length := float(cylinder["extent_max_mm"])
+		var full_start := float(cylinder["full_start_mm"])
+		var full_end := float(cylinder["full_end_mm"])
+		if wall_length < 0.0 or full_start < 0.0 or full_end < full_start \
+				or full_end > wall_length or float(cylinder["extent_full_bound_mm"]) < 0.0:
+			return {"cylinders": [], "error": "B-Rep extent metadata has invalid bounds"}
 		out.append({
 			"source": "b_rep",
 			"dia_mm": float(cylinder.get("dia_mm", 0.0)),
@@ -1327,8 +1350,8 @@ func _solid_cylinders(panel: Object, source: String, screw: Dictionary) -> Dicti
 			# walked at a fixed pitch, so the error bar above is a floor and
 			# not a bound. Either one makes engagement unknown rather than
 			# measured, and unknown is not a pass.
-			"extent_exact": bool(cylinder.get("extent_exact", true)),
-			"extent_bounded": bool(cylinder.get("extent_full_bounded", true)),
+			"extent_exact": cylinder["extent_exact"],
+			"extent_bounded": cylinder["extent_full_bounded"],
 		})
 	return {"cylinders": out, "partial": partial}
 

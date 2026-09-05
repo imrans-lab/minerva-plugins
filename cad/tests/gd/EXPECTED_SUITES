@@ -285,12 +285,12 @@ test_interference.gd assertions=66
 # through the copy it took, never the live record — and says the references
 # moved. And a tolerance the worker could only GUESS (a curved face it cannot
 # read) is not a bound: the check fails with a reason and a status line that
-# says so, and passes on the distances alone only when the caller accepts an
-# unbounded tolerance — and then it really is the distances alone: the
+# says so. Accepting an unbounded tolerance requests an advisory grade only;
+# both the overall and per-pair pass remain false. The
 # stand-in grades like the worker (min_mm less the effective tolerance
 # against required_mm), so a 0.505 mm gap under a 0.5 mm requirement with a
 # 0.01 mm estimate fails in the worker's reply, and the opt-in regrades it on
-# min_mm with the reply saying the bar was waived.
+# min_mm as advisory_pass with the reply saying the bar was waived.
 # And the join is only as fresh as the poses and colliders it was measured
 # at: a clean report about THIS source whose reference has since been moved
 # (pose rewritten in place) or whose colliders have since been rebuilt is
@@ -303,15 +303,16 @@ test_interference.gd assertions=66
 # coordinate is reported, stated in the bound and subtracted from bound_mm
 # (2^-15 mm at the fixture's 300 mm), and a pose 1e8 mm out — 8 mm steps —
 # is refused with the number rather than measured to a bar it cannot keep.
-# 48 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
+# 50 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
 # fixture and the byte-measured refusal) + 4 refusal + 8 buried (+2: the
 # undecidable node and the undecidable reference; +1: a stale report — moved
 # poses or rebuilt colliders — is not a pass; +1: no report about this source
 # is not a pass either) + 2 pin/blob across a re-pose (+1: the corrupted
 # same-length file) + 1 pose rewritten in place + 2 unbounded tolerance (+1:
-# the waiver grades on the distance alone) + 2 quantization (the fixture's
+# the waiver grades on the distance alone, advisory only) + 2 part changes
+# during await (mesh identity and local transform) + 2 quantization (the fixture's
 # 2^-15 mm step reported and subtracted; the far pose refused) + 3 isolation.
-test_clearance.gd assertions=48
+test_clearance.gd assertions=50
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -406,4 +407,8 @@ test_clearance.gd assertions=48
 # references used to be, +1: a pose rewritten in place under a waiting check
 # is stale as well, +1: a check that starts with the colliders already
 # behind the poses is stale or rebuilds, never a mixed epoch).
-test_fasteners.gd assertions=63
+test_fasteners.gd assertions=72
+
+# Missing/malformed bounds, exact cache and pose identity, mesh replacement,
+# and a material-run ray that must exclude a nearer sibling node.
+test_geometry_contract.gd assertions=8

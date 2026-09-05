@@ -344,6 +344,9 @@ func _run() -> void:
 	await _check_bridge_over_the_seat(module, panel)
 	await _check_shelf_in_bore(module, panel)
 	await _check_bottoming(module, panel, report)
+	await _check_through_bore(module, panel)
+	await _check_missing_extent_metadata(module, panel)
+	await _check_parts_changed_during_await(module, panel)
 	await _check_pose_snapshot(module, panel)
 
 
@@ -1406,6 +1409,78 @@ func _check_shelf_in_bore(module: RefCounted, panel: Node) -> void:
 ## reading as ample and the path otherwise clear. The row must say bottoming,
 ## with the tip, the floor and the 0.2 mm excess — and the main report's 8 mm
 ## screw in the same bore must not.
+func _check_missing_extent_metadata(module: RefCounted, panel: Node) -> void:
+	var original: Array = panel.bores
+	for field in ["extent_max_mm", "full_start_mm", "full_end_mm", "extent_full_bound_mm", "extent_exact", "extent_full_bounded"]:
+		panel.bores = original.duplicate(true)
+		panel.bores[0].erase(field)
+		var report: Dictionary = await module.check(panel, {"screw":_screw(), "holes":_holes()})
+		check("missing " + field + " refuses instead of guessing engagement",
+			not bool(report.get("checked", true)) and str(report.get("reason", "")).contains(field), str(report))
+	panel.bores = original
+
+
+func _check_parts_changed_during_await(module: RefCounted, panel: Node) -> void:
+	for kind in ["transform", "mesh"]:
+		var part: Dictionary = panel.checks_records[0]["parts"][0]
+		var original: Variant = part[kind]
+		var epoch: int = panel.gauge.get_generation()
+		var replies: Array = []
+		_collect_check(module, panel, replies)
+		if kind == "transform":
+			part[kind] = Transform3D(Basis.IDENTITY, Vector3(10,0,0))
+		else:
+			var replacement := ArrayMesh.new()
+			replacement.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, BoxMesh.new().get_mesh_arrays())
+			part[kind] = replacement
+		for _frame in range(600):
+			if not replies.is_empty():
+				break
+			await process_frame
+		part[kind] = original
+		var report: Dictionary = replies[0] if not replies.is_empty() else {}
+		check("mid-flight part " + kind + " change is stale before collider rebuild",
+			bool(report.get("stale", false)) and not bool(report.get("checked", true))
+			and panel.gauge.get_generation() == epoch, str(report))
+
+
+func _check_through_bore(module: RefCounted, panel: Node) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+	var combiner = CSGCombiner3D.new()
+	var holder = CSGCombiner3D.new()
+	holder.transform = _boss_transform(HOLE_XY[0], 0.0, 0.0)
+	var boss = CSGCylinder3D.new()
+	boss.radius = BOSS_OUTER_R
+	boss.height = BORE_LENGTH
+	boss.sides = 64
+	boss.rotation.x = PI * 0.5
+	boss.position.z = (BORE_TOP_Z + BORE_BOTTOM_Z) * 0.5
+	holder.add_child(boss)
+	var cutter = CSGCylinder3D.new()
+	cutter.radius = BORE_R
+	cutter.height = BORE_LENGTH + 4.0
+	cutter.sides = 64
+	cutter.rotation.x = PI * 0.5
+	cutter.position.z = boss.position.z
+	cutter.operation = CSGShape3D.OPERATION_SUBTRACTION
+	holder.add_child(cutter)
+	combiner.add_child(holder)
+	root.add_child(combiner)
+	await process_frame
+	panel.mesh_data = _mesh_data(combiner.bake_static_mesh(), _pose)
+	combiner.queue_free()
+	panel.bores = [(_bores[0] as Dictionary).duplicate(true)]
+	panel.bores[0].extent_max_mm = BORE_LENGTH
+	panel.bores[0].extent_exact = true
+	panel.bores[0].extent_full_bounded = true
+	var report: Dictionary = await module.check(panel, {"screw":{"dia_mm":SCREW_DIA, "length_mm":BOTTOMING_SCREW_LENGTH, "head_dia_mm":HEAD_DIA}, "holes":_holes()})
+	var row = _row_at(report, HOLE_XY[0])
+	check("through pilot bore: oversize screw exits without bottoming", not bool(row.get("bottoming", true)) and bool(row.get("pass", false)), str(row))
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+
+
 func _check_bottoming(module: RefCounted, panel: Node, main: Dictionary) -> void:
 	var original_mesh: Dictionary = panel.mesh_data
 	var original_bores: Array = panel.bores
@@ -1720,6 +1795,8 @@ func _brep_bores() -> Array:
 			"faces": 2,
 			"area_mm2": TAU * BORE_R * BORE_LENGTH,
 			"extent_full_exact": false,
+			"extent_exact": true,
+			"extent_full_bounded": true,
 			"extent_full_bound_mm": EXTENT_BOUND_MM,
 		})
 	out.append(_brep_groove())

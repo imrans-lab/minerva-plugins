@@ -205,6 +205,7 @@ func _run() -> void:
 	await _check_buried(panel, checks)
 	await _check_pin_across_a_repose(panel, checks)
 	await _check_pose_rewritten_in_place(panel, checks)
+	await _check_parts_changed_during_await(panel, checks)
 	await _check_unbounded_tolerance(panel, checks)
 	await _check_quantization(panel, checks)
 	_check_isolation(checks)
@@ -919,6 +920,32 @@ func _check_pose_rewritten_in_place(panel: Node, checks: RefCounted) -> void:
 ## with no error bar cannot be judged against required_mm, so the panel's
 ## verdict is FALSE with a reason, unless the caller has opted in to judging
 ## the distances alone — and then the flag still travels.
+func _check_parts_changed_during_await(panel: Node, checks: RefCounted) -> void:
+	for kind in ["transform", "mesh"]:
+		_payloads.clear()
+		_known_blobs.clear()
+		var part: Dictionary = panel.records[0]["parts"][0]
+		var original: Variant = part[kind]
+		var replies: Array = []
+		_collect_clearance(checks, panel, replies)
+		if kind == "transform":
+			part[kind] = Transform3D(Basis.IDENTITY, Vector3(10,0,0))
+		else:
+			var replacement := ArrayMesh.new()
+			replacement.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, BoxMesh.new().get_mesh_arrays())
+			part[kind] = replacement
+		for _frame in range(600):
+			if not replies.is_empty():
+				break
+			await process_frame
+		part[kind] = original
+		var report: Dictionary = replies[0] if not replies.is_empty() else {}
+		check("mid-flight part " + kind + " change prevents clearance passing",
+			bool(report.get("references_moved", false)) and not bool(report.get("pass", true)), str(report))
+	_payloads.clear()
+	_known_blobs.clear()
+
+
 func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 	_mode = "unbounded"
 	var doubted: Dictionary = await checks.check_clearance(panel,
@@ -929,7 +956,7 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 	var line: String = checks.clearance_status_line(doubted)
 	check("tolerance: a worker reply whose tolerance is not a bound fails "
 			+ "the check with a reason and a status line that says so, "
-			+ "passes only when the caller accepts an unbounded tolerance, "
+			+ "is advisory even when the caller accepts an unbounded tolerance, "
 			+ "and carries the flag and the requested tolerance either way",
 			bool(doubted.get("checked", false))
 				and not bool(doubted.get("pass", true))
@@ -941,21 +968,23 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 					- GeometryChecks.CLEARANCE_TOLERANCE_MM) < 1.0e-9
 				and line.contains("NOT guaranteed")
 				and bool(accepted.get("checked", false))
-				and bool(accepted.get("pass", false))
-				and not accepted.has("pass_reason")
+				and not bool(accepted.get("pass", true))
+				and bool(accepted.get("advisory", false))
+				and accepted.has("pass_reason")
 				and not bool(accepted.get("tolerance_bounded", true))
 				and (doubted.get("pairs", []) as Array).size() == 2
-				and bool(((doubted.get("pairs", []) as Array)[0] as Dictionary)
-					.get("pass", false)),
+				and not bool(((doubted.get("pairs", []) as Array)[0] as Dictionary)
+					.get("pass", true)),
 			"doubted = %s, accepted = %s, line = %s" % [str(doubted),
 				str(accepted.get("pass")), line])
 
-	# WAIVING THE BAR MEANS GRADING ON THE DISTANCE. The worker's own verdict
+	# The opt-in grades the distance as advisory; it cannot certify a pass.
+	# The worker's own verdict
 	# subtracts its estimate whether or not that estimate is a bound, so a
 	# 0.505 mm gap against a 0.5 mm requirement with a 0.01 mm estimate FAILS
 	# in the worker's reply (0.495 < 0.5). The caller who accepts an unbounded
 	# tolerance has asked for the distances alone, so the panel regrades every
-	# pair on min_mm against required_mm — 0.505 >= 0.5 passes — and the reply
+	# pair on min_mm against required_mm — 0.505 >= 0.5 is advisory_pass — and the reply
 	# says the bar was waived and what each pair was graded on. Without the
 	# opt-in the same reply fails with the reason.
 	_mode = "unbounded"
@@ -972,9 +1001,9 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 	# bound_mm carries the float32 quantization of the vertices too (a
 	# thirty-thousandth of a millimetre at this pose), waived bar or not.
 	var quantum := float(refused.get("quantization_mm", 0.0))
-	check("tolerance: with the bar waived the grade IS the distance — a "
+	check("tolerance: with the bar waived the advisory grade IS the distance — a "
 			+ "0.505 mm gap, 0.5 mm required, 0.01 mm estimated fails on the "
-			+ "worker's subtraction, passes on min_mm alone under the "
+			+ "worker's subtraction, is advisory on min_mm alone under the "
 			+ "opt-in with the reply saying the bar was waived, and fails "
 			+ "with the reason without it",
 			absf(float(refused.get("tessellation_tolerance_mm", 0.0)) - 0.01) < 1.0e-9
@@ -984,13 +1013,15 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 				and not bool(refused.get("pass", true))
 				and str(refused.get("pass_reason", "")).contains("not guaranteed")
 				and not refused.has("tolerance_waived")
-				and bool(waived_near.get("pass", false))
+				and not bool(waived_near.get("pass", true))
+				and bool(waived_near.get("advisory_pass", false))
 				and absf(float(waived_near.get("bound_mm", 0.0)) - (0.505 - quantum)) < 1.0e-9
 				and str(waived_near.get("graded_on", "")).contains("waived")
-				and bool(waived.get("pass", false))
+				and not bool(waived.get("pass", true))
+				and bool(waived.get("advisory", false))
 				and bool(waived.get("tolerance_waived", false))
 				and str(waived.get("waiver", "")).contains("WAIVED")
-				and not waived.has("pass_reason")
+				and waived.has("pass_reason")
 				and not bool(waived.get("tolerance_bounded", true)),
 			"refused = %s, waived = %s" % [str(refused_near), str(waived)])
 
