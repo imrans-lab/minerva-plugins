@@ -1,7 +1,7 @@
 {
   "id": "cad",
   "name": "CAD",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
   "backend": {
