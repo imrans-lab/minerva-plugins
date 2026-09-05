@@ -873,7 +873,7 @@ func _probe_step(forward_mm: float, backward_mm: float) -> float:
 
 
 ## The ray the contact-run rule needs for one crossing, chosen by the
-## reference\nnode key the crossing was recorded under.
+## the "<reference>\n<node>" key (newline-joined) the crossing was recorded under.
 func _reference_ray_for(
 	key: String,
 	gauge: Object,
