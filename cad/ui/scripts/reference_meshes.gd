@@ -51,8 +51,11 @@ const SHADED_NODE_NAME: String = _Report.SHADED_NODE_NAME
 const OUTLINE_NODE_NAME: String = _Report.OUTLINE_NODE_NAME
 const MARKER_NODE_NAME: String = _Report.MARKER_NODE_NAME
 
-## Reference formats the panel can read. glTF states its own frame; STL states
-## nothing, which is why an STL without units= is loaded AND warned about.
+## Reference formats the panel can read, and the ONE list of them: the file
+## dialog, the import guard and the skill text all read it from here through
+## mesh_import.gd. glTF states its own frame; STL states nothing, which is why
+## an STL without units= is loaded AND warned about. OBJ joins the list when
+## its parser lands.
 const SUPPORTED_EXTENSIONS: Array = ["glb", "gltf", "stl"]
 
 ## Millimetres per unit, for the `units` a reference may declare.

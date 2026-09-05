@@ -10,17 +10,25 @@ extends SceneTree
 ## budget runs out. No file, no error, nothing to retry differently.
 ##
 ## So the host reads the render target on the call itself and keeps the booking
-## only as the refresh. This suite runs where the failure is total — Godot's
-## dummy renderer never draws a frame, as the premise below asserts — with the
-## scene the report was made about underneath: a solid over ten thousand
-## vertices and a reference over a hundred thousand triangles, mounted in the
-## pane being captured.
+## only as the refresh.
 ##
-## ORACLE. What would show this wrong: open the written PNG. It is the pane, at
-## the pane's size, not a blank or a stale picture of an empty scene. Headless
-## has no rasteriser, so the pixels here come from a stand-in render target —
-## what is under test is that the host ASKS for them without a drawn frame, and
-## that the answer reaches a file inside a budget.
+## THE CAUSE IS DEMONSTRATED, NOT ASSERTED. The suite books a one-shot on
+## RenderingServer.frame_post_draw, spins the main loop, and shows the shot was
+## never fired — which is precisely what the old path was waiting on.
+##
+## THE SCENE IS THE REAL ONE. The solid is built by the panel's own mesh
+## display into a live ArrayMesh and counted off the MeshInstance3D in the
+## tree, not off the dictionary it was fed; the reference is a procedural
+## hundred-thousand-triangle soup mounted in the pane being captured. Both are
+## measured after mounting, so a scene that quietly failed to build cannot pass
+## for the one the report was made about.
+##
+## ORACLE. What would show this wrong: open the written PNGs. They are the
+## pane, at the pane's own SubViewport size, not blank and not a stale picture
+## of an empty scene. Headless has no rasteriser, so the PIXELS come from a
+## stand-in render target sized from that same SubViewport — what is under test
+## is that the host ASKS for them without a drawn frame, twice, and that both
+## answers reach a file inside the budget.
 ##
 ## Run:
 ##   cd <minerva>/src && godot --headless -s res://../../minerva-plugins/cad/tests/gd/test_snapshot_capture.gd
@@ -38,7 +46,13 @@ const MIN_REFERENCE_TRIANGLES := 100000
 ## is seconds; the capture is one step of it.
 const CAPTURE_BUDGET_MS := 2000
 
-const PANE_SIZE := Vector2i(400, 300)
+## How long the loop is spun while nothing draws, looking for the frame the old
+## path was waiting on.
+const IDLE_FRAMES := 60
+
+## Filled from the pane's own SubViewport, so the stand-in target is the size
+## the real one would be.
+var _pane_size: Vector2i = Vector2i(400, 300)
 
 var _pass: int = 0
 var _fail: int = 0
@@ -101,10 +115,23 @@ func _run() -> void:
 	await process_frame
 	await process_frame
 
-	check("premise: this run draws no frames at all — the state in which the "
-			+ "old path waited for a frame_post_draw that never came",
-			Engine.get_frames_drawn() == 0,
-			"frames drawn = %d" % Engine.get_frames_drawn())
+	# The cause, shown rather than asserted: book the very signal the old path
+	# waited on and spin the loop. A drawn frame would fire it; nothing here
+	# ever draws one, which is exactly the state of an occluded or minimised
+	# window, and the caller's await had no timeout.
+	var fired := [false]
+	var one_shot := func() -> void: fired[0] = true
+	RenderingServer.frame_post_draw.connect(one_shot, CONNECT_ONE_SHOT)
+	for _idle in range(IDLE_FRAMES):
+		await process_frame
+	if RenderingServer.frame_post_draw.is_connected(one_shot):
+		RenderingServer.frame_post_draw.disconnect(one_shot)
+	check("the signal the old path awaited never fires: %d main-loop " % IDLE_FRAMES
+			+ "iterations produced no frame_post_draw and no drawn frame, so "
+			+ "the await it hung on had nothing to resume it",
+			not bool(fired[0]) and Engine.get_frames_drawn() == 0,
+			"fired = %s, frames drawn = %d" % [
+				str(fired[0]), Engine.get_frames_drawn()])
 
 	# ── The scene the report was made about ───────────────────────────────
 	var mesh_data := _solid(112)
@@ -120,18 +147,29 @@ func _run() -> void:
 	iso_root.add_child(reference_instance)
 	await process_frame
 
-	check("fixture: a solid of %d+ vertices is displayed with a %d+ triangle "
-			% [MIN_SOLID_VERTICES, MIN_REFERENCE_TRIANGLES]
-			+ "reference mounted in the pane being captured",
+	# Counted off the live scene, not off the dictionary that was fed in: the
+	# mesh display builds its own ArrayMesh, and a build that silently failed
+	# would leave the pane empty while the input still looked big.
+	var iso_viewport: SubViewport = panel.get_node("%s/IsoView/SubViewport" % GRID)
+	_pane_size = iso_viewport.size
+	var built_vertices := _mounted_vertices(iso_root)
+	var mounted_triangles := _mounted_triangles(iso_root)
+	check("fixture: the pane being captured really holds the scene — a built "
+			+ "ArrayMesh of %d+ vertices " % MIN_SOLID_VERTICES
+			+ "and a %d+ triangle reference, " % MIN_REFERENCE_TRIANGLES
+			+ "measured off the MeshInstance3Ds in the tree",
 			vertex_count >= MIN_SOLID_VERTICES
-				and _triangles(reference) >= MIN_REFERENCE_TRIANGLES,
-			"solid %d vertices, reference %d triangles" % [
-				vertex_count, _triangles(reference)])
+				and built_vertices >= MIN_SOLID_VERTICES
+				and mounted_triangles >= MIN_REFERENCE_TRIANGLES
+				and _pane_size.x > 0 and _pane_size.y > 0,
+			"fed %d vertices, mounted %d vertices / %d triangles in a %s pane"
+				% [vertex_count, built_vertices, mounted_triangles,
+					str(_pane_size)])
 
 	# ── The capture ───────────────────────────────────────────────────────
 	var host = panel.get_annotation_host()
 	var stand_in := _StandInViewport.new()
-	stand_in.texture = _StandInTexture.new(PANE_SIZE)
+	stand_in.texture = _StandInTexture.new(_pane_size)
 	root.add_child(stand_in)
 	host.set_viewport_for("iso", stand_in)
 
@@ -141,7 +179,7 @@ func _run() -> void:
 
 	check("the FIRST call answers with an image although no frame has been "
 			+ "drawn — the booking is a refresh, not the only way to an answer",
-			image != null and image.get_size() == PANE_SIZE,
+			image != null and image.get_size() == _pane_size,
 			"got %s after %d ms" % [
 				"null" if image == null else str(image.get_size()), elapsed])
 	check("within %d ms, so the caller's budget is spent on the picture rather "
@@ -151,11 +189,19 @@ func _run() -> void:
 			+ "older capture of another scene",
 			stand_in.texture.reads == 1, "reads = %d" % stand_in.texture.reads)
 
+	var second_started := Time.get_ticks_msec()
 	var second: Image = host.render_view_to_image("iso", Rect2())
-	check("a second call in the same frame is served from the cache — the "
-			+ "read-back is not repeated per caller",
-			second != null and stand_in.texture.reads == 1,
-			"reads = %d" % stand_in.texture.reads)
+	var second_elapsed := Time.get_ticks_msec() - second_started
+	check("a second call is served from the cache while the frame counter has "
+			+ "not moved — the read-back is not repeated per caller — and is "
+			+ "no slower than the first",
+			second != null and stand_in.texture.reads == 1
+				and second_elapsed <= elapsed
+				and second_elapsed < CAPTURE_BUDGET_MS,
+			"reads = %d, first %d ms, second %d ms" % [
+				stand_in.texture.reads, elapsed, second_elapsed])
+	print("    capture: first %d ms, second %d ms, pane %s"
+		% [elapsed, second_elapsed, str(_pane_size)])
 
 	# ── The file the verb promises ────────────────────────────────────────
 	var path := "user://cad_snapshots/test_snapshot_capture.png"
@@ -173,10 +219,28 @@ func _run() -> void:
 	var written := FileAccess.open(path, FileAccess.READ)
 	check("and the file really is a PNG of the pane, not an empty one",
 			written != null and written.get_length() > 100
-				and Image.load_from_file(path).get_size() == PANE_SIZE,
+				and Image.load_from_file(path).get_size() == _pane_size,
 			"size on disk = %d" % (written.get_length() if written != null else -1))
 	if written != null:
 		written.close()
+
+	# The verb is called twice in a session more often than once — the item's
+	# own trap — so the SECOND snapshot has to reach disk too, in budget.
+	var second_path := "user://cad_snapshots/test_snapshot_capture_2.png"
+	if FileAccess.file_exists(second_path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(second_path))
+	var second_write := Time.get_ticks_msec()
+	var second_saved: Error = second.save_png(second_path)
+	var second_write_ms := Time.get_ticks_msec() - second_write
+	check("the second snapshot lands on disk as well, inside the same budget "
+			+ "— two calls in one session both produce a file",
+			second_saved == OK and FileAccess.file_exists(second_path)
+				and FileAccess.file_exists(path)
+				and (second_write_ms + second_elapsed) < CAPTURE_BUDGET_MS
+				and Image.load_from_file(second_path).get_size() == _pane_size,
+			"err=%d, %d ms encode" % [second_saved, second_write_ms])
+	print("    encode: first %d ms, second %d ms"
+		% [write_ms, second_write_ms])
 
 	# ── The honest refusal ────────────────────────────────────────────────
 	var unknown: Image = host.render_view_to_image("no_such_pane", Rect2())
@@ -248,3 +312,46 @@ func _reference_mesh(triangle_count: int) -> ArrayMesh:
 func _triangles(mesh: ArrayMesh) -> int:
 	var arrays: Array = mesh.surface_get_arrays(0)
 	return int((arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3)
+
+
+## Vertices of every ArrayMesh mounted under `node`, less the reference soup:
+## what the pane is actually asked to draw for the solid.
+func _mounted_vertices(node: Node) -> int:
+	var total := 0
+	for instance in _mesh_instances(node):
+		var mesh: ArrayMesh = instance.mesh as ArrayMesh
+		if mesh == null:
+			continue
+		for surface in range(mesh.get_surface_count()):
+			if mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+				continue
+			var arrays: Array = mesh.surface_get_arrays(surface)
+			var count: int = (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+			if count < MIN_REFERENCE_TRIANGLES * 3:
+				total += count
+	return total
+
+
+## Triangles of the largest ArrayMesh mounted under `node` — the reference.
+func _mounted_triangles(node: Node) -> int:
+	var most := 0
+	for instance in _mesh_instances(node):
+		var mesh: ArrayMesh = instance.mesh as ArrayMesh
+		if mesh == null:
+			continue
+		for surface in range(mesh.get_surface_count()):
+			if mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+				continue
+			var arrays: Array = mesh.surface_get_arrays(surface)
+			most = maxi(most,
+				int((arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3))
+	return most
+
+
+func _mesh_instances(node: Node) -> Array[MeshInstance3D]:
+	var out: Array[MeshInstance3D] = []
+	if node is MeshInstance3D:
+		out.append(node as MeshInstance3D)
+	for child in node.get_children():
+		out.append_array(_mesh_instances(child))
+	return out

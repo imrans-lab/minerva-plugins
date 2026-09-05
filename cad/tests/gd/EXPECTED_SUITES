@@ -432,23 +432,31 @@ test_geometry_contract.gd assertions=9
 # for ASCII), the pose, units="in" scaling the same file by 25.4, and the
 # warning an STL mounted without units= must carry — the file states no scale,
 # so the default is said out loud rather than guessed silently.
-# 17 assertions = 2 fixture + 2 format registration + 6 binary (load, count,
-# local bounds, part name, mounted, world bounds) + 4 ascii + 2 undeclared
-# units (the warning, and that it still mounts) + 1 declared units.
-test_stl_reference.gd assertions=17
+# 18 assertions = 2 fixture + 3 format registration (the picker offers .stl;
+# the loader accepts it; and the two lists are the SAME list — the loader owns
+# it and the picker re-exports it, so a format cannot be offered but unreadable
+# or readable but unofferable) + 6 binary (load, count, local bounds, part
+# name, mounted, world bounds) + 4 ascii + 2 undeclared units (the warning, and
+# that it still mounts) + 1 declared units.
+test_stl_reference.gd assertions=18
 
 # A boss whose flat top is coplanar with the board's underside is a designed
 # contact, not interference. The fixture is a GRID-TRIANGULATED plate over a
 # cylinder rim — the box-on-a-floor flush fixture has two triangles a face and
 # no edge running over the rim, which is why it never caught this — and the
-# control is the same boss driven 0.1 mm into the plate.
-# 7 assertions = 2 fixture premises (the plate really is grid-triangulated;
-# its underside edges really do cross the rim) + 1 collider built + 1 the
-# flush boss reports nothing + 2 the bitten boss reports the board's node and,
-# because no single edge spans a tenth-of-a-millimetre disc, no depth with it
-# + 1 the depth control (the same boss driven clean through the board reports
-# the board's thickness).
-test_flush_contact.gd assertions=7
+# control is the same boss driven 0.5 mm into the plate. The coplanarity is
+# asked twice, exact and float-noisy (1e-5 mm, inside TOUCH_EPSILON_MM): only
+# the noisy one reproduces the report, because exact coplanarity is already
+# cleared by the per-crossing parity tests, so it is the noisy one that turns
+# red when the contact-run gate is removed.
+# 8 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# its underside edges really do cross the rim) + 1 collider built + 2 the
+# flush boss reports nothing, exactly coplanar and a hundred-thousandth of a
+# millimetre out + 2 the bitten boss reports the board's node and, because no
+# single edge spans a half-millimetre disc, no depth with it + 1 the depth
+# control (the same boss driven clean through the board reports the board's
+# thickness).
+test_flush_contact.gd assertions=8
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool
@@ -479,14 +487,19 @@ test_pane_projection.gd assertions=13
 
 # A snapshot of a big scene comes back, or says why. Run where no frame is ever
 # drawn — the dummy renderer, which is the same condition as an occluded window
-# — with a 12k-vertex solid and a 132k-triangle reference in the pane.
-# 10 assertions = 2 premises (no frames drawn; the scene really is that size) +
-# 4 the capture (the first call answers with no drawn frame; inside the budget;
-# it read the target rather than replaying an older capture; a second call in
-# the same frame is cached) + 2 the file (a PNG lands on disk in budget; it is
-# the pane's size, not empty) + 2 the refusals (an unknown pane and a real pane
-# that has drawn nothing both answer null instead of hanging).
-test_snapshot_capture.gd assertions=10
+# — with a 12,769-vertex solid built by the panel's own mesh display and a
+# 100k-triangle procedural reference mounted in the pane, both counted off the
+# MeshInstance3Ds in the tree rather than off the data they were fed.
+# 11 assertions = 2 shown premises (the frame_post_draw one-shot the old path
+# awaited never fires over 60 main-loop iterations; the pane really holds a
+# scene of that size, at its SubViewport's own size) + 4 the capture (the first
+# call answers with no drawn frame; inside the budget; it read the target
+# rather than replaying an older capture; the second call is cached and no
+# slower) + 3 the files (a PNG lands on disk in budget; it is the pane's size,
+# not empty; the SECOND snapshot lands too, which is the trap the item names)
+# + 2 the refusals (an unknown pane and a real pane that has drawn nothing both
+# answer null instead of hanging).
+test_snapshot_capture.gd assertions=11
 
 # A zero-area triangle carries connectivity, not a plane. Counting normals to
 # decide "this edge bounds the surface" made both neighbours of a sliver look

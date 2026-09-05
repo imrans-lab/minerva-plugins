@@ -872,22 +872,17 @@ func _probe_step(forward_mm: float, backward_mm: float) -> float:
 	return shorter * 0.5
 
 
-## Does the solid's edge a→b lie IN a face of `node_path`, rather than pass
-## through it? Cached per node in `lying`, which the caller keeps for one edge.
-func _runs_in_reference_face(
+## The ray the contact-run rule needs for one crossing, chosen by the
+## reference\nnode key the crossing was recorded under.
+func _reference_ray_for(
+	key: String,
 	gauge: Object,
-	state: PhysicsDirectSpaceState3D,
-	a: Vector3,
-	b: Vector3,
-	reference_name: String,
-	node_path: String,
-	lying: Dictionary
-) -> bool:
-	var key := reference_name + "\n" + node_path
-	if not lying.has(key):
-		lying[key] = _ContactRuns.runs_in_surface(a, b, TOUCH_EPSILON_MM,
-			_reference_hit.bind(gauge, state, reference_name, node_path))
-	return bool(lying[key])
+	state: PhysicsDirectSpaceState3D
+) -> Callable:
+	var parts := key.split("\n")
+	var reference_name: String = parts[0] if parts.size() > 0 else ""
+	var node_path: String = parts[1] if parts.size() > 1 else ""
+	return _reference_hit.bind(gauge, state, reference_name, node_path)
 
 
 ## One ray against ONE node of one reference, for the contact-run rule. The
@@ -912,6 +907,21 @@ func _reference_hit(
 	if not bool(hit.get("hit", false)):
 		return null
 	return hit.get("position", null)
+
+
+## Drop the crossings that only bound a run LYING IN a face of the body they
+## crossed — a designed flush fit whose shared rim this edge cut. The rays it
+## costs are only spent on crossings everything else has already called a
+## penetration.
+func _drop_contact_runs(a: Vector3, b: Vector3, crossings: Array,
+		ray_for: Callable) -> Array:
+	if crossings.is_empty():
+		return crossings
+	var out: Array = []
+	for kept in _ContactRuns.penetrating_indices(a, b, crossings,
+			TOUCH_EPSILON_MM, ray_for):
+		out.append(crossings[kept])
+	return out
 
 
 ## The same, against the solid's own collider.
@@ -975,10 +985,6 @@ func _cross_into_references(
 		return out
 	var direction := (b - a) / length
 	var cursor := a
-	# Whether this edge lies IN a face of each node it crossed, asked once per
-	# node: the same edge can cross one node several times, and the answer is
-	# about the edge.
-	var lying: Dictionary = {}
 	for _step in range(MAX_CROSSINGS_PER_EDGE):
 		_casts += 1
 		var hit: Dictionary = gauge.call("run_now", state, "raycast", {
@@ -988,7 +994,7 @@ func _cross_into_references(
 			"reference": reference_scope,
 		})
 		if not bool(hit.get("hit", false)):
-			return out
+			break
 		var point: Vector3 = hit.get("position", Vector3.ZERO)
 		var travelled := a.distance_to(point)
 		# A crossing at either end of the edge is a touch, not a penetration:
@@ -998,20 +1004,21 @@ func _cross_into_references(
 		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
 				and _straddles(a, b, point, hit) \
 				and _penetrates_reference(gauge, state, point, direction, mask,
-					str(hit.get("reference", "")), str(hit.get("node", ""))) \
-				and not _runs_in_reference_face(gauge, state, a, b,
-					str(hit.get("reference", "")), str(hit.get("node", "")), lying):
+					str(hit.get("reference", "")), str(hit.get("node", ""))):
 			out.append({
 				"point": point,
+				"key": str(hit.get("reference", "")) + "\n"
+					+ str(hit.get("node", "")),
 				"node": str(hit.get("node", "")),
 				"reference": str(hit.get("reference", "")),
 				"distance": travelled,
 			})
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:
-			return out
+			break
 		cursor = next
-	return out
+	return _drop_contact_runs(a, b, out,
+		_reference_ray_for.bind(gauge, state))
 
 
 # ---------------------------------------------------------------------------
@@ -1108,31 +1115,27 @@ func _cross_into_solid(
 		return out
 	var direction := (b - a) / length
 	var cursor := a
-	# Asked at most once per edge, and only when everything else has already
-	# called this a penetration: the rays it costs are wasted on an edge that
-	# was never going to be reported.
-	var lies_in_surface := -1
+	var candidates: Array = []
 	for _step in range(MAX_CROSSINGS_PER_EDGE):
 		var hit := _solid_ray(solid_state, cursor, b)
 		if hit.is_empty():
-			return out
+			break
 		var point: Vector3 = hit.get("position", Vector3.ZERO)
 		var travelled := a.distance_to(point)
 		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
 				and _straddles(a, b, point, hit) \
 				and _penetrates_solid(solid_state, point, direction):
-			if lies_in_surface < 0:
-				lies_in_surface = 1 if _ContactRuns.runs_in_surface(a, b,
-					TOUCH_EPSILON_MM, _solid_hit.bind(solid_state)) else 0
-			if lies_in_surface == 1:
-				# The whole edge is on the solid's surface: this is the rim of
-				# a designed flush fit, and nothing behind it is overlap.
-				return []
-			out.append(point)
+			candidates.append({"point": point, "key": ""})
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:
-			return out
+			break
 		cursor = next
+	# Only one body here, so every crossing carries the same key and the ray is
+	# the same one whichever crossing asks for it.
+	for kept in _ContactRuns.penetrating_indices(a, b, candidates,
+			TOUCH_EPSILON_MM,
+			func(_key: String) -> Callable: return _solid_hit.bind(solid_state)):
+		out.append((candidates[kept] as Dictionary).get("point", Vector3.ZERO))
 	return out
 
 

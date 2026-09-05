@@ -12,10 +12,14 @@
 ## the source it should write.
 extends RefCounted
 
-## Extensions the panel can actually load today (reference_meshes.gd reads
-## glTF and STL). OBJ joins this list when its parser lands — the file dialog,
-## the import guard and the skill text all read it from here.
-const SUPPORTED_EXTENSIONS: Array = ["glb", "gltf", "stl"]
+const _ReferenceMeshes := preload("reference_meshes.gd")
+
+## Extensions the panel can actually load, re-exported from the module that
+## does the loading. There is exactly one list, and it lives with the reader:
+## a format that the dialog offers but nothing can parse is worse than one that
+## is loadable and unpickable, and keeping a second copy here guarantees one of
+## the two eventually.
+const SUPPORTED_EXTENSIONS: Array = _ReferenceMeshes.SUPPORTED_EXTENSIONS
 
 ## Prefix for generated binding names. `ref1`, `ref2`, … — numbered from the
 ## first, because an unnumbered `ref` followed by `ref2` reads as if the second

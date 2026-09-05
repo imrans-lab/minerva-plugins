@@ -24,7 +24,16 @@ extends SceneTree
 ## boss, so its edges cross the rim; that is the property the old fixture
 ## lacked and the one this suite asserts before it asserts anything else.
 ##
-## THE CONTROL IS THE SAME BOSS RAISED 0.1 mm INTO THE PLATE. Nothing else
+## THE COPLANARITY IS FLOAT COPLANARITY. A board that arrives from the modeller
+## does not sit at exactly z = 0 — the measured underside of the real one sits
+## a fraction of a micron off it — so the fixture asks the question twice: the
+## boss exactly in the plane, and the boss a hundredth of a micron... a
+## hundred-thousandth of a millimetre INTO it, inside the check's own touch
+## epsilon. Exact coplanarity is already cleared by the per-crossing parity
+## tests; it is the LIFTED one that reproduces the report, and it is the one
+## that turns red the moment the contact-run gate is taken out.
+##
+## THE CONTROL IS THE SAME BOSS RAISED 0.5 mm INTO THE PLATE. Nothing else
 ## changes — same mesh, same triangulation, same rim, same edges crossing it.
 ## If the rule that clears the flush case also clears this one it has not
 ## learned the difference between contact and overlap, it has just stopped
@@ -32,11 +41,11 @@ extends SceneTree
 ##
 ## ORACLE: the pair of reports. The rule is wrong in one direction if the
 ## flush boss is still reported, and wrong in the other if the bitten one is
-## not — the two differ by a tenth of a millimetre and nothing else.
+## not — the two differ by half a millimetre of lift and nothing else.
 ##
 ## THE DEPTH IS A THIRD CASE, not a property of the bitten one. A penetration
-## depth is a RUN — one edge in and out again — and nothing runs through a
-## tenth-of-a-millimetre disc, so the bite is reported WITHOUT a depth. The
+## depth is a RUN — one edge in and out again — and no single edge spans the
+## half-millimetre disc, so the bite is reported WITHOUT a depth. The
 ## boss driven clean through the board is the control that says so honestly:
 ## there the run exists, and the depth is the board's thickness.
 ##
@@ -61,8 +70,13 @@ const BOSS_FACETS := 32
 ## Off the grid lines and off the origin, so the rim cuts cells rather than
 ## running along their edges.
 const BOSS_CENTRE := Vector2(1.2, -5.0)
+## The float noise a real coplanar face arrives with. Inside TOUCH_EPSILON_MM
+## (1e-4), and the lift at which the false positive actually appears: at exact
+## zero the per-crossing parity tests already clear the crossing, so a fixture
+## built only on exact coplanarity measures nothing.
+const FLUSH_LIFT_MM := 1e-5
 ## How far the control boss is driven INTO the plate.
-const BITE_MM := 0.1
+const BITE_MM := 0.5
 
 const REFERENCE_NAME := "board"
 const NODE_PATH := "Assembly/Plate"
@@ -130,30 +144,45 @@ func _run() -> void:
 	# --- the designed contact -----------------------------------------------
 	checks.build_solid(_boss_mesh(0.0))
 	var flush: Dictionary = await _submit(gauge, checks)
-	check("a boss whose flat top is coplanar with the board's underside is a "
-			+ "designed contact, not interference",
+	check("a boss whose flat top is exactly coplanar with the board's "
+			+ "underside is a designed contact, not interference",
 			bool(flush.get("checked", false))
 				and int(flush.get("count", 0)) == 0
 				and int(flush.get("point_count", 0)) == 0,
 			"report = %s" % str(flush))
 
+	# The same contact as it actually arrives: coplanar to within float noise,
+	# well inside the check's touch epsilon. THIS is the case that reproduces
+	# the report — dozens of underside triangle edges cut the rim, each one a
+	# millimetres-long chord that every per-crossing test calls real — and the
+	# one that goes red when the contact-run gate is removed.
+	checks.build_solid(_boss_mesh(FLUSH_LIFT_MM))
+	var noisy: Dictionary = await _submit(gauge, checks)
+	check("the same contact a hundred-thousandth of a millimetre out of plane "
+			+ "— float noise, inside the touch epsilon — is still a contact, "
+			+ "and its rim chords are not a four-millimetre penetration",
+			bool(noisy.get("checked", false))
+				and int(noisy.get("count", 0)) == 0
+				and int(noisy.get("point_count", 0)) == 0,
+			"report = %s" % str(noisy))
+
 	# --- the control ---------------------------------------------------------
 	checks.build_solid(_boss_mesh(BITE_MM))
 	var bitten: Dictionary = await _submit(gauge, checks)
-	check("the same boss driven a tenth of a millimetre INTO the board is "
+	check("the same boss driven half a millimetre INTO the board is "
 			+ "interference, on the board's own node",
 			bool(bitten.get("checked", false))
 				and int(bitten.get("count", 0)) == 1
 				and str(((bitten.get("pairs", []) as Array)[0] as Dictionary)
 					.get("node", "")) == NODE_PATH,
 			"report = %s" % str(bitten))
-	# A depth is a RUN: two crossings of one edge, one in and one out. Nothing
-	# spans a tenth-of-a-millimetre disc — the board's underside edges enter
-	# the boss's rim and stop inside it, and the boss's own side edges enter
-	# the board and stop inside it — so the overlap is reported without a
-	# depth rather than with the lateral chord, which is millimetres long and
-	# would read as the depth of a bite a tenth as deep.
-	check("the tenth-of-a-millimetre overlap is reported without a depth: no "
+	# A depth is a RUN: two crossings of one edge, one in and one out. No edge
+	# spans the half-millimetre disc — the board's underside edges enter the
+	# boss's rim and stop inside it, and the boss's own side edges enter the
+	# board and stop inside it — so the overlap is reported without a depth
+	# rather than with the lateral chord, which is millimetres long and would
+	# read as the depth of a far deeper bite.
+	check("the half-millimetre overlap is reported without a depth: no "
 			+ "single edge spans it, and the check quotes no run it did not "
 			+ "measure",
 			_penetration_of(bitten) == 0.0,

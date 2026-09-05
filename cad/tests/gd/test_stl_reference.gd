@@ -93,6 +93,12 @@ func _test_the_panel_declares_stl_loadable() -> void:
 	check("library: the loader accepts .stl",
 			ReferenceMeshes.SUPPORTED_EXTENSIONS.has("stl"),
 			"SUPPORTED_EXTENSIONS = %s" % str(ReferenceMeshes.SUPPORTED_EXTENSIONS))
+	# One list, held by the loader. A dialog that offers a format nothing can
+	# parse, or a loadable format nothing offers, is what two copies produce.
+	check("and the picker's list IS the loader's, not a second copy of it",
+			MeshImport.SUPPORTED_EXTENSIONS == ReferenceMeshes.SUPPORTED_EXTENSIONS,
+			"picker %s vs loader %s" % [str(MeshImport.SUPPORTED_EXTENSIONS),
+				str(ReferenceMeshes.SUPPORTED_EXTENSIONS)])
 
 
 func _test_a_binary_stl_mounts_in_millimetres(path: String) -> void:
