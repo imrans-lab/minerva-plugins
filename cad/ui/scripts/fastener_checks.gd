@@ -605,10 +605,14 @@ func _one_screw(
 	var head := {"clear": true, "obstructions": [], "rays": 0}
 	var seat := {"landed": 0, "rays": 0}
 	if head_dia > 0.0:
+		# The head sees the solid too, or a shell feature standing over the
+		# seat — an annular bridge outside the shank and inside the head —
+		# is invisible to the only fan wide enough to meet it. The solid face
+		# the seat plane lies in is the one hit that is the screw arriving.
 		head = _fan_clear(
 			gauge, state, solid_state, checks, origin, direction,
 			head_dia * 0.5, start_t, seat_t - PATH_END_EPSILON_MM,
-			hole_centre, mask, reference_scope, {}
+			hole_centre, mask, reference_scope, {"seat_t": seat_t}
 		)
 		seat = _seat_support(
 			gauge, state, origin, direction, head_dia * 0.5, dia * 0.5,
@@ -828,16 +832,20 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 ##   tilt lifts above the mouth across the width of the fan.
 ##
 ## Anything else on the solid is a genuine obstruction: a rib modelled across
-## the bore, a lid over the hole, a wall the shell grew into the gap. Pass an
-## empty `expected` and the fan sees the references only — which is what the
-## HEAD ring does, because the head never has to reach the bore and the solid
-## it would meet on its own span is the top of the boss it is sitting on.
+## the bore, a lid over the hole, a wall the shell grew into the gap. The HEAD
+## fan passes `seat_t` instead of a bore: the only solid it may meet on its
+## span is a face lying in the seat plane itself — the solid's own seat, or
+## the boss top the seat plane runs through — and a solid face anywhere else
+## above the seat is a feature standing between the head and where it sits.
+## Pass an empty `expected` and the fan sees the references only.
 ##
 ## THE ENGAGED BORE IS INSPECTED TOO. When `expected` carries bore_from_t and
 ## bore_to_t, hits between them — past the mouth, down to the engaged depth —
-## are judged by one rule: a hit at the bore's own radius about its axis is
-## the wall (the screw's thread is meant to meet it), and anything else there
-## is an obstruction, reported with span "bore".
+## are judged by one rule: a hit ON THE SOLID at the bore's own radius about
+## its axis is the wall (the screw's thread is meant to meet it), and anything
+## else there is an obstruction, reported with span "bore". A REFERENCE part
+## at that radius — a sleeve, a post, a pin left in the bore — is not the
+## wall however exactly its surface sits on it; only the solid has a wall.
 func _fan_clear(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -876,7 +884,8 @@ func _fan_clear(
 					continue
 			elif t >= bore_from_t and t <= bore_to_t:
 				span = "bore"
-				if _is_the_bore_wall(crossing["point"], expected):
+				if bool(crossing.get("solid", false)) \
+						and _is_the_bore_wall(crossing["point"], expected):
 					continue
 			else:
 				continue
@@ -919,11 +928,13 @@ func _disc_points(direction: Vector3, radius: float) -> Array:
 
 
 ## Is this hit on the solid the screw arriving at its own boss rather than
-## something in its way? See _fan_clear's note for the two cases and why they
-## are the only two.
+## something in its way? See _fan_clear's note for the cases and why they are
+## the only ones. `expected` names the fan: a `seat_t` is the head's, whose
+## one legitimate solid hit is a face in the seat plane, to the same axial
+## tolerance the seat ring lands with; a bore is the shank's.
 func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> bool:
-	if expected.is_empty():
-		return true
+	if expected.has("seat_t"):
+		return absf(t - float(expected["seat_t"])) <= SEAT_TOLERANCE_MM
 	if t >= float(expected["from_t"]) - float(expected["band"]):
 		# The boss's own end face, or anything at or past the mouth.
 		return true
@@ -935,10 +946,12 @@ func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> b
 	return t >= float(expected["from_t"]) and t <= float(expected["to_t"])
 
 
-## Is this hit, inside the engaged bore, the bore's own wall? A wall hit lies
-## at the bore's radius about the bore's axis, to the tessellation slack a
-## chorded cylinder has; a hit nearer the axis is something across the bore,
-## and a hit further out is a surface in the material the thread would bite.
+## Is this hit on the solid, inside the engaged bore, the bore's own wall? A
+## wall hit lies at the bore's radius about the bore's axis, to the
+## tessellation slack a chorded cylinder has; a hit nearer the axis is
+## something across the bore, and a hit further out is a surface in the
+## material the thread would bite. Radius alone cannot tell a reference part
+## from the wall, so the caller asks this only of solid hits.
 func _is_the_bore_wall(point: Vector3, expected: Dictionary) -> bool:
 	var axis: Vector3 = expected["axis"]
 	var offset: Vector3 = point - (expected["point"] as Vector3)
@@ -1563,6 +1576,10 @@ func _why(row: Dictionary) -> String:
 			% [float(row.get("engagement_mm", 0.0)),
 			   float(row.get("engagement_required_mm", 0.0))]
 	if not bool(row.get("head_seat_clear", true)):
+		var over: Array = row.get("head_obstructions", []) as Array
+		if not over.is_empty():
+			return "the head cannot reach its seat: %s stands over it" \
+				% str((over[0] as Dictionary).get("node", "something"))
 		return "the head cannot reach its seat"
 	return ""
 

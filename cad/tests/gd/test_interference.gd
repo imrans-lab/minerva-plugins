@@ -150,6 +150,14 @@ const STACK_SPAN := 60.0
 ## which is less than the module's 0.005 mm ceiling and more than the 0.002 mm
 ## sphere its parity probe places.
 const THIN_PLATE_MM := 0.004
+## Two plates at the parity probe's own limit. The probe sits at the middle
+## of the material's run and the gauge sphere has PARITY_SPHERE_MM of
+## DIAMETER, so the sphere fits a run longer than that diameter and not a run
+## shorter: PROBED_PLATE_MM is probed (it is above the diameter, and only
+## above it by half a radius) and KEPT_PLATE_MM cannot be — its crossing has
+## to stand on the keep-the-crossing rule alone.
+const PROBED_PLATE_MM := 0.003
+const KEPT_PLATE_MM := 0.0015
 const THIN_REFERENCE := "shim"
 const THIN_NODE := "Assembly/Shim"
 ## The column through it: square, well clear of the plate's edges, and long
@@ -207,6 +215,10 @@ const STACK_COLUMN_HEIGHT_MM := 1.2
 const STACK_COLUMN_XY := Vector2(13.0, 4.0)
 
 const POINT_TOLERANCE_MM := 0.05
+## How far the board is lifted along its own normal for the check that starts
+## with its pose rewritten and its colliders not rebuilt: enough to put the
+## board's top face above a boss that cleared it by 0.1 mm.
+const LIFT_MM := 0.5
 
 var _pass: int = 0
 var _fail: int = 0
@@ -279,10 +291,12 @@ func _run() -> void:
 	await _check_scoping(gauge, checks)
 	await _check_supersession(gauge, checks)
 	await _check_busy_refusal(gauge, checks)
+	await _check_colliders_behind_the_poses(gauge, checks)
 	# From here on each check rebuilds the gauge and the records around its
 	# own reference.
 	await _check_thin_plate(gauge, checks)
 	await _check_tetrahedron_in_thin_plate(gauge, checks)
+	await _check_plates_at_the_probe_limit(gauge, checks)
 	await _check_pin_through_hole(gauge, checks)
 	await _check_undecidable_and_the_neighbouring_node(gauge, checks)
 	await _check_layered_stack(gauge, checks)
@@ -597,6 +611,59 @@ func _check_tetrahedron_in_thin_plate(gauge: Node, checks: RefCounted) -> void:
 			"report = %s" % str(report))
 
 
+## The two plates either side of the probe's limit. The column goes through
+## each; both crossings have to be reported, and for different reasons: the
+## 0.003 mm plate is thick enough for the sphere (half its run, 0.0015 mm,
+## exceeds the sphere's 0.001 mm radius), so the probe is placed and reads
+## "inside"; the 0.0015 mm plate is not, so the probe is never placed and the
+## crossing is kept because it cannot be cleared. A cutoff that mistook the
+## sphere's diameter for its radius would probe the second plate with the
+## sphere touching both faces and clear a genuine crossing; a cutoff that
+## refused the first would still answer right, but on the wrong rule.
+func _check_plates_at_the_probe_limit(gauge: Node, checks: RefCounted) -> void:
+	check("probe limit: the two plates straddle the sphere's DIAMETER, which "
+			+ "is the size mesh_gauge reads a sphere as — the probed one "
+			+ "clears it by half a radius, the kept one is under it",
+			PROBED_PLATE_MM > GeometryChecks.PARITY_SPHERE_MM
+				and PROBED_PLATE_MM * 0.5 - GeometryChecks.PARITY_SPHERE_MM * 0.5
+					<= GeometryChecks.PARITY_SPHERE_MM * 0.25 + 1e-9
+				and KEPT_PLATE_MM < GeometryChecks.PARITY_SPHERE_MM
+				and KEPT_PLATE_MM > GeometryChecks.CROSSING_ADVANCE_MM * 2.0,
+			"probed=%f kept=%f sphere=%f" % [PROBED_PLATE_MM, KEPT_PLATE_MM,
+				GeometryChecks.PARITY_SPHERE_MM])
+	for entry in [[PROBED_PLATE_MM, "probed"], [KEPT_PLATE_MM, "kept"]]:
+		var thickness := float(entry[0])
+		var plate: ArrayMesh = await _bake_thin_plate(thickness)
+		gauge.build([{
+			"mesh": plate, "transform": _pose, "node": THIN_NODE,
+			"reference": THIN_REFERENCE,
+		}], "thin-plate-fixture|%f" % thickness)
+		_records = [{
+			"name": THIN_REFERENCE,
+			"pose": _pose,
+			"world_aabb": _posed_box(plate.get_aabb()),
+			"parts": [{"mesh": plate, "transform": Transform3D.IDENTITY,
+				"node_path": THIN_NODE, "node": THIN_NODE}],
+		}]
+		checks.set_records(_records)
+		# Off the plate's face diagonals: the verdict is the column's own
+		# edges' and the probe placed at each of their crossings, with no
+		# plate edge crossing the column to report it another way.
+		checks.build_solid(await _column_mesh(STACK_COLUMN_XY))
+		var report: Dictionary = await _submit(gauge, checks, "", "")
+		var pairs: Array = report.get("pairs", []) as Array
+		var first: Dictionary = pairs[0] if not pairs.is_empty() else {}
+		check("probe limit: a column through a %s mm plate (%s) is reported as "
+				% [str(thickness), str(entry[1])]
+				+ "a crossing through the plate's faces, not cleared as a graze",
+				bool(report.get("checked", false))
+					and int(report.get("count", 0)) == 1
+					and str(first.get("node", "")) == THIN_NODE
+					and int(first.get("point_count", 0)) >= 2
+					and not str(first.get("note", "")).contains("inside"),
+				"report = %s" % str(report))
+
+
 ## The tetrahedron: a wide base ABOVE the plate and a single apex poking down
 ## into its material, so every edge that meets the plate is on its way out.
 func _tetrahedron_mesh() -> Dictionary:
@@ -620,12 +687,12 @@ func _tetrahedron_mesh() -> Dictionary:
 	return {"vertices": vertices, "faces": faces}
 
 
-## The plate: as wide as the board and THIN_PLATE_MM thick.
-func _bake_thin_plate() -> ArrayMesh:
+## The plate: as wide as the board and `thickness` thick.
+func _bake_thin_plate(thickness: float = THIN_PLATE_MM) -> ArrayMesh:
 	var combiner := CSGCombiner3D.new()
 	combiner.name = "ThinPlate"
 	var plate := CSGBox3D.new()
-	plate.size = Vector3(BOARD.x, BOARD.y, THIN_PLATE_MM)
+	plate.size = Vector3(BOARD.x, BOARD.y, thickness)
 	combiner.add_child(plate)
 	root.add_child(combiner)
 	await process_frame
@@ -635,12 +702,16 @@ func _bake_thin_plate() -> ArrayMesh:
 
 
 ## The column: a square post driven clean through the plate, well clear of its
-## edges, so every crossing it makes is through the plate's faces.
-func _column_mesh() -> Dictionary:
+## edges, so every crossing it makes is through the plate's faces. Stood at
+## `xy` in the plate's frame; off the plate's face diagonals, the plate's own
+## triangle edges cross nothing and the column's edges alone carry the
+## verdict.
+func _column_mesh(xy: Vector2 = Vector2.ZERO) -> Dictionary:
 	var combiner := CSGCombiner3D.new()
 	combiner.name = "Column"
 	var post := CSGBox3D.new()
 	post.size = Vector3(COLUMN_MM, COLUMN_MM, COLUMN_HEIGHT_MM)
+	post.position = Vector3(xy.x, xy.y, 0.0)
 	combiner.add_child(post)
 	root.add_child(combiner)
 	await process_frame
@@ -1495,6 +1566,84 @@ func _check_busy_refusal(gauge: Node, checks: RefCounted) -> void:
 			+ "request",
 			int(after.get("ticket", 0)) != 0, "after = %s" % str(after))
 	checks.release_reservation(int(after.get("ticket", 0)))
+
+
+# ---------------------------------------------------------------------------
+# A check that STARTS with the colliders behind the poses
+# ---------------------------------------------------------------------------
+
+## The re-pose the panel actually performs: the SAME record with its pose
+## rewritten where it stands, and the colliders rebuilt lazily, later. A check
+## that begins in that window holds the new pose and casts against the old
+## geometry, and nothing changes during its wait for any guard to notice. The
+## board is lifted along its own normal so that a boss which cleared it by
+## 0.1 mm now runs 0.4 mm into it: the old colliders say clear, the poses say
+## crossing, and only a check that rebuilds from its records finds it — at the
+## lifted board's top face, framed in the lifted pose, with the digests it
+## reports being the gauge's own.
+func _check_colliders_behind_the_poses(gauge: Node, checks: RefCounted) -> void:
+	var panel := _stand_in_panel(gauge)
+	panel.mesh_data = await _shell_mesh(BOSS_CLEAR_BOTTOM_Z)
+	var record: Dictionary = _records[0]
+	var lifted := Transform3D(_pose.basis,
+		_pose.origin + _pose.basis * Vector3(0.0, 0.0, LIFT_MM))
+	var generation_before := int(gauge.get_generation())
+	var colliders_before := str(gauge.get_bodies_digest())
+	record["pose"] = lifted
+	var records_describe := str(MeshGauge.bodies_digest(
+		MeshGauge.bodies_from_records(_records)))
+	var report: Dictionary = await checks.check(panel, {})
+	var colliders_after := str(gauge.get_bodies_digest())
+	var generation_after := int(gauge.get_generation())
+	record["pose"] = _pose
+
+	check("behind: a check that starts with a pose rewritten in place and the "
+			+ "colliders not rebuilt rebuilds them from its records before "
+			+ "casting, and stamps the report with the digest of the "
+			+ "colliders it cast against — the gauge's own, now the records'",
+			bool(report.get("checked", false))
+				and colliders_before != records_describe
+				and colliders_after == records_describe
+				and str(report.get("records_digest", "")) == colliders_after
+				and int(report.get("gauge_generation", -1)) == generation_after
+				and generation_after == generation_before + 1
+				and bool(report.get("colliders_rebuilt", false)),
+			"report = %s, generation %d -> %d, before = %s, after = %s, "
+			% [str(report.get("reason", report.get("count"))),
+				generation_before, generation_after, colliders_before,
+				colliders_after] + "records = %s" % records_describe)
+
+	# The crossing is at the NEW pose: the boss's vertical edges enter the
+	# lifted board through its top face, which in the lifted frame is still
+	# the local plane z = +half the thickness and in the fixture's original
+	# frame sits LIFT_MM higher.
+	var pairs: Array = report.get("pairs", []) as Array
+	var first: Dictionary = pairs[0] if not pairs.is_empty() else {}
+	var points: Array = first.get("points_mm", []) as Array
+	var at_the_lifted_top := not points.is_empty()
+	for entry in points:
+		var point: Dictionary = entry
+		var local := _as_vector(point.get("local", []))
+		var in_old_frame: Vector3 = _pose.affine_inverse() * _as_vector(point.get("world", []))
+		if absf(local.z - BOARD.z * 0.5) > POINT_TOLERANCE_MM \
+				or absf(in_old_frame.z - (BOARD.z * 0.5 + LIFT_MM)) > POINT_TOLERANCE_MM:
+			at_the_lifted_top = false
+	check("behind: the crossing is found where the board IS — a boss that "
+			+ "cleared the board at the old pose runs into its lifted top "
+			+ "face, reported in the lifted frame",
+			int(report.get("count", 0)) == 1
+				and str(first.get("node", "")) == BOARD_NODE
+				and int(first.get("point_count", 0)) >= 2
+				and at_the_lifted_top,
+			"report = %s" % str(report))
+
+	# Restored for the checks that follow: the colliders back at the pose the
+	# records now say again.
+	gauge.build([{
+		"mesh": (record["parts"] as Array)[0]["mesh"], "transform": _pose,
+		"node": BOARD_NODE, "reference": BOARD_REFERENCE,
+	}], "interference-fixture|restored")
+	panel.queue_free()
 
 
 ## Start a check without awaiting it and park its reply in `into`.

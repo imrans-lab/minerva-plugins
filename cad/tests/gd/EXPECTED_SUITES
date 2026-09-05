@@ -205,7 +205,16 @@ test_cad_note.gd assertions=40
 # the plate faces with the plate's thickness — the tri-state that keeps an
 # unreadable probe from clearing a body holds on the reference side as it
 # does on the solid side.
-# 59 assertions = 3 fixture + 5 collider +
+# A check that STARTS with a pose rewritten in place and the colliders not
+# yet rebuilt — nothing changing during its wait — rebuilds the colliders
+# from the records it holds before casting, stamps the report with the
+# gauge's own digest, and finds the crossing where the board now is, framed
+# in the new pose. And the parity probe's limit is the gauge sphere's
+# DIAMETER (mesh_gauge reads a sphere's size as one): a column through a
+# 0.003 mm plate is probed and kept, one through a 0.0015 mm plate cannot be
+# probed and is kept by the keep-the-crossing rule — both off the plate's
+# face diagonals, so the plate's own edges cannot report the crossing.
+# 64 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
 # 6 queue/supersession (+1: a queued newer evaluation revokes the running
 # check's paint) + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
@@ -215,8 +224,10 @@ test_cad_note.gd assertions=40
 # two-enclosing-blocks (+1: two OVERLAPPING nodes of one reference are two
 # answers, which a reference-scoped question cannot give) + 3 thin plate
 # (+1: the tetrahedron that only leaves the plate) + 1 per-node parity
-# budget.
-test_interference.gd assertions=59
+# budget + 2 colliders behind the poses (the rebuild and its digests; the
+# crossing at the new pose) + 3 probe limit (the fixture straddles the
+# diameter; the probed plate; the kept plate).
+test_interference.gd assertions=64
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -350,7 +361,13 @@ test_clearance.gd assertions=45
 # the ENGAGED bore, where only the bore's own wall may be met — a separate
 # check on a one-boss shell with a web across its bore 2 mm below the mouth
 # reports the path blocked by the solid inside the bore, at the web's depth.
-# 59 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
+# Only the SOLID has a bore wall: a reference sleeve whose top face sits at
+# the bore radius inside the engaged span — met by a ring of rays at exactly
+# that radius — is an obstruction naming the sleeve. And the head fan sees
+# the solid too: an annular bridge of the shell standing on the seat, outside
+# the shank and inside the head, fails head_seat_clear naming the solid while
+# the shank path and the seat ring are untouched.
+# 61 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
 # spacing, with the rays it placed counted) + 5 pairing (+1: the groove is not
 # paired and is named, +1: partial surfaces are asked for and a one-bin-short
 # bore is still a bore) + 8 A (+1: engagement measured on the
@@ -360,10 +377,11 @@ test_clearance.gd assertions=45
 # axis and the rim) + 4 F (+1: the seat number states that it is coverage of
 # one ring at a stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat
 # + 5 refusal (+1: an empty check reports its own counters, +1: an inexact
-# extent is not graded) + 1 web in the bore + 4 poses (+1: a mid-flight
+# extent is not graded) + 1 web in the bore + 1 reference sleeve at the bore
+# radius + 1 solid bridge over the seat + 4 poses (+1: a mid-flight
 # collider rebuild comes
 # back stale, with no rows measured against holes that describe where the
 # references used to be, +1: a pose rewritten in place under a waiting check
 # is stale as well, +1: a check that starts with the colliders already
 # behind the poses is stale or rebuilds, never a mixed epoch).
-test_fasteners.gd assertions=59
+test_fasteners.gd assertions=61

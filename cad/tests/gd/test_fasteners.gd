@@ -148,6 +148,23 @@ const WEB_SIZE := Vector3(BORE_R * 2.0 + 0.4, 0.6, 0.3)
 ## all the way round — the shape a tilted trim leaves. The engaged length must
 ## be measured on the full-circumference extent and not on this one.
 const WALL_OVERRUN_MM := 1.0
+## A reference SLEEVE standing in boss A's bore, its top SLEEVE_TOP_T below
+## the hole centre — inside the engaged span — and its annulus spanning the
+## bore radius. Driven with a screw whose shank radius IS the bore radius, so
+## the fan's outer ring of rays lies exactly at the bore radius: a check that
+## exempted every hit at that radius as the bore wall would read the sleeve
+## as wall.
+const SLEEVE_NODE := "Assembly/Sleeve"
+const SLEEVE_INNER_R := 0.9
+const SLEEVE_OUTER_R := 1.35
+const SLEEVE_HEIGHT := 1.0
+const SLEEVE_TOP_T := 3.0
+const SLEEVE_SCREW_DIA := BORE_R * 2.0
+## An annular BRIDGE of the shell standing on the board's top face around
+## hole 1: outside the shank's fan, inside the head's, BRIDGE_HEIGHT tall.
+const BRIDGE_INNER_R := 2.0
+const BRIDGE_OUTER_R := 2.8
+const BRIDGE_HEIGHT := 1.0
 
 # --- the screw ---------------------------------------------------------------
 const SCREW_DIA := 3.0
@@ -304,6 +321,8 @@ func _run() -> void:
 	await _check_seatless_hole(module, panel)
 	await _check_refusals(module, panel)
 	await _check_web_in_bore(module, panel)
+	await _check_sleeve_in_bore(module, panel)
+	await _check_bridge_over_the_seat(module, panel)
 	await _check_pose_snapshot(module, panel)
 
 
@@ -1131,14 +1150,180 @@ func _check_web_in_bore(module: RefCounted, panel: Node) -> void:
 
 ## One coaxial boss at hole 1 with a web across its bore, as worker mesh data.
 func _webbed_shell_mesh() -> Dictionary:
+	return await _one_boss_shell_mesh(WEB_DROP_MM, false)
+
+
+## One coaxial boss at hole 1, with a web `web_drop` below its mouth when that
+## is positive and, when `bridge` is set, an annular bridge of the shell
+## standing on the board's top face around the hole.
+func _one_boss_shell_mesh(web_drop: float, bridge: bool) -> Dictionary:
 	var combiner := CSGCombiner3D.new()
-	combiner.name = "WebbedShell"
-	_add_boss(combiner, _boss_transform(HOLE_XY[0], 0.0, 0.0), 0.0, WEB_DROP_MM)
+	combiner.name = "OneBossShell"
+	var xform := _boss_transform(HOLE_XY[0], 0.0, 0.0)
+	_add_boss(combiner, xform, 0.0, web_drop)
+	if bridge:
+		var holder := CSGCombiner3D.new()
+		holder.transform = xform
+		var ring := _tube(BRIDGE_OUTER_R, BRIDGE_INNER_R, BRIDGE_HEIGHT)
+		# The bridge stands on the seat: its underside on the board's top
+		# face, its top BRIDGE_HEIGHT above it.
+		ring.position = Vector3(0.0, 0.0, BOARD_HALF_THICKNESS + BRIDGE_HEIGHT * 0.5)
+		holder.add_child(ring)
+		combiner.add_child(holder)
 	root.add_child(combiner)
 	await process_frame
 	var baked: ArrayMesh = combiner.bake_static_mesh()
 	combiner.queue_free()
 	return _mesh_data(baked, _pose)
+
+
+## A tube along +Z: a cylinder with a coaxial cylinder cut out of it.
+func _tube(outer_r: float, inner_r: float, height: float) -> CSGCombiner3D:
+	var tube := CSGCombiner3D.new()
+	var outer := CSGCylinder3D.new()
+	outer.radius = outer_r
+	outer.height = height
+	outer.sides = 64
+	outer.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	var inner := CSGCylinder3D.new()
+	inner.radius = inner_r
+	inner.height = height + 2.0
+	inner.sides = 64
+	inner.operation = CSGShape3D.OPERATION_SUBTRACTION
+	inner.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	tube.add_child(outer)
+	tube.add_child(inner)
+	return tube
+
+
+# ---------------------------------------------------------------------------
+# A REFERENCE part at the bore radius
+# ---------------------------------------------------------------------------
+
+## Inside the engaged bore the only hit the fan may let through is the bore's
+## own wall, and the wall is a surface OF THE SOLID at the bore's radius. A
+## reference part whose surface sits at that radius — a sleeve or a pin left
+## in the bore — is in the screw's way however exactly it matches the radius.
+## The sleeve here is a reference body under the board's own pose, and the
+## screw's shank radius is the bore radius, so the fan's outer ring meets the
+## sleeve's top face at the bore radius precisely.
+func _check_sleeve_in_bore(module: RefCounted, panel: Node) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+	var sleeve: ArrayMesh = await _bake_sleeve()
+	var record: Dictionary = (_records[0] as Dictionary).duplicate()
+	var parts: Array = (record["parts"] as Array).duplicate()
+	parts.append({"mesh": sleeve, "transform": Transform3D.IDENTITY,
+		"node_path": SLEEVE_NODE, "node": SLEEVE_NODE})
+	record["parts"] = parts
+	var with_sleeve: Array = [record]
+	panel.checks_records = with_sleeve
+	panel.gauge.call("build", MeshGauge.bodies_from_records(with_sleeve),
+		"fastener-fixture|sleeve")
+	panel.mesh_data = await _one_boss_shell_mesh(0.0, false)
+	panel.bores = [_bores[0]]
+	var report: Dictionary = await module.check(panel, {
+		"screw": {"dia_mm": SLEEVE_SCREW_DIA, "length_mm": SCREW_LENGTH,
+			"head_dia_mm": HEAD_DIA},
+		"holes": _holes(),
+	})
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+	panel.checks_records = _records
+	_rebuild_gauge(panel, _pose)
+
+	var row := _row_at(report, HOLE_XY[0])
+	var obstructions: Array = row.get("obstructions", []) as Array
+	var first: Dictionary = obstructions[0] if not obstructions.is_empty() else {}
+	var only_the_sleeve := not obstructions.is_empty()
+	for entry in obstructions:
+		if str((entry as Dictionary).get("node", "")) != SLEEVE_NODE:
+			only_the_sleeve = false
+	check("sleeve: a REFERENCE sleeve whose top face sits at the bore radius "
+			+ "inside the engaged span blocks the screw — the path is not "
+			+ "clear, every obstruction names the sleeve under its reference "
+			+ "(never the solid's wall), at the sleeve's own depth, met by "
+			+ "the ring of rays at exactly the bore radius, and `why` says so",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 1
+				and not bool(row.get("path_clear", true))
+				and not bool(row.get("pass", true))
+				and only_the_sleeve
+				and str(first.get("reference", "")) == BOARD_REFERENCE
+				and str(first.get("span", "")) == "bore"
+				and absf(float(first.get("axial_mm", -99.0)) - SLEEVE_TOP_T)
+					<= NUMERIC_TOLERANCE_MM
+				and absf(float(first.get("ray_radius_mm", -99.0)) - BORE_R)
+					<= NUMERIC_TOLERANCE_MM
+				and str(row.get("why", "")).contains(SLEEVE_NODE)
+				and str(row.get("why", "")).contains("inside the engaged bore")
+				and bool(row.get("head_seat_clear", false)),
+			"row = %s" % str(row))
+
+
+## The sleeve in the board's own frame: a tube down boss A's bore, its top
+## SLEEVE_TOP_T below the hole centre.
+func _bake_sleeve() -> ArrayMesh:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "Sleeve"
+	var tube := _tube(SLEEVE_OUTER_R, SLEEVE_INNER_R, SLEEVE_HEIGHT)
+	tube.position = Vector3(HOLE_XY[0].x, HOLE_XY[0].y,
+		-(SLEEVE_TOP_T + SLEEVE_HEIGHT * 0.5))
+	combiner.add_child(tube)
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return baked
+
+
+# ---------------------------------------------------------------------------
+# A SOLID feature between the head and its seat
+# ---------------------------------------------------------------------------
+
+## The head fan has to see the solid too. An annular bridge of the shell
+## standing on the seat around the hole, outside the shank's radius and
+## inside the head's, is met by no shank ray and by no reference ray — the
+## seat ring lands on the board through the bridge's hole and reads fully
+## supported — so the head fan is the only sampler wide enough to find it,
+## and it can only do so with the solid among the bodies it casts against.
+func _check_bridge_over_the_seat(module: RefCounted, panel: Node) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+	panel.mesh_data = await _one_boss_shell_mesh(0.0, true)
+	panel.bores = [_bores[0]]
+	var report: Dictionary = await module.check(panel, {
+		"screw": _screw(), "holes": _holes(),
+	})
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+
+	var row := _row_at(report, HOLE_XY[0])
+	var over: Array = row.get("head_obstructions", []) as Array
+	var first: Dictionary = over[0] if not over.is_empty() else {}
+	# The bridge's top face, as an axial distance from the hole centre: the
+	# seat is BOARD_HALF_THICKNESS above it, the bridge BRIDGE_HEIGHT higher.
+	var bridge_top := -(BOARD_HALF_THICKNESS + BRIDGE_HEIGHT)
+	check("bridge: an annular bridge of the SOLID standing on the seat, "
+			+ "outside the shank and inside the head, fails head_seat_clear "
+			+ "— the head obstruction is the solid on the approach at the "
+			+ "bridge's top, met at a ray radius the shank never reaches — "
+			+ "while the shank path stays clear, the seat ring still lands "
+			+ "on the board, and `why` names it",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 1
+				and bool(row.get("path_clear", false))
+				and not bool(row.get("head_seat_clear", true))
+				and not bool(row.get("pass", true))
+				and str(first.get("node", "")) == "<solid>"
+				and str(first.get("span", "")) == "approach"
+				and absf(float(first.get("axial_mm", 99.0)) - bridge_top)
+					<= NUMERIC_TOLERANCE_MM
+				and float(first.get("ray_radius_mm", 0.0)) > SCREW_DIA * 0.5
+				and float(first.get("ray_radius_mm", 99.0)) <= HEAD_DIA * 0.5
+				and float(row.get("head_seat_supported", 0.0)) > 0.99
+				and str(row.get("why", "")).contains("head cannot reach its seat")
+				and str(row.get("why", "")).contains("<solid>")
+				and bool(row.get("engagement_ok", false)),
+			"row = %s" % str(row))
 
 
 # ---------------------------------------------------------------------------

@@ -98,10 +98,13 @@ const CROSSING_ADVANCE_MM: float = 0.0002
 ## graze; so the run of material past the hit is measured first and the probe
 ## goes half of whatever is there. See _probe_step_mm.
 const PENETRATION_PROBE_MM: float = 0.005
-## The gauge sphere the parity probe places, millimetres. Material thinner
-## than this cannot be probed at all — the sphere touches both walls and the
-## gauge reports contacts rather than "inside" — so a crossing through it is
-## KEPT rather than cleared: unprovable is not clean.
+## The gauge sphere the parity probe places, millimetres — its DIAMETER, which
+## is what mesh_gauge reads a sphere's size as (its contact rays reach half of
+## it). The probe sits at the middle of the material's run, so the sphere fits
+## only when that run exceeds this diameter; material no thicker than it cannot
+## be probed at all — the sphere touches a wall and the gauge reports a
+## contact rather than "inside" — so a crossing through it is KEPT rather
+## than cleared: unprovable is not clean.
 const PARITY_SPHERE_MM: float = 0.002
 ## Crossings counted along one edge. An edge threading more walls than this is
 ## pathological; the crossings found still count as interference, and only the
@@ -610,13 +613,32 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 		return _nothing("the evaluation produced no solid geometry to check")
 
 	set_records(panel.get_reference_state())
+	# The colliders have to be the ones THESE records describe. A pose is
+	# rewritten in place and the panel rebuilds lazily, so a check can begin
+	# with the records already ahead of the gauge and nothing changing during
+	# its wait: every guard that watches for a change sees none, the rays meet
+	# the old geometry and the report is framed in the new pose. The gauge is
+	# asked what it was built from; on a mismatch this module rebuilds it from
+	# the records it holds — this is the per-evaluation path, and a rebuild
+	# here is the same rebuild the panel's next measurement would make. It is
+	# labelled by the records digest, because the panel's own label still
+	# names the old poses and an identical label is a no-op to build(); the
+	# panel relabels on its next ensure_gauge_built.
+	var bodies: Array = _MeshGauge.bodies_from_records(_records)
+	var colliders_rebuilt := false
+	if str(gauge.call("get_bodies_digest")) != _MeshGauge.bodies_digest(bodies):
+		if int(gauge.call("build", bodies, _MeshGauge.bodies_digest(bodies))) <= 0:
+			return _nothing("the reference colliders could not be rebuilt at "
+				+ "the current poses; there is nothing to run into")
+		colliders_rebuilt = true
 	# What this report is ABOUT, fixed before anything is awaited: the
-	# reference poses (as the gauge digests them) and the collider generation
-	# the rays are cast against. The clearance join compares both with the
-	# state it finds later, because a report about references that have since
-	# moved or been rebuilt cannot say which nodes are buried now.
-	var records_digest := str(_MeshGauge.bodies_digest(
-		_MeshGauge.bodies_from_records(_records)))
+	# reference poses as the gauge digests them — read back from the gauge,
+	# so they are the colliders the rays are cast against, not a derivation
+	# beside them — and the collider generation. The clearance join compares
+	# both with the state it finds later, because a report about references
+	# that have since moved or been rebuilt cannot say which nodes are buried
+	# now.
+	var records_digest := str(gauge.call("get_bodies_digest"))
 	var gauge_generation := int(gauge.call("get_generation"))
 	var reference_scope := str(args.get("reference", ""))
 	var mask := ALL_LAYERS
@@ -651,6 +673,8 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 		reply["source_digest"] = _source_digest(str(document.get("source", "")))
 		reply["records_digest"] = records_digest
 		reply["gauge_generation"] = gauge_generation
+		if colliders_rebuilt:
+			reply["colliders_rebuilt"] = true
 	return reply
 
 
@@ -807,7 +831,8 @@ func _run_along(
 ## The step to probe with, given the material either side of the hit: half the
 ## SHORTER run, so the probe lands inside whichever side is thinner rather
 ## than through it. Zero when either side is too thin to place the parity
-## sphere in, which is the caller's signal to keep the crossing.
+## sphere in — half the run is then no more than the sphere's radius, half of
+## PARITY_SPHERE_MM — which is the caller's signal to keep the crossing.
 func _probe_step(forward_mm: float, backward_mm: float) -> float:
 	var shorter := minf(forward_mm, backward_mm)
 	if shorter <= PARITY_SPHERE_MM:
@@ -1368,7 +1393,7 @@ func _inside_reference(
 	_casts += 1
 	var verdict: Dictionary = gauge.call("run_now", state, "gauge", {
 		"shape": "sphere",
-		"size": Vector3(0.002, 0.0, 0.0),
+		"size": Vector3(PARITY_SPHERE_MM, 0.0, 0.0),
 		"at": point,
 		"mask": int(gauge.call("mask_for", reference_name)),
 		"reference": reference_name,
