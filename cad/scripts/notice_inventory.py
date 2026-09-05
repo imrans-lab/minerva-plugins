@@ -373,12 +373,12 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='fonttools',
         component='fonttools',
-        version='4.63.0',
+        version='4.64.0',
         license='MIT',
         copyright='Copyright (c) 2017 Just van Rossum',
         source_url='https://github.com/fonttools/fonttools',
-        license_files=('fonttools-4.63.0.LICENSE.external.txt',
-                        'fonttools-4.63.0.LICENSE.txt'),
+        license_files=('fonttools-4.64.0.LICENSE.external.txt',
+                        'fonttools-4.64.0.LICENSE.txt'),
         note="Font parsing for matplotlib and for build123d's text features. "
              'Its LICENSE.external records the terms of the fonts and '
              'third-party code the project carries, and is inventoried '
@@ -387,12 +387,12 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='ipython',
         component='ipython',
-        version='9.16.1',
+        version='9.17.1',
         license='BSD-3-Clause',
         copyright='Copyright (c) 2008-Present, IPython Development Team; '
                   'Copyright (c) 2001-2007, Fernando Perez',
         source_url='https://github.com/ipython/ipython',
-        license_files=('ipython-9.16.1.LICENSE.txt',),
+        license_files=('ipython-9.17.1.LICENSE.txt',),
         note='Transitive through build123d. Nothing in the cad worker '
              'imports it; it ships because pip resolved it.',
     ),
@@ -420,11 +420,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='kiwisolver',
         component='kiwisolver',
-        version='1.5.0',
+        version='1.5.1',
         license='BSD-3-Clause',
         copyright='Copyright (c) 2013-2026, Nucleic Development Team',
         source_url='https://github.com/nucleic/kiwi',
-        license_files=('kiwisolver-1.5.0.LICENSE.txt',),
+        license_files=('kiwisolver-1.5.1.LICENSE.txt',),
         note="matplotlib's layout solver.",
     ),
     RuntimeComponent(
@@ -482,12 +482,17 @@ RUNTIME_COMPONENTS: tuple = (
         copyright='Copyright (c) 2005-2025, NumPy Developers.',
         source_url='https://github.com/numpy/numpy',
         license_files=('numpy-2.5.2.LICENSE.txt',),
-        note="Array backbone for the worker's geometry code. The wheel "
-             'additionally ships per-component texts under its dist-info for '
-             'the code it vendors (Mersenne Twister, PCG64, pocketfft, '
-             'LAPACK-lite, highway, dragon4, libdivide, x86-simd-sort); the '
-             'top-level BSD-3-Clause text inventoried here is the one that '
-             'covers NumPy itself.',
+        note="Array backbone for the worker's geometry code. The text "
+             'inventoried here is not BSD-3-Clause alone: after NumPy\'s own '
+             'licence it carries the statements for the shared libraries the '
+             'wheel ships in numpy.libs — OpenBLAS and the LAPACK bundled '
+             'inside it (both BSD-3-Clause), and libgfortran and libquadmath '
+             '(GPL-3.0-or-later under the GCC Runtime Library Exception, '
+             'whose full text is included). The wheel ALSO ships per-component '
+             'texts under its dist-info for source it vendors (Mersenne '
+             'Twister, PCG64, pocketfft, LAPACK-lite, highway, dragon4, '
+             'libdivide, x86-simd-sort); those are compiled into _multiarray '
+             'and friends rather than shipped as separate files.',
     ),
     RuntimeComponent(
         distribution='ocp-gordon',
@@ -622,12 +627,12 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='pygments',
         component='pygments',
-        version='2.20.0',
+        version='2.21.0',
         license='BSD-2-Clause',
         copyright='Copyright (c) 2006-2022 by the respective authors (see AUTHORS '
                   'file).',
         source_url='https://github.com/pygments/pygments',
-        license_files=('pygments-2.20.0.LICENSE.txt',),
+        license_files=('pygments-2.21.0.LICENSE.txt',),
         note='IPython syntax highlighting.',
     ),
     RuntimeComponent(
@@ -656,12 +661,12 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='scipy',
         component='scipy',
-        version='1.18.0',
+        version='1.18.1',
         license='BSD-3-Clause',
         copyright='Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy '
                   'Developers.',
         source_url='https://github.com/scipy/scipy',
-        license_files=('scipy-1.18.0.LICENSE.txt',),
+        license_files=('scipy-1.18.1.LICENSE.txt',),
         note="Numerics used by the worker's geometry checks.",
     ),
     RuntimeComponent(
@@ -697,11 +702,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='svgpathtools',
         component='svgpathtools',
-        version='1.7.2',
+        version='1.7.4',
         license='MIT',
         copyright='Copyright (c) 2015 Andrew Allan Port',
         source_url='https://github.com/mathandy/svgpathtools',
-        license_files=('svgpathtools-1.7.2.LICENSE.txt',),
+        license_files=('svgpathtools-1.7.4.LICENSE.txt',),
         note='SVG path maths; a build123d dependency.',
     ),
     RuntimeComponent(
@@ -773,11 +778,11 @@ RUNTIME_COMPONENTS: tuple = (
     RuntimeComponent(
         distribution='wcwidth',
         component='wcwidth',
-        version='0.8.2',
+        version='0.8.3',
         license='MIT',
         copyright='Copyright (c) 2014 Jeff Quast <contact@jeffquast.com>',
         source_url='https://github.com/jquast/wcwidth',
-        license_files=('wcwidth-0.8.2.LICENSE.txt',),
+        license_files=('wcwidth-0.8.3.LICENSE.txt',),
         note='prompt-toolkit dependency.',
     ),
     RuntimeComponent(

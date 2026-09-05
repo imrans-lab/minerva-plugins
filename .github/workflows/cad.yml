@@ -142,12 +142,29 @@ jobs:
       # anything transitive turns this red. That is the intent: a new version
       # is a licence text to re-check.
       - name: Verify the licence census still describes the built bundle
+        # Both counters are load-bearing. `sp=$(...)` runs in a subshell, so a
+        # glob that matches nothing does not trip `set -e`: it yields an empty
+        # path, and a verification of nothing is a green step. Same for the
+        # outer loop — `for stage in <glob>/` with no stage directory iterates
+        # zero times and the step passes without checking any bundle at all.
         run: |
+          set -euo pipefail
+          verified=0
           for stage in runtime-build/runtime-stage/*/; do
+            [ -d "$stage" ] || continue
             sp=$(ls -d "$stage"lib/python*/site-packages "$stage"Lib/site-packages 2>/dev/null | head -1)
+            if [ -z "$sp" ]; then
+              echo "no site-packages under $stage — nothing to verify against" >&2
+              exit 1
+            fi
             echo "== $sp"
             python3 scripts/gen_notice.py --verify-bundle "$sp"
+            verified=$((verified + 1))
           done
+          if [ "$verified" -eq 0 ]; then
+            echo "no staged bundle under runtime-build/runtime-stage/ — the census verified nothing" >&2
+            exit 1
+          fi
 
       # Every compiled wheel in the bundle is imported by the interpreter that
       # will ship with it, on the platform it will ship for. The build script

@@ -181,24 +181,24 @@ stack-data dependency.
 
 DXF reader/writer build123d uses for 2D import and export.
 
-## fonttools 4.63.0
+## fonttools 4.64.0
 
 - Licence: MIT
 - Copyright (c) 2017 Just van Rossum
 - Source: https://github.com/fonttools/fonttools
 - Arrives via: `fonttools` wheel
-- Licence text: `cad/licenses/runtime/fonttools-4.63.0.LICENSE.external.txt` (sha256 94a83aaee0729a0f302d34acc4acecbd9d58366f262429075fe557e4a54b2e69)
-- Licence text: `cad/licenses/runtime/fonttools-4.63.0.LICENSE.txt` (sha256 6787208f83f659ccbc2223b2fde952ffa6f7e8aca62f1a8a2bf5bc51bb1b2383)
+- Licence text: `cad/licenses/runtime/fonttools-4.64.0.LICENSE.external.txt` (sha256 94a83aaee0729a0f302d34acc4acecbd9d58366f262429075fe557e4a54b2e69)
+- Licence text: `cad/licenses/runtime/fonttools-4.64.0.LICENSE.txt` (sha256 6787208f83f659ccbc2223b2fde952ffa6f7e8aca62f1a8a2bf5bc51bb1b2383)
 
 Font parsing for matplotlib and for build123d's text features. Its LICENSE.external records the terms of the fonts and third-party code the project carries, and is inventoried alongside the MIT text.
 
-## ipython 9.16.1
+## ipython 9.17.1
 
 - Licence: BSD-3-Clause
 - Copyright (c) 2008-Present, IPython Development Team; Copyright (c) 2001-2007, Fernando Perez
 - Source: https://github.com/ipython/ipython
 - Arrives via: `ipython` wheel
-- Licence text: `cad/licenses/runtime/ipython-9.16.1.LICENSE.txt` (sha256 e0e390748ed440ab893ca1f135a88a920aaf5409dbb90a5b427c75c5e51268fb)
+- Licence text: `cad/licenses/runtime/ipython-9.17.1.LICENSE.txt` (sha256 e0e390748ed440ab893ca1f135a88a920aaf5409dbb90a5b427c75c5e51268fb)
 
 Transitive through build123d. Nothing in the cad worker imports it; it ships because pip resolved it.
 
@@ -222,13 +222,13 @@ IPython dependency.
 
 IPython completion dependency.
 
-## kiwisolver 1.5.0
+## kiwisolver 1.5.1
 
 - Licence: BSD-3-Clause
 - Copyright (c) 2013-2026, Nucleic Development Team
 - Source: https://github.com/nucleic/kiwi
 - Arrives via: `kiwisolver` wheel
-- Licence text: `cad/licenses/runtime/kiwisolver-1.5.0.LICENSE.txt` (sha256 529c40e5f67f2f88904657a9f7879ae2f8dc76bc9bfef9cb10d988b48804ed61)
+- Licence text: `cad/licenses/runtime/kiwisolver-1.5.1.LICENSE.txt` (sha256 529c40e5f67f2f88904657a9f7879ae2f8dc76bc9bfef9cb10d988b48804ed61)
 
 matplotlib's layout solver.
 
@@ -280,7 +280,7 @@ sympy dependency.
 - Arrives via: `numpy` wheel
 - Licence text: `cad/licenses/runtime/numpy-2.5.2.LICENSE.txt` (sha256 4860083caa0de2ac3292ca98bd074bd8f45d8b32624e37b1e70a240bff61e488)
 
-Array backbone for the worker's geometry code. The wheel additionally ships per-component texts under its dist-info for the code it vendors (Mersenne Twister, PCG64, pocketfft, LAPACK-lite, highway, dragon4, libdivide, x86-simd-sort); the top-level BSD-3-Clause text inventoried here is the one that covers NumPy itself.
+Array backbone for the worker's geometry code. The text inventoried here is not BSD-3-Clause alone: after NumPy's own licence it carries the statements for the shared libraries the wheel ships in numpy.libs — OpenBLAS and the LAPACK bundled inside it (both BSD-3-Clause), and libgfortran and libquadmath (GPL-3.0-or-later under the GCC Runtime Library Exception, whose full text is included). The wheel ALSO ships per-component texts under its dist-info for source it vendors (Mersenne Twister, PCG64, pocketfft, LAPACK-lite, highway, dragon4, libdivide, x86-simd-sort); those are compiled into _multiarray and friends rather than shipped as separate files.
 
 ## ocp-gordon 0.2.2
 
@@ -394,13 +394,13 @@ pexpect dependency. Its METADATA says License: UNKNOWN; the shipped text is the 
 
 stack-data dependency.
 
-## pygments 2.20.0
+## pygments 2.21.0
 
 - Licence: BSD-2-Clause
 - Copyright (c) 2006-2022 by the respective authors (see AUTHORS file).
 - Source: https://github.com/pygments/pygments
 - Arrives via: `pygments` wheel
-- Licence text: `cad/licenses/runtime/pygments-2.20.0.LICENSE.txt` (sha256 a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17)
+- Licence text: `cad/licenses/runtime/pygments-2.21.0.LICENSE.txt` (sha256 a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17)
 
 IPython syntax highlighting.
 
@@ -424,13 +424,13 @@ matplotlib dependency.
 
 matplotlib dependency. Dual-licensed: the shipped text carries both the Apache-2.0 grant and the original BSD-3-Clause terms, which is why the id is an AND rather than a choice.
 
-## scipy 1.18.0
+## scipy 1.18.1
 
 - Licence: BSD-3-Clause
 - Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.
 - Source: https://github.com/scipy/scipy
 - Arrives via: `scipy` wheel
-- Licence text: `cad/licenses/runtime/scipy-1.18.0.LICENSE.txt` (sha256 17e7db9ffa4913121fa2df484633a362456a482da736c99db4711a98473770ea)
+- Licence text: `cad/licenses/runtime/scipy-1.18.1.LICENSE.txt` (sha256 17e7db9ffa4913121fa2df484633a362456a482da736c99db4711a98473770ea)
 
 Numerics used by the worker's geometry checks.
 
@@ -464,13 +464,13 @@ IPython traceback dependency.
 
 SVG parsing; an ocpsvg/build123d dependency.
 
-## svgpathtools 1.7.2
+## svgpathtools 1.7.4
 
 - Licence: MIT
 - Copyright (c) 2015 Andrew Allan Port
 - Source: https://github.com/mathandy/svgpathtools
 - Arrives via: `svgpathtools` wheel
-- Licence text: `cad/licenses/runtime/svgpathtools-1.7.2.LICENSE.txt` (sha256 e61b5f4e69dcb874e07ee26762113879ec326a7c98c75c9aa2c8ea5453b4e495)
+- Licence text: `cad/licenses/runtime/svgpathtools-1.7.4.LICENSE.txt` (sha256 e61b5f4e69dcb874e07ee26762113879ec326a7c98c75c9aa2c8ea5453b4e495)
 
 SVG path maths; a build123d dependency.
 
@@ -534,13 +534,13 @@ Typing backports. Licensed under the Python Software Foundation License, whose f
 
 Visualisation toolkit; pulled in by cadquery-ocp's VTK-enabled build. Its wheel carries the compiled VTK shared libraries.
 
-## wcwidth 0.8.2
+## wcwidth 0.8.3
 
 - Licence: MIT
 - Copyright (c) 2014 Jeff Quast <contact@jeffquast.com>
 - Source: https://github.com/jquast/wcwidth
 - Arrives via: `wcwidth` wheel
-- Licence text: `cad/licenses/runtime/wcwidth-0.8.2.LICENSE.txt` (sha256 70b98a95a2144eb70af8017fa8c6d95ce247e40867436e8bc649e137fe13d21a)
+- Licence text: `cad/licenses/runtime/wcwidth-0.8.3.LICENSE.txt` (sha256 70b98a95a2144eb70af8017fa8c6d95ce247e40867436e8bc649e137fe13d21a)
 
 prompt-toolkit dependency.
 

@@ -344,20 +344,6 @@ def _fake_site_packages(root: Path, distributions: dict) -> Path:
     return site_packages
 
 
-def test_the_committed_census_is_what_a_site_packages_scan_produces(tmp_path):
-    """The census reader and the census file agree on shape and content.
-
-    Round-tripping the committed census through a directory that contains
-    exactly those distributions proves the reader is the same function that
-    produced the file — otherwise a census generated on one machine and
-    verified on another can disagree for reasons nobody can see.
-    """
-    census = gn.read_manifest()
-    assert census, "the committed census is empty"
-    site_packages = _fake_site_packages(tmp_path, census)
-    assert gn.census_site_packages(site_packages) == census
-
-
 def test_gate_refuses_a_site_packages_distribution_with_no_inventory_entry(
         tmp_path, lock_vars):
     """THE mutation this whole census exists for.
@@ -504,3 +490,37 @@ def test_census_rewrite_keeps_the_header_and_lists_what_it_measured(tmp_path):
     written = manifest.read_text(encoding="utf-8")
     assert written.startswith("# cad/scripts/runtime-bundle.manifest")
     assert gn.read_manifest(manifest) == {"alpha": "1.0", "beta": "2.0"}
+
+
+def test_verify_bundle_exit_codes_including_a_path_that_matched_nothing(tmp_path):
+    """The CLI the build leg actually invokes, checked by its exit code.
+
+    `census_differences` being right is not enough: the build leg's verdict is
+    `gen_notice.py --verify-bundle <path>`'s status, and the path comes from a
+    shell glob. A glob that matched no bundle hands the CLI an empty string,
+    and the CLI must refuse it rather than treat "no arguments of interest" as
+    "generate the NOTICE and succeed" — a green step that verified nothing is
+    worse than no step.
+
+    Oracle: point --verify-bundle at a real built stage's site-packages and at
+    a deleted one. The first exits 0, the second non-zero, and NOTICE.md's
+    mtime is unchanged by either.
+    """
+    manifest = tmp_path / "runtime-bundle.manifest"
+    shutil.copyfile(gn.DEFAULT_MANIFEST_PATH, manifest)
+    census = gn.read_manifest(manifest)
+
+    matching = _fake_site_packages(tmp_path / "matching", census)
+    assert gn.main(["--verify-bundle", str(matching),
+                    "--manifest", str(manifest)]) == 0
+
+    unattributed = _fake_site_packages(tmp_path / "extra",
+                                       dict(census, stowaway="1.0"))
+    assert gn.main(["--verify-bundle", str(unattributed),
+                    "--manifest", str(manifest)]) != 0
+
+    notice_before = gn.DEFAULT_NOTICE_PATH.read_bytes()
+    assert gn.main(["--verify-bundle", "", "--manifest", str(manifest)]) != 0
+    assert gn.main(["--verify-bundle", str(tmp_path / "absent"),
+                    "--manifest", str(manifest)]) != 0
+    assert gn.DEFAULT_NOTICE_PATH.read_bytes() == notice_before

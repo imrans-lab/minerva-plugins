@@ -654,7 +654,16 @@ def main(argv: Union[list, None] = None) -> int:
     manifest_path = Path(args.manifest) if args.manifest else DEFAULT_MANIFEST_PATH
     out_path = Path(args.out) if args.out else DEFAULT_NOTICE_PATH
 
-    if args.verify_bundle:
+    # `is not None`, not truthiness: the build leg passes a path expanded from
+    # a shell glob, and a glob that matched nothing expands to an empty string.
+    # Under a truthiness test that empty argument falls through to the GENERATE
+    # branch, which rewrites NOTICE.md and exits 0 — the verification step
+    # passes precisely when there is no bundle to verify.
+    if args.verify_bundle is not None:
+        if not args.verify_bundle.strip():
+            print("gen_notice --verify-bundle: empty site-packages path "
+                  "(the caller's glob matched no bundle)", file=sys.stderr)
+            return 1
         try:
             actual = census_site_packages(args.verify_bundle)
         except OSError as exc:
@@ -675,7 +684,11 @@ def main(argv: Union[list, None] = None) -> int:
               f"{len(actual)} distributions with no unattributed ones.")
         return 0
 
-    if args.census:
+    if args.census is not None:
+        if not args.census.strip():
+            print("gen_notice --census: empty site-packages path",
+                  file=sys.stderr)
+            return 1
         try:
             found = census_site_packages(args.census)
         except OSError as exc:
