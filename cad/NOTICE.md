@@ -8,11 +8,11 @@ Regenerate with:
 
 Licence and attribution inventory for the third-party content that ships inside the cad plugin's embedded Python runtime bundle. The full text of every licence below is in `cad/licenses/runtime/`, which is copied into the bundle (as `licenses/`) and into the release tarball beside the plugin binary — BSD and MIT terms require the notice, conditions and disclaimer to be provided with a binary distribution, so naming the licence here is not on its own enough.
 
-The inventory is checked against a census of the built bundle's site-packages (`cad/scripts/runtime-bundle.manifest`), not against the two pins in `cad/scripts/runtime-bundle.lock`: pip resolves the transitive tree, so the lock names 2 distributions and the bundle contains 47. Wheel metadata cannot see what a wheel vendors either — python-fcl's contains compiled FCL, libccd, OctoMap and Eigen while shipping only python-fcl's LICENSE, and cadquery-ocp's contains the whole of OCCT while shipping no licence text at all — so the inventory is maintained by hand in `cad/scripts/notice_inventory.py` and `gen_notice.py --check` is the gate that keeps it honest.
+The inventory is checked against a census of the built bundle's site-packages (`cad/scripts/runtime-bundle.manifest`), not against the two pins in `cad/scripts/runtime-bundle.lock`: pip resolves the transitive tree, so the lock names 2 distributions and the bundle contains 48. Wheel metadata cannot see what a wheel vendors either — python-fcl's contains compiled FCL, libccd, OctoMap and Eigen while shipping only python-fcl's LICENSE, and cadquery-ocp's contains the whole of OCCT while shipping no licence text at all — so the inventory is maintained by hand in `cad/scripts/notice_inventory.py` and `gen_notice.py --check` is the gate that keeps it honest.
 
 Lock pins: build123d, python-fcl
 
-Census: 47 distributions in the built bundle's site-packages, 53 inventoried components (a distribution yields more than one entry when its wheel vendors other projects), 0 excluded.
+Census: 48 distributions in the built bundle's site-packages, 54 inventoried components (a distribution yields more than one entry when its wheel vendors other projects), 0 excluded.
 
 ## python-fcl 0.7.0.11
 
@@ -140,6 +140,16 @@ The geometry kernel every modelling operation in the cad worker ends up in. It r
 - Licence text: `cad/licenses/runtime/cadquery-ocp-proxy-7.9.3.1.1.LICENSE.txt` (sha256 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30)
 
 A no-op package (an __init__.py and a _version.py) whose only job is to pin which cadquery-ocp variant resolves. Its wheel ships no licence text and its repository is not public, so the canonical Apache-2.0 text is used, matching the Apache-2.0 its METADATA declares.
+
+## colorama 0.4.6
+
+- Licence: BSD-3-Clause
+- Copyright (c) 2010 Jonathan Hartley
+- Source: https://github.com/tartley/colorama
+- Arrives via: `colorama` wheel
+- Licence text: `cad/licenses/runtime/colorama-0.4.6.LICENSE.txt` (sha256 cac35c02686e5d04a5a7140bfb3b36e73aed496656e891102e428886d7930318)
+
+IPython dependency on Windows only — its requirement is marked sys_platform == "win32", so it is absent from the linux and macOS bundles and --verify-bundle warns there. Text from the wheel's dist-info LICENSE.txt.
 
 ## contourpy 1.3.3
 

@@ -21,6 +21,12 @@
 # these versions. That is the point — a version change here is a licence text
 # that has to be re-checked, and --verify-bundle is what makes someone look.
 #
+# The census is the UNION over the three build platforms, so some entries are
+# absent from any one bundle: pexpect and ptyprocess are POSIX-only, colorama
+# is pulled in by ipython only on win32. --verify-bundle reports a census entry
+# missing from the bundle it is measuring as a warning, not an error, for that
+# reason; the reverse direction — in the bundle, not in the census — is an error.
+#
 # python-fcl is in the lock (PIP_NO_DEPS_PKGS) and is listed below, but it was
 # NOT present in the stage this census was taken from — that stage predates the
 # pin. --verify-bundle on a build leg is what turns that claim into a fact.
@@ -30,6 +36,7 @@ asttokens 3.0.2
 build123d 0.10.0
 cadquery-ocp 7.8.1.1.post1
 cadquery-ocp-proxy 7.9.3.1.1
+colorama 0.4.6
 contourpy 1.3.3
 cycler 0.12.1
 executing 2.2.1

@@ -331,6 +331,19 @@ RUNTIME_COMPONENTS: tuple = (
              'METADATA declares.',
     ),
     RuntimeComponent(
+        distribution='colorama',
+        component='colorama',
+        version='0.4.6',
+        license='BSD-3-Clause',
+        copyright='Copyright (c) 2010 Jonathan Hartley',
+        source_url='https://github.com/tartley/colorama',
+        license_files=('colorama-0.4.6.LICENSE.txt',),
+        note='IPython dependency on Windows only — its requirement is marked '
+             'sys_platform == "win32", so it is absent from the linux and '
+             'macOS bundles and --verify-bundle warns there. Text from the '
+             'wheel\'s dist-info LICENSE.txt.',
+    ),
+    RuntimeComponent(
         distribution='contourpy',
         component='contourpy',
         version='1.3.3',
