@@ -206,7 +206,16 @@ func release() -> void:
 ## The join is only made from a report about THIS source measured against
 ## the reference poses and colliders standing NOW; a report whose references
 ## have moved or been rebuilt since is stale, joins nothing and fails the
-## check with a `pass_reason`, because whether a node is buried is unknown.
+## check with a `pass_reason`, because whether a node is buried is unknown —
+## and so does having NO report about this source (the DSL was edited and not
+## yet evaluated): the distances are reported, the verdict is false with
+## "interference evidence unavailable".
+##
+## THE VERTICES TRAVEL AS FLOAT32. Their quantization at the largest world
+## coordinate in scope is reported as `quantization_mm` (with
+## `largest_coordinate_mm`), stated in `bound`, and subtracted from every
+## pair's bound_mm beside the tessellation tolerance; a pose far enough from
+## the origin for it to exceed tolerance_mm is refused with a reason.
 ##
 ## THE POSES ARE THE ONES THE CHECK WAS CALLED WITH. The geometry is extracted
 ## and hashed at the poses of entry, so the worker's world answer is about
@@ -261,6 +270,15 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 			+ "nothing to measure a clearance against")
 
 	var targets: Array = []
+	# The coarsest float32 step among the vertices about to be measured, and
+	# the coordinate that set it. It is an error bar of its own: a vertex
+	# written as float32 lands on a grid whose pitch grows with the distance
+	# from the origin, and a pose far enough out puts that pitch above the
+	# tolerance the caller asked for — at which point no triangle-pair
+	# distance can be quoted to that tolerance and the check refuses rather
+	# than report a bar it cannot keep.
+	var quantization := 0.0
+	var largest := 0.0
 	for entry in parts:
 		var part: Dictionary = entry
 		var blob := _blob_for(part)
@@ -271,14 +289,30 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 			"node": part["node"],
 			"key": blob["digest"],
 		})
+		if float(blob.get("quantization_mm", 0.0)) > quantization:
+			quantization = float(blob["quantization_mm"])
+			largest = float(blob.get("largest_coordinate_mm", 0.0))
 	if targets.is_empty():
 		return _no_clearance("the references in scope carry no triangles")
+	if quantization > tolerance_mm:
+		var refused := _no_clearance(("the reference vertices are written as "
+			+ "float32 world millimetres, and at the largest coordinate in "
+			+ "scope (%s mm) that quantizes them to %s mm — coarser than the "
+			+ "%s mm tolerance asked for, so no distance could be quoted to it; "
+			+ "pose the assembly nearer the origin or loosen tolerance_mm")
+			% [largest, quantization, tolerance_mm])
+		refused["quantization_mm"] = quantization
+		refused["largest_coordinate_mm"] = largest
+		return refused
 
 	var head := {
 		"source": source,
 		"required_mm": required_mm,
 		"tolerance_mm": tolerance_mm,
 	}
+	# The quantization rides beside the request, not in it: the worker never
+	# sees it, and the reply is stamped with it here.
+	var bar := {"quantization_mm": quantization, "largest_coordinate_mm": largest}
 	var plan := _batch_targets(head, targets)
 	if plan.has("error"):
 		return _no_clearance(str(plan["error"]))
@@ -290,7 +324,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	var pinned := _pin(plan["batches"] as Array)
 	var report := await _measure(panel, head, plan["batches"] as Array, records,
 		_buried_pairs(document, source, records, panel),
-		bool(args.get("accept_unbounded_tolerance", false)))
+		bool(args.get("accept_unbounded_tolerance", false)), bar)
 	_unpin(pinned)
 	if bool(report.get("checked", false)):
 		report["references_moved"] = is_instance_valid(panel) \
@@ -302,7 +336,7 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 ## Ask every batch and fold the replies into one report. Split out so the pin
 ## its caller takes is dropped on every path out of the measurement.
 func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
-		buried: Dictionary, accept_unbounded: bool) -> Dictionary:
+		buried: Dictionary, accept_unbounded: bool, bar: Dictionary = {}) -> Dictionary:
 	var envelope: Dictionary = {}
 	var raw_pairs: Array = []
 	for batch_entry in batches:
@@ -315,6 +349,7 @@ func _measure(panel: Object, head: Dictionary, batches: Array, records: Array,
 				+ "did not run and gave no reason")))
 		envelope = reply
 		raw_pairs.append_array(reply.get("pairs", []) as Array)
+	envelope.merge(bar, true)
 	return _clearance_report(envelope, raw_pairs, records, buried, accept_unbounded)
 
 
@@ -550,8 +585,9 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["bound_mm"] = float(pair["min_mm"])
 			pair["pass"] = float(pair["min_mm"]) > 0.0 \
 				and float(pair["min_mm"]) >= required
-			pair["graded_on"] = "min_mm alone: the tolerance bar was waived " \
-				+ "by accept_unbounded_tolerance"
+			pair["graded_on"] = "min_mm alone (less the float32 quantization " \
+				+ "of the vertices): the tolerance bar was waived by " \
+				+ "accept_unbounded_tolerance"
 	var verdict := true
 	for entry in pairs:
 		if not bool((entry as Dictionary)["pass"]):
@@ -563,12 +599,39 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			+ "unrecognised curved faces in the solid, so the measured " \
 			+ "distances carry no error bar; pass accept_unbounded_tolerance " \
 			+ "to judge them on the distances alone"
-	# A report that could not decide the containment question — measured
-	# against reference poses or colliders that have since changed — leaves
-	# "is any node buried" unknown, and unknown is not a pass.
+	# THE JOIN IS EVIDENCE THE VERDICT NEEDS. A report that could not decide
+	# the containment question — measured against reference poses or
+	# colliders that have since changed — leaves "is any node buried"
+	# unknown; a report about another source, or none at all, leaves it just
+	# as unknown: the solid may since have grown around a node that the
+	# unsigned distance reports as a positive gap. Unknown is not a pass
+	# either way; the distances are still reported.
 	if bool(buried.get("stale", false)):
 		verdict = false
 		pass_reason = str(buried.get("reason", "the interference report is stale"))
+	elif not bool(buried.get("fresh", false)):
+		verdict = false
+		pass_reason = "interference evidence unavailable: no interference " \
+			+ "report describes this source, so whether any node is buried in " \
+			+ "the solid is unknown and a mesh-to-mesh distance cannot tell; " \
+			+ "evaluate the document (the check runs on every evaluation) and " \
+			+ "ask again"
+	# The float32 quantization of the shipped vertices is a second error bar
+	# beside the tessellation's, and it is subtracted from the same bound the
+	# verdict is graded on — one rule for both bars.
+	var quantization := float(envelope.get("quantization_mm", 0.0))
+	if quantization > 0.0:
+		for entry in pairs:
+			var pair: Dictionary = entry
+			if bool(pair.get("interference", false)):
+				continue
+			pair["bound_mm"] = maxf(float(pair["bound_mm"]) - quantization, 0.0)
+			if bool(pair.get("pass", false)) and float(pair["bound_mm"]) < required:
+				pair["pass"] = false
+				pair["note"] = ("the gap clears required_mm by less than the "
+					+ "float32 quantization of the reference vertices (%s mm)") \
+					% quantization
+				verdict = false
 	var report := {
 		"checked": true,
 		"units": "mm",
@@ -579,7 +642,14 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		"requested_tolerance_mm": float(envelope.get("requested_tolerance_mm",
 			envelope.get("tessellation_tolerance_mm", 0.0))),
 		"tolerance_bounded": bounded,
-		"bound": str(envelope.get("bound", "")),
+		"bound": str(envelope.get("bound", "")) + (("; the reference vertices "
+			+ "travel as float32 world millimetres, quantized to at most %s mm "
+			+ "at the largest coordinate (%s mm), and that quantization is "
+			+ "subtracted from bound_mm as well") % [quantization,
+				float(envelope.get("largest_coordinate_mm", 0.0))]
+			if quantization > 0.0 else ""),
+		"quantization_mm": quantization,
+		"largest_coordinate_mm": float(envelope.get("largest_coordinate_mm", 0.0)),
 		"solid_triangles": int(envelope.get("solid_triangles", 0)),
 		"engine": str(envelope.get("engine", "")),
 		"cache": envelope.get("cache", {}),
@@ -823,10 +893,17 @@ func _blob_for(part: Dictionary) -> Dictionary:
 
 ## Every triangle of `mesh`, transformed into world millimetres, packed into
 ## the blob body and hashed. Returns {} for a mesh with no triangles.
+##
+## The body is float32, so every coordinate lands on a grid whose pitch is the
+## float32 ulp at its magnitude: a hundredth of a micron at a few hundred
+## millimetres, whole millimetres past a hundred million. That pitch is an
+## error bar of its own, reported as quantization_mm with the coordinate that
+## set it, and the caller refuses to measure to a tolerance finer than it.
 func _extract_blob(mesh: Mesh, xform: Transform3D) -> Dictionary:
 	var points := PackedFloat32Array()
 	var indices := PackedInt32Array()
 	var vertex_count := 0
+	var largest := 0.0
 	for surface in range(mesh.get_surface_count()):
 		if mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
 			continue
@@ -840,6 +917,8 @@ func _extract_blob(mesh: Mesh, xform: Transform3D) -> Dictionary:
 			points.append(world.x)
 			points.append(world.y)
 			points.append(world.z)
+			largest = maxf(largest, maxf(absf(world.x),
+				maxf(absf(world.y), absf(world.z))))
 		vertex_count += vertices.size()
 		if arrays.size() > Mesh.ARRAY_INDEX and arrays[Mesh.ARRAY_INDEX] != null:
 			var source: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
@@ -874,7 +953,25 @@ func _extract_blob(mesh: Mesh, xform: Transform3D) -> Dictionary:
 		"body": body,
 		"vertices": vertex_count,
 		"triangles": triangles,
+		"quantization_mm": float32_ulp(largest),
+		"largest_coordinate_mm": largest,
 	}
+
+
+## The spacing between adjacent float32 values at magnitude `x`: 2^(e - 23)
+## for the exponent e with 2^e <= |x| < 2^(e+1). The exponent is found by
+## walking powers of two rather than by a logarithm, whose rounding at an exact
+## power of two would pick the neighbouring binade. Zero for zero.
+static func float32_ulp(x: float) -> float:
+	var magnitude := absf(x)
+	if magnitude <= 0.0:
+		return 0.0
+	var exponent := int(floor(log(magnitude) / log(2.0)))
+	while pow(2.0, exponent + 1) <= magnitude:
+		exponent += 1
+	while pow(2.0, exponent) > magnitude:
+		exponent -= 1
+	return pow(2.0, exponent - 23)
 
 
 ## Write the blobs for `keys` where the worker can read them, and sweep away

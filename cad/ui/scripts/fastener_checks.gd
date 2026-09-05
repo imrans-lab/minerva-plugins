@@ -6,7 +6,8 @@ extends RefCounted
 ## screw has to REACH the boss without meeting a capacitor on the way, it has
 ## to bite deep enough to hold, and the head has to land on something flat. An
 ## LLM iterating on the DSL can see none of that, and a picture of it says
-## nothing — so this check answers all four with millimetres, per screw.
+## nothing — so this check answers each of them — and whether the screw bottoms
+## out first — with millimetres, per screw.
 ##
 ## WHY A MODULE OF ITS OWN. geometry_checks.gd already holds the ray-walk
 ## interference check, the blob transport and the clearance report; this is a
@@ -47,16 +48,23 @@ extends RefCounted
 ## two hits that are the screw ARRIVING — the bore wall inside its own radius
 ## and span, and the boss's end face within a band of the mouth derived from
 ## the boss's own measured tilt — are filtered out by name. The same shank
-## rays then carry on down the ENGAGED bore, where the only solid they may
-## meet is the bore's wall at its own radius: a web or an inward rib below the
-## mouth is an obstruction there. The HEAD ring sees the references only: it
-## never has to reach the bore, and the solid on its span is the top of the
-## boss it is sitting on.
+## rays then carry on down the bore to where the screw's TIP reaches, where
+## the only solid they may meet is the bore's wall at its own radius with a
+## radial normal: a web, an inward rib or a shelf ending at the wall below the
+## mouth is an obstruction there, and solid across the bore at or past its
+## extent end is the FLOOR of a blind bore the screw would bottom out on. The
+## HEAD fan sees the solid as well as the references, and the one solid hit it
+## lets through is the face in the seat plane.
 ##
 ## ENGAGEMENT — the overlap of the screw's length, measured from the seat, with
 ## the bore's axial extent. Graded against a material default: thread-forming
 ## screws in a thermoplastic boss want 2.0 x d, which is `engagement_min_d`'s
 ## default; metal-to-metal is 1.0 to 1.5 and the caller states it.
+##
+## BOTTOMING — a blind bore shallower than the screw is long: the tip meets the
+## floor before the head meets its seat, and engagement can read as ample
+## while the joint never closes. Graded from the same rays as the path: the
+## floor the fan met, the tip's position, and the difference.
 ##
 ## HEAD SEAT — the head ring must reach the seat plane with nothing in front of
 ## it, and must find material there to sit on. A head hanging over the edge of
@@ -147,6 +155,11 @@ const CROSSING_ADVANCE_MM: float = 0.0002
 ## A solid surface this close to the bore's own radius IS the bore wall. It
 ## absorbs the chordal error of a tessellated wall, nothing more.
 const BORE_WALL_TOLERANCE_MM: float = 0.05
+## How far off perpendicular to the bore's axis a hit's normal may lean and
+## still be the bore's WALL: sin 15 degrees, so a drafted or tapered wall is
+## still the wall while a shelf or floor face at the same radius — whose
+## normal is axial, |dot| near 1 — is not.
+const BORE_WALL_MAX_AXIAL_NORMAL: float = 0.26
 ## How far short of its end plane a path span stops. A shank ring ray at the
 ## thread radius meets the boss's own face AT the mouth of the bore, and a head
 ## ring ray meets the board AT the seat: both are the screw ARRIVING, and a
@@ -539,10 +552,14 @@ func _one_screw(
 			wall_entry_t = wall_exit_t
 			wall_exit_t = wall_swap
 
+	# Where the screw's tip ends up with the head on its seat. Everything about
+	# depth — engagement, and whether a blind bore's floor is reached before
+	# the head is — is a comparison against this one number.
+	var tip_t := seat_t + length
 	# ISO 1101: the zone is measured over the length the screw is actually in
 	# the bore for, not over the whole feature.
 	var engaged_from := maxf(bore_entry_t, seat_t)
-	var engaged_to := minf(bore_exit_t, seat_t + length)
+	var engaged_to := minf(bore_exit_t, tip_t)
 	var engagement := maxf(0.0, engaged_to - engaged_from)
 	var min_d := float(verb_args.get("engagement_min_d", DEFAULT_ENGAGEMENT_D))
 	var engagement_required := min_d * dia
@@ -579,9 +596,11 @@ func _one_screw(
 	# a floor the modeller put above the stated depth are all in the screw's
 	# way just as surely as a lid over the hole, and a fan that stopped at the
 	# mouth called every one of them clear. The span starts past the mouth
-	# band (the boss's end face is the screw arriving) and ends just short of
-	# the engaged depth, so the bore's floor under a screw that bottoms out is
-	# not an obstruction either.
+	# band (the boss's end face is the screw arriving) and runs to where the
+	# TIP reaches: a blind bore's floor met inside that span means the screw
+	# is longer than the bore is deep and cannot seat — the fan reports that
+	# floor and the row grades it as bottoming, a different finding from an
+	# obstruction with the same consequence.
 	var expected := {
 		"point": bore_start,
 		"axis": bore_axis,
@@ -593,7 +612,9 @@ func _one_screw(
 		# the mouth at every azimuth the thread is on one side only, and the
 		# boss's trimmed end face is the screw arriving there too.
 		"bore_from_t": bore_entry_t + mouth_band,
-		"bore_to_t": engaged_to - PATH_END_EPSILON_MM,
+		"bore_to_t": tip_t - PATH_END_EPSILON_MM,
+		# Solid across the bore at or past the extent end is the bore's floor.
+		"bore_exit_t": bore_exit_t,
 		"datum": hole_centre,
 		"direction": direction,
 	}
@@ -631,6 +652,12 @@ func _one_screw(
 	var engagement_ok := extent_certain \
 		and engagement - engagement_bound >= engagement_required
 	var head_seat_clear := bool(head["clear"])
+	# BOTTOMING. The fan's bore span runs to the tip, so a floor it met is a
+	# floor the tip would reach: the screw runs out of bore before the head
+	# reaches its seat. Reported with the numbers — where the tip ends, where
+	# the floor is, by how much — because the fix is a shorter screw or a
+	# deeper bore and the reader has to know which millimetre to change.
+	var bottoming := shank["floor_t"] != null
 	var row := {
 		"reference": str(hole.get("reference", "")),
 		"node": str(hole.get("node", "")),
@@ -655,6 +682,9 @@ func _one_screw(
 		"engagement_required_mm": engagement_required,
 		"engagement_ok": engagement_ok,
 		"head_seat_clear": head_seat_clear,
+		"screw_tip_mm": tip_t,
+		"bore_floor_mm": shank["floor_t"],
+		"bottoming": bottoming,
 		# The span the screw can engage over (full circumference) and the span
 		# the bore's wall occupies. They differ by whatever a tilted trim cut
 		# off one side of the mouth.
@@ -663,6 +693,8 @@ func _one_screw(
 	}
 	if not bool(shank["clear"]):
 		row["obstructions"] = shank["obstructions"]
+	if bottoming:
+		row["bottoming_by_mm"] = tip_t - float(shank["floor_t"])
 	if head_dia > 0.0:
 		# The fraction of the SEAT RING that landed, over that ring's own ray
 		# count. The head fan is a different ring at a different radius, and
@@ -696,7 +728,8 @@ func _one_screw(
 	var coaxiality_ok := (not bool(zone.get("graded", false))) \
 		or bool(zone.get("pass", false))
 	row["pass"] = coaxiality_ok \
-		and bool(shank["clear"]) and engagement_ok and head_seat_clear
+		and bool(shank["clear"]) and engagement_ok and head_seat_clear \
+		and not bottoming
 	row["why"] = _why(row)
 	return row
 
@@ -845,7 +878,12 @@ func _iso_273_allowance(screw_dia: float, verb_args: Dictionary) -> Dictionary:
 ## its axis is the wall (the screw's thread is meant to meet it), and anything
 ## else there is an obstruction, reported with span "bore". A REFERENCE part
 ## at that radius — a sleeve, a post, a pin left in the bore — is not the
-## wall however exactly its surface sits on it; only the solid has a wall.
+## wall however exactly its surface sits on it; only the solid has a wall,
+## and the wall is told from a shelf ending at the same radius by its normal.
+## The bore span runs to where the screw's TIP reaches, so solid met at or
+## past the bore's extent end is the floor of a blind bore the screw would
+## bottom out on: it is returned as `floor_t` (the nearest such hit, or null),
+## not listed as an obstruction.
 func _fan_clear(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
@@ -865,6 +903,12 @@ func _fan_clear(
 	var rays := _disc_points(direction, radius)
 	var bore_from_t := float(expected.get("bore_from_t", INF))
 	var bore_to_t := float(expected.get("bore_to_t", -INF))
+	# Past the bore's extent end, inside the span the screw's tip reaches,
+	# the solid across the bore is the bore's FLOOR: the nearest such hit is
+	# reported rather than listed as an obstruction, because what it says is
+	# not "something is in the way" but "the screw is too long for this bore".
+	var floor_from_t := float(expected.get("bore_exit_t", INF)) - BORE_WALL_TOLERANCE_MM
+	var floor_t: Variant = null
 	var far_end := maxf(to_t, bore_to_t)
 	var travel := (far_end - from_t) + OUTSIDE_MARGIN_MM * 2.0 + (datum - origin).length()
 	var see_solid := not expected.is_empty()
@@ -884,9 +928,14 @@ func _fan_clear(
 					continue
 			elif t >= bore_from_t and t <= bore_to_t:
 				span = "bore"
-				if bool(crossing.get("solid", false)) \
-						and _is_the_bore_wall(crossing["point"], expected):
-					continue
+				if bool(crossing.get("solid", false)):
+					if _is_the_bore_wall(crossing["point"],
+							crossing.get("normal", Vector3.ZERO), expected):
+						continue
+					if t >= floor_from_t:
+						if floor_t == null or t < float(floor_t):
+							floor_t = t
+						continue
 			else:
 				continue
 			if obstructions.size() < MAX_OBSTRUCTIONS:
@@ -909,6 +958,7 @@ func _fan_clear(
 		"clear": obstructions.is_empty(),
 		"obstructions": obstructions,
 		"rays": rays.size(),
+		"floor_t": floor_t,
 	}
 
 
@@ -948,15 +998,24 @@ func _is_the_screw_arriving(point: Vector3, t: float, expected: Dictionary) -> b
 
 ## Is this hit on the solid, inside the engaged bore, the bore's own wall? A
 ## wall hit lies at the bore's radius about the bore's axis, to the
-## tessellation slack a chorded cylinder has; a hit nearer the axis is
-## something across the bore, and a hit further out is a surface in the
-## material the thread would bite. Radius alone cannot tell a reference part
-## from the wall, so the caller asks this only of solid hits.
-func _is_the_bore_wall(point: Vector3, expected: Dictionary) -> bool:
+## tessellation slack a chorded cylinder has, AND its face is the wall's: the
+## normal of a cylinder's facet is radial, perpendicular to the axis, while a
+## shelf or a floor ending at the wall has a face at that same radius whose
+## normal is axial — the same point in the bore, a different surface, and one
+## the screw cannot pass. A hit nearer the axis is something across the bore,
+## and a hit further out is a surface in the material the thread would bite.
+## Radius alone cannot tell a reference part from the wall either, so the
+## caller asks this only of solid hits. A hit that carries no normal (a shape
+## that cannot report one) falls back to the radius rule.
+func _is_the_bore_wall(point: Vector3, normal: Vector3, expected: Dictionary) -> bool:
 	var axis: Vector3 = expected["axis"]
 	var offset: Vector3 = point - (expected["point"] as Vector3)
 	var radial := (offset - axis * offset.dot(axis)).length()
-	return absf(radial - float(expected["radius"])) <= BORE_WALL_TOLERANCE_MM
+	if absf(radial - float(expected["radius"])) > BORE_WALL_TOLERANCE_MM:
+		return false
+	if normal.length_squared() < 0.5:
+		return true
+	return absf(normal.normalized().dot(axis)) <= BORE_WALL_MAX_AXIAL_NORMAL
 
 
 ## Do the panel's references still stand where this check's snapshot says?
@@ -1129,6 +1188,7 @@ func _crossings(
 			next = reference_hit["position"]
 			chosen = {
 				"point": next,
+				"normal": reference_hit.get("normal", Vector3.ZERO),
 				"node": str(reference_hit.get("node", "")),
 				"reference": str(reference_hit.get("reference", "")),
 			}
@@ -1137,7 +1197,7 @@ func _crossings(
 			if chosen.is_empty() or cursor.distance_to(point) < cursor.distance_to(next):
 				next = point
 				chosen = {"point": point, "node": "<solid>", "reference": "",
-					"solid": true}
+					"normal": solid_hit.get("normal", Vector3.ZERO), "solid": true}
 		if chosen.is_empty():
 			break
 		out.append(chosen)
@@ -1575,6 +1635,12 @@ func _why(row: Dictionary) -> String:
 		return "the screw engages %.2f mm of bore and needs %.2f mm" \
 			% [float(row.get("engagement_mm", 0.0)),
 			   float(row.get("engagement_required_mm", 0.0))]
+	if bool(row.get("bottoming", false)):
+		return ("the screw bottoms out: its tip reaches %.2f mm below the hole "
+			+ "centre and the bore's floor is at %.2f mm, so it is %.2f mm too "
+			+ "long to seat") % [float(row.get("screw_tip_mm", 0.0)),
+				float(row.get("bore_floor_mm", 0.0)),
+				float(row.get("bottoming_by_mm", 0.0))]
 	if not bool(row.get("head_seat_clear", true)):
 		var over: Array = row.get("head_obstructions", []) as Array
 		if not over.is_empty():

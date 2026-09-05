@@ -40,6 +40,10 @@ extends SceneTree
 ##             shell, which is the phantom the flush fixture's sibling exists
 ##             to catch.
 ##
+##   REBUILT   the shared gauge rebuilt by a newer evaluation while a check is
+##             parked at its physics step: that check is superseded, never
+##             stamped or painted; the rebuilding evaluation is measured.
+##
 ## The board is posed by a TURNED transform — a yaw about the CAD world's up
 ## axis and a lean about x, plus a translation — so nothing here can pass by
 ## treating the pose as a translation or the hole axis as world z. Every
@@ -292,6 +296,7 @@ func _run() -> void:
 	await _check_supersession(gauge, checks)
 	await _check_busy_refusal(gauge, checks)
 	await _check_colliders_behind_the_poses(gauge, checks)
+	await _check_rebuild_under_a_check_in_flight(gauge, checks)
 	# From here on each check rebuilds the gauge and the records around its
 	# own reference.
 	await _check_thin_plate(gauge, checks)
@@ -1643,6 +1648,115 @@ func _check_colliders_behind_the_poses(gauge: Node, checks: RefCounted) -> void:
 		"mesh": (record["parts"] as Array)[0]["mesh"], "transform": _pose,
 		"node": BOARD_NODE, "reference": BOARD_REFERENCE,
 	}], "interference-fixture|restored")
+	panel.queue_free()
+
+
+# ---------------------------------------------------------------------------
+# A REBUILD UNDER A CHECK IN FLIGHT — two epochs must not make one answer
+# ---------------------------------------------------------------------------
+
+## The gauge is shared. Evaluation A's check is parked waiting for its physics
+## step when evaluation B re-poses the board (its record rewritten in place,
+## as the panel does), rebuilds the colliders at the new pose and queues its
+## own check. A's rays now meet B's colliders while A's records and A's stamp
+## describe the old pose — an answer about no document at all. A has to come
+## back superseded, unstamped and unpainted, and B — whose records and
+## colliders agree — is the one measured, stamped with the lifted digest and
+## painted. The pane is cleared first so a marker can only be B's, and both
+## solids are baked before A starts so nothing yields between A parking, the
+## rebuild and B queuing.
+func _check_rebuild_under_a_check_in_flight(gauge: Node, checks: RefCounted) -> void:
+	var through: Dictionary = await _shell_mesh(BOSS_THROUGH_BOTTOM_Z)
+	var clear: Dictionary = await _shell_mesh(BOSS_CLEAR_BOTTOM_Z)
+	var panel := _stand_in_panel(gauge)
+	var mesh_root: Node = panel.get_node_or_null(MESH_ROOT_PATH)
+	var record: Dictionary = _records[0]
+	var mesh: Mesh = ((record["parts"] as Array)[0] as Dictionary)["mesh"]
+	var lifted := Transform3D(_pose.basis,
+		_pose.origin + _pose.basis * Vector3(0.0, 0.0, LIFT_MM))
+
+	panel.mesh_data = clear
+	var cleared: Dictionary = await checks.check(panel, {})
+	var clear_before := bool(cleared.get("painted", false)) and mesh_root != null \
+		and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) == null
+
+	# A: interfering at the old pose, parked at its physics step.
+	var replies: Array = []
+	panel.mesh_data = through
+	_collect(checks, panel, replies)
+	var old_stamp := str(gauge.get_bodies_digest())
+	var old_generation := int(gauge.get_generation())
+	# B: re-pose in place, rebuild the shared gauge, queue.
+	record["pose"] = lifted
+	gauge.build([{"mesh": mesh, "transform": lifted, "node": BOARD_NODE,
+		"reference": BOARD_REFERENCE}], "interference-fixture|lifted")
+	var lifted_stamp := str(gauge.get_bodies_digest())
+	panel.mesh_data = clear
+	_collect(checks, panel, replies)
+
+	var sampled_at_a := false
+	var painted_at_a := false
+	for _frame in range(900):
+		if replies.size() >= 1 and not sampled_at_a:
+			sampled_at_a = true
+			painted_at_a = mesh_root != null \
+				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null
+		if replies.size() >= 2:
+			break
+		await process_frame
+	var a: Dictionary = replies[0] if replies.size() > 0 else {}
+	var b: Dictionary = replies[1] if replies.size() > 1 else {}
+	record["pose"] = _pose
+
+	check("rebuild in flight: the check whose colliders were rebuilt under it "
+			+ "comes back superseded — not checked, no count, no stamp, "
+			+ "nothing painted — and says the colliders were rebuilt while "
+			+ "it waited",
+			clear_before and replies.size() == 2
+				and bool(a.get("superseded", false))
+				and not bool(a.get("checked", true))
+				and int(a.get("count", -1)) == 0
+				and not a.has("records_digest")
+				and not a.has("gauge_generation")
+				and not bool(a.get("painted", false))
+				and str(a.get("reason", "")).contains("rebuilt")
+				and sampled_at_a and not painted_at_a
+				and old_stamp != lifted_stamp,
+			"a = %s, sampled = %s, painted_at_a = %s, cleared = %s" % [
+				str(a), str(sampled_at_a), str(painted_at_a), str(cleared.get("painted"))])
+
+	# B's crossing is at the lifted pose: the clear boss runs into the lifted
+	# board's top face, local z = +half the thickness in the lifted frame.
+	var pairs: Array = b.get("pairs", []) as Array
+	var first: Dictionary = pairs[0] if not pairs.is_empty() else {}
+	var points: Array = first.get("points_mm", []) as Array
+	var at_the_lifted_top := not points.is_empty()
+	for entry in points:
+		var point: Dictionary = entry
+		var local := _as_vector(point.get("local", []))
+		var in_old_frame: Vector3 = _pose.affine_inverse() * _as_vector(point.get("world", []))
+		if absf(local.z - BOARD.z * 0.5) > POINT_TOLERANCE_MM \
+				or absf(in_old_frame.z - (BOARD.z * 0.5 + LIFT_MM)) > POINT_TOLERANCE_MM:
+			at_the_lifted_top = false
+	check("rebuild in flight: the evaluation that rebuilt the colliders is the "
+			+ "one measured — checked against its own colliders without a "
+			+ "second rebuild, stamped with the lifted digest and the new "
+			+ "generation, its crossing at the lifted top face, and painted",
+			bool(b.get("checked", false))
+				and not bool(b.get("superseded", false))
+				and int(b.get("count", 0)) == 1
+				and str(first.get("node", "")) == BOARD_NODE
+				and at_the_lifted_top
+				and str(b.get("records_digest", "")) == lifted_stamp
+				and int(b.get("gauge_generation", -1)) == old_generation + 1
+				and not bool(b.get("colliders_rebuilt", false))
+				and bool(b.get("painted", false))
+				and mesh_root != null
+				and mesh_root.get_node_or_null(GeometryChecks.MARKER_NODE_NAME) != null,
+			"b = %s, lifted = %s, generation %d" % [str(b), lifted_stamp, old_generation])
+
+	gauge.build([{"mesh": mesh, "transform": _pose, "node": BOARD_NODE,
+		"reference": BOARD_REFERENCE}], "interference-fixture|after-the-rebuild")
 	panel.queue_free()
 
 

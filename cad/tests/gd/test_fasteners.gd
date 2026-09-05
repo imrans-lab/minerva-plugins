@@ -43,6 +43,9 @@ extends SceneTree
 ##      the axis                                -> passes, with HALF its seat
 ##      ring unsupported: the one number that grades how the head lands
 ##
+## Two more on a one-boss shell: a thin SHELF at the bore radius is told from
+## the wall by its normal, and a 10 mm screw in the 8.2 mm blind bore BOTTOMS.
+##
 ## THE POSE IS TURNED, and that is load-bearing. The board is yawed about the
 ## CAD world's up axis and leaned about x, so the screw axis is nowhere near
 ## world z and every seat, obstruction and offset has to come from the hole's
@@ -165,6 +168,22 @@ const SLEEVE_SCREW_DIA := BORE_R * 2.0
 const BRIDGE_INNER_R := 2.0
 const BRIDGE_OUTER_R := 2.8
 const BRIDGE_HEIGHT := 1.0
+## A thin annular shelf inside boss A's bore, SHELF_DROP_MM below its mouth:
+## its exposed top face spans only R-0.05..R (the rest merges into the wall),
+## so every point of it lies within the bore-wall radius tolerance — a hit
+## there is told from the wall by its NORMAL alone. The screw diameter puts
+## the fan's outer ring at 1.17 mm: over the shelf, inside the chorded wall.
+const SHELF_DROP_MM := 2.0
+const SHELF_INNER_R := BORE_R - 0.05
+const SHELF_OUTER_R := 1.5
+const SHELF_HEIGHT := 0.3
+const SHELF_SCREW_DIA := 2.34
+const SHELF_RING_R := SHELF_SCREW_DIA * 0.5
+## A screw longer than boss A's blind bore is deep: seat at -0.8, tip at
+## 9.2 axial, floor (the full-turn extent end) at 0.8 + 8.2 = 9.0.
+const BOTTOMING_SCREW_LENGTH := 10.0
+const BORE_FLOOR_T := BOARD_HALF_THICKNESS + BORE_LENGTH
+const BOTTOMING_TIP_T := -BOARD_HALF_THICKNESS + BOTTOMING_SCREW_LENGTH
 
 # --- the screw ---------------------------------------------------------------
 const SCREW_DIA := 3.0
@@ -323,6 +342,8 @@ func _run() -> void:
 	await _check_web_in_bore(module, panel)
 	await _check_sleeve_in_bore(module, panel)
 	await _check_bridge_over_the_seat(module, panel)
+	await _check_shelf_in_bore(module, panel)
+	await _check_bottoming(module, panel, report)
 	await _check_pose_snapshot(module, panel)
 
 
@@ -1156,11 +1177,12 @@ func _webbed_shell_mesh() -> Dictionary:
 ## One coaxial boss at hole 1, with a web `web_drop` below its mouth when that
 ## is positive and, when `bridge` is set, an annular bridge of the shell
 ## standing on the board's top face around the hole.
-func _one_boss_shell_mesh(web_drop: float, bridge: bool) -> Dictionary:
+func _one_boss_shell_mesh(web_drop: float, bridge: bool,
+		shelf_drop: float = 0.0) -> Dictionary:
 	var combiner := CSGCombiner3D.new()
 	combiner.name = "OneBossShell"
 	var xform := _boss_transform(HOLE_XY[0], 0.0, 0.0)
-	_add_boss(combiner, xform, 0.0, web_drop)
+	_add_boss(combiner, xform, 0.0, web_drop, shelf_drop)
 	if bridge:
 		var holder := CSGCombiner3D.new()
 		holder.transform = xform
@@ -1324,6 +1346,103 @@ func _check_bridge_over_the_seat(module: RefCounted, panel: Node) -> void:
 				and str(row.get("why", "")).contains("<solid>")
 				and bool(row.get("engagement_ok", false)),
 			"row = %s" % str(row))
+
+
+# ---------------------------------------------------------------------------
+# A SHELF at the bore radius — the wall is a face, not a radius
+# ---------------------------------------------------------------------------
+
+## Inside the engaged bore a solid hit at the bore's radius used to be the
+## wall by that fact alone. A thin shelf ending at the wall has a top face at
+## that same radius, and a ray over it meets a face whose normal is AXIAL —
+## the screw stops there. The fan's outer ring at 1.17 mm lies within the
+## 0.05 mm wall tolerance of the 1.2 mm bore, so only the normal can tell.
+func _check_shelf_in_bore(module: RefCounted, panel: Node) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+	panel.mesh_data = await _one_boss_shell_mesh(0.0, false, SHELF_DROP_MM)
+	panel.bores = [_bores[0]]
+	var report: Dictionary = await module.check(panel, {
+		"screw": {"dia_mm": SHELF_SCREW_DIA, "length_mm": SCREW_LENGTH,
+			"head_dia_mm": HEAD_DIA},
+		"holes": _holes(),
+	})
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+
+	var row := _row_at(report, HOLE_XY[0])
+	var obstructions: Array = row.get("obstructions", []) as Array
+	var first: Dictionary = obstructions[0] if not obstructions.is_empty() else {}
+	var shelf_top := BOARD_HALF_THICKNESS + SHELF_DROP_MM
+	check("shelf: a thin annular shelf spanning R-0.05..R at 2 mm depth blocks "
+			+ "the screw — the obstruction is the SOLID inside the engaged "
+			+ "bore at the shelf's top, met by a ray within the wall radius "
+			+ "tolerance of the bore radius (the radius rule alone would have "
+			+ "called it the wall), and `why` says so",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 1
+				and not bool(row.get("path_clear", true))
+				and not bool(row.get("pass", true))
+				and str(first.get("node", "")) == "<solid>"
+				and str(first.get("span", "")) == "bore"
+				and absf(float(first.get("axial_mm", -99.0)) - shelf_top)
+					<= NUMERIC_TOLERANCE_MM
+				and absf(float(first.get("ray_radius_mm", -99.0)) - SHELF_RING_R)
+					<= NUMERIC_TOLERANCE_MM
+				and absf(float(first.get("ray_radius_mm", -99.0)) - BORE_R)
+					<= FastenerChecks.BORE_WALL_TOLERANCE_MM
+				and str(row.get("why", "")).contains("inside the engaged bore")
+				and bool(row.get("head_seat_clear", false))
+				and not bool(row.get("bottoming", true)),
+			"row = %s" % str(row))
+
+
+# ---------------------------------------------------------------------------
+# BOTTOMING — a screw longer than its blind bore is deep
+# ---------------------------------------------------------------------------
+
+## Boss A's bore is blind, 8.2 mm deep from a mouth 0.8 mm under the seat, so
+## its floor is 9.0 mm down the axis. A 10 mm screw's tip ends 9.2 mm down: it
+## meets the floor before the head meets the board, with engagement (8.2 mm)
+## reading as ample and the path otherwise clear. The row must say bottoming,
+## with the tip, the floor and the 0.2 mm excess — and the main report's 8 mm
+## screw in the same bore must not.
+func _check_bottoming(module: RefCounted, panel: Node, main: Dictionary) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+	panel.mesh_data = await _one_boss_shell_mesh(0.0, false)
+	panel.bores = [_bores[0]]
+	var report: Dictionary = await module.check(panel, {
+		"screw": {"dia_mm": SCREW_DIA, "length_mm": BOTTOMING_SCREW_LENGTH,
+			"head_dia_mm": HEAD_DIA},
+		"holes": _holes(),
+	})
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+
+	var row := _row_at(report, HOLE_XY[0])
+	var fine := _row_at(main, HOLE_XY[0])
+	check("bottoming: a 10 mm screw in the 8.2 mm blind bore bottoms out — "
+			+ "tip at 9.2, floor at 9.0, 0.2 mm too long — the row fails on "
+			+ "that alone with the path clear, the bite ample and the head "
+			+ "seated, `why` says so, and the 8 mm screw in the same bore "
+			+ "does not bottom",
+			bool(report.get("checked", false)) and int(report.get("count", 0)) == 1
+				and bool(row.get("bottoming", false))
+				and not bool(row.get("pass", true))
+				and absf(float(row.get("screw_tip_mm", 0.0)) - BOTTOMING_TIP_T)
+					<= NUMERIC_TOLERANCE_MM
+				and absf(float(row.get("bore_floor_mm", 0.0)) - BORE_FLOOR_T)
+					<= NUMERIC_TOLERANCE_MM
+				and absf(float(row.get("bottoming_by_mm", 0.0))
+					- (BOTTOMING_TIP_T - BORE_FLOOR_T)) <= NUMERIC_TOLERANCE_MM
+				and bool(row.get("path_clear", false))
+				and bool(row.get("engagement_ok", false))
+				and bool(row.get("head_seat_clear", false))
+				and str(row.get("why", "")).contains("bottoms out")
+				and not bool(fine.get("bottoming", true))
+				and fine.get("bore_floor_mm", 0.0) == null
+				and bool(fine.get("pass", false)),
+			"row = %s, main A = %s" % [str(row), str(fine.get("why", fine.get("pass")))])
 
 
 # ---------------------------------------------------------------------------
@@ -1495,9 +1614,9 @@ func _shell_mesh() -> Dictionary:
 ## `drop` lowers the boss (and its bore) away from the board, leaving a gap the
 ## rib then bridges. A boss with no drop sits against the board's underside.
 ## `web_drop`, when positive, leaves a web across the bore that far below its
-## mouth.
+## mouth; `shelf_drop`, when positive, a thin annular shelf at the wall.
 func _add_boss(combiner: CSGCombiner3D, xform: Transform3D, drop: float,
-		web_drop: float = 0.0) -> void:
+		web_drop: float = 0.0, shelf_drop: float = 0.0) -> void:
 	var boss := CSGCylinder3D.new()
 	boss.radius = BOSS_OUTER_R
 	boss.height = BORE_TOP_Z - BOSS_BOTTOM_Z
@@ -1537,6 +1656,13 @@ func _add_boss(combiner: CSGCombiner3D, xform: Transform3D, drop: float,
 		web.position = Vector3(0.0, 0.0,
 			BORE_TOP_Z - drop - web_drop - WEB_SIZE.z * 0.5)
 		holder.add_child(web)
+	if shelf_drop > 0.0:
+		# The shelf: a tube whose outside merges into the wall, leaving a
+		# ring of top face R-0.05..R exposed. Added after the cutter.
+		var shelf := _tube(SHELF_OUTER_R, SHELF_INNER_R, SHELF_HEIGHT)
+		shelf.position = Vector3(0.0, 0.0,
+			BORE_TOP_Z - drop - shelf_drop - SHELF_HEIGHT * 0.5)
+		holder.add_child(shelf)
 	combiner.add_child(holder)
 
 

@@ -405,6 +405,10 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 		# answer still goes back to this caller, and nothing else happens.
 		return _superseded(report)
 	release_reservation(ticket)
+	# The run itself found its epoch mixed (the colliders were rebuilt under
+	# it): nothing on screen may come from that.
+	if bool(report.get("superseded", false)):
+		return report
 	# Only the newest request may paint. A superseded reply still goes back to
 	# its own caller — it is a true answer about the geometry it was asked
 	# about — but repainting from it would leave the previous evaluation's red
@@ -612,7 +616,11 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	if triangles == 0:
 		return _nothing("the evaluation produced no solid geometry to check")
 
-	set_records(panel.get_reference_state())
+	# A COPY of the panel's records, never its live array: a re-pose rewrites
+	# a record's pose in place, and the job that reads _records runs after an
+	# await. The deep duplicate copies the dictionaries and their poses and
+	# shares the meshes, which are never rewritten under a record.
+	set_records((panel.get_reference_state() as Array).duplicate(true))
 	# The colliders have to be the ones THESE records describe. A pose is
 	# rewritten in place and the panel rebuilds lazily, so a check can begin
 	# with the records already ahead of the gauge and nothing changing during
@@ -664,6 +672,21 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 		"reference": reference_scope,
 		"node": str(args.get("node", "")),
 	})
+	# THE COLLIDERS THE RAYS MET MUST BE THE ONES STAMPED ABOVE. The gauge is
+	# shared: a newer evaluation re-poses its references and rebuilds it
+	# before it queues here, and a measurement verb rebuilds it on demand, so
+	# the physics step this check waited for can have cast against another
+	# epoch's colliders while the records and the stamp are this one's. That
+	# answer belongs to neither document, so it is superseded — the newest
+	# evaluation is queued and re-measures anyway — and nothing is stamped or
+	# painted from it.
+	if bool(reply.get("checked", false)) \
+			and (str(gauge.call("get_bodies_digest")) != records_digest
+				or int(gauge.call("get_generation")) != gauge_generation):
+		return _superseded(_nothing("the reference colliders were rebuilt "
+			+ "while this check waited for its physics step, so its rays may "
+			+ "have met another evaluation's geometry; the evaluation that "
+			+ "rebuilt them is checked in its own right"))
 	# Which solid, which reference poses and which colliders the report
 	# describes. The clearance verb joins this report only when all three
 	# match the state it is about to measure against, so a report about an

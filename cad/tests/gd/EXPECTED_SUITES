@@ -214,7 +214,12 @@ test_cad_note.gd assertions=40
 # 0.003 mm plate is probed and kept, one through a 0.0015 mm plate cannot be
 # probed and is kept by the keep-the-crossing rule — both off the plate's
 # face diagonals, so the plate's own edges cannot report the crossing.
-# 64 assertions = 3 fixture + 5 collider +
+# And the shared gauge REBUILT under a check in flight: a check parked at its
+# physics step when a newer evaluation re-poses in place, rebuilds the
+# colliders and queues comes back superseded — unchecked, unstamped,
+# unpainted — and the evaluation that rebuilt them is the one measured,
+# stamped with the new digest and generation, and painted.
+# 66 assertions = 3 fixture + 5 collider +
 # 8 through + 3 clear + 2 sliver + 2 buried + 2 enclosed + 2 flush + 2 scope +
 # 6 queue/supersession (+1: a queued newer evaluation revokes the running
 # check's paint) + 2 pin + 6 busy/reclaim + 5 neighbour/undecidable
@@ -226,8 +231,10 @@ test_cad_note.gd assertions=40
 # (+1: the tetrahedron that only leaves the plate) + 1 per-node parity
 # budget + 2 colliders behind the poses (the rebuild and its digests; the
 # crossing at the new pose) + 3 probe limit (the fixture straddles the
-# diameter; the probed plate; the kept plate).
-test_interference.gd assertions=64
+# diameter; the probed plate; the kept plate) + 2 rebuild under a check in
+# flight (the superseded check; the rebuilding evaluation's stamped, painted
+# answer).
+test_interference.gd assertions=66
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -288,15 +295,23 @@ test_interference.gd assertions=64
 # at: a clean report about THIS source whose reference has since been moved
 # (pose rewritten in place) or whose colliders have since been rebuilt is
 # stale — nothing is joined, the check does not pass, and the reason says so —
-# while a report stamped at the current state passes again.
-# 45 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
-# fixture and the byte-measured refusal) + 4 refusal + 7 buried (+2: the
+# while a report stamped at the current state passes again. And NO report
+# about this source is the same unknown: the DSL edited so the solid encloses
+# a bar, asked before the new evaluation, does not pass ("interference
+# evidence unavailable") while the unsigned distances are still reported.
+# The vertices travel as float32: their quantization at the largest world
+# coordinate is reported, stated in the bound and subtracted from bound_mm
+# (2^-15 mm at the fixture's 300 mm), and a pose 1e8 mm out — 8 mm steps —
+# is refused with the number rather than measured to a bar it cannot keep.
+# 48 assertions = 3 fixture + 8 upload + 9 answer + 6 cap (+2: the multibyte
+# fixture and the byte-measured refusal) + 4 refusal + 8 buried (+2: the
 # undecidable node and the undecidable reference; +1: a stale report — moved
-# poses or rebuilt colliders — is not a pass) + 2 pin/blob across a
-# re-pose (+1: the corrupted same-length file) + 1 pose rewritten in place
-# + 2 unbounded tolerance (+1: the waiver grades on the distance alone)
-# + 3 isolation.
-test_clearance.gd assertions=45
+# poses or rebuilt colliders — is not a pass; +1: no report about this source
+# is not a pass either) + 2 pin/blob across a re-pose (+1: the corrupted
+# same-length file) + 1 pose rewritten in place + 2 unbounded tolerance (+1:
+# the waiver grades on the distance alone) + 2 quantization (the fixture's
+# 2^-15 mm step reported and subtracted; the far pose refused) + 3 isolation.
+test_clearance.gd assertions=48
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
@@ -366,8 +381,13 @@ test_clearance.gd assertions=45
 # that radius — is an obstruction naming the sleeve. And the head fan sees
 # the solid too: an annular bridge of the shell standing on the seat, outside
 # the shank and inside the head, fails head_seat_clear naming the solid while
-# the shank path and the seat ring are untouched.
-# 61 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
+# the shank path and the seat ring are untouched. The wall is a FACE, not a
+# radius: a thin shelf spanning R-0.05..R at depth, met by a ray within the
+# wall tolerance of the bore radius, is an obstruction because its normal is
+# axial. And a screw longer than its blind bore is deep BOTTOMS: the fan runs
+# to the tip, meets the floor at the extent end, and the row fails with the
+# tip, the floor and the excess while the 8 mm screw in the same bore does not.
+# 63 assertions = 4 fixture + 4 envelope (+1: the disc's radial AND angular
 # spacing, with the rays it placed counted) + 5 pairing (+1: the groove is not
 # paired and is named, +1: partial surfaces are asked for and a one-bin-short
 # bore is still a bore) + 8 A (+1: engagement measured on the
@@ -378,10 +398,12 @@ test_clearance.gd assertions=45
 # one ring at a stated radius) + 3 fit + 1 banner + 3 ISO 273 + 1 seat
 # + 5 refusal (+1: an empty check reports its own counters, +1: an inexact
 # extent is not graded) + 1 web in the bore + 1 reference sleeve at the bore
-# radius + 1 solid bridge over the seat + 4 poses (+1: a mid-flight
+# radius + 1 solid bridge over the seat + 1 shelf at the bore radius (told
+# from the wall by its normal) + 1 bottoming (10 mm screw, 8.2 mm blind bore)
+# + 4 poses (+1: a mid-flight
 # collider rebuild comes
 # back stale, with no rows measured against holes that describe where the
 # references used to be, +1: a pose rewritten in place under a waiting check
 # is stale as well, +1: a check that starts with the colliders already
 # behind the poses is stale or rebuilds, never a mixed epoch).
-test_fasteners.gd assertions=61
+test_fasteners.gd assertions=63

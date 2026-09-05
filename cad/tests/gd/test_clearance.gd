@@ -46,7 +46,9 @@ extends SceneTree
 ## A mesh-to-mesh distance is unsigned: a node buried in the solid's material
 ## is a positive surface-to-surface number, and on its own reads as clearance.
 ## The verb therefore joins the panel's latest interference report, and the
-## suite drives both halves of that — a joined report and a stale one.
+## suite drives every state of that — a joined report, a stale one, and none
+## about this source at all, which is no pass either. The vertices travel as
+## float32, and their quantization is an error bar the reply carries.
 ##
 ## Run:
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
@@ -90,6 +92,19 @@ const FAR_NODE := "Assembly/Far"
 ## The document the panel would hand over. Its text is forwarded verbatim; the
 ## suite never evaluates it, the worker does.
 const SOURCE := "part = translate([-2, -50, 0.8], cube(4, 100, 2))"
+## The same document EDITED so the solid grows down around the near bar. The
+## stand-in worker never reads the source, so its unsigned 0.8 mm stands —
+## which is exactly the blind spot: only an interference report about THIS
+## text could say the bar is now inside, and none has been made yet.
+const ENCLOSING_SOURCE := "part = translate([-2, -50, -3.0], cube(4, 100, 6))"
+## A pose far enough from the origin that float32 world millimetres are
+## quantized to whole millimetres: 1e8 lies in [2^26, 2^27), where the float32
+## spacing is 2^(26-23) = 8 mm.
+const FAR_ORIGIN := Vector3(1.0e8, 0.0, 0.0)
+const FAR_QUANTIZATION_MM := 8.0
+## The fixture's largest world coordinate is POSE_ORIGIN.z = 300, in
+## [2^8, 2^9), where the float32 spacing is 2^(8-23).
+const NEAR_QUANTIZATION_MM := 0.000030517578125
 
 ## The host caps a panel to plugin IPC payload at 64 KiB
 ## (PluginScenePanelBroker.MAX_PAYLOAD_BYTES). The whole reason the arrays
@@ -170,6 +185,9 @@ func _run() -> void:
 		],
 	}]
 	root.add_child(panel)
+	# The evidence every passing clearance needs: a clean interference report
+	# about this source at these poses. Without one the verdict is false.
+	panel.last_eval = _interference_over(SOURCE, [])
 
 	var checks: RefCounted = GeometryChecks.new()
 	checks.attach(root)
@@ -188,6 +206,7 @@ func _run() -> void:
 	await _check_pin_across_a_repose(panel, checks)
 	await _check_pose_rewritten_in_place(panel, checks)
 	await _check_unbounded_tolerance(panel, checks)
+	await _check_quantization(panel, checks)
 	_check_isolation(checks)
 	_clear_blob_dir()
 
@@ -509,12 +528,19 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 			"join = '%s'" % str(report.get("interference_join", "")))
 
 	# A report about another document describes another solid. Joining it would
-	# fail a node for an overlap that no longer exists.
-	panel.last_eval = _interference_over(SOURCE + "\n# something else",
-		[NEAR_NODE])
-	var stale: Dictionary = await checks.check_clearance(panel,
+	# fail a node for an overlap that no longer exists — and NOT having a
+	# report about this one leaves the question it answers open. Here the DSL
+	# is edited so the solid grows around the near bar and clearance is asked
+	# before the new evaluation has run: the stand-in worker still answers
+	# 0.8 mm of unsigned air, and the only report there is names the OLD
+	# source (and, as it happens, the near node — which must not be joined
+	# either).
+	panel.last_eval = _interference_over(SOURCE, [NEAR_NODE])
+	panel.source = ENCLOSING_SOURCE
+	var unavailable: Dictionary = await checks.check_clearance(panel,
 		{"required_mm": 0.5})
-	var unjoined := _pair_for(stale, NEAR_NODE)
+	panel.source = SOURCE
+	var unjoined := _pair_for(unavailable, NEAR_NODE)
 	# The other half of the same blind spot. A node whose containment the
 	# interference check could not DECIDE — every probe it offered landed in a
 	# hole or a cavity — is exactly the node whose unsigned distance cannot be
@@ -559,13 +585,25 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 			"report = %s" % str(whole))
 
 	check("buried: an interference report about a DIFFERENT source is not "
-			+ "joined, and the reply says the distances are unsigned",
+			+ "joined — the node it names keeps its measured gap and its own "
+			+ "pass — and the reply says the distances are unsigned",
 			absf(float(unjoined.get("min_mm", -1.0)) - GAP_MM) < GAP_TOLERANCE_MM
 				and bool(unjoined.get("pass", false))
-				and bool(stale.get("pass", false))
-				and str(stale.get("interference_join", "")).contains("unsigned"),
+				and not bool(unjoined.get("interference", false))
+				and (unavailable.get("pairs", []) as Array).size() == 2
+				and str(unavailable.get("interference_join", "")).contains("unsigned"),
 			"pair = %s, join = '%s'" % [str(unjoined),
-				str(stale.get("interference_join", ""))])
+				str(unavailable.get("interference_join", ""))])
+	check("unavailable: with the DSL edited so the solid encloses the near bar "
+			+ "and no evaluation of it yet, the clearance does NOT pass — "
+			+ "'interference evidence unavailable' — while the worker's "
+			+ "unsigned distances are still reported",
+			bool(unavailable.get("checked", false))
+				and not bool(unavailable.get("pass", true))
+				and str(unavailable.get("pass_reason", "")).contains(
+					"interference evidence unavailable")
+				and (unavailable.get("pairs", []) as Array).size() == 2,
+			"report = %s" % str(unavailable))
 
 	# THE JOIN IS ONLY AS FRESH AS THE POSES AND COLLIDERS IT WAS MEASURED
 	# AT. The DSL is unchanged, so the source digest still matches — but the
@@ -619,7 +657,7 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 					after_move.get("pass"))), str(after_rebuild.get("pass_reason",
 					after_rebuild.get("pass"))), str(restamped.get("pass_reason",
 					restamped.get("pass")))])
-	panel.last_eval = {}
+	panel.last_eval = _interference_over(SOURCE, [])
 
 
 ## An eval result carrying an interference report over `nodes`, stamped with
@@ -931,6 +969,9 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 	_mode = "measure"
 	var refused_near := _pair_for(refused, NEAR_NODE)
 	var waived_near := _pair_for(waived, NEAR_NODE)
+	# bound_mm carries the float32 quantization of the vertices too (a
+	# thirty-thousandth of a millimetre at this pose), waived bar or not.
+	var quantum := float(refused.get("quantization_mm", 0.0))
 	check("tolerance: with the bar waived the grade IS the distance — a "
 			+ "0.505 mm gap, 0.5 mm required, 0.01 mm estimated fails on the "
 			+ "worker's subtraction, passes on min_mm alone under the "
@@ -938,13 +979,13 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 			+ "with the reason without it",
 			absf(float(refused.get("tessellation_tolerance_mm", 0.0)) - 0.01) < 1.0e-9
 				and absf(float(refused_near.get("min_mm", 0.0)) - 0.505) < 1.0e-6
-				and absf(float(refused_near.get("bound_mm", 0.0)) - 0.495) < 1.0e-6
+				and absf(float(refused_near.get("bound_mm", 0.0)) - (0.495 - quantum)) < 1.0e-9
 				and not bool(refused_near.get("pass", true))
 				and not bool(refused.get("pass", true))
 				and str(refused.get("pass_reason", "")).contains("not guaranteed")
 				and not refused.has("tolerance_waived")
 				and bool(waived_near.get("pass", false))
-				and absf(float(waived_near.get("bound_mm", 0.0)) - 0.505) < 1.0e-6
+				and absf(float(waived_near.get("bound_mm", 0.0)) - (0.505 - quantum)) < 1.0e-9
 				and str(waived_near.get("graded_on", "")).contains("waived")
 				and bool(waived.get("pass", false))
 				and bool(waived.get("tolerance_waived", false))
@@ -952,6 +993,58 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 				and not waived.has("pass_reason")
 				and not bool(waived.get("tolerance_bounded", true)),
 			"refused = %s, waived = %s" % [str(refused_near), str(waived)])
+
+
+# ---------------------------------------------------------------------------
+# THE VERTICES TRAVEL AS FLOAT32
+# ---------------------------------------------------------------------------
+
+## The blob body is float32, so every world coordinate lands on a grid whose
+## pitch is the float32 spacing at its magnitude — an error bar of its own,
+## beside the tessellation's. At the fixture's pose it is 2^-15 mm and is
+## reported, stated in the bound and subtracted from bound_mm; at a pose a
+## hundred million millimetres out it is 8 mm, coarser than any tolerance
+## asked for, and the check refuses with the number rather than quote a bar
+## it cannot keep.
+func _check_quantization(panel: Node, checks: RefCounted) -> void:
+	_payloads.clear()
+	var near: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var near_pair := _pair_for(near, NEAR_NODE)
+	var quantum := float(near.get("quantization_mm", 0.0))
+	check("quantization: at the fixture's pose the float32 step is 2^-15 mm — "
+			+ "reported, three orders under the 0.01 mm tolerance, set by the "
+			+ "300 mm coordinate, stated in the bound and subtracted from "
+			+ "bound_mm beside the tessellation tolerance",
+			bool(near.get("checked", false))
+				and absf(quantum - NEAR_QUANTIZATION_MM) < 1.0e-12
+				and quantum < GeometryChecks.CLEARANCE_TOLERANCE_MM / 100.0
+				and absf(float(near.get("largest_coordinate_mm", 0.0)) - POSE_ORIGIN.z) < 0.5
+				and str(near.get("bound", "")).contains("quantized")
+				and absf(float(near_pair.get("bound_mm", 0.0))
+					- (float(near_pair.get("min_mm", 0.0))
+						- GeometryChecks.CLEARANCE_TOLERANCE_MM - quantum)) < 1.0e-9
+				and bool(near.get("pass", false)),
+			"report = %s" % str(near))
+
+	var record: Dictionary = panel.records[0]
+	record["pose"] = Transform3D(_pose.basis, FAR_ORIGIN)
+	_payloads.clear()
+	var far: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	record["pose"] = _pose
+	check("quantization: a pose 1e8 mm out quantizes the vertices to 8 mm, "
+			+ "coarser than the tolerance asked for — the check is refused "
+			+ "with the quantization and the coordinate stated, and nothing "
+			+ "is sent to the worker",
+			not bool(far.get("checked", true))
+				and str(far.get("reason", "")).contains("float32")
+				and absf(float(far.get("quantization_mm", 0.0)) - FAR_QUANTIZATION_MM) < 1.0e-9
+				and float(far.get("largest_coordinate_mm", 0.0)) >= FAR_ORIGIN.x - 1.0
+				and (far.get("pairs", []) as Array).is_empty()
+				and _payloads.is_empty(),
+			"report = %s, sent = %d" % [str(far), _payloads.size()])
+	_payloads.clear()
 
 
 ## Start a clearance call without awaiting it and park its reply in `into`.
