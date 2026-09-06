@@ -21,6 +21,9 @@ extends RefCounted
 ##                               how much air is between them, exactly.
 ##   minerva_cad_check_fasteners will these screws go in — coaxiality, a clear
 ##                               path, engagement and head seating, per screw.
+##   minerva_cad_check_design    all three of those, one after another, folded
+##                               into one verdict and only the failing rows —
+##                               the acceptance loop's check step.
 ##   minerva_cad_get_selected_reference
 ##                               which reference node the user last clicked,
 ##                               and where on it — the sibling of
@@ -63,6 +66,9 @@ const _PartScope: Script = preload("scripts/part_scope.gd")
 ## How much of an answer travels: the lean/full choice, the clearance
 ## filters, the obstruction collapse and the hole census as DSL.
 const _ReplyShape: Script = preload("scripts/reply_shape.gd")
+## The three checks run together and folded into one verdict. It is handed
+## the check Callables rather than preloading this script back.
+const _DesignCheck: Script = preload("scripts/design_check.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -122,6 +128,12 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			return await _per_part(panel, args, _check_clearance)
 		"minerva_cad_check_fasteners":
 			return await _per_part(panel, args, _check_fasteners)
+		"minerva_cad_check_design":
+			# The three checks in one call. They are sequenced there, not
+			# here, because interference and fasteners share the panel's one
+			# solid collider and must not be in flight together.
+			return await _DesignCheck.run(panel, args, _per_part,
+				_check_interference, _check_clearance, _check_fasteners)
 		"minerva_cad_get_selected_reference":
 			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
