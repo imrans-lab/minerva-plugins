@@ -19,6 +19,15 @@ extends RefCounted
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 
+## Shortest segment worth a line, in millimetres. The test is ABSOLUTE, not
+## Vector3.is_equal_approx, whose epsilon scales with the coordinates: a solid
+## posed a hundred metres from the origin makes that tolerance wider than the
+## short edges of a small feature, and those edges would vanish from the
+## outline. A micrometre is below anything the tessellator resolves, so only a
+## genuinely coincident pair — the dot this pass exists to stop drawing — is
+## skipped.
+const DEGENERATE_SEGMENT_MM: float = 1.0e-6
+
 
 ## Endpoint pairs for every edge in `edges`, with the edge id each pair came
 ## from. Returns {segments: PackedVector3Array, edge_ids: PackedInt32Array,
@@ -46,7 +55,7 @@ static func segments_from_edges(edges: Array) -> Dictionary:
 		for index in range(points.size() - 1):
 			var a := points[index]
 			var b := points[index + 1]
-			if a.is_equal_approx(b):
+			if a.distance_squared_to(b) <= DEGENERATE_SEGMENT_MM * DEGENERATE_SEGMENT_MM:
 				continue
 			segments.append(a)
 			segments.append(b)

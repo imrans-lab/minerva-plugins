@@ -322,6 +322,17 @@ func _make_rig(panel_name: String) -> Dictionary:
 	var broker = PanelBrokerScript.new()
 	broker.register_panel(panel, "cad", panel_name,
 			PackedStringArray(["cad.evaluate", "cad.cancel_eval"]))
+	# register_panel also wires the panel's `request` signal to the broker's
+	# own dispatch, and THIS SUITE IS THE BACKEND: the broker here has no
+	# PluginManager, so it has no manifest to validate the panel against and
+	# no running plugin connection to forward to — it would answer every
+	# request with permission_denied within a millisecond, and the worker
+	# reply this suite delivers by hand would arrive at an IPC helper with
+	# nobody waiting. Only the trampoline is dropped; the broker keeps doing
+	# the parts the suite needs (the IPC helper, the buffer attach, and
+	# reply delivery).
+	for connection in panel.get_signal_connection_list("request"):
+		panel.disconnect("request", (connection as Dictionary)["callable"] as Callable)
 	panel._on_panel_loaded({
 		"plugin_id": "cad",
 		"panel_name": panel_name,

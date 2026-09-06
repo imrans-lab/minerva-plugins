@@ -314,6 +314,61 @@ func _check_ticket(panel: Node, checks: RefCounted) -> void:
 				and not str(unknown.get("reason", "")).is_empty(),
 			"unknown = %s" % str(unknown))
 
+	# A real measurement is several worker batches of minutes each and can
+	# outlive the keep window while still running. The clock cannot be wound
+	# forward, so the job's own stamps are backdated to the state such a run
+	# reaches: a sweep that ages a job from when it STARTED erases this
+	# ticket, and the report that lands afterwards can never be collected.
+	checks.first_reply_ms = 0
+	var long_run: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	checks.first_reply_ms = budget
+	var long_handle := str(long_run.get("ticket", ""))
+	var long_job: Dictionary = checks._jobs.get(long_handle, {})
+	long_job["started_ms"] = int(long_job.get("started_ms", 0)) \
+		- (GeometryChecks.TICKET_KEEP_MS + 1000)
+	var polled: Dictionary = await checks.check_clearance(panel,
+		{"ticket": long_handle})
+	check("ticket: a measurement still running long past the keep window is "
+			+ "not swept — its ticket still polls as running",
+			str(polled.get("status", "")) == "running"
+				and checks._jobs.has(long_handle),
+			"polled = %s" % str(polled))
+	var late: Dictionary = {}
+	for _attempt in range(20):
+		await process_frame
+		late = await checks.check_clearance(panel, {"ticket": long_handle})
+		if bool(late.get("checked", false)):
+			break
+	check("ticket: and the report that long run finishes with is still "
+			+ "collectable",
+			bool(late.get("checked", false))
+				and str(late.get("status", "")) == "complete",
+			"late = %s" % str(late))
+
+	# The other half of the rule: a FINISHED report nobody collected still
+	# ages out, timed from when it settled, so the table cannot grow for the
+	# life of the panel.
+	checks.first_reply_ms = 0
+	var abandoned: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	checks.first_reply_ms = budget
+	var abandoned_handle := str(abandoned.get("ticket", ""))
+	for _attempt in range(20):
+		await process_frame
+		var pending: Dictionary = checks._jobs.get(abandoned_handle, {})
+		if str(pending.get("status", "")) == "settled":
+			break
+	var settled_job: Dictionary = checks._jobs.get(abandoned_handle, {})
+	settled_job["settled_ms"] = int(settled_job.get("settled_ms", 0)) \
+		- (GeometryChecks.TICKET_KEEP_MS + 1000)
+	var swept: Dictionary = await checks.check_clearance(panel,
+		{"ticket": abandoned_handle})
+	check("ticket: a finished report nobody collected ages out of the table",
+			not bool(swept.get("checked", true))
+				and not checks._jobs.has(abandoned_handle),
+			"swept = %s" % str(swept))
+
 
 # ---------------------------------------------------------------------------
 # The upload: hashes first, arrays only when asked for

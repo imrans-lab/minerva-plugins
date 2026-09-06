@@ -79,6 +79,7 @@ func _run() -> void:
 	_check_sliver()
 	_check_real_boundaries()
 	_check_chain_from_a_curved_edge()
+	_check_short_edges_far_from_the_origin()
 	await _check_panel_report()
 
 
@@ -242,6 +243,71 @@ func _check_chain_from_a_curved_edge() -> void:
 			ids.size() == segments.size() / 2 and _distinct_ids(ids) == [41]
 				and int(outline["edges"]) == 1,
 			"ids = %s, edges = %s" % [str(ids), str(outline["edges"])])
+
+
+# ---------------------------------------------------------------------------
+# Short edges a long way from the origin
+# ---------------------------------------------------------------------------
+
+## A part is modelled where it sits, not always at the origin, and Vector3's
+## is_equal_approx scales its tolerance with the coordinates: a hundred metres
+## out that tolerance is a whole millimetre, so the two ends of a
+## half-millimetre edge compare EQUAL and every short edge of the part is
+## dropped as a dot. What survives is a partial outline that looks like a
+## modelling mistake. The skip has to be an absolute length.
+func _check_short_edges_far_from_the_origin() -> void:
+	var origin := Vector3(100000.0, 100000.0, 0.0)
+	var thickness := 0.5
+	var registry := _box_registry(origin, Vector3(thickness, 10.0, 10.0))
+	var outline: Dictionary = EdgeOutline.segments_from_edges(registry)
+	var segments: PackedVector3Array = outline["segments"]
+	var shortest := INF
+	for i in range(0, segments.size(), 2):
+		shortest = minf(shortest, segments[i].distance_to(segments[i + 1]))
+	check("a thin box 100 m from the origin keeps ALL twelve of its edges, "
+			+ "the four half-millimetre ones included",
+			int(outline["edges"]) == 12 and segments.size() == 24
+				and absf(shortest - thickness) < 0.05,
+			"%d edges, %d segments, shortest %.4f mm" % [
+				int(outline["edges"]), segments.size() / 2, shortest])
+
+	# The other side of the same rule: an absolute epsilon must still drop the
+	# thing the pass exists for.
+	var with_dot: Array = registry.duplicate()
+	var point: Array = _as_triple(origin)
+	with_dot.append({"id": 99, "kind": "straight",
+		"start": point, "end": point, "polyline": [point, point]})
+	var drawn: Dictionary = EdgeOutline.segments_from_edges(with_dot)
+	check("and an entry out there that really is a point still draws nothing",
+			int(drawn["edges"]) == 12
+				and (drawn["segments"] as PackedVector3Array).size() == 24,
+			"%d edges, %d segments" % [int(drawn["edges"]),
+				(drawn["segments"] as PackedVector3Array).size() / 2])
+
+
+## The twelve straight edges of an axis-aligned box, as the worker's edge
+## registry has them.
+func _box_registry(origin: Vector3, size: Vector3) -> Array:
+	var corners: Array = []
+	for i in range(8):
+		corners.append(origin + Vector3(
+			size.x if (i & 1) != 0 else 0.0,
+			size.y if (i & 2) != 0 else 0.0,
+			size.z if (i & 4) != 0 else 0.0))
+	var pairs := [
+		[0, 1], [1, 3], [3, 2], [2, 0],
+		[4, 5], [5, 7], [7, 6], [6, 4],
+		[0, 4], [1, 5], [2, 6], [3, 7],
+	]
+	var registry: Array = []
+	for i in range(pairs.size()):
+		var start: Array = _as_triple(corners[int(pairs[i][0])])
+		var end: Array = _as_triple(corners[int(pairs[i][1])])
+		registry.append({
+			"id": i + 1, "kind": "straight",
+			"start": start, "end": end, "polyline": [start, end],
+		})
+	return registry
 
 
 # ---------------------------------------------------------------------------

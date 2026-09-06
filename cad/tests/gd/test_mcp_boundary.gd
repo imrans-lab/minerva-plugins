@@ -441,10 +441,12 @@ func _check_references_are_lean_by_default() -> void:
 	var full_row: Dictionary = (full["references"] as Array)[0]
 	check("nothing is lost: detail=\"full\" carries the pose, both frames and "
 			+ "every node box",
-			(full_row["pose"] as Array).size() == 16
+			_is_row_major_4x4(full_row["pose"], Vector3(1.0, 2.0, 3.0))
 				and (full_row["nodes"] as Array).size() == BOARD_NODES
 				and (full_row["bbox_mm"] as Dictionary).has("local"),
-			"full row keys = %s" % str(full_row.keys()))
+			"pose = %s, nodes = %d, bbox frames = %s" % [
+				str(full_row["pose"]), (full_row["nodes"] as Array).size(),
+				str((full_row["bbox_mm"] as Dictionary).keys())])
 
 	var missed: Dictionary = await PanelTools.handle(
 			panel, "minerva_cad_references", {"reference": "lid"})
@@ -626,6 +628,23 @@ func _check_await_eval_reports_what_the_panel_painted() -> void:
 
 ## One reference with `nodes` nodes, shaped the way the panel's reference
 ## report shapes a record.
+## The pose the boundary serialises is a 4x4 written ROW-MAJOR: four rows of
+## four, not a flat sixteen. This checks the shape and that the last column of
+## the first three rows is the translation the record was posed at — a flat
+## list, a transposed matrix or a dropped bottom row all fail it.
+func _is_row_major_4x4(raw: Variant, origin: Vector3) -> bool:
+	if not (raw is Array) or (raw as Array).size() != 4:
+		return false
+	var rows: Array = raw
+	for row_variant in rows:
+		if not (row_variant is Array) or (row_variant as Array).size() != 4:
+			return false
+	return is_equal_approx(float((rows[0] as Array)[3]), origin.x) \
+		and is_equal_approx(float((rows[1] as Array)[3]), origin.y) \
+		and is_equal_approx(float((rows[2] as Array)[3]), origin.z) \
+		and is_equal_approx(float((rows[3] as Array)[3]), 1.0)
+
+
 func _board_record(nodes: int) -> Dictionary:
 	var bounds: Array = []
 	for index in range(nodes):

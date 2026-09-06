@@ -487,13 +487,21 @@ func _settled(handle: String, job: Dictionary) -> Dictionary:
 
 
 ## Drop jobs nobody collected. A report is geometry-dated and a table that
-## grows for the life of the panel is a leak; TICKET_KEEP_MS is far longer
-## than any measurement, so only an abandoned ticket is ever swept.
+## grows for the life of the panel is a leak.
+##
+## A STILL-RUNNING job is never swept, however long it has been running: a
+## measurement is several worker batches of minutes each, and erasing its
+## ticket mid-flight would leave the report that arrives afterwards with no
+## entry to land in and no way to be collected. Only a settled report ages
+## out, and it ages from the moment it settled — TICKET_KEEP_MS after there
+## was something to collect, not after the work started.
 func _sweep_jobs() -> void:
 	var now := Time.get_ticks_msec()
 	for key in _jobs.keys():
 		var job: Dictionary = _jobs[key]
-		if now - int(job["started_ms"]) > TICKET_KEEP_MS:
+		if str(job.get("status", "")) == "running":
+			continue
+		if now - int(job.get("settled_ms", 0)) > TICKET_KEEP_MS:
 			_jobs.erase(key)
 
 
