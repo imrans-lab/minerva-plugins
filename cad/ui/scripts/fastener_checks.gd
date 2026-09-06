@@ -119,6 +119,39 @@ const SIZE_EPSILON_MM: float = 0.001
 ## at 1.7-2.2 d); metal-to-metal wants 1.0-1.5 and the caller says so.
 const DEFAULT_ENGAGEMENT_D: float = 2.0
 
+## Where the head lands, as the caller states it. One description of one screw
+## covers every enclosure the DCR asks about, and each value names the BODY the
+## seat plane is read off — never "whichever surface is nearest", which cannot
+## tell a seat from the thing standing in the head's way.
+##   reference  the head-side face of the reference plate the hole is in. The
+##              board-on-bosses case, and the default.
+##   solid      the first face of the EVALUATED SOLID the head's bearing ring
+##              meets travelling along the screw's axis. The two-shell cases:
+##              a head counterbored into a tray floor under a sandwiched board,
+##              or a head on a lid's outer skin.
+##   offset     a seat plane the caller places itself, `seat_offset_mm` along
+##              the screw's travel from the hole's centre (negative is short of
+##              the hole, which is where a head coming from below sits).
+const SEAT_ON_REFERENCE: String = "reference"
+const SEAT_ON_SOLID: String = "solid"
+const SEAT_AT_OFFSET: String = "offset"
+
+## A bore no wider than this multiple of the screw's own diameter is material
+## the thread bites: a pilot, a thread-forming boss, a tapped hole. Anything
+## wider is a hole the screw passes THROUGH. The threshold is the ISO 273
+## medium clearance hole for that screw where the table has one — 3.4 mm for an
+## M3, so a 3.0 mm pilot is thread and a 3.82 mm printed clearance bore is not
+## — and this multiple only where it does not. A clearance bore is never an
+## engagement, however deep it is, so which of two coaxial bores gets paired
+## with a hole is not a question a distance can answer.
+const CLEARANCE_FIT_D: float = 1.1
+## A bore narrower than this multiple of the screw's diameter cannot take the
+## screw at all: a vent, a moulding pin, a texture. It is paired last, behind
+## every bore that could actually receive the screw.
+const UNDERSIZE_FIT_D: float = 0.5
+## The order the three kinds of bore are paired in. Lower is preferred.
+const FIT_RANK: Dictionary = {"thread": 0, "clearance": 1, "undersize": 2}
+
 ## No two adjacent rays of a ring may be further apart than this along the
 ## circle. It is the whole guarantee the path check makes: an obstruction
 ## narrower than this can pass between two rays unseen. At an M3 shank radius
@@ -206,8 +239,16 @@ var _started_us: int = 0
 ##    casts, ray_spacing_mm, elapsed_ms}
 ##
 ## `args`:
-##   screw            {dia_mm, length_mm, head_dia_mm?} — dia and length are
-##                    mandatory; a check with no screw in it is not a check.
+##   screw            {dia_mm, length_mm, head_dia_mm?, seat?, seat_offset_mm?}
+##                    — dia and length are mandatory; a check with no screw in
+##                    it is not a check. `seat` says WHICH BODY the head lands
+##                    on: "reference" (default), "solid", or "offset" with
+##                    seat_offset_mm; see SEAT_ON_REFERENCE.
+##   mesh             the tessellation to build the solid's collider from, when
+##                    the check is scoped to one named part. The document's own
+##                    render target otherwise.
+##   source           the DSL that evaluates to that same part, for the B-Rep
+##                    bores. Must be the part `mesh` came from.
 ##   holes            the reference holes to pair against, as
 ##                    minerva_cad_find_holes reports them. The verb supplies
 ##                    these; this module never segments a reference itself.
@@ -248,7 +289,14 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		document = panel.get_document_state()
-	var mesh_data: Dictionary = document.get("mesh", {}) as Dictionary
+	# A part-scoped check brings the tessellation AND the source of ITS part;
+	# with neither, both come from the document's own render target.
+	var mesh_data: Dictionary = args.get("mesh", {}) as Dictionary
+	if (mesh_data.get("faces", []) as Array).is_empty():
+		mesh_data = document.get("mesh", {}) as Dictionary
+	var solid_source := str(args.get("source", ""))
+	if solid_source.strip_edges().is_empty():
+		solid_source = str(document.get("source", ""))
 
 	# The references AS THEY ARE NOW, before anything is awaited. Every local
 	# coordinate in the reply is a world point taken back through one of these
@@ -292,7 +340,7 @@ func check(panel: Object, args: Dictionary = {}) -> Dictionary:
 	# The B-Rep first, and OUTSIDE the reservation: it is an IPC round trip to
 	# the worker, and holding the solid's collider across it would stall every
 	# evaluation for its duration.
-	var features := await _solid_cylinders(panel, str(document.get("source", "")), screw)
+	var features := await _solid_cylinders(panel, solid_source, screw)
 	if features.has("error"):
 		return _nothing(str(features["error"]))
 
@@ -400,7 +448,7 @@ func _run(
 	if not reference_scope.is_empty():
 		mask = int(gauge.call("mask_for", reference_scope))
 
-	var pairing := _pair(bores, holes, args)
+	var pairing := _pair(bores, holes, screw, args)
 	# The surfaces that were never candidates, named rather than dropped: a
 	# reader looking for a bore the check did not grade has to be able to see
 	# why it was not one.
@@ -514,31 +562,57 @@ func _one_screw(
 	var bore_start: Vector3 = pair["bore_start"]
 	var bore_end: Vector3 = pair["bore_end"]
 
-	# +axis is the direction the screw travels: from the hole into the bore.
+	# +axis is the direction the screw travels: from the hole toward the MIDDLE
+	# of the bore. The bore's near END is not the same test — a pilot in a post
+	# that starts level with the board's own top face, or a bore that straddles
+	# the hole, puts that end on either side of the hole centre and flips the
+	# screw round — and a screw run backwards fails every span it measures.
 	var direction := hole_axis
-	if direction.dot(bore_start - hole_centre) < 0.0:
+	if direction.dot((bore_start + bore_end) * 0.5 - hole_centre) < 0.0:
 		direction = -direction
 
 	var dia := float(screw["dia_mm"])
 	var length := float(screw["length_mm"])
 	var head_dia := float(screw["head_dia_mm"])
+	var seat_on := str(screw.get("seat", SEAT_ON_REFERENCE))
 
 	# Axial coordinates are distances along `direction` from the hole centre.
 	# One frame for the whole screw, so seat, bore and screw length are
-	# comparable numbers rather than three sets of points.
-	# The seat plane is half the plate's thickness above the hole's centre, so
-	# a hole record with no thickness in it has NO seat — and defaulting to
-	# zero would put the seat at the centre of the plate and shift every axial
-	# number by half of it, silently. Refuse instead.
-	var thickness := float(hole.get("depth_mm", 0.0))
-	if thickness <= 0.0:
-		thickness = float(hole.get("extent_mm", 0.0))
-	if thickness <= 0.0:
-		return _unmeasurable(hole, bore,
-			"the hole record carries neither depth_mm nor extent_mm, so there "
-			+ "is no seat plane to measure the screw from; "
-			+ "minerva_cad_find_holes reports depth_mm on a verified hole")
-	var seat_t := -thickness * 0.5
+	# comparable numbers rather than three sets of points. EVERYTHING about
+	# depth hangs off the seat: engagement, bottoming, where the head's span
+	# ends. Getting it from the wrong body is the difference between a joint
+	# that is fine and four screws that read "bottoming by 5.4 mm".
+	var seat_t := 0.0
+	if seat_on == SEAT_AT_OFFSET:
+		seat_t = float(screw.get("seat_offset_mm", 0.0))
+	elif seat_on == SEAT_ON_SOLID:
+		# The first face of the SOLID the head's bearing ring meets on its way
+		# in. Only the solid: a board or a component in the head's way is an
+		# obstruction, and a seat read off "whatever is nearest" could not tell
+		# the two apart.
+		var found: Variant = _solid_seat(solid_state, checks, hole_centre,
+			direction, head_dia * 0.5, dia * 0.5, reach)
+		if found == null:
+			return _unmeasurable(hole, bore,
+				"screw.seat is 'solid' and the head's ring meets no face of "
+				+ "the evaluated solid anywhere along its axis, so there is "
+				+ "nothing for the head to sit on; check the screw is coming "
+				+ "in from the side the counterbore or the skin is on")
+		seat_t = float(found)
+	else:
+		# The plate's head-side face: half its thickness short of the hole's
+		# centre. A hole record with no thickness in it has NO seat — and
+		# defaulting to zero would put the seat at the centre of the plate and
+		# shift every axial number by half of it, silently. Refuse instead.
+		var thickness := float(hole.get("depth_mm", 0.0))
+		if thickness <= 0.0:
+			thickness = float(hole.get("extent_mm", 0.0))
+		if thickness <= 0.0:
+			return _unmeasurable(hole, bore,
+				"the hole record carries neither depth_mm nor extent_mm, so "
+				+ "there is no seat plane to measure the screw from; "
+				+ "minerva_cad_find_holes reports depth_mm on a verified hole")
+		seat_t = -thickness * 0.5
 	var bore_entry_t := (bore_start - hole_centre).dot(direction)
 	var bore_exit_t := (bore_end - hole_centre).dot(direction)
 	if bore_exit_t < bore_entry_t:
@@ -642,8 +716,9 @@ func _one_screw(
 			hole_centre, mask, reference_scope, {"seat_t": seat_t}
 		)
 		seat = _seat_support(
-			gauge, state, origin, direction, head_dia * 0.5, dia * 0.5,
-			seat_t, hole_centre, mask, reference_scope
+			gauge, state, solid_state, checks, origin, direction,
+			head_dia * 0.5, dia * 0.5, seat_t, hole_centre, mask,
+			reference_scope, seat_on == SEAT_ON_SOLID
 		)
 
 	_path_rays += int(shank["rays"]) + int(head["rays"])
@@ -655,7 +730,13 @@ func _one_screw(
 	var engagement_bound := float(bore.get("extent_bound_mm", 0.0))
 	var extent_certain := bool(bore.get("extent_exact", true)) \
 		and bool(bore.get("extent_bounded", true))
-	var engagement_ok := extent_certain \
+	# A CLEARANCE BORE IS NOT AN ENGAGEMENT. The screw passes through it; there
+	# is no material for the thread to hold. Overlap with one is still measured
+	# and reported — it is the span the screw is inside that body for — but it
+	# never counts as bite, or a `pairs` override onto the tray's own clearance
+	# hole would read as a joint with 7.5 mm of grip in a hole with no thread.
+	var bore_fit := str(pair.get("fit", "thread"))
+	var engagement_ok := extent_certain and bore_fit == "thread" \
 		and engagement - engagement_bound >= engagement_required
 	var head_seat_clear := bool(head["clear"])
 	# BOTTOMING. The fan's bore span runs to the tip, so a floor it met is a
@@ -672,8 +753,17 @@ func _one_screw(
 		"hole_dia_mm": float(hole.get("dia_mm", 0.0)),
 		"hole_gauge_dia_mm": float(hole.get("gauge_dia_mm", 0.0)),
 		"bore_dia_mm": float(bore.get("dia_mm", 0.0)),
+		# What the paired bore is FOR: only a thread bore can be an
+		# engagement, and a reader looking at 7 mm of overlap has to be able
+		# to see which kind of hole those millimetres are in.
+		"bore_fit": bore_fit,
 		"screw_axis": _axes(direction, str(hole.get("reference", ""))),
 		"seat_mm": _frames(hole_centre + direction * seat_t, str(hole.get("reference", ""))),
+		# Which body the seat plane was read off, and how far along the
+		# screw's travel from the hole's centre it landed. Every axial number
+		# in this row is measured from it.
+		"seat_on": seat_on,
+		"seat_offset_mm": seat_t,
 		"coaxiality": coaxiality["zone"],
 		"axis_angle_deg": coaxiality["axis_angle_deg"],
 		"centre_offset_mm": coaxiality["centre_offset_mm"],
@@ -715,11 +805,13 @@ func _one_screw(
 		row["head_seat_tolerance_mm"] = SEAT_TOLERANCE_MM
 		row["head_seat_rule"] = ("circumference coverage at one radius, not "
 			+ "bearing area: the fraction of a single ring of rays at "
-			+ "%.3f mm from the axis that met reference material within "
+			+ "%.3f mm from the axis that met %s material within "
 			+ "%s mm of the seat plane along the axis, so an annular void "
 			+ "inside that ring is not seen; head_seat_gap_mm is the furthest "
 			+ "below the seat any of them found a surface") \
-			% [float(seat["radius_mm"]), SEAT_TOLERANCE_MM]
+			% [float(seat["radius_mm"]),
+				"the evaluated solid's" if seat_on == SEAT_ON_SOLID
+					else "reference", SEAT_TOLERANCE_MM]
 		if not head_seat_clear:
 			row["head_obstructions"] = head["obstructions"]
 	if bore.get("source", "b_rep") == "b_rep":
@@ -1086,6 +1178,52 @@ func _unmeasurable(hole: Dictionary, bore: Dictionary, reason: String) -> Dictio
 	}
 
 
+## Where the head lands on the SOLID: the axial position of the first face of
+## the evaluated solid the head's bearing ring meets travelling in, or null
+## when it meets none.
+##
+## The ring is sampled between the shank radius and the head radius, the same
+## annulus the head actually bears on, so a ray does not simply fall down the
+## clearance hole the shank passes through. The NEAREST hit over the ring is
+## the seat — that is where the head stops — which is why this looks at the
+## solid alone: a reference part standing in front of the seat is something in
+## the head's way, and the head fan reports it as one. A counterbore in a tray
+## floor and a lid's outer skin are both answered by this, with no argument
+## beyond `seat: solid`.
+func _solid_seat(
+	solid_state: PhysicsDirectSpaceState3D,
+	checks: Object,
+	hole_centre: Vector3,
+	direction: Vector3,
+	head_radius: float,
+	shank_radius: float,
+	reach: float
+) -> Variant:
+	if checks == null or not is_instance_valid(checks) or solid_state == null:
+		return null
+	# Outside every body on the head's side. The seat is not known yet, so the
+	# origin cannot be measured from it: the scene's own reach is what puts
+	# this ray in front of everything.
+	var origin := hole_centre - direction * (OUTSIDE_MARGIN_MM + reach)
+	var travel := (OUTSIDE_MARGIN_MM + reach) * 2.0
+	var nearest: Variant = null
+	# From 1: _ring_points puts the AXIS first, and the axis travels down the
+	# clearance hole the shank passes through — it is never where the head
+	# bears, and a floor far down that hole is not a seat.
+	var ring := _ring_points(direction, (head_radius + shank_radius) * 0.5)
+	for index in range(1, ring.size()):
+		var start: Vector3 = origin + (ring[index] as Vector3)
+		var hit: Dictionary = checks.call("solid_ray", solid_state, start,
+			start + direction * travel)
+		_casts += 1
+		if hit.is_empty():
+			continue
+		var t: float = ((hit["position"] as Vector3) - hole_centre).dot(direction)
+		if nearest == null or t < float(nearest):
+			nearest = t
+	return nearest
+
+
 ## How much of the seat ring actually lands on material at the seat plane, as
 ## {landed, rays, radius_mm, gap_mm}. A head hanging half over the edge of its
 ## boss is "clear" — nothing is in its way — and still badly seated, and only
@@ -1105,6 +1243,8 @@ func _unmeasurable(hole: Dictionary, bore: Dictionary, reason: String) -> Dictio
 func _seat_support(
 	gauge: Object,
 	state: PhysicsDirectSpaceState3D,
+	solid_state: PhysicsDirectSpaceState3D,
+	checks: Object,
 	origin: Vector3,
 	direction: Vector3,
 	head_radius: float,
@@ -1112,7 +1252,8 @@ func _seat_support(
 	seat_t: float,
 	datum: Vector3,
 	mask: int,
-	reference_scope: String
+	reference_scope: String,
+	include_solid: bool
 ) -> Dictionary:
 	var radius := (head_radius + shank_radius) * 0.5
 	var ring := _ring_points(direction, radius)
@@ -1128,7 +1269,17 @@ func _seat_support(
 		rays += 1
 		var start: Vector3 = origin + (ring[index] as Vector3)
 		var finish: Vector3 = start + direction * ((datum - origin).length() * 2.0 + head_radius)
-		var hit := _reference_ray(gauge, state, start, finish, mask, reference_scope)
+		# The body the seat was read off is the body its coverage is measured
+		# on. A seat on the reference is graded against the reference alone —
+		# a shell feature standing over it is the head fan's obstruction, not a
+		# surface the head sits on — and a seat on the solid the same way.
+		var hit := {}
+		if include_solid:
+			hit = checks.call("solid_ray", solid_state, start, finish) \
+				if checks != null and is_instance_valid(checks) else {}
+			_casts += 1
+		else:
+			hit = _reference_ray(gauge, state, start, finish, mask, reference_scope)
 		if hit.is_empty():
 			continue
 		var t: float = (hit["position"] as Vector3 - datum).dot(direction)
@@ -1464,13 +1615,19 @@ func _agreement(bore: Dictionary, fitted: Array, direction: Vector3) -> Dictiona
 
 ## Match the solid's bores to the reference holes, one to one.
 ##
-## Greedy by distance: every admissible (bore, hole) combination is scored by
-## how far the bore's axis passes from the hole's centre, the list is sorted,
-## and pairs are taken in order, skipping any whose bore or hole is already
-## spoken for. That is the one-to-one constraint: two bosses near one hole
-## must not both claim it. Anything left over is reported by name under
-## `unpaired` rather than quietly dropped.
-func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
+## Greedy by FIT, then by distance. Distance alone cannot pair a two-shell
+## enclosure: a board bolted from below sits between a clearance bore in the
+## tray and a pilot in the post above it, both dead coaxial with the hole, and
+## the nearest of the two is whichever the modeller happened to put closer. The
+## screw only threads into one of them, so every admissible (bore, hole)
+## combination is ranked by what the bore is FOR — thread first, then a
+## clearance bore the screw only passes through, then a bore too small to take
+## it at all — and only then by how far the bore's axis passes from the hole's
+## centre. Pairs are taken in that order, skipping any whose bore or hole is
+## already spoken for: two bosses near one hole must not both claim it.
+## Anything left over is reported by name, WITH its fit, under `unpaired`
+## rather than quietly dropped.
+func _pair(bores: Array, holes: Array, screw: Dictionary, args: Dictionary) -> Dictionary:
 	var prepared_holes: Array = []
 	for entry in holes:
 		var hole: Dictionary = entry
@@ -1482,18 +1639,27 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 			"hole": hole, "axis": axis.normalized(), "centre": centre,
 		})
 
+	var screw_dia := float(screw.get("dia_mm", 0.0))
+	var clearance_dia := _clearance_bore_dia(screw_dia, args)
 	var explicit: Array = args.get("pairs", []) as Array
 	var candidates: Array = []
 	if explicit.is_empty():
 		for b in range(bores.size()):
 			for h in range(prepared_holes.size()):
-				var scored := _score(bores[b] as Dictionary, prepared_holes[h] as Dictionary)
+				var scored := _score(bores[b] as Dictionary,
+					prepared_holes[h] as Dictionary, screw_dia, clearance_dia)
 				if scored.is_empty():
 					continue
 				scored["bore_index"] = b
 				scored["hole_index"] = h
 				candidates.append(scored)
-		candidates.sort_custom(func(a, b): return float(a["offset"]) < float(b["offset"]))
+		# Fit first, distance second. Sorting on the pair puts every bore the
+		# screw can thread into ahead of every bore it merely passes through,
+		# so a clearance bore is only ever paired when no thread bore lines up.
+		candidates.sort_custom(func(a, b):
+			if int(a["fit_rank"]) != int(b["fit_rank"]):
+				return int(a["fit_rank"]) < int(b["fit_rank"])
+			return float(a["offset"]) < float(b["offset"]))
 	else:
 		for entry in explicit:
 			var asked: Dictionary = entry
@@ -1501,7 +1667,8 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 			var h := int(asked.get("reference_hole", -1))
 			if b < 0 or b >= bores.size() or h < 0 or h >= prepared_holes.size():
 				continue
-			var scored := _score(bores[b] as Dictionary, prepared_holes[h] as Dictionary, true)
+			var scored := _score(bores[b] as Dictionary,
+				prepared_holes[h] as Dictionary, screw_dia, clearance_dia, true)
 			scored["bore_index"] = b
 			scored["hole_index"] = h
 			candidates.append(scored)
@@ -1527,6 +1694,7 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 			"bore_axis": (bore["axis"] as Vector3).normalized(),
 			"bore_start": bore["start"],
 			"bore_end": bore["end"],
+			"fit": str(candidate["fit"]),
 		})
 
 	var loose_bores: Array = []
@@ -1539,6 +1707,7 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 			"dia_mm": float(bore.get("dia_mm", 0.0)),
 			"centre_mm": _frames(bore["centre"], ""),
 			"source": str(bore.get("source", "b_rep")),
+			"fit": _fit_of(float(bore.get("dia_mm", 0.0)), screw_dia, clearance_dia),
 		})
 	var loose_holes: Array = []
 	for h in range(prepared_holes.size()):
@@ -1564,16 +1733,23 @@ func _pair(bores: Array, holes: Array, args: Dictionary) -> Dictionary:
 		"unpaired": {
 			"solid_features": loose_bores,
 			"reference_holes": loose_holes,
-			"rule": ("a bore is paired with the reference hole whose axis it "
-				+ "passes closest to, one to one; anything more than %s mm "
-				+ "off or %s degrees out is left unpaired rather than "
-				+ "mispaired") % [PAIR_MAX_OFFSET_MM, PAIR_MAX_ANGLE_DEG],
+			"rule": ("a bore the screw can THREAD into (up to %s mm across "
+				+ "for this screw) is preferred over one it only passes "
+				+ "through, and only then is the bore whose axis passes "
+				+ "closest to the hole's centre taken, one to one; anything "
+				+ "more than %s mm off or %s degrees out is left unpaired "
+				+ "rather than mispaired") % [clearance_dia,
+					PAIR_MAX_OFFSET_MM, PAIR_MAX_ANGLE_DEG],
+			"clearance_bore_dia_mm": clearance_dia,
 		},
 	}
 
 
 ## How well one bore lines up with one hole, or {} when it is not a candidate.
-func _score(bore: Dictionary, prepared: Dictionary, forced: bool = false) -> Dictionary:
+## `fit` says what the bore is FOR and `fit_rank` orders the three kinds; see
+## _fit_of.
+func _score(bore: Dictionary, prepared: Dictionary, screw_dia: float,
+		clearance_dia: float, forced: bool = false) -> Dictionary:
 	var bore_axis: Vector3 = (bore["axis"] as Vector3).normalized()
 	var hole_axis: Vector3 = prepared["axis"]
 	var aligned := bore_axis if bore_axis.dot(hole_axis) >= 0.0 else -bore_axis
@@ -1582,7 +1758,39 @@ func _score(bore: Dictionary, prepared: Dictionary, forced: bool = false) -> Dic
 		prepared["centre"], hole_axis, bore["centre"], aligned, 0.0)
 	if not forced and (angle > PAIR_MAX_ANGLE_DEG or offset > PAIR_MAX_OFFSET_MM):
 		return {}
-	return {"offset": offset, "angle": angle}
+	var fit := _fit_of(float(bore.get("dia_mm", 0.0)), screw_dia, clearance_dia)
+	return {"offset": offset, "angle": angle, "fit": fit,
+		"fit_rank": FIT_RANK.get(fit, 1)}
+
+
+## What one bore is for, from its diameter and the screw's.
+##
+##   thread     the screw bites here — a pilot, a moulded boss, a tapped hole.
+##              This is the only kind of bore an engagement can be measured in.
+##   clearance  the screw passes through: at or above the clearance hole its
+##              own diameter calls for.
+##   undersize  narrower than the screw can enter at all.
+func _fit_of(bore_dia: float, screw_dia: float, clearance_dia: float) -> String:
+	if screw_dia <= 0.0:
+		return "thread"
+	if bore_dia < screw_dia * UNDERSIZE_FIT_D:
+		return "undersize"
+	if bore_dia >= clearance_dia:
+		return "clearance"
+	return "thread"
+
+
+## The diameter at which a bore stops being material the screw threads into.
+## ISO 273 medium where the table has this screw, `clearance_hole_dia_mm` when
+## the caller states one, and CLEARANCE_FIT_D x d otherwise.
+func _clearance_bore_dia(screw_dia: float, args: Dictionary) -> float:
+	var stated := float(args.get("clearance_hole_dia_mm", 0.0))
+	if stated > 0.0:
+		return stated
+	for size in ISO_273_MEDIUM:
+		if absf(float(size) - screw_dia) <= SIZE_EPSILON_MM:
+			return float(ISO_273_MEDIUM[size])
+	return screw_dia * CLEARANCE_FIT_D
 
 
 # ---------------------------------------------------------------------------
@@ -1656,6 +1864,14 @@ func _why(row: Dictionary) -> String:
 				% [str((first[0] as Dictionary).get("node", "something")), where]
 		return "the screw path is blocked"
 	if not bool(row.get("engagement_ok", true)):
+		if str(row.get("bore_fit", "thread")) != "thread":
+			return ("the screw does not thread into this bore: at %.2f mm it "
+				+ "is a %s hole the screw passes through, so the %.2f mm of "
+				+ "overlap is not engagement — pair the hole with the bore "
+				+ "the screw actually bites in") % [
+					float(row.get("bore_dia_mm", 0.0)),
+					str(row.get("bore_fit", "")),
+					float(row.get("engagement_mm", 0.0))]
 		if not bool(row.get("engagement_certain", true)):
 			return ("the bore's extent is not exact, so the %.2f mm of bite "
 				+ "measured here cannot be graded: the kernel could not read "
@@ -1734,11 +1950,25 @@ func _screw_from(args: Dictionary) -> Dictionary:
 	var assumed := head <= 0.0
 	if assumed:
 		head = dia * 2.0
+	var seat := str(raw.get("seat", SEAT_ON_REFERENCE))
+	if not [SEAT_ON_REFERENCE, SEAT_ON_SOLID, SEAT_AT_OFFSET].has(seat):
+		return {"error": ("screw.seat must be 'reference' (the head lands on "
+			+ "the reference plate the hole is in), 'solid' (on the evaluated "
+			+ "solid — a counterbore in a tray floor, a lid's outer skin) or "
+			+ "'offset' with seat_offset_mm; '%s' is none of those") % seat}
+	var offset := float(raw.get("seat_offset_mm", 0.0))
+	if seat == SEAT_AT_OFFSET and not is_finite(offset):
+		return {"error": "screw.seat 'offset' needs a finite seat_offset_mm: "
+			+ "how far along the screw's travel from the hole's centre the "
+			+ "head lands, negative for a head that arrives from the far side "
+			+ "of the hole"}
 	return {
 		"dia_mm": dia,
 		"length_mm": length,
 		"head_dia_mm": head,
 		"head_dia_assumed": assumed,
+		"seat": seat,
+		"seat_offset_mm": offset,
 	}
 
 

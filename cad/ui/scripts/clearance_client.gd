@@ -301,7 +301,11 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		document = panel.get_document_state()
-	var source := str(document.get("source", ""))
+	# A part-scoped check states the source that evaluates to ITS part; with
+	# none the document's own source is the solid.
+	var source := str(args.get("source", ""))
+	if source.strip_edges().is_empty():
+		source = str(document.get("source", ""))
 	if source.strip_edges().is_empty():
 		return _no_clearance("there is no DSL source to evaluate a solid from")
 

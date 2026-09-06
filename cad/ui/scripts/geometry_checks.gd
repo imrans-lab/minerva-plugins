@@ -633,7 +633,15 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	var document: Dictionary = {}
 	if panel.has_method("get_document_state"):
 		document = panel.get_document_state()
-	var triangles := build_solid(document.get("mesh", {}) as Dictionary, ticket)
+	# A part-scoped check brings its own tessellation; otherwise the shape the
+	# document evaluates to.
+	var scoped_mesh: Dictionary = args.get("mesh", {}) as Dictionary
+	var scoped_source := str(args.get("source", ""))
+	if (scoped_mesh.get("faces", []) as Array).is_empty():
+		scoped_mesh = document.get("mesh", {}) as Dictionary
+	if scoped_source.strip_edges().is_empty():
+		scoped_source = str(document.get("source", ""))
+	var triangles := build_solid(scoped_mesh, ticket)
 	if triangles < 0:
 		return _nothing("another check holds this panel's geometry; nothing "
 			+ "was measured")
@@ -717,7 +725,7 @@ func _run(panel: Object, args: Dictionary, ticket: int = 0) -> Dictionary:
 	# older document — or about references that have moved under the same
 	# document — can neither mark a node as buried nor clear one.
 	if bool(reply.get("checked", false)):
-		reply["source_digest"] = _source_digest(str(document.get("source", "")))
+		reply["source_digest"] = _source_digest(scoped_source)
 		reply["records_digest"] = records_digest
 		reply["gauge_generation"] = gauge_generation
 		if colliders_rebuilt:

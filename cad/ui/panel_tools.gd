@@ -57,6 +57,9 @@ const _FastenerChecks: Script = preload("scripts/fastener_checks.gd")
 ## The MCP rendering of an interference report: the panel keeps the full
 ## records digest for its joins, the wire carries a hash of it.
 const _EvalReplyScript: Script = preload("scripts/eval_reply.gd")
+## Which PART of the document a check is about, and how a named binding is
+## evaluated into a mesh of its own.
+const _PartScope: Script = preload("scripts/part_scope.gd")
 ## How much of an answer travels: the lean/full choice, the clearance
 ## filters, the obstruction collapse and the hole census as DSL.
 const _ReplyShape: Script = preload("scripts/reply_shape.gd")
@@ -108,7 +111,7 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_cad_probe":
 			return await _fresh(panel, args, _probe)
 		"minerva_cad_check_interference":
-			return await _fresh(panel, args, _check_interference)
+			return await _per_part(panel, args, _check_interference)
 		"minerva_cad_check_clearance":
 			# Collecting a ticket measures nothing, so there is no snapshot
 			# for a re-pose to invalidate — and a re-run would collect a
@@ -116,9 +119,9 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			# hands back carries its own `references_moved`.
 			if not str(args.get("ticket", "")).is_empty():
 				return await _check_clearance(panel, args)
-			return await _fresh(panel, args, _check_clearance)
+			return await _per_part(panel, args, _check_clearance)
 		"minerva_cad_check_fasteners":
-			return await _fresh(panel, args, _check_fasteners)
+			return await _per_part(panel, args, _check_fasteners)
 		"minerva_cad_get_selected_reference":
 			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
@@ -157,6 +160,60 @@ static func _fresh(panel, args: Dictionary, verb: Callable) -> Dictionary:
 		+ "was running, twice; the numbers describe a pose the document no " \
 		+ "longer has — call again once the document is settled"
 	return reply
+
+
+## Run a check once per part and say which part each answer is about.
+##
+## With no `parts` the check runs once, against the shape the document
+## evaluates to, and the reply NAMES that shape — the answer to "which half did
+## you just check" that a two-shell document could not get before. With
+## `parts`, each named binding is evaluated on its own (part_scope appends it
+## as the trailing expression, the DSL's own render-target rule) and checked
+## against its own mesh, and the replies come back together under `parts` with
+## `pass` true only when every one of them passed. The parts run one after
+## another because they share the panel's single solid collider.
+static func _per_part(panel, args: Dictionary, verb: Callable) -> Dictionary:
+	var wanted: Array = _PartScope.names(args)
+	if wanted.is_empty():
+		var single: Dictionary = await _fresh(panel, args, verb)
+		var target: String = _PartScope.render_target(panel)
+		if not target.is_empty():
+			single["part"] = target
+		return single
+
+	var rows: Array = []
+	var failed := 0
+	for entry in wanted:
+		var part := str(entry)
+		var resolved: Dictionary = await _PartScope.resolve(panel, part)
+		if resolved.has("error"):
+			rows.append({"part": part, "checked": false,
+				"reason": str(resolved["error"])})
+			failed += 1
+			continue
+		var scoped: Dictionary = args.duplicate(true)
+		scoped.erase("parts")
+		# What the check measures instead of the document's own render target:
+		# this part's tessellation for the colliders, and the source that
+		# produced it for anything the worker re-evaluates.
+		scoped["mesh"] = resolved["mesh"]
+		scoped["source"] = resolved["source"]
+		var one: Dictionary = await _fresh(panel, scoped, verb)
+		one["part"] = part
+		rows.append(one)
+		if not bool(one.get("success", true)) or not bool(one.get("pass", true)):
+			failed += 1
+	return _ok({
+		"parts": rows,
+		"count": rows.size(),
+		"failed": failed,
+		"pass": failed == 0 and not rows.is_empty(),
+		"parts_note": "each part is the document evaluated with that binding "
+			+ "as its trailing expression, which is the DSL\'s own "
+			+ "render-target rule; a part that does not evaluate is reported "
+			+ "as checked:false with the reason and does not silently drop "
+			+ "out of the count",
+	})
 
 
 ## The panel's digest of its mounted references, or "" for a panel that has
@@ -571,6 +628,12 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 	var report: Dictionary = await panel.check_interference({
 		"reference": asked,
 		"node": str(args.get("node", "")),
+		# The part this call is scoped to, when it is scoped to one: its own
+		# tessellation in place of the document's render target, and the
+		# source that produced it, so the report is stamped with that part's
+		# digest and the clearance join lines up per part.
+		"mesh": args.get("mesh", {}),
+		"source": str(args.get("source", "")),
 		# An agent asking now: refused with `busy` while an evaluation's own
 		# check holds the geometry, rather than queued behind it. The caller
 		# can ask again; a wait it cannot see would just look like a hang.
@@ -603,6 +666,9 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)
 	var report: Dictionary = await panel.check_clearance({
+		# The clearance measurement re-tessellates in the worker, so a
+		# part-scoped call hands it that part's SOURCE rather than a mesh.
+		"source": str(args.get("source", "")),
 		"required_mm": float(args.get("required_mm", 0.0)),
 		"tolerance_mm": float(args.get("tolerance_mm",
 			_GeometryChecks.CLEARANCE_TOLERANCE_MM)),
@@ -643,6 +709,11 @@ static func _check_fasteners(panel, args: Dictionary) -> Dictionary:
 		return holes
 
 	var report: Dictionary = await panel.check_fasteners({
+		# A part-scoped call brings both: the mesh the rays are cast against
+		# and the source the B-Rep bores are read from. They must be the same
+		# part or the bores would be one shape's and the collider another's.
+		"mesh": args.get("mesh", {}),
+		"source": str(args.get("source", "")),
 		"screw": screw,
 		"holes": holes.get("holes", []),
 		"pairs": args.get("pairs", []),

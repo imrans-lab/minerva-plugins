@@ -423,8 +423,14 @@ test_clearance.gd assertions=66
 # back stale, with no rows measured against holes that describe where the
 # references used to be, +1: a pose rewritten in place under a waiting check
 # is stale as well, +1: a check that starts with the colliders already
-# behind the poses is stale or rebuilds, never a mixed epoch).
-test_fasteners.gd assertions=72
+# behind the poses is stale or rebuilds, never a mixed epoch)
+# + 5 two-shell stack (a screw arriving from BELOW through a tray floor and a
+# boss, head counterbored into the tray's own skin, into a pilot in the post
+# above the board: pairing takes the pilot over the nearer clearance bore, the
+# seat is read off the solid so the joint passes with no pairs override, the
+# post nudged 0.5 mm still fails coaxiality, a rib across the pilot blocks the
+# path, and overlap with a clearance bore is never engagement).
+test_fasteners.gd assertions=77
 
 # Missing/malformed bounds, exact cache and pose identity, mesh replacement,
 # and a material-run ray that must exclude a nearer sibling node.
@@ -433,8 +439,10 @@ test_fasteners.gd assertions=72
 # whose tolerance_bounded is not a bool is refused by name before any pair is
 # graded, while the same reply with a real bool is answered) + 1 one-micron
 # move + 1 distinct scales + 3 pose/mesh/local-transform guards + 1 material
-# run past a sibling.
-test_geometry_contract.gd assertions=9
+# run past a sibling + 2 part scoping (a `parts` entry is reached by appending
+# that binding as the document's trailing expression, and anything that is not
+# a bare binding name is refused before the worker is asked).
+test_geometry_contract.gd assertions=11
 
 # STL as a reference format: a box written by the suite itself, twice — a
 # binary STL whose 80-byte header deliberately begins with "solid" (so a reader

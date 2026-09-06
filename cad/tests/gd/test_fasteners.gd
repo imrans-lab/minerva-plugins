@@ -185,6 +185,46 @@ const BOTTOMING_SCREW_LENGTH := 10.0
 const BORE_FLOOR_T := BOARD_HALF_THICKNESS + BORE_LENGTH
 const BOTTOMING_TIP_T := -BOARD_HALF_THICKNESS + BOTTOMING_SCREW_LENGTH
 
+# --- the two-shell stack (a screw arriving from BELOW) -----------------------
+## The enclosure the DCR is actually about, in miniature and on the same board:
+## a tray floor under the board, a boss carrying the board's underside, and a
+## post above it carrying the pilot the screw threads into. The screw comes up
+## from below, its head counterbored into the tray floor, so the seat is a face
+## of the SOLID and every axial number is measured from a plane 8.3 mm short of
+## the hole. Distances are in the board's own frame, z = 0 at mid-thickness.
+const TRAY_UNDER_Z := -10.8      # the tray's outer skin, where the screw goes in
+const TRAY_TOP_Z := -8.8         # 2 mm of floor
+const TRAY_SIZE := Vector3(24.0, 24.0, TRAY_TOP_Z - TRAY_UNDER_Z)
+## The head's seat: the counterbore's floor, 2.5 mm up inside the floor and the
+## boss. Wide enough that the M3 head (6 mm) drops into it.
+const HEAD_SEAT_Z := -8.3
+const COUNTERBORE_DIA := 6.82
+## The bore the screw PASSES THROUGH: a printed 3.4 mm clearance hole, from the
+## tray's outer skin to the boss's top face. Coaxial with the pilot, wider than
+## it, and nearer the board's hole than the pilot is — everything a pairing
+## rule that only measures distance would prefer.
+const TRAY_CLEAR_DIA := 3.82
+const BOSS_TOP_Z := -BOARD_HALF_THICKNESS
+## The post above the board and the pilot the screw threads into: a thread-form
+## pilot, narrower than the screw's own clearance hole.
+const POST_TOP_Z := 10.0
+const POST_OUTER_R := 3.0
+const PILOT_DIA := 2.5
+const PILOT_BOTTOM_Z := BOARD_HALF_THICKNESS
+const PILOT_TOP_Z := 9.8
+## The screw: an M3 long enough to reach from the counterbore floor into the
+## pilot and stop short of its end. Seat -8.3, tip -8.3 + 16 = 7.7, pilot floor
+## 9.8, so it engages 7.7 - 0.8 = 6.9 mm and does not bottom.
+const STACK_SCREW_LENGTH := 16.0
+const STACK_ENGAGEMENT_MM := 6.9
+## How far the post is nudged so the joint stops being buildable: more than the
+## 0.2 mm an M3 in a 3.4 mm hole is allowed to wander, so the 1.0 mm zone it
+## makes blows the 0.4 mm allowance.
+const POST_NUDGE_MM := 0.5
+## A rib of the shell left across the pilot bore, 2 mm above its mouth.
+const STACK_RIB_DROP_MM := 2.0
+const STACK_RIB_SIZE := Vector3(PILOT_DIA + 0.4, 0.6, 0.3)
+
 # --- the screw ---------------------------------------------------------------
 const SCREW_DIA := 3.0
 const SCREW_LENGTH := 8.0
@@ -347,6 +387,7 @@ func _run() -> void:
 	await _check_through_bore(module, panel)
 	await _check_missing_extent_metadata(module, panel)
 	await _check_parts_changed_during_await(module, panel)
+	await _check_two_shell_from_below(module, panel)
 	await _check_pose_snapshot(module, panel)
 
 
@@ -1534,6 +1575,269 @@ func _check_bottoming(module: RefCounted, panel: Node, main: Dictionary) -> void
 				and fine.get("bore_floor_mm", 0.0) == null
 				and bool(fine.get("pass", false)),
 			"row = %s, main A = %s" % [str(row), str(fine.get("why", fine.get("pass")))])
+
+
+# ---------------------------------------------------------------------------
+# The two-shell stack: a screw arriving from BELOW, head on the SOLID
+# ---------------------------------------------------------------------------
+
+## The enclosure this whole check exists for, and the one it used to get wrong
+## on every count.
+##
+## The board is sandwiched: a tray floor and a boss below it, a post above it,
+## and an M3 comes UP from underneath — head counterbored into the tray's outer
+## skin, shank through the tray's clearance bore and the board's own hole, tip
+## threading into the pilot in the post. Two things have to be right for a
+## single number in that row to be right:
+##
+##   the bore the hole is paired with. The tray's clearance bore is coaxial
+##   with the board's hole and NEARER it than the pilot is, so a pairing rule
+##   that only measures distance takes it, grades "7 mm of engagement" in a
+##   hole with no thread in it, and runs the screw in from the wrong end.
+##
+##   the plane the head lands on. It is 8.3 mm short of the hole, on the SOLID,
+##   and reading it off the reference instead puts the seat at the board and
+##   makes a joint with two millimetres to spare read as bottoming.
+##
+## Neither is fixed by a `pairs` override: the first is what the override is
+## for, and the second is wrong with or without one. So this runs with no
+## override at all, and the last check here forces the pairing ONTO the
+## clearance bore to show that the overlap it measures there is still not
+## engagement.
+func _check_two_shell_from_below(module: RefCounted, panel: Node) -> void:
+	var original_mesh: Dictionary = panel.mesh_data
+	var original_bores: Array = panel.bores
+
+	panel.mesh_data = await _stack_shell_mesh(0.0, false)
+	panel.bores = _stack_bores(0.0)
+	var report: Dictionary = await module.check(panel, {
+		"screw": _stack_screw(), "holes": [_hole_record(HOLE_XY[0])],
+	})
+
+	var row := _row_at(report, HOLE_XY[0])
+	var unpaired: Dictionary = report.get("unpaired", {}) as Dictionary
+	var loose: Array = unpaired.get("solid_features", []) as Array
+	var loose_fits: Array = []
+	for entry in loose:
+		loose_fits.append(str((entry as Dictionary).get("fit", "")))
+	check("stack: the hole is paired with the PILOT, not with the wider "
+			+ "clearance bore that shares its axis and is nearer the board — "
+			+ "and both wider bores are listed unpaired as clearance fits",
+			int(report.get("count", 0)) == 1
+				and absf(float(row.get("bore_dia_mm", 0.0)) - PILOT_DIA)
+					< NUMERIC_TOLERANCE_MM
+				and str(row.get("bore_fit", "")) == "thread"
+				and loose.size() == 2
+				and loose_fits.count("clearance") == 2,
+			"bore_dia=%s fit=%s unpaired=%s" % [str(row.get("bore_dia_mm")),
+				str(row.get("bore_fit")), str(loose)])
+
+	# The seat, in the board's own frame: the counterbore's floor, which is
+	# where the head physically stops. Everything else in this check is
+	# measured from it.
+	var seat_local := _local_of(row.get("seat_mm", {}))
+	check("stack: with NO pairs override the screw passes on every count — "
+			+ "the seat is the counterbore floor on the solid, the bite is "
+			+ "measured in the pilot alone, the path is clear and nothing "
+			+ "bottoms",
+			bool(row.get("pass", false))
+				and str(row.get("seat_on", "")) == "solid"
+				and absf(seat_local.z - HEAD_SEAT_Z) < NUMERIC_TOLERANCE_MM
+				and absf(float(row.get("engagement_mm", 0.0))
+					- STACK_ENGAGEMENT_MM) < NUMERIC_TOLERANCE_MM
+				and bool(row.get("engagement_ok", false))
+				and bool(row.get("path_clear", false))
+				and bool(row.get("head_seat_clear", false))
+				and float(row.get("head_seat_supported", 0.0)) > 0.99
+				and not bool(row.get("bottoming", true))
+				and str(row.get("why", "x")).is_empty(),
+			"row = %s" % str(row))
+
+	# The falsifier. Half a millimetre of post is more than an M3 in a 3.4 mm
+	# hole may wander, so this joint cannot be built — and nothing else about
+	# it changes, so `why` has to send the reader to the coaxiality.
+	panel.mesh_data = await _stack_shell_mesh(POST_NUDGE_MM, false)
+	panel.bores = _stack_bores(POST_NUDGE_MM)
+	var nudged: Dictionary = await module.check(panel, {
+		"screw": _stack_screw(), "holes": [_hole_record(HOLE_XY[0])],
+	})
+	var nudged_row := _row_at(nudged, HOLE_XY[0])
+	var nudged_zone: Dictionary = nudged_row.get("coaxiality", {}) as Dictionary
+	check("stack: the same post moved half a millimetre fails, and the "
+			+ "failure is the offset — measured, named, and outside the "
+			+ "allowance the screw's own clearance gives it",
+			not bool(nudged_row.get("pass", true))
+				and absf(float(nudged_row.get("centre_offset_mm", 0.0))
+					- POST_NUDGE_MM) < NUMERIC_TOLERANCE_MM
+				and absf(float(nudged_zone.get("zone_dia_mm", 0.0))
+					- POST_NUDGE_MM * 2.0) < NUMERIC_TOLERANCE_MM
+				and not bool(nudged_zone.get("pass", true))
+				and str(nudged_row.get("why", "")).contains("coaxiality"),
+			"row = %s" % str(nudged_row))
+
+	# A rib the shell grew across its own pilot, above where the tip reaches.
+	panel.mesh_data = await _stack_shell_mesh(0.0, true)
+	panel.bores = _stack_bores(0.0)
+	var ribbed: Dictionary = await module.check(panel, {
+		"screw": _stack_screw(), "holes": [_hole_record(HOLE_XY[0])],
+	})
+	var ribbed_row := _row_at(ribbed, HOLE_XY[0])
+	var blocked: Array = ribbed_row.get("obstructions", []) as Array
+	var first: Dictionary = blocked[0] if not blocked.is_empty() else {}
+	check("stack: a rib of the shell across the pilot bore blocks the screw — "
+			+ "the path is not clear and the obstruction is the solid, inside "
+			+ "the engaged bore",
+			not bool(ribbed_row.get("path_clear", true))
+				and not bool(ribbed_row.get("pass", true))
+				and str(first.get("node", "")) == "<solid>"
+				and str(first.get("span", "")) == "bore",
+			"row = %s" % str(ribbed_row))
+
+	# And the guard the acceptance turns on: a `pairs` override onto the tray's
+	# own clearance bore measures plenty of overlap and must still not call it
+	# engagement, because there is no material there for a thread to hold.
+	panel.mesh_data = await _stack_shell_mesh(0.0, false)
+	panel.bores = _stack_bores(0.0)
+	var forced: Dictionary = await module.check(panel, {
+		"screw": _stack_screw(), "holes": [_hole_record(HOLE_XY[0])],
+		"pairs": [{"solid_feature": 1, "reference_hole": 0}],
+	})
+	var forced_row := _row_at(forced, HOLE_XY[0])
+	check("stack: forced onto the tray's CLEARANCE bore the screw fails — the "
+			+ "overlap is reported, the fit says what kind of hole it is, and "
+			+ "it is not engagement",
+			str(forced_row.get("bore_fit", "")) == "clearance"
+				and float(forced_row.get("engagement_mm", 0.0)) > 0.0
+				and not bool(forced_row.get("engagement_ok", true))
+				and not bool(forced_row.get("pass", true))
+				and str(forced_row.get("why", "")).contains("passes through"),
+			"row = %s" % str(forced_row))
+
+	panel.mesh_data = original_mesh
+	panel.bores = original_bores
+
+
+## The two-shell stack as worker mesh data, in world millimetres. `nudge` moves
+## the POST and its pilot sideways; `rib` leaves a bar across the pilot bore.
+func _stack_shell_mesh(nudge: float, rib: bool) -> Dictionary:
+	var combiner := CSGCombiner3D.new()
+	combiner.name = "StackShell"
+	var xy: Vector2 = HOLE_XY[0]
+
+	# The tray floor, and the boss standing on it up to the board's underside.
+	var floor_plate := CSGBox3D.new()
+	floor_plate.size = TRAY_SIZE
+	floor_plate.position = Vector3(xy.x, xy.y, (TRAY_UNDER_Z + TRAY_TOP_Z) * 0.5)
+	combiner.add_child(floor_plate)
+	var boss := CSGCylinder3D.new()
+	boss.radius = BOSS_OUTER_R
+	boss.height = BOSS_TOP_Z - TRAY_TOP_Z
+	boss.sides = 64
+	boss.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	boss.position = Vector3(xy.x, xy.y, (TRAY_TOP_Z + BOSS_TOP_Z) * 0.5)
+	combiner.add_child(boss)
+
+	# The post above the board, carrying the pilot.
+	var post := CSGCylinder3D.new()
+	post.radius = POST_OUTER_R
+	post.height = POST_TOP_Z - PILOT_BOTTOM_Z
+	post.sides = 64
+	post.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	post.position = Vector3(xy.x + nudge, xy.y,
+		(PILOT_BOTTOM_Z + POST_TOP_Z) * 0.5)
+	combiner.add_child(post)
+
+	# The three bores, cut after everything they pass through. The clearance
+	# bore runs the whole way from the tray's skin to the boss's top face; the
+	# counterbore stops at the head's seat; the pilot stops short of the post's
+	# top so the bore has a floor.
+	combiner.add_child(_stack_cut(xy, 0.0, TRAY_CLEAR_DIA * 0.5,
+		TRAY_UNDER_Z - 1.0, BOSS_TOP_Z + 1.0))
+	combiner.add_child(_stack_cut(xy, 0.0, COUNTERBORE_DIA * 0.5,
+		TRAY_UNDER_Z - 1.0, HEAD_SEAT_Z))
+	combiner.add_child(_stack_cut(xy, nudge, PILOT_DIA * 0.5,
+		PILOT_BOTTOM_Z - 1.0, PILOT_TOP_Z))
+	if rib:
+		# Added after the cutters, so they cannot remove it: a bar across the
+		# whole pilot and into its wall on both sides.
+		var bar := CSGBox3D.new()
+		bar.size = STACK_RIB_SIZE
+		bar.position = Vector3(xy.x + nudge, xy.y,
+			PILOT_BOTTOM_Z + STACK_RIB_DROP_MM + STACK_RIB_SIZE.z * 0.5)
+		combiner.add_child(bar)
+
+	root.add_child(combiner)
+	await process_frame
+	var baked: ArrayMesh = combiner.bake_static_mesh()
+	combiner.queue_free()
+	return _mesh_data(baked, _pose)
+
+
+## One cylindrical cutter along the board's +z, from `from_z` to `to_z`.
+func _stack_cut(xy: Vector2, nudge: float, radius: float,
+		from_z: float, to_z: float) -> CSGCylinder3D:
+	var cutter := CSGCylinder3D.new()
+	cutter.radius = radius
+	cutter.height = to_z - from_z
+	cutter.sides = 64
+	cutter.operation = CSGShape3D.OPERATION_SUBTRACTION
+	cutter.rotation = Vector3(PI * 0.5, 0.0, 0.0)
+	cutter.position = Vector3(xy.x + nudge, xy.y, (from_z + to_z) * 0.5)
+	return cutter
+
+
+## What the worker's cylindrical_features answers for that stack: the pilot,
+## then the two bores the screw only passes through. Index 1 is the clearance
+## bore the last check forces the pairing onto.
+func _stack_bores(nudge: float) -> Array:
+	return [
+		_stack_bore(PILOT_DIA, PILOT_BOTTOM_Z, PILOT_TOP_Z, nudge),
+		_stack_bore(TRAY_CLEAR_DIA, TRAY_UNDER_Z, BOSS_TOP_Z, 0.0),
+		_stack_bore(COUNTERBORE_DIA, TRAY_UNDER_Z, HEAD_SEAT_Z, 0.0),
+	]
+
+
+## One bore of the stack in the shape the worker reports it: a closed concave
+## cylinder whose whole wall goes all the way round, so its full-turn extent
+## and its wall extent are the same span and carry no error bar.
+func _stack_bore(dia: float, from_z: float, to_z: float,
+		nudge: float) -> Dictionary:
+	var xy: Vector2 = HOLE_XY[0]
+	var origin: Vector3 = _pose * Vector3(xy.x + nudge, xy.y, from_z)
+	var direction: Vector3 = (_pose.basis * Vector3(0.0, 0.0, 1.0)).normalized()
+	var length := to_z - from_z
+	return {
+		"source": "b_rep",
+		"sense": "concave",
+		"radius_mm": dia * 0.5,
+		"dia_mm": dia,
+		"axis": {"origin_mm": _as_array(origin),
+			"direction": _as_array(direction)},
+		"centre_mm": _as_array(origin + direction * (length * 0.5)),
+		"start_mm": 0.0,
+		"end_mm": length,
+		"length_mm": length,
+		"extent_max_mm": length,
+		"extent_full_mm": length,
+		"full_start_mm": 0.0,
+		"full_end_mm": length,
+		"sweep_deg": 360.0,
+		"closed": true,
+		"bin_deg": BIN_DEG,
+		"closed_min_sweep_deg": CLOSED_MIN_SWEEP_DEG,
+		"faces": 1,
+		"area_mm2": TAU * dia * 0.5 * length,
+		"extent_full_exact": true,
+		"extent_exact": true,
+		"extent_full_bounded": true,
+		"extent_full_bound_mm": 0.0,
+	}
+
+
+## The screw of the stack: an M3 whose head lands on the SOLID, described once.
+func _stack_screw() -> Dictionary:
+	return {"dia_mm": SCREW_DIA, "length_mm": STACK_SCREW_LENGTH,
+		"head_dia_mm": HEAD_DIA, "seat": "solid"}
 
 
 # ---------------------------------------------------------------------------

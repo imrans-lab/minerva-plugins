@@ -4,6 +4,7 @@ const Clearance = preload("res://../../minerva-plugins/cad/ui/scripts/clearance_
 const Gauge = preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const Geometry = preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const Fasteners = preload("res://../../minerva-plugins/cad/ui/scripts/fastener_checks.gd")
+const PartScope = preload("res://../../minerva-plugins/cad/ui/scripts/part_scope.gd")
 var passed := 0
 var failed := 0
 
@@ -25,6 +26,20 @@ class ReplyPanel extends RefCounted:
 		# Awaited by the caller, so it yields once like the real IPC round trip.
 		await (Engine.get_main_loop() as SceneTree).process_frame
 		return {"success": true, "result": {"ok": true, "result": reply}}
+
+## A panel whose worker answers one canned evaluate reply and keeps the source
+## it was asked about, so the trailing-expression rule can be read back.
+class EvaluatePanel extends RefCounted:
+	var asked: String = ""
+	var reply: Dictionary = {}
+	func get_document_state() -> Dictionary:
+		return {"source": "bottom = cube(1, 1, 1)\ntop = cube(2, 2, 2)\ntop"}
+	func call_backend(_channel: String, payload: Dictionary,
+			_timeout_ms: int = 30000) -> Dictionary:
+		asked = str(payload.get("source", ""))
+		await (Engine.get_main_loop() as SceneTree).process_frame
+		return {"success": true, "result": {"ok": true, "result": reply}}
+
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -97,7 +112,30 @@ func _run() -> void:
 	check("material run excludes a sibling node's nearer surface", absf(float(ray.get("run", 0.0)) - 0.004) < 0.00001)
 	gauge.queue_free()
 	await process_frame
+	await _check_part_scope()
 	print("=== Results: %d passed, %d failed ===" % [passed, failed])
+
+
+## A `parts` entry is a DSL BINDING NAME, and the part it names is reached by
+## appending it as the document's trailing expression — the DSL's own
+## render-target rule. Both halves of that matter: a name that is not a
+## binding must never be appended (it would be an arbitrary statement run in
+## the document's scope), and the source that is sent has to be the document
+## with exactly that one line added, or the mesh a check measures is not the
+## part the caller asked for.
+func _check_part_scope() -> void:
+	var panel := EvaluatePanel.new()
+	panel.reply = {"shape_name": "bottom",
+		"mesh": {"vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "faces": [[0, 1, 2]]}}
+	var resolved: Dictionary = await PartScope.resolve(panel, "bottom")
+	check("a named part is the document with that binding appended as its trailing expression",
+		not resolved.has("error")
+			and panel.asked == panel.get_document_state()["source"] + "\nbottom\n"
+			and (resolved.get("mesh", {}) as Dictionary).has("faces"))
+	panel.asked = ""
+	var refused: Dictionary = await PartScope.resolve(panel, "bottom - top")
+	check("a `parts` entry that is not a bare binding name is refused, and nothing is sent to the worker",
+		refused.has("error") and panel.asked.is_empty())
 	quit(1 if failed else 0)
 
 ## `_clearance_report` is only half the tolerance_bounded contract: the field
