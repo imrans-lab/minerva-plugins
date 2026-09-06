@@ -515,18 +515,21 @@ func _boss_world_box(lift: float) -> AABB:
 
 
 ## The plate as the evaluated solid, tilted the same five microradians about Y
-## through the origin. The tilt is what makes its underside weave through the
-## boss's top-face plane instead of lying in it; as the SOLID, those underside
-## edges are cast at the reference, which is the leg the unswapped tilted case
-## never reaches.
+## through x = 0.75 — half a grid pitch off the plate's x = 0 grid line. An axis
+## on a grid line leaves every underside chord wholly above or wholly inside
+## the boss's top-face plane; half a pitch off, the chords straddle it and
+## exit through the top face mid-edge. As the SOLID, those underside edges are
+## cast at the reference, which is the leg the unswapped tilted case never
+## reaches.
 func _tilted_plate_solid() -> Dictionary:
 	var tilt := Basis(Vector3(0.0, 1.0, 0.0), BOARD_TILT_RAD)
+	var axis_offset := Vector3(0.75, 0.0, 0.0)
 	var data := _solid_from(_grid_plate())
 	var tilted: Array = []
 	for entry in (data.get("vertices", []) as Array):
 		var point: Array = entry
-		var moved: Vector3 = tilt * Vector3(
-			float(point[0]), float(point[1]), float(point[2]))
+		var moved: Vector3 = tilt * (Vector3(
+			float(point[0]), float(point[1]), float(point[2])) - axis_offset) + axis_offset
 		tilted.append([moved.x, moved.y, moved.z])
 	data["vertices"] = tilted
 	return data
