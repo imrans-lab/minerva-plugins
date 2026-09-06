@@ -760,6 +760,15 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["pass"] = false
 			pair["containment_undecidable"] = true
 			pair["note"] = "containment undecidable: %s" % doubt
+		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
+			var pose := _pose_in(records, pair["reference"])
+			var reference_point := _vector(raw["reference_point_mm"])
+			pair["solid_point_mm"] = _vec(_vector(raw["solid_point_mm"]))
+			pair["reference_point_mm"] = {
+				"world": _vec(reference_point),
+				"local": _vec(pose.affine_inverse() * reference_point),
+			}
+		# The witness points are kept for a contact row too: they locate the touch.
 		if float(pair["min_mm"]) <= 0.0 or bool(raw.get("interference", false)):
 			# No air at all between the two meshes. The worker cannot say
 			# whether that is a flush contact or a crossing — its distance is
@@ -776,14 +785,6 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 				pair["note"] = _contact_note(buried)
 			pairs.append(pair)
 			continue
-		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
-			var pose := _pose_in(records, pair["reference"])
-			var reference_point := _vector(raw["reference_point_mm"])
-			pair["solid_point_mm"] = _vec(_vector(raw["solid_point_mm"]))
-			pair["reference_point_mm"] = {
-				"world": _vec(reference_point),
-				"local": _vec(pose.affine_inverse() * reference_point),
-			}
 		if not str(raw.get("note", "")).is_empty() and not pair.has("note"):
 			pair["note"] = str(raw["note"])
 		pairs.append(pair)

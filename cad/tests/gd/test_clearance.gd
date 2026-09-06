@@ -862,7 +862,11 @@ func _check_flush_contact(panel: Node, checks: RefCounted) -> void:
 				and not bool(flush.get("pass", true)),
 			"pair = %s, join = '%s'" % [str(met),
 				str(flush.get("interference_join", ""))])
-	check("flush: the same node lifted by %g mm is a positive distance again, "
+	check("flush: the contact row still carries its witness points, so the "
+			+ "touch can be located",
+			met.has("solid_point_mm") and met.has("reference_point_mm"),
+			"pair = %s" % str(met))
+	check("flush: the same node lifted by %s mm is a positive distance again, "
 			% FLUSH_LIFT_MM + "with neither flag — contact is not a "
 			+ "tolerance band",
 			float(apart.get("min_mm", -1.0)) > 0.0

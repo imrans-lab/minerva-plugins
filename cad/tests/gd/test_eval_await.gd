@@ -411,10 +411,19 @@ func _status(panel: Node) -> String:
 
 
 func _teardown(rig: Dictionary) -> void:
+	# Freed immediately, not queued: the last rig is torn down right before
+	# quit(), and a queued free never gets its frame, which Godot reports as
+	# resources still in use at exit.
 	var panel: Node = rig.get("panel", null)
+	var broker: Object = rig.get("broker", null)
 	if panel != null and is_instance_valid(panel):
-		(rig["broker"] as Object).detach_buffer_from_panel("cad", str(rig["panel_name"]))
-		panel.queue_free()
+		if broker != null:
+			broker.detach_buffer_from_panel("cad", str(rig["panel_name"]))
+		if panel.get_parent() != null:
+			panel.get_parent().remove_child(panel)
+		panel.free()
+	if broker is Node and is_instance_valid(broker) and (broker as Node).get_parent() == null:
+		(broker as Node).free()
 
 
 func _cleanup() -> void:
