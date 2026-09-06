@@ -107,11 +107,21 @@ def _mesh_defects(mesh: dict) -> dict:
     tessellation, so the two agree.
     """
     faces = mesh.get("faces") or []
+    # The tessellation carries one vertex per face corner (normals differ
+    # across an edge), so two faces sharing an edge index different vertices
+    # at the same point. Weld by position first, as the panel's outline pass
+    # does, or every closed solid reads as all open edges.
+    welded: dict = {}
+    weld_of: list = []
+    for vertex in mesh.get("vertices") or []:
+        key = tuple(round(float(c), 6) for c in vertex)
+        weld_of.append(welded.setdefault(key, len(welded)))
     edge_uses: dict = {}
     seen_faces: set = set()
     degenerate = 0
     duplicate = 0
-    for face in faces:
+    for raw_face in faces:
+        face = [weld_of[int(i)] if int(i) < len(weld_of) else int(i) for i in raw_face]
         if len(set(face)) != len(face):
             degenerate += 1
             continue

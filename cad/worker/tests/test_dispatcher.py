@@ -406,8 +406,15 @@ class TestEvaluateSummary:
         # A closed cube has no open or non-manifold edges and no repeats.
         assert "mesh_defects" not in summary
 
-        summary_bytes = len(json.dumps(summary))
-        assert summary_bytes < len(json.dumps(full["mesh"])) / 4
+        # The saving only shows on a mesh with some faces in it: a cube is
+        # twelve triangles, so measure the ratio on a sphere.
+        _methods.reset_caches()
+        ball = _methods._evaluate({"source": "b = sphere(5)\n"})["result"]
+        ball_summary = _methods._evaluate(
+            {"source": "b = sphere(5)\n", "summary": True}
+        )["result"]
+        assert ball_summary["face_count"] == len(ball["mesh"]["faces"])
+        assert len(json.dumps(ball_summary)) < len(json.dumps(ball["mesh"])) / 4
 
     def test_summary_counts_the_defects_of_an_open_mesh(self):
         import mcad_worker.methods as _methods

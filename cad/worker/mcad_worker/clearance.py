@@ -308,9 +308,9 @@ def _chord_clause(angular_rad: float, effective_mm: float,
     printed_effective = "%.6f" % effective_mm
     printed_request = "%.6f" % tolerance_mm
     relation = "equal to" if printed_effective == printed_request else "more than"
-    step = ("this module's finest angular step (%.4f rad)" % angular_rad
+    step = ("this module's finest angular step (%.6f rad)" % angular_rad
             if angular_rad <= MIN_ANGULAR_RAD
-            else "an angular step of %.4f rad" % angular_rad)
+            else "an angular step of %.6f rad" % angular_rad)
     return (" and held at %s, which on that radius is %s mm of chord error — "
             "%s the %s mm asked for"
             % (step, printed_effective, relation, printed_request))
