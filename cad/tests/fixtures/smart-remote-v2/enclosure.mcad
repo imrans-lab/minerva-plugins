@@ -1,0 +1,207 @@
+# smart-remote-v2 enclosure — rev 2 (mouse-domed top, vertical finger grooves, screw posts for top-shell parts)
+# The pcb 3D export is glTF-standard: metres, Y up. mesh() converts to mm, Z up.
+# Board frame after conversion: x 0..90, y -100..0, z 0 (underside) .. 1.6 (top face);
+# tallest part reaches z 10.1 (the U1S devkit sockets), header pins hang to z -1.6.
+# Left of the board = small x. SW1/SW2 are the vertical pair on the left edge, SW3/SW4 the horizontal pair at y -60.
+board = mesh("smart-remote-v2.glb", units="m", up="y")
+
+# ---- print settings: PLA on an FDM printer. Holes print ~0.42 mm under size, so every CLEARANCE hole gets
+# print_clear added to its diameter. Thread pilots do NOT: a post drilled at exactly the screw diameter prints
+# slightly under and the machine thread cuts its own grip.
+print_clear = 0.42
+screw_d = 3
+screw_clear_d = 3.4 + print_clear    # ISO 273 medium clearance for M3, plus the printer's undersize
+pilot_r = screw_d / 2                # M3 pilots in the shell posts: no clearance on purpose
+m2_pilot_r = 1.0                     # OLED module screws
+m25_pilot_r = 1.25                   # thumbstick module screws
+
+# ---- off-board parts (stand-in meshes from datasheet dimensions), posed in the board frame
+# ESP32-S3 devkit plugs into the U1S_A/U1S_B sockets (x 32.3..57.7, y -64..-8.2, top at z 10.1); USB-C end faces y=0
+esp = translate([45, -36.9, 10.1], mesh("parts/esp32_s3_devkitc1.glb", units="mm", up="z"))
+# OLED beside the SW1/SW2 pair, screwed from below to four posts under the dome, display up through a window.
+# 0.96" module: 27 x 27 board, 1.6 pcb, four 2.0 mm holes on a 23.5 mm square (confirm against the bought module).
+oled_x = 27.5
+oled_y = -28
+oled_z = 18.5   # low enough that the dome's inner surface clears the module's far corner (it grazed it at z 20)
+oled = translate([oled_x, oled_y, oled_z], mesh("parts/oled_096.stl", units="mm", up="z"))
+oled_hole = 23.5 / 2
+# thumbstick below SW3/SW4 in the bottom-left corner, turned 90 degrees so its 34 mm side runs along x: that keeps
+# its pcb off the shell post at (4,-96) and its own posts off the devkit corner at (32.3,-68.65). Screwed from
+# below to four posts; KY-023 board 26 x 34, 1.6 pcb, four holes on 20.5 x 26.5 (confirm), stick up through the dome
+stick_x = 24.5
+stick_y = -84
+stick_z = 9
+stick = translate([stick_x, stick_y, stick_z], rotate([0, 0, 90], mesh("parts/joystick_ky023.glb", units="mm", up="z")))
+stick_hx = 26.5 / 2
+stick_hy = 20.5 / 2
+# speaker in the upper right under the dome, held by a collar (no mounting holes on a 28 mm speaker), grille above
+spk_x = 75
+spk_y = -32
+spk_z = 15.5    # collar clears the devkit's top edge (z 15, x up to 57.7)
+speaker = translate([spk_x, spk_y, spk_z], mesh("parts/speaker_28mm.stl", units="mm", up="z"))
+# 4xAA holder under the board in the bottom shell, resting on the closed battery door (door top at z -22.7)
+batt = translate([45, -52, -22.7], mesh("parts/holder_4xaa_2x2.stl", units="mm", up="z"))
+
+holes = [[4, -4], [86, -4], [4, -96], [86, -96]]
+# tactile switch centres (actuator tops at z 6.6)
+switches = [[6, -9.5], [5.5, -42], [22, -60.5], [8, -60.5]]
+
+wall = 2
+side = 2          # air between board edge and inner wall
+gap = 0.3         # parting gap between the halves
+wire_bay = 12     # extra length past the board's y=-100 edge: room for the battery leads and connector to be plugged
+x0 = 0 - side - wall
+y0 = -100 - side - wall - wire_bay
+ox = 90 + 2*side + 2*wall
+oy = 100 + 2*side + 2*wall + wire_bay
+ix = ox - 2*wall
+iy = oy - 2*wall
+cx = x0 + ox / 2
+cy = y0 + oy / 2
+huge = 200
+
+# ---- outer form of the walls: one blank for both halves, vertical corners rounded, split at the parting line.
+# The board's sharp corners sit 4 mm inside the outer corner, so the corner fillet cannot exceed ~4.8 mm.
+floor_top = -22
+part_z = 4
+wall_top = 14                        # the vertical walls end here; the dome takes over
+blank = translate([x0, y0, floor_top - wall], cube(ox, oy, wall_top - floor_top + wall))
+fillet blank, [1, 3, 5, 7], r=4
+bottom = blank - translate([x0 - 1, y0 - 1, part_z], cube(ox + 2, oy + 2, huge))
+bottom = bottom - translate([x0 + wall, y0 + wall, floor_top], cube(ix, iy, part_z - floor_top + 1))
+# standoffs carry the board underside (z=0); the screw passes up through them
+for p in holes:
+    bottom = bottom + translate([p[0], p[1], floor_top], cylinder(h=0 - floor_top, r=3))
+    bottom = bottom - translate([p[0], p[1], floor_top - wall - 1], cylinder(h=0 - floor_top + wall + 2, r=screw_clear_d / 2))
+
+# battery door, hook-and-snap (the classic TV-remote cover, printable in PLA):
+#   two rigid hooks on the -y edge slide into slots under the floor margin; a 1 mm cantilever tab on the +y edge
+#   carries a 0.6 mm bump that snaps behind a 1.2 mm ledge. To open: press the tab through the finger recess, lift, unhook.
+door_x = 12
+door_y = -82.5
+door_w = 66
+door_l = 61
+floor_z = floor_top - wall           # underside of the floor (z -24)
+door_t = 1.3                         # door plate thickness; the floor is 2, so 0.7 mm of floor stays over the hooks
+bottom = bottom - translate([door_x, door_y, floor_z - 1], cube(door_w, door_l, wall + 2))
+for hx in [door_x + 10, door_x + door_w - 22]:
+    bottom = bottom - translate([hx - print_clear/2, door_y - 4 - print_clear/2, floor_z - 1], cube(12 + print_clear, 4 + print_clear, 1 + 0.8 + print_clear))
+tab_x = door_x + door_w/2
+bottom = bottom - translate([tab_x - 7, door_y + door_l - 0.1, floor_z - 1], cube(14, 1.3, 1 + 1.0 + print_clear))
+bottom = bottom - translate([tab_x - 7, door_y + door_l + 1.2, floor_z - 1], cube(14, 2.6, 1 + 1.6 + print_clear))
+bottom = bottom - translate([tab_x - 6, door_y + door_l + 1.2, floor_z - 1], cube(12, 6, 1 + 0.6))
+door = translate([door_x + print_clear/2, door_y + print_clear/2, floor_z], cube(door_w - print_clear, door_l - print_clear, door_t))
+for hx in [door_x + 10, door_x + door_w - 22]:
+    door = door + translate([hx, door_y - 4 + print_clear/2, floor_z], cube(12, 4.2, 0.8))
+door = door + translate([tab_x - 6, door_y + door_l - 10, floor_z], cube(12, 10 + 3.5, 1.0))
+door = door - translate([tab_x - 6.5, door_y + door_l - 10, floor_z - 1], cube(0.5, 10, 3))
+door = door - translate([tab_x + 6, door_y + door_l - 10, floor_z - 1], cube(0.5, 10, 3))
+door = door + translate([tab_x - 6, door_y + door_l + 1.6, floor_z + 1.0], cube(12, 1.6, 0.6))
+
+# ---- finger grips: a 4 mm pad along each side with four VERTICAL grooves scooped 3 mm into it
+pad_y0 = -85
+pad_len = 70
+groove_cx = [x0 - 4 - 3, x0 + ox + 4 + 3]
+groove_y = [-75, -57, -39, -21]
+for gx in [x0 - 4, x0 + ox]:
+    bottom = bottom + translate([gx, pad_y0, floor_top - wall], cube(4, pad_len, part_z - floor_top + wall))
+for gcx in groove_cx:
+    for gy in groove_y:
+        bottom = bottom - translate([gcx, gy, floor_top + 2], cylinder(h=part_z - floor_top, r=6))
+
+# ---- top half: vertical walls from the blank up to wall_top, then a mouse-like dome lofted over them
+top_z0 = part_z + gap
+walls = blank - translate([x0 - 1, y0 - 1, top_z0 - huge], cube(ox + 2, oy + 2, huge))
+dome = loft:
+    z=14: rect(98, 120)
+    z=22: oval(94, 116)
+    z=30: oval(82, 106)
+    z=36: oval(52, 74)
+dome = translate([cx, cy, 0], dome)
+dome_in = loft:
+    z=13: rect(94, 116)
+    z=22: oval(90, 112)
+    z=28: oval(78, 102)
+    z=34: oval(48, 70)
+dome_in = translate([cx, cy, 0], dome_in)
+# a slightly larger dome: anything that must stand 1.5 mm proud of the surface (keycaps) is clipped to it
+dome_plus = loft:
+    z=14: rect(101, 123)
+    z=23.5: oval(99, 121)
+    z=31.5: oval(85, 109)
+    z=37.5: oval(55, 77)
+dome_plus = translate([cx, cy, 0], dome_plus)
+# "outside the dome" for clipping posts: a big box minus the dome
+outside = translate([x0 - 10, y0 - 10, wall_top], cube(ox + 20, oy + 20, 100)) - dome
+outside_plus = translate([x0 - 10, y0 - 10, wall_top], cube(ox + 20, oy + 20, 100)) - dome_plus
+
+top = walls + dome
+top = top - translate([x0 + wall, y0 + wall, top_z0 - 1], cube(ix, iy, wall_top - top_z0 + 1))
+top = top - dome_in
+for gx in [x0 - 4, x0 + ox]:
+    top = top + translate([gx, pad_y0, top_z0], cube(4, pad_len, wall_top - top_z0))
+for gcx in groove_cx:
+    for gy in groove_y:
+        top = top - translate([gcx, gy, top_z0 - 1], cylinder(h=wall_top - top_z0 - 1, r=6))
+
+# everything that hangs from the dome is built as tall cylinders, unioned, and clipped ONCE to the dome's outer
+# surface (posts, sleeves, collar, mic tube); a single boolean against the lofted faces keeps the worker under
+# the panel's 90 s evaluation budget
+hang = translate([holes[0][0], holes[0][1], 1.6], cylinder(h=1, r=0.1))
+# shell posts: from the board top face (z=1.6) up into the dome; M3 pilots 8 deep
+for p in holes:
+    hang = hang + translate([p[0], p[1], 1.6], cylinder(h=40, r=3))
+# OLED posts: land on the module's pcb top face (pcb 1.6 thick), screws come up from below into M2 pilots
+for dx in [-oled_hole, oled_hole]:
+    for dy in [-oled_hole, oled_hole]:
+        hang = hang + translate([oled_x + dx, oled_y + dy, oled_z + 1.6], cylinder(h=40, r=2.5))
+# thumbstick posts on its pcb top face (z stick_z + 1.6), M2.5 pilots
+for dx in [-stick_hx, stick_hx]:
+    for dy in [-stick_hy, stick_hy]:
+        hang = hang + translate([stick_x + dx, stick_y + dy, stick_z + 1.6], cylinder(h=40, r=2.8))
+# speaker collar: a ring around the 28 mm speaker from its base up into the dome
+hang = hang + translate([spk_x, spk_y, spk_z], cylinder(h=40, r=16.5))
+# mic tube: from 1 mm above the MEMS mic U3 (top z 2.6) up into the dome
+hang = hang + translate([45, -92, 3.6], cylinder(h=40, r=3))
+# keycap guide sleeves hanging from the dome
+for s in switches:
+    hang = hang + translate([s[0], s[1], 8.6], cylinder(h=40, r=4.4))
+hang = hang - outside
+top = top + hang
+
+# bores through the hanging parts
+for p in holes:
+    top = top - translate([p[0], p[1], 1.6 - 1], cylinder(h=8 + 1, r=pilot_r))
+# SW1 (y up to -6.4, z up to 6.6) runs into the post at (4,-4): notch the post flat at y=-5.9 over SW1's height
+top = top - translate([-1, -9, 1.6], cube(9, 3.1, 5.5))
+for dx in [-oled_hole, oled_hole]:
+    for dy in [-oled_hole, oled_hole]:
+        top = top - translate([oled_x + dx, oled_y + dy, oled_z + 1.6 - 1], cylinder(h=5, r=m2_pilot_r))
+top = top - translate([oled_x - 11, oled_y - 11, oled_z + 2], cube(22, 22, 40))
+for dx in [-stick_hx, stick_hx]:
+    for dy in [-stick_hy, stick_hy]:
+        top = top - translate([stick_x + dx, stick_y + dy, stick_z + 1.6 - 1], cylinder(h=6, r=m25_pilot_r))
+top = top - translate([stick_x, stick_y, wall_top - 1], cylinder(h=40, r=9 + print_clear/2))
+top = top - translate([spk_x, spk_y, spk_z - 1], cylinder(h=42, r=14 + print_clear/2))
+# speaker grille: 3x3 holes over the cone
+for gx in [-6, 0, 6]:
+    for gy in [-6, 0, 6]:
+        top = top - translate([spk_x + gx, spk_y + gy, spk_z + 5.5], cylinder(h=40, r=1.2))
+top = top - translate([45, -92, 3.6 - 1], cylinder(h=45, r=1.2))
+for mx in [-0.7, 0, 0.7]:
+    top = top - translate([45 + mx, -92, 3.6], cylinder(h=45, r=0.35))
+# two USB-C windows in the y=0 end wall, 13 mm apart, at the devkit's connector height
+for dx in [-6.5, 6.5]:
+    top = top - translate([45 + dx - 5 - print_clear/2, 1, 11 - print_clear/2], cube(10 + print_clear, 4, 5 + print_clear))
+for s in switches:
+    top = top - translate([s[0], s[1], 8.6 - 1], cylinder(h=45, r=3 + print_clear/2))
+
+# keycaps: a plunger riding in its sleeve, a foot flange so it cannot fall out, top clipped 1.5 mm proud of the dome
+caps = translate([switches[0][0], switches[0][1], 6.8], cylinder(h=1, r=0.1))
+for s in switches:
+    caps = caps + translate([s[0], s[1], 6.8], cylinder(h=40, r=2.7))
+    caps = caps + translate([s[0], s[1], 6.8], cylinder(h=1.5, r=4))
+caps = caps - outside_plus
+
+enclosure = bottom + top + door + caps
+enclosure
