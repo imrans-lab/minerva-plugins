@@ -449,14 +449,22 @@ test_stl_reference.gd assertions=18
 # the noisy one reproduces the report, because exact coplanarity is already
 # cleared by the per-crossing parity tests, so it is the noisy one that turns
 # red when the contact-run gate is removed.
-# 8 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# The same contact is then asked with the ROLES SWAPPED — the boss mounted as
+# the reference, the plate evaluated as the solid — because each cast
+# direction carries its own copy of the contact-run gate and only the swap
+# puts the plate's dense underside edges on the reference-cast path, where
+# _drop_contact_runs is the sole reason they are cleared. Its lifts bracket
+# TOUCH_EPSILON_MM itself: 9e-5 mm in is still a contact, 2e-4 mm in is not.
+# 13 assertions = 2 fixture premises (the plate really is grid-triangulated;
 # its underside edges really do cross the rim) + 1 collider built + 2 the
 # flush boss reports nothing, exactly coplanar and a hundred-thousandth of a
 # millimetre out + 2 the bitten boss reports the board's node and, because no
 # single edge spans a half-millimetre disc, no depth with it + 1 the depth
 # control (the same boss driven clean through the board reports the board's
-# thickness).
-test_flush_contact.gd assertions=8
+# thickness) + 5 swapped (1 the boss became the one reference collider, 2 the
+# two lifts inside the touch epsilon are contacts, 2 the lift past it and the
+# half-millimetre bite are interference on the boss's node).
+test_flush_contact.gd assertions=13
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool

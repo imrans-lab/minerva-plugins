@@ -49,6 +49,31 @@ extends SceneTree
 ## boss driven clean through the board is the control that says so honestly:
 ## there the run exists, and the depth is the board's thickness.
 ##
+## THE SAME CONTACT IS ASKED WITH THE ROLES SWAPPED, because the check casts
+## in two directions and each has its own copy of the contact-run gate. With
+## the plate as the reference and the boss as the solid it is the SOLID-path
+## copy that clears the rim chords (_cross_into_solid); the boss's own edges
+## barely reach the plate, so the reference-path copy
+## (_cross_into_references -> _drop_contact_runs) decides nothing and could be
+## deleted with this suite still green. Making the PLATE the solid puts its
+## dense underside edges on the reference-cast path, and there the chords are
+## cleared by _drop_contact_runs alone: the boss's own crossings of the plate
+## sit within TOUCH_EPSILON_MM of the edge start at these lifts and are
+## already dropped as touches, so direction two contributes nothing to the
+## swapped verdict.
+##
+## MUTATION THAT MUST TURN THE SWAPPED CASES RED: make _drop_contact_runs
+## return `crossings` unchanged. The plate's underside chords over the boss
+## rim straddle the rim wall and have boss material a probe step behind them,
+## so every one of them is then reported and the two cleared lifts report a
+## pair.
+##
+## THE SWAPPED LIFTS BRACKET THE EPSILON ITSELF. The gate clears a run whose
+## every sample has a face within TOUCH_EPSILON_MM (1e-4), so a boss top
+## 9e-5 mm inside the plate is still a contact and one 2e-4 mm inside is not.
+## That pair differs by a tenth of a micron and by nothing else, which is what
+## makes it a test of the gate's rule rather than of the fixture.
+##
 ## Run:
 ##   scripts/run-gd-tests.sh --plugin cad <path-to-minerva-checkout>
 
@@ -78,8 +103,16 @@ const FLUSH_LIFT_MM := 1e-5
 ## How far the control boss is driven INTO the plate.
 const BITE_MM := 0.5
 
+## The swapped fixture's lifts, either side of TOUCH_EPSILON_MM: the last one
+## the contact-run gate still calls a contact, and the first one it does not.
+const INSIDE_EPSILON_LIFT_MM := 9e-5
+const OUTSIDE_EPSILON_LIFT_MM := 2e-4
+
 const REFERENCE_NAME := "board"
 const NODE_PATH := "Assembly/Plate"
+## The swapped fixture: the boss is the mounted reference, the plate the solid.
+const BOSS_REFERENCE_NAME := "boss"
+const BOSS_NODE_PATH := "Assembly/Boss"
 
 var _pass: int = 0
 var _fail: int = 0
@@ -204,6 +237,83 @@ func _run() -> void:
 			"penetration = %s, report = %s"
 				% [str(_penetration_of(through)), str(through)])
 
+	await _swapped_roles(gauge, checks)
+
+
+## The same designed contact cast the other way: the boss is the mounted
+## reference and the triangulated plate is the solid, so the plate's underside
+## edges are what run over the rim and the reference-cast gate is what has to
+## clear them.
+func _swapped_roles(gauge: Node, checks: RefCounted) -> void:
+	checks.build_solid(_solid_from(_grid_plate()))
+	var built := _mount_boss(gauge, checks, FLUSH_LIFT_MM)
+	check("fixture (swapped): the boss became the one reference collider, so "
+			+ "the plate's edges are now the ones cast at it",
+			built == 1, "built %d colliders" % built)
+
+	var noisy: Dictionary = await _submit(gauge, checks)
+	check("swapped: a boss a hundred-thousandth of a millimetre into the "
+			+ "plate is a contact when the plate's edges are the ones cast",
+			bool(noisy.get("checked", false))
+				and int(noisy.get("count", 0)) == 0
+				and int(noisy.get("point_count", 0)) == 0,
+			"report = %s" % str(noisy))
+
+	_mount_boss(gauge, checks, INSIDE_EPSILON_LIFT_MM)
+	var inside: Dictionary = await _submit(gauge, checks)
+	check("swapped: still a contact at the far edge of the touch epsilon",
+			bool(inside.get("checked", false))
+				and int(inside.get("count", 0)) == 0
+				and int(inside.get("point_count", 0)) == 0,
+			"report = %s" % str(inside))
+
+	# The control that says the gate has a threshold rather than a habit: a
+	# tenth of a micron deeper and the same chords are an overlap again.
+	_mount_boss(gauge, checks, OUTSIDE_EPSILON_LIFT_MM)
+	var outside: Dictionary = await _submit(gauge, checks)
+	check("swapped: a boss a fifth of a micron PAST the touch epsilon is "
+			+ "interference, on the boss's own node",
+			bool(outside.get("checked", false))
+				and int(outside.get("count", 0)) == 1
+				and str(((outside.get("pairs", []) as Array)[0] as Dictionary)
+					.get("node", "")) == BOSS_NODE_PATH,
+			"report = %s" % str(outside))
+
+	_mount_boss(gauge, checks, BITE_MM)
+	var bitten: Dictionary = await _submit(gauge, checks)
+	check("swapped: the same boss half a millimetre into the plate is "
+			+ "interference either way round",
+			bool(bitten.get("checked", false))
+				and int(bitten.get("count", 0)) == 1
+				and str(((bitten.get("pairs", []) as Array)[0] as Dictionary)
+					.get("node", "")) == BOSS_NODE_PATH,
+			"report = %s" % str(bitten))
+
+
+## Mount the boss as the sole reference at this lift, replacing whatever was
+## mounted before. The digest carries the lift: an unchanged digest is a no-op
+## build, and every lift here is a different body.
+func _mount_boss(gauge: Node, checks: RefCounted, lift: float) -> int:
+	var mesh := _mesh_from(_boss_mesh(lift))
+	var built: int = gauge.build([{
+		"mesh": mesh,
+		"transform": Transform3D.IDENTITY,
+		"node": BOSS_NODE_PATH,
+		"reference": BOSS_REFERENCE_NAME,
+	}], "flush-contact-swapped|lift=%.8f" % lift)
+	checks.set_records([{
+		"name": BOSS_REFERENCE_NAME,
+		"pose": Transform3D.IDENTITY,
+		"world_aabb": _boss_world_box(lift),
+		"parts": [{
+			"mesh": mesh,
+			"transform": Transform3D.IDENTITY,
+			"node_path": BOSS_NODE_PATH,
+			"node": BOSS_NODE_PATH,
+		}],
+	}])
+	return built
+
 
 func _submit(gauge: Node, checks: RefCounted) -> Dictionary:
 	return await gauge.submit("interference", {
@@ -299,6 +409,55 @@ func _boss_mesh(lift: float) -> Dictionary:
 func _plate_world_box() -> AABB:
 	return AABB(Vector3(-PLATE_SPAN * 0.5, -PLATE_SPAN * 0.5, 0.0),
 		Vector3(PLATE_SPAN, PLATE_SPAN, PLATE_THICKNESS))
+
+
+## The boss's world bounds, grown by a micron. The plate's underside edges lie
+## exactly in the plane of the boss's top, and edges are culled against these
+## bounds by AABB.intersects, which rejects boxes that only touch — an
+## unpadded box would cull away the very edges this fixture is about.
+func _boss_world_box(lift: float) -> AABB:
+	return AABB(
+		Vector3(BOSS_CENTRE.x - BOSS_RADIUS, BOSS_CENTRE.y - BOSS_RADIUS,
+			lift - BOSS_HEIGHT),
+		Vector3(BOSS_RADIUS * 2.0, BOSS_RADIUS * 2.0, BOSS_HEIGHT)
+	).grow(0.001)
+
+
+## An ArrayMesh from worker mesh data, for mounting a body that the unswapped
+## fixture evaluates as the solid.
+func _mesh_from(mesh_data: Dictionary) -> ArrayMesh:
+	var vertices: Array = mesh_data.get("vertices", [])
+	var soup := PackedVector3Array()
+	for entry in (mesh_data.get("faces", []) as Array):
+		var face: Array = entry
+		for corner in [0, 1, 2]:
+			var point: Array = vertices[int(face[corner])]
+			soup.append(Vector3(float(point[0]), float(point[1]),
+				float(point[2])))
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = soup
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+## Worker mesh data from an ArrayMesh, the other way round. The soup's own
+## duplicate corners are left alone: build_solid welds edges by position, so
+## the collider and its edge list are the same either way.
+func _solid_from(mesh: ArrayMesh) -> Dictionary:
+	var arrays: Array = mesh.surface_get_arrays(0)
+	var soup: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var vertices: Array = []
+	var faces: Array = []
+	var index := 0
+	while index + 2 < soup.size():
+		for corner in [0, 1, 2]:
+			var point: Vector3 = soup[index + corner]
+			vertices.append([point.x, point.y, point.z])
+		faces.append([index, index + 1, index + 2])
+		index += 3
+	return {"vertices": vertices, "faces": faces}
 
 
 # ---------------------------------------------------------------------------
