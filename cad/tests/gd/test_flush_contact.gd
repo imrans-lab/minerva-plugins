@@ -75,6 +75,15 @@ extends SceneTree
 ## so every one of them is then reported and the two cleared lifts report a
 ## pair.
 ##
+## THE SEATING FACE IS BORED. Every boss in a real enclosure carries a screw,
+## and the pilot's mouth is in the face that seats — so the contact face is an
+## annulus and the plane it shares with the board has a hole in it. A chord
+## over that mouth is over nothing: no face is within the touch epsilon of it,
+## and a gate that only asks "is this run lying in a face" reports the whole
+## flush fit. The BORED boss is therefore asked at the same three lifts as the
+## plain one, and its control is the same half-millimetre bite: a rule that
+## cleared the mouth by clearing everything coplanar would clear that too.
+##
 ## THE SWAPPED LIFTS BRACKET THE EPSILON ITSELF. The gate clears a run whose
 ## every sample has a face within TOUCH_EPSILON_MM (1e-4), so a boss top
 ## 9e-5 mm inside the plate is still a contact and one 2e-4 mm inside is not.
@@ -102,6 +111,12 @@ const BOSS_FACETS := 32
 ## Off the grid lines and off the origin, so the rim cuts cells rather than
 ## running along their edges.
 const BOSS_CENTRE := Vector2(1.2, -5.0)
+## The screw pilot bored into the boss from its seating face: an M2.5 thread
+## pilot, wider than the plate's grid pitch so its own rim is cut by underside
+## edges the same way the boss's outer rim is. Blind, and shallower than the
+## boss, so the bore has a floor and the body stays closed.
+const BORE_RADIUS := 1.25
+const BORE_DEPTH := 4.0
 ## The tilt a board arrives with. A modelled contact plane is coplanar to
 ## within float noise, not exactly: over this plate the underside then weaves
 ## a few hundredths of a micron either side of the boss's top face — every
@@ -255,6 +270,50 @@ func _run() -> void:
 				and absf(_penetration_of(through) - PLATE_THICKNESS) < 0.05,
 			"penetration = %s, report = %s"
 				% [str(_penetration_of(through)), str(through)])
+
+	# --- the same contact through a bored seating face -----------------------
+	# The boss as it is actually built: pilot-bored for the screw it carries,
+	# so its top face is an annulus and the mouth of the bore is IN the plane
+	# the board rests on. Underside chords now cross two rims, and the run
+	# over the mouth lies in no face at all.
+	var bored := _bored_boss_mesh(0.0)
+	check("fixture: the bore's own rim is cut by the plate's underside edges "
+			+ "too — the mouth is in the contact plane, not beside it",
+			_underside_edges_crossing_the_rim(plate, BORE_RADIUS) > 0,
+			"%d edges cross the bore rim"
+				% _underside_edges_crossing_the_rim(plate, BORE_RADIUS))
+	checks.build_solid(bored)
+	var bored_flush: Dictionary = await _submit(gauge, checks)
+	check("a bored boss seated exactly in the board's underside is a contact: "
+			+ "the chord over the open mouth is not a penetration",
+			bool(bored_flush.get("checked", false))
+				and int(bored_flush.get("count", 0)) == 0
+				and int(bored_flush.get("point_count", 0)) == 0,
+			"report = %s" % str(bored_flush))
+
+	checks.build_solid(_bored_boss_mesh(FLUSH_LIFT_MM))
+	var bored_noisy: Dictionary = await _submit(gauge, checks)
+	check("the same bored contact a hundred-thousandth of a millimetre out of "
+			+ "plane — float noise, inside the touch epsilon — is still a "
+			+ "contact, with no depth quoted across the bore",
+			bool(bored_noisy.get("checked", false))
+				and int(bored_noisy.get("count", 0)) == 0
+				and int(bored_noisy.get("point_count", 0)) == 0
+				and _penetration_of(bored_noisy) == 0.0,
+			"report = %s" % str(bored_noisy))
+
+	# THE CONTROL. Same bore, same rims, same chords over the same mouth: only
+	# the half millimetre of lift differs. A rule that cleared the flush bore
+	# by clearing everything in the contact plane clears this one too.
+	checks.build_solid(_bored_boss_mesh(BITE_MM))
+	var bored_bitten: Dictionary = await _submit(gauge, checks)
+	check("the bored boss driven half a millimetre INTO the board is still "
+			+ "interference, on the board's own node",
+			bool(bored_bitten.get("checked", false))
+				and int(bored_bitten.get("count", 0)) == 1
+				and str(((bored_bitten.get("pairs", []) as Array)[0]
+					as Dictionary).get("node", "")) == NODE_PATH,
+			"report = %s" % str(bored_bitten))
 
 	# --- the contact as a modeller actually delivers it ----------------------
 	# Same boss, same plate, same triangulation: only the plate is tilted by
@@ -497,6 +556,54 @@ func _boss_mesh(lift: float) -> Dictionary:
 	return {"vertices": vertices, "faces": faces}
 
 
+## The same boss with the screw pilot bored into its seating face: the top is
+## an annulus between BORE_RADIUS and BOSS_RADIUS, the bore's wall runs down
+## from that face and the bore has a floor, so the body stays closed. `lift`
+## means what it does for the plain boss — the seating face, and with it the
+## mouth of the bore, sits that far above the plate's underside.
+func _bored_boss_mesh(lift: float) -> Dictionary:
+	var vertices: Array = []
+	var faces: Array = []
+	var top := lift
+	var bottom := lift - BOSS_HEIGHT
+	var floor_z := lift - BORE_DEPTH
+	var centre_bottom := vertices.size()
+	vertices.append([BOSS_CENTRE.x, BOSS_CENTRE.y, bottom])
+	var centre_floor := vertices.size()
+	vertices.append([BOSS_CENTRE.x, BOSS_CENTRE.y, floor_z])
+	var rim_top: Array = []
+	var rim_bottom: Array = []
+	var bore_top: Array = []
+	var bore_floor: Array = []
+	for facet in range(BOSS_FACETS):
+		var angle := TAU * float(facet) / float(BOSS_FACETS)
+		var outer := BOSS_CENTRE + Vector2(cos(angle), sin(angle)) * BOSS_RADIUS
+		var inner := BOSS_CENTRE + Vector2(cos(angle), sin(angle)) * BORE_RADIUS
+		rim_top.append(vertices.size())
+		vertices.append([outer.x, outer.y, top])
+		rim_bottom.append(vertices.size())
+		vertices.append([outer.x, outer.y, bottom])
+		bore_top.append(vertices.size())
+		vertices.append([inner.x, inner.y, top])
+		bore_floor.append(vertices.size())
+		vertices.append([inner.x, inner.y, floor_z])
+	for facet in range(BOSS_FACETS):
+		var next := (facet + 1) % BOSS_FACETS
+		# The seating face, an annulus wound the way the plain boss's disc is.
+		faces.append([bore_top[facet], rim_top[facet], rim_top[next]])
+		faces.append([bore_top[facet], rim_top[next], bore_top[next]])
+		# Outer wall and bottom disc, unchanged from the plain boss.
+		faces.append([rim_top[facet], rim_bottom[facet], rim_bottom[next]])
+		faces.append([rim_top[facet], rim_bottom[next], rim_top[next]])
+		faces.append([centre_bottom, rim_bottom[next], rim_bottom[facet]])
+		# The bore: its wall faces the axis, so it is the outer wall's winding
+		# reversed, and its floor faces up into the void the way the seat does.
+		faces.append([bore_top[facet], bore_floor[next], bore_floor[facet]])
+		faces.append([bore_top[facet], bore_top[next], bore_floor[next]])
+		faces.append([centre_floor, bore_floor[facet], bore_floor[next]])
+	return {"vertices": vertices, "faces": faces}
+
+
 func _plate_world_box() -> AABB:
 	return AABB(Vector3(-PLATE_SPAN * 0.5, -PLATE_SPAN * 0.5, 0.0),
 		Vector3(PLATE_SPAN, PLATE_SPAN, PLATE_THICKNESS))
@@ -581,10 +688,11 @@ func _triangle_count(mesh: ArrayMesh) -> int:
 	return (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3
 
 
-## Underside triangle edges with one end inside the boss rim and the other
-## outside it: the edges that cut the rim, which is what the old fixture had
-## none of.
-func _underside_edges_crossing_the_rim(mesh: ArrayMesh) -> int:
+## Underside triangle edges with one end inside a rim of that radius about the
+## boss's axis and the other outside it: the edges that cut the rim, which is
+## what the old fixture had none of. The bore's rim is asked the same way.
+func _underside_edges_crossing_the_rim(mesh: ArrayMesh,
+		radius: float = BOSS_RADIUS) -> int:
 	var arrays: Array = mesh.surface_get_arrays(0)
 	var soup: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	var crossing := 0
@@ -599,8 +707,8 @@ func _underside_edges_crossing_the_rim(mesh: ArrayMesh) -> int:
 		for pair in [[0, 1], [1, 2], [2, 0]]:
 			var a: Vector3 = corners[pair[0]]
 			var b: Vector3 = corners[pair[1]]
-			var inside_a: bool = Vector2(a.x, a.y).distance_to(BOSS_CENTRE) < BOSS_RADIUS
-			var inside_b: bool = Vector2(b.x, b.y).distance_to(BOSS_CENTRE) < BOSS_RADIUS
+			var inside_a: bool = Vector2(a.x, a.y).distance_to(BOSS_CENTRE) < radius
+			var inside_b: bool = Vector2(b.x, b.y).distance_to(BOSS_CENTRE) < radius
 			if inside_a != inside_b:
 				crossing += 1
 	return crossing

@@ -26,6 +26,9 @@ extends "clearance_client.gd"
 ## Contacts closer than a tenth of a micrometre are reported as TOUCHING, not
 ## as interference: a shell resting on a board shares a plane, and a check that
 ## calls a designed contact an error is a check the reader learns to ignore.
+## The seating face is usually bored for the screw it carries, so the shared
+## plane has a hole in it; contact_runs.gd holds the rule that keeps a chord
+## over that open mouth from reading as a penetration.
 ##
 ## THREE CONSTRAINTS, EACH ONE MEASURED BY ITS FAILURE
 ##
@@ -913,6 +916,31 @@ func _reference_ray_for(
 	return _reference_hit.bind(gauge, state, reference_name, node_path)
 
 
+## The parity probe the contact-run rule needs for one crossing, chosen by the
+## same newline-joined key the ray is.
+func _reference_inside_for(
+	key: String,
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D
+) -> Callable:
+	var parts := key.split("\n")
+	var reference_name: String = parts[0] if parts.size() > 0 else ""
+	var node_path: String = parts[1] if parts.size() > 1 else ""
+	return _reference_inside.bind(gauge, state, reference_name, node_path)
+
+
+## Is this sample in the material of that one node? The contact-run rule's
+## argument order — the point first — around _inside_reference's tri-state.
+func _reference_inside(
+	point: Vector3,
+	gauge: Object,
+	state: PhysicsDirectSpaceState3D,
+	reference_name: String,
+	node_path: String
+) -> int:
+	return _inside_reference(gauge, state, point, reference_name, node_path)
+
+
 ## One ray against ONE node of one reference, for the contact-run rule. The
 ## first hit's position, or null. Scoped to that node so a neighbouring body
 ## cannot vouch for a run.
@@ -942,14 +970,23 @@ func _reference_hit(
 ## costs are only spent on crossings everything else has already called a
 ## penetration.
 func _drop_contact_runs(a: Vector3, b: Vector3, crossings: Array,
-		ray_for: Callable) -> Array:
+		ray_for: Callable, inside_for: Callable) -> Array:
 	if crossings.is_empty():
 		return crossings
 	var out: Array = []
 	for kept in _ContactRuns.penetrating_indices(a, b, crossings,
-			TOUCH_EPSILON_MM, ray_for):
+			TOUCH_EPSILON_MM, ray_for, inside_for):
 		out.append(crossings[kept])
 	return out
+
+
+## Is this sample in the solid's material? The contact-run rule's argument
+## order around _parity_inside_solid's tri-state.
+func _solid_inside(
+	point: Vector3,
+	solid_state: PhysicsDirectSpaceState3D
+) -> int:
+	return _parity_inside_solid(solid_state, point)
 
 
 ## The same, against the solid's own collider.
@@ -1053,7 +1090,8 @@ func _cross_into_references(
 			break
 		cursor = next
 	return _drop_contact_runs(a, b, out,
-		_reference_ray_for.bind(gauge, state))
+		_reference_ray_for.bind(gauge, state),
+		_reference_inside_for.bind(gauge, state))
 
 
 # ---------------------------------------------------------------------------
@@ -1172,11 +1210,12 @@ func _cross_into_solid(
 		if a.distance_to(next) >= length:
 			break
 		cursor = next
-	# Only one body here, so every crossing carries the same key and the ray is
-	# the same one whichever crossing asks for it.
+	# Only one body here, so every crossing carries the same key and the ray
+	# and the parity probe are the same ones whichever crossing asks for them.
 	for kept in _ContactRuns.penetrating_indices(a, b, candidates,
 			TOUCH_EPSILON_MM,
-			func(_key: String) -> Callable: return _solid_hit.bind(solid_state)):
+			func(_key: String) -> Callable: return _solid_hit.bind(solid_state),
+			func(_key: String) -> Callable: return _solid_inside.bind(solid_state)):
 		out.append((candidates[kept] as Dictionary).get("point", Vector3.ZERO))
 	return out
 
@@ -1740,7 +1779,8 @@ func _report(pairs: Dictionary) -> Dictionary:
 		# The cost of a per-evaluation check is part of its answer: a reader
 		# deciding whether to keep it on can only do that with the bound.
 		"cost": "one ray per solid edge whose box reaches a reference, three "
-			+ "per overlapping reference triangle, and two or three parity "
+			+ "per overlapping reference triangle, a probe of the runs either "
+			+ "side of each crossing that survived, and two or three parity "
 			+ "rays when nothing crossed; everything else is an AABB test",
 	}
 

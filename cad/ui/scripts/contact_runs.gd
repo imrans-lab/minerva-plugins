@@ -25,9 +25,26 @@ extends RefCounted
 ## chord sits half a millimetre inside, far outside the epsilon, and the
 ## interference stands.
 ##
-## The rays are the caller's: this module owns the rule, not the space. The
-## Callable is `func(from: Vector3, to: Vector3) -> Variant` returning the
-## first hit position along the segment, or null.
+## THE FACE CAN HAVE A HOLE IN IT. A boss is bored for the screw it carries,
+## and the bore's mouth is in the very face that seats: the contact face is an
+## annulus, and a chord over it crosses the mouth, where the plane goes on but
+## the face does not. Nothing is within the touch epsilon of a sample hanging
+## over an open bore, so the run is not lying in a face — and it is not
+## travelling through material either. Overlap needs VOLUME, so the run is
+## sorted three ways rather than two: it lies IN a face, it goes through
+## MATERIAL, or it crosses a VOID of that body — the mouth of a bore, or the
+## air beside a rim. A crossing survives only when a run beside it goes
+## through material. That keeps every piercing edge (its far run is material
+## even though its near run is air) and drops the bored flush fit, whose runs
+## are face and void and nothing else.
+##
+## The rays and the parity probe are the caller's: this module owns the rule,
+## not the space. The ray Callable is
+## `func(from: Vector3, to: Vector3) -> Variant` returning the first hit
+## position along the segment, or null; the parity Callable is
+## `func(point: Vector3) -> int` — 1 inside the body, 0 outside, -1
+## undecidable, and undecidable counts as material because a probe nobody
+## could read is not evidence that a part is clear.
 ##
 ## No class_name: off-tree plugin scripts cannot use class_name.
 ## Consumers: scripts/geometry_checks.gd, both cast directions.
@@ -55,23 +72,54 @@ const _PROBE_DIRECTIONS: Array[Vector3] = [
 ]
 
 
-## Does the segment a→b lie in a face of the body `ray` casts against, along
-## its whole length? Callers pass the RUN between two crossings, not the parent
-## edge. False for a degenerate segment: nothing runs along a face in no
-## distance.
-##
-## A chord short enough that its own sagitta is inside the epsilon reads as a
-## run along the curved wall it clipped, and is cleared. That is a graze — on a
-## three millimetre boss it is under a twentieth of a millimetre long — and the
-## depth it would have contributed is smaller still.
-static func runs_in_surface(a: Vector3, b: Vector3, epsilon: float,
-		ray: Callable) -> bool:
+## What one run is. Callers pass the RUN between two crossings, not the parent
+## edge.
+enum Run {
+	## Every sample lies in a face of the body: the edge was travelling in the
+	## surface. A chord short enough that its own sagitta is inside the
+	## epsilon reads this way against the curved wall it clipped — a graze, on
+	## a three millimetre boss under a twentieth of a millimetre long, whose
+	## depth would have been smaller still.
+	CONTACT,
+	## No sample is in the body's material and not every one is on a face: the
+	## run is over the mouth of a bore in the contact face, or in the air
+	## beside a rim. Neither is overlap.
+	VOID,
+	## A sample is inside the body and clear of every face of it. This is the
+	## only run that makes its crossings interference.
+	MATERIAL,
+}
+
+## How many off-face samples of one run are asked whether they are in the
+## body's material. Between two consecutive crossings of the SAME body the
+## segment is wholly inside it or wholly outside — a change of side is itself
+## a crossing — so the most central sample already answers; the second is
+## there for a run whose middle grazes a facet. The probe is the expensive
+## question (a parity walk, or a gauge), so it is not asked of every sample.
+const MATERIAL_PROBES: int = 2
+
+
+## Sort the segment a→b. A degenerate segment is MATERIAL — not because
+## anything runs through material in no distance, but because two crossings
+## that coincide bound no contact either, and the crossing's other run is
+## what should decide it.
+static func classify_run(a: Vector3, b: Vector3, epsilon: float,
+		ray: Callable, inside: Callable) -> Run:
 	if a.distance_to(b) <= epsilon:
-		return false
+		return Run.MATERIAL
+	var in_face := true
+	var probes := 0
 	for fraction in SAMPLE_FRACTIONS:
-		if not surface_at(a.lerp(b, fraction), epsilon, ray):
-			return false
-	return true
+		if not in_face and probes >= MATERIAL_PROBES:
+			break
+		var point := a.lerp(b, fraction)
+		if surface_at(point, epsilon, ray):
+			continue
+		in_face = false
+		probes += 1
+		if int(inside.call(point)) != 0:
+			return Run.MATERIAL
+	return Run.CONTACT if in_face else Run.VOID
 
 
 ## Is a face of that body within `epsilon` of `point`?
@@ -104,7 +152,7 @@ static func surface_at(point: Vector3, epsilon: float, ray: Callable) -> bool:
 ##
 ## Every crossing bounds two runs along its edge — back to the previous
 ## crossing of the same body, or to the edge's own start, and forward to the
-## next one, or to its end. A crossing is CONTACT when either of those runs
+## next one, or to its end. A crossing is a CONTACT when either of those runs
 ## lies in a face of the body: the edge was travelling in the surface and left
 ## it through the rim of that face, which is the signature of a designed flush
 ## fit and not of overlap. That end has to be counted, because a rim chord is
@@ -112,13 +160,21 @@ static func surface_at(point: Vector3, epsilon: float, ray: Callable) -> bool:
 ## sitting a float-noise depth inside the body, at the other — a gate that
 ## only looked between two crossings would clear almost none of them.
 ##
-## Testing both runs regardless of which one is inside the material costs
-## nothing in accuracy: a run through open air has no face within the epsilon
-## of it to find, so it answers no on its own.
+## And it survives only when the OTHER run goes through material. A run that
+## crosses a void of the body — the open mouth of a bore in the seating face,
+## or the air outside a rim — is no more an overlap than a run in the face is,
+## and a bored flush fit has nothing else: chord over the annulus, chord over
+## the mouth, and no material anywhere along either. A piercing edge is
+## untouched by that: its near run is air but its far run is material, and one
+## material run is enough.
+##
+## `inside_for` is func(key: String) -> Callable, the parity probe against
+## that one body, alongside `ray_for`'s ray.
 ##
 ## Returns the surviving indices, in order.
 static func penetrating_indices(a: Vector3, b: Vector3, crossings: Array,
-		epsilon: float, ray_for: Callable) -> PackedInt32Array:
+		epsilon: float, ray_for: Callable,
+		inside_for: Callable) -> PackedInt32Array:
 	var out := PackedInt32Array()
 	for index in range(crossings.size()):
 		var crossing: Dictionary = crossings[index]
@@ -127,10 +183,14 @@ static func penetrating_indices(a: Vector3, b: Vector3, crossings: Array,
 		var key := str(crossing.get("key", ""))
 		var point: Vector3 = crossing.get("point", Vector3.ZERO)
 		var ray: Callable = ray_for.call(key)
-		if runs_in_surface(_neighbour(crossings, index, -1, key, a), point,
-					epsilon, ray) \
-				or runs_in_surface(point,
-					_neighbour(crossings, index, 1, key, b), epsilon, ray):
+		var inside: Callable = inside_for.call(key)
+		var before := classify_run(_neighbour(crossings, index, -1, key, a),
+			point, epsilon, ray, inside)
+		var after := classify_run(point,
+			_neighbour(crossings, index, 1, key, b), epsilon, ray, inside)
+		if before == Run.CONTACT or after == Run.CONTACT:
+			continue
+		if before != Run.MATERIAL and after != Run.MATERIAL:
 			continue
 		out.append(index)
 	return out

@@ -480,18 +480,26 @@ test_stl_reference.gd assertions=18
 # the reference leg's own keep: an exactly coplanar swapped case has both ends
 # of a plate chord penetrating the rim, so its run is bounded either way, while
 # the tilted one needs the discarded top-face hit as its far bound.
-# 15 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# The boss is then asked again BORED, because a seating face carries a screw:
+# the pilot's mouth is in the contact plane, so a chord over it lies in the
+# plane and in no face, and a gate that only asks whether a run lies in a face
+# reports the whole flush fit. Its control is the same half-millimetre bite,
+# bored the same way — a rule that cleared the mouth by clearing everything
+# coplanar would clear that too.
+# 19 assertions = 2 fixture premises (the plate really is grid-triangulated;
 # its underside edges really do cross the rim) + 1 collider built + 2 the
 # flush boss reports nothing, exactly coplanar and a hundred-thousandth of a
 # millimetre out + 2 the bitten boss reports the board's node and, because no
 # single edge spans a half-millimetre disc, no depth with it + 1 the depth
 # control (the same boss driven clean through the board reports the board's
-# thickness) + 1 the tilted board is still a contact + 6 swapped (1 the boss
-# became the one reference collider, 2 the two lifts inside the touch epsilon
-# are contacts, 2 the lift past it and the half-millimetre bite are
-# interference on the boss's node, 1 the tilted plate over an exactly coplanar
-# boss is a contact on the reference-cast leg).
-test_flush_contact.gd assertions=15
+# thickness) + 4 bored (1 the plate's edges really do cut the bore's rim too,
+# 2 the bored boss is a contact at both flush lifts, 1 the bored boss bitten
+# half a millimetre in is still interference) + 1 the tilted board is still a
+# contact + 6 swapped (1 the boss became the one reference collider, 2 the two
+# lifts inside the touch epsilon are contacts, 2 the lift past it and the
+# half-millimetre bite are interference on the boss's node, 1 the tilted plate
+# over an exactly coplanar boss is a contact on the reference-cast leg).
+test_flush_contact.gd assertions=19
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool
