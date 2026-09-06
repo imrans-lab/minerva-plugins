@@ -39,6 +39,10 @@ class EvaluationResult:
     # Foreign mesh files the source referenced, each with its composed pose.
     # The worker never opens them; the panel resolves and loads them.
     references: list[dict[str, Any]] = field(default_factory=list)
+    # The live B-Rep the mesh was tessellated from. NOT serializable and never
+    # part of the reply: it is here so a caller that already paid to build the
+    # part can export it without translating the DSL a second time.
+    shape: Any = None
 
 
 def body_count_of(shape: Any) -> int:
@@ -131,6 +135,7 @@ def evaluate_source(
         shape_name=shape_name,
         body_count=body_count_of(shape),
         references=references,
+        shape=shape,
     )
 
 
@@ -149,6 +154,18 @@ def export_source(source: str, *, format: str, path: str) -> str:
             "No 3D part produced. Define a shape with extrude(...) or another 3D primitive before exporting."
         )
 
+    return export_built(shape, format=format, path=path, node_name=shape_name)
+
+
+def export_built(shape: Any, *, format: str, path: str,
+                 node_name: str = "part") -> str:
+    """Write an ALREADY-BUILT shape out; everything past the translation.
+
+    Split from export_source so a caller holding the shape the panel just
+    evaluated can write the file without translating the DSL again — on a
+    lofted shell with a hundred booleans that second translation is minutes,
+    and it is the whole cost of an export the panel has already paid for.
+    """
     export_format = format.strip().lower()
     if export_format not in {"step", "stp", "stl", "3mf", "glb"}:
         raise ExportError(f"Unsupported export format: {format}")
@@ -169,6 +186,6 @@ def export_source(source: str, *, format: str, path: str) -> str:
         requested_path = requested_path.with_suffix("." + export_format)
 
     try:
-        return export_shape(shape, str(requested_path), node_name=shape_name or "part")
+        return export_shape(shape, str(requested_path), node_name=node_name or "part")
     except TranslatorError as exc:
         raise ExportError(str(exc)) from exc

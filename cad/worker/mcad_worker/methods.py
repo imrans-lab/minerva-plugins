@@ -8,7 +8,9 @@ Per design §8, only `init` and `shutdown` are real in Round 1 (scaffold).
 Round 2 Unit A adds a real `validate` implementation.
 Round 3 Unit A adds real `evaluate` and `list_edges` implementations.
 Round 4 adds `export` (STL binary / 3MF / STEP AP214) atop the existing
-``mcad.evaluator.export_source`` helper. The remaining stub is `deviation`.
+``mcad.evaluator`` helpers — ``export_built`` when the part is already in the
+cache the last evaluation left, ``export_source`` when it has to be built.
+The remaining stub is `deviation`.
 
 `clearance` lives in its own module (``mcad_worker.clearance``) and is
 imported at call time: it pulls in numpy and python-fcl, and a worker that
@@ -17,10 +19,11 @@ never measures a clearance should not pay for them.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import traceback
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 WORKER_VERSION = "0.1.0"
 
@@ -29,6 +32,30 @@ WORKER_VERSION = "0.1.0"
 # Size 1: replaced on each new source. Threadsafe is not required — the worker
 # is single-threaded by design (§2 process model).
 _last_program: Optional[Tuple[int, dict]] = None
+
+# The B-Rep the last evaluation built, as (source digest, shape_name, shape).
+# Separate from _last_program because it is a different product of the same
+# source: the mesh reply is what the panel draws, this is what an export
+# writes. Keeping it means an export of source the panel has already rendered
+# costs a file write instead of a second translation — on a lofted shell of
+# ~60 booleans that translation is minutes, and it was the whole reason a
+# heavy document could render and then fail to export.
+#
+# Keyed by SHA-256, not hash(): two sources colliding in a 64-bit hash would
+# write one document's geometry into the other's file with no signal at all.
+_last_shape: Optional[Tuple[str, str, Any]] = None
+
+
+def _digest(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def reset_caches() -> None:
+    """Forget the last evaluation and the part it built. For tests."""
+    global _last_program, _last_shape
+    _last_program = None
+    _last_shape = None
+
 
 # Best-effort OCCT version string, resolved once at module import.
 _OCCT_VERSION: str = "unknown"
@@ -63,7 +90,7 @@ def _evaluate(params: dict) -> dict:
     same source is evaluated twice, the second call returns the cached dict
     without re-tessellating.
     """
-    global _last_program
+    global _last_program, _last_shape
 
     source = params.get("source")
     if not isinstance(source, str):
@@ -170,6 +197,10 @@ def _evaluate(params: dict) -> dict:
         "references": result.references,
     }
     _last_program = (h, result_dict)
+    # A document made only of references builds no part; leave the previous
+    # shape in place rather than caching a None an export would trip over.
+    if result.shape is not None:
+        _last_shape = (_digest(source), result.shape_name, result.shape)
     return {"ok": True, "result": result_dict}
 
 
@@ -275,7 +306,7 @@ def _export(params: dict) -> dict:
         }
 
     try:
-        from mcad.evaluator import ExportError, export_source
+        from mcad.evaluator import ExportError, export_built, export_source
         from mcad.lexer import LexError
         from mcad.parser import ParseError
         from mcad.translator import TranslatorError
@@ -288,8 +319,19 @@ def _export(params: dict) -> dict:
             },
         }
 
+    # The part the last evaluation built, when it was built from THIS source.
+    # Reusing it is the difference between an export that costs a file write
+    # and one that re-runs every boolean in the document; the digest is what
+    # keeps an edited buffer off the cached shape.
+    cached = _last_shape
+    reused = cached is not None and cached[0] == _digest(source)
+
     try:
-        written_path = export_source(source, format=fmt, path=path)
+        if reused:
+            written_path = export_built(cached[2], format=fmt, path=path,
+                                        node_name=cached[1])
+        else:
+            written_path = export_source(source, format=fmt, path=path)
     except LexError as exc:
         # Lex errors aren't wrapped by ExportError (which only catches
         # ParseError/TranslatorError); surface as parse kind so callers
@@ -350,6 +392,10 @@ def _export(params: dict) -> dict:
             "path": str(Path(written_path)),
             "bytes_written": bytes_written,
             "format": fmt,
+            # Whether the part came from the last evaluation or was built for
+            # this call. A reader watching an export get slow can tell the two
+            # apart without guessing.
+            "reused_evaluation": reused,
         },
     }
 

@@ -470,6 +470,11 @@ func workerErrorToast(toolName string, we *bridge.WorkerError) (level, message s
 	case "cancelled":
 		// Cancellation is expected; no toast needed. Return empty to suppress.
 		return "info", ""
+	case "running":
+		// Not a failure: a detached export the caller is asked to collect by
+		// calling again. Toasting it would put an error in front of the user
+		// every time a heavy document is exported.
+		return "info", ""
 	default:
 		return "error", fmt.Sprintf("CAD plugin [%s]: worker error (%s) — %s", toolName, we.Kind, we.Message)
 	}
