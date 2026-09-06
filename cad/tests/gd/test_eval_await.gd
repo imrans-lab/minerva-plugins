@@ -189,12 +189,13 @@ func _test_giving_up_is_said_out_loud() -> void:
 			str(last_eval.get("status", "")) == "timeout"
 				and int(last_eval.get("elapsed_ms", 0)) >= 120,
 			"last_eval = %s" % str(last_eval))
-	var banner := panel._error_banner as CanvasItem
-	var banner_text: String = str(panel._error_banner_label.text) if panel._error_banner_label != null else ""
-	check("give-up: the user is told on screen, with the wait in the message",
-			banner != null and banner.visible and banner_text.contains("gave up"),
-			"visible=%s text='%s'" % [
-				str(banner.visible) if banner != null else "<no banner>", banner_text])
+	var banner: Dictionary = panel._eval_banner.state_for_mcp()
+	check("give-up: the user is told on screen, with the wait in the message, "
+			+ "stamped with the evaluation it is about",
+			bool(banner.get("visible", false))
+				and str(banner.get("text", "")).contains("gave up")
+				and not str(banner.get("stamp", "")).is_empty(),
+			"banner = %s" % str(banner))
 	_teardown(rig)
 
 

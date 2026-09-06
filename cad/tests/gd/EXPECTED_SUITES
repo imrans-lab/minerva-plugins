@@ -674,6 +674,17 @@ test_ortho_speckles.gd assertions=19
 # the time it waited).
 test_eval_await.gd assertions=21
 
+# Which evaluation is the report on screen about? 1 rig + 3 the stamped report
+# (an interfering evaluation says so; it names the evaluation it belongs to;
+# last_eval carries the same state an agent reads) + 1 the dismissal (closing
+# it hides that report and the wire says so) + 2 the acceptance test (the NEXT
+# evaluation's report about the same fault shows itself, under its own stamp,
+# rather than inheriting the dismissal) + 1 a clean evaluation clearing it
+# + 1 the banner being anchored along the panel's bottom, away from every
+# control. The interference is real: a board written out as an STL, mounted by
+# the panel's own evaluation path, with a post driven through it.
+test_eval_banner.gd assertions=9
+
 # minerva_cad_check_design: interference, fasteners and clearance run one after
 # another and folded into one verdict carrying only the failing rows. A
 # stand-in panel answers the three check methods with canned reports, so what

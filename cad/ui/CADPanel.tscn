@@ -1,4 +1,4 @@
-[gd_scene load_steps=9 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="CADPanel.gd" id="1_cadpanel"]
 [ext_resource type="Script" path="scripts/orbit_camera.gd" id="2_orbitcam"]
@@ -7,6 +7,14 @@
 [ext_resource type="Script" path="res://Scripts/UI/Controls/responsive_container.gd" id="5_responsive"]
 [ext_resource type="Script" path="scripts/reference_sidebar.gd" id="6_refsidebar"]
 [ext_resource type="Script" path="scripts/reference_click.gd" id="7_refclick"]
+[ext_resource type="Script" path="scripts/eval_banner.gd" id="8_evalbanner"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_banner"]
+bg_color = Color(0.5, 0.12, 0.12, 0.96)
+content_margin_left = 10.0
+content_margin_top = 6.0
+content_margin_right = 10.0
+content_margin_bottom = 6.0
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_cad"]
 sky_top_color = Color(0.42, 0.46, 0.54, 1)
@@ -347,6 +355,49 @@ view_id = "single"
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="ResponsiveContainer/NarrowLayout/SingleView/SubViewport"]
 environment = SubResource("Environment_cad")
+
+[node name="EvalBannerLayer" type="Control" parent="."]
+layout_mode = 2
+mouse_filter = 2
+z_index = 2
+
+[node name="EvalBanner" type="PanelContainer" parent="EvalBannerLayer"]
+visible = false
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_top = -48.0
+grow_horizontal = 2
+grow_vertical = 0
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_banner")
+script = ExtResource("8_evalbanner")
+
+[node name="Body" type="VBoxContainer" parent="EvalBannerLayer/EvalBanner"]
+layout_mode = 2
+mouse_filter = 2
+
+[node name="Header" type="HBoxContainer" parent="EvalBannerLayer/EvalBanner/Body"]
+layout_mode = 2
+mouse_filter = 2
+
+[node name="Stamp" type="Label" parent="EvalBannerLayer/EvalBanner/Body/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(1, 0.85, 0.85, 1)
+text = "Evaluation"
+
+[node name="Close" type="Button" parent="EvalBannerLayer/EvalBanner/Body/Header"]
+layout_mode = 2
+text = "✕"
+tooltip_text = "Dismiss this report. A later evaluation reports again."
+
+[node name="Message" type="Label" parent="EvalBannerLayer/EvalBanner/Body"]
+layout_mode = 2
+autowrap_mode = 3
+theme_override_colors/font_color = Color(1, 0.9, 0.9, 1)
 
 [node name="MeshImportDialog" type="FileDialog" parent="."]
 title = "Import mesh"

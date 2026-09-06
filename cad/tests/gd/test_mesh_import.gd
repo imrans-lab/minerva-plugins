@@ -305,28 +305,25 @@ func _test_an_unsaved_document_gets_an_absolute_path_and_a_warning() -> void:
 			"path='%s'" % str(plan.get("path", "")))
 	check("unsaved: the owner is warned, on screen, not only in the log",
 			not str(plan.get("warning", "")).is_empty()
-				and panel._error_banner != null and panel._error_banner.visible
-				and panel._error_banner_label.text.contains("Import mesh"),
-			"warning='%s' banner_visible=%s text='%s'" % [
-				str(plan.get("warning", "")),
-				str(panel._error_banner.visible) if panel._error_banner != null else "<none>",
-				panel._error_banner_label.text if panel._error_banner_label != null else "",
-			])
+				and bool(_banner(panel).get("visible", false))
+				and str(_banner(panel).get("text", "")).contains("Import mesh"),
+			"warning='%s' banner=%s" % [
+				str(plan.get("warning", "")), str(_banner(panel))])
 
 	# A successful evaluation hides the error banner; the import notice must
 	# outlive that, or the owner sees it for under a second.
 	panel._hide_eval_error()
 	check("unsaved: the warning survives the next successful evaluation",
-			panel._error_banner != null and panel._error_banner.visible
-				and panel._error_banner_label.text.contains("Import mesh"),
-			"banner hidden by _hide_eval_error")
+			bool(_banner(panel).get("visible", false))
+				and str(_banner(panel).get("text", "")).contains("Import mesh"),
+			"banner hidden by _hide_eval_error: %s" % str(_banner(panel)))
 
 	# Save-As rebinds the buffer in place (it gains a path, nothing re-attaches);
 	# the notice must let go then, or the banner is pinned forever.
 	buffer.file_path = _saved_later_path
 	panel._hide_eval_error()
 	check("unsaved: once the buffer has a path the notice lets the banner hide",
-			panel._error_banner == null or not panel._error_banner.visible,
+			not bool(_banner(panel).get("visible", false)),
 			"banner still visible after the buffer gained a path")
 	buffer.file_path = ""
 
@@ -474,6 +471,13 @@ func _cleanup() -> void:
 	for path in [_glb_path, _decoy_path, _document_path, _saved_later_path]:
 		if path != "" and FileAccess.file_exists(path):
 			DirAccess.remove_absolute(path)
+
+
+## What the report banner is showing, in the same shape last_eval carries it.
+func _banner(panel: Node) -> Dictionary:
+	if panel._eval_banner == null:
+		return {}
+	return panel._eval_banner.state_for_mcp()
 
 
 func check(desc: String, ok: bool, detail: String = "") -> void:

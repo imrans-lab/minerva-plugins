@@ -238,10 +238,12 @@ var _mesh_import_ui: RefCounted = null
 ## "timeout" = the panel gave up waiting; elapsed_ms says how long it waited.
 var _last_eval_result: Dictionary = {"status": "empty"}
 
-## Error banner shown over the 3D views when an evaluation fails (W8 / RCA
-## 019e46b5). Built in _ready; visibility is driven by _evaluate_and_render.
-var _error_banner: PanelContainer = null
-var _error_banner_label: Label = null
+## The report banner along the BOTTOM of the panel (scripts/eval_banner.gd on
+## the EvalBanner node of the scene): a failed evaluation, a reference that
+## would not load, the interference the check found. It owns the stamp that
+## says which evaluation a report belongs to and the per-report dismissal;
+## _evaluate_and_render only tells it what to say.
+@onready var _eval_banner: PanelContainer = $EvalBannerLayer/EvalBanner
 
 ## The wide sidebar's edge inspector and the edge selection it drives
 ## (scripts/edge_sidebar.gd).
@@ -354,39 +356,6 @@ func _ready() -> void:
 	_canvas_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_canvas_overlay.z_index = 1
 	add_child(_canvas_overlay)
-
-	# ── Evaluation-error banner ───────────────────────────────────────────
-	# When cad.evaluate fails (timeout / worker error / connection lost) the
-	# 3D views render nothing; without this banner that empty render is silent
-	# — the user-facing symptom of RCA 019e46b5. A dedicated full-rect Control
-	# layer hosts a top-anchored banner so the PanelContainer's single-child
-	# layout does not stretch the banner across the whole panel.
-	var _error_layer := Control.new()
-	_error_layer.name = "EvalErrorLayer"
-	_error_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_error_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_error_layer.z_index = 2
-	add_child(_error_layer)
-
-	_error_banner = PanelContainer.new()
-	_error_banner.name = "EvalErrorBanner"
-	_error_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_error_banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	_error_banner.visible = false
-	var _banner_style := StyleBoxFlat.new()
-	_banner_style.bg_color = Color(0.5, 0.12, 0.12, 0.96)
-	_banner_style.content_margin_left = 10.0
-	_banner_style.content_margin_right = 10.0
-	_banner_style.content_margin_top = 6.0
-	_banner_style.content_margin_bottom = 6.0
-	_error_banner.add_theme_stylebox_override("panel", _banner_style)
-	_error_layer.add_child(_error_banner)
-
-	_error_banner_label = Label.new()
-	_error_banner_label.name = "EvalErrorLabel"
-	_error_banner_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_error_banner_label.add_theme_color_override("font_color", Color(1, 0.9, 0.9))
-	_error_banner.add_child(_error_banner_label)
 
 	if _annotation_host.has_method("set_panel_root"):
 		_annotation_host.set_panel_root(_canvas_overlay)
@@ -948,6 +917,16 @@ func _shared_buffer() -> Object:
 
 # ── Save/load contract (overrides MinervaPluginPanel virtuals) ──────────────
 
+## last_eval as MCP sees it, with the report the panel is SHOWING merged in.
+## The owner reads the banner and an agent reads this; a verdict that differed
+## between them would be two answers to one question.
+func _last_eval_for_mcp() -> Dictionary:
+	var out: Dictionary = _EvalReplyScript.last_eval_for_mcp(_last_eval_result)
+	if _eval_banner != null:
+		out["banner"] = _eval_banner.state_for_mcp()
+	return out
+
+
 func _on_panel_save_request() -> Dictionary:
 	# Include the current DSL source so doc_read on an open editor (whether
 	# anonymous or path-bound) returns useful content. _pending_dsl_text is the
@@ -963,7 +942,7 @@ func _on_panel_save_request() -> Dictionary:
 	return {
 		"version": 1,
 		"source": _pending_dsl_text,
-		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
+		"last_eval": _last_eval_for_mcp(),
 	}
 
 
@@ -987,7 +966,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 			"status": "empty",
 			"ts": Time.get_unix_time_from_system(),
 		}
-		return {"ok": true, "last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result)}
+		return {"ok": true, "last_eval": _last_eval_for_mcp()}
 
 	# Race guard: when minerva_create_plugin_editor mounts a fresh paired_dsl
 	# panel and the agent's first minerva_doc_write fires immediately after,
@@ -1010,7 +989,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 			"status": "pending",
 			"ts": Time.get_unix_time_from_system(),
 		}
-		return {"ok": true, "last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result)}
+		return {"ok": true, "last_eval": _last_eval_for_mcp()}
 
 	# Helper is ready — synchronous eval as originally intended. Cancel any
 	# in-flight + skip the debounce so the MCP caller gets a tight request →
@@ -1024,7 +1003,7 @@ func _on_panel_apply_sync(document: Dictionary) -> Dictionary:
 	var status: String = str(_last_eval_result.get("status", ""))
 	return {
 		"ok": status == "ok",
-		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
+		"last_eval": _last_eval_for_mcp(),
 	}
 
 
@@ -1052,7 +1031,7 @@ func await_evaluation(timeout_ms: int) -> Dictionary:
 		if not is_instance_valid(self):
 			return {"status": "closed", "timed_out": false, "waited_ms": 0}
 	return {
-		"last_eval": _EvalReplyScript.last_eval_for_mcp(_last_eval_result),
+		"last_eval": _last_eval_for_mcp(),
 		"timed_out": timed_out,
 		"waited_ms": Time.get_ticks_msec() - started_ms,
 	}
@@ -1395,31 +1374,32 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		_show_eval_error("\n".join(lines))
 
 
-## Show the evaluation-error banner with a human-readable message. Called from
-## _evaluate_and_render's failure paths so a failed render is never silent
-## (the empty-render symptom of RCA 019e46b5).
+## Say what this evaluation found. Called from _evaluate_and_render's failure
+## paths so a failed render is never silent (the empty-render symptom of RCA
+## 019e46b5), and from its success path for a reference or interference report.
+## The evaluation the message belongs to is _last_eval_result, which every
+## caller has already written before it gets here.
 func _show_eval_error(message: String) -> void:
-	if _error_banner_label != null:
-		_error_banner_label.text = message
-	if _error_banner != null:
-		_error_banner.visible = true
+	if _eval_banner != null:
+		_eval_banner.show_for_eval(message, _last_eval_result)
 
 
-## Hide the evaluation-error banner — a fresh evaluate started, or one succeeded.
+## Nothing to report — a fresh evaluate started, or one settled clean.
 ## An import notice outlives evaluations: it stays until the buffer has a path.
 ## Save-As rebinds the attached buffer in place rather than re-attaching it, so
 ## the path is read from the buffer here, not from an attach event.
 func _hide_eval_error() -> void:
+	if _eval_banner == null:
+		return
 	if not _import_notice.is_empty():
 		var buffer: Object = _shared_buffer()
 		var buffer_path: Variant = buffer.get("file_path") if buffer != null else null
 		if buffer_path is String and not (buffer_path as String).is_empty():
 			_import_notice = ""
 		else:
-			_show_eval_error(_import_notice)
+			_eval_banner.show_notice(_import_notice)
 			return
-	if _error_banner != null:
-		_error_banner.visible = false
+	_eval_banner.clear()
 
 
 # ── Width-class handling ────────────────────────────────────────────────────
