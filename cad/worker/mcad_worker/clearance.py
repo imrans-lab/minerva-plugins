@@ -316,37 +316,48 @@ def _chord_clause(angular_rad: float, effective_mm: float,
             % (step, printed_effective, relation, printed_request))
 
 
-def _curvature(source: str) -> tuple:
-    """(widest measured radius or None, whether every curved face was measured).
+def _curvature(source: str, tolerance_mm: float) -> tuple:
+    """(widest binding radius or None, every curved face measured, sampled?).
 
     The widest, because the sagitta of a fixed angle grows with the radius:
     an angle chosen for a 2 mm bore leaves a 200 mm barrel a millimetre from
     its own surface. Hold the chord error on the widest face and every
     tighter one is inside it.
 
-    Read straight off the B-Rep by the module that already reads B-Rep
-    surfaces. The second value is False when a curved face is of a kind that
-    reader cannot measure — a spline, a revolution, an offset — or when the
-    B-Rep could not be read at all: the radius is then at best a partial
-    answer, and no bound derived from it covers the faces it did not see.
+    Read by the module that already reads B-Rep surfaces: analytically off a
+    cylinder, sphere, cone or torus, and by sampling the surface's own
+    principal curvatures on anything else — the B-spline flanks a loft or a
+    sweep produces, which have a curvature but no radius field to read. The
+    tolerance goes in because a face too small for its curvature to deviate
+    that far does not bind any angular step, and a near-flat spline patch
+    whose sampled curvature is noise must not drag the mesh finer.
+
+    The second value is False only when a face could not be measured at all —
+    OCCT would not adapt it, or the B-Rep could not be read: the radius is
+    then at best a partial answer, and no bound derived from it covers the
+    faces it did not see. The third says whether any radius came from
+    sampling, so the reply can name where its bound came from.
     """
-    key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    key = hashlib.sha256(
+        ("%r\n" % tolerance_mm).encode("utf-8") + source.encode("utf-8")
+    ).hexdigest()
     cached = _curvatures.take(key)
     if cached is not None:
         return cached
     try:
         from .features import FeatureError, curvature_report
     except ImportError:
-        return None, False
+        return None, False, False
     try:
-        report = curvature_report(source)
+        report = curvature_report(source, tolerance_mm=tolerance_mm)
     except FeatureError:
-        answer = (None, False)
+        answer = (None, False, False)
     except BaseException:  # noqa: BLE001 — a broken OCCT raises anything
-        answer = (None, False)
+        answer = (None, False, False)
     else:
         answer = (report["largest_radius_mm"],
-                  int(report["unrecognised_faces"]) == 0)
+                  int(report["unrecognised_faces"]) == 0,
+                  int(report.get("sampled_faces", 0)) > 0)
     _curvatures.put(key, answer)
     return answer
 
@@ -366,9 +377,13 @@ def _bbox_radius(vertices) -> float:
     return widest * 0.5
 
 
-UNRECOGNISED_CURVATURE = ("a curved face of a kind this reader cannot measure "
-                          "(a spline, a revolution, an offset), or a B-Rep "
-                          "that could not be read at all")
+UNRECOGNISED_CURVATURE = ("a curved face OCCT would not let this reader "
+                          "evaluate at all, or a B-Rep that could not be read")
+
+#: Named in the `how` when the widest radius was sampled off the surface
+#: rather than read off it, because the two are not the same kind of fact.
+SAMPLED_CLAUSE = (", whose curvature was sampled across the face rather than "
+                  "read off an analytic surface")
 
 
 def _prepare_solid(source: str, tolerance_mm: float,
@@ -390,12 +405,14 @@ def _prepare_solid(source: str, tolerance_mm: float,
     asked for — an error bar the mesh does not keep is worse than a coarse
     one, because a caller subtracts it and believes the result.
 
-    `bounded` is False when a curved face's radius could not be read: the
-    angle is then chosen from the bounding box, which is a guess about the
+    `bounded` is False only when a curved face could not be measured at all:
+    the angle is then chosen from the bounding box, which is a guess about the
     curvature, and `effective_mm` is what that guess implies rather than
-    what the mesh is known to keep.
+    what the mesh is known to keep. A face with no analytic radius — the
+    B-spline flank of a loft — is measured by sampling its curvature, so it
+    bounds the answer like any other face and says so in the `how`.
     """
-    measured, known = _curvature(source)
+    measured, known, sampled = _curvature(source, tolerance_mm)
 
     if angular_param is not None:
         vertices, faces = _solid_arrays(source, tolerance_mm, angular_param)
@@ -410,16 +427,24 @@ def _prepare_solid(source: str, tolerance_mm: float,
         vertices, faces = _solid_arrays(source, tolerance_mm, angular)
         effective = max(tolerance_mm, _sagitta_mm(angular, measured))
         how = "derived from the widest curved face (radius %.4f mm)" % measured
+        if sampled:
+            how += SAMPLED_CLAUSE
         if effective > tolerance_mm:
             how += _chord_clause(angular, effective, tolerance_mm)
         return vertices, faces, angular, how, effective, True
 
     if known:
-        # No curved face at all: every chord is the surface, at any angle.
+        # Nothing curved enough to bind: either no curved face at all, or only
+        # faces too small for the curvature they carry to deviate by the
+        # tolerance however they are cut. Every chord is inside it at any angle.
         vertices, faces = _solid_arrays(source, tolerance_mm, DEFAULT_ANGULAR_RAD)
-        return (vertices, faces, DEFAULT_ANGULAR_RAD,
-                "the default: no curved face was found to bind it",
-                tolerance_mm, True)
+        how = "the default: no curved face was found to bind it"
+        if sampled:
+            how = ("the default: every curved face was measured, by sampling "
+                   "where there was no analytic radius to read, and none is "
+                   "curved enough across its own extent to deviate by the "
+                   "tolerance")
+        return (vertices, faces, DEFAULT_ANGULAR_RAD, how, tolerance_mm, True)
 
     # A curved face whose radius could not be read. Tessellate once at the
     # default and take the bounding box as the radius — wider than any face

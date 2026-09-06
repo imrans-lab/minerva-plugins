@@ -56,6 +56,8 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from . import curvature
+
 #: Two faces belong to the same cylinder when their radii agree to within this
 #: and their axis lines coincide to within it. A B-Rep's own faces of one
 #: surface agree to kernel precision; the tolerance exists so that a bore
@@ -132,8 +134,11 @@ def _occt():
     """
     try:
         from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
+        from OCP.BRepBndLib import BRepBndLib
         from OCP.BRepGProp import BRepGProp
+        from OCP.BRepLProp import BRepLProp_SLProps
         from OCP.BRepTools import BRepTools
+        from OCP.Bnd import Bnd_Box
         from OCP.GCPnts import GCPnts_QuasiUniformDeflection
         from OCP.GProp import GProp_GProps
         from OCP.GeomAbs import (
@@ -154,8 +159,11 @@ def _occt():
     return {
         "BRepAdaptor_Curve": BRepAdaptor_Curve,
         "BRepAdaptor_Surface": BRepAdaptor_Surface,
+        "BRepBndLib": BRepBndLib,
         "BRepGProp": BRepGProp,
+        "BRepLProp_SLProps": BRepLProp_SLProps,
         "BRepTools": BRepTools,
+        "Bnd_Box": Bnd_Box,
         "GCPnts_QuasiUniformDeflection": GCPnts_QuasiUniformDeflection,
         "GProp_GProps": GProp_GProps,
         "GeomAbs_Cone": GeomAbs_Cone,
@@ -917,18 +925,32 @@ def largest_curved_radius(source: str) -> Optional[float]:
     return report["largest_radius_mm"]
 
 
-def curvature_report(source: str) -> dict:
+def curvature_report(source: str,
+                     tolerance_mm: Optional[float] = None) -> dict:
     """Every curved face of the shape, sorted into measured and not.
 
-    Returns {largest_radius_mm: float|None, unrecognised_faces: int}. The
-    radius is the widest one among the faces this reader can measure —
-    cylinders, spheres, cones (at the wider end of their trim) and tori (the
-    outer circle) — or None when there is none. `unrecognised_faces` counts
-    the curved faces it cannot: a B-spline, a Bezier, a surface of revolution
-    or extrusion, an offset. Those are curved and their radius is UNKNOWN,
-    which is not the same answer as "no curvature": a tessellation bound
-    derived from the measured faces alone says nothing about them, and the
-    caller has to say so.
+    Returns {largest_radius_mm: float|None, unrecognised_faces: int,
+    sampled_faces: int}. The radius is the widest one among the faces that
+    bind a tessellation — cylinders, spheres, cones (at the wider end of their
+    trim) and tori (the outer circle) read straight off the surface, and every
+    other curved kind (a B-spline, a Bezier, a revolution, an extrusion, an
+    offset — what a loft or a sweep produces) sampled by `curvature`, which
+    reports the widest curvature that could break the tolerance across the
+    face's own extent. `sampled_faces`
+    counts the faces whose radius came from that sampling rather than from the
+    surface's own field, because a sampled reading is a measurement of the
+    surface at a grid of points, not a closed-form fact about it.
+
+    `unrecognised_faces` is now only the faces that could not be measured at
+    all: OCCT would not adapt the face, or not one sample on it evaluated. A
+    bound derived from the other faces still says nothing about those.
+
+    `tolerance_mm`, when given, drops sampled faces that cannot deviate by
+    that much however they are tessellated — a chord is at most the face wide,
+    so a face whose whole extent stays inside the tolerance never binds, and a
+    near-flat patch whose sampled curvature is mostly noise must not be
+    allowed to drag the mesh finer. Without it every measurable curvature is
+    reported.
 
     Raises FeatureError for the same reasons every other reader here does.
     """
@@ -936,6 +958,7 @@ def curvature_report(source: str) -> dict:
     _shape_name, wrapped = _shape_for(source)
     largest = None
     unrecognised = 0
+    sampled = 0
     explorer = occt["TopExp_Explorer"](wrapped, occt["TopAbs_FACE"])
     while explorer.More():
         face = occt["TopoDS"].Face_s(explorer.Current())
@@ -957,14 +980,23 @@ def curvature_report(source: str) -> dict:
                 # The widest circle on a torus is the outer one.
                 radius = float(torus.MajorRadius()) + float(torus.MinorRadius())
             else:
-                unrecognised += 1
-                continue
+                radius, evaluated = curvature.binding_radius(
+                    occt, face, tolerance_mm)
+                if not evaluated:
+                    unrecognised += 1
+                    continue
+                sampled += 1
+                if radius is None:
+                    # Measured, and it cannot break the tolerance: like a plane.
+                    continue
         except BaseException:  # noqa: BLE001 — a face it cannot adapt
             unrecognised += 1
             continue
         if radius > 0.0 and (largest is None or radius > largest):
             largest = radius
-    return {"largest_radius_mm": largest, "unrecognised_faces": unrecognised}
+    return {"largest_radius_mm": largest,
+            "unrecognised_faces": unrecognised,
+            "sampled_faces": sampled}
 
 
 def _cone_radius(adaptor) -> float:

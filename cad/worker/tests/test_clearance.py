@@ -374,6 +374,24 @@ CURVED_SOLID_SOURCE = "part = translate([0, 0, %f], cylinder(r=%f, h=%f))" % (
 )
 
 
+#: A solid whose only curved faces come from a LOFT. OCCT gives a loft's
+#: flanks as B-spline surfaces, which carry no radius field to read, and while
+#: those counted as unmeasurable every reply on a lofted shell was
+#: advisory-only. Between two rectangles the flanks are ruled and flat, so
+#: nothing on this solid binds the angular step at all — the tolerance the
+#: caller asks for is the one the mesh keeps. Its lowest section sits `gap_mm`
+#: above z = 0, where bar A's top face is, and covers the bar in x and y.
+def _loft_source(gap_mm: float) -> str:
+    return "\n".join([
+        "hump = loft:",
+        "    z=%f: rect(%f, %f)" % (gap_mm, 2 * BAR_HALF_WIDTH,
+                                    2 * BAR_HALF_LENGTH),
+        "    z=%f: rect(%f, %f)" % (gap_mm + BAR_THICKNESS, BAR_HALF_WIDTH,
+                                    BAR_HALF_LENGTH),
+        "part = hump",
+    ])
+
+
 def _max_chord_deviation(source: str, tolerance_mm: float,
                          radius_mm: float) -> float:
     """The worst distance from a tessellated chord to the true cylinder.
@@ -697,8 +715,8 @@ class TestClearanceVerb:
                                          MIXED_WIDE_R)
         assert deviation <= tolerance, deviation
         assert deviation > 0.0
-        assert clr._curvature(MIXED_SOLID_SOURCE) == (
-            pytest.approx(MIXED_WIDE_R, abs=1.0e-6), True)
+        assert clr._curvature(MIXED_SOLID_SOURCE, tolerance) == (
+            pytest.approx(MIXED_WIDE_R, abs=1.0e-6), True, False)
 
     def test_a_cone_is_a_curved_face_too(self):
         """Cylinders and spheres are not the whole of curvature.
@@ -726,24 +744,26 @@ class TestClearanceVerb:
         # A part with no curved face at all has no radius to report either.
         assert feat.largest_curved_radius("part = cube(10, 10, 10)") is None
 
-    def test_an_unrecognised_curved_face_is_not_promised_a_bound(self, tmp_path):
-        """A guess about curvature is reported as a guess, not as a bound.
+    def test_a_face_with_no_analytic_radius_is_measured_by_sampling(self, tmp_path):
+        """A B-spline face has curvature; it just has no radius to read.
 
         An oblate spheroid — a 50 mm sphere squashed to a tenth of its height
-        — is one B-spline face to OCCT, which this module's curvature reader
-        cannot measure. Its bounding box is 100 x 100 x 10 mm, so the fallback
-        radius is 50 mm; the surface at the pole has a radius of curvature of
-        a^2/c = 500 mm, ten times that. The angle chosen for 50 mm leaves the
-        pole's chords ten times further out than the number a reply derived
-        from it would state, so that number is not a bound the mesh keeps.
+        — is one B-spline face to OCCT, so the analytic reader has nothing to
+        read off it. Its bounding box is 100 x 100 x 10 mm, and the old
+        fallback took HALF THE WIDEST EXTENT, 50 mm, as the radius; the
+        surface at the pole has a radius of curvature of a^2/c = 500 mm, ten
+        times that, so the angle chosen for 50 mm left the pole's chords ten
+        times further out than the reply's own number. Sampling the surface's
+        principal curvatures finds the pole instead, and the pole is what the
+        angle then holds.
 
-        ORACLE: `curvature_report` itself says the face is unrecognised, and
-        the reply must then carry tolerance_bounded False, keep the request,
-        label the effective value as an estimate and say in `bound` that it
-        is not guaranteed for unrecognised curved faces — while a part whose
-        every curved face IS measured, and a part with no curved face at all,
-        both come back bounded. The pass verdict is not this module's to
-        withhold: the panel joins tolerance_bounded to its own verdict.
+        ORACLE: the spheroid's analytic pole radius, a^2/c = 500 mm, which the
+        sampled reading must reach from below — the grid does not land exactly
+        on the pole, so it may only approach it — and never exceed. The reply
+        must then be BOUNDED at the tolerance asked for, with the source text
+        saying the curvature was sampled; a part whose every curved face has
+        an analytic radius, and a part with no curved face at all, stay
+        bounded and say neither.
         """
         pytest.importorskip("fcl")
         pytest.importorskip("build123d")
@@ -762,26 +782,91 @@ class TestClearanceVerb:
 
         spheroid = ("part = translate([0, 0, %f], scale([1, 1, 0.1], "
                     "sphere(50)))" % (GAP_MM + 5.0))
-        report = feat.curvature_report(spheroid)
-        assert report["unrecognised_faces"] >= 1
-        assert report["largest_radius_mm"] is None
+        pole_radius = 50.0 * 50.0 / 5.0
+        report = feat.curvature_report(spheroid, tolerance_mm=requested)
+        assert report["unrecognised_faces"] == 0
+        assert report["sampled_faces"] == 1
+        # From below and close: the bbox guess (50 mm) is an order of
+        # magnitude short of this, so a fallback cannot pass the test.
+        assert report["largest_radius_mm"] <= pole_radius * (1.0 + 1.0e-9)
+        assert report["largest_radius_mm"] >= pole_radius * 0.9
 
-        guessed = _reply(spheroid)
-        assert guessed["checked"] is True
-        assert guessed["tolerance_bounded"] is False
-        assert guessed["requested_tolerance_mm"] == requested
-        assert guessed["tessellation_tolerance_mm"] >= requested
-        assert "not guaranteed for unrecognised curved faces" in guessed["bound"]
-        assert "ESTIMATED" in guessed["bound"]
-        assert "guessed from the mesh's own bounding box" \
-            in guessed["angular_deflection_source"]
+        sampled = _reply(spheroid)
+        assert sampled["checked"] is True
+        assert sampled["tolerance_bounded"] is True
+        assert sampled["requested_tolerance_mm"] == requested
+        assert sampled["tessellation_tolerance_mm"] == pytest.approx(
+            requested, rel=1.0e-6)
+        assert "not guaranteed" not in sampled["bound"]
+        assert "sampled across the face" in sampled["angular_deflection_source"]
 
         measured = _reply(CURVED_SOLID_SOURCE)
         assert measured["tolerance_bounded"] is True
         assert "not guaranteed" not in measured["bound"]
+        assert "sampled" not in measured["angular_deflection_source"]
         flat = _reply(SOLID_SOURCE)
         assert flat["tolerance_bounded"] is True
         assert "no curved face" in flat["angular_deflection_source"]
+
+    def test_a_lofted_solid_is_bounded_and_graded_on_its_real_gap(self, tmp_path):
+        """A shell with a loft in it must be certifiable, not merely advised.
+
+        This is the whole point of the bound: `check_clearance` is the step
+        that says a design is clear, and a shell with any organic surface in
+        it — which is every shell worth lofting — could never say so while a
+        B-spline face counted as unmeasurable. The flanks of a loft between
+        two rectangles are RULED: they carry no curvature at all, so nothing
+        on this solid binds the angular step and the tolerance the caller
+        asked for is exactly the one the mesh keeps.
+
+        ORACLE: the gap the fixture is BUILT from. The loft's lowest section
+        is placed a stated distance above bar A's top face, so at 0.9 mm the
+        reply must report that 0.9 (within its own stated tolerance) and fail
+        a 1.0 mm requirement, and at 1.2 mm it must pass the same
+        requirement — both while claiming the bound rather than an estimate.
+        A reader that still gave up on the flanks reports tolerance_bounded
+        False and cannot pass at any distance.
+        """
+        pytest.importorskip("fcl")
+        pytest.importorskip("build123d")
+        verts, faces = _bar_a()
+        path, key = write_blob(tmp_path, verts, faces)
+        requested = 0.01
+        required = 1.0
+
+        def _reply(gap_mm):
+            return clr.clearance({
+                "source": _loft_source(gap_mm),
+                "required_mm": required,
+                "tolerance_mm": requested,
+                "targets": [{"reference": "board", "node": "Assembly/Bar",
+                             "key": key, "path": path}],
+            })["result"]
+
+        # The flanks are seen and measured, not skipped.
+        report = feat.curvature_report(_loft_source(0.9),
+                                       tolerance_mm=requested)
+        assert report["unrecognised_faces"] == 0
+        assert report["sampled_faces"] == 4
+        assert report["largest_radius_mm"] is None  # ruled: nothing binds
+
+        short = _reply(0.9)
+        assert short["tolerance_bounded"] is True
+        assert short["tessellation_tolerance_mm"] == pytest.approx(
+            requested, rel=1.0e-6)
+        assert "not guaranteed" not in short["bound"]
+        pair = short["pairs"][0]
+        assert pair["min_mm"] == pytest.approx(
+            0.9, abs=short["tessellation_tolerance_mm"])
+        assert pair["pass"] is False
+        assert short["pass"] is False
+
+        clear = _reply(1.2)
+        assert clear["tolerance_bounded"] is True
+        assert clear["pairs"][0]["min_mm"] == pytest.approx(
+            1.2, abs=clear["tessellation_tolerance_mm"])
+        assert clear["pairs"][0]["pass"] is True
+        assert clear["pass"] is True
 
     def test_pairs_come_back_closest_first(self, tmp_path):
         pytest.importorskip("fcl")
