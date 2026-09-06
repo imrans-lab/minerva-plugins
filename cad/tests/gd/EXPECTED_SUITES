@@ -628,8 +628,15 @@ test_pane_projection.gd assertions=17
 # than at Perspective; 1 control: the pane on screen captures its own
 # projection; 3 the repro: Top while Perspective shows is refused rather than
 # answered with the perspective picture, the same request succeeds once the
-# pane is pointed at Top, and Perspective is then the refused one).
-test_snapshot_capture.gd assertions=16
+# pane is pointed at Top, and Perspective is then the refused one)
+# + 3 the panes showing a direction, which draw the mesh outline and so are the
+# only ones a capture costs anything extra (1 fixture: three panes hold a
+# rev-3-scale shell and draw an outline of it while the iso pane, drawing no
+# outline, has walked no edge of it; 1 repro: four consecutive captures of each,
+# plus the mesh arriving, all inside one budget; 1 the wait named: the outline
+# is walked once and kept, so three further rounds cost less between them than
+# the first alone).
+test_snapshot_capture.gd assertions=19
 
 # A zero-area triangle carries connectivity, not a plane. Counting normals to
 # decide "this edge bounds the surface" made both neighbours of a sliver look

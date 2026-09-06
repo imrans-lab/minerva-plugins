@@ -21,6 +21,9 @@ const _DEBUG_EDGE_PICK: bool = true
 
 signal edge_selected(edge_id: int)
 
+## The outline the ortho panes draw, and the caches that keep it affordable.
+const _OrthoSilhouetteScript: Script = preload("ortho_silhouette.gd")
+
 const ORTHO_BACKGROUND := Color(0.94, 0.95, 0.97, 1.0)
 const ORTHO_EDGE_COLOR := Color(0.18, 0.19, 0.22, 1.0)
 const SELECTED_EDGE_COLOR := Color(0.62, 0.08, 0.08, 1.0)
@@ -31,17 +34,16 @@ const CHOOSER_TEXT := Color(0.92, 0.94, 0.97, 1.0)
 const CHOOSER_ROW_HEIGHT := 22.0
 const CHOOSER_WIDTH := 190.0
 const LABEL_FONT_SIZE := 15
-const FEATURE_EDGE_ANGLE_DEGREES := 24.0
-const EDGE_QUANTIZE_SCALE := 1000.0
+const ORTHO_EDGE_WIDTH := 1.4
 const PICK_RADIUS := 9.0
 const CIRCLE_PROJECTION_SEGMENTS := 48
 const POINTLIKE_THRESHOLD_PX := 0.75
 const MIN_MARKER_WIDTH := 1.5
 const MAX_MARKER_WIDTH_RATIO := 0.32
 
-var _raw_verts: Array = []
-var _raw_faces: Array = []
-var _feature_edge_cache: Array = []
+## scripts/ortho_silhouette.gd — the mesh outline this pane draws when it is
+## showing a direction, cached against the mesh and against the camera pose.
+var _silhouette: RefCounted = _OrthoSilhouetteScript.new()
 var _camera: Camera3D = null
 # Per-edge registry from the worker (id, start, end, kind, center, radius, …).
 # Used for hit-testing and selected-edge highlight rendering — distinct from
@@ -87,9 +89,12 @@ func _ready() -> void:
 # ── Public API ───────────────────────────────────────────────────────────────
 
 func set_mesh_data(mesh_data: Dictionary) -> void:
-	_raw_verts = mesh_data.get("vertices", []) if mesh_data.get("vertices", []) is Array else []
-	_raw_faces = mesh_data.get("faces", []) if mesh_data.get("faces", []) is Array else []
-	_rebuild_feature_edge_cache()
+	var vertices: Variant = mesh_data.get("vertices", [])
+	var faces: Variant = mesh_data.get("faces", [])
+	_silhouette.set_mesh(
+		vertices if vertices is Array else [],
+		faces if faces is Array else []
+	)
 	queue_redraw()
 
 
@@ -161,7 +166,7 @@ func _draw() -> void:
 	# intended visualisation in iso/Perspective.
 	if not is_perspective:
 		draw_rect(Rect2(Vector2.ZERO, size), ORTHO_BACKGROUND, true)
-		_draw_projected_mesh_edges()
+		_draw_silhouette()
 
 	# Refresh projected-edge lookup before highlight + future hit-tests. The
 	# rebuild is camera-dependent and cheap (linear in edge count); we only do
@@ -216,41 +221,21 @@ func _draw_chooser(font: Font) -> void:
 		)
 
 
-func _draw_projected_mesh_edges() -> void:
-	if _feature_edge_cache.is_empty():
+## Stroke the outline of the mesh as seen from this pane.
+##
+## A drawing of a few thousand segments is stroked as antialiased quads, one
+## canvas command each, which is what makes it read as drawn rather than
+## sampled. Past that the segments are shorter than the stroke is wide: the
+## quads cost a command apiece and show nothing extra, so the batched
+## primitive path takes over and the whole outline is one command.
+func _draw_silhouette() -> void:
+	var points: PackedVector2Array = _silhouette.points_for(_camera, size)
+	if points.size() < 2:
 		return
-
-	var view_dir := -_camera.global_transform.basis.z.normalized()
-	var cosine_threshold := cos(deg_to_rad(FEATURE_EDGE_ANGLE_DEGREES))
-	# Collect all segments into a flat packed array, then draw with a single
-	# draw_multiline call. This is dramatically faster than draw_line-per-edge
-	# for dense meshes (bolt-flange plate: ~5000 faces).
-	var points: PackedVector2Array = PackedVector2Array()
-	for edge_info in _feature_edge_cache:
-		var normals: Array = edge_info["normals"]
-		var should_draw := false
-		if normals.size() == 1:
-			should_draw = true
-		else:
-			var normal_a: Vector3 = normals[0]
-			var normal_b: Vector3 = normals[1]
-			var facing_a := normal_a.dot(view_dir)
-			var facing_b := normal_b.dot(view_dir)
-			var is_silhouette := facing_a * facing_b <= 0.0001
-			var is_sharp := normal_a.dot(normal_b) < cosine_threshold
-			should_draw = is_silhouette or is_sharp
-		if not should_draw:
-			continue
-
-		var p0_3d: Vector3 = edge_info["a"]
-		var p1_3d: Vector3 = edge_info["b"]
-		if _camera.is_position_behind(p0_3d) and _camera.is_position_behind(p1_3d):
-			continue
-		points.append(_camera.unproject_position(p0_3d))
-		points.append(_camera.unproject_position(p1_3d))
-
-	if points.size() >= 2:
-		draw_multiline(points, ORTHO_EDGE_COLOR, 1.4, true)
+	if _silhouette.is_dense():
+		draw_multiline(points, ORTHO_EDGE_COLOR)
+	else:
+		draw_multiline(points, ORTHO_EDGE_COLOR, ORTHO_EDGE_WIDTH, true)
 
 
 func _draw_selected_highlight() -> void:
@@ -463,57 +448,6 @@ func _project_circle_edge(edge_info: Dictionary) -> Dictionary:
 		"polyline": polyline,
 	}
 
-
-# ── Silhouette feature-edge cache (mesh-derived, view-independent build) ─────
-
-func _rebuild_feature_edge_cache() -> void:
-	# Build the face-adjacency edge map ONCE per mesh. Silhouette classification
-	# is view-dependent, so it still runs per-frame — but the dictionary build
-	# (O(faces * 3)) does not.
-	_feature_edge_cache.clear()
-	if _raw_verts.is_empty() or _raw_faces.is_empty():
-		return
-
-	var edge_map := {}
-	for face in _raw_faces:
-		if not (face is Array and face.size() >= 3):
-			continue
-		var a := _vector3_from_raw(_raw_verts[int(face[0])])
-		var b := _vector3_from_raw(_raw_verts[int(face[1])])
-		var c := _vector3_from_raw(_raw_verts[int(face[2])])
-		var normal := (b - a).cross(c - a)
-		if normal.length_squared() <= 0.000001:
-			continue
-		normal = normal.normalized()
-		_add_silhouette_edge(edge_map, a, b, normal)
-		_add_silhouette_edge(edge_map, b, c, normal)
-		_add_silhouette_edge(edge_map, c, a, normal)
-	_feature_edge_cache = edge_map.values()
-
-
-func _add_silhouette_edge(edge_map: Dictionary, a: Vector3, b: Vector3, normal: Vector3) -> void:
-	var key_a := _point_key(a)
-	var key_b := _point_key(b)
-	var edge_key := _edge_key(key_a, key_b)
-	if not edge_map.has(edge_key):
-		var first := a
-		var second := b
-		if key_b < key_a:
-			first = b
-			second = a
-		edge_map[edge_key] = {
-			"a": first,
-			"b": second,
-			"normals": [normal],
-		}
-		return
-	var normals: Array = edge_map[edge_key]["normals"]
-	if normals.size() < 2:
-		normals.append(normal)
-
-
-# ── Geometry helpers ─────────────────────────────────────────────────────────
-
 func _marker_width_for_projected_edge(projected: Dictionary, requested_width: float) -> float:
 	var span := _projected_edge_span(projected)
 	if span <= 0.0001:
@@ -575,17 +509,3 @@ func _vector3_from_raw(raw_vertex: Variant) -> Vector3:
 			float(raw_vertex[2])
 		)
 	return Vector3.ZERO
-
-
-func _point_key(point: Vector3) -> String:
-	return "%d,%d,%d" % [
-		roundi(point.x * EDGE_QUANTIZE_SCALE),
-		roundi(point.y * EDGE_QUANTIZE_SCALE),
-		roundi(point.z * EDGE_QUANTIZE_SCALE),
-	]
-
-
-func _edge_key(point_a: String, point_b: String) -> String:
-	if point_a < point_b:
-		return point_a + "|" + point_b
-	return point_b + "|" + point_a

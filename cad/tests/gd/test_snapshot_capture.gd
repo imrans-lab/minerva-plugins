@@ -38,6 +38,16 @@ extends SceneTree
 ## stand-in target here paints the direction its camera is actually looking, so
 ## a capture can be told apart from a capture of another projection.
 ##
+## AND THE PANES THE OWNER JUDGES BY ARE THE EXPENSIVE ONES. A pane showing a
+## direction draws the outline of the mesh: the only work a capture of it does
+## that a capture of the iso pane does not. On a rev-3-scale shell that walk is
+## a hundred thousand edges, and it was redone for every pane the moment a mesh
+## arrived and again on every single draw — so a burst of snapshots of top,
+## front and right paid for it a dozen times over and the verb ran out of
+## budget while iso, which draws no outline, answered in seconds. The walk is
+## now built once per mesh, only for a pane that actually draws an outline, and
+## its projection is kept until the camera or the pane moves.
+##
 ## Run:
 ##   cd <minerva>/src && godot --headless -s res://../../minerva-plugins/cad/tests/gd/test_snapshot_capture.gd
 
@@ -64,6 +74,17 @@ const CAPTURE_BUDGET_MS := 2000
 ## How long the loop is spun while nothing draws, looking for the frame the old
 ## path was waiting on.
 const IDLE_FRAMES := 60
+
+## The panes an owner judges a wall by, and the shell they timed out on: a
+## grid of this many cells is 37,249 vertices and 73,728 triangles, the size
+## of the rev-3 enclosure. Four consecutive calls is what the report was made
+## of, and the budget covers the mesh arriving as well as the four rounds —
+## the outline used to be rebuilt for every pane on arrival AND on every draw.
+const ORTHO_PANES: PackedStringArray = ["top", "front", "right"]
+const ORTHO_SOLID_CELLS := 192
+const ORTHO_MIN_VERTICES := 35000
+const ORTHO_BURST := 4
+const ORTHO_BUDGET_MS := 5000
 
 ## Filled from the pane's own SubViewport, so the stand-in target is the size
 ## the real one would be.
@@ -286,6 +307,75 @@ func _run() -> void:
 			+ "null on the call rather than hanging on a frame",
 			real_pane == null, "the dummy renderer produced an image")
 
+	# ── The panes the owner judges by ─────────────────────────────────────
+	var shell := _solid(ORTHO_SOLID_CELLS)
+	var ortho_targets := {}
+	for pane_id in ORTHO_PANES:
+		var pane_viewport: SubViewport = panel.get_node(
+			"%s/%sView/SubViewport" % [GRID, String(pane_id).capitalize()])
+		var pane_target := _StandInViewport.new()
+		pane_target.texture = _StandInTexture.new(pane_viewport.size)
+		root.add_child(pane_target)
+		host.set_viewport_for(pane_id, pane_target)
+		ortho_targets[pane_id] = pane_target
+
+	# Timed from the mesh arriving, because handing it to the panes used to
+	# cost as much as capturing them.
+	var burst_started := Time.get_ticks_msec()
+	panel._last_mesh_data = shell
+	panel._edge_registry = []
+	panel._push_mesh_to_geometry_overlays()
+	var round_ms := PackedInt32Array()
+	var captured := 0
+	var outline_segments := 0
+	for burst_round in range(ORTHO_BURST):
+		var round_started := Time.get_ticks_msec()
+		for pane_id in ORTHO_PANES:
+			var overlay: Control = panel._geometry_overlays[pane_id] as Control
+			# What the pane's own draw costs — the wait a read of its render
+			# target sits behind, and the one thing iso never pays.
+			var points: PackedVector2Array = overlay._silhouette.points_for(
+				panel.get_view_camera(pane_id), overlay.size)
+			outline_segments = maxi(outline_segments, int(points.size() / 2))
+			if host.render_view_to_image(pane_id, Rect2()) != null:
+				captured += 1
+		round_ms.append(Time.get_ticks_msec() - round_started)
+	var burst_ms := Time.get_ticks_msec() - burst_started
+
+	var iso_overlay: Control = panel._geometry_overlays["iso"] as Control
+	check("fixture: the three panes showing a direction hold the shell the "
+			+ "report was made on — %d+ vertices, " % ORTHO_MIN_VERTICES
+			+ "an outline of it drawn in each — while the iso pane, which "
+			+ "draws no outline, has walked no edge of it",
+			(shell["vertices"] as Array).size() >= ORTHO_MIN_VERTICES
+				and outline_segments > 0
+				and iso_overlay._silhouette.edge_count() == 0,
+			"%d vertices, %d outline segments, iso walked %d edges" % [
+				(shell["vertices"] as Array).size(), outline_segments,
+				iso_overlay._silhouette.edge_count()])
+
+	check("the repro: %d consecutive captures of each of top, front and right "
+			% ORTHO_BURST + "all answer with an image, and the mesh arriving "
+			+ "plus every one of them fits in %d ms — the verb spends its "
+			% ORTHO_BUDGET_MS + "budget on pictures, not on redrawing the "
+			+ "outline once per call",
+			captured == ORTHO_BURST * ORTHO_PANES.size()
+				and burst_ms < ORTHO_BUDGET_MS,
+			"%d of %d captured in %d ms" % [
+				captured, ORTHO_BURST * ORTHO_PANES.size(), burst_ms])
+
+	var repeat_ms: int = 0
+	for burst_round in range(1, round_ms.size()):
+		repeat_ms += round_ms[burst_round]
+	check("and the wait is named: the outline is walked on the first round "
+			+ "and kept, so the three rounds after it — same mesh, same "
+			+ "cameras, same pane sizes — cost less between them than the "
+			+ "first one did alone",
+			round_ms.size() == ORTHO_BURST and repeat_ms <= round_ms[0],
+			"rounds %s ms" % str(round_ms))
+	print("    ortho: %d segments, mesh + %d rounds in %d ms, rounds %s"
+		% [outline_segments, ORTHO_BURST, burst_ms, str(round_ms)])
+
 	# ── The narrow layout: one pane, one projection, one honest answer ────
 	panel._apply_width_class(&"sm")
 	await process_frame
@@ -350,6 +440,8 @@ func _run() -> void:
 			"got an image for a projection the pane is not showing")
 
 	narrow_target.free()
+	for pane_id in ORTHO_PANES:
+		(ortho_targets[pane_id] as Node).free()
 	stand_in.free()
 	reference_instance.queue_free()
 	panel.free()
