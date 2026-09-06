@@ -70,7 +70,7 @@ scipy 1.18.1
 six 1.17.0
 stack-data 0.6.3
 svgelements 1.9.6
-svgpathtools 1.7.5
+svgpathtools 1.8.0
 svgwrite 1.4.3
 sympy 1.14.0
 traitlets 5.16.1

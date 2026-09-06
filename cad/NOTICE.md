@@ -474,13 +474,13 @@ IPython traceback dependency.
 
 SVG parsing; an ocpsvg/build123d dependency.
 
-## svgpathtools 1.7.5
+## svgpathtools 1.8.0
 
 - Licence: MIT
 - Copyright (c) 2015 Andrew Allan Port
 - Source: https://github.com/mathandy/svgpathtools
 - Arrives via: `svgpathtools` wheel
-- Licence text: `cad/licenses/runtime/svgpathtools-1.7.5.LICENSE.txt` (sha256 e61b5f4e69dcb874e07ee26762113879ec326a7c98c75c9aa2c8ea5453b4e495)
+- Licence text: `cad/licenses/runtime/svgpathtools-1.8.0.LICENSE.txt` (sha256 e61b5f4e69dcb874e07ee26762113879ec326a7c98c75c9aa2c8ea5453b4e495)
 
 SVG path maths; a build123d dependency.
 
