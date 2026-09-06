@@ -67,6 +67,13 @@ const GAP_TOLERANCE_MM := 0.005
 ## to sort.
 const FAR_DROP_MM := 10.0
 
+## The lift that turns a flush contact back into a gap. Small enough that
+## nothing but the sign of the distance distinguishes the two cases, and still
+## exact in float32 at the fixture's 300 mm: 300 is a power-of-two boundary,
+## so the reference's top face decodes to exactly 300.0 and the difference is
+## the lift itself.
+const FLUSH_LIFT_MM := 1.0e-5
+
 const POSE_ORIGIN := Vector3(100.0, 200.0, 300.0)
 ## The yaw the reference is posed with, about +z. The bars approach each other
 ## face to face along z, so the gap is the same at any yaw — but the triangles
@@ -215,6 +222,7 @@ func _run() -> void:
 	await _check_batching(panel, checks)
 	await _check_refusals(panel, checks)
 	await _check_buried(panel, checks)
+	await _check_flush_contact(panel, checks)
 	await _check_pin_across_a_repose(panel, checks)
 	await _check_pose_rewritten_in_place(panel, checks)
 	await _check_parts_changed_during_await(panel, checks)
@@ -753,6 +761,61 @@ func _check_buried(panel: Node, checks: RefCounted) -> void:
 					after_move.get("pass"))), str(after_rebuild.get("pass_reason",
 					after_rebuild.get("pass"))), str(restamped.get("pass_reason",
 					restamped.get("pass")))])
+	panel.last_eval = _interference_over(SOURCE, [])
+
+
+# ---------------------------------------------------------------------------
+# CONTACT IS NOT INTERFERENCE
+# ---------------------------------------------------------------------------
+
+## A boss resting flush on a reference face measures 0 mm of air, and the
+## worker cannot tell that from a boss driven through the face: its distance
+## is unsigned. The interference check CAN, and on a flush pair it names no
+## crossing. A row that calls the flush case interference contradicts the join
+## note printed beside it in the same reply — "found no overlap" — and sends a
+## reader looking for crossing points that do not exist.
+##
+## ORACLE: the same fixture at two gaps that differ only in sign of contact.
+## At 0 the row must say touching and not interference, with pass false
+## against a required 0.5; lifted by a hundredth of a micron it must be a
+## positive distance with neither flag. An implementation that copies the
+## worker's interference flag through fails the first; one that clamps small
+## gaps to contact fails the second.
+func _check_flush_contact(panel: Node, checks: RefCounted) -> void:
+	panel.last_eval = _interference_over(SOURCE, [])
+	_gap_mm = 0.0
+	var flush: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var met := _pair_for(flush, NEAR_NODE)
+	_gap_mm = FLUSH_LIFT_MM
+	var lifted: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	var apart := _pair_for(lifted, NEAR_NODE)
+	_gap_mm = GAP_MM
+	check("flush: a pair with no air between the meshes, that the "
+			+ "interference report names no crossing for, is reported as "
+			+ "touching at 0 and fails the required gap — and is NOT called "
+			+ "interference, which the same reply's join note denies",
+			is_equal_approx(float(met.get("min_mm", -1.0)), 0.0)
+				and is_equal_approx(float(met.get("bound_mm", -1.0)), 0.0)
+				and bool(met.get("touching", false))
+				and not met.has("interference")
+				and not bool(met.get("pass", true))
+				and str(met.get("note", "")).contains("flush")
+				and str(flush.get("interference_join", "")).contains(
+					"found no overlap")
+				and not bool(flush.get("pass", true)),
+			"pair = %s, join = '%s'" % [str(met),
+				str(flush.get("interference_join", ""))])
+	check("flush: the same node lifted by %g mm is a positive distance again, "
+			% FLUSH_LIFT_MM + "with neither flag — contact is not a "
+			+ "tolerance band",
+			float(apart.get("min_mm", -1.0)) > 0.0
+				and absf(float(apart.get("min_mm", -1.0)) - FLUSH_LIFT_MM)
+					< FLUSH_LIFT_MM * 0.1
+				and not apart.has("touching")
+				and not apart.has("interference"),
+			"pair = %s" % str(apart))
 	panel.last_eval = _interference_over(SOURCE, [])
 
 

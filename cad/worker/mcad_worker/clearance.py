@@ -290,6 +290,32 @@ def _angular_for(tolerance_mm: float, radius_mm: float) -> float:
     return max(MIN_ANGULAR_RAD, angle)
 
 
+def _chord_clause(angular_rad: float, effective_mm: float,
+                  tolerance_mm: float) -> str:
+    """The tail of the tessellation `how` when the chords sit wider than asked.
+
+    Two things it has to get right, because a caller reads this beside the
+    numbers it subtracts. The angle it names is the one actually STEPPED: the
+    reply's angular_deflection_deg is degrees of that same angle, and naming
+    the module's floor where the floor did not bind leaves the reader with a
+    degree figure and a radian figure that are not the same angle. And the
+    comparison word matches the numbers AS PRINTED: `effective_mm` is the max
+    of the request and a sagitta derived from it, which on the face the angle
+    was chosen for lands a float step above the request — "more than the
+    0.010000 mm asked for" beside an identical 0.010000 is a contradiction,
+    not a measurement.
+    """
+    printed_effective = "%.6f" % effective_mm
+    printed_request = "%.6f" % tolerance_mm
+    relation = "equal to" if printed_effective == printed_request else "more than"
+    step = ("this module's finest angular step (%.4f rad)" % angular_rad
+            if angular_rad <= MIN_ANGULAR_RAD
+            else "an angular step of %.4f rad" % angular_rad)
+    return (" and held at %s, which on that radius is %s mm of chord error — "
+            "%s the %s mm asked for"
+            % (step, printed_effective, relation, printed_request))
+
+
 def _curvature(source: str) -> tuple:
     """(widest measured radius or None, whether every curved face was measured).
 
@@ -385,10 +411,7 @@ def _prepare_solid(source: str, tolerance_mm: float,
         effective = max(tolerance_mm, _sagitta_mm(angular, measured))
         how = "derived from the widest curved face (radius %.4f mm)" % measured
         if effective > tolerance_mm:
-            how += (" and held at this module's finest angular step (%.4f "
-                    "rad), which on that radius is %.6f mm of chord error — "
-                    "more than the %.6f mm asked for"
-                    % (MIN_ANGULAR_RAD, effective, tolerance_mm))
+            how += _chord_clause(angular, effective, tolerance_mm)
         return vertices, faces, angular, how, effective, True
 
     if known:

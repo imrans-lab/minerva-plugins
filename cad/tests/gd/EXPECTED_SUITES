@@ -323,8 +323,10 @@ test_interference.gd assertions=71
 # Plus 6 ticket assertions: a measurement that outruns the verb's budget
 # comes back running with a ticket and nothing measured, the ticket
 # collects the SAME report the inline path produced, a spent ticket and an
-# unknown one are refusals by name.
-test_clearance.gd assertions=60
+# unknown one are refusals by name. Plus 2 flush-contact assertions: a pair
+# at 0 mm whose interference join found no overlap is touching, not
+# interference; lifted 1e-5 mm it is a positive distance with neither flag.
+test_clearance.gd assertions=62
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm

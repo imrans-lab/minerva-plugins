@@ -233,7 +233,8 @@ func release() -> void:
 ##    tessellation_tolerance_mm, requested_tolerance_mm, tolerance_bounded,
 ##    bound, references_moved,
 ##    pairs: [{reference, node, min_mm, bound_mm, pass, solid_point_mm,
-##             reference_point_mm: {world, local}, interference?, note?}],
+##             reference_point_mm: {world, local}, interference?, touching?,
+##             note?}],
 ##    solid_triangles, cache, engine, interference_join}
 ##
 ## sorted by min_mm, closest first. `solid_point_mm` is a bare world triple
@@ -276,6 +277,12 @@ func release() -> void:
 ## The latest interference report for this same source is joined in for exactly
 ## that case: a node it names is reported at 0 with the interference flag and
 ## does not pass. `interference_join` says whether that report was available.
+##
+## CONTACT IS NOT INTERFERENCE. A pair with no air between the meshes measures
+## 0 whether the surfaces are flush or one body is inside the other, and an
+## unsigned distance cannot tell those apart. Such a pair is reported with
+## `touching` and fails every required gap above zero; the `interference` flag
+## is the joined report's to give, and appears only for a node it names.
 func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _no_clearance("the CAD panel is gone")
@@ -745,6 +752,22 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 			pair["pass"] = false
 			pair["containment_undecidable"] = true
 			pair["note"] = "containment undecidable: %s" % doubt
+		if float(pair["min_mm"]) <= 0.0 or bool(raw.get("interference", false)):
+			# No air at all between the two meshes. The worker cannot say
+			# whether that is a flush contact or a crossing — its distance is
+			# unsigned — and the interference report, which can, named no
+			# crossing here. So the row states contact and fails: calling it
+			# interference sends a reader hunting for crossing points that do
+			# not exist. A pair whose containment the join could not decide
+			# keeps the doubt it was already given as its note.
+			pair["min_mm"] = 0.0
+			pair["bound_mm"] = 0.0
+			pair["pass"] = false
+			pair["touching"] = true
+			if not pair.has("note"):
+				pair["note"] = _contact_note(buried)
+			pairs.append(pair)
+			continue
 		if raw.has("solid_point_mm") and raw.has("reference_point_mm"):
 			var pose := _pose_in(records, pair["reference"])
 			var reference_point := _vector(raw["reference_point_mm"])
@@ -753,8 +776,6 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 				"world": _vec(reference_point),
 				"local": _vec(pose.affine_inverse() * reference_point),
 			}
-		if bool(raw.get("interference", false)):
-			pair["interference"] = true
 		if not str(raw.get("note", "")).is_empty() and not pair.has("note"):
 			pair["note"] = str(raw["note"])
 		pairs.append(pair)
@@ -770,6 +791,7 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 		for entry in pairs:
 			var pair: Dictionary = entry
 			if bool(pair.get("interference", false)) \
+					or bool(pair.get("touching", false)) \
 					or bool(pair.get("containment_undecidable", false)):
 				continue
 			pair["bound_mm"] = float(pair["min_mm"])
@@ -813,7 +835,8 @@ func _clearance_report(envelope: Dictionary, raw_pairs: Array,
 	if quantization > 0.0:
 		for entry in pairs:
 			var pair: Dictionary = entry
-			if bool(pair.get("interference", false)):
+			if bool(pair.get("interference", false)) \
+					or bool(pair.get("touching", false)):
 				continue
 			pair["bound_mm"] = maxf(float(pair["bound_mm"]) - quantization, 0.0)
 			if bool(pair.get("pass", false)) and float(pair["bound_mm"]) < required:
@@ -951,6 +974,21 @@ func _buried_pairs(document: Dictionary, source: String, records: Array,
 	return out
 
 
+## Why a pair measured 0. The distance says only that there is no air here;
+## which of the two cases it is — flush surfaces, or one body inside the other
+## — is the interference report's answer, and this note says whether that
+## report was there to give it.
+func _contact_note(buried: Dictionary) -> String:
+	if bool(buried.get("fresh", false)) and not bool(buried.get("stale", false)):
+		return "the surfaces are flush: the meshes meet at 0 mm and the " \
+			+ "interference report for this source names no crossing here, " \
+			+ "so this is contact and not overlap; any required gap above " \
+			+ "zero is unmet"
+	return "the meshes meet at 0 mm, and with no fresh interference report " \
+		+ "for this source whether that is a flush contact or a crossing is " \
+		+ "unknown: an unsigned distance cannot tell them apart"
+
+
 ## What the join contributed, in one sentence, so the reply is readable
 ## without the reader knowing the interference check exists.
 func _join_note(buried: Dictionary) -> String:
@@ -971,8 +1009,8 @@ func _join_note(buried: Dictionary) -> String:
 			+ "measured from") % undecided
 	if count == 0:
 		return "the latest interference report for this source found no " \
-			+ "overlap, so every distance below is between two surfaces " \
-			+ "with air in between" + doubt
+			+ "overlap, so every distance below is a surface-to-surface gap " \
+			+ "and a 0 among them is a flush contact, not a crossing" + doubt
 	return ("%d node(s) the latest interference report for this source found "
 		% count + "overlapping the solid are reported at 0 rather than at "
 		+ "their unsigned surface-to-surface distance") + doubt

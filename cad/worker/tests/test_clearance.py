@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import struct
 import sys
 from pathlib import Path
@@ -410,6 +411,44 @@ def _max_chord_deviation(source: str, tolerance_mm: float,
             worst = max(worst,
                         radius_mm - _math.hypot(middle[0], middle[1]))
     return worst
+
+
+def test_the_chord_clause_quotes_the_angle_it_stepped_and_the_relation_it_measured():
+    """The prose beside the numbers has to agree with the numbers.
+
+    It lied twice on the same reply. The clause named this module's angular
+    FLOOR whenever the effective tolerance came out above the request — even
+    where the derived angle was thirty times the floor — so one sentence
+    quoted 10.253 degrees and 0.0050 rad, two different angles. And it said
+    "more than" for two values that print identically: the effective
+    tolerance is the max of the request and a sagitta derived from it, which
+    on the very face the angle was chosen for lands a float step above.
+
+    ORACLE: the radian figure parsed back out of the clause, in degrees, is
+    the angular_deflection_deg the same reply publishes; and a clause whose
+    two millimetre figures print the same does not say "more than". Neither
+    needs OCCT — the angle and the sagitta are this module's own arithmetic.
+    """
+    derived = clr._angular_for(0.01, 2.5)
+    assert derived > clr.MIN_ANGULAR_RAD
+    sagitta = clr._sagitta_mm(derived, 2.5)
+    clause = clr._chord_clause(derived, max(0.01, sagitta), 0.01)
+    quoted = float(re.search(r"([0-9.]+) rad", clause).group(1))
+    assert math.degrees(quoted) == pytest.approx(math.degrees(derived),
+                                                 abs=0.001)
+    assert "finest angular step" not in clause
+    assert "more than" not in clause
+    assert "equal to the 0.010000 mm asked for" in clause
+
+    # The floor really binding: a 200 mm barrel asked for a micron. Now the
+    # clause names the floor, and the two millimetre figures differ.
+    floor = clr._angular_for(0.000001, 200.0)
+    assert floor == clr.MIN_ANGULAR_RAD
+    coarse = clr._chord_clause(floor, clr._sagitta_mm(floor, 200.0), 0.000001)
+    assert "finest angular step" in coarse
+    assert math.degrees(float(re.search(r"([0-9.]+) rad", coarse).group(1))) \
+        == pytest.approx(math.degrees(floor), abs=0.001)
+    assert "more than the 0.000001 mm asked for" in coarse
 
 
 def test_two_meshes_with_the_same_body_bytes_cannot_share_a_key(tmp_path):
