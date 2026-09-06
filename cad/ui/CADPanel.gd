@@ -1345,6 +1345,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	var defects: Dictionary = _mesh_defects()
 	if not defects.is_empty():
 		_last_eval_result["mesh_defects"] = defects
+	# WHERE they are. The worker located them on the same tessellation it sent
+	# here: every non-manifold edge by world position, degenerate faces as a
+	# capped spread sample with the note that slivers on curved faces are not
+	# defects. A count on its own names no feature to fix.
+	var defect_sites: Variant = eval_result.get("mesh_defect_sites", {})
+	if defect_sites is Dictionary and not (defect_sites as Dictionary).is_empty():
+		_last_eval_result["mesh_defect_sites"] = defect_sites
 	# Render succeeded — clear any error banner left by a prior failed evaluate.
 	_hide_eval_error()
 	# A reference that could not be loaded — or that was too big to outline —

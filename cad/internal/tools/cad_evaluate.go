@@ -22,12 +22,12 @@ import (
 // Evaluate is the MCP tool spec for cad.evaluate.
 var Evaluate = ToolSpec{
 	Name:        "cad.evaluate",
-	Description: "Evaluate .mcad DSL source and return the resulting mesh + edges. Returns {shape_name, body_count, mesh:{vertices,faces}, edges:[...], references:[{name,path,units,up,matrix}]}. body_count is the number of separate solid bodies in the result: a part written as two halves (part = bottom + lid) that do not touch is ONE shape of TWO bodies, and every check reads the whole shape. Uses the worker's last_program cache to skip re-tessellation when the source matches a recently-evaluated program. Pass summary=true to get the same evaluation WITHOUT the mesh — {summary, shape_name, body_count, bbox, vertex_count, face_count, edge_count, reference_count, mesh_defects} — which is the cheap way to check that an edit landed; the mesh is one more call away and costs no second tessellation.",
+	Description: "Evaluate .mcad DSL source and return the resulting mesh + edges. Returns {shape_name, body_count, mesh:{vertices,faces}, edges:[...], references:[{name,path,units,up,matrix}]}. body_count is the number of separate solid bodies in the result: a part written as two halves (part = bottom + lid) that do not touch is ONE shape of TWO bodies, and every check reads the whole shape. Uses the worker's last_program cache to skip re-tessellation when the source matches a recently-evaluated program. Pass summary=true to get the same evaluation WITHOUT the mesh — {summary, shape_name, body_count, bbox, vertex_count, face_count, edge_count, reference_count, mesh_defects, mesh_defect_sites} — which is the cheap way to check that an edit landed; the mesh is one more call away and costs no second tessellation.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
 			"source": {"type": "string", "description": ".mcad DSL source code"},
-			"summary": {"type": "boolean", "description": "Return the evaluation without its mesh: shape_name, body_count, bbox, vertex/face/edge counts and mesh_defects. Default false."}
+			"summary": {"type": "boolean", "description": "Return the evaluation without its mesh: shape_name, body_count, bbox, vertex/face/edge counts and mesh_defects (counts) plus mesh_defect_sites, which gives every non-manifold edge a world position and a capped sample of degenerate faces. Default false."}
 		},
 		"required": ["source"]
 	}`),

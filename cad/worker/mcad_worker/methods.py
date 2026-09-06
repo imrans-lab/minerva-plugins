@@ -25,6 +25,8 @@ import traceback
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
+from mcad_worker import mesh_defects as _defect_module
+
 WORKER_VERSION = "0.1.0"
 
 # Module-level last-program cache (design §5).
@@ -105,44 +107,11 @@ def _mesh_defects(mesh: dict) -> dict:
     triangle twice. Only non-zero counts are reported — a clean mesh has
     nothing to say. The panel counts the same four over the same
     tessellation, so the two agree.
+
+    Counting and locating are one walk (``mcad_worker.mesh_defects``); this is
+    the counts half of it.
     """
-    faces = mesh.get("faces") or []
-    # The tessellation carries one vertex per face corner (normals differ
-    # across an edge), so two faces sharing an edge index different vertices
-    # at the same point. Weld by position first, as the panel's outline pass
-    # does, or every closed solid reads as all open edges.
-    welded: dict = {}
-    weld_of: list = []
-    for vertex in mesh.get("vertices") or []:
-        key = tuple(round(float(c), 6) for c in vertex)
-        weld_of.append(welded.setdefault(key, len(welded)))
-    edge_uses: dict = {}
-    seen_faces: set = set()
-    degenerate = 0
-    duplicate = 0
-    for raw_face in faces:
-        face = [weld_of[int(i)] if int(i) < len(weld_of) else int(i) for i in raw_face]
-        if len(set(face)) != len(face):
-            degenerate += 1
-            continue
-        key = tuple(sorted(face))
-        if key in seen_faces:
-            duplicate += 1
-        else:
-            seen_faces.add(key)
-        for i in range(len(face)):
-            a, b = face[i], face[(i + 1) % len(face)]
-            edge = (a, b) if a < b else (b, a)
-            edge_uses[edge] = edge_uses.get(edge, 0) + 1
-    open_edges = sum(1 for count in edge_uses.values() if count == 1)
-    non_manifold = sum(1 for count in edge_uses.values() if count > 2)
-    reported = {
-        "open_edges": open_edges,
-        "non_manifold_edges": non_manifold,
-        "degenerate_faces": degenerate,
-        "duplicate_faces": duplicate,
-    }
-    return {name: count for name, count in reported.items() if count > 0}
+    return _defect_module.defect_report(mesh)["counts"]
 
 
 def _defects_for_source(source: str) -> tuple[dict, str, int]:
@@ -157,7 +126,7 @@ def _defects_for_source(source: str) -> tuple[dict, str, int]:
         return {}, "", 0
     cached = _last_program[1]
     return (
-        _mesh_defects(cached.get("mesh") or {}),
+        cached.get("mesh_defects") or _mesh_defects(cached.get("mesh") or {}),
         str(cached.get("shape_name", "")),
         int(cached.get("body_count", 0)),
     )
@@ -184,6 +153,9 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
     thing to a body name the exporter has.
     """
     defects, shape_name, body_count = _defects_for_source(source)
+    sites: dict = {}
+    if _last_program is not None and _last_program[0] == hash(source):
+        sites = _last_program[1].get("mesh_defect_sites") or {}
     name = shape_name or getattr(exc, "node_name", "") or "part"
     where = f"body '{name}'" if body_count <= 1 else f"'{name}' ({body_count} bodies)"
     if defects:
@@ -211,6 +183,9 @@ def _mesh_invalid_error(exc: Exception, source: str) -> dict:
                 "shape_name": name,
                 "body_count": body_count,
                 "mesh_defects": defects,
+                # Where they are, not only how many: the same located report
+                # last_eval carries, so a refusal is actionable on its own.
+                "mesh_defect_sites": sites,
                 "counts_from": "last_evaluation" if defects else "unavailable",
             },
         },
@@ -233,9 +208,19 @@ def _summarise(result: dict) -> dict:
         "edge_count": len(result.get("edges") or []),
         "reference_count": len(result.get("references") or []),
     }
-    defects = _mesh_defects(mesh)
+    # Counts and locations both come from the walk the evaluation already
+    # did; a summary of a dict that predates it (a direct caller, an old
+    # cache entry) falls back to walking here.
+    if "mesh_defects" in result or "mesh_defect_sites" in result:
+        defects = result.get("mesh_defects") or {}
+        sites = result.get("mesh_defect_sites") or {}
+    else:
+        report = _defect_module.defect_report(mesh)
+        defects, sites = report["counts"], report["sites"]
     if defects:
         summary["mesh_defects"] = defects
+    if sites:
+        summary["mesh_defect_sites"] = sites
     return summary
 
 
@@ -378,6 +363,13 @@ def _evaluate(params: dict) -> dict:
         "edges": result.edges,
         "references": result.references,
     }
+    # One walk of the tessellation, cached with it: the counts the summary and
+    # the 3MF refusal quote, and the positions that say WHICH edge is bad.
+    _report = _defect_module.defect_report(result_dict["mesh"] or {})
+    if _report["counts"]:
+        result_dict["mesh_defects"] = _report["counts"]
+    if _report["sites"]:
+        result_dict["mesh_defect_sites"] = _report["sites"]
     _last_program = (h, result_dict)
     # A document made only of references builds no part; leave the previous
     # shape in place rather than caching a None an export would trip over.
