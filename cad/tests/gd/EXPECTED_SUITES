@@ -455,16 +455,24 @@ test_stl_reference.gd assertions=18
 # puts the plate's dense underside edges on the reference-cast path, where
 # _drop_contact_runs is the sole reason they are cleared. Its lifts bracket
 # TOUCH_EPSILON_MM itself: 9e-5 mm in is still a contact, 2e-4 mm in is not.
-# 13 assertions = 2 fixture premises (the plate really is grid-triangulated;
+# The last unswapped case is the contact as a MODELLER delivers it: the same
+# plate tilted five microradians, so its underside is coplanar with the boss's
+# top to within float noise rather than exactly. Its edges then enter the boss
+# through the rim wall and leave through the TOP FACE, and that top-face hit
+# is discarded — the edge straddles it by far less than the epsilon. Unless
+# the discarded hit is still handed to the contact-run rule as a run BOUNDARY,
+# the surviving rim crossing measures its run out to the far end of the
+# triangle, through the air past the boss, and a designed contact is reported.
+# 14 assertions = 2 fixture premises (the plate really is grid-triangulated;
 # its underside edges really do cross the rim) + 1 collider built + 2 the
 # flush boss reports nothing, exactly coplanar and a hundred-thousandth of a
 # millimetre out + 2 the bitten boss reports the board's node and, because no
 # single edge spans a half-millimetre disc, no depth with it + 1 the depth
 # control (the same boss driven clean through the board reports the board's
-# thickness) + 5 swapped (1 the boss became the one reference collider, 2 the
+# thickness) + 1 the tilted board is still a contact + 5 swapped (1 the boss became the one reference collider, 2 the
 # two lifts inside the touch epsilon are contacts, 2 the lift past it and the
 # half-millimetre bite are interference on the boss's node).
-test_flush_contact.gd assertions=13
+test_flush_contact.gd assertions=14
 
 # Which panel a cad verb reaches, and how big its reply is. Two real CADPanel
 # scenes under two tab titles, addressed through the host's own panel-tool

@@ -95,6 +95,18 @@ const BOSS_FACETS := 32
 ## Off the grid lines and off the origin, so the rim cuts cells rather than
 ## running along their edges.
 const BOSS_CENTRE := Vector2(1.2, -5.0)
+## The tilt a board arrives with. A modelled contact plane is coplanar to
+## within float noise, not exactly: over this plate the underside then weaves
+## a few hundredths of a micron either side of the boss's top face — every
+## deviation inside TOUCH_EPSILON_MM (1e-4), so the whole face is still a
+## contact, but the underside edges now cross the top face plane instead of
+## lying in it. That crossing is what the exactly-coplanar fixture cannot
+## make: the edge enters the boss through the rim wall and leaves through the
+## TOP FACE, and the top-face hit is discarded (the edge straddles it by far
+## less than the epsilon), so the rim crossing is left measuring its run out
+## to the far end of the triangle — through the air past the boss.
+## 4.5e-6 rad over a 24 mm plate is 5.4e-5 mm at the corners.
+const BOARD_TILT_RAD := 4.5e-6
 ## The float noise a real coplanar face arrives with. Inside TOUCH_EPSILON_MM
 ## (1e-4), and the lift at which the false positive actually appears: at exact
 ## zero the per-crossing parity tests already clear the crossing, so a fixture
@@ -237,6 +249,27 @@ func _run() -> void:
 			"penetration = %s, report = %s"
 				% [str(_penetration_of(through)), str(through)])
 
+	# --- the contact as a modeller actually delivers it ----------------------
+	# Same boss, same plate, same triangulation: only the plate is tilted by
+	# five microradians, so its underside is coplanar with the boss's top to
+	# within float noise rather than exactly. Every underside edge over the
+	# boss now enters through the rim wall and leaves through the top face,
+	# and the top-face hit is the one no per-crossing test will vouch for.
+	# ORACLE: the controls above, unchanged. A gate that clears this by
+	# widening what counts as a contact clears the half-millimetre bite too;
+	# one that reports it has lost the flush fit the board rests on.
+	_mount_tilted_plate(gauge, checks)
+	checks.build_solid(_boss_mesh(0.0))
+	var tilted: Dictionary = await _submit(gauge, checks)
+	check("a board tilted five microradians — coplanar with the boss's top to "
+			+ "within float noise, the way one arrives from a modeller — is "
+			+ "still a contact, with no depth quoted for it",
+			bool(tilted.get("checked", false))
+				and int(tilted.get("count", 0)) == 0
+				and int(tilted.get("point_count", 0)) == 0
+				and _penetration_of(tilted) == 0.0,
+			"report = %s" % str(tilted))
+
 	await _swapped_roles(gauge, checks)
 
 
@@ -288,6 +321,35 @@ func _swapped_roles(gauge: Node, checks: RefCounted) -> void:
 				and str(((bitten.get("pairs", []) as Array)[0] as Dictionary)
 					.get("node", "")) == BOSS_NODE_PATH,
 			"report = %s" % str(bitten))
+
+
+## Re-mount the plate as the sole reference, rotated by BOARD_TILT_RAD about
+## Y. The rotation is about the origin, which is 1.2 mm from the boss's axis,
+## so the underside plane crosses z = 0 INSIDE the rim — the edge weaves
+## through the contact plane rather than lying in it. The world box is grown
+## by a micron for the same reason the boss's is: AABB.intersects is exclusive
+## and the edges this fixture is about lie in the box's own face.
+func _mount_tilted_plate(gauge: Node, checks: RefCounted) -> void:
+	var plate := _grid_plate()
+	var tilt := Transform3D(Basis(Vector3(0.0, 1.0, 0.0), BOARD_TILT_RAD),
+		Vector3.ZERO)
+	gauge.build([{
+		"mesh": plate,
+		"transform": tilt,
+		"node": NODE_PATH,
+		"reference": REFERENCE_NAME,
+	}], "flush-contact-tilted|v1")
+	checks.set_records([{
+		"name": REFERENCE_NAME,
+		"pose": Transform3D.IDENTITY,
+		"world_aabb": _plate_world_box().grow(0.001),
+		"parts": [{
+			"mesh": plate,
+			"transform": tilt,
+			"node_path": NODE_PATH,
+			"node": NODE_PATH,
+		}],
+	}])
 
 
 ## Mount the boss as the sole reference at this lift, replacing whatever was

@@ -87,10 +87,20 @@ static func surface_at(point: Vector3, epsilon: float, ray: Callable) -> bool:
 
 ## Which of these crossings are real penetrations?
 ##
-## `crossings` are the crossings of the ONE edge a→b, in order along it, each
-## {point: Vector3, key: String}; `key` names the body crossed, because a
-## crossing of one body bounds no run through another. `ray_for` is
-## func(key: String) -> Callable, the ray against that one body.
+## `crossings` are the SURFACE HITS of the ONE edge a→b, in order along it,
+## each {point: Vector3, key: String, bound_only: bool}; `key` names the body
+## crossed, because a crossing of one body bounds no run through another.
+## `ray_for` is func(key: String) -> Callable, the ray against that one body.
+##
+## A hit marked `bound_only` is one the caller's per-crossing tests already
+## threw away — a hit the edge did not straddle, or one with no material
+## behind it. It is never classified and never returned, but it still BOUNDS
+## the runs of its neighbours, because it is a place the edge met the surface
+## whatever the caller decided about it. Leaving those out is what made a
+## flush contact report: when the partner hit at the far side of a rim was
+## discarded, the surviving one measured its run to the far END of the
+## triangle edge instead, out through the air past the rim, and no gate can
+## clear a run that is mostly air.
 ##
 ## Every crossing bounds two runs along its edge — back to the previous
 ## crossing of the same body, or to the edge's own start, and forward to the
@@ -112,6 +122,8 @@ static func penetrating_indices(a: Vector3, b: Vector3, crossings: Array,
 	var out := PackedInt32Array()
 	for index in range(crossings.size()):
 		var crossing: Dictionary = crossings[index]
+		if bool(crossing.get("bound_only", false)):
+			continue
 		var key := str(crossing.get("key", ""))
 		var point: Vector3 = crossing.get("point", Vector3.ZERO)
 		var ray: Callable = ray_for.call(key)
@@ -124,7 +136,8 @@ static func penetrating_indices(a: Vector3, b: Vector3, crossings: Array,
 	return out
 
 
-## The nearest crossing of the same body on one side, or the edge end past it.
+## The nearest hit on the same body on one side, or the edge end past it.
+## Discarded hits count here: the run ends where the edge met the surface.
 static func _neighbour(crossings: Array, index: int, step: int, key: String,
 		fallback: Vector3) -> Vector3:
 	var scan := index + step

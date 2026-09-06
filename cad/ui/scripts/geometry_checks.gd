@@ -1001,18 +1001,25 @@ func _cross_into_references(
 		# a face resting on a face meets exactly there. Neither is a hit the
 		# edge does not straddle — it lies in that surface, or climbs off it,
 		# rather than passing through.
-		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
-				and _straddles(a, b, point, hit) \
-				and _penetrates_reference(gauge, state, point, direction, mask,
-					str(hit.get("reference", "")), str(hit.get("node", ""))):
-			out.append({
-				"point": point,
-				"key": str(hit.get("reference", "")) + "\n"
-					+ str(hit.get("node", "")),
-				"node": str(hit.get("node", "")),
-				"reference": str(hit.get("reference", "")),
-				"distance": travelled,
-			})
+		var penetrating := travelled > TOUCH_EPSILON_MM \
+			and (length - travelled) > TOUCH_EPSILON_MM \
+			and _straddles(a, b, point, hit) \
+			and _penetrates_reference(gauge, state, point, direction, mask,
+				str(hit.get("reference", "")), str(hit.get("node", "")))
+		# Every hit is kept, the discarded ones marked: a hit this edge did
+		# not pass through is still the place it met the surface, and the
+		# contact-run rule measures its runs BETWEEN surfaces. Dropping it
+		# here would leave the next crossing measuring out to the edge's own
+		# end, through the air past the rim.
+		out.append({
+			"point": point,
+			"key": str(hit.get("reference", "")) + "\n"
+				+ str(hit.get("node", "")),
+			"node": str(hit.get("node", "")),
+			"reference": str(hit.get("reference", "")),
+			"distance": travelled,
+			"bound_only": not penetrating,
+		})
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:
 			break
@@ -1122,10 +1129,17 @@ func _cross_into_solid(
 			break
 		var point: Vector3 = hit.get("position", Vector3.ZERO)
 		var travelled := a.distance_to(point)
-		if travelled > TOUCH_EPSILON_MM and (length - travelled) > TOUCH_EPSILON_MM \
-				and _straddles(a, b, point, hit) \
-				and _penetrates_solid(solid_state, point, direction):
-			candidates.append({"point": point, "key": ""})
+		# As on the reference leg: the hits that fail these tests stay on as
+		# run boundaries, because the rim of a flush fit is usually crossed
+		# once as a penetration and once as a hit no test will vouch for.
+		candidates.append({
+			"point": point,
+			"key": "",
+			"bound_only": not (travelled > TOUCH_EPSILON_MM
+				and (length - travelled) > TOUCH_EPSILON_MM
+				and _straddles(a, b, point, hit)
+				and _penetrates_solid(solid_state, point, direction)),
+		})
 		var next := point + direction * CROSSING_ADVANCE_MM
 		if a.distance_to(next) >= length:
 			break
