@@ -79,6 +79,8 @@ const _DesignCheck: Script = preload("scripts/design_check.gd")
 ## The verbs that ask about the references alone: reference-against-reference
 ## clearance and interference, and the z profile over a footprint.
 const _ReferenceVerbs: Script = preload("scripts/reference_verbs.gd")
+## The node boxes as keep-out source a shell can subtract (emit_dsl=true).
+const _KeepoutDsl: Script = preload("scripts/keepout_dsl.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -275,6 +277,9 @@ static func _references(panel, args: Dictionary) -> Dictionary:
 	var full := str(args.get("detail", "lean")) == "full"
 	var records := _status_records(panel)
 	var out: Array = []
+	# The full rows regardless of detail=: the keep-out formatter reads the
+	# node boxes, which the lean row does not carry.
+	var rows: Array = []
 	var named: Array = []
 	var failed := 0
 	var matched := false
@@ -312,6 +317,7 @@ static func _references(panel, args: Dictionary) -> Dictionary:
 			"bbox_mm": _boxes(record.get("local_aabb", AABB()), pose),
 			"nodes": nodes,
 		}
+		rows.append(row)
 		out.append(row if full else _ReplyShape.lean_reference(row))
 	# A reference= that names nothing is a typo about the document, not an
 	# empty scene: answering "no references" would hide it.
@@ -331,14 +337,32 @@ static func _references(panel, args: Dictionary) -> Dictionary:
 			+ "why and names the file. A node's `path` from the file root is " \
 			+ "its identity — `name` is only the leaf and two branches may " \
 			+ "share one — and node= filters accept either."
-	return _ok({
+	var payload := {
 		"units": "mm",
 		"references": out,
 		"count": out.size(),
 		"failed": failed,
 		"detail": "full" if full else "lean",
 		"note": note,
-	})
+	}
+	# The node boxes as source. Sizing a wall against a part means writing the
+	# part's envelope into the document, and the envelope is already here.
+	if bool(args.get("emit_dsl", false)):
+		var emitted: Dictionary = _KeepoutDsl.emit(rows,
+			args.get("nodes", []) as Array,
+			float(args.get("clearance_mm", 0.0)))
+		if emitted.has("error"):
+			return _err(str(emitted["error"]))
+		payload["dsl"] = str(emitted["dsl"])
+		payload["dsl_bindings"] = emitted["bindings"]
+		payload["dsl_note"] = "world millimetres, one cube per node grown by "\
+			+ "clearance_mm on every side; subtract the bound names from your "\
+			+ "part. Each box is taken in the node's WORLD pose, so a part "\
+			+ "mounted at an angle keeps its world box and not a tight one."
+		var omitted: Array = emitted["omitted"] as Array
+		if not omitted.is_empty():
+			payload["dsl_omitted"] = omitted
+	return _ok(payload)
 
 
 # ---------------------------------------------------------------------------

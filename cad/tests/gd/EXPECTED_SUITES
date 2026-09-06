@@ -585,8 +585,14 @@ test_flush_contact.gd assertions=19
 # copy the MCP listing verbs read carries none of those points, costs a fifth
 # of the registry at most, and still names each edge's id, kind and both ends;
 # the caller's own array still has the points, because that is what the panes
-# draw).
-test_mcp_boundary.gd assertions=44
+# draw) + 7 the keep-out envelopes (emit_dsl binds one keepout_<reference>
+# per reference with the line to subtract; a part mounted at 90 degrees gets
+# its WORLD box and not the file's, which is the falsifier; an unrotated node
+# grows the same way; the comment names the nodes and warns about the world
+# box; nodes= scopes it and a name nothing carries is omitted with a reason; a
+# node with no thickness and no clearance is omitted rather than written flat;
+# a reference over the cap is an error asking for nodes=).
+test_mcp_boundary.gd assertions=51
 
 # Each wide pane carries the SAME projection dropdown the one-pane layout has,
 # driving that pane's own camera. A SLOT ("top") is a place on screen and keeps

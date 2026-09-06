@@ -39,6 +39,7 @@ const ReplyShape := preload("res://../../minerva-plugins/cad/ui/scripts/reply_sh
 const FastenerChecks := preload("res://../../minerva-plugins/cad/ui/scripts/fastener_checks.gd")
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
+const KeepoutDsl := preload("res://../../minerva-plugins/cad/ui/scripts/keepout_dsl.gd")
 
 ## Two anonymous editors, named as a user would name them.
 const FIRST_TITLE := "HITL enclosure"
@@ -64,6 +65,17 @@ const REFERENCES_LEAN_BUDGET_BYTES := 768
 const CLEARANCE_LIMITED_BUDGET_BYTES := 3072
 ## Pairs in the clearance fixture — the report shape measured on the real board.
 const BOARD_PAIRS := 50
+
+## The keep-out fixture. A board lying in the world frame with a silkscreen
+## node that has no thickness, and a joystick mounted at 90 degrees about z:
+## 4 mm across x and 20 mm along y in its own file, so its world footprint is
+## the other way round and an envelope read from the local box is wrong by
+## 16 mm in both directions.
+const KEEPOUT_STICK_NODE := "Stick/Body"
+const KEEPOUT_STICK_POSE := Vector3(40.0, -20.0, 2.0)
+const KEEPOUT_STICK_HALF := Vector3(2.0, 10.0, 0.0)
+const KEEPOUT_STICK_HEIGHT := 10.0
+const KEEPOUT_BOARD_SIZE := Vector3(60.0, 40.0, 1.6)
 
 ## Stands in for the document the report is about. Its digest is a fixed
 ## sixty-four characters, so the reply's size is the reference set's cost.
@@ -105,6 +117,7 @@ func _run() -> void:
 	_check_obstructions_collapse()
 	_check_reference_holes_are_indexed_as_paired()
 	_check_a_hole_census_becomes_dsl()
+	await _check_node_boxes_become_keep_out_envelopes()
 	await _check_await_eval_reports_what_the_panel_painted()
 	_check_a_kernel_failure_reaches_the_reader()
 	await _check_the_edge_listing_carries_no_drawing()
@@ -592,6 +605,78 @@ func _check_a_hole_census_becomes_dsl() -> void:
 			"dsl:\n%s" % str(posts["dsl"]))
 
 
+## An enclosure wall is sized against the parts it has to miss, and the boxes
+## for that are already in the references listing. The falsifier is the ROTATED
+## part: its own box is 4 x 20 x 10, and only a world-frame envelope reports the
+## 20 x 4 x 10 footprint it actually occupies.
+func _check_node_boxes_become_keep_out_envelopes() -> void:
+	var panel := _ReferenceStandIn.new()
+	panel.records = [_keepout_board_record(), _keepout_stick_record()]
+	root.add_child(panel)
+
+	var reply: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_references", {"emit_dsl": true, "clearance_mm": 1.0})
+	var dsl := str(reply.get("dsl", ""))
+	check("emit_dsl binds one keepout_<reference> per mounted reference and "
+			+ "says what to subtract, at the default lean detail",
+			(reply["dsl_bindings"] as Array) == ["keepout_board", "keepout_stick"]
+				and dsl.contains("keepout_board = translate(")
+				and dsl.contains("keepout_stick = translate(")
+				and dsl.contains("# then: part = part - keepout_board - keepout_stick"),
+			"dsl:\n%s" % dsl)
+
+	check("a part mounted at 90 degrees gets its WORLD box — 20 x 4 x 10 grown "
+			+ "by 1 mm on every side, not the 4 x 20 x 10 the file holds",
+			dsl.contains("translate([40.0, -20.0, 7.0], "
+				+ "cube(22.0, 6.0, 12.0, center = true))"),
+			"dsl:\n%s" % dsl)
+
+	check("an unrotated node gets its world box grown the same way",
+			dsl.contains("translate([30.0, 20.0, 0.8], "
+				+ "cube(62.0, 42.0, 3.6, center = true))"),
+			"dsl:\n%s" % dsl)
+
+	check("the comment names the nodes each envelope covers and warns that the "
+			+ "box is the WORLD box",
+			dsl.contains("board_mm/Substrate") and dsl.contains(KEEPOUT_STICK_NODE)
+				and dsl.contains("WORLD"),
+			"dsl:\n%s" % dsl)
+
+	var scoped: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_references", {"emit_dsl": true, "clearance_mm": 1.0,
+			"nodes": [KEEPOUT_STICK_NODE, "U1S_A"]})
+	check("nodes= emits only the nodes named, and a name no node carries is "
+			+ "omitted with a reason rather than silently shrinking the envelope",
+			(scoped["dsl_bindings"] as Array) == ["keepout_stick"]
+				and not str(scoped["dsl"]).contains("keepout_board")
+				and (scoped["dsl_omitted"] as Array).size() == 1
+				and str((scoped["dsl_omitted"] as Array)[0]).contains("U1S_A"),
+			"dsl:\n%s\nomitted = %s" % [str(scoped["dsl"]),
+				str(scoped.get("dsl_omitted", []))])
+
+	var tight: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_references", {"emit_dsl": true})
+	check("with no clearance the silkscreen node has no thickness to be a "
+			+ "cube, so it is omitted and NAMED instead of written flat",
+			str(tight["dsl"]).contains("cube(60.0, 40.0, 1.6, center = true)")
+				and not str(tight["dsl"]).contains("keepout_board = keepout_board")
+				and str(tight["dsl"]).contains("# board_mm/Silk:")
+				and str(tight.get("dsl_omitted", [])).contains("board_mm/Silk"),
+			"dsl:\n%s\nomitted = %s" % [str(tight["dsl"]),
+				str(tight.get("dsl_omitted", []))])
+
+	panel.records = [_board_record(KeepoutDsl.MAX_NODES + 1)]
+	var huge: Dictionary = await PanelTools.handle(panel,
+			"minerva_cad_references", {"emit_dsl": true, "clearance_mm": 1.0})
+	check("a reference too big to write is an error asking for nodes=, not a "
+			+ "reply nobody can paste",
+			not bool(huge.get("success", true))
+				and str(huge.get("error", "")).contains("nodes=")
+				and str(huge.get("error", "")).contains(str(KeepoutDsl.MAX_NODES)),
+			"reply = %s" % str(huge))
+	panel.free()
+
+
 ## A doc_edit on the text tab returns before the debounce has even fired.
 func _check_await_eval_reports_what_the_panel_painted() -> void:
 	var panel := _AwaitStandIn.new()
@@ -715,6 +800,62 @@ func _board_record(nodes: int) -> Dictionary:
 		"node_bounds": bounds,
 	}
 
+
+## The board of the keep-out fixture: a substrate with a real thickness and a
+## silkscreen node that is a plane.
+func _keepout_board_record() -> Dictionary:
+	return {
+		"name": "board",
+		"path": "boards/smart-remote-v2.glb",
+		"resolved_path": "/home/owner/boards/smart-remote-v2.glb",
+		"status": "ok",
+		"reason": "",
+		"warning": "",
+		"triangle_count": 214000,
+		"bytes": 8400000,
+		"load_ms": 640,
+		"outlines_skipped": true,
+		"pose": Transform3D.IDENTITY,
+		"local_aabb": AABB(Vector3.ZERO, KEEPOUT_BOARD_SIZE),
+		"node_bounds": [
+			{
+				"name": "Substrate",
+				"path": "board_mm/Substrate",
+				"aabb": AABB(Vector3.ZERO, KEEPOUT_BOARD_SIZE),
+			},
+			{
+				"name": "Silk",
+				"path": "board_mm/Silk",
+				"aabb": AABB(Vector3(0.0, 0.0, KEEPOUT_BOARD_SIZE.z),
+					Vector3(KEEPOUT_BOARD_SIZE.x, KEEPOUT_BOARD_SIZE.y, 0.0)),
+			},
+		],
+	}
+
+
+## The joystick of the keep-out fixture, posed a quarter turn about z.
+func _keepout_stick_record() -> Dictionary:
+	var pose := Transform3D(Basis(Vector3(0.0, 0.0, 1.0), deg_to_rad(90.0)),
+		KEEPOUT_STICK_POSE)
+	var local := AABB(-KEEPOUT_STICK_HALF,
+		KEEPOUT_STICK_HALF * 2.0 + Vector3(0.0, 0.0, KEEPOUT_STICK_HEIGHT))
+	return {
+		"name": "stick",
+		"path": "parts/ky-023.glb",
+		"resolved_path": "/home/owner/parts/ky-023.glb",
+		"status": "ok",
+		"reason": "",
+		"warning": "",
+		"triangle_count": 4200,
+		"bytes": 91000,
+		"load_ms": 12,
+		"outlines_skipped": false,
+		"pose": pose,
+		"local_aabb": local,
+		"node_bounds": [
+			{"name": "Body", "path": KEEPOUT_STICK_NODE, "aabb": local},
+		],
+	}
 
 ## An interference report crossing `nodes` nodes at `points` points each.
 func _crossing_report(nodes: int, points: int) -> Dictionary:

@@ -340,7 +340,7 @@ static func holes_as_dsl(holes: Array, kind: String, clearance_mm: float,
 		slug_index += 1
 		var slug := "slug_%d" % slug_index
 		var body := "cylinder(h = %s, r = %s, center = true)" \
-			% [_number(float(group["length"])), _number(float(group["radius"]))]
+			% [dsl_number(float(group["length"])), dsl_number(float(group["radius"]))]
 		var wrap: String = str(group["wrap"])
 		lines.append("%s = %s" % [slug, body if wrap.is_empty() else wrap % body])
 		for centre in group["centres"]:
@@ -348,7 +348,7 @@ static func holes_as_dsl(holes: Array, kind: String, clearance_mm: float,
 			if at.size() != 3:
 				continue
 			var placed := "translate([%s, %s, %s], %s)" % [
-				_number(float(at[0])), _number(float(at[1])), _number(float(at[2])), slug]
+				dsl_number(float(at[0])), dsl_number(float(at[1])), dsl_number(float(at[2])), slug]
 			if bound:
 				lines.append("%s = %s + %s" % [noun, noun, placed])
 			else:
@@ -362,7 +362,7 @@ static func holes_as_dsl(holes: Array, kind: String, clearance_mm: float,
 
 ## A length as the DSL should read it: no exponent, no trailing zeros, and
 ## never an empty fraction (build123d takes "5." as 5, a reader does not).
-static func _number(value: float) -> String:
+static func dsl_number(value: float) -> String:
 	var text := "%.4f" % value
 	while text.ends_with("0"):
 		text = text.substr(0, text.length() - 1)
