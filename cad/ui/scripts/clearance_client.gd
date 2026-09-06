@@ -97,8 +97,26 @@ func _vec(v: Vector3) -> Array:
 ## number as its error bar, so the check asks for its own, tighter one.
 const CLEARANCE_TOLERANCE_MM: float = 0.01
 ## The worker tessellates the solid and may build a 130k-triangle tree on the
-## first call. Later calls are milliseconds.
+## first call. Later calls are milliseconds. Used only where the panel cannot
+## keep an await alive across chunks (see _ask_worker).
 const CLEARANCE_TIMEOUT_MS: int = 60000
+## One arm of the renewable await, and the total beyond which the worker is
+## declared silent rather than slow. The tessellation a clearance pays for is
+## unbounded — a lofted shell with a hundred booleans is minutes of OCCT — so
+## the wait is re-armed rather than ended, or the panel pays for a measurement
+## and drops the reply as stale.
+const CLEARANCE_CHUNK_MS: int = 60000
+const CLEARANCE_GIVE_UP_MS: int = 900000
+
+## How long the verb itself waits for a measurement before handing back a
+## ticket instead. The caller is an MCP client with its OWN window — around a
+## minute, and not ours to widen — and a tool call that outlives it is
+## reported as a timeout with nothing to collect and the work thrown away. So
+## the verb always answers inside that window: with the report when it is
+## ready, and otherwise with the ticket the next call collects it by.
+const FIRST_REPLY_MS: int = 20000
+## How long a job stays in the table for its ticket to be collected.
+const TICKET_KEEP_MS: int = 900000
 
 ## Mesh blob format, read by worker/mcad_worker/clearance.py. Little-endian:
 ## magic, uint32 version, uint32 vertex count, uint32 triangle count, then
@@ -134,6 +152,16 @@ var _blob_dir: String = ""
 ## Digests a clearance call now in flight has named, by how many calls name
 ## them. The sweep keeps these whatever the current document hashes to.
 var _pinned_digests: Dictionary = {}
+## Measurements that outlived the verb that started them, by ticket:
+## {status, started_ms, settled_ms, report}. A job is erased when its report
+## is handed back, so a ticket names one answer exactly once.
+var _jobs: Dictionary = {}
+var _next_ticket: int = 0
+## How long the verb waits before handing back a ticket. Read from the
+## variable rather than the constant so a suite can drive the handover
+## without spending the window waiting for it; nothing in the panel ever
+## writes it.
+var first_reply_ms: int = FIRST_REPLY_MS
 
 
 ## Where the mesh blobs are written. The user's cache directory by default:
@@ -168,6 +196,10 @@ func release() -> void:
 	# The pins outlive their call only when a measurement's coroutine died
 	# holding them; the panel going away is the last chance to drop them.
 	_pinned_digests.clear()
+	# A job still running holds its own dictionary and will settle into it;
+	# dropping the table only means nobody can collect a report about a
+	# document that has gone away.
+	_jobs.clear()
 	_bodies.clear()
 	var directory := get_blob_dir()
 	_blobs.clear()
@@ -182,7 +214,18 @@ func release() -> void:
 ## every reference node in scope, against `required_mm`.
 ##
 ## `args`: required_mm (mandatory), reference=, node=, tolerance_mm=,
-## accept_unbounded_tolerance= (default false).
+## accept_unbounded_tolerance= (default false), ticket= (collect only).
+##
+## IT ALWAYS ANSWERS, WHETHER OR NOT IT HAS MEASURED. The worker re-tessellates
+## the solid at the measurement tolerance, and on a lofted shell that is
+## minutes of OCCT — far past the window the MCP client gives a tool call,
+## which is not ours to widen. So the measurement runs as a job and this verb
+## returns inside FIRST_REPLY_MS either way: the finished report, or
+## {checked: false, status: "running", ticket} naming the ticket a later call
+## collects it by. Every settled reply carries `status`, the `ticket` it was
+## filed under and `measured_ms`, so a reader can always tell a report that
+## was measured from one that is still being measured. A ticket is spent when
+## its report is handed back.
 ##
 ## The reply is the worker's, re-framed:
 ##
@@ -236,6 +279,10 @@ func release() -> void:
 func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if panel == null or not is_instance_valid(panel):
 		return _no_clearance("the CAD panel is gone")
+	var handle := str(args.get("ticket", ""))
+	if not handle.is_empty():
+		return _collect(handle)
+	_sweep_jobs()
 	var required_mm := float(args.get("required_mm", 0.0))
 	if required_mm <= 0.0:
 		return _no_clearance("a clearance check needs required_mm: the "
@@ -320,14 +367,56 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 	if plan.has("error"):
 		return _no_clearance(str(plan["error"]))
 
+	# The measurement runs as its own coroutine and the verb waits only as long
+	# as it may. Everything the job needs from the panel is read HERE, before
+	# it detaches: the buried pairs are the interference report standing now.
+	var job := {
+		"status": "running",
+		"started_ms": Time.get_ticks_msec(),
+		"settled_ms": 0,
+		"report": {},
+	}
+	var issued := "clearance-%d" % _next_ticket
+	_next_ticket += 1
+	_jobs[issued] = job
+	# Called, not awaited: the coroutine runs to its first await and carries on
+	# by itself, so a measurement that outlives this verb still finishes and
+	# still lands in its job.
+	_measure_into(job, panel, head, plan["batches"] as Array, records,
+		_buried_pairs(document, source, records, panel),
+		bool(args.get("accept_unbounded_tolerance", false)), bar)
+	await _wait_for(job, first_reply_ms)
+	if str(job["status"]) == "running":
+		return _running(issued, job)
+	_jobs.erase(issued)
+	return _settled(issued, job)
+
+
+## Wait up to `budget_ms` for a job to settle, giving the rest of the frame
+## back while it does. A module with no scene tree (a caller driving it out of
+## one) cannot wait at all, and says so by returning at once.
+func _wait_for(job: Dictionary, budget_ms: int) -> void:
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+	var deadline := Time.get_ticks_msec() + budget_ms
+	while str(job.get("status", "")) == "running" \
+			and Time.get_ticks_msec() < deadline:
+		await tree.process_frame
+
+
+## Run one measurement and leave it in `job`. The pin is taken and dropped
+## here so it covers exactly the time the worker is being asked.
+func _measure_into(job: Dictionary, panel: Object, head: Dictionary,
+		batches: Array, records: Array, buried: Dictionary,
+		accept_unbounded: bool, bar: Dictionary) -> void:
 	# The keys this call names are pinned for as long as it runs. Two calls
 	# share _blobs and the blob directory, so a reference re-posed between one
 	# call's two attempts would otherwise let the other's sweep delete the file
 	# the retry names — a single-shot "could not read" with nothing wrong.
-	var pinned := _pin(plan["batches"] as Array)
-	var report := await _measure(panel, head, plan["batches"] as Array, records,
-		_buried_pairs(document, source, records, panel),
-		bool(args.get("accept_unbounded_tolerance", false)), bar)
+	var pinned := _pin(batches)
+	var report := await _measure(panel, head, batches, records, buried,
+		accept_unbounded, bar)
 	_unpin(pinned)
 	if bool(report.get("checked", false)):
 		report["references_moved"] = is_instance_valid(panel) \
@@ -336,7 +425,69 @@ func check_clearance(panel: Object, args: Dictionary = {}) -> Dictionary:
 		if report["references_moved"]:
 			report["pass"] = false
 			report["pass_reason"] = "reference geometry changed while clearance was measured; ask again"
+	job["report"] = report
+	job["settled_ms"] = Time.get_ticks_msec()
+	job["status"] = "settled"
+
+
+## Collect a ticket. A ticket is spent when its report is handed back: the
+## answer describes geometry that is already ageing, and a reader asking twice
+## must measure again rather than be handed a second copy of the old one.
+func _collect(handle: String) -> Dictionary:
+	_sweep_jobs()
+	if not _jobs.has(handle):
+		return _no_clearance(("no clearance measurement is filed under ticket "
+			+ "'%s' — its report was collected already, or nobody collected it "
+			+ "for %d s and it was dropped; ask again without a ticket to "
+			+ "start a new measurement") % [handle, TICKET_KEEP_MS / 1000])
+	var job: Dictionary = _jobs[handle]
+	if str(job["status"]) == "running":
+		return _running(handle, job)
+	_jobs.erase(handle)
+	return _settled(handle, job)
+
+
+## What a measurement that has not finished yet answers with. It is `checked`
+## false — nothing has been measured — but it is not a refusal either, and the
+## reply says which of the two it is and how to collect the answer.
+func _running(handle: String, job: Dictionary) -> Dictionary:
+	var waited := Time.get_ticks_msec() - int(job["started_ms"])
+	return {
+		"checked": false,
+		"units": "mm",
+		"status": "running",
+		"ticket": handle,
+		"elapsed_ms": waited,
+		"pairs": [],
+		"reason": ("the measurement is still running in the worker after "
+			+ "%.1f s — the solid is re-tessellated at the measurement "
+			+ "tolerance, which on a large lofted shell is minutes of "
+			+ "geometry. Nothing has been found: ask again with "
+			+ "ticket=\"%s\" to collect the report when it lands.")
+			% [waited / 1000.0, handle],
+	}
+
+
+## A settled job's report, stamped with what it cost and which ticket carried
+## it. The stamp is on every reply, including the ones that came back inside
+## the first wait and were never handed a ticket to poll.
+func _settled(handle: String, job: Dictionary) -> Dictionary:
+	var report: Dictionary = job["report"]
+	report["status"] = "complete"
+	report["ticket"] = handle
+	report["measured_ms"] = int(job["settled_ms"]) - int(job["started_ms"])
 	return report
+
+
+## Drop jobs nobody collected. A report is geometry-dated and a table that
+## grows for the life of the panel is a leak; TICKET_KEEP_MS is far longer
+## than any measurement, so only an abandoned ticket is ever swept.
+func _sweep_jobs() -> void:
+	var now := Time.get_ticks_msec()
+	for key in _jobs.keys():
+		var job: Dictionary = _jobs[key]
+		if now - int(job["started_ms"]) > TICKET_KEEP_MS:
+			_jobs.erase(key)
 
 
 ## Ask every batch and fold the replies into one report. Split out so the pin
@@ -879,10 +1030,20 @@ func _no_clearance(reason: String) -> Dictionary:
 ## host's two envelopes down to the worker's own result. Returns {error: ...}
 ## for every layer that can fail, so the caller has one shape to read.
 func _ask_worker(panel: Object, payload: Dictionary) -> Dictionary:
-	if not panel.has_method("call_backend"):
+	# The measurement outlives the verb that started it, so the panel it was
+	# handed can be gone by the time a batch is asked.
+	if panel == null or not is_instance_valid(panel):
+		return {"error": "the CAD panel closed while the clearance "
+			+ "measurement was running"}
+	var envelope: Dictionary = {}
+	if panel.has_method("call_backend_until"):
+		envelope = await panel.call_backend_until("cad.clearance", payload,
+			CLEARANCE_CHUNK_MS, CLEARANCE_GIVE_UP_MS)
+	elif panel.has_method("call_backend"):
+		envelope = await panel.call_backend(
+			"cad.clearance", payload, CLEARANCE_TIMEOUT_MS)
+	else:
 		return {"error": "this panel cannot reach the CAD worker"}
-	var envelope: Dictionary = await panel.call_backend(
-		"cad.clearance", payload, CLEARANCE_TIMEOUT_MS)
 	return _WorkerReply.unwrap(envelope, "clearance")
 
 

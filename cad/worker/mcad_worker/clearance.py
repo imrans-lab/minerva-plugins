@@ -129,12 +129,18 @@ class _LRU(OrderedDict):
 
 _reference_trees: _LRU = _LRU(MAX_CACHED_REFERENCES)
 _solid_meshes: _LRU = _LRU(MAX_CACHED_SOLIDS)
+#: Curvature reports, keyed by source. Reading the curvature TRANSLATES the
+#: whole DSL — on a shell of a hundred booleans that is as expensive as the
+#: tessellation beside it — and the answer is a property of the source alone,
+#: so a clearance that pays for it once must not pay for it twice.
+_curvatures: _LRU = _LRU(MAX_CACHED_SOLIDS)
 
 
 def reset_caches() -> None:
     """Drop every cached tree and tessellation. For tests and for a reload."""
     _reference_trees.clear()
     _solid_meshes.clear()
+    _curvatures.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +304,10 @@ def _curvature(source: str) -> tuple:
     B-Rep could not be read at all: the radius is then at best a partial
     answer, and no bound derived from it covers the faces it did not see.
     """
+    key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    cached = _curvatures.take(key)
+    if cached is not None:
+        return cached
     try:
         from .features import FeatureError, curvature_report
     except ImportError:
@@ -305,10 +315,14 @@ def _curvature(source: str) -> tuple:
     try:
         report = curvature_report(source)
     except FeatureError:
-        return None, False
+        answer = (None, False)
     except BaseException:  # noqa: BLE001 — a broken OCCT raises anything
-        return None, False
-    return report["largest_radius_mm"], int(report["unrecognised_faces"]) == 0
+        answer = (None, False)
+    else:
+        answer = (report["largest_radius_mm"],
+                  int(report["unrecognised_faces"]) == 0)
+    _curvatures.put(key, answer)
+    return answer
 
 
 def _bbox_radius(vertices) -> float:

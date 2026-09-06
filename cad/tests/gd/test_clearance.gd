@@ -211,6 +211,7 @@ func _run() -> void:
 
 	await _check_upload(panel, checks)
 	await _check_answer(panel, checks)
+	await _check_ticket(panel, checks)
 	await _check_batching(panel, checks)
 	await _check_refusals(panel, checks)
 	await _check_buried(panel, checks)
@@ -222,6 +223,88 @@ func _run() -> void:
 	await _check_more_nodes_than_the_worker_caches(panel, checks)
 	_check_isolation(checks)
 	_clear_blob_dir()
+
+
+# ---------------------------------------------------------------------------
+# The ticket: an answer inside the caller's window, measured or not
+# ---------------------------------------------------------------------------
+
+## The worker re-tessellates the solid, and on a real lofted shell that runs
+## past the window the MCP client gives a tool call — at which point the
+## caller is told "timed out" and the measurement is thrown away. So the verb
+## answers inside its own budget either way, and hands back a ticket for the
+## report it has not got yet.
+##
+## The budget is driven to zero here rather than waited out: what is being
+## pinned is the HANDOVER, not the length of the wait. The stand-in worker
+## still answers a frame later, so the collected report has to be the same
+## measurement the inline path produced — a ticket that dropped its job, or
+## answered from a fresh one, does not match it.
+func _check_ticket(panel: Node, checks: RefCounted) -> void:
+	var inline: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	check("ticket: an answer that arrives inside the budget needs no ticket, "
+			+ "and still says it is complete",
+			bool(inline.get("checked", false))
+				and str(inline.get("status", "")) == "complete"
+				and inline.has("measured_ms"),
+			"inline = %s" % str(inline))
+	var inline_pairs: Array = inline.get("pairs", []) as Array
+	var expected := float((inline_pairs[0] as Dictionary).get("min_mm", -1.0)) \
+		if inline_pairs.size() > 0 else -1.0
+
+	var budget: int = int(checks.first_reply_ms)
+	checks.first_reply_ms = 0
+	var started: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 0.5})
+	checks.first_reply_ms = budget
+	var handle := str(started.get("ticket", ""))
+	check("ticket: a measurement that outruns the budget comes back running, "
+			+ "with a ticket and NOTHING measured",
+			not bool(started.get("checked", true))
+				and str(started.get("status", "")) == "running"
+				and not handle.is_empty()
+				and (started.get("pairs", []) as Array).is_empty(),
+			"started = %s" % str(started))
+	check("ticket: and it says how to collect the report, in its reason",
+			str(started.get("reason", "")).contains(handle),
+			"reason = %s" % str(started.get("reason", "")))
+
+	# The stand-in worker answers a frame or two later; the collection is the
+	# same measurement, not a new one.
+	var collected: Dictionary = {}
+	for _attempt in range(20):
+		await process_frame
+		collected = await checks.check_clearance(panel, {"ticket": handle})
+		if bool(collected.get("checked", false)):
+			break
+	var collected_pairs: Array = collected.get("pairs", []) as Array
+	var same_distance := collected_pairs.size() == inline_pairs.size() \
+		and collected_pairs.size() > 0 \
+		and absf(float((collected_pairs[0] as Dictionary).get("min_mm", -1.0))
+			- expected) < 1e-9
+	check("ticket: collecting it returns the finished report — the same "
+			+ "distance the inline call measured, complete and stamped",
+			bool(collected.get("checked", false))
+				and str(collected.get("status", "")) == "complete"
+				and str(collected.get("ticket", "")) == handle
+				and same_distance,
+			"collected = %s" % str(collected))
+
+	var again: Dictionary = await checks.check_clearance(panel,
+		{"ticket": handle})
+	check("ticket: a ticket is spent once its report is handed back — asking "
+			+ "twice is refused by name, not answered from a stale copy",
+			not bool(again.get("checked", true))
+				and str(again.get("reason", "")).contains(handle),
+			"again = %s" % str(again))
+	var unknown: Dictionary = await checks.check_clearance(panel,
+		{"ticket": "clearance-does-not-exist"})
+	check("ticket: an unknown ticket is a refusal with a reason, never a "
+			+ "clean bill of health",
+			not bool(unknown.get("checked", true))
+				and not str(unknown.get("reason", "")).is_empty(),
+			"unknown = %s" % str(unknown))
 
 
 # ---------------------------------------------------------------------------

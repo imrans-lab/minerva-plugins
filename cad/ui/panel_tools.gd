@@ -99,6 +99,12 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_cad_check_interference":
 			return await _fresh(panel, args, _check_interference)
 		"minerva_cad_check_clearance":
+			# Collecting a ticket measures nothing, so there is no snapshot
+			# for a re-pose to invalidate — and a re-run would collect a
+			# ticket the first attempt has already spent. The report it
+			# hands back carries its own `references_moved`.
+			if not str(args.get("ticket", "")).is_empty():
+				return await _check_clearance(panel, args)
 			return await _fresh(panel, args, _check_clearance)
 		"minerva_cad_check_fasteners":
 			return await _fresh(panel, args, _check_fasteners)
@@ -127,6 +133,11 @@ static func _fresh(panel, args: Dictionary, verb: Callable) -> Dictionary:
 		if not is_instance_valid(panel):
 			return _err("the CAD panel closed while the measurement was running")
 		if _reference_digest(panel) == before:
+			return reply
+		# A reply that measured nothing — a clearance still running in the
+		# worker — describes no pose, so a re-pose cannot have staled it.
+		# Running the verb again would only start a second measurement.
+		if str(reply.get("status", "")) == "running":
 			return reply
 	reply["stale"] = true
 	reply["stale_reason"] = "the reference set changed while this measurement " \
@@ -494,10 +505,19 @@ static func _check_interference(panel, args: Dictionary) -> Dictionary:
 ## tightest? The distance is computed in the worker over a swept-sphere BVH,
 ## so the number is exact for the two meshes; the reply states the tolerance
 ## the solid was tessellated at, which is the error bar against the true
-## B-Rep surface.
+## B-Rep surface. A measurement that outruns the caller's window comes back as
+## a ticket; passing that ticket back collects it.
 static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 	if panel == null or not panel.has_method("check_clearance"):
 		return _err("clearance checking is not available on this panel")
+	var handle := str(args.get("ticket", ""))
+	if not handle.is_empty():
+		# A ticket names a measurement that was started with its own scope and
+		# tolerance; nothing else in the call is read.
+		var collected: Dictionary = await panel.check_clearance({"ticket": handle})
+		if collected.has("error"):
+			return _err(str(collected["error"]))
+		return _ok(collected)
 	var asked := str(args.get("reference", ""))
 	if not asked.is_empty() and not _has_reference(panel, asked):
 		return _err("no reference named '%s' is mounted" % asked)

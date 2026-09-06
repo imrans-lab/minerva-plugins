@@ -135,9 +135,17 @@ const _PROBE_DIRECTIONS: Array[Vector3] = [
 ## number; this bounds what travels in the reply.
 const MAX_POINTS_PER_PAIR: int = 8
 
-## Edges of the solid cast in one check, and reference triangles examined.
-## Both are ceilings on a pathological document, not a sampling scheme: when
-## either is hit the report says so in `sampling` and the count is a floor.
+## Rays spent on the solid's own edges in one check, and reference triangles
+## examined. Both are ceilings on a pathological document, not a sampling
+## scheme: when either is hit the report says so in `sampling` and the count
+## is a floor.
+##
+## THE EDGE CEILING BOUNDS CASTS, NOT THE WALK. An edge whose box cannot reach
+## any reference costs one AABB test and no ray, so the walk always runs to
+## the END of the solid and only edges that actually reach a reference draw on
+## the budget. A hundred-thousand-edge shell whose roof stands clear of
+## everything inside it is therefore cast in full — a ceiling on the walk
+## would have stopped in the middle of the roof and called the answer a floor.
 const MAX_SOLID_EDGES: int = 60000
 const MAX_REFERENCE_TRIANGLES: int = 400000
 
@@ -177,6 +185,16 @@ var _marker_points: PackedVector3Array = PackedVector3Array()
 var _casts: int = 0
 ## Ceilings the running check hit, in prose.
 var _limits: PackedStringArray = PackedStringArray()
+## The solid's edges as the running check treated them: how many it holds,
+## how many of those could reach a reference at all, and how many of THOSE it
+## actually cast a ray from. The three are what the report says it did.
+var _edges_total: int = 0
+var _edges_reaching: int = 0
+var _edges_cast: int = 0
+## Rays the check may spend on solid edges. Read from the variable rather
+## than the constant so a suite can drive the ceiling without generating a
+## hundred thousand edges; nothing in the panel ever writes it.
+var max_solid_edge_casts: int = MAX_SOLID_EDGES
 ## Nodes whose containment question could not be answered, as
 ## {reference, node, reason}. A rejected probe is not a clean node.
 var _undecided: Array = []
@@ -732,22 +750,32 @@ func run_check(gauge: Object, state: PhysicsDirectSpaceState3D, args: Dictionary
 	# it should cost a box test per edge rather than a cast.
 	var reach := _reference_bounds(reference_scope)
 	var cull := reach.size.length_squared() > 0.0
-	var edge_count := get_solid_edge_count()
-	var edge_limit := mini(edge_count, MAX_SOLID_EDGES)
-	if edge_limit < edge_count:
-		_limits.append("only %d of the solid's %d edges were cast"
-			% [edge_limit, edge_count])
-	for i in range(edge_limit):
+	_edges_total = get_solid_edge_count()
+	_edges_reaching = 0
+	_edges_cast = 0
+	# The budget is spent on RAYS, so the walk runs to the end of the solid
+	# whatever its size and an edge that cannot reach a reference costs a box
+	# test. An edge past the budget is still counted, so the report can say
+	# exactly how many were left rather than "at least this many".
+	for i in range(_edges_total):
 		var a := _solid_edges[i * 2]
 		var b := _solid_edges[i * 2 + 1]
 		if cull and not AABB(a, Vector3.ZERO).expand(b).intersects(reach):
 			continue
+		_edges_reaching += 1
+		if _edges_cast >= max_solid_edge_casts:
+			continue
+		_edges_cast += 1
 		var crossings := _cross_into_references(gauge, state, a, b, mask, reference_scope)
 		for crossing in crossings:
 			_absorb(pairs, crossing as Dictionary, node_scope)
 		# The depth this one edge reached inside each node it crossed. Runs are
 		# measured per EDGE: two crossings on different edges bound nothing.
 		_absorb_runs(pairs, crossings, node_scope)
+	if _edges_reaching > _edges_cast:
+		_limits.append(("%d of the %d solid edges that reach a reference were "
+			+ "not cast; the first %d spent the ray budget")
+			% [_edges_reaching - _edges_cast, _edges_reaching, _edges_cast])
 
 	# Direction 2: the edges of every reference triangle that could reach the
 	# solid, against the solid's own collider.
@@ -1681,8 +1709,11 @@ func _report(pairs: Dictionary) -> Dictionary:
 			entry["note"] = str(pair["note"])
 		total += int(pair["point_count"])
 		out.append(entry)
-	var sampling := "none: every edge of the solid and every edge of every " \
-		+ "reference triangle overlapping it was cast"
+	var sampling := ("none: every one of the %d solid edges that reach a "
+		+ "reference was cast (of %d the solid has; the rest stand clear of "
+		+ "everything in scope, where no ray could cross anything), as was "
+		+ "every edge of every reference triangle overlapping the solid") \
+		% [_edges_cast, _edges_total]
 	if not _limits.is_empty():
 		sampling = "TRUNCATED — %s; the counts are floors" % ", ".join(_limits)
 	return {
@@ -1699,6 +1730,11 @@ func _report(pairs: Dictionary) -> Dictionary:
 			+ "inside its own body; a node listed here offered none, so it is "
 			+ "neither clean nor reported as interfering"),
 		"sampling": sampling,
+		# What the walk actually covered: every edge the solid has, the ones
+		# whose box reaches a reference, and the ones a ray was cast from.
+		"solid_edges": _edges_total,
+		"edges_reaching": _edges_reaching,
+		"edges_cast": _edges_cast,
 		"casts": _casts,
 		"elapsed_ms": float(Time.get_ticks_usec() - _started_us) / 1000.0,
 		# The cost of a per-evaluation check is part of its answer: a reader

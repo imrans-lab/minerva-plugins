@@ -588,7 +588,9 @@ func check_interference(args: Dictionary = {}) -> Dictionary:
 ## `args` carries required_mm (mandatory) plus reference=/node=/tolerance_mm=,
 ## which is what minerva_cad_check_clearance passes through. Unlike the
 ## interference check this one is asked for, not run on every evaluation: it
-## re-tessellates the solid at a measurement tolerance in the worker.
+## re-tessellates the solid at a measurement tolerance in the worker, which
+## can outlast the caller's window — hence ticket=, which collects a
+## measurement an earlier call left running.
 func check_clearance(args: Dictionary = {}) -> Dictionary:
 	if _geometry_checks == null:
 		return {"error": "clearance checking is not available on this panel"}
@@ -631,6 +633,29 @@ func call_backend(channel: String, args: Dictionary,
 	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
 	request.emit(channel, args, reply_id)
 	return await ipc.await_reply(reply_id, timeout_ms)
+
+
+## The same round trip, kept alive until the backend actually answers.
+##
+## A channel whose work is unbounded — a clearance measurement re-tessellates
+## the solid, which on a lofted shell is minutes of OCCT — cannot be awaited
+## once: MinervaIPC.await_reply ends at its own limit and the worker's later
+## reply is then dropped as stale, so the panel pays for a measurement and
+## throws it away. This re-arms the await on the SAME reply_id in chunks
+## (see _renew_await) until the answer lands or `give_up_ms` is spent.
+func call_backend_until(channel: String, args: Dictionary,
+		chunk_ms: int = 60000, give_up_ms: int = 900000) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {
+			"success": false,
+			"error_code": "ipc_unavailable",
+			"error_message": "MinervaIPC helper not attached; cannot reach "
+				+ "the CAD plugin backend",
+		}
+	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
+	request.emit(channel, args, reply_id)
+	return await _renew_await(ipc, reply_id, chunk_ms, give_up_ms, "")
 
 
 ## The user's last click on a reference node, or {} — read by
@@ -1032,10 +1057,24 @@ func _on_panel_load_request(document: Dictionary) -> void:
 ## `elapsed_ms` added — on a give-up that envelope is the helper's own timeout
 ## error, which the caller turns into last_eval.status "timeout".
 func _await_eval_reply(ipc: Node, reply_id: String, request_id: String) -> Dictionary:
+	return await _renew_await(ipc, reply_id, _eval_await_chunk_ms,
+		_eval_give_up_ms, request_id)
+
+
+## Re-arm one IPC await on the same reply_id until the backend answers.
+##
+## The re-arm runs in the same call stack as the expiry (await_reply resumes
+## its caller synchronously), so no reply can land in the gap. `request_id`
+## non-empty adds the evaluation path's supersession: a newer request owning
+## the in-flight slot ends the wait, because this reply is not worth having.
+## Returns the envelope with `elapsed_ms` added — on a give-up that envelope
+## is the helper's own timeout error.
+func _renew_await(ipc: Node, reply_id: String, chunk_ms: int, give_up_ms: int,
+		request_id: String) -> Dictionary:
 	var started_ms: int = Time.get_ticks_msec()
 	var envelope: Dictionary = {}
 	while true:
-		envelope = await ipc.await_reply(reply_id, _eval_await_chunk_ms)
+		envelope = await ipc.await_reply(reply_id, chunk_ms)
 		var elapsed_ms: int = Time.get_ticks_msec() - started_ms
 		envelope["elapsed_ms"] = elapsed_ms
 		# Only the IPC helper's own expiry sentinel names the reply_id back; a
@@ -1050,7 +1089,7 @@ func _await_eval_reply(ipc: Node, reply_id: String, request_id: String) -> Dicti
 		var superseded: bool = request_id != "" and _inflight_request_id != request_id
 		if not expired or superseded:
 			break
-		if elapsed_ms >= _eval_give_up_ms:
+		if elapsed_ms >= give_up_ms:
 			envelope["error_message"] = (
 				"the worker did not answer in %.1f s" % (elapsed_ms / 1000.0))
 			break

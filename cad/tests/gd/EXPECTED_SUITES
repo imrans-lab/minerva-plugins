@@ -234,7 +234,11 @@ test_cad_note.gd assertions=40
 # diameter; the probed plate; the kept plate) + 2 rebuild under a check in
 # flight (the superseded check; the rebuilding evaluation's stamped, painted
 # answer).
-test_interference.gd assertions=66
+# + 5 cast budget (the ray ceiling bounds CASTS, not the walk: a solid whose
+# stray edges outnumber the whole budget still reports the unbounded
+# answer untruncated; one ray short, the ceiling is stated with the count
+# it left uncast).
+test_interference.gd assertions=71
 
 # Clearance between the evaluated solid and a reference: two bars crossing at
 # right angles with 0.8 mm of air between them, the reference YAWED 30 degrees
@@ -316,7 +320,11 @@ test_interference.gd assertions=66
 # first call in a session, which always passed; the SECOND call, which is
 # where a panel that assumes residency across calls fails; and the retry
 # carrying a path for every target rather than only the reported misses).
-test_clearance.gd assertions=54
+# Plus 6 ticket assertions: a measurement that outruns the verb's budget
+# comes back running with a ticket and nothing measured, the ticket
+# collects the SAME report the inline path produced, a spent ticket and an
+# unknown one are refusals by name.
+test_clearance.gd assertions=60
 
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm

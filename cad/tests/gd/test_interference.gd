@@ -85,6 +85,11 @@ const BOSS_CLEAR_BOTTOM_Z := 0.9
 ## board's top face by 0.2 mm. Every one of its own corners is outside the
 ## board (|x| > 40) and every corner of the board is outside it (|y| > 5).
 const BAR := Vector3(200.0, 10.0, 0.9)
+## Stray triangles parked far from the board, ahead of the crossing bar in
+## the mesh's own face order. Three edges each, none of which can reach the
+## board's box: they are the roof of a real shell, in miniature.
+const STRAY_TRIANGLES := 40
+const STRAY_LIFT_MM := 500.0
 const BAR_CENTRE_Z := 1.05
 const SLIVER_OVERLAP_MM := 0.2
 
@@ -289,6 +294,7 @@ func _run() -> void:
 	await _check_through(gauge, checks)
 	await _check_clear(gauge, checks)
 	await _check_sliver(gauge, checks)
+	await _check_cast_budget(gauge, checks)
 	await _check_buried(gauge, checks)
 	await _check_enclosed(gauge, checks)
 	await _check_flush(gauge, checks)
@@ -452,6 +458,65 @@ func _check_sliver(gauge: Node, checks: RefCounted) -> void:
 	check("sliver: the 0.2 mm overlap is still reported, on the board's node",
 			int(report.get("count", 0)) > 0 and named,
 			"report = %s" % str(report))
+
+
+# ---------------------------------------------------------------------------
+# BUDGET — the ray ceiling bounds CASTS, not the walk
+# ---------------------------------------------------------------------------
+
+## A hundred-thousand-edge shell is mostly roof standing clear of everything
+## inside it, and a ceiling on the WALK stops in the middle of that roof and
+## calls every count a floor. The fixture is that shape in miniature: a run of
+## stray triangles parked far from the board, AHEAD of the crossing bar in the
+## mesh's own face order, so a budget spent on the walk is gone before the bar
+## is ever reached while a budget spent on rays does not touch it at all.
+func _check_cast_budget(gauge: Node, checks: RefCounted) -> void:
+	var bar: Dictionary = await _bar_mesh()
+	checks.build_solid(_strays_then(bar))
+
+	var ceiling: int = int(checks.max_solid_edge_casts)
+	checks.max_solid_edge_casts = 1000000
+	var whole: Dictionary = await _submit(gauge, checks, "", "")
+	var total: int = int(whole.get("solid_edges", 0))
+	var reaching: int = int(whole.get("edges_reaching", 0))
+	check("budget: the fixture parks more edges away from the board than the "
+			+ "whole ray budget the next run gets, so a ceiling on the walk "
+			+ "cannot reach the bar",
+			reaching > 0 and total - reaching > reaching,
+			"%d of %d edges reach the board" % [reaching, total])
+	check("budget: with no ceiling the crossing is found and nothing is truncated",
+			int(whole.get("count", 0)) > 0
+				and not str(whole.get("sampling", "")).contains("TRUNCATED")
+				and int(whole.get("edges_cast", 0)) == reaching,
+			"report = %s" % str(whole))
+
+	# The ceiling set to exactly the edges that reach: every ray the check
+	# actually needs is affordable, and the strays cost none.
+	checks.max_solid_edge_casts = reaching
+	var budgeted: Dictionary = await _submit(gauge, checks, "", "")
+	check("budget: a ceiling below the edge COUNT truncates nothing — the "
+			+ "edges that could not reach a reference spent no rays",
+			not str(budgeted.get("sampling", "")).contains("TRUNCATED"),
+			"sampling = %s" % str(budgeted.get("sampling", "")))
+	check("budget: and the answer is the unbounded one, pair for pair",
+			int(budgeted.get("count", 0)) == int(whole.get("count", 0))
+				and int(budgeted.get("point_count", 0))
+					== int(whole.get("point_count", 0)),
+			"budgeted = %s, whole = %s" % [str(budgeted), str(whole)])
+
+	# One ray short. The ceiling really does bind, and it says exactly what it
+	# cost rather than reporting a floor of a floor.
+	checks.max_solid_edge_casts = reaching - 1
+	var short: Dictionary = await _submit(gauge, checks, "", "")
+	check("budget: a ceiling below the edges that REACH is stated, with the "
+			+ "count it left uncast",
+			str(short.get("sampling", "")).contains("TRUNCATED")
+				and str(short.get("sampling", "")).contains(
+					"1 of the %d solid edges" % reaching)
+				and int(short.get("edges_cast", 0)) == reaching - 1,
+			"sampling = %s, edges_cast = %s" % [
+				str(short.get("sampling", "")), str(short.get("edges_cast", 0))])
+	checks.max_solid_edge_casts = ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -1909,6 +1974,32 @@ func _bar_mesh() -> Dictionary:
 	var baked: ArrayMesh = combiner.bake_static_mesh()
 	combiner.queue_free()
 	return _mesh_data(baked, _pose)
+
+
+## `bar` with STRAY_TRIANGLES loose triangles in front of it, as worker mesh
+## data. The strays are lifted clear of the board IN THE BOARD'S OWN FRAME and
+## posed with everything else, so the pose cannot accidentally bring them back
+## into reach.
+func _strays_then(bar: Dictionary) -> Dictionary:
+	var vertices: Array = []
+	var faces: Array = []
+	for i in range(STRAY_TRIANGLES):
+		var base := Vector3(float(i), 0.0, STRAY_LIFT_MM)
+		var corners: Array = [base, base + Vector3(0.5, 0.0, 0.0),
+			base + Vector3(0.0, 0.5, 0.0)]
+		var first := vertices.size()
+		for corner in corners:
+			var world: Vector3 = _pose * (corner as Vector3)
+			vertices.append([world.x, world.y, world.z])
+		faces.append([first, first + 1, first + 2])
+	var offset := vertices.size()
+	for entry in (bar.get("vertices", []) as Array):
+		vertices.append(entry)
+	for entry in (bar.get("faces", []) as Array):
+		var face: Array = entry
+		faces.append([int(face[0]) + offset, int(face[1]) + offset,
+			int(face[2]) + offset])
+	return {"vertices": vertices, "faces": faces}
 
 
 ## A box big enough to swallow the whole board.
