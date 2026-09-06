@@ -695,6 +695,12 @@ def handle_request(req: dict) -> dict | None:
         result["id"] = req_id
         return result
 
+    if method == "reference_pairs":
+        from .reference_pairs import reference_pairs
+        result = reference_pairs(req.get("params") or {})
+        result["id"] = req_id
+        return result
+
     if method == "cylindrical_features":
         from .features import cylindrical_features
         result = cylindrical_features(req.get("params") or {})

@@ -1,4 +1,4 @@
-extends "clearance_client.gd"
+extends "reference_pairs.gd"
 ## geometry_checks.gd — does the evaluated solid run into anything?
 ##
 ## An enclosure is designed AGAINST foreign geometry: a board, a connector, a

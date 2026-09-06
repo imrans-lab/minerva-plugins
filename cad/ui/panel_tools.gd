@@ -18,7 +18,14 @@ extends RefCounted
 ##                               reference — the same report every evaluation
 ##                               already carries, on demand and scopeable.
 ##   minerva_cad_check_clearance
-##                               how much air is between them, exactly.
+##                               how much air is between them, exactly. Both
+##                               of those take against= (or
+##                               reference="all-pairs") to measure two
+##                               REFERENCES against each other instead —
+##                               the off-board-parts layout question.
+##   minerva_cad_reference_profile
+##                               over a world-XY footprint, how tall is the
+##                               reference geometry, and which node is it.
 ##   minerva_cad_check_fasteners will these screws go in — coaxiality, a clear
 ##                               path, engagement and head seating, per screw.
 ##   minerva_cad_check_design    all three of those, one after another, folded
@@ -69,6 +76,9 @@ const _ReplyShape: Script = preload("scripts/reply_shape.gd")
 ## The three checks run together and folded into one verdict. It is handed
 ## the check Callables rather than preloading this script back.
 const _DesignCheck: Script = preload("scripts/design_check.gd")
+## The verbs that ask about the references alone: reference-against-reference
+## clearance and interference, and the z profile over a footprint.
+const _ReferenceVerbs: Script = preload("scripts/reference_verbs.gd")
 
 ## Default hole diameters to look for, in millimetres. Wide enough for a via
 ## and a mounting hole, narrow enough to leave the outline alone.
@@ -117,6 +127,10 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_cad_probe":
 			return await _fresh(panel, args, _probe)
 		"minerva_cad_check_interference":
+			# against= (or reference="all-pairs") asks about two REFERENCES
+			# and not about the solid, so it never scopes to a DSL part.
+			if _ReferenceVerbs.is_pair_call(args):
+				return await _fresh(panel, args, _pairs_interference)
 			return await _per_part(panel, args, _check_interference)
 		"minerva_cad_check_clearance":
 			# Collecting a ticket measures nothing, so there is no snapshot
@@ -125,6 +139,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			# hands back carries its own `references_moved`.
 			if not str(args.get("ticket", "")).is_empty():
 				return await _check_clearance(panel, args)
+			if _ReferenceVerbs.is_pair_call(args):
+				return await _fresh(panel, args, _pairs_clearance)
 			return await _per_part(panel, args, _check_clearance)
 		"minerva_cad_check_fasteners":
 			return await _per_part(panel, args, _check_fasteners)
@@ -134,6 +150,8 @@ static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
 			# solid collider and must not be in flight together.
 			return await _DesignCheck.run(panel, args, _per_part,
 				_check_interference, _check_clearance, _check_fasteners)
+		"minerva_cad_reference_profile":
+			return _ReferenceVerbs.reference_profile(panel, args)
 		"minerva_cad_get_selected_reference":
 			return await _fresh(panel, args, _selected_reference)
 		"minerva_cad_select_reference":
@@ -704,6 +722,17 @@ static func _check_clearance(panel, args: Dictionary) -> Dictionary:
 		return _err(str(report["error"]))
 	return _ok(_ReplyShape.filter_clearance(report,
 		int(args.get("limit", 0)), bool(args.get("failing_only", false))))
+
+
+## The two reference-against-reference entry points, as verbs _fresh can
+## call: a Callable has to name a function of THIS script for the re-pose
+## guard to wrap it, and the measurement itself lives in the sibling.
+static func _pairs_clearance(panel, args: Dictionary) -> Dictionary:
+	return await _ReferenceVerbs.check_pairs_clearance(panel, args)
+
+
+static func _pairs_interference(panel, args: Dictionary) -> Dictionary:
+	return await _ReferenceVerbs.check_pairs_interference(panel, args)
 
 
 ## minerva_cad_check_fasteners — will these screws actually go in?

@@ -1203,10 +1203,15 @@ func _no_clearance(reason: String) -> Dictionary:
 	}
 
 
-## Send one clearance request through the panel's IPC helper and unwrap the
+## Send one measurement request through the panel's IPC helper and unwrap the
 ## host's two envelopes down to the worker's own result. Returns {error: ...}
 ## for every layer that can fail, so the caller has one shape to read.
-func _ask_worker(panel: Object, payload: Dictionary) -> Dictionary:
+##
+## `channel` is the IPC channel, which is also the MCP tool name and names the
+## worker method: reference-against-reference measurement (reference_pairs.gd)
+## rides the same blob store and the same envelopes on a channel of its own.
+func _ask_worker(panel: Object, payload: Dictionary,
+		channel: String = "cad.clearance") -> Dictionary:
 	# The measurement outlives the verb that started it, so the panel it was
 	# handed can be gone by the time a batch is asked.
 	if panel == null or not is_instance_valid(panel):
@@ -1214,14 +1219,14 @@ func _ask_worker(panel: Object, payload: Dictionary) -> Dictionary:
 			+ "measurement was running"}
 	var envelope: Dictionary = {}
 	if panel.has_method("call_backend_until"):
-		envelope = await panel.call_backend_until("cad.clearance", payload,
+		envelope = await panel.call_backend_until(channel, payload,
 			CLEARANCE_CHUNK_MS, CLEARANCE_GIVE_UP_MS)
 	elif panel.has_method("call_backend"):
 		envelope = await panel.call_backend(
-			"cad.clearance", payload, CLEARANCE_TIMEOUT_MS)
+			channel, payload, CLEARANCE_TIMEOUT_MS)
 	else:
 		return {"error": "this panel cannot reach the CAD worker"}
-	return _WorkerReply.unwrap(envelope, "clearance")
+	return _WorkerReply.unwrap(envelope, channel.trim_prefix("cad."))
 
 
 # ---------------------------------------------------------------------------

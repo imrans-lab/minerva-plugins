@@ -348,6 +348,25 @@ test_interference.gd assertions=77
 # survives the filter, so the surviving row can be the further of the two.
 test_clearance.gd assertions=75
 
+# Reference against reference, and how tall the references are over a
+# footprint. Two 6 x 8 x 4 blocks posed 0.5 mm apart (their faces overlapping,
+# no two corners lined up) driven through minerva_cad_check_clearance with
+# against=, with reference="all-pairs" and through
+# minerva_cad_check_interference: the request sends each node once and names
+# the pair by index, the stand-in worker derives 0.5 from the BYTES the panel
+# wrote, the realising point comes back in the second reference's own frame,
+# no tessellation tolerance is quoted for a measurement that tessellated
+# nothing, and two parts that only miss each other list no interference at
+# all. Plus the refusals: against= naming nothing mounted, and a reference
+# measured against itself. And the z profile, on a KY-023 stand-in (a 16 x 16
+# x 10 housing with a 2 x 2 stick to 42, posed off the origin): the housing
+# footprint answers 10.1 where the stick's answers 42.1 — the falsifier a
+# node-box reading cannot produce — a footprint wholly inside the top face
+# with no triangle vertex in it is still measured, per_node lists both nodes
+# tallest first, an empty footprint is found:false rather than an error, and a
+# call with no region_mm is.
+test_reference_measurement.gd assertions=21
+
 # Fasteners: a 60 x 60 x 1.6 board posed away from the origin AND TURNED (a
 # yaw and a lean, so the screw axis is nowhere near world z) with five 3.4 mm
 # through holes and a blocker part standing over the third, and a shell of six

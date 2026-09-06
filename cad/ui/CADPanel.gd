@@ -615,6 +615,18 @@ func check_clearance(args: Dictionary = {}) -> Dictionary:
 	return await _geometry_checks.check_clearance(self, args)
 
 
+## How close do the REFERENCES come to each other? `args` carries reference=
+## and against= (or reference="all-pairs") plus required_mm=, which is what
+## minerva_cad_check_clearance and minerva_cad_check_interference pass through
+## when the question is part-against-part rather than solid-against-part.
+## Neither side is the evaluated solid, so nothing is tessellated and the
+## measurement is over the reference meshes the panel already holds.
+func check_reference_pairs(args: Dictionary = {}) -> Dictionary:
+	if _geometry_checks == null:
+		return {"error": "reference measurement is not available on this panel"}
+	return await _geometry_checks.check_reference_pairs(self, args)
+
+
 ## Will these screws go in? `args` carries screw={dia_mm,length_mm,head_dia_mm}
 ## and the reference holes to pair against, which is what
 ## minerva_cad_check_fasteners passes through after running find_holes. Like
