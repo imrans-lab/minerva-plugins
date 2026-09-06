@@ -28,10 +28,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ipeerbhai/plugins/cad/internal/cadruntime"
-	"github.com/ipeerbhai/plugins/cad/internal/tools"
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 	sharedruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
+	"github.com/ipeerbhai/plugins/cad/internal/cadruntime"
+	"github.com/ipeerbhai/plugins/cad/internal/tools"
 )
 
 const (
@@ -334,6 +334,49 @@ func handleCancelEval(id json.RawMessage, args json.RawMessage) rpcResponse {
 	})
 }
 
+// ensureWorkerSpawned starts the Python worker under a process-lifetime
+// context.
+//
+// bridge.Worker spawns lazily inside Call and binds the subprocess to
+// whichever context reached Call first. A cad.evaluate carrying a request_id
+// runs under a per-request cancellable context, so letting it be the spawning
+// call ties the worker's life to that one request: cancelling it (the panel
+// closed) — or merely finishing it, since the cancel func is released on
+// return — kills the worker process. Whatever request is in flight beside it
+// then dies with "worker stdout closed unexpectedly" (kind=crashed).
+// Spawning here first means Call always finds a live worker and the
+// per-request context governs only the request.
+func ensureWorkerSpawned() error {
+	if worker == nil || worker.IsAlive() {
+		return nil
+	}
+	return worker.Start(context.Background())
+}
+
+// workerFailureResponse renders a worker/spawn failure the way the panel and
+// the LLM expect: an error toast plus an {ok:false, error} envelope carried as
+// an isError tool result, so panel-side decoders read worker_payload.ok /
+// .error uniformly with the success path. Non-WorkerError failures stay MCP
+// protocol errors.
+func workerFailureResponse(id json.RawMessage, toolName string, err error) rpcResponse {
+	var we *bridge.WorkerError
+	if !asWorkerErr(err, &we) {
+		return errResponse(id, -32603, fmt.Sprintf("tool error: %v", err))
+	}
+	// Surface spawn/crash errors (kind: crashed, python, internal) as error
+	// toasts; validation failures (kind: parse, translate, occt) as warnings.
+	toastLevel, toastMsg := workerErrorToast(toolName, we)
+	emitHostNotify(toastLevel, toastMsg, we)
+	errEnvelope := map[string]interface{}{"ok": false, "error": we}
+	errJSON, _ := json.Marshal(errEnvelope)
+	return okResponse(id, map[string]interface{}{
+		"content": []map[string]interface{}{
+			{"type": "text", "text": string(errJSON)},
+		},
+		"isError": true,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // MCP handler functions
 // ---------------------------------------------------------------------------
@@ -390,6 +433,12 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 		return handleCancelEval(id, p.Arguments)
 	}
 
+	// Spawn the worker before deriving any per-request context so the
+	// subprocess never inherits one (see ensureWorkerSpawned).
+	if err := ensureWorkerSpawned(); err != nil {
+		return workerFailureResponse(id, p.Name, err)
+	}
+
 	ctx := context.Background()
 	// cad.evaluate may carry request_id for cancellation. If present, derive
 	// a cancellable context and register it; the cancel_eval handler will
@@ -414,24 +463,7 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 	if err != nil {
 		// Worker errors are returned as MCP tool result content (not MCP errors)
 		// so the LLM can inspect them. Only internal/protocol errors become MCP errors.
-		var we *bridge.WorkerError
-		if asWorkerErr(err, &we) {
-			// Surface spawn/crash errors (kind: crashed, python, internal) as error
-			// toasts; validation failures (kind: parse, translate, occt) as warnings.
-			toastLevel, toastMsg := workerErrorToast(p.Name, we)
-			emitHostNotify(toastLevel, toastMsg, we)
-			// Preserve the {ok, error} envelope shape the worker uses on success
-			// so panel-side decoders can read worker_payload.ok / .error uniformly.
-			errEnvelope := map[string]interface{}{"ok": false, "error": we}
-			errJSON, _ := json.Marshal(errEnvelope)
-			return okResponse(id, map[string]interface{}{
-				"content": []map[string]interface{}{
-					{"type": "text", "text": string(errJSON)},
-				},
-				"isError": true,
-			})
-		}
-		return errResponse(id, -32603, fmt.Sprintf("tool error: %v", err))
+		return workerFailureResponse(id, p.Name, err)
 	}
 
 	// Wrap the raw result in {ok: true, result: <result>} so the panel-side
