@@ -19,15 +19,40 @@ from .ast_nodes import (
     Assignment,
     Command,
     Export,
+    Extrude,
     ForLoop,
     Identifier,
     If,
+    Loft,
     ModuleDef,
     Program,
+    Return,
+    SketchBlock,
     While,
 )
 from .parser import ParseError
 from .translator import Translator, TranslatorError
+
+#: Statement forms ``Translator._eval_statement`` handles itself. Anything
+#: else is an expression statement, and as the final statement of a program it
+#: names the result. Mirrors the dispatch in ``_eval_statement``.
+_STATEMENT_NODES = (
+    Assignment,
+    SketchBlock,
+    ForLoop,
+    If,
+    While,
+    Command,
+    Export,
+    ModuleDef,
+    Return,
+    Extrude,
+    Loft,
+)
+
+#: Binding name given to a trailing expression that is not a bare name, so the
+#: reply, the exports and the checks always have something to call the result.
+_RESULT_BINDING = "result"
 
 #: Bounds on the failure-path face probe. It only ever runs after the shape
 #: has already failed to tessellate, but a shell of thousands of faces must
@@ -116,10 +141,18 @@ def translate_program(translator: Translator, program: Program) -> None:
     per-statement entry point) only so the statement boundary is still in
     scope when an exception escapes. DSL-level errors — lex, parse, translate
     — pass through untouched so their own kinds survive.
+
+    A program whose last statement is a bare expression (``hump_in``) selects
+    that expression as the result; without one, the last-assigned part stands.
     """
-    for stmt in program.statements:
+    statements = program.statements
+    for index, stmt in enumerate(statements):
+        last = index == len(statements) - 1
         try:
-            translator._eval_statement(stmt)
+            if last and not isinstance(stmt, _STATEMENT_NODES):
+                _select_result(translator, stmt)
+            else:
+                translator._eval_statement(stmt)
         except (ParseError, TranslatorError, BuildFailure):
             raise
         except Exception as exc:
@@ -127,6 +160,25 @@ def translate_program(translator: Translator, program: Program) -> None:
             raise BuildFailure(
                 binding=binding, stage="build", cause=exc, line=line
             ) from exc
+
+
+def _select_result(translator: Translator, expr: Any) -> None:
+    """Evaluate a trailing bare expression and make it the render target.
+
+    Evaluated once, here, rather than for side effects and again for its
+    value — a trailing ``a + b`` would otherwise build the boolean twice.
+    """
+    value = translator._eval_expr(expr)
+    name = expr.name if isinstance(expr, Identifier) else _RESULT_BINDING
+    if not translator.is_part(value):
+        subject = f"'{expr.name}'" if isinstance(expr, Identifier) else "expression"
+        raise TranslatorError(
+            f"The program's final {subject} is a {type(value).__name__}, not a "
+            "3D shape. A trailing bare expression selects what the program "
+            "evaluates to, so it must name a solid; drop the line to keep the "
+            "last assigned part."
+        )
+    translator.select_result(name, value)
 
 
 def tessellate_shape(

@@ -185,7 +185,12 @@ class Translator:
         raise TranslatorError(f"Undefined variable: {name}")
 
     def translate(self, program: Program) -> dict[str, Any]:
-        """Walk the AST and build geometry.  Returns {filename: Part} dict."""
+        """Walk the AST and build geometry.  Returns {filename: Part} dict.
+
+        Bare statement walk only: the trailing-expression result rule and
+        kernel-error attribution live in ``build_trace.translate_program``,
+        which is what every caller that then reads ``last_part()`` must use.
+        """
         for stmt in program.statements:
             self._eval_statement(stmt)
         return self.parts
@@ -202,14 +207,27 @@ class Translator:
             return None, None
         return name, value
 
+    @staticmethod
+    def is_part(value: Any) -> bool:
+        """True for a value that carries a B-Rep the panel can render."""
+        return hasattr(value, "tessellate") and hasattr(value, "volume")
+
     def _bind_value(self, name: str, value: Any) -> None:
         """Bind a value into the env and, if it's a 3D part, mark it as the
         current render target. Centralizing this keeps render-target tracking
         out of dict-insertion-order semantics.
         """
         self.env[name] = value
-        if hasattr(value, "tessellate") and hasattr(value, "volume"):
+        if self.is_part(value):
             self._last_part_name = name
+
+    def select_result(self, name: str, value: Any) -> None:
+        """Make *value* the render target under *name*.
+
+        Used for a program's trailing bare expression, which names what the
+        program evaluates to regardless of which binding was assigned last.
+        """
+        self._bind_value(name, value)
 
     def get_edge_registry(self, shape_name: str) -> list[dict[str, Any]]:
         """Return the stored logical edge registry for an extruded profile."""
@@ -526,7 +544,7 @@ class Translator:
         if isinstance(value, MeshReference):
             # A reference always exists; it just isn't geometry.
             return True
-        if hasattr(value, "tessellate") and hasattr(value, "volume"):
+        if self.is_part(value):
             return True
         raise TranslatorError(
             f"Cannot evaluate truthiness of {type(value).__name__}"

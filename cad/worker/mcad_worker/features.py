@@ -178,15 +178,19 @@ def _shape_for(source: str):
     throws the shape away, and the shape is the entire point of this method.
     """
     try:
+        from mcad.build_trace import translate_program
         from mcad.parser import ParseError, parse
         from mcad.translator import Translator, TranslatorError
     except ImportError as exc:
         raise FeatureError(f"mcad package unavailable: {exc}") from exc
 
+    # translate_program, not Translator.translate: it is the entry point that
+    # applies the trailing-expression result rule, so the features reported
+    # here are the features of the shape the panel is showing.
     try:
         program = parse(source)
         translator = Translator()
-        translator.translate(program)
+        translate_program(translator, program)
     except (ParseError, TranslatorError) as exc:
         raise FeatureError(f"the DSL did not evaluate: {exc}") from exc
 
