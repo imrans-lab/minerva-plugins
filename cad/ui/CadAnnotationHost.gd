@@ -80,6 +80,10 @@ const WIDE_PANE_IDS: PackedStringArray = ["iso", "top", "front", "right"]
 ## number no longer matches the engine's current frame.
 var _capture_cache: Dictionary = {}     # view_id -> Image
 var _capture_cache_frame: Dictionary = {}  # view_id -> int (Engine.get_frames_drawn() at capture)
+## view_id -> the projection the pane was pointed at when that image was read.
+## Only meaningful for panes that share one SubViewport (narrow layout), where
+## a cached image can be of a different projection than the id it is filed under.
+var _capture_cache_projection: Dictionary = {}
 var _capture_pending: Dictionary = {}   # view_id -> bool (one-shot in flight)
 ## view_id -> the Callable that one-shot is connected with, so it can be
 ## disconnected again when this host leaves the tree.
@@ -344,13 +348,22 @@ func render_content_to_image(viewport_rect: Rect2) -> Image:
 ## is fresh for this frame, otherwise reads the render target now and falls
 ## back to the previous capture (null only when the view has never rendered).
 ##
-## Caveat: in NARROW layout only the visible SubViewport is actually rendering.
-## Capturing a non-visible view returns the last cached image (possibly stale
-## from before the layout switched) or null.
+## Caveat: in NARROW layout every pane id resolves to the ONE SubViewport that
+## is on screen, so its pixels are of whatever projection that pane is pointed
+## at. A view other than the active one has no render of its own here and is
+## refused (null) rather than answered with the active pane's picture under the
+## requested name.
 func render_view_to_image(view_id: String, viewport_rect: Rect2 = Rect2()) -> Image:
+	if not _pane_shows(view_id):
+		return null
+
 	var current_frame: int = Engine.get_frames_drawn()
 	var cached_frame: int = int(_capture_cache_frame.get(view_id, -1))
 	var cached_image: Image = _capture_cache.get(view_id, null) as Image
+	if cached_image != null and not _cached_image_is_of(view_id):
+		# Filed under this id but read while the shared pane showed something
+		# else — of no use to anyone who asked for this view.
+		cached_image = null
 
 	if cached_image != null and cached_frame == current_frame:
 		return _maybe_crop(cached_image, viewport_rect)
@@ -382,6 +395,54 @@ func _maybe_crop(img: Image, viewport_rect: Rect2) -> Image:
 	return img.get_region(rect_i)
 
 
+## Whether the SubViewport behind `view_id` is currently drawing that view.
+##
+## True for every pane of the wide layout, where each id owns a SubViewport.
+## In the narrow layout all ids are registered against the single visible
+## SubViewport, so only the active projection is genuinely being drawn.
+## An id with no viewport registered is left to the normal path, which answers
+## null for it anyway.
+func _pane_shows(view_id: String) -> bool:
+	if not _viewport_for.has(view_id):
+		return true
+	if not _is_shared_pane(view_id):
+		return true
+	return _same_projection(_active_viewport_id, view_id)
+
+
+## Whether the viewport behind `view_id` is also registered under another id —
+## the signature of the narrow layout's one-pane-serves-every-id registration.
+func _is_shared_pane(view_id: String) -> bool:
+	var mine: Variant = _viewport_for.get(view_id, null)
+	if mine == null or not is_instance_valid(mine):
+		return false
+	for other_id in _viewport_for.keys():
+		if String(other_id) == view_id:
+			continue
+		var other: Variant = _viewport_for[other_id]
+		if other != null and is_instance_valid(other) and other == mine:
+			return true
+	return false
+
+
+## "iso" and "perspective" are the same camera under two names: the wide
+## layout's iso pane and the narrow layout's Perspective preset.
+func _same_projection(a: String, b: String) -> bool:
+	if a == b:
+		return true
+	var pair := [a, b]
+	return pair.has("iso") and pair.has("perspective")
+
+
+## Whether the cached image filed under `view_id` was actually read while the
+## pane was showing that view. Always true for a pane of its own.
+func _cached_image_is_of(view_id: String) -> bool:
+	if not _is_shared_pane(view_id):
+		return true
+	var shot_of: String = String(_capture_cache_projection.get(view_id, ""))
+	return not shot_of.is_empty() and _same_projection(shot_of, view_id)
+
+
 ## One-shot frame_post_draw scheduling. De-dup'd per-view via _capture_pending.
 ##
 ## The connection is KEPT so it can be taken back off RenderingServer when this
@@ -399,6 +460,15 @@ func _schedule_capture(view_id: String) -> void:
 	_capture_pending[view_id] = true
 	_capture_connections[view_id] = pending
 	RenderingServer.frame_post_draw.connect(pending, CONNECT_ONE_SHOT)
+
+
+## Drop every cached capture. CADPanel calls this when the layout changes: the
+## ids stay the same but resolve to different SubViewports afterwards, so the
+## images filed under them are pictures of the layout that just went away.
+func invalidate_captures() -> void:
+	_capture_cache.clear()
+	_capture_cache_frame.clear()
+	_capture_cache_projection.clear()
 
 
 ## Take every capture still waiting on RenderingServer back off it.
@@ -442,6 +512,11 @@ func _pull_capture(view_id: String) -> bool:
 		return false
 	_capture_cache[view_id] = img
 	_capture_cache_frame[view_id] = Engine.get_frames_drawn()
+	# What the pane was pointed at when these pixels were read. Tells a later
+	# call whether a cached image of a shared pane is of the view asked for.
+	_capture_cache_projection[view_id] = (
+		view_id if not _is_shared_pane(view_id) else _active_viewport_id
+	)
 	return true
 
 
@@ -464,6 +539,7 @@ func set_active_viewport(viewport_id: String) -> void:
 		# repopulate the cache for whichever view was last requested.
 		_capture_cache.erase(_active_viewport_id)
 		_capture_cache_frame.erase(_active_viewport_id)
+		_capture_cache_projection.erase(_active_viewport_id)
 	_active_viewport_id = viewport_id
 
 

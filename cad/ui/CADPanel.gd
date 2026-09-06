@@ -1389,6 +1389,11 @@ func _apply_width_class(cls: StringName) -> void:
 func _register_host_viewports(is_narrow: bool) -> void:
 	if _annotation_host == null:
 		return
+	# The pane ids survive the layout change but the SubViewports behind them
+	# do not, so anything captured from the outgoing layout is a picture of a
+	# pane that no longer exists.
+	if _annotation_host.has_method("invalidate_captures"):
+		_annotation_host.invalidate_captures()
 	# Resolve cameras used in wide mode.
 	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
 	var iso_cam: Camera3D   = get_node_or_null(grid + "/IsoView/SubViewport/OrbitCamera")   as Camera3D

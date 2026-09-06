@@ -30,11 +30,26 @@ extends SceneTree
 ## is that the host ASKS for them without a drawn frame, twice, and that both
 ## answers reach a file inside the budget.
 ##
+## AND IT IS A PICTURE OF WHAT WAS ASKED FOR. The narrow layout registers every
+## pane id against the ONE SubViewport on screen, so the pixels behind "top"
+## there are of whatever the pane is pointed at. Answering that picture under
+## the requested name is worse than answering nothing: a vision model reads the
+## perspective render as the top view and reports on it with confidence. The
+## stand-in target here paints the direction its camera is actually looking, so
+## a capture can be told apart from a capture of another projection.
+##
 ## Run:
 ##   cd <minerva>/src && godot --headless -s res://../../minerva-plugins/cad/tests/gd/test_snapshot_capture.gd
 
 const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 const GRID := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
+const SINGLE_VIEW := "ResponsiveContainer/NarrowLayout/SingleView"
+const _PaneProjection: Script = preload("res://../../minerva-plugins/cad/ui/scripts/pane_projection.gd")
+
+## Every pane id the narrow layout registers against its one SubViewport.
+const NARROW_PANE_IDS: PackedStringArray = [
+	"perspective", "top", "bottom", "front", "back", "left", "right", "iso",
+]
 
 ## The scene the timeout was measured on: a two-part shell of some fourteen
 ## thousand vertices with a 132k-triangle board under it. The floors here are
@@ -76,6 +91,24 @@ class _StandInTexture extends RefCounted:
 		reads += 1
 		var img := Image.create_empty(size.x, size.y, false, Image.FORMAT_RGBA8)
 		img.fill(Color(0.2, 0.3, 0.4, 1.0))
+		return img
+
+
+## The same stand-in target, painting the direction its camera is actually
+## looking, so two captures of one pane under two projections are as
+## distinguishable as two real renders would be.
+class _ProjectionTexture extends _StandInTexture:
+	var camera: Camera3D = null
+
+	func _init(image_size: Vector2i, view_camera: Camera3D) -> void:
+		super._init(image_size)
+		camera = view_camera
+
+	func get_image() -> Image:
+		reads += 1
+		var look: Vector3 = -camera.global_transform.basis.z
+		var img := Image.create_empty(size.x, size.y, false, Image.FORMAT_RGBA8)
+		img.fill(Color(absf(look.x), absf(look.y), absf(look.z), 1.0))
 		return img
 
 
@@ -253,6 +286,70 @@ func _run() -> void:
 			+ "null on the call rather than hanging on a frame",
 			real_pane == null, "the dummy renderer produced an image")
 
+	# ── The narrow layout: one pane, one projection, one honest answer ────
+	panel._apply_width_class(&"sm")
+	await process_frame
+	var single_viewport: SubViewport = panel.get_node("%s/SubViewport" % SINGLE_VIEW)
+	var single_camera: Camera3D = panel.get_node("%s/SubViewport/OrbitCamera" % SINGLE_VIEW)
+	var narrow_target := _StandInViewport.new()
+	narrow_target.texture = _ProjectionTexture.new(single_viewport.size, single_camera)
+	root.add_child(narrow_target)
+	for pane_id in NARROW_PANE_IDS:
+		host.set_viewport_for(pane_id, narrow_target)
+
+	# Two directions the one pane can be pointed in, sampled off the stand-in
+	# itself: if these were the same colour the repro below could not tell a
+	# genuine capture from the wrong one.
+	single_camera.set_view_preset("Top")
+	var top_colour: Color = narrow_target.texture.get_image().get_pixel(0, 0)
+	single_camera.set_view_preset("Perspective")
+	var perspective_colour: Color = narrow_target.texture.get_image().get_pixel(0, 0)
+	panel._on_projection_selected(_PaneProjection.index_of("Perspective"))
+	check("fixture: narrow layout is showing its single pane, the wide grid is "
+			+ "hidden, and the pane paints a different picture pointed at Top "
+			+ "than at Perspective",
+			panel._narrow_layout.visible and not panel._wide_layout.visible
+				and host.get_active_viewport() == "perspective"
+				and top_colour != perspective_colour,
+			"narrow=%s wide=%s active=%s top=%s perspective=%s" % [
+				str(panel._narrow_layout.visible), str(panel._wide_layout.visible),
+				host.get_active_viewport(), str(top_colour), str(perspective_colour)])
+
+	var active_shot: Image = host.render_view_to_image("perspective", Rect2())
+	check("the pane that IS on screen captures, and the picture is of the "
+			+ "projection it is pointed at",
+			active_shot != null
+				and active_shot.get_pixel(0, 0) == perspective_colour,
+			"got %s" % ("null" if active_shot == null
+				else str(active_shot.get_pixel(0, 0))))
+
+	var not_on_screen: Image = host.render_view_to_image("top", Rect2())
+	check("the repro: asking for Top while the pane shows Perspective is "
+			+ "refused — the caller is never handed the perspective picture "
+			+ "under the name it did not ask for",
+			not_on_screen == null,
+			"got an image, %s the perspective capture" % (
+				"" if not_on_screen == null or active_shot == null
+				else ("identical to"
+					if not_on_screen.get_pixel(0, 0) == active_shot.get_pixel(0, 0)
+					else "differing from")))
+
+	panel._on_projection_selected(_PaneProjection.index_of("Top"))
+	var top_shot: Image = host.render_view_to_image("top", Rect2())
+	check("and once the pane really is pointed at Top the same request is "
+			+ "answered with a Top capture, which is not the perspective one",
+			top_shot != null and top_shot.get_pixel(0, 0) == top_colour
+				and top_shot.get_pixel(0, 0) != perspective_colour,
+			"got %s, wanted %s" % ["null" if top_shot == null
+				else str(top_shot.get_pixel(0, 0)), str(top_colour)])
+
+	var gone_from_screen: Image = host.render_view_to_image("perspective", Rect2())
+	check("while Perspective, no longer on screen, is now the refused one — "
+			+ "the capture taken of it a moment ago is not served for it again",
+			gone_from_screen == null,
+			"got an image for a projection the pane is not showing")
+
+	narrow_target.free()
 	stand_in.free()
 	reference_instance.queue_free()
 	panel.free()

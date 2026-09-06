@@ -524,8 +524,14 @@ test_pane_projection.gd assertions=13
 # slower) + 3 the files (a PNG lands on disk in budget; it is the pane's size,
 # not empty; the SECOND snapshot lands too, which is the trap the item names)
 # + 2 the refusals (an unknown pane and a real pane that has drawn nothing both
-# answer null instead of hanging).
-test_snapshot_capture.gd assertions=11
+# answer null instead of hanging)
+# + 5 the narrow layout, where every pane id resolves to the one SubViewport on
+# screen (1 fixture: the single pane paints a different picture pointed at Top
+# than at Perspective; 1 control: the pane on screen captures its own
+# projection; 3 the repro: Top while Perspective shows is refused rather than
+# answered with the perspective picture, the same request succeeds once the
+# pane is pointed at Top, and Perspective is then the refused one).
+test_snapshot_capture.gd assertions=16
 
 # A zero-area triangle carries connectivity, not a plane. Counting normals to
 # decide "this edge bounds the surface" made both neighbours of a sliver look
