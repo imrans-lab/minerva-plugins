@@ -29,7 +29,8 @@ const PANE_NODES := {
 const DEFAULTS := {
 	"top": "Top", "front": "Front", "right": "Right", "iso": "Perspective",
 }
-## Dropdown index of "Bottom" in the shared option list.
+## Dropdown indices in the shared option list.
+const PERSPECTIVE_INDEX := 0
 const BOTTOM_INDEX := 2
 
 var _pass: int = 0
@@ -106,6 +107,41 @@ func _run() -> void:
 
 	var narrow_dropdown: OptionButton = panel.get_node(
 		"ResponsiveContainer/NarrowLayout/ProjectionRow/ProjectionDropdown")
+
+	# The pane IS the label: a word saying "View" over a picture of the part
+	# only eats the corner it sits in. The one-pane layout, where the dropdown
+	# stands in a toolbar rather than on a picture, keeps its own.
+	var wide_labels: Array = []
+	for slot in PANE_NODES.keys():
+		if panel.get_node_or_null("%s/%s/ProjectionRow/ProjectionLabel" % [GRID, PANE_NODES[slot]]) != null:
+			wide_labels.append(slot)
+	check("no wide pane prefixes its dropdown with a label, while the one-pane "
+			+ "layout keeps its own",
+			wide_labels.is_empty()
+				and panel.get_node_or_null(
+					"ResponsiveContainer/NarrowLayout/ProjectionRow/ProjectionLabel") != null,
+			"labels still in %s" % str(wide_labels))
+
+	# Sized to its content: an OptionButton that fits its longest item asks for
+	# exactly "Perspective" plus the arrow, and nothing stretches it wider.
+	var stretched: Array = []
+	for slot in PANE_NODES.keys():
+		var d: OptionButton = dropdowns[slot]
+		if d.size.x > d.get_combined_minimum_size().x + 1.0:
+			stretched.append("%s %f>%f" % [slot, d.size.x, d.get_combined_minimum_size().x])
+	check("and each dropdown is exactly as wide as its widest option plus the "
+			+ "arrow, not stretched across the pane",
+			stretched.is_empty() and dropdowns["top"].fit_to_longest_item,
+			"stretched: %s" % str(stretched))
+
+	# The control reads over the picture behind it: an ortho pane paints the
+	# near-white blueprint, Perspective leaves the grey shaded render.
+	check("a dropdown over a white-shaded pane draws light with dark text, and "
+			+ "the one over the perspective pane keeps the host's dark scheme",
+			_is_light(dropdowns["top"]) and _is_light(dropdowns["front"])
+				and _is_light(dropdowns["right"]) and not _is_light(dropdowns["iso"]),
+			"light = %s" % str(PANE_NODES.keys().filter(
+				func(s): return _is_light(dropdowns[s]))))
 	check("offering exactly the presets the one-pane layout offers — the same "
 			+ "seven, in the same order, from the same list",
 			_labels(dropdowns["top"]) == _labels(narrow_dropdown)
@@ -186,6 +222,17 @@ func _run() -> void:
 			not _mesh_visible(panel, "IsoView"),
 			"iso still shaded while showing %s" % panel.get_pane_preset("iso"))
 
+	# The scheme belongs to the projection, not to the slot. Hardcoding "iso is
+	# the dark one" survives the line above and dies here.
+	dropdowns["top"].select(PERSPECTIVE_INDEX)
+	dropdowns["top"].item_selected.emit(PERSPECTIVE_INDEX)
+	check("and the scheme follows the pane's CURRENT projection both ways: the "
+			+ "iso pane pointed at Bottom turns light, the top pane put on "
+			+ "Perspective goes back to dark",
+			_is_light(dropdowns["iso"]) and not _is_light(dropdowns["top"]),
+			"iso light=%s top light=%s" % [
+				str(_is_light(dropdowns["iso"])), str(_is_light(dropdowns["top"]))])
+
 	panel.free()
 
 
@@ -204,6 +251,17 @@ func _panel() -> Node:
 		"editor": editor,
 	})
 	return panel
+
+
+## Whether a dropdown is dressed for a white-shaded pane. The overrides ARE
+## the scheme: with none, the control falls back to the host's dark theme.
+func _is_light(dropdown: OptionButton) -> bool:
+	if not dropdown.has_theme_stylebox_override(&"normal"):
+		return false
+	var face := dropdown.get_theme_stylebox(&"normal") as StyleBoxFlat
+	return face != null and face.bg_color.v > 0.8 \
+		and dropdown.has_theme_color_override(&"font_color") \
+		and dropdown.get_theme_color(&"font_color").v < 0.5
 
 
 func _labels(dropdown: OptionButton) -> Array:
