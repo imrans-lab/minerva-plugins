@@ -147,6 +147,26 @@ var _buffer_version: int = -1
 var _pending_dsl_text: String = ""
 var _inflight_request_id: String = ""
 
+## The text the document-open path last dispatched an evaluation for. Opening a
+## paired document delivers the source TWICE — once as a load request, once as
+## the buffer attach — and each delivery would otherwise start its own
+## evaluation of identical text. Cleared by anything that changes the document.
+var _open_eval_text: String = ""
+
+## How long one await of a cad.evaluate reply lasts before the panel re-arms it.
+## MinervaIPC.await_reply is shared substrate: when its limit passes the await
+## ends for good and the worker's later reply is dropped as stale, so a limit
+## wide enough for the heaviest document would have to be raised for every
+## channel. Instead the panel re-awaits the SAME reply_id in chunks. The re-arm
+## runs in the same call stack as the expiry (await_reply resumes its caller
+## synchronously), so no reply can land in the gap.
+var _eval_await_chunk_ms: int = 300000
+
+## Total time the panel waits before it abandons an evaluation, reports status
+## "timeout" with the elapsed time and says so on the banner. Only a worker
+## that never answers at all gets this far — supersede/cancel ends the rest.
+var _eval_give_up_ms: int = 900000
+
 ## Debounce timer for text_changed → evaluate. Created lazily on first
 ## text_changed receipt so the panel doesn't pay the Timer cost in the legacy
 ## (non-paired_dsl) path.
@@ -212,7 +232,7 @@ var _mesh_import_ui: RefCounted = null
 ## "ok" = worker returned a mesh; panel is rendering it.
 ## "error" = worker rejected the DSL (kind/message available).
 ## "cancelled" = preempted by a newer evaluate (transient; not user-visible).
-## "timeout" = worker didn't reply within the 30s budget.
+## "timeout" = the panel gave up waiting; elapsed_ms says how long it waited.
 var _last_eval_result: Dictionary = {"status": "empty"}
 
 ## Error banner shown over the 3D views when an evaluation fails (W8 / RCA
@@ -725,11 +745,12 @@ func receive(channel: String, payload: Dictionary) -> void:
 			# buffers are skipped — the worker would emit a parse warning,
 			# producing a toast on every fresh-empty .mcad open.
 			if not text.strip_edges().is_empty():
-				_evaluate_with_request_id(text)
+				_evaluate_document_open(text)
 		"text_changed":
 			_buffer_version = int(payload.get("version", 0))
 			var text2: String = str(payload.get("text", ""))
 			_pending_dsl_text = text2
+			_open_eval_text = ""
 			if _annotation_host != null and _annotation_host.has_method("set_document_source"):
 				_annotation_host.set_document_source(_buffer_path, text2)
 			_start_eval_debounce()
@@ -742,6 +763,7 @@ func receive(channel: String, payload: Dictionary) -> void:
 			_buffer_path = ""
 			_buffer_version = -1
 			_pending_dsl_text = ""
+			_open_eval_text = ""
 
 
 ## Issue a fresh cad.evaluate with a unique request_id, cancelling any prior
@@ -752,6 +774,17 @@ func _evaluate_with_request_id(text: String) -> void:
 	# fire-and-await — supersession check inside _evaluate_and_render handles
 	# the race where this call completes after a newer one has already landed.
 	_evaluate_and_render(text, rid)
+
+
+## Evaluate the source a document OPEN delivered, once. The host delivers an
+## open twice (load request + buffer attach), so the second delivery of text
+## that is already being evaluated is skipped rather than costing the worker a
+## second full evaluation of the same document.
+func _evaluate_document_open(text: String) -> void:
+	if text == _open_eval_text:
+		return
+	_open_eval_text = text
+	_evaluate_with_request_id(text)
 
 
 ## Cancel the current in-flight cad.evaluate (if any) by emitting cad.cancel_eval.
@@ -837,6 +870,7 @@ func _apply_source_edit(new_source: String) -> void:
 		buffer.apply_edit(new_source)
 		return
 	_pending_dsl_text = new_source
+	_open_eval_text = ""
 	if _annotation_host != null and _annotation_host.has_method("set_document_source"):
 		_annotation_host.set_document_source(_buffer_path, new_source)
 	# The ordinary typing path: one debounce, one evaluate, whether the text
@@ -987,7 +1021,40 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		_annotation_host.set_document_source(file_path, dsl_text)
 
 	_pending_dsl_text = dsl_text
-	_evaluate_and_render(dsl_text)
+	_evaluate_document_open(dsl_text)
+
+
+## Await one cad.evaluate reply for as long as the worker needs it.
+##
+## The shared IPC await ends at its own limit; this re-arms it on the same
+## reply_id until the worker answers, a newer evaluation takes the in-flight
+## slot, or _eval_give_up_ms is spent. Returns the IPC envelope with
+## `elapsed_ms` added — on a give-up that envelope is the helper's own timeout
+## error, which the caller turns into last_eval.status "timeout".
+func _await_eval_reply(ipc: Node, reply_id: String, request_id: String) -> Dictionary:
+	var started_ms: int = Time.get_ticks_msec()
+	var envelope: Dictionary = {}
+	while true:
+		envelope = await ipc.await_reply(reply_id, _eval_await_chunk_ms)
+		var elapsed_ms: int = Time.get_ticks_msec() - started_ms
+		envelope["elapsed_ms"] = elapsed_ms
+		# Only the IPC helper's own expiry sentinel names the reply_id back; a
+		# timeout reported by the broker or the worker is a real answer.
+		var expired: bool = (
+			not bool(envelope.get("success", false))
+			and str(envelope.get("error_code", "")) == "timeout"
+			and str(envelope.get("reply_id", "")) == reply_id
+		)
+		# Superseded: a newer evaluation owns the panel, so this one is not worth
+		# waiting on any longer. The caller drops the envelope either way.
+		var superseded: bool = request_id != "" and _inflight_request_id != request_id
+		if not expired or superseded:
+			break
+		if elapsed_ms >= _eval_give_up_ms:
+			envelope["error_message"] = (
+				"the worker did not answer in %.1f s" % (elapsed_ms / 1000.0))
+			break
+	return envelope
 
 
 ## Round-trip a DSL string through the worker's evaluate method and update the
@@ -1028,12 +1095,11 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_hide_eval_error()
 	request.emit("cad.evaluate", args, reply_id)
 
-	# 90s timeout: build123d cold-start on macOS ARM takes >30s in practice
-	# (Python module import + cadquery-ocp dylib first-launch caching +
-	# Gatekeeper scans on every nested arm64 binary). The previous 30s value
-	# was too tight; warm-start evals complete in <1s so the headroom only
-	# costs us when something is genuinely broken.
-	var result: Dictionary = await ipc.await_reply(reply_id, 90000)
+	# No fixed limit: a heavy document (many booleans, a cold build123d start)
+	# can take minutes, and an answer the worker computed must be painted
+	# whenever it is still the newest one.
+	var result: Dictionary = await _await_eval_reply(ipc, reply_id, request_id)
+	var elapsed_ms: int = int(result.get("elapsed_ms", 0))
 
 	# Supersession: if a newer evaluate started while we were awaiting, drop
 	# this result. The newer evaluate set _inflight_request_id to its own id;
@@ -1050,18 +1116,22 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		var err_msg: String = str(result.get("error_message", ""))
 		# IPC-layer timeout surfaces as success=false with a timeout-ish code.
 		var st: String = "timeout" if err_code.findn("timeout") != -1 else "error"
+		# How long it waited is the point of a give-up: "still pending" and
+		# "abandoned after four minutes" are different facts for the reader.
 		_last_eval_result = {
 			"status": st,
 			"error_kind": err_code,
 			"error_message": err_msg,
+			"elapsed_ms": elapsed_ms,
 			"request_id": request_id,
 			"ts": Time.get_unix_time_from_system(),
 		}
 		push_warning(
-			"[CADPanel] cad.evaluate transport failure: %s — %s"
-			% [err_code, err_msg]
+			"[CADPanel] cad.evaluate transport failure: %s — %s (after %d ms)"
+			% [err_code, err_msg, elapsed_ms]
 		)
-		var _what: String = "timed out" if st == "timeout" else "failed"
+		var _what: String = ("gave up after %.1f s" % (elapsed_ms / 1000.0)
+			if st == "timeout" else "failed")
 		_show_eval_error("CAD evaluation %s: %s" % [_what,
 			err_msg if err_msg != "" else err_code])
 		return

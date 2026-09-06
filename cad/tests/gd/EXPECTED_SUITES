@@ -529,3 +529,18 @@ test_snapshot_capture.gd assertions=11
 # panel's own report (a sound solid reports nothing; a holed one reports its
 # open edges in the evaluation reply).
 test_ortho_speckles.gd assertions=11
+
+# Waiting for a worker that takes minutes. The panel's await window and give-up
+# budget are shortened to milliseconds and a stand-in hands the answer back
+# through the broker, so the reply's TIMING is the suite's to choose.
+# 18 assertions = 5 rigs (the panel scene instantiates, once per case)
+# + 4 the late answer (one evaluation on attach; still pending — not abandoned
+# — after eight expiries of the await window; the answer that lands afterwards
+# is recorded ok with its vertex count; and it reaches the pane as geometry)
+# + 4 one open one evaluation (the load request and the buffer attach, in
+# BOTH delivery orders, produce exactly one evaluate, each carrying a
+# request_id so a newer one can cancel it) + 2 the give-up (status timeout
+# with the elapsed time; the banner says it gave up) + 3 supersession (the
+# newer evaluation cancels the older by request id; the displaced answer is
+# not painted; the newest one is).
+test_eval_await.gd assertions=18
