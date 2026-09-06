@@ -356,6 +356,7 @@
           "ui/scripts/gauge_shapes.gd",
           "ui/scripts/gauge_seed.gd",
           "ui/scripts/mesh_display.gd",
+          "ui/scripts/edge_outline.gd",
           "ui/scripts/Cad_GeometryOverlay.gd",
           "ui/scripts/orbit_camera.gd",
           "ui/scripts/pane_projection.gd"

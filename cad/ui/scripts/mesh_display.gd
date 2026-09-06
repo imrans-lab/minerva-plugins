@@ -9,10 +9,13 @@
 extends Node3D
 class_name MeshDisplay
 
-## Feature-edge extraction and line-mesh building are shared with the reference
-## library, so the evaluated solid and a foreign reference are outlined by one
-## piece of code and cannot drift apart.
+## Line-mesh building and the tessellation walk are shared with the reference
+## library, so the mesh statistics and the fallback outline are one piece of
+## code and cannot drift apart.
 const _ReferenceMeshes: Script = preload("reference_meshes.gd")
+## The solid's own outline comes from the worker's B-Rep edges instead, so the
+## seams a boolean leaves on a curved face are drawn as the curves they are.
+const _EdgeOutline: Script = preload("edge_outline.gd")
 
 const DEFAULT_MESH_COLOR := Color(0.78, 0.62, 0.12)
 const DEFAULT_EDGE_COLOR := Color(0.16, 0.11, 0.02, 0.95)
@@ -37,6 +40,14 @@ var _edge_label_root: Node3D
 var _wireframe_only: bool = false
 var _model_center: Vector3 = Vector3.ZERO
 var _feature_edge_count: int = 0
+## Which pass drew the outline on screen: "brep" when it came from the worker's
+## edge registry, "tessellation" when it was inferred from triangle normals
+## (references, and a solid that arrived without a registry).
+var _outline_source: String = ""
+## The registry edge each drawn segment belongs to, one id per segment.
+var _outline_edge_ids: PackedInt32Array = PackedInt32Array()
+## Registry edges that contributed at least one segment.
+var _outlined_edge_count: int = 0
 ## What the outline pass saw in the mesh it just walked: face count and the
 ## defects (degenerate faces, open or non-manifold edges, duplicate faces).
 ## Free — the outline pass welds and walks every triangle anyway.
@@ -79,12 +90,11 @@ func _ready() -> void:
 ##     "color":    [r, g, b]           # optional, 0..1
 ##   }
 ##
-## TODO(scaffold-round-2): wire to plugin IPC instead of HTTP backend.
-## In Round 2+, CADPanel._on_ipc_mesh_ready(data) calls update_mesh(data, edge_registry).
-## edge_registry parameter retained on the signature but unused — Round 1 stripped
-## the auto-emitted Label3D edge callouts; the cad_edge_number annotation kind owns
-## that surface now. Underscore prefix silences UNUSED_PARAMETER.
-func update_mesh(mesh_data: Dictionary, _edge_registry: Variant = []) -> void:
+## `edge_registry` is the worker's edge list for this solid; it is what the
+## outline is drawn from. Pass [] for a mesh with no B-Rep behind it (a
+## reference, or a fixture) and the outline falls back to the tessellation
+## pass.
+func update_mesh(mesh_data: Dictionary, edge_registry: Variant = []) -> void:
 	clear_mesh()
 
 	var raw_verts = mesh_data.get("vertices", [])
@@ -104,7 +114,9 @@ func update_mesh(mesh_data: Dictionary, _edge_registry: Variant = []) -> void:
 			if arr_mesh != null:
 				_mesh_instance.mesh = arr_mesh
 				_mesh_instance.visible = true
-		_edge_instance.mesh = _build_feature_edge_mesh(raw_verts, raw_faces)
+		_edge_instance.mesh = _build_outline_mesh(
+			raw_verts, raw_faces,
+			edge_registry if edge_registry is Array else [])
 		# Default-no-labels: edge id callouts are now handled by the
 		# `cad_edge_number` annotation kind, not auto-emitted. The leader
 		# helpers and Label3D root remain but stay empty unless something
@@ -125,6 +137,9 @@ func clear_mesh() -> void:
 	_edge_leader_instance.mesh = null
 	_model_center = Vector3.ZERO
 	_feature_edge_count = 0
+	_outline_source = ""
+	_outline_edge_ids = PackedInt32Array()
+	_outlined_edge_count = 0
 	_mesh_stats = {}
 	for child in _edge_label_root.get_children():
 		child.queue_free()
@@ -305,7 +320,14 @@ func _build_array_mesh(
 	return arr_mesh
 
 
-func _build_feature_edge_mesh(raw_verts: Array, raw_faces: Array) -> Mesh:
+## Build the outline of the solid, and count the defects of the mesh it came
+## with. The tessellation walk runs either way: it is where the defect counts
+## come from, and those describe the mesh the shaded panes actually render. The
+## LINES it proposes are used only when there is no edge registry to draw from —
+## a boolean seam on a curved face is triangulated with slivers whose normals
+## disagree at random, and that is what speckled the ortho panes.
+func _build_outline_mesh(raw_verts: Array, raw_faces: Array,
+		edge_registry: Array) -> Mesh:
 	var positions := PackedVector3Array()
 	for v in raw_verts:
 		positions.append(_vector3_from_raw(v))
@@ -321,8 +343,21 @@ func _build_feature_edge_mesh(raw_verts: Array, raw_faces: Array) -> Mesh:
 	var stats := {}
 	var segments: PackedVector3Array = _ReferenceMeshes.feature_edge_segments(
 		positions, indices, _ReferenceMeshes.FEATURE_EDGE_ANGLE_DEGREES, stats)
-	_feature_edge_count = int(segments.size() / 2)
 	_mesh_stats = stats
+	_outline_source = "tessellation"
+	_outline_edge_ids = PackedInt32Array()
+	_outlined_edge_count = 0
+
+	var outline: Dictionary = _EdgeOutline.segments_from_edges(edge_registry)
+	var brep_segments: PackedVector3Array = outline["segments"]
+	if not brep_segments.is_empty():
+		var brep_ids: PackedInt32Array = outline["edge_ids"]
+		segments = brep_segments
+		_outline_edge_ids = brep_ids
+		_outlined_edge_count = int(outline["edges"])
+		_outline_source = "brep"
+
+	_feature_edge_count = int(segments.size() / 2)
 	return _ReferenceMeshes.line_mesh_from_segments(
 		segments,
 		ORTHO_EDGE_COLOR if _wireframe_only else DEFAULT_EDGE_COLOR
@@ -541,6 +576,23 @@ func get_feature_edge_count() -> int:
 	return _feature_edge_count
 
 
+## "brep", "tessellation", or "" before a mesh is displayed.
+func get_outline_source() -> String:
+	return _outline_source
+
+
+## The registry edge each drawn segment belongs to, one id per segment. Empty
+## when the outline came from the tessellation pass, which knows no edge ids.
+func get_outline_edge_ids() -> PackedInt32Array:
+	return _outline_edge_ids
+
+
+## How many registry edges are drawn. Equal to the worker's edge count for a
+## solid whose every edge is in view of the outline pass.
+func get_outlined_edge_count() -> int:
+	return _outlined_edge_count
+
+
 ## Defect counts for the mesh currently displayed, or {} before one is.
 func get_mesh_stats() -> Dictionary:
 	return _mesh_stats
@@ -555,4 +607,7 @@ func get_debug_state() -> Dictionary:
 		"edge_leader_visible": _edge_leader_instance != null and _edge_leader_instance.visible,
 		"edge_leader_has_mesh": _edge_leader_instance != null and _edge_leader_instance.mesh != null,
 		"label3d_count": _edge_label_root.get_child_count() if _edge_label_root != null else 0,
+		"outline_source": _outline_source,
+		"outline_segments": _feature_edge_count,
+		"outlined_edges": _outlined_edge_count,
 	}

@@ -507,6 +507,21 @@ func _mesh_defects() -> Dictionary:
 	return reported
 
 
+## Where the outline the panes draw came from: {source, edges, segments}.
+## `source` is "brep" when it was drawn from the worker's edge registry —
+## every segment then belongs to a numbered edge — and "tessellation" when it
+## was inferred from triangle normals, which is what speckles a boolean seam.
+func _outline_report() -> Dictionary:
+	var mesh_root: Node = get_node_or_null(_MESH_ROOT_PATHS[0])
+	if mesh_root == null or not mesh_root.has_method("get_outline_source"):
+		return {}
+	return {
+		"source": str(mesh_root.call("get_outline_source")),
+		"edges": int(mesh_root.call("get_outlined_edge_count")),
+		"segments": int(mesh_root.call("get_feature_edge_count")),
+	}
+
+
 ## The direction a pane is currently looking from ("Top", "Bottom", …) as its
 ## own dropdown shows it. A slot id ("iso"/"top"/"front"/"right") is a place on
 ## screen and does not change when the owner points that pane elsewhere, so the
@@ -1276,6 +1291,11 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		# scalar coordinates, so this agrees with minerva_cad_get_mesh_info.
 		"vertex_count": (mesh_data.get("vertices", []) as Array).size(),
 		"edge_count": edges.size(),
+		# How the outline on screen was drawn, and how much of the edge list it
+		# accounts for. "brep" means every line is a numbered edge; a solid
+		# whose outlined_edges is short of edge_count has edges the drawing is
+		# not showing.
+		"outline": _outline_report(),
 		"reference_count": int(_reference_report.get("mounted", 0)),
 		"references": _reference_report.get("statuses", []),
 		"request_id": request_id,

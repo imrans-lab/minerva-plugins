@@ -536,15 +536,24 @@ test_snapshot_capture.gd assertions=16
 # A zero-area triangle carries connectivity, not a plane. Counting normals to
 # decide "this edge bounds the surface" made both neighbours of a sliver look
 # like boundaries, and the panes that draw the outline alone — the ortho ones —
-# grew specks in the middle of flat faces.
-# 11 assertions = 4 the sliver (it really has no area; the same sheet torn open
+# grew specks in the middle of flat faces. A sliver with a LITTLE area has a
+# normal pointing anywhere, so the specks came back as arcs along the seams a
+# boolean leaves on a curved face; the solid's outline is now drawn from the
+# worker's edge list instead, one polyline per numbered edge, while the
+# tessellation walk stays for the references and for the defect counts.
+# 17 assertions = 4 the sliver (it really has no area; the same sheet torn open
 # draws seven boundary edges; with the sliver the outline is the four rim edges
 # alone; the walk counts the sliver and still calls the surface sound) + 5 what
 # must still be drawn (a punched hole is drawn and counted; a closed box draws
-# its twelve edges with no defect; a doubled face is one duplicate) + 2 the
-# panel's own report (a sound solid reports nothing; a holed one reports its
-# open edges in the evaluation reply).
-test_ortho_speckles.gd assertions=11
+# its twelve edges with no defect; a doubled face is one duplicate) + 2 a
+# sampled curve (drawn as one ordered chain of its own points, every chord
+# naming its edge id) + 2 the panel's own report (a sound solid reports
+# nothing; a holed one reports its open edges in the evaluation reply) + 4 the
+# outline on screen (a 45-degree sliver really does put a star in the middle of
+# a flat plate; the same tessellation drawn from the part's four edges shows
+# the rim alone; every segment on screen carries an edge id; a box with holes
+# outlines as many edges as the worker listed).
+test_ortho_speckles.gd assertions=17
 
 # Waiting for a worker that takes minutes. The panel's await window and give-up
 # budget are shortened to milliseconds and a stand-in hands the answer back

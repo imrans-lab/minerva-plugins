@@ -224,14 +224,27 @@ def _list_edges(params: dict) -> dict:
 
     h = hash(source)
     if _last_program is not None and _last_program[0] == h:
-        return {"ok": True, "result": _last_program[1]["edges"]}
+        return {"ok": True, "result": _without_polylines(_last_program[1]["edges"])}
 
     # Cache miss — run the full evaluate pipeline.
     response = _evaluate({"source": source})
     if not response.get("ok"):
         return response  # propagate error unchanged
 
-    return {"ok": True, "result": response["result"]["edges"]}
+    return {"ok": True, "result": _without_polylines(response["result"]["edges"])}
+
+
+def _without_polylines(edges: list) -> list:
+    """The edge list without the sampled points each entry carries.
+
+    The polyline exists so the panel can DRAW an edge; a reader asking what
+    edges a part has does not need forty points per arc, and on a real
+    enclosure they are more than half the listing.
+    """
+    return [
+        {key: value for key, value in entry.items() if key != "polyline"}
+        for entry in edges
+    ]
 
 
 _SUPPORTED_EXPORT_FORMATS: frozenset[str] = frozenset(

@@ -23,10 +23,24 @@ extends SceneTree
 ## cases are below, and the defect counts the panel now reports on every
 ## evaluation are the same walk's answer to "is this mesh sound?".
 ##
+## THAT WAS NOT THE END OF IT. A sliver with a LITTLE area has a normal, and it
+## points anywhere: the seam where a post meets a lofted dome is triangulated
+## with such slivers, and the dihedral test drew a fragment at each of them —
+## arcs of dots that read as holes in the mesh. Guessing edges from
+## triangle normals is the wrong question to ask about a solid the worker built
+## from a B-Rep, so the solid's outline is now drawn from the worker's edge
+## list: one polyline per numbered edge. The tessellation walk stays for the
+## reference meshes, which have no edge list, and for the defect counts.
+##
+## ORACLE for that: a flat plate whose middle cell is triangulated around a
+## vertex lifted two hundredths of a millimetre draws a star in the middle of a
+## face that has no such feature. Drawn from the plate's four edges, it cannot.
+##
 ## Run:
 ##   cd <minerva>/src && godot --headless -s res://../../minerva-plugins/cad/tests/gd/test_ortho_speckles.gd
 
 const ReferenceMeshes := preload("res://../../minerva-plugins/cad/ui/scripts/reference_meshes.gd")
+const EdgeOutline := preload("res://../../minerva-plugins/cad/ui/scripts/edge_outline.gd")
 const PANEL_SCENE_PATH := "res://../../minerva-plugins/cad/ui/CADPanel.tscn"
 const GRID := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
 
@@ -64,6 +78,7 @@ func check(label: String, ok: bool, detail: String = "") -> void:
 func _run() -> void:
 	_check_sliver()
 	_check_real_boundaries()
+	_check_chain_from_a_curved_edge()
 	await _check_panel_report()
 
 
@@ -196,6 +211,40 @@ func _check_real_boundaries() -> void:
 
 
 # ---------------------------------------------------------------------------
+# A curved edge is one line, not a scatter
+# ---------------------------------------------------------------------------
+
+## The seam where a post meets a dome is a curve. The worker samples it into a
+## chord polyline; the outline must come back as that ONE chain, in order, with
+## every segment carrying the seam's edge id. A pass that dropped the polyline
+## and fell back to the two endpoints would draw a straight line across the
+## dome; one that lost the ordering would draw a scatter.
+func _check_chain_from_a_curved_edge() -> void:
+	var arc := _arc_polyline(7)
+	var outline: Dictionary = EdgeOutline.segments_from_edges([
+		{"id": 41, "kind": "curve", "start": arc[0], "end": arc[arc.size() - 1],
+			"polyline": arc},
+	])
+	var segments: PackedVector3Array = outline["segments"]
+	var ids: PackedInt32Array = outline["edge_ids"]
+	var chained := true
+	for i in range(2, segments.size(), 2):
+		if not segments[i].is_equal_approx(segments[i - 1]):
+			chained = false
+	check("a sampled curve is drawn as one connected chain of its own points, "
+			+ "in order — six chords for seven samples",
+			segments.size() / 2 == 6 and chained
+				and segments[0].is_equal_approx(_as_vector3(arc[0]))
+				and segments[segments.size() - 1].is_equal_approx(
+					_as_vector3(arc[arc.size() - 1])),
+			"%d segments, chained %s" % [segments.size() / 2, str(chained)])
+	check("and every one of them names the edge it belongs to",
+			ids.size() == segments.size() / 2 and _distinct_ids(ids) == [41]
+				and int(outline["edges"]) == 1,
+			"ids = %s, edges = %s" % [str(ids), str(outline["edges"])])
+
+
+# ---------------------------------------------------------------------------
 # What the panel says about the mesh it drew
 # ---------------------------------------------------------------------------
 
@@ -226,7 +275,68 @@ func _check_panel_report() -> void:
 			int(defects.get("open_edges", 0)) == 4 and defects.size() == 1,
 			"reported %s" % str(defects))
 
+	# The speckle in its smallest form: a flat plate with one sliver in it.
+	# Nothing about the PART changed; the tessellation did.
+	var starred := _plate_with_a_lifted_centre()
+	mesh_root.call("update_mesh", starred, [])
+	check("premise: guessing the outline from triangle normals puts a star in "
+			+ "the middle of a face that has no feature there",
+			_interior_segments(_drawn_segments(mesh_root)).size() > 0
+				and str(mesh_root.call("get_outline_source")) == "tessellation",
+			"%d interior segments, source %s" % [
+				_interior_segments(_drawn_segments(mesh_root)).size() / 2,
+				str(mesh_root.call("get_outline_source"))])
+
+	mesh_root.call("update_mesh", starred, _plate_edge_registry())
+	var drawn := _drawn_segments(mesh_root)
+	var drawn_ids: PackedInt32Array = mesh_root.call("get_outline_edge_ids")
+	check("drawn from the part's own edges instead, the SAME tessellation "
+			+ "outlines the plate's four sides and nothing else",
+			_interior_segments(drawn).is_empty() and drawn.size() / 2 == 4
+				and str(mesh_root.call("get_outline_source")) == "brep",
+			"%d segments, %d interior, source %s" % [
+				drawn.size() / 2, _interior_segments(drawn).size() / 2,
+				str(mesh_root.call("get_outline_source"))])
+	check("and every segment on screen can be traced to the edge id the "
+			+ "annotate and fillet tools use — no line belongs to nothing",
+			drawn_ids.size() == drawn.size() / 2
+				and _distinct_ids(drawn_ids) == [1, 2, 3, 4],
+			"%d ids for %d segments: %s" % [
+				drawn_ids.size(), drawn.size() / 2, str(drawn_ids)])
+
+	# Box with two through-hole rims: fourteen edges, twelve of them straight.
+	var box_with_holes := _box_with_holes_registry()
+	mesh_root.call("update_mesh", _box_mesh_data(), box_with_holes)
+	check("on a box with holes the drawing accounts for the whole edge list: "
+			+ "as many outlined edges as the worker reported",
+			int(mesh_root.call("get_outlined_edge_count")) == box_with_holes.size()
+				and int(mesh_root.call("get_outlined_edge_count")) == 14
+				and int(panel._outline_report().get("edges", 0)) == 14,
+			"outlined %d of %d, report %s" % [
+				int(mesh_root.call("get_outlined_edge_count")),
+				box_with_holes.size(), str(panel._outline_report())])
+
 	panel.free()
+
+
+## The line segments the display is actually drawing, read back off the mesh it
+## built — what is on screen, not what a counter says.
+func _drawn_segments(mesh_root: Node) -> PackedVector3Array:
+	var instance := mesh_root.get_node_or_null("FeatureEdges") as MeshInstance3D
+	if instance == null or instance.mesh == null:
+		return PackedVector3Array()
+	var arrays: Array = (instance.mesh as ArrayMesh).surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	return vertices
+
+
+func _distinct_ids(ids: PackedInt32Array) -> Array:
+	var seen := {}
+	for id in ids:
+		seen[id] = true
+	var out: Array = seen.keys()
+	out.sort()
+	return out
 
 
 # ---------------------------------------------------------------------------
@@ -310,3 +420,115 @@ func _holed_box_mesh_data() -> Dictionary:
 	faces.remove_at(0)
 	data["faces"] = faces
 	return data
+
+
+## The plate, with one interior cell re-triangulated as a fan around an added
+## vertex placed 0.05 mm from the cell's left side and lifted 0.05 mm out of
+## the plane. That makes ONE thin triangle whose normal is 45 degrees off the
+## plate while its three neighbours stay flat — a sliver with area, which is
+## what OCCT leaves along a boolean seam on a curved face, and what the
+## dihedral test cannot tell from a real crease.
+func _plate_with_a_lifted_centre() -> Dictionary:
+	var plate := _plate()
+	var positions: PackedVector3Array = plate["positions"]
+	var indices: PackedInt32Array = plate["indices"]
+
+	# The cell whose corners are (5,5), (5,10), (10,5) and (10,10).
+	var a := 1 * (CELLS + 1) + 1
+	var b := a + 1
+	var c := a + CELLS + 1
+	var d := a + CELLS + 2
+	var cell := [a, b, c, d]
+	var kept := PackedInt32Array()
+	for t in range(indices.size() / 3):
+		var corners := [indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2]]
+		if cell.has(corners[0]) and cell.has(corners[1]) and cell.has(corners[2]):
+			continue
+		kept.append_array(corners)
+
+	var centre := positions.size()
+	positions.append(Vector3(PITCH + 0.05, 1.5 * PITCH, 0.05))
+	for pair in [[a, b], [b, d], [d, c], [c, a]]:
+		kept.append_array([int(pair[0]), int(pair[1]), centre])
+
+	var vertices: Array = []
+	for point in positions:
+		vertices.append([point.x, point.y, point.z])
+	var faces: Array = []
+	for t in range(kept.size() / 3):
+		faces.append([kept[t * 3], kept[t * 3 + 1], kept[t * 3 + 2]])
+	return {"vertices": vertices, "faces": faces}
+
+
+## What the worker would say the plate's edges are: its four sides, each a
+## straight edge sampled as its two ends.
+func _plate_edge_registry() -> Array:
+	var span := float(CELLS) * PITCH
+	var corners := [
+		[0.0, 0.0, 0.0], [span, 0.0, 0.0], [span, span, 0.0], [0.0, span, 0.0],
+	]
+	var registry: Array = []
+	for i in range(4):
+		var start: Array = corners[i]
+		var end: Array = corners[(i + 1) % 4]
+		registry.append({
+			"id": i + 1, "kind": "straight",
+			"start": start, "end": end, "polyline": [start, end],
+		})
+	return registry
+
+
+## A box with two through holes, as the worker's edge list has it: the box's
+## twelve straight edges plus the two hole rims, each rim a sampled circle.
+func _box_with_holes_registry() -> Array:
+	var box := _box()
+	var positions: PackedVector3Array = box["positions"]
+	var pairs := [
+		[0, 1], [1, 2], [2, 3], [3, 0],
+		[4, 5], [5, 6], [6, 7], [7, 4],
+		[0, 4], [1, 5], [2, 6], [3, 7],
+	]
+	var registry: Array = []
+	for i in range(pairs.size()):
+		var start: Array = _as_triple(positions[int(pairs[i][0])])
+		var end: Array = _as_triple(positions[int(pairs[i][1])])
+		registry.append({
+			"id": i + 1, "kind": "straight",
+			"start": start, "end": end, "polyline": [start, end],
+		})
+	for rim in range(2):
+		var circle := _circle_polyline(Vector3(5.0, 5.0, 10.0 * float(rim)), 2.0, 12)
+		registry.append({
+			"id": pairs.size() + rim + 1, "kind": "circle",
+			"start": circle[0], "end": circle[circle.size() - 1],
+			"polyline": circle,
+		})
+	return registry
+
+
+## `count` points along a quarter turn of radius 10 in the z=0 plane.
+func _arc_polyline(count: int) -> Array:
+	var points: Array = []
+	for i in range(count):
+		var angle := (PI * 0.5) * float(i) / float(count - 1)
+		points.append([10.0 * cos(angle), 10.0 * sin(angle), 0.0])
+	return points
+
+
+## A closed circle as a polyline: `segments` chords, first point repeated last.
+func _circle_polyline(centre: Vector3, radius: float, segments: int) -> Array:
+	var points: Array = []
+	for i in range(segments + 1):
+		var angle := TAU * float(i) / float(segments)
+		points.append([
+			centre.x + radius * cos(angle), centre.y + radius * sin(angle), centre.z,
+		])
+	return points
+
+
+func _as_triple(point: Vector3) -> Array:
+	return [point.x, point.y, point.z]
+
+
+func _as_vector3(triple: Array) -> Vector3:
+	return Vector3(float(triple[0]), float(triple[1]), float(triple[2]))

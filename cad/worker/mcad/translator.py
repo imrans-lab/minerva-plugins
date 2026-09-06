@@ -25,6 +25,7 @@ import math
 from typing import Any
 
 from . import build123d_compat  # noqa: F401  Ensures OCP shims are applied first.
+from .edge_polyline import edge_polyline
 
 from build123d import (
     Axis,
@@ -1644,11 +1645,14 @@ class Translator:
         shapes — anywhere ``_build_extruded_edge_registry`` doesn't apply.
 
         Each entry conforms to the same schema as extrude-registry entries
-        (``id``/``source_plane``/``start``/``end``/``source_point``/
-        ``midpoint``/``axis``/``length``/``tags``/``visible_in_views``) and
-        adds ``kind`` plus optional ``center``/``radius``/``normal`` for
-        circular edges. ``axis`` is the unit direction for straight edges,
-        ``None`` otherwise.
+        (``id``/``source_plane``/``start``/``end``/``polyline``/
+        ``source_point``/``midpoint``/``axis``/``length``/``tags``/
+        ``visible_in_views``) and adds ``kind`` plus optional
+        ``center``/``radius``/``normal`` for circular edges. ``axis`` is the
+        unit direction for straight edges, ``None`` otherwise. ``polyline``
+        is the edge sampled to chord tolerance — two points for a straight
+        edge, many for an arc or a boolean seam — so a consumer can draw the
+        edge without re-deriving it from the mesh.
 
         IDs are a fresh 1..N sequence; they are NOT preserved across
         topology-changing operations.
@@ -1722,6 +1726,7 @@ class Translator:
                     "source_point": None,
                     "start": start,
                     "end": end,
+                    "polyline": edge_polyline(edge),
                     "midpoint": midpoint,
                     "axis": axis,
                     "center": center,
@@ -1963,7 +1968,38 @@ class Translator:
                 y_edges, "YZ", "Y", next_id, all_shape_edges, adjacency, wire_membership
             )
         )
-        return registry
+        return self._with_uncovered_edges(shape, registry)
+
+    def _with_uncovered_edges(
+        self, shape: Any, registry: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Append generic entries for edges the axis-aligned fast path missed.
+
+        The extruded builders number Z-, X- and Y-parallel edges from the 2D
+        profile. Anything else — an arc in the profile, a diagonal side, the
+        re-entrant corners of a T — got no entry at all, so it could not be
+        annotated, filleted by number, or DRAWN: a registry that is not the
+        whole part is a drawing with lines missing.
+
+        Existing ids are untouched and the extras are numbered after them, so
+        source that already refers to an edge by number still means it.
+        """
+        covered = [entry["midpoint"] for entry in registry]
+        next_id = max((int(entry["id"]) for entry in registry), default=0) + 1
+        extras: list[dict[str, Any]] = []
+        for entry in self._enumerate_edges(shape):
+            midpoint = entry["midpoint"]
+            if any(
+                abs(midpoint[0] - point[0]) < 1e-6
+                and abs(midpoint[1] - point[1]) < 1e-6
+                and abs(midpoint[2] - point[2]) < 1e-6
+                for point in covered
+            ):
+                continue
+            entry["id"] = next_id
+            next_id += 1
+            extras.append(entry)
+        return registry + extras
 
     def _build_xy_registry_entries(
         self,
@@ -2105,6 +2141,7 @@ class Translator:
             "source_point": source_point,
             "start": start,
             "end": end,
+            "polyline": edge_polyline(edge),
             "midpoint": midpoint_list,
             "axis": axis_vector,
             "axis_name": axis_name,
