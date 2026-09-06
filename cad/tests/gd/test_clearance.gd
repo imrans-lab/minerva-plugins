@@ -55,6 +55,7 @@ extends SceneTree
 
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
+const ReplyShape := preload("res://../../minerva-plugins/cad/ui/scripts/reply_shape.gd")
 
 ## The reference bar, in its own frame: long in X, its top face at z = 0.
 const BAR_HALF_LENGTH := 50.0
@@ -228,6 +229,7 @@ func _run() -> void:
 	await _check_pose_rewritten_in_place(panel, checks)
 	await _check_parts_changed_during_await(panel, checks)
 	await _check_unbounded_tolerance(panel, checks)
+	await _check_lean_filter(panel, checks)
 	await _check_quantization(panel, checks)
 	await _check_more_nodes_than_the_worker_caches(panel, checks)
 	_check_isolation(checks)
@@ -1459,6 +1461,84 @@ func _check_unbounded_tolerance(panel: Node, checks: RefCounted) -> void:
 				and waived.has("pass_reason")
 				and not bool(waived.get("tolerance_bounded", true)),
 			"refused = %s, waived = %s" % [str(refused_near), str(waived)])
+
+
+# ---------------------------------------------------------------------------
+# What the caller reads: failing_only, and what it hides
+# ---------------------------------------------------------------------------
+
+## A fifty-pair report is twenty kilobytes and one of those pairs is the
+## reason to edit anything, so the verb takes failing_only and limit. The
+## filter cannot be keyed on the row's `pass`: on a solid whose tessellation
+## tolerance could not be bounded EVERY row is graded false whatever its gap,
+## which is the state a lofted shell is measured in, and a pass-keyed filter
+## then hides nothing at all. It is keyed on the distance against the bar that
+## pair had to keep — the call's, or its own when it declared one.
+func _check_lean_filter(panel: Node, checks: RefCounted) -> void:
+	# The clean interference report a passing pair needs, whatever the checks
+	# above left behind.
+	panel.last_eval = _interference_over(SOURCE, [])
+	# 0.9 mm at the near node, 10.9 at the far one, 1.0 required, and no bound
+	# on the tolerance: one real failure among two rows that all read false.
+	_mode = "unbounded"
+	_gap_mm = 0.9
+	var advisory: Dictionary = await checks.check_clearance(panel,
+		{"required_mm": 1.0, "tolerance_mm": 0.0025,
+			"accept_unbounded_tolerance": true})
+	_gap_mm = GAP_MM
+	_mode = "measure"
+	var graded_pass := false
+	for entry in advisory.get("pairs", []):
+		if bool((entry as Dictionary).get("pass", false)):
+			graded_pass = true
+	var failing: Dictionary = ReplyShape.filter_clearance(advisory, 5, true)
+	var shown: Array = failing.get("pairs", []) as Array
+	var only: Dictionary = shown[0] as Dictionary if not shown.is_empty() else {}
+	check("lean: failing_only on an unbounded report keeps the 0.9 mm pair "
+			+ "that misses the 1.0 mm bar and drops the 10.9 mm one that "
+			+ "clears it — though NEITHER row is graded pass — and limit=5 "
+			+ "leaves at most five rows",
+			not graded_pass
+				and (advisory.get("pairs", []) as Array).size() == 2
+				and shown.size() == 1
+				and shown.size() <= 5
+				and str(only.get("node", "")) == NEAR_NODE
+				and absf(float(only.get("min_mm", 0.0)) - 0.9) < 1.0e-6,
+			"advisory = %s, shown = %s" % [str(advisory.get("pairs")), str(shown)])
+	check("lean: the reply says how many pairs the filter hid, and an "
+			+ "unfiltered one says none were",
+			int(failing.get("pairs_total", 0)) == 2
+				and int(failing.get("pairs_shown", 0)) == 1
+				and int(failing.get("pairs_hidden", 0)) == 1
+				and int(failing.get("pairs_failing", 0)) == 1
+				and str(failing.get("pairs_filter", "")).contains("hidden")
+				and int(ReplyShape.filter_clearance(advisory, 0, false)
+					.get("pairs_hidden", -1)) == 0
+				and int(ReplyShape.filter_clearance(advisory, 0, false)
+					.get("pairs_total", 0)) == 2,
+			"failing = %s" % str(failing))
+
+	# The far node declares a 20 mm gap of its own, which its 10.9 mm does not
+	# keep, while the near node's 0.9 mm clears the call's 0.5 mm. So the
+	# failing row is the FURTHER of the two: an implementation that took the
+	# closest row first and filtered afterwards would answer with nothing.
+	_gap_mm = 0.9
+	var declared: Dictionary = await checks.check_clearance(panel, {
+		"required_mm": 0.5,
+		"expected_contacts": [{"reference": REFERENCE_NAME, "node": FAR_NODE,
+			"required_mm": 20.0, "why": "the far bar has to stand well clear"}],
+	})
+	_gap_mm = GAP_MM
+	var one: Dictionary = ReplyShape.filter_clearance(declared, 1, true)
+	var kept: Array = one.get("pairs", []) as Array
+	check("lean: limit is applied to what SURVIVES the filter — with the far "
+			+ "pair failing the 20 mm it declared for itself and the near one "
+			+ "clearing the call's 0.5 mm, limit=1 with failing_only answers "
+			+ "with the far pair and not with nothing",
+			kept.size() == 1
+				and str((kept[0] as Dictionary).get("node", "")) == FAR_NODE
+				and int(one.get("pairs_hidden", 0)) == 1,
+			"declared = %s, kept = %s" % [str(declared.get("pairs")), str(kept)])
 
 
 # ---------------------------------------------------------------------------

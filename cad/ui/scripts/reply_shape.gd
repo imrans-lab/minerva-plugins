@@ -59,31 +59,66 @@ static func lean_reference(row: Dictionary) -> Dictionary:
 ##
 ## `pairs` arrive sorted by min_mm ascending, so `limit` keeps the CLOSEST n —
 ## the tightest gaps, which are the ones an edit is about. `failing_only`
-## drops the pairs that cleared. The report's own `pass` is graded over every
-## pair before this runs and is not touched: a filtered report still says
-## whether the whole scope cleared, and says how many rows it did not show.
+## drops the pairs that CLEARED, which is not the same question as the row's
+## `pass`: on a solid whose tessellation tolerance could not be bounded every
+## row is graded false whatever its gap, so a filter keyed on `pass` hides
+## nothing. It is keyed on the distance instead — see `pair_clears`. The
+## limit is applied to what survives the filter, so limit=5 with failing_only
+## is five FAILING rows and not five rows of which some failed.
+##
+## The report's own `pass` is graded over every pair before this runs and is
+## not touched: a filtered report still says whether the whole scope cleared,
+## and it always says how many rows it did not show.
 static func filter_clearance(report: Dictionary, limit: int, failing_only: bool) -> Dictionary:
 	var pairs: Array = report.get("pairs", []) as Array
-	if limit <= 0 and not failing_only:
-		return report
+	var required := float(report.get("required_mm", 0.0))
+	var quantization := float(report.get("quantization_mm", 0.0))
 	var kept: Array = []
 	for entry in pairs:
 		var pair: Dictionary = entry
-		if failing_only and bool(pair.get("pass", false)):
+		if failing_only and pair_clears(pair, required, quantization):
 			continue
 		kept.append(pair)
-		if limit > 0 and kept.size() >= limit:
-			break
-	var out := report.duplicate(true)
-	out["pairs"] = kept
+	var shown: Array = kept if limit <= 0 or kept.size() <= limit \
+		else kept.slice(0, limit)
+	# Shallow: only top-level keys are written here, and every pair that
+	# travels is one of the caller's own rows, unmodified.
+	var out := report.duplicate()
+	out["pairs"] = shown
 	out["pairs_total"] = pairs.size()
-	out["pairs_shown"] = kept.size()
-	if kept.size() < pairs.size():
+	out["pairs_shown"] = shown.size()
+	var hidden := pairs.size() - shown.size()
+	out["pairs_hidden"] = hidden
+	if failing_only:
+		out["pairs_failing"] = kept.size()
+	if hidden > 0:
 		out["pairs_filter"] = ("%d of %d pairs shown, closest first%s; "
-			+ "`pass` is graded over ALL of them — call again without "
-			+ "limit/failing_only for the rest") % [kept.size(), pairs.size(),
-			" (failing only)" if failing_only else ""]
+			+ "%d hidden; `pass` is graded over ALL of them — call again "
+			+ "without limit/failing_only for the rest") % [shown.size(),
+			pairs.size(), " (failing only)" if failing_only else "", hidden]
 	return out
+
+
+## Did this pair clear the gap it had to keep?
+##
+## The measured distance less the float32 quantization of the shipped
+## vertices, against the pair's own required_mm when it declared one and the
+## call's otherwise. `pass` is taken as clearing when it is true, but its
+## being false is not taken as failing: an unbounded tessellation tolerance
+## fails every row in the report without saying anything about any one gap.
+## A pair the check could not reason about — material overlap, a flush
+## contact, a containment it could not decide — never clears, because the
+## distance is not the answer for it.
+static func pair_clears(pair: Dictionary, required_mm: float,
+		quantization_mm: float) -> bool:
+	if bool(pair.get("interference", false)) \
+			or bool(pair.get("touching", false)) \
+			or bool(pair.get("containment_undecidable", false)):
+		return false
+	if bool(pair.get("pass", false)):
+		return true
+	var need := float(pair.get("required_mm", required_mm))
+	return float(pair.get("min_mm", 0.0)) - quantization_mm >= need
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +174,84 @@ static func collapse_report_obstructions(report: Dictionary) -> Dictionary:
 		for field in ["obstructions", "head_obstructions"]:
 			if row.has(field):
 				row[field] = collapse_obstructions(row[field] as Array)
+	return out
+
+
+## How close two unpaired features' diameters have to be to travel as one
+## group. A tenth of the tightest tolerance any of these checks grades on, so
+## two nominally identical bores measured a micron apart still group.
+const UNPAIRED_DIA_GROUP_MM: float = 0.01
+
+
+## Collapse a fastener report's unpaired solid features to counts.
+##
+## An enclosure's shell has thirty-odd cylindrical surfaces no screw is ever
+## going into — grille holes, sleeves, pilots, counterbores — and every one of
+## them comes back as a row with a world centre and a source. That list is
+## most of the reply and it is the same list on every call, so by default the
+## rows are grouped into {dia_mm, count, indices} by diameter and by what the
+## bore is FOR: the indices are exactly what a `pairs` override names, so the
+## override still works off the grouped reply. detail="full" returns the rows.
+static func lean_fastener_report(report: Dictionary, detail: String) -> Dictionary:
+	if detail == "full":
+		return report
+	var unpaired: Dictionary = report.get("unpaired", {}) as Dictionary
+	var features: Array = unpaired.get("solid_features", []) as Array
+	if features.is_empty():
+		return report
+	var out := report.duplicate(true)
+	var lean: Dictionary = out["unpaired"]
+	lean["solid_features"] = group_unpaired_features(features)
+	lean["solid_features_grouped"] = ("one row per diameter (grouped to %s mm) "
+		+ "and fit; `indices` are the solid_feature numbers a `pairs` entry "
+		+ "names and `count` is how many features the row stands for. Pass "
+		+ "detail=\"full\" for the features themselves, with their centres.") \
+		% UNPAIRED_DIA_GROUP_MM
+	return out
+
+
+## The grouping itself: one row per (diameter, fit), or per diameter for the
+## surfaces that were never bores — a partial cylinder has no fit, and the
+## sweep that disqualified it travels as the range the group covers.
+static func group_unpaired_features(features: Array) -> Array:
+	var groups: Dictionary = {}
+	var order: Array = []
+	for entry in features:
+		var row: Dictionary = entry
+		var dia := snappedf(float(row.get("dia_mm", 0.0)), UNPAIRED_DIA_GROUP_MM)
+		var partial := row.has("sweep_deg")
+		var fit := str(row.get("fit", ""))
+		var key := "%.4f|%s" % [dia, "partial" if partial else fit]
+		if not groups.has(key):
+			var fresh := {"dia_mm": dia, "count": 0, "indices": []}
+			if partial:
+				fresh["partial"] = true
+				fresh["reason"] = "partial cylinder: a screw down its axis " \
+					+ "would be open on one side, so it is never paired " \
+					+ "with a hole"
+				fresh["sweep_deg"] = {"min": float(row["sweep_deg"]),
+					"max": float(row["sweep_deg"])}
+			elif not fit.is_empty():
+				fresh["fit"] = fit
+			groups[key] = fresh
+			order.append(key)
+		var group: Dictionary = groups[key]
+		group["count"] = int(group["count"]) + 1
+		if row.has("index"):
+			(group["indices"] as Array).append(int(row["index"]))
+		if partial:
+			var sweep: Dictionary = group["sweep_deg"]
+			sweep["min"] = minf(float(sweep["min"]), float(row["sweep_deg"]))
+			sweep["max"] = maxf(float(sweep["max"]), float(row["sweep_deg"]))
+	var out: Array = []
+	for key in order:
+		var group: Dictionary = groups[key]
+		# A partial surface is not one of the pairing's bores, so it has no
+		# index for a `pairs` entry to name and an empty list would read as
+		# one it lost.
+		if (group["indices"] as Array).is_empty():
+			group.erase("indices")
+		out.append(group)
 	return out
 
 

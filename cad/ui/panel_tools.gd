@@ -738,13 +738,19 @@ static func _check_fasteners(panel, args: Dictionary) -> Dictionary:
 	if report.has("error"):
 		return _err(str(report["error"]))
 	report = _ReplyShape.collapse_report_obstructions(report)
+	# The unpaired features are the bulk of a shell's reply and are the same
+	# list on every call, so they travel as counts unless the caller asks for
+	# the rows.
+	report = _ReplyShape.lean_fastener_report(report, str(args.get("detail", "")))
 	report["holes_considered"] = int(holes.get("count", 0))
 	report["pairs_note"] = "reference_hole_index[].index is the number a "\
 		+ "pairs entry's `reference_hole` names — a hole with no usable axis "\
 		+ "is not in it, so the numbering is the check's own and not the "\
 		+ "order minerva_cad_find_holes reported. Obstruction rows are "\
 		+ "collapsed to one per (node, span), keeping the nearest crossing "\
-		+ "with a count and the axial range the rays met it over."
+		+ "with a count and the axial range the rays met it over, and "\
+		+ "unpaired.solid_features to one row per diameter and fit — pass "\
+		+ "detail=\"full\" for the unpaired features themselves."
 	return _ok(report)
 
 

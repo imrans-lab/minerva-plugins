@@ -67,6 +67,7 @@ extends SceneTree
 const MeshGauge := preload("res://../../minerva-plugins/cad/ui/scripts/mesh_gauge.gd")
 const GeometryChecks := preload("res://../../minerva-plugins/cad/ui/scripts/geometry_checks.gd")
 const FastenerChecks := preload("res://../../minerva-plugins/cad/ui/scripts/fastener_checks.gd")
+const ReplyShape := preload("res://../../minerva-plugins/cad/ui/scripts/reply_shape.gd")
 
 # --- the board ---------------------------------------------------------------
 const BOARD_SIZE := Vector3(60.0, 60.0, 1.6)
@@ -369,6 +370,7 @@ func _run() -> void:
 	})
 	_check_envelope(report)
 	_check_pairing(report, panel)
+	_check_lean_unpaired(report)
 	_check_screw_a(report)
 	_check_screw_b(report)
 	_check_screw_c(report)
@@ -389,6 +391,98 @@ func _run() -> void:
 	await _check_parts_changed_during_await(module, panel)
 	await _check_two_shell_from_below(module, panel)
 	await _check_pose_snapshot(module, panel)
+
+
+# ---------------------------------------------------------------------------
+# The unpaired list, as it travels
+# ---------------------------------------------------------------------------
+
+## A shell has thirty-odd cylindrical surfaces no screw is going into, and
+## they are the same thirty on every call. The wire form is a count per
+## diameter and fit; what it may not do is lose a feature or the number a
+## `pairs` override names it by.
+func _check_lean_unpaired(report: Dictionary) -> void:
+	var unpaired: Dictionary = report.get("unpaired", {}) as Dictionary
+	var rows: Array = unpaired.get("solid_features", []) as Array
+	var grouped: Array = ReplyShape.group_unpaired_features(rows)
+	var counted := 0
+	var named := {}
+	for entry in grouped:
+		var group: Dictionary = entry
+		counted += int(group.get("count", 0))
+		for index in group.get("indices", []):
+			named[int(index)] = true
+	var indexed := 0
+	for entry in rows:
+		if (entry as Dictionary).has("index"):
+			indexed += 1
+	check("lean: grouping the fixture's own unpaired list loses nothing — "
+			+ "every feature is counted and every solid_feature index a "
+			+ "`pairs` override could name is still in the reply",
+			counted == rows.size() and named.size() == indexed,
+			"rows=%d counted=%d indexed=%d named=%d grouped=%s"
+				% [rows.size(), counted, indexed, named.size(), str(grouped)])
+
+	# Thirty features at three diameters, plus two partial surfaces: the shape
+	# of a real shell's list, in the form the grouper takes.
+	var many: Array = []
+	for index in range(30):
+		many.append({
+			"index": index,
+			"dia_mm": [2.0, 2.0005, 3.5][index % 3],
+			"centre_mm": {"world": [float(index), 0.0, 0.0]},
+			"source": "b_rep",
+			"fit": "undersize" if index % 3 == 2 else "thread",
+		})
+	many.append({"dia_mm": 2.0, "sweep_deg": 355.0, "source": "b_rep",
+		"reason": "partial cylinder (sweep 355.0 degrees)"})
+	many.append({"dia_mm": 2.0, "sweep_deg": 180.0, "source": "b_rep",
+		"reason": "partial cylinder (sweep 180.0 degrees)"})
+	var collapsed: Array = ReplyShape.group_unpaired_features(many)
+	var bores: Dictionary = {}
+	var partial: Dictionary = {}
+	for entry in collapsed:
+		var group: Dictionary = entry
+		if bool(group.get("partial", false)):
+			partial = group
+		else:
+			bores["%s|%s" % [group.get("dia_mm"), group.get("fit")]] = group
+	var thread_2: Dictionary = bores.get("2|thread", {}) as Dictionary
+	var sweep: Dictionary = partial.get("sweep_deg", {}) as Dictionary
+	check("lean: thirty-two features become three rows — two diameters a "
+			+ "micron apart group as one, the undersize bores group apart "
+			+ "from the ones a screw could thread into, and the partial "
+			+ "surfaces group on their own with the sweep range that "
+			+ "disqualified them and no index to name them by",
+			collapsed.size() == 3
+				and int(thread_2.get("count", 0)) == 20
+				and (thread_2.get("indices", []) as Array).size() == 20
+				and int((bores.get("3.5|undersize", {}) as Dictionary)
+					.get("count", 0)) == 10
+				and int(partial.get("count", 0)) == 2
+				and not partial.has("indices")
+				and absf(float(sweep.get("min", 0.0)) - 180.0) < 0.001
+				and absf(float(sweep.get("max", 0.0)) - 355.0) < 0.001,
+			"collapsed = %s" % str(collapsed))
+
+	# The reply the verb layer actually sends, both ways round.
+	var full: Dictionary = ReplyShape.lean_fastener_report(report, "full")
+	var lean: Dictionary = ReplyShape.lean_fastener_report(report, "")
+	var lean_rows: Array = (lean.get("unpaired", {}) as Dictionary) \
+		.get("solid_features", []) as Array
+	var full_rows: Array = (full.get("unpaired", {}) as Dictionary) \
+		.get("solid_features", []) as Array
+	check("lean: the default reply carries the groups and says how to get "
+			+ "the rows back; detail=\"full\" hands over the rows themselves "
+			+ "and the fixture's report is unchanged by the ask",
+			lean_rows.size() == grouped.size()
+				and (lean_rows[0] as Dictionary).has("count")
+				and str((lean.get("unpaired", {}) as Dictionary)
+					.get("solid_features_grouped", "")).contains("detail")
+				and full_rows.size() == rows.size()
+				and (full_rows[0] as Dictionary).has("centre_mm")
+				and (rows[0] as Dictionary).has("centre_mm"),
+			"lean=%s full rows=%d" % [str(lean_rows), full_rows.size()])
 
 
 # ---------------------------------------------------------------------------
