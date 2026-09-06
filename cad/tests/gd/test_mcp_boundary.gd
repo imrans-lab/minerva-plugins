@@ -106,6 +106,7 @@ func _run() -> void:
 	_check_reference_holes_are_indexed_as_paired()
 	_check_a_hole_census_becomes_dsl()
 	await _check_await_eval_reports_what_the_panel_painted()
+	_check_a_kernel_failure_reaches_the_reader()
 	await _check_the_edge_listing_carries_no_drawing()
 
 
@@ -621,6 +622,51 @@ func _check_await_eval_reports_what_the_panel_painted() -> void:
 			"reply = %s" % str(gave_up))
 	panel.free()
 
+
+# ---------------------------------------------------------------------------
+# A kernel failure the reader can act on
+# ---------------------------------------------------------------------------
+
+## A worker kernel failure arrives as {kind: "occt", message naming the DSL
+## binding, traceback}. The banner and the MCP reply both have to keep the
+## innermost frame: it is the only line that says WHICH kernel call raised.
+##
+## ORACLE. The traceback text is a verbatim copy of one the worker produced for
+## the three-section rev-3 loft — the reproduction on record — not a shape
+## invented here.
+func _check_a_kernel_failure_reaches_the_reader() -> void:
+	var traceback := "Traceback (most recent call last):\n" \
+		+ "  File \"/x/mcad/build_trace.py\", line 140, in tessellate_shape\n" \
+		+ "    return shape.tessellate(\n" \
+		+ "  File \"/x/build123d/topology/shape_core.py\", line 1923, in tessellate\n" \
+		+ "    poly.Node(i).Transformed(trsf) for i in range(1, poly.NbNodes() + 1)\n" \
+		+ "AttributeError: 'NoneType' object has no attribute 'NbNodes'"
+	var frame: String = EvalReply.innermost_frame(traceback)
+	check("the innermost frame keeps the exception and the deepest source line",
+			frame.contains("AttributeError: 'NoneType' object has no attribute "
+				+ "'NbNodes'")
+				and frame.contains("shape_core.py")
+				and not frame.contains("build_trace.py"),
+			"frame = %s" % frame)
+
+	check("a reply with no traceback produces no frame rather than noise",
+			EvalReply.innermost_frame("") == ""
+				and EvalReply.innermost_frame("   ") == "",
+			"frame = %s" % EvalReply.innermost_frame(""))
+
+	var wire: Dictionary = EvalReply.last_eval_for_mcp({
+		"status": "error",
+		"error_kind": "occt",
+		"error_message": "Tessellating 'enclosure' failed in the geometry "
+			+ "kernel — AttributeError: 'NoneType' object has no attribute "
+			+ "'NbNodes'",
+		"error_frame": frame,
+	})
+	check("the MCP wire carries the kind, the named binding and the frame",
+			str(wire.get("error_kind", "")) == "occt"
+				and str(wire.get("error_message", "")).contains("'enclosure'")
+				and str(wire.get("error_frame", "")).contains("shape_core.py"),
+			"wire = %s" % str(wire))
 
 # ---------------------------------------------------------------------------
 # Fixtures for the verb-by-verb cases

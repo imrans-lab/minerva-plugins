@@ -205,6 +205,7 @@ def _evaluate(params: dict) -> dict:
         return {"ok": True, "result": _summarise(cached) if summary_only else cached}
 
     try:
+        from mcad.build_trace import BuildFailure
         from mcad.evaluator import EvaluationError, evaluate_source
         from mcad.lexer import LexError
         from mcad.parser import ParseError
@@ -237,6 +238,20 @@ def _evaluate(params: dict) -> dict:
                     "line": getattr(exc, "line", 0),
                     "col": getattr(exc, "col", 0),
                 },
+            },
+        }
+    except BuildFailure as exc:
+        # A kernel error inside one build step: the message names the binding,
+        # the payload carries the underlying traceback whole. Truncating it
+        # would drop the innermost frame, which is the only line that says
+        # which kernel call failed.
+        return {
+            "ok": False,
+            "error": {
+                "kind": "occt",
+                "message": str(exc),
+                "details": exc.details(),
+                "traceback": exc.cause_traceback,
             },
         }
     except EvaluationError as exc:
@@ -369,6 +384,8 @@ def _export(params: dict) -> dict:
         - "parse"    — DSL syntax error (propagated from evaluator).
         - "translate" — DSL is well-formed but produces no shape, or the
                          export call rejected the result.
+        - "occt"     — the geometry kernel failed inside one build step;
+                       names the binding and carries its traceback.
         - "io"       — disk write failed (permission, missing parent dir
                        even after mkdir, etc).
         - "python"   — unhandled exception; includes traceback.
@@ -416,6 +433,7 @@ def _export(params: dict) -> dict:
         }
 
     try:
+        from mcad.build_trace import BuildFailure
         from mcad.evaluator import ExportError, export_built, export_source
         from mcad.lexer import LexError
         from mcad.parser import ParseError
@@ -455,6 +473,16 @@ def _export(params: dict) -> dict:
                     "line": getattr(exc, "line", 0),
                     "col": getattr(exc, "col", 0),
                 },
+            },
+        }
+    except BuildFailure as exc:
+        return {
+            "ok": False,
+            "error": {
+                "kind": "occt",
+                "message": str(exc),
+                "details": exc.details(),
+                "traceback": exc.cause_traceback,
             },
         }
     except ExportError as exc:

@@ -530,7 +530,7 @@ test_flush_contact.gd assertions=15
 # of the registry at most, and still names each edge's id, kind and both ends;
 # the caller's own array still has the points, because that is what the panes
 # draw).
-test_mcp_boundary.gd assertions=41
+test_mcp_boundary.gd assertions=44
 
 # Each wide pane carries the SAME projection dropdown the one-pane layout has,
 # driving that pane's own camera. A SLOT ("top") is a place on screen and keeps

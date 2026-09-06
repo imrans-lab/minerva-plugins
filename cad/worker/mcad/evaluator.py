@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .build_trace import tessellate_shape, translate_program
 from .parser import ParseError, parse
 from .translator import Translator, TranslatorError, export_shape
 
@@ -76,7 +77,7 @@ def evaluate_source(
     try:
         program = parse(source)
         translator = Translator()
-        translator.translate(program)
+        translate_program(translator, program)
     except (ParseError, TranslatorError) as exc:
         raise EvaluationError(str(exc)) from exc
 
@@ -98,9 +99,13 @@ def evaluate_source(
             "No 3D part produced. Define a shape with extrude(...) before evaluating."
         )
 
-    vertices, faces = shape.tessellate(
-        tolerance=float(tolerance),
-        angular_tolerance=float(angular_tolerance),
+    # A kernel failure here is attributed to the render-target binding rather
+    # than surfacing as a bare AttributeError from inside build123d.
+    vertices, faces = tessellate_shape(
+        shape,
+        shape_name,
+        tolerance=tolerance,
+        angular_tolerance=angular_tolerance,
     )
     if not vertices or not faces:
         raise EvaluationError("Tessellation produced no mesh data")
@@ -144,7 +149,7 @@ def export_source(source: str, *, format: str, path: str) -> str:
     try:
         program = parse(source)
         translator = Translator()
-        translator.translate(program)
+        translate_program(translator, program)
     except (ParseError, TranslatorError) as exc:
         raise ExportError(str(exc)) from exc
 

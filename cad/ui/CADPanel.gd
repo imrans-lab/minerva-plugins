@@ -1265,16 +1265,21 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 				"ts": Time.get_unix_time_from_system(),
 			}
 			return
+		var frame: String = _EvalReplyScript.innermost_frame(str(err.get("traceback", "")))
 		_last_eval_result = {
 			"status": "error",
 			"error_kind": kind,
 			"error_message": msg,
+			"error_frame": frame,
 			"request_id": request_id,
 			"ts": Time.get_unix_time_from_system(),
 		}
 		push_warning("[CADPanel] cad.evaluate worker error [%s]: %s" % [kind, msg])
-		_show_eval_error("CAD evaluation failed (%s): %s" % [kind,
-			msg if msg != "" else "no detail provided"])
+		var banner: String = "CAD evaluation failed (%s): %s" % [kind,
+			msg if msg != "" else "no detail provided"]
+		if frame != "":
+			banner += "\n%s" % frame
+		_show_eval_error(banner)
 		return
 
 	var eval_result: Dictionary = worker_payload.get("result", {}) as Dictionary

@@ -79,6 +79,26 @@ static func lean_interference(report: Dictionary) -> Dictionary:
 	return lean
 
 
+## The innermost frame of a worker traceback, as the exception line followed by
+## the deepest "File ..." line. A kernel failure's message names the DSL binding
+## that was building; this names the call inside the kernel that raised, which
+## is what tells two failure modes of the same binding apart. Empty for a
+## payload with no traceback.
+static func innermost_frame(tb: String) -> String:
+	var trimmed: String = tb.strip_edges()
+	if trimmed.is_empty():
+		return ""
+	var lines: PackedStringArray = trimmed.split("\n", false)
+	if lines.is_empty():
+		return ""
+	var exception_line: String = lines[lines.size() - 1].strip_edges()
+	for i in range(lines.size() - 1, -1, -1):
+		var candidate: String = lines[i].strip_edges()
+		if candidate.begins_with("File \""):
+			return "%s\n  %s" % [exception_line, candidate]
+	return exception_line
+
+
 ## A last_eval dictionary as MCP should render it: the verdict, the numbers
 ## that describe the solid, and a STATUS line for the interference check.
 ##
